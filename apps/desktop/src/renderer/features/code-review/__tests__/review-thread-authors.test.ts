@@ -1,0 +1,192 @@
+// @vitest-environment jsdom
+import { act, createElement } from "react";
+import { createRoot, type Root } from "react-dom/client";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { PrInlineReview } from "@zeros/protocol/github-review";
+import { githubReviewThreadItem } from "../github-review-model";
+import { InlineReviewThread } from "../inline-review-thread";
+import { ReviewDraftStore } from "../review-draft-store";
+import type {
+  CodeReviewOperations,
+  CodeReviewThreadItem,
+} from "../review-thread-model";
+
+const anchor = {
+  path: "src/auth.ts",
+  side: "new" as const,
+  startLine: 4,
+  endLine: 6,
+  revision: "rev-1",
+};
+const operations = {
+  create: vi.fn(),
+  reply: vi.fn(),
+  setResolved: vi.fn(),
+} as unknown as CodeReviewOperations;
+let root: Root;
+let host: HTMLDivElement;
+
+beforeEach(() => {
+  host = document.createElement("div");
+  document.body.append(host);
+  root = createRoot(host);
+});
+afterEach(async () => {
+  await act(async () => root.unmount());
+  host.remove();
+});
+
+async function render(thread: CodeReviewThreadItem) {
+  await act(async () =>
+    root.render(
+      createElement(InlineReviewThread, {
+        thread,
+        operations,
+        drafts: new ReviewDraftStore(),
+        active: true,
+      }),
+    ),
+  );
+  return host.querySelector("[data-review-thread]") as HTMLElement;
+}
+
+function thread(
+  source: CodeReviewThreadItem["source"],
+  author: CodeReviewThreadItem["comments"][number]["author"],
+  extra: Partial<CodeReviewThreadItem> = {},
+): CodeReviewThreadItem {
+  return {
+    id: `${source}-thread`,
+    source,
+    anchor,
+    comments: [{ id: "c1", author, body: "Check the role.", createdAt: 10 }],
+    resolved: false,
+    version: 1,
+    canReply: source !== "check",
+    ...extra,
+  };
+}
+
+describe("comment authors", () => {
+  it("keeps a GitHub author's sanitised avatar on the thread comment", () => {
+    const comment = {
+      id: "comment-1",
+      databaseId: 21,
+      body: "Check role.",
+      url: "https://github.com/org/repo/pull/7#discussion_r21",
+      createdAt: 10,
+      updatedAt: 20,
+      commitSha: "b".repeat(40),
+    };
+    const review = {
+      threads: [
+        {
+          id: "thread-1",
+          path: "src/auth.ts",
+          side: "RIGHT",
+          startLine: 4,
+          line: 6,
+          originalStartLine: 4,
+          originalLine: 6,
+          isOutdated: false,
+          isResolved: false,
+          canResolve: true,
+          canUnresolve: false,
+          commentsTruncated: false,
+          comments: [
+            {
+              ...comment,
+              author: {
+                login: "priya",
+                kind: "human",
+                avatarUrl: "https://avatars.githubusercontent.com/u/1",
+              },
+            },
+            {
+              ...comment,
+              id: "comment-2",
+              author: { login: "coderabbitai", kind: "bot", avatarUrl: null },
+            },
+          ],
+        },
+      ],
+    } as unknown as PrInlineReview;
+    const item = githubReviewThreadItem(review.threads[0]!, "rev-1");
+    expect(item.comments[0]!.author).toMatchObject({
+      name: "priya",
+      kind: "human",
+      avatarUrl: "https://avatars.githubusercontent.com/u/1",
+    });
+    expect(item.comments[1]!.author).not.toHaveProperty("avatarUrl");
+  });
+
+  it("gives an agent its mark on a rounded square and an Agent badge, without the provider", async () => {
+    const section = await render(
+      thread("workspace", {
+        id: "agent:claude:1",
+        name: "Claude",
+        kind: "agent",
+        provider: "claude",
+      }),
+    );
+    const article = section.querySelector("article")!;
+    const avatar = article.firstElementChild as HTMLElement;
+    expect(avatar.className).toContain("rounded-md");
+    expect(avatar.querySelector("svg, span[data-agent-icon], img")).not.toBeNull();
+    expect(article.textContent).toContain("Agent");
+    expect(article.textContent).not.toContain("claude");
+    expect(article.textContent).not.toContain("Human");
+  });
+
+  it("draws people in a circle and review apps on a rounded square with a Bot badge", async () => {
+    const person = await render(
+      thread("github", { id: "github:priya", name: "Priya Shah", kind: "human" }),
+    );
+    const personAvatar = person.querySelector("article [data-slot=avatar]")!;
+    expect(personAvatar.className).toContain("rounded-full");
+    expect(personAvatar.textContent).toBe("PS");
+    expect(person.querySelector("article")!.textContent).not.toContain("Bot");
+
+    const bot = await render(
+      thread("github", {
+        id: "github:coderabbitai",
+        name: "coderabbitai",
+        kind: "integration",
+      }),
+    );
+    expect(bot.querySelector("article [data-slot=avatar]")!.className).toContain(
+      "rounded-md",
+    );
+    expect(bot.querySelector("article")!.textContent).toContain("Bot");
+  });
+
+  it("puts a check's severity icon in the avatar slot and its pill in the comment row", async () => {
+    const section = await render(
+      thread(
+        "check",
+        { id: "check:typecheck", name: "Typecheck", kind: "integration" },
+        { severity: "failure" },
+      ),
+    );
+    expect(section.getAttribute("aria-label")).toBe(
+      "Check annotation on New lines 4–6",
+    );
+    const slot = section.querySelector("article")!.firstElementChild!;
+    expect(slot.className).toContain("text-red-primary");
+    expect(slot.querySelector("svg")).not.toBeNull();
+    expect(section.querySelector("[data-slot=avatar]")).toBeNull();
+    expect(section.textContent).toContain("failure");
+    expect(section.textContent).not.toContain("Check annotation");
+  });
+
+  it("offers the reply as a field beside the viewer's avatar", async () => {
+    const section = await render(
+      thread("workspace", { id: "human:1", name: "Alex Morgan", kind: "human" }),
+    );
+    const reply = section.querySelector<HTMLButtonElement>(
+      'button[aria-label="Reply"]',
+    )!;
+    expect(reply.textContent).toBe("Reply…");
+    expect(reply.previousElementSibling!.querySelector("[data-slot=avatar]")).not.toBeNull();
+  });
+});
