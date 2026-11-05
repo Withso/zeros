@@ -1,8 +1,10 @@
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createServer } from "node:http";
 import { mkdtemp, rm } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import type { SpawnOptions } from "@anthropic-ai/claude-agent-sdk";
 
 export const nativeQuestionInput = { questions: [{ question: "Which color?", header: "Color", multiSelect: false,
   options: [{ label: "Red", description: "First" }, { label: "Blue", description: "Second" }] }] };
@@ -17,6 +19,18 @@ export async function claudeNativeApi(steps: (directory: string) => Tool[]) {
   const sdk = createRequire(import.meta.url).resolve("@anthropic-ai/claude-agent-sdk");
   const executable = createRequire(sdk).resolve(`@anthropic-ai/claude-agent-sdk-${process.platform}-${process.arch}/${process.platform === "win32" ? "claude.exe" : "claude"}`);
   const tools = steps(directory), requests: ApiRequest[] = [], results = new Map<string, ToolResult>();
+  const children = new Map<ChildProcessWithoutNullStreams, Promise<void>>();
+  let closing = false, closeTask: Promise<void> | undefined;
+  function spawnClaudeCodeProcess(options: SpawnOptions) {
+    if (closing) throw new Error("Native fixture is closing");
+    const child = spawn(options.command, options.args, { cwd: options.cwd, env: options.env, signal: options.signal, stdio: "pipe" });
+    child.stderr.resume();
+    child.once("error", () => {});
+    const closed = new Promise<void>(resolve => child.once("close", () => resolve()));
+    children.set(child, closed);
+    void closed.then(() => children.delete(child));
+    return child;
+  }
   const server = createServer(async (request, response) => {
     if (!request.url?.startsWith("/v1/messages")) { response.writeHead(404); response.end("{}"); return; }
     let raw = "";
@@ -47,10 +61,23 @@ export async function claudeNativeApi(steps: (directory: string) => Tool[]) {
   await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
   const address = server.address();
   if (!address || typeof address === "string") throw new Error("Missing fixture address");
-  return { directory, executable, requests, results,
+  return { directory, executable, requests, results, spawnClaudeCodeProcess,
     env: { PATH: `${dirname(executable)}:${process.env.PATH}`, HOME: directory, ANTHROPIC_API_KEY: "offline-native-fixture-key",
       ANTHROPIC_BASE_URL: `http://127.0.0.1:${address.port}`, CLAUDE_CONFIG_DIR: join(directory, ".claude"),
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1", DISABLE_AUTOUPDATER: "1", DISABLE_TELEMETRY: "1" },
-    async close() { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); await rm(directory, { recursive: true, force: true }); },
+    close() {
+      closing = true;
+      return closeTask ??= (async () => {
+        server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve()));
+        // SDK close() returns before the native child's final filesystem writes.
+        const grace = setTimeout(() => {
+          for (const child of children.keys()) if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+        }, 5_000);
+        grace.unref();
+        try { await Promise.all(children.values()); }
+        finally { clearTimeout(grace); }
+        await rm(directory, { recursive: true, force: true });
+      })();
+    },
   };
 }

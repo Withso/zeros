@@ -29,7 +29,7 @@ it.each(["bypass", "plan"])("uses Local's %s question/approval behavior in the p
     },
   } } as AgentAdapterContext;
   const adapter = new ClaudeSdkAdapter(ctx, { queryFn: args => query({ ...args, options: {
-    ...args.options, env: fixture.env, persistSession: false, settingSources: [], strictMcpConfig: true,
+    ...args.options, env: fixture.env, spawnClaudeCodeProcess: fixture.spawnClaudeCodeProcess, persistSession: false, settingSources: [], strictMcpConfig: true,
     hooks: { ...args.options?.hooks, ...(args.options?.hooks?.PreToolUse ? { PreToolUse: args.options.hooks.PreToolUse.map(matcher => ({ ...matcher,
       hooks: matcher.hooks.map(callback => async (...params) => { hooks.push(params[0].hook_event_name === "PreToolUse" ? params[0].tool_name : "other"); return callback(...params); }),
     })) } : {}) },
