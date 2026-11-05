@@ -1,0 +1,9 @@
+{
+  "id": "design-empty-sections-hidden",
+  "kind": "replay",
+  "area": "desktop-design",
+  "fixedBy": "2164b7186195d3a7de95a2b196e22a9ae2fbcfdc",
+  "symptom": "An unstyled frame's Style inspector showed six empty section headers (Stroke, Effects, Typography, Transform, Transition, Motion) instead of the approved inspector, where only sections in use show.",
+  "rule": "An empty optional inspector section draws nothing inside the Style editor and is listed under Add property, which reveals it and runs that section's own add (plans.md §7).",
+  "check": "pnpm exec vitest run apps/desktop/src/renderer/features/design-workspace/__tests__/design-addable-sections.test.ts apps/desktop/src/renderer/shared/ui/primitives/__tests__/empty-state.test.ts"
+}

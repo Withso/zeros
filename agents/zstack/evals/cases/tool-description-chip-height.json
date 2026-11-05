@@ -1,0 +1,9 @@
+{
+  "id": "tool-description-chip-height",
+  "kind": "scenario",
+  "area": "renderer-agents",
+  "fixedBy": "e5ee323486fab5f241be08581a1557c849f836f9",
+  "symptom": "A tool row's description chip (a command, a thinking summary, a search) was 18px beside 20px file tags, in the app and on the canvas.",
+  "rule": "A tool's description is a 20px chip, 12/16 with 2px by 6px padding, the height of the file tags beside it; the tool-presentation smoke measures it.",
+  "check": "pnpm test:ui-smoke --shard=2/3"
+}

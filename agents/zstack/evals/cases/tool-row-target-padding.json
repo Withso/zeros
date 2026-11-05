@@ -1,0 +1,9 @@
+{
+  "id": "tool-row-target-padding",
+  "kind": "scenario",
+  "area": "renderer-agents",
+  "fixedBy": "884f5a440977753af10fbc7ac101b2aead46152b",
+  "symptom": "Tool rows with a file or link target beside the name (Read, Edit, Write, linked commands) painted an unpadded fill on the bare name, while Bash rows hovered as a padded 28px row with 6px corners.",
+  "rule": "A row whose targets sit beside its disclosure is one ListRowGroup: 8px sides, 6px corners, one hover fill and focus ring, and a click in its gaps toggles; the tool-presentation smoke measures both kinds.",
+  "check": "pnpm test:ui-smoke --shard=2/3"
+}
