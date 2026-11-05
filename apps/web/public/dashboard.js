@@ -989,14 +989,18 @@ function bootDashboard() {
       const model = navModel();
       const structure = navHtml({ ...model, section: null });
       if (structure !== navStructure) {
-        const focused = document.activeElement?.closest?.("[data-section]");
-        const focusedSection = nav.contains(focused)
-          ? focused.dataset.section
+        // Re-rendering the rows drops focus; put it back on the same control.
+        const active = document.activeElement;
+        const focusedSection = nav.contains(active)
+          ? active.closest?.("[data-section]")?.dataset.section
           : null;
+        const switcherFocused = Boolean(active?.closest?.("#org-switcher"));
         nav.innerHTML = navHtml({ ...model, section: state.section });
         navStructure = structure;
         if (focusedSection) {
           nav.querySelector(`[data-section="${focusedSection}"]`)?.focus();
+        } else if (switcherFocused) {
+          nav.querySelector("#org-switcher > summary")?.focus();
         }
       }
       nav.querySelectorAll("[data-section]").forEach((node) => {
@@ -1127,8 +1131,9 @@ function bootDashboard() {
   async function reloadMe() {
     const wasUnavailable = dashboardOrganizationDataUnavailable(state);
     if (wasUnavailable) {
+      // Show the spinner without waiting on Profile's own requests.
       state.organizationsLoading = true;
-      await render();
+      void render();
     }
     try {
       const me = await api("/v1/me");

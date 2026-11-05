@@ -1,0 +1,9 @@
+{
+  "id": "hosted-page-ui-gate",
+  "kind": "scenario",
+  "area": "control-plane",
+  "fixedBy": "d136d3822234b531e1912b0dd83c1c5520e47fef",
+  "symptom": "Control-plane pages that started emitting classed HTML (hosted-page.ts, github.ts, workos-browser-sessions.ts) failed pnpm check:ui as class names compiled by nothing; the push had run only lint and the secret scan.",
+  "rule": "When server code emits classed HTML styled by its own inline stylesheet, name those files in SOURCE_EXEMPT with the reason rather than adding an @source, and run every AGENTS.md handoff gate before each push.",
+  "check": "pnpm check:ui"
+}

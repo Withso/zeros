@@ -768,3 +768,26 @@ Each landed step appends one line: date, workstream, what landed, evidence.
   both typechecks; red first for the provider choice on both sides, the
   shell's tokens against `styles/zeros-tokens.css`, the copy of each page and
   the server's shell copy; local renders of all 19 page states in both themes.
+- 2026-11-05 · 5 · Web app (plans.md §8): the dashboard and Ops follow
+  their 25 frames. One set of markup builders in `public/dashboard.js` paints
+  the server's first frame and every re-render. The web lists cloud
+  organizations only, Personal being each device's local space; without one,
+  Profile is the only section and offers Create organization when allowed,
+  and an unreachable control plane keeps Profile with a retry. The switcher
+  shows your role, Members gains a More actions menu and Leave, and
+  recoverable organizations show by name (`GET /v1/deletions` returns
+  `targetName`). Ops' centred states use the shared shell with Ops beside the
+  logo; its console uses the dashboard layout, with Identity recovery as a
+  platform owner's own section. Each Ops page sends the host's policy plus
+  one nonce. `check:ui` now exempts the control plane's three hosted-page
+  files, which round 1 pushed without running it. The canvas (version 367)
+  drops the 25 frames' badges and adds the Identity recovery frame; only
+  Open in Zeros on a cloud workspace is left.
+  Evidence: `node --test apps/web/lib/*.test.mjs` 160 tests, with a builder
+  test per dashboard frame state and the Ops pages' policy, hooks and
+  escaping; red first for `targetName` in the deletion integration suite;
+  the deletion lifecycle integration suite (14 tests) and the shell copy
+  test against a local Postgres; both typechecks, lint, `check:ui` and
+  `check:secrets`; local renders of the 18 dashboard and 8 Ops states in both
+  themes beside their frames, served under each page's real policy, plus the
+  member menu, switching, focus after navigation and the phone layout.

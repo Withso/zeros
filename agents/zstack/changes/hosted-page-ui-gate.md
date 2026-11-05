@@ -17,4 +17,5 @@ markup Tailwind should not compile: it would ship stray utilities to the app.
 Run every handoff gate in `AGENTS.md` before each push, not a subset.
 
 **Encoded in.** The control-plane entry in `SOURCE_EXEMPT`
-(`scripts/check-ui-consistency.mjs`) and eval case `hosted-page-ui-gate`.
+(`scripts/check-ui-consistency.mjs`) and eval case `hosted-page-ui-gate`, fixed
+by commit d136d382.
