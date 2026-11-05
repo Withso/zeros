@@ -2,7 +2,7 @@
   "id": "claude-native-fixture-retirement",
   "kind": "scenario",
   "area": "protocol",
-  "fixedBy": "pending",
+  "fixedBy": "pr:843",
   "symptom": "The native Claude question fixtures intermittently failed with ENOTEMPTY because SDK disposal returned before the child finished writing session files.",
   "rule": "Join the actual native child's close event before removing its fixture tree; exercise both Local and worker callers without weakening tool-loop assertions or widening production deadlines (zstack-verify and principles 13 and 14).",
   "check": "pnpm exec vitest run packages/protocol/src/__tests__/claude-native-api.test.ts apps/desktop/src/engine/agents/adapters/claude-sdk/__tests__/native-question.test.ts && pnpm --dir apps/cloud-worker exec vitest run src/drivers/claude/__tests__/native-question.test.ts"
