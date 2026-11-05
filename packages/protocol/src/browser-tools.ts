@@ -404,6 +404,10 @@ export interface BrowserSessionState {
    * UI follows `actor` for the full provider-owned session instead of expiring
    * between individual actions. */
   agentActivityUntil?: number;
+  /** Chromium's net error name for the last failed top-level load, such as
+   * `ERR_NAME_NOT_RESOLVED`, until the next navigation starts. Electron paints
+   * no error page, so trusted browser chrome reports it. */
+  loadError?: string;
 }
 
 /** Agents that drive Zeros-owned browser, computer, and simulator control. */

@@ -1,7 +1,10 @@
-import type {
-  BrowserJsonValue,
-  BrowserSessionState,
-  BrowserToolName,
+import { isAbsolute } from "node:path";
+import {
+  isBrowserProductId,
+  type BrowserJsonValue,
+  type BrowserSessionOwner,
+  type BrowserSessionState,
+  type BrowserToolName,
 } from "@zeros/protocol/browser-tools";
 
 import { browserError } from "./errors";
@@ -332,6 +335,53 @@ export function dispatchBrowserUserNavigation(input: {
       input.reload();
       return true;
   }
+}
+
+/** Closed net error name for a failed top-level load; page-controlled detail
+ * never reaches the renderer. */
+export function browserLoadErrorName(description: string): string {
+  const name = description.replace(/^net::/, "");
+  return /^ERR_[A-Z0-9_]{1,64}$/.test(name) ? name : "ERR_FAILED";
+}
+
+/** The trusted Browser tab's request to reopen its conversation's page. Main
+ * reuses a record it still holds for the conversation; the Local workspace
+ * owner is needed only to create one after a relaunch. */
+export function parseBrowserRestoreRequest(args: Record<string, unknown>): {
+  conversationId: string;
+  url: string;
+  owner?: BrowserSessionOwner;
+} {
+  const { conversationId, url, owner } = args;
+  if (
+    !isBrowserProductId(conversationId) ||
+    typeof url !== "string" ||
+    url.length > 8_192
+  ) {
+    throw new Error("Invalid browser restore request.");
+  }
+  if (owner === undefined) return { conversationId, url };
+  const fields =
+    owner && typeof owner === "object" && !Array.isArray(owner)
+      ? (owner as Record<string, unknown>)
+      : null;
+  if (
+    !fields ||
+    !isBrowserProductId(fields.workspaceId) ||
+    typeof fields.workspaceRoot !== "string" ||
+    !isAbsolute(fields.workspaceRoot)
+  ) {
+    throw new Error("Invalid browser restore owner.");
+  }
+  return {
+    conversationId,
+    url,
+    owner: {
+      workspaceId: fields.workspaceId,
+      conversationId,
+      workspaceRoot: fields.workspaceRoot,
+    },
+  };
 }
 
 /** Navigation/title events arrive independently from the invocation promise.

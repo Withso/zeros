@@ -142,6 +142,7 @@ import {
   installDesignProtocol,
   registerDesignProtocolPrivileges,
 } from "./design-protocol";
+import { browserErrorMessage } from "./browser/errors";
 import {
   startZerosBrowserService,
   type ZerosBrowserServiceHandle,
@@ -161,6 +162,7 @@ import {
 import {
   browserRendererEventIsCurrent,
   normalizeBrowserViewBoundsForHost,
+  parseBrowserRestoreRequest,
   shouldRevokeBrowserSurfaceForNavigation,
 } from "./browser/surface";
 import { createComputerControlPanel } from "./computer-use/control-panel";
@@ -1355,6 +1357,17 @@ app.whenReady().then(async () => {
       tool,
       toolArguments as BrowserJsonValue,
     );
+  });
+  setCommand("browser_session_restore", async (args, event) => {
+    trustedBrowserWindow(event);
+    const request = parseBrowserRestoreRequest(args);
+    try {
+      return await (await readyBrowserService()).restore(request);
+    } catch (error) {
+      // Only deliberate browser copy reaches the renderer; a failed realpath
+      // or Chromium error never carries host detail into the toolbar.
+      throw new Error(browserErrorMessage(error));
+    }
   });
   setCommand("browser_session_stop", async (args, event) => {
     trustedBrowserWindow(event);
