@@ -2,7 +2,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
-import { ListRow } from "../list-row";
+import { LIST_ROW_IN_GROUP, ListRow, ListRowGroup, type ListRowProps } from "../list-row";
 
 describe("ListRow", () => {
   const render = (props: Record<string, unknown> = {}) =>
@@ -76,5 +76,48 @@ describe("ListRow", () => {
     expect(markup).toContain('aria-expanded="false"');
     expect(markup).toContain('disabled=""');
     expect(markup).toContain('tabindex="-1"');
+  });
+});
+
+// Regression: a tool row with a file or link target beside its name hovered
+// only its bare name, with no side padding and 4px corners.
+describe("ListRowGroup", () => {
+  const classes = (markup: string, index = 0) =>
+    new Set([...markup.matchAll(/class="([^"]*)"/g)][index]![1]!.split(/\s+/));
+  const render = (props: Record<string, unknown> = {}) =>
+    renderToStaticMarkup(
+      createElement(
+        ListRowGroup,
+        props,
+        createElement(
+          ListRow,
+          { "data-list-row-disclosure": "", className: LIST_ROW_IN_GROUP, "aria-expanded": false } as ListRowProps,
+          "Edit",
+        ),
+        createElement("a", { href: "#file" }, "a.ts"),
+      ),
+    );
+
+  it("is the same padded 28px row with 6px corners as a plain ListRow", () => {
+    const group = classes(render());
+    for (const cls of ["-ml-2", "px-2", "py-1", "min-h-7", "rounded-md", "hover:bg-bg1-hover", "w-fit", "max-w-full"]) {
+      expect(group, cls).toContain(cls);
+    }
+    expect(group).toContain("has-[[data-list-row-disclosure]:focus-visible]:inset-ring-highlighted-bright");
+  });
+
+  it("leaves its disclosure only the icon and name, with no fill or ring of its own", () => {
+    const disclosure = classes(render(), 1);
+    for (const cls of ["p-0", "m-0", "hover:bg-transparent", "focus-visible:ring-0", "focus-visible:inset-ring-0"]) {
+      expect(disclosure, cls).toContain(cls);
+    }
+    expect(disclosure).not.toContain("hover:bg-bg1-hover");
+    expect(disclosure).not.toContain("px-2");
+  });
+
+  it("does not hover or ring when it cannot open", () => {
+    const group = classes(render({ interactive: false }));
+    expect(group).not.toContain("hover:bg-bg1-hover");
+    expect([...group].some((cls) => cls.startsWith("has-["))).toBe(false);
   });
 });

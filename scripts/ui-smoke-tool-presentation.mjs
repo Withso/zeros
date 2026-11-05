@@ -191,6 +191,60 @@ export async function runToolPresentationSmoke({ page, check }) {
   await runTurnChangesSmoke({ page, check });
 }
 
+// Regression: a row with a file or link target beside its name painted its
+// hover on the bare name, with no side padding and 4px corners, while a plain
+// row (Bash) hovered as a padded 28px row with 6px corners.
+async function expectRowShape({ page, feed, check, label }) {
+  const shapes = await feed.evaluateAll((elements) => elements.map((row) => {
+    const style = getComputedStyle(row);
+    const bounds = row.getBoundingClientRect();
+    const icon = row.querySelector('[aria-hidden="true"]').getBoundingClientRect();
+    return {
+      targets: row.tagName !== "BUTTON",
+      padding: `${style.paddingLeft} ${style.paddingRight}`,
+      radius: style.borderTopLeftRadius,
+      iconInset: Math.round(icon.left - bounds.left),
+      tall: bounds.height >= 28,
+    };
+  }));
+  expect(shapes.some((shape) => shape.targets), `${label}: a row with targets`).toBe(true);
+  expect(shapes.some((shape) => !shape.targets), `${label}: a plain row`).toBe(true);
+  for (const shape of shapes) {
+    expect(shape, label).toEqual({ targets: shape.targets, padding: "8px 8px", radius: "6px", iconInset: 8, tall: true });
+  }
+  const hoverFill = await page.evaluate(() => {
+    const probe = document.createElement("span");
+    probe.style.backgroundColor = "var(--bg1-hover)";
+    document.body.append(probe);
+    const color = getComputedStyle(probe).backgroundColor;
+    probe.remove();
+    return color;
+  });
+  const fill = (locator) => locator.evaluate((node) => getComputedStyle(node).backgroundColor);
+  const plain = feed.and(page.locator("button[aria-expanded]")).first();
+  const withTargets = feed
+    .and(page.locator("div"))
+    .filter({ has: page.locator("button[aria-expanded]") })
+    .first();
+  for (const [targets, row] of [[false, plain], [true, withTargets]]) {
+    const box = await row.boundingBox();
+    // The row's own left padding, not its name: the fill covers the whole row.
+    await page.mouse.move(box.x + 3, box.y + box.height / 2);
+    await expect.poll(() => fill(row), `${label}: hover fill`).toBe(hoverFill);
+    if (targets) {
+      const disclosure = row.locator("button[aria-expanded]").first();
+      await expect.poll(() => fill(disclosure)).toBe("rgba(0, 0, 0, 0)");
+      const expanded = await disclosure.getAttribute("aria-expanded");
+      await page.mouse.click(box.x + 3, box.y + box.height / 2);
+      await expect(disclosure).toHaveAttribute("aria-expanded", expanded === "true" ? "false" : "true");
+      await page.mouse.click(box.x + 3, box.y + box.height / 2);
+      await expect(disclosure).toHaveAttribute("aria-expanded", expanded ?? "false");
+    }
+  }
+  await page.mouse.move(0, 0);
+  check(`${label}: every tool row, with or without targets, is one padded 28px row with 6px corners and one hover fill`, true);
+}
+
 export async function runToolSpacingSmoke({ page, check }) {
   const fixture = page.locator("#tool-spacing-fixture");
   const root = fixture.locator("#tool-spacing-root");
@@ -211,6 +265,7 @@ export async function runToolSpacingSmoke({ page, check }) {
   };
 
   await expectSpacing(root, "Live mixed calls and batched edits/reads");
+  await expectRowShape({ page, feed: rows(root), check, label: "Live mixed calls and batched edits/reads" });
   await fixture.getByRole("button", { name: "Agent Spacing audit", exact: true }).click();
   await expectSpacing(nested, "Nested agent tools");
   const edit = root.getByRole("button", { name: "Edit update.ts", exact: true });
