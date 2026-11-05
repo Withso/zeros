@@ -170,7 +170,10 @@ export function validBrowserSessionState(
       typeof state.surfaceHovered !== "boolean") ||
     (state.agentActivityUntil !== undefined &&
       (!Number.isSafeInteger(state.agentActivityUntil) ||
-        state.agentActivityUntil < 0))
+        state.agentActivityUntil < 0)) ||
+    (state.loadError !== undefined &&
+      (typeof state.loadError !== "string" ||
+        !/^ERR_[A-Z0-9_]{1,64}$/.test(state.loadError)))
   ) {
     return false;
   }

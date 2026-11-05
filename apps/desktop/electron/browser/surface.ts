@@ -337,6 +337,13 @@ export function dispatchBrowserUserNavigation(input: {
   }
 }
 
+/** Closed net error name for a failed top-level load; page-controlled detail
+ * never reaches the renderer. */
+export function browserLoadErrorName(description: string): string {
+  const name = description.replace(/^net::/, "");
+  return /^ERR_[A-Z0-9_]{1,64}$/.test(name) ? name : "ERR_FAILED";
+}
+
 /** The trusted Browser tab's request to reopen its conversation's page. Main
  * reuses a record it still holds for the conversation; the Local workspace
  * owner is needed only to create one after a relaunch. */

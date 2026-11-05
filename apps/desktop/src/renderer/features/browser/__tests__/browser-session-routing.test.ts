@@ -520,6 +520,12 @@ describe("agent browser workbench routing", () => {
       false,
     );
     expect(
+      validBrowserSessionState({ ...valid, loadError: "ERR_NAME_NOT_RESOLVED" }),
+    ).toBe(true);
+    for (const loadError of ["", "Could not load https://x.test", 404]) {
+      expect(validBrowserSessionState({ ...valid, loadError })).toBe(false);
+    }
+    expect(
       validBrowserSessionState({
         ...valid,
         sourceViewport: { width: 1_440, height: 1_000 },

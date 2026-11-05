@@ -6,6 +6,7 @@ import React, {
   useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
@@ -146,6 +147,7 @@ import {
   WorkbenchTabToolbar,
   useWorkbenchStatusSource,
 } from "../tab-status";
+import { WorkbenchConditionError } from "../tab-status-model";
 
 // URL normalization lives in ./localhost-url. Browser navigation accepts
 // ordinary http(s) sites; Design/Canvas are gated separately to loopback URLs.
@@ -244,6 +246,7 @@ function NativeAgentBrowserTab({ tab, active, scope }: BrowserTabProps) {
   const [editingAddress, setEditingAddress] = useState(false);
   const [restoring, setRestoring] = useState(false);
   const [restorePending, setRestorePending] = useState(false);
+  const [restoreError, setRestoreError] = useState<string | null>(null);
   const [surfaceError, setSurfaceError] = useState<string | null>(null);
   const retryAttach = useRef<(() => Promise<void>) | null>(null);
 
@@ -252,7 +255,7 @@ function NativeAgentBrowserTab({ tab, active, scope }: BrowserTabProps) {
       if (!conversationId) return false;
       const generation = ++restoreGenerationRef.current;
       setRestorePending(true);
-      setSurfaceError(null);
+      setRestoreError(null);
       try {
         const state = await restoreConversationBrowser(conversationId, url);
         if (tabClosedRef.current) {
@@ -269,16 +272,15 @@ function NativeAgentBrowserTab({ tab, active, scope }: BrowserTabProps) {
         if (!currentBrowserSessionActivity(state.browserSessionId)) {
           publishBrowserSessionActivity(state);
         }
-        setLostSessionId((lost) =>
-          lost === state.browserSessionId ? null : lost,
-        );
+        // Any page this tab lost is superseded by the one main now holds.
+        setLostSessionId(null);
         return true;
       } catch (error) {
         if (
           restoreGenerationRef.current === generation &&
           !tabClosedRef.current
         ) {
-          setSurfaceError(
+          setRestoreError(
             error instanceof Error && error.message
               ? error.message
               : "The page could not be reopened.",
@@ -305,8 +307,14 @@ function NativeAgentBrowserTab({ tab, active, scope }: BrowserTabProps) {
     };
   }, [conversationId]);
 
+  // Why the page is missing: the published session attach lost, or the
+  // closed one. A lost id that is no longer published is stale.
   const missingSessionId =
-    lostSessionId ?? (activity?.status === "closed" ? activity.browserSessionId : "");
+    publishedSessionId !== undefined && publishedSessionId === lostSessionId
+      ? lostSessionId
+      : activity?.status === "closed"
+        ? activity.browserSessionId
+        : "";
   // Layout timing replaces the placeholder before the first paint. Each
   // missing page reopens once per visible interval; Reload and Retry repeat it.
   useLayoutEffect(() => {
@@ -328,9 +336,23 @@ function NativeAgentBrowserTab({ tab, active, scope }: BrowserTabProps) {
     restoreUrl,
   ]);
 
+  // A failed load leaves Electron's page blank; the tab names the error.
+  const loadError =
+    browserSessionId && activity?.loadError && !activity.loading
+      ? `This page couldn’t load (${activity.loadError}).`
+      : null;
+  // Reopen and load failures name a condition the user can act on, so their
+  // copy is the banner; attach failures keep the tab's generic copy.
+  const conditionError = (browserSessionId ? null : restoreError) ?? loadError;
+  const statusError = useMemo(
+    () =>
+      surfaceError ??
+      (conditionError ? new WorkbenchConditionError(conditionError) : null),
+    [conditionError, surfaceError],
+  );
   const managed = useWorkbenchStatusSource(
     {
-      error: surfaceError,
+      error: statusError,
       pending: restoring || restorePending,
       primary: true,
       hasContent:
@@ -339,7 +361,9 @@ function NativeAgentBrowserTab({ tab, active, scope }: BrowserTabProps) {
         !active
           ? undefined
           : browserSessionId
-            ? retryAttach.current?.()
+            ? loadError && !surfaceError
+              ? control("reload").then(() => undefined)
+              : retryAttach.current?.()
             : restoreUrl
               ? restorePage(restoreUrl).then(() => undefined)
               : undefined,
@@ -665,14 +689,15 @@ function NativeAgentBrowserTab({ tab, active, scope }: BrowserTabProps) {
     : !restoreUrl || restorePending;
   const reload = () =>
     void (browserSessionId ? control("reload") : restorePage(restoreUrl));
+  const visibleError = surfaceError ?? conditionError;
   const placeholder = blockingOverlayOpen
     ? null
-    : surfaceError
+    : visibleError
       ? // In a tab the failure is the one row under the toolbar, with its
         // Retry; the page area doesn't repeat it.
         managed
         ? null
-        : surfaceError
+        : visibleError
       : browserSessionId
         ? restoring
           ? "Connecting to the live browser…"

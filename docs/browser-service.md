@@ -691,7 +691,9 @@ does; the engine's next acquire for that owner returns the same page, so the
 agent continues from what the user sees. The address bar and Reload reopen a
 page too. Hidden tabs never reopen one, an attach that finds no page behind a
 published session reopens it once, and a tab closed while its page reopens
-closes that page.
+closes that page. Electron paints a failed top-level load blank, so session
+state carries Chromium's net error name (`loadError`) until the next
+navigation starts, and the tab names it beside Reload.
 
 Closing a conversation-owned Browser tab is an explicit native close
 transaction, not a renderer-only tab removal. Main destroys the matching

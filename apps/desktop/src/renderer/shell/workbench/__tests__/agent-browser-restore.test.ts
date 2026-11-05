@@ -340,6 +340,113 @@ describe("taking over a conversation's Browser tab without a live page", () => {
     expect(host.textContent).not.toContain("busy or visible");
   });
 
+  it("names a failed load and reloads it", async () => {
+    const conversation = conversationId();
+    const tab = agentTab(conversation);
+    await seedConversation(conversation, tab);
+    const failed = liveState(conversation, {
+      loading: false,
+      loadError: "ERR_NAME_NOT_RESOLVED",
+    });
+    const { publishBrowserSessionActivity } = await import(
+      "../../../features/browser/browser-session-activity-store"
+    );
+    publishBrowserSessionActivity(failed);
+    native.invoke.mockImplementation(async (command) => {
+      if (command === "browser_session_attach") return failed;
+      if (command === "browser_session_control") return { success: true };
+      if (command === "browser_session_capture") return { dataUrl: null };
+      return null;
+    });
+
+    await render(tab, true);
+    await runFrames(() => attachCalls(failed.browserSessionId) > 0);
+    expect(host.textContent).toContain(
+      "This page couldn’t load (ERR_NAME_NOT_RESOLVED).",
+    );
+    await act(async () => {
+      host
+        .querySelector<HTMLButtonElement>('button[aria-label="Reload"]')!
+        .click();
+    });
+
+    expect(restoreCalls()).toEqual([]);
+    expect(native.invoke).toHaveBeenCalledWith("browser_session_control", {
+      browserSessionId: failed.browserSessionId,
+      tool: "reload",
+      arguments: {},
+    });
+  });
+
+  it("reopens again when a page it reopened closes under the visible tab", async () => {
+    const conversation = conversationId();
+    const tab = agentTab(conversation);
+    await seedConversation(conversation, tab);
+    const lost = liveState(conversation, {
+      browserSessionId: `browser_lost_${conversation.slice(-4)}`,
+      loading: false,
+    });
+    const reopened = liveState(conversation);
+    const { publishBrowserSessionActivity } = await import(
+      "../../../features/browser/browser-session-activity-store"
+    );
+    publishBrowserSessionActivity(lost);
+    native.invoke.mockImplementation(async (command, args) => {
+      const id = (args as { browserSessionId?: string } | undefined)
+        ?.browserSessionId;
+      if (command === "browser_session_attach") {
+        return id === reopened.browserSessionId ? reopened : null;
+      }
+      if (command === "browser_session_restore") return reopened;
+      if (command === "browser_session_capture") return { dataUrl: null };
+      return null;
+    });
+
+    await render(tab, true);
+    await runFrames(() => attachCalls(reopened.browserSessionId) > 0);
+    expect(restoreCalls()).toHaveLength(1);
+    await act(async () => {
+      publishBrowserSessionActivity({ ...reopened, status: "closed" });
+    });
+
+    expect(restoreCalls()).toHaveLength(2);
+  });
+
+  it("leaves a reopen that lands after the tab was hidden detached", async () => {
+    const conversation = conversationId();
+    const tab = agentTab(conversation);
+    await seedConversation(conversation, tab);
+    const restored = liveState(conversation);
+    let finishRestore!: (state: BrowserSessionState) => void;
+    native.invoke.mockImplementation(async (command) => {
+      if (command === "browser_session_restore") {
+        return new Promise((resolve) => {
+          finishRestore = resolve;
+        });
+      }
+      if (command === "browser_session_attach") return restored;
+      if (command === "browser_session_capture") return { dataUrl: null };
+      return null;
+    });
+
+    await render(tab, true);
+    expect(restoreCalls()).toHaveLength(1);
+    await render(tab, false);
+    await act(async () => {
+      finishRestore(restored);
+    });
+    await runFrames(() => false);
+
+    expect(restoreCalls()).toHaveLength(1);
+    expect(attachCalls(restored.browserSessionId)).toBe(0);
+
+    // Shown again, it binds to the page the reopen produced.
+    await render(tab, true);
+    await runFrames(() => attachCalls(restored.browserSessionId) > 0);
+    expect(restoreCalls()).toHaveLength(1);
+    expect(attachCalls(restored.browserSessionId)).toBe(1);
+  });
+
   it("never opens a page for a hidden tab", async () => {
     const conversation = conversationId();
     const tab = agentTab(conversation);

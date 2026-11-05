@@ -88,6 +88,7 @@ import {
   browserDomMarkers,
   browserInputDisposition,
   browserInputTargetStillMatches,
+  browserLoadErrorName,
   browserNavigationPublishStatus,
   browserOperationNeedsReadySettlement,
   browserPolicySnapshotIsCurrent,
@@ -226,6 +227,8 @@ interface BrowserLease {
   /** Native guest hover cannot bubble into the renderer DOM. Publish it so
    * PiP chrome can reveal while the pointer is anywhere over the live page. */
   surfaceHovered: boolean;
+  /** Net error of the last failed top-level load until the next navigation. */
+  loadError: string | null;
   surfaceId: string | null;
   consoleErrors: string[];
   networkErrors: string[];
@@ -879,44 +882,23 @@ export async function startZerosBrowserService(
     url: string;
     owner?: BrowserSessionOwner;
   }): Promise<BrowserSessionState> => {
-    const blocked = () =>
-      browserServiceInvocationBlockedReason({
-        browserEnabled: browserUiEnabled,
-        trustedSurfaceAvailable:
-          options.isTrustedSurfaceAvailable?.() !== false,
-      });
-    const initialBlock = blocked();
-    if (initialBlock) throw browserError(initialBlock);
-    if (!isBrowserProductId(request.conversationId)) {
-      throw browserError("Invalid Zeros browser restore request.");
-    }
     const url = normalizeWebUrl(request.url);
-    let record = conversationBrowserRecord(
-      records.values(),
-      request.conversationId,
-    );
-    if (!record) {
-      const owner = request.owner;
-      if (!owner || owner.conversationId !== request.conversationId) {
-        throw browserError(
-          "This conversation's browser page can't be reopened here.",
-        );
-      }
-      const acquired = await acquire(owner);
-      const queuedBlock = blocked();
-      if (queuedBlock) throw browserError(queuedBlock);
-      record = records.get(acquired.browserSessionId);
-      if (!record) {
-        throw browserError("The Zeros browser session is unavailable.");
-      }
-    }
-    const owned = record;
-    touchRecord(owned);
-    return restoreUserBrowserPage(owned, url, {
+    const record = await admitBrowserRestore(request, {
+      records,
+      acquire,
+      blockedReason: () =>
+        browserServiceInvocationBlockedReason({
+          browserEnabled: browserUiEnabled,
+          trustedSurfaceAvailable:
+            options.isTrustedSurfaceAvailable?.() !== false,
+        }),
+    });
+    touchRecord(record);
+    return restoreUserBrowserPage(record, url, {
       options,
       scheduleLeaseCleanup,
       openLease: () =>
-        createLease(owned, {
+        createLease(record, {
           options,
           confirmations,
           actor: "user",
@@ -2003,6 +1985,43 @@ function conversationBrowserRecord(
   return match;
 }
 
+/** Browser policy first, then the conversation's record. A Local owner may
+ * create a record only when none exists, and policy is rechecked after that
+ * wait so a Settings change during acquire still refuses. */
+async function admitBrowserRestore(
+  request: { conversationId: string; owner?: BrowserSessionOwner },
+  context: {
+    records: Map<string, BrowserSessionRecord>;
+    acquire: (
+      owner: BrowserSessionOwner,
+    ) => Promise<BrowserSessionAcquireResponse>;
+    blockedReason: () => string | null;
+  },
+): Promise<BrowserSessionRecord> {
+  const initialBlock = context.blockedReason();
+  if (initialBlock) throw browserError(initialBlock);
+  if (!isBrowserProductId(request.conversationId)) {
+    throw browserError("Invalid Zeros browser restore request.");
+  }
+  const existing = conversationBrowserRecord(
+    context.records.values(),
+    request.conversationId,
+  );
+  if (existing) return existing;
+  const owner = request.owner;
+  if (!owner || owner.conversationId !== request.conversationId) {
+    throw browserError(
+      "This conversation's browser page can't be reopened here.",
+    );
+  }
+  const acquired = await context.acquire(owner);
+  const queuedBlock = context.blockedReason();
+  if (queuedBlock) throw browserError(queuedBlock);
+  const record = context.records.get(acquired.browserSessionId);
+  if (!record) throw browserError("The Zeros browser session is unavailable.");
+  return record;
+}
+
 /** A Browser tab outlives its native page: a closed window, renderer reload
  * or relaunch destroys the page while the tab keeps its address. Reopening
  * binds the tab to a page the record still holds, without navigating it, or
@@ -3055,6 +3074,7 @@ function createLease(
     workingOverlayId: `${domMarkers.pointerId}-working`,
     workingOverlayVisible: false,
     surfaceHovered: false,
+    loadError: null,
     surfaceId: null,
     consoleErrors: [],
     networkErrors: [],
@@ -3209,9 +3229,14 @@ function createLease(
   view.webContents.on("did-navigate-in-page", publishCommittedNavigation);
   view.webContents.on(
     "did-fail-load",
-    (_event, _errorCode, _errorDescription, _validatedUrl, isMainFrame) => {
+    (_event, errorCode, errorDescription, _validatedUrl, isMainFrame) => {
       if (!isMainFrame || record.lease !== lease) return;
       lease.pendingUrl = null;
+      // ERR_ABORTED is a superseded or host-intercepted navigation, not a
+      // page the user is left looking at.
+      if (errorCode !== -3) {
+        lease.loadError = browserLoadErrorName(errorDescription);
+      }
       publishNavigation();
     },
   );
@@ -3277,6 +3302,7 @@ function createLease(
       const isSameDocument = event.isSameDocument ?? legacyIsInPlace ?? false;
       const targetUrl = event.url ?? legacyUrl ?? "";
       if (!isMainFrame || record.lease !== lease) return;
+      if (!isSameDocument) lease.loadError = null;
       if (lease.displayTitleTimer) {
         clearTimeout(lease.displayTitleTimer);
         lease.displayTitleTimer = null;
@@ -4715,6 +4741,7 @@ function sessionState(
       ? { cancellable: true }
       : {}),
     ...(lease ? { surfaceHovered: lease.surfaceHovered } : {}),
+    ...(lease?.loadError ? { loadError: lease.loadError } : {}),
     ...(tool ? { tool } : {}),
   };
 }

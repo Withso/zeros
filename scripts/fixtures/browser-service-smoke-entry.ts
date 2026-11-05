@@ -209,6 +209,7 @@ app
         tool?: string;
         browserSessionId: string;
         faviconDataUrl?: string;
+        loadError?: string;
       }> = [];
       const controlBar: ControlBarCall[] = [];
       const userStops: Array<{
@@ -644,11 +645,24 @@ app
         }),
         /can't be reopened here/,
       );
+      // Electron paints a failed load blank, so its state names the error.
+      const portProbe = createServer();
+      const closedPort = await listen(portProbe);
+      await new Promise<void>((resolve) => portProbe.close(() => resolve()));
       const relaunchedPage = await service.restore({
         conversationId: "conversation-relaunched",
-        url: restoredUrl,
+        url: `http://127.0.0.1:${closedPort}/`,
         owner: owner("conversation-relaunched", artifactRoot),
       });
+      await assertEventually(
+        () =>
+          states.some(
+            (state) =>
+              state.browserSessionId === relaunchedPage.browserSessionId &&
+              state.loadError === "ERR_CONNECTION_REFUSED",
+          ),
+        "A refused reopen never reported its load error.",
+      );
       assert.equal(
         (await service.acquire(owner("conversation-relaunched", artifactRoot)))
           .browserSessionId,
