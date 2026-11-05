@@ -1,6 +1,6 @@
 # Canvas audit: Zeros Design against the app
 
-Status 2026-11-05, Zeros Design canvas version 364.
+Status 2026-11-05, Zeros Design canvas version 368.
 
 ## How to read this
 
@@ -27,7 +27,7 @@ and in [`plans.md`](plans.md).
 | UI components | 47 | 3 | Three Design-tab details, listed below |
 | Foundations | 14 | 0 | — |
 | Branding | 4 | 0 | — |
-| Web app | 60 | 56 | §8. The shared page shell shipped. Still to do: one sign-in page (2), each page's copy (32), the dashboard rebuild (18), Ops on the dashboard shell (3), and the route map (1) |
+| Web app | 55 | 0 | — |
 | Agent chat | 87 | 0 | — |
 | Sidebar | 25 | 0 | — |
 | Dashboard (Home) | 18 | 0 | — |
@@ -40,7 +40,7 @@ and in [`plans.md`](plans.md).
 | Simulators | 12 | 0 | — |
 | Customize | 25 | 0 | — |
 | Settings | 36 | 0 | — |
-| **Total** | **459** | **86** | |
+| **Total** | **454** | **30** | |
 
 ## Landed this round
 
@@ -76,7 +76,32 @@ and in [`plans.md`](plans.md).
   - Theme editor: the chosen rail row on bg2-highlight, 12 fg3 labels and
     counts, mono 12 names, the edited theme as a pressed toggle on
     selected-bg, a 20px swatch and Reset.
-- **Canvas (versions 363 and 364).**
+- **Web app sign-in and centred pages.**
+  - Sign-in offers Continue with Google and Continue with GitHub, each
+    started directly (the owner's decision); Ops and step-ups keep Hosted
+    AuthKit.
+  - One page shell follows the canvas recipe with inline logos and tokens,
+    shared verbatim with the control plane's sign-in and GitHub pages.
+  - Every centred app page has its frame's copy, and the account states are
+    centred pages with one primary.
+- **Web dashboard and Ops.**
+  - The dashboard follows its 18 frames, with one set of markup builders
+    for the server's first paint and the browser's re-renders. It lists
+    cloud organizations only, and recoverable organizations by name.
+  - Ops follows its 7 frames: the centred states on the shared shell with
+    Ops beside the logo, and the console on the dashboard layout, each page
+    allowing its one inline block by nonce under the Ops policy.
+- **Open in Zeros on a cloud workspace.**
+  - The web workspace page reads its workspace from the cloud v2 API, as its
+    creator, and offers Open in Zeros through
+    `zeros[-channel]://cloud-workspace/<organization>/<workspace>`.
+  - The desktop app switches to that organization and opens the workspace,
+    and a cloud workspace's menu copies the page's link.
+  - The invite page is gone: cloud workspaces are creator-only.
+- **Loaders.** The centred pages and the dashboard draw the app's square
+  Orbit. The workspace loading and GitHub checking frames had lost their
+  badge without the loader they draw, and the dashboard's loader was round.
+- **Canvas (versions 363 to 368).**
   - Eleven Planned badges came off frames that are now built.
   - The remaining notes name exactly what is left.
   - The Changes "All states" frame had been clipping its tallest state by
@@ -84,6 +109,16 @@ and in [`plans.md`](plans.md).
   - Version 364: three Design-tab sheets lose their badge and three narrow
     it, RevEmpty shows the no-PR state the app ships, and the colour picker
     sheet draws its fields on bg3-hover like the other popovers.
+  - Version 366: 25 Web app frames lose their badge, and the four frames for
+    code removed with Auth0 (the rollback sign-in and callback, `/launch` and
+    the legacy handoff) are gone.
+  - Version 367: the dashboard (18) and Ops (7) frames lose their badge and
+    show what shipped: the switcher shows your role, Teams drops its member
+    count, the outage keeps Profile, owners see Force purge disabled, and a
+    new frame shows Ops' Identity recovery section.
+  - Version 368: the workspace page's Ready frame and the route map lose
+    their badge, the two workspace invitation frames are gone, and the route
+    map is fitted to its rows.
 
 ## What is left
 
@@ -132,11 +167,6 @@ plus a navigator. The Resolve conflicts panel goes.
 Agents get their mark, GitHub authors their photo, and review apps their logo
 with a Bot badge. The thread model needs each comment's avatar URL and its
 agent provider.
-
-### §8 Web app: 56 frames
-
-See plans.md §8: the sign-in page, page copy, the dashboard's Settings
-anatomy, account pages and Ops.
 
 ### UI components: the Design-tab sheets (3 frames)
 

@@ -28,6 +28,7 @@ import { createGithubAppJwt } from "./github-app-jwt.js";
 import { githubCommitProfile, type GithubCommitProfile } from "./github-git-author.js";
 import { rateLimit } from "./ratelimit.js";
 import { rememberMcpRepositories } from "./mcp/repositories.js";
+import { HOSTED_PAGE_STYLE_SOURCE, hostedPage } from "./hosted-page.js";
 
 export { createGithubAppJwt };
 
@@ -1003,9 +1004,13 @@ export function createGithubPublicRoutes(
     const state = parsedState.data;
     if (state.startsWith("zcg_") && dependencies.cloudCallback) {
       await dependencies.cloudCallback(state, c.req.query("code"), !!c.req.query("error"));
-      c.header("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'");
+      c.header("Content-Security-Policy", `default-src 'none'; style-src ${HOSTED_PAGE_STYLE_SOURCE}; frame-ancestors 'none'`);
       c.header("Referrer-Policy", "no-referrer");
-      return c.html("<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>GitHub connected</title><h1>GitHub connected</h1><p>Return to Zeros to continue. You can close this tab.</p></html>");
+      return c.html(hostedPage(
+        "GitHub connected",
+        `<div class="title">GitHub connected</div>
+      <div class="sub">Return to Zeros to continue. You can close this tab.</div>`,
+      ));
     }
     // Keep expiry sweeps off this unauthenticated route to prevent arbitrary
     // table-wide writes. The atomic DELETE and expiry predicate guard this state.

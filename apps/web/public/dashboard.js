@@ -1,5 +1,5 @@
 export function organizationDisplayName(organization) {
-  return organization?.name?.trim() || "Personal";
+  return organization?.name?.trim() || "Organization";
 }
 
 export function organizationCreationAllowed(capabilities) {
@@ -252,24 +252,523 @@ export function memberPermissions({
   };
 }
 
+// ── Markup ─────────────────────────────────────────────────────────────────
+// The page's markup, shared by the server's first paint (lib/dashboard.mjs)
+// and every re-render here, so the two cannot drift. It follows the Zeros
+// Design canvas's Web app dashboard frames. Every value is escaped here.
+
+export function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>"']/g, (character) =>
+    character === "&"
+      ? "&amp;"
+      : character === "<"
+        ? "&lt;"
+        : character === ">"
+          ? "&gt;"
+          : character === '"'
+            ? "&quot;"
+            : "&#39;",
+  );
+}
+
+export function initials(value) {
+  const words = String(value ?? "")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+  return `${words[0]?.[0] ?? ""}${words[1]?.[0] ?? ""}`.toUpperCase();
+}
+
+/** The web manages cloud organizations only: Personal is each device's local
+ * account space, so it never appears in the list or the switcher. */
+export function cloudOrganizations(organizations) {
+  return (Array.isArray(organizations) ? organizations : [])
+    .filter((organization) => organization && organization.isPersonal !== true)
+    .map((organization) => ({
+      ...organization,
+      logo: safeOrganizationLogo(organization.logo),
+    }));
+}
+
+const ROLE_LABELS = { owner: "Owner", admin: "Admin", member: "Member" };
+
+export function roleLabel(role) {
+  return Object.hasOwn(ROLE_LABELS, role) ? ROLE_LABELS[role] : String(role ?? "");
+}
+
+export function formatShortDate(value) {
+  const timestamp = typeof value === "string" ? Date.parse(value) : Number.NaN;
+  if (!Number.isFinite(timestamp)) return null;
+  return new Date(timestamp).toLocaleDateString("en-US", {
+    timeZone: "UTC",
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+  });
+}
+
+const icon = (size, body, className = "") =>
+  `<svg${className ? ` class="${className}"` : ""} viewBox="0 0 24 24" width="${size}" height="${size}" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${body}</svg>`;
+
+export const ICONS = {
+  profile: icon(14, '<path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>'),
+  general: icon(14, '<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/>'),
+  members: icon(14, '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>'),
+  teams: icon(14, '<path d="M18 21a8 8 0 0 0-16 0"/><circle cx="10" cy="8" r="5"/><path d="M22 20c0-3.37-2-6.5-4-8a5 5 0 0 0-.45-8.3"/>'),
+  billing: icon(14, '<rect width="20" height="14" x="2" y="5" rx="2"/><line x1="2" x2="22" y1="10" y2="10"/>'),
+  chevrons: icon(12, '<path d="m7 15 5 5 5-5"/><path d="m7 9 5-5 5 5"/>', "chevron"),
+  plus: icon(14, '<path d="M5 12h14"/><path d="M12 5v14"/>'),
+  copy: icon(12, '<rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>'),
+  more: icon(14, '<circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/>'),
+  remove: icon(14, '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>'),
+  close: icon(12, '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>'),
+  mail: icon(12, '<rect width="20" height="16" x="2" y="4" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/>'),
+  ok: icon(16, '<circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/>', "toast-icon"),
+  error: icon(16, '<circle cx="12" cy="12" r="10"/><line x1="12" x2="12" y1="8" y2="12"/><line x1="12" x2="12.01" y1="16" y2="16"/>', "toast-icon"),
+  // The 32px empty-state marks.
+  organizations: icon(32, '<path d="M18 21a8 8 0 0 0-16 0"/><circle cx="10" cy="8" r="5"/><path d="M22 20c0-3.37-2-6.5-4-8a5 5 0 0 0-.45-8.3"/>'),
+  offline: icon(32, '<path d="m2 2 20 20"/><path d="M5.782 5.782A7 7 0 0 0 9 19h8.5a4.5 4.5 0 0 0 1.307-.193"/><path d="M21.532 16.5A4.5 4.5 0 0 0 17.5 10h-1.79A7.008 7.008 0 0 0 10 5.07"/>'),
+  alert: icon(32, '<circle cx="12" cy="12" r="10"/><line x1="12" x2="12" y1="8" y2="12"/><line x1="12" x2="12.01" y1="16" y2="16"/>'),
+};
+
+const ACCOUNT_SECTIONS = [["profile", "Profile"]];
+const ORGANIZATION_SECTIONS = [
+  ["general", "General"],
+  ["members", "Members"],
+  ["teams", "Teams"],
+  ["billing", "Billing"],
+];
+
+export const SECTION_COPY = {
+  members: { title: "Members", line: "Members join the default team automatically." },
+  teams: { title: "Teams", line: "Teams group members and workspace access." },
+  billing: { title: "Billing", line: "Plan, seats and payment for this organization." },
+};
+
+export function organizationAvatarHtml(organization, size = 28) {
+  const logo = safeOrganizationLogo(organization?.logo);
+  return `<span class="avatar square${size === 20 ? " size-20" : ""}" aria-hidden="true">${
+    logo
+      ? `<img class="avatar-image" src="${escapeHtml(logo)}" alt="" />`
+      : escapeHtml(initials(organizationDisplayName(organization)))
+  }</span>`;
+}
+
+function navRowHtml(id, name, section) {
+  return `<button class="nav-row" type="button" data-section="${id}" aria-current="${section === id ? "page" : "false"}">${ICONS[id]}<span class="nav-name">${name}</span></button>`;
+}
+
+/** The switcher's menu items, one per cloud organization, with the role you
+ * hold in it. */
+function organizationMenuHtml(organizations, activeId, email, canCreate) {
+  const items = organizations
+    .map(
+      (organization) =>
+        `<button class="menu-item" type="button" role="menuitemradio" aria-checked="${organization.id === activeId}" data-org-id="${escapeHtml(organization.id)}">${organizationAvatarHtml(organization, 20)}<span class="menu-name">${escapeHtml(organizationDisplayName(organization))}</span><span class="menu-meta">${escapeHtml(roleLabel(organization.role))}</span><span class="menu-check" aria-hidden="true">${organization.id === activeId ? "✓" : ""}</span></button>`,
+    )
+    .join("");
+  const create = canCreate
+    ? `<div class="menu-sep" role="separator"></div><button class="menu-item" type="button" role="menuitem" data-action="create-organization">${ICONS.plus}Create organization</button>`
+    : "";
+  return `<div class="menu org-menu" role="menu" aria-label="Organizations">${email ? `<p class="menu-label">${escapeHtml(email)}</p>` : ""}${items}${create}</div>`;
+}
+
+/** The sidebar's rows: the organization switcher first, then Account and,
+ * with an organization, Organization. `orgList` is "ready", "loading" (a
+ * retry in flight) or "unavailable" (the list couldn't load). */
+export function navHtml({
+  organizations = [],
+  activeId = null,
+  section = "profile",
+  canCreate = false,
+  email = "",
+  orgList = "ready",
+}) {
+  const active =
+    organizations.find((organization) => organization.id === activeId) ??
+    organizations[0] ??
+    null;
+  let first = "";
+  if (orgList === "loading") {
+    first = '<div class="nav-row org-row" aria-hidden="true"><span class="skel-av square"></span><span class="skel name"></span></div>';
+  } else if (orgList === "ready" && active) {
+    first = `<details class="org-switcher" id="org-switcher"><summary class="nav-row org-row">${organizationAvatarHtml(active, 20)}<span class="nav-name">${escapeHtml(organizationDisplayName(active))}</span>${ICONS.chevrons}</summary>${organizationMenuHtml(organizations, active.id, email, canCreate)}</details>`;
+  } else if (orgList === "ready" && canCreate) {
+    first = `<button class="nav-row org-row" type="button" data-action="create-organization">${ICONS.plus}<span class="nav-name">Create organization</span></button>`;
+  }
+  const list = (rows) =>
+    `<div class="nav-list">${rows.map(([id, name]) => navRowHtml(id, name, section)).join("")}</div>`;
+  return `${first}<p class="nav-label${first ? "" : " first"}">Account</p>${list(ACCOUNT_SECTIONS)}${
+    orgList === "ready" && active
+      ? `<p class="nav-label">Organization</p>${list(ORGANIZATION_SECTIONS)}`
+      : ""
+  }`;
+}
+
+function headHtml(title, line = "") {
+  return `<header class="page-head"><div><h1>${escapeHtml(title)}</h1>${line ? `<p>${escapeHtml(line)}</p>` : ""}</div></header>`;
+}
+
+function groupHtml(title, description, body) {
+  return `<section class="group">${title ? `<h2 class="group-title">${escapeHtml(title)}</h2>` : ""}${description ? `<p class="group-desc">${escapeHtml(description)}</p>` : ""}${body}</section>`;
+}
+
+function textHtml(name, hint = "") {
+  return `<span class="row-text"><span class="row-name">${name}</span>${hint ? `<span class="row-hint">${hint}</span>` : ""}</span>`;
+}
+
+function rowHtml(text, controls = "", who = "") {
+  return `<div class="row">${who ? `<span class="row-who">${who}${text}</span>` : text}${controls ? `<span class="row-ctl">${controls}</span>` : ""}</div>`;
+}
+
+function emptyCardHtml(mark, line, action = "") {
+  return `<div class="card"><div class="empty">${mark}<p>${escapeHtml(line)}</p>${action}</div></div>`;
+}
+
+/** Profile: who you are, Organizations when you have none (or while the list
+ * is loading or unavailable), recoverable organizations, Sessions and Delete
+ * account. */
+export function profileHtml({
+  user,
+  signOutHref,
+  deletions = [],
+  hasOrganizations = true,
+  canCreate = false,
+  orgList = "ready",
+}) {
+  const name = user?.displayName || "Zeros user";
+  const identity = groupHtml(
+    "",
+    "",
+    `<div class="card">${rowHtml(
+      textHtml(escapeHtml(name), escapeHtml(user?.email)),
+      '<span class="badge">Sign-in profile</span>',
+      `<span class="avatar size-40" aria-hidden="true">${escapeHtml(initials(user?.displayName || user?.email))}</span>`,
+    )}</div><p class="group-line">Name and avatar come from your sign-in provider.</p>`,
+  );
+  let organizations = "";
+  if (orgList === "loading") {
+    organizations = groupHtml(
+      "Organizations",
+      "",
+      '<div class="card"><div class="empty" aria-busy="true"><span class="orb" aria-hidden="true"></span><p>Loading your organizations…</p></div></div>',
+    );
+  } else if (orgList === "unavailable") {
+    organizations = groupHtml(
+      "Organizations",
+      "",
+      emptyCardHtml(
+        ICONS.offline,
+        "Couldn’t reach Zeros. You’re still signed in.",
+        '<button class="button secondary" type="button" data-action="retry-me">Try again</button>',
+      ),
+    );
+  } else if (!hasOrganizations && canCreate) {
+    organizations = groupHtml(
+      "Organizations",
+      "",
+      emptyCardHtml(
+        ICONS.organizations,
+        "Create a cloud organization to share workspaces, members and settings.",
+        `<button class="button primary" type="button" data-action="create-organization">${ICONS.plus}Create organization</button>`,
+      ),
+    );
+  }
+  const recoverable = deletions.length
+    ? groupHtml(
+        "Recoverable organizations",
+        "An owner can restore these within 30 days.",
+        `<div class="card">${deletions
+          .map((deletion) => {
+            const label = deletion.targetName || "Organization";
+            return rowHtml(
+              textHtml(
+                escapeHtml(label),
+                `Restore before ${escapeHtml(formatLifecycleDate(deletion.purgeAfter))} · ${escapeHtml(deletion.recoveryCode)}`,
+              ),
+              `<button class="button secondary" type="button" data-restore-organization="${escapeHtml(deletion.targetId)}" data-deletion-request="${escapeHtml(deletion.id)}" aria-label="Restore ${escapeHtml(label)}">Restore</button>`,
+              `<span class="avatar square" aria-hidden="true">${escapeHtml(initials(label))}</span>`,
+            );
+          })
+          .join("")}</div>`,
+      )
+    : "";
+  const sessions = groupHtml(
+    "Sessions",
+    "",
+    `<div class="card">${rowHtml(
+      textHtml("Sign out", "Sign out of Zeros in this browser."),
+      `<a class="button secondary" href="${escapeHtml(signOutHref)}">Sign out</a>`,
+    )}</div>`,
+  );
+  const deleteAccount = groupHtml(
+    "Delete account",
+    "",
+    `<div class="card">${rowHtml(
+      textHtml("Delete account", "Signs out everywhere. Recoverable for 30 days; local work stays."),
+      '<button class="button danger-secondary" type="button" data-action="delete-account">Delete account</button>',
+    )}</div>`,
+  );
+  return `${headHtml("Profile")}${identity}${organizations}${recoverable}${sessions}${deleteAccount}`;
+}
+
+const canAdminister = (organization) =>
+  organization?.role === "owner" || organization?.role === "admin";
+
+/** General: the organization's logo, name, ID and your role; owners can
+ * schedule its deletion. */
+export function generalHtml(organization) {
+  const editable = canAdminister(organization);
+  const name = organizationDisplayName(organization);
+  const logo = safeOrganizationLogo(organization.logo);
+  const logoControls = editable
+    ? `<label class="button secondary">Change<input class="file-input" type="file" accept="image/png,image/jpeg,image/webp,image/gif" data-organization-logo /></label>${logo ? '<button class="button ghost" type="button" data-action="remove-organization-logo">Remove</button>' : ""}`
+    : "";
+  const nameText = textHtml("Name", "Shown across Zeros and in invitations.");
+  const nameRow = editable
+    ? `<form class="row" data-form="rename-organization">${nameText}<span class="row-ctl"><input class="input" name="name" required maxlength="80" value="${escapeHtml(organization.name)}" aria-label="Organization name" /><button class="button secondary" type="submit">Save</button></span></form>`
+    : rowHtml(nameText, `<span class="row-value">${escapeHtml(name)}</span>`);
+  const seat = seatBadgeHtml(organization.seat);
+  const rows = [
+    rowHtml(
+      textHtml("Logo", `Shown for ${escapeHtml(name)} across Zeros.`),
+      logoControls,
+      organizationAvatarHtml(organization),
+    ),
+    nameRow,
+    rowHtml(
+      textHtml("Organization ID", "Your stable tenant identifier."),
+      `<code class="id-code">${escapeHtml(organization.id)}</code><button class="icon-button" type="button" data-copy-organization-id="${escapeHtml(organization.id)}" aria-label="Copy organization ID">${ICONS.copy}</button>`,
+    ),
+    rowHtml(textHtml("Your role"), `<span class="badge">${escapeHtml(roleLabel(organization.role))}</span>`),
+    seat
+      ? rowHtml(textHtml("Your seat", "Pro, a free seat, or On Hold while the free seats are taken."), seat)
+      : "",
+  ].join("");
+  return `${headHtml("General")}${groupHtml("Organization", "", `<div class="card">${rows}</div>${organization.seat === "hold" ? HOLD_NOTICE_HTML : ""}`)}${
+    organization.role === "owner"
+      ? groupHtml(
+          "Delete organization",
+          "",
+          `<div class="card">${rowHtml(
+            textHtml("Delete organization", "Removes access now. An owner can restore it for 30 days."),
+            '<button class="button danger-secondary" type="button" data-action="delete-organization">Delete organization</button>',
+          )}</div>`,
+        )
+      : ""
+  }`;
+}
+
+function memberActionsHtml(member, name, isSelf) {
+  return `<button class="icon-button standard" type="button" aria-label="More actions for ${escapeHtml(name)}" aria-haspopup="menu" aria-expanded="false" data-member-menu="${escapeHtml(member.id)}">${ICONS.more}</button><div class="menu row-menu" role="menu" hidden><button class="menu-item danger" type="button" role="menuitem" data-remove-member="${escapeHtml(member.id)}">${isSelf ? "Leave organization" : "Remove from organization"}</button></div>`;
+}
+
+function memberRowHtml(member, { organization, userId, ownerCount, aligned }) {
+  const name = member.display_name || member.email;
+  const isSelf = member.id === userId;
+  const directoryManaged = member.directory_managed === true;
+  const permissions = memberPermissions({
+    actorRole: organization.role,
+    targetRole: member.role,
+    isSelf,
+    ownerCount,
+    directoryManaged,
+  });
+  const role = permissions.canChangeRole
+    ? `<select class="select compact" aria-label="Role for ${escapeHtml(name)}" data-member-role="${escapeHtml(member.id)}">${permissions.availableRoles
+        .map(
+          (option) =>
+            `<option value="${option}"${member.role === option ? " selected" : ""}>${roleLabel(option)}</option>`,
+        )
+        .join("")}</select>`
+    : `<span class="badge">${escapeHtml(roleLabel(member.role))}</span>`;
+  const action = !permissions.canRemove
+    ? aligned
+      ? '<span class="slot" aria-hidden="true"></span>'
+      : ""
+    : isSelf && !permissions.canChangeRole
+      ? `<button class="button ghost" type="button" data-remove-member="${escapeHtml(member.id)}">Leave</button>`
+      : memberActionsHtml(member, name, isSelf);
+  return rowHtml(
+    textHtml(
+      `${escapeHtml(name)}${isSelf ? " (you)" : ""}`,
+      `${escapeHtml(member.email)}${directoryManaged ? " · Directory managed" : ""}`,
+    ),
+    `${seatBadgeHtml(member.seat)}${role}${action}`,
+    `<span class="avatar" aria-hidden="true">${escapeHtml(initials(name))}</span>`,
+  );
+}
+
+/** Members: the invite form for admins, every member with the controls your
+ * role allows, then pending invitations. */
+export function membersHtml({ organization, data, userId }) {
+  const admin = canAdminister(organization);
+  const members = Array.isArray(data?.members) ? data.members : [];
+  const invitations = Array.isArray(data?.invitations) ? data.invitations : [];
+  const seats = seatSummary(data?.seats);
+  const ownerCount = members.filter((member) => member.role === "owner").length;
+  const held = members.some((member) => member.id === userId && member.seat === "hold");
+  const invite = admin
+    ? groupHtml(
+        "Invite member",
+        "They sign in with this exact email address.",
+        '<div class="card"><form class="invite-form" data-form="invite-member"><label>Email address<input class="input" name="email" type="email" maxlength="254" required autocomplete="off" placeholder="teammate@example.com" /></label><label>Role<select class="select" name="role"><option value="member">Member</option><option value="admin">Admin</option></select></label><button class="button primary" type="submit">Send invite</button></form></div>',
+      )
+    : "";
+  const list = groupHtml(
+    "Members",
+    seats ?? `${members.length} ${members.length === 1 ? "member" : "members"}`,
+    `<div class="card">${members
+      .map((member) => memberRowHtml(member, { organization, userId, ownerCount, aligned: admin }))
+      .join("")}</div>`,
+  );
+  const pending =
+    admin && invitations.length
+      ? groupHtml(
+          "Pending invitations",
+          `Unused invitations expire on their own.${seats ? " Each one holds a seat until then." : ""}`,
+          `<div class="card">${invitations
+            .map((invite) => {
+              const expires = formatShortDate(invite.expires_at);
+              return rowHtml(
+                textHtml(escapeHtml(invite.email), expires ? `Expires ${escapeHtml(expires)}` : "Pending"),
+                `<span class="badge">${escapeHtml(roleLabel(invite.role))}</span><button class="icon-button standard" type="button" data-revoke-invite="${escapeHtml(invite.id)}" aria-label="Revoke invitation for ${escapeHtml(invite.email)}">${ICONS.remove}</button>`,
+                `<span class="avatar vacant" aria-hidden="true">${ICONS.mail}</span>`,
+              );
+            })
+            .join("")}</div>`,
+        )
+      : "";
+  return `${headHtml("Members", `${SECTION_COPY.members.line}${admin ? "" : " Only admins can invite."}`)}${held ? HOLD_NOTICE_HTML : ""}${invite}${list}${pending}`;
+}
+
+/** Teams: one default team for now. */
+export function teamsHtml({ organization, data }) {
+  const teams = Array.isArray(data?.teams) ? data.teams : [];
+  const name = organizationDisplayName(organization);
+  return `${headHtml(SECTION_COPY.teams.title, SECTION_COPY.teams.line)}${groupHtml(
+    "Organization teams",
+    "More teams are coming. Everyone is in the default team.",
+    `<div class="card">${teams
+      .map((team) =>
+        rowHtml(
+          textHtml(escapeHtml(team.name), team.is_default ? `Everyone in ${escapeHtml(name)}` : escapeHtml(team.slug)),
+          `<span class="badge">${team.is_default ? "Default" : escapeHtml(roleLabel(team.role))}</span>`,
+          `<span class="avatar square" aria-hidden="true">${escapeHtml(initials(team.name))}</span>`,
+        ),
+      )
+      .join("")}</div>`,
+  )}`;
+}
+
+const capitalize = (value) => {
+  const text = String(value ?? "");
+  return text ? `${text[0].toUpperCase()}${text.slice(1)}` : text;
+};
+
+/** Billing: the plan, until checkout and invoices arrive. */
+export function billingHtml({ data }) {
+  const billing = data?.billing ?? {};
+  const subscription = billing.subscription ?? null;
+  const count = Number.isSafeInteger(billing.memberCount) && billing.memberCount > 0 ? billing.memberCount : 1;
+  const hint = subscription
+    ? `${capitalize(subscription.status)} · ${subscription.seats} ${subscription.seats === 1 ? "seat" : "seats"}`
+    : `${count} ${count === 1 ? "member" : "members"}`;
+  const badge = subscription
+    ? `<span class="badge${subscription.status === "active" ? " success" : ""}">${escapeHtml(capitalize(subscription.status))}</span>`
+    : '<span class="badge">No subscription</span>';
+  return `${headHtml(SECTION_COPY.billing.title, SECTION_COPY.billing.line)}${groupHtml(
+    "Plan",
+    "Checkout, invoices and payment methods are coming soon.",
+    `<div class="card">${rowHtml(textHtml(escapeHtml(capitalize(subscription?.plan) || "Free"), escapeHtml(hint)), badge)}</div>`,
+  )}`;
+}
+
+/** A section's first load: its heading over three skeleton rows. */
+export function sectionLoadingHtml(section) {
+  const copy = SECTION_COPY[section];
+  const skeleton =
+    '<div class="row"><span class="row-who"><span class="skel-av"></span><span class="row-text"><span class="skel name"></span><span class="skel hint"></span></span></span><span class="skel ctl"></span></div>';
+  return `${headHtml(copy.title, copy.line)}<section class="group" aria-busy="true" aria-label="Loading ${copy.title.toLowerCase()}"><div class="card">${skeleton.repeat(3)}</div></section>`;
+}
+
+/** A section whose first load failed, with a retry. */
+export function sectionErrorHtml(section) {
+  const copy = SECTION_COPY[section];
+  return `${headHtml(copy.title)}<section class="group">${emptyCardHtml(
+    ICONS.alert,
+    `Zeros couldn’t load ${copy.title.toLowerCase()}. Try again.`,
+    '<button class="button secondary" type="button" data-action="retry-section">Try again</button>',
+  )}</section>`;
+}
+
+function dialogHtml({ id, title, line, field, error, submit, destructive = false }) {
+  return `<dialog id="${id}-dialog" class="dialog" aria-labelledby="${id}-title">
+    <form method="dialog" id="${id}-form">
+      <div class="dialog-head"><div class="dialog-titlerow"><h2 class="dialog-title" id="${id}-title">${title}</h2><button class="icon-button" type="button" value="cancel" data-action="close-dialog" aria-label="Close">${ICONS.close}</button></div><p class="dialog-desc">${line}</p></div>
+      <div class="dialog-body">${field}<div class="dialog-error" id="${error}" role="alert"></div></div>
+      <div class="dialog-foot"><button class="button ghost" type="button" value="cancel" data-action="close-dialog">Cancel</button><button class="button ${destructive ? "danger" : "primary"}" type="submit" value="default">${submit}</button></div>
+    </form>
+  </dialog>`;
+}
+
+export function createOrganizationDialogHtml() {
+  return dialogHtml({
+    id: "create-organization",
+    title: "Create organization",
+    line: "Organizations share workspaces, members and settings.",
+    field: '<label class="field"><span>Organization name</span><input class="input" name="name" maxlength="80" required autocomplete="organization" placeholder="Acme" /></label>',
+    error: "create-organization-error",
+    submit: "Create organization",
+  });
+}
+
+/** The confirmation names the organization; opening the dialog refreshes it
+ * for the active one. */
+export function deleteOrganizationDialogHtml(name = "") {
+  return dialogHtml({
+    id: "delete-organization",
+    title: "Delete organization",
+    line: "Access stops now. An owner can restore it for 30 days.",
+    field: `<label class="field"><span data-confirmation-label>Type ${escapeHtml(name)} to confirm</span><input class="input" name="confirmation" maxlength="500" required autocomplete="off" placeholder="${escapeHtml(name)}" /></label>`,
+    error: "delete-organization-error",
+    submit: "Schedule deletion",
+    destructive: true,
+  });
+}
+
+export function deleteAccountDialogHtml() {
+  return dialogHtml({
+    id: "delete-account",
+    title: "Delete account",
+    line: "Signs out every device. Recoverable for 30 days; local work stays.",
+    field: '<label class="field"><span>Type DELETE MY ACCOUNT to confirm</span><input class="input" name="confirmation" maxlength="64" required autocomplete="off" placeholder="DELETE MY ACCOUNT" /></label>',
+    error: "delete-account-error",
+    submit: "Schedule deletion",
+    destructive: true,
+  });
+}
+
+const TOAST_LIMIT = 3;
+
 function bootDashboard() {
   "use strict";
 
   const bootNode = document.getElementById("dashboard-data");
   const content = document.getElementById("dashboard-content");
+  const nav = document.getElementById("dashboard-nav");
   if (!bootNode || !content) return;
 
   const boot = JSON.parse(bootNode.textContent || "{}");
   const state = {
     user: boot.user,
     capabilities: boot.capabilities || {},
-    organizations: (boot.organizations || []).map((organization) => ({
-      ...organization,
-      logo: safeOrganizationLogo(organization.logo),
-    })),
+    organizations: cloudOrganizations(boot.organizations),
     activeOrganizationId: boot.activeOrganizationId,
     section: boot.section || "profile",
     loadError: boot.loadError || null,
+    signOutHref: boot.signOutHref || "/auth/logout",
+    organizationsLoading: false,
     deletions: [],
   };
   const snapshots = new Map();
@@ -288,42 +787,19 @@ function bootDashboard() {
   let securitySigningOut = false;
   let lastSecurityContactAt = 0;
 
-  const normalizeOrganization = (organization) => ({
-    ...organization,
-    logo: safeOrganizationLogo(organization?.logo),
-  });
   const replaceOrganization = (organization) => {
     const index = state.organizations.findIndex(
       (item) => item.id === organization?.id,
     );
     // Rename and logo responses carry no seat, and neither edit changes it.
     const seat = organization?.seat ?? state.organizations[index]?.seat;
-    const next = normalizeOrganization(
+    const [next] = cloudOrganizations([
       seat ? { ...organization, seat } : organization,
-    );
-    if (index >= 0) state.organizations[index] = next;
+    ]);
+    if (index >= 0 && next) state.organizations[index] = next;
     return next;
   };
 
-  const escapeHtml = (value) =>
-    String(value ?? "").replace(/[&<>"']/g, (character) =>
-      character === "&"
-        ? "&amp;"
-        : character === "<"
-          ? "&lt;"
-          : character === ">"
-            ? "&gt;"
-            : character === '"'
-              ? "&quot;"
-              : "&#39;",
-    );
-  const initials = (value) => {
-    const words = String(value || "Personal")
-      .trim()
-      .split(/\s+/)
-      .filter(Boolean);
-    return `${words[0]?.[0] || "P"}${words[1]?.[0] || ""}`.toUpperCase();
-  };
   async function fileToOrganizationLogo(file) {
     let bitmap;
     try {
@@ -373,41 +849,39 @@ function bootDashboard() {
     state.organizations.find(
       (organization) => organization.id === state.activeOrganizationId,
     ) ||
-    state.organizations.find((organization) => organization.isPersonal) ||
     state.organizations[0] ||
     null;
-  const label = organizationDisplayName;
-  const organizationAvatarHtml = (organization, classes = "") => {
-    const logo = safeOrganizationLogo(organization?.logo);
-    return `<span class="avatar avatar-square ${classes}" aria-hidden="true">${logo ? `<img class="avatar-image" src="${escapeHtml(logo)}" alt="" />` : escapeHtml(initials(label(organization)))}</span>`;
-  };
   const canAdmin = (organization) =>
     organization &&
     (organization.role === "owner" || organization.role === "admin");
-  const canOwn = (organization) => organization?.role === "owner";
-
-  const organizationCreationMenu =
-    '<div class="menu-separator"></div><button class="menu-action" type="button" data-action="create-organization"><span aria-hidden="true">＋</span>Create organization</button>';
-  const organizationCreationDialog = `<dialog id="create-organization-dialog" class="dialog">
-    <form method="dialog" id="create-organization-form">
-      <div class="dialog-header"><div><h2>Create organization</h2><p>Organizations can own local and cloud workspaces.</p></div><button class="icon-button" type="button" value="cancel" data-action="close-dialog" aria-label="Close">×</button></div>
-      <label class="field"><span>Organization name</span><input name="name" maxlength="80" required autocomplete="organization" placeholder="Acme" /></label>
-      <div class="dialog-error" id="create-organization-error" role="alert"></div>
-      <div class="dialog-actions"><button class="button secondary" type="button" value="cancel" data-action="close-dialog">Cancel</button><button class="button primary" type="submit" value="default">Create organization</button></div>
-    </form>
-  </dialog>`;
+  const orgList = () =>
+    dashboardOrganizationDataUnavailable(state)
+      ? state.organizationsLoading
+        ? "loading"
+        : "unavailable"
+      : "ready";
+  const navModel = () => ({
+    organizations: state.organizations,
+    activeId: activeOrganization()?.id ?? null,
+    canCreate: organizationCreationAllowed(state.capabilities),
+    email: state.user?.email || "",
+    orgList: orgList(),
+  });
+  const profileModel = () => ({
+    user: state.user,
+    signOutHref: state.signOutHref,
+    deletions: state.deletions,
+    hasOrganizations: state.organizations.length > 0,
+    canCreate: organizationCreationAllowed(state.capabilities),
+    orgList: orgList(),
+  });
 
   function syncOrganizationCreationSurface() {
     const allowed = organizationCreationAllowed(state.capabilities);
-    for (const [id, markup] of [
-      ["create-organization-menu-slot", organizationCreationMenu],
-      ["create-organization-dialog-slot", organizationCreationDialog],
-    ]) {
-      const slot = document.getElementById(id);
-      if (!slot || slot.dataset.enabled === String(allowed)) continue;
-      slot.innerHTML = allowed ? markup : "";
-      slot.dataset.enabled = String(allowed);
-    }
+    const slot = document.getElementById("create-organization-dialog-slot");
+    if (!slot || slot.dataset.enabled === String(allowed)) return;
+    slot.innerHTML = allowed ? createOrganizationDialogHtml() : "";
+    slot.dataset.enabled = String(allowed);
   }
 
   function toast(message, error = false) {
@@ -415,8 +889,12 @@ function bootDashboard() {
     if (!region) return;
     const node = document.createElement("div");
     node.className = `toast${error ? " error" : ""}`;
-    node.textContent = message;
+    node.innerHTML = `${error ? ICONS.error : ICONS.ok}<span class="toast-title"></span><button class="icon-button" type="button" aria-label="Dismiss" data-action="dismiss-toast">${ICONS.close}</button>`;
+    node.querySelector(".toast-title").textContent = message;
     region.append(node);
+    while (region.childElementCount > TOAST_LIMIT) {
+      region.firstElementChild?.remove();
+    }
     window.setTimeout(() => node.remove(), 4500);
   }
 
@@ -430,6 +908,22 @@ function bootDashboard() {
         open ? "Close navigation" : "Open navigation",
       );
     }
+  }
+
+  /** Close the switcher and any member menu, except the one holding `keep`. */
+  function closeMenus(keep = null) {
+    const switcher = document.getElementById("org-switcher");
+    if (switcher?.open && !(keep && switcher.contains(keep))) {
+      switcher.removeAttribute("open");
+    }
+    document
+      .querySelectorAll('[data-member-menu][aria-expanded="true"]')
+      .forEach((button) => {
+        if (keep && button.parentElement?.contains(keep)) return;
+        button.setAttribute("aria-expanded", "false");
+        const menu = button.nextElementSibling;
+        if (menu) menu.hidden = true;
+      });
   }
 
   async function api(path, options = {}) {
@@ -452,7 +946,10 @@ function bootDashboard() {
     const body = await response.json().catch(() => null);
     if (!response.ok) {
       const error = new Error(
-        body?.error?.message || `Request failed (${response.status})`,
+        body?.error?.message ||
+          (method === "GET"
+            ? "Couldn’t reach Zeros. You’re still signed in."
+            : "Zeros couldn’t save that change. Try again."),
       );
       error.code = body?.error?.code || "request_failed";
       error.status = response.status;
@@ -480,155 +977,61 @@ function bootDashboard() {
     history.replaceState(null, "", url);
   }
 
+  // The server painted the sidebar from the same boot data and builder, so
+  // the first sync only marks the current section.
+  let navStructure = navHtml({ ...navModel(), section: null });
+
   function syncChrome() {
     syncOrganizationCreationSurface();
     const organization = activeOrganization();
-    document.querySelectorAll("[data-section]").forEach((node) => {
-      const section = node.dataset.section;
-      node.setAttribute(
-        "aria-current",
-        section === state.section ? "page" : "false",
-      );
-      node.disabled = collaborationSectionDisabled(organization, section);
-    });
-    const summary = document.querySelector("#org-switcher > summary");
-    if (summary) {
-      summary.innerHTML = `${organizationAvatarHtml(organization)}<span class="summary-copy"><strong>${escapeHtml(label(organization))}</strong><small>${organization?.isPersonal ? "Personal" : "Organization"}</small></span><span aria-hidden="true">⌄</span>`;
-    }
-    const options = document.getElementById("organization-options");
-    if (options) {
-      options.innerHTML = state.organizations
-        .map(
-          (item) =>
-            `<button class="org-option" type="button" role="option" aria-selected="${item.id === organization?.id}" data-org-id="${escapeHtml(item.id)}">${organizationAvatarHtml(item)}<span class="org-option-copy"><strong>${escapeHtml(label(item))}</strong><small>${item.isPersonal ? "Local workspaces only" : "Local + cloud workspaces"}</small></span><span class="org-check" aria-hidden="true">${item.id === organization?.id ? "✓" : ""}</span></button>`,
-        )
-        .join("");
+    state.activeOrganizationId = organization?.id ?? null;
+    if (nav) {
+      const model = navModel();
+      const structure = navHtml({ ...model, section: null });
+      if (structure !== navStructure) {
+        // Re-rendering the rows drops focus; put it back on the same control.
+        const active = document.activeElement;
+        const focusedSection = nav.contains(active)
+          ? active.closest?.("[data-section]")?.dataset.section
+          : null;
+        const switcherFocused = Boolean(active?.closest?.("#org-switcher"));
+        nav.innerHTML = navHtml({ ...model, section: state.section });
+        navStructure = structure;
+        if (focusedSection) {
+          nav.querySelector(`[data-section="${focusedSection}"]`)?.focus();
+        } else if (switcherFocused) {
+          nav.querySelector("#org-switcher > summary")?.focus();
+        }
+      }
+      nav.querySelectorAll("[data-section]").forEach((node) => {
+        node.setAttribute(
+          "aria-current",
+          node.dataset.section === state.section ? "page" : "false",
+        );
+      });
     }
     const mobileTitle = document.querySelector(".mobile-header strong");
-    if (mobileTitle) mobileTitle.textContent = label(organization);
+    if (mobileTitle) {
+      mobileTitle.textContent = organization
+        ? organizationDisplayName(organization)
+        : "";
+    }
   }
 
-  const heading = (title, description, action = "") =>
-    `<div class="section-heading"><div><h1>${escapeHtml(title)}</h1><p>${escapeHtml(description)}</p></div>${action}</div>`;
-
-  function profileHtml() {
-    const displayName = state.user.displayName || "Zeros user";
-    const recoverable = state.deletions
-      .map(
-        (deletion) =>
-          `<div class="settings-row"><span class="settings-copy"><strong>Recoverable organization</strong><p>Scheduled for final deletion on ${escapeHtml(formatLifecycleDate(deletion.purgeAfter))}. Recovery code ${escapeHtml(deletion.recoveryCode)}.</p></span><span class="settings-value"><button class="button secondary" type="button" data-restore-organization="${escapeHtml(deletion.targetId)}" data-deletion-request="${escapeHtml(deletion.id)}">Restore</button></span></div>`,
-      )
-      .join("");
-    return `<section class="section-stack">${heading("Profile", "Your browser account and sign-in identity.")}
-      <div class="card"><div class="identity-row"><span class="avatar avatar-large">${escapeHtml(initials(displayName || state.user.email))}</span><div><strong>${escapeHtml(displayName)}</strong><p>${escapeHtml(state.user.email)}</p></div></div></div>
-      <div class="card"><div class="card-title"><div><strong>Account identity</strong><p>Your name and avatar come from your sign-in account. Profile editing will be available here later.</p></div><span class="badge">Sign-in profile</span></div></div>
-      ${recoverable ? `<div class="card settings-card"><div class="card-title"><div><strong>Recoverable organizations</strong><p>An owner can restore these during the 30-day grace period.</p></div></div>${recoverable}</div>` : ""}
-      <div class="subsection-label">Danger zone</div><div class="card danger-card"><div class="card-title"><div><strong>Delete account</strong><p>Signs out every device immediately and keeps cloud account data recoverable for 30 days. Local Personal workspaces stay on each device.</p></div><button class="button danger" type="button" data-action="delete-account">Delete account</button></div></div>
-    </section>`;
-  }
-
-  function generalHtml(organization) {
-    if (!organization)
-      return `<div class="empty-state"><h1>Personal</h1><p>Your account space is being prepared.</p></div>`;
-    const editable = !organization.isPersonal && canAdmin(organization);
-    const logo = safeOrganizationLogo(organization.logo);
-    const logoActions = editable
-      ? `<label class="button secondary file-button">Change<input type="file" accept="image/png,image/jpeg,image/webp,image/gif" data-organization-logo hidden /></label>${logo ? '<button class="button secondary" type="button" data-action="remove-organization-logo">Remove</button>' : ""}`
-      : "";
-    const nameControl = editable
-      ? `<form class="settings-row" data-form="rename-organization"><span class="settings-copy"><strong>Organization name</strong><p>Shown across Zeros and in invitations.</p></span><span class="settings-value settings-name-control"><input name="name" required maxlength="80" value="${escapeHtml(organization.name)}" aria-label="Organization name" /><button class="button secondary" type="submit">Save</button></span></form>`
-      : `<div class="settings-row"><span class="settings-copy"><strong>${organization.isPersonal ? "Personal name" : "Organization name"}</strong><p>${organization.isPersonal ? "Provided by your sign-in identity." : "Shown across Zeros and in invitations."}</p></span><span class="settings-value"><strong>${escapeHtml(label(organization))}</strong></span></div>`;
-    return `<section class="section-stack">${heading("General", organization.isPersonal ? "Your permanent, device-local account space." : "Organization identity and workspace capabilities.")}
-      <div class="card settings-card">
-        <div class="settings-row"><span class="settings-copy"><strong>Logo</strong><p>Shown for this organization across Zeros.</p></span><span class="settings-value">${organizationAvatarHtml(organization, "avatar-large")}${logoActions}</span></div>
-        ${nameControl}
-        <div class="settings-row"><span class="settings-copy"><strong>Organization ID</strong><p>Your stable tenant identifier.</p></span><span class="settings-value"><code class="id-code">${escapeHtml(organization.id)}</code><button class="icon-button copy-button" type="button" data-copy-organization-id="${escapeHtml(organization.id)}" aria-label="Copy organization ID">▣</button></span></div>
-        <div class="settings-row"><span class="settings-copy"><strong>Your role</strong><p>What you can do in this organization.</p></span><span class="settings-value"><span class="badge">${escapeHtml(organization.role)}</span></span></div>
-        ${seatBadgeHtml(organization.seat) ? `<div class="settings-row"><span class="settings-copy"><strong>Your seat</strong><p>Pro, a free seat, or On Hold while the free seats are taken.</p></span><span class="settings-value">${seatBadgeHtml(organization.seat)}</span></div>` : ""}
-      </div>
-      ${organization.seat === "hold" ? HOLD_NOTICE_HTML : ""}
-      <div class="card"><div class="card-title"><div><strong>Workspace access</strong><p>Capability metadata; cloud provisioning will still enforce plan and quota.</p></div></div><div class="capability-grid"><div class="capability"><span class="status-dot success"></span><div><strong>Local workspaces</strong><p>Available on your Mac</p></div></div><div class="capability ${organization.workspaceCapabilities?.cloud ? "" : "disabled"}"><span class="status-dot ${organization.workspaceCapabilities?.cloud ? "success" : ""}"></span><div><strong>Cloud workspaces</strong><p>${organization.workspaceCapabilities?.cloud ? "Organization eligible" : "Not available in Personal"}</p></div></div></div></div>
-      ${organization.isPersonal ? `<div class="notice"><strong>Personal is permanent</strong><p>Personal cannot be removed. It cannot invite members and stores workspace configuration locally.</p></div>` : canOwn(organization) ? `<div class="subsection-label">Danger zone</div><div class="card danger-card"><div class="card-title"><div><strong>Delete organization</strong><p>Revokes access immediately and keeps the organization recoverable for 30 days. Provider deletion begins only after the grace period.</p></div><button class="button danger" type="button" data-action="delete-organization">Delete organization</button></div></div>` : ""}
-    </section>`;
-  }
-
-  function loadingHtml(title, description, snapshot) {
-    if (snapshot) return snapshot;
-    return `<section class="section-stack">${heading(title, description)}<div class="card loading-card" aria-busy="true">Loading…</div></section>`;
-  }
-
-  function sectionErrorHtml(title, error) {
-    return `<div class="notice notice-error"><strong>Couldn't load ${escapeHtml(title)}</strong><p>${escapeHtml(error.message)}</p><button class="button secondary" type="button" data-action="retry-section">Try again</button></div>`;
-  }
-
-  function memberRows(members, organization) {
-    const ownerCount = members.filter(
-      (member) => member.role === "owner",
-    ).length;
-    return members
-      .map((member) => {
-        const name = member.display_name || member.email;
-        const permissions = memberPermissions({
-          actorRole: organization.role,
-          targetRole: member.role,
-          isSelf: member.id === state.user.id,
-          ownerCount,
-          directoryManaged: member.directory_managed === true,
-        });
-        const roleControl = permissions.canChangeRole
-          ? `<select aria-label="Role for ${escapeHtml(name)}" data-member-role="${escapeHtml(member.id)}">${permissions.availableRoles.map((role) => `<option value="${role}" ${member.role === role ? "selected" : ""}>${role[0].toUpperCase() + role.slice(1)}</option>`).join("")}</select>`
-          : `<span class="badge">${escapeHtml(member.role)}</span>`;
-        const seatBadge = seatBadgeHtml(member.seat);
-        const removeControl = permissions.canRemove
-          ? `<button class="icon-button" type="button" data-remove-member="${escapeHtml(member.id)}" aria-label="${member.id === state.user.id ? "Leave organization" : `Remove ${escapeHtml(name)}`}">×</button>`
-          : "";
-        return `<div class="member-row"><span class="avatar">${escapeHtml(initials(name))}</span><span class="member-copy"><strong>${escapeHtml(name)}${member.id === state.user.id ? " (you)" : ""}</strong><small>${escapeHtml(member.email)}${member.directory_managed === true ? " · Directory managed" : ""}</small></span><span class="row-actions">${seatBadge}${roleControl}${removeControl}</span></div>`;
-      })
-      .join("");
-  }
-
-  function membersHtml(organization, data) {
-    const inviteForm = canAdmin(organization)
-      ? `<form class="inline-form" data-form="invite-member"><label class="field"><span>Email address</span><input name="email" type="email" maxlength="254" required placeholder="teammate@example.com" /></label><label class="field"><span>Role</span><select name="role"><option value="member">Member</option><option value="admin">Admin</option></select></label><button class="button primary" type="submit">Send invite</button></form>`
-      : "";
-    const invitations = (data.invitations || [])
-      .map(
-        (invite) =>
-          `<div class="member-row"><span class="avatar">✉</span><span class="member-copy"><strong>${escapeHtml(invite.email)}</strong><small>Pending · expires ${escapeHtml(new Date(invite.expires_at).toLocaleDateString())}</small></span><span class="row-actions"><span class="badge">${escapeHtml(invite.role)}</span>${canAdmin(organization) ? `<button class="icon-button" type="button" data-revoke-invite="${escapeHtml(invite.id)}" aria-label="Revoke invitation">×</button>` : ""}</span></div>`,
-      )
-      .join("");
-    const seats = seatSummary(data.seats);
-    const held = data.members.some(
-      (member) => member.id === state.user.id && member.seat === "hold",
-    );
-    return `<section class="section-stack">${heading("Members", "Organization members are automatically included in the default team.")}
-      ${held ? HOLD_NOTICE_HTML : ""}
-      <div class="card"><div class="card-title"><div><strong>Invite member</strong><p>The recipient must sign in with this exact email address.${seats ? " Members and pending invitations share the member limit, and members without Pro can join only while a free seat is open." : ""}</p></div></div>${inviteForm || `<div class="notice" style="margin-top:18px">Only organization admins can invite members.</div>`}</div>
-      <div class="card"><div class="card-title"><div><strong>Members</strong><p>${seats ?? `${data.members.length} ${data.members.length === 1 ? "member" : "members"}`}</p></div></div><div class="member-list">${memberRows(data.members, organization)}</div></div>
-      ${invitations ? `<div class="card"><div class="card-title"><div><strong>Pending invitations</strong><p>Unused invitations expire automatically.${seats ? " Each one holds a seat until then." : ""}</p></div></div><div class="member-list">${invitations}</div></div>` : ""}
-    </section>`;
-  }
-
-  function teamsHtml(organization, data) {
-    const rows = data.teams
-      .map(
-        (team) =>
-          `<div class="team-row"><span class="avatar avatar-square">D</span><span class="member-copy"><strong>${escapeHtml(team.name)}</strong><small>${escapeHtml(team.slug)} · ${team.is_default ? "Default team" : "Team"}</small></span><span class="row-actions"><span class="badge success">${team.is_default ? "Default" : escapeHtml(team.role)}</span></span></div>`,
-      )
-      .join("");
-    return `<section class="section-stack">${heading("Teams", "Teams group organization members and workspace access.", `<button class="button secondary" type="button" disabled>New team · Coming later</button>`)}
-      <div class="notice"><strong>One default team for now</strong><p>The hierarchy and membership metadata are ready. Creating additional teams will be enabled in a future release.</p></div>
-      <div class="card"><div class="card-title"><div><strong>Organization teams</strong><p>Every organization member belongs to the default team.</p></div></div><div class="team-list">${rows}</div></div>
-    </section>`;
-  }
-
-  function billingHtml(data) {
-    const billing = data.billing;
-    const subscription = billing.subscription;
-    return `<section class="section-stack">${heading("Billing", "Plan, seats, and payment management for this organization.")}
-      <div class="card"><div class="card-title"><div><strong>${escapeHtml(subscription?.plan || "Free")}</strong><p>${subscription ? `${escapeHtml(subscription.status)} · ${subscription.seats} seats` : `${billing.memberCount || 1} organization member${billing.memberCount === 1 ? "" : "s"}`}</p></div><span class="badge ${subscription?.status === "active" ? "success" : ""}">${escapeHtml(subscription?.status || "No subscription")}</span></div></div>
-      <div class="notice"><strong>Billing management is coming soon</strong><p>The billing schema and organization boundary are ready. Checkout, invoices, and payment methods will be connected here in a later release.</p><button class="button secondary" type="button" disabled>Manage billing</button></div>
-    </section>`;
+  function syncDeleteOrganizationDialog(organization) {
+    const dialog = document.getElementById("delete-organization-dialog");
+    if (!dialog || !organization) return dialog;
+    const name = organization.name || "";
+    const label = dialog.querySelector("[data-confirmation-label]");
+    if (label) label.textContent = `Type ${name} to confirm`;
+    const input = dialog.querySelector('input[name="confirmation"]');
+    if (input) {
+      input.value = "";
+      input.placeholder = name;
+    }
+    const errorNode = document.getElementById("delete-organization-error");
+    if (errorNode) errorNode.textContent = "";
+    return dialog;
   }
 
   async function loadExact(key, loader) {
@@ -636,33 +1039,28 @@ function bootDashboard() {
   }
 
   async function render() {
+    if (!activeOrganization() && state.section !== "profile") {
+      state.section = "profile";
+    }
     syncChrome();
     updateUrl();
     const organization = activeOrganization();
-    if (dashboardOrganizationDataUnavailable(state)) {
-      content.innerHTML = `<div class="notice notice-error"><strong>Organization data is unavailable</strong><p>${escapeHtml(state.loadError)}</p><button class="button secondary" type="button" data-action="retry-me">Try again</button></div>`;
-      return;
-    }
     if (state.section === "profile") {
-      content.innerHTML = profileHtml();
+      content.innerHTML = profileHtml(profileModel());
       try {
         const value = await loadExact("account:deletions", () =>
           api("/v1/deletions"),
         );
         state.deletions = Array.isArray(value.deletions) ? value.deletions : [];
-        if (state.section === "profile") content.innerHTML = profileHtml();
+        if (state.section === "profile") {
+          content.innerHTML = profileHtml(profileModel());
+        }
       } catch (error) {
-        toast(error.message, true);
+        // An unreachable control plane already shows its retry on the page.
+        if (!dashboardOrganizationDataUnavailable(state)) {
+          toast(error.message, true);
+        }
       }
-      return;
-    }
-    if (!organization) {
-      content.innerHTML = `<div class="empty-state"><h1>Personal</h1><p>Your organization list is unavailable.</p><button class="button secondary" data-action="retry-me">Try again</button></div>`;
-      return;
-    }
-    if (collaborationSectionDisabled(organization, state.section)) {
-      state.section = "profile";
-      await render();
       return;
     }
     if (state.section === "general") {
@@ -670,151 +1068,94 @@ function bootDashboard() {
       return;
     }
 
-    const key = `${organization.id}:${state.section}`;
+    const section = state.section;
+    const key = `${organization.id}:${section}`;
     const prior = snapshots.get(key);
-    if (state.section === "members") {
-      content.innerHTML = prior
-        ? membersHtml(organization, prior)
-        : loadingHtml("Members", "Loading organization members…");
-      try {
-        const value = await loadExact(key, async () => {
-          const [members, invitations] = await Promise.all([
-            api(`/v1/organizations/${organization.id}/members`),
-            canAdmin(organization)
-              ? api(`/v1/organizations/${organization.id}/invitations`)
-              : Promise.resolve({ invitations: [] }),
-          ]);
-          return {
-            members: members.members,
-            seats: members.seats,
-            invitations: invitations.invitations,
-          };
-        });
-        if (
-          sectionRequestStillCurrent(
-            activeOrganization()?.id,
-            state.section,
-            organization.id,
-            "members",
-          )
-        ) {
-          content.innerHTML = membersHtml(organization, value);
+    const paint = (value) =>
+      section === "members"
+        ? membersHtml({ organization, data: value, userId: state.user?.id })
+        : section === "teams"
+          ? teamsHtml({ organization, data: value })
+          : billingHtml({ data: value });
+    content.innerHTML = prior ? paint(prior) : sectionLoadingHtml(section);
+    try {
+      const value = await loadExact(key, async () => {
+        if (section === "teams") {
+          return api(`/v1/organizations/${organization.id}/teams`);
         }
-      } catch (error) {
-        if (
-          !sectionRequestStillCurrent(
-            activeOrganization()?.id,
-            state.section,
-            organization.id,
-            "members",
-          )
-        ) {
-          return;
+        if (section === "billing") {
+          return api(`/v1/organizations/${organization.id}/billing`);
         }
-        toast(error.message, true);
-        if (sectionLoadErrorNeedsInlineRetry(prior)) {
-          content.innerHTML = sectionErrorHtml("members", error);
-        }
+        const [members, invitations] = await Promise.all([
+          api(`/v1/organizations/${organization.id}/members`),
+          canAdmin(organization)
+            ? api(`/v1/organizations/${organization.id}/invitations`)
+            : Promise.resolve({ invitations: [] }),
+        ]);
+        return {
+          members: members.members,
+          seats: members.seats,
+          invitations: invitations.invitations,
+        };
+      });
+      if (
+        sectionRequestStillCurrent(
+          activeOrganization()?.id,
+          state.section,
+          organization.id,
+          section,
+        )
+      ) {
+        content.innerHTML = paint(value);
       }
-      return;
-    }
-    if (state.section === "teams") {
-      content.innerHTML = prior
-        ? teamsHtml(organization, prior)
-        : loadingHtml("Teams", "Loading teams…");
-      try {
-        const value = await loadExact(key, () =>
-          api(`/v1/organizations/${organization.id}/teams`),
-        );
-        if (
-          sectionRequestStillCurrent(
-            activeOrganization()?.id,
-            state.section,
-            organization.id,
-            "teams",
-          )
-        ) {
-          content.innerHTML = teamsHtml(organization, value);
-        }
-      } catch (error) {
-        if (
-          !sectionRequestStillCurrent(
-            activeOrganization()?.id,
-            state.section,
-            organization.id,
-            "teams",
-          )
-        ) {
-          return;
-        }
-        toast(error.message, true);
-        if (sectionLoadErrorNeedsInlineRetry(prior)) {
-          content.innerHTML = sectionErrorHtml("teams", error);
-        }
+    } catch (error) {
+      if (
+        !sectionRequestStillCurrent(
+          activeOrganization()?.id,
+          state.section,
+          organization.id,
+          section,
+        )
+      ) {
+        return;
       }
-      return;
-    }
-    if (state.section === "billing") {
-      content.innerHTML = prior
-        ? billingHtml(prior)
-        : loadingHtml("Billing", "Loading billing status…");
-      try {
-        const value = await loadExact(key, () =>
-          api(`/v1/organizations/${organization.id}/billing`),
-        );
-        if (
-          sectionRequestStillCurrent(
-            activeOrganization()?.id,
-            state.section,
-            organization.id,
-            "billing",
-          )
-        ) {
-          content.innerHTML = billingHtml(value);
-        }
-      } catch (error) {
-        if (
-          !sectionRequestStillCurrent(
-            activeOrganization()?.id,
-            state.section,
-            organization.id,
-            "billing",
-          )
-        ) {
-          return;
-        }
+      if (sectionLoadErrorNeedsInlineRetry(prior)) {
+        content.innerHTML = sectionErrorHtml(section);
+      } else {
+        // The retained snapshot stays on screen; say it couldn't refresh.
         toast(error.message, true);
-        if (sectionLoadErrorNeedsInlineRetry(prior)) {
-          content.innerHTML = sectionErrorHtml("billing", error);
-        }
       }
     }
   }
 
   async function reloadMe() {
+    const wasUnavailable = dashboardOrganizationDataUnavailable(state);
+    if (wasUnavailable) {
+      // Show the spinner without waiting on Profile's own requests.
+      state.organizationsLoading = true;
+      void render();
+    }
     try {
       const me = await api("/v1/me");
       state.user = me.user;
       state.capabilities = me.capabilities || {};
-      state.organizations = (me.organizations || me.teams || []).map(
-        normalizeOrganization,
-      );
+      state.organizations = cloudOrganizations(me.organizations || me.teams);
       if (
         !state.organizations.some(
           (organization) => organization.id === state.activeOrganizationId,
         )
       ) {
-        state.activeOrganizationId =
-          state.organizations.find((organization) => organization.isPersonal)
-            ?.id ||
-          state.organizations[0]?.id ||
-          null;
+        state.activeOrganizationId = state.organizations[0]?.id || null;
       }
       state.loadError = null;
-      await render();
     } catch (error) {
+      state.organizationsLoading = false;
       toast(error.message, true);
+      if (wasUnavailable) await render();
+      return;
     }
+    state.organizationsLoading = false;
+    await render();
   }
 
   function signOutForSecurityEvent() {
@@ -949,6 +1290,7 @@ function bootDashboard() {
   }
 
   document.addEventListener("click", async (event) => {
+    closeMenus(event.target);
     const target = event.target.closest("button, [data-action]");
     if (!target) return;
     if (target.dataset.section && !target.disabled) {
@@ -959,22 +1301,27 @@ function bootDashboard() {
     }
     if (target.dataset.orgId) {
       state.activeOrganizationId = target.dataset.orgId;
-      const organization = activeOrganization();
-      if (
-        organization?.isPersonal &&
-        ["members", "teams", "billing"].includes(state.section)
-      )
-        state.section = "profile";
-      else if (state.section === "profile" && !organization?.isPersonal)
-        state.section = "general";
+      if (state.section === "profile") state.section = "general";
       document.getElementById("org-switcher")?.removeAttribute("open");
       setMobileNavigationOpen(false);
       await render();
       return;
     }
+    if (target.dataset.memberMenu) {
+      const open = target.getAttribute("aria-expanded") === "true";
+      const menu = target.nextElementSibling;
+      target.setAttribute("aria-expanded", String(!open));
+      if (menu) {
+        menu.hidden = open;
+        if (!open) menu.querySelector("button")?.focus();
+      }
+      return;
+    }
     const action = target.dataset.action;
     if (action === "close-dialog") {
       target.closest("dialog")?.close();
+    } else if (action === "dismiss-toast") {
+      target.closest(".toast")?.remove();
     } else if (action === "create-organization") {
       if (!organizationCreationAllowed(state.capabilities)) return;
       document.getElementById("org-switcher")?.removeAttribute("open");
@@ -1001,8 +1348,7 @@ function bootDashboard() {
       await render();
     } else if (action === "remove-organization-logo") {
       const organization = activeOrganization();
-      if (!organization || organization.isPersonal || !canAdmin(organization))
-        return;
+      if (!organization || !canAdmin(organization)) return;
       target.disabled = true;
       try {
         const result = await api(`/v1/organizations/${organization.id}`, {
@@ -1025,17 +1371,12 @@ function bootDashboard() {
       ) {
         toast("Organization ID copied");
       } else {
-        toast("Couldn't copy the organization ID", true);
+        toast("Couldn’t copy the organization ID", true);
       }
     } else if (action === "delete-organization") {
       const organization = activeOrganization();
-      if (!organization || organization.isPersonal) return;
-      const dialog = document.getElementById("delete-organization-dialog");
-      const input = dialog?.querySelector('input[name="confirmation"]');
-      if (input) input.value = "";
-      const errorNode = document.getElementById("delete-organization-error");
-      if (errorNode) errorNode.textContent = "";
-      dialog?.showModal();
+      if (!organization) return;
+      syncDeleteOrganizationDialog(organization)?.showModal();
     } else if (action === "delete-account") {
       const dialog = document.getElementById("delete-account-dialog");
       const input = dialog?.querySelector('input[name="confirmation"]');
@@ -1112,10 +1453,18 @@ function bootDashboard() {
   });
 
   document.addEventListener("keydown", (event) => {
-    if (
-      event.key === "Escape" &&
-      document.body.classList.contains("mobile-nav-open")
-    ) {
+    if (event.key !== "Escape") return;
+    const switcher = document.getElementById("org-switcher");
+    const memberMenu = document.querySelector(
+      '[data-member-menu][aria-expanded="true"]',
+    );
+    if (switcher?.open) {
+      closeMenus();
+      switcher.querySelector("summary")?.focus();
+    } else if (memberMenu) {
+      closeMenus();
+      memberMenu.focus();
+    } else if (document.body.classList.contains("mobile-nav-open")) {
       setMobileNavigationOpen(false);
       document.querySelector('[data-action="toggle-mobile-nav"]')?.focus();
     }
@@ -1126,12 +1475,7 @@ function bootDashboard() {
     if (logoInput) {
       const organization = activeOrganization();
       const file = logoInput.files?.[0];
-      if (
-        !organization ||
-        organization.isPersonal ||
-        !canAdmin(organization) ||
-        !file
-      ) {
+      if (!organization || !canAdmin(organization) || !file) {
         logoInput.value = "";
         return;
       }
@@ -1207,10 +1551,12 @@ function bootDashboard() {
           method: "POST",
           body: { name },
         });
-        const created = normalizeOrganization(result.organization);
-        state.organizations.push(created);
-        state.activeOrganizationId = created.id;
-        state.section = "general";
+        const [created] = cloudOrganizations([result.organization]);
+        if (created) {
+          state.organizations.push(created);
+          state.activeOrganizationId = created.id;
+          state.section = "general";
+        }
         form.reset();
         document.getElementById("create-organization-dialog")?.close();
         toast("Organization created");
@@ -1239,13 +1585,17 @@ function bootDashboard() {
           state.organizations = state.organizations.filter(
             (item) => item.id !== organization.id,
           );
-          if (result.deletion) state.deletions.unshift(result.deletion);
-          state.activeOrganizationId =
-            state.organizations.find((item) => item.isPersonal)?.id || null;
+          if (result.deletion) {
+            state.deletions.unshift({
+              ...result.deletion,
+              targetName: organization.name,
+            });
+          }
+          state.activeOrganizationId = state.organizations[0]?.id || null;
           state.section = "profile";
           form.reset();
           form.closest("dialog")?.close();
-          toast("Organization deletion scheduled for 30 days");
+          toast("Organization deletion scheduled");
           await render();
         } catch (error) {
           if (error.code === "reauthentication_required") {
@@ -1309,16 +1659,13 @@ function bootDashboard() {
         await render();
       }
     } catch (error) {
-      if (
-        form.id === "create-organization-form" ||
-        form.id === "delete-organization-form" ||
-        form.id === "delete-account-form"
-      ) {
+      if (form.id === "create-organization-form") {
         const errorNode = document.getElementById("create-organization-error");
-        if (form.id === "create-organization-form" && errorNode) {
-          errorNode.textContent = error.message;
-        }
-      } else {
+        if (errorNode) errorNode.textContent = error.message;
+      } else if (
+        form.id !== "delete-organization-form" &&
+        form.id !== "delete-account-form"
+      ) {
         toast(error.message, true);
       }
     } finally {
@@ -1335,8 +1682,8 @@ function bootDashboard() {
     document.getElementById("create-organization-dialog")?.showModal();
   } else if (boot.action === "delete-account") {
     document.getElementById("delete-account-dialog")?.showModal();
-  } else if (boot.action === "delete-organization") {
-    document.getElementById("delete-organization-dialog")?.showModal();
+  } else if (boot.action === "delete-organization" && activeOrganization()) {
+    syncDeleteOrganizationDialog(activeOrganization())?.showModal();
   }
   window.addEventListener("focus", onSecurityLifecycleHint);
   window.addEventListener("online", onSecurityLifecycleHint);

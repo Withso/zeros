@@ -1,3 +1,5 @@
+import { shell as pageShell } from "./page.ts";
+
 const INVITE_TOKEN = /^[A-Za-z0-9_-]{20,200}$/;
 const NONCE = /^[A-Za-z0-9_-]{8,128}$/;
 export {responseHeaders as invitationResponseHeaders,shell as invitationPageShell};
@@ -45,52 +47,13 @@ function responseHeaders(nonce) {
 }
 
 function shell(title, inner, nonce) {
-  return `<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="robots" content="noindex" />
-    <title>${title}</title>
-    <style nonce="${nonce}">
-      :root { color-scheme: dark; }
-      body {
-        font: 14px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-        background: #0c0c0d; color: #e6e6e6;
-        display: flex; min-height: 100vh; margin: 0;
-        align-items: center; justify-content: center;
-      }
-      .card { width: 100%; max-width: 360px; padding: 0 1.5rem; text-align: center; }
-      .title { font-weight: 650; color: #f4f4f5; margin-bottom: 0.35rem; }
-      .sub { color: #a1a1aa; font-size: 13px; line-height: 1.5; margin-bottom: 1.5rem; }
-      a.btn, button.btn {
-        display: flex; align-items: center; justify-content: center;
-        width: 100%; box-sizing: border-box;
-        margin-top: 0.6rem; padding: 0.65rem 1rem;
-        color: #0c0c0d; font: inherit; font-weight: 600; cursor: pointer;
-        text-decoration: none; background: #fff;
-        border: 1px solid #fff; border-radius: 8px;
-      }
-      a.btn:hover, button.btn:hover { background: #e6e6e6; }
-      a.btn.secondary, button.btn.secondary {
-        background: transparent; color: #e6e6e6; border-color: #3f3f46;
-      }
-      a.btn.secondary:hover, button.btn.secondary:hover { background: #18181b; }
-      .msg { color: #a1a1aa; font-size: 13px; line-height: 1.5; margin-top: 0.9rem; }
-      .msg.error { color: #f87171; }
-      .hint { color: #71717a; font-size: 12px; line-height: 1.5; margin-top: 1.25rem; }
-      .hint a { color: #e6e6e6; }
-      .hidden { display: none !important; }
-    </style>
-  </head>
-  <body><main class="card">${inner}</main></body>
-</html>`;
+  return pageShell(title, inner, { nonce });
 }
 
 function invalidInner(marketingOrigin) {
   return `<div class="title">This invite link is incomplete</div>
           <div class="sub">Ask the person who invited you to send a fresh link.</div>
-          <a class="btn" href="${escapeHtml(marketingOrigin)}">Get Zeros</a>`;
+          <p class="meta">Don’t have Zeros? <a href="${escapeHtml(marketingOrigin)}">Download it</a></p>`;
 }
 
 function landingInner(token, tokenParameter, scheme, marketingOrigin, nonce) {
@@ -104,17 +67,19 @@ function landingInner(token, tokenParameter, scheme, marketingOrigin, nonce) {
       try {
         await navigator.clipboard.writeText(window.location.href);
         message.textContent = "Link copied.";
+        message.className = "msg ok";
+        copy.setAttribute("aria-pressed", "true");
       } catch {
-        message.textContent = "Copy this page's URL from the address bar.";
+        message.textContent = "Copy this page’s address from the address bar.";
+        message.className = "msg";
+        copy.removeAttribute("aria-pressed");
       }
     });`;
-  return `<div class="title">You've been invited to Zeros</div>
-          <div class="sub">Choose where to accept this invitation. The link is single-use and tied to the invited email address.</div>
-          <a class="btn" href="${escapeHtml(desktopUrl)}">Open in Zeros</a>
-          <a class="btn secondary" href="${escapeHtml(webPath)}">Continue in browser</a>
-          <button class="btn secondary" id="copy" type="button">Copy invite link</button>
+  return `<div class="title">You’re invited to Zeros</div>
+          <div class="sub">Accept with the email this invite was sent to.</div>
+          <div class="acts"><a class="btn" href="${escapeHtml(desktopUrl)}">Open in Zeros</a><a class="btn ghost" href="${escapeHtml(webPath)}">Continue in browser</a><button class="btn ghost" id="copy" type="button">Copy link</button></div>
           <div class="msg" id="message" aria-live="polite"></div>
-          <div class="hint">Don't have Zeros yet? <a href="${escapeHtml(marketingOrigin)}">Download it</a>.</div>
+          <p class="meta">Don’t have Zeros? <a href="${escapeHtml(marketingOrigin)}">Download it</a></p>
           <script nonce="${nonce}">${script}</script>`;
 }
 
@@ -129,8 +94,14 @@ function webInner(token, nonce) {
     const AUTH_ATTEMPT_KEY = "zeros:invitation:auth-attempted";
     const AUTH_START = ${JSON.stringify(authStart)};
     const message = document.getElementById("message");
+    const sub = document.getElementById("sub");
     const retry = document.getElementById("retry");
     const another = document.getElementById("another");
+    function again(label) {
+      retry.textContent = label;
+      retry.disabled = false;
+      retry.classList.remove("hidden");
+    }
     let stored = false;
     if (INITIAL_TOKEN) {
       try {
@@ -155,15 +126,17 @@ function webInner(token, nonce) {
       TOKEN = null;
     }
     async function accept() {
-      retry.classList.add("hidden");
       another.classList.add("hidden");
       message.classList.remove("error");
       if (typeof TOKEN !== "string" || !/^[A-Za-z0-9_-]{20,200}$/.test(TOKEN)) {
         forget();
+        retry.classList.add("hidden");
         message.classList.add("error");
-        message.textContent = "Invitation session expired. Open the original invitation email again.";
+        message.textContent = "This session expired. Open the invitation email again.";
         return;
       }
+      retry.textContent = "Accepting…";
+      retry.disabled = true;
       message.textContent = "Checking your invitation…";
       let response;
       try {
@@ -175,14 +148,15 @@ function webInner(token, nonce) {
         });
       } catch {
         message.classList.add("error");
-        message.textContent = "Zeros is temporarily unreachable. Your invitation was not changed.";
-        retry.classList.remove("hidden");
+        message.textContent = "Zeros is unreachable. Your invitation wasn’t changed.";
+        again("Try again");
         return;
       }
+      retry.classList.add("hidden");
       if (response.status === 401) {
         if (!stored) {
           message.classList.add("error");
-          message.textContent = "This browser blocked the temporary invitation session. Allow tab storage and open the email link again.";
+          message.textContent = "Allow tab storage, then open the email link again.";
           return;
         }
         let authAttempted = false;
@@ -191,7 +165,7 @@ function webInner(token, nonce) {
         } catch {}
         if (authAttempted) {
           message.classList.add("error");
-          message.textContent = "Sign-in did not establish a Zeros session. Open the original invitation email and try again.";
+          message.textContent = "Sign-in didn’t create a session. Open the email again.";
           return;
         }
         try {
@@ -201,7 +175,7 @@ function webInner(token, nonce) {
           }
         } catch {
           message.classList.add("error");
-          message.textContent = "This browser blocked the temporary invitation session. Allow tab storage and open the email link again.";
+          message.textContent = "Allow tab storage, then open the email link again.";
           return;
         }
         window.location.replace(AUTH_START);
@@ -221,20 +195,22 @@ function webInner(token, nonce) {
       const code = payload?.error?.code;
       message.classList.add("error");
       if (code === "wrong_account") {
-        message.textContent = "This invitation belongs to a different account. Sign out, then use the invited email address.";
+        sub.textContent = "This invite is for another email. Switch accounts to accept.";
+        message.classList.remove("error");
+        message.textContent = "";
         another.classList.remove("hidden");
       } else if (code === "invalid_invite") {
         forget();
-        message.textContent = "This invitation is expired, revoked, or already used. Ask an organization admin for a fresh invitation.";
+        message.textContent = "This invite expired or was used. Ask for a new one.";
       } else if (code === "invite_preparing") {
-        message.textContent = "Your invitation email arrived just before setup finished. Nothing was changed; try again.";
-        retry.classList.remove("hidden");
+        message.textContent = "Setup was still finishing. Nothing changed; try again.";
+        again("Try again");
       } else if (code === "auth_unavailable" || response.status >= 500) {
-        message.textContent = "Zeros could not verify the invitation right now. Nothing was changed; try again.";
-        retry.classList.remove("hidden");
+        message.textContent = "We couldn’t verify the invite. Nothing was changed.";
+        again("Try again");
       } else {
-        message.textContent = "Zeros could not accept this invitation. Nothing was changed.";
-        retry.classList.remove("hidden");
+        message.textContent = "We couldn’t accept this invite. Nothing was changed.";
+        again("Try again");
       }
     }
     retry.addEventListener("click", accept);
@@ -243,10 +219,9 @@ function webInner(token, nonce) {
     });
     retry.classList.remove("hidden");`;
   return `<div class="title">Accept your invitation</div>
-          <div class="sub">Zeros will verify your signed-in account before changing organization access.</div>
-          <div class="msg" id="message" aria-live="polite">Choose Accept invitation to join using your signed-in account.</div>
-          <button class="btn secondary" id="retry" type="button">Accept invitation</button>
-          <a class="btn secondary hidden" id="another" href="${escapeHtml(logout)}">Use another account</a>
+          <div class="sub" id="sub">Join using the account you’re signed in with.</div>
+          <div class="acts"><button class="btn" id="retry" type="button">Accept invitation</button><a class="btn hidden" id="another" href="${escapeHtml(logout)}">Use another account</a></div>
+          <div class="msg" id="message" aria-live="polite"></div>
           <script nonce="${nonce}">${script}</script>`;
 }
 

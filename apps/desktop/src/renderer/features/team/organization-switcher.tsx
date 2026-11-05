@@ -26,17 +26,13 @@ import { toast } from "../../shared/ui/primitives/elements";
 import { isLocalDevelopment } from "../../platform/runtime";
 import { useAuth, type AuthStatus } from "../auth";
 import { setActiveOrganizationSelection } from "./active-team";
-import { organizationDashboardUrl } from "./organization-links";
+import { APP_BASE_URL, organizationDashboardUrl } from "./organization-links";
 import { useActiveOrganization, useOrganizations } from "./team-store";
 import type { OrganizationSummary } from "./control-plane";
 import {
   desktopOrganizationChoices,
   PERSONAL_ORGANIZATION,
 } from "./personal-organization";
-
-const APP_BASE_URL =
-  (import.meta.env.VITE_APP_BASE_URL as string | undefined) ||
-  "https://app.zeros.build";
 
 function openDashboard(
   options: Parameters<typeof organizationDashboardUrl>[1],

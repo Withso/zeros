@@ -1,0 +1,9 @@
+{
+  "id": "web-shell-tokens-exports",
+  "kind": "scenario",
+  "area": "web",
+  "fixedBy": "ae4ca89817fdc0e0ade451e62a1869bab6dfb643",
+  "symptom": "The root suite's web-shell-tokens test regex-parsed apps/web/lib/page.ts for the shell's palette and failed once the palette moved into the exported SHELL_TOKENS object; the push had not run the root suite.",
+  "rule": "Pin another module's values by importing its exports, not by parsing its source text, and run pnpm test:git before pushing a change it covers.",
+  "check": "pnpm exec vitest run --config vitest.config.ts scripts/__tests__/web-shell-tokens.test.ts"
+}

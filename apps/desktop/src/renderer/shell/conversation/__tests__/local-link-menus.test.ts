@@ -10,6 +10,8 @@ const harness = vi.hoisted(() => ({
   owner: null as string | null,
   transport: "local",
   copy: vi.fn(),
+  copyCloud: vi.fn(),
+  cloudAccess: true,
   selectCopy: undefined as (() => void) | undefined,
 }));
 vi.mock("react", async (original) => {
@@ -29,6 +31,13 @@ vi.mock("../../../platform/bridge/active-bridge", () => ({
 vi.mock("../../../state/local-link-actions", async (original) => ({
   ...(await original<typeof import("../../../state/local-link-actions")>()),
   copyLocalLink: harness.copy,
+}));
+vi.mock("../../../features/team/cloud-workspace-account-access", () => ({
+  useCloudWorkspaceAccountAccess: () => harness.cloudAccess,
+}));
+vi.mock("../../../state/cloud-workspace-link-actions", async (original) => ({
+  ...(await original<typeof import("../../../state/cloud-workspace-link-actions")>()),
+  copyCloudWorkspaceLink: harness.copyCloud,
 }));
 vi.mock("../../../state/use-active-workspace", () => ({
   useActiveWorkspace: () => ({ workspace: harness.workspace }),
@@ -150,6 +159,7 @@ beforeEach(() => {
   harness.enabled = true;
   harness.owner = null;
   harness.transport = "local";
+  harness.cloudAccess = true;
 });
 
 describe.each(["chat", "workspace"] as const)("%s Copy link menu", (kind) => {
@@ -193,4 +203,37 @@ it.each<Partial<ChatThread>>([
   { folder: "cloud://org/workspace" },
 ])("does not offer a link for an ineligible chat: %j", (patch) => {
   expect(renderMenu("chat", { ...chat, ...patch })).not.toContain("Copy link");
+});
+
+describe("cloud workspace Copy link", () => {
+  const key = "cloud://5d2f8c1a-3b7e-4f90-a6d4-9c1e2b7f8a35/6e3a9d2b-4c8f-4a01-b7e5-0d2f3c8a9b46";
+  const cloud = {
+    ...local,
+    id: key,
+    path: key,
+    repoRoot: key,
+    organizationId: "5d2f8c1a-3b7e-4f90-a6d4-9c1e2b7f8a35",
+    placement: "cloud",
+  } as Workspace;
+
+  it("copies the web page link for a cloud workspace, in any organization", () => {
+    harness.workspace = { ...cloud };
+    harness.owner = "5d2f8c1a-3b7e-4f90-a6d4-9c1e2b7f8a35";
+    harness.transport = "cloud";
+    expect(renderMenu("workspace")).toContain("Copy link");
+    harness.selectCopy!();
+    expect(harness.copyCloud).toHaveBeenCalledExactlyOnceWith(harness.workspace);
+    expect(harness.copy).not.toHaveBeenCalled();
+  });
+
+  it("hides without cloud access for its organization", () => {
+    harness.workspace = { ...cloud };
+    harness.cloudAccess = false;
+    expect(renderMenu("workspace")).not.toContain("Copy link");
+  });
+
+  it("hides for a path inside a cloud workspace", () => {
+    harness.workspace = { ...cloud, path: `${key}/src` };
+    expect(renderMenu("workspace")).not.toContain("Copy link");
+  });
 });

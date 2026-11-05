@@ -31,18 +31,24 @@ in observation/log mode, inspect detections and false positives, and approve a
 separate enforcement change. No Zeros authorization decision may depend on
 Radar being present.
 
-Every authorization URL uses `provider=authkit`. Browser, Pages, desktop, and
-deep-link callers cannot select a WorkOS connection, organization, or social
-provider. Legacy `provider`, `connection`, and `organization` query parameters
-are deliberately ignored during the rolling transition; they never reach the
-WorkOS SDK.
+The web sign-in page (app.zeros.build) offers Continue with Google and Continue
+with GitHub. Each sends one exact `provider=google` or `provider=github` to
+`/auth/start`, which starts that provider directly (`GoogleOAuth` or
+`GitHubOAuth`). The owner chose this on 2026-11-05 to match the Zeros Design
+canvas, accepting that the web page no longer offers the emailed code; it
+replaces the hosted chooser for that one page only. Every other authorization
+URL uses `provider=authkit`: the desktop, deep links, Ops (which never forwards
+a provider), workspace pages and step-up sign-ins. No caller can select a WorkOS
+connection or organization, and any other `provider` value is ignored before it
+reaches the WorkOS SDK.
 
-This removes the former custom Google/GitHub chooser and the application-owned
-GitHub email-verification continuation. There is no anonymous endpoint that
-accepts pending WorkOS credentials or infers verification from webhook timing.
-If Hosted AuthKit has not completed verification, Zeros receives no usable
-session. A defensive desktop error mapping remains so an unexpected
-`email_verification_required` response fails closed.
+The application-owned GitHub email-verification continuation stays removed.
+There is no anonymous endpoint that accepts pending WorkOS credentials or infers
+verification from webhook timing. If a provider or Hosted AuthKit has not
+completed verification, Zeros receives no usable session: the callback ends on
+"Sign-in didn't finish" with "Verify your email with the provider, then try
+again", and a defensive desktop error mapping still fails an unexpected
+`email_verification_required` response closed.
 
 WorkOS authenticates people and is authoritative for WorkOS identities,
 credentials, provider sessions, collaborative-organization objects, native
@@ -533,12 +539,13 @@ they do not call WorkOS and do not need its API key.
    are indexed in Postgres. The verifier is retained in the expiring flow row
    because it is required for code exchange.
 3. Railway sets a `Secure`, `HttpOnly`, host-only, `SameSite=Lax`
-   `__Host-zeros_auth_flow` cookie and redirects to Hosted AuthKit with
-   `provider=authkit`, S256 PKCE, the Web Application client ID, and the exact
-   HTTPS callback. `Lax` is limited to this short-lived cross-site callback
-   ceremony.
-4. Hosted AuthKit completes the entire login, verification, MFA, recovery, and
-   linking ceremony before returning a code.
+   `__Host-zeros_auth_flow` cookie and redirects to WorkOS with
+   `provider=GoogleOAuth` or `provider=GitHubOAuth` when the sign-in page named
+   one (`provider=authkit` otherwise), S256 PKCE, the Web Application client ID,
+   and the exact HTTPS callback. `Lax` is limited to this short-lived cross-site
+   callback ceremony.
+4. WorkOS completes the provider login, or Hosted AuthKit's entire login,
+   verification, MFA, recovery and linking ceremony, before returning a code.
 5. Railway atomically claims the ten-minute flow using both cookie and state,
    exchanges the code, requires a verified WorkOS user, authenticates the
    sealed session, and promotes the same row to a browser session.

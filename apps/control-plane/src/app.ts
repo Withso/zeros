@@ -228,7 +228,9 @@ export function createApp(
     );
     app.route(
       "/",
-      createWorkOSBrowserSessionRoutes(sessions, config.workos.appOrigin),
+      createWorkOSBrowserSessionRoutes(sessions, config.workos.appOrigin, {
+        socialProviders: true,
+      }),
     );
     if (config.workos.opsOrigin && config.deploymentChannel !== "beta") {
       const opsSessions = new WorkOSBrowserSessions(

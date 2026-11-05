@@ -3,8 +3,8 @@ export const GITHUB_COMPLETION_ERRORS: readonly string[];
 export const GITHUB_COMPLETION_LINK_TTL_MS: number;
 
 export type GithubCompletionFragment =
-  | { kind: "connected"; deepLink: string }
-  | { kind: "error"; error: string; deepLink: string }
+  | { kind: "connected"; scheme: string; deepLink: string }
+  | { kind: "error"; error: string; scheme: string; deepLink: string }
   | { kind: "invalid" };
 
 export function parseGithubCompletionFragment(
@@ -33,3 +33,5 @@ export function armGithubCompletionExpiry(
   schedule: (callback: () => void, timeoutMs: number) => unknown,
   timeoutMs: number,
 ): () => void;
+/** The /github/connected page; `appLink` is this deployment's app link. */
+export function githubCompletionPage(appLink: string): string;

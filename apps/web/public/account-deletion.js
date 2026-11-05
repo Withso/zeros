@@ -41,7 +41,7 @@ button?.addEventListener("click", async () => {
     }
     if (!response.ok) {
       throw new Error(
-        body?.error?.message || "The account could not be restored.",
+        body?.error?.message || "The account couldn’t be restored. Sign in again and retry.",
       );
     }
     window.location.replace("/");
@@ -50,7 +50,7 @@ button?.addEventListener("click", async () => {
       errorNode.textContent =
         error instanceof Error
           ? error.message
-          : "The account could not be restored.";
+          : "The account couldn’t be restored. Sign in again and retry.";
     }
     button.disabled = false;
   }

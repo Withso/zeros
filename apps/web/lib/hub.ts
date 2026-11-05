@@ -2,15 +2,15 @@
 // (functions/index.ts).
 //
 // Two outcomes:
-//   • signed out → one entry point into Hosted AuthKit (→ /auth/start on THIS
-//                  host)
+//   • signed out → Continue with Google or GitHub (→ /auth/start on THIS host,
+//                  which starts that provider directly)
 //   • signed in  → organization management dashboard
 //
 // The desktop signs in through its own WorkOS PKCE flow
 // (/auth/desktop, lib/workos-desktop-authorization.mjs), not through this page.
 
 import { getVerifiedSessionWithId, type Env } from "./session";
-import { html, shell } from "./page";
+import { html } from "./page";
 import { appOrigin } from "./hosts";
 import {
   accountAccessPage,
@@ -22,22 +22,7 @@ import {
   type DashboardMe,
 } from "./dashboard.mjs";
 import { proxyControlPlane } from "./control-plane-proxy";
-import { browserAuthStartOptions } from "./workos-browser.mjs";
-
-// Sign-in starts on this host and then hands the complete ceremony to the
-// hosted provider UI. Authentication-method selection, verification, MFA,
-// recovery, and bot defenses stay outside application code.
-function signedOut(env: Env, returnTo: string): string {
-  const links = browserAuthStartOptions(returnTo)
-    .map(
-      ({ label, href }) =>
-        `<a class="btn" href="${href.replaceAll("&", "&amp;")}">${label}</a>`,
-    )
-    .join("\n          ");
-  return `<div class="title">Sign in to Zeros</div>
-          <div class="sub">Sign in or create an account securely.</div>
-          ${links}`;
-}
+import { signInPage } from "./workos-browser.mjs";
 
 // Sign-out (functions/auth/logout.ts) ends the WorkOS browser session and
 // returns the user to the hub afterwards.
@@ -115,8 +100,7 @@ async function dashboard(
     }
     me = body as DashboardMe;
   } catch {
-    loadError =
-      "Couldn't reach the organization service. Your account is still signed in.";
+    loadError = "Couldn’t reach Zeros. You’re still signed in.";
   }
   return dashboardPage({
     session: user,
@@ -139,7 +123,7 @@ export async function renderHub(request: Request, env: Env): Promise<Response> {
   };
   if (!verified?.data) {
     const self = dashboardReturnUrl(appOrigin(env), request.url);
-    return finish(shell("Sign in to Zeros", signedOut(env, self)));
+    return finish(signInPage(self));
   }
   return finish(await dashboard(request, env, verified));
 }

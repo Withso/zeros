@@ -711,6 +711,15 @@ const SOURCE_EXEMPT = [
     match: (rel) => rel.startsWith("apps/web/"),
   },
   {
+    why: "control-plane hosted pages (sign-in completion and failure, cloud GitHub), styled by the inline <style> in hosted-page.ts, a verbatim copy of apps/web's page shell",
+    match: (rel) =>
+      [
+        "apps/control-plane/src/hosted-page.ts",
+        "apps/control-plane/src/github.ts",
+        "apps/control-plane/src/workos-browser-sessions.ts",
+      ].includes(rel),
+  },
+  {
     why: "standalone package preview page, opened directly and styled by its own inline <style>",
     match: (rel) => rel === "packages/zeros-logo-particles/preview.html",
   },

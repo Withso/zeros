@@ -323,6 +323,42 @@ d("account, organization, and operator deletion lifecycle", () => {
     expect(restored.status).toBe(200);
   });
 
+  it("lists an owner's recoverable organizations by name, and only to owners", async () => {
+    const owner = await signup("RecoverableOwner");
+    const member = await signup("RecoverableMember");
+    const organizationId = await createOrganization(owner, "Northwind");
+    await addOrganizationMember(organizationId, member, "member");
+
+    asActor(owner);
+    const scheduled = await request(`/v1/organizations/${organizationId}`, {
+      method: "DELETE",
+      body: { confirmation: "Northwind" },
+    });
+    expect(scheduled.status).toBe(202);
+    const { deletion } = (await scheduled.json()) as DeletionResponse;
+
+    const listed = await request("/v1/deletions");
+    expect(listed.status).toBe(200);
+    const body = (await listed.json()) as {
+      deletions: Array<Record<string, unknown>>;
+    };
+    expect(body.deletions).toContainEqual(
+      expect.objectContaining({
+        id: deletion.id,
+        recoveryCode: deletion.recoveryCode,
+        targetKind: "organization",
+        targetId: organizationId,
+        targetName: "Northwind",
+      }),
+    );
+
+    asActor(member);
+    const hidden = (await (await request("/v1/deletions")).json()) as {
+      deletions: Array<{ id: string }>;
+    };
+    expect(hidden.deletions.map((item) => item.id)).not.toContain(deletion.id);
+  });
+
   it("waits for WorkOS user deletion before final account erasure and completion notification", async () => {
     const customer = await signup("AccountPurge");
     const originalEmail = customer.email;

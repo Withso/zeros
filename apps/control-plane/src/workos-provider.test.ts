@@ -74,6 +74,28 @@ describe("WorkOS Hosted AuthKit authorization", () => {
     expect(url.searchParams.has("client_secret")).toBe(false);
   });
 
+  it("starts Google or GitHub directly when the web sign-in page names one", () => {
+    const start = (socialProvider?: "google" | "github") =>
+      new URL(
+        provider().authorizationUrl({
+          state: STATE,
+          codeChallenge: CHALLENGE,
+          redirectUri: `${APP_ORIGIN}/auth/callback`,
+          ...(socialProvider ? { socialProvider } : {}),
+        }),
+      );
+
+    expect(start("google").searchParams.get("provider")).toBe("GoogleOAuth");
+    expect(start("github").searchParams.get("provider")).toBe("GitHubOAuth");
+    expect(start().searchParams.get("provider")).toBe("authkit");
+    for (const url of [start("google"), start("github")]) {
+      expect(url.searchParams.get("client_id")).toBe("client_web_example");
+      expect(url.searchParams.get("code_challenge_method")).toBe("S256");
+      expect(url.searchParams.has("connection_id")).toBe(false);
+      expect(url.searchParams.has("organization_id")).toBe(false);
+    }
+  });
+
   it("always starts the hosted UI for the independent desktop application", () => {
     const url = new URL(
       provider().desktopAuthorizationUrl({

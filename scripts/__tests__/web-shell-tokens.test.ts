@@ -1,28 +1,13 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { SHELL_TOKENS } from "../../apps/web/lib/page";
 
-// apps/web/lib/page.ts carries a hand-written copy of the app palette (the web
-// functions ship no CSS pipeline). This pins every value to
-// styles/zeros-tokens.css, so a token change fails here instead of leaving the
-// centred web pages on the old colours.
-const root = process.cwd();
-const app = readFileSync(join(root, "styles/zeros-tokens.css"), "utf8");
-const page = readFileSync(join(root, "apps/web/lib/page.ts"), "utf8");
-
-/** The web name and the app token it copies. */
-const COPIES: Record<string, string> = {
-  "--bg1": "--bg1",
-  "--fg1": "--fg1",
-  "--fg2": "--fg2",
-  "--fg3": "--fg3",
-  "--border3": "--border3",
-  "--bg2-highlight": "--bg2-highlight",
-  "--primary-bg": "--primary-button-bg",
-  "--primary-fg": "--primary-button-fg",
-  "--primary-hover": "--primary-button-hover",
-  "--red-fg": "--red-fg",
-};
+// apps/web/lib/page.ts carries the app palette inline (its pages render under
+// policies that admit no stylesheet file, and the control plane keeps a copy of
+// the same shell). This pins every value to styles/zeros-tokens.css, so a token
+// change fails here instead of leaving the centred web pages on old colours.
+const app = readFileSync(join(process.cwd(), "styles/zeros-tokens.css"), "utf8");
 
 function block(source: string, header: string): string {
   const at = source.indexOf(header);
@@ -54,18 +39,21 @@ function resolve(map: Map<string, string>, name: string, depth = 0): string | un
 
 const appDark = tokens(block(app, ":root {"));
 const appLight = new Map([...appDark, ...tokens(block(app, '[data-theme="light"] {'))]);
-const webDark = tokens(block(page, ":root {"));
-const webLight = tokens(block(block(page, "@media (prefers-color-scheme: light) {"), ":root {"));
 
 describe("web shell palette", () => {
-  // A real colour on both sides, so a parse miss cannot pass as undefined.
-  it.each(Object.entries(COPIES))("%s copies %s in Dark", (web, token) => {
-    expect(resolve(appDark, token)).toMatch(/^hsl\(/);
-    expect(webDark.get(web)).toBe(resolve(appDark, token));
+  it("defines the same tokens in both themes", () => {
+    expect(Object.keys(SHELL_TOKENS.dark).length).toBeGreaterThan(0);
+    expect(Object.keys(SHELL_TOKENS.light)).toEqual(Object.keys(SHELL_TOKENS.dark));
   });
 
-  it.each(Object.entries(COPIES))("%s copies %s in Light", (web, token) => {
-    expect(resolve(appLight, token)).toMatch(/^hsl\(/);
-    expect(webLight.get(web)).toBe(resolve(appLight, token));
+  // A real colour on both sides, so a lookup miss cannot pass as undefined.
+  it.each(Object.entries(SHELL_TOKENS.dark))("%s matches the app in Dark", (name, value) => {
+    expect(resolve(appDark, name)).toMatch(/^hsl\(/);
+    expect(value).toBe(resolve(appDark, name));
+  });
+
+  it.each(Object.entries(SHELL_TOKENS.light))("%s matches the app in Light", (name, value) => {
+    expect(resolve(appLight, name)).toMatch(/^hsl\(/);
+    expect(value).toBe(resolve(appLight, name));
   });
 });

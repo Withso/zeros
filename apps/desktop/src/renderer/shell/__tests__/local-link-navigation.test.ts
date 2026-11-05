@@ -73,6 +73,10 @@ vi.mock("../../state/store", () => ({
   },
 }));
 vi.mock("../../shared/ui/primitives/elements", () => ({ toast: state.toast }));
+vi.mock("../../state/use-open-workspace", () => ({ useOpenWorkspace: vi.fn() }));
+vi.mock("../cloud-workspace-link-navigation", () => ({
+  navigateCloudWorkspaceLink: vi.fn(),
+}));
 import {
   navigateLocalLink,
   observeLocalLinkNavigation,
@@ -304,6 +308,33 @@ describe("Local link intent retirement", () => {
     runtime.status = "disconnected";
     for (const listener of statuses) listener();
     runtime.status = "connected";
+    expect(observation.current()).toBe(false);
+    observation.dispose();
+  });
+
+  it("observes a cloud workspace link without a bridge, and still fences owners, navigation and accounts", () => {
+    state.bridge = null;
+    const retired = vi.fn();
+    const observation = observeLocalLinkNavigation(undefined, retired);
+    expect(observation.current()).toBe(true);
+    state.generation++;
+    expect(observation.current()).toBe(false);
+    state.generation--;
+    for (const listener of state.ownerListeners) listener();
+    expect(observation.current()).toBe(false);
+    expect(retired).toHaveBeenCalledOnce();
+    observation.dispose();
+    expect(state.ownerListeners.size + state.navigationListeners.size).toBe(0);
+    const later = observeLocalLinkNavigation(undefined, vi.fn());
+    for (const listener of state.navigationListeners)
+      listener({ navigationVersion: 1 }, { navigationVersion: 0 });
+    expect(later.current()).toBe(false);
+    later.dispose();
+  });
+
+  it("keeps a Local link's read fenced when there is no bridge", () => {
+    state.bridge = null;
+    const observation = observeLocalLinkNavigation(null, vi.fn());
     expect(observation.current()).toBe(false);
     observation.dispose();
   });

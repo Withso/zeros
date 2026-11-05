@@ -106,6 +106,25 @@ describe("Local link native boundary", () => {
     expect(handler).not.toHaveBeenCalled();
   });
 
+  it("delivers this channel's cloud workspace link, normalized, and refuses another channel's", async () => {
+    let listener!: (value: unknown) => void;
+    state.listen.mockImplementation(async (_name, callback) => {
+      listener = callback;
+      return vi.fn();
+    });
+    state.invoke.mockImplementation(async (name) => (name === "app_info" ? { channel: "alpha" } : null));
+    const handler = vi.fn();
+    const off = await (await import("../local-links")).onLocalNavigation(handler);
+    const org = "5d2f8c1a-3b7e-4f90-a6d4-9c1e2b7f8a35", ws = "6e3a9d2b-4c8f-4a01-b7e5-0d2f3c8a9b46";
+    listener(`zeros://cloud-workspace/${org}/${ws}`);
+    listener(`zeros-alpha://cloud-workspace/${org}/${ws}?x=1`);
+    listener(`zeros-alpha://cloud-workspace/${org.toUpperCase()}/${ws}`);
+    await vi.waitFor(() => expect(handler).toHaveBeenCalledExactlyOnceWith({
+      scheme: "zeros-alpha", kind: "cloud-workspace", organizationId: org, workspaceId: ws,
+    }));
+    off();
+  });
+
   it("does not replay a pending IPC reply over a newer live intent", async () => {
     let listener!: (value: unknown) => void;
     let finish!: (value: unknown) => void;

@@ -746,3 +746,95 @@ Each landed step appends one line: date, workstream, what landed, evidence.
   rename check failed on the old outlined field. The canvas smoke's
   geometry check caught the theme editor's Close sitting flush once its
   padding was trimmed, so the 12px padding stays.
+- 2026-11-05 · 5 · Web app (plans.md §8): sign-in is one page with Continue
+  with Google and Continue with GitHub, primary with their logos and stacked
+  at 260px. Each sends one exact `provider=google|github`, which the app's
+  `/auth/start` maps to `GoogleOAuth` or `GitHubOAuth`; the owner chose this
+  over the hosted chooser, and Ops, workspace pages and step-ups keep Hosted
+  AuthKit (`docs/workos-authentication-migration.md`). The centred page shell
+  (`apps/web/lib/page.ts`) now follows the canvas recipe, with the logo and
+  mark inline so it renders under every page's policy. The invitation and
+  workspace pages, which had their own shells, use it with their nonce, and
+  the control plane's sign-in completion, failure and cloud GitHub pages use
+  a verbatim copy allowed by a CSP hash. Every centred app page has its
+  frame's copy; the account states moved out of the dashboard layout onto
+  the shell with one primary and a copyable recovery code; an expired GitHub
+  handoff keeps Open Zeros without its nonce. The canvas (version 366) drops
+  the four frames for code removed with Auth0 and the badges of 25 built
+  frames. Left: the dashboard rebuild, Ops (its host allows no inline style)
+  and Open in Zeros on a cloud workspace.
+  Evidence: `node --test apps/web/lib/*.test.mjs` 138 tests; the full
+  control-plane suite (135 files, 1,846 tests; database files skipped here);
+  both typechecks; red first for the provider choice on both sides, the
+  shell's tokens against `styles/zeros-tokens.css`, the copy of each page and
+  the server's shell copy; local renders of all 19 page states in both themes.
+- 2026-11-05 · 5 · Web app (plans.md §8): the dashboard and Ops follow
+  their 25 frames. One set of markup builders in `public/dashboard.js` paints
+  the server's first frame and every re-render. The web lists cloud
+  organizations only, Personal being each device's local space; without one,
+  Profile is the only section and offers Create organization when allowed,
+  and an unreachable control plane keeps Profile with a retry. The switcher
+  shows your role, Members gains a More actions menu and Leave, and
+  recoverable organizations show by name (`GET /v1/deletions` returns
+  `targetName`). Ops' centred states use the shared shell with Ops beside the
+  logo; its console uses the dashboard layout, with Identity recovery as a
+  platform owner's own section. Each Ops page sends the host's policy plus
+  one nonce. `check:ui` now exempts the control plane's three hosted-page
+  files, which round 1 pushed without running it. The canvas (version 367)
+  drops the 25 frames' badges and adds the Identity recovery frame; only
+  Open in Zeros on a cloud workspace is left.
+  Evidence: `node --test apps/web/lib/*.test.mjs` 160 tests, with a builder
+  test per dashboard frame state and the Ops pages' policy, hooks and
+  escaping; red first for `targetName` in the deletion integration suite;
+  the full control-plane suite against a local Postgres, database files
+  included (198 files, 2,920 tests); both typechecks, lint, `check:ui` and
+  `check:secrets`. `pnpm test:git` caught `web-shell-tokens.test.ts`, which
+  round 1 broke and which now reads the exported tokens; its other failures
+  here come from this container (the Playwright browser build, injected
+  commit signing, the proxy and Git 2.43) and touch none of these files; local renders of the 18 dashboard and 8 Ops states in both
+  themes beside their frames, served under each page's real policy, plus the
+  member menu, switching, focus after navigation and the phone layout.
+- 2026-11-05 · 5 · Web app (plans.md §8): Open in Zeros on a cloud workspace.
+  The workspace page had been broken since cloud v1 was retired: it read the
+  removed `/v1/cloud-workspaces/<id>`, and its invite page posted to a removed
+  accept route. It now reads `GET /v1/cloud-v2/workspaces/<id>`, which answers
+  only the creator while they are a member and is the only cloud route the web
+  proxy admits. Its Ready state offers Open in Zeros through
+  `zeros[-channel]://cloud-workspace/<organization>/<workspace>`, with the
+  deployment's scheme (`packages/protocol/src/cloud-workspace-link.ts`; a root
+  test keeps the web's string equal to the desktop parser). Electron main
+  accepts the link for its own channel only and carries it on the Local links'
+  navigation intent, which opens a window and waits for the signed-in app.
+  The renderer reads the workspace as the signed-in account, switches to its
+  organization and opens it as the sidebar does; bridge changes never retire
+  that read. A cloud workspace's menu gains Copy link, which copies the page.
+  The invite route and its two frames are gone, the Ready frame and the route
+  map lose their badge (canvas version 368), and the route map is refitted to
+  its rows: round 2 had removed four without shrinking it. Nothing in §8 is
+  left.
+  Evidence: red first for the link format (20 tests), main's routing (14)
+  and the web page (5 of its 7 tests); the navigator (18), the subscription
+  and the bridge-free observer (3), and the navigator's mount (2, one
+  mutation-checked); Copy link (11, for the menu, the copy action and the page
+  URL); the parity test (5); `node --test apps/web/lib/*.test.mjs` 161 tests;
+  typecheck, lint, `check:ui`, `check:preload`, `check:deep-link-schemes`,
+  `check:protocol` and `check:secrets`; `pnpm test:git` with 22,619 tests
+  passing, where 164 of its 165 failures are round 2's environmental set (the
+  Playwright browser build, injected commit signing, Git 2.43 and the proxy)
+  and the other, the zstack pack's playbook budget, came from this round's
+  lesson and is folded back; local renders of the Ready,
+  Unavailable and Loading states in both themes under the page's real
+  headers. Not run here: link handling in the packaged macOS app (a cold
+  launch, and a launch with every window closed).
+- 2026-11-05 · 5 · Web app: the loaders. Round 1 took the Planned badge off
+  the workspace loading and GitHub checking frames on their copy alone; both
+  draw a 16px loader the pages never had, and round 2 drew the dashboard's
+  loader as a round ring. The shared shell now carries the app's square Orbit
+  (`shared/ui/loading/zeros-spinner.tsx`: a 1200ms lap over a `muted-fg`
+  track at 40%, resting under reduced motion) in an 18px row 24px below the
+  line, the control plane's copy follows it, and the dashboard draws the same
+  Orbit. The GitHub page hides it as soon as its script names the outcome.
+  Evidence: red first for the shell, both pages and the shared recipe;
+  `node --test apps/web/lib/*.test.mjs` 165 tests; the control plane's
+  shell-copy test; renders of both loading states and the dashboard's beside
+  their frames, in both themes.

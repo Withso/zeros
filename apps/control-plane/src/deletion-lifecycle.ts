@@ -1138,21 +1138,29 @@ export function createDeletionLifecycleRoutes(pool: pg.Pool): Hono {
 
   app.get("/v1/deletions", async (c) => {
     const user = c.get("user");
+    // The name lets an owner tell recoverable organizations apart; the row
+    // keeps it until the purge.
     const result = await withSystemTx(pool, (tx) =>
-      tx.query<DeletionRequestRow>(
+      tx.query<DeletionRequestRow & { target_name: string }>(
         `SELECT DISTINCT r.id, r.public_code, r.target_kind, r.target_id,
-                r.state, r.requested_at, r.purge_after
+                r.state, r.requested_at, r.purge_after, o.name AS target_name
          FROM deletion_requests r
          JOIN organization_members om
            ON om.org_id = r.target_organization_id
           AND om.user_id = $1 AND om.role = 'owner'
+         JOIN organizations o ON o.id = r.target_organization_id
          WHERE r.target_kind = 'organization' AND r.state = 'scheduled'
            AND r.purge_after > now()
          ORDER BY r.requested_at DESC, r.id`,
         [user.id],
       ),
     );
-    return c.json({ deletions: result.rows.map(publicDeletionRequest) });
+    return c.json({
+      deletions: result.rows.map((row) => ({
+        ...publicDeletionRequest(row),
+        targetName: row.target_name,
+      })),
+    });
   });
 
   const scheduleOrganization = async (c: Context) => {

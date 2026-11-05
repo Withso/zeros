@@ -33,9 +33,15 @@ export type WorkOSRefreshResult =
     }
   | { status: "terminal"; reason: string };
 
-export function browserAuthStartOptions(
-  returnTo: string,
-): Array<{ label: "Continue"; href: string }>;
+export type BrowserAuthProvider = "google" | "github";
+
+export function browserAuthStartOptions(returnTo: string): Array<{
+  label: "Continue with Google" | "Continue with GitHub";
+  provider: BrowserAuthProvider;
+  href: string;
+}>;
+/** The signed-out hub page: Continue with Google and Continue with GitHub. */
+export function signInPage(returnTo: string): string;
 export function beginWorkOSBrowserAuth(
   request: Request,
   env: WorkOSBrowserEnv,

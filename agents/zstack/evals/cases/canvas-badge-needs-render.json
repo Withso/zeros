@@ -1,0 +1,9 @@
+{
+  "id": "canvas-badge-needs-render",
+  "kind": "scenario",
+  "area": "web",
+  "fixedBy": "37b89617894e9ce971a9ebed467b04aa75c18e05",
+  "symptom": "The cloud workspace loading and GitHub checking frames lost their Planned badge after a copy-only check, though both draw a 16px loader the pages lacked; the dashboard's loader was drawn round instead of the app's square Orbit, and a route map kept 212px of blank sheet after four rows were removed.",
+  "rule": "Take a Planned badge off only beside a render of the shipped page that matches everything the frame draws, loaders and icons included; copy a component the app already has from its source; refit a board after removing frames or rows.",
+  "check": "node --test apps/web/lib/page.test.mjs apps/web/lib/workspace-page.test.mjs apps/web/lib/github-completion.test.mjs"
+}

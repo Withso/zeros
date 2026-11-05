@@ -1,1 +1,1 @@
-export declare function renderWorkspacePage(options:{workspaceId:string;invitation?:boolean;nonce:string}):{html:string;headers:Headers};
+export declare function renderWorkspacePage(options:{workspaceId:string;appLink:string;nonce:string}):{html:string;headers:Headers};
