@@ -144,8 +144,34 @@ async function exerciseDesignWorkbench({ page, check }) {
   check(
     "a Git conflict pauses the live canvas and offers retry/cancel",
     (await page.locator("[data-design-canvas-viewport]").count()) === 0 &&
-      (await page.getByRole("button", { name: "Retry Design" }).isVisible()) &&
+      (await page.getByRole("button", { name: "Retry", exact: true }).isVisible()) &&
       (await page.getByRole("button", { name: "Cancel merge…" }).isVisible()),
+  );
+  // The conflicted files sit in one quiet card, and each opens in Changes.
+  const pause = page.locator("[data-design-conflict-pause]");
+  const files = pause.locator("[data-design-conflict-files]");
+  const row = files.getByRole("button", { name: "Open North One - Design/design.toml in Changes", exact: true });
+  const card = await files.evaluate((node) => {
+    const style = getComputedStyle(node);
+    return { radius: style.borderTopLeftRadius, width: style.borderTopWidth, rows: node.querySelectorAll("button").length };
+  });
+  check(
+    "a Git conflict lists its files in one quiet card, folder then name",
+    card.radius === "8px" && card.width === "1px" && card.rows === 1 &&
+      (await pause.getByText("Design is paused", { exact: true }).isVisible()) &&
+      (await row.textContent()) === "North One - Design/design.toml",
+  );
+  await row.click();
+  check(
+    "a conflicted file opens in Changes",
+    await page.waitForFunction(async () => {
+      const { useWorkspaceStore } = await import("/apps/desktop/src/renderer/state/store.tsx");
+      const scopes = Object.values(useWorkspaceStore.getState().workbenchByScope ?? {});
+      return scopes.some((scope) => {
+        const tab = scope.tabs?.find((candidate) => candidate.id === scope.activeId);
+        return tab?.type === "changes" && tab.filePath?.endsWith("design.toml");
+      });
+    }, null, { timeout: 5_000 }).then(() => true, () => false),
   );
 }
 

@@ -26,6 +26,7 @@ import {
   useDesignLayoutToolsLive,
   type DesignLayoutToolsLiveChild,
 } from "./state/design-layout-tools-live";
+import { DESIGN_CANVAS_CHIP_PX } from "./design-canvas-chip";
 
 /** One editable spacing value on the canvas, handed to the gesture owner. */
 export interface DesignLayoutSpacingControl {
@@ -790,10 +791,10 @@ export const DesignLayoutTools = React.memo(function DesignLayoutTools({
                 style={{
                   ...paddingBadgeStyle(band.side, zoom),
                   minWidth: 20 / zoom,
-                  paddingInline: 5 / zoom,
-                  borderRadius: 3 / zoom,
-                  fontSize: 11 / zoom,
-                  lineHeight: `${18 / zoom}px`,
+                  paddingInline: DESIGN_CANVAS_CHIP_PX.paddingInline / zoom,
+                  borderRadius: DESIGN_CANVAS_CHIP_PX.radius / zoom,
+                  fontSize: DESIGN_CANVAS_CHIP_PX.fontSize / zoom,
+                  lineHeight: `${DESIGN_CANVAS_CHIP_PX.height / zoom}px`,
                   transform: counterRotation,
                 }}
               >
@@ -828,10 +829,10 @@ export const DesignLayoutTools = React.memo(function DesignLayoutTools({
             top: interaction.anchor.y,
             translate: "-50% -50%",
             minWidth: 20 / zoom,
-            paddingInline: 5 / zoom,
-            borderRadius: 3 / zoom,
-            fontSize: 11 / zoom,
-            lineHeight: `${18 / zoom}px`,
+            paddingInline: DESIGN_CANVAS_CHIP_PX.paddingInline / zoom,
+            borderRadius: DESIGN_CANVAS_CHIP_PX.radius / zoom,
+            fontSize: DESIGN_CANVAS_CHIP_PX.fontSize / zoom,
+            lineHeight: `${DESIGN_CANVAS_CHIP_PX.height / zoom}px`,
             transform: counterRotation,
           }}
         >
@@ -927,10 +928,10 @@ export const DesignLayoutTools = React.memo(function DesignLayoutTools({
                   style={{
                     ...gapBadgeStyle(gap.axis, zoom),
                     minWidth: 20 / zoom,
-                    paddingInline: 5 / zoom,
-                    borderRadius: 3 / zoom,
-                    fontSize: 11 / zoom,
-                    lineHeight: `${18 / zoom}px`,
+                    paddingInline: DESIGN_CANVAS_CHIP_PX.paddingInline / zoom,
+                    borderRadius: DESIGN_CANVAS_CHIP_PX.radius / zoom,
+                    fontSize: DESIGN_CANVAS_CHIP_PX.fontSize / zoom,
+                    lineHeight: `${DESIGN_CANVAS_CHIP_PX.height / zoom}px`,
                     transform: counterRotation,
                   }}
                 >

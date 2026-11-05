@@ -12,6 +12,10 @@ import { cn } from "../../shared/ui/cn";
 import { getLastInputModality } from "../../shared/ui/overlay-focus";
 import type { InspectorGlyphName } from "./design-layout-values";
 import {
+  useDesignSectionHidden,
+  type DesignAddableSection,
+} from "./design-addable-sections";
+import {
   PopoverAnchor,
   Select,
   SelectContent,
@@ -32,6 +36,9 @@ interface InspectorSectionProps extends Omit<
   actions?: React.ReactNode;
   /** A section with nothing authored renders as its header alone. */
   empty?: boolean;
+  /** An optional section: while empty it draws nothing and the Style tab's
+   * Add property menu lists it under `title`, running `onAdd` when chosen. */
+  addable?: DesignAddableSection;
   bodyClassName?: string;
 }
 
@@ -40,11 +47,18 @@ export function InspectorSection({
   title,
   actions,
   empty = false,
+  addable,
   className,
   bodyClassName,
   children,
   ...rest
 }: InspectorSectionProps) {
+  const hidden = useDesignSectionHidden(
+    addable,
+    empty,
+    typeof title === "string" ? title : (addable?.id ?? ""),
+  );
+  if (hidden) return null;
   const hasBody = !empty && React.Children.count(children) > 0;
   return (
     <section

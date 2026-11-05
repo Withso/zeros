@@ -382,6 +382,7 @@ export function DesignEffectsSection({
     <InspectorSection
       title="Effects"
       empty={empty}
+      addable={{ id: "effects", onAdd: add }}
       data-design-effects-section=""
       actions={
         <>
@@ -766,6 +767,7 @@ export function DesignTransformSection({
           <InspectorSection
             title="Transform"
             empty={empty}
+            addable={{ id: "transform", onAdd: () => setOpen(true) }}
             data-design-transform-section=""
             actions={
               empty ? (

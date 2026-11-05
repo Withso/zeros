@@ -117,7 +117,9 @@ exported page by page to [design-implementation/](design-implementation/README.m
    carries the tone (red error, yellow warning, a spinner or `fg3`); one line
    that ends in an ellipsis; 24px Ghost actions. A message inside content uses
    the same anatomy. An empty state is a 32px `fg3` icon and one 13/18 `fg2`
-   line, plus one action only when it creates or configures something.
+   line, plus one action only when it creates or configures something; its
+   failure is one 12/16 red line under the text (`EmptyState` `error`), never
+   a filled box.
 4. **One surface language.** Canvas `bg1`; raised `bg2` or `sidebar-bg`;
    floating menus, popovers, tooltips, hover cards and toasts share `bg3` with
    `border2`, 12px corners, the dropdown shadow, a 4px inset and 28px rows with

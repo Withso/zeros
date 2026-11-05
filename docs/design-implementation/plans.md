@@ -113,25 +113,18 @@ model needs the avatar URL and the agent provider for each comment.
 
 ## 7. Design: inspector and layers
 
-Boards: `DsnWindow`, `DsnInspectorFrame`, `DsnInspectorText`,
-`DsnInspectorCss`, `DsnThemeEditor`, `DsnInitGit`, `DsnConflicts`.
-Inspector fields become filled 28px controls with no resting edge (labels
-12 medium fg3, computed values fg2); only the sections in use show, and Add
-property adds Stroke, Effects, Typography, Transform, Transition or Motion.
-Layer rows move to 28px with the bg2-highlight selection: the row height is
-part of `design-layer-layout.ts`, which the canvas tools measure, so change
-it there with the layer-panel tests and the Design smokes. Long computed
-and theme values end in an ellipsis inside their field. A failed Git init
-is one red line under the text, in Design (`design-git-setup.tsx`) and in
-the Changes tab's Initialize Git (`NotAGitRepo` in `changes-tab.tsx`), which
-still show a filled red box; change both together. The conflict pause lists
-its files in one quiet card that opens them in Changes. Canvas readouts
-(selection size, rotation, spacing, the agent on the canvas) become one
-canvas chip, 18px with 4px corners and no edge (the Badge and
-MotionTimeline boards): today each overlay draws its own
-`zd-design-selection-label` box, 20px with mixed padding, in
-`design-canvas.tsx` and `design-workspace-overlays.tsx`; run the Design
-smokes that measure them.
+Landed 2026-11-05; see the README's status log. Only the Style sections in use
+show, and one Add property menu reveals Stroke, Effects, Typography,
+Transform, Transition, Motion or Advanced and runs that section's own add
+(`design-addable-sections.tsx`, through `InspectorSection`'s `addable`). In-field
+labels and suffixes are fg3; the selected layer fills bg2-highlight (rows were
+already 28px in `design-workspace-sidebar-panels.tsx`); long values end in an
+ellipsis in fields and in the CSS tab. A failed Git init is one red line in
+Design and in the Changes tab's Initialize Git (`EmptyStateError`), the
+conflict pause is the empty-state recipe with its files in one quiet card that
+opens them in Changes, and every canvas readout is one 18px chip with 4px
+corners and no edge (`design-canvas-chip.ts`). The Design smokes reach hidden
+sections through `addDesignSection` (`ui-smoke-design-helpers.mjs`).
 
 ## 8. Web app: the dashboard, account pages and Ops
 

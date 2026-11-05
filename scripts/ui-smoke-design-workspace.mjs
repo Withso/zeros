@@ -1,6 +1,6 @@
 import { runDesignFloatingChromeSmoke } from "./ui-smoke-design-floating-chrome.mjs";
 import { runDesignFloatingChromeEdgesSmoke } from "./ui-smoke-design-floating-chrome-edges.mjs";
-import { designCanvasPoint, designFrameElementBox } from "./ui-smoke-design-helpers.mjs";
+import { addDesignSection, designCanvasPoint, designFrameElementBox } from "./ui-smoke-design-helpers.mjs";
 import { shiftClickDesignGroupMember } from "./ui-smoke-design-group-selection.mjs";
 import { expect } from "@playwright/test";
 import { runDesignWorkbenchSmoke } from "./ui-smoke-design-workbench.mjs";
@@ -1004,12 +1004,28 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
     .waitFor({ state: "visible", timeout: 10_000 });
   const inspector = page.locator("[data-design-inspector]");
   const inspectorHeader = inspector.locator("[data-design-inspector-header]");
-  const expandStyleSection = async (title) => {
-    const trigger = inspector.getByRole("button", {
-      name: `Expand ${title}`,
-      exact: true,
-    });
-    if ((await trigger.count()) > 0) await trigger.click();
+  // Only the sections in use show: an empty one is added from Add property.
+  // Adding Transform opens its editor, which closes again unless `keepOpen`.
+  // Returns whether the section had to be added.
+  const expandStyleSection = async (title, { keepOpen = false } = {}) => {
+    const heading = inspector.getByRole("heading", { name: title, exact: true });
+    if ((await heading.count()) > 0) return false;
+    await addDesignSection(page, title);
+    await heading.waitFor({ state: "visible" });
+    if (title === "Transform") {
+      const editor = page.getByLabel("Transform CSS value");
+      await editor.waitFor({ state: "visible" });
+      if (!keepOpen) {
+        // The field's own Escape cancels its draft; the next closes the
+        // editor. Press only while it is open, or Escape reaches the canvas.
+        for (let attempt = 0; attempt < 3 && (await editor.isVisible()); attempt += 1) {
+          await page.keyboard.press("Escape");
+          await page.waitForTimeout(150);
+        }
+        await editor.waitFor({ state: "hidden" });
+      }
+    }
+    return true;
   };
   const pageSelectionPoint = await designCanvasPoint(page, { empty: true });
   await page.mouse.click(pageSelectionPoint.x, pageSelectionPoint.y);
@@ -3123,8 +3139,9 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
       "design-style-preview-escape",
     ),
   );
-  await expandStyleSection("Transform");
-  await page.getByRole("button", { name: "Edit transform" }).click();
+  if (!(await expandStyleSection("Transform", { keepOpen: true }))) {
+    await page.getByRole("button", { name: "Edit transform" }).click();
+  }
   const transformInput = page.getByLabel("Transform CSS value");
   await transformInput.press("ControlOrMeta+A");
   await transformInput.press("Backspace");

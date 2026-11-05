@@ -1,5 +1,5 @@
 import { useRef, useState } from "react";
-import { Folder } from "lucide-react";
+import { FolderGit2 } from "lucide-react";
 import { gitInitInPlace, isGitErrorShape } from "../../platform/git";
 import {
   loadProjects,
@@ -9,6 +9,7 @@ import {
 import { notifyProjectsChanged } from "../../state/use-projects";
 import { triggerGitRefresh } from "../../shell/use-git-refresh-key";
 import { Button } from "../../shared/ui/primitives/button";
+import { EmptyState } from "../../shared/ui/layout/empty-state";
 import { errorMessage } from "./design-workspace-error";
 
 /** Git setup is explicit. Opening Design never initializes or publishes a folder. */
@@ -46,31 +47,26 @@ export function DesignGitSetup({
       setBusy(false);
     }
   };
+  // The empty-state recipe: a failure is one red line under the text and the
+  // button stays ready to try again.
   return (
-    <div
-      className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 px-6 text-center"
+    <EmptyState
+      icon={FolderGit2}
+      title="Design needs Git"
       data-design-tab-empty=""
-    >
-      <Folder className="text-muted-fg size-10" strokeWidth={1} aria-hidden />
-      <Button
-        variant="secondary"
-        size="sm"
-        disabled={!active || busy}
-        onClick={() => void initialize()}
-      >
-        {busy ? "Initializing…" : "Initialize Git"}
-      </Button>
-      <p className="text-fg2 max-w-sm text-xs">
-        Initialize Git to create a workspace for Design.
-      </p>
-      {failure && (
-        <p
-          role="alert"
-          className="bg-red-bg text-red-fg max-w-sm rounded-md px-3 py-2 text-xs"
+      error={failure ? `Couldn’t initialize Git: ${failure}` : null}
+      action={
+        <Button
+          variant="primary"
+          disabled={!active || busy}
+          loading={busy}
+          onClick={() => void initialize()}
         >
-          {failure}
-        </p>
-      )}
-    </div>
+          {busy ? "Initializing…" : "Initialize Git"}
+        </Button>
+      }
+    >
+      Initialize Git in this folder to start designing.
+    </EmptyState>
   );
 }

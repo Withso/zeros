@@ -77,6 +77,12 @@
   outline: 0;
 }
 
+/* A long computed or theme value ends in an ellipsis inside its field; the
+ * whole value returns while the field is edited. */
+.zd-field input {
+  text-overflow: ellipsis;
+}
+
 .zd-field input::placeholder {
   color: var(--fg3);
 }
@@ -86,14 +92,15 @@
   flex: none;
 }
 
-/* In-field label or glyph. It doubles as the scrub handle for numbers. */
+/* In-field label or glyph, 12 medium fg3. It doubles as the scrub handle for
+ * numbers. */
 .zd-field-label {
   display: inline-flex;
   height: 100%;
   flex-shrink: 0;
   align-items: center;
   justify-content: center;
-  color: var(--muted-fg);
+  color: var(--fg3);
   font-size: 12px;
   font-weight: var(--weight-medium);
 }
@@ -106,7 +113,7 @@
 .zd-field-suffix {
   flex-shrink: 0;
   padding-right: 8px;
-  color: var(--muted-fg);
+  color: var(--fg3);
   font-size: 12px;
 }
 
@@ -257,6 +264,14 @@
   flex-direction: column;
   gap: 8px;
   padding: 0 12px 12px;
+}
+
+/* Only the sections in use show; one compact Ghost button adds the rest. */
+.zd-add-property-row {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  padding: 6px 8px 10px;
 }
 
 /* Property popovers (Fill, Stroke, Effects, Type settings, …). */
@@ -1274,12 +1289,12 @@
 }
 
 /* Layer selection stays neutral: the tree reads as chrome, and the canvas keeps
- * sole ownership of the design accent. One surface token supplies the whole
- * ramp — owned rows sit below hover, and the selection itself sits above it. */
+ * sole ownership of the design accent. Like every tree, the selected row fills
+ * bg2-highlight with fg1, a step above hover; owned rows sit between. */
 .zd-design-layer-selected,
 .zd-design-layer-selected:hover {
   border-width: 0;
-  background-color: var(--bg2-hover);
+  background-color: var(--bg2-highlight);
   box-shadow: none;
   color: var(--fg1);
 }

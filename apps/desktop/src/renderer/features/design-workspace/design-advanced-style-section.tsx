@@ -78,19 +78,22 @@ export function DesignAdvancedStyleSection({
     reset();
   };
 
+  const startAdding = () => {
+    setAdding(true);
+    window.requestAnimationFrame(() => nameRef.current?.focus());
+  };
+
   return (
     <InspectorSection
       title="Advanced"
       data-design-advanced-section=""
       empty={rows.length === 0 && !adding && !details.classes}
+      addable={{ id: "advanced", onAdd: startAdding }}
       actions={
         <InspectorIconButton
           label="Add property"
           disabled={disabled}
-          onClick={() => {
-            setAdding(true);
-            window.requestAnimationFrame(() => nameRef.current?.focus());
-          }}
+          onClick={startAdding}
         >
           <Plus className="size-3" />
         </InspectorIconButton>

@@ -302,6 +302,7 @@ export function DesignTypographySection({
           <InspectorSection
             title="Typography"
             empty={!open}
+            addable={{ id: "typography", onAdd: () => setExpanded(true) }}
             data-design-typography-section=""
             actions={
               open ? (

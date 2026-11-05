@@ -339,9 +339,10 @@ export async function runFolderDesignSetupSmoke({ page, check }) {
   const chats = await page.locator("[data-folder-state]").textContent();
   await page.getByRole("tab", { name: "Design", exact: true }).click();
   const empty = page.locator("[data-design-tab-empty]");
-  await expect(empty.locator("svg.lucide-folder")).toBeVisible();
+  await expect(empty.locator("svg.lucide-folder-git-2")).toBeVisible();
+  await expect(empty.getByText("Design needs Git", { exact: true })).toBeVisible();
   await expect(
-    empty.getByText("Initialize Git to create a workspace for Design.", {
+    empty.getByText("Initialize Git in this folder to start designing.", {
       exact: true,
     }),
   ).toBeVisible();
@@ -360,9 +361,11 @@ export async function runFolderDesignSetupSmoke({ page, check }) {
   expect(beforeOps).not.toContain("design.initialize");
   await page.evaluate(() => window.failFolderInitialization(true));
   await initialize.click();
-  await expect(empty.getByRole("alert")).toContainText(
-    "Git initialization failed",
-  );
+  // One red line under the text, not a filled box, and the button can retry.
+  const failure = empty.getByRole("alert");
+  await expect(failure).toContainText("Couldn’t initialize Git: Git initialization failed");
+  await expect(failure).toHaveAttribute("data-slot", "empty-state-error");
+  expect(await failure.evaluate((node) => getComputedStyle(node).backgroundColor)).toBe("rgba(0, 0, 0, 0)");
   await expect(initialize).toBeEnabled();
   await page.evaluate(() => window.failFolderInitialization(false));
   await initialize.click();

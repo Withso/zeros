@@ -1016,6 +1016,8 @@ async function main() {
       if (workbenchHarness && message.op === "workspace.list") return { type: "WORKSPACE_RESPONSE", result: { workspaces: message.params?.archived === true ? [] : workspaces } };
       if (workbenchHarness && message.op === "git.status") return { type: "WORKSPACE_RESPONSE", result: { staged: [], unstaged: [], untracked: [], conflicted: [], conflictState: null, branch: workspace.branch, upstream: null, ahead: 0, behind: 0 } };
       if (workbenchHarness && message.op === "git.changeCounts") return { type: "WORKSPACE_RESPONSE", result: { all: 0, uncommitted: 0, staged: 0, unstaged: 0 } };
+      // A conflicted Design file opens in Changes, which reads the PR's review.
+      if (workbenchHarness && message.op === "gh.prInlineReview") return { type: "WORKSPACE_RESPONSE", result: { headSha: "0".repeat(40), baseSha: "0".repeat(40), threads: [], annotations: [], threadsTruncated: false, annotationsTruncated: false, annotationError: null } };
       if (message.op === "design.preview") {
         // A capture host stand-in: one flat picture at the requested raster.
         const params = message.params!;

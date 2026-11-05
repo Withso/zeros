@@ -636,3 +636,13 @@ Each landed step appends one line: date, workstream, what landed, evidence.
   composer's width and 8px above it, with 8px row corners, a medium fg3 head,
   fg3 hints and ruled 24px tabs whose active tab is the selected fill. The
   embedded terminal card takes the dock surface, a 40px head and a bg1 well.
+- 2026-11-05 · 5 · Design tab (plans.md §7): only the Style sections in use
+  show, and Add property reveals the rest and runs each one's own add (an
+  unstyled frame showed six empty headers). In-field labels are fg3, the
+  selected layer fills bg2-highlight, and long values end in an ellipsis in
+  fields and the CSS tab. A failed Git init is one red line under the text in
+  Design and in Changes, "Design needs Git" leads with a primary Initialize
+  Git, and the conflict pause lists its files in one quiet card that opens
+  each in Changes. Selection, creation and group sizes, rotation, spacing and
+  the agent's draft status share one 18px canvas chip with no edge. The
+  Design smokes reach hidden sections through Add property.

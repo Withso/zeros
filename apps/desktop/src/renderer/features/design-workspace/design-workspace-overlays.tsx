@@ -67,6 +67,7 @@ import {
 import { designLivePreviewValue } from "./state/design-live-preview";
 import { useDesignMotionPlayhead } from "./state/design-motion-playhead";
 import { useDesignRuntimeStore } from "./state/design-runtime-store";
+import { DESIGN_CANVAS_CHIP_CLS } from "./design-canvas-chip";
 
 export function frameGeometry(
   frame: Pick<DesignCanvasFrameWire, "x" | "y" | "width" | "height" | "z">,
@@ -1066,7 +1067,7 @@ export function DesignSelectionMeasurements({
               ? `${sizeModes.x ?? "fixed"},${sizeModes.y ?? "fixed"}`
               : undefined
           }
-          className="zd-design-selection-label text-2xxs pointer-events-none absolute top-full left-1/2 -translate-x-1/2 rounded-sm px-1.5 py-0.5 leading-4 font-medium whitespace-nowrap tabular-nums"
+          className={cn("zd-design-selection-label pointer-events-none absolute top-full left-1/2 -translate-x-1/2", DESIGN_CANVAS_CHIP_CLS)}
           style={{
             marginTop: designCanvasScreenPixels(4),
             transform: `translateX(-50%) scale(${DESIGN_CANVAS_INVERSE_ZOOM})`,
