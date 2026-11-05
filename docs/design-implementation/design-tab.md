@@ -10,7 +10,7 @@ Owner today: `features/design-workspace/design-workbench-surface.tsx · design-w
 
 Changes:
 - Inspector fields are filled 28s with no resting edge; labels 12 medium fg3, computed values fg2.
-- Segmented: 28 track, 24 items; selected is bg1 + border2 in Light, bg4 with no edge in Dark.
+- Segmented: 28 track, 24 items; the selected item fills selected-bg with no edge.
 - Tree rows are 28; the selected row fills bg2-highlight.
 - Floating toolbar: 36 bar, 28 buttons, 14 icons, 10px corners, border2.
 - Tabs: 28 tall, 6px corners, hover bg1-hover, active bg2 in medium.
@@ -168,7 +168,7 @@ Owner today: `features/design-workspace/design-inspector.tsx · design-style-edi
 
 Changes:
 - Only the sections in use show; Add property adds Stroke, Effects, Typography, Transform, Transition or Motion.
-- Icon buttons: 6px corners (4 at 20) and a bg2-highlight hover; toggles add border4.
+- Icon buttons: 6px corners (4 at 20) and a bg2-highlight hover; a pressed toggle fills selected-bg with no edge.
 
 Code notes:
 - The style editor renders every section always, so an unstyled frame shows six empty headers; show a section once it has a value or is added. (`features/design-workspace/design-style-editor.tsx:1-6,279-680`)

@@ -14,7 +14,8 @@ The full guide is `docs/design-system.md`; token values are in
 1. **Follow the direction (§0).** Few, quiet words: a title and at most one
    line of description, sentence case. Rows in grouped cards, not boxes in
    boxes. One banner, one message row and one empty state. One height per
-   row. Color only for meaning. Keyboard focus only for the keyboard. Each
+   row. Color only for meaning. Selection is a fill, never an edge. Keyboard
+   focus only for the keyboard. Each
    page's approved boards are exported to `docs/design-implementation/`; read
    the page's file before changing it.
 2. **Compose, don't restyle.** Use the shared primitives in
@@ -39,7 +40,9 @@ The full guide is `docs/design-system.md`; token values are in
    `bg-bg3` + `border-border2`, 12px corners, the dropdown shadow, a 4px inset
    and 28px rows with 8px corners; only they use `bg-bg3`. Navigation
    selection (sidebar, trees, layers) is `bg-bg2-highlight` with `text-fg1`, a
-   step above hover.
+   step above hover. A pressed toggle, the active tab or segment, and a chosen
+   chip or option fill with `bg-selected-bg`; no selected, pressed, active or
+   current state adds a border, ring, outline or shadow.
 5. **Text tiers:** `text-fg1` emphasis/selected, `text-fg2` default, `text-fg3`
    secondary and placeholders, `text-muted-fg` metadata. Never fake a tier with
    opacity (`text-fg2/60`). On a tinted `bg-<family>-bg`, text is

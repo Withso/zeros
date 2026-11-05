@@ -171,7 +171,6 @@ export function TerminalWorkbenchLayout({
                   : "Show terminal sidebar"
               }
               aria-pressed={sidebarVisible}
-              pressedTone="fill"
               onClick={onToggleSidebar}
               className={WORKBENCH_TITLE_ACTION_CLS}
             >

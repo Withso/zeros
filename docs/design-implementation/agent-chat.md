@@ -55,7 +55,7 @@ Code notes:
 Owner today: `shell/conversation/workspace-header.tsx · conversation-summary.tsx · shell/workbench/toggle-button.tsx`
 
 Changes:
-- Icon buttons: 6px corners (4 at 20) and a bg2-highlight hover; toggles add border4.
+- Icon buttons: 6px corners (4 at 20) and a bg2-highlight hover; a pressed toggle fills selected-bg with no edge.
 
 Code notes:
 - The leading slot is a 16px icon, a 24px Local badge or a 28px Cloud button, so the name starts at 28, 78 or 40px; trailing actions mix a 28px Summary with a 24px toggle. (`shell/conversation/workspace-header.tsx:52,56,79,83 · shell/conversation/cloud-workspace-details.tsx:55-56 · shell/conversation/conversation-summary.tsx:174-175`)

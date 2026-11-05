@@ -4,8 +4,8 @@
 // Design-system policy for renderer class markup, enforced with a ratchet.
 //
 // Each rule inspects the class candidates extracted from the TypeScript AST
-// (class-candidates.mjs) or the JSX element tree, and names a finding by
-// (rule, file, key). Existing findings are recorded as DEBT in
+// (class-candidates.mjs), the JSX element tree or, for selection-edge, the
+// renderer's stylesheets, and names a finding by (rule, file, key). Existing findings are recorded as DEBT in
 // styles/policy/ui-debt.json; `pnpm check:ui` fails when:
 //   • a (rule, file, key) count rises above its recorded debt (new drift), or
 //   • a count falls below it (debt was paid — prune the ledger so the freed
@@ -22,7 +22,7 @@
 // Product UI only: harness pages and tests are out of scope. Rationale and
 // the replacement for each rule: docs/design-system.md.
 // ============================================================
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 import ts from "typescript";
 
@@ -57,6 +57,79 @@ const tokenValueIsDesignToken = (value) =>
   /^var\(--[\w-]+\)$/.test(value) ||
   // Derived values built from a token, e.g. calc(var(--radius-lg)*1.5).
   (/var\(--[\w-]+\)/.test(value) && !/#|rgba?\(|hsla?\(|oklch\(/.test(value));
+
+// What marks a chosen tab, segment, toggle, option or row. A checked form
+// control (data-[state=checked], aria-checked) is its own indicator, and
+// keyboard focus is the one ring, so neither counts as selection here.
+const SELECTION_VARIANT_RE =
+  /(?:^|:)(?:group-|peer-)?(?:aria-(?:pressed|selected|current)|aria-\[(?:pressed|selected|current)=[^\]]+\]|data-\[state=(?:active|on)\]|data-\[(?:selected|active|current)(?:=[^\]]+)?\]|data-(?:selected|active|current))(?:\/[\w-]+)?:/;
+
+/** The edge a utility draws, or null: border colours, rings, shadows and
+ * outlines. Utilities that remove an edge (border-transparent, ring-0,
+ * shadow-none, outline-none) and border widths or styles draw none. */
+export function edgeUtility(base) {
+  const border = base.match(/^border-[xytrblse]-(.+)$/) ?? base.match(/^border-(.+)$/);
+  if (border) {
+    const value = border[1];
+    if (/^(?:\d+(?:\.\d+)?|\[[\d.]+px\]|solid|dashed|dotted|double|hidden|none|transparent)$/.test(value)) {
+      return null;
+    }
+    return base;
+  }
+  const ring = base.match(/^(?:inset-)?ring(?:-(.+))?$/);
+  if (ring) return ring[1] === "0" ? null : base;
+  const shadow = base.match(/^(?:inset-)?shadow(?:-(.+))?$/);
+  if (shadow) return shadow[1] === "none" ? null : base;
+  const outline = base.match(/^outline(?:-(.+))?$/);
+  if (outline) return /^(?:none|hidden|0|offset-.+)$/.test(outline[1] ?? "") ? null : base;
+  return null;
+}
+
+const SELECTION_EDGE_MESSAGE = (key) =>
+  `"${key}" draws an edge on a selected, pressed, active or current state. Selection is a fill and never an edge: use the primitive's state (bg-selected-bg, var(--selected-bg)) and keep the resting edge unchanged (docs/design-system.md).`;
+
+// The CSS half of selection-edge: a rule whose element is selected, pressed,
+// active or current (not a child of one) must not draw an edge.
+const CSS_SELECTION_ATTR =
+  /\[(?:aria-(?:pressed|selected)="true"|aria-current(?:="[^"]*")?|data-state="(?:active|on)")\]/;
+const CSS_EDGE_PROPERTY =
+  /^\s*(border(?:-(?:top|right|bottom|left|block|inline)(?:-(?:start|end))?)?(?:-color)?|box-shadow|outline(?:-color)?)\s*:\s*([\s\S]+?)\s*$/;
+
+/** [{ line, key }] for every edge a CSS selection rule declares. */
+export function findCssSelectionEdges(source) {
+  // Blank comments out, keeping line breaks so line numbers hold.
+  const text = source.replace(/\/\*[\s\S]*?\*\//g, (comment) => comment.replace(/[^\n]/g, " "));
+  const findings = [];
+  const block = /([^{}]+)\{([^{}]*)\}/g;
+  let match;
+  while ((match = block.exec(text))) {
+    const [whole, selectorText, body] = match;
+    const selected = selectorText
+      .split(",")
+      .map((selector) => selector.trim())
+      .filter((selector) => {
+        const own = selector.split(/[\s>~+]+/).filter(Boolean).pop() ?? "";
+        return CSS_SELECTION_ATTR.test(own) && !/:focus/.test(own);
+      });
+    if (selected.length === 0) continue;
+    let offset = match.index + whole.indexOf("{") + 1;
+    for (const declaration of body.split(";")) {
+      const edge = declaration.match(CSS_EDGE_PROPERTY);
+      if (edge) {
+        const [, property, value] = edge;
+        const removes =
+          /^(?:none|0|transparent|hidden)$/.test(value) ||
+          (property.startsWith("border") && /\btransparent\b/.test(value));
+        if (!removes) {
+          const line = text.slice(0, offset + declaration.search(/\S/)).split("\n").length;
+          findings.push({ line, key: `${selected[0]} { ${property} }` });
+        }
+      }
+      offset += declaration.length + 1;
+    }
+  }
+  return findings;
+}
 
 /** Class-token rules: return a finding key, or null when the token is fine. */
 export const CLASS_RULES = [
@@ -130,6 +203,15 @@ export const CLASS_RULES = [
       `"transition-all" animates layout properties. Name the properties: transition-colors, transition-opacity, transition-transform, or transition-[…].`,
     test(base) {
       return base === "transition-all" ? base : null;
+    },
+  },
+  {
+    id: "selection-edge",
+    message: (key) => SELECTION_EDGE_MESSAGE(key),
+    test(base, token) {
+      const variants = token.slice(0, token.length - base.length);
+      if (!SELECTION_VARIANT_RE.test(variants) || /focus/.test(variants)) return null;
+      return edgeUtility(base) ? token : null;
     },
   },
   {
@@ -321,10 +403,26 @@ function ignoredLines(source) {
   return ignored;
 }
 
+/** Stylesheets under a directory, for the CSS half of the rules. */
+function cssFilesUnder(dir) {
+  let entries;
+  try {
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  return entries.flatMap((entry) => {
+    const path = join(dir, entry.name);
+    if (entry.isDirectory()) return entry.name === "node_modules" ? [] : cssFilesUnder(path);
+    return entry.name.endsWith(".css") ? [path] : [];
+  });
+}
+
 /**
- * All policy findings: [{ rule, file, key, line, message }].
+ * All policy findings: [{ rule, file, key, line, message }]. `cssFiles`
+ * defaults to the renderer's stylesheets.
  */
-export function collectFindings({ root, files, contexts }) {
+export function collectFindings({ root, files, contexts, cssFiles }) {
   const scoped = files.filter((file) => isPolicyScoped(toRel(root, file)));
   // Reuse a caller's extraction (check:ui shares one AST pass); anything
   // outside the policy scope is filtered below.
@@ -340,6 +438,20 @@ export function collectFindings({ root, files, contexts }) {
       if (key) {
         findings.push({ rule: rule.id, file: rel, key, line: occurrence.line, message: rule.message(key) });
       }
+    }
+  }
+
+  for (const file of cssFiles ?? cssFilesUnder(join(root, "apps/desktop/src/renderer"))) {
+    const rel = toRel(root, file);
+    if (!isPolicyScoped(rel)) continue;
+    for (const finding of findCssSelectionEdges(readFileSync(file, "utf8"))) {
+      findings.push({
+        rule: "selection-edge",
+        file: rel,
+        key: finding.key,
+        line: finding.line,
+        message: SELECTION_EDGE_MESSAGE(finding.key),
+      });
     }
   }
 

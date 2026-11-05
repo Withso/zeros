@@ -29,7 +29,7 @@ Code notes:
 Owner today: `shell/workbench/tabs/browser-tab.tsx · IframeBrowserTab, BrowserChrome · tab-strip.tsx`
 
 Changes:
-- Icon buttons: 6px corners (4 at 20) and a bg2-highlight hover; toggles add border4.
+- Icon buttons: 6px corners (4 at 20) and a bg2-highlight hover; a pressed toggle fills selected-bg with no edge.
 
 ## Start page · Local server states (`BrwStartStates`)
 

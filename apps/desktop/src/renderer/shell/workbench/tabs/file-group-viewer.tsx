@@ -104,7 +104,6 @@ export function FileGroupViewer({
             <IconButton
               label="Toggle attached files"
               aria-pressed={showSidebar}
-              pressedTone="fill"
               size="standard"
               disabled={!active}
               onClick={() => setSidebar(!showSidebar)}

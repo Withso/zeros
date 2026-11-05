@@ -102,12 +102,6 @@
   --switch-thumb: #0D0D0D; /* near-black knob on the salmon track */
   --switch-thumb-shadow: 0 1px 2px rgb(0 0 0 / 0.25); /* one soft lift for the 16px knob */
 
-  /* Segmented control (shared/ui/primitives/tabs.tsx) — the selected segment
-     never sits darker than its bg2 track: in Dark it lifts to bg4 with no
-     edge, because a border2 ring reads as a dark outline on the lighter fill. */
-  --segment-active-bg: var(--bg4);
-  --segment-active-border: transparent;
-
   /* Selected-state fill on GLASS surfaces (frosted overlays — first caller:
      the shortcuts palette's tabs + category/Kbd chips). A translucent wash
      that reads as "selected" without going opaque on a blurred panel; reuse
@@ -170,9 +164,4 @@
 
   /* Selected-state fill on glass — bg3 (= white in Light) at 30%. */
   --selected-glass: color-mix(in oklab, var(--bg3) 30%, transparent);
-
-  /* Segmented control — Light's selected segment is the white bg1 card with
-     its border2 edge on the grey track. */
-  --segment-active-bg: var(--bg1);
-  --segment-active-border: var(--border2);
 }

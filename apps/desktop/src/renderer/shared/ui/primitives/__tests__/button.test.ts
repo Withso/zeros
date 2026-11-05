@@ -66,11 +66,13 @@ describe("Button states", () => {
     );
   });
 
-  it("presses Secondary and Ghost through aria-pressed with fill and border", () => {
+  it("presses Secondary and Ghost through aria-pressed as the selected fill, never an edge", () => {
     for (const variant of ["secondary", "ghost"] as const) {
-      expect(classesFor({ variant }), variant).toEqual(
-        expect.arrayContaining(["aria-pressed:border-border4", "aria-pressed:bg-bg2-highlight"]),
+      const set = classesFor({ variant });
+      expect(set, variant).toEqual(
+        expect.arrayContaining(["aria-pressed:bg-selected-bg", "aria-pressed:hover:bg-selected-bg"]),
       );
+      expect(set.some((cls) => /^aria-pressed:(?:hover:)?(?:border|ring|shadow|outline)/.test(cls)), variant).toBe(false);
     }
   });
 

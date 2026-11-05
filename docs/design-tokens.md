@@ -86,7 +86,7 @@ Values for every public token in both themes, the contrast each declared pairing
 
 ## Contrast contract
 
-Worst WCAG 2.2 ratio over each declared pairing's surfaces (`styles/policy/contrast-contract.json`). `@rest` = bg0, bg1, bg1-highlight, bg1-bright, bg2, bg3, sidebar-bg, highlighted-bg; `@hover` = bg1-hover, bg2-hover, bg2-highlight, bg3-hover, sidebar-bg-hover.
+Worst WCAG 2.2 ratio over each declared pairing's surfaces (`styles/policy/contrast-contract.json`). `@rest` = bg0, bg1, bg1-highlight, bg1-bright, bg2, bg3, sidebar-bg, highlighted-bg; `@hover` = bg1-hover, bg2-hover, bg2-highlight, bg3-hover, sidebar-bg-hover, selected-bg.
 
 Supplemental metadata and subtle boundary floors are owner-reviewed design decisions, below AA and WCAG 1.4.11 respectively. Passing those floors is not a WCAG conformance claim.
 
@@ -98,15 +98,15 @@ Supplemental metadata and subtle boundary floors are owner-reviewed design decis
 | `--fg2` | @rest | 4.5:1 | ✓ 8.12 on bg2 | ✓ 7.05 on highlighted-bg |
 | `--fg3` | @rest | 4.5:1 | ✓ 6.23 on bg2 | ✓ 5.67 on highlighted-bg |
 | `--muted-fg` | @rest | 3:1 | ✓ 3.02 on bg2 | ✓ 4.48 on highlighted-bg |
-| `--fg1` | @hover | 4.5:1 | ✓ 11.92 on bg2-highlight | ✓ 11.10 on bg2-highlight |
-| `--fg2` | @hover | 4.5:1 | ✓ 6.85 on bg2-highlight | ✓ 6.36 on bg2-highlight |
-| `--fg3` | @hover | 4.5:1 | ✓ 5.26 on bg2-highlight | ✓ 5.11 on bg2-highlight |
-| `--red-primary` | @rest, @hover | 4.5:1 | ✓ 4.94 on bg2-highlight | ✓ 4.58 on bg2-highlight |
-| `--green-primary` | @rest, @hover | 4.5:1 | ✓ 7.79 on bg2-highlight | ✓ 4.58 on bg2-highlight |
-| `--yellow-primary` | @rest, @hover | 4.5:1 | ✓ 6.66 on bg2-highlight | ✓ 4.58 on bg2-highlight |
-| `--blue-primary` | @rest, @hover | 4.5:1 | ✓ 7.14 on bg2-highlight | ✓ 4.61 on bg2-highlight |
-| `--violet-primary` | @rest, @hover | 4.5:1 | ✓ 4.95 on bg2-highlight | ✓ 4.79 on bg2-highlight |
-| `--brown-primary` | @rest, @hover | 4.5:1 | ✓ 6.12 on bg2-highlight | ✓ 4.63 on bg2-highlight |
+| `--fg1` | @hover | 4.5:1 | ✓ 10.92 on selected-bg | ✓ 11.10 on bg2-highlight |
+| `--fg2` | @hover | 4.5:1 | ✓ 6.28 on selected-bg | ✓ 6.36 on bg2-highlight |
+| `--fg3` | @hover | 4.5:1 | ✓ 4.82 on selected-bg | ✓ 5.11 on bg2-highlight |
+| `--red-primary` | @rest, @hover | 4.5:1 | ✓ 4.53 on selected-bg | ✓ 4.58 on bg2-highlight |
+| `--green-primary` | @rest, @hover | 4.5:1 | ✓ 7.14 on selected-bg | ✓ 4.58 on bg2-highlight |
+| `--yellow-primary` | @rest, @hover | 4.5:1 | ✓ 6.10 on selected-bg | ✓ 4.58 on bg2-highlight |
+| `--blue-primary` | @rest, @hover | 4.5:1 | ✓ 6.55 on selected-bg | ✓ 4.61 on bg2-highlight |
+| `--violet-primary` | @rest, @hover | 4.5:1 | ✓ 4.54 on selected-bg | ✓ 4.79 on bg2-highlight |
+| `--brown-primary` | @rest, @hover | 4.5:1 | ✓ 5.61 on selected-bg | ✓ 4.63 on bg2-highlight |
 | `--red-fg` | red-bg | 4.5:1 | ✓ 8.96 on red-bg | ✓ 5.86 on red-bg |
 | `--green-fg` | green-bg | 4.5:1 | ✓ 9.31 on green-bg | ✓ 4.61 on green-bg |
 | `--yellow-fg` | yellow-bg | 4.5:1 | ✓ 7.01 on yellow-bg | ✓ 4.62 on yellow-bg |
@@ -117,10 +117,10 @@ Supplemental metadata and subtle boundary floors are owner-reviewed design decis
 | `--red-secondary-fg` | red-secondary, red-secondary-hover | 4.5:1 | ✓ 6.61 on red-secondary | ✓ 4.90 on red-secondary |
 | `--inverted-fg` | inverted-bg | 4.5:1 | ✓ 16.30 on inverted-bg | ✓ 14.62 on inverted-bg |
 | `--primary-button-fg` | primary-button-bg, primary-button-hover | 4.5:1 | ✓ 13.11 on primary-button-hover | ✓ 10.41 on primary-button-hover |
-| `--yellow-icon` | @rest, @hover | 3:1 | ✓ 6.66 on bg2-highlight | ✓ 3.14 on bg2-highlight |
+| `--yellow-icon` | @rest, @hover | 3:1 | ✓ 6.10 on selected-bg | ✓ 3.14 on bg2-highlight |
 | `--border3` | bg0, bg1, bg1-highlight, bg1-bright, bg2, bg3, sidebar-bg | 1.45:1 | ✓ 1.65 on bg2 | ✓ 1.50 on bg1-bright |
 | `--border4` | bg0, bg1, bg1-highlight, bg1-bright, bg2, bg3, sidebar-bg | 1.6:1 | ✓ 2.23 on bg2 | ✓ 1.76 on bg1-bright |
-| `--highlighted-bright` | @rest, @hover | 3:1 | ✓ 8.29 on bg2-highlight | ✓ 6.98 on bg2-highlight |
+| `--highlighted-bright` | @rest, @hover | 3:1 | ✓ 7.60 on selected-bg | ✓ 6.98 on bg2-highlight |
 
 Contrast ladders (each upper tier must have at least the listed factor more contrast on its declared surface):
 

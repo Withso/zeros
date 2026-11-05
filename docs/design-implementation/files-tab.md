@@ -14,9 +14,9 @@ Changes:
 - File tab names keep the tab colour; only the status letter is coloured: M yellow, U green, D red.
 - File options beside Viewed uses lucide ellipsis.
 - Tabs: 28 tall, 6px corners, hover bg1-hover, active bg2 in medium.
-- Icon buttons: 6px corners (4 at 20) and a bg2-highlight hover; the open side column’s toggle is a bg2-highlight fill with no edge.
+- Icon buttons: 6px corners (4 at 20) and a bg2-highlight hover; the open side column’s toggle fills selected-bg with no edge.
 - Menus: bg3, border2, 12px corners, 4px inset and 28px rows; labels 12 medium fg3.
-- Icon buttons: 6px corners (4 at 20) and a bg2-highlight hover; toggles add border4.
+- Icon buttons: 6px corners (4 at 20) and a bg2-highlight hover; a pressed toggle fills selected-bg with no edge.
 
 Code notes:
 - The file name is a bordered chip (border1, 4px corners, 8 / 4px padding), the same title chip terminals use. (`shell/workbench/tab-chrome.ts:24-26 · shell/workbench/tabs/file-viewer.tsx:227`)
@@ -63,7 +63,7 @@ Owner today: `shell/workbench/tabs/code-editor/file-editor-options.tsx · editor
 Changes:
 - Switch thumb sits 2px inside the track with one soft shadow.
 - Shortcut chips: 18 tall, bg2 + border2, 11/16 medium.
-- Segmented: 28 track, 24 items; selected is bg1 + border2 in Light, bg4 with no edge in Dark.
+- Segmented: 28 track, 24 items; the selected item fills selected-bg with no edge.
 - Toast joins the floating family: bg3, border2, 12px corners, 360 wide, close inside the top-right corner.
 
 Code notes:

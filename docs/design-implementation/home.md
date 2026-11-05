@@ -13,7 +13,7 @@ Changes:
 - Search is 280px and leads the toolbar; the filters keep to the right edge.
 - Repository filters are 28px pills; the selected one sits on bg2-hover and does not change on hover.
 - PR numbers are 24px pills coloured by PR state, as on the PR status island, with no link icon: brown while open, green when ready to merge, violet once merged.
-- Segmented: 28 track, 24 items; selected is bg1 + border2 in Light, bg4 with no edge in Dark.
+- Segmented: 28 track, 24 items; the selected item fills selected-bg with no edge.
 - Cards and tiles round to 12; hover lifts to border3 + bg2-highlight.
 - Fields: 13/18 text, 8px padding, no shadow; clicking in and typing change nothing.
 

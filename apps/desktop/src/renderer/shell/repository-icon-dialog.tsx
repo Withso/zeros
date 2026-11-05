@@ -198,17 +198,14 @@ export function RepositoryIconDialog({
 
         <DialogBody className="gap-0 overflow-y-auto">
           <Tabs value={tab} onValueChange={setTab} className="min-h-0">
-            <TabsList className="border-border1 h-auto w-full justify-start rounded-none border-b bg-transparent p-0">
-              <TabsTrigger
-                value="icons"
-                className="data-[state=active]:border-fg1 rounded-none border-b-2 border-transparent bg-transparent px-3 py-2 text-xs shadow-none data-[state=active]:bg-transparent data-[state=active]:shadow-none"
-              >
+            <TabsList
+              aria-label="Icon source"
+              className="border-border1 h-auto w-full shrink-0 justify-start gap-0 rounded-none border-b bg-transparent p-1"
+            >
+              <TabsTrigger value="icons" variant="chrome">
                 Icons
               </TabsTrigger>
-              <TabsTrigger
-                value="upload"
-                className="data-[state=active]:border-fg1 rounded-none border-b-2 border-transparent bg-transparent px-3 py-2 text-xs shadow-none data-[state=active]:bg-transparent data-[state=active]:shadow-none"
-              >
+              <TabsTrigger value="upload" variant="chrome">
                 Upload
               </TabsTrigger>
             </TabsList>

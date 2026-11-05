@@ -35,14 +35,15 @@ const buttonVariants = cva(
         // exact chrome: TRANSPARENT fill so it blends with whatever surface it
         // sits on (bg1 / bg2 / bg3 alike) + border3 → hover/open bg2-highlight
         // + border4, so a secondary button and a Select are indistinguishable
-        // at rest and on hover. Pressed (aria-pressed) holds the open look:
-        // fill and border both lift, so it survives Light and colour blindness.
+        // at rest and on hover. Pressed (aria-pressed) is the selected fill:
+        // selection never draws or changes an edge.
         secondary:
-          "border-border3 bg-transparent text-fg1 hover:border-border4 hover:bg-bg2-highlight data-[state=open]:border-border4 data-[state=open]:bg-bg2-highlight aria-pressed:border-border4 aria-pressed:bg-bg2-highlight",
+          "border-border3 bg-transparent text-fg1 hover:border-border4 hover:bg-bg2-highlight data-[state=open]:border-border4 data-[state=open]:bg-bg2-highlight aria-pressed:bg-selected-bg aria-pressed:hover:bg-selected-bg",
         // GHOST — transparent, no outline; toolbar and subtle text actions (a
-        // dialog's Cancel). Its open menu and pressed state hold the hover.
+        // dialog's Cancel). Its open menu holds the hover; pressed is the
+        // selected fill with no edge.
         ghost:
-          "hover:bg-bg2-highlight hover:text-fg1 data-[state=open]:bg-bg2-highlight data-[state=open]:text-fg1 aria-pressed:border-border4 aria-pressed:bg-bg2-highlight aria-pressed:text-fg1",
+          "hover:bg-bg2-highlight hover:text-fg1 data-[state=open]:bg-bg2-highlight data-[state=open]:text-fg1 aria-pressed:bg-selected-bg aria-pressed:text-fg1 aria-pressed:hover:bg-selected-bg",
         // DESTRUCTIVE (primary) — solid red fill (--red-secondary); text is the
         // static --red-secondary-fg (white in both themes — fg1 would flip dark in light).
         destructive:

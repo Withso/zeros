@@ -255,6 +255,7 @@
   --color-bg2: var(--bg2); /* #212121 — composer surface */
   --color-bg2-hover: var(--bg2-hover); /* #262626 — hover on bg2 */
   --color-bg2-highlight: var(--bg2-highlight); /* #2E2E2E — dropdown trigger hover/open */
+  --color-selected-bg: var(--selected-bg); /* #343434 — selected, pressed and active fill, one step above hover; never an edge */
   --color-bg3: var(--bg3); /* #1C1C1C — floating popover surface */
   --color-bg3-hover: var(--bg3-hover); /* #2A2A2A — hover on bg3 (menu items) */
   --color-bg4: var(--bg4); /* #3D3D3D — rare */
@@ -487,6 +488,7 @@
   --bg2: hsl(0 0% 13%); /* #212121 — composer surface */
   --bg2-hover: hsl(0 0% 15%); /* #262626 — hover on bg2 */
   --bg2-highlight: hsl(0 0% 18%); /* #2E2E2E — dropdown trigger hover/open */
+  --selected-bg: hsl(0 0% 20.5%); /* #343434 — selected, pressed and active fill, one step above hover; never an edge */
   /* @generated tokens:base-pane-bg:end */
   /* bg3 is a FLOATING-SURFACE-ONLY token (popover / dropdown / menu / select /
    * command) — always on TOP of a background, NEVER a fill/chip/selected state.
@@ -775,6 +777,7 @@
   --bg2: hsl(36 20% 95.098%); /* #F5F3F0 — composer surface */
   --bg2-hover: hsl(30 13.043% 90.98%); /* #EBE8E5 — hover on bg2 */
   --bg2-highlight: var(--bg5); /* #E2E0DD — dropdown trigger hover/open */
+  --selected-bg: var(--bg5); /* #E2E0DD — selected, pressed and active fill; at hover level in Light so status text keeps AA; never an edge */
   /* @generated tokens:light-bg0:end */
   /* Floating popover surface = the bg1 canvas itself; lift is border2 +
    * --shadow-dropdown (bg3 == bg1 in light — see the dark block's note). */

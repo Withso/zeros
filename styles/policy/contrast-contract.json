@@ -16,7 +16,8 @@
       "bg2-hover",
       "bg2-highlight",
       "bg3-hover",
-      "sidebar-bg-hover"
+      "sidebar-bg-hover",
+      "selected-bg"
     ]
   },
   "roles": {

@@ -24,7 +24,8 @@ The full guide is `docs/design-system.md`; token values are in
 1. **Follow the direction (§0).** Few, quiet words: a title and at most one
    line of description, sentence case. Rows in grouped cards, not boxes in
    boxes. One banner, one message row and one empty state. One height per
-   row. Color only for meaning. Keyboard focus only for the keyboard. Each
+   row. Color only for meaning. Selection is a fill, never an edge. Keyboard
+   focus only for the keyboard. Each
    page's approved boards are exported to `docs/design-implementation/`; read
    the page's file before changing it.
 2. **Compose, don't restyle.** Use the shared primitives in
@@ -49,7 +50,9 @@ The full guide is `docs/design-system.md`; token values are in
    `bg-bg3` + `border-border2`, 12px corners, the dropdown shadow, a 4px inset
    and 28px rows with 8px corners; only they use `bg-bg3`. Navigation
    selection (sidebar, trees, layers) is `bg-bg2-highlight` with `text-fg1`, a
-   step above hover.
+   step above hover. A pressed toggle, the active tab or segment, and a chosen
+   chip or option fill with `bg-selected-bg`; no selected, pressed, active or
+   current state adds a border, ring, outline or shadow.
 5. **Text tiers:** `text-fg1` emphasis/selected, `text-fg2` default, `text-fg3`
    secondary and placeholders, `text-muted-fg` metadata. Never fake a tier with
    opacity (`text-fg2/60`). On a tinted `bg-<family>-bg`, text is
@@ -129,9 +132,14 @@ exported page by page to [design-implementation/](design-implementation/README.m
 7. **Keyboard focus is opaque and only for the keyboard.** Tab shows
    `highlighted-bright` with the 3px halo; a click or typing shows the caret
    (`FIELD_FOCUS` reads the focus tracker's `data-zeros-keyboard-focus`).
-8. **Hover belongs to the surface; selected is a step above it.** Rows use
-   their surface's hover; sidebar, tree and layer selection is `bg2-highlight`
-   with `fg1`.
+8. **Hover belongs to the surface; selected is a fill a step above it, never
+   an edge.** Rows use their surface's hover; sidebar, tree and layer selection
+   is `bg2-highlight` with `fg1`. A pressed toggle, the active tab or segment,
+   and a chosen chip or option fill with `selected-bg` and hold it under the
+   pointer. A control's resting edge stays as it is; selection never adds a
+   border, ring, outline or shadow. Only keyboard focus rings, and objects on
+   the Design canvas keep the selection stroke. `ui/selection-edge` enforces
+   it in class names and the renderer's stylesheets.
 9. **Two tab styles.** A segmented control switches a view; one strip tab
    serves chrome, workbench and chat. A closable tab shows ✕ on hover or focus
    over a fade in its own fill, so it never changes width.
@@ -198,6 +206,7 @@ next agent inherits it instead of rediscovering it:
 | Spacing and type stay on their scales | `ui/off-scale-spacing`, `ui/off-scale-text` |
 | No `transition-all`; no `dark:` in components | `ui/transition-all`, `ui/dark-variant` |
 | `-fg` on `-bg` for tinted containers | `ui/status-pairing` |
+| Selected, pressed, active and current states draw no edge (border colour, ring, outline, shadow); keyboard focus and checked form controls are exempt | `ui/selection-edge` (class variants and the renderer's stylesheets) |
 | No raw `<button>` / `<input>` / `<select>` / `<textarea>` outside `shared/ui/` | `ui/raw-control` |
 | A quiet icon-only action is `IconButton` (a ghost `Button` at an icon size is not) | `ui/icon-only-button` |
 | `bg-bg3` only on floating panels | `check:ui` (`BG3_SURFACE_FILES`) |
@@ -225,11 +234,17 @@ imports, following property paths such as `chip.cls`). The ledger counts
 | Repository sidebar | `bg-sidebar-bg` | `bg-sidebar-bg-hover` | `border-border2` | Settings navigation uses the default surfaces |
 | Grouped content on canvas | `bg-bg1-highlight` | — | — | A wash, never the only boundary |
 | Primary action | `bg-primary-button-bg` | `bg-primary-button-hover` | — | Text `text-primary-button-fg`; one per view |
+| Selected control: pressed toggle, active tab or segment, chosen chip or option | `bg-selected-bg` | holds `bg-selected-bg` | never an edge; a resting edge is unchanged | One step above hover in Dark; equal to `bg2-highlight` in Light, where status text needs AA |
 
 - Hover is **surface-scoped**: use the hover of the surface the element sits on.
 - **Selected is a step above hover** for navigation: sidebar, tree and layer
-  rows use `bg-bg2-highlight` with `text-fg1`; the active tab is `bg-bg2`;
-  a menu's focused row keeps its hover.
+  rows use `bg-bg2-highlight` with `text-fg1`; a chrome strip's active tab is
+  `bg-bg2`; a menu's focused row keeps its hover.
+- **Selection is a fill, never an edge.** Pressed (`aria-pressed`), active
+  (`data-[state=active]`), on and chosen controls fill with `bg-selected-bg`
+  and keep their resting edge. The primitives own it: Button (Secondary,
+  Ghost), IconButton, Pill, Tabs and the Design inspector's segments and
+  tools; a checked RadioGroup card fills to `bg1-hover` and keeps `border1`.
 - `bg-bg3` is never a fill, chip, or selected state: it equals `bg1` in Light and
   the sidebar fill in Dark, so it vanishes or inverts on other surfaces.
 - `--inverted-bg` always pairs with `--inverted-fg`.
@@ -358,7 +373,8 @@ All, editing, portals and vendor surfaces across owners, placements and themes.
 - Primary (`variant="primary"`) is the single focal action of a view; Secondary
   is the default button; Ghost for quiet text actions and a dialog's Cancel;
   icon-only actions are `IconButton`. Toggles use `aria-pressed` on Secondary,
-  Ghost or IconButton; a toolbar's active tool is `pressedTone="tool"`.
+  Ghost or IconButton, which press to the `selected-bg` fill with no edge; a
+  toolbar's active tool is `pressedTone="tool"`.
 
 **Radius:** `rounded-sm` 4px (inline icon buttons, pills, badges, kbd,
 checkboxes, the inline-rename field) · `rounded-md` 6px (buttons, fields, tabs,
@@ -491,7 +507,7 @@ state, `aria-*`, `data-*` hooks) at the caller.
 | A surface that owns its descendants' hover/selected fill | `Surface` (`shared/ui/layout/surface.tsx`) | `kind="canvas" \| "raised" \| "floating" \| "sidebar"`, optional semantic `as`. Paints the surface fill and binds `--surface-hover` / `--surface-border` for descendants. `floating` is for real menus and popovers. |
 | Horizontal layout on the spacing scale | `Inline` (`shared/ui/layout/inline.tsx`) | `gap`, `align`, `justify`, `wrap`, `as`; flex with no implicit constraints. |
 | Vertical layout on the spacing scale | `Stack` (`shared/ui/layout/stack.tsx`) | Same props; adds `flex-col`. |
-| An icon-only action | `IconButton` | Required `label` (its accessible name); `size="inline"` 20px (4px corners) inside a row or tab, `"compact"` 24px, `"standard"` 28px; the glyph size belongs to the size. One `bg2-highlight` hover, the keyboard ring at every size, `aria-pressed` as a neutral toggle or `pressedTone="tool"` for a toolbar's active tool; `asChild` keeps link semantics. Inside a `Toolbar` or `PanelHeader` the default size is standard (`IconButtonSizeContext`). |
+| An icon-only action | `IconButton` | Required `label` (its accessible name); `size="inline"` 20px (4px corners) inside a row or tab, `"compact"` 24px, `"standard"` 28px; the glyph size belongs to the size. One `bg2-highlight` hover, the keyboard ring at every size, `aria-pressed` as the `selected-bg` fill with no edge or `pressedTone="tool"` for a toolbar's active tool; `asChild` keeps link semantics. Inside a `Toolbar` or `PanelHeader` the default size is standard (`IconButtonSizeContext`). |
 | A group of tools | `Toolbar` (+ `ToolbarSeparator`, `ToolbarText`) | One 36px bar of 28px tools: `bg2`, `border2`, 10px corners, `elevation="floating"` (dropdown shadow) or `"docked"`, `orientation`. One Tab stop: arrow keys, Home and End move between enabled tools. |
 | An action with related choices | `SplitButton` / `splitButtonClasses` | Two bordered halves, each with Button's focus ring; `variant="primary" \| "secondary"`, `size`, `loading` (the menu waits). |
 | A form field | `Field` around `Input`, `Textarea` or a Select trigger | One label (13/18 medium), one hint (12/16 `fg3`) that an error replaces (12/16 `red-primary`); wires `id`, `aria-describedby` and `aria-invalid`. `Input` has `size="compact"`, `appearance="inline"` (rename) and `mono`. |

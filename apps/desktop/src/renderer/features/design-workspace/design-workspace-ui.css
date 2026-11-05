@@ -152,12 +152,13 @@
   color: var(--fg1);
 }
 
+/* The chosen segment is the shared selected fill: selection never draws an
+ * edge. */
 .zd-segment[aria-pressed="true"],
 .zd-segment[aria-checked="true"],
 .zd-segment[data-state="active"],
 .zd-segment[data-state="on"] {
-  background-color: var(--bg1);
-  box-shadow: inset 0 0 0 1px var(--border3);
+  background-color: var(--selected-bg);
   color: var(--fg1);
 }
 
@@ -199,9 +200,16 @@
 
 .zd-icon-button:hover:not(:disabled),
 .zd-icon-button[data-state="open"],
-.zd-icon-button[aria-expanded="true"],
-.zd-icon-button[aria-pressed="true"] {
+.zd-icon-button[aria-expanded="true"] {
   background-color: var(--bg2-hover);
+  color: var(--fg1);
+}
+
+/* Pressed is the selected fill, a step above hover, and holds under the
+ * pointer. */
+.zd-icon-button[aria-pressed="true"],
+.zd-icon-button[aria-pressed="true"]:hover:not(:disabled) {
+  background-color: var(--selected-bg);
   color: var(--fg1);
 }
 
@@ -810,12 +818,16 @@
   color: var(--fg1);
 }
 
-/* Toggles and open menus hold the IconButton pressed look: the fill and the
- * border both lift, so pressed never reads as hover. */
-.zd-canvas-tool[aria-pressed="true"],
+/* An open menu holds the hover; a toggle takes IconButton's pressed look, the
+ * selected fill with no edge. */
 .zd-canvas-tool[aria-expanded="true"] {
-  border-color: var(--border4);
   background-color: var(--bg2-highlight);
+  color: var(--fg1);
+}
+
+.zd-canvas-tool[aria-pressed="true"],
+.zd-canvas-tool[aria-pressed="true"]:hover:not(:disabled) {
+  background-color: var(--selected-bg);
   color: var(--fg1);
 }
 

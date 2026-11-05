@@ -62,9 +62,11 @@ any new surface, and the rules that can be checked move into
    signal.
 7. **Keyboard focus is opaque and only for the keyboard.** Tab shows
    `highlighted-bright` with the 3px halo; a click or typing shows the caret.
-8. **Hover belongs to the surface; selected is a step above it.** Rows use their
-   surface's hover; sidebar, tree and layer selection is `bg2-highlight` with
-   `fg1`.
+8. **Hover belongs to the surface; selected is a fill a step above it, never
+   an edge.** Rows use their surface's hover; sidebar, tree and layer selection
+   is `bg2-highlight` with `fg1`. A pressed toggle, the active tab or segment,
+   and a chosen chip or option fill with `selected-bg`; selection never adds a
+   border, ring, outline or shadow.
 9. **Two tab styles.** A segmented control switches a view; one strip tab serves
    chrome, workbench and chat. A closable tab shows ✕ on hover or focus over a
    fade in its own fill, so it never changes width.
@@ -147,14 +149,14 @@ migrated, then the retired names go in the same branch. The specs are in
 
 | Primitive | Change |
 | --- | --- |
-| Button | Flat Primary and Destructive; Ghost shows Open; `aria-pressed` on Secondary and Ghost; built-in `loading`; disabled keeps hover for its reason tooltip; `variant="primary"` replaces `default`, one size name per height; the legacy `shared/ui/button.tsx` wrapper and icon sizes retire into IconButton. |
-| IconButton | One hover (`bg2-highlight`) on every surface; inline 20 gets the ring and a fixed 12 glyph; neutral pressed; deprecated `hover` and `motion` options retire. |
+| Button | Flat Primary and Destructive; Ghost shows Open; `aria-pressed` on Secondary and Ghost presses to the `selected-bg` fill with no edge; built-in `loading`; disabled keeps hover for its reason tooltip; `variant="primary"` replaces `default`, one size name per height; the legacy `shared/ui/button.tsx` wrapper and icon sizes retire into IconButton. |
+| IconButton | One hover (`bg2-highlight`) on every surface; inline 20 gets the ring and a fixed 12 glyph; pressed is the `selected-bg` fill with no edge (the edgeless `fill` tone retires into it); deprecated `hover` and `motion` options retire. |
 | SplitButton, Toolbar | 28 halves, medium label, per-half focus, `muted-fg` chevron; one toolbar size (bar 36, buttons 28, icons 14), active tool in the selection blue. |
 | Input, Textarea, Select | 13/18 text, 8px side padding, hover `border4`, keyboard-only ring, red invalid, compact 24; Select check at the end; Textarea three-line minimum. |
 | Checkbox, RadioGroup, Switch, Slider | 16px boxes, 2px check, inverted fill when on, hover ring, 50% disabled; Switch thumb #0D0D0D in Dark; Slider track `border3`, range and thumb `fg1`. |
 | Menus, Command, Popover, HoverCard, Tooltip | The floating recipe; menu choice rules; Kbd shortcuts; popover widths 240 / 320 / 400; tooltips solid `bg3`. |
 | Dialog, Toast | 12px corners with `border2`; widths 400 / 520 / 640; one 16px inset; Ghost Cancel; toasts on the floating recipe at 360. |
-| Tabs | Segmented and strip; active `bg2` + `fg1` medium; ✕ over a fade; Dark selected segment `bg4` without an edge. |
+| Tabs | Segmented and strip; strip active `bg2` + `fg1` medium; ✕ over a fade; the selected segment fills `selected-bg` with no edge in both themes. |
 | PanelHeader, ListRow, SidebarRow | 28 actions; ListRow hover `bg1-hover` and no expanded fill; sidebar selected `bg2-highlight`. |
 | Badge, Pill, Kbd, Avatar, StatusIcon | Badge one 20px size with tinted tones; two pill sizes; Kbd 18px `border2` chip; avatar badge outside the clip; status labels `fg3`. |
 | ProgressBar, Card, Tile, Separator | `border3` 4px track; card `bg1-bright` + `border1` + 12; tile hover `bg2-highlight` + `border3`; scroll thumb `border2` → `border3`. |
@@ -610,3 +612,15 @@ Each landed step appends one line: date, workstream, what landed, evidence.
   in all. It caught two regressions, each fixed with a test and an eval
   case. The tab status letter and unsaved dot had lost their hover titles,
   and the Dialog close button sat 2px off the title line.
+- 2026-11-05 · 2, 3, 6 · Direction: selection is a fill, never an edge (the
+  user's correction on the Design inspector tabs, the Home view toggle and
+  filter chips, the sidebar toggle and the Design theme sources). A new
+  `selected-bg` token (Dark `#343434`, a step above hover; Light `bg5`, equal
+  to hover, since anything darker fails AA for status text) is the pressed,
+  active and chosen fill of Button (Secondary, Ghost), IconButton, Pill, Tabs
+  and the Design inspector's segments, icon buttons and tools. Their border4,
+  border2 and inset rings retire, with `--segment-active-*` and IconButton's
+  `fill` tone; the checked RadioGroup card keeps `border1`; the repository icon
+  dialog moves to the chrome tab strip. `ui/selection-edge` fails on any new
+  edge drawn on a selected, pressed, active or current state, in class names
+  and in the renderer's stylesheets.

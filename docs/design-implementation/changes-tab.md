@@ -14,11 +14,11 @@ Changes:
 - Viewed is the checkbox alone; it keeps its Viewed name for screen readers and a Mark viewed tooltip.
 - Diff rows use the Files Diff view’s type and colours: 12px on a 1.6 line, 12px number padding, a 2px bar with + or − in the gutter, and the palette’s row, gutter and word washes.
 - File tab names keep the tab colour; only the status letter is coloured: M yellow, U green, D red.
-- Segmented: 28 track, 24 items; selected is bg1 + border2 in Light, bg4 with no edge in Dark.
+- Segmented: 28 track, 24 items; the selected item fills selected-bg with no edge.
 - Fields: 13/18 text, 8px padding, no shadow; clicking in and typing change nothing.
 - Checkboxes are 16 with a 12px check.
 - Tabs: 28 tall, 6px corners, hover bg1-hover, active bg2 in medium.
-- Icon buttons: 6px corners (4 at 20) and a bg2-highlight hover; while the changes list is open its toggle is a bg2-highlight fill with no edge.
+- Icon buttons: 6px corners (4 at 20) and a bg2-highlight hover; while the changes list is open its toggle fills selected-bg with no edge.
 
 Code notes:
 - Hunk review is removed from the design. When implementing, delete its UI and its functionality: the Accept / Reject bar under each hunk (Changes and diffs opened in a Files tab), the Reject dialog, the stored decisions, the git.reviewHunk and git.reviewHunks operations and their tests. Keep merge-conflict resolution, which shares these files and whose input schema builds on the hunk one. (`features/code-review/hunk-review-actions.tsx · hunk-review-cache.ts · use-hunk-reviews.ts · review-hunk-model.ts · review-annotations.ts:36,74,96-160 · review-annotation-view.tsx:35-47 · shell/workbench/tabs/changes-diff-viewer.tsx:172-190,307-323,465,673-729 · file-viewer.tsx:653-660,891,1004-1024 · platform/git-review-actions.ts:17-30,57-85 · apps/desktop/src/engine/git/review-actions.ts:83-218 · hunk-review-store.ts · apps/desktop/src/engine/workspace/service.ts:549,644,737,1154 · apps/desktop/src/engine/zeros-engine.ts:514,565 · packages/protocol/src/git-review-actions.ts:36-55,65-81,102 · packages/protocol/src/review-hunks.ts`)
@@ -370,7 +370,7 @@ Changes:
 - File tab names keep the tab colour; only the status letter is coloured, so a conflict shows a red ! beside a plain name.
 - The file name sits on the bar as plain text, with no edge or fill; its hit area stays 28px.
 - File options beside the side-column toggles uses lucide ellipsis.
-- Icon buttons: 6px corners (4 at 20) and a bg2-highlight hover; the open side column’s toggle is a bg2-highlight fill with no edge.
+- Icon buttons: 6px corners (4 at 20) and a bg2-highlight hover; the open side column’s toggle fills selected-bg with no edge.
 
 Code notes:
 - Nothing steps between conflicts today: the panel lists Conflict 1, Conflict 2 without moving the editor. The parser already returns each block’s start line, which a navigator can scroll to. (`features/code-review/merge-conflict-actions.tsx:200-232 · packages/protocol/src/merge-conflicts.ts:8,52`)

@@ -10,7 +10,7 @@ Owner today: `shell/workbench/tabs/terminal-tab.tsx · shell/terminal/terminal-w
 
 Changes:
 - Tabs: 28 tall, 6px corners, hover bg1-hover, active bg2 in medium.
-- Icon buttons: 6px corners (4 at 20) and a bg2-highlight hover; toggles add border4.
+- Icon buttons: 6px corners (4 at 20) and a bg2-highlight hover; a pressed toggle fills selected-bg with no edge.
 
 Code notes:
 - One terminal, two headers: a 36px toolbar with 24px actions beside a 28px chip in the tab, and a 40px strip with 28px buttons and a 4px leading edge when docked. (`shell/terminal/terminal-workbench-layout.tsx:89-160 · shell/workbench/tabs/terminal-tab.tsx:770,799-817,1431,1507-1515`)

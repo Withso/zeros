@@ -155,7 +155,7 @@ Composite board: implemented through the boards it imports.
 Owner today: `features/settings/settings-page.tsx (ModelsPanel) · claude-provider-settings.tsx · features/agent/reliability-settings.ts`
 
 Changes:
-- Segmented: 28 track, 24 items; selected is bg1 + border2 in Light, bg4 with no edge in Dark.
+- Segmented: 28 track, 24 items; the selected item fills selected-bg with no edge.
 
 Code notes:
 - The agent and model selects share one trailing slot, so a long model name reflows the label column; Automatic is static text in a control slot. (`features/settings/settings-page.tsx:1166-1206,1212`)
