@@ -9,26 +9,33 @@ const protocolFields = new Set(["code", "severity", "failureKind", "phase", "cos
   "inputType", "presentation", "autoResolution", "queuedDelivery", "queuedPresentation", "marker", "textMode", "delivery", "event"]);
 const rawFields = new Set(["rawInput", "rawOutput"]);
 
+function redactionVariants(values: readonly (string | undefined)[]): string[] {
+  const variants = [...new Set(values.filter((value): value is string => !!value).flatMap(value => {
+    const json = JSON.stringify(value).slice(1, -1);
+    let uri = value;
+    try { uri = encodeURIComponent(value); } catch { /* JSON also permits unpaired UTF-16 surrogates. */ }
+    return [value, json, JSON.stringify(json).slice(1, -1), uri, Buffer.from(value).toString("base64"), Buffer.from(value).toString("base64url")];
+  }))];
+  if (variants.length) variants.push("[redacted]");
+  return variants.sort((a, b) => b.length - a.length);
+}
+const redactionPattern = (variants: readonly string[]) => variants.length
+  ? new RegExp(variants.map(value => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"), "g") : undefined;
+
 /** Values are child inputs, never process-global state. The same immutable
  * selection scrubs diagnostics and mirrored prose, including escaped echoes. */
 export class ApplicationEnvironment {
   readonly variables: Readonly<Record<string, string>>;
   private readonly pattern?: RegExp;
   private readonly carry: number;
+  private readonly variants: readonly string[];
 
   constructor(material: CloudEnvironmentMaterial = { variables: {}, files: [] }) {
     if (!CloudEnvironmentMaterialSchema.safeParse(material).success) throw new Error("Invalid application environment.");
     this.variables = Object.freeze({ ...material.variables });
     const values = [...Object.values(material.variables), ...material.files.flatMap(file => [file.content, ...Object.values(parseEnv(file.content))])];
-    const variants = [...new Set(values.filter((value): value is string => !!value).flatMap(value => {
-      const json = JSON.stringify(value).slice(1, -1);
-      let uri = value;
-      try { uri = encodeURIComponent(value); } catch { /* JSON also permits unpaired UTF-16 surrogates. */ }
-      return [value, json, JSON.stringify(json).slice(1, -1), uri, Buffer.from(value).toString("base64"), Buffer.from(value).toString("base64url")];
-    }))];
-    if (variants.length) variants.push("[redacted]");
-    variants.sort((a, b) => b.length - a.length);
-    this.pattern = variants.length ? new RegExp(variants.map(value => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"), "g") : undefined;
+    const variants = this.variants = redactionVariants(values);
+    this.pattern = redactionPattern(variants);
     this.carry = variants.reduce((longest, value) => Math.max(longest, value.length - 1), 0);
   }
 
@@ -69,17 +76,20 @@ export class ApplicationEnvironment {
     return this.text(value);
   }
 
-  stream(write: (text: string) => void): { push(chunk: Buffer): void; end(truncated?: boolean): void } {
+  stream(write: (text: string) => void, privateText: readonly string[] = []): { push(chunk: Buffer): void; end(truncated?: boolean): void } {
     const decoder = new StringDecoder("utf8");
+    const variants = privateText.length ? [...new Set([...this.variants, ...redactionVariants(privateText)])].sort((a, b) => b.length - a.length) : this.variants;
+    const pattern = privateText.length ? redactionPattern(variants) : this.pattern;
+    const carry = privateText.length ? variants.reduce((longest, value) => Math.max(longest, value.length - 1), 0) : this.carry;
     let pending = "";
     const drain = (final: boolean) => {
-      let boundary = final ? pending.length : Math.max(0, pending.length - this.carry);
+      let boundary = final ? pending.length : Math.max(0, pending.length - carry);
       if (!boundary) return;
       let cursor = 0, output = "";
-      if (this.pattern) {
-        this.pattern.lastIndex = 0;
+      if (pattern) {
+        pattern.lastIndex = 0;
         let match: RegExpExecArray | null;
-        while ((match = this.pattern.exec(pending)) && match.index < boundary) {
+        while ((match = pattern.exec(pending)) && match.index < boundary) {
           output += pending.slice(cursor, match.index) + "[redacted]";
           cursor = match.index + match[0].length;
           boundary = Math.max(boundary, cursor);

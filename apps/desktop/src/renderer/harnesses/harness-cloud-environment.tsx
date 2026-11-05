@@ -5,12 +5,14 @@ import "../../../../../styles/semantic-tokens.css";
 import "../../../../../styles/globals.css";
 
 const userId = "11111111-1111-4111-8111-111111111111";
+let accountId = userId;
+const computer = new URLSearchParams(location.search).has("computer");
 const organizations = ["22222222-2222-4222-8222-222222222222", "33333333-3333-4333-8333-333333333333"];
 window.__ZEROS_NATIVE__ = {
   on: () => () => {},
   async invoke<T>(command: string): Promise<T> {
-    if (command === "auth_get_access_token") return { access_token: "synthetic-environment-session" } as T;
-    if (command === "auth_get_session_user") return { sub: userId, accountId: userId, email: "fixture@example.test", name: "Fixture", provider: "workos" } as T;
+    if (command === "auth_get_access_token") return { access_token: `synthetic-environment-session-${accountId}` } as T;
+    if (command === "auth_get_session_user") return { sub: accountId, accountId, email: "fixture@example.test", name: "Fixture", provider: "workos" } as T;
     return null as T;
   },
 };
@@ -19,6 +21,7 @@ async function main() {
   const React = await import("react"), { createRoot } = await import("react-dom/client");
   const { Button, TooltipProvider } = await import("../shared/ui/primitives");
   const { EnvironmentPanel } = await import("../features/settings/environment-panel");
+  const { CloudComputerPanel } = await import("../features/settings/cloud-computer-panel");
   const { acceptOrganizationSnapshot } = await import("../features/team/team-store");
   const { setActiveOrganizationSelection } = await import("../features/team/active-team");
   const { saveEnvironmentSelection } = await import("../features/settings/environment-selection");
@@ -28,6 +31,12 @@ async function main() {
     role: "owner" as const, isPersonal: false, defaultTeamId: null, workspaceCapabilities: { local: true, cloud: true },
     teamCapabilities: { multiple: false as const, canCreate: false as const } }));
   acceptOrganizationSnapshot({ user: { id: userId, email: "fixture@example.test", displayName: "Fixture", staffRole: null }, organizations: membership, teams: membership });
+  function identity(next: string, role: "owner" | "member" = "owner", personal = false) {
+    accountId = next;
+    const rows = membership.map(row => ({ ...row, role, isPersonal: personal }));
+    acceptOrganizationSnapshot({ user: { id: next, email: "fixture@example.test", displayName: "Fixture", staffRole: null }, organizations: rows, teams: rows });
+    setActiveOrganizationSelection(organizations[0]!, personal);
+  }
   setActiveOrganizationSelection(organizations[0]!, false);
   for (const [i, organization] of organizations.entries()) saveEnvironmentSelection(userId, organization, { scope: "cloud",
     repository: { id: i ? "456" : "123", owner: "fixture", name: i ? "second" : "first", defaultBranch: "main", private: true, canPush: true } });
@@ -45,8 +54,14 @@ async function main() {
       <nav aria-label="Environment fixture owners" className="flex gap-2">
         {organizations.map((id, i) => <Button key={id} variant="secondary" onClick={() => setActiveOrganizationSelection(id, false)}>Organization {i ? "B" : "A"}</Button>)}
         <Button variant="ghost" onClick={() => setActive(value => !value)}>{active ? "Hide settings" : "Show settings"}</Button>
+        {computer && <>
+          <Button variant="secondary" onClick={() => identity("55555555-5555-4555-8555-555555555555")}>Account B</Button>
+          <Button variant="secondary" onClick={() => identity(userId)}>Account A</Button>
+          <Button variant="secondary" onClick={() => identity(accountId, "member")}>Member</Button>
+          <Button variant="secondary" onClick={() => identity(accountId, "owner", true)}>Local owner</Button>
+        </>}
       </nav>
-      <EnvironmentPanel surfaceActive={active} />
+      {computer ? <CloudComputerPanel surfaceActive={active} /> : <EnvironmentPanel surfaceActive={active} />}
     </div></main></BridgeProvider></TooltipProvider>;
   }
   createRoot(document.getElementById("root")!).render(<React.StrictMode><Harness /></React.StrictMode>);

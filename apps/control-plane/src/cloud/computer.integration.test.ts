@@ -67,6 +67,25 @@ d("cloud v2 Cloud Computer builds", () => {
     await expect(computers.enqueue(org, admin, recipe)).rejects.toMatchObject({ code: "computer_build_in_progress" });
   });
 
+  it("pins and logs the selected path while builders run only the admin validation command", async () => {
+    const boat = compute(), selection = { repository: "withso/zeros", setup: "pnpm install", setupScript: "fixture-setup/bootstrap.sh" };
+    await expect(computers.saveRecipe(org, member, [selection], 0)).rejects.toMatchObject({ status: 403 });
+    await computers.saveRecipe(org, admin, [selection], 0);
+    const build = await computers.buildConfigured(org, admin, 1);
+    const builder = new CloudV2ComputerBuilder({ computers, compute: boat, channel: "alpha", runtime, cloneToken: async () => "synthetic-setup-token" });
+    await builder.tick();
+    const overview = await computers.overview(org);
+    expect(overview.recipe.repositories).toEqual([selection]);
+    expect(overview.builds[0]).toMatchObject({ state: "succeeded", recipe: { repositories: [{ ...selection, commit }] } });
+    const commands = vi.mocked(boat.execLong).mock.calls.map(([, command]) => command);
+    expect(commands.some(command => command.includes(selection.setup))).toBe(true);
+    expect(commands.some(command => command.includes(selection.setupScript))).toBe(false);
+    expect(await computers.log(org, build.id)).toContain("workspace setup withso/zeros: fixture-setup/bootstrap.sh");
+    await computers.saveRecipe(org, admin, [{ ...selection, setupScript: "fixture-setup/other.sh" }], overview.recipeRevision);
+    const discarded = await computers.discardRecipe(org, admin, overview.recipeRevision + 1);
+    expect(discarded.recipe.repositories).toEqual([selection]);
+  });
+
   it.each(["save", "discard", "enqueue", "configured", "reactivate", "automatic"] as const)(
     "rechecks the administrator after an organization lock wait (%s)", async operation => {
       await pool.query("UPDATE organization_members SET role='owner' WHERE org_id=$1 AND user_id=$2", [org, member]);

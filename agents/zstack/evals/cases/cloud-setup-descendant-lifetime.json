@@ -1,0 +1,9 @@
+{
+  "id": "cloud-setup-descendant-lifetime",
+  "kind": "replay",
+  "area": "cloud-worker",
+  "fixedBy": "pending",
+  "symptom": "A cloud setup shell could exit successfully while a background child with redirected output survived both setup completion and worker disposal.",
+  "rule": "Treat setup's native process group as one lifetime. Verify descendants with closed output as well as a live shell, and retire them before setup completion or Stop acknowledgement (zstack-verify, principles 16 and 18).",
+  "check": "pnpm --dir apps/cloud-worker exec vitest run src/workspace/__tests__/setup.test.ts"
+}

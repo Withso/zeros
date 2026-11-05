@@ -1,4 +1,5 @@
 import { expect } from "@playwright/test";
+import { runCloudRepositorySetupSmoke } from "./ui-smoke-cloud-repository-setup.mjs";
 
 export async function runCloudEnvironmentSmoke({ page, check }) {
   const records = new Map(), writes = [], origin = new URL(page.url()).origin;
@@ -79,4 +80,5 @@ export async function runCloudEnvironmentSmoke({ page, check }) {
     expect(writes.length).toBe(count);
     check("Clearing defaults changes future pins only; switching to Local never uploads its vault", true);
   } finally { await page.unroute(endpoint, handle); }
+  await runCloudRepositorySetupSmoke({ page, check });
 }

@@ -9,8 +9,8 @@ const CHANGE_LABEL: Record<ComputerChange, string> = { repositories: "repositori
 
 /** The editable part of a build's recipe. */
 export function editableRepositories(build: Pick<CloudV2Build, "recipe"> | null | undefined): CloudV2RepositoryDraft[] {
-  return (build?.recipe.repositories ?? []).map(({ repository, ref, setup }) =>
-    ({ repository, ...(ref ? { ref } : {}), ...(setup ? { setup } : {}) }));
+  return (build?.recipe.repositories ?? []).map(({ repository, ref, setup, setupScript }) =>
+    ({ repository, ...(ref ? { ref } : {}), ...(setup ? { setup } : {}), ...(setupScript ? { setupScript } : {}) }));
 }
 
 /** What differs between the configured repositories and the live build. */
@@ -23,7 +23,7 @@ export function computerChanges(configured: readonly CloudV2RepositoryDraft[], l
     const previous = before.get(key(row));
     if (!previous) continue;
     if ((row.ref ?? "") !== (previous.ref ?? "")) changes.add("branches");
-    if ((row.setup ?? "") !== (previous.setup ?? "")) changes.add("setup");
+    if ((row.setup ?? "") !== (previous.setup ?? "") || (row.setupScript ?? "") !== (previous.setupScript ?? "")) changes.add("setup");
   }
   return (["repositories", "branches", "setup"] as const).filter(change => changes.has(change));
 }

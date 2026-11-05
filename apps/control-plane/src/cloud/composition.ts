@@ -137,7 +137,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
         id: workspace.id, organizationId: workspace.organizationId, repository: workspace.repository,
         checkoutPath: `${CLOUD_V2_HOME}/${workspace.repository}`, branch: workspace.branch, baseBranch: workspace.baseBranch,
         github: repositoryBinding,
-        ...(setup !== null ? { setup } : {}),
+        ...(setup ?? {}),
         ...(baseCommit ? { baseCommit } : {}),
       },
       agents,

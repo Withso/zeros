@@ -2,6 +2,7 @@
 // so the shared workspace UI renders v2 workspaces without its own copy.
 import { z } from "zod";
 import { CloudGithubUnavailableReasonSchema } from "@zeros/protocol/cloud-github-connection";
+import { RepositorySetupPathSchema } from "@zeros/protocol/cloud-v2-relay";
 import { prepareCloudPromptErasure } from "./cloud-prompt-erasure";
 import { cloudAccountRequest } from "./cloud-workspaces";
 import type { CloudWorkspaceDocument } from "./cloud-workspace-contract";
@@ -189,9 +190,10 @@ export const CloudV2RepositorySchema = z.object({
   commit: z.string().optional(),
   branch: z.string().optional(),
   setup: z.string().max(8000).optional(),
+  setupScript: RepositorySetupPathSchema.optional(),
 });
 /** What an admin edits: a repository, its branch or tag, and its setup. */
-export const CloudV2RepositoryDraftSchema = CloudV2RepositorySchema.pick({ repository: true, ref: true, setup: true });
+export const CloudV2RepositoryDraftSchema = CloudV2RepositorySchema.pick({ repository: true, ref: true, setup: true, setupScript: true });
 export type CloudV2RepositoryDraft = z.infer<typeof CloudV2RepositoryDraftSchema>;
 export const CloudV2BuildSchema = z.object({
   id: uuid, organizationId: uuid, version: z.number().int().positive(),

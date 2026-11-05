@@ -5,6 +5,9 @@
 // the fixed id "run", which maps back to the legacy session id so persisted run
 // terminals keep matching.
 
+export { selectRepositorySetup, quoteSetupArgument } from "./repository-setup";
+export type { RepositorySetupSelection } from "./repository-setup";
+
 export const RUN_ACTION_PLATFORMS = ["mac", "linux", "win"] as const;
 export type RunActionPlatform = (typeof RUN_ACTION_PLATFORMS)[number];
 

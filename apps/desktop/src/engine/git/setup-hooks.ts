@@ -24,6 +24,7 @@ import {
 } from "node:fs/promises";
 import { closeSync, constants as fsConstants, fstatSync, lstatSync, openSync, readFileSync } from "node:fs";
 import path from "node:path";
+import { selectRepositorySetup, quoteSetupArgument as shellQuote } from "@zeros/protocol/run-actions";
 import { GitError } from "./errors";
 // Reuse the engine's cached login-shell PATH resolver so an inline command
 // like `pnpm install` finds the user's tools (the Electron-spawned engine's
@@ -380,11 +381,6 @@ function buildSetupEnv(extra: Record<string, string>): Record<string, string> {
   return { ...env, ...extra };
 }
 
-/** POSIX single-quote a path/string so it survives `sh -c "<cmd>"`. */
-function shellQuote(s: string): string {
-  return `'${s.replace(/'/g, `'\\''`)}'`;
-}
-
 /** The env for the BACKGROUND setup PTY. Same scrubbed allowlist + ZEROS_*
  *  context as the (former) synchronous setup script — so a repo-resident setup
  *  command still cannot read the engine's provider keys or GitHub token —
@@ -444,12 +440,9 @@ async function resolveRepositorySetupCommand(opts: {
   inlineCommand?: string;
   allowAutoSetup?: boolean;
 }): Promise<string | null> {
-  if (opts.setupScript && opts.setupScript.trim()) {
-    return shellQuote(path.join(opts.repoRoot, opts.setupScript));
-  }
-  if (opts.inlineCommand && opts.inlineCommand.trim()) {
-    return opts.inlineCommand.trim();
-  }
+  const selected = selectRepositorySetup(opts);
+  if (selected?.kind === "script") return shellQuote(path.join(opts.repoRoot, selected.path));
+  if (selected?.kind === "command") return selected.command;
   if (opts.allowAutoSetup && process.env.ZEROS_AUTORUN_SETUP_SH === "1") {
     const auto = await defaultSetupScript(opts.repoRoot);
     if (auto) return shellQuote(path.join(opts.repoRoot, auto));

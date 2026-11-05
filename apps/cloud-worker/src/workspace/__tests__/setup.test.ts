@@ -56,6 +56,20 @@ it("joins a real shell that ignores TERM after cancelling its process group", as
   expect(JSON.parse(await readFile(f.statusPath, "utf8"))).toMatchObject({ state: "interrupted" });
 });
 
+it("retires background descendants even when their shell already exited and closed output", async () => {
+  const f = await fixture("sleep 60 </dev/null >/dev/null 2>&1 &\nprintf '%s' $! > descendant\n");
+  let pid: number | undefined;
+  try {
+    f.setup.start(true); await expect.poll(() => f.setup.busy).toBe(false);
+    pid = Number(await readFile(join(f.directory, "descendant"), "utf8"));
+    await f.setup.dispose();
+    await expect.poll(async () => {
+      const stat = await readFile(`/proc/${pid}/stat`, "utf8").catch(() => "");
+      return stat !== "" && !["Z", "X"].includes(stat.slice(stat.lastIndexOf(")") + 2, stat.lastIndexOf(")") + 3));
+    }, { timeout: 1000 }).toBe(false);
+  } finally { if (pid) { try { process.kill(pid, "SIGKILL"); } catch { /* Already exited. */ } } }
+});
+
 it("treats an existing admission path as final without following or overwriting it", async () => {
   const runner = vi.fn<SetupRunner>(async () => 0), f = await fixture("unused", runner);
   const outside = join(f.directory, "retained"); await writeFile(outside, "unchanged");

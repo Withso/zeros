@@ -13,8 +13,8 @@ import { Badge, CodeTextarea } from "../../shared/ui/primitives";
 import { MessageRow } from "../../shared/ui/primitives/message-row";
 import { KeyedAsyncCache } from "../../shared/lib/keyed-async-cache";
 import { useRecoveringRead } from "../../state/use-recovering-read";
-import { useActiveOrganization, useTeams } from "../team/team-store";
-import { ControlPlaneError } from "../team/control-plane";
+import { getOrganizationStoreGeneration, getTeamStoreState, useActiveOrganization, useTeams } from "../team/team-store";
+import { CONTROL_PLANE_URL, ControlPlaneError } from "../team/control-plane";
 import { SettingsGroup, SettingsSection } from "./settings-ui";
 import { CloudRepositoryPicker, type CloudRepositorySelection } from "./cloud-repository-picker";
 import {
@@ -28,7 +28,12 @@ const MAX_REPOSITORIES = 10;
 /** Typing in a branch or setup field saves after a pause; list edits at once. */
 const TYPING_SAVE_MS = 600;
 
-const computerKey = (userId: string, organizationId: string) => JSON.stringify([userId, organizationId]);
+const computerKey = (userId: string, organizationId: string) => JSON.stringify([CONTROL_PLANE_URL, getOrganizationStoreGeneration(), userId, organizationId]);
+function assertComputerOwner(key: string, organizationId: string): void {
+  const me = getTeamStoreState().me, organization = (me?.organizations ?? me?.teams)?.find(row => row.id === organizationId);
+  if (!me || key !== computerKey(me.user.id, organizationId) || !organization || organization.isPersonal ||
+      (organization.role !== "owner" && organization.role !== "admin")) throw new Error("The Cloud Computer account changed. Reopen its settings.");
+}
 /** Intent warming for the Settings entry; only owners and admins can read it. */
 export function prefetchCloudComputer(userId: string, organization: { id: string; isPersonal: boolean; role?: string }): void {
   if (organization.isPersonal || (organization.role !== "owner" && organization.role !== "admin")) return;
@@ -46,7 +51,7 @@ export function CloudComputerPanel({ surfaceActive = true }: { surfaceActive?: b
   const { me } = useTeams();
   if (!organization || organization.isPersonal || !me) return null;
   const canManage = organization.role === "owner" || organization.role === "admin";
-  return <CloudComputerScope key={`${me.user.id}:${organization.id}`} userId={me.user.id}
+  return <CloudComputerScope key={computerKey(me.user.id, organization.id)} userId={me.user.id}
     organizationId={organization.id} canManage={canManage} active={surfaceActive} />;
 }
 
@@ -72,7 +77,9 @@ function useRecipeDraft(organizationId: string, key: string, data: CloudV2Comput
   callbacks.current = { refresh, onError };
   const [queue] = useState(() => new RecipeSaveQueue<CloudV2RepositoryDraft[]>({
     save: async (repositories, revision) => {
+      assertComputerOwner(key, organizationId);
       const saved = await saveCloudV2ComputerRecipe(organizationId, repositories, revision);
+      assertComputerOwner(key, organizationId);
       publishRecipe(key, latest, saved);
       return saved.recipeRevision;
     },
@@ -84,8 +91,13 @@ function useRecipeDraft(organizationId: string, key: string, data: CloudV2Comput
         ? "The Cloud Computer changed elsewhere. The latest repositories are shown." : message(error));
     },
   }));
-  // Leaving with a pending pause still saves it.
-  useEffect(() => () => { if (queue.waiting) void queue.flush(); }, [queue]);
+  // Owner navigation can finish an authored save, but a retired account must
+  // not send its queued selection under the replacement account's authority.
+  useEffect(() => () => {
+    if (!queue.waiting) return;
+    try { assertComputerOwner(key, organizationId); void queue.flush(); }
+    catch { queue.cancel(); }
+  }, [queue, key, organizationId]);
 
   const edit = useCallback((next: CloudV2RepositoryDraft[], delayMs: number) => {
     setLocal(next);
@@ -132,6 +144,7 @@ function CloudComputerScope({ userId, organizationId, canManage, active }: {
   };
   const build = () => run(async () => {
     await draft.settle();
+    assertComputerOwner(key, organizationId);
     const revision = draft.revision();
     if (draft.legacy || revision === undefined) await buildCloudV2Computer(organizationId, configured);
     else await buildConfiguredCloudV2Computer(organizationId, revision);
@@ -142,17 +155,21 @@ function CloudComputerScope({ userId, organizationId, canManage, active }: {
     // discard names the revision it produced.
     draft.reset();
     await draft.settle();
+    assertComputerOwner(key, organizationId);
     const current = draft.latest.current, revision = draft.revision();
     if (draft.legacy || revision === undefined || !current.data) return;
-    publishRecipe(key, draft.latest, await discardCloudV2ComputerRecipe(organizationId, revision));
+    const saved = await discardCloudV2ComputerRecipe(organizationId, revision);
+    assertComputerOwner(key, organizationId);
+    publishRecipe(key, draft.latest, saved);
   });
-  const activate = (buildId: string) => run(() => activateCloudV2Build(organizationId, buildId));
+  const activate = (buildId: string) => run(() => { assertComputerOwner(key, organizationId); return activateCloudV2Build(organizationId, buildId); });
 
-  const update = (repository: string, patch: { ref?: string; setup?: string }) =>
+  const update = (repository: string, patch: { ref?: string; setup?: string; setupScript?: string }) =>
     draft.edit(configured.map(row => {
       if (row.repository !== repository) return row;
       const next = { ...row, ...patch };
-      return { repository: next.repository, ...(next.ref?.trim() ? { ref: next.ref.trim() } : {}), ...(next.setup?.trim() ? { setup: next.setup } : {}) };
+      return { repository: next.repository, ...(next.ref?.trim() ? { ref: next.ref.trim() } : {}), ...(next.setup?.trim() ? { setup: next.setup } : {}),
+        ...(next.setupScript ? { setupScript: next.setupScript } : {}) };
     }), TYPING_SAVE_MS);
   const remove = (repository: string) => draft.edit(configured.filter(row => row.repository !== repository), 0);
   const same = (row: CloudV2RepositoryDraft, repository: { owner: string; name: string }) =>
@@ -221,7 +238,14 @@ function CloudComputerScope({ userId, organizationId, canManage, active }: {
               value={row.ref ?? ""} onChange={event => update(row.repository, { ref: event.target.value })} disabled={locked} />
             <CodeTextarea aria-label={`${row.repository} setup command`} value={row.setup ?? ""}
               readOnly={locked} offscreen={!active} onChange={value => update(row.repository, { setup: value })}
-              description="Runs at each build and in each new workspace" />
+              description={row.setupScript ? "Build validation command (e.g. pnpm install). Workspaces use the selected script below."
+                : "Runs at each build and in each new workspace"} />
+            <label className="text-fg2 flex flex-col gap-1 text-xs">
+              Workspace setup script (optional)
+              <Input aria-label={`${row.repository} workspace setup script`} placeholder="scripts/setup.sh" maxLength={512}
+                value={row.setupScript ?? ""} onChange={event => update(row.repository, { setupScript: event.target.value })} disabled={locked} />
+              <span className="text-fg3 text-3xxs">Tracked Bash script, relative to the repository. Replaces the command in workspaces and runs once on each new disk, after environment files are ready.</span>
+            </label>
           </div>
         ))}
         <div className="flex flex-col gap-1">

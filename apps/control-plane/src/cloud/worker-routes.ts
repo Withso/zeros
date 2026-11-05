@@ -69,8 +69,11 @@ async function configuration(deps: CloudV2WorkerRouteDeps, workspace: CloudV2Wor
       const { mcpServers, githubPullRequests, githubUserTokens, gitIdentity, agentInteractions, codeReview, historyReplacement: _historyReplacement, environment, ...legacy } = config;
       if (environment && !features.has("workspace-environment-v1"))
         throw new HttpError(409, "cloud_environment_runtime_required", "Update the cloud runtime before opening this workspace.");
-      const { setup, baseCommit, github, ...workspaceConfig } = config.workspace;
+      const { setup, setupScript, baseCommit, github, ...workspaceConfig } = config.workspace;
+      if (setupScript !== undefined && !features.has("repository-setup-v1"))
+        throw new HttpError(409, "cloud_repository_setup_runtime_required", "Update the cloud runtime before opening this workspace.");
       return { ...legacy, workspace: { ...workspaceConfig,
+        ...(setupScript !== undefined ? { setupScript } : {}),
         ...(features.has("github-pr-v1") && github ? { github } : {}),
         ...(features.has("workspace-setup-v1") && setup !== undefined ? { setup } : {}),
         ...(features.has("checkout-v2") && baseCommit !== undefined ? { baseCommit } : {}) },

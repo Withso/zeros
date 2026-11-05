@@ -12,6 +12,7 @@ import { CloudV2PromptOutbox } from "./prompt-outbox.js";
 import { computerSourceReviewRequired, readComputerSourceTargets } from "./computer-provenance.js";
 import { CloudSourceTargetSchema } from "./source-authority.js";
 import { pinCloudEnvironment, releaseCloudEnvironment } from "./environment-store.js";
+import { originalSetupBuild } from "./setup-selection.js";
 
 import { mirrorMessageWindow, type MessageWindow, type WindowOptions } from "./history.js";
 import { mirrorMessageSearch, type SearchOptions } from "./history-search.js";
@@ -91,6 +92,10 @@ export type CloudV2LifecycleWorkspace = CloudV2Workspace & {
 };
 export type CloudV2RestoreCreate = { from: string; name: string; env: Record<string, string>; requestedAt: string };
 
+function restoreCreate(value: CloudV2RestoreCreate | null): CloudV2RestoreCreate | null {
+  return value && { from: value.from, name: value.name, env: value.env, requestedAt: value.requestedAt };
+}
+
 type Row = {
   id: string; org_id: string; creator_user_id: string; name: string; repository: string; branch: string; base_branch: string;
   state: CloudV2WorkspaceState; boat_sandbox_id: string | null; computer_build_id: string | null;
@@ -145,7 +150,7 @@ function lifecycleWorkspace(row: LifecycleRow): CloudV2LifecycleWorkspace {
         savedAt: row.checkpoint_saved_at.toISOString(), stopGeneration: row.checkpoint_stop_generation, ...(reuse ? { reuse } : {}) }
     : null;
   return { ...workspace(row), leaseRenewedAt: row.lease_renewed_at?.toISOString() ?? null, baseCommit: row.base_commit,
-    checkpoint, restorePending: row.restore_pending, restoreAttempt: row.restore_attempt, restoreCreate: row.restore_create,
+    checkpoint, restorePending: row.restore_pending, restoreAttempt: row.restore_attempt, restoreCreate: restoreCreate(row.restore_create),
     stopGeneration: row.stop_generation, checkpointUploadUntil: uploadHorizon(row.checkpoint_uploads),
     checkpointRetryFork: checkpointFork(row.checkpoint_retry_fork) };
 }
@@ -800,8 +805,8 @@ export class CloudV2Store {
    * that wins the race still finds the replacement. */
   async beginRestore(id: string, lostSandboxId: string | null, request: { attempt: string } & Omit<CloudV2RestoreCreate, "from" | "requestedAt">): Promise<{ attempt: string; create: CloudV2RestoreCreate } | "no_computer" | null> {
     return withSystemTx(this.pool, async tx => {
-      const { rows } = await tx.query<{ org_id: string }>(
-        `SELECT org_id FROM cloud_v2_workspaces WHERE id=$1 AND state='starting' AND boat_sandbox_id IS NOT DISTINCT FROM $2::text
+      const { rows } = await tx.query<{ org_id: string; computer_build_id: string | null; restore_create: unknown }>(
+        `SELECT org_id,computer_build_id,restore_create FROM cloud_v2_workspaces WHERE id=$1 AND state='starting' AND boat_sandbox_id IS NOT DISTINCT FROM $2::text
            AND checkpoint_object IS NOT NULL FOR UPDATE`, [id, lostSandboxId]);
       if (!rows[0]) return null;
       // As at creation: activation and cleanup wait for this pin.
@@ -812,13 +817,14 @@ export class CloudV2Store {
            AND b.snapshot_deleted_at IS NULL AND b.cleanup_requested_at IS NULL
          FOR SHARE OF c,b`, [rows[0].org_id]);
       if (!active.rows[0]) return "no_computer";
+      const setup = originalSetupBuild(rows[0].computer_build_id, rows[0].restore_create);
       const recorded = await tx.query<{ restore_attempt: string; restore_create: CloudV2RestoreCreate }>(
         `UPDATE cloud_v2_workspaces SET restore_pending=true, restore_attempt=$3, boat_sandbox_id=NULL, computer_build_id=$2,
-           restore_create=jsonb_build_object('from',$4::text,'name',$5::text,'env',$6::jsonb,'requestedAt',clock_timestamp()),
+           restore_create=jsonb_build_object('from',$4::text,'name',$5::text,'env',$6::jsonb,'requestedAt',clock_timestamp()) || $7::jsonb,
            worker_route_url=NULL, worker_port_token=NULL, worker_token_hash=NULL, worker_boot_id=NULL
          WHERE id=$1 RETURNING restore_attempt, restore_create`,
-        [id, active.rows[0].id, request.attempt, active.rows[0].snapshot_name, request.name, JSON.stringify(request.env)]);
-      return { attempt: recorded.rows[0]!.restore_attempt, create: recorded.rows[0]!.restore_create };
+        [id, active.rows[0].id, request.attempt, active.rows[0].snapshot_name, request.name, JSON.stringify(request.env), JSON.stringify(setup)]);
+      return { attempt: recorded.rows[0]!.restore_attempt, create: restoreCreate(recorded.rows[0]!.restore_create)! };
     });
   }
 
