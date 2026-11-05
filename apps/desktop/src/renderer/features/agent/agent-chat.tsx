@@ -99,7 +99,7 @@ import { turnGet } from "../../platform/turns";
 import { turnRowCache, turnRowKey } from "../../state/read-caches";
 import { useCachedRead } from "../../state/use-cached-read";
 import { findProjectForFolder } from "../../state/workspace-resolution";
-import { Bot, Square, ArrowLeft, Upload, Check } from "lucide-react";
+import { Bot, Square, ArrowLeft, Check } from "lucide-react";
 import {
   encodeAttachments,
   reportSkippedAttachments,
@@ -108,9 +108,12 @@ import type { ComposerAttachment } from "./composer-attachments";
 import { isSubmittedComposerDocument } from "./composer-submission";
 import { useCloudWorkspaceAccountAccess } from "../team/cloud-workspace-account-access";
 import {
+  COMPOSER_DRAG_CLS,
   COMPOSER_FILE_ACCEPT,
+  COMPOSER_SEND_CLS,
   COMPOSER_SURFACE_CLS,
   COMPOSER_SURFACE_RADIUS,
+  ComposerDropVeil,
   TRANSCRIPT_STATUS_ROW_CLS,
 } from "./composer-shell";
 import { COMPOSER_DOCK_FADE } from "@/renderer/shared/ui/composer-surface";
@@ -4580,10 +4583,7 @@ function AgentChatBody({
                 // changes nothing.
                 COMPOSER_SURFACE_CLS,
                 COMPOSER_SURFACE_RADIUS,
-                // Drag: the same composer edge, dashed, with a soft ring; `!`
-                // keeps it identical whether or not the composer is focused.
-                dragActive &&
-                  "!border-(--composer-border) ring-highlighted-bright/30 border-dashed ring-2",
+                dragActive && COMPOSER_DRAG_CLS,
                 // Guarded modes (Claude Plan / Codex Ask / Cursor Ask): hide the
                 // solid border; the SVG dotted frame below provides the visible
                 // edge (spaced round dots, --border4).
@@ -4602,20 +4602,7 @@ function AgentChatBody({
               so the popover matches the composer width,
               not the full-width wrapper above. */}
               {composerSuggestionPopup}
-              {dragActive && (
-                <div
-                  className={cn(
-                    "bg-bg3/75 text-fg2 pointer-events-none absolute inset-0 z-[5] flex flex-col items-center justify-center gap-1.5 p-3 text-xs",
-                    // Tracks the card's corners so the drop veil doesn't square
-                    // off inside them.
-                    COMPOSER_SURFACE_RADIUS,
-                  )}
-                  aria-hidden="true"
-                >
-                  <Upload size={20} />
-                  <span>Drop files to attach</span>
-                </div>
-              )}
+              {dragActive && <ComposerDropVeil />}
               <PromptInput
                 onSubmit={(e) => {
                   e.preventDefault();
@@ -4770,8 +4757,7 @@ function AgentChatBody({
                                 ? !queuedEditHasContent
                                 : !canSend
                         }
-                        // 28px like every toolbar control; Send is the only circle.
-                        className="disabled:bg-bg2-hover disabled:text-fg2 aria-disabled:bg-bg2-hover aria-disabled:text-fg2 size-7 disabled:opacity-100"
+                        className={COMPOSER_SEND_CLS}
                       >
                         {composerStreaming ? (
                           <Square className="size-3" />

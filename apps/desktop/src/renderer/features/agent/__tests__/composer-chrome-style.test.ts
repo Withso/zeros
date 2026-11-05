@@ -73,10 +73,36 @@ describe("composer chrome", () => {
     // Dragging files over the card and the guarded (plan/ask) frame both
     // override the border with `!`, so a focused composer looks identical to an
     // unfocused one in those states.
-    expect(agentChat).toContain(
-      '"!border-(--composer-border) ring-highlighted-bright/30 border-dashed ring-2"',
+    expect(code("../composer-shell.tsx")).toMatch(
+      /export const COMPOSER_DRAG_CLS =\s*"!border-\(--composer-border\) ring-highlighted-bright\/30 border-dashed ring-2"/,
     );
+    expect(agentChat).toContain("dragActive && COMPOSER_DRAG_CLS");
+    expect(agentChat).toContain("{dragActive && <ComposerDropVeil />}");
     expect(agentChat).toContain('"!border-transparent"');
+  });
+
+  it("edits a sent message in the composer's own card", () => {
+    // The inline edit is the composer around the same editor and pills: its
+    // surface and 18px corners, its drag edge and drop veil, and its 28px
+    // controls 4px apart.
+    const turn = code("../turn-container.tsx");
+    const editor = turn.slice(turn.indexOf("function TurnPromptEditor("));
+    expect(editor).toMatch(
+      /"zeros-agent-turn-prompt is-editing relative w-full border px-3\.5 py-3",\s*COMPOSER_SURFACE_CLS,\s*COMPOSER_SURFACE_RADIUS,\s*dragActive && COMPOSER_DRAG_CLS,/,
+    );
+    expect(editor).toContain("{dragActive && <ComposerDropVeil />}");
+    expect(editor).toContain("className={COMPOSER_SEND_CLS}");
+    expect(code("../agent-chat.tsx")).toContain("className={COMPOSER_SEND_CLS}");
+    expect(code("../composer-shell.tsx")).toContain(
+      'export const COMPOSER_SEND_CLS =\n  "disabled:bg-bg2-hover disabled:text-fg2 aria-disabled:bg-bg2-hover aria-disabled:text-fg2 size-7 disabled:opacity-100"',
+    );
+    expect(editor).toContain('<PromptInputTools className="min-w-0 flex-nowrap gap-1">');
+    // The old bg2 card, its inner ring, the 32px Resend and a restyled attach
+    // button are gone.
+    expect(turn).not.toContain("border-border2 bg-bg2");
+    expect(turn).not.toContain("ring-highlighted-bright/40");
+    expect(editor).not.toContain("size-8");
+    expect(editor).not.toContain('className="rounded-sm"');
   });
 
   it("fades the transcript into the canvas above the top of the composer stack", () => {
@@ -108,7 +134,7 @@ describe("composer chrome", () => {
     expect(agentChat.match(/data-composer-dock-fade=""/g)).toHaveLength(1);
   });
 
-  it("gives Create and workspace composers 18px corners without changing sent messages", () => {
+  it("gives Create, workspace and edit composers 18px corners without changing sent messages", () => {
     expect(code("../composer-shell.tsx")).toContain(
       'export const COMPOSER_SURFACE_RADIUS = "rounded-[18px]"',
     );

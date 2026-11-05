@@ -769,3 +769,17 @@ Each landed step appends one line: date, workstream, what landed, evidence.
   lint, check:ui, check:tokens, check:secrets and build:ui pass. Of the
   full root suite's 19 failing files, 11 pass with a neutral `HOME` (the
   container signs commits) and 8 fail identically on the base commit.
+- 2026-11-05 · 5 · Agent chat: editing a sent message happens in the
+  composer itself. `TurnPromptEditor` owns the composer's card (its surface,
+  18px corners, dashed drag edge and drop veil from
+  `features/agent/composer-shell.tsx`)
+  around the same editor and pills, with the 28px Send geometry and 4px tool
+  gaps; the 12px `bg2` card, its inner drag ring and the 32px Resend retire.
+  Its pickers anchor to the card, matching its width 8px above it. Fixed on
+  the way: using a portaled picker or menu from the edit (even a tab) read as
+  a click away and cancelled it; the card now marks pointerdowns from its
+  React subtree as inside. Canvas: the chat kit's edit card takes the same
+  edge and corners. Evidence: the composer-attachments smoke checks the
+  edit card's computed surface and corners in both themes, a 28 × 28 Resend,
+  the picker geometry and that clicking inside the picker keeps the edit
+  open (it failed before the fix).

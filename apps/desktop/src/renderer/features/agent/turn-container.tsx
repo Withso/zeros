@@ -16,7 +16,14 @@ import { autoActionIcon } from "./auto-action";
 import { cn } from "@/renderer/shared/ui/cn";
 import { Tooltip } from "@/renderer/shared/ui/primitives";
 import type { ComposerAttachment } from "./composer-attachments";
-import { COMPOSER_SURFACE_CLS, PROMPT_SURFACE_RADIUS } from "./composer-shell";
+import {
+  COMPOSER_DRAG_CLS,
+  COMPOSER_SEND_CLS,
+  COMPOSER_SURFACE_CLS,
+  COMPOSER_SURFACE_RADIUS,
+  ComposerDropVeil,
+  PROMPT_SURFACE_RADIUS,
+} from "./composer-shell";
 import {
   useComposerEditor,
   messageToEditorContent,
@@ -238,35 +245,27 @@ export const TurnPromptHeader = memo(function TurnPromptHeader({
     onRequestEdit?.(null);
   }, [onRequestEdit]);
 
-  // Edit mode expands to a full-width card that echoes the bottom composer's
-  // chrome; TurnPromptEditor neutralizes its own InputGroup chrome.
+  // Edit mode is the bottom composer at full width. Mounted only while
+  // editing, so its document-level drag listeners exist for the active edit
+  // alone.
   if (editing && onEdit) {
     return (
-      <div
-        className={cn(
-          "zeros-agent-turn-prompt is-editing border-border2 bg-bg2 w-full border px-3.5 py-3",
-          PROMPT_SURFACE_RADIUS,
-        )}
-      >
-        {/* Mounted only while editing, so its document-level drag listeners exist
-            for the active edit alone. */}
-        <TurnPromptEditor
-          key={editStashKey}
-          chatId={chatId}
-          draftKey={editStashKey}
-          originalText={originalText ?? ""}
-          originalAttachments={originalAttachments}
-          originalSegments={originalSegments}
-          stash={editStash}
-          onPersistDraft={persistEditStash}
-          onClearDraft={clearEditStash}
-          onEdit={onEdit}
-          onCancel={exitEdit}
-          editToolbarPills={editToolbarPills}
-          agentContext={editAgentContext}
-          surfaceActive={surfaceActive}
-        />
-      </div>
+      <TurnPromptEditor
+        key={editStashKey}
+        chatId={chatId}
+        draftKey={editStashKey}
+        originalText={originalText ?? ""}
+        originalAttachments={originalAttachments}
+        originalSegments={originalSegments}
+        stash={editStash}
+        onPersistDraft={persistEditStash}
+        onClearDraft={clearEditStash}
+        onEdit={onEdit}
+        onCancel={exitEdit}
+        editToolbarPills={editToolbarPills}
+        agentContext={editAgentContext}
+        surfaceActive={surfaceActive}
+      />
     );
   }
 
@@ -504,11 +503,14 @@ function TurnPromptEditor({
     if (editor) focusEditor();
   }, [editor, focusEditor]);
 
-  // Pills and menus render in-tree, so a contains check covers everything that
-  // belongs to the editor.
+  // The @, / and # pickers and the pills' menus are portaled out of the card,
+  // so DOM containment cannot see they belong to this edit. React events still
+  // pass through the card's capture handler on their way to the document, so
+  // that handler marks the event as inside.
+  const insidePointerRef = useRef<Event | null>(null);
   useEffect(() => {
     const onDocPointerDown = (e: PointerEvent) => {
-      if (submittingRef.current) return;
+      if (submittingRef.current || e === insidePointerRef.current) return;
       const root = wrapperRef.current;
       if (!root) return;
       const target = e.target;
@@ -628,67 +630,68 @@ function TurnPromptEditor({
   return (
     <div
       ref={wrapperRef}
+      className={cn(
+        "zeros-agent-turn-prompt is-editing relative w-full border px-3.5 py-3",
+        COMPOSER_SURFACE_CLS,
+        COMPOSER_SURFACE_RADIUS,
+        dragActive && COMPOSER_DRAG_CLS,
+      )}
       // Stop clicks from re-firing the parent's beginEdit.
       onClick={(e) => e.stopPropagation()}
+      onPointerDownCapture={(e) => {
+        insidePointerRef.current = e.nativeEvent;
+      }}
+      {...(submitting ? {} : dragHandlers)}
     >
+      {/* Pickers anchor to this card, as on the bottom composer. */}
+      {suggestionPopup}
+      {dragActive && <ComposerDropVeil />}
       <PromptInput
         onSubmit={(e) => {
           e.preventDefault();
           if (!sendDisabled) submitEdit();
         }}
       >
-        <div
-          // The edit composer drops its own card chrome so the outer wrapper's shows
-          // through.
-          className={cn(
-            "zeros-agent-turn-prompt-edit relative",
-            dragActive && "ring-highlighted-bright/40 ring-2",
-          )}
-          {...(submitting ? {} : dragHandlers)}
-        >
-          <PromptInputBody className="items-stretch rounded-none border-0 bg-transparent p-0 shadow-none has-[[data-slot=input-group-control]:focus-visible]:border-0 has-[[data-slot=input-group-control]:focus-visible]:shadow-none has-[[data-slot=input-group-control]:focus-visible]:ring-0">
-            {suggestionPopup}
-            {editorContent}
-            <PromptInputToolbar
-              data-permission-feedback-boundary=""
-              className="min-w-0 flex-nowrap gap-1.5 pt-1 pr-0 pb-1 pl-0"
-            >
-              <PromptInputTools className="min-w-0 flex-nowrap gap-0.5">
-                <IconButton
-                  size="standard"
-                  type="button"
-                  onClick={() => fileInputRef.current?.click()}
-                  label="Attach file"
-                  disabled={submitting}
-                  className="rounded-sm"
-                >
-                  <Plus size={14} />
-                </IconButton>
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  disabled={submitting}
-                  multiple
-                  hidden
-                  onChange={(e) => {
-                    const files = e.target.files;
-                    if (files) void addFiles(files);
-                    e.target.value = "";
-                  }}
-                />
-                {editToolbarPills}
-              </PromptInputTools>
-              <Tooltip label="Resend" shortcut="↵">
-                <PromptInputSubmit
-                  data-composer-toolbar-actions=""
-                  disabled={sendDisabled}
-                  aria-label="Resend edited prompt"
-                  className="disabled:bg-bg2-hover disabled:text-fg2 size-8 disabled:opacity-100"
-                />
-              </Tooltip>
-            </PromptInputToolbar>
-          </PromptInputBody>
-        </div>
+        <PromptInputBody className="items-stretch rounded-none border-0 bg-transparent p-0 shadow-none has-[[data-slot=input-group-control]:focus-visible]:border-0 has-[[data-slot=input-group-control]:focus-visible]:shadow-none has-[[data-slot=input-group-control]:focus-visible]:ring-0">
+          {editorContent}
+          <PromptInputToolbar
+            data-permission-feedback-boundary=""
+            className="min-w-0 flex-nowrap gap-1.5 pt-1 pr-0 pb-1 pl-0"
+          >
+            <PromptInputTools className="min-w-0 flex-nowrap gap-1">
+              <IconButton
+                size="standard"
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                label="Attach file"
+                disabled={submitting}
+              >
+                <Plus size={14} />
+              </IconButton>
+              <input
+                ref={fileInputRef}
+                type="file"
+                disabled={submitting}
+                multiple
+                hidden
+                onChange={(e) => {
+                  const files = e.target.files;
+                  if (files) void addFiles(files);
+                  e.target.value = "";
+                }}
+              />
+              {editToolbarPills}
+            </PromptInputTools>
+            <Tooltip label="Resend" shortcut="↵">
+              <PromptInputSubmit
+                data-composer-toolbar-actions=""
+                disabled={sendDisabled}
+                aria-label="Resend edited prompt"
+                className={COMPOSER_SEND_CLS}
+              />
+            </Tooltip>
+          </PromptInputToolbar>
+        </PromptInputBody>
       </PromptInput>
       {imagePreviewOverlay}
     </div>
