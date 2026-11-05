@@ -94,6 +94,15 @@ interface DesignRuntimeStore {
       dropUnrefreshed?: boolean;
     },
   ): boolean;
+  /** A frame's viewport changed without a new source generation: every box
+   * may have moved, so only the readbacks just measured again stay. */
+  replaceFrameGeometry(
+    workspaceId: string,
+    frame: string,
+    sourceVersion: string,
+    snapshot: DesignRuntimeSnapshot,
+    details: readonly DesignRuntimeNodeDetails[],
+  ): boolean;
   setHoveredNode(
     workspaceId: string,
     frame: string | null,
@@ -655,6 +664,53 @@ export const useDesignRuntimeStore = create<DesignRuntimeStore>((set) => ({
       );
     });
     return adopted;
+  },
+
+  replaceFrameGeometry(workspaceId, frame, sourceVersion, snapshot, details) {
+    if (
+      snapshot.sourceVersion !== sourceVersion ||
+      details.some((value) => value.sourceVersion !== sourceVersion)
+    ) {
+      return false;
+    }
+    let replaced = false;
+    set((state) => {
+      const workspace = state.byWorkspace[workspaceId];
+      const current = workspace?.frames[frame];
+      if (
+        !workspace ||
+        current?.sourceVersion !== sourceVersion ||
+        current.retiredAt !== undefined
+      ) {
+        return state;
+      }
+      replaced = true;
+      return updateWorkspace(
+        state,
+        workspaceId,
+        workspace.folder,
+        frame,
+        (ownedFrame, now) => {
+          const detailsByNode: Record<string, DesignRuntimeNodeDetails> = {};
+          let detailOrder: string[] = [];
+          for (const value of details) {
+            detailsByNode[value.oid] = value;
+            detailOrder = touchOrder(detailOrder, value.oid, MAX_DETAILS_PER_FRAME);
+          }
+          return {
+            ...ownedFrame,
+            snapshot:
+              ownedFrame.snapshot && sameTree(ownedFrame.snapshot.tree, snapshot.tree)
+                ? { ...snapshot, tree: ownedFrame.snapshot.tree }
+                : snapshot,
+            detailsByNode: keepKeys(detailsByNode, detailOrder),
+            detailOrder,
+            updatedAt: now,
+          };
+        },
+      );
+    });
+    return replaced;
   },
 
   setHoveredNode(workspaceId, hoveredFrame, hoveredNodeId) {

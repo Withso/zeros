@@ -1,14 +1,31 @@
 import type { DesignRuntimeNodeDetails } from "@zeros/protocol/design-runtime";
 import type { DesignCanvasFrameWire } from "../../platform/git";
+import {
+  designSelectionBox,
+  designSelectionBoxCorners,
+  designSelectionLabelPlacement,
+  designSelectionOverlayFrame,
+} from "./design-canvas-math";
+import { DESIGN_CANVAS_CHIP_CLS } from "./design-canvas-chip";
+import { designSizeBadgeText } from "./design-layout-tools";
 import { designRuntimeFrameState } from "./state/design-runtime-store";
+
+type DragNode = Pick<DesignRuntimeNodeDetails, "oid" | "rect"> &
+  Partial<Pick<DesignRuntimeNodeDetails, "box" | "borderCoordinateSpace" | "styles">>;
 
 /** Reuse already captured pixels across opaque iframe boundaries. There is no
  * document clone, rasterization, store write, or layout read per pointer sample. */
 export function createDesignDragPresentation(
   workspaceId: string,
   frame: DesignCanvasFrameWire,
-  details: Pick<DesignRuntimeNodeDetails, "oid" | "rect">,
+  details: DragNode,
   article: HTMLElement,
+  options: {
+    /** Draw the layer's own selection on the picture while it is outside its
+     * frame. The frame's overlay sits beneath the picture there, so it would
+     * otherwise be covered by the very pixels it describes. */
+    selection?: boolean;
+  } = {},
 ) {
   const world = article.closest<HTMLElement>("[data-design-canvas-world]");
   if (!world) return null;
@@ -36,6 +53,62 @@ export function createDesignDragPresentation(
     )
       z = Math.max(z, Number(sibling.style.zIndex) || 0);
   element.style.zIndex = String(z + 1);
+  const box = designSelectionBox(details);
+  const pixels = document.createElement("div");
+  pixels.dataset.designDragPixels = "";
+  pixels.className = "zd-design-drag-pixels";
+  // Cached and older-runtime pictures are crops of the frame, so they carry
+  // whatever lies behind a turned or transparent layer's bounding box. Only
+  // the layer's own border box belongs to the drag.
+  const corners = designSelectionBoxCorners(box).map(
+    (corner) =>
+      `${corner.x - details.rect.x}px ${corner.y - details.rect.y}px`,
+  );
+  pixels.style.clipPath = `polygon(${corners.join(", ")})`;
+  element.appendChild(pixels);
+  // The frame's own selection chrome for this layer: its overlay would sit
+  // beneath the picture, and its constraint runs describe a parent the layer
+  // is no longer over.
+  const frameChrome = options.selection
+    ? [
+        ...article.querySelectorAll<HTMLElement>(
+          `[data-design-element-overlay="${CSS.escape(details.oid)}"], [data-design-parent-guides="${CSS.escape(details.oid)}"]`,
+        ),
+      ]
+    : [];
+  if (options.selection) {
+    const frameOverlay = designSelectionOverlayFrame(box);
+    const outline = document.createElement("div");
+    outline.dataset.designDragSelection = "";
+    outline.className = "zd-design-selection-outline zd-design-stroke absolute";
+    outline.style.setProperty("--design-stroke-width", "2");
+    Object.assign(outline.style, {
+      left: `${frameOverlay.left - details.rect.x}px`,
+      top: `${frameOverlay.top - details.rect.y}px`,
+      width: `${frameOverlay.width}px`,
+      height: `${frameOverlay.height}px`,
+      transform: frameOverlay.affine
+        ? `matrix(${frameOverlay.affine.join(",")},0,0)`
+        : frameOverlay.rotation
+          ? `rotate(${frameOverlay.rotation}deg)`
+          : "",
+      transformOrigin: frameOverlay.affine
+        ? "0 0"
+        : `${frameOverlay.pivotX}px ${frameOverlay.pivotY}px`,
+    });
+    const label = document.createElement("span");
+    label.className = `zd-design-selection-label pointer-events-none absolute ${DESIGN_CANVAS_CHIP_CLS}`;
+    label.textContent = designSizeBadgeText(frameOverlay.width, frameOverlay.height);
+    const placement = designSelectionLabelPlacement(frameOverlay);
+    Object.assign(label.style, {
+      left: `${placement.left}px`,
+      top: `${placement.top}px`,
+      transform: placement.transform,
+      transformOrigin: "0 0",
+    });
+    outline.appendChild(label);
+    element.appendChild(outline);
+  }
   const showPixels = (dataUrl: string, wholeFrame: boolean) => {
     const image = document.createElement("img");
     image.src = dataUrl;
@@ -52,9 +125,10 @@ export function createDesignDragPresentation(
           }
         : { width: "100%", height: "100%" },
     );
-    element.replaceChildren(image);
+    pixels.replaceChildren(image);
   };
   let hasPixels = screenshot !== null;
+  let isolated = false;
   if (screenshot) showPixels(screenshot.dataUrl, !exactNode);
   else {
     const sourceImage = article.querySelector<HTMLImageElement>(`img[data-design-source-ready][data-design-source-version="${CSS.escape(frame.sourceVersion)}"]`);
@@ -65,9 +139,15 @@ export function createDesignDragPresentation(
   }
   world.appendChild(element);
   let disposeWatch: (() => void) | null = null;
-  const remove = () => {
+  const showOverlay = () => {
+    for (const chrome of frameChrome) chrome.removeAttribute("data-design-drag-detached");
+  };
+  /** `transferred`: the layer now lives in another frame, so its old chrome
+   * stays hidden until it unmounts instead of flashing at the old place. */
+  const remove = (options: { transferred?: boolean } = {}) => {
     disposeWatch?.();
     disposeWatch = null;
+    if (!options.transferred) showOverlay();
     element.remove();
   };
   return {
@@ -75,19 +155,38 @@ export function createDesignDragPresentation(
     get hasPixels() {
       return hasPixels;
     },
-    /** Pixels captured for this drag once the layer left its frame, when
-     * none were cached for this exact generation. */
-    adopt(captured: { sourceVersion: string; dataUrl: string; nodeId: string | null }) {
-      if (hasPixels || captured.sourceVersion !== frame.sourceVersion || captured.nodeId !== details.oid) return;
+    /** Whether the pictured layer was captured alone, at drag resolution. */
+    get isolated() {
+      return isolated;
+    },
+    /** Pixels captured for this drag once the layer left its frame. A capture
+     * of the layer alone replaces any cached crop; it is sharper and carries
+     * nothing from behind the layer. */
+    adopt(captured: {
+      sourceVersion: string;
+      dataUrl: string;
+      nodeId: string | null;
+      isolated?: boolean;
+    }) {
+      if (
+        captured.sourceVersion !== frame.sourceVersion ||
+        captured.nodeId !== details.oid ||
+        isolated ||
+        (hasPixels && !captured.isolated)
+      )
+        return;
       hasPixels = true;
+      isolated = captured.isolated === true;
       showPixels(captured.dataUrl, false);
     },
     paint(origin: { x: number; y: number }) {
       element.style.transform = `translate3d(${frame.x + origin.x}px, ${frame.y + origin.y}px, 0)`;
       element.hidden = false;
+      for (const chrome of frameChrome) chrome.setAttribute("data-design-drag-detached", "");
     },
     hide() {
       element.hidden = true;
+      showOverlay();
     },
     remove,
     /** A confirmed write is not a presented document. Keep the dropped pixels
@@ -96,7 +195,7 @@ export function createDesignDragPresentation(
       return new Promise((resolve) => {
         const selector = `[data-design-frame="${CSS.escape(destination.file)}"] iframe[data-design-document-buffer="displayed"][data-design-document-source-version="${CSS.escape(destination.sourceVersion)}"][data-design-document-ready]`;
         const finish = () => {
-          remove();
+          remove({ transferred: true });
           resolve();
         };
         const observer = new MutationObserver(() => {

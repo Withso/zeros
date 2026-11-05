@@ -1962,6 +1962,7 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
       return Math.abs(handleCenter - bandCenter) < 1;
     }),
   );
+  // The white edge is an inset shadow, so it stays one screen pixel at any zoom.
   check(
     "padding uses blue and gap uses pink with white line borders",
     (await inlinePaddingLeft
@@ -1970,7 +1971,8 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
         const style = getComputedStyle(line);
         return (
           style.backgroundColor === "rgb(12, 140, 233)" &&
-          style.borderColor === "rgb(255, 255, 255)"
+          style.boxShadow.includes("rgb(255, 255, 255)") &&
+          style.boxShadow.includes("inset")
         );
       })) &&
       (await inlineGapHandle
@@ -1980,7 +1982,8 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
           const style = getComputedStyle(line);
           return (
             style.backgroundColor === "rgb(245, 49, 179)" &&
-            style.borderColor === "rgb(255, 255, 255)"
+            style.boxShadow.includes("rgb(255, 255, 255)") &&
+            style.boxShadow.includes("inset")
           );
         })),
   );
@@ -4300,8 +4303,9 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
   check(
     "text edit mode replaces transform handles with one clean editing boundary",
     await waitFor(async () => {
-      const outline = await inlineText.evaluate(
-        (editor) => getComputedStyle(editor).outlineColor,
+      // The boundary is a shadow: an outline's width rounds up before zoom.
+      const boundary = await inlineText.evaluate(
+        (editor) => getComputedStyle(editor).boxShadow,
       );
       const runtimePaint = await runtimeHeading.evaluate((heading) => ({
         color: getComputedStyle(heading).color,
@@ -4310,7 +4314,7 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
       return (
         (await homeFrame.locator(".zd-design-selection-handle").count()) ===
           0 &&
-        outline === "rgb(12, 140, 233)" &&
+        boundary.includes("rgb(12, 140, 233)") &&
         runtimePaint.color !== "rgba(0, 0, 0, 0)" &&
         runtimePaint.fill === "rgba(0, 0, 0, 0)"
       );

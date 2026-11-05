@@ -12,7 +12,7 @@ import {
 // --- IMPORTS ---
 
 import { Diamond } from "lucide-react";
-import React, { useMemo } from "react";
+import React, { useLayoutEffect, useMemo, useRef } from "react";
 
 import type { DesignRuntimeNodeDetails } from "@zeros/protocol/design-runtime";
 
@@ -25,8 +25,13 @@ import {
   DESIGN_ROTATION_CORNERS,
   designMeasureSpacing,
   designOriginTranslationShift,
+  designOverlayCounterTransform,
+  designResizeHandleCursor,
+  designResizeHandleLayout,
+  designRotationCornerCursorAngle,
   designRotationCursor,
   designSelectionBox,
+  designSelectionLabelPlacement,
   designSelectionOverlayFrame,
   type DesignCanvasRect,
   type DesignConstraintSide,
@@ -118,6 +123,11 @@ export function designSelectionOverlayStyle(
   };
 }
 
+/** Inline width, in screen pixels, for a `zd-design-stroke` element. */
+export function designStrokeWidth(pixels: number): React.CSSProperties {
+  return { "--design-stroke-width": pixels } as React.CSSProperties;
+}
+
 /** Write a label's text without replacing the node React rendered.
  * `replaceChildren` and `textContent` both detach the text node React's fiber
  * points at; React's next update then writes into a node that is no longer in
@@ -175,10 +185,18 @@ export function paintDesignNodeOverlayGeometry(
       designSizeBadgeModesOf(size),
     ),
   );
+  if (size) {
+    const placement = designSelectionLabelPlacement(overlay);
+    size.style.left = `${placement.left}px`;
+    size.style.top = `${placement.top}px`;
+    size.style.transform = placement.transform;
+    size.style.transformOrigin = "0 0";
+  }
   // The pivot rides the box it turns about, and both it and the angle readout
-  // counter-rotate to stay upright. React renders them from the same overlay
-  // frame; a gesture that repaints the box owes them the same update, or the
-  // reticle drifts off the pivot and the readout tilts as you drag.
+  // undo the overlay's turn (and mirror) to stay upright. React renders them
+  // from the same overlay frame; a gesture that repaints the box owes them the
+  // same update, or the reticle drifts off the pivot and the readout tilts.
+  const counter = designOverlayCounterTransform(overlay);
   const pivot = element.querySelector<HTMLElement>(
     "[data-design-origin-handle]",
   );
@@ -189,14 +207,70 @@ export function paintDesignNodeOverlayGeometry(
       pivot.style.left = `${originX * overlay.width}px`;
       pivot.style.top = `${originY * overlay.height}px`;
     }
-    pivot.style.transform = `translate(-50%, -50%) rotate(${-overlay.rotation}deg)`;
+    pivot.style.transform = `translate(-50%, -50%) ${counter}`.trim();
   }
   const readout = element.querySelector<HTMLElement>(
     "[data-design-rotation-feedback]",
   );
   if (readout) {
-    readout.style.transform = `rotate(${-overlay.rotation}deg) scale(${DESIGN_CANVAS_INVERSE_ZOOM})`;
+    const placement = designSelectionLabelPlacement(overlay, ROTATION_READOUT_GAP);
+    readout.style.left = `${placement.left}px`;
+    readout.style.top = `${placement.top}px`;
+    readout.style.transform = placement.transform;
+    readout.style.transformOrigin = "0 0";
   }
+}
+
+/** The angle readout sits one chip below the size badge, on the same edge, so
+ * it reads upright however the selection turns. */
+const ROTATION_READOUT_GAP = 26;
+
+export function designRotationReadoutStyle(
+  overlay: DesignSelectionOverlayFrame,
+): React.CSSProperties {
+  const placement = designSelectionLabelPlacement(overlay, ROTATION_READOUT_GAP);
+  return {
+    left: placement.left,
+    top: placement.top,
+    transform: placement.transform,
+    transformOrigin: "0 0",
+  };
+}
+
+/** Gestures paint the selection overlay directly, but React only rewrites
+ * the style props whose values changed since its own last render. A confirmed
+ * box that repeats a value the gesture replaced (a size, the badge text) left
+ * the outline where the gesture had put it, so this repaints the whole
+ * geometry whenever the confirmed box changes. */
+export function DesignOverlayGeometrySync({
+  overlay,
+}: {
+  overlay: DesignSelectionOverlayFrame;
+}) {
+  const ref = useRef<HTMLSpanElement>(null);
+  const key = JSON.stringify(overlay);
+  useLayoutEffect(() => {
+    const element = ref.current?.parentElement;
+    if (element) paintDesignNodeOverlayGeometry(element, overlay);
+    // The serialized frame is the dependency; a new object for the same box
+    // must not repaint over a gesture in progress.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key]);
+  return <span ref={ref} hidden aria-hidden="true" />;
+}
+
+/** The size badge's inline placement (see `designSelectionLabelPlacement`).
+ * Gesture paints write the same longhands. */
+export function designSelectionLabelStyle(
+  overlay: DesignSelectionOverlayFrame,
+): React.CSSProperties {
+  const placement = designSelectionLabelPlacement(overlay);
+  return {
+    left: placement.left,
+    top: placement.top,
+    transform: placement.transform,
+    transformOrigin: "0 0",
+  };
 }
 
 /** Dashed runs from the selection to the parent edges its CSS pins it to — the
@@ -248,14 +322,13 @@ export function DesignConstraintGuides({
       {outlineRect ? (
         <span
           data-design-constraint-parent=""
-          className="zd-design-constraint-parent absolute"
+          className="zd-design-constraint-parent zd-design-dashed-box absolute"
           style={{
             left: outlineRect.x,
             top: outlineRect.y,
             width: outlineRect.width,
             height: outlineRect.height,
             ...(outlineBox ? designSelectionOverlayStyle(designSelectionOverlayFrame(outlineBox)) : {}),
-            outlineWidth: designCanvasScreenPixels(1),
           }}
         />
       ) : null}
@@ -263,23 +336,11 @@ export function DesignConstraintGuides({
         <span
           key={guide.side}
           data-design-parent-guide={guide.side}
-          className={cn(
-            "zd-design-parent-guide absolute border-dashed",
-            guide.axis === "vertical" ? "border-l" : "border-t",
-          )}
+          className="zd-design-parent-guide zd-design-dashed-line absolute"
           style={{
             left: guide.x,
             top: guide.y,
-            width: guide.axis === "vertical" ? 0 : guide.length,
-            height: guide.axis === "vertical" ? guide.length : 0,
-            borderLeftWidth:
-              guide.axis === "vertical"
-                ? designCanvasScreenPixels(1)
-                : undefined,
-            borderTopWidth:
-              guide.axis === "horizontal"
-                ? designCanvasScreenPixels(1)
-                : undefined,
+            ...designDashedLineStyle(guide.axis, guide.length),
             display: guide.length > 0.5 ? undefined : "none",
             transform: guide.rotation ? `rotate(${guide.rotation}deg)` : undefined,
             transformOrigin: "0 0",
@@ -289,31 +350,41 @@ export function DesignConstraintGuides({
       {sides.center?.x ? (
         <span
           data-design-parent-guide="center-x"
-          className="zd-design-parent-guide absolute border-t border-dashed"
+          className="zd-design-parent-guide zd-design-dashed-line absolute"
           style={{
             left: `calc(${centerX}px - ${designCanvasScreenPixels(6)})`,
             top: centerY,
-            width: designCanvasScreenPixels(12),
-            height: 0,
-            borderTopWidth: designCanvasScreenPixels(1),
+            ...designDashedLineStyle("horizontal", designCanvasScreenPixels(12)),
           }}
         />
       ) : null}
       {sides.center?.y ? (
         <span
           data-design-parent-guide="center-y"
-          className="zd-design-parent-guide absolute border-l border-dashed"
+          className="zd-design-parent-guide zd-design-dashed-line absolute"
           style={{
             left: centerX,
             top: `calc(${centerY}px - ${designCanvasScreenPixels(6)})`,
-            width: 0,
-            height: designCanvasScreenPixels(12),
-            borderLeftWidth: designCanvasScreenPixels(1),
+            ...designDashedLineStyle("vertical", designCanvasScreenPixels(12)),
           }}
         />
       ) : null}
     </span>
   );
+}
+
+/** A one-screen-pixel dashed run of `length` along an axis. */
+export function designDashedLineStyle(
+  axis: "horizontal" | "vertical",
+  length: number | string,
+  color?: string,
+): React.CSSProperties {
+  return {
+    width: axis === "vertical" ? designCanvasScreenPixels(1) : length,
+    height: axis === "vertical" ? length : designCanvasScreenPixels(1),
+    "--design-dash-direction": axis === "vertical" ? "180deg" : "90deg",
+    ...(color ? { "--design-dash-color": color } : {}),
+  } as React.CSSProperties;
 }
 
 /** Gesture paints repaint the guides directly: the parent stays put while one
@@ -432,38 +503,25 @@ export const DesignMeasureOverlay = React.memo(function DesignMeasureOverlay({
     >
       <span
         data-design-measure-target=""
-        className="absolute outline"
+        className="zd-design-stroke absolute"
         style={{
           left: target.x,
           top: target.y,
           width: target.width,
           height: target.height,
-          outlineColor: "var(--red-primary)",
-          outlineWidth: designCanvasScreenPixels(1),
-        }}
+          "--design-stroke-color": "var(--red-primary)",
+          ...designStrokeWidth(1),
+        } as React.CSSProperties}
       />
       {extensions.map((extension, index) => (
         <span
           key={`extension:${index}`}
           data-design-measure-extension=""
-          className={cn(
-            "absolute border-dashed",
-            extension.axis === "vertical" ? "border-l" : "border-t",
-          )}
+          className="zd-design-dashed-line absolute"
           style={{
             left: extension.x,
             top: extension.y,
-            width: extension.axis === "vertical" ? 0 : extension.length,
-            height: extension.axis === "vertical" ? extension.length : 0,
-            borderColor: "var(--red-primary)",
-            borderLeftWidth:
-              extension.axis === "vertical"
-                ? designCanvasScreenPixels(1)
-                : undefined,
-            borderTopWidth:
-              extension.axis === "horizontal"
-                ? designCanvasScreenPixels(1)
-                : undefined,
+            ...designDashedLineStyle(extension.axis, extension.length, "var(--red-primary)"),
           }}
         />
       ))}
@@ -527,10 +585,17 @@ const DESIGN_EDGE_RESIZE_HANDLES = DESIGN_RESIZE_HANDLES.filter(
 
 export function DesignResizeHandles({
   label,
+  box,
+  screenSize,
   onPointerDown,
   onEdgeDoubleClick,
 }: {
   label: string;
+  /** A turned or mirrored selection points each cursor the way its handle
+   * actually sits on screen. */
+  box?: Pick<DesignSelectionBox, "affine" | "rotation">;
+  /** The selection's painted size on screen; a tiny one keeps its body. */
+  screenSize?: { width: number; height: number };
   onPointerDown: (
     event: React.PointerEvent<HTMLButtonElement>,
     handle: DesignResizeHandle,
@@ -538,6 +603,10 @@ export function DesignResizeHandles({
   /** Double-clicking an edge sizes its axis to Hug (Option: Fill). */
   onEdgeDoubleClick?: (handle: DesignResizeHandle, fill: boolean) => void;
 }) {
+  const cursorFor = (handle: DesignResizeHandle, cursor: string) =>
+    box && (box.affine || Math.abs(box.rotation) > 0.01)
+      ? designResizeHandleCursor(handle, box)
+      : cursor;
   const size = designCanvasScreenPixels(8);
   // Keep a crisp four-screen-pixel resize strip inside the outline. Wider
   // bands steal pointer intent from padding/gap controls that legitimately
@@ -545,10 +614,14 @@ export function DesignResizeHandles({
   const edgeHitSize = designCanvasScreenPixels(4);
   // Visible squares live on the four corners only; edges keep their invisible
   // resize strips so mid-edge resizing still works without the extra chrome.
-  const handles = DESIGN_CORNER_RESIZE_HANDLES;
+  const layout = designResizeHandleLayout(screenSize ?? { width: Infinity, height: Infinity });
+  const handles = layout.corners ? DESIGN_CORNER_RESIZE_HANDLES : [];
+  const edges = DESIGN_EDGE_RESIZE_HANDLES.filter(({ x }) =>
+    x === "center" ? layout.endEdges : layout.sideEdges,
+  );
   return (
     <div className="pointer-events-none absolute inset-0 z-40">
-      {DESIGN_EDGE_RESIZE_HANDLES.map(({ handle, x, y, cursor }) => {
+      {edges.map(({ handle, x, y, cursor }) => {
         const horizontal = x === "center";
         return (
           <button
@@ -564,14 +637,14 @@ export function DesignResizeHandles({
                     left: designCanvasScreenPixels(4),
                     top: y === "top" ? 0 : `calc(100% - ${edgeHitSize})`,
                     height: edgeHitSize,
-                    cursor,
+                    cursor: cursorFor(handle, cursor),
                   }
                 : {
                     top: designCanvasScreenPixels(4),
                     bottom: designCanvasScreenPixels(4),
                     left: x === "left" ? 0 : `calc(100% - ${edgeHitSize})`,
                     width: edgeHitSize,
-                    cursor,
+                    cursor: cursorFor(handle, cursor),
                   }
             }
             aria-label={`Resize ${label} from ${handle} edge`}
@@ -594,15 +667,14 @@ export function DesignResizeHandles({
           key={handle}
           data-design-controls
           type="button"
-          className="zd-design-selection-handle pointer-events-auto absolute rounded-[1px] border"
+          className="zd-design-selection-handle pointer-events-auto absolute rounded-[1px]"
           style={{
             width: size,
             height: size,
             left: x === "left" ? 0 : x === "center" ? "50%" : "100%",
             top: y === "top" ? 0 : y === "center" ? "50%" : "100%",
             transform: "translate(-50%, -50%)",
-            cursor,
-            borderWidth: designCanvasScreenPixels(1),
+            cursor: cursorFor(handle, cursor),
           }}
           aria-label={`Resize ${label} from ${handle}`}
           onPointerDown={(event) => {
@@ -624,18 +696,25 @@ export function DesignResizeHandles({
 export function DesignRotationHandles({
   label,
   rotation,
+  box,
+  inset: insetPixels = 5,
   onPointerDown,
 }: {
   label: string;
   /** The selection's painted rotation, so each cursor stays aimed at the box. */
   rotation: number;
+  /** A mirrored selection's corners sit mirrored on screen; their cursors
+   * follow where each corner actually is. */
+  box?: Pick<DesignSelectionBox, "affine" | "rotation">;
+  /** How far, in screen pixels, each zone reaches into its corner. */
+  inset?: number;
   onPointerDown: (
     event: React.PointerEvent<HTMLButtonElement>,
     corner: DesignRotationCorner,
   ) => void;
 }) {
   const size = designCanvasScreenPixels(20);
-  const inset = designCanvasScreenPixels(5);
+  const inset = designCanvasScreenPixels(insetPixels);
   return (
     <div className="pointer-events-none absolute inset-0 z-30">
       {DESIGN_ROTATION_CORNERS.map(({ corner, x, y, cursorAngle }) => (
@@ -650,7 +729,11 @@ export function DesignRotationHandles({
             height: size,
             [x === 0 ? "right" : "left"]: `calc(100% - ${inset})`,
             [y === 0 ? "bottom" : "top"]: `calc(100% - ${inset})`,
-            cursor: designRotationCursor(rotation + cursorAngle),
+            cursor: designRotationCursor(
+              box?.affine
+                ? designRotationCornerCursorAngle({ x, y }, box)
+                : rotation + cursorAngle,
+            ),
           }}
           aria-label={`Rotate ${label} from ${corner} corner`}
           // Arming here, in the DOM, keeps hover off React's render path.
@@ -712,7 +795,7 @@ export function DesignOriginHandle({
           top: overlay.pivotY,
           width: hit,
           height: hit,
-          transform: `translate(-50%, -50%) rotate(${-overlay.rotation}deg)`,
+          transform: `translate(-50%, -50%) ${designOverlayCounterTransform(overlay)}`.trim(),
           cursor: "move",
         }}
         aria-label={`Move the rotation origin of ${label}`}
@@ -767,14 +850,13 @@ export function DesignOriginAnchors() {
         [0, 0.5, 1].map((x) => (
           <span
             key={`${x}:${y}`}
-            className="zd-design-origin-anchor absolute block"
+            className="zd-design-origin-anchor zd-design-dashed-box absolute block"
             style={{
               left: `${x * 100}%`,
               top: `${y * 100}%`,
               width: size,
               height: size,
               transform: "translate(-50%, -50%)",
-              borderWidth: designCanvasScreenPixels(1),
             }}
           />
         )),
@@ -828,6 +910,8 @@ export function designOriginStyles(
 export type DesignPaintedNode = {
   rect: DesignCanvasRect;
   styles: Record<string, string>;
+  /** The element's real axes, mirrored ones included (see designSelectionBox). */
+  borderCoordinateSpace?: DesignRuntimeNodeDetails["borderCoordinateSpace"];
 };
 
 export type DesignPaintedChild = DesignPaintedNode & {
@@ -1067,12 +1151,10 @@ export function DesignSelectionMeasurements({
               ? `${sizeModes.x ?? "fixed"},${sizeModes.y ?? "fixed"}`
               : undefined
           }
-          className={cn("zd-design-selection-label pointer-events-none absolute top-full left-1/2 -translate-x-1/2", DESIGN_CANVAS_CHIP_CLS)}
-          style={{
-            marginTop: designCanvasScreenPixels(4),
-            transform: `translateX(-50%) scale(${DESIGN_CANVAS_INVERSE_ZOOM})`,
-            transformOrigin: "top center",
-          }}
+          className={cn("zd-design-selection-label pointer-events-none absolute", DESIGN_CANVAS_CHIP_CLS)}
+          style={designSelectionLabelStyle(
+            designSelectionOverlayFrame(designSelectionBox(details)),
+          )}
         >
           {designSizeBadgeText(sizeWidth, sizeHeight, sizeModes)}
         </span>
@@ -1113,12 +1195,12 @@ export const DesignLayerHoverOverlay = React.memo(
     return (
       <div
         data-design-element-overlay={details.oid}
-        className="zd-design-hover-outline pointer-events-none absolute z-[1] outline"
+        className="zd-design-hover-outline zd-design-stroke pointer-events-none absolute z-[1]"
         style={{
           ...designSelectionOverlayStyle(
             designSelectionOverlayFrame(designSelectionBox(details)),
           ),
-          outlineWidth: designCanvasScreenPixels(1),
+          ...designStrokeWidth(1),
         }}
       />
     );
@@ -1203,7 +1285,7 @@ export const DesignMotionCanvasOverlay = React.memo(
                   data-design-motion-path-point={point.offset}
                   type="button"
                   className={cn(
-                    "zd-design-motion-path-point pointer-events-auto absolute z-30 rounded-full border shadow-sm",
+                    "zd-design-motion-path-point pointer-events-auto absolute z-30 rounded-full",
                     selected && "zd-design-motion-path-point-selected",
                   )}
                   style={{
@@ -1211,7 +1293,6 @@ export const DesignMotionCanvasOverlay = React.memo(
                     top: center.y + point.y,
                     width: designCanvasScreenPixels(12),
                     height: designCanvasScreenPixels(12),
-                    borderWidth: designCanvasScreenPixels(1),
                     transform: "translate(-50%, -50%)",
                   }}
                   aria-label={`Seek motion to ${designMotionTimeAtOffset(point.offset, duration)}ms`}

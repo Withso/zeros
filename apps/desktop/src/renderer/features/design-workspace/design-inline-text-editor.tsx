@@ -318,10 +318,10 @@ export const DesignInlineTextEditor = React.memo(
           borderStyle: "solid",
           borderColor: "transparent",
           overflow: "visible",
-          outlineWidth: designCanvasScreenPixels(1),
-          outlineStyle: "solid",
-          outlineColor: "var(--design-selection-stroke)",
-          outlineOffset: 0,
+          // A shadow, not an outline: Chromium rounds an outline under 1 CSS px
+          // up to a whole pixel before the camera zooms it.
+          outline: "none",
+          boxShadow: `0 0 0 ${designCanvasScreenPixels(1)} var(--design-selection-stroke)`,
           background: "transparent",
           color: paintColor,
           WebkitTextFillColor: paintColor,

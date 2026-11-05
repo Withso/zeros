@@ -446,7 +446,7 @@
         "shadow-md": 1
       },
       "apps/desktop/src/renderer/features/design-workspace/design-workspace-overlays.tsx": {
-        "shadow-sm": 2
+        "shadow-sm": 1
       },
       "apps/desktop/src/renderer/shared/ui/primitives/sidebar.tsx": {
         "shadow-sm": 2
