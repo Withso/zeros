@@ -11,7 +11,6 @@ import {
   type CodeReviewAnchor,
   type CodeReviewThread,
 } from "@zeros/protocol/code-review";
-import type { GitReviewActionsClient } from "@/renderer/platform/git-review-actions";
 import { codeReviewAvailable } from "@/renderer/platform/bridge/code-review-availability";
 import { Button, TooltipProvider } from "@/renderer/shared/ui/primitives";
 import {
@@ -276,7 +275,6 @@ function Harness() {
   const [style, setStyle] = useState<"unified" | "split">("unified");
   const [threads, setThreads] = useState(() => cloud || params.has("loading") ? [] : seedThreads());
   const [source, setSource] = useState(SOURCE);
-  const [conflictDisk, setConflictDisk] = useState(CONFLICT);
   const [confirmed, setConfirmed] = useState(false);
   const [publishedRevision, setPublishedRevision] = useState(REVISION);
   const [hidden, setHidden] = useState(false);
@@ -495,23 +493,6 @@ function Harness() {
       loadMoreComments,
     ],
   );
-  const actionClient = useMemo<GitReviewActionsClient>(
-    () => ({
-      identity: "fixture-actions",
-      resolveConflict: async (_cwd, input) => {
-        await perform();
-        setConflictDisk(input.content);
-        setLastAction("save resolution");
-        return {
-          kind: "success",
-          path: input.path,
-          bytes: new TextEncoder().encode(input.content).length,
-        };
-      },
-    }),
-    [perform],
-  );
-
   return (
     <TooltipProvider delayDuration={300}>
       <main
@@ -747,11 +728,10 @@ function Harness() {
                 editorId="review-fixture-conflict"
                 cwd="/review-fixture"
                 path="src/conflict.ts"
-                content={conflictDisk}
+                content={CONFLICT}
                 review={review}
                 isGitConflict
                 offscreen={hidden}
-                reviewActionClient={actionClient}
               />
             )}
           </div>

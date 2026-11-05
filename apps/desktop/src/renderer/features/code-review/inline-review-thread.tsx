@@ -284,7 +284,7 @@ export const InlineReviewThread = memo(function InlineReviewThread({
           : comment.author.name}
       </span>
       {actorKind(thread, comment.author.kind) && (
-        <Badge className="bg-bg2-highlight h-4.5 px-1.25 text-2xxs">
+        <Badge className="bg-bg2-highlight h-4.5 px-1.5 text-2xxs">
           {actorKind(thread, comment.author.kind)}
         </Badge>
       )}
@@ -537,18 +537,17 @@ export const InlineReviewThread = memo(function InlineReviewThread({
               onSubmitted={() => setReplying(false)}
             />
           ) : (
-            <button
-              type="button"
+            <Button
               aria-label="Reply"
               disabled={!active}
-              className="border-border2 bg-sidebar-bg text-fg3 hover:border-border3 hover:text-fg2 focus-visible:border-highlighted-bright focus-visible:ring-highlighted-bright/50 flex h-8 min-w-0 items-center rounded-md border px-2.5 text-left text-xs leading-4.5 focus-visible:ring-[3px] focus-visible:outline-none disabled:opacity-50"
+              className="border-border2 bg-sidebar-bg text-fg3 hover:border-border3 hover:bg-sidebar-bg hover:text-fg2 h-8 w-full min-w-0 justify-start px-2.5 font-normal"
               onClick={() => {
                 drafts.requestFocus(draftKey);
                 setReplying(true);
               }}
             >
               Reply…
-            </button>
+            </Button>
           )}
         </div>
       )}

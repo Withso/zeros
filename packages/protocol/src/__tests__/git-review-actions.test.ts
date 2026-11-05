@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { parseMergeConflicts, applyConflictChoices } from "../merge-conflicts";
+import {
+  parseMergeConflicts,
+  applyConflictChoices,
+  conflictReplacement,
+} from "../merge-conflicts";
 
 describe("merge conflict previews", () => {
   const source =
@@ -16,6 +20,8 @@ describe("merge conflict previews", () => {
       currentLabel: "HEAD",
       incomingLabel: "topic",
       startLine: 2,
+      baseLine: 4,
+      separatorLine: 6,
       endLine: 8,
     });
     for (const [choice, expected] of [
@@ -69,6 +75,28 @@ describe("merge conflict previews", () => {
       expect(() => applyConflictChoices(bad, {})).toThrow();
     },
   );
+  it("replaces one block in place, keeping a last block's missing newline", () => {
+    const tail = "a\n<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> topic";
+    const [block] = parseMergeConflicts(tail).conflicts;
+    expect(block).toMatchObject({ separatorLine: 4, endLine: 6 });
+    expect(block.baseLine).toBeUndefined();
+    expect(conflictReplacement(tail, block, "incoming")).toBe("theirs");
+    expect(conflictReplacement(tail, block, "both")).toBe("ours\ntheirs");
+    const [first] = parseMergeConflicts(source).conflicts;
+    expect(conflictReplacement(source, first, "current")).toBe("ours\n");
+    expect(() =>
+      conflictReplacement(source, first, "neither" as never),
+    ).toThrow("Invalid conflict choice.");
+  });
+  it.each([
+    ["<<<<<<< ours\na\n=======\nb\n", "Line 1 has no separator or closing marker."],
+    ["<<<<<<< ours\n<<<<<<< nested\na\n=======\nb\n>>>>>>> theirs\n", "Line 2 opens a conflict inside another."],
+    ["a\n>>>>>>> theirs\n", "Line 2 has a conflict marker outside any conflict."],
+    ["<<<<<<< ours\na\n========\nb\n>>>>>>> theirs\n", "Line 3 has a marker of a different length."],
+    ["<<<<<<< ours\na\n>>>>>>> theirs\n=======\n", "Line 3 has conflict markers out of order."],
+  ])("names the line of a marker it cannot pair", (bad, message) => {
+    expect(parseMergeConflicts(bad).errors[0]?.message).toBe(message);
+  });
   it("rejects choices from another content snapshot", () => {
     expect(() =>
       applyConflictChoices(source, { "unknown-block": "both" }),

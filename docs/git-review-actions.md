@@ -6,41 +6,31 @@ and discard keep their own hunk operations. Decisions stored under the
 `git.hunk-review.v1:` settings prefix are no longer read and need no
 migration.
 
-Merge conflict choices support normal and diff3 blocks, including multiple
-blocks, CRLF, and files without a final newline. Current, Incoming, and Both
-update an editor preview immediately; Both keeps current followed by incoming.
-Unrelated source slices remain exact. Save resolution is a separate explicit
-action. The engine reconstructs the choices against the original snapshot,
-requires every conflict to be chosen, and verifies that the path is still
-unmerged. It leaves the index and merge/rebase continuation to explicit Git
-actions.
+Merge conflicts resolve in place, where the file is shown. Each normal or
+diff3 block is marked in its rows (current under its HEAD band, incoming above
+its branch band) with Accept current change, Accept incoming change and Accept
+both above it; Both keeps current followed by incoming. Accepting rewrites only
+that block, so unrelated source, CRLF line endings and a missing final newline
+stay exact (`conflictReplacement` in `@zeros/protocol/merge-conflicts`). Markers
+that cannot all be paired get one notice naming the line and no actions, so
+nothing rewrites a broken file.
 
-Source writes use workspace-relative path validation, the existing cloud file
-authority, and Design recognition from current, index, HEAD, registry, and
-sticky evidence. Code review refuses Design authoring and path aliases. Guarded
-writes compare bounded UTF-8 bytes and file generation before preparing a
-temporary file and immediately before atomic replacement. Restored-file
-permissions are set on the temporary file before local/cloud ownership
-publication and replacement. Creation modes are an internal Git-derived option,
-never a file-write IPC parameter. Existing targets retain their permissions. A
-stale or unsafe write returns an error; the renderer retains the preview and
-choices. A changed confirmed snapshot requires an explicit Reload latest to
-discard an unsaved resolution preview.
+In the Files editor (`code-editor/merge-conflict-blocks.ts`) an accept is one
+ordinary editor transaction: ⌘Z undoes it, it shares the draft and undo history
+with typed edits, and the file autosaves or saves with ⌘S like any other. A
+navigator beside the file name steps between blocks. Diff view waits while Git
+still lists the file as conflicted, so no accept swaps editors and drops its
+undo history. A Changes card (`features/code-review/merge-conflict-pierre.tsx`)
+shows the same blocks, buttons and navigator; an accept there rewrites the file
+through the ordinary file write, only over the exact text the card shows. A
+file that changed since is refreshed instead. Read-only views mark the blocks
+and point to the editable file. Design files resolve like any other file;
+people's writes to cloud Design paths stay refused by the engine.
 
-The standalone renderer component lives in
-`features/code-review/merge-conflict-actions.tsx`. Their owner receives the
-confirmed disk content separately from the preview and gates inactive, read-only,
-historical, and Design surfaces. Ordinary unguarded editor Save must be disabled
-while displaying a resolution preview or routed through the conflict action.
-Separate unsaved source edits must be saved or undone before choosing a
-resolution. While Save resolution is pending, the editor and Discard preview
-remain disabled; failure retains the choices and preview for retry. The parent
-tracks the save lifetime so an early disk refresh cannot erase an editor draft.
-
-The protocol leaf `@zeros/protocol/git-review-actions` owns the schema and the
-pure conflict helpers. The workspace operation is `git.resolveConflict`;
-registration must retain write admission, lifecycle serialization, cloud
-policy, Design guards, and workspace change events.
+Saving never stages: Git keeps listing the file as conflicted until it is
+staged, and merge or rebase continuation stays an explicit Git action. The
+former Resolve conflicts panel, its preview strip and the `git.resolveConflict`
+workspace operation are gone; nothing persisted belongs to them.
 
 ## Direct commits and your Git setup
 

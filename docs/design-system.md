@@ -318,6 +318,8 @@ All, editing, portals and vendor surfaces across owners, placements and themes.
 | Tinted container | `bg-<family>-bg` | Callouts, failed rows, chips |
 | Text on that container | `text-<family>-fg` | Never `-primary` on `-bg` |
 | Solid destructive | `bg-red-secondary` + `text-red-secondary-fg`, hover `bg-red-secondary-hover` | Delete buttons, destructive badges |
+| Solid accept | `bg-<green\|blue\|neutral>-secondary` + `text-<…>-secondary-fg`, hover `bg-<…>-secondary-hover` | A merge conflict's Accept current change, Accept incoming change and Accept both |
+| Conflict rows | `--conflict-current(-band)`, `--conflict-incoming(-band)`, `--conflict-neutral` | Translucent block rows and marker bands, so a selection shows through |
 | Yellow graphics | `bg-yellow-icon`, `border-yellow-icon/40` | Dots, icons, tints — in Light `--yellow-primary` is ochre text |
 | Highlight wash | `--yellow-wash` at 35% / 54% | Code-editor search matches |
 

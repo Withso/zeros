@@ -195,6 +195,50 @@
     {
       "role": "text",
       "fg": [
+        "green-secondary-fg"
+      ],
+      "on": [
+        "green-secondary",
+        "green-secondary-hover"
+      ],
+      "why": "Solid Accept current change fills on a merge conflict, at rest and on hover."
+    },
+    {
+      "role": "text",
+      "fg": [
+        "blue-secondary-fg"
+      ],
+      "on": [
+        "blue-secondary",
+        "blue-secondary-hover"
+      ],
+      "why": "Solid Accept incoming change fills on a merge conflict, at rest and on hover."
+    },
+    {
+      "role": "text",
+      "fg": [
+        "neutral-secondary-fg"
+      ],
+      "on": [
+        "neutral-secondary",
+        "neutral-secondary-hover"
+      ],
+      "why": "Solid Accept both fills on a merge conflict, at rest and on hover."
+    },
+    {
+      "role": "supplemental",
+      "fg": [
+        "fg3"
+      ],
+      "on": [
+        "green-primary/0.26@bg1",
+        "blue-primary/0.34@bg1"
+      ],
+      "why": "The (Current change) and (Incoming change) labels on a conflict's marker bands; 0.34 is the stronger band in either theme."
+    },
+    {
+      "role": "text",
+      "fg": [
         "inverted-fg"
       ],
       "on": [

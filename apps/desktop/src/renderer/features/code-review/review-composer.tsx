@@ -119,7 +119,7 @@ export function ReviewComposer({
           // the cue. Sending dims the text until the write lands.
           "resize-y border-transparent text-xs leading-5 shadow-none hover:border-transparent focus-visible:data-[zeros-keyboard-focus]:border-transparent focus-visible:data-[zeros-keyboard-focus]:ring-0",
           reply
-            ? "min-h-12 px-2.5 pt-1.75 pb-0.5"
+            ? "min-h-12 px-2.5 pt-1.5 pb-0.5"
             : cn("min-h-16 px-3 py-1.5", showLabel ? "pt-1" : "pt-2.5"),
           draft.busy && "text-fg3",
         )}

@@ -115,6 +115,10 @@ Supplemental metadata and subtle boundary floors are owner-reviewed design decis
 | `--brown-fg` | brown-bg | 4.5:1 | ✓ 6.74 on brown-bg | ✓ 5.08 on brown-bg |
 | `--fg1` | yellow-wash/0.35@bg1, yellow-wash/0.54@bg1, yellow-wash/0.35@sidebar-bg, yellow-wash/0.54@sidebar-bg | 4.5:1 | ✓ 4.58 on yellow-wash/0.54@sidebar-bg | ✓ 10.12 on yellow-wash/0.54@sidebar-bg |
 | `--red-secondary-fg` | red-secondary, red-secondary-hover | 4.5:1 | ✓ 6.61 on red-secondary | ✓ 4.90 on red-secondary |
+| `--green-secondary-fg` | green-secondary, green-secondary-hover | 4.5:1 | ✓ 5.31 on green-secondary-hover | ✓ 6.04 on green-secondary |
+| `--blue-secondary-fg` | blue-secondary, blue-secondary-hover | 4.5:1 | ✓ 5.56 on blue-secondary-hover | ✓ 6.07 on blue-secondary |
+| `--neutral-secondary-fg` | neutral-secondary, neutral-secondary-hover | 4.5:1 | ✓ 7.34 on neutral-secondary-hover | ✓ 8.37 on neutral-secondary |
+| `--fg3` | green-primary/0.26@bg1, blue-primary/0.34@bg1 | 3:1 | ✓ 3.26 on blue-primary/0.34@bg1 | ✓ 3.92 on blue-primary/0.34@bg1 |
 | `--inverted-fg` | inverted-bg | 4.5:1 | ✓ 16.30 on inverted-bg | ✓ 14.62 on inverted-bg |
 | `--primary-button-fg` | primary-button-bg, primary-button-hover | 4.5:1 | ✓ 13.11 on primary-button-hover | ✓ 10.41 on primary-button-hover |
 | `--yellow-icon` | @rest, @hover | 3:1 | ✓ 6.10 on selected-bg | ✓ 3.14 on bg2-highlight |

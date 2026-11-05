@@ -421,53 +421,23 @@ export async function runCodeReviewSmoke({
   await conflictEditor.press("Control+Home");
   await conflictEditor.pressSequentially("// manual unsaved edit");
   await conflictEditor.press("Enter");
-  // A preview based on disk must never replace unrelated unsaved editor text.
-  const currentChoice = page.getByRole("button", {
-    name: "Current",
-    exact: true,
-  });
-  await expect
-    .poll(
-      async () =>
-        (await currentChoice.count()) === 0 ||
-        (await currentChoice.isDisabled()),
-    )
-    .toBe(true);
-  await expect(conflictEditor).toContainText("// manual unsaved edit");
-  await expect(last()).not.toHaveText("save resolution");
-  check("Conflict controls preserve a separate unsaved source draft", true);
-
-  await open();
-  await page.getByTestId("review-mode-conflict").click();
-  const saveResolution = page.getByRole("button", {
-    name: "Save resolution",
-    exact: true,
-  });
-  await expect(saveResolution).toBeDisabled();
-  await page.getByRole("button", { name: "Both", exact: true }).click();
-  await expect(page.locator(".cm-content")).toContainText("'workspace'");
-  await expect(page.locator(".cm-content")).toContainText("'shared'");
-  await expect(page.locator(".cm-content")).not.toContainText("<<<<<<<");
-  await expect(saveResolution).toBeEnabled();
-  const normalSave = page.getByRole("button", { name: "Save", exact: true });
-  if (await normalSave.count()) await expect(normalSave).toBeDisabled();
-  await page.getByTestId("review-hold-submissions").click();
-  await saveResolution.click();
-  await expect(page.getByTestId("review-release-submissions")).toBeEnabled();
+  // An accept is an ordinary edit: it shares the draft and the undo history
+  // with typed text, and nothing previews or saves separately.
   await expect(
-    page.getByRole("button", {
-      name: "Discard resolution preview",
-      exact: true,
-    }),
-  ).toBeDisabled();
-  await expect(page.locator(".cm-content")).toHaveAttribute(
-    "contenteditable",
-    "false",
-  );
-  await page.getByTestId("review-release-submissions").click();
-  await expect(last()).toHaveText("save resolution");
+    page.getByRole("button", { name: "Save resolution", exact: true }),
+  ).toHaveCount(0);
+  await page
+    .getByRole("button", { name: "Accept both", exact: true })
+    .click();
+  await expect(conflictEditor).toContainText("'workspace'");
+  await expect(conflictEditor).toContainText("'shared'");
+  await expect(conflictEditor).not.toContainText("<<<<<<<");
+  await expect(conflictEditor).toContainText("// manual unsaved edit");
+  await conflictEditor.press("Control+z");
+  await expect(conflictEditor).toContainText("<<<<<<<");
+  await expect(conflictEditor).toContainText("// manual unsaved edit");
   check(
-    "Conflict choices preview in the real editor and save through the guarded resolution action",
+    "Conflict accepts and typed edits share one draft and undo history",
     true,
   );
   await runReviewComparisonSmoke({ page, check, harnessBase: base });

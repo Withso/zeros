@@ -1,140 +1,100 @@
 import { chromium, expect } from "@playwright/test";
 import { pathToFileURL } from "node:url";
 
+// Git conflicts resolve in place in the real Files editor: each block's
+// accept row rewrites it as an ordinary edit (⌘Z undoes it), the navigator
+// steps between blocks, the file saves through the ordinary file write, and
+// nothing calls a separate resolution operation. Hunk review stays retired.
+const TWO_BLOCKS = [
+  "prefix",
+  "<<<<<<< HEAD",
+  "current one",
+  "||||||| base",
+  "old one",
+  "=======",
+  "incoming one",
+  ">>>>>>> topic",
+  "between",
+  "<<<<<<< HEAD",
+  "current two",
+  "=======",
+  "incoming two",
+  ">>>>>>> topic",
+  "",
+].join("\n");
+
 export async function runGitReviewActionsSmoke({ page, check = () => {}, harnessBase }) {
-  const base = `${harnessBase ?? `${new URL(page.url()).origin}/apps/desktop/src/renderer/harnesses`}/harness-git-review-actions.html`;
-  const open = async (query = "") => {
-    await page.goto(`${base}${query ? `?${query}` : ""}`);
-    await expect
-      .poll(() => page.evaluate(() => window.reviewActionsFixture?.ready))
-      .toBe(true);
+  const base = `${harnessBase ?? `${new URL(page.url()).origin}/apps/desktop/src/renderer/harnesses`}/harness-file-editor.html`;
+  const source = () => page.locator(".cm-content[contenteditable=true]:visible");
+  const navigator = () => page.getByRole("group", { name: "Conflicts", exact: true });
+  const accept = (block, name) =>
+    page
+      .getByRole("group", { name: new RegExp(`^Conflict ${block} of \\d+$`) })
+      .getByRole("button", { name, exact: true });
+  const disk = () =>
+    page.evaluate(() => window.__fileEditor.disk("conflict.ts"));
+  const open = async (content) => {
+    await page.goto(`${base}?owner=personal&reset`);
+    await expect.poll(() => page.evaluate(() => Boolean(window.__fileEditor))).toBe(true);
+    await page.evaluate((text) => window.__fileEditor.external("conflict.ts", text), content);
+    await page.evaluate(() => window.__fileEditor.open("conflict.ts"));
+    await expect(source()).toBeVisible();
   };
-  const requests = (op) =>
-    page.evaluate(
-      (op) =>
-        window.reviewActionsFixture.requests.filter((item) => item.op === op),
-      op,
-    );
-  const dialog = () => page.getByRole("dialog");
-  const save = () =>
-    page.getByRole("button", { name: "Save resolution", exact: true });
-  const conflict = (index) => page.locator("[data-conflict-id]").nth(index);
-  const preview = () => page.locator("[data-resolution-preview]").textContent();
 
-  await open();
-  await expect(
-    page.getByRole("heading", { name: "Git review actions", exact: true }),
-  ).toBeVisible();
-  for (const name of ["Accept", "Reject", "Accepted", "Reject hunk"])
+  await open(TWO_BLOCKS);
+  for (const name of ["Accept", "Reject", "Accepted", "Reject hunk", "Save resolution", "Resolve conflicts"])
     await expect(page.getByRole("button", { name, exact: true })).toHaveCount(0);
-  expect(
-    await page.evaluate(() => window.reviewActionsFixture.requests),
-  ).toEqual([]);
-  check("Hunk review is gone: no Accept or Reject and no decision reads", true);
+  check("Hunk review and the Resolve conflicts panel are gone", true);
 
-  await open("conflicts=1");
-  const initial = await preview();
-  await expect(save()).toBeDisabled();
-  await conflict(0)
-    .getByRole("button", { name: "Current", exact: true })
-    .click();
-  expect(await preview()).toContain(
-    "prefix\r\ncurrent one\r\nbetween\r\n<<<<<<< HEAD",
-  );
-  expect(await preview()).not.toContain("old one");
-  await expect(save()).toBeDisabled();
-  await conflict(0)
-    .getByRole("button", { name: "Incoming", exact: true })
-    .click();
-  expect(await preview()).toContain("prefix\r\nincoming one\r\nbetween");
-  await conflict(0).getByRole("button", { name: "Both", exact: true }).click();
-  expect(await preview()).toContain(
-    "prefix\r\ncurrent one\r\nincoming one\r\nbetween",
-  );
-  expect(await page.evaluate(() => window.reviewActionsFixture.disk())).toBe(
-    initial,
-  );
-  await conflict(1)
-    .getByRole("button", { name: "Incoming", exact: true })
-    .click();
-  const resolved =
-    "prefix\r\ncurrent one\r\nincoming one\r\nbetween\r\nincoming two";
-  expect(await preview()).toBe(resolved);
-  await expect(save()).toBeEnabled();
-  await save().evaluate((element) => {
-    element.click();
-    element.click();
-  });
-  await expect
-    .poll(() => page.evaluate(() => window.reviewActionsFixture.saved))
-    .toEqual([resolved]);
-  expect(await requests("resolve")).toHaveLength(1);
-  expect(await page.evaluate(() => window.reviewActionsFixture.disk())).toBe(
-    resolved,
-  );
-  check(
-    "Current, Incoming and Both preview immediately; only explicit Save writes the complete resolution",
-    true,
-  );
+  const step = (name) =>
+    navigator().getByRole("button", { name, exact: true }).click();
+  const caretLine = () => page.locator(".cm-activeLine:visible").textContent();
+  // Above every block, 1 is the next block below; Next goes there first, so
+  // no block is ever skipped.
+  await expect(navigator()).toHaveText("1 / 2");
+  await step("Next conflict");
+  await expect(navigator()).toHaveText("1 / 2");
+  await expect.poll(caretLine).toContain("<<<<<<< HEAD");
+  await step("Next conflict");
+  await expect(navigator()).toHaveText("2 / 2");
+  await step("Next conflict");
+  await expect(navigator()).toHaveText("1 / 2");
+  await step("Previous conflict");
+  await expect(navigator()).toHaveText("2 / 2");
+  check("The navigator steps between blocks and wraps", true);
 
-  await open("conflicts=1");
-  await conflict(0)
-    .getByRole("button", { name: "Current", exact: true })
-    .click();
-  await conflict(1).getByRole("button", { name: "Both", exact: true }).click();
-  const draft = await preview();
-  await page.evaluate(() =>
-    window.reviewActionsFixture.refresh(
-      window.reviewActionsFixture.initialConflict.replace(
-        "current one",
-        "external one",
-      ),
-    ),
-  );
-  await expect(page.locator("[data-conflict-stale=true]")).toBeVisible();
-  expect(await preview()).toBe(draft);
-  await save().click();
-  await expect(page.getByRole("alert")).toContainText("file changed");
-  expect(await preview()).toBe(draft);
-  await expect(
-    conflict(0).getByRole("button", { name: "Current", exact: true }),
-  ).toHaveAttribute("aria-pressed", "true");
-  expect(
-    await page.evaluate(() => window.reviewActionsFixture.saved),
-  ).toHaveLength(0);
-  await page
-    .getByRole("button", { name: "Reload latest", exact: true })
-    .click();
-  await expect(
-    dialog().getByRole("button", { name: "Cancel", exact: true }),
-  ).toBeFocused();
-  await dialog().getByRole("button", { name: "Cancel", exact: true }).click();
-  expect(await preview()).toBe(draft);
-  await page
-    .getByRole("button", { name: "Reload latest", exact: true })
-    .click();
-  await dialog()
-    .getByRole("button", { name: "Reload latest", exact: true })
-    .click();
-  expect(await preview()).toContain("external one");
-  await expect(save()).toBeDisabled();
-  check(
-    "Concurrent refresh and failed save retain choices and preview until a confirmed Reload",
-    true,
-  );
+  await accept(1, "Accept incoming change").click();
+  await expect(source()).not.toContainText("current one");
+  await expect(navigator()).toHaveText("1 / 1");
+  await source().press("ControlOrMeta+z");
+  await expect(source()).toContainText("current one");
+  await expect(navigator()).toHaveText(/\/ 2$/);
+  check("Accepting is an ordinary edit that ⌘Z undoes", true);
 
-  for (const gate of ["inactive", "readonly", "design", "historical"]) {
-    await open(`conflicts=1&${gate}=1`);
-    await expect(save()).toHaveCount(0);
-    await expect(
-      page.getByRole("button", { name: "Current", exact: true }),
-    ).toHaveCount(0);
-    expect(await requests("resolve")).toHaveLength(0);
-  }
-  check(
-    "Conflict mutation controls respect live owner, visibility and Design admission",
-    true,
+  await accept(1, "Accept both").click();
+  await accept(1, "Accept current change").click();
+  const resolved = "prefix\ncurrent one\nincoming one\nbetween\ncurrent two\n";
+  await expect.poll(disk).toBe(resolved);
+  await expect(navigator()).toHaveCount(0);
+  const requests = await page.evaluate(() =>
+    window.__fileEditor.requests().map((request) => request.op),
   );
+  expect(requests).toContain("file.write");
+  expect(requests).not.toContain("git.resolveConflict");
+  check("A resolved file saves through the ordinary file write", true);
+
+  await page.getByRole("button", { name: "File options", exact: true }).click();
+  const options = page.getByRole("dialog", { name: "File options" });
+  await expect(options.getByRole("switch", { name: /Diff view/ })).toBeDisabled();
+  await expect(options).toContainText("Resolve conflicts first");
+  await page.keyboard.press("Escape");
+  check("Diff view waits while Git lists the file as conflicted", true);
+
+  await open("<<<<<<< ours\na\n=======\nb\n");
+  await expect(page.getByRole("status").filter({ hasText: "Line 1 has no separator or closing marker. Fix it by hand." })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Accept current change", exact: true })).toHaveCount(0);
+  await expect(navigator()).toHaveCount(0);
+  check("Unpaired markers show one notice and no accept actions", true);
 }
 
 // A dedicated run avoids editing the shared smoke dispatcher during parallel work.
@@ -148,14 +108,12 @@ if (
   const browser = await chromium.launch();
   const errors = [];
   try {
-    const page = await browser.newPage();
+    const page = await browser.newPage({ viewport: { width: 1100, height: 780 } });
     page.on("pageerror", (error) => errors.push(error.message));
-    await page.goto(
-      `${origin}/apps/desktop/src/renderer/harnesses/harness-git-review-actions.html`,
-    );
     await runGitReviewActionsSmoke({
       page,
       check: (name) => console.log(`ok: ${name}`),
+      harnessBase: `${origin}/apps/desktop/src/renderer/harnesses`,
     });
     expect(errors).toEqual([]);
   } finally {

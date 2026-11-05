@@ -4,8 +4,6 @@ import { isCodeReviewOperation } from "@zeros/protocol/code-review";
 import { handleCodeReviewRoute } from "../code-review/routes";
 import { CodeReviewError } from "../code-review/errors";
 import type { CodeReviewAgentScope } from "../agents/code-review-tools";
-import { isGitReviewOperation } from "@zeros/protocol/git-review-actions";
-import { handleGitReviewOperation } from "../git/review-actions";
 import { assertDesignCheckoutReadable, readDesignCheckoutStatus } from "../design/checkout-status";
 import { DesignCatalogReader, DesignCatalogError, type DesignCatalogAdmission } from "../design/catalog";
 import { DesignPreviewJobs } from "../design/preview-jobs";
@@ -546,7 +544,6 @@ function assertRemoteRepoRootAllowed(repoRoot: string, remote: boolean): void {
 const WRITE_OPS = new Set<string>([
   "mcp.saveServer",
   "mcp.deleteServer",
-  "git.resolveConflict",
   "codeReview.create",
   "codeReview.reply",
   "codeReview.setResolved",
@@ -640,7 +637,6 @@ const LIFECYCLE_GATED_WORKSPACE_OPS = new Set<string>([
   "design.page.rename",
   "design.page.delete",
   "design.themes.update",
-  "git.resolveConflict",
   "design.capture",
   // Starts a capture render like design.capture; archive drains it first.
   "design.preview",
@@ -732,7 +728,6 @@ const LIFECYCLE_GATED_WORKSPACE_OPS = new Set<string>([
  * on Git's own lock files, so callers must still surface a lock conflict rather
  * than retrying through another execution backend. */
 const SERIALIZED_GIT_MUTATION_OPS = new Set<string>([
-  "git.resolveConflict",
   "design.initialize",
   "design.stage",
   "design.unstage",
@@ -2662,14 +2657,6 @@ export class WorkspaceService {
         remote,
         userId: opts.reviewUserId,
         userName: opts.reviewUserName,
-      });
-    }
-    if (isGitReviewOperation(op)) {
-      const workspaceId = reqStr(params, "workspaceId");
-      const cwd = this.resolveReadCwd(workspaceId, remote);
-      return handleGitReviewOperation(op, params, {
-        cwd, remote,
-        assertSourceWrite: (paths, action) => assertNoDesignPathWrites(workspaceId, paths, action, cwd),
       });
     }
     switch (op) {
