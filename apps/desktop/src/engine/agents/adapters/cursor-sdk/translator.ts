@@ -141,6 +141,10 @@ export interface CursorSdkTranslatorOptions {
   /** Optional diagnostic sink (adapter → onAgentStderr). One line per subagent
    *  at flush so a path/timing miss is visible without spamming on every poll. */
   onLog?: (message: string) => void;
+  /** The server Cursor named for each MCP call that returned a result without
+   *  an error. Cursor reports no MCP connection status, so this is the only
+   *  evidence that one of its servers connected. */
+  onMcpToolSucceeded?: (server: string) => void;
 }
 
 export class CursorSdkTranslator {
@@ -180,6 +184,9 @@ export class CursorSdkTranslator {
     path: string,
   ) => ParsedSubagentTranscript | null;
   private readonly onLog?: (message: string) => void;
+  private readonly onMcpToolSucceeded?: (server: string) => void;
+  /** MCP call_id → the server its running frame named; completions can omit args. */
+  private readonly mcpCallServers = new Map<string, string>();
 
   private hasSeenTerminal = false;
   private hasSeenError = false;
@@ -210,6 +217,7 @@ export class CursorSdkTranslator {
     this.loadSubagentTranscript = opts.loadSubagentTranscript;
     this.loadSubagentTranscriptByPath = opts.loadSubagentTranscriptByPath;
     this.onLog = opts.onLog;
+    this.onMcpToolSucceeded = opts.onMcpToolSucceeded;
     this.compactionTrigger = opts.compactionTrigger ?? "auto";
   }
 
@@ -472,6 +480,7 @@ export class CursorSdkTranslator {
     if (entry.hasTranscript) return;
     entry.native ??= new CursorSdkTranslator({
       sessionId: this.sessionId,
+      onMcpToolSucceeded: this.onMcpToolSucceeded,
       emit: (event) => {
         const value = event.update;
         this.emit({ ...event, update:
@@ -628,6 +637,11 @@ export class CursorSdkTranslator {
       result,
       msg.truncated?.result === true,
     );
+    const mcpServer =
+      mapToolKind(name) === "mcp" && !partialArgs && isObj(args) &&
+      typeof args.providerIdentifier === "string" && args.providerIdentifier
+        ? args.providerIdentifier
+        : undefined;
 
     // The subagent's agentId rides on the task tool args — capture it now (the
     // completed message may not echo args) so we can find its transcript later.
@@ -644,6 +658,7 @@ export class CursorSdkTranslator {
 
     if (msg.status === "running") {
       if (previous?.status === "completed" || previous?.status === "failed") return;
+      if (mcpServer) this.mcpCallServers.set(callId, mcpServer);
       this.openToolCard(callId, name, args);
       if (previous && args != null && !partialArgs) {
         this.emit({ sessionId: this.sessionId, update: {
@@ -684,6 +699,11 @@ export class CursorSdkTranslator {
     if (previous?.snapshot === snapshot) return;
     this.toolRecords.set(callId, { name, status, rawOutput: presentation.rawOutput, snapshot });
     this.opened.add(callId);
+    if (mapToolKind(name) === "mcp" && status !== "pending") {
+      const server = mcpServer ?? this.mcpCallServers.get(callId);
+      this.mcpCallServers.delete(callId);
+      if (status === "completed" && server) this.onMcpToolSucceeded?.(server);
+    }
 
     // A task result can be a completed child or a background launch receipt.
     // Native deltas carry live output; older transports use owned checkpoints.

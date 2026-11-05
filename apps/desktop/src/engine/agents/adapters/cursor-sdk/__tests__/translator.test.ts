@@ -1204,3 +1204,25 @@ describe("CursorSdkTranslator", () => {
     expect(answerOf(out, parentId)).toBe("# Right report");
   });
 });
+
+describe("Cursor MCP connection evidence", () => {
+  it("reports the server of each successful MCP tool call, and nothing else", () => {
+    const used: string[] = [];
+    const t = new CursorSdkTranslator({ sessionId: "s1", emit: () => {}, onMcpToolSucceeded: (server) => used.push(server) });
+    const call = (call_id: string, status: string, extra: Record<string, unknown>) =>
+      t.feed({ type: "tool_call", call_id, name: "mcp", status, ...extra });
+    const ok = { status: "success", value: { isError: false, content: [{ text: { text: "ok" } }] } };
+    // The completed frame may omit args; the running frame names the server.
+    call("a", "running", { args: { providerIdentifier: "linear", toolName: "list_issues", args: {} } });
+    call("a", "completed", { result: ok });
+    call("b", "running", { args: { providerIdentifier: "broken", toolName: "fail" } });
+    call("b", "completed", { result: { status: "success", value: { isError: true, content: [] } } });
+    call("c", "error", { args: { providerIdentifier: "offline", toolName: "x" } });
+    call("d", "running", { args: { providerIdentifier: "slow", toolName: "wait" } });
+    t.feed({ type: "tool_call", call_id: "e", name: "read", status: "completed", args: { providerIdentifier: "not-mcp", path: "a.ts" }, result: { status: "success", value: { content: "x" } } });
+    // A one-shot completion and the native callback lane name their server too.
+    call("f", "completed", { args: { providerIdentifier: "one-shot", toolName: "x" }, result: ok });
+    t.feedDelta({ type: "tool-call-completed", callId: "g", toolCall: { type: "mcp", args: { providerIdentifier: "callback", toolName: "y" }, result: ok } });
+    expect(used).toEqual(["linear", "one-shot", "callback"]);
+  });
+});

@@ -266,6 +266,7 @@ export class DesignCodeToolAdmissions {
         beginPrompt: () => admittedHandler.beginPrompt(),
         cancel: () => admittedHandler.cancel(),
         suspend: () => admittedHandler.suspend(),
+        listedMcpServers: () => (admittedServer.listedTools ? [admittedServer.name] : []),
         revoke: () => admittedHandler.dispose(),
         dispose: () => {
           admittedHandler.dispose();

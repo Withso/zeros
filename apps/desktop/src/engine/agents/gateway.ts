@@ -1438,6 +1438,32 @@ function withUnavailableMcp<T extends SessionToolsSnapshot | SessionToolsInvento
   };
 }
 
+/** Cursor reports no MCP connection status. An engine-hosted server that
+ * served its tool list to this execution's provider connected. A status the
+ * provider reported, and rows from its own settings, stay as they are. */
+function withListedMcp(
+  snapshot: SessionToolsInventorySnapshot,
+  listed: readonly string[],
+): SessionToolsInventorySnapshot {
+  if (!listed.length || !snapshot.groups) return snapshot;
+  const names = new Set(listed);
+  return {
+    ...snapshot,
+    groups: snapshot.groups.map((group) =>
+      group.kind !== "mcp"
+        ? group
+        : {
+            ...group,
+            entries: group.entries.map((entry): SessionToolInventoryEntry =>
+              entry.status === "unverified" && entry.source !== "local" && names.has(entry.name)
+                ? { ...entry, status: "connected", detail: "The agent loaded this server's tools in this chat." }
+                : entry,
+            ),
+          },
+    ),
+  };
+}
+
 export interface NewAgentSessionOptions {
   cwd?: string;
   env?: Record<string, string>;
@@ -6954,7 +6980,10 @@ export class AgentGateway {
         "Could not read this chat’s tool inventory. Refresh to retry.",
       );
     }
-    return withUnavailableMcp(snapshot, this.executionUnavailableMcp.get(sessionId));
+    return withUnavailableMcp(
+      withListedMcp(snapshot, this.sessionTools.listedMcpServers(sessionId)),
+      this.executionUnavailableMcp.get(sessionId),
+    );
   }
 
   async authenticateSessionTool(

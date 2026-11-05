@@ -30,6 +30,8 @@ export interface AgentSessionTools {
   /** Retire document grants during an engine-owned directory transition while
    * preserving the stable provider MCP registration. */
   suspend?(): () => void;
+  /** This owner's servers whose tools the provider has listed. */
+  listedMcpServers?(): string[];
 }
 export interface AgentSessionToolInput {
   /** Registered provider chosen by gateway admission, not a tool caller. */
@@ -100,6 +102,7 @@ export function composeAgentSessionToolFactories(
         const resume = admitted.flatMap((tools) => (tools.suspend ? [tools.suspend()] : []));
         return () => resume.forEach((release) => release());
       },
+      listedMcpServers: () => admitted.flatMap((tools) => tools.listedMcpServers?.() ?? []),
       revoke: () => admitted.forEach((tools) => tools.revoke()),
       dispose: async () => {
         const results = await Promise.allSettled(admitted.map((tools) => tools.dispose()));
@@ -285,6 +288,14 @@ export class AgentSessionToolRegistry {
       // Turn settlement is best-effort cleanup and must not replace the
       // provider's own result or error for this prompt.
     }
+  }
+
+  /** Product servers whose tools this execution's provider has listed. A
+   * retiring execution's servers no longer answer it. */
+  listedMcpServers(executionId: string): string[] {
+    const entry = this.entries.get(executionId);
+    if (!entry || entry.controller.signal.aborted) return [];
+    return entry.tools?.listedMcpServers?.() ?? [];
   }
 
   suspend(workspaceId?: string): () => void {

@@ -845,3 +845,11 @@ Each landed step appends one line: date, workstream, what landed, evidence.
   count and switches, and `disabled_tools` is unchanged. A Customize smoke
   step holds it: a server with 59 tools shows no notice. The exported
   `customize.md` still lists the row; it predates this change.
+- 2026-11-05 · 4 · Composer Tools: a Not verified row takes a neutral 14px
+  dashed circle in fg3 instead of the red error X. Cursor reports no MCP
+  status, so every server in a Cursor chat read as failed even when its tools
+  worked; its grouped rows now say Not verified, and red stays for real
+  failures. A row turns Connected on Zeros' own evidence: Cursor finished one
+  of its tools in that chat, or a Zeros-hosted server served that chat its
+  tool list. `composer-tool-groups.test.ts` and the Cursor inventory,
+  translator and gateway tests hold it.

@@ -1053,6 +1053,9 @@ function cursorSettingSources(
     : [];
 }
 
+// The same bound as an inventory's rows.
+const MAX_USED_MCP_SERVERS = 1_000;
+
 interface Session {
   /** Zeros-owned live execution route; deliberately not the SDK agent id. */
   zerosSessionId: string;
@@ -1099,6 +1102,10 @@ interface Session {
    *  toggles into/out of Auto mode — autoReview is create-time only. */
   env?: Record<string, string>;
   mcpServers?: McpServerRegistration[];
+  /** Servers whose MCP tools returned a result without an error in this chat.
+   *  Cursor reports no connection status, so this is the evidence that one
+   *  connected. */
+  usedMcpServers?: Set<string>;
   settingSources: CursorSettingSources;
   /** The autoReview value currently baked into `agent` (set at create/resume).
    *  A mode change flips the DESIRED value (autoReviewFor(modeId)); when it
@@ -1178,11 +1185,23 @@ export class CursorSdkAdapter implements AgentAdapter {
       inventory: async ({ sessionId }) => {
         const list = this.readSessionTools(sessionId);
         const local = this.localMcpEntries(sessionId, list.entries);
+        // The legacy list can only call an unverified server an error;
+        // grouped rows can say the connection is unknown.
+        const admitted = list.entries.map((entry): SessionToolInventoryEntry =>
+          entry.status === "connected"
+            ? entry
+            : {
+                id: entry.id,
+                name: entry.name,
+                status: "unverified",
+                detail: "Cursor does not report whether this server connected.",
+              },
+        );
         return {
           ...list,
           groups: sessionToolGroups(list).map((group) =>
             group.kind === "mcp"
-              ? { ...group, entries: [...group.entries, ...local] }
+              ? { ...group, entries: [...admitted, ...local] }
               : group,
           ),
         };
@@ -1212,12 +1231,21 @@ export class CursorSdkAdapter implements AgentAdapter {
       state: "unsupported",
       detail:
         "Cursor does not report MCP connection status. Dashboard tools require Cursor-hosted agents.",
-      entries: (session.mcpServers ?? this.ctx.mcpServers).map((server) => ({
-        id: server.name,
-        name: server.name,
-        status: "error",
-        detail: "Cursor cannot verify this connection through its SDK.",
-      })),
+      entries: (session.mcpServers ?? this.ctx.mcpServers).map((server) =>
+        session.usedMcpServers?.has(server.name)
+          ? {
+              id: server.name,
+              name: server.name,
+              status: "connected",
+              detail: "Cursor used this server's tools in this chat.",
+            }
+          : {
+              id: server.name,
+              name: server.name,
+              status: "error",
+              detail: "Cursor cannot verify this connection through its SDK.",
+            },
+      ),
     };
   }
 
@@ -1233,19 +1261,23 @@ export class CursorSdkAdapter implements AgentAdapter {
     return scanCursorMcpServers(session.providerHome ?? homedir(), session.cwd)
       .filter((server) => !taken.has(server.name))
       .slice(0, Math.max(0, 1_000 - admitted.length))
-      .map((server) => ({
-        // Native configuration names are not constrained by our wire schema.
-        // Hash oversized identities so truncating their labels cannot merge
-        // two rows or invalidate the entire Tools inventory response.
-        id: server.name.length > 512
-          ? `local:${createHash("sha256").update(server.name).digest("hex")}`
-          : server.name,
-        name: server.name.slice(0, 512),
-        status: "unverified",
-        source: "local",
-        detail:
-          "Declared in Cursor's MCP settings. Cursor does not report whether it connected.",
-      }));
+      .map((server): SessionToolInventoryEntry => {
+        const used = session.usedMcpServers?.has(server.name) === true;
+        return {
+          // Native configuration names are not constrained by our wire schema.
+          // Hash oversized identities so truncating their labels cannot merge
+          // two rows or invalidate the entire Tools inventory response.
+          id: server.name.length > 512
+            ? `local:${createHash("sha256").update(server.name).digest("hex")}`
+            : server.name,
+          name: server.name.slice(0, 512),
+          status: used ? "connected" : "unverified",
+          source: "local",
+          detail: used
+            ? "Declared in Cursor's MCP settings. Cursor used its tools in this chat."
+            : "Declared in Cursor's MCP settings. Cursor does not report whether it connected.",
+        };
+      });
   }
   private cachedInitialize: InitializeResponse | null = null;
   /** The most recently activated account feeds initialize metadata and new
@@ -2536,6 +2568,11 @@ export class CursorSdkAdapter implements AgentAdapter {
         readSubagentTranscript: (child, final) => transcripts.read(child, final),
         onLog: (m) =>
           this.ctx.emit.onAgentStderr(AGENT_ID, `${m} (cwd=${session.cwd})`),
+        onMcpToolSucceeded: (server) => {
+          if (this.sessions.get(opts.sessionId) !== session) return;
+          const used = (session.usedMcpServers ??= new Set());
+          if (used.size < MAX_USED_MCP_SERVERS) used.add(server);
+        },
       });
 
       // Verification breadcrumb, mirroring the Claude and Codex adapters: one

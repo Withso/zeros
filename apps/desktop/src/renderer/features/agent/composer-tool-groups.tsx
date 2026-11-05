@@ -3,6 +3,7 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
+  CircleDashed,
   LoaderCircle,
   X,
 } from "lucide-react";
@@ -308,6 +309,14 @@ function ToolStatus({
       >
         Authenticate
       </Button>
+    );
+  if (entry.status === "unverified")
+    return (
+      <Tooltip label={entry.detail ?? label}>
+        <span role="img" aria-label={entry.detail ? `${label}: ${entry.detail}` : label} className="shrink-0">
+          <CircleDashed className="text-fg3 size-3.5" />
+        </span>
+      </Tooltip>
     );
   return (
     <Tooltip label={entry.detail ?? label}>

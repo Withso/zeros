@@ -130,7 +130,7 @@ export function McpServerEditor({ initial, target, onSave, onBack, onSaved = onB
 }) {
   const id = useId();
   // One feedback slot per editor: a repeated outcome replaces its toast.
-  const feedback = { id: `mcp-server-editor-${id}` };
+  const feedback = useMemo(() => ({ id: `mcp-server-editor-${id}` }), [id]);
   const [draft, setDraft] = useState(() => secureDraftFromServer(initial));
   const [args, setArgs] = useState(() => (draft.args ?? []).map(value => ({ id: nextKvId(), value })));
   const [busy, setBusy] = useState(false);
@@ -203,7 +203,7 @@ export function McpServerEditor({ initial, target, onSave, onBack, onSaved = onB
     return () => { clearTimeout(timer); abort.abort(); };
   // The serialized configuration key includes every probe input, including
   // write-only edits, without retriggering for names or tool policy.
-  }, [probe, probeKey, configurationKey, draft.transport, draft.url, surfaceActive, busy, onVerified, connectionChanged, savedConnection?.connecting, initial?.enabled]);
+  }, [probe, probeKey, configurationKey, draft.transport, draft.url, surfaceActive, busy, onVerified, connectionChanged, savedConnection?.connecting, initial?.enabled, feedback]);
 
   const fill = (server: RawServer) => {
     const next = secureDraftFromServer(server);

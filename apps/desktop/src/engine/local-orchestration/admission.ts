@@ -283,6 +283,7 @@ export class LocalOrchestrationAdmissions {
       mcpServers: [{ ...mcp.registration, defaultToolsApproval: "approve" }],
       ...(binDir ? { pathPrepend: [binDir] } : {}),
       preparePrompt: () => (ports.featureOpen() && !revoked ? this.brief(scope.chatId, input.agentId) : ""),
+      listedMcpServers: () => (mcp.listedTools ? [mcp.name] : []),
       revoke,
       dispose: () =>
         (disposal ??= (async () => {

@@ -465,13 +465,62 @@ describe("Cursor session tools", () => {
             ?.find((group) => group.kind === "mcp")
             ?.entries.map((entry) => [entry.name, entry.status, entry.source]),
         ).toEqual([
-          ["imported", "error", undefined],
+          ["imported", "unverified", undefined],
           ["home-tools", "unverified", "local"],
           ["repo-tools", "unverified", "local"],
         ]);
-        // The strict legacy list carries only the admitted registry.
+        // The strict legacy list carries only the admitted registry, and its
+        // schema has no unverified status.
         const list = await adapter.capabilityPorts.sessionTools.list({ sessionId });
-        expect(list.entries.map((entry) => entry.name)).toEqual(["imported"]);
+        expect(list.entries.map((entry) => [entry.name, entry.status])).toEqual([["imported", "error"]]);
+      } finally {
+        await adapter.dispose();
+      }
+    });
+  });
+
+  it("shows a server as connected once Cursor has used one of its tools in this chat", async () => {
+    await withCursorConfigs(async (workspace) => {
+      const quiet = { name: "quiet", transport: "http" as const, url: "https://example.test/quiet" };
+      const result = (isError: boolean) => ({ status: "success", value: { isError, content: [{ text: { text: "ok" } }] } });
+      const used = (call_id: string, server: string, isError = false) => [
+        { type: "tool_call", call_id, name: "mcp", status: "running", args: { providerIdentifier: server, toolName: "probe", args: {} } },
+        { type: "tool_call", call_id, name: "mcp", status: "completed", result: result(isError) },
+      ];
+      sendSpy.mockImplementation(async () => ({
+        ...makeRun(),
+        stream: async function* () {
+          yield* used("a", "imported");
+          yield* used("b", "home-tools");
+          yield* used("c", "quiet", true);
+        },
+      }));
+      const adapter = new CursorSdkAdapter(makeCtx());
+      try {
+        const { session } = await adapter.newSession({
+          cwd: workspace,
+          env: { CURSOR_API_KEY: "key_test" },
+          mcpServers: [imported, quiet],
+        });
+        const sessionId = session.executionId;
+        await adapter.prompt({ sessionId, prompt: TEXT });
+        const inventory = await adapter.capabilityPorts.sessionTools.inventory({ sessionId });
+        expect(sessionToolsInventorySnapshotSchema.safeParse(inventory).success).toBe(true);
+        expect(
+          inventory.groups
+            ?.find((group) => group.kind === "mcp")
+            ?.entries.map((entry) => [entry.name, entry.status]),
+        ).toEqual([
+          ["imported", "connected"],
+          ["quiet", "unverified"],
+          ["home-tools", "connected"],
+          ["repo-tools", "unverified"],
+        ]);
+        const list = await adapter.capabilityPorts.sessionTools.list({ sessionId });
+        expect(list.entries.map((entry) => [entry.name, entry.status])).toEqual([
+          ["imported", "connected"],
+          ["quiet", "error"],
+        ]);
       } finally {
         await adapter.dispose();
       }

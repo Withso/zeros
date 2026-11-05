@@ -3,6 +3,8 @@
 // argv grammar as the CLI.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -218,6 +220,24 @@ describe("Local CLI admission", () => {
     expect((fs.statSync(dir).mode & 0o777).toString(8)).toBe("700");
     await tools.dispose();
     expect(fs.existsSync(dir)).toBe(false);
+  });
+
+  it("reports the tool server as loaded once the agent lists its tools", async () => {
+    const tools = (await admissions.admit(input("local")))!;
+    disposers.push(() => tools.dispose());
+    const registration = tools.mcpServers[0]!;
+    if (registration.transport !== "http") throw new Error("The Local CLI tool server is not HTTP.");
+    const client = new Client({ name: "local-admission-test", version: "1.0.0" });
+    try {
+      await client.connect(new StreamableHTTPClientTransport(new URL(registration.url), {
+        requestInit: { headers: { Authorization: tools.env[LOCAL_ORCHESTRATION_ENV.toolsCapability]! } },
+      }));
+      expect(tools.listedMcpServers?.()).toEqual([]);
+      await client.listTools();
+      expect(tools.listedMcpServers?.()).toEqual([LOCAL_ORCHESTRATION_TOOL_SERVER]);
+    } finally {
+      await client.close();
+    }
   });
 
   it("ends access when the execution ends", async () => {

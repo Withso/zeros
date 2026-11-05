@@ -227,6 +227,23 @@ describe("Design-agent MCP boundary", () => {
     ).resolves.toMatchObject({ content: [{ type: "text", text: "ok" }] });
   });
 
+  it("records a tool listing only from the provider holding the capability", async () => {
+    const refused = await fetch(server.url, {
+      method: "POST",
+      headers: {
+        Accept: "application/json, text/event-stream",
+        Authorization: `Bearer ${"0".repeat(64)}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
+    });
+    expect(refused.status).toBe(401);
+    const connected = await connect();
+    expect(server.listedTools).toBe(false);
+    await connected.listTools();
+    expect(server.listedTools).toBe(true);
+  });
+
   it("rejects unknown session identifiers instead of creating a replacement session", async () => {
     const response = await fetch(server.url, {
       method: "POST",

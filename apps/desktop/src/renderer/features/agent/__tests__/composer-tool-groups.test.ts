@@ -52,6 +52,18 @@ describe("MCP sign-in rows", () => {
     expect(html).toContain('aria-label="Error: The server exited before it started listening."');
     expect(html).not.toContain("Authenticate");
   });
+  it("shows a connection the agent cannot verify as unknown, not failed", () => {
+    const html = renderToStaticMarkup(createElement(ComposerToolGroups, {
+      snapshot: { state: "unsupported", entries: [], groups: [{ kind: "mcp", state: "partial", entries: [
+        { id: "linear", name: "linear", status: "unverified", detail: "Cursor does not report whether this server connected." },
+      ] }] },
+      authBusy: null, onAuthenticate: () => {},
+    }));
+    expect(html).toContain('aria-label="Not verified: Cursor does not report whether this server connected."');
+    expect(html).toContain("lucide-circle-dashed");
+    expect(html).not.toContain("lucide-x");
+    expect(html).not.toContain("text-red-primary");
+  });
   it("does not apply an MCP attempt to a plugin or app with the same id", () => {
     const html = renderToStaticMarkup(createElement(ComposerToolGroups, {
       snapshot: { state: "ready", entries: [], groups: [

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { AgentGateway } from "../gateway";
 import type { AgentAdapter } from "../types";
+import type { AgentSessionToolRegistry } from "../session-tools";
 import type { SessionToolsInventorySnapshot } from "@zeros/protocol/agent-extensions";
 import { testExecutionBoundary } from "./helpers/test-execution-boundary";
 
@@ -117,6 +118,75 @@ describe("session tools authority", () => {
       ).rejects.toThrow("Could not start tool authentication");
     } finally {
       await f.gateway.dispose();
+    }
+  });
+
+  it("shows an engine-hosted server as connected once the chat's agent listed its tools", async () => {
+    let listed: string[] = [];
+    const gateway = new AgentGateway({
+      projectRoot: "/fixture",
+      executionBoundary: testExecutionBoundary(),
+      events: {
+        onSessionUpdate() {},
+        onPermissionRequest() {},
+        onQuestionRequest() {},
+        onAgentStderr() {},
+        onAgentExit() {},
+      },
+      sessionToolFactory: async () => ({
+        env: {},
+        mcpServers: [],
+        listedMcpServers: () => listed,
+        revoke() {},
+        dispose: async () => {},
+      }),
+    });
+    const internal = gateway as unknown as {
+      adapters: Map<string, AgentAdapter>;
+      executionToAgent: Map<string, string>;
+      executionToCwd: Map<string, string>;
+      sessionTools: AgentSessionToolRegistry;
+    };
+    const unknown = (name: string) => ({ id: name, name, status: "unverified" as const, detail: "Cursor does not report whether this server connected." });
+    const inventory = vi.fn().mockResolvedValue({
+      state: "unsupported",
+      entries: [],
+      groups: [{ kind: "mcp", state: "partial", entries: [
+        unknown("design-draft"),
+        unknown("zeros_browser"),
+        { id: "zeros_device", name: "zeros_device", status: "error", detail: "The provider reported a failure." },
+        { ...unknown("zeros_computer"), id: "local-zeros_computer", source: "local" },
+      ] }],
+    });
+    internal.adapters.set("cursor", {
+      agentId: "cursor",
+      capabilityPorts: { sessionTools: { list: vi.fn(), inventory } },
+      dispose: async () => {},
+    } as unknown as AgentAdapter);
+    internal.executionToAgent.set("session-a", "cursor");
+    internal.executionToCwd.set("session-a", "/fixture/a");
+    const rows = async () =>
+      (await gateway.readSessionToolInventory("cursor", "session-a", "/fixture/a"))
+        .groups?.[0]?.entries.map((entry) => [entry.name, entry.status]);
+    try {
+      await internal.sessionTools.admit({ agentId: "cursor", executionId: "session-a", cwd: "/fixture/a" }, [], {});
+      expect(await rows()).toEqual([
+        ["design-draft", "unverified"],
+        ["zeros_browser", "unverified"],
+        ["zeros_device", "error"],
+        ["zeros_computer", "unverified"],
+      ]);
+      // A provider-reported status wins, and a provider's own settings row is
+      // not the engine-hosted server.
+      listed = ["design-draft", "zeros_device", "zeros_computer"];
+      expect(await rows()).toEqual([
+        ["design-draft", "connected"],
+        ["zeros_browser", "unverified"],
+        ["zeros_device", "error"],
+        ["zeros_computer", "unverified"],
+      ]);
+    } finally {
+      await gateway.dispose();
     }
   });
 });

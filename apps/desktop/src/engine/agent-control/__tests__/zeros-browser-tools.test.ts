@@ -381,9 +381,11 @@ describe("agent-control admissions", () => {
           { requestInit: { headers: { Authorization: bearer } } },
         ),
       );
+      expect(tools!.listedMcpServers?.()).toEqual([]);
       expect((await client.listTools()).tools).toHaveLength(
         BROWSER_TOOL_NAMES.length,
       );
+      expect(tools!.listedMcpServers?.()).toEqual(["zeros_browser"]);
       await expect(
         client.callTool({ name: "snapshot", arguments: {} }),
       ).resolves.toMatchObject({
