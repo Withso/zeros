@@ -794,3 +794,31 @@ Each landed step appends one line: date, workstream, what landed, evidence.
   commit signing, the proxy and Git 2.43) and touch none of these files; local renders of the 18 dashboard and 8 Ops states in both
   themes beside their frames, served under each page's real policy, plus the
   member menu, switching, focus after navigation and the phone layout.
+- 2026-11-05 · 5 · Web app (plans.md §8): Open in Zeros on a cloud workspace.
+  The workspace page had been broken since cloud v1 was retired: it read the
+  removed `/v1/cloud-workspaces/<id>`, and its invite page posted to a removed
+  accept route. It now reads `GET /v1/cloud-v2/workspaces/<id>`, which answers
+  only the creator while they are a member and is the only cloud route the web
+  proxy admits. Its Ready state offers Open in Zeros through
+  `zeros[-channel]://cloud-workspace/<organization>/<workspace>`, with the
+  deployment's scheme (`packages/protocol/src/cloud-workspace-link.ts`; a root
+  test keeps the web's string equal to the desktop parser). Electron main
+  accepts the link for its own channel only and carries it on the Local links'
+  navigation intent, which opens a window and waits for the signed-in app.
+  The renderer reads the workspace as the signed-in account, switches to its
+  organization and opens it as the sidebar does; bridge changes never retire
+  that read. A cloud workspace's menu gains Copy link, which copies the page.
+  The invite route and its two frames are gone, the Ready frame and the route
+  map lose their badge (canvas version 368), and the route map is refitted to
+  its rows: round 2 had removed four without shrinking it. Nothing in §8 is
+  left.
+  Evidence: red first for the link format (20 tests), main's routing (14)
+  and the web page (5 of its 7 tests); the navigator (18), the subscription
+  and the bridge-free observer (3), and the navigator's mount (2, one
+  mutation-checked); Copy link (11, for the menu, the copy action and the page
+  URL); the parity test (5); `node --test apps/web/lib/*.test.mjs` 161 tests;
+  typecheck, lint, `check:ui`, `check:preload`, `check:deep-link-schemes`,
+  `check:protocol` and `check:secrets`; local renders of the Ready,
+  Unavailable and Loading states in both themes under the page's real
+  headers. Not run here: link handling in the packaged macOS app (a cold
+  launch, and a launch with every window closed).

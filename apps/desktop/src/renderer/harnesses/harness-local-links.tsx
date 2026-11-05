@@ -275,7 +275,9 @@ function Harness() {
     let current = true;
     let stop: (() => void) | undefined;
     void onLocalNavigation((link) =>
-      setClicked(`${link.kind}:${link.id}`),
+      setClicked(link.kind === "cloud-workspace"
+        ? `${link.kind}:${link.workspaceId}`
+        : `${link.kind}:${link.id}`),
     ).then((off) => {
       if (current) stop = off;
       else off();

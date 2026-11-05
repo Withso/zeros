@@ -21,7 +21,7 @@ import { getActiveBridge } from "../platform/bridge/active-bridge";
 import { useBridge, useBridgeStatus } from "../platform/bridge/use-bridge";
 import type { RuntimeClient } from "../platform/bridge/ws-client";
 import { readLocalLinkSnapshot } from "../platform/local-link-snapshot";
-import { onLocalNavigation } from "../platform/local-links";
+import { onLocalNavigation, type NavigationLink } from "../platform/local-links";
 import { isLocalDevelopment } from "../platform/runtime";
 import { toast } from "../shared/ui/primitives/elements";
 import { resolveLocalLinkDestination } from "../state/local-link-navigation";
@@ -32,11 +32,16 @@ import {
 } from "../state/use-projects";
 import { syncProjectsToEngine } from "../state/projects-store";
 import { useWorkspaceStore, type ChatThread } from "../state/store";
+import { useOpenWorkspace } from "../state/use-open-workspace";
+import { useLatestCallback } from "../shared/lib/use-latest-callback";
+import { navigateCloudWorkspaceLink } from "./cloud-workspace-link-navigation";
 
 type ReadChat = (row: ChatRowWire) => ChatThread;
 
+/** A cloud link reads the control plane, not the engine: pass `undefined` to
+ * observe without a bridge. */
 export function observeLocalLinkNavigation(
-  bridge: RuntimeClient | null,
+  bridge: RuntimeClient | null | undefined,
   retired: () => void,
 ) {
   let cancelled = false;
@@ -63,9 +68,9 @@ export function observeLocalLinkNavigation(
   return {
     current: () =>
       !cancelled &&
-      getActiveBridge() === bridge &&
       getOrganizationStoreGeneration() === generation &&
-      bridge?.status === "connected",
+      (bridge === undefined ||
+        (getActiveBridge() === bridge && bridge?.status === "connected")),
     stop,
     dispose: () => {
       cancelled = true;
@@ -158,12 +163,15 @@ export async function navigateLocalLink(
 
 /** Main retains an intent until this listener mounts; the bridge and staff
  * gate may then finish booting independently. A newer link or user selection
- * retires the old read, including A → B → A owner switches. */
+ * retires the old read, including A → B → A owner switches. Cloud workspace
+ * links share the intent and wait only for the account's organizations. */
 export function LocalLinkNavigation({ readChat }: { readChat: ReadChat }) {
   const [pending, setPending] = useState<{
-    link: LocalLink;
+    link: NavigationLink;
     navigationVersion: number;
   } | null>(null);
+  // One identity, so a sessions or access change does not retire a read.
+  const openWorkspace = useLatestCallback(useOpenWorkspace());
   const bridge = useBridge();
   const status = useBridgeStatus();
   const enabled = useAgentControlFeatureActive("localOrchestration");
@@ -201,8 +209,34 @@ export function LocalLinkNavigation({ readChat }: { readChat: ReadChat }) {
     };
   }, []);
 
+  // A cloud link reads the control plane, so bridge changes never retire it.
   useEffect(() => {
-    if (!pending) return;
+    if (pending?.link.kind !== "cloud-workspace") return;
+    const clear = () =>
+      setPending((value) => (value === pending ? null : value));
+    if (
+      pending.navigationVersion !==
+      (useWorkspaceStore.getState().navigationVersion ?? 0)
+    ) {
+      clear();
+      return;
+    }
+    if (accessPending) return;
+    const observation = observeLocalLinkNavigation(undefined, clear);
+    void navigateCloudWorkspaceLink(pending.link, {
+      openWorkspace,
+      current: observation.current,
+      beforeCommit: observation.stop,
+    }).finally(() => {
+      observation.stop();
+      if (observation.current()) clear();
+    });
+    return observation.dispose;
+  }, [pending, accessPending, openWorkspace]);
+
+  useEffect(() => {
+    if (!pending || pending.link.kind === "cloud-workspace") return;
+    const { link } = pending;
     const clear = () =>
       setPending((value) => (value === pending ? null : value));
     if (
@@ -220,7 +254,7 @@ export function LocalLinkNavigation({ readChat }: { readChat: ReadChat }) {
       return observation.dispose;
     }
     if (!bridge || status !== "connected") return observation.dispose;
-    void navigateLocalLink(pending.link, {
+    void navigateLocalLink(link, {
       bridge,
       readChat,
       current: observation.current,

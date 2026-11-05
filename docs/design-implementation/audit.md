@@ -1,6 +1,6 @@
 # Canvas audit: Zeros Design against the app
 
-Status 2026-11-05, Zeros Design canvas version 367.
+Status 2026-11-05, Zeros Design canvas version 368.
 
 ## How to read this
 
@@ -27,7 +27,7 @@ and in [`plans.md`](plans.md).
 | UI components | 47 | 3 | Three Design-tab details, listed below |
 | Foundations | 14 | 0 | — |
 | Branding | 4 | 0 | — |
-| Web app | 57 | 2 | §8: Open in Zeros on a cloud workspace (1), and the route map's own note (1) |
+| Web app | 55 | 0 | — |
 | Agent chat | 87 | 0 | — |
 | Sidebar | 25 | 0 | — |
 | Dashboard (Home) | 18 | 0 | — |
@@ -40,7 +40,7 @@ and in [`plans.md`](plans.md).
 | Simulators | 12 | 0 | — |
 | Customize | 25 | 0 | — |
 | Settings | 36 | 0 | — |
-| **Total** | **456** | **32** | |
+| **Total** | **454** | **30** | |
 
 ## Landed this round
 
@@ -91,7 +91,14 @@ and in [`plans.md`](plans.md).
   - Ops follows its 7 frames: the centred states on the shared shell with
     Ops beside the logo, and the console on the dashboard layout, each page
     allowing its one inline block by nonce under the Ops policy.
-- **Canvas (versions 363 to 366).**
+- **Open in Zeros on a cloud workspace.**
+  - The web workspace page reads its workspace from the cloud v2 API, as its
+    creator, and offers Open in Zeros through
+    `zeros[-channel]://cloud-workspace/<organization>/<workspace>`.
+  - The desktop app switches to that organization and opens the workspace,
+    and a cloud workspace's menu copies the page's link.
+  - The invite page is gone: cloud workspaces are creator-only.
+- **Canvas (versions 363 to 368).**
   - Eleven Planned badges came off frames that are now built.
   - The remaining notes name exactly what is left.
   - The Changes "All states" frame had been clipping its tallest state by
@@ -106,6 +113,9 @@ and in [`plans.md`](plans.md).
     show what shipped: the switcher shows your role, Teams drops its member
     count, the outage keeps Profile, owners see Force purge disabled, and a
     new frame shows Ops' Identity recovery section.
+  - Version 368: the workspace page's Ready frame and the route map lose
+    their badge, the two workspace invitation frames are gone, and the route
+    map is fitted to its rows.
 
 ## What is left
 
@@ -154,13 +164,6 @@ plus a navigator. The Resolve conflicts panel goes.
 Agents get their mark, GitHub authors their photo, and review apps their logo
 with a Bot badge. The thread model needs each comment's avatar URL and its
 agent provider.
-
-### §8 Web app: 2 frames
-
-See plans.md §8:
-
-- Open in Zeros on a cloud workspace (1): it needs an app link that opens one;
-- the route map's own note (1).
 
 ### UI components: the Design-tab sheets (3 frames)
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { organizationDashboardUrl } from "../organization-links";
+import { cloudWorkspacePageUrl, organizationDashboardUrl } from "../organization-links";
 
 describe("organization dashboard links", () => {
   it("opens a selected organization section on the web dashboard", () => {
@@ -30,5 +30,27 @@ describe("organization dashboard links", () => {
     expect(organizationDashboardUrl("file:///tmp/fake-dashboard")).toBe(
       "https://app.zeros.build/",
     );
+  });
+});
+
+describe("cloud workspace page links", () => {
+  const id = "6e3a9d2b-4c8f-4a01-b7e5-0d2f3c8a9b46";
+
+  it("links the web workspace page on the configured origin", () => {
+    expect(cloudWorkspacePageUrl("https://app-alpha.zeros.build/", id)).toBe(
+      `https://app-alpha.zeros.build/workspace/${id}`,
+    );
+    expect(cloudWorkspacePageUrl("https://preview.example/base?x=1#y", id.toUpperCase())).toBe(
+      `https://preview.example/workspace/${id}`,
+    );
+  });
+
+  it("falls back to the production origin for malformed or non-web configuration", () => {
+    for (const base of ["not a url", "javascript:alert(1)", undefined])
+      expect(cloudWorkspacePageUrl(base, id)).toBe(`https://app.zeros.build/workspace/${id}`);
+  });
+
+  it("refuses an id that is not a workspace UUID", () => {
+    expect(() => cloudWorkspacePageUrl("https://app.zeros.build", "../ops")).toThrow();
   });
 });

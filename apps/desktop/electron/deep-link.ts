@@ -4,6 +4,11 @@
 
 import { app, shell } from "electron";
 import { formatLocalLink, parseLocalLink } from "@zeros/protocol/local-orchestration";
+import {
+  CLOUD_WORKSPACE_LINK_ACTION,
+  formatCloudWorkspaceLink,
+  parseCloudWorkspaceLink,
+} from "@zeros/protocol/cloud-workspace-link";
 import { IS_LOCAL_DEVELOPMENT } from "./runtime-mode";
 import {
   assertIsDirectory,
@@ -87,6 +92,19 @@ export async function handleUrl(rawUrl: string): Promise<void> {
 
   // Query and fragment can carry callback or pairing secrets; log only scheme and action.
   console.log(`[Zeros] deep-link: ${parsed.protocol}//${action}`);
+
+  if (action === CLOUD_WORKSPACE_LINK_ACTION) {
+    // Shares the Local links' navigation intent: it opens a window when none
+    // is open and waits for the signed-in renderer. A local development build
+    // has no account, so it returned above.
+    const link = parseCloudWorkspaceLink(rawUrl);
+    if (!link || link.scheme !== scheme()) {
+      console.warn("[Zeros] deep-link: invalid cloud workspace link");
+      return;
+    }
+    emitLocalNavigation(formatCloudWorkspaceLink(link.scheme, link));
+    return;
+  }
 
   if (action === "auth") {
     // Prefer fragment values to keep them out of redirect observers, retaining

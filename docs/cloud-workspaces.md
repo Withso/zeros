@@ -725,6 +725,25 @@ historical source provenance. Withheld PR data is not replaced by a stale
 cached discussion. A denied repository is never made accessible merely by
 belonging to its Zeros organization.
 
+## Web page and desktop link
+
+`app.zeros.build/workspace/<id>` shows one cloud workspace to its creator. The
+page reads `GET /v1/cloud-v2/workspaces/<id>` through the web's control-plane
+proxy, which admits only that exact read, and offers Open in Zeros:
+`zeros[-alpha|-beta|-dev]://cloud-workspace/<organizationId>/<workspaceId>`,
+with the deployment's scheme
+([`cloud-workspace-link.ts`](../packages/protocol/src/cloud-workspace-link.ts)).
+The link carries no secret and grants nothing. Electron main accepts only its
+channel's scheme and two UUIDs and passes the link on the navigation intent
+Local links use, so it opens a window and waits for the signed-in app; a local
+development build ignores it. The desktop reads the workspace as the signed-in
+account, switches to its organization and opens it as the sidebar does: a
+stopped workspace wakes and an archived one opens read-only. An organization
+the account is not in, a 404, or a deleting workspace says the workspace
+couldn't be found, and nothing switches. A cloud workspace's context menu has
+Copy link, which copies the page for the build's web app (`VITE_APP_BASE_URL`).
+There is no invite route: cloud workspaces are creator-only.
+
 ## Lifecycle
 
 Each lifecycle replica admits up to four workspace steps concurrently and
@@ -745,7 +764,8 @@ do not renew it; an untouched shell eventually becomes idle. Passive history rea
 the VM, and neither do reconnects: `/connect` accepts `{ "wake": false }`, and
 the single-use ticket carries that intent through bridge admission. The app
 asks to wake for explicit navigation from the sidebar, Dashboard or repository
-rows, or a trusted pointer press or keystroke inside the active cloud workspace.
+rows, an Open in Zeros link from the workspace's web page, or a trusted pointer
+press or keystroke inside the active cloud workspace.
 This includes empty space, the composer and the Files editor. There is no wake
 notice; a save joins a pending wake before dispatch. Without a pending wake, a
 save against a stopped workspace rejects as a temporary transport failure so its

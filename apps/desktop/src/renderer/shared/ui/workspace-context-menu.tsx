@@ -2,6 +2,10 @@ import React, { useRef, type MouseEvent, type ReactNode } from "react";
 import { isLocalMainWorkspace } from "../../state/local-main-workspace";
 import { Archive, Check, Link, RotateCw } from "lucide-react";
 import { copyLocalLink, useCanCopyLocalLink } from "../../state/local-link-actions";
+import {
+  copyCloudWorkspaceLink,
+  useCanCopyCloudWorkspaceLink,
+} from "../../state/cloud-workspace-link-actions";
 
 import {
   workspaceSetStatus,
@@ -68,6 +72,7 @@ export function WorkspaceContextMenu({
 }: WorkspaceContextMenuProps) {
   const archiving = useWorkspaceArchiving(workspace.id);
   const canCopyLink = useCanCopyLocalLink(workspace);
+  const canCopyCloudLink = useCanCopyCloudWorkspaceLink(workspace);
   const folderWorkspace = isLocalMainWorkspace(workspace);
   const archiveInert = archiveDisabled || archiving;
   const setStatus = (status: WorkspaceStatus) => {
@@ -154,8 +159,14 @@ export function WorkspaceContextMenu({
           </ContextMenuSubContent>
         </ContextMenuSub>}
 
-        {canCopyLink && (
-          <ContextMenuItem onSelect={() => void copyLocalLink(workspace)}>
+        {(canCopyLink || canCopyCloudLink) && (
+          <ContextMenuItem
+            onSelect={() =>
+              void (canCopyCloudLink
+                ? copyCloudWorkspaceLink(workspace)
+                : copyLocalLink(workspace))
+            }
+          >
             <Link />
             <span>Copy link</span>
           </ContextMenuItem>

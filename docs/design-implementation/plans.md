@@ -227,10 +227,22 @@ Boards: `web-app.md`. Landed on 2026-11-05:
   Ops host now serves `dashboard.css` and its tokens. Owners see Force purge
   disabled: developers run it with an owner's grant.
 
-Still to do:
+- **Open in Zeros on a cloud workspace.** The workspace page
+  (`/workspace/<id>`) reads `GET /v1/cloud-v2/workspaces/<id>`, which answers
+  only the workspace's creator while they are a member, and its Ready state
+  offers Open in Zeros through
+  `zeros[-channel]://cloud-workspace/<organization>/<workspace>`
+  (`packages/protocol/src/cloud-workspace-link.ts`; the deployment picks the
+  channel's scheme, and a root test keeps the web's string equal to the
+  desktop parser). Electron main carries it on the Local links' navigation
+  intent, so it opens a window and waits for the signed-in app. The desktop
+  reads the workspace as the signed-in account, switches to its organization
+  and opens it as the sidebar does: a stopped workspace wakes and an archived
+  one opens read-only. A cloud workspace's menu has Copy link, which copies
+  the web page. The page's invite route and its two frames are gone: cloud
+  workspaces are creator-only and the accept API was retired with cloud v1.
 
-- **Open in Zeros on a cloud workspace.** The workspace page needs an app link
-  that opens a cloud workspace; `zeros://workspace/<id>` is a Local link.
+Nothing in §8 is left.
 
 Verify with `node --test apps/web/lib/*.test.mjs` and renders of each board
 in both themes; `check:web-deploy` checks the live Pages deployments and
