@@ -15,13 +15,14 @@ export function renderWorkspacePage({workspaceId,appLink,nonce}) {
     const WORKSPACE=${JSON.stringify(workspaceId)},PATH=${JSON.stringify(path)},APP=${JSON.stringify(appLink)};
     const UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
     const AUTH_KEY="zeros:workspace-lookup-auth";
-    const title=document.getElementById("title"),sub=document.getElementById("sub");
+    const title=document.getElementById("title"),sub=document.getElementById("sub"),spin=document.getElementById("spin");
     const open=document.getElementById("open"),proceed=document.getElementById("proceed"),another=document.getElementById("another"),meta=document.getElementById("meta");
     const auth="/auth/start?return="+encodeURIComponent(PATH),logout="/auth/logout?return="+encodeURIComponent(PATH);
     another.href=logout;
     let busy=false;
     function show(view){
       title.textContent=view.title;sub.textContent=view.sub;
+      if(view.loading)spin.classList.remove("hidden");else spin.classList.add("hidden");
       if(view.open){open.href=view.open;open.classList.remove("hidden");}
       else{open.removeAttribute("href");open.classList.add("hidden");}
       if(view.action){proceed.textContent=view.action;proceed.className=view.open?"btn ghost":"btn";proceed.classList.remove("hidden");}
@@ -36,7 +37,7 @@ export function renderWorkspacePage({workspaceId,appLink,nonce}) {
     async function perform(){
       if(busy)return;busy=true;proceed.disabled=true;
       try{
-        show({title:"Cloud workspace",sub:"Loading your cloud workspace. This takes a moment."});
+        show({title:"Cloud workspace",sub:"Loading your cloud workspace. This takes a moment.",loading:true});
         const response=await fetch("/api/v1/cloud-v2/workspaces/"+WORKSPACE,{credentials:"same-origin",headers:{accept:"application/json"}});
         if(response.status===401){
           try{
@@ -78,6 +79,7 @@ export function renderWorkspacePage({workspaceId,appLink,nonce}) {
   `;
   const inner=`<div class="title" id="title">Cloud workspace</div>
     <div class="sub" id="sub">Loading your cloud workspace. This takes a moment.</div>
+    <div class="spin" id="spin"><span class="orb" aria-hidden="true"></span></div>
     <div class="acts">
       <a class="btn hidden" id="open">Open in Zeros</a>
       <button class="btn hidden" id="proceed" type="button">Refresh</button>

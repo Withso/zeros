@@ -93,6 +93,7 @@ export function githubCompletionPage(appLink) {
     const sub = document.getElementById("github-sub");
     const open = document.getElementById("github-open");
     const msg = document.getElementById("github-msg");
+    document.getElementById("github-spin").hidden = true;
 
     if (parsed.kind === "invalid") {
       title.textContent = "This GitHub link is incomplete";
@@ -131,6 +132,7 @@ export function githubCompletionPage(appLink) {
     `<div id="github-live">
             <div class="title" id="github-title">Finish GitHub connection</div>
             <div class="sub" id="github-sub">Checking the secure GitHub handoff. This takes a moment.</div>
+            <div class="spin" id="github-spin"><span class="orb" aria-hidden="true"></span></div>
             <div class="acts"><a class="btn" id="github-open" hidden>Open Zeros</a></div>
             <div class="msg" id="github-msg" aria-live="polite"></div>
           </div>

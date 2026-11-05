@@ -5,7 +5,7 @@ import vm from "node:vm";
 import {renderWorkspacePage} from "./workspace-page.mjs";
 import {allowedControlPlaneRoute} from "./control-plane-policy.mjs";
 const workspaceId="11111111-1111-4111-8111-111111111111",organizationId="5d2f8c1a-3b7e-4f90-a6d4-9c1e2b7f8a35";
-const IDS=["title","sub","open","proceed","another","meta"];
+const IDS=["title","sub","spin","open","proceed","another","meta"];
 const ok=(workspace)=>({status:200,ok:true,json:async()=>({workspace})});
 const ready={id:workspaceId,organizationId,name:"Acme API",state:"stopped",placement:"cloud",version:2};
 function fixture({storage=new Map(),response={status:401},appLink="zeros-alpha://"}={}) {
@@ -79,6 +79,18 @@ test("sign-in redirects once, then offers a retry instead of looping",async()=>{
   assert.equal(retry.replacements.length,1);
   const blocked=fixture({storage:{get:()=>null,set(){throw new Error("blocked");},delete(){}}});await blocked.settle();
   assert.equal(blocked.elements.get("sub").textContent,"Allow tab storage to sign in to this workspace.");
+});
+
+test("the 16px loader stands in for the actions while the workspace loads",async()=>{
+  const {html}=renderWorkspacePage({workspaceId,appLink:"zeros://",nonce:"testnonce"});
+  assert.match(html,/<div class="sub" id="sub">Loading your cloud workspace\. This takes a moment\.<\/div>\s*<div class="spin" id="spin"><span class="orb" aria-hidden="true"><\/span><\/div>/);
+  const loading=fixture({response:new Promise(()=>{})});await loading.settle();
+  assert.equal(loading.shown("spin"),true);
+  for(const id of ["open","proceed","another","meta"])assert.equal(loading.shown(id),false,id);
+  const done=fixture({response:ok(ready)});await done.settle();
+  assert.equal(done.shown("spin"),false);
+  const failed=fixture({response:{status:404,ok:false,json:async()=>null}});await failed.settle();
+  assert.equal(failed.shown("spin"),false);
 });
 
 test("the page starts in its loading state and carries no invitation flow",()=>{

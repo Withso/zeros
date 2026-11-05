@@ -98,6 +98,9 @@ and in [`plans.md`](plans.md).
   - The desktop app switches to that organization and opens the workspace,
     and a cloud workspace's menu copies the page's link.
   - The invite page is gone: cloud workspaces are creator-only.
+- **Loaders.** The centred pages and the dashboard draw the app's square
+  Orbit. The workspace loading and GitHub checking frames had lost their
+  badge without the loader they draw, and the dashboard's loader was round.
 - **Canvas (versions 363 to 368).**
   - Eleven Planned badges came off frames that are now built.
   - The remaining notes name exactly what is left.

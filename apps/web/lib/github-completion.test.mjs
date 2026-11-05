@@ -1,3 +1,4 @@
+import vm from "node:vm";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
@@ -144,6 +145,27 @@ describe("GitHub connection page", () => {
       assert.ok(page.includes(copy), copy);
     }
     assert.doesNotMatch(page, /<img /);
+  });
+
+  it("shows the 16px loader only until the page has named the outcome", () => {
+    const page = githubCompletionPage("zeros-alpha://");
+    assert.match(page, /<div class="sub" id="github-sub">[^<]*<\/div>\s*<div class="spin" id="github-spin"><span class="orb" aria-hidden="true"><\/span><\/div>/);
+    const script = /<script>([\s\S]*?)<\/script>/.exec(page)[1];
+    const nonce = "n".repeat(32);
+    for (const hash of ["", `#scheme=zeros-alpha&nonce=${nonce}`, `#scheme=zeros-alpha&nonce=${nonce}&error=access_denied`]) {
+      const elements = new Map(["github-title", "github-sub", "github-spin", "github-open", "github-msg"].map((id) => [
+        id, { textContent: "", className: "", href: "", hidden: false, addEventListener() {} },
+      ]));
+      vm.runInNewContext(script, {
+        URLSearchParams,
+        window: { location: { hash, pathname: "/github/connected" }, addEventListener() {} },
+        history: { replaceState() {} },
+        document: { getElementById: (id) => elements.get(id) },
+        setTimeout() {},
+      });
+      assert.equal(elements.get("github-spin").hidden, true, hash || "no fragment");
+      assert.equal(elements.get("github-open").hidden, false, hash || "no fragment");
+    }
   });
 
   it("shows Turn on JavaScript when scripts are off", () => {

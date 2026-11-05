@@ -28,6 +28,7 @@ export const SHELL_TOKENS = {
     "--fg1": "hsl(0 0% 94%)",
     "--fg2": "hsl(0 0% 72%)",
     "--fg3": "hsl(0 0% 63%)",
+    "--muted-fg": "hsl(0 0% 42%)",
     "--border1": "hsl(0 0% 14%)",
     "--border3": "hsl(0 0% 26.667%)",
     "--border4": "hsl(0 0% 34.118%)",
@@ -47,6 +48,7 @@ export const SHELL_TOKENS = {
     "--fg1": "hsl(30 10% 15.686%)",
     "--fg2": "hsl(30 5.195% 30.196%)",
     "--fg3": "hsl(30 4.396% 35.686%)",
+    "--muted-fg": "hsl(40 2.83% 41.569%)",
     "--border1": "hsl(34.29 14.894% 90.784%)",
     "--border3": "hsl(33.33 8.108% 78.235%)",
     "--border4": "hsl(36 7.042% 72.157%)",
@@ -128,6 +130,22 @@ export const SHELL_CSS = `
       .msg.ok { color: var(--green-fg); }
       .meta { margin: 20px 0 0; color: var(--fg3); font-size: 12px; line-height: 16px; }
       .meta a { color: var(--fg1); font-weight: 500; }
+      /* The 16px loader that stands in for an action while a page checks: the
+         app's square Orbit, its snake lapping a fixed ring. */
+      .spin { display: flex; height: 18px; align-items: center; justify-content: center; margin-top: 24px; }
+      @property --orb-turn { syntax: "<angle>"; inherits: false; initial-value: 0deg; }
+      .orb { position: relative; display: inline-block; width: 16px; height: 16px; flex-shrink: 0; color: var(--fg2); }
+      .orb::before, .orb::after { content: ""; position: absolute; inset: 2px; box-sizing: border-box; }
+      .orb::before { border: 3px solid var(--muted-fg); opacity: 0.4; }
+      .orb::after {
+        padding: 3px;
+        background: conic-gradient(from calc(var(--orb-turn) - 80deg), transparent 0deg, currentColor 80deg 188deg, transparent 188deg 360deg);
+        -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite: xor;
+        mask: linear-gradient(#000 0 0) content-box exclude, linear-gradient(#000 0 0);
+        animation: orb-lap 1200ms linear infinite;
+      }
+      @keyframes orb-lap { to { --orb-turn: 360deg; } }
+      @media (prefers-reduced-motion: reduce) { .orb::after { animation: none; } }
       .box { width: 100%; max-width: 400px; margin-top: 20px; border: 1px solid var(--border1); border-radius: 12px; background: var(--bg1-bright); text-align: left; }
       .box-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 14px; }
       .box-text { display: flex; min-width: 0; flex-direction: column; gap: 2px; }

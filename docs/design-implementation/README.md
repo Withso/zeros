@@ -822,3 +822,15 @@ Each landed step appends one line: date, workstream, what landed, evidence.
   Unavailable and Loading states in both themes under the page's real
   headers. Not run here: link handling in the packaged macOS app (a cold
   launch, and a launch with every window closed).
+- 2026-11-05 · 5 · Web app: the loaders. Round 1 took the Planned badge off
+  the workspace loading and GitHub checking frames on their copy alone; both
+  draw a 16px loader the pages never had, and round 2 drew the dashboard's
+  loader as a round ring. The shared shell now carries the app's square Orbit
+  (`shared/ui/loading/zeros-spinner.tsx`: a 1200ms lap over a `muted-fg`
+  track at 40%, resting under reduced motion) in an 18px row 24px below the
+  line, the control plane's copy follows it, and the dashboard draws the same
+  Orbit. The GitHub page hides it as soon as its script names the outcome.
+  Evidence: red first for the shell, both pages and the shared recipe;
+  `node --test apps/web/lib/*.test.mjs` 165 tests; the control plane's
+  shell-copy test; renders of both loading states and the dashboard's beside
+  their frames, in both themes.

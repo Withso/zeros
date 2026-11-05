@@ -211,17 +211,20 @@ label.button { position: relative; }
 .skel.ctl { width: 88px; height: 28px; border-radius: 6px; }
 .skel-av { width: 28px; height: 28px; flex-shrink: 0; border-radius: 50%; background: var(--bg2); }
 .skel-av.square { width: 20px; height: 20px; border-radius: 6px; }
-.orb { position: relative; display: inline-block; width: 16px; height: 16px; flex-shrink: 0; color: var(--loader-active, var(--fg2)); }
-.orb::before, .orb::after { content: ""; position: absolute; inset: 2px; border-radius: 50%; box-sizing: border-box; }
-.orb::before { border: 3px solid var(--loader-rest, var(--border3)); opacity: 0.4; }
+/* The app's square Orbit, as on the centred pages (lib/page.ts). */
+@property --orb-turn { syntax: "<angle>"; inherits: false; initial-value: 0deg; }
+.orb { position: relative; display: inline-block; width: 16px; height: 16px; flex-shrink: 0; color: var(--fg2); }
+.orb::before, .orb::after { content: ""; position: absolute; inset: 2px; box-sizing: border-box; }
+.orb::before { border: 3px solid var(--muted-fg); opacity: 0.4; }
 .orb::after {
   padding: 3px;
-  background: conic-gradient(from -80deg, transparent 0deg, currentColor 80deg 188deg, transparent 188deg 360deg);
+  background: conic-gradient(from calc(var(--orb-turn) - 80deg), transparent 0deg, currentColor 80deg 188deg, transparent 188deg 360deg);
   -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite: xor;
   mask: linear-gradient(#000 0 0) content-box exclude, linear-gradient(#000 0 0);
-  animation: orb-turn 900ms linear infinite;
+  animation: orb-lap 1200ms linear infinite;
 }
-@keyframes orb-turn { to { transform: rotate(360deg); } }
+@keyframes orb-lap { to { --orb-turn: 360deg; } }
+@media (prefers-reduced-motion: reduce) { .orb::after { animation: none; } }
 
 /* ── Dialogs: the 400px recipe ─ */
 dialog.dialog {
