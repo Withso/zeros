@@ -678,6 +678,21 @@ bind to the latest live session event. The first-open intent survives chat
 hydration without carrying stale activity state, and deleting a conversation
 atomically removes every workbench tab it owns.
 
+The tab outlives its native page. Closing the window, reloading the renderer
+or relaunching Zeros destroys the page (trusted-surface revocation and app
+shutdown are destructive lease boundaries) while the tab keeps its last
+address. A visible tab without a live page asks main to reopen it
+(`browser_session_restore`), so the user can take over without the agent.
+Main reuses the record it still holds for the conversation: it republishes a
+live page without navigating it, or opens a user-owned page at the tab's
+address. Only when no record exists, after a relaunch, does it acquire one for
+the Local workspace owner, which the renderer resolves the way an agent spawn
+does; the engine's next acquire for that owner returns the same page, so the
+agent continues from what the user sees. The address bar and Reload reopen a
+page too. Hidden tabs never reopen one, an attach that finds no page behind a
+published session reopens it once, and a tab closed while its page reopens
+closes that page.
+
 Closing a conversation-owned Browser tab is an explicit native close
 transaction, not a renderer-only tab removal. Main destroys the matching
 ephemeral lease and publishes `closed`; this prevents the still-authoritative

@@ -335,6 +335,15 @@ export interface ZerosBrowserServiceHandle {
     tool: "open" | "back" | "forward" | "reload",
     args?: BrowserJsonValue,
   ): Promise<BrowserToolResult>;
+  /** Reopens a conversation's page for its Browser tab after a closed window,
+   * renderer reload or relaunch destroyed the native view. Reuses the
+   * conversation's record; `owner` creates one only when none exists. A live
+   * page is republished, never navigated. */
+  restore(request: {
+    conversationId: string;
+    url: string;
+    owner?: BrowserSessionOwner;
+  }): Promise<BrowserSessionState>;
   /** Destroy every live ephemeral Chromium profile without deleting durable
    * conversation ownership or explicit browser artifacts. Per-session and
    * global site-grant clearing is reached through `clearSession` on the
@@ -842,22 +851,8 @@ export async function startZerosBrowserService(
         ...(url ? { url } : {}),
         canGoBack: contents.navigationHistory.canGoBack(),
         canGoForward: contents.navigationHistory.canGoForward(),
-        open: (targetUrl) => {
-          // Chromium starts loading before any semantic snapshot work.
-          // Lifecycle events publish committed URL/title/history later.
-          void contents.loadURL(targetUrl).then(
-            () => {
-              if (record.lease !== lease || contents.isDestroyed()) return;
-              if (lease.pendingUrl === targetUrl) lease.pendingUrl = null;
-              publishState(options, record, "ready", tool);
-            },
-            () => {
-              if (record.lease !== lease || contents.isDestroyed()) return;
-              if (lease.pendingUrl === targetUrl) lease.pendingUrl = null;
-              publishState(options, record, "ready", tool);
-            },
-          );
-        },
+        open: (targetUrl) =>
+          startUserBrowserLoad(record, lease, targetUrl, options, tool),
         back: () => contents.navigationHistory.goBack(),
         forward: () => contents.navigationHistory.goForward(),
         reload: () => contents.reload(),
@@ -876,6 +871,60 @@ export async function startZerosBrowserService(
       accepted: true,
       browserSessionId,
       ...(url ? { url } : {}),
+    });
+  };
+
+  const restore = async (request: {
+    conversationId: string;
+    url: string;
+    owner?: BrowserSessionOwner;
+  }): Promise<BrowserSessionState> => {
+    const blocked = () =>
+      browserServiceInvocationBlockedReason({
+        browserEnabled: browserUiEnabled,
+        trustedSurfaceAvailable:
+          options.isTrustedSurfaceAvailable?.() !== false,
+      });
+    const initialBlock = blocked();
+    if (initialBlock) throw browserError(initialBlock);
+    if (!isBrowserProductId(request.conversationId)) {
+      throw browserError("Invalid Zeros browser restore request.");
+    }
+    const url = normalizeWebUrl(request.url);
+    let record = conversationBrowserRecord(
+      records.values(),
+      request.conversationId,
+    );
+    if (!record) {
+      const owner = request.owner;
+      if (!owner || owner.conversationId !== request.conversationId) {
+        throw browserError(
+          "This conversation's browser page can't be reopened here.",
+        );
+      }
+      const acquired = await acquire(owner);
+      const queuedBlock = blocked();
+      if (queuedBlock) throw browserError(queuedBlock);
+      record = records.get(acquired.browserSessionId);
+      if (!record) {
+        throw browserError("The Zeros browser session is unavailable.");
+      }
+    }
+    const owned = record;
+    touchRecord(owned);
+    return restoreUserBrowserPage(owned, url, {
+      options,
+      scheduleLeaseCleanup,
+      openLease: () =>
+        createLease(owned, {
+          options,
+          confirmations,
+          actor: "user",
+          showAgentCursor,
+          navigationApproval,
+          interrupted: () => false,
+          stopFromPage: stopFromControlBar,
+        }),
     });
   };
 
@@ -1237,6 +1286,7 @@ export async function startZerosBrowserService(
     control(browserSessionId, tool, args = {}) {
       return Promise.resolve(controlAsUser(browserSessionId, tool, args));
     },
+    restore,
     async clearBrowsingData() {
       // Clearing data is also a control-boundary reset. Invalidate current and
       // queued work before closing WebContents so nothing can resume against a
@@ -1911,6 +1961,81 @@ async function handBrowserLeaseToUser(
   ) {
     publishState(options, record, "ready");
   }
+}
+
+/** User navigation starts Chromium's load at once, before any snapshot work;
+ * lifecycle events publish the committed URL, title and history afterwards. */
+function startUserBrowserLoad(
+  record: BrowserSessionRecord,
+  lease: BrowserLease,
+  url: string,
+  options: ZerosBrowserServiceOptions,
+  tool: "open" | "back" | "forward" | "reload",
+): void {
+  const contents = lease.view.webContents;
+  const settle = () => {
+    if (record.lease !== lease || contents.isDestroyed()) return;
+    if (lease.pendingUrl === url) lease.pendingUrl = null;
+    publishState(options, record, "ready", tool);
+  };
+  void contents.loadURL(url).then(settle, settle);
+}
+
+/** Records are keyed by workspace and conversation, so a conversation can hold
+ * more than one; its live page wins, then the most recently used record. */
+function conversationBrowserRecord(
+  records: Iterable<BrowserSessionRecord>,
+  conversationId: string,
+): BrowserSessionRecord | undefined {
+  let match: BrowserSessionRecord | undefined;
+  const live = (record: BrowserSessionRecord) =>
+    Boolean(record.lease && !record.lease.view.webContents.isDestroyed());
+  for (const record of records) {
+    if (record.owner.conversationId !== conversationId) continue;
+    if (
+      !match ||
+      (live(record) && !live(match)) ||
+      (live(record) === live(match) && record.touchedAt > match.touchedAt)
+    ) {
+      match = record;
+    }
+  }
+  return match;
+}
+
+/** A Browser tab outlives its native page: a closed window, renderer reload
+ * or relaunch destroys the page while the tab keeps its address. Reopening
+ * binds the tab to a page the record still holds, without navigating it, or
+ * opens a user-owned page there so the agent later shares it. */
+function restoreUserBrowserPage(
+  record: BrowserSessionRecord,
+  url: string,
+  context: {
+    options: ZerosBrowserServiceOptions;
+    openLease: () => BrowserLease;
+    scheduleLeaseCleanup: (lease: BrowserLease) => Promise<void>;
+  },
+): BrowserSessionState {
+  const current = record.lease;
+  if (current && !current.view.webContents.isDestroyed()) {
+    return publishState(
+      context.options,
+      record,
+      current.status,
+      current.currentTool,
+    );
+  }
+  if (current) {
+    record.lease = null;
+    void context.scheduleLeaseCleanup(current);
+  }
+  const lease = context.openLease();
+  record.lease = lease;
+  lease.currentTool = "open";
+  lease.pendingUrl = url;
+  recordTrace(lease, "tool", "open");
+  startUserBrowserLoad(record, lease, url, context.options, "open");
+  return publishState(context.options, record, "ready", "open");
 }
 
 async function captureNativeBrowserScreenshot(

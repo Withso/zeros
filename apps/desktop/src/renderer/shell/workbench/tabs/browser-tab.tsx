@@ -89,6 +89,7 @@ import {
   BROWSER_MIN_HEIGHT,
   BROWSER_MIN_WIDTH,
   BROWSER_VIEWPORT_PRESETS,
+  canonicalBrowsableHttpUrl,
   type WorkbenchTab,
 } from "../tab-model";
 import { Button } from "../../../shared/ui";
@@ -122,7 +123,16 @@ import {
   redactPreviewRuntimeTextForTab,
   stagePreviewNavigation,
 } from "../../../features/browser/preview-navigation";
-import { useBrowserSessionAgentPresence } from "@/renderer/features/browser/browser-session-activity-store";
+import {
+  currentBrowserSessionActivity,
+  dismissBrowserSession,
+  publishBrowserSessionActivity,
+  useBrowserSessionAgentPresence,
+} from "@/renderer/features/browser/browser-session-activity-store";
+import {
+  conversationBrowserTabOpen,
+  restoreConversationBrowser,
+} from "@/renderer/features/browser/browser-session-restore";
 import {
   hasOpenNativeBrowserBlockingOverlay,
   nativeBrowserOverlayShouldParkSurface,
@@ -199,29 +209,140 @@ function NativeAgentBrowserTab({ tab, active, scope }: BrowserTabProps) {
   const conversationId = tab.browserConversationId;
   const presence = useBrowserSessionAgentPresence(conversationId, active);
   const activity = presence.activity;
-  const browserSessionId =
+  // Attach found no page behind this published session: main destroyed the
+  // view without a close this renderer saw. It reopens like a closed page.
+  const [lostSessionId, setLostSessionId] = useState<string | null>(null);
+  const publishedSessionId =
     activity && activity.status !== "closed"
       ? activity.browserSessionId
       : undefined;
+  const browserSessionId =
+    publishedSessionId !== lostSessionId ? publishedSessionId : undefined;
+  const conversationFolder = useWorkspaceStore((state) =>
+    conversationId
+      ? state.chats.find((chat) => chat.id === conversationId)?.folder
+      : undefined,
+  );
+  // The tab persists across a closed window, reload or relaunch; its native
+  // page does not. A Local conversation's tab reopens its last address so the
+  // user can take over without the agent. Cloud workspaces have no browser.
+  const restoreAvailable =
+    conversationFolder !== undefined &&
+    !isCloudWorkspace(conversationFolder) &&
+    !isCloudWorkspace(scope ?? "");
+  const restoreUrl = restoreAvailable ? canonicalBrowsableHttpUrl(tab.url) : "";
   const surfaceIdRef = useRef(`workbench:${tab.id}`);
   const hostRef = useRef<HTMLDivElement>(null);
   const addressInputRef = useRef<HTMLInputElement>(null);
   const attachedSessionRef = useRef<string | null>(null);
   const navigationSequenceRef = useRef(0);
   const submittedAddressRef = useRef<string | null>(null);
+  const restoreGenerationRef = useRef(0);
+  const autoRestoreKeyRef = useRef<string | null>(null);
+  const tabClosedRef = useRef(false);
   const [address, setAddress] = useState(tab.url ?? "");
   const [editingAddress, setEditingAddress] = useState(false);
   const [restoring, setRestoring] = useState(false);
+  const [restorePending, setRestorePending] = useState(false);
   const [surfaceError, setSurfaceError] = useState<string | null>(null);
   const retryAttach = useRef<(() => Promise<void>) | null>(null);
+
+  const restorePage = useCallback(
+    async (url: string): Promise<boolean> => {
+      if (!conversationId) return false;
+      const generation = ++restoreGenerationRef.current;
+      setRestorePending(true);
+      setSurfaceError(null);
+      try {
+        const state = await restoreConversationBrowser(conversationId, url);
+        if (tabClosedRef.current) {
+          // The tab closed while main reopened its page: close that page as
+          // the tab's own close would, before its state recreates the tab.
+          dismissBrowserSession(state.browserSessionId);
+          void nativeInvoke("browser_session_close", {
+            browserSessionId: state.browserSessionId,
+          }).catch(() => undefined);
+          return false;
+        }
+        if (restoreGenerationRef.current !== generation) return true;
+        // Main publishes the same state; this reply never replaces a newer one.
+        if (!currentBrowserSessionActivity(state.browserSessionId)) {
+          publishBrowserSessionActivity(state);
+        }
+        setLostSessionId((lost) =>
+          lost === state.browserSessionId ? null : lost,
+        );
+        return true;
+      } catch (error) {
+        if (
+          restoreGenerationRef.current === generation &&
+          !tabClosedRef.current
+        ) {
+          setSurfaceError(
+            error instanceof Error && error.message
+              ? error.message
+              : "The page could not be reopened.",
+          );
+        }
+        return false;
+      } finally {
+        if (restoreGenerationRef.current === generation) {
+          setRestorePending(false);
+        }
+      }
+    },
+    [conversationId],
+  );
+
+  useEffect(() => {
+    tabClosedRef.current = false;
+    return () => {
+      // Deck eviction unmounts too; only a tab gone from every scope abandons
+      // a reopen still in flight.
+      if (conversationId && !conversationBrowserTabOpen(conversationId)) {
+        tabClosedRef.current = true;
+      }
+    };
+  }, [conversationId]);
+
+  const missingSessionId =
+    lostSessionId ?? (activity?.status === "closed" ? activity.browserSessionId : "");
+  // Layout timing replaces the placeholder before the first paint. Each
+  // missing page reopens once per visible interval; Reload and Retry repeat it.
+  useLayoutEffect(() => {
+    if (!active) {
+      autoRestoreKeyRef.current = null;
+      return;
+    }
+    if (browserSessionId || !conversationId || !restoreUrl) return;
+    const key = `${conversationId}\u0000${restoreUrl}\u0000${missingSessionId}`;
+    if (autoRestoreKeyRef.current === key) return;
+    autoRestoreKeyRef.current = key;
+    void restorePage(restoreUrl);
+  }, [
+    active,
+    browserSessionId,
+    conversationId,
+    missingSessionId,
+    restorePage,
+    restoreUrl,
+  ]);
+
   const managed = useWorkbenchStatusSource(
     {
       error: surfaceError,
-      pending: restoring,
+      pending: restoring || restorePending,
       primary: true,
       hasContent:
         attachedSessionRef.current === browserSessionId && !!browserSessionId,
-      retry: () => (active ? retryAttach.current?.() : undefined),
+      retry: () =>
+        !active
+          ? undefined
+          : browserSessionId
+            ? retryAttach.current?.()
+            : restoreUrl
+              ? restorePage(restoreUrl).then(() => undefined)
+              : undefined,
     },
     browserSessionId,
   );
@@ -406,9 +527,11 @@ function NativeAgentBrowserTab({ tab, active, scope }: BrowserTabProps) {
             if (disposed) return;
             attachedSessionRef.current = state ? browserSessionId : null;
             setRestoring(false);
-            setSurfaceError(
-              state ? null : "The live browser session is no longer available.",
-            );
+            if (state) {
+              setSurfaceError(null);
+              return;
+            }
+            setLostSessionId(browserSessionId);
           })
           .catch((error) => {
             if (disposed) return;
@@ -501,13 +624,16 @@ function NativeAgentBrowserTab({ tab, active, scope }: BrowserTabProps) {
     setAddress(url);
     addressInputRef.current?.blur();
     const confirmedAddress = activity?.url || tab.url || "";
-    void control("open", { url }).then((succeeded) => {
+    const opened = browserSessionId
+      ? control("open", { url })
+      : restorePage(url);
+    void opened.then((succeeded) => {
       if (!succeeded && navigationSequenceRef.current === sequence) {
         submittedAddressRef.current = null;
         setAddress(confirmedAddress);
       }
     });
-  }, [activity?.url, address, control, tab.url]);
+  }, [activity?.url, address, browserSessionId, control, restorePage, tab.url]);
 
   const changeAppearance = useCallback(
     (appearance: BrowserAppearance | undefined) => {
@@ -530,6 +656,15 @@ function NativeAgentBrowserTab({ tab, active, scope }: BrowserTabProps) {
   const awaitingConfirmation = activity?.status === "awaiting-confirmation";
   const closed = activity?.status === "closed";
   const browserLocked = presence.active || awaitingConfirmation;
+  // Without a live page, the address bar and Reload reopen one as the user.
+  const addressDisabled = browserSessionId
+    ? browserLocked
+    : !restoreAvailable || restorePending;
+  const reloadDisabled = browserSessionId
+    ? browserLocked
+    : !restoreUrl || restorePending;
+  const reload = () =>
+    void (browserSessionId ? control("reload") : restorePage(restoreUrl));
   const placeholder = blockingOverlayOpen
     ? null
     : surfaceError
@@ -538,13 +673,19 @@ function NativeAgentBrowserTab({ tab, active, scope }: BrowserTabProps) {
         managed
         ? null
         : surfaceError
-      : closed
-        ? "This browser session has closed. The agent can open it again."
-        : !browserSessionId
-          ? "The agent’s browser will appear here when it opens a page."
-          : restoring
-            ? "Connecting to the live browser…"
-            : null;
+      : browserSessionId
+        ? restoring
+          ? "Connecting to the live browser…"
+          : null
+        : restorePending
+          ? "Reopening the page…"
+          : restoreUrl
+            ? "Reload to open this page again."
+            : closed
+              ? "This browser session has closed. The agent can open it again."
+              : lostSessionId
+                ? "The live browser session is no longer available."
+                : "The agent’s browser will appear here when it opens a page.";
 
   return (
     <div className="bg-bg1 flex min-h-0 flex-1 flex-col overflow-hidden">
@@ -576,8 +717,8 @@ function NativeAgentBrowserTab({ tab, active, scope }: BrowserTabProps) {
           </IconButton>
           <IconButton
             size="standard"
-            disabled={!browserSessionId || browserLocked}
-            onClick={() => void control("reload")}
+            disabled={reloadDisabled}
+            onClick={reload}
             label="Reload"
           >
             {activity?.loading ? (
@@ -616,7 +757,7 @@ function NativeAgentBrowserTab({ tab, active, scope }: BrowserTabProps) {
                   event.currentTarget.select();
                 }}
                 onBlur={() => setEditingAddress(false)}
-                disabled={!browserSessionId || browserLocked}
+                disabled={addressDisabled}
                 spellCheck={false}
                 autoCorrect="off"
                 autoCapitalize="off"
@@ -637,10 +778,7 @@ function NativeAgentBrowserTab({ tab, active, scope }: BrowserTabProps) {
               </IconButton>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="min-w-[180px]">
-              <DropdownMenuItem
-                onClick={() => void control("reload")}
-                disabled={!browserSessionId || browserLocked}
-              >
+              <DropdownMenuItem onClick={reload} disabled={reloadDisabled}>
                 Reload
               </DropdownMenuItem>
               <DropdownMenuSeparator />
