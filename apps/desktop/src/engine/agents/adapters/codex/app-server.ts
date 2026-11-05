@@ -66,6 +66,8 @@ import {
   JsonRpcRequestError,
 } from "../shared/jsonrpc";
 import { buildSpawnEnvWithLoginPath } from "../shared/login-shell-path";
+import { CODEX_AUTH_ENV } from "../shared/provider-connection";
+import { AgentFailureError } from "../../types";
 import { resolveCodexBinary, type CodexBinarySource } from "./binary-resolver";
 import { PERMISSION_RESPONSE_TIMEOUT_MS } from "../shared/constants";
 import { MAX_PENDING_MCP_ELICITATIONS } from "../shared/mcp-elicitation";
@@ -104,6 +106,8 @@ import type { TurnStartParams as GenTurnStartParams } from "./generated/v2/TurnS
 import type { ReviewStartParams as GenReviewStartParams } from "./generated/v2/ReviewStartParams";
 import type { AttestationGenerateResponse as GenAttestationGenerateResponse } from "./generated/v2/AttestationGenerateResponse";
 import type { ChatgptAuthTokensRefreshParams as GenChatgptAuthTokensRefreshParams } from "./generated/v2/ChatgptAuthTokensRefreshParams";
+import type { LoginAccountParams as GenLoginAccountParams } from "./generated/v2/LoginAccountParams";
+import type { LoginAccountResponse as GenLoginAccountResponse } from "./generated/v2/LoginAccountResponse";
 import type { ChatgptAuthTokensRefreshResponse as GenChatgptAuthTokensRefreshResponse } from "./generated/v2/ChatgptAuthTokensRefreshResponse";
 import type { CurrentTimeReadResponse as GenCurrentTimeReadResponse } from "./generated/v2/CurrentTimeReadResponse";
 import type { DynamicToolCallParams as GenDynamicToolCallParams } from "./generated/v2/DynamicToolCallParams";
@@ -552,19 +556,28 @@ const APPROVAL_TIMEOUT_MS = PERMISSION_RESPONSE_TIMEOUT_MS;
 
 /** Per-process Codex configuration. A ZSR child cannot access the host
  * keychain by design, so both Codex and MCP OAuth refreshes must remain in the
- * generation-private CODEX_HOME owned for that contained session. */
-export function codexAppServerFeatureArgs(fileAuthStorage: boolean): string[] {
+ * generation-private CODEX_HOME owned for that contained session. A selected
+ * API key lives only in this process: Codex neither reads nor replaces the
+ * login saved in CODEX_HOME. */
+export function codexAppServerFeatureArgs(
+  fileAuthStorage: boolean,
+  apiKeyConnection = false,
+): string[] {
+  const authStore = apiKeyConnection ? "ephemeral" : fileAuthStorage ? "file" : null;
   return [
     ...codexQuestionFeatureArgs(),
-    ...(fileAuthStorage
-      ? [
-          "-c",
-          'cli_auth_credentials_store="file"',
-          "-c",
-          'mcp_oauth_credentials_store="file"',
-        ]
-      : []),
+    ...(authStore ? ["-c", `cli_auth_credentials_store="${authStore}"`] : []),
+    ...(fileAuthStorage ? ["-c", 'mcp_oauth_credentials_store="file"'] : []),
   ];
+}
+
+/** The key to log in when the Local connection is an API key ("" when it is
+ * selected without one), or undefined for a saved login. */
+function codexApiKeyConnection(
+  env: Readonly<Record<string, string>> | undefined,
+): string | undefined {
+  if (env?.[CODEX_AUTH_ENV] !== "api-key") return undefined;
+  return env.OPENAI_API_KEY?.trim() ?? "";
 }
 
 /** Boot a codex app-server. Resolves with a ready-to-use handle once
@@ -582,7 +595,9 @@ export async function bootCodexAppServerRuntime(
   const cwd = opts.cwd;
 
   const binarySource = await resolveCodexBinary({ override: opts.cliBinary, pathValue: opts.env?.PATH });
+  const apiKey = codexApiKeyConnection(opts.env);
   const env = await buildSpawnEnvWithLoginPath(opts.env);
+  delete env[CODEX_AUTH_ENV];
 
   // The binary-resolver returns either an executable path or the
   // wrapper script `bin/codex.js`. For the latter, we need to spawn
@@ -607,6 +622,7 @@ export async function bootCodexAppServerRuntime(
   //     banner is pure noise for the user.
   const featureArgs = codexAppServerFeatureArgs(
     hasKernelExecutionBoundary(opts.executionBoundary),
+    apiKey !== undefined,
   );
 
   const proc = spawnStdioAgent({
@@ -1103,6 +1119,28 @@ export async function bootCodexAppServerRuntime(
     opts.onExit?.(code, signal);
   });
 
+  // Codex ignores OPENAI_API_KEY in its environment. Log the selected key in
+  // before any thread starts; without one the process stays signed out
+  // rather than using the saved device login.
+  if (apiKey) {
+    const accepted = await client
+      .request<GenLoginAccountResponse>(
+        "account/login/start",
+        { type: "apiKey", apiKey } satisfies GenLoginAccountParams,
+        { timeoutMs: INITIALIZE_TIMEOUT_MS },
+      )
+      .then((login) => login?.type === "apiKey", () => false);
+    if (!accepted) {
+      await teardown(proc, client);
+      throw new AgentFailureError({
+        kind: "auth-required",
+        agentId: "codex",
+        message:
+          "Codex did not accept the OpenAI API key. Check it in Settings → Providers → Codex.",
+      });
+    }
+  }
+
   // ── Public handle ─────────────────────────────────────────
   const requestWithRetry = async <T>(
     method: string,
@@ -1431,6 +1469,13 @@ function truncate(s: string, n: number): string {
   return s.length <= n ? s : `${s.slice(0, n)}…(${s.length - n} more)`;
 }
 
+const TRACE_CREDENTIAL_FIELDS = [
+  "apiKey",
+  "accessToken",
+  "secretAccessKey",
+  "sessionToken",
+] as const;
+
 /** Redact prompt- and answer-bearing fields from a JSON-RPC line before
  * logging. Server-request responses do not carry a method name, so their
  * `result.answers` / `result.content` fields need explicit treatment too.
@@ -1462,6 +1507,16 @@ export function redactCodexRpcLine(line: string): string {
     if (obj.result && "content" in obj.result) {
       obj.result.content = "[redacted content]";
       changed = true;
+    }
+    // Login requests and host token refreshes carry live credentials.
+    for (const payload of [obj.params, obj.result] as Array<Record<string, unknown> | undefined>) {
+      if (!payload || typeof payload !== "object") continue;
+      for (const key of TRACE_CREDENTIAL_FIELDS) {
+        if (key in payload) {
+          payload[key] = "[redacted credential]";
+          changed = true;
+        }
+      }
     }
     if (obj.method === "mcpServer/elicitation/request" && obj.params) {
       if (obj.params.mode === "openai/userVerification") {

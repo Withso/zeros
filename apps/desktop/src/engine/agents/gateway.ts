@@ -183,6 +183,7 @@ import {
 } from "./containment/warm-session-boundary-pool";
 import { providerAccountProfile } from "./provider-credentials";
 import { completeAgentSpawnEnv } from "./adapters/shared/config-isolation";
+import { CODEX_AUTH_ENV } from "./adapters/shared/provider-connection";
 import {
   localPreviewGatewayFactory,
   type BoundaryPreviewGateway,
@@ -416,7 +417,7 @@ const PROVIDER_CONNECTION_ENV: Readonly<Record<string, readonly string[]>> = {
     "ANTHROPIC_BASE_URL",
     "CLAUDE_CONFIG_DIR",
   ],
-  codex: ["OPENAI_API_KEY", "CODEX_HOME"],
+  codex: ["OPENAI_API_KEY", "CODEX_HOME", CODEX_AUTH_ENV],
   cursor: ["CURSOR_API_KEY"],
 };
 

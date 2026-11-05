@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { applyUserProviderConfig, usesProviderApiKey } from "../provider-env";
 import { seedProviderCredentials } from "../../agents/provider-credentials";
+import { CODEX_AUTH_ENV } from "../../agents/adapters/shared/provider-connection";
 
 let dir: string; // cwd = repoRoot for the resolver
 let userDir: string;
@@ -53,6 +54,55 @@ describe("applyUserProviderConfig — user-layer spawn fallback", () => {
     expect(applyUserProviderConfig(dir, provider, { env: { [keyVar]: "stale-fixture-key" } }).env?.[keyVar])
       .toBe("selected-fixture-key");
   });
+
+  it("marks a selected Codex API key so the app-server logs it in", () => {
+    seedProviderCredentials({
+      claude: { apiKey: "claude-fixture-key" }, codex: { apiKey: "selected-fixture-key" },
+      cursor: null, cursorSubscription: null,
+      authMethods: { claude: "apiKey", codex: "apiKey" },
+    });
+    expect(applyUserProviderConfig(dir, "codex", { env: {} }).env).toEqual({
+      OPENAI_API_KEY: "selected-fixture-key",
+      [CODEX_AUTH_ENV]: "api-key",
+    });
+    // Only Codex ignores its key variable; the others never carry the marker.
+    expect(applyUserProviderConfig(dir, "claude", { env: {} }).env).not.toHaveProperty(CODEX_AUTH_ENV);
+
+    // A removed key stays selected: Codex must not fall back to its saved login.
+    seedProviderCredentials({
+      claude: null, codex: null, cursor: null, cursorSubscription: null,
+      authMethods: { codex: "apiKey" },
+    });
+    expect(applyUserProviderConfig(dir, "codex", { env: { OPENAI_API_KEY: "old-fixture-key" } }).env).toEqual({
+      OPENAI_API_KEY: "",
+      [CODEX_AUTH_ENV]: "api-key",
+    });
+  });
+
+  it("marks a Codex API key selected only in trusted personal settings", () => {
+    writeUser('[providers.codex]\nauth = "api-key"\n');
+    seedProviderCredentials({
+      claude: null, codex: { apiKey: "saved-fixture-key" }, cursor: null, cursorSubscription: null,
+    });
+    expect(applyUserProviderConfig(dir, "codex", { env: {} }).env).toEqual({
+      OPENAI_API_KEY: "saved-fixture-key",
+      [CODEX_AUTH_ENV]: "api-key",
+    });
+  });
+
+  it.each(["cli", "account", undefined] as const)(
+    "never lets another layer mark a %s Codex connection as an API key",
+    (method) => {
+      seedProviderCredentials({
+        claude: null, codex: { apiKey: "inherited-fixture-key" }, cursor: null, cursorSubscription: null,
+        ...(method ? { authMethods: { codex: method } } : {}),
+      });
+      const env = applyUserProviderConfig(dir, "codex", {
+        env: { OPENAI_API_KEY: "inherited-fixture-key", [CODEX_AUTH_ENV]: "api-key" },
+      }).env;
+      expect(env).not.toHaveProperty(CODEX_AUTH_ENV);
+    },
+  );
 
   it("does not use a renderer or inherited API key after the selected key is removed", () => {
     seedProviderCredentials({
