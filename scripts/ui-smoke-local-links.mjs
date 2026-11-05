@@ -68,7 +68,20 @@ export async function runLocalLinksSmoke({ page, harnessBase, check }) {
         (element) => globalThis.getComputedStyle(element).borderTopWidth,
       ),
     ).toBe("1px");
-    expect(await pill.evaluate((element) => globalThis.getComputedStyle(element).borderTopColor)).toBe(rest.borderColor);
+    // Hover lifts the edge to border3 like every reference pill; width holds.
+    // The probe sits beside the pill so it reads the same theme scope.
+    await expect
+      .poll(() =>
+        pill.evaluate((element) => {
+          const probe = globalThis.document.createElement("span");
+          probe.style.color = "var(--border3)";
+          element.parentElement.append(probe);
+          const border3 = globalThis.getComputedStyle(probe).color;
+          probe.remove();
+          return globalThis.getComputedStyle(element).borderTopColor === border3;
+        }),
+      )
+      .toBe(true);
     const workspace = specimens.getByRole("button", { name: "Open workspace: watchet", exact: true });
     expect(await workspace.evaluate((element) => globalThis.getComputedStyle(element).borderTopWidth)).toBe("0px");
     // The workspace glyph sits 4px from its name (chat logos keep 8px).

@@ -210,13 +210,14 @@ describe("Local link identity and presentation", () => {
       expect(html).toContain("bg-bg2");
       expect(html).toContain("border-border2");
       expect(html).toContain("text-fg1");
+      // It hovers like every reference pill: bg2-highlight on border3.
       expect(html).toContain("hover:bg-bg2-highlight");
+      expect(html).toContain("hover:border-border3");
       expect(html).not.toContain("bg-agent-");
       expect(html).not.toContain("border-0");
       expect(html).toContain("h-5");
       expect(html).toContain("gap-1");
       expect(html).toContain("px-1.5");
-      expect(html).not.toContain("hover:border-");
     },
   );
 

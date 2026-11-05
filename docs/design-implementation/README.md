@@ -655,3 +655,6 @@ Each landed step appends one line: date, workstream, what landed, evidence.
   (`selected && …`, `tab === activeTab ? … : …`); a border in the box's own
   fill colour (a checked box), drop targets and focus stay exempt. The
   composer-editor and cloud-github smokes measure the fill and the edge.
+  The canvas's pill hover reaches the code too: composer pills, sent
+  attachments and chat links fill bg2-highlight on border3 as one shape
+  (`PILL_HOVER`), where only the label's inner button filled before.

@@ -15,7 +15,7 @@ import {
 import { useLocalLinks } from "./context";
 
 const TINTS = {
-  chat: "hover:bg-bg2-highlight hover:text-fg1",
+  chat: "hover:border-border3 hover:bg-bg2-highlight hover:text-fg1",
   workspace:
     "bg-blue-pill-bg text-blue-fg hover:bg-blue-pill-hover hover:text-blue-fg",
   muted: "bg-bg2-hover text-fg3 hover:bg-bg2-highlight hover:text-fg3",

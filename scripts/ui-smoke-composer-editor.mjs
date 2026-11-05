@@ -375,20 +375,48 @@ export async function runComposerEditorSmoke({ page, check }) {
   // keeps its resting edge: selection is a fill, never a ring.
   const pillShell = () =>
     mention.evaluate((element) => {
-      const probe = document.createElement("span");
-      probe.style.backgroundColor = "var(--selected-bg)";
-      document.body.append(probe);
-      const selectedBg = getComputedStyle(probe).backgroundColor;
-      probe.remove();
+      const token = (name, property) => {
+        const probe = document.createElement("span");
+        probe.style[property] = `var(${name})`;
+        document.body.append(probe);
+        const value = getComputedStyle(probe)[property];
+        probe.remove();
+        return value;
+      };
       const style = getComputedStyle(element);
+      const inner = [...element.querySelectorAll("button")].map(
+        (button) => getComputedStyle(button).backgroundColor,
+      );
       return {
         background: style.backgroundColor,
         border: style.borderTopColor,
         shadow: style.boxShadow,
-        selectedBg,
+        inner,
+        selectedBg: token("--selected-bg", "backgroundColor"),
+        hoverBg: token("--bg2-highlight", "backgroundColor"),
+        hoverBorder: token("--border3", "color"),
       };
     });
   const restingPill = await pillShell();
+  // Hover belongs to the whole pill: its inner buttons paint no fill.
+  await mention.hover();
+  await expect
+    .poll(async () => (await pillShell()).background)
+    .toBe(restingPill.hoverBg)
+    .catch(() => {});
+  const hoveredPill = await pillShell();
+  check(
+    "a hovered pill fills bg2-highlight on border3 as one shape",
+    hoveredPill.background === hoveredPill.hoverBg &&
+      hoveredPill.border === hoveredPill.hoverBorder &&
+      hoveredPill.inner.every((fill) => fill === "rgba(0, 0, 0, 0)"),
+    JSON.stringify({ restingPill, hoveredPill }),
+  );
+  await page.mouse.move(850, 500);
+  await expect
+    .poll(async () => (await pillShell()).background)
+    .toBe(restingPill.background)
+    .catch(() => {});
   const caretBefore = await page.evaluate(() => {
     const ed = window.__composerHarness.editor;
     const from = ed.state.selection.from;

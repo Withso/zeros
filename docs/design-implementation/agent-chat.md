@@ -200,6 +200,7 @@ Owner today: `features/agent/added-directories.tsx · composer-editor/pills.tsx 
 
 Changes:
 - A pill the caret selects fills with selected-bg and keeps its border2 edge; the 2px highlighted-bright ring is gone. A workspace link steps up to blue-pill-hover.
+- A hovered pill fills bg2-highlight on border3 as one shape (`PILL_HOVER`), in the composer, on sent attachments and on chat links; before, only the label's inner button filled, inside the pill.
 
 Code notes:
 - Four chip geometries in the card: 20px inline pills, 28px /add-dir chips, a 28px Design frame chip with a camera button, and a 28px Design tag. (`features/agent/composer-editor/pill-views.tsx:23-25 · features/agent/added-directories.tsx:50-63 · features/agent/composer-design-frame.tsx:176-184`)
