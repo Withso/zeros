@@ -751,20 +751,25 @@ Each landed step appends one line: date, workstream, what landed, evidence.
   docked @, / and # pickers take the new semantic `--composer-border`
   (#323232 in Dark, between border2 and border3 with no primitive of its
   own; border2 in Light), and a file drag dashes that edge. The transcript
-  dissolves into the pane over the 32px above the top of the stack, solid
-  over the lower 40% (`COMPOSER_DOCK_FADE`). The dock column carries it, so
-  it sits on the composer alone and above the highest card once one docks;
-  a docked picker is portaled, so `PopoverContent surface="composer"`
-  carries its own while it opens upward, scrolls in an inner box so the
-  card no longer clips it, and hides it when the picker flips below. Canvas
-  version 371 draws both: Feature tokens gains a Composer section (the
-  token and the fade in three states), Borders lists composer-border, and
-  the chat kit applies the edge and the fade on the window boards.
+  dissolves into the pane in one 32px gradient that starts at the top edge
+  of the stack, with no solid band (`COMPOSER_DOCK_FADE`). The dock column
+  carries it, so it sits on the composer alone and above the highest card
+  once one docks; a docked picker is portaled, so
+  `PopoverContent surface="composer"` carries its own while it opens
+  upward, scrolls in an inner box so the card no longer clips it, and hides
+  it when the picker flips below. Canvas version 374 draws both: Feature
+  tokens gains a Composer section (the token and the fade in three states),
+  Borders lists composer-border, and the chat kit applies the edge and the
+  fade on the window boards. An earlier draft held the fade solid over its
+  lower 40%, which read as an offset above the edge; the unit pin now
+  refuses any colour stop, and the pixel readings require the dissolve to
+  begin at the edge.
   Evidence: Vitest 521 files (5,962 tests) across agent, primitives, theme
   and shell, plus 19 code-review files; the new dock-fade smoke (cloud,
   Local and organization-local, both themes, decoded pixels; moving the
-  fade into the composer fails it) and the suggestions smoke (the picker
-  fade for all three owners and the flipped narrow window); the three
+  fade into the composer or holding it solid at the edge fails it) and the
+  suggestions smoke (the picker fade for all three owners and the flipped
+  narrow window); the three
   ui-smoke shards pass (623, 1,162 and 1,039 checks); typecheck,
   lint, check:ui, check:tokens, check:secrets and build:ui pass. Of the
   full root suite's 19 failing files, 11 pass with a neutral `HOME` (the

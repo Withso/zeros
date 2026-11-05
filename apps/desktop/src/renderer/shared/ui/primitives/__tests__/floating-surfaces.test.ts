@@ -212,11 +212,12 @@ describe("the composer dock fade", () => {
       "h-8",
       "bg-gradient-to-t",
       "from-(--pane-bg)",
-      // Solid over the lower 40% (13px), then a linear dissolve.
-      "from-40%",
       "to-transparent",
     ]) {
       expect(COMPOSER_DOCK_FADE.split(" ")).toContain(cls);
     }
+    // One dissolve that starts at the edge: no solid band or extra stop
+    // between the card's top and the transcript.
+    expect(COMPOSER_DOCK_FADE).not.toMatch(/(?:from|via|to)-\d+%|via-/);
   });
 });

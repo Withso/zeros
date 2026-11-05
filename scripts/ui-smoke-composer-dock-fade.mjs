@@ -38,7 +38,9 @@ export async function resolvedRgb(page, expression) {
 const distance = (a, b) => Math.max(...a.map((channel, i) => Math.abs(channel - b[i])));
 
 /** Over a bright band of "transcript" ink, a fade reads as ink just above it,
- *  the pane fill over its solid lower 12px, and a steady dissolve between. */
+ *  the pane fill at the edge it sits on (its last row, sampled half a pixel
+ *  in, is about 98%), and a steady dissolve that starts at that edge: ink
+ *  still shows a few pixels above it, so no solid band offsets the fade. */
 export function fadeReading(rows, { ink, pane, above }) {
   const covered = rows.slice(above);
   const towardPane = covered.map((row) => distance(row, pane));
@@ -46,7 +48,8 @@ export function fadeReading(rows, { ink, pane, above }) {
   const middle = covered[Math.floor(covered.length / 2)];
   return {
     inkAbove: distance(rows[Math.max(0, above - 3)], ink) <= 3,
-    solidBase: covered.slice(-12).every((row) => distance(row, pane) <= 3),
+    paneAtEdge: distance(rows.at(-1), pane) <= 8,
+    startsAtEdge: distance(covered.at(-6), pane) > 8,
     halfwayBetween: distance(middle, pane) > 8 && distance(middle, ink) > 8,
     monotonic,
   };
@@ -114,7 +117,7 @@ export async function checkComposerDockFade({ page, check, harnessBase }) {
         restingPointer: "none", paintsOver: true,
       });
       expect(fadeReading(await screenshotColumn(page, alone.clip), colors), `${placement} ${theme}: alone pixels`)
-        .toEqual({ inkAbove: true, solidBase: true, halfwayBetween: true, monotonic: true });
+        .toEqual({ inkAbove: true, paneAtEdge: true, startsAtEdge: true, halfwayBetween: true, monotonic: true });
 
       await page.evaluate((chat) => window.composerSendFailureFixture.queue(chat, "Queued follow-up"), index);
       await expect(page.locator("[data-queued-messages]:visible")).toBeVisible();
@@ -124,7 +127,7 @@ export async function checkComposerDockFade({ page, check, harnessBase }) {
         composerClear: true, paintsOver: true,
       });
       expect(fadeReading(await screenshotColumn(page, docked.clip), colors), `${placement} ${theme}: docked pixels`)
-        .toEqual({ inkAbove: true, solidBase: true, halfwayBetween: true, monotonic: true });
+        .toEqual({ inkAbove: true, paneAtEdge: true, startsAtEdge: true, halfwayBetween: true, monotonic: true });
 
       await page.evaluate((chat) => {
         window.composerSendFailureFixture.clearQueue(chat);

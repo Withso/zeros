@@ -33,7 +33,7 @@ async function checkPickerFade(menu, page, label) {
   }, fade.band);
   const colors = { ink: await resolvedRgb(page, "var(--fg1)"), pane: await resolvedRgb(page, "var(--pane-bg)"), above: 8 };
   expect(fadeReading(await screenshotColumn(page, fade.clip), colors), `${label}: pixels`)
-    .toEqual({ inkAbove: true, solidBase: true, halfwayBetween: true, monotonic: true });
+    .toEqual({ inkAbove: true, paneAtEdge: true, startsAtEdge: true, halfwayBetween: true, monotonic: true });
   await page.evaluate(() => document.querySelector("[data-picker-fade-probe]")?.remove());
   return fade.side;
 }
