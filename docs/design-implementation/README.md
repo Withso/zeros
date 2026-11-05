@@ -852,4 +852,6 @@ Each landed step appends one line: date, workstream, what landed, evidence.
   failures. A row turns Connected on Zeros' own evidence: Cursor finished one
   of its tools in that chat, or a Zeros-hosted server served that chat its
   tool list. `composer-tool-groups.test.ts` and the Cursor inventory,
-  translator and gateway tests hold it.
+  translator and gateway tests hold it. In a live Cursor chat the servers it
+  used and the Zeros-hosted servers were ticked, the rest read Not verified,
+  and a server that failed to start stayed red.
