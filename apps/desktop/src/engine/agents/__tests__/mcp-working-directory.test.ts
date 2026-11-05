@@ -11,6 +11,7 @@ import {
   claudeMcpStdio,
   validateMcpWorkingDirectory,
 } from "../mcp-working-directory";
+import { SCRUBBED_COMMAND_ENV_NAMES } from "../../env/launcher-env";
 
 const server = {
   name: "files",
@@ -56,6 +57,7 @@ describe("MCP per-server working directory", () => {
           ],
         },
         root,
+        process.env.PATH,
       );
       const result = await promisify(execFile)(
         config.command,
@@ -66,6 +68,55 @@ describe("MCP per-server working directory", () => {
         await realpath(path.join(root, name)),
         "literal $HOME ' ;",
       ]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+  it("starts a Claude MCP server with the scrubbed base environment and only its own variables", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "mcp-env-"));
+    try {
+      const shim = path.join(root, "zeros-git-auth-fixture");
+      await mkdir(shim);
+      // A command path containing "=" must not be read as an assignment.
+      const bin = path.join(root, "with=equals");
+      await mkdir(bin);
+      await symlink(process.execPath, path.join(bin, "node"));
+      const sessionPath = [shim, "/usr/bin", "/bin"].join(path.delimiter);
+      const config = claudeMcpStdio(
+        {
+          name: "probe",
+          transport: "stdio",
+          command: path.join(bin, "node"),
+          args: ["-e", "process.stdout.write(JSON.stringify(process.env))"],
+          env: { OWN_TOKEN: "own-secret" },
+        },
+        root,
+        sessionPath,
+      );
+      // Claude starts each server with its own whole environment plus the
+      // server's configured variables.
+      const claudeEnv = {
+        HOME: root,
+        LANG: "en_US.UTF-8",
+        PATH: sessionPath,
+        ZEROS_LOCAL_TOKEN: "engine-secret",
+        ZEROS_GIT_AUTH_SOCKET: "/tmp/broker.sock",
+        ZEROS_MCP_0123456789ABCDEF0123456789ABCDEF_TOKEN: "other-server-secret",
+        ANTHROPIC_API_KEY: "provider-secret",
+        "odd.name": "odd-secret",
+        MULTILINE: "first\nHOME=/forged\n=x",
+      };
+      const { stdout } = await promisify(execFile)(config.command, config.args, {
+        cwd: root,
+        env: { ...claudeEnv, ...config.env },
+      });
+      const env = JSON.parse(stdout) as Record<string, string>;
+      expect(env).toMatchObject({ HOME: root, LANG: "en_US.UTF-8", OWN_TOKEN: "own-secret", PATH: "/usr/bin:/bin" });
+      // The shell that runs a command path containing "=" adds its own bookkeeping.
+      const allowed = new Set<string>([...SCRUBBED_COMMAND_ENV_NAMES, "OWN_TOKEN", "PWD", "SHLVL", "_", "__CF_USER_TEXT_ENCODING"]);
+      expect(Object.keys(env).filter((name) => !allowed.has(name))).toEqual([]);
+      // Claude expands ${NAME} in server arguments; the launcher must not use it.
+      expect(config.args[1]).not.toContain("${");
     } finally {
       await rm(root, { recursive: true, force: true });
     }

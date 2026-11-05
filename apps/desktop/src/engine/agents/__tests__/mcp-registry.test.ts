@@ -375,6 +375,33 @@ enabled = false
     expect(resolveMcpServers().gatewayBackends).toEqual([]);
     expect(resolveMcpServers().servers).toEqual(result.servers);
   });
+  it("lets only a personal backend on this machine reach loopback, as the connection check does", () => {
+    writeUser(`[[mcp.servers]]
+name = "ipv4"
+transport = "http"
+url = "http://127.0.0.1:47831/key/mcp"
+auth = "header"
+[[mcp.servers]]
+name = "named"
+transport = "http"
+url = "http://localhost:47832/oauth/mcp"
+auth = "oauth"
+[[mcp.servers]]
+name = "ipv6"
+transport = "sse"
+url = "http://[::1]:47833/sse"
+auth = "header"
+[[mcp.servers]]
+name = "remote"
+transport = "http"
+url = "https://remote.example/mcp"
+auth = "oauth"
+`);
+    const backends = resolveMcpServers().gatewayBackends;
+    expect(Object.fromEntries(backends.map((backend) => [backend.name, backend.allowLoopback]))).toEqual({
+      ipv4: true, named: true, ipv6: true, remote: undefined,
+    });
+  });
   const writeRepoFile = (root: string, file: string, toml: string) => {
     mkdirSync(path.join(root, ".zeros"), { recursive: true });
     writeFileSync(path.join(root, ".zeros", file), toml);

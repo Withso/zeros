@@ -16,6 +16,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { AgentGateway } from "../gateway";
+import { McpServerStartError } from "../mcp-registration";
 import type {
   AgentAdapter,
   InitializeResponse,
@@ -245,6 +246,46 @@ describe("AgentGateway per-session MCP resolution", () => {
       { name: "zeros-gateway", transport: "http", url: "http://127.0.0.1:39218/mcp", headersFromEnv: { Authorization: "ZEROS_MCP_GATEWAY_CAPABILITY" } },
       { name: "ctx7", transport: "stdio", command: "npx" },
     ]);
+  });
+
+  it("starts the chat without servers that cannot start and lists them as errors in its tools", async () => {
+    writeUser(
+      `[[mcp.servers]]\nname = "healthy"\ntransport = "stdio"\ncommand = "npx"\n\n` +
+        `[[mcp.servers]]\nname = "listener"\ntransport = "stdio"\ncommand = "node"\nargs = ["listener.js"]\nlisten_url = "http://127.0.0.1:47999/mcp"\n\n` +
+        `[[mcp.servers]]\nname = "keyed"\ntransport = "stdio"\ncommand = "node"\nargs = ["keyed.js"]\ncredential_id = "6f1c2d4e-8a9b-4c3d-9e2f-1a2b3c4d5e6f"\nenv = { API_KEY = "\${zeros.secret}" }\n\n` +
+        `[[mcp.servers]]\nname = "elsewhere"\ntransport = "stdio"\ncommand = "node"\nargs = ["elsewhere.js"]\ncwd = "missing-folder"\n`,
+    );
+    const gw = makeGateway();
+    gw.setMcpSecretResolver((servers) => {
+      if (servers.some((server) => server.name === "keyed"))
+        throw new McpServerStartError("The saved variable API_KEY is unavailable. Edit the server to restore it.");
+    });
+    gw.setMcpLauncher(async (servers) => ({
+      servers: servers.filter((server) => server.transport !== "stdio" || !server.listenUrl),
+      unavailable: servers
+        .filter((server) => server.transport === "stdio" && server.listenUrl)
+        .map((server) => ({ name: server.name, detail: "The server exited before it started listening." })),
+    }));
+    const captured: { servers?: McpServerRegistration[] } = {};
+    const adapter = Object.assign(capturingAdapter("claude", captured), {
+      capabilityPorts: { sessionTools: { list: async () => ({ state: "ready", entries: [{ id: "healthy", name: "healthy", status: "connected" }] }) } },
+    });
+    (gw as unknown as GwInternals).adapters.set("claude", adapter);
+    try {
+      const session = await (gw as unknown as GwInternals).newSession("claude", { cwd: repoDir });
+      expect(captured.servers).toEqual([{ name: "healthy", transport: "stdio", command: "npx" }]);
+      const tools = await gw.readSessionToolInventory("claude", session.sessionId, repoDir);
+      expect(tools.entries.map(({ name, status, detail }) => ({ name, status, detail }))).toEqual([
+        { name: "healthy", status: "connected", detail: undefined },
+        { name: "keyed", status: "error", detail: "The saved variable API_KEY is unavailable. Edit the server to restore it." },
+        { name: "elsewhere", status: "error", detail: "MCP working directory must be an existing, accessible folder on the machine running the server." },
+        { name: "listener", status: "error", detail: "The server exited before it started listening." },
+      ]);
+      expect(new Set(tools.entries.map((entry) => entry.id)).size).toBe(4);
+      expect(tools.groups?.find((group) => group.kind === "mcp")?.entries).toHaveLength(4);
+    } finally {
+      await gw.dispose();
+    }
   });
 
   it.each([null, "http://127.0.0.1:39218/mcp"])("omits an empty project gateway without falling back to the global endpoint (%s)", async retained => {

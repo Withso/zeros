@@ -5,6 +5,7 @@ import { mcpServerSchema } from "../../settings/schema";
 import { mcpResourceHeaders } from "./resource-headers";
 import { CatalogClient } from "./list-tools";
 import { safeAuthFetch } from "./safe-fetch";
+import { isLoopbackHost } from "./oauth-url";
 import { mcpCredentialKey } from "./credential-key";
 import type { OAuthVault } from "./oauth-provider";
 import type { McpGatewaySecretChanges } from "../../settings/mcp-configuration";
@@ -45,7 +46,7 @@ export async function probeMcpServer(raw: unknown, changes: McpGatewaySecretChan
       const requestHeaders = new Headers(init?.headers);
       if (url.origin === endpoint.origin) headers.forEach((value, name) => requestHeaders.set(name, value));
       const response = await safeAuthFetch(url, { ...init, headers: requestHeaders, signal: combined }, {
-        allowLoopback: ["127.0.0.1", "localhost", "[::1]"].includes(endpoint.hostname), sensitiveHeaders: [...headers.keys()],
+        allowLoopback: isLoopbackHost(endpoint.hostname), sensitiveHeaders: [...headers.keys()],
       });
       reached = true;
       return response;

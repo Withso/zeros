@@ -212,6 +212,27 @@ describe("McpGateway (networking)", () => {
     expect(tools.map((t) => t.name).sort()).toEqual(["be__a", "be__c"]); // b not exposed
   });
 
+  it("reaches a loopback backend only when that backend allows it", async () => {
+    const backend = await makeFakeBackend(["t"]);
+    cleanups.push(backend.close);
+    const vault = new OAuthVault();
+    const blockedUrl = backend.url.replace("/mcp", "/blocked");
+    vault.setHeader(canonicalResourceUri(backend.url), { name: "Authorization", value: "x" });
+    vault.setHeader(canonicalResourceUri(blockedUrl), { name: "Authorization", value: "x" });
+    const gw = new McpGateway({ port: 0, callbackPort: 0, vault });
+    cleanups.push(() => gw.stop());
+    await gw.start([
+      { name: "local", url: backend.url, auth: "header", headerName: "Authorization", allowLoopback: true, source: "user" },
+      { name: "blocked", url: blockedUrl, auth: "header", headerName: "Authorization", source: "user" },
+    ]);
+    const statuses = gw.getStatuses();
+    expect(statuses.find((s) => s.name === "local")?.state).toBe("connected");
+    expect(statuses.find((s) => s.name === "blocked")?.state).toBe("error");
+    const agent = await connectAgentClient(gw);
+    cleanups.push(() => agent.close());
+    expect((await agent.listTools()).tools.map((t) => t.name)).toEqual(["local__t"]);
+  });
+
   it("isolates a failing backend — the healthy one still serves", async () => {
     const good = await makeFakeBackend(["ok"]);
     cleanups.push(good.close);

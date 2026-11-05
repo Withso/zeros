@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { buildMcpServerOverrides } from "../app-server";
+import { codexMcpServers } from "../mcp-overrides";
 import {
   mcpDisabledThreadConfig,
   readNativeMcpSurface,
@@ -7,6 +8,26 @@ import {
 } from "../native-mcp";
 import { codexNativeBrowserDeclarationAllowance } from "../browser-tools";
 import type { McpServerRegistration } from "../../../types";
+
+describe("codexMcpServers", () => {
+  it("names each server the way Claude and Cursor do and reports what Codex cannot take", () => {
+    const set = codexMcpServers([
+      { name: "plain", transport: "http", url: "https://a.test/mcp" },
+      { name: "my server.v2", transport: "stdio", command: "node" },
+      { name: "a.b", transport: "stdio", command: "first" },
+      { name: "a b", transport: "stdio", command: "second" },
+      { name: "events", transport: "sse", url: "https://e.test/sse" },
+      { name: "taken_name", transport: "stdio", command: "own" },
+      { name: "taken.name", transport: "stdio", command: "renamed" },
+    ]);
+    expect(set.servers.map((server) => server.name)).toEqual(["plain", "my_server_v2", "a_b", "taken_name"]);
+    expect(set.servers.find((server) => server.name === "taken_name")).toMatchObject({ command: "own" });
+    expect([...set.labels]).toEqual([["my_server_v2", "my server.v2"], ["a_b", "a.b"]]);
+    expect(set.unavailable.map((server) => server.name)).toEqual(["a b", "events", "taken.name"]);
+    expect(new Set(set.unavailable.map((server) => server.id)).size).toBe(3);
+    expect(buildMcpServerOverrides(set.servers)).toContain('mcp_servers.my_server_v2.command="node"');
+  });
+});
 
 describe("buildMcpServerOverrides — Codex -c MCP config", () => {
   it("does not reinterpret unsupported direct SSE or break the remaining servers", () => {

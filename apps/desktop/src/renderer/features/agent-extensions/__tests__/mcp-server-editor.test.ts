@@ -15,7 +15,7 @@ const script = buildSync({
       result: { status: "connected", stages: [], toolCount: 2, tools: ["search", "fetch"] },
     };
     const probe = async () => { f.probes++; return structuredClone(f.result); };
-    const onSave = async () => { f.saves++; if (f.failSave) throw new Error(f.failSave); return structuredClone(f.initial); };
+    const onSave = async (draft) => { f.saves++; f.saved = draft; if (f.failSave) throw new Error(f.failSave); return structuredClone(f.initial); };
     let checking = false;
     new MutationObserver(() => {
       const next = document.body.textContent.includes("Checking connection…");
@@ -64,7 +64,7 @@ async function open(initial: Record<string, unknown>, result?: Record<string, un
 }
 
 it("treats an empty variable row as no change to a connected server", async () => {
-  await open({ name: "docs", transport: "http", url: "https://mcp.example.test/mcp", credential_id: "docs-id" });
+  await open({ name: "docs", transport: "http", url: "https://mcp.example.test/mcp", auth: "header", header_names: ["Authorization"], credential_id: "docs-id" });
   await page.getByText("2 tools available.").waitFor();
   await page.getByRole("button", { name: "Add variable" }).click();
   await settle();
@@ -75,7 +75,7 @@ it("treats an empty variable row as no change to a connected server", async () =
 });
 
 it("connects an unchanged sign-in server without saving when only an empty row was added", async () => {
-  await open({ name: "flora", transport: "http", url: "https://agents.example.test/mcp", auth: "oauth", oauth_client_mode: "auto", credential_id: "flora-id" },
+  await open({ name: "flora", transport: "http", url: "https://agents.example.test/mcp", auth: "oauth", oauth_client_mode: "auto", header_names: ["X-Org"], credential_id: "flora-id" },
     { status: "needs-auth", stages: [{ stage: "transport", status: "needs-auth" }] });
   await page.getByRole("button", { name: "Add variable" }).click();
   await settle();
@@ -103,4 +103,22 @@ it("keeps the settled connection check and one error toast across failed saves",
   expect(await fixture("checks")).toBe(checks);
   expect(await page.locator('[data-sonner-toast]:not([data-removed="true"])').filter({ hasText: message }).count()).toBe(1);
   expect(await page.getByText("2 tools available.").isVisible()).toBe(true);
+});
+
+it("offers variables only where a header can use them and never saves dormant ones", async () => {
+  const variables = () => page.getByRole("button", { name: "Add variable" }).count();
+  await open({ name: "docs", transport: "http", url: "https://mcp.example.test/mcp", credential_id: "docs-id", env: { TOKEN: "${zeros.secret}" } });
+  expect(await variables()).toBe(0);
+  // A saved variable no header can use is not a change, and a save drops it.
+  expect(await page.getByRole("button", { name: "Check connection" }).count()).toBe(1);
+  await page.getByRole("button", { name: "Save changes" }).click();
+  await page.waitForFunction(() => (window as any).fixture.saves === 1);
+  expect(await page.evaluate(() => (window as any).fixture.saved.env)).toEqual([]);
+  const method = page.getByRole("combobox", { name: "Authentication" });
+  await method.click();
+  await page.getByRole("option", { name: "API key" }).click();
+  expect(await variables()).toBe(1);
+  await method.click();
+  await page.getByRole("option", { name: "Sign in" }).click();
+  expect(await variables()).toBe(0);
 });

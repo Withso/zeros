@@ -1,4 +1,5 @@
 import { mcpCredentialKey } from "./gateway/credential-key";
+import { isLoopbackHost } from "./gateway/oauth-url";
 // ──────────────────────────────────────────────────────────
 // MCP registry helpers — normalize before handing to adapters.
 // ──────────────────────────────────────────────────────────
@@ -183,6 +184,9 @@ export interface GatewayBackend {
   variables?: Record<string, string>;
   sealedHeaders?: string[];
   clientMode?: "auto" | "metadata" | "dynamic" | "custom";
+  /** A personal backend on this machine may use loopback HTTP, as its
+   *  connection check does. Organisation backends never set it. */
+  allowLoopback?: boolean;
   name: string;
   /** Omitted by older callers: Streamable HTTP. */
   transport?: "http" | "sse";
@@ -394,6 +398,14 @@ export async function resolveMcpServersForRepo(
   );
 }
 
+function isLoopbackUrl(raw: string): boolean {
+  try {
+    return isLoopbackHost(new URL(raw).hostname);
+  } catch {
+    return false;
+  }
+}
+
 /** Compose per-layer raw docs into the effective registry: highest precedence
  *  first, dedup first-wins. Unlike scalar/table settings, `mcp.servers` is an
  *  ARRAY that replaces whole on merge — so we read each layer's OWN array and
@@ -452,6 +464,7 @@ function composeMcpRegistry(
           ...(s.oauth_client_mode ? { clientMode: s.oauth_client_mode } : {}),
           ...(s.transport === "sse" ? { transport: "sse" as const } : {}),
           url: s.url,
+          ...(isLoopbackUrl(s.url) ? { allowLoopback: true } : {}),
           auth: s.auth,
           ...(s.env ? { variables: s.env } : {}),
           ...(s.headers ? { sealedHeaders: Object.entries(s.headers).filter(([, value]) => value === MCP_SECRET_SENTINEL).map(([name]) => name) } : {}),

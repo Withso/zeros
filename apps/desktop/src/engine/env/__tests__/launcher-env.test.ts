@@ -13,6 +13,7 @@ import {
   sanitizeProbedPath,
   stripLauncherBinFromPath,
   stripLauncherNodeOptions,
+  SCRUBBED_COMMAND_ENV_NAMES,
   TOOLCHAIN_ENV_NAMES,
 } from "../launcher-env";
 
@@ -324,5 +325,18 @@ describe("TOOLCHAIN_ENV_NAMES", () => {
     }
     expect(TOOLCHAIN_ENV_NAMES).toContain("PNPM_HOME");
     expect(TOOLCHAIN_ENV_NAMES).toContain("NVM_DIR");
+  });
+});
+
+describe("SCRUBBED_COMMAND_ENV_NAMES", () => {
+  it("never carries a credential or a Zeros variable", () => {
+    // Setup scripts and every stdio MCP server inherit exactly these names, so
+    // one token-shaped entry would reach all of them.
+    for (const name of SCRUBBED_COMMAND_ENV_NAMES) {
+      expect(name).not.toMatch(/TOKEN|KEY|SECRET|PASSWORD|AUTH|CREDENTIAL|ASKPASS|^ZEROS_|^SSH_/i);
+    }
+    expect(SCRUBBED_COMMAND_ENV_NAMES).toEqual(
+      expect.arrayContaining(["PATH", "HOME", "TMPDIR", "HTTPS_PROXY", "NODE_EXTRA_CA_CERTS", ...TOOLCHAIN_ENV_NAMES]),
+    );
   });
 });

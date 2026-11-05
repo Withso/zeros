@@ -4,6 +4,26 @@ import { withoutLocalDevelopment } from "../env/local-development";
 const HEADER_NAME = /^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,128}$/;
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,255}$/;
 
+/** A failure that belongs to one MCP server. The chat starts without that
+ * server, and this message is shown beside it in the chat's tools. */
+export class McpServerStartError extends Error {}
+
+export interface UnavailableMcpServer {
+  name: string;
+  detail: string;
+}
+
+/** Other failures can carry paths or process output, so they get a fixed
+ * message instead. */
+export function unavailableMcpServer(name: string, error: unknown): UnavailableMcpServer {
+  return {
+    name,
+    detail: error instanceof McpServerStartError
+      ? error.message
+      : "Could not start this server. Check its settings, then start a new chat.",
+  };
+}
+
 /** Materialize an HTTP MCP registration for SDKs that do not support
  * environment-backed headers themselves. The secret stays out of the durable
  * registration and provider argv; it exists only in the already-authorized
@@ -15,8 +35,8 @@ export function materializeMcpServerRegistration(
   if (registration.transport === "stdio" && registration.envFromEnv) {
     const values = { ...(registration.env ?? {}) };
     for (const [name, reference] of Object.entries(registration.envFromEnv)) {
-      if (!ENV_NAME.test(name) || !ENV_NAME.test(reference)) throw new Error("An MCP server has an invalid credential reference.");
-      if (env[reference] === undefined) throw new Error("An MCP server is missing a saved variable. Edit the server to enter it again.");
+      if (!ENV_NAME.test(name) || !ENV_NAME.test(reference)) throw new McpServerStartError("This server has an invalid saved variable name. Edit the server to fix it.");
+      if (env[reference] === undefined) throw new McpServerStartError("This server is missing a saved variable. Edit the server to enter it again.");
       values[name] = env[reference]!;
     }
     const { envFromEnv: _references, ...rest } = registration;

@@ -1,9 +1,11 @@
 import { gatewayRegistration, type McpGatewayEndpoint } from "./gateway/capability";
 import { McpWorkingDirectoryError, validateMcpWorkingDirectory } from "./mcp-working-directory";
+import { unavailableMcpServer, type UnavailableMcpServer } from "./mcp-registration";
 import {
   sessionToolsSnapshotSchema,
   sessionToolsInventorySnapshotSchema,
   sessionToolGroups,
+  type SessionToolInventoryEntry,
   type SessionToolsInventorySnapshot,
   type SessionToolsSnapshot,
 } from "@zeros/protocol/agent-extensions";
@@ -40,7 +42,7 @@ import {
 
 import * as fsp from "node:fs/promises";
 import { existsSync, lstatSync, realpathSync } from "node:fs";
-import { createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import path from "node:path";
 import { tmpdir } from "node:os";
 
@@ -1409,6 +1411,32 @@ async function withTargetBranchEnv(
   return { ...env, ZEROS_TARGET_BRANCH: targetRef };
 }
 
+/** Add an error row for each configured server the execution started
+ * without. A provider row with the same name wins. */
+function withUnavailableMcp<T extends SessionToolsSnapshot | SessionToolsInventorySnapshot>(
+  snapshot: T,
+  unavailable: readonly UnavailableMcpServer[] | undefined,
+): T {
+  if (!unavailable?.length) return snapshot;
+  const add = <E extends { name: string }>(entries: readonly E[]): (E | SessionToolInventoryEntry)[] => {
+    const reported = new Set(entries.map((entry) => entry.name));
+    const rows = unavailable
+      .filter((server) => !reported.has(server.name))
+      .map((server): SessionToolInventoryEntry => ({
+        id: `unavailable:${createHash("sha256").update(server.name).digest("hex")}`,
+        name: server.name.slice(0, 512),
+        status: "error",
+        detail: server.detail.slice(0, 1000),
+      }));
+    return [...entries, ...rows].slice(0, 1000);
+  };
+  const groups = "groups" in snapshot ? snapshot.groups : undefined;
+  return {
+    ...snapshot,
+    entries: add(snapshot.entries),
+    ...(groups ? { groups: groups.map((group) => group.kind === "mcp" ? { ...group, entries: add(group.entries) } : group) } : {}),
+  };
+}
 
 export interface NewAgentSessionOptions {
   cwd?: string;
@@ -1575,6 +1603,9 @@ export class AgentGateway {
   /** Main-checkout root used by layered settings for each live execution.
    * Plain-folder chats have no entry. */
   private readonly executionToMainRepoRoot = new Map<string, string>();
+  /** Configured MCP servers this execution started without. The provider
+   * never saw them, so the chat's tool list adds them from here. */
+  private readonly executionUnavailableMcp = new Map<string, readonly UnavailableMcpServer[]>();
   /** Sessions already given the one-shot cwd hint (see CWD_SELF_AWARE_AGENTS).
    *  First prompt per session only — the agent's server keeps it in history. */
   private readonly sessionsCwdHinted = new Set<string>();
@@ -4046,7 +4077,7 @@ export class AgentGateway {
   setScopedMcpGateway(resolve: NonNullable<AgentGateway["scopedMcpGateway"]>): void { this.scopedMcpGateway = resolve; }
   private organizationMcpResolver?: (workspaceId: string, env: Record<string, string>, signal?: AbortSignal) => Promise<McpServerRegistration[]>;
   setOrganizationMcpResolver(resolve: NonNullable<AgentGateway["organizationMcpResolver"]>): void { this.organizationMcpResolver = resolve; }
-  private mcpLauncher?: (servers: McpServerRegistration[], cwd: string, env: Record<string, string>, workspaceId?: string, signal?: AbortSignal) => Promise<McpServerRegistration[]>;
+  private mcpLauncher?: (servers: McpServerRegistration[], cwd: string, env: Record<string, string>, workspaceId?: string, signal?: AbortSignal) => Promise<{ servers: McpServerRegistration[]; unavailable: UnavailableMcpServer[] }>;
   setMcpLauncher(launch: NonNullable<AgentGateway["mcpLauncher"]>): void { this.mcpLauncher = launch; }
   private mcpSecretResolver?: (servers: McpServerRegistration[], env: Record<string, string>) => void;
   setMcpSecretResolver(resolve: NonNullable<AgentGateway["mcpSecretResolver"]>): void { this.mcpSecretResolver = resolve; }
@@ -4118,7 +4149,9 @@ export class AgentGateway {
    *  registry reload race. Async because the repo-local trust check shells
    *  `git check-ignore` (off the event loop — the old sync resolve blocked the
    *  whole engine per spawn). Registry read failures fall back to the global
-   *  view; invalid configured working directories remain actionable errors. */
+   *  view. A server that cannot start (missing saved variable, folder or
+   *  launch failure) is left out and recorded in `unavailable`; the chat
+   *  starts with the rest. */
   private async resolveSessionMcp(
     agentId: string,
     cwd: string,
@@ -4126,12 +4159,18 @@ export class AgentGateway {
     env?: Record<string, string>,
     workspaceId?: string,
     signal?: AbortSignal,
+    unavailable: UnavailableMcpServer[] = [],
   ): Promise<McpServerRegistration[]> {
+    const launch = async (servers: McpServerRegistration[]) => {
+      if (!this.mcpLauncher) return servers;
+      const launched = await this.mcpLauncher(servers, cwd, env ?? {}, workspaceId, signal);
+      unavailable.push(...launched.unavailable);
+      return launched.servers;
+    };
     const workspace = workspaceId ? getWorkspaceById(workspaceId) : undefined;
     if (workspace?.organizationId) {
       if (!this.organizationMcpResolver || workspace.placement === "cloud") throw new Error("Organisation MCP configuration is unavailable in this runtime.");
-      const servers = await this.validateSessionMcp(await this.organizationMcpResolver(workspaceId!, env ?? {}, signal), cwd);
-      return this.mcpLauncher ? this.mcpLauncher(servers, cwd, env ?? {}, workspaceId, signal) : servers;
+      return launch(await this.validateSessionMcp(await this.organizationMcpResolver(workspaceId!, env ?? {}, signal), cwd, unavailable));
     }
     try {
       const { servers, gatewayBackends, warnings } =
@@ -4166,22 +4205,46 @@ export class AgentGateway {
         );
         return false;
       });
-      if (env) this.mcpSecretResolver?.(safeServers, env);
-      const validated = await this.validateSessionMcp([...injected, ...safeServers], cwd);
-      return this.mcpLauncher ? this.mcpLauncher(validated, cwd, env ?? {}, workspaceId, signal) : validated;
+      const resolver = this.mcpSecretResolver;
+      const withSecrets = env && resolver ? safeServers.filter((server) => {
+        try {
+          resolver([server], env);
+          return true;
+        } catch (error) {
+          unavailable.push(unavailableMcpServer(server.name, error));
+          return false;
+        }
+      }) : safeServers;
+      return await launch(await this.validateSessionMcp([...injected, ...withSecrets], cwd, unavailable));
     } catch (err) {
       if (err instanceof McpWorkingDirectoryError || this.scopedMcpGateway || this.mcpSecretResolver) throw err;
       console.warn(
         `[agents] ${agentId} MCP resolve failed for ${cwd}; using the global registry:`,
         err instanceof Error ? err.message : String(err),
       );
-      return await this.validateSessionMcp(this.mcpServersView, cwd);
+      unavailable.length = 0;
+      return await this.validateSessionMcp(this.mcpServersView, cwd, unavailable);
     }
   }
 
-  private async validateSessionMcp(servers: readonly McpServerRegistration[], cwd: string): Promise<McpServerRegistration[]> {
-    return Promise.all(servers.map(async (server) => server.transport === "stdio" && server.cwd
-      ? { ...server, cwd: await validateMcpWorkingDirectory(server.cwd, cwd) } : server));
+  private recordUnavailableMcp(agentId: string, executionId: string, unavailable: readonly UnavailableMcpServer[]): void {
+    if (unavailable.length === 0) return;
+    for (const server of unavailable)
+      console.warn(`[agents] ${agentId} MCP: started ${executionId} without "${server.name}": ${server.detail}`);
+    this.executionUnavailableMcp.set(executionId, unavailable);
+  }
+
+  private async validateSessionMcp(servers: readonly McpServerRegistration[], cwd: string, unavailable: UnavailableMcpServer[]): Promise<McpServerRegistration[]> {
+    const validated = await Promise.all(servers.map(async (server) => {
+      if (server.transport !== "stdio" || !server.cwd) return server;
+      try {
+        return { ...server, cwd: await validateMcpWorkingDirectory(server.cwd, cwd) };
+      } catch (error) {
+        unavailable.push(unavailableMcpServer(server.name, error));
+        return null;
+      }
+    }));
+    return validated.filter((server) => server !== null);
   }
 
   /** Resolve only browser capabilities the selected provider exposes natively.
@@ -5182,12 +5245,13 @@ export class AgentGateway {
       cwd,
     };
     this.executionOwnership.set(executionId, executionOwner);
+    const unavailableMcp: UnavailableMcpServer[] = [];
     const { mcpServers, preparedBoundary, protectionAttestation } =
       await this.withProvisionalTerritory(
         executionId,
         territorySet.contributions,
         async () => {
-          let mcpServers = await this.resolveSessionMcp(agentId, cwd, mainRepoRoot, providerEnv, opts.workspaceId, opts.admissionSignal);
+          let mcpServers = await this.resolveSessionMcp(agentId, cwd, mainRepoRoot, providerEnv, opts.workspaceId, opts.admissionSignal, unavailableMcp);
           if (actor === "agent-code") {
             mcpServers = await this.sessionTools.admit(
               {
@@ -5365,6 +5429,7 @@ export class AgentGateway {
     // Optional benchmark mode only: pre-admit the next spare of this shape.
     this.replenishWarmSessionBoundary(preparedBoundary, protectionAttestation);
     this.executionToAgent.set(session.executionId, agentId);
+    this.recordUnavailableMcp(agentId, session.executionId, unavailableMcp);
     this.executionAuthFingerprint.set(session.executionId, authFingerprint);
     this.executionConnectionSources.set(session.executionId, {
       cwd,
@@ -5514,6 +5579,7 @@ export class AgentGateway {
       cwd,
     };
     this.executionOwnership.set(executionId, executionOwner);
+    const unavailableMcp: UnavailableMcpServer[] = [];
     const { mcpServers, preparedBoundary, protectionAttestation } =
       await this.withProvisionalTerritory(
         executionId,
@@ -5526,6 +5592,7 @@ export class AgentGateway {
             providerEnv,
             opts.workspaceId,
             opts.admissionSignal,
+            unavailableMcp,
           );
           const mcpServers = await this.sessionTools.admit(
             {
@@ -5694,6 +5761,7 @@ export class AgentGateway {
     // either path.
     this.replenishWarmSessionBoundary(preparedBoundary, protectionAttestation);
     this.executionToAgent.set(executionId, agentId);
+    this.recordUnavailableMcp(agentId, executionId, unavailableMcp);
     this.executionAuthFingerprint.set(executionId, authFingerprint);
     this.executionConnectionSources.set(executionId, {
       cwd,
@@ -6050,6 +6118,7 @@ export class AgentGateway {
     this.executionToWorkspace.delete(sessionId);
     this.executionToCwd.delete(sessionId);
     this.executionToMainRepoRoot.delete(sessionId);
+    this.executionUnavailableMcp.delete(sessionId);
     this.sessionsCwdHinted.delete(sessionId);
     this.sessionsInstructed.delete(sessionId);
     this.sessionsTerritoryNoticePending.delete(sessionId);
@@ -6841,22 +6910,25 @@ export class AgentGateway {
     const adoption = this.sessionToolsAdoption(agentId, sessionId, cwd);
     if (adoption) await adoption;
     const { adapter, port } = this.sessionToolsPort(agentId, sessionId, cwd);
+    const unavailable = this.executionUnavailableMcp.get(sessionId);
     if (!port)
-      return {
+      return withUnavailableMcp({
         state: "unsupported",
         entries: [],
         detail: "This agent does not report tool connections.",
-      };
+      }, unavailable);
+    let snapshot: SessionToolsSnapshot;
     try {
       const result = await port.list({ sessionId });
       if (this.sessionToolsPort(agentId, sessionId, cwd).adapter !== adapter)
         throw new Error("Session changed");
-      return sessionToolsSnapshotSchema.parse(result);
+      snapshot = sessionToolsSnapshotSchema.parse(result);
     } catch {
       throw new Error(
         "Could not read this chat's tool connections. Refresh to retry.",
       );
     }
+    return withUnavailableMcp(snapshot, unavailable);
   }
 
   async readSessionToolInventory(
@@ -6871,16 +6943,18 @@ export class AgentGateway {
       const result = await this.readSessionTools(agentId, sessionId, cwd);
       return { ...result, groups: sessionToolGroups(result) };
     }
+    let snapshot: SessionToolsInventorySnapshot;
     try {
       const result = await port.inventory({ sessionId });
       if (this.sessionToolsPort(agentId, sessionId, cwd).adapter !== adapter)
         throw new Error("Session changed");
-      return sessionToolsInventorySnapshotSchema.parse(result);
+      snapshot = sessionToolsInventorySnapshotSchema.parse(result);
     } catch {
       throw new Error(
         "Could not read this chat’s tool inventory. Refresh to retry.",
       );
     }
+    return withUnavailableMcp(snapshot, this.executionUnavailableMcp.get(sessionId));
   }
 
   async authenticateSessionTool(

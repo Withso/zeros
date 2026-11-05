@@ -14,6 +14,21 @@ import { Badge } from "../../shared/ui/primitives/badge";
 import { mcpDraftError } from "./mcp-form-save";
 import { mcpConnectionView } from "./mcp-connection-view";
 
+/** An HTTP server's variables only fill ${NAME} in its headers, so they apply
+ * exactly where the Headers field is shown. */
+function variablesApply(draft: Draft): boolean {
+  return draft.transport === "stdio" || draft.auth === "header" || (draft.auth === "oauth" && draft.headers.length > 0);
+}
+
+/** What a save or connection check sends. Dormant input stays in the draft
+ * when changing methods, but never leaves it. */
+function usableDraft(draft: Draft): Draft {
+  return { ...draft,
+    headers: draft.auth === "none" || draft.transport === "stdio" ? [] : draft.headers,
+    env: variablesApply(draft) ? draft.env : [],
+  };
+}
+
 /** Ephemeral draft comparison, including write-only edits but excluding row IDs
  * and the empty rows a save drops. */
 function connectionDraftKey(draft: Draft): string {
@@ -141,13 +156,9 @@ export function McpServerEditor({ initial, target, onSave, onBack, onSaved = onB
   const latestConnection = useRef(connection);
   latestConnection.current = connection;
   const [catalog, setCatalog] = useState<{ key: string; tools: string[] } | null>(null);
-  // Keep dormant input in the draft when changing methods, but never send it
-  // with a No sign-in request or save.
-  const effectiveDraft = useMemo(() => ({ ...draft, args: args.map(row => row.value),
-    headers: draft.auth === "none" || draft.transport === "stdio" ? [] : draft.headers,
-  }), [draft, args]);
+  const effectiveDraft = useMemo(() => ({ ...usableDraft(draft), args: args.map(row => row.value) }), [draft, args]);
   const initialDraft = useMemo(() => secureDraftFromServer(initial), [initial]);
-  const connectionChanged = Boolean(initial && connectionDraftKey(effectiveDraft) !== connectionDraftKey(initialDraft));
+  const connectionChanged = Boolean(initial && connectionDraftKey(effectiveDraft) !== connectionDraftKey(usableDraft(initialDraft)));
   const hasChanges = !initial || connectionChanged || draft.name !== initialDraft.name || draft.description !== initialDraft.description
     || JSON.stringify(draft.disabledTools) !== JSON.stringify(initialDraft.disabledTools);
   const set = <K extends keyof Draft>(key: K, value: Draft[K]) => setDraft(current => ({ ...current, [key]: value }));
@@ -361,9 +372,9 @@ export function McpServerEditor({ initial, target, onSave, onBack, onSaved = onB
           </div></CollapsibleContent>
         </Collapsible>}
       </Section>}
-      <Section title="Variables" description={draft.transport === "stdio" ? "Stored securely." : "Use in headers as ${NAME}."}>
+      {variablesApply(draft) && <Section title="Variables" description={draft.transport === "stdio" ? "Stored securely." : "Use in headers as ${NAME}."}>
         <div><KeyValueFields kind="variable" rows={draft.env} onChange={rows => set("env", rows)} /></div>
-      </Section>
+      </Section>}
       <Collapsible open={importOpen} onOpenChange={setImportOpen}>
         <CollapsibleTrigger asChild><Button variant="ghost" className="text-fg2 px-0"><span>Import a configuration</span>{importOpen ? <ChevronDown aria-hidden="true" /> : <ChevronRight aria-hidden="true" />}</Button></CollapsibleTrigger>
         <CollapsibleContent className="pt-3"><SettingsList>

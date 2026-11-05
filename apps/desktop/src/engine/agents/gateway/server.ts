@@ -195,8 +195,9 @@ export class McpGateway {
    *  HTTPS only; loopback/private addresses rejected (unless allowLoopback). */
   private readonly guardedFetch = (
     input: string | URL | Request,
-    init?: RequestInit,
-    sensitiveHeaders?: readonly string[],
+    init: RequestInit | undefined,
+    sensitiveHeaders: readonly string[],
+    allowLoopback: boolean,
   ): Promise<Response> => {
     if (typeof input !== "string" && !(input instanceof URL)) {
       // Defensive: the SDK passes (url, init), never a Request — but if it ever
@@ -205,10 +206,10 @@ export class McpGateway {
       return safeAuthFetch(
         req.url,
         { method: req.method, headers: req.headers, ...init },
-        { allowLoopback: this.allowLoopback, sensitiveHeaders },
+        { allowLoopback, sensitiveHeaders },
       );
     }
-    return safeAuthFetch(input, init, { allowLoopback: this.allowLoopback, sensitiveHeaders });
+    return safeAuthFetch(input, init, { allowLoopback, sensitiveHeaders });
   };
 
   /** Every backend path (including both sign-in flows) uses the declared
@@ -228,6 +229,7 @@ export class McpGateway {
     // The selected OAuth credential owns Authorization, including before login.
     if (options.authProvider) resourceHeaders.delete("authorization");
     const sensitiveHeaders = [...resourceHeaders.keys()];
+    const allowLoopback = this.allowLoopback || backend.allowLoopback === true;
     const config = {
       ...options,
       // requestInit is also inherited by the SDK's OAuth fetch wrapper. Inject
@@ -249,12 +251,12 @@ export class McpGateway {
           init = { ...init, headers };
         }
         const protectedHeaders = [...new Set([...sensitiveHeaders, ...new Headers(init?.headers).keys()])];
-        const response = await this.guardedFetch(input, { ...init, signal: requestSignal }, protectedHeaders);
+        const response = await this.guardedFetch(input, { ...init, signal: requestSignal }, protectedHeaders, allowLoopback);
         if (response.status !== 401 || !resourceRequest || !backend.authorization) return response;
         await response.body?.cancel();
         const headers = new Headers(originalHeaders);
         new Headers(await backend.authorization(true, requestSignal)).forEach((value, name) => headers.set(name, value));
-        return this.guardedFetch(input, { ...init, headers, signal: requestSignal }, [...headers.keys()]);
+        return this.guardedFetch(input, { ...init, headers, signal: requestSignal }, [...headers.keys()], allowLoopback);
       },
     };
     return backend.transport === "sse"

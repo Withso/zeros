@@ -35,8 +35,8 @@ import { getLoginShellPath } from "../agents/adapters/shared/login-shell-path";
 // before handing the PATH to a script in a DIFFERENT project's worktree.
 import {
   sanitizeProbedPath,
+  SCRUBBED_COMMAND_ENV_NAMES,
   stripLauncherBinFromPath,
-  TOOLCHAIN_ENV_NAMES,
 } from "../env/launcher-env";
 import { randomUUID } from "node:crypto";
 import type { RepoTaskBoundaryFactory } from "../agents/containment/types";
@@ -282,74 +282,9 @@ export async function runInlineScript(
   }
 }
 
-/** Allowlist of environment variables a setup script may see. The engine's
- *  full env carries provider API keys, the GitHub OAuth token, AWS/SSH creds,
- *  etc. A repo-resident script must not be able to read those, so we pass only
- *  these locale/shell basics plus the ZEROS_* context vars added by the caller.
- *
- *  The list is deliberately wider than "shell basics", because a setup script is
- *  almost always a dependency install and the 11-var version made it fail in
- *  ways the Terminal tab never did — the tab inherits the full desktop env:
- *
- *    • proxy + CA vars — behind a corporate proxy or a TLS-inspecting
- *      middlebox, `pnpm install` hung or died on a cert error here while the
- *      same command in the terminal worked,
- *    • XDG_* + toolchain roots — where npm/pnpm/cargo/go keep their config,
- *      caches and package stores. Missing, they silently re-resolved to
- *      defaults, so an install could re-download the world or miss a registry.
- *
- *  Every entry is a path, a locale, or a proxy/CA endpoint — never a token. The
- *  one judgement call is the proxy URLs, which CAN embed `user:password@`: they
- *  are in because without them an ordinary install cannot reach the network at
- *  all, and a proxy credential is a far narrower grant than the secrets this rule exists
- *  for (provider API keys, the GitHub OAuth token, cloud creds, DSNs).
- *
- *  SSH_AUTH_SOCK is deliberately NOT here, though it would make `git+ssh://`
- *  dependencies work. "The script runs as the user and owns ~/.ssh anyway" is
- *  false exactly where it matters: a passphrase-protected key is useless
- *  without the passphrase, and a hardware-backed key (Secure Enclave, YubiKey,
- *  1Password agent) can never be read from disk at all — so forwarding the
- *  socket would hand a branch-supplied script the ability to sign as the user
- *  with keys the user believes are hardware-locked. A failing `git+ssh` install
- *  is a loud, fixable error; that is the better trade. */
-const SETUP_ENV_ALLOWLIST = [
-  // Core shell + locale.
-  "PATH",
-  "HOME",
-  "USER",
-  "LOGNAME",
-  "SHELL",
-  "LANG",
-  "LANGUAGE",
-  "LC_ALL",
-  "LC_CTYPE",
-  "TERM",
-  "TMPDIR",
-  "TZ",
-  // Network reachability: proxies and the CA bundles a TLS-inspecting proxy
-  // needs. Lower-case forms are the ones curl/git actually read.
-  "HTTP_PROXY",
-  "HTTPS_PROXY",
-  "ALL_PROXY",
-  "NO_PROXY",
-  "http_proxy",
-  "https_proxy",
-  "all_proxy",
-  "no_proxy",
-  "NODE_EXTRA_CA_CERTS",
-  "SSL_CERT_FILE",
-  "SSL_CERT_DIR",
-  "CURL_CA_BUNDLE",
-  "REQUESTS_CA_BUNDLE",
-  "GIT_SSL_CAINFO",
-  // Config/cache roots + toolchain locations — the shared list, so a newly
-  // supported version manager lands here and in the remote-shell allowlist at
-  // once instead of only wherever it was first noticed.
-  ...TOOLCHAIN_ENV_NAMES,
-];
-
-/** The scrubbed environment a repository command receives (see the allowlist
- *  below), with the user's login-shell PATH so common tools resolve. */
+/** The scrubbed environment a repository command receives (see
+ *  SCRUBBED_COMMAND_ENV_NAMES), with the user's login-shell PATH so common
+ *  tools resolve. */
 export async function repositoryScriptEnv(
   extra: Record<string, string>,
 ): Promise<Record<string, string>> {
@@ -363,9 +298,11 @@ export async function repositoryScriptEnv(
   return env;
 }
 
+/** A setup script sees only the shared scrubbed command environment plus the
+ *  ZEROS_* context vars its caller adds. */
 function buildSetupEnv(extra: Record<string, string>): Record<string, string> {
   const env: Record<string, string> = {};
-  for (const key of SETUP_ENV_ALLOWLIST) {
+  for (const key of SCRUBBED_COMMAND_ENV_NAMES) {
     const v = process.env[key];
     if (typeof v === "string") env[key] = v;
   }

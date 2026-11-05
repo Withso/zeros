@@ -207,6 +207,7 @@ import { createRepoTaskBoundaryFactory } from "./agents/containment/repo-task-bo
 import type { ExecutionBoundary } from "./agents/containment/types";
 import { buildPtyEnv } from "./pty/shell-setup";
 import { resolveMcpServers, resolveMcpServersForRepo, type GatewayBackend } from "./agents/mcp-registry";
+import { McpServerStartError } from "./agents/mcp-registration";
 import {
   CONFIG_ROOT_ENV_VARS,
   stripEngineAuthorityEnv,
@@ -2203,7 +2204,7 @@ export class ZerosEngine {
         const saved = vault.readEntry(server.credentialKey)?.env;
         for (const [name, alias] of Object.entries(server.envFromEnv ?? {})) {
           const value = saved?.[name];
-          if (value === undefined) throw new Error(`The saved variable ${name} for MCP server ${server.name} is unavailable. Edit the server to restore it.`);
+          if (value === undefined) throw new McpServerStartError(`The saved variable ${name} is unavailable. Edit the server to enter it again.`);
           env[alias] = value;
         }
       }

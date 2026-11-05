@@ -35,6 +35,22 @@ describe("launched loopback MCP lifecycle", () => {
     await expect(launcher.ensureRunning()).rejects.toThrow("closed");
   });
 
+  it("does not hand the worker's own environment to a launched server", async () => {
+    const { root, server, port, url } = await fixture();
+    await close(server);
+    const marker = join(root, "env.json");
+    process.env.ZEROS_FIXTURE_WORKER_SECRET = "worker-secret";
+    cleanups.push(async () => { delete process.env.ZEROS_FIXTURE_WORKER_SECRET; });
+    const launcher = new McpHttpLauncher({ command: process.execPath, args: ["-e",
+      `require('node:fs').writeFileSync(process.argv[1], JSON.stringify(process.env)); require('node:net').createServer(s=>s.end()).listen(${port},'127.0.0.1');`,
+      marker], env: { MCP_VALUE: "fixture-value" }, listenUrl: url, workspaceRoot: root });
+    cleanups.push(() => launcher.dispose());
+    await launcher.ensureRunning();
+    const env = JSON.parse(await readFile(marker, "utf8")) as Record<string, string>;
+    expect(env).toMatchObject({ MCP_VALUE: "fixture-value", PATH: process.env.PATH });
+    expect(env).not.toHaveProperty("ZEROS_FIXTURE_WORKER_SECRET");
+  });
+
   it("refuses an occupied endpoint before executing a command", async () => {
     const { root, server, url } = await fixture();
     cleanups.push(() => close(server));

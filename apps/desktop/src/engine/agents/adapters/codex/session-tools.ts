@@ -1,9 +1,26 @@
 import type { ListMcpServerStatusResponse } from "./generated/v2/ListMcpServerStatusResponse";
 import type { McpServerOauthLoginResponse } from "./generated/v2/McpServerOauthLoginResponse";
-import type { SessionToolsSnapshot } from "@zeros/protocol/agent-extensions";
+import type { SessionToolInventoryEntry, SessionToolsSnapshot } from "@zeros/protocol/agent-extensions";
 import { normalizeExternalHttpUrl } from "@zeros/protocol/external-url";
 import { redactLogSecrets } from "@zeros/protocol/scrub";
 import type { CodexAppServerHandle } from "./app-server";
+import type { CodexMcpServerSet } from "./mcp-overrides";
+
+export type CodexMcpNames = Pick<CodexMcpServerSet, "labels" | "unavailable">;
+
+/** Codex's MCP rows under each server's own name, then the servers this chat
+ * could not give Codex. */
+export function withCodexMcpNames<E extends SessionToolsSnapshot["entries"][number] | SessionToolInventoryEntry>(
+  entries: readonly E[],
+  names: CodexMcpNames,
+): E[] {
+  const listed = entries.map((entry) => {
+    const label = names.labels.get(entry.id);
+    return label ? { ...entry, name: label.slice(0, 512) } : entry;
+  });
+  const unavailable = names.unavailable.map(({ id, name, detail }) => ({ id, name, status: "error", detail }) as E);
+  return [...listed, ...unavailable].slice(0, 1000);
+}
 
 /** Read the admitted thread, never the account's global configuration. App
  * tools are already grouped by Codex under the single codex_apps server. */

@@ -310,8 +310,8 @@ function ToolStatus({
       </Button>
     );
   return (
-    <Tooltip label={label}>
-      <span role="img" aria-label={label} className="shrink-0">
+    <Tooltip label={entry.detail ?? label}>
+      <span role="img" aria-label={entry.detail ? `${label}: ${entry.detail}` : label} className="shrink-0">
         <X className="text-red-primary size-3.5" />
       </span>
     </Tooltip>

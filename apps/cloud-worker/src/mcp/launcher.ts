@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { getDefaultEnvironment } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { createConnection } from "node:net";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
@@ -99,7 +100,8 @@ export class McpHttpLauncher {
       signal.throwIfAborted();
       const child = spawn(this.options.command, this.options.args ?? [], {
         cwd: resolveMcpCwd(this.options.cwd, this.options.workspaceRoot, this.options.homeDirectory),
-        env: { ...process.env, ...this.options.env }, shell: false, detached: process.platform !== "win32", stdio: "ignore",
+        // The same base a direct stdio server gets, not the worker's own env.
+        env: { ...getDefaultEnvironment(), ...this.options.env }, shell: false, detached: process.platform !== "win32", stdio: "ignore",
       });
       this.child = child;
       let exited = false;
