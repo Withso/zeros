@@ -79,7 +79,8 @@ import { useActiveWorkspace } from "../../state/use-active-workspace";
 import { isLocalMainWorkspace } from "../../state/local-main-workspace";
 import { useWorkspaceReviewStatus } from "../../features/code-review/use-workspace-review-status";
 import { statusForGeneration } from "../git-status-reads";
-import { fileStatusesForFolder, FILE_STATUS_PRESENTATION } from "./tabs/file-status";
+import { fileStatusesForFolder } from "./tabs/file-status";
+import { TabFileMarks } from "./tab-file-marks";
 import type { FileChangeStatus } from "../../platform/git";
 import { markWorkbenchEditorClosing, useWorkbenchDirtyEditorIds } from "./tabs/code-editor/editor-state";
 
@@ -268,7 +269,6 @@ function TabPill({
   const meta = TAB_TYPE_META[tab.type];
   const Icon = meta.icon;
   const showLabel = tabShowsLabel(tab);
-  const statusPresentation = fileStatus ? FILE_STATUS_PRESENTATION[fileStatus] : undefined;
   // A File tab wears its file's own colored type glyph (same sprite as the tree
   // and the viewer breadcrumb); everything else keeps its type's lucide glyph.
   const iconPath = workbenchTabIconPath(tab);
@@ -330,7 +330,8 @@ function TabPill({
         WORKBENCH_TAB_PILL_BASE_CLS,
         // Labelled tabs fit their content up to a 180px cap (then
         // truncate); icon-only (empty) pills get a tighter square footprint.
-        showLabel ? "max-w-[180px] gap-1.5 px-2.5" : "px-2",
+        // The chat tab's 8px sides and gap; the label caps at 180px.
+        showLabel ? "max-w-[180px] gap-2 px-2" : "px-2",
         browserWorking ? "pr-7" : "",
         active
           ? WORKBENCH_TAB_PILL_ACTIVE_CLS
@@ -338,6 +339,9 @@ function TabPill({
       ].join(" ")}
     >
       {tab.type === "terminal" && <CloudTerminalIndicator folder={folderKey} />}
+      {/* One 14px glyph slot, so a running terminal's stream never shifts
+          the label. */}
+      <span className="inline-flex size-3.5 shrink-0 items-center justify-center">
       {tab.type === "terminal" ? (
         terminalIndicator?.running ? (
           <RunStream
@@ -367,11 +371,12 @@ function TabPill({
       ) : (
         <Icon className="size-3.5 shrink-0" />
       )}
+      </span>
       {showLabel && (
+        // The name keeps the tab colour; only the status letter is tinted.
         <span
           className={[
             "truncate",
-            statusPresentation?.className ?? "",
             browserWorking ? "zeros-browser-tab-working" : "",
           ].join(" ")}
         >
@@ -381,14 +386,7 @@ function TabPill({
           )}
         </span>
       )}
-      {statusPresentation && (
-        <span title={statusPresentation.label} className={cn("text-2xxs shrink-0 font-medium", statusPresentation.className)}>
-          {statusPresentation.letter}
-        </span>
-      )}
-      {dirty && (
-        <span aria-label="Unsaved changes" title="Unsaved changes" className="bg-fg3 size-1.5 shrink-0 rounded-full" />
-      )}
+      <TabFileMarks fileStatus={fileStatus} dirty={dirty} />
       {terminalIndicator?.dot && (
         <span
           aria-hidden
@@ -405,7 +403,7 @@ function TabPill({
       {badge > 0 && (
         // Bare count — no chip bg (saves space); the pill's gap spaces it.
         // Bare-count treatment (no chip) keeps the pill compact.
-        <span className="text-fg2 text-2xxs tabular-nums">{badge}</span>
+        <span className="text-fg2 text-3xxs leading-4 tabular-nums">{badge}</span>
       )}
       {browserWorking ? (
         <div className="from-bg2 pointer-events-none absolute inset-y-0 right-0 flex w-9 items-center justify-end bg-gradient-to-l from-55% to-transparent pr-1.5 pl-3">
@@ -431,7 +429,7 @@ function TabPill({
         // Pure overlay (absolute) → no flex-width change on hover, no layout
         // shift. focus-within keeps it visible for keyboard users. Reveal keys
         // off the strip-driven data-hovered, not :hover (sticky-strip rule).
-        <div className="from-bg2 pointer-events-none absolute inset-y-0 right-0 flex w-10 items-center justify-end bg-gradient-to-l from-50% to-transparent pr-1.5 pl-4 opacity-0 transition-none group-data-[hovered=true]/tab:opacity-100 focus-within:opacity-100">
+        <div className="from-bg2 pointer-events-none absolute inset-y-0 right-0 flex w-10 items-center justify-end bg-gradient-to-l from-50% to-transparent pr-1 pl-4 opacity-0 transition-none group-data-[hovered=true]/tab:opacity-100 focus-within:opacity-100">
           <IconButton
             type="button"
             onClick={(e) => {

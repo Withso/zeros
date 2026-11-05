@@ -6,6 +6,7 @@ import React, {
   useMemo,
   useState,
 } from "react";
+import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import { Folder } from "lucide-react";
 import { useActiveWorkspace } from "../../state/use-active-workspace";
 import { useWorkspaceStore } from "../../state/workspace-store";
@@ -14,13 +15,7 @@ import { workspaceLabel } from "../workspace-tabs";
 import { cn } from "../../shared/ui/cn";
 import { MENU_SURFACE_RADIUS } from "../../shared/ui/menu-surface";
 import { resolvePopoverBoundary } from "../../shared/ui/popover-boundary";
-import {
-  Button,
-  Popover,
-  PopoverContent,
-  PopoverTrigger,
-  Tooltip,
-} from "../../shared/ui/primitives";
+import { Popover, PopoverContent, PopoverTrigger, Tooltip } from "../../shared/ui/primitives";
 import { prefetchSettingsForRepo } from "../../features/settings/use-settings";
 import { SummaryContents } from "./summary-contents";
 import { summaryHasSplitColumns } from "./summary-model";
@@ -169,11 +164,10 @@ export function ConversationSummaryTrigger() {
   const state = useContext(SummaryContext);
   if (!state) return null;
   const button = (
-    <Button
-      variant="ghost"
-      size="icon-sm"
+    <IconButton
+      size="standard"
       className="text-fg2 shrink-0 [&_svg]:size-4"
-      aria-label="Summary"
+      label="Summary"
       aria-expanded={state.open}
       aria-controls={state.docked ? state.islandId : undefined}
       onClick={state.docked ? () => state.setOpen(!state.open) : undefined}
@@ -181,7 +175,7 @@ export function ConversationSummaryTrigger() {
       onFocus={!state.open ? state.warm : undefined}
     >
       <SummaryIcon />
-    </Button>
+    </IconButton>
   );
   return (
     <span ref={state.setAnchor} className="contents">
@@ -205,7 +199,7 @@ export function ConversationSummaryTrigger() {
             aria-label="Workspace summary"
             align="end"
             side="bottom"
-            sideOffset={12}
+            sideOffset={6}
             collisionBoundary={state.boundary}
             collisionPadding={{ top: 8, right: 16, bottom: 8, left: 8 }}
             padding="none"

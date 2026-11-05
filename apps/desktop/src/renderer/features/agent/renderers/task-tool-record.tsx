@@ -7,7 +7,7 @@
 import { memo } from "react";
 import { SquareCheckBig } from "lucide-react";
 
-import { Card, CardContent } from "@/renderer/shared/ui/primitives/card";
+import { DETAIL_BODY_CLS } from "./tool-detail-surface";
 
 import type { AgentToolMessage } from "../use-agent-session";
 import { EventRow, type EventMeta } from "./event-row";
@@ -76,18 +76,16 @@ export const TaskToolRecord: Renderer<AgentToolMessage> = memo(
         ctx={ctx}
         meta={meta}
         detail={
-          <Card>
-            <CardContent className="flex flex-col gap-2 p-3 text-sm">
-              {subject ? (
-                <strong className="text-fg1 font-medium">{subject}</strong>
-              ) : null}
-              {description ? (
-                <span className="text-fg2 break-words">{description}</span>
-              ) : null}
-              {status ? <InfoRow label="Status" value={status} /> : null}
-              <InfoRow label="Task ID" value={taskId ?? "Unknown"} mono />
-            </CardContent>
-          </Card>
+          <div className={DETAIL_BODY_CLS}>
+            {subject ? (
+              <strong className="text-fg1 font-medium">{subject}</strong>
+            ) : null}
+            {description ? (
+              <span className="text-fg2 break-words">{description}</span>
+            ) : null}
+            {status ? <InfoRow label="Status" value={status} /> : null}
+            <InfoRow label="Task ID" value={taskId ?? "Unknown"} mono />
+          </div>
         }
       />
     );

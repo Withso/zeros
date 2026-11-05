@@ -23,9 +23,9 @@ export function AuthenticationNotice({
 }) {
   if (resolved || historical) {
     const Icon = resolved ? Check : LogIn;
-    return <Badge variant="neutral" role="status" className="h-7 w-fit gap-2"
+    return <Badge variant="neutral" role="status" className="w-fit"
       data-authentication-status={resolved ? "signed-in" : "required"}>
-      <Icon className="size-3.5" aria-hidden="true" />
+      <Icon aria-hidden="true" />
       {resolved ? "Signed in" : "Sign-in required"}
     </Badge>;
   }
@@ -40,7 +40,7 @@ export function AuthenticationNotice({
         onClick={cloud ? () => onSignIn(cloud.provider) : () => onSignIn()}
         className={cn(AGENT_NOTICE_ACTION, "mt-1")}
       >
-        <LogIn className="size-4" aria-hidden="true" />
+        <LogIn className="size-3.5" aria-hidden="true" />
         {cloud ? "Reconnect provider account" : "Sign in"}
       </Button>
     </AgentNotice>

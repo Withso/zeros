@@ -1,4 +1,5 @@
 import { LocalLinksProvider } from "./local-links/provider";
+import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import { AGENT_NOTICE_ACTION, AgentNotice } from "./agent-notice";
 import { getFollowUpBehavior, type FollowUpBehavior } from "../settings/follow-up-behavior";
 import { notifyAgentSendFailure } from "./agent-send-failure-toast";
@@ -108,7 +109,9 @@ import { isSubmittedComposerDocument } from "./composer-submission";
 import { useCloudWorkspaceAccountAccess } from "../team/cloud-workspace-account-access";
 import {
   COMPOSER_FILE_ACCEPT,
+  COMPOSER_SURFACE_CLS,
   COMPOSER_SURFACE_RADIUS,
+  TRANSCRIPT_STATUS_ROW_CLS,
 } from "./composer-shell";
 import { ComposerAttachmentMenu } from "./composer-attachment-menu";
 import { ComposerDesignTag } from "./composer-design-tag";
@@ -4242,15 +4245,14 @@ function AgentChatBody({
       {headerActions === undefined && (
         <header className="border-border1 flex h-11 shrink-0 items-center gap-2 border-b px-3">
           <Tooltip label="Back to agents">
-            <Button
-              variant="ghost"
-              size="icon-sm"
+            <IconButton
+              size="standard"
               type="button"
               onClick={onBack}
-              aria-label="Back to agents"
+              label="Back to agents"
             >
               <ArrowLeft className="size-3.5" />
-            </Button>
+            </IconButton>
           </Tooltip>
           <Bot className="text-fg2 size-4 shrink-0" />
           <div className="flex min-w-0 flex-1 items-baseline gap-2">
@@ -4278,7 +4280,9 @@ function AgentChatBody({
         <Conversation
           ref={setScrollContainer}
           data-agent-diff-collision-boundary=""
-          className="zeros-agent-body zeros-agent-scrollbar min-h-0 flex-1 overflow-x-hidden overflow-y-auto bg-transparent"
+          // `isolate` keeps everything layered inside the transcript (code
+          // gutters, copy buttons) under the top fade, the rail and the pill.
+          className="zeros-agent-body zeros-agent-scrollbar isolate min-h-0 flex-1 overflow-x-hidden overflow-y-auto bg-transparent"
           style={{ position: "relative" }}
         >
           <ConversationContent
@@ -4291,7 +4295,7 @@ function AgentChatBody({
             {/* Older history auto-pages in via the nearTop effect above, with
               no visible affordance: scrolling back should show everything. */}
             {transcriptLoadingVisible && (
-              <div className="text-muted-fg flex items-center gap-2 py-2 text-xs">
+              <div className={TRANSCRIPT_STATUS_ROW_CLS}>
                 <ZerosSpinner
                   size={14}
                   label="Loading conversation"
@@ -4300,15 +4304,19 @@ function AgentChatBody({
                 <span aria-hidden="true">Loading conversation…</span>
               </div>
             )}
+            {/* Waiting reads exactly like loading, so the hand-off never jumps. */}
             {transcriptHistoryStatus === "waiting" && (
-              <div role="status" aria-label="Waiting for conversation" className="text-fg3 py-2 text-xs">
+              <div role="status" aria-label="Waiting for conversation" className={TRANSCRIPT_STATUS_ROW_CLS}>
+                <span aria-hidden="true" className="inline-flex shrink-0">
+                  <ZerosSpinner size={14} label="Waiting" />
+                </span>
                 Loading conversation…
               </div>
             )}
             {transcriptHistoryStatus === "unavailable" && (
-              <div role="status" aria-label="Chat history unavailable" className="text-fg3 flex items-center gap-2 py-2 text-xs">
+              <div role="status" aria-label="Chat history unavailable" className={TRANSCRIPT_STATUS_ROW_CLS}>
                 <span>Chat history isn’t available yet.</span>
-                <Button variant="ghost" size="sm" onClick={() => { void session.hydrateChat().catch(() => {}); }}>
+                <Button variant="ghost" size="compact" onClick={() => { void session.hydrateChat().catch(() => {}); }}>
                   Retry
                 </Button>
               </div>
@@ -4318,7 +4326,7 @@ function AgentChatBody({
             {readOnly &&
               session.transcriptState === "resident" &&
               session.messages.length === 0 && (
-                <p className="text-fg2 text-sm">No chat history.</p>
+                <p className={TRANSCRIPT_STATUS_ROW_CLS}>No chat history.</p>
               )}
             {!readOnly &&
               emptyStateReady &&
@@ -4429,17 +4437,22 @@ function AgentChatBody({
               />
             )}
           </ConversationContent>
-          <JumpToPromptPill scrollEl={scrollEl} promptEl={activePromptEl} />
         </Conversation>
+        {/* Outside the scroller, so it stays put while the transcript scrolls,
+            and on the 856px column's right edge rather than the pane's. */}
+        <div className="pointer-events-none absolute inset-x-0 top-3 z-2 mx-auto flex w-full max-w-[856px] justify-end px-7">
+          <JumpToPromptPill scrollEl={scrollEl} promptEl={activePromptEl} />
+        </div>
         {/* Stable top fade under the chat strip, present from the first paint so a
             restore never pops it in; it never takes clicks. */}
         <div
           aria-hidden="true"
-          // h-6 (24px) keeps it subtle — about one line. The via stop feathers
-          // the lower edge so it dissolves without a visible seam.
-          className="pointer-events-none absolute inset-x-0 top-0 z-[6] h-6 bg-gradient-to-b from-(--pane-bg) via-(--pane-bg)/40 to-transparent"
+          // h-3 (12px) ends where the transcript column starts (pt-3), so the
+          // first prompt never sits under the wash while scrolled content
+          // still fades under the strip. The via stop feathers the edge.
+          className="pointer-events-none absolute inset-x-0 top-0 z-1 h-3 bg-gradient-to-b from-(--pane-bg) via-(--pane-bg)/40 to-transparent"
         />
-        {/* A sibling of the scroller so the rail stays pinned; z-[8] paints above
+        {/* A sibling of the scroller so the rail stays pinned; z-2 paints above
             the top mask. */}
         <CheckpointRail
           active={surfaceActive}
@@ -4461,7 +4474,9 @@ function AgentChatBody({
         />
         {/* max-w-[856px] stays in lock-step with the transcript band above. */}
         {readOnly ? composerReplacement : (
-        <div className="mx-auto box-border flex w-full max-w-[856px] min-w-0 shrink-0 flex-col gap-0.5 border-t-0 bg-transparent px-7 pt-0 pb-4">
+        <div className="mx-auto box-border flex w-full max-w-[856px] min-w-0 shrink-0 flex-col gap-2 border-t-0 bg-transparent px-7 pt-0 pb-4">
+          {/* Docked cards and the composer stand 8px apart; queued messages
+              are a card of their own rather than tucked under the composer. */}
           {/* Embedded-terminal command (Claude /mcp, /login, …): a banner →
             inline ephemeral PTY mounted directly above the composer. Only
             present while a terminal command is active; requires a cwd. */}
@@ -4554,11 +4569,13 @@ function AgentChatBody({
             <div
               ref={composerCardRef}
               className={cn(
-                "border-border1 bg-bg2 focus-within:border-border2 relative flex w-full min-w-0 flex-col border px-3.5 py-3 shadow-xs transition-[border-color,background,box-shadow] duration-150 ease-out",
+                "relative flex w-full min-w-0 flex-col border px-3.5 py-3 transition-[border-color,background,box-shadow] duration-150 ease-out",
+                // sidebar-bg + border2, shared with Create, user messages and
+                // the cards docked above; focusing or typing changes nothing.
+                COMPOSER_SURFACE_CLS,
                 COMPOSER_SURFACE_RADIUS,
-                // Drag border: subtle (border2), not near-white --highlighted-bright; `!`
-                // beats the higher-specificity focus-within:border-border2 so the drag
-                // state looks identical whether or not the composer is focused.
+                // Drag: the same border2 edge, dashed, with a soft ring; `!`
+                // keeps it identical whether or not the composer is focused.
                 dragActive &&
                   "!border-border2 ring-highlighted-bright/30 border-dashed ring-2",
                 // Guarded modes (Claude Plan / Codex Ask / Cursor Ask): hide the
@@ -4615,16 +4632,19 @@ function AgentChatBody({
                   QUEUED message (see startQueuedEdit). Cancel restores the
                   stashed draft; Enter / the tick below saves back onto the
                   queue entry. */}
+                  {/* A 32px row whose text sits on the editor's 14px column. */}
                   {editingQueuedId && (
-                    <div className="bg-bg2-hover/60 text-fg1 mb-1 flex items-center justify-between gap-2 rounded-md px-3 py-2 text-sm">
+                    <div className="bg-sidebar-bg-hover text-fg1 -mx-2 mb-1 flex min-h-8 items-center justify-between gap-2 rounded-lg pr-1 pl-2 text-xs leading-4.5">
                       <span>Editing queued message</span>
-                      <button
+                      <Button
                         type="button"
+                        variant="ghost"
+                        size="compact"
                         onClick={() => exitQueuedEdit()}
-                        className="text-fg2 hover:text-fg1 shrink-0 transition-colors"
+                        className="shrink-0"
                       >
                         Cancel
-                      </button>
+                      </Button>
                     </div>
                   )}
                   {/* `/add-dir` context pills — extra directories Claude can access
@@ -4646,7 +4666,8 @@ function AgentChatBody({
                     data-permission-feedback-boundary=""
                     className="min-w-0 flex-nowrap gap-1.5 pt-1 pr-0 pb-1 pl-0"
                   >
-                    <PromptInputTools className="min-w-0 flex-nowrap gap-0.5">
+                    {/* Every control is 28px, 4px apart. */}
+                    <PromptInputTools className="min-w-0 flex-nowrap gap-1">
                       {/* The locally stateful menu opens without re-rendering
                       AgentChat. Modal/file actions remain deferred past Radix
                       focus restoration inside the island. */}
@@ -4677,7 +4698,7 @@ function AgentChatBody({
                     </PromptInputTools>
                     <div
                       data-composer-toolbar-actions=""
-                      className="flex shrink-0 items-center gap-1.5"
+                      className="flex shrink-0 items-center gap-1"
                     >
                       {/* Always present: an empty ring before the first turn, and a disabled ring
                           for Cursor, whose SDK reports no context fill. */}
@@ -4743,7 +4764,8 @@ function AgentChatBody({
                                 ? !queuedEditHasContent
                                 : !canSend
                         }
-                        className="disabled:bg-bg2-hover disabled:text-fg2 aria-disabled:bg-bg2-hover aria-disabled:text-fg2 size-8 disabled:opacity-100"
+                        // 28px like every toolbar control; Send is the only circle.
+                        className="disabled:bg-bg2-hover disabled:text-fg2 aria-disabled:bg-bg2-hover aria-disabled:text-fg2 size-7 disabled:opacity-100"
                       >
                         {composerStreaming ? (
                           <Square className="size-3" />

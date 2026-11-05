@@ -251,8 +251,11 @@ describe("canonical permission-card variants", () => {
       }),
     );
 
-    expect(html).toContain("border-border1 bg-bg2");
-    expect(html).toContain("border-border3 bg-bg1");
+    // The dock card surface; context items sit in bg1 wells with border1.
+    expect(html).toContain("border-border2 bg-sidebar-bg");
+    expect(html).toContain("border-border1 bg-bg1");
+    // Options are plain rows with 18px keycaps, not bordered buttons.
+    expect(html).not.toContain("border-border3");
     expect(html).toContain("Workflow approval");
     expect(html).toContain("Find · 8 agents");
     expect(html).toContain("Run once");

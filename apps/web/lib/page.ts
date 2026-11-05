@@ -18,10 +18,14 @@ export function html(body: string, status = 200): Response {
 export function shell(
   title: string,
   inner: string,
-  options: { presentation?: "compact" | "hero" } = {},
+  // "hero" pages (GitHub handoff) share the one centred scale; kept for callers.
+  _options: { presentation?: "compact" | "hero" } = {},
 ): string {
-  const cardClass =
-    options.presentation === "hero" ? "card card-hero" : "card";
+  // Every centred page carries the 32px mark above its title, except pages
+  // that place their own (the GitHub handoff's hero-logo).
+  const mark = inner.includes('class="hero-logo"')
+    ? ""
+    : '<img class="hero-logo" src="/zeros-logo.svg" alt="" />';
   return `<!doctype html>
 <html lang="en">
   <head>
@@ -30,48 +34,73 @@ export function shell(
     <meta name="robots" content="noindex" />
     <title>${title}</title>
     <style>
-      :root { color-scheme: dark; }
+      /* The app's tokens (styles/zeros-tokens.css), so Light works too. */
+      :root {
+        color-scheme: dark;
+        --bg1: hsl(0 0% 7.843%); --fg1: hsl(0 0% 94%); --fg2: hsl(0 0% 72%);
+        --fg3: hsl(0 0% 63%); --border3: hsl(0 0% 26.667%); --bg2-highlight: hsl(0 0% 18%);
+        --primary-bg: hsl(0 0% 92%); --primary-fg: hsl(0 0% 5%); --primary-hover: hsl(0 0% 83%);
+        --red-fg: hsl(2.05 100% 82.745%);
+      }
+      @media (prefers-color-scheme: light) {
+        :root {
+          color-scheme: light;
+          --bg1: hsl(0 0% 100%); --fg1: hsl(30 10% 15.686%); --fg2: hsl(30 5.195% 30.196%);
+          --fg3: hsl(30 4.396% 35.686%); --border3: hsl(33.33 8.108% 78.235%); --bg2-highlight: hsl(36 7.937% 87.647%);
+          --primary-bg: hsl(30 10% 15.686%); --primary-fg: hsl(0 0% 100%); --primary-hover: hsl(30 7.937% 24.706%);
+          --red-fg: hsl(358.21 63.81% 41.176%);
+        }
+      }
       body {
-        font: 14px -apple-system, system-ui, sans-serif;
-        background: #0c0c0d; color: #e6e6e6;
+        font: 13px/18px -apple-system, system-ui, sans-serif;
+        background: var(--bg1); color: var(--fg1);
         display: flex; min-height: 100vh; margin: 0;
         align-items: center; justify-content: center;
       }
-      .card { width: 100%; max-width: 320px; padding: 0 1.5rem; text-align: center; }
-      .card-hero { max-width: 540px; }
+      /* The Zeros logo top-left: a 16px mark, 12px from the wordmark. */
+      .brand {
+        position: fixed; top: 16px; left: 16px;
+        display: inline-flex; align-items: center; gap: 12px;
+        color: var(--fg1); font-weight: 600; text-decoration: none;
+      }
+      .brand img { width: 16px; height: 16px; }
+      .card { width: 100%; max-width: 560px; padding: 0 1.5rem; text-align: center; box-sizing: border-box; }
+      /* A 32px mark centred over the title, with no container. */
       .hero-logo {
-        width: 56px; height: 56px; box-sizing: border-box;
-        margin-bottom: 2rem; padding: 10px; border-radius: 14px;
-        background: #18181b; border: 1px solid #3f3f46;
+        display: block; width: 32px; height: 32px; margin: 0 auto 16px;
+        padding: 0; border: 0; border-radius: 0; background: none;
       }
-      .hero-title {
-        color: #f4f4f5; font-size: 32px; line-height: 1.2;
-        font-weight: 600; letter-spacing: -0.02em; margin-bottom: 0.75rem;
-      }
-      .hero-sub {
-        max-width: 440px; margin: 0 auto 2rem; color: #a1a1aa;
-        font-size: 16px; line-height: 1.5;
-      }
-      .card-hero .btn { min-height: 48px; font-size: 16px; }
       [hidden] { display: none !important; }
-      .title { font-weight: 600; color: #f4f4f5; margin-bottom: 0.35rem; }
-      .sub { color: #a1a1aa; font-size: 13px; line-height: 1.5; margin-bottom: 1.5rem; }
+      .title, .hero-title {
+        color: var(--fg1); font-size: 18px; line-height: 24px;
+        font-weight: 600; letter-spacing: 0; margin: 0 0 4px;
+      }
+      /* One line, up to 560px, wrapping only when it is longer. */
+      .sub, .hero-sub {
+        max-width: 560px; margin: 0 auto 20px; color: var(--fg2);
+        font-size: 13px; line-height: 18px;
+      }
+      /* Fit-width 28px actions that never underline. */
       a.btn, button.btn {
-        display: flex; align-items: center; justify-content: center;
-        width: 100%; box-sizing: border-box;
-        margin-top: 0.6rem; padding: 0.6rem 1rem;
-        color: #0c0c0d; font: inherit; font-weight: 600; cursor: pointer;
-        text-decoration: none; background: #ffffff;
-        border: 1px solid #ffffff; border-radius: 8px;
+        display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+        height: 28px; box-sizing: border-box; margin: 4px;
+        padding: 0 12px; color: var(--primary-fg); font: inherit; font-weight: 500;
+        cursor: pointer; text-decoration: none; white-space: nowrap;
+        background: var(--primary-bg); border: 1px solid var(--primary-bg); border-radius: 6px;
       }
-      a.btn:hover, button.btn:hover { background: #e6e6e6; }
+      a.btn:hover, button.btn:hover { background: var(--primary-hover); border-color: var(--primary-hover); }
       a.btn.secondary, button.btn.secondary {
-        background: transparent; color: #e6e6e6; border-color: #3f3f46;
+        background: transparent; color: var(--fg1); border-color: var(--border3);
       }
-      a.btn.secondary:hover, button.btn.secondary:hover { background: #18181b; }
-      .msg { color: #a1a1aa; font-size: 13px; margin-top: 0.75rem; }
+      a.btn.secondary:hover, button.btn.secondary:hover { background: var(--bg2-highlight); }
+      a { color: var(--fg1); text-decoration: none; }
+      .msg { color: var(--fg3); font-size: 12px; line-height: 16px; margin-top: 12px; }
+      .msg.error, .error { color: var(--red-fg); }
     </style>
   </head>
-  <body><div class="${cardClass}">${inner}</div></body>
+  <body>
+    <a class="brand" href="/"><img src="/zeros-logo.svg" alt="" />Zeros</a>
+    <div class="card">${mark}${inner}</div>
+  </body>
 </html>`;
 }

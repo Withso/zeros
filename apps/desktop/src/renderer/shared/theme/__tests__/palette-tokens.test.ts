@@ -112,9 +112,17 @@ const FORMER_WARM_DARK = {
  *               the tier consolidation).
  *    muted-fg — L42, the owner-chosen supplemental tier: a 3:1 floor at rest,
  *               below AA by design; hovered/selected rows step up to fg3.
- *               styles/policy/contrast-contract.json owns the thresholds. */
+ *               styles/policy/contrast-contract.json owns the thresholds.
+ *    bg1, sidebar-bg, border3, border4, highlighted-bright — the Zeros Design
+ *               palette: #141414 and #181818 surfaces, #444444 / #575757
+ *               control outlines and a #CACACA focus colour. */
 const NEUTRAL_DARK_LIGHTNESS_OVERRIDES: Record<string, number> = {
+  bg1: 7.843,
   bg2: 13,
+  "sidebar-bg": 9.412,
+  border3: 26.667,
+  border4: 34.118,
+  "highlighted-bright": 79.216,
   fg1: 94,
   fg2: 72,
   fg3: 63,
@@ -150,7 +158,15 @@ describe("dark structural palettes", () => {
 
   it("propagates the adjusted canvases through shared aliases", () => {
     expect(neutral).toMatch(/--pane-bg:\s*var\(--bg1\)/);
-    expect(neutral).toMatch(/--bg3:\s*var\(--sidebar-bg\)/);
+  });
+
+  it("lifts floating surfaces one step above the sidebar", () => {
+    // Menus and popovers have their own fill (#1C1C1C, hover #2A2A2A) so they
+    // read as floating over the sidebar they often open from.
+    const sidebar = tokenTriple(neutral, "sidebar-bg")[2];
+    const floating = tokenTriple(neutral, "bg3")[2];
+    expect(floating).toBeGreaterThan(sidebar);
+    expect(tokenTriple(neutral, "bg3-hover")[2]).toBeGreaterThan(floating);
   });
 
   it("aliases the user-message surface to bg2 in neutral Dark only", () => {
@@ -219,14 +235,14 @@ describe("foreground tier ladder", () => {
    *  FORMER_WARM_DARK + NEUTRAL_DARK_LIGHTNESS_OVERRIDES), so a "quick
    *  contrast tweak" to either palette is a reviewed edit.
    *
-   *  fg1–fg3 clear AA; muted-fg is neutral grey in both themes with a reviewed
-   *  supplemental 3:1 floor. Thresholds live in the contrast contract.
+   *  fg1–fg3 clear AA; muted-fg keeps a reviewed supplemental 3:1 floor. Light
+   *  shares one warm tint (OKLCH hue 70) across its neutrals. Thresholds live in the contrast contract.
    *  Lightness RISES as the tiers get quieter because Light inverts the axis. */
   const LIGHT_FOREGROUND_TIERS: Record<string, [number, number, number]> = {
-    fg1: [20, 7, 16],
-    fg2: [20, 4, 30.5],
-    fg3: [20, 4, 36],
-    "muted-fg": [0, 0, 42],
+    fg1: [30, 10, 15.686],
+    fg2: [30, 5.195, 30.196],
+    fg3: [30, 4.396, 35.686],
+    "muted-fg": [40, 2.83, 41.569],
   };
 
   it("pins the light foreground tiers against unreviewed drift", () => {
@@ -273,10 +289,10 @@ describe("control outline palette", () => {
   it("pins the reviewed rest and hover outlines in both themes", () => {
     const dark = extractBlock(":root");
     const light = extractBlock('[data-theme="light"]');
-    expect(tokenTriple(dark, "border3")).toEqual([0, 0, 24]);
-    expect(tokenTriple(dark, "border4")).toEqual([0, 0, 30]);
-    expect(tokenTriple(light, "border3")).toEqual([60, 3, 78]);
-    expect(tokenTriple(light, "border4")).toEqual([60, 3, 72]);
+    expect(tokenTriple(dark, "border3")).toEqual([0, 0, 26.667]);
+    expect(tokenTriple(dark, "border4")).toEqual([0, 0, 34.118]);
+    expect(tokenTriple(light, "border3")).toEqual([33.33, 8.108, 78.235]);
+    expect(tokenTriple(light, "border4")).toEqual([36, 7.042, 72.157]);
   });
 });
 

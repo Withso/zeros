@@ -1,0 +1,9 @@
+{
+  "id": "ui-direction-single-owner",
+  "kind": "replay",
+  "area": "renderer-ui",
+  "fixedBy": "5059d93e0437d6c457a029b39574c8ab05d9478a",
+  "symptom": "A new visual direction (12px floating surfaces, solid tooltips, neutral reference pills, one badge size) needed every caller found by hand: callers reshaped Badge heights, pinned a blue workspace chip and recreated menu rows, and tests pinned the old look at call sites.",
+  "rule": "A direction lands once at its owner (token, primitive or shared pattern) with a test there, callers compose without restyling, and the superseded variant retires (docs/design-system.md §0, 'How the direction changes'; playbooks/ui-design.md step 8).",
+  "check": "pnpm exec vitest run apps/desktop/src/renderer/shared/ui/primitives/__tests__/floating-surfaces.test.ts apps/desktop/src/renderer/shared/ui/primitives/__tests__/pill.test.ts"
+}

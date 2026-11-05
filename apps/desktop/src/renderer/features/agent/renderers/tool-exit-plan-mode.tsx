@@ -98,14 +98,15 @@ export const ExitPlanModeCard: Renderer<AgentToolMessage> = memo(
 
     // The plan body renders FLAT — no bg3/40 detail box (user 2026-07-04:
     // "no bg, only for this tool call's expand view"). Unlike shell output,
-    // the plan is the turn's focal document; it reads as answer markdown.
+    // the plan is the turn's focal document; it reads as answer markdown,
+    // with the detail card's 12px sides so it never touches the border.
     const detail = planHtml ? (
       <LocalLinkHtml
-        className="zeros-agent-md text-fg1 text-sm"
+        className="zeros-agent-md text-fg1 px-3 py-2.5 text-sm"
         html={planHtml}
       />
     ) : (
-      <div className="text-fg2 text-xs">
+      <div className="text-fg2 px-3 py-2.5 text-xs leading-4.5">
         (the agent invoked ExitPlanMode without a plan body)
       </div>
     );

@@ -1,8 +1,8 @@
 import React, { useEffect, useRef, useState } from "react";
+import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import { ClipboardPaste, X } from "lucide-react";
 
 import { ZerosSpinner } from "@/renderer/shared/ui/loading";
-import { Button } from "../../shared/ui";
 import { Tooltip } from "@/renderer/shared/ui/primitives";
 import { ptyKill, resolveAgentBinary } from "../../platform/pty";
 import { TerminalSessionView } from "../../shell/terminal/terminal-session-view";
@@ -145,11 +145,10 @@ export function InlineLoginTerminal({
         </span>
         {loginProvider && (
           <Tooltip label="Paste">
-            <Button
+            <IconButton
               type="button"
-              variant="ghost"
-              size="icon-sm"
-              aria-label="Paste into terminal"
+              size="standard"
+              label="Paste into terminal"
               onClick={() => {
                 void navigator.clipboard
                   .readText()
@@ -166,19 +165,18 @@ export function InlineLoginTerminal({
               }}
             >
               <ClipboardPaste className="size-3.5" aria-hidden="true" />
-            </Button>
+            </IconButton>
           </Tooltip>
         )}
-        <Button
+        <IconButton
           type="button"
-          variant="ghost"
-          size="icon-sm"
-          aria-label="Close terminal"
+          size="standard"
+          label="Close terminal"
           onClick={onClose}
           className="shrink-0"
         >
           <X className="size-4" aria-hidden="true" />
-        </Button>
+        </IconButton>
       </div>
       {pasteError && (
         <p className="text-fg2 px-3 pt-2 text-xs" role="alert">

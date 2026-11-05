@@ -9,10 +9,10 @@ export async function runMcpToolsSmoke({ page: parent, check }) {
   const button = name => page.getByRole("button", { name, exact: true });
   const tools = () => page.getByRole("region", { name: "Tools", exact: true });
   const allow = name => tools().getByRole("switch", { name: `Allow ${name}`, exact: true });
-  const add = () => page.getByRole("button", { name: /New MCP server/ }).click();
+  const add = () => page.getByRole("button", { name: "Add server", exact: true }).click();
   try {
     await page.goto(new URL("/apps/desktop/src/renderer/harnesses/harness-customize.html", parent.url()).href);
-    await page.getByRole("tab", { name: "MCP", exact: true }).click();
+    await page.getByRole("tab", { name: "MCP servers", exact: true }).click();
     await add();
     await page.getByLabel("Name", { exact: true }).fill("tool-policy");
     await page.getByRole("combobox", { name: "Transport" }).click();
@@ -56,7 +56,9 @@ export async function runMcpToolsSmoke({ page: parent, check }) {
     await allow("read_file").click();
     await button("Save changes").click();
     await expect(button("Edit tool-policy")).toBeVisible();
-    await expect(button("Edit tool-policy").locator("..")).toContainText("Connected");
+    // Connected is the normal state: the row shows no status or action.
+    for (const status of ["Needs connection", "Connection failed", "Sign-in required"])
+      await expect(button("Edit tool-policy").locator("..")).not.toContainText(status);
     expect(JSON.parse(await page.locator("#last-write").textContent()).server.disabled_tools).toEqual(["delete_file", "read_file"]);
     await page.evaluate(() => { window.mcpFormFixture.holdProbe = false; window.mcpFormFixture.releaseProbe(); window.mcpFormFixture.releaseProbe = undefined; });
     await button("Edit tool-policy").click();

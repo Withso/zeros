@@ -14,8 +14,8 @@ export async function runMcpConnectionSmoke({ page: parent, check }) {
   };
   try {
     await page.goto(new URL("/apps/desktop/src/renderer/harnesses/harness-customize.html?gatewayState=needs-auth", parent.url()).href);
-    await page.getByRole("tab", { name: "MCP", exact: true }).click();
-    await page.getByRole("button", { name: /New MCP server/ }).click();
+    await page.getByRole("tab", { name: "MCP servers", exact: true }).click();
+    await page.getByRole("button", { name: "Add server", exact: true }).click();
     await page.getByLabel("Name", { exact: true }).fill("account-tools");
     await page.getByRole("combobox", { name: "Transport", exact: true }).click();
     await page.getByRole("option", { name: "Streamable HTTP", exact: true }).click();
@@ -55,7 +55,7 @@ export async function runMcpConnectionSmoke({ page: parent, check }) {
     expect(JSON.parse(await page.locator("#last-write").textContent()).server).not.toHaveProperty("headers");
     check("Authentication choices retain entered headers while No sign-in omits them from the saved connection", true);
 
-    await page.getByRole("button", { name: /New MCP server/ }).click();
+    await page.getByRole("button", { name: "Add server", exact: true }).click();
     await page.getByLabel("Name", { exact: true }).fill("api-key-tools");
     await page.getByRole("combobox", { name: "Transport", exact: true }).click();
     await page.getByRole("option", { name: "Streamable HTTP", exact: true }).click();
@@ -78,7 +78,7 @@ export async function runMcpConnectionSmoke({ page: parent, check }) {
     await page.evaluate(() => { window.mcpFormFixture.requiresAuth = false; });
     check("Missing API keys are validated before saving and rejected keys never launch OAuth", true);
 
-    await page.getByRole("button", { name: /New MCP server/ }).click();
+    await page.getByRole("button", { name: "Add server", exact: true }).click();
     await page.getByLabel("Name", { exact: true }).fill("saved-sign-in");
     await page.getByRole("combobox", { name: "Transport", exact: true }).click();
     await page.getByRole("option", { name: "Streamable HTTP", exact: true }).click();
@@ -89,7 +89,8 @@ export async function runMcpConnectionSmoke({ page: parent, check }) {
     const row = button("Edit saved-sign-in").locator("..").locator("..");
     await expect(row).toContainText("Sign-in required");
     await row.getByRole("button", { name: "Connect", exact: true }).click();
-    await expect(row).toContainText("Connected");
+    // Connected is the normal state: the row shows no status at all.
+    await expect(row).not.toContainText("Sign-in required");
     await expect(row.getByRole("button", { name: "Connect", exact: true })).toHaveCount(0);
     check("Connecting a saved list row replaces its earlier authentication-required check", true);
 
@@ -112,11 +113,12 @@ export async function runMcpConnectionSmoke({ page: parent, check }) {
     });
     await expect(row).toContainText("Connection failed");
     await row.getByRole("button", { name: "Retry", exact: true }).click();
-    await expect(row).toContainText("Connected");
+    await expect(row).not.toContainText("Connection failed");
+    await expect(row.getByRole("button", { name: "Retry", exact: true })).toHaveCount(0);
     expect(await page.evaluate(() => window.mcpGatewayHealthFixture.reconnects)).toBe(1);
     check("A failed gateway supersedes a saved successful check and Retry restores the connection", true);
 
-    await page.getByRole("button", { name: /New MCP server/ }).click();
+    await page.getByRole("button", { name: "Add server", exact: true }).click();
     await page.getByLabel("Name", { exact: true }).fill("detected-sign-in");
     await page.getByRole("combobox", { name: "Transport", exact: true }).click();
     await page.getByRole("option", { name: "Streamable HTTP", exact: true }).click();
@@ -129,12 +131,13 @@ export async function runMcpConnectionSmoke({ page: parent, check }) {
     await expect(connection()).toContainText("Connected");
     expect(JSON.parse(await page.locator("#last-write").textContent()).server.auth).toBe("oauth");
     await button("MCP").click();
-    await expect(detectedRow).toContainText("Connected");
+    await expect(detectedRow).not.toContainText("Sign-in required");
+    await expect(detectedRow.getByRole("button", { name: "Connect", exact: true })).toHaveCount(0);
     await expect(button("Edit detected-sign-in")).toHaveCount(1);
     check("Connect on a saved HTTP row with detected authentication opens the editor and authorizes the same server", true);
 
     await page.goto(new URL("/apps/desktop/src/renderer/harnesses/harness-customize.html?gatewayState=needs-auth", parent.url()).href);
-    await page.getByRole("tab", { name: "MCP", exact: true }).click();
+    await page.getByRole("tab", { name: "MCP servers", exact: true }).click();
     await button("Edit gateway-error").click();
     await expect(connection()).toContainText("Sign-in required");
     await page.evaluate(async () => {
@@ -182,7 +185,7 @@ export async function runMcpConnectionSmoke({ page: parent, check }) {
     check("A failed cancellation request still releases the list controls so sign-in can be retried", true);
 
     await page.goto(new URL("/apps/desktop/src/renderer/harnesses/harness-customize.html?gatewayState=needs-auth", parent.url()).href);
-    await page.getByRole("tab", { name: "MCP", exact: true }).click();
+    await page.getByRole("tab", { name: "MCP servers", exact: true }).click();
     await button("Edit gateway-error").click();
     await expect(connection()).toContainText("Sign-in required");
     await page.evaluate(async () => {
@@ -222,7 +225,7 @@ export async function runMcpConnectionSmoke({ page: parent, check }) {
 export async function runMcpAuthorizationRefreshRaceSmoke({ page, check }) {
   const origin = new URL(page.url()).origin;
   await page.goto(`${origin}/apps/desktop/src/renderer/harnesses/harness-customize.html?gatewayState=needs-auth`);
-  await page.getByRole("tab", { name: "MCP", exact: true }).click();
+  await page.getByRole("tab", { name: "MCP servers", exact: true }).click();
   await page.getByRole("button", { name: "Edit gateway-error", exact: true }).click();
   const connection = page.getByRole("region", { name: "Connection", exact: true });
   await expect(connection).toContainText("Sign-in required");

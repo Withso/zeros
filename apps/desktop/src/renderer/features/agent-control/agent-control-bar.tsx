@@ -5,7 +5,7 @@ import { cn } from "@/renderer/shared/ui/cn";
 import { Button } from "@/renderer/shared/ui/primitives/button";
 import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import { Kbd } from "@/renderer/shared/ui/primitives/kbd";
-import { Toolbar } from "@/renderer/shared/ui/primitives/toolbar";
+import { Toolbar, ToolbarText } from "@/renderer/shared/ui/primitives/toolbar";
 
 export interface AgentControlBarProps {
   /** `strip` is the picture-in-picture hover toolbar; `pill` floats at the
@@ -77,7 +77,6 @@ export function AgentControlBar({
         </span>
         <IconButton
           type="button"
-          motion="none"
           className="pointer-events-auto"
           disabled={stopping}
           onClick={stop}
@@ -93,27 +92,23 @@ export function AgentControlBar({
   return (
     <Toolbar
       aria-label={`${title} control`}
-      className={cn(
-        "w-max max-w-full gap-1.5 pl-2 shadow-[var(--shadow-dropdown)]",
-        FADE,
-        visibility,
-        className,
-      )}
+      className={cn("w-max max-w-full", FADE, visibility, className)}
       style={style}
       data-testid={testId}
     >
       {leading}
-      <span className="text-fg1 shrink-0 text-xs font-medium">{title}</span>
-      {detail ? (
-        <span className="text-fg3 min-w-0 truncate text-xs" title={detail}>
-          {detail}
-        </span>
-      ) : null}
+      <ToolbarText>
+        <strong>{title}</strong>
+        {detail ? (
+          <span className="min-w-0 truncate" title={detail}>
+            {detail}
+          </span>
+        ) : null}
+      </ToolbarText>
       <Button
         type="button"
         variant="secondary"
-        size="compact"
-        className="ml-1 shrink-0"
+        className="shrink-0"
         disabled={stopping}
         onClick={stop}
         aria-label={stopLabel}
@@ -123,7 +118,7 @@ export function AgentControlBar({
         Stop
       </Button>
       {escapeHint ? (
-        <Kbd aria-hidden="true" className="mr-1">
+        <Kbd aria-hidden="true" className="mr-1.5 ml-1">
           esc
         </Kbd>
       ) : null}

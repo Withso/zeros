@@ -20,7 +20,7 @@ export async function runFullDiskAccessSmoke({ page, harnessBase, check }) {
   expect(await reads()).toBe(1);
   await expect(
     page.getByText(
-      "Let local agents work without repeated macOS folder prompts.",
+      "Fewer macOS folder prompts.",
     ),
   ).toBeVisible();
   const openSettings = page.getByRole("button", {

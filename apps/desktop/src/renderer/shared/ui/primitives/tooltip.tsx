@@ -2,16 +2,19 @@ import * as React from "react";
 import * as TooltipPrimitive from "@radix-ui/react-tooltip";
 
 import { cn } from "@/renderer/shared/ui/cn";
+import { FLOATING_SURFACE } from "@/renderer/shared/ui/layout/surface";
 import { ANCHORED_OVERLAY_MOTION } from "@/renderer/shared/ui/anchored-overlay-motion";
 import { isKeyboardNavigationActive } from "@/renderer/shared/ui/focus-navigation";
 import { useNativeSurfaceOverlayIntent } from "@/renderer/shared/ui/native-surface-overlay";
+import { KbdKeys } from "./kbd";
 
 // ──────────────────────────────────────────────────────────
 // Tooltip — the ONE tooltip for the whole app.
 //
-// A GLASS chip: translucent --bg2 (40%) + backdrop blur(10px) & saturate,
-// --fg1 text, a 50% --border2 hairline edge and the --shadow-dropdown lift.
-// It sits ABOVE the trigger and CENTERED on it by default; Radix
+// The small member of the floating family: a solid --bg3 chip with a
+// --border2 edge and the --shadow-dropdown lift, 6px corners, 12/16 --fg1
+// text, so it reads the same over any background. Shortcuts are Kbd chips,
+// as in menus. It sits ABOVE the trigger and CENTERED on it by default; Radix
 // collision handling flips it BELOW (and nudges it inward) when
 // there isn't room — e.g. a control flush against the top edge.
 //
@@ -140,7 +143,8 @@ const TooltipContent = React.forwardRef<
       collisionPadding={collisionPadding}
       className={cn(
         ANCHORED_OVERLAY_MOTION,
-        "z-dropdown w-fit max-w-xs overflow-hidden rounded-sm border border-border2/50 bg-bg2/40 px-2 py-1 text-3xxs text-fg1 shadow-[var(--shadow-dropdown)] backdrop-blur-[10px] backdrop-saturate-[1.7]",
+        "z-dropdown inline-flex w-fit max-w-xs items-center gap-1.5 overflow-hidden rounded-md border border-border2 px-2 py-[calc(var(--spacing)*0.75)] text-3xxs leading-4 text-fg1 shadow-[var(--shadow-dropdown)]",
+        FLOATING_SURFACE,
         className,
       )}
       {...props}
@@ -152,7 +156,7 @@ TooltipContent.displayName = TooltipPrimitive.Content.displayName;
 export interface TooltipProps {
   /** The tooltip text (what used to be the native `title`). */
   label: React.ReactNode;
-  /** Optional keyboard hint rendered muted after the label, e.g. "⌘R". */
+  /** Optional keyboard hint after the label, as Kbd chips: "⌘R". */
   shortcut?: React.ReactNode;
   /** The trigger — a native element or any ref-forwarding component. */
   children: React.ReactNode;
@@ -200,8 +204,10 @@ function Tooltip({
       <TooltipTrigger asChild>{children}</TooltipTrigger>
       <TooltipContent side={side} align={align} sideOffset={sideOffset} className={className}>
         {label}
-        {shortcut != null && shortcut !== "" ? (
-          <span className="ml-1.5 text-fg2">{shortcut}</span>
+        {typeof shortcut === "string" && shortcut !== "" ? (
+          <KbdKeys keys={shortcut} />
+        ) : shortcut != null && shortcut !== "" ? (
+          <span className="inline-flex items-center gap-0.5">{shortcut}</span>
         ) : null}
       </TooltipContent>
     </TooltipRoot>

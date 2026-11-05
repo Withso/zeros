@@ -12,18 +12,18 @@ import { cn } from "../../../shared/ui/cn";
 import { FileTypeIcon } from "./file-type-icon";
 import { Tooltip } from "@/renderer/shared/ui/primitives";
 
-// Unified pill recipe: 20px tall, 4px radius, bg --bg1,
-// border --border3 — the SAME chrome as the tool-row FileTag and the
-// turn-footer file pills, so composer pills, sent-bubble pills, and transcript
-// pills all read as one family.
+// Unified pill recipe: the neutral inline Pill (20px, 4px corners, bg2 +
+// border2, 12/16, 4px gap, 6px padding) — the SAME chrome as the tool-row
+// FileTag and the turn-footer file pills, so composer pills, sent-bubble
+// pills, and transcript pills all read as one family.
 // FLAG: the 3px subtraction is the paired 1.5px inline-alignment margins used
 // by every caller. The label caps at 16/18rem, but in a narrower pane the pill
 // must cap its complete margin box at the composer/bubble width; the truncating
 // label then absorbs the squeeze while attachment remove buttons remain usable.
 export const PILL_METRICS =
-  "inline-flex h-5 max-w-[calc(100%-3px)] mx-[1.5px] items-center rounded-sm align-middle text-xs leading-none select-none";
-export const PILL_SHELL = `${PILL_METRICS} gap-1 border border-border3 bg-bg1 text-fg1`;
-export const COMPOSER_PILL_SPACING = "gap-2 px-1.5";
+  "inline-flex h-5 max-w-[calc(100%-3px)] mx-[1.5px] items-center rounded-sm align-middle text-3xxs leading-4 select-none";
+export const PILL_SHELL = `${PILL_METRICS} gap-1 border border-border2 bg-bg2 text-fg1`;
+export const COMPOSER_PILL_SPACING = "gap-1 px-1.5";
 
 export function MentionPillView({
   label,
@@ -36,7 +36,7 @@ export function MentionPillView({
 }) {
   return (
     <Tooltip label={path || label}>
-      <span data-mention-pill="" className={cn(PILL_SHELL, "px-2")}>
+      <span data-mention-pill="" className={cn(PILL_SHELL, COMPOSER_PILL_SPACING)}>
         <FileTypeIcon name={path || label} kind={kind} size={13} />
         <span className="max-w-[18rem] truncate">{label}</span>
       </span>

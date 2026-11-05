@@ -16,6 +16,8 @@ import React, {
   useState,
   type ReactNode,
 } from "react";
+import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
+import { EmptyState } from "@/renderer/shared/ui/layout/empty-state";
 import {
   PanelTop,
   ChevronDown,
@@ -52,7 +54,7 @@ import { cn } from "../../../shared/ui/cn";
 import { Button } from "../../../shared/ui";
 import { Badge, Tooltip } from "../../../shared/ui/primitives";
 import { RunStream } from "../../../shared/ui/loading";
-import { DynamicIcon } from "../../../shared/ui/icon-registry";
+import { resolveIcon } from "../../../shared/ui/icon-registry";
 import { useWorkspaceStore } from "../../../state/store";
 import { useActiveWorkspace } from "../../../state/use-active-workspace";
 import {
@@ -764,11 +766,10 @@ export function TerminalPanel({
           onClose={handleClose}
           onAdd={handleAddTerminal}
           leading={
-            <Button
-              variant="ghost"
-              size="icon-sm"
+            <IconButton
+              size="standard"
               className="text-fg2 hover:text-fg1 size-7 shrink-0"
-              aria-label={expanded ? "Collapse panel" : "Expand panel"}
+              label={expanded ? "Collapse panel" : "Expand panel"}
               onClick={() => setExpanded(!expanded)}
             >
               {expanded ? (
@@ -776,7 +777,7 @@ export function TerminalPanel({
               ) : (
                 <ChevronUp className="text-fg2" size={14} />
               )}
-            </Button>
+            </IconButton>
           }
           trailing={
             <>
@@ -796,10 +797,9 @@ export function TerminalPanel({
                   />
                 )}
               <Tooltip label="Undock terminal">
-                <Button
-                  variant="ghost"
-                  size="icon-sm"
-                  aria-label="Move terminal to tab bar"
+                <IconButton
+                  size="standard"
+                  label="Move terminal to tab bar"
                   onClick={() => {
                     if (panelTab?.terminalId)
                       openWorkbenchTerminal(
@@ -814,7 +814,7 @@ export function TerminalPanel({
                   }}
                 >
                   <PanelTop className="text-fg2 size-3.5" />
-                </Button>
+                </IconButton>
               </Tooltip>
             </>
           }
@@ -1153,13 +1153,13 @@ const RUN_LAST_RUN_COPY: Record<RunOutcome, string> = {
   stopped: "Last run was stopped before it finished.",
 };
 
-/** Filled outcome badge — 24px, token bg/fg pair, no icon (identical rule to
+/** Outcome badge — the tinted status pair, no icon (identical rule to
  *  Setup's; green = finished, red = failed AND stopped per the catalog). */
 function RunStatusBadge({ outcome }: { outcome: RunOutcome }) {
   return (
     <Badge
       variant={outcome === "finished" ? "success" : "failure"}
-      className="h-6 font-medium select-none"
+      className="select-none"
     >
       {RUN_BADGE_LABEL[outcome]}
     </Badge>
@@ -1262,19 +1262,13 @@ function RunActionOverlay({
             <div className="text-fg2 text-xs">Starting {action.name}…</div>
           </Stack>
         ) : (
-          <>
-            <Stack
-              gap={3}
-              align="center"
-              justify="center"
-              className="h-full min-h-0 px-6 text-center"
-            >
-              <DynamicIcon
-                name={action.icon}
-                className="text-muted-fg size-10"
-                strokeWidth={1}
-                aria-hidden
-              />
+          // The titled empty state: the action's icon and name, the command
+          // or the last outcome, then Start. The line is the outcome, so no
+          // badge repeats it.
+          <EmptyState
+            icon={resolveIcon(action.icon)}
+            title={action.name}
+            action={
               <Tooltip label={action.command}>
                 <Button variant="secondary" size="sm" onClick={onStart}>
                   {outcome && <RotateCw />}
@@ -1283,16 +1277,14 @@ function RunActionOverlay({
                     : `Start ${action.name}`}
                 </Button>
               </Tooltip>
-              <div className="text-muted-fg max-w-sm truncate font-mono text-xs">
-                {outcome ? RUN_LAST_RUN_COPY[outcome] : action.command}
-              </div>
-            </Stack>
-            {outcome && (
-              <div className="absolute right-3 bottom-3">
-                <RunStatusBadge outcome={outcome} />
-              </div>
+            }
+          >
+            {outcome ? (
+              RUN_LAST_RUN_COPY[outcome]
+            ) : (
+              <span className="block truncate font-mono">{action.command}</span>
             )}
-          </>
+          </EmptyState>
         )}
       </div>
     );
@@ -1326,20 +1318,17 @@ function RunActionOverlay({
 function RunAddEmpty() {
   const openRunActions = useOpenScriptsSettings("run-actions");
   return (
-    <Stack
-      gap={3}
-      align="center"
-      justify="center"
-      className="h-full min-h-0 px-6 text-center"
+    <EmptyState
+      icon={Play}
+      title="Run"
+      action={
+        <Button variant="secondary" size="sm" onClick={() => openRunActions()}>
+          Add run script
+        </Button>
+      }
     >
-      <Play className="text-muted-fg size-10" strokeWidth={1} aria-hidden />
-      <Button variant="secondary" size="sm" onClick={() => openRunActions()}>
-        Add run script
-      </Button>
-      <div className="text-fg2 max-w-sm text-xs">
-        Run a dev server or test command in this workspace.
-      </div>
-    </Stack>
+      Run a dev server or test command in this workspace.
+    </EmptyState>
   );
 }
 
@@ -1504,15 +1493,14 @@ function TerminalSubTabStrip({
         {/* The "+" sits OUTSIDE the scroll lane: it hugs the last tab while
             they fit, then stays put while only the tabs scroll. */}
         <div className="flex h-full shrink-0 items-center">
-          <Button
-            variant="ghost"
-            size="icon-sm"
+          <IconButton
+            size="standard"
             className="text-fg2 hover:text-fg1 size-7 shrink-0"
-            aria-label="New terminal"
+            label="New terminal"
             onClick={onAdd}
           >
             <Plus className="text-fg2" size={14} />
-          </Button>
+          </IconButton>
         </div>
         <div className="min-w-0 flex-1" aria-hidden="true" />
       </div>
@@ -1561,16 +1549,17 @@ function SubTab({
       data-active={active}
       data-terminal-tab="true"
       className={cn(
-        "group/subtab gap-0 px-2.5",
+        // The workbench pill: 8px sides and gap, the label capped at 180px.
+        "group/subtab max-w-[180px] gap-2 px-2",
         WORKBENCH_TAB_PILL_BASE_CLS,
         active
           ? WORKBENCH_TAB_PILL_ACTIVE_CLS
           : WORKBENCH_TAB_PILL_INACTIVE_CLS,
       )}
     >
-      <CloudTerminalIndicator folder={folderKey} className="mr-1.5" />
-      {running && <RunStream size={12} className="mr-1.5" />}
-      <span className="max-w-[140px] truncate">
+      <CloudTerminalIndicator folder={folderKey} />
+      {running && <RunStream size={12} />}
+      <span className="min-w-0 truncate">
         {label}
         {exited && <span className="ml-1 opacity-70">(exited)</span>}
       </span>
@@ -1578,7 +1567,7 @@ function SubTab({
         <span
           aria-hidden
           className={cn(
-            "ml-1.5 size-1.5 shrink-0 rounded-full",
+            "size-1.5 shrink-0 rounded-full",
             dot === "running" &&
               "bg-yellow-icon ring-yellow-icon/20 ring-[3px]",
             dot === "passed" && "bg-green-primary",
@@ -1586,36 +1575,23 @@ function SubTab({
           )}
         />
       )}
+      {/* The workbench close: a 20px ✕ over a 40px fade in the pill's own
+          fill. An absolute overlay, so hover causes no layout shift; it keys
+          off the strip-driven data-hovered, not :hover (sticky-strip rule),
+          and focus-within keeps it visible for keyboard users. */}
       {onClose && (
-        <>
-          {/* Fades the label's trailing edge under the close button. An absolute
-              overlay, so hover causes no layout shift; it keys off the strip-driven
-              data-hovered, not :hover (sticky-strip rule). */}
-          <span
-            aria-hidden
-            className="from-bg2 pointer-events-none absolute inset-y-0 right-0 w-8 bg-gradient-to-l from-50% to-transparent opacity-0 transition-none group-data-[hovered=true]/subtab:opacity-100"
-          />
-          <button
-            type="button"
-            aria-label={`Close ${label}`}
+        <div className="from-bg2 pointer-events-none absolute inset-y-0 right-0 flex w-10 items-center justify-end bg-gradient-to-l from-50% to-transparent pr-1 pl-4 opacity-0 transition-none group-data-[hovered=true]/subtab:opacity-100 focus-within:opacity-100">
+          <IconButton
+            label={`Close ${label}`}
             onClick={(e) => {
               e.stopPropagation();
               onClose();
             }}
-            className={cn(
-              "absolute top-1/2 right-1 inline-flex size-4 -translate-y-1/2 items-center justify-center",
-              // Solid backing matches the selected/hovered pill so the X is never read
-              // against the label underneath; hover bumps to bg-bg2-hover for feedback.
-              "bg-bg2 text-fg2 hover:bg-bg2-hover hover:text-fg1 rounded-sm",
-              "opacity-0 transition-none group-data-[hovered=true]/subtab:opacity-100",
-              // Keyboard focus visibility — the absolute button is otherwise
-              // invisible to tab-key users since opacity:0 kills paint + a11y.
-              "focus-visible:ring-highlighted-bright focus-visible:opacity-100 focus-visible:ring-1 focus-visible:outline-none",
-            )}
+            className="pointer-events-auto shrink-0"
           >
-            <X size={10} />
-          </button>
-        </>
+            <X className="size-3.5" />
+          </IconButton>
+        </div>
       )}
     </div>
   );

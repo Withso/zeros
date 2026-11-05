@@ -77,7 +77,7 @@ function ComputerSwitchRow({
   children,
 }: {
   id: string;
-  row: { label: string; hint: string };
+  row: { label: string; hint?: string };
   checked: boolean;
   managed: boolean;
   disabled: boolean;
@@ -141,7 +141,7 @@ function OrganizationComputerUsePanel({
     <SettingsGroup title="Computer use">
       <SettingsRow
         label="Unavailable in cloud workspaces"
-        hint="Computer use sees and controls apps on this Mac, so only Local workspaces offer it."
+        hint="Only in local workspaces."
       />
     </SettingsGroup>
   );
@@ -397,7 +397,7 @@ function LocalComputerUsePanel({ surfaceActive }: { surfaceActive: boolean }) {
     pendingBlockedApps?.settled === false;
   const switchRow = (
     key: ComputerUseBooleanSetting,
-    row: { label: string; hint: string },
+    row: { label: string; hint?: string },
     options: { inactive?: boolean } = {},
   ) => (
     <ComputerSwitchRow
@@ -425,14 +425,14 @@ function LocalComputerUsePanel({ surfaceActive }: { surfaceActive: boolean }) {
         <SettingsGroup title="Permissions">
           <SettingsRow
             label="Computer use unavailable"
-            hint="Computer use needs macOS and the driver that ships inside the Zeros app."
+            hint="Needs macOS and the Zeros app."
           />
         </SettingsGroup>
       ) : null}
       {status?.available ? (
         <SettingsGroup
           title="Permissions"
-          description="Zeros needs both macOS permissions to see and control apps."
+          description="Zeros needs both."
         >
           {(
             Object.keys(COMPUTER_PERMISSION_ROWS) as ComputerPermissionKind[]
@@ -472,10 +472,7 @@ function LocalComputerUsePanel({ surfaceActive }: { surfaceActive: boolean }) {
             onRemove={(id) => updateBlockedApps(withoutBlockedApp(blockedApps, id))}
           />
         ))}
-        <SettingsRow
-          label="Add app"
-          hint="Choose an app agents may never see or control."
-        >
+        <SettingsRow label="Add app">
           <div className="flex items-center gap-2">
             {managed("blocked_apps") ? (
               <span className="text-fg3 text-xs">Managed</span>

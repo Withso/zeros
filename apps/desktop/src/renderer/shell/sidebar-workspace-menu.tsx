@@ -1,9 +1,9 @@
 import { useCallback, useMemo, useRef, useState } from "react";
+import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import { ListFilter, Search } from "lucide-react";
 import type { Project } from "../state/projects-store";
 import type { SidebarWorkspaceSort } from "../state/sidebar-list-preferences";
 import { cn } from "../shared/ui/cn";
-import { Button } from "../shared/ui/primitives/button";
 import { Input } from "../shared/ui/primitives/input";
 import {
   DropdownMenu,
@@ -101,10 +101,9 @@ export function SidebarWorkspaceMenu({
     >
       <Tooltip label="Filter workspaces" side="bottom" delayDuration={1500} disabled={open}>
         <DropdownMenuTrigger asChild>
-          <Button
+          <IconButton
             type="button"
-            variant="ghost"
-            size="icon-compact"
+            size="compact"
             className={cn(
               SIDEBAR_ROW_ACTION_CLS,
               "relative",
@@ -112,7 +111,7 @@ export function SidebarWorkspaceMenu({
                 !filtered &&
                 "opacity-0 group-hover/section:opacity-100 focus-visible:opacity-100",
             )}
-            aria-label="Filter workspaces"
+            label="Filter workspaces"
             aria-description={filtered ? "Repository filter active" : undefined}
             data-filtered={filtered || undefined}
           >
@@ -124,12 +123,11 @@ export function SidebarWorkspaceMenu({
                 className="bg-blue-primary absolute top-0.5 right-0.5 size-1.5 rounded-full"
               />
             )}
-          </Button>
+          </IconButton>
         </DropdownMenuTrigger>
       </Tooltip>
       <DropdownMenuContent
         align="start"
-        sideOffset={5}
         className="w-52"
         aria-label="Workspace display options"
       >
@@ -147,8 +145,6 @@ export function SidebarWorkspaceMenu({
             <DropdownMenuRadioItem
               key={value}
               value={value}
-              indicator="check"
-              indicatorSide="end"
             >
               {GROUP_LABELS[value]}
             </DropdownMenuRadioItem>
@@ -158,7 +154,7 @@ export function SidebarWorkspaceMenu({
         <DropdownMenuSub>
           <DropdownMenuSubTrigger>Filter</DropdownMenuSubTrigger>
           <DropdownMenuSubContent
-            className="w-44"
+            className="w-40"
             aria-label="Workspace filters"
           >
             <DropdownMenuSub
@@ -173,12 +169,12 @@ export function SidebarWorkspaceMenu({
               </DropdownMenuSubTrigger>
               <DropdownMenuSubContent
                 ref={setRepoContent}
-                className="w-64"
+                className="w-52"
                 aria-label="Filter by repository"
               >
-                <div className="flex h-9 items-center gap-2 px-2">
+                <div className="flex h-7 items-center gap-2 px-2">
                   <Search
-                    className="text-fg3 size-4 shrink-0"
+                    className="text-fg3 size-3.5 shrink-0"
                     aria-hidden="true"
                   />
                   <Input
@@ -220,7 +216,6 @@ export function SidebarWorkspaceMenu({
                   <DropdownMenuCheckboxItem
                     key={project.id}
                     checked={selected.has(project.id)}
-                    indicatorSide="end"
                     onSelect={(event) => event.preventDefault()}
                     onCheckedChange={(checked) =>
                       onRepositoryIdsChange(
@@ -245,7 +240,7 @@ export function SidebarWorkspaceMenu({
                   </DropdownMenuCheckboxItem>
                 ))}
                 {matching.length === 0 && (
-                  <div className="text-fg3 px-2 py-2 text-xs" role="status">
+                  <div className="text-fg3 flex h-7 items-center px-2 text-xs" role="status">
                     No repositories found
                   </div>
                 )}
@@ -265,15 +260,11 @@ export function SidebarWorkspaceMenu({
             >
               <DropdownMenuRadioItem
                 value="updated"
-                indicator="check"
-                indicatorSide="end"
               >
                 Updated
               </DropdownMenuRadioItem>
               <DropdownMenuRadioItem
                 value="created"
-                indicator="check"
-                indicatorSide="end"
               >
                 Created
               </DropdownMenuRadioItem>

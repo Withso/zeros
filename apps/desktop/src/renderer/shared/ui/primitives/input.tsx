@@ -1,27 +1,48 @@
 import * as React from "react";
+import { cva, type VariantProps } from "class-variance-authority";
 
 import { cn } from "@/renderer/shared/ui/cn";
+import { FIELD_BOX, FIELD_FOCUS, FIELD_INVALID } from "./field";
 
-const Input = React.forwardRef<
-  HTMLInputElement,
-  React.ComponentProps<"input">
->(({ className, type, ...props }, ref) => {
-  return (
+const inputVariants = cva(
+  cn(
+    "flex w-full min-w-0 px-2 placeholder:text-fg3 read-only:bg-bg2 read-only:text-fg2 file:border-0 file:bg-transparent file:text-xs file:font-medium file:text-fg1",
+    FIELD_BOX,
+    FIELD_FOCUS,
+    FIELD_INVALID,
+  ),
+  {
+    variants: {
+      // Standard is 28px like Button and the Select trigger; compact is the
+      // 24px field for inspectors and tables.
+      size: { standard: "h-7", compact: "h-6" },
+      // Inline is the rename look: no resting edge and a hover fill, so the
+      // text reads as text until it is being edited.
+      appearance: {
+        outline: "",
+        inline:
+          "rounded-sm border-transparent px-1.5 hover:border-transparent hover:bg-bg2-highlight focus-visible:data-[zeros-keyboard-focus]:bg-bg1",
+      },
+      mono: { true: "font-mono text-3xxs", false: "" },
+    },
+    defaultVariants: { size: "standard", appearance: "outline", mono: false },
+  },
+);
+
+export interface InputProps
+  extends Omit<React.ComponentProps<"input">, "size">,
+    VariantProps<typeof inputVariants> {}
+
+const Input = React.forwardRef<HTMLInputElement, InputProps>(
+  ({ className, type, size, appearance, mono, ...props }, ref) => (
     <input
       type={type}
-      className={cn(
-        // Same box as the Select dropdown trigger and every Button: 28px tall
-        // (h-7), 6px corners (--radius-md), border3 on transparent. Focus = a
-        // `highlighted-bright` border, NO ring. Consumers may set a SHORTER
-        // height for compact spots (design inspector), but 28px is the max.
-        "flex h-7 w-full rounded-md border border-border3 bg-transparent px-3 py-1 text-sm shadow-sm transition-colors file:border-0 file:bg-transparent file:text-sm file:font-medium file:text-fg1 placeholder:text-fg3 focus-visible:outline-none focus-visible:border-highlighted-bright disabled:cursor-not-allowed disabled:opacity-50",
-        className,
-      )}
+      className={cn(inputVariants({ size, appearance, mono }), className)}
       ref={ref}
       {...props}
     />
-  );
-});
+  ),
+);
 Input.displayName = "Input";
 
-export { Input };
+export { Input, inputVariants };

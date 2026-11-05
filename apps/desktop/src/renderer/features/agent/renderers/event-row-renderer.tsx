@@ -89,8 +89,9 @@ function langForTool(tool: AgentToolMessage): string {
 
 // Shared chrome for an expandable output body: the surrounding card + a wrapping,
 // monospace, fg1 code surface (shiki tokens override fg1 when highlighted).
+// The one code style in chat: 13/20 mono, as in markdown blocks and Read.
 const OUTPUT_CLASS =
-  "px-3 py-2 font-mono text-sm leading-relaxed text-fg1 [&_pre]:whitespace-pre-wrap [&_pre]:break-words";
+  "px-3 py-2 font-mono text-xs leading-5 text-fg1 [&_pre]:whitespace-pre-wrap [&_pre]:break-words";
 
 function readPathOf(tool: AgentToolMessage): string | null {
   const input = (
@@ -385,7 +386,8 @@ export function renderDetail(
       .filter((paragraph) => paragraph.trim());
     if (paragraphs.length === 0) return null;
     return (
-      <div className="text-fg2 flex select-text flex-col gap-2 px-3 text-sm leading-normal">
+      // On the row label's 20px column, at 20px lines.
+      <div className="text-fg2 flex select-text flex-col gap-2 pr-3 pl-5 text-sm leading-5">
         {paragraphs.map((paragraph, index) => (
           <p key={index} className="m-0 wrap-anywhere whitespace-pre-wrap">
             {paragraph}
@@ -459,7 +461,7 @@ function ToolDetail({ tool, ctx }: { tool: AgentToolMessage; ctx: RendererContex
         <HighlightedCode
           code={tool.toolKind === "execute" ? `$ ${asDisplayString(input)}` : input}
           lang={tool.toolKind === "execute" ? "shellscript" : "text"}
-          className={`${OUTPUT_CLASS} ${body ? "border-border2 border-b" : ""}`}
+          className={`${OUTPUT_CLASS} ${body ? "border-border1 border-b" : ""}`}
         />
       )}
       {unreported && <div className="text-fg2 px-3 py-2 text-xs">Completion not reported. The provider did not report whether this tool completed.</div>}

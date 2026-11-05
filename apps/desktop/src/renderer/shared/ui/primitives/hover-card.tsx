@@ -2,6 +2,8 @@ import * as React from "react";
 import { HoverCard as HoverCardPrimitive } from "radix-ui";
 
 import { cn } from "@/renderer/shared/ui/cn";
+import { FLOATING_SURFACE } from "@/renderer/shared/ui/layout/surface";
+import { MENU_SURFACE_RADIUS } from "@/renderer/shared/ui/menu-surface";
 import { ANCHORED_OVERLAY_MOTION } from "@/renderer/shared/ui/anchored-overlay-motion";
 import { useNativeSurfaceOverlayIntent } from "@/renderer/shared/ui/native-surface-overlay";
 
@@ -56,7 +58,9 @@ const HoverCardContent = React.forwardRef<
       sideOffset={sideOffset}
       className={cn(
         ANCHORED_OVERLAY_MOTION,
-        "border-border2 bg-bg2 text-fg1 z-dropdown w-64 origin-(--radix-hover-card-content-transform-origin) rounded-lg border p-4 shadow-[var(--shadow-dropdown)] outline-hidden",
+        "border-border2 text-fg1 z-dropdown w-64 origin-(--radix-hover-card-content-transform-origin) border p-3 shadow-[var(--shadow-dropdown)] outline-hidden",
+        FLOATING_SURFACE,
+        MENU_SURFACE_RADIUS,
         className,
       )}
       {...props}

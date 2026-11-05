@@ -1,6 +1,7 @@
 // Browser contract for the real Summary controls, caches and navigation.
 // Only engine/native transport is replaced; no filesystem or PTY is touched.
 import "../../../../../styles/zeros-tokens.css";
+import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import "../../../../../styles/semantic-tokens.css";
 import "../../../../../styles/globals.css";
 import React, { useCallback, useEffect, useRef, useState } from "react";
@@ -424,14 +425,13 @@ function Harness() {
             <WorkspaceHeader folder={folder} name={folder === folderB ? "Summary B" : "Summary A"} branch trailing={<>
               <ConversationSummaryTrigger />
               {collapsed && (
-                <Button
-                  variant="ghost"
-                  size="icon-sm"
-                  aria-label="Expand workbench"
+                <IconButton
+                  size="standard"
+                  label="Expand workbench"
                   onClick={reveal}
                 >
                   ↔
-                </Button>
+                </IconButton>
               )}
             </>} />
             <div className="flex min-h-0 min-w-0 flex-1">

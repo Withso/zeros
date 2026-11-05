@@ -190,14 +190,18 @@ describe("sidebar workspace list presentations", () => {
 });
 
 describe("sidebar workspace rows", () => {
-  it("fill the sidebar width with the shared hover and selection fill", () => {
+  it("fill the sidebar width with the shared hover and their own selected fill", () => {
     const cls = classConstant(ROW, "SIDEBAR_WORKSPACE_ROW_CLS");
     expect(cls).toMatch(/\bw-full\b/);
     expect(cls).toMatch(/\bh-8\b/);
     expect(cls).toContain("hover:bg-(--surface-hover)");
     expect(cls).toContain("focus-within:bg-(--surface-hover)");
-    expect(cls).toContain("data-[active=true]:bg-(--surface-hover)");
+    // Selected is not hover: bg2-highlight, kept while hovered or focused.
+    expect(cls).toContain("data-[active=true]:bg-bg2-highlight");
+    expect(cls).toContain("data-[active=true]:hover:bg-bg2-highlight");
+    expect(cls).not.toContain("data-[active=true]:bg-(--surface-hover)");
     expect(cls).toMatch(/data-\[active=true\]:text-fg1\b/);
+    expect(cls).toContain("has-[>button:focus-visible]:ring-[3px]");
     expect(SIDEBAR).toMatch(/<Surface\s+as="nav"\s+kind="sidebar"/);
     expect(classConstant(HEADER, "REPOSITORY_HEADER_CLS")).toMatch(/\bh-8\b/);
     const surface = source(
@@ -307,6 +311,19 @@ describe("sidebar collapse and geometry", () => {
     );
   });
 
+  it("opens Create beside the sidebar with no repositories or nothing chosen", () => {
+    expect(SHELL).toContain('const nothingSelected = activePage === "workspace" && !activeWorkspaceFolder;');
+    expect(SHELL).toMatch(
+      /const opensCreate =\s*\(showWelcome && \(activePage === "dashboard" \|\| activePage === "workspace"\)\) \|\|\s*nothingSelected;/,
+    );
+    expect(SHELL).toContain('activePage === "create" || opensCreate');
+    // The full-window welcome is gone; Create's start banners replace it.
+    expect(SHELL).not.toContain("NoProjectsView");
+    const CREATE = source("apps/desktop/src/renderer/shell/dispatcher/dispatcher-modal.tsx");
+    expect(CREATE).toMatch(/\{!cloud\.computerMode && !selectedProject && \(\s*<CreateStartBanners/);
+    expect(CREATE).toContain("!needsGitSetup && selectedProject && (");
+  });
+
   it("keeps the corner the collapsed controls float over clear", () => {
     expect(SHELL).toContain(
       "const collapsedControlsVisible = sidebarCollapsed && !settingsActive;",
@@ -314,7 +331,12 @@ describe("sidebar collapse and geometry", () => {
     expect(SHELL).toContain(
       "{collapsedControlsVisible && <CollapsedSidebarControls />}",
     );
-    expect(SHELL).toContain('collapsedControlsVisible ? "mt-10" : ""');
+    // Home reserves the corner in the Dashboard's own title row instead of
+    // dropping every page below a 40px band; only Create still starts below.
+    expect(SHELL).toContain('collapsedControlsVisible && activeHomePageId === "create" ? "mt-10" : ""');
+    const DASHBOARD = source("apps/desktop/src/renderer/features/dashboard/dashboard-page.tsx");
+    expect(DASHBOARD).toMatch(/sidebarCollapsed && \(\s*<span\s+className=\{COLLAPSED_CONTROLS_RESERVE_CLS\}/);
+    expect(TOGGLE).toContain('export const COLLAPSED_CONTROLS_RESERVE_CLS = "h-full w-29 shrink-0";');
     expect(SHELL).toContain("windowControlsInset={sidebarCollapsed}");
     // The reserve belongs to the single column header, above all split panes.
     expect(PANE).toMatch(
@@ -327,9 +349,12 @@ describe("sidebar collapse and geometry", () => {
     expect(WORKSPACE_HEADER.match(/data-window-controls-reserve/g)).toHaveLength(1);
   });
 
-  it("uses 32px repository rows and 2px gaps, with a quiet section header", () => {
+  it("uses 32px rows and 2px gaps on one 16px icon column, with a quiet section header", () => {
     const entry = classConstant(SIDEBAR, "SIDEBAR_ENTRY_CLS");
-    expect(entry).toMatch(/\bh-7\.5\b/);
+    // 8px list inset + 8px padding and no border put every icon at 16px.
+    for (const cls of ["h-8", "px-2", "gap-2", "border-0", "data-[state=active]:bg-bg2-highlight", "[&>svg]:text-fg3"]) {
+      expect(entry.split(/\s+/), cls).toContain(cls);
+    }
     expect(classConstant(HEADER, "REPOSITORY_HEADER_CLS")).toMatch(
       /\bh-8\b/,
     );
@@ -343,9 +368,10 @@ describe("sidebar collapse and geometry", () => {
       ),
     );
     expect(section).not.toContain("hover:bg-");
-    expect(classConstant(SIDEBAR, "SECTION_LABEL_CLS")).toMatch(
-      /\btext-3xxs\b[^"]*\btext-fg2\b|\btext-fg2\b[^"]*\btext-3xxs\b/,
-    );
+    const label = classConstant(SIDEBAR, "SECTION_LABEL_CLS").split(/\s+/);
+    for (const cls of ["text-3xxs", "leading-4", "font-medium", "text-fg3"]) expect(label, cls).toContain(cls);
+    // The scroller's 4px top inset keeps the first header's focus ring whole.
+    expect(SIDEBAR).toContain('className="min-h-0 flex-1 overflow-y-auto px-2 pt-1 pb-2"');
   });
 });
 
@@ -366,10 +392,12 @@ describe("sidebar typography and colour", () => {
     expect(header).toMatch(/\btext-fg2\b/);
     expect(header).not.toMatch(/\btext-fg1\b/);
     expect(header).not.toContain("has-[:focus-visible]:bg-");
+    // An open repository page fills its header like a selected row.
+    expect(header.split(/\s+/)).toContain("data-[active=true]:bg-bg2-highlight");
     expect(classConstant(ROW, "GLYPH_BOX_CLS")).toMatch(/\btext-fg2\b/);
   });
 
-  it("presents device Personal as Local, sized to its name", () => {
+  it("presents device Personal as Local in a full-width nav row", () => {
     const switcher = source(
       "apps/desktop/src/renderer/features/team/organization-switcher.tsx",
     );
@@ -377,12 +405,13 @@ describe("sidebar typography and colour", () => {
       'export const LOCAL_ORGANIZATION_LABEL = "Local";',
     );
     expect(switcher).toContain("<LaptopMinimal strokeWidth={1.5} />");
-    expect(switcher).toMatch(/\bw-fit max-w-full min-w-0\b/);
+    // A full-width 32px row, the same height and inset as the nav rows.
+    expect(switcher).toMatch(/\bh-8 w-full min-w-0\b/);
     expect(switcher).toContain(
       '<span className="min-w-0 truncate text-left">{label}</span>',
     );
     expect(switcher).toContain(
-      '<ChevronDown className="size-3" strokeWidth={1.5} />',
+      '<ChevronDown className="ml-auto size-3!" strokeWidth={1.5} />',
     );
     expect(switcher).not.toContain("ExternalLink");
     expect(
@@ -402,11 +431,17 @@ describe("sidebar repository headers", () => {
     expect(HEADER).toContain("aria-expanded={!collapsed}");
   });
 
-  it("keep + visible and reveal settings and ⋯ on hover or while the menu is open", () => {
-    expect(HEADER).toMatch(
-      /menuOpen\s*\?\s*"flex"\s*:\s*"hidden group-hover\/repo:flex group-has-focus-visible\/repo:flex"/,
+  it("keep + visible and reveal settings and ⋯ over the name on hover or while the menu is open", () => {
+    // Overlaid on a fade instead of toggling display, so the name never
+    // re-truncates under the pointer; the fade stays click-through.
+    expect(classConstant(HEADER, "REPOSITORY_HOVER_ACTIONS_CLS")).toMatch(
+      /^pointer-events-none absolute inset-y-0 right-full\b[^"]*\bopacity-0\b/,
     );
-    const actions = HEADER.slice(HEADER.indexOf('"items-center gap-0.5"'));
+    expect(HEADER).toMatch(
+      /menuOpen\s*\?\s*"opacity-100 \[&_button\]:pointer-events-auto"\s*:\s*"group-hover\/repo:opacity-100 group-hover\/repo:\[&_button\]:pointer-events-auto group-has-focus-visible\/repo:opacity-100 group-has-focus-visible\/repo:\[&_button\]:pointer-events-auto"/,
+    );
+    expect(HEADER).not.toContain("hidden group-hover/repo:flex");
+    const actions = HEADER.slice(HEADER.indexOf("REPOSITORY_HOVER_ACTIONS_CLS,"));
     const plus = actions.indexOf(
       "aria-label={`Create workspace in ${project.name}`}",
     );
@@ -431,9 +466,8 @@ describe("sidebar repository headers", () => {
     ]);
     expect(HEADER).not.toMatch(/Hide repository/);
     expect(menu).toContain("requestCreateFromSource(project.id);");
-    expect(menu).toContain(
-      'className="text-red-primary focus:text-red-primary"',
-    );
+    expect(menu).toContain('variant="destructive"');
+    expect(menu).not.toContain("text-red-primary");
   });
 
   it("share the Paths section's removal flow instead of duplicating it", () => {

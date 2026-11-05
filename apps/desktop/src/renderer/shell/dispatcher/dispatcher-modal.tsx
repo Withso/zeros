@@ -89,6 +89,7 @@ import {
 } from "../../features/team/team-store";
 import { canCreateWorkspaceIn, localWorkspaceOwner } from "../../features/team/organization-capabilities";
 import { CloudWorkspacePausedNotice, useOrganizationCloudPaused } from "../../features/team/cloud-workspace-pause";
+import { CreateStartBanners } from "./create-start-banners";
 import { useNativeRuntime } from "../../platform/runtime";
 import { RepositoryIcon } from "../../features/repositories/repository-icon";
 import { CONTROL_PLANE_URL } from "../../features/team/control-plane";
@@ -681,7 +682,7 @@ function ActiveDispatcherPage({
               active={active}
               disabled={busy}
               onChange={next => setComputerSource(next && cloud.sourceOwner ? { owner: cloud.sourceOwner, base: next } : null)}
-            /> : !needsGitSetup && (
+            /> : !needsGitSetup && selectedProject && (
               <CreateFromSource
                 key={JSON.stringify([
                   selectedProject?.id,
@@ -731,6 +732,13 @@ function ActiveDispatcherPage({
               allowAdditionalDirectories={placement === "local"}
             />
           </section>
+          {!cloud.computerMode && !selectedProject && (
+            <CreateStartBanners
+              onOpenProject={() => onOpenProject({ onSelect: selectAddedProject })}
+              onOpenGithubProject={() => onOpenGithubProject({ onSelect: selectAddedProject })}
+              onQuickStart={() => onQuickStart({ onSelect: selectAddedProject })}
+            />
+          )}
         </div>
       </div>
       </div>

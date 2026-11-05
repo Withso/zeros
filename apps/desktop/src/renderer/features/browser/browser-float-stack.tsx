@@ -420,13 +420,12 @@ function BrowserFloatBox({
           className={cn("shrink-0", FLOAT_ISLAND_HIDDEN, reveal)}
         >
           <Tooltip label="Dock preview">
-            <IconButton size="compact" onClick={openInPanel} label="Open in right panel">
+            <IconButton onClick={openInPanel} label="Open in right panel">
               <PanelRightOpen aria-hidden="true" />
             </IconButton>
           </Tooltip>
           <Tooltip label={windowUnavailable ?? "Preview window"}>
             <IconButton
-              size="compact"
               disabled={windowUnavailable !== null}
               onClick={() => {
                 void openBrowserWindow(windowInput).then((result) => {
@@ -439,7 +438,6 @@ function BrowserFloatBox({
             </IconButton>
           </Tooltip>
           <IconButton
-            size="compact"
             onClick={closeFloat}
             label="Close floating preview"
           >

@@ -28,6 +28,8 @@ import {
   useWorkbenchStatusSource,
 } from "../../shell/workbench/tab-status";
 import { Button } from "../../shared/ui/primitives/button";
+import { EmptyState } from "../../shared/ui/layout/empty-state";
+import { ZerosSpinner } from "../../shared/ui/loading/zeros-spinner";
 import { primeDesignWorkspaceSnapshot } from "./state/design-workspace-cache";
 import { DesignWorkspaceColumn } from "./design-workspace";
 import { reportDesignDirectoryFailure } from "./design-directory-failure";
@@ -144,38 +146,46 @@ export function DesignWorkbenchSurface({
     );
   }
   if (!localMain && target.data?.exists === false) {
+    // Create is the one primary action; while it runs it keeps its place
+    // and shows the spinner.
     return (
-      <div
-        className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 px-6 text-center"
+      <EmptyState
+        icon={Frame}
+        title="Design"
         data-design-tab-empty=""
+        action={
+          <Button
+            variant="primary"
+            loading={creating}
+            disabled={!active}
+            aria-label="Create design directory"
+            onClick={() => void initialize()}
+          >
+            {creating ? "Creating…" : "Create design directory"}
+          </Button>
+        }
       >
-        <Frame className="text-muted-fg size-10" strokeWidth={1} aria-hidden />
-        <Button
-          variant="secondary"
-          size="sm"
-          disabled={!active || creating}
-          onClick={() => void initialize()}
-        >
-          {creating ? "Creating…" : "Create design directory"}
-        </Button>
-        <p className="text-fg2 max-w-sm text-xs">Start designing</p>
-      </div>
+        Start designing
+      </EmptyState>
     );
   }
   if (loadError && (target.data === undefined || checkout.data === undefined))
     return <WorkbenchEmptyState type="design" />;
+  // Checking is one quiet line with the spinner; the rest are the shared
+  // empty state.
+  if (!localMain && (target.data !== null || target.loading || checkout.loading))
+    return (
+      <div
+        className="text-fg2 flex min-h-0 flex-1 items-center justify-center gap-2 p-4 text-xs leading-4.5"
+        data-design-tab-empty=""
+      >
+        <ZerosSpinner size={16} />
+        <p className="m-0">Checking Design directory…</p>
+      </div>
+    );
   return (
-    <div
-      className="text-fg2 flex min-h-0 flex-1 flex-col items-center justify-center gap-3 p-4 text-sm"
-      data-design-tab-empty=""
-    >
-      <p>
-        {localMain
-          ? "Open a workspace to edit Design."
-          : target.data !== null || target.loading || checkout.loading
-            ? "Checking Design directory…"
-            : "No Design directory available."}
-      </p>
-    </div>
+    <EmptyState icon={Frame} data-design-tab-empty="">
+      {localMain ? "Open a workspace to edit Design." : "No Design directory available."}
+    </EmptyState>
   );
 }

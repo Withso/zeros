@@ -439,7 +439,6 @@ export function BrowserAgentPictureInPicture({
           <>
             <IconButton
               type="button"
-              motion="none"
               className="pointer-events-auto"
               onClick={() => setHiddenSessionId(browserSessionId ?? null)}
               label="Hide browser picture in picture"
@@ -448,7 +447,6 @@ export function BrowserAgentPictureInPicture({
             </IconButton>
             <IconButton
               type="button"
-              motion="none"
               className="pointer-events-auto"
               onClick={restoreBrowser}
               label="Restore browser column"

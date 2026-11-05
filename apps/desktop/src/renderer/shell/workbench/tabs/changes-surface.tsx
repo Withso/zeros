@@ -1,4 +1,5 @@
 import { ChangesScopeMenu } from "./changes-scope-menu";
+import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import { scopeIdentity } from "./changes-scope";
 import { WorkbenchTabToolbar, useWorkbenchStatusSource } from "../tab-status";
 import {
@@ -48,7 +49,9 @@ import { useGithubReview } from "@/renderer/features/code-review/use-github-revi
 import type { CodeReviewExternalSource } from "@/renderer/features/code-review/review-thread-model";
 import { parseRemote } from "../../pr/github-url";
 import { resolveReviewProvider } from "../../pr/review-provider";
-import { Button, Input, Tooltip } from "@/renderer/shared/ui/primitives";
+import { Input, Tooltip } from "@/renderer/shared/ui/primitives";
+import { SkeletonLine } from "@/renderer/shared/ui/primitives/skeleton";
+import { EmptyState as SharedEmptyState } from "@/renderer/shared/ui/layout/empty-state";
 import { cn } from "@/renderer/shared/ui/cn";
 import { useChatCwd } from "../../use-chat-cwd";
 import { triggerGitRefresh, useGitRefreshKey } from "../../use-git-refresh-key";
@@ -154,10 +157,7 @@ export const ChangesWorkbenchSurface = React.memo(
             onChanged={handleChanged}
           />
         ) : (
-          <EmptyState
-            title="No git workspace"
-            subtitle="Open this folder as a Zeros workspace (create a worktree) to review its changes here."
-          />
+          <EmptyState title="Open this folder as a workspace to review its changes" />
         )}
       </div>
     );
@@ -833,10 +833,9 @@ export function ChangesSurface({
 
   const sidebarToggle = (
     <Tooltip label={sidebarVisible ? "Hide changes" : "Show changes"}>
-      <Button
-        variant="ghost"
-        size="icon-sm"
-        aria-label={sidebarVisible ? "Hide changes list" : "Show changes list"}
+      <IconButton
+        size="standard"
+        label={sidebarVisible ? "Hide changes list" : "Show changes list"}
         aria-pressed={sidebarVisible}
         onClick={() => setChangesSidebarVisible(!sidebarVisible)}
         className={cn(
@@ -845,7 +844,7 @@ export function ChangesSurface({
         )}
       >
         <Folders className="size-3.5" />
-      </Button>
+      </IconButton>
     </Tooltip>
   );
 
@@ -969,13 +968,31 @@ export function ChangesSurface({
               })}
             {(!selected || (!dirtyEditorIds.has(tab.id) && tab.changesRequestedFile === selected && !model.loading && !model.error && !orderedPaths.includes(selected))) && (
               <div className="pointer-events-none absolute inset-0 flex h-full min-h-0 flex-col">
-                <div className="flex flex-1 flex-col items-center justify-center gap-2 px-8 text-center">
-                  <FileDiff className="text-muted-fg size-10" strokeWidth={1} />
-                  <p className="text-fg2 m-0 max-w-full break-words text-xs">
+                {model.loading && !(selected && tab.changesRequestedFile === selected) ? (
+                  // Skeleton cards where the diffs will land; the pane keeps
+                  // its name for screen readers.
+                  <div
+                    role="status"
+                    aria-label="Loading changes"
+                    className="flex flex-col gap-3 p-3"
+                  >
+                    {[0, 1, 2].map((card) => (
+                      <div key={card} className="border-border1 rounded-lg border">
+                        <div className="border-border1 flex h-9 items-center border-b px-3">
+                          <SkeletonLine className="w-40" />
+                        </div>
+                        <div className="flex flex-col gap-2.5 p-3">
+                          {[64, 82, 46, 72].map((width) => (
+                            <SkeletonLine key={width} style={{ width: `${width}%` }} />
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                <SharedEmptyState icon={FileDiff} className="break-words">
                     {selected && tab.changesRequestedFile === selected
                       ? `No current changes for ${selected}`
-                      : model.loading
-                      ? "Loading changes…"
                       : model.error
                         ? "Choose another comparison or retry."
                         : fileCount > 0
@@ -992,8 +1009,8 @@ export function ChangesSurface({
                                   : model.scope.kind === "all"
                                     ? "No branch changes"
                                     : "No changes in this selection"}
-                  </p>
-                </div>
+                </SharedEmptyState>
+                )}
               </div>
             )}
           </div>

@@ -30,9 +30,9 @@ interface Props {
   ctx: RendererContext;
 }
 
-/** Same cap as the other tool detail bodies (~8 lines of mono). */
+/** The chat code style inside the one detail card, which owns the scroll. */
 const DETAIL_CLASS =
-  "max-h-[200px] overflow-y-auto rounded-md bg-bg2/60 p-2 font-mono text-xs leading-relaxed text-fg1 [&_pre]:whitespace-pre-wrap [&_pre]:break-words";
+  "px-3 py-2 font-mono text-xs leading-5 text-fg1 [&_pre]:whitespace-pre-wrap [&_pre]:break-words";
 
 export const UnknownMessage = memo(function UnknownMessage({
   message,

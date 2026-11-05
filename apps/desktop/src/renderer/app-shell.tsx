@@ -88,7 +88,6 @@ import {
   useAddProject,
 } from "./shell/add-project-provider";
 import { DispatcherPage } from "./shell/dispatcher/dispatcher-modal";
-import { NoProjectsView } from "./shell/no-projects-view";
 import { useActiveWorkspace } from "./state/use-active-workspace";
 import { LocalLinkNavigation } from "./shell/local-link-navigation";
 import { useProjects } from "./state/use-projects";
@@ -939,13 +938,20 @@ function MainShellBody({
   // ⌘T opens a chat; ⌘⇧T opens a terminal-agent tab when that feature is
   // enabled. Mounted here so neither shortcut fires from Settings.
   useNewTabHotkeys(activePage === "workspace" && workspaceToolsAvailable);
-  // Zero projects -> full-window welcome (logo + Open project / GitHub /
-  // Quick start tiles) instead of the empty three-column shell.
+  // With no repositories, Home and the workspace page open the Create page
+  // beside the sidebar (its start banners add the first repository); so does
+  // the workspace page with nothing chosen. Routing only: the saved page is
+  // unchanged, so adding a repository or opening a workspace returns to it.
   const showWelcome = projects.length === 0;
+  const nothingSelected = activePage === "workspace" && !activeWorkspaceFolder;
+  const opensCreate =
+    (showWelcome && (activePage === "dashboard" || activePage === "workspace")) ||
+    nothingSelected;
   // The Home sub-pages share one shell beside the app sidebar. "repo" is the
   // per-repo page (workspaces + settings) reached from a repository's settings
   // action; "customize" is agent capabilities (MCP now) scoped User / per-repo.
   const isHome =
+    opensCreate ||
     activePage === "create" ||
     activePage === "dashboard" ||
     activePage === "customize" ||
@@ -958,7 +964,7 @@ function MainShellBody({
       ? (projects.find((p) => p.id === activeRepoId) ?? null)
       : null;
   const activeHomePageId = isHome
-    ? activePage === "create"
+    ? activePage === "create" || opensCreate
       ? "create"
       : activePage === "settings"
         ? "settings"
@@ -1049,11 +1055,6 @@ function MainShellBody({
               </div>
             </div>
           )}
-          {showWelcome && !isHome && (
-            <div className="absolute inset-0 flex min-h-0 min-w-0">
-              <NoProjectsView />
-            </div>
-          )}
 
           {homePageIdsToRender.length > 0 && (
             <div
@@ -1071,8 +1072,11 @@ function MainShellBody({
                 {...popoverBoundaryProps}
                 className={[
                   "relative flex min-h-0 min-w-0 flex-1 overflow-hidden",
-                  // Home pages start below the collapsed window controls.
-                  collapsedControlsVisible ? "mt-10" : "",
+                  // The Dashboard header reserves the collapsed controls'
+                  // corner in its own row; Customize and repository pages
+                  // already start below it. The Create page's column still
+                  // starts below the controls.
+                  collapsedControlsVisible && activeHomePageId === "create" ? "mt-10" : "",
                 ].join(" ")}
               >
                 {homePageIdsToRender.includes("dashboard") && (
@@ -1086,7 +1090,7 @@ function MainShellBody({
                     ].join(" ")}
                     aria-hidden={activeHomePageId !== "dashboard"}
                   >
-                    {showWelcome ? <NoProjectsView /> : <DashboardPage />}
+                    {!showWelcome && <DashboardPage />}
                   </div>
                 )}
                 {homePageIdsToRender.includes("customize") && (

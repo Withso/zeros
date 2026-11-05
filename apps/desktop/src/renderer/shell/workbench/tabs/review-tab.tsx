@@ -873,7 +873,7 @@ function MergeControls({
     const ready = (
       <Button
         size="sm"
-        variant="default"
+        variant="primary"
         disabled={busy || !!blockedReason}
         onClick={onMarkReady}
       >

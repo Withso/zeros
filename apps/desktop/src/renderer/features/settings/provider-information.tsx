@@ -1,10 +1,10 @@
 import React, { useEffect, useState, useSyncExternalStore } from "react";
+import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import { RefreshCw } from "lucide-react";
 import type {
   BrowserSubscriptionProvider,
   ProviderSubscriptionStatus,
 } from "@zeros/protocol/provider-auth";
-import { Button } from "../../shared/ui";
 import { cn } from "../../shared/ui/cn";
 import { ZerosSpinner } from "../../shared/ui/loading/zeros-spinner";
 import { ProgressBar } from "../../shared/ui/primitives/progress-bar";
@@ -145,12 +145,11 @@ export function ProviderInformation({
       </dl>
       <div className="border-border1 flex flex-col gap-4 border-t p-4">
         <div className="flex items-center justify-between gap-3">
-          <h3 className="text-fg1 text-[14px] font-medium">Usage limits</h3>
+          <h3 className="text-fg1 text-xs leading-4.5 font-medium">Usage limits</h3>
           <Tooltip label="Refresh usage">
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              aria-label={`Refresh ${SUBSCRIPTION_NAMES[provider]} usage`}
+            <IconButton
+              size="standard"
+              label={`Refresh ${SUBSCRIPTION_NAMES[provider]} usage`}
               aria-busy={refreshing}
               disabled={!active || read.loading || read.refreshing}
               onClick={() => {
@@ -169,7 +168,7 @@ export function ProviderInformation({
                 )}
                 aria-hidden="true"
               />
-            </Button>
+            </IconButton>
           </Tooltip>
         </div>
         {coldLoading ? (

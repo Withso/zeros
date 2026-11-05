@@ -1,7 +1,9 @@
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
 import { cn } from "../../cn";
-import { buttonVariants } from "../button";
+import { Button, buttonVariants } from "../button";
 
 // Same merge the Button component applies to its recipe.
 const classesFor = (props: Parameters<typeof buttonVariants>[0]) =>
@@ -40,5 +42,72 @@ describe("Button control sizes", () => {
     const destructive = classesFor({ variant: "destructive" }).join(" ");
     expect(destructive).toContain("hover:bg-red-secondary-hover");
     expect(destructive).not.toMatch(/bg-red-secondary\/\d+/);
+  });
+});
+
+describe("Button states", () => {
+  it("draws Primary and Destructive flat, without a stock shadow", () => {
+    for (const variant of ["primary", "destructive"] as const) {
+      const classes = classesFor({ variant });
+      expect(classes.some((cls) => /^shadow(-|$)/.test(cls)), variant).toBe(false);
+    }
+  });
+
+  it("names Primary for what it is", () => {
+    expect(classesFor({ variant: "primary" })).toContain("bg-primary-button-bg");
+    // `default` was Primary's pre-rename name; one name per look now.
+    expect(classesFor({ variant: "default" as never }).join(" ")).not.toContain("bg-primary-button-bg");
+  });
+
+  it("holds the hover look while a Ghost button's menu is open", () => {
+    const ghost = classesFor({ variant: "ghost" });
+    expect(ghost).toEqual(
+      expect.arrayContaining(["data-[state=open]:bg-bg2-highlight", "data-[state=open]:text-fg1"]),
+    );
+  });
+
+  it("presses Secondary and Ghost through aria-pressed with fill and border", () => {
+    for (const variant of ["secondary", "ghost"] as const) {
+      expect(classesFor({ variant }), variant).toEqual(
+        expect.arrayContaining(["aria-pressed:border-border4", "aria-pressed:bg-bg2-highlight"]),
+      );
+    }
+  });
+
+  it("dims aria-disabled without dropping hover, so a reason tooltip can show", () => {
+    const base = classesFor({});
+    expect(base).toEqual(expect.arrayContaining(["aria-disabled:opacity-50", "aria-disabled:cursor-not-allowed"]));
+    expect(base.some((cls) => cls.startsWith("aria-disabled:pointer-events"))).toBe(false);
+  });
+
+  it("lets a loading spinner take the leading icon's place", () => {
+    expect(classesFor({})).toContain("[&>[data-zeros-loader]+svg]:hidden");
+  });
+
+  it("disables and reports busy while loading, whatever the caller passed", () => {
+    const markup = renderToStaticMarkup(
+      createElement(Button, { variant: "primary", loading: true, "aria-busy": false }, "Save"),
+    );
+    expect(markup).toContain('disabled=""');
+    expect(markup).toContain('aria-busy="true"');
+    expect(markup).toMatch(/<button[^>]*><span[^>]*data-zeros-loader="orbit"/);
+    expect(markup).toContain("Save</button>");
+  });
+});
+
+describe("Button asChild", () => {
+  // Regression: the loading slot rendered `null` beside the child, so Slot
+  // received two children and threw (Design layer rows, the API key link).
+  it("renders its one child as the button with the recipe classes", () => {
+    const html = renderToStaticMarkup(
+      createElement(
+        Button,
+        { asChild: true, variant: "secondary", size: "sm" },
+        createElement("a", { href: "#console" }, "Open console"),
+      ),
+    );
+    expect(html).toMatch(/^<a [^>]*href="#console"/);
+    expect(html).toContain("rounded-md");
+    expect(html).toContain("Open console");
   });
 });

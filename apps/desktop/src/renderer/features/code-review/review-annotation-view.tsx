@@ -1,5 +1,10 @@
 import { useState } from "react";
-import { Button } from "@/renderer/shared/ui/primitives";
+import {
+  Button,
+  Tabs,
+  TabsList,
+  TabsTrigger,
+} from "@/renderer/shared/ui/primitives";
 import { InlineReviewThread } from "./inline-review-thread";
 import { ReviewComposer } from "./review-composer";
 import { ReviewSelectionToolbar } from "./review-selection-toolbar";
@@ -73,7 +78,7 @@ export function ReviewAnnotationView({
             onCancel={() => onCancel(selection)}
           />
         ) : (
-          <div className="border-border2 bg-bg1 min-w-0 rounded-md border p-2">
+          <div className="min-w-0">
             <ReviewComposer
               store={review.drafts}
               draftKey={`new:${reviewSelectionKey(selection)}`}
@@ -97,37 +102,42 @@ export function ReviewAnnotationView({
               }}
               onCancel={() => onCancel(selection)}
               onSubmitted={() => onCancel(selection)}
-            >
-              {selection.postToPr && !postComment && (
-                <p role="status" className="text-fg3 text-xs">
-                  The PR diff changed. Your draft is kept; select the current
-                  range before posting to PR.
-                </p>
-              )}
-              {postComment || selection.postToPr ? (
-                <div className="text-fg2 flex items-center gap-1">
-                  {workspaceCommentsAvailable && <Button
-                    type="button"
-                    variant={selection.postToPr ? "ghost" : "secondary-on"}
-                    aria-pressed={!selection.postToPr}
-                    onClick={() => onSelect({ ...selection, postToPr: false })}
+              notice={
+                selection.postToPr && !postComment ? (
+                  <p
+                    role="status"
+                    className="text-yellow-primary m-0 text-xs leading-4.5"
                   >
-                    Workspace
-                  </Button>}
-                  <Button
-                    type="button"
-                    variant={selection.postToPr ? "secondary-on" : "ghost"}
-                    disabled={!postComment}
-                    aria-pressed={!!selection.postToPr}
-                    onClick={() => onSelect({ ...selection, postToPr: true })}
+                    The PR diff changed. Your draft is kept; select the current
+                    range before posting to PR.
+                  </p>
+                ) : undefined
+              }
+              destination={
+                postComment || selection.postToPr ? (
+                  // Where the comment goes; the primary submit follows it.
+                  <Tabs
+                    value={selection.postToPr ? "pr" : "workspace"}
+                    onValueChange={(value) =>
+                      onSelect({ ...selection, postToPr: value === "pr" })
+                    }
                   >
-                    Post to PR
-                  </Button>
-                </div>
-              ) : (
-                <p className="text-fg3 text-xs">Workspace comment</p>
-              )}
-            </ReviewComposer>
+                    <TabsList aria-label="Comment destination">
+                      {workspaceCommentsAvailable && (
+                        <TabsTrigger value="workspace">Workspace</TabsTrigger>
+                      )}
+                      <TabsTrigger value="pr" disabled={!postComment}>
+                        Pull request
+                      </TabsTrigger>
+                    </TabsList>
+                  </Tabs>
+                ) : (
+                  <span className="text-fg3 px-1 text-xs leading-4.5">
+                    Workspace comment
+                  </span>
+                )
+              }
+            />
           </div>
         ))}
     </div>

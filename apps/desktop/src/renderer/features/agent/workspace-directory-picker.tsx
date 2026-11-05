@@ -150,7 +150,6 @@ export function WorkspaceDirectoryPicker({
       onOpenChange={onOpenChange}
       title="Link a workspace or directory"
       description="Give this chat access to another worktree or a folder."
-      className="sm:max-w-[560px]"
     >
       <CommandInput placeholder="Search workspaces…" />
       <CommandList className="max-h-[380px]">

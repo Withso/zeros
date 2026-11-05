@@ -1,6 +1,7 @@
 import React from "react";
 import { Check } from "lucide-react";
 import { Button } from "../../shared/ui";
+import { cn } from "../../shared/ui/cn";
 import {
   Dialog,
   DialogContent,
@@ -49,7 +50,7 @@ export function ProviderConnectionDialog({
           {
             id: "cli" as const,
             label: "CLI",
-            description: "Connect your subscription using the inline terminal.",
+            description: "Sign in from the terminal below.",
           },
         ]),
     {
@@ -75,21 +76,28 @@ export function ProviderConnectionDialog({
             {methods.map((entry) => (
               <section
                 key={entry.id}
-                className="border-border1 min-w-0 overflow-hidden rounded-lg border"
+                className="border-border1 min-w-0 overflow-hidden rounded-[calc(var(--radius-lg)*1.5)] border"
               >
                 <Button
                   variant="ghost"
-                  className="h-auto w-full justify-start gap-3 rounded-none px-4 py-3 text-left"
+                  className="hover:bg-bg1-hover aria-pressed:bg-transparent aria-pressed:border-transparent h-auto w-full justify-start gap-3 rounded-none px-4 py-3 text-left"
                   aria-pressed={method === entry.id}
                   disabled={busy}
                   onClick={() => onMethodChange(entry.id)}
                 >
+                  {/* The RadioGroup look: border4, then inverted-bg around a
+                      6px inverted-fg dot when chosen. */}
                   <span
                     aria-hidden="true"
-                    className="border-fg2 flex size-4 shrink-0 items-center justify-center rounded-full border"
+                    className={cn(
+                      "flex size-4 shrink-0 items-center justify-center rounded-full border",
+                      method === entry.id
+                        ? "border-inverted-bg bg-inverted-bg"
+                        : "border-border4",
+                    )}
                   >
                     {method === entry.id && (
-                      <span className="bg-fg1 size-2 rounded-full" />
+                      <span className="bg-inverted-fg size-1.5 rounded-full" />
                     )}
                   </span>
                   <span className="flex-1">{entry.label}</span>

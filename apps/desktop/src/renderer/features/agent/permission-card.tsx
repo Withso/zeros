@@ -40,6 +40,9 @@
 // on No. They have no global approval shortcut or saved-policy action.
 // ──────────────────────────────────────────────────────────
 
+import { Kbd } from "../../shared/ui/primitives/kbd";
+import { cn } from "../../shared/ui/cn";
+import { DOCK_CARD_CLS } from "./composer-shell";
 import { memo, useEffect, useRef, type Ref } from "react";
 import { FilePen, FileText, Terminal, Wrench } from "lucide-react";
 
@@ -362,9 +365,9 @@ export const PermissionCard = memo(function PermissionCard({
     <div
       ref={rootRef}
       data-permission-card=""
-      className="border-border1 bg-bg2 flex w-full min-w-0 flex-col gap-3 rounded-lg border px-3.5 py-3"
+      className={cn(DOCK_CARD_CLS, "flex w-full min-w-0 flex-col gap-2.5 px-3.5 py-3")}
     >
-      <div className="text-fg1 text-sm font-medium">{title}</div>
+      <div className="text-fg1 text-xs leading-4.5 font-medium">{title}</div>
 
       {contextItems.length > 0 ? (
         <div className="flex min-w-0 flex-wrap gap-1.5">
@@ -372,7 +375,7 @@ export const PermissionCard = memo(function PermissionCard({
             <span
               key={`${index}:${item}`}
               data-permission-context-item=""
-              className="border-border3 bg-bg1 text-fg2 max-w-full select-text truncate rounded-md border px-2 py-1 text-xs"
+              className="border-border1 bg-bg1 text-fg2 max-w-full select-text truncate rounded-md border px-2 py-1 text-xs"
             >
               {item}
             </span>
@@ -380,23 +383,24 @@ export const PermissionCard = memo(function PermissionCard({
         </div>
       ) : null}
 
+      {/* The command sits in a bg1 well with a border1 edge. */}
       {label || detail ? (
-        <Inline gap={2} align="center" className="min-w-0">
+        <Inline gap={2} align="center" className="border-border1 bg-bg1 min-h-9 min-w-0 rounded-lg border px-2.5 py-2">
           <Icon className="text-fg2 size-3.5 shrink-0" aria-hidden="true" />
           {label && (
-            <span className="text-fg1 max-w-[45%] shrink-0 select-text truncate text-sm">
+            <span className="text-fg1 max-w-[45%] shrink-0 select-text truncate text-xs leading-4.5">
               {label}
             </span>
           )}
           {detail && (
-            <span className="text-fg2 min-w-0 flex-1 select-text truncate font-mono text-xs">
+            <span className="text-fg2 min-w-0 flex-1 select-text truncate font-mono text-3xxs leading-4">
               {detail}
             </span>
           )}
         </Inline>
       ) : null}
 
-      <div className="flex flex-col gap-1.5">
+      <div className="-mx-2 -mb-1.5 flex flex-col gap-0.5">
         {useOptionNames ? (
           opts.map((option, index) => (
             <PermRow
@@ -515,14 +519,17 @@ function PermRow({
       type="button"
       ref={buttonRef}
       onClick={onClick}
-      // Secondary-button recipe (RULES.md): bg1 fill + border3, hover → bg2 +
-      // border4. Full-width row (label left, shortcut hint right).
-      className={`border-border3 bg-bg1 hover:border-border4 hover:bg-bg2 flex w-full items-center justify-between gap-3 rounded-md border px-3 py-2 text-left transition-colors duration-150 ease-out${explicitFocus ? " focus:border-fg2 focus:outline-none" : ""}`}
+      // A 32px option row on the card's surface: no border, the surface hover
+      // for pointer and focus, and the Enter default highlighted at rest.
+      // Label left, its shortcut as an 18px keycap right.
+      className={cn(
+        "hover:bg-sidebar-bg-hover focus-visible:bg-sidebar-bg-hover flex min-h-8 w-full items-center justify-between gap-3 rounded-lg px-2 py-1.5 text-left transition-colors duration-120 ease-out focus-visible:outline-none",
+        hint === "↵" && "bg-sidebar-bg-hover",
+        explicitFocus && "focus:bg-sidebar-bg-hover",
+      )}
     >
-      <span className="text-fg1 min-w-0 truncate text-sm">{label}</span>
-      {hint ? (
-        <span className="text-fg2 shrink-0 font-mono text-xs">{hint}</span>
-      ) : null}
+      <span className="text-fg1 min-w-0 truncate text-xs leading-4.5">{label}</span>
+      {hint ? <Kbd>{hint}</Kbd> : null}
     </button>
   );
 }

@@ -12,4 +12,9 @@
   [data-model-pill-label] {
     display: none;
   }
+  /* At the 360px pane floor the Design tag keeps its mark and remove glyph,
+     so Design mode's tools still fit beside the actions on one row. */
+  [data-composer-design-tag-label] {
+    display: none;
+  }
 }

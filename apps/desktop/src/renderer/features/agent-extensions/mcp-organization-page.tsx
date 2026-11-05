@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
-import { ChevronRight, Plus, Trash2 } from "lucide-react";
+import { Plus } from "lucide-react";
 import { Button } from "../../shared/ui/primitives/button";
-import { Switch } from "../../shared/ui/primitives/switch";
+import { Badge } from "../../shared/ui/primitives/badge";
+import { MessageRow } from "../../shared/ui/primitives/message-row";
+import { Tabs, TabsList, TabsTrigger } from "../../shared/ui/primitives/tabs";
 import { toast } from "../../shared/ui/primitives/elements";
 import { useRecoveringRead } from "../../state/use-recovering-read";
 import { KeyedAsyncCache } from "../../shared/lib/keyed-async-cache";
@@ -14,11 +16,14 @@ import { saveMcpDraft, secretChangesFromDraft } from "./mcp-form-save";
 import { serverFromDraft, type Draft } from "./mcp-server-model";
 import type { RawServer } from "./mcp-server-model";
 import { mcpConnectionView } from "./mcp-connection-view";
-import { SETTINGS_CARD_LIST_CLS, SETTINGS_GROUP_RADIUS } from "../settings/settings-ui";
+import { SettingsAddRow, SettingsGroup, SettingsList, SettingsRow } from "../settings/settings-ui";
+import { McpServerRow } from "./mcp-server-row";
 import { readCloudMcpRepositories, cancelCloudMcpAuth, cloudMcpAuthStatus, cloudMcpCache, cloudMcpKey, probeCloudMcp, readCloudMcp, removeCloudMcp, saveCloudMcp, startCloudMcpAuth, type CloudMcpExtension } from "./mcp-cloud-api";
 import { cloudMcpRecoverySnapshot, consumeCloudMcpRecovery, subscribeCloudMcpRecovery } from "../agent/cloud-failure-navigation";
 
 const repositoriesCache = new KeyedAsyncCache<McpProjectOption[]>(24);
+
+const TRANSPORT_LABEL = { stdio: "STDIO", sse: "Legacy SSE", http: "Streamable HTTP" } as const;
 
 function OrganizationMcpRow({ row, ownerKey, observedAt, busy, onEdit, onConnect, onToggle, onRemove }: {
   row: CloudMcpExtension; ownerKey: string; observedAt: number; busy: boolean; onEdit: () => void; onConnect: () => void;
@@ -28,16 +33,26 @@ function OrganizationMcpRow({ row, ownerKey, observedAt, busy, onEdit, onConnect
   const verification = useSyncExternalStore(useCallback(listener => mcpConnectionCache.subscribe(key, listener), [key]), useCallback(() => mcpConnectionCache.getSnapshot(key), [key]));
   const checked = row.config.auth !== "oauth" || !row.oauth || verification.updatedAt >= observedAt ? verification.data : undefined;
   const view = mcpConnectionView(row.config, checked, row.config.auth === "oauth" ? row.oauth?.status : undefined);
-  return <div className="flex flex-wrap items-center gap-3 py-3">
-    <Button variant="ghost" className="h-auto min-w-0 flex-1 justify-between gap-4 px-0 py-1 text-left" onClick={onEdit} aria-label={`Edit ${String(row.config.name)}`}>
-      <span className="flex min-w-0 flex-col gap-1"><span className="text-fg1 truncate text-xs">{String(row.config.name)}</span><span className="text-fg2 truncate text-xs">{row.repository ?? "All projects"} · {row.config.transport === "stdio" ? "STDIO" : row.config.transport === "sse" ? "Legacy SSE" : "Streamable HTTP"}</span></span>
-      <ChevronRight className="text-fg3 size-4" aria-hidden="true" />
-    </Button>
-    <span className={view.tone === "success" ? "text-green-primary text-xs" : view.tone === "error" ? "text-red-primary text-xs" : "text-fg2 text-xs"}>{view.label}</span>
-    {view.action && view.label !== "Connected" && <Button variant="secondary" disabled={busy} onClick={onConnect}>{view.tone === "error" ? "Retry" : "Connect"}</Button>}
-    {row.canEdit && <><Switch aria-label={`Enable ${String(row.config.name)}`} checked={row.config.enabled !== false} disabled={busy} onCheckedChange={onToggle} />
-      <Button variant="ghost" size="icon" aria-label={`Remove ${String(row.config.name)}`} disabled={busy} onClick={onRemove}><Trash2 aria-hidden="true" /></Button></>}
-  </div>;
+  const name = String(row.config.name);
+  const transport = row.config.transport === "stdio" ? "stdio" : row.config.transport === "sse" ? "sse" : "http";
+  // Status shows only when the server needs the person.
+  const tone = view.tone === "warning" ? "warning" as const : view.tone === "error" ? "failure" as const
+    : view.label === "Needs connection" ? "neutral" as const : null;
+  return <McpServerRow
+    transport={transport}
+    name={name}
+    hint={`${row.repository ?? "All projects"} · ${TRANSPORT_LABEL[transport]}`}
+    status={tone ? <Badge variant={tone}>{view.label}</Badge> : null}
+    action={view.action && view.label !== "Connected"
+      ? <Button variant="secondary" size="compact" disabled={busy} onClick={onConnect}>{view.tone === "error" ? "Retry" : "Connect"}</Button>
+      : null}
+    toggle={row.canEdit ? { checked: row.config.enabled !== false, onCheckedChange: onToggle, disabled: busy } : undefined}
+    onOpen={{ label: `Edit ${name}`, onClick: onEdit }}
+    menu={{ disabled: busy, items: [
+      { label: row.canEdit ? "Edit" : "View", onSelect: onEdit },
+      ...(row.canEdit ? [{ label: "Remove", onSelect: onRemove, destructive: true }] : []),
+    ] }}
+  />;
 }
 
 export function OrganizationMcpPage({ organization, surfaceActive }: { organization: OrganizationSummary; surfaceActive: boolean }) {
@@ -47,7 +62,9 @@ export function OrganizationMcpPage({ organization, surfaceActive }: { organizat
   const key = cloudMcpKey(organization.id, recovery ? "cloud" : githubPlacement);
   const read = useRecoveringRead(cloudMcpCache, key, readCloudMcp, { enabled: surfaceActive, maxAgeMs: 30_000 });
   const repositories = useRecoveringRead(repositoriesCache, key, readCloudMcpRepositories, { enabled: surfaceActive, maxAgeMs: 30_000 });
-  const [view, setView] = useState<{ kind: "list"; requestId?: string } | { kind: "editor"; initial: CloudMcpExtension | null; connect?: boolean; requestId?: string }>({ kind: "list" });
+  const [view, setView] = useState<{ kind: "list"; requestId?: string } | { kind: "editor"; initial: CloudMcpExtension | null; connect?: boolean; owner?: "organization" | "user"; requestId?: string }>({ kind: "list" });
+  const canShare = organization.role === "owner" || organization.role === "admin";
+  const servers = read.data;
   const [missingServer, setMissingServer] = useState(false);
   const recoveryRow = recovery ? read.data?.find(row => row.id === recovery.serverId) : undefined;
   useEffect(() => {
@@ -66,7 +83,7 @@ export function OrganizationMcpPage({ organization, surfaceActive }: { organizat
     // destination is committed so the editor cannot remount and sign in twice.
     consumeCloudMcpRecovery(recovery);
   }, [surfaceActive, recovery, recoveryRow, read.data, read.loading, read.refreshing, read.readError, key, organization.id, view.requestId, githubPlacement]);
-  const shownView = recovery && recoveryRow ? { kind: "editor" as const, initial: recoveryRow, connect: true, requestId: recovery.id } : view;
+  const shownView: typeof view = recovery && recoveryRow ? { kind: "editor", initial: recoveryRow, connect: true, requestId: recovery.id } : view;
   const [busy, setBusy] = useState<string | null>(null);
   const mutating = useRef(false);
   const mounted = useRef(true);
@@ -90,51 +107,74 @@ export function OrganizationMcpPage({ organization, surfaceActive }: { organizat
       if (mounted.current) { toast.error(error instanceof Error ? error.message : "Could not update this MCP server."); read.refresh(); }
     } finally { mutating.current = false; if (mounted.current) setBusy(null); }
   };
-  return <div className="bg-bg1 flex h-full min-h-0 w-full flex-col overflow-y-auto" {...(!surfaceActive ? { inert: "" } : {})}>
-    <div className="mx-auto flex w-full max-w-4xl flex-col gap-6 px-6 pt-10 pb-12">
-      {recovery && !recoveryRow ? <p className="text-fg2 m-0 text-sm" role="status">{read.error ? "Could not load this MCP server. Reopen this page to try again." : "Opening MCP server…"}</p>
-        : shownView.kind === "editor" ? <OrganizationMcpEditor key={`${key}:${shownView.requestId ?? shownView.initial?.id ?? "new"}`} initial={shownView.initial} organization={organization}
-        ownerKey={key} projects={repositories.data ?? []} projectsLoading={!repositories.data && !repositories.error}
+  return <div className="bg-bg1 flex h-full min-h-0 w-full flex-col overflow-y-auto px-6" {...(!surfaceActive ? { inert: "" } : {})}>
+    {/* The Settings shell: one centered 640px column, one title. */}
+    <div className="mx-auto flex w-full max-w-160 flex-col gap-8 pt-10 pb-12">
+      {recovery && !recoveryRow ? <SettingsList>
+        {read.error ? <MessageRow tone="error" role="alert" flush
+          actions={<Button variant="ghost" size="compact" onClick={read.refresh}>Retry</Button>}>Couldn’t load this MCP server.</MessageRow>
+          : <MessageRow tone="pending" role="status" flush>Opening MCP server…</MessageRow>}
+      </SettingsList>
+        : shownView.kind === "editor" ? <OrganizationMcpEditor key={`${key}:${shownView.requestId ?? shownView.initial?.id ?? `new:${shownView.owner ?? ""}`}`}
+        initial={shownView.initial} organization={organization} defaultOwner={shownView.owner} ownerKey={key}
+        projects={repositories.data ?? []} projectsLoading={!repositories.data && !repositories.error}
         servers={read.data ?? []} surfaceActive={surfaceActive} connectOnOpen={shownView.connect ?? false} onBack={() => { setView({ kind: "list" }); read.refresh(); }} />
         : <>
-          <div className="flex items-start justify-between gap-4"><div className="flex flex-col gap-1">
-            <h1 className="text-fg1 m-0 text-lg font-medium">MCP servers</h1>
-            <p className="text-fg2 m-0 text-xs">Connect tools and services for {organization.name}.</p>
-          </div><Button variant="default" onClick={() => setView({ kind: "editor", initial: null })}><Plus aria-hidden="true" />Add server</Button></div>
-          {!read.data && <p className="text-fg3 m-0 text-sm" role="status">{read.error ? "Could not load MCP servers. Reopen this page to try again." : "Loading MCP servers…"}</p>}
-          {missingServer && <p className="text-fg2 m-0 text-sm" role="status">This MCP server is no longer available in this organization.</p>}
-          {cloudEnabled && <div className="flex flex-wrap items-center gap-2" role="group" aria-label="GitHub connection for repository selection">
-            <span className="text-fg2 text-xs">Repository connection</span>
-            <Button variant={githubPlacement === "local" ? "secondary" : "ghost"} aria-pressed={githubPlacement === "local"} onClick={() => setGithubPlacement("local")}>On this Mac</Button>
-            <Button variant={githubPlacement === "cloud" ? "secondary" : "ghost"} aria-pressed={githubPlacement === "cloud"} onClick={() => setGithubPlacement("cloud")}>Cloud</Button>
-          </div>}
-          {repositories.error && <p className="text-fg2 m-0 text-xs" role="status">{repositories.error.message}</p>}
-          {(["organization", "user"] as const).map(owner => {
-            const rows = (read.data ?? []).filter(row => row.owner === owner);
-            return <section className="flex flex-col gap-3" key={owner} aria-label={owner === "organization" ? "Shared servers" : "Your servers"}>
-              <div className="flex flex-col gap-1"><h2 className="text-fg2 m-0 text-3xxs font-medium">{owner === "organization" ? "Shared by your organisation" : "Your servers"}</h2>
-                <p className="text-fg3 m-0 text-xs">{owner === "organization" ? "Available to members. Each person connects their own account when sign-in is required." : "Only you can use these servers in this organisation."}</p></div>
-              <div className={`${SETTINGS_CARD_LIST_CLS} ${SETTINGS_GROUP_RADIUS} flex flex-col divide-y`}>
-                {rows.length === 0 ? <p className="text-fg2 m-0 py-4 text-xs">No MCP servers yet.</p> : rows.map(row => <OrganizationMcpRow key={row.id} row={row} ownerKey={key} observedAt={read.updatedAt} busy={busy !== null}
-                  onEdit={() => setView({ kind: "editor", initial: row })} onConnect={() => setView({ kind: "editor", initial: row, connect: true })}
-                  onToggle={enabled => void mutate(row, false, enabled)} onRemove={() => void mutate(row, true)} />)}
-              </div>
-            </section>;
+          <header className="flex items-start justify-between gap-4">
+            <div className="flex min-w-0 flex-col gap-1">
+              <h1 className="text-fg1 m-0 text-lg leading-6 font-medium">MCP servers</h1>
+              <p className="text-fg2 m-0 text-xs leading-4.5">Tools and services for {organization.name}.</p>
+            </div>
+            <Button variant="primary" size="compact" className="shrink-0" onClick={() => setView({ kind: "editor", initial: null })}><Plus aria-hidden="true" />Add server</Button>
+          </header>
+          {missingServer && <MessageRow tone="warning" role="status" flush>This MCP server is no longer available in this organization.</MessageRow>}
+          {cloudEnabled && <SettingsList>
+            <SettingsRow label="Repository connection" hint="Where repository servers run.">
+              <Tabs value={githubPlacement} onValueChange={value => setGithubPlacement(value === "cloud" ? "cloud" : "local")}>
+                <TabsList aria-label="GitHub connection for repository selection">
+                  <TabsTrigger value="local">On this Mac</TabsTrigger>
+                  <TabsTrigger value="cloud">Cloud</TabsTrigger>
+                </TabsList>
+              </Tabs>
+            </SettingsRow>
+          </SettingsList>}
+          {repositories.error && <MessageRow tone="warning" flush>{repositories.error.message}</MessageRow>}
+          {/* Until the first read lands, one row says so for the whole page. */}
+          {!servers ? <SettingsList>
+            {read.error ? <MessageRow tone="error" role="alert" flush
+              actions={<Button variant="ghost" size="compact" onClick={read.refresh}>Retry</Button>}>Couldn’t load MCP servers.</MessageRow>
+              : <MessageRow tone="pending" role="status" flush>Loading MCP servers…</MessageRow>}
+          </SettingsList> : (["organization", "user"] as const).map(owner => {
+            const rows = servers.filter(row => row.owner === owner);
+            const shared = owner === "organization";
+            // An empty group says so, unless its one action (the add row) does.
+            const addRow = shared ? rows.length === 0 && canShare : true;
+            return <SettingsGroup key={owner} aria-label={shared ? "Shared servers" : "Your servers"}
+              title={shared ? "Shared by your organization" : "Your servers"}
+              description={shared ? "Members sign in with their own account." : `Only you can use these in ${organization.name}.`}>
+              {rows.length === 0 && !(shared && canShare) && <p className="text-fg2 m-0 text-xs leading-4.5">
+                {shared ? "No shared servers yet." : "No servers of your own yet."}</p>}
+              {rows.map(row => <OrganizationMcpRow key={row.id} row={row} ownerKey={key} observedAt={read.updatedAt} busy={busy !== null}
+                onEdit={() => setView({ kind: "editor", initial: row })} onConnect={() => setView({ kind: "editor", initial: row, connect: true })}
+                onToggle={enabled => void mutate(row, false, enabled)} onRemove={() => void mutate(row, true)} />)}
+              {addRow && <SettingsAddRow label={shared ? "Add a shared server" : "Add your own server"}
+                onClick={() => setView({ kind: "editor", initial: null, owner })} />}
+            </SettingsGroup>;
           })}
         </>}
     </div>
   </div>;
 }
 
-function OrganizationMcpEditor({ initial: source, organization, ownerKey, projects, projectsLoading, servers, onBack, surfaceActive, connectOnOpen }: {
-  initial: CloudMcpExtension | null; organization: OrganizationSummary; ownerKey: string; projects: readonly McpProjectOption[];
+function OrganizationMcpEditor({ initial: source, organization, defaultOwner, ownerKey, projects, projectsLoading, servers, onBack, surfaceActive, connectOnOpen }: {
+  initial: CloudMcpExtension | null; organization: OrganizationSummary; defaultOwner?: "organization" | "user"; ownerKey: string; projects: readonly McpProjectOption[];
   projectsLoading: boolean; servers: CloudMcpExtension[]; onBack: () => void; surfaceActive: boolean; connectOnOpen: boolean;
 }) {
   const [initial, setInitial] = useState(source);
   const definition = useRef(initial);
   definition.current = initial;
   const canShare = organization.role === "owner" || organization.role === "admin";
-  const [owner, setOwner] = useState<"organization" | "user">(() => initial?.owner ?? (canShare ? "organization" : "user"));
+  const [owner, setOwner] = useState<"organization" | "user">(() => initial?.owner ?? (defaultOwner === "user" || !canShare ? "user" : "organization"));
   const [project, setProject] = useState(initial?.repository ?? "all");
   const [id] = useState(() => initial?.id ?? crypto.randomUUID());
   const verificationKey = initial ? mcpConnectionKey(ownerKey, initial.config, initial) : "new-organization-mcp";

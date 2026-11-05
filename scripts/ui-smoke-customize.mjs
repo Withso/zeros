@@ -10,7 +10,7 @@ export async function runCustomizeSmoke({ page, check }) {
   );
   const providerTabs = page.getByRole("tablist", { name: "Agent provider" });
   await expect(providerTabs).toHaveCount(0);
-  await expect(page.getByRole("tab")).toHaveText(["MCP", "Skills"]);
+  await expect(page.getByRole("tab")).toHaveText(["MCP servers", "Skills"]);
   await page.getByRole("tab", { name: "Skills", exact: true }).click();
   await page.getByRole("button", { name: "New skill", exact: true }).click();
   await page.getByLabel("Name", { exact: true }).fill("review-changes");
@@ -19,15 +19,15 @@ export async function runCustomizeSmoke({ page, check }) {
     .getByLabel("Instructions", { exact: true })
     .fill("Inspect the diff and verify behavior.");
   await page.getByRole("button", { name: "Save skill", exact: true }).click();
-  await expect(
-    page.getByRole("heading", { name: "review-changes", exact: true }),
-  ).toBeVisible();
+  await expect(page.getByText("review-changes", { exact: true })).toBeVisible();
   await expect(page.locator("#last-write")).toContainText(
     '"expectedRevision":null',
   );
   check("Zeros skills save and return to a refreshed inventory", true);
 
-  await page.getByRole("button", { name: "Edit", exact: true }).click();
+  // Edit lives in the row's ⋯ menu.
+  await page.getByRole("button", { name: "More actions for review-changes", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Edit", exact: true }).click();
   await page
     .getByLabel("Instructions", { exact: true })
     .fill("Unsaved user draft");
@@ -40,15 +40,16 @@ export async function runCustomizeSmoke({ page, check }) {
   await expect(page.getByLabel("Instructions", { exact: true })).toHaveValue(
     "",
   );
-  await page.getByRole("button", { name: "Cancel", exact: true }).click();
+  // The breadcrumb goes back; the form has no Cancel.
+  await page.getByRole("navigation", { name: "Breadcrumb" }).getByRole("button", { name: "Skills", exact: true }).click();
   check(
     "scope switching cannot move an unsaved skill draft into another repository",
     true,
   );
 
-  await page.getByRole("tab", { name: "MCP", exact: true }).click();
+  await page.getByRole("tab", { name: "MCP servers", exact: true }).click();
   await expect(
-    page.getByRole("button", { name: /New MCP server/ }),
+    page.getByRole("button", { name: "Add server", exact: true }),
   ).toBeVisible();
   check("Customize exposes only Zeros MCP and skills editing", true);
 
@@ -63,7 +64,12 @@ export async function runCustomizeSmoke({ page, check }) {
   authUrl.searchParams.set("gatewayState", "needs-auth");
   await page.goto(authUrl.href);
   await expect(page.getByRole("button", { name: "Connect", exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: "No browser?", exact: true })).toBeVisible();
+  // Sign-in without a browser lives in the row's ⋯ menu.
+  const moreGateway = page.getByRole("button", { name: "More actions for gateway-error", exact: true });
+  const headlessItem = page.getByRole("menuitem", { name: "Sign in without a browser", exact: true });
+  await moreGateway.click();
+  await expect(headlessItem).toBeVisible();
+  await page.keyboard.press("Escape");
   check("SSE authentication failures retain both existing sign-in flows", true);
   await page.evaluate(async () => {
     const { RuntimeClient } = await import("/apps/desktop/src/renderer/platform/bridge/ws-client.ts");
@@ -80,14 +86,18 @@ export async function runCustomizeSmoke({ page, check }) {
       return request.call(this, message, ...args);
     };
   });
-  await page.getByRole("button", { name: "No browser?", exact: true }).click();
+  await moreGateway.click();
+  await headlessItem.click();
   const signIn = page.getByRole("dialog", { name: "Sign in to gateway-error" });
   await signIn.getByPlaceholder("code=… or the full …/callback?code=… URL").fill("fixture-code");
   await signIn.getByRole("button", { name: "Finish sign-in", exact: true }).click();
   await expect(signIn.getByRole("button", { name: "Cancel", exact: true })).toBeEnabled();
   await signIn.getByRole("button", { name: "Cancel", exact: true }).click();
   await expect(signIn).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "No browser?", exact: true })).toBeEnabled();
+  await expect(moreGateway).toBeEnabled();
+  await moreGateway.click();
+  await expect(headlessItem).toBeEnabled();
+  await page.keyboard.press("Escape");
   check("Sign-in can be cancelled during token exchange without a late response reopening it", true);
   await page.screenshot({
     path: ".context/customize-final.png",
@@ -104,7 +114,7 @@ export async function runMcpConcurrentAuthSmoke({ page, check }) {
   url.searchParams.set("gatewayState", "needs-auth");
   url.searchParams.set("gatewayServers", "multiple");
   await page.goto(url.href);
-  await page.getByRole("tab", { name: "MCP", exact: true }).click();
+  await page.getByRole("tab", { name: "MCP servers", exact: true }).click();
   await page.evaluate(async () => {
     const { RuntimeClient } = await import("/apps/desktop/src/renderer/platform/bridge/ws-client.ts");
     const request = RuntimeClient.prototype.request;
@@ -144,39 +154,44 @@ export async function runMcpConcurrentAuthSmoke({ page, check }) {
       return request.call(this, message, ...args);
     };
   });
-  const signIn = page.getByRole("button", { name: /Connect$/ });
-  const headless = page.getByRole("button", { name: "No browser?", exact: true });
-  await expect(signIn).toHaveCount(2);
-  await signIn.evaluateAll((buttons) => {
+  // Rows are addressed by their name button; while a row signs in it offers
+  // only Cancel, and sign-in without a browser lives in its ⋯ menu.
+  const row = (server) => page.getByRole("button", { name: `Edit ${server}`, exact: true, includeHidden: true }).locator("..");
+  const connect = (server) => row(server).getByRole("button", { name: "Connect", exact: true, includeHidden: true });
+  const more = (server) => page.getByRole("button", { name: `More actions for ${server}`, exact: true, includeHidden: true });
+  const cancel = () => page.getByRole("button", { name: "Cancel", exact: true });
+  await expect(page.getByRole("button", { name: "Connect", exact: true })).toHaveCount(2);
+  await page.getByRole("button", { name: "Connect", exact: true }).evaluateAll((buttons) => {
     buttons[0].click();
     buttons[1].click();
   });
-  await expect(signIn.nth(1)).toBeDisabled();
-  await expect(headless.nth(1)).toBeDisabled();
-  await expect(page.getByRole("button", { name: "Cancel", exact: true })).toBeEnabled();
+  await expect(connect("gateway-second")).toBeDisabled();
+  await expect(more("gateway-second")).toBeDisabled();
+  await expect(cancel()).toBeEnabled();
   await page.evaluate(() => window.mcpAuthSmoke.finish());
-  await expect(signIn.nth(1)).toBeEnabled();
-  await expect(headless.nth(1)).toBeEnabled();
-  await expect(page.getByRole("button", { name: "Cancel", exact: true })).toHaveCount(0);
+  await expect(connect("gateway-second")).toBeEnabled();
+  await expect(more("gateway-second")).toBeEnabled();
+  await expect(cancel()).toHaveCount(0);
 
-  await headless.nth(1).click();
+  await more("gateway-second").click();
+  await page.getByRole("menuitem", { name: "Sign in without a browser", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "Sign in to gateway-second" });
   await expect(dialog).toBeVisible();
-  await expect(page.getByRole("button", { name: /Connect$/, includeHidden: true }).first()).toBeDisabled();
-  await expect(page.getByRole("button", { name: "No browser?", exact: true, includeHidden: true }).first()).toBeDisabled();
+  await expect(connect("gateway-error")).toBeDisabled();
+  await expect(more("gateway-error")).toBeDisabled();
   await dialog.getByPlaceholder("code=… or the full …/callback?code=… URL").fill("fixture-code");
   await dialog.getByRole("button", { name: "Finish sign-in", exact: true }).click();
   await expect(dialog.getByRole("button", { name: "Cancel", exact: true })).toBeEnabled();
   await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
   await expect(dialog).toHaveCount(0);
-  await expect(signIn.first()).toBeEnabled();
-  await signIn.first().click();
+  await expect(connect("gateway-error")).toBeEnabled();
+  await connect("gateway-error").click();
   // A cancelled token exchange can answer after another server owns the UI.
   await page.evaluate(() => window.mcpAuthSmoke.finishCancelled());
-  await expect(page.getByRole("button", { name: "Cancel", exact: true })).toBeEnabled();
-  await expect(signIn.nth(1)).toBeDisabled();
+  await expect(cancel()).toBeEnabled();
+  await expect(connect("gateway-second")).toBeDisabled();
   await page.evaluate(() => window.mcpAuthSmoke.finish());
-  await expect(signIn.nth(1)).toBeEnabled();
+  await expect(connect("gateway-second")).toBeEnabled();
   expect(await page.evaluate(() => window.mcpAuthSmoke.calls)).toEqual([
     { op: "mcp.gateway.authorize", server: "gateway-error" },
     { op: "mcp.gateway.beginAuth", server: "gateway-second" },

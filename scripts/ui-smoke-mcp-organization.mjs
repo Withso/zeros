@@ -113,21 +113,22 @@ export async function runOrganizationMcpSmoke({ page: parent, check }) {
     active.setActiveOrganizationSelection(id, false);
   }, { id, account, snapshot: me(account ?? userA) });
   const button = name => page.getByRole("button", { name, exact: true });
+  const tab = name => page.getByRole("tab", { name, exact: true });
   const field = name => page.getByLabel(name, { exact: true });
   const section = name => page.getByRole("region", { name, exact: true });
   try {
     await page.goto(new URL("/apps/desktop/src/renderer/harnesses/harness-customize.html", parent.url()).href);
     await selectOwner(orgA);
-    await expect(button("On this Mac")).toHaveAttribute("aria-pressed", "true");
-    await button("Cloud").click();
-    await expect(button("Cloud")).toHaveAttribute("aria-pressed", "true");
+    await expect(tab("On this Mac")).toHaveAttribute("aria-selected", "true");
+    await tab("Cloud").click();
+    await expect(tab("Cloud")).toHaveAttribute("aria-selected", "true");
     await button("Add server").click();
     await page.getByRole("combobox", { name: "Project" }).click();
     await expect(page.getByRole("option")).toHaveText(["All projects", "cloud-only/project"]);
     await page.getByRole("option", { name: "All projects", exact: true }).click();
     expect(cloudReads).toEqual([orgA]);
     await button("MCP").click();
-    await button("On this Mac").click();
+    await tab("On this Mac").click();
     check("MCP repository selection preserves the Mac connection by default and explicitly switches to cloud credentials", true);
     await button("Add server").click();
     await page.getByRole("combobox", { name: "Owner" }).click();
@@ -154,7 +155,14 @@ export async function runOrganizationMcpSmoke({ page: parent, check }) {
     await button("Add server").click();
     const savedRow = () => button("Edit private-api");
     const savedStatus = () => savedRow().locator("..");
-    await expect(savedStatus()).toContainText("Connected");
+    // Connected is the normal state: the row shows no status and no Connect.
+    const expectConnectedRow = async () => {
+      await expect(savedRow()).toBeVisible();
+      for (const status of ["Needs connection", "Sign-in required", "Connection failed"])
+        await expect(savedStatus()).not.toContainText(status);
+      await expect(savedStatus().getByRole("button", { name: "Connect", exact: true })).toHaveCount(0);
+    };
+    await expectConnectedRow();
     expect(lastWrite).toMatchObject({ owner: "user", repository: "team-a/project", config: { headers: { Authorization: "${zeros.secret}" }, disabled_tools: ["org_write"] }, secrets: { headers: { Authorization: "fixture-private-value" } } });
     check("Organisation projects use authorized owner/repo names and private credentials travel separately from config", true);
 
@@ -184,7 +192,7 @@ export async function runOrganizationMcpSmoke({ page: parent, check }) {
     expect(authInputs).toHaveLength(1);
     expect(authInputs[0]).toMatchObject({ extensionId: rows.get(orgA)[0].id, expectedRevision: rows.get(orgA)[0].revision, config: { auth: "oauth" } });
     await button("MCP").click();
-    await expect(savedStatus()).toContainText("Connected");
+    await expectConnectedRow();
     check("Organization save-and-connect uses the saved revision and never authorizes a failed write", true);
     completeAuth = false;
 
@@ -225,7 +233,7 @@ export async function runOrganizationMcpSmoke({ page: parent, check }) {
     await expect(section("Tools").getByRole("switch", { name: "Allow org_write", exact: true })).toBeDisabled();
     check("Member editors remain read-only, allow personal sign-in, and cancel polling while hidden", true);
     await selectOwner(orgA, userA);
-    await expect(savedStatus()).toContainText("Connected");
+    await expectConnectedRow();
     await expect(page.getByRole("button").filter({ hasText: "shared-sign-in" })).toHaveCount(0);
     expect(probes).toBeGreaterThan(0);
     expect(errors).toEqual([]);

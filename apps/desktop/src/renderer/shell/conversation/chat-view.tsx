@@ -40,6 +40,7 @@ import { useEnabledAgents } from "../../features/agent/enabled-agents";
 import { isRemovedAgent } from "../../features/agent/agent-runnable";
 import { AgentRemovedPanel } from "../agent-removed-panel";
 import { NoFolderPanel } from "../no-folder-panel";
+import { MessageRow } from "../../shared/ui/primitives/message-row";
 import { useChatCwd } from "../use-chat-cwd";
 import { useWorkspaceProvisioning } from "../../state/pending-workspaces";
 import { finishPreparedChatView } from "./chat-intent";
@@ -722,10 +723,13 @@ function ChatBody({
 
   return (
     <>
+      {/* In the transcript's 856px column, as the shared error row. */}
       {readOnly && historyError && (
-        <p className="text-red-fg px-7 py-2 text-xs" role="alert">
-          {historyError}
-        </p>
+        <div className="mx-auto w-full max-w-[856px] shrink-0 px-7 pt-2">
+          <MessageRow tone="error" flush role="alert">
+            {historyError}
+          </MessageRow>
+        </div>
       )}
       <AgentChat
         liveTextUpdates={!readOnly}

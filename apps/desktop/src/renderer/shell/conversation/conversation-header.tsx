@@ -15,7 +15,7 @@ import { ChevronDown, Copy, Pencil } from "lucide-react";
 import { Button } from "../../shared/ui";
 import { cn } from "../../shared/ui/cn";
 import { toast } from "../../shared/ui/primitives/elements";
-import { Badge, Kbd, Tooltip } from "@/renderer/shared/ui/primitives";
+import { Kbd, Pill, Tooltip } from "@/renderer/shared/ui/primitives";
 import { branchDisplayName } from "../../shared/lib/branch-name";
 import { WorkbenchToggleButton } from "../workbench/toggle-button";
 import {
@@ -420,7 +420,6 @@ function OpenInDropdown({ path }: OpenInDropdownProps) {
       <Tooltip label={`Open in ${defaultApp.name} (⌘O)`}>
         <IconButton
           size="standard"
-          hover="subtle"
           className="shrink-0"
           disabled={!menu.canOpenLocally}
           onClick={() => void openWith(defaultApp)}
@@ -432,14 +431,13 @@ function OpenInDropdown({ path }: OpenInDropdownProps) {
       <DropdownMenu>
         <Tooltip label="Open in…" delayDuration={1500}>
           <DropdownMenuTrigger asChild>
-            <Button
-              variant="ghost"
-              size="icon-sm"
+            <IconButton
+              size="standard"
               className={OPEN_IN_CHEVRON_BTN_CLS}
-              aria-label="Open path in another app"
+              label="Open path in another app"
             >
               <ChevronDown className="size-3" />
-            </Button>
+            </IconButton>
           </DropdownMenuTrigger>
         </Tooltip>
         <DropdownMenuContent
@@ -470,18 +468,10 @@ export function OpenInBadgeMenu({
     <DropdownMenu>
       <Tooltip label="Open in…" delayDuration={1500}>
         <DropdownMenuTrigger asChild>
-          <Badge
-            variant="accent"
-            role="button"
-            tabIndex={0}
-            aria-label={`Open ${label} in…`}
-            // Only the cursor: the chip's size, weight and colour live in the
-            // `accent` variant (typography and color come
-            // from the primitive, not from a call site's className).
-            className="cursor-pointer"
-          >
-            {label}
-          </Badge>
+          {/* A workspace link is the neutral inline pill, with no blue. */}
+          <Pill aria-label={`Open ${label} in…`}>
+            <span>{label}</span>
+          </Pill>
         </DropdownMenuTrigger>
       </Tooltip>
       <DropdownMenuContent
@@ -501,13 +491,13 @@ export function OpenInPathButton({ path }: OpenInDropdownProps) {
   const menu = useOpenInMenu(path);
   return <div className="flex min-w-0 items-center">
     <Tooltip label={`Open ${path} in ${menu.defaultApp.name}`}>
-      <Button variant="outline" className="min-w-0 flex-1 justify-start rounded-r-none" disabled={!menu.canOpenLocally}
+      <Button variant="secondary" className="min-w-0 flex-1 justify-start rounded-r-none" disabled={!menu.canOpenLocally}
         aria-label={`Open sync directory in ${menu.defaultApp.name}`} onClick={() => { void menu.openWith(menu.defaultApp); }}>
         <OpenAppIcon app={menu.defaultApp} /><span className="min-w-0 truncate">{path}</span>
       </Button>
     </Tooltip>
     <DropdownMenu><DropdownMenuTrigger asChild>
-      <Button variant="outline" size="icon-sm" className="-ml-px rounded-l-none" aria-label="Sync directory options"><ChevronDown /></Button>
+      <Button variant="secondary" size="icon-sm" className="-ml-px rounded-l-none" aria-label="Sync directory options"><ChevronDown /></Button>
     </DropdownMenuTrigger><DropdownMenuContent align="start"><OpenInMenuRows menu={menu} shortcuts={false} /></DropdownMenuContent></DropdownMenu>
   </div>;
 }

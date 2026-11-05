@@ -119,7 +119,7 @@ const PromptInputSubmit = React.forwardRef<
     <Button
       ref={ref}
       type="submit"
-      variant="default"
+      variant="primary"
       size="icon"
       data-slot="prompt-input-submit"
       data-status={status}

@@ -33,7 +33,7 @@ export async function runWorkspaceHoverCards({ page, check, harnessBase, capture
     const colors = await local.evaluate(node => {
       const panel = node.closest('[role="dialog"]');
       const probe = document.createElement("span");
-      probe.style.backgroundColor = "var(--bg1-highlight)";
+      probe.style.backgroundColor = "var(--bg3)";
       probe.style.border = "1px solid var(--border2)";
       panel.append(probe);
       const actual = getComputedStyle(panel);
@@ -48,7 +48,7 @@ export async function runWorkspaceHoverCards({ page, check, harnessBase, capture
     if (capture) await capture(page, theme);
   }
   await page.evaluate(() => { document.documentElement.dataset.theme = "dark"; });
-  check("Dark and Light cards use bg1-highlight and border2", true);
+  check("Dark and Light cards use the floating surface, bg3 and border2", true);
 
   await local.hover();
   await local.getByRole("button", { name: "More PR options" }).click();
@@ -64,6 +64,9 @@ export async function runWorkspaceHoverCards({ page, check, harnessBase, capture
   await expect(previews).toHaveCount(0);
   check("The pointer can enter the card and its PR menu; Escape dismisses them", true);
 
+  // The menu steps leave the pointer where the last item sat; a hover tooltip
+  // there (the sidebar's resize handle) is not this keyboard path's.
+  await page.mouse.move(1000, 700);
   const trigger = row("ws-atlanta").getByRole("button", { name: /^Open workspace/ });
   await page.getByRole("button", { name: "Home", exact: true }).focus();
   await trigger.focus();

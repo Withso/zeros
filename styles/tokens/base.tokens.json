@@ -56,7 +56,7 @@
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
-        "components": [0.0, 0.0, 7.0]
+        "components": [0.0, 0.0, 7.843]
       },
       "$description": "default canvas / app backdrop + active chat window",
       "$extensions": {
@@ -185,7 +185,10 @@
     },
     "bg3": {
       "$type": "color",
-      "$value": "{tokens.sidebar-bg}",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [0.0, 0.0, 10.98]
+      },
       "$description": "floating popover surface",
       "$extensions": {
         "org.zeros": {
@@ -199,7 +202,10 @@
     },
     "bg3-hover": {
       "$type": "color",
-      "$value": "{tokens.sidebar-bg-hover}",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [0.0, 0.0, 16.471]
+      },
       "$description": "hover on bg3 (menu items)",
       "$extensions": {
         "org.zeros": {
@@ -318,7 +324,7 @@
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
-        "components": [0.0, 0.0, 9.0]
+        "components": [0.0, 0.0, 9.412]
       },
       "$description": "repository sidebar background",
       "$extensions": {
@@ -386,7 +392,7 @@
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
-        "components": [0.0, 0.0, 24.0]
+        "components": [0.0, 0.0, 26.667]
       },
       "$description": "secondary btn / dropdown / input",
       "$extensions": {
@@ -403,7 +409,7 @@
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
-        "components": [0.0, 0.0, 30.0]
+        "components": [0.0, 0.0, 34.118]
       },
       "$description": "highlighted state of border3",
       "$extensions": {
@@ -463,20 +469,6 @@
         }
       }
     },
-    "dialog-close-radius": {
-      "$type": "dimension",
-      "$value": {
-        "value": 999.0,
-        "unit": "px"
-      },
-      "$description": "circular popup close button",
-      "$extensions": {
-        "org.zeros": {
-          "cssName": "--dialog-close-radius",
-          "section": "base-dialog-title-size"
-        }
-      }
-    },
     "scrim": {
       "$type": "color",
       "$value": {
@@ -513,7 +505,7 @@
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
-        "components": [0.0, 0.0, 65.0]
+        "components": [0.0, 0.0, 79.216]
       },
       "$description": "input focus border, brighter accents",
       "$extensions": {
@@ -628,7 +620,7 @@
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
-        "components": [7.0, 83.0, 39.0]
+        "components": [357.52, 68.075, 41.765]
       },
       "$description": "solid delete fills + delete icons",
       "$extensions": {
@@ -664,7 +656,7 @@
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
-        "components": [7.0, 83.0, 36.0]
+        "components": [357.78, 67.839, 39.02]
       },
       "$description": "destructive hover fill",
       "$extensions": {
@@ -681,7 +673,7 @@
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
-        "components": [3.0, 26.0, 13.7]
+        "components": [0.0, 36.842, 14.902]
       },
       "$description": "error container surface",
       "$extensions": {
@@ -698,7 +690,7 @@
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
-        "components": [20.0, 97.0, 72.0]
+        "components": [2.05, 100.0, 82.745]
       },
       "$description": "text/icon on --red-bg",
       "$extensions": {
@@ -860,7 +852,7 @@
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
-        "components": [226.0, 57.0, 18.0]
+        "components": [207.6, 75.758, 12.941]
       },
       "$description": "info container surface",
       "$extensions": {
@@ -908,11 +900,7 @@
       "$type": "color",
       "$value": {
         "colorSpace": "hsl",
-        "components": [
-          226,
-          57,
-          24
-        ]
+        "components": [207.62, 69.231, 17.843]
       },
       "$description": "Workspace link pill hover fill",
       "$extensions": {

@@ -29,6 +29,9 @@
 
 import { memo, useMemo } from "react";
 import { CircleX, Clock, MessageSquare, SkipForward } from "lucide-react";
+import { Badge } from "@/renderer/shared/ui/primitives";
+import { cn } from "@/renderer/shared/ui/cn";
+import { DETAIL_BODY_CLS } from "./tool-detail-surface";
 
 import type { AgentToolMessage } from "../use-agent-session";
 import type { Renderer } from "./types";
@@ -55,10 +58,10 @@ function StatusChip({
   children: React.ReactNode;
 }) {
   return (
-    <span className="border-border1 text-fg2 text-xxs flex shrink-0 items-center gap-1 rounded-sm border px-1.5 py-0.5 font-mono tracking-wide uppercase">
+    <Badge variant="outline">
       {icon}
       {children}
-    </span>
+    </Badge>
   );
 }
 
@@ -109,10 +112,9 @@ export const QuestionRecordCard: Renderer<AgentToolMessage> = memo(
       </StatusChip>
     ) : null;
 
-    // The detail body — same container recipe as the other tool rows'
-    // expanded views (Bash output / raw input): rounded, bg-bg2/60, 14px.
+    // The detail body — the shared plain body inside the one detail card.
     const detail = (
-      <div className="bg-bg2/60 flex flex-col gap-3 rounded-md p-2.5 text-sm leading-relaxed">
+      <div className={cn(DETAIL_BODY_CLS, "gap-3")}>
         {stamp?.outcome === "skipped" && stamp.summary ? (
           <div className="text-fg3 text-xs">{stamp.summary}</div>
         ) : null}

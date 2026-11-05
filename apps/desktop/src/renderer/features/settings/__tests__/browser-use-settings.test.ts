@@ -180,10 +180,10 @@ describe("Browser use settings", () => {
       ...BROWSER_SETTINGS_ROWS.shared,
     ];
     for (const row of rows) {
-      expect(row.hint.length).toBeLessThanOrEqual(64);
+      expect((row.hint ?? "").length).toBeLessThanOrEqual(64);
     }
     for (const row of BROWSER_SETTINGS_ROWS.shared) {
-      expect(row.hint).not.toContain("Codex");
+      expect(row.hint ?? "").not.toContain("Codex");
     }
   });
 

@@ -22,7 +22,7 @@ import { ToolIdentityIcon } from "./tool-identity-icon";
 import { nativeToolSurface, toolRecord } from "./native-tool-presentation";
 import { pendingChecksMessage } from "./tool-pending-checks";
 import { useTurnDisclosure } from "../turn-disclosures";
-import { ListRow } from "@/renderer/shared/ui/primitives";
+import { Badge, ListRow, Tooltip } from "@/renderer/shared/ui/primitives";
 import { ImageHoverCard, imagePreviewMimeType } from "../image-hover-card";
 import { filePillPath, openFilePill, warmFilePill } from "@/renderer/shell/workbench/file-pill-navigation";
 import { useLocalLinks } from "../local-links/context";
@@ -148,7 +148,6 @@ export const EventRow = memo(function EventRow({
       name={path ?? meta.target!}
       kind={meta.targetKind}
       data-file-path={path}
-      title={hoverPreview || (path && destination === "file" && imagePreviewMimeType(path)) ? undefined : path ?? meta.target}
       aria-label={`Open ${accessibleTarget}`}
       aria-disabled={!canOpen || undefined}
       onPointerEnter={warmFile}
@@ -161,16 +160,20 @@ export const EventRow = memo(function EventRow({
     filePill = <DiffHoverCard trigger={filePill as React.ReactElement} enabled={!open && active}>{hoverPreview}</DiffHoverCard>;
   } else if (filePill && path && destination === "file" && imagePreviewMimeType(path)) {
     filePill = <ImageHoverCard name={path} path={path} cwd={ctx.attachmentCwd} enabled={active && !open}>{filePill as React.ReactElement}</ImageHoverCard>;
+  } else if (filePill) {
+    // The tag shows the base name; the shared hint carries the hidden path.
+    filePill = <Tooltip label={path ?? meta.target ?? ""}>{filePill as React.ReactElement}</Tooltip>;
   }
   const trailing = <>
     {trailingNode ?? (meta.trailing ? <span className="text-fg2 shrink-0 text-xs tabular-nums">{meta.trailing}</span> : null)}
-    {transportTruncated && <span className="bg-yellow-bg text-yellow-fg shrink-0 rounded-sm px-1.5 py-0.5 text-xxs font-medium" title="The provider truncated this tool payload">Truncated</span>}
+    {transportTruncated && <Tooltip label="The provider truncated this tool payload"><Badge variant="warning" className="shrink-0">Truncated</Badge></Tooltip>}
   </>;
   const preview = meta.target && !open ? (
     <span data-tool-preview="" className={cn(
-      "max-w-[440px] min-w-0 truncate rounded-sm px-1.5 py-0.5 text-xs font-medium",
+      // An 18px chip: 12/16 on bg2, beside the 20px file tags.
+      "max-w-[440px] min-w-0 truncate rounded-sm px-1.5 py-px text-3xxs leading-4 font-medium",
       localCli && sTone !== "fail" && "font-mono",
-      sTone === "fail" ? "bg-red-bg text-red-primary" : "bg-bg1-hover text-fg3",
+      sTone === "fail" ? "bg-red-bg text-red-primary" : "bg-bg2 text-fg2",
     )}>{meta.target}</span>
   ) : null;
   const disclosure = (
@@ -179,9 +182,10 @@ export const EventRow = memo(function EventRow({
       // (`max-w-full`): the hover tint then wraps exactly the row's content
       // instead of painting the empty space out to the right edge.
       className={cn(
-        "-ml-2 flex w-fit max-w-full min-w-0 items-center gap-2 rounded-md px-2 py-1 text-left transition-colors",
+        // A 28px row with 6px corners and the bg1-hover fill.
+        "-ml-2 flex min-h-7 w-fit max-w-full min-w-0 items-center gap-2 rounded-md px-2 py-1 text-left transition-colors",
         !separateTargets && "group/event-row",
-        expandable ? "hover:bg-bg2-hover/40 cursor-pointer" : "cursor-default",
+        expandable ? "hover:bg-bg1-hover cursor-pointer" : "cursor-default",
         separateTargets && "m-0 min-w-0 shrink-0 gap-2 rounded-sm p-0",
         rowTint,
       )}

@@ -150,7 +150,7 @@ export function CloudGithubSection({
   return (
     <SettingsSection
       title="GitHub"
-      description="Choose how Zeros connects to GitHub for your cloud workspaces in this organization."
+      description="How cloud workspaces in this organization reach GitHub."
       action={
         <Button
           variant="ghost"
@@ -205,7 +205,7 @@ export function CloudGithubSection({
                       ? `Signed in as ${summary.login}`
                       : method === "github-app"
                         ? "Sign in through GitHub and choose repository access."
-                        : "Use a token you create and control on GitHub."}
+                        : "A token you create on GitHub."}
                   </span>
                   {selected && (
                     <span className="text-fg2 flex items-center gap-1 text-xs">
@@ -316,14 +316,10 @@ export function CloudGithubSection({
                     onChange={(event) => setPat(event.target.value)}
                   />
                   <p className="text-fg2 text-xs">
-                    Choose the repositories you need. Allow Contents for Git and
-                    Pull requests for PR actions. Add Checks read to show CI
-                    results. Organization approval may be required.
+                    Allow Contents, Pull requests and Checks (read).
                   </p>
                   <p className="text-fg2 text-xs">
-                    Git tools in your cloud VM can use this token with all of
-                    its GitHub permissions. Prefer a token limited to the
-                    repositories you work on.
+                    Cloud Git uses all of this token’s permissions.
                   </p>
                   <div className="flex items-center gap-2">
                     <Button
@@ -370,8 +366,7 @@ export function CloudGithubSection({
         })}
       </div>
       <p className="text-fg2 text-xs">
-        Only repositories allowed by your GitHub account and the selected
-        connection are available.
+        Only repositories this connection can reach.
       </p>
     </SettingsSection>
   );

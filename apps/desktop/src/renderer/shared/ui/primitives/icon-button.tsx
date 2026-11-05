@@ -2,62 +2,61 @@ import * as React from "react";
 import { Slot } from "@radix-ui/react-slot";
 
 import { cn } from "@/renderer/shared/ui/cn";
-import { buttonVariants } from "./button";
 
-type IconButtonMotion =
-  | "hover"
-  /** @deprecated Preserves a pre-existing recipe; unify during the UI iteration. */
-  | "colors"
-  /** @deprecated Preserves a pre-existing recipe; unify during the UI iteration. */
-  | "colors-hover"
-  /** @deprecated Preserves a pre-existing recipe; unify during the UI iteration. */
-  | "none";
+export type IconButtonSize = "inline" | "compact" | "standard";
+
+/** The size icon buttons take when they name none: Toolbar and PanelHeader
+ *  provide the 28px tool size. */
+export const IconButtonSizeContext = React.createContext<IconButtonSize | undefined>(undefined);
 
 export interface IconButtonProps extends Omit<
   React.ButtonHTMLAttributes<HTMLButtonElement>,
   "aria-label"
 > {
   label: string;
-  /** inline = 20px action embedded in rows/tabs;
-   * compact = 24px action in a dense toolbar (Button icon-compact geometry);
-   * standard = 28px chrome action (Button icon-sm geometry). */
-  size?: "inline" | "compact" | "standard";
-  hover?:
-    | "raised"
-    /** @deprecated Preserves a pre-existing recipe; unify during the UI iteration. */
-    | "subtle";
-  motion?: IconButtonMotion;
+  /** The name is `label`. Declared so a dashed attribute that JSX would
+   * otherwise accept unchecked (directly or through a wrapper's props) is a
+   * type error instead of being replaced by `label`. */
+  "aria-label"?: never;
+  /** inline = 20px action embedded in rows and tabs (12px glyph, 4px corners);
+   * compact = 24px action in a dense toolbar or section header (12px glyph);
+   * standard = 28px chrome and toolbar action (14px glyph). Defaults to
+   * standard inside a Toolbar or PanelHeader and inline elsewhere. */
+  size?: IconButtonSize;
+  /** What `aria-pressed` looks like: a neutral toggle (bg2-highlight +
+   * border4), a fill with no edge for the toggle of an open side column, or
+   * the active tool of a toolbar in the selection blue. */
+  pressedTone?: "toggle" | "fill" | "tool";
   asChild?: boolean;
 }
 
+// One hover (bg2-highlight) on every surface: bg2-hover was 1.06:1 on raised
+// surfaces. The glyph size belongs to the component, so it wins over sizes a
+// caller puts on the icon.
+const BASE =
+  "inline-flex shrink-0 select-none items-center justify-center border border-transparent p-0 text-fg2 transition-colors duration-120 ease-out hover:bg-bg2-highlight hover:text-fg1 data-[state=open]:bg-bg2-highlight data-[state=open]:text-fg1 focus-visible:outline-none focus-visible:border-highlighted-bright focus-visible:ring-[3px] focus-visible:ring-highlighted-bright/50 disabled:pointer-events-none disabled:opacity-50 aria-disabled:cursor-not-allowed aria-disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0";
+
 const SIZE_CLASSES = {
-  inline: "inline-flex size-5 items-center justify-center",
-  compact: buttonVariants({ variant: "ghost", size: "icon-compact" }),
-  standard: buttonVariants({ variant: "ghost", size: "icon-sm" }),
+  inline: "size-5 rounded-sm [&_svg]:size-3",
+  compact: "size-6 rounded-md [&_svg]:size-3",
+  standard: "size-7 rounded-md [&_svg]:size-3.5",
 } as const;
 
-const HOVER_CLASSES = {
-  raised: "hover:bg-bg2-hover hover:text-fg1",
-  subtle: "hover:bg-bg2-hover/40 hover:text-fg1",
+const PRESSED_CLASSES = {
+  toggle:
+    "aria-pressed:border-border4 aria-pressed:bg-bg2-highlight aria-pressed:text-fg1",
+  fill: "aria-pressed:bg-bg2-highlight aria-pressed:text-fg1",
+  tool: "aria-pressed:bg-(--design-selection-label-bg) aria-pressed:text-(--design-selection-label-fg) aria-pressed:hover:bg-(--design-selection-label-bg) aria-pressed:hover:text-(--design-selection-label-fg)",
 } as const;
 
-const MOTION_CLASSES = {
-  hover: "transition-[background-color,color] duration-120 ease-out",
-  colors: "transition-colors",
-  "colors-hover": "transition-colors duration-120 ease-out",
-  none: "",
-} as const;
-
-/** Icon-only action with a required accessible name. New callers use the
- * defaults (size as needed, hover="raised", motion="hover"). asChild preserves
- * link semantics; standard size retains Button's focus and SVG contracts. */
+/** Icon-only action with a required accessible name. asChild preserves link
+ * semantics. */
 const IconButton = React.forwardRef<HTMLButtonElement, IconButtonProps>(
   (
     {
       label,
-      size = "inline",
-      hover = "raised",
-      motion = "hover",
+      size,
+      pressedTone = "toggle",
       asChild = false,
       type,
       className,
@@ -66,6 +65,8 @@ const IconButton = React.forwardRef<HTMLButtonElement, IconButtonProps>(
     ref,
   ) => {
     const Comp = asChild ? Slot : "button";
+    const contextSize = React.useContext(IconButtonSizeContext);
+    const resolvedSize = size ?? contextSize ?? "inline";
     return (
       <Comp
         {...props}
@@ -73,10 +74,9 @@ const IconButton = React.forwardRef<HTMLButtonElement, IconButtonProps>(
         type={asChild ? type : (type ?? "button")}
         aria-label={label}
         className={cn(
-          SIZE_CLASSES[size],
-          "text-fg2 rounded-sm",
-          HOVER_CLASSES[hover],
-          MOTION_CLASSES[motion],
+          BASE,
+          SIZE_CLASSES[resolvedSize],
+          PRESSED_CLASSES[pressedTone],
           className,
         )}
       />

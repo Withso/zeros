@@ -297,7 +297,7 @@ describe("Code seats its column controls above the chat strips", () => {
 
   it("orders the strip: toggle, tabs, +, history, pane menu, expand", () => {
     const leadingSlot = chatTabsSource.indexOf("CHAT_STRIP_LEADING_CLS}");
-    const tabViewport = chatTabsSource.indexOf("TAB_VIEWPORT_CLS}");
+    const tabViewport = chatTabsSource.search(/className=\{cn\(TAB_VIEWPORT_CLS[,)]|className=\{TAB_VIEWPORT_CLS\}/);
     const plusSlot = chatTabsSource.indexOf("PLUS_CONTROL_CLS}");
     const historySlot = chatTabsSource.indexOf("HISTORY_CONTROL_CLS}");
     const paneMenuSlot = chatTabsSource.indexOf("PANE_MENU_CONTROL_CLS}");

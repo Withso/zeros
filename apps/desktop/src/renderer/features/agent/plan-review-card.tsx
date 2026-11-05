@@ -5,8 +5,7 @@
 // Claude's ExitPlanMode is plan REVIEW, not a permission gate. A permission
 // card is a blocking Yes/No that REPLACES the composer; plan review keeps the
 // composer live. So while a plan is pending we show this as its OWN card
-// stacked above the (still-usable) composer with bg1, border-border1 and
-// rounded-lg, matching the other above-composer cards.
+// stacked above the (still-usable) composer on the shared dock card.
 //
 //   • Copy    — copy the plan markdown
 //   • Reject  — deny the ExitPlanMode gate; the agent STAYS in Plan mode
@@ -21,11 +20,13 @@
 // retired the agent hand-off flow, so it would be new work; deferred.
 // ──────────────────────────────────────────────────────────
 
+import { cn } from "../../shared/ui/cn";
+import { DOCK_CARD_CLS } from "./composer-shell";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Check, ClipboardList, Copy } from "lucide-react";
 
 import { Button } from "@/renderer/shared/ui/primitives/button";
-import { Tooltip } from "@/renderer/shared/ui/primitives";
+import { ButtonShortcut } from "@/renderer/shared/ui/primitives/kbd";
 import { isInFocusedPane } from "./pane-focus";
 
 interface PlanReviewCardProps {
@@ -85,58 +86,43 @@ export function PlanReviewCard({
   return (
     <div
       ref={rootRef}
-      className="border-border1 bg-bg1 flex items-center gap-2 rounded-lg border px-3.5 py-2.5"
+      className={cn(DOCK_CARD_CLS, "flex min-h-11 items-center gap-2 py-1.5 pr-2 pl-3.5")}
     >
-      <ClipboardList
-        size={16}
-        className="text-fg2 shrink-0"
-        aria-hidden="true"
-      />
-      <span className="text-fg2 min-w-0 flex-1 truncate text-sm">
+      <ClipboardList className="text-fg2 size-3.5 shrink-0" aria-hidden="true" />
+      <span className="text-fg2 min-w-0 flex-1 truncate text-xs leading-4.5">
         Plan ready for review
       </span>
-      <Tooltip label="Copy plan">
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
-          onClick={copy}
-          disabled={!planText}
-          className="shrink-0"
-        >
-          {copied ? (
-            <Check className="size-3.5" />
-          ) : (
-            <Copy className="size-3.5" />
-          )}
-          {copied ? "Copied" : "Copy"}
-        </Button>
-      </Tooltip>
-      <Tooltip label="Reject plan">
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
-          onClick={onReject}
-          className="shrink-0"
-        >
-          Reject
-        </Button>
-      </Tooltip>
-      <Tooltip label="Approve plan" shortcut="⌘⇧↵">
-        <Button
-          type="button"
-          variant="default"
-          size="sm"
-          onClick={onApprove}
-          className="shrink-0"
-        >
-          Approve
-          <kbd className="bg-primary-button-fg/15 text-primary-button-fg text-2xxs ml-1 inline-flex h-4 items-center rounded-sm px-1 font-mono">
-            ⌘⇧↵
-          </kbd>
-        </Button>
-      </Tooltip>
+      <Button
+        type="button"
+        variant="ghost"
+        size="sm"
+        onClick={copy}
+        disabled={!planText}
+        className="shrink-0"
+      >
+        {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+        {copied ? "Copied" : "Copy"}
+      </Button>
+      <Button
+        type="button"
+        variant="ghost"
+        size="sm"
+        onClick={onReject}
+        className="shrink-0"
+      >
+        Reject
+      </Button>
+      <Button
+        type="button"
+        variant="primary"
+        size="sm"
+        onClick={onApprove}
+        aria-keyshortcuts="Meta+Shift+Enter Control+Shift+Enter"
+        className="shrink-0"
+      >
+        Approve
+        <ButtonShortcut keys="⌘⇧↵" />
+      </Button>
     </div>
   );
 }

@@ -54,7 +54,9 @@ describe("the agent's working timer", () => {
   it("is the timer on the active turn's rail, a little apart from the loader", () => {
     const markup = renderToStaticMarkup(createElement(ActivityShimmer, { startedAt: Date.now() - 2 * MINUTE }));
     expect(markup).toMatch(/>2m, 0\.\ds<\/span>/);
-    expect(markup).toMatch(/^<div[^>]*class="[^"]*\bgap-3\b/);
+    // 6px after a loader centred on the 12px icon column: the timer starts on
+    // the 20px label column every feed row shares.
+    expect(markup).toMatch(/^<div[^>]*class="[^"]*\bgap-1\.5\b/);
     expect(markup).not.toContain("zeros-agent-live-duration");
   });
 

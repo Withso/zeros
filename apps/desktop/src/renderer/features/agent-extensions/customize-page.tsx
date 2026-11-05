@@ -10,7 +10,7 @@ import { OrganizationMcpPage } from "./mcp-organization-page";
 // form identity includes the scope so drafts cannot move between repositories.
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { Check, ChevronDown, CircleUser } from "lucide-react";
+import { Check, ChevronDownIcon, CircleUser } from "lucide-react";
 
 import { Tabs, TabsList, TabsTrigger } from "../../shared/ui/primitives/tabs";
 import {
@@ -20,6 +20,7 @@ import {
   DropdownMenuLabel,
   DropdownMenuTrigger,
 } from "../../shared/ui/primitives/dropdown-menu";
+import { SELECT_CHEVRON, selectTriggerClassName } from "../../shared/ui/primitives/select";
 import { RepositoryIcon } from "../repositories/repository-icon";
 import { getSetting, setSetting } from "../../platform/settings";
 import { useAuth } from "../auth";
@@ -47,7 +48,7 @@ import { prefetchExtensions } from "./extensions-cache";
 // Provider-native discovery remains a backend capability for a later UI.
 
 const CATEGORY_LABELS = {
-  mcp: "MCP",
+  mcp: "MCP servers",
   skills: "Skills",
 };
 const SELECTION_SETTING_KEY = "customize:selection";
@@ -65,10 +66,9 @@ export type ResolvedCustomizeScope =
   | { kind: "user" }
   | { kind: "repo"; project: Project };
 
-// Same trigger recipe as the models page's model dropdown — a Select-shaped
-// button (the scope menu needs grouped rows a Radix Select can't hold).
-const SCOPE_TRIGGER_CLS =
-  "border-border3 hover:border-border4 hover:bg-bg2 data-[state=open]:border-border4 data-[state=open]:bg-bg2 flex h-8 min-w-[150px] max-w-[280px] items-center gap-2 rounded-sm border bg-transparent px-3 text-sm whitespace-nowrap shadow-xs outline-none";
+// The Select trigger's own chrome at the fixed 160px width: a menu button,
+// because the scope menu needs grouped two-line rows a Radix Select can't hold.
+const SCOPE_TRIGGER_CLS = selectTriggerClassName("fixed", "shrink-0 gap-2");
 
 function ScopePicker({
   scope,
@@ -89,45 +89,42 @@ function ScopePicker({
           aria-label="Customize scope"
           className={SCOPE_TRIGGER_CLS}
         >
-          {scope.kind === "user" ? (
-            <CircleUser
-              className="text-fg2 size-4 shrink-0"
-              aria-hidden="true"
-            />
-          ) : (
-            <span
-              className="bg-bg2-hover inline-flex size-4 shrink-0 items-center justify-center rounded-sm"
-              aria-hidden="true"
-            >
-              <RepositoryIcon
-                project={scope.project}
-                className="size-full rounded-sm"
-              />
+          <span className="flex min-w-0 flex-1 items-center gap-2">
+            {scope.kind === "user" ? (
+              <CircleUser className="text-fg3 size-3.5 shrink-0" aria-hidden="true" />
+            ) : (
+              <span
+                className="bg-bg2-hover inline-flex size-3.5 shrink-0 items-center justify-center rounded-sm"
+                aria-hidden="true"
+              >
+                <RepositoryIcon
+                  project={scope.project}
+                  className="size-full rounded-sm"
+                />
+              </span>
+            )}
+            <span className="min-w-0 truncate text-left">
+              {scope.kind === "user" ? displayName : scope.project.name}
             </span>
-          )}
-          <span className="min-w-0 flex-1 truncate text-left">
-            {scope.kind === "user" ? displayName : scope.project.name}
           </span>
-          <ChevronDown className="text-fg2 size-4 shrink-0 opacity-50" />
+          <ChevronDownIcon className={SELECT_CHEVRON} aria-hidden="true" />
         </button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="start" className="min-w-[240px]">
+      <DropdownMenuContent align="end" className="min-w-60">
         <DropdownMenuItem
           onSelect={() => onChange({ kind: "user" })}
-          className="items-start gap-2.5"
+          className="items-start gap-2"
         >
           <CircleUser className="mt-0.5" />
           <span className="flex min-w-0 flex-1 flex-col">
-            <span className="text-fg1 truncate text-sm">User</span>
-            <span className="text-fg2 truncate text-xs">{displayName}</span>
+            <span className="text-fg1 truncate text-xs leading-4.5">User</span>
+            <span className="text-fg3 truncate text-3xxs leading-4">{displayName}</span>
           </span>
           {scope.kind === "user" && (
             <Check className="text-fg1 mt-0.5 size-3.5 shrink-0" />
           )}
         </DropdownMenuItem>
-        {projects.length > 0 && (
-          <DropdownMenuLabel className="text-fg2">Repos</DropdownMenuLabel>
-        )}
+        {projects.length > 0 && <DropdownMenuLabel>Repos</DropdownMenuLabel>}
         {projects.map((p) => (
           <DropdownMenuItem
             key={p.id}
@@ -135,7 +132,7 @@ function ScopePicker({
             // Repo scopes read that repo's settings layer — warm it on hover
             // so the switch paints from a complete snapshot.
             onPointerEnter={() => prefetchSettingsForRepo(p.repoRoot)}
-            className="items-start gap-2.5"
+            className="items-start gap-2"
           >
             <span
               className="bg-bg2-hover mt-0.5 inline-flex size-3.5 shrink-0 items-center justify-center rounded-sm"
@@ -144,8 +141,8 @@ function ScopePicker({
               <RepositoryIcon project={p} className="size-full rounded-sm" />
             </span>
             <span className="flex min-w-0 flex-1 flex-col">
-              <span className="text-fg1 truncate text-sm">{p.name}</span>
-              <span className="text-fg2 truncate text-xs">{p.repoSlug}</span>
+              <span className="text-fg1 truncate text-xs leading-4.5">{p.name}</span>
+              <span className="text-fg3 truncate text-3xxs leading-4">{p.repoSlug}</span>
             </span>
             {scope.kind === "repo" && scope.project.id === p.id && (
               <Check className="text-fg1 mt-0.5 size-3.5 shrink-0" />
@@ -254,8 +251,9 @@ function LocalCustomizePage({
       ref={pageSurfaceRef}
       className="bg-bg1 flex h-full min-h-0 w-full min-w-0 flex-1 flex-col overflow-hidden"
     >
-      <div ref={pageScrollRef} className="min-h-0 flex-1 overflow-y-auto">
-        <div className="flex w-full max-w-5xl flex-col pt-10 pr-6 pb-16 pl-[clamp(1.5rem,5vw,6.25rem)]">
+      {/* The Settings shell: one centered 640px column under a 40px band. */}
+      <div ref={pageScrollRef} className="min-h-0 flex-1 overflow-y-auto px-6">
+        <div className="mx-auto flex w-full max-w-160 flex-col pt-10 pb-12">
           {activeView.kind === "form" ? (
             <McpServerFormPage
               key={viewKey}
@@ -271,52 +269,45 @@ function LocalCustomizePage({
               }}
             />
           ) : (
-            <>
-              <div className="flex flex-col items-start gap-5">
-                <div className="flex flex-col gap-1">
-                  <h1 className="text-fg1 m-0 text-lg leading-tight font-medium">
+            <div className="flex flex-col gap-8">
+              <header className="flex items-start justify-between gap-4">
+                <div className="flex min-w-0 flex-col gap-1">
+                  <h1 className="text-fg1 m-0 text-lg leading-6 font-medium">
                     Customize
                   </h1>
-                  <p className="text-fg2 m-0 text-sm">
-                    Manage your Zeros MCP servers and skills.
+                  <p className="text-fg2 m-0 text-xs leading-4.5">
+                    Tools and skills for your agents.
                   </p>
                 </div>
+                <ScopePicker
+                  scope={scope}
+                  projects={projects}
+                  onChange={(next) => {
+                    setView({ kind: "list" });
+                    setScope(next);
+                  }}
+                />
+              </header>
 
-                <div className="flex flex-wrap items-center gap-3">
-                  <ScopePicker
-                    scope={scope}
-                    projects={projects}
-                    onChange={(next) => {
-                      setView({ kind: "list" });
-                      setScope(next);
-                    }}
-                  />
-                  <div
-                    className="bg-border1 h-5 w-px shrink-0"
-                    aria-hidden="true"
-                  />
-                  <Tabs
-                    value={category}
-                    onValueChange={(v) => select(v as CustomizeCategory)}
-                  >
-                    <TabsList className="h-8">
-                      {CUSTOMIZE_CATEGORIES.map((id) => (
-                        <TabsTrigger
-                          key={id}
-                          value={id}
-                          className="text-xs"
-                          onPointerEnter={() => warm(id)}
-                          onFocus={() => warm(id)}
-                        >
-                          {CATEGORY_LABELS[id]}
-                        </TabsTrigger>
-                      ))}
-                    </TabsList>
-                  </Tabs>
-                </div>
-              </div>
+              <Tabs
+                value={category}
+                onValueChange={(v) => select(v as CustomizeCategory)}
+              >
+                <TabsList aria-label="Customize">
+                  {CUSTOMIZE_CATEGORIES.map((id) => (
+                    <TabsTrigger
+                      key={id}
+                      value={id}
+                      onPointerEnter={() => warm(id)}
+                      onFocus={() => warm(id)}
+                    >
+                      {CATEGORY_LABELS[id]}
+                    </TabsTrigger>
+                  ))}
+                </TabsList>
+              </Tabs>
 
-              <div className="w-full pt-8">
+              <div className="w-full">
                 {category === "mcp" && provider === "zeros" ? (
                   <CustomizeMcpSection
                     key={scopeKey}
@@ -334,7 +325,7 @@ function LocalCustomizePage({
                   />
                 )}
               </div>
-            </>
+            </div>
           )}
         </div>
       </div>

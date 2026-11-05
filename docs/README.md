@@ -14,6 +14,7 @@ A roadmap item or local test result is not evidence that a feature is released.
 | [Agent guide](../AGENTS.md)                                     | Coding-agent workflow, implementation invariants and checks                                      |
 | [Contributing](../CONTRIBUTING.md)                              | Development setup and contribution workflow                                                      |
 | [UI interaction and performance](ui-interaction-performance.md) | Shared loading, caching, navigation, gesture and retained-surface rules                          |
+| [Implementing the Zeros Design](design-implementation/README.md) | The approved redesign: direction, workstreams, status and the board-by-board spec per page       |
 
 ## Durable feature guides
 

@@ -27,8 +27,8 @@ describe("chat provenance block styling", () => {
     );
   });
 
-  it("puts 12px between the rows", () => {
-    expect(provenance()).toMatch(/<div className="flex flex-col gap-3 p-3">/);
+  it("puts 12px between the rows and the icons on the composer's text column", () => {
+    expect(provenance()).toMatch(/<div className="flex flex-col gap-3 px-3\.5 py-3">/);
   });
 
   it("uses ONE font — no mono, and no <code> to sneak the UA's in", () => {
@@ -123,30 +123,16 @@ describe("the transcript summaries read the block waits on", () => {
 });
 
 describe("workspace name chip", () => {
-  it("is the blue container pair", () => {
-    // --blue-bg fill with --blue-primary text. `-primary` rather than the
-    // family's usual `-fg` partner is deliberate (2026-07-29 direction); both
-    // clear AA on the two themes.
-    const badge = source(
-      "apps/desktop/src/renderer/shared/ui/primitives/badge.tsx",
-    );
-    expect(badge).toContain("bg-blue-bg text-blue-primary");
-    // Typography lives in the variant, not at the call site.
-    expect(badge).toContain("text-sm font-normal");
-    // The fill must not shift on hover — no single lighten/darken works in
-    // both themes when the token is near-black in one and near-white in the
-    // other. See the comment on the variant.
-    expect(badge).toContain("hover:border-blue-primary");
-    expect(badge).not.toContain("bg-bg1-highlight text-fg1");
-  });
-
-  it("matches the sentence it sits in — 14px, regular, UI font", () => {
+  it("is the neutral inline pill: a workspace link carries no blue", () => {
     const topbar = source(
       "apps/desktop/src/renderer/shell/conversation/conversation-header.tsx",
     );
-    expect(topbar).toContain('variant="accent"');
-    expect(topbar).toContain('className="cursor-pointer"');
-    expect(topbar).not.toContain("font-mono font-normal");
+    const chip = topbar.slice(topbar.indexOf("export function OpenInBadgeMenu("));
+    expect(chip).toContain("<Pill aria-label={`Open ${label} in…`}>");
+    expect(topbar).not.toContain('variant="accent"');
+    const pill = source("apps/desktop/src/renderer/shared/ui/primitives/pill.tsx");
+    expect(pill).toContain("border-border2 bg-bg2 text-fg1");
+    expect(pill).not.toContain("blue");
   });
 });
 
@@ -229,13 +215,15 @@ describe("Settings → Git prefix pane", () => {
     const badge = source(
       "apps/desktop/src/renderer/shared/ui/primitives/badge.tsx",
     );
-    expect(badge).toMatch(/neutral:\s*"[^"]*bg-bg2[^"]*text-fg1[^"]*"/);
+    expect(badge).toMatch(/neutral:\s*"[^"]*bg-bg2[^"]*text-fg2[^"]*"/);
     expect(badge).not.toMatch(/neutral:\s*"[^"]*bg-bg1-highlight/);
     // Same card fill, restated here so the collision is checked against the
     // real value rather than a remembered one.
     expect(
       source("apps/desktop/src/renderer/features/settings/settings-ui.tsx"),
-    ).toContain('"bg-bg1-bright divide-border1 rounded-lg px-3 [&>*]:py-3"');
+    ).toContain(
+      '"bg-bg1-bright border-border1 divide-border1 rounded-[calc(var(--radius-lg)*1.5)] border px-3.5 [&>*]:py-3"',
+    );
   });
 
   it("keeps the preview line to the founder's two strings", () => {

@@ -1,12 +1,15 @@
 import * as React from "react";
 import * as DropdownMenuPrimitive from "@radix-ui/react-dropdown-menu";
-import { Check, ChevronRight, Circle } from "lucide-react";
+import { Check, ChevronRight } from "lucide-react";
 
 import { cn } from "@/renderer/shared/ui/cn";
 import { ANCHORED_OVERLAY_MOTION } from "@/renderer/shared/ui/anchored-overlay-motion";
 import {
+  MENU_ITEM_BOX,
+  MENU_ITEM_DESTRUCTIVE,
   MENU_ITEM_ICON,
   MENU_ITEM_RADIUS,
+  MENU_LABEL,
   MENU_SEPARATOR,
   MENU_SURFACE_INSET,
   MENU_SURFACE_RADIUS,
@@ -14,6 +17,7 @@ import {
 import { suppressPointerRefocus } from "@/renderer/shared/ui/overlay-focus";
 import { useOverlayEscape } from "@/renderer/shared/ui/overlay-escape";
 import { useNativeSurfaceOverlayIntent } from "@/renderer/shared/ui/native-surface-overlay";
+import { KbdKeys } from "./kbd";
 
 const DropdownMenuOpenContext = React.createContext<
   ((open: boolean) => void) | null
@@ -88,7 +92,8 @@ const DropdownMenuSubTrigger = React.forwardRef<
   <DropdownMenuPrimitive.SubTrigger
     ref={ref}
     className={cn(
-      "focus:bg-bg3-hover focus:[&_.text-muted-fg]:text-fg3 data-[state=open]:bg-bg3-hover data-[state=open]:[&_.text-muted-fg]:text-fg3 flex cursor-default items-center gap-2 px-2 py-1.5 text-xs outline-none select-none",
+      "focus:bg-bg3-hover focus:[&_.text-muted-fg]:text-fg3 data-[state=open]:bg-bg3-hover data-[state=open]:[&_.text-muted-fg]:text-fg3 flex cursor-default items-center outline-none select-none",
+      MENU_ITEM_BOX,
       MENU_ITEM_RADIUS,
       MENU_ITEM_ICON,
       inset && "pl-8",
@@ -242,18 +247,26 @@ const DropdownMenuContent = React.forwardRef<
 });
 DropdownMenuContent.displayName = DropdownMenuPrimitive.Content.displayName;
 
+const ROW =
+  "focus:bg-bg3-hover focus:text-fg1 focus:[&_.text-muted-fg]:text-fg3 relative flex cursor-default items-center transition-colors outline-none select-none data-[disabled]:pointer-events-none data-[disabled]:opacity-50";
+
 const DropdownMenuItem = React.forwardRef<
   React.ComponentRef<typeof DropdownMenuPrimitive.Item>,
   React.ComponentPropsWithoutRef<typeof DropdownMenuPrimitive.Item> & {
     inset?: boolean;
+    /** destructive: red-primary text and icon; place it last. */
+    variant?: "default" | "destructive";
   }
->(({ className, inset, ...props }, ref) => (
+>(({ className, inset, variant = "default", ...props }, ref) => (
   <DropdownMenuPrimitive.Item
     ref={ref}
+    data-variant={variant}
     className={cn(
-      "focus:bg-bg3-hover focus:text-fg1 focus:[&_.text-muted-fg]:text-fg3 relative flex cursor-default items-center gap-2 px-2 py-1.5 text-xs transition-colors outline-none select-none data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
+      ROW,
+      MENU_ITEM_BOX,
       MENU_ITEM_RADIUS,
       MENU_ITEM_ICON,
+      variant === "destructive" && MENU_ITEM_DESTRUCTIVE,
       inset && "pl-8",
       className,
     )}
@@ -262,77 +275,46 @@ const DropdownMenuItem = React.forwardRef<
 ));
 DropdownMenuItem.displayName = DropdownMenuPrimitive.Item.displayName;
 
+/** One of several choices (filters, view options): a check column on the
+ * left, so every option lines up whether it is on or off. */
 const DropdownMenuCheckboxItem = React.forwardRef<
   React.ComponentRef<typeof DropdownMenuPrimitive.CheckboxItem>,
-  React.ComponentPropsWithoutRef<typeof DropdownMenuPrimitive.CheckboxItem> & {
-    /** Trailing boxed selection for range/group menus. */
-    indicatorSide?: "start" | "end";
-  }
->(
-  (
-    { className, children, checked, indicatorSide = "start", ...props },
-    ref,
-  ) => (
-    <DropdownMenuPrimitive.CheckboxItem
-      ref={ref}
-      className={cn(
-        "focus:bg-bg3-hover focus:text-fg1 focus:[&_.text-muted-fg]:text-fg3 relative flex cursor-default items-center py-1.5 pr-2 pl-8 text-xs transition-colors outline-none select-none data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
-        MENU_ITEM_RADIUS,
-        indicatorSide === "end" && "pr-8 pl-2",
-        className,
-      )}
-      checked={checked}
-      {...props}
-    >
-      <span
-        className={cn(
-          "absolute flex size-3.5 items-center justify-center",
-          indicatorSide === "start"
-            ? "left-2"
-            : "border-border4 right-2 rounded-sm border",
-          indicatorSide === "end" &&
-            checked &&
-            "bg-inverted-bg border-inverted-bg text-inverted-fg",
-        )}
-      >
-        <DropdownMenuPrimitive.ItemIndicator>
-          <Check className={indicatorSide === "end" ? "size-3" : "size-3.5"} />
-        </DropdownMenuPrimitive.ItemIndicator>
-      </span>
-      {children}
-    </DropdownMenuPrimitive.CheckboxItem>
-  ),
-);
-DropdownMenuCheckboxItem.displayName =
-  DropdownMenuPrimitive.CheckboxItem.displayName;
-
-const DropdownMenuRadioItem = React.forwardRef<
-  React.ComponentRef<typeof DropdownMenuPrimitive.RadioItem>,
-  React.ComponentPropsWithoutRef<typeof DropdownMenuPrimitive.RadioItem> & {
-    indicator?: "dot" | "check";
-    indicatorSide?: "start" | "end";
-  }
->(({ className, children, indicator = "dot", indicatorSide = "start", ...props }, ref) => (
-  <DropdownMenuPrimitive.RadioItem
+  React.ComponentPropsWithoutRef<typeof DropdownMenuPrimitive.CheckboxItem>
+>(({ className, children, checked, ...props }, ref) => (
+  <DropdownMenuPrimitive.CheckboxItem
     ref={ref}
-    className={cn(
-      "focus:bg-bg3-hover focus:text-fg1 focus:[&_.text-muted-fg]:text-fg3 relative flex cursor-default items-center py-1.5 pr-2 pl-8 text-xs transition-colors outline-none select-none data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
-      MENU_ITEM_RADIUS,
-      indicatorSide === "end" && "pr-8 pl-2",
-      className,
-    )}
+    className={cn(ROW, MENU_ITEM_BOX, MENU_ITEM_RADIUS, MENU_ITEM_ICON, "pl-8", className)}
+    checked={checked}
     {...props}
   >
-    <span className={cn("absolute flex size-3.5 items-center justify-center", indicatorSide === "end" ? "right-2" : "left-2")}>
+    <span className="text-fg1 absolute left-2 flex size-3.5 items-center justify-center">
       <DropdownMenuPrimitive.ItemIndicator>
-        {indicator === "check" ? (
-          <Check className="size-3.5" />
-        ) : (
-          <Circle className="h-2 w-2 fill-current" />
-        )}
+        <Check className="text-fg1 size-3.5" />
       </DropdownMenuPrimitive.ItemIndicator>
     </span>
     {children}
+  </DropdownMenuPrimitive.CheckboxItem>
+));
+DropdownMenuCheckboxItem.displayName =
+  DropdownMenuPrimitive.CheckboxItem.displayName;
+
+/** The one choice of a group: the chosen row carries a check at its end, the
+ * way Select does. */
+const DropdownMenuRadioItem = React.forwardRef<
+  React.ComponentRef<typeof DropdownMenuPrimitive.RadioItem>,
+  React.ComponentPropsWithoutRef<typeof DropdownMenuPrimitive.RadioItem>
+>(({ className, children, ...props }, ref) => (
+  <DropdownMenuPrimitive.RadioItem
+    ref={ref}
+    className={cn(ROW, MENU_ITEM_BOX, MENU_ITEM_RADIUS, MENU_ITEM_ICON, "pr-8", className)}
+    {...props}
+  >
+    {children}
+    <span className="absolute right-2 flex size-3.5 items-center justify-center">
+      <DropdownMenuPrimitive.ItemIndicator>
+        <Check className="text-fg1 size-3.5" />
+      </DropdownMenuPrimitive.ItemIndicator>
+    </span>
   </DropdownMenuPrimitive.RadioItem>
 ));
 DropdownMenuRadioItem.displayName = DropdownMenuPrimitive.RadioItem.displayName;
@@ -345,11 +327,7 @@ const DropdownMenuLabel = React.forwardRef<
 >(({ className, inset, ...props }, ref) => (
   <DropdownMenuPrimitive.Label
     ref={ref}
-    className={cn(
-      "px-2 py-1.5 text-xs font-semibold",
-      inset && "pl-8",
-      className,
-    )}
+    className={cn(MENU_LABEL, inset && "pl-8", className)}
     {...props}
   />
 ));
@@ -367,17 +345,19 @@ const DropdownMenuSeparator = React.forwardRef<
 ));
 DropdownMenuSeparator.displayName = DropdownMenuPrimitive.Separator.displayName;
 
+/** A row's shortcut as Kbd chips, one per key, at the row's end. */
 const DropdownMenuShortcut = ({
   className,
+  children,
   ...props
-}: React.HTMLAttributes<HTMLSpanElement>) => {
-  return (
-    <span
-      className={cn("ml-auto text-xs tracking-widest opacity-60", className)}
-      {...props}
-    />
+}: React.HTMLAttributes<HTMLSpanElement>) =>
+  typeof children === "string" ? (
+    <KbdKeys keys={children} className={cn("ml-auto", className)} {...props} />
+  ) : (
+    <span className={cn("ml-auto inline-flex items-center gap-0.5", className)} {...props}>
+      {children}
+    </span>
   );
-};
 DropdownMenuShortcut.displayName = "DropdownMenuShortcut";
 
 export {

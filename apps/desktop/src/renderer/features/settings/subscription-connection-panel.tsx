@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import { MoreVertical, RefreshCw } from "lucide-react";
 import {
   RadioGroup,
@@ -196,14 +197,13 @@ export function SubscriptionConnectionPanel({
                       }
                     >
                       <DropdownMenuTrigger asChild>
-                        <Button
-                          variant="ghost"
-                          size="icon-sm"
+                        <IconButton
+                          size="standard"
                           disabled={disabled}
-                          aria-label={`Account options for ${label}`}
+                          label={`Account options for ${label}`}
                         >
                           <MoreVertical className="size-4" aria-hidden="true" />
-                        </Button>
+                        </IconButton>
                       </DropdownMenuTrigger>
                       <DropdownMenuContent align="end">
                         <DropdownMenuItem
@@ -293,15 +293,14 @@ export function SubscriptionConnectionPanel({
               ? "Add account"
               : "Connect via subscription"}
         </Button>
-        <Button
-          variant="ghost"
-          size="icon-sm"
+        <IconButton
+          size="standard"
           disabled={!native || !surfaceActive || read.refreshing}
           onClick={read.refresh}
-          aria-label={`Refresh ${name} subscription`}
+          label={`Refresh ${name} subscription`}
         >
           <RefreshCw className="size-3.5" aria-hidden="true" />
-        </Button>
+        </IconButton>
       </Actions>
     </section>
   );

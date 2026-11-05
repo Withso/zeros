@@ -41,7 +41,8 @@ vi.mock("../../../shell/add-project-provider", () => ({
 vi.mock("../../../shared/ui/open-settings-file-button", () => ({ OpenSettingsFileButton: () => null }));
 
 import { SettingsPage } from "../settings-page";
-import { NoProjectsView } from "../../../shell/no-projects-view";
+import { DispatcherPage } from "../../../shell/dispatcher/dispatcher-modal";
+import { CreateStartBanners } from "../../../shell/dispatcher/create-start-banners";
 import { TooltipProvider } from "../../../shared/ui/primitives/tooltip";
 
 function settings() {
@@ -80,14 +81,19 @@ describe("paused cloud entry points", () => {
     expect(state.cloudPanel).toHaveBeenCalledTimes(2);
   });
 
-  it("replaces organization creation tiles with a pause notice, leaving Local creation available", () => {
-    const paused = renderToStaticMarkup(createElement(NoProjectsView));
+  it("replaces organization creation with a pause notice, leaving Local creation available", () => {
+    const noop = () => {};
+    const create = () => renderToStaticMarkup(createElement(DispatcherPage, {
+      active: true, initialProjectId: null, onOpenProject: noop, onOpenGithubProject: noop, onQuickStart: noop,
+    }));
+    const paused = create();
     expect(paused).toContain("Cloud workspaces are paused");
     expect(paused).not.toMatch(/Open GitHub project|Start from scratch|Open project/);
-    state.organization = { id: "personal-fixture", isPersonal: true } as OrganizationSummary;
-    const local = renderToStaticMarkup(createElement(NoProjectsView));
-    expect(local).toContain("Open GitHub project");
-    expect(local).toContain("Start from scratch");
+    // The Create page's start banners are the Local way in with no repository.
+    const local = renderToStaticMarkup(createElement(CreateStartBanners, {
+      onOpenProject: noop, onOpenGithubProject: noop, onQuickStart: noop,
+    }));
+    for (const label of ["Open project", "Open GitHub project", "Start from scratch"]) expect(local).toContain(label);
   });
 
   it("routes organization-local agent controls to the device panel while paused", async () => {

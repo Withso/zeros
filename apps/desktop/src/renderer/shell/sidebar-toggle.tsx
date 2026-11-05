@@ -22,7 +22,7 @@
 
 import { PanelLeft } from "lucide-react";
 
-import { Button } from "../shared/ui/primitives/button";
+import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import { Tooltip } from "../shared/ui/primitives/tooltip";
 import { toggleSidebarCollapsed } from "./sidebar-collapsed";
 
@@ -32,6 +32,12 @@ export const APP_SIDEBAR_ID = "app-sidebar";
 /** Clears the native traffic lights; the toggle follows after a 4px gap. */
 export const TRAFFIC_LIGHT_RESERVE_CLS = "h-full w-[80px] shrink-0";
 
+/** The corner the floating collapsed controls take from a page header: the
+ * traffic-light reserve, a 4px gap, the 28px toggle and the 4px end inset. A
+ * header row that starts at the window edge leads with this instead of
+ * dropping below a 40px band. */
+export const COLLAPSED_CONTROLS_RESERVE_CLS = "h-full w-29 shrink-0";
+
 const TOGGLE_CLS =
   "-translate-y-px h-7 w-7 shrink-0 rounded-md text-fg2 hover:bg-sidebar-bg-hover hover:text-fg1";
 
@@ -39,18 +45,17 @@ export function SidebarToggleButton({ collapsed }: { collapsed: boolean }) {
   const label = collapsed ? "Show sidebar" : "Hide sidebar";
   return (
     <Tooltip label={label} side="bottom">
-      <Button
+      <IconButton
         type="button"
-        variant="ghost"
-        size="icon"
+        size="standard"
         className={TOGGLE_CLS}
-        aria-label={label}
+        label={label}
         aria-expanded={!collapsed}
         aria-controls={APP_SIDEBAR_ID}
         onClick={toggleSidebarCollapsed}
       >
         <PanelLeft className="size-4" strokeWidth={1.5} />
-      </Button>
+      </IconButton>
     </Tooltip>
   );
 }

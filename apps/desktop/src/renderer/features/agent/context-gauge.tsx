@@ -54,8 +54,10 @@ export function formatTokens(n: number): string {
 
 function ServerRow({ server }: { server: ContextGaugeServer }) {
   return (
-    <div className="text-fg2 flex items-center justify-between gap-2 px-0.5 py-1 text-xs">
-      <span className="min-w-0 truncate" title={server.name}>{server.name}</span>
+    <div className="text-fg2 flex items-center justify-between gap-2 px-1.5 py-1 text-xs leading-4.5">
+      <Tooltip label={server.name} delayDuration={1500}>
+        <span className="min-w-0 truncate">{server.name}</span>
+      </Tooltip>
       <span className="shrink-0 font-mono tabular-nums">
         {(server.percentageTenths / 10).toFixed(1)}%
       </span>
@@ -74,7 +76,7 @@ function McpServersRow({ row }: { row: ContextGaugeRow & { servers: ContextGauge
       <Button
         variant="ghost"
         size="compact"
-        className="hover:bg-bg3-hover text-fg2 w-full justify-between px-0.5 font-normal"
+        className="hover:bg-bg3-hover text-fg2 w-full justify-between px-1.5 font-normal"
         aria-label="MCP servers"
         aria-expanded={expanded}
         aria-controls={serversId}
@@ -99,7 +101,7 @@ function McpServersRow({ row }: { row: ContextGaugeRow & { servers: ContextGauge
               <Button
                 variant="ghost"
                 size="compact"
-                className="hover:bg-bg3-hover text-fg2 w-full justify-between px-0.5 font-normal"
+                className="hover:bg-bg3-hover text-fg2 w-full justify-between px-1.5 font-normal"
                 aria-label={showAll ? "Show fewer MCP servers" : `${remaining.length} more MCP servers`}
                 aria-expanded={showAll}
                 aria-controls={moreId}
@@ -208,7 +210,7 @@ export const ContextGauge = memo(function ContextGauge({
             type="button"
             aria-label={tooltip}
             className={cn(
-              "hover:bg-bg2-hover text-fg2 hover:text-fg1 flex size-8 shrink-0 cursor-pointer items-center justify-center rounded-md border-0 bg-transparent p-0 transition-colors",
+              "hover:bg-bg2-highlight text-fg2 hover:text-fg1 flex size-7 shrink-0 cursor-pointer items-center justify-center rounded-md border-0 bg-transparent p-0 transition-colors",
               !data && "text-muted-fg",
             )}
           >
@@ -216,13 +218,14 @@ export const ContextGauge = memo(function ContextGauge({
           </button>
         </PopoverTrigger>
       </Tooltip>
-      <PopoverContent align="end" side="top" className="p-3.5">
+      {/* The shared 12px popover inset; every row's text starts 6px in. */}
+      <PopoverContent align="end" side="top">
         {/* No-data popovers (pre-first-message / Cursor) carry ONLY the
         message — no "Context" title, no bar, no footer. */}
         {data ? (
           <>
             <div className="flex items-baseline justify-between">
-              <span className="text-fg1 text-sm font-semibold">Context</span>
+              <span className="text-fg1 text-xs leading-4.5 font-medium">Context</span>
               <span className="text-fg2 font-mono text-xs">
                 {formatTokens(data.used)} / {formatTokens(data.size)}
               </span>
@@ -239,7 +242,7 @@ export const ContextGauge = memo(function ContextGauge({
               ) : (
                 <div
                   key={r.id ?? `${r.kind}:${r.name}`}
-                  className="flex items-center justify-between px-0.5 py-1 text-[12.5px]"
+                  className="flex items-center justify-between px-1.5 py-1 text-xs leading-4.5"
                 >
                   <span className="text-fg2">{r.name}</span>
                   <span
@@ -255,19 +258,20 @@ export const ContextGauge = memo(function ContextGauge({
             </div>
             {onCompactNow && (
               <div className="border-border2 mt-2 border-t pt-2">
-                <button
-                  type="button"
+                <Button
+                  variant="ghost"
+                  size="compact"
                   disabled={compactDisabled}
                   onClick={onCompactNow}
-                  className="hover:bg-bg3-hover text-fg2 hover:text-fg1 w-full cursor-pointer rounded-md border-0 bg-transparent px-2 py-1 text-left text-xs font-medium transition-colors disabled:cursor-default disabled:opacity-50"
+                  className="hover:bg-bg3-hover text-fg2 hover:text-fg1 w-full justify-start px-1.5"
                 >
                   Compact now
-                </button>
+                </Button>
               </div>
             )}
           </>
         ) : (
-          <p className="text-fg2 text-[12.5px]">{noDataMessage}</p>
+          <p className="text-fg2 text-xs leading-4.5">{noDataMessage}</p>
         )}
       </PopoverContent>
     </Popover>

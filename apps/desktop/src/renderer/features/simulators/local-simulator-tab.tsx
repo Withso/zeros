@@ -156,7 +156,7 @@ function DeviceScreen({
       return (
         <ScreenMessage active={active} message={`${device.name} is shut down.`}>
           <Button
-            variant="default"
+            variant="primary"
             size="compact"
             onClick={() => void bootSimulatorFromTab(device)}
           >

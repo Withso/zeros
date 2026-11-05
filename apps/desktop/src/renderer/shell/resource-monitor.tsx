@@ -14,6 +14,7 @@ import React, {
   useRef,
   useState,
 } from "react";
+import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import {
   AppWindow,
   ArrowDown,
@@ -212,11 +213,10 @@ const ResourceProcessRow = memo(function ResourceProcessRow({
         style={{ paddingInlineStart: indent }}
       >
         {expandable ? (
-          <Button
+          <IconButton
             type="button"
-            variant="ghost"
-            size="icon-sm"
-            aria-label={`${collapsed ? "Expand" : "Collapse"} ${node.name}`}
+            size="standard"
+            label={`${collapsed ? "Expand" : "Collapse"} ${node.name}`}
             aria-expanded={!collapsed}
             onClick={() => onToggle(node.id)}
           >
@@ -225,7 +225,7 @@ const ResourceProcessRow = memo(function ResourceProcessRow({
             ) : (
               <ChevronDown aria-hidden="true" />
             )}
-          </Button>
+          </IconButton>
         ) : (
           <span className="size-6 shrink-0" aria-hidden="true" />
         )}
@@ -781,17 +781,16 @@ export const ResourceMonitor = memo(function ResourceMonitor() {
                 }
                 side="bottom"
               >
-                <Button
+                <IconButton
                   type="button"
-                  variant={includesTerminal ? "secondary-on" : "ghost"}
-                  size="icon-sm"
-                  aria-label={terminalControlLabel}
+                  size="standard"
+                  label={terminalControlLabel}
                   aria-pressed={includesTerminal}
                   disabled={!currentTerminalFilterAvailable && includeTerminal}
                   onClick={() => setIncludeTerminal((included) => !included)}
                 >
                   <SquareTerminal aria-hidden="true" />
-                </Button>
+                </IconButton>
               </Tooltip>
               <Tooltip
                 label={
@@ -801,11 +800,10 @@ export const ResourceMonitor = memo(function ResourceMonitor() {
                 }
                 side="bottom"
               >
-                <Button
+                <IconButton
                   type="button"
-                  variant={stack ? "secondary-on" : "ghost"}
-                  size="icon-sm"
-                  aria-label={
+                  size="standard"
+                  label={
                     stack
                       ? "Unstack matching processes"
                       : "Stack matching processes"
@@ -814,38 +812,36 @@ export const ResourceMonitor = memo(function ResourceMonitor() {
                   onClick={() => setStack((stacked) => !stacked)}
                 >
                   <Layers3 aria-hidden="true" />
-                </Button>
+                </IconButton>
               </Tooltip>
               <Tooltip
                 label={tree ? "Flat view" : "Tree view"}
                 side="bottom"
               >
-                <Button
+                <IconButton
                   type="button"
-                  variant={tree ? "secondary-on" : "ghost"}
-                  size="icon-sm"
-                  aria-label={tree ? "Use flat view" : "Use tree view"}
+                  size="standard"
+                  label={tree ? "Use flat view" : "Use tree view"}
                   aria-pressed={tree}
                   onClick={() => setTree((treeView) => !treeView)}
                 >
                   <GitFork aria-hidden="true" />
-                </Button>
+                </IconButton>
               </Tooltip>
               <Tooltip
                 label="Copy diagnostics"
                 side="bottom"
               >
-                <Button
+                <IconButton
                   type="button"
-                  variant="ghost"
-                  size="icon-sm"
-                  aria-label="Copy diagnostics"
+                  size="standard"
+                  label="Copy diagnostics"
                   aria-busy={copying}
                   disabled={!displaySnapshot || !totals || copying}
                   onClick={() => void handleCopy()}
                 >
                   <Copy aria-hidden="true" />
-                </Button>
+                </IconButton>
               </Tooltip>
             </Inline>
           </div>

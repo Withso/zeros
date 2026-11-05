@@ -1,0 +1,9 @@
+{
+  "id": "field-focus-ring-keyboard-only",
+  "kind": "replay",
+  "area": "renderer-ui",
+  "fixedBy": "5059d93e0437d6c457a029b39574c8ab05d9478a",
+  "symptom": "Every focus turned a field's border bright, including a click into it and typing, so a field shouted while the caret already showed where input goes; text inputs always match :focus-visible, so the browser cannot tell the two apart.",
+  "rule": "Fields ring only when focus arrived by keyboard: focus-navigation.ts marks it data-zeros-keyboard-focus and FIELD_FOCUS in shared/ui/primitives/field.tsx reads it (docs/design-system.md §0, item 7, and §6).",
+  "check": "pnpm exec vitest run apps/desktop/src/renderer/shared/ui/primitives/__tests__/inputs.test.ts"
+}

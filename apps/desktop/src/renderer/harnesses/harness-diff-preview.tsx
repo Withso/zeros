@@ -226,8 +226,10 @@ async function main() {
     status: "completed",
     rawInput: {
       file_path: "src/placement.ts",
-      old_string: "const placement = 'old';",
-      new_string: "const placement = 'new';",
+      // Two lines each way: the four-row preview must stay taller than the
+      // room above the trigger inside the transcript, at chat's 20px rows.
+      old_string: "const placement = 'old';\nconst side = 'top';",
+      new_string: "const placement = 'new';\nconst side = 'bottom';",
     },
     createdAt: 0,
     updatedAt: 0,

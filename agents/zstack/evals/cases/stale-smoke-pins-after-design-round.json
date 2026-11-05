@@ -1,0 +1,9 @@
+{
+  "id": "stale-smoke-pins-after-design-round",
+  "kind": "replay",
+  "area": "renderer-ui",
+  "fixedBy": "74ad101688ea0c4a63704dd91f82ede42ef76a78",
+  "symptom": "Nine ui-smoke scenarios still pinned looks the design branch had replaced on purpose (model menu width, row height and gaps, sidebar hover actions, organization switcher padding, collapsed Dashboard offset, hover card surface, canvas tool rail width, Dialog close size) plus an exact float comparison; only the handoff registry run found them, and each crash hid the rest of its shard.",
+  "rule": "Run the registry shards that mount a page step's surfaces before committing the step, update pins to the shipped look in the same commit, and compare computed geometry with a tolerance.",
+  "check": "pnpm test:ui-smoke --shard=2/3"
+}

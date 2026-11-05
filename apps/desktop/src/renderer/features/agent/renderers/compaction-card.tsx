@@ -22,6 +22,9 @@ import { memo } from "react";
 import { CircleCheckBig, CircleSlash } from "lucide-react";
 
 import { ZerosSpinner } from "@/renderer/shared/ui/loading";
+import { Badge } from "@/renderer/shared/ui/primitives";
+import { cn } from "@/renderer/shared/ui/cn";
+import { DETAIL_BODY_CLS } from "./tool-detail-surface";
 
 import type { AgentToolMessage } from "../use-agent-session";
 import type { Renderer } from "./types";
@@ -36,13 +39,9 @@ function CompactingIcon({ className }: { className?: string }) {
   return <ZerosSpinner size={12} label="Compacting" className={className} />;
 }
 
-/** Same chip recipe as the question record's StatusChip, minus the icon. */
+/** The record's status: the shared outline Badge, as the question record's. */
 function DoneChip() {
-  return (
-    <span className="border-border1 text-fg2 text-xxs flex shrink-0 items-center rounded-md border px-1.5 py-0.5 font-mono tracking-wide uppercase">
-      Done
-    </span>
-  );
+  return <Badge variant="outline">Done</Badge>;
 }
 
 /** Optional detail: adapters may stamp rawInput with {trigger, preTokens}
@@ -103,12 +102,10 @@ export const CompactionRecordCard: Renderer<AgentToolMessage> = memo(
 
     const detail = running ? undefined : failed ? (
       error ? (
-        <div className="bg-bg2/60 text-fg2 rounded-md p-2.5 text-sm leading-relaxed">
-          {error}
-        </div>
+        <div className={DETAIL_BODY_CLS}>{error}</div>
       ) : undefined
     ) : info || fallback ? (
-      <div className="bg-bg2/60 text-fg2 flex flex-col gap-0.5 rounded-md p-2.5 text-sm leading-relaxed">
+      <div className={cn(DETAIL_BODY_CLS, "gap-0.5")}>
         {info?.trigger ? (
           <div>
             <span className="text-fg2/70">Trigger: </span>

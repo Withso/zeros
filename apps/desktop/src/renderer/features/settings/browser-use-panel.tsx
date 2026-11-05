@@ -78,7 +78,7 @@ function BrowserSwitchRow({
   children,
 }: {
   id: string;
-  row: { label: string; hint: string };
+  row: { label: string; hint?: string };
   checked: boolean;
   managed: boolean;
   disabled: boolean;
@@ -291,7 +291,7 @@ function LocalBrowserUsePanel() {
   const sharedRowsOff = !inAppBrowserInUse(values, { zerosBrowser });
   const switchRow = (
     key: BrowserBooleanSetting,
-    row: { label: string; hint: string },
+    row: { label: string; hint?: string },
     options: { inactive?: boolean; children?: ReactNode } = {},
   ) => (
     <BrowserSwitchRow
@@ -375,7 +375,7 @@ function LocalBrowserUsePanel() {
                 updateNavigationApproval(value as BrowserNavigationApproval)
               }
             >
-              <SelectTrigger aria-label={navigationApprovalRow.label}>
+              <SelectTrigger width="fixed" aria-label={navigationApprovalRow.label}>
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>

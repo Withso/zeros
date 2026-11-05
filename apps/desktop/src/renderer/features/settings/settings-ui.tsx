@@ -1,37 +1,31 @@
 // ──────────────────────────────────────────────────────────
-// Settings UI primitives — flat sections, no cards
+// Settings UI primitives — one layout of grouped cards
 // ──────────────────────────────────────────────────────────
 //
-// The shared visual vocabulary for every settings panel (User + Repo).
-// The former `rounded-lg border bg-bg3 p-6` card that wrapped every group was
-// retired; the page reads as flat sections of
-// label-left / control-right rows separated by hairline dividers, with
-// inputs and selects keeping their own borders and nothing else boxed.
+// The shared visual vocabulary for every settings panel (User + Repo):
+// rows in grouped cards — `bg1-bright`, a `border1` edge and dividers, 12px
+// corners and 12 × 14 rows — with 13/18 medium names, 12/16 `fg3` hints and
+// 28px controls right-aligned. Group titles are 13 medium `fg1` with an
+// optional 12 `fg3` description. Flat sections retired with this layout.
 //
 // Build these ONCE; every panel composes them so User and Repo scopes
 // read identically.
-//
-// Design system (docs/design-system.md): section heading /
-// row label `font-medium text-fg1`; hints `text-xs text-fg2`; dividers
-// `border-border1`; default text fg2, focal/selected fg1; 4 px grid.
-//
-// NAMES (section titles + row/field/empty labels) size as `text-[14px]`,
-// NOT `text-sm`: names are 14px and everything
-// else 13px on the settings page. The arbitrary `text-[14px]` is load-
-// bearing: it opts these out of the `.settings-type-scale` shrink that
-// pulls `.text-sm` controls down to 13px (settings-page.css). It equals the
-// old `text-sm` (14px) everywhere else (e.g. repo settings), so no other
-// surface changes. Hints stay `text-xs` = the app-native 13px.
 // ──────────────────────────────────────────────────────────
 
 import React from "react";
-import { Lock } from "lucide-react";
+import { Lock, Plus } from "lucide-react";
 import { cn } from "@/renderer/shared/ui/cn";
+import { badgeVariants } from "@/renderer/shared/ui/primitives/badge";
+import { Button } from "@/renderer/shared/ui/primitives/button";
+
+const NAME_CLS = "text-fg1 text-xs leading-4.5 font-medium";
+const HINT_CLS = "text-fg3 text-3xxs leading-4";
 
 // ── Section ──────────────────────────────────────────────
 
-/** A flat settings section: a muted heading (with an optional one-line
- *  description and a right-aligned action), then its body. No card. */
+/** A titled section: a 13 medium heading (with an optional one-line
+ *  description and a right-aligned action) 8px above its body, which is
+ *  usually a `SettingsList` card. */
 export function SettingsSection({
   title,
   description,
@@ -46,14 +40,12 @@ export function SettingsSection({
   className?: string;
 }) {
   return (
-    <section className={cn("flex flex-col gap-3", className)}>
+    <section className={cn("flex flex-col gap-2", className)}>
       {(title || action || description) && (
         <div className="flex items-start justify-between gap-4">
           <div className="flex min-w-0 flex-col gap-0.5">
-            {title && (
-              <h2 className="text-fg1 m-0 text-[14px] font-medium">{title}</h2>
-            )}
-            {description && <p className="text-fg2 text-xs">{description}</p>}
+            {title && <h2 className={cn(NAME_CLS, "m-0")}>{title}</h2>}
+            {description && <p className={cn(HINT_CLS, "m-0")}>{description}</p>}
           </div>
           {action && <div className="shrink-0">{action}</div>}
         </div>
@@ -63,31 +55,25 @@ export function SettingsSection({
   );
 }
 
-/** Filled section card for settings rows — the Models-panel recipe (a
- *  borderless subtle-fill card, `--border1` hairlines between rows, 12px
- *  padding on all sides via `px-3` + the `[&>*]:py-3` row override). The
- *  fill is `--bg1-bright` (a step above bg1-highlight in dark, = bg2 in
- *  light), NOT `--bg3`: in light mode bg3 = bg1 = white and the card would
- *  vanish (check:ui guards this). Pass as `className` to a `SettingsList`. */
+/** The settings card: `--bg1-bright` fill (a step above bg1-highlight in
+ *  dark, = bg2 in light) with a `--border1` edge and dividers, 12px corners,
+ *  and 12 × 14 rows (`px-3.5` on the card, `[&>*]:py-3` on every row). Not
+ *  `--bg3`: in light mode bg3 = bg1 = white and the card would vanish
+ *  (check:ui guards this). Every `SettingsList` wears it. */
 export const SETTINGS_CARD_LIST_CLS =
-  "bg-bg1-bright divide-border1 rounded-lg px-3 [&>*]:py-3";
+  "bg-bg1-bright border-border1 divide-border1 rounded-[calc(var(--radius-lg)*1.5)] border px-3.5 [&>*]:py-3";
 
-/** Grouped settings card — the Cursor-style recipe every settings tab is
- *  migrating to (Appearance first, 2026-09-14). An optional MUTED heading
- *  (`text-fg2 text-xs`, unlike `SettingsSection`'s fg1 title) sits 8px
- *  above the card. The card is the same filled recipe as
- *  `SETTINGS_CARD_LIST_CLS` but at a 12px radius: `--bg1-bright` fill, `--border1`
- *  hairlines between rows, and 12px padding on all sides (`px-3` on the
- *  card + `[&>*]:py-3` on every row, which overrides the rows' own
- *  `py-3.5`). Groups are spaced 24px apart by the panel (`gap-6`). */
 /** 12px corners for the grouped card, DERIVED from the radius scale like
- *  menu-surface.ts's 16px dropdown surface (1.5 × --radius-lg). Not
+ *  menu-surface.ts's floating surfaces (1.5 × --radius-lg). Not
  *  `rounded-xl`: zeros-tokens.css resets `--radius-xl` to `initial` on
  *  purpose, so that class compiles to nothing (the card rendered with
  *  square corners, 2026-09-14). The grouped card is a larger surface than
  *  the 8px rows/chips inside it, hence the step up. */
 export const SETTINGS_GROUP_RADIUS = "rounded-[calc(var(--radius-lg)*1.5)]";
 
+/** Grouped settings card: an optional 13 medium `fg1` title and 12 `fg3`
+ *  description 8px above the `SETTINGS_CARD_LIST_CLS` card. Groups are
+ *  spaced 32px apart by the panel (`gap-8`). */
 export function SettingsGroup({
   title,
   description,
@@ -104,48 +90,28 @@ export function SettingsGroup({
 }) {
   return (
     <section aria-label={ariaLabel} className={cn("flex flex-col gap-2", className)}>
-      {/* 12px: one step below the 13px row text so the heading reads as a
-          group label, not another row. */}
       {(title || description) && (
-        <div className="flex flex-col gap-0.5">
-          {title && (
-            <h2 className="text-fg2 text-3xxs m-0 font-medium">{title}</h2>
-          )}
-          {description && (
-            <p className="text-muted-fg text-3xxs m-0">{description}</p>
-          )}
+        <div className="flex flex-col gap-0.5 px-0.5">
+          {title && <h2 className={cn(NAME_CLS, "m-0")}>{title}</h2>}
+          {description && <p className={cn(HINT_CLS, "m-0")}>{description}</p>}
         </div>
       )}
-      <SettingsGroupContext.Provider value={true}>
-        <SettingsList
-          className={cn(SETTINGS_CARD_LIST_CLS, SETTINGS_GROUP_RADIUS)}
-        >
-          {children}
-        </SettingsList>
-      </SettingsGroupContext.Provider>
+      <SettingsList>{children}</SettingsList>
     </section>
   );
 }
 
-/** True inside a `SettingsGroup` card. Rows there use the grouped type
- *  scale — label AND hint both 13px, 2px apart — instead of the flat
- *  page's 14px names. Context (not a prop) so existing `SettingsRow`
- *  call sites migrate just by being wrapped. */
-const SettingsGroupContext = React.createContext(false);
-
-/** A flat row group: `SettingsRow` / `SettingsField` children separated by
- *  hairline dividers, sitting directly on the page surface — no card fill,
- *  no border, no rounding (the bg2 card was retired 2026-07-12; rows align
- *  flush with the section headings). */
+/** A card of `SettingsRow` / `SettingsField` children separated by
+ *  `border1` dividers. */
 export function SettingsList({
   children,
   className,
-}: {
+  ...props
+}: React.HTMLAttributes<HTMLDivElement> & {
   children: React.ReactNode;
-  className?: string;
 }) {
   return (
-    <div className={cn("divide-border2 flex flex-col divide-y", className)}>
+    <div {...props} className={cn("flex flex-col divide-y", SETTINGS_CARD_LIST_CLS, className)}>
       {children}
     </div>
   );
@@ -159,6 +125,7 @@ export function SettingsRow({
   label,
   hint,
   htmlFor,
+  leading,
   children,
   className,
   align = "center",
@@ -166,41 +133,44 @@ export function SettingsRow({
   label?: React.ReactNode;
   hint?: React.ReactNode;
   htmlFor?: string;
+  /** An avatar or icon 12px before the label block. */
+  leading?: React.ReactNode;
   children?: React.ReactNode;
   className?: string;
   /** Vertical alignment of the control against the label block. */
   align?: "center" | "start";
 }) {
-  // Grouped cards: 13px names (= the 13px hint). Flat sections keep 14px.
-  const grouped = React.useContext(SettingsGroupContext);
-  const labelCls = cn(
-    "text-fg1 font-medium",
-    grouped ? "text-[13px]" : "text-[14px]",
+  const labelCls = NAME_CLS;
+  const text = (label || hint) && (
+    <div className="flex min-w-0 flex-col gap-0.5">
+      {label &&
+        (htmlFor ? (
+          <label htmlFor={htmlFor} className={labelCls}>
+            {label}
+          </label>
+        ) : (
+          <span className={labelCls}>{label}</span>
+        ))}
+      {hint && <span className={HINT_CLS}>{hint}</span>}
+    </div>
   );
   return (
     <div
       className={cn(
-        "flex justify-between gap-4 py-3.5",
+        "flex justify-between gap-4 py-3",
         align === "center" ? "items-center" : "items-start",
         className,
       )}
     >
-      {(label || hint) && (
-        <div className="flex min-w-0 flex-col gap-0.5">
-          {label &&
-            (htmlFor ? (
-              <label htmlFor={htmlFor} className={labelCls}>
-                {label}
-              </label>
-            ) : (
-              <span className={labelCls}>{label}</span>
-            ))}
-          {hint && (
-            <span className="text-fg2 text-xs leading-relaxed">{hint}</span>
-          )}
+      {leading ? (
+        <div className="flex min-w-0 items-center gap-3">
+          {leading}
+          {text}
         </div>
+      ) : (
+        text
       )}
-      {children != null && <div className="shrink-0">{children}</div>}
+      {children != null && <div className="flex shrink-0 items-center gap-2">{children}</div>}
     </div>
   );
 }
@@ -220,16 +190,15 @@ export function SettingsField({
   children: React.ReactNode;
   className?: string;
 }) {
-  const grouped = React.useContext(SettingsGroupContext);
   return (
-    <div className={cn("flex flex-col gap-2 py-3.5", className)}>
+    <div className={cn("flex flex-col gap-1.5 py-3", className)}>
       {label && (
-        <label htmlFor={htmlFor} className={cn("text-fg1 font-medium", grouped ? "text-xs" : "text-[14px]")}>
+        <label htmlFor={htmlFor} className={NAME_CLS}>
           {label}
         </label>
       )}
       {children}
-      {hint && <p className="text-fg2 text-xs leading-relaxed">{hint}</p>}
+      {hint && <p className={cn(HINT_CLS, "m-0")}>{hint}</p>}
     </div>
   );
 }
@@ -241,7 +210,33 @@ export function SettingsActions({ children }: { children: React.ReactNode }) {
   );
 }
 
-/** Empty-state block for a section with nothing configured yet. */
+/** The last row of a list card, adding an item: the whole 44px row is the
+ *  target (the card's `[&>*]:py-3` and the button's border make 44), a 14px
+ *  `fg3` plus and 13/18 `fg2` text that lifts to `fg1` on hover. */
+export function SettingsAddRow({
+  label,
+  onClick,
+  disabled,
+}: {
+  label: string;
+  onClick: () => void;
+  disabled?: boolean;
+}) {
+  return (
+    <Button
+      variant="ghost"
+      className="text-fg2 [&_svg]:text-fg3 w-full justify-start gap-2 px-0 hover:bg-transparent"
+      onClick={onClick}
+      disabled={disabled}
+    >
+      <Plus aria-hidden />
+      {label}
+    </Button>
+  );
+}
+
+/** The one empty state for a section with nothing configured yet: one
+ *  13/18 `fg2` line, with an optional 12 `fg3` hint. */
 export function SettingsEmpty({
   title,
   hint,
@@ -250,14 +245,15 @@ export function SettingsEmpty({
   hint?: React.ReactNode;
 }) {
   return (
-    <div className="flex flex-col gap-1 py-6 text-center">
-      <p className="text-fg1 text-[14px] font-medium">{title}</p>
-      {hint && <p className="text-fg2 text-xs">{hint}</p>}
+    <div className="flex flex-col items-center gap-0.5 py-6 text-center">
+      <p className="text-fg2 m-0 text-xs leading-4.5">{title}</p>
+      {hint && <p className={cn(HINT_CLS, "m-0")}>{hint}</p>}
     </div>
   );
 }
 
-/** A compact empty collection state with its primary creation action. */
+/** An empty collection in its card: one line and the action that creates
+ *  the first item. */
 export function SettingsEmptyCard({
   title,
   action,
@@ -266,8 +262,13 @@ export function SettingsEmptyCard({
   action: React.ReactNode;
 }) {
   return (
-    <div className="border-border1 flex h-36 flex-col items-center justify-center gap-2 rounded-lg border">
-      <p className="text-fg2 text-xs">{title}</p>
+    <div
+      className={cn(
+        "bg-bg1-bright border-border1 flex flex-col items-center justify-center gap-3 border px-3.5 py-6",
+        SETTINGS_GROUP_RADIUS,
+      )}
+    >
+      <p className="text-fg2 m-0 text-xs leading-4.5">{title}</p>
       {action}
     </div>
   );
@@ -314,7 +315,7 @@ const SOURCE_LABEL: Record<SettingsSource, string> = {
 export function SourceTag({ source }: { source: SettingsSource | undefined }) {
   if (!source) return null;
   return (
-    <span className="border-border1 text-fg2 rounded-sm border px-1.5 py-px text-xs font-medium select-none">
+    <span className={cn(badgeVariants({ variant: "outline" }), "select-none")}>
       {SOURCE_LABEL[source]}
     </span>
   );
@@ -332,8 +333,8 @@ export function InheritedGroup({
 }) {
   return (
     <section className="flex flex-col gap-2 pt-2">
-      <div className="text-fg2 flex items-center gap-1.5 text-xs font-medium">
-        <Lock className="size-3" aria-hidden="true" />
+      <div className={cn(NAME_CLS, "flex items-center gap-1.5 px-0.5")}>
+        <Lock className="text-fg3 size-3" aria-hidden="true" />
         {label}
       </div>
       <SettingsList>{children}</SettingsList>
@@ -353,21 +354,15 @@ export function InheritedRow({
   onOverride?: () => void;
 }) {
   return (
-    <div className="flex items-center justify-between gap-4 py-2.5">
+    <div className="flex items-center justify-between gap-4 py-3">
       <div className="flex min-w-0 items-center gap-2">
-        <span className="text-fg2 truncate font-mono text-sm">{name}</span>
-        {value != null && (
-          <span className="text-muted-fg truncate text-xs">{value}</span>
-        )}
+        <span className="text-fg2 text-3xxs truncate font-mono">{name}</span>
+        {value != null && <span className={cn(HINT_CLS, "truncate")}>{value}</span>}
       </div>
       {onOverride && (
-        <button
-          type="button"
-          onClick={onOverride}
-          className="text-fg2 hover:text-fg1 shrink-0 text-xs font-medium transition-colors"
-        >
+        <Button variant="ghost" size="compact" className="shrink-0" onClick={onOverride}>
           Override
-        </button>
+        </Button>
       )}
     </div>
   );
@@ -377,12 +372,8 @@ export function InheritedRow({
  *  key and fall back to the inherited one. */
 export function ResetToInherited({ onReset }: { onReset: () => void }) {
   return (
-    <button
-      type="button"
-      onClick={onReset}
-      className="text-fg2 hover:text-fg1 shrink-0 text-xs font-medium transition-colors"
-    >
+    <Button variant="ghost" size="compact" className="shrink-0" onClick={onReset}>
       Reset
-    </button>
+    </Button>
   );
 }

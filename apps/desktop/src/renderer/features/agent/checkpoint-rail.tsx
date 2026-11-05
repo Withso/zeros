@@ -117,8 +117,9 @@ function spyAnchorPx(viewportH: number): number {
 }
 
 /** The strip's border-box width; the popup offsets by it to open flush on top
- *  of the strip. */
-const RAIL_WIDTH_PX = 28;
+ *  of the strip. It spans 4–24px, clear of the lane's 28px text column and
+ *  of the rows' hover, which starts 8px before it. */
+const RAIL_WIDTH_PX = 20;
 
 import { beginChatScrollNavigation, CHAT_SCROLL_NAVIGATION_EVENT, type ChatScrollNavigation } from "./chat-scroll-navigation";
 
@@ -520,10 +521,11 @@ export const CheckpointRail = memo(function CheckpointRail({
     <HoverCard openDelay={150} closeDelay={150}>
       <HoverCardTrigger asChild>
         {/* The hit zone is the tick stack only, so the transcript beside it stays
-            selectable. z-[8] sits above the top mask and below the jump pill. */}
+            selectable. z-2 sits above the top mask; the jump pill shares it on
+            the other edge. */}
         <nav
           aria-label="Chat checkpoints"
-          className="group/rail absolute top-3 left-1 z-[8] flex max-h-[calc(100%-4rem)] flex-col overflow-hidden p-1"
+          className="group/rail absolute top-3 left-1 z-2 flex max-h-[calc(100%-4rem)] flex-col overflow-hidden p-0.5"
         >
           {checkpoints.map((c, i) => (
             <button
@@ -532,7 +534,7 @@ export const CheckpointRail = memo(function CheckpointRail({
               onClick={() => scrollToCheckpoint(c.id)}
               aria-label={`Jump to: ${summarizeCheckpointText(c.text)}`}
               aria-current={i === activeIndex ? "true" : undefined}
-              className="flex w-5 cursor-pointer items-center focus-visible:outline-none"
+              className="flex w-4 cursor-pointer items-center focus-visible:outline-none"
               style={{ height: pitch }}
             >
               {/* Active state is color only; every tick has the same width. */}
@@ -557,7 +559,7 @@ export const CheckpointRail = memo(function CheckpointRail({
         sideOffset={-RAIL_WIDTH_PX}
         alignOffset={0}
         collisionPadding={12}
-        className="flex max-h-[min(28rem,70vh)] w-72 flex-col gap-1 overflow-y-auto p-1.5"
+        className="flex max-h-[min(28rem,70vh)] w-72 flex-col gap-0.5 overflow-y-auto p-1"
       >
         {checkpoints.map((c, i) => (
           <button
@@ -567,12 +569,13 @@ export const CheckpointRail = memo(function CheckpointRail({
             onClick={() => scrollToCheckpoint(c.id)}
             // Only the selected row's text is fg1; hover changes the background only.
             className={cn(
-              "flex h-8 w-full flex-none cursor-pointer items-center gap-2.5 rounded-md px-2 text-left transition-colors",
-              // The selected row keeps bg2-hover, the hover fill of its siblings.
-              // --highlighted-bg is the user-bubble surface and would sit darker.
+              // A 28px menu row inset 4px, like every floating list.
+              "flex h-7 w-full flex-none cursor-pointer items-center gap-2.5 rounded-md px-2 text-left transition-colors",
+              // The hover card binds the floating surface's row hover; the
+              // selected row keeps it.
               i === activeIndex
-                ? "bg-bg2-hover text-fg1"
-                : "text-fg2 hover:bg-bg2-hover",
+                ? "bg-(--surface-hover) text-fg1"
+                : "text-fg2 hover:bg-(--surface-hover)",
             )}
           >
             <span

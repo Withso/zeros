@@ -11,6 +11,7 @@ import React, {
   useRef,
   useState,
 } from "react";
+import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import { isFeatureEnabled } from "../../config/release-channel";
 import {
   ArrowUpRight,
@@ -23,7 +24,9 @@ import {
 } from "lucide-react";
 import { Button, Input } from "../../shared/ui";
 import { Tooltip } from "@/renderer/shared/ui/primitives";
-import { selectTriggerClassName } from "../../shared/ui/primitives/select";
+import { badgeVariants } from "@/renderer/shared/ui/primitives/badge";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/renderer/shared/ui/primitives/tabs";
+import { SELECT_CHEVRON, selectTriggerClassName } from "../../shared/ui/primitives/select";
 import { OpenAppIcon } from "../agent/open-app-icon";
 import {
   FINDER_APP_ID,
@@ -40,7 +43,6 @@ import {
 } from "../../shared/ui/primitives/dropdown-menu";
 import { toast } from "../../shared/ui/primitives/elements";
 import { openAgentConfig } from "../../platform/app";
-import { cn } from "@/renderer/shared/ui/cn";
 import { flushAgentPreferences } from "../../platform/agent-preferences";
 import { subscribeProviderAuth } from "../../platform/provider-auth-state";
 import { AgentIcon } from "../agent/agent-icon";
@@ -161,15 +163,11 @@ function ExecutablePathHint({
   if (agentId === "codex") {
     return (
       <>
-        Leave blank to use the bundled Codex, falling back to{" "}
-        <span className="bg-bg2-hover text-fg1 rounded-sm px-1.5 py-0.5 text-xs">
-          codex
-        </span>{" "}
-        on your $PATH.
+        Blank uses the bundled Codex.
       </>
     );
   }
-  return <>Leave blank to use the bundled {name} (recommended).</>;
+  return <>Blank uses the bundled {name}.</>;
 }
 
 /** Each agent's own native config file — we link out to it (Finder / copy path)
@@ -201,7 +199,7 @@ function AgentConfigCard({ agentId }: { agentId: string }) {
   return (
     <div className="border-border1 flex flex-row items-center justify-between gap-3 rounded-lg border px-4 py-3">
       <div className="flex flex-col gap-0.5">
-        <div className="text-fg1 text-[14px] font-medium">{cfg.title}</div>
+        <div className="text-fg1 text-xs leading-4.5 font-medium">{cfg.title}</div>
         <code className="text-fg2 text-xs">{cfg.path}</code>
       </div>
       <DropdownMenu>
@@ -212,7 +210,7 @@ function AgentConfigCard({ agentId }: { agentId: string }) {
           className={selectTriggerClassName("fit", "text-fg1")}
         >
           Open in
-          <ChevronDown className="size-3.5 opacity-50" aria-hidden="true" />
+          <ChevronDown className={SELECT_CHEVRON} aria-hidden="true" />
         </DropdownMenuTrigger>
         <DropdownMenuContent
           align="end"
@@ -268,7 +266,7 @@ export function ProvidersPanel({
   if (!organization && getActiveOrganizationIdSnapshot())
     return <p className="text-fg2 text-xs">Loading organization agent settings…</p>;
   return organization && !organization.isPersonal
-    ? <CloudProviderConnections key={`${me?.user.id ?? "pending"}:${organization.id}`} organizationId={organization.id} surfaceActive={surfaceActive} Tabs={ProviderTabs} />
+    ? <CloudProviderConnections key={`${me?.user.id ?? "pending"}:${organization.id}`} organizationId={organization.id} surfaceActive={surfaceActive} />
     : <LocalProvidersPanel surfaceActive={surfaceActive} />;
 }
 
@@ -397,21 +395,23 @@ function LocalProvidersPanel({ surfaceActive }: { surfaceActive: boolean }) {
       {ordered.length === 0 ? (
         <div className="min-h-24" aria-busy="true" />
       ) : (
-        <>
-          <ProviderTabs
-            providers={ordered}
-            activeId={active?.id ?? ordered[0].id}
-            onSelect={setActiveId}
-          />
+        <Tabs
+          value={active?.id ?? ordered[0].id}
+          onValueChange={setActiveId}
+          className="flex flex-col gap-8"
+        >
+          <ProviderTabs providers={ordered} />
           {active && (
-            <ProviderCard
-              key={active.id}
-              agent={active}
-              surfaceActive={surfaceActive}
-              onRefresh={handleRefresh}
-            />
+            <TabsContent value={active.id} className="mt-0">
+              <ProviderCard
+                key={active.id}
+                agent={active}
+                surfaceActive={surfaceActive}
+                onRefresh={handleRefresh}
+              />
+            </TabsContent>
           )}
-        </>
+        </Tabs>
       )}
     </div>
   );
@@ -421,49 +421,23 @@ function LocalProvidersPanel({ surfaceActive }: { surfaceActive: boolean }) {
 // Tab strip
 // ──────────────────────────────────────────────────────────
 
+/** The shared segmented control: a 28px track with 24px tabs. */
 function ProviderTabs({
   providers,
-  activeId,
-  onSelect,
 }: {
   providers: Pick<BridgeRegistryAgent, "id" | "name" | "beta">[];
-  activeId: string;
-  onSelect: (id: string) => void;
 }) {
-  // Underline tabs: each button's 2px `border-b` overlaps the parent's 1px
-  // baseline via a negative margin. The row scrolls with a hidden scrollbar, and
-  // `shrink-0 whitespace-nowrap` keeps two-word names from wrapping.
   return (
-    <div
-      role="tablist"
-      className="border-border1 flex flex-row items-center gap-0.5 overflow-x-auto border-b [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
-    >
-      {providers.map((agent) => {
-        const isActive = activeId === agent.id;
-        return (
-          <button
-            key={agent.id}
-            type="button"
-            role="tab"
-            aria-selected={isActive}
-            onClick={() => onSelect(agent.id)}
-            className={cn(
-              "-mb-px inline-flex h-9 shrink-0 cursor-pointer items-center gap-1.5 rounded-none border-x-0 border-t-0 border-b-2 bg-transparent px-3 text-sm font-medium whitespace-nowrap transition-colors duration-150 ease-out",
-              isActive
-                ? "border-fg1 text-fg1"
-                : "text-fg2 hover:text-fg1 border-transparent",
-            )}
-          >
-            {agent.name}
-            {agent.beta && (
-              <span className="border-border1 text-fg2 rounded-sm border px-1 py-px text-xs font-medium">
-                Beta
-              </span>
-            )}
-          </button>
-        );
-      })}
-    </div>
+    <TabsList aria-label="Agents" className="max-w-full self-start overflow-x-auto [scrollbar-width:none]">
+      {providers.map((agent) => (
+        <TabsTrigger key={agent.id} value={agent.id} className="shrink-0">
+          {agent.name}
+          {agent.beta && (
+            <span className={badgeVariants({ variant: "outline" })}>Beta</span>
+          )}
+        </TabsTrigger>
+      ))}
+    </TabsList>
   );
 }
 
@@ -916,7 +890,7 @@ function ProviderCard({
                   <div className="flex flex-row items-center gap-2.5">
                     <label
                       htmlFor={`api-key-${agent.id}`}
-                      className="text-fg1 text-[14px] font-medium"
+                      className="text-fg1 text-xs leading-4.5 font-medium"
                     >
                       {vendor.vendor} API key
                     </label>
@@ -1015,10 +989,9 @@ function ProviderCard({
                     >
                       Open terminal
                     </Button>
-                    <Button
-                      variant="ghost"
-                      size="icon-sm"
-                      aria-label={`Refresh ${agent.id === "claude" ? "Claude" : agent.name} subscription`}
+                    <IconButton
+                      size="standard"
+                      label={`Refresh ${agent.id === "claude" ? "Claude" : agent.name} subscription`}
                       disabled={subscription.refreshing}
                       onClick={() => {
                         subscription.refresh();
@@ -1026,7 +999,7 @@ function ProviderCard({
                       }}
                     >
                       <RefreshCw className="size-3.5" aria-hidden="true" />
-                    </Button>
+                    </IconButton>
                   </div>
                 )}
               </>
@@ -1085,11 +1058,10 @@ function ProviderCard({
               htmlFor={`gateway-${agent.id}`}
               hint={
                 <>
-                  Point Claude at a compatible proxy (LiteLLM, corporate
-                  gateway). Injected as{" "}
-                  <span className="bg-bg2-hover text-fg1 rounded-sm px-1.5 py-0.5 text-xs">
+                  Sets{" "}
+                  <code className="bg-bg2 text-fg1 rounded-sm px-1.5 py-px font-mono text-3xxs leading-4">
                     {vendor.gatewayBaseUrlVar}
-                  </span>
+                  </code>
                   .
                 </>
               }

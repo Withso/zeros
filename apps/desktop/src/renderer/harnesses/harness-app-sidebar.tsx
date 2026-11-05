@@ -467,6 +467,10 @@ const { selectWorkbench } = await import("../state/workspace-store");
 const { ShortcutsPalette } = await import("../shell/shortcuts-palette");
 const { useShortcutsHotkey } = await import("../shell/use-shortcuts-hotkey");
 const { DispatcherPage } = await import("../shell/dispatcher/dispatcher-modal");
+// The real Settings page is opt-in (?settings) so navigation checks stay light.
+const SettingsPage = params.has("settings")
+  ? (await import("../features/settings/settings-page")).SettingsPage
+  : null;
 const { RepoPage } = await import("../features/repositories/repo-page");
 const { DashboardPage } = await import("../features/dashboard/dashboard-page");
 const { useProjects, notifyWorkspacesChanged } = await import("../state/use-projects");
@@ -708,10 +712,9 @@ function Harness() {
       <main
         className={[
           "relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden",
-          // The real chat strip reserves the corner itself.
-          controlsVisible && !(page === "workspace" && ConversationPane)
-            ? "mt-10"
-            : "",
+          // Mirrors app-shell: the chat strip and the Dashboard header reserve
+          // the corner themselves; only Create still starts below it.
+          controlsVisible && page === "create" ? "mt-10" : "",
         ].join(" ")}
         data-harness-page={page}
       >
@@ -727,6 +730,8 @@ function Harness() {
           <RepoPage project={repoProject} />
         ) : page === "dashboard" ? (
           <DashboardPage />
+        ) : page === "settings" && SettingsPage ? (
+          <SettingsPage />
         ) : page === "workspace" && ConversationPane ? (
           <div className="flex min-h-0 min-w-0 flex-1">
             <ConversationPane

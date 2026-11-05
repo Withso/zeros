@@ -29,7 +29,8 @@ import {
 } from "@/renderer/shared/ui/primitives/select";
 import { Button } from "@/renderer/shared/ui/primitives/button";
 import { Textarea } from "@/renderer/shared/ui/primitives/textarea";
-import { Label } from "@/renderer/shared/ui/primitives/label";
+import { Checkbox } from "@/renderer/shared/ui/primitives/checkbox";
+import { Field } from "@/renderer/shared/ui/primitives/field";
 import { toast } from "@/renderer/shared/ui/primitives/elements";
 import { isElectron, nativeInvoke } from "@/renderer/platform/runtime";
 import {
@@ -91,76 +92,61 @@ export function FeedbackDialog({
       <DialogContent className="max-w-md">
         <DialogHeader>
           <DialogTitle>Send feedback</DialogTitle>
-          <DialogDescription>
-            Report a bug, request a feature, or tell us how it&apos;s going.
-          </DialogDescription>
+          <DialogDescription>Report a bug or share an idea.</DialogDescription>
         </DialogHeader>
-        <DialogBody>
-          <div className="grid gap-3">
-            <div className="grid gap-1.5">
-              <Label htmlFor="feedback-type">Type</Label>
-              <Select
-                value={type}
-                onValueChange={(v) => setType(v as FeedbackType)}
-              >
-                <SelectTrigger id="feedback-type" className="w-full">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {FEEDBACK_TYPE_OPTIONS.map((o) => (
-                    <SelectItem key={o.value} value={o.value}>
-                      {o.label}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
+        <DialogBody className="gap-3">
+          {/* Select's root renders no DOM, so the Field can sit inside it and
+              hand its id to the trigger. */}
+          <Select value={type} onValueChange={(v) => setType(v as FeedbackType)}>
+            <Field label="Type">
+              <SelectTrigger className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+            </Field>
+            <SelectContent>
+              {FEEDBACK_TYPE_OPTIONS.map((o) => (
+                <SelectItem key={o.value} value={o.value}>
+                  {o.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
 
-            <div className="grid gap-1.5">
-              <Label htmlFor="feedback-message">Message</Label>
-              <Textarea
-                id="feedback-message"
-                autoFocus
-                rows={5}
-                value={message}
-                onChange={(e) => setMessage(e.target.value)}
-                placeholder="Tell us about the bug you found, an idea, or how it's going…"
+          <Field label="Message">
+            <Textarea
+              autoFocus
+              rows={5}
+              value={message}
+              onChange={(e) => setMessage(e.target.value)}
+              placeholder="Tell us about the bug you found, an idea, or how it's going…"
+            />
+          </Field>
+
+          {isElectron() ? (
+            <div className="flex items-center gap-2">
+              <Checkbox
+                className="text-fg2 grow"
+                checked={includeLogs}
+                onChange={() => setIncludeLogs((value) => !value)}
+                label="Include recent app logs (may include personal data)"
               />
+              <Button
+                type="button"
+                variant="ghost"
+                size="compact"
+                className="text-fg2"
+                onClick={onViewLogs}
+              >
+                View
+              </Button>
             </div>
+          ) : null}
 
-            {isElectron() ? (
-              <div className="flex items-center gap-2">
-                <input
-                  id="feedback-include-logs"
-                  type="checkbox"
-                  checked={includeLogs}
-                  onChange={(e) => setIncludeLogs(e.target.checked)}
-                  className="accent-fg1 size-3.5 shrink-0"
-                />
-                <Label
-                  htmlFor="feedback-include-logs"
-                  className="text-fg2 grow cursor-pointer text-xs font-normal"
-                >
-                  Include recent app logs (may include personal data)
-                </Label>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="sm"
-                  className="text-fg2 h-6 px-2 text-xs"
-                  onClick={onViewLogs}
-                >
-                  View
-                </Button>
-              </div>
-            ) : null}
-
-            <p className="text-muted-fg text-xs">
+          <p className="text-fg3 m-0 text-xs leading-4.5">
               {includeLogs
                 ? "Your message plus the recent app logs shown under View are sent — secrets are scrubbed first."
                 : "Only what you write here is sent — never your code, files, or keys."}
-            </p>
-          </div>
+          </p>
         </DialogBody>
         <DialogFooter>
           <DialogClose asChild>
@@ -168,7 +154,12 @@ export function FeedbackDialog({
               Cancel
             </Button>
           </DialogClose>
-          <Button onClick={onSubmit} disabled={submitting || !message.trim()}>
+          <Button
+            variant="primary"
+            loading={submitting}
+            onClick={onSubmit}
+            disabled={!message.trim()}
+          >
             {submitting ? "Sending…" : "Send feedback"}
           </Button>
         </DialogFooter>

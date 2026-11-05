@@ -1,0 +1,9 @@
+{
+  "id": "listrow-focus-edge-layout",
+  "kind": "replay",
+  "area": "renderer-ui",
+  "fixedBy": "94f195b587a95d7cf1f22895fd17f37a43f7f264",
+  "symptom": "ListRow gained a transparent 1px border for its focus edge, moving every row's content 1px right of EventRow rows; the subagent disclosure slot left its child rail and only the codex-transcript ui-smoke noticed.",
+  "rule": "A row's focus edge takes no layout space: draw it as an inset ring plus the halo, so rows built from different primitives keep one column.",
+  "check": "pnpm exec vitest run apps/desktop/src/renderer/shared/ui/primitives/__tests__/list-row.test.ts"
+}

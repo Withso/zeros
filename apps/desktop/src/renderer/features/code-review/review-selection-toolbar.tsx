@@ -1,4 +1,5 @@
 import { MessageSquare, X } from "lucide-react";
+import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import { Button } from "@/renderer/shared/ui/primitives";
 import type { CodeReviewAnchor } from "@zeros/protocol/code-review";
 import { reviewRangeLabel } from "./review-thread-model";
@@ -33,15 +34,14 @@ export function ReviewSelectionToolbar({
         <MessageSquare className="size-3" />
         Comment
       </Button>
-      <Button
-        variant="ghost"
-        size="icon-compact"
-        aria-label="Cancel line selection"
+      <IconButton
+        size="compact"
+        label="Cancel line selection"
         disabled={!active}
         onClick={onCancel}
       >
         <X className="size-3" />
-      </Button>
+      </IconButton>
     </div>
   );
 }

@@ -28,7 +28,8 @@ vi.mock("../../agent/model-catalog", () => ({ modelsForAgent: () => [{ value: "t
 vi.mock("../../../platform/app", () => ({ shellOpenUrl: vi.fn() }));
 import { CloudProviderConnections } from "../cloud-provider-connections";
 
-type Element = ReactElement<{ children?: ReactNode; onClick?: () => Promise<void> | void; disabled?: boolean; active?: boolean }>;
+type Element = ReactElement<{ children?: ReactNode; onClick?: () => Promise<void> | void; onSelect?: () => Promise<void> | void;
+  disabled?: boolean; active?: boolean; agent?: { id: string } }>;
 function elements(node: ReactNode): Element[] {
   const found: Element[] = [];
   Children.forEach(node, child => { if (isValidElement(child)) { const element = child as Element;
@@ -36,11 +37,16 @@ function elements(node: ReactNode): Element[] {
   return found;
 }
 function tree() {
-  const outer = CloudProviderConnections({ organizationId: f.organizationId, surfaceActive: f.active, Tabs: () => null });
-  const component = elements(outer).find(child => typeof child.type === "function" && child.type.name === "CloudProviderConnection")!;
+  const outer = CloudProviderConnections({ organizationId: f.organizationId, surfaceActive: f.active });
+  const component = elements(outer).find(child => typeof child.type === "function" &&
+    child.type.name === "CloudProviderConnection" && child.props.agent?.id === "claude")!;
   return (component.type as (props: unknown) => ReactNode)(component.props);
 }
-function action(name: string) { return elements(tree()).find(element => element.props.children === name)!; }
+// Remove and Disconnect are menu items: they act on select, like a click.
+function action(name: string) {
+  const element = elements(tree()).find(candidate => candidate.props.children === name)!;
+  return { props: { disabled: element.props.disabled, onClick: element.props.onClick ?? element.props.onSelect } };
+}
 beforeEach(() => { f.start.mockClear(); f.request.mockClear(); f.decide.mockClear(); f.snapshot = { busy: false }; f.active = true; });
 describe("organization Remove and Disconnect integration", () => {
   it("prepares organization Remove with its exact confirmed credential revision", async () => {

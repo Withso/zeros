@@ -93,7 +93,8 @@ export function TurnUsageCard({
       <HoverCardTrigger asChild>
         <button
           type="button"
-          className="text-fg2 hover:text-fg1 focus-visible:ring-highlighted-bright rounded-sm tabular-nums outline-none focus-visible:ring-2"
+          // A 20px inline control, the footer's height, with the shared ring.
+          className="text-fg2 hover:bg-bg1-hover hover:text-fg1 focus-visible:ring-highlighted-bright/50 inline-flex h-5 items-center rounded-sm px-1 text-xs tabular-nums outline-none focus-visible:ring-[3px]"
           aria-label={`Turn usage, ${formatElapsed(durationMs)}`}
           aria-describedby={open && enabled ? id : undefined}
           onClick={() => setOpen(true)}

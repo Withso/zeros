@@ -11,10 +11,13 @@ function render(local: boolean) {
     "apps/desktop/src/renderer/features/settings/settings-page.tsx",
     "utf8",
   );
-  const panel = source.slice(
-    source.indexOf("function AccountPanel()"),
-    source.indexOf("// ── Privacy"),
-  );
+  const start = source.indexOf("function AccountPanel()");
+  const end = source.indexOf("function PrivacyGroup(");
+  // A missing marker would run the slice to the end of the file and evaluate
+  // unrelated module constants.
+  expect(start).toBeGreaterThan(0);
+  expect(end).toBeGreaterThan(start);
+  const panel = source.slice(start, end);
   const module = {
     exports: {} as { AccountPanel: () => ReturnType<typeof createElement> },
   };

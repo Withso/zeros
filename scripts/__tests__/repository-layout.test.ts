@@ -475,7 +475,7 @@ describe("repository layout contracts", () => {
 
   it("uses owned UI terminology and records vendored component licenses", () => {
     const compatibilityButton = read(
-      "apps/desktop/src/renderer/shared/ui/button.tsx",
+      "apps/desktop/src/renderer/shared/ui/primitives/button.tsx",
     );
     const uiGuard = read("scripts/check-ui-consistency.mjs");
     const notices = read("THIRD-PARTY-NOTICES.md");

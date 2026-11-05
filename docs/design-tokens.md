@@ -10,49 +10,49 @@ Values for every public token in both themes, the contrast each declared pairing
 
 | Token | Dark | Light | Role |
 | --- | --- | --- | --- |
-| `--bg0` | `#0D0D0D` | `#FAFAFA` | INACTIVE chat window fill (below bg1) |
-| `--bg1` | `#121212` | `#FFFFFF` | default canvas / app backdrop + active chat window |
-| `--bg1-hover` | `#1F1F1F` | `#F3F2F2` | hover on bg1 (tool calls, tabs) |
-| `--bg1-highlight` | `#171717` | `#F7F7F7` | highlighted content above bg1 |
-| `--bg1-bright` | `#1C1C1C` | `#F3F3F2` (= bg2) | filled section card on bg1 |
-| `--bg2` | `#212121` | `#F3F3F2` | composer surface |
-| `--bg2-hover` | `#262626` | `#E9E9E7` | hover on bg2 |
-| `--bg2-highlight` | `#2E2E2E` | `#E0E0E0` (= bg5) | dropdown trigger hover/open |
-| `--bg3` | `#171717` (= sidebar-bg) | `#FFFFFF` (= bg1) | floating popover surface |
-| `--bg3-hover` | `#262626` (= sidebar-bg-hover) | `#F3F2F2` (= bg1-hover) | hover on bg3 (menu items) |
-| `--bg4` | `#3D3D3D` | `#F0F0F0` | rare |
-| `--bg5` | `#5E5E5E` | `#E0E0E0` | rare |
-| `--sidebar-bg` | `#171717` | `#FAFAF9` | repository sidebar background |
-| `--sidebar-bg-hover` | `#262626` | `#EBEBEA` | sidebar row hover + selected state |
-| `--highlighted-bg` | `#212121` (= bg2) | `#ECEBEA` | user msg bg (text: fg1/fg2) |
+| `--bg0` | `#0D0D0D` | `#FBFAF9` | INACTIVE chat window fill (below bg1) |
+| `--bg1` | `#141414` | `#FFFFFF` | default canvas / app backdrop + active chat window |
+| `--bg1-hover` | `#1F1F1F` | `#F4F2F0` | hover on bg1 (tool calls, tabs) |
+| `--bg1-highlight` | `#171717` | `#F8F7F5` | highlighted content above bg1 |
+| `--bg1-bright` | `#1C1C1C` | `#F5F3F0` (= bg2) | filled section card on bg1 |
+| `--bg2` | `#212121` | `#F5F3F0` | composer surface |
+| `--bg2-hover` | `#262626` | `#EBE8E5` | hover on bg2 |
+| `--bg2-highlight` | `#2E2E2E` | `#E2E0DD` (= bg5) | dropdown trigger hover/open |
+| `--bg3` | `#1C1C1C` | `#FFFFFF` (= bg1) | floating popover surface |
+| `--bg3-hover` | `#2A2A2A` | `#F4F2F0` (= bg1-hover) | hover on bg3 (menu items) |
+| `--bg4` | `#3D3D3D` | `#F1F0EE` | rare |
+| `--bg5` | `#5E5E5E` | `#E2E0DD` | rare |
+| `--sidebar-bg` | `#181818` | `#FBFAF8` | repository sidebar background |
+| `--sidebar-bg-hover` | `#262626` | `#EDEBE8` | sidebar row hover + selected state |
+| `--highlighted-bg` | `#212121` (= bg2) | `#EEEBE8` | user msg bg (text: fg1/fg2) |
 
 ### Text and icons
 
 | Token | Dark | Light | Role |
 | --- | --- | --- | --- |
-| `--fg1` | `#F0F0F0` | `#2C2826` | selected/highlighted text + icons |
-| `--fg2` | `#B8B8B8` | `#514D4B` | default text + icon across app |
-| `--fg3` | `#A1A1A1` | `#5F5B58` | middle tier (one step below fg2) |
-| `--muted-fg` | `#6B6B6B` | `#6B6B6B` | supplemental metadata; 3:1 floor, fg3 on hover/selection |
+| `--fg1` | `#F0F0F0` | `#2C2824` | selected/highlighted text + icons |
+| `--fg2` | `#B8B8B8` | `#514D49` | default text + icon across app |
+| `--fg3` | `#A1A1A1` | `#5F5B57` | middle tier (one step below fg2) |
+| `--muted-fg` | `#6B6B6B` | `#6D6B67` | supplemental metadata; 3:1 floor, fg3 on hover/selection |
 
 ### Borders and focus
 
 | Token | Dark | Light | Role |
 | --- | --- | --- | --- |
-| `--border1` | `#242424` | `#EAE8E6` | default for bg1 surfaces |
-| `--border2` | `#2E2E2E` | `#E3E0DE` | sidebar / composer focus / bg2 |
-| `--border3` | `#3D3D3D` | `#C9C9C5` | secondary btn / dropdown / input |
-| `--border4` | `#4D4D4D` | `#BABAB5` | highlighted state of border3 |
-| `--highlighted-bright` | `#A6A6A6` | `#78726D` | input focus border, brighter accents |
+| `--border1` | `#242424` | `#EBE8E4` | default for bg1 surfaces |
+| `--border2` | `#2E2E2E` | `#E4E0DC` | sidebar / composer focus / bg2 |
+| `--border3` | `#444444` | `#CCC8C3` | secondary btn / dropdown / input |
+| `--border4` | `#575757` | `#BDB9B3` | highlighted state of border3 |
+| `--highlighted-bright` | `#CACACA` | `#4C4741` | input focus border, brighter accents |
 
 ### Inverted pair and primary button
 
 | Token | Dark | Light | Role |
 | --- | --- | --- | --- |
-| `--inverted-bg` | `#EBEBEB` | `#2C2826` | polarity-flipping fill (near-white in Dark, near-black in Light) |
+| `--inverted-bg` | `#EBEBEB` | `#2C2824` | polarity-flipping fill (near-white in Dark, near-black in Light) |
 | `--inverted-fg` | `#0D0D0D` | `#FFFFFF` | dark text/icon on the inverted fill |
-| `--primary-button-bg` | `#EBEBEB` (= inverted-bg) | `#2C2826` (= inverted-bg) | filled focal CTA (one per view) |
-| `--primary-button-hover` | `#D4D4D4` | `#443F3C` | lifted neutral |
+| `--primary-button-bg` | `#EBEBEB` (= inverted-bg) | `#2C2824` (= inverted-bg) | filled focal CTA (one per view) |
+| `--primary-button-hover` | `#D4D4D4` | `#443F3A` | lifted neutral |
 | `--primary-button-fg` | `#0D0D0D` (= inverted-fg) | `#FFFFFF` (= inverted-fg) | text/icon on the primary button |
 
 ## Status families
@@ -62,10 +62,10 @@ Values for every public token in both themes, the contrast each declared pairing
 | Family | Meaning | Role | Dark | Light |
 | --- | --- | --- | --- | --- |
 | red | error · −N | `--red-primary` | `#F87272` | `#C11F1F` |
-|  |  | `--red-bg` | `#2C1B1A` | `#FCE0D4` |
-|  |  | `--red-fg` | `#FDA172` | `#B53E0B` |
-|  |  | `--red-secondary` | `#B62411` | `#DB2424` |
-|  |  | `--red-secondary-hover` | `#A82110` | `#C52020` |
+|  |  | `--red-bg` | `#341818` | `#FFE8E7` |
+|  |  | `--red-fg` | `#FFAAA7` | `#AC262A` |
+|  |  | `--red-secondary` | `#B32228` | `#DB2424` |
+|  |  | `--red-secondary-hover` | `#A72025` | `#C52020` |
 |  |  | `--red-secondary-fg` | `#FFFFFF` | `#FFFFFF` |
 | green | success · +N | `--green-primary` | `#4ADE80` | `#107234` |
 |  |  | `--green-bg` | `#213521` | `#D8EEDD` |
@@ -75,7 +75,7 @@ Values for every public token in both themes, the contrast each declared pairing
 |  |  | `--yellow-fg` | `#FFBB00` | `#9C6000` |
 |  |  | `--yellow-icon` | `#E6AB4C` (= yellow-primary) | `#AE6F09` |
 | blue | info · links | `--blue-primary` | `#83C3F1` | `#1556E2` |
-|  |  | `--blue-bg` | `#142048` | `#F0F6FF` |
+|  |  | `--blue-bg` | `#08233A` | `#F0F6FF` |
 |  |  | `--blue-fg` | `#91C5FD` | `#1C4ED9` |
 | violet | done · merged | `--violet-primary` | `#BC83F1` | `#851EE6` |
 |  |  | `--violet-bg` | `#292438` | `#F2E1FE` |
@@ -92,35 +92,35 @@ Supplemental metadata and subtle boundary floors are owner-reviewed design decis
 
 | Foreground | On | Needs | Dark (worst) | Light (worst) |
 | --- | --- | --- | --- | --- |
-| `--blue-fg` | blue-pill-bg, blue-pill-hover | 4.5:1 | ✓ 7.45 on blue-pill-hover | ✓ 4.57 on blue-pill-hover |
-| `--highlighted-bright` | blue-pill-bg, blue-pill-hover | 3:1 | ✓ 5.54 on blue-pill-hover | ✓ 3.24 on blue-pill-hover |
-| `--fg1` | @rest | 4.5:1 | ✓ 14.13 on bg2 | ✓ 12.26 on highlighted-bg |
-| `--fg2` | @rest | 4.5:1 | ✓ 8.12 on bg2 | ✓ 7.02 on highlighted-bg |
-| `--fg3` | @rest | 4.5:1 | ✓ 6.23 on bg2 | ✓ 5.65 on highlighted-bg |
+| `--blue-fg` | blue-pill-bg, blue-pill-hover | 4.5:1 | ✓ 7.50 on blue-pill-hover | ✓ 4.57 on blue-pill-hover |
+| `--highlighted-bright` | blue-pill-bg, blue-pill-hover | 3:1 | ✓ 8.27 on blue-pill-hover | ✓ 6.28 on blue-pill-hover |
+| `--fg1` | @rest | 4.5:1 | ✓ 14.13 on bg2 | ✓ 12.31 on highlighted-bg |
+| `--fg2` | @rest | 4.5:1 | ✓ 8.12 on bg2 | ✓ 7.05 on highlighted-bg |
+| `--fg3` | @rest | 4.5:1 | ✓ 6.23 on bg2 | ✓ 5.67 on highlighted-bg |
 | `--muted-fg` | @rest | 3:1 | ✓ 3.02 on bg2 | ✓ 4.48 on highlighted-bg |
-| `--fg1` | @hover | 4.5:1 | ✓ 11.92 on bg2-highlight | ✓ 11.06 on bg2-highlight |
-| `--fg2` | @hover | 4.5:1 | ✓ 6.85 on bg2-highlight | ✓ 6.33 on bg2-highlight |
-| `--fg3` | @hover | 4.5:1 | ✓ 5.26 on bg2-highlight | ✓ 5.09 on bg2-highlight |
-| `--red-primary` | @rest, @hover | 4.5:1 | ✓ 4.94 on bg2-highlight | ✓ 4.57 on bg2-highlight |
-| `--green-primary` | @rest, @hover | 4.5:1 | ✓ 7.79 on bg2-highlight | ✓ 4.57 on bg2-highlight |
-| `--yellow-primary` | @rest, @hover | 4.5:1 | ✓ 6.66 on bg2-highlight | ✓ 4.57 on bg2-highlight |
-| `--blue-primary` | @rest, @hover | 4.5:1 | ✓ 7.14 on bg2-highlight | ✓ 4.60 on bg2-highlight |
-| `--violet-primary` | @rest, @hover | 4.5:1 | ✓ 4.95 on bg2-highlight | ✓ 4.78 on bg2-highlight |
-| `--brown-primary` | @rest, @hover | 4.5:1 | ✓ 6.12 on bg2-highlight | ✓ 4.62 on bg2-highlight |
-| `--red-fg` | red-bg | 4.5:1 | ✓ 8.22 on red-bg | ✓ 4.58 on red-bg |
+| `--fg1` | @hover | 4.5:1 | ✓ 11.92 on bg2-highlight | ✓ 11.10 on bg2-highlight |
+| `--fg2` | @hover | 4.5:1 | ✓ 6.85 on bg2-highlight | ✓ 6.36 on bg2-highlight |
+| `--fg3` | @hover | 4.5:1 | ✓ 5.26 on bg2-highlight | ✓ 5.11 on bg2-highlight |
+| `--red-primary` | @rest, @hover | 4.5:1 | ✓ 4.94 on bg2-highlight | ✓ 4.58 on bg2-highlight |
+| `--green-primary` | @rest, @hover | 4.5:1 | ✓ 7.79 on bg2-highlight | ✓ 4.58 on bg2-highlight |
+| `--yellow-primary` | @rest, @hover | 4.5:1 | ✓ 6.66 on bg2-highlight | ✓ 4.58 on bg2-highlight |
+| `--blue-primary` | @rest, @hover | 4.5:1 | ✓ 7.14 on bg2-highlight | ✓ 4.61 on bg2-highlight |
+| `--violet-primary` | @rest, @hover | 4.5:1 | ✓ 4.95 on bg2-highlight | ✓ 4.79 on bg2-highlight |
+| `--brown-primary` | @rest, @hover | 4.5:1 | ✓ 6.12 on bg2-highlight | ✓ 4.63 on bg2-highlight |
+| `--red-fg` | red-bg | 4.5:1 | ✓ 8.96 on red-bg | ✓ 5.86 on red-bg |
 | `--green-fg` | green-bg | 4.5:1 | ✓ 9.31 on green-bg | ✓ 4.61 on green-bg |
 | `--yellow-fg` | yellow-bg | 4.5:1 | ✓ 7.01 on yellow-bg | ✓ 4.62 on yellow-bg |
-| `--blue-fg` | blue-bg | 4.5:1 | ✓ 8.73 on blue-bg | ✓ 6.15 on blue-bg |
+| `--blue-fg` | blue-bg | 4.5:1 | ✓ 8.85 on blue-bg | ✓ 6.15 on blue-bg |
 | `--violet-fg` | violet-bg | 4.5:1 | ✓ 6.61 on violet-bg | ✓ 6.34 on violet-bg |
 | `--brown-fg` | brown-bg | 4.5:1 | ✓ 6.74 on brown-bg | ✓ 5.08 on brown-bg |
-| `--fg1` | yellow-wash/0.35@bg1, yellow-wash/0.55@bg1, yellow-wash/0.35@sidebar-bg, yellow-wash/0.55@sidebar-bg | 4.5:1 | ✓ 4.50 on yellow-wash/0.55@sidebar-bg | ✓ 10.00 on yellow-wash/0.55@sidebar-bg |
-| `--red-secondary-fg` | red-secondary, red-secondary-hover | 4.5:1 | ✓ 6.46 on red-secondary | ✓ 4.90 on red-secondary |
-| `--inverted-fg` | inverted-bg | 4.5:1 | ✓ 16.30 on inverted-bg | ✓ 14.60 on inverted-bg |
-| `--primary-button-fg` | primary-button-bg, primary-button-hover | 4.5:1 | ✓ 13.11 on primary-button-hover | ✓ 10.39 on primary-button-hover |
-| `--yellow-icon` | @rest, @hover | 3:1 | ✓ 6.66 on bg2-highlight | ✓ 3.13 on bg2-highlight |
-| `--border3` | bg0, bg1, bg1-highlight, bg1-bright, bg2, bg3, sidebar-bg | 1.45:1 | ✓ 1.48 on bg2 | ✓ 1.50 on bg1-bright |
-| `--border4` | bg0, bg1, bg1-highlight, bg1-bright, bg2, bg3, sidebar-bg | 1.6:1 | ✓ 1.90 on bg2 | ✓ 1.75 on bg1-bright |
-| `--highlighted-bright` | @rest, @hover | 3:1 | ✓ 5.58 on bg2-highlight | ✓ 3.59 on bg2-highlight |
+| `--fg1` | yellow-wash/0.35@bg1, yellow-wash/0.54@bg1, yellow-wash/0.35@sidebar-bg, yellow-wash/0.54@sidebar-bg | 4.5:1 | ✓ 4.58 on yellow-wash/0.54@sidebar-bg | ✓ 10.12 on yellow-wash/0.54@sidebar-bg |
+| `--red-secondary-fg` | red-secondary, red-secondary-hover | 4.5:1 | ✓ 6.61 on red-secondary | ✓ 4.90 on red-secondary |
+| `--inverted-fg` | inverted-bg | 4.5:1 | ✓ 16.30 on inverted-bg | ✓ 14.62 on inverted-bg |
+| `--primary-button-fg` | primary-button-bg, primary-button-hover | 4.5:1 | ✓ 13.11 on primary-button-hover | ✓ 10.41 on primary-button-hover |
+| `--yellow-icon` | @rest, @hover | 3:1 | ✓ 6.66 on bg2-highlight | ✓ 3.14 on bg2-highlight |
+| `--border3` | bg0, bg1, bg1-highlight, bg1-bright, bg2, bg3, sidebar-bg | 1.45:1 | ✓ 1.65 on bg2 | ✓ 1.50 on bg1-bright |
+| `--border4` | bg0, bg1, bg1-highlight, bg1-bright, bg2, bg3, sidebar-bg | 1.6:1 | ✓ 2.23 on bg2 | ✓ 1.76 on bg1-bright |
+| `--highlighted-bright` | @rest, @hover | 3:1 | ✓ 8.29 on bg2-highlight | ✓ 6.98 on bg2-highlight |
 
 Contrast ladders (each upper tier must have at least the listed factor more contrast on its declared surface):
 
@@ -128,8 +128,8 @@ Contrast ladders (each upper tier must have at least the listed factor more cont
 | --- | --- | --- | --- | --- |
 | fg1 → fg2 | bg1 | 1.15× | 1.74× | 1.75× |
 | fg2 → fg3 | bg1 | 1.15× | 1.30× | 1.24× |
-| fg3 → muted-fg | bg1 | 1.15× | 2.06× | 1.26× |
-| border4 → border3 | bg2 | 1.15× | 1.28× | 1.17× |
+| fg3 → muted-fg | bg1 | 1.15× | 2.06× | 1.27× |
+| border4 → border3 | bg2 | 1.15× | 1.35× | 1.17× |
 
 ## Scales
 

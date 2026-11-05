@@ -173,6 +173,8 @@ export const KNOWN_RULES = new Set([
   ...CLASS_RULES.map((rule) => rule.id),
   ...GROUP_RULES.map((rule) => rule.id),
   "raw-control",
+  "icon-only-button",
+  "class-template-join",
   "ignore-directive",
 ]);
 
@@ -183,6 +185,84 @@ export const RAW_CONTROL_RULE = {
   message: (key) =>
     `Raw <${key}> outside shared/ui. Use the shared primitive (Button, Input, Select, Textarea, Checkbox, …) so size, focus, and states stay consistent; extend the primitive if it lacks a variant.`,
 };
+
+export const ICON_ONLY_BUTTON_RULE = {
+  id: "icon-only-button",
+  message: () =>
+    "A quiet icon-only action is an IconButton: its required `label` is the accessible name, and it owns the hover, focus ring and glyph size. Filled or bordered icon buttons stay Buttons.",
+};
+
+const ICON_SIZES = /^icon(?:-sm|-lg|-compact)?$/;
+
+/** `<Button variant="ghost" size="icon…">`: the IconButton job done by hand. */
+export function findIconOnlyButtons(file, source) {
+  const sourceFile = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const findings = [];
+  const literal = (node, name) => {
+    for (const attribute of node.attributes.properties) {
+      if (
+        ts.isJsxAttribute(attribute) &&
+        attribute.name.getText(sourceFile) === name &&
+        attribute.initializer &&
+        ts.isStringLiteral(attribute.initializer)
+      ) {
+        return attribute.initializer.text;
+      }
+    }
+    return null;
+  };
+  const visit = (node) => {
+    if (
+      (ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node)) &&
+      node.tagName.getText(sourceFile) === "Button" &&
+      literal(node, "variant") === "ghost" &&
+      ICON_SIZES.test(literal(node, "size") ?? "")
+    ) {
+      const { line } = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile));
+      findings.push({ key: "Button size=icon", line: line + 1 });
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return findings;
+}
+
+export const CLASS_TEMPLATE_JOIN_RULE = {
+  id: "class-template-join",
+  message: () =>
+    "A className template joins a class to an interpolation with no space, so both tokens break (`relative${drag ? \"ring-2\" : \"\"}` renders `relativering-2`). Compose classes with cn().",
+};
+
+/** `className={`a b${x}`}` or `${x}b`: text touching an interpolation. */
+export function findClassTemplateJoins(file, source) {
+  const sourceFile = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const findings = [];
+  const visit = (node) => {
+    if (
+      ts.isJsxAttribute(node) &&
+      node.name.getText(sourceFile) === "className" &&
+      node.initializer &&
+      ts.isJsxExpression(node.initializer) &&
+      node.initializer.expression &&
+      ts.isTemplateExpression(node.initializer.expression)
+    ) {
+      const template = node.initializer.expression;
+      const texts = [template.head.text, ...template.templateSpans.map((span) => span.literal.text)];
+      // Text before an interpolation must end in whitespace (or be empty);
+      // text after one must start with whitespace (or be empty).
+      const joined = texts.some((text, index) =>
+        (index < texts.length - 1 && /\S$/.test(text)) || (index > 0 && /^\S/.test(text)),
+      );
+      if (joined) {
+        const { line } = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile));
+        findings.push({ key: "className", line: line + 1 });
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return findings;
+}
 
 function toRel(root, abs) {
   return relative(root, abs).split(sep).join("/");
@@ -288,14 +368,33 @@ export function collectFindings({ root, files, contexts }) {
   for (const file of scoped) {
     if (!file.endsWith(".tsx")) continue;
     const rel = toRel(root, file);
+    const source = readFileSync(file, "utf8");
+    for (const finding of findClassTemplateJoins(file, source)) {
+      findings.push({
+        rule: CLASS_TEMPLATE_JOIN_RULE.id,
+        file: rel,
+        key: finding.key,
+        line: finding.line,
+        message: CLASS_TEMPLATE_JOIN_RULE.message(),
+      });
+    }
     if (rel.startsWith("apps/desktop/src/renderer/shared/ui/")) continue;
-    for (const finding of findRawControls(file, readFileSync(file, "utf8"))) {
+    for (const finding of findRawControls(file, source)) {
       findings.push({
         rule: RAW_CONTROL_RULE.id,
         file: rel,
         key: finding.key,
         line: finding.line,
         message: RAW_CONTROL_RULE.message(finding.key),
+      });
+    }
+    for (const finding of findIconOnlyButtons(file, source)) {
+      findings.push({
+        rule: ICON_ONLY_BUTTON_RULE.id,
+        file: rel,
+        key: finding.key,
+        line: finding.line,
+        message: ICON_ONLY_BUTTON_RULE.message(),
       });
     }
   }

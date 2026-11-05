@@ -13,6 +13,9 @@
 // we just make the catalogue discoverable.
 // ──────────────────────────────────────────────────────────
 
+import { cn } from "../../shared/ui/cn";
+import { Badge } from "../../shared/ui/primitives/badge";
+import { PICKER_EMPTY_CLS, PICKER_LIST_CLS, PICKER_ROW_CLS, PICKER_TAB_CLS, PICKER_TABS_CLS, PICKER_WRAP_CLS } from "./picker-recipe";
 import React, { useEffect, useRef } from "react";
 import type { AvailableCommand } from "../../platform/bridge/agent-events";
 import { slashCommandKind } from "../../platform/bridge/agent-events";
@@ -70,7 +73,7 @@ export function SlashCommandPicker({
     if (node) node.scrollIntoView({ block: "nearest" });
   }, [highlightIndex]);
 
-  const menuWrap = "flex min-h-0 flex-col overflow-hidden";
+  const menuWrap = PICKER_WRAP_CLS;
 
   // Per-tab counts off the query-filtered set, so each tab shows how many of
   // its kind match what the user typed. Items with no `kind` count as commands.
@@ -85,7 +88,7 @@ export function SlashCommandPicker({
   const visible = commands.filter((c) => matchesSlashTab(c, slashTab));
 
   const tabBar = (
-    <div className="flex h-9 items-center gap-1 border-b border-border1 px-1.5">
+    <div className={PICKER_TABS_CLS}>
       {SLASH_TABS.map((t) => {
         const active = t.id === slashTab;
         return (
@@ -100,12 +103,11 @@ export function SlashCommandPicker({
               e.preventDefault();
               onTab(t.id);
             }}
-            // 14px category highlight, derived from the 8px and 6px radius steps.
-            className={`cursor-pointer rounded-[calc(var(--radius-lg)+var(--radius-md))] px-2 hover:bg-(--surface-hover) ${
-              active
-                ? "bg-(--surface-hover) text-fg1"
-                : "text-fg2 hover:text-fg1"
-            }`}
+            // 24px tabs with 6px corners.
+            className={cn(
+              PICKER_TAB_CLS,
+              active ? "bg-(--surface-hover) text-fg1" : "text-fg2 hover:text-fg1",
+            )}
           >
             <span>{t.label}</span>
             <span className="text-muted-fg">{counts[t.id]}</span>
@@ -119,11 +121,11 @@ export function SlashCommandPicker({
     <div className={menuWrap}>
       {tabBar}
       {visible.length === 0 ? (
-        <div className="p-3 text-xs text-fg2">
+        <div className={PICKER_EMPTY_CLS}>
           {slashTab === "skills" ? "No skills match." : "No commands match."}
         </div>
       ) : (
-        <div ref={listRef} className="min-h-0 max-h-[220px] overflow-y-auto overscroll-contain">
+        <div ref={listRef} className={PICKER_LIST_CLS}>
           {visible.map((cmd, i) => {
             const active = i === highlightIndex;
             // Tell the user a command opens a terminal (Claude /mcp, /login, …).
@@ -146,9 +148,7 @@ export function SlashCommandPicker({
                   e.preventDefault();
                   onPick(cmd);
                 }}
-                className={`flex w-full cursor-pointer items-center gap-2 border-0 bg-transparent px-3 py-1.5 text-left text-fg1 transition-colors hover:bg-(--surface-hover) ${
-                  active ? "bg-(--surface-hover)" : ""
-                }`}
+                className={PICKER_ROW_CLS}
               >
                 {/* Text "/" marker in place of an icon because the lucide Slash
                     glyph reads poorly. The command name drops its own
@@ -176,11 +176,7 @@ export function SlashCommandPicker({
                 {/* Skill badge — bordered bg1 chip at the row's end so the user
                     can tell a skill from a command at a glance, mirroring the
                     "takes input" affordance. */}
-                {isSkill && (
-                  <span className="shrink-0 rounded-sm border border-border1 bg-bg1 px-1.5 py-0.5 text-xxs leading-none text-fg2">
-                    skill
-                  </span>
-                )}
+                {isSkill && <Badge variant="outline">skill</Badge>}
               </Button>
             );
           })}

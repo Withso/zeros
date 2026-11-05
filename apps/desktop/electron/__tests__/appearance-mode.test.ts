@@ -19,13 +19,13 @@ describe("appearance modes", () => {
 
   it("migrates stale dark first-frame colors to the active palette", () => {
     expect(migrateLegacyWindowBackground("#131111", "dark", true)).toBe(
-      "#121212",
+      "#141414",
     );
     expect(migrateLegacyWindowBackground("#0E0C0C", null, true)).toBe(
-      "#121212",
+      "#141414",
     );
-    expect(migrateLegacyWindowBackground("#141414", "dark", true)).toBe(
-      "#121212",
+    expect(migrateLegacyWindowBackground("#121212", "dark", true)).toBe(
+      "#141414",
     );
     expect(migrateLegacyWindowBackground("#131111", "system", false)).toBe(
       "#ffffff",
@@ -34,8 +34,8 @@ describe("appearance modes", () => {
       "#242424",
     );
     // Neutral Dark's own value maps to itself.
-    expect(migrateLegacyWindowBackground("#121212", "dark", true)).toBe(
-      "#121212",
+    expect(migrateLegacyWindowBackground("#141414", "dark", true)).toBe(
+      "#141414",
     );
   });
 });

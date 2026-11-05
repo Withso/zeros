@@ -94,15 +94,15 @@ describe("chat pane width floors", () => {
 
     expect(paneTreeMinimumSize(leaf("single"))).toEqual({
       width: 360,
-      height: 160,
+      height: 240,
     });
     expect(paneTreeMinimumSize(stacked)).toEqual({
       width: 360,
-      height: 326,
+      height: 486,
     });
     expect(paneTreeMinimumSize(mixed)).toEqual({
       width: 726,
-      height: 326,
+      height: 486,
     });
     expect(paneTreeMinimumSize(threeAcross).width).toBe(1_092);
   });
@@ -123,7 +123,7 @@ describe("chat pane width floors", () => {
     expect(paneTreeHasDirection(root, "row")).toBe(false);
     expect(paneTreeMinimumSizeAfterSplit(root, "only", "row")).toEqual({
       width: 726,
-      height: 160,
+      height: 240,
     });
     // 500px surface today, workbench sitting at 500 of which 300 is surrenderable
     // above its 200px floor → 800px reachable, so the 726px tree fits.
@@ -254,7 +254,7 @@ describe("chat pane width floors", () => {
         targetPaneId: "only",
         direction: "column",
         containerWidth: 800,
-        containerHeight: 325.99,
+        containerHeight: 485.99,
       }),
     ).toBe(false);
     expect(
@@ -263,7 +263,7 @@ describe("chat pane width floors", () => {
         targetPaneId: "only",
         direction: "column",
         containerWidth: 800,
-        containerHeight: 326,
+        containerHeight: 486,
       }),
     ).toBe(true);
     expect(

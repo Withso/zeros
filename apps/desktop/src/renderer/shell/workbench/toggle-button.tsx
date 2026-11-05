@@ -25,14 +25,13 @@
 // ──────────────────────────────────────────────────────────
 
 import React from "react";
+import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import { PanelRight } from "lucide-react";
-import { Button } from "../../shared/ui";
 import { Tooltip } from "@/renderer/shared/ui/primitives";
 
-// 2026-05-28 — chrome icon recipe: 24 × 24 container, 16 × 16 icon
-// glyph (16 px is the Button base via `[&_svg]:size-4`), 1 px stroke.
+// The 28px chrome tool, like Summary beside it, with a 1px-stroke glyph.
 const TOGGLE_BTN_CLS =
-  "size-6 shrink-0 text-fg2 hover:text-fg1 [&_svg]:stroke-[1]";
+  "shrink-0 text-fg2 hover:text-fg1 [&_svg]:stroke-[1]";
 
 interface WorkbenchToggleButtonProps {
   workbenchCollapsed: boolean;
@@ -45,15 +44,14 @@ export function WorkbenchToggleButton({
 }: WorkbenchToggleButtonProps) {
   return (
     <Tooltip label={workbenchCollapsed ? "Show panel" : "Hide panel"} shortcut="⌥⌘B">
-      <Button
-        variant="ghost"
-        size="icon-sm"
+      <IconButton
+        size="standard"
         className={TOGGLE_BTN_CLS}
         onClick={onToggle}
-        aria-label={workbenchCollapsed ? "Show design panel" : "Hide design panel"}
+        label={workbenchCollapsed ? "Show design panel" : "Hide design panel"}
       >
         <PanelRight strokeWidth={1} />
-      </Button>
+      </IconButton>
     </Tooltip>
   );
 }

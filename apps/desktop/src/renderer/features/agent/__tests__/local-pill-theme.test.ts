@@ -18,7 +18,7 @@ describe("Local pill theme contract", () => {
 
   it("preserves the exact dark workspace colors", () => {
     expect(resolveRgb(themes.dark, "blue-pill-bg")).toEqual(resolveRgb(themes.dark, "blue-bg"));
-    expect(resolveRgb(themes.dark, "blue-pill-hover")).toEqual([26, 43, 96].map((c) => c / 255));
+    expect(resolveRgb(themes.dark, "blue-pill-hover")).toEqual([14, 48, 77].map((c) => c / 255));
     expect(resolveRgb(themes.dark, "blue-fg")).toEqual([145, 197, 253].map((c) => c / 255));
   });
 

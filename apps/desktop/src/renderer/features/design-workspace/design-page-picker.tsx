@@ -284,7 +284,6 @@ export function DesignPagePicker({
                 <DropdownMenuRadioItem
                   key={candidate.id}
                   value={candidate.id}
-                  indicator="check"
                   className="h-7"
                 >
                   <span className="truncate">{candidate.title}</span>

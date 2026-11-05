@@ -15,9 +15,10 @@
 // Lives here, not next to its caller, per RULES.md: "If a primitive is missing,
 // extend /apps/desktop/src/renderer/shared/ui/ first."
 //
-// The dot is `--fg1` on a `--border3` ring, matching the app's other selection
-// affordances (Switch, the segmented auth control) rather than the brand accent
-// — a settings choice is a state, not a call to action.
+// The same 16px box as Checkbox: border4 at rest, fg3 on hover, and selected
+// fills with inverted-bg around an inverted-fg dot, the same "on" look as a
+// checked box. A settings choice is a state, not a call to action, so it never
+// takes the brand accent.
 // ──────────────────────────────────────────────────────────
 
 import * as React from "react";
@@ -64,28 +65,24 @@ function RadioGroupItem({
         className={cn(
           "group flex cursor-pointer items-center gap-2 text-left focus-visible:outline-none",
           "disabled:cursor-not-allowed disabled:opacity-50",
-          variant === "card" && "border-border1 bg-bg1-highlight hover:bg-bg1-hover flex-row-reverse justify-between gap-4 rounded-lg border p-4",
+          variant === "card" &&
+            "border-border1 bg-bg1-highlight hover:bg-bg1-hover data-[state=checked]:border-border4 data-[state=checked]:bg-bg1-hover flex-row-reverse justify-between gap-4 rounded-lg border px-3.5 py-3",
           className,
         )}
         {...props}
       >
         <span
           className={cn(
-            // The subtle border3 ring steps up to border4 on hover and fg1
-            // once checked. Keyboard focus draws a separate opaque
-            // highlighted-bright outline: a border swap lost to the checked
-            // border, so a focused, selected radio showed no focus at all.
-            // highlighted-bright stays reserved for focus, never hover.
-            "border-border3 group-hover:border-border4 group-data-[state=checked]:border-fg1 group-focus-visible:outline-2 group-focus-visible:outline-offset-2 group-focus-visible:outline-highlighted-bright flex size-4 shrink-0 items-center justify-center rounded-full border transition-colors",
+            // Keyboard focus is the standard halo on the box; the checked
+            // fill keeps the highlighted-bright border visible inside it.
+            "border-border4 group-hover:border-fg3 group-data-[state=checked]:border-inverted-bg group-data-[state=checked]:bg-inverted-bg group-data-[state=checked]:group-hover:border-primary-button-hover group-data-[state=checked]:group-hover:bg-primary-button-hover group-focus-visible:border-highlighted-bright group-data-[state=checked]:group-focus-visible:border-highlighted-bright group-focus-visible:ring-highlighted-bright/50 flex size-4 shrink-0 items-center justify-center rounded-full border transition-[background-color,border-color,box-shadow] duration-120 ease-out group-focus-visible:ring-[3px]",
           )}
         >
-          <RadioGroupPrimitive.Indicator className="bg-fg1 size-2 rounded-full" />
+          <RadioGroupPrimitive.Indicator className="bg-inverted-fg size-1.5 rounded-full" />
         </span>
-        {/* Use the 14px token without the text-sm class that Settings
-            reduces to its smaller control scale. */}
-        <span className="flex min-w-0 flex-col gap-1">
-          <span className="text-fg1 text-(length:--text-sm)">{label}</span>
-          {description && <span className="text-fg3 text-xs leading-relaxed">{description}</span>}
+        <span className="flex min-w-0 flex-col gap-0.5">
+          <span className="text-fg1 text-xs leading-4.5">{label}</span>
+          {description && <span className="text-fg3 text-3xxs leading-4">{description}</span>}
         </span>
       </RadioGroupPrimitive.Item>
       {children && <div className="ml-6">{children}</div>}

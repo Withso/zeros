@@ -22,6 +22,7 @@ import { WorkbenchToggleButton } from "../workbench/toggle-button";
 import type { Workspace } from "../../platform/git";
 import { workspaceIsReadOnly } from "../../state/workspace-history";
 import { WorkspaceHistoryBar } from "../workspace-history-bar";
+import { TRANSCRIPT_STATUS_ROW_CLS } from "../../features/agent/composer-shell";
 import { selectActiveFolder, useActivePage, useWorkspaceStore } from "../../state/store";
 
 import { popoverBoundaryProps } from "@/renderer/shared/ui/popover-boundary";
@@ -127,8 +128,9 @@ export function ConversationPane({
   const emptyHistory =
     readOnly && workspace ? (
       <>
-        <div className="text-fg2 flex flex-1 items-center justify-center text-sm">
-          No chat history.
+        {/* The transcript column's own status row, as in a read-only chat. */}
+        <div className="mx-auto w-full max-w-[856px] flex-1 px-7 pt-3">
+          <p className={TRANSCRIPT_STATUS_ROW_CLS}>No chat history.</p>
         </div>
         <WorkspaceHistoryBar
           key={workspace.id}

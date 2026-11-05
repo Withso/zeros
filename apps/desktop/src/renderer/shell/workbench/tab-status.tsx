@@ -1,3 +1,4 @@
+import { EmptyState } from "@/renderer/shared/ui/layout/empty-state";
 import React, {
   createContext,
   useCallback,
@@ -10,7 +11,7 @@ import React, {
   useSyncExternalStore,
 } from "react";
 import { createPortal } from "react-dom";
-import { CircleAlert, Info, LoaderCircle } from "lucide-react";
+import { CircleAlert, Info } from "lucide-react";
 import { Button } from "../../shared/ui/primitives/button";
 import { cn } from "../../shared/ui/cn";
 import {
@@ -31,6 +32,7 @@ import {
 } from "./tab-status-model";
 import type { WorkbenchTab, WorkbenchTabType } from "./tab-model";
 import { ActivityScope } from "../../shared/ui/loading/activity-scope";
+import { ZerosSpinner } from "../../shared/ui/loading/zeros-spinner";
 import { isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
 
 interface TabStatusContext {
@@ -53,17 +55,10 @@ function WorkbenchEmptyStateContent({
   message?: string;
 }) {
   const adapter = WORKBENCH_STATUS_ADAPTERS[type];
-  const Icon = adapter.icon;
   return (
-    <div
-      data-workbench-empty=""
-      className="flex h-full min-h-0 flex-1 flex-col items-center justify-center gap-2 px-6 text-center"
-    >
-      <Icon className="text-muted-fg size-10" strokeWidth={1} aria-hidden />
-      <p className="text-fg2 m-0 text-xs">
-        {message ?? adapter.empty.retryable}
-      </p>
-    </div>
+    <EmptyState icon={adapter.icon} data-workbench-empty="">
+      {message ?? adapter.empty.retryable}
+    </EmptyState>
   );
 }
 
@@ -96,34 +91,30 @@ export function WorkbenchTabBanner({
 }) {
   // Keep this element (and its live region) mounted through recovery, retry,
   // and tone changes. Only message text mutations trigger announcements.
-  const Icon =
-    status?.tone === "pending"
-      ? LoaderCircle
-      : status?.tone === "neutral"
-        ? Info
-        : CircleAlert;
+  // One 32px row on the panel's own background, like the Diff viewer's
+  // message rows: the 16px icon alone carries the tone.
+  const Icon = status?.tone === "neutral" ? Info : CircleAlert;
   return (
     <div
       data-workbench-banner=""
       data-tone={status?.tone}
       hidden={!status}
       className={cn(
-        "flex h-12 shrink-0 items-center gap-2 px-3 py-1.5 text-xs",
+        "border-border1 text-fg2 flex h-8 shrink-0 items-center gap-2 border-b pr-1.5 pl-3 text-xs leading-4.5",
         !status && "hidden",
-        status?.tone === "error"
-          ? "bg-red-bg text-red-fg"
-          : status?.tone === "pending"
-            ? "bg-yellow-bg text-yellow-fg"
-            : "bg-bg2 text-fg2",
       )}
     >
-      <Icon
-        aria-hidden
-        className={cn(
-          "size-3.5 shrink-0",
-          active && status?.tone === "pending" && "motion-safe:animate-spin",
-        )}
-      />
+      {status?.tone === "pending" ? (
+        <ZerosSpinner size={16} label="Loading" />
+      ) : (
+        <Icon
+          aria-hidden
+          className={cn(
+            "size-4 shrink-0",
+            status?.tone === "error" ? "text-red-primary" : "text-fg3",
+          )}
+        />
+      )}
       <span
         role="status"
         aria-live={active ? "polite" : "off"}
@@ -131,7 +122,7 @@ export function WorkbenchTabBanner({
         className="min-w-0 flex-1"
       >
         <span
-          className="line-clamp-2 break-words"
+          className="block truncate"
           title={
             status
               ? `${status.message}${status.diagnostic ? `\n${status.diagnostic}` : ""}`
@@ -145,7 +136,7 @@ export function WorkbenchTabBanner({
         <Button
           variant="ghost"
           size="compact"
-          className="shrink-0 text-inherit hover:text-inherit"
+          className="shrink-0 font-normal"
           disabled={busy || !active}
           aria-busy={busy || undefined}
           aria-label={

@@ -128,6 +128,22 @@ export function finishDiffRender(node: HTMLElement): void {
   }
 }
 
+/** Workbench diffs (Changes and the Files Diff view) read in the plain
+ *  editor's type, so turning Diff view on or off moves no text: 12px mono on
+ *  a 1.6 line, numbers padded 12px each side, and the editor's fg1 18%
+ *  selection over any row wash. The virtualizer's line estimate is the same
+ *  height, or the estimates drift from the painted rows across files. Chat
+ *  EditCards and Review keep the 13/20 chat code style. */
+const WORKBENCH_DIFF_LINE_HEIGHT = 19.2;
+const WORKBENCH_DIFF_CSS = `
+  :host {
+    --diffs-font-size: 12px;
+    --diffs-line-height: ${WORKBENCH_DIFF_LINE_HEIGHT}px;
+  }
+  [data-column-number] { padding-inline: 12px; }
+  ::selection { background-color: color-mix(in srgb, var(--fg1) 18%, transparent); }
+`;
+
 /** Shared diff render options for the `options` prop of PatchDiff /
  *  MultiFileDiff / CodeView. `diffStyle` toggles unified vs split.
  *  `disableFileHeader` drops the in-diff file header — used by the agent chat's
@@ -206,6 +222,7 @@ export function zerosCodeViewOptions<
   const presentation = zerosSharedDiffPresentation(opts);
   return {
     ...presentation,
+    unsafeCSS: presentation.unsafeCSS + WORKBENCH_DIFF_CSS,
     ...(opts?.disableFileHeader ? { disableFileHeader: true } : {}),
     layout: {
       ...DEFAULT_CODE_VIEW_LAYOUT,
@@ -218,6 +235,7 @@ export function zerosCodeViewOptions<
       paddingBottom: 0,
       spacing: 0,
       hunkSeparatorHeight: HUNK_SEPARATOR_HEIGHT,
+      lineHeight: WORKBENCH_DIFF_LINE_HEIGHT,
     },
   };
 }

@@ -48,12 +48,12 @@ describe("shared PR status row placement", () => {
     const emptyRowClasses = primitive.match(/window:\s*"([^"]+)"/)?.[1];
     expect(new Set(emptyRowClasses?.split(/\s+/))).toEqual(
       new Set(
-        "border-border1 bg-bg1 flex h-10 shrink-0 items-center gap-1 border-b px-2".split(/\s+/),
+        "border-border1 bg-bg1 flex h-10 shrink-0 items-center gap-1 border-b pr-1.5 pl-3".split(/\s+/),
       ),
     );
 
     expect(island).toMatch(
-      /data-pr-island=""[\s\S]*?"flex h-10 shrink-0 items-center gap-2\.5 border-y px-2"/,
+      /data-pr-island=""[\s\S]*?"flex h-10 shrink-0 items-center gap-2\.5 border-y pr-1\.5 pl-3"/,
     );
   });
 });

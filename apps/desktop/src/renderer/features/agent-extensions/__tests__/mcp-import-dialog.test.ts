@@ -94,7 +94,7 @@ it("allows a discovered name already used in Zeros to be imported under a differ
     f.sources = [{ source: "cursor", label: "Cursor", exists: true, path: "/fixture/mcp.json", servers: [{ name: "database", transport: "stdio", command: "discovered" }] }];
     f.render();
   });
-  const row = page.getByRole("button", { name: /database.*discovered/ });
+  const row = page.getByRole("checkbox", { name: /database.*discovered/ });
   await row.click();
   const submit = page.getByRole("button", { name: "Import 1", exact: true });
   expect(await submit.isDisabled()).toBe(true);
@@ -114,8 +114,8 @@ it("keeps failed rows selected and retries only those rows with their original c
   await page.getByRole("button", { name: "Import 2", exact: true }).click();
   await page.waitForFunction(() => (window as any).fixture.errors.length === 1);
   expect(await page.getByRole("dialog").isVisible()).toBe(true);
-  expect(await page.getByRole("button", { name: /one.*Imported/ }).isDisabled()).toBe(true);
-  expect(await page.getByRole("button", { name: /stdio.*two/ }).getAttribute("aria-pressed")).toBe("true");
+  expect(await page.getByRole("checkbox", { name: /one.*Imported/ }).isDisabled()).toBe(true);
+  expect(await page.getByRole("checkbox", { name: /stdio.*two/ }).isChecked()).toBe(true);
   expect(await page.evaluate(() => (window as any).fixture.successes)).toEqual([]);
   await page.evaluate(() => { (window as any).fixture.failName = null; });
   await page.getByRole("button", { name: "Import 1", exact: true }).click();

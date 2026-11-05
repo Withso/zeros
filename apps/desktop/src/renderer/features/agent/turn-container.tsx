@@ -4,6 +4,7 @@
 // turn with a null prompt.
 
 import React, { memo, useCallback, useEffect, useRef, useState } from "react";
+import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import type { LocalMessageChatRef } from "@zeros/protocol/agent-messages";
 import { Plus, Pencil, Copy, Check } from "lucide-react";
 import type {
@@ -13,10 +14,9 @@ import type {
 import { formatCompactAge } from "./format-age";
 import { autoActionIcon } from "./auto-action";
 import { cn } from "@/renderer/shared/ui/cn";
-import { Button } from "../../shared/ui";
 import { Tooltip } from "@/renderer/shared/ui/primitives";
 import type { ComposerAttachment } from "./composer-attachments";
-import { PROMPT_SURFACE_RADIUS } from "./composer-shell";
+import { COMPOSER_SURFACE_CLS, PROMPT_SURFACE_RADIUS } from "./composer-shell";
 import {
   useComposerEditor,
   messageToEditorContent,
@@ -287,7 +287,9 @@ export const TurnPromptHeader = memo(function TurnPromptHeader({
         autoAction
           ?
             "bg-brown-bg text-brown-fg border-transparent font-medium"
-          : "border-border1 bg-highlighted-bg",
+          // The composer's own surface: a sent message reads as the prompt
+          // it was.
+          : COMPOSER_SURFACE_CLS,
       )}
     >
       {/* Two block wrappers keep the fit-content width geometry unchanged. */}
@@ -367,42 +369,27 @@ function UserMessageActions({
     }
   }, [text]);
 
-  const btn =
-    "inline-flex size-4 items-center justify-center rounded-sm text-fg2 transition-colors hover:bg-bg1-hover hover:text-fg1 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-highlighted-bright";
-
+  // 20px inline icon buttons 2px under the bubble, so the row hangs no
+  // further into the turn gap than the old 16px marks did.
   return (
-    <div className="pointer-events-none absolute top-full right-0 z-[2] flex items-center gap-0.5 pt-1 opacity-0 transition-opacity duration-150 ease-out group-focus-within/usermsg:pointer-events-auto group-focus-within/usermsg:opacity-100 group-hover/usermsg:pointer-events-auto group-hover/usermsg:opacity-100">
+    <div className="pointer-events-none absolute top-full right-0 z-[2] flex items-center gap-0.5 pt-0.5 opacity-0 transition-opacity duration-150 ease-out group-focus-within/usermsg:pointer-events-auto group-focus-within/usermsg:opacity-100 group-hover/usermsg:pointer-events-auto group-hover/usermsg:opacity-100">
       {canEdit && (
         <Tooltip label="Edit message">
-          <button
-            type="button"
-            onClick={onEdit}
-            className={btn}
-            aria-label="Edit message"
-          >
-            <Pencil className="size-3" strokeWidth={2} />
-          </button>
+          <IconButton size="inline" onClick={onEdit} label="Edit message">
+            <Pencil strokeWidth={2} />
+          </IconButton>
         </Tooltip>
       )}
       <Tooltip label={copied ? "Copied" : "Copy message"}>
-        <button
-          type="button"
-          onClick={copy}
-          className={btn}
-          aria-label={copied ? "Copied" : "Copy message"}
-        >
-          {copied ? (
-            <Check className="size-3" strokeWidth={2} />
-          ) : (
-            <Copy className="size-3" strokeWidth={2} />
-          )}
-        </button>
+        <IconButton size="inline" onClick={copy} label={copied ? "Copied" : "Copy message"}>
+          {copied ? <Check strokeWidth={2} /> : <Copy strokeWidth={2} />}
+        </IconButton>
       </Tooltip>
       {age && (
         <Tooltip
           label={createdAt ? new Date(createdAt).toLocaleString() : undefined}
         >
-          <span className="text-muted-fg px-1 text-xs tabular-nums select-none">
+          <span className="text-muted-fg px-1 text-3xxs leading-4 tabular-nums select-none">
             {age}
           </span>
         </Tooltip>
@@ -653,9 +640,10 @@ function TurnPromptEditor({
         <div
           // The edit composer drops its own card chrome so the outer wrapper's shows
           // through.
-          className={`zeros-agent-turn-prompt-edit relative${
-            dragActive ? "ring-highlighted-bright/40 ring-2" : ""
-          }`}
+          className={cn(
+            "zeros-agent-turn-prompt-edit relative",
+            dragActive && "ring-highlighted-bright/40 ring-2",
+          )}
           {...(submitting ? {} : dragHandlers)}
         >
           <PromptInputBody className="items-stretch rounded-none border-0 bg-transparent p-0 shadow-none has-[[data-slot=input-group-control]:focus-visible]:border-0 has-[[data-slot=input-group-control]:focus-visible]:shadow-none has-[[data-slot=input-group-control]:focus-visible]:ring-0">
@@ -666,17 +654,16 @@ function TurnPromptEditor({
               className="min-w-0 flex-nowrap gap-1.5 pt-1 pr-0 pb-1 pl-0"
             >
               <PromptInputTools className="min-w-0 flex-nowrap gap-0.5">
-                <Button
-                  variant="ghost"
-                  size="icon-sm"
+                <IconButton
+                  size="standard"
                   type="button"
                   onClick={() => fileInputRef.current?.click()}
-                  aria-label="Attach file"
+                  label="Attach file"
                   disabled={submitting}
                   className="rounded-sm"
                 >
                   <Plus size={14} />
-                </Button>
+                </IconButton>
                 <input
                   ref={fileInputRef}
                   type="file"

@@ -142,14 +142,13 @@ function CaptureCard({
         <Toolbar
           aria-label={`${label} actions`}
           className={cn(
-            "pointer-events-none p-0.5 opacity-0 transition-opacity duration-150",
+            "pointer-events-none opacity-0 transition-opacity duration-150",
             "group-hover/capture:pointer-events-auto group-hover/capture:opacity-100",
             "group-focus-within/capture:pointer-events-auto group-focus-within/capture:opacity-100",
           )}
         >
           <Tooltip label="Attach capture">
             <IconButton
-              size="compact"
               label="Add to chat"
               aria-busy={adding || undefined}
               disabled={adding}
@@ -163,7 +162,6 @@ function CaptureCard({
             </IconButton>
           </Tooltip>
           <IconButton
-            size="compact"
             label="Close"
             onClick={() => captureThumbnails.dismiss(capture.id)}
           >

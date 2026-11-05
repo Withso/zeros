@@ -81,7 +81,10 @@ export const ActivityShimmer = memo(function ActivityShimmer({
   return (
     <div
       className={cn(
-        "text-fg2 flex items-center gap-3 py-1.5 text-xs",
+        // The 16px loader hangs 2px into the gutter so it centres on the
+        // feed's 12px icon column, and a 6px gap puts the timer 20px in, the
+        // column every row label starts on.
+        "text-fg2 flex items-center gap-1.5 py-1.5 text-xs",
         className,
       )}
       role="status"
@@ -91,7 +94,7 @@ export const ActivityShimmer = memo(function ActivityShimmer({
         size={16}
         variant="glass"
         label="Agent working"
-        className="shrink-0"
+        className="-ml-0.5 shrink-0"
       />
       {gibberish ? (
         <span className="flex min-w-0 items-center gap-2">

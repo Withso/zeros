@@ -27,7 +27,7 @@ export type ComputerPermissionKind = "accessibility" | "screen-recording";
 export const COMPUTER_USE_SETTINGS_ROWS = {
   enabled: {
     label: "Enable computer use",
-    hint: "Let agents see and control apps on this Mac. Each chat asks before it uses an app.",
+    hint: "Each chat asks before it uses an app.",
   },
   codex_native: {
     label: "Use Codex’s built-in computer use",
@@ -35,7 +35,7 @@ export const COMPUTER_USE_SETTINGS_ROWS = {
   },
   blocked_apps: {
     label: "Blocked apps",
-    hint: "Agents can never see or control these apps. Zeros is always blocked.",
+    hint: "Agents never see or control these.",
   },
   show_agent_cursor: {
     label: "Show agent cursor",

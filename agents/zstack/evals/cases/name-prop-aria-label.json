@@ -1,0 +1,9 @@
+{
+  "id": "name-prop-aria-label",
+  "kind": "replay",
+  "area": "renderer-ui",
+  "fixedBy": "5488b6beeab4fd1bfa5416d3de3362c333bba5cd",
+  "symptom": "DialogCloseButton moved onto IconButton, which names itself from label; the theme editor still passed aria-label=\"Close theme editor\", which typechecked because JSX accepts undeclared dashed attributes, and IconButton renamed the button to the default \"Close\". Only the design-workbench ui-smoke noticed.",
+  "rule": "A component that takes its accessible name from a prop declares aria-label?: never, so a stray aria-label is a type error directly and through every wrapper; when a primitive changes how it is named, grep its callers for the old attribute.",
+  "check": "pnpm typecheck"
+}

@@ -219,28 +219,27 @@
   /* ── RADII — fixed 3-step scale ──
    * The whole app uses exactly three corner radii; pick by use case,
    * never by taste:
-   *   --radius-sm 4px — ALL buttons + icon buttons, pills/chips/badges,
-   *                     kbd, checkboxes, menu items, inputs
-   *   --radius-md 6px — tabs + segmented pills, model/composer pills,
-   *                     sidebar + settings nav rows (workspace rows,
-   *                     Dashboard/Create, settings entries), small
-   *                     cards/rows, markdown img/table, tooltips
-   *   --radius-lg 8px — dialogs, cards, code blocks, toasts, panels
-   * Dropdown surfaces (Popover, DropdownMenu, ContextMenu, Select) use
-   * 2 × --radius-lg = 16px via shared/ui/menu-surface.ts; the grouped
-   * settings cards use 1.5 × --radius-lg = 12px via
-   * features/settings/settings-ui.tsx (SETTINGS_GROUP_RADIUS); and the
+   *   --radius-sm 4px — the 20px inline icon button, inline pills, badges,
+   *                     kbd chips, checkboxes, the inline-rename field
+   *   --radius-md 6px — buttons, icon buttons, fields and the Select
+   *                     trigger, tabs and segmented controls, tooltips,
+   *                     toolbar tools, sidebar and settings rows
+   *   --radius-lg 8px — menu rows, code blocks, small cards and rows
+   * Floating surfaces (menus, Select lists, Command, popovers, hover
+   * cards, toasts, dialogs) use 1.5 × --radius-lg = 12px via
+   * shared/ui/menu-surface.ts, as do the grouped settings cards
+   * (features/settings/settings-ui.tsx, SETTINGS_GROUP_RADIUS) and the
    * prompt surfaces — composer card, inline edit composer, sent user
-   * message — use the same 12px via features/agent/composer-shell.tsx
-   * (PROMPT_SURFACE_RADIUS), so a prompt keeps its shape from typed to
-   * sent. All derived from the scale, not a fourth token.
+   * message — via features/agent/composer-shell.tsx (PROMPT_SURFACE_RADIUS),
+   * so a prompt keeps its shape from typed to sent. Toolbars use
+   * --radius-md + 4px = 10px (shared/ui/primitives/toolbar.tsx). All
+   * derived from the scale, not a fourth token.
    * Plus rounded-full (circles/scrollbars/switch) and rounded-none
    * (nested resets). xs/xl/2xl/3xl/4xl are reset to `initial` below
    * ON PURPOSE so `rounded-xl` etc. no longer exist —
    * a class that won't compile beats a fourth radius sneaking in.
-   * Nesting rule: inner radius = outer radius − inset (8px menu with
-   * 4px padding → 4px items). Dropdown rows are the documented exception:
-   * 16px surfaces carry 8px row fills (see shared/ui/menu-surface.ts). */
+   * Nesting rule: inner radius = outer radius − inset (a 12px menu with a
+   * 4px inset → 8px rows; a 10px toolbar with a 4px inset → 6px tools). */
   --radius-*: initial;
   --radius-sm: 4px;
   --radius-md: 6px;
@@ -249,15 +248,15 @@
   /* ── BACKGROUNDS — `bg-bg0`..`bg-bg5` + hovers ── */
   /* @generated tokens:utilities-bg0:start */
   --color-bg0: var(--bg0); /* #0D0D0D — INACTIVE chat window fill (below bg1) */
-  --color-bg1: var(--bg1); /* #121212 — default canvas / app backdrop + active chat window */
+  --color-bg1: var(--bg1); /* #141414 — default canvas / app backdrop + active chat window */
   --color-bg1-hover: var(--bg1-hover); /* #1F1F1F — hover on bg1 (tool calls, tabs) */
   --color-bg1-highlight: var(--bg1-highlight); /* #171717 — highlighted content above bg1 */
   --color-bg1-bright: var(--bg1-bright); /* #1C1C1C — filled section card on bg1 */
   --color-bg2: var(--bg2); /* #212121 — composer surface */
   --color-bg2-hover: var(--bg2-hover); /* #262626 — hover on bg2 */
   --color-bg2-highlight: var(--bg2-highlight); /* #2E2E2E — dropdown trigger hover/open */
-  --color-bg3: var(--bg3); /* #171717 — floating popover surface */
-  --color-bg3-hover: var(--bg3-hover); /* #262626 — hover on bg3 (menu items) */
+  --color-bg3: var(--bg3); /* #1C1C1C — floating popover surface */
+  --color-bg3-hover: var(--bg3-hover); /* #2A2A2A — hover on bg3 (menu items) */
   --color-bg4: var(--bg4); /* #3D3D3D — rare */
   --color-bg5: var(--bg5); /* #5E5E5E — rare */
   /* @generated tokens:utilities-bg0:end */
@@ -276,7 +275,7 @@
 
   /* ── REPOSITORY NAVIGATION ── */
   /* @generated tokens:utilities-sidebar-bg:start */
-  --color-sidebar-bg: var(--sidebar-bg); /* #171717 — repository sidebar background */
+  --color-sidebar-bg: var(--sidebar-bg); /* #181818 — repository sidebar background */
   --color-sidebar-bg-hover: var(--sidebar-bg-hover); /* #262626 — sidebar row hover and selected state */
   /* @generated tokens:utilities-sidebar-bg:end */
 
@@ -284,14 +283,14 @@
   /* @generated tokens:utilities-border1:start */
   --color-border1: var(--border1); /* #242424 — default for bg1 surfaces */
   --color-border2: var(--border2); /* #2E2E2E — sidebar / composer focus / bg2 */
-  --color-border3: var(--border3); /* #3D3D3D — secondary btn / dropdown / input */
-  --color-border4: var(--border4); /* #4D4D4D — highlighted state of border3 */
+  --color-border3: var(--border3); /* #444444 — secondary btn / dropdown / input */
+  --color-border4: var(--border4); /* #575757 — highlighted state of border3 */
   /* @generated tokens:utilities-border1:end */
 
   /* ── HIGHLIGHTED (theme-adaptive interaction emphasis) ── */
   /* @generated tokens:utilities-highlighted-bg:start */
   --color-highlighted-bg: var(--highlighted-bg); /* #212121 — user msg bg (text: fg1/fg2) */
-  --color-highlighted-bright: var(--highlighted-bright); /* #A6A6A6 — input focus border, brighter accents */
+  --color-highlighted-bright: var(--highlighted-bright); /* #CACACA — input focus border, brighter accents */
   /* @generated tokens:utilities-highlighted-bg:end */
 
   /* ── INVERTED (polarity-flipping pair — buttons, checkbox ON) ── */
@@ -310,11 +309,11 @@
   /* ── COLOR PALETTES (families → bg-/text-/border- utilities) ── */
   /* @generated tokens:utilities-red-primary:start */
   --color-red-primary: var(--red-primary); /* #F87272 — −N counts, error accents */
-  --color-red-secondary: var(--red-secondary); /* #B62411 — solid delete fills + delete icons */
+  --color-red-secondary: var(--red-secondary); /* #B32228 — solid delete fills + delete icons */
   --color-red-secondary-fg: var(--red-secondary-fg); /* #FFFFFF — text/icon on SOLID --red-secondary fills. THEME-STATIC (white in both themes — the red fill stays vivid in light, so fg1, which flips dark, can't sit on it). */
-  --color-red-secondary-hover: var(--red-secondary-hover); /* #A82110 — destructive hover fill */
-  --color-red-bg: var(--red-bg); /* #2C1B1A — error container surface */
-  --color-red-fg: var(--red-fg); /* #FDA172 — text/icon on --red-bg */
+  --color-red-secondary-hover: var(--red-secondary-hover); /* #A72025 — destructive hover fill */
+  --color-red-bg: var(--red-bg); /* #341818 — error container surface */
+  --color-red-fg: var(--red-fg); /* #FFAAA7 — text/icon on --red-bg */
   --color-green-primary: var(--green-primary); /* #4ADE80 — +N counts, success accents */
   --color-green-bg: var(--green-bg); /* #213521 — success container surface */
   --color-green-fg: var(--green-fg); /* #87EEAC — text/icon on --green-bg */
@@ -323,7 +322,7 @@
   --color-yellow-fg: var(--yellow-fg); /* #FFBB00 — text/icon on --yellow-bg */
   --color-yellow-icon: var(--yellow-icon); /* #E6AB4C — icons, status dots and tinted borders */
   --color-blue-primary: var(--blue-primary); /* #83C3F1 — info · links · accents */
-  --color-blue-bg: var(--blue-bg); /* #142048 — info container surface */
+  --color-blue-bg: var(--blue-bg); /* #08233A — info container surface */
   --color-blue-fg: var(--blue-fg); /* #91C5FD — text/icon on --blue-bg */
   --color-violet-primary: var(--violet-primary); /* #BC83F1 — done · merged */
   --color-violet-bg: var(--violet-bg); /* #292438 — done container surface */
@@ -406,8 +405,8 @@
   /* @generated tokens:utilities-red-50:end */
 
   /* @generated tokens:utilities-local-links:start */
-  --color-blue-pill-bg: var(--blue-pill-bg); /* #142048 — Workspace link pill fill; Light separates it from the composer surface */
-  --color-blue-pill-hover: var(--blue-pill-hover); /* #1A2B60 — Workspace link pill hover fill */
+  --color-blue-pill-bg: var(--blue-pill-bg); /* #08233A — Workspace link pill fill; Light separates it from the composer surface */
+  --color-blue-pill-hover: var(--blue-pill-hover); /* #0E304D — Workspace link pill hover fill */
   /* @generated tokens:utilities-local-links:end */
 }
 
@@ -473,15 +472,15 @@
   /* @generated tokens:base-bg0:start */
   --bg0: hsl(0 0% 5%); /* #0D0D0D — INACTIVE chat window fill (below bg1) */
   --bg1: hsl(
-    0 0% 7%
-  ); /* #121212 — default canvas / app backdrop + active chat window */
+    0 0% 7.843%
+  ); /* #141414 — default canvas / app backdrop + active chat window */
   /* @generated tokens:base-bg0:end */
   /* Contextual chat-window surface. Defaults to bg1 so the ACTIVE window (and
    * any chat chrome rendered outside a pane) looks exactly like the plain app
    * canvas; ChatPane overrides it to bg0 on unfocused panes. Consumers use
    * bg-(--pane-bg) / from-(--pane-bg) so they re-tint with their pane. */
   /* @generated tokens:base-pane-bg:start */
-  --pane-bg: var(--bg1); /* #121212 — contextual chat-pane surface; unfocused panes override it to bg0 */
+  --pane-bg: var(--bg1); /* #141414 — contextual chat-pane surface; unfocused panes override it to bg0 */
   --bg1-hover: hsl(0 0% 12%); /* #1F1F1F — hover on bg1 (tool calls, tabs) */
   --bg1-highlight: hsl(0 0% 9%); /* #171717 — highlighted content above bg1 */
   --bg1-bright: hsl(0 0% 11%); /* #1C1C1C — filled section card on bg1 */
@@ -497,10 +496,10 @@
    * (--sidebar-bg / --sidebar-bg-hover are defined a few lines below; CSS
    * custom properties resolve var() lazily, so the forward reference is fine.) */
   /* @generated tokens:base-bg3:start */
-  --bg3: var(--sidebar-bg); /* #171717 — floating popover surface */
-  --bg3-hover: var(
-    --sidebar-bg-hover
-  ); /* #262626 — hover on bg3 (menu items) */
+  --bg3: hsl(0 0% 10.98%); /* #1C1C1C — floating popover surface */
+  --bg3-hover: hsl(
+    0 0% 16.471%
+  ); /* #2A2A2A — hover on bg3 (menu items) */
   --bg4: hsl(0 0% 24%); /* #3D3D3D — rare */
   --bg5: hsl(0 0% 37%); /* #5E5E5E — rare */
   /* @generated tokens:base-bg3:end */
@@ -524,7 +523,7 @@
 
   /* ── REPOSITORY NAVIGATION (not the settings sidebar) ── */
   /* @generated tokens:base-sidebar-bg:start */
-  --sidebar-bg: hsl(0 0% 9%); /* #171717 — repository sidebar background */
+  --sidebar-bg: hsl(0 0% 9.412%); /* #181818 — repository sidebar background */
   --sidebar-bg-hover: hsl(0 0% 15%); /* #262626 — sidebar row hover and selected state */
   /* @generated tokens:base-sidebar-bg:end */
 
@@ -532,8 +531,8 @@
   /* @generated tokens:base-border1:start */
   --border1: hsl(0 0% 14%); /* #242424 — default for bg1 surfaces */
   --border2: hsl(0 0% 18%); /* #2E2E2E — sidebar / composer focus / bg2 */
-  --border3: hsl(0 0% 24%); /* #3D3D3D — secondary btn / dropdown / input */
-  --border4: hsl(0 0% 30%); /* #4D4D4D — highlighted state of border3 */
+  --border3: hsl(0 0% 26.667%); /* #444444 — secondary btn / dropdown / input */
+  --border4: hsl(0 0% 34.118%); /* #575757 — highlighted state of border3 */
   /* @generated tokens:base-border1:end */
 
   /* ── ELEVATION ──
@@ -546,7 +545,6 @@
   /* Shared modal chrome and overlay veil in both themes. */
   /* @generated tokens:base-dialog-title-size:start */
   --dialog-title-size: 0.9375rem; /* 0.9375rem — 15px shared popup heading */
-  --dialog-close-radius: 999px; /* 999px — circular popup close button */
   --scrim: rgba(0, 0, 0, 0.5); /* #00000080 — modal overlay veil */
   /* @generated tokens:base-dialog-title-size:end */
 
@@ -560,8 +558,8 @@
   /* @generated tokens:base-highlighted-bg:start */
   --highlighted-bg: var(--bg2); /* #212121 — user msg bg (text: fg1/fg2) */
   --highlighted-bright: hsl(
-    0 0% 65%
-  ); /* #A6A6A6 — input focus border, brighter accents */
+    0 0% 79.216%
+  ); /* #CACACA — input focus border, brighter accents */
   /* @generated tokens:base-highlighted-bg:end */
 
   /* ── INVERTED (polarity-flipping pair) ──
@@ -600,8 +598,8 @@
   /* @generated tokens:base-red-primary:start */
   --red-primary: hsl(0 91% 71%); /* #F87272 — −N counts, error accents */
   --red-secondary: hsl(
-    7 83% 39%
-  ); /* #B62411 — solid delete fills + delete icons */
+    357.52 68.075% 41.765%
+  ); /* #B32228 — solid delete fills + delete icons */
   --red-secondary-fg: hsl(
     0 0% 100%
   ); /* #FFFFFF — text/icon on SOLID --red-secondary fills. THEME-STATIC (white in both themes — the red fill stays vivid in light, so fg1, which flips dark, can't sit on it). */
@@ -610,9 +608,9 @@
    * alpha (`/90`) wash: alpha lightens the fill toward the surface and broke
    * white-text contrast in Light. */
   /* @generated tokens:base-red-secondary-hover:start */
-  --red-secondary-hover: hsl(7 83% 36%); /* #A82110 — destructive hover fill */
-  --red-bg: hsl(3 26% 13.7%); /* #2C1B1A — error container surface */
-  --red-fg: hsl(20 97% 72%); /* #FDA172 — text/icon on --red-bg */
+  --red-secondary-hover: hsl(357.78 67.839% 39.02%); /* #A72025 — destructive hover fill */
+  --red-bg: hsl(0 36.842% 14.902%); /* #341818 — error container surface */
+  --red-fg: hsl(2.05 100% 82.745%); /* #FFAAA7 — text/icon on --red-bg */
   --green-primary: hsl(142 69% 58%); /* #4ADE80 — +N counts, success accents */
   --green-bg: hsl(120 23% 17%); /* #213521 — success container surface */
   --green-fg: hsl(142 75% 73%); /* #87EEAC — text/icon on --green-bg */
@@ -634,10 +632,10 @@
   /* @generated tokens:base-yellow-wash:start */
   --yellow-wash: var(--yellow-primary); /* #E6AB4C — code-editor search-match washes */
   --blue-primary: hsl(205 80% 73%); /* #83C3F1 — info · links · accents */
-  --blue-bg: hsl(226 57% 18%); /* #142048 — info container surface */
+  --blue-bg: hsl(207.6 75.758% 12.941%); /* #08233A — info container surface */
   --blue-fg: hsl(211 96% 78%); /* #91C5FD — text/icon on --blue-bg */
-  --blue-pill-bg: var(--blue-bg); /* #142048 — Workspace link pill fill; Light separates it from the composer surface */
-  --blue-pill-hover: hsl(226 57% 24%); /* #1A2B60 — Workspace link pill hover fill */
+  --blue-pill-bg: var(--blue-bg); /* #08233A — Workspace link pill fill; Light separates it from the composer surface */
+  --blue-pill-hover: hsl(207.62 69.231% 17.843%); /* #0E304D — Workspace link pill hover fill */
   --violet-primary: hsl(271 80% 73%); /* #BC83F1 — done · merged */
   --violet-bg: hsl(255 21% 18%); /* #292438 — done container surface */
   --violet-fg: hsl(265 66% 77%); /* #BE9EEB — text/icon on --violet-bg */
@@ -767,55 +765,55 @@
 
   /* ── BACKGROUNDS ── */
   /* @generated tokens:light-bg0:start */
-  --bg0: hsl(0 0% 98%); /* #FAFAFA — INACTIVE chat window fill (below bg1) */
+  --bg0: hsl(30 20% 98.039%); /* #FBFAF9 — INACTIVE chat window fill (below bg1) */
   --bg1: hsl(
     0 0% 100%
   ); /* #FFFFFF — default canvas / app backdrop + active chat window */
-  --bg1-hover: hsl(0 4% 95%); /* #F3F2F2 — hover on bg1 (tool calls, tabs) */
-  --bg1-highlight: hsl(0 0% 97%); /* #F7F7F7 — highlighted content above bg1 */
-  --bg1-bright: var(--bg2); /* #F3F3F2 — filled section card on bg1 */
-  --bg2: hsl(60 4% 95%); /* #F3F3F2 — composer surface */
-  --bg2-hover: hsl(60 4% 91%); /* #E9E9E7 — hover on bg2 */
-  --bg2-highlight: var(--bg5); /* #E0E0E0 — dropdown trigger hover/open */
+  --bg1-hover: hsl(30 15.385% 94.902%); /* #F4F2F0 — hover on bg1 (tool calls, tabs) */
+  --bg1-highlight: hsl(40 17.647% 96.667%); /* #F8F7F5 — highlighted content above bg1 */
+  --bg1-bright: var(--bg2); /* #F5F3F0 — filled section card on bg1 */
+  --bg2: hsl(36 20% 95.098%); /* #F5F3F0 — composer surface */
+  --bg2-hover: hsl(30 13.043% 90.98%); /* #EBE8E5 — hover on bg2 */
+  --bg2-highlight: var(--bg5); /* #E2E0DD — dropdown trigger hover/open */
   /* @generated tokens:light-bg0:end */
   /* Floating popover surface = the bg1 canvas itself; lift is border2 +
    * --shadow-dropdown (bg3 == bg1 in light — see the dark block's note). */
   /* @generated tokens:light-bg3:start */
   --bg3: var(--bg1); /* #FFFFFF — floating popover surface */
-  --bg3-hover: var(--bg1-hover); /* #F3F2F2 — hover on bg3 (menu items) */
-  --bg4: hsl(0 0% 94%); /* #F0F0F0 — rare (deepest chip grey) */
-  --bg5: hsl(0 0% 88%); /* #E0E0E0 — rare (one step past bg4) */
+  --bg3-hover: var(--bg1-hover); /* #F4F2F0 — hover on bg3 (menu items) */
+  --bg4: hsl(40 9.677% 93.922%); /* #F1F0EE — rare (deepest chip grey) */
+  --bg5: hsl(36 7.937% 87.647%); /* #E2E0DD — rare (one step past bg4) */
   /* @generated tokens:light-bg3:end */
 
   /* ── FOREGROUNDS ── */
   /* @generated tokens:light-fg1:start */
-  --fg1: hsl(20 7% 16%); /* #2C2826 — selected/highlighted text + icons */
+  --fg1: hsl(30 10% 15.686%); /* #2C2824 — selected/highlighted text + icons */
   /* @generated tokens:light-fg1:end */
   /* fg1–fg3 keep AA on rest and hover surfaces. The quietest metadata tier
    * uses the same neutral grey in both themes and a reviewed 3:1 floor.
    * Light INVERTS the lightness axis: higher L means LESS contrast on white. */
   /* @generated tokens:light-fg2:start */
-  --fg2: hsl(20 4% 30.5%); /* #514D4B — default text + icon; 8.4:1 on white */
-  --fg3: hsl(20 4% 36%); /* #5F5B58 — middle tier (one step below fg2) */
-  --muted-fg: hsl(0 0% 42%); /* #6B6B6B — supplemental metadata; 3:1 floor, fg3 on hover/selection */
+  --fg2: hsl(30 5.195% 30.196%); /* #514D49 — default text + icon; 8.4:1 on white */
+  --fg3: hsl(30 4.396% 35.686%); /* #5F5B57 — middle tier (one step below fg2) */
+  --muted-fg: hsl(40 2.83% 41.569%); /* #6D6B67 — supplemental metadata; 3:1 floor, fg3 on hover/selection */
   /* @generated tokens:light-fg2:end */
 
   /* ── SIDEBAR ── */
   /* @generated tokens:light-sidebar-bg:start */
-  --sidebar-bg: hsl(60 9% 98%); /* #FAFAF9 — repository sidebar background */
-  --sidebar-bg-hover: hsl(60 2% 92%); /* #EBEBEA — sidebar row hover and selected state */
+  --sidebar-bg: hsl(40 27.273% 97.843%); /* #FBFAF8 — repository sidebar background */
+  --sidebar-bg-hover: hsl(36 12.195% 91.961%); /* #EDEBE8 — sidebar row hover and selected state */
   /* @generated tokens:light-sidebar-bg:end */
 
   /* ── BORDERS ── */
   /* @generated tokens:light-border1:start */
-  --border1: hsl(30 9% 91%); /* #EAE8E6 — default for bg1 surfaces */
-  --border2: hsl(30 9% 88%); /* #E3E0DE — sidebar / composer focus / bg2 */
+  --border1: hsl(34.29 14.894% 90.784%); /* #EBE8E4 — default for bg1 surfaces */
+  --border2: hsl(30 12.903% 87.843%); /* #E4E0DC — sidebar / composer focus / bg2 */
   /* @generated tokens:light-border1:end */
   /* Subtle rest/hover outlines on control surfaces, below WCAG 1.4.11's
    * 3:1 by reviewed design. Keyboard focus remains the strong opaque cue. */
   /* @generated tokens:light-border3:start */
-  --border3: hsl(60 3% 78%); /* #C9C9C5 — control outline at rest */
-  --border4: hsl(60 3% 72%); /* #BABAB5 — control outline on hover/open */
+  --border3: hsl(33.33 8.108% 78.235%); /* #CCC8C3 — control outline at rest */
+  --border4: hsl(36 7.042% 72.157%); /* #BDB9B3 — control outline on hover/open */
   /* @generated tokens:light-border3:end */
 
   /* ── ELEVATION ── softer, wider wash — a light UI reads shadow
@@ -831,16 +829,16 @@
   /* ── HIGHLIGHTED ── */
   /* @generated tokens:light-highlighted-bg:start */
   --highlighted-bg: hsl(
-    30 5% 92%
-  ); /* #ECEBEA — user msg bg (text on it: fg1/fg2) */
+    30 15% 92.157%
+  ); /* #EEEBE8 — user msg bg (text on it: fg1/fg2) */
   --highlighted-bright: hsl(
-    25 5% 45%
-  ); /* #78726D — input focus border, brighter accents */
+    32.73 7.801% 27.647%
+  ); /* #4C4741 — input focus border, brighter accents */
   /* @generated tokens:light-highlighted-bg:end */
 
   /* ── INVERTED (near-black in light) ── */
   /* @generated tokens:light-inverted-bg:start */
-  --inverted-bg: hsl(20 7% 16%); /* #2C2826 — warm near-black */
+  --inverted-bg: hsl(30 10% 15.686%); /* #2C2824 — warm near-black */
   --inverted-fg: hsl(0 0% 100%); /* #FFFFFF — text/icon on the inverted fill */
   /* @generated tokens:light-inverted-bg:end */
 
@@ -848,7 +846,7 @@
    * :root aliases; only the hover needs its own light value (a
    * lifted warm charcoal that reads against the near-black fill). */
   /* @generated tokens:light-primary-button-hover:start */
-  --primary-button-hover: hsl(22 6% 25%); /* #443F3C — lifted primary button fill */
+  --primary-button-hover: hsl(30 7.937% 24.706%); /* #443F3A — lifted primary button fill */
   /* @generated tokens:light-primary-button-hover:end */
 
   /* ── COLOR PALETTES (6 families — light anchors) ──
@@ -863,8 +861,8 @@
     0 72% 50%
   ); /* #DB2424 — solid delete fills + delete icons */
   --red-secondary-hover: hsl(0 72% 45%); /* #C52020 — destructive hover fill */
-  --red-bg: hsl(18 87% 91%); /* #FCE0D4 — error container surface */
-  --red-fg: hsl(18 89% 37.5%); /* #B53E0B — text/icon on --red-bg */
+  --red-bg: hsl(2.5 100% 95.294%); /* #FFE8E7 — error container surface */
+  --red-fg: hsl(358.21 63.81% 41.176%); /* #AC262A — text/icon on --red-bg */
   --green-primary: hsl(142 75% 25.5%); /* #107234 — +N counts, success accents */
   --green-bg: hsl(134 38% 89%); /* #D8EEDD — success container surface */
   --green-fg: hsl(142 70% 27.5%); /* #157739 — text/icon on --green-bg */

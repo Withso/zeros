@@ -17,8 +17,8 @@ export function CloudCredentialRemovalDialog({ state, active, busy, onDecision }
         <DialogDescription>All running agents will be stopped</DialogDescription>
       </DialogHeader>
       <DialogFooter>
-        <Button variant="secondary" disabled={busy} onClick={() => { if (!busy) onDecision("cancel"); }}>No</Button>
-        <Button disabled={busy} onClick={() => { if (!busy) onDecision("confirm"); }}>Yes, remove</Button>
+        <Button variant="ghost" disabled={busy} onClick={() => { if (!busy) onDecision("cancel"); }}>No</Button>
+        <Button variant="destructive" disabled={busy} onClick={() => { if (!busy) onDecision("confirm"); }}>Yes, remove</Button>
       </DialogFooter>
     </DialogContent>
   </Dialog>;

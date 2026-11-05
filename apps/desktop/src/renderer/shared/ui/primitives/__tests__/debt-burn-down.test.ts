@@ -9,42 +9,10 @@ import { Avatar, AvatarFallback } from "../avatar";
 import { ListRow } from "../list-row";
 import { Select, SelectTrigger } from "../select";
 
-// This is a fixture for a floating menu row, not a surface owned by this file.
-const floatingRowHover = ["hover:bg", "bg3-hover"].join("-");
-
 // Before strings were captured from these callers before the debt burn-down.
 // Alias normalization permits only the listed exact substitutions. The browser
 // proof separately compares their compiled styles in both themes and states.
 const cases = [
-  {
-    file: "features/agent/context-gauge.tsx",
-    site: 141,
-    component: "ClassAlias",
-    tag: "button",
-    original:
-      "hover:bg-bg2-hover text-fg2 hover:text-fg1 flex size-8 shrink-0 cursor-pointer items-center justify-center rounded-[6px] border-0 bg-transparent p-0 transition-colors",
-    className:
-      "hover:bg-bg2-hover text-fg2 hover:text-fg1 flex size-8 shrink-0 cursor-pointer items-center justify-center rounded-md border-0 bg-transparent p-0 transition-colors",
-    literal:
-      "hover:bg-bg2-hover text-fg2 hover:text-fg1 flex size-8 shrink-0 cursor-pointer items-center justify-center rounded-md border-0 bg-transparent p-0 transition-colors",
-    alias: {
-      before: "rounded-[6px]",
-      after: "rounded-md",
-    },
-  },
-  {
-    file: "features/agent/context-gauge.tsx",
-    site: 190,
-    component: "ClassAlias",
-    tag: "button",
-    original: `${floatingRowHover} text-fg2 hover:text-fg1 w-full cursor-pointer rounded-[6px] border-0 bg-transparent px-2 py-1 text-left text-xs font-medium transition-colors disabled:cursor-default disabled:opacity-50`,
-    className: `${floatingRowHover} text-fg2 hover:text-fg1 w-full cursor-pointer rounded-md border-0 bg-transparent px-2 py-1 text-left text-xs font-medium transition-colors disabled:cursor-default disabled:opacity-50`,
-    literal: `${floatingRowHover} text-fg2 hover:text-fg1 w-full cursor-pointer rounded-md border-0 bg-transparent px-2 py-1 text-left text-xs font-medium transition-colors disabled:cursor-default disabled:opacity-50`,
-    alias: {
-      before: "rounded-[6px]",
-      after: "rounded-md",
-    },
-  },
   {
     file: "features/agent/composer-attachments.tsx",
     site: 194,
@@ -72,22 +40,6 @@ const cases = [
     },
   },
   {
-    file: "features/agent/agent-model-menu.tsx",
-    site: 877,
-    component: "ClassAlias",
-    tag: "button",
-    original:
-      "text-fg2 hover:text-fg1 focus-visible:text-fg1 mr-1 flex h-[18px] shrink-0 items-center justify-center rounded-sm px-1.5 text-[12px] outline-none",
-    className:
-      "text-fg2 hover:text-fg1 focus-visible:text-fg1 mr-1 flex h-[18px] shrink-0 items-center justify-center rounded-sm px-1.5 text-3xxs outline-none",
-    literal:
-      "text-fg2 hover:text-fg1 focus-visible:text-fg1 mr-1 flex h-[18px] shrink-0 items-center justify-center rounded-sm px-1.5 text-3xxs outline-none",
-    alias: {
-      before: "text-[12px]",
-      after: "text-3xxs",
-    },
-  },
-  {
     file: "features/design-workspace/design-inspector.tsx",
     site: 678,
     component: "ClassAlias",
@@ -98,32 +50,6 @@ const cases = [
       "zd-design-unit-trigger h-full w-auto shrink-0 gap-0 rounded-none border-0 bg-transparent py-0 pr-2 pl-1 text-3xxs shadow-none [&>svg]:hidden",
     literal:
       "zd-design-unit-trigger h-full w-auto shrink-0 gap-0 rounded-none border-0 bg-transparent py-0 pr-2 pl-1 text-3xxs shadow-none [&>svg]:hidden",
-    alias: {
-      before: "text-[12px]",
-      after: "text-3xxs",
-    },
-  },
-  {
-    file: "features/settings/settings-ui.tsx",
-    site: 110,
-    component: "ClassAlias",
-    tag: "h2",
-    original: "text-fg2 m-0 text-[12px] font-medium",
-    className: "text-fg2 m-0 text-3xxs font-medium",
-    literal: "text-fg2 m-0 text-3xxs font-medium",
-    alias: {
-      before: "text-[12px]",
-      after: "text-3xxs",
-    },
-  },
-  {
-    file: "features/settings/settings-ui.tsx",
-    site: 113,
-    component: "ClassAlias",
-    tag: "p",
-    original: "text-muted-fg m-0 text-[12px]",
-    className: "text-muted-fg m-0 text-3xxs",
-    literal: "text-muted-fg m-0 text-3xxs",
     alias: {
       before: "text-[12px]",
       after: "text-3xxs",
@@ -146,22 +72,6 @@ const cases = [
     style: {
       width: 20,
       height: 20,
-    },
-  },
-  {
-    file: "features/agent/renderers/event-row.tsx",
-    site: 220,
-    component: "ClassAlias",
-    tag: "span",
-    original:
-      "bg-yellow-bg text-yellow-fg shrink-0 rounded-sm px-1.5 py-0.5 text-[10px] font-medium",
-    className:
-      "bg-yellow-bg text-yellow-fg shrink-0 rounded-sm px-1.5 py-0.5 text-xxs font-medium",
-    literal:
-      "bg-yellow-bg text-yellow-fg shrink-0 rounded-sm px-1.5 py-0.5 text-xxs font-medium",
-    alias: {
-      before: "text-[10px]",
-      after: "text-xxs",
     },
   },
   {
@@ -296,10 +206,12 @@ const cases = [
     site: 148,
     component: "ListRow",
     tag: "button",
+    // The Zeros Design ListRow: a bg1-hover hover, 28px, the keyboard ring,
+    // pulled 8px into the gutter like every feed row.
     original:
-      "group/event-stripe hover:bg-bg2-hover/40 -ml-1 flex w-fit max-w-full min-w-0 items-center gap-2 rounded-md px-1 py-1 text-left transition-colors",
-    className: "group/event-stripe -ml-1 min-w-0 px-1 transition-colors",
-    literal: "group/event-stripe -ml-1 min-w-0 px-1 transition-colors",
+      "group/event-stripe hover:bg-bg1-hover focus-visible:inset-ring focus-visible:inset-ring-highlighted-bright focus-visible:ring-highlighted-bright/50 -ml-2 flex min-h-7 w-fit max-w-full min-w-0 items-center gap-2 rounded-md px-2 py-1 text-left transition-colors duration-120 ease-out focus-visible:ring-[3px] focus-visible:outline-none",
+    className: "group/event-stripe min-w-0 transition-colors",
+    literal: "group/event-stripe min-w-0 transition-colors",
   },
 ];
 

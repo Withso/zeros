@@ -34,12 +34,16 @@ export async function runEditorReviewAnchorSmoke({
     const editor = page.locator(".cm-content[contenteditable=true]");
     const composer = page.locator("[data-review-composer]");
     const toolbar = page.locator("[data-review-selection-toolbar]");
+    // The comment + replaces the number of the line under the pointer.
     const line = (number) =>
       page.getByRole("button", {
         name: `Comment on line ${number}`,
         exact: true,
       });
+    const hoverLine = (number) =>
+      page.locator(".cm-line").nth(number - 1).hover();
 
+    await hoverLine(4);
     if (duringDrag) {
       await line(4).hover();
       await page.mouse.down();
@@ -58,7 +62,7 @@ export async function runEditorReviewAnchorSmoke({
     await expect(editor.locator(".cm-line")).toHaveText("one line");
 
     if (duringDrag) {
-      await line(1).hover();
+      await page.locator(".cm-lineNumbers .cm-gutterElement").filter({ hasText: /^1$/ }).hover();
       await page.mouse.up();
       pointerHeld = false;
       expect(
@@ -68,13 +72,14 @@ export async function runEditorReviewAnchorSmoke({
       await expect(toolbar).toHaveCount(0);
       await expect(composer).toHaveCount(0);
     }
+    await hoverLine(1);
     await line(1).click({ modifiers: ["Shift"] });
     expect(
       errors,
       "the retained gutter anchor must belong to the current document",
     ).toEqual([]);
-    await expect(toolbar).toHaveAccessibleName("Review line 1");
-    await toolbar.getByRole("button", { name: "Comment", exact: true }).click();
+    // A number click or Shift range opens the composer straight away.
+    await expect(toolbar).toHaveCount(0);
     await expect(composer).toHaveAccessibleName("Comment on line 1");
     const input = composer.locator("textarea");
     await expect(input).toBeFocused();
@@ -125,12 +130,11 @@ export async function runCodeReviewSmoke({
         `${side ? `[data-${side}] ` : ""}[data-gutter] [data-column-number="${number}"]`,
       )
       .first();
+  // A number click opens the composer; Shift extends it to a range.
   const commentOnRange = async (start, end = start, side) => {
     await line(start, side).click();
     if (end !== start) await line(end, side).click({ modifiers: ["Shift"] });
-    await toolbar()
-      .getByRole("button", { name: "Comment", exact: true })
-      .click();
+    await expect(toolbar()).toHaveCount(0);
     await expect(input()).toBeFocused();
   };
 
@@ -312,7 +316,7 @@ export async function runCodeReviewSmoke({
   await commentOnRange(9, 11, "deletions");
   await expect(composer()).toHaveAccessibleName("Comment on Old lines 9–11");
   await expect(
-    composer().getByRole("button", { name: "Post to PR", exact: true }),
+    composer().getByRole("tab", { name: "Pull request", exact: true }),
   ).toHaveCount(0);
   await input().fill("Review the original range.");
   await input().press("Control+Enter");
@@ -320,7 +324,7 @@ export async function runCodeReviewSmoke({
   await page.getByTestId("review-toggle-confirmed").click();
   await commentOnRange(11, 11, "additions");
   await composer()
-    .getByRole("button", { name: "Post to PR", exact: true })
+    .getByRole("tab", { name: "Pull request", exact: true })
     .click();
   await input().fill("Publish this exact added line.");
   await input().press("Control+Enter");
@@ -337,7 +341,7 @@ export async function runCodeReviewSmoke({
     await page.getByTestId("review-toggle-confirmed").click();
     await commentOnRange(11, 11, "deletions");
     await composer()
-      .getByRole("button", { name: "Post to PR", exact: true })
+      .getByRole("tab", { name: "Pull request", exact: true })
       .click();
     await input().fill("Keep this draft on its original PR revision.");
     await page.getByTestId(change).click();
@@ -355,6 +359,9 @@ export async function runCodeReviewSmoke({
 
   await open();
   await page.getByTestId("review-mode-edit").click();
+  const editorLine = (number) =>
+    page.locator(".cm-line").nth(number - 1).hover();
+  await editorLine(2);
   await page
     .getByRole("button", { name: "Comment on line 2", exact: true })
     .click();
@@ -375,16 +382,17 @@ export async function runCodeReviewSmoke({
     true,
   );
 
+  await editorLine(4);
   await page
     .getByRole("button", { name: "Comment on line 4", exact: true })
     .click();
   await composer().getByRole("button", { name: "Cancel", exact: true }).click();
+  await editorLine(6);
   await page
     .getByRole("button", { name: "Comment on line 6", exact: true })
     .click({ modifiers: ["Shift"] });
-  await expect(toolbar()).toHaveAccessibleName("Review lines 4–6");
   await expect(page.locator(".cm-selectionBackground").first()).toBeVisible();
-  await toolbar().getByRole("button", { name: "Comment", exact: true }).click();
+  await expect(toolbar()).toHaveCount(0);
   await expect(composer()).toHaveAccessibleName("Comment on lines 4–6");
   await input().press("Escape");
   check(

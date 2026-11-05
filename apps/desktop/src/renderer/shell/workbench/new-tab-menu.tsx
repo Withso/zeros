@@ -3,6 +3,9 @@
 // ──────────────────────────────────────────────────────────
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
+import { TruncateStart } from "@/renderer/shared/ui/primitives/truncate-start";
+import { COMMAND_EMPTY_CLS } from "@/renderer/shared/ui/primitives/command";
 import { File, Globe, Plus, Smartphone, Terminal } from "lucide-react";
 import { addWorkbenchTerminal, openWorkbenchTerminal } from "./open-terminal";
 import { useActiveWorkspace } from "../../state/use-active-workspace";
@@ -24,7 +27,6 @@ import {
   useWorkspaceDispatch,
 } from "@/renderer/state/store";
 import { FileTypeIcon } from "@/renderer/features/agent/composer-editor/file-type-icon";
-import { Button } from "@/renderer/shared/ui/primitives/button";
 import {
   Command,
   CommandGroup,
@@ -230,16 +232,15 @@ export function WorkbenchNewTabMenu({
       }}
     >
       <PopoverTrigger asChild>
-        <Button
-          variant="ghost"
-          size="icon-sm"
+        <IconButton
+          size="standard"
           className="shrink-0"
-          aria-label="New File, Browser, or Terminal tab"
+          label="New File, Browser, or Terminal tab"
           onPointerEnter={warm}
           onFocus={warm}
         >
           <Plus className="text-fg2 size-3.5" />
-        </Button>
+        </IconButton>
       </PopoverTrigger>
       <PopoverContent
         ref={menuRef}
@@ -259,7 +260,7 @@ export function WorkbenchNewTabMenu({
               void warmSimulatorTab(scope).catch(() => {});
             }
           }}
-          className="min-h-0 rounded-none [&_[data-slot=command-input-wrapper]]:h-10 [&_[data-slot=command-input-wrapper]]:shrink-0 [&_[data-slot=command-input-wrapper]_svg]:size-3.5"
+          className="min-h-0 rounded-none [&_[data-slot=command-input-wrapper]]:shrink-0"
         >
           <CommandInput
             autoFocus
@@ -340,10 +341,10 @@ export function WorkbenchNewTabMenu({
                   onSelect={() => addBrowser(directUrl, "Browser")}
                 >
                   <Globe className="size-3.5" />
-                  <div className="min-w-0 flex-1">
-                    <div className="truncate">Open URL</div>
-                    <div className="text-fg2 truncate text-xs">{directUrl}</div>
-                  </div>
+                  <span className="shrink-0">Open URL</span>
+                  <span className="text-fg3 min-w-0 flex-1 truncate">
+                    {directUrl}
+                  </span>
                 </CommandItem>
               </CommandGroup>
             )}
@@ -369,12 +370,12 @@ export function WorkbenchNewTabMenu({
                     onSelect={() => addBrowser(entry.url, entry.title)}
                   >
                     <Globe className="size-3.5" />
-                    <div className="min-w-0 flex-1">
-                      <div className="truncate">{entry.title || "Browser"}</div>
-                      <div className="text-fg2 truncate text-xs">
-                        {entry.url}
-                      </div>
-                    </div>
+                    <span className="max-w-full shrink-0 truncate">
+                      {entry.title || "Browser"}
+                    </span>
+                    <span className="text-fg3 min-w-0 flex-1 truncate">
+                      {entry.url}
+                    </span>
                   </CommandItem>
                 ))}
               </CommandGroup>
@@ -395,21 +396,23 @@ export function WorkbenchNewTabMenu({
                       size={14}
                       className="size-3.5"
                     />
-                    <div className="min-w-0 flex-1">
-                      <div className="truncate">{file.name}</div>
-                      {file.directory && (
-                        <div className="text-fg2 truncate text-xs">
-                          {file.directory}
-                        </div>
-                      )}
-                    </div>
+                    {/* One 28px row: the name, then its folder, which
+                        gives way first and keeps its deepest part. */}
+                    <span className="max-w-full shrink-0 truncate">
+                      {file.name}
+                    </span>
+                    {file.directory ? (
+                      <TruncateStart className="text-fg3 flex-1">
+                        {file.directory}
+                      </TruncateStart>
+                    ) : null}
                   </CommandItem>
                 ))}
               </CommandGroup>
             )}
 
             {searching && filesFailed && fileResults.length === 0 && (
-              <div className="text-fg2 px-3 py-4 text-center text-xs">
+              <div className={COMMAND_EMPTY_CLS}>
                 Files are temporarily unavailable.
               </div>
             )}

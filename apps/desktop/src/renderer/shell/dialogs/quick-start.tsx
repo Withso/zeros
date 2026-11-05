@@ -220,7 +220,7 @@ export function QuickStartDialog({
             Cancel
           </Button>
           <Button
-            variant="default"
+            variant="primary"
             size="sm"
             onClick={handleCreate}
             disabled={!canSubmit}

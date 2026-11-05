@@ -178,8 +178,8 @@ function LocalServersSection({ scope, active, onOpen }: BrowserStartPageProps) {
                 <DropdownMenuSeparator />
                 <DropdownMenuLabel className="text-muted-fg font-normal">Show</DropdownMenuLabel>
                 <DropdownMenuRadioGroup value={filter satisfies LocalDevServerFilter} onValueChange={onFilter}>
-                  <DropdownMenuRadioItem value="all" indicator="check">All</DropdownMenuRadioItem>
-                  <DropdownMenuRadioItem value="online" indicator="check">Online</DropdownMenuRadioItem>
+                  <DropdownMenuRadioItem value="all">All</DropdownMenuRadioItem>
+                  <DropdownMenuRadioItem value="online">Online</DropdownMenuRadioItem>
                 </DropdownMenuRadioGroup>
               </DropdownMenuContent>
             </DropdownMenu>

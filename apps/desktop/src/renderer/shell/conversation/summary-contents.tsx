@@ -1,4 +1,5 @@
 import React, { useCallback } from "react";
+import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import {
   ArrowUpRight,
   Plus,
@@ -49,7 +50,7 @@ const DESTINATIONS = [
   "files",
 ] as const;
 const ROW =
-  "text-fg2 h-8 w-full min-w-0 justify-start gap-2 rounded-lg px-1.5 text-left font-normal hover:text-fg1";
+  "text-fg2 h-7 w-full min-w-0 justify-start gap-2 rounded-md px-1.5 text-left font-normal hover:text-fg1";
 const SECTION_LABEL = "text-fg3 text-3xxs mb-1 px-1.5 font-[450]";
 
 export function SummaryContents({
@@ -185,27 +186,25 @@ export function SummaryContents({
                       }
                     >
                       <span className="inline-flex">
-                        <Button
-                          variant="ghost"
-                          size="icon-sm"
+                        <IconButton
+                          size="standard"
                           className="text-fg2"
-                          aria-label={`Open ${action.name} in Browser`}
+                          label={`Open ${action.name} in Browser`}
                           disabled={!previewUrl}
                           onClick={() => {
                             if (previewUrl) openBrowser({ url: previewUrl });
                           }}
                         >
                           <ArrowUpRight className="size-4" aria-hidden="true" />
-                        </Button>
+                        </IconButton>
                       </span>
                     </Tooltip>}
                     <Tooltip label={`Stop ${action.name}`}>
                       <span className="inline-flex">
-                        <Button
-                          variant="ghost"
-                          size="icon-sm"
+                        <IconButton
+                          size="standard"
                           className="text-fg2"
-                          aria-label={`Stop ${action.name}`}
+                          label={`Stop ${action.name}`}
                           onClick={(event) => {
                             // Stop disappears when the run exits. Keep keyboard
                             // focus on the stable action instead of losing it.
@@ -219,7 +218,7 @@ export function SummaryContents({
                           }}
                         >
                           <Square className="size-3" aria-hidden="true" />
-                        </Button>
+                        </IconButton>
                       </span>
                     </Tooltip>
                   </Inline>

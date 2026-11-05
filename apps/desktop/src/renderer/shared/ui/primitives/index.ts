@@ -2,10 +2,21 @@
 // this entrypoint over deep imports when they need several primitives.
 
 export { Button, buttonVariants, type ButtonProps } from "./button";
-export { IconButton, type IconButtonProps } from "./icon-button";
-export { PanelHeader, type PanelHeaderProps } from "./panel-header";
+export {
+  IconButton,
+  IconButtonSizeContext,
+  type IconButtonProps,
+  type IconButtonSize,
+} from "./icon-button";
+export {
+  PanelHeader,
+  PanelHeaderActions,
+  PanelHeaderTitle,
+  type PanelHeaderProps,
+} from "./panel-header";
 export { ListRow, type ListRowProps } from "./list-row";
 export { Pill, type PillProps } from "./pill";
+export { TruncateStart } from "./truncate-start";
 export {
   Card,
   CardHeader,
@@ -14,7 +25,7 @@ export {
   CardDescription,
   CardContent,
 } from "./card";
-export { Input } from "./input";
+export { Input, inputVariants, type InputProps } from "./input";
 export { Textarea } from "./textarea";
 export { CodeTextarea, type CodeTextareaProps } from "./code-textarea";
 export { Label } from "./label";
@@ -22,7 +33,7 @@ export { Checkbox, type CheckboxProps, type CheckedState } from "./checkbox";
 export { Badge, badgeVariants, type BadgeProps } from "./badge";
 export { RadioGroup, RadioGroupItem } from "./radio-group";
 export { Separator } from "./separator";
-export { Kbd } from "./kbd";
+export { ButtonShortcut, Kbd } from "./kbd";
 export { Tile } from "./tile";
 export { Alert, AlertTitle, AlertDescription } from "./alert";
 export {
@@ -70,8 +81,20 @@ export {
   TooltipProvider,
 } from "./tooltip";
 export { Tabs, TabsList, TabsTrigger, TabsContent } from "./tabs";
-export { Toolbar } from "./toolbar";
-export { SplitButton, type SplitButtonProps } from "./split-button";
+export {
+  TOOLBAR_SURFACE,
+  Toolbar,
+  ToolbarSeparator,
+  ToolbarText,
+  type ToolbarProps,
+} from "./toolbar";
+export {
+  SplitButton,
+  splitButtonClasses,
+  type SplitButtonProps,
+  type SplitButtonSize,
+  type SplitButtonVariant,
+} from "./split-button";
 export { ScrollArea, ScrollBar } from "./scroll-area";
 export { Switch } from "./switch";
 export { Slider } from "./slider";
@@ -104,10 +127,16 @@ export {
   SelectSeparator,
   SelectTrigger,
   SelectValue,
+  SELECT_CHEVRON,
   selectTriggerClassName,
-  splitTriggerClassNames,
-  splitTriggerClasses,
 } from "./select";
+export {
+  FIELD_BOX,
+  FIELD_FOCUS,
+  FIELD_INVALID,
+  Field,
+  type FieldProps,
+} from "./field";
 export {
   InputGroup,
   InputGroupAddon,

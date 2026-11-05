@@ -4,6 +4,9 @@ import {
   Button,
   IconButton,
   Input,
+  Toolbar,
+  ToolbarSeparator,
+  ToolbarText,
   Tooltip,
 } from "@/renderer/shared/ui/primitives";
 import "./document-controls.css";
@@ -42,29 +45,28 @@ export function DocumentControls({
   };
   return (
     <div className="pointer-events-none absolute inset-x-3 bottom-3 z-1 flex justify-center">
-      <div
+      {/* The floating island every preview shares: one 36px bar of 28px
+          tools with 10px corners, the page stepper, a divider, then zoom. */}
+      <Toolbar
         data-document-controls
-        role="group"
         aria-label={label}
-        className="border-border2 bg-bg2 text-fg2 pointer-events-auto flex max-w-full flex-wrap items-center justify-center gap-1 rounded-full border p-1 shadow-[var(--shadow-dropdown)]"
+        className="pointer-events-auto max-w-full flex-wrap justify-center"
       >
-        <div className="flex items-center gap-1">
+        <div className="flex items-center gap-0.5">
           <Tooltip label="Previous page">
             <IconButton
               label="Previous page"
-              size="compact"
-              className="rounded-full"
               disabled={page <= 1}
               onClick={() => onPage(page - 1)}
             >
-              <ChevronUp className="size-3.5" />
+              <ChevronUp />
             </IconButton>
           </Tooltip>
           <Input
             aria-label="Page number"
             inputMode="numeric"
             value={pageInput}
-            className="hover:bg-bg2-hover h-6 w-8 border-transparent px-0 text-center text-xs tabular-nums shadow-none"
+            className="hover:bg-bg2-highlight h-7 w-8 border-transparent px-0 text-center tabular-nums"
             onChange={(event) => setPageInput(event.target.value)}
             onBlur={commitPage}
             onKeyDown={(event) => {
@@ -72,56 +74,50 @@ export function DocumentControls({
               if (event.key === "Escape") setPageInput(String(page));
             }}
           />
-          <span className="text-xs tabular-nums">/ {pageCount}</span>
+          <ToolbarText className="pl-0.5 tabular-nums">/ {pageCount}</ToolbarText>
           <Tooltip label="Next page">
             <IconButton
               label="Next page"
-              size="compact"
-              className="rounded-full"
               disabled={page >= pageCount}
               onClick={() => onPage(page + 1)}
             >
-              <ChevronDown className="size-3.5" />
+              <ChevronDown />
             </IconButton>
           </Tooltip>
         </div>
-        <div className="border-border2 flex items-center gap-1 border-l pl-1">
+        <ToolbarSeparator />
+        <div className="flex items-center gap-0.5">
           <Tooltip label="Zoom out">
             <IconButton
               label="Zoom out"
-              size="compact"
-              className="rounded-full"
               disabled={scale <= 0.25}
               onClick={() => onZoom(Math.max(0.25, scale - 0.25))}
             >
-              <ZoomOut className="size-3.5" />
+              <ZoomOut />
             </IconButton>
           </Tooltip>
           <Tooltip label="Zoom in">
             <IconButton
               label="Zoom in"
-              size="compact"
-              className="rounded-full"
               disabled={scale >= maxScale}
               onClick={() => onZoom(Math.min(maxScale, scale + 0.25))}
             >
-              <ZoomIn className="size-3.5" />
+              <ZoomIn />
             </IconButton>
           </Tooltip>
           <Tooltip label="Fit page">
             <Button
               variant="ghost"
-              size="compact"
               aria-label="Fit page"
               aria-pressed={fit}
-              className="w-12 rounded-full px-1 text-xs tabular-nums"
+              className="w-12 px-1 tabular-nums"
               onClick={() => onZoom(null)}
             >
               {Math.round(scale * 100)}%
             </Button>
           </Tooltip>
         </div>
-      </div>
+      </Toolbar>
     </div>
   );
 }

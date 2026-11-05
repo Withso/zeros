@@ -171,19 +171,19 @@ export function OrganizationSwitcher({
       if (next && showMemberships) void reload();
       if (next && multipleAccounts) void refreshAccounts();
     }}>
-      {/* Sized to its name, up to the sidebar's width; a long organization
-          name truncates while the icon and trailing chevron stay whole. 4px
-          of padding on every side (px-1 beside the primitive's py-1). */}
+      {/* A 32px nav row on the same icon column as the rows below it; a long
+          organization name truncates while the icon and the trailing chevron
+          stay whole. */}
       <DropdownMenuTrigger asChild>
         <Button
           type="button"
           variant="ghost"
-          className="text-fg1 hover:bg-sidebar-bg-hover data-[state=open]:bg-sidebar-bg-hover [&_svg]:text-fg2 h-7.5 w-fit max-w-full min-w-0 justify-start gap-2 rounded-md px-1 text-xs font-medium [&_svg]:shrink-0"
+          className="text-fg1 hover:bg-sidebar-bg-hover data-[state=open]:bg-sidebar-bg-hover [&_svg]:text-fg3 h-8 w-full min-w-0 justify-start gap-2 rounded-md border-0 px-2 py-0 text-xs leading-4.5 font-medium [&_svg]:size-3.5 [&_svg]:shrink-0"
           aria-label="Switch organization"
         >
           <OrganizationIcon organization={active} />
           <span className="min-w-0 truncate text-left">{label}</span>
-          <ChevronDown className="size-3" strokeWidth={1.5} />
+          <ChevronDown className="ml-auto size-3!" strokeWidth={1.5} />
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" className="w-64">

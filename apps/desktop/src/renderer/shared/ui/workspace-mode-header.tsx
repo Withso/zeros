@@ -1,4 +1,5 @@
 import React, { useCallback, useMemo, type ReactNode } from "react";
+import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import { Code2, MessageSquarePlus, PenTool, Plus, type LucideIcon } from "lucide-react";
 
 import { workspaceSetMode, type Workspace } from "../../platform/git";
@@ -23,7 +24,6 @@ import {
 } from "../../state/design-directory-target";
 import { requestDesignSyncAgent } from "../../state/design-sync-intent";
 import { cn } from "./cn";
-import { Button } from "./primitives/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -101,12 +101,11 @@ export function WorkspaceModeToggleView({
       {WORKSPACE_MODES.map((option) => {
         const active = mode === option.mode;
         const button = (
-          <Button
+          <IconButton
             type="button"
-            variant="ghost"
-            size="icon-sm"
+            size="standard"
             data-workspace-mode={option.mode}
-            aria-label={`${option.label} mode`}
+            label={`${option.label} mode`}
             aria-pressed={active}
             disabled={disabled}
             className={cn(
@@ -123,7 +122,7 @@ export function WorkspaceModeToggleView({
               strokeWidth={1.5}
               aria-hidden="true"
             />
-          </Button>
+          </IconButton>
         );
         // The checkout has no design directory: Design becomes a confirmed
         // creation rather than a silent one. The button keeps its identity

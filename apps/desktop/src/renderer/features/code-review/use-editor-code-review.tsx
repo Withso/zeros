@@ -10,6 +10,7 @@ import { createPortal } from "react-dom";
 import {
   EditorSelection,
   Prec,
+  RangeSet,
   StateEffect,
   StateField,
 } from "@codemirror/state";
@@ -19,8 +20,8 @@ import {
   GutterMarker,
   ViewPlugin,
   WidgetType,
-  gutter,
   keymap,
+  lineNumberMarkers,
   lineNumbers,
   type DecorationSet,
 } from "@codemirror/view";
@@ -111,30 +112,86 @@ class CommentMarker extends GutterMarker {
   }
 }
 
+/** The line whose number shows the comment +: the line under the pointer. */
+const setCommentLine = StateEffect.define<number | null>();
+const commentLineField = StateField.define<number | null>({
+  create: () => null,
+  update(value, transaction) {
+    for (const effect of transaction.effects)
+      if (effect.is(setCommentLine)) return effect.value;
+    return transaction.docChanged ? null : value;
+  },
+  // A marker replaces its line's number, so the + sits where the number was
+  // and the code keeps the plain editor's left edge.
+  provide: (field) =>
+    lineNumberMarkers.compute([field], (state) => {
+      const line = state.field(field);
+      if (line === null || line > state.doc.lines) return RangeSet.empty;
+      return RangeSet.of([
+        new CommentMarker(line).range(state.doc.line(line).from),
+      ]);
+    }),
+});
+
+const commentLineTracker = ViewPlugin.define((view) => {
+  const show = (line: number | null) => {
+    if (view.state.field(commentLineField, false) !== line)
+      view.dispatch({ effects: setCommentLine.of(line) });
+  };
+  // One layout read per frame, however fast the pointer moves.
+  let frame = 0;
+  let pointerY = 0;
+  const locate = () => {
+    frame = 0;
+    const position = view.posAtCoords(
+      { x: view.contentDOM.getBoundingClientRect().left + 8, y: pointerY },
+      false,
+    );
+    show(view.state.doc.lineAt(position).number);
+  };
+  const move = (event: MouseEvent) => {
+    pointerY = event.clientY;
+    if (!frame) frame = requestAnimationFrame(locate);
+  };
+  // A frame still pending when the pointer leaves must not bring the + back.
+  const cancel = () => {
+    if (frame) cancelAnimationFrame(frame);
+    frame = 0;
+  };
+  const leave = () => {
+    cancel();
+    show(null);
+  };
+  view.dom.addEventListener("mousemove", move);
+  view.dom.addEventListener("mouseleave", leave);
+  return {
+    destroy: () => {
+      cancel();
+      view.dom.removeEventListener("mousemove", move);
+      view.dom.removeEventListener("mouseleave", leave);
+    },
+  };
+});
+
 const reviewEditorTheme = EditorView.theme({
-  ".zeros-review-gutter": { width: "24px" },
-  ".zeros-review-gutter .cm-gutterElement": {
-    padding: "0",
+  ".cm-lineNumbers .cm-gutterElement:has(.zeros-review-comment-button)": {
     display: "flex",
-    justifyContent: "center",
+    alignItems: "center",
+    justifyContent: "flex-end",
   },
   ".zeros-review-comment-button": {
-    width: "20px",
-    height: "20px",
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    width: "16px",
+    height: "16px",
     padding: "0",
     border: "0",
     borderRadius: "var(--radius-sm)",
-    background: "transparent",
-    color: "var(--fg2)",
+    background: "var(--bg2-highlight)",
+    color: "var(--fg1)",
     font: "inherit",
     cursor: "pointer",
-    opacity: "0",
-  },
-  '.cm-gutterElement:hover .zeros-review-comment-button, .zeros-review-comment-button:focus-visible:where(:not([data-zeros-focus-visible="false"]))':
-    { opacity: "1" },
-  ".zeros-review-comment-button:hover": {
-    background: "var(--bg2-hover)",
-    color: "var(--fg1)",
   },
   '.zeros-review-comment-button:focus-visible:where(:not([data-zeros-focus-visible="false"]))': {
     outline: "1px solid var(--fg2)",
@@ -148,7 +205,8 @@ const reviewEditorTheme = EditorView.theme({
 });
 
 // CodeMirror hides its entire gutter container by default and offers no gutter
-// accessibility option. Expose native review controls while hiding decoration.
+// accessibility option. Expose the comment + in the number gutter while every
+// number and the other gutters stay hidden decoration.
 const reviewGutterAccessibility = ViewPlugin.define((view) => {
   let live = true;
   let queued = false;
@@ -158,12 +216,16 @@ const reviewGutterAccessibility = ViewPlugin.define((view) => {
     for (const container of view.dom.querySelectorAll<HTMLElement>(
       ".cm-gutters",
     )) {
-      if (!container.querySelector(".zeros-review-gutter")) continue;
+      const numbers = container.querySelector(".cm-lineNumbers");
+      if (!numbers) continue;
       container.removeAttribute("aria-hidden");
-      for (const child of container.children) {
-        if (child.classList.contains("zeros-review-gutter"))
-          child.removeAttribute("aria-hidden");
+      for (const child of container.children)
+        if (child === numbers) child.removeAttribute("aria-hidden");
         else child.setAttribute("aria-hidden", "true");
+      for (const element of numbers.children) {
+        if (element.querySelector(".zeros-review-comment-button"))
+          element.removeAttribute("aria-hidden");
+        else element.setAttribute("aria-hidden", "true");
       }
     }
   };
@@ -175,11 +237,16 @@ const reviewGutterAccessibility = ViewPlugin.define((view) => {
   };
   schedule();
   return {
+    // The gutter's elements change with the document, viewport, geometry or
+    // configuration, and the + moves with the pointer between lines.
     update: (update) => {
       if (
-        update.viewportChanged ||
         update.docChanged ||
-        update.transactions.some((transaction) => transaction.reconfigured)
+        update.viewportChanged ||
+        update.geometryChanged ||
+        update.transactions.some((transaction) => transaction.reconfigured) ||
+        update.startState.field(commentLineField, false) !==
+          update.state.field(commentLineField, false)
       )
         schedule();
     },
@@ -269,7 +336,6 @@ export function useEditorCodeReview({
         : clicked;
       anchorLine.current = start;
       let end = clicked;
-      let moved = false;
       const paint = () => {
         const first = editor.state.doc.line(Math.min(start, end));
         const last = editor.state.doc.line(Math.max(start, end));
@@ -296,7 +362,6 @@ export function useEditorCodeReview({
         if (position === null) return;
         const nextEnd = editor.state.doc.lineAt(position).number;
         if (nextEnd === end) return;
-        moved = true;
         end = nextEnd;
         paint();
       };
@@ -306,11 +371,7 @@ export function useEditorCodeReview({
           latest.current.review.ownerKey === owner &&
           latest.current.path === selectedPath
         )
-          select(
-            editor,
-            { start, end },
-            moved || pointer.shiftKey ? "selection" : mode,
-          );
+          select(editor, { start, end }, mode);
       };
       const cleanup = () => {
         window.removeEventListener("pointermove", move);
@@ -344,11 +405,12 @@ export function useEditorCodeReview({
           update.changes.mapPos(previous.from, 1),
         ).number;
       }),
-      gutter({
-        class: "zeros-review-gutter",
-        lineMarker: (editor, block) =>
-          new CommentMarker(editor.state.doc.lineAt(block.from).number),
-        lineMarkerChange: (update) => update.docChanged,
+      commentLineField,
+      commentLineTracker,
+      // Extend the existing native number gutter, preserving its geometry. A
+      // number click opens the composer on its line; a drag selects lines and
+      // opens it on release, as in Changes.
+      lineNumbers({
         domEventHandlers: {
           pointerdown: (editor, block, event) =>
             beginGutterSelection(editor, block.from, event),
@@ -359,49 +421,6 @@ export function useEditorCodeReview({
             select(editor, { start: line, end: line }, "composer");
             return true;
           },
-        },
-      }),
-      // Extend the existing native number gutter, preserving its geometry. A
-      // number click/drag commits a range toolbar; the plus opens the composer.
-      lineNumbers({
-        domEventHandlers: {
-          pointerdown: (editor, block, event) =>
-            beginGutterSelection(editor, block.from, event, "selection"),
-        },
-      }),
-      EditorView.domEventHandlers({
-        mouseup: (_event, editor) => {
-          if (!latest.current.active || stopDrag.current) return false;
-          queueMicrotask(() => {
-            if (!latest.current.active || editor.state.selection.main.empty)
-              return;
-            select(
-              editor,
-              editorReviewLineRange(
-                editor.state.doc,
-                editor.state.selection.main,
-              ),
-              "selection",
-            );
-          });
-          return false;
-        },
-        keyup: (event, editor) => {
-          if (
-            latest.current.active &&
-            event.shiftKey &&
-            event.key.startsWith("Arrow") &&
-            !editor.state.selection.main.empty
-          )
-            select(
-              editor,
-              editorReviewLineRange(
-                editor.state.doc,
-                editor.state.selection.main,
-              ),
-              "selection",
-            );
-          return false;
         },
       }),
       Prec.highest(

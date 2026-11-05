@@ -89,13 +89,13 @@ describe("AuthGate startup loader", () => {
     );
 
     expect(markup).toContain('id="zeros-boot"');
-    expect(markup).toContain('class="zeros-boot-logo"');
-    expect(markup).toContain('class="zeros-boot-halftone"');
+    // The same Island Z the HTML paints: four Weave rows on one gradient.
+    expect(markup).toContain('class="zeros-boot-mark"');
     expect(markup).toContain('aria-hidden="true"');
     expect(markup).not.toContain("<img");
-    expect(markup).not.toContain("zeros-boot-ascii");
+    expect(markup).not.toContain("halftone");
     expect(markup).not.toContain("Starting Zeros");
-    expect(markup.match(/class="zeros-boot-halftone-layer /g)).toHaveLength(5);
+    expect(markup.match(/class="zeros-boot-row-[lr]/g)).toHaveLength(4);
     expect(visibleText(markup)).toBe("");
   });
 });

@@ -22,6 +22,7 @@
 // ──────────────────────────────────────────────────────────
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import {
   CornerDownLeft,
   FolderInput,
@@ -62,6 +63,7 @@ import { resolveModelConfiguration } from "../../features/agent/model-preference
 import { pickAgentForNewChat } from "../../features/settings/default-agent";
 import {
   COMPOSER_FILE_ACCEPT,
+  COMPOSER_SURFACE_CLS,
   COMPOSER_SURFACE_RADIUS,
 } from "../../features/agent/composer-shell";
 import { cn } from "../../shared/ui/cn";
@@ -472,7 +474,8 @@ export function DispatcherComposer({
     <div
       data-dispatcher-composer=""
       className={cn(
-        "border-border1 bg-bg2 focus-within:border-border2 relative flex w-full min-w-0 flex-col border px-3.5 py-3 shadow-xs",
+        "relative flex w-full min-w-0 flex-col border px-3.5 py-3",
+        COMPOSER_SURFACE_CLS,
         COMPOSER_SURFACE_RADIUS,
       )}
       {...(designMode ? {} : (dragHandlers ?? {}))}
@@ -557,16 +560,15 @@ export function DispatcherComposer({
                   don't fight Radix's focus-restore. */}
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
-                  <Button
-                    variant="ghost"
-                    size="icon-sm"
+                  <IconButton
+                    size="standard"
                     type="button"
-                    aria-label={allowAdditionalDirectories ? "Add attachment or link a workspace" : "Add attachment"}
+                    label={allowAdditionalDirectories ? "Add attachment or link a workspace" : "Add attachment"}
                     disabled={busy || !active || draftKey === null}
                     className="rounded-sm"
                   >
                     <Plus size={14} />
-                  </Button>
+                  </IconButton>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="start" side="top">
                   <DropdownMenuItem
@@ -623,7 +625,7 @@ export function DispatcherComposer({
               )}
             </PromptInputTools>
             <Button
-              variant="default"
+              variant="primary"
               size="sm"
               type="submit"
               data-create-submit=""
@@ -633,7 +635,7 @@ export function DispatcherComposer({
               }
             >
               {busy || readingAttachments ? (
-                <ZerosSpinner size={16} tone="inverted" />
+                <ZerosSpinner size={14} tone="inverted" />
               ) : (
                 <>
                   <span>Create</span>

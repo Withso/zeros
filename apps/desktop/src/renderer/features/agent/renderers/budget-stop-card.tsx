@@ -15,6 +15,8 @@
 
 import { memo } from "react";
 import { Wallet } from "lucide-react";
+import { Badge } from "@/renderer/shared/ui/primitives";
+import { DETAIL_BODY_CLS } from "./tool-detail-surface";
 
 import type { AgentToolMessage } from "../use-agent-session";
 import type { Renderer } from "./types";
@@ -39,33 +41,26 @@ export const BudgetStopRecordCard: Renderer<AgentToolMessage> = memo(
     };
 
     const chips = (
-      <span className="flex shrink-0 items-center gap-1.5">
-        <span className="border-border1 text-fg2 text-xxs flex shrink-0 items-center rounded-sm border px-1.5 py-0.5 font-mono tracking-wide uppercase">
-          Budget
-        </span>
-        {/* Muted scope pill — budget caps are Claude-only for now. */}
-        <span className="bg-bg1-hover text-muted-fg text-xxs flex shrink-0 items-center rounded-sm px-1.5 py-0.5 font-mono tracking-wide uppercase">
-          Claude
-        </span>
+      <span className="flex shrink-0 items-center gap-1">
+        <Badge variant="outline">Budget</Badge>
+        {/* Muted scope badge — budget caps are Claude-only for now. */}
+        <Badge>Claude</Badge>
       </span>
     );
 
     const detail = (
-      <div className="bg-bg2/60 flex flex-col gap-1.5 rounded-md p-2.5 text-sm leading-relaxed">
+      <div className={DETAIL_BODY_CLS}>
+        {/* The Claude badge carries the scope; the line says what happened
+            and what to do. */}
         <span className="text-fg2">
           The{" "}
           {capUsd != null ? (
-            <b className="text-fg1 font-semibold">${capUsd.toFixed(2)}</b>
+            <b className="text-fg1 font-medium">${capUsd.toFixed(2)}</b>
           ) : (
             "configured"
           )}{" "}
-          per-turn budget was reached, so the turn ended cleanly. Everything
-          completed so far is kept.
-        </span>
-        <span className="text-muted-fg text-[11.5px]">
-          Budget caps are Claude Code only for now — Codex &amp; Cursor expose
-          no budget hook yet. Continue below starts a fresh turn under a new
-          cap, or raise it in Settings → Models.
+          turn budget was reached. Work so far is kept. Continue starts a new
+          turn, or raise the cap in Settings → Models.
         </span>
       </div>
     );

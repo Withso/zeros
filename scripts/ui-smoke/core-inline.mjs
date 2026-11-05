@@ -361,8 +361,8 @@ export async function runModelMenuSmoke({
     element instanceof HTMLElement ? element.offsetWidth : 0,
   );
   check(
-    "model popup is at most 230px wide",
-    modelMenuWidth > 0 && modelMenuWidth <= 230,
+    "model popup is at most 240px wide",
+    modelMenuWidth > 0 && modelMenuWidth <= 240,
     `${modelMenuWidth}px`,
   );
   const modelMenuOverflow = await modelMenu().evaluate((element) => ({
@@ -402,8 +402,8 @@ export async function runModelMenuSmoke({
     element instanceof HTMLElement ? element.offsetWidth : 0,
   );
   check(
-    "model catalog popup is at most 230px wide",
-    catalogWidth > 0 && catalogWidth <= 230,
+    "model catalog popup is at most 240px wide",
+    catalogWidth > 0 && catalogWidth <= 240,
     `${catalogWidth}px`,
   );
   const catalogOverflow = await catalog().evaluate((element) => ({
@@ -565,7 +565,8 @@ export async function runModelMenuSmoke({
     .locator("[data-model-name]")
     .evaluate((name) => getComputedStyle(name).fontWeight);
   // "Reasoning", "Options", "Model", and every agent title are one label tier:
-  // model-name weight, 12px, on the 28px heading rhythm.
+  // the shared menu label (12px medium, above the regular model names), on the
+  // 28px heading rhythm.
   const sectionTitles = [
     page.getByText("Reasoning", { exact: true }),
     page.getByText("Options", { exact: true }),
@@ -578,8 +579,9 @@ export async function runModelMenuSmoke({
     ),
   );
   check(
-    "configuration, Model, and agent titles match model-name weight",
-    titleFontWeights.every((weight) => weight === modelNameFontWeight),
+    "configuration, Model, and agent titles share the medium menu-label weight",
+    titleFontWeights.every((weight) => weight === titleFontWeights[0]) &&
+      Number(titleFontWeights[0]) > Number(modelNameFontWeight),
     `${modelNameFontWeight}/${titleFontWeights.join(",")}`,
   );
   const titleFontSizes = await Promise.all(
@@ -611,9 +613,9 @@ export async function runModelMenuSmoke({
     .locator("[data-model-catalog-item]")
     .evaluateAll((items) => items.map((item) => item.offsetHeight));
   check(
-    "all catalog models use one compact 26px row height",
+    "all catalog models use the shared 28px menu row height",
     catalogRowHeights.length > 0 &&
-      catalogRowHeights.every((height) => Math.abs(height - 26) <= 0.5),
+      catalogRowHeights.every((height) => Math.abs(height - 28) <= 0.5),
     catalogRowHeights.join(","),
   );
   const effortRowHeights = await page
@@ -625,10 +627,10 @@ export async function runModelMenuSmoke({
     .locator("xpath=..")
     .evaluate((row) => row.offsetHeight);
   check(
-    "configuration choices share the same 26px dropdown row height",
+    "configuration choices share the same 28px menu row height",
     effortRowHeights.length > 0 &&
-      effortRowHeights.every((height) => Math.abs(height - 26) <= 0.5) &&
-      Math.abs(fastOptionRowHeight - 26) <= 0.5,
+      effortRowHeights.every((height) => Math.abs(height - 28) <= 0.5) &&
+      Math.abs(fastOptionRowHeight - 28) <= 0.5,
     `${effortRowHeights.join(",")}/${fastOptionRowHeight}`,
   );
   const compactRowPadding = await Promise.all([
@@ -688,11 +690,11 @@ export async function runModelMenuSmoke({
       }),
     );
   check(
-    "catalog and reasoning items have an exact 1px inter-item gap",
+    "catalog and reasoning items sit edge to edge, as menu rows do",
     catalogItemGaps.length > 0 &&
       reasoningItemGaps.length > 0 &&
       [...catalogItemGaps, ...reasoningItemGaps].every(
-        (gap) => Math.abs(gap - 1) <= 0.5,
+        (gap) => Math.abs(gap) <= 0.5,
       ),
     `${catalogItemGaps.join(",")}/${reasoningItemGaps.join(",")}`,
   );
@@ -1016,8 +1018,8 @@ export async function runModelMenuSmoke({
     element instanceof HTMLElement ? element.offsetWidth : 0,
   );
   check(
-    "model editor popup is at most 230px wide",
-    modelEditorWidth > 0 && modelEditorWidth <= 230,
+    "model editor popup is at most 240px wide",
+    modelEditorWidth > 0 && modelEditorWidth <= 240,
     `${modelEditorWidth}px`,
   );
   const modelEditorOverflow = await modelEditor().evaluate((element) => ({
@@ -1234,9 +1236,9 @@ export async function runModelMenuSmoke({
       }),
     );
   check(
-    "search-result items have the same exact 1px gap",
+    "search-result items sit edge to edge like the catalog",
     searchItemGaps.length > 0 &&
-      searchItemGaps.every((gap) => Math.abs(gap - 1) <= 0.5),
+      searchItemGaps.every((gap) => Math.abs(gap) <= 0.5),
     searchItemGaps.join(","),
   );
   await searchInput.fill("Fable");
@@ -1252,8 +1254,8 @@ export async function runModelMenuSmoke({
     (row) => row.getBoundingClientRect().height,
   );
   check(
-    "search results use the same compact 26px model-row height",
-    Math.abs(searchRowHeight - 26) <= 0.5,
+    "search results use the same 28px menu row height",
+    Math.abs(searchRowHeight - 28) <= 0.5,
     `${searchRowHeight}px`,
   );
   const searchRowPadding = await modelRow("Fable 5").evaluate((row) => ({
@@ -2018,7 +2020,6 @@ export async function runDiffFilesSmoke({
   // result routes to the viewer.
   const searchSidebarTrigger = page.getByTestId("search-sidebar-trigger");
   const searchSidebarResize = page.getByTestId("search-sidebar-resize");
-  const searchSidebarShell = page.getByTestId("search-sidebar-shell");
   const searchSidebar = page.getByTestId("files-search-sidebar");
   const searchSidebarInput = searchSidebar.getByRole("textbox", {
     name: "Search workspace files",
@@ -2260,8 +2261,11 @@ export async function runGithubSettingsSmoke({
     ),
   );
   check(
-    "GitHub disconnect consequences are itemized",
-    (await disconnectDialog.locator("li").count()) === 3,
+    "GitHub disconnect says what changes in one line",
+    (await disconnectDialog.locator("li").count()) === 0 &&
+      (await disconnectDialog
+        .getByText("Zeros will use gh CLI instead.", { exact: false })
+        .count()) === 1,
   );
   check(
     "Cancel owns initial dialog focus",

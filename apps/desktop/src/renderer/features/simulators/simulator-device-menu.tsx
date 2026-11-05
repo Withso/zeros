@@ -16,7 +16,6 @@ function DeviceItem({ device }: { device: SimulatorDevice }) {
   return (
     <DropdownMenuRadioItem
       value={device.id}
-      indicator="check"
       disabled={device.state === "shutting-down"}
     >
       <span className="flex min-w-0 flex-col">

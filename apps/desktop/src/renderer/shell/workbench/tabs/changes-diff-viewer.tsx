@@ -6,6 +6,7 @@ import React, {
   useRef,
   useState,
 } from "react";
+import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import { createPortal } from "react-dom";
 import {
   CodeView,
@@ -25,7 +26,8 @@ import {
   ChevronsDownUp,
   ChevronsUpDown,
 } from "lucide-react";
-import { Button, Checkbox, Tooltip } from "@/renderer/shared/ui/primitives";
+import { Badge, Button, Checkbox, Tooltip } from "@/renderer/shared/ui/primitives";
+import type { FileChangeStatus } from "@/renderer/platform/git";
 import { toast } from "@/renderer/shared/ui/primitives/elements";
 import { useWorkbenchStatusSource } from "../tab-status";
 import { FileTypeIcon } from "@/renderer/features/agent/composer-editor/file-type-icon";
@@ -497,10 +499,9 @@ export function ChangesDiffViewer({
                   key={style}
                   label={style === "unified" ? "Unified diff" : "Split diff"}
                 >
-                  <Button
-                    size="icon-sm"
-                    variant="ghost"
-                    aria-label={
+                  <IconButton
+                    size="standard"
+                    label={
                       style === "unified" ? "Unified diff" : "Split diff"
                     }
                     aria-pressed={diffStyle === style}
@@ -516,18 +517,17 @@ export function ChangesDiffViewer({
                     ) : (
                       <Columns2 className="size-3.5" />
                     )}
-                  </Button>
+                  </IconButton>
                 </Tooltip>
               ))}
             </div>
             <Tooltip
               label={allCollapsed ? "Expand all" : "Collapse all"}
             >
-              <Button
-                variant="ghost"
-                size="icon-sm"
+              <IconButton
+                size="standard"
                 disabled={!files.length}
-                aria-label={
+                label={
                   allCollapsed ? "Expand all diffs" : "Collapse all diffs"
                 }
                 onClick={() =>
@@ -539,7 +539,7 @@ export function ChangesDiffViewer({
                 ) : (
                   <ChevronsDownUp className="size-3.5" />
                 )}
-              </Button>
+              </IconButton>
             </Tooltip>
             <Tooltip
               label={
@@ -548,10 +548,9 @@ export function ChangesDiffViewer({
                   : "All files"
               }
             >
-              <Button
-                variant="ghost"
-                size="icon-sm"
-                aria-label={
+              <IconButton
+                size="standard"
+                label={
                   presentation === "all"
                     ? "Show one file at a time"
                     : "Show all file diffs"
@@ -568,7 +567,7 @@ export function ChangesDiffViewer({
                 ) : (
                   <File className="size-3.5" />
                 )}
-              </Button>
+              </IconButton>
             </Tooltip>
           </div>,
           toolbarContainer,
@@ -617,6 +616,19 @@ export function ChangesDiffViewer({
     </>
   );
 }
+
+
+/** A file's status as a tag before its Viewed box: New in green, Deleted and
+ *  Conflicted in red, Renamed in grey; a modified file has none. */
+const FILE_STATUS_TAG: Partial<
+  Record<FileChangeStatus, { label: string; variant: "success" | "failure" | "neutral" }>
+> = {
+  added: { label: "New", variant: "success" },
+  untracked: { label: "New", variant: "success" },
+  deleted: { label: "Deleted", variant: "failure" },
+  conflicted: { label: "Conflicted", variant: "failure" },
+  renamed: { label: "Renamed", variant: "neutral" },
+};
 
 function ChangesDiffHeader({
   file,
@@ -774,11 +786,10 @@ function ChangesDiffHeader({
       <Tooltip
         label={collapsed ? `Expand ${file.path}` : `Collapse ${file.path}`}
       >
-        <Button
-          variant="ghost"
-          size="icon-sm"
+        <IconButton
+          size="standard"
           className="relative shrink-0 hover:bg-transparent [&_svg]:size-3.5"
-          aria-label={`${collapsed ? "Expand" : "Collapse"} ${file.path}`}
+          label={`${collapsed ? "Expand" : "Collapse"} ${file.path}`}
           aria-expanded={!collapsed}
           onClick={onToggle}
         >
@@ -791,7 +802,7 @@ function ChangesDiffHeader({
               collapsed && "-rotate-90",
             )}
           />
-        </Button>
+        </IconButton>
       </Tooltip>
       <button
         className="hover:text-fg1 min-w-0 truncate text-left"
@@ -808,6 +819,23 @@ function ChangesDiffHeader({
         <span className="text-green-primary">+{file.additions}</span>
         <span className="text-red-primary">−{file.deletions}</span>
       </span>
+      {/* The header's one action, on the file that failed; the error rides
+          in its tooltip. */}
+      {error && !managed && (
+        <Tooltip label={error}>
+          <Button
+            size="compact"
+            className="shrink-0"
+            aria-label={`Retry ${file.path}`}
+            onClick={() => {
+              setError(null);
+              void load().catch((error) => setError(String(error)));
+            }}
+          >
+            Retry diff
+          </Button>
+        </Tooltip>
+      )}
       {notice && (
         <Tooltip label={notice}>
           <CircleAlert
@@ -826,11 +854,10 @@ function ChangesDiffHeader({
         </Button>
       )}
       <Tooltip label="Copy file">
-        <Button
-          size="icon-sm"
-          variant="ghost"
+        <IconButton
+          size="standard"
           className="pointer-events-none shrink-0 opacity-0 group-hover/diff-header:pointer-events-auto group-hover/diff-header:opacity-100 group-has-focus-visible/diff-header:pointer-events-auto group-has-focus-visible/diff-header:opacity-100 hover:bg-transparent [&_svg]:size-3"
-          aria-label={`Copy ${file.path}`}
+          label={`Copy ${file.path}`}
           disabled={file.binary}
           onClick={() => {
             const immediate = initial(file).copyText;
@@ -856,38 +883,39 @@ function ChangesDiffHeader({
           }}
         >
           {copied ? <Check /> : <Copy />}
-        </Button>
+        </IconButton>
       </Tooltip>
-      {error && !managed && (
-        <Tooltip label={error}>
-          <Button
-            variant="ghost"
-            size="sm"
-            aria-label={`Retry ${file.path}`}
-            onClick={() => {
-              setError(null);
-              void load().catch((error) => setError(String(error)));
-            }}
-          >
-            <span className="text-red-primary">Retry diff</span>
-          </Button>
-        </Tooltip>
+      {/* A modified file carries no tag; the others say what changed. */}
+      {FILE_STATUS_TAG[file.status] && (
+        <Badge
+          variant={FILE_STATUS_TAG[file.status]!.variant}
+          className="ml-auto"
+        >
+          {FILE_STATUS_TAG[file.status]!.label}
+        </Badge>
       )}
-      <label className="ml-auto flex shrink-0 cursor-pointer items-center gap-1.5">
-        <Checkbox
-          checked={viewed}
-          aria-label={`Viewed ${file.path}`}
-          onChange={() =>
-            setFileViewed(
-              workspaceId,
-              file.path,
-              !viewed,
-              file.hash ?? hashString(file.patch),
-            )
-          }
-        />
-        Viewed
-      </label>
+      {/* The checkbox alone; its name stays Viewed for screen readers. */}
+      <Tooltip label={viewed ? "Mark unviewed" : "Mark viewed"}>
+        <label
+          className={cn(
+            "flex size-7 shrink-0 cursor-pointer items-center justify-center",
+            !FILE_STATUS_TAG[file.status] && "ml-auto",
+          )}
+        >
+          <Checkbox
+            checked={viewed}
+            aria-label={`Viewed ${file.path}`}
+            onChange={() =>
+              setFileViewed(
+                workspaceId,
+                file.path,
+                !viewed,
+                file.hash ?? hashString(file.patch),
+              )
+            }
+          />
+        </label>
+      </Tooltip>
     </div>
   );
 }

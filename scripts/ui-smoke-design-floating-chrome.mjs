@@ -101,7 +101,7 @@ export async function runDesignFloatingChromeSmoke({ page, waitFor, check }) {
               !!element.closest("[data-design-canvas-viewport]"),
           )) &&
           near(g.toolbar.x, g.canvas.x + 8) &&
-          near(g.toolbar.width, 40) &&
+          near(g.toolbar.width, 36) &&
           near(
             g.toolbar.y + g.toolbar.height / 2,
             g.rail.y + g.rail.height / 2,

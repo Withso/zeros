@@ -7,6 +7,7 @@
 // shared with Canvas mode so both modes resume at the same size).
 
 import { useRef, useState } from "react";
+import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import { ChevronDown, RotateCwSquare, X } from "lucide-react";
 
 import type { CanvasKnobAxis } from "./canvas-knob-handles";
@@ -370,7 +371,7 @@ export function BrowserDeviceToolbar({
               onPresetChange(normalizeBrowserDevicePreset(value))
             }
           >
-            <DropdownMenuRadioItem value="custom" indicator="check">
+            <DropdownMenuRadioItem value="custom">
               Custom
             </DropdownMenuRadioItem>
             <DropdownMenuSeparator />
@@ -378,7 +379,6 @@ export function BrowserDeviceToolbar({
               <DropdownMenuRadioItem
                 key={preset.id}
                 value={preset.id}
-                indicator="check"
               >
                 <span className="min-w-0 flex-1 truncate">{preset.label}</span>
                 <span className="text-muted-fg pl-4 tabular-nums">
@@ -407,15 +407,14 @@ export function BrowserDeviceToolbar({
       />
 
       <Tooltip label="Rotate">
-        <Button
-          variant="ghost"
-          size="icon-compact"
+        <IconButton
+          size="compact"
           className="text-fg2 hover:text-fg1 shrink-0"
           onClick={onRotate}
-          aria-label="Rotate viewport"
+          label="Rotate viewport"
         >
           <RotateCwSquare aria-hidden="true" />
-        </Button>
+        </IconButton>
       </Tooltip>
 
       <DropdownMenu>
@@ -446,7 +445,7 @@ export function BrowserDeviceToolbar({
               if (next) onZoomChange(next);
             }}
           >
-            <DropdownMenuRadioItem value="fit" indicator="check">
+            <DropdownMenuRadioItem value="fit">
               Fit to panel
             </DropdownMenuRadioItem>
             <DropdownMenuSeparator />
@@ -454,7 +453,6 @@ export function BrowserDeviceToolbar({
               <DropdownMenuRadioItem
                 key={candidate}
                 value={String(candidate)}
-                indicator="check"
               >
                 {Math.round(candidate * 100)}%
               </DropdownMenuRadioItem>
@@ -464,15 +462,14 @@ export function BrowserDeviceToolbar({
       </DropdownMenu>
 
       <div className="min-w-0 flex-1" />
-      <Button
-        variant="ghost"
-        size="icon-compact"
+      <IconButton
+        size="compact"
         className="text-fg2 hover:text-fg1 shrink-0"
         onClick={onClose}
-        aria-label="Close device toolbar"
+        label="Close device toolbar"
       >
         <X aria-hidden="true" />
-      </Button>
+      </IconButton>
     </div>
   );
 }

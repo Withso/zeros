@@ -134,6 +134,46 @@ describe("class rules", () => {
     expect(primitive).toEqual([]);
   });
 
+  it("asks for IconButton where a ghost Button does an icon-only job", () => {
+    const feature = findingsFor(
+      "apps/desktop/src/renderer/features/icons.tsx",
+      `export const I = () => (
+        <>
+          <Button variant="ghost" size="icon-sm" aria-label="Close"><X /></Button>
+          <Button variant="ghost" size="icon-compact" />
+          <Button variant="secondary" size="icon-sm" aria-label="Stop"><Square /></Button>
+          <Button variant="primary" size="icon" aria-label="Send"><ArrowUp /></Button>
+          <Button variant="ghost">Cancel</Button>
+        </>
+      );`,
+    );
+    // Filled and bordered icon buttons and text buttons are not this finding.
+    expect(keys(feature)).toEqual(["icon-only-button:Button size=icon", "icon-only-button:Button size=icon"]);
+    const primitive = findingsFor(
+      "apps/desktop/src/renderer/shared/ui/primitives/sidebar-trigger.tsx",
+      'export const T = () => <Button variant="ghost" size="icon" />;',
+    );
+    expect(primitive).toEqual([]);
+  });
+
+  // Regression: `relative${drag ? "ring-2" : ""}` rendered "relativering-2",
+  // so the edit composer lost `relative` and its drag ring together.
+  it("flags a className template that joins a class to an interpolation", () => {
+    const feature = findingsFor(
+      "apps/desktop/src/renderer/features/joined.tsx",
+      `export const J = ({ drag, tone }: { drag: boolean; tone: string }) => (
+        <>
+          <div className={\`edit relative\${drag ? "ring-2" : ""}\`} />
+          <div className={\`edit \${tone}border\`} />
+          <div className={\`edit relative \${drag ? "ring-2" : ""}\`} />
+          <div className={\`\${tone} edit\`} />
+          <div className={cn("edit relative", drag && "ring-2")} />
+        </>
+      );`,
+    );
+    expect(keys(feature)).toEqual(["class-template-join:className", "class-template-join:className"]);
+  });
+
   it("skips harnesses and tests; an ignore directive hides its line but is itself counted", () => {
     expect(
       findingsFor(

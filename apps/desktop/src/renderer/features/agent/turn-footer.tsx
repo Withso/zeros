@@ -73,6 +73,7 @@ import {
   type WorkspaceFileDiffQuery,
 } from "@/renderer/shell/workspace-file-data-cache";
 import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
+import { Badge } from "@/renderer/shared/ui/primitives";
 import { turnCheckpointsAvailable } from "./chat-feature-availability";
 import { trackCloudChatMutation } from "./cloud-chat-mutation";
 import { cloudWorkspaceKey, parseCloudScopedId } from "@/renderer/platform/bridge/cloud-workspace-key";
@@ -751,9 +752,7 @@ export const TurnFooter = memo(function TurnFooter({
       <div className="mt-1 flex flex-wrap items-center gap-1.5 text-xs">
         {statusLabel && !settledFailure.card && (
           <div className="basis-full">
-            <span className="border-border3 bg-bg1 text-fg1 inline-flex w-fit rounded-sm border px-2 py-0.5 text-xs tracking-wide">
-              {statusLabel}
-            </span>
+            <Badge variant="outline">{statusLabel}</Badge>
           </div>
         )}
         <TurnUsageCard agentId={turn?.agentId} usage={turn?.usage}
@@ -765,14 +764,9 @@ export const TurnFooter = memo(function TurnFooter({
             onClick={onCopy}
             disabled={!outputText}
             label={copied ? "Copied" : "Copy output"}
-            motion="colors"
             className={cn("flex shrink-0", !outputText && "cursor-default")}
           >
-            {copied ? (
-              <Check className="size-3.5" strokeWidth={2} />
-            ) : (
-              <Copy className="size-3.5" strokeWidth={2} />
-            )}
+            {copied ? <Check strokeWidth={2} /> : <Copy strokeWidth={2} />}
           </IconButton>
         </Tooltip>
         {!readOnly && (onFork || turnId) && (
@@ -781,10 +775,9 @@ export const TurnFooter = memo(function TurnFooter({
               <IconButton
                 type="button"
                 label="Turn actions"
-                motion="colors"
                 className="flex shrink-0"
               >
-                <MoreHorizontal className="size-4" strokeWidth={2} />
+                <MoreHorizontal strokeWidth={2} />
               </IconButton>
             </DropdownMenuTrigger>
             <DropdownMenuContent
@@ -866,18 +859,19 @@ export const TurnFooter = memo(function TurnFooter({
         recoverable stops on the last turn. */}
       {continueReason && (
         <div className="mt-1.5 flex flex-wrap items-center gap-2">
-          <button
+          <Button
             type="button"
+            variant="secondary"
+            size="compact"
             onClick={() => onContinue?.(continueReason)}
-            className="border-border3 text-fg1 hover:bg-bg2-hover flex h-[22px] items-center gap-1.5 rounded-sm border bg-transparent px-2 text-xs font-medium transition-colors"
           >
-            <Play className="size-3" strokeWidth={2} />
+            <Play strokeWidth={2} />
             Continue
-          </button>
-          <span className="text-muted-fg text-2xxs leading-snug">
+          </Button>
+          <span className="text-fg3 text-3xxs leading-4">
             {continueReason === "max_tokens"
-              ? "Resumes in the same session — full context is kept, so the answer picks up where the token cap cut it off."
-              : "Starts a fresh turn under a new budget cap — work already done is kept."}
+              ? "Resumes in the same session with full context."
+              : "Starts a new turn under a new cap."}
           </span>
         </div>
       )}

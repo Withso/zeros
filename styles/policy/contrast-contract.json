@@ -174,9 +174,9 @@
       ],
       "on": [
         "yellow-wash/0.35@bg1",
-        "yellow-wash/0.55@bg1",
+        "yellow-wash/0.54@bg1",
         "yellow-wash/0.35@sidebar-bg",
-        "yellow-wash/0.55@sidebar-bg"
+        "yellow-wash/0.54@sidebar-bg"
       ],
       "why": "Text over code-editor search-match washes (35% match, 55% selected match). Editor text uses the syntax theme foreground, which sits at the fg1 end of the ladder; syntax token colors are a separate system."
     },

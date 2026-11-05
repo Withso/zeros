@@ -8,6 +8,7 @@ import {
   useState,
   useSyncExternalStore,
 } from "react";
+import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import { Blocks, LoaderCircle, RefreshCw } from "lucide-react";
 import { ComposerToolGroups } from "./composer-tool-groups";
 import { NativeBrowserAvailability } from "./native-browser-availability";
@@ -16,7 +17,6 @@ import {
   type SessionToolQuery,
 } from "@zeros/protocol/agent-extensions";
 import { normalizeExternalHttpUrl } from "@zeros/protocol/external-url";
-import { Button } from "../../shared/ui/primitives/button";
 import {
   Popover,
   PopoverContent,
@@ -204,23 +204,23 @@ function ToolsPopover({
     >
       <Tooltip label="Tools" delayDuration={1500} disabled={visible}>
         <PopoverTrigger asChild>
-          <Button
+          <IconButton
             type="button"
-            variant="ghost"
-            size="icon-lg"
-            aria-label="Tools"
+            size="standard"
+            label="Tools"
             ref={trigger}
             onPointerEnter={warm}
             onFocus={warm}
           >
             <Blocks className="size-4" />
-          </Button>
+          </IconButton>
         </PopoverTrigger>
       </Tooltip>
       <PopoverContent
         side="top"
         align="end"
-        className="w-80 p-3"
+        // The one scroll owner: the old 320px list cap plus the header.
+        className="w-80 p-3 max-h-[min(24rem,var(--radix-popover-content-available-height))]"
         aria-labelledby={titleId}
         data-composer-tools=""
         onEscapeKeyDown={() => {
@@ -246,11 +246,10 @@ function ToolsPopover({
           <h2 id={titleId} className="text-fg1 text-sm font-medium">
             Tools
           </h2>
-          <Button
+          <IconButton
             type="button"
-            variant="ghost"
-            size="icon-sm"
-            aria-label="Refresh tools"
+            size="standard"
+            label="Refresh tools"
             className="text-fg2 hover:text-fg2"
             disabled={
               !enabled ||
@@ -265,7 +264,7 @@ function ToolsPopover({
             }}
           >
             <RefreshCw className="size-3.5" />
-          </Button>
+          </IconButton>
         </div>
         {cloudWorkspace && (
           <div className="mb-3">

@@ -100,8 +100,10 @@ describe("sidebar workspace row", () => {
     expect(row.slice(gutter, gutter + 400)).toMatch(
       /<span className=\{SIDEBAR_WORKSPACE_GUTTER_CLS\} aria-hidden="true">[\s\S]*?<AgentAwaitingIcon/,
     );
-    expect(ROW).toMatch(/const SIDEBAR_WORKSPACE_GROUPED_INSET_CLS = "pl-6";/);
-    expect(ROW).toMatch(/SIDEBAR_WORKSPACE_GUTTER_CLS =\s*"[^"]*\babsolute inset-y-0 left-0\b[^"]*\bw-6\b/);
+    // The square starts on the header's 40px name column; the 32px gutter
+    // centres the mark on the header's 24px icon column.
+    expect(ROW).toMatch(/const SIDEBAR_WORKSPACE_GROUPED_INSET_CLS = "pl-8";/);
+    expect(ROW).toMatch(/SIDEBAR_WORKSPACE_GUTTER_CLS =\s*"[^"]*\babsolute inset-y-0 left-0\b[^"]*\bw-8\b/);
   });
 
   it("gives a flat row's mark the pencil's slot, which it outranks", () => {

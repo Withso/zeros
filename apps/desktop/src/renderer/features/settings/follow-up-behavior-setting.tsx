@@ -7,15 +7,12 @@ export function FollowUpBehaviorSetting() {
   return (
     <SettingsRow
       label="Follow-up behavior"
-      hint={
-        <>
-          Queue messages until the agent finishes, including background tasks, or steer the agent mid-turn.
-          <span className="mt-1 block">Use Cmd/Ctrl+Enter to {behavior === "queue" ? "steer" : "queue"}.</span>
-        </>
-      }
+      hint={behavior === "queue"
+        ? "Queue messages, or steer mid-turn with ⌘↵."
+        : "Steer mid-turn, or queue messages with ⌘↵."}
     >
       <Select value={behavior} onValueChange={value => setFollowUpBehavior(value === "steer" ? "steer" : "queue")}>
-        <SelectTrigger aria-label="Follow-up behavior" className="w-32">
+        <SelectTrigger width="fixed" aria-label="Follow-up behavior">
           <SelectValue />
         </SelectTrigger>
         <SelectContent>

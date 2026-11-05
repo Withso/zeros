@@ -9,6 +9,8 @@
 // "#<number> " into the prompt.
 // ──────────────────────────────────────────────────────────
 
+import { cn } from "../../shared/ui/cn";
+import { PICKER_EMPTY_CLS, PICKER_HEADER_CLS, PICKER_LIST_CLS, PICKER_ROW_CLS, PICKER_WRAP_CLS } from "./picker-recipe";
 import { useEffect, useRef } from "react";
 import { GitPullRequest } from "lucide-react";
 
@@ -84,12 +86,8 @@ export function PrPicker({
     if (node) node.scrollIntoView({ block: "nearest" });
   }, [highlightIndex]);
 
-  // Popover above the textarea — same geometry AND surface as the
-  // mention/slash menus: bg1 (canvas) + border1 + shadow-lg, so all three
-  // pickers read as one consistent "floating card" (was bg3, the lone
-  // outlier in the picker family).
-  const menuWrap =
-    "absolute inset-x-0 bottom-[calc(100%+6px)] z-[25] overflow-hidden rounded-lg border border-border1 bg-bg1 shadow-lg";
+  // Rendered inside the shared picker popover, like the @ and / pickers.
+  const menuWrap = PICKER_WRAP_CLS;
 
   if (items.length === 0) {
     if (status === "loading") {
@@ -105,17 +103,17 @@ export function PrPicker({
         : "No open pull requests.";
     return (
       <div className={menuWrap}>
-        <div className="text-fg2 p-3 text-xs">{emptyLabel}</div>
+        <div className={PICKER_EMPTY_CLS}>{emptyLabel}</div>
       </div>
     );
   }
 
   return (
     <div className={menuWrap}>
-      <div className="border-border1 text-fg2 border-b px-3 py-1.5 text-xs">
+      <div className={PICKER_HEADER_CLS}>
         Pull request · {items.length} result{items.length === 1 ? "" : "s"}
       </div>
-      <div ref={listRef} className="max-h-[220px] overflow-y-auto">
+      <div ref={listRef} className={PICKER_LIST_CLS}>
         {items.map((pr, i) => {
           const active = i === highlightIndex;
           return (
@@ -129,9 +127,8 @@ export function PrPicker({
                 e.preventDefault();
                 onPick(pr);
               }}
-              className={`text-fg1 hover:bg-bg1-hover flex w-full cursor-pointer items-center gap-2 border-0 bg-transparent px-3 py-1.5 text-left transition-[background] duration-150 ease-out ${
-                active ? "!bg-bg1-hover [&_[data-icon]]:text-green-primary" : ""
-              }`}
+              data-selected={active || undefined}
+              className={cn(PICKER_ROW_CLS, active && "[&_[data-icon]]:text-green-primary")}
             >
               <GitPullRequest
                 data-icon

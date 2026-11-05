@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from "react";
+import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import { Download, X } from "lucide-react";
 import DOMPurify from "dompurify";
 import type { ComposerAttachment } from "../../features/agent/composer-attachments";
 import { FileTypeIcon } from "../../features/agent/composer-editor/file-type-icon";
-import { Button, PanelHeader, Tabs, TabsContent, TabsList, TabsTrigger, Tooltip } from "../../shared/ui/primitives";
+import { PanelHeader, Tabs, TabsContent, TabsList, TabsTrigger, Tooltip } from "../../shared/ui/primitives";
 import { WorkbenchEmptyState, WorkbenchTabBanner } from "../workbench/tab-status";
 import { readCreateAttachmentPreview, type CreateAttachmentPreview } from "./create-attachment-preview";
 
@@ -76,13 +77,13 @@ export function CreateAttachmentPreviewPanel({ attachment, onClose }: {
         )}
         {loaded && (
           <Tooltip label="Download attachment">
-            <Button variant="ghost" size="icon-sm" asChild>
-              <a href={loaded.url} download={attachment.name} aria-label="Download attachment"><Download size={14} /></a>
-            </Button>
+            <IconButton asChild size="standard" label="Download attachment">
+              <a href={loaded.url} download={attachment.name}><Download size={14} /></a>
+            </IconButton>
           </Tooltip>
         )}
         <Tooltip label="Close preview">
-          <Button type="button" ref={closeButton} variant="ghost" size="icon-sm" aria-label="Close attachment preview" onClick={onClose}><X size={14} /></Button>
+          <IconButton type="button" ref={closeButton} size="standard" label="Close attachment preview" onClick={onClose}><X size={14} /></IconButton>
         </Tooltip>
       </PanelHeader>
       <WorkbenchTabBanner type="files" singleFile active busy={!loaded && !error}

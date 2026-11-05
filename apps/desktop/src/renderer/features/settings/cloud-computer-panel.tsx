@@ -6,9 +6,11 @@
 // Older builds stay in the history and can be made active again, which
 // rebuilds them at the same commits.
 import { useCallback, useEffect, useRef, useState } from "react";
+import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import { ChevronDown, ChevronUp, CircleCheck, CircleMinus, CircleX, LoaderCircle, TriangleAlert, X } from "lucide-react";
 import { Button, GithubIcon, Input } from "../../shared/ui";
 import { Badge, CodeTextarea } from "../../shared/ui/primitives";
+import { MessageRow } from "../../shared/ui/primitives/message-row";
 import { KeyedAsyncCache } from "../../shared/lib/keyed-async-cache";
 import { useRecoveringRead } from "../../state/use-recovering-read";
 import { useActiveOrganization, useTeams } from "../team/team-store";
@@ -164,12 +166,12 @@ function CloudComputerScope({ userId, organizationId, canManage, active }: {
   };
 
   if (!canManage)
-    return <SettingsSection title="Cloud Computer" description="Only organization owners and admins manage the Cloud Computer." />;
+    return <SettingsSection title="Cloud Computer" description="Only owners and admins manage it." />;
   const locked = busy || running;
   return (
-    <div className="flex flex-col gap-6" {...(!active ? { inert: "" } : {})} aria-hidden={!active || undefined}>
-      {error && <p className="text-red-primary text-xs" role="alert">{error}</p>}
-      {computer.error && <p className="text-red-primary text-xs" role="alert">Cloud Computer could not be refreshed.</p>}
+    <div className="flex flex-col gap-8" {...(!active ? { inert: "" } : {})} aria-hidden={!active || undefined}>
+      {error && <MessageRow tone="error" role="alert" flush>{error}</MessageRow>}
+      {computer.error && <MessageRow tone="error" role="alert" flush>Cloud Computer could not be refreshed.</MessageRow>}
       <SettingsGroup>
         <div className="flex items-center justify-between gap-4">
           <StatusSummary status={status} />
@@ -177,7 +179,7 @@ function CloudComputerScope({ userId, organizationId, canManage, active }: {
             {status.kind === "unbuilt" && (
               <Button variant="ghost" onClick={() => void discard()} disabled={locked}>Discard</Button>
             )}
-            <Button variant={status.kind === "unbuilt" ? "default" : "secondary"} onClick={() => void build()}
+            <Button variant={status.kind === "unbuilt" ? "primary" : "secondary"} onClick={() => void build()}
               disabled={locked || configured.length === 0 || data === undefined}>
               {running ? "Building…" : "Build computer"}
             </Button>
@@ -202,7 +204,7 @@ function CloudComputerScope({ userId, organizationId, canManage, active }: {
         )}
       </SettingsGroup>
 
-      <SettingsGroup title="Repositories" description="Available to members who have repository access. Changes take effect after you build the computer.">
+      <SettingsGroup title="Repositories" description="Changes apply after the next build.">
         {configured.map(row => (
           <div key={row.repository} className="flex flex-col gap-2">
             <div className="flex items-center justify-between gap-3">
@@ -210,16 +212,16 @@ function CloudComputerScope({ userId, organizationId, canManage, active }: {
                 <GithubIcon className="size-3.5 shrink-0" aria-hidden />
                 <span className="truncate">{row.repository}</span>
               </span>
-              <Button variant="ghost" size="icon-sm" aria-label={`Remove ${row.repository}`}
+              <IconButton size="standard" label={`Remove ${row.repository}`}
                 onClick={() => remove(row.repository)} disabled={locked}>
                 <X aria-hidden />
-              </Button>
+              </IconButton>
             </div>
             <Input aria-label={`${row.repository} branch`} placeholder={`Branch or tag (default: ${liveBranch(row.repository) ?? "the repository's default"})`}
               value={row.ref ?? ""} onChange={event => update(row.repository, { ref: event.target.value })} disabled={locked} />
             <CodeTextarea aria-label={`${row.repository} setup command`} value={row.setup ?? ""}
               readOnly={locked} offscreen={!active} onChange={value => update(row.repository, { setup: value })}
-              description="Setup script, run in the checkout during each build and once in each new workspace (e.g. pnpm install)" />
+              description="Runs at each build and in each new workspace" />
           </div>
         ))}
         <div className="flex flex-col gap-1">
@@ -267,7 +269,7 @@ function HistoryRow({ build, active, disabled, onActivate }: {
 }) {
   const state = BUILD_ICON[build.state], note = historyNote(build);
   return (
-    <li className="flex items-center justify-between gap-3 py-2">
+    <li className="flex min-h-10 items-center justify-between gap-3 py-2">
       <span className="flex min-w-0 items-center gap-3">
         <span title={state.label} className="inline-flex">{state.icon}<span className="sr-only">{state.label}</span></span>
         <span className="text-fg1 text-xs font-medium">Build #{build.version}</span>
@@ -276,9 +278,9 @@ function HistoryRow({ build, active, disabled, onActivate }: {
         </span>
       </span>
       {active
-        ? <Badge variant="outline" className="font-mono uppercase">Active</Badge>
+        ? <Badge variant="success">Active</Badge>
         : build.state === "succeeded" && (
-          <Button variant="ghost" onClick={onActivate} disabled={disabled}
+          <Button variant="ghost" size="compact" onClick={onActivate} disabled={disabled}
             title="Builds this version again at the same commits and makes it live">Activate</Button>
         )}
     </li>

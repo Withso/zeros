@@ -12,6 +12,7 @@ import {
   RefreshCw,
   TriangleAlert,
 } from "lucide-react";
+import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 
 import type {
   DesignStyleSourceWire,
@@ -158,13 +159,12 @@ export function DesignThemeSourceRail({
             className="zd-theme-tooltip"
             label="Update sources"
           >
-            <Button
+            <IconButton
               type="button"
-              variant="ghost"
-              size="icon-compact"
+              size="compact"
               className="zd-icon-button"
               data-design-theme-update=""
-              aria-label={updating ? "Updating sources" : "Update sources"}
+              label={updating ? "Updating sources" : "Update sources"}
               disabled={updating}
               onClick={onUpdate}
             >
@@ -172,7 +172,7 @@ export function DesignThemeSourceRail({
                 aria-hidden="true"
                 className={updating ? "animate-spin" : undefined}
               />
-            </Button>
+            </IconButton>
           </Tooltip>
         ) : null}
       </div>

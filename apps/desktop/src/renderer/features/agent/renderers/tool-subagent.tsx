@@ -107,7 +107,9 @@ export const SubagentCard: Renderer<AgentToolMessage> = memo(
           <span
             data-agent-icon=""
             className={cn(
-              "relative inline-flex size-3.5 shrink-0 items-center justify-center",
+              // The 12px icon column every feed row shares; the child rail
+              // sits on its centre (the 14px glass square overhangs it by 1px).
+              "relative inline-flex size-3 shrink-0 items-center justify-center",
               failed ? "text-red-primary" : "text-fg2",
             )}
           >
@@ -125,7 +127,7 @@ export const SubagentCard: Renderer<AgentToolMessage> = memo(
             </span>
             <Chevron
               aria-hidden="true"
-              className="absolute inset-0 hidden size-3.5 group-hover/subagent-row:block group-focus-visible/subagent-row:block"
+              className="absolute inset-0 hidden size-3 group-hover/subagent-row:block group-focus-visible/subagent-row:block"
             />
           </span>
           <span

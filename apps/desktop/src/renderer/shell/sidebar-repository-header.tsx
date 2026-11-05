@@ -32,7 +32,7 @@ import {
 
 import { RemoveRepositoryDialog } from "../features/repositories/repositories-panel";
 import { DEFAULT_REPO_SETTINGS_VIEW } from "../features/repositories/repo-page";
-import { RepositoryIcon } from "../features/repositories/repository-icon";
+import { REPOSITORY_ICON_CHIP_CLS, RepositoryIcon } from "../features/repositories/repository-icon";
 import { prefetchSettingsForRepo } from "../features/settings/use-settings";
 import type { Project } from "../state/projects-store";
 import { useWorkspaceDispatch } from "../state/store";
@@ -60,17 +60,21 @@ import { RepositoryIconDialog } from "./repository-icon-dialog";
 
 // --- CONSTANTS ---
 
-// Hover only reveals the disclosure and actions; the row fills when its
-// repository page is active. Focus stays on the focused control itself.
+// Hover only reveals the disclosure and actions; the row fills bg2-highlight,
+// like a selected workspace row, when its repository page is active. Focus
+// stays on the focused control itself.
 const REPOSITORY_HEADER_CLS =
-  "group/repo relative flex h-8 w-full min-w-0 shrink-0 select-none items-center gap-1 rounded-md pr-1 text-fg2 transition-none data-[active=true]:bg-(--surface-hover)";
+  "group/repo relative flex h-8 w-full min-w-0 shrink-0 select-none items-center gap-1 rounded-md pr-1 text-fg2 transition-none [--repo-fill:var(--sidebar-bg)] data-[active=true]:bg-bg2-highlight data-[active=true]:[--repo-fill:var(--bg2-highlight)]";
+// Sits left of the always-visible Create button: 2px gap, then a 16px fade
+// that stays click-through to the name; only its buttons take the pointer.
+const REPOSITORY_HOVER_ACTIONS_CLS =
+  "pointer-events-none absolute inset-y-0 right-full flex items-center gap-0.5 bg-gradient-to-l from-(--repo-fill) from-75% to-transparent pr-0.5 pl-4 opacity-0 transition-none";
 const REPOSITORY_TOGGLE_CLS =
   "group/toggle flex h-full min-w-0 flex-1 items-center gap-2 rounded-md pl-2 text-left text-xs font-medium text-inherit outline-none focus-visible:ring-2 focus-visible:ring-highlighted-bright/50";
-const REPOSITORY_CHIP_CLS =
-  "inline-flex size-4 shrink-0 items-center justify-center rounded-sm bg-bg2-hover text-xxs font-medium text-fg2";
-// Row actions: 24px squares inside the 32px row, on the sidebar's own hover.
+// Row actions: 24px squares inside the 32px row with the shared icon-button
+// hover (bg2-highlight), ending 12px in like every trailing control.
 export const SIDEBAR_ROW_ACTION_CLS =
-  "inline-flex size-6 shrink-0 items-center justify-center rounded-md text-fg2 outline-none transition-[background-color,color] duration-120 ease-out hover:bg-bg2-hover hover:text-fg1 focus-visible:ring-2 focus-visible:ring-highlighted-bright/50 data-[state=open]:bg-bg2-hover data-[state=open]:text-fg1 [&_svg]:size-3.5";
+  "inline-flex size-6 shrink-0 items-center justify-center rounded-md text-fg2 outline-none transition-[background-color,color] duration-120 ease-out hover:bg-bg2-highlight hover:text-fg1 focus-visible:ring-2 focus-visible:ring-highlighted-bright/50 data-[state=open]:bg-bg2-highlight data-[state=open]:text-fg1 [&_svg]:size-3.5";
 // A pointer-placed context menu can leave a trailing click on the row it
 // covered. Swallow a toggle that lands in that brief aftermath (the same guard
 // WorkspaceContextMenu applies to workspace rows).
@@ -166,17 +170,13 @@ export function SidebarRepositoryHeader({
                   <ZerosSpinner size={14} label={`Opening ${project.name}`} />
                 ) : (
                   <>
-                    <span
+                    <RepositoryIcon
+                      project={project}
                       className={cn(
-                        REPOSITORY_CHIP_CLS,
+                        REPOSITORY_ICON_CHIP_CLS,
                         "group-hover/repo:invisible group-focus-visible/toggle:invisible",
                       )}
-                    >
-                      <RepositoryIcon
-                        project={project}
-                        className="size-full rounded-sm"
-                      />
-                    </span>
+                    />
                     <span className="text-fg2 absolute inset-0 hidden items-center justify-center group-hover/repo:flex group-focus-visible/toggle:flex">
                       {collapsed ? (
                         <ChevronRight className="size-3.5" strokeWidth={1.5} />
@@ -189,13 +189,15 @@ export function SidebarRepositoryHeader({
               </span>
               <span className="min-w-0 flex-1 truncate">{project.name}</span>
             </button>
-            <div className="flex shrink-0 items-center gap-0.5">
+            {/* Settings and ⋯ appear over the name's end on a fade of the
+                row's fill, so hovering never re-truncates the name. */}
+            <div className="relative flex shrink-0 items-center">
               <div
                 className={cn(
-                  "items-center gap-0.5",
+                  REPOSITORY_HOVER_ACTIONS_CLS,
                   menuOpen
-                    ? "flex"
-                    : "hidden group-hover/repo:flex group-has-focus-visible/repo:flex",
+                    ? "opacity-100 [&_button]:pointer-events-auto"
+                    : "group-hover/repo:opacity-100 group-hover/repo:[&_button]:pointer-events-auto group-has-focus-visible/repo:opacity-100 group-has-focus-visible/repo:[&_button]:pointer-events-auto",
                 )}
               >
                 <button
@@ -262,13 +264,13 @@ export function SidebarRepositoryHeader({
                     </DropdownMenuItem>
                     <DropdownMenuSeparator />
                     <DropdownMenuItem
-                      className="text-red-primary focus:text-red-primary"
+                      variant="destructive"
                       onSelect={() => {
                         skipMenuFocusReturnRef.current = true;
                         window.setTimeout(() => setRemoveOpen(true), 0);
                       }}
                     >
-                      <Trash2 className="text-red-primary" />
+                      <Trash2 />
                       <span>Remove repository</span>
                     </DropdownMenuItem>
                   </DropdownMenuContent>
@@ -287,7 +289,7 @@ export function SidebarRepositoryHeader({
             </div>
           </div>
         </ContextMenuTrigger>
-        <ContextMenuContent className="w-48">
+        <ContextMenuContent className="w-52">
           <ContextMenuItem
             onSelect={() => window.setTimeout(() => setIconDialogOpen(true), 0)}
           >

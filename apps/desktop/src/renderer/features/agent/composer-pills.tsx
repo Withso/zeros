@@ -50,18 +50,18 @@ import type { BridgeRegistryAgent } from "../../platform/bridge/messages";
 
 // The one canonical composer-toolbar pill chrome. Density variants pass an
 // override through cn(TOOLBAR_PILL, …) so tailwind-merge resolves the px delta.
-// Labels are text-xs, one step under the textarea's text-sm, so chrome reads
-// quieter than the text being written; rounded-md is the 6px radius
-// (styles/zeros-tokens.css).
+// Every toolbar control is 28px with 6px corners and the shared icon-button
+// hover (bg2-highlight). Labels are text-xs, one step under the textarea's
+// text-sm, so chrome reads quieter than the text being written.
 export const TOOLBAR_PILL =
-  "inline-flex items-center gap-1 rounded-md border-0 bg-transparent px-2 py-1 text-xs font-medium text-fg2 cursor-pointer transition-[background-color,color] duration-150 ease-out hover:bg-bg2-hover hover:text-fg1";
+  "inline-flex h-7 items-center gap-1 rounded-md border-0 bg-transparent px-2 py-0 text-xs font-medium text-fg2 cursor-pointer transition-[background-color,color] duration-150 ease-out hover:bg-bg2-highlight hover:text-fg1";
 
 // The model pill is just logo + label, with no caret.
 
 // The engaged pill chrome, used only by the Fast pill when on: --bg3-hover fill
 // and --yellow-fg text, hugging its content.
 export const TOOLBAR_PILL_ACTIVE =
-  "inline-flex items-center gap-1.5 rounded-md border-0 bg-bg2-hover px-2 py-1 text-xs font-medium text-yellow-fg cursor-pointer transition-[background-color,color] duration-150 ease-out";
+  "inline-flex h-7 items-center gap-1.5 rounded-md border-0 bg-bg2-highlight px-2 py-0 text-xs font-medium text-yellow-fg cursor-pointer transition-[background-color,color] duration-150 ease-out";
 
 // True while a permission or question card has taken the composer's slot and
 // the composer card is display:none (not unmounted, so the draft survives).
@@ -253,7 +253,7 @@ export function EffortPill({
           onChange(next);
         }}
         aria-label={`Reasoning effort: ${label}`}
-        className="text-fg2 hover:bg-bg2-hover hover:text-fg1 inline-flex cursor-pointer items-center overflow-hidden rounded-md border-0 px-2 py-1 text-xs font-medium transition-[background-color,color] duration-150 ease-out"
+        className="text-fg2 hover:bg-bg2-highlight hover:text-fg1 inline-flex h-7 cursor-pointer items-center overflow-hidden rounded-md border-0 px-2 py-0 text-xs font-medium transition-[background-color,color] duration-150 ease-out"
       >
         {/* Label — drops in gently from the top, but ONLY on a user toggle. The
             key is bumped solely by the click path (labelAnimKey), so a remount
@@ -503,7 +503,7 @@ export function PermissionToggle({
             onSelectMode(next.modeId);
           }}
           aria-label={`Permission mode: ${current.label}`}
-          className="text-fg2 hover:bg-bg2-hover hover:text-fg1 inline-flex cursor-pointer items-center overflow-hidden rounded-md border-0 px-2 py-1 text-xs font-medium transition-[background-color,color] duration-150 ease-out"
+          className="text-fg2 hover:bg-bg2-highlight hover:text-fg1 inline-flex h-7 cursor-pointer items-center overflow-hidden rounded-md border-0 px-2 py-0 text-xs font-medium transition-[background-color,color] duration-150 ease-out"
         >
           {/* Icon — drops in gently from the top, but ONLY on a user toggle
               (keyed remount; key 0 = no animation class, same as EffortPill). */}
@@ -518,13 +518,15 @@ export function PermissionToggle({
       {/* The picked mode's name floats to the RIGHT when it fits, then moves
           above only when the toolbar boundary/actions leave insufficient room.
           Absolute positioning is load-bearing: feedback never consumes toolbar
-          width or pushes this single-row composer onto a second line. */}
+          width or pushes this single-row composer onto a second line. It
+          carries the composer's own fill, so while it shows it masks the pill
+          it floats over instead of printing on top of its text. */}
       {labelVisible && (
         <span
           ref={feedbackRef}
           data-permission-mode-feedback
           data-placement={feedbackPlacement}
-          className={`text-fg2 pointer-events-none absolute z-[2] inline-flex items-center overflow-hidden py-1 text-xs font-medium whitespace-nowrap ${
+          className={`text-fg2 bg-sidebar-bg pointer-events-none absolute z-[2] inline-flex items-center overflow-hidden py-1 pr-1.5 text-xs font-medium whitespace-nowrap ${
             feedbackPlacement === "right"
               ? "top-1/2 left-full ml-1 -translate-y-1/2"
               : "bottom-full left-1/2 mb-1 -translate-x-1/2"
@@ -545,19 +547,21 @@ export function PermissionToggle({
 // In the guarded modes (permissionModeShowsFrame) the composer card gets an
 // SVG frame of evenly spaced dashes in --border4: native `border-style: dashed`
 // has no length or spacing control. The `3 5` array paints 3-long round-capped
-// dashes with 5 gaps. The svg is inset 1px to avoid calc() in SVG geometry
-// (Chromium-flaky), so rx/ry are COMPOSER_SURFACE_RADIUS − 1 = 17. Render
+// dashes with 5 gaps. The svg box sits on the border's centreline (0.5px into
+// the 1px border, outside the padding box absolute children start from), so
+// the dashes paint exactly where the border was and the edge never steps when
+// the mode toggles; rx/ry are COMPOSER_SURFACE_RADIUS − 0.5 = 17.5. Render
 // inside the card (position: relative) with a transparent base border.
 export function PlanModeFrame() {
   // An <svg> is a REPLACED element with an intrinsic 300×150 size — absolute
   // insets alone do NOT stretch it (it'd paint a 300×150 dotted box in the
-  // corner). So give it explicit CSS dimensions: offset 1px from the top-left
-  // and size to the card minus 2px via calc (reliable in CSS, unlike calc in
-  // SVG geometry attributes). The rect then fills the svg at a plain 100%.
+  // corner). So give it explicit CSS dimensions: half a pixel out from the
+  // padding box and one pixel larger, via calc (reliable in CSS, unlike calc
+  // in SVG geometry attributes). The rect then fills the svg at a plain 100%.
   return (
     <svg
-      className="pointer-events-none absolute top-[1px] left-[1px] z-[3] overflow-visible"
-      style={{ width: "calc(100% - 2px)", height: "calc(100% - 2px)" }}
+      className="pointer-events-none absolute top-[-0.5px] left-[-0.5px] z-[3] overflow-visible"
+      style={{ width: "calc(100% + 1px)", height: "calc(100% + 1px)" }}
       aria-hidden="true"
     >
       <rect
@@ -565,8 +569,8 @@ export function PlanModeFrame() {
         y="0"
         width="100%"
         height="100%"
-        rx="17"
-        ry="17"
+        rx="17.5"
+        ry="17.5"
         fill="none"
         strokeWidth="1"
         strokeDasharray="3 5"

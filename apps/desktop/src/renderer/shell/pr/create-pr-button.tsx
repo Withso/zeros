@@ -12,7 +12,7 @@ import {
 import { cn } from "../../shared/ui/cn";
 import {
   Tooltip,
-  splitTriggerClasses,
+  splitButtonClasses,
 } from "@/renderer/shared/ui/primitives";
 import {
   DropdownMenu,
@@ -129,7 +129,7 @@ function GithubCreatePrButton({
   const busy = claimed?.kind === "create-pr";
   const [menuOpen, setMenuOpen] = useState(false);
   useEffect(() => { if (!active) setMenuOpen(false); }, [active]);
-  const classes = splitTriggerClasses(appearance, size);
+  const classes = splitButtonClasses(appearance, size);
   // The repo's configured push/PR remote — the brief must name the same
   // remote the engine's own git ops use.
   const remote = useGitRemote(workspace.repoRoot);
@@ -474,7 +474,7 @@ function GithubCreatePrButton({
         <span className="inline-flex">
           <button
             type="button"
-            className={classes.main}
+            className={classes.action}
             disabled={inert}
             aria-label="Create PR"
             aria-busy={busy || undefined}
@@ -483,9 +483,13 @@ function GithubCreatePrButton({
             }
           >
             {busy ? (
-              <ZerosSpinner size={14} tone="inherit" />
+              <ZerosSpinner
+                size={size === "compact" ? 16 : 18}
+                tone={appearance === "primary" ? "inverted" : "default"}
+                label="Creating PR"
+              />
             ) : (
-              <GitPullRequestCreate className="size-3.5" />
+              <GitPullRequestCreate />
             )}
             <span>Create PR</span>
           </button>

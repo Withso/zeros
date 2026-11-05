@@ -13,6 +13,7 @@ import React, {
   useRef,
   useState,
 } from "react";
+import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import {
   Box,
   ChevronDown,
@@ -310,16 +311,15 @@ function MotionEasingField({
       />
       <DropdownMenu modal={false}>
         <DropdownMenuTrigger asChild>
-          <Button
+          <IconButton
             type="button"
-            variant="ghost"
-            size="icon-sm"
+            size="standard"
             className="zd-icon-button zd-motion-easing-trigger"
-            aria-label="Choose easing curve"
+            label="Choose easing curve"
             disabled={disabled}
           >
             <ChevronDown />
-          </Button>
+          </IconButton>
         </DropdownMenuTrigger>
         <DropdownMenuContent
           align="end"
@@ -1716,17 +1716,16 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
         <div className="zd-motion-header">
           <Diamond className="zd-motion-accent size-3.5 fill-current" />
           <span className="text-fg1 text-xs font-medium">Motion</span>
-          <Button
+          <IconButton
             type="button"
-            variant="ghost"
-            size="icon-sm"
+            size="standard"
             className="zd-icon-button ml-auto"
             data-size="row"
-            aria-label="Close motion timeline"
+            label="Close motion timeline"
             onClick={() => onOpenChange(false)}
           >
             <ChevronDown />
-          </Button>
+          </IconButton>
         </div>
       </section>
     );
@@ -1824,14 +1823,13 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
         </div>
         <div className="zd-motion-transport">
           <Tooltip label={playing ? "Pause preview" : "Play preview"}>
-            <Button
+            <IconButton
               type="button"
-              variant="ghost"
-              size="icon-sm"
+              size="standard"
               className="zd-icon-button zd-motion-play"
               data-size="row"
               aria-pressed={playing}
-              aria-label={
+              label={
                 playing ? "Pause motion preview" : "Play motion preview"
               }
               disabled={
@@ -1872,7 +1870,7 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
               }}
             >
               {playing ? <Pause /> : <Play />}
-            </Button>
+            </IconButton>
           </Tooltip>
           <MotionTimeField
             label="Motion current time"
@@ -1921,17 +1919,16 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
         </div>
         <Popover open={settingsOpen} onOpenChange={setSettingsOpen}>
           <PopoverTrigger asChild>
-            <Button
+            <IconButton
               type="button"
-              variant="ghost"
-              size="icon-sm"
+              size="standard"
               className="zd-icon-button"
               data-size="row"
-              aria-label="More motion settings"
+              label="More motion settings"
               disabled={disabled}
             >
               <Settings />
-            </Button>
+            </IconButton>
           </PopoverTrigger>
           <PopoverContent
             data-design-motion-settings
@@ -2072,20 +2069,19 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
           </PopoverContent>
         </Popover>
         {persistedMotion || draft.keyframes.length > 0 ? (
-          <Button
+          <IconButton
             type="button"
-            variant="ghost"
-            size="icon-sm"
+            size="standard"
             className="zd-icon-button"
             data-size="row"
-            aria-label={
+            label={
               persistedMotion ? "Delete motion" : "Clear motion draft"
             }
             disabled={disabled || saving}
             onClick={() => void deleteMotion()}
           >
             <Trash2 />
-          </Button>
+          </IconButton>
         ) : null}
         <Tooltip
           label={draftIssue}
@@ -2093,7 +2089,7 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
           <span className="zd-motion-save-target">
             <Button
               type="button"
-              variant={dirty ? "default" : "ghost"}
+              variant={dirty ? "primary" : "ghost"}
               size="sm"
               className="zd-motion-save"
               aria-label={saving ? "Saving…" : "Save"}
@@ -2113,17 +2109,16 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
             </Button>
           </span>
         </Tooltip>
-        <Button
+        <IconButton
           type="button"
-          variant="ghost"
-          size="icon-sm"
+          size="standard"
           className="zd-icon-button"
           data-size="row"
-          aria-label="Close motion timeline"
+          label="Close motion timeline"
           onClick={() => onOpenChange(false)}
         >
           <ChevronDown />
-        </Button>
+        </IconButton>
       </div>
 
       <div className="zd-motion-scroll">
@@ -2166,18 +2161,17 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
                   <option key={property} value={property} />
                 ))}
               </datalist>
-              <Button
+              <IconButton
                 type="button"
-                variant="ghost"
-                size="icon-sm"
+                size="standard"
                 className="zd-icon-button"
                 data-size="row"
-                aria-label="Add animated property"
+                label="Add animated property"
                 disabled={disabled || !propertyDraft.trim()}
                 onClick={addProperty}
               >
                 <Plus />
-              </Button>
+              </IconButton>
             </div>
             <div className="zd-motion-lane-cell">
               <div
@@ -2213,12 +2207,11 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
           </div>
           <div className="zd-motion-layer-row">
             <div className="zd-motion-layer-name">
-              <Button
+              <IconButton
                 type="button"
-                variant="ghost"
-                size="icon-sm"
+                size="standard"
                 className="zd-icon-button"
-                aria-label={
+                label={
                   layerExpanded
                     ? "Collapse motion layer"
                     : "Expand motion layer"
@@ -2227,7 +2220,7 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
                 onClick={() => setLayerExpanded((current) => !current)}
               >
                 {layerExpanded ? <ChevronDown /> : <ChevronRight />}
-              </Button>
+              </IconButton>
               <Box className="text-fg2 size-3.5 shrink-0" />
               <span className="text-fg1 min-w-0 flex-1 truncate text-xs">
                 {details.name}
@@ -2276,29 +2269,27 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
                         <Tooltip
                           label="Add keyframe"
                         >
-                          <Button
+                          <IconButton
                             type="button"
-                            variant="ghost"
-                            size="icon-sm"
+                            size="standard"
                             className="zd-icon-button"
-                            aria-label={`Add ${property} keyframe`}
+                            label={`Add ${property} keyframe`}
                             disabled={disabled}
                             onClick={() => addPoint(property)}
                           >
                             <Diamond />
-                          </Button>
+                          </IconButton>
                         </Tooltip>
-                        <Button
+                        <IconButton
                           type="button"
-                          variant="ghost"
-                          size="icon-sm"
+                          size="standard"
                           className="zd-icon-button"
-                          aria-label={`Remove ${property} track`}
+                          label={`Remove ${property} track`}
                           disabled={disabled}
                           onClick={() => removeProperty(property)}
                         >
                           <Minus />
-                        </Button>
+                        </IconButton>
                       </div>
                     </div>
                     <div className="zd-motion-lane-cell">
@@ -2459,20 +2450,19 @@ export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
               }));
             }}
           />
-          <Button
+          <IconButton
             type="button"
-            variant="ghost"
-            size="icon-sm"
+            size="standard"
             className="zd-icon-button"
             data-size="row"
-            aria-label="Delete selected keyframe"
+            label="Delete selected keyframe"
             disabled={disabled}
             onClick={() =>
               removePoint(selectedPoint.property, selectedPoint.offset)
             }
           >
             <Trash2 />
-          </Button>
+          </IconButton>
         </div>
       ) : null}
     </section>

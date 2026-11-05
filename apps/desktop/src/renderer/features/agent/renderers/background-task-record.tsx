@@ -9,7 +9,7 @@ import { memo } from "react";
 import { Play } from "lucide-react";
 
 import { formatElapsed } from "@/renderer/shared/ui/loading";
-import { Card, CardContent } from "@/renderer/shared/ui/primitives/card";
+import { DETAIL_BODY_CLS } from "./tool-detail-surface";
 
 import type { AgentToolMessage } from "../use-agent-session";
 import { EventRow, type EventMeta } from "./event-row";
@@ -58,27 +58,25 @@ export const BackgroundTaskRecord: Renderer<AgentToolMessage> = memo(
         ctx={ctx}
         meta={meta}
         detail={
-          <Card>
-            <CardContent className="flex flex-col gap-2 p-3 text-sm">
-              <strong className="text-fg1 font-medium">{name}</strong>
-              {command ? (
-                <InfoRow label="Command" value={command} mono />
-              ) : null}
-              <InfoRow label="Task ID" value={taskId ?? "Unknown"} mono />
-              {runOrdinal !== null ? <InfoRow label="Run" value={String(runOrdinal)} run /> : null}
-              {providerStatus ? (
-                <InfoRow label="Status" value={providerStatus} />
-              ) : null}
-              {summary ? <InfoRow label="Result" value={summary} /> : null}
-              {error ? <InfoRow label="Error" value={error} /> : null}
-              {durationMs !== null ? (
-                <InfoRow label="Duration" value={formatElapsed(durationMs)} />
-              ) : null}
-              {outputFile ? (
-                <InfoRow label="Output file" value={outputFile} mono />
-              ) : null}
-            </CardContent>
-          </Card>
+          <div className={DETAIL_BODY_CLS}>
+            <strong className="text-fg1 font-medium">{name}</strong>
+            {command ? (
+              <InfoRow label="Command" value={command} mono />
+            ) : null}
+            <InfoRow label="Task ID" value={taskId ?? "Unknown"} mono />
+            {runOrdinal !== null ? <InfoRow label="Run" value={String(runOrdinal)} run /> : null}
+            {providerStatus ? (
+              <InfoRow label="Status" value={providerStatus} />
+            ) : null}
+            {summary ? <InfoRow label="Result" value={summary} /> : null}
+            {error ? <InfoRow label="Error" value={error} /> : null}
+            {durationMs !== null ? (
+              <InfoRow label="Duration" value={formatElapsed(durationMs)} />
+            ) : null}
+            {outputFile ? (
+              <InfoRow label="Output file" value={outputFile} mono />
+            ) : null}
+          </div>
         }
       />
     );

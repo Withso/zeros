@@ -1,25 +1,24 @@
 import * as React from "react";
 
 import { cn } from "@/renderer/shared/ui/cn";
+import { FIELD_BOX, FIELD_FOCUS, FIELD_INVALID } from "./field";
 
-const Textarea = React.forwardRef<
-  HTMLTextAreaElement,
-  React.ComponentProps<"textarea">
->(({ className, ...props }, ref) => {
-  return (
+/** The Input field box over several lines: at least three lines (68px). */
+const Textarea = React.forwardRef<HTMLTextAreaElement, React.ComponentProps<"textarea">>(
+  ({ className, ...props }, ref) => (
     <textarea
       className={cn(
-        // Matches Input: 6px corners (--radius-md), border3 on transparent, focus =
-        // highlighted-bright border with NO ring. (Multi-line, so height is min-h
-        // rather than fixed.)
-        "flex min-h-[60px] w-full rounded-md border border-border3 bg-transparent px-3 py-2 text-sm shadow-sm transition-colors placeholder:text-fg3 focus-visible:outline-none focus-visible:border-highlighted-bright disabled:cursor-not-allowed disabled:opacity-50",
+        "flex min-h-17 w-full min-w-0 px-2 py-1.5 placeholder:text-fg3",
+        FIELD_BOX,
+        FIELD_FOCUS,
+        FIELD_INVALID,
         className,
       )}
       ref={ref}
       {...props}
     />
-  );
-});
+  ),
+);
 Textarea.displayName = "Textarea";
 
 export { Textarea };

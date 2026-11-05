@@ -17,6 +17,7 @@
 // Emits a canonical QuestionResponse; the engine adapter reshapes it per provider.
 // ──────────────────────────────────────────────────────────
 
+import { DOCK_CARD_CLS } from "./composer-shell";
 import {
   useCallback,
   useEffect,
@@ -37,7 +38,7 @@ import {
 
 import { cn } from "@/renderer/shared/ui/cn";
 import { Button } from "@/renderer/shared/ui/primitives/button";
-import { Tooltip } from "@/renderer/shared/ui/primitives";
+import { IconButton, Tooltip } from "@/renderer/shared/ui/primitives";
 import { hasShortcutPriorityClaim } from "./shortcut-priority";
 import { isInFocusedPane } from "./pane-focus";
 import { cachedBrowserFavicon } from "../browser/browser-session-activity-store";
@@ -388,11 +389,11 @@ function StructuredQuestionCard({ request, onRespond }: QuestionCardProps) {
         RESPONSE" line here duplicated it right above the card. */}
 
       {/* The card */}
-      <div className="border-border1 bg-bg1 flex w-full min-w-0 flex-col gap-3 rounded-lg border px-3.5 py-3">
-        <div className="flex items-start gap-2">
+      <div className={cn(DOCK_CARD_CLS, "flex w-full min-w-0 flex-col gap-2.5 px-3.5 py-3")}>
+        <div className="flex items-center gap-2">
           {/* Scope/header chip (e.g. COMPONENT SOURCE) intentionally not
             rendered. */}
-          <div className="text-fg1 min-w-0 flex-1 select-text text-sm font-medium">
+          <div className="text-fg1 min-w-0 flex-1 select-text text-xs leading-4.5 font-medium">
             {q.prompt}
           </div>
           {showCountdown ? (
@@ -412,15 +413,15 @@ function StructuredQuestionCard({ request, onRespond }: QuestionCardProps) {
               </span>
             </Tooltip>
           ) : null}
-          <button
-            type="button"
+          <IconButton
+            size="compact"
             onMouseDown={suppressFocusOnClick}
             onClick={dismiss}
-            aria-label="Dismiss (agent proceeds with its default)"
-            className="text-fg2 hover:text-fg1 -mt-0.5 -mr-1 shrink-0 rounded-sm p-0.5 transition-colors"
+            label="Dismiss (agent proceeds with its default)"
+            className="hover:bg-sidebar-bg-hover -my-1 -mr-1.5"
           >
-            <X className="size-4" />
-          </button>
+            <X />
+          </IconButton>
         </div>
 
         {/* Option rows */}
@@ -433,34 +434,36 @@ function StructuredQuestionCard({ request, onRespond }: QuestionCardProps) {
                 type="button"
                 onMouseDown={suppressFocusOnClick}
                 onClick={() => toggleOption(q, opt.id, multi)}
+                // 32px rows (taller with a description) that highlight with
+                // the card surface's own hover.
                 className={cn(
-                  "group flex w-full items-start gap-3 rounded-md px-2 py-1.5 text-left transition-colors",
-                  selected ? "bg-bg2-hover/70" : "hover:bg-bg1-hover",
+                  "group flex min-h-8 w-full items-start gap-3 rounded-md px-2 py-1.5 text-left transition-colors",
+                  selected ? "bg-sidebar-bg-hover" : "hover:bg-sidebar-bg-hover",
                 )}
               >
-                <span className="text-fg2 w-4 shrink-0 pt-0.5 text-right font-mono text-xs">
+                <span className="text-fg2 w-4 shrink-0 text-right font-mono text-xs leading-4.5">
                   {i + 1}
                 </span>
                 <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-                  <span className="text-fg1 text-sm">{opt.label}</span>
+                  <span className="text-fg1 text-xs leading-4.5">{opt.label}</span>
                   {opt.description ? (
-                    <span className="text-fg2 text-xs">{opt.description}</span>
+                    <span className="text-fg2 text-xs leading-4.5">{opt.description}</span>
                   ) : null}
                 </span>
                 {multi ? (
                   <span
                     className={cn(
-                      "mt-0.5 flex size-3.5 shrink-0 items-center justify-center rounded-sm border",
+                      "mt-px flex size-4 shrink-0 items-center justify-center rounded-sm border",
                       selected
                         ? "border-inverted-bg bg-inverted-bg"
-                        : "border-border3",
+                        : "border-border4",
                     )}
                     aria-hidden="true"
                   >
                     {selected ? (
                       <Check
-                        className="text-inverted-fg size-2.5"
-                        strokeWidth={3}
+                        className="text-inverted-fg size-3"
+                        strokeWidth={2}
                       />
                     ) : null}
                   </span>
@@ -473,8 +476,8 @@ function StructuredQuestionCard({ request, onRespond }: QuestionCardProps) {
           {q.allowOther ? (
             <div
               className={cn(
-                "flex flex-col rounded-md px-2 py-1.5 transition-colors",
-                qs.otherActive ? "bg-bg2-hover/70" : "hover:bg-bg1-hover",
+                "flex min-h-8 flex-col rounded-md px-2 py-1.5 transition-colors",
+                qs.otherActive ? "bg-sidebar-bg-hover" : "hover:bg-sidebar-bg-hover",
               )}
             >
               <button
@@ -488,7 +491,7 @@ function StructuredQuestionCard({ request, onRespond }: QuestionCardProps) {
                 </span>
                 <span
                   className={cn(
-                    "text-sm",
+                    "text-xs leading-4.5",
                     qs.otherActive ? "text-fg1" : "text-fg2",
                   )}
                 >
@@ -502,7 +505,8 @@ function StructuredQuestionCard({ request, onRespond }: QuestionCardProps) {
                   value={qs.freeText}
                   onChange={(e) => patch(q.id, { freeText: e.target.value })}
                   {...(q.secret ? { spellCheck: false } : {})}
-                  className="text-fg1 placeholder:text-muted-fg border-border1 bg-bg1 focus:border-border2 mt-1.5 ml-7 resize-none rounded-sm border px-2 py-1.5 text-sm outline-none"
+                  // A bg1 well with a border1 edge; focusing changes nothing.
+                  className="text-fg1 placeholder:text-muted-fg border-border1 bg-bg1 mt-1.5 ml-7 resize-none rounded-md border px-2 py-1.5 text-xs leading-4.5 outline-none"
                   placeholder={
                     q.secret ? "Value (hidden from logs)" : "Your answer…"
                   }
@@ -520,17 +524,17 @@ function StructuredQuestionCard({ request, onRespond }: QuestionCardProps) {
         {/* Footer: carousel (left) · submit (right) */}
         <div className="flex items-center justify-between">
           {questions.length > 1 ? (
-            <div className="text-fg2 flex items-center gap-1.5">
-              <button
-                type="button"
+            <div className="text-fg2 -ml-1 flex items-center gap-1">
+              <IconButton
+                size="compact"
                 onMouseDown={suppressFocusOnClick}
                 onClick={() => setIndex((i) => Math.max(0, i - 1))}
                 disabled={index === 0}
-                aria-label="Previous question"
-                className="hover:text-fg1 disabled:opacity-30"
+                label="Previous question"
+                className="hover:bg-sidebar-bg-hover"
               >
-                <ChevronLeft className="size-4" />
-              </button>
+                <ChevronLeft />
+              </IconButton>
               <div className="flex items-center gap-1">
                 {questions.map((qq, i) => {
                   const done = isAnswered(qq, answers[qq.id] ?? blankState(qq));
@@ -549,18 +553,18 @@ function StructuredQuestionCard({ request, onRespond }: QuestionCardProps) {
                   );
                 })}
               </div>
-              <button
-                type="button"
+              <IconButton
+                size="compact"
                 onMouseDown={suppressFocusOnClick}
                 onClick={() =>
                   setIndex((i) => Math.min(questions.length - 1, i + 1))
                 }
                 disabled={index === questions.length - 1}
-                aria-label="Next question"
-                className="hover:text-fg1 disabled:opacity-30"
+                label="Next question"
+                className="hover:bg-sidebar-bg-hover"
               >
-                <ChevronRight className="size-4" />
-              </button>
+                <ChevronRight />
+              </IconButton>
             </div>
           ) : (
             <span />
@@ -595,7 +599,7 @@ function StructuredQuestionCard({ request, onRespond }: QuestionCardProps) {
               <Button
                 type="button"
                 size="icon"
-                variant="default"
+                variant="primary"
                 onMouseDown={suppressFocusOnClick}
                 onClick={submit}
                 disabled={!allAnswered}
@@ -712,7 +716,7 @@ function OneClickApprovalCard({
   );
   return (
     <div ref={rootRef} className="flex w-full min-w-0 flex-col gap-1.5">
-      <div className="border-border1 bg-bg1 flex w-full min-w-0 flex-col gap-3 rounded-lg border px-3.5 py-3">
+      <div className={cn(DOCK_CARD_CLS, "flex w-full min-w-0 flex-col gap-2.5 px-3.5 py-3")}>
         <div className="flex min-w-0 items-start gap-2.5">
           <span className="border-border1 bg-bg2 text-fg2 mt-0.5 inline-flex size-6 shrink-0 items-center justify-center rounded-full border">
             {favicon ? (
@@ -722,11 +726,11 @@ function OneClickApprovalCard({
             )}
           </span>
           <div className="min-w-0 flex-1">
-            <div className="text-fg1 select-text text-sm font-medium">
+            <div className="text-fg1 select-text text-xs leading-4.5 font-medium">
               {question.approvalPrompt ?? question.prompt}
             </div>
             {question.header ? (
-              <div className="text-fg2 mt-0.5 text-xs">
+              <div className="text-fg2 mt-0.5 text-xs leading-4.5">
                 Requested by {question.header}
               </div>
             ) : null}
@@ -776,7 +780,7 @@ function OneClickApprovalCard({
             <Button
               type="button"
               size="sm"
-              variant="default"
+              variant="primary"
               disabled={responded}
               onMouseDown={suppressFocusOnClick}
               onClick={() => answer(allowOnce.id)}

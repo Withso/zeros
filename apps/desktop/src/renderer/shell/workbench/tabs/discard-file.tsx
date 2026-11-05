@@ -10,6 +10,7 @@ import { useEffect } from "react";
 
 import {
   Button,
+  ButtonShortcut,
   Dialog,
   DialogContent,
   DialogBody,
@@ -201,12 +202,12 @@ export function DiscardDialog({
           </DialogDescription>
         </DialogBody>
         <DialogFooter>
-          <Button autoFocus variant="secondary" size="sm" onClick={onCancel}>
+          <Button autoFocus variant="ghost" size="sm" onClick={onCancel}>
             Cancel
           </Button>
-          <Button variant="destructive" size="sm" onClick={onConfirm}>
+          <Button variant="destructive" size="sm" onClick={onConfirm} aria-keyshortcuts="Meta+Enter Control+Enter">
             {isNew ? "Delete file" : "Discard"}
-            <span className="text-xxs ml-1 opacity-70">⌘↵</span>
+            <ButtonShortcut keys="⌘↵" />
           </Button>
         </DialogFooter>
       </DialogContent>

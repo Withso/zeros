@@ -608,38 +608,40 @@
   --zd-design-panel-inset: var(--zd-design-panel-width);
 }
 
-/* The canvas tools: a 40px floating bar of 32px tools. The active modal
- * tool (move, frame, text) wears the design accent, as on the canvas; panel
- * toggles stay neutral. */
+/* The canvas tools follow the shared Toolbar: a 36px floating bar of 28px
+ * tools on bg2 with a border2 edge. The active modal tool (move, frame,
+ * text) is the selection blue; panel toggles stay neutral. */
 .zd-design-floating-toolbar {
-  background-color: var(--bg1-highlight);
+  border: 1px solid var(--border2);
+  background-color: var(--bg2);
   box-shadow: var(--shadow-dropdown);
 }
 
 .zd-canvas-toolbar {
-  height: 40px;
+  height: 36px;
   gap: 2px;
-  padding: 4px;
-  border-radius: 12px;
+  padding: calc(var(--spacing) * 0.75);
+  border-radius: calc(var(--radius-md) + 4px);
 }
 
 .zd-canvas-toolbar-divider {
   width: 1px;
-  height: 20px;
-  margin-inline: 4px;
+  height: 16px;
+  flex-shrink: 0;
+  margin-inline: 2px;
   background-color: var(--border2);
 }
 
-/* Vertical at the canvas's left edge: 40px wide, as tall as its tools. */
+/* Vertical at the canvas's left edge: 36px wide, as tall as its tools. */
 .zd-canvas-toolbar[aria-orientation="vertical"] {
-  width: 40px;
+  width: 36px;
   height: auto;
 }
 
 .zd-canvas-toolbar[aria-orientation="vertical"] .zd-canvas-toolbar-divider {
-  width: 20px;
+  width: 16px;
   height: 1px;
-  margin-block: 4px;
+  margin-block: 2px;
   margin-inline: 0;
 }
 
@@ -719,10 +721,10 @@
   bottom: 8px;
   left: calc((100% - var(--zd-design-panel-inset)) / 2);
   max-width: calc(100% - var(--zd-design-panel-inset) - 112px);
-  height: 40px;
+  height: 36px;
   gap: 2px;
-  padding: 4px;
-  border-radius: 12px;
+  padding: calc(var(--spacing) * 0.75);
+  border-radius: calc(var(--radius-md) + 4px);
   transform: translateX(-50%);
   transition: bottom 160ms ease-out;
 }
@@ -734,18 +736,18 @@
 .zd-design-agent-activity-status {
   display: inline-flex;
   min-width: 0;
-  height: 32px;
+  height: 28px;
   align-items: center;
   gap: 6px;
-  padding-inline: 8px;
+  padding-inline: 6px;
   color: var(--fg2);
   font-size: 13px;
-  font-weight: var(--weight-medium);
+  line-height: 18px;
 }
 
 .zd-design-agent-activity-status > svg {
-  width: 16px;
-  height: 16px;
+  width: 14px;
+  height: 14px;
   flex-shrink: 0;
   color: var(--fg3);
 }
@@ -783,49 +785,55 @@
 
 .zd-canvas-tool {
   display: inline-flex;
-  width: 32px;
-  height: 32px;
+  width: 28px;
+  height: 28px;
   flex-shrink: 0;
   align-items: center;
   justify-content: center;
-  border: 0;
-  border-radius: var(--radius-lg);
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
   background: transparent;
   color: var(--fg2);
   transition:
     background-color 120ms ease-out,
+    border-color 120ms ease-out,
     color 120ms ease-out;
 }
 
 .zd-canvas-tool svg {
-  width: 16px;
-  height: 16px;
+  width: 14px;
+  height: 14px;
 }
 
 .zd-canvas-tool:hover:not(:disabled) {
-  background-color: var(--bg2-hover);
+  background-color: var(--bg2-highlight);
   color: var(--fg1);
 }
 
+/* Toggles and open menus hold the IconButton pressed look: the fill and the
+ * border both lift, so pressed never reads as hover. */
 .zd-canvas-tool[aria-pressed="true"],
 .zd-canvas-tool[aria-expanded="true"] {
-  background-color: var(--bg2-hover);
+  border-color: var(--border4);
+  background-color: var(--bg2-highlight);
   color: var(--fg1);
 }
 
 .zd-canvas-tool[data-tool][aria-pressed="true"],
 .zd-canvas-tool[data-tool][aria-pressed="true"]:hover {
-  background-color: var(--design-selection-stroke);
+  border-color: transparent;
+  background-color: var(--design-selection-label-bg);
   color: var(--design-selection-label-fg);
 }
 
 .zd-canvas-tool:focus-visible:where(:not([data-zeros-focus-visible="false"])) {
-  outline: 1px solid var(--highlighted-bright);
-  outline-offset: -1px;
+  border-color: var(--highlighted-bright);
+  outline: none;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--highlighted-bright) 50%, transparent);
 }
 
 .zd-canvas-tool:disabled {
-  opacity: 0.4;
+  opacity: 0.5;
 }
 
 /* Frame chrome stays 28 screen pixels at every canvas zoom. */

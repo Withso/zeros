@@ -54,7 +54,7 @@ import {
   useAnyChatAwaitingKind,
 } from "../features/agent/sessions-store";
 import { DEFAULT_REPO_SETTINGS_VIEW } from "../features/repositories/repo-page";
-import { RepositoryIcon } from "../features/repositories/repository-icon";
+import { REPOSITORY_ICON_CHIP_CLS, RepositoryIcon } from "../features/repositories/repository-icon";
 import { useAnyChatHasDraft } from "../state/composer-draft-presence";
 import { isLocalMainWorkspace } from "../state/local-main-workspace";
 import {
@@ -93,33 +93,42 @@ import { useSidebarWorkspacePreview } from "./use-sidebar-workspace-preview";
 
 // --- CONSTANTS ---
 
-// Full-width 32px row on the sidebar's hover/selection fill. Selection is
-// colour-only (fg1 on sidebar-bg-hover); rows never shift. `transition-none`
-// keeps a switch from cross-fading the old and new selection.
+// Full-width 32px row. Hover is the sidebar's hover fill; the selected row has
+// its own, bg2-highlight with fg1, so it never reads as hover. Rows never
+// shift. --row-fill carries the current fill so the Archive fade matches it.
+// Keyboard focus is the standard ring drawn as shadows (a 1px inset edge and
+// the 3px halo), so the row keeps no layout border and its glyph lands on the
+// 16px icon column. `transition-none` keeps a switch from cross-fading the old
+// and new selection.
 const SIDEBAR_WORKSPACE_ROW_CLS =
-  "group/workspace relative flex h-8 w-full min-w-0 shrink-0 select-none items-center overflow-hidden rounded-md pr-2 text-left text-xs font-normal text-fg2 transition-none hover:bg-(--surface-hover) focus-within:bg-(--surface-hover) data-[active=true]:bg-(--surface-hover) data-[active=true]:text-fg1";
-// Grouped rows sit under their repository header: the state glyph centres on
-// the header's name column. Ungrouped rows (repository icon first) and
-// standalone folder rows align with the headers' own icon column instead.
-const SIDEBAR_WORKSPACE_GROUPED_INSET_CLS = "pl-6";
+  "group/workspace relative flex h-8 w-full min-w-0 shrink-0 select-none items-center overflow-hidden rounded-md pr-2 text-left text-xs font-normal text-fg2 transition-none [--row-fill:var(--surface-hover)] hover:bg-(--surface-hover) focus-within:bg-(--surface-hover) data-[active=true]:bg-bg2-highlight data-[active=true]:text-fg1 data-[active=true]:[--row-fill:var(--bg2-highlight)] data-[active=true]:hover:bg-bg2-highlight data-[active=true]:focus-within:bg-bg2-highlight has-[>button:focus-visible]:inset-ring has-[>button:focus-visible]:inset-ring-highlighted-bright has-[>button:focus-visible]:ring-[3px] has-[>button:focus-visible]:ring-highlighted-bright/50";
+// Grouped rows sit under their repository header: the state glyph starts on
+// the header's 40px name column. Ungrouped rows (repository icon first) and
+// standalone folder rows align with the headers' own 16px icon column.
+const SIDEBAR_WORKSPACE_GROUPED_INSET_CLS = "pl-8";
 // The grouped inset doubles as the gutter for the awaiting mark, left of the
-// square it must not replace.
+// square it must not replace; it centres on the header's icon column (24px).
 const SIDEBAR_WORKSPACE_GUTTER_CLS =
-  "pointer-events-none absolute inset-y-0 left-0 flex w-6 items-center justify-center text-fg2";
+  "pointer-events-none absolute inset-y-0 left-0 flex w-8 items-center justify-center text-fg2";
 const SIDEBAR_WORKSPACE_FLAT_INSET_CLS = "pl-2";
 const SIDEBAR_WORKSPACE_OPEN_BUTTON_CLS =
-  "absolute inset-0 size-full rounded-md border-0 bg-transparent p-0 text-inherit shadow-none transition-none hover:bg-transparent hover:text-inherit";
+  "absolute inset-0 size-full rounded-md border-0 bg-transparent p-0 text-inherit shadow-none transition-none hover:bg-transparent hover:text-inherit focus-visible:ring-0";
 const SIDEBAR_WORKSPACE_CONTENT_CLS =
   "pointer-events-none relative flex h-full min-w-0 flex-1 items-center gap-2 whitespace-nowrap text-inherit [&_svg]:shrink-0 [&_svg:not([data-draft-icon])]:size-3.5";
 const SIDEBAR_WORKSPACE_TRAILING_CLS = "flex shrink-0 items-center gap-1.5";
+// Every trailing mark (stream, agent state, draft, unread, awaiting) takes the
+// same 16px slot, so the name's truncation point never moves with the state.
+const TRAILING_SLOT_CLS =
+  "relative inline-flex size-4 shrink-0 items-center justify-center";
 // Hover and focus reveal Archive at the row's end over a fade of the same
-// hover fill, so the trailing counts/stream slide under it instead of reflowing.
+// hover fill, so the trailing counts/stream slide under it instead of
+// reflowing. The 24px button ends 12px in, like the headers' row actions.
 const SIDEBAR_WORKSPACE_ACTION_OVERLAY_CLS =
-  "pointer-events-none absolute inset-y-0 right-0 z-10 flex w-12 items-center justify-end rounded-r-md bg-gradient-to-l from-sidebar-bg-hover from-50% to-transparent pr-1.5 opacity-0 transition-none group-hover/workspace:opacity-100 focus-within:opacity-100";
+  "pointer-events-none absolute inset-y-0 right-0 z-10 flex w-12 items-center justify-end rounded-r-md bg-gradient-to-l from-(--row-fill) from-50% to-transparent pr-1 opacity-0 transition-none group-hover/workspace:opacity-100 focus-within:opacity-100";
 // A drafted (or, in a flat row, awaiting) row's Archive covers that mark in
-// its own slot.
+// its own 16px slot, so it lands where the plain row's Archive does.
 const SIDEBAR_WORKSPACE_DRAFT_ACTION_OVERLAY_CLS =
-  "pointer-events-none absolute -inset-1 flex items-center justify-center rounded-sm bg-sidebar-bg-hover opacity-0 transition-none group-hover/workspace:opacity-100 focus-within:opacity-100";
+  "pointer-events-none absolute -inset-1 flex items-center justify-center rounded-md bg-(--row-fill) opacity-0 transition-none group-hover/workspace:opacity-100 focus-within:opacity-100";
 // State glyphs stay on fg2 even in the selected row (only the name lifts to
 // fg1); the workspace square sets its own rest, working and PR colours.
 const GLYPH_BOX_CLS =
@@ -141,10 +150,10 @@ export function WorkspaceProjectIcon({ project }: { project: Project }) {
           onContextMenu={(event) => event.stopPropagation()}
         >
           <span className="pointer-events-auto inline-flex size-4 shrink-0 items-center justify-center">
-            <RepositoryIcon project={project} className="size-4 rounded-sm" />
+            <RepositoryIcon project={project} className={REPOSITORY_ICON_CHIP_CLS} />
           </span>
         </ContextMenuTrigger>
-        <ContextMenuContent className="w-48">
+        <ContextMenuContent className="w-52">
           <ContextMenuItem
             onSelect={() => window.setTimeout(() => setIconDialogOpen(true), 0)}
           >
@@ -293,6 +302,7 @@ export function SidebarWorkspaceRow({
       <Tooltip label={action.tooltip} side="right">
         <IconButton
           type="button"
+          size="compact"
           className="pointer-events-auto shrink-0"
           label={action.label}
           onClick={(event) => {
@@ -424,10 +434,12 @@ export function SidebarWorkspaceRow({
             <WorkspaceChangeCounts {...changeLines} active={active} />
           )}
           {runActionRunning && (
-            <RunStream size={12} className="text-blue-primary" />
+            <span className={TRAILING_SLOT_CLS}>
+              <RunStream size={12} className="text-blue-primary" />
+            </span>
           )}
           {trailingAgentState || trailingDesignMark ? (
-            <span className={GLYPH_BOX_CLS} aria-hidden="true">
+            <span className={cn(TRAILING_SLOT_CLS, "text-fg2")} aria-hidden="true">
               {trailingDesignMark ? (
                 <PenTool className="size-3.5" strokeWidth={1.25} />
               ) : (
@@ -436,12 +448,7 @@ export function SidebarWorkspaceRow({
             </span>
           ) : null}
           {trailingMark && (
-            <span
-              className={cn(
-                "relative inline-flex shrink-0 items-center justify-center",
-                trailingMark === "draft" ? "size-3" : "text-fg2 size-3.5",
-              )}
-            >
+            <span className={cn(TRAILING_SLOT_CLS, "text-fg2")}>
               {trailingMark === "draft" ? (
                 <ComposerDraftIndicator />
               ) : trailingMark === "unread" ? (
@@ -476,10 +483,12 @@ export function SidebarWorkspaceRow({
           ref={preview.contentRef}
           side="right"
           align="start"
-          sideOffset={10}
+          // The row ends 8px before the 1px seam: 13 floats the card the
+          // recipe's 4px beyond it instead of looking attached.
+          sideOffset={13}
           collisionPadding={8}
           aria-label={`Workspace details for ${label}`}
-          className="bg-bg1-highlight border-border2 w-[340px] rounded-lg p-3"
+          size="md"
           onOpenAutoFocus={(event) => event.preventDefault()}
           onCloseAutoFocus={(event) => event.preventDefault()}
           onEscapeKeyDown={() => {
@@ -561,7 +570,7 @@ export function PendingSidebarWorkspaceRow({
     >
       <span className={SIDEBAR_WORKSPACE_CONTENT_CLS}>
         {mixedRepositories && project ? (
-          projectInteractive ? <WorkspaceProjectIcon project={project} /> : <RepositoryIcon project={project} className="size-4 rounded-sm" />
+          projectInteractive ? <WorkspaceProjectIcon project={project} /> : <RepositoryIcon project={project} className={REPOSITORY_ICON_CHIP_CLS} />
         ) : (
           <span className={GLYPH_BOX_CLS} aria-hidden="true">
             {kind === "design" ? (

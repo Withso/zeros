@@ -65,7 +65,6 @@ export function NewChatMenu({
   const plusButton = (
     <IconButton
       size="standard"
-      hover="subtle"
       className="shrink-0"
       label={terminalAgentsEnabled ? "New tab" : "New chat"}
       aria-keyshortcuts={terminalAgentsEnabled ? undefined : "Meta+T"}

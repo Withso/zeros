@@ -2,170 +2,92 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, expectTypeOf, it } from "vitest";
 
-import { Button } from "../button";
 import { IconButton, type IconButtonProps } from "../icon-button";
 
 function classes(markup: string) {
-  return new Set(markup.match(/class="([^"]*)"/)![1]!.split(/\s+/));
+  const attribute = markup.match(/class="([^"]*)"/)![1]!.replaceAll("&amp;", "&");
+  return new Set(attribute.split(/\s+/));
 }
 
-describe("IconButton markup equivalence", () => {
-  const inlineCases: Array<{
-    site: string;
-    original: string;
-    props: Omit<IconButtonProps, "label">;
-  }> = [
-    // Each original recipe is retained verbatim from its migrated caller.
-    {
-      site: "chat-tabs close",
-      original:
-        "pointer-events-auto size-5 inline-flex items-center justify-center rounded-sm shrink-0 text-fg2 hover:text-fg1 hover:bg-bg2-hover transition-[background-color,color] duration-120 ease-out",
-      props: { className: "pointer-events-auto shrink-0" },
-    },
-    {
-      site: "sidebar-workspace-row Archive/settings",
-      original:
-        "pointer-events-auto inline-flex size-5 shrink-0 items-center justify-center rounded-sm text-fg2 transition-[background-color,color] duration-120 ease-out hover:bg-bg2-hover hover:text-fg1",
-      props: { className: "pointer-events-auto shrink-0" },
-    },
-    {
-      site: "tab-strip stop",
-      original:
-        "text-fg2 hover:bg-bg2-hover hover:text-fg1 pointer-events-auto inline-flex size-5 shrink-0 items-center justify-center rounded-sm transition-[background-color,color] duration-120 ease-out disabled:opacity-50",
-      props: { className: "pointer-events-auto shrink-0 disabled:opacity-50" },
-    },
-    {
-      site: "tab-strip close",
-      original:
-        "text-fg2 hover:bg-bg2-hover hover:text-fg1 pointer-events-auto inline-flex size-5 shrink-0 items-center justify-center rounded-sm transition-[background-color,color] duration-120 ease-out",
-      props: { className: "pointer-events-auto shrink-0" },
-    },
-    ...["stop", "hide", "restore"].map((action) => ({
-      site: `browser-agent-picture-in-picture ${action}`,
-      original:
-        "text-fg2 hover:bg-bg2-hover hover:text-fg1 pointer-events-auto inline-flex size-5 items-center justify-center rounded-sm",
-      props: { motion: "none" as const, className: "pointer-events-auto" },
-    })),
-    ...["copy", "actions"].map((action) => ({
-      site: `turn-footer ${action}`,
-      original:
-        "flex size-5 shrink-0 items-center justify-center rounded-sm text-fg2 transition-colors hover:bg-bg2-hover hover:text-fg1",
-      props: { motion: "colors" as const, className: "flex shrink-0" },
-    })),
-    {
-      site: "changes-tab row action",
-      original:
-        "text-fg2 hover:bg-bg2-hover hover:text-fg1 flex size-5 items-center justify-center rounded-sm transition-colors disabled:opacity-30",
-      props: { motion: "colors", className: "flex disabled:opacity-30" },
-    },
-    {
-      site: "review-checks logs anchor",
-      original:
-        "text-fg2 hover:bg-bg2-hover hover:text-fg1 flex size-5 shrink-0 items-center justify-center rounded-sm transition-colors duration-120 ease-out",
-      props: {
-        asChild: true,
-        motion: "colors-hover",
-        className: "flex shrink-0",
-      },
-    },
-  ];
+function render(props: Omit<IconButtonProps, "label">) {
+  return renderToStaticMarkup(
+    createElement(IconButton, { ...props, label: "Action" }, "icon"),
+  );
+}
 
-  it.each(inlineCases)("preserves $site", ({ original, props }) => {
-    const markup = renderToStaticMarkup(
-      createElement(
-        IconButton,
-        { ...props, label: "Action" },
-        props.asChild ? createElement("a", { href: "/logs" }, "icon") : "icon",
-      ),
-    );
-    expect(markup).toMatch(props.asChild ? /^<a\b/ : /^<button\b/);
-    expect(classes(markup)).toEqual(new Set(original.split(/\s+/)));
-    if (props.asChild) expect(markup).not.toContain('type="button"');
-    else expect(markup).toContain('type="button"');
-    expect(markup).toContain('aria-label="Action"');
-  });
-
+describe("IconButton sizes", () => {
   it.each([
-    // Button-backed callers must retain Button's complete rendered recipe.
-    [
-      "chat-tabs pane menu",
-      "size-7 shrink-0 rounded-sm text-fg2 hover:bg-bg2-hover/40 hover:text-fg1 transition-[background-color,color] duration-120 ease-out",
-    ],
-    [
-      "conversation-header Open in",
-      "size-7 shrink-0 rounded-sm text-fg2 hover:text-fg1 hover:bg-bg2-hover/40 transition-[background-color,color] duration-120 ease-out",
-    ],
-    [
-      "new-chat-menu +",
-      "size-7 shrink-0 rounded-sm text-fg2 hover:bg-bg2-hover/40 hover:text-fg1 transition-[background-color,color] duration-120 ease-out",
-    ],
-  ])("retains Button's full class set for %s", (_site, original) => {
-    const previous = renderToStaticMarkup(
-      createElement(
-        Button,
-        {
-          variant: "ghost",
-          size: "icon-sm",
-          className: original,
-          "aria-label": "Action",
-        },
-        "icon",
-      ),
-    );
-    const current = renderToStaticMarkup(
-      createElement(
-        IconButton,
-        {
-          size: "standard",
-          hover: "subtle",
-          className: "shrink-0",
-          label: "Action",
-        },
-        "icon",
-      ),
-    );
-    expect(current).toMatch(/^<button\b/);
-    expect(classes(current)).toEqual(classes(previous));
-    expect(current).toContain('aria-label="Action"');
+    ["inline", "size-5", "rounded-sm", "[&_svg]:size-3"],
+    ["compact", "size-6", "rounded-md", "[&_svg]:size-3"],
+    ["standard", "size-7", "rounded-md", "[&_svg]:size-3.5"],
+  ] as const)("draws %s at %s with its own glyph size", (size, box, radius, glyph) => {
+    const set = classes(render({ size }));
+    for (const cls of [box, radius, glyph]) expect(set, cls).toContain(cls);
   });
 
-  it("gives compact actions Button's 24px icon-compact geometry", () => {
-    const button = renderToStaticMarkup(
-      createElement(
-        Button,
-        {
-          variant: "ghost",
-          size: "icon-compact",
-          className:
-            "text-fg2 rounded-sm hover:bg-bg2-hover hover:text-fg1 transition-[background-color,color] duration-120 ease-out",
-          "aria-label": "Action",
-        },
-        "icon",
-      ),
-    );
-    const markup = renderToStaticMarkup(
-      createElement(IconButton, { size: "compact", label: "Action" }, "icon"),
-    );
-    expect(classes(markup)).toEqual(classes(button));
-    expect(classes(markup)).toContain("size-6");
+  it("defaults to the inline 20px action", () => {
+    expect(classes(render({}))).toContain("size-5");
+  });
+});
+
+describe("IconButton states", () => {
+  it("uses one hover on every surface and every size", () => {
+    for (const size of ["inline", "compact", "standard"] as const) {
+      const set = classes(render({ size }));
+      expect(set, size).toContain("hover:bg-bg2-highlight");
+      expect(set, size).toContain("hover:text-fg1");
+      expect([...set].some((cls) => cls.startsWith("hover:bg-bg2-hover")), size).toBe(false);
+    }
+  });
+
+  it("shows the keyboard ring at every size, including inline", () => {
+    for (const size of ["inline", "compact", "standard"] as const) {
+      const set = classes(render({ size }));
+      expect(set, size).toContain("focus-visible:border-highlighted-bright");
+      expect(set, size).toContain("focus-visible:ring-[3px]");
+    }
+  });
+
+  it("presses as a neutral toggle unless it is a toolbar's active tool", () => {
+    const toggle = classes(render({}));
+    expect(toggle).toContain("aria-pressed:bg-bg2-highlight");
+    expect(toggle).toContain("aria-pressed:border-border4");
+    const tool = classes(render({ pressedTone: "tool" }));
+    expect(tool).toContain("aria-pressed:bg-(--design-selection-label-bg)");
+    expect(tool).toContain("aria-pressed:text-(--design-selection-label-fg)");
+  });
+
+  it("fills an open side column's toggle without an edge", () => {
+    const fill = classes(render({ pressedTone: "fill" }));
+    expect(fill).toContain("aria-pressed:bg-bg2-highlight");
+    expect([...fill].some((cls) => cls.startsWith("aria-pressed:border"))).toBe(false);
+  });
+
+  it("holds the hover look while its menu is open", () => {
+    expect(classes(render({}))).toContain("data-[state=open]:bg-bg2-highlight");
+  });
+
+  it("dims aria-disabled without dropping hover", () => {
+    const set = classes(render({}));
+    expect(set).toContain("aria-disabled:opacity-50");
+    expect(set).toContain("aria-disabled:cursor-not-allowed");
+  });
+});
+
+describe("IconButton semantics", () => {
+  it("is a button with its accessible name and a default type", () => {
+    const markup = render({});
+    expect(markup).toMatch(/^<button\b/);
+    expect(markup).toContain('type="button"');
     expect(markup).toContain('aria-label="Action"');
   });
 
-  it("preserves the logs link's native semantics and attributes", () => {
+  it("preserves a link's native semantics and attributes", () => {
     const markup = renderToStaticMarkup(
       createElement(
         IconButton,
-        {
-          asChild: true,
-          label: "Open logs",
-          motion: "colors-hover",
-          className: "flex shrink-0",
-        },
-        createElement(
-          "a",
-          { href: "/logs", target: "_blank", rel: "noreferrer" },
-          "icon",
-        ),
+        { asChild: true, label: "Open logs", className: "flex shrink-0" },
+        createElement("a", { href: "/logs", target: "_blank", rel: "noreferrer" }, "icon"),
       ),
     );
     expect(markup).toMatch(/^<a\b/);
@@ -200,5 +122,12 @@ describe("IconButton markup equivalence", () => {
     expectTypeOf<IconButtonProps>()
       .toHaveProperty("label")
       .toEqualTypeOf<string>();
+  });
+
+  it("takes its name only from label, so wrappers cannot pass an aria-label it would replace", () => {
+    // JSX accepts any undeclared dashed attribute, so without this an
+    // aria-label reaching IconButton through a wrapper's props typechecks and
+    // is silently renamed to the wrapper's default label.
+    expectTypeOf<IconButtonProps["aria-label"]>().toEqualTypeOf<undefined>();
   });
 });

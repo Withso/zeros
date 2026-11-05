@@ -30,12 +30,12 @@ export function SubscriptionSignInButton({
         </>
       ) : phase === "success" ? (
         <>
-          <Check className="size-3" strokeWidth={2} aria-hidden="true" />
+          <Check className="size-3.5" strokeWidth={2} aria-hidden="true" />
           Signed in
         </>
       ) : (
         <>
-          <LogIn className="size-3" strokeWidth={2} aria-hidden="true" />
+          <LogIn className="size-3.5" strokeWidth={2} aria-hidden="true" />
           Sign in
         </>
       )}

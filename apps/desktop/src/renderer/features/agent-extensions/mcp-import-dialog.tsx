@@ -1,8 +1,10 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, Check } from "lucide-react";
-
 import { Button } from "../../shared/ui";
-import { Input, Tooltip } from "@/renderer/shared/ui/primitives";
+import { Badge } from "../../shared/ui/primitives/badge";
+import { Checkbox } from "../../shared/ui/primitives/checkbox";
+import { Field } from "../../shared/ui/primitives/field";
+import { Input } from "../../shared/ui/primitives/input";
+import { MessageRow } from "../../shared/ui/primitives/message-row";
 import {
   Dialog,
   DialogContent,
@@ -13,7 +15,6 @@ import {
   DialogTitle,
 } from "../../shared/ui/primitives/dialog";
 import { toast } from "../../shared/ui/primitives/elements";
-import { cn } from "@/renderer/shared/ui/cn";
 import { useBridge, useBridgeStatus } from "../../platform/bridge/use-bridge";
 import { useReadRecovery } from "../../state/use-read-recovery";
 import { useDocumentActive } from "../../state/use-document-active";
@@ -38,7 +39,6 @@ import {
   serverFromDraft,
   type RawServer,
 } from "./mcp-server-model";
-import { ZerosSpinner } from "@/renderer/shared/ui/loading";
 
 const keyOf = (source: string, name: string) => `${source}::${name}`;
 
@@ -92,14 +92,6 @@ function sameImportEntry(saved: RawServer, entry: RawServer): boolean {
       ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)))
       : value);
   return signature(saved) === signature(entry);
-}
-
-function TransportPill({ transport }: { transport: "stdio" | "http" | "sse" }) {
-  return (
-    <span className="select-none rounded-sm border border-border1 px-1.5 py-px text-xs font-medium text-fg2">
-      {transport}
-    </span>
-  );
 }
 
 export function McpImportDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
@@ -297,44 +289,45 @@ export function McpImportDialog({ open, onClose }: { open: boolean; onClose: () 
         <DialogHeader>
           <DialogTitle>Import MCP servers</DialogTitle>
           <DialogDescription>
-            Choose local MCP configurations to copy into Zeros. Imported
-            servers are available to Claude, Codex, and Cursor. Environment
-            values and HTTP headers are saved in the encrypted vault for each server.
+            Copy MCP servers from your other tools. Environment values and
+            headers are saved encrypted for each server.
           </DialogDescription>
         </DialogHeader>
         <DialogBody>
           <div className="flex max-h-[50vh] flex-col gap-4 overflow-y-auto">
             {importError && (
-              <div className="flex items-center gap-2 py-4 text-sm text-red-primary">
-                <AlertTriangle className="size-4 shrink-0" aria-hidden="true" />
-                <p>{importError}</p>
-                <Button variant="ghost" size="sm" onClick={() => void (recovery.error ? retry() : refreshSettings())}>Retry</Button>
-              </div>
+              <MessageRow
+                tone="error"
+                role="alert"
+                flush
+                actions={
+                  <Button variant="ghost" size="compact" onClick={() => void (recovery.error ? retry() : refreshSettings())}>
+                    Retry
+                  </Button>
+                }
+              >
+                {importError}
+              </MessageRow>
             )}
             {!sources && !importError ? (
-              <div className="flex items-center gap-2 py-8 text-sm text-fg2">
-                <ZerosSpinner size={16} />
+              <MessageRow tone="pending" role="status" flush>
                 Scanning…
-              </div>
+              </MessageRow>
             ) : !sources ? null : !hasAny ? (
-              <p className="py-8 text-center text-sm text-fg2">
-                No MCP servers found in Cursor, Claude, Codex, or Factory configs.
+              <p className="text-fg2 m-0 py-6 text-center text-xs leading-4.5">
+                No MCP servers found.
               </p>
             ) : (
               (sources ?? [])
                 .filter((src) => src.servers.length > 0 || src.warning)
                 .map((src) => (
-                  <section key={src.source} className="flex flex-col gap-1.5">
-                    <div className="flex items-baseline justify-between gap-2">
-                      <h3 className="text-xs font-medium text-fg2">{src.label}</h3>
-                      {src.warning && (
-                        <Tooltip label={src.warning}>
-                          <span className="truncate text-xs text-fg2">
-                            {src.warning}
-                          </span>
-                        </Tooltip>
-                      )}
-                    </div>
+                  <section key={src.source} className="flex flex-col gap-1">
+                    <h3 className="text-fg3 m-0 text-3xxs leading-4 font-medium">{src.label}</h3>
+                    {src.warning && (
+                      <MessageRow tone="warning" flush>
+                        {src.warning}
+                      </MessageRow>
+                    )}
                     <div className="flex flex-col">
                       {src.servers.map((srv) => {
                         const already = existingNames.has(srv.name);
@@ -342,53 +335,40 @@ export function McpImportDialog({ open, onClose }: { open: boolean; onClose: () 
                         const isSel = selected.has(key);
                         const done = imported.has(key);
                         const nameError = nameErrors.get(key);
+                        // The server list's anatomy behind a checkbox: transport,
+                        // name, endpoint; Imported and Name in use are badges.
                         return (
-                          <div key={key} className="flex flex-col gap-1">
-                            <Button
-                              type="button"
-                              variant="ghost"
+                          <div key={key} className="flex flex-col">
+                            <Checkbox
+                              checked={isSel || done}
+                              onChange={() => toggle(key)}
                               disabled={done || busy}
-                              aria-pressed={isSel}
-                              onClick={() => toggle(key)}
-                              className={cn(
-                                "h-auto w-full justify-start gap-2.5 rounded-sm px-1.5 py-2 text-left",
-                                !done && "hover:bg-bg1-hover",
-                              )}
-                            >
-                              <span
-                                className={cn(
-                                  "flex size-4 shrink-0 items-center justify-center rounded-sm border",
-                                  isSel || done
-                                    ? "border-primary-button-bg bg-primary-button-bg text-primary-button-fg"
-                                    : "border-border2",
-                                )}
-                                aria-hidden="true"
-                              >
-                                {(isSel || done) && <Check className="size-3" />}
-                              </span>
-                              <TransportPill transport={srv.transport} />
-                              <div className="min-w-0 flex-1">
-                                <div className="truncate text-sm text-fg1">{srv.name}</div>
-                                <div className="truncate font-mono text-xs text-fg2">
-                                  {endpointSummary(srv as RawServer)}
-                                </div>
-                              </div>
-                              {(done || already) && (
-                                <span className="shrink-0 text-xs text-fg2">{done ? "Imported" : "Name in use"}</span>
-                              )}
-                            </Button>
+                              className="w-full py-2 [&>span[aria-hidden]]:mt-0.5"
+                              label={
+                                <span className="flex min-w-0 items-center gap-3">
+                                  <span className="flex w-12 shrink-0">
+                                    <Badge variant="outline" mono>{srv.transport}</Badge>
+                                  </span>
+                                  <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+                                    <span className="text-fg1 truncate text-xs leading-4.5">{srv.name}</span>
+                                    <span className="text-fg3 truncate font-mono text-3xxs leading-4">
+                                      {endpointSummary(srv as RawServer)}
+                                    </span>
+                                  </span>
+                                  {done ? <Badge variant="success">Imported</Badge>
+                                    : already && <Badge variant="neutral">Name in use</Badge>}
+                                </span>
+                              }
+                            />
                             {isSel && (nameError || names[key] !== undefined) && (
-                              <label className="flex flex-col gap-1 px-1.5 pb-2 text-xs text-fg2">
-                                Import name
+                              <Field label="Import name" error={nameError} className="pb-2 pl-6">
                                 <Input
                                   aria-label={`Import name for ${srv.name} from ${src.label}`}
-                                  aria-invalid={!!nameError}
                                   value={names[key] ?? srv.name}
                                   disabled={busy}
                                   onChange={event => setNames(prior => ({ ...prior, [key]: event.target.value }))}
                                 />
-                                {nameError && <span className="text-red-primary">{nameError}</span>}
-                              </label>
+                              </Field>
                             )}
                           </div>
                         );
@@ -399,24 +379,22 @@ export function McpImportDialog({ open, onClose }: { open: boolean; onClose: () 
             )}
 
             {hasAny && (
-              <p className="text-xs text-fg2">
-                Tip: Cursor caps the total number of MCP tools at ~40 across all servers —
-                importing many at once may exceed that.
+              <p className="text-fg3 m-0 text-3xxs leading-4">
+                Cursor allows about 40 tools in total.
               </p>
             )}
           </div>
         </DialogBody>
         <DialogFooter>
-          <Button variant="ghost" size="sm" onClick={onClose} disabled={busy}>
+          <Button variant="ghost" onClick={onClose} disabled={busy}>
             Cancel
           </Button>
           <Button
-            variant="default"
-            size="sm"
-            disabled={busy || loading || !connected || !!scanError || !layer || settingsLoading || !!settingsReadError || !!layer.error || selectedCount === 0 || nameErrors.size > 0}
+            variant="primary"
+            loading={busy}
+            disabled={loading || !connected || !!scanError || !layer || settingsLoading || !!settingsReadError || !!layer.error || selectedCount === 0 || nameErrors.size > 0}
             onClick={() => void handleImport()}
           >
-            {busy && <ZerosSpinner size={16} tone="inverted" />}
             {selectedCount > 0 ? `Import ${selectedCount}` : "Import"}
           </Button>
         </DialogFooter>

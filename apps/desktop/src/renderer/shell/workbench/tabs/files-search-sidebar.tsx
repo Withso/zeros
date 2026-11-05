@@ -69,7 +69,7 @@ export function FilesSearchSidebar({
       className="bg-bg1 flex h-full min-h-0 flex-col overflow-hidden"
     >
       <PanelHeader size="panel" className="shrink-0">
-        <Search className="text-fg3 size-4 shrink-0" />
+        <Search className="text-muted-fg size-3.5 shrink-0" />
         <input
           autoFocus={active}
           aria-label="Search workspace files"

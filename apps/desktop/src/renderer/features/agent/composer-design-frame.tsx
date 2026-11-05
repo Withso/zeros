@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import { Camera, Frame, X } from "lucide-react";
 import type { ComposerMode } from "@zeros/protocol/composer-mode";
 import { peekWorkspacesFor, useProjectForFolder, useWorkspacesFor } from "../../state/use-projects";
@@ -7,7 +8,7 @@ import { isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
 import { captureDesignPageOwner, designWorkspaceView, useDesignWorkspaceUiStore } from "../design-workspace/state/design-workspace-ui";
 import { clearDesignCanvasSelection } from "../design-workspace/state/design-selection";
 import type { DesignSelectionTarget } from "../design-workspace/design-selected-targets";
-import { Button, Tooltip } from "../../shared/ui/primitives";
+import { Pill, Tooltip } from "../../shared/ui/primitives";
 import { designFrameAttachmentTargets, type DesignFrameAttachmentSelection, type DesignFrameAttachmentTarget } from "./design-frame-attachment";
 import { designWorkspaceSnapshotCache } from "../design-workspace/state/design-workspace-cache";
 import { hasDesignFrameAttachmentSelection } from "./design-frame-selection";
@@ -170,19 +171,20 @@ export function ComposerDesignFrame({ selection, onRemove, onToggleScreenshot }:
   return (
     <div className="flex items-center gap-1">
       <Tooltip label={`Include ${targets.map(target => `${target.frame}${target.nodeId ? ` · ${target.nodeId}` : ""}`).join(", ")} as context`}>
-        <Button type="button" variant="ghost" size="sm" onClick={onRemove} onMouseDown={event => event.preventDefault()}
+        {/* The 24px control Pill, like every context chip in the card. */}
+        <Pill type="button" size="control" onClick={onRemove} onMouseDown={event => event.preventDefault()}
           aria-label={targets.length > 1 ? `Remove canvas selection (${targets.length} targets)` : `Remove frame context ${first.frame}`}
           data-composer-design-frame="" data-composer-design-count={targets.length}
-          className="bg-bg2-hover text-fg2 hover:text-fg1 max-w-48 shrink-0 gap-1 rounded-md px-2 text-xs">
-          <Frame size={12} aria-hidden="true" />
-          <span className="truncate">{label}</span>
-          <X size={12} aria-hidden="true" />
-        </Button>
+          className="max-w-48">
+          <Frame aria-hidden="true" />
+          <span>{label}</span>
+          <X aria-hidden="true" />
+        </Pill>
       </Tooltip>
       <Tooltip label="Attach image">
-        <Button type="button" variant="ghost" size="icon-sm" aria-label="Include frame image" aria-pressed={first.includeScreenshot === true} onClick={onToggleScreenshot} onMouseDown={event => event.preventDefault()}>
-          <Camera size={14} />
-        </Button>
+        <IconButton type="button" size="compact" label="Include frame image" aria-pressed={first.includeScreenshot === true} onClick={onToggleScreenshot} onMouseDown={event => event.preventDefault()}>
+          <Camera />
+        </IconButton>
       </Tooltip>
     </div>
   );

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import { ImageUp, RotateCw, Search } from "lucide-react";
 
 import type { Project } from "../state/projects-store";
@@ -339,11 +340,10 @@ export function RepositoryIconDialog({
                     </Button>
                   )}
                   {!plainFolder && (
-                    <Button
+                    <IconButton
                       type="button"
-                      variant="ghost"
-                      size="icon-sm"
-                      aria-label="Refresh automatic repository icon"
+                      size="standard"
+                      label="Refresh automatic repository icon"
                       disabled={automatic.loading || automatic.refreshing}
                       onClick={automatic.refresh}
                     >
@@ -352,7 +352,7 @@ export function RepositoryIconDialog({
                       ) : (
                         <RotateCw className="size-3.5" />
                       )}
-                    </Button>
+                    </IconButton>
                   )}
                 </div>
               </div>

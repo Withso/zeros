@@ -6,8 +6,11 @@ import { ChevronRight } from "lucide-react";
 import { cn } from "@/renderer/shared/ui/cn";
 import { ANCHORED_OVERLAY_MOTION } from "@/renderer/shared/ui/anchored-overlay-motion";
 import {
+  MENU_ITEM_BOX,
+  MENU_ITEM_DESTRUCTIVE,
   MENU_ITEM_ICON,
   MENU_ITEM_RADIUS,
+  MENU_LABEL,
   MENU_SEPARATOR,
   MENU_SURFACE_INSET,
   MENU_SURFACE_RADIUS,
@@ -238,7 +241,8 @@ const ContextMenuSubTrigger = React.forwardRef<
   <ContextMenuPrimitive.SubTrigger
     ref={ref}
     className={cn(
-      "focus:bg-bg3-hover focus:text-fg1 focus:[&_.text-muted-fg]:text-fg3 data-[state=open]:bg-bg3-hover data-[state=open]:[&_.text-muted-fg]:text-fg3 flex cursor-default items-center gap-2 px-2 py-1.5 text-xs outline-none select-none",
+      "focus:bg-bg3-hover focus:text-fg1 focus:[&_.text-muted-fg]:text-fg3 data-[state=open]:bg-bg3-hover data-[state=open]:[&_.text-muted-fg]:text-fg3 flex cursor-default items-center outline-none select-none",
+      MENU_ITEM_BOX,
       MENU_ITEM_RADIUS,
       MENU_ITEM_ICON,
       inset && "pl-8",
@@ -349,14 +353,20 @@ const ContextMenuItem = React.forwardRef<
   React.ComponentRef<typeof ContextMenuPrimitive.Item>,
   React.ComponentPropsWithoutRef<typeof ContextMenuPrimitive.Item> & {
     inset?: boolean;
+    /** destructive: red-primary text and icon; place it last, after a
+     *  separator. */
+    variant?: "default" | "destructive";
   }
->(({ className, inset, ...props }, ref) => (
+>(({ className, inset, variant = "default", ...props }, ref) => (
   <ContextMenuPrimitive.Item
     ref={ref}
+    data-variant={variant}
     className={cn(
-      "focus:bg-bg3-hover focus:text-fg1 focus:[&_.text-muted-fg]:text-fg3 relative flex cursor-default items-center gap-2 px-2 py-1.5 text-xs transition-colors outline-none select-none data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
+      "focus:bg-bg3-hover focus:text-fg1 focus:[&_.text-muted-fg]:text-fg3 relative flex cursor-default items-center transition-colors outline-none select-none data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
+      MENU_ITEM_BOX,
       MENU_ITEM_RADIUS,
       MENU_ITEM_ICON,
+      variant === "destructive" && MENU_ITEM_DESTRUCTIVE,
       inset && "pl-8",
       className,
     )}
@@ -373,7 +383,7 @@ const ContextMenuLabel = React.forwardRef<
 >(({ className, inset, ...props }, ref) => (
   <ContextMenuPrimitive.Label
     ref={ref}
-    className={cn("text-fg2 px-2 py-1.5 text-xs", inset && "pl-8", className)}
+    className={cn(MENU_LABEL, inset && "pl-8", className)}
     {...props}
   />
 ));

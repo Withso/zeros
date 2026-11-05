@@ -12,12 +12,12 @@ export function githubMethodLabel(method: GithubAuthMethod): string {
 
 export function githubMethodDescription(method: GithubAuthMethod): string {
   if (method === "gh-cli") {
-    return "Use the account already signed in with GitHub CLI.";
+    return "Uses your gh CLI sign-in.";
   }
   if (method === "github-app") {
-    return "Authorize in your browser and choose repository access.";
+    return "Authorize in your browser.";
   }
-  return "Use a token you create and control on GitHub.";
+  return "A token you create on GitHub.";
 }
 
 /** A missing count means the bounded inventory was unavailable or incomplete,

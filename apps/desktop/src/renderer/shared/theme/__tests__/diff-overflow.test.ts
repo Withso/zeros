@@ -13,6 +13,14 @@ describe("file and diff overflow policy", () => {
     }
     expect(changes.itemMetrics?.hunkSeparatorHeight).toBe(44);
   });
+  it("reads workbench diffs in the plain editor's type, and chat in its own", () => {
+    const workbench = zerosCodeViewOptions();
+    expect(workbench.unsafeCSS).toMatch(/--diffs-font-size:\s*12px/);
+    expect(workbench.unsafeCSS).toMatch(/--diffs-line-height:\s*19\.2px/);
+    // The virtualizer estimates rows at the painted height.
+    expect(workbench.itemMetrics?.lineHeight).toBe(19.2);
+    expect(zerosDiffOptions().unsafeCSS).not.toMatch(/--diffs-font-size/);
+  });
   it("wraps PatchDiff content instead of creating a horizontal scroller", () => {
     expect(zerosDiffOptions().overflow).toBe("wrap");
   });

@@ -3,6 +3,7 @@ import { Slot } from "@radix-ui/react-slot";
 import { cva, type VariantProps } from "class-variance-authority";
 
 import { cn } from "@/renderer/shared/ui/cn";
+import { ZerosSpinner } from "@/renderer/shared/ui/loading/zeros-spinner";
 
 const buttonVariants = cva(
   // Shared by EVERY button — and IDENTICAL to the Select dropdown trigger
@@ -16,52 +17,41 @@ const buttonVariants = cva(
   // only the icon-only squares pin a 28px box.
   // :where keeps fallback SVG sizing below caller descendant selectors;
   // explicit size classes on an SVG still take precedence as well.
-  "inline-flex w-fit select-none items-center justify-center gap-1 whitespace-nowrap rounded-md border border-transparent px-1.5 py-1 text-xs leading-4.5 font-medium transition-colors focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-highlighted-bright/50 focus-visible:border-highlighted-bright disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_:where(svg:not([class*='size-']))]:size-3.5",
+  // `aria-disabled` is the disabled state that keeps hover, so a Tooltip can
+  // say why the action is unavailable; the caller keeps the click a no-op.
+  // A loading button's spinner takes the leading icon's place.
+  "inline-flex w-fit select-none items-center justify-center gap-1 whitespace-nowrap rounded-md border border-transparent px-1.5 py-1 text-xs leading-4.5 font-medium transition-colors focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-highlighted-bright/50 focus-visible:border-highlighted-bright disabled:pointer-events-none disabled:opacity-50 aria-disabled:cursor-not-allowed aria-disabled:opacity-50 aria-busy:cursor-progress [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_:where(svg:not([class*='size-']))]:size-3.5 [&>[data-zeros-loader]+svg]:hidden",
   {
     variants: {
-      // Canonical set: Primary (the rare main CTA) + Secondary (the everyday
-      // button), two Destructive flavors, Ghost (icon buttons), and Link.
+      // Canonical set: Primary (the single main action), Secondary (the
+      // everyday button), Ghost (toolbar and quiet actions) and two
+      // Destructive flavors. Toggles use aria-pressed on Secondary or Ghost.
       variant: {
         // PRIMARY — inverted fill (near-white on dark, near-black on light).
-        // Reserve for the single main action on a view.
-        default:
-          "bg-primary-button-bg text-primary-button-fg shadow hover:bg-primary-button-hover",
+        // Reserve for the single main action on a view. Flat: no shadow.
+        primary:
+          "bg-primary-button-bg text-primary-button-fg hover:bg-primary-button-hover",
         // SECONDARY — the everyday button, wearing the dropdown trigger's
         // exact chrome: TRANSPARENT fill so it blends with whatever surface it
         // sits on (bg1 / bg2 / bg3 alike) + border3 → hover/open bg2-highlight
-        // + border4. (2026-07-17: fill bg2 → transparent so the button "matches
-        // its background"; 2026-09-15: border2/bg2-hover → the trigger's
-        // border3/bg2-highlight so a secondary button and a Select are
-        // indistinguishable at rest and on hover.)
+        // + border4, so a secondary button and a Select are indistinguishable
+        // at rest and on hover. Pressed (aria-pressed) holds the open look:
+        // fill and border both lift, so it survives Light and colour blindness.
         secondary:
-          "border-border3 bg-transparent text-fg1 hover:border-border4 hover:bg-bg2-highlight data-[state=open]:border-border4 data-[state=open]:bg-bg2-highlight",
-        // GHOST — transparent, no outline; icon buttons + subtle/secondary text
-        // actions (a dialog's Cancel). Same hover fill as the dropdown.
-        ghost: "hover:bg-bg2-highlight hover:text-fg1",
+          "border-border3 bg-transparent text-fg1 hover:border-border4 hover:bg-bg2-highlight data-[state=open]:border-border4 data-[state=open]:bg-bg2-highlight aria-pressed:border-border4 aria-pressed:bg-bg2-highlight",
+        // GHOST — transparent, no outline; toolbar and subtle text actions (a
+        // dialog's Cancel). Its open menu and pressed state hold the hover.
+        ghost:
+          "hover:bg-bg2-highlight hover:text-fg1 data-[state=open]:bg-bg2-highlight data-[state=open]:text-fg1 aria-pressed:border-border4 aria-pressed:bg-bg2-highlight aria-pressed:text-fg1",
         // DESTRUCTIVE (primary) — solid red fill (--red-secondary); text is the
         // static --red-secondary-fg (white in both themes — fg1 would flip dark in light).
         destructive:
-          "bg-red-secondary text-red-secondary-fg shadow hover:bg-red-secondary-hover",
+          "bg-red-secondary text-red-secondary-fg hover:bg-red-secondary-hover",
         // DESTRUCTIVE (secondary) — same neutral surface as Secondary
         // (transparent fill + border3 → hover bg2-highlight/border4);
         // red-primary text carries the danger cue.
         "destructive-secondary":
           "border-border3 bg-transparent text-red-primary hover:border-border4 hover:bg-bg2-highlight",
-        // SECONDARY-ON — a Secondary button in a latched/selected state, for a
-        // toggle that stays on screen after you press it (the empty chat's
-        // transcript pills). Deliberately NOT Primary: N white fills is N main
-        // CTAs stacked above the view's real one, which is what the Primary
-        // reservation above exists to prevent.
-        //
-        // It lifts one step in BOTH fill and border rather than relying on
-        // colour, so it survives the light theme and colour-blind readers; the
-        // caller adds the brand-coloured mark and the check that carry the
-        // rest of the signal. border4 (not highlighted-bright) because
-        // highlighted-bright is the app's focus ring — overloading it would
-        // make a focused-but-off control and an on-but-unfocused control look
-        // identical.
-        "secondary-on":
-          "border-border4 bg-bg2-highlight text-fg1 hover:bg-bg2-highlight",
       },
       // Two control heights (docs/design-system.md → Controls):
       //   standard 28px — every button by default, identical to the Select
@@ -86,7 +76,7 @@ const buttonVariants = cva(
     },
     defaultVariants: {
       // Secondary is the everyday button, so it's the default when no variant
-      // is passed. Primary (`variant="default"`) is the rare main-CTA opt-in.
+      // is passed. Primary (`variant="primary"`) is the rare main-CTA opt-in.
       variant: "secondary",
       size: "default",
     },
@@ -98,17 +88,60 @@ export interface ButtonProps
     React.ButtonHTMLAttributes<HTMLButtonElement>,
     VariantProps<typeof buttonVariants> {
   asChild?: boolean;
+  /** Busy: the button disables, reports aria-busy and shows the spinner in
+   *  its leading icon's place, keeping its colour. */
+  loading?: boolean;
 }
 
+const SPINNER_TONE = {
+  primary: "inverted",
+  destructive: "inherit",
+} as const;
+
 const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
-  ({ className, variant, size, asChild = false, ...props }, ref) => {
+  (
+    {
+      className,
+      variant,
+      size,
+      asChild = false,
+      loading = false,
+      disabled,
+      children,
+      ...props
+    },
+    ref,
+  ) => {
     const Comp = asChild ? Slot : "button";
+    const compact = size === "compact" || size === "icon-compact";
     return (
       <Comp
+        {...props}
         className={cn(buttonVariants({ variant, size, className }))}
         ref={ref}
-        {...props}
-      />
+        disabled={disabled || loading}
+        aria-busy={loading || props["aria-busy"] || undefined}
+      >
+        {/* Slot takes exactly one child, so asChild passes it alone. */}
+        {asChild ? (
+          children
+        ) : (
+          <>
+            {loading ? (
+              <ZerosSpinner
+                size={compact ? 16 : 18}
+                tone={
+                  (variant &&
+                    SPINNER_TONE[variant as keyof typeof SPINNER_TONE]) ??
+                  "default"
+                }
+                label="Working"
+              />
+            ) : null}
+            {children}
+          </>
+        )}
+      </Comp>
     );
   },
 );

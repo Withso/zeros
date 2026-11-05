@@ -1,6 +1,9 @@
 import { useEffect } from "react";
-import { Archive, ArrowUpRight, Cloud, FolderOpen, GitPullRequest, GitPullRequestClosed, GitMerge, GitCommitVertical } from "lucide-react";
-import { RepositoryIcon } from "../features/repositories/repository-icon";
+import { Archive, Cloud, FolderOpen, GitCommitVertical } from "lucide-react";
+import { PrPill } from "./pr/pr-pill";
+import { usePrIslandKind } from "./pr/pr-island-state-store";
+import { workspacePrTone } from "./workspace-glyph";
+import { REPOSITORY_ICON_CHIP_CLS, RepositoryIcon } from "../features/repositories/repository-icon";
 import { useRepositoryRemote } from "../features/repositories/use-repository-remote";
 import { formatCompactAge } from "../features/agent/format-age";
 import { useOptionalAgentSessions } from "../features/agent/sessions-hooks";
@@ -74,8 +77,7 @@ export function SidebarWorkspaceHoverCard({
   const age = formatCompactAge(at);
   const prUrl = workspace.prUrl && parsePrUrl(workspace.prUrl)?.number === workspace.prNumber
     ? workspace.prUrl : null;
-  const PrIcon = workspace.prState === "merged" ? GitMerge
-    : workspace.prState === "closed" ? GitPullRequestClosed : GitPullRequest;
+  const prTone = workspacePrTone(workspace, usePrIslandKind(workspace.id, workspace.prNumber));
   const commitAndPush = () => {
     const bubble = promptActionBubble("commit-and-push")!;
     const sent = sendToChat(chat?.id ?? null, {
@@ -100,7 +102,7 @@ export function SidebarWorkspaceHoverCard({
         )}
         <span className="ml-auto flex min-w-0 items-center gap-1.5" title={repoName}>
           {cloud && <Cloud className="size-3.5 shrink-0" aria-label="Cloud workspace" />}
-          {project && <RepositoryIcon project={project} className="size-4 shrink-0 rounded-sm" />}
+          {project && <RepositoryIcon project={project} className={REPOSITORY_ICON_CHIP_CLS} />}
           <span className="truncate">{repoName}</span>
         </span>
       </div>
@@ -108,7 +110,7 @@ export function SidebarWorkspaceHoverCard({
       <div className="text-fg3 truncate text-xs" title={preview || workspace.branch}>
         {preview || workspace.branch}
       </div>
-      <div className="mt-4 flex min-w-0 flex-wrap items-center gap-2">
+      <div className="mt-2 flex min-w-0 flex-wrap items-center gap-2">
         {action === "archive" ? (
           <Button onClick={onArchive} className="bg-violet-bg text-violet-fg hover:bg-violet-bg border-transparent">
             <Archive />Archive
@@ -127,7 +129,7 @@ export function SidebarWorkspaceHoverCard({
         ) : action === "commit-push" ? (
           <Tooltip label={working ? AGENT_WORKING_REASON : undefined}>
             <span className="inline-flex">
-              <Button variant="default" disabled={working} onClick={commitAndPush}>
+              <Button variant="primary" disabled={working} onClick={commitAndPush}>
                 <GitCommitVertical />Commit and push
               </Button>
             </span>
@@ -136,11 +138,7 @@ export function SidebarWorkspaceHoverCard({
           <Button onClick={onSelect}><FolderOpen />Open workspace</Button>
         )}
         {workspace.prNumber != null && prUrl && (
-          <Button asChild variant="ghost" className="text-fg3 gap-0.5 px-0" aria-label={`Open PR #${workspace.prNumber}`}>
-            <a href={prUrl} target="_blank" rel="noreferrer">
-              <PrIcon />#{workspace.prNumber}<ArrowUpRight className="size-3" />
-            </a>
-          </Button>
+          <PrPill number={workspace.prNumber} url={prUrl} tone={prTone ?? "open"} />
         )}
         {age && <time className="text-fg3 ml-auto shrink-0 text-xs tabular-nums" dateTime={new Date(at).toISOString()} title={new Date(at).toLocaleString()}>
           {age === "now" ? age : `${age} ago`}

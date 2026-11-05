@@ -12,6 +12,7 @@ import {
   type SessionToolInventoryEntry,
 } from "@zeros/protocol/agent-extensions";
 import { Button } from "../../shared/ui/primitives/button";
+import { Tooltip } from "../../shared/ui/primitives/tooltip";
 import {
   Collapsible,
   CollapsibleContent,
@@ -69,7 +70,8 @@ export const ComposerToolGroups = memo(function ComposerToolGroups({
       </p>
     );
   return (
-    <div className="max-h-80 overflow-y-auto" data-tool-groups="">
+    // The popover is the one scroll owner; it caps its own height.
+    <div data-tool-groups="">
       {groups.map((group) => {
         const open = expanded.has(group.kind);
         const label = LABELS[group.kind];
@@ -93,21 +95,21 @@ export const ComposerToolGroups = memo(function ComposerToolGroups({
             data-tool-group={group.kind}
             onOpenChange={toggle(group.kind)}
           >
+            <Tooltip label="Incomplete inventory" disabled={group.state !== "partial"}>
             <CollapsibleTrigger asChild>
               <Button
                 type="button"
                 variant="ghost"
                 size="sm"
-                className="w-full justify-start gap-2"
+                // A 12px chevron and a 6px gap put the label 24px in, the
+                // column its tool rows' names start on.
+                className="w-full justify-start gap-1.5"
                 aria-label={`${label}, ${count === "—" ? "not reported" : count}`}
-                title={
-                  group.state === "partial" ? "Incomplete inventory" : undefined
-                }
               >
                 {open ? (
-                  <ChevronDown className="text-fg2 size-3.5" />
+                  <ChevronDown className="text-fg2 size-3" />
                 ) : (
-                  <ChevronRight className="text-fg2 size-3.5" />
+                  <ChevronRight className="text-fg2 size-3" />
                 )}
                 <span className="min-w-0 flex-1 text-left">{label}</span>
                 <span
@@ -118,6 +120,7 @@ export const ComposerToolGroups = memo(function ComposerToolGroups({
                 </span>
               </Button>
             </CollapsibleTrigger>
+            </Tooltip>
             <CollapsibleContent>
               {rows.length > 0 && (
                 <ToolRows
@@ -136,19 +139,19 @@ export const ComposerToolGroups = memo(function ComposerToolGroups({
                   onOpenChange={toggle(LOCAL_FOLDER)}
                   className="pl-4"
                 >
+                  <Tooltip label="Declared in this agent's own settings on this machine">
                   <CollapsibleTrigger asChild>
                     <Button
                       type="button"
                       variant="ghost"
                       size="sm"
-                      className="w-full justify-start gap-2"
+                      className="w-full justify-start gap-1.5"
                       aria-label={`Local, ${local.length}`}
-                      title="Declared in this agent's own settings on this machine"
                     >
                       {localOpen ? (
-                        <ChevronDown className="text-fg2 size-3.5" />
+                        <ChevronDown className="text-fg2 size-3" />
                       ) : (
-                        <ChevronRight className="text-fg2 size-3.5" />
+                        <ChevronRight className="text-fg2 size-3" />
                       )}
                       <span className="min-w-0 flex-1 text-left">Local</span>
                       <span className="text-fg2 text-xs tabular-nums">
@@ -156,6 +159,7 @@ export const ComposerToolGroups = memo(function ComposerToolGroups({
                       </span>
                     </Button>
                   </CollapsibleTrigger>
+                  </Tooltip>
                   <CollapsibleContent>
                     <ToolRows
                       label="Local MCPs"
@@ -198,11 +202,12 @@ function ToolRows({
         <li
           key={entry.id}
           data-tool-id={entry.id}
-          className="flex min-h-8 items-center gap-2 px-2 py-1 text-sm"
+          // 28px rows, 13/18, names on the group label's 24px column.
+          className="flex min-h-7 items-center gap-2 py-1 pr-1.5 pl-6 text-xs leading-4.5"
         >
-          <div className="text-fg1 min-w-0 flex-1 truncate" title={entry.name}>
-            {entry.name}
-          </div>
+          <Tooltip label={entry.name} delayDuration={1500}>
+            <div className="text-fg1 min-w-0 flex-1 truncate">{entry.name}</div>
+          </Tooltip>
           <ToolStatus
             entry={entry}
             canAuthenticate={canAuthenticate && entry.canAuthenticate === true}
@@ -254,20 +259,21 @@ function ToolStatus({
     (entry.status === "error" || authFailed === entry.id)
   )
     return (
-      <Button
-        type="button"
-        size="sm"
-        variant="ghost"
-        disabled={authBusy !== null}
-        className="h-auto shrink-0 bg-transparent p-0 hover:bg-transparent"
-        aria-label={`Authenticate ${entry.name}`}
-        title="Sign-in failed. Authenticate again to retry."
-        onClick={() => onAuthenticate(entry.id)}
-      >
-        <span role="img" aria-label="Sign-in failed">
-          <X className="text-red-primary size-4" />
-        </span>
-      </Button>
+      <Tooltip label="Sign-in failed. Authenticate again to retry.">
+        <Button
+          type="button"
+          size="sm"
+          variant="ghost"
+          disabled={authBusy !== null}
+          className="h-auto shrink-0 bg-transparent p-0 hover:bg-transparent"
+          aria-label={`Authenticate ${entry.name}`}
+          onClick={() => onAuthenticate(entry.id)}
+        >
+          <span role="img" aria-label="Sign-in failed">
+            <X className="text-red-primary size-3.5" />
+          </span>
+        </Button>
+      </Tooltip>
     );
   if (
     entry.status === "connected" ||
@@ -276,19 +282,16 @@ function ToolStatus({
     entry.status === "loaded"
   ) {
     return (
-      <span role="img" aria-label={label} title={label} className="shrink-0">
-        <Check className="text-green-primary size-4" />
-      </span>
+      <Tooltip label={label}>
+        <span role="img" aria-label={label} className="shrink-0">
+          <Check className="text-green-primary size-3.5" />
+        </span>
+      </Tooltip>
     );
   }
   if (entry.status === "connecting")
     return (
-      <span
-        role="status"
-        aria-label="Connecting"
-        title="Connecting"
-        className="shrink-0"
-      >
+      <span role="status" aria-label="Connecting" className="shrink-0">
         <LoaderCircle className="text-fg2 size-3.5 animate-spin motion-reduce:animate-none" />
       </span>
     );
@@ -307,8 +310,10 @@ function ToolStatus({
       </Button>
     );
   return (
-    <span role="img" aria-label={label} title={label} className="shrink-0">
-      <X className="text-red-primary size-4" />
-    </span>
+    <Tooltip label={label}>
+      <span role="img" aria-label={label} className="shrink-0">
+        <X className="text-red-primary size-3.5" />
+      </span>
+    </Tooltip>
   );
 }

@@ -1,27 +1,28 @@
-import {
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  type ComponentType,
-} from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Ellipsis } from "lucide-react";
 import { Button, Input } from "../../shared/ui";
 import { toast } from "../../shared/ui/primitives/elements";
+import { Avatar, AvatarFallback } from "../../shared/ui/primitives/avatar";
+import { initialsOf } from "../../shared/lib/initials";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "../../shared/ui/primitives/dropdown-menu";
+import { IconButton } from "../../shared/ui/primitives/icon-button";
+import { MessageRow } from "../../shared/ui/primitives/message-row";
 import { useTeams } from "../team/team-store";
 import { modelsForAgent } from "../agent/model-catalog";
-import { AgentIcon } from "../agent/agent-icon";
-import { NativeBrowserAvailability } from "../agent/native-browser-availability";
+import { NATIVE_BROWSER_UNAVAILABLE } from "../agent/native-browser-availability";
+import { SettingsAddRow, SettingsGroup, SettingsRow } from "./settings-ui";
 import { invalidateCloudOrganizationAgentRegistry } from "../agent/workspace-agent-registry";
 import { useRecoveringRead } from "../../state/use-recovering-read";
 import { ProviderConnectionDialog } from "./provider-connection-dialog";
 import { CloudCredentialRemovalDialog } from "./cloud-credential-removal-dialog";
 import { useCloudCredentialRemoval } from "./use-cloud-credential-removal";
 import { connectedAccountLabel, type ConnectionMethod } from "./connection-methods";
-import {
-  readScopedSettingsSelection,
-  writeScopedSettingsSelection,
-  settingsOwnerKey,
-} from "./settings-scope";
+import { readScopedSettingsSelection, settingsOwnerKey } from "./settings-scope";
 import { subscribeProviderSettingsTab } from "./settings-navigation";
 import { connectCloudProviderSignIn } from "./cloud-provider-sign-in";
 import { shellOpenUrl } from "../../platform/app";
@@ -44,11 +45,6 @@ const PROVIDERS = [
   { id: "cursor", name: "Cursor" },
 ];
 type Provider = { id: string; name: string; beta?: boolean };
-type Tabs = ComponentType<{
-  providers: Provider[];
-  activeId: string;
-  onSelect: (id: string) => void;
-}>;
 
 function connectionErrorMessage(error: unknown): string {
   const code = error && typeof error === "object" && "code" in error
@@ -60,44 +56,92 @@ function connectionErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "Cloud connection failed";
 }
 
+/** Every agent is a titled card on one page, so a request for one agent
+ * (a chat's sign-in link) scrolls its card into view once the page shows. */
 export function CloudProviderConnections({
   organizationId,
   surfaceActive,
-  Tabs,
 }: {
   organizationId: string;
   surfaceActive: boolean;
-  Tabs: Tabs;
 }) {
   const { me } = useTeams();
   const owner = settingsOwnerKey(me?.user.id ?? "pending", organizationId);
-  const [agentId, setAgentId] = useState(() =>
-    readScopedSettingsSelection(owner, "provider", "claude"),
+  // The same keyed read every card uses; a failure is said once, up top.
+  const snapshot = useRecoveringRead(
+    cloudOrganizationConnectionsCache,
+    me ? owner : null,
+    () => readCloudOrganizationConnections(organizationId),
+    { enabled: surfaceActive, maxAgeMs: 30_000 },
   );
-  const agent = PROVIDERS.find((row) => row.id === agentId) ?? PROVIDERS[0]!;
-  useEffect(() => subscribeProviderSettingsTab(setAgentId, owner), [owner]);
+  const sections = useRef(new Map<string, HTMLElement>());
+  // The persisted request, read once; null once it has been scrolled to.
+  const requested = useRef<string | null | undefined>(undefined);
+  if (requested.current === undefined)
+    requested.current = readScopedSettingsSelection(owner, "provider", "claude");
+  const [request, setRequest] = useState(0);
+  useEffect(
+    () =>
+      subscribeProviderSettingsTab((id) => {
+        requested.current = id;
+        setRequest((value) => value + 1);
+      }, owner),
+    [owner],
+  );
+  useEffect(() => {
+    if (!surfaceActive) return;
+    // The page reveals this panel in the same commit; scroll after layout.
+    const frame = requestAnimationFrame(() => {
+      const id = requested.current;
+      requested.current = null;
+      if (id) sections.current.get(id)?.scrollIntoView({ block: "nearest" });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [surfaceActive, request]);
   return (
-    <div className="flex flex-col gap-8">
-      <Tabs
-        providers={PROVIDERS}
-        activeId={agent.id}
-        onSelect={(id) => {
-          setAgentId(id);
-          writeScopedSettingsSelection(owner, "provider", id);
-        }}
-      />
-      {me && (
-        <CloudProviderConnection
-          key={`${owner}:${agent.id}`}
-          organizationId={organizationId}
-          userId={me.user.id}
-          agent={agent}
-          surfaceActive={surfaceActive}
-        />
+    <div className="flex flex-col gap-4">
+      {snapshot.error && (
+        <MessageRow
+          tone="error"
+          role="alert"
+          flush
+          actions={
+            <Button variant="ghost" size="compact" onClick={() => void snapshot.refresh()}>
+              Retry
+            </Button>
+          }
+        >
+          {connectionErrorMessage(snapshot.error)}
+        </MessageRow>
       )}
+      <div className="flex flex-col gap-8">
+        {me &&
+          PROVIDERS.map((agent) => (
+            <div
+              key={`${owner}:${agent.id}`}
+              ref={(node) => {
+                if (node) sections.current.set(agent.id, node);
+                else sections.current.delete(agent.id);
+              }}
+            >
+              <CloudProviderConnection
+                key={`${owner}:${agent.id}`}
+                organizationId={organizationId}
+                userId={me.user.id}
+                agent={agent}
+                surfaceActive={surfaceActive}
+              />
+            </div>
+          ))}
+      </div>
+      {/* Said once for every agent, not under each card. */}
+      <p className="text-fg3 m-0 text-3xxs leading-4">
+        {NATIVE_BROWSER_UNAVAILABLE}
+      </p>
     </div>
   );
 }
+
 
 function CloudProviderConnection({
   organizationId,
@@ -304,96 +348,95 @@ function CloudProviderConnection({
     setOpen(true);
   };
   return (
-    <section className="flex flex-col gap-4">
-      <div className="flex items-center justify-between gap-4">
-        <div className="text-fg1 flex items-center gap-3 text-sm font-medium">
-          <AgentIcon agentId={agent.id} iconUrl={null} className="size-5" />
-          {agent.name}
-        </div>
-        <Button
-          variant="secondary"
-          onClick={() => configure(null)}
-          disabled={!snapshot.data || busy}
-        >
-          {matching.length ? "Add account" : "Connect"}
-        </Button>
-      </div>
-      <p className="text-fg2 text-xs">
-        Your accounts are private. Choose one for your sessions in this
-        organization.
-      </p>
-      <NativeBrowserAvailability provider={agent.id} />
-      {snapshot.error && (
-        <div className="flex items-center justify-between gap-3">
-          <p className="text-red-primary text-xs" role="alert">
-            {connectionErrorMessage(snapshot.error)}
-          </p>
-          <Button variant="ghost" onClick={() => void snapshot.refresh()}>
-            Retry
-          </Button>
-        </div>
-      )}
-      {matching.map((credential) => {
-        const isSelected = connection?.credentialId === credential.id;
-        const health = isSelected ? connection?.health : undefined;
-        const ready = readyCredential?.id === credential.id;
-        const reconnect = isSelected && (credential.revoked || health?.status === "expired" ||
-          health?.status === "expiring" || health?.status === "credential_unavailable");
-        // Health is the selected source's last observation, never a model or
-        // refresh grant. N-1 servers leave it absent; do not invent readiness.
-        const status = !isSelected ? "Saved" : !health ? "Selected · Status unavailable"
-          : health.status === "ready" ? ready ? "Connected" : "Account changed"
-          : ({ not_selected: "Status unavailable", consent_required: "Permission required",
-              credential_unavailable: "Account unavailable", credential_changed: "Account changed",
-              expiring: "Connection expires soon", expired: "Connection expired" })[health.status];
-        return (
-          <div
-            key={credential.id}
-            className="border-border1 flex flex-col gap-3 border-b py-3"
-          >
-            <div className="flex items-center justify-between gap-3">
-            <div className="min-w-0">
-              <div className="text-fg1 truncate text-sm">
-                {credential.displayName}
-              </div>
-              <div className="text-fg2 text-xs">
-                {status} ·{" "}
-                {credential.connectionMethod === "account" ||
-                !credential.kind.endsWith("api-key")
-                  ? "Account"
-                  : "API"}
-              </div>
-            </div>
-            <div className="flex shrink-0 gap-2">
+    <>
+      <SettingsGroup title={agent.name} aria-label={agent.name}>
+        {matching.map((credential) => {
+          const isSelected = connection?.credentialId === credential.id;
+          const health = isSelected ? connection?.health : undefined;
+          const ready = readyCredential?.id === credential.id;
+          const reconnect = isSelected && (credential.revoked || health?.status === "expired" ||
+            health?.status === "expiring" || health?.status === "credential_unavailable");
+          // Health is the selected source's last observation, never a model or
+          // refresh grant. N-1 servers leave it absent; do not invent readiness.
+          const status = !isSelected ? "Saved" : !health ? "Selected · Status unavailable"
+            : health.status === "ready" ? ready ? "Connected" : "Account changed"
+            : ({ not_selected: "Status unavailable", consent_required: "Permission required",
+                credential_unavailable: "Account unavailable", credential_changed: "Account changed",
+                expiring: "Connection expires soon", expired: "Connection expired" })[health.status];
+          const kind = credential.connectionMethod === "account" ||
+            !credential.kind.endsWith("api-key") ? "Account" : "API";
+          return (
+            <SettingsRow
+              key={credential.id}
+              leading={
+                <Avatar aria-hidden>
+                  <AvatarFallback>{initialsOf(credential.displayName)}</AvatarFallback>
+                </Avatar>
+              }
+              label={<span className="block truncate">{credential.displayName}</span>}
+              hint={`${status} · ${kind}`}
+            >
+              {/* One control height per row: both 24px. */}
               <Button
-                variant="ghost"
+                variant="secondary"
+                size="compact"
                 disabled={busy}
                 onClick={() => configure(credential, reconnect)}
               >
                 {reconnect ? "Reconnect" : isSelected ? "Configure" : "Use account"}
               </Button>
-              {isSelected ? (
-                <Button
-                  variant="ghost"
-                  disabled={busy}
-                  onClick={() => void disconnect()}
-                >
-                  Disconnect
-                </Button>
-              ) : (
-                <Button
-                  variant="ghost"
-                  disabled={busy}
-                  onClick={() => void remove(credential)}
-                >
-                  Remove
-                </Button>
-              )}
-            </div>
-            </div>
-          </div>
-        );
-      })}
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <IconButton
+                    size="compact"
+                    label={`More actions for ${credential.displayName}`}
+                    disabled={busy}
+                  >
+                    <Ellipsis />
+                  </IconButton>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end">
+                  {isSelected ? (
+                    <DropdownMenuItem
+                      variant="destructive"
+                      disabled={busy}
+                      onSelect={() => void disconnect()}
+                    >
+                      Disconnect
+                    </DropdownMenuItem>
+                  ) : (
+                    <DropdownMenuItem
+                      variant="destructive"
+                      disabled={busy}
+                      onSelect={() => void remove(credential)}
+                    >
+                      Remove
+                    </DropdownMenuItem>
+                  )}
+                </DropdownMenuContent>
+              </DropdownMenu>
+            </SettingsRow>
+          );
+        })}
+        {matching.length === 0 ? (
+          <SettingsRow label="Not connected" hint={`For ${agent.name} in cloud sessions.`}>
+            <Button
+              variant="secondary"
+              size="compact"
+              onClick={() => configure(null)}
+              disabled={!snapshot.data || busy}
+            >
+              Connect
+            </Button>
+          </SettingsRow>
+        ) : (
+          <SettingsAddRow
+            label="Add account"
+            onClick={() => configure(null)}
+            disabled={!snapshot.data || busy}
+          />
+        )}
+      </SettingsGroup>
       <CloudCredentialRemovalDialog state={removal.state} active={surfaceActive && removal.current()}
         busy={removal.busy} onDecision={action => { void removal.decide(action); }} />
       <ProviderConnectionDialog
@@ -452,14 +495,12 @@ function CloudProviderConnection({
             />
             {method === "account" && agent.id === "claude" && (
               <p className="text-fg2 text-xs">
-                Run <code>claude setup-token</code> and paste the token here.
-                Add another account to use a different subscription.
+                Run <code>claude setup-token</code> and paste the token.
               </p>
             )}
             {method === "account" && agent.id === "codex" && (
               <p className="text-fg2 text-xs">
-                Enable device code authorization in ChatGPT Settings → Security.
-                Connect, then enter the code on the verification page.
+                Turn on device codes in ChatGPT Settings → Security.
               </p>
             )}
             {method === "account" && agent.id === "cursor" && (
@@ -517,8 +558,8 @@ function CloudProviderConnection({
           </div>
         )}
         <p className="text-fg2 text-xs">
-          Connecting stores this account encrypted in the cloud for your sessions
-          on Zeros-managed computers in this organization, until you disconnect.
+          Stored encrypted for your cloud sessions in this organization until you
+          disconnect.
         </p>
         <div className="flex justify-end gap-2">
           {busy && authStatus && (
@@ -541,6 +582,6 @@ function CloudProviderConnection({
           </Button>
         </div>
       </ProviderConnectionDialog>
-    </section>
+    </>
   );
 }

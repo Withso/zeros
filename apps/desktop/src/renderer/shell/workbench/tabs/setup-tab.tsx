@@ -73,6 +73,7 @@ import { createTerminalResizeScheduler } from "../../terminal/terminal-resize-sc
 import { isUsableTerminalDimensions } from "../../terminal/terminal-dimensions";
 import { useWorkbenchStatusSource } from "../tab-status";
 import { Stack } from "@/renderer/shared/ui/layout/stack";
+import { EmptyState } from "@/renderer/shared/ui/layout/empty-state";
 
 /** How often to re-pull the setup buffer while a run is live. The buffer is the
  *  source of truth; we delta-append, so polling is exact (no dup/gap). */
@@ -638,14 +639,14 @@ const BADGE_LABEL: Record<SetupOutcome, string> = {
   stopped: "Setup stopped",
 };
 
-/** Filled outcome badge — 24px (button height), token bg/fg pair, no icon.
- *  Green for a pass; red for failed AND stopped (per the state-catalog
- *  reference — a neutral yellow for "stopped" is a one-variant change here). */
+/** Outcome badge — the tinted status pair, no icon. Green for a pass; red
+ *  for failed AND stopped (per the state-catalog reference — a neutral yellow
+ *  for "stopped" is a one-variant change here). */
 export function SetupStatusBadge({ outcome }: { outcome: SetupOutcome }) {
   return (
     <Badge
       variant={outcome === "passed" ? "success" : "failure"}
-      className="h-6 font-medium select-none"
+      className="select-none"
     >
       {BADGE_LABEL[outcome]}
     </Badge>
@@ -703,12 +704,11 @@ function SetupStarting() {
   );
 }
 
-// ── Empty states (illustration → action → description) ────
+// ── Empty states (icon → Setup → one line → action) ────
 
-/** Shared empty-state layout: a 1px-stroke illustration centered on top, the
- *  action button, then a one-line description underneath. */
+/** Every Setup state is the shared titled empty state. */
 function SetupEmptyLayout({
-  icon: Icon,
+  icon,
   action,
   description,
 }: {
@@ -717,16 +717,9 @@ function SetupEmptyLayout({
   description: string;
 }) {
   return (
-    <Stack
-      gap={3}
-      align="center"
-      justify="center"
-      className="h-full min-h-0 px-6 text-center"
-    >
-      <Icon className="text-muted-fg size-10" strokeWidth={1} aria-hidden />
-      {action}
-      <div className="text-fg2 max-w-sm text-xs">{description}</div>
-    </Stack>
+    <EmptyState icon={icon} title="Setup" action={action}>
+      {description}
+    </EmptyState>
   );
 }
 
@@ -758,8 +751,7 @@ const LAST_RUN_COPY: Record<SetupOutcome, string> = {
 };
 
 /** Post-restart summary — the durable outcome survived, the streamed log
- *  didn't. Same layout as SetupRunEmpty plus the outcome badge bottom-right
- *  (persistent here: it IS the summary). */
+ *  didn't. The line is the summary, so no badge repeats it. */
 function SetupLastRunEmpty({
   outcome,
   busy,
@@ -770,26 +762,21 @@ function SetupLastRunEmpty({
   onRun: () => void;
 }) {
   return (
-    <>
-      <SetupEmptyLayout
-        icon={SquarePlay}
-        action={
-          <Button
-            variant="secondary"
-            size="sm"
-            disabled={busy}
-            onClick={() => onRun()}
-          >
-            <RotateCw />
-            Run setup again
-          </Button>
-        }
-        description={LAST_RUN_COPY[outcome]}
-      />
-      <div className="absolute right-3 bottom-3">
-        <SetupStatusBadge outcome={outcome} />
-      </div>
-    </>
+    <SetupEmptyLayout
+      icon={SquarePlay}
+      action={
+        <Button
+          variant="secondary"
+          size="sm"
+          disabled={busy}
+          onClick={() => onRun()}
+        >
+          <RotateCw />
+          Run setup again
+        </Button>
+      }
+      description={LAST_RUN_COPY[outcome]}
+    />
   );
 }
 
@@ -804,7 +791,7 @@ function SetupAddEmpty({ onAdd }: { onAdd: () => void }) {
           Add setup script
         </Button>
       }
-      description="This script runs on worktree creation to install dependencies or environment setup."
+      description="Runs when a worktree is created, to install dependencies."
     />
   );
 }

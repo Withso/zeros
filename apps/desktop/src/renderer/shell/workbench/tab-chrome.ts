@@ -12,17 +12,21 @@
 //     bg-bg2 fill is what lets it float above scrolling neighbors (z-20 sits
 //     above the strip's fades at z-10).
 
+// The Zeros Design tab: 6px corners like every tab, a bg1-hover hover that is
+// not the active fill, and medium text only on the active tab.
 export const WORKBENCH_TAB_PILL_BASE_CLS =
-  "relative flex h-7 shrink-0 cursor-pointer items-center overflow-hidden rounded-lg text-xs font-medium transition-none";
+  "relative flex h-7 shrink-0 cursor-pointer items-center overflow-hidden rounded-md text-xs transition-none";
 
 export const WORKBENCH_TAB_PILL_ACTIVE_CLS =
-  "bg-bg2 text-fg1 sticky left-1 right-1 z-20";
+  "bg-bg2 text-fg1 font-medium sticky left-1 right-1 z-20";
 
 export const WORKBENCH_TAB_PILL_INACTIVE_CLS =
-  "text-fg2 data-[hovered=true]:bg-bg2 data-[hovered=true]:text-fg1";
+  "text-fg2 data-[hovered=true]:bg-bg1-hover data-[hovered=true]:text-fg1";
 
-/** Files and terminals share the same title chip and adjacent icon geometry. */
+/** Files and terminals share the same title and adjacent icon geometry. The
+ *  name sits on the bar as plain text, with no edge or fill, on a 28px row so
+ *  its hover hint keeps its target; the actions beside it are the header's
+ *  28px tools. */
 export const WORKBENCH_TITLE_CHIP_CLS =
-  "border-border1 flex min-w-0 items-center gap-1.5 rounded-sm border px-2 py-1";
-export const WORKBENCH_TITLE_ACTION_CLS =
-  "size-6 shrink-0 [&_svg]:size-3.5";
+  "flex h-7 min-w-0 items-center gap-1.5";
+export const WORKBENCH_TITLE_ACTION_CLS = "shrink-0";

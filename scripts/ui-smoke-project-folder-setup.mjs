@@ -3,28 +3,33 @@ import { runCommandPaletteSmoke } from "./ui-smoke-command-palette.mjs";
 import { runKeyboardFocusSmoke } from "./ui-smoke-focus.mjs";
 
 async function expectDialogChrome(dialog, page, { footer = true } = {}) {
+  // The Dialog board: a 16px inset everywhere, a 15/20 title and the compact
+  // 24px IconButton close, centred on the title's first line with its glyph
+  // on the 16px edge (the button reaches 6px into the inset).
   await expect(dialog.locator('[data-slot="dialog-header"]')).toHaveCSS(
-    "padding", "12px 16px 0px",
+    "padding", "16px 16px 0px",
   );
   await expect(dialog.locator('[data-slot="dialog-body"]')).toHaveCSS(
-    "padding", "24px 16px",
+    "padding", "16px",
   );
   const title = dialog.locator('[data-slot="dialog-title"]');
   await expect(title).toHaveCSS("font-size", "15px");
+  await expect(title).toHaveCSS("line-height", "20px");
   const close = dialog.getByRole("button", { name: "Close", exact: true });
-  await expect(close).toHaveCSS("width", "20px");
-  await expect(close).toHaveCSS("height", "20px");
-  await expect(close).toHaveCSS("border-radius", "999px");
+  await expect(close).toHaveCSS("width", "24px");
+  await expect(close).toHaveCSS("height", "24px");
+  await expect(close).toHaveCSS("border-radius", "6px");
   await expect(close.locator("svg")).toHaveCSS("width", "12px");
   await expect(close.locator("svg")).toHaveCSS("height", "12px");
   await expect.poll(() => dialog.evaluate((element) => {
     const row = element.querySelector('[data-slot="dialog-title-row"]').getBoundingClientRect();
     const titleBox = element.querySelector('[data-slot="dialog-title"]').getBoundingClientRect();
     const closeBox = element.querySelector('button[aria-label="Close"]').getBoundingClientRect();
+    const firstLine = titleBox.y + 10;
     return titleBox.right < closeBox.left &&
       Math.abs(titleBox.left - row.left) < 1 &&
-      Math.abs(closeBox.right - row.right) < 1 &&
-      Math.abs(closeBox.y + closeBox.height / 2 - titleBox.y - titleBox.height / 2) < 2;
+      Math.abs(closeBox.right - row.right - 6) < 1 &&
+      Math.abs(closeBox.y + closeBox.height / 2 - firstLine) < 1;
   })).toBe(true);
   await expect(page.locator('[data-slot="dialog-overlay"]')).toHaveCSS(
     "background-color",
@@ -32,8 +37,9 @@ async function expectDialogChrome(dialog, page, { footer = true } = {}) {
   );
   if (footer) {
     const actions = dialog.locator('[data-slot="dialog-footer"]');
-    await expect(actions).toHaveCSS("padding", "10px");
-    await expect(actions).toHaveCSS("border-top-width", "1px");
+    await expect(actions).toHaveCSS("padding", "0px 16px 16px");
+    await expect(actions).toHaveCSS("border-top-width", "0px");
+    await expect(actions).toHaveCSS("column-gap", "8px");
     // Read both rectangles in one frame while the dialog's entrance animates.
     await expect.poll(() => dialog.evaluate((element) => {
       const footerBox = element.querySelector('[data-slot="dialog-footer"]').getBoundingClientRect();

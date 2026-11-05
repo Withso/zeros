@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { CircleAlert, CircleCheck, LoaderCircle, TriangleAlert } from "lucide-react";
+import { CircleAlert, CircleCheck, LoaderCircle, RotateCw, TriangleAlert } from "lucide-react";
 import type {
   SimulatorDevice,
   SimulatorHubSnapshot,
@@ -8,6 +8,8 @@ import type {
 
 import { cn } from "../../shared/ui/cn";
 import { Button } from "../../shared/ui/primitives/button";
+import { IconButton } from "../../shared/ui/primitives/icon-button";
+import { Tooltip } from "../../shared/ui/primitives/tooltip";
 import { ProgressBar } from "../../shared/ui/primitives/progress-bar";
 import { SplitButton } from "../../shared/ui/primitives/split-button";
 import { checkSimulatorsAgain, runSimulatorSetupAction } from "./simulator-actions";
@@ -48,37 +50,33 @@ function ToneIcon({ tone, active }: { tone: SimulatorSetupRow["tone"]; active: b
   }
 }
 
+/** The check is one 32px status row, not a filled card: its icon, what it
+ *  found (the detail follows in fg3), then its fix and a refresh beside it. */
 function SetupStatusRow({ row, active }: { row: SimulatorSetupRow; active: boolean }) {
   const [checking, setChecking] = useState(false);
   const { action } = row;
   return (
-    <div data-simulator-setup={row.tone} className="bg-bg2 flex flex-col gap-2 rounded-md px-3 py-2.5">
-      <div className="flex items-start gap-2">
+    <div data-simulator-setup={row.tone} className="flex flex-col gap-2">
+      <div className="flex min-h-8 items-center gap-2">
         <ToneIcon tone={row.tone} active={active} />
-        <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-          <span aria-live={active ? "polite" : "off"} className="text-fg1 text-xs">
-            {row.message}
-          </span>
-          {row.detail && <span className="text-muted-fg text-2xxs">{row.detail}</span>}
-        </div>
-      </div>
-      {typeof row.progress === "number" && (
-        <div className="flex items-center gap-2">
-          <ProgressBar value={row.progress} aria-label="Download progress" className="flex-1" />
-          <span className="text-muted-fg text-2xxs tabular-nums">{row.progress}%</span>
-        </div>
-      )}
-      {(action || row.checkAgain) && (
-        <div className="flex flex-wrap items-center gap-1.5">
-          {action && (
-            <Button size="compact" onClick={() => void runSimulatorSetupAction(action)}>
-              {action.label}
-            </Button>
-          )}
-          {row.checkAgain && (
-            <Button
-              variant="ghost"
+        <span
+          aria-live={active ? "polite" : "off"}
+          className="min-w-0 flex-1 truncate text-xs leading-4.5"
+          title={row.detail ? `${row.message} ${row.detail}` : row.message}
+        >
+          <span className="text-fg1">{row.message}</span>
+          {row.detail && <span className="text-fg3"> {row.detail}</span>}
+        </span>
+        {action && (
+          <Button size="compact" className="shrink-0" onClick={() => void runSimulatorSetupAction(action)}>
+            {action.label}
+          </Button>
+        )}
+        {row.checkAgain && (
+          <Tooltip label={checking ? "Checking…" : "Check again"}>
+            <IconButton
               size="compact"
+              label="Check again"
               disabled={checking}
               aria-busy={checking || undefined}
               onClick={() => {
@@ -86,9 +84,15 @@ function SetupStatusRow({ row, active }: { row: SimulatorSetupRow; active: boole
                 void checkSimulatorsAgain().finally(() => setChecking(false));
               }}
             >
-              {checking ? "Checking…" : "Check again"}
-            </Button>
-          )}
+              <RotateCw className={cn(checking && "motion-safe:animate-spin")} />
+            </IconButton>
+          </Tooltip>
+        )}
+      </div>
+      {typeof row.progress === "number" && (
+        <div className="flex items-center gap-2">
+          <ProgressBar value={row.progress} aria-label="Download progress" className="flex-1" />
+          <span className="text-muted-fg text-2xxs tabular-nums">{row.progress}%</span>
         </div>
       )}
     </div>

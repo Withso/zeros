@@ -1,4 +1,5 @@
 import { useOrganizationProjects } from "../state/use-organization-projects";
+import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 // ============================================
 // COMPONENT: AppSidebar
 // PURPOSE: The app's single left navigation — window chrome, organization,
@@ -159,19 +160,21 @@ import { useResizeHint } from "./use-resize-hint";
 import { warmWorkspaceFiles } from "./workspace-files-cache";
 import { resolveRepoWorkspaceDestination } from "./workspace-tabs";
 import { Surface } from "@/renderer/shared/ui/layout/surface";
+import { Avatar, AvatarFallback } from "@/renderer/shared/ui/primitives/avatar";
+import { initialsOf } from "@/renderer/shared/lib/initials";
 
 // --- CONSTANTS ---
 
 // One shared destination-row shape, mirroring the Settings rail's entry
 // (settings-page.tsx SIDEBAR_ENTRY_CLS) so both navigations read as the same
-// control: fg2 at rest, fg1 on the lifted --sidebar-bg-hover when selected.
-// Destinations are 30px; repository, folder and workspace rows are 32px.
-// Selection is colour-only; rows never shift width. Icons are 14px via the
-// primitive's own `[&_svg]:` selector so twMerge drops its default size.
+// control: 32px, fg2 at rest on the surface hover, fg1 on bg2-highlight when
+// selected. Icons are 14px on fg3 at the 16px icon column (8px list inset +
+// 8px padding, no border); selection lifts them to fg2. Rows never shift
+// width. `[&_svg]:` beats the primitive's own icon size through twMerge.
 const SIDEBAR_ENTRY_CLS =
-  "flex h-7.5 w-full min-w-0 items-center justify-start gap-2.5 rounded-md border-0 bg-transparent px-2.5 py-0 text-left text-xs font-normal text-fg2 transition-colors duration-150 ease-out hover:bg-(--surface-hover) hover:text-fg2 data-[state=active]:bg-(--surface-hover) data-[state=active]:text-fg1 data-[state=active]:hover:text-fg1 [&_svg]:size-3.5 [&>svg]:shrink-0 [&>svg]:text-fg2 data-[state=active]:[&>svg]:text-fg1";
-// The list's section label: 12px on the default fg2 tier.
-const SECTION_LABEL_CLS = "select-none truncate text-3xxs text-fg2";
+  "flex h-8 w-full min-w-0 items-center justify-start gap-2 rounded-md border-0 bg-transparent px-2 py-0 text-left text-xs leading-4.5 font-normal text-fg2 transition-colors duration-120 ease-out hover:bg-(--surface-hover) hover:text-fg1 data-[state=active]:bg-bg2-highlight data-[state=active]:text-fg1 data-[state=active]:hover:bg-bg2-highlight [&_svg]:size-3.5 [&>svg]:shrink-0 [&>svg]:text-fg3 data-[state=active]:[&>svg]:text-fg2";
+// The list's section label: 12/16 medium on fg3, like Settings' group labels.
+const SECTION_LABEL_CLS = "select-none truncate text-3xxs leading-4 font-medium text-fg3";
 // The sidebar never squeezes the workspace below its column floors
 // (conversation 360px + workbench 200px + seams); the persisted width is a
 // preference, this cap is the live window's constraint.
@@ -243,16 +246,6 @@ function useNativeRuntimeNotice(): void {
   }, [nativeRuntime.status]);
 }
 
-/** Initials for the profile avatar — first letters of the first two words
- *  of the display name (falls back to the email's first letter). */
-function profileInitials(name: string | null, email: string | null): string {
-  const source = (name ?? "").trim() || (email ?? "").trim();
-  if (!source) return "·";
-  const words = source.split(/\s+/).filter(Boolean);
-  const first = words[0]?.[0] ?? "";
-  const second = words.length > 1 ? (words[1][0] ?? "") : "";
-  return (first + second).toUpperCase() || "·";
-}
 
 // --- ROOT COMPONENT ---
 
@@ -741,7 +734,7 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
             The Internal memory summary raises the floor to fit its label. */}
         <div
           data-tauri-drag-region
-          className="flex h-10 shrink-0 items-center gap-1 pr-2"
+          className="flex h-10 shrink-0 items-center gap-1 pr-3"
         >
           <div className={TRAFFIC_LIGHT_RESERVE_CLS} aria-hidden="true" />
           <SidebarToggleButton collapsed={false} />
@@ -828,7 +821,7 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
         />
 
         {/* The section label stays quiet; its filter control owns the menu. */}
-        <div className="group/section mx-2 mt-2 flex h-8 shrink-0 items-center gap-1 pr-1 pl-2.5">
+        <div className="group/section mx-2 mt-3 flex h-8 shrink-0 items-center gap-1 pr-1 pl-2">
           <span className={cn(SECTION_LABEL_CLS, "min-w-0 flex-1")}>
             Workspaces
           </span>
@@ -847,7 +840,7 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
 
         <div
           ref={listRef}
-          className="min-h-0 flex-1 overflow-y-auto px-2 pb-2"
+          className="min-h-0 flex-1 overflow-y-auto px-2 pt-1 pb-2"
           aria-label={
             groupedList ? "Workspaces grouped by repository"
               : listFilter === "status" ? "Workspaces grouped by status" : "Workspaces"
@@ -869,7 +862,7 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
                 return (
                   <React.Fragment key={entry.key}>
                     <Button type="button" variant="ghost"
-                      className={cn(SIDEBAR_ENTRY_CLS, "group/status h-8 gap-2 px-2 font-medium")}
+                      className={cn(SIDEBAR_ENTRY_CLS, "group/status font-medium")}
                       data-sidebar-status={entry.status.value}
                       aria-expanded={!collapsed} aria-controls={groupId}
                       onClick={() => setSidebarStatusCollapsed(entry.status.value, !collapsed)}>
@@ -900,7 +893,7 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
                     key={entry.key}
                     type="button"
                     variant="ghost"
-                    className={cn(SIDEBAR_ENTRY_CLS, "h-8")}
+                    className={SIDEBAR_ENTRY_CLS}
                     data-sidebar-folder={entry.project.id}
                     data-state={selected ? "active" : "inactive"}
                     aria-current={selected ? "page" : undefined}
@@ -913,7 +906,10 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
                       })
                     }
                   >
-                    <Folder strokeWidth={1.5} />
+                    {/* The 16px box puts the name on the rows' 40px column. */}
+                    <span className={cn("inline-flex size-4 shrink-0 items-center justify-center", selected ? "text-fg2" : "text-fg3")} aria-hidden="true">
+                      <Folder strokeWidth={1.5} />
+                    </span>
                     <span className="truncate">{entry.project.name}</span>
                   </Button>
                 );
@@ -954,14 +950,17 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
                 role="status"
                 aria-live="polite"
               >
-                <ZerosSpinner size={14} label={`Opening ${pendingOnly.name}`} />
+                <span className="inline-flex size-4 shrink-0 items-center justify-center">
+                  <ZerosSpinner size={14} label={`Opening ${pendingOnly.name}`} />
+                </span>
                 <span className="min-w-0 truncate">{pendingOnly.name}</span>
               </div>
             )}
             {repositoryIds.length > 0 && listedItems.length === 0 && !liveLoading && (
               <div className="flex flex-col items-start gap-1 px-2 py-2 text-xs text-fg3" role="status">
                 <span>No workspaces match this filter</span>
-                <Button variant="ghost" size="compact" onClick={() => setSidebarRepositoryIds(filterOwner, [])}>
+                {/* Pulled left by its padding so the label lines up with the message. */}
+                <Button variant="ghost" size="compact" className="-ml-1.5" onClick={() => setSidebarRepositoryIds(filterOwner, [])}>
                   Clear filter
                 </Button>
               </div>
@@ -969,27 +968,24 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
           </div>
         </div>
 
-        {/* Profile card — identity + the Settings entry point (⌘, works too). */}
-        <div className="border-border1 mx-2 flex shrink-0 items-center gap-2.5 border-t px-1 py-2.5">
-          <span
-            className="bg-bg2-hover text-fg1 text-xxs inline-flex size-6 shrink-0 items-center justify-center rounded-full font-medium"
-            aria-hidden="true"
-          >
-            {profileInitials(displayName, email)}
-          </span>
-          <span className="flex min-w-0 flex-1 flex-col leading-tight">
-            <span className="text-fg1 truncate text-xs">
+        {/* Profile row — identity + the Settings entry point (⌘, works too).
+            A fixed 48px whether or not there is an email line. */}
+        <div className="border-border1 mx-2 flex h-12 shrink-0 items-center gap-2 border-t px-1">
+          <Avatar size="sm" aria-hidden="true">
+            <AvatarFallback>{initialsOf(displayName?.trim() || email)}</AvatarFallback>
+          </Avatar>
+          <span className="flex min-w-0 flex-1 flex-col">
+            <span className="text-fg1 truncate text-xs leading-4">
               {displayName ?? email ?? "Not signed in"}
             </span>
             {displayName && email && (
-              <span className="text-muted-fg truncate text-xs">{email}</span>
+              <span className="text-fg3 truncate text-3xxs leading-4">{email}</span>
             )}
           </span>
-          <Button
+          <IconButton
             type="button"
-            variant="ghost"
-            size="icon-sm"
-            aria-label="Open settings"
+            size="standard"
+            label="Open settings"
             data-state={activePage === "settings" ? "active" : "inactive"}
             className="text-fg2 hover:text-fg1 data-[state=active]:text-fg1 shrink-0"
             onClick={() =>
@@ -997,7 +993,7 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
             }
           >
             <Settings size={16} strokeWidth={1.5} />
-          </Button>
+          </IconButton>
         </div>
       </Surface>
       {/* Right-edge resize seam — a 1px border line with a wider invisible

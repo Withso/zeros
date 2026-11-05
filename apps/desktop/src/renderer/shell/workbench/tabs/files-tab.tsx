@@ -27,6 +27,7 @@
 // ──────────────────────────────────────────────────────────
 
 import React, { useCallback, useMemo, useRef, useState } from "react";
+import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import { File, FolderOpen, FolderTree, Search } from "lucide-react";
 
 import { useActiveWorkspace } from "@/renderer/state/use-active-workspace";
@@ -39,8 +40,9 @@ import { resolveReviewProvider } from "../../pr/review-provider";
 import { isLocalMainWorkspace } from "@/renderer/state/local-main-workspace";
 import { relativeWorkspaceFilePath } from "@/renderer/platform/workspace-file-path";
 import { useWorkspaceDispatch } from "@/renderer/state/store";
-import { Button, Tooltip } from "@/renderer/shared/ui/primitives";
+import { Tooltip } from "@/renderer/shared/ui/primitives";
 import { cn } from "@/renderer/shared/ui/cn";
+import { EmptyState } from "@/renderer/shared/ui/layout/empty-state";
 import { useChatCwd } from "../../use-chat-cwd";
 import { useGitRefreshKey } from "../../use-git-refresh-key";
 import { useOpenFileInWorkbench } from "../use-open-file";
@@ -67,7 +69,6 @@ import {
 } from "./files-sidebar-mode";
 import { treeSelectionMirrorTarget } from "./tree-paths";
 import { Inline } from "@/renderer/shared/ui/layout/inline";
-import { Stack } from "@/renderer/shared/ui/layout/stack";
 import { WorkbenchTabToolbar, useWorkbenchStatusSource } from "../tab-status";
 
 interface TabBodyProps {
@@ -237,14 +238,12 @@ const WorkspaceFilesTab = React.memo(function WorkspaceFilesTab({
           : "Show files"
       }
     >
-      <Button
-        variant="ghost"
-        size="icon-sm"
-        className={cn(
-          "text-fg2 shrink-0",
-          sidebarMode === "tree" && "bg-bg2-hover text-fg1",
-        )}
-        aria-label={
+      <IconButton
+        size="standard"
+        // The open column's toggle fills bg2-highlight, with no edge.
+        pressedTone="fill"
+        className="text-fg2 shrink-0"
+        label={
           sidebarMode === "tree" && layout.hasFile
             ? "Hide file tree"
             : "Show file tree"
@@ -253,25 +252,23 @@ const WorkspaceFilesTab = React.memo(function WorkspaceFilesTab({
         onClick={() => toggleSidebarMode("tree")}
       >
         <FolderTree className="size-3.5" />
-      </Button>
+      </IconButton>
     </Tooltip>
   );
 
   const searchTrigger = (
     <Tooltip label="Search files">
-      <Button
-        variant="ghost"
-        size="icon-sm"
-        className={cn(
-          "text-fg2 shrink-0",
-          sidebarMode === "search" && "bg-bg2-hover text-fg1",
-        )}
-        aria-label="Search files"
+      <IconButton
+        size="standard"
+        // The open column's toggle fills bg2-highlight, with no edge.
+        pressedTone="fill"
+        className="text-fg2 shrink-0"
+        label="Search files"
         aria-pressed={sidebarMode === "search"}
         onClick={() => toggleSidebarMode("search")}
       >
         <Search className="size-3.5" />
-      </Button>
+      </IconButton>
     </Tooltip>
   );
 
@@ -282,21 +279,19 @@ const WorkspaceFilesTab = React.memo(function WorkspaceFilesTab({
 
   const directoriesTrigger = directoriesAvailable ? (
     <Tooltip label="Working folders">
-      <Button
-        variant="ghost"
-        size="icon-sm"
-        className={cn(
-          "text-fg2 shrink-0",
-          sidebarMode === "directories" && "bg-bg2-hover text-fg1",
-        )}
-        aria-label="Choose working folders"
+      <IconButton
+        size="standard"
+        // The open column's toggle fills bg2-highlight, with no edge.
+        pressedTone="fill"
+        className="text-fg2 shrink-0"
+        label="Choose working folders"
         aria-pressed={sidebarMode === "directories"}
         onPointerEnter={warmWorkingDirectories}
         onFocus={warmWorkingDirectories}
         onClick={() => toggleSidebarMode("directories")}
       >
         <FolderOpen className="size-3.5" />
-      </Button>
+      </IconButton>
     </Tooltip>
   ) : null;
 
@@ -346,21 +341,7 @@ const WorkspaceFilesTab = React.memo(function WorkspaceFilesTab({
               designFilter="exclude-design"
               emptyWorkspaceState={
                 !layout.hasFile ? (
-                  <Stack
-                    gap={3}
-                    align="center"
-                    justify="center"
-                    className="h-full min-h-0 px-6 text-center"
-                  >
-                    <File
-                      className="text-muted-fg size-10"
-                      strokeWidth={1}
-                      aria-hidden
-                    />
-                    <p className="text-fg2 max-w-sm text-xs">
-                      No files in this workspace
-                    </p>
-                  </Stack>
+                  <EmptyState icon={File}>No files in this workspace</EmptyState>
                 ) : undefined
               }
               initialSelectedPath={tab.filePath}
@@ -492,7 +473,7 @@ const WorkspaceFilesTab = React.memo(function WorkspaceFilesTab({
           <WorkbenchTabToolbar>
             <div
               data-testid="files-tree-header"
-              className="border-border1 flex h-9 shrink-0 items-center justify-end gap-2 border-b px-2"
+              className="border-border1 flex h-9 shrink-0 items-center justify-end gap-2 border-b pr-1 pl-3"
             >
               {sidebarActions}
             </div>

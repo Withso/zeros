@@ -28,7 +28,7 @@ describe("AgentControlBar", () => {
     const markup = render({ detail: "Clicking…", escapeHint: true });
     expect(markup).toMatch(/^<div[^>]*role="toolbar"/);
     expect(markup).toContain('aria-label="Codex control"');
-    expect(markup).toContain(">Codex</span>");
+    expect(markup).toContain(">Codex</strong>");
     expect(markup).toContain(">Clicking…</span>");
     expect(markup).toMatch(
       /<button[^>]*aria-label="Stop agent browser work"[^>]*>[\s\S]*Stop<\/button>/,
@@ -42,14 +42,14 @@ describe("AgentControlBar", () => {
     const classes = rootClasses(render());
     expect(classes).toContain("shadow-[var(--shadow-dropdown)]");
     expect(classes).not.toContain("shadow-[var(--shadow-xl)]");
-    expect(classes).toContain("rounded-lg");
+    expect(classes).toContain("rounded-[calc(var(--radius-md)+var(--spacing))]");
   });
 
   it("omits the detail and Esc hint when they do not apply", () => {
     const markup = render({ detail: "", escapeHint: false });
     expect(markup).not.toContain("aria-keyshortcuts");
     expect(markup).not.toContain('data-slot="kbd"');
-    expect(markup.match(/<span/g)).toHaveLength(1);
+    expect(markup).not.toContain("truncate");
   });
 
   it("fades without taking the pointer while hidden", () => {

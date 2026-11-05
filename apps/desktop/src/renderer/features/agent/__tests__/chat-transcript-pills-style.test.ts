@@ -5,7 +5,7 @@
 // pinning the source is how these are held.
 //
 // The settled contracts: concise by default, full on right-click, added state as
-// a Button variant, no open/closed or budget chrome, transcript-only hover, and
+// the pressed control Pill, no open/closed or budget chrome, transcript-only hover, and
 // a live pill paired with a fixed chip.
 
 import { readFileSync } from "node:fs";
@@ -44,8 +44,8 @@ const pills = () =>
   code("apps/desktop/src/renderer/features/agent/chat-transcript-pills.tsx");
 const preview = () =>
   code("apps/desktop/src/renderer/features/agent/chat-transcript-preview.tsx");
-const button = () =>
-  code("apps/desktop/src/renderer/shared/ui/primitives/button.tsx");
+const pill = () =>
+  code("apps/desktop/src/renderer/shared/ui/primitives/pill.tsx");
 
 /** The body of the pill's right-click menu, so ordering assertions aren't
  *  confused by the import block at the top of the file. */
@@ -164,27 +164,28 @@ describe("the menu is reachable without a pointer", () => {
   });
 });
 
-describe("the added state is a Button variant, not an override", () => {
-  it("selects a variant rather than restyling with className", () => {
-    expect(pills()).toContain(
-      'variant={attached ? "secondary-on" : "secondary"}',
-    );
+describe("the added state is the Button's pressed state, not an override", () => {
+  it("presses the shared control Pill rather than restyling with className", () => {
+    expect(pills()).toContain("<Pill");
+    expect(pills()).toContain("aria-pressed={attached}");
   });
 
-  it("the variant exists and lifts BOTH fill and border", () => {
+  it("the pressed state lifts BOTH fill and border", () => {
     // Three independent signals (fill, border, the brand glyph) so it survives
     // the light theme and does not depend on colour alone.
-    const src = button();
-    expect(src).toContain('"secondary-on":');
-    expect(src).toContain("border-border4");
-    expect(src).toContain("bg-bg2-highlight");
+    const src = pill();
+    expect(src).toContain("aria-pressed:border-border4");
+    expect(src).toContain("aria-pressed:bg-bg2-highlight");
   });
 
   it("does not overload the focus ring token for the pressed state", () => {
     // highlighted-bright IS the focus signal. Using it here would make a
     // focused-but-off pill and an on-but-unfocused pill look identical.
-    const variant = button().split('"secondary-on":')[1]?.split("},")[0] ?? "";
-    expect(variant).not.toContain("highlighted-bright");
+    const pressed = pill()
+      .split(/\s+/)
+      .filter((token) => token.includes("aria-pressed:"));
+    expect(pressed.length).toBeGreaterThan(0);
+    expect(pressed.join(" ")).not.toContain("highlighted-bright");
   });
 
   it("never fills a pill with the Primary surface", () => {
@@ -356,7 +357,7 @@ describe("row geometry", () => {
   });
 
   it("keeps the pills on the 24px control step", () => {
-    expect(pills()).toContain('size="sm"');
+    expect(pills()).toContain('size="control"');
   });
 
   it("groups them for assistive tech without adding six tab stops of chrome", () => {
@@ -365,16 +366,16 @@ describe("row geometry", () => {
     expect(src).toContain('aria-label="Add chat transcripts"');
   });
 
-  // Button's base class pins `[&_svg]:size-4` on every descendant svg. AgentIcon
+  // The control Pill pins `[&_svg]:size-3.5` on every descendant svg. AgentIcon
   // sizes its wrapper span and leaves the mark on `width="1em"`, which CSS
-  // outranks — so inside a Button the `size` prop moves the box and NOT the ink,
-  // and the logo sat at 16px against a 13px label (~9.3px cap) through two
+  // outranks — so inside the pill the `size` prop moves the box and NOT the ink,
+  // and the logo sat larger than the 13px label (~9.3px cap) through two
   // rounds of "make it smaller". The class is the only thing that moves it.
-  it("overrides Button's 16px svg floor so the logo tracks the label", () => {
+  it("overrides the Pill's svg floor so the logo tracks the label", () => {
     const src = pills();
     expect(src).toContain('const LOGO_CLASS = "[&_svg]:size-2.5"');
     // …and it has to reach the pill, not just exist.
-    expect(src).toContain('cn("max-w-[14.5rem] gap-1.5", LOGO_CLASS)');
+    expect(src).toContain('cn("gap-1.5", LOGO_CLASS)');
   });
 
   // A `size-*` on a glyph inside the pill loses to LOGO_CLASS's descendant

@@ -155,7 +155,7 @@ export async function runComposerSuggestionsSmoke({ page, check, harnessBase }) 
     await skill.getByRole("button", { name: /^Open / }).click();
     expect((await activeTab()).skillSource).toMatchObject({ agentId: "claude", path: "/home/fixture/.claude/skills/library-review/SKILL.md" });
     await expect(viewer.getByRole("heading", { name: "Library source", exact: true })).toBeVisible();
-    await viewer.getByRole("button", { name: "Code", exact: true }).click();
+    await viewer.getByRole("tab", { name: "Code", exact: true }).click();
     await expect(viewer).toContainText("# Library source");
     expect(await page.evaluate(() => window.__composerActionCalls.filter(op => op === "skills_list" || op === "skills.list")))
       .toEqual([label === "cloud" ? "skills.list" : "skills_list"]);
@@ -173,9 +173,9 @@ export async function runComposerSuggestionsSmoke({ page, check, harnessBase }) 
     await expect(attachment.getByRole("button", { name: "Open notes.md", exact: true })).toBeEnabled();
     await attachment.getByRole("button", { name: "Open notes.md", exact: true }).click();
     await expect(viewer.getByRole("heading", { name: "Chat attachment", exact: true })).toBeVisible();
-    await viewer.getByRole("button", { name: "Code", exact: true }).click();
+    await viewer.getByRole("tab", { name: "Code", exact: true }).click();
     await expect(viewer.locator(".cm-content")).toContainText("# Chat attachment");
-    await viewer.getByRole("button", { name: /^preview$/i }).click();
+    await viewer.getByRole("tab", { name: "Preview", exact: true }).click();
     await expect(viewer.getByRole("heading", { name: "Chat attachment", exact: true })).toBeVisible();
     check(`${label}: composer Markdown attachments retain Preview and Code in their file tab`, true);
   }

@@ -40,7 +40,7 @@ export const MarkdownCodeBlock = memo(function MarkdownCodeBlock({
       <HighlightedCode
         code={body}
         lang={lang || "text"}
-        className="text-fg1 overflow-x-auto px-4 py-3 font-mono text-xs leading-[1.6] [&_code]:!bg-transparent [&_pre]:!bg-transparent"
+        className="text-fg1 overflow-x-auto px-4 py-3 font-mono text-xs leading-5 [&_code]:!bg-transparent [&_pre]:!bg-transparent"
       />
     </div>
   );

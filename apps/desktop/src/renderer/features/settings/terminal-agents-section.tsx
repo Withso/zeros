@@ -31,6 +31,7 @@ import {
   SelectValue,
 } from "../../shared/ui/primitives/select";
 import { toast } from "../../shared/ui/primitives/elements";
+import { Tabs, TabsList, TabsTrigger } from "../../shared/ui/primitives/tabs";
 import { cn } from "@/renderer/shared/ui/cn";
 import { SettingsRow, SettingsField, SettingsActions } from "./settings-ui";
 import { AgentIcon } from "../agent/agent-icon";
@@ -195,7 +196,7 @@ export function TerminalAgentsSection() {
   };
 
   return (
-    <section className="flex flex-col gap-6">
+    <section className="flex flex-col gap-8">
       <DefaultAgentRow
         agents={ordered}
         defaultId={defaultId}
@@ -252,7 +253,7 @@ function DefaultAgentRow({
         value={defaultId ?? NONE}
         onValueChange={(v) => onChange(v === NONE ? null : v)}
       >
-        <SelectTrigger>
+        <SelectTrigger width="fixed">
           <SelectValue placeholder="Pick an agent…" />
         </SelectTrigger>
         <SelectContent>
@@ -270,9 +271,8 @@ function DefaultAgentRow({
 
 // ── Tab strip ────────────────────────────────────────────
 
-const TAB_CLS =
-  "-mb-px inline-flex h-9 shrink-0 cursor-pointer items-center gap-1.5 rounded-none border-x-0 border-t-0 border-b-2 bg-transparent px-3 text-sm font-medium transition-colors duration-150 ease-out";
-
+/** The shared segmented control, with Add agent as a 24px Ghost button 8px
+ *  after it. While a new agent is being drafted no tab is selected. */
 function TerminalAgentTabs({
   agents,
   activeId,
@@ -287,59 +287,42 @@ function TerminalAgentTabs({
   onAdd(): void;
 }) {
   return (
-    <div className="flex flex-row items-stretch">
-      {/* The bottom border lives on the tab strip ONLY (flex-grows to fill the
-          row), so the baseline never runs under the "+ Add agent" button. */}
-      <div
-        role="tablist"
-        className="border-border1 flex min-w-0 flex-1 flex-row items-center gap-0.5 overflow-x-auto border-b [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
-      >
-        {agents.map((agent) => {
-          const isActive = !creating && activeId === agent.id;
-          return (
-            <button
-              key={agent.id}
-              type="button"
-              role="tab"
-              aria-selected={isActive}
-              onClick={() => onSelect(agent.id)}
-              className={cn(
-                TAB_CLS,
-                isActive
-                  ? "border-fg1 text-fg1"
-                  : "text-fg2 hover:text-fg1 border-transparent",
-              )}
-            >
-              {/* Logo only for agents that carry one; every other agent is
-                  name-only. */}
-              {agent.icon && (
-                <AgentIcon
-                  agentId={agent.id}
-                  iconUrl={agent.icon}
-                  size={14}
-                  monochrome={!isActive}
-                />
-              )}
-              <span>{labelOf(agent)}</span>
-            </button>
-          );
-        })}
+    <Tabs value={creating ? "" : activeId} onValueChange={onSelect}>
+      <div className="flex min-w-0 items-center gap-2">
+        <TabsList
+          aria-label="Terminal agents"
+          className="max-w-full min-w-0 justify-start overflow-x-auto [scrollbar-width:none]"
+        >
+          {agents.map((agent) => {
+            const isActive = !creating && activeId === agent.id;
+            return (
+              <TabsTrigger key={agent.id} value={agent.id} className="shrink-0">
+                {/* Logo only for agents that carry one; every other agent is
+                    name-only. */}
+                {agent.icon && (
+                  <AgentIcon
+                    agentId={agent.id}
+                    iconUrl={agent.icon}
+                    size={14}
+                    monochrome={!isActive}
+                  />
+                )}
+                <span>{labelOf(agent)}</span>
+              </TabsTrigger>
+            );
+          })}
+        </TabsList>
+        <Button
+          variant="ghost"
+          size="compact"
+          onClick={onAdd}
+          className={cn("shrink-0", creating ? "text-fg1" : "text-fg2")}
+        >
+          <Plus aria-hidden="true" />
+          Add agent
+        </Button>
       </div>
-
-      {/* "+ Add agent" sits OUTSIDE the bordered strip (no underline beneath
-          it), pinned at the right end. New agents append at the end. */}
-      <button
-        type="button"
-        onClick={onAdd}
-        className={cn(
-          "inline-flex h-9 shrink-0 cursor-pointer items-center gap-1.5 px-3 text-sm font-medium transition-colors duration-150 ease-out",
-          creating ? "text-fg1" : "text-fg2 hover:text-fg1",
-        )}
-      >
-        <Plus className="size-3.5" aria-hidden="true" />
-        Add agent
-      </button>
-    </div>
+    </Tabs>
   );
 }
 

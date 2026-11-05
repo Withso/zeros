@@ -210,9 +210,7 @@ function ConflictDraft({
                   key={choice}
                   type="button"
                   size="sm"
-                  variant={
-                    choices[conflict.id] === choice ? "secondary-on" : "ghost"
-                  }
+                  variant="ghost"
                   aria-pressed={choices[conflict.id] === choice}
                   disabled={busy || saved}
                   title={

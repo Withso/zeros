@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import { ChevronDown, RefreshCw, Search } from "lucide-react";
 import type { CloudComputerRepository } from "../../features/settings/cloud-computer-v2-create-gate";
 import { Button, GithubIcon } from "../../shared/ui";
@@ -233,11 +234,10 @@ export function CloudComputerSourcePicker({
             <span className="max-w-[100px] truncate">{repository?.name}</span>
           </span>
           <Tooltip label="Refresh sources">
-            <Button
+            <IconButton
               type="button"
-              variant="ghost"
-              size="icon-sm"
-              aria-label="Refresh sources"
+              size="standard"
+              label="Refresh sources"
               disabled={branches.refreshing || prs.refreshing}
               onClick={() => {
                 branches.refresh();
@@ -245,7 +245,7 @@ export function CloudComputerSourcePicker({
               }}
             >
               <RefreshCw className="size-3.5" />
-            </Button>
+            </IconButton>
           </Tooltip>
         </div>
         <Tabs

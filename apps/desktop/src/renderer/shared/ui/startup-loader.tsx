@@ -2,12 +2,14 @@ import { useEffect, useLayoutEffect } from "react";
 
 export const STARTUP_LOADER_ID = "zeros-boot";
 
-const STARTUP_LOGO_HALFTONE_LAYERS = [
-  "base",
-  "dots",
-  "checks",
-  "hatch",
-  "blocks",
+/** The Island Z's four rows as mask cells, each repeating every four cells so
+ * the Weave's first and last frames are the resting Z. index.html carries the
+ * same rows (a test keeps them equal) and the critical styles. */
+export const STARTUP_LOGO_WEAVE_ROWS = [
+  { className: "zeros-boot-row-r", d: "M-4 0h1v1h-1ZM-2 0h3v1h-3ZM2 0h2v1h-2Z" },
+  { className: "zeros-boot-row-l zeros-boot-beat-1", d: "M2 1h1v1h-1ZM6 1h1v1h-1Z" },
+  { className: "zeros-boot-row-r zeros-boot-beat-2", d: "M-3 2h1v1h-1ZM1 2h1v1h-1Z" },
+  { className: "zeros-boot-row-l zeros-boot-beat-3", d: "M0 3h2v1h-2ZM3 3h3v1h-3ZM7 3h1v1h-1Z" },
 ] as const;
 
 const useClientLayoutEffect =
@@ -56,16 +58,20 @@ export function StartupLogoLoader() {
       aria-live="polite"
       aria-label="Loading Zeros"
     >
-      <span className="zeros-boot-logo" aria-hidden="true">
-        <span className="zeros-boot-halftone">
-          {STARTUP_LOGO_HALFTONE_LAYERS.map((layer) => (
-            <span
-              className={`zeros-boot-halftone-layer zeros-boot-halftone--${layer}`}
-              key={layer}
-            />
-          ))}
-        </span>
-      </span>
+      <svg className="zeros-boot-mark" viewBox="0 0 4 4" aria-hidden="true">
+        <defs>
+          <linearGradient id="zeros-boot-fade" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0" style={{ stopColor: "var(--zeros-boot-top)" }} />
+            <stop offset="1" style={{ stopColor: "var(--zeros-boot-bottom)" }} />
+          </linearGradient>
+          <mask id="zeros-boot-weave" maskUnits="userSpaceOnUse" x="0" y="0" width="4" height="4">
+            {STARTUP_LOGO_WEAVE_ROWS.map((row) => (
+              <path key={row.d} fill="white" className={row.className} d={row.d} />
+            ))}
+          </mask>
+        </defs>
+        <rect width="4" height="4" mask="url(#zeros-boot-weave)" fill="url(#zeros-boot-fade)" />
+      </svg>
     </div>
   );
 }

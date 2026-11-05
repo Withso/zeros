@@ -9,6 +9,7 @@ import React, {
   useRef,
   useState,
 } from "react";
+import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import { createPortal } from "react-dom";
 import type { BrowserAppearance } from "@zeros/protocol/browser-tools";
 import { workspacePreviewAvailable } from "../../../platform/cloud-workspace-access";
@@ -532,8 +533,10 @@ function NativeAgentBrowserTab({ tab, active, scope }: BrowserTabProps) {
   const placeholder = blockingOverlayOpen
     ? null
     : surfaceError
-      ? managed
-        ? "Retry to load the preview."
+      ? // In a tab the failure is the one row under the toolbar, with its
+        // Retry; the page area doesn't repeat it.
+        managed
+        ? null
         : surfaceError
       : closed
         ? "This browser session has closed. The agent can open it again."
@@ -546,49 +549,43 @@ function NativeAgentBrowserTab({ tab, active, scope }: BrowserTabProps) {
   return (
     <div className="bg-bg1 flex min-h-0 flex-1 flex-col overflow-hidden">
       <WorkbenchTabToolbar>
-        <PanelHeader size="window" className="h-9">
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            className="text-fg2 hover:text-fg1 size-6 disabled:opacity-40"
+        <PanelHeader size="window" className="h-9 px-1.5">
+          <IconButton
+            size="standard"
             disabled={
               !browserSessionId ||
               browserLocked ||
               activity?.canGoBack === false
             }
             onClick={() => void control("back")}
-            aria-label="Back"
+            label="Back"
           >
             <ChevronLeft size={14} />
-          </Button>
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            className="text-fg2 hover:text-fg1 size-6 disabled:opacity-40"
+          </IconButton>
+          <IconButton
+            size="standard"
             disabled={
               !browserSessionId ||
               browserLocked ||
               activity?.canGoForward === false
             }
             onClick={() => void control("forward")}
-            aria-label="Forward"
+            label="Forward"
           >
             <ChevronRight size={14} />
-          </Button>
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            className="text-fg2 hover:text-fg1 size-6 disabled:opacity-40"
+          </IconButton>
+          <IconButton
+            size="standard"
             disabled={!browserSessionId || browserLocked}
             onClick={() => void control("reload")}
-            aria-label="Reload"
+            label="Reload"
           >
             {activity?.loading ? (
               <ZerosSpinner size={16} />
             ) : (
               <RotateCw size={14} />
             )}
-          </Button>
+          </IconButton>
           <form
             className="min-w-0 flex-1"
             onSubmit={(event) => {
@@ -596,7 +593,7 @@ function NativeAgentBrowserTab({ tab, active, scope }: BrowserTabProps) {
               navigate();
             }}
           >
-            <div className="bg-bg2 focus-within:border-highlighted-bright flex h-6 items-center rounded-sm border border-transparent px-2">
+            <div className="bg-bg2 focus-within:border-highlighted-bright flex h-7 items-center rounded-md border border-transparent px-2">
               {activity?.faviconDataUrl ? (
                 <img
                   src={activity.faviconDataUrl}
@@ -624,7 +621,7 @@ function NativeAgentBrowserTab({ tab, active, scope }: BrowserTabProps) {
                 autoCorrect="off"
                 autoCapitalize="off"
                 placeholder="Search or enter URL"
-                className="text-fg1 placeholder:text-fg3 min-w-0 flex-1 border-0 bg-transparent p-0 text-sm outline-none disabled:cursor-not-allowed"
+                className="text-fg1 placeholder:text-fg3 min-w-0 flex-1 border-0 bg-transparent p-0 text-xs leading-4.5 outline-none disabled:cursor-not-allowed"
               />
             </div>
           </form>
@@ -632,14 +629,12 @@ function NativeAgentBrowserTab({ tab, active, scope }: BrowserTabProps) {
               the agent drives or before it opens a page. */}
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <Button
-                variant="ghost"
-                size="icon-sm"
-                className="text-fg2 hover:text-fg1 data-[state=open]:bg-bg2-hover data-[state=open]:text-fg1 size-6"
-                aria-label="More browser actions"
+              <IconButton
+                size="standard"
+                label="More browser actions"
               >
                 <MoreHorizontal size={14} />
-              </Button>
+              </IconButton>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="min-w-[180px]">
               <DropdownMenuItem
@@ -2244,46 +2239,40 @@ function BrowserChrome({
   );
 
   return (
-    <PanelHeader size="window" className="h-9">
-      <Button
-        variant="ghost"
-        size="icon-sm"
-        className="text-fg2 hover:text-fg1 size-6 disabled:opacity-40"
+    <PanelHeader size="window" className="h-9 px-1.5">
+      <IconButton
+        size="standard"
         disabled={!state.canGoBack}
         onClick={back}
-        aria-label="Back"
+        label="Back"
       >
         <ChevronLeft size={14} />
-      </Button>
-      <Button
-        variant="ghost"
-        size="icon-sm"
-        className="text-fg2 hover:text-fg1 size-6 disabled:opacity-40"
+      </IconButton>
+      <IconButton
+        size="standard"
         disabled={!state.canGoForward}
         onClick={forward}
-        aria-label="Forward"
+        label="Forward"
       >
         <ChevronRight size={14} />
-      </Button>
-      <Button
-        variant="ghost"
-        size="icon-sm"
-        className="text-fg2 hover:text-fg1 size-6"
+      </IconButton>
+      <IconButton
+        size="standard"
         onClick={reload}
-        aria-label="Reload"
+        label="Reload"
       >
         {state.isLoading ? (
           <ZerosSpinner size={16} />
         ) : (
           <RotateCw size={14} />
         )}
-      </Button>
+      </IconButton>
 
       {/* URL omnibox — accepts canonical or scheme-less http(s) addresses. */}
       <form onSubmit={handleSubmit} className="min-w-0 flex-1">
         <div
           className={[
-            "bg-bg2 flex h-6 w-full items-center rounded-sm border border-transparent px-2 transition-colors",
+            "bg-bg2 flex h-7 w-full items-center rounded-md border border-transparent px-2 transition-colors",
             electron ? "focus-within:border-highlighted-bright" : "opacity-60",
           ].join(" ")}
           onMouseDown={(e) => {
@@ -2324,7 +2313,7 @@ function BrowserChrome({
             autoCorrect="off"
             autoCapitalize="off"
             aria-label="Browser URL"
-            className="text-fg1 placeholder:text-fg3 min-w-0 flex-1 border-0 bg-transparent p-0 text-sm outline-none disabled:cursor-not-allowed"
+            className="text-fg1 placeholder:text-fg3 min-w-0 flex-1 border-0 bg-transparent p-0 text-xs leading-4.5 outline-none disabled:cursor-not-allowed"
           />
         </div>
       </form>
@@ -2333,79 +2322,56 @@ function BrowserChrome({
           button does not shift. */}
       {designModeAvailable && (
         <Tooltip label="Design mode" shortcut="⌘⇧D">
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            className={[
-              "size-6",
-              designModeActive
-                ? "bg-bg2-hover text-fg1"
-                : "text-fg2 hover:text-fg1",
-              // Design/Canvas are plain toggles over the live iframe. Avoid a
-              // focus-visible carry-over when focus bounces through the page.
-              "focus-visible:border-transparent focus-visible:ring-0",
-            ].join(" ")}
+          <IconButton
+            size="standard"
+            // Design/Canvas are plain toggles over the live iframe (pressed is
+            // the shared toggle look). Avoid a focus-visible carry-over when
+            // focus bounces through the page.
+            className="focus-visible:border-transparent focus-visible:ring-0"
             onClick={() => setDesignMode(!designModeActive)}
             disabled={!electron || floating}
             aria-pressed={designModeActive}
-            aria-label="Toggle Design Mode"
+            label="Toggle Design Mode"
           >
             <MousePointer2 size={14} />
-          </Button>
+          </IconButton>
         </Tooltip>
       )}
       {localToolsEnabled && (
         <Tooltip label="Canvas mode" shortcut={"⌘\\"}>
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            className={[
-              "size-6",
-              canvasMode
-                ? "bg-bg2-hover text-fg1"
-                : "text-fg2 hover:text-fg1",
-              "focus-visible:border-transparent focus-visible:ring-0",
-            ].join(" ")}
+          <IconButton
+            size="standard"
+            className="focus-visible:border-transparent focus-visible:ring-0"
             onClick={onToggleCanvasMode}
             disabled={floating}
             aria-pressed={canvasMode}
-            aria-label="Toggle Canvas Mode"
+            label="Toggle Canvas Mode"
           >
             <Palette size={14} />
-          </Button>
+          </IconButton>
         </Tooltip>
       )}
       <Tooltip label={floating ? "Stop floating" : "Float preview"}>
-        <Button
-          variant="ghost"
-          size="icon-sm"
-          className={[
-            "size-6",
-            floating ? "bg-bg2-hover text-fg1" : "text-fg2 hover:text-fg1",
-          ].join(" ")}
+        <IconButton
+          size="standard"
           onClick={onToggleFloat}
           disabled={!canFloat}
           aria-pressed={floating}
-          aria-label="Float preview over chat"
+          label="Float preview over chat"
         >
           <PictureInPicture2 size={14} />
-        </Button>
+        </IconButton>
       </Tooltip>
 
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            className={[
-              "text-fg2 hover:text-fg1 size-6",
-              "data-[state=open]:bg-bg2-hover data-[state=open]:text-fg1",
-            ].join(" ")}
+          <IconButton
+            size="standard"
             disabled={!electron}
-            aria-label="More browser actions"
+            label="More browser actions"
           >
             <MoreHorizontal size={14} />
-          </Button>
+          </IconButton>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end" className="min-w-[220px]">
           <DropdownMenuItem onClick={hardReload} disabled={!electron}>
@@ -2429,7 +2395,6 @@ function BrowserChrome({
             </DropdownMenuLabel>
           )}
           <DropdownMenuCheckboxItem
-            indicatorSide="end"
             checked={deviceToolbar}
             disabled={!canShowDeviceToolbar}
             onCheckedChange={(checked) => onToggleDeviceToolbar(checked === true)}

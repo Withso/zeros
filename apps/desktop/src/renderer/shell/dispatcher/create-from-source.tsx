@@ -1,5 +1,6 @@
 // Create records a source; only the Create button performs a workspace action.
 import { useEffect, useMemo, useState } from "react";
+import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import {
   Check,
   ChevronDown,
@@ -340,16 +341,15 @@ export function CreateFromSource({
             </span>
           )}
           <Tooltip label="Refresh sources">
-            <Button
+            <IconButton
               type="button"
-              variant="ghost"
-              size="icon-sm"
-              aria-label="Refresh sources"
+              size="standard"
+              label="Refresh sources"
               onClick={refresh}
               disabled={refreshing}
             >
               <RefreshCw className="size-3.5" />
-            </Button>
+            </IconButton>
           </Tooltip>
         </div>
         <Tabs

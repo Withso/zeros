@@ -8,15 +8,14 @@
 // scattered through the chat. Rule lives in docs/design-system.md
 // (Feedback).
 //
-// Visual recipe (matches the reference screenshots):
+// Visual recipe (the floating family, docs/design-system.md):
 //   • Anchored bottom-right of the viewport, ~24px inset
-//   • Fixed 350px card — every toast is the same width regardless of
-//     text length — bg-bg1, rounded-lg (8px), NO border/ring (just a soft shadow)
-//   • Close × is a ROUND secondary icon button (bg-bg1 + border3, hover
-//     bg2/border4) overlapping the top-left corner
+//   • Fixed 360px card — every toast is the same width regardless of
+//     text length — bg3, border2, 12px corners and the dropdown shadow
+//   • Close × is a 24px IconButton inside the top-right corner
+//   • A status toast leads with its tone's 16px icon; info is blue-primary
 //   • An optional action renders as a PRIMARY button (no icon) BELOW the text
-//   • Message text reads at text-sm, single line by default
-//     but wraps if long
+//   • Title 13/18 medium, description 12/16 fg2; both wrap if long
 //   • Default auto-dismiss after 4s; user can hover-pause
 //   • Errors stay 6s; successes 3s; info 4s
 //
@@ -41,7 +40,10 @@ import { X, CircleCheck, CircleX, TriangleAlert, Info } from "lucide-react";
 import { Toaster as SonnerToaster, toast as sonnerToast, useSonner } from "sonner";
 
 import { cn } from "@/renderer/shared/ui/cn";
+import { FLOATING_SURFACE } from "@/renderer/shared/ui/layout/surface";
+import { MENU_SURFACE_RADIUS } from "@/renderer/shared/ui/menu-surface";
 import { Button } from "@/renderer/shared/ui/primitives/button";
+import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import { createNativeSurfaceOverlayIntent } from "@/renderer/shared/ui/native-surface-overlay";
 
 const toastOverlayIntents = new Map<
@@ -89,7 +91,7 @@ const VARIANT_ICON_TONE: Record<Exclude<ToastVariant, "default">, string> = {
   success: "text-green-primary",
   error: "text-red-primary",
   warning: "text-yellow-primary",
-  info: "text-fg2",
+  info: "text-blue-primary",
 };
 
 function ToastCard({
@@ -105,48 +107,30 @@ function ToastCard({
   return (
     <div
       className={cn(
-        // Fixed 350px width so EVERY toast is the same size regardless of
-        // text length. bg-bg1, 8px radius, NO border and NO ring — just a soft
-        // drop shadow for lift. Any action button sits BELOW the text (not inline).
-        "relative flex w-[350px] items-start gap-3 rounded-lg bg-bg1 px-4 py-3.5 text-sm text-fg1 shadow-[var(--shadow-dropdown)]",
+        "border-border2 text-fg1 relative flex w-90 items-start gap-2.5 border p-3 shadow-[var(--shadow-dropdown)]",
+        FLOATING_SURFACE,
+        MENU_SURFACE_RADIUS,
       )}
     >
-      {/* Close button — a secondary icon button (bg-bg1 + border3, hover
-          bg2/border4) sitting half-on / half-off the top-left corner so it
-          reads as an external affordance, not a card child. Hidden on the
-          stacked-BEHIND toasts while the stack is collapsed — sonner sets
-          data-front="false" + data-expanded="false" on those <li>s — so only
-          the front toast shows a × (the peeking ×'s behind looked odd). On
-          hover the stack expands (data-expanded="true") and every × returns. */}
-      <button
-        type="button"
-        onClick={() => sonnerToast.dismiss(id)}
-        aria-label="Dismiss"
-        className="absolute -left-2 -top-2 inline-flex size-5 items-center justify-center rounded-sm border border-border3 bg-bg1 text-fg1 transition-colors hover:border-border4 hover:bg-bg2 focus-visible:outline-none focus-visible:border-highlighted-bright [[data-front=false][data-expanded=false]_&]:hidden"
-      >
-        <X className="size-3" strokeWidth={2.25} aria-hidden="true" />
-      </button>
-
       {Icon && (
         <Icon
-          className={cn("mt-0.5 size-4 shrink-0", iconTone)}
+          className={cn("mt-px size-4 shrink-0", iconTone)}
           aria-hidden="true"
         />
       )}
-      <div className="min-w-0 flex-1">
-        <div className="font-medium text-fg1 leading-snug break-words">
+      <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+        <div className="text-fg1 text-xs leading-4.5 font-medium break-words">
           {message}
         </div>
         {description && (
-          <div className="mt-0.5 text-xs text-fg2 break-words">
+          <div className="text-fg2 text-3xxs leading-4 break-words">
             {description}
           </div>
         )}
         {action && (
           <Button
-            variant="default"
-            size="sm"
-            className="mt-2.5"
+            variant="primary"
+            className="mt-2"
             onClick={() => {
               action.onClick();
               sonnerToast.dismiss(id);
@@ -156,6 +140,17 @@ function ToastCard({
           </Button>
         )}
       </div>
+      {/* Only the front toast shows its × while the stack is collapsed:
+          sonner marks the stacked-behind <li>s data-front="false" +
+          data-expanded="false". Hover expands the stack and every × returns. */}
+      <IconButton
+        size="compact"
+        label="Dismiss"
+        onClick={() => sonnerToast.dismiss(id)}
+        className="-mt-1 -mr-1 [[data-front=false][data-expanded=false]_&]:hidden"
+      >
+        <X aria-hidden="true" />
+      </IconButton>
     </div>
   );
 }

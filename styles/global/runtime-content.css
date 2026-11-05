@@ -362,16 +362,18 @@
 [data-Zeros-root] .zeros-agent-md a * {
   color: inherit;
 }
+/* The one chat code style: 13/20 mono in a 12 × 16 card with 8px corners,
+   as MarkdownCodeBlock draws its React cards. */
 [data-Zeros-root] .zeros-agent-md pre {
   margin: 14px 0;
-  padding: 14px 16px;
+  padding: 12px 16px;
   background: var(--bg2);
   border: 1px solid var(--border2);
   border-radius: 8px;
   overflow-x: auto;
   font-family: var(--font-mono);
-  font-size: 12px;
-  line-height: 1.6;
+  font-size: 13px;
+  line-height: 20px;
 }
 [data-Zeros-root] .zeros-agent-md pre code {
   padding: 0;

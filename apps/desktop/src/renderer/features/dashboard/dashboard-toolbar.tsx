@@ -4,8 +4,8 @@ import {
   ArrowDownUp,
   ChevronDown,
   Columns3,
-  List,
   Search,
+  TextAlignJustify,
   SlidersHorizontal,
   X,
 } from "lucide-react";
@@ -53,15 +53,18 @@ const DISPLAY_OPTIONS: { value: keyof DashboardDisplay; label: string }[] = [
 
 export function DashboardViewToggle({ view }: { view: DashboardView }) {
   return (
+    // The segmented control: a 28px bg2 track with 24px items; the chosen
+    // item takes the shared segment tokens (bg4 in Dark, bg1 + border2 in
+    // Light), the same pair Tabs uses.
     <div
       role="group"
       aria-label="Dashboard view"
-      className="border-border1 ml-1 flex items-center gap-0.5 rounded-md border p-0.5"
+      className="bg-bg2 flex items-center gap-0.5 rounded-lg p-0.5"
     >
       {(
         [
           { value: "board", label: "Board view", icon: Columns3 },
-          { value: "list", label: "List view", icon: List },
+          { value: "list", label: "List view", icon: TextAlignJustify },
         ] as const
       ).map(({ value, label, icon: Icon }) => (
         <Tooltip key={value} label={label}>
@@ -70,8 +73,9 @@ export function DashboardViewToggle({ view }: { view: DashboardView }) {
             label={label}
             aria-pressed={view === value}
             className={cn(
-              "hover:bg-bg1-hover",
-              view === value && "bg-bg1-hover text-fg1",
+              "hover:bg-transparent",
+              view === value &&
+                "border-(--segment-active-border) bg-(--segment-active-bg) text-fg1 hover:bg-(--segment-active-bg)",
             )}
             onClick={() => updateDashboardPreferences({ view: value })}
           >
@@ -103,10 +107,11 @@ export function DashboardToolbar({
     onOpenChange: (value: boolean) => setMenu(value ? name : null),
   });
   return (
+    // Search leads at up to 280px; the menus keep to the right edge.
     <div className="flex shrink-0 flex-wrap items-center gap-2 px-6 pb-3">
-      <div className="relative min-w-40 flex-1">
+      <div className="relative w-70 min-w-45 shrink">
         <Search
-          className="text-fg3 pointer-events-none absolute top-1.5 left-2 size-4"
+          className="text-fg3 pointer-events-none absolute top-1/2 left-2 size-3.5 -translate-y-1/2"
           aria-hidden="true"
         />
         <Input
@@ -115,7 +120,7 @@ export function DashboardToolbar({
           placeholder="Search workspaces…"
           value={query}
           onChange={(event) => onQueryChange(event.target.value)}
-          className="pr-8 pl-8 text-xs [&::-webkit-search-cancel-button]:appearance-none"
+          className="pr-8 pl-7 [&::-webkit-search-cancel-button]:appearance-none"
           onKeyDown={(event) => {
             if (event.key === "Escape" && query) {
               event.stopPropagation();
@@ -133,12 +138,12 @@ export function DashboardToolbar({
           </IconButton>
         )}
       </div>
-      <div className="flex shrink-0 items-center gap-1">
+      <div className="ml-auto flex shrink-0 items-center gap-1">
         <DropdownMenu {...open("archive")}>
           <DropdownMenuTrigger asChild>
             <Button
               variant="ghost"
-              className="text-fg2 hover:bg-bg1-hover"
+              className="text-fg2"
               aria-label="Archive visibility"
             >
               <Archive />
@@ -173,7 +178,7 @@ export function DashboardToolbar({
           <DropdownMenuTrigger asChild>
             <Button
               variant="ghost"
-              className="text-fg2 hover:bg-bg1-hover"
+              className="text-fg2"
               aria-label="Sort workspaces"
             >
               <ArrowDownUp />
@@ -204,7 +209,7 @@ export function DashboardToolbar({
         </DropdownMenu>
         <DropdownMenu {...open("display")}>
           <DropdownMenuTrigger asChild>
-            <Button variant="ghost" className="text-fg2 hover:bg-bg1-hover">
+            <Button variant="ghost" className="text-fg2">
               <SlidersHorizontal />
               <span>Display</span>
               <ChevronDown className="text-muted-fg" />

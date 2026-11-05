@@ -211,7 +211,7 @@ function TeamSwitcher({
           className="hover:bg-bg2 data-[state=open]:bg-bg2 flex w-fit max-w-full items-center gap-2.5 rounded-lg border-0 bg-transparent py-1.5 pr-2.5 pl-1.5 text-left outline-none"
         >
           <TeamLogo team={active} size={28} />
-          <span className="text-fg1 truncate text-[14px] font-medium">
+          <span className="text-fg1 truncate text-xs leading-4.5 font-medium">
             {active.name}
           </span>
           <ChevronsUpDown className="text-fg2 size-3.5 shrink-0" />
