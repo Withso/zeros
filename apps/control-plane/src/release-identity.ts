@@ -6,6 +6,7 @@ import type { Config } from "./config.js";
 import { withSystemTx } from "./db.js";
 import type { MigrationStatus } from "./migrate.js";
 import { isNewerExpandMigration } from "./migration-phase.js";
+import { runtimeReleaseIdentity } from "./cloud/runtime-release.js";
 
 type LedgerRow = { name: string; checksum: string | null; phase?: string | null };
 type Dependencies = {
@@ -57,10 +58,9 @@ export function createReleaseIdentityRoutes(config: Config, pool: pg.Pool, deps:
     const ready = !!sourceSha && !maintenance && migrations.state === "current";
     const cloud = { enabled: !!config.cloudV2, ready: !config.cloudV2 || ready,
       state: config.cloudV2 ? ready ? "healthy" : "unready" : "disabled" };
-    // Retain the released response shape; v2 distributes a versioned runtime,
-    // so there is no separately qualified VM image.
     return { version: 1 as const, ready, sourceSha, channel: config.deploymentChannel,
-      maintenance, migrations, cloud, worker: null, workerQualified: false };
+      maintenance, migrations, cloud, ...runtimeReleaseIdentity(config.cloudV2?.runtime),
+      runtimeCanaryAdmission: config.deploymentChannel === "alpha" && !!config.cloudV2?.runtimeCanary ? 1 : null };
   }
   app.get("/v1/release-identity", async c => {
     c.header("Cache-Control", "no-store");

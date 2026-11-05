@@ -527,6 +527,79 @@ Cloud runtime publication and VM lifecycle are described in
 [Cloud workspaces](cloud-workspaces.md). Runtime delivery is independent of
 signed desktop artifact publication.
 
+### Runtime release qualification
+
+The app support for runtime-only releases is separate from the owner-merged
+CI-definition/controller PR. Start dispatch-only: the release controller must
+build an exact main commit with successful required CI, publish by SHA-256,
+qualify it on Alpha, then change the pin. Do not use the ordinary publisher's
+retention defaults for this path: use `--no-prune` and retain all active,
+previous and promoted digests with their immutable source manifests and
+qualification receipts. Beta and Production promotion copies and re-hashes
+the same archive; it does not rebuild it.
+
+Apply expand migration `0219_cloud_runtime_canaries.sql` and deploy app
+support before enabling the canary policy. Provision a dedicated fixture
+account with Pro, a separate fixture organization, a connected immutable
+GitHub repository and an already active Cloud Computer. Connect all three
+provider logins for that fixture. It must have no staff or Ops role; its
+membership confers no release or build-drain authority.
+
+Generate a separate Ed25519 canary signing key. Its PKCS#8 private material
+belongs only in the GitHub `alpha` environment as
+`CLOUD_V2_RUNTIME_CANARY_PRIVATE_KEY`. The control plane receives only
+`CLOUD_V2_RUNTIME_CANARY_CONFIG`: `keys` is an array of one or two
+`{id, publicKey}` entries (publicKey is base64 DER SPKI), and `fixture` is
+`{creatorUserId, organizationId, repositoryId}` with the immutable numeric
+repository ID serialized as a string. It rejects canary keys equal to either
+worker-signing key and refuses the canary private-key variable. Beta,
+Production and Dev cannot enable the canary policy.
+
+Rotate by deploying both public keys under distinct IDs, changing the Alpha
+environment's signer to the new private key/ID, then removing the retired
+public key after all old admission grants have expired. Admission lasts at
+most 15 minutes. Already consumed workspace pins remain stable until cleanup;
+do not remove or change the fixture policy while one needs to boot. The
+signer grants nothing outside the exact fixture account, organization,
+repository, create key, run/attempt, source commit and candidate digest.
+
+The app-owned Alpha probe entry point is
+`pnpm --dir apps/control-plane exec tsx src/cloud/runtime-canary-gate0.ts --receipt <private-file>`.
+Pass its private inputs through the Alpha environment, never CLI values or
+logs: `CLOUD_RUNTIME_CANARY_GRANT`, `CLOUD_RUNTIME_CANARY_CLAIMS` (the matching
+JSON claims), `CLOUD_RUNTIME_CANARY_REPOSITORY`, `CLOUD_RUNTIME_RELEASE_CP_SHA`
+and `CLOUD_RUNTIME_RELEASE_PRIOR_SHA256`. Fixture login uses the existing
+`WORKOS_CLIENT_ID` and `WORKOS_API_KEY`, plus
+`CLOUD_RUNTIME_FIXTURE_EMAIL`, `CLOUD_RUNTIME_FIXTURE_PASSWORD`,
+`CLOUD_RUNTIME_FIXTURE_WORKOS_USER_ID` and optional
+`CLOUD_RUNTIME_FIXTURE_WORKOS_ORGANIZATION_ID`. The dedicated signing key
+stays with the controller; the probe only sends the short-lived grant.
+It checks the exact live CP SHA, prior pin and canary capability before
+sign-in and again after cleanup. It uses and revokes only its newly issued
+fixture session and writes an allowlisted receipt only after every check and
+confirmed deletion. An unsupported old control plane is refused before any
+VM starts. The Dev operator probe keeps its existing target restrictions.
+
+The controller must serialize the whole release under `release-<channel>`
+and `hosted-mutation-<channel>` without cancellation. Before staging variables,
+require W's versioned persisted build-drain begin/inspect/end operations via
+the existing channel migration/database authority, in scoped transactions.
+No new HTTP endpoint or CI staff login authorizes a drain. Bind the expiring
+lease to the run, live CP SHA and prior runtime digest, require zero live or
+unresolved claims, and release it on failure. Missing drain support refuses
+pinning. Recheck the live CP SHA and prior pin immediately before the one
+redeploy of the unchanged CP commit. Stage the digest and its matching
+`CLOUD_V2_RUNTIME_RELEASE_METADATA` with Railway `skipDeploys` first.
+
+Always close canary admission and clean up the exact workspace before pin
+authority. A failed/ambiguous create must not later allocate after cleanup:
+the release controller uses its existing database authority to retire that
+run's unused nonce or recover its committed workspace before retrying the
+ordinary fixture DELETE. Never treat a workspace 404 as deletion proof.
+Explicit Beta/Production promotion and rollback require their GitHub
+environment approvals, expected-prior-pin checks and retained Alpha receipt.
+They never edit an organization's recipe or stop user workspaces.
+
 Set GitHub Environment deployment-branch protection too: `alpha` permits only
 `main`; `beta` and `production` permit `release/*`.
 The stable desktop workflow itself rejects `main` and requires an exact

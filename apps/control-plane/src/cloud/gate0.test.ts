@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -9,7 +9,8 @@ import type { Gate0Timing } from "./gate0-transport.js";
 const cleanup: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); });
 
-type Faults = { cancelAck?: "missing" | "request" | "chat" | "state"; completedBeforeStop?: boolean; older?: "anchor" | "wrong"; answer?: string };
+type Faults = { cancelAck?: "missing" | "request" | "chat" | "state"; completedBeforeStop?: boolean; older?: "anchor" | "wrong"; answer?: string;
+  canaryStatus?: "missing" | "wrong" | "inaccessible" | "not-deleted"; wakeRuntime?: false; lostCreate?: true };
 async function fixture(failAgent?: string, protocolVersion = 21, faults: Faults = {}) {
   const id = randomUUID(), organizationId = randomUUID();
   const repository = "example/project", root = `/home/user/${repository}`, branch = "zeros/gate0";
@@ -18,6 +19,11 @@ async function fixture(failAgent?: string, protocolVersion = 21, faults: Faults 
   const sessions = new Map<string, string>(), tickets = new Set<string>(), activePrompts = new Map<string, any>();
   const logs: string[] = [];
   let state = "absent", name = "", staged = false, connections = 0;
+  const canary = { token: "synthetic-runtime-grant", claims: { version: 1 as const, iss: "zeros-runtime-release" as const, aud: "zeros-cloud-runtime-canary" as const,
+    channel: "alpha" as const, jti: randomUUID(), iat: Math.floor(Date.now() / 1000), exp: Math.floor(Date.now() / 1000) + 900,
+    runId: "456", runAttempt: 1, creatorUserId: randomUUID(), organizationId, repositoryId: "42", createKey: randomUUID(),
+    runtimeSha256: "a".repeat(64), sourceSha: "b".repeat(40) } };
+  const canaryHeaders: { path: string; token: string | undefined; key: string | undefined }[] = [];
   const workspace = () => ({ id, organizationId, repository, branch, baseBranch: "master", name, state, boatSandboxId: "bx_23456789" });
   const server = createServer(async (request, response) => {
     const chunks = [];
@@ -25,14 +31,25 @@ async function fixture(failAgent?: string, protocolVersion = 21, faults: Faults 
     const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString()) : undefined;
     const path = request.url!, method = request.method!;
     calls.push({ method, path, body });
+    canaryHeaders.push({ path, token: request.headers["x-zeros-runtime-canary"] as string | undefined, key: request.headers["idempotency-key"] as string | undefined });
     const json = (value: unknown, status = 200) => {
       response.writeHead(status, { "content-type": "application/json" }); response.end(JSON.stringify(value));
     };
     if (request.headers.authorization !== "Bearer synthetic-gate0-access") return json({}, 401);
+    if (path === `/v1/cloud-v2/runtime-canaries/${canary.claims.jti}`) {
+      if (state === "absent" || faults.canaryStatus === "missing" || (faults.canaryStatus === "inaccessible" && state === "deleted")) return json({}, 404);
+      return json({ version: 1, grantId: canary.claims.jti, workspaceId: id, creatorUserId: canary.claims.creatorUserId, organizationId,
+        repositoryId: "42", runId: faults.canaryStatus === "wrong" ? "999" : "456", runAttempt: 1,
+        runtimeSha256: canary.claims.runtimeSha256, sourceSha: canary.claims.sourceSha,
+        grantSha256: createHash("sha256").update(canary.token).digest("hex"), createKeySha256: createHash("sha256").update(canary.claims.createKey).digest("hex"),
+        state: faults.canaryStatus === "not-deleted" ? "running" : state, deleted: faults.canaryStatus !== "not-deleted" && state === "deleted" });
+    }
     if (path.endsWith("/computer/repositories")) return json({ repositories: [{ repository, defaultBranch: "master" }] });
     if (method === "POST" && path === "/v1/cloud-v2/workspaces") {
       expect(request.headers["idempotency-key"]).toBeTypeOf("string");
-      name = body.name; state = "running"; return json({ workspace: workspace() }, 201);
+      name = body.name; state = "running";
+      if (faults.lostCreate) { request.socket.destroy(); return; }
+      return json({ workspace: workspace() }, 201);
     }
     if (method === "GET" && path.startsWith("/v1/cloud-v2/workspaces?")) return json({ workspaces: state === "absent" ? [] : [workspace()] });
     if (method === "GET" && path === `/v1/cloud-v2/workspaces/${id}`) return state === "deleted" ? json({}, 404) : json({ workspace: workspace() });
@@ -93,6 +110,7 @@ async function fixture(failAgent?: string, protocolVersion = 21, faults: Faults 
       }
       if (frame.type === "PTY_CREATE") return reply("PTY_CREATED", { sessionId: frame.sessionId, cwd: root });
       if (frame.type === "PTY_WRITE") {
+        if (faults.wakeRuntime === false && connections > 1) return;
         const marker = /'([a-f0-9-]{36})'/.exec(frame.data)?.[1];
         return send({ type: "PTY_DATA", sessionId: frame.sessionId, data: `zeros-gate0-${marker}:${branch}\r\n` });
       }
@@ -149,10 +167,47 @@ async function fixture(failAgent?: string, protocolVersion = 21, faults: Faults 
   });
   const options = { apiOrigin: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, organizationId, repository,
     accessToken: async () => "synthetic-gate0-access", log: (line: string) => logs.push(line), pollMs: 1, timeoutMs: 2_000 };
-  return { options, calls, frames, logs, sessions, connections: () => connections, state: () => state };
+  return { options, calls, frames, logs, sessions, canary, canaryHeaders, connections: () => connections, state: () => state };
 }
 
 describe("cloud v2 gate0 through a fake HTTP control plane and relay", () => {
+  it("uses one grant-bound create, proves the candidate on create and wake, and requires bound deletion", async () => {
+    const f = await fixture();
+    const result = await runCloudV2Gate0({ ...f.options, runtimeSha: f.canary.claims.runtimeSha256, canary: f.canary });
+    expect(result.deleted).toBe(true);
+    expect(f.canaryHeaders.filter(row => row.token !== undefined)).toEqual([{ path: "/v1/cloud-v2/workspaces", token: f.canary.token, key: f.canary.claims.createKey }]);
+    expect(f.calls.find(row => row.method === "POST" && row.path === "/v1/cloud-v2/workspaces")?.body.name).toBe(`gate0-${f.canary.claims.jti}`);
+    expect(f.frames.filter(frame => frame.type === "PTY_WRITE" && frame.data.includes(`/opt/zeros/runtime/${f.canary.claims.runtimeSha256}`))).toHaveLength(2);
+    expect(f.calls.filter(row => row.path.startsWith("/v1/cloud-v2/runtime-canaries/"))).toHaveLength(2);
+    expect(f.logs.join("\n")).not.toContain(f.canary.token);
+  });
+
+  it.each(["missing", "wrong", "inaccessible", "not-deleted"] as const)("refuses %s canary proof, including a misleading workspace 404", async canaryStatus => {
+    const f = await fixture(undefined, 21, { canaryStatus });
+    await expect(runCloudV2Gate0({ ...f.options, timeoutMs: 100, runtimeSha: f.canary.claims.runtimeSha256, canary: f.canary })).rejects.toThrow();
+    expect(f.state()).toBe("deleted");
+  });
+
+  it("refuses a different runtime after wake and still deletes the candidate", async () => {
+    const f = await fixture(undefined, 21, { wakeRuntime: false });
+    await expect(runCloudV2Gate0({ ...f.options, timeoutMs: 100, runtimeSha: f.canary.claims.runtimeSha256, canary: f.canary })).rejects.toThrow("wake_runtime");
+    expect(f.state()).toBe("deleted");
+  });
+
+  it("recovers an ambiguous create by grant identity without replaying creation", async () => {
+    const f = await fixture(undefined, 21, { lostCreate: true });
+    await expect(runCloudV2Gate0({ ...f.options, runtimeSha: f.canary.claims.runtimeSha256, canary: f.canary })).rejects.toThrow("create");
+    expect(f.state()).toBe("deleted");
+    expect(f.calls.filter(row => row.method === "POST" && row.path === "/v1/cloud-v2/workspaces")).toHaveLength(1);
+    expect(f.calls.some(row => row.path.startsWith("/v1/cloud-v2/workspaces?"))).toBe(false);
+  });
+
+  it.each([{ keep: true }, { agents: ["codex"] as const }, { runtimeSha: undefined }])("refuses a partial or retained canary before creating anything (%j)", async patch => {
+    const f = await fixture();
+    await expect(runCloudV2Gate0({ ...f.options, runtimeSha: f.canary.claims.runtimeSha256, canary: f.canary, ...patch })).rejects.toThrow("canary_configuration");
+    expect(f.calls).toHaveLength(0);
+  });
+
   it("prints each chat's stage durations, including Stop, before stopping the same VM", async () => {
     const f = await fixture();
     const readTimings = vi.fn(async (): Promise<Gate0Timing[]> => {

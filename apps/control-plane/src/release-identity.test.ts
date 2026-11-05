@@ -17,6 +17,27 @@ function harness(overrides: Partial<Config> = {}, ledger: Array<{ name: string; 
 }
 describe("public release readiness", () => {
 
+  it.each(["alpha", "beta", "production"] as const)("advertises canary support only on a configured Alpha (%s)", async deploymentChannel => {
+    const { app } = harness({ deploymentChannel, cloudV2: { runtime: { sha256: "c".repeat(64) }, runtimeCanary: {} } as NonNullable<Config["cloudV2"]> });
+    expect(await (await app.request("/v1/release-identity")).json()).toMatchObject({ runtimeCanaryAdmission: deploymentChannel === "alpha" ? 1 : null });
+  });
+
+  it("reports the live runtime pin without claiming legacy pins were qualified", async () => {
+    const { app } = harness({ cloudV2: { runtime: { sha256: "c".repeat(64) } } as NonNullable<Config["cloudV2"]> });
+    const response = await app.request("/v1/release-identity");
+    expect(await response.json()).toMatchObject({ worker: { sha256: "c".repeat(64), sourceSha: null }, workerQualified: false });
+  });
+
+  it.each([true, false])("binds qualification to the exact live runtime digest (matching=%s)", async matching => {
+    const release = { version: 1, sha256: "c".repeat(64), sourceSha: "d".repeat(40), sourceSha256: "e".repeat(64),
+      qualification: { channel: "alpha", runId: "123456", runAttempt: 1, completedAt: "2026-11-01T10:00:00.000Z",
+        receiptSha256: "f".repeat(64), deleted: true } };
+    const live = matching ? release.sha256 : "a".repeat(64);
+    const { app } = harness({ cloudV2: { runtime: { sha256: live, release } } as unknown as NonNullable<Config["cloudV2"]> });
+    const response = await app.request("/v1/release-identity");
+    expect(await response.json()).toMatchObject({ worker: { sha256: live, sourceSha: matching ? release.sourceSha : null }, workerQualified: matching });
+  });
+
   it("reports a verified exact identity without authentication and shares polls", async () => {
     const { app, readLedger } = harness();
     const [a, b] = await Promise.all([app.request("/v1/release-identity"), app.request("/v1/release-identity")]);

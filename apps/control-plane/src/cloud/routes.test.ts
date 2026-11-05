@@ -46,6 +46,20 @@ function fixture(repositories: { repository: string; defaultBranch: string | nul
 }
 
 describe("cloud v2 creation", () => {
+  it("refuses a canary grant when this deployment has no canary authority", async () => {
+    const f = fixture();
+    const response = await f.app.request("/v1/cloud-v2/workspaces", {
+      method: "POST", headers: { "content-type": "application/json", "idempotency-key": "canary-create",
+        "x-zeros-runtime-canary": "synthetic-untrusted-grant" },
+      body: JSON.stringify({ organizationId: org, repository: "example/project" }),
+    });
+    expect(response.status).toBe(403);
+    expect(await response.json()).toMatchObject({ error: { code: "cloud_runtime_canary_refused" } });
+    expect(f.createWorkspace).not.toHaveBeenCalled();
+    expect(f.createWorkspaceOnce).not.toHaveBeenCalled();
+    expect((await f.create({}, "ordinary-create")).status).toBe(201);
+  });
+
   it.each([false, true])("directs a legacy Computer's %s admin to the rebuild path", async admin => {
     const f = fixture(null);
     f.overview.mockResolvedValue({ activeBuildId: f.buildId });

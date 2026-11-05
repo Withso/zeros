@@ -32,6 +32,8 @@ import { cloudV2SandboxName } from "./resource-names.js";
 import { CloudV2PromptSignals } from "./prompt-signals.js";
 import { createMcpServices } from "../mcp/composition.js";
 import { CloudEnvironments } from "./environment-store.js";
+import { RuntimeCanaryAuthority } from "./runtime-canary.js";
+import { readRuntimeCanary, workspaceRuntimeResolver } from "./runtime-canary-store.js";
 
 const PROXY_TOKEN_TTL_MS = 24 * 60 * 60_000;
 
@@ -72,6 +74,9 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   if (!v2) return null;
   const localOwner = config.development && !("generation" in config.development) ? config.development.owner : undefined;
   const store = new CloudV2Store(pool);
+  const runtime = cloudV2Runtime(v2.runtime.sha256, v2.runtime.store);
+  const runtimeCanary = config.deploymentChannel === "alpha" && v2.runtimeCanary ? new RuntimeCanaryAuthority(v2.runtimeCanary) : undefined;
+  const runtimeForWorkspace = workspaceRuntimeResolver(pool, runtime, runtimeCanary?.policy);
   const compute = new BoatCloudV2Compute(new BoatApiClient({
     apiKey: v2.boat.apiKey, timeoutMs: 120_000, ...(v2.boat.billingOrg ? { billingOrg: v2.boat.billingOrg } : {}),
   }));
@@ -155,6 +160,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     github: { service: github.service, documents: github.documents },
     githubConnections: github.connections,
     environments,
+    ...(runtimeCanary ? { runtimeCanary, runtimeCanaryStatus: (userId: string, grantId: string) => readRuntimeCanary(pool, runtimeCanary.policy, userId, grantId) } : {}),
     bridgeBaseUrl: v2.realtimeUrl,
     promptOutbox: v2.promptOutbox === true,
   };
@@ -174,6 +180,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   const relay = roles.relay ? connections : null;
   const promptSignals = new CloudV2PromptSignals();
   const workers: CloudV2WorkerRouteDeps = { store, timing, logger: console, authorizeSource, continueSource, config: workerConfig, githubToken, runtimeSha256: v2.runtime.sha256,
+    runtimeSha256ForWorkspace: async workspace => (await runtimeForWorkspace(workspace)).sha256,
     environmentReport: (token, bootId, value) => environments.report(token, bootId, value),
     githubCheckout: (token,bootId,value) => github.metadata.checkout(token,bootId,value),
     ...(mcp ? { mcpAuthorization: async (workspace, id, force) =>
@@ -207,7 +214,6 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     },
   });
   void loginChanges?.start().catch(() => {}); // The shared listener retries and re-reads onReady.
-  const runtime = cloudV2Runtime(v2.runtime.sha256, v2.runtime.store);
   const remoteHeads = github.remoteHead;
   const builder = roles.lifecycle ? new CloudV2ComputerBuilder({
     computers, compute, channel: config.deploymentChannel, localOwner, runtime,
@@ -225,6 +231,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     timing,
     compute,
     runtime,
+    runtimeForWorkspace,
     authorizeSource,
     prepareRepository: async (workspace, sandboxId) => {
       const credential = await github.workspaceToken(workspace);
@@ -239,7 +246,8 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     checkpointRetry: v2.checkpointRetry === true,
     publicKeys: signer.publicKeys, sealPortToken: (token, id) => sealPortToken(token, id, keys),
     stopWorker: workspace => connections!.stopWorkspace(workspace),
-    bootEnv: workspace => ({ CLOUD_V2_API_URL: v2.apiUrl, CLOUD_V2_RUNTIME_SHA256: v2.runtime.sha256, ZEROS_WORKSPACE_ID: workspace.id }),
+    bootEnv: async (workspace, selected) => ({ CLOUD_V2_API_URL: v2.apiUrl,
+      CLOUD_V2_RUNTIME_SHA256: (selected ?? await runtimeForWorkspace(workspace)).sha256, ZEROS_WORKSPACE_ID: workspace.id }),
     sandboxName: workspace => cloudV2SandboxName(config.deploymentChannel, "ws", workspace.id, localOwner),
     // Checkpoints share the runtime's bucket, under cloud-v2/checkpoints/.
     checkpoints: {

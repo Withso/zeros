@@ -18,6 +18,7 @@ import { createCloudGithubConnectionRoutes } from "./github-connection-routes.js
 import type { CloudGithubUnavailableReason } from "./github-connection-contract.js";
 import type { CloudEnvironments } from "./environment-store.js";
 import { createCloudEnvironmentRoutes } from "./environment-routes.js";
+import { RUNTIME_CANARY_HEADER, refuseRuntimeCanary, type RuntimeCanaryAuthority, type RuntimeCanaryStatus } from "./runtime-canary.js";
 
 export type CloudGithubWorkspaceDocument = CloudV2Workspace & {
   checkoutPath?: string;
@@ -64,6 +65,8 @@ export type CloudV2RouteDeps = {
   github?: { service: Pick<CloudGithubPrService, "execute">; documents(workspaces: readonly CloudV2Workspace[]): Promise<CloudGithubWorkspaceDocument[]> };
   githubConnections?: CloudGithubConnections;
   environments?: CloudEnvironments;
+  runtimeCanary?: RuntimeCanaryAuthority;
+  runtimeCanaryStatus?(userId: string, grantId: string): Promise<RuntimeCanaryStatus | null>;
 };
 
 function workspaceDocument(workspace: CloudGithubWorkspaceDocument, promptOutbox: boolean) {
@@ -124,6 +127,15 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
     return c.json(await deps.github.service.execute(id.data, c.get("user").id, await c.req.json().catch(() => null)));
   });
 
+  app.get("/v1/cloud-v2/runtime-canaries/:grantId", async c => {
+    c.header("Cache-Control", "no-store");
+    const id = uuid.safeParse(c.req.param("grantId"));
+    const status = id.success && deps.runtimeCanary && deps.runtimeCanaryStatus
+      ? await deps.runtimeCanaryStatus(c.get("user").id, id.data) : null;
+    if (!status) throw new HttpError(404, "not_found", "Runtime canary not found");
+    return c.json(status);
+  });
+
   app.post("/v1/cloud-v2/workspaces", json, async c => {
     const parsed = CreateSchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) throw new HttpError(400, "invalid_request", "Invalid cloud workspace request");
@@ -131,7 +143,10 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
     await deps.computers.requireMember(input.organizationId, c.get("user").id);
     const key = c.req.header("Idempotency-Key");
     if (key !== undefined && !/^[\x21-\x7e]{1,200}$/.test(key)) throw new HttpError(400, "invalid_request", "Invalid creation key");
-    const hash = createHash("sha256").update(JSON.stringify({ ...input, repository: input.repository.toLowerCase() })).digest("hex");
+    const canary = c.req.header(RUNTIME_CANARY_HEADER);
+    if (canary !== undefined && (!deps.runtimeCanary || !key || !canary || canary.length > 4096)) throw refuseRuntimeCanary();
+    const hash = createHash("sha256").update(JSON.stringify({ ...input, repository: input.repository.toLowerCase(),
+      ...(canary === undefined ? {} : { runtimeCanary: createHash("sha256").update(canary).digest("hex") }) })).digest("hex");
     if (key) {
       const previous = await deps.store.readCreateReceipt(c.get("user").id, key, hash);
       if (previous) {
@@ -139,6 +154,8 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
         return c.json(previous.response, previous.status);
       }
     }
+    const runtimeCanary = canary === undefined ? undefined : deps.runtimeCanary!.verify(canary,
+      { creatorUserId: c.get("user").id, organizationId: input.organizationId, createKey: key });
     const computer = await deps.store.activeComputer(input.organizationId);
     if (!computer) throw await computerUnavailable(input.organizationId, c.get("user").id);
     // Display names can move. Select among the build's authorized ID bindings,
@@ -159,6 +176,7 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
       throw new HttpError(409, "repository_not_installed", "Add this repository to the Cloud Computer first");
     }
     const { entry: repository, target } = selected;
+    if (runtimeCanary && runtimeCanary.repositoryId !== target.repositoryId) throw refuseRuntimeCanary();
     const baseBranch = input.baseBranch ?? repository.defaultBranch;
     if (!baseBranch) throw new HttpError(409, "repository_branch_required", "Select a branch or rebuild the Cloud Computer to record its default branch");
     if (await deps.remoteHead(input.organizationId, c.get("user").id, target, baseBranch) === null)
@@ -170,6 +188,7 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
       repository: repository.repository, branch: input.branch ?? `${prefix}${slug(name)}-${id.slice(0, 8)}`,
       baseBranch, computerBuildId: computer.buildId,
       sourceRepositoryId: target.repositoryId,
+      ...(runtimeCanary ? { runtimeCanary } : {}),
     };
     if (key) {
       const receipt = await deps.store.createWorkspaceOnce(create, key, hash, workspace => ({ workspace: workspaceDocument(workspace, deps.promptOutbox === true) }));
