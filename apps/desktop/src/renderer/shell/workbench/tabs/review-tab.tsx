@@ -17,7 +17,7 @@
 // composer.
 
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { ArrowLeft } from "lucide-react";
+import { ArrowLeft, Pencil } from "lucide-react";
 
 import { gitDiff, type PR } from "../../../platform/git";
 import { useGithubReview } from "@/renderer/features/code-review/use-github-review";
@@ -26,7 +26,7 @@ import {
   useWorkspaceDispatch,
 } from "@/renderer/state/store";
 import { notifyWorkspacesChanged } from "@/renderer/state/use-projects";
-import { Button } from "@/renderer/shared/ui/primitives";
+import { Button, ButtonShortcut, Textarea } from "@/renderer/shared/ui/primitives";
 import { toast } from "@/renderer/shared/ui/primitives/elements";
 import { renderMarkdown } from "@/renderer/features/agent/markdown";
 import { useCodeReview } from "@/renderer/features/code-review/use-code-review";
@@ -47,14 +47,16 @@ import {
 } from "./review-data";
 import { useReviewGithubFailure } from "../../pr/review-github-failure";
 import { derivePrStatusView, reviewFindings, summarizeChecks } from "./review-model";
-import { Centered } from "./review-shared-components";
+import { ErrorCallout } from "./review-shared-components";
 import {
   FindingsSection,
   PrStatusCard,
   ReviewHeader,
   ReviewOverviewLayout,
   ReviewRail,
+  ReviewSection,
   ReviewSubnav,
+  SUBTAB_FRAME,
   type ReviewChangeCounts,
 } from "./review-overview";
 import { ReviewChangesSection } from "./review-changes";
@@ -203,7 +205,7 @@ export function ReviewView({
   gitStatus?: React.ReactNode;
 }) {
   const filesKey = reviewFilesKey(provider.cacheKey, workspaceId, prNumber, baseBranch);
-  const { snap, refresh, postComment, merge, markReady } = useReviewLiveData({
+  const { snap, refresh, postComment, merge, markReady, updateBody } = useReviewLiveData({
     provider,
     workspaceId,
     prNumber,
@@ -590,6 +592,8 @@ export function ReviewView({
                 islandKind={islandKind}
                 agentWorking={agentWorking}
                 busy={busy}
+                commitCount={snap.commits?.length ?? null}
+                baseBranch={pr.baseBranch}
                 onMerge={(method) => void runMerge(method)}
                 onMarkReady={() => void runMarkReady()}
                 onAddToChat={addToChat}
@@ -632,25 +636,34 @@ export function ReviewView({
             />
           </>
         )}
-        {sub === "description" && <DescriptionSection pr={pr} />}
+        {sub === "description" && (
+          <div className={SUBTAB_FRAME}>
+            <DescriptionSection key={pr.number} pr={pr} hostLabel={provider.hostLabel} onSave={updateBody} />
+          </div>
+        )}
         {sub === "commits" && (
-          <ReviewCommitsSection
-            commits={snap.commits}
-            loading={snap.refreshing}
-            error={null}
-            onRetry={() => void refresh()}
-          />
+          <div className={SUBTAB_FRAME}>
+            <ReviewCommitsSection
+              commits={snap.commits}
+              loading={snap.refreshing}
+              error={null}
+              prUrl={pr.url || prUrl}
+              onRetry={() => void refresh()}
+            />
+          </div>
         )}
         {sub === "checks" && (
-          <ReviewChecksSection
-            data={snap.checks}
-            loading={snap.refreshing}
-            error={null}
-            prNumber={pr.number}
-            branch={branch || pr.headBranch}
-            onAddToChat={addToChat}
-            onRetry={() => void refresh()}
-          />
+          <div className={SUBTAB_FRAME}>
+            <ReviewChecksSection
+              data={snap.checks}
+              loading={snap.refreshing}
+              error={null}
+              prNumber={pr.number}
+              branch={branch || pr.headBranch}
+              onAddToChat={addToChat}
+              onRetry={() => void refresh()}
+            />
+          </div>
         )}
         {sub === "activity" && (
           <ReviewTimelineSection
@@ -665,6 +678,7 @@ export function ReviewView({
               workspaceId,
               pr.number,
             ])}
+            hostLabel={provider.hostLabel}
             onAddToChat={addToChat}
             onPostComment={postComment}
             onRetry={() => void refresh()}
@@ -723,18 +737,94 @@ function ReviewPendingShell({
 
 // ── description ──────────────────────────────────────────────
 
-function DescriptionSection({ pr }: { pr: PR }) {
+/** The body as Markdown, with Edit when the provider can write it. Saving
+ * keeps the draft and says why if the write fails. */
+function DescriptionSection({
+  pr,
+  hostLabel,
+  onSave,
+}: {
+  pr: PR;
+  hostLabel: string;
+  onSave: ((body: string) => Promise<void>) | null;
+}) {
   const html = useMemo(() => renderMarkdown(pr.body), [pr.body]);
-  if (!pr.body.trim())
-    return (
-      <Centered>No description yet. Edit it on the PR to add one.</Centered>
-    );
+  const [draft, setDraft] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const save = async () => {
+    if (!onSave || draft == null || saving) return;
+    setSaving(true);
+    setError(null);
+    try {
+      await onSave(draft);
+      setDraft(null);
+    } catch (e) {
+      setError(humanGitError(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+  const edit =
+    onSave && draft == null ? (
+      <Button
+        variant="ghost"
+        size="compact"
+        className="text-fg2"
+        onClick={() => {
+          setError(null);
+          setDraft(pr.body);
+        }}
+      >
+        <Pencil aria-hidden />
+        Edit
+      </Button>
+    ) : null;
   return (
-    <div className="zeros-agent-md p-3 [&_.zeros-md-prose>:first-child]:mt-0">
-      <div
-        className="zeros-md-prose text-sm"
-        dangerouslySetInnerHTML={{ __html: html }}
-      />
-    </div>
+    <ReviewSection title="Description" action={edit}>
+      {draft != null ? (
+        <div data-review-description-editor="" className="flex min-w-0 flex-col gap-2">
+          <Textarea
+            aria-label="Pull request description"
+            value={draft}
+            maxLength={60_000}
+            autoFocus
+            rows={12}
+            className="min-h-48 font-mono text-xs leading-5"
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+                e.preventDefault();
+                void save();
+              }
+            }}
+          />
+          {error ? <ErrorCallout text={error} /> : null}
+          <div className="flex items-center gap-2">
+            <span className="text-fg3 text-3xxs flex-1 leading-4">Saves to {hostLabel}</span>
+            <Button variant="ghost" size="compact" disabled={saving} onClick={() => setDraft(null)}>
+              Cancel
+            </Button>
+            <Button
+              variant="primary"
+              size="compact"
+              aria-keyshortcuts="Meta+Enter Control+Enter"
+              loading={saving}
+              disabled={draft === pr.body}
+              onClick={() => void save()}
+            >
+              Save
+              <ButtonShortcut keys="⌘↵" />
+            </Button>
+          </div>
+        </div>
+      ) : pr.body.trim() ? (
+        <div className="zeros-agent-md [&_.zeros-md-prose>:first-child]:mt-0 [&_.zeros-md-prose>:last-child]:mb-0">
+          <div className="zeros-md-prose text-sm" dangerouslySetInnerHTML={{ __html: html }} />
+        </div>
+      ) : (
+        <p className="text-fg3 m-0 text-xs">No description yet.</p>
+      )}
+    </ReviewSection>
   );
 }

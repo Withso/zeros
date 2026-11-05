@@ -474,3 +474,63 @@ export function reviewFindings(
   }
   return findings.sort((a, b) => Number(a.resolved) - Number(b.resolved));
 }
+
+// ── Activity · people and bots ───────────────────────────────
+
+/** A GitHub App acts as `name[bot]`. */
+export function isBotLogin(login: string): boolean {
+  return /\[bot\]$/i.test(login);
+}
+
+export type TimelineFilter = "all" | "people" | "bots";
+
+function eventActor(event: ReviewTimelineEvent): string | null {
+  switch (event.kind) {
+    case "opened":
+      return event.author;
+    case "commit":
+      return event.commit.authorLogin ?? event.commit.authorName;
+    case "review":
+    case "comment":
+      return event.item.author;
+    default:
+      return null;
+  }
+}
+
+/** People keeps every event no App took, including the authorless merged and
+ * closed lines; Bots keeps an App's own reviews, comments and commits. */
+export function filterTimelineEvents(
+  events: readonly ReviewTimelineEvent[],
+  filter: TimelineFilter,
+): ReviewTimelineEvent[] {
+  if (filter === "all") return [...events];
+  return events.filter((event) => {
+    const actor = eventActor(event);
+    const bot = actor != null && isBotLogin(actor);
+    return filter === "bots" ? bot : !bot;
+  });
+}
+
+// ── Overview · merge methods ─────────────────────────────────
+
+/** The merge menu's second line: what a method does to this PR's commits. */
+export function mergeMethodDetail(
+  method: string,
+  commits: number | null,
+  base: string,
+): string | null {
+  const count = commits && commits > 0 ? commits : null;
+  if (count === 1) {
+    if (method === "squash") return `The commit lands on ${base}`;
+    if (method === "merge") return `The commit joins ${base} with a merge commit`;
+    if (method === "rebase") return `The commit replays onto ${base}`;
+    return null;
+  }
+  const these = count == null ? "The commits" : `The ${count} commits`;
+  if (method === "squash") return `${these} land on ${base} as one`;
+  if (method === "merge")
+    return `${count == null ? "The commits" : `All ${count} commits`} join ${base} with a merge commit`;
+  if (method === "rebase") return `${these} replay onto ${base}`;
+  return null;
+}

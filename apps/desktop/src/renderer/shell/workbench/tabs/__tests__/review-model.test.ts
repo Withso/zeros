@@ -6,10 +6,13 @@ import {
   commitAuthorsLabel,
   composeTimeline,
   derivePrStatusView,
+  filterTimelineEvents,
   formatDuration,
   groupCommitsByRecency,
   hasPendingChecks,
+  isBotLogin,
   latestReviewsByAuthor,
+  mergeMethodDetail,
   recencyLabel,
   relTime,
   reviewActionBlockReason,
@@ -422,5 +425,54 @@ describe("reviewFindings", () => {
     expect(findings[0].chatText).toBe(
       "PR #42 — Claude on `src/auth/login.ts:18`:\n> **Protocol-relative URLs** pass `safeRedirect`\n\n",
     );
+  });
+});
+
+describe("mergeMethodDetail", () => {
+  it("says what each GitHub method does to the commits", () => {
+    expect(mergeMethodDetail("squash", 3, "main")).toBe("The 3 commits land on main as one");
+    expect(mergeMethodDetail("merge", 3, "main")).toBe("All 3 commits join main with a merge commit");
+    expect(mergeMethodDetail("rebase", 3, "main")).toBe("The 3 commits replay onto main");
+  });
+
+  it("reads one commit and an unknown count naturally", () => {
+    expect(mergeMethodDetail("squash", 1, "main")).toBe("The commit lands on main");
+    expect(mergeMethodDetail("merge", 1, "main")).toBe("The commit joins main with a merge commit");
+    expect(mergeMethodDetail("rebase", null, "dev")).toBe("The commits replay onto dev");
+  });
+
+  it("has nothing to say about a method it doesn't know", () => {
+    expect(mergeMethodDetail("fast-forward", 2, "main")).toBeNull();
+  });
+});
+
+describe("timeline people and bots", () => {
+  const item = (id: number, author: string, kind: "review" | "comment" = "comment") => ({
+    kind, id, author, authorAvatarUrl: null, state: kind === "review" ? "COMMENTED" : "", body: "x", url: null, createdAt: id,
+  });
+  const commit = (sha: string, authorLogin: string): PrCommitSummary => ({
+    sha, abbreviatedSha: sha.slice(0, 7), message: "m", authorName: authorLogin, authorLogin, authorAvatarUrl: null,
+    coAuthors: [], date: 1, changedFiles: 1, additions: 1, deletions: 0,
+  } as PrCommitSummary);
+  const events = [
+    { kind: "opened" as const, at: 1, author: "alex" },
+    { kind: "commit" as const, at: 2, commit: commit("a1b2c3d4", "alex") },
+    { kind: "commit" as const, at: 3, commit: commit("e5f6a7b8", "dependabot[bot]") },
+    { kind: "review" as const, at: 4, item: item(4, "coderabbitai[bot]", "review") },
+    { kind: "comment" as const, at: 5, item: item(5, "sam") },
+    { kind: "merged" as const, at: 6 },
+  ];
+
+  it("tells a GitHub App's login from a person's", () => {
+    expect(isBotLogin("coderabbitai[bot]")).toBe(true);
+    expect(isBotLogin("github-actions[bot]")).toBe(true);
+    expect(isBotLogin("robot")).toBe(false);
+    expect(isBotLogin("bot-lover")).toBe(false);
+  });
+
+  it("filters by who acted, keeping authorless events with people", () => {
+    expect(filterTimelineEvents(events, "all")).toHaveLength(6);
+    expect(filterTimelineEvents(events, "people").map((e) => e.at)).toEqual([1, 2, 5, 6]);
+    expect(filterTimelineEvents(events, "bots").map((e) => e.at)).toEqual([3, 4]);
   });
 });

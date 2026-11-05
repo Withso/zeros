@@ -2,33 +2,33 @@
 // ReviewChecksSection — the Review tab's Checks sub-tab
 // ──────────────────────────────────────────────────────────
 //
-// CI checks + deploy statuses bucketed Failed → Running → Passed (failures
-// first — they're why you're here). Failed rows carry "Add to chat": a
-// fix-it brief (buildFixCheckPrompt) drops into the active chat's composer so
-// the agent can chase the log and land the fix. Durations come from the
-// check-run timing the engine now forwards. The section re-renders live off
-// the store's fast checks lane, so runs complete in place.
+// A summary card counts the run (failed, running, passed) over one bar and
+// offers Add failures to chat. CI checks follow in Failed → Running → Passed
+// groups (failures first — they're why you're here); a failed row's Add to
+// chat drops a fix-it brief (buildFixCheckPrompt) into the active composer.
+// Durations come from the check-run timing the engine forwards, and the
+// section re-renders live off the store's fast checks lane, so runs complete
+// in place. Deployments close the tab as cards with their state and Open.
 
 import React, { useState } from "react";
-import { ExternalLink, MessageSquarePlus, Wrench } from "lucide-react";
+import { ArrowUpRight, Globe } from "lucide-react";
 
 import type {
   PrChecksResult,
   PrCheck,
   PrDeployment,
 } from "../../../platform/git";
-import { Button, Tooltip } from "@/renderer/shared/ui/primitives";
+import { Badge, Button, Tooltip } from "@/renderer/shared/ui/primitives";
 import { cn } from "@/renderer/shared/ui/cn";
 import { buildFixCheckPrompt } from "../../pr/pr-action-prompts";
-import { bucketChecks, formatDuration, summarizeChecks } from "./review-model";
+import { bucketChecks, formatDuration } from "./review-model";
 import {
-  Centered,
   CheckGlyph,
   ErrorCallout,
   GroupHeader,
   OutcomeGlyph,
 } from "./review-shared-components";
-import { PanelHeader } from "@/renderer/shared/ui/primitives/panel-header";
+import { REVIEW_CARD, ReviewSection } from "./review-overview";
 import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 
 function checkDuration(c: PrCheck, now = Date.now()): string {
@@ -61,23 +61,17 @@ export function ReviewChecksSection({
   );
 
   if (loading && !data) return <div className="min-h-24" aria-busy="true" />;
-  if (error && !data)
-    return (
-      <div className="p-3">
-        <ErrorCallout text={error} onRetry={onRetry} />
-      </div>
-    );
+  if (error && !data) return <ErrorCallout text={error} onRetry={onRetry} />;
   if (!data) return null;
   if (data.checks.length === 0 && data.deployments.length === 0)
     return (
-      <Centered>
-        No checks reported for this pull request. CI results appear here the
-        moment the provider reports them.
-      </Centered>
+      <p className="text-fg3 m-0 text-xs">
+        No checks reported yet. Results appear here as the provider reports
+        them.
+      </p>
     );
 
   const buckets = bucketChecks(data.checks);
-  const summary = summarizeChecks(data);
   const toggle = (id: string) =>
     setClosedGroups((prev) => {
       const next = new Set(prev);
@@ -90,44 +84,40 @@ export function ReviewChecksSection({
     buckets.failed.length > 0 || buckets.pending.length > 0;
   const isOpen = (id: string, defaultClosed = false) =>
     defaultClosed ? closedGroups.has(id) : !closedGroups.has(id);
+  const fixPrompt = (checks: PrCheck[]) =>
+    buildFixCheckPrompt({
+      checkName: checks.map((c) => c.name).join("`, `"),
+      prNumber,
+      branch,
+      detailsUrl: checks[0]?.detailsUrl ?? null,
+    });
 
   const row = (c: PrCheck, i: number, failed = false) => (
     <div
       key={`${c.name}-${i}`}
-      className="group hover:bg-bg1-hover flex h-8 items-center gap-2 px-3 transition-colors duration-120 ease-out"
+      data-review-check={c.name}
+      className="group hover:bg-bg1-hover flex h-9 min-w-0 items-center gap-2.5 rounded-md px-2.5 transition-colors duration-120 ease-out"
     >
       <CheckGlyph check={c} />
       <span className="text-fg1 min-w-0 flex-1 truncate text-xs">{c.name}</span>
       {failed && (
-        <button
-          type="button"
-          onClick={() =>
-            onAddToChat(
-              buildFixCheckPrompt({
-                checkName: c.name,
-                prNumber,
-                branch,
-                detailsUrl: c.detailsUrl,
-              }),
-            )
-          }
-          className="text-2xxs text-fg2 hover:bg-bg2-hover hover:text-fg1 flex shrink-0 items-center gap-1 rounded-sm px-1.5 py-0.5 opacity-0 transition-colors duration-120 ease-out group-hover:opacity-100 focus-visible:opacity-100"
+        <Button
+          variant="ghost"
+          size="compact"
+          className="text-fg2 opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
+          onClick={() => onAddToChat(fixPrompt([c]))}
         >
-          <MessageSquarePlus className="size-3" /> Add to chat
-        </button>
+          Add to chat
+        </Button>
       )}
-      <span className="text-2xxs text-muted-fg shrink-0 tabular-nums">
+      <span className="text-fg3 text-3xxs shrink-0 leading-4 tabular-nums">
         {checkDuration(c)}
       </span>
       {c.detailsUrl && (
         <Tooltip label="Open logs">
-          <IconButton
-            asChild
-            label="Open logs"
-            className="flex shrink-0"
-          >
+          <IconButton asChild size="compact" label="Open logs" className="text-fg3 shrink-0">
             <a href={c.detailsUrl} target="_blank" rel="noreferrer">
-              <ExternalLink className="size-3" />
+              <ArrowUpRight aria-hidden />
             </a>
           </IconButton>
         </Tooltip>
@@ -136,140 +126,169 @@ export function ReviewChecksSection({
   );
 
   return (
-    <div className="flex flex-col pb-3">
-      {/* Summary strip (only when real checks reported — deployments alone
-          carry their own per-card status) */}
-      {summary.tone !== "none" && (
-        <PanelHeader size="panel">
-          <OutcomeGlyph
-            outcome={
-              summary.tone === "failure"
-                ? "failed"
-                : summary.tone === "pending"
-                  ? "pending"
-                  : "passed"
-            }
-          />
-          <span
-            className={cn(
-              "text-xs font-medium",
-              summary.tone === "failure"
-                ? "text-red-primary"
-                : summary.tone === "pending"
-                  ? "text-yellow-primary"
-                  : "text-green-primary",
-            )}
-          >
-            {summary.label}
-          </span>
-          {summary.fraction && (
-            <span className="text-muted-fg text-xs tabular-nums">
-              {summary.fraction} passed
-            </span>
-          )}
-          <div className="flex-1" />
+    <>
+      {data.checks.length > 0 && (
+        <ChecksSummaryCard
+          failed={buckets.failed.length}
+          running={buckets.pending.length}
+          passed={buckets.passed.length}
+          onAddFailures={() => onAddToChat(fixPrompt(buckets.failed))}
+        />
+      )}
+      {data.checks.length > 0 && (
+        <div className="-mx-2.5 flex min-w-0 flex-col gap-1">
           {buckets.failed.length > 0 && (
-            <Button
-              variant="ghost"
-              size="sm"
-              className="gap-1.5 text-xs"
-              onClick={() =>
-                onAddToChat(
-                  buildFixCheckPrompt({
-                    checkName: buckets.failed.map((c) => c.name).join("`, `"),
-                    prNumber,
-                    branch,
-                    detailsUrl: buckets.failed[0]?.detailsUrl ?? null,
-                  }),
-                )
-              }
-            >
-              <Wrench className="size-3.5" /> Fix in chat
-            </Button>
+            <section aria-label="Failed checks">
+              <GroupHeader
+                label="Failed"
+                count={buckets.failed.length}
+                open={isOpen("failed")}
+                onToggle={() => toggle("failed")}
+              />
+              {isOpen("failed") && buckets.failed.map((c, i) => row(c, i, true))}
+            </section>
           )}
-        </PanelHeader>
+          {buckets.pending.length > 0 && (
+            <section aria-label="Running checks">
+              <GroupHeader
+                label="Running"
+                count={buckets.pending.length}
+                open={isOpen("pending")}
+                onToggle={() => toggle("pending")}
+              />
+              {isOpen("pending") && buckets.pending.map((c, i) => row(c, i))}
+            </section>
+          )}
+          {buckets.passed.length > 0 && (
+            <section aria-label="Passed checks">
+              <GroupHeader
+                label="Passed"
+                count={buckets.passed.length}
+                open={isOpen("passed", passedDefaultClosed)}
+                onToggle={() => toggle("passed")}
+              />
+              {isOpen("passed", passedDefaultClosed) &&
+                buckets.passed.map((c, i) => row(c, i))}
+            </section>
+          )}
+        </div>
       )}
-
-      {buckets.failed.length > 0 && (
-        <section>
-          <GroupHeader
-            label="Failed"
-            count={buckets.failed.length}
-            tone="failure"
-            open={isOpen("failed")}
-            onToggle={() => toggle("failed")}
-          />
-          {isOpen("failed") && buckets.failed.map((c, i) => row(c, i, true))}
-        </section>
-      )}
-      {buckets.pending.length > 0 && (
-        <section>
-          <GroupHeader
-            label="Running"
-            count={buckets.pending.length}
-            tone="pending"
-            open={isOpen("pending")}
-            onToggle={() => toggle("pending")}
-          />
-          {isOpen("pending") && buckets.pending.map((c, i) => row(c, i))}
-        </section>
-      )}
-      {buckets.passed.length > 0 && (
-        <section>
-          <GroupHeader
-            label="Passed"
-            count={buckets.passed.length}
-            tone="success"
-            open={isOpen("passed", passedDefaultClosed)}
-            onToggle={() => toggle("passed")}
-          />
-          {isOpen("passed", passedDefaultClosed) &&
-            buckets.passed.map((c, i) => row(c, i))}
-        </section>
-      )}
-
       {data.deployments.length > 0 && (
-        <section className="mt-2 flex flex-col gap-2 px-3">
-          <span className="text-fg1 text-xs font-medium">Deployments</span>
-          {data.deployments.map((d, i) => (
-            <DeploymentCard key={`${d.environment}-${i}`} deployment={d} />
-          ))}
-        </section>
+        <ReviewSection title="Deployments" count={data.deployments.length}>
+          <div className="flex min-w-0 flex-col gap-2">
+            {data.deployments.map((d, i) => (
+              <DeploymentCard key={`${d.environment}-${i}`} deployment={d} />
+            ))}
+          </div>
+        </ReviewSection>
       )}
+    </>
+  );
+}
+
+const SUMMARY_PARTS = [
+  { key: "failed", label: "failed", outcome: "failed", bar: "bg-red-primary" },
+  { key: "running", label: "running", outcome: "pending", bar: "bg-yellow-primary" },
+  { key: "passed", label: "passed", outcome: "passed", bar: "bg-green-primary" },
+] as const;
+
+/** Counts per state over a bar whose segments share its width by count. */
+function ChecksSummaryCard({
+  failed,
+  running,
+  passed,
+  onAddFailures,
+}: {
+  failed: number;
+  running: number;
+  passed: number;
+  onAddFailures: () => void;
+}) {
+  const counts = { failed, running, passed };
+  const parts = SUMMARY_PARTS.filter((part) => counts[part.key] > 0);
+  return (
+    <div
+      data-review-checks-summary=""
+      className={cn(REVIEW_CARD, "flex flex-col gap-3 py-3 pr-2.5 pl-3.5")}
+    >
+      <div className="flex min-h-7 min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
+        {parts.map((part) => (
+          <span
+            key={part.key}
+            data-review-checks-count={part.key}
+            className="flex shrink-0 items-center gap-1.5 text-xs"
+          >
+            <OutcomeGlyph outcome={part.outcome} />
+            <span className="text-fg1 font-medium tabular-nums">
+              {counts[part.key]}
+            </span>
+            <span className="text-fg2">{part.label}</span>
+          </span>
+        ))}
+        <span className="flex-1" />
+        {failed > 0 && (
+          <Button variant="secondary" size="compact" onClick={onAddFailures}>
+            Add failures to chat
+          </Button>
+        )}
+      </div>
+      <div aria-hidden className="mr-1 flex h-1 gap-0.5">
+        {parts.map((part) => (
+          <span
+            key={part.key}
+            className={cn("h-full rounded-full", part.bar)}
+            style={{ flexGrow: counts[part.key] }}
+          />
+        ))}
+      </div>
     </div>
   );
 }
 
+const DEPLOYMENT_STATE: Record<
+  string,
+  { label: string; variant: "success" | "failure" | "neutral" }
+> = {
+  success: { label: "Ready", variant: "success" },
+  failure: { label: "Failed", variant: "failure" },
+  error: { label: "Failed", variant: "failure" },
+};
+
 function DeploymentCard({ deployment: d }: { deployment: PrDeployment }) {
-  const outcome =
-    d.state === "success"
-      ? "passed"
-      : d.state === "failure" || d.state === "error"
-        ? "failed"
-        : "pending";
+  const state = DEPLOYMENT_STATE[d.state] ?? {
+    label: "Deploying",
+    variant: "neutral" as const,
+  };
   return (
-    <div className="border-border2 bg-bg2 rounded-lg border p-3">
-      <div className="flex items-center gap-2">
-        <OutcomeGlyph outcome={outcome} />
-        <span className="text-fg1 min-w-0 flex-1 truncate text-xs font-medium">
-          {d.environment}
+    <div
+      data-review-deployment={d.environment}
+      className={cn(REVIEW_CARD, "flex min-h-13 items-center gap-3 py-2.5 pr-2.5 pl-3.5")}
+    >
+      <Globe aria-hidden className="text-fg3 size-4 shrink-0" />
+      <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+        <span className="flex min-w-0 items-center gap-2">
+          <span className="text-fg1 min-w-0 truncate text-xs font-medium">
+            {d.environment}
+          </span>
+          <Badge variant={state.variant}>{state.label}</Badge>
         </span>
+        {d.url ? (
+          <span className="text-fg3 text-3xxs truncate font-mono leading-4">
+            {d.url.replace(/^https?:\/\//, "")}
+          </span>
+        ) : d.description ? (
+          <span className="text-fg3 text-3xxs truncate leading-4">
+            {d.description}
+          </span>
+        ) : null}
       </div>
-      {d.description && (
-        <p className="text-fg2 m-0 mt-1.5 text-xs leading-relaxed">
-          {d.description}
-        </p>
-      )}
       {d.url && (
-        <a
-          href={d.url}
-          target="_blank"
-          rel="noreferrer"
-          className="text-fg2 hover:text-fg1 mt-1.5 inline-flex items-center gap-1 text-xs underline-offset-2 transition-colors duration-120 ease-out hover:underline"
-        >
-          {d.url.replace(/^https?:\/\//, "")}{" "}
-          <ExternalLink className="size-3" />
-        </a>
+        <Button asChild variant="ghost" size="compact" className="text-fg2 shrink-0">
+          <a href={d.url} target="_blank" rel="noreferrer">
+            <ArrowUpRight aria-hidden />
+            Open
+          </a>
+        </Button>
       )}
     </div>
   );

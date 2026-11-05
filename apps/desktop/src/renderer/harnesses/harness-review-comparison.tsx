@@ -53,11 +53,15 @@ const metadataReady = fixtureParams.has("holdMetadata")
   : Promise.resolve();
 let currentPr = 42;
 let mount = 0;
-// `?sub=overview` opens another destination; `?rich` fills Overview with
-// checks, reviews, reviewers, labels and merge methods.
+// `?sub=overview` opens another destination; `?rich` fills every sub-tab:
+// checks with a deployment, reviews (one from an App), commits, reviewers,
+// labels, merge methods and an editable description.
 let currentSub = (fixtureParams.get("sub") ?? "changes") as ReviewSubtab;
 const rich = fixtureParams.has("rich");
 const DAY = 86_400_000;
+/** Bodies the description editor saved, in order (read by the smoke). */
+const descriptionWrites: string[] = [];
+(window as unknown as { __descriptionWrites: string[] }).__descriptionWrites = descriptionWrites;
 
 function prFor(prNumber: number): PR {
   return {
@@ -78,7 +82,7 @@ function prFor(prNumber: number): PR {
     ...(rich
       ? {
           title: "Fix login redirect loop",
-          body: "Keeps `returnTo` through the OAuth state.\n\nFixes #31",
+          body: descriptionWrites.at(-1) ?? "Keeps `returnTo` through the OAuth state.\n\nFixes #31",
           authorLogin: "alex-morgan",
           headBranch: "alex/fix-login",
           additions: 39,
@@ -122,20 +126,30 @@ const provider: ReviewProvider = {
           passed: 5,
           pending: 1,
           failed: 1,
-          deployments: [],
+          deployments: [
+            { environment: "Preview", state: "success", description: null, url: "https://fixture-pr-42.preview.example.test" },
+          ],
           checks: [
-            { name: "test (ubuntu-latest)", status: "completed", conclusion: "failure", detailsUrl: "https://example.test/run/1", startedAt: null, completedAt: null },
+            { name: "test (ubuntu-latest)", status: "completed", conclusion: "failure", detailsUrl: "https://example.test/run/1", startedAt: Date.now() - 134_000, completedAt: Date.now() },
             { name: "lint", status: "in_progress", conclusion: null, detailsUrl: null, startedAt: null, completedAt: null },
             ...["build", "typecheck", "unit", "e2e", "codeql"].map((name) => ({
-              name, status: "completed", conclusion: "success", detailsUrl: null, startedAt: null, completedAt: null,
+              name, status: "completed", conclusion: "success", detailsUrl: null, startedAt: Date.now() - 38_000, completedAt: Date.now(),
             })),
           ],
         }
       : { total: 0, passed: 0, pending: 0, failed: 0, checks: [], deployments: [] },
-  getCommits: async () => [],
+  getCommits: async () =>
+    rich
+      ? [
+          { sha: "a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0", abbreviatedSha: "a1b2c3d", message: "Use timing-safe compare for session MACs", authorName: "Alex Morgan", authorLogin: "alex-morgan", authorAvatarUrl: null, date: Date.now() - 2 * 3_600_000, coAuthors: [{ name: "Claude", avatarUrl: null }], additions: 6, deletions: 4, changedFiles: 2 },
+          { sha: "e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3", abbreviatedSha: "e4f5a6b", message: "Shorten session lifetime to 12 hours", authorName: "Alex Morgan", authorLogin: "alex-morgan", authorAvatarUrl: null, date: Date.now() - 3 * 3_600_000, coAuthors: [], additions: 1, deletions: 1, changedFiles: 1 },
+          { sha: "0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b", abbreviatedSha: "0a1b2c3", message: "Remove legacy cookie helper", authorName: "Priya Shah", authorLogin: "priya-shah", authorAvatarUrl: null, date: Date.now() - 26 * 3_600_000, coAuthors: [], additions: 0, deletions: 40, changedFiles: 1 },
+        ]
+      : [],
   getTimeline: async () =>
     rich
       ? [
+          { kind: "review" as const, id: 4, author: "coderabbitai[bot]", authorAvatarUrl: null, state: "COMMENTED", body: "**Walkthrough**\n\nThe session helpers now compare MACs in constant time.", url: null, createdAt: Date.now() - DAY - 60_000 },
           { kind: "review" as const, id: 1, author: "priya-shah", authorAvatarUrl: null, state: "CHANGES_REQUESTED", body: "Please add a test for the SSO path.", url: null, createdAt: Date.now() - DAY },
           { kind: "review" as const, id: 2, author: "sam-lee", authorAvatarUrl: null, state: "APPROVED", body: "", url: null, createdAt: Date.now() - DAY / 2 },
           { kind: "comment" as const, id: 3, author: "alex-morgan", authorAvatarUrl: null, state: "", body: "Addressed.", url: null, createdAt: Date.now() - DAY / 4 },
@@ -169,6 +183,10 @@ const provider: ReviewProvider = {
   },
   markReady: async () => {
     throw new Error("Unexpected mark-ready write");
+  },
+  updateBody: async ({ reviewRef }, body) => {
+    descriptionWrites.push(body);
+    return prFor(Number(reviewRef));
   },
 };
 

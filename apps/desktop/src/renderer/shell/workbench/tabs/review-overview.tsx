@@ -33,6 +33,7 @@ import type { PR, PrLabel, PrPerson, PrTimelineItem } from "../../../platform/gi
 import {
   Button,
   DropdownMenuContent,
+  DropdownMenuLabel,
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem,
   DropdownMenu,
@@ -55,6 +56,7 @@ import type { ReviewSubtab } from "../tab-model";
 import { AuthorAvatar, OutcomeGlyph } from "./review-shared-components";
 import {
   latestReviewsByAuthor,
+  mergeMethodDetail,
   relTime,
   reviewActionBlockReason,
   type ChecksSummary,
@@ -103,7 +105,8 @@ export interface ReviewChangeCounts {
   deletions: number;
 }
 
-function copy(text: string, what: string) {
+/** Copy text and say so, or say why not. */
+export function copyWithToast(text: string, what: string) {
   void navigator.clipboard
     .writeText(text)
     .then(() => toast.success(`Copied ${what}`))
@@ -188,8 +191,8 @@ export function ReviewHeader({
             </IconButton>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end">
-            {url ? <DropdownMenuItem onSelect={() => copy(url, "link")}>Copy link</DropdownMenuItem> : null}
-            <DropdownMenuItem onSelect={() => copy(pr.headBranch, "branch name")}>Copy branch name</DropdownMenuItem>
+            {url ? <DropdownMenuItem onSelect={() => copyWithToast(url, "link")}>Copy link</DropdownMenuItem> : null}
+            <DropdownMenuItem onSelect={() => copyWithToast(pr.headBranch, "branch name")}>Copy branch name</DropdownMenuItem>
             <DropdownMenuItem onSelect={onRefresh}>Refresh</DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
@@ -209,7 +212,7 @@ export function ReviewHeader({
           <BranchChip title={pr.headBranch} shrink>
             {pr.headBranch}
           </BranchChip>
-          <IconButton size="compact" label={`Copy ${pr.headBranch}`} onClick={() => copy(pr.headBranch, "branch name")}>
+          <IconButton size="compact" label={`Copy ${pr.headBranch}`} onClick={() => copyWithToast(pr.headBranch, "branch name")}>
             <Copy aria-hidden />
           </IconButton>
         </span>
@@ -290,9 +293,12 @@ export function ReviewSubnav({
 // ── shared card recipe ──────────────────────────────────────
 
 /** Overview's card (git-status-card.tsx owns it); rows divide with border1. */
-const REVIEW_CARD = STATUS_CARD;
+export const REVIEW_CARD = STATUS_CARD;
 const ROW = "border-border1 flex min-h-11 min-w-0 items-center gap-2.5 py-1.5 pr-2.5 pl-3.5 [&+&]:border-t";
 const ROW_HEAD = "min-h-13 py-2.5";
+
+/** Description, Activity, Checks and Commits sit in Overview's inset. */
+export const SUBTAB_FRAME = "flex min-w-0 flex-col gap-5 px-5 pt-5 pb-7";
 
 export function ReviewSection({
   title,
@@ -345,6 +351,8 @@ export function PrStatusCard({
   islandKind,
   agentWorking,
   busy,
+  commitCount,
+  baseBranch,
   onMerge,
   onMarkReady,
   onAddToChat,
@@ -354,6 +362,9 @@ export function PrStatusCard({
   islandKind: string | null;
   agentWorking: boolean;
   busy: boolean;
+  /** The PR's commits, for the merge menu's descriptions; null until read. */
+  commitCount: number | null;
+  baseBranch: string;
   onMerge: (method: ReviewMergeMethod) => void;
   onMarkReady: () => void;
   onAddToChat: (text: string) => void;
@@ -373,6 +384,8 @@ export function PrStatusCard({
             islandKind={islandKind}
             agentWorking={agentWorking}
             busy={busy}
+            commitCount={commitCount}
+            baseBranch={baseBranch}
             onMerge={onMerge}
           />
         ) : view.action === "ready" ? (
@@ -424,12 +437,16 @@ function MergeAction({
   islandKind,
   agentWorking,
   busy,
+  commitCount,
+  baseBranch,
   onMerge,
 }: {
   provider: ReviewProvider;
   islandKind: string | null;
   agentWorking: boolean;
   busy: boolean;
+  commitCount: number | null;
+  baseBranch: string;
   onMerge: (method: ReviewMergeMethod) => void;
 }) {
   const methods = provider.capabilities.mergeMethods;
@@ -446,7 +463,8 @@ function MergeAction({
       onClick={() => onMerge(selected.id)}
       menuLabel="Choose merge method"
       menu={
-        <DropdownMenuContent align="end">
+        <DropdownMenuContent align="end" className="w-64">
+          <DropdownMenuLabel>Merge method</DropdownMenuLabel>
           <DropdownMenuRadioGroup
             value={selected.id}
             onValueChange={(next) => {
@@ -454,11 +472,17 @@ function MergeAction({
               saveMergeMethod(provider, next as ReviewMergeMethod);
             }}
           >
-            {methods.map((candidate) => (
-              <DropdownMenuRadioItem key={candidate.id} value={candidate.id}>
-                {candidate.label}
-              </DropdownMenuRadioItem>
-            ))}
+            {methods.map((candidate) => {
+              const detail = mergeMethodDetail(candidate.id, commitCount, baseBranch);
+              return (
+                <DropdownMenuRadioItem key={candidate.id} value={candidate.id} data-merge-method={candidate.id}>
+                  <span className="flex min-w-0 flex-col">
+                    <span>{candidate.label}</span>
+                    {detail ? <span className="text-fg3 text-3xxs leading-4">{detail}</span> : null}
+                  </span>
+                </DropdownMenuRadioItem>
+              );
+            })}
           </DropdownMenuRadioGroup>
         </DropdownMenuContent>
       }

@@ -68,9 +68,20 @@ open: the Changes tab still cannot prove its Branch comparison is the
 published diff, because the renderer never learns the comparison's head SHA
 (the engine's diff and the worker's need to return it). Until then the
 published diff, where Post to PR works, stays one step from Overview's rail
-(Open changes, the `changes` destination). Step 6 (Description edit,
-Activity filters, the Checks summary card, Commits hover actions) and step 7's
-narrow fold of the header remain.
+(Open changes, the `changes` destination). Step 6 landed after it:
+Description, Activity, Checks and Commits sit in Overview's inset under a
+section header; Description edits the body through the provider's
+`updateBody` (`gh.prUpdate`, Local and cloud); Activity filters All, People
+and Bots once an App has taken part and folds an App's review to one line
+until Show; Checks opens on a summary card (counts, Add failures to chat, one
+bar) and ends with deployment cards; Commits group by day with co-authors,
+Copy, Open and the short SHA; the merge menu says what each method does to
+the commits. Still open, each needing data the renderer doesn't have:
+Re-run failed, Required badges and the Expected group (rerun and
+branch-protection reads in the engine and control plane), a commit's check
+state and chat link, GitLab and Bitbucket (RevProviders), and RevEmpty's
+own Create pull request (it stays in the status row above) with step 7's
+narrow fold of the header.
 
 ## 2. Changes: one card per file
 

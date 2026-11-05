@@ -695,3 +695,21 @@ Each landed step appends one line: date, workstream, what landed, evidence.
   check. Evidence: the smoke passed three runs in a row, the codex-transcript
   chain (118 checks, with turn changes and file-pill navigation) passed, and
   79 Vitest files for the workbench tabs, theme and code review passed.
+- 2026-11-05 · 5 · Review sub-tabs (plans.md §1, step 6): Description,
+  Activity, Checks and Commits now sit in Overview's 20px inset under a
+  section header, as the boards show, instead of running edge to edge.
+  Description edits the body (the provider's optional `updateBody`, backed by
+  `gh.prUpdate` for Local and cloud; ⌘↵ saves). Activity filters All, People
+  and Bots once a GitHub App has taken part and folds an App's review to one
+  line until Show; commit lines carry the short SHA and cards use the Review
+  card surface. Checks opens on a summary card (counts per state, Add
+  failures to chat, a bar shared by count), neutral group headers and
+  deployment cards with their state and Open. Commits group by day with
+  co-authors, Copy, Open and the SHA chip. The merge menu labels itself and
+  says what each method does to this PR's commits. Decisions: Re-run failed,
+  Required badges and the Expected group wait for rerun and branch-protection
+  reads; the composer and Save carry their shortcut as a `ButtonShortcut`, so
+  the buttons keep their plain names. Evidence: review-comparison (15 checks,
+  five new), focus, workbench-status, review-retention and pr-actions smokes;
+  Vitest 291 files (3,086 tests) across workbench, PR, code review, state and
+  platform; both themes captured.

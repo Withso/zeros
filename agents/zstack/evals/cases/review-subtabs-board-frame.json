@@ -1,0 +1,9 @@
+{
+  "id": "review-subtabs-board-frame",
+  "kind": "scenario",
+  "area": "renderer-ui",
+  "fixedBy": "pr:839",
+  "symptom": "After the Review rebuild shipped Overview, the owner still saw the old UI: Description, Activity, Checks and Commits ran edge to edge without the boards' section headers, summary card, filters or bot folding.",
+  "rule": "A page's rebuild covers every tab its boards show; each sub-tab is measured in the smoke (inset against the header title, its section controls), not only the landing tab.",
+  "check": "pnpm test:ui-smoke --shard=1/3"
+}

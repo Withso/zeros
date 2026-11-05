@@ -338,7 +338,7 @@ export async function runReviewComparisonSmoke({
     });
     const prStatus = page.locator("[data-review-pr-status]");
     await expect(prStatus).toBeVisible();
-    await expect(page.getByRole("tab")).toHaveText(["Overview", "Description", "Activity3", "Checks7", "Commits"]);
+    await expect(page.getByRole("tab")).toHaveText(["Overview", "Description", "Activity4", "Checks7", "Commits3"]);
     const overview = await page.evaluate(() => {
       const tab = document.querySelector('[role="tab"][data-state="active"]');
       const title = document.querySelector("[data-review-header] h2");
@@ -383,6 +383,85 @@ export async function runReviewComparisonSmoke({
       "Review Overview reads in header rows with five sub-tabs, one Merge in PR status, Findings and a rail that folds into Details",
       true,
     );
+
+    // The merge menu says what each method does to this PR's commits.
+    await prStatus.getByRole("button", { name: "Choose merge method" }).click();
+    const methods = page.getByRole("menuitemradio");
+    await expect(methods).toHaveText([
+      "Squash and mergeThe 3 commits land on main as one",
+      "Create a merge commitAll 3 commits join main with a merge commit",
+      "Rebase and mergeThe 3 commits replay onto main",
+    ]);
+    await expect(page.getByRole("menu").getByText("Merge method", { exact: true })).toBeVisible();
+    await page.keyboard.press("Escape");
+    check("The merge menu names the method and what it does to the commits", true);
+
+    // Description, Activity, Checks and Commits sit in Overview's inset: a
+    // section's left edge is the header title's.
+    const alignedWithTitle = (label) =>
+      page.evaluate((name) => {
+        const section = document.querySelector(`section[aria-label="${name}"]`);
+        const title = document.querySelector("[data-review-header] h2");
+        return !!section && !!title && Math.round(section.getBoundingClientRect().left) === Math.round(title.getBoundingClientRect().left);
+      }, label);
+
+    await page.getByRole("tab", { name: "Description" }).click();
+    await expect.poll(() => alignedWithTitle("Description")).toBe(true);
+    await page.getByRole("button", { name: "Edit", exact: true }).click();
+    const editor = page.getByRole("textbox", { name: "Pull request description" });
+    await expect(editor).toHaveValue("Keeps `returnTo` through the OAuth state.\n\nFixes #31");
+    await editor.fill("Keeps `returnTo` through the OAuth state.\n\nAlso covers SSO.");
+    await page.getByRole("button", { name: "Save", exact: true }).click();
+    await expect.poll(() => page.evaluate(() => window.__descriptionWrites.at(-1))).toBe(
+      "Keeps `returnTo` through the OAuth state.\n\nAlso covers SSO.",
+    );
+    await expect(editor).toHaveCount(0);
+    await expect(page.locator('section[aria-label="Description"]')).toContainText("Also covers SSO.");
+    check("Description sits in the inset, and Edit saves the body through the provider", true);
+
+    await page.getByRole("tab", { name: /^Activity/ }).click();
+    await expect.poll(() => alignedWithTitle("Activity")).toBe(true);
+    await expect(page.getByRole("tablist", { name: "Show activity from" }).getByRole("tab")).toHaveText(["All", "People", "Bots1"]);
+    const bot = page.locator("[data-review-bot-event]");
+    await expect(bot).toHaveCount(1);
+    await expect(bot).toContainText("coderabbitai");
+    await expect(bot).toContainText("Bot");
+    await bot.getByRole("button", { name: "Show" }).click();
+    await expect(page.getByText("The session helpers now compare MACs in constant time.")).toBeVisible();
+    await page.getByRole("button", { name: "Hide" }).click();
+    await expect(bot).toHaveCount(1);
+    await page.getByRole("tab", { name: "People" }).click();
+    await expect(bot).toHaveCount(0);
+    await expect(page.getByText("Please add a test for the SSO path.")).toBeVisible();
+    await page.getByRole("tab", { name: /^Bots/ }).click();
+    await expect(bot).toHaveCount(1);
+    await expect(page.getByText("Please add a test for the SSO path.")).toHaveCount(0);
+    await page.getByRole("tab", { name: "All" }).click();
+    check("Activity filters All, People and Bots, and folds an App's review to one line until Show", true);
+
+    await page.getByRole("tab", { name: /^Checks/ }).click();
+    const summary = page.locator("[data-review-checks-summary]");
+    await expect(summary).toBeVisible();
+    await expect(summary.locator("[data-review-checks-count]")).toHaveText(["1failed", "1running", "5passed"]);
+    await expect(summary.getByRole("button", { name: "Add failures to chat" })).toBeVisible();
+    const deployment = page.locator('[data-review-deployment="Preview"]');
+    await expect(deployment).toContainText("Ready");
+    await expect(deployment.getByRole("link", { name: "Open" })).toHaveAttribute("href", "https://fixture-pr-42.preview.example.test");
+    expect(
+      await page.evaluate(() => {
+        const card = document.querySelector("[data-review-checks-summary]");
+        const title = document.querySelector("[data-review-header] h2");
+        return Math.round(card.getBoundingClientRect().left) === Math.round(title.getBoundingClientRect().left);
+      }),
+    ).toBe(true);
+    check("Checks open on a summary card with counts and Add failures to chat, and end with deployment cards", true);
+
+    await page.getByRole("tab", { name: /^Commits/ }).click();
+    await expect(page.locator("[data-review-commit]")).toHaveCount(3);
+    await expect(page.locator('section[aria-label="Today"]')).toBeVisible();
+    await expect(page.locator('section[aria-label="Yesterday"]')).toBeVisible();
+    await expect(page.locator('[data-review-commit="a1b2c3d"]')).toContainText("Alex Morgan and Claude");
+    check("Commits group by day with co-authors and the short SHA", true);
     expect(errors).toEqual([]);
   } finally {
     page.off("pageerror", onError);

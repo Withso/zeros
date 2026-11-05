@@ -21,6 +21,7 @@ import {
   ghPrCommits,
   ghPrGet,
   ghPrMarkReady,
+  ghPrUpdate,
   ghPrMerge,
   ghPrReviews,
   type AuthStatusResult,
@@ -88,6 +89,8 @@ export interface ReviewProvider {
   ): Promise<{ id: number; url: string }>;
   merge(target: ReviewTarget, method: ReviewMergeMethod): Promise<{ sha: string }>;
   markReady(target: ReviewTarget): Promise<PR>;
+  /** Replace the description; Description offers Edit only when present. */
+  updateBody?(target: ReviewTarget, body: string): Promise<PR>;
 }
 
 function githubPrNumber(target: ReviewTarget): number {
@@ -140,6 +143,7 @@ const githubProvider: ReviewProvider = {
     return ghPrMerge({ ...githubArgs(target), method });
   },
   markReady: (target) => ghPrMarkReady(githubArgs(target)),
+  updateBody: (target, body) => ghPrUpdate({ ...githubArgs(target), body }),
 };
 
 /** Pick the provider for an explicit workspace origin host. Unsupported hosts
