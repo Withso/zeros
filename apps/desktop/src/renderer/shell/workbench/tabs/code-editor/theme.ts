@@ -44,6 +44,8 @@ const chrome = (dark: boolean, baseFg: string | null): Extension =>
       },
       // Read-only editors use contenteditable=false but remain copyable.
       ".cm-content": { padding: "12px 0", caretColor: "var(--fg1)", userSelect: "text" },
+      // Code starts 4px past the gutter, as in Diff view, so toggling it moves no text.
+      ".cm-line": { padding: "0 6px 0 4px" },
       "&.cm-focused": { outline: "none" },
       ".cm-cursor, .cm-dropCursor": { borderLeftColor: "var(--fg1)" },
       ".cm-gutters": {
