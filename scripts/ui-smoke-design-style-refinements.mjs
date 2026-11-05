@@ -3,6 +3,7 @@ import { addDesignSection } from "./ui-smoke-design-helpers.mjs";
 import { runDesignStyleTokensSmoke } from "./ui-smoke-design-style-tokens.mjs";
 import { runDesignDeferredFocusSmoke, runDesignCloseFocusSmoke } from "./ui-smoke-design-focus.mjs";
 import { runDesignThemeSourcesSmoke } from "./ui-smoke-design-theme-sources.mjs";
+import { runDesignThemeVariablesSmoke } from "./ui-smoke-design-theme-variables.mjs";
 
 async function openStyleDesign(page) {
   await page.setViewportSize({ width: 1440, height: 900 });
@@ -438,4 +439,5 @@ export async function runDesignStyleRefinementsSmoke(context) {
   await runDesignDeferredFocusSmoke({ ...context, moveFocus: false });
   await runDesignCloseFocusSmoke(context);
   await runDesignThemeSourcesSmoke(context);
+  await runDesignThemeVariablesSmoke(context);
 }

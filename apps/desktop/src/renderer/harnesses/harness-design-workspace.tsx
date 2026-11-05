@@ -143,6 +143,16 @@ const framePlaybackHarness = new URLSearchParams(window.location.search).has("fr
 const designTokensHarness = new URLSearchParams(window.location.search).has(
   "designTokens",
 );
+// `?themeVariables`: one plain tokens.css variable that frames read, so the
+// theme editor's row actions can be driven past their @property guard.
+const themeVariablesHarness = new URLSearchParams(window.location.search).has(
+  "themeVariables",
+);
+// `&numberToken`: the heading's letter-spacing also reads a tokens.css
+// variable, so a number field shows one.
+const numberTokenHarness = new URLSearchParams(window.location.search).has(
+  "numberToken",
+);
 const DESIGN_TOKENS_HOME_SOURCE = `<!doctype html>
 <html>
   <head>
@@ -156,8 +166,8 @@ const DESIGN_TOKENS_HOME_SOURCE = `<!doctype html>
       }
     </style>
     <style data-zeros-source="tokens.css">
-      :root { --brand: rebeccapurple; }
-      .title { color: var(--brand); }
+      :root { --brand: rebeccapurple;${numberTokenHarness ? " --tracking: -1px;" : ""} }
+      .title { color: var(--brand);${numberTokenHarness ? " letter-spacing: var(--tracking);" : ""} }
     </style>
     <style>body { margin: 0; } main { padding: 72px; } button { border: 0; padding: 8px 12px; }</style>
   </head>
@@ -485,6 +495,20 @@ async function main() {
         usageCount: index % 4,
         line: index + 2,
       })),
+      ...(themeVariablesHarness
+        ? [
+            {
+              name: "--radius",
+              syntax: "*",
+              inherits: true,
+              initialValue: "",
+              value: "6px",
+              themeValues: { dark: "8px" },
+              usageCount: 3,
+              line: 22,
+            },
+          ]
+        : []),
     ],
     tokenSourceVersion: "tokens-source-version-1",
     ...(styleSourcesHarness
@@ -1543,8 +1567,13 @@ async function main() {
               else token.themeValues[operation.theme] = operation.value!;
             } else token.value = operation.value ?? "";
           }
+          // Mirror the adapter: a null value removes the declaration, and a
+          // variable nothing declares or registers is no longer listed.
+          const declared = tokens.filter(
+            (token) => token.value !== "" || Object.keys(token.themeValues).length > 0 || token.syntax !== "*",
+          );
           const revision = `harness:tokens:${transaction.transactionId}`;
-          currentWorkspaceSnapshot = { ...currentWorkspaceSnapshot, tokens, tokenSourceVersion: revision };
+          currentWorkspaceSnapshot = { ...currentWorkspaceSnapshot, tokens: declared, tokenSourceVersion: revision };
           publishFoundation(key, {
             ...previous,
             summary: { ...previous.summary, revision },

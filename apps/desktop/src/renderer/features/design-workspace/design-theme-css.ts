@@ -170,3 +170,76 @@ export function designThemeVariableNameIssue(
   if (!/^--[A-Za-z0-9_-]{1,128}$/.test(candidate)) return "invalid";
   return tokens.some((token) => token.name === candidate) ? "taken" : null;
 }
+
+/** What the theme editor needs of a tokens.css variable to rename or delete it. */
+export interface DesignThemeVariable {
+  name: string;
+  /** The `:root` value; empty when only themes declare it. */
+  value: string;
+  themeValues: Readonly<Record<string, string>>;
+  /** "*" unless an `@property` rule registers the name. */
+  syntax: string;
+  usageCount: number;
+  usageCountKnown?: boolean;
+}
+
+export interface DesignThemeVariableOperation {
+  operationId: string;
+  type: "token.set";
+  file: "tokens.css";
+  name: string;
+  theme: string | null;
+  value: string | null;
+}
+
+const uses = (count: number) => `Used ${count} ${count === 1 ? "time" : "times"}`;
+
+/** Why the editor cannot rename a variable, or null. Renaming moves only the
+ * declarations, so a variable something still reads keeps its name. */
+export function designThemeRenameBlocker(variable: DesignThemeVariable): string | null {
+  if (variable.syntax !== "*") return "Registered with @property";
+  if (variable.usageCountKnown === false) return "Uses not counted yet";
+  return variable.usageCount > 0 ? uses(variable.usageCount) : null;
+}
+
+/** Why the editor cannot delete a variable, or null. An `@property` rule
+ * would keep listing it after its declarations go. */
+export function designThemeDeleteBlocker(variable: DesignThemeVariable): string | null {
+  return variable.syntax !== "*" ? "Registered with @property" : null;
+}
+
+/** The declarations to remove: `:root` and every theme that sets it. */
+export function designThemeDeleteOperations(
+  variable: DesignThemeVariable,
+  id: () => string,
+): DesignThemeVariableOperation[] {
+  return [null, ...Object.keys(variable.themeValues)].map((theme) => ({
+    operationId: id(),
+    type: "token.set",
+    file: "tokens.css",
+    name: variable.name,
+    theme,
+    value: null,
+  }));
+}
+
+/** The same values under `nextName`, then the old declarations removed. */
+export function designThemeRenameOperations(
+  variable: DesignThemeVariable,
+  nextName: string,
+  id: () => string,
+): DesignThemeVariableOperation[] {
+  const set = (theme: string | null, value: string): DesignThemeVariableOperation => ({
+    operationId: id(),
+    type: "token.set",
+    file: "tokens.css",
+    name: nextName,
+    theme,
+    value,
+  });
+  return [
+    ...(variable.value ? [set(null, variable.value)] : []),
+    ...Object.entries(variable.themeValues).map(([theme, value]) => set(theme, value)),
+    ...designThemeDeleteOperations(variable, id),
+  ];
+}

@@ -7,8 +7,10 @@
 // ============================================
 
 import React from "react";
+import { Unlink, Variable } from "lucide-react";
 
 import { cn } from "../../shared/ui/cn";
+import { IconButton } from "../../shared/ui/primitives/icon-button";
 import { getLastInputModality } from "../../shared/ui/overlay-focus";
 import type { InspectorGlyphName } from "./design-layout-values";
 import {
@@ -24,6 +26,42 @@ import {
   SelectValue,
   Tooltip,
 } from "../../shared/ui/primitives";
+
+// --- VARIABLES ---
+
+/** The 12px fg3 glyph before a value a theme variable supplies. */
+export function DesignVariableGlyph({ className }: { className?: string }) {
+  return (
+    <Variable
+      aria-hidden="true"
+      className={cn("text-fg3 size-3 shrink-0", className)}
+    />
+  );
+}
+
+/** Replace a variable with the value it resolves to, as a plain value. */
+export function DesignDetachVariableButton({
+  disabled,
+  onDetach,
+}: {
+  disabled?: boolean;
+  onDetach: () => void;
+}) {
+  return (
+    <Tooltip label="Detach variable">
+      <IconButton
+        size="inline"
+        label="Detach variable"
+        disabled={disabled}
+        className="mr-0.5"
+        onPointerDown={(event) => event.stopPropagation()}
+        onClick={onDetach}
+      >
+        <Unlink />
+      </IconButton>
+    </Tooltip>
+  );
+}
 
 // --- SECTIONS ---
 
