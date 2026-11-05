@@ -11,6 +11,7 @@ import { RuntimeAdoption } from "./runtime-adoption.js";
 import { workspaceRuntimeResolver } from "./runtime-canary-store.js";
 import type { RuntimeCanaryPolicy } from "./runtime-canary.js";
 import { RuntimeHandoffStore } from "./runtime-handoff-store.js";
+import { beginBuildDrain, buildDrainActive, endBuildDrain } from "./runtime-build-drain.js";
 import { CloudV2Store } from "./store.js";
 import { createCloudV2WorkerRoutes } from "./worker-routes.js";
 
@@ -60,6 +61,7 @@ suite("idle worker runtime status", () => {
       fixture: { creatorUserId: creator, organizationId: org, repositoryId: "42" } };
     const authorize = vi.fn(github.authorizeSource), compute = { execLong: vi.fn(async () => ({ exitCode: 0, stdout: "", timedOut: false })) };
     const adoption = new RuntimeAdoption({ store, handoffs, compute, authorizeSource: authorize,
+      drainActive: () => buildDrainActive(pool),
       runtimeForWorkspace: workspace => workspaceRuntimeResolver(pool, { sha256: target, url }, canary ? policy : undefined)(workspace) });
     const app = new Hono();
     app.onError((error, c) => c.json({ code: error instanceof HttpError ? error.code : "internal" }, error instanceof HttpError ? error.status : 500));
@@ -79,7 +81,7 @@ suite("idle worker runtime status", () => {
     const f = await fixture(), counts: number[] = [];
     try {
       for (let i = 0; i < 3; i++) expect(await observeTransactionTiming(() => f.request(), summary => { counts.push(summary.transactions); })).toEqual({ status: "current" });
-      expect(counts).toEqual([3, 3, 3]);
+      expect(counts).toEqual([4, 4, 4]);
       expect(f.authorize).not.toHaveBeenCalled(); expect(f.fetcher).not.toHaveBeenCalled();
       expect(f.url).not.toHaveBeenCalled(); expect(f.compute.execLong).not.toHaveBeenCalled();
     } finally { f.adoption.close(); }
@@ -92,8 +94,23 @@ suite("idle worker runtime status", () => {
         await pool.query("UPDATE cloud_github_source_verifications SET verified_at=clock_timestamp()-interval '61 seconds' WHERE org_id=$1", [f.input.organizationId]);
         expect(await observeTransactionTiming(() => f.request(), summary => { counts.push(summary.transactions); })).toEqual({ status: "current" });
       }
-      expect(counts).toEqual([3, 3, 3]);
+      expect(counts).toEqual([4, 4, 4]);
       expect(f.authorize).not.toHaveBeenCalled(); expect(f.fetcher).not.toHaveBeenCalled();
+    } finally { f.adoption.close(); }
+  });
+
+  it("keeps an already-current status behind the real build drain until the lease ends", async () => {
+    const f = await fixture();
+    try {
+      const drain = await beginBuildDrain(pool, { runId: `status-${randomUUID()}`, liveCpSha: "c".repeat(40),
+        priorRuntimeSha256: "a".repeat(64), ttlMs: 60_000 });
+      try {
+        expect(drain.ready).toBe(true);
+        expect(await f.request()).toEqual({ status: "unavailable" });
+        expect(f.authorize).not.toHaveBeenCalled(); expect(f.url).not.toHaveBeenCalled();
+        expect(f.compute.execLong).not.toHaveBeenCalled();
+      } finally { await endBuildDrain(pool, drain.lease); }
+      expect(await f.request()).toEqual({ status: "current" });
     } finally { f.adoption.close(); }
   });
 

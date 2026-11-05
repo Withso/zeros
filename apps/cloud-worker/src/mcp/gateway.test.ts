@@ -203,13 +203,15 @@ describe("worker MCP gateway", () => {
     cleanups.push(() => rm(root, { recursive: true, force: true }));
     const socket = createServer(); await new Promise<void>(resolve => socket.listen(0, "127.0.0.1", resolve));
     const port = (socket.address() as { port: number }).port;
-    await new Promise<void>(resolve => socket.close(() => resolve()));
+    cleanups.push(() => socket.listening ? new Promise<void>(resolve => socket.close(() => resolve())) : Promise.resolve());
     const args = [fileURLToPath(new URL("./__fixtures__/server.mjs", import.meta.url)), ...(mode === "http" ? ["http", String(port)] : []), "literal ; $(no-shell)"];
     const gateway = new McpGateway({ workspaceRoot: root }); cleanups.push(() => gateway.dispose());
     await gateway.configure([{ id: randomUUID(), name: "child", transport: "stdio", command: process.execPath, args, cwd: "nested", env: { MCP_TEST_VALUE: "fixture-process-secret" },
       ...(mode === "http" ? { listen_url: `http://127.0.0.1:${port}/mcp` } : {}) }]);
     const [entry] = Object.values(await gateway.providers()), client = new Client({ name: "test-agent", version: "1" });
     cleanups.push(() => client.close());
+    // Keep the child port reserved while the gateway chooses its own listener.
+    await new Promise<void>(resolve => socket.close(() => resolve()));
     await client.connect(new StreamableHTTPClientTransport(new URL(entry.url), { requestInit: { headers: entry.headers } }));
     expect((await client.listTools()).tools[0]?.description).toBe("[redacted]");
     const result = await client.callTool({ name: "inspect" }), content = result.content as Array<{ text: string }>;
