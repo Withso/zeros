@@ -804,4 +804,19 @@ Each landed step appends one line: date, workstream, what landed, evidence.
   tracking and hidden chats) failed red on a stub; the new prompt-fold smoke
   (cloud, Local and organization-local, decoded pixels in both themes)
   fails when the folded mask is removed or the bubble fits its content; the
-  local-links smoke now checks the lane width.
+  local-links smoke now checks the lane width. The three ui-smoke shards pass
+  on that head (623, 1,163 and 1,040 checks).
+- 2026-11-05 · 5 · Agent chat: the sender line. A message another chat sent
+  (`localFrom`) no longer carries "Sent from" and a chat pill: it shows the
+  sending chat's name in fg1, centred on its agent's 16px logo after it,
+  right-aligned above the full-width bubble like a sender in a chat app.
+  `LocalLinkPill appearance="sender"` draws it with no border or fill; on
+  hover only the name takes the bg1-hover fill and its text stays fg1, and a
+  click (or middle click) opens that chat as the pill did. A chat that is
+  gone reads fg3. "Sent from" stays for screen readers. Canvas version 377
+  draws it on Messages · Local chat links with a hovered state, also in its
+  All states. Evidence: the local-links unit test (the sender's classes,
+  name-then-logo order and muted target; the right-aligned header) and smoke
+  (geometry for sent, steered, saved and short senders; fg1 at rest and
+  hovered, the name-only fill, no border and the click to its chat, in both
+  themes; narrow-pane truncation) failed red before the change.

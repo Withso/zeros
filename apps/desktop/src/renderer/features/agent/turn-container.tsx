@@ -308,12 +308,12 @@ export const TurnPromptHeader = memo(function TurnPromptHeader({
   return (
     <div className="zeros-agent-turn-prompt group/usermsg relative flex w-full max-w-[800px] min-w-0 flex-col">
       {localFrom ? (
-        // Provenance sits above its bubble at the bubble's left edge, keeping
-        // its own width.
+        // A sender line, as in a chat app: the sending chat's name and logo,
+        // right-aligned above its bubble. "Sent from" is for screen readers.
         <div data-local-from-group="" className="flex w-full min-w-0 flex-col">
-          <div data-local-from="" className="mb-2 flex max-w-full min-w-0 items-center gap-1 self-start text-xs text-fg3">
-            <span className="shrink-0">Sent from</span>
-            <LocalLinkPill href={localFrom.link} fallback={localFrom} className="mr-0 shrink" />
+          <div data-local-from="" className="mb-2 flex max-w-full min-w-0 items-center self-end text-xs">
+            <span className="sr-only">Sent from</span>
+            <LocalLinkPill href={localFrom.link} fallback={localFrom} appearance="sender" className="shrink" />
           </div>
           {bubble}
         </div>

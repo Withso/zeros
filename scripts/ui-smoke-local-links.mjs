@@ -116,7 +116,6 @@ export async function runLocalLinksSmoke({ page, harnessBase, check }) {
   );
 
   const from = page.getByTestId("sent-from");
-  await expect(from).toContainText("Sent from");
   await expect(from).not.toContainText("[Zeros]");
   await expect(
     from.getByRole("button", { name: "Edit message", exact: true }),
@@ -143,24 +142,36 @@ export async function runLocalLinksSmoke({ page, harnessBase, check }) {
       const header = element.querySelector("[data-local-from]");
       const bubble = element.querySelector("[data-user-bubble]");
       const turn = element.querySelector(".zeros-agent-turn-prompt") ?? element;
-      const h = header.getBoundingClientRect();
-      const b = bubble.getBoundingClientRect();
-      const t = turn.getBoundingClientRect();
+      const sender = header.querySelector('[data-local-link-appearance="sender"]');
+      const name = sender.querySelector("[data-local-link-label]");
+      const logo = sender.querySelector("svg");
+      const box = (node) => node.getBoundingClientRect();
+      const h = box(header), b = box(bubble), t = box(turn), n = box(name), l = box(logo);
       return {
         siblings: header.parentElement === bubble.parentElement,
         outside: !bubble.contains(header),
-        aligned: Math.abs(h.left - b.left) <= 1,
+        // A sender line: flush with the bubble's right edge, its own width.
+        rightAligned: Math.abs(h.right - b.right) <= 1,
         ownWidth: h.width < b.width,
         // Every sent message spans the 800px lane, however short.
         fills: Math.abs(b.left - t.left) <= 1 && Math.abs(b.right - t.right) <= 1,
         lane: Math.round(t.width),
         gap: b.top - h.bottom,
         bubbleText: bubble.textContent,
+        // The chat's name, then its 16px logo, centred on one line.
+        nameFirst: n.right <= l.left + 0.5,
+        logo: Math.round(l.width),
+        centred: Math.abs((n.top + n.bottom) / 2 - (l.top + l.bottom) / 2) <= 0.5,
+        // "Sent from" stays for screen readers, in a 1px box.
+        unseen: [...header.children]
+          .filter((child) => child !== sender)
+          .map((child) => [child.textContent, box(child).width * box(child).height <= 1]),
       };
     });
-    // The bubble spans the lane; the header keeps its own width at the
-    // bubble's left edge, 8px above.
-    expect(geometry).toMatchObject({ siblings: true, outside: true, aligned: true, ownWidth: true, gap: 8, fills: true, lane: 800 });
+    expect(geometry).toMatchObject({
+      siblings: true, outside: true, rightAligned: true, ownWidth: true, gap: 8, fills: true, lane: 800,
+      nameFirst: true, logo: 16, centred: true, unseen: [["Sent from", true]],
+    });
     expect(geometry.bubbleText).not.toContain("Sent from");
     await expect(prompt.getByRole("button", { name: "Edit message", exact: true })).toHaveCount(0);
   }
@@ -171,7 +182,51 @@ export async function runLocalLinksSmoke({ page, harnessBase, check }) {
     "The implementation is ready. Review zeros-dev://workspace/ws_child when you have time.",
   );
   check(
-    "Normal, steered and saved provenance sits above the full-width copy-only bubble; notes and code retain their roles",
+    "Normal, steered and saved senders sit right-aligned above the full-width copy-only bubble as the chat's name and logo; notes and code retain their roles",
+    true,
+  );
+
+  // The sender's name is fg1 at rest and hovered; hovered, only the name takes
+  // the bg1-hover fill, with no border. Tokens resolve beside the line, in its
+  // own theme scope.
+  const sender = from.locator('[data-local-link-appearance="sender"]');
+  const senderStyle = () =>
+    sender.evaluate((element) => {
+      const name = element.querySelector("[data-local-link-label]");
+      const resolve = (value) => {
+        const probe = globalThis.document.createElement("span");
+        probe.style.backgroundColor = value;
+        element.parentElement.append(probe);
+        const color = globalThis.getComputedStyle(probe).backgroundColor;
+        probe.remove();
+        return color;
+      };
+      const style = globalThis.getComputedStyle(element);
+      const nameStyle = globalThis.getComputedStyle(name);
+      return {
+        border: style.borderTopWidth,
+        fill: style.backgroundColor,
+        name: nameStyle.color === resolve("var(--fg1)") ? "fg1" : nameStyle.color,
+        nameFill: nameStyle.backgroundColor === resolve("var(--bg1-hover)") ? "bg1-hover" : nameStyle.backgroundColor,
+      };
+    });
+  const toggleTheme = page.getByRole("button", { name: "Toggle theme", exact: true });
+  for (const theme of ["light", "dark"]) {
+    if (theme === "dark") await toggleTheme.click();
+    await page.mouse.move(0, 0);
+    await expect
+      .poll(senderStyle, { message: `${theme}: sender at rest` })
+      .toEqual({ border: "0px", fill: "rgba(0, 0, 0, 0)", name: "fg1", nameFill: "rgba(0, 0, 0, 0)" });
+    await sender.hover();
+    await expect
+      .poll(senderStyle, { message: `${theme}: sender hovered` })
+      .toEqual({ border: "0px", fill: "rgba(0, 0, 0, 0)", name: "fg1", nameFill: "bg1-hover" });
+  }
+  await toggleTheme.click();
+  await sender.click();
+  await expect(navigation).toHaveText("chat:codex");
+  check(
+    "The sender's name stays fg1, takes only a bg1-hover fill on hover with no border, and opens its chat, in both themes",
     true,
   );
 
@@ -301,7 +356,7 @@ export async function runLocalLinksSmoke({ page, harnessBase, check }) {
   const narrow = await page.getByTestId("steered-from").evaluate((element) => {
     const header = element.querySelector("[data-local-from]");
     const pill = header.querySelector("[data-local-link-pill]");
-    const label = pill.lastElementChild;
+    const label = pill.querySelector("[data-local-link-label]");
     const bounds = element.getBoundingClientRect();
     return {
       fits: header.getBoundingClientRect().left >= bounds.left && pill.getBoundingClientRect().right <= bounds.right,
