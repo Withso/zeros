@@ -838,3 +838,10 @@ Each landed step appends one line: date, workstream, what landed, evidence.
   `node --test apps/web/lib/*.test.mjs` 165 tests; the control plane's
   shell-copy test; renders of both loading states and the dashboard's beside
   their frames, in both themes.
+- 2026-11-05 · 5 · Customize: the tool-cap row retires, and with it the
+  import dialog's "Cursor allows about 40 tools in total." Cursor's docs name
+  no MCP tool limit, it loads tools on demand, and Zeros never enforced one,
+  so the row told people to turn off tools they wanted. Rows keep their tool
+  count and switches, and `disabled_tools` is unchanged. A Customize smoke
+  step holds it: a server with 59 tools shows no notice. The exported
+  `customize.md` still lists the row; it predates this change.

@@ -7144,9 +7144,8 @@ export class AgentGateway {
       // Hand the shared, deduplicated registry view (mutated in place by
       // setMcpServers). Adapters read ctx.mcpServers lazily per session, so a
       // settings edit reaches each agent's next session live. Dedup (collapse
-      // duplicate names/endpoints — matters for Cursor's ~40-tool cap) happens
-      // in refreshMcpView; native agent configuration remains owned by each
-      // adapter's discovery path.
+      // duplicate names/endpoints) happens in refreshMcpView; native agent
+      // configuration remains owned by each adapter's discovery path.
       mcpServers: this.mcpServersView,
       mcpCatalogRevision: (server) =>
         server.name === "zeros-gateway" &&

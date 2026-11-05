@@ -15,7 +15,7 @@ export class ScopedMcpGateways {
     if (this.stopped) throw new Error("MCP runtime is shutting down.");
     const current = this.entries.get(root);
     if (current) {
-      if (!force && isDeepStrictEqual(signature(current.backends), signature(backends))) return current.flight;
+      if (!force && sameGatewayBackends(current.backends, backends)) return current.flight;
       current.backends = [...backends];
       current.flight = current.flight.catch(() => current.gateway).then(async gateway => {
         this.assertCurrent(root, gateway);
@@ -55,6 +55,12 @@ export class ScopedMcpGateways {
     const entries = [...this.entries.values()]; this.entries.clear();
     await Promise.allSettled(entries.map(async entry => { await entry.gateway.stop(); await entry.flight.catch(() => {}); }));
   }
+}
+
+/** Broker callbacks are recreated on every resolve; `authorizationKey`
+ * carries their identity. */
+export function sameGatewayBackends(left: readonly GatewayBackend[], right: readonly GatewayBackend[]): boolean {
+  return isDeepStrictEqual(signature(left), signature(right));
 }
 
 function signature(backends: readonly GatewayBackend[]): unknown {

@@ -1,0 +1,9 @@
+{
+  "id": "settings-write-datetime-erasure",
+  "kind": "replay",
+  "area": "desktop-engine",
+  "fixedBy": "pending",
+  "symptom": "An unrelated settings write replaced hand-written TOML datetimes with empty tables, because pruning undefined values walked Date objects as plain records.",
+  "rule": "Value walkers over parsed TOML keep Date values intact; test writes over files that contain every TOML value type a person can write (principle 13).",
+  "check": "pnpm exec vitest run --config vitest.config.ts apps/desktop/src/engine/settings/__tests__/files.test.ts -t 'hand-written datetimes'"
+}

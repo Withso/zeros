@@ -20,7 +20,7 @@ import {
   type RawServer,
 } from "../mcp-server-model";
 
-describe("disabledToolsOf / withToolDisabled (Cursor 40-cap allowlist)", () => {
+describe("disabledToolsOf / withToolDisabled (per-server tool switches)", () => {
   it("reads disabled_tools, tolerating absent / non-array / non-strings", () => {
     expect(disabledToolsOf({})).toEqual([]);
     expect(disabledToolsOf({ disabled_tools: ["a", "b"] })).toEqual(["a", "b"]);

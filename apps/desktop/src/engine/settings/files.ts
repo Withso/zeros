@@ -284,6 +284,7 @@ function settingsValuesEqual(left: unknown, right: unknown): boolean {
 function prune(value: unknown): unknown {
   if (Array.isArray(value))
     return value.filter((v) => v !== undefined).map(prune);
+  if (value instanceof Date) return value;
   if (typeof value === "object" && value !== null) {
     const out: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(value)) {
@@ -293,6 +294,15 @@ function prune(value: unknown): unknown {
     return out;
   }
   return value;
+}
+
+/** One final line ending in the text's own style. smol-toml already ends with
+ * one and toml-patch keeps the file's trailing blank lines, so appending one
+ * would grow the file on every write. */
+function withFinalNewline(text: string): string {
+  let end = text.length;
+  while (end > 0 && (text[end - 1] === "\n" || text[end - 1] === "\r")) end--;
+  return `${text.slice(0, end)}${text.includes("\r\n") ? "\r\n" : "\n"}`;
 }
 
 export interface WriteSettingsOptions {
@@ -321,7 +331,7 @@ export function writeSettingsFile(
     if (k === "$schema") continue;
     ordered[k] = v;
   }
-  const text = `${serializeSettings(ordered, existingText)}\n`;
+  const text = withFinalNewline(serializeSettings(ordered, existingText));
   mkdirSync(path.dirname(filePath), { recursive: true });
   const tmp = `${filePath}.tmp-${process.pid}-${randomUUID()}`;
   try {

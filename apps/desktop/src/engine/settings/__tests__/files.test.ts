@@ -451,6 +451,52 @@ describe("updateSettingsFile", () => {
     ).toEqual({ budget_cap_usd: 2 });
   });
 
+  it("keeps hand-written datetimes and comments through an unrelated write", () => {
+    const file = path.join(dir, "settings.toml");
+    writeFileSync(
+      file,
+      [
+        "# keep me",
+        "[[mcp.servers]]",
+        'name = "fixture"',
+        'transport = "stdio"',
+        'command = "fixture"',
+        "reviewed_at = 2026-01-02T03:04:05Z",
+        "reviewed_on = 2026-01-02",
+        "",
+        "[scripts]",
+        'run = "old"',
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    updateSettingsFile(file, { scripts: { run: "new" } }, { schemaUrl: null });
+    expect(readFileSync(file, "utf8")).toContain("# keep me");
+    const [server] = (
+      readSettingsFile(file).doc.mcp as { servers: Record<string, unknown>[] }
+    ).servers;
+    expect(JSON.parse(JSON.stringify(server))).toMatchObject({
+      reviewed_at: "2026-01-02T03:04:05.000Z",
+      reviewed_on: "2026-01-02",
+    });
+  });
+
+  it("ends the file with one newline however often it is written", () => {
+    const file = path.join(dir, "settings.toml");
+    writeSettingsFile(file, { scripts: { run: "a" } }, { schemaUrl: null });
+    for (const run of ["b", "c", "d"]) {
+      updateSettingsFile(file, { scripts: { run } }, { schemaUrl: null });
+    }
+    expect(readFileSync(file, "utf8")).toBe('[scripts]\nrun = "d"\n');
+  });
+
+  it("drops trailing blank lines left by earlier writes, keeping line endings", () => {
+    const file = path.join(dir, "settings.toml");
+    writeFileSync(file, '# keep me\r\n[scripts]\r\nrun = "a"\r\n\r\n\r\n', "utf8");
+    updateSettingsFile(file, { scripts: { run: "b" } }, { schemaUrl: null });
+    expect(readFileSync(file, "utf8")).toBe('# keep me\r\n[scripts]\r\nrun = "b"\r\n');
+  });
+
   it("falls back to a full rewrite when existingText can't be patched (never throws)", () => {
     const file = path.join(dir, "settings.toml");
     expect(() =>

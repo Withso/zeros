@@ -5,11 +5,10 @@ import { mcpCredentialKey } from "./gateway/credential-key";
 //
 // The gateway holds one MCP server registry (AgentGateway.mcpServers) and
 // fans it out to all three agent adapters. Before that fan-out we collapse
-// duplicates so nothing double-loads — which matters because Cursor caps
-// the total tool count (~40 across all servers), and because the agents
-// key their injected MCP maps by name (a second same-name entry would
-// silently overwrite the first on Claude/Cursor, or deep-merge oddly on
-// Codex).
+// duplicates so nothing double-loads — a repeated endpoint would offer its
+// tools twice, and the agents key their injected MCP maps by name (a second
+// same-name entry would silently overwrite the first on Claude/Cursor, or
+// deep-merge oddly on Codex).
 
 import { stat } from "node:fs/promises";
 import { existsSync } from "node:fs";
@@ -43,7 +42,7 @@ import { mcpSecretEnvAlias } from "@zeros/protocol/mcp-secrets";
  *  of duplicate are dropped:
  *   - same `name` — agents key by name; a duplicate would clobber/merge.
  *   - same endpoint (`url`) under a different name — would connect to the
- *     same server twice, doubling its tools against Cursor's ~40-tool cap.
+ *     same server twice, doubling its tools.
  *
  *  Scope note: this deduplicates the Zeros registry against itself. Native
  *  pass-through agent configuration remains outside this registry. */
@@ -200,8 +199,8 @@ export interface GatewayBackend {
   /** For auth:"oauth": a pre-registered client_id (no-DCR providers). Non-secret. */
   clientId?: string;
   scopes?: string[];
-  /** Tool NAMES to hide from agents (the Cursor 40-cap allowlist). The gateway
-   *  filters these out of the aggregated set it serves. */
+  /** Tool NAMES the user turned off. The gateway filters these out of the
+   *  aggregated set it serves. */
   disabledTools?: string[];
   source: SettingsLayerName;
 }

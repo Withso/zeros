@@ -82,12 +82,19 @@ export function commitMcpCredentials(vault: OAuthVault, server: McpSettingsServe
   }));
 }
 
+/** The editor holds the JSON copy settings.read sent over the bridge, while
+ * smol-toml tables have null prototypes and datetimes are Date subclasses.
+ * Compare JSON values, never JS prototypes. */
+function sameSavedEntry(entry: unknown, previous: Record<string, unknown>): boolean {
+  return isDeepStrictEqual(JSON.parse(JSON.stringify(entry)), JSON.parse(JSON.stringify(previous)));
+}
+
 /** Identify an edit by its original identity, then compare the original entry.
  * Unrelated insertions/deletions survive; changing the edited row conflicts. */
 export function replaceMcpServer(servers: unknown[], previous: Record<string, unknown> | null, server: Record<string, unknown>): unknown[] {
   const isRecord = (entry: unknown): entry is Record<string, unknown> => typeof entry === "object" && entry !== null && !Array.isArray(entry);
   const index = previous ? servers.findIndex(entry => isRecord(entry) && (previous.credential_id ? entry.credential_id === previous.credential_id : entry.name === previous.name)) : -1;
-  if (previous && (index === -1 || !isDeepStrictEqual(servers[index], previous))) throw new Error("This MCP server changed while you were editing. Reopen it to review the latest version.");
+  if (previous && (index === -1 || !sameSavedEntry(servers[index], previous))) throw new Error("This MCP server changed while you were editing. Reopen it to review the latest version.");
   if (servers.some((entry, offset) => offset !== index && isRecord(entry) && entry.name === server.name)) throw new Error("Another MCP server already uses this name.");
   if (index === -1 && servers.length >= 128) throw new Error("Use up to 128 MCP servers per project.");
   return index === -1 ? [...servers, server] : servers.map((entry, offset) => offset === index ? server : entry);
@@ -115,7 +122,7 @@ export const mcpDeleteInputSchema = mcpSaveInputSchema.omit({ server: true, secr
 export function removeMcpServer(servers: unknown[], previous: Record<string, unknown>): unknown[] {
   // Reuse the exact identity/CAS check before removing, preserving unknown rows.
   replaceMcpServer(servers, previous, previous);
-  return servers.filter(entry => !isDeepStrictEqual(entry, previous));
+  return servers.filter(entry => !sameSavedEntry(entry, previous));
 }
 export async function opMcpDeleteServer(input: z.infer<typeof mcpDeleteInputSchema>, commit?: McpSettingsCommit): Promise<McpSettingsWrite> {
   const write = () => {

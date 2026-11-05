@@ -21,7 +21,7 @@ import type { McpServerRegistration } from "../types";
 
 // The gateway normalizes the MCP registry before fanning it
 // out to the adapters, so a duplicate name/endpoint can't double-load (which
-// would burn Cursor's ~40-tool cap and clobber name-keyed injection maps).
+// would offer its tools twice and clobber name-keyed injection maps).
 
 const http = (name: string, url: string): McpServerRegistration => ({
   name,

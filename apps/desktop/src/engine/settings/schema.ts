@@ -292,7 +292,7 @@ const mcpHttpServerSchema = z.object({
     .array(z.string())
     .optional()
     .describe(
-      "For a gateway-fronted server (auth oauth/header): tool NAMES to hide from agents — e.g. to stay under Cursor's ~40-tool cap. Empty/absent = all tools exposed.",
+      "For a gateway-fronted server (auth oauth/header): tool NAMES to hide from agents. Empty/absent = all tools exposed.",
     ),
   enabled: z
     .boolean()

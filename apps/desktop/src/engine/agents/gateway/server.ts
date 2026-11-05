@@ -308,6 +308,9 @@ export class McpGateway {
   getStatuses(): readonly GatewayBackendStatus[] {
     return this.statuses;
   }
+  get backends(): readonly GatewayBackend[] {
+    return this.backendList;
+  }
 
   /** Changes only with a committed tool/schema change, including withdrawal.
    * The generation prevents a new listener on the same URL reusing an SDK cache. */
@@ -441,8 +444,8 @@ export class McpGateway {
           await client.close();
           return;
         }
-        // Filter out the user's disabled tools (the Cursor 40-cap allowlist);
-        // report ALL names for the UI so a disabled tool can be re-enabled.
+        // Filter out the user's disabled tools; report ALL names for the UI so
+        // a disabled tool can be re-enabled.
         const allNames = tools.map((t) => t.name);
         catalog.tools = tools;
         catalogs.set(b.name, catalog);
