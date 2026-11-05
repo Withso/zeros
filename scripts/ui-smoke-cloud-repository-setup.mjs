@@ -61,7 +61,7 @@ export async function runCloudRepositorySetupSmoke({ page, check }) {
     expect(writes.at(-1).input.repositories[0].setup).toBe("pnpm install");
     await page.getByRole("button", { name: "Member", exact: true }).click();
     await expect(field).toHaveCount(0);
-    await expect(page.getByText("Only organization owners and admins manage the Cloud Computer.", { exact: true })).toBeVisible();
+    await expect(page.getByText("Only owners and admins manage it.", { exact: true })).toBeVisible();
     const before = writes.length;
     await page.getByRole("button", { name: "Local owner", exact: true }).click();
     await expect(field).toHaveCount(0);
