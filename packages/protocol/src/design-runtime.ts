@@ -383,6 +383,10 @@ export interface DesignRuntimeScreenshot {
   height: number;
   scale: number;
   nodeId: string | null;
+  /** True when the capture holds only the node's own subtree on a transparent
+   * background (requested with `isolate`); older runtimes omit it and return a
+   * crop of the whole frame. */
+  isolated?: boolean;
 }
 
 export interface DesignRuntimeMatchedDeclaration {
@@ -3892,6 +3896,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     dragPaintStyle = null;
     if (!element) return;
     var style = document.createElement("style");
+    style.setAttribute("data-zeros-drag-paint", "");
     var selector = element === document.body ? "body" : '[data-oid="' + CSS.escape(oid) + '"]';
     style.textContent = selector + "{opacity:0!important}";
     document.head.appendChild(style);
@@ -4770,6 +4775,9 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     var nodeId = typeof args.nodeId === "string" && args.nodeId
       ? args.nodeId
       : null;
+    // A dragged layer's picture holds only that layer: every other box is
+    // hidden and the canvas behind it stays transparent.
+    var isolate = args.isolate === true && nodeId !== null && !viewportCapture;
     var viewportWidth = document.documentElement.clientWidth || window.innerWidth;
     var viewportHeight = document.documentElement.clientHeight || window.innerHeight;
     var crop;
@@ -4824,7 +4832,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       : (typeof args.scale === "number" ? args.scale : 1);
     var scale = viewportCapture
       ? requestedScale
-      : Math.max(0.1, Math.min(2, requestedScale));
+      : Math.max(0.1, Math.min(isolate ? 4 : 2, requestedScale));
     scale = Math.min(
       scale,
       MAX_CAPTURE_DIMENSION / crop.width,
@@ -4845,6 +4853,12 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     if (disposed || cancelledRequests.has(requestId)) throw typedError("CANCELLED", "Capture cancelled.", false);
     var clone = document.documentElement.cloneNode(true);
     clone.setAttribute("xmlns", "http://www.w3.org/1999/xhtml");
+    // A dragged layer's paint is suppressed while the host shows its picture;
+    // that editor state is not part of what the frame looks like.
+    var dragPaintStyles = clone.querySelectorAll("style[data-zeros-drag-paint]");
+    for (var dragPaintIndex = 0; dragPaintIndex < dragPaintStyles.length; dragPaintIndex += 1) {
+      dragPaintStyles[dragPaintIndex].remove();
+    }
     // A document propagates a solid BODY background to its transparent root
     // canvas. Inside foreignObject, BODY instead paints only its own box.
     // Reproduce that canvas paint without adding it twice for translucent fills.
@@ -4856,7 +4870,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       return color === "transparent" || /^rgba\([^)]*,\s*0(?:\.0+)?\s*\)$/.test(color) ||
         /\/\s*0(?:\.0+)?%?\s*\)$/.test(color);
     }
-    if (captureBody && clonedCaptureBody && captureBodyStyle &&
+    if (!isolate && captureBody && clonedCaptureBody && captureBodyStyle &&
         captureRootStyle.backgroundImage === "none" &&
         captureColorIsTransparent(captureRootStyle.backgroundColor) &&
         captureBodyStyle.backgroundImage === "none" &&
@@ -4896,6 +4910,22 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       clonedCaptureBody.style.setProperty("background-color", "transparent", "important");
     }
 
+    if (isolate) {
+      var isolatedTarget = clone.querySelector('[data-oid="' + CSS.escape(nodeId) + '"]');
+      if (!isolatedTarget) throw new Error("The screenshot target is not in the frame document.");
+      isolatedTarget.setAttribute("data-zeros-capture-isolate", "");
+      var isolateStyle = document.createElement("style");
+      // The first important layer outranks authored important rules (see
+      // above); nothing outside the target paints, while the target's own
+      // descendants keep any visibility they author. The rules stay inside
+      // the cloned page: a hidden <foreignObject> paints none of its content.
+      isolateStyle.textContent = "@layer{html,body{background:transparent!important}" +
+        "html:not([data-zeros-capture-isolate]),html :not([data-zeros-capture-isolate]):not([data-zeros-capture-isolate] *){visibility:hidden!important}" +
+        "[data-zeros-capture-isolate]{visibility:visible!important}}";
+      var isolateStyleParent = clone.querySelector("head") || clone;
+      isolateStyleParent.insertBefore(isolateStyle, isolateStyleParent.firstChild);
+      clone.style.setProperty("background", "transparent", "important");
+    }
     var scripts = clone.querySelectorAll("script");
     for (var index = scripts.length - 1; index >= 0; index -= 1) {
       scripts[index].remove();
@@ -4903,7 +4933,13 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     scripts = null;
     clone.style.setProperty("width", viewportWidth + "px", "important");
     clone.style.setProperty("height", viewportHeight + "px", "important");
-    clone.style.setProperty("overflow", "hidden", "important");
+    clone.style.setProperty("overflow", isolate ? "visible" : "hidden", "important");
+    if (isolate) {
+      // A dragged layer is often already partly past the viewport when its
+      // picture is taken. Only it paints, so the page is shifted (without
+      // relayout or new viewport units) to bring its box to the origin.
+      clone.style.setProperty("translate", (-documentX) + "px " + (-documentY) + "px", "important");
+    }
     var serialized = new XMLSerializer().serializeToString(clone);
     clone = null;
     if (serialized.length > 16 * 1024 * 1024) throw typedError("BAD_REQUEST", "Capture source budget exceeded.", false);
@@ -4966,12 +5002,12 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
           var context = canvas.getContext("2d");
           if (!context) throw new Error("Canvas capture is unavailable.");
           context.drawImage(
-            image, documentX, documentY, crop.width, crop.height,
+            image, isolate ? 0 : documentX, isolate ? 0 : documentY, crop.width, crop.height,
             0, 0, outputWidth, outputHeight
           );
           encoding = true;
           encodeCanvasPng(canvas, function (dataUrl) {
-            finish(null, {
+            var captured = {
               sourceVersion: captureSourceVersion,
               dataUrl: dataUrl,
               mimeType: "image/png",
@@ -4979,7 +5015,9 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
               height: outputHeight,
               scale: scale,
               nodeId: nodeId
-            });
+            };
+            if (isolate) captured.isolated = true;
+            finish(null, captured);
           }, function (error) { finish(error); }, operation);
         } catch (error) {
           finish(error);

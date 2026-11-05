@@ -887,6 +887,130 @@ export function designLocalDelta(
   return rotateVector(delta, -rotation);
 }
 
+export type DesignLinearMap = readonly [number, number, number, number];
+
+/** The selection's own axes in frame space, as unit columns: where its local
+ * x and y point, including a mirrored axis. A rotation alone cannot describe
+ * a flipped element; this can. */
+export function designSelectionLinear(
+  box: Pick<DesignSelectionBox, "affine" | "rotation">,
+): DesignLinearMap {
+  if (box.affine) return box.affine;
+  const radians = (box.rotation * Math.PI) / 180;
+  const cos = Math.cos(radians);
+  const sin = Math.sin(radians);
+  return [cos, sin, -sin, cos];
+}
+
+function invertLinear(linear: DesignLinearMap): DesignLinearMap | null {
+  const [a, b, c, d] = linear;
+  const determinant = a * d - b * c;
+  if (!Number.isFinite(determinant) || Math.abs(determinant) < 1e-9)
+    return null;
+  return [d / determinant, -b / determinant, -c / determinant, a / determinant];
+}
+
+function applyLinear(
+  linear: DesignLinearMap,
+  vector: { x: number; y: number },
+): { x: number; y: number } {
+  return {
+    x: linear[0] * vector.x + linear[2] * vector.y,
+    y: linear[1] * vector.x + linear[3] * vector.y,
+  };
+}
+
+/** A frame-space delta in the selection's own axes. Inverting the whole
+ * linear map, not just its angle, keeps a mirrored element's handles and
+ * spacing ticks following the pointer on the mirrored axis. */
+export function designSelectionLocalDelta(
+  delta: { x: number; y: number },
+  box: Pick<DesignSelectionBox, "affine" | "rotation">,
+): { x: number; y: number } {
+  const inverse = box.affine ? invertLinear(box.affine) : null;
+  return inverse ? applyLinear(inverse, delta) : rotateVector(delta, -box.rotation);
+}
+
+export function designSelectionFrameDelta(
+  local: { x: number; y: number },
+  box: Pick<DesignSelectionBox, "affine" | "rotation">,
+): { x: number; y: number } {
+  return box.affine ? applyLinear(box.affine, local) : rotateVector(local, box.rotation);
+}
+
+/** Selection chrome that must read on screen — the size badge and the angle
+ * readout — sits inside the turned overlay. This undoes the overlay's own
+ * map so the chrome can choose its screen orientation; the identity is empty
+ * so an upright selection keeps its plain transform. */
+export function designOverlayCounterTransform(
+  frame: Pick<DesignSelectionOverlayFrame, "affine" | "rotation">,
+): string {
+  if (frame.affine) {
+    const inverse = invertLinear(frame.affine);
+    return inverse ? `matrix(${inverse.map(roundedTransformNumber).join(",")},0,0)` : "";
+  }
+  return Math.abs(frame.rotation) > 1e-6 ? `rotate(${roundedTransformNumber(-frame.rotation)}deg)` : "";
+}
+
+function roundedTransformNumber(value: number): string {
+  const rounded = Math.round(value * 1e6) / 1e6;
+  return String(Object.is(rounded, -0) ? 0 : rounded);
+}
+
+export interface DesignSelectionLabelPlacement {
+  /** The anchor, in the overlay's own unturned coordinates: the middle of
+   * the edge that faces down on screen. */
+  left: number;
+  top: number;
+  /** Screen angle of that edge, normalized so the text never reads upside
+   * down or mirrored. */
+  angle: number;
+  /** Composed before the inverse camera scale (transform-origin 0 0). */
+  transform: string;
+}
+
+const LABEL_EDGES = [
+  { name: "bottom", x: 0.5, y: 1, normal: { x: 0, y: 1 }, tangent: { x: 1, y: 0 } },
+  { name: "right", x: 1, y: 0.5, normal: { x: 1, y: 0 }, tangent: { x: 0, y: 1 } },
+  { name: "left", x: 0, y: 0.5, normal: { x: -1, y: 0 }, tangent: { x: 0, y: 1 } },
+  { name: "top", x: 0.5, y: 0, normal: { x: 0, y: -1 }, tangent: { x: 1, y: 0 } },
+] as const;
+
+/** The size badge sits centred under whichever edge faces down on screen,
+ * running along it and never upside down, so a flipped or half-turned
+ * selection keeps its badge below it. */
+export function designSelectionLabelPlacement(
+  frame: Pick<DesignSelectionOverlayFrame, "affine" | "rotation" | "width" | "height">,
+  gap = 4,
+): DesignSelectionLabelPlacement {
+  const linear = designSelectionLinear(frame);
+  let best: (typeof LABEL_EDGES)[number] = LABEL_EDGES[0];
+  let bestDown = -Infinity;
+  for (const edge of LABEL_EDGES) {
+    // Ties (an exact 45° turn) keep the earlier edge, so the badge does not
+    // flicker between two sides while an angle settles.
+    const down = applyLinear(linear, edge.normal).y;
+    if (down > bestDown + 1e-6) {
+      best = edge;
+      bestDown = down;
+    }
+  }
+  let tangent = applyLinear(linear, best.tangent);
+  if (tangent.x < 0 || (Math.abs(tangent.x) < 1e-9 && tangent.y < 0))
+    tangent = { x: -tangent.x, y: -tangent.y };
+  const angle = (Math.atan2(tangent.y, tangent.x) * 180) / Math.PI;
+  const counter = designOverlayCounterTransform(frame);
+  const turn = Math.abs(angle) > 1e-6 ? `rotate(${roundedTransformNumber(angle)}deg)` : "";
+  return {
+    left: best.x * frame.width,
+    top: best.y * frame.height,
+    angle,
+    transform: [counter, turn, "scale(var(--design-canvas-inverse-zoom))", `translate(-50%, ${gap}px)`]
+      .filter(Boolean)
+      .join(" "),
+  };
+}
+
 function originFractionFromComputed(
   value: string | undefined,
   size: number,
@@ -912,11 +1036,18 @@ export function designSelectionBox(details: {
     const [a, b, c, d, x, y] = details.borderCoordinateSpace;
     const scaleX = Math.hypot(a, b);
     const scaleY = Math.hypot(c, d);
-    if (
+    const skewed =
       scaleX > 0 &&
       scaleY > 0 &&
-      Math.abs((a * c + b * d) / (scaleX * scaleY)) > 0.0005
-    ) {
+      Math.abs((a * c + b * d) / (scaleX * scaleY)) > 0.0005;
+    const mirrored = a * d - b * c < 0;
+    if (scaleX > 0 && scaleY > 0 && (skewed || mirrored)) {
+      // The runtime reports a mirrored box as a half turn with its local y
+      // (and origin) flipped: the right corners, but top and bottom swapped,
+      // so handles would resize the wrong edge. The coordinate space keeps
+      // the element's real axes.
+      const runtimeFlippedY =
+        mirrored && Math.abs((a * c + b * d) / (scaleX * scaleX)) <= 0.0005;
       return {
         ...details.box,
         x,
@@ -924,6 +1055,7 @@ export function designSelectionBox(details: {
         scaleX,
         scaleY,
         rotation: (Math.atan2(b, a) * 180) / Math.PI,
+        originY: runtimeFlippedY ? 1 - details.box.originY : details.box.originY,
         affine: [a / scaleX, b / scaleX, c / scaleY, d / scaleY],
       };
     }
@@ -980,6 +1112,135 @@ export function designSelectionOverlayFrame(
     pivotX,
     pivotY,
   };
+}
+
+/** A measured node moved by (dx, dy) in frame space. Its rect, box and
+ * coordinate space move together: a turned layer's bounding rect is larger
+ * than its own box, so neither can be predicted from the other. */
+export function designTranslatedNodeGeometry<
+  Node extends {
+    rect: DesignCanvasRect;
+    box?: DesignSelectionBox;
+    borderCoordinateSpace?:
+      | readonly [number, number, number, number, number, number]
+      | null;
+  },
+>(node: Node, dx: number, dy: number): Node {
+  const space = node.borderCoordinateSpace;
+  return {
+    ...node,
+    rect: { ...node.rect, x: node.rect.x + dx, y: node.rect.y + dy },
+    ...(node.box
+      ? { box: { ...node.box, x: node.box.x + dx, y: node.box.y + dy } }
+      : {}),
+    ...(space
+      ? {
+          borderCoordinateSpace: [
+            space[0],
+            space[1],
+            space[2],
+            space[3],
+            space[4] + dx,
+            space[5] + dy,
+          ] as [number, number, number, number, number, number],
+        }
+      : {}),
+  };
+}
+
+/** The overlay a rotation gesture paints before the runtime answers: turned
+ * further about its pivot. An upright or turned overlay is already anchored on
+ * that pivot; a mirrored or skewed one is anchored on its corner, so its corner
+ * moves around the pivot with it. */
+export function designRotatedOverlayFrame(
+  frame: DesignSelectionOverlayFrame,
+  degrees: number,
+): DesignSelectionOverlayFrame {
+  if (!frame.affine) return { ...frame, rotation: frame.rotation + degrees };
+  const radians = (degrees * Math.PI) / 180;
+  const cos = Math.cos(radians);
+  const sin = Math.sin(radians);
+  const turn: DesignLinearMap = [cos, sin, -sin, cos];
+  const [a, b, c, d] = frame.affine;
+  const affine: DesignLinearMap = [
+    cos * a - sin * b,
+    sin * a + cos * b,
+    cos * c - sin * d,
+    sin * c + cos * d,
+  ];
+  const pivot = applyLinear(frame.affine, { x: frame.pivotX, y: frame.pivotY });
+  const turnedPivot = applyLinear(turn, pivot);
+  return {
+    ...frame,
+    left: frame.left + pivot.x - turnedPivot.x,
+    top: frame.top + pivot.y - turnedPivot.y,
+    rotation: frame.rotation + degrees,
+    affine,
+  };
+}
+
+/** Below this many screen pixels on a side, a selection shows no resize
+ * handles: eight-pixel corners would cover the whole box, and pressing it
+ * must move it. */
+export const DESIGN_COMPACT_SELECTION_PIXELS = 16;
+/** A frame this small on screen moves from its body: a marquee inside it has
+ * no room to start, and its name label has no width left to grab. */
+export const DESIGN_TINY_FRAME_PIXELS = 24;
+
+export interface DesignResizeHandleLayout {
+  corners: boolean;
+  /** The left and right edge strips, which take width from the body. */
+  sideEdges: boolean;
+  /** The top and bottom edge strips, which take height from the body. */
+  endEdges: boolean;
+  /** How far the rotation zones reach into the box's corners. */
+  rotationInset: number;
+}
+
+export function designResizeHandleLayout(screen: {
+  width: number;
+  height: number;
+}): DesignResizeHandleLayout {
+  const width = Number.isFinite(screen.width) ? screen.width : Infinity;
+  const height = Number.isFinite(screen.height) ? screen.height : Infinity;
+  const smallest = Math.min(width, height);
+  return {
+    corners: smallest >= DESIGN_COMPACT_SELECTION_PIXELS,
+    sideEdges: width >= DESIGN_TINY_FRAME_PIXELS,
+    endEdges: height >= DESIGN_TINY_FRAME_PIXELS,
+    // Zones that reach five pixels into each corner tile a ten-pixel box.
+    rotationInset: smallest >= DESIGN_TINY_FRAME_PIXELS ? 5 : 0,
+  };
+}
+
+/** The resize cursor for one handle of a turned or mirrored selection: the
+ * direction the handle sits from the centre on screen, not in the box. */
+export function designResizeHandleCursor(
+  handle: DesignResizeHandle,
+  box: Pick<DesignSelectionBox, "affine" | "rotation">,
+): "ew-resize" | "ns-resize" | "nwse-resize" | "nesw-resize" {
+  const local = {
+    x: handle.includes("e") ? 1 : handle.includes("w") ? -1 : 0,
+    y: handle.includes("s") ? 1 : handle.includes("n") ? -1 : 0,
+  };
+  const screen = applyLinear(designSelectionLinear(box), local);
+  const angle = (((Math.atan2(screen.y, screen.x) * 180) / Math.PI) % 180 + 180) % 180;
+  const sector = Math.round(angle / 45) % 4;
+  return sector === 0 ? "ew-resize" : sector === 1 ? "nwse-resize" : sector === 2 ? "ns-resize" : "nesw-resize";
+}
+
+/** The rotation cursor's angle at one corner: the corner's screen direction
+ * from the centre, a quarter turn on, so the arc wraps the box. Equals the
+ * box rotation plus the corner's fixed angle unless the box is mirrored. */
+export function designRotationCornerCursorAngle(
+  corner: { x: number; y: number },
+  box: Pick<DesignSelectionBox, "affine" | "rotation">,
+): number {
+  const screen = applyLinear(designSelectionLinear(box), {
+    x: corner.x * 2 - 1,
+    y: corner.y * 2 - 1,
+  });
+  return (Math.atan2(screen.y, screen.x) * 180) / Math.PI + 90;
 }
 
 /** The axis-aligned bounding box of a painted selection. Equals the box itself
@@ -1329,12 +1590,12 @@ export function designRotatedResizeOrigin(input: {
   height: number;
 }): { x: number; y: number } {
   const { box, anchor } = input;
-  const shift = rotateVector(
+  const shift = designSelectionFrameDelta(
     {
       x: anchor.x * (input.width - box.width) * box.scaleX,
       y: anchor.y * (input.height - box.height) * box.scaleY,
     },
-    box.rotation,
+    box,
   );
   return { x: box.x - shift.x, y: box.y - shift.y };
 }

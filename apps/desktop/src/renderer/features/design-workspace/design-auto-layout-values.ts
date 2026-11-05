@@ -199,6 +199,42 @@ export function designFrameResizeRootStyles(
     : null;
 }
 
+/** Where a frame's root is while its frame is resized by hand, ahead of the
+ * runtime, so the root's padding and gap tools track the frame on every
+ * sample instead of waiting for the next measurement. An axis that spans the
+ * frame, or a Hug axis the resize fixes to it, follows the new size; any other
+ * axis keeps its measured extent. A turned root keeps its measurement. */
+export function designFrameResizeRootGeometry(
+  root: DesignRuntimeNodeDetails,
+  start: { w: number; h: number },
+  next: { w: number; h: number },
+): Pick<DesignRuntimeNodeDetails, "rect" | "box"> | null {
+  const box = root.box;
+  if (
+    box &&
+    (Math.abs(box.rotation) > 0.001 ||
+      Math.abs(box.scaleX - 1) > 0.0001 ||
+      Math.abs(box.scaleY - 1) > 0.0001)
+  )
+    return null;
+  const extent = (axis: DesignLayoutAxis) => {
+    const position = axis === "x" ? root.rect.x : root.rect.y;
+    const size = axis === "x" ? root.rect.width : root.rect.height;
+    const from = axis === "x" ? start.w : start.h;
+    const to = axis === "x" ? next.w : next.h;
+    if (to === from) return size;
+    if (intrinsicSize(root, axis)) return Math.max(0, to - position);
+    return Math.abs(position) <= 0.5 && Math.abs(size - from) <= 0.5
+      ? Math.max(0, size + to - from)
+      : size;
+  };
+  const rect = { ...root.rect, width: extent("x"), height: extent("y") };
+  return {
+    rect,
+    box: box ? { ...box, width: rect.width, height: rect.height } : undefined,
+  };
+}
+
 export function designAutoLayoutFlow(
   node: DesignRuntimeNodeDetails,
 ): DesignAutoLayoutFlow {

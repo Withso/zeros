@@ -5,6 +5,7 @@ import { runDesignNestingSmoke } from "./ui-smoke-design-nesting.mjs";
 import { runDesignCopySmoke } from "./ui-smoke-design-copy.mjs";
 import { runDesignPicturesSmoke } from "./ui-smoke-design-pictures.mjs";
 import { runDesignResidencySmoke } from "./ui-smoke-design-residency.mjs";
+import { runDesignTransformChromeSmoke } from "./ui-smoke-design-transform-chrome.mjs";
 
 async function openCanvasFixture(page, query = "layoutGestures") {
   const origin = new URL(page.url()).origin;
@@ -1142,6 +1143,7 @@ export async function runDesignCanvasRefinementsSmoke(options) {
   await runDesignCopySmoke(options);
   await runDesignPicturesSmoke(options);
   await runDesignResidencySmoke(options);
+  await runDesignTransformChromeSmoke(options);
 }
 
 export async function runDesignFrameLiveCameraSmoke({ page, check }) {

@@ -105,7 +105,11 @@ function color(value: string): DesignTileFrame["background"] {
 
 function frameColors(frame: HTMLElement) {
   const style = getComputedStyle(frame);
-  return { background: color(style.backgroundColor), outline: {
+  // Canvas frames stroke their edge with a box-shadow (`.zd-design-stroke`),
+  // which a rounded outline width cannot thicken under zoom; the plane paints
+  // that same one-screen-pixel edge for the frames it owns.
+  const edge = style.getPropertyValue("--design-frame-stroke").trim();
+  return { background: color(style.backgroundColor), outline: edge ? { color: color(edge), width: 1 } : {
     color: color(style.outlineColor), width: style.outlineStyle !== "none" && Number.parseFloat(style.outlineWidth) > 0 ? 1 : 0,
   } };
 }

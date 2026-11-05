@@ -76,6 +76,7 @@ import { hasDesignAssetDrag, readDesignAssetDrag } from "./design-assets";
 import {
   canFillDesignContainer,
   canHugDesignContents,
+  designFrameResizeRootGeometry,
   designFrameResizeRootStyles,
   designSizingMode,
   designSizingStyles,
@@ -89,7 +90,11 @@ import {
   designConstraintSides,
   designCssSizeAfterResize,
   designHighResolutionViewportTile,
+  DESIGN_TINY_FRAME_PIXELS,
   designLocalDelta,
+  designResizeHandleLayout,
+  designRotatedOverlayFrame,
+  designSelectionLocalDelta,
   designOriginFraction,
   designPointerRotation,
   designResizeAnchor,
@@ -288,13 +293,16 @@ import {
   DesignMotionCanvasOverlay,
   DesignOriginAnchors,
   DesignOriginHandle,
+  DesignOverlayGeometrySync,
   DesignResizeHandles,
   DesignRotationHandles,
   DesignSelectionMeasurements,
   designGesturePixelBase,
   designOriginStyles,
   designPixelValue,
+  designRotationReadoutStyle,
   designSelectionOverlayStyle,
+  designStrokeWidth,
   frameGeometry,
   paintDesignConstraintGuides,
   paintDesignInlineGapHandles,
@@ -3133,6 +3141,30 @@ export const DesignCanvas = React.memo(function DesignCanvas({
       const badge = element.querySelector<HTMLElement>(
         "[data-design-frame-size-badge]",
       );
+      // The root's padding and gap tools follow the frame on every sample; the
+      // runtime measures the reflowed root once the new size is confirmed.
+      const rootOverlay = resizeRoot
+        ? element.querySelector<HTMLElement>(
+            `[data-design-frame-layout-owner][data-design-layout-owner="${CSS.escape(resizeRoot.oid)}"]`,
+          )
+        : null;
+      const rootSpacing =
+        rootOverlay?.querySelector<HTMLElement>(
+          "[data-design-inline-spacing-root]",
+        ) ?? null;
+      const paintRootGeometry = (geometry: DesignFrameGeometryWire | null) => {
+        if (!resizeRoot || !rootOverlay) return;
+        const predicted = geometry
+          ? designFrameResizeRootGeometry(resizeRoot, start, geometry)
+          : resizeRoot;
+        if (!predicted) return;
+        const painted = { ...resizeRoot, ...predicted };
+        paintDesignNodeOverlayGeometry(
+          rootOverlay,
+          designSelectionOverlayFrame(designSelectionBox(painted)),
+        );
+        if (rootSpacing) paintDesignInlinePaddingGeometry(rootSpacing, painted);
+      };
       let rootPreviewKeys = "";
       const rootPreviewLane = resizeRoot
         ? `${canvasDocumentOwner}\0${frame.file}\0${resizeRoot.oid}`
@@ -3336,8 +3368,10 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         preview.geometry = latest;
         frameGeometryPreviewsRef.current.set(previewKey, preview);
         paintFrameGeometry(element, latest);
-        if (mode !== "move") previewRootSizing(latest);
-        else trackNestTarget(pointerEvent);
+        if (mode !== "move") {
+          previewRootSizing(latest);
+          paintRootGeometry(latest);
+        } else trackNestTarget(pointerEvent);
       };
 
       const finish = () => {
@@ -3514,6 +3548,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
             settle(restored);
             if (!ownerIsCurrent()) return;
             clearRootPreview();
+            if (mode !== "move") paintRootGeometry(restored);
             paintDesignLabelText(
               badge,
               designSizeBadgeText(restored.w, restored.h, rootModes),
@@ -3537,6 +3572,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
             paintFrameGeometry(element, restored);
             if (mode !== "move") {
               clearRootPreview();
+              paintRootGeometry(previousPreview ? restored : null);
               paintDesignLabelText(
                 badge,
                 designSizeBadgeText(restored.w, restored.h, rootModes),
@@ -3666,8 +3702,16 @@ export const DesignCanvas = React.memo(function DesignCanvas({
        * painting the pointer's angle led the element's pixels by one frame. */
       let measuring = false;
       const paintPredicted = (rotation: number) => {
-        // The overlay is already anchored on the pivot, so turning it further
-        // about that same point needs no reflow and no repositioning.
+        // An upright or turned overlay is already anchored on the pivot, so it
+        // turns about that point with no reflow; a mirrored one is anchored on
+        // its corner, which orbits the pivot.
+        if (overlayFrame.affine) {
+          paintDesignNodeOverlayGeometry(
+            overlay,
+            designRotatedOverlayFrame(overlayFrame, rotation - overlayFrame.rotation),
+          );
+          return;
+        }
         overlay.style.transform = `rotate(${rotation}deg)`;
         overlay.style.transformOrigin = `${overlayFrame.pivotX}px ${overlayFrame.pivotY}px`;
       };
@@ -3723,7 +3767,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
           document.body.style.cursor = cursor;
         }
         if (feedback) {
-          feedback.style.display = "block";
+          feedback.style.display = "inline-flex";
           paintDesignLabelText(feedback, `${rotate}°`);
         }
         loop.author({ transform: latestTransform });
@@ -3731,7 +3775,10 @@ export const DesignCanvas = React.memo(function DesignCanvas({
       /** Hold one exact angle on the overlay. Only the pivot-anchored transform
        * changes, so no reflow and no repositioning are involved. */
       const settle = (rotation: number) => {
-        paintDesignNodeOverlayGeometry(overlay, { ...overlayFrame, rotation });
+        paintDesignNodeOverlayGeometry(
+          overlay,
+          designRotatedOverlayFrame(overlayFrame, rotation - overlayFrame.rotation),
+        );
       };
       const cleanup = (committing = false) => {
         if (committing) loop.finish();
@@ -3878,12 +3925,12 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         // Pointer travel is screen-space; the pivot lives in the element's own
         // rotated axes, so the delta rotates back before it becomes a fraction.
         const zoom = liveDesignZoom();
-        const local = designLocalDelta(
+        const local = designSelectionLocalDelta(
           {
             x: (pointerEvent.clientX - startX) / zoom,
             y: (pointerEvent.clientY - startY) / zoom,
           },
-          overlayFrame.rotation,
+          box,
         );
         if (!moved && Math.hypot(local.x, local.y) < 2 / zoom) return;
         moved = true;
@@ -4174,6 +4221,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
             dy,
             axis: control.axis,
             rotation: control.rotation,
+            linear: control.linear,
             zoom: liveDesignZoom(),
             scale: control.scale,
           }),
@@ -5301,10 +5349,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
             } : undefined,
             isCurrent: () => nudgeLifetimeRef.current === lifetime,
             paint: (geometry, parent) => {
-              const box =
-                "styles" in geometry
-                  ? designSelectionBox(geometry)
-                  : { ...designSelectionBox(details), ...geometry.rect };
+              const box = designSelectionBox(geometry);
               paintDesignNodeOverlayGeometry(
                 overlay,
                 designSelectionOverlayFrame(box),
@@ -5663,7 +5708,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         // rotates into the element's axes first. A move stays screen-aligned.
         const local =
           turned && gestureMode !== "move"
-            ? designLocalDelta({ x: screenX, y: screenY }, box.rotation)
+            ? designSelectionLocalDelta({ x: screenX, y: screenY }, box)
             : { x: screenX, y: screenY };
         const raw =
           gestureMode === "move"
@@ -6494,7 +6539,8 @@ export const DesignCanvas = React.memo(function DesignCanvas({
       draft.style.top = `${rect.y}px`;
       draft.style.width = `${Math.max(1, rect.width)}px`;
       draft.style.height = `${Math.max(1, rect.height)}px`;
-      draft.style.outlineWidth = `${1 / zoom}px`;
+      // The draft sits in the world, outside any frame's chrome scale.
+      draft.style.setProperty("--design-canvas-inverse-zoom", String(1 / zoom));
       const label = draft.querySelector<HTMLElement>(
         "[data-design-creation-size]",
       );
@@ -7667,13 +7713,11 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                 data-design-frame-controls={selected || frameSelectedOnly || framePlaying || renamingFrame === frame.file
                   ? "expanded" : "automatic"}
                 className={cn(
-                  "zd-design-frame pointer-events-auto absolute outline",
+                  "zd-design-frame zd-design-stroke pointer-events-auto absolute",
                   frame.kind === "text" ? "bg-transparent" : "bg-bg1",
                   frameSelectedOnly
                     ? "zd-design-selection-outline"
-                    : frame.kind === "text"
-                      ? "outline-transparent"
-                      : "outline-border2",
+                    : frame.kind !== "text" && "zd-design-frame-edge",
                 )}
                 style={{
                   left: paintedFrame?.x ?? description.x,
@@ -7681,11 +7725,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                   width: paintedFrame?.w ?? description.width,
                   height: paintedFrame?.h ?? description.height,
                   zIndex: paintedFrame?.z ?? description.z,
-                  outlineWidth: frameSelectedOnly
-                    ? designCanvasScreenPixels(2)
-                    : frame.kind === "text"
-                      ? 0
-                      : designCanvasScreenPixels(1),
+                  ...designStrokeWidth(frameSelectedOnly ? 2 : frame.kind === "text" ? 0 : 1),
                 }}
                 onPointerDown={(event) => {
                   if (
@@ -7767,6 +7807,17 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                         });
                       });
                   };
+                  if (
+                    activeTool === "select" &&
+                    frameSelectedOnly &&
+                    !pointer.metaKey &&
+                    !pointer.ctrlKey &&
+                    Math.min(frame.width, frame.height) * liveDesignZoom() <
+                      DESIGN_TINY_FRAME_PIXELS
+                  ) {
+                    startFrameGesture(event, frame, "move");
+                    return;
+                  }
                   if (
                     activeTool === "select" &&
                     startMarquee(event, { frame, onClick: selectAtPoint })
@@ -7975,15 +8026,15 @@ export const DesignCanvas = React.memo(function DesignCanvas({
 
                 {secondaryElements.map(details => (
                   <div key={details.oid} data-design-secondary-selection={details.oid}
-                    className="zd-design-selection-outline pointer-events-none absolute z-1 outline"
-                    style={{ ...designSelectionOverlayStyle(designSelectionOverlayFrame(designSelectionBox(details))), outlineWidth: designCanvasScreenPixels(2) }} />
+                    className="zd-design-selection-outline zd-design-stroke pointer-events-none absolute z-1"
+                    style={{ ...designSelectionOverlayStyle(designSelectionOverlayFrame(designSelectionBox(details))), ...designStrokeWidth(2) }} />
                 ))}
 
                 {multiSelectionBounds ? (
                   <div
                     data-design-multi-selection=""
                     data-design-resize-roots={transformElements.length}
-                    className="zd-design-selection-outline pointer-events-none absolute z-[2] outline"
+                    className="zd-design-selection-outline zd-design-stroke pointer-events-none absolute z-[2]"
                     style={{
                       left: multiSelectionBounds.x,
                       top: multiSelectionBounds.y,
@@ -7991,7 +8042,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                         multiSelectionBounds.right - multiSelectionBounds.x,
                       height:
                         multiSelectionBounds.bottom - multiSelectionBounds.y,
-                      outlineWidth: designCanvasScreenPixels(2),
+                      ...designStrokeWidth(2),
                     }}
                   >
                     <span
@@ -8013,6 +8064,10 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                     </span>
                     <DesignResizeHandles
                       label={`${selectedElements.length} selected layers`}
+                      screenSize={{
+                        width: (multiSelectionBounds.right - multiSelectionBounds.x) * view.zoom,
+                        height: (multiSelectionBounds.bottom - multiSelectionBounds.y) * view.zoom,
+                      }}
                       onPointerDown={(event, handle) =>
                         startNodeGroupResize(
                           event,
@@ -8132,14 +8187,14 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                         primarySelection ? "" : undefined
                       }
                       className={cn(
-                        "absolute touch-none outline",
+                        "absolute touch-none",
                         editingThisElement
-                          ? "pointer-events-none outline-none"
+                          ? "pointer-events-none"
                           : primarySelection
-                            ? "zd-design-selection-outline pointer-events-auto cursor-move"
+                            ? "zd-design-selection-outline zd-design-stroke pointer-events-auto cursor-move"
                             : additiveSelection
-                              ? "zd-design-selection-outline pointer-events-auto cursor-move"
-                              : "zd-design-hover-outline pointer-events-none",
+                              ? "zd-design-selection-outline zd-design-stroke pointer-events-auto cursor-move"
+                              : "zd-design-hover-outline zd-design-stroke pointer-events-none",
                         additiveSelection &&
                           selectionOverlaySuppressed &&
                           "opacity-0",
@@ -8147,9 +8202,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                       style={{
                         ...designSelectionOverlayStyle(overlayFrame),
                         zIndex: 1,
-                        outlineWidth: editingThisElement
-                          ? 0
-                          : designCanvasScreenPixels(primarySelection ? 2 : 1),
+                        ...designStrokeWidth(editingThisElement ? 0 : primarySelection ? 2 : 1),
                       }}
                       onPointerDown={(event) => {
                         if (
@@ -8205,6 +8258,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                         );
                       }}
                     >
+                      <DesignOverlayGeometrySync overlay={overlayFrame} />
                       {primarySelection && !editingThisElement ? (
                         <>
                           <span
@@ -8253,16 +8307,19 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                             <>
                               <span
                                 data-design-rotation-feedback=""
-                                className={cn("bg-inverted-bg text-inverted-fg pointer-events-none absolute top-full right-full hidden", DESIGN_CANVAS_CHIP_CLS)}
-                                style={{
-                                  marginTop: designCanvasScreenPixels(4),
-                                  marginRight: designCanvasScreenPixels(4),
-                                  transform: `rotate(${-overlayFrame.rotation}deg) scale(${DESIGN_CANVAS_INVERSE_ZOOM})`,
-                                  transformOrigin: "top right",
-                                }}
+                                // `hidden` must follow the chip's own display
+                                // class: merged the other way round, the empty
+                                // readout showed at a corner of every selection.
+                                className={cn(DESIGN_CANVAS_CHIP_CLS, "bg-inverted-bg text-inverted-fg pointer-events-none absolute hidden")}
+                                style={designRotationReadoutStyle(overlayFrame)}
                               />
                               <DesignResizeHandles
                                 label={details.name}
+                                box={designSelectionBox(details)}
+                                screenSize={{
+                                  width: overlayFrame.width * view.zoom,
+                                  height: overlayFrame.height * view.zoom,
+                                }}
                                 onPointerDown={(event, handle) =>
                                   startNodeGesture(
                                     event,
@@ -8285,6 +8342,11 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                                   <DesignRotationHandles
                                     label={details.name}
                                     rotation={overlayFrame.rotation}
+                                    box={overlayFrame}
+                                    inset={designResizeHandleLayout({
+                                      width: overlayFrame.width * view.zoom,
+                                      height: overlayFrame.height * view.zoom,
+                                    }).rotationInset}
                                     onPointerDown={(event) =>
                                       startNodeRotation(event, frame, details)
                                     }
@@ -8359,6 +8421,11 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                       zIndex: 2,
                     }}
                   >
+                    <DesignOverlayGeometrySync
+                      overlay={designSelectionOverlayFrame(
+                        designSelectionBox(frameLayoutOwnerDetails),
+                      )}
+                    />
                     <span
                       data-design-spacing-hover-zone=""
                       className="pointer-events-auto absolute inset-0"
@@ -8419,6 +8486,10 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                 {frameSelectedOnly ? (
                   <DesignResizeHandles
                     label={frame.title}
+                    screenSize={{
+                      width: (paintedFrame?.w ?? frame.width) * view.zoom,
+                      height: (paintedFrame?.h ?? frame.height) * view.zoom,
+                    }}
                     onPointerDown={(event, handle) =>
                       startFrameGesture(event, frame, handle)
                     }
@@ -8463,7 +8534,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
           <div
             ref={creationDraftRef}
             data-design-creation-draft="frame"
-            className="zd-design-creation-draft pointer-events-none absolute z-[100001] hidden outline outline-solid"
+            className="zd-design-creation-draft zd-design-stroke pointer-events-none absolute z-[100001] hidden"
             aria-hidden="true"
           >
             <span

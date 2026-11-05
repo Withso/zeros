@@ -394,8 +394,11 @@ export async function runDesignInlineToolsSmoke({ page, waitFor, check }) {
     assert(
       await outline.evaluate((element) => {
         const computed = getComputedStyle(element);
-        return [computed.borderTopStyle, computed.outlineStyle].includes(
-          "dotted",
+        // The dots are one-screen-pixel gradient runs: a dotted outline's
+        // width was rounded up to a whole CSS pixel before the camera zoom.
+        return (
+          computed.getPropertyValue("--design-dash-length").trim() === "1px" &&
+          /repeating-linear-gradient/.test(computed.backgroundImage)
         );
       }),
       "The constraint parent has a dotted outline",

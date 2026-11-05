@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 
 import {
+  designOverlayCounterTransform,
   designSelectionBox,
   designSelectionOverlayFrame,
   type DesignCanvasRect,
@@ -27,6 +28,7 @@ import {
   type DesignLayoutToolsLiveChild,
 } from "./state/design-layout-tools-live";
 import { DESIGN_CANVAS_CHIP_PX } from "./design-canvas-chip";
+import { designDashedLineStyle } from "./design-workspace-overlays";
 
 /** One editable spacing value on the canvas, handed to the gesture owner. */
 export interface DesignLayoutSpacingControl {
@@ -43,6 +45,9 @@ export interface DesignLayoutSpacingControl {
   /** Styles that release an Auto axis once the gap becomes fixed. */
   reset?: Record<string, string>;
   rotation: number;
+  /** The owner's real axes when one is mirrored (or skewed); a rotation alone
+   * would read pointer travel along a mirrored axis backwards. */
+  linear?: readonly [number, number, number, number];
   scale: { x: number; y: number };
   /** Local tick center, where the readout stays if reflow removes the space. */
   anchor?: { x: number; y: number };
@@ -278,7 +283,8 @@ export const DesignLayoutTools = React.memo(function DesignLayoutTools({
       band.axis === "x" ? band.rect.width : band.rect.height,
     ]),
   ) as Record<DesignPaddingBand["side"], number>;
-  const counterRotation = rotation ? `rotate(${-rotation}deg)` : undefined;
+  const counterRotation = designOverlayCounterTransform(frame) || undefined;
+  const linear = frame.affine;
 
   // Every target in local units, so crowding is resolved before anything
   // paints: a gap keeps its tick, and a padding tick that would sit on another
@@ -454,6 +460,7 @@ export const DesignLayoutTools = React.memo(function DesignLayoutTools({
     direction: band.direction,
     value: band.value,
     rotation,
+    linear,
     scale,
     openEntry: (mirror) =>
       setEntry({
@@ -475,6 +482,7 @@ export const DesignLayoutTools = React.memo(function DesignLayoutTools({
     automatic: gap.automatic,
     reset: gap.reset,
     rotation,
+    linear,
     scale,
     anchor: gapTicks.get(gap.key),
     openEntry: () =>
@@ -595,7 +603,6 @@ export const DesignLayoutTools = React.memo(function DesignLayoutTools({
             width: `${48 / zoom}px`,
             height: `${20 / zoom}px`,
             fontSize: `${11 / zoom}px`,
-            borderWidth: `${1 / zoom}px`,
             borderRadius: `${3 / zoom}px`,
             paddingInline: `${5 / zoom}px`,
             transform: counterRotation,
@@ -776,11 +783,10 @@ export const DesignLayoutTools = React.memo(function DesignLayoutTools({
             >
               <span
                 data-design-inline-spacing-line=""
-                className="zd-design-inline-spacing-line pointer-events-none absolute box-border border"
+                className="zd-design-inline-spacing-line pointer-events-none absolute"
                 style={{
                   width: (band.axis === "y" ? TICK_LONG : TICK_SHORT) / zoom,
                   height: (band.axis === "x" ? TICK_LONG : TICK_SHORT) / zoom,
-                  borderWidth: 1 / zoom,
                   borderRadius: 2 / zoom,
                 }}
                 aria-hidden="true"
@@ -913,11 +919,10 @@ export const DesignLayoutTools = React.memo(function DesignLayoutTools({
               >
                 <span
                   data-design-inline-spacing-line=""
-                  className="zd-design-inline-spacing-line pointer-events-none absolute box-border border"
+                  className="zd-design-inline-spacing-line pointer-events-none absolute"
                   style={{
                     width: (gap.axis === "y" ? TICK_LONG : TICK_SHORT) / zoom,
                     height: (gap.axis === "x" ? TICK_LONG : TICK_SHORT) / zoom,
-                    borderWidth: 1 / zoom,
                     borderRadius: 2 / zoom,
                   }}
                   aria-hidden="true"
@@ -982,12 +987,11 @@ function DesignGridTrackGuides({
         <span
           key={`column:${index}`}
           data-design-grid-track="column"
-          className="zd-design-grid-line pointer-events-none absolute border-l border-dashed"
+          className="zd-design-grid-line zd-design-dashed-line pointer-events-none absolute"
           style={{
             left: x,
             top: content.y,
-            height: content.height,
-            borderLeftWidth: 1 / zoom,
+            ...designDashedLineStyle("vertical", content.height),
           }}
         />
       ))}
@@ -995,12 +999,11 @@ function DesignGridTrackGuides({
         <span
           key={`row:${index}`}
           data-design-grid-track="row"
-          className="zd-design-grid-line pointer-events-none absolute border-t border-dashed"
+          className="zd-design-grid-line zd-design-dashed-line pointer-events-none absolute"
           style={{
             top: y,
             left: content.x,
-            width: content.width,
-            borderTopWidth: 1 / zoom,
+            ...designDashedLineStyle("horizontal", content.width),
           }}
         />
       ))}
@@ -1015,7 +1018,6 @@ function DesignGridTrackGuides({
               top: content.y,
               translate: "-50% -50%",
               transform: counterRotation,
-              borderWidth: 1 / zoom,
               borderRadius: 3 / zoom,
               paddingInline: 4 / zoom,
               fontSize: 11 / zoom,
@@ -1037,7 +1039,6 @@ function DesignGridTrackGuides({
               top: track.start + track.size / 2,
               translate: "-50% -50%",
               transform: counterRotation,
-              borderWidth: 1 / zoom,
               borderRadius: 3 / zoom,
               paddingInline: 4 / zoom,
               fontSize: 11 / zoom,
