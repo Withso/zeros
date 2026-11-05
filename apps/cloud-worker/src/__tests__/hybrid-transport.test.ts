@@ -200,7 +200,7 @@ it("bounds optional timing reports per phase and ignores an older control plane'
 });
 it("advertises outbox support without changing the strict hello body, and rereads credentials on pull", async () => {
   const f = await fixture();
-  expect(new Headers(vi.mocked(f.fetcher).mock.calls[0]![1]?.headers).get("x-zeros-worker-features")).toBe("prompt-outbox-v1,mcp-v1,workspace-setup-v1,checkout-v2,agent-interactions-v1,github-pr-v1,git-identity-v1,github-user-token-v1,code-review-v1,history-replace-v1,workspace-environment-v1");
+  expect(new Headers(vi.mocked(f.fetcher).mock.calls[0]![1]?.headers).get("x-zeros-worker-features")).toBe("prompt-outbox-v1,mcp-v1,workspace-setup-v1,checkout-v2,agent-interactions-v1,github-pr-v1,git-identity-v1,github-user-token-v1,code-review-v1,history-replace-v1,workspace-environment-v1,repository-setup-v1");
   expect(Object.keys(f.requests[0]!.body).sort()).toEqual(["bootId", "protocol", "runtimeSha256"]);
   await f.rotate();
   vi.mocked(f.fetcher).mockImplementationOnce(async (_url, init) => {

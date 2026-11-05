@@ -316,9 +316,10 @@ back control plane's hello writer from bypassing this proof. Identical lost-resp
 report retries succeed, while stale boots and late failure reports cannot undo
 readiness. Keep old encryption key versions available for pinned workspaces.
 
-The optional repository-owned setup script is separate work. This environment
-support supplies the existing workspace setup path and does not begin executing
-new repository configuration files.
+An organization admin can separately select a tracked Bash script in Cloud
+Computer settings. Its workspace execution begins only after environment files
+are durably seeded and the ready report is confirmed. Environment selection
+alone never opts into repository code or private repository settings files.
 
 ## Credentials and history
 
@@ -821,19 +822,48 @@ Older workers retain their existing hello behavior; newer workers tolerate an
 older control plane returning 404 for the report. Deploy the API and matching
 SHA-pinned worker together to get the full failure handling.
 
-Creation pins the active Cloud Computer build. The worker receives that
-build's repository setup script, at most 8,000 characters, only when it
-advertises `workspace-setup-v1` on both HTTPS and WebSocket configuration
-carriers. When checkout creates a new workspace branch, setup runs in the
+Creation pins the active Cloud Computer build. Its inline setup command, at
+most 8,000 characters, requires `workspace-setup-v1` on both HTTPS and WebSocket
+configuration carriers. An admin may instead select a **Workspace setup script**
+for each repository in Cloud Computer settings. The optional `setupScript`
+path replaces only workspace execution; builders continue to validate the
+inline command and log the selected path without executing the selected script.
+The path is pinned in the immutable build recipe, bound to the original
+repository ID. Before a VM-loss restore changes `computer_build_id`, its existing
+restore journal retains the original setup build, including an absent selection.
+A newer build selecting a different script for the same repository cannot
+replace it. Legacy restore journals with no proven original selection refuse
+a selected script. No database migration is needed.
+
+A selected script requires exact `repository-setup-v1` acknowledgement on both
+configuration carriers. An older worker is refused, never silently given an
+inline fallback. The path must be relative, at most 512 characters, with no
+traversal, control characters or private-state components. After checkout refresh
+settles, the worker reads that path's regular Git blob from HEAD: untracked files,
+symlinks, submodule entries, NUL, invalid UTF-8 and scripts over 64 KiB are refused.
+Staged or working-tree edits do not change the admitted blob. Frozen bytes run
+through an inherited private descriptor, so scripts should resolve resources from
+the checkout working directory rather than `BASH_SOURCE`.
+
+When checkout creates a new workspace branch, setup runs in the
 background with `bash -lc` as `user`, in the checkout, with the same child
 environment and GitHub broker as terminals. It does not delay `ENGINE_READY`.
 While the branch can still fast-forward, setup waits for the background fetch.
 After a checkpoint restore, setup runs once even though the branch exists.
 Admission and status are saved before execution under
-`/home/user/.local/share/zeros/cloud-worker/workspace-setup/<workspace-id>.json`;
-the sibling `.log` keeps the first 256 KiB of output, privately on the VM.
+`/home/user/.local/share/zeros/cloud-worker/workspace-setup/<workspace-id>.json`.
+The sibling `.log` keeps bounded output privately on the VM (at most 256 KiB).
+The worker does not dump the script body, but Bash diagnostics may quote tracked
+script text. Selected application values are scrubbed before persistence,
+including when they appear in diagnostic fragments. The status records only the
+selected path and commit/blob IDs.
 Refresh, wake and restart never rerun an admitted script. A failed script
-leaves the workspace available; Stop cancels and joins setup before its ack.
+or refused selection leaves the workspace available without inline fallback.
+The one-hour deadline and Stop cancel setup; completion retires its native
+process group. Worker cancellation is synchronous before configuration
+drains, and is checked again after source/admission awaits immediately before
+spawn. Stop joins setup before its acknowledgement. A restored disk admits setup
+once again because checkpoints exclude its admission state and dependencies.
 
 Boat deletes a stopped VM's disk after 14 days, so every stop also saves a
 checkpoint in our own object storage. It is kept until the workspace is

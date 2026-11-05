@@ -7,6 +7,7 @@ export type WorkerRoute = { workspace: CloudV2Workspace; accessEpoch: string; ur
 const peerFeatures = new WeakMap<WebSocket, ReadonlySet<string>>();
 export const workerSupportsMcp = (socket: WebSocket): boolean => peerFeatures.get(socket)?.has("mcp-v1") ?? false;
 export const workerSupportsSetup = (socket: WebSocket): boolean => peerFeatures.get(socket)?.has("workspace-setup-v1") ?? false;
+export const workerSupportsRepositorySetup = (socket: WebSocket): boolean => peerFeatures.get(socket)?.has("repository-setup-v1") ?? false;
 export const workerSupportsCheckout = (socket: WebSocket): boolean => peerFeatures.get(socket)?.has("checkout-v2") ?? false;
 export const workerSupportsGithub = (socket: WebSocket): boolean => peerFeatures.get(socket)?.has("github-pr-v1") ?? false;
 export const workerSupportsGithubUserTokens = (socket: WebSocket): boolean => peerFeatures.get(socket)?.has("github-user-token-v1") ?? false;

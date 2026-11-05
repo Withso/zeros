@@ -101,6 +101,21 @@ it("refuses required environment pins on old workers instead of stripping or rel
   }
   expect(f.deps.store.acceptWorkerHello).toHaveBeenCalledTimes(1);
 });
+it("requires exact repository setup support before hello readiness or refreshed config", async () => {
+  const f = fixture(), original = await f.deps.config({} as CloudV2Workspace);
+  vi.mocked(f.deps.config).mockResolvedValue({ ...original, workspace: { ...original.workspace, setupScript: "fixture-setup/install.sh", setup: "echo inline" } });
+  for (const [path, input] of [["hello", { bootId: f.bootId, protocol: 2, runtimeSha256: "a".repeat(64) }], ["config", undefined]] as const) {
+    for (const features of ["", "workspace-setup-v1", "repository-setup-v10"]) {
+      const response = await f.request(path, input, { "x-zeros-worker-features": features });
+      expect(response.status).toBe(409);
+      expect(await response.json()).toEqual({ error: { code: "cloud_repository_setup_runtime_required" } });
+    }
+    const response = await f.request(path, input, { "x-zeros-worker-features": "workspace-setup-v1, repository-setup-v1" });
+    expect(response.status).toBe(200);
+    expect((await response.json()).config.workspace).toMatchObject({ setupScript: "fixture-setup/install.sh", setup: "echo inline" });
+  }
+  expect(f.deps.store.acceptWorkerHello).toHaveBeenCalledTimes(1);
+});
 it("acknowledges bounded environment status only for the current authenticated boot", async () => {
   const f = fixture(), status = { versionId: randomUUID(), sequence: 1, state: "ready" };
   f.deps.environmentReport = vi.fn(async () => {});

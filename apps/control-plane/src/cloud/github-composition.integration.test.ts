@@ -280,9 +280,7 @@ database("cloud GitHub composition", () => {
         "former/project",
       ),
     ).toEqual({ repository: "current/project", repositoryId: "42" });
-    expect(await services.workspaceSetup(workspace, computers)).toBe(
-      "echo original-source",
-    );
+    expect(await services.workspaceSetup(workspace, computers)).toEqual({ setup: "echo original-source" });
     expect(
       fetcher.mock.calls.some(
         ([url]) => new URL(String(url)).pathname === "/repos/former/project",

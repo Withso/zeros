@@ -310,6 +310,48 @@ describe("cloud v2 relay", () => {
     }
   });
 
+  it.each(["", "workspace-setup-v1", "repository-setup-v10", "repository-setup-v1"])("requires exact repository setup support on the WebSocket: %s", async features => {
+    workerServer.on("headers", headers => { headers.push(`X-Zeros-Worker-Features: ${features}`); });
+    const original = deps.config;
+    let selected = false;
+    deps.config = async ws => { const value = await original(ws); return { ...value, workspace: { ...value.workspace,
+      ...(selected ? { setupScript: "fixture-setup/install.sh", setup: "echo inline" } : {}) } }; };
+    const frames: any[] = [], closed: WebSocket[] = [];
+    workerServer.on("connection", ws => {
+      ws.on("message", raw => frames.push(JSON.parse(String(raw))));
+      ws.once("close", () => closed.push(ws));
+    });
+    await app();
+    await vi.waitFor(() => expect(frames.filter(frame => frame.t === "config")).toHaveLength(1));
+    selected = true; loginRevision = "1"; await relay.refreshLogins();
+    if (features === "repository-setup-v1") {
+      await vi.waitFor(() => expect(frames.filter(frame => frame.t === "config")).toHaveLength(2));
+      expect(frames.filter(frame => frame.t === "config")[1].workspace.setupScript).toBe("fixture-setup/install.sh");
+    } else {
+      await vi.waitFor(() => expect(closed).toContain(connectedWorkers[0]));
+      expect(frames.filter(frame => frame.t === "config")).toHaveLength(1);
+    }
+  });
+
+  it.each(["workspace-setup-v1", "repository-setup-v1"])("refuses or delivers selected setup on the initial WebSocket configuration: %s", async features => {
+    workerServer.on("headers", headers => { headers.push(`X-Zeros-Worker-Features: ${features}`); });
+    const original = deps.config;
+    deps.config = async ws => { const value = await original(ws); return { ...value, workspace: { ...value.workspace, setupScript: "fixture-setup/install.sh" } }; };
+    const frames: any[] = [], closed: WebSocket[] = [];
+    workerServer.on("connection", ws => {
+      ws.on("message", raw => frames.push(JSON.parse(String(raw))));
+      ws.once("close", () => closed.push(ws));
+    });
+    await app();
+    if (features === "repository-setup-v1") {
+      await vi.waitFor(() => expect(frames.filter(frame => frame.t === "config")).toHaveLength(1));
+      expect(frames.find(frame => frame.t === "config").workspace.setupScript).toBe("fixture-setup/install.sh");
+    } else {
+      await vi.waitFor(() => expect(closed.length).toBeGreaterThan(0));
+      expect(frames.filter(frame => frame.t === "config")).toHaveLength(0);
+    }
+  });
+
   it.each([false, true])("gates setup on WebSocket upgrade support=%s for initial and refreshed config", async supported => {
     workerServer.on("headers", headers => { headers.push(`X-Zeros-Worker-Features: mcp-v1${supported ? ",workspace-setup-v1" : ""}`); });
     const original = deps.config;

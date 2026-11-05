@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { CloudV2Build } from "../../../platform/cloud-v2";
+import { CloudV2RepositoryDraftSchema } from "../../../platform/cloud-v2";
 import { computerChanges, computerStatus, describeChanges, editableRepositories, historyNote, relativeAge } from "../cloud-computer-model";
 
 const now = Date.parse("2026-10-24T12:00:00.000Z");
@@ -15,6 +16,14 @@ function build(version: number, patch: Partial<CloudV2Build> = {}): CloudV2Build
 }
 
 describe("Cloud Computer model", () => {
+  it("keeps selected scripts through recipe projection and marks path edits or removal as setup changes", () => {
+    const selected = { repository: "fixture/repo", setup: "pnpm install", setupScript: "scripts/bootstrap.sh" };
+    expect(CloudV2RepositoryDraftSchema.parse(selected)).toEqual(selected);
+    expect(editableRepositories(build(1, { recipe: { repositories: [{ ...selected, commit: "a".repeat(40) }] } }))).toEqual([selected]);
+    expect(computerChanges([selected], [selected])).toEqual([]);
+    expect(computerChanges([{ ...selected, setupScript: "scripts/other.sh" }], [selected])).toEqual(["setup"]);
+    expect(computerChanges([{ repository: selected.repository, setup: selected.setup }], [selected])).toEqual(["setup"]);
+  });
   it("keeps only what an admin edits from a build", () => {
     expect(editableRepositories(build(1, { recipe: { repositories: [
       { repository: "iamarunrk/0kit", commit: "a".repeat(40), branch: "main", setup: "pnpm install" },

@@ -9,6 +9,7 @@ const state = vi.hoisted(() => ({
   error: null as Error | null,
 }));
 vi.mock("../../team/team-store", () => ({
+  getOrganizationStoreGeneration: () => 0,
   useActiveOrganization: () => ({ id: "11111111-1111-4111-8111-111111111111", isPersonal: false, role: state.role }),
   useTeams: () => ({ me: { user: { id: "22222222-2222-4222-8222-222222222222" } } }),
 }));
@@ -43,6 +44,15 @@ beforeEach(() => {
 });
 
 describe("Cloud Computer settings panel", () => {
+  it("shows the selected workspace script alongside the separate build command", () => {
+    state.data = { ...state.data!, recipe: { repositories: [{ repository: "fixture/repo", setup: "pnpm install", setupScript: "scripts/bootstrap.sh" }] } };
+    const html = render();
+    expect(html).toContain('aria-label="fixture/repo workspace setup script"');
+    expect(html).toContain('value="scripts/bootstrap.sh"');
+    expect(text(html)).toContain("Tracked Bash script, relative to the repository");
+    state.role = "member";
+    expect(render()).not.toContain("workspace setup script");
+  });
   it("keeps the configured computer visible without announcing a first refresh failure", () => {
     state.error = new Error("temporary network failure");
     const html = text(render());

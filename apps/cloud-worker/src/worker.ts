@@ -397,6 +397,7 @@ export class CloudWorker {
         this.options.onError?.("storage"); void agents!.closeChat(chatId).catch(() => {});
       }));
       setup = new WorkspaceSetup({ directory: this.options.directory, workspace: config.workspace, gitEnvironment: this.gitEnvironment, application,
+        signal: this.environmentLifetime.signal,
         runner: this.options.setupRunner, activity: () => { void this.reportIdle(); }, onStorageError: () => this.options.onError?.("storage"),
         beforeRun: async () => {
           if (refresh?.mayFastForward) await refreshing;

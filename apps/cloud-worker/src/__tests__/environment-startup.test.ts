@@ -11,9 +11,13 @@ import type { CloudV2ControlFrame } from "@zeros/protocol/cloud-v2-relay";
 
 afterEach(() => vi.restoreAllMocks());
 const versionId = "44444444-4444-4444-8444-444444444444";
-async function fixture(mode: "held" | "lost" | "refused") {
+async function fixture(mode: "held" | "lost" | "refused", selectedScript = false) {
   const f = await repositoryFixture();
   await writeFile(join(f.root, ".gitignore"), ".env*\n");
+  if (selectedScript) {
+    await writeFile(join(f.root, "setup.sh"), "printf setup\n");
+    await f.git("add", "setup.sh"); await f.git("commit", "-m", "selected setup fixture");
+  }
   if (mode === "refused") await writeFile(join(f.root, ".env.local"), "existing-user-file");
   const tokenFile = join(f.directory, "token"); await writeFile(tokenFile, "synthetic-worker-token", { mode: 0o600 });
   let receive!: (frame: CloudV2ControlFrame) => Promise<void>, release!: () => void, reports = 0;
@@ -28,7 +32,7 @@ async function fixture(mode: "held" | "lost" | "refused") {
     onStatus: status => ready.push(status), fetch: async (url, options) => {
       const path = new URL(String(url)).pathname.split("/").at(-1)!, body = options?.body ? JSON.parse(String(options.body)) : null;
       requests.push({ path, body });
-      if (path === "hello" || path === "config") return Response.json({ config: { ...config, agents: {}, workspace: { ...f.scope.workspace, setup: "synthetic setup" },
+      if (path === "hello" || path === "config") return Response.json({ config: { ...config, agents: {}, workspace: { ...f.scope.workspace, setup: "synthetic setup", ...(selectedScript ? { setupScript: "setup.sh" } : {}) },
         environment: { versionId, repositoryId: "123", variables: { APP_SECRET: "synthetic-app-value" }, files: [{ path: ".env.local", content: "VALUE=synthetic-file-value\n" }] } } });
       if (path === "environment") {
         reports++;
@@ -50,8 +54,8 @@ async function fixture(mode: "held" | "lost" | "refused") {
   return { ...f, worker, transport, runner, ready, requests, release, control: (frame: CloudV2ControlFrame) => receive(frame) };
 }
 
-it("retries the exact durable seed proof after a lost report, before reading config or starting setup", async () => {
-  const f = await fixture("lost");
+it.each([false, true])("retries the exact durable seed proof before config or setup (selected script=%s)", async selected => {
+  const f = await fixture("lost", selected);
   try {
     await expect.poll(() => f.runner.mock.calls.length).toBe(1);
     const reports = f.requests.filter(row => row.path === "environment");
@@ -63,8 +67,8 @@ it("retries the exact durable seed proof after a lost report, before reading con
   } finally { f.release(); await f.worker.dispose(); }
 });
 
-it.each(["stop", "dispose"] as const)("%s cancels a held seed acknowledgement before waiting on initial transport configuration", async mode => {
-  const f = await fixture("held"); let settled = false;
+it.each(["stop", "dispose"] as const)("%s cancels a held seed acknowledgement before selected-script admission", async mode => {
+  const f = await fixture("held", true); let settled = false;
   try {
     expect(f.runner).not.toHaveBeenCalled(); expect(f.ready).not.toContain("connected");
     const closing = mode === "stop" ? f.control({ t: "stop", id: randomUUID() }) : f.worker.dispose();

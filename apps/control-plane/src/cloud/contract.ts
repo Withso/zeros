@@ -3,6 +3,7 @@
 import { z } from "zod";
 import { CloudWorkspaceEnvironmentSchema } from "./environment-contract.js";
 import { CloudV2PromptCounterSchema } from "./prompt-contract.js";
+import { RepositorySetupPathSchema } from "./repository-setup-contract.js";
 
 export const CLOUD_V2_RELAY_PROTOCOL = 2;
 export const CLOUD_V2_WORKER_PORT = 41783;
@@ -147,6 +148,7 @@ export const CloudV2ControlFrameSchema = z.discriminatedUnion("t", [
       baseCommit: z.string().regex(/^[0-9a-f]{40}$/).optional(),
       /** Delivered only with workspace-setup-v1; runs once after a new checkout. */
       setup: z.string().max(8000).optional(),
+      setupScript: RepositorySetupPathSchema.optional(),
     }).strict(),
     agents: z.object({
       codex: proxy.optional(),

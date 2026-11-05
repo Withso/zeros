@@ -33,7 +33,7 @@ function fixture(options: { admin?: boolean } = {}) {
 describe("cloud v2 Cloud Computer recipe routes", () => {
   it("saves the configured repositories at the revision the editor saw", async () => {
     const f = fixture();
-    const repositories = [{ repository: "withso/zeros", setup: "pnpm install" }, { repository: "withso/zeros-dev-fixture", ref: "main" }];
+    const repositories = [{ repository: "withso/zeros", setup: "pnpm install", setupScript: "fixture-setup/bootstrap.sh" }, { repository: "withso/zeros-dev-fixture", ref: "main" }];
     const response = await f.send("/recipe", "PUT", { repositories, revision: 2 });
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual(saved);
@@ -44,6 +44,8 @@ describe("cloud v2 Cloud Computer recipe routes", () => {
     const f = fixture();
     expect((await f.send("/recipe", "PUT", { repositories: [], revision: 0 })).status).toBe(200);
     for (const repositories of [
+      [{ repository: "withso/zeros", setupScript: "../outside.sh" }],
+      [{ repository: "withso/zeros", setupScript: ".zeros/setup.sh" }],
       [{ repository: "withso/zeros", commit: "a".repeat(40) }],
       [{ repository: "withso/zeros" }, { repository: "Withso/Zeros" }],
       [{ repository: "withso/.." }],
@@ -71,7 +73,7 @@ describe("cloud v2 Cloud Computer recipe routes", () => {
 
   it("lets only owners and admins change the Computer", async () => {
     const f = fixture({ admin: false });
-    expect((await f.send("/recipe", "PUT", { repositories: [], revision: 0 })).status).toBe(403);
+    expect((await f.send("/recipe", "PUT", { repositories: [{ repository: "fixture/repo", setupScript: "fixture-setup/bootstrap.sh" }], revision: 0 })).status).toBe(403);
     expect((await f.send("/recipe/discard", "POST", { revision: 0 })).status).toBe(403);
     expect((await f.send("/builds", "POST", { revision: 0 })).status).toBe(403);
     expect(f.computers.saveRecipe).not.toHaveBeenCalled();

@@ -10,6 +10,8 @@ import { CloudWorkspaceEnvironmentSchema } from "./cloud-workspace-environment";
 export * from "./cloud-workspace-environment";
 import { MAX_BRIDGE_FRAME_BYTES } from "./schemas";
 import { CloudV2PromptCounterSchema } from "./cloud-v2-prompts";
+import { RepositorySetupPathSchema } from "./repository-setup";
+export { RepositorySetupPathSchema, REPOSITORY_SETUP_MAX_BYTES } from "./repository-setup";
 export { CloudFailureSchema, CloudProviderFailureSchema, CloudMcpFailureSchema, cloudFailureMessage } from "./cloud-failure";
 export type { CloudFailure, CloudProviderFailure, CloudMcpFailure } from "./cloud-failure";
 
@@ -156,6 +158,7 @@ export const CloudV2ControlFrameSchema = z.discriminatedUnion("t", [
       baseCommit: z.string().regex(/^[0-9a-f]{40}$/).optional(),
       /** Delivered only with workspace-setup-v1; runs once after a new checkout. */
       setup: z.string().max(8000).optional(),
+      setupScript: RepositorySetupPathSchema.optional(),
     }).strict(),
     agents: z.object({
       codex: proxy.optional(),

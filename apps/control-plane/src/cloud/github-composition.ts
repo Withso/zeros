@@ -19,6 +19,7 @@ import type { CloudV2ComputerSourceResolver } from "./computer-provenance.js";
 import type { CloudV2Computers } from "./computer.js";
 import { z } from "zod";
 import { cloudGithubUnavailableReason as unavailableReason } from "./github-failure.js";
+import { setupSelectionUnavailable, workspaceSetupBuild } from "./setup-selection.js";
 
 export function createCloudGithubServices(
   pool: pg.Pool,
@@ -78,12 +79,16 @@ export function createCloudGithubServices(
     // a different recipe; never run a reused name's setup on the old source.
     if (!sources.some((source) => source.repositoryId === target.repositoryId))
       return null;
+    const original = await workspaceSetupBuild(pool, workspace);
+    if (!original?.setupBuildId) return null;
     const recipe = await computers.recipeForRepositoryId(
       workspace.organizationId,
-      workspace.computerBuildId,
+      original.setupBuildId,
       target.repositoryId,
     );
-    return recipe.setup ?? null;
+    if (recipe.setupScript && original.setupLegacy) throw setupSelectionUnavailable();
+    if (recipe.setup === undefined && recipe.setupScript === undefined) return null;
+    return { ...(recipe.setup !== undefined ? { setup: recipe.setup } : {}), ...(recipe.setupScript ? { setupScript: recipe.setupScript } : {}) };
   };
   const retireRevoked = async (workspace: CloudV2Workspace, error: unknown) => {
     if (isGithubAccessRevoked(error)) await workspaces.transition(workspace.id, ["running"], "stopping");

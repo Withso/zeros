@@ -14,6 +14,7 @@ import { installRuntimeCommand, type CloudV2Runtime } from "./runtime.js";
 import { cloudV2SandboxName, cloudV2SnapshotName } from "./resource-names.js";
 import { CloudSourceTargetSchema, type CloudSourceTarget } from "./source-authority.js";
 import { computerSourceReviewRequired, readComputerSourceTargets, type CloudV2ComputerSourceResolver } from "./computer-provenance.js";
+import { RepositorySetupPathSchema } from "./repository-setup-contract.js";
 export { cloudV2SnapshotName } from "./resource-names.js";
 
 const MAX_LOG_BYTES = 1024 * 1024;
@@ -48,6 +49,7 @@ const editable = {
   ref: z.string().min(1).max(255).refine(value => !value.startsWith("-"), "Invalid branch or tag").optional(),
   /** Non-interactive bash run in the checkout as the workspace user, e.g. "pnpm install". */
   setup: z.string().max(8_000).optional(),
+  setupScript: RepositorySetupPathSchema.optional(),
 };
 export const CloudV2RecipeSchema = z.object({
   repositories: z.array(z.object({
@@ -68,8 +70,8 @@ export const CloudV2DraftSchema = z.array(CloudV2RepositoryDraftSchema).max(10).
 
 /** The editable part of a recipe, in its order. */
 export function editableRepositories(recipe: { repositories?: readonly Partial<RecipeEntry>[] } | null | undefined): CloudV2RepositoryDraft[] {
-  return (recipe?.repositories ?? []).flatMap(({ repository, ref, setup }) =>
-    typeof repository === "string" ? [{ repository, ...(ref ? { ref } : {}), ...(setup ? { setup } : {}) }] : []);
+  return (recipe?.repositories ?? []).flatMap(({ repository, ref, setup, setupScript }) =>
+    typeof repository === "string" ? [{ repository, ...(ref ? { ref } : {}), ...(setup ? { setup } : {}), ...(setupScript ? { setupScript } : {}) }] : []);
 }
 
 export type CloudV2BuildReason = "manual" | "reactivate" | "runtime" | "refresh";
@@ -968,6 +970,7 @@ export class CloudV2ComputerBuilder {
       await current();
       assertHeld();
       if (!await computers.running(job.id)) return [];
+      if (entry.setupScript) await log(`[zeros] workspace setup ${entry.repository}: ${entry.setupScript}\n`);
       if (entry.setup) {
         assertHeld();
         const setup = await compute.execLong(sandboxId, `${asZeros([`cd ${shellQuote(dir)}`, entry.setup])} 2>&1`, 3600);
