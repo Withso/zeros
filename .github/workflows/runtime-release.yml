@@ -1,0 +1,200 @@
+name: Cloud runtime release
+on:
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: Destination channel
+        type: choice
+        options: [alpha, beta, production]
+        default: alpha
+        required: true
+      action:
+        description: Publish on Alpha, promote retained Alpha bytes, or roll back to the recorded previous pin
+        type: choice
+        options: [publish, promote, rollback]
+        default: publish
+        required: true
+      expected_cp_sha:
+        description: Exact 40-character source SHA reported by the destination release identity
+        type: string
+        required: true
+      expected_runtime_sha256:
+        description: Exact current destination runtime digest
+        type: string
+        required: true
+      source_sha:
+        description: Publish only; exact main commit with successful Preflight and CodeQL
+        type: string
+        default: ""
+      runtime_sha256:
+        description: Promote only; exact Alpha-qualified archive digest
+        type: string
+        default: ""
+      alpha_run_id:
+        description: Promote only; successful Alpha runtime release run
+        type: string
+        default: ""
+      alpha_run_attempt:
+        description: Promote only; successful Alpha runtime release attempt
+        type: string
+        default: ""
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: release-${{ inputs.channel }}
+  cancel-in-progress: false
+env:
+  RUNTIME_RELEASE_CHANNEL: ${{ inputs.channel }}
+  RUNTIME_RELEASE_ACTION: ${{ inputs.action }}
+  RUNTIME_RELEASE_EXPECTED_CP_SHA: ${{ inputs.expected_cp_sha }}
+  RUNTIME_RELEASE_EXPECTED_SHA256: ${{ inputs.expected_runtime_sha256 }}
+  RUNTIME_RELEASE_SOURCE_SHA: ${{ inputs.source_sha }}
+  RUNTIME_RELEASE_SHA256: ${{ inputs.runtime_sha256 }}
+  RUNTIME_RELEASE_ALPHA_RUN_ID: ${{ inputs.alpha_run_id }}
+  RUNTIME_RELEASE_ALPHA_RUN_ATTEMPT: ${{ inputs.alpha_run_attempt }}
+jobs:
+  approve:
+    name: Approve runtime promotion
+    if: github.event.repository.fork == false && inputs.channel == 'production' && startsWith(github.ref, 'refs/heads/release/')
+    runs-on: ubuntu-latest
+    environment: production-approval
+    permissions: {}
+    steps:
+      - name: Record runtime approval
+        run: echo "Runtime promotion approved for $GITHUB_SHA on $GITHUB_REF_NAME"
+  build:
+    name: Runtime archive build
+    if: github.event.repository.fork == false && inputs.channel == 'alpha' && inputs.action == 'publish' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ inputs.source_sha }}
+          path: .context/runtime-candidate
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --dir apps/control-plane install --frozen-lockfile
+      - name: Build exact runtime
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: pnpm exec tsx scripts/release/runtime-build-cli.ts
+      - name: Save runtime archive
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: runtime-archive-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .context/runtime-build/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 30
+  release:
+    name: Runtime release transaction
+    needs: [approve, build]
+    if: >-
+      !cancelled() && github.event.repository.fork == false &&
+      ((inputs.channel == 'alpha' && github.ref == 'refs/heads/main' && needs.approve.result == 'skipped') ||
+      (inputs.channel == 'beta' && startsWith(github.ref, 'refs/heads/release/') && needs.approve.result == 'skipped') ||
+      (inputs.channel == 'production' && startsWith(github.ref, 'refs/heads/release/') && needs.approve.result == 'success')) &&
+      ((inputs.action == 'publish' && needs.build.result == 'success') ||
+      (inputs.action != 'publish' && needs.build.result == 'skipped'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 70
+    environment: ${{ inputs.channel }}
+    concurrency:
+      group: hosted-mutation-${{ inputs.channel }}
+      cancel-in-progress: false
+    env:
+      ZEROS_RUNTIME_RELEASE: ${{ vars.ZEROS_RUNTIME_RELEASE }}
+      ZEROS_HOSTED_PROMOTION: ${{ vars.ZEROS_HOSTED_PROMOTION }}
+      RAILWAY_PROJECT_ID: ${{ vars.RAILWAY_PROJECT_ID }}
+      RAILWAY_ENVIRONMENT_ID: ${{ vars.RAILWAY_ENVIRONMENT_ID }}
+      RAILWAY_SERVICE_ID: ${{ vars.RAILWAY_SERVICE_ID }}
+      PLANETSCALE_ORG: ${{ vars.PLANETSCALE_ORG }}
+      PLANETSCALE_DATABASE: ${{ vars.PLANETSCALE_DATABASE }}
+      PLANETSCALE_BRANCH: ${{ vars.PLANETSCALE_BRANCH }}
+      CLOUD_V2_RUNTIME_STORE_ENDPOINT: ${{ vars.CLOUD_V2_RUNTIME_STORE_ENDPOINT }}
+      CLOUD_V2_RUNTIME_STORE_BUCKET: ${{ vars.CLOUD_V2_RUNTIME_STORE_BUCKET }}
+      CLOUD_RUNTIME_ALPHA_STORE_ENDPOINT: ${{ vars.CLOUD_RUNTIME_ALPHA_STORE_ENDPOINT }}
+      CLOUD_RUNTIME_ALPHA_STORE_BUCKET: ${{ vars.CLOUD_RUNTIME_ALPHA_STORE_BUCKET }}
+      CLOUD_V2_RUNTIME_CANARY_CONFIG: ${{ vars.CLOUD_V2_RUNTIME_CANARY_CONFIG }}
+      CLOUD_RUNTIME_CANARY_KEY_ID: ${{ vars.CLOUD_RUNTIME_CANARY_KEY_ID }}
+      CLOUD_RUNTIME_CANARY_REPOSITORY: ${{ vars.CLOUD_RUNTIME_CANARY_REPOSITORY }}
+      WORKOS_CLIENT_ID: ${{ vars.WORKOS_CLIENT_ID }}
+      CLOUD_RUNTIME_FIXTURE_WORKOS_USER_ID: ${{ vars.CLOUD_RUNTIME_FIXTURE_WORKOS_USER_ID }}
+      CLOUD_RUNTIME_FIXTURE_WORKOS_ORGANIZATION_ID: ${{ vars.CLOUD_RUNTIME_FIXTURE_WORKOS_ORGANIZATION_ID }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --dir apps/control-plane install --frozen-lockfile
+      - name: Read exact-attempt runtime archive
+        if: inputs.action == 'publish'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: runtime-archive-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .context/runtime-build
+      - name: Qualify and pin runtime
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RAILWAY_DEPLOY_TOKEN: ${{ secrets.RAILWAY_DEPLOY_TOKEN }}
+          PLANETSCALE_SERVICE_TOKEN_ID: ${{ secrets.PLANETSCALE_SERVICE_TOKEN_ID }}
+          PLANETSCALE_SERVICE_TOKEN: ${{ secrets.PLANETSCALE_SERVICE_TOKEN }}
+          CLOUD_V2_RUNTIME_STORE_ACCESS_KEY_ID: ${{ secrets.CLOUD_V2_RUNTIME_STORE_ACCESS_KEY_ID }}
+          CLOUD_V2_RUNTIME_STORE_SECRET_ACCESS_KEY: ${{ secrets.CLOUD_V2_RUNTIME_STORE_SECRET_ACCESS_KEY }}
+          CLOUD_RUNTIME_ALPHA_STORE_ACCESS_KEY_ID: ${{ secrets.CLOUD_RUNTIME_ALPHA_STORE_ACCESS_KEY_ID }}
+          CLOUD_RUNTIME_ALPHA_STORE_SECRET_ACCESS_KEY: ${{ secrets.CLOUD_RUNTIME_ALPHA_STORE_SECRET_ACCESS_KEY }}
+          CLOUD_V2_RUNTIME_CANARY_PRIVATE_KEY: ${{ secrets.CLOUD_V2_RUNTIME_CANARY_PRIVATE_KEY }}
+          WORKOS_API_KEY: ${{ secrets.WORKOS_API_KEY }}
+          CLOUD_RUNTIME_FIXTURE_EMAIL: ${{ secrets.CLOUD_RUNTIME_FIXTURE_EMAIL }}
+          CLOUD_RUNTIME_FIXTURE_PASSWORD: ${{ secrets.CLOUD_RUNTIME_FIXTURE_PASSWORD }}
+        run: pnpm exec tsx scripts/release/runtime-cli.ts --execute
+      - name: Retire runtime release authority
+        if: always()
+        timeout-minutes: 5
+        env:
+          RAILWAY_DEPLOY_TOKEN: ${{ secrets.RAILWAY_DEPLOY_TOKEN }}
+          PLANETSCALE_SERVICE_TOKEN_ID: ${{ secrets.PLANETSCALE_SERVICE_TOKEN_ID }}
+          PLANETSCALE_SERVICE_TOKEN: ${{ secrets.PLANETSCALE_SERVICE_TOKEN }}
+          CLOUD_V2_RUNTIME_STORE_ACCESS_KEY_ID: ${{ secrets.CLOUD_V2_RUNTIME_STORE_ACCESS_KEY_ID }}
+          CLOUD_V2_RUNTIME_STORE_SECRET_ACCESS_KEY: ${{ secrets.CLOUD_V2_RUNTIME_STORE_SECRET_ACCESS_KEY }}
+          WORKOS_API_KEY: ${{ secrets.WORKOS_API_KEY }}
+          CLOUD_RUNTIME_FIXTURE_EMAIL: ${{ secrets.CLOUD_RUNTIME_FIXTURE_EMAIL }}
+          CLOUD_RUNTIME_FIXTURE_PASSWORD: ${{ secrets.CLOUD_RUNTIME_FIXTURE_PASSWORD }}
+        run: pnpm exec tsx scripts/release/runtime-cli.ts --cleanup
+      - name: Save runtime receipt
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: runtime-release-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .context/runtime-release/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 90
+      - name: Save runtime recovery records
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: runtime-release-recovery-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .context/runtime-release/
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 90

@@ -1,0 +1,9 @@
+{
+  "id": "runtime-release-final-drain",
+  "kind": "seeded",
+  "area": "scripts-release",
+  "fixedBy": "pending",
+  "symptom": "A runtime publisher can change the channel pin after an awaited boundary invalidates the serving control-plane identity or its build-drain lease.",
+  "rule": "Recheck the exact serving control-plane deployment and prior pin after the final drain wait, then synchronously recheck cancellation and the active empty lease with enough reserved time before mutation (zstack-review and zstack-verify).",
+  "check": "pnpm exec vitest run --config scripts/release/vitest.config.ts scripts/release/runtime-provider.test.ts scripts/release/runtime-provider-drain-db.test.ts"
+}

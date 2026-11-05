@@ -529,14 +529,15 @@ signed desktop artifact publication.
 
 ### Runtime release qualification
 
-The app support for runtime-only releases is separate from the owner-merged
-CI-definition/controller PR. Start dispatch-only: the release controller must
-build an exact main commit with successful required CI, publish by SHA-256,
-qualify it on Alpha, then change the pin. Do not use the ordinary publisher's
-retention defaults for this path: use `--no-prune` and retain all active,
-previous and promoted digests with their immutable source manifests and
-qualification receipts. Beta and Production promotion copies and re-hashes
-the same archive; it does not rebuild it.
+The **Cloud runtime release** workflow (`runtime-release.yml`) is dispatch-only.
+It builds an exact main commit with successful Preflight and CodeQL, publishes
+by SHA-256, qualifies on Alpha, then changes the pin. It redeploys the unchanged
+live control-plane commit; it does not publish a desktop or web release.
+Beta and Production promotion copies and re-hashes the same archive without
+rebuilding it. Archives, source manifests and qualification receipts are
+retained under `cloud-v2/runtime/releases/`, outside the ordinary publisher's
+pruning namespace. Before a retained archive is selected, the controller
+restores its ordinary `cloud-v2/runtime/<digest>.tar.gz` object if necessary.
 
 Apply expand migration `0219_cloud_runtime_canaries.sql` and deploy app
 support before enabling the canary policy. Provision a dedicated fixture
@@ -604,8 +605,9 @@ cannot write its lease or run receipts.
   and committed runtime adoptions finish; the shared database guard refuses
   new claims and handoffs, including older claim writers.
 - `endBuildDrain(pool, lease)` confirms `{ version: 1, lease, released: true }`.
-  End the lease after success and on failure. An exception or lost reply is
-  unconfirmed, not permission to proceed or release a successor's lease.
+  End the lease after success or a confirmed safe failure. A pending or unknown
+  deployment keeps the lease held until expiry. An exception or lost reply
+  never grants permission to proceed or release a successor's lease.
 
 The lease binds its UUID, run, exact live CP SHA, prior digest and original
 expiry. Repeating a run with identical inputs returns its original receipt,
@@ -623,25 +625,204 @@ authority. A failed/ambiguous create must not later allocate after cleanup:
 the release controller uses its existing database authority to retire that
 run's unused nonce or recover its committed workspace before retrying the
 ordinary fixture DELETE. Never treat a workspace 404 as deletion proof.
-Explicit Beta/Production promotion and rollback require their GitHub
-environment approvals, expected-prior-pin checks and retained Alpha receipt.
+Beta/Production promotion and rollback require explicit dispatch,
+expected-prior-pin checks and a retained Alpha receipt. Production also requires
+its existing GitHub approval job; Beta follows the app's current policy without
+a human approval gate.
 They never edit an organization's recipe or stop user workspaces.
+
+#### Runtime workflow configuration
+
+Deploy the canary and build-drain app support, including migrations 0219 and
+0221, before enabling the workflow. Every serving control-plane instance must
+support the claim/adoption drain. The controller requires the exact live CP
+SHA and `runtimeBuildDrainVersion: 1`; an old or unready service cannot authorize
+a pin even if the database already has the migration.
+
+The `alpha`, `beta` and `production` GitHub environments hold channel
+configuration. Set both `ZEROS_RUNTIME_RELEASE=enabled` and
+`ZEROS_HOSTED_PROMOTION=enabled` for mutations. Keep Railway autodeploy disabled.
+Use the existing `RAILWAY_PROJECT_ID`, `RAILWAY_ENVIRONMENT_ID`,
+`RAILWAY_SERVICE_ID`, `RAILWAY_DEPLOY_TOKEN`, `PLANETSCALE_ORG`,
+`PLANETSCALE_DATABASE`, `PLANETSCALE_BRANCH` and PlanetScale service-token
+secrets. The database must be `zeros-control-plane-<channel>` on `main`.
+No operator database password is stored in GitHub: the controller allocates
+one owner login with a one-hour expiry, verifies its branch and the live
+Railway database route, and confirms deletion before publishing success.
+
+Configure `CLOUD_V2_RUNTIME_STORE_ENDPOINT` and `CLOUD_V2_RUNTIME_STORE_BUCKET`
+as variables, and the corresponding `ACCESS_KEY_ID` and `SECRET_ACCESS_KEY`
+as secrets. They must exactly match the serving channel's runtime store.
+Beta and Production additionally need read-only Alpha store access through
+`CLOUD_RUNTIME_ALPHA_STORE_ENDPOINT`, `CLOUD_RUNTIME_ALPHA_STORE_BUCKET`,
+`CLOUD_RUNTIME_ALPHA_STORE_ACCESS_KEY_ID` and
+`CLOUD_RUNTIME_ALPHA_STORE_SECRET_ACCESS_KEY`. Destination credentials write
+the retained copy; the Alpha credentials only read it.
+
+Alpha alone holds the dedicated signing private key and fixture login described
+above. Its variables include `CLOUD_RUNTIME_CANARY_KEY_ID`, the matching public
+`CLOUD_V2_RUNTIME_CANARY_CONFIG`, `CLOUD_RUNTIME_CANARY_REPOSITORY`,
+`WORKOS_CLIENT_ID`, `CLOUD_RUNTIME_FIXTURE_WORKOS_USER_ID`, and the optional
+WorkOS organization ID. Keep `WORKOS_API_KEY`, fixture email and password as
+environment secrets. Do not place the signing key at repository scope or in
+Beta/Production. The build job receives no channel secrets and passes only a
+small host environment to the existing isolated Linux/Node 24 packager.
+
+The workflow uses the existing `production-approval` environment for Production
+promotion and rollback, and checks that job's exact source, run and attempt.
+Beta follows the current app Beta policy: explicit dispatch and all source,
+qualification and pin checks, with no human gate. There is no `beta-approval`
+dependency. All destination secrets are confined to the one release job,
+including its immediate cleanup step.
+
+Recommended hardening for the repository owner is a required reviewer on the
+secret-bearing `production` environment itself, with self-review and
+administrator bypass disabled. A reviewer on `beta` is an optional owner
+decision. These are recommendations, not settings applied by this change.
+Use selected deployment branches with no tags: `main` for `alpha`, and
+`release/*` for `beta` and `production`; protect `release/*` with the repository
+ruleset below. A dispatched branch controls its workflow, so the separate
+approval job alone does not enforce approval against a modified workflow ref.
+GitHub enforces protection on the secret-bearing environment before releasing
+its secrets.
+
+If the owner enables that Production reviewer, remove the now-redundant
+`approve` job, its `needs`/`if` dependency, and the matching Production
+approval-job check in `runtime-github.ts` together in an owner-reviewed change.
+Apply the environment protection first. Production's single release job then
+needs one approval, including cleanup, rather than both approval gates.
+
+#### Runtime dispatch and rollback
+
+Read the destination's `/v1/release-identity` immediately before dispatch.
+Supply its exact `sourceSha` as `expected_cp_sha` and its `worker.sha256` as
+`expected_runtime_sha256`. A later change to either refuses the release.
+
+- **Publish:** dispatch on `main` with `channel=alpha`, `action=publish` and
+  `source_sha=<full main commit>`. Leave the digest and Alpha-run inputs empty.
+  The build artifact must belong to this exact workflow attempt. The controller
+  inspects its archive and source hash again before publication, then runs all
+  three providers and create/wake/Stop/history/file/Git/terminal gate0 checks on
+  the one admitted canary workspace. Ordinary workspaces keep the prior pin.
+- **Promote:** dispatch on `release/X.Y.Z` with `channel=beta` or `production`,
+  `action=promote`, `runtime_sha256`, `alpha_run_id` and `alpha_run_attempt` from
+  the successful Alpha publish attempt. Leave `source_sha` empty. Both its
+  archive-build job and release job must have succeeded. The separate build
+  artifact must match the qualification's complete manifest, archive digest,
+  source, run and attempt; the source and workflow commits must retain main/CI
+  provenance. A qualification from an Alpha rollback cannot authorize a new
+  promotion. The destination's control-plane and protocol trees must match the
+  Alpha qualification; unavailable proof refuses promotion.
+- **Rollback:** dispatch on the channel's branch with `action=rollback` and
+  the two expected live identities. Leave source, digest and Alpha-run inputs
+  empty. The controller selects only `CLOUD_V2_RUNTIME_PREVIOUS_SHA256` and its
+  recorded metadata. Alpha reruns gate0 on that retained archive. Beta and
+  Production verify the retained receipt against the hash in the trusted
+  previous-pin metadata and recheck control-plane compatibility, so GitHub
+  artifact expiration does not erase rollback capability. An unqualified
+  legacy previous pin or missing retained bytes still refuses.
+
+Selecting the already-active digest refuses without replacing the rollback
+pin. A successful release stores the prior digest and metadata in
+`CLOUD_V2_RUNTIME_PREVIOUS_SHA256` and
+`CLOUD_V2_RUNTIME_PREVIOUS_RELEASE_METADATA` together with the new pin. The
+drain uses a fixed 15-minute lease; it waits for live builds, unresolved provider
+effects and committed adoptions without killing them. It does not renew a run.
+Before staging, at least ten minutes must remain. This conservative budget
+uses the observed 6.2-minute maximum of ten successful Alpha hosted-service
+promotion steps, plus readiness and cleanup margin; unchanged-CP redeploy time
+was not measured separately, and Beta/Production use the same budget. Deploy
+requires nine minutes remaining, with an eight-minute absolute submission and
+readiness bound and one minute reserved for cleanup. A long-running Computer
+build may therefore cause a clean refusal before any variable changes.
+
+After each final drain read, refresh serving deployment/source and pin ownership,
+then synchronously recheck lease expiry and cancellation before the mutation.
+If deployment is refused after staging, restore only the exact owned runtime
+variables, including the previous pin, and confirm readback before ending the
+lease. Foreign variables, a changed serving deployment, a lost deploy reply or
+a known pending rollout refuse recovery and leave the lease held until expiry.
+
+#### Runtime interruption and recovery
+
+Success produces the `runtime-release-<run>-<attempt>` GitHub artifact with
+`runtime-qualification.json` and `runtime-receipt.json`. Failures retain a
+separate `runtime-release-recovery-<run>-<attempt>` artifact. Before each canary,
+temporary-login or Railway effect, the controller writes an allowlisted event
+under `cloud-v2/runtime/releases/intents/<channel>/<run>/<attempt>/` and into
+the private local evidence directory. Events contain identities, hashes and
+operation state; they contain no grant token, password, signing key or raw
+provider response. The storage copy survives loss of the runner before artifact
+upload. Success is withheld until the drain release and temporary-login deletion
+are both confirmed.
+
+SIGINT, SIGTERM and the controller's 45-minute deadline stop further mutations
+and enter cleanup. The immediately following same-job `always()` step also
+runs after cancellation. It reuses the one acknowledged migration login; it
+never mints another login or acquires a missing drain. A lost begin reply is
+retried once with its original binding only to recover and release the lease;
+the later cleanup step only reads the durable run receipt.
+
+Execution is restricted to ephemeral GitHub-hosted Linux runners. Before any
+canary or drain operation, the password is registered with runner masking and
+stored exclusively in a mode-0600, descriptor-validated file inside a fresh
+mode-0700 directory under `RUNNER_TEMP`, outside `GITHUB_WORKSPACE`. It contains
+only the acknowledged login and exact source/run/attempt/role bindings, never
+the PlanetScale service token. Its path and contents are not logged or uploaded.
+No third-party action runs before cleanup; artifact uploads follow it.
+
+On an interrupted operation, the login is kept only for that immediate cleanup
+step. Cleanup retires the exact nonce, deletes its fixture workspace and closes
+its fixture session, reconciles the owned stage/drain, and confirms login
+deletion. The private file is unlinked after deletion and on refusal. The step
+has a five-minute bound; a double cancellation, runner loss or unavailable
+provider retains the 3,600-second login TTL as a backstop, never a successful
+cleanup claim. A pending deployment does not count as completed and does not
+authorize early drain release. Cleanup saves only allowlisted recovery results.
+
+If cleanup remains unconfirmed, reconcile the exact recorded channel, run,
+source, grant, login, lease and deployment IDs before dispatching again:
+
+1. Close the recorded canary admission with the existing migration authority.
+   A committed grant identifies its exact fixture workspace; an unused nonce
+   must be retired so a delayed create cannot allocate afterward. Use the
+   ordinary fixture delete operation and require the retained grant status to
+   report that exact workspace as deleted. A 404 is insufficient.
+2. Confirm the owned temporary PlanetScale login is absent, or delete only that
+   recorded login after verifying its branch and creator. Its one-hour TTL is
+   a fallback, not a successful cleanup receipt.
+3. Read Railway variables, deployment inventory and public release identity.
+   If the staging or deploy response was lost, determine whether its exact
+   effect occurred. Reconcile a partial staged pin through the normal channel
+   operator process before another release. The controller never repeats an
+   unacknowledged mutation automatically.
+4. Inspect the recorded drain lease. End only that current lease after its
+   rollout or restoration is confirmed and require the structured release
+   response. An expired or replaced lease cannot authorize a deploy or release
+   its successor.
+
+After reconciliation, dispatch a new explicit run with the observed live
+identities. A consumed run's build-drain receipt is durable across GitHub
+attempts and cannot be renewed by rerunning a job.
 
 Set GitHub Environment deployment-branch protection too: `alpha` permits only
 `main`; `beta` and `production` permit `release/*`.
 The stable desktop workflow itself rejects `main` and requires an exact
 `release/X.Y.Z` ref, so a manual dispatch cannot bypass the promotion ladder.
 
-Production takes **one human approval per run**. The `production-approval`
-environment holds the required reviewer, permits only `release/*`, and has no
+The current `production-approval` environment holds a required reviewer,
+permits only `release/*`, and has no
 secrets or variables. `release.yml` starts with an `approve` job in that
 environment, and every job that can read `production` secrets needs it: build,
 submit, notarize, publish and the hosted lane it calls. A direct Production
 dispatch of `controlled-cutover.yml` needs the same approval; Alpha and Beta
-skip it. The `production` environment
-therefore keeps its secrets and branch policy but no reviewer of its own.
+skip it. The current secret-bearing `production` and `beta` environments have
+branch policies but no required reviewers. A reviewer on `production` is the
+recommended hardening described above; Beta approval remains an owner choice.
+Adding a reviewer to an environment used by several desktop jobs can add
+per-job approvals until those workflows consolidate their secret access.
 
-That moves secret protection to the release branches: the `release` ruleset
+Alongside environment protection, the `release` ruleset
 must be active, block deletion and force-push, and restrict branch creation and
 updates to repository admins and the `zeros-agent` App, which cuts release
 branches. Other changes reach a release branch through reviewed PRs.
@@ -650,13 +831,12 @@ Apply the settings in this order, so no window runs without a gate:
 
 1. Create `production-approval` with the reviewer and the `release/*` policy.
    A job that names a missing environment would create it unprotected.
-2. Merge the workflows that use it. Until step 3, Production asks for that
-   approval plus the old per-job approvals.
-3. Activate the `release` ruleset restrictions above.
-4. After the next Beta release publishes, remove the reviewer from
-   `production`. Older release branches still run their earlier workflows,
-   which lack the approval job; their Production jobs refuse a SHA that the
-   latest Beta did not publish.
+2. Keep the existing `release` ruleset and deployment-branch restrictions.
+3. If the owner chooses the recommended hardening, enable the reviewer on
+   `production` before removing any separate approval dependency. The runtime
+   workflow already concentrates its secrets in one job; update other release
+   workflows deliberately before removing their approval jobs. Older or
+   modified refs remain subject to the secret-bearing environment's rules.
 
 ### macOS signing keychain
 

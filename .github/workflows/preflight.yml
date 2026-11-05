@@ -111,6 +111,18 @@ jobs:
     name: quality
     if: (github.event_name != 'pull_request' || !inputs.pr_selected_quality)
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -129,6 +141,8 @@ jobs:
       - name: Install JS dependencies
         run: pnpm install --frozen-lockfile
       - name: Verify hosted release contracts
+        env:
+          TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
         run: |
           pnpm --dir apps/control-plane install --frozen-lockfile
           pnpm exec tsc -p scripts/release/tsconfig.json
