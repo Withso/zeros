@@ -13,6 +13,7 @@ const f = vi.hoisted(() => ({
   securityConstructor: vi.fn(), securityStart: vi.fn(), securityNotify: vi.fn(), securityStop: vi.fn(async () => {}),
   brokerConstructor: vi.fn(), broker: { stop: vi.fn(async () => {}) },
   cloud: vi.fn(), lifecycle: { start: vi.fn() }, lifecycleStop: vi.fn(async () => {}),
+  runtimeUpdates: { close: vi.fn() },
   loginChanges: { stop: vi.fn(async () => {}) }, relay: { close: vi.fn(), handleUpgrade: vi.fn() },
   promptChanges: { stop: vi.fn(async () => {}) }, promptSignals: { wakeAll: vi.fn() },
   routes: {}, proxy: {}, server: { on: vi.fn(), close: vi.fn() },
@@ -74,6 +75,7 @@ beforeEach(() => {
   f.cloud.mockImplementation((config, _pool, roles) => config.cloudV2 ? {
     routes: f.routes, proxy: f.proxy, connections: f.relay, workers: {}, relay: roles.relay ? f.relay : null,
     lifecycle: roles.lifecycle ? f.lifecycle : null, loginChanges: roles.relay ? f.loginChanges : null,
+    runtimeUpdates: f.runtimeUpdates,
     promptChanges: config.cloudV2.promptOutbox ? f.promptChanges : null, promptSignals: f.promptSignals,
   } : null);
   f.serve.mockImplementation((_options, ready) => { ready({ port: 8080 }); return f.server; });
@@ -163,6 +165,8 @@ describe("account workers and cloud v2 boot composition", () => {
     f.promptChanges.stop.mockImplementationOnce(() => new Promise<void>(resolve => { releasePromptListener = resolve; }));
     const shutdown = process.listeners("SIGTERM").find(listener => !oldTerm.includes(listener))!;
     shutdown("SIGTERM"); await vi.advanceTimersByTimeAsync(0);
+    expect(f.runtimeUpdates.close).toHaveBeenCalledOnce();
+    expect(f.runtimeUpdates.close).toHaveBeenCalledBefore(f.relay.close);
     expect(f.relay.close).toHaveBeenCalledOnce(); expect(f.lifecycleStop).toHaveBeenCalledOnce();
     expect(f.loginChanges.stop).toHaveBeenCalledOnce(); expect(f.broker.stop).toHaveBeenCalledOnce();
     expect(f.stopNotifications).toHaveBeenCalledOnce(); expect(f.workos.stop).toHaveBeenCalledOnce(); expect(f.securityStop).toHaveBeenCalledOnce();

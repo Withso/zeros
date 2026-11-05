@@ -332,7 +332,8 @@ describe("cloud v2 lifecycle", () => {
     expect(checkpoints.storage.downloadUrl).toHaveBeenCalledWith(waking.id, SAVED.object);
     // Runtime first, then the checkpoint, then the worker's route and credential.
     const order = vi.mocked(f.compute.exec).mock.calls.map(([, command]) =>
-      command.includes("zeros-checkpoint-restored") ? "restore" : command.includes("/opt/zeros/runtime") ? "runtime" : "token");
+      command.includes("zeros-checkpoint-restored") ? "restore" : command.includes(Buffer.from(token).toString("base64")) ? "token"
+        : command.includes("/opt/zeros/runtime") ? "runtime" : "unknown");
     expect(order).toEqual(["runtime", "restore", "token"]);
     expect(f.store.finishRestore).toHaveBeenCalledWith(waking.id, "bx_new1");
     expect(f.store.finishRestore).toHaveBeenCalledBefore(vi.mocked(f.compute.hostPort));
