@@ -2,7 +2,7 @@
   "id": "mcp-save-connect-watcher-reconnect",
   "kind": "replay",
   "area": "desktop-engine",
-  "fixedBy": "pending",
+  "fixedBy": "pr:851",
   "symptom": "Save & connect wrote the server and started sign-in, then the settings watcher saw that same write and reconnected every gateway backend, which cancelled the pending sign-in.",
   "rule": "A settings-watcher reload keeps an unchanged gateway backend set; saves and credential changes still reconnect, and a failed gateway still retries. Hold the second, unforced reload and assert no reconnect (principles 13 and 14).",
   "check": "pnpm exec vitest run --config vitest.config.ts apps/desktop/src/engine/__tests__/engine-gateway-catalog.test.ts -t 'pending sign-in'"

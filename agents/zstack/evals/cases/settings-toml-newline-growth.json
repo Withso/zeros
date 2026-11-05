@@ -2,7 +2,7 @@
   "id": "settings-toml-newline-growth",
   "kind": "replay",
   "area": "desktop-engine",
-  "fixedBy": "pending",
+  "fixedBy": "pr:851",
   "symptom": "Every settings write added another blank line to the end of settings.toml, because toml-patch keeps the existing trailing newlines and the writer appended one more.",
   "rule": "Normalize a written settings file to exactly one final line ending in its own style, and test repeated writes of the same file rather than one write (principle 13).",
   "check": "pnpm exec vitest run --config vitest.config.ts apps/desktop/src/engine/settings/__tests__/files.test.ts -t 'one newline|trailing blank lines'"
