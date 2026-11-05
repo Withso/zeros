@@ -2,7 +2,7 @@
   "id": "selection-fill-not-edge",
   "kind": "replay",
   "area": "renderer-ui",
-  "fixedBy": "007c03beb232e7c99b72967da6dd26ac1de5f8bb",
+  "fixedBy": "pr:839",
   "symptom": "The active tab, pressed toggles and chosen chips read as outlined: segmented tabs drew an inset ring, Secondary and Ghost buttons, IconButton and Pill pressed to border4 or border2, and the user had to find each one.",
   "rule": "Selection is a fill, never an edge: pressed, active and chosen controls fill with selected-bg and keep their resting edge, owned by the primitives; ui/selection-edge fails on any edge drawn on a selected state (docs/design-system.md §0 item 8).",
   "check": "pnpm exec vitest run apps/desktop/src/renderer/shared/ui/primitives/__tests__/button.test.ts apps/desktop/src/renderer/shared/ui/primitives/__tests__/icon-button.test.ts apps/desktop/src/renderer/shared/ui/primitives/__tests__/pill.test.ts scripts/__tests__/design-system-policy.test.ts"

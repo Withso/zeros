@@ -29,5 +29,5 @@ composer-editor (pill hover and caret selection), local-links (hover edge) and
 cloud-github (chosen card) smokes; eval cases `selection-fill-not-edge`,
 `selection-edge-conditional`, `tool-row-target-padding`, `tool-row-one-pitch`,
 `docked-picker-composer-surface`, `design-empty-sections-hidden`,
-`pill-hover-one-shape` and `tool-description-chip-height`. Their `fixedBy`
-names the branch commits; replace them with `pr:<number>` when the PR opens.
+`pill-hover-one-shape` and `tool-description-chip-height`, all fixed by
+`pr:839`.
