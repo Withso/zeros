@@ -1,0 +1,9 @@
+{
+  "id": "mcp-gateway-loopback-backend-blocked",
+  "kind": "replay",
+  "area": "desktop-agents",
+  "fixedBy": "pr:851",
+  "symptom": "An API-key or Sign-in MCP server on localhost passed the editor's connection check, but the chat gateway refused to reach it, so the chat had none of its tools.",
+  "rule": "A personal gateway backend on this machine may use loopback HTTP exactly as its connection check does; organization backends never may. Drive the chat path with the URL the form check accepted. Principles 10 and 13.",
+  "check": "pnpm exec vitest run --config vitest.config.ts apps/desktop/src/engine/agents/__tests__/mcp-registry.test.ts apps/desktop/src/engine/agents/gateway/__tests__/server.test.ts -t 'reach loopback|reaches a loopback backend'"
+}

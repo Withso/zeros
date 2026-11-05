@@ -1,0 +1,9 @@
+{
+  "id": "cloud-mcp-launched-server-worker-env",
+  "kind": "replay",
+  "area": "cloud-worker",
+  "fixedBy": "pr:851",
+  "symptom": "A cloud MCP server with a listening endpoint was started with the worker's whole environment, while a direct stdio server got only the SDK's default environment.",
+  "rule": "Cloud launched and direct stdio servers start from the same default environment plus their own variables. Principle 10.",
+  "check": "pnpm --dir apps/cloud-worker test src/mcp/launcher.test.ts -t 'own environment'"
+}

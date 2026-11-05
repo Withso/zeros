@@ -1,0 +1,9 @@
+{
+  "id": "codex-mcp-server-name-dropped",
+  "kind": "replay",
+  "area": "desktop-agents",
+  "fixedBy": "pr:851",
+  "symptom": "An MCP server whose name had a dot or a space worked in Claude and Cursor but silently vanished from Codex chats.",
+  "rule": "Codex gets the same underscore name Claude and Cursor use, the chat lists the server's own name, and a server Codex cannot run is listed with its reason. Principle 10.",
+  "check": "pnpm exec vitest run --config vitest.config.ts apps/desktop/src/engine/agents/adapters/codex/__tests__/app-server-adapter-native-mcp.test.ts apps/desktop/src/engine/agents/adapters/codex/__tests__/mcp-overrides.test.ts -t 'MCP server names|names each server'"
+}
