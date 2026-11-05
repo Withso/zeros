@@ -2,15 +2,17 @@ import { randomUUID } from "node:crypto";
 import { request as httpRequest } from "node:http";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { CodeReviewAgentToolsCore } from "@zeros/protocol/code-review";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WorkspaceToolsMcp, type WorkspaceToolGrant } from "./workspace-tools";
+import { RuntimeQuiescence } from "../runtime-quiescence";
 
 const cleanups: Array<() => void | Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
-function fixture() {
-  const mcp = new WorkspaceToolsMcp(), run = vi.fn(() => ({ workspaceId: "workspace", threads: [] }));
+function fixture(admission?: () => Promise<() => void>) {
+  const mcp = new WorkspaceToolsMcp(admission), run = vi.fn(() => ({ workspaceId: "workspace", threads: [] }));
   cleanups.push(() => mcp.dispose());
   let current = true;
   const tools = new CodeReviewAgentToolsCore({ workspaceId: "workspace", workspacePath: "/fixture", assertCurrent: () => { if (!current) throw new Error("Retired execution"); } }, run,
@@ -27,6 +29,58 @@ async function connect(grant: WorkspaceToolGrant) {
 const pause = () => new Promise<void>(resolve => setImmediate(resolve));
 
 describe("per-execution workspace MCP grants", () => {
+  it("lets an established idle notification stream become quiet while retaining tool admission", async () => {
+    let now = 0;
+    const f = fixture(async () => gate.admit());
+    const gate = new RuntimeQuiescence(() => ({ clients: false, requests: false, agents: false, terminals: false, setup: false,
+      checkout: false, configuration: false, prompts: false, attachments: false, storage: false, tools: f.mcp.runtimeBusy }), () => now);
+    const grant = await f.mcp.admit(randomUUID(), f.tools), entry = grant.servers.zeros_workspace;
+    const client = new Client({ name: "idle-native-session", version: "1" });
+    cleanups.push(() => client.close());
+    let established = false;
+    await client.connect(new StreamableHTTPClientTransport(new URL(entry.url), { requestInit: { headers: entry.headers }, fetch: async (input, init) => {
+      const response = await fetch(input, init);
+      if (new Request(input, init).method === "GET" && response.status === 200) established = true;
+      return response;
+    } }));
+    await expect.poll(() => established).toBe(true);
+    await expect.poll(() => f.mcp.runtimeBusy).toBe(false);
+    expect(gate.ticket()).toBeNull(); now = 30_000;
+    const ticket = gate.ticket(); expect(ticket).not.toBeNull();
+    expect(gate.freeze(ticket!)).toBe(true);
+    const pending = client.callTool({ name: "code_review_list" });
+    try {
+      await expect.poll(() => gate.valid(ticket!)).toBe(false);
+      expect(f.run).not.toHaveBeenCalled();
+    } finally { gate.release(); await pending; }
+    expect(f.run).toHaveBeenCalledOnce();
+  });
+
+  it("keeps an active POST tool counted until its handler settles", async () => {
+    const f = fixture(), grant = await f.mcp.admit(randomUUID(), f.tools), client = await connect(grant);
+    let entered = false, release!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    const invoke = f.tools.callTool.bind(f.tools);
+    vi.spyOn(f.tools, "callTool").mockImplementationOnce(async (...args) => { entered = true; await held; return invoke(...args); });
+    const call = client.callTool({ name: "code_review_list" });
+    try { await expect.poll(() => entered).toBe(true); expect(f.mcp.runtimeBusy).toBe(true); }
+    finally { release(); await call; }
+  });
+
+  it("counts a notification stream until the authenticated handshake completes", async () => {
+    const f = fixture(), grant = await f.mcp.admit(randomUUID(), f.tools);
+    let entered = false, release!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    const original = StreamableHTTPServerTransport.prototype.handleRequest;
+    const handling = vi.spyOn(StreamableHTTPServerTransport.prototype, "handleRequest").mockImplementation(async function (this: StreamableHTTPServerTransport, ...args) {
+      if (args[0].method === "GET") { entered = true; await held; }
+      return original.apply(this, args);
+    });
+    try { await connect(grant); await expect.poll(() => entered).toBe(true); expect(f.mcp.runtimeBusy).toBe(true); }
+    finally { release(); handling.mockRestore(); }
+    await expect.poll(() => f.mcp.runtimeBusy).toBe(false);
+  });
+
   it("joins previously revoked session drains, including concurrent disposal", async () => {
     const f = fixture(), grant = await f.mcp.admit(randomUUID(), f.tools);
     await connect(grant);

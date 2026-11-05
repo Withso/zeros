@@ -72,7 +72,17 @@ export class RuntimeAdoption {
     }
     if (input.op !== "activate" && await this.options.drainActive?.()) return { status: "unavailable" };
     let runtime: CloudV2Runtime;
-    try { await this.options.authorizeSource(workspace); runtime = await this.options.runtimeForWorkspace(workspace); }
+    try {
+      if (input.op === "status") {
+        runtime = await this.options.runtimeForWorkspace(workspace);
+        const installed = await handoffs.runtime(token, bootId);
+        if (this.closed) return { status: "unavailable" };
+        // Matching status carries no archive or mutation authority. Adoption
+        // still rechecks the source and effective pin at every admission.
+        if (installed && installed === runtime.sha256) return { status: "current" };
+      }
+      await this.options.authorizeSource(workspace); runtime = await this.options.runtimeForWorkspace(workspace);
+    }
     catch {
       if (input.op === "commit" || input.op === "activate") {
         if (await handoffs.cancel(token, input.id, bootId)) return { status: "cancelled", id: input.id };

@@ -5,6 +5,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { CallToolRequestSchema, InitializeRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { CodeReviewError, type CodeReviewAgentToolsCore } from "@zeros/protocol/code-review";
 import type { DriverMcpServers } from "./gateway";
+import { McpRuntimeActivity } from "./runtime-activity";
 
 export interface WorkspaceToolAdmission {
   agentId: string;
@@ -34,22 +35,23 @@ export class WorkspaceToolsMcp {
   private disposing?: Promise<void>;
   private readonly drains = new Set<Promise<void>>();
   private readonly entries = new Map<string, Entry>();
+  private readonly activity: McpRuntimeActivity;
   get runtimeBusy(): boolean {
-    return this.drains.size > 0 || [...this.entries.values()].some(entry => entry.pending.size > 0 || entry.flights.size > 0);
+    return this.activity.busy || this.drains.size > 0 || [...this.entries.values()].some(entry => entry.pending.size > 0);
   }
   private readonly http = createServer((req, res) => { void this.serve(req, res).catch(() => {
     if (!res.headersSent) res.writeHead(400); res.end("Workspace tool request could not complete.");
   }); });
 
-  constructor(private readonly admission?: () => Promise<() => void>) {
+  constructor(admission?: () => Promise<() => void>) {
+    this.activity = new McpRuntimeActivity(admission);
     this.http.requestTimeout = 30_000; this.http.headersTimeout = 10_000;
     this.http.keepAliveTimeout = 5_000; this.http.maxRequestsPerSocket = 200;
     this.http.maxConnections = 256;
   }
 
   private async serve(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    const leave = await this.admission?.();
-    try { await this.handle(req, res); } finally { leave?.(); }
+    await this.activity.http(req, res, () => this.handle(req, res));
   }
 
   async admit(id: string, tools: CodeReviewAgentToolsCore): Promise<WorkspaceToolGrant> {
@@ -141,6 +143,7 @@ export class WorkspaceToolsMcp {
       onsessioninitialized: key => { entry.pending.delete(session); entry.sessions.set(key, session); },
       onsessionclosed: key => { entry.sessions.delete(key); void server.close().catch(() => {}); },
     });
+    this.activity.track(transport);
     const session: Session = { server, transport }; entry.pending.add(session);
     try {
       await server.connect(transport);
@@ -152,10 +155,11 @@ export class WorkspaceToolsMcp {
   }
 
   private async call<T>(entry: Entry, action: () => Promise<T>): Promise<T> {
-    const leave = await this.admission?.();
-    const task = Promise.resolve().then(action), flight = task.then(() => {}, () => {});
-    entry.flights.add(flight);
-    try { return await task; } finally { entry.flights.delete(flight); leave?.(); }
+    return this.activity.run(async () => {
+      const task = Promise.resolve().then(action), flight = task.then(() => {}, () => {});
+      entry.flights.add(flight);
+      try { return await task; } finally { entry.flights.delete(flight); }
+    });
   }
 
   private close(entry: Entry): Promise<void> {
