@@ -290,19 +290,23 @@ export const InlineReviewThread = memo(function InlineReviewThread({
       )}
     </>
   );
-  const time = (comment: CodeReviewThreadComment) =>
-    comment.createdAt > 0 && (
+  const time = (comment: CodeReviewThreadComment) => {
+    const at = new Date(comment.createdAt);
+    // An out-of-range stored time would make toISOString throw during render.
+    if (!(comment.createdAt > 0) || Number.isNaN(at.getTime())) return null;
+    return (
       <time
-        dateTime={new Date(comment.createdAt).toISOString()}
+        dateTime={at.toISOString()}
         className="text-fg3 shrink-0 text-3xxs leading-4"
-        title={new Date(comment.createdAt).toLocaleString()}
+        title={at.toLocaleString()}
       >
-        {new Date(comment.createdAt).toLocaleDateString(undefined, {
+        {at.toLocaleDateString(undefined, {
           month: "short",
           day: "numeric",
         })}
       </time>
     );
+  };
 
   // A check annotation reads like one comment by the check: its severity
   // icon in the avatar slot, the check's name, a severity pill and the line.

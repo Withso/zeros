@@ -867,4 +867,8 @@ Each landed step appends one line: date, workstream, what landed, evidence.
   `hsl()` with an alpha. CI's composer smoke failed a File Edit check that
   pinned CodeMirror's default 6px line padding; it now compares the indented
   line with an unindented one, and still fails with the old
-  `padding-left: Nch` hack restored.
+  `padding-left: Nch` hack restored. CodeRabbit's review: a Changes card
+  accept no longer shares a file read that began before the click, conflict
+  cards offer no comment +, blocked theme-row items stay reachable by arrow
+  keys, the rename field composes the inline `Input`, and theme renames and
+  deletes stop before 256 operations; each has a test or smoke check.

@@ -40,7 +40,9 @@ export function conflictRowsStyle(parsed: MergeConflictParseResult): string {
   for (const conflict of actionableConflicts(parsed))
     for (let line = conflict.startLine; line <= conflict.endLine; line++) {
       const kind = conflictRowKind(conflict, line);
-      lines.set(kind, [...(lines.get(kind) ?? []), line]);
+      const numbers = lines.get(kind);
+      if (numbers) numbers.push(line);
+      else lines.set(kind, [line]);
     }
   const rules: string[] = [];
   for (const [kind, numbers] of lines) {

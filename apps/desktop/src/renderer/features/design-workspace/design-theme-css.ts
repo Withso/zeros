@@ -1,3 +1,5 @@
+import { DESIGN_TRANSACTION_MAX_OPERATIONS } from "@zeros/design-core";
+
 import { parseDesignCssDeclarations } from "./design-style-values";
 
 export interface DesignCssVariableImport {
@@ -167,7 +169,8 @@ export function designThemeVariableNameIssue(
 ): "invalid" | "taken" | null {
   const candidate = name.trim();
   if (!candidate) return null;
-  if (!/^--[A-Za-z0-9_-]{1,128}$/.test(candidate)) return "invalid";
+  // token.set caps the whole name, "--" included, at 128 characters.
+  if (!/^--[A-Za-z0-9_-]{1,126}$/.test(candidate)) return "invalid";
   return tokens.some((token) => token.name === candidate) ? "taken" : null;
 }
 
@@ -199,13 +202,18 @@ const uses = (count: number) => `Used ${count} ${count === 1 ? "time" : "times"}
 export function designThemeRenameBlocker(variable: DesignThemeVariable): string | null {
   if (variable.syntax !== "*") return "Registered with @property";
   if (variable.usageCountKnown === false) return "Uses not counted yet";
-  return variable.usageCount > 0 ? uses(variable.usageCount) : null;
+  if (variable.usageCount > 0) return uses(variable.usageCount);
+  // One write and one removal per declaration must fit one transaction.
+  const declarations = 1 + Object.keys(variable.themeValues).length;
+  return 2 * declarations > DESIGN_TRANSACTION_MAX_OPERATIONS ? "Too many themes" : null;
 }
 
 /** Why the editor cannot delete a variable, or null. An `@property` rule
  * would keep listing it after its declarations go. */
 export function designThemeDeleteBlocker(variable: DesignThemeVariable): string | null {
-  return variable.syntax !== "*" ? "Registered with @property" : null;
+  if (variable.syntax !== "*") return "Registered with @property";
+  const declarations = 1 + Object.keys(variable.themeValues).length;
+  return declarations > DESIGN_TRANSACTION_MAX_OPERATIONS ? "Too many themes" : null;
 }
 
 /** The declarations to remove: `:root` and every theme that sets it. */

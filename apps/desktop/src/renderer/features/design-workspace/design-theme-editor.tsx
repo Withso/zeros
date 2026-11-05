@@ -1470,7 +1470,12 @@ export const DesignThemeEditor = React.memo(function DesignThemeEditor({
                                   }
                                   spellCheck={false}
                                   autoComplete="off"
-                                  className="h-6 min-w-0 flex-1 px-1.5 font-mono text-3xxs"
+                                  size="compact"
+                                  appearance="inline"
+                                  mono
+                                  // Shown only while renaming, so it keeps the
+                                  // editing fill under the pointer too.
+                                  className="bg-bg1 hover:bg-bg1 min-w-0 flex-1"
                                   onFocus={(event) => event.currentTarget.select()}
                                   onChange={(event) => setVariableDraft(event.currentTarget.value)}
                                   onKeyDown={(event) => {
@@ -1684,9 +1689,14 @@ function VariableActions({
           onRename();
         }}
       >
+        {/* aria-disabled, not disabled: arrow keys still reach the reason. */}
         <DropdownMenuItem
-          disabled={renameBlocker !== null}
-          onSelect={() => {
+          aria-disabled={renameBlocker !== null || undefined}
+          onSelect={(event) => {
+            if (renameBlocker !== null) {
+              event.preventDefault();
+              return;
+            }
             renameChosen.current = true;
           }}
         >
@@ -1697,8 +1707,14 @@ function VariableActions({
         </DropdownMenuItem>
         <DropdownMenuItem
           variant="destructive"
-          disabled={deleteBlocker !== null}
-          onSelect={onDelete}
+          aria-disabled={deleteBlocker !== null || undefined}
+          onSelect={(event) => {
+            if (deleteBlocker !== null) {
+              event.preventDefault();
+              return;
+            }
+            onDelete();
+          }}
         >
           Delete
           {deleteBlocker ? (

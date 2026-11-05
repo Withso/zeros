@@ -118,6 +118,29 @@ describe("comment authors", () => {
       avatarUrl: "https://avatars.githubusercontent.com/u/1",
     });
     expect(item.comments[1]!.author).not.toHaveProperty("avatarUrl");
+    // A new photo alone gives the thread a new version, so it re-renders.
+    const [first, ...rest] = review.threads[0]!.comments;
+    const changed = githubReviewThreadItem(
+      {
+        ...review.threads[0]!,
+        comments: [
+          { ...first!, author: { ...first!.author, avatarUrl: "https://avatars.githubusercontent.com/u/2" } },
+          ...rest,
+        ],
+      },
+      "rev-1",
+    );
+    expect(changed.version).not.toBe(item.version);
+  });
+
+  it("drops the date of a comment whose stored time is out of range instead of throwing", async () => {
+    const section = await render(
+      thread("workspace", { id: "u1", name: "Priya", kind: "human" }, {
+        comments: [{ id: "c1", author: { id: "u1", name: "Priya", kind: "human" }, body: "Check the role.", createdAt: 8.65e15 }],
+      }),
+    );
+    expect(section.textContent).toContain("Check the role.");
+    expect(section.querySelector("time")).toBeNull();
   });
 
   it("gives an agent its mark on a rounded square and an Agent badge, without the provider", async () => {
@@ -188,5 +211,26 @@ describe("comment authors", () => {
     )!;
     expect(reply.textContent).toBe("Reply…");
     expect(reply.previousElementSibling!.querySelector("[data-slot=avatar]")).not.toBeNull();
+    await act(async () => reply.click());
+    const textarea = section.querySelector("textarea");
+    expect(textarea).not.toBeNull();
+    expect(document.activeElement).toBe(textarea);
+  });
+
+  it("shows a person's photo once it has loaded", async () => {
+    // jsdom never loads images; Radix shows one when it reports complete.
+    const spies = [
+      vi.spyOn(HTMLImageElement.prototype, "complete", "get").mockReturnValue(true),
+      vi.spyOn(HTMLImageElement.prototype, "naturalWidth", "get").mockReturnValue(20),
+    ];
+    try {
+      const avatarUrl = "https://avatars.githubusercontent.com/u/1";
+      const section = await render(
+        thread("github", { id: "github:priya", name: "priya", kind: "human", avatarUrl }),
+      );
+      expect(section.querySelector("[data-slot=avatar-image]")?.getAttribute("src")).toBe(avatarUrl);
+    } finally {
+      for (const spy of spies) spy.mockRestore();
+    }
   });
 });

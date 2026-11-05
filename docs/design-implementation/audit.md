@@ -73,7 +73,7 @@ and in [`plans.md`](plans.md).
 
 ## What is left
 
-### §1 Review: 7 frames, all GitHub data the renderer doesn't have yet
+### §1 Review: 7 frames, most waiting on GitHub data
 
 | Frame | Left | Needs |
 |---|---|---|

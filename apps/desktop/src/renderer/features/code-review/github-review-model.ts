@@ -99,7 +99,11 @@ export function githubReviewThreadItem(
       revision,
       thread.isResolved,
       thread.isOutdated,
-      thread.comments.map((comment) => [comment.id, comment.updatedAt]),
+      thread.comments.map((comment) => [
+        comment.id,
+        comment.updatedAt,
+        comment.author.avatarUrl,
+      ]),
     ]),
     outdated: thread.isOutdated || thread.line === null,
     anchorMissing: thread.line === null && thread.originalLine === null,

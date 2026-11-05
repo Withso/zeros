@@ -8,7 +8,7 @@ const mocks = vi.hoisted(() => ({
   info: vi.fn(),
   error: vi.fn(),
 }));
-vi.mock("../../../workspace-file-data-cache", () => ({ loadWorkspaceFileRead: mocks.read }));
+vi.mock("../../../workspace-file-data-cache", () => ({ loadWorkspaceFileReadForWrite: mocks.read }));
 vi.mock("@/renderer/platform/files", () => ({ writeWorkspaceFile: mocks.write }));
 vi.mock("@/renderer/shell/use-git-refresh-key", () => ({ triggerGitRefresh: mocks.refresh }));
 vi.mock("@/renderer/state/workspace-store", () => ({ recordWorkspaceActivity: mocks.activity }));
@@ -32,7 +32,7 @@ beforeEach(() => {
 describe("accepting a conflict from a Changes card", () => {
   it("rewrites only that block through the ordinary file write, then refreshes", async () => {
     await acceptCardConflict(cwd, path, shown, 1, "both");
-    expect(mocks.read).toHaveBeenCalledWith({ cwd, path }, { force: true });
+    expect(mocks.read).toHaveBeenCalledWith({ cwd, path });
     expect(mocks.write).toHaveBeenCalledWith(
       cwd,
       path,

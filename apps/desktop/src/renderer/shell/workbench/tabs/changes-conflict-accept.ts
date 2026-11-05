@@ -8,7 +8,7 @@ import { actionableConflicts } from "@/renderer/features/code-review/merge-confl
 import { writeWorkspaceFile } from "@/renderer/platform/files";
 import { triggerGitRefresh } from "@/renderer/shell/use-git-refresh-key";
 import { recordWorkspaceActivity } from "@/renderer/state/workspace-store";
-import { loadWorkspaceFileRead } from "../../workspace-file-data-cache";
+import { loadWorkspaceFileReadForWrite } from "../../workspace-file-data-cache";
 
 /** Accepting from a card writes the file like a save. It writes only over
  * the text the card shows; a file that changed since is refreshed instead. */
@@ -21,7 +21,15 @@ export async function acceptCardConflict(
 ): Promise<void> {
   const conflict = actionableConflicts(parseMergeConflicts(shown))[index];
   if (!conflict) return;
-  const fresh = await loadWorkspaceFileRead({ cwd, path }, { force: true });
+  const fresh = await loadWorkspaceFileReadForWrite({ cwd, path }).catch(
+    (error: unknown) => {
+      toast.error(`Couldn't read ${path}`, {
+        description: error instanceof Error ? error.message : String(error),
+      });
+      return null;
+    },
+  );
+  if (!fresh) return;
   if (fresh.kind !== "text" || (fresh.content ?? "") !== shown) {
     toast.info(`${path} changed, so its conflicts were refreshed.`);
     triggerGitRefresh(cwd);

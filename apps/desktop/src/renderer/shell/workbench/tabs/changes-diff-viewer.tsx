@@ -89,6 +89,7 @@ import {
   stepConflict,
 } from "@/renderer/features/code-review/merge-conflict-rows";
 import { acceptCardConflict } from "./changes-conflict-accept";
+import { changesReviewOptions } from "./changes-review-options";
 
 interface Props {
   active: boolean;
@@ -128,7 +129,8 @@ function conflictCard(file: FileContents, readOnly: boolean): ConflictCard {
   const parsed = parseMergeConflicts(file.contents);
   const card = {
     parsed,
-    css: conflictRowsStyle(parsed),
+    // A card is resolved, not commented on: no comment + on its numbers.
+    css: `${conflictRowsStyle(parsed)}[data-utility-button]{display:none}`,
     annotations: conflictAnnotations<ChangesAnnotationPayload>(parsed, {
       canAccept: !readOnly,
       readOnlyNotice: "Open the live editable file to resolve these conflicts.",
@@ -465,7 +467,7 @@ export function ChangesDiffViewer({
     });
     return {
       ...shared,
-      ...inlineReview.options,
+      ...changesReviewOptions(inlineReview.options),
       unsafeCSS: `${shared.unsafeCSS ?? ""}\n${REVIEW_GUTTER_CSS}`,
       onPostRender: (node: HTMLElement, instance: unknown) => {
         finishDiffRender(node);

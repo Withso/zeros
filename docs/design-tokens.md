@@ -55,6 +55,14 @@ Values for every public token in both themes, the contrast each declared pairing
 | `--primary-button-hover` | `#D4D4D4` | `#443F3A` | lifted neutral |
 | `--primary-button-fg` | `#0D0D0D` (= inverted-fg) | `#FFFFFF` (= inverted-fg) | text/icon on the primary button |
 
+### Neutral solid fills
+
+| Token | Dark | Light | Role |
+| --- | --- | --- | --- |
+| `--neutral-secondary` | `#444444` | `#514D49` (= fg2) | solid neutral fills: Accept both (merge conflicts) |
+| `--neutral-secondary-hover` | `#565656` | `#4B4743` | neutral solid hover fill |
+| `--neutral-secondary-fg` | `#FFFFFF` (= red-secondary-fg) | `#FFFFFF` (= red-secondary-fg) | text on SOLID --neutral-secondary fills. THEME-STATIC white. |
+
 ## Status families
 
 `-primary` is status text / counts / icons on app surfaces, `-bg` a tinted container, `-fg` the text on that container. Numeric ramps (`--red-500` …) are private to `styles/zeros-tokens.css`.
@@ -70,6 +78,9 @@ Values for every public token in both themes, the contrast each declared pairing
 | green | success · +N | `--green-primary` | `#4ADE80` | `#107234` |
 |  |  | `--green-bg` | `#213521` | `#D8EEDD` |
 |  |  | `--green-fg` | `#87EEAC` | `#157739` |
+|  |  | `--green-secondary` | `#2A653F` | `#107234` (= green-primary) |
+|  |  | `--green-secondary-hover` | `#2F794A` | `#0F6930` |
+|  |  | `--green-secondary-fg` | `#FFFFFF` (= red-secondary-fg) | `#FFFFFF` (= red-secondary-fg) |
 | yellow | warning · modified · in progress | `--yellow-primary` | `#E6AB4C` | `#8A5807` |
 |  |  | `--yellow-bg` | `#49330E` | `#FEF3C8` |
 |  |  | `--yellow-fg` | `#FFBB00` | `#9C6000` |
@@ -77,6 +88,9 @@ Values for every public token in both themes, the contrast each declared pairing
 | blue | info · links | `--blue-primary` | `#83C3F1` | `#1556E2` |
 |  |  | `--blue-bg` | `#08233A` | `#F0F6FF` |
 |  |  | `--blue-fg` | `#91C5FD` | `#1C4ED9` |
+|  |  | `--blue-secondary` | `#405A6C` | `#1556E2` (= blue-primary) |
+|  |  | `--blue-secondary-hover` | `#4C6C82` | `#134FD0` |
+|  |  | `--blue-secondary-fg` | `#FFFFFF` (= red-secondary-fg) | `#FFFFFF` (= red-secondary-fg) |
 | violet | done · merged | `--violet-primary` | `#BC83F1` | `#851EE6` |
 |  |  | `--violet-bg` | `#292438` | `#F2E1FE` |
 |  |  | `--violet-fg` | `#BE9EEB` | `#652EBD` |

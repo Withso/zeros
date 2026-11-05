@@ -1341,6 +1341,8 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
   check(
     "design inspector shows one name row without tags, metadata, or frame actions",
     (await inspectorHeader.getAttribute("data-design-selection-type")) === "Text" &&
+      // The row names the layer itself, not just its type.
+      ((await inspectorHeader.textContent()) ?? "").includes("Make the next move unmistakable.") &&
       (await inspectorHeader.evaluate(
         (header) => header.parentElement?.children.length,
       )) === 1 &&

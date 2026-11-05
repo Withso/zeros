@@ -85,6 +85,11 @@ describe("design theme CSS import", () => {
     expect(designThemeVariableNameIssue("--new-token", tokens)).toBeNull();
     expect(designThemeVariableNameIssue("", tokens)).toBeNull();
   });
+
+  it("keeps the whole name, dashes included, within token.set's 128 characters", () => {
+    expect(designThemeVariableNameIssue(`--${"a".repeat(126)}`, [])).toBeNull();
+    expect(designThemeVariableNameIssue(`--${"a".repeat(127)}`, [])).toBe("invalid");
+  });
 });
 
 describe("theme variable rename and delete", () => {
@@ -161,5 +166,16 @@ describe("theme variable rename and delete", () => {
       "Registered with @property",
     );
     expect(designThemeDeleteBlocker({ ...gap, usageCount: 2 })).toBeNull();
+  });
+
+  it("blocks a rename or delete that would not fit one transaction", () => {
+    const themes = (count: number) =>
+      Object.fromEntries(Array.from({ length: count }, (_, index) => [`t${index}`, "1px"]));
+    // A rename writes and removes every declaration: 2 × (1 + themes) operations.
+    expect(designThemeRenameBlocker({ ...gap, themeValues: themes(127) })).toBeNull();
+    expect(designThemeRenameOperations({ ...gap, themeValues: themes(127) }, "--space", ids())).toHaveLength(256);
+    expect(designThemeRenameBlocker({ ...gap, themeValues: themes(128) })).toBe("Too many themes");
+    expect(designThemeDeleteBlocker({ ...gap, themeValues: themes(255) })).toBeNull();
+    expect(designThemeDeleteBlocker({ ...gap, themeValues: themes(256) })).toBe("Too many themes");
   });
 });

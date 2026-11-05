@@ -29,6 +29,17 @@ export async function runDesignThemeVariablesSmoke({ page, check }) {
     "a variable registered with @property says why it cannot be renamed or deleted",
     (await menu.getByRole("menuitem").allTextContents()).every((label) => label.endsWith("Registered with @property")),
   );
+  // Blocked items stay reachable by arrow keys, so the reason is read out;
+  // Enter on one changes nothing and keeps the menu open.
+  await page.keyboard.press("ArrowDown");
+  const reached = await page.evaluate(() => document.activeElement?.textContent ?? "");
+  await page.keyboard.press("Enter");
+  check(
+    "arrow keys reach a blocked item and its reason, and Enter on it does nothing",
+    reached.startsWith("Rename…") && reached.endsWith("Registered with @property") &&
+      (await menu.isVisible()) && (await dialog.locator("input[aria-label^='Rename ']").count()) === 0,
+    reached,
+  );
   await page.keyboard.press("Escape");
 
   await dialog.getByRole("button", { name: "New variable", exact: true }).click();

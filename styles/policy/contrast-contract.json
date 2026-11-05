@@ -234,7 +234,7 @@
         "green-primary/0.26@bg1",
         "blue-primary/0.34@bg1"
       ],
-      "why": "The (Current change) and (Incoming change) labels on a conflict's marker bands; 0.34 is the stronger band in either theme."
+      "why": "The (Current change) and (Incoming change) labels on a conflict's marker bands, at the dark bands' alphas (0.26 and 0.34). Light's incoming band is 0.26, so 0.34 is the stricter check there."
     },
     {
       "role": "text",
