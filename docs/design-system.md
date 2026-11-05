@@ -125,8 +125,14 @@ exported page by page to [design-implementation/](design-implementation/README.m
    `border2`, 12px corners, the dropdown shadow, a 4px inset and 28px rows with
    8px corners (`shared/ui/menu-surface.ts`, `Surface kind="floating"`). The
    chat composer, user messages and everything docked above the composer
-   (dock cards and the @, / and # pickers) share `sidebar-bg` with `border2`
-   and no shadow, 8px apart.
+   (dock cards and the @, / and # pickers) share `sidebar-bg` with the
+   `--composer-border` edge (#323232 in Dark, `border2` in Light) and no
+   shadow, 8px apart. The transcript dissolves into the pane over the 32px
+   above the top of that stack (`COMPOSER_DOCK_FADE`,
+   `shared/ui/composer-surface.ts`): above the composer alone, above the
+   highest card once cards dock, and on a docked picker's own top edge while
+   it opens above. `features/agent/__tests__/composer-chrome-style.test.ts`
+   and the composer ui-smokes hold both.
 5. **One height per row.** 28 standard, 24 compact, 20 inline; glyphs 14, 12
    and 12. Controls in one row share a height; toolbars are 36px bars of 28px
    tools.
@@ -237,7 +243,7 @@ imports, following property paths such as `chip.cls`). The ledger counts
 | Canvas, active chat, dialogs, sheets | `bg-bg1` | `bg-bg1-hover` | `border-border1` | Dialogs sit on `bg-scrim` |
 | Inactive chat pane | `bg-(--pane-bg)` (= `bg0`) | — | — | Dims the fill only; text keeps full contrast |
 | Raised: tiles | `bg-bg2` | `bg-bg2-hover` | `border-border2` | `bg-bg1-bright` for cards and settings groups |
-| Chat composer, user messages and what docks above the composer | `bg-sidebar-bg` | `bg-sidebar-bg-hover` | `border-border2` | No shadow; 18px composer corners, 12px elsewhere. Dock cards use `DOCK_CARD_CLS`; the docked pickers use `PopoverContent surface="composer"` |
+| Chat composer, user messages and what docks above the composer | `bg-sidebar-bg` | `bg-sidebar-bg-hover` | `border-(--composer-border)` | No shadow; 18px composer corners, 12px elsewhere. Dock cards use `DOCK_CARD_CLS`; the docked pickers use `PopoverContent surface="composer"`; review drafts take `COMPOSER_SURFACE_CLS`. The top of the stack carries `COMPOSER_DOCK_FADE` |
 | Floating: menus, selects, command, popovers, tooltips, hover cards, toasts | `bg-bg3` | `bg-bg3-hover` | `border-border2` | 12px corners, 4px inset, lift = `shadow-[var(--shadow-dropdown)]`; feature panels take the fill from `FLOATING_SURFACE` |
 | Repository sidebar | `bg-sidebar-bg` | `bg-sidebar-bg-hover` | `border-border2` | Settings navigation uses the default surfaces |
 | Grouped content on canvas | `bg-bg1-highlight` | — | — | A wash, never the only boundary |
@@ -340,6 +346,9 @@ All, editing, portals and vendor surfaces across owners, placements and themes.
   perceptibility floors of 1.45:1 for border3 and 1.6:1 for border4 on every
   surface controls sit on, and a ≥1.15× hover step on bg2. The user-message
   bubble is excluded because controls do not sit on it. Focus is the strong cue.
+  The composer family has its own semantic edge, `--composer-border`
+  (`styles/semantic-tokens.css`): #323232 in Dark, between border2 and
+  border3 with no primitive of its own, and border2 in Light.
 - **Focus** is an opaque `border-highlighted-bright`, `ring-highlighted-bright`,
   or `outline-highlighted-bright` (the radio uses an outline so its checked
   border cannot override it); the `ring-highlighted-bright/50` halo is
@@ -557,7 +566,7 @@ state, `aria-*`, `data-*` hooks) at the caller.
 styles/zeros-tokens.css      Tailwind import, @source allowlist, @theme wiring,
                              :root (Dark) + [data-theme="light"] primitives,
                              named z utilities, base border/outline defaults
-styles/semantic-tokens.css   feature aliases (switch, loader, PR island, design)
+styles/semantic-tokens.css   feature aliases (composer edge, switch, loader, PR island, design)
 styles/globals.css           ordered cross-boundary modules in styles/global/
 ```
 

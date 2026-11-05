@@ -113,6 +113,7 @@ import {
   COMPOSER_SURFACE_RADIUS,
   TRANSCRIPT_STATUS_ROW_CLS,
 } from "./composer-shell";
+import { COMPOSER_DOCK_FADE } from "@/renderer/shared/ui/composer-surface";
 import { ComposerAttachmentMenu } from "./composer-attachment-menu";
 import { ComposerDesignTag } from "./composer-design-tag";
 import { ComposerDesignFrame, useComposerDesignFrame } from "./composer-design-frame";
@@ -4474,7 +4475,11 @@ function AgentChatBody({
         />
         {/* max-w-[856px] stays in lock-step with the transcript band above. */}
         {readOnly ? composerReplacement : (
-        <div className="mx-auto box-border flex w-full max-w-[856px] min-w-0 shrink-0 flex-col gap-2 border-t-0 bg-transparent px-7 pt-0 pb-4">
+        <div className="relative mx-auto box-border flex w-full max-w-[856px] min-w-0 shrink-0 flex-col gap-2 border-t-0 bg-transparent px-7 pt-0 pb-4">
+          {/* pt-0 puts the column's top on its topmost card, so this one fade
+              sits on the composer alone or on the highest docked card.
+              Portaled pickers carry their own. */}
+          <div aria-hidden="true" data-composer-dock-fade="" className={COMPOSER_DOCK_FADE} />
           {/* Docked cards and the composer stand 8px apart; queued messages
               are a card of their own rather than tucked under the composer. */}
           {/* Embedded-terminal command (Claude /mcp, /login, …): a banner →
@@ -4570,14 +4575,15 @@ function AgentChatBody({
               ref={composerCardRef}
               className={cn(
                 "relative flex w-full min-w-0 flex-col border px-3.5 py-3 transition-[border-color,background,box-shadow] duration-150 ease-out",
-                // sidebar-bg + border2, shared with Create, user messages and
-                // the cards docked above; focusing or typing changes nothing.
+                // sidebar-bg + composer-border, shared with Create, user
+                // messages and the cards docked above; focusing or typing
+                // changes nothing.
                 COMPOSER_SURFACE_CLS,
                 COMPOSER_SURFACE_RADIUS,
-                // Drag: the same border2 edge, dashed, with a soft ring; `!`
+                // Drag: the same composer edge, dashed, with a soft ring; `!`
                 // keeps it identical whether or not the composer is focused.
                 dragActive &&
-                  "!border-border2 ring-highlighted-bright/30 border-dashed ring-2",
+                  "!border-(--composer-border) ring-highlighted-bright/30 border-dashed ring-2",
                 // Guarded modes (Claude Plan / Codex Ask / Cursor Ask): hide the
                 // solid border; the SVG dotted frame below provides the visible
                 // edge (spaced round dots, --border4).

@@ -40,7 +40,7 @@ Values for every public token in both themes, the contrast each declared pairing
 | Token | Dark | Light | Role |
 | --- | --- | --- | --- |
 | `--border1` | `#242424` | `#EBE8E4` | default for bg1 surfaces |
-| `--border2` | `#2E2E2E` | `#E4E0DC` | sidebar / composer focus / bg2 |
+| `--border2` | `#2E2E2E` | `#E4E0DC` | sidebar / bg2 / floating panels |
 | `--border3` | `#444444` | `#CCC8C3` | secondary btn / dropdown / input |
 | `--border4` | `#575757` | `#BDB9B3` | highlighted state of border3 |
 | `--highlighted-bright` | `#CACACA` | `#4C4741` | input focus border, brighter accents |

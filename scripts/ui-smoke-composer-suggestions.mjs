@@ -1,4 +1,42 @@
 import { expect } from "@playwright/test";
+import { fadeReading, resolvedRgb, screenshotColumn } from "./ui-smoke-composer-dock-fade.mjs";
+
+// A docked picker is the top of the composer stack while it opens above the
+// composer, so it carries the stack's fade on its own top edge: flush on its
+// border, its width, 32px, inert, and dissolving the ink behind it into the
+// pane. Flipped below its anchor it covers the composer, so the fade hides.
+async function checkPickerFade(menu, page, label) {
+  const fade = await menu.evaluate((node) => {
+    const element = node.querySelector("[data-composer-dock-fade]");
+    const f = element.getBoundingClientRect(), m = node.getBoundingClientRect();
+    return {
+      side: node.dataset.side,
+      shown: getComputedStyle(element).display !== "none",
+      height: Math.round(f.height),
+      flushOnBorder: Math.abs(f.bottom - m.top) < 0.5,
+      spansCard: Math.abs(f.left - m.left) < 0.5 && Math.abs(f.right - m.right) < 0.5,
+      pointer: getComputedStyle(element).pointerEvents,
+      band: { left: m.left, width: m.width, top: m.top - 56 },
+      clip: { x: Math.round(f.left + f.width / 2) - 1, y: Math.round(f.top) - 8, width: 2, height: Math.round(f.height) + 8 },
+    };
+  });
+  if (fade.side !== "top") {
+    expect(fade.shown, `${label}: flipped picker`).toBe(false);
+    return fade.side;
+  }
+  expect(fade, label).toMatchObject({ shown: true, height: 32, flushOnBorder: true, spansCard: true, pointer: "none" });
+  await page.evaluate(({ left, width, top }) => {
+    const band = document.createElement("div");
+    band.dataset.pickerFadeProbe = "";
+    band.style.cssText = `position:fixed;left:${left}px;width:${width}px;top:${top}px;height:56px;background:var(--fg1);z-index:0`;
+    document.body.append(band);
+  }, fade.band);
+  const colors = { ink: await resolvedRgb(page, "var(--fg1)"), pane: await resolvedRgb(page, "var(--pane-bg)"), above: 8 };
+  expect(fadeReading(await screenshotColumn(page, fade.clip), colors), `${label}: pixels`)
+    .toEqual({ inkAbove: true, solidBase: true, halfwayBetween: true, monotonic: true });
+  await page.evaluate(() => document.querySelector("[data-picker-fade-probe]")?.remove());
+  return fade.side;
+}
 
 export async function runCreateReferenceSafetySmoke({ page, check, harnessBase }) {
   await page.goto(`${harnessBase}/harness-folder-workspace.html?create&cloud-enabled&composer-suggestions`);
@@ -108,13 +146,13 @@ export async function runComposerSuggestionsSmoke({ page, check, harnessBase }) 
       return !!card && !!popup && Math.abs(popup.x - card.x) < 1 && Math.abs(popup.width - card.width) < 1 && Math.abs(popup.y + popup.height + 8 - card.y) < 1;
     }).toBe(true);
     // Docked above the composer, the picker is one more card on the
-    // composer's surface: sidebar-bg, a border2 edge and no lift.
+    // composer's surface: sidebar-bg, the composer-border edge and no lift.
     for (const theme of ["dark", "light"]) {
       await page.evaluate(next => { document.documentElement.dataset.theme = next; }, theme);
       const surface = await menu.evaluate(node => {
         const probe = document.createElement("span");
         probe.style.backgroundColor = "var(--sidebar-bg)";
-        probe.style.borderTopColor = "var(--border2)";
+        probe.style.borderTopColor = "var(--composer-border)";
         document.body.append(probe);
         const expected = getComputedStyle(probe);
         const actual = getComputedStyle(node);
@@ -127,6 +165,7 @@ export async function runComposerSuggestionsSmoke({ page, check, harnessBase }) 
         return result;
       });
       expect(surface, theme).toEqual({ background: true, border: true, shadow: "none" });
+      await checkPickerFade(menu, page, `${label} ${theme}: slash picker fade`);
     }
     await page.evaluate(() => { document.documentElement.dataset.theme = "dark"; });
     // IME candidate confirmation must reach the input method, not accept a
@@ -143,7 +182,7 @@ export async function runComposerSuggestionsSmoke({ page, check, harnessBase }) 
     await expect(editor).toHaveText("Please run /init ");
     await expect(editor.locator("[data-slash-command]")).toHaveText("/init");
     expect(await page.evaluate(() => window.__composerActionCalls.includes("submit"))).toBe(false);
-    check(`${label}: mid-message slash menu opens 8px above the composer at its width on the composer's surface, accents commands, respects IME and consumes Enter`, true);
+    check(`${label}: mid-message slash menu opens 8px above the composer at its width on the composer's surface with the stack's fade, accents commands, respects IME and consumes Enter`, true);
 
     await editor.fill("Read @App");
     const mentions = page.locator('[data-composer-suggestions="@"]');
@@ -153,8 +192,9 @@ export async function runComposerSuggestionsSmoke({ page, check, harnessBase }) 
       const card = await host.boundingBox(), popup = await mentions.boundingBox();
       return !!card && !!popup && Math.abs(popup.x - card.x) < 1 && Math.abs(popup.width - card.width) < 1 && Math.abs(popup.y + popup.height + 8 - card.y) < 1;
     }).toBe(true);
+    await checkPickerFade(mentions, page, `${label}: mention picker fade`);
     await editor.press("Escape");
-    check(`${label}: file mentions share the above-composer placement`, true);
+    check(`${label}: file mentions share the above-composer placement and its fade`, true);
 
     await editor.fill("Please use /review-agent");
     await page.getByRole("button").filter({ hasText: /Review the source/ }).click();
@@ -247,6 +287,8 @@ export async function runComposerSuggestionsSmoke({ page, check, harnessBase }) 
     const box = await menu.boundingBox();
     return !!box && box.x >= 7 && box.y >= 7 && box.x + box.width <= 423 && box.y + box.height <= 273;
   }).toBe(true);
+  // Squeezed below the window's top edge the picker flips under its anchor.
+  expect(await checkPickerFade(menu, page, "narrow window")).toBe("bottom");
   await page.screenshot({ path: ".context/composer-suggestions-narrow.png", animations: "disabled" });
   check("Workspace menus stay inside narrow windows and remain readable in both themes", true);
   await runLateSkillSourceSmoke({ page, check, harnessBase });

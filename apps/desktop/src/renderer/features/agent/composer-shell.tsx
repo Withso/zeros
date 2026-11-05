@@ -11,7 +11,7 @@
 // Public API:
 //   COMPOSER_FILE_ACCEPT    — canonical accept= string for the file picker
 //   COMPOSER_SURFACE_RADIUS — 18px corners for Create and workspace composers
-//   COMPOSER_SURFACE_CLS    — the sidebar-bg + border2 surface they share
+//   COMPOSER_SURFACE_CLS    — the sidebar-bg + composer-border surface they share
 //   PROMPT_SURFACE_RADIUS   — 12px corners shared by the prompt surfaces
 //                             and the chat notices beside them
 // ──────────────────────────────────────────────────────────
@@ -23,10 +23,10 @@ export const COMPOSER_FILE_ACCEPT =
  * Sent messages and inline edits retain their existing prompt shape. */
 export const COMPOSER_SURFACE_RADIUS = "rounded-[18px]";
 
-/** The composer surface shared by Create and Agent chat: sidebar-bg with a
- *  border2 edge and no shadow. Clicking in and typing change nothing; only a
- *  drag or a mode outline restyles it. */
-export const COMPOSER_SURFACE_CLS = "border-border2 bg-sidebar-bg";
+/** The composer surface shared by Create and Agent chat: sidebar-bg with the
+ *  composer-border edge (styles/semantic-tokens.css) and no shadow. Clicking
+ *  in and typing change nothing; only a drag or a mode outline restyles it. */
+export const COMPOSER_SURFACE_CLS = "border-(--composer-border) bg-sidebar-bg";
 
 /** One 32px row for the transcript's own states (loading, waiting,
  *  unavailable, no history): 13/18 fg3 text after a 14px leading slot, with a
@@ -40,7 +40,7 @@ export const TRANSCRIPT_STATUS_ROW_CLS =
  *  pickers docked on the composer take the same surface through
  *  `PopoverContent surface="composer"`. */
 export const DOCK_CARD_CLS =
-  "border-border2 bg-sidebar-bg rounded-[calc(var(--radius-lg)*1.5)] border";
+  "border-(--composer-border) bg-sidebar-bg rounded-[calc(var(--radius-lg)*1.5)] border";
 
 /** 12px corners for sent user messages, their inline edit composer, and the
  *  chat error/warning/sign-in notices (agent-notice.tsx) that share their shape.

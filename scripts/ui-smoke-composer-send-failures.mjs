@@ -7,6 +7,7 @@ import { checkEmptyChatTranscriptRow } from "./ui-smoke-transcript-row.mjs";
 import { checkTranscriptResumePresentation } from "./ui-smoke-transcript-resume.mjs";
 import { checkAgentPreparationFailures } from "./ui-smoke-agent-preparation.mjs";
 import { checkCloudTurnFeedback } from "./ui-smoke-cloud-turn-feedback.mjs";
+import { checkComposerDockFade } from "./ui-smoke-composer-dock-fade.mjs";
 
 export async function runComposerSendFailuresSmoke({ page, check, harnessBase }) {
   await page.clock.install();
@@ -32,6 +33,7 @@ export async function runComposerSendFailuresSmoke({ page, check, harnessBase })
   const { checkStreamingRenderScope } = await import("./ui-smoke-transcript-render-scope.mjs");
   await checkStreamingRenderScope({ page, check });
   await runFollowUpBehaviorSmoke({ page, check, harnessBase });
+  await checkComposerDockFade({ page, check, harnessBase });
   await open();
   const { checkIncrementalTranscriptPresentation } = await import("./ui-smoke-transcript-incremental.mjs");
   await checkIncrementalTranscriptPresentation({ page, check });

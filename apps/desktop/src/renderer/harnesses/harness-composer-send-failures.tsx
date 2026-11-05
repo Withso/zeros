@@ -113,6 +113,17 @@ Object.assign(window, { composerSendFailureFixture: {
   get cloudChatId() { return chats[0].id; },
   get cloudSession() { return useSessionsStore.getState().sessions[chats[0].id]; },
   stopRuntime,
+  // Docks a queued message card above the composer mid-turn, as a send typed
+  // while the agent runs does.
+  queue(index: number, text: string) {
+    const chatId = chats[index].id, store = useSessionsStore.getState(), slot = store.sessions[chatId];
+    store.patchSession(chatId, { status: "streaming", messages: [...slot.messages,
+      { id: `queued-${crypto.randomUUID()}`, kind: "text" as const, role: "user" as const, text, createdAt: Date.now(), queued: true }] });
+  },
+  clearQueue(index: number) {
+    const chatId = chats[index].id, store = useSessionsStore.getState(), slot = store.sessions[chatId];
+    store.patchSession(chatId, { status: "ready", messages: slot.messages.filter(message => !(message.kind === "text" && message.queued)) });
+  },
   refreshCloud() { cloudRuntime?.refresh(chats[0].id); },
   cloudNative(state: "running" | "completed" | "failed" | "cancelled") {
     const chatId = chats[0].id, store = useSessionsStore.getState(), slot = store.sessions[chatId], turnId = slot.foregroundTurnId;
