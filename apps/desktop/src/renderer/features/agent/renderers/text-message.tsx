@@ -176,13 +176,10 @@ export const TextMessage: Renderer<AgentTextMessage> = memo(
             displaySegments.length > 0 ? (
               // 2026-06-08 — inline render: text + mention/attachment pills
               // exactly where they were composed (no separate chip row).
-              // wrap-anywhere (not break-words): overflow-wrap:break-word only
-              // breaks at LAYOUT time and is ignored for intrinsic (min-content)
-              // sizing, so a pasted log/JSON blob kept a huge min-content that
-              // forced TurnPromptHeader's w-fit bubble wider than a narrow pane
-              // (right-anchored → clipped off the LEFT edge). `anywhere` counts
-              // those break opportunities in min-content, so the bubble can
-              // shrink to the lane and the text wraps at its edge instead.
+              // wrap-anywhere (not break-words): `anywhere` also counts its
+              // break opportunities in min-content sizing, so a pasted log or
+              // JSON blob never makes the message's min-content wider than the
+              // lane, and the text wraps at the bubble's edge.
               <div className="leading-5 wrap-anywhere whitespace-pre-wrap">
                 {displaySegments.map((seg, i) => (
                   <MessageSegmentView
@@ -259,9 +256,7 @@ export const TextMessage: Renderer<AgentTextMessage> = memo(
                   // pre-wrap` match the composer exactly. User bubbles trim
                   // trailing whitespace so stray end-of-message newlines/spaces
                   // don't balloon the bubble; interior/leading spacing is kept.
-                  // wrap-anywhere: see the segments branch above — break-words
-                  // doesn't shrink min-content, so unbroken pastes overflowed
-                  // the w-fit user bubble past a narrow pane's left edge.
+                  // wrap-anywhere: see the segments branch above.
                   <div className="leading-5 wrap-anywhere whitespace-pre-wrap">
                     <LocalLinkText text={message.role === "user"
                       ? text.trimEnd()

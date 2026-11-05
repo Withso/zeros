@@ -360,13 +360,14 @@ describe("Local link identity and presentation", () => {
     expect(from).toContain("The actual body");
     expect(from).not.toContain("[Zeros]");
     expect(render(body)).not.toContain("Sent from");
-    // The bubble fits its message and stays flush right; the header keeps
-    // its own width, starting at the group's left edge, 8px above.
+    // The bubble spans the lane like every sent message; the header keeps
+    // its own width at the bubble's left edge, 8px above.
     expect(from).toMatch(/data-local-from=""[^>]*class="[^"]*\bself-start\b/);
     expect(from).toMatch(/data-local-from=""[^>]*class="[^"]*\bmb-2\b/);
-    expect(from).toMatch(/data-local-from-group=""[^>]*class="[^"]*\bitems-end\b/);
-    expect(from).toMatch(/data-user-bubble=""[^>]*class="[^"]*\bw-fit\b/);
-    expect(from).not.toMatch(/data-user-bubble=""[^>]*class="[^"]*\bw-full\b/);
+    expect(from).toMatch(/data-local-from-group=""[^>]*class="[^"]*\bw-full\b/);
+    expect(from).not.toMatch(/data-local-from-group=""[^>]*class="[^"]*\bitems-end\b/);
+    expect(from).toMatch(/data-user-bubble=""[^>]*class="[^"]*\bw-full\b/);
+    expect(from).not.toMatch(/data-user-bubble=""[^>]*class="[^"]*\bw-fit\b/);
     expect(from.indexOf("Sent from")).toBeLessThan(from.indexOf('data-user-bubble=""'));
     expect(from).not.toContain('aria-label="Edit message"');
     const note = render(

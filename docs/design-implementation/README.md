@@ -788,3 +788,20 @@ Each landed step appends one line: date, workstream, what landed, evidence.
   edit card's computed surface and corners in both themes, a 28 × 28 Resend,
   the picker geometry and that clicking inside the picker keeps the edit
   open (it failed before the fix).
+- 2026-11-05 · 5 · Agent chat: sent messages span the lane and long ones
+  fold. Every sent message, a one-word one included, is as wide as the
+  800px lane and the composer, with the Sent from header at its left edge.
+  `PromptFold` (`features/agent/prompt-fold.tsx`) folds a message taller
+  than six lines to five that dissolve over their last 32px above a Ghost
+  Show more; unfolded it shows up to fifteen and scrolls inside, fading only
+  the edges its text runs past, above Show less. A message folding would
+  not shorten stays whole, the fold commits before the first paint,
+  measures only while its chat is surfaced, and folds back when the chat is
+  switched away. Canvas version 375 adds Messages · Long prompt (Folded,
+  Unfolded, Scrolled) to the board row and its All states, and the chat
+  kit's bubbles span the lane. Evidence: `prompt-fold.test.ts` (SSR pins
+  and Chromium checks of the first frame, the thresholds, the toggle, edge
+  tracking and hidden chats) failed red on a stub; the new prompt-fold smoke
+  (cloud, Local and organization-local, decoded pixels in both themes)
+  fails when the folded mask is removed or the bubble fits its content; the
+  local-links smoke now checks the lane width.

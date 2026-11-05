@@ -126,10 +126,9 @@ export const TurnEventList = memo(function TurnEventList({
   // 800px content column (agent-chat.tsx `.zeros-agent-messages` and the
   // composer are max-w-[856px] with 28px gutters), so prose and the composer
   // share one column. `self-start` left-anchors the lane to the band's left
-  // edge (which lines up with the composer's left edge); the user prompt is
-  // its right-anchored counterpart (turn-container.tsx: `items-end` +
-  // `max-w-[min(800px,100%)]`) — the answer hugs the LEFT, the prompt hugs the
-  // RIGHT. RESPONSIVE: the cap is ABSOLUTE, so `w-full` fills the band
+  // edge (which lines up with the composer's left edge); the user prompt
+  // spans the same lane (turn-container.tsx: `w-full max-w-[800px]`), as wide
+  // as the composer. RESPONSIVE: the cap is ABSOLUTE, so `w-full` fills the band
   // whenever it is narrower than 800 (a shrunk conversation pane → content
   // fits the window) and only caps once it would exceed 800. A proportional
   // cap (max-w-[80%]) was tried and reverted — it reserved

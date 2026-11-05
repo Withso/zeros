@@ -51,6 +51,7 @@ import { isPristineEditDraft } from "./edit-draft-content";
 import { registerLiveEditDraft } from "./edit-live-drafts";
 import type { Turn } from "./turn-grouping";
 import { LocalLinkPill } from "./local-links/pill";
+import { PromptFold } from "./prompt-fold";
 
 export {
   groupMessagesIntoTurns,
@@ -269,19 +270,17 @@ export const TurnPromptHeader = memo(function TurnPromptHeader({
     );
   }
 
-  // A right-aligned, fit-to-content bubble capped at min(800px, 100%), matching
-  // the answer lane's cap (turn-event-list.tsx). The 100% arm matters: w-fit
-  // floors at min-content width, and an unbreakable paste would spill off the
-  // left edge, where the scroller clips it. text-message.tsx pairs it with
-  // wrap-anywhere. The text is selectable; editing uses the hover row's button.
-  // Long prompts are never truncated: oversized clipboard text becomes a .txt
-  // attachment before send.
+  // Every sent message spans the lane, as the composer does, however short:
+  // the row caps at 800px like the answer lane (turn-event-list.tsx), so it
+  // also holds the hover row's right edge. The text is selectable; editing
+  // uses the hover row's button. A long message folds (prompt-fold.tsx), and
+  // oversized clipboard text still becomes a .txt attachment before send.
   const AutoIcon = autoAction ? autoActionIcon(autoAction) : null;
   const bubble = (
     <div
       data-user-bubble=""
       className={cn(
-        "w-fit max-w-[min(800px,100%)] cursor-text border px-3 py-2 select-text",
+        "w-full min-w-0 cursor-text border px-3 py-2 select-text",
         PROMPT_SURFACE_RADIUS,
         autoAction
           ?
@@ -291,30 +290,27 @@ export const TurnPromptHeader = memo(function TurnPromptHeader({
           : COMPOSER_SURFACE_CLS,
       )}
     >
-      {/* Two block wrappers keep the fit-content width geometry unchanged. */}
-      <div className="relative">
-        <div>
-          {AutoIcon ? (
-            <div className="flex items-start gap-1.5">
-              <AutoIcon
-                className="text-brown-fg mt-0.5 size-4 shrink-0"
-                strokeWidth={2}
-              />
-              <div className="min-w-0">{children}</div>
-            </div>
-          ) : (
-            children
-          )}
-        </div>
-      </div>
+      <PromptFold surfaceActive={surfaceActive}>
+        {AutoIcon ? (
+          <div className="flex items-start gap-1.5">
+            <AutoIcon
+              className="text-brown-fg mt-0.5 size-4 shrink-0"
+              strokeWidth={2}
+            />
+            <div className="min-w-0">{children}</div>
+          </div>
+        ) : (
+          children
+        )}
+      </PromptFold>
     </div>
   );
   return (
-    <div className="zeros-agent-turn-prompt group/usermsg relative flex flex-col items-end">
+    <div className="zeros-agent-turn-prompt group/usermsg relative flex w-full max-w-[800px] min-w-0 flex-col">
       {localFrom ? (
-        // Provenance and its bubble form one right-aligned group; the header keeps its
-        // own width at the group's left edge.
-        <div data-local-from-group="" className="flex w-fit max-w-[min(800px,100%)] min-w-0 flex-col items-end">
+        // Provenance sits above its bubble at the bubble's left edge, keeping
+        // its own width.
+        <div data-local-from-group="" className="flex w-full min-w-0 flex-col">
           <div data-local-from="" className="mb-2 flex max-w-full min-w-0 items-center gap-1 self-start text-xs text-fg3">
             <span className="shrink-0">Sent from</span>
             <LocalLinkPill href={localFrom.link} fallback={localFrom} className="mr-0 shrink" />

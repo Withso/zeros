@@ -124,6 +124,13 @@ Object.assign(window, { composerSendFailureFixture: {
     const chatId = chats[index].id, store = useSessionsStore.getState(), slot = store.sessions[chatId];
     store.patchSession(chatId, { status: "ready", messages: slot.messages.filter(message => !(message.kind === "text" && message.queued)) });
   },
+  // A sent message straight into the transcript, so a smoke can size it by
+  // its lines.
+  post(index: number, text: string) {
+    const chatId = chats[index].id, store = useSessionsStore.getState(), slot = store.sessions[chatId];
+    store.patchSession(chatId, { status: "ready", messages: [...slot.messages,
+      { id: `posted-${crypto.randomUUID()}`, kind: "text" as const, role: "user" as const, text, createdAt: Date.now() }] });
+  },
   refreshCloud() { cloudRuntime?.refresh(chats[0].id); },
   cloudNative(state: "running" | "completed" | "failed" | "cancelled") {
     const chatId = chats[0].id, store = useSessionsStore.getState(), slot = store.sessions[chatId], turnId = slot.foregroundTurnId;

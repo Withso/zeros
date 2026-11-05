@@ -205,10 +205,6 @@ export const TranscriptTurn = memo(function TranscriptTurn({
               awaiting only provider admission does: it is already
               presented as this active turn, before wire dispatch. */}
           {prompt && (
-            // Every turn's user prompt is sticky: as the user scrolls up
-            // through history each turn's prompt pins until the next turn's
-            // prompt arrives at the top and pushes it off.
-            //
             // Click-to-edit is enabled for ALL turns including the active one
             // ("regenerate this prompt with a tweak"). For the active turn,
             // editAndResubmit cancels the in-flight stream before truncating
@@ -221,8 +217,8 @@ export const TranscriptTurn = memo(function TranscriptTurn({
               messageId={prompt.id}
               createdAt={prompt.createdAt}
               // The keep-alive deck keeps hidden chats mounted, so the
-              // prompt's "More"-expanded state needs the surfacing signal to
-              // collapse on tab switch.
+              // prompt's fold needs the surfacing signal to stop measuring and
+              // fold back on tab switch.
               surfaceActive={shared.surfaceActive}
               editingMessageId={editing ? prompt.id : null}
               onRequestEdit={shared.setEditingMessageId}
@@ -236,10 +232,10 @@ export const TranscriptTurn = memo(function TranscriptTurn({
               editAgentContext={editAgentContext}
             >
               <div ref={isVisualTail ? shared.setActivePromptEl : null}>
-                {/* The user prompt renders as a right-aligned, fit-to-content
-                    bubble. TurnPromptHeader paints the bubble chrome and the
-                    hover edit/copy/age row; the inner TextMessage contributes
-                    just the text. */}
+                {/* The user prompt renders as a full-width bubble that folds
+                    when long. TurnPromptHeader paints the bubble chrome, the
+                    fold and the hover edit/copy/age row; the inner
+                    TextMessage contributes just the text. */}
                 <MessageView message={prompt} ctx={ctx} />
               </div>
             </TurnPromptHeader>

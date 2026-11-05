@@ -142,33 +142,25 @@ export async function runLocalLinksSmoke({ page, harnessBase, check }) {
     const geometry = await prompt.evaluate((element) => {
       const header = element.querySelector("[data-local-from]");
       const bubble = element.querySelector("[data-user-bubble]");
-      const group = element.querySelector("[data-local-from-group]");
       const turn = element.querySelector(".zeros-agent-turn-prompt") ?? element;
       const h = header.getBoundingClientRect();
       const b = bubble.getBoundingClientRect();
-      // The bubble's own fit-content width, measured on a detached copy.
-      const probe = bubble.cloneNode(true);
-      probe.style.cssText = "position:absolute;visibility:hidden;width:max-content;max-width:none";
-      turn.appendChild(probe);
-      const fit = Math.min(probe.getBoundingClientRect().width, group.getBoundingClientRect().width);
-      probe.remove();
-      const right = turn.getBoundingClientRect().right;
+      const t = turn.getBoundingClientRect();
       return {
         siblings: header.parentElement === bubble.parentElement,
         outside: !bubble.contains(header),
-        // A wider message: the header starts at its left edge. A wider
-        // header: the header is flush right instead, over the short message.
-        aligned: b.width >= h.width ? Math.abs(h.left - b.left) <= 1 : Math.abs(h.right - right) <= 1,
-        bubbleRight: Math.abs(right - b.right),
-        fits: Math.abs(b.width - fit) <= 1,
+        aligned: Math.abs(h.left - b.left) <= 1,
+        ownWidth: h.width < b.width,
+        // Every sent message spans the 800px lane, however short.
+        fills: Math.abs(b.left - t.left) <= 1 && Math.abs(b.right - t.right) <= 1,
+        lane: Math.round(t.width),
         gap: b.top - h.bottom,
         bubbleText: bubble.textContent,
       };
     });
-    // The bubble fits its message with no gap on its right; the header keeps
-    // its own width 8px above.
-    expect(geometry).toMatchObject({ siblings: true, outside: true, aligned: true, gap: 8, fits: true });
-    expect(geometry.bubbleRight).toBeLessThanOrEqual(1);
+    // The bubble spans the lane; the header keeps its own width at the
+    // bubble's left edge, 8px above.
+    expect(geometry).toMatchObject({ siblings: true, outside: true, aligned: true, ownWidth: true, gap: 8, fills: true, lane: 800 });
     expect(geometry.bubbleText).not.toContain("Sent from");
     await expect(prompt.getByRole("button", { name: "Edit message", exact: true })).toHaveCount(0);
   }
@@ -179,7 +171,7 @@ export async function runLocalLinksSmoke({ page, harnessBase, check }) {
     "The implementation is ready. Review zeros-dev://workspace/ws_child when you have time.",
   );
   check(
-    "Normal, steered and saved provenance sits above the right-aligned copy-only bubble; notes and code retain their roles",
+    "Normal, steered and saved provenance sits above the full-width copy-only bubble; notes and code retain their roles",
     true,
   );
 
