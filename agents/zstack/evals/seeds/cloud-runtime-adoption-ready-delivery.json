@@ -1,0 +1,5 @@
+{
+  "file": "scripts/release/runtime-adoption.integration.test.ts",
+  "before": "    await expect.poll(() => successor.frames.find(frame => frame.type === \"ENGINE_READY\")).toMatchObject({ instanceId: instance });",
+  "after": "    expect(successor.frames.find(frame => frame.type === \"ENGINE_READY\")).toMatchObject({ instanceId: instance });"
+}

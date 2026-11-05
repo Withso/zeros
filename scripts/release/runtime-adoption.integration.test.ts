@@ -242,6 +242,8 @@ suite("runtime adoption over worker HTTP and app WebSockets", () => {
       handoffTimer = setTimeout(() => reject(new Error("No runtime handoff after a completed native turn")), 5000); handoffTimer.unref();
     })]); } finally { clearTimeout(handoffTimer); }
     const successor = await connect();
+    // Durable HTTP completion does not acknowledge delivery on this socket.
+    if (slow) successor.socket.pause();
     const fileRead = successor.send("WORKSPACE_REQUEST", { op: "file.read", params: { path: "retained.txt" } });
     let foreground: { client: RuntimeClient; connected: Promise<void>; reading: Promise<unknown>; failed: () => unknown } | undefined;
     if (slow) {
@@ -316,7 +318,11 @@ suite("runtime adoption over worker HTTP and app WebSockets", () => {
       expect(nativeFixture!.requests.length).toBeGreaterThan(beforeResumeRequests);
       expect(mcpListings.mock.calls.length).toBeGreaterThan(beforeResumeListings);
     }
-    expect(successor.frames.find(frame => frame.type === "ENGINE_READY")).toMatchObject({ instanceId: instance });
+    if (slow) {
+      expect(successor.frames).toEqual([]);
+      queueMicrotask(() => successor.socket.resume());
+    }
+    await expect.poll(() => successor.frames.find(frame => frame.type === "ENGINE_READY")).toMatchObject({ instanceId: instance });
     const file = await successor.response(fileRead);
     expect(file.type).toBe("WORKSPACE_RESPONSE"); expect(JSON.stringify(file)).toContain("foreground read survived adoption");
     const history = await successor.response(successor.send("WORKSPACE_REQUEST", { op: "messages.window", params: { chatId: "chat" } }));
