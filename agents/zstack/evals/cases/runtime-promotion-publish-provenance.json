@@ -2,7 +2,7 @@
   "id": "runtime-promotion-publish-provenance",
   "kind": "scenario",
   "area": "scripts-release",
-  "fixedBy": "pending",
+  "fixedBy": "pr:846",
   "symptom": "A successful Alpha rollback qualified a previous archive and could be cited as authority for a new Production promotion without a successful publish build.",
   "rule": "Bind promotion to the exact successful publish build and its separate archive manifest, source/main/CI evidence and attempt; retained channel rollback is a separate authority path (zstack-review and zstack-verify).",
   "check": "pnpm exec vitest run --config scripts/release/vitest.config.ts scripts/release/runtime-proof.test.ts scripts/release/runtime-build.test.ts scripts/release/runtime-github.test.ts scripts/release/runtime-security-regression.test.ts"
