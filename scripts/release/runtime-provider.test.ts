@@ -12,13 +12,13 @@ function databaseRoute(username: string, password = "synthetic") {
   return url.toString();
 }
 
-function fixture() {
-  const config: RuntimeReleaseConfig = { channel: "alpha", action: "publish", repository: "example/project", workflowSha: "1".repeat(40), branch: "main",
-    runId: "123", runAttempt: 1, sourceSha: "2".repeat(40), expectedCpSha: "3".repeat(40), expectedRuntimeSha256: "a".repeat(64) };
+function fixture(channel: "alpha" | "beta" = "alpha") {
+  const config: RuntimeReleaseConfig = { channel, action: channel === "alpha" ? "publish" : "promote", repository: "example/project", workflowSha: "1".repeat(40), branch: channel === "alpha" ? "main" : "release/1.2.3",
+    runId: "123", runAttempt: 1, ...(channel === "alpha" ? { sourceSha: "2".repeat(40) } : { runtimeSha256: "b".repeat(64), alphaRunId: "100", alphaRunAttempt: 1 }), expectedCpSha: "3".repeat(40), expectedRuntimeSha256: "a".repeat(64) };
   const env = { RAILWAY_PROJECT_ID: randomUUID(), RAILWAY_ENVIRONMENT_ID: randomUUID(), RAILWAY_SERVICE_ID: randomUUID(), RAILWAY_DEPLOY_TOKEN: "synthetic-private-token" };
   const target = { projectId: env.RAILWAY_PROJECT_ID, environmentId: env.RAILWAY_ENVIRONMENT_ID, serviceId: env.RAILWAY_SERVICE_ID };
   const storage = { endpoint: "https://store.example.test", bucket: "runtime-fixture", accessKeyId: "synthetic-access", secretAccessKey: "synthetic-secret" };
-  const release = { version: 1 as const, sha256: "b".repeat(64), sourceSha: config.sourceSha!, sourceSha256: "c".repeat(64),
+  const release = { version: 1 as const, sha256: "b".repeat(64), sourceSha: "2".repeat(40), sourceSha256: "c".repeat(64),
     qualification: { channel: "alpha" as const, runId: config.runId, runAttempt: 1, completedAt: new Date().toISOString(), receiptSha256: "d".repeat(64), deleted: true as const } };
   const pin = { sha256: release.sha256, release }, previous = { sha256: config.expectedRuntimeSha256, release: null };
   const variables: Record<string, string> = { CLOUD_V2_RUNTIME_SHA256: previous.sha256,
@@ -27,7 +27,7 @@ function fixture() {
   const state = { serviceInstanceAutoDeployStatus: { enabled: false },
     environment: { id: target.environmentId, name: config.channel, projectId: target.projectId, unmergedChangesCount: null,
       config: { services: { [target.serviceId]: { source: { repo: config.repository, branch: config.branch, rootDirectory: "apps/control-plane", checkSuites: false } } } } },
-    serviceInstance: { serviceId: target.serviceId, environmentId: target.environmentId, domains: { customDomains: [{ domain: "api-alpha.zeros.build" }] } },
+    serviceInstance: { serviceId: target.serviceId, environmentId: target.environmentId, domains: { customDomains: [{ domain: `api-${channel}.zeros.build` }] } },
     environmentStagedChanges: { id: "<empty>", patch: {} }, variables };
   const identity = { version: 1, channel: config.channel, sourceSha: config.expectedCpSha, ready: true, maintenance: false,
     migrations: { state: "current", head: "0221_fixture.sql", expectedHead: "0221_fixture.sql", manifestSha256: "e".repeat(64) },
@@ -43,7 +43,9 @@ function fixture() {
   const record = vi.fn(async (intent: RuntimeProviderIntent) => { intents.push(structuredClone(intent)); });
   const controller = new AbortController();
   const inventoryRead = vi.fn(async () => {});
+  const alphaRead = vi.fn(async () => Response.json({ version: 1, channel: "alpha", ready: true, worker: { sha256: pin.sha256 } }));
   const fetcher: typeof fetch = async (url, init) => {
+    if (channel === "beta" && String(url) === "https://api-alpha.zeros.build/v1/release-identity") return alphaRead();
     if (String(url).endsWith("/v1/release-identity")) return Response.json(identity, { status: identityStatuses.shift() ?? 200 });
     const body = JSON.parse(String(init?.body)); calls.push(body);
     if (body.query.includes("RuntimeState")) return Response.json({ data: state });
@@ -74,7 +76,7 @@ function fixture() {
   return { config, env, target, storage, pin, previous, variables, state, identity, deployments, calls, lease, inspectDrain, provider, identityStatuses,
     restart: () => runtimeProvider(config, env, storage, { fetch: fetcher, pause: async () => {}, inspectDrain, record,
       recovery: { stage: intents.findLast(intent => intent.kind === "stage"), deploy: intents.findLast(intent => intent.kind === "deploy") } } as never),
-    intents, record, controller, inventoryRead, loseMutation: () => { loseMutation = true; }, pendingDeployment: () => { deployPending = true; } };
+    intents, record, controller, inventoryRead, alphaRead, loseMutation: () => { loseMutation = true; }, pendingDeployment: () => { deployPending = true; } };
 }
 
 function transaction(f: ReturnType<typeof fixture>) {
@@ -88,6 +90,64 @@ function transaction(f: ReturnType<typeof fixture>) {
 }
 
 describe("runtime-only Railway boundary", () => {
+  it.each(["stage", "deploy"] as const)("refuses %s when Alpha no longer serves the exact ready digest", async phase => {
+    const f = fixture("beta");
+    if (phase === "deploy") await f.provider.stage(f.pin, f.previous, f.lease);
+    f.alphaRead.mockResolvedValue(Response.json({ version: 1, channel: "alpha", ready: true, worker: { sha256: "f".repeat(64) } }));
+    const before = f.calls.filter(call => call.query.startsWith("mutation")).length;
+    await expect(phase === "stage" ? f.provider.stage(f.pin, f.previous, f.lease) : f.provider.deploy(f.config.expectedCpSha, f.lease)).rejects.toThrow(/Alpha/);
+    expect(f.calls.filter(call => call.query.startsWith("mutation"))).toHaveLength(before);
+  });
+  it.each(["stage", "deploy"] as const)("refuses %s while Alpha is unreachable", async phase => {
+    const f = fixture("beta");
+    if (phase === "deploy") await f.provider.stage(f.pin, f.previous, f.lease);
+    f.alphaRead.mockRejectedValue(new Error("private fixture upstream body"));
+    const before = f.calls.filter(call => call.query.startsWith("mutation")).length;
+    await expect(phase === "stage" ? f.provider.stage(f.pin, f.previous, f.lease) : f.provider.deploy(f.config.expectedCpSha, f.lease)).rejects.toThrow(/Alpha/);
+    expect(f.calls.filter(call => call.query.startsWith("mutation"))).toHaveLength(before);
+  });
+  it.each(["stage", "deploy"] as const)("refuses %s while Alpha is unready", async phase => {
+    const f = fixture("beta");
+    if (phase === "deploy") await f.provider.stage(f.pin, f.previous, f.lease);
+    f.alphaRead.mockImplementation(async () => Response.json({ version: 1, channel: "alpha", ready: false, worker: { sha256: f.pin.sha256 } }));
+    const before = f.calls.filter(call => call.query.startsWith("mutation")).length;
+    await expect(phase === "stage" ? f.provider.stage(f.pin, f.previous, f.lease) : f.provider.deploy(f.config.expectedCpSha, f.lease)).rejects.toThrow(/Alpha/);
+    expect(f.calls.filter(call => call.query.startsWith("mutation"))).toHaveLength(before);
+  });
+  it.each(["stage", "deploy"] as const)("refreshes serving ownership, expiry and cancellation after the final Alpha read for %s", async phase => {
+    for (const change of ["unchanged", "serving", "pin", "expiry", "cancelled"]) {
+      const f = fixture("beta");
+      if (phase === "deploy") await f.provider.stage(f.pin, f.previous, f.lease);
+      const entered = Promise.withResolvers<void>(), finish = Promise.withResolvers<void>();
+      f.alphaRead.mockImplementation(async () => {
+        entered.resolve(); await finish.promise;
+        return Response.json({ version: 1, channel: "alpha", ready: true, worker: { sha256: f.pin.sha256 } });
+      });
+      const before = f.calls.filter(call => call.query.startsWith("mutation")).length;
+      const running = (phase === "stage" ? f.provider.stage(f.pin, f.previous, f.lease) : f.provider.deploy(f.config.expectedCpSha, f.lease))
+        .then(() => "success", () => "refused");
+      await entered.promise;
+      expect(f.calls.filter(call => call.query.startsWith("mutation"))).toHaveLength(before);
+      if (change === "serving") f.deployments[0].id = "replacement-deployment";
+      if (change === "pin") f.variables.CLOUD_V2_RUNTIME_SHA256 = "f".repeat(64);
+      if (change === "expiry") f.lease.expiresAt = new Date(Date.now() + 59_000).toISOString();
+      if (change === "cancelled") f.controller.abort();
+      finish.resolve();
+      expect(await running).toBe(change === "unchanged" ? "success" : "refused");
+      expect(f.calls.filter(call => call.query.startsWith("mutation"))).toHaveLength(before + (change === "unchanged" ? 1 : 0));
+    }
+  });
+  it("restores its owned staged pin if Alpha stops qualifying before deploy", async () => {
+    const f = fixture("beta"), t = transaction(f);
+    f.alphaRead.mockImplementationOnce(async () => Response.json({ version: 1, channel: "alpha", ready: true, worker: { sha256: f.pin.sha256 } }))
+      .mockRejectedValue(new Error("Alpha unavailable"));
+    await expect(t.run()).rejects.toThrow(/Alpha/);
+    expect(f.calls.filter(call => call.query.includes("RuntimeStage("))).toHaveLength(1);
+    expect(f.calls.filter(call => call.query.includes("RuntimeDeploy("))).toHaveLength(0);
+    expect(f.calls.filter(call => call.query.includes("RuntimeRestore("))).toHaveLength(1);
+    expect(f.variables.CLOUD_V2_RUNTIME_SHA256).toBe(f.previous.sha256);
+    expect(t.deps.endDrain).toHaveBeenCalledExactlyOnceWith(f.lease); expect(t.deps.record).not.toHaveBeenCalled();
+  });
   it("restores only its persisted stage after the original process is gone", async () => {
     const f = fixture(); await f.provider.stage(f.pin, f.previous, f.lease);
     expect(await f.restart().recover(f.lease)).toEqual({ releaseDrain: true });

@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { runtimeReleaseConfig, type RuntimeQualification } from "./runtime-contracts";
+import { runtimeReleaseConfig } from "./runtime-contracts";
 import { runRuntimeController } from "./runtime-controller";
-import { runtimeJsonSha256 } from "./runtime-proof";
+import { prepareRuntimePublication, completeRuntimePublication } from "./runtime-proof";
 
 function fixture(action: "publish" | "promote" | "rollback" = "publish") {
   const channel = action === "promote" ? "beta" : "alpha", branch = channel === "alpha" ? "main" : "release/1.2.3";
@@ -16,12 +16,12 @@ function fixture(action: "publish" | "promote" | "rollback" = "publish") {
     PLANETSCALE_ORG: "fixture", PLANETSCALE_DATABASE: `zeros-control-plane-${channel}`, PLANETSCALE_BRANCH: "main", PLANETSCALE_SERVICE_TOKEN_ID: "synthetic-token-id", PLANETSCALE_SERVICE_TOKEN: "synthetic-private-token" };
   const config = runtimeReleaseConfig(env), events: string[] = [];
   const manifest = { version: 1 as const, repository: config.repository, sourceSha: "2".repeat(40), sourceSha256: "c".repeat(64), sha256: "b".repeat(64), bytes: 123 };
-  const receipt = { version: 1 as const, channel: "alpha" as const, cpSourceSha: config.expectedCpSha, previousRuntimeSha256: "a".repeat(64),
-    runtimeSha256: manifest.sha256, sourceSha: manifest.sourceSha, runId: action === "promote" ? "100" : "123", runAttempt: 1, grantId: randomUUID(), workspaceId: randomUUID(),
-    creatorUserId: randomUUID(), organizationId: randomUUID(), repositoryId: "42", agents: ["codex", "claude", "cursor"] as ["codex", "claude", "cursor"], deleted: true as const, completedAt: new Date().toISOString() };
-  const proof: RuntimeQualification = { version: 1, repository: config.repository, workflowSha: config.workflowSha, manifest, receipt,
-    release: { version: 1, sha256: manifest.sha256, sourceSha: manifest.sourceSha, sourceSha256: manifest.sourceSha256,
-      qualification: { channel: "alpha", runId: receipt.runId, runAttempt: 1, completedAt: receipt.completedAt, receiptSha256: runtimeJsonSha256(receipt), deleted: true } } };
+  const prepared = prepareRuntimePublication({ ...config, channel: "alpha", action: "publish", branch: "main", sourceSha: manifest.sourceSha,
+    runId: action === "promote" ? "100" : "123" }, manifest);
+  const receipt = { version: 1 as const, status: "success" as const, channel: "alpha" as const, action: "publish" as const,
+    repository: config.repository, workflowSha: config.workflowSha, cpSourceSha: config.expectedCpSha, previousRuntimeSha256: "a".repeat(64),
+    runtime: prepared.release, runId: prepared.intent.runId, runAttempt: 1, deploymentId: "alpha-deployment", completedAt: new Date().toISOString() };
+  const proof = completeRuntimePublication(prepared, receipt);
   const live = { branch: config.branch, current: { sha256: config.expectedRuntimeSha256, release: null }, previous: { sha256: manifest.sha256, release: proof.release },
     identity: { version: 1, channel, ready: true, sourceSha: config.expectedCpSha, maintenance: false, migrations: { state: "current", head: "0221_fixture.sql", expectedHead: "0221_fixture.sql", manifestSha256: "d".repeat(64) },
       cloud: { enabled: true, ready: true, state: "healthy" }, worker: { sha256: config.expectedRuntimeSha256 }, workerQualified: false, runtimeCanaryAdmission: 1, runtimeBuildDrainVersion: 1 } };
@@ -45,7 +45,7 @@ function fixture(action: "publish" | "promote" | "rollback" = "publish") {
   });
   const read = vi.fn(async () => ({ version: 1, repository: config.repository, workflowSha: config.workflowSha, runId: config.runId, runAttempt: 1, manifest }));
   const write = vi.fn(async () => {}), qualify = vi.fn(async () => { events.push("qualify-deleted"); return proof; });
-  const github = { source: vi.fn(async () => {}), sameControlPlane: vi.fn(async () => true), artifact: vi.fn(async () => proof),
+  const github = { source: vi.fn(async () => {}), sameControlPlane: vi.fn(async () => true), artifact: vi.fn(async () => proof), alphaCurrent: vi.fn(async () => {}),
     mainSource: vi.fn(async () => {}), buildArtifact: vi.fn(async () => ({ version: 1, repository: config.repository, workflowSha: config.workflowSha,
       runId: receipt.runId, runAttempt: 1, manifest })),
     read: vi.fn(async path => path.includes("/jobs?") ? { total_count: 2, jobs: [
@@ -59,22 +59,35 @@ function fixture(action: "publish" | "promote" | "rollback" = "publish") {
     database, drain: vi.fn(() => drain), qualify, read, write, planetScale: vi.fn(() => {}) };
   const controller = new AbortController();
   const execute = () => runRuntimeController(env, { root: "/synthetic/controller", signal: controller.signal, services: services as never });
-  return { env, config, events, target, alpha, provider, drain, services, database, read, write, qualify, controller, execute, failCleanup: () => { cleanupFails = true; } };
+  return { env, config, live, events, target, alpha, provider, drain, services, github, database, read, write, qualify, controller, execute, failCleanup: () => { cleanupFails = true; } };
 }
 
 describe("runtime controller production composition", () => {
+  it("publishes on Alpha without a canary grant, fixture login or canary admission configuration", async () => {
+    const f = fixture();
+    delete (f.live.identity as { runtimeCanaryAdmission?: number }).runtimeCanaryAdmission;
+    f.qualify.mockRejectedValue(new Error("candidate canary must not execute"));
+    await expect(f.execute()).resolves.toMatchObject({ status: "success", action: "publish", runtime: { sha256: "b".repeat(64) } });
+    expect(f.qualify).not.toHaveBeenCalled();
+    expect(f.events.indexOf("ready")).toBeLessThan(f.events.indexOf("qualification-save"));
+    expect(f.events.indexOf("database-cleanup")).toBeLessThan(f.events.indexOf("qualification-save"));
+  });
   it("publishes success only after confirmed drain release and database-role cleanup", async () => {
     const f = fixture(), receipt = await f.execute();
-    expect(receipt.status).toBe("success"); expect(f.events.indexOf("qualify-deleted")).toBeLessThan(f.events.indexOf("drain"));
+    expect(receipt.status).toBe("success"); expect(f.qualify).not.toHaveBeenCalled();
     expect(f.events.indexOf("release")).toBeLessThan(f.events.indexOf("database-cleanup"));
     expect(f.events.indexOf("database-cleanup")).toBeLessThan(f.events.indexOf("receipt-save"));
+    expect(f.events.indexOf("receipt-save")).toBeLessThan(f.events.indexOf("qualification-save"));
+    expect(f.target.saveQualification).toHaveBeenCalledWith(expect.objectContaining({ version: 2,
+      receipt: expect.objectContaining({ status: "success", channel: "alpha", action: "publish", runtime: receipt.runtime }) }));
+    expect(JSON.stringify(f.target.saveQualification.mock.calls)).not.toMatch(/grantId|workspaceId|creatorUserId|password|synthetic-private/);
     expect(f.services.drain).toHaveBeenCalledWith(f.config, { query: "owned-pool-fixture" });
     expect(f.write.mock.calls.some(([path]) => String(path).endsWith("runtime-receipt.json"))).toBe(true);
     expect(JSON.stringify(f.write.mock.calls)).not.toContain("synthetic-private-token");
   });
   it("does not grant success when temporary database cleanup is unknown", async () => {
     const f = fixture(); f.failCleanup(); await expect(f.execute()).rejects.toThrow(/withheld/);
-    expect(f.target.saveReceipt).not.toHaveBeenCalled(); expect(f.target.close).toHaveBeenCalledOnce();
+    expect(f.target.saveReceipt).not.toHaveBeenCalled(); expect(f.target.saveQualification).not.toHaveBeenCalled(); expect(f.target.close).toHaveBeenCalledOnce();
   });
   it("checks the serving identity and producer before allocating database authority", async () => {
     const f = fixture(); f.provider.current.mockRejectedValueOnce(new Error("old-control-plane"));
@@ -89,10 +102,21 @@ describe("runtime controller production composition", () => {
     expect(f.alpha.qualification).toHaveBeenCalledWith("b".repeat(64), "100", 1);
     expect(f.target.saveQualification).toHaveBeenCalledOnce(); expect(f.alpha.close).toHaveBeenCalledOnce();
   });
-  it("selects the recorded previous pin for Alpha rollback and qualifies it again", async () => {
+  it("selects the recorded previous pin for Alpha rollback without producing publish provenance", async () => {
     const f = fixture("rollback"); await f.execute();
-    expect(f.target.copy).toHaveBeenCalledWith("b".repeat(64), undefined); expect(f.qualify).toHaveBeenCalledOnce();
+    expect(f.target.copy).toHaveBeenCalledWith("b".repeat(64), undefined); expect(f.qualify).not.toHaveBeenCalled();
+    expect(f.target.saveQualification).toHaveBeenCalledWith(expect.objectContaining({ version: 2, intent: expect.objectContaining({ action: "rollback" }), receipt: expect.objectContaining({ action: "rollback" }) }));
     expect(f.target.publish).not.toHaveBeenCalled();
+  });
+  it("refuses an unavailable Alpha pin before allocating destination mutation authority", async () => {
+    const f = fixture("promote"); f.github.alphaCurrent.mockRejectedValue(new Error("unavailable"));
+    await expect(f.execute()).rejects.toThrow();
+    expect(f.database).not.toHaveBeenCalled(); expect(f.target.copy).not.toHaveBeenCalled(); expect(f.provider.stage).not.toHaveBeenCalled();
+  });
+  it.each(["stage", "deploy", "wait"] as const)("does not retain Alpha publication qualification when %s fails", async phase => {
+    const f = fixture(); f.provider[phase].mockRejectedValue(new Error("operation failed"));
+    await expect(f.execute()).rejects.toThrow();
+    expect(f.target.saveQualification).not.toHaveBeenCalled(); expect(f.target.saveReceipt).not.toHaveBeenCalled();
   });
   it("refuses disabled execution before initializing any external authority", async () => {
     const f = fixture(); f.env.ZEROS_RUNTIME_RELEASE = "";

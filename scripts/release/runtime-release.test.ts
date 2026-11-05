@@ -23,7 +23,7 @@ function fixture(action: "publish" | "promote" | "rollback" = "publish") {
   const record = <T>(name: string, value: T) => vi.fn(async () => { events.push(name); return value; });
   const deps: RuntimeReleaseDependencies = {
     current: record("current", live), source: record("source", undefined),
-    prepare: record("prepare", manifest), qualify: record("qualify_deleted", release),
+    prepare: record("prepare", manifest), qualify: record("publication-intent", release),
     qualification: record("qualification", release), retain: record("retain", undefined),
     beginDrain: record("begin", status), inspectDrain: record("inspect", status),
     endDrain: record("end", { version: 1, lease, released: true }), pause: record("pause", undefined),
@@ -34,9 +34,9 @@ function fixture(action: "publish" | "promote" | "rollback" = "publish") {
 }
 
 describe("runtime-only release transaction", () => {
-  it("qualifies and deletes the candidate before draining, staging, or redeploying the unchanged CP", async () => {
+  it("binds the Alpha publication intent before draining, staging, or redeploying the unchanged CP", async () => {
     const f = fixture(), receipt = await f.run();
-    expect(f.events).toEqual(["source", "current", "prepare", "qualify_deleted", "retain", "source", "current", "begin", "source", "current", "inspect", "stage", "current", "inspect", "deploy", "wait", "end", "record"]);
+    expect(f.events).toEqual(["source", "current", "prepare", "publication-intent", "retain", "source", "current", "begin", "source", "current", "inspect", "stage", "current", "inspect", "deploy", "wait", "end", "record"]);
     expect(f.deps.deploy).toHaveBeenCalledExactlyOnceWith(f.config.expectedCpSha, f.lease);
     expect(f.deps.stage).toHaveBeenCalledExactlyOnceWith({ sha256: f.release.sha256, release: f.release }, f.live.current, f.lease);
     expect(receipt).toMatchObject({ status: "success", action: "publish", cpSourceSha: f.config.expectedCpSha, previousRuntimeSha256: f.config.expectedRuntimeSha256, runtime: f.release });
@@ -57,7 +57,7 @@ describe("runtime-only release transaction", () => {
     expect(f.deps.qualification).not.toHaveBeenCalled(); expect(f.deps.beginDrain).not.toHaveBeenCalled(); expect(f.deps.stage).not.toHaveBeenCalled();
   });
 
-  it("rolls back only to the previous pin and requalifies that archive on Alpha", async () => {
+  it("rolls back only to the previous pin and binds its Alpha rollback intent", async () => {
     const f = fixture("rollback"); await f.run();
     expect(f.deps.prepare).toHaveBeenCalledExactlyOnceWith(f.live.previous!.sha256);
     expect(f.deps.qualify).toHaveBeenCalledExactlyOnceWith(f.manifest);

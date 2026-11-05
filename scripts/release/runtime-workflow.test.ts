@@ -6,6 +6,9 @@ const text = readFileSync(new URL("../../.github/workflows/runtime-release.yml",
 const step = (job: any, name: string) => job.steps.find((entry: any) => entry.name === name);
 
 describe("runtime release workflow authority", () => {
+  it("publishes to Alpha without any candidate fixture or signing credentials", () => {
+    expect(text).not.toMatch(/CLOUD_V2_RUNTIME_CANARY|CLOUD_RUNTIME_CANARY|CLOUD_RUNTIME_FIXTURE|WORKOS_CLIENT_ID|WORKOS_API_KEY|gate0/);
+  });
   it("always cleans the exact attempt on the same ephemeral runner before any artifact action", () => {
     const release = workflow.jobs.release, cleanup = step(release, "Retire runtime release authority");
     expect(cleanup?.if).toBe("always()");

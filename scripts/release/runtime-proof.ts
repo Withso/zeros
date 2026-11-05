@@ -2,7 +2,8 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 import { RuntimeCanaryReceiptSchema, RuntimeReleaseSchema, type RuntimeRelease } from "../../apps/control-plane/src/cloud/runtime-release";
 import { requireCheck } from "./contracts";
-import { RuntimeBuildSchema, RuntimeQualification, type RuntimeManifest, type RuntimeReleaseConfig } from "./runtime-contracts";
+import { RuntimeBuildSchema, RuntimeQualification, LegacyRuntimeQualification, RuntimePublication, RuntimePublicationIntent,
+  type RuntimeManifest, type RuntimeReleaseConfig, type RuntimeReleaseReceipt } from "./runtime-contracts";
 import type { ReleaseCanary } from "./runtime-canary";
 
 export function runtimeJson(value: unknown): string {
@@ -13,7 +14,7 @@ export function runtimeJson(value: unknown): string {
 export const runtimeJsonSha256 = (value: unknown) => createHash("sha256").update(runtimeJson(value)).digest("hex");
 
 export function qualifiedRuntime(config: RuntimeReleaseConfig, manifest: RuntimeManifest, canary: ReleaseCanary,
-  value: unknown, cleanup: { deleted: true; workspaceId: string | null }): RuntimeQualification {
+  value: unknown, cleanup: { deleted: true; workspaceId: string | null }): LegacyRuntimeQualification {
   const parsed = RuntimeCanaryReceiptSchema.safeParse(value);
   requireCheck(config.channel === "alpha" && parsed.success, "Runtime qualification receipt is invalid");
   const receipt = parsed.data, claims = canary.claims;
@@ -28,7 +29,41 @@ export function qualifiedRuntime(config: RuntimeReleaseConfig, manifest: Runtime
   const release = RuntimeReleaseSchema.parse({ version: 1, sha256: manifest.sha256, sourceSha: manifest.sourceSha, sourceSha256: manifest.sourceSha256,
     qualification: { channel: "alpha", runId: config.runId, runAttempt: config.runAttempt,
       completedAt: receipt.completedAt, receiptSha256: runtimeJsonSha256(receipt), deleted: true } });
-  return RuntimeQualification.parse({ version: 1, repository: config.repository, workflowSha: config.workflowSha, manifest, receipt, release });
+  return LegacyRuntimeQualification.parse({ version: 1, repository: config.repository, workflowSha: config.workflowSha, manifest, receipt, release });
+}
+
+export function prepareRuntimePublication(config: RuntimeReleaseConfig, manifest: RuntimeManifest) {
+  requireCheck(config.channel === "alpha" && config.action !== "promote" && manifest.repository === config.repository &&
+    (config.action !== "publish" || manifest.sourceSha === config.sourceSha), "Alpha publication intent does not match its source");
+  const intent = RuntimePublicationIntent.parse({ version: 1, channel: "alpha", action: config.action, repository: config.repository,
+    workflowSha: config.workflowSha, runId: config.runId, runAttempt: config.runAttempt, cpSourceSha: config.expectedCpSha,
+    previousRuntimeSha256: config.expectedRuntimeSha256, manifest, verifiedAt: new Date().toISOString() });
+  // The compatible pin metadata binds an intent; only the terminal publication proof grants promotion authority.
+  const release = RuntimeReleaseSchema.parse({ version: 1, sha256: manifest.sha256, sourceSha: manifest.sourceSha, sourceSha256: manifest.sourceSha256,
+    qualification: { channel: "alpha", runId: config.runId, runAttempt: config.runAttempt, completedAt: intent.verifiedAt,
+      receiptSha256: runtimeJsonSha256(intent), deleted: true } });
+  return { intent, release };
+}
+
+function assertRuntimePublication(record: RuntimePublication): void {
+  const { intent, receipt, release, manifest } = record, proof = release.qualification;
+  requireCheck(record.repository === intent.repository && record.repository === receipt.repository && record.repository === manifest.repository &&
+    record.workflowSha === intent.workflowSha && record.workflowSha === receipt.workflowSha && runtimeJson(intent.manifest) === runtimeJson(manifest) &&
+    receipt.channel === "alpha" && receipt.action === intent.action && receipt.runId === intent.runId && receipt.runAttempt === intent.runAttempt &&
+    receipt.cpSourceSha === intent.cpSourceSha && receipt.previousRuntimeSha256 === intent.previousRuntimeSha256 &&
+    runtimeJson(receipt.runtime) === runtimeJson(release) && release.sha256 === manifest.sha256 && release.sourceSha === manifest.sourceSha &&
+    release.sourceSha256 === manifest.sourceSha256 && proof.runId === intent.runId && proof.runAttempt === intent.runAttempt &&
+    proof.completedAt === intent.verifiedAt && proof.receiptSha256 === runtimeJsonSha256(intent) &&
+    Date.parse(receipt.completedAt) >= Date.parse(intent.verifiedAt) && Date.parse(receipt.completedAt) <= Date.now() + 30_000,
+    "Alpha publication does not prove the exact intent and successful pin/deploy receipt");
+}
+
+export function completeRuntimePublication(prepared: ReturnType<typeof prepareRuntimePublication>, receipt: RuntimeReleaseReceipt): RuntimePublication {
+  const { intent, release } = prepared;
+  const record = RuntimePublication.parse({ version: 2, repository: intent.repository, workflowSha: intent.workflowSha,
+    manifest: intent.manifest, intent, receipt, release });
+  assertRuntimePublication(record);
+  return record;
 }
 
 const WorkflowRun = z.object({ id: z.number().int().positive(), run_attempt: z.number().int().positive(),
@@ -54,15 +89,19 @@ export async function verifyRuntimeQualification(config: RuntimeReleaseConfig, m
   buildArtifact(runId: string, attempt: number): Promise<unknown>;
   mainSource(sourceSha: string): Promise<void>;
   sameControlPlane(left: string, right: string): Promise<boolean>;
+  alphaCurrent(sha256: string): Promise<void>;
 }, pinnedPrevious?: RuntimeRelease): Promise<RuntimeQualification> {
   const parsed = RuntimeQualification.safeParse(value);
   requireCheck(parsed.success, "Retained runtime qualification is invalid");
   const record = parsed.data, proof = record.release.qualification, receipt = record.receipt;
   requireCheck(record.repository === config.repository && runtimeJson(record.manifest) === runtimeJson(manifest) &&
-    record.release.sha256 === manifest.sha256 && record.release.sourceSha === manifest.sourceSha && record.release.sourceSha256 === manifest.sourceSha256 &&
-    receipt.runtimeSha256 === manifest.sha256 && receipt.sourceSha === manifest.sourceSha && receipt.runId === proof.runId && receipt.runAttempt === proof.runAttempt &&
-    runtimeJsonSha256(receipt) === proof.receiptSha256 && receipt.completedAt === proof.completedAt,
+    record.release.sha256 === manifest.sha256 && record.release.sourceSha === manifest.sourceSha && record.release.sourceSha256 === manifest.sourceSha256,
     "Retained Alpha qualification does not match this archive");
+  if (record.version === 1) {
+    const legacy = record.receipt;
+    requireCheck(legacy.runtimeSha256 === manifest.sha256 && legacy.sourceSha === manifest.sourceSha && legacy.runId === proof.runId && legacy.runAttempt === proof.runAttempt &&
+      runtimeJsonSha256(legacy) === proof.receiptSha256 && legacy.completedAt === proof.completedAt, "Retained Alpha qualification does not match this archive");
+  } else assertRuntimePublication(record);
   if (config.action === "rollback") {
     // The prior pin's receipt hash remains authoritative after GitHub artifacts expire.
     const pinned = RuntimeReleaseSchema.safeParse(pinnedPrevious);
@@ -71,6 +110,9 @@ export async function verifyRuntimeQualification(config: RuntimeReleaseConfig, m
     requireCheck(await deps.sameControlPlane(receipt.cpSourceSha, config.expectedCpSha), "Destination control-plane code differs from the previous runtime qualification");
     return record;
   }
+  requireCheck(config.action === "promote" && config.channel !== "alpha" && record.version === 2 && record.receipt.action === "publish" &&
+    record.intent.action === "publish" && config.runtimeSha256 === manifest.sha256 && config.alphaRunId === proof.runId && config.alphaRunAttempt === proof.runAttempt,
+    "New promotions require the exact successful Alpha publication attempt; rollback and legacy gate0 receipts do not qualify");
   const run = WorkflowRun.safeParse(await deps.read(`/actions/runs/${proof.runId}/attempts/${proof.runAttempt}`));
   requireCheck(run.success && String(run.data.id) === proof.runId && run.data.run_attempt === proof.runAttempt &&
     run.data.head_sha === record.workflowSha && run.data.head_branch === "main" && run.data.path === ".github/workflows/runtime-release.yml" &&
@@ -93,5 +135,6 @@ export async function verifyRuntimeQualification(config: RuntimeReleaseConfig, m
   const artifact = RuntimeQualification.safeParse(await deps.artifact(proof.runId, proof.runAttempt));
   requireCheck(artifact.success && runtimeJson(artifact.data) === runtimeJson(record), "Runtime qualification differs from its trusted workflow artifact");
   requireCheck(await deps.sameControlPlane(receipt.cpSourceSha, config.expectedCpSha), "Destination control-plane code differs from Alpha qualification; qualify against the matching code before promotion");
+  await deps.alphaCurrent(manifest.sha256);
   return record;
 }
