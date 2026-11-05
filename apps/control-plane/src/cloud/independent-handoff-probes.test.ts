@@ -10,7 +10,8 @@ import { RuntimeHandoffStore } from "./runtime-handoff-store.js";
 import { RuntimeAdoption } from "./runtime-adoption.js";
 import { createCloudV2WorkerRoutes } from "./worker-routes.js";
 
-describe("independent successive runtime handoff authority", () => {
+const suite = process.env.TEST_DATABASE_URL ? describe : describe.skip;
+suite("independent successive runtime handoff authority", () => {
   let pool: pg.Pool;
   beforeAll(() => { pool = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL, max: 5 }); });
   beforeEach(() => resetMigratedTestDatabase(pool));

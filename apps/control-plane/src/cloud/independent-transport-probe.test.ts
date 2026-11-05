@@ -16,7 +16,8 @@ import { RuntimeHandoffStore } from "./runtime-handoff-store.js";
 import { RuntimeAdoption } from "./runtime-adoption.js";
 import { createCloudV2WorkerRoutes } from "./worker-routes.js";
 
-it("keeps the real adopted transport authorized after an aborted second update and login refresh", async () => {
+const test = process.env.TEST_DATABASE_URL ? it : it.skip;
+test("keeps the real adopted transport authorized after an aborted second update and login refresh", async () => {
   const pool = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL, max: 5 });
   const root = await mkdtemp(join(tmpdir(), "zeros-review-handoff-transport-"));
   let server: ReturnType<typeof serve> | undefined, transport: HybridTransport | undefined, adoption: RuntimeAdoption | undefined;
