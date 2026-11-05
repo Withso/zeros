@@ -1350,9 +1350,24 @@ whether every running VM has adopted it. Runtime publication does not stop
 user workspaces or change their visible state. Local Personal and
 organization-local workspaces do not use this authority.
 
-The release controller and dispatch workflow ship separately from this app
-support. See [Runtime release qualification](deployment-environments.md#runtime-release-qualification)
-for key provisioning, the probe entry point and controller ordering.
+The dispatch-only **Cloud runtime release** workflow builds from exact main
+source, qualifies one Alpha canary, deletes it, drains admitted Computer builds
+and runtime handoffs, and changes the channel pin through one redeploy of the
+unchanged control-plane commit. Beta promotion and rollback require an explicit
+dispatch; Production also requires the existing `production-approval` gate.
+Promotions copy the same retained archive; rollback selects the channel's
+recorded previous digest. Neither path changes a recipe, stops a user workspace
+or affects Local Personal or organization-local workspaces. Silent adoption
+uses the existing quiet-workspace rules; a busy workspace waits for a safe
+opportunity or its next natural wake.
+
+The controller requires the live `runtimeBuildDrainVersion: 1` capability and
+an active lease with zero live builds, unresolved provider effects and committed
+adoptions. Missing or unknown support refuses pinning. Immutable release
+archives and receipts survive the ordinary publisher's pruning. See
+[Runtime release qualification](deployment-environments.md#runtime-release-qualification)
+for provisioning, exact dispatch inputs, previous-pin verification and recovery
+from an unconfirmed mutation.
 
 ### Source-authority rollout
 
