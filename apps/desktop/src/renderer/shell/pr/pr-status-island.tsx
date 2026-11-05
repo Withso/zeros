@@ -50,10 +50,13 @@ import { notifyWorkspacesChanged } from "../../state/use-projects";
 import { useArchiveWorkspace } from "../../state/archive-actions";
 import { useGitRefreshKey } from "../use-git-refresh-key";
 import { useShowReviewTab } from "./use-open-review-tab";
+import { GitStatusCard } from "./git-status-card";
 import {
+  deriveGitStatus,
   derivePrIslandState,
   isActionDisabledByIslandClaim,
   isActionGatedWhileAgentWorking,
+  type PrStatusInputs,
   type PrIslandAction,
   type PrIslandActionBehavior,
   type PrIslandActionKind,
@@ -104,6 +107,9 @@ interface PrStatusIslandProps {
   active: boolean;
   /** Direct host-only lifecycle actions are absent in browser/relay sessions. */
   localDesktop: boolean;
+  /** The row above Changes, or Review Overview's Git status card. Both read,
+   *  claim and gate the same way; only what they draw differs. */
+  presentation?: "row" | "git-status";
 }
 
 // Tone → row surface + bottom hairline. Every open-PR state shares the brown
@@ -264,6 +270,7 @@ export function PrStatusIsland({
   workspace,
   active,
   localDesktop,
+  presentation = "row",
 }: PrStatusIslandProps) {
   const local = !!workspace.path && !isCloudWorkspace(workspace.path) && !isCloudWorkspace(workspace.id) && !parseCloudScopedId(workspace.id);
   const cloudDocument = useCloudGithubPrDocument(workspace.id);
@@ -704,9 +711,8 @@ export function PrStatusIsland({
     pr: null,
     checks: null,
   };
-  const derived = data
-    ? derivePrIslandState(
-        {
+  const inputs: PrStatusInputs | null = data
+    ? {
           prState: workspace.prState,
           status: {
             // This MUST be the HEAD-vs-worktree net comparison. Porcelain bucket
@@ -735,10 +741,9 @@ export function PrStatusIsland({
                 total: checks.total,
               }
             : null,
-        },
-        { allowContinue: localDesktop && local },
-      )
+      }
     : null;
+  const derived = inputs ? derivePrIslandState(inputs, { allowContinue: localDesktop && local }) : null;
   // A raw "checking" derivation (GitHub recomputing mergeability) is masked by
   // the generation's last definitive state, so a resume never flaps the row
   // (pr-status-stability.ts). Before the first settled batch, render the durable
@@ -802,6 +807,33 @@ export function PrStatusIsland({
   }, [workspace.id, prNumber, islandKind]);
 
   if (prNumber == null) return null;
+
+  const actionState = (action: PrIslandAction) => {
+    const gated = agentWorking && isActionGatedWhileAgentWorking(action);
+    const claimBlocked = isActionDisabledByIslandClaim(
+      acting?.behavior === "create" ? "push" : acting?.behavior ?? null,
+      action,
+    );
+    return { running: acting?.kind === action.kind, disabled: claimBlocked || gated, reason: gated ? AGENT_WORKING_REASON : null };
+  };
+
+  if (presentation === "git-status") {
+    return (
+      <GitStatusCard
+        state={inputs ? deriveGitStatus(inputs) : null}
+        checklist={{
+          uncommitted: counts ? counts.uncommitted : null,
+          ahead: status?.ahead ?? null,
+          behind: status?.behind ?? null,
+          conflicts: status ? status.conflicted.length > 0 || status.conflictState != null : null,
+          behindBase: pr?.mergeableState === "behind" ? (pr.behindBy ?? null) : 0,
+          baseBranch: pr?.baseBranch ?? workspace.baseBranch ?? "base",
+        }}
+        actionState={actionState}
+        onAction={runAction}
+      />
+    );
+  }
 
   const tone: PrIslandTone = island?.tone ?? "neutral";
 

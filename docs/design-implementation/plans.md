@@ -59,6 +59,19 @@ Boards: every `Rev*` board in `review-tab.md`.
 Verification: the review unit suites, `ui-smoke-code-review`, the PR action
 smokes and renders of every `Rev*` board in both themes, Local and cloud.
 
+Status (2026-11-05): steps 1, 3, 4 and 5 landed: the sub-tabs and their
+restore mapping, the header rows, Overview (Git status from the island's
+`git-status` presentation, PR status with the one Merge, Findings) and the
+rail, from the pull request's own totals, reviewers, assignees and labels
+(engine and control plane read them from the same pulls response). Step 2 is
+open: the Changes tab still cannot prove its Branch comparison is the
+published diff, because the renderer never learns the comparison's head SHA
+(the engine's diff and the worker's need to return it). Until then the
+published diff, where Post to PR works, stays one step from Overview's rail
+(Open changes, the `changes` destination). Step 6 (Description edit,
+Activity filters, the Checks summary card, Commits hover actions) and step 7's
+narrow fold of the header remain.
+
 ## 2. Changes: one card per file
 
 Board: `ChgWindow`. The diff is one virtualized Pierre `CodeView`

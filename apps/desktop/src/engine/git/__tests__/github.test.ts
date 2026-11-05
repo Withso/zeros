@@ -99,6 +99,12 @@ interface PrPayload {
   merged_at?: string | null;
   merge_commit_sha?: string | null;
   node_id: string;
+  additions?: number;
+  deletions?: number;
+  changed_files?: number;
+  requested_reviewers?: Array<{ login: string; avatar_url?: string | null }>;
+  assignees?: Array<{ login: string; avatar_url?: string | null }>;
+  labels?: Array<{ name: string; color?: string }>;
 }
 
 function makeOctokitMock() {
@@ -1004,6 +1010,31 @@ describe("github", () => {
       expect(got.number).toBe(pr.number);
       expect(got.title).toBe("t");
       expect(got.headSha).toBe("a".repeat(40));
+    });
+
+    it("carries the pull request's totals, reviewers, assignees and labels", async () => {
+      const pr = await createPr({ workspaceId, title: "rail", body: "" });
+      Object.assign(mock.getPr(pr.number)!, {
+        user: { login: "test-user", avatar_url: "https://avatars.githubusercontent.com/u/9" },
+        additions: 39,
+        deletions: 47,
+        changed_files: 4,
+        requested_reviewers: [{ login: "priya" }],
+        assignees: [{ login: "alex", avatar_url: null }],
+        labels: [{ name: "bug", color: "d73a4a" }, { name: "odd", color: "zz" }],
+      });
+      await expect(getPr({ workspaceId, prNumber: pr.number })).resolves.toMatchObject({
+        additions: 39,
+        deletions: 47,
+        changedFiles: 4,
+        authorAvatarUrl: "https://avatars.githubusercontent.com/u/9",
+        requestedReviewers: [{ login: "priya", avatarUrl: null }],
+        assignees: [{ login: "alex", avatarUrl: null }],
+        labels: [
+          { name: "bug", color: "d73a4a" },
+          { name: "odd", color: null },
+        ],
+      });
     });
 
     it("recomputes behindBy when the PR base changes without a head push", async () => {

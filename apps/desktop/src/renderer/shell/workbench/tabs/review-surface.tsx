@@ -32,6 +32,8 @@ import { useWorkspacePrDiscoveryState } from "../../pr/workspace-pr-discovery-st
 import { useReviewGithubFailure } from "../../pr/review-github-failure";
 import { isCloudWorkspace, parseCloudScopedId } from "../../../platform/bridge/cloud-workspace-key";
 import { WorkbenchEmptyState, useWorkbenchStatusSource } from "../tab-status";
+import { PrStatusIsland } from "../../pr/pr-status-island";
+import { useNativeRuntime } from "@/renderer/platform/runtime";
 
 interface TabBodyProps {
   tab: WorkbenchTab;
@@ -47,6 +49,7 @@ export const ReviewSurface = React.memo(function ReviewSurface({
   scope,
 }: TabBodyProps) {
   const dispatch = useWorkspaceDispatch();
+  const nativeReady = useNativeRuntime().ready;
   const { workspace, isLocalMain, changesTarget } = useSourceTarget();
   // The owning project supplies the provider host for the review connection.
   const { project } = useActiveWorkspace();
@@ -109,7 +112,16 @@ export const ReviewSurface = React.memo(function ReviewSurface({
         // Live polling runs only while this is the visible workbench tab.
         active={active}
         agentWorking={agentWorking}
-        sub={tab.reviewSubtab ?? "changes"}
+        gitStatus={
+          <PrStatusIsland
+            key={workspace.id}
+            workspace={workspace}
+            active={active}
+            localDesktop={nativeReady}
+            presentation="git-status"
+          />
+        }
+        sub={tab.reviewSubtab ?? "overview"}
         onSubChange={(reviewSubtab) =>
           dispatch({
             type: "UPDATE_WORKBENCH_TAB",

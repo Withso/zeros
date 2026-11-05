@@ -5,6 +5,7 @@ import { describe, it, expect } from "vitest";
 
 import {
   claimPrIslandAction,
+  deriveGitStatus,
   derivePrIslandState,
   isActionDisabledByIslandClaim,
   isActionGatedWhileAgentWorking,
@@ -415,5 +416,40 @@ describe("PR island action single-flight claim", () => {
 
     expect(isActionDisabledByIslandClaim("push", showChecks)).toBe(false);
     expect(isActionDisabledByIslandClaim("push", archive)).toBe(true);
+  });
+});
+
+// Review's Overview splits the island: the branch on this machine is Git
+// status; the pull request on GitHub is PR status (plans.md §1.4).
+describe("deriveGitStatus — the local half of the island", () => {
+  it("keeps every local blocker and its one action", () => {
+    const cases: [Partial<PrStatusInputs["status"]>, string, string][] = [
+      [{ conflicts: true }, "merge-conflicts", "resolve"],
+      [{ uncommitted: 2 }, "uncommitted", "commit-and-push"],
+      [{ ahead: 1, behind: 2 }, "diverged", "pull"],
+      [{ ahead: 3 }, "ahead", "push"],
+      [{ behind: 1 }, "behind", "pull"],
+    ];
+    for (const [status, kind, action] of cases) {
+      const s = deriveGitStatus(base({ status: { ...cleanStatus, ...status }, pr: readyPr("clean") }));
+      expect([s.kind, s.actions.map((a) => a.kind)]).toEqual([kind, [action]]);
+    }
+  });
+
+  it("owns the branch's place against its base, not the PR's verdict", () => {
+    const behind = deriveGitStatus(base({ pr: { ...readyPr("behind"), behindBy: 4 } }));
+    expect([behind.kind, behind.actions.map((a) => a.kind)]).toEqual(["behind-base", ["update-from-base"]]);
+    expect(behind.label).toBe("4 commits behind the base branch");
+    const dirty = deriveGitStatus(base({ pr: readyPr("dirty", false) }));
+    expect([dirty.kind, dirty.actions.map((a) => a.kind)]).toEqual(["merge-conflicts", ["resolve"]]);
+    for (const pr of [readyPr("clean"), readyPr("blocked"), readyPr("unstable"), null]) {
+      const s = deriveGitStatus(base({ pr, checks: { pending: 0, failed: 2, total: 3 } }));
+      expect([s.kind, s.label, s.tone, s.actions]).toEqual(["up-to-date", "Branch is up to date", "success", []]);
+    }
+  });
+
+  it("still reports the branch on a merged or draft pull request", () => {
+    expect(deriveGitStatus(base({ prState: "merged", status: { ...cleanStatus, ahead: 1 } })).kind).toBe("ahead");
+    expect(deriveGitStatus(base({ prState: "draft" })).kind).toBe("up-to-date");
   });
 });

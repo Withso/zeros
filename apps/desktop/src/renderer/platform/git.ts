@@ -355,6 +355,27 @@ export interface PR {
   mergedAt: number | null;
   /** Absent when connected to an older engine build. */
   mergeCommitSha?: string | null;
+  /** Pull-request totals from the host; absent from list reads and older
+   *  engines, where Review counts the published diff. */
+  additions?: number;
+  deletions?: number;
+  changedFiles?: number;
+  authorAvatarUrl?: string | null;
+  /** Review's rail; absent on older engines, empty when there are none. */
+  requestedReviewers?: PrPerson[];
+  assignees?: PrPerson[];
+  labels?: PrLabel[];
+}
+
+export interface PrPerson {
+  login: string;
+  avatarUrl: string | null;
+}
+
+export interface PrLabel {
+  name: string;
+  /** Six-digit hex without the #. */
+  color: string | null;
 }
 
 export interface CreatedWorkspace {

@@ -663,3 +663,22 @@ Each landed step appends one line: date, workstream, what landed, evidence.
   in the app (`py-0.5` on 12/16) and on every canvas board (`.ck-row-chip`);
   it was 18px. Rows stay 28px on one pitch, and the tool-presentation smoke
   measures the chip.
+- 2026-11-05 · 5 · Review (plans.md §1, steps 1 and 3–5): the sub-tabs are
+  Overview, Description, Activity, Checks and Commits (a restored `changes`
+  lands on Overview, `reviews` on Activity). The header reads in rows (state;
+  repo and number; title; author and branches with copy; age and size) with
+  only Open on GitHub and More. Overview holds Git status (the shared island's
+  `git-status` presentation: one line, its one action, the checklist behind
+  the chevron), PR status (the verdict, Merge with the remembered method as a
+  green split when it can run and an outline when it can't, only the
+  blockers with Add to chat, and what is done), Findings (agent comments,
+  review apps and code scanning, with Add all to chat) and the rail
+  (reviewers with their verdicts, assignees, labels, the linked issue, the
+  change counts and Open changes), which folds into Details below 768px. On
+  Review with a PR the shared status row no longer renders, so there is one
+  Merge. The engine and the control plane read the pull request's totals,
+  author avatar, requested reviewers, assignees and labels from the same
+  response. Decisions: the title is 18/28 (`text-lg`; the type scale has no
+  20) and the board's 26px state chip is 24px. Post to PR stays on the
+  published diff behind Open changes until the Changes tab learns its
+  comparison's head SHA (plans.md §1.2).

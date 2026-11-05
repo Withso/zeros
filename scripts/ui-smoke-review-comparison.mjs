@@ -329,6 +329,60 @@ export async function runReviewComparisonSmoke({
         true,
       );
     }
+
+    // Overview (plans.md §1): the header in rows, five sub-tabs, Git status,
+    // PR status holding the one Merge with only its blockers, Findings and
+    // the rail — which folds into Details in a narrow pane.
+    await page.goto(`${harnessBase}/harness-review-comparison.html?rich&sub=overview`, {
+      waitUntil: "networkidle",
+    });
+    const prStatus = page.locator("[data-review-pr-status]");
+    await expect(prStatus).toBeVisible();
+    await expect(page.getByRole("tab")).toHaveText(["Overview", "Description", "Activity3", "Checks7", "Commits"]);
+    const overview = await page.evaluate(() => {
+      const tab = document.querySelector('[role="tab"][data-state="active"]');
+      const title = document.querySelector("[data-review-header] h2");
+      const rails = [...document.querySelectorAll("[data-review-rail]")].filter((rail) => rail.getClientRects().length > 0);
+      return {
+        tab: tab ? { text: tab.textContent, height: tab.getBoundingClientRect().height } : null,
+        title: title ? { text: title.textContent, size: getComputedStyle(title).fontSize, line: getComputedStyle(title).lineHeight } : null,
+        blockers: [...document.querySelectorAll("[data-review-blocker]")].map((row) => row.textContent),
+        findings: document.querySelectorAll("[data-review-finding]").length,
+        visibleRails: rails.length,
+        railBesideStatus:
+          rails.length === 1 &&
+          rails[0].getBoundingClientRect().left > document.querySelector("[data-review-pr-status]").getBoundingClientRect().right,
+        headerMerge: document.querySelector("[data-review-header] [data-slot='split-button']") !== null,
+      };
+    });
+    expect(overview).toMatchObject({
+      tab: { text: "Overview", height: 28 },
+      title: { text: "Fix login redirect loop", size: "18px", line: "28px" },
+      blockers: ["test (ubuntu-latest) failedAdd to chat", "priya-shah requested changesAdd to chat"],
+      findings: 2,
+      visibleRails: 1,
+      railBesideStatus: true,
+      headerMerge: false,
+    });
+    // Merge waits while it is blocked: a quiet outline, not the green fill.
+    const merge = prStatus.locator("[data-slot='split-button'] button").first();
+    await expect(merge).toBeDisabled();
+    expect(await merge.evaluate((el) => getComputedStyle(el).backgroundColor)).toBe("rgba(0, 0, 0, 0)");
+    await page.setViewportSize({ width: 640, height: 900 });
+    await expect
+      .poll(() =>
+        page.evaluate(() => {
+          const rails = [...document.querySelectorAll("[data-review-rail]")].filter((rail) => rail.getClientRects().length > 0);
+          const details = document.querySelector('[aria-label="Details"]');
+          return rails.length === 1 && !!details && details.contains(rails[0]);
+        }),
+      )
+      .toBe(true);
+    await page.setViewportSize({ width: 1180, height: 900 });
+    check(
+      "Review Overview reads in header rows with five sub-tabs, one Merge in PR status, Findings and a rail that folds into Details",
+      true,
+    );
     expect(errors).toEqual([]);
   } finally {
     page.off("pageerror", onError);

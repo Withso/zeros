@@ -435,9 +435,6 @@
       "apps/desktop/src/renderer/shell/workbench/tabs/review-shared-components.tsx": {
         "button": 3
       },
-      "apps/desktop/src/renderer/shell/workbench/tabs/review-tab.tsx": {
-        "button": 4
-      },
       "apps/desktop/src/renderer/shell/workbench/tabs/review-timeline.tsx": {
         "button": 1
       },

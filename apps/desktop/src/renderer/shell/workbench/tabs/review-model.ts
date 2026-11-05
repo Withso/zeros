@@ -14,6 +14,11 @@ import type {
   PrCommitSummary,
   PrTimelineItem,
 } from "../../../platform/git";
+import {
+  buildFixCheckPrompt,
+  buildReviewCommentContext,
+} from "../../pr/pr-action-prompts";
+import type { CodeReviewThreadItem } from "../../../features/code-review/review-thread-model";
 
 // ── time formatting ──────────────────────────────────────────
 
@@ -278,4 +283,194 @@ export function hasPendingChecks(data: PrChecksResult | null): boolean {
     !!data &&
     (data.pending > 0 || data.checks.some((c) => checkOutcome(c) === "pending"))
   );
+}
+
+// ── Overview · PR status ─────────────────────────────────────
+
+const VERDICT_STATES = new Set(["APPROVED", "CHANGES_REQUESTED", "DISMISSED"]);
+
+/** Each reviewer's standing review, newest first: their latest verdict
+ * (approved, changes requested, dismissed), else their latest comment-only
+ * review. A comment after a verdict leaves the verdict standing, as on GitHub. */
+export function latestReviewsByAuthor(items: readonly PrTimelineItem[]): PrTimelineItem[] {
+  const byAuthor = new Map<string, PrTimelineItem>();
+  const sorted = items
+    .filter((item) => item.kind === "review")
+    .sort((a, b) => b.createdAt - a.createdAt);
+  for (const item of sorted) {
+    const held = byAuthor.get(item.author);
+    if (!held) byAuthor.set(item.author, item);
+    else if (!VERDICT_STATES.has(held.state) && VERDICT_STATES.has(item.state)) byAuthor.set(item.author, item);
+  }
+  return [...byAuthor.values()].sort((a, b) => b.createdAt - a.createdAt);
+}
+
+export interface PrStatusBlocker {
+  id: string;
+  kind: "check" | "review" | "conflicts" | "behind" | "requirements";
+  title: string;
+  /** What Add to chat drops in the composer; absent when the row has none. */
+  chatText?: string;
+}
+
+export interface PrStatusView {
+  title: string;
+  detail: string | null;
+  tone: "success" | "danger" | "neutral" | "merged" | "closed";
+  /** The card's one action: Merge (with the remembered method) or Ready for
+   *  review. Its enabled state comes from the island (reviewActionBlockReason). */
+  action: "merge" | "ready" | null;
+  blockers: PrStatusBlocker[];
+  /** What is already done, in one quiet line. */
+  done: string | null;
+}
+
+const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+
+function joinPhrases(parts: string[]): string {
+  if (parts.length <= 1) return parts[0] ?? "";
+  return `${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}`;
+}
+
+/** The pull request on GitHub: its verdict, the one action, only what blocks
+ * it (failing checks and requested changes carry Add to chat), and what is
+ * done. Local Git state belongs to Git status and is never repeated here. */
+export function derivePrStatusView(args: {
+  pr: PR;
+  branch: string;
+  checks: PrChecksResult | null;
+  timeline: readonly PrTimelineItem[] | null;
+  now?: number;
+}): PrStatusView {
+  const { pr, branch, checks, timeline } = args;
+  if (pr.state === "merged" || pr.mergedAt != null) {
+    return {
+      title: "Merged",
+      detail: pr.mergedAt ? `Merged ${relTime(pr.mergedAt, args.now)}` : null,
+      tone: "merged",
+      action: null,
+      blockers: [],
+      done: null,
+    };
+  }
+  if (pr.state === "closed") {
+    return { title: "Closed", detail: "Closed without merging", tone: "closed", action: null, blockers: [], done: null };
+  }
+  const buckets = bucketChecks(checks?.checks ?? []);
+  const reviews = latestReviewsByAuthor(timeline ?? []);
+  const blockers: PrStatusBlocker[] = buckets.failed.map((c) => ({
+    id: `check:${c.name}`,
+    kind: "check",
+    title: `${c.name} failed`,
+    chatText: buildFixCheckPrompt({ checkName: c.name, prNumber: pr.number, branch: branch || pr.headBranch, detailsUrl: c.detailsUrl }),
+  }));
+  const changesRequested = reviews.filter((r) => r.state === "CHANGES_REQUESTED");
+  for (const r of changesRequested) {
+    blockers.push({
+      id: `review:${r.author}`,
+      kind: "review",
+      title: `${r.author} requested changes`,
+      chatText: buildReviewCommentContext({ prNumber: pr.number, author: r.author, state: r.state, body: r.body }),
+    });
+  }
+  const mergeable = pr.mergeableState.toLowerCase();
+  if (mergeable === "dirty") blockers.push({ id: "conflicts", kind: "conflicts", title: `Conflicts with ${pr.baseBranch}` });
+  if (mergeable === "behind") blockers.push({ id: "behind", kind: "behind", title: `Behind ${pr.baseBranch}` });
+  if (mergeable === "blocked" && blockers.length === 0) {
+    blockers.push({ id: "requirements", kind: "requirements", title: "Repository merge requirements aren’t met" });
+  }
+
+  const passed = buckets.passed.length;
+  const pending = buckets.pending.length;
+  const approvedBy = reviews.filter((r) => r.state === "APPROVED").map((r) => r.author);
+  const doneParts = [
+    passed > 0 ? plural(passed, "check") + " passed" : null,
+    pending > 0 && blockers.length > 0 ? `${pending} running` : null,
+    approvedBy.length > 0 ? `Approved by ${joinPhrases(approvedBy)}` : null,
+  ].filter((part): part is string => part !== null);
+  const done = doneParts.length > 0 ? doneParts.join(" · ") : null;
+
+  if (pr.state === "draft" || mergeable === "draft") {
+    return { title: "Draft", detail: "Mark it ready for review to merge", tone: "neutral", action: "ready", blockers, done };
+  }
+  if (blockers.length > 0) {
+    const reasons = [
+      buckets.failed.length > 0 ? plural(buckets.failed.length, "failing check") : null,
+      changesRequested.length > 0 ? "requested changes" : null,
+      mergeable === "dirty" ? `conflicts with ${pr.baseBranch}` : null,
+      mergeable === "behind" ? `an out-of-date branch` : null,
+      blockers.some((b) => b.kind === "requirements") ? "unmet merge requirements" : null,
+    ].filter((part): part is string => part !== null);
+    return { title: "Merge blocked", detail: joinPhrases(reasons), tone: "danger", action: "merge", blockers, done };
+  }
+  if (pending > 0) {
+    const total = checks?.checks.length ?? pending;
+    return { title: "Checks running", detail: `${pending} of ${total} checks running`, tone: "neutral", action: "merge", blockers, done };
+  }
+  if ((mergeable === "clean" || mergeable === "has_hooks") && pr.isMergeable !== false) {
+    return { title: "Ready to merge", detail: null, tone: "success", action: "merge", blockers, done };
+  }
+  return { title: "Checking mergeability…", detail: null, tone: "neutral", action: "merge", blockers, done };
+}
+
+// ── Overview · Findings ──────────────────────────────────────
+
+export interface ReviewFinding {
+  key: string;
+  /** Who wrote it: an agent (its provider names the mark), a review app or a
+   *  code-scanning check. */
+  author: { name: string; kind: "agent" | "bot" | "check"; provider?: string };
+  title: string;
+  /** "login.ts:18" or "login.ts:18–21". */
+  location: string;
+  resolved: boolean;
+  /** What Add to chat drops in the composer. */
+  chatText: string;
+}
+
+function findingTitle(body: string): string {
+  const line =
+    body
+      .split("\n")
+      .map((text) => text.replace(/\*\*|__/g, "").replace(/^\s*(?:#+|[-*>]|\d+\.)\s+/, "").trim())
+      .find(Boolean) ?? "";
+  return line.length > 160 ? `${line.slice(0, 159)}…` : line;
+}
+
+/** Findings are comments from agents, review apps and code scanning; people's
+ * reviews stay in Activity. Unresolved first, each in thread order. */
+export function reviewFindings(
+  threads: readonly CodeReviewThreadItem[],
+  prNumber: number,
+): ReviewFinding[] {
+  const findings: ReviewFinding[] = [];
+  for (const thread of threads) {
+    const first = thread.comments[0];
+    if (!first) continue;
+    const kind =
+      thread.source === "check"
+        ? "check"
+        : thread.source === "github" && first.author.kind === "integration"
+          ? "bot"
+          : thread.source === "workspace" && first.author.kind === "agent"
+            ? "agent"
+            : null;
+    if (!kind) continue;
+    const { path, startLine, endLine } = thread.anchor;
+    const base = path.split("/").pop() ?? path;
+    const lines = endLine > startLine ? `${startLine}–${endLine}` : `${startLine}`;
+    const quoted = first.body
+      .split("\n")
+      .map((text) => `> ${text}`)
+      .join("\n");
+    findings.push({
+      key: `${thread.source}:${thread.id}`,
+      author: { name: first.author.name, kind, ...(first.author.provider ? { provider: first.author.provider } : {}) },
+      title: findingTitle(first.body),
+      location: `${base}:${lines}`,
+      resolved: thread.resolved,
+      chatText: `PR #${prNumber} — ${first.author.name} on \`${path}:${lines}\`:\n${quoted}\n\n`,
+    });
+  }
+  return findings.sort((a, b) => Number(a.resolved) - Number(b.resolved));
 }

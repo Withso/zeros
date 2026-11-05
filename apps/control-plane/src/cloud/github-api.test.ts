@@ -331,6 +331,34 @@ describe("cloud GitHub API", () => {
     },
   );
 
+  it("carries the pull request's totals, reviewers, assignees and labels for Review's rail", async () => {
+    const { api } = fixture((path) => {
+      if (path === "/repositories/42") return Response.json(repository);
+      return Response.json({
+        ...pull,
+        user: { login: "contributor", avatar_url: "https://avatars.githubusercontent.com/u/1" },
+        additions: 39,
+        deletions: 47,
+        changed_files: 4,
+        requested_reviewers: [{ login: "priya" }],
+        assignees: [{ login: "alex", avatar_url: null }],
+        labels: [{ name: "bug", color: "d73a4a" }, { name: "odd", color: "not-a-hex" }],
+      });
+    });
+    expect(await api.get(target, 7)).toMatchObject({
+      additions: 39,
+      deletions: 47,
+      changedFiles: 4,
+      authorAvatarUrl: "https://avatars.githubusercontent.com/u/1",
+      requestedReviewers: [{ login: "priya", avatarUrl: null }],
+      assignees: [{ login: "alex", avatarUrl: null }],
+      labels: [
+        { name: "bug", color: "d73a4a" },
+        { name: "odd", color: null },
+      ],
+    });
+  });
+
   it("keeps checks from an old head out of a refreshed PR", async () => {
     let reads = 0;
     const { api } = fixture((path) => {

@@ -26,6 +26,10 @@ const ref = z.object({
   sha: githubSha,
   repo: repository.nullable(),
 });
+const person = z.object({
+  login: githubName,
+  avatar_url: z.string().url().max(512).nullable().optional(),
+});
 const pullSchema = z.object({
   number: githubId,
   node_id: z.string().min(1).max(256),
@@ -34,11 +38,20 @@ const pullSchema = z.object({
   draft: z.boolean().nullable().optional(),
   title: z.string().max(1024),
   body: z.string().max(100_000).nullable(),
-  user: z.object({ login: githubName }).nullable(),
+  user: z.object({ login: githubName, avatar_url: z.string().url().max(512).nullable().optional() }).nullable(),
   base: ref,
   head: ref,
   mergeable: z.boolean().nullable().optional(),
   mergeable_state: z.string().max(64).optional(),
+  additions: z.number().int().nonnegative().optional(),
+  deletions: z.number().int().nonnegative().optional(),
+  changed_files: z.number().int().nonnegative().optional(),
+  requested_reviewers: z.array(person).max(100).optional(),
+  assignees: z.array(person).max(100).optional(),
+  labels: z
+    .array(z.object({ name: z.string().min(1).max(100), color: z.string().max(16).nullable().optional() }))
+    .max(100)
+    .optional(),
   created_at: githubDate,
   updated_at: githubDate,
   merged_at: githubDate.nullable().optional(),
@@ -89,6 +102,24 @@ function projection(p: Pull) {
     updatedAt: Date.parse(p.updated_at),
     mergedAt: p.merged_at ? Date.parse(p.merged_at) : null,
     mergeCommitSha: p.merge_commit_sha ?? null,
+    ...(p.additions !== undefined ? { additions: p.additions } : {}),
+    ...(p.deletions !== undefined ? { deletions: p.deletions } : {}),
+    ...(p.changed_files !== undefined ? { changedFiles: p.changed_files } : {}),
+    authorAvatarUrl: p.user?.avatar_url ?? null,
+    ...(p.requested_reviewers
+      ? { requestedReviewers: p.requested_reviewers.map((r) => ({ login: r.login, avatarUrl: r.avatar_url ?? null })) }
+      : {}),
+    ...(p.assignees
+      ? { assignees: p.assignees.map((a) => ({ login: a.login, avatarUrl: a.avatar_url ?? null })) }
+      : {}),
+    ...(p.labels
+      ? {
+          labels: p.labels.map((l) => ({
+            name: l.name,
+            color: l.color && /^[0-9a-f]{6}$/i.test(l.color) ? l.color : null,
+          })),
+        }
+      : {}),
   };
 }
 export type CloudGithubPullRequest = ReturnType<typeof projection>;

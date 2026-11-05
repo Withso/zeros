@@ -488,7 +488,7 @@ describe("REMOVE/UPDATE/ACTIVATE_WORKBENCH_TAB", () => {
     dispatch({
       type: "UPDATE_WORKBENCH_TAB",
       id: reviewB.id,
-      updates: { reviewSubtab: "reviews" },
+      updates: { reviewSubtab: "activity" },
     });
 
     dispatch({ type: "SET_NEW_AGENT_FOLDER", folder: folderA });
@@ -505,7 +505,7 @@ describe("REMOVE/UPDATE/ACTIVATE_WORKBENCH_TAB", () => {
       state.workbenchByScope[workbenchScopeForFolder(folderB)].tabs.find(
         (tab) => tab.id === reviewB.id,
       )?.reviewSubtab,
-    ).toBe("reviews");
+    ).toBe("activity");
   });
 
   it("keeps file-tree visibility isolated by File tab across A → B → A", () => {
