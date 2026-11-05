@@ -2,7 +2,7 @@
   "id": "cloud-runtime-current-poll-budget",
   "kind": "replay",
   "area": "control-plane-data",
-  "fixedBy": "pending",
+  "fixedBy": "pr:845",
   "symptom": "An already-current worker repeated source authorization on each runtime poll; polls beyond the short admission freshness window used 21 database transactions despite authorizing no update.",
   "rule": "Measure the actual repeated HTTP/database path. An authenticated current boot matching its effective server-owned pin can return only current; a different or unknown runtime keeps full source and adoption checks (zstack-verify, principles 3, 9, 13 and 18).",
   "check": "pnpm --dir apps/control-plane exec vitest run src/cloud/runtime-status.integration.test.ts src/cloud/runtime-adoption.integration.test.ts src/cloud/runtime-handoff.integration.test.ts"
