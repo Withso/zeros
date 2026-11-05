@@ -3,7 +3,7 @@ import { access, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { CloudV2ControlFrameSchema, CLOUD_V2_RELAY_PROTOCOL, type CloudV2WorkerFrame } from "@zeros/protocol/cloud-v2-relay";
+import { CloudV2ControlFrameSchema, CLOUD_V2_RELAY_PROTOCOL, type CloudV2ControlFrame, type CloudV2WorkerFrame } from "@zeros/protocol/cloud-v2-relay";
 import { CloudV2PromptPullReplySchema } from "@zeros/protocol/cloud-v2-prompts";
 import { createMessage, type BridgeMessage } from "@zeros/protocol/messages";
 import { safeParseClientBridgeMessage } from "@zeros/protocol/schemas";
@@ -37,11 +37,17 @@ import { WorkerCodeReview } from "./workspace/code-review";
 import { measureStartup, recordStartupTiming, type StartupTimingObserver } from "./startup-timings";
 import { EnvironmentSeedError, seedEnvironment } from "./workspace/environment-seed";
 import { ApplicationEnvironment } from "./credentials/application-environment";
+import { RuntimeQuiescence, type RuntimeCensus } from "./runtime-quiescence";
+import { RuntimeUpdate } from "./runtime-update";
+import type { RuntimePermit } from "./runtime-permit";
 
 interface WorkerOptions {
   directory: string;
   homeDirectory?: string;
   workspaceId?: string;
+  runtimeResume?: { instanceId: string; ready?(): void };
+  runtimePermit?: RuntimePermit;
+  runtimeClock?: () => number;
   transport: Transport;
   drivers?: DriverFactories;
   prepareCheckout?: (workspace: WorkerConfig["workspace"], gitEnvironment: NodeJS.ProcessEnv, timing?: StartupTimingObserver) => Promise<CheckoutResult | void>;
@@ -58,14 +64,19 @@ interface Client extends AppClient { rejected: boolean }
 /** One VM, one checkout, many app sockets. The relay is a carrier for ordinary
  * bridge frames; this process owns validation, agent work and durable history. */
 export class CloudWorker {
-  /** Changes with every process, so the app can tell a restart (its shells are gone) from a reconnect. */
-  private readonly instanceId = randomUUID();
+  /** Only a quiescent handoff preserves identity; ordinary restarts lose PTYs. */
+  private readonly instanceId: string;
   private readonly clients = new Map<string, Client>();
+  private readonly pendingClients = new Map<string, object>();
+  private readonly runtimeGate = new RuntimeQuiescence(() => this.runtimeCensus, () => this.options.runtimeClock?.() ?? Date.now());
+  private runtimeUpdater?: RuntimeUpdate;
+  private runtimePublished = false;
+  private configurations = 0;
   private scope?: WorkspaceScope;
   private store?: SessionStore;
   private agents?: Agents;
   private mcp?: McpGateway;
-  private readonly workspaceMcp = new WorkspaceToolsMcp();
+  private readonly workspaceMcp = new WorkspaceToolsMcp(async () => this.runtimeGate.admit());
   private reviews?: WorkerCodeReview;
   private chats?: ChatService;
   private history?: HistoryMirror;
@@ -99,6 +110,7 @@ export class CloudWorker {
   private unsubscribers: Array<() => void> = [];
 
   constructor(private readonly options: WorkerOptions) {
+    this.instanceId = options.runtimeResume?.instanceId ?? randomUUID();
     this.tokens = new GithubTokens((frame, timeoutMs) => this.send(frame, timeoutMs));
     this.githubCredentials = new GithubCredentialRecovery(this.tokens, { fetch: options.githubFetch, supportsRecovery: () => this.githubUserTokensEnabled });
     this.github = new GithubBroker(`/tmp/zeros-github-${this.instanceId}/github.sock`, (purpose, failed) => this.githubCredentials.get(purpose, failed), () => this.workspace?.githubChanged());
@@ -143,7 +155,7 @@ export class CloudWorker {
 
   async dispose(): Promise<void> {
     if (this.disposed) return;
-    this.disposed = true; clearInterval(this.heartbeat); this.tokens.dispose(); this.githubCredentials.invalidate();
+    this.disposed = true; this.runtimeUpdater?.stop(); clearInterval(this.heartbeat); this.tokens.dispose(); this.githubCredentials.invalidate();
     const workspaceTools = this.workspaceMcp.dispose();
     const agentsClosing = this.agents?.dispose();
     this.environmentLifetime.abort();
@@ -170,6 +182,23 @@ export class CloudWorker {
     const parsed = CloudV2ControlFrameSchema.safeParse(raw);
     if (!parsed.success) return;
     const message = parsed.data;
+    if (["stop", "close", "prompts"].includes(message.t)) this.runtimeGate.activity();
+    if (["stop", "close", "prompts", "reply", "refusal"].includes(message.t)) return this.control(message);
+    const opening = {};
+    if (message.t === "open") this.pendingClients.set(message.clientId, opening);
+    const admission = this.runtimeGate.admit();
+    const leave = typeof admission === "function" ? admission : await admission;
+    if (message.t === "config") this.configurations++;
+    try {
+      if (message.t !== "open" || this.pendingClients.get(message.clientId) === opening) await this.control(message);
+    } finally {
+      if (message.t === "open" && this.pendingClients.get(message.clientId) === opening) this.pendingClients.delete(message.clientId);
+      if (message.t === "config") this.configurations--; leave();
+    }
+  }
+
+  private async control(message: CloudV2ControlFrame): Promise<void> {
+    if (this.disposed) return;
     if (message.t === "config") {
       this.configuring = this.configuring.catch(() => {}).then(() => this.configure(message));
       await this.configuring.catch(error => { this.options.onError?.("configuration"); throw error; });
@@ -180,6 +209,7 @@ export class CloudWorker {
     if (message.t === "reply" || message.t === "refusal") { this.tokens.receive(message); return; }
     if (message.t === "prompts") { this.promptInbox?.hint(); return; }
     if (message.t === "stop") {
+      this.runtimeUpdater?.stop();
       // The VM can stop only after the native turn's final rows reach the HTTP
       // mirror. Keep the transport alive until this correlated ack is sent.
       this.stopping ??= this.prepareStop();
@@ -192,6 +222,7 @@ export class CloudWorker {
       return;
     }
     if (message.t === "close") {
+      this.pendingClients.delete(message.clientId);
       const client = this.clients.get(message.clientId); if (client) this.terminals?.detach(client);
       this.clients.delete(message.clientId); return;
     }
@@ -289,6 +320,10 @@ export class CloudWorker {
       if (!this.reviews!.enabled) this.workspaceMcp.revoke();
       this.agents!.configure(config);
     }
+    await this.options.transport.readyRuntime?.();
+    if (this.disposed || this.stopping) return;
+    this.options.runtimeResume?.ready?.();
+    this.runtimePublished = true;
     this.history!.connect();
     if (config.promptOutbox === 1 && this.options.transport.promptRequest) {
       this.promptInbox ??= new PromptInbox(this.store!, this.agents!, async (op, body, signal) => {
@@ -304,6 +339,15 @@ export class CloudWorker {
       this.promptInbox.start();
     } else if (this.promptInbox) { await this.promptInbox.dispose(); this.promptInbox = undefined; }
     this.configurationRevision = revision;
+    if (config.runtimeUpdate === 1 && this.options.transport.runtimeUpdate && this.options.runtimePermit && !this.runtimeUpdater) {
+      this.runtimeUpdater = new RuntimeUpdate({ gate: this.runtimeGate, permit: this.options.runtimePermit, instanceId: this.instanceId,
+        revision: () => this.configurationRevision?.toString(), request: this.options.transport.runtimeUpdate.bind(this.options.transport),
+        flush: async () => {
+          await this.flushServices();
+          if (!await this.history!.flush()) throw new Error("History mirror is unavailable.");
+        } });
+      this.runtimeUpdater.start();
+    }
     if (!initial && reviewAvailable !== this.reviews?.enabled) await this.broadcast(this.readyFrame());
     this.configuredReviewAvailable = this.reviews?.enabled === true;
     await this.reportIdle(true);
@@ -320,7 +364,8 @@ export class CloudWorker {
     try {
       await this.github.start();
       if (this.disposed || this.stopping) return false;
-      const checkout = await measureStartup("worker_checkout", () => (this.options.prepareCheckout ?? prepareCheckout)(config.workspace, this.gitEnvironment, timing), timing)
+      const checkout = await measureStartup("worker_checkout", () => this.options.runtimeResume ? Promise.resolve(undefined)
+        : (this.options.prepareCheckout ?? prepareCheckout)(config.workspace, this.gitEnvironment, timing), timing)
         .catch(async error => {
           await this.options.transport.reportCheckoutFailure?.().catch(() => {});
           throw error;
@@ -360,6 +405,8 @@ export class CloudWorker {
         historyDiff: params => agents!.turns.historyDiff(params),
         ...this.options.workspaceServices,
         codeReview: reviews,
+        pollingAllowed: () => this.runtimeGate.open && (!this.options.runtimeResume || this.runtimePublished),
+        activity: () => this.runtimeGate.activity(),
         ...(config.githubPullRequests === 1 && this.options.transport.reportGithubCheckout
           ? { reportGithubCheckout: this.options.transport.reportGithubCheckout.bind(this.options.transport) } : {}),
         nextCheckoutSequence: () => ++this.checkoutSequence,
@@ -370,7 +417,7 @@ export class CloudWorker {
         publish: (frame) => { if (workspace && this.workspace === workspace) void this.broadcast(frame); },
       });
       if (this.disposed || this.stopping) return false;
-      mcp = new McpGateway({ workspaceRoot: scope.root, authorization: this.options.transport.mcpAuthorization?.bind(this.options.transport),
+      mcp = new McpGateway({ workspaceRoot: scope.root, authorization: this.options.transport.mcpAuthorization?.bind(this.options.transport), admit: async () => this.runtimeGate.admit(),
         onFailure: (executionId, failure) => agents?.mcpFailure(executionId, failure) });
       await mcp.configure(config.mcpServers ?? [], config.loginRevision);
       if (this.disposed || this.stopping) return false;
@@ -378,10 +425,10 @@ export class CloudWorker {
         codex: () => new CodexDriver({ gitEnvironment: this.gitEnvironment }), claude: () => new ClaudeDriver({ gitEnvironment: this.gitEnvironment }),
         cursor: () => new CursorDriver({ gitEnvironment: this.gitEnvironment }),
       }, config,
-        (frame) => this.broadcast(frame), () => { void this.reportIdle(); }, this.options.onTiming, this.options.modelDiscovery, executionId => mcp!.providers(executionId),
-        async input => reviews!.enabled ? this.workspaceMcp.admit(input.executionId, reviews!.tools(input)) : undefined, application);
+        (frame) => this.broadcast(frame), () => { this.runtimeGate.activity(); void this.reportIdle(); }, this.options.onTiming, this.options.modelDiscovery, executionId => mcp!.providers(executionId),
+        async input => reviews!.enabled ? this.workspaceMcp.admit(input.executionId, reviews!.tools(input)) : undefined, application, !!this.options.runtimeResume);
       terminals = new Terminals(scope, { gitEnvironment: this.gitEnvironment, applicationEnvironment: application.variables,
-        broadcast: frame => this.broadcast(frame), activity: () => { void this.reportIdle(); } });
+        broadcast: frame => this.broadcast(frame), activity: () => { this.runtimeGate.activity(); void this.reportIdle(); } });
       const chats = new ChatService(store, scope, (chatId) => agents!.closeChat(chatId), agents.turns, {
         historyReplacement: () => this.historyReplacementEnabled,
         mutate: agents.mutateChat.bind(agents),
@@ -389,6 +436,7 @@ export class CloudWorker {
       });
       history = new HistoryMirror(store, this.options.transport, () => this.historyReplacementEnabled, value => application.value(value));
       unsubscribers.push(store.onChange((change) => {
+        this.runtimeGate.activity();
         if (!change.chat && !change.deleted && !change.rows.length && !change.replace) return;
         void this.broadcast(createMessage({ type: "DB_CHANGED", source: "engine", kinds: [...(change.chat || change.deleted ? ["chats"] : []), ...(change.rows.length || change.replace ? ["messages"] : []), ...(change.replace ? ["conversationContext"] : []), ...(change.deleted ? ["workspaces"] : [])],
           ...(change.deleted ? { workspaceIds: [scope.workspace.id] } : {}),
@@ -413,7 +461,7 @@ export class CloudWorker {
       this.unsubscribers.push(...unsubscribers); this.scope = scope; published = true;
       recordStartupTiming("worker_services", servicesStarted, timing);
       const refreshing = refresh?.start();
-      setup.start(this.initialSetupNeeded || restored);
+      if (!this.options.runtimeResume) setup.start(this.initialSetupNeeded || restored);
       return true;
     } finally {
       if (!published) {
@@ -471,6 +519,22 @@ export class CloudWorker {
   private get busy(): boolean {
     return Boolean(this.agents?.busy || this.terminals?.busy || this.setup?.busy || this.workspace?.uploading ||
       this.activeMutations || Date.now() - this.lastMutationAt < RECENT_ACTIVITY_MS);
+  }
+  get runtimeCensus(): RuntimeCensus {
+    return {
+      clients: this.clients.size > 0,
+      requests: this.activeMutations > 0,
+      agents: this.agents?.runtimeBusy ?? null,
+      terminals: this.terminals?.runtimeBusy ?? null,
+      setup: this.setup?.busy ?? null,
+      checkout: this.checkoutRefresh ? this.checkoutRefresh.runtimeBusy ?? null : false,
+      configuration: !this.scope || !this.online || this.configurations > 0 || this.disposed || !!this.stopping ||
+        this.acceptedConfigurationRevision !== this.configurationRevision,
+      prompts: this.promptInbox?.runtimeBusy ?? false,
+      attachments: this.workspace?.uploading ?? null,
+      storage: this.store && this.history ? this.store.runtimeBusy || this.history.runtimeBusy : null,
+      tools: this.mcp ? this.mcp.runtimeBusy || this.workspaceMcp.runtimeBusy : null,
+    };
   }
   private async reportIdle(force = false): Promise<void> {
     if (!this.online || !this.agents) return;

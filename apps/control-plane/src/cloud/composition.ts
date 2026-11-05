@@ -34,6 +34,8 @@ import { createMcpServices } from "../mcp/composition.js";
 import { CloudEnvironments } from "./environment-store.js";
 import { RuntimeCanaryAuthority } from "./runtime-canary.js";
 import { readRuntimeCanary, workspaceRuntimeResolver } from "./runtime-canary-store.js";
+import { RuntimeHandoffStore } from "./runtime-handoff-store.js";
+import { RuntimeAdoption } from "./runtime-adoption.js";
 
 const PROXY_TOKEN_TTL_MS = 24 * 60 * 60_000;
 
@@ -105,6 +107,8 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     return target;
   };
   const authorizeSource = github.authorizeSource;
+  const runtimeHandoffs = new RuntimeHandoffStore(pool);
+  const runtimeUpdates = new RuntimeAdoption({ handoffs: runtimeHandoffs, store, compute, runtimeForWorkspace, authorizeSource, logger: console });
   const continueSource = github.continueSource;
   const mcp = createMcpServices(pool, config, github.connections.authorizeRepositoryConfiguration.bind(github.connections));
   const timing = (record: CloudV2TimingRecord) => console.log(`[cloud-v2] timing ${JSON.stringify(record)}`);
@@ -136,6 +140,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
       githubPullRequests: 1,
       githubUserTokens: 1,
       agentInteractions: 1,
+      runtimeUpdate: 1,
       ...(v2.promptOutbox ? { promptOutbox: 1 as const } : {}),
       loginRevision: await store.loginRevision(workspace.id) ?? "0",
       workspace: {
@@ -167,10 +172,14 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   const proxy: CloudV2ProxyDeps = { store, logins, authorizeSource, continueSource, ...(keys ? { refreshCodex: createCloudV2CodexRefresh(pool, keys) } : {}) };
   const connections = roles.relay || roles.lifecycle ? new CloudV2Relay({
     store, timing, authorizeSource, continueSource, ...(securityEvents ? { securityEvents } : {}),
+    runtimeAdmission: runtimeHandoffs,
     config: workerConfig,
     workerRoute: async id => {
       const route = await store.workerRoute(id);
-      return route ? { ...route, token: route.portToken ? openPortToken(route.portToken, id, keys) : null } : null;
+      if (!route) return null;
+      const handoff = await runtimeHandoffs.route(id);
+      return { ...route, bootId: handoff.blocked ? null : route.bootId, ...(handoff.stopBootIds ? { stopBootIds: handoff.stopBootIds } : {}),
+        token: route.portToken ? openPortToken(route.portToken, id, keys) : null };
     },
     mintWorkerToken: (id, boot) => signer.mint(id, boot),
     wake: async workspace => { await store.transition(workspace.id, ["stopped"], "starting"); },
@@ -180,6 +189,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   const relay = roles.relay ? connections : null;
   const promptSignals = new CloudV2PromptSignals();
   const workers: CloudV2WorkerRouteDeps = { store, timing, logger: console, authorizeSource, continueSource, config: workerConfig, githubToken, runtimeSha256: v2.runtime.sha256,
+    runtimeUpdates, runtimeHandoffs,
     runtimeSha256ForWorkspace: async workspace => (await runtimeForWorkspace(workspace)).sha256,
     environmentReport: (token, bootId, value) => environments.report(token, bootId, value),
     githubCheckout: (token,bootId,value) => github.metadata.checkout(token,bootId,value),
@@ -226,6 +236,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     logger: console,
   }) : null;
   const lifecycle = roles.lifecycle ? new CloudV2Lifecycle({
+    runtimeUpdates,
     ...(builder ? { builds: builder } : {}),
     store,
     timing,
@@ -260,5 +271,5 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     githubToken: (workspace: CloudV2Workspace) => github.workspaceToken(workspace),
     logger: console,
   }) : null;
-  return { store, compute, routes, proxy, workers, relay, connections, lifecycle, loginChanges, promptChanges, promptSignals };
+  return { store, compute, routes, proxy, workers, relay, connections, lifecycle, runtimeUpdates, loginChanges, promptChanges, promptSignals };
 }

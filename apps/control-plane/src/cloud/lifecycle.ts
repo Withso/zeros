@@ -109,6 +109,7 @@ export type CloudV2LifecycleDeps = {
   prepareRepository?(workspace: CloudV2Workspace, sandboxId: string): Promise<void>;
   /** Cloud Computer builds share this loop; one runs at a time. */
   builds?: { tick(): Promise<void>; cleanup?(): Promise<void> };
+  runtimeUpdates?: { tick(): Promise<void>; close(): void };
   /** Retries a stop's failed checkpoint on a fork of the stopped VM. */
   checkpointRetry?: boolean;
   now?: () => number;
@@ -149,10 +150,11 @@ export function deliverWorkerTokenCommand(token: string, bootEnv: Readonly<Recor
   const b64 = (value: string) => Buffer.from(value, "utf8").toString("base64");
   const dir = CLOUD_V2_WORKER_TOKEN_PATH.slice(0, CLOUD_V2_WORKER_TOKEN_PATH.lastIndexOf("/"));
   const envFile = Object.entries(bootEnv).map(([name, value]) => `${name}=${value}\n`).join("");
-  return `umask 077 && mkdir -p ${dir} && chmod 700 ${dir} && ` +
+  return `(exec 9</opt/zeros/runtime/.install.lock && flock -x 9 && umask 077 && mkdir -p ${dir} && chmod 700 ${dir} && ` +
+    `sudo -n rm -f /opt/zeros/worker-runtime.env && ` +
     `printf %s '${b64(envFile)}' | base64 -d > ${CLOUD_V2_WORKER_ENV_PATH}.tmp && mv -f ${CLOUD_V2_WORKER_ENV_PATH}.tmp ${CLOUD_V2_WORKER_ENV_PATH} && ` +
     `printf %s '${b64(token)}' | base64 -d > ${CLOUD_V2_WORKER_TOKEN_PATH}.tmp && mv -f ${CLOUD_V2_WORKER_TOKEN_PATH}.tmp ${CLOUD_V2_WORKER_TOKEN_PATH} && ` +
-    `(sudo -n systemctl restart zeros-worker.service || true)`;
+    `(sudo -n systemctl restart zeros-worker.service || true))`;
 }
 
 export class CloudV2Lifecycle {
@@ -170,6 +172,7 @@ export class CloudV2Lifecycle {
     }, this.intervalMs);
     this.timer.unref();
     return async () => {
+      this.deps.runtimeUpdates?.close();
       if (this.timer) clearInterval(this.timer);
       this.timer = null;
       await this.running;
@@ -201,6 +204,7 @@ export class CloudV2Lifecycle {
 
   private async admit(): Promise<void> {
     const now = this.deps.now?.() ?? Date.now();
+    await this.deps.runtimeUpdates?.tick();
     await this.deps.prompts?.wakePending();
     if (now - this.lastPromptPrune > 10 * 60_000) {
       await this.deps.prompts?.prune();

@@ -34,14 +34,22 @@ export class WorkspaceToolsMcp {
   private disposing?: Promise<void>;
   private readonly drains = new Set<Promise<void>>();
   private readonly entries = new Map<string, Entry>();
-  private readonly http = createServer((req, res) => { void this.handle(req, res).catch(() => {
+  get runtimeBusy(): boolean {
+    return this.drains.size > 0 || [...this.entries.values()].some(entry => entry.pending.size > 0 || entry.flights.size > 0);
+  }
+  private readonly http = createServer((req, res) => { void this.serve(req, res).catch(() => {
     if (!res.headersSent) res.writeHead(400); res.end("Workspace tool request could not complete.");
   }); });
 
-  constructor() {
+  constructor(private readonly admission?: () => Promise<() => void>) {
     this.http.requestTimeout = 30_000; this.http.headersTimeout = 10_000;
     this.http.keepAliveTimeout = 5_000; this.http.maxRequestsPerSocket = 200;
     this.http.maxConnections = 256;
+  }
+
+  private async serve(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const leave = await this.admission?.();
+    try { await this.handle(req, res); } finally { leave?.(); }
   }
 
   async admit(id: string, tools: CodeReviewAgentToolsCore): Promise<WorkspaceToolGrant> {
@@ -117,7 +125,7 @@ export class WorkspaceToolsMcp {
     if (entry.sessions.size + entry.pending.size >= 8) { res.writeHead(503).end(); return; }
     const server = new Server({ name: "zeros-workspace", version: "1" }, { capabilities: { tools: {} } });
     server.setRequestHandler(ListToolsRequestSchema, () => { this.assertCurrent(entry); return { tools: entry.tools.listTools() }; });
-    server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
+    server.setRequestHandler(CallToolRequestSchema, (request, extra) => this.call(entry, async () => {
       this.assertCurrent(entry);
       try {
         const result = await entry.tools.callTool(request.params.name, request.params.arguments ?? {}, AbortSignal.any([extra.signal, entry.controller.signal]));
@@ -128,7 +136,7 @@ export class WorkspaceToolsMcp {
         return { isError: true, content: [{ type: "text", text: JSON.stringify(error instanceof CodeReviewError
           ? { code: error.code, message: error.message } : { code: "CODE_REVIEW_UNAVAILABLE", message: "The workspace review request could not complete." }) }] };
       }
-    });
+    }));
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: randomUUID,
       onsessioninitialized: key => { entry.pending.delete(session); entry.sessions.set(key, session); },
       onsessionclosed: key => { entry.sessions.delete(key); void server.close().catch(() => {}); },
@@ -141,6 +149,13 @@ export class WorkspaceToolsMcp {
       this.assertCurrent(entry);
       if (!transport.sessionId) { entry.pending.delete(session); await server.close(); }
     } catch (error) { entry.pending.delete(session); if (transport.sessionId) entry.sessions.delete(transport.sessionId); await server.close().catch(() => {}); throw error; }
+  }
+
+  private async call<T>(entry: Entry, action: () => Promise<T>): Promise<T> {
+    const leave = await this.admission?.();
+    const task = Promise.resolve().then(action), flight = task.then(() => {}, () => {});
+    entry.flights.add(flight);
+    try { return await task; } finally { entry.flights.delete(flight); leave?.(); }
   }
 
   private close(entry: Entry): Promise<void> {

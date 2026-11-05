@@ -121,6 +121,36 @@ credential in `/home/user/.config/zeros/worker-token` (mode `0600`) and
 restarts the worker, which registers a new boot identity in `hello` before the
 control plane dials it. The worker rereads the credential on every request.
 
+Workers supporting `runtime-update-v1` can also adopt a changed pin while the
+VM remains running. Adoption waits for 30 continuous quiet seconds with no
+connected desktop, active or queued agent work, pending question or approval,
+live PTY, setup, environment seeding, attachment transfer, durable prompt or
+receipt, file/Git mutation, or outstanding tool work. Missing or uncertain
+activity evidence defers the update until a later quiet period or natural wake.
+The selected runtime comes from the same workspace resolver used at boot;
+an admitted Alpha canary retains its candidate pin.
+
+The control plane stages and verifies the archive without changing the active
+link or credentials. The worker then freezes admission, flushes durable state,
+and authorizes a one-use switch bound to its token, VM, boot, configuration,
+source, access and Stop generations. A local permit races Stop's revocation
+immediately before activation. Foreground work arriving after commitment waits
+for the replacement. Only the worker service restarts; adoption never stops,
+resumes or checkpoints the VM. It emits no app notice or catalog state change.
+
+The replacement boot remains private until fresh environment and service
+readiness are committed. It retains the app's instance identity, persisted
+executions and provider conversations, and does not rerun setup. Failed
+activation restores the previous verified runtime privately; only server logs
+record the failure. Interrupted private boots cannot reuse a readiness proof.
+Rollback permits at most three fresh boots, and unresolved recovery keeps
+foreground admission fenced. A later natural boot retires obsolete handoffs.
+The VM retains the current and previous runtime, plus at most one prepared
+candidate. Older workers update on natural wake. Deploy the migration and
+control-plane support in every serving role before publishing a runtime that
+negotiates in-place adoption. Local Personal and organization-local lifecycle
+and permissions are unchanged.
+
 Each organization has one Cloud Computer: a configured recipe and an active
 named snapshot. Admins edit the recipe (repositories, branch or tag, setup
 script) as an organization setting, saved at a revision so concurrent edits

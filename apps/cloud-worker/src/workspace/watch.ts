@@ -12,7 +12,8 @@ export class CheckoutWatch {
   private pending = Promise.resolve();
   private disposed = false;
   private refresh = false;
-  constructor(private readonly scope: WorkspaceScope, private readonly run: CommandRunner, private readonly changed: (content: boolean) => Promise<void>) {}
+  constructor(private readonly scope: WorkspaceScope, private readonly run: CommandRunner, private readonly changed: (content: boolean) => Promise<void>,
+    private readonly options: { pollingAllowed?(): boolean; activity?(): void } = {}) {}
 
   async start(): Promise<void> {
     await this.scan();
@@ -20,6 +21,7 @@ export class CheckoutWatch {
   }
   schedule(content = true): void {
     if (this.disposed) return;
+    if (content) this.options.activity?.();
     this.refresh ||= content;
     if (this.timer) return;
     this.timer = setTimeout(() => { this.timer = undefined; this.drain(); }, 100); this.timer.unref?.();
@@ -27,7 +29,7 @@ export class CheckoutWatch {
   private drain(): void {
     const content = this.refresh; this.refresh = false;
     this.pending = this.pending.then(async () => {
-      if (this.disposed) return;
+      if (this.disposed || this.options.pollingAllowed?.() === false) return;
       if (content) await this.scan();
       await this.changed(content);
     }).catch(() => {});

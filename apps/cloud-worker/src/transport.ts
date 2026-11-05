@@ -1,4 +1,4 @@
-import type { CloudEnvironmentReport, CloudV2WorkerFrame, CloudV2WorkerTiming } from "@zeros/protocol/cloud-v2-relay";
+import type { CloudEnvironmentReport, CloudRuntimeUpdateReply, CloudRuntimeUpdateRequest, CloudV2WorkerFrame, CloudV2WorkerTiming } from "@zeros/protocol/cloud-v2-relay";
 import type { McpAuthorizationRequest } from "./mcp/gateway";
 import type { ReportGithubCheckout } from "./workspace/github-checkout";
 
@@ -23,6 +23,8 @@ export interface Transport {
   reportGithubCheckout?: ReportGithubCheckout;
   reportCheckoutFailure?: () => Promise<void>;
   reportEnvironment?: (report: CloudEnvironmentReport, signal?: AbortSignal) => Promise<void>;
+  runtimeUpdate?: (request: CloudRuntimeUpdateRequest, signal?: AbortSignal) => Promise<CloudRuntimeUpdateReply>;
+  readyRuntime?: () => Promise<void>;
   /** Best-effort diagnostics, independent of strict authority/history frames. */
   reportTiming?: (record: CloudV2WorkerTiming) => void;
 }
