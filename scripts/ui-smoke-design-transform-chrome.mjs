@@ -324,6 +324,18 @@ async function cameraOnto(page, target, zoom) {
   await expect.poll(() => page.evaluate(() => document.querySelector("[data-design-canvas-world]").style.transform)).toContain(`scale(${zoom})`);
 }
 
+// The saved size of a canvas frame. The harness holds canvas saves for 700 ms,
+// and a gesture that starts before its save lands works from the old size.
+const savedFrameSize = (page, file = "home.html") =>
+  page.evaluate(async (file) => {
+    const { designWorkspaceSnapshotCache } =
+      await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-cache.ts");
+    const frame = designWorkspaceSnapshotCache
+      .peekSnapshot("ws_design_harness")
+      .data?.frames.find((item) => item.file === file);
+    return frame ? `${frame.width} × ${frame.height}` : null;
+  }, file);
+
 async function typeSize(page, width, height) {
   const layout = page.locator("[data-design-layout-section]");
   for (const [label, value] of [["W", width], ["H", height]]) {
@@ -386,6 +398,7 @@ export async function runDesignTinySelectionSmoke({ page, check }) {
   const canvasFrame = page.locator('[data-design-frame="home.html"]');
   await canvasFrame.locator("[data-design-frame-label]").click();
   await typeSize(page, 10, 10);
+  await expect.poll(() => savedFrameSize(page), { timeout: 10_000 }).toBe("10 × 10");
   await expect.poll(async () => (await canvasFrame.boundingBox()).width).toBeLessThan(5);
   const geometry = () => canvasFrame.evaluate((node) => ({
     x: Number.parseFloat(node.style.left), y: Number.parseFloat(node.style.top),
@@ -411,10 +424,7 @@ export async function runDesignTinySelectionSmoke({ page, check }) {
   // and 20% the frame is 22 screen pixels; world (85, 100) is over the hero
   // layer and clear of the lower-right corner handle.
   await typeSize(page, 110, 110);
-  await expect.poll(async () => {
-    const { width, height } = await geometry();
-    return `${width} × ${height}`;
-  }).toBe("110 × 110");
+  await expect.poll(() => savedFrameSize(page), { timeout: 10_000 }).toBe("110 × 110");
   const zoom = 0.2;
   const resized = await geometry();
   await setCamera(page, {
