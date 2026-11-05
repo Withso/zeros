@@ -818,7 +818,11 @@ Each landed step appends one line: date, workstream, what landed, evidence.
   mutation-checked); Copy link (11, for the menu, the copy action and the page
   URL); the parity test (5); `node --test apps/web/lib/*.test.mjs` 161 tests;
   typecheck, lint, `check:ui`, `check:preload`, `check:deep-link-schemes`,
-  `check:protocol` and `check:secrets`; local renders of the Ready,
+  `check:protocol` and `check:secrets`; `pnpm test:git` with 22,619 tests
+  passing, where 164 of its 165 failures are round 2's environmental set (the
+  Playwright browser build, injected commit signing, Git 2.43 and the proxy)
+  and the other, the zstack pack's playbook budget, came from this round's
+  lesson and is folded back; local renders of the Ready,
   Unavailable and Loading states in both themes under the page's real
   headers. Not run here: link handling in the packaged macOS app (a cold
   launch, and a launch with every window closed).
