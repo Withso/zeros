@@ -210,4 +210,26 @@ suite("private runtime handoff", () => {
     expect(await promoting).toBe(false);
     expect(await f.store.workerSession(f.token, f.boot)).not.toBeNull();
   });
+
+  it.each([false, true])("keeps published readiness retries independent of later receipts (rollback=%s)", async rollback => {
+    const f = await fixture(false); expect(await f.commit()).toBe(true); await f.updates.activate(f.token, f.h.id);
+    if (rollback) await f.updates.rollback(f.h.id);
+    const boot = rollback ? f.h.rollback_boot_id : f.h.next_boot_id;
+    expect(await f.updates.promote(f.token, f.h.id, boot)).toBe(true); await f.updates.complete(f.h.id);
+    const next = (await f.updates.prepare(f.token, boot, { target: "c".repeat(64), instanceId: f.h.instance_id, revision: f.h.login_revision, generation: 8 }))!;
+    expect(next).not.toBeNull(); expect(await f.updates.cancel(f.token, next.id, boot)).toBe(true);
+    const adoption = new RuntimeAdoption({ handoffs: f.updates, store: f.store, compute: { execLong: async () => ({ exitCode: 0, stdout: "", timedOut: false }) },
+      authorizeSource: async () => {}, runtimeForWorkspace: async () => ({ sha256: next.target_sha256, url: async () => "https://fixture.example.test/runtime.tar.gz" }) });
+    try {
+      expect(await adoption.request(f.token, boot.toUpperCase(), { op: "ready", id: f.h.id })).toEqual({ status: "completed", id: f.h.id });
+      expect(await f.updates.promote(f.token, f.h.id, boot)).toBe(true);
+      expect(await adoption.session(f.token, boot, next.id)).toBeNull();
+      expect(await adoption.session(f.token, boot, f.h.id, "d".repeat(64))).toBeNull();
+      expect(await adoption.session(f.token, f.boot, f.h.id)).toBeNull();
+      const natural = randomUUID(); await f.store.beginWorkerHello(f.token, natural); await f.store.acceptWorkerHello(f.token, natural);
+      await f.updates.recordRuntime(f.token, natural, next.target_sha256);
+      expect(await adoption.session(f.token, natural, f.h.id)).toBeNull();
+      expect((await pool.query("SELECT worker_runtime_handoff_id FROM cloud_v2_workspaces WHERE id=$1", [f.workspace.id])).rows[0].worker_runtime_handoff_id).toBeNull();
+    } finally { adoption.close(); }
+  });
 });

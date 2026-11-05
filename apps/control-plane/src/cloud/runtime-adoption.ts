@@ -28,11 +28,7 @@ export class RuntimeAdoption {
   async session(token: string, bootId: string, id: string, sha256?: string): Promise<CloudV2WorkerSession | null> {
     const current = await this.options.store.workerSession(token, bootId);
     if (current) {
-      const receipt = await this.options.handoffs.inspect(token, id);
-      if (!receipt || !((receipt.state === "succeeded" && receipt.next_boot_id === bootId.toLowerCase()) ||
-        (receipt.state === "rolled_back" && receipt.rollback_boot_id === bootId.toLowerCase()))) return null;
-      if (sha256 && sha256 !== await this.options.handoffs.runtime(token, bootId)) return null;
-      return current;
+      return await this.options.handoffs.published(token, bootId, id, sha256) ? current : null;
     }
     const handoff = await this.options.handoffs.privateBoot(token, id, bootId, sha256);
     return handoff ? this.options.store.workerSession(token, handoff.old_boot_id) : null;
@@ -48,9 +44,13 @@ export class RuntimeAdoption {
     if (this.closed) return { status: "unavailable" };
     const { handoffs } = this.options;
     if (input.op === "ready") {
-      const workspace = await this.session(token, bootId, input.id), h = await handoffs.inspect(token, input.id);
-      if (!workspace || !h) return { status: "unavailable" };
+      const workspace = await this.session(token, bootId, input.id);
+      if (!workspace) return { status: "unavailable" };
       await this.options.authorizeSource(workspace);
+      if (this.closed) return { status: "unavailable" };
+      if (await handoffs.published(token, bootId, input.id)) return { status: "completed", id: input.id };
+      const h = await handoffs.inspect(token, input.id);
+      if (!h) return { status: "unavailable" };
       if (h.state !== "rolling_back" && h.state !== "rolled_back" &&
           (await this.options.runtimeForWorkspace(workspace)).sha256 !== h.target_sha256) return { status: "unavailable" };
       if (this.closed) return { status: "unavailable" };

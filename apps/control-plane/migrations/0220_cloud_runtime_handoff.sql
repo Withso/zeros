@@ -4,6 +4,7 @@ SET LOCAL lock_timeout = '5s';
 ALTER TABLE cloud_v2_workspaces ADD COLUMN worker_runtime_sha256 text
   CHECK (worker_runtime_sha256 ~ '^[a-f0-9]{64}$');
 ALTER TABLE cloud_v2_workspaces ADD COLUMN worker_runtime_boot_id uuid,
+  ADD COLUMN worker_runtime_handoff_id uuid,
   ADD COLUMN worker_runtime_unknown_activity boolean NOT NULL DEFAULT false;
 
 CREATE TABLE cloud_worker_runtime_handoffs (

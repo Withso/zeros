@@ -38,6 +38,7 @@ export class RuntimeHandoffStore {
     await withSystemTx(this.pool, async tx => {
       const changed = await tx.query<{ id: string }>(`UPDATE cloud_v2_workspaces w SET worker_runtime_sha256=$3,
         worker_runtime_unknown_activity=CASE WHEN worker_runtime_boot_id IS DISTINCT FROM $2::uuid THEN false ELSE worker_runtime_unknown_activity END,
+        worker_runtime_handoff_id=CASE WHEN worker_runtime_boot_id IS DISTINCT FROM $2::uuid THEN NULL ELSE worker_runtime_handoff_id END,
         worker_runtime_boot_id=$2 WHERE worker_token_hash=$1 AND worker_boot_id=$2 AND state IN ('starting','running') AND ${CLOUD_V2_LIVE_ACCESS}
         RETURNING id`, [hashCloudV2Token(token), bootId, sha256]);
       if (changed.rows[0]) {
@@ -53,6 +54,14 @@ export class RuntimeHandoffStore {
     return withSystemTx(this.pool, async tx => (await tx.query<{ worker_runtime_sha256: string | null }>(
       `SELECT worker_runtime_sha256 FROM cloud_v2_workspaces w WHERE worker_token_hash=$1 AND worker_boot_id=$2
        AND worker_runtime_boot_id=$2 AND state='running' AND ${CLOUD_V2_LIVE_ACCESS}`, [hashCloudV2Token(token), bootId])).rows[0]?.worker_runtime_sha256 ?? null);
+  }
+
+  // The next prepared attempt replaces its receipt, not the published boot's authority.
+  async published(token: string, bootId: string, id: string, sha256?: string): Promise<boolean> {
+    return withSystemTx(this.pool, async tx => Boolean((await tx.query(`SELECT 1 FROM cloud_v2_workspaces w
+      WHERE worker_token_hash=$1 AND worker_boot_id=$2 AND worker_runtime_boot_id=$2 AND worker_runtime_handoff_id=$3
+        AND ($4::text IS NULL OR worker_runtime_sha256=$4) AND state IN ('running','stopping') AND ${CLOUD_V2_LIVE_ACCESS}`,
+    [hashCloudV2Token(token), bootId, id, sha256 ?? null])).rowCount));
   }
 
   async prepare(token: string, bootId: string, input: { target: string; instanceId: string; revision: string; generation: number }): Promise<RuntimeHandoff | null> {
@@ -187,9 +196,8 @@ export class RuntimeHandoffStore {
       await this.lock(tx, id);
       const handoff = await this.current(tx, id, token);
       if (!handoff) {
-        return Boolean((await tx.query(`SELECT 1 FROM cloud_worker_runtime_handoffs h JOIN cloud_v2_workspaces w ON w.id=h.workspace_id
-          WHERE h.id=$1 AND h.token_hash=$2 AND w.worker_token_hash=h.token_hash AND w.worker_boot_id=$3
-          AND ((h.state='succeeded' AND h.next_boot_id=$3) OR (h.state='rolled_back' AND h.rollback_boot_id=$3))
+        return Boolean((await tx.query(`SELECT 1 FROM cloud_v2_workspaces w
+          WHERE w.worker_runtime_handoff_id=$1 AND w.worker_token_hash=$2 AND w.worker_boot_id=$3 AND w.worker_runtime_boot_id=$3
           AND w.state='running' AND ${CLOUD_V2_LIVE_ACCESS}`, [id, hashCloudV2Token(token), boot])).rowCount);
       }
       const rollback = handoff.state === "rolling_back";
@@ -204,8 +212,9 @@ export class RuntimeHandoffStore {
           report_state='ready',report_error=NULL WHERE workspace_id=$1`, [handoff.workspace_id, boot, report.sequence]);
       }
       await tx.query("UPDATE cloud_worker_runtime_handoffs SET state=$2,updated_at=clock_timestamp() WHERE id=$1", [id, rollback ? "rolled_back" : "succeeded"]);
-      await tx.query(`UPDATE cloud_v2_workspaces SET worker_boot_id=$2,worker_runtime_boot_id=$2,worker_runtime_sha256=$3,worker_history_sequence=0,worker_history_digest=NULL WHERE id=$1`,
-        [handoff.workspace_id, boot, rollback ? handoff.previous_sha256 : handoff.target_sha256]);
+      await tx.query(`UPDATE cloud_v2_workspaces SET worker_boot_id=$2,worker_runtime_boot_id=$2,worker_runtime_sha256=$3,
+        worker_runtime_handoff_id=$4,worker_history_sequence=0,worker_history_digest=NULL WHERE id=$1`,
+        [handoff.workspace_id, boot, rollback ? handoff.previous_sha256 : handoff.target_sha256, id]);
       return true;
     });
   }
