@@ -85,6 +85,10 @@ suite("runtime adoption over worker HTTP and app WebSockets", () => {
     let desired = "a".repeat(64), clock = 0, port = 0, candidateEntered!: () => void, releaseCandidate!: () => void;
     const entered = new Promise<void>(resolve => { candidateEntered = resolve; });
     const release = new Promise<void>(resolve => { releaseCandidate = resolve; });
+    const delayedInitial = !fails && !http && !native && !slow;
+    let initialHelloEntered!: () => void, releaseInitialHello!: () => void;
+    const initialHelloWaiting = new Promise<void>(resolve => { initialHelloEntered = resolve; });
+    const initialHelloHeld = new Promise<void>(resolve => { releaseInitialHello = resolve; });
     let helloEntered!: () => void, releaseHello!: () => void, pollEntered!: () => void, releasePoll!: () => void, nextPoll!: () => void;
     const helloWaiting = new Promise<void>(resolve => { helloEntered = resolve; }), helloHeld = new Promise<void>(resolve => { releaseHello = resolve; });
     const pollWaiting = new Promise<void>(resolve => { pollEntered = resolve; }), pollHeld = new Promise<void>(resolve => { releasePoll = resolve; });
@@ -99,6 +103,7 @@ suite("runtime adoption over worker HTTP and app WebSockets", () => {
       const address = await originalStart.call(this, receiver); port = address.port; return address;
     });
     const config = async () => {
+      if (delayedInitial && starts.length === 1) { initialHelloEntered(); await initialHelloHeld; }
       if (slow && starts.length === 2) { helloEntered(); await helloHeld; }
       return { t: "config" as const, loginRevision: await store.loginRevision(workspace.id) ?? "0", runtimeUpdate: 1 as const,
       ...(http ? { promptOutbox: 1 as const } : {}),
@@ -176,7 +181,8 @@ suite("runtime adoption over worker HTTP and app WebSockets", () => {
     const apiPort = (controlPlane.server.address() as { port: number }).port;
     const apiUrl = `http://127.0.0.1:${apiPort}`;
     settle.push(async () => {
-      finishing = true; for (const cp of controlPlanes) cp.adoption.close(); releaseCandidate(); releaseHello(); releasePoll();
+      finishing = true; for (const cp of controlPlanes) cp.adoption.close(); releaseCandidate(); releaseHello(); releasePoll(); releaseInitialHello();
+      if (delayedInitial && starts[0]) await expect.poll(() => starts[0]!.statuses, { timeout: 5000 }).toContain("connected");
       await Promise.allSettled(replacements);
     });
     const connect = async () => {
@@ -188,7 +194,15 @@ suite("runtime adoption over worker HTTP and app WebSockets", () => {
       const response = async (id: string) => { await expect.poll(() => frames.find(frame => frame.requestId === id), { timeout: native ? 10_000 : 5000 }).toBeDefined(); return frames.find(frame => frame.requestId === id); };
       return { socket, frames, send, response };
     };
-    const first = start(desired); await expect.poll(() => first.statuses).toContain("connected");
+    const first = start(desired);
+    if (delayedInitial) {
+      await initialHelloWaiting;
+      expect(first.statuses).toEqual([]);
+      // A valid first configuration can outlast Vitest's one-second default.
+      const initialHelloTimer = setTimeout(releaseInitialHello, 1500);
+      cleanup.push(() => clearTimeout(initialHelloTimer));
+    }
+    await expect.poll(() => first.statuses, { timeout: 5000 }).toContain("connected");
     const initial = await connect(); await expect.poll(() => initial.frames.some(frame => frame.type === "ENGINE_READY")).toBe(true);
     const instance = initial.frames.find(frame => frame.type === "ENGINE_READY").instanceId;
     const key = `cloud://${org}/${workspace.id}`, agentId = native ? "claude" : "codex";
@@ -243,7 +257,7 @@ suite("runtime adoption over worker HTTP and app WebSockets", () => {
     })]); } finally { clearTimeout(handoffTimer); }
     const successor = await connect();
     // Durable HTTP completion does not acknowledge delivery on this socket.
-    if (slow) successor.socket.pause();
+    if (http) successor.socket.pause();
     const fileRead = successor.send("WORKSPACE_REQUEST", { op: "file.read", params: { path: "retained.txt" } });
     let foreground: { client: RuntimeClient; connected: Promise<void>; reading: Promise<unknown>; failed: () => unknown } | undefined;
     if (slow) {
@@ -318,7 +332,7 @@ suite("runtime adoption over worker HTTP and app WebSockets", () => {
       expect(nativeFixture!.requests.length).toBeGreaterThan(beforeResumeRequests);
       expect(mcpListings.mock.calls.length).toBeGreaterThan(beforeResumeListings);
     }
-    if (slow) {
+    if (http) {
       expect(successor.frames).toEqual([]);
       queueMicrotask(() => successor.socket.resume());
     }
