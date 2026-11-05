@@ -19,6 +19,8 @@ const ALLOWED: Record<string, string> = {
   "src/postgres-notifications.ts#acquire": "Dedicated LISTEN session; it issues only LISTEN/UNLISTEN.",
   "src/workos-provider-locks.ts#connectBeforeDeadline": "Session holder for WorkOS advisory locks; it never reads tables.",
   "src/cloud/computer.ts#withBuildLock": "Session holder for Computer build/erasure advisory locks only; table access uses separate withSystemTx connections.",
+  "src/cloud/runtime-build-drain.ts#operatorTransaction":
+    "Release operator retains the migration role and sets app.system in its own transaction; the runtime role cannot write drain leases.",
   "src/development-environment.ts#assertHostedDatabaseOwnership":
     "Reads zeros_development_identity (no RLS) and pg_roles to prove runtime privileges.",
   "src/dev-connections/bootstrap.ts#bootstrapDevConnectionDatabase":
