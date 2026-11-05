@@ -55,7 +55,7 @@ describe.skipIf(process.platform !== "linux")("same-job runtime cleanup login", 
     expect(JSON.stringify(saved)).not.toContain(f.env.PLANETSCALE_SERVICE_TOKEN);
     f.mask.mockReset();
     expect(await f.consume(async value => value?.login.id)).toBe(f.login.id);
-    await expect(readFile(f.path)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await readdir(f.temporary)).toEqual([]);
   });
   it.each(["self-hosted", "checkout"])("refuses a %s handoff before writing or masking a credential", async change => {
     const f = await fixture();
