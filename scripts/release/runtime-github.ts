@@ -7,6 +7,7 @@ import { SHA, requireCheck } from "./contracts";
 import { assertRequiredCI, requiredCIEvidence, REQUIRED_CI } from "./ci";
 import { command, jsonClient, type Command } from "./io";
 import type { RuntimeReleaseConfig } from "./runtime-contracts";
+import { requireCurrentAlphaRuntime } from "./runtime-alpha";
 
 export function runtimeGithub(config: RuntimeReleaseConfig, env: NodeJS.ProcessEnv, options: { fetch?: typeof fetch; command?: Command } = {}) {
   const json = jsonClient(options.fetch), execute = options.command ?? command;
@@ -46,6 +47,7 @@ export function runtimeGithub(config: RuntimeReleaseConfig, env: NodeJS.ProcessE
   }
   return {
     read, mainSource,
+    alphaCurrent: (sha256: string) => requireCurrentAlphaRuntime(sha256, options.fetch),
     async source() {
       requireCheck((await execute("git", ["rev-parse", "HEAD"])).trim() === config.workflowSha &&
         !(await execute("git", ["status", "--porcelain", "--untracked-files=normal"])).trim(), "Runtime controller checkout must be the clean dispatched commit");

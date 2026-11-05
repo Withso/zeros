@@ -531,55 +531,32 @@ signed desktop artifact publication.
 
 The **Cloud runtime release** workflow (`runtime-release.yml`) is dispatch-only.
 It builds an exact main commit with successful Preflight and CodeQL, publishes
-by SHA-256, qualifies on Alpha, then changes the pin. It redeploys the unchanged
-live control-plane commit; it does not publish a desktop or web release.
+by SHA-256, then pins and deploys it on Alpha. Alpha is the canary: a broken
+runtime reaches Alpha users first, and rollback is the recovery. A successful
+Alpha publish attempt is required before promotion to Beta or Production.
+The workflow redeploys the unchanged live control-plane commit; it does not
+publish a desktop or web release.
 Beta and Production promotion copies and re-hashes the same archive without
 rebuilding it. Archives, source manifests and qualification receipts are
 retained under `cloud-v2/runtime/releases/`, outside the ordinary publisher's
 pruning namespace. Before a retained archive is selected, the controller
 restores its ordinary `cloud-v2/runtime/<digest>.tar.gz` object if necessary.
 
-Apply expand migration `0219_cloud_runtime_canaries.sql` and deploy app
-support before enabling the canary policy. Provision a dedicated fixture
-account with Pro, a separate fixture organization, a connected immutable
-GitHub repository and an already active Cloud Computer. Connect all three
-provider logins for that fixture. It must have no staff or Ops role; its
-membership confers no release or build-drain authority.
+The workflow needs no fixture account, candidate VM, gate0 probe or canary
+signing key. Existing control-plane canary admission stays dormant without
+configuration and is not part of this workflow. Manual Alpha qualification
+can exercise real user flows after publication.
 
-Generate a separate Ed25519 canary signing key. Its PKCS#8 private material
-belongs only in the GitHub `alpha` environment as
-`CLOUD_V2_RUNTIME_CANARY_PRIVATE_KEY`. The control plane receives only
-`CLOUD_V2_RUNTIME_CANARY_CONFIG`: `keys` is an array of one or two
-`{id, publicKey}` entries (publicKey is base64 DER SPKI), and `fixture` is
-`{creatorUserId, organizationId, repositoryId}` with the immutable numeric
-repository ID serialized as a string. It rejects canary keys equal to either
-worker-signing key and refuses the canary private-key variable. Beta,
-Production and Dev cannot enable the canary policy.
-
-Rotate by deploying both public keys under distinct IDs, changing the Alpha
-environment's signer to the new private key/ID, then removing the retired
-public key after all old admission grants have expired. Admission lasts at
-most 15 minutes. Already consumed workspace pins remain stable until cleanup;
-do not remove or change the fixture policy while one needs to boot. The
-signer grants nothing outside the exact fixture account, organization,
-repository, create key, run/attempt, source commit and candidate digest.
-
-The app-owned Alpha probe entry point is
-`pnpm --dir apps/control-plane exec tsx src/cloud/runtime-canary-gate0.ts --receipt <private-file>`.
-Pass its private inputs through the Alpha environment, never CLI values or
-logs: `CLOUD_RUNTIME_CANARY_GRANT`, `CLOUD_RUNTIME_CANARY_CLAIMS` (the matching
-JSON claims), `CLOUD_RUNTIME_CANARY_REPOSITORY`, `CLOUD_RUNTIME_RELEASE_CP_SHA`
-and `CLOUD_RUNTIME_RELEASE_PRIOR_SHA256`. Fixture login uses the existing
-`WORKOS_CLIENT_ID` and `WORKOS_API_KEY`, plus
-`CLOUD_RUNTIME_FIXTURE_EMAIL`, `CLOUD_RUNTIME_FIXTURE_PASSWORD`,
-`CLOUD_RUNTIME_FIXTURE_WORKOS_USER_ID` and optional
-`CLOUD_RUNTIME_FIXTURE_WORKOS_ORGANIZATION_ID`. The dedicated signing key
-stays with the controller; the probe only sends the short-lived grant.
-It checks the exact live CP SHA, prior pin and canary capability before
-sign-in and again after cleanup. It uses and revokes only its newly issued
-fixture session and writes an allowlisted receipt only after every check and
-confirmed deletion. An unsupported old control plane is refused before any
-VM starts. The Dev operator probe keeps its existing target restrictions.
+The version-2 publication proof binds the exact archive manifest, source,
+workflow run/attempt, publication intent and successful terminal pin/deploy
+receipt. The compatible pin metadata hashes the verified intent; its
+`completedAt` is the intent verification time and `deleted: true` records that
+no candidate workspace is outstanding. That metadata alone is not promotion
+authority. The proof is retained only after readiness, confirmed drain release
+and migration-login deletion, and promotion also verifies the successful
+workflow and build artifacts. It contains no credential or synthetic gate0
+receipt. Legacy gate0 receipts remain usable only for a channel's recorded
+previous-pin rollback.
 
 The controller must serialize the whole release under `release-<channel>`
 and `hosted-mutation-<channel>` without cancellation. Before staging variables,
@@ -620,11 +597,6 @@ digest and matching `CLOUD_V2_RUNTIME_RELEASE_METADATA` with Railway
 missing capability, expired lease, nonzero count or unknown result refuses
 pinning.
 
-Always close canary admission and clean up the exact workspace before pin
-authority. A failed/ambiguous create must not later allocate after cleanup:
-the release controller uses its existing database authority to retire that
-run's unused nonce or recover its committed workspace before retrying the
-ordinary fixture DELETE. Never treat a workspace 404 as deletion proof.
 Beta/Production promotion and rollback require explicit dispatch,
 expected-prior-pin checks and a retained Alpha receipt. Production also requires
 its existing GitHub approval job; Beta follows the app's current policy without
@@ -633,9 +605,9 @@ They never edit an organization's recipe or stop user workspaces.
 
 #### Runtime workflow configuration
 
-Deploy the canary and build-drain app support, including migrations 0219 and
-0221, before enabling the workflow. Every serving control-plane instance must
-support the claim/adoption drain. The controller requires the exact live CP
+Deploy the build-drain app support, including migration 0221, before enabling
+the workflow. Every serving control-plane instance must support the
+claim/adoption drain. The controller requires the exact live CP
 SHA and `runtimeBuildDrainVersion: 1`; an old or unready service cannot authorize
 a pin even if the database already has the migration.
 
@@ -659,14 +631,10 @@ Beta and Production additionally need read-only Alpha store access through
 `CLOUD_RUNTIME_ALPHA_STORE_SECRET_ACCESS_KEY`. Destination credentials write
 the retained copy; the Alpha credentials only read it.
 
-Alpha alone holds the dedicated signing private key and fixture login described
-above. Its variables include `CLOUD_RUNTIME_CANARY_KEY_ID`, the matching public
-`CLOUD_V2_RUNTIME_CANARY_CONFIG`, `CLOUD_RUNTIME_CANARY_REPOSITORY`,
-`WORKOS_CLIENT_ID`, `CLOUD_RUNTIME_FIXTURE_WORKOS_USER_ID`, and the optional
-WorkOS organization ID. Keep `WORKOS_API_KEY`, fixture email and password as
-environment secrets. Do not place the signing key at repository scope or in
-Beta/Production. The build job receives no channel secrets and passes only a
-small host environment to the existing isolated Linux/Node 24 packager.
+Do not configure a fixture account, fixture login or canary signing key in the
+`alpha` environment for runtime releases. The workflow passes none of those
+values. The build job receives no channel secrets and passes only a small host
+environment to the existing isolated Linux/Node 24 packager.
 
 The workflow uses the existing `production-approval` environment for Production
 promotion and rollback, and checks that job's exact source, run and attempt.
@@ -701,9 +669,10 @@ Supply its exact `sourceSha` as `expected_cp_sha` and its `worker.sha256` as
 - **Publish:** dispatch on `main` with `channel=alpha`, `action=publish` and
   `source_sha=<full main commit>`. Leave the digest and Alpha-run inputs empty.
   The build artifact must belong to this exact workflow attempt. The controller
-  inspects its archive and source hash again before publication, then runs all
-  three providers and create/wake/Stop/history/file/Git/terminal gate0 checks on
-  the one admitted canary workspace. Ordinary workspaces keep the prior pin.
+  inspects its archive and source hash again before publication, drains existing
+  builds/adoptions, pins the digest and waits for the unchanged control plane to
+  serve it. The final successful publish receipt qualifies that digest for
+  promotion. Alpha users receive it through normal wake or quiet adoption.
 - **Promote:** dispatch on `release/X.Y.Z` with `channel=beta` or `production`,
   `action=promote`, `runtime_sha256`, `alpha_run_id` and `alpha_run_attempt` from
   the successful Alpha publish attempt. Leave `source_sha` empty. Both its
@@ -711,16 +680,25 @@ Supply its exact `sourceSha` as `expected_cp_sha` and its `worker.sha256` as
   artifact must match the qualification's complete manifest, archive digest,
   source, run and attempt; the source and workflow commits must retain main/CI
   provenance. A qualification from an Alpha rollback cannot authorize a new
-  promotion. The destination's control-plane and protocol trees must match the
-  Alpha qualification; unavailable proof refuses promotion.
+  promotion. A legacy gate0 receipt cannot authorize a new promotion either.
+  The destination's control-plane and protocol trees must match the Alpha
+  publication. The controller reads Alpha's public `/v1/release-identity` at
+  qualification and again immediately before destination staging and deploy:
+  `ready` must be true and `worker.sha256` must equal the selected digest.
+  Unreachable, unready or different Alpha state refuses the action with an
+  operator message. No minimum soak timer applies. If Alpha rolled back to
+  this digest, select its original successful publish attempt, never the
+  rollback attempt. Unavailable provenance refuses promotion.
 - **Rollback:** dispatch on the channel's branch with `action=rollback` and
   the two expected live identities. Leave source, digest and Alpha-run inputs
   empty. The controller selects only `CLOUD_V2_RUNTIME_PREVIOUS_SHA256` and its
-  recorded metadata. Alpha reruns gate0 on that retained archive. Beta and
-  Production verify the retained receipt against the hash in the trusted
-  previous-pin metadata and recheck control-plane compatibility, so GitHub
-  artifact expiration does not erase rollback capability. An unqualified
-  legacy previous pin or missing retained bytes still refuses.
+  recorded metadata. Alpha restores that retained archive without a fixture
+  probe and records a rollback receipt, which cannot qualify a new promotion.
+  Beta and Production verify the retained proof against the trusted previous
+  pin and recheck control-plane compatibility, so GitHub artifact expiration
+  does not erase rollback capability. This accepts either the version-2
+  publication proof or a matching legacy gate0 proof; an unqualified legacy
+  previous pin or missing retained bytes still refuses on those channels.
 
 Selecting the already-active digest refuses without replacing the rollback
 pin. A successful release stores the prior digest and metadata in
@@ -736,8 +714,10 @@ requires nine minutes remaining, with an eight-minute absolute submission and
 readiness bound and one minute reserved for cleanup. A long-running Computer
 build may therefore cause a clean refusal before any variable changes.
 
-After each final drain read, refresh serving deployment/source and pin ownership,
-then synchronously recheck lease expiry and cancellation before the mutation.
+After each final drain read, promotion checks Alpha's current ready digest,
+then refreshes destination serving deployment/source and pin ownership.
+Synchronously recheck lease expiry and cancellation after those waits before
+the mutation.
 If deployment is refused after staging, restore only the exact owned runtime
 variables, including the previous pin, and confirm readback before ending the
 lease. Foreign variables, a changed serving deployment, a lost deploy reply or
@@ -747,7 +727,7 @@ a known pending rollout refuse recovery and leave the lease held until expiry.
 
 Success produces the `runtime-release-<run>-<attempt>` GitHub artifact with
 `runtime-qualification.json` and `runtime-receipt.json`. Failures retain a
-separate `runtime-release-recovery-<run>-<attempt>` artifact. Before each canary,
+separate `runtime-release-recovery-<run>-<attempt>` artifact. Before each
 temporary-login or Railway effect, the controller writes an allowlisted event
 under `cloud-v2/runtime/releases/intents/<channel>/<run>/<attempt>/` and into
 the private local evidence directory. Events contain identities, hashes and
@@ -764,7 +744,7 @@ retried once with its original binding only to recover and release the lease;
 the later cleanup step only reads the durable run receipt.
 
 Execution is restricted to ephemeral GitHub-hosted Linux runners. Before any
-canary or drain operation, the password is registered with runner masking and
+drain operation, the password is registered with runner masking and
 stored exclusively in a mode-0600, descriptor-validated file inside a fresh
 mode-0700 directory under `RUNNER_TEMP`, outside `GITHUB_WORKSPACE`. It contains
 only the acknowledged login and exact source/run/attempt/role bindings, never
@@ -772,31 +752,25 @@ the PlanetScale service token. Its path and contents are not logged or uploaded.
 No third-party action runs before cleanup; artifact uploads follow it.
 
 On an interrupted operation, the login is kept only for that immediate cleanup
-step. Cleanup retires the exact nonce, deletes its fixture workspace and closes
-its fixture session, reconciles the owned stage/drain, and confirms login
-deletion. The private file is unlinked after deletion and on refusal. The step
-has a five-minute bound; a double cancellation, runner loss or unavailable
+step. Cleanup reconciles the owned stage/drain and confirms login deletion.
+The private file is unlinked after deletion and on refusal. The step has a
+five-minute bound; a double cancellation, runner loss or unavailable
 provider retains the 3,600-second login TTL as a backstop, never a successful
 cleanup claim. A pending deployment does not count as completed and does not
 authorize early drain release. Cleanup saves only allowlisted recovery results.
 
 If cleanup remains unconfirmed, reconcile the exact recorded channel, run,
-source, grant, login, lease and deployment IDs before dispatching again:
+source, login, lease and deployment IDs before dispatching again:
 
-1. Close the recorded canary admission with the existing migration authority.
-   A committed grant identifies its exact fixture workspace; an unused nonce
-   must be retired so a delayed create cannot allocate afterward. Use the
-   ordinary fixture delete operation and require the retained grant status to
-   report that exact workspace as deleted. A 404 is insufficient.
-2. Confirm the owned temporary PlanetScale login is absent, or delete only that
+1. Confirm the owned temporary PlanetScale login is absent, or delete only that
    recorded login after verifying its branch and creator. Its one-hour TTL is
    a fallback, not a successful cleanup receipt.
-3. Read Railway variables, deployment inventory and public release identity.
+2. Read Railway variables, deployment inventory and public release identity.
    If the staging or deploy response was lost, determine whether its exact
    effect occurred. Reconcile a partial staged pin through the normal channel
    operator process before another release. The controller never repeats an
    unacknowledged mutation automatically.
-4. Inspect the recorded drain lease. End only that current lease after its
+3. Inspect the recorded drain lease. End only that current lease after its
    rollout or restoration is confirmed and require the structured release
    response. An expired or replaced lease cannot authorize a deploy or release
    its successor.
