@@ -746,3 +746,25 @@ Each landed step appends one line: date, workstream, what landed, evidence.
   rename check failed on the old outlined field. The canvas smoke's
   geometry check caught the theme editor's Close sitting flush once its
   padding was trimmed, so the 12px padding stays.
+- 2026-11-05 · 5 · Web app (plans.md §8): sign-in is one page with Continue
+  with Google and Continue with GitHub, primary with their logos and stacked
+  at 260px. Each sends one exact `provider=google|github`, which the app's
+  `/auth/start` maps to `GoogleOAuth` or `GitHubOAuth`; the owner chose this
+  over the hosted chooser, and Ops, workspace pages and step-ups keep Hosted
+  AuthKit (`docs/workos-authentication-migration.md`). The centred page shell
+  (`apps/web/lib/page.ts`) now follows the canvas recipe, with the logo and
+  mark inline so it renders under every page's policy. The invitation and
+  workspace pages, which had their own shells, use it with their nonce, and
+  the control plane's sign-in completion, failure and cloud GitHub pages use
+  a verbatim copy allowed by a CSP hash. Every centred app page has its
+  frame's copy; the account states moved out of the dashboard layout onto
+  the shell with one primary and a copyable recovery code; an expired GitHub
+  handoff keeps Open Zeros without its nonce. The canvas (version 366) drops
+  the four frames for code removed with Auth0 and the badges of 25 built
+  frames. Left: the dashboard rebuild, Ops (its host allows no inline style)
+  and Open in Zeros on a cloud workspace.
+  Evidence: `node --test apps/web/lib/*.test.mjs` 138 tests; the full
+  control-plane suite (135 files, 1,846 tests; database files skipped here);
+  both typechecks; red first for the provider choice on both sides, the
+  shell's tokens against `styles/zeros-tokens.css`, the copy of each page and
+  the server's shell copy; local renders of all 19 page states in both themes.

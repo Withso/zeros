@@ -1,6 +1,6 @@
 # Canvas audit: Zeros Design against the app
 
-Status 2026-11-05, Zeros Design canvas version 364.
+Status 2026-11-05, Zeros Design canvas version 366.
 
 ## How to read this
 
@@ -27,7 +27,7 @@ and in [`plans.md`](plans.md).
 | UI components | 47 | 3 | Three Design-tab details, listed below |
 | Foundations | 14 | 0 | — |
 | Branding | 4 | 0 | — |
-| Web app | 60 | 56 | §8. The shared page shell shipped. Still to do: one sign-in page (2), each page's copy (32), the dashboard rebuild (18), Ops on the dashboard shell (3), and the route map (1) |
+| Web app | 56 | 27 | §8: the dashboard rebuild (18), Ops (7), Open in Zeros on a cloud workspace (1), and the route map's own note (1) |
 | Agent chat | 87 | 0 | — |
 | Sidebar | 25 | 0 | — |
 | Dashboard (Home) | 18 | 0 | — |
@@ -40,7 +40,7 @@ and in [`plans.md`](plans.md).
 | Simulators | 12 | 0 | — |
 | Customize | 25 | 0 | — |
 | Settings | 36 | 0 | — |
-| **Total** | **459** | **86** | |
+| **Total** | **455** | **57** | |
 
 ## Landed this round
 
@@ -76,7 +76,15 @@ and in [`plans.md`](plans.md).
   - Theme editor: the chosen rail row on bg2-highlight, 12 fg3 labels and
     counts, mono 12 names, the edited theme as a pressed toggle on
     selected-bg, a 20px swatch and Reset.
-- **Canvas (versions 363 and 364).**
+- **Web app sign-in and centred pages.**
+  - Sign-in offers Continue with Google and Continue with GitHub, each
+    started directly (the owner's decision); Ops and step-ups keep Hosted
+    AuthKit.
+  - One page shell follows the canvas recipe with inline logos and tokens,
+    shared verbatim with the control plane's sign-in and GitHub pages.
+  - Every centred app page has its frame's copy, and the account states are
+    centred pages with one primary.
+- **Canvas (versions 363 to 366).**
   - Eleven Planned badges came off frames that are now built.
   - The remaining notes name exactly what is left.
   - The Changes "All states" frame had been clipping its tallest state by
@@ -84,6 +92,9 @@ and in [`plans.md`](plans.md).
   - Version 364: three Design-tab sheets lose their badge and three narrow
     it, RevEmpty shows the no-PR state the app ships, and the colour picker
     sheet draws its fields on bg3-hover like the other popovers.
+  - Version 366: 25 Web app frames lose their badge, and the four frames for
+    code removed with Auth0 (the rollback sign-in and callback, `/launch` and
+    the legacy handoff) are gone.
 
 ## What is left
 
@@ -133,10 +144,15 @@ Agents get their mark, GitHub authors their photo, and review apps their logo
 with a Bot badge. The thread model needs each comment's avatar URL and its
 agent provider.
 
-### §8 Web app: 56 frames
+### §8 Web app: 27 frames
 
-See plans.md §8: the sign-in page, page copy, the dashboard's Settings
-anatomy, account pages and Ops.
+See plans.md §8:
+
+- the dashboard's Settings anatomy (18 frames);
+- Ops: its four centred pages and its console on the dashboard shell (7);
+  the Ops host allows no inline style, so they need the stylesheet's hash;
+- Open in Zeros on a cloud workspace (1): it needs an app link that opens one;
+- the route map's own note (1).
 
 ### UI components: the Design-tab sheets (3 frames)
 

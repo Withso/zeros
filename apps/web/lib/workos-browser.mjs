@@ -1,5 +1,6 @@
 import { fetchWorkOSRailway } from "./workos-railway.mjs";
 import { readBoundedResponseBody } from "./control-plane-policy.mjs";
+import { PROVIDER_LOGOS, shell } from "./page.ts";
 
 export const WORKOS_FLOW_COOKIE = "__Host-zeros_auth_flow";
 export const WORKOS_SESSION_COOKIE = "__Host-zeros_session";
@@ -7,12 +8,24 @@ export const WORKOS_SESSION_COOKIE = "__Host-zeros_session";
 const OPAQUE_ID = /^[A-Za-z0-9_-]{43}$/;
 const MAX_RAILWAY_SESSION_BYTES = 256 * 1024;
 
-function upstreamBrowserPath(env, pathname) {
+// The sign-in page's two choices. Each starts that provider directly; every
+// other start (Ops, a workspace page, a step-up) stays on Hosted AuthKit.
+const SOCIAL_PROVIDERS = Object.freeze([
+  { provider: "google", label: "Continue with Google" },
+  { provider: "github", label: "Continue with GitHub" },
+]);
+const SOCIAL_PROVIDER_IDS = new Set(SOCIAL_PROVIDERS.map((entry) => entry.provider));
+
+function routePrefix(env) {
   const prefix = String(env.WORKOS_BROWSER_ROUTE_PREFIX || "").trim();
   if (prefix !== "" && prefix !== "/ops") {
     throw new Error("WORKOS_BROWSER_ROUTE_PREFIX must be empty or /ops");
   }
-  return `${prefix}${pathname}`;
+  return prefix;
+}
+
+function upstreamBrowserPath(env, pathname) {
+  return `${routePrefix(env)}${pathname}`;
 }
 
 function cookies(request) {
@@ -60,11 +73,16 @@ function validSessionData(value, { allowEmptyBearer = false } = {}) {
 
 function failureResponse() {
   return new Response(
-    "Sign-in didn't finish. The sign-in service is temporarily unavailable. Nothing was changed; please try again.",
+    shell(
+      "Sign-in didn’t finish",
+      `<div class="title">Sign-in didn’t finish</div>
+          <div class="sub">Sign-in is unavailable right now. Try again shortly.</div>
+          <div class="acts"><a class="btn" href="/">Try again</a></div>`,
+    ),
     {
-      status: 400,
+      status: 503,
       headers: {
-        "content-type": "text/plain; charset=utf-8",
+        "content-type": "text/html; charset=utf-8",
         "cache-control": "no-store",
       },
     },
@@ -131,10 +149,30 @@ async function proxyBrowserGet(request, env, pathname, options = {}) {
   }
 }
 
-/** WorkOS has exactly one application-owned entry point because Hosted
- * AuthKit owns every authentication-method choice. */
+/** The signed-out hub's choices: Google and GitHub, each started directly. */
 export function browserAuthStartOptions(returnTo) {
-  return [{ label: "Continue", href: `/auth/start?return=${encodeURIComponent(returnTo)}` }];
+  return SOCIAL_PROVIDERS.map(({ provider, label }) => ({
+    label,
+    provider,
+    href: `/auth/start?return=${encodeURIComponent(returnTo)}&provider=${provider}`,
+  }));
+}
+
+function browserAuthStartButton({ label, provider, href }) {
+  return `<a class="btn" href="${href.replaceAll("&", "&amp;")}">${PROVIDER_LOGOS[provider]}${label}</a>`;
+}
+
+/** The signed-out hub: one page, Google and GitHub stacked at 260px. */
+export function signInPage(returnTo) {
+  const buttons = browserAuthStartOptions(returnTo).map(browserAuthStartButton).join("\n            ");
+  return shell(
+    "Sign in to Zeros",
+    `<div class="title">Sign in to Zeros</div>
+          <div class="sub">Sign in or create an account to continue.</div>
+          <div class="acts stack">
+            ${buttons}
+          </div>`,
+  );
 }
 
 /** Cloudflare Pages is a stateless same-origin facade. Railway creates PKCE
@@ -146,6 +184,15 @@ export function beginWorkOSBrowserAuth(request, env, options = {}) {
   if (returnTo !== null) sanitized.searchParams.set("return", returnTo);
   if (source.searchParams.get("max_age") === "300") {
     sanitized.searchParams.set("max_age", "300");
+  }
+  // Only the app's sign-in page names a provider; Ops keeps Hosted AuthKit.
+  const providers = source.searchParams.getAll("provider");
+  if (
+    String(env.WORKOS_BROWSER_ROUTE_PREFIX || "").trim() === "" &&
+    providers.length === 1 &&
+    SOCIAL_PROVIDER_IDS.has(providers[0])
+  ) {
+    sanitized.searchParams.set("provider", providers[0]);
   }
   return proxyBrowserGet(
     new Request(sanitized, { headers: request.headers }),

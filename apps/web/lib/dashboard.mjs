@@ -1,3 +1,5 @@
+import { shell } from "./page.ts";
+
 const SECTIONS = ["profile", "general", "members", "teams", "billing"];
 const COLLABORATIVE_SECTIONS = new Set(["members", "teams", "billing"]);
 const ORGANIZATION_LOGO_MAX_CHARS = 200_000;
@@ -150,112 +152,66 @@ export function parseAccountResolutionError(status, body) {
   };
 }
 
-export function accountAccessPage({ session, kind, signOutHref }) {
-  const identity = session.name || session.email || "Zeros user";
+export function accountAccessPage({ kind, signOutHref }) {
   const content = {
     account_exists: {
       title: "Use your existing sign-in",
-      summary:
-        "A Zeros account already uses this verified email with a different sign-in identity.",
-      detail:
-        "For your security, Zeros never links identities by matching email alone. Sign out and use the sign-in method you originally used, or contact Zeros support for reviewed help.",
+      line: "This email already signs in another way. Use that method.",
+      primary: "Sign out",
     },
+    // Signing out returns to the sign-in page, which is the fresh sign-in.
     reauthentication_required: {
       title: "Sign in again",
-      summary:
-        "A recent authentication is required before this identity can continue.",
-      detail:
-        "Sign out, then sign in to Zeros again. A fresh sign-in protects account recovery and other sensitive changes.",
+      line: "For your security, sign in once more to continue.",
+      primary: "Sign in again",
     },
     account_unavailable: {
       title: "Account access unavailable",
-      summary: "This Zeros account is no longer active.",
-      detail:
-        "Sign out before trying another account. If you believe this is unexpected, contact Zeros support.",
+      line: "This Zeros account is no longer active. Contact support if unexpected.",
+      primary: "Sign out",
     },
   }[kind] ?? {
     title: "Account access unavailable",
-    summary: "Zeros could not authorize this account.",
-    detail: "Sign out and contact Zeros support if the problem continues.",
+    line: "Zeros couldn’t authorize this account. Contact support for help.",
+    primary: "Sign out",
   };
-  return `<!doctype html>
-<html lang="en" data-theme="dark">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <meta name="robots" content="noindex" />
-  <title>Zeros · ${esc(content.title)}</title>
-  <link rel="stylesheet" href="${dashboardAsset("/dashboard.css")}" />
-</head>
-<body class="dashboard-page">
-  <div class="app-shell">
-    <aside class="sidebar" aria-label="Zeros account">
-      <a class="brand" href="/" aria-label="Zeros home">${BRAND_MARK}<span>Zeros</span></a>
-      <div class="sidebar-account"><span class="avatar">${esc(initials(identity))}</span><span><strong>${esc(identity)}</strong><small>${esc(session.email || "")}</small></span><a href="${esc(signOutHref)}">Sign out</a></div>
-    </aside>
-    <main class="main-content">
-      <div class="content-column">
-        <section class="section-stack">
-          <div class="section-heading"><div><h1>${esc(content.title)}</h1><p>${esc(content.summary)}</p></div></div>
-          <div class="notice notice-error"><strong>Access was stopped safely</strong><p>${esc(content.detail)}</p></div>
-          <div><a class="button secondary" href="${esc(signOutHref)}">Sign out</a> <a class="button secondary" href="mailto:hi@zeros.build">Contact support</a></div>
-        </section>
-      </div>
-    </main>
-  </div>
-</body>
-</html>`;
+  return shell(
+    `Zeros · ${esc(content.title)}`,
+    `<div class="title">${esc(content.title)}</div>
+          <div class="sub">${esc(content.line)}</div>
+          <div class="acts"><a class="btn" href="${esc(signOutHref)}">${esc(content.primary)}</a><a class="btn ghost" href="mailto:hi@zeros.build">Contact support</a></div>`,
+  );
+}
+
+const COPY_ICON =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>';
+
+function recoveryCodeBox(code, hint) {
+  return `<div class="box"><div class="box-row"><span class="box-text"><span class="box-name">Recovery code</span><span class="box-hint">${hint}</span></span><span class="box-ctl"><code class="code">${esc(code)}</code><button class="icon-btn" type="button" aria-label="Copy recovery code" data-copy="${esc(code)}">${COPY_ICON}</button></span></div></div>
+          <script>document.querySelectorAll("[data-copy]").forEach((button) => button.addEventListener("click", () => navigator.clipboard?.writeText(button.dataset.copy).catch(() => {})));</script>`;
 }
 
 /** A valid WorkOS ceremony can still require deliberate identity recovery.
  * Keep this out of the ordinary dashboard so it is never mislabeled as an
  * organization/network outage, and never serialize browser credentials. */
-export function accountRecoveryPage({ session, recoveryCode, signOutHref }) {
+export function accountRecoveryPage({ recoveryCode, signOutHref }) {
   const safeRecoveryCode =
     typeof recoveryCode === "string" && RECOVERY_CODE_RE.test(recoveryCode)
       ? recoveryCode
       : null;
-  const identity = session.name || session.email || "Zeros user";
-  return `<!doctype html>
-<html lang="en" data-theme="dark">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <meta name="robots" content="noindex" />
-  <title>Zeros · Account recovery</title>
-  <link rel="stylesheet" href="${dashboardAsset("/dashboard.css")}" />
-</head>
-<body class="dashboard-page">
-  <div class="app-shell">
-    <aside class="sidebar" aria-label="Zeros account">
-      <a class="brand" href="/" aria-label="Zeros home">${BRAND_MARK}<span>Zeros</span></a>
-      <div class="sidebar-account"><span class="avatar">${esc(initials(identity))}</span><span><strong>${esc(identity)}</strong><small>${esc(session.email || "")}</small></span><a href="${esc(signOutHref)}">Sign out</a></div>
-    </aside>
-    <main class="main-content">
-      <div class="content-column">
-        <section class="section-stack">
-          <div class="section-heading"><div><h1>Account recovery required</h1><p>Your sign-in completed securely, but it cannot be linked automatically.</p></div></div>
-          <div class="notice notice-error">
-            <strong>We protected your existing Zeros account</strong>
-            <p>A previous sign-in identity for this verified email was removed. Zeros never links a new identity by email alone, because that could let the wrong person take over the account.</p>
-          </div>
-          <div class="card">
-            <div class="card-title"><div><strong>What to do</strong><p>Email <a href="mailto:hi@zeros.build">hi@zeros.build</a>${safeRecoveryCode ? " and include the recovery code below" : " for a reviewed recovery"}. The code is a support locator, not a password, and expires after 24 hours.</p></div></div>
-            ${safeRecoveryCode ? `<div class="settings-row"><span class="settings-copy"><strong>Recovery code</strong><p>Share this only with Zeros support.</p></span><span class="settings-value"><code class="id-code">${esc(safeRecoveryCode)}</code></span></div>` : ""}
-          </div>
-          <div><a class="button secondary" href="${esc(signOutHref)}">Sign out</a></div>
-        </section>
-      </div>
-    </main>
-  </div>
-</body>
-</html>`;
+  return shell(
+    "Zeros · Account recovery",
+    `<div class="title">Account recovery required</div>
+          <div class="sub">${safeRecoveryCode ? "Email hi@zeros.build with your recovery code to restore access." : "Email hi@zeros.build to ask for a reviewed recovery."}</div>
+          ${safeRecoveryCode ? recoveryCodeBox(safeRecoveryCode, "Share only with Zeros support · expires in 24 hours") : ""}
+          <div class="acts"><a class="btn" href="mailto:hi@zeros.build">Email support</a><a class="btn ghost" href="${esc(signOutHref)}">Sign out</a></div>`,
+  );
 }
 
 /** A provider session may authenticate a deletion-pending identity only to the
  * exact lifecycle status/restore endpoints. This page contains no bearer or
  * sealed-session material; the host-only HttpOnly session remains server-side. */
-export function accountDeletionPage({ session, deletion, signOutHref }) {
+export function accountDeletionPage({ deletion, signOutHref }) {
   const requestId =
     typeof deletion?.id === "string" && ORGANIZATION_ID_RE.test(deletion.id)
       ? deletion.id
@@ -274,35 +230,16 @@ export function accountDeletionPage({ session, deletion, signOutHref }) {
         timeZone: "UTC",
       })
     : "the end of the recovery period";
-  const identity = session.name || session.email || "Zeros user";
-  return `<!doctype html>
-<html lang="en" data-theme="dark">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <meta name="robots" content="noindex" />
-  <title>Zeros · Restore account</title>
-  <link rel="stylesheet" href="${dashboardAsset("/dashboard.css")}" />
-  <script type="module" src="${dashboardAsset("/account-deletion.js")}"></script>
-</head>
-<body class="dashboard-page">
-  <div class="app-shell">
-    <aside class="sidebar" aria-label="Zeros account">
-      <a class="brand" href="/" aria-label="Zeros home">${BRAND_MARK}<span>Zeros</span></a>
-      <div class="sidebar-account"><span class="avatar">${esc(initials(identity))}</span><span><strong>${esc(identity)}</strong><small>${esc(session.email || "")}</small></span><a href="${esc(signOutHref)}">Sign out</a></div>
-    </aside>
-    <main class="main-content"><div class="content-column">
-      <section class="section-stack">
-        <div class="section-heading"><div><h1>Account deletion scheduled</h1><p>Cloud account access was stopped immediately. Local Personal workspaces remain on your devices.</p></div></div>
-        <div class="notice notice-error"><strong>Recovery is available for 30 days</strong><p>Restore this account before ${esc(purgeLabel)}. After that point, Zeros will permanently delete your account and erase the retained cloud account data.</p></div>
-        ${recoveryCode ? `<div class="card settings-card"><div class="settings-row"><span class="settings-copy"><strong>Recovery code</strong><p>This identifies the request; it is not authentication.</p></span><span class="settings-value"><code class="id-code">${esc(recoveryCode)}</code></span></div></div>` : ""}
-        <div class="card"><div class="card-title"><div><strong>Restore account</strong><p>A recent sign-in is required. Previously revoked sessions remain signed out.</p></div><button class="button primary" id="restore-account" type="button" ${requestId ? "" : "disabled"}>Restore account</button></div><div class="dialog-error" id="restore-account-error" role="alert"></div></div>
-        <a class="button secondary" href="${esc(signOutHref)}">Sign out</a>
-      </section>
-    </div></main>
-  </div>
-  <script type="application/json" id="account-deletion-data">${safeJson({ requestId })}</script>
-</body></html>`;
+  return shell(
+    "Zeros · Restore account",
+    `<div class="title">Account deletion scheduled</div>
+          <div class="sub">Restore before ${esc(purgeLabel)} to keep your cloud account.</div>
+          ${recoveryCode ? recoveryCodeBox(recoveryCode, "Identifies the request; it isn’t a password") : ""}
+          <div class="acts"><button class="btn" id="restore-account" type="button" ${requestId ? "" : "disabled"}>Restore account</button><a class="btn ghost" href="${esc(signOutHref)}">Sign out</a></div>
+          <div class="msg error" id="restore-account-error" role="alert"></div>
+          <script type="application/json" id="account-deletion-data">${safeJson({ requestId })}</script>`,
+    { head: `<script type="module" src="${dashboardAsset("/account-deletion.js")}"></script>` },
+  );
 }
 
 function organizationLabel(org) {

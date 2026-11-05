@@ -7,6 +7,7 @@ import {
   GITHUB_COMPLETION_LINK_TTL_MS,
   GITHUB_COMPLETION_SCHEMES,
   parseGithubCompletionFragment,
+  githubCompletionPage,
 } from "./github-completion.mjs";
 
 const NONCE = "n".repeat(43);
@@ -22,6 +23,7 @@ describe("GitHub browser completion handoff", () => {
 
       assert.deepEqual(parsed, {
         kind: "connected",
+        scheme,
         deepLink: `${scheme}://github/connected#nonce=${NONCE}`,
       });
     }
@@ -37,6 +39,7 @@ describe("GitHub browser completion handoff", () => {
     assert.deepEqual(parsed, {
       kind: "error",
       error: "access_denied",
+      scheme: "zeros",
       deepLink: `zeros://github/connected#nonce=${NONCE}&error=access_denied`,
     });
   });
@@ -72,6 +75,7 @@ describe("GitHub browser completion handoff", () => {
       ),
       {
         kind: "connected",
+        scheme: "zeros",
         deepLink: `zeros://github/connected#nonce=${NONCE}`,
       },
     );
@@ -111,10 +115,44 @@ describe("GitHub browser completion handoff", () => {
     assert.equal(typeof expire, "function");
     scheduled.callback();
     assert.equal(parsed.deepLink, "");
-    assert.equal("href" in open, false);
-    assert.equal(open.hidden, true);
-    assert.equal(title.textContent, "This GitHub handoff has expired");
-    assert.match(sub.textContent, /start the connection again/);
+    assert.equal(open.href, "zeros://");
+    assert.equal(open.hidden, false);
+    assert.equal(title.textContent, "This GitHub handoff expired");
+    assert.equal(sub.textContent, "In Zeros, open Settings › Integrations and connect again.");
     assert.equal(msg.textContent, "");
+  });
+});
+
+describe("GitHub connection page", () => {
+  it("checks the handoff, then names each outcome with Open Zeros", () => {
+    const page = githubCompletionPage("zeros-alpha://");
+
+    assert.match(page, /<div class="title" id="github-title">Finish GitHub connection<\/div>/);
+    assert.match(page, /<div class="sub" id="github-sub">Checking the secure GitHub handoff\. This takes a moment\.<\/div>/);
+    assert.match(page, /<div class="acts"><a class="btn" id="github-open" hidden>Open Zeros<\/a><\/div>/);
+    for (const copy of [
+      '"This GitHub link is incomplete"',
+      '"In Zeros, open Settings › Integrations and connect again."',
+      'open.href = "zeros-alpha://"',
+      '"GitHub connection canceled"',
+      '"Nothing was connected. Return to Zeros to try again."',
+      '"GitHub couldn’t connect"',
+      '"Open Zeros to see what went wrong and try again."',
+      '"Open Zeros to finish linking GitHub on this Mac."',
+      '"Opening Zeros… You can close this tab."',
+    ]) {
+      assert.ok(page.includes(copy), copy);
+    }
+    assert.doesNotMatch(page, /<img /);
+  });
+
+  it("shows Turn on JavaScript when scripts are off", () => {
+    const page = githubCompletionPage("zeros://");
+
+    assert.match(page, /<noscript><style>#github-live \{ display: none; \}<\/style><\/noscript>/);
+    assert.match(
+      page,
+      /<noscript><div class="title">Turn on JavaScript<\/div><div class="sub">Enable JavaScript to finish connecting GitHub\.<\/div><\/noscript>/,
+    );
   });
 });

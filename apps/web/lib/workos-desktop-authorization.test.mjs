@@ -202,3 +202,44 @@ test("Beta and Production reject the local Dev scheme", async () => {
     assert.equal(response.status, 400);
   }
 });
+
+test("the desktop handoff pages follow the canvas copy and keep Open Zeros", async () => {
+  const opened = await renderWorkOSDesktopCallback(
+    new Request(`https://app-alpha.zeros.build/auth/desktop/callback?code=authorization-code&state=${STATE}`),
+    ENV,
+  ).text();
+  assert.match(opened, /<div class="title">Opening Zeros…<\/div>/);
+  assert.match(opened, /<div class="sub">Signed in\. If Zeros doesn’t open, use the button below\.<\/div>/);
+  assert.match(opened, /<div class="acts"><a class="btn" id="open-zeros" href="#">Open Zeros<\/a><\/div>/);
+  assert.doesNotMatch(opened, /You may close this tab/);
+
+  const refused = await renderWorkOSDesktopCallback(
+    new Request(`https://app-alpha.zeros.build/auth/desktop/callback?error=access_denied&state=${STATE}`),
+    ENV,
+  ).text();
+  assert.match(refused, /<div class="title">Sign-in wasn’t completed<\/div>/);
+  assert.match(refused, /<div class="sub">Return to Zeros and try signing in again\.<\/div>/);
+
+  const invalid = renderWorkOSDesktopCallback(
+    new Request("https://app-alpha.zeros.build/auth/desktop/callback?code=x&state=bogus"),
+    ENV,
+  );
+  const invalidBody = await invalid.text();
+  assert.equal(invalid.status, 400);
+  assert.match(invalidBody, /<div class="title">Sign-in didn’t finish<\/div>/);
+  assert.match(invalidBody, /<div class="sub">This sign-in link expired\. Start again from the Zeros app\.<\/div>/);
+  assert.match(invalidBody, /<div class="acts"><a class="btn" href="zeros-alpha:\/\/">Open Zeros<\/a><\/div>/);
+
+  const start = `https://app-alpha.zeros.build/auth/desktop?state=${STATE}&code_challenge=${CHALLENGE}`;
+  const unavailable = await beginWorkOSDesktopAuthorization(new Request(start), ENV, {
+    fetch: async () => {
+      throw new Error("offline");
+    },
+  });
+  const unavailableBody = await unavailable.text();
+  assert.match(unavailableBody, /<div class="sub">Sign-in is unavailable right now\. Try again shortly\.<\/div>/);
+  assert.match(
+    unavailableBody,
+    new RegExp(`<div class="acts"><a class="btn" href="/auth/desktop\\?state=${STATE}&amp;code_challenge=${CHALLENGE}">Try again</a></div>`),
+  );
+});

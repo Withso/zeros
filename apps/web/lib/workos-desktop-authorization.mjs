@@ -1,6 +1,6 @@
 import { fetchWorkOSRailway } from "./workos-railway.mjs";
-import { html, shell } from "./page.ts";
-import { SCHEMES } from "./schemes.mjs";
+import { esc, html, shell } from "./page.ts";
+import { SCHEMES, deploymentAppLink } from "./schemes.mjs";
 
 const TOKEN_PART = /^[A-Za-z0-9_-]{43}$/;
 const MAX_CALLBACK_VALUE_LENGTH = 8_192;
@@ -53,12 +53,19 @@ function callbackValue(raw) {
 }
 
 function invalidPage(
-  message = "This desktop sign-in link is invalid or expired.",
+  env,
+  message = "This sign-in link expired. Start again from the Zeros app.",
+  action = {
+    label: "Open Zeros",
+    href: deploymentAppLink((env.ZEROS_DEPLOY_ENV || "").trim()),
+  },
 ) {
   return noStorePage(
     shell(
-      "Sign-in didn't finish",
-      `<div class="title">Sign-in didn't finish</div><div class="sub">${message}</div>`,
+      "Sign-in didn’t finish",
+      `<div class="title">Sign-in didn’t finish</div>
+          <div class="sub">${message}</div>
+          <div class="acts"><a class="btn" href="${esc(action.href)}">${action.label}</a></div>`,
     ),
     400,
   );
@@ -88,7 +95,7 @@ export async function beginWorkOSDesktopAuthorization(
     fresh.length > 1 ||
     (fresh.length === 1 && fresh[0] !== "1")
   ) {
-    return invalidPage();
+    return invalidPage(env);
   }
   const query = new URLSearchParams({
     state: state.value,
@@ -112,9 +119,10 @@ export async function beginWorkOSDesktopAuthorization(
       headers,
     });
   } catch {
-    return invalidPage(
-      "The sign-in service is temporarily unavailable. Please try again.",
-    );
+    return invalidPage(env, "Sign-in is unavailable right now. Try again shortly.", {
+      label: "Try again",
+      href: `${url.pathname}${url.search}`,
+    });
   }
 }
 
@@ -124,7 +132,7 @@ export function renderWorkOSDesktopCallback(request, env) {
   const code = callbackValue(url.searchParams.get("code"));
   const providerError = callbackValue(url.searchParams.get("error"));
   if (!state || (!code && !providerError) || (code && providerError)) {
-    return invalidPage();
+    return invalidPage(env);
   }
 
   const nonce = crypto.randomUUID().replaceAll("-", "");
@@ -144,14 +152,13 @@ export function renderWorkOSDesktopCallback(request, env) {
     button.href = target;
     if (SUCCEEDED) window.location.href = target;
   `;
-  const title = succeeded ? "Opening Zeros…" : "Sign-in wasn't completed";
+  const title = succeeded ? "Opening Zeros…" : "Sign-in wasn’t completed";
   const detail = succeeded
-    ? "Your browser sign-in is complete. If the app does not open, use the button below."
-    : "Return to the Zeros app and try signing in again.";
+    ? "Signed in. If Zeros doesn’t open, use the button below."
+    : "Return to Zeros and try signing in again.";
   const inner = `<div class="title">${title}</div>
           <div class="sub">${detail}</div>
-          <a class="btn" id="open-zeros" href="#">Open Zeros</a>
-          <div class="msg">You may close this tab after the app opens.</div>
+          <div class="acts"><a class="btn" id="open-zeros" href="#">Open Zeros</a></div>
           <script nonce="${nonce}">${script}</script>`;
   return noStorePage(shell(title, inner), 200, nonce);
 }

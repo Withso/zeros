@@ -10,6 +10,7 @@ import {
   logoutWorkOSBrowserSession,
   readWorkOSBrowserSession,
   refreshWorkOSBrowserSession,
+  signInPage,
 } from "./workos-browser.mjs";
 
 const SESSION_ID = "A".repeat(43);
@@ -17,21 +18,46 @@ const APP_ORIGIN = "https://app-alpha.zeros.build";
 const CONTROL_PLANE_URL = "https://api-alpha.zeros.build";
 const ENV = { APP_ORIGIN, CONTROL_PLANE_URL };
 
-test("the signed-out hub gives one Hosted AuthKit entry", () => {
+test("the signed-out hub offers Google and GitHub", () => {
   const returnTo = `${APP_ORIGIN}/after`;
   assert.deepEqual(browserAuthStartOptions(returnTo), [
     {
-      label: "Continue",
-      href: `/auth/start?return=${encodeURIComponent(returnTo)}`,
+      label: "Continue with Google",
+      provider: "google",
+      href: `/auth/start?return=${encodeURIComponent(returnTo)}&provider=google`,
+    },
+    {
+      label: "Continue with GitHub",
+      provider: "github",
+      href: `/auth/start?return=${encodeURIComponent(returnTo)}&provider=github`,
     },
   ]);
+});
+
+test("the sign-in page stacks Continue with Google and Continue with GitHub", () => {
+  const page = signInPage(`${APP_ORIGIN}/after?a=1&b=2`);
+  const returnTo = encodeURIComponent(`${APP_ORIGIN}/after?a=1&b=2`);
+
+  assert.match(page, /<title>Sign in to Zeros<\/title>/);
+  assert.match(page, /<div class="title">Sign in to Zeros<\/div>/);
+  assert.match(page, /<div class="sub">Sign in or create an account to continue\.<\/div>/);
+  const actions = /<div class="acts stack">([\s\S]*?)<\/div>/.exec(page)?.[1] ?? "";
+  const buttons = [...actions.matchAll(/<a class="btn" href="([^"]+)"><svg[^>]*>[\s\S]*?<\/svg>([^<]+)<\/a>/g)];
+  assert.deepEqual(
+    buttons.map(([, href, label]) => [href, label]),
+    [
+      [`/auth/start?return=${returnTo}&amp;provider=google`, "Continue with Google"],
+      [`/auth/start?return=${returnTo}&amp;provider=github`, "Continue with GitHub"],
+    ],
+  );
+  assert.doesNotMatch(page, />Continue<\/a>/);
 });
 
 test("auth start is a stateless facade for the matching Railway service", async () => {
   const calls = [];
   const response = await beginWorkOSBrowserAuth(
     new Request(
-      `${APP_ORIGIN}/auth/start?provider=github&connection=conn_attacker&return=${encodeURIComponent(`${APP_ORIGIN}/after`)}`,
+      `${APP_ORIGIN}/auth/start?provider=github&connection=conn_attacker&organization=org_attacker&return=${encodeURIComponent(`${APP_ORIGIN}/after`)}`,
       { headers: { cookie: "unrelated=value" } },
     ),
     ENV,
@@ -52,7 +78,7 @@ test("auth start is a stateless facade for the matching Railway service", async 
   assert.equal(response.status, 303);
   assert.equal(
     calls[0].url,
-    `${CONTROL_PLANE_URL}/auth/start?return=${encodeURIComponent(`${APP_ORIGIN}/after`)}`,
+    `${CONTROL_PLANE_URL}/auth/start?return=${encodeURIComponent(`${APP_ORIGIN}/after`)}&provider=github`,
   );
   assert.equal(calls[0].init.headers.get("cookie"), null);
   assert.equal(calls[0].init.redirect, "manual");
@@ -81,6 +107,56 @@ test("the isolated Ops project uses its separate Railway browser namespace", asy
     },
   );
   assert.equal(forwarded.url, `${CONTROL_PLANE_URL}/ops/auth/start`);
+});
+
+test("auth start forwards only an exact Google or GitHub choice, never on Ops", async () => {
+  const forwarded = [];
+  const fetch = async (url) => {
+    forwarded.push(new URL(url));
+    return new Response(null, {
+      status: 303,
+      headers: { location: "https://api.workos.com/user_management/authorize" },
+    });
+  };
+  for (const provider of ["google", "github"]) {
+    await beginWorkOSBrowserAuth(new Request(`${APP_ORIGIN}/auth/start?provider=${provider}`), ENV, { fetch });
+  }
+  for (const provider of ["GitHubOAuth", "GoogleOAuth", "authkit", "Google", "sso", ""]) {
+    await beginWorkOSBrowserAuth(new Request(`${APP_ORIGIN}/auth/start?provider=${provider}`), ENV, { fetch });
+  }
+  await beginWorkOSBrowserAuth(new Request(`${APP_ORIGIN}/auth/start?provider=google&provider=github`), ENV, { fetch });
+  await beginWorkOSBrowserAuth(
+    new Request("https://ops-alpha.zeros.build/auth/start?provider=github&max_age=300"),
+    { ...ENV, APP_ORIGIN: "https://ops-alpha.zeros.build", WORKOS_BROWSER_ROUTE_PREFIX: "/ops" },
+    { fetch },
+  );
+
+  assert.deepEqual(
+    forwarded.map((url) => url.searchParams.get("provider")),
+    ["google", "github", null, null, null, null, null, null, null, null],
+  );
+  assert.equal(forwarded.at(-1).pathname, "/ops/auth/start");
+  assert.equal(forwarded.at(-1).searchParams.get("max_age"), "300");
+});
+
+test("an unreachable sign-in service ends on the shared page with Try again", async () => {
+  const response = await beginWorkOSBrowserAuth(
+    new Request(`${APP_ORIGIN}/auth/start?provider=google`),
+    ENV,
+    {
+      fetch: async () => {
+        throw new Error("offline");
+      },
+    },
+  );
+  const body = await response.text();
+
+  assert.equal(response.status, 503);
+  assert.match(response.headers.get("content-type"), /^text\/html/);
+  assert.equal(response.headers.get("cache-control"), "no-store");
+  assert.match(body, /<div class="title">Sign-in didn’t finish<\/div>/);
+  assert.match(body, /<div class="sub">Sign-in is unavailable right now\. Try again shortly\.<\/div>/);
+  assert.match(body, /<a class="btn" href="\/">Try again<\/a>/);
 });
 
 test("auth start preserves only the fixed step-up max_age", async () => {

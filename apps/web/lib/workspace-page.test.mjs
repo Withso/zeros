@@ -6,7 +6,7 @@ import {allowedControlPlaneRoute} from "./control-plane-policy.mjs";
 const workspaceId="11111111-1111-4111-8111-111111111111",token=`zwi_${"A".repeat(43)}`;
 function fixture({hash=`#token=${token}`,storage=new Map(),response={status:401},invitation=true}={}) {
   const page=renderWorkspacePage({workspaceId,invitation,nonce:"testnonce"}),elements=new Map(),replacements=[],history=[],requests=[];
-  for(const id of ["title","message","proceed","another"])elements.set(id,{textContent:"",disabled:false,events:{},classList:{add(){},remove(){}},addEventListener(name,fn){this.events[name]=fn;}});
+  for(const id of ["title","sub","message","proceed","another","meta"]){const hidden=new Set();elements.set(id,{textContent:"",className:"",disabled:false,events:{},hidden,classList:{add(name){hidden.add(name);},remove(name){hidden.delete(name);},contains(name){return hidden.has(name);}},addEventListener(name,fn){this.events[name]=fn;}});}
   const script=page.html.match(/<script nonce="testnonce">([\s\S]*?)<\/script>/)[1];
   vm.runInNewContext(script,{URLSearchParams,Date,document:{getElementById:id=>elements.get(id)},
     sessionStorage:{getItem:key=>storage.get(key)??null,setItem:(key,value)=>storage.set(key,value),removeItem:key=>storage.delete(key)},
@@ -27,13 +27,16 @@ test("authentication resumes only the exact tab invitation and does not loop",as
   const first=fixture();await first.click();
   assert.equal(first.replacements.length,1);assert.ok(!first.replacements[0].includes(token));
   const second=fixture({hash:"",storage:first.storage});await second.click();
-  assert.equal(second.replacements.length,0);assert.match(second.elements.get("message").textContent,/Sign-in did not establish/);
+  assert.equal(second.replacements.length,0);assert.equal(second.elements.get("sub").textContent,"Sign-in didn’t create a session. Use the invited email.");
+  assert.equal(second.elements.get("another").classList.contains("hidden"),false);assert.equal(second.elements.get("proceed").classList.contains("hidden"),true);
 });
 test("ordinary workspace lookup bounds automatic auth redirects and permits explicit retry",async()=>{
   const first=fixture({invitation:false,hash:""});await new Promise(resolve=>setImmediate(resolve));
   assert.equal(first.replacements.length,1);
   const second=fixture({invitation:false,hash:"",storage:first.storage});await new Promise(resolve=>setImmediate(resolve));
-  assert.equal(second.replacements.length,0);assert.match(second.elements.get("message").textContent,/Sign-in did not establish/);
+  assert.equal(second.replacements.length,0);assert.equal(second.elements.get("title").textContent,"Workspace unavailable");
+  assert.equal(second.elements.get("sub").textContent,"Sign-in didn’t create a session. Allow cookies and retry.");
+  assert.equal(second.elements.get("proceed").textContent,"Try again");
   second.elements.get("another").events.click();
   const retry=fixture({invitation:false,hash:"",storage:second.storage});await new Promise(resolve=>setImmediate(resolve));
   assert.equal(retry.replacements.length,1);
@@ -49,4 +52,26 @@ test("the browser proxy admits only exact workspace lookup and invitation accept
   assert.equal(allowedControlPlaneRoute("POST",`/v1/cloud-workspaces/${workspaceId}/invitations`),false);
   assert.equal(allowedControlPlaneRoute("GET",`/v1/cloud-workspaces/${workspaceId}/private`),false);
   assert.equal(allowedControlPlaneRoute("DELETE",`/v1/cloud-workspaces/${workspaceId}`),false);
+});
+test("each workspace state names itself in the title and one line",async()=>{
+  const page=renderWorkspacePage({workspaceId,invitation:false,nonce:"testnonce"}).html;
+  assert.match(page,/<div class="title" id="title">Cloud workspace<\/div>/);
+  assert.match(page,/<div class="sub" id="sub">Loading your cloud workspace\. This takes a moment\.<\/div>/);
+  const ready=fixture({invitation:false,hash:"",response:{status:200,ok:true,json:async()=>({workspace:{id:workspaceId,displayName:"Acme API",status:"running"}})}});
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(ready.elements.get("title").textContent,"Acme API");
+  assert.equal(ready.elements.get("sub").textContent,"You have access to this workspace on every device.");
+  assert.equal(ready.elements.get("proceed").textContent,"Refresh");
+  assert.equal(ready.elements.get("meta").classList.contains("hidden"),false);
+  const denied=fixture({invitation:false,hash:"",response:{status:403,ok:false,json:async()=>null}});
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(denied.elements.get("title").textContent,"Workspace unavailable");
+  assert.equal(denied.elements.get("sub").textContent,"This account can’t open this workspace. Try another account.");
+  assert.equal(denied.elements.get("another").classList.contains("hidden"),false);
+  const invite=renderWorkspacePage({workspaceId,invitation:true,nonce:"testnonce"}).html;
+  assert.match(invite,/<div class="title" id="title">Join a cloud workspace<\/div>/);
+  assert.match(invite,/<div class="sub" id="sub">Accept with the email this invite was sent to\.<\/div>/);
+  const revoked=fixture({response:{status:404,ok:false,json:async()=>null}});await revoked.click();
+  assert.equal(revoked.elements.get("sub").textContent,"This invite expired or is for another email. Ask for a new one.");
+  assert.equal(revoked.elements.get("another").classList.contains("hidden"),false);
 });

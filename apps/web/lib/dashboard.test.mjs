@@ -349,10 +349,54 @@ test("sign-in conflicts and fresh-auth requirements get dedicated safe guidance"
       kind,
       signOutHref: "/auth/logout",
     });
-    assert.match(page, /Sign out/);
+    assert.match(page, /href="\/auth\/logout"/);
+    assert.match(page, /Contact support/);
     assert.doesNotMatch(page, /Organization data is unavailable/);
     assert.doesNotMatch(page, /secret-token-must-not-render/);
     assert.doesNotMatch(page, /refresh-secret-must-not-render/);
     assert.doesNotMatch(page, /untrusted/);
+  }
+});
+
+test("account states are centred pages with the canvas copy and one primary", () => {
+  const recovery = accountRecoveryPage({ session, recoveryCode: "ZR-ABCD-2345", signOutHref: "/auth/logout" });
+  assert.match(recovery, /<main class="card">/);
+  assert.match(recovery, /<div class="title">Account recovery required<\/div>/);
+  assert.match(recovery, /<div class="sub">Email hi@zeros\.build with your recovery code to restore access\.<\/div>/);
+  assert.match(recovery, /<span class="box-name">Recovery code<\/span><span class="box-hint">Share only with Zeros support · expires in 24 hours<\/span>/);
+  assert.match(recovery, /<code class="code">ZR-ABCD-2345<\/code><button class="icon-btn" type="button" aria-label="Copy recovery code" data-copy="ZR-ABCD-2345"><svg/);
+  assert.match(recovery, /navigator\.clipboard/);
+  assert.match(recovery, /<div class="acts"><a class="btn" href="mailto:hi@zeros\.build">Email support<\/a><a class="btn ghost" href="\/auth\/logout">Sign out<\/a><\/div>/);
+  assert.doesNotMatch(recovery, /class="sidebar"/);
+  const noCode = accountRecoveryPage({ session, recoveryCode: null, signOutHref: "/auth/logout" });
+  assert.match(noCode, /<div class="sub">Email hi@zeros\.build to ask for a reviewed recovery\.<\/div>/);
+  assert.doesNotMatch(noCode, /class="box"/);
+
+  const deletion = accountDeletionPage({
+    session,
+    deletion: { id: "44444444-4444-4444-8444-444444444444", recoveryCode: "ZD-ABCD-2345", purgeAfter: "2026-11-30T00:00:00.000Z" },
+    signOutHref: "/auth/logout",
+  });
+  assert.match(deletion, /<div class="title">Account deletion scheduled<\/div>/);
+  assert.match(deletion, /<div class="sub">Restore before November 30, 2026 to keep your cloud account\.<\/div>/);
+  assert.match(deletion, /<span class="box-hint">Identifies the request; it isn’t a password<\/span>/);
+  assert.match(deletion, /aria-label="Copy recovery code" data-copy="ZD-ABCD-2345"/);
+  assert.match(deletion, /<div class="acts"><button class="btn" id="restore-account" type="button" >Restore account<\/button><a class="btn ghost" href="\/auth\/logout">Sign out<\/a><\/div>/);
+  assert.match(deletion, /<div class="msg error" id="restore-account-error" role="alert"><\/div>/);
+
+  const copy = {
+    account_exists: ["Use your existing sign-in", "This email already signs in another way. Use that method.", "Sign out"],
+    reauthentication_required: ["Sign in again", "For your security, sign in once more to continue.", "Sign in again"],
+    account_unavailable: ["Account access unavailable", "This Zeros account is no longer active. Contact support if unexpected.", "Sign out"],
+    unknown: ["Account access unavailable", "Zeros couldn’t authorize this account. Contact support for help.", "Sign out"],
+  };
+  for (const [kind, [title, line, primary]] of Object.entries(copy)) {
+    const page = accountAccessPage({ session, kind, signOutHref: "/auth/logout" });
+    assert.match(page, new RegExp(`<div class="title">${title}</div>`));
+    assert.ok(page.includes(`<div class="sub">${line}</div>`), kind);
+    assert.ok(
+      page.includes(`<div class="acts"><a class="btn" href="/auth/logout">${primary}</a><a class="btn ghost" href="mailto:hi@zeros.build">Contact support</a></div>`),
+      kind,
+    );
   }
 });

@@ -24,6 +24,7 @@ import {
   DEFAULT_SCHEME,
   schemeForDeploymentEnvironment,
   schemeOrDefault,
+  deploymentAppLink,
 } from "./schemes.mjs";
 
 // Every value schemeForChannel() can return. Kept honest against the desktop by
@@ -101,4 +102,12 @@ describe("invite page scheme selection", () => {
       assert.equal(schemeOrDefault(scheme), "zeros");
     }
   });
+});
+
+it("an Open Zeros link without a callback opens this deployment's app", () => {
+  assert.equal(deploymentAppLink("alpha"), "zeros-alpha://");
+  assert.equal(deploymentAppLink("beta"), "zeros-beta://");
+  assert.equal(deploymentAppLink("production"), "zeros://");
+  assert.equal(deploymentAppLink(""), "zeros://");
+  assert.equal(deploymentAppLink("staging"), "zeros://");
 });

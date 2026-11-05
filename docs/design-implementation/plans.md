@@ -174,14 +174,33 @@ in the selection header, and the theme editor's row actions.
 
 ## 8. Web app: the dashboard, account pages and Ops
 
-Boards: `web-app.md`. The centred pages now share one shell
-(`apps/web/lib/page.ts`). What remains is per page and in the dashboard:
+Boards: `web-app.md`. Landed on 2026-11-05:
 
-- **Copy.** Each reason one line under 70 characters; titles that name the
-  state (Go to Zeros, Sign-in didn't finish); no dead ends (Open Zeros or Try
-  again on every failure, the GitHub expired button stays).
-- **Sign-in.** One page for WorkOS and the Auth0 rollback: Continue with
-  Google and Continue with GitHub, both primary with their logos, 260px wide.
+- **Sign-in.** One page with Continue with Google and Continue with GitHub,
+  both primary with their logos, stacked at 260px. Each sends one exact
+  `provider=google|github` to `/auth/start`, which starts that provider
+  directly. The owner chose this over the hosted chooser
+  (`docs/workos-authentication-migration.md`); Ops, workspace pages and
+  step-ups stay on Hosted AuthKit.
+- **One shell.** `apps/web/lib/page.ts` follows the canvas recipe: the logo
+  top-left, a 32px mark, an 18/24 title, one line, 28px actions, status and
+  meta lines and the recovery-code box. Logos and tokens are inline, so it
+  renders under every page's policy, and a test keeps the tokens equal to
+  `styles/zeros-tokens.css`. The control plane's sign-in completion and
+  failure pages and the cloud GitHub page use a verbatim copy
+  (`apps/control-plane/src/hosted-page.ts`, kept equal by a test) and allow its
+  stylesheet by hash.
+- **Copy.** Every centred app page follows its frame: desktop sign-in, GitHub,
+  invitations, cloud workspaces, the sign-in callback and the account states,
+  which are now centred pages with one primary. Every failure ends on Open
+  Zeros or Try again, and an expired GitHub handoff keeps Open Zeros without
+  its nonce.
+- **Removed frames.** The Auth0 rollback sign-in and callback, `/launch` and
+  the legacy `?scheme=` handoff left the code with Auth0 (#800) and are gone
+  from the canvas.
+
+Still to do:
+
 - **Dashboard** (`public/dashboard.css`, `public/dashboard.js`,
   `lib/dashboard.mjs`): the mac Settings anatomy (256px sidebar, 32px rows
   with 14px icons, 12px group labels, a 640px column, grouped cards with 12px
@@ -189,9 +208,13 @@ Boards: `web-app.md`. The centred pages now share one shell
   switcher as the first nav row, Sign out in Profile, Delete account as a
   destructive-secondary in a normal group, the 400px dialog recipe, toasts
   in the floating family.
-- **Account pages** become centred pages with one primary; **Ops**
-  (`public/ops.css`, `lib/ops.ts`) uses the dashboard shell with an Ops
-  badge beside the logo.
+- **Ops** (`public/ops.css`, `lib/ops.ts`): sign-in, reauthentication, access
+  denied and unavailable on the shared shell with an Ops badge, and the
+  console on the dashboard shell. The Ops host's policy allows no inline
+  style, so these pages must send their own policy with the shell
+  stylesheet's hash, as the control plane's pages do.
+- **Open in Zeros on a cloud workspace.** The workspace page needs an app link
+  that opens a cloud workspace; `zeros://workspace/<id>` is a Local link.
 
 Verify with `node --test apps/web/lib/*.test.mjs` and renders of each board
 in both themes; `check:web-deploy` checks the live Pages deployments and
