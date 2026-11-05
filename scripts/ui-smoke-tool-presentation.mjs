@@ -192,8 +192,9 @@ export async function runToolPresentationSmoke({ page, check }) {
 }
 
 // Regression: a row with a file or link target beside its name painted its
-// hover on the bare name, with no side padding and 4px corners, while a plain
-// row (Bash) hovered as a padded 28px row with 6px corners.
+// hover on the bare name, with no side padding and 4px corners, and stood
+// 36px tall, while a plain row (Bash) hovered as a padded 28px row with 6px
+// corners; rows then sat 36 or 44px apart.
 async function expectRowShape({ page, feed, check, label }) {
   const shapes = await feed.evaluateAll((elements) => elements.map((row) => {
     const style = getComputedStyle(row);
@@ -204,13 +205,15 @@ async function expectRowShape({ page, feed, check, label }) {
       padding: `${style.paddingLeft} ${style.paddingRight}`,
       radius: style.borderTopLeftRadius,
       iconInset: Math.round(icon.left - bounds.left),
-      tall: bounds.height >= 28,
+      height: Math.round(bounds.height),
     };
   }));
   expect(shapes.some((shape) => shape.targets), `${label}: a row with targets`).toBe(true);
   expect(shapes.some((shape) => !shape.targets), `${label}: a plain row`).toBe(true);
   for (const shape of shapes) {
-    expect(shape, label).toEqual({ targets: shape.targets, padding: "8px 8px", radius: "6px", iconInset: 8, tall: true });
+    // One height too, so every row sits on the same 36px pitch (28 + the
+    // feed's 8px gap): a row with targets used to be 36px tall.
+    expect(shape, label).toEqual({ targets: shape.targets, padding: "8px 8px", radius: "6px", iconInset: 8, height: 28 });
   }
   const hoverFill = await page.evaluate(() => {
     const probe = document.createElement("span");
@@ -242,7 +245,7 @@ async function expectRowShape({ page, feed, check, label }) {
     }
   }
   await page.mouse.move(0, 0);
-  check(`${label}: every tool row, with or without targets, is one padded 28px row with 6px corners and one hover fill`, true);
+  check(`${label}: every tool row, with or without targets, is one padded 28px row with 6px corners, one pitch and one hover fill`, true);
 }
 
 export async function runToolSpacingSmoke({ page, check }) {

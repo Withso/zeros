@@ -26,9 +26,10 @@ const ListRow = React.forwardRef<HTMLButtonElement, ListRowProps>(
 ListRow.displayName = "ListRow";
 
 /** Turns a ListRow into the disclosure inside a ListRowGroup: just its icon
- * and name, with the group drawing the row around it. */
+ * and name, with the group drawing the row around it. It drops the 28px
+ * minimum too, so the group is 28px like a plain ListRow, not 36. */
 const LIST_ROW_IN_GROUP =
-  "m-0 min-w-0 shrink-0 rounded-none p-0 hover:bg-transparent focus-visible:inset-ring-0 focus-visible:ring-0";
+  "m-0 min-h-0 min-w-0 shrink-0 rounded-none p-0 hover:bg-transparent focus-visible:inset-ring-0 focus-visible:ring-0";
 
 const GROUP_FOCUS =
   "has-[[data-list-row-disclosure]:focus-visible]:inset-ring has-[[data-list-row-disclosure]:focus-visible]:inset-ring-highlighted-bright has-[[data-list-row-disclosure]:focus-visible]:ring-[3px] has-[[data-list-row-disclosure]:focus-visible]:ring-highlighted-bright/50";

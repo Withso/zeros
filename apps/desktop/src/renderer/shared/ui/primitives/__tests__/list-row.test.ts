@@ -108,10 +108,13 @@ describe("ListRowGroup", () => {
 
   it("leaves its disclosure only the icon and name, with no fill or ring of its own", () => {
     const disclosure = classes(render(), 1);
-    for (const cls of ["p-0", "m-0", "hover:bg-transparent", "focus-visible:ring-0", "focus-visible:inset-ring-0"]) {
+    // min-h-0: the disclosure's own 28px minimum inside the group's 4px
+    // padding made a row with targets 36px tall beside 28px plain rows.
+    for (const cls of ["p-0", "m-0", "min-h-0", "hover:bg-transparent", "focus-visible:ring-0", "focus-visible:inset-ring-0"]) {
       expect(disclosure, cls).toContain(cls);
     }
     expect(disclosure).not.toContain("hover:bg-bg1-hover");
+    expect(disclosure).not.toContain("min-h-7");
     expect(disclosure).not.toContain("px-2");
   });
 
