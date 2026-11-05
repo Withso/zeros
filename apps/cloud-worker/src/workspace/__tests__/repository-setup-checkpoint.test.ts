@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { expect, it } from "vitest";
 import { CloudWorker } from "../../worker";
@@ -53,8 +53,8 @@ it("runs the selected script once per disk after seeded files, including actual 
   await mkdir(f.root); await f.git("clone", origin, ".");
   const restored = run([...checkpointRestoreSteps({ checkoutPath: f.root, home, key, sha256 }, [`cp ${quote(archive)} "$work/checkpoint.zck"`]), "report zeros-checkpoint-restored"]);
   expect(parseRestoreResult(restored)).toEqual({ ok: true });
-  await expect(stat(proof)).rejects.toMatchObject({ code: "ENOENT" });
-  await expect(stat(status)).rejects.toMatchObject({ code: "ENOENT" });
+  await expect(readFile(proof)).rejects.toMatchObject({ code: "ENOENT" });
+  await expect(readFile(status)).rejects.toMatchObject({ code: "ENOENT" });
   expect(await readFile(join(f.root, ".env.local"), "utf8")).toBe(environment.files[0]!.content);
   const replacement = await start(false);
   try {
@@ -62,6 +62,6 @@ it("runs the selected script once per disk after seeded files, including actual 
     await replacement.relay.receive(configuration);
     await expect.poll(async () => JSON.parse(await readFile(status, "utf8")).state).toBe("succeeded");
     expect(await readFile(proof, "utf8")).toBe("ran");
-    await expect(stat(join(state, "restored-from-checkpoint"))).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(readFile(join(state, "restored-from-checkpoint"))).rejects.toMatchObject({ code: "ENOENT" });
   } finally { await replacement.worker.dispose(); }
 }, 30_000);
