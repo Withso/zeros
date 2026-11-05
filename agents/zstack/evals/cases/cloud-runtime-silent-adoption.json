@@ -2,7 +2,7 @@
   "id": "cloud-runtime-silent-adoption",
   "kind": "scenario",
   "area": "control-plane-data",
-  "fixedBy": "pending",
+  "fixedBy": "pr:841",
   "symptom": "A running cloud workspace kept an older runtime indefinitely; a naive service restart can interrupt work, expose a starting state or expire the app's existing execution.",
   "rule": "Adopt only after a complete quiet dwell and a final Stop fence, publish a fresh private boot atomically, and verify the next existing-chat prompt, history and terminal through the actual transport (zstack-verify, principles 11, 13 and 18).",
   "check": "pnpm --dir apps/control-plane exec vitest run src/cloud/runtime-adoption.integration.test.ts src/cloud/runtime-handoff.integration.test.ts src/cloud/runtime-update.test.ts"
