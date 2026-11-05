@@ -2,6 +2,17 @@ import { createHash } from "node:crypto";
 
 // Each reviewed migration lists its exact exempted statements by rule.
 const reviewed: Readonly<Record<string, Readonly<Record<string, readonly string[]>>>> = {
+  "0221_cloud_computer_build_recovery.sql": {
+    "new-table-privileges": [
+      "REVOKE ALL ON cloud_runtime_build_drain FROM PUBLIC, zeros_app;",
+      "REVOKE ALL ON cloud_runtime_build_drain_runs FROM PUBLIC, zeros_app;",
+    ],
+    "privilege-tightening": [
+      "REVOKE ALL ON FUNCTION cloud_runtime_build_claim_allowed() FROM PUBLIC;",
+      "REVOKE ALL ON FUNCTION cloud_guard_computer_build_claim() FROM PUBLIC;",
+      "REVOKE ALL ON FUNCTION cloud_guard_runtime_handoff_drain() FROM PUBLIC;",
+    ],
+  },
   "0213_mcp_repository_identities.sql": {},
   "0206_github_authorization_generations.sql": {
     "grant-generation-fingerprint": [`CREATE OR REPLACE FUNCTION cloud_github_actor_fingerprint(target_org_id uuid,target_user_id uuid)

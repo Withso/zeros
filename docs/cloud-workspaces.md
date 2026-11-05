@@ -203,8 +203,23 @@ queues another clean image and validates the recipe on its disposable builder,
 including Git and setup. A snapshot whose build recorded no runtime is
 refreshed the same way. A refresh installs the runtime it was queued for, even
 when a process still on the previous pin picks it up during a deploy.
-Failures are retried after six hours, at most three times per pin. Builds and
-their cleanup hold their locks on a separate two-connection pool, so the
+An interrupted automatic runtime or daily refresh retries at most three total
+attempts, with one-minute then five-minute delays. Each retry retains the
+original recipe, source IDs, runtime digest and active-build/configuration
+binding. The failed build and its log remain visible. A newer build or recipe,
+lost administrator/source access, or unresolved provider operation prevents a
+retry. Only a process using the recorded pin queues the retry; a queued retry
+keeps that digest when a process on another pin claims it during a deploy.
+Admission rechecks the binding after the drain wait and before provider intent.
+The ordinary refresh scan cannot bypass an exhausted interruption budget.
+
+Genuine automatic runtime failures retain their six-hour cooldown and limit of
+three failures per pin. Daily refresh retains its ordinary daily schedule.
+Failed manual builds and reactivations are never retried automatically. A
+system cancellation of superseded retry intent does not permanently prevent
+fresh automatic refreshes.
+
+Builds and their cleanup hold their locks on a separate two-connection pool, so the
 lifecycle's two database connections stay free. Once a day, an organization that used cloud workspaces in the last week is
 rebuilt at its live build's refs when GitHub reports a moved branch; unbuilt
 edits are left for an admin to build. An organization with no new commits is
@@ -215,6 +230,22 @@ meanwhile is never relabelled or rolled back, and a rebuilt older build is never
 refreshed this way. Scans run beside build admission, never ahead of it. Each
 lifecycle process runs one build at a time: a build holds a dedicated lock
 connection for its whole run.
+
+Control-plane shutdown closes build admission before waiting for work already
+admitted. A claim that has not started a provider operation returns to the
+queue; an admitted build continues with its heartbeat and cleanup. A stale
+heartbeat alone cannot interrupt a build whose process still holds its lock.
+After a process is lost, recovery resolves and cleans up its recorded provider
+effects before queuing an eligible retry.
+
+Runtime release controllers use the versioned database build drain described in
+[Runtime release qualification](deployment-environments.md#runtime-release-qualification).
+It blocks new claims, including older control-plane claim writers, and new
+runtime handoffs while existing builds and committed handoffs finish. A release
+may proceed only with an active, exact lease and zero live builds, unresolved
+provider effects and committed runtime adoptions. Expiry or a confirmed release
+restores admission. This drain never stops a user workspace or changes its
+catalog state.
 
 New workspaces fork the clean snapshot of the build they pinned at creation.
 After checking the creator's repository access, the control plane clones only

@@ -108,7 +108,7 @@ export type CloudV2LifecycleDeps = {
   authorizeSource?(workspace: CloudV2Workspace): Promise<void>;
   prepareRepository?(workspace: CloudV2Workspace, sandboxId: string): Promise<void>;
   /** Cloud Computer builds share this loop; one runs at a time. */
-  builds?: { tick(): Promise<void>; cleanup?(): Promise<void> };
+  builds?: { tick(): Promise<void>; cleanup?(): Promise<void>; close?(): void };
   runtimeUpdates?: { tick(): Promise<void>; close(): void };
   /** Retries a stop's failed checkpoint on a fork of the stopped VM. */
   checkpointRetry?: boolean;
@@ -173,6 +173,7 @@ export class CloudV2Lifecycle {
     this.timer.unref();
     return async () => {
       this.deps.runtimeUpdates?.close();
+      this.deps.builds?.close?.();
       if (this.timer) clearInterval(this.timer);
       this.timer = null;
       await this.running;
