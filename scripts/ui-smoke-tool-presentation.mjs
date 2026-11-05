@@ -65,6 +65,15 @@ export async function runToolPresentationSmoke({ page, check }) {
     exact: true,
   });
   await expect(bash.locator("[data-tool-preview]")).toBeVisible();
+  // The description is a 20px chip, the height of the file tags beside it.
+  const previewHeight = await bash
+    .locator("[data-tool-preview]")
+    .evaluate((element) => element.getBoundingClientRect().height);
+  check(
+    "A tool's description chip is 20px, like its file tags",
+    previewHeight === 20,
+    `height ${previewHeight}`,
+  );
   await bash.focus();
   await page.keyboard.press("Enter");
   await expect(bash).toHaveAttribute("aria-expanded", "true");

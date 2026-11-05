@@ -368,7 +368,8 @@ Code notes:
 
 Owner today: `features/agent/renderers/event-stripe.tsx · event-row.tsx · event-meta.ts · styles/global/runtime-content.css (.zeros-working-feed)`
 
-No change beyond the shared foundation and primitives.
+Changes:
+- Every tool description (a command, a thinking summary, a search) is one 20px chip, 12/16 on bg2 with 2px by 6px padding: the height of the file tags beside it, inside the 28px row.
 
 ## Tool calls · Bash (`ChatToolBash`)
 
@@ -376,6 +377,7 @@ Owner today: `features/agent/renderers/event-meta.ts (execute) · event-row.tsx 
 
 Changes:
 - Expanded tool calls open into a bg1 card with a border1 edge; the row keeps its look and failures stay red.
+- The command preview is the 20px description chip (it was 18px).
 
 Code notes:
 - Command previews are 22px chips on bg1-hover while file rows use a 20px tag with border3 and a 13px icon. (`features/agent/renderers/event-row.tsx:170-174,251 · features/agent/renderers/file-tag.tsx:41,45`)

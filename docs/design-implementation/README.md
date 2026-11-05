@@ -658,3 +658,8 @@ Each landed step appends one line: date, workstream, what landed, evidence.
   The canvas's pill hover reaches the code too: composer pills, sent
   attachments and chat links fill bg2-highlight on border3 as one shape
   (`PILL_HOVER`), where only the label's inner button filled before.
+- 2026-11-05 · 5 · Agent chat: a tool's description chip (a command, a
+  thinking summary, a search) is 20px, the height of the file tags beside it,
+  in the app (`py-0.5` on 12/16) and on every canvas board (`.ck-row-chip`);
+  it was 18px. Rows stay 28px on one pitch, and the tool-presentation smoke
+  measures the chip.

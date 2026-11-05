@@ -170,8 +170,8 @@ export const EventRow = memo(function EventRow({
   </>;
   const preview = meta.target && !open ? (
     <span data-tool-preview="" className={cn(
-      // An 18px chip: 12/16 on bg2, beside the 20px file tags.
-      "max-w-[440px] min-w-0 truncate rounded-sm px-1.5 py-px text-3xxs leading-4 font-medium",
+      // A 20px chip: 12/16 on bg2, the height of the file tags beside it.
+      "max-w-[440px] min-w-0 truncate rounded-sm px-1.5 py-0.5 text-3xxs leading-4 font-medium",
       localCli && sTone !== "fail" && "font-mono",
       sTone === "fail" ? "bg-red-bg text-red-primary" : "bg-bg2 text-fg2",
     )}>{meta.target}</span>
