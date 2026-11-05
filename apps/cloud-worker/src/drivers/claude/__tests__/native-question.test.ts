@@ -16,7 +16,7 @@ it.each([true, false])("runs Full access through the pinned native tool loop wit
   const onPermission = vi.fn(async () => ({ outcome: { outcome: "cancelled" as const } }));
   const hooks: string[] = [];
   const driver = new ClaudeDriver({ executable: fixture.executable, query: args => query({ ...args, options: {
-    ...args.options, env: fixture.env, persistSession: false, settingSources: [], strictMcpConfig: true,
+    ...args.options, env: fixture.env, spawnClaudeCodeProcess: fixture.spawnClaudeCodeProcess, persistSession: false, settingSources: [], strictMcpConfig: true,
     hooks: { ...args.options.hooks, ...(args.options.hooks?.PreToolUse ? { PreToolUse: args.options.hooks.PreToolUse.map(matcher => ({ ...matcher,
       hooks: matcher.hooks.map(callback => async (...params) => { hooks.push(params[0].hook_event_name === "PreToolUse" ? params[0].tool_name : "other"); return callback(...params); }),
     })) } : {}) },
@@ -45,7 +45,7 @@ it("keeps the next native Write gated after a cloud allow-once plan approval, li
   ]);
   const permissions: string[] = [];
   const driver = new ClaudeDriver({ executable: fixture.executable, query: args => query({ ...args, options: {
-    ...args.options, env: fixture.env, persistSession: false, settingSources: [], strictMcpConfig: true,
+    ...args.options, env: fixture.env, spawnClaudeCodeProcess: fixture.spawnClaudeCodeProcess, persistSession: false, settingSources: [], strictMcpConfig: true,
   } }) });
   try {
     await driver.open({ sessionId: "native-plan", cwd: fixture.directory, model: "claude-sonnet-4-6", modeId: "plan", apiKey: "offline-native-fixture-key",
