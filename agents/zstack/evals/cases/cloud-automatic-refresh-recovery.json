@@ -5,5 +5,5 @@
   "fixedBy": "pr:844",
   "symptom": "A control-plane redeploy interrupted an automatic runtime refresh and left the Cloud Computer on its old snapshot until an administrator rebuilt it.",
   "rule": "Fence claims with a persisted release drain and revalidate retry intent after waits and at provider intent. Preserve recorded pins across rolling instances, bounded interruption recovery, the existing genuine automatic failure cooldown, and manual failure boundaries (zstack-verify, principles 1, 4, 7, 11 and 13).",
-  "check": "pnpm --dir apps/control-plane exec vitest run src/cloud/computer-recovery.integration.test.ts src/cloud/computer-recovery-races.integration.test.ts src/cloud/runtime-build-drain.integration.test.ts src/cloud/lifecycle.test.ts src/db-context-usage.test.ts"
+  "check": "pnpm --dir apps/control-plane exec vitest run src/cloud/computer-recovery.integration.test.ts src/cloud/computer-recovery-races.integration.test.ts src/cloud/runtime-build-drain.integration.test.ts src/cloud/lifecycle.test.ts src/db-context-usage.test.ts src/migrations.test.ts"
 }
