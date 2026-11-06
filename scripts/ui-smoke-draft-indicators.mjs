@@ -31,6 +31,15 @@ export async function runDraftIndicatorsSmoke({
         ),
     );
   const moveAway = () => page.mouse.move(0, 330);
+  // A sidebar row's details card opens to its right, over the chat strip, and
+  // the second 176px tab can sit under it. Leave the row through the window's
+  // top edge, as a pointer heading for the strip would, and let the card close
+  // before clicking a tab.
+  const clickChat = async (id) => {
+    await page.mouse.move(page.viewportSize().width - 2, 2);
+    await expect(page.getByRole("dialog", { name: /^Workspace details for / })).toHaveCount(0);
+    await chat(id).click();
+  };
 
   await expect(editor()).toBeVisible();
   await expect(page.locator("[data-composer-draft]")).toHaveCount(0);
@@ -54,7 +63,7 @@ export async function runDraftIndicatorsSmoke({
   ).toEqual(before);
   check("continued typing does not rerender chat or workspace tabs", true);
 
-  await chat("a-other").click();
+  await clickChat("a-other");
   await moveAway();
   await expect(editor()).toHaveText("");
   await expect(mark(chat("a"))).toBeVisible();
@@ -127,7 +136,7 @@ export async function runDraftIndicatorsSmoke({
 
   for (const theme of ["dark", "light"]) {
     await page.evaluate((theme) => {
-      document.documentElement.className = theme;
+      document.documentElement.dataset.theme = theme;
     }, theme);
     await page.setViewportSize({ width: 440, height: 340 });
     await verifySlot(chat("a"), "Close chat", 176, theme);
@@ -139,7 +148,7 @@ export async function runDraftIndicatorsSmoke({
   await expect(mark(workspace("b"))).toHaveCount(0);
   for (const theme of ["dark", "light"]) {
     await page.evaluate((theme) => {
-      document.documentElement.className = theme;
+      document.documentElement.dataset.theme = theme;
     }, theme);
     await verifySlot(workspace("a"), /^Archive workspace/, 220, theme);
     const label = mark(workspace("a"))
@@ -162,7 +171,7 @@ export async function runDraftIndicatorsSmoke({
     true,
   );
   await page.evaluate(() => {
-    document.documentElement.className = "dark";
+    document.documentElement.dataset.theme = "dark";
   });
   await editor().focus();
   await moveAway();
@@ -207,7 +216,7 @@ export async function runDraftIndicatorsSmoke({
   await editor().press("ControlOrMeta+A");
   await editor().press("Backspace");
   await editor().pressSequentially("   ");
-  await chat("a-other").click();
+  await clickChat("a-other");
   await expect(mark(chat("a"))).toHaveCount(0);
   await selectWorkspace("b");
   await expect(mark(workspace("a"))).toHaveCount(0);
@@ -220,7 +229,7 @@ export async function runDraftIndicatorsSmoke({
 
   await page.evaluate(() => window.draftIndicatorsHarness.attach());
   await expect(mark(chat("a"))).toHaveCount(0);
-  await chat("a-other").click();
+  await clickChat("a-other");
   await expect(mark(chat("a"))).toHaveCount(1);
   await selectWorkspace("b");
   await expect(mark(workspace("a"))).toHaveCount(1);
@@ -234,7 +243,7 @@ export async function runDraftIndicatorsSmoke({
   await expect(mark(workspace("b"))).toHaveCount(1);
   await expect(editor().locator("[data-attachment-pill]")).toHaveCount(1);
   await page.evaluate(() => window.draftIndicatorsHarness.clear());
-  await chat("a-other").click();
+  await clickChat("a-other");
   await expect(mark(chat("a"))).toHaveCount(0);
   await selectWorkspace("b");
   await expect(mark(workspace("a"))).toHaveCount(0);
@@ -246,9 +255,9 @@ export async function runDraftIndicatorsSmoke({
   await page.setViewportSize({ width: 960, height: 640 });
   await selectWorkspace("a");
   await editor().pressSequentially("Keep this closed chat draft");
-  await chat("a-other").click();
+  await clickChat("a-other");
   await editor().pressSequentially("Other split draft");
-  await chat("a").click();
+  await clickChat("a");
   for (const direction of ["row", "column"]) {
     await page.evaluate(
       (direction) => window.draftIndicatorsHarness.split(direction),
@@ -263,7 +272,7 @@ export async function runDraftIndicatorsSmoke({
     await editor("a-other").click();
     await expect(mark(chat("a"))).toHaveCount(0);
     await expect(mark(chat("a-other"))).toHaveCount(0);
-    await chat("a-background").click();
+    await clickChat("a-background");
     await expect(mark(chat("a"))).toHaveCount(1);
     await expect(mark(chat("a-other"))).toHaveCount(0);
     await expect(mark(workspace("a"))).toHaveCount(0);
@@ -279,7 +288,7 @@ export async function runDraftIndicatorsSmoke({
     );
   }
   await page.evaluate(() => window.draftIndicatorsHarness.split(null));
-  await chat("a-other").click();
+  await clickChat("a-other");
   await page.evaluate(() => window.draftIndicatorsHarness.clear());
   await chat("a").hover();
   await chat("a").getByRole("button", { name: "Close chat" }).click();
