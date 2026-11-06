@@ -142,7 +142,7 @@ describe("cloud private review comments", () => {
     const opening = f.relay.request(CLIENT_A, message);
     await expect.poll(() => waiting).toBe(true);
     const { codeReview: _review, ...disabled } = f.configuration;
-    const changing = f.relay.receive({ ...disabled, loginRevision: "1" });
+    const changing = f.relay.receive({ ...disabled, loginRevision: "1", workspace: { ...disabled.workspace, baseBranch: "release" } });
     try {
       await expect.poll(() => configuring).toBe(true);
       releaseAdmission(); await opening;

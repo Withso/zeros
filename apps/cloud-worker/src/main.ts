@@ -44,6 +44,7 @@ export function startWorker(options: BootOptions): { worker: CloudWorker; stop: 
     ...(runtimeHandoff ? { runtimeResume: { instanceId: runtimeHandoff.instanceId, ready: () => completeRuntimeHandoff(directory, runtimeHandoff) } } : {}),
     gitAskpassPath: fileURLToPath(new URL("./bin/git-askpass", import.meta.url)), onError: code => log(code),
     onTiming: record => log(`timing ${JSON.stringify(record)}`),
+    onReconfigure: changed => log(`reconfigure ${changed.join(",")}`),
   });
   const shutdown = () => { void stop(); };
   const stop = (code = 0): Promise<void> => {

@@ -50,7 +50,7 @@ describe("exact snapshot review configuration revocation", () => {
       entered = true; await held; return original.apply(this, args);
     });
     const { codeReview: _review, ...disabled } = f.configuration;
-    const configuring = f.relay.receive({ ...disabled, loginRevision: "1" });
+    const configuring = f.relay.receive({ ...disabled, loginRevision: "1", workspace: { ...disabled.workspace, baseBranch: "release" } });
     try {
       await expect.poll(() => entered).toBe(true);
       const wrote = await f.client.callTool({ name: "code_review_create", arguments: {
@@ -74,7 +74,7 @@ describe("exact snapshot review configuration revocation", () => {
     vi.spyOn(WorkspaceService.prototype, "configure").mockImplementationOnce(async function (this: WorkspaceService, ...args) {
       entered = true; await held; return original.apply(this, args);
     });
-    const configuring = f.relay.receive({ ...f.configuration, loginRevision: "1" });
+    const configuring = f.relay.receive({ ...f.configuration, loginRevision: "1", workspace: { ...f.configuration.workspace, baseBranch: "release" } });
     try {
       await expect.poll(() => entered).toBe(true);
       expect((await f.client.listTools()).tools).toHaveLength(4);
@@ -96,7 +96,7 @@ describe("exact snapshot review configuration revocation", () => {
 it("does not restore revoked review authority from an older config after a newer configuration fails in unrelated I/O", async () => {
   const f = await fixture(), { codeReview: _review, ...disabled } = f.configuration;
   vi.spyOn(WorkspaceService.prototype, "configure").mockRejectedValueOnce(new Error("held service I/O failed"));
-  await expect(f.relay.receive({ ...disabled, loginRevision: "2" })).rejects.toThrow("held service I/O failed");
+  await expect(f.relay.receive({ ...disabled, loginRevision: "2", workspace: { ...disabled.workspace, baseBranch: "release" } })).rejects.toThrow("held service I/O failed");
   expect((f.worker as unknown as { reviews: WorkerCodeReview }).reviews.enabled).toBe(false);
   await f.relay.receive({ ...f.configuration, loginRevision: "1" });
   const request = browserFrame("WORKSPACE_REQUEST", { op: "codeReview.create", params: {
@@ -111,10 +111,10 @@ it("retries an accepted revision and publishes its capability only after require
   expect(f.relay.bridge("ENGINE_READY").at(-1)?.frame).toMatchObject({ capabilities: expect.arrayContaining(["code-review-v1"]) });
   const services = vi.spyOn(WorkspaceService.prototype, "configure").mockRejectedValueOnce(new Error("service unavailable"));
   const agents = vi.spyOn(Agents.prototype, "configure");
-  await expect(f.relay.receive({ ...disabled, loginRevision: "2" })).rejects.toThrow("service unavailable");
+  await expect(f.relay.receive({ ...disabled, loginRevision: "2", workspace: { ...disabled.workspace, baseBranch: "release" } })).rejects.toThrow("service unavailable");
   expect(agents.mock.calls.length).toBe(0);
   expect((f.worker as unknown as { configurationRevision: bigint }).configurationRevision).toBe(0n);
-  await f.relay.receive({ ...disabled, loginRevision: "2" });
+  await f.relay.receive({ ...disabled, loginRevision: "2", workspace: { ...disabled.workspace, baseBranch: "release" } });
   expect(services.mock.calls.length).toBe(2);
   expect(agents.mock.calls.length).toBe(1);
   expect((f.worker as unknown as { configurationRevision: bigint }).configurationRevision).toBe(2n);
