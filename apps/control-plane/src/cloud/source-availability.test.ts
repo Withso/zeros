@@ -71,6 +71,29 @@ it("does not extend the original grace deadline after repeated outages or idle a
   await expect(f.source.continueWorkspace(f.workspace, f.proof)).rejects.toMatchObject({ code: "github_unavailable" });
 });
 
+it("reports the original absolute grace deadline through cached and outage continuations", async () => {
+  const f = fixture();
+  await f.source.workspace(f.workspace);
+  expect((await f.source.continueWorkspace(f.workspace, f.proof)).graceUntil).toBe(1000 + CLOUD_SOURCE_GRACE_MS);
+  f.github.check.mockRejectedValue(new GithubTemporaryError("github_unavailable"));
+  for (const elapsed of [5, 15, 45, 59]) {
+    f.time(1000 + elapsed * 60_000);
+    const lease = await f.source.continueWorkspace(f.workspace, f.proof);
+    await lease.refresh?.catch(() => {});
+    expect(lease.graceUntil).toBe(1000 + CLOUD_SOURCE_GRACE_MS);
+  }
+});
+
+it("moves the grace deadline only after a new successful verification", async () => {
+  const f = fixture();
+  await f.source.workspace(f.workspace);
+  f.time(1001 + CLOUD_SOURCE_REFRESH_MS);
+  const refreshing = await f.source.continueWorkspace(f.workspace, f.proof);
+  expect(refreshing.graceUntil).toBe(1000 + CLOUD_SOURCE_GRACE_MS);
+  await refreshing.refresh;
+  expect((await f.source.continueWorkspace(f.workspace, f.proof)).graceUntil).toBe(1001 + CLOUD_SOURCE_REFRESH_MS + CLOUD_SOURCE_GRACE_MS);
+});
+
 it.each(["github_refresh_pending", "github_refresh_uncertain", "github_oauth_failed", "github_bad_response"])(
   "retains an existing grant during %s without treating it as an explicit GitHub denial", async code => {
     const f = fixture();

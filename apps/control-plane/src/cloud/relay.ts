@@ -13,11 +13,13 @@ import type { CloudV2Store, CloudV2Workspace } from "./store.js";
 import { isCloudV2Token } from "./tokens.js";
 import { dialWorker, workerSupportsCheckout, workerSupportsMcp, workerSupportsSetup, workerSupportsRepositorySetup, workerSupportsGithub, workerSupportsGitIdentity, workerSupportsGithubUserTokens, workerSupportsAgentInteractions, workerSupportsCodeReview, workerSupportsHistoryReplacement, workerSupportsEnvironment, workerSupportsRuntimeUpdate, type WorkerRoute } from "./worker-connection.js";
 import { emitCloudV2Timing, type CloudV2TimingRecord } from "./lifecycle.js";
-import { isGithubAccessRevoked } from "../github-availability.js";
+import { isGithubAccessRevoked, isGithubTemporary } from "../github-availability.js";
 import { CLOUD_SOURCE_REFRESH_MS, type CloudSourceContinuation, type CloudSourceProof } from "./source-authority.js";
 
 /** Bounds a lost cross-replica revocation notice for app frames between reads. */
 const APP_AUTHORITY_WINDOW_MS = 5_000;
+/** Retry spacing for a temporary source failure inside the original grace. */
+const SOURCE_RETRY_MS = 10_000, SOURCE_RETRY_MAX_MS = 60_000;
 export const CLOUD_V2_BRIDGE_PROTOCOL = "zeros.cloud.v2";
 export const CLOUD_V2_EXPLICIT_WAKE_PROTOCOL = "zeros.cloud.v2.explicit-wake";
 const BRIDGE_PATH = /^\/v2\/cloud\/workspaces\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/bridge$/;
@@ -60,6 +62,8 @@ type Room = {
   authorizedUntil?: number; authorizedRevision?: number; authorizedProof?: CloudSourceProof;
   /** Ends a connect retry wait early; a hint that lands outside the wait is kept. */
   retryNow?: () => void; readyHinted?: boolean;
+  /** The source authority's absolute grace deadline under the proof that produced it. */
+  sourceGrace?: { until: number; proof: string }; sourceRetryMs?: number;
   clients: Map<string, { ws: WebSocket; sessionId: string | null }>; queued: Map<string, unknown[]>;
   admitting: Map<string, WebSocket>;
   delivered: Map<string, Map<string, DeliveredPrompt>>;
@@ -213,24 +217,46 @@ export class CloudV2Relay {
       }
     }
     if (admittingSessionId && !live.has(admittingSessionId)) return "revoked";
+    const proof = snapshot.loginRevision !== undefined ? { accessEpoch: snapshot.accessEpoch, loginRevision: snapshot.loginRevision } : undefined;
+    const proofKey = proof && JSON.stringify([proof.accessEpoch, proof.loginRevision]);
     try {
       const controlOnly = !room.clients.size && room.stops.size > 0 && !admission;
       if (!controlOnly) {
         if (!admission && this.deps.continueSource) {
-          const lease = await this.deps.continueSource(room.workspace, snapshot.loginRevision !== undefined
-            ? { accessEpoch: snapshot.accessEpoch, loginRevision: snapshot.loginRevision } : undefined);
-          room.sourceCheckAt = lease.recheckAt;
+          // During a temporary-failure backoff the next source attempt waits for
+          // its retry time; app access and sessions are still read every check.
+          const backingOff = room.sourceRetryMs !== undefined && proofKey && room.sourceGrace?.proof === proofKey &&
+            (this.deps.now?.() ?? Date.now()) < room.sourceCheckAt;
+          if (!backingOff) {
+            const lease = await this.deps.continueSource(room.workspace, proof);
+            // A result that began before a source or security change must not
+            // write deadlines; the rerun observes the change from scratch.
+            if (revision !== this.securityRevision) return this.authorize(room, admittingSessionId, admission);
+            room.sourceCheckAt = lease.recheckAt;
+            if (lease.graceUntil !== undefined && proofKey) room.sourceGrace = { until: lease.graceUntil, proof: proofKey };
+            else delete room.sourceGrace;
+            delete room.sourceRetryMs;
+          }
         } else {
           await this.deps.authorizeSource?.(room.workspace);
+          if (revision !== this.securityRevision) return this.authorize(room, admittingSessionId, admission);
           room.sourceCheckAt = (this.deps.now?.() ?? Date.now()) + CLOUD_SOURCE_REFRESH_MS;
         }
       }
     } catch (error) {
       if (revision !== this.securityRevision) return this.authorize(room, admittingSessionId, admission);
       if (isGithubAccessRevoked(error)) { this.revoke(room); return "revoked"; }
-      // A failed new admission must not disconnect an already authorized room.
-      if (!admission) this.revoke(room, 1013, "github_unavailable");
-      return "unavailable";
+      const now = this.deps.now?.() ?? Date.now();
+      if (!admission && isGithubTemporary(error) && proofKey && room.sourceGrace?.proof === proofKey && now < room.sourceGrace.until) {
+        // A slow or unavailable verification keeps an authorized room until the
+        // source authority's original deadline; it never extends that deadline.
+        room.sourceRetryMs = Math.min(SOURCE_RETRY_MAX_MS, (room.sourceRetryMs ?? SOURCE_RETRY_MS / 2) * 2);
+        room.sourceCheckAt = Math.min(now + room.sourceRetryMs, room.sourceGrace.until);
+      } else {
+        // A failed new admission must not disconnect an already authorized room.
+        if (!admission) this.revoke(room, 1013, "github_unavailable");
+        return "unavailable";
+      }
     }
     if (room.revoked) return "revoked";
     if (revision !== this.securityRevision) return this.authorize(room, admittingSessionId, admission);
@@ -260,7 +286,7 @@ export class CloudV2Relay {
   readonly revalidateSources = AsyncResource.bind((scope: { organizationId?: string; ownerUserId?: string }): void => {
     this.securityRevision++;
     for (const room of this.rooms.values()) if ((!scope.organizationId || room.workspace.organizationId === scope.organizationId) &&
-      (!scope.ownerUserId || room.workspace.creatorUserId === scope.ownerUserId)) { delete room.authorizedUntil; void this.authorized(room); }
+      (!scope.ownerUserId || room.workspace.creatorUserId === scope.ownerUserId)) { delete room.authorizedUntil; delete room.sourceGrace; void this.authorized(room); }
   }, "cloud-v2-source-wake");
   private watch(socket: WebSocket): void { this.alive.add(socket); socket.on("pong", () => this.alive.add(socket)); }
   private heartbeat(): void {
