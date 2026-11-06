@@ -34,6 +34,15 @@ describe("cloud PR observation cadence", () => {
     await expect(first).resolves.toEqual(success(43));
     expect(load).toHaveBeenCalledOnce();
   });
+  it("does not let an older observer bypass the newer ref observation's freshness window", async () => {
+    const cache = new CloudPrStatusReads(), load = vi.fn(async () => success());
+    await cache.read("workspace#42", load, 3);
+    await cache.read("workspace#42", load, 2);
+    expect(load).toHaveBeenCalledOnce();
+    vi.advanceTimersByTime(30_000);
+    await cache.read("workspace#42", load, 3);
+    expect(load).toHaveBeenCalledTimes(2);
+  });
   it("shares only the exact workspace/PR flight and keeps A-B-A isolated", async () => {
     const cache = new CloudPrStatusReads();
     let release!: (result: Result) => void;

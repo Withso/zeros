@@ -17,7 +17,7 @@ export class CloudPrStatusReads {
       if (refsVersion > previous.refsVersion && refsVersion > (previous.next?.refsVersion ?? -1)) previous.next = { refsVersion, load };
       return previous.result;
     }
-    if (previous && Date.now() < previous.retryAt && (previous.failures > 0 || previous.refsVersion === refsVersion)) return previous.result;
+    if (previous && Date.now() < previous.retryAt && (previous.failures > 0 || refsVersion <= previous.refsVersion)) return previous.result;
     if (!previous && this.entries.size >= 64) {
       const oldest = [...this.entries].find(([, entry]) => !entry.pending);
       if (!oldest) return Promise.resolve(unavailable());
