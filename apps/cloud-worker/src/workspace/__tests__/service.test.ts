@@ -11,6 +11,18 @@ const services: WorkspaceService[] = [];
 const noPr = async () => ({ prNumber: null, prState: null, prUrl: null });
 afterEach(async () => { for (const service of services.splice(0)) await service.dispose(); });
 
+it("keeps optional startup diagnostics out of workspace readiness and later configuration", async () => {
+  const { scope, state } = await repositoryFixture();
+  const onStartupTiming = vi.fn(() => { throw new Error("diagnostics unavailable"); });
+  const service = await WorkspaceService.open(scope, state, { watch: false, lookupPr: noPr, onStartupTiming });
+  services.push(service);
+  expect(onStartupTiming).toHaveBeenCalledTimes(5);
+  expect(await service.handle("workspace.get", {})).toMatchObject({ baseBranch: "main" });
+  await service.configure({ ...scope.workspace, baseBranch: "release" });
+  expect(onStartupTiming).toHaveBeenCalledTimes(5);
+  expect(await service.handle("workspace.get", {})).toMatchObject({ baseBranch: "release" });
+});
+
 it("returns one native workspace row with live HEAD and cached branch PR metadata", async () => {
   const { scope, state, git, root } = await repositoryFixture(); const calls: string[] = [], frames: BridgeMessage[] = [];
   const service = await WorkspaceService.open(scope, state, { watch: false, publish: frame => { frames.push(frame); }, lookupPr: async branch => {

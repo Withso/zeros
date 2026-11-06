@@ -179,7 +179,8 @@ export const CloudV2WorkerActivityReplySchema = z.object({
  * schemas remain compatible. Only closed phases and bounded durations. */
 export const CloudV2WorkerTimingSchema = z.object({
   phase: z.enum(["worker_checkout", "worker_checkout_fetch", "worker_checkout_switch", "worker_session_store", "worker_services", "worker_configure",
-    "worker_services_review", "worker_services_workspace", "worker_services_mcp", "worker_reconfigure", "worker_reconfigure_workspace", "worker_reconfigure_mcp", "worker_reconfigure_ready"]),
+    "worker_services_review", "worker_services_workspace", "worker_services_mcp", "worker_reconfigure", "worker_reconfigure_workspace", "worker_reconfigure_mcp", "worker_reconfigure_ready",
+    "worker_workspace_state", "worker_workspace_metadata", "worker_workspace_remote", "worker_workspace_poll", "worker_workspace_watch"]),
   durationMs: z.number().int().nonnegative().max(3_600_000),
 }).strict();
 export type CloudV2WorkerTiming = z.infer<typeof CloudV2WorkerTimingSchema>;

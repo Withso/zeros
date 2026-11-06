@@ -12,6 +12,7 @@ import { listWorkspaceSkills } from "./skills";
 import { GithubCheckoutReporter, type ReportGithubCheckout } from "./github-checkout";
 import { reconcileGithubRemote } from "./github-remote";
 import type { WorkerCodeReview } from "./code-review";
+import { recordStartupTiming, type StartupTimingObserver } from "../startup-timings";
 
 export interface PrSummary { prNumber: number | null; prState: "draft" | "ready" | "merged" | "closed" | null; prUrl: string | null }
 const EMPTY_PR: PrSummary = { prNumber: null, prState: null, prUrl: null };
@@ -27,6 +28,7 @@ export interface WorkspaceServiceOptions {
   codeReview?: WorkerCodeReview;
   pollingAllowed?(): boolean;
   activity?(): void;
+  onStartupTiming?: StartupTimingObserver;
 }
 
 /** Native wire contract from engine/workspace/service.ts and git/types.ts,
@@ -72,6 +74,7 @@ export class WorkspaceService {
   static async open(scope: WorkspaceScope, directory: string, options: WorkspaceServiceOptions = {}): Promise<WorkspaceService> {
     const service = new WorkspaceService(scope, directory, options);
     try {
+      const stateStarted = performance.now();
       await mkdir(directory, { recursive: true, mode: 0o700 });
       try {
         const state = JSON.parse(await readFile(join(directory, "workspace.json"), "utf8")) as State;
@@ -82,9 +85,14 @@ export class WorkspaceService {
         service.state = { workspaceId: scope.workspace.id, root: scope.root, baseBranch: scope.workspace.baseBranch, configuredBase: scope.workspace.baseBranch, createdAt: Date.now() };
         await service.update(state => state);
       }
-      await service.configure(scope.workspace);
+      recordStartupTiming("worker_workspace_state", stateStarted, options.onStartupTiming);
+      await service.configure(scope.workspace, options.onStartupTiming);
+      const pollStarted = performance.now();
       await service.poll(false, { waitForCheckoutReport: false });
+      recordStartupTiming("worker_workspace_poll", pollStarted, options.onStartupTiming);
+      const watchStarted = performance.now();
       await service.watcher?.start();
+      recordStartupTiming("worker_workspace_watch", watchStarted, options.onStartupTiming);
       return service;
     } catch (error) {
       await service.dispose().catch(() => {});
@@ -92,10 +100,14 @@ export class WorkspaceService {
     }
   }
 
-  async configure(workspace: WorkerConfig["workspace"]): Promise<void> {
+  async configure(workspace: WorkerConfig["workspace"], timing?: StartupTimingObserver): Promise<void> {
     const epoch = ++this.configurationEpoch;
+    const metadataStarted = performance.now();
     await this.update(state => state.configuredBase === workspace.baseBranch ? state : { ...state, configuredBase: workspace.baseBranch, baseBranch: workspace.baseBranch });
+    recordStartupTiming("worker_workspace_metadata", metadataStarted, timing);
+    const remoteStarted = performance.now();
     if (workspace.github) await reconcileGithubRemote(this.scope.root,workspace.github,this.run,() => !this.disposed && epoch === this.configurationEpoch);
+    recordStartupTiming("worker_workspace_remote", remoteStarted, timing);
     if (!this.disposed && epoch === this.configurationEpoch) this.githubRepository = workspace.github?.repository;
   }
 

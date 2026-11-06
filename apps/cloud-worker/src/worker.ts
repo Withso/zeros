@@ -414,6 +414,7 @@ export class CloudWorker {
         historyDiff: params => agents!.turns.historyDiff(params),
         ...this.options.workspaceServices,
         codeReview: reviews,
+        onStartupTiming: timing,
         pollingAllowed: () => this.runtimeGate.open && (!this.options.runtimeResume || this.runtimePublished),
         activity: () => this.runtimeGate.activity(),
         ...(config.githubPullRequests === 1 && this.options.transport.reportGithubCheckout

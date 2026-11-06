@@ -68,7 +68,8 @@ const cases = {
   CloudV2WorkerHistorySchema: [{ ...history, bootId: WORKSPACE_ID, sequence: 1 }],
   CloudV2WorkerActivitySchema: [{ idle: false }],
   CloudV2WorkerActivityReplySchema: [{ loginRevision: "3", state: "running" }],
-  CloudV2WorkerTimingSchema: [{ phase: "worker_checkout", durationMs: 42 }],
+  CloudV2WorkerTimingSchema: ["worker_checkout", "worker_workspace_state", "worker_workspace_metadata", "worker_workspace_remote", "worker_workspace_poll", "worker_workspace_watch"]
+    .map(phase => ({ phase, durationMs: 42 })),
   RuntimeMcpServerSchema: [
     { id: WORKSPACE_ID, name: "fixture", transport: "stdio", command: "tool", args: ["literal arg"], cwd: "~", env: { KEY: "fixture" }, listen_url: "http://127.0.0.1:3333/mcp" },
     { id: WORKSPACE_ID, name: "fixture", transport: "http", url: "https://example.test/mcp", headers: { "X-Key": "fixture" }, auth: "oauth", disabled_tools: ["blocked"] },

@@ -279,9 +279,9 @@ it("ignores an older control plane that rejects a newer timing phase", async () 
   const f = await fixture();
   let rejected = 0;
   vi.mocked(f.fetcher).mockImplementationOnce(async () => { rejected++; return Response.json({ error: { code: "invalid_input" } }, { status: 400 }); });
-  f.transport.reportTiming({ phase: "worker_services_mcp", durationMs: 12 });
+  f.transport.reportTiming({ phase: "worker_workspace_watch", durationMs: 12 });
   await expect.poll(() => rejected).toBe(1);
-  f.transport.reportTiming({ phase: "worker_services_mcp", durationMs: 12 });
+  f.transport.reportTiming({ phase: "worker_workspace_watch", durationMs: 12 });
   await f.transport.send({ t: "idle", idle: false });
   await expect.poll(() => f.requests.some(request => request.path === "activity")).toBe(true);
   expect(rejected).toBe(1);
