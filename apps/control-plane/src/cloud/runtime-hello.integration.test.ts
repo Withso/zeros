@@ -111,6 +111,38 @@ suite("runtime hello through the production composition", () => {
     for (const sample of samples.slice(1)) expect(sample.githubCalls).toBeLessThanOrEqual(1);
   });
 
+  it.each([
+    ["github_unavailable", 503, false], ["github_rate_limited", 429, false],
+    ["github_unavailable", 503, true], ["github_rate_limited", 429, true],
+    ["github_cloud_access_denied", 403, false],
+  ] as const)("rechecks a stored %s at hello configuration without bypassing backoff (%s, %s)", async (code, status, backoff) => {
+    const f = await fixture(false);
+    expect((await f.ordinary("hello")).status).toBe(200);
+    const config = f.cp.workers.config;
+    vi.spyOn(f.cp.workers, "config").mockImplementationOnce(async (...args) => {
+      // A different replica may record a failure after the route's admission.
+      await pool.query(`UPDATE cloud_github_source_verifications SET
+        verified_at=clock_timestamp()-interval '1 minute',failure_code=$2,failure_status=$3,
+        retry_at=clock_timestamp()+($4::double precision * interval '1 minute') WHERE org_id=$1`,
+      [f.org, code, status, backoff ? 1 : -1]);
+      return config(...args);
+    });
+    f.fetcher.mockClear();
+    const response = await f.ordinary("hello"), recover = !backoff && status !== 403;
+    expect(response.status).toBe(recover ? 200 : status);
+    const body = await response.json();
+    if (recover) {
+      expect(body.config.workspace.github).toMatchObject({ repositoryId: "42", repository: "fixture/repo" });
+      expect((await pool.query("SELECT failure_code FROM cloud_github_source_verifications WHERE org_id=$1", [f.org])).rows)
+        .toEqual([{ failure_code: null }]);
+      expect(f.fetcher.mock.calls.filter(([url]) => new URL(String(url)).pathname === "/repositories/42")).toHaveLength(1);
+    } else {
+      expect(body).toEqual({ code });
+      expect(f.fetcher).not.toHaveBeenCalled();
+    }
+    expect((await f.cp.store.get(f.workspace.id, f.creator)).state).toBe(status === 403 ? "stopping" : "running");
+  });
+
   async function holdProfile(f: Awaited<ReturnType<typeof fixture>>, route: "hello" | "config") {
     let entered!: () => void, release!: () => void;
     const waiting = new Promise<void>(resolve => { entered = resolve; }), held = new Promise<void>(resolve => { release = resolve; });

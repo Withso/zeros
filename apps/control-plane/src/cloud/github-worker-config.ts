@@ -94,7 +94,7 @@ export function createCloudGithubWorkerConfig(deps: {
     let initial: Snapshot;
     try { initial = await read(); }
     catch (error) {
-      if (!(error instanceof HttpError) || !["github_authorization_expired", "github_verification_expired"].includes(error.code)) throw error;
+      if (!(error instanceof HttpError) || !["github_authorization_expired", "github_verification_expired"].includes(error.code) && !isGithubTemporary(error)) throw error;
       if (error.code === "github_authorization_expired") await deps.connections.access(scope);
       if (continuation) await deps.continueSource(workspace, proof); else await deps.authorizeSource(workspace);
       initial = await read();
