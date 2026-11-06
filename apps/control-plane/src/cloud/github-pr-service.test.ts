@@ -2,8 +2,10 @@ import { describe, expect, it, vi } from "vitest";
 import { CloudGithubApi } from "./github-api.js";
 import {
   CloudGithubPrService,
+  assertCloudGithubPrContext,
   type CloudGithubPrContext,
 } from "./github-pr-service.js";
+import { HttpError } from "../authz.js";
 
 const head = "a".repeat(40),
   base = "b".repeat(40);
@@ -99,7 +101,17 @@ function fixture() {
     ),
   };
   return {
-    service: new CloudGithubPrService(deps),
+    service: new CloudGithubPrService({ ...deps, open: async (workspaceId, userId) => {
+      const captured = await deps.context();
+      if (captured.workspaceId !== workspaceId || captured.creatorUserId !== userId)
+        throw new HttpError(404, "not_found", "Cloud workspace not found.");
+      const access = await deps.access();
+      const fence = async () => {
+        await access.assertCurrent();
+        assertCloudGithubPrContext(captured, await deps.context());
+      };
+      return { context: captured, access: { ...access, assertCurrent: fence, api: access.api.withFence(fence) } };
+    } }),
     deps,
     fetch,
     setContext: (next: Partial<CloudGithubPrContext>) => {

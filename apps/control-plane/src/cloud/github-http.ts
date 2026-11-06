@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { createHash } from "node:crypto";
 import { HttpError } from "../authz.js";
 import { GithubTemporaryError, githubRateLimit, githubRetryAfter } from "../github-availability.js";
 
@@ -8,7 +9,27 @@ export type CloudGithubHttpOptions = {
   token: string;
   assertCurrent(): Promise<void>;
   fetch?: typeof fetch;
+  /** Exact server-owned owner/workspace/checkout/connection identity. */
+  cacheScope?: string;
 };
+type ConditionalResponse = { etag: string; text: string; bytes: number; at: number };
+const conditionalResponses = new Map<string, ConditionalResponse>();
+let conditionalBytes = 0;
+function forgetConditional(key: string): void {
+  conditionalBytes -= conditionalResponses.get(key)?.bytes ?? 0;
+  conditionalResponses.delete(key);
+}
+function rememberConditional(key: string, etag: string | null, text: string): void {
+  if (!etag || etag.length > 512 || /[\r\n]/.test(etag)) return;
+  forgetConditional(key);
+  const bytes = Buffer.byteLength(text) + Buffer.byteLength(key) + Buffer.byteLength(etag);
+  conditionalResponses.set(key, { etag, text, bytes, at: Date.now() });
+  conditionalBytes += bytes;
+  for (const oldest of conditionalResponses.keys()) {
+    if (conditionalResponses.size <= 128 && conditionalBytes <= 8 * 1024 * 1024) break;
+    forgetConditional(oldest);
+  }
+}
 const unavailable = () =>
   new HttpError(
     503,
@@ -44,6 +65,13 @@ export class CloudGithubHttp {
         input.method !== "GET");
     let response!: Response;
     let url = `${this.options.apiBaseUrl.replace(/\/$/, "")}${path}`;
+    const cacheKey = !mutation && (!input.method || input.method === "GET") && this.options.cacheScope
+      ? JSON.stringify([this.options.cacheScope, createHash("sha256").update(this.options.token).digest("hex"), url, input.text === true]) : null;
+    let cached = cacheKey ? conditionalResponses.get(cacheKey) : undefined;
+    if (cached && Date.now() - cached.at >= 15 * 60_000) {
+      forgetConditional(cacheKey!);
+      cached = undefined;
+    }
     for (let redirects = 0; ; redirects++) {
       await this.options.assertCurrent();
       try {
@@ -58,6 +86,7 @@ export class CloudGithubHttp {
               : "application/vnd.github+json",
             "x-github-api-version": "2026-03-10",
             "user-agent": "zeros-control-plane",
+            ...(cached && redirects === 0 ? { "if-none-match": cached.etag } : {}),
             ...(input.body === undefined
               ? {}
               : { "content-type": "application/json" }),
@@ -91,9 +120,16 @@ export class CloudGithubHttp {
         )
           throw unavailable();
         url = next.toString();
+        cached = undefined;
       } catch {
         throw unavailable();
       }
+    }
+    if (response.status === 304) {
+      if (!cached || !cacheKey) throw unavailable();
+      await this.options.assertCurrent();
+      rememberConditional(cacheKey, cached.etag, cached.text);
+      return input.text ? cached.text : JSON.parse(cached.text) as unknown;
     }
     if (!response.ok) {
       const limited = await githubRateLimit(response);
@@ -185,11 +221,16 @@ export class CloudGithubHttp {
     // in flight. Its caller fences presentation and returns that receipt without
     // replaying it. Protected reads always revalidate before releasing data.
     if (!mutation) await this.options.assertCurrent();
-    if (input.text) return text;
+    if (input.text) {
+      if (cacheKey) rememberConditional(cacheKey, response.headers.get("etag"), text);
+      return text;
+    }
     // Some writes answer 201 with no body (re-running workflow jobs).
     if (mutation && text.trim() === "") return null;
     try {
-      return JSON.parse(text) as unknown;
+      const value = JSON.parse(text) as unknown;
+      if (cacheKey) rememberConditional(cacheKey, response.headers.get("etag"), text);
+      return value;
     } catch {
       throw unavailable();
     }

@@ -128,7 +128,7 @@ export type CloudGithubPullRequest = ReturnType<typeof projection>;
  * workspace authorization and confirmed branch; this service never wakes a VM. */
 export class CloudGithubApi {
   readonly http: CloudGithubHttp;
-  constructor(private readonly options: CloudGithubHttpOptions) {
+  constructor(private readonly options: CloudGithubHttpOptions, private readonly resolvedRepository?: CloudGithubRepositoryIdentity) {
     this.http = new CloudGithubHttp(options);
   }
 
@@ -142,7 +142,13 @@ export class CloudGithubApi {
     });
   }
 
+  withRepository(repository: CloudGithubRepositoryIdentity) {
+    return new CloudGithubApi(this.options, repository);
+  }
+
   repository(target: CloudGithubRepositoryTarget) {
+    if (this.resolvedRepository && target.repositoryId === this.resolvedRepository.repositoryId)
+      return Promise.resolve(this.resolvedRepository);
     return resolveCloudGithubRepository(this.http, target);
   }
 
