@@ -54,6 +54,17 @@ import { getActiveBridge, onActiveBridgeConnected } from "../../platform/bridge/
 import { WorkspaceRuntimeClient } from "../../platform/bridge/workspace-runtime-client";
 import { cloudWorkspaceDocument, subscribeCloudWorkspaces } from "../../state/cloud-workspace-catalog";
 
+/** Cloud shells where a command line was submitted since the shell started.
+ *  A shell that only showed its prompt starts clean after its workspace stops;
+ *  one that ran commands keeps its output and says a new shell started. */
+const cloudCommandsRan = new Set<string>();
+const RESUMED_LINE = "\r\n\x1b[2m--- Previous terminal session restored. Starting new shell... ---\x1b[0m";
+function cloudWorkspaceRunning(cwd: string | undefined): boolean {
+  const target = parseCloudWorkspaceKey(cwd);
+  const status = target ? cloudWorkspaceDocument(target)?.status : undefined;
+  return status === "ready" || status === "busy";
+}
+
 function cloudTerminalEngineId(cwd: string): string | undefined {
   if (!isCloudWorkspace(cwd)) return undefined;
   const bridge = getActiveBridge();
@@ -358,6 +369,7 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
       // someone types or navigates inside a terminal UI.
       if (data.includes("\r") || data.includes("\n")) {
         recordWorkspaceActivity(cwd);
+        if (isCloudWorkspace(cwd)) cloudCommandsRan.add(sessionId);
       }
       void ptyWrite({ sessionId, data }).catch(() => {
         /* drop — pty likely exited */
@@ -501,6 +513,12 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
       return;
     }
     let resuming = canResumeCloudTerminal();
+    let announced = false;
+    const announceResume = () => {
+      if (announced || !resuming) return;
+      announced = true;
+      if (cloudCommandsRan.delete(sessionId)) term.writeln(RESUMED_LINE);
+    };
     attachInFlightRef.current = true;
     setReadPending(true);
     try {
@@ -515,6 +533,7 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
         if (xtermRef.current !== term) return;
         resuming ||= canResumeCloudTerminal();
         if (terms === null) throw new Error("Terminal connection unavailable");
+        if (!terms.some(t => t.sessionId === sessionId && t.exited !== true)) announceResume();
         const live = terms.some(
           (t) => t.sessionId === sessionId && t.exited !== true,
         );
@@ -591,7 +610,7 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
       if (resuming) {
         markAlive(sessionId);
         agentLaunchedRef.current = true; // Resume a shell; never replay a launch command.
-        if (!info.reattached) term.writeln("\r\n\x1b[2mWorkspace resumed — new shell\x1b[0m");
+        if (!info.reattached) announceResume();
       }
       // If the main-side PTY's dims drifted from what we just measured
       // (re-attach into a session that was resized in another renderer),
@@ -750,6 +769,13 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
           term.writeln(`\x1b[2m[${exitPolicy.recovery}]\x1b[0m`);
           return;
         }
+        // The cloud workspace stopped under this shell (the worker retires
+        // its shells with SIGTERM). Resume starts a new shell; nothing to
+        // restart by key. A shell where nothing ran starts clean.
+        if (isCloudWorkspace(cwd) && (evt.signal === 15 || !cloudWorkspaceRunning(cwd))) {
+          if (!cloudCommandsRan.has(sessionId)) term.reset();
+          return;
+        }
         const hint = restartOnKeyRef.current
           ? " — press any key to restart"
           : "";
@@ -758,7 +784,7 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
         );
       }
     });
-  }, [sessionId, markExited]);
+  }, [sessionId, markExited, cwd]);
 
   // Re-resolve when the concrete theme flips or the code theme or surface
   // changes: bg/fg are app tokens and ANSI comes from the code theme. Keyed on

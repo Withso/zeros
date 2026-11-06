@@ -17,7 +17,8 @@ const code = ts.transpileModule(declarations.join("\n") + "\nglobalThis.actions 
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
 }).outputText;
 const folder = "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222";
-function harness(cwd = folder, engine = "new-engine", visible = true) {
+const RESUMED_LINE = "\r\n\x1b[2m--- Previous terminal session restored. Starting new shell... ---\x1b[0m";
+function harness(cwd = folder, engine = "new-engine", visible = true, commandsRan = true) {
   const term = { write: vi.fn(), writeln: vi.fn(), focus: vi.fn() };
   const row = { id: "shell", resumePending: true };
   const context: any = {
@@ -32,16 +33,22 @@ function harness(cwd = folder, engine = "new-engine", visible = true) {
     setReadPending: vi.fn(), setReadFailure: vi.fn(), setHasScrollback: vi.fn(), markExited: vi.fn(), markAlive: vi.fn(),
     useTerminalStore: { getState: () => ({ sessions: [row] }) }, isCloudWorkspace, parseCloudWorkspaceKey, managed: true,
     cloudWorkspaceDocument: () => ({ status: "ready", capabilities: { canWrite: true }, deletedAt: null, error: null }),
+    cloudCommandsRan: new Set(commandsRan ? ["shell"] : []), RESUMED_LINE,
   };
   vm.runInNewContext(code, context);
   context.row = row;
   return context;
 }
 describe("cloud terminal resume", () => {
+  it("starts a clean new shell after a stop when no command ran, without any resume line", async () => {
+    const h = harness(folder, "new-engine", true, false);
+    await h.actions.spawn(h.term, true);
+    expect(h.ptyCreate).toHaveBeenCalledOnce(); expect(h.term.writeln).not.toHaveBeenCalled();
+  });
   it("spawns a fresh shell in the existing cwd and writes one dim resume line after engine replacement", async () => {
     const h = harness(); await h.actions.spawn(h.term, true);
     expect(h.ptyCreate).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ sessionId: "shell", cwd: folder }));
-    expect(h.term.writeln).toHaveBeenCalledExactlyOnceWith("\r\n\x1b[2mWorkspace resumed — new shell\x1b[0m");
+    expect(h.term.writeln).toHaveBeenCalledExactlyOnceWith(RESUMED_LINE);
     expect(h.markExited).not.toHaveBeenCalled(); expect(h.setReadFailure).not.toHaveBeenCalledWith(expect.any(Error));
   });
   it("keeps a same-engine closed shell exited without automatically recreating it", async () => {
@@ -57,7 +64,7 @@ describe("cloud terminal resume", () => {
     const h = harness("/local/worktree"); await h.actions.spawn(h.term, true);
     expect(h.ptyCreate).not.toHaveBeenCalled(); expect(h.markExited).toHaveBeenCalledWith("shell");
     expect(h.term.writeln).toHaveBeenCalledWith(expect.stringContaining("press any key to restart"));
-    expect(h.term.writeln).not.toHaveBeenCalledWith(expect.stringContaining("Workspace resumed"));
+    expect(h.term.writeln).not.toHaveBeenCalledWith(RESUMED_LINE);
   });
   it("never respawns a missing cloud Run PTY as a shell", async () => {
     const h = harness(); h.attachOnly = true; await h.actions.spawn(h.term, true);
@@ -70,7 +77,7 @@ describe("cloud terminal resume", () => {
     expect(h.ptyTerminals).not.toHaveBeenCalled(); expect(h.ptyCreate).not.toHaveBeenCalled(); expect(h.setReadFailure).not.toHaveBeenCalled();
     doc.status = "ready"; h.actions.resumeAfterReconnect();
     await vi.waitFor(() => expect(h.ptyCreate).toHaveBeenCalledOnce());
-    expect(h.term.writeln).toHaveBeenCalledExactlyOnceWith("\r\n\x1b[2mWorkspace resumed — new shell\x1b[0m");
+    expect(h.term.writeln).toHaveBeenCalledExactlyOnceWith(RESUMED_LINE);
   });
   it("reattaches a shell already resumed on another device without writing a second resume line", async () => {
     const h = harness(); h.ptyTerminals.mockResolvedValue([{ sessionId: "shell", exited: false }]);
