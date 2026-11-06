@@ -225,7 +225,3 @@ revision in the same checkout and compare failing test names.
   can report as new, so confirm it against the base before arming.
 - Alpha's clock differs from this host by about 0.5 s. Compare time windows with
   documented bounds, never exact values.
-- Vitest doesn't type-check: a name a barrel doesn't export is `undefined`
-  until called, so an op tested only by inputs that throw first can ship
-  broken (`gh.prRerunFailed`, 2026-11-06). Test each new op with valid input,
-  and type-check changed files before committing.
