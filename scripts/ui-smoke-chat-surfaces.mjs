@@ -15,6 +15,51 @@ export async function runChatSurfacesSmoke({ page, check, harnessBase }) {
   await page.goto(`${harnessBase}/harness-app-sidebar.html?shortcuts`, { waitUntil: "networkidle" });
   await page.keyboard.press("Meta+Digit1");
   await expect(page.getByRole("tablist", { name: "Chat sessions" }).getByRole("tab")).toHaveCount(3);
+
+  // Side column island (2026-11-06): the tab row stays on the column and the
+  // open tab's content sits in one island 12px in from the column's sides and
+  // bottom, on the column's own bg1 with a border1 edge and 12px corners.
+  await expect(page.locator("[data-workbench-island]")).toBeVisible();
+  for (const theme of ["dark", "light"]) {
+    await page.evaluate((value) => {
+      document.documentElement.dataset.theme = value;
+    }, theme);
+    const island = await page.evaluate(() => {
+      const rgb = (value) => {
+        const probe = document.createElement("div");
+        probe.style.color = value;
+        document.body.append(probe);
+        const color = getComputedStyle(probe).color;
+        probe.remove();
+        return color;
+      };
+      const column = document.querySelector("[data-zeros-column-3]");
+      const node = column.querySelector("[data-workbench-island]");
+      const header = column.querySelector('[data-testid="workbench-header"]').getBoundingClientRect();
+      const firstTab = column.querySelector('[role="tablist"][aria-label="Workspace panels"] [role="tab"]').getBoundingClientRect();
+      const outer = column.getBoundingClientRect();
+      const rect = node.getBoundingClientRect();
+      const style = getComputedStyle(node);
+      return {
+        bg1: rgb("var(--bg1)"),
+        border1: rgb("var(--border1)"),
+        columnSeam: getComputedStyle(column).borderLeftWidth,
+        insets: [rect.left - outer.left, outer.right - rect.right, outer.bottom - rect.bottom, rect.top - header.bottom],
+        firstTabOffset: firstTab.left - rect.left,
+        radius: style.borderTopLeftRadius,
+        border: [style.borderTopWidth, style.borderTopColor],
+        fill: style.backgroundColor,
+      };
+    });
+    expect(island.columnSeam).toBe("0px");
+    expect(island.insets.map(Math.round)).toEqual([12, 12, 12, 0]);
+    expect(Math.abs(island.firstTabOffset)).toBeLessThan(0.5);
+    expect(island.radius).toBe("12px");
+    expect(island.border).toEqual(["1px", island.border1]);
+    expect(island.fill).toBe(island.bg1);
+  }
+  check("Side column: the open tab sits in a bg1 island 12px in with a border1 edge, under the tab row and in line with its first tab, in Dark and Light", true);
+
   const panes = page.locator("[data-pane-root]");
   await page.getByRole("button", { name: "Pane options", exact: true }).click();
   await page.getByRole("menuitem", { name: "Split Right", exact: true }).click();
