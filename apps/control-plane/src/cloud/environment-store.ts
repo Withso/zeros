@@ -7,6 +7,7 @@ import { memberOnHoldSql, organizationMemberOnHold } from "../organization-seats
 import type { CloudAgentCredentialKeys } from "../agent-credentials/agent-credential-envelope.js";
 import { CLOUD_V2_LIVE_ACCESS } from "./workspace-access.js";
 import { hashCloudV2Token } from "./tokens.js";
+import { notifyCloudV2WorkerReady } from "./worker-ready.js";
 import type { CloudV2Workspace } from "./store.js";
 import { CLOUD_ENVIRONMENT_ERRORS, CLOUD_ENVIRONMENT_LIMITS, CloudEnvironmentMaterialSchema, CloudEnvironmentPatchSchema,
   CloudEnvironmentReportSchema, CloudEnvironmentRepositoryIdSchema, cloudEnvironmentMetadata,
@@ -212,6 +213,7 @@ export class CloudEnvironments {
         await tx.query(`UPDATE cloud_v2_workspaces SET state='running',attempts=0,next_attempt_at=NULL,
           active_at=CASE WHEN state='running' THEN active_at ELSE clock_timestamp() END,
           updated_at=CASE WHEN state='running' THEN updated_at ELSE clock_timestamp() END WHERE id=$1`, [row.id]);
+        if (row.state !== "running") await notifyCloudV2WorkerReady(tx, row.id);
       } else {
         await tx.query(`UPDATE cloud_v2_workspaces SET state='failed',error_code=$2,access_epoch=access_epoch+1,worker_route_url=NULL,worker_port_token=NULL,
           attempts=0,next_attempt_at=NULL,updated_at=clock_timestamp() WHERE id=$1`, [row.id, report.errorCode]);

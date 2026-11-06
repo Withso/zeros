@@ -1,0 +1,9 @@
+{
+  "id": "cloud-relay-ready-hint",
+  "kind": "replay",
+  "area": "control-plane",
+  "fixedBy": "pr:PENDING",
+  "symptom": "A cloud workspace became usable 6-7 s after its worker said hello. The relay noticed `running` only by polling every ~2 s, with a full authority read per loop. It then re-read authority three more times and rebuilt configuration with uncached source checks.",
+  "rule": "Readiness is pushed as a commit-time hint that carries no authority, with polling as the fallback. The relay's own re-checks share the bounded, revision-fenced authority window. A source continuation reuses its lease only with a proof from that fresh room read (principles 4, 9, 11).",
+  "check": "pnpm --dir apps/control-plane test src/cloud/relay.test.ts src/cloud/composition-credentials.test.ts src/cloud/store.integration.test.ts src/cloud/environment-report.integration.test.ts"
+}

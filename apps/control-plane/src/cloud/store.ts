@@ -20,6 +20,7 @@ import { MESSAGE_SEARCH_DEADLINE_MS } from "./message-search.js";
 import { consumeRuntimeCanary } from "./runtime-canary-store.js";
 import type { RuntimeCanaryAdmission } from "./runtime-canary.js";
 import { RUNTIME_HANDOFF_SESSION } from "./runtime-handoff-store.js";
+import { notifyCloudV2WorkerReady } from "./worker-ready.js";
 
 export type CloudV2WorkspaceState =
   | "creating" | "running" | "stopping" | "stopped" | "starting" | "deleting" | "deleted" | "failed";
@@ -467,7 +468,8 @@ export class CloudV2Store {
   }
 
   async acceptWorkerHello(token: string, bootId: string, proof?: { accessEpoch: string; loginRevision: string }): Promise<CloudV2WorkerSession | null> {
-    const { rows } = await withSystemTx(this.pool, tx => tx.query<Row & { access_epoch: string; login_revision: string; prior_state: "creating" | "starting" | "running"; hello_ms: number }>(
+    const { rows } = await withSystemTx(this.pool, async tx => {
+      const result = await tx.query<Row & { access_epoch: string; login_revision: string; prior_state: "creating" | "starting" | "running"; hello_ms: number }>(
       `WITH prior AS MATERIALIZED (
          SELECT id AS prior_id, state AS prior_state, updated_at AS prior_updated_at,
            NOT EXISTS (SELECT 1 FROM cloud_workspace_environment_pins p WHERE p.workspace_id=w.id
@@ -484,7 +486,11 @@ export class CloudV2Store {
        FROM prior WHERE w.id=prior.prior_id
        RETURNING ${COLUMNS.replace(/\b(\w+)\b/g, "w.$1")}, access_epoch::text, login_revision::text, prior.prior_state,
          greatest(0, extract(epoch FROM (clock_timestamp()-prior.prior_updated_at))*1000)::float8 AS hello_ms`,
-      [hashCloudV2Token(token), bootId, proof?.accessEpoch ?? null, proof?.loginRevision ?? null]));
+      [hashCloudV2Token(token), bootId, proof?.accessEpoch ?? null, proof?.loginRevision ?? null]);
+      const ready = result.rows[0];
+      if (ready?.state === "running" && ready.prior_state !== "running") await notifyCloudV2WorkerReady(tx, ready.id);
+      return result;
+    });
     const row = rows[0];
     return row ? { ...workspace(row), accessEpoch: row.access_epoch, loginRevision: row.login_revision,
       ...(row.prior_state === "running" || row.state !== "running" ? {} : { helloTiming: { state: row.prior_state, durationMs: Math.round(row.hello_ms) } }) } : null;

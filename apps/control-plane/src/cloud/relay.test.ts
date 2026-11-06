@@ -199,6 +199,159 @@ describe("cloud v2 relay", () => {
     });
   });
 
+  describe("relay readiness", () => {
+    const opened = (frames: any[]) => frames.filter(frame => frame.t === "open").length;
+    it("reads authority once for a first dial while its window is fresh", async () => {
+      let now = 1000; deps.now = () => now;
+      const frames: any[] = [];
+      workerServer.once("connection", socket => socket.on("message", raw => frames.push(JSON.parse(String(raw)))));
+      await app();
+      await vi.waitFor(() => expect(opened(frames)).toBe(1));
+      // One admission read and one connect read; the post-dial and configuration rechecks reuse the window.
+      expect(deps.store.appAccessSnapshot).toHaveBeenCalledTimes(2);
+    });
+    it("rechecks authority after a configuration build that outlived the window", async () => {
+      let now = 1000; deps.now = () => now;
+      let release!: () => void;
+      const original = deps.config;
+      deps.config = vi.fn(async ws => { await new Promise<void>(resolve => { release = resolve; }); return original(ws); });
+      const frames: any[] = [];
+      workerServer.once("connection", socket => socket.on("message", raw => frames.push(JSON.parse(String(raw)))));
+      const a = await app();
+      await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+      authorized = false; now += 5_000;
+      release();
+      await vi.waitFor(() => expect(a.readyState).toBe(WebSocket.CLOSED));
+      expect(frames.some(frame => frame.t === "config" || frame.t === "open")).toBe(false);
+    });
+    it("does not deliver configuration when a security event revokes access while it builds", async () => {
+      let now = 1000; deps.now = () => now;
+      let release!: () => void;
+      const original = deps.config;
+      deps.config = vi.fn(async ws => { await new Promise<void>(resolve => { release = resolve; }); return original(ws); });
+      const frames: any[] = [];
+      workerServer.once("connection", socket => socket.on("message", raw => frames.push(JSON.parse(String(raw)))));
+      const a = await app();
+      await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+      authorized = false;
+      notification.emit("notification", { channel: "zeros_security_event" });
+      release();
+      await vi.waitFor(() => expect(a.readyState).toBe(WebSocket.CLOSED));
+      expect(frames.some(frame => frame.t === "config" || frame.t === "open")).toBe(false);
+    });
+    it("dials as soon as a ready hint arrives instead of waiting out the retry delay", async () => {
+      deps.retryBaseMs = 60_000; deps.retryMaxMs = 60_000;
+      state = "starting";
+      await app();
+      await vi.waitFor(() => expect(deps.workerRoute).toHaveBeenCalledTimes(1));
+      state = "running";
+      relay.hintReady(workspaceId);
+      await vi.waitFor(() => expect(connectedWorkers).toHaveLength(1));
+      expect(deps.workerRoute).toHaveBeenCalledTimes(2);
+    });
+    it("keeps a ready hint that lands while the route read is in flight", async () => {
+      deps.retryBaseMs = 60_000; deps.retryMaxMs = 60_000;
+      state = "starting";
+      let release!: () => void;
+      const original = vi.mocked(deps.workerRoute).getMockImplementation()!;
+      vi.mocked(deps.workerRoute).mockImplementationOnce(async id => { const route = await original(id); await new Promise<void>(resolve => { release = resolve; }); return route; });
+      await app();
+      await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+      state = "running"; relay.hintReady(workspaceId); release();
+      await vi.waitFor(() => expect(connectedWorkers).toHaveLength(1));
+    });
+    it("stops before configuration when a security event lands during the dial", async () => {
+      let now = 1000; deps.now = () => now;
+      const frames: any[] = [];
+      workerServer.once("connection", socket => {
+        socket.on("message", raw => frames.push(JSON.parse(String(raw))));
+        authorized = false;
+        notification.emit("notification", { channel: "zeros_security_event" });
+      });
+      const a = await app();
+      await vi.waitFor(() => expect(a.readyState).toBe(WebSocket.CLOSED));
+      await new Promise(resolve => setTimeout(resolve, 20));
+      expect(deps.config).not.toHaveBeenCalled();
+      expect(frames).toEqual([]);
+    });
+    it("rechecks authority after a dial that outlived the window", async () => {
+      let now = 1000; deps.now = () => now;
+      const frames: any[] = [];
+      workerServer.once("connection", socket => {
+        socket.on("message", raw => frames.push(JSON.parse(String(raw))));
+        authorized = false; now += 5_000;
+      });
+      const a = await app();
+      await vi.waitFor(() => expect(a.readyState).toBe(WebSocket.CLOSED));
+      expect(deps.config).not.toHaveBeenCalled();
+      expect(frames).toEqual([]);
+    });
+    it("re-reads the route on a ready hint and dials only once the route is running", async () => {
+      deps.retryBaseMs = 60_000; deps.retryMaxMs = 60_000;
+      state = "starting";
+      await app();
+      await vi.waitFor(() => expect(deps.workerRoute).toHaveBeenCalledTimes(1));
+      relay.hintReady(workspaceId);
+      await vi.waitFor(() => expect(deps.workerRoute).toHaveBeenCalledTimes(2));
+      await new Promise(resolve => setTimeout(resolve, 50));
+      expect(connectedWorkers).toHaveLength(0);
+      expect(deps.workerRoute).toHaveBeenCalledTimes(2);
+      state = "running"; relay.hintReady(workspaceId);
+      await vi.waitFor(() => expect(connectedWorkers).toHaveLength(1));
+    });
+    it("still dials by polling when no ready hint arrives", async () => {
+      state = "starting";
+      await app();
+      await vi.waitFor(() => expect(deps.workerRoute).toHaveBeenCalledTimes(1));
+      state = "running";
+      await vi.waitFor(() => expect(connectedWorkers).toHaveLength(1));
+    });
+    it("gives a ready hint no authority of its own", async () => {
+      let now = 1000; deps.now = () => now;
+      deps.retryBaseMs = 60_000; deps.retryMaxMs = 60_000;
+      state = "starting";
+      const a = await app();
+      await vi.waitFor(() => expect(deps.workerRoute).toHaveBeenCalledTimes(1));
+      authorized = false; now += 5_000; state = "running";
+      relay.hintReady(workspaceId);
+      await vi.waitFor(() => expect(a.readyState).toBe(WebSocket.CLOSED));
+      expect(connectedWorkers).toHaveLength(0);
+    });
+    it("passes configuration only a proof from the room's fresh allowed read", async () => {
+      let now = 1000; deps.now = () => now;
+      let login = "7";
+      const original = vi.mocked(deps.store.appAccessSnapshot).getMockImplementation()!;
+      vi.mocked(deps.store.appAccessSnapshot).mockImplementation(async (id, sessions) => {
+        const snapshot = await original(id, sessions);
+        return snapshot && { ...snapshot, loginRevision: login };
+      });
+      const frames: any[] = [];
+      workerServer.once("connection", socket => socket.on("message", raw => frames.push(JSON.parse(String(raw)))));
+      await app();
+      await vi.waitFor(() => expect(opened(frames)).toBe(1));
+      expect(deps.config).toHaveBeenLastCalledWith(expect.anything(), "continuation", { accessEpoch, loginRevision: "7" });
+      // Past the window, a login refresh reads again and passes that read's proof.
+      now += 5_000; login = "8"; loginRevision = "8";
+      await relay.refreshLogins();
+      expect(deps.config).toHaveBeenLastCalledWith(expect.anything(), "continuation", { accessEpoch, loginRevision: "8" });
+      // A read without a login revision supplies no proof.
+      now += 5_000; vi.mocked(deps.store.appAccessSnapshot).mockImplementation(original); loginRevision = "9";
+      await relay.refreshLogins();
+      expect(deps.config).toHaveBeenLastCalledWith(expect.anything(), "continuation", undefined);
+    });
+    it("ignores ready hints for unknown or already ready rooms", async () => {
+      const frames: any[] = [];
+      workerServer.once("connection", socket => socket.on("message", raw => frames.push(JSON.parse(String(raw)))));
+      await app();
+      await vi.waitFor(() => expect(opened(frames)).toBe(1));
+      vi.mocked(deps.workerRoute).mockClear();
+      relay.hintReady(workspaceId); relay.hintReady("00000000-0000-4000-8000-000000000000");
+      await new Promise(resolve => setTimeout(resolve, 50));
+      expect(deps.workerRoute).not.toHaveBeenCalled();
+      expect(connectedWorkers).toHaveLength(1);
+    });
+  });
+
   it("times the first dial through readiness, including retry and configuration", async () => {
     const timing = vi.fn(); deps.timing = timing;
     let now = 1000; deps.now = () => now;
@@ -207,7 +360,7 @@ describe("cloud v2 relay", () => {
     deps.config = async ws => { now += 75; return original(ws); };
     await app();
     await vi.waitFor(() => expect(timing).toHaveBeenCalledTimes(1));
-    expect(timing).toHaveBeenCalledWith({ workspaceId: workspaceId.slice(0, 8), phase: "relay_ready", durationMs: 75 });
+    expect(timing).toHaveBeenCalledWith({ workspaceId: workspaceId.slice(0, 8), phase: "relay_ready", durationMs: 75, dialMs: 0, configMs: 75 });
     expect(deps.workerRoute).toHaveBeenCalledTimes(2);
   });
 
