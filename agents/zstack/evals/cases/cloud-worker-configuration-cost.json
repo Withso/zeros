@@ -1,0 +1,9 @@
+{
+  "id": "cloud-worker-configuration-cost",
+  "kind": "replay",
+  "area": "control-plane",
+  "fixedBy": "pr:869",
+  "symptom": "Worker hello and config refresh repeated connection, source and repository reads before delivering configuration: cold hello used 48 transactions and 172 driver calls, warm hello 35 and 123, and refresh 31 and 109.",
+  "rule": "zstack-review database-cost and concurrency checks: measure the production HTTP composition, retain source deadlines and live before/after I/O fences, and keep config reads within bounded transactions. Held profile tests enforce current membership, source, checkout and selected credentials; stored GitHub denials retire, while local access failures only withhold. Run with TEST_DATABASE_URL pointing to disposable PostgreSQL; skipped database tests are unverified.",
+  "check": "pnpm --dir apps/control-plane test src/cloud/runtime-hello.integration.test.ts --maxWorkers=1"
+}
