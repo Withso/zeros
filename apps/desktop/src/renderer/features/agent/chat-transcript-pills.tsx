@@ -478,8 +478,6 @@ export function ChatTranscriptPills({
 
   return (
     <div className="flex flex-col gap-2">
-      {/* A plain label (2026-11-06): no glyph, no colon and no trailing
-          control. The pills are self-evidently the objects of the verb. */}
       <div className="text-fg2 flex items-center gap-2 text-sm">
         <span>Add chat transcripts</span>
       </div>

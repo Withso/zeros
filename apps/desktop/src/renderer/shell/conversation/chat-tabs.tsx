@@ -133,10 +133,10 @@ import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
  *  so this constant is EXPORTED and the placeholder band in
  *  conversation/pane-layout.tsx consumes it rather than restating the literal.
  *
- *  2026-11-06: with no header divider or pane seams, the strip starts in the
- *  chrome (bg1) and dissolves into its pane's fill over its first 8px (20% of
- *  40px), behind the tabs, so an unfocused pane meets the header or the pane
- *  above it softly. Over a focused pane the fade is bg1 on bg1. */
+ *  With no header divider or pane seams, the strip starts in the chrome (bg1)
+ *  and dissolves into its pane's fill over its first 8px (20% of 40px),
+ *  behind the tabs, so an unfocused pane meets the header or the pane above
+ *  it without a line. */
 export const CHAT_STRIP_SHELL_CLS =
   "flex h-10 shrink-0 items-center overflow-hidden bg-gradient-to-b from-bg1 to-transparent to-20%";
 

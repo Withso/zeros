@@ -4451,10 +4451,9 @@ function AgentChatBody({
             restore never pops it in; it never takes clicks. */}
         <div
           aria-hidden="true"
-          // 32px from the strip's edge (2026-11-06), like the fade above the
-          // composer. It ends where the transcript column starts (pt-8), so the
-          // first message never sits under it while scrolled content still
-          // dissolves under the strip.
+          // It ends where the transcript column starts (pt-8), so the first
+          // message never sits under it while scrolled content still dissolves
+          // under the strip.
           className="pointer-events-none absolute inset-x-0 top-0 z-1 h-8 bg-gradient-to-b from-(--pane-bg) to-transparent"
         />
         {/* A sibling of the scroller so the rail stays pinned; z-2 paints above

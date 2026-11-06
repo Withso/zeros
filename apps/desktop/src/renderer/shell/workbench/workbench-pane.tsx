@@ -76,16 +76,12 @@ import { Surface } from "@/renderer/shared/ui/layout/surface";
 // when conversation pane freezes at its 2400px cap on ultrawide windows (bare
 // 0..1 factors leave an empty gap at the right edge there). No top inset
 // (2026-07-12): the h-10 header is the column's full 0..40px title strip, like
-// repository panel and conversation pane. Island treatment (2026-11-06,
-// replacing the 2026-07-11 flush column): the header stays on the column's bg1
-// and everything under it sits in one island (WORKBENCH_ISLAND_CLS), whose
-// edge replaces the `border-l` seam against conversation pane.
+// repository panel and conversation pane. The column draws no seam against
+// conversation pane: the island's edge (WORKBENCH_ISLAND_CLS) separates them.
 const WORKBENCH_PANE_CLS =
   "relative flex min-h-0 min-w-[200px] flex-col overflow-hidden bg-bg1 [flex:calc((1_-_var(--zeros-column-2-ratio,0.5))*100)_1_0px]";
-/** The island under the header: 12px in from the column's sides and bottom,
- *  12px corners and a border1 edge on the column's own bg1 (a canvas Surface).
- *  It holds the shared PR row, every tab body and the docked terminal panel;
- *  nothing inside a tab changes. */
+/** Everything under the header. Rendered as a canvas Surface, which paints
+ *  bg1 and binds --surface-border to border1. */
 const WORKBENCH_ISLAND_CLS =
   "mx-3 mb-3 flex min-h-0 flex-1 flex-col overflow-hidden rounded-[calc(var(--radius-lg)*1.5)] border border-(--surface-border)";
 /** Bound rich File/diff DOM while making the common recent-tab path instant. */

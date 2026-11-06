@@ -42,9 +42,7 @@ export function WorkspaceHeader({ folder, ...props }: {
 
 function LocalHeader(props: Omit<Parameters<typeof WorkspaceHeader>[0], "folder">) {
   // The 28px box the Cloud details button takes, so the name starts at one
-  // column for branch, folder and cloud workspaces. Whether the branch is
-  // published does not change the glyph (2026-11-06: the "Local" badge that
-  // replaced it for unpublished Git is retired).
+  // column for branch, folder and cloud workspaces, published or not.
   const icon = (
     <span className="-ml-1.5 inline-flex size-7 items-center justify-center">
       {props.branch ? <GitBranch className="size-4" /> : <Folder className="size-4" />}
