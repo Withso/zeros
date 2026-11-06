@@ -845,3 +845,16 @@ Each landed step appends one line: date, workstream, what landed, evidence.
   fades and the T-junction valley, each in Dark and Light) passes; the
   draft-indicators smoke follows the cap and now really switches to Light,
   and the conversation-summary smoke follows the retired badge.
+- 2026-11-06 · 5, 6 · Split chat panes go solid (canvas version 391, "Solid
+  split", replacing the soft valleys in the entry above): only while the
+  column is split, panes sit 12px apart, the divider being the gap and the
+  resize handle (`PANE_SPLITTER_PX` is 12, so two panes need 732px), and 12px
+  in from the column's left and bottom edges and from its right edge when
+  Workbench is not beside it, whose island keeps the same 12px
+  (`splitPaneGutters`, charged to the column's floor and to the split gate);
+  every corner rounds 12px, and the tab-strip and seam fades are gone with
+  `pane-edges.ts`. A lone pane is unchanged. Evidence: the pane-sizing and
+  pane-surfaces tests failed red first; the chat-surfaces smoke measures the
+  gutters, the 12px gaps, the 12px to the side island, the right gutter with
+  the side column hidden, every radius and the absent fades, in Dark and
+  Light.
