@@ -106,6 +106,27 @@ older response cannot lower the minimum. The additive `required` field and
 `updater_require` command carry validated version metadata only, never remote
 error text. Malformed 426 bodies still block with safe, unknown-version copy.
 
+## Update relaunch recovery (macOS)
+
+After installing a staged update, Squirrel's ShipIt relaunches the app through
+LaunchServices. LaunchServices can fail that launch with `-600`
+(`procNotFound`) after launchd has already spawned the new app suspended. The
+suspended process never runs, yet it stays the app's launchd job, so every
+later open fails with "The application is not open anymore" until it is
+killed.
+
+Every update restart (Restart now, Restart to Update, the automatic idle
+restart and required updates) therefore starts a detached `/bin/sh` guard
+(`apps/desktop/electron/relaunch-guard.ts`) just before `quitAndInstall`. It
+arms only for an executable inside a macOS `.app` bundle. Once the old app
+exits it watches for up to three minutes: processes that existed before the
+restart are never candidates, a running new instance ends the watch, and an
+instance still stopped after ten seconds is killed and the bundle reopened, at
+most twice, with a `relaunch guard` line in `main.log`. Quitting normally with
+install-on-quit does not relaunch and starts no guard. To recover an install
+that predates the guard, kill the app process that `ps` shows in state `T`,
+then open the app.
+
 ## Analytics
 
 All events register the metadata-only `release_channel` super property:

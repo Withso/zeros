@@ -13,8 +13,11 @@ import { IS_PACKAGED } from "./runtime-mode";
 import { channel, type Channel } from "../src/engine/runtime";
 import { mergeClientUpgradeRequired, parseClientUpgradeRequired, type ClientUpgradeRequired } from "../shared/client-compatibility";
 import { onClientUpgrade } from "./client-upgrade-signal";
+import { startUpdateRelaunchGuard } from "./relaunch-guard";
+import type { ChildProcess } from "node:child_process";
 
 let wired = false;
+let relaunchGuard: ChildProcess | null = null;
 
 const CHECK_INTERVAL_MS = 5 * 60 * 1000;
 const MIN_OPPORTUNISTIC_CHECK_GAP_MS = 60 * 1000;
@@ -448,14 +451,31 @@ export function installStagedUpdate(): boolean {
   return true;
 }
 
+function armRelaunchGuard(): ChildProcess | null {
+  if (relaunchGuard) return relaunchGuard;
+  const guard = startUpdateRelaunchGuard();
+  if (!guard) return null;
+  relaunchGuard = guard;
+  guard.once("exit", () => {
+    if (relaunchGuard === guard) relaunchGuard = null;
+  });
+  return guard;
+}
+
 /** Run quitAndInstall off the current event-loop tick (electron-updater's own
  *  guidance — calling it synchronously inside an event handler can race the
  *  download cleanup). isForceRunAfter relaunches into the new version. */
 function applyAndRelaunch(): void {
   setImmediate(() => {
+    const armedEarlier = relaunchGuard !== null;
+    const guard = armRelaunchGuard();
     try {
       autoUpdater.quitAndInstall(false, true);
     } catch (err) {
+      if (guard && !armedEarlier) {
+        guard.kill();
+        if (relaunchGuard === guard) relaunchGuard = null;
+      }
       console.warn("[updater] quitAndInstall failed:", err);
       publish({
         kind: "error",
