@@ -9,7 +9,9 @@ Target: `gotchas.md` (the macOS `TMPDIR` entry).
   `/private/tmp` belongs to `wheel`. The suite checks that Git's private
   temporary files carry the process's group.
 - **Rule.** Replace "Set `TMPDIR` under `/private/tmp`" with: create a
-  directory there with your own group and use it
-  (`mkdir -p /private/tmp/zs && chgrp "$(id -g)" /private/tmp/zs`). The path
-  stays canonical and short enough for Unix socket paths.
+  private directory there with `mktemp`, give it your own group and use it
+  (`export TMPDIR="$(mktemp -d /private/tmp/zs.XXXXXX)" && chgrp "$(id -g)" "$TMPDIR"`).
+  Another user can plant a fixed name in a shared folder first; `mktemp`
+  makes a new directory that only you can open. The path stays canonical and
+  short enough for Unix socket paths.
 - **Encoded in.** Guidance only.

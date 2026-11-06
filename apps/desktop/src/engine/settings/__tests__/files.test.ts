@@ -401,6 +401,18 @@ describe("updateSettingsFile", () => {
     expect(read.text).toContain("# keep me");
   });
 
+  it("writes an empty servers array without padding after the last server is removed", () => {
+    const file = path.join(dir, "settings.toml");
+    const original = "# keep me\n[mcp]\nservers = []\n";
+    writeFileSync(file, original, "utf8");
+    const server = { name: "one", transport: "http", url: "https://one.example.test/mcp" };
+    updateSettingsFile(file, { mcp: { servers: [server] } }, { schemaUrl: null });
+    updateSettingsFile(file, { mcp: { servers: [] } }, { schemaUrl: null });
+    const text = readFileSync(file, "utf8");
+    expect(text).toMatch(/^servers = \[\]$/m);
+    expect(text).toBe(original);
+  });
+
   it("preserves comments + sibling keys when adding mcp.servers to an existing file", () => {
     const file = path.join(dir, "settings.toml");
     writeFileSync(
