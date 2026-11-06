@@ -309,6 +309,29 @@ suite("durable cloud prompt delivery", () => {
     expect(second.items).toHaveLength(1); expect(second.nextAfter).toBeNull();
   });
 
+  it.each(["pull", "ack", "begin"] as const)("rechecks live membership after the %s workspace-lock wait without a notice", async phase => {
+    expect((await submit()).status).toBe(201);
+    const item = phase === "pull" ? undefined : phase === "ack" ? (await pull()).prompts[0]! : await inbox();
+    const before = (await pool.query("SELECT state,delivery_id,dispatch_id FROM cloud_v2_prompt_outbox WHERE workspace_id=$1", [workspace.id])).rows;
+    const held = await pool.connect();
+    let pending: Promise<Response> | undefined;
+    try {
+      await held.query("BEGIN");
+      await held.query("SELECT id FROM cloud_v2_workspaces WHERE id=$1 FOR UPDATE", [workspace.id]);
+      const body = item ? { userMessageId: item.receipt.userMessageId, deliveryId: item.deliveryId,
+        ...(phase === "begin" ? { dispatchId: randomUUID() } : {}) } : { waitMs: 0, held: [] };
+      pending = Promise.resolve(worker(phase, body));
+      await vi.waitFor(async () => {
+        const waiting = await pool.query("SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND pid<>pg_backend_pid()");
+        expect(waiting.rowCount).toBeGreaterThan(0);
+      });
+      await held.query("DELETE FROM organization_members WHERE org_id=$1 AND user_id=$2", [org, creator]);
+      await held.query("COMMIT");
+      expect((await pending).status).toBe(401);
+      expect((await pool.query("SELECT state,delivery_id,dispatch_id FROM cloud_v2_prompt_outbox WHERE workspace_id=$1", [workspace.id])).rows).toEqual(before);
+    } finally { await held.query("ROLLBACK"); held.release(); await pending; }
+  });
+
   it("makes a new queued chat discoverable after app quit without manufacturing transcript order", async () => {
     await store.transition(workspace.id, ["running"], "stopped");
     const input = prompt(); expect((await submit(input)).status).toBe(201);

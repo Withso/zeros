@@ -1,12 +1,13 @@
 import type pg from "pg";
 import { createHash } from "node:crypto";
-import { withSystemTx, type Tx } from "../db.js";
+import { withSystemStatement, withSystemTx, type Tx } from "../db.js";
+import { sql, SqlFragment } from "../sql-fragment.js";
 import type { AuthedUser } from "../auth.js";
 import { securityStreamAuthority } from "../security-events.js";
 import { HttpError } from "../authz.js";
 import type { CloudV2HistoryState, CloudV2MessageRow } from "./contract.js";
 import { hashCloudV2Token, newCloudV2Token } from "./tokens.js";
-import { CLOUD_V2_CREATOR_ON_HOLD, CLOUD_V2_LIVE_ACCESS as LIVE_ACCESS } from "./workspace-access.js";
+import { CLOUD_V2_CREATOR_ON_HOLD, CLOUD_V2_LIVE_ACCESS as LIVE_ACCESS, CLOUD_V2_LIVE_ACCESS_SQL } from "./workspace-access.js";
 import { memberOnHoldSql, organizationMemberOnHold } from "../organization-seats.js";
 import { CloudV2PromptOutbox } from "./prompt-outbox.js";
 import { computerSourceReviewRequired, readComputerSourceTargets } from "./computer-provenance.js";
@@ -107,8 +108,9 @@ type Row = {
   error_code: string | null; active_at: Date | null; archived_at: Date | null; created_at: Date; updated_at: Date;
 };
 
-const COLUMNS = `id, org_id, creator_user_id, name, repository, branch, base_branch, state, boat_sandbox_id,
+const WORKSPACE_COLUMNS_SQL = sql`id, org_id, creator_user_id, name, repository, branch, base_branch, state, boat_sandbox_id,
   computer_build_id, error_code, active_at, archived_at, created_at, updated_at`;
+const COLUMNS = WORKSPACE_COLUMNS_SQL.text;
 
 type LifecycleRow = Row & {
   lease_renewed_at: Date | null; base_commit: string | null; restore_pending: boolean; restore_attempt: string | null;
@@ -303,10 +305,12 @@ export class CloudV2Store {
   }
 
   async promptContext(id: string, userId: string) {
-    return withSystemTx(this.pool, async tx => {
-      const row = await ownedRow(tx, id, userId);
-      return { workspace: workspace(row), proof: { accessEpoch: row.access_epoch, loginRevision: row.login_revision } };
-    });
+    const { rows } = await withSystemStatement<Row & { access_epoch: string; login_revision: string }>(this.pool,
+      sql`SELECT ${WORKSPACE_COLUMNS_SQL}, access_epoch::text, login_revision::text FROM cloud_v2_workspaces w
+        WHERE w.id=${SqlFragment.uuid(id.toLowerCase())} AND w.creator_user_id=${SqlFragment.uuid(userId.toLowerCase())}
+          AND w.state<>'deleted' AND ${CLOUD_V2_LIVE_ACCESS_SQL}`);
+    const row = rows[0] ?? await withSystemTx(this.pool, tx => ownedRow(tx, id, userId));
+    return { workspace: workspace(row), proof: { accessEpoch: row.access_epoch, loginRevision: row.login_revision } };
   }
 
   async list(organizationId: string, userId: string): Promise<CloudV2Workspace[]> {
@@ -504,11 +508,16 @@ export class CloudV2Store {
   }
 
   async workerSession(token: string, bootId: string, handoff?: { id: string; sha256?: string }): Promise<CloudV2WorkerSession | null> {
-    const { rows } = await withSystemTx(this.pool, tx => tx.query<Row & { access_epoch: string; login_revision: string }>(
+    const { rows } = handoff ? await withSystemTx(this.pool, tx => tx.query<Row & { access_epoch: string; login_revision: string }>(
       `SELECT ${COLUMNS}, access_epoch::text, login_revision::text FROM cloud_v2_workspaces w
-       WHERE worker_token_hash=$1 AND ${handoff ? RUNTIME_HANDOFF_SESSION : "worker_boot_id=$2"}
+       WHERE worker_token_hash=$1 AND ${RUNTIME_HANDOFF_SESSION}
        AND state NOT IN ('deleting','deleted') AND ${LIVE_ACCESS}`,
-      [hashCloudV2Token(token), bootId, ...(handoff ? [handoff.id, handoff.sha256 ?? null] : [])]));
+      [hashCloudV2Token(token), bootId, handoff.id, handoff.sha256 ?? null]))
+      : await withSystemStatement<Row & { access_epoch: string; login_revision: string }>(this.pool,
+        sql`SELECT ${WORKSPACE_COLUMNS_SQL}, access_epoch::text, login_revision::text FROM cloud_v2_workspaces w
+          WHERE worker_token_hash=decode(${SqlFragment.text(hashCloudV2Token(token).toString("hex"), /^[0-9a-f]{64}$/)}, 'hex')
+            AND worker_boot_id=${SqlFragment.uuid(bootId.toLowerCase())}
+            AND state NOT IN ('deleting','deleted') AND ${CLOUD_V2_LIVE_ACCESS_SQL}`);
     const row = rows[0];
     return row ? { ...workspace(row), accessEpoch: row.access_epoch, loginRevision: row.login_revision } : null;
   }
