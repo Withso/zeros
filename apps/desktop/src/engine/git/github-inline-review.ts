@@ -57,6 +57,7 @@ interface ThreadNode {
   };
 }
 interface ThreadsQuery {
+  viewer?: { login: string; avatarUrl: string } | null;
   repository: {
     pullRequest: {
       headRefOid: string;
@@ -67,6 +68,7 @@ interface ThreadsQuery {
 }
 
 const THREADS_QUERY = `query($owner: String!, $repo: String!, $number: Int!, $after: String) {
+  viewer { login avatarUrl }
   repository(owner: $owner, name: $repo) {
     pullRequest(number: $number) {
       headRefOid baseRefOid
@@ -225,6 +227,7 @@ export function createGithubInlineReviewService(deps: Dependencies) {
     let threadsTruncated = false;
     let threadBytes = 0;
     let threadBudgetFull = false;
+    let viewer: PrInlineReview["viewer"] = null;
     for (let page = 0; page < 10; page++) {
       const response: ThreadsQuery = await deps.withAuth((oct) =>
         oct.graphql<ThreadsQuery>(THREADS_QUERY, {
@@ -235,6 +238,8 @@ export function createGithubInlineReviewService(deps: Dependencies) {
       );
       const pr = response.repository?.pullRequest;
       if (!pr) validation("This pull request is no longer available.");
+      if (page === 0 && response.viewer?.login)
+        viewer = { login: response.viewer.login, avatarUrl: safeUrl(response.viewer.avatarUrl) };
       if (
         headSha !== null &&
         (headSha !== pr.headRefOid || baseSha !== pr.baseRefOid)
@@ -275,6 +280,7 @@ export function createGithubInlineReviewService(deps: Dependencies) {
       threadsTruncated,
       annotationsTruncated: false,
       annotationError: null,
+      viewer,
     };
     try {
       const runs = await deps.withAuth((oct) =>

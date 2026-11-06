@@ -211,6 +211,7 @@ export const InlineReviewThread = memo(function InlineReviewThread({
   const [historyBusy, setHistoryBusy] = useState(false);
   const historyFlight = useRef(false);
   const viewer = useViewerIdentity();
+  const replyAs = thread.replyAs === undefined ? viewer : thread.replyAs;
   const open = !thread.resolved || expandedResolved || replying;
   const first = thread.comments[0];
   const range = thread.anchorMissing
@@ -517,11 +518,11 @@ export const InlineReviewThread = memo(function InlineReviewThread({
         </div>
       )}
       {open && (replying || thread.canReply) && (
-        // Reply is a field in the composer look beside your avatar; focusing
-        // it opens the reply box in place.
+        // Reply is a field in the composer look beside the avatar of whoever
+        // it posts as; focusing it opens the reply box in place.
         <div className="grid min-w-0 grid-cols-[20px_minmax(0,1fr)] items-start gap-x-2.5 px-3 pb-3">
           <span className="mt-1.5">
-            <AuthorAvatar name={viewer.name} avatarUrl={viewer.avatarUrl} />
+            {replyAs ? <AuthorAvatar name={replyAs.name} avatarUrl={replyAs.avatarUrl} /> : null}
           </span>
           {replying ? (
             <ReviewComposer

@@ -311,6 +311,8 @@ export function setRunFileForTesting(
 export interface AuthStatusResult {
   authenticated: boolean;
   login?: string;
+  /** The account's GitHub photo, https only. */
+  avatarUrl?: string;
   /** A successful identity probe can still be incomplete. GitHub returns
    *  `200` plus `X-GitHub-SSO: partial-results` when SAML-protected
    *  organizations were omitted, so callers must not cache that response as
@@ -358,6 +360,17 @@ export function forgetGithubLogin(): void {
   lastKnownLogin = null;
 }
 
+/** A GitHub photo URL the renderer may load: https, no credentials. */
+function httpsAvatarUrl(value: string | null | undefined): string | undefined {
+  if (!value) return undefined;
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && !url.username && !url.password ? url.toString() : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Probe whether we have a working token. Rotating App credentials get the
  * same one-shot owner refresh as normal API calls; borrowed/PAT credentials
  * retain the legacy retry-and-clear behavior after two explicit rejections. */
@@ -373,9 +386,11 @@ export async function getAuthStatus(): Promise<AuthStatusResult> {
     );
     const warning = partialSsoWarning(response.headers);
     rememberLogin(response.data.login);
+    const avatarUrl = httpsAvatarUrl(response.data.avatar_url);
     return {
       authenticated: true,
       login: response.data.login,
+      ...(avatarUrl ? { avatarUrl } : {}),
       ...(warning ? { warning } : {}),
     };
   } catch (err) {

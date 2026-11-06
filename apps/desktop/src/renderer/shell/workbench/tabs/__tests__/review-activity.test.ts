@@ -95,6 +95,28 @@ describe("Local Review observation activity", () => {
     expect(provider.getPr).toHaveBeenCalledOnce();
   });
 
+  it("keeps the GitHub account's photo for the comment box and a posting comment", async () => {
+    vi.mocked(provider.authStatus).mockResolvedValue({
+      authenticated: true,
+      login: "reviewer",
+      avatarUrl: "https://avatars.githubusercontent.com/u/3",
+    });
+    let posted: (value: { id: number; url: string }) => void = () => {};
+    vi.mocked(provider.addComment).mockImplementation(() => new Promise((resolve) => { posted = resolve; }));
+    let live = Fixture();
+    await vi.advanceTimersByTimeAsync(0);
+    live = Fixture();
+    expect(live.snap).toMatchObject({ login: "reviewer", avatarUrl: "https://avatars.githubusercontent.com/u/3" });
+    const sending = live.postComment("Ship it");
+    expect(Fixture().snap.timeline?.at(-1)).toMatchObject({
+      author: "reviewer",
+      authorAvatarUrl: "https://avatars.githubusercontent.com/u/3",
+      optimistic: true,
+    });
+    posted({ id: 9, url: "https://github.com/o/r/pull/42#issuecomment-9" });
+    await sending;
+  });
+
   it("restores only the exact owner through A to hidden B to A", async () => {
     Fixture("personal-workspace"); await vi.advanceTimersByTimeAsync(0); unmount();
     const before = review.peekReviewLiveData(provider, "personal-workspace", 42).pr;

@@ -412,6 +412,8 @@ export type CreateWorkspaceArgs = {
 export interface AuthStatusResult {
   authenticated: boolean;
   login?: string;
+  /** The account's GitHub photo (https only), for "you" in the Review tab. */
+  avatarUrl?: string;
 }
 
 // Every DB-touching git, GitHub and workspace op runs on the engine over the

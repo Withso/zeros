@@ -23,6 +23,7 @@ export interface CloudGithubPrContext {
 export interface CloudGithubPrAccess {
   api: CloudGithubApi;
   login?: string;
+  avatarUrl?: string;
   generation: string;
   assertCurrent(): Promise<void>;
 }
@@ -162,6 +163,7 @@ export class CloudGithubPrService {
         result = {
           authenticated: true,
           ...(access.login ? { login: access.login } : {}),
+          ...(access.login && access.avatarUrl ? { avatarUrl: access.avatarUrl } : {}),
         };
         break;
       case "gh.repoAccess":

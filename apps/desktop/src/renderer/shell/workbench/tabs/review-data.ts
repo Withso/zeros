@@ -82,6 +82,8 @@ export interface ReviewSnapshot {
   authed: boolean | null;
   /** The signed-in login (labels optimistic comments). */
   login: string | null;
+  /** That account's photo, beside the comment box and on a posting comment. */
+  avatarUrl: string | null;
   pr: PR | null;
   checks: PrChecksResult | null;
   commits: PrCommitSummary[] | null;
@@ -108,6 +110,7 @@ export interface ReviewSnapshot {
 const EMPTY_SNAPSHOT: ReviewSnapshot = {
   authed: null,
   login: null,
+  avatarUrl: null,
   pr: null,
   checks: null,
   commits: null,
@@ -308,6 +311,7 @@ async function refreshFull(
           patch(key, {
             authed: status.authenticated,
             login: status.login ?? null,
+            avatarUrl: status.avatarUrl ?? null,
           });
           stopAfterAuth = !status.authenticated;
         }
@@ -631,7 +635,7 @@ export function useReviewLiveData(args: {
         kind: "comment",
         id: -Date.now(),
         author: e.snap.login ?? "you",
-        authorAvatarUrl: null,
+        authorAvatarUrl: e.snap.avatarUrl,
         state: "",
         body,
         url: null,

@@ -59,6 +59,7 @@ export function ReviewTimelineSection({
   error,
   scrollKey,
   hostLabel,
+  viewer = null,
   onAddToChat,
   onPostComment,
   onRetry,
@@ -73,6 +74,8 @@ export function ReviewTimelineSection({
   scrollKey: string;
   /** Where a comment posts ("GitHub"). */
   hostLabel: string;
+  /** The account a comment posts as, beside the comment box. */
+  viewer?: { login: string; avatarUrl: string | null } | null;
   onAddToChat: (text: string) => void;
   onPostComment: (body: string) => Promise<void>;
   onRetry: () => void;
@@ -163,7 +166,7 @@ export function ReviewTimelineSection({
           </ReviewSection>
         </div>
       </div>
-      <CommentComposer onPost={onPostComment} hostLabel={hostLabel} />
+      <CommentComposer onPost={onPostComment} hostLabel={hostLabel} viewer={viewer} />
     </div>
   );
 }
@@ -491,9 +494,11 @@ function TimelineCard({
 function CommentComposer({
   onPost,
   hostLabel,
+  viewer,
 }: {
   onPost: (body: string) => Promise<void>;
   hostLabel: string;
+  viewer: { login: string; avatarUrl: string | null } | null;
 }) {
   const [value, setValue] = useState("");
   const [busy, setBusy] = useState(false);
@@ -521,7 +526,15 @@ function CommentComposer({
   };
 
   return (
-    <div className="border-border1 shrink-0 border-t px-5 pt-3 pb-4">
+    <div
+      data-review-comment-composer=""
+      className="border-border1 grid shrink-0 grid-cols-[20px_minmax(0,1fr)] items-start gap-x-2.5 border-t px-5 pt-3 pb-4"
+    >
+      {/* Whoever the comment posts as; the column stays when that's unknown. */}
+      <span className="mt-1.5">
+        {viewer ? <AuthorAvatar login={viewer.login} avatarUrl={viewer.avatarUrl} /> : null}
+      </span>
+      <div className="min-w-0">
       {error && (
         <div className="mb-2">
           <ErrorCallout text={error} />
@@ -557,6 +570,7 @@ function CommentComposer({
           Comment
           <ButtonShortcut keys="⌘↵" />
         </Button>
+      </div>
       </div>
     </div>
   );

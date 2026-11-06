@@ -267,6 +267,22 @@ describe("GitHub inline review aggregate", () => {
       ],
     });
   });
+  it("names the GitHub account a reply posts as, with only a safe avatar", async () => {
+    const { service, graphql } = setup();
+    graphql.mockResolvedValue({
+      ...page(),
+      viewer: { login: "priya", avatarUrl: "https://avatars.githubusercontent.com/u/9" },
+    });
+    expect((await service.get(target)).viewer).toEqual({
+      login: "priya",
+      avatarUrl: "https://avatars.githubusercontent.com/u/9",
+    });
+    graphql.mockResolvedValue({ ...page(), viewer: { login: "priya", avatarUrl: "http://evil.test/a.png" } });
+    expect((await service.get(target)).viewer).toEqual({ login: "priya", avatarUrl: null });
+    graphql.mockResolvedValue(page());
+    expect((await service.get(target)).viewer).toBeNull();
+    expect(graphql.mock.calls[0]![0]).toContain("viewer { login avatarUrl }");
+  });
   it("reads subsequent thread pages and refuses a mixed-head snapshot", async () => {
     const { service, graphql } = setup();
     graphql

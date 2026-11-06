@@ -3,7 +3,7 @@ import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { PrInlineReview } from "@zeros/protocol/github-review";
-import { githubReviewThreadItem } from "../github-review-model";
+import { githubReviewItems, githubReviewThreadItem } from "../github-review-model";
 import { InlineReviewThread } from "../inline-review-thread";
 import { ReviewDraftStore } from "../review-draft-store";
 import type {
@@ -215,6 +215,73 @@ describe("comment authors", () => {
     const textarea = section.querySelector("textarea");
     expect(textarea).not.toBeNull();
     expect(document.activeElement).toBe(textarea);
+  });
+
+  it("shows the GitHub account a GitHub reply posts as beside Reply", async () => {
+    const review = {
+      headSha: "b".repeat(40),
+      baseSha: "a".repeat(40),
+      threads: [
+        {
+          id: "thread-viewer",
+          path: "src/auth.ts",
+          side: "RIGHT",
+          startLine: 4,
+          line: 6,
+          originalStartLine: 4,
+          originalLine: 6,
+          isOutdated: false,
+          isResolved: false,
+          canResolve: true,
+          canUnresolve: false,
+          commentsTruncated: false,
+          comments: [
+            {
+              id: "comment-viewer",
+              databaseId: 31,
+              body: "Check role.",
+              url: null,
+              createdAt: 10,
+              updatedAt: 20,
+              commitSha: "b".repeat(40),
+              author: { login: "sam", kind: "human", avatarUrl: null },
+            },
+          ],
+        },
+      ],
+      annotations: [],
+      threadsTruncated: false,
+      annotationsTruncated: false,
+      annotationError: null,
+      viewer: { login: "priya-gh", avatarUrl: "https://avatars.githubusercontent.com/u/9" },
+    } as unknown as PrInlineReview;
+    const target = { workspaceId: "ws", prNumber: 7 };
+    const [item] = githubReviewItems(review, target);
+    expect(item!.replyAs).toEqual({
+      name: "priya-gh",
+      avatarUrl: "https://avatars.githubusercontent.com/u/9",
+    });
+    const section = await render(item!);
+    const reply = section.querySelector<HTMLButtonElement>('button[aria-label="Reply"]')!;
+    expect(reply.previousElementSibling!.textContent).toBe("PG");
+    // Another account makes a new version, so the open thread re-renders.
+    const [other] = githubReviewItems(
+      { ...review, threads: review.threads.map((t) => ({ ...t })), viewer: { login: "sam", avatarUrl: null } },
+      target,
+    );
+    expect(other!.version).not.toBe(item!.version);
+  });
+
+  it("shows no avatar beside a GitHub reply when the posting account is unknown", async () => {
+    const section = await render(
+      thread(
+        "github",
+        { id: "github:sam", name: "sam", kind: "human" },
+        { replyAs: null },
+      ),
+    );
+    const reply = section.querySelector<HTMLButtonElement>('button[aria-label="Reply"]')!;
+    expect(reply.previousElementSibling?.querySelector("[data-slot=avatar]") ?? null).toBeNull();
   });
 
   it("shows a person's photo once it has loaded", async () => {
