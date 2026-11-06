@@ -19,6 +19,7 @@ import { z } from "zod";
 import { setupSelectionUnavailable, workspaceSetupBuild } from "./setup-selection.js";
 import { withSystemTx } from "../db.js";
 import { cloudGithubRequestContext } from "./github-request-context.js";
+import { createCloudGithubWorkerConfig } from "./github-worker-config.js";
 import { createCloudGithubCatalog } from "./github-catalog.js";
 
 export function createCloudGithubServices(
@@ -209,6 +210,7 @@ export function createCloudGithubServices(
     const [repositoryBinding, gitIdentity] = await Promise.all([binding(workspace, mode, access), connections.gitIdentity(scope, access)]);
     return { repositoryBinding, gitIdentity };
   };
+  const workerConfiguration = createCloudGithubWorkerConfig({ pool, connections, metadata, authorizeSource, continueSource, binding, retireRevoked });
   const workspaceToken = async (
     workspace: CloudV2Workspace,
     access: "read" | "write" | "user" = "read",
@@ -269,6 +271,7 @@ export function createCloudGithubServices(
     continueSource,
     binding,
     workerIdentity,
+    workerConfiguration,
     token,
     workspaceToken,
     resolveRepository,

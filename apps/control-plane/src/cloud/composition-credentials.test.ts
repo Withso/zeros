@@ -19,10 +19,12 @@ const github = vi.hoisted(() => ({
   workspaceSetup: vi.fn(async () => null),
   source: { invalidate: vi.fn(), targets: vi.fn(async () => {}) },
   binding: vi.fn(async () => ({ repository: "owner/project" })),
-  workerIdentity: vi.fn(),
+  workerConfiguration: vi.fn(),
 }));
 vi.mock("./github-composition.js", () => ({ createCloudGithubServices: () => github }));
 vi.mock("../postgres-notifications.js", () => ({ postgresNotificationSubscription: () => null }));
+vi.mock("../db.js", async original => ({ ...await original<typeof import("../db.js")>(),
+  withSystemTx: async (_pool: pg.Pool, read: (tx: unknown) => unknown) => read({ query: vi.fn() }) }));
 vi.mock("./agent-logins.js", async original => ({ ...await original<typeof import("./agent-logins.js")>(),
   createCloudV2AgentLogins: () => Object.assign(async () => null, { all: async () => ({ codex: null, claude: null, cursor: null }) }) }));
 vi.mock("../mcp/composition.js", () => ({ createMcpServices: () => null }));
@@ -31,8 +33,11 @@ vi.mock("./lifecycle.js", async original => ({ ...await original<typeof import("
 }));
 
 it("wires workspace git, gh, legacy, hydration and restore credentials to the creator while Computer builds keep automation credentials", async () => {
-  github.workerIdentity.mockImplementation(async workspace => ({ repositoryBinding: await github.binding(),
-    gitIdentity: await github.connections.gitIdentity({ organizationId: workspace.organizationId, userId: workspace.creatorUserId }) }));
+  github.workerConfiguration.mockImplementation(async workspace => ({ repositoryBinding: await github.binding(), loginRevision: "0",
+    gitIdentity: async () => {
+      await github.authorizeSource();
+      return github.connections.gitIdentity({ organizationId: workspace.organizationId, userId: workspace.creatorUserId });
+    } }));
   const config = {
     github: null, deploymentChannel: "alpha", cloudAgentCredentials: { settingsSecretKeyV1: Buffer.alloc(32, 1).toString("base64url") },
     cloudV2: { boat: { apiKey: "synthetic-boat-credential" }, apiUrl: "https://api.example.test", realtimeUrl: "https://rt.example.test",
@@ -84,7 +89,7 @@ it("wires workspace git, gh, legacy, hydration and restore credentials to the cr
   await outcome;
 });
 
-it("passes the relay room's proof to both source continuation checks while configuring", async () => {
+it("passes the relay room's proof into configuration authority after entry continuation", async () => {
   const config = {
     github: null, deploymentChannel: "alpha", cloudAgentCredentials: { settingsSecretKeyV1: Buffer.alloc(32, 1).toString("base64url") },
     cloudV2: { boat: { apiKey: "synthetic-boat-credential" }, apiUrl: "https://api.example.test", realtimeUrl: "https://rt.example.test",
@@ -95,15 +100,17 @@ it("passes the relay room's proof to both source continuation checks while confi
   vi.spyOn(assembled.routes.environments!, "resolve").mockResolvedValue(undefined);
   vi.spyOn(assembled.store, "baseCommit").mockResolvedValue(null);
   vi.spyOn(assembled.store, "loginRevision").mockResolvedValue("5");
-  github.workerIdentity.mockResolvedValue({ repositoryBinding: { repository: "owner/project" }, gitIdentity: null });
+  github.workerConfiguration.mockResolvedValue({ repositoryBinding: { repository: "owner/project" }, loginRevision: "5", gitIdentity: async () => null });
   const workspace = { id: randomUUID(), organizationId: randomUUID(), creatorUserId: randomUUID(), state: "running", repository: "owner/project", branch: "topic", baseBranch: "main" } as CloudV2Workspace;
   const relay = assembled.connections as unknown as { deps: CloudV2RelayDeps };
   const proof = { accessEpoch: "3", loginRevision: "5" };
   github.continueSource.mockClear();
   await relay.deps.config(workspace, "continuation", proof);
-  expect(github.continueSource.mock.calls).toEqual([[workspace, proof], [workspace, proof]]);
+  expect(github.continueSource.mock.calls).toEqual([[workspace, proof]]);
+  expect(github.workerConfiguration).toHaveBeenLastCalledWith(workspace, "continuation", proof);
   github.continueSource.mockClear();
   await relay.deps.config(workspace, "continuation");
-  expect(github.continueSource.mock.calls).toEqual([[workspace, undefined], [workspace, undefined]]);
+  expect(github.continueSource.mock.calls).toEqual([[workspace, undefined]]);
+  expect(github.workerConfiguration).toHaveBeenLastCalledWith(workspace, "continuation", undefined);
   assembled.connections?.close();
 });

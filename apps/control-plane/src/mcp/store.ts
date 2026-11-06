@@ -224,13 +224,13 @@ export class McpStore {
       return { input, ...next, binding };
     });
   }
-  async resolve(organizationId: string, userId: string, repository: string, admittedWorkspace?: CloudMcpRepositoryTarget): Promise<RuntimeMcpServer[]> {
-    await this.requireMember(organizationId, userId);
+  async resolve(organizationId: string, userId: string, repository: string, admittedWorkspace?: CloudMcpRepositoryTarget, transaction?: Tx): Promise<RuntimeMcpServer[]> {
+    if (!transaction) await this.requireMember(organizationId, userId);
     repository = McpRepositorySchema.parse(repository);
     // A cloud caller supplies its admitted workspace's immutable source ID.
     // Name-only legacy definitions remain available to Local, but cannot prove
     // cloud provenance; saving them with verified access records their identity.
-    return withSystemTx(this.pool, async tx => {
+    const read = async (tx: Tx) => {
       await this.member(tx, organizationId, userId);
       const admitted = admittedWorkspace ?? await this.requireRepository(organizationId, userId, repository, tx);
       const repositoryId = admitted.repositoryId ? McpRepositoryIdSchema.parse(admitted.repositoryId) : null;
@@ -245,7 +245,8 @@ export class McpStore {
       // only this selection view so renamed repositories retain override order.
       return selectMcpEntries(rows.map(row => ({ ...row, ownerUserId: row.owner_user_id,
         repository: row.repository === null ? null : repository })), userId, repository).map(row => this.runtime(row));
-    });
+    };
+    return transaction ? read(transaction) : withSystemTx(this.pool, read);
   }
   runtime(row: McpRow): RuntimeMcpServer {
     const config = materializeMcp(McpConfigSchema.parse(row.config), this.secrets(row));

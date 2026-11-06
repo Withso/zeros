@@ -2,7 +2,7 @@
 // Settings → Agents. Storage, encryption and consent are the existing vault's;
 // cloud v2 only opens the selected, current, unrevoked version.
 import type pg from "pg";
-import { withSystemTx } from "../db.js";
+import { withSystemTx, type Tx } from "../db.js";
 import { DatabaseCodexAuthRenewal, type CodexCredentialVersion } from "../agent-credentials/codex-auth-renewal.js";
 import {
   openCloudAgentCredential,
@@ -27,8 +27,8 @@ const KINDS: Record<CloudV2AgentProvider, readonly CloudAgentCredentialKind[]> =
 };
 
 export function createCloudV2AgentLogins(pool: pg.Pool, keys: CloudAgentCredentialKeys) {
-  const read = async (ownerUserId: string, organizationId: string, providers: CloudV2AgentProvider[]) => {
-    const { rows } = await withSystemTx(pool, tx => tx.query<Row>(
+  const read = async (ownerUserId: string, organizationId: string, providers: CloudV2AgentProvider[], transaction?: Tx) => {
+    const query = (tx: Tx) => tx.query<Row>(
       `SELECT connection.provider, credential.id, credential.owner_user_id, credential.kind, credential.current_version,
               material.key_version, material.nonce, material.ciphertext, material.auth_tag
        FROM cloud_agent_organization_connections connection
@@ -39,7 +39,8 @@ export function createCloudV2AgentLogins(pool: pg.Pool, keys: CloudAgentCredenti
        WHERE connection.org_id = $1 AND connection.owner_user_id = $2 AND connection.provider = ANY($3::text[])
          AND coalesce(material.material_mode, 'local') = 'local'`,
       [organizationId, ownerUserId, providers],
-    ));
+    );
+    const { rows } = await (transaction ? query(transaction) : withSystemTx(pool, query));
     const selected: Record<CloudV2AgentProvider, CloudAgentCredentialMaterial | null> = { codex: null, claude: null, cursor: null };
     for (const row of rows) if (KINDS[row.provider].includes(row.kind)) selected[row.provider] = openCloudAgentCredential(
         { nonce: row.nonce, ciphertext: row.ciphertext, authTag: row.auth_tag },
@@ -49,7 +50,7 @@ export function createCloudV2AgentLogins(pool: pg.Pool, keys: CloudAgentCredenti
     return selected;
   };
   const login: CloudV2AgentLogins = async (ownerUserId, organizationId, provider) => (await read(ownerUserId, organizationId, [provider]))[provider];
-  return Object.assign(login, { all: (ownerUserId: string, organizationId: string) => read(ownerUserId, organizationId, ["codex", "claude", "cursor"]) });
+  return Object.assign(login, { all: (ownerUserId: string, organizationId: string, tx?: Tx) => read(ownerUserId, organizationId, ["codex", "claude", "cursor"], tx) });
 }
 
 /** Renews the ChatGPT login the creator selected, with the vault's fenced,
