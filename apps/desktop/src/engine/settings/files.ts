@@ -211,9 +211,9 @@ function serializeSettings(
       const patched = tomlPatch(existingText, ordered);
       // toml-patch can return syntactically invalid TOML WITHOUT throwing; round-
       // trip it so a bad patch falls through to the full rewrite, never to disk.
-      // It can also return VALID but semantically incomplete TOML (notably when
-      // replacing an array-of-tables with `[]`), so syntax alone is insufficient:
-      // require the parsed result to equal the document we asked it to write.
+      // It can also return VALID but semantically incomplete TOML, so syntax
+      // alone is insufficient: require the parsed result to equal the document
+      // we asked it to write.
       const parsed = parseToml(patched);
       if (!settingsValuesEqual(parsed, ordered)) {
         throw new Error("TOML patch did not preserve the requested document");
@@ -236,8 +236,9 @@ function serializeSettings(
  * the file's comments (never its data: the fallback is a full rewrite). The two
  * that occur: smol-toml returns datetimes as a `Date` subclass (`TomlDate`), and
  * `-0` re-parses as `0` after being written `-0.0`, so numbers compare with `===`
- * rather than `Object.is`. Integers beyond `Number.MAX_SAFE_INTEGER` never reach
- * here — toml-patch itself refuses to serialize them and we take the rewrite. */
+ * rather than `Object.is`. Whole numbers beyond `Number.MAX_SAFE_INTEGER` come
+ * back as the same float: toml-patch writes them with a decimal point, so no
+ * BigInt reaches here. */
 function settingsValuesEqual(left: unknown, right: unknown): boolean {
   if (Object.is(left, right)) return true;
   if (typeof left === "number" && typeof right === "number") {

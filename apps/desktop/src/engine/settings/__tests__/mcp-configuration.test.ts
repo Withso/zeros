@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -69,6 +69,33 @@ describe("MCP edits of servers saved in settings.toml", () => {
     const [remote, files] = read();
     opSettingsWrite("user", { mcp: { servers: [remote, { ...files, command: "other" }] } });
     await expect(save(files, { ...files, args: [] })).rejects.toThrow(/changed while you were editing/);
+  });
+});
+
+describe("MCP adds and removes in settings.toml", () => {
+  let directory: string;
+  const file = () => path.join(directory, "settings.toml");
+  beforeEach(() => {
+    directory = mkdtempSync(path.join(tmpdir(), "zeros-mcp-tidy-"));
+    vi.stubEnv("ZEROS_USER_SETTINGS_DIR", directory);
+    writeFileSync(file(), "# my settings\npreferences_version = 1\n");
+  });
+  afterEach(() => { vi.unstubAllEnvs(); rmSync(directory, { recursive: true, force: true }); });
+  const servers = () => (JSON.parse(JSON.stringify(opSettingsRead("user").doc)) as { mcp: { servers: Record<string, unknown>[] } }).mcp.servers;
+  const add = (server: Record<string, unknown>) => opMcpSaveServer(mcpSaveInputSchema.parse({ layer: "user", previous: null, server }));
+  const remove = (previous: Record<string, unknown>) => opMcpDeleteServer(mcpDeleteInputSchema.parse({ layer: "user", previous }));
+
+  it("keeps settings.toml the same size across add and remove cycles", async () => {
+    const sizes: number[] = [];
+    for (let cycle = 0; cycle < 3; cycle++) {
+      for (const name of ["one", "two", "three"]) await add({ name, transport: "http", url: `https://${name}.example.test/mcp` });
+      for (const server of servers()) await remove(server);
+      sizes.push(readFileSync(file(), "utf8").length);
+    }
+    const text = readFileSync(file(), "utf8");
+    expect(text).toMatch(/^servers = \[\]$/m);
+    expect(text).toContain("# my settings");
+    expect(new Set(sizes).size).toBe(1);
   });
 });
 

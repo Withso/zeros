@@ -381,15 +381,12 @@ describe("updateSettingsFile", () => {
     ).toEqual(replaced);
   });
 
-  it("recovers when toml-patch silently emits invalid TOML for an inline servers array", () => {
+  it("reshapes a hand-written inline servers array in place, keeping comments", () => {
     const file = path.join(dir, "settings.toml");
     // A hand-written / imported file with a single-line INLINE array-of-tables.
-    // Reshaping the entry's key set makes @decimalturn/toml-patch drop the closing
-    // brace WITHOUT throwing — the serializer must round-trip + fall back, not write
-    // corrupt TOML that wedges every later write with "refusing to overwrite malformed".
     writeFileSync(
       file,
-      '[mcp]\nservers = [{name="a",transport="stdio",command="x"}]\n',
+      '# keep me\n[mcp]\nservers = [{name="a",transport="stdio",command="x"}]\n',
       "utf8",
     );
     const replaced = [{ name: "b", transport: "http", url: "https://y" }];
@@ -401,6 +398,7 @@ describe("updateSettingsFile", () => {
     const read = readSettingsFile(file);
     expect(read.error).toBeUndefined();
     expect((read.doc.mcp as { servers: unknown[] }).servers).toEqual(replaced);
+    expect(read.text).toContain("# keep me");
   });
 
   it("preserves comments + sibling keys when adding mcp.servers to an existing file", () => {
