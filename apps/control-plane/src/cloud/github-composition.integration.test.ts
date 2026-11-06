@@ -18,7 +18,7 @@ import { CloudV2Computers } from "./computer.js";
 import { PostgresGithubVerificationStore } from "./github-verification-store.js";
 import { Hono } from "hono";
 import { createCloudV2Routes } from "./routes.js";
-import { observeTransactionTiming } from "../request-timing.js";
+import { observeTransactionTiming, requestTiming, type RequestDatabaseCost } from "../request-timing.js";
 
 const database = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 database("cloud GitHub composition", () => {
@@ -203,6 +203,43 @@ database("cloud GitHub composition", () => {
     }
     console.info("Worker credential service cost", samples);
     expect(samples, JSON.stringify(samples)).toSatisfy(rows => rows.every((row: typeof samples[number]) => row.transactions <= 8 && row.githubCalls <= 2));
+  });
+
+  it("bounds warm workspace catalog reads independently of same-owner row count", async () => {
+    created = true;
+    const fixtures = await Promise.all([fixture(), fixture(), fixture()]);
+    for (const { workspace } of fixtures)
+      await services.service.execute(workspace.id, userId, { op: "gh.prSync", params: {} });
+    const app = new Hono(), costs: RequestDatabaseCost[] = [];
+    app.use("*", requestTiming({ slowMs: Infinity, databasePool: pool, costObserver: cost => { costs.push(cost); } }));
+    app.use("*", async (c, next) => { c.set("user", { id: userId } as never); await next(); });
+    app.route("/", createCloudV2Routes({ store: workspaces, computers: new CloudV2Computers(pool),
+      installedRepositories: async () => null, remoteHead: async () => head,
+      bridgeBaseUrl: "wss://bridge.example.test", github: services }));
+    const list = `/v1/cloud-v2/workspaces?organizationId=${organizationId}`;
+    expect((await app.request(list)).status).toBe(200);
+    const samples: Array<{ kind: string; transactions: number; queries: number; githubCalls: number }> = [];
+    const measure = async (kind: string, path: string) => {
+      fetcher.mockClear();
+      const response = await observeTransactionTiming(() => app.request(path),
+        summary => samples.push({ kind, transactions: summary.transactions, queries: costs.at(-1)!.queriesStarted, githubCalls: fetcher.mock.calls.length }));
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      const rows = body.workspaces ?? [body.workspace];
+      expect(rows).toHaveLength(path === list ? 3 : 1);
+      for (const row of rows) {
+        expect(row).toMatchObject({ github: { prNumber: 7 } });
+        expect(row).not.toHaveProperty("accessEpoch");
+        expect(row).not.toHaveProperty("loginRevision");
+        expect(row).not.toHaveProperty("proof");
+      }
+    };
+    await measure("running-get", `/v1/cloud-v2/workspaces/${fixtures[0]!.workspace.id}`);
+    await measure("running-list", list);
+    for (const { workspace } of fixtures) await workspaces.transition(workspace.id, ["running"], "stopped");
+    await measure("stopped-list", list);
+    console.info("Workspace catalog cost", samples);
+    expect(samples, JSON.stringify(samples)).toSatisfy(rows => rows.every((row: typeof samples[number]) => row.transactions <= 6 && row.queries <= 18 && row.githubCalls === 0));
   });
 
   it("binds the first PR snapshot when the original repository name has not moved", async () => {
@@ -552,6 +589,87 @@ database("cloud GitHub composition", () => {
     expect((await services.documents([workspace]))[0]).not.toHaveProperty(
       "github",
     );
+  });
+  it.each(["membership", "login", "access", "state", "sources"] as const)(
+    "withdraws catalog metadata when %s changes during its read", async change => {
+      const f = await fixture();
+      created = true;
+      await services.service.execute(f.workspace.id, userId, { op: "gh.prSync", params: {} });
+      const workspace = await workspaces.get(f.workspace.id, userId);
+      const original = services.metadata.documents.bind(services.metadata);
+      vi.spyOn(services.metadata, "documents").mockImplementationOnce(async (...args) => {
+        const result = await original(...args);
+        if (change === "membership") await pool.query("DELETE FROM organization_members WHERE org_id=$1 AND user_id=$2", [organizationId, userId]);
+        else if (change === "login") await pool.query("UPDATE cloud_v2_workspaces SET login_revision=login_revision+1 WHERE id=$1", [workspace.id]);
+        else if (change === "access") await pool.query("UPDATE cloud_v2_workspaces SET access_epoch=access_epoch+1 WHERE id=$1", [workspace.id]);
+        else if (change === "state") await workspaces.transition(workspace.id, ["running"], "stopped");
+        else await pool.query("DELETE FROM cloud_v2_github_sources WHERE workspace_id=$1", [workspace.id]);
+        return result;
+      });
+      const [document] = await services.documents([workspace]);
+      expect(document).not.toHaveProperty("github");
+      expect(document).toHaveProperty("githubUnavailableReason");
+      expect(document?.repository).toBe(workspace.repository);
+      expect(Date.parse(document!.updatedAt)).toBeGreaterThanOrEqual(Date.parse(workspace.updatedAt));
+    },
+  );
+  it("withdraws a catalog row when a secondary source is denied during the metadata read", async () => {
+    const id = randomUUID();
+    // Historical workspaces retain every source from their original snapshot.
+    await pool.query(`INSERT INTO cloud_v2_workspaces(id,org_id,creator_user_id,name,repository,branch,base_branch,state,source_repositories)
+      VALUES($1,$2,$3,'Historical workspace','former/project','topic','main','creating',$4)`,
+      [id, organizationId, userId, ["former/project", "secondary/project"]]);
+    await pool.query(`INSERT INTO cloud_v2_github_sources(workspace_id,source_repository,repository_id)
+      VALUES($1,'former/project',42),($1,'secondary/project',43)`, [id]);
+    const token = await workspaces.rotateWorkerToken(id), boot = randomUUID();
+    await workspaces.acceptWorkerHello(token, boot);
+    await services.metadata.checkout(token, boot, { sequence: 1, branch: "topic", baseBranch: "main", headSha: head });
+    fetcher.mockImplementation(async (value, init) => new URL(String(value)).pathname === "/repositories/43"
+      ? Response.json({ ...repo(), id: 43, owner: { login: "secondary" } }) : defaultFetch(value, init));
+    created = true;
+    await services.service.execute(id, userId, { op: "gh.prSync", params: {} });
+    const workspace = await workspaces.get(id, userId);
+    const original = services.metadata.documents.bind(services.metadata);
+    vi.spyOn(services.metadata, "documents").mockImplementationOnce(async (...args) => {
+      const result = await original(...args);
+      await pool.query(`UPDATE cloud_github_source_verifications SET verified_at=NULL,failure_code='github_cloud_access_denied',
+        failure_status=403,retry_at=clock_timestamp()+interval '1 minute' WHERE org_id=$1 AND owner_user_id=$2 AND repository_id=43`, [organizationId, userId]);
+      return result;
+    });
+    const [document] = await services.documents([workspace]);
+    expect(document).not.toHaveProperty("github");
+    expect(document?.githubUnavailableReason).toBe("access-denied");
+  });
+  it("keeps stopped catalog admission fresh instead of borrowing a running continuation", async () => {
+    const f = await fixture();
+    await services.service.execute(f.workspace.id, userId, { op: "gh.prSync", params: {} });
+    const running = await workspaces.get(f.workspace.id, userId);
+    await services.documents([running]);
+    await pool.query("UPDATE cloud_github_source_verifications SET verified_at=clock_timestamp()-interval '31 seconds' WHERE org_id=$1", [organizationId]);
+    await workspaces.transition(running.id, ["running"], "stopped");
+    fetcher.mockImplementation(async () => new Response(null, { status: 503 }));
+    const [document] = await services.documents([await workspaces.get(running.id, userId)]);
+    expect(fetcher).toHaveBeenCalled();
+    expect(document).not.toHaveProperty("github");
+    expect(document?.githubUnavailableReason).toBe("unavailable");
+    expect((await workspaces.get(running.id, userId)).state).toBe("stopped");
+  });
+  it("never shares a catalog fingerprint or proof across organizations", async () => {
+    const first = await fixture(), firstOrg = organizationId;
+    created = true;
+    await services.service.execute(first.workspace.id, userId, { op: "gh.prSync", params: {} });
+    organizationId = randomUUID();
+    await pool.query("INSERT INTO organizations(id,slug,name,created_by,is_personal,cloud_workspaces_allowed) VALUES($1,$2,'Other',$3,false,true)",
+      [organizationId, `org-${organizationId}`, userId]);
+    await pool.query("INSERT INTO organization_members(org_id,user_id,role) VALUES($1,$2,'owner')", [organizationId, userId]);
+    const second = await fixture();
+    const rows = await Promise.all([first, second].map(f => workspaces.get(f.workspace.id, userId)));
+    for (const ordered of [rows, [...rows].reverse(), rows]) {
+      const documents = await services.documents(ordered);
+      expect(documents.find(row => row.organizationId === firstOrg)).toMatchObject({ github: { prNumber: 7 } });
+      expect(documents.find(row => row.organizationId === organizationId)).not.toHaveProperty("github");
+      expect(documents.find(row => row.organizationId === organizationId)?.githubUnavailableReason).toBe("connection-required");
+    }
   });
   it("keeps catalog versions monotonic when authorization withdraws newer PR metadata", async () => {
     const { workspace } = await fixture();

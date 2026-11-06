@@ -13,15 +13,13 @@ import { CloudGithubPrService } from "./github-pr-service.js";
 import { CloudGithubActions } from "./github-actions.js";
 import { createSelectedCloudGithubTokens } from "./github-selected-tokens.js";
 import type { CloudV2Store, CloudV2Workspace } from "./store.js";
-import type { CloudGithubWorkspaceDocument } from "./routes.js";
-import type { CloudGithubUnavailableReason } from "./github-connection-contract.js";
 import type { CloudV2ComputerSourceResolver } from "./computer-provenance.js";
 import type { CloudV2Computers } from "./computer.js";
 import { z } from "zod";
-import { cloudGithubUnavailableReason as unavailableReason } from "./github-failure.js";
 import { setupSelectionUnavailable, workspaceSetupBuild } from "./setup-selection.js";
 import { withSystemTx } from "../db.js";
 import { cloudGithubRequestContext } from "./github-request-context.js";
+import { createCloudGithubCatalog } from "./github-catalog.js";
 
 export function createCloudGithubServices(
   pool: pg.Pool,
@@ -170,59 +168,8 @@ export function createCloudGithubServices(
       return actions.run(id, action);
     },
   });
-  const documents = async (
-    rows: readonly CloudV2Workspace[],
-  ): Promise<CloudGithubWorkspaceDocument[]> => {
-    // Metadata is safe to retain for its owner. Published PR state/capabilities
-    // are released only after the entire original source scope is authorized.
-    const allowed = new Map<string, string>();
-    const unavailable = new Map<string, CloudGithubUnavailableReason>();
-    await Promise.all(
-      rows.map(async (row) => {
-        const scope = {
-          organizationId: row.organizationId,
-          userId: row.creatorUserId,
-        };
-        try {
-          const generation = await connections.fingerprintFor(scope);
-          if (row.state === "running") await continueSource(row);
-          else await authorizeSource(row);
-          await connections.store.assertCurrent(scope, generation);
-          allowed.set(row.id, generation);
-        } catch (error) {
-          unavailable.set(row.id, unavailableReason(error));
-        }
-      }),
-    );
-    const enriched = new Map(
-      (await metadata.documents(rows, allowed)).map((row) => [row.id, row]),
-    );
-    return Promise.all(
-      rows.map(async (row) => {
-        const generation = allowed.get(row.id);
-        if (generation)
-          try {
-            await connections.store.assertCurrent(
-              { organizationId: row.organizationId, userId: row.creatorUserId },
-              generation,
-            );
-            return enriched.get(row.id) ?? row;
-          } catch (error) {
-            unavailable.set(row.id, unavailableReason(error));
-          }
-        // Keep recovery controls visible, but never publish upstream text or
-        // protected PR metadata when source or connection authority is absent.
-        // Withdrawing access must not roll the catalog's version back to the
-        // older lifecycle timestamp: clients would correctly reject it as stale
-        // and retain the protected PR view. Only the timestamp survives here.
-        return {
-          ...row,
-          updatedAt: enriched.get(row.id)?.updatedAt ?? row.updatedAt,
-          githubUnavailableReason: unavailable.get(row.id) ?? "unavailable",
-        };
-      }),
-    );
-  };
+  const documents = createCloudGithubCatalog({ pool, connections: connections.store, metadata, verifications,
+    authorizeSource, continueSource, retireRevoked });
   const binding = async (workspace: CloudV2Workspace, mode: "admission" | "continuation" = "admission", pending?: ReturnType<CloudGithubConnections["access"]>) => {
     const target = await identities.primary(workspace);
     if (mode === "continuation") {
