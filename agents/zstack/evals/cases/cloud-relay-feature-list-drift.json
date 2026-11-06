@@ -1,0 +1,9 @@
+{
+  "id": "cloud-relay-feature-list-drift",
+  "kind": "replay",
+  "area": "cloud-worker",
+  "fixedBy": "pr:878",
+  "symptom": "After every relay dial, a cloud worker reconfigured with the GitHub repository binding and pull-request flag removed. The relay's inbound dial advertised a feature list without github-pr-v1, while the HTTP hello advertised it. Renamed or transferred repositories could then fail PR creation with GITHUB_REMOTE_CHANGED, depending on which path delivered the last configuration.",
+  "rule": "zstack-review compatibility: a capability advertised on more than one channel must come from one definition, and a test must pin what the control plane sees on each channel. Use the worker's changed-path journal line (cloud-worker reconfigure ...) to catch configurations that differ by delivery path.",
+  "check": "pnpm --dir apps/cloud-worker exec vitest run src/__tests__/inbound-bridge.test.ts"
+}

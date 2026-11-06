@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { CLOUD_WORKER_FEATURES } from "./worker-features";
 import { CLOUD_V2_MAX_FRAME_BYTES, CLOUD_V2_RELAY_PROTOCOL, CloudV2ControlFrameSchema, CloudV2WorkerActivityReplySchema,
   CloudV2WorkerFrameSchema, CloudV2WorkerTimingSchema, type CloudV2WorkerTiming, type CloudV2ControlFrame, type CloudV2WorkerFrame } from "@zeros/protocol/cloud-v2-relay";
 import { InboundBridge } from "./inbound-bridge";
@@ -321,7 +322,7 @@ export class HybridTransport implements Transport {
         method: payload === undefined ? "GET" : "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", "X-Zeros-Worker-Boot": this.bootId,
           // An HTTP header is ignored by older control planes; adding a JSON
           // field would break their strict hello schema before configuration.
-          "X-Zeros-Worker-Features": "prompt-outbox-v1,mcp-v1,workspace-setup-v1,checkout-v2,agent-interactions-v1,github-pr-v1,git-identity-v1,github-user-token-v1,code-review-v1,history-replace-v1,workspace-environment-v1,repository-setup-v1,runtime-update-v1",
+          "X-Zeros-Worker-Features": CLOUD_WORKER_FEATURES,
           ...(this.options.runtimeHandoff ? { "X-Zeros-Runtime-Handoff": this.options.runtimeHandoff.id } : {}) },
         ...(payload === undefined ? {} : { body: payload }), redirect: "error", signal: controller.signal,
       });
