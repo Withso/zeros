@@ -844,6 +844,23 @@ describe("WorkspaceService", () => {
     expect(fs.readFileSync(path.join(dir, "ordinary/design.toml"), "utf8")).toBe('name = "ordinary"\n');
   });
 
+  it("file.write replaces a file only while it holds the expected text", async () => {
+    const { upsertRepoByRoot } = await import("../../db/projects");
+    upsertRepoByRoot({ repoRoot: dir, repoSlug: "expected-content" });
+    fs.writeFileSync(path.join(dir, "conflict.txt"), "shown\n");
+    await expect(svc.handle("file.write", {
+      workspaceId: dir, path: "conflict.txt", content: "accepted\n", expectedContent: "shown\n",
+    })).resolves.toMatchObject({ kind: "success" });
+    fs.writeFileSync(path.join(dir, "conflict.txt"), "edited elsewhere\n");
+    await expect(svc.handle("file.write", {
+      workspaceId: dir, path: "conflict.txt", content: "stale\n", expectedContent: "accepted\n",
+    })).resolves.toMatchObject({ kind: "error", error: expect.stringContaining("The file changed") });
+    expect(fs.readFileSync(path.join(dir, "conflict.txt"), "utf8")).toBe("edited elsewhere\n");
+    await expect(svc.handle("file.write", {
+      workspaceId: dir, path: "conflict.txt", content: "x", expectedContent: 1,
+    })).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+  });
+
   it("file.write writes a registered repo ROOT file for LOCAL; remote raw-path + non-strings rejected", async () => {
     const { upsertRepoByRoot } = await import("../../db/projects");
     const repoC = fs.mkdtempSync(path.join(os.tmpdir(), "zeros-write-op-"));

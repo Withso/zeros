@@ -74,7 +74,7 @@ describe.each([
   it("writes when the read made after the click still matches the card", async () => {
     readFile.mockResolvedValue(text(shown));
     await acceptCardConflict(cwd, path, shown, 0, "incoming");
-    expect(mocks.write).toHaveBeenCalledWith(cwd, path, "top\ntheirs\n");
+    expect(mocks.write).toHaveBeenCalledWith(cwd, path, "top\ntheirs\n", { expectedContent: shown });
     expect(mocks.refresh).toHaveBeenCalledWith(cwd);
   });
 

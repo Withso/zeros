@@ -4311,6 +4311,13 @@ export class WorkspaceService {
             message: "file.write requires string content",
           });
         }
+        const expectedContent = params.expectedContent;
+        if (expectedContent !== undefined && typeof expectedContent !== "string") {
+          throw new GitError({
+            code: "VALIDATION_FAILED",
+            message: "file.write expectedContent must be text",
+          });
+        }
         const writePaths = [rel];
         for (const candidate of writePaths.filter(candidate => normalizeRepoMutationPath(candidate)?.endsWith("/design.toml"))) {
           let claimsDesign: boolean;
@@ -4349,8 +4356,11 @@ export class WorkspaceService {
         // writeWorkspaceFile re-checks the RESOLVED + realpath target (lexical
         // containment + symlink-escape + secret denylist) — the SAME boundary as
         // file.read — and writes atomically (tmp + rename) so a crash can't
-        // truncate the file.
-        return writeWorkspaceFile(cwd, rel, content, { remote });
+        // truncate the file. Expected text makes it refuse a file that changed.
+        return writeWorkspaceFile(cwd, rel, content, {
+          remote,
+          ...(expectedContent !== undefined ? { expectedContent } : {}),
+        });
       }
       case "attachment.write": {
         const cwd = this.resolveReadCwd(reqStr(params, "workspaceId"), remote);

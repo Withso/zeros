@@ -16,6 +16,21 @@ it("reads and atomically writes native or relative paths with Local's result sha
   expect(await files.handle("file.read", { path: "new/nested.txt" })).toMatchObject({ content: "created" });
 });
 
+it("writes over a file only while it still holds the text the client expects", async () => {
+  const { scope, root } = await repositoryFixture();
+  const files = new FileService(scope);
+  expect(await files.handle("file.write", { path: "readme.txt", content: "accepted\n", expectedContent: "initial\n" }))
+    .toEqual({ kind: "success", path: "readme.txt", bytes: 9 });
+  await writeFile(join(root, "readme.txt"), "someone else\n");
+  expect(await files.handle("file.write", { path: "readme.txt", content: "stale accept\n", expectedContent: "accepted\n" }))
+    .toEqual({ kind: "error", path: "readme.txt", bytes: 0, error: "The file changed. Refresh it before saving; your draft is still available." });
+  expect(await readFile(join(root, "readme.txt"), "utf8")).toBe("someone else\n");
+  expect(await files.handle("file.write", { path: "missing.txt", content: "new", expectedContent: "old" }))
+    .toMatchObject({ kind: "error", error: "The file changed. Refresh it before saving; your draft is still available." });
+  await expect(files.handle("file.write", { path: "readme.txt", content: "x", expectedContent: 7 }))
+    .rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+});
+
 it("rejects foreign identities, traversal and symlinks escaping the checkout", async () => {
   const { scope, root, directory } = await repositoryFixture();
   const files = new FileService(scope);

@@ -37,6 +37,7 @@ describe("accepting a conflict from a Changes card", () => {
       cwd,
       path,
       "top\n<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> topic\nmid\nx\ny\n",
+      { expectedContent: shown },
     );
     expect(mocks.activity).toHaveBeenCalledWith(cwd);
     expect(mocks.refresh).toHaveBeenCalledWith(cwd);
@@ -57,6 +58,23 @@ describe("accepting a conflict from a Changes card", () => {
       description: "Design paths are read-only here",
     });
     expect(mocks.refresh).not.toHaveBeenCalled();
+  });
+
+  it("refreshes when the write meets a file that changed after the read", async () => {
+    mocks.read
+      .mockResolvedValueOnce({ kind: "text", path, content: shown, bytes: shown.length })
+      .mockResolvedValueOnce({ kind: "text", path, content: `${shown}// agent edit\n`, bytes: 1 });
+    mocks.write.mockResolvedValue({
+      kind: "error",
+      path,
+      bytes: 0,
+      error: "The file changed. Refresh it before saving; your draft is still available.",
+    });
+    await acceptCardConflict(cwd, path, shown, 0, "incoming");
+    expect(mocks.write).toHaveBeenCalledWith(cwd, path, expect.any(String), { expectedContent: shown });
+    expect(mocks.info).toHaveBeenCalledWith("src/a.ts changed, so its conflicts were refreshed.");
+    expect(mocks.error).not.toHaveBeenCalled();
+    expect(mocks.refresh).toHaveBeenCalledWith(cwd);
   });
 
   it("does nothing for a block that is no longer there", async () => {

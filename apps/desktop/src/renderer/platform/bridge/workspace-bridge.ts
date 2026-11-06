@@ -996,11 +996,15 @@ export async function bridgeFileWrite(
   workspaceId: string,
   path: string,
   content: string,
+  /** Replace the file only while it holds exactly this text. An older cloud
+   *  worker ignores it and writes as before. */
+  expectedContent?: string,
 ): Promise<WriteFileResult> {
   return (await workspaceOp(bridge, "file.write", {
     workspaceId,
     path,
     content,
+    ...(expectedContent !== undefined ? { expectedContent } : {}),
   })) as WriteFileResult;
 }
 
