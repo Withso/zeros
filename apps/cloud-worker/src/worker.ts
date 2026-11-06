@@ -57,6 +57,8 @@ interface WorkerOptions {
   workspaceServices?: WorkspaceServiceOptions;
   onError?: (code: "configuration" | "storage" | "transport") => void;
   onTiming?: TimingObserver;
+  /** Closed configuration paths only; never values or user-defined keys. */
+  onReconfigure?: (changed: readonly string[]) => void;
   modelDiscovery?: ModelDiscoveryOptions;
 }
 interface Client extends AppClient { rejected: boolean }
@@ -64,12 +66,20 @@ interface Client extends AppClient { rejected: boolean }
 const stableJson = (value: unknown): string => Array.isArray(value) ? `[${value.map(stableJson).join(",")}]`
   : value && typeof value === "object" ? `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${stableJson((value as Record<string, unknown>)[key])}`).join(",")}}`
   : JSON.stringify(value) ?? "null";
-/** The control plane mints a new Codex proxy token for every configuration it
- * builds, so the relay's copy of the hello configuration differs only there. */
-function configurationIdentity(config: WorkerConfig): string {
-  const { agents: { codex, ...agents }, ...rest } = config;
-  return createHash("sha256").update(stableJson({ ...rest, agents: { ...agents, ...(codex ? { codex: { baseUrl: codex.baseUrl } } : {}) } })).digest("hex");
+/** Digests per closed schema path. The control plane mints a new Codex proxy
+ * token for every configuration it builds, so that token is not compared. */
+function configurationSections(config: WorkerConfig): Map<string, string> {
+  const { agents: { codex, ...agents }, workspace, ...rest } = config;
+  const digest = (value: unknown) => createHash("sha256").update(stableJson(value)).digest("hex");
+  const sections = new Map<string, string>();
+  for (const [key, value] of Object.entries(rest)) sections.set(key, digest(value));
+  for (const [key, value] of Object.entries(workspace)) sections.set(`workspace.${key}`, digest(value));
+  for (const [key, value] of Object.entries(agents)) sections.set(`agents.${key}`, digest(value));
+  if (codex) sections.set("agents.codex", digest({ baseUrl: codex.baseUrl }));
+  return sections;
 }
+const changedSections = (previous: Map<string, string>, next: Map<string, string>): string[] =>
+  [...new Set([...previous.keys(), ...next.keys()])].filter(key => previous.get(key) !== next.get(key)).sort();
 
 /** One VM, one checkout, many app sockets. The relay is a carrier for ordinary
  * bridge frames; this process owns validation, agent work and durable history. */
@@ -104,7 +114,7 @@ export class CloudWorker {
   private readonly github: GithubBroker;
   private readonly gitEnvironment: NodeJS.ProcessEnv;
   private configuring: Promise<void> = Promise.resolve();
-  private appliedConfiguration?: string;
+  private appliedSections?: Map<string, string>;
   private disconnects = 0;
   private online = false;
   private disposed = false;
@@ -143,7 +153,7 @@ export class CloudWorker {
       },
       frame: (raw) => this.receive(raw),
       close: () => {
-        this.online = false; this.appliedConfiguration = undefined; this.disconnects++;
+        this.online = false; this.appliedSections = undefined; this.disconnects++;
         for (const client of this.clients.values()) this.terminals?.detach(client);
         this.clients.clear(); this.history?.disconnect(); this.tokens.disconnect(); this.githubCredentials.disconnect();
       },
@@ -310,10 +320,13 @@ export class CloudWorker {
     const timing = this.options.transport.reportTiming?.bind(this.options.transport);
     const revision = BigInt(config.loginRevision);
     if (this.acceptedConfigurationRevision !== undefined && revision < this.acceptedConfigurationRevision) return;
-    const identity = configurationIdentity(config), disconnects = this.disconnects;
+    const sections = configurationSections(config), disconnects = this.disconnects;
+    // Only a configuration applied in full on this connection is a baseline.
+    const changed = this.scope && !this.stopping && this.appliedSections ? changedSections(this.appliedSections, sections) : undefined;
     // Repeating checkout, MCP and review setup would hold every waiting open.
-    if (this.scope && !this.stopping && identity === this.appliedConfiguration) { this.agents!.configure(config); return; }
-    this.appliedConfiguration = undefined;
+    if (changed?.length === 0) { this.agents!.configure(config); return; }
+    if (changed) this.options.onReconfigure?.(changed);
+    this.appliedSections = undefined;
     this.githubUserTokensEnabled = config.githubUserTokens === 1;
     if (this.options.workspaceId && config.workspace.id !== this.options.workspaceId) throw new Error("Workspace identity changed.");
     const scope = new WorkspaceScope(config.workspace);
@@ -327,11 +340,12 @@ export class CloudWorker {
     }
     this.historyReplacementEnabled = config.historyReplacement === 1;
     if (this.configurationRevision !== revision) { this.tokens.invalidate(); this.githubCredentials.invalidate(); }
-    await configureGitIdentity(this.options.homeDirectory ?? homedir(), config.gitIdentity);
+    if (!changed || changed.includes("gitIdentity")) await configureGitIdentity(this.options.homeDirectory ?? homedir(), config.gitIdentity);
     if (!this.scope) {
       if (!await this.initialize(scope, config, timing)) return;
     } else {
-      await measureStartup("worker_reconfigure_workspace", () => this.workspace!.configure(config.workspace), timing);
+      if (!changed || changed.some(key => key.startsWith("workspace.")))
+        await measureStartup("worker_reconfigure_workspace", () => this.workspace!.configure(config.workspace), timing);
       await measureStartup("worker_reconfigure_mcp", () => this.mcp!.configure(config.mcpServers ?? [], config.loginRevision), timing);
       if (!this.stopping) await this.reviews!.configure(config.codeReview);
       if (!this.reviews!.enabled) this.workspaceMcp.revoke();
@@ -374,7 +388,7 @@ export class CloudWorker {
     }
     if (!initial && reviewAvailable !== this.reviews?.enabled) await this.broadcast(this.readyFrame());
     this.configuredReviewAvailable = this.reviews?.enabled === true;
-    if (disconnects === this.disconnects) this.appliedConfiguration = identity;
+    if (disconnects === this.disconnects) this.appliedSections = sections;
     await this.reportIdle(true);
     if (initial) recordStartupTiming("worker_configure", started, timing);
     else recordStartupTiming("worker_reconfigure", started, timing);

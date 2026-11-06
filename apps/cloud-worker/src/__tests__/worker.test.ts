@@ -94,7 +94,7 @@ describe("worker bridge routing through a fake relay", () => {
     const worker = new CloudWorker({ directory, transport: relay, prepareCheckout: async () => {}, drivers: {} });
     cleanups.push(async () => { await worker.dispose(); await rm(directory, { recursive: true, force: true }); });
     worker.start(); await relay.receive(config); reportTiming.mockClear();
-    await relay.receive({ ...config, loginRevision: "1" });
+    await relay.receive({ ...config, loginRevision: "1", workspace: { ...config.workspace, baseBranch: "release" } });
     expect(reportTiming.mock.calls.map(([record]) => record.phase)).toEqual(["worker_reconfigure_workspace", "worker_reconfigure_mcp",
       "worker_reconfigure_ready", "worker_reconfigure"]);
   });
@@ -115,6 +115,22 @@ describe("worker bridge routing through a fake relay", () => {
     relay.disconnect(); await relay.reconnect();
     await relay.receive({ ...config, mcpServers: [] });
     expect(phases()).toContain("worker_reconfigure");
+  });
+  it("names the changed configuration sections and repeats workspace setup only when the workspace changed", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "zeros-worker-sections-"));
+    const reportTiming = vi.fn(), onReconfigure = vi.fn(), relay = Object.assign(new FakeRelay(), { reportTiming });
+    const worker = new CloudWorker({ directory, transport: relay, prepareCheckout: async () => {}, drivers: {}, onReconfigure });
+    cleanups.push(async () => { await worker.dispose(); await rm(directory, { recursive: true, force: true }); });
+    const phases = () => reportTiming.mock.calls.map(([record]) => record.phase);
+    worker.start(); await relay.receive(config); reportTiming.mockClear();
+    await relay.receive({ ...config, githubPullRequests: 1 });
+    expect(onReconfigure).toHaveBeenLastCalledWith(["githubPullRequests"]);
+    expect(phases()).toContain("worker_reconfigure");
+    expect(phases()).not.toContain("worker_reconfigure_workspace");
+    reportTiming.mockClear();
+    await relay.receive({ ...config, githubPullRequests: 1, workspace: { ...config.workspace, baseBranch: "release" } });
+    expect(onReconfigure).toHaveBeenLastCalledWith(["workspace.baseBranch"]);
+    expect(phases()).toContain("worker_reconfigure_workspace");
   });
   it("reports value-free initial configuration phases without delaying readiness or requiring telemetry support", async () => {
     const directory = await mkdtemp(join(tmpdir(), "zeros-worker-timing-"));
