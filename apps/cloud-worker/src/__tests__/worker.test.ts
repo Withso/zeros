@@ -88,20 +88,32 @@ describe("worker bridge routing through a fake relay", () => {
     expect(relay.response(request.id)).toMatchObject({ type: "AGENT_ERROR", code: "CLOUD_V2_UNSUPPORTED", message: expect.stringContaining("not available in cloud") });
     expect(drivers[0].prompts).toHaveLength(0);
   });
+  it("reports the relay's later reconfiguration separately from the initial configuration", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "zeros-worker-retiming-"));
+    const reportTiming = vi.fn(), relay = Object.assign(new FakeRelay(), { reportTiming });
+    const worker = new CloudWorker({ directory, transport: relay, prepareCheckout: async () => {}, drivers: {} });
+    cleanups.push(async () => { await worker.dispose(); await rm(directory, { recursive: true, force: true }); });
+    worker.start(); await relay.receive(config); reportTiming.mockClear();
+    await relay.receive(config);
+    expect(reportTiming.mock.calls.map(([record]) => record.phase)).toEqual(["worker_reconfigure_workspace", "worker_reconfigure_mcp",
+      "worker_reconfigure_ready", "worker_reconfigure"]);
+  });
   it("reports value-free initial configuration phases without delaying readiness or requiring telemetry support", async () => {
     const directory = await mkdtemp(join(tmpdir(), "zeros-worker-timing-"));
     const reportTiming = vi.fn(), relay = Object.assign(new FakeRelay(), { reportTiming });
     const worker = new CloudWorker({ directory, transport: relay, prepareCheckout: async () => {}, drivers: {} });
     cleanups.push(async () => { await worker.dispose(); await rm(directory, { recursive: true, force: true }); });
     worker.start(); await relay.receive(config); await relay.receive({ t: "open", clientId: CLIENT_A });
-    expect(reportTiming.mock.calls.map(([record]) => record.phase)).toEqual(["worker_checkout", "worker_session_store", "worker_services", "worker_configure"]);
+    expect(reportTiming.mock.calls.map(([record]) => record.phase)).toEqual(["worker_checkout", "worker_session_store",
+      "worker_services_review", "worker_services_workspace", "worker_services_mcp", "worker_services", "worker_configure"]);
     for (const [record] of reportTiming.mock.calls) {
       expect(Object.keys(record).sort()).toEqual(["durationMs", "phase"]);
       expect(record.durationMs).toBeGreaterThanOrEqual(0);
     }
     expect(relay.bridge("ENGINE_READY")).toHaveLength(1);
     await relay.receive(config);
-    expect(reportTiming).toHaveBeenCalledTimes(4);
+    // A later configuration reports only its own reconfiguration phases.
+    expect(reportTiming.mock.calls.filter(([record]) => !record.phase.startsWith("worker_reconfigure"))).toHaveLength(7);
   });
 
   it.each(["configuration", "sign-in"])("delivers scoped MCP capabilities and replaces drivers between turns on %s change", async change => {

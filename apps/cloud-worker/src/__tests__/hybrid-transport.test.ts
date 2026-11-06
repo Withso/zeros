@@ -275,6 +275,18 @@ it("bounds optional timing reports per phase and ignores an older control plane'
   expect(f.requests.filter(request => request.path === "hello")).toHaveLength(1);
   expect(f.requests.find(request => request.path === "timing")).toMatchObject({ body: { phase: "worker_checkout", durationMs: 10 }, authorized: true });
 });
+it("ignores an older control plane that rejects a newer timing phase", async () => {
+  const f = await fixture();
+  let rejected = 0;
+  vi.mocked(f.fetcher).mockImplementationOnce(async () => { rejected++; return Response.json({ error: { code: "invalid_input" } }, { status: 400 }); });
+  f.transport.reportTiming({ phase: "worker_services_mcp", durationMs: 12 });
+  await expect.poll(() => rejected).toBe(1);
+  f.transport.reportTiming({ phase: "worker_services_mcp", durationMs: 12 });
+  await f.transport.send({ t: "idle", idle: false });
+  await expect.poll(() => f.requests.some(request => request.path === "activity")).toBe(true);
+  expect(rejected).toBe(1);
+  expect(f.requests.filter(request => request.path === "timing")).toHaveLength(0);
+});
 it("advertises outbox support without changing the strict hello body, and rereads credentials on pull", async () => {
   const f = await fixture();
   expect(new Headers(vi.mocked(f.fetcher).mock.calls[0]![1]?.headers).get("x-zeros-worker-features")).toBe("prompt-outbox-v1,mcp-v1,workspace-setup-v1,checkout-v2,agent-interactions-v1,github-pr-v1,git-identity-v1,github-user-token-v1,code-review-v1,history-replace-v1,workspace-environment-v1,repository-setup-v1,runtime-update-v1");
