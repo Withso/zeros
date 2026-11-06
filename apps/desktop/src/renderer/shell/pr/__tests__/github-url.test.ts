@@ -4,6 +4,7 @@ import {
   githubCompareUrl,
   isGithubDotComRemote,
   parseRemote,
+  remoteWebUrl,
 } from "../github-url";
 
 describe("parseRemote", () => {
@@ -91,5 +92,30 @@ describe("isGithubDotComRemote", () => {
     expect(isGithubDotComRemote("https://gitlab.com/acme/example.git")).toBe(
       false,
     );
+  });
+});
+
+describe("remoteWebUrl", () => {
+  it("opens the repository page on its own host, keeping group paths", () => {
+    expect(remoteWebUrl("git@gitlab.example.com:team/sub/api.git")).toEqual({
+      host: "gitlab.example.com",
+      url: "https://gitlab.example.com/team/sub/api",
+    });
+    expect(remoteWebUrl("ssh://git@bitbucket.org:7999/acme/api.git")).toEqual({
+      host: "bitbucket.org",
+      url: "https://bitbucket.org/acme/api",
+    });
+    expect(remoteWebUrl("https://git.example.com/acme/api")).toEqual({
+      host: "git.example.com",
+      url: "https://git.example.com/acme/api",
+    });
+  });
+  it("encodes each path segment and refuses what it cannot read", () => {
+    expect(remoteWebUrl("git@git.example.com:acme/my repo.git")?.url).toBe(
+      "https://git.example.com/acme/my%20repo",
+    );
+    expect(remoteWebUrl("")).toBeNull();
+    expect(remoteWebUrl("not a remote")).toBeNull();
+    expect(remoteWebUrl("file:///srv/git/api.git")).toBeNull();
   });
 });

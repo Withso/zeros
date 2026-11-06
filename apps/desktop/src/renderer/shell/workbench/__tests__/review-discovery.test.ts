@@ -38,7 +38,10 @@ describe("Review on another Git host", () => {
     fixture.origin = "https://gitlab.com/fixture/repo.git";
     fixture.workspace = { id: "ws-review-host", path: "/workspace", repoSlug: "fixture", prNumber: 7, placement: "local", organizationId: null } as Workspace;
     publishWorkspacePrDiscovery("ws-review-host", { pending: false, checked: true, error: null });
-    expect(render()).toContain("Review needs a github.com remote");
+    const html = render();
+    expect(html).toContain("Reviews aren’t available for this host yet");
+    expect(html).toContain('href="https://gitlab.com/fixture/repo"');
+    expect(html).not.toContain("No pull request");
   });
 });
 

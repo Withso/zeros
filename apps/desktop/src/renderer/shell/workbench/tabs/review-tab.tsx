@@ -52,6 +52,7 @@ import {
   FindingsSection,
   PrStatusCard,
   ReviewHeader,
+  ReviewKnownHeader,
   ReviewOverviewLayout,
   ReviewRail,
   ReviewSection,
@@ -467,6 +468,10 @@ export function ReviewView({
     },
     "review-resources",
   );
+  const commentViewer = useMemo(
+    () => (snap.login ? { login: snap.login, avatarUrl: snap.avatarUrl } : null),
+    [snap.login, snap.avatarUrl],
+  );
   const checksSummary = summarizeChecks(snap.checks);
   const conversationCount = snap.timeline?.length ?? null;
   // The pull request's own totals; an older engine falls back to the diff.
@@ -542,8 +547,28 @@ export function ReviewView({
   if (signedOut) return <WorkbenchEmptyState type="review" />;
   if (!pr) {
     if (snap.error) {
+      // The rows the workspace knows stay; the tab's banner names the failure
+      // and offers Retry, and the body keeps the tab's one-line fallback.
       return (
-        <div className="p-3">
+        <div className="flex h-full min-h-0 flex-col" data-review-load-failed="">
+          <WorkbenchTabToolbar>
+            <ReviewKnownHeader
+              prNumber={prNumber}
+              repoSlug={repoSlug}
+              hostLabel={provider.hostLabel}
+              prUrl={prUrl}
+              baseBranch={baseBranch}
+              branch={branch}
+            />
+            <ReviewSubnav
+              sub={sub}
+              onSubChange={onSubChange}
+              activityCount={null}
+              commitsCount={null}
+              checksCount={null}
+              checks={summarizeChecks(null)}
+            />
+          </WorkbenchTabToolbar>
           <WorkbenchEmptyState type="review" />
         </div>
       );
@@ -679,6 +704,7 @@ export function ReviewView({
               pr.number,
             ])}
             hostLabel={provider.hostLabel}
+            viewer={commentViewer}
             onAddToChat={addToChat}
             onPostComment={postComment}
             onRetry={() => void refresh()}
