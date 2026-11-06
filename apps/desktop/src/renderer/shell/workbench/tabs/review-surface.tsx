@@ -28,7 +28,7 @@ import { resolveReviewProvider } from "../../pr/review-provider";
 import { EmptyState, useSourceTarget } from "./changes-tab";
 import { ReviewView } from "./review-tab";
 import { isWorkspacePrSyncEligible, retryWorkspacePrDiscovery } from "../../pr/use-workspace-pr-sync";
-import { useWorkspacePrDiscoveryState } from "../../pr/workspace-pr-discovery-state";
+import { useWorkspacePrDiscoveryState, workspacePrDiscoveryKey } from "../../pr/workspace-pr-discovery-state";
 import { useReviewGithubFailure } from "../../pr/review-github-failure";
 import { isCloudWorkspace, parseCloudScopedId } from "../../../platform/bridge/cloud-workspace-key";
 import { WorkbenchEmptyState, useWorkbenchStatusSource } from "../tab-status";
@@ -64,7 +64,7 @@ export const ReviewSurface = React.memo(function ReviewSurface({
   const refreshKey = useGitRefreshKey(workspace?.path, changesTarget, active);
   // Parks the header's Merge / Mark-as-ready writes while a turn is in flight.
   const agentWorking = useWorkspaceAgentWorking(workspace);
-  const discovery = useWorkspacePrDiscoveryState(workspace?.id ?? null);
+  const discovery = useWorkspacePrDiscoveryState(workspacePrDiscoveryKey(workspace));
   // Cloud v2 observes PR metadata through its workspace row; it has no gh.*
   // bridge operations. This source describes Local discovery only.
   const discovering = isWorkspacePrSyncEligible(workspace) &&

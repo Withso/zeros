@@ -28,13 +28,15 @@ import { useGitRefreshKey } from "../use-git-refresh-key";
 import { registerPrWorkspaceCacheForget } from "./pr-cache-forget";
 import { isCloudWorkspace, parseCloudScopedId } from "../../platform/bridge/cloud-workspace-key";
 import { documentIsForeground, pollWhileForeground } from "../../shared/lib/element-activity";
-import { publishWorkspacePrDiscovery, workspacePrDiscoverySnapshot } from "./workspace-pr-discovery-state";
+import { publishWorkspacePrDiscovery, workspacePrDiscoveryKey, workspacePrDiscoverySnapshot } from "./workspace-pr-discovery-state";
+import { workspacePrRefVersion } from "./pr-ref-version";
+import { useCloudGithubPrScope } from "../../platform/cloud-github-pr-scope";
 
 /** Last probe per workspace id. Switching INTO a PR-less worktree re-runs the
  *  effect with an unchanged refresh generation — pure navigation, so a recent
  *  identical probe already answered it. Local refresh-key changes probe
- *  immediately; cloud broadcasts still obey the observation/backoff bound. */
-type Probe = { refreshKey: number; at: number; failures?: number; retryAt?: number };
+ *  immediately; cloud ref hints bypass healthy reuse but preserve error backoff. */
+type Probe = { refreshKey: number; at: number; failures?: number; retryAt?: number; refsVersion?: number; key?: string; retired?: boolean };
 const lastProbe = new Map<string, Probe>();
 const PROBE_FRESH_MS = 60_000;
 const RESUME_PROBE_FRESH_MS = 2_000;
@@ -91,12 +93,22 @@ function recordProbe(
   while (lastProbe.size > MAX_PR_PROBE_WORKSPACES) {
     const oldest = lastProbe.keys().next().value as string | undefined;
     if (oldest === undefined) break;
+    const retired = lastProbe.get(oldest);
     lastProbe.delete(oldest);
     // Its late reply is no longer admissible, so also retire the pending UI
     // state. Otherwise that state stays pinned beyond both caches' bounds.
-    const snapshot = workspacePrDiscoverySnapshot(oldest);
-    if (snapshot.pending) publishWorkspacePrDiscovery(oldest, { ...snapshot, pending: false });
+    const key = retired?.key ?? oldest;
+    const snapshot = workspacePrDiscoverySnapshot(key);
+    if (snapshot.pending) publishWorkspacePrDiscovery(key, { ...snapshot, pending: false });
   }
+}
+
+function retireOtherBranch(id: string, key: string): void {
+  const previous = lastProbe.get(id);
+  if (!previous?.key || previous.key === key) return;
+  previous.retired = true;
+  const snapshot = workspacePrDiscoverySnapshot(previous.key);
+  if (snapshot.pending) publishWorkspacePrDiscovery(previous.key, { ...snapshot, pending: false });
 }
 
 // Deletion purge (pr-cache-forget): probe bookkeeping is keyed by the exact
@@ -127,6 +139,8 @@ export function useWorkspacePrSync(workspace: Workspace | null): void {
   const refreshKey = useGitRefreshKey(workspace?.path, workspace?.id);
   const id = workspace?.id ?? null;
   const repoSlug = workspace?.repoSlug ?? null;
+  const scope = useCloudGithubPrScope(id);
+  const key = workspacePrDiscoveryKey(workspace, scope);
   const eligible = isWorkspacePrSyncEligible(workspace);
   const local = !!workspace && !isCloudWorkspace(workspace.id) && !isCloudWorkspace(workspace.path) && !parseCloudScopedId(workspace.id);
 
@@ -134,50 +148,53 @@ export function useWorkspacePrSync(workspace: Workspace | null): void {
     (reason: ProbeReason) => {
       // Only DETECT while unrecorded — once the row has a prNumber, Review's
       // live store owns freshness. Local-main has no PR branch.
-      if (!eligible || !id || !repoSlug) return;
+      if (!eligible || !id || !repoSlug || !key) return;
       if (!documentIsForeground()) return;
+      retireOtherBranch(id, key);
+      const refsVersion = workspacePrRefVersion(id);
+      const previous = lastProbe.get(id);
+      const refsChanged = !!previous && previous.refsVersion !== refsVersion;
+      const contextChanged = !!previous && (previous.key !== key || previous.retired);
       const pending = inflightProbes.get(id);
       if (pending) {
         // A turn can create the PR while an older lookup is still reading
         // "none". Returning from GitHub or retrying can also be the only nudge.
         // The age gate coalesces mount/focus events that started this read.
-        if (reason === "manual" || shouldProbeWorkspacePr(lastProbe.get(id), refreshKey, Date.now(), reason)) {
+        if (reason === "manual" || contextChanged || refsChanged || shouldProbeWorkspacePr(previous, refreshKey, Date.now(), reason)) {
           pending.queued = pending.queued === "manual" ? "manual" : reason;
         }
         return pending.request;
       }
       const now = Date.now();
-      const previous = lastProbe.get(id);
-      // Cloud Git/DB broadcasts can arrive for every agent write. Discovery
-      // is observation, so those broadcasts cannot bypass its error backoff
-      // or issue a fresh database-backed probe on every edit.
-      if (reason !== "manual" && !local && previous && (now < (previous.retryAt ?? 0) || now - previous.at < 30_000)) return;
-      if (reason !== "manual" && !shouldProbeWorkspacePr(previous, refreshKey, now, reason)) {
+      // Ordinary file events arrive for every agent write; reserve immediate
+      // discovery for acknowledged ref changes and preserve error backoff.
+      if (reason !== "manual" && !contextChanged && !local && previous && (now < (previous.retryAt ?? 0) || !refsChanged && now - previous.at < 30_000)) return;
+      if (reason !== "manual" && !contextChanged && !refsChanged && !shouldProbeWorkspacePr(previous, refreshKey, now, reason)) {
         return;
       }
-      const probe: Probe = { refreshKey, at: now, failures: previous?.failures ?? 0 };
+      const probe: Probe = { refreshKey, at: now, failures: contextChanged ? 0 : previous?.failures ?? 0, refsVersion, key };
       recordProbe(id, probe);
-      const snapshot = workspacePrDiscoverySnapshot(id);
-      publishWorkspacePrDiscovery(id, { ...snapshot, pending: true });
+      const snapshot = workspacePrDiscoverySnapshot(key);
+      publishWorkspacePrDiscovery(key, { ...snapshot, pending: true });
       let found = false;
       const request: Promise<void> = ghPrSync(id)
         .then((pr) => {
           // Deletion/eviction retires the observation, including its late tail.
-          if (lastProbe.get(id) !== probe) return;
+          if (lastProbe.get(id) !== probe || probe.retired || workspacePrRefVersion(id) !== refsVersion) return;
           probe.failures = 0;
           found = !!pr && pr.number > 0;
           // A queued refresh invalidated this absence. Keep any earlier
           // confirmation, but let the successor establish a new one.
           const checked = !found && (snapshot.checked || !inflightProbes.get(id)?.queued);
-          publishWorkspacePrDiscovery(id, { pending: false, checked, error: null });
+          publishWorkspacePrDiscovery(key, { pending: false, checked, error: null });
           if (!found) return;
           // The engine stamped the row — refresh the workspace-list consumers
           // so Create PR atomically gives way to PR status + Review.
           notifyWorkspacesChanged(repoSlug);
         })
         .catch((error: unknown) => {
-          if (lastProbe.get(id) !== probe) return;
-          publishWorkspacePrDiscovery(id, { pending: false, checked: snapshot.checked, error });
+          if (lastProbe.get(id) !== probe || probe.retired || workspacePrRefVersion(id) !== refsVersion) return;
+          publishWorkspacePrDiscovery(key, { pending: false, checked: snapshot.checked, error });
           if (!local) {
             probe.failures = Math.min(4, (probe.failures ?? 0) + 1);
             probe.retryAt = Date.now() + Math.min(300_000, 60_000 * 2 ** (probe.failures - 1));
@@ -187,6 +204,8 @@ export function useWorkspacePrSync(workspace: Workspace | null): void {
           const flight = inflightProbes.get(id);
           if (flight?.request !== request) return;
           inflightProbes.delete(id);
+          const current = workspacePrDiscoverySnapshot(key);
+          if (lastProbe.get(id) === probe && current.pending) publishWorkspacePrDiscovery(key, { ...current, pending: false });
           if (flight.queued && !found) {
             // Use the currently mounted owner, never the closure that started
             // an old request. Hidden/unmounted owners cannot start a successor.
@@ -196,11 +215,13 @@ export function useWorkspacePrSync(workspace: Workspace | null): void {
       inflightProbes.set(id, { request, queued: null });
       return request;
     },
-    [eligible, id, repoSlug, refreshKey, local],
+    [eligible, id, repoSlug, key, refreshKey, local],
   );
 
   useEffect(() => {
-    if (!id || !eligible) return;
+    if (!id || !key) return;
+    retireOtherBranch(id, key);
+    if (!eligible) return;
     let consumers = probeConsumers.get(id);
     if (!consumers) { consumers = new Set(); probeConsumers.set(id, consumers); }
     consumers.add(probe);
@@ -209,7 +230,7 @@ export function useWorkspacePrSync(workspace: Workspace | null): void {
       consumers.delete(probe);
       if (consumers.size === 0 && probeConsumers.get(id) === consumers) probeConsumers.delete(id);
     };
-  }, [id, eligible, probe]);
+  }, [id, key, eligible, probe]);
 
   // A PR can be opened entirely on github.com, with no local file/Git event.
   // Re-probe promptly when the user returns to Zeros and periodically while the

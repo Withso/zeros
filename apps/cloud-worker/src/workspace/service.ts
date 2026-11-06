@@ -40,6 +40,9 @@ export class WorkspaceService {
   private state!: State;
   private metadataQueue = Promise.resolve();
   private signature?: string;
+  private refChange = 0;
+  private publishedRefChange = 0;
+  private checkoutFlight?: Promise<void>;
   private readonly prs = new Map<string, { value: PrSummary; time: number }>();
   private readonly prFlights = new Map<string, Promise<PrSummary>>();
   private prEpoch = 0;
@@ -130,25 +133,53 @@ export class WorkspaceService {
     if (this.disposed) return;
     const signature = JSON.stringify([branch, head, refs]), refsChanged = this.signature !== undefined && signature !== this.signature;
     this.signature = signature;
-    if (refsChanged) { this.prEpoch++; this.prs.clear(); }
-    if (refsChanged || content) this.publish(refsChanged);
-    const reporting = this.githubCheckout?.report().catch(() => {});
+    if (refsChanged) this.invalidatePr();
+    if (refsChanged || content) this.publish(false);
+    const reporting = this.reportCheckout();
     if (options.waitForCheckoutReport !== false) await reporting;
   }
-  async flush(): Promise<void> { await this.git.flush(); await this.metadataQueue; await this.watcher?.flush(); await this.githubCheckout?.flush(); }
+  async flush(): Promise<void> { await this.git.flush(); await this.metadataQueue; await this.watcher?.flush(); await this.checkoutFlight; await this.githubCheckout?.flush(); }
   get uploading(): boolean { return this.attachments.busy; }
   stopAttachmentTransfers(): Promise<void> { return this.attachments.dispose(); }
   githubChanged(): void { this.invalidate(true); }
   async dispose(): Promise<void> {
     if (this.disposed) return;
     this.disposed = true;
-    const closed = await Promise.allSettled([this.watcher?.dispose(), this.attachments.dispose(), this.git.flush(), this.metadataQueue, this.githubCheckout?.dispose()]);
+    const closed = await Promise.allSettled([this.watcher?.dispose(), this.attachments.dispose(), this.git.flush(), this.metadataQueue, this.checkoutFlight, this.githubCheckout?.dispose()]);
     for (const result of closed) if (result.status === "rejected") throw result.reason;
   }
 
   private invalidate(refs: boolean): void {
-    if (refs) { this.prEpoch++; this.prs.clear(); }
-    this.publish(refs); this.watcher?.schedule(true);
+    if (refs) this.invalidatePr();
+    this.publish(false); this.watcher?.schedule(true);
+    if (refs && !this.watcher) void this.reportCheckout();
+  }
+  private invalidatePr(): void {
+    this.prEpoch++; this.prs.clear(); this.refChange++;
+  }
+  private reportCheckout(): Promise<void> {
+    if (this.checkoutFlight) return this.checkoutFlight;
+    const flight = (async () => {
+      while (!this.disposed) {
+        const revision = this.refChange;
+        // The app's next GitHub read must see the acknowledged checkout, even
+        // when an older report was already in flight at the time of the push.
+        await this.githubCheckout?.fresh();
+        if (this.disposed) return;
+        if (revision !== this.refChange) continue;
+        if (this.publishedRefChange !== revision) {
+          this.publishedRefChange = revision;
+          this.publish(true);
+        }
+        if (revision === this.refChange) return;
+      }
+    })().catch(() => {
+      // Keep the pending ref revision for the next existing watcher observation.
+    }).finally(() => {
+      if (this.checkoutFlight === flight) this.checkoutFlight = undefined;
+    });
+    this.checkoutFlight = flight;
+    return flight;
   }
   private publish(gitRefsChanged: boolean): void {
     if (!this.disposed) this.options.publish?.(createMessage({ type: "DB_CHANGED", source: "engine", kinds: ["workspaces"], workspaceIds: [this.scope.workspace.id], ...(gitRefsChanged ? { gitRefsChanged: true } : {}) }));

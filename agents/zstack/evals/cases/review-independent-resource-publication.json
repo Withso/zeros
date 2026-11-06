@@ -1,0 +1,9 @@
+{
+  "id": "review-independent-resource-publication",
+  "kind": "replay",
+  "area": "renderer-state",
+  "fixedBy": "pr:864",
+  "symptom": "Cloud Review kept its PR header behind an authentication preflight and slow checks even after the PR read had completed.",
+  "rule": "Publish independently confirmed resources without a waterfall, preserve same-key presentation, and let an authentication refusal fence later sibling replies; agents/zstack/changes/pr-checkout-observation.md.",
+  "check": "pnpm test:git apps/desktop/src/renderer/shell/workbench/tabs/__tests__/review-first-result.test.ts"
+}
