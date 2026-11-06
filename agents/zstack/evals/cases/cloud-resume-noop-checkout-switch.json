@@ -2,7 +2,7 @@
   "id": "cloud-resume-noop-checkout-switch",
   "kind": "replay",
   "area": "cloud-worker",
-  "fixedBy": "pr:PENDING",
+  "fixedBy": "pr:866",
   "symptom": "On Alpha, a resumed cloud workspace's worker spent 4.9 s in `worker_checkout_switch` before it was ready (2–10 ms on create). `git switch -- <branch>` to the already checked-out branch still refreshed the whole index on a freshly restored disk, which delayed the app's first request after resume.",
   "rule": "Startup work on a resumed disk must skip no-op operations that touch every file. Measure resume separately from create (principle 11).",
   "check": "pnpm --dir apps/cloud-worker exec vitest run src/workspace/__tests__/checkout.test.ts"
