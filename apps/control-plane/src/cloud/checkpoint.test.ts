@@ -805,7 +805,8 @@ describe("cloud v2 checkpoints", () => {
     const upload = checkpointCommand({ checkoutPath: "/home/user/acme/app", home: "/home/user", baseBranch: "main", key,
       uploadUrl: "https://bucket.example.test/cloud-v2/checkpoints/x.zck?X-Amz-Signature=abc" });
     expect(upload.startsWith("bash -c '")).toBe(true);
-    expect(upload).toContain("systemctl stop zeros-worker.service");
+    // Boat's resume starts enabled units; only token delivery may start the worker again.
+    expect(upload).toContain("systemctl stop zeros-worker.service >/dev/null 2>&1 || true\nsudo -n systemctl disable zeros-worker.service");
     const download = restoreCommand({ checkoutPath: "/home/user/acme/app", home: "/home/user", key, sha256: "a".repeat(64),
       downloadUrl: "https://bucket.example.test/x.zck?sig=1", githubToken: token, repositoryUrl: "https://github.com/acme/app.git" });
     expect(download).not.toContain(token);

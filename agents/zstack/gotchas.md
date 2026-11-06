@@ -226,3 +226,11 @@ revision in the same checkout and compare failing test names.
   can report as new, so confirm it against the base before arming.
 - Alpha's clock differs from this host by about 0.5 s. Compare time windows with
   documented bounds, never exact values.
+- Measure cloud resume with an idle gap after stop. Starting immediately after
+  `stopped` added about 13 s of lag before the lifecycle began (52.8 s versus
+  22.5 s). Read the per-phase `[cloud-v2] timing` lines and the VM journal
+  (`journalctl -b`) before choosing an optimization.
+- Do not judge whether a PlanetScale table has data from `pg_stat_user_tables`
+  counters, which reset (`schema_migrations` showed 0 while holding 216 rows), or
+  from MCP `count(*)`, which row-level security can hide. Use
+  `pg_relation_size(oid) > 0`.

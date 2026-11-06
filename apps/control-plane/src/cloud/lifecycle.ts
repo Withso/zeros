@@ -142,10 +142,11 @@ function errorCode(error: unknown): string {
   return typeof code === "string" && /^[a-z0-9_]{1,64}$/.test(code) ? code : "provider_request_failed";
 }
 
-/** Writes the worker credential and its boot settings owner-only, then starts
- * the worker if it is not running. Values are single-quoted base64 literals the
- * shell never expands. Boat's sandbox environment does not reach systemd, so
- * the boot settings travel with the credential. */
+/** Writes the worker credential and its boot settings owner-only, re-enables
+ * the unit a stop disabled so a reboot keeps it, then restarts the worker.
+ * Values are single-quoted base64 literals the shell never expands. Boat's
+ * sandbox environment does not reach systemd, so the boot settings travel with
+ * the credential. */
 export function deliverWorkerTokenCommand(token: string, bootEnv: Readonly<Record<string, string>> = {}): string {
   if (!/^zw2w_[A-Za-z0-9_-]{43}$/.test(token)) throw new Error("Invalid worker token");
   for (const [name, value] of Object.entries(bootEnv))
@@ -157,6 +158,7 @@ export function deliverWorkerTokenCommand(token: string, bootEnv: Readonly<Recor
     `sudo -n rm -f /opt/zeros/worker-runtime.env && ` +
     `printf %s '${b64(envFile)}' | base64 -d > ${CLOUD_V2_WORKER_ENV_PATH}.tmp && mv -f ${CLOUD_V2_WORKER_ENV_PATH}.tmp ${CLOUD_V2_WORKER_ENV_PATH} && ` +
     `printf %s '${b64(token)}' | base64 -d > ${CLOUD_V2_WORKER_TOKEN_PATH}.tmp && mv -f ${CLOUD_V2_WORKER_TOKEN_PATH}.tmp ${CLOUD_V2_WORKER_TOKEN_PATH} && ` +
+    `(systemctl is-enabled --quiet zeros-worker.service || sudo -n systemctl enable zeros-worker.service >/dev/null 2>&1 || true) && ` +
     `(sudo -n systemctl restart zeros-worker.service || true))`;
 }
 

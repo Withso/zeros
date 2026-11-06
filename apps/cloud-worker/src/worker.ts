@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { access, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { homedir } from "node:os";
@@ -61,6 +61,16 @@ interface WorkerOptions {
 }
 interface Client extends AppClient { rejected: boolean }
 
+const stableJson = (value: unknown): string => Array.isArray(value) ? `[${value.map(stableJson).join(",")}]`
+  : value && typeof value === "object" ? `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${stableJson((value as Record<string, unknown>)[key])}`).join(",")}}`
+  : JSON.stringify(value) ?? "null";
+/** The control plane mints a new Codex proxy token for every configuration it
+ * builds, so the relay's copy of the hello configuration differs only there. */
+function configurationIdentity(config: WorkerConfig): string {
+  const { agents: { codex, ...agents }, ...rest } = config;
+  return createHash("sha256").update(stableJson({ ...rest, agents: { ...agents, ...(codex ? { codex: { baseUrl: codex.baseUrl } } : {}) } })).digest("hex");
+}
+
 /** One VM, one checkout, many app sockets. The relay is a carrier for ordinary
  * bridge frames; this process owns validation, agent work and durable history. */
 export class CloudWorker {
@@ -94,6 +104,8 @@ export class CloudWorker {
   private readonly github: GithubBroker;
   private readonly gitEnvironment: NodeJS.ProcessEnv;
   private configuring: Promise<void> = Promise.resolve();
+  private appliedConfiguration?: string;
+  private disconnects = 0;
   private online = false;
   private disposed = false;
   private started = false;
@@ -131,7 +143,7 @@ export class CloudWorker {
       },
       frame: (raw) => this.receive(raw),
       close: () => {
-        this.online = false;
+        this.online = false; this.appliedConfiguration = undefined; this.disconnects++;
         for (const client of this.clients.values()) this.terminals?.detach(client);
         this.clients.clear(); this.history?.disconnect(); this.tokens.disconnect(); this.githubCredentials.disconnect();
       },
@@ -298,6 +310,10 @@ export class CloudWorker {
     const timing = this.options.transport.reportTiming?.bind(this.options.transport);
     const revision = BigInt(config.loginRevision);
     if (this.acceptedConfigurationRevision !== undefined && revision < this.acceptedConfigurationRevision) return;
+    const identity = configurationIdentity(config), disconnects = this.disconnects;
+    // Repeating checkout, MCP and review setup would hold every waiting open.
+    if (this.scope && !this.stopping && identity === this.appliedConfiguration) { this.agents!.configure(config); return; }
+    this.appliedConfiguration = undefined;
     this.githubUserTokensEnabled = config.githubUserTokens === 1;
     if (this.options.workspaceId && config.workspace.id !== this.options.workspaceId) throw new Error("Workspace identity changed.");
     const scope = new WorkspaceScope(config.workspace);
@@ -358,6 +374,7 @@ export class CloudWorker {
     }
     if (!initial && reviewAvailable !== this.reviews?.enabled) await this.broadcast(this.readyFrame());
     this.configuredReviewAvailable = this.reviews?.enabled === true;
+    if (disconnects === this.disconnects) this.appliedConfiguration = identity;
     await this.reportIdle(true);
     if (initial) recordStartupTiming("worker_configure", started, timing);
     else recordStartupTiming("worker_reconfigure", started, timing);

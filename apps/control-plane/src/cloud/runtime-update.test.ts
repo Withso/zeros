@@ -100,5 +100,5 @@ it("a natural token delivery clears the private override and fences a delayed ol
   expect(() => f.run(activateRuntimeCommand({ sha256: f.sha256, previousSha256: f.old, id, bootId: randomUUID(), instanceId: randomUUID(),
     tokenSha256: f.tokenSha256, expectedBootIds: [f.bootId] }))).toThrow();
   expect(readlinkSync(f.current)).toBe(join(f.runtimes, f.old));
-  expect(readFileSync(f.log, "utf8")).toBe("restart zeros-worker.service\n");
+  expect(readFileSync(f.log, "utf8")).toBe("is-enabled --quiet zeros-worker.service\nrestart zeros-worker.service\n");
 });

@@ -497,8 +497,11 @@ export function checkpointCommand(input: ArchiveInput & { uploadUrl: string }): 
     CHECKPOINT_SAVED_REPORT,
   ];
   // The worker is told to stop first; systemd's stop also ends its agents,
-  // terminals and anything they started before the files are read.
-  return `bash -c ${quote(["sudo -n systemctl stop zeros-worker.service >/dev/null 2>&1 || true", ...script].join("\n"))}`;
+  // terminals and anything they started before the files are read. Boat's
+  // resume starts enabled units, which would run the worker on its stale
+  // credential until token delivery restarts it; delivery re-enables it.
+  return `bash -c ${quote(["sudo -n systemctl stop zeros-worker.service >/dev/null 2>&1 || true",
+    "sudo -n systemctl disable zeros-worker.service >/dev/null 2>&1 || true", ...script].join("\n"))}`;
 }
 
 export type RestoreInput = CheckpointPaths & { key: Buffer; sha256: string; githubToken?: string; repositoryUrl?: string };

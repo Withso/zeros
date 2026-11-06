@@ -94,9 +94,27 @@ describe("worker bridge routing through a fake relay", () => {
     const worker = new CloudWorker({ directory, transport: relay, prepareCheckout: async () => {}, drivers: {} });
     cleanups.push(async () => { await worker.dispose(); await rm(directory, { recursive: true, force: true }); });
     worker.start(); await relay.receive(config); reportTiming.mockClear();
-    await relay.receive(config);
+    await relay.receive({ ...config, loginRevision: "1" });
     expect(reportTiming.mock.calls.map(([record]) => record.phase)).toEqual(["worker_reconfigure_workspace", "worker_reconfigure_mcp",
       "worker_reconfigure_ready", "worker_reconfigure"]);
+  });
+  it("skips the relay's duplicate configuration that only renews the Codex proxy token until the transport reconnects", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "zeros-worker-duplicate-"));
+    const reportTiming = vi.fn(), relay = Object.assign(new FakeRelay(), { reportTiming });
+    const worker = new CloudWorker({ directory, transport: relay, prepareCheckout: async () => {}, drivers: {} });
+    cleanups.push(async () => { await worker.dispose(); await rm(directory, { recursive: true, force: true }); });
+    const phases = () => reportTiming.mock.calls.map(([record]) => record.phase);
+    worker.start(); await relay.receive(config); reportTiming.mockClear();
+    await relay.receive({ ...config, agents: { codex: { ...config.agents.codex!, token: "renewed-proxy-token", expiresAt: config.agents.codex!.expiresAt + 1 } } });
+    await relay.receive({ t: "open", clientId: CLIENT_A });
+    expect(phases()).toEqual([]);
+    expect(relay.bridge("ENGINE_READY")).toHaveLength(1);
+    await relay.receive({ ...config, mcpServers: [] });
+    expect(phases()).toContain("worker_reconfigure");
+    reportTiming.mockClear();
+    relay.disconnect(); await relay.reconnect();
+    await relay.receive({ ...config, mcpServers: [] });
+    expect(phases()).toContain("worker_reconfigure");
   });
   it("reports value-free initial configuration phases without delaying readiness or requiring telemetry support", async () => {
     const directory = await mkdtemp(join(tmpdir(), "zeros-worker-timing-"));
