@@ -32,6 +32,7 @@ import {
   triggerGitRefreshForWorkspaceIdsForTests,
   triggerGitSettingsChangeForTests,
 } from "../use-git-refresh-key";
+import { workspacePrRefVersion } from "../pr/pr-ref-version";
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -102,6 +103,15 @@ describe("finishedStreamingChatIds", () => {
 });
 
 describe("git refresh scope generations", () => {
+  it("publishes an exact PR ref revision before the normal refresh signal", () => {
+    const a = "ref-workspace-a", b = "ref-workspace-b";
+    const beforeA = workspacePrRefVersion(a), beforeB = workspacePrRefVersion(b);
+    triggerGitRefreshForWorkspaceIdsForTests([a]);
+    expect(workspacePrRefVersion(a)).toBe(beforeA);
+    triggerGitRefreshForWorkspaceIdsForTests([a], { gitRefsChanged: true });
+    expect(workspacePrRefVersion(a)).toBeGreaterThan(beforeA);
+    expect(workspacePrRefVersion(b)).toBe(beforeB);
+  });
   it("advances only the changed cwd and normalizes trailing separators", () => {
     const beforeA = getGitRefreshKeyForTests("/repo/a");
     const beforeB = getGitRefreshKeyForTests("/repo/b");

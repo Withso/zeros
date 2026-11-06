@@ -2,7 +2,7 @@ import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Workspace } from "../../../platform/git";
-import { publishWorkspacePrDiscovery } from "../../pr/workspace-pr-discovery-state";
+import { publishWorkspacePrDiscovery, workspacePrDiscoveryKey } from "../../pr/workspace-pr-discovery-state";
 import { forgetPrCachesForWorkspace } from "../../pr/pr-cache-forget";
 import { ReviewSurface } from "../tabs/review-surface";
 import { ghAuthStatusCache } from "../../../state/read-caches";
@@ -37,7 +37,7 @@ describe("Review on another Git host", () => {
   it("says why it is unavailable instead of a bare dead end", () => {
     fixture.origin = "https://gitlab.com/fixture/repo.git";
     fixture.workspace = { id: "ws-review-host", path: "/workspace", repoSlug: "fixture", prNumber: 7, placement: "local", organizationId: null } as Workspace;
-    publishWorkspacePrDiscovery("ws-review-host", { pending: false, checked: true, error: null });
+    publishWorkspacePrDiscovery(workspacePrDiscoveryKey(fixture.workspace)!, { pending: false, checked: true, error: null });
     expect(render()).toContain("Review needs a github.com remote");
   });
 });
@@ -45,14 +45,14 @@ describe("Review on another Git host", () => {
 describe.each([null, "organization"])("PR discovery for Local owner %s", organizationId => {
   it("does not claim there is no PR before discovery finishes", () => {
     fixture.workspace = { id: "ws-review", path: "/workspace", repoSlug: "fixture", prNumber: null, placement: "local", organizationId } as Workspace;
-    publishWorkspacePrDiscovery("ws-review", { pending: true, checked: false, error: null });
+    publishWorkspacePrDiscovery(workspacePrDiscoveryKey(fixture.workspace)!, { pending: true, checked: false, error: null });
     expect(render()).not.toContain("No pull request");
   });
 
   it("reports failed discovery through the shared status banner with a retry", () => {
     fixture.workspace = { id: "ws-review", path: "/workspace", repoSlug: "fixture", prNumber: null, placement: "local", organizationId } as Workspace;
     const error = new Error("Connect GitHub to check pull requests");
-    publishWorkspacePrDiscovery("ws-review", { pending: false, checked: false, error });
+    publishWorkspacePrDiscovery(workspacePrDiscoveryKey(fixture.workspace)!, { pending: false, checked: false, error });
     expect(render()).not.toContain("No pull request");
     expect(fixture.status).toHaveBeenCalledWith(expect.objectContaining({ error, retry: expect.any(Function) }), expect.any(String));
   });
@@ -68,7 +68,7 @@ describe.each([null, "organization"])("PR discovery for Local owner %s", organiz
       },
     });
     const error = Object.assign(new Error("Not signed in to GitHub"), { code: "NOT_AUTHENTICATED" });
-    publishWorkspacePrDiscovery("ws-review", { pending: false, checked: false, error });
+    publishWorkspacePrDiscovery(workspacePrDiscoveryKey(fixture.workspace)!, { pending: false, checked: false, error });
     render();
     const [source] = fixture.status.mock.calls.at(-1)!;
     expect(describeWorkbenchFailure("review", source.error).message)
@@ -77,21 +77,21 @@ describe.each([null, "organization"])("PR discovery for Local owner %s", organiz
 
   it("shows the empty state only after a successful lookup found no PR", () => {
     fixture.workspace = { id: "ws-review", path: "/workspace", repoSlug: "fixture", prNumber: null, placement: "local", organizationId } as Workspace;
-    publishWorkspacePrDiscovery("ws-review", { pending: false, checked: true, error: null });
+    publishWorkspacePrDiscovery(workspacePrDiscoveryKey(fixture.workspace)!, { pending: false, checked: true, error: null });
     expect(render()).toContain("No pull request");
   });
 
   it("retains confirmed absence while a later refresh reports an error", () => {
     fixture.workspace = { id: "ws-review", path: "/workspace", repoSlug: "fixture", prNumber: null, placement: "local", organizationId } as Workspace;
     const error = new Error("GitHub is unavailable");
-    publishWorkspacePrDiscovery("ws-review", { pending: false, checked: true, error });
+    publishWorkspacePrDiscovery(workspacePrDiscoveryKey(fixture.workspace)!, { pending: false, checked: true, error });
     expect(render()).toContain("No pull request");
     expect(fixture.status).toHaveBeenCalledWith(expect.objectContaining({ error, hasContent: true }), expect.any(String));
   });
 
   it("renders a known PR even when an earlier discovery failed", () => {
     fixture.workspace = { id: "ws-review", path: "/workspace", repoSlug: "fixture", prNumber: 12, placement: "local", organizationId } as Workspace;
-    publishWorkspacePrDiscovery("ws-review", { pending: false, checked: false, error: new Error("Earlier failure") });
+    publishWorkspacePrDiscovery(workspacePrDiscoveryKey(fixture.workspace)!, { pending: false, checked: false, error: new Error("Earlier failure") });
     expect(render()).toContain("Confirmed PR");
     expect(fixture.status).toHaveBeenCalledWith(expect.objectContaining({ error: null, active: false }), expect.any(String));
   });
@@ -100,7 +100,7 @@ describe.each([null, "organization"])("PR discovery for Local owner %s", organiz
 it("keeps cloud metadata outside the Local discovery error source", () => {
   const id = "cloud://organization/workspace";
   fixture.workspace = { id, path: id, repoSlug: "fixture", prNumber: null, placement: "cloud", organizationId: "organization" } as Workspace;
-  publishWorkspacePrDiscovery(id, { pending: false, checked: false, error: new Error("Unsupported Local bridge operation") });
+  publishWorkspacePrDiscovery(workspacePrDiscoveryKey(fixture.workspace)!, { pending: false, checked: false, error: new Error("Unsupported Local bridge operation") });
   expect(render()).toContain("No pull request");
   expect(fixture.status).toHaveBeenCalledWith(expect.objectContaining({ error: null, active: false }), expect.any(String));
 });

@@ -3,8 +3,8 @@
 // change counts, gitStatus, ghPrGet and ghPrChecks. Local changes refetch on
 // useGitRefreshKey, GitHub changes on app resume and a bounded active-only
 // poll, and a merged or closed PR stops recurring refreshes
-// (pr-status-refresh.ts). Results apply as one settled batch, since sources
-// resolving at different speeds rendered mixed states, and a last-known cache
+// (pr-status-refresh.ts). Git state can publish before GitHub; PR readiness
+// waits for its complete observation, and a last-known cache
 // (persisted per workspace#pr) repaints instantly after a remount or relaunch.
 // Prompt actions auto-send a brief to the active chat; direct actions run in
 // the engine and flip the state optimistically.
@@ -97,6 +97,7 @@ import { useDocumentActive } from "../../state/use-document-active";
 import { isCloudWorkspace, parseCloudScopedId } from "../../platform/bridge/cloud-workspace-key";
 import { documentIsForeground } from "../../shared/lib/element-activity";
 import { CloudPrStatusReads } from "./cloud-pr-status-reads";
+import { workspacePrRefVersion } from "./pr-ref-version";
 import {
   claimWorkspaceGitAction, releaseWorkspaceGitAction, useWorkspaceGitActionClaim,
   type WorkspaceGitActionClaim,
@@ -212,15 +213,18 @@ function livePr(pr: PR | null): PR | null {
   return pr && pr.number > 0 ? pr : null;
 }
 
-/** One settled fetch round's worth of island inputs, applied atomically. */
+/** Git and GitHub observations retain their own completion boundaries. */
 interface IslandData {
   status: StatusResult | null;
   counts: ChangeCounts | null;
   pr: PR | null;
   checks: PrChecksResult | null;
+  githubLoaded: boolean;
+  refreshing: boolean;
   /** Refresh generation + completion time of the round that produced this
    *  batch — lets a remount skip refetching data that is still fresh. */
   refreshKey: number;
+  refsVersion: number;
   at: number;
 }
 
@@ -284,6 +288,7 @@ export function PrStatusIsland({
   // remote the engine's own git ops use.
   const remote = useGitRemote(workspace.repoRoot);
   const refreshKey = useGitRefreshKey(workspace.path, workspace.id, observing);
+  const refsVersion = workspacePrRefVersion(workspace.id);
   // Focus workbench's pinned Review tab — shared by the View-PR chip and the
   // Show-checks action (which lands directly on its Checks sub-tab).
   const showPr = useShowReviewTab();
@@ -355,6 +360,8 @@ export function PrStatusIsland({
     // turn every tab re-activation into a refetch the batch doesn't need.
     if (
       prev &&
+      !prev.refreshing &&
+      prev.refsVersion === refsVersion &&
       (prev.refreshKey === refreshKey ||
         isTerminalPrState(prevEffectiveState)) &&
       Date.now() - prev.at < ISLAND_FRESH_MS &&
@@ -368,6 +375,8 @@ export function PrStatusIsland({
     // Re-derived on every run, never latched.
     if (
       prev &&
+      !prev.refreshing &&
+      prev.refsVersion === refsVersion &&
       forceRefreshAt <= prev.at &&
       !shouldPollPrStatus(prevEffectiveState, effectTrigger.trigger)
     ) {
@@ -379,23 +388,37 @@ export function PrStatusIsland({
       ghPrGet({ workspaceId: workspace.id, prNumber }),
       ghPrChecks({ workspaceId: workspace.id, prNumber }),
     ]);
-    void Promise.all([
-      Promise.allSettled([nativeReads ? statusForGeneration(workspace.id, refreshKey, workspace.path) : Promise.resolve(null),
-        nativeReads ? changeCountsForGeneration(workspace.id, refreshKey) : Promise.resolve(null)]),
-      local ? readGithub() : cloudPrReads.read(dataKey, readGithub),
-    ]).then(([[s, n], [p, c]]) => {
-      if (cancelled || cloudGithubPrScope(workspace.id) !== scope) return;
+    const publish = (update: Partial<IslandData>) => {
+      if (cancelled || cloudGithubPrScope(workspace.id) !== scope || workspacePrRefVersion(workspace.id) !== refsVersion) return;
       const prev = lastKnownData.get(dataKey);
       const next: IslandData = {
-        status: s.status === "fulfilled" ? s.value : (prev?.status ?? null),
-        counts: n.status === "fulfilled" ? n.value : (prev?.counts ?? null),
-        pr: p.status === "fulfilled" ? p.value : (prev?.pr ?? null),
-        checks: c.status === "fulfilled" ? c.value : (prev?.checks ?? null),
-        refreshKey,
-        at: Date.now(),
+        status: null, counts: null, pr: null, checks: null, githubLoaded: false, refreshing: false, at: 0,
+        ...prev, ...update,
+        refreshKey, refsVersion,
       };
       rememberIslandData(dataKey, next);
       setLive({ key: dataKey, data: next });
+    };
+    let remaining = nativeReads ? 2 : 1;
+    const settle = (update: Partial<IslandData>) => {
+      remaining -= 1;
+      publish({ ...update, refreshing: remaining > 0, ...(remaining === 0 ? { at: Date.now() } : {}) });
+    };
+    publish({ refreshing: true });
+    if (nativeReads) void Promise.allSettled([
+      statusForGeneration(workspace.id, refreshKey, workspace.path),
+      changeCountsForGeneration(workspace.id, refreshKey),
+    ]).then(([status, counts]) => settle({
+      ...(status.status === "fulfilled" ? { status: status.value } : {}),
+      ...(counts.status === "fulfilled" ? { counts: counts.value } : {}),
+    }));
+    void (local ? readGithub() : cloudPrReads.read(dataKey, readGithub, refsVersion)).then(([p, c]) => {
+      if (cancelled || cloudGithubPrScope(workspace.id) !== scope || workspacePrRefVersion(workspace.id) !== refsVersion) return;
+      settle({
+        ...(p.status === "fulfilled" ? { pr: p.value } : {}),
+        ...(c.status === "fulfilled" ? { checks: c.value } : {}),
+        githubLoaded: p.status === "fulfilled" && c.status === "fulfilled",
+      });
       if (
         p.status === "fulfilled" &&
         (local || !reconciledCloudPrReads.has(p)) &&
@@ -427,6 +450,7 @@ export function PrStatusIsland({
     prNumber,
     dataKey,
     refreshKey,
+    refsVersion,
     forceRefreshAt,
     nativeReads,
     scope,
@@ -701,17 +725,15 @@ export function PrStatusIsland({
     ],
   );
 
-  // No settled data for this PR yet → derive nothing. A guessed intermediate
-  // state ("PR open" → "Ready to merge" a beat later) reads as status churn;
-  // the render instead falls back to the DURABLE last-known state below, and
-  // to "Loading..." only when this PR has no derivation history at all.
+  // Native Git may arrive before the first complete GitHub observation;
+  // retain the row's last derived status until both can establish readiness.
   const { status, counts, pr, checks } = data ?? {
     status: null,
     counts: null,
     pr: null,
     checks: null,
   };
-  const inputs: PrStatusInputs | null = data
+  const inputs: PrStatusInputs | null = data && ((status && counts) || !nativeReads)
     ? {
           prState: workspace.prState,
           status: {
@@ -743,12 +765,11 @@ export function PrStatusIsland({
             : null,
       }
     : null;
-  const derived = inputs ? derivePrIslandState(inputs, { allowContinue: localDesktop && local }) : null;
+  const derived = inputs && data?.githubLoaded ? derivePrIslandState(inputs, { allowContinue: localDesktop && local }) : null;
   // A raw "checking" derivation (GitHub recomputing mergeability) is masked by
   // the generation's last definitive state, so a resume never flaps the row
   // (pr-status-stability.ts). Before the first settled batch, render the durable
-  // last-known state while the fetch runs; "Loading..." only for a PR with no
-  // persisted state.
+  // last-known state while the fetch runs.
   const island = derived
     ? stabilizePrIslandState(stabilityKey, derived)
     : getPrIslandLastState(dataKey);
@@ -820,13 +841,13 @@ export function PrStatusIsland({
   if (presentation === "git-status") {
     return (
       <GitStatusCard
-        state={inputs ? deriveGitStatus(inputs) : null}
+        state={inputs && status && counts ? deriveGitStatus(inputs) : null}
         checklist={{
           uncommitted: counts ? counts.uncommitted : null,
           ahead: status?.ahead ?? null,
           behind: status?.behind ?? null,
           conflicts: status ? status.conflicted.length > 0 || status.conflictState != null : null,
-          behindBase: pr?.mergeableState === "behind" ? (pr.behindBy ?? null) : 0,
+          behindBase: pr ? pr.mergeableState === "behind" ? (pr.behindBy ?? null) : 0 : null,
           baseBranch: pr?.baseBranch ?? workspace.baseBranch ?? "base",
         }}
         actionState={actionState}
@@ -876,10 +897,10 @@ export function PrStatusIsland({
           <span className="min-w-0 truncate">{island.label}</span>
         </span>
       ) : (
-        // No batch AND no durable last-known state — this machine has never
-        // derived a status for this PR. Honest, quiet, no spinner.
+        // Workspace metadata confirms this PR before detailed checks arrive.
         <span className="text-fg2 ml-1 min-w-0 truncate text-sm font-medium">
-          Loading...
+          {workspace.prState === "draft" ? "Draft pull request" : workspace.prState === "merged" ? "Merged" :
+            workspace.prState === "closed" ? "Closed" : "Pull request open"}
         </span>
       )}
       <div className="flex-1" />

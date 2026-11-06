@@ -52,6 +52,7 @@ import {
   notifyWorkspacesChanged,
   notifyWorkspacesChangedForIds,
 } from "../state/use-projects";
+import { invalidateWorkspacePrRefs } from "./pr/pr-ref-version";
 
 // Renderer-side refresh generations — for writes that DON'T go through the
 // engine bridge (so no DB_CHANGED broadcast), e.g. the Files-tab editor saving
@@ -347,6 +348,7 @@ function handleWorkspaceDbChanged(msg: unknown): void {
 
   const gitRefsChanged =
     (msg as { gitRefsChanged?: unknown }).gitRefsChanged === true;
+  if (gitRefsChanged) invalidateWorkspacePrRefs(changedIds);
   const designRecognitionChanged =
     (msg as { designRecognitionChanged?: unknown }).designRecognitionChanged ===
     true;

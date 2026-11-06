@@ -24,6 +24,7 @@ type Revision = { headSha: string; baseSha: string };
 type Snapshot = {
   authority: CloudGithubPrAuthority;
   revisions: Map<number, Revision>;
+  catalog: ReturnType<typeof cloudGithubPrCatalogContext>;
 };
 const snapshots = new Map<string, Snapshot>(),
   flights = new Map<string, Promise<unknown>>(),
@@ -35,6 +36,9 @@ const changed = () =>
   );
 const same = (a: CloudGithubPrAuthority, b: CloudGithubPrAuthority) =>
   JSON.stringify(a) === JSON.stringify(b);
+const samePresentation = (a: CloudGithubPrAuthority, b: CloudGithubPrAuthority) =>
+  a.connectionGeneration === b.connectionGeneration && a.repositoryId === b.repositoryId &&
+  a.repository === b.repository && a.branch === b.branch && a.baseBranch === b.baseBranch;
 const errorCodes: Record<string, string> = {
   github_connection_required: "NOT_AUTHENTICATED",
   github_authorization_required: "NOT_AUTHENTICATED",
@@ -55,7 +59,8 @@ export function cloudGithubPrAvailable(target: CloudWorkspaceTarget): boolean {
 export function cloudGithubPrAuthority(
   target: CloudWorkspaceTarget,
 ): CloudGithubPrAuthority | undefined {
-  const authority = snapshots.get(cloudWorkspaceKey(target))?.authority;
+  const snapshot = snapshots.get(cloudWorkspaceKey(target));
+  const authority = snapshot?.catalog === cloudGithubPrCatalogContext(target) ? snapshot?.authority : undefined;
   return authority ? { ...authority } : undefined;
 }
 function forgetPresentation(key: string): void {
@@ -65,7 +70,10 @@ function forgetPresentation(key: string): void {
   );
   invalidateCloudGithubPrScope(key);
 }
-onCloudGithubPrContextChange((key) => {
+onCloudGithubPrContextChange((key, retainPresentation) => {
+  // A new HEAD invalidates request/mutation authority, while the same branch's
+  // last confirmed presentation remains useful during its next read.
+  if (retainPresentation) return;
   snapshots.delete(key);
   forgetPresentation(key);
 });
@@ -126,7 +134,7 @@ export function requestCloudGithubPr(
     delete params.originUrl;
   }
   if (write) {
-    if (!captured)
+    if (!captured || captured.catalog !== context)
       return Promise.reject(
         new Error("Refresh GitHub status before applying this action."),
       );
@@ -198,11 +206,11 @@ export function requestCloudGithubPr(
         throw changed();
       if (write && !same(captured!.authority, response.authority))
         throw changed();
-      const matching = live && same(live.authority, response.authority);
+      const matching = live && live.catalog === context && same(live.authority, response.authority);
       const snapshot: Snapshot = matching
         ? live
-        : { authority: response.authority, revisions: new Map() };
-      if (live && !matching) forgetPresentation(key);
+        : { authority: response.authority, revisions: new Map(), catalog: context };
+      if (live && !samePresentation(live.authority, response.authority)) forgetPresentation(key);
       const result = response.result;
       if (
         result &&
