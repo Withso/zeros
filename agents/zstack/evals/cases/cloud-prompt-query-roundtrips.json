@@ -1,0 +1,9 @@
+{
+  "id": "cloud-prompt-query-roundtrips",
+  "kind": "replay",
+  "area": "control-plane-data",
+  "fixedBy": "pr:868",
+  "symptom": "Durable cloud sends met their transaction budgets but still used 21/23/9/11 database calls for receipt, waiting pull, ACK and begin; a full delivery batch added one call per prompt.",
+  "rule": "agents/zstack/changes/cloud-prompt-query-roundtrips.md: measure driver round trips through the real HTTP and PostgreSQL boundaries, including notification wake-up and full batches. Keep the workspace lock followed by a fresh authority statement and distinct durable ACK and dispatch checkpoints. Run with TEST_DATABASE_URL pointing to disposable PostgreSQL; skipped database tests are unverified.",
+  "check": "pnpm --dir apps/control-plane test src/cloud/prompt-latency.integration.test.ts --maxWorkers=1"
+}

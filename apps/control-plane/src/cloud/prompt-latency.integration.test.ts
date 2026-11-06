@@ -5,7 +5,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 import { HttpError } from "../authz.js";
 import { resetMigratedTestDatabase } from "../test-database.js";
 import { grantTestPro } from "../test-pro.js";
-import { observeTransactionTiming } from "../request-timing.js";
+import { observeTransactionTiming, requestTiming, type RequestDatabaseCost } from "../request-timing.js";
 import { CloudV2Store } from "./store.js";
 import { createCloudGithubServices } from "./github-composition.js";
 import { createCloudV2Routes, type CloudV2RouteDeps } from "./routes.js";
@@ -46,8 +46,10 @@ database("durable prompt request cost", () => {
     await github.authorizeSource(live);
     await github.continueSource(live, live);
     fetcher.mockClear();
+    const costs: RequestDatabaseCost[] = [];
     const app = (signals?: CloudV2PromptSignals, continueSource = github.continueSource) => {
       const api = new Hono();
+      api.use("*", requestTiming({ slowMs: Infinity, databasePool: pool, costObserver: cost => { costs.push(cost); } }));
       api.use("*", async (c, next) => { c.set("user", { id: userId } as never); await next(); });
       api.onError((error, c) => error instanceof HttpError ? c.json({ error: { code: error.code } }, error.status) : c.json({ error: { code: "internal" } }, 500));
       api.route("/", createCloudV2Routes({ store, promptOutbox: true, bridgeBaseUrl: "wss://example.test",
@@ -61,18 +63,18 @@ database("durable prompt request cost", () => {
       method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ chatId: "native-chat", userMessageId: randomUUID(),
         agentId: "claude", model: "claude-haiku-5-5", effort: "low", prompt: [{ type: "text", text: "Reply with exactly: ok" }], startedAt: 1234 }),
     });
-    return { store, workspace, live, scope, github, fetcher, token, boot, userId, organizationId, app, submit };
+    return { store, workspace, live, scope, github, fetcher, token, boot, userId, organizationId, app, submit, costs };
   }
 
   it("wakes the durable pull at commit and bounds receipt, ACK and dispatch authority work", async () => {
-    const { store, workspace, fetcher, token, boot, app: createApp } = await fixture();
+    const { store, workspace, fetcher, token, boot, costs, app: createApp } = await fixture();
     const signals = new CloudV2PromptSignals(), listener = await pool.connect(), app = createApp(signals);
     listener.on("notification", notice => { if (notice.channel === "zeros_cloud_v2_prompts" && notice.payload) signals.wake(notice.payload); });
     await listener.query("LISTEN zeros_cloud_v2_prompts");
-    const samples: Array<{ phase: string; transactions: number; ms: number }> = [];
+    const samples: Array<{ phase: string; transactions: number; queries: number; ms: number }> = [];
     const measure = (phase: string, run: () => Promise<Response>) => {
       const started = performance.now();
-      return observeTransactionTiming(run, timing => samples.push({ phase, transactions: timing.transactions, ms: Math.round(performance.now() - started) }));
+      return observeTransactionTiming(run, timing => samples.push({ phase, transactions: timing.transactions, queries: costs.findLast(cost => cost.route.endsWith(phase === "receipt" ? "/prompts" : `/${phase}`))!.queriesStarted, ms: Math.round(performance.now() - started) }));
     };
     const controller = new AbortController();
     const worker = (phase: string, body: object) => measure(phase, () => app.request(`/v2/cloud/worker/prompts/${phase}`, {
@@ -108,6 +110,8 @@ database("durable prompt request cost", () => {
       expect(samples.find(row => row.phase === "pull")?.transactions).toBeLessThanOrEqual(4);
       expect(samples.find(row => row.phase === "ack")?.transactions).toBeLessThanOrEqual(2);
       expect(samples.find(row => row.phase === "begin")?.transactions).toBeLessThanOrEqual(2);
+      const queryBudgets: Record<string, number> = { receipt: 10, pull: 14, ack: 6, begin: 7 };
+      expect(samples, JSON.stringify(samples)).toSatisfy(values => values.every((value: typeof samples[number]) => value.queries <= queryBudgets[value.phase]!));
       expect(fetcher).not.toHaveBeenCalled();
     } finally {
       controller.abort(); signals.wakeAll(); await pending; pullSpy.mockRestore();
@@ -127,6 +131,34 @@ database("durable prompt request cost", () => {
     await expect(f.store.promptContext(f.workspace.id, randomUUID())).rejects.toMatchObject({ code: "not_found" });
     await pool.query("DELETE FROM organization_members WHERE org_id=$1 AND user_id=$2", [f.organizationId, f.userId]);
     await expect(f.store.promptContext(f.workspace.id, f.userId)).rejects.toMatchObject({ code: "not_found" });
+  });
+
+  it("leases a full batch in constant database work and preserves delivery IDs on a lost reply", async () => {
+    const f = await fixture(), app = f.app();
+    const messages = Array.from({ length: 16 }, () => randomUUID());
+    for (const [index, userMessageId] of messages.entries()) {
+      const response = await app.request(`/v1/cloud-v2/workspaces/${f.workspace.id}/prompts`, {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ chatId: `chat-${index}`, userMessageId, agentId: "claude",
+          prompt: [{ type: "text", text: "Reply with exactly: ok" }], startedAt: 1234 }),
+      });
+      expect(response.status).toBe(201);
+    }
+    const pull = async (held: string[]) => {
+      const response = await app.request("/v2/cloud/worker/prompts/pull", {
+        method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${f.token}`, "x-zeros-worker-boot": f.boot },
+        body: JSON.stringify({ waitMs: 0, held }),
+      });
+      expect(response.status).toBe(200);
+      expect(f.costs.at(-1)?.queriesStarted).toBeLessThanOrEqual(7);
+      return (await response.json()).prompts as Array<{ receipt: { userMessageId: string }; deliveryId: string }>;
+    };
+    const first = await pull([]);
+    expect(first.map(item => item.receipt.userMessageId)).toEqual(messages);
+    expect(new Set(first.map(item => item.deliveryId)).size).toBe(16);
+    expect(await pull([])).toEqual(first);
+    expect(await pull(messages.slice(0, 8))).toEqual(first.slice(8));
+    expect(f.fetcher).not.toHaveBeenCalled();
   });
 
   it("refuses a late creator proof after a newer credential selection was observed", async () => {
