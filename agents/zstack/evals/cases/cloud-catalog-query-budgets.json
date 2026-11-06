@@ -1,0 +1,9 @@
+{
+  "id": "cloud-catalog-query-budgets",
+  "kind": "replay",
+  "area": "control-plane-data",
+  "fixedBy": "pr:867",
+  "symptom": "Warm cloud workspace reads repeated GitHub connection and source authority work for every row: one workspace took ten transactions and a three-workspace list took twenty-two, with no GitHub requests.",
+  "rule": "agents/zstack/changes/cloud-catalog-query-budgets.md: batch live authority and exact source proofs by creator scope, require fresh stopped-workspace admission, and fence the whole catalog before publication. Local membership failures withhold metadata without retiring a workspace. Run with TEST_DATABASE_URL pointing to disposable PostgreSQL; skipped database tests are unverified.",
+  "check": "pnpm --dir apps/control-plane test src/cloud/github-composition.integration.test.ts --maxWorkers=1"
+}
