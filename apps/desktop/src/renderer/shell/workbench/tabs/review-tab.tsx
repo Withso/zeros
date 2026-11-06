@@ -46,7 +46,7 @@ import {
   useReviewLiveData,
 } from "./review-data";
 import { useReviewGithubFailure } from "../../pr/review-github-failure";
-import { derivePrStatusView, reviewFindings, summarizeChecks } from "./review-model";
+import { derivePrStatusView, reviewCommentViewer, reviewFindings, summarizeChecks } from "./review-model";
 import { reviewRepositoryLabel } from "./review-repository-label";
 import { ErrorCallout } from "./review-shared-components";
 import {
@@ -484,9 +484,14 @@ export function ReviewView({
     },
     "review-resources",
   );
+  const inlineViewer = githubReview.snapshot?.viewer;
   const commentViewer = useMemo(
-    () => (snap.login ? { login: snap.login, avatarUrl: snap.avatarUrl } : null),
-    [snap.login, snap.avatarUrl],
+    () => reviewCommentViewer({ login: snap.login, avatarUrl: snap.avatarUrl }, inlineViewer),
+    [snap.login, snap.avatarUrl, inlineViewer],
+  );
+  const postAsViewer = useCallback(
+    (body: string) => postComment(body, commentViewer),
+    [postComment, commentViewer],
   );
   const checksSummary = summarizeChecks(snap.checks);
   const conversationCount = snap.timeline?.length ?? null;
@@ -736,7 +741,7 @@ export function ReviewView({
             hostLabel={provider.hostLabel}
             viewer={commentViewer}
             onAddToChat={addToChat}
-            onPostComment={postComment}
+            onPostComment={postAsViewer}
             onRetry={() => void refresh()}
             checks={snap.checks}
             chats={commitChats}

@@ -553,3 +553,21 @@ export function mergeMethodDetail(
   if (method === "rebase") return `${these} replay onto ${base}`;
   return null;
 }
+
+// ── comment author ───────────────────────────────────────────
+
+export interface ReviewCommentViewer {
+  login: string;
+  avatarUrl: string | null;
+}
+
+/** The GitHub account a conversation comment posts as. Local learns it from
+ *  the pull request read's account check; cloud reads authorize themselves and
+ *  skip that check, so the inline review read's viewer names it there. */
+export function reviewCommentViewer(
+  snapshot: { login: string | null; avatarUrl: string | null },
+  inlineViewer: ReviewCommentViewer | null | undefined,
+): ReviewCommentViewer | null {
+  if (snapshot.login) return { login: snapshot.login, avatarUrl: snapshot.avatarUrl };
+  return inlineViewer ? { login: inlineViewer.login, avatarUrl: inlineViewer.avatarUrl } : null;
+}

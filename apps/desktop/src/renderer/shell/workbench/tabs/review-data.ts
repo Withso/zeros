@@ -435,8 +435,9 @@ export interface ReviewLiveData {
   /** Silent full refresh (deduped). */
   refresh: () => Promise<void>;
   /** Post a conversation comment with an optimistic timeline entry. Throws on
-   *  failure (after rolling the optimistic entry back). */
-  postComment: (body: string) => Promise<void>;
+   *  failure (after rolling the optimistic entry back). `as` names the
+   *  posting account when this snapshot hasn't (cloud skips the account check). */
+  postComment: (body: string, as?: { login: string; avatarUrl: string | null } | null) => Promise<void>;
   merge: (method: ReviewMergeMethod) => Promise<void>;
   markReady: () => Promise<void>;
   /** Absent when the provider can't write the description. */
@@ -636,14 +637,14 @@ export function useReviewLiveData(args: {
   }, [pollChecks, provider, key]);
 
   const postComment = useCallback(
-    async (body: string) => {
+    async (body: string, as?: { login: string; avatarUrl: string | null } | null) => {
       const e = entryFor(key);
       if (!currentReviewEntry(provider, target, key, e)) throw new Error("Your GitHub connection changed. Refresh before posting.");
       const optimistic: ReviewTimelineEntry = {
         kind: "comment",
         id: -Date.now(),
-        author: e.snap.login ?? "you",
-        authorAvatarUrl: e.snap.avatarUrl,
+        author: e.snap.login ?? as?.login ?? "you",
+        authorAvatarUrl: e.snap.login ? e.snap.avatarUrl : (as?.avatarUrl ?? null),
         state: "",
         body,
         url: null,
