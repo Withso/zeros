@@ -1,0 +1,9 @@
+{
+  "id": "macos-update-relaunch-suspended",
+  "kind": "replay",
+  "area": "desktop-native",
+  "fixedBy": "pr:873",
+  "symptom": "After an automatic update restart, ShipIt's LaunchServices relaunch of Zeros Alpha failed with -600 (procNotFound) and left the new app process suspended in state T. It stayed the app's launchd job, so every later open failed with 'The application is not open anymore' until the process was killed by hand.",
+  "rule": "Prove an 'app won't open' report from the Mac's ShipIt, unified and process logs before changing code (bug-fix playbook, principles 5 and 16). Every update restart arms an outside relaunch guard that kills a post-update instance still stopped after its grace period and reopens the bundle, never touching processes that existed before the restart; test it with real stopped processes (principles 13 and 14).",
+  "check": "pnpm exec vitest run --config vitest.config.ts apps/desktop/electron/__tests__/updater-relaunch-guard.test.ts -t 'arms the guard before Squirrel quits'"
+}
