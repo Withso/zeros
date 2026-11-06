@@ -202,7 +202,7 @@ describe("cloud v2 lifecycle", () => {
     vmCommands(f);
     await f.lifecycle.tick();
     const [, command, timeout] = vmCommand(f, "zeros-checkpoint-saved")!;
-    expect(command).toContain("systemctl stop zeros-worker.service");
+    expect(command).toContain("systemctl stop zeros-worker.service >/dev/null 2>&1 || true\nsudo -n systemctl disable zeros-worker.service");
     expect(command).toContain("/home/user/o/r");
     expect(command).not.toContain(Buffer.alloc(32, 7).toString("base64"));
     expect(timeout).toBe(540);
@@ -863,6 +863,11 @@ describe("cloud v2 lifecycle", () => {
     expect(command).toContain(Buffer.from(token).toString("base64"));
     expect(command).toContain(CLOUD_V2_WORKER_TOKEN_PATH);
     expect(() => deliverWorkerTokenCommand("zw2w_'; rm -rf / #")).toThrow();
+  });
+
+  it("re-enables the worker that stop disabled before restarting it with the delivered token", () => {
+    const command = deliverWorkerTokenCommand(token);
+    expect(command).toMatch(/systemctl is-enabled --quiet zeros-worker\.service \|\| sudo -n systemctl enable zeros-worker\.service[^)]*\) && \(sudo -n systemctl restart zeros-worker\.service/);
   });
 });
 

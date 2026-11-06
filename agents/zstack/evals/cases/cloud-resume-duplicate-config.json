@@ -1,0 +1,9 @@
+{
+  "id": "cloud-resume-duplicate-config",
+  "kind": "replay",
+  "area": "cloud-worker",
+  "fixedBy": "pr:875",
+  "symptom": "A resumed cloud workspace answered the waiting app's open only after a second full configure. The relay re-sent the hello configuration after dialing, and it differed only by a freshly minted Codex proxy token. That cost 3-11 s of the 22-52 s resume. Boat's restore also started the still-enabled worker unit on its stale credential, so token delivery had to restart it (~2.7 s).",
+  "rule": "zstack-verify live resume evidence: run a cold stop/resume probe with an idle gap after `stopped` (an immediate start added ~13 s before the lifecycle began). Read the per-phase worker timings and the VM journal before optimizing. Treat a repeated configuration whose only difference is a rotating credential as a no-op that still adopts the credential, and re-apply in full after any transport disconnect.",
+  "check": "pnpm --dir apps/cloud-worker exec vitest run src/__tests__/worker.test.ts -t \"duplicate configuration\""
+}
