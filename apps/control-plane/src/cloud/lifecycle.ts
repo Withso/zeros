@@ -72,6 +72,8 @@ export type CloudV2TimingRecord = {
   /** relay_ready: the worker socket dial, and the time from it to readiness.
    * worker_hello: configMs is the control plane's configuration inside hello. */
   dialMs?: number; configMs?: number;
+  /** relay_ready: route reads until the worker was ready, including the successful one. */
+  attempts?: number;
 };
 type TimingDetail = Pick<CloudV2TimingRecord, "runtimeChanged" | "checkpoint">;
 export function emitCloudV2Timing(observer: ((record: CloudV2TimingRecord) => void) | undefined, record: CloudV2TimingRecord): void {

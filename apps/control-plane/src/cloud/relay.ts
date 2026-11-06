@@ -325,7 +325,7 @@ export class CloudV2Relay {
   private async connect(room: Room): Promise<void> {
     const started = this.deps.now?.() ?? Date.now();
     const deadline = Date.now() + 60_000;
-    for (let attempt = 0; this.wanted(room) && Date.now() < deadline; attempt++) {
+    for (let attempt = 0, attempts = 0; this.wanted(room) && Date.now() < deadline; attempt++, attempts++) {
       if (await this.current(room) !== "allowed") return;
       let ws: WebSocket | undefined;
       try {
@@ -355,7 +355,8 @@ export class CloudV2Relay {
             room.ready = true; room.wakeAllowed = false; delete room.readyHinted;
             const at = this.deps.now?.() ?? Date.now();
             emitCloudV2Timing(this.deps.timing, { workspaceId: room.workspace.id.slice(0, 8), phase: "relay_ready",
-              durationMs: Math.max(0, Math.round(at - started)), dialMs: Math.max(0, Math.round(dialed - dialStarted)), configMs: Math.max(0, Math.round(at - dialed)) });
+              durationMs: Math.max(0, Math.round(at - started)), dialMs: Math.max(0, Math.round(dialed - dialStarted)), configMs: Math.max(0, Math.round(at - dialed)),
+              attempts: attempts + 1 });
             for (const [clientId, client] of room.clients) {
               if (client.ws.readyState !== WebSocket.OPEN) continue;
               send(ws, { t: "open", clientId });
@@ -369,20 +370,26 @@ export class CloudV2Relay {
         }
       } catch { ws?.terminate(); /* Errors can include route headers; never log them. */ }
       const ms = Math.min(this.deps.retryMaxMs ?? 2000, (this.deps.retryBaseMs ?? 250) * 2 ** Math.min(attempt, 4));
-      await this.retryWait(room, ms);
+      // A worker that has just become ready is retried from the base delay.
+      if (await this.retryWait(room, ms)) attempt = -1;
     }
     if (!room.revoked && this.wanted(room)) {
       for (const { ws: client } of room.clients.values()) client.close(1013, "workspace_starting");
       for (const finish of room.stops.values()) finish(false);
     }
   }
-  private retryWait(room: Room, ms: number): Promise<void> {
-    if (room.readyHinted || room.abort.signal.aborted) { delete room.readyHinted; return Promise.resolve(); }
+  /** Resolves true when a ready hint, not the delay, ended the wait. */
+  private retryWait(room: Room, ms: number): Promise<boolean> {
+    if (room.readyHinted || room.abort.signal.aborted) {
+      const hinted = room.readyHinted === true && !room.abort.signal.aborted;
+      delete room.readyHinted; return Promise.resolve(hinted);
+    }
     return new Promise(resolve => {
       const done = () => {
         clearTimeout(timer); room.abort.signal.removeEventListener("abort", done);
         if (room.retryNow === done) delete room.retryNow;
-        delete room.readyHinted; resolve();
+        const hinted = room.readyHinted === true && !room.abort.signal.aborted;
+        delete room.readyHinted; resolve(hinted);
       };
       const timer = setTimeout(done, ms);
       room.abort.signal.addEventListener("abort", done, { once: true });

@@ -249,6 +249,26 @@ describe("cloud v2 relay", () => {
       await vi.waitFor(() => expect(connectedWorkers).toHaveLength(1));
       expect(deps.workerRoute).toHaveBeenCalledTimes(2);
     });
+    it("restarts the retry backoff after a ready hint so a refused first dial is retried at the base delay", async () => {
+      deps.retryBaseMs = 1; deps.retryMaxMs = 60_000;
+      state = "starting";
+      const waits: number[] = [], target = relay as unknown as { retryWait(room: unknown, ms: number): Promise<boolean> };
+      const wait = target.retryWait.bind(relay);
+      vi.spyOn(target, "retryWait").mockImplementation((room, ms) => { waits.push(ms); return wait(room, ms); });
+      const original = vi.mocked(deps.workerRoute).getMockImplementation()!;
+      let refused = false;
+      vi.mocked(deps.workerRoute).mockImplementation(async id => {
+        const route = await original(id);
+        if (state !== "running" || refused || !route) return route;
+        refused = true; return { ...route, url: "ws://127.0.0.1:9/refused" };
+      });
+      await app();
+      await vi.waitFor(() => expect(waits).toContain(16));
+      state = "running"; relay.hintReady(workspaceId);
+      await vi.waitFor(() => expect(connectedWorkers).toHaveLength(1));
+      expect(refused).toBe(true);
+      expect(waits.at(-1)).toBe(1);
+    });
     it("keeps a ready hint that lands while the route read is in flight", async () => {
       deps.retryBaseMs = 60_000; deps.retryMaxMs = 60_000;
       state = "starting";
@@ -360,7 +380,7 @@ describe("cloud v2 relay", () => {
     deps.config = async ws => { now += 75; return original(ws); };
     await app();
     await vi.waitFor(() => expect(timing).toHaveBeenCalledTimes(1));
-    expect(timing).toHaveBeenCalledWith({ workspaceId: workspaceId.slice(0, 8), phase: "relay_ready", durationMs: 75, dialMs: 0, configMs: 75 });
+    expect(timing).toHaveBeenCalledWith({ workspaceId: workspaceId.slice(0, 8), phase: "relay_ready", durationMs: 75, dialMs: 0, configMs: 75, attempts: 2 });
     expect(deps.workerRoute).toHaveBeenCalledTimes(2);
   });
 
