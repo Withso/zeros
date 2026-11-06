@@ -1,0 +1,9 @@
+{
+  "id": "settings-listen-url-typo-throws",
+  "kind": "replay",
+  "area": "desktop-engine",
+  "fixedBy": "pr:851",
+  "symptom": "A hand-written MCP listen_url without its scheme (127.0.0.1:8080) made settings validation throw \"Invalid URL\", because zod still ran the loopback refinement after .url() failed. Settings resolution and the MCP registry stopped instead of dropping that one server with a warning.",
+  "rule": "A validator never throws on input an earlier check rejected; test refusals with realistic typos (principle 13).",
+  "check": "pnpm exec vitest run --config vitest.config.ts apps/desktop/src/engine/settings/__tests__/schema.test.ts -t 'listen_url is not a URL'"
+}

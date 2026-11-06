@@ -125,6 +125,15 @@ it("keeps failed rows selected and retries only those rows with their original c
   expect(attempts[1].id).toBe(attempts[2].id);
 });
 
+it("states no tool limit for any provider", async () => {
+  await page.evaluate(() => {
+    const f = (window as any).fixture;
+    f.sources = [{ source: "cursor", label: "Cursor", exists: true, path: "/fixture/mcp.json", servers: [{ name: "database", transport: "stdio", command: "discovered" }] }];
+    f.render();
+  });
+  await page.getByRole("checkbox", { name: /database.*discovered/ }).waitFor();
+  expect(await page.getByRole("dialog").textContent()).not.toMatch(/allows about|tools in total/);
+});
 it("does not continue a held batch or close a newly opened dialog after its owner retires", async () => {
   await page.evaluate(() => {
     const f = (window as any).fixture;

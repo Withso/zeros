@@ -1,49 +1,68 @@
 import { createHash } from "node:crypto";
 import type { McpServerRegistration } from "../types";
 import type { RepoTaskBoundaryFactory } from "../containment/types";
-import { materializeMcpServerRegistration } from "../mcp-registration";
+import { McpServerStartError, materializeMcpServerRegistration, unavailableMcpServer, type UnavailableMcpServer } from "../mcp-registration";
+import { mcpServerEnvironment } from "../mcp-process-env";
 import { McpHttpLauncher } from "./http-launcher";
 
 /** Explicit session admission owns these processes; form reads and HTTP
  * probes never launch a command. Retain only live configurations, with no
- * idle health checks or retries. */
+ * idle health checks or retries. A server that cannot start is left out of
+ * that admission and reported; the next admission tries it again. */
 export class LaunchedMcpServers {
   private readonly entries = new Map<string, { launcher: McpHttpLauncher; signature: string; cwd: string; owner: string; organization: boolean }>();
   private readonly flights = new Map<string, Promise<unknown>>();
   private readonly admissions = new Set<{ cwd: string; owner: string; organization: boolean; retired: boolean }>();
   private closed = false;
   constructor(private readonly boundaryFactory: RepoTaskBoundaryFactory) {}
-  resolve(servers: McpServerRegistration[], cwd: string, env: Record<string, string>, owner: string, repoRoot: string, organization: boolean, signal?: AbortSignal): Promise<McpServerRegistration[]> {
+  resolve(servers: McpServerRegistration[], cwd: string, env: Record<string, string>, owner: string, repoRoot: string, organization: boolean, signal?: AbortSignal): Promise<{ servers: McpServerRegistration[]; unavailable: UnavailableMcpServer[] }> {
     const admission = { cwd, owner, organization, retired: false };
     this.admissions.add(admission);
     const assertCurrent = () => {
       if (this.closed || admission.retired) throw new Error("MCP runtime changed. Try again.");
       signal?.throwIfAborted();
     };
+    const launch = async (server: Extract<McpServerRegistration, { transport: "stdio" }> & { listenUrl: string }, key: string) => {
+      const materialized = materializeMcpServerRegistration(server, env);
+      if (materialized.transport !== "stdio") throw new McpServerStartError("Invalid MCP process configuration.");
+      const processEnv = mcpServerEnvironment(env, materialized.env);
+      const signature = createHash("sha256").update(JSON.stringify([server, cwd, processEnv])).digest("hex");
+      let entry = this.entries.get(key);
+      if (entry && entry.signature !== signature) { await entry.launcher.dispose(); this.entries.delete(key); entry = undefined; }
+      assertCurrent();
+      if (!entry) {
+        if (this.entries.size >= 64) throw new McpServerStartError("Too many MCP servers are running. Close other chats and try again.");
+        entry = { signature, cwd, owner, organization, launcher: new McpHttpLauncher({ command: server.command,
+          args: server.args, cwd: server.cwd, env: processEnv, listenUrl: server.listenUrl, workspaceRoot: cwd, repoRoot, boundaryFactory: this.boundaryFactory }) };
+        this.entries.set(key, entry);
+      }
+      try {
+        await entry.launcher.ensureRunning(signal);
+      } catch (error) {
+        // A failed start whose stop was proven holds no process, so it stops
+        // counting toward the limit; an unproven one keeps its handle for a retry.
+        if (entry.launcher.idle && this.entries.get(key) === entry) this.entries.delete(key);
+        throw error;
+      }
+      return entry.launcher.endpoint;
+    };
     const run = async () => {
       assertCurrent();
       const output: McpServerRegistration[] = [];
+      const unavailable: UnavailableMcpServer[] = [];
       const wanted = new Set<string>();
       for (const server of servers) {
         if (server.transport !== "stdio" || !server.listenUrl) { output.push(server); continue; }
         const key = JSON.stringify([owner, cwd, server.name]); wanted.add(key);
-        const materialized = materializeMcpServerRegistration(server, env);
-        if (materialized.transport !== "stdio") throw new Error("Invalid MCP process configuration.");
-        const processEnv = Object.fromEntries(Object.entries(env).filter(([name]) => !/^ZEROS_MCP_[A-F0-9]{32}_/.test(name) && name !== "ZEROS_LOCAL_DEVELOPMENT"));
-        Object.assign(processEnv, materialized.env);
-        const signature = createHash("sha256").update(JSON.stringify([server, cwd, processEnv])).digest("hex");
-        let entry = this.entries.get(key);
-        if (entry && entry.signature !== signature) { await entry.launcher.dispose(); this.entries.delete(key); entry = undefined; }
-        assertCurrent();
-        if (!entry) {
-          if (this.entries.size >= 64) throw new Error("Too many running MCP processes.");
-          entry = { signature, cwd, owner, organization, launcher: new McpHttpLauncher({ command: server.command,
-            args: server.args, cwd: server.cwd, env: processEnv, listenUrl: server.listenUrl, workspaceRoot: cwd, repoRoot, boundaryFactory: this.boundaryFactory }) };
-          this.entries.set(key, entry);
+        try {
+          const url = await launch({ ...server, listenUrl: server.listenUrl }, key);
+          assertCurrent();
+          output.push({ name: server.name, transport: "http", url });
+        } catch (error) {
+          // Cancellation and runtime changes still fail the whole admission.
+          assertCurrent();
+          unavailable.push(unavailableMcpServer(server.name, error));
         }
-        await entry.launcher.ensureRunning(signal);
-        assertCurrent();
-        output.push({ name: server.name, transport: "http", url: entry.launcher.endpoint });
       }
       for (const [key, entry] of this.entries) {
         if (entry.owner === owner && entry.cwd === cwd && !wanted.has(key)) {
@@ -51,7 +70,7 @@ export class LaunchedMcpServers {
         }
       }
       assertCurrent();
-      return output;
+      return { servers: output, unavailable };
     };
     const previous = this.flights.get(owner) ?? Promise.resolve();
     const flight = previous.then(run, run);

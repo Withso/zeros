@@ -59,6 +59,13 @@ let mount = 0;
 let currentSub = (fixtureParams.get("sub") ?? "changes") as ReviewSubtab;
 const rich = fixtureParams.has("rich");
 const DAY = 86_400_000;
+/** A commit date inside the local calendar day `daysAgo` back. The Commits tab
+ *  groups by the viewer's day, so just after midnight "2 hours ago" is yesterday. */
+const commitDate = (hoursAgo: number, daysAgo: number) => {
+  const now = new Date();
+  const dayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate() - daysAgo).getTime();
+  return Math.max(dayStart, now.getTime() - hoursAgo * 3_600_000);
+};
 /** Bodies the description editor saved, in order (read by the smoke). */
 const descriptionWrites: string[] = [];
 (window as unknown as { __descriptionWrites: string[] }).__descriptionWrites = descriptionWrites;
@@ -141,9 +148,9 @@ const provider: ReviewProvider = {
   getCommits: async () =>
     rich
       ? [
-          { sha: "a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0", abbreviatedSha: "a1b2c3d", message: "Use timing-safe compare for session MACs", authorName: "Alex Morgan", authorLogin: "alex-morgan", authorAvatarUrl: null, date: Date.now() - 2 * 3_600_000, coAuthors: [{ name: "Claude", avatarUrl: null }], additions: 6, deletions: 4, changedFiles: 2 },
-          { sha: "e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3", abbreviatedSha: "e4f5a6b", message: "Shorten session lifetime to 12 hours", authorName: "Alex Morgan", authorLogin: "alex-morgan", authorAvatarUrl: null, date: Date.now() - 3 * 3_600_000, coAuthors: [], additions: 1, deletions: 1, changedFiles: 1 },
-          { sha: "0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b", abbreviatedSha: "0a1b2c3", message: "Remove legacy cookie helper", authorName: "Priya Shah", authorLogin: "priya-shah", authorAvatarUrl: null, date: Date.now() - 26 * 3_600_000, coAuthors: [], additions: 0, deletions: 40, changedFiles: 1 },
+          { sha: "a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0", abbreviatedSha: "a1b2c3d", message: "Use timing-safe compare for session MACs", authorName: "Alex Morgan", authorLogin: "alex-morgan", authorAvatarUrl: null, date: commitDate(2, 0), coAuthors: [{ name: "Claude", avatarUrl: null }], additions: 6, deletions: 4, changedFiles: 2 },
+          { sha: "e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3", abbreviatedSha: "e4f5a6b", message: "Shorten session lifetime to 12 hours", authorName: "Alex Morgan", authorLogin: "alex-morgan", authorAvatarUrl: null, date: commitDate(3, 0), coAuthors: [], additions: 1, deletions: 1, changedFiles: 1 },
+          { sha: "0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b", abbreviatedSha: "0a1b2c3", message: "Remove legacy cookie helper", authorName: "Priya Shah", authorLogin: "priya-shah", authorAvatarUrl: null, date: commitDate(26, 1), coAuthors: [], additions: 0, deletions: 40, changedFiles: 1 },
         ]
       : [],
   getTimeline: async () =>

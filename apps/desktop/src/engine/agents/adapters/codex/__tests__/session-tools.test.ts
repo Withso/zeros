@@ -4,6 +4,8 @@ import {
   authenticateCodexSessionTool,
 } from "../session-tools";
 
+const DISCOVERY_FAILED = "Codex could not load this server's tools.";
+
 describe("Codex session tool connections", () => {
   it("distinguishes discovery failure from a valid empty or cached catalog", async () => {
     const requestTyped = vi.fn().mockResolvedValue({
@@ -46,7 +48,7 @@ describe("Codex session tool connections", () => {
         id: "failed",
         name: "failed",
         status: "error",
-        detail: "Tool discovery timed out.",
+        detail: DISCOVERY_FAILED,
       },
       { id: "empty", name: "empty", status: "connected" },
       { id: "cached", name: "cached", status: "connected" },
@@ -56,19 +58,29 @@ describe("Codex session tool connections", () => {
         name: "auth",
         status: "needs-auth",
         canAuthenticate: true,
-        detail: "Tool discovery requires authentication.",
+        detail: DISCOVERY_FAILED,
       },
     ]);
   });
 
-  it("bounds and scrubs discovery diagnostics before exposing the existing detail", async () => {
-    const secret = "fixture-credential-value";
+  it("shows a fixed message instead of Codex's discovery error text", async () => {
     const requestTyped = vi.fn().mockResolvedValue({
       data: [
         {
-          name: "failed",
+          name: "header",
           runtimeStatus: "connected",
-          toolsError: `Discovery failed: Authorization: Bearer ${secret}\n${"x".repeat(2000)}`,
+          toolsError: `Discovery failed: Authorization: Bearer fixture-credential-value\n${"x".repeat(2000)}`,
+        },
+        {
+          name: "url",
+          runtimeStatus: "connected",
+          toolsError:
+            "Discovery failed at http://fixture-user:fixture-password@localhost:8080/mcp?token=fixture-token",
+        },
+        {
+          name: "path",
+          runtimeStatus: "connected",
+          toolsError: "spawn /Users/fixture/private/server.js ENOENT",
         },
       ],
       nextCursor: null,
@@ -77,9 +89,12 @@ describe("Codex session tool connections", () => {
       { requestTyped } as never,
       "thread-a",
     );
-    expect(result.entries[0].detail).toContain("Discovery failed");
-    expect(result.entries[0].detail).not.toContain(secret);
-    expect(result.entries[0].detail!.length).toBeLessThanOrEqual(1000);
+    expect(result.entries.map(({ status, detail }) => ({ status, detail }))).toEqual([
+      { status: "error", detail: DISCOVERY_FAILED },
+      { status: "error", detail: DISCOVERY_FAILED },
+      { status: "error", detail: DISCOVERY_FAILED },
+    ]);
+    expect(JSON.stringify(result)).not.toMatch(/fixture|Discovery failed|ENOENT/);
   });
 
   it("uses thread runtime status, aggregates apps, hides disabled servers and strips credentials", async () => {
@@ -153,31 +168,9 @@ describe("Codex session tool connections", () => {
       expect(
         (await readCodexSessionTools({ requestTyped } as never, "thread"))
           .entries[0],
-      ).toMatchObject({ status: "error", detail: "Tool discovery failed." });
+      ).toMatchObject({ status: "error", detail: DISCOVERY_FAILED });
     },
   );
-
-  it("removes URL credentials from native discovery diagnostics", async () => {
-    const requestTyped = vi.fn().mockResolvedValue({
-      data: [
-        {
-          name: "failed",
-          runtimeStatus: "connected",
-          toolsError:
-            "Discovery failed at http://fixture-user:fixture-password@localhost:8080/mcp?token=fixture-token",
-        },
-      ],
-      nextCursor: null,
-    });
-    const result = await readCodexSessionTools(
-      { requestTyped } as never,
-      "thread",
-    );
-    expect(result.entries[0].detail).toContain("Discovery failed");
-    expect(result.entries[0].detail).not.toMatch(
-      /fixture-user|fixture-password|fixture-token/,
-    );
-  });
 
   it("only authenticates an eligible server in the same thread and validates its browser URL", async () => {
     const requestTyped = vi

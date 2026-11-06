@@ -35,6 +35,7 @@ describe("launched loopback MCP lifecycle", () => {
     // Retain the same boundary handle a real successful launch would own.
     (launcher as unknown as { boundary: PreparedBoundary }).boundary = { stopAndProve } as unknown as PreparedBoundary;
     await expect(launcher.dispose()).rejects.toThrow("Fixture cleanup refusal");
+    expect(launcher.idle).toBe(false);
     const retry = launcher.dispose();
     const concurrent = launcher.dispose();
     expect(retry).toBe(concurrent);
@@ -43,6 +44,7 @@ describe("launched loopback MCP lifecycle", () => {
       await vi.waitFor(() => expect(stopAndProve).toHaveBeenCalledTimes(2));
     } finally { release?.(); await result; }
     expect(await result).toBe(true);
+    expect(launcher.idle).toBe(true);
     await launcher.dispose();
     expect(stopAndProve).toHaveBeenCalledTimes(2);
     await expect(launcher.ensureRunning()).rejects.toThrow("closed");
@@ -82,6 +84,7 @@ describe("launched loopback MCP lifecycle", () => {
       workspaceRoot: root, startupTimeoutMs: 400 });
     cleanups.push(() => launcher.dispose());
     await expect(launcher.ensureRunning()).rejects.toThrow("start");
+    expect(launcher.idle).toBe(true);
     const controller = new AbortController();
     const pending = launcher.ensureRunning(controller.signal);
     controller.abort();

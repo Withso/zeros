@@ -1,0 +1,9 @@
+{
+  "id": "mcp-editor-dormant-variables",
+  "kind": "replay",
+  "area": "renderer-settings",
+  "fixedBy": "pr:851",
+  "symptom": "The MCP editor showed Variables for an HTTP server with No sign-in, where no field can use them, and saved those dormant values.",
+  "rule": "Variables appear only where a header or the stdio environment can use them, and a value no field uses is never saved. Principle 3.",
+  "check": "pnpm exec vitest run --config vitest.config.ts apps/desktop/src/renderer/features/agent-extensions/__tests__/mcp-server-editor.test.ts -t 'offers variables only'"
+}

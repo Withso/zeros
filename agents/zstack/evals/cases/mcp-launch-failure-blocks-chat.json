@@ -1,0 +1,9 @@
+{
+  "id": "mcp-launch-failure-blocks-chat",
+  "kind": "replay",
+  "area": "desktop-agents",
+  "fixedBy": "pr:851",
+  "symptom": "One MCP server with \"Also listens on\" failed to start, and the whole chat refused to start, so the conversation and every other server were unavailable.",
+  "rule": "A server that cannot start is left out of that chat: the chat starts without a notice and the server shows its error only in the composer's MCP tools list. Principles 5 and 13.",
+  "check": "pnpm exec vitest run --config vitest.config.ts apps/desktop/src/engine/agents/gateway/__tests__/launched-servers.test.ts apps/desktop/src/engine/agents/__tests__/gateway-mcp.test.ts apps/desktop/src/renderer/features/agent/__tests__/composer-tool-groups.test.ts -t 'does not start|cannot start|without a sign-in action'"
+}

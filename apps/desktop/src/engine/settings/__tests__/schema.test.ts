@@ -1,6 +1,10 @@
+import Ajv from "ajv";
+import addFormats from "ajv-formats";
 import { describe, expect, it } from "vitest";
+import { z } from "zod";
 import {
   REPO_FILE_UNSUPPORTED_KEYS,
+  mcpServerSchema,
   repoLocalSettingsSchema,
   sanitizeLayer,
 } from "../schema";
@@ -597,6 +601,22 @@ describe("sanitizeLayer", () => {
     expect(r.warnings).toHaveLength(2);
   });
 
+  it("drops a server whose listen_url is not a URL, keeping its siblings", () => {
+    const r = sanitizeLayer(
+      {
+        mcp: {
+          servers: [
+            { name: "typo", transport: "stdio", command: "a", listen_url: "127.0.0.1:8080" },
+            { name: "ok", transport: "stdio", command: "b", listen_url: "http://127.0.0.1:8080/mcp" },
+          ],
+        },
+      },
+      "user",
+    );
+    expect((r.doc.mcp as { servers: Array<{ name: string }> }).servers.map((s) => s.name)).toEqual(["ok"]);
+    expect(r.warnings).toHaveLength(1);
+  });
+
   it("warns when [mcp] is not a table or mcp.servers is not an array", () => {
     expect(sanitizeLayer({ mcp: "nope" }, "user").warnings).toHaveLength(1);
     expect(sanitizeLayer({ mcp: "nope" }, "user").doc.mcp).toBeUndefined();
@@ -609,6 +629,20 @@ describe("sanitizeLayer", () => {
     const r = sanitizeLayer({ mcp: { future_knob: 7, servers: [] } }, "user");
     expect((r.doc.mcp as Record<string, unknown>).future_knob).toBe(7);
     expect(r.warnings).toEqual([]);
+  });
+});
+
+describe("published settings schema", () => {
+  it("gives editors the same listen_url rule the engine enforces", () => {
+    const ajv = new Ajv({ strict: false });
+    addFormats(ajv);
+    const published = ajv.compile(z.toJSONSchema(mcpServerSchema, { target: "draft-7", io: "input" }));
+    const server = (listen_url: string) => ({ name: "local", transport: "stdio", command: "server", listen_url });
+    const verdicts = (listen_url: string) => [published(server(listen_url)), mcpServerSchema.safeParse(server(listen_url)).success];
+    for (const listen_url of ["http://127.0.0.1:8123/mcp", "http://localhost:8123/mcp", "http://[::1]:8123/mcp", "http://localhost", "http://localhost:65535/mcp?x=1"])
+      expect(verdicts(listen_url), listen_url).toEqual([true, true]);
+    for (const listen_url of ["https://127.0.0.1/mcp", "http://example.test/mcp", "http://127.example.test:8/mcp", "http://user@127.0.0.1:8/mcp", "http://localhost/mcp#top", "http://localhost:65536/mcp"])
+      expect(verdicts(listen_url), listen_url).toEqual([false, false]);
   });
 });
 

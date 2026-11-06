@@ -41,6 +41,29 @@ describe("MCP sign-in rows", () => {
     expect(render("connecting", false)).toContain("lucide-loader-circle");
     expect(render("error", false)).toContain('aria-label="Error"');
   });
+  it("says why a server without a sign-in action failed", () => {
+    const html = renderToStaticMarkup(createElement(ComposerToolGroups, {
+      snapshot: { state: "ready", entries: [], groups: [{ kind: "mcp", state: "ready", entries: [
+        { id: "unavailable:listener", name: "listener", status: "error", detail: "The server exited before it started listening." },
+      ] }] },
+      authBusy: null, onAuthenticate: () => {},
+    }));
+    expect(html).toContain(">listener<");
+    expect(html).toContain('aria-label="Error: The server exited before it started listening."');
+    expect(html).not.toContain("Authenticate");
+  });
+  it("shows a connection the agent cannot verify as unknown, not failed", () => {
+    const html = renderToStaticMarkup(createElement(ComposerToolGroups, {
+      snapshot: { state: "unsupported", entries: [], groups: [{ kind: "mcp", state: "partial", entries: [
+        { id: "linear", name: "linear", status: "unverified", detail: "Cursor does not report whether this server connected." },
+      ] }] },
+      authBusy: null, onAuthenticate: () => {},
+    }));
+    expect(html).toContain('aria-label="Not verified: Cursor does not report whether this server connected."');
+    expect(html).toContain("lucide-circle-dashed");
+    expect(html).not.toContain("lucide-x");
+    expect(html).not.toContain("text-red-primary");
+  });
   it("does not apply an MCP attempt to a plugin or app with the same id", () => {
     const html = renderToStaticMarkup(createElement(ComposerToolGroups, {
       snapshot: { state: "ready", entries: [], groups: [

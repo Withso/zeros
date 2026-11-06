@@ -330,9 +330,10 @@ inventory with retained entries displays a dash, not zero.
 Partial counts have an asterisk and can include retained, unverified entries.
 Expanded rows show only a name and a status icon or supported authentication
 action, without descriptions or inline status labels. Enabled/loaded plugins
-and available/connected tools receive a tick; unavailable states receive an
-error icon. The underlying status is retained in accessible names and short
-hover titles. Refresh uses `--fg2`. Authenticate is an unpadded text action with
+and available/connected tools receive a tick; Not verified entries receive a
+neutral dashed circle; other unavailable states receive an error icon. The
+underlying status is retained in accessible names and short hover titles.
+Refresh uses `--fg2`. Authenticate is an unpadded text action with
 no hover background; its color starts at `--blue-fg` and increases only HSL
 lightness by ten percentage points on hover, derived from the active theme.
 Plugins can
@@ -438,9 +439,15 @@ runtime loads it. Changing that creation-time flag takes effect when the query
 is recreated at the normal session boundary.
 
 Cursor has no public
-MCP connection-status API, so its rows show an Error with an explanation that
-status could not be verified, and its Local rows show Not verified; configured
-does not receive a connection tick.
+MCP connection-status API, so its grouped rows, configured and Local, show Not
+verified with that explanation; the strict legacy list, which has no such
+status, still reports those configured servers as errors. Configured does not
+receive a connection tick; Zeros' own evidence does. A row becomes Connected
+once Cursor completes one of that server's tools in the chat (a call that
+returns an error does not count), and an engine-hosted Zeros server becomes
+Connected once it serves its tool list to the chat's provider, which only the
+holder of that chat's capability can request. A status the provider reports
+is never replaced by this evidence.
 Provider errors, tool schemas, URLs, headers and credentials are excluded from
 the status result.
 

@@ -377,12 +377,6 @@ export function McpImportDialog({ open, onClose }: { open: boolean; onClose: () 
                   </section>
                 ))
             )}
-
-            {hasAny && (
-              <p className="text-fg3 m-0 text-3xxs leading-4">
-                Cursor allows about 40 tools in total.
-              </p>
-            )}
           </div>
         </DialogBody>
         <DialogFooter>

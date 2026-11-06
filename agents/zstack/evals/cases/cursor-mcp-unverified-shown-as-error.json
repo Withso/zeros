@@ -1,0 +1,9 @@
+{
+  "id": "cursor-mcp-unverified-shown-as-error",
+  "kind": "replay",
+  "area": "desktop-agents",
+  "fixedBy": "pr:851",
+  "symptom": "In a Cursor chat the composer's MCP tools list put a red error mark on every server, including servers whose tools were working, because Cursor does not report connection status.",
+  "rule": "A status the provider cannot report is shown as Not verified with a neutral mark, and turns Connected only on Zeros' own evidence: Cursor completed one of the server's tools in that chat, or an engine-hosted server served its tool list to that chat's provider. Red is kept for real failures, and the strict legacy list keeps its old error status. Principles 2 and 11.",
+  "check": "pnpm exec vitest run --config vitest.config.ts apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/mode-prewarm.test.ts apps/desktop/src/engine/agents/adapters/cursor-sdk/__tests__/translator.test.ts apps/desktop/src/engine/agents/__tests__/gateway-session-tools.test.ts apps/desktop/src/renderer/features/agent/__tests__/composer-tool-groups.test.ts -t 'settings in the Local folder|Cursor has used|successful MCP tool call|agent listed its tools|cannot verify as unknown'"
+}

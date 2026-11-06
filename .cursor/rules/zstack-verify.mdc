@@ -12,7 +12,9 @@ alwaysApply: false
 
 Run the whole test directories you touched, then the static gates:
 `pnpm typecheck`, `pnpm lint`, `pnpm check:ui`, `pnpm test:git` (filtered to the
-touched area, under `umask 022`) and `pnpm check:secrets`.
+touched area, under `umask 022`) and `pnpm check:secrets`. `pnpm lint` exits 0
+with warnings, so read its list: fix a warning in a touched file at its cause,
+never with a disable comment, unless the merge base already has it.
 
 | Touched | Also run |
 |---|---|
@@ -103,11 +105,15 @@ Principle 16 applies to every claim.
 - Every time in a record comes from a clock read: write it with
   `$(date -u +%H:%M)` inside the command that appends it.
 - Don't claim macOS-only checks from Linux.
+- macOS UI smoke is not the Linux gate. Run one `--shard=k/3` at a time (a
+  crash ends its shard; stub the crashing scenario through
+  `runSmokeScenarios`' `loadModule` to reach the rest) and compare each failure
+  with the merge base in a worktree outside `.context/` that runs its own
+  `pnpm install --frozen-lockfile`. A failure the base reproduces is existing
+  and left to CI's Linux shards; any other blocks handoff.
 - A smoke or capture switches themes with `document.documentElement.dataset.theme`
-  (a class on `<html>` does nothing), and asserts that a resolved token, such
-  as a `var(--bg1)` probe, differs between the passes or matches each theme's
-  own value. A value compared only within one pass cannot catch a switch that
-  never happened.
+  (a class on `<html>` does nothing) and asserts a resolved token, such as a
+  `var(--bg1)` probe, differs between the passes, so a missed switch fails.
 
 ## When a check fails
 
@@ -117,10 +123,9 @@ browser and CI facts that have already cost a loop. Search the waiting
 fragments too (`grep -ril '<error text>' agents/zstack/gotchas.md
 agents/zstack/changes`): facts sit there until the pack owner folds them.
 
-A smoke failure that is `Failed to fetch dynamically imported module` for a
-module outside the diff's import graph is a dev-server fetch, not a
-regression: confirm nothing you changed is in its import graph, through
-barrels such as `primitives/index.ts` too, then rerun that
-scenario alone twice on the same head (a scratch runner imports it from
-`scripts/ui-smoke/scenarios.mjs` against its own dev server). Report the shard
-and the isolated reruns together; never call the shard green.
+A smoke's `Failed to fetch dynamically imported module` for a module whose
+import graph, barrels such as `primitives/index.ts` included, holds nothing
+you changed is a dev-server fetch: rerun that scenario alone twice on the same
+head (a scratch runner imports it from `scripts/ui-smoke/scenarios.mjs`
+against its own dev server) and report the shard and the reruns together;
+never call the shard green.

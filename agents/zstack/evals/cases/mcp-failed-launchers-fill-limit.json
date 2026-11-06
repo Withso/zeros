@@ -1,0 +1,9 @@
+{
+  "id": "mcp-failed-launchers-fill-limit",
+  "kind": "replay",
+  "area": "desktop-agents",
+  "fixedBy": "pr:851",
+  "symptom": "An MCP server with \"Also listens on\" that failed to start kept its launcher in the engine's pool after its process was stopped, and the pool's 64-server limit counted it. A failing server in the user's own settings added one entry per workspace folder, until a working server elsewhere was refused with \"Too many MCP servers are running.\"",
+  "rule": "A capacity limit counts only what is held: release a failed entry once its cleanup is proven, keep it while the cleanup still needs a retry, and test the limit after many failures. Principle 8.",
+  "check": "pnpm exec vitest run --config vitest.config.ts apps/desktop/src/engine/agents/gateway/__tests__/launched-servers.test.ts -t 'failed to start'"
+}

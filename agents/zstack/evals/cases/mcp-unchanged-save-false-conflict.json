@@ -1,0 +1,9 @@
+{
+  "id": "mcp-unchanged-save-false-conflict",
+  "kind": "replay",
+  "area": "desktop-engine",
+  "fixedBy": "pr:851",
+  "symptom": "Saving an MCP server read from settings.toml failed with \"This MCP server changed while you were editing\" even when nothing changed, because the edit check compared smol-toml's null-prototype tables and dates with the JSON copy the editor received over the bridge.",
+  "rule": "Compare an edit's previous entry as the JSON value that crossed the bridge, never by JavaScript prototype, and test edits of servers parsed from a real settings.toml after the same JSON round trip (principles 13 and 18).",
+  "check": "pnpm exec vitest run --config vitest.config.ts apps/desktop/src/engine/settings/__tests__/mcp-configuration.test.ts -t 'servers saved in settings.toml'"
+}

@@ -872,6 +872,23 @@ Each landed step appends one line: date, workstream, what landed, evidence.
   cards offer no comment +, blocked theme-row items stay reachable by arrow
   keys, the rename field composes the inline `Input`, and theme renames and
   deletes stop before 256 operations; each has a test or smoke check.
+- 2026-11-05 · 5 · Customize: the tool-cap row retires, and with it the
+  import dialog's "Cursor allows about 40 tools in total." Cursor's docs name
+  no MCP tool limit, it loads tools on demand, and Zeros never enforced one,
+  so the row told people to turn off tools they wanted. Rows keep their tool
+  count and switches, and `disabled_tools` is unchanged. A Customize smoke
+  step holds it: a server with 59 tools shows no notice. The exported
+  `customize.md` still lists the row; it predates this change.
+- 2026-11-05 · 4 · Composer Tools: a Not verified row takes a neutral 14px
+  dashed circle in fg3 instead of the red error X. Cursor reports no MCP
+  status, so every server in a Cursor chat read as failed even when its tools
+  worked; its grouped rows now say Not verified, and red stays for real
+  failures. A row turns Connected on Zeros' own evidence: Cursor finished one
+  of its tools in that chat, or a Zeros-hosted server served that chat its
+  tool list. `composer-tool-groups.test.ts` and the Cursor inventory,
+  translator and gateway tests hold it. In a live Cursor chat the servers it
+  used and the Zeros-hosted servers were ticked, the rest read Not verified,
+  and a server that failed to start stayed red.
 - 2026-11-06 · 5 · Review leftovers (plans.md §1), Local and cloud: Checks
   marks the checks the base branch requires, lists required checks that
   haven't reported in Expected, and Re-run failed restarts the head's failed

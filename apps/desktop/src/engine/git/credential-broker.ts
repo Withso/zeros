@@ -235,7 +235,7 @@ function isCredentialShimDirectory(directory: string): boolean {
   return path.basename(directory).startsWith("zeros-git-auth-");
 }
 
-function withoutCredentialShimDirectories(pathValue: string): string {
+export function withoutCredentialShimDirectories(pathValue: string): string {
   return pathValue.split(path.delimiter).filter((directory) => {
     if (isCredentialShimDirectory(directory)) return false;
     try {
@@ -853,11 +853,47 @@ case "\${1:-}" in
 esac
 `;
 
+// Every shim version keeps this exact line: it is how a shim recognises
+// another one, wherever it lives and whatever its version.
+const SHIM_MARKER = "# Zeros credential shim: shims skip any PATH entry containing this line.";
+
+// A child that keeps PATH but not the broker variables still reaches a shim:
+// MCP SDKs, Codex and Cursor start stdio servers with only a few basics. The
+// shim then acts as the executable it shadows, the next one on PATH that is
+// not a Zeros shim, so two shims on PATH can never exec each other.
+const SHIM_PATH_LOOKUP = `zeros_real_on_path() {
+  IFS=:
+  set -f
+  for dir in \${PATH:-}; do
+    case "$dir" in
+      */zeros-git-auth-*) continue ;;
+      /*) ;;
+      *) continue ;;
+    esac
+    candidate="$dir/$1"
+    if [ -f "$candidate" ] && [ -x "$candidate" ] &&
+      ! LC_ALL=C command -p grep -qxF '${SHIM_MARKER}' "$candidate" 2>/dev/null; then
+      printf '%s\\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}`;
+
 const GIT_SHIM_SCRIPT = `#!/bin/sh
+${SHIM_MARKER}
 set -eu
 
-real="\${ZEROS_REAL_GIT_PATH:?}"
-helper="\${ZEROS_GIT_AUTH_HELPER:?}"
+${SHIM_PATH_LOOKUP}
+
+real="\${ZEROS_REAL_GIT_PATH:-}"
+helper="\${ZEROS_GIT_AUTH_HELPER:-}"
+if [ -z "$real" ]; then
+  real="$(zeros_real_on_path git)" || {
+    printf '%s\\n' "Git is not installed." >&2
+    exit 127
+  }
+fi
 
 # Check before either broker probe or dead-broker fallback. The inode check
 # also catches aliases of this script without spawning another process.
@@ -871,6 +907,11 @@ case "$real" in
     exit 126
     ;;
 esac
+
+# Without the broker variables there is no broker to ask.
+if [ -z "$helper" ] || [ -z "\${ZEROS_GIT_AUTH_SOCKET:-}" ]; then
+  exec "$real" "$@"
+fi
 
 # A hard-killed engine can leave this shim and its unix-socket inode on PATH.
 # Native same-host shells use a cheap PID liveness check. Consumers in another
@@ -906,13 +947,18 @@ exec "$real" \\
 `;
 
 const GH_SHIM_SCRIPT = `#!/bin/sh
+${SHIM_MARKER}
 set -eu
 
+${SHIM_PATH_LOOKUP}
+
 real="\${ZEROS_REAL_GH_PATH:-}"
-[ -n "$real" ] || {
-  printf '%s\\n' "GitHub CLI is not installed." >&2
-  exit 127
-}
+if [ -z "$real" ]; then
+  real="$(zeros_real_on_path gh)" || {
+    printf '%s\\n' "GitHub CLI is not installed." >&2
+    exit 127
+  }
+fi
 
 if [ "$real" = "$0" ] || [ "$real" -ef "$0" ]; then
   printf '%s\\n' "Zeros GitHub CLI shim refused a recursive executable." >&2
@@ -924,6 +970,12 @@ case "$real" in
     exit 126
     ;;
 esac
+
+# Without the broker variables there is no broker to ask, and a GH_TOKEN the
+# caller set for itself stays.
+if [ -z "\${ZEROS_GIT_AUTH_SOCKET:-}" ]; then
+  exec "$real" "$@"
+fi
 
 # Authentication management belongs to the real gh config store. In
 # particular, a selected PAT must not become GH_TOKEN for gh-auth-login,

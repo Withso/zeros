@@ -31,6 +31,8 @@ const rt = vi.hoisted(() => ({
     remotePluginId: string | null;
   }[],
   startThreadParams: [] as unknown[],
+  /** `mcpServerStatus/list` rows the fake app-server reports. */
+  mcpStatus: [] as { name: string; runtimeStatus: string }[],
   /** Method order, to prove the read happens before the thread starts. */
   methodOrder: [] as string[],
 }));
@@ -85,10 +87,7 @@ vi.mock("../app-server", () => ({
       if (method === "plugin/read")
         return { plugin: { mcpServers: ["local_plugin_mcp"] } };
       if (method === "mcpServerStatus/list")
-        return {
-          data: [{ name: "codex_apps", runtimeStatus: "connected" }],
-          nextCursor: null,
-        };
+        return { data: rt.mcpStatus, nextCursor: null };
       if (method === "app/installed")
         return {
           apps: [
@@ -139,6 +138,7 @@ function makeAdapter(emit: Partial<AgentAdapterContext["emit"]> = {}) {
   rt.configReadError = null;
   rt.plugins = [];
   rt.mcpServers = {};
+  rt.mcpStatus = [{ name: "codex_apps", runtimeStatus: "connected" }];
   const ctx = {
     projectRoot: "/tmp/proj",
     mcpServers: [],
@@ -532,5 +532,76 @@ describe("CodexAppServerAdapter explicit native MCP opt-out", () => {
       "MCP configuration",
     );
     expect(rt.startThreadParams).toHaveLength(0);
+  });
+});
+
+describe("CodexAppServerAdapter MCP server names", () => {
+  const bootedServerNames = async () => {
+    const { bootCodexAppServerRuntime } = await import("../app-server");
+    return vi.mocked(bootCodexAppServerRuntime).mock.calls.at(-1)![0].mcpServers!.map((server) => server.name);
+  };
+  const mcpRows = async (adapter: CodexAppServerAdapter, sessionId: string) => {
+    const query = { sessionId };
+    const inventory = await adapter.capabilityPorts.sessionTools.inventory(query);
+    return [
+      (await adapter.capabilityPorts.sessionTools.list(query)).entries,
+      inventory.entries,
+      inventory.groups!.find((group) => group.kind === "mcp")!.entries,
+    ];
+  };
+
+  it("starts a server whose name Codex cannot take under the name Claude and Cursor use, listed by its own name", async () => {
+    const adapter = makeAdapter();
+    rt.mcpStatus = [
+      { name: "probe_dots", runtimeStatus: "connected" },
+      { name: "My_Tools", runtimeStatus: "connected" },
+    ];
+    try {
+      const { session } = await adapter.newSession({
+        cwd: "/tmp/proj",
+        mcpServers: [
+          { name: "probe.dots", transport: "stdio", command: "node", args: ["probe.mjs"] },
+          { name: "My Tools", transport: "http", url: "https://tools.example/mcp" },
+        ],
+      });
+      expect(await bootedServerNames()).toEqual(["probe_dots", "My_Tools"]);
+      for (const rows of await mcpRows(adapter, session.executionId!)) {
+        expect(rows).toEqual(expect.arrayContaining([
+          expect.objectContaining({ id: "probe_dots", name: "probe.dots", status: "connected" }),
+          expect.objectContaining({ id: "My_Tools", name: "My Tools", status: "connected" }),
+        ]));
+      }
+    } finally {
+      await adapter.dispose();
+    }
+  });
+
+  it("lists a server Codex cannot run, with the reason, instead of dropping it silently", async () => {
+    const adapter = makeAdapter();
+    rt.mcpStatus = [{ name: "probe_dots", runtimeStatus: "connected" }];
+    try {
+      const { session } = await adapter.newSession({
+        cwd: "/tmp/proj",
+        mcpServers: [
+          { name: "probe.dots", transport: "stdio", command: "renamed" },
+          { name: "probe_dots", transport: "stdio", command: "own" },
+          { name: "events", transport: "sse", url: "https://example.test/sse" },
+        ],
+      });
+      expect(await bootedServerNames()).toEqual(["probe_dots"]);
+      for (const rows of await mcpRows(adapter, session.executionId!)) {
+        expect(rows.filter((row) => row.name.startsWith("probe"))).toEqual([
+          expect.objectContaining({ id: "probe_dots", name: "probe_dots", status: "connected" }),
+          expect.objectContaining({ name: "probe.dots", status: "error", detail: expect.stringContaining("“probe_dots”") }),
+        ]);
+        expect(rows).toContainEqual(expect.objectContaining({ name: "events", status: "error", detail: expect.stringContaining("SSE") }));
+      }
+      const [rows] = await mcpRows(adapter, session.executionId!);
+      const unavailable = rows!.find((row) => row.name === "probe.dots")!;
+      await expect(adapter.capabilityPorts.sessionTools.authenticate({ sessionId: session.executionId!, toolId: unavailable.id }))
+        .rejects.toThrow("This tool is not connected to the chat.");
+    } finally {
+      await adapter.dispose();
+    }
   });
 });

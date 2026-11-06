@@ -21,7 +21,7 @@ import { Toaster } from "../shared/ui/primitives/elements/toast";
 
 declare global {
   interface Window {
-    mcpFormFixture: { failSave: boolean; failProbe: boolean; requiresAuth?: boolean; authorizations: string[]; holdProbe?: boolean; releaseProbe?: () => void; toolNames: string[]; probeCount: number; saveCount: number; setSurfaceActive?: (active: boolean) => void };
+    mcpFormFixture: { failSave: boolean; failProbe: boolean; requiresAuth?: boolean; authorizations: string[]; holdProbe?: boolean; releaseProbe?: () => void; toolNames: string[]; gatewayToolNames?: string[]; probeCount: number; saveCount: number; setSurfaceActive?: (active: boolean) => void };
   }
 }
 window.mcpFormFixture = { failSave: false, failProbe: false, authorizations: [], toolNames: ["read_file", "search", "delete_file"], probeCount: 0, saveCount: 0 };
@@ -109,11 +109,12 @@ RuntimeClient.prototype.request = async function <
   if (request.op === "mcp.gateway.authorize") {
     window.mcpFormFixture.authorizations.push(String(params.server));
     connectedServers.add(String(params.server));
-    result = { status: { name: params.server, state: "connected", toolCount: 3 } };
+    result = { status: { name: params.server, state: "connected", toolCount: window.mcpFormFixture.gatewayToolNames?.length ?? 3 } };
   }
   if (request.op === "mcp.resolveComposed") result = { servers: [], warnings: [] };
   if (request.op === "mcp.gateway.status") result = { running: true, error: null, servers: [...settings.values()].flatMap(doc => ((doc.mcp as { servers?: { name: string; url?: string; auth?: string }[] } | undefined)?.servers ?? []))
-    .filter(server => server.auth === "oauth" || connectedServers.has(server.name)).map(({ name, url }) => ({ name, url, state: connectedServers.has(name) ? "connected" : gatewayState, toolCount: connectedServers.has(name) ? 3 : 0, detail: "Connection unavailable (503)" })) };
+    .filter(server => server.auth === "oauth" || connectedServers.has(server.name)).map(({ name, url }) => ({ name, url, state: connectedServers.has(name) ? "connected" : gatewayState, toolCount: connectedServers.has(name) ? window.mcpFormFixture.gatewayToolNames?.length ?? 3 : 0,
+      ...(connectedServers.has(name) && window.mcpFormFixture.gatewayToolNames ? { tools: [...window.mcpFormFixture.gatewayToolNames] } : {}), detail: "Connection unavailable (503)" })) };
   if (request.op === "extensions.list") {
     inventoryProviders.push(String(params.provider));
     document.getElementById("inventory-providers")!.textContent =

@@ -17,7 +17,9 @@ import {
 } from "../manifest";
 import { decodeCanvasFile } from "../canvas-file";
 import { useLegacyDesignStorage } from "./storage-fixtures";
-import { DesignAgentMcpServer } from "../design-agent-mcp";
+import { DESIGN_AGENT_CAPABILITY_ENV, DesignAgentMcpServer } from "../design-agent-mcp";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
 describe("Code Design target admission", () => {
   let root: string;
@@ -327,6 +329,24 @@ describe("Code Design target admission", () => {
     target!.assertCurrent();
     owner = "nested-workspace";
     expect(() => target!.assertCurrent()).toThrow("authority changed");
+  });
+
+  it("reports the Design server as loaded once the agent lists its tools", async () => {
+    const tools = (await new DesignCodeToolAdmissions(options).admit(input))!;
+    const client = new Client({ name: "design-admission-test", version: "1.0.0" });
+    try {
+      const registration = tools.mcpServers[0]!;
+      if (registration.transport !== "http") throw new Error("The Design server is not HTTP.");
+      await client.connect(new StreamableHTTPClientTransport(new URL(registration.url), {
+        requestInit: { headers: { Authorization: tools.env[DESIGN_AGENT_CAPABILITY_ENV]! } },
+      }));
+      expect(tools.listedMcpServers?.()).toEqual([]);
+      await client.listTools();
+      expect(tools.listedMcpServers?.()).toEqual(["design-draft"]);
+    } finally {
+      await client.close();
+      await tools.dispose();
+    }
   });
 
   it("bounds live admissions and releases a slot only after transport disposal", async () => {

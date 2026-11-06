@@ -1,5 +1,17 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentAdapterContext } from "../../../types";
+
+// The native MCP read walks $CODEX_HOME/plugins/cache on the real filesystem.
+// A connector installed on the machine running the suite must not exclude the
+// servers these cases sign in to.
+const realCodexHome = process.env.CODEX_HOME;
+beforeAll(() => {
+  process.env.CODEX_HOME = "/nonexistent/zeros-test-codex-home";
+});
+afterAll(() => {
+  if (realCodexHome === undefined) delete process.env.CODEX_HOME;
+  else process.env.CODEX_HOME = realCodexHome;
+});
 
 describe("Codex fallback selection", () => {
   it("rejects a different model reported by thread creation before a prompt can run", async () => {

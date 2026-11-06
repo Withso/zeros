@@ -1,0 +1,9 @@
+{
+  "id": "mcp-editor-empty-row-and-repeat-toasts",
+  "kind": "replay",
+  "area": "renderer-settings",
+  "fixedBy": "pr:851",
+  "symptom": "In the MCP editor an empty variable row counted as a connection change, hiding the tools and offering Save & connect; each failed save re-ran the connection check; and repeated outcomes stacked one toast per attempt.",
+  "rule": "Compare drafts without the rows a save drops, keep a settled check of the same probe key across save and sign-in pauses, and give each editor one toast id. Advance a paused clock past the check debounce and count probes and live toasts (principles 3 and 14).",
+  "check": "pnpm exec vitest run --config vitest.config.ts apps/desktop/src/renderer/features/agent-extensions/__tests__/mcp-server-editor.test.ts"
+}
