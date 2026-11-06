@@ -40,6 +40,7 @@ export class WorkspaceService {
   private readonly run: CommandRunner;
   private readonly watcher?: CheckoutWatch;
   private state!: State;
+  private persistedStateJson?: string;
   private metadataQueue = Promise.resolve();
   private signature?: string;
   private refChange = 0;
@@ -80,6 +81,7 @@ export class WorkspaceService {
         const state = JSON.parse(await readFile(join(directory, "workspace.json"), "utf8")) as State;
         if (state.workspaceId !== scope.workspace.id || state.root !== scope.root || typeof state.baseBranch !== "string" || typeof state.configuredBase !== "string" || !Number.isSafeInteger(state.createdAt)) throw new Error("Invalid workspace state.");
         service.state = state;
+        service.persistedStateJson = JSON.stringify(state);
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw new WorkspaceError("WORKSPACE_UNAVAILABLE", "The saved workspace identity could not be loaded.");
         service.state = { workspaceId: scope.workspace.id, root: scope.root, baseBranch: scope.workspace.baseBranch, configuredBase: scope.workspace.baseBranch, createdAt: Date.now() };
@@ -235,13 +237,18 @@ export class WorkspaceService {
 
   private update(update: (state: State) => State): Promise<void> {
     const pending = this.metadataQueue.then(async () => {
-      const state = update(this.state), path = join(this.directory, "workspace.json"), temp = `${path}.${randomUUID()}.tmp`;
+      const state = update(this.state), json = JSON.stringify(state);
+      if (json === this.persistedStateJson) return;
+      // A failed directory sync can leave renamed bytes that the next write must repair.
+      this.persistedStateJson = undefined;
+      const path = join(this.directory, "workspace.json"), temp = `${path}.${randomUUID()}.tmp`;
       try {
         const file = await open(temp, "wx", 0o600);
-        try { await file.writeFile(JSON.stringify(state)); await file.sync(); } finally { await file.close(); }
+        try { await file.writeFile(json); await file.sync(); } finally { await file.close(); }
         await rename(temp, path);
         const directory = await open(this.directory, "r"); try { await directory.sync(); } finally { await directory.close(); }
         this.state = state;
+        this.persistedStateJson = json;
       } finally { await rm(temp, { force: true }).catch(() => {}); }
     });
     this.metadataQueue = pending.catch(() => {}); return pending;
