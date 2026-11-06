@@ -497,6 +497,26 @@ describe("cloud v2 relay", () => {
       await expect(closed).resolves.toBe(1013);
       expect(frames).toEqual([]);
     });
+    it("does not restore cleared grace from a held continuation after source revalidation", async () => {
+      const { a, frames } = await setup();
+      let reached!: () => void, release!: () => void, first = true;
+      const entered = new Promise<void>(resolve => { reached = resolve; });
+      const held = new Promise<void>(resolve => { release = resolve; });
+      deps.continueSource = vi.fn(async () => {
+        if (!first) throw busy();
+        first = false; reached(); await held;
+        return { recheckAt: now + 600_000, graceUntil: GRACE_END };
+      });
+      now += 5_000; a.send(JSON.stringify({ type: "PING", id: "held" }));
+      try {
+        await entered;
+        relay.revalidateSources({});
+        release();
+        await vi.waitFor(() => expect(vi.mocked(deps.continueSource!).mock.calls.length).toBeGreaterThanOrEqual(2));
+        await vi.waitFor(() => expect(a.readyState).toBe(WebSocket.CLOSED));
+        expect(frames).toEqual([]);
+      } finally { release(); }
+    });
     it("still closes on a confirmed revocation inside the grace", async () => {
       const { a } = await setup();
       failure = new HttpError(403, "github_cloud_access_denied", "denied");

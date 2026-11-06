@@ -229,6 +229,9 @@ export class CloudV2Relay {
             (this.deps.now?.() ?? Date.now()) < room.sourceCheckAt;
           if (!backingOff) {
             const lease = await this.deps.continueSource(room.workspace, proof);
+            // A result that began before a source or security change must not
+            // write deadlines; the rerun observes the change from scratch.
+            if (revision !== this.securityRevision) return this.authorize(room, admittingSessionId, admission);
             room.sourceCheckAt = lease.recheckAt;
             if (lease.graceUntil !== undefined && proofKey) room.sourceGrace = { until: lease.graceUntil, proof: proofKey };
             else delete room.sourceGrace;
@@ -236,6 +239,7 @@ export class CloudV2Relay {
           }
         } else {
           await this.deps.authorizeSource?.(room.workspace);
+          if (revision !== this.securityRevision) return this.authorize(room, admittingSessionId, admission);
           room.sourceCheckAt = (this.deps.now?.() ?? Date.now()) + CLOUD_SOURCE_REFRESH_MS;
         }
       }
