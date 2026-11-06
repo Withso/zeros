@@ -83,6 +83,7 @@ import {
   tabCloseResourceAction,
 } from "./chat-close";
 import { ChatCloseDialog } from "./chat-close-dialog";
+import { NO_PANE_EDGES, paneEdges, type PaneEdges, type PaneSpan } from "./pane-edges";
 import {
   captureScrollWithin,
   preserveScrollGeometryWithin,
@@ -184,6 +185,8 @@ interface PaneCtx {
   bodyAside: ReactNode;
   chatsByPane: Map<string, ChatThread[]>;
   focusedPaneId: string;
+  /** Corners and seam fades per pane; see pane-edges.ts. */
+  paneEdges: ReadonlyMap<string, PaneEdges>;
   globalActiveChatId: string | null;
   historyChats: ChatThread[];
   workspaceHasChats: boolean;
@@ -735,6 +738,10 @@ export function ConversationPaneLayout({
   );
 
   const paneCountValue = leafIds(layout.root).length;
+  const edgesByPane = useMemo(
+    () => paneEdges(layout.root, focusedPaneId),
+    [layout.root, focusedPaneId],
+  );
 
   const ctx = useMemo<PaneCtx>(
     () => ({
@@ -747,6 +754,7 @@ export function ConversationPaneLayout({
       bodyAside,
       chatsByPane,
       focusedPaneId,
+      paneEdges: edgesByPane,
       globalActiveChatId: selectedChatId,
       historyChats,
       workspaceHasChats: visibleChats.length > 0,
@@ -769,6 +777,7 @@ export function ConversationPaneLayout({
       bodyAside,
       chatsByPane,
       focusedPaneId,
+      edgesByPane,
       selectedChatId,
       historyChats,
       visibleChats.length,
@@ -830,7 +839,9 @@ export function ConversationPaneLayout({
       <div
         ref={paneSurfaceRef}
         data-pane-layout-surface=""
-        className="flex min-h-0 min-w-0 flex-1"
+        // The chrome: bg1, which shows in the corners where panes meet and is
+        // what their seam fades dissolve into.
+        className="flex min-h-0 min-w-0 flex-1 bg-bg1"
       >
         <PaneNodeView node={layout.root} ctx={ctx} />
       </div>
@@ -1073,29 +1084,37 @@ function PaneSplitter({
       role="separator"
       aria-orientation={isRow ? "vertical" : "horizontal"}
       aria-label="Resize panes"
+      // No resting seam (2026-11-06): the panes' fills, corners and fades
+      // separate them. The 6px strip takes no layout space; it overlays the
+      // second pane's leading edge, so the first pane's scrollbar stays clear.
       className={cn(
         "relative z-10 flex shrink-0",
-        isRow ? "w-1.5 cursor-ew-resize" : "h-1.5 cursor-ns-resize",
+        isRow ? "-mr-1.5 w-1.5 cursor-ew-resize" : "-mb-1.5 h-1.5 cursor-ns-resize",
       )}
       onPointerDown={onPointerDown}
       onDoubleClick={resetToBalanced}
       {...hintHandlers}
     >
-      {/* Resting 1px seam so the two panes read as separate surfaces. The
-          resize cursor + the idle "Drag to resize" hint above the pointer
-          are the only other affordances. */}
-      <div
-        className={cn(
-          "bg-border1 pointer-events-none absolute",
-          isRow
-            ? "inset-y-0 left-1/2 w-px -translate-x-1/2"
-            : "inset-x-0 top-1/2 h-px -translate-y-1/2",
-        )}
-        aria-hidden="true"
-      />
+      {/* The resize cursor and the idle "Drag to resize" hint above the
+          pointer are its only affordances. */}
       {hint}
     </div>
   );
+}
+
+/** Where an unfocused pane meets another pane without a seam (2026-11-06), it
+ *  dissolves into the chrome (bg1, the focused pane's own fill) over 8px: along
+ *  a stacked seam, and along a side it shares with another unfocused pane. The
+ *  fades sit above the pane's content and below its drop overlay. */
+const PANE_SEAM_FADE_CLS = {
+  bottom: "pointer-events-none absolute inset-x-0 bottom-0 z-2 h-2 bg-gradient-to-t from-bg1 to-transparent",
+  left: "pointer-events-none absolute inset-y-0 left-0 z-2 w-2 bg-gradient-to-r from-bg1 to-transparent",
+  right: "pointer-events-none absolute inset-y-0 right-0 z-2 w-2 bg-gradient-to-l from-bg1 to-transparent",
+} as const;
+
+/** Places a side fade on the stretch it covers, as fractions of the pane height. */
+function paneSpanStyle(span: PaneSpan): React.CSSProperties {
+  return { top: `${span.start * 100}%`, bottom: `${(1 - span.end) * 100}%` };
 }
 
 function ChatPane({ paneId, ctx }: { paneId: string; ctx: PaneCtx }) {
@@ -1110,6 +1129,7 @@ function ChatPane({ paneId, ctx }: { paneId: string; ctx: PaneCtx }) {
     paneChats,
   );
   const isFocused = ctx.focusedPaneId === paneId;
+  const edges = ctx.paneEdges.get(paneId) ?? NO_PANE_EDGES;
   const onSelectChat = ctx.onSelectChat;
 
   // Publish this pane's displayed chat for the terminal deck.
@@ -1321,13 +1341,18 @@ function ChatPane({ paneId, ctx }: { paneId: string; ctx: PaneCtx }) {
       ref={rootRef}
       data-pane-root=""
       data-pane-focused={isFocused ? "true" : "false"}
-      // --pane-bg is the window surface: bg1 on the focused pane, bg0 elsewhere so
-      // inactive windows read recessed. Everything inside inherits it, so the window
-      // re-tints as one. That fill is the only inactive treatment; text and controls
-      // keep full contrast (a former veil dropped text below WCAG AA).
+      // --pane-bg is the window surface: bg1 on the focused pane, the sidebar's
+      // fill elsewhere (2026-11-06: a hair lighter, so nothing darkens; bg0 read
+      // too dark once panes lost their seams). Everything inside inherits it, so
+      // the window re-tints as one. That fill is the only inactive treatment;
+      // text and controls keep full contrast (a former veil dropped text below
+      // WCAG AA). Where panes meet, the top corners round over the chrome.
       className={cn(
         "relative flex min-h-0 min-w-0 flex-1 flex-col bg-(--pane-bg)",
-        !isFocused && "[--pane-bg:var(--bg0)]",
+        (edges.roundTopLeft || edges.roundTopRight) && "overflow-hidden",
+        edges.roundTopLeft && "rounded-tl-[calc(var(--radius-lg)*1.5)]",
+        edges.roundTopRight && "rounded-tr-[calc(var(--radius-lg)*1.5)]",
+        !isFocused && "[--pane-bg:var(--sidebar-bg)]",
       )}
     >
       <ChatTabs
@@ -1367,6 +1392,15 @@ function ChatPane({ paneId, ctx }: { paneId: string; ctx: PaneCtx }) {
         </div>
         {paneId === topRightLeafId(ctx.layout.root) ? ctx.bodyAside : null}
       </div>
+      {!isFocused && edges.fadeBottom && (
+        <div aria-hidden="true" data-pane-seam-fade="bottom" className={PANE_SEAM_FADE_CLS.bottom} />
+      )}
+      {edges.fadeLeft.map((span) => (
+        <div key={`left:${span.start}`} aria-hidden="true" data-pane-seam-fade="left" className={PANE_SEAM_FADE_CLS.left} style={paneSpanStyle(span)} />
+      ))}
+      {edges.fadeRight.map((span) => (
+        <div key={`right:${span.start}`} aria-hidden="true" data-pane-seam-fade="right" className={PANE_SEAM_FADE_CLS.right} style={paneSpanStyle(span)} />
+      ))}
       {/* Drop overlay covers the WHOLE pane (strip + body) so dropping
           a dragged tab onto another pane's strip moves it there too. */}
       {!ctx.readOnly && (
@@ -1499,7 +1533,7 @@ function PaneDropOverlay({
       {zone && (
         <div
           className={cn(
-            "border-highlighted-bright/50 bg-highlighted-bg/40 pointer-events-none absolute rounded-sm border",
+            "bg-highlighted-bg/40 pointer-events-none absolute rounded-sm",
             zone === "center" && "inset-1",
             zone === "right" && "inset-y-1 right-1 left-1/2",
             zone === "down" && "inset-x-1 top-1/2 bottom-1",

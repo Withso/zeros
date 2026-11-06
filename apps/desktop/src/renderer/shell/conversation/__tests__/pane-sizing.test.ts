@@ -32,14 +32,14 @@ describe("chat pane width floors", () => {
     expect(MIN_PANE_WIDTH).toBe(360);
   });
 
-  it("offers a horizontal split only when two 360px panes and its seam fit", () => {
+  it("offers a horizontal split only when two 360px panes fit side by side", () => {
     const exact = MIN_PANE_WIDTH * 2 + PANE_SPLITTER_PX;
     expect(canSplitPaneDimension(exact - 0.01, MIN_PANE_WIDTH)).toBe(false);
     expect(canSplitPaneDimension(exact, MIN_PANE_WIDTH)).toBe(true);
     expect(canSplitPaneDimension(Number.NaN, MIN_PANE_WIDTH)).toBe(false);
   });
 
-  it("reserves the 6px seam while clamping both resized children", () => {
+  it("clamps both resized children against their floors (the divider takes no layout)", () => {
     const container = 1_000;
     const available = container - PANE_SPLITTER_PX;
     const leftFloorPointer = MIN_PANE_WIDTH + PANE_SPLITTER_PX / 2;
@@ -98,22 +98,22 @@ describe("chat pane width floors", () => {
     });
     expect(paneTreeMinimumSize(stacked)).toEqual({
       width: 360,
-      height: 486,
+      height: 480,
     });
     expect(paneTreeMinimumSize(mixed)).toEqual({
-      width: 726,
-      height: 486,
+      width: 720,
+      height: 480,
     });
-    expect(paneTreeMinimumSize(threeAcross).width).toBe(1_092);
+    expect(paneTreeMinimumSize(threeAcross).width).toBe(1_080);
   });
 
   it("clamps asymmetric nested children against each subtree's own floor", () => {
     const container = 1_200;
     const available = container - PANE_SPLITTER_PX;
-    expect(clampPaneSplitRatio(0, container, 726, 360)).toBeCloseTo(
-      726 / available,
+    expect(clampPaneSplitRatio(0, container, 720, 360)).toBeCloseTo(
+      720 / available,
     );
-    expect(clampPaneSplitRatio(container, container, 726, 360)).toBeCloseTo(
+    expect(clampPaneSplitRatio(container, container, 720, 360)).toBeCloseTo(
       1 - 360 / available,
     );
   });
@@ -122,11 +122,11 @@ describe("chat pane width floors", () => {
     const root = { type: "leaf" as const, id: "only" };
     expect(paneTreeHasDirection(root, "row")).toBe(false);
     expect(paneTreeMinimumSizeAfterSplit(root, "only", "row")).toEqual({
-      width: 726,
+      width: 720,
       height: 240,
     });
     // 500px surface today, workbench sitting at 500 of which 300 is surrenderable
-    // above its 200px floor → 800px reachable, so the 726px tree fits.
+    // above its 200px floor → 800px reachable, so the 720px tree fits.
     expect(
       canSplitPaneTree({
         root,
@@ -141,7 +141,7 @@ describe("chat pane width floors", () => {
 
   // The bootstrap exception is bounded by REACHABLE space. On a minimum-width
   // window (840 − 248px repository nav = 592px row) workbench is already at its
-  // 200px floor, so the conversation column can never reach 726px: offering the
+  // 200px floor, so the conversation column can never reach 720px: offering the
   // split there produced a clipped row that the seam then refused to drag back.
   it("refuses the first right split when the row can never fit the result", () => {
     const root = { type: "leaf" as const, id: "only" };
@@ -224,14 +224,14 @@ describe("chat pane width floors", () => {
     };
     expect(paneTreeHasDirection(root, "row")).toBe(true);
     expect(paneTreeMinimumSizeAfterSplit(root, "left", "row")?.width).toBe(
-      1_092,
+      1_080,
     );
     expect(
       canSplitPaneTree({
         root,
         targetPaneId: "left",
         direction: "row",
-        containerWidth: 1_091.99,
+        containerWidth: 1_079.99,
         containerHeight: 800,
       }),
     ).toBe(false);
@@ -240,7 +240,7 @@ describe("chat pane width floors", () => {
         root,
         targetPaneId: "left",
         direction: "row",
-        containerWidth: 1_092,
+        containerWidth: 1_080,
         containerHeight: 800,
       }),
     ).toBe(true);
@@ -254,7 +254,7 @@ describe("chat pane width floors", () => {
         targetPaneId: "only",
         direction: "column",
         containerWidth: 800,
-        containerHeight: 485.99,
+        containerHeight: 479.99,
       }),
     ).toBe(false);
     expect(
@@ -263,7 +263,7 @@ describe("chat pane width floors", () => {
         targetPaneId: "only",
         direction: "column",
         containerWidth: 800,
-        containerHeight: 486,
+        containerHeight: 480,
       }),
     ).toBe(true);
     expect(
@@ -291,7 +291,7 @@ describe("chat pane width floors", () => {
         root,
         targetPaneId: "target",
         direction: "row",
-        containerWidth: 726,
+        containerWidth: 720,
         containerHeight: 800,
       }),
     ).toBe(false);
@@ -300,7 +300,7 @@ describe("chat pane width floors", () => {
         root,
         targetPaneId: "target",
         direction: "row",
-        containerWidth: 726,
+        containerWidth: 720,
         containerHeight: 800,
         collapsedPaneId: "source",
       }),
@@ -356,7 +356,7 @@ describe("clampConversationRatio", () => {
 
   it("uses the active split tree's wider physical floor", () => {
     // Two horizontal 360px panes plus their 6px splitter.
-    expect(clampConversationRatio(0.05, 1600, 726)).toBeCloseTo(726 / 1600);
+    expect(clampConversationRatio(0.05, 1600, 720)).toBeCloseTo(720 / 1600);
   });
 
   it("reserves workbench's 200px floor when tighter than the 70% cap", () => {

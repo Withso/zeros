@@ -4291,10 +4291,10 @@ function AgentChatBody({
         >
           <ConversationContent
             // flex-none matters: ConversationContent's flex-1 would pin this box to the
-            // scroller's height, so pb-8 would never reach the real bottom. pt-3 matches
-            // the sticky prompt's top-3; px-7 clears the checkpoint rail. Mirror any change
-            // on the composer column.
-            className="zeros-agent-messages mx-auto flex w-full max-w-[856px] min-w-0 flex-none flex-col gap-5 overflow-visible px-7 pt-3 pb-8"
+            // scroller's height, so pb-8 would never reach the real bottom. pt-8 starts the
+            // first message below the 32px top fade; px-7 clears the checkpoint rail.
+            // Mirror any change on the composer column.
+            className="zeros-agent-messages mx-auto flex w-full max-w-[856px] min-w-0 flex-none flex-col gap-5 overflow-visible px-7 pt-8 pb-8"
           >
             {/* Older history auto-pages in via the nearTop effect above, with
               no visible affordance: scrolling back should show everything. */}
@@ -4451,10 +4451,11 @@ function AgentChatBody({
             restore never pops it in; it never takes clicks. */}
         <div
           aria-hidden="true"
-          // h-3 (12px) ends where the transcript column starts (pt-3), so the
-          // first prompt never sits under the wash while scrolled content
-          // still fades under the strip. The via stop feathers the edge.
-          className="pointer-events-none absolute inset-x-0 top-0 z-1 h-3 bg-gradient-to-b from-(--pane-bg) via-(--pane-bg)/40 to-transparent"
+          // 32px from the strip's edge (2026-11-06), like the fade above the
+          // composer. It ends where the transcript column starts (pt-8), so the
+          // first message never sits under it while scrolled content still
+          // dissolves under the strip.
+          className="pointer-events-none absolute inset-x-0 top-0 z-1 h-8 bg-gradient-to-b from-(--pane-bg) to-transparent"
         />
         {/* A sibling of the scroller so the rail stays pinned; z-2 paints above
             the top mask. */}
