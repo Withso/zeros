@@ -68,8 +68,8 @@ export function WorkspaceHeaderView({ name, icon, actions, readOnly, windowContr
   windowControlsInset?: boolean;
   trailing?: ReactNode;
 }) {
-  // No divider: the header's bg1 runs straight into the chat strips below,
-  // whose own top fade separates a recessed (unfocused) pane from it.
+  // No divider: the header's bg1 runs straight into the chat below; a split
+  // pane's own fill and corners set it apart.
   return <PanelHeader size="window" divider={false} aria-label="Workspace header" data-workspace-header="" data-tauri-drag-region="">
     {windowControlsInset && <span className="block h-full w-[108px] shrink-0" aria-hidden="true" data-window-controls-reserve="" />}
     <div className="text-fg2 inline-flex shrink-0 items-center" data-workspace-placement="">{icon}</div>

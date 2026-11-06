@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { PANE_SPLITTER_PX } from "../pane-portal-store";
+import { PANE_SPLITTER_PX, PANE_SPLIT_GUTTER_PX } from "../pane-portal-store";
 
 const read = (path: string) =>
   readFileSync(resolve(process.cwd(), "apps/desktop/src/renderer/shell/conversation", path), "utf8");
@@ -25,18 +25,52 @@ function classConstant(src: string, name: string): string[] {
   return match[1].split(/\s+/);
 }
 
-// 2026-11-06 direction (Zeros Design v378 to v383): split panes meet as
-// surfaces, not boxes. No seam line divides them, an unfocused pane takes the
-// sidebar's fill, corners round where panes meet, and the chrome (bg1, the
-// header's and the focused pane's fill) dissolves into each pane at its seams.
+// 2026-11-06 direction (Zeros Design v391, "Solid split", replacing the soft
+// valleys of v378 to v383): only while the column is split, panes stand apart
+// as solid surfaces on the bg1 chrome, 12px apart and 12px in from the
+// column's edges, with 12px corners and nothing fading between them. An
+// unfocused pane keeps the sidebar's fill. A lone pane runs edge to edge.
 describe("split pane surfaces", () => {
-  it("draws no resting seam and keeps the 6px resize strip out of layout", () => {
+  it("makes the divider the 12px gap between split panes, still the resize handle", () => {
+    expect(PANE_SPLITTER_PX).toBe(12);
     const splitter = component(paneLayout(), "PaneSplitter");
+    expect(splitter).toContain('isRow ? "w-3 cursor-ew-resize" : "h-3 cursor-ns-resize"');
+    expect(splitter).not.toMatch(/-m[lrtbxy]?-/);
     expect(splitter).not.toContain("bg-border1");
-    // 2px over the first pane, 4px over the second: the first tab starts 4px in.
-    expect(splitter).toContain('"-mr-1 -ml-0.5 w-1.5 cursor-ew-resize"');
-    expect(splitter).toContain('"-mt-0.5 -mb-1 h-1.5 cursor-ns-resize"');
-    expect(PANE_SPLITTER_PX).toBe(0);
+  });
+
+  it("insets a split from the column's left and bottom, and its right when Workbench is not beside it", () => {
+    expect(PANE_SPLIT_GUTTER_PX).toBe(12);
+    const src = paneLayout();
+    expect(src).toContain('"flex min-h-0 min-w-0 flex-1 bg-bg1"');
+    expect(src).toContain('split && "pb-3 pl-3"');
+    expect(src).toContain('split && !workbenchBeside && "pr-3"');
+    expect(read("conversation-pane.tsx")).toContain("workbenchBeside={!workbenchCollapsed}");
+    // The column's floor and the split gate both charge the gutters, the gate
+    // before any split exists.
+    expect(src).toContain("paneSurfaceMinimumSize(layout.root, workbenchBeside)");
+    expect(component(src, "measureSplitCapacity")).toContain("splitPaneGutters(workbenchWidth > 0)");
+  });
+
+  it("rounds every corner of a split pane and none of a lone pane", () => {
+    const pane = component(paneLayout(), "ChatPane");
+    expect(pane).toContain("const split = ctx.paneCount > 1;");
+    expect(pane).toContain('split && "overflow-hidden rounded-[calc(var(--radius-lg)*1.5)]"');
+    expect(pane).not.toMatch(/rounded-t[lr]-/);
+    expect(pane).toContain('!isFocused && "[--pane-bg:var(--sidebar-bg)]"');
+  });
+
+  it("draws no seam fades, valleys or tab-strip fade", () => {
+    const src = paneLayout();
+    expect(src).not.toContain("data-pane-seam-fade");
+    expect(src).not.toContain("pane-edges");
+    expect(classConstant(read("chat-tabs.tsx"), "CHAT_STRIP_SHELL_CLS")).toEqual([
+      "flex",
+      "h-10",
+      "shrink-0",
+      "items-center",
+      "overflow-hidden",
+    ]);
   });
 
   it("shows a drop zone as a soft fill without a border", () => {
@@ -44,31 +78,5 @@ describe("split pane surfaces", () => {
     expect(overlay).toContain('"bg-highlighted-bg/40 pointer-events-none absolute rounded-sm"');
     expect(overlay).not.toContain("border-highlighted-bright");
     expect(overlay).not.toMatch(/\bborder"/);
-  });
-
-  it("paints the chrome behind the panes, where their rounded corners show it", () => {
-    expect(paneLayout()).toContain('className="flex min-h-0 min-w-0 flex-1 bg-bg1"');
-  });
-
-  it("starts every tab strip in the chrome and dissolves it into the pane over 8px", () => {
-    // 20% of the 40px strip; behind the tabs, so they keep their own fills.
-    expect(classConstant(read("chat-tabs.tsx"), "CHAT_STRIP_SHELL_CLS")).toEqual(
-      expect.arrayContaining(["h-10", "bg-gradient-to-b", "from-bg1", "to-transparent", "to-20%"]),
-    );
-  });
-
-  it("rounds a pane's corners and fades its seams from its computed edges", () => {
-    const pane = component(paneLayout(), "ChatPane");
-    expect(pane).toContain("ctx.paneEdges.get(paneId)");
-    expect(pane).toContain('edges.roundTopLeft && "rounded-tl-[calc(var(--radius-lg)*1.5)]"');
-    expect(pane).toContain('edges.roundTopRight && "rounded-tr-[calc(var(--radius-lg)*1.5)]"');
-    expect(pane).toContain('!isFocused && "[--pane-bg:var(--sidebar-bg)]"');
-    for (const side of ["bottom", "left", "right"]) {
-      expect(pane).toContain(`data-pane-seam-fade="${side}"`);
-    }
-    const fades = paneLayout();
-    expect(fades).toContain('"pointer-events-none absolute inset-x-0 bottom-0 z-2 h-2 bg-gradient-to-t from-bg1 to-transparent"');
-    expect(fades).toContain('"pointer-events-none absolute inset-y-0 left-0 z-2 w-2 bg-gradient-to-r from-bg1 to-transparent"');
-    expect(fades).toContain('"pointer-events-none absolute inset-y-0 right-0 z-2 w-2 bg-gradient-to-l from-bg1 to-transparent"');
   });
 });

@@ -131,14 +131,9 @@ import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
  *  and the workbench expand control, which lives in whichever of the two owns it,
  *  landed 2px lower when the panel was collapsed. One shared height is the fix,
  *  so this constant is EXPORTED and the placeholder band in
- *  conversation/pane-layout.tsx consumes it rather than restating the literal.
- *
- *  With no header divider or pane seams, the strip starts in the chrome (bg1)
- *  and dissolves into its pane's fill over its first 8px (20% of 40px),
- *  behind the tabs, so an unfocused pane meets the header or the pane above
- *  it without a line. */
+ *  conversation/pane-layout.tsx consumes it rather than restating the literal. */
 export const CHAT_STRIP_SHELL_CLS =
-  "flex h-10 shrink-0 items-center overflow-hidden bg-gradient-to-b from-bg1 to-transparent to-20%";
+  "flex h-10 shrink-0 items-center overflow-hidden";
 
 /** Column-owned strip slots. 2026-09-01: Code's conversation column dropped its
  * own h-10 name/mode row, so the mode toggle became this strip's fixed leading
