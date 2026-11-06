@@ -143,6 +143,9 @@ revision in the same checkout and compare failing test names.
 
 ## Browser, Vite and UI smoke
 
+- `pnpm check:ui` reads `#` followed by hex digits in renderer source and
+  tests as a raw color, so a PR reference such as `#859` in a `describe` title or
+  comment fails it. Write `PR 859` instead.
 - Vite refuses private directories such as `.context`. Put a browser
   qualification checkout beside the main checkout instead.
 - Root Vitest starts Vite servers on the same dependency cache as UI smoke. Run
