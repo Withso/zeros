@@ -76,6 +76,12 @@ entries. Cursor subscription credentials and all three API keys use Electron
 `safeStorage` encryption, whose macOS encryption key is held in Keychain.
 They are not stored in renderer preferences or repository files.
 
+Claude and Cursor read the selected key from `ANTHROPIC_API_KEY` and
+`CURSOR_API_KEY`. Codex's app-server ignores `OPENAI_API_KEY`, so the engine
+logs the selected key in through `account/login/start` with an in-memory
+credential store. The device Codex login is neither used nor replaced while API
+is selected; see [Codex app-server compatibility](codex-app-server-compatibility.md).
+
 These are separate native profiles. New profiles start with provider defaults;
 Zeros settings and repository instructions still apply. Existing native personal
 settings remain with the device CLI account; the app does not copy credential

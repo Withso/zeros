@@ -135,6 +135,7 @@ const ALLOWED_COMMANDS = new Set<string>([
   "browser_session_park",
   "browser_session_detach",
   "browser_session_control",
+  "browser_session_restore",
   "browser_session_states",
   "browser_session_stop",
   "browser_ui_preferences_update",

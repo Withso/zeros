@@ -130,7 +130,7 @@ export class HybridTransport implements Transport {
     catch (error) { if (error instanceof HttpFailure && error.status === 401) this.failed(error); throw error; }
   }
   async runtimeUpdate(input: CloudRuntimeUpdateRequest, signal?: AbortSignal): Promise<CloudRuntimeUpdateReply> {
-    return CloudRuntimeUpdateReplySchema.parse(await this.request("runtime", input, signal, input.op === "prepare" ? 310_000 : 10_000));
+    return CloudRuntimeUpdateReplySchema.parse(await this.request("runtime", input, signal, input.op === "prepare" ? 310_000 : input.op === "ready" ? 30_000 : 10_000));
   }
   async readyRuntime(): Promise<void> {
     if (!this.options.runtimeHandoff || this.runtimeReady) return;
@@ -221,7 +221,7 @@ export class HybridTransport implements Transport {
         this.listening = true;
       }
       if (!this.registered) {
-        const reply = await this.request("hello", { protocol: CLOUD_V2_RELAY_PROTOCOL, runtimeSha256: this.options.runtimeSha256, bootId: this.bootId });
+        const reply = await this.request("hello", { protocol: CLOUD_V2_RELAY_PROTOCOL, runtimeSha256: this.options.runtimeSha256, bootId: this.bootId }, undefined, 30_000);
         this.registered = true;
         await this.handlers!.open();
         await this.configuration(reply);
@@ -298,15 +298,23 @@ export class HybridTransport implements Transport {
   }
   private async request(path: string, body?: unknown, signal?: AbortSignal, timeoutMs = 10_000): Promise<Record<string, unknown>> {
     const deadline = Date.now() + timeoutMs;
-    const token = await readWorkerToken(this.options.tokenFile ?? WORKER_TOKEN_FILE);
     if (this.stopped) throw new Error("Worker stopped.");
-    const remaining = deadline - Date.now();
-    if (remaining <= 0) throw new Error("Worker request timed out.");
     const controller = new AbortController(); this.requests.add(controller);
     const abort = () => controller.abort();
     if (signal?.aborted) abort(); else signal?.addEventListener("abort", abort, { once: true });
-    const timer = setTimeout(abort, remaining); timer.unref();
+    const timer = setTimeout(abort, timeoutMs); timer.unref();
     try {
+      const token = await new Promise<string>((resolve, reject) => {
+        const cancelled = () => { controller.signal.removeEventListener("abort", cancelled); reject(new Error("Worker request cancelled.")); };
+        if (controller.signal.aborted) { cancelled(); return; }
+        controller.signal.addEventListener("abort", cancelled, { once: true });
+        void readWorkerToken(this.options.tokenFile ?? WORKER_TOKEN_FILE).then(value => {
+          controller.signal.removeEventListener("abort", cancelled); resolve(value);
+        }, error => { controller.signal.removeEventListener("abort", cancelled); reject(error); });
+      });
+      controller.signal.throwIfAborted();
+      if (this.stopped) throw new Error("Worker stopped.");
+      if (deadline <= Date.now()) throw new Error("Worker request timed out.");
       const payload = body === undefined ? undefined : JSON.stringify(body);
       if (payload && Buffer.byteLength(payload) > CLOUD_V2_MAX_FRAME_BYTES) throw new Error("Worker payload too large.");
       const response = await (this.options.fetch ?? fetch)(new URL(`/v2/cloud/worker/${path}`, this.options.apiUrl), {

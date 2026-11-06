@@ -209,6 +209,7 @@ app
         tool?: string;
         browserSessionId: string;
         faviconDataUrl?: string;
+        loadError?: string;
       }> = [];
       const controlBar: ControlBarCall[] = [];
       const userStops: Array<{
@@ -612,6 +613,62 @@ app
 
       assert.equal(await service.revokeConfirmationSurface(), 0);
       assert.equal((await invoke("snapshot")).success, false);
+      // A closed window or reload destroys the page but keeps its Browser tab.
+      // The tab reopens its address as a user-owned page in the conversation's
+      // record, which the agent then shares; a live page is never navigated.
+      const restoredUrl = `http://127.0.0.1:${fixturePort}/?role=restored`;
+      const restoredPage = await service.restore({
+        conversationId: "conversation-a",
+        url: restoredUrl,
+      });
+      assert.equal(restoredPage.browserSessionId, first.browserSessionId);
+      assert.equal(restoredPage.actor, "user");
+      assert.equal(restoredPage.url, restoredUrl);
+      await assertEventually(async () => {
+        const page = await invoke("snapshot");
+        return (
+          page.success &&
+          (JSON.parse(page.content[0]?.text ?? "{}") as { title?: string })
+            .title === "Zeros browser smoke"
+        );
+      }, "The reopened page never reached the agent.");
+      const republished = await service.restore({
+        conversationId: "conversation-a",
+        url: `http://127.0.0.1:${landingPort}/landing`,
+      });
+      assert.equal(republished.browserSessionId, first.browserSessionId);
+      assert.equal(republished.url, restoredUrl);
+      await assert.rejects(
+        service.restore({
+          conversationId: "conversation-relaunched",
+          url: restoredUrl,
+        }),
+        /can't be reopened here/,
+      );
+      // Electron paints a failed load blank, so its state names the error.
+      const portProbe = createServer();
+      const closedPort = await listen(portProbe);
+      await new Promise<void>((resolve) => portProbe.close(() => resolve()));
+      const relaunchedPage = await service.restore({
+        conversationId: "conversation-relaunched",
+        url: `http://127.0.0.1:${closedPort}/`,
+        owner: owner("conversation-relaunched", artifactRoot),
+      });
+      await assertEventually(
+        () =>
+          states.some(
+            (state) =>
+              state.browserSessionId === relaunchedPage.browserSessionId &&
+              state.loadError === "ERR_CONNECTION_REFUSED",
+          ),
+        "A refused reopen never reported its load error.",
+      );
+      assert.equal(
+        (await service.acquire(owner("conversation-relaunched", artifactRoot)))
+          .browserSessionId,
+        relaunchedPage.browserSessionId,
+      );
+      assert.equal(service.close(relaunchedPage.browserSessionId), true);
       const afterSurfaceReset = await service.acquire(
         owner("conversation-a", movedWorkspaceRoot),
       );

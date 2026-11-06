@@ -69,7 +69,7 @@ export async function runDesignFrameChildrenSmoke({ page, waitFor, check }) {
     window.__designChildCreation = probe;
     const sample = () => {
       const layers = document.querySelector("[data-design-sidebar-panel]");
-      const header = document.querySelector("[data-design-inspector-header]")?.textContent?.trim() ?? "";
+      const header = document.querySelector("[data-design-inspector-header]")?.getAttribute("data-design-selection-type") ?? "";
       probe.states.push({
         pending: [...(layers?.querySelectorAll("span") ?? [])].some((span) => /^Loading/.test(span.textContent ?? "")),
         empty: header === "Nothing selected" || header === "Page",
@@ -274,7 +274,7 @@ export async function runDesignFrameChildrenSmoke({ page, waitFor, check }) {
       if (article) probe.created = article.getAttribute("data-design-frame");
       if (article && !painted && (!draft || getComputedStyle(draft).display === "none")) probe.blank++;
       const inspector = document.querySelector("[data-design-inspector]");
-      if (inspector?.querySelector("[data-design-inspector-header]")?.textContent?.trim() === "Frame" &&
+      if (inspector?.querySelector("[data-design-inspector-header]")?.getAttribute("data-design-selection-type") === "Frame" &&
           !inspector.querySelector("[data-design-layout-section]")) probe.fallback++;
       if (!probe.done) requestAnimationFrame(sample);
     };

@@ -8,6 +8,7 @@ import {
   type ElementType,
 } from "react";
 import {
+  DEFAULT_CODE_VIEW_LAYOUT,
   parseDiffFromFile,
   type CodeViewItem,
   type FileContents,
@@ -20,7 +21,10 @@ import {
 import { CodeView, EditProvider, type CodeViewHandle } from "@pierre/diffs/react";
 import { isNativeEditHistoryTarget, registerEditHistory } from "@/renderer/shared/ui/edit-history";
 import { useCodeTheme } from "@/renderer/shared/theme/use-code-theme";
-import { zerosCodeViewOptions } from "@/renderer/shared/theme/diff-theme";
+import {
+  NEW_FILE_DIFF_CSS,
+  zerosCodeViewOptions,
+} from "@/renderer/shared/theme/diff-theme";
 import { useWorkbenchStatusSource } from "../../tab-status";
 import { useScrollMemory } from "../../../scroll-memory";
 import {
@@ -201,6 +205,8 @@ function EditableDiffSession({
   // Edit notifications go to the shared draft, not back into controlled items.
   // Replacing input per keystroke destroys native selection/IME/undo state.
   const items = useMemo(() => [{ ...item, edit: true }], [item]);
+  // An empty base is a new or untracked file: no row wash, only bars and +.
+  const newFile = oldFile === null;
   const options = useMemo(() => {
     const base = zerosCodeViewOptions({
       diffStyle: "unified",
@@ -213,10 +219,17 @@ function EditableDiffSession({
     return {
       ...base,
       unsafeCSS: `${base.unsafeCSS}
-  [data-line][data-line-type="change-deletion"] { -webkit-user-select: none; user-select: none; }`,
+  [data-line][data-line-type="change-deletion"] { -webkit-user-select: none; user-select: none; }${newFile ? NEW_FILE_DIFF_CSS : ""}`,
+      // The plain editor's 12px above the first line and below the last.
+      layout: {
+        ...DEFAULT_CODE_VIEW_LAYOUT,
+        ...base.layout,
+        paddingTop: 12,
+        paddingBottom: 12,
+      },
       expandUnchanged: true,
     };
-  }, [theme]);
+  }, [theme, newFile]);
   useEffect(
     () => () => {
       EditStateManager.clear("file-diff", sessionKey);

@@ -19,6 +19,7 @@ import { mirrorMessageSearch, type SearchOptions } from "./history-search.js";
 import { MESSAGE_SEARCH_DEADLINE_MS } from "./message-search.js";
 import { consumeRuntimeCanary } from "./runtime-canary-store.js";
 import type { RuntimeCanaryAdmission } from "./runtime-canary.js";
+import { RUNTIME_HANDOFF_SESSION } from "./runtime-handoff-store.js";
 
 export type CloudV2WorkspaceState =
   | "creating" | "running" | "stopping" | "stopped" | "starting" | "deleting" | "deleted" | "failed";
@@ -489,11 +490,12 @@ export class CloudV2Store {
       ...(row.prior_state === "running" || row.state !== "running" ? {} : { helloTiming: { state: row.prior_state, durationMs: Math.round(row.hello_ms) } }) } : null;
   }
 
-  async workerSession(token: string, bootId: string): Promise<CloudV2WorkerSession | null> {
+  async workerSession(token: string, bootId: string, handoff?: { id: string; sha256?: string }): Promise<CloudV2WorkerSession | null> {
     const { rows } = await withSystemTx(this.pool, tx => tx.query<Row & { access_epoch: string; login_revision: string }>(
       `SELECT ${COLUMNS}, access_epoch::text, login_revision::text FROM cloud_v2_workspaces w
-       WHERE worker_token_hash=$1 AND worker_boot_id=$2 AND state NOT IN ('deleting','deleted') AND ${LIVE_ACCESS}`,
-      [hashCloudV2Token(token), bootId]));
+       WHERE worker_token_hash=$1 AND ${handoff ? RUNTIME_HANDOFF_SESSION : "worker_boot_id=$2"}
+       AND state NOT IN ('deleting','deleted') AND ${LIVE_ACCESS}`,
+      [hashCloudV2Token(token), bootId, ...(handoff ? [handoff.id, handoff.sha256 ?? null] : [])]));
     const row = rows[0];
     return row ? { ...workspace(row), accessEpoch: row.access_epoch, loginRevision: row.login_revision } : null;
   }

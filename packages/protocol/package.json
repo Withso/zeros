@@ -49,7 +49,6 @@
     "./code-review": "./src/code-review.ts",
     "./git-review-actions": "./src/git-review-actions.ts",
     "./merge-conflicts": "./src/merge-conflicts.ts",
-    "./review-hunks": "./src/review-hunks.ts",
     "./workspace-paths": "./src/workspace-paths.ts",
     "./identities": "./src/identities.ts",
     "./local-orchestration": "./src/local-orchestration.ts",

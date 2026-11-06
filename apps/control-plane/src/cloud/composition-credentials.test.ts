@@ -18,16 +18,20 @@ const github = vi.hoisted(() => ({
   workspaceSetup: vi.fn(async () => null),
   source: { invalidate: vi.fn(), targets: vi.fn(async () => {}) },
   binding: vi.fn(async () => ({ repository: "owner/project" })),
+  workerIdentity: vi.fn(),
 }));
 vi.mock("./github-composition.js", () => ({ createCloudGithubServices: () => github }));
 vi.mock("../postgres-notifications.js", () => ({ postgresNotificationSubscription: () => null }));
-vi.mock("./agent-logins.js", async original => ({ ...await original<typeof import("./agent-logins.js")>(), createCloudV2AgentLogins: () => async () => null }));
+vi.mock("./agent-logins.js", async original => ({ ...await original<typeof import("./agent-logins.js")>(),
+  createCloudV2AgentLogins: () => Object.assign(async () => null, { all: async () => ({ codex: null, claude: null, cursor: null }) }) }));
 vi.mock("../mcp/composition.js", () => ({ createMcpServices: () => null }));
 vi.mock("./lifecycle.js", async original => ({ ...await original<typeof import("./lifecycle.js")>(),
   CloudV2Lifecycle: class { constructor(readonly deps: CloudV2LifecycleDeps) {} },
 }));
 
 it("wires workspace git, gh, legacy, hydration and restore credentials to the creator while Computer builds keep automation credentials", async () => {
+  github.workerIdentity.mockImplementation(async workspace => ({ repositoryBinding: await github.binding(),
+    gitIdentity: await github.connections.gitIdentity({ organizationId: workspace.organizationId, userId: workspace.creatorUserId }) }));
   const config = {
     github: null, deploymentChannel: "alpha", cloudAgentCredentials: { settingsSecretKeyV1: Buffer.alloc(32, 1).toString("base64url") },
     cloudV2: { boat: { apiKey: "synthetic-boat-credential" }, apiUrl: "https://api.example.test", realtimeUrl: "https://rt.example.test",

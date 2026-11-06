@@ -17,7 +17,7 @@ export type CloudV2AgentLogins = (ownerUserId: string, organizationId: string, p
 
 type Row = {
   id: string; owner_user_id: string; kind: CloudAgentCredentialKind; current_version: number;
-  key_version: number; nonce: Buffer; ciphertext: Buffer; auth_tag: Buffer;
+  key_version: number; nonce: Buffer; ciphertext: Buffer; auth_tag: Buffer; provider: CloudV2AgentProvider;
 };
 
 const KINDS: Record<CloudV2AgentProvider, readonly CloudAgentCredentialKind[]> = {
@@ -26,28 +26,30 @@ const KINDS: Record<CloudV2AgentProvider, readonly CloudAgentCredentialKind[]> =
   cursor: ["cursor-api-key"],
 };
 
-export function createCloudV2AgentLogins(pool: pg.Pool, keys: CloudAgentCredentialKeys): CloudV2AgentLogins {
-  return async (ownerUserId, organizationId, provider) => {
+export function createCloudV2AgentLogins(pool: pg.Pool, keys: CloudAgentCredentialKeys) {
+  const read = async (ownerUserId: string, organizationId: string, providers: CloudV2AgentProvider[]) => {
     const { rows } = await withSystemTx(pool, tx => tx.query<Row>(
-      `SELECT credential.id, credential.owner_user_id, credential.kind, credential.current_version,
+      `SELECT connection.provider, credential.id, credential.owner_user_id, credential.kind, credential.current_version,
               material.key_version, material.nonce, material.ciphertext, material.auth_tag
        FROM cloud_agent_organization_connections connection
        JOIN cloud_agent_credentials credential ON credential.id = connection.credential_id
          AND credential.owner_user_id = connection.owner_user_id AND credential.revoked_at IS NULL
        JOIN cloud_agent_credential_versions material ON material.credential_id = credential.id
          AND material.version = credential.current_version
-       WHERE connection.org_id = $1 AND connection.owner_user_id = $2 AND connection.provider = $3
+       WHERE connection.org_id = $1 AND connection.owner_user_id = $2 AND connection.provider = ANY($3::text[])
          AND coalesce(material.material_mode, 'local') = 'local'`,
-      [organizationId, ownerUserId, provider],
+      [organizationId, ownerUserId, providers],
     ));
-    const row = rows[0];
-    if (!row || !KINDS[provider].includes(row.kind)) return null;
-    return openCloudAgentCredential(
-      { nonce: row.nonce, ciphertext: row.ciphertext, authTag: row.auth_tag },
-      { credentialId: row.id, ownerUserId: row.owner_user_id, kind: row.kind, version: row.current_version, keyVersion: row.key_version },
-      keys.keys,
-    );
+    const selected: Record<CloudV2AgentProvider, CloudAgentCredentialMaterial | null> = { codex: null, claude: null, cursor: null };
+    for (const row of rows) if (KINDS[row.provider].includes(row.kind)) selected[row.provider] = openCloudAgentCredential(
+        { nonce: row.nonce, ciphertext: row.ciphertext, authTag: row.auth_tag },
+        { credentialId: row.id, ownerUserId: row.owner_user_id, kind: row.kind, version: row.current_version, keyVersion: row.key_version },
+        keys.keys,
+      );
+    return selected;
   };
+  const login: CloudV2AgentLogins = async (ownerUserId, organizationId, provider) => (await read(ownerUserId, organizationId, [provider]))[provider];
+  return Object.assign(login, { all: (ownerUserId: string, organizationId: string) => read(ownerUserId, organizationId, ["codex", "claude", "cursor"]) });
 }
 
 /** Renews the ChatGPT login the creator selected, with the vault's fenced,

@@ -55,6 +55,14 @@ Values for every public token in both themes, the contrast each declared pairing
 | `--primary-button-hover` | `#D4D4D4` | `#443F3A` | lifted neutral |
 | `--primary-button-fg` | `#0D0D0D` (= inverted-fg) | `#FFFFFF` (= inverted-fg) | text/icon on the primary button |
 
+### Neutral solid fills
+
+| Token | Dark | Light | Role |
+| --- | --- | --- | --- |
+| `--neutral-secondary` | `#444444` | `#514D49` (= fg2) | solid neutral fills: Accept both (merge conflicts) |
+| `--neutral-secondary-hover` | `#565656` | `#4B4743` | neutral solid hover fill |
+| `--neutral-secondary-fg` | `#FFFFFF` (= red-secondary-fg) | `#FFFFFF` (= red-secondary-fg) | text on SOLID --neutral-secondary fills. THEME-STATIC white. |
+
 ## Status families
 
 `-primary` is status text / counts / icons on app surfaces, `-bg` a tinted container, `-fg` the text on that container. Numeric ramps (`--red-500` …) are private to `styles/zeros-tokens.css`.
@@ -70,6 +78,9 @@ Values for every public token in both themes, the contrast each declared pairing
 | green | success · +N | `--green-primary` | `#4ADE80` | `#107234` |
 |  |  | `--green-bg` | `#213521` | `#D8EEDD` |
 |  |  | `--green-fg` | `#87EEAC` | `#157739` |
+|  |  | `--green-secondary` | `#2A653F` | `#107234` (= green-primary) |
+|  |  | `--green-secondary-hover` | `#2F794A` | `#0F6930` |
+|  |  | `--green-secondary-fg` | `#FFFFFF` (= red-secondary-fg) | `#FFFFFF` (= red-secondary-fg) |
 | yellow | warning · modified · in progress | `--yellow-primary` | `#E6AB4C` | `#8A5807` |
 |  |  | `--yellow-bg` | `#49330E` | `#FEF3C8` |
 |  |  | `--yellow-fg` | `#FFBB00` | `#9C6000` |
@@ -77,6 +88,9 @@ Values for every public token in both themes, the contrast each declared pairing
 | blue | info · links | `--blue-primary` | `#83C3F1` | `#1556E2` |
 |  |  | `--blue-bg` | `#08233A` | `#F0F6FF` |
 |  |  | `--blue-fg` | `#91C5FD` | `#1C4ED9` |
+|  |  | `--blue-secondary` | `#405A6C` | `#1556E2` (= blue-primary) |
+|  |  | `--blue-secondary-hover` | `#4C6C82` | `#134FD0` |
+|  |  | `--blue-secondary-fg` | `#FFFFFF` (= red-secondary-fg) | `#FFFFFF` (= red-secondary-fg) |
 | violet | done · merged | `--violet-primary` | `#BC83F1` | `#851EE6` |
 |  |  | `--violet-bg` | `#292438` | `#F2E1FE` |
 |  |  | `--violet-fg` | `#BE9EEB` | `#652EBD` |
@@ -115,6 +129,10 @@ Supplemental metadata and subtle boundary floors are owner-reviewed design decis
 | `--brown-fg` | brown-bg | 4.5:1 | ✓ 6.74 on brown-bg | ✓ 5.08 on brown-bg |
 | `--fg1` | yellow-wash/0.35@bg1, yellow-wash/0.54@bg1, yellow-wash/0.35@sidebar-bg, yellow-wash/0.54@sidebar-bg | 4.5:1 | ✓ 4.58 on yellow-wash/0.54@sidebar-bg | ✓ 10.12 on yellow-wash/0.54@sidebar-bg |
 | `--red-secondary-fg` | red-secondary, red-secondary-hover | 4.5:1 | ✓ 6.61 on red-secondary | ✓ 4.90 on red-secondary |
+| `--green-secondary-fg` | green-secondary, green-secondary-hover | 4.5:1 | ✓ 5.31 on green-secondary-hover | ✓ 6.04 on green-secondary |
+| `--blue-secondary-fg` | blue-secondary, blue-secondary-hover | 4.5:1 | ✓ 5.56 on blue-secondary-hover | ✓ 6.07 on blue-secondary |
+| `--neutral-secondary-fg` | neutral-secondary, neutral-secondary-hover | 4.5:1 | ✓ 7.34 on neutral-secondary-hover | ✓ 8.37 on neutral-secondary |
+| `--fg3` | green-primary/0.26@bg1, blue-primary/0.34@bg1 | 3:1 | ✓ 3.26 on blue-primary/0.34@bg1 | ✓ 3.92 on blue-primary/0.34@bg1 |
 | `--inverted-fg` | inverted-bg | 4.5:1 | ✓ 16.30 on inverted-bg | ✓ 14.62 on inverted-bg |
 | `--primary-button-fg` | primary-button-bg, primary-button-hover | 4.5:1 | ✓ 13.11 on primary-button-hover | ✓ 10.41 on primary-button-hover |
 | `--yellow-icon` | @rest, @hover | 3:1 | ✓ 6.10 on selected-bg | ✓ 3.14 on bg2-highlight |

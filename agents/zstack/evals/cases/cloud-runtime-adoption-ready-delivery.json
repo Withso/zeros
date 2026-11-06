@@ -1,0 +1,9 @@
+{
+  "id": "cloud-runtime-adoption-ready-delivery",
+  "kind": "seeded",
+  "area": "scripts-release",
+  "fixedBy": "pr:849",
+  "symptom": "The slow runtime-adoption release contract intermittently read an undefined ENGINE_READY frame after its durable HTTP prompt had completed on a separate transport.",
+  "rule": "The CI-red playbook requires fixtures to await the actual consumer acknowledgement. Hold real WebSocket reception until HTTP completion, retain the exact instanceId assertion and existing deadlines, then seed the original synchronous read to reproduce both successful-adoption and rollback failures. A replay overlay would copy the fixed assertion onto both sides of this test-only correction.",
+  "check": "pnpm exec vitest run --config scripts/release/vitest.config.ts scripts/release/runtime-adoption.integration.test.ts"
+}

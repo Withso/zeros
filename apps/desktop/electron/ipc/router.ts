@@ -178,6 +178,7 @@ const commandTable: Record<string, CommandHandler> = {
   browser_session_states: notImpl("browser_session_states", 0),
   browser_session_detach: notImpl("browser_session_detach", 0),
   browser_session_control: notImpl("browser_session_control", 0),
+  browser_session_restore: notImpl("browser_session_restore", 0),
   browser_session_stop: notImpl("browser_session_stop", 0),
   browser_ui_preferences_update: notImpl("browser_ui_preferences_update", 0),
 

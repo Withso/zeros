@@ -12,11 +12,6 @@ import {
   reviewThreadRenderVersion,
   type CodeReviewThreadItem,
 } from "./review-thread-model";
-import {
-  reviewHunkPlacements,
-  type ReviewHunkTarget,
-  type ReviewLiveHunkSource,
-} from "./review-hunk-model";
 
 export interface ReviewSelectionTarget {
   itemId: string;
@@ -33,7 +28,6 @@ export interface ReviewAnnotationPayload {
   id: string;
   threads: readonly ReviewAnnotationThread[];
   selection?: ReviewSelectionTarget;
-  hunks?: readonly ReviewHunkTarget[];
 }
 export type ReviewAnnotation =
   | LineAnnotation<ReviewAnnotationPayload>
@@ -71,7 +65,6 @@ export function reviewAnnotationVersion(
           annotation.metadata.selection.mode,
           annotation.metadata.selection.postToPr,
         ],
-        annotation.metadata.hunks?.map((hunk) => hunk.key),
       ]),
     ),
   );
@@ -93,14 +86,12 @@ export class ReviewAnnotationCache {
     snapshot: Extract<ReviewCodeSnapshot, { kind: "diff" }>,
     threads: readonly CodeReviewThreadItem[],
     selection?: ReviewSelectionTarget,
-    hunkSource?: ReviewLiveHunkSource,
     active = true,
   ): DiffLineAnnotation<ReviewAnnotationPayload>[] {
     return this.build(
       snapshot,
       threads,
       selection,
-      hunkSource,
       active,
     ) as DiffLineAnnotation<ReviewAnnotationPayload>[];
   }
@@ -114,7 +105,6 @@ export class ReviewAnnotationCache {
       snapshot,
       threads,
       selection,
-      undefined,
       active,
     ) as LineAnnotation<ReviewAnnotationPayload>[];
   }
@@ -123,7 +113,6 @@ export class ReviewAnnotationCache {
     snapshot: ReviewCodeSnapshot,
     threads: readonly CodeReviewThreadItem[],
     selection?: ReviewSelectionTarget,
-    hunkSource?: ReviewLiveHunkSource,
     active = true,
   ): ReviewAnnotation[] {
     const relevant = threads.filter((thread) =>
@@ -149,13 +138,6 @@ export class ReviewAnnotationCache {
         reviewSelectionKey(selection),
         selection.mode,
         selection.postToPr,
-      ],
-      hunkSource && [
-        hunkSource.cwd,
-        hunkSource.path,
-        hunkSource.comparison,
-        hunkSource.contentRevision,
-        reviewContentRevision(hunkSource.patch),
       ],
     ]);
     const key = `${snapshot.kind}:${snapshot.path}`;
@@ -208,15 +190,6 @@ export class ReviewAnnotationCache {
       group(placement.lineNumber, selection.anchor.side).metadata.selection =
         selection;
     }
-    if (snapshot.kind === "diff" && hunkSource) {
-      for (const placement of reviewHunkPlacements(snapshot, hunkSource)) {
-        const entry = group(placement.lineNumber, placement.side);
-        entry.metadata.hunks = [
-          ...(entry.metadata.hunks ?? []),
-          placement.target,
-        ];
-      }
-    }
     const annotations = [...groups.values()].sort(
       (a, b) =>
         a.lineNumber - b.lineNumber ||
@@ -233,11 +206,6 @@ export class ReviewAnnotationCache {
         if (
           old &&
           old.metadata.selection === current.metadata.selection &&
-          (old.metadata.hunks === current.metadata.hunks ||
-            (old.metadata.hunks?.length === current.metadata.hunks?.length &&
-              old.metadata.hunks?.every(
-                (hunk, at) => hunk === current.metadata.hunks?.[at],
-              ))) &&
           old.metadata.threads.length === current.metadata.threads.length &&
           old.metadata.threads.every(
             (entry, at) =>

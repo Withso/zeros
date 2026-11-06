@@ -410,13 +410,10 @@ export async function runCodeReviewSmoke({
 
   await open();
   await page.getByTestId("review-mode-diff").click();
-  await page.getByTestId("review-toggle-hunks").click();
-  await page.getByRole("button", { name: "Accept", exact: true }).click();
-  await expect(last()).toHaveText("accepted hunk");
-  await expect(
-    page.getByRole("button", { name: "Accepted", exact: true }),
-  ).toBeVisible();
-  check("Hunk review controls are embedded in the live diff", true);
+  await expect(page.locator("[data-gutter]").first()).toBeVisible();
+  for (const name of ["Accept", "Reject", "Accepted", "Reject hunk"])
+    await expect(page.getByRole("button", { name, exact: true })).toHaveCount(0);
+  check("The live diff carries no hunk review controls", true);
 
   await page.getByTestId("review-mode-conflict").click();
   const conflictEditor = page.locator(".cm-content[contenteditable=true]");
@@ -424,53 +421,23 @@ export async function runCodeReviewSmoke({
   await conflictEditor.press("Control+Home");
   await conflictEditor.pressSequentially("// manual unsaved edit");
   await conflictEditor.press("Enter");
-  // A preview based on disk must never replace unrelated unsaved editor text.
-  const currentChoice = page.getByRole("button", {
-    name: "Current",
-    exact: true,
-  });
-  await expect
-    .poll(
-      async () =>
-        (await currentChoice.count()) === 0 ||
-        (await currentChoice.isDisabled()),
-    )
-    .toBe(true);
-  await expect(conflictEditor).toContainText("// manual unsaved edit");
-  await expect(last()).not.toHaveText("save resolution");
-  check("Conflict controls preserve a separate unsaved source draft", true);
-
-  await open();
-  await page.getByTestId("review-mode-conflict").click();
-  const saveResolution = page.getByRole("button", {
-    name: "Save resolution",
-    exact: true,
-  });
-  await expect(saveResolution).toBeDisabled();
-  await page.getByRole("button", { name: "Both", exact: true }).click();
-  await expect(page.locator(".cm-content")).toContainText("'workspace'");
-  await expect(page.locator(".cm-content")).toContainText("'shared'");
-  await expect(page.locator(".cm-content")).not.toContainText("<<<<<<<");
-  await expect(saveResolution).toBeEnabled();
-  const normalSave = page.getByRole("button", { name: "Save", exact: true });
-  if (await normalSave.count()) await expect(normalSave).toBeDisabled();
-  await page.getByTestId("review-hold-submissions").click();
-  await saveResolution.click();
-  await expect(page.getByTestId("review-release-submissions")).toBeEnabled();
+  // An accept is an ordinary edit: it shares the draft and the undo history
+  // with typed text, and nothing previews or saves separately.
   await expect(
-    page.getByRole("button", {
-      name: "Discard resolution preview",
-      exact: true,
-    }),
-  ).toBeDisabled();
-  await expect(page.locator(".cm-content")).toHaveAttribute(
-    "contenteditable",
-    "false",
-  );
-  await page.getByTestId("review-release-submissions").click();
-  await expect(last()).toHaveText("save resolution");
+    page.getByRole("button", { name: "Save resolution", exact: true }),
+  ).toHaveCount(0);
+  await page
+    .getByRole("button", { name: "Accept both", exact: true })
+    .click();
+  await expect(conflictEditor).toContainText("'workspace'");
+  await expect(conflictEditor).toContainText("'shared'");
+  await expect(conflictEditor).not.toContainText("<<<<<<<");
+  await expect(conflictEditor).toContainText("// manual unsaved edit");
+  await conflictEditor.press("Control+z");
+  await expect(conflictEditor).toContainText("<<<<<<<");
+  await expect(conflictEditor).toContainText("// manual unsaved edit");
   check(
-    "Conflict choices preview in the real editor and save through the guarded resolution action",
+    "Conflict accepts and typed edits share one draft and undo history",
     true,
   );
   await runReviewComparisonSmoke({ page, check, harnessBase: base });
@@ -509,10 +476,10 @@ async function checkReviewAvailability({ page, check, harnessBase }) {
     await expect(page.locator("[data-review-selection-toolbar]")).toHaveCount(0);
   }
   await page.getByTestId("review-mode-diff").click();
-  await page.getByTestId("review-toggle-hunks").click();
-  await page.getByRole("button", { name: "Accept", exact: true }).click();
-  await expect(page.getByTestId("review-last-action")).toHaveText("accepted hunk");
-  check("Cloud Files, editor and Changes expose no comment creation while Git hunk controls still work", true);
+  await expect(page.locator("[data-gutter]").first()).toBeVisible();
+  for (const name of ["Accept", "Reject"])
+    await expect(page.getByRole("button", { name, exact: true })).toHaveCount(0);
+  check("Cloud Files, editor and Changes expose no comment creation or hunk review", true);
   for (const theme of ["dark", "light"]) {
     await page.evaluate(async theme => {
       const { setPrefs } = await import("/apps/desktop/src/renderer/shared/theme/store.ts");

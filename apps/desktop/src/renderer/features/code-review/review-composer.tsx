@@ -27,6 +27,7 @@ export function ReviewComposer({
   onSubmitted,
   destination,
   notice,
+  variant = "card",
 }: {
   store: ReviewDraftStore;
   draftKey: string;
@@ -42,7 +43,11 @@ export function ReviewComposer({
   destination?: ReactNode;
   /** A line above the footer, such as a moved PR diff. */
   notice?: ReactNode;
+  /** A reply box takes the reply field's place beside your avatar: 6px
+   *  corners, a two-line area and a tighter footer. */
+  variant?: "card" | "reply";
 }) {
+  const reply = variant === "reply";
   const id = useId();
   const textarea = useRef<HTMLTextAreaElement>(null);
   const subscribe = useCallback(
@@ -71,7 +76,10 @@ export function ReviewComposer({
       data-review-composer
       aria-label={label}
       aria-busy={draft.busy || undefined}
-      className="border-border2 bg-sidebar-bg flex min-w-0 flex-col rounded-lg border font-sans"
+      className={cn(
+        "border-border2 bg-sidebar-bg flex min-w-0 flex-col border font-sans",
+        reply ? "rounded-md" : "rounded-lg",
+      )}
       onSubmit={(event) => {
         event.preventDefault();
         submit();
@@ -104,13 +112,15 @@ export function ReviewComposer({
         aria-describedby={draft.error ? `${id}-error` : undefined}
         value={draft.body}
         maxLength={CODE_REVIEW_BODY_LIMIT}
-        rows={3}
-        placeholder="Write a comment…"
+        rows={reply ? 2 : 3}
+        placeholder={reply ? "Write a reply…" : "Write a comment…"}
         className={cn(
           // Borderless inside the box, and unchanged on focus: the caret is
           // the cue. Sending dims the text until the write lands.
-          "min-h-16 resize-y border-transparent px-3 py-1.5 text-xs leading-5 shadow-none hover:border-transparent focus-visible:data-[zeros-keyboard-focus]:border-transparent focus-visible:data-[zeros-keyboard-focus]:ring-0",
-          showLabel ? "pt-1" : "pt-2.5",
+          "resize-y border-transparent text-xs leading-5 shadow-none hover:border-transparent focus-visible:data-[zeros-keyboard-focus]:border-transparent focus-visible:data-[zeros-keyboard-focus]:ring-0",
+          reply
+            ? "min-h-12 px-2.5 pt-1.5 pb-0.5"
+            : cn("min-h-16 px-3 py-1.5", showLabel ? "pt-1" : "pt-2.5"),
           draft.busy && "text-fg3",
         )}
         disabled={!active}
@@ -126,7 +136,12 @@ export function ReviewComposer({
         </p>
       )}
       {notice ? <div className="px-3 pt-1">{notice}</div> : null}
-      <div className="flex items-center justify-end gap-1 p-2">
+      <div
+        className={cn(
+          "flex items-center justify-end gap-1",
+          reply ? "pt-1 pr-1.5 pb-1.5 pl-2.5" : "p-2",
+        )}
+      >
         {destination ? (
           <div className="mr-auto flex min-w-0 items-center">{destination}</div>
         ) : null}

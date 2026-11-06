@@ -129,9 +129,10 @@ export class CloudGithubConnections {
   }
   async gitIdentity(
     scope: CloudGithubConnectionScope,
+    pending = this.access(scope),
   ): Promise<{ name: string; email: string } | null> {
     try {
-      const access = await this.access(scope);
+      const access = await pending;
       await access.assertCurrent();
       return {
         name: access.identity.name ?? access.identity.login,

@@ -23,8 +23,6 @@ const CODE_REVIEW_MUTATIONS = new Set([
   "codeReview.setResolved",
 ]);
 
-const GIT_REVIEW_MUTATIONS = new Set(["git.reviewHunk", "git.resolveConflict"]);
-
 const PROJECT_MUTATIONS = new Set([
   "project.upsert",
   "project.remove",
@@ -217,7 +215,6 @@ export const LONG_LIFECYCLE_OPS = new Set([
 export function dbChangedIncludesOriginator(op: string): boolean {
   return (
     CODE_REVIEW_MUTATIONS.has(op) ||
-    GIT_REVIEW_MUTATIONS.has(op) ||
     LONG_LIFECYCLE_OPS.has(op) ||
     SETTINGS_MUTATIONS.has(op) ||
     // Re-adding a removed repo reconciles its old workspace visibility in the
@@ -242,7 +239,6 @@ export function dbChangedIncludesOriginator(op: string): boolean {
 /** Which renderer server-state collections a successful operation changed. */
 export function dbChangedKinds(op: string, result?: unknown): string[] | null {
   if (CODE_REVIEW_MUTATIONS.has(op)) return ["codeReview"];
-  if (GIT_REVIEW_MUTATIONS.has(op)) return ["workspaces", "gitReview"];
   if (op === "design.transaction.apply" && result && typeof result === "object" &&
       (result as { result?: { dryRun?: boolean } }).result?.dryRun === true) return null;
   if (CHAT_MUTATIONS.has(op)) return ["chats"];

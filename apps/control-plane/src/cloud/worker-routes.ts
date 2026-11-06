@@ -74,11 +74,13 @@ async function configuration(deps: CloudV2WorkerRouteDeps, workspace: CloudV2Wor
   if (mode === "continuation" && deps.continueSource) await deps.continueSource(workspace, workspace);
   else await deps.authorizeSource?.(workspace);
   for (let attempt = 0; attempt < 8; attempt++) {
-    const revision = await deps.store.loginRevision(workspace.id);
-    if (revision === null || !await currentSession(deps, token, bootId, handoff)) throw unauthorized();
-    const config = await deps.config(workspace, mode);
-    if (!await currentSession(deps, token, bootId, handoff)) throw unauthorized();
-    if (revision === await deps.store.loginRevision(workspace.id)) {
+    const before = await currentSession(deps, token, bootId, handoff);
+    if (!before) throw unauthorized();
+    const config = await deps.config(before, mode);
+    const after = await currentSession(deps, token, bootId, handoff);
+    if (!after || before.accessEpoch !== after.accessEpoch) throw unauthorized();
+    const revision = before.loginRevision;
+    if (revision === after.loginRevision) {
       const { mcpServers, githubPullRequests, githubUserTokens, gitIdentity, agentInteractions, codeReview, historyReplacement: _historyReplacement, environment, runtimeUpdate: _runtimeUpdate, ...legacy } = config;
       if (environment && !features.has("workspace-environment-v1"))
         throw new HttpError(409, "cloud_environment_runtime_required", "Update the cloud runtime before opening this workspace.");

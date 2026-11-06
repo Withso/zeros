@@ -24,6 +24,13 @@ import path from "node:path";
 import type { ProviderCredentialUpdate } from "../../types";
 import { openOwnedTranscript, ownedTranscriptPath } from "./transcript-file";
 
+/** Zeros-private marker, value "api-key": this execution's Local Codex
+ * connection is the selected key in OPENAI_API_KEY. Codex's app-server ignores
+ * that variable and authenticates from the login saved in CODEX_HOME, so boot
+ * logs the key in explicitly. Only the trusted provider projection sets it; it
+ * never reaches the Codex process. */
+export const CODEX_AUTH_ENV = "ZEROS_CODEX_AUTH";
+
 /** The execution env with the update's connection variables applied: listed
  * names absent from the update are removed, never left at their old value. */
 export function withProviderConnection(
