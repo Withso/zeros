@@ -7,3 +7,5 @@ export declare function schemeForDeploymentEnvironment(
   environment: "alpha" | "beta" | "production" | undefined,
   requestedScheme: string,
 ): string;
+/** This deployment's app link, for an Open Zeros that carries no callback. */
+export function deploymentAppLink(environment: string | undefined | null): string;

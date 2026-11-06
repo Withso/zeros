@@ -3,9 +3,11 @@ import { Hono } from "hono";
 import type pg from "pg";
 
 import { withSystemTx, type Tx } from "./db.js";
+import { HOSTED_PAGE_STYLE_SOURCE, hostedPage } from "./hosted-page.js";
 import type {
   WorkOSBrowserProvider,
   WorkOSExchange,
+  WorkOSSocialProvider,
 } from "./workos-provider.js";
 import {
   withWorkOSProviderLocks,
@@ -602,6 +604,7 @@ export class WorkOSBrowserSessions {
   async start(options: {
     returnPath: string;
     maxAge?: 300;
+    socialProvider?: WorkOSSocialProvider;
   }): Promise<{ credential: string; authorizationUrl: string }> {
     const credential = this.token();
     const state = this.token();
@@ -619,6 +622,9 @@ export class WorkOSBrowserSessions {
       codeChallenge: pkceChallenge(codeVerifier),
       redirectUri,
       ...(options.maxAge !== undefined ? { maxAge: options.maxAge } : {}),
+      ...(options.socialProvider
+        ? { socialProvider: options.socialProvider }
+        : {}),
     });
     const parsed = new URL(authorizationUrl);
     if (parsed.protocol !== "https:" || parsed.username || parsed.password) {
@@ -991,27 +997,36 @@ function appendSessionCleanup(headers: Headers): void {
   headers.append("set-cookie", expireCookie("zeros_session", true));
 }
 
+const HOSTED_PAGE_HEADERS = {
+  "cache-control": "no-store",
+  pragma: "no-cache",
+  "content-type": "text/html; charset=utf-8",
+  "content-security-policy": `default-src 'none'; style-src ${HOSTED_PAGE_STYLE_SOURCE}; base-uri 'none'; form-action 'self'; frame-ancestors 'none'`,
+  "cross-origin-opener-policy": "same-origin",
+  "referrer-policy": "no-referrer",
+  "x-content-type-options": "nosniff",
+  "x-frame-options": "DENY",
+} as const;
+
 function failureResponse(reason: string): Response {
   const descriptions: Record<string, string> = {
-    missing_callback: "The sign-in link was missing required callback data.",
-    invalid_flow:
-      "This sign-in attempt expired, was already used, or did not match this browser.",
-    email_unverified:
-      "Verify your email address with the provider before continuing.",
-    exchange_failed: "The sign-in service could not complete this attempt.",
-    provider_error: "The identity provider did not complete this attempt.",
-    unavailable: "The sign-in service is temporarily unavailable.",
+    missing_callback: "The sign-in response was incomplete. Nothing was changed.",
+    invalid_flow: "This attempt expired, was used, or came from another browser.",
+    email_unverified: "Verify your email with the provider, then try again.",
+    exchange_failed: "The sign-in service couldn’t finish. Nothing was changed.",
+    provider_error: "The identity provider didn’t finish. Nothing was changed.",
+    unavailable: "Sign-in is unavailable right now. Try again shortly.",
   };
   const message = descriptions[reason] ?? descriptions.unavailable!;
   return new Response(
-    `Sign-in didn't finish. ${message} Nothing was changed; please try again.`,
-    {
-      status: 400,
-      headers: {
-        "content-type": "text/plain; charset=utf-8",
-        "cache-control": "no-store",
-      },
-    },
+    hostedPage(
+      "Sign-in didn’t finish",
+      `<div class="title">Sign-in didn’t finish</div>
+      <div class="sub">${message}</div>
+      <div class="acts"><a class="btn" href="/">Try again</a></div>`,
+      '<meta name="referrer" content="no-referrer" />',
+    ),
+    { status: 400, headers: new Headers(HOSTED_PAGE_HEADERS) },
   );
 }
 
@@ -1032,43 +1047,18 @@ function htmlAttribute(value: string): string {
  */
 function completionResponse(returnTo: string): Response {
   const target = htmlAttribute(returnTo);
-  const headers = new Headers({
-    "cache-control": "no-store",
-    pragma: "no-cache",
-    "content-type": "text/html; charset=utf-8",
-    "content-security-policy":
-      "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
-    "cross-origin-opener-policy": "same-origin",
-    "referrer-policy": "no-referrer",
-    "x-content-type-options": "nosniff",
-    "x-frame-options": "DENY",
-  });
   return new Response(
-    `<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="referrer" content="no-referrer" />
-    <meta http-equiv="refresh" content="0;url=${target}" />
-    <title>Completing sign in to Zeros</title>
-    <style>
-      :root { color-scheme: dark; }
-      body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #0c0c0d; color: #e6e6e6; font: 14px -apple-system, system-ui, sans-serif; }
-      main { max-width: 28rem; padding: 2rem; text-align: center; }
-      p { color: #a1a1aa; }
-      a { color: #f4f4f5; }
-    </style>
-  </head>
-  <body>
-    <main aria-live="polite">
-      <h1>Completing sign in</h1>
-      <p>Your secure Zeros session is ready.</p>
-      <a href="${target}">Continue to Zeros</a>
-    </main>
-  </body>
-</html>`,
-    { status: 200, headers },
+    hostedPage(
+      "Completing sign in",
+      `<div aria-live="polite">
+        <div class="title">Completing sign in</div>
+        <div class="sub">Your secure Zeros session is ready. Continue to open the app.</div>
+      </div>
+      <div class="acts"><a class="btn" href="${target}">Continue to Zeros</a></div>`,
+      `<meta name="referrer" content="no-referrer" />
+    <meta http-equiv="refresh" content="0;url=${target}" />`,
+    ),
+    { status: 200, headers: new Headers(HOSTED_PAGE_HEADERS) },
   );
 }
 
@@ -1079,15 +1069,33 @@ function json(value: unknown, status = 200): Response {
   });
 }
 
+/** One exact `provider=google|github`, only where the routes allow it. */
+function requestedSocialProvider(
+  requestUrl: URL,
+  allowed: boolean,
+): WorkOSSocialProvider | undefined {
+  const requested = requestUrl.searchParams.getAll("provider");
+  if (!allowed || requested.length !== 1) return undefined;
+  return requested[0] === "google" || requested[0] === "github"
+    ? requested[0]
+    : undefined;
+}
+
 export function createWorkOSBrowserSessionRoutes(
   sessions: WorkOSBrowserSessions,
   appOrigin: string,
+  // The app's sign-in page offers Google and GitHub; Ops stays on AuthKit.
+  options: { socialProviders?: boolean } = {},
 ): Hono {
   const app = new Hono();
 
   app.get("/auth/start", async (c) => {
     const requestUrl = new URL(c.req.url);
     try {
+      const socialProvider = requestedSocialProvider(
+        requestUrl,
+        options.socialProviders === true,
+      );
       const started = await sessions.start({
         returnPath: safeWorkOSReturnPath(
           requestUrl.searchParams.get("return"),
@@ -1096,6 +1104,7 @@ export function createWorkOSBrowserSessionRoutes(
         ...(requestUrl.searchParams.get("max_age") === "300"
           ? { maxAge: 300 as const }
           : {}),
+        ...(socialProvider ? { socialProvider } : {}),
       });
       const headers = new Headers({
         location: started.authorizationUrl,

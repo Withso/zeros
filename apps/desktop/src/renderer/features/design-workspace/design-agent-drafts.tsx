@@ -356,13 +356,12 @@ const DesignAgentDraftGhost = React.memo(function DesignAgentDraftGhost({
     <article
       data-design-agent-draft-ghost={entry.draft.file}
       aria-label={`${name}: ${phaseLabel(entry)}`}
-      className="outline-border2 pointer-events-none absolute outline outline-dashed"
+      className="zd-design-agent-draft-edge zd-design-dashed-box pointer-events-none absolute"
       style={{
         left: rect.x,
         top: rect.y,
         width: rect.width,
         height: rect.height,
-        outlineWidth: designCanvasScreenPixels(1),
       }}
     >
       <GhostTurnEnd workspaceId={workspaceId} entry={entry} />

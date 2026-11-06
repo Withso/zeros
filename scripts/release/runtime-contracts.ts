@@ -12,11 +12,34 @@ export type RuntimeManifest = z.infer<typeof RuntimeManifest>;
 export const RuntimeBuildSchema = z.object({ version: z.literal(1), repository: z.string(), workflowSha: z.string().regex(SHA),
   runId: z.string().regex(/^[1-9][0-9]{0,19}$/), runAttempt: z.number().int().min(1).max(10_000), manifest: RuntimeManifest }).strict();
 export type RuntimeBuild = z.infer<typeof RuntimeBuildSchema>;
-export const RuntimeQualification = z.object({
+export const LegacyRuntimeQualification = z.object({
   version: z.literal(1), repository: z.string().regex(/^[\w.-]+\/[\w.-]+$/),
   workflowSha: z.string().regex(SHA), manifest: RuntimeManifest, receipt: RuntimeCanaryReceiptSchema,
   release: RuntimeReleaseSchema,
 }).strict();
+export type LegacyRuntimeQualification = z.infer<typeof LegacyRuntimeQualification>;
+export const RuntimeReleaseReceiptSchema = z.object({
+  version: z.literal(1), status: z.literal("success"), channel: z.enum(["alpha", "beta", "production"]), action: z.enum(["publish", "promote", "rollback"]),
+  repository: z.string().regex(/^[\w.-]+\/[\w.-]+$/), workflowSha: z.string().regex(SHA),
+  runId: z.string().regex(/^[1-9][0-9]{0,19}$/), runAttempt: z.number().int().min(1).max(10_000), cpSourceSha: z.string().regex(SHA),
+  previousRuntimeSha256: z.string().regex(DIGEST), runtime: RuntimeReleaseSchema,
+  deploymentId: z.string().regex(/^[a-zA-Z0-9_-]{1,128}$/), completedAt: z.string().datetime(),
+}).strict();
+export type RuntimeReleaseReceipt = z.infer<typeof RuntimeReleaseReceiptSchema>;
+export const RuntimePublicationIntent = z.object({
+  version: z.literal(1), channel: z.literal("alpha"), action: z.enum(["publish", "rollback"]),
+  repository: z.string().regex(/^[\w.-]+\/[\w.-]+$/), workflowSha: z.string().regex(SHA),
+  runId: z.string().regex(/^[1-9][0-9]{0,19}$/), runAttempt: z.number().int().min(1).max(10_000),
+  cpSourceSha: z.string().regex(SHA), previousRuntimeSha256: z.string().regex(DIGEST),
+  manifest: RuntimeManifest, verifiedAt: z.string().datetime(),
+}).strict();
+export type RuntimePublicationIntent = z.infer<typeof RuntimePublicationIntent>;
+export const RuntimePublication = z.object({
+  version: z.literal(2), repository: z.string().regex(/^[\w.-]+\/[\w.-]+$/), workflowSha: z.string().regex(SHA),
+  manifest: RuntimeManifest, intent: RuntimePublicationIntent, receipt: RuntimeReleaseReceiptSchema, release: RuntimeReleaseSchema,
+}).strict();
+export type RuntimePublication = z.infer<typeof RuntimePublication>;
+export const RuntimeQualification = z.discriminatedUnion("version", [LegacyRuntimeQualification, RuntimePublication]);
 export type RuntimeQualification = z.infer<typeof RuntimeQualification>;
 export const RuntimeLiveIdentity = z.object({
   version: z.literal(1), channel: z.enum(["alpha", "beta", "production"]), ready: z.literal(true),
@@ -85,7 +108,6 @@ export function assertRuntimeLive(config: RuntimeReleaseConfig, value: RuntimeLi
     "Live control-plane source or runtime pin changed; no release mutation is authorized");
   requireCheck(config.channel === "alpha" ? value.branch === "main" : value.branch === config.branch,
     "Runtime releases preserve the existing control-plane source branch");
-  requireCheck(config.channel !== "alpha" || parsed.data.runtimeCanaryAdmission === 1, "The live Alpha control plane does not support runtime canaries");
   return parsed.data;
 }
 

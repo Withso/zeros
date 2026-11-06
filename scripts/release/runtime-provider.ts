@@ -10,6 +10,7 @@ import { assertEmptyRuntimeDrain, type RuntimeDrainLease, type RuntimeDrainStatu
 import { assertRuntimeDrainBudget, assertRuntimeDrainRecovery, boundRuntimeDrainLease, RUNTIME_STAGE_BUDGET_MS, RUNTIME_READINESS_BUDGET_MS, RUNTIME_CLEANUP_BUDGET_MS } from "./runtime-drain";
 import { runtimeJson } from "./runtime-proof";
 import { RuntimeProviderIntentSchema, type RuntimeProviderIntent, type RuntimeProviderRecovery } from "./runtime-journal";
+import { requireCurrentAlphaRuntime } from "./runtime-alpha";
 
 const deploymentSchema = z.object({ id: z.string().regex(/^[a-zA-Z0-9_-]{1,128}$/), status: z.string(),
   projectId: z.string().uuid(), environmentId: z.string().uuid(), serviceId: z.string().uuid(),
@@ -197,6 +198,7 @@ export function runtimeProvider(config: RuntimeReleaseConfig, env: NodeJS.Proces
       // The empty lease fences new work while serving ownership is refreshed after the drain wait.
       const drain = await options.inspectDrain(lease);
       assertEmptyRuntimeDrain(config, lease, drain);
+      if (config.action === "promote") await requireCurrentAlphaRuntime(next.sha256, boundedFetch);
       requireCheck(runtimeJson((await current()).current) === runtimeJson(previous), "Previous runtime changed before staging");
       assertRuntimeDrainBudget(config, lease, drain, RUNTIME_STAGE_BUDGET_MS);
       requireCheck(!options.signal?.aborted, "Runtime staging was cancelled");
@@ -218,6 +220,7 @@ export function runtimeProvider(config: RuntimeReleaseConfig, env: NodeJS.Proces
       await options.record({ kind: "deploy", phase: "requested", cpSha, next: stagedTarget, lease, deploymentId: null });
       const drain = await options.inspectDrain(lease);
       assertEmptyRuntimeDrain(config, lease, drain);
+      if (config.action === "promote") await requireCurrentAlphaRuntime(stagedTarget.sha256, boundedFetch);
       await current(stagedTarget);
       assertRuntimeDrainBudget(config, lease, drain, RUNTIME_READINESS_BUDGET_MS + RUNTIME_CLEANUP_BUDGET_MS);
       requireCheck(!options.signal?.aborted, "Runtime deployment was cancelled");

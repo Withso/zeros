@@ -11,7 +11,6 @@ import { openSearchPanel, replaceAll, SearchQuery, setSearchQuery } from "@codem
 import { CodeEditor, type CodeEditorProps } from "../code-editor";
 import { SourceEditor } from "../source-editor";
 import type { FileEditorControls } from "../file-editor-options";
-import type { GitReviewActionsClient } from "@/renderer/platform/git-review-actions";
 
 const writes = vi.hoisted(() => ({ save: vi.fn(async () => ({ kind: "success", path: "file.ts", bytes: 4 })) }));
 vi.mock("@/renderer/platform/files", () => ({ writeWorkspaceFile: writes.save }));
@@ -154,7 +153,7 @@ describe("CodeEditor history and controlled values", () => {
 
 describe.each(["/personal/a", "/organization/a", "cloud://organization/a"])("source history in %s", cwd => {
   let controls: FileEditorControls | null;
-  async function renderSource(content: string, options: { offscreen?: boolean; active?: boolean; autoSave?: boolean; refreshKey?: number; isGitConflict?: boolean; reviewActionClient?: GitReviewActionsClient } = {}) {
+  async function renderSource(content: string, options: { offscreen?: boolean; active?: boolean; autoSave?: boolean; refreshKey?: number; isGitConflict?: boolean } = {}) {
     await act(async () => root.render(createElement(SourceEditor, {
       editorId: "tab-a", cwd, path: "file.ts", content, review: {} as never,
       onControlsChange: value => { controls = value; }, ...options,
@@ -232,24 +231,33 @@ describe.each(["/personal/a", "/organization/a", "cloud://organization/a"])("sou
     expect(view.state.doc.toString()).toBe("base saved newer");
   });
 
-  it("does not restore a cancelled or saved conflict preview through source Undo", async () => {
-    const content = "<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> branch\n";
-    const resolveConflict = vi.fn(async () => {});
-    const view = await renderSource(content, { isGitConflict: true,
-      reviewActionClient: { identity: "history-test", resolveConflict } as unknown as GitReviewActionsClient });
-    const click = async (label: string) => act(async () => {
-      Array.from(host.querySelectorAll("button")).find(button => button.textContent === label)!.click();
-    });
-    await click("Current");
-    expect(view.state.doc.toString()).toBe("ours\n");
-    expect(view.state.readOnly).toBe(true);
-    await click("Discard resolution preview");
+  it("accepts a conflict block in place as one undoable edit that saves like any other", async () => {
+    const content = "keep\n<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> branch\n";
+    const view = await renderSource(content, { isGitConflict: true, autoSave: true });
+    expect(controls!.conflicts).toMatchObject({ count: 1, shown: 1 });
+    const accept = Array.from(host.querySelectorAll("button")).find(button => button.textContent === "Accept incoming change")!;
+    act(() => accept.click());
+    expect(view.state.doc.toString()).toBe("keep\ntheirs\n");
+    expect(controls!.dirty).toBe(true);
+    expect(controls!.conflicts).toBeNull();
+    act(() => { expect(undo(view)).toBe(true); });
     expect(view.state.doc.toString()).toBe(content);
-    act(() => { expect(undo(view)).toBe(false); });
-    await click("Incoming");
-    await click("Save resolution");
-    expect(resolveConflict).toHaveBeenCalledWith(cwd, expect.objectContaining({ content: "theirs\n" }));
-    expect(view.state.doc.toString()).toBe("theirs\n");
-    act(() => { expect(undo(view)).toBe(false); expect(redo(view)).toBe(false); });
+    expect(controls!.conflicts).toMatchObject({ count: 1 });
+    act(() => { expect(redo(view)).toBe(true); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(600); });
+    expect(writes.save).toHaveBeenCalledWith(cwd, "file.ts", "keep\ntheirs\n");
+  });
+
+  it("shows one notice and no accept rows when markers cannot be paired", async () => {
+    await renderSource("<<<<<<< HEAD\nours\n=======\ntheirs\n", { isGitConflict: true });
+    expect(host.textContent).toContain("Line 1 has no separator or closing marker. Fix it by hand.");
+    expect(host.querySelector(".cm-conflict-actions")).toBeNull();
+    expect(controls!.conflicts).toBeNull();
+  });
+
+  it("does not mark conflict-like text in a file Git does not list as conflicted", async () => {
+    await renderSource("<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> branch\n");
+    expect(host.querySelector(".cm-conflict-actions, .cm-conflict-row")).toBeNull();
+    expect(controls!.conflicts).toBeNull();
   });
 });

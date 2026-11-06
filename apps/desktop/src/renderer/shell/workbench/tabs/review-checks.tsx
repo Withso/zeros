@@ -2,16 +2,18 @@
 // ReviewChecksSection — the Review tab's Checks sub-tab
 // ──────────────────────────────────────────────────────────
 //
-// A summary card counts the run (failed, running, passed) over one bar and
-// offers Add failures to chat. CI checks follow in Failed → Running → Passed
-// groups (failures first — they're why you're here); a failed row's Add to
+// A summary card counts the run (failed, running, expected, passed) over one
+// bar and offers Re-run failed and Add failures to chat. CI checks follow in
+// Failed → Expected → Running → Passed groups (failures first — they're why
+// you're here); a check the base branch requires carries Required, and a
+// required check that hasn't reported waits in Expected. A failed row's Add to
 // chat drops a fix-it brief (buildFixCheckPrompt) into the active composer.
 // Durations come from the check-run timing the engine forwards, and the
 // section re-renders live off the store's fast checks lane, so runs complete
 // in place. Deployments close the tab as cards with their state and Open.
 
 import React, { useState } from "react";
-import { ArrowUpRight, Globe } from "lucide-react";
+import { ArrowUpRight, CircleDashed, Globe, RotateCw } from "lucide-react";
 
 import type {
   PrChecksResult,
@@ -45,6 +47,7 @@ export function ReviewChecksSection({
   branch,
   onAddToChat,
   onRetry,
+  onRerunFailed,
 }: {
   data: PrChecksResult | null;
   loading: boolean;
@@ -53,6 +56,9 @@ export function ReviewChecksSection({
   branch: string;
   onAddToChat: (text: string) => void;
   onRetry: () => void;
+  /** Present when the provider can start failed runs again. Reports its own
+   *  failure and resolves once the write settles. */
+  onRerunFailed?: () => Promise<void>;
 }) {
   // Groups with failures open failed+running and tuck passed away; an
   // all-green run shows everything.
@@ -63,7 +69,8 @@ export function ReviewChecksSection({
   if (loading && !data) return <div className="min-h-24" aria-busy="true" />;
   if (error && !data) return <ErrorCallout text={error} onRetry={onRetry} />;
   if (!data) return null;
-  if (data.checks.length === 0 && data.deployments.length === 0)
+  const expected = data.expected ?? [];
+  if (data.checks.length === 0 && data.deployments.length === 0 && expected.length === 0)
     return (
       <p className="text-fg3 m-0 text-xs">
         No checks reported yet. Results appear here as the provider reports
@@ -79,9 +86,10 @@ export function ReviewChecksSection({
       else next.add(id);
       return next;
     });
-  // Passed is collapsed by default only while something else needs attention.
+  // Passed is collapsed by default only while something else needs attention;
+  // a required check that hasn't reported still blocks the merge.
   const passedDefaultClosed =
-    buckets.failed.length > 0 || buckets.pending.length > 0;
+    buckets.failed.length > 0 || buckets.pending.length > 0 || expected.length > 0;
   const isOpen = (id: string, defaultClosed = false) =>
     defaultClosed ? closedGroups.has(id) : !closedGroups.has(id);
   const fixPrompt = (checks: PrCheck[]) =>
@@ -99,7 +107,9 @@ export function ReviewChecksSection({
       className="group hover:bg-bg1-hover flex h-9 min-w-0 items-center gap-2.5 rounded-md px-2.5 transition-colors duration-120 ease-out"
     >
       <CheckGlyph check={c} />
-      <span className="text-fg1 min-w-0 flex-1 truncate text-xs">{c.name}</span>
+      <span className="text-fg1 min-w-0 truncate text-xs">{c.name}</span>
+      {c.required ? <Badge variant="neutral">Required</Badge> : null}
+      <span className="flex-1" />
       {failed && (
         <Button
           variant="ghost"
@@ -125,17 +135,21 @@ export function ReviewChecksSection({
     </div>
   );
 
+  const rerun =
+    onRerunFailed && buckets.failed.some((c) => c.rerunnable) ? onRerunFailed : undefined;
   return (
     <>
-      {data.checks.length > 0 && (
+      {(data.checks.length > 0 || expected.length > 0) && (
         <ChecksSummaryCard
           failed={buckets.failed.length}
           running={buckets.pending.length}
+          expected={expected.length}
           passed={buckets.passed.length}
           onAddFailures={() => onAddToChat(fixPrompt(buckets.failed))}
+          onRerunFailed={rerun}
         />
       )}
-      {data.checks.length > 0 && (
+      {(data.checks.length > 0 || expected.length > 0) && (
         <div className="-mx-2.5 flex min-w-0 flex-col gap-1">
           {buckets.failed.length > 0 && (
             <section aria-label="Failed checks">
@@ -146,6 +160,30 @@ export function ReviewChecksSection({
                 onToggle={() => toggle("failed")}
               />
               {isOpen("failed") && buckets.failed.map((c, i) => row(c, i, true))}
+            </section>
+          )}
+          {expected.length > 0 && (
+            <section aria-label="Expected checks">
+              <GroupHeader
+                label="Expected"
+                count={expected.length}
+                open={isOpen("expected")}
+                onToggle={() => toggle("expected")}
+              />
+              {isOpen("expected") &&
+                expected.map((check) => (
+                  <div
+                    key={check.name}
+                    data-review-check-expected={check.name}
+                    className="flex h-9 min-w-0 items-center gap-2.5 rounded-md px-2.5"
+                  >
+                    <CircleDashed aria-hidden className="text-fg3 size-3.5 shrink-0" />
+                    <span className="text-fg1 min-w-0 truncate text-xs">{check.name}</span>
+                    <Badge variant="neutral">Required</Badge>
+                    <span className="flex-1" />
+                    <span className="text-fg3 text-3xxs shrink-0 leading-4">Not reported yet</span>
+                  </div>
+                ))}
             </section>
           )}
           {buckets.pending.length > 0 && (
@@ -189,6 +227,7 @@ export function ReviewChecksSection({
 const SUMMARY_PARTS = [
   { key: "failed", label: "failed", outcome: "failed", bar: "bg-red-primary" },
   { key: "running", label: "running", outcome: "pending", bar: "bg-yellow-primary" },
+  { key: "expected", label: "expected", outcome: "expected", bar: "bg-border3" },
   { key: "passed", label: "passed", outcome: "passed", bar: "bg-green-primary" },
 ] as const;
 
@@ -196,15 +235,20 @@ const SUMMARY_PARTS = [
 function ChecksSummaryCard({
   failed,
   running,
+  expected,
   passed,
   onAddFailures,
+  onRerunFailed,
 }: {
   failed: number;
   running: number;
+  expected: number;
   passed: number;
   onAddFailures: () => void;
+  onRerunFailed?: () => Promise<void>;
 }) {
-  const counts = { failed, running, passed };
+  const [rerunning, setRerunning] = useState(false);
+  const counts = { failed, running, expected, passed };
   const parts = SUMMARY_PARTS.filter((part) => counts[part.key] > 0);
   return (
     <div
@@ -218,7 +262,11 @@ function ChecksSummaryCard({
             data-review-checks-count={part.key}
             className="flex shrink-0 items-center gap-1.5 text-xs"
           >
-            <OutcomeGlyph outcome={part.outcome} />
+            {part.outcome === "expected" ? (
+              <CircleDashed aria-hidden className="text-fg3 size-3.5 shrink-0" />
+            ) : (
+              <OutcomeGlyph outcome={part.outcome} />
+            )}
             <span className="text-fg1 font-medium tabular-nums">
               {counts[part.key]}
             </span>
@@ -226,6 +274,20 @@ function ChecksSummaryCard({
           </span>
         ))}
         <span className="flex-1" />
+        {failed > 0 && onRerunFailed && (
+          <Button
+            variant="secondary"
+            size="compact"
+            loading={rerunning}
+            onClick={() => {
+              setRerunning(true);
+              void onRerunFailed().finally(() => setRerunning(false));
+            }}
+          >
+            <RotateCw aria-hidden />
+            Re-run failed
+          </Button>
+        )}
         {failed > 0 && (
           <Button variant="secondary" size="compact" onClick={onAddFailures}>
             Add failures to chat

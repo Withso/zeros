@@ -1,93 +1,91 @@
 import {invitationResponseHeaders,invitationPageShell} from "./invite-page.mjs";
 const UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const APP_LINK=/^zeros(?:-alpha|-beta|-dev)?:\/\/$/;
 
-/** Stable, authenticated workspace locator. Capability fragments never enter
- * SSR, access logs, OAuth state, return URLs, or referrers. */
-export function renderWorkspacePage({workspaceId,invitation=false,nonce}) {
-  if(!UUID.test(workspaceId)||!/^[A-Za-z0-9_-]{8,128}$/.test(nonce))throw new TypeError("Invalid workspace page identity");
+/** A cloud workspace's page for its creator: the control plane's exact v2 read
+ * (creator-only, current members), then Open in Zeros through
+ * `<scheme>://cloud-workspace/<organizationId>/<workspaceId>`, the link the
+ * desktop app opens (packages/protocol/src/cloud-workspace-link.ts). Each state
+ * names itself in the title and one line (the Zeros Design Web app frames). */
+export function renderWorkspacePage({workspaceId,appLink,nonce}) {
+  if(!UUID.test(workspaceId)||!APP_LINK.test(appLink)||!/^[A-Za-z0-9_-]{8,128}$/.test(nonce))throw new TypeError("Invalid workspace page identity");
   workspaceId=workspaceId.toLowerCase();
-  const path=`/workspace/${workspaceId}${invitation?"/invite":""}`;
+  const path=`/workspace/${workspaceId}`;
   const script=`
-    const WORKSPACE=${JSON.stringify(workspaceId)},INVITATION=${JSON.stringify(invitation)},PATH=${JSON.stringify(path)};
-    const KEY="zeros:workspace-invitation:"+WORKSPACE;
+    const WORKSPACE=${JSON.stringify(workspaceId)},PATH=${JSON.stringify(path)},APP=${JSON.stringify(appLink)};
+    const UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
     const AUTH_KEY="zeros:workspace-lookup-auth";
-    const message=document.getElementById("message"),proceed=document.getElementById("proceed"),another=document.getElementById("another");
+    const title=document.getElementById("title"),sub=document.getElementById("sub"),spin=document.getElementById("spin");
+    const open=document.getElementById("open"),proceed=document.getElementById("proceed"),another=document.getElementById("another"),meta=document.getElementById("meta");
     const auth="/auth/start?return="+encodeURIComponent(PATH),logout="/auth/logout?return="+encodeURIComponent(PATH);
     another.href=logout;
-    let pending=null,busy=false;
-    const TOKEN=/^zwi_[A-Za-z0-9_-]{43}$/;
-    function save(){try{sessionStorage.setItem(KEY,JSON.stringify(pending));return sessionStorage.getItem(KEY)===JSON.stringify(pending);}catch{return false;}}
-    function forget(){try{sessionStorage.removeItem(KEY);}catch{}pending=null;}
-    if(INVITATION){
-      try{pending=JSON.parse(sessionStorage.getItem(KEY)||"null");}catch{}
-      const fragment=new URLSearchParams(window.location.hash.slice(1));
-      if(window.location.hash){
-        history.replaceState(null,"",PATH);
-        // An invalid new link must not silently reuse a previously stored invite.
-        forget();
-        if(fragment.size===1&&fragment.getAll("token").length===1&&TOKEN.test(fragment.get("token")||"")){
-          pending={token:fragment.get("token"),createdAt:Date.now(),authAttempted:false};save();
-        }
-      }
-      if(!pending||!TOKEN.test(pending.token||"")||!Number.isFinite(pending.createdAt)||pending.createdAt>Date.now()+60000||Date.now()-pending.createdAt>7*86400000){
-        forget();proceed.disabled=true;message.textContent="Open the original invitation email to continue.";
-      }
+    let busy=false;
+    function show(view){
+      title.textContent=view.title;sub.textContent=view.sub;
+      if(view.loading)spin.classList.remove("hidden");else spin.classList.add("hidden");
+      if(view.open){open.href=view.open;open.classList.remove("hidden");}
+      else{open.removeAttribute("href");open.classList.add("hidden");}
+      if(view.action){proceed.textContent=view.action;proceed.className=view.open?"btn ghost":"btn";proceed.classList.remove("hidden");}
+      else proceed.classList.add("hidden");
+      if(view.another){another.className="btn ghost";another.classList.remove("hidden");}
+      else another.classList.add("hidden");
+      if(view.meta)meta.classList.remove("hidden");else meta.classList.add("hidden");
+    }
+    function unavailable(line,withAnother=false){
+      show({title:"Workspace unavailable",sub:line,action:"Try again",another:withAnother});
     }
     async function perform(){
-      if(busy)return;busy=true;proceed.disabled=true;another.classList.add("hidden");
+      if(busy)return;busy=true;proceed.disabled=true;
       try{
-        if(INVITATION&&!pending)return;
-        message.textContent=INVITATION?"Checking your invitation…":"Loading workspace…";
-        const response=await fetch(INVITATION?"/api/v1/cloud-workspace-invitations/accept":"/api/v1/cloud-workspaces/"+WORKSPACE,
-          INVITATION?{method:"POST",credentials:"same-origin",headers:{"Content-Type":"application/json","X-Zeros-Request":"dashboard"},body:JSON.stringify({token:pending.token,workspaceId:WORKSPACE})}
-            :{credentials:"same-origin",headers:{accept:"application/json"}});
+        show({title:"Cloud workspace",sub:"Loading your cloud workspace. This takes a moment.",loading:true});
+        const response=await fetch("/api/v1/cloud-v2/workspaces/"+WORKSPACE,{credentials:"same-origin",headers:{accept:"application/json"}});
         if(response.status===401){
-          if(INVITATION){
-            if(pending.authAttempted){message.textContent="Sign-in did not establish a session. Use the invited email address and try again.";another.classList.remove("hidden");return;}
-            pending.authAttempted=true;
-            if(!save()){message.textContent="Allow tab storage and reopen the invitation email to sign in.";return;}
-          }else{
-            try{
-              const attempt=JSON.parse(sessionStorage.getItem(AUTH_KEY)||"null");
-              if(attempt?.workspace===WORKSPACE&&Number.isFinite(attempt.createdAt)&&attempt.createdAt<=Date.now()+60000&&Date.now()-attempt.createdAt<600000){
-                message.textContent="Sign-in did not establish a session. Allow cookies and try again.";another.classList.remove("hidden");return;
-              }
-              const next=JSON.stringify({workspace:WORKSPACE,createdAt:Date.now()});
-              sessionStorage.setItem(AUTH_KEY,next);
-              if(sessionStorage.getItem(AUTH_KEY)!==next)throw new Error("storage unavailable");
-            }catch{message.textContent="Allow tab storage to sign in to this workspace.";return;}
-          }
+          try{
+            const attempt=JSON.parse(sessionStorage.getItem(AUTH_KEY)||"null");
+            if(attempt?.workspace===WORKSPACE&&Number.isFinite(attempt.createdAt)&&attempt.createdAt<=Date.now()+60000&&Date.now()-attempt.createdAt<600000){
+              unavailable("Sign-in didn’t create a session. Allow cookies and retry.",true);return;
+            }
+            const next=JSON.stringify({workspace:WORKSPACE,createdAt:Date.now()});
+            sessionStorage.setItem(AUTH_KEY,next);
+            if(sessionStorage.getItem(AUTH_KEY)!==next)throw new Error("storage unavailable");
+          }catch{unavailable("Allow tab storage to sign in to this workspace.");return;}
           window.location.replace(auth);return;
         }
         const result=await response.json().catch(()=>null);
         if(response.ok){
-          if(INVITATION){
-            if(result?.workspaceId!==WORKSPACE){forget();message.textContent="This invitation belongs to another workspace. Open its original email link.";return;}
-            forget();window.location.replace("/workspace/"+WORKSPACE);return;
+          const workspace=result?.workspace;
+          if(workspace?.id!==WORKSPACE||typeof workspace.organizationId!=="string"||!UUID.test(workspace.organizationId)){
+            unavailable("This link doesn’t match an available workspace.");return;
           }
-          if(result?.workspace?.id!==WORKSPACE){message.textContent="Workspace is unavailable.";return;}
           try{sessionStorage.removeItem(AUTH_KEY);}catch{}
-          document.getElementById("title").textContent=result.workspace.displayName||"Cloud workspace";
-          message.textContent="You have access to this workspace. Status: "+String(result.workspace.status||"unknown")+".";
-          proceed.textContent="Refresh";return;
+          const name=typeof workspace.name==="string"?workspace.name.trim():"";
+          show({title:name||"Cloud workspace",sub:"You have access to this workspace on every device.",
+            open:APP+"cloud-workspace/"+workspace.organizationId.toLowerCase()+"/"+WORKSPACE,action:"Refresh",meta:true});
+          return;
         }
         if(response.status===404||response.status===403){
-          message.textContent=INVITATION?"This invitation is unavailable for this account, expired, or revoked. Sign in with the invited email address or request a fresh invitation.":"This workspace is unavailable for your account.";
-          another.classList.remove("hidden");return;
+          unavailable("This account can’t open this workspace. Try another account.",true);
+          return;
         }
-        message.textContent="Zeros is temporarily unavailable. Try again shortly.";
-      }catch{message.textContent="Zeros is temporarily unreachable. Try again shortly.";}
-      finally{busy=false;proceed.disabled=INVITATION&&!pending;}
+        unavailable("Zeros is unavailable right now. Try again shortly.");
+      }catch{
+        unavailable("Zeros is unreachable right now. Try again shortly.");
+      }
+      finally{busy=false;proceed.disabled=false;}
     }
     proceed.addEventListener("click",perform);
-    another.addEventListener("click",()=>{if(pending){pending.authAttempted=false;save();}try{sessionStorage.removeItem(AUTH_KEY);}catch{}});
-    if(!INVITATION)perform();
+    another.addEventListener("click",()=>{try{sessionStorage.removeItem(AUTH_KEY);}catch{}});
+    perform();
   `;
-  const inner=`<div class="title" id="title">${invitation?"Join a cloud workspace":"Cloud workspace"}</div>
-    <div class="sub">${invitation?"Accept this invitation using the email address it was sent to.":"Your workspace has the same identity on every device."}</div>
-    <div class="msg" id="message" aria-live="polite"></div>
-    <button class="btn" id="proceed" type="button">${invitation?"Accept invitation":"Refresh"}</button>
-    <a class="btn secondary hidden" id="another">Use another account</a>
+  const inner=`<div class="title" id="title">Cloud workspace</div>
+    <div class="sub" id="sub">Loading your cloud workspace. This takes a moment.</div>
+    <div class="spin" id="spin"><span class="orb" aria-hidden="true"></span></div>
+    <div class="acts">
+      <a class="btn hidden" id="open">Open in Zeros</a>
+      <button class="btn hidden" id="proceed" type="button">Refresh</button>
+      <a class="btn ghost hidden" id="another">Use another account</a>
+    </div>
+    <p class="meta hidden" id="meta">Cloud workspace · same identity on every device</p>
     <script nonce="${nonce}">${script}</script>`;
   return {html:invitationPageShell("Zeros — cloud workspace",inner,nonce),headers:invitationResponseHeaders(nonce)};
 }

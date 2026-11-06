@@ -4,8 +4,6 @@ import { isCodeReviewOperation } from "@zeros/protocol/code-review";
 import { handleCodeReviewRoute } from "../code-review/routes";
 import { CodeReviewError } from "../code-review/errors";
 import type { CodeReviewAgentScope } from "../agents/code-review-tools";
-import { isGitReviewOperation } from "@zeros/protocol/git-review-actions";
-import { handleGitReviewOperation } from "../git/review-actions";
 import { assertDesignCheckoutReadable, readDesignCheckoutStatus } from "../design/checkout-status";
 import { DesignCatalogReader, DesignCatalogError, type DesignCatalogAdmission } from "../design/catalog";
 import { DesignPreviewJobs } from "../design/preview-jobs";
@@ -38,7 +36,8 @@ import {
   changesHistorySchema,
   turnHistoryCursorSchema,
 } from "@zeros/protocol/changes-history";
-import { historyDiff, listHistoryTurns } from "../git/history-diff";
+import { historyDiff, listHistoryCommitLinks, listHistoryTurns } from "../git/history-diff";
+import { isTurnCommitSha, TURN_COMMIT_LOOKUP_LIMIT } from "@zeros/protocol/turns";
 import {
   getPrInlineReview,
   getPrReviewDiff,
@@ -131,6 +130,7 @@ import {
   fetch,
   getAuthStatus,
   getPrChecks,
+  rerunFailedPrChecks,
   getPrCommits,
   getPrReviews,
   getRepositoryOwnerAvatar,
@@ -546,8 +546,6 @@ function assertRemoteRepoRootAllowed(repoRoot: string, remote: boolean): void {
 const WRITE_OPS = new Set<string>([
   "mcp.saveServer",
   "mcp.deleteServer",
-  "git.reviewHunk",
-  "git.resolveConflict",
   "codeReview.create",
   "codeReview.reply",
   "codeReview.setResolved",
@@ -582,6 +580,7 @@ const WRITE_OPS = new Set<string>([
   "gh.prMarkReady",
   "gh.prMerge",
   "gh.prComment",
+  "gh.prRerunFailed",
   // Detect + backfill a workspace's PR (prNumber/prState/prUrl) from GitHub for
   // PRs opened outside the engine (agent `gh pr create`, terminal, github.com).
   // Writes only the workspace's OWN row from real GitHub state (no client-
@@ -641,8 +640,6 @@ const LIFECYCLE_GATED_WORKSPACE_OPS = new Set<string>([
   "design.page.rename",
   "design.page.delete",
   "design.themes.update",
-  "git.reviewHunk",
-  "git.resolveConflict",
   "design.capture",
   // Starts a capture render like design.capture; archive drains it first.
   "design.preview",
@@ -734,8 +731,6 @@ const LIFECYCLE_GATED_WORKSPACE_OPS = new Set<string>([
  * on Git's own lock files, so callers must still surface a lock conflict rather
  * than retrying through another execution backend. */
 const SERIALIZED_GIT_MUTATION_OPS = new Set<string>([
-  "git.reviewHunk",
-  "git.resolveConflict",
   "design.initialize",
   "design.stage",
   "design.unstage",
@@ -1151,7 +1146,6 @@ async function assertNoDesignPathWrites(
  *     its own chat list freely, matching the existing WRITE_OPS exclusion). */
 const REMOTE_READABLE = new Set<string>([
   "design.page.select",
-  "git.reviewHunks",
   "codeReview.list",
   // Workspaces + projects (repository navigation / workspace picker)
   "workspace.list",
@@ -1183,10 +1177,12 @@ const REMOTE_READABLE = new Set<string>([
   "git.remoteBranches",
   "git.repoBranchCatalog",
   "git.hasChanges",
-  // Turn reads (footer pills, per-turn changes filter, per-turn diff)
+  // Turn reads (footer pills, per-turn changes filter, per-turn diff, and
+  // which chat made a pull request's commits)
   "turns.list",
   "turns.get",
   "turns.diff",
+  "turns.commits",
   // GitHub PR reads
   "gh.authStatus",
   "gh.repoOwnerAvatar",
@@ -2666,14 +2662,6 @@ export class WorkspaceService {
         remote,
         userId: opts.reviewUserId,
         userName: opts.reviewUserName,
-      });
-    }
-    if (isGitReviewOperation(op)) {
-      const workspaceId = reqStr(params, "workspaceId");
-      const cwd = this.resolveReadCwd(workspaceId, remote);
-      return handleGitReviewOperation(op, params, {
-        cwd, remote,
-        assertSourceWrite: (paths, action) => assertNoDesignPathWrites(workspaceId, paths, action, cwd),
       });
     }
     switch (op) {
@@ -4328,6 +4316,13 @@ export class WorkspaceService {
             message: "file.write requires string content",
           });
         }
+        const expectedContent = params.expectedContent;
+        if (expectedContent !== undefined && typeof expectedContent !== "string") {
+          throw new GitError({
+            code: "VALIDATION_FAILED",
+            message: "file.write expectedContent must be text",
+          });
+        }
         const writePaths = [rel];
         for (const candidate of writePaths.filter(candidate => normalizeRepoMutationPath(candidate)?.endsWith("/design.toml"))) {
           let claimsDesign: boolean;
@@ -4366,8 +4361,11 @@ export class WorkspaceService {
         // writeWorkspaceFile re-checks the RESOLVED + realpath target (lexical
         // containment + symlink-escape + secret denylist) — the SAME boundary as
         // file.read — and writes atomically (tmp + rename) so a crash can't
-        // truncate the file.
-        return writeWorkspaceFile(cwd, rel, content, { remote });
+        // truncate the file. Expected text makes it refuse a file that changed.
+        return writeWorkspaceFile(cwd, rel, content, {
+          remote,
+          ...(expectedContent !== undefined ? { expectedContent } : {}),
+        });
       }
       case "attachment.write": {
         const cwd = this.resolveReadCwd(reqStr(params, "workspaceId"), remote);
@@ -4806,6 +4804,16 @@ export class WorkspaceService {
           workspaceId: reqStr(params, "workspaceId"),
           prNumber: reqNum(params, "prNumber"),
         });
+      case "gh.prRerunFailed": {
+        const headSha = reqStr(params, "headSha");
+        if (!/^[a-f0-9]{40}$/.test(headSha))
+          throw new GitError({ code: "VALIDATION_FAILED", message: "gh.prRerunFailed requires the head commit it re-runs" });
+        return rerunFailedPrChecks({
+          workspaceId: reqStr(params, "workspaceId"),
+          prNumber: reqNum(params, "prNumber"),
+          headSha,
+        });
+      }
       case "gh.prCommits":
         return getPrCommits({
           workspaceId: reqStr(params, "workspaceId"),
@@ -5426,6 +5434,12 @@ export class WorkspaceService {
                 : turnHistoryCursorSchema.parse(params.after),
           }),
         };
+      case "turns.commits": {
+        const shas = params.shas;
+        if (!Array.isArray(shas) || shas.length > TURN_COMMIT_LOOKUP_LIMIT || !shas.every(isTurnCommitSha))
+          throw new GitError({ code: "VALIDATION_FAILED", message: "turns.commits requires full commit SHAs" });
+        return { commits: await listHistoryCommitLinks(reqStr(params, "workspaceId"), shas) };
+      }
       case "turns.get":
         return {
           turn: getTurn(reqStr(params, "chatId"), reqStr(params, "turnId")),

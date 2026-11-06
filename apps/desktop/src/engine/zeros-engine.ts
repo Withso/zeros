@@ -305,12 +305,14 @@ import {
 } from "./db/chats";
 import {
   authoredPathsFromMessages,
+  commitShasFromMessages,
   deleteSnapshotRefs,
   isGitWorkTree,
   repoToplevel,
   snapshotRef,
   snapshotWorkingTree,
   treesIdentical,
+  resolveTurnCommits,
   turnFileDiffs,
 } from "./git/turns-git";
 
@@ -511,8 +513,6 @@ const DESIGN_OWNER_REGISTRY_CHANGE_OPS = new Set<string>([
  * identity publication. Native Code and Git remain unrestricted; qualified
  * cloud Code additionally performs its immutable authority handoff. */
 const DESIGN_RECOGNITION_PATH_OPS = new Set<string>([
-  "git.reviewHunk",
-  "git.resolveConflict",
   "file.write",
   "git.stage",
   "git.unstage",
@@ -562,7 +562,6 @@ function workspaceOpCanChangeDesignRecognition(
   inspectedHunkPaths: readonly string[] = [],
 ): boolean {
   if (!DESIGN_RECOGNITION_PATH_OPS.has(op)) return false;
-  if (op === "git.reviewHunk" && params.decision !== "rejected") return false;
   // `git apply` accepts traditional/quoted/binary/rename patches that cannot
   // be classified safely with a `diff --git` regex. The caller asks Git's own
   // parser first, so ordinary source hunks keep the fast path while a settings
@@ -580,7 +579,7 @@ function workspaceOpCanChangeDesignRecognition(
     return true;
   }
   const candidates =
-    op === "file.write" || op === "git.resolveConflict"
+    op === "file.write"
       ? [params.path]
       : Array.isArray(params.paths)
         ? params.paths
@@ -7297,6 +7296,12 @@ export class ZerosEngine {
             snapshotRef(ctx.chatId, ctx.turnId, "post"),
           )
         : null;
+      // What this turn's own shell tools reported committing, kept only when
+      // the commit exists here, so the Review tab can name the chat behind it.
+      const commitCandidates = ctx.isGit ? commitShasFromMessages(turnMsgs) : [];
+      const commits = commitCandidates.length
+        ? await resolveTurnCommits(ctx.root, commitCandidates)
+        : [];
       let files: TurnFile[];
       if (ctx.pre && post && authored.length > 0) {
         // Real ±counts/status, restricted to authored paths (concurrency-safe).
@@ -7320,6 +7325,7 @@ export class ZerosEngine {
         postSnapshot: post,
         files,
         usage: usage ?? null,
+        commits,
       });
       // Conversational, denied, failed-without-write, and net-zero turns remain
       // as lightweight timeline rows for duration/transcript reset, but their
@@ -7757,7 +7763,7 @@ export class ZerosEngine {
             )
           : await operation;
       const changed = dbChangedKinds(op, result);
-      const workspaceIds = changed && (changed.includes("codeReview") || changed.includes("gitReview")) && typeof params.workspaceId === "string"
+      const workspaceIds = changed && changed.includes("codeReview") && typeof params.workspaceId === "string"
         ? [params.workspaceId]
         : changed?.includes("workspaces")
         ? dbChangedWorkspaceIds(params, result)

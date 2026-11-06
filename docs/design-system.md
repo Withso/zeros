@@ -354,6 +354,8 @@ All, editing, portals and vendor surfaces across owners, placements and themes.
 | Tinted container | `bg-<family>-bg` | Callouts, failed rows, chips |
 | Text on that container | `text-<family>-fg` | Never `-primary` on `-bg` |
 | Solid destructive | `bg-red-secondary` + `text-red-secondary-fg`, hover `bg-red-secondary-hover` | Delete buttons, destructive badges |
+| Solid accept | `bg-<green\|blue\|neutral>-secondary` + `text-<…>-secondary-fg`, hover `bg-<…>-secondary-hover` | A merge conflict's Accept current change, Accept incoming change and Accept both |
+| Conflict rows | `--conflict-current(-band)`, `--conflict-incoming(-band)`, `--conflict-neutral` | Translucent block rows and marker bands, so a selection shows through |
 | Yellow graphics | `bg-yellow-icon`, `border-yellow-icon/40` | Dots, icons, tints — in Light `--yellow-primary` is ochre text |
 | Highlight wash | `--yellow-wash` at 35% / 54% | Code-editor search matches |
 
@@ -422,7 +424,9 @@ All, editing, portals and vendor surfaces across owners, placements and themes.
   primitive sizes them); empty states use a 32px `fg3` icon.
 - Primary (`variant="primary"`) is the single focal action of a view; Secondary
   is the default button; Ghost for quiet text actions and a dialog's Cancel;
-  icon-only actions are `IconButton`. Toggles use `aria-pressed` on Secondary,
+  Link (`variant="link"`) for an action inside a line of text, `fg2` that
+  brightens to `fg1`, with no fill or padding; icon-only actions are
+  `IconButton`. Toggles use `aria-pressed` on Secondary,
   Ghost or IconButton, which press to the `selected-bg` fill with no edge; a
   toolbar's active tool is `pressedTone="tool"`.
 
@@ -570,6 +574,7 @@ state, `aria-*`, `data-*` hooks) at the caller.
 | A settings list | `SettingsGroup` · `SettingsList` · `SettingsRow` · `SettingsField` (`features/settings/settings-ui.tsx`) | The grouped card: `bg1-bright`, `border1`, 12px corners, 12 × 14 rows, 13/18 medium names, 12/16 `fg3` hints, controls right-aligned. `SettingsRow` takes `leading` for an avatar or icon; secondary actions go in one ⋯ menu; trailing selects use `width="fixed"` (160px). |
 | The last row of a list card, adding an item | `SettingsAddRow` | The whole 44px row is the target: a 14px `fg3` plus and 13/18 `fg2` text that lifts to `fg1`. |
 | A configured server or similar list row | `McpServerRow` (`features/agent-extensions/mcp-server-row.tsx`) | A 48px `Badge mono` transport column so names share an edge, the name and one 12px hint, then status only when it needs the person, one action, the switch and one ⋯ menu, all 24px. `McpToolList` puts its tools under the name. |
+| A Design field bound to a variable | `DesignVariableGlyph` · `DesignDetachVariableButton` (`features/design-workspace/design-inspector-kit.tsx`) | A 12px `fg3` glyph before the variable's name, shown without its leading dashes, and a 20px inline Detach variable at the field's end, which writes the value the variable resolves to. Colour and number fields share both; while a field is being edited it shows its value instead. In Motion mode a number field leaves its trailing edge to the keyframe control, so its Detach waits until the timeline closes. |
 | Content still loading in a list | `SkeletonLine` (`shared/ui/primitives/skeleton.tsx`) | An 8px `bg2` bar with 4px corners, no shimmer; the region carries `aria-busy`. Two rows for a list. |
 | A card or a tile | `Card` · `Tile` | `bg1-bright` / `bg2`, `border1`, 12px corners, 16 padding; a Tile's hover is `bg2-highlight` with `border3`. |
 | Every workbench tab body | `WorkbenchTabFrame` + `WorkbenchTabToolbar` (`shell/workbench/tab-status.tsx`) | Structural single status slot under portalled toolbar rows; preserves confirmed content. Supplies `WorkbenchEmptyState` only for a persistent condition without confirmed content; raw child fallbacks follow that same decision. The exhaustive `WorkbenchTabType` adapter requires copy/icon for future tabs. |

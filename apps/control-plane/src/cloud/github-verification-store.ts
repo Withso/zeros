@@ -1,8 +1,11 @@
 import { randomUUID } from "node:crypto";
 import type pg from "pg";
-import { withSystemTx } from "../db.js";
+import { withSystemTx, type Tx } from "../db.js";
 import { HttpError } from "../authz.js";
 import { isGithubAccessRevoked } from "../github-availability.js";
+import { CLOUD_SOURCE_ADMISSION_MS, CloudSourceTargetSchema, type CloudSourceProof } from "./source-authority.js";
+import type { CloudV2Workspace } from "./store.js";
+import { CLOUD_V2_LIVE_ACCESS } from "./workspace-access.js";
 
 export type GithubVerificationScope = {
   organizationId: string; userId: string; repositoryId: string; fingerprint: string;
@@ -38,11 +41,98 @@ type Row = {
 };
 const columns = "verified_at,canonical_repository,retry_at,failures,failure_code,failure_status,claim_id,claim_until,claim_started_at,clock_timestamp() AS database_now";
 const params = (scope: GithubVerificationScope) => [scope.organizationId, scope.userId, scope.repositoryId, scope.fingerprint];
+type WorkspaceSource = {
+  repository: string; source: string; repository_id: string | null; source_count: number;
+  verified_at: Date | null; failure_code: string | null; database_now: Date;
+};
+export type CloudGithubCatalogAuthority = {
+  proof: CloudSourceProof; state: CloudV2Workspace["state"]; repository: string; sources: string;
+  admission: { repositoryId: string; until: number } | null;
+};
+const sourceReviewRequired = () => new HttpError(409, "cloud_source_review_required", "This workspace needs its original source identities verified. Its files have been retained.");
+function admission(rows: readonly WorkspaceSource[], started: number) {
+  const primary = rows.find(row => row.source.toLowerCase() === row.repository.toLowerCase());
+  if (!primary || rows.length > 100 || rows.length !== primary.source_count || rows.some(row =>
+    !CloudSourceTargetSchema.safeParse({ repository: row.source, repositoryId: row.repository_id }).success))
+    throw sourceReviewRequired();
+  let until = Infinity;
+  for (const row of rows) {
+    const age = row.verified_at ? row.database_now.getTime() - row.verified_at.getTime() : -1;
+    if (row.failure_code || age < 0 || age >= CLOUD_SOURCE_ADMISSION_MS) return null;
+    until = Math.min(until, started + CLOUD_SOURCE_ADMISSION_MS - age);
+  }
+  return { repositoryId: primary.repository_id!, until };
+}
 
 /** No timer, provider call or lock held across I/O. Short claims coalesce
  * replicas; CAS prevents a late result from replacing a newer observation. */
 export class PostgresGithubVerificationStore implements GithubVerificationStore {
   constructor(private readonly pool: pg.Pool, private readonly now = () => Date.now()) {}
+
+  /** A fresh positive for every immutable source, read with the caller's live
+   * membership, credential and checkout checks. A miss needs ordinary admission. */
+  async workspaceAdmission(tx: Tx, workspaceId: string, scope: { organizationId: string; userId: string }, fingerprint: string) {
+    const started = this.now();
+    const { rows } = await tx.query<WorkspaceSource>(`SELECT w.repository,src.name AS source,s.repository_id::text,cardinality(w.source_repositories) AS source_count,
+        v.verified_at,v.failure_code,clock_timestamp() AS database_now
+      FROM cloud_v2_workspaces w CROSS JOIN LATERAL unnest(w.source_repositories) src(name)
+      LEFT JOIN cloud_v2_github_sources s ON s.workspace_id=w.id AND s.source_repository=lower(src.name)
+      LEFT JOIN cloud_github_source_verifications v ON v.org_id=w.org_id AND v.owner_user_id=w.creator_user_id
+        AND v.repository_id=s.repository_id AND v.fingerprint=$4
+      WHERE w.id=$1 AND w.org_id=$2 AND w.creator_user_id=$3 AND w.state NOT IN ('deleted','deleting')
+      LIMIT 101`, [workspaceId, scope.organizationId, scope.userId, fingerprint]);
+    return admission(rows, started);
+  }
+
+  /** These proofs stay inside the current catalog request. The final read
+   * catches lost revocation notices before any protected metadata is released. */
+  async catalogAuthority(tx: Tx, workspaceIds: readonly string[], scope: { organizationId: string; userId: string }, fingerprint: string) {
+    const started = this.now();
+    type CatalogRow = WorkspaceSource & {
+      workspace_id: string; state: CloudV2Workspace["state"]; access_epoch: string; login_revision: string;
+      live: boolean; failure_status: HttpError["status"] | null;
+    };
+    const { rows } = await tx.query<CatalogRow>(`WITH requested AS MATERIALIZED (
+        SELECT w.id,w.org_id,w.creator_user_id,w.repository,w.source_repositories,w.state,
+          w.access_epoch::text,w.login_revision::text,${CLOUD_V2_LIVE_ACCESS} AS live
+        FROM cloud_v2_workspaces w WHERE w.id=ANY($1::uuid[]) AND w.org_id=$2 AND w.creator_user_id=$3
+          AND w.state NOT IN ('deleted','deleting'))
+      SELECT w.id AS workspace_id,w.repository,w.state,w.access_epoch,w.login_revision,w.live,
+        src.name AS source,s.repository_id::text,cardinality(w.source_repositories) AS source_count,
+        v.verified_at,v.failure_code,v.failure_status,clock_timestamp() AS database_now
+      FROM requested w CROSS JOIN LATERAL (SELECT name,ordinality FROM unnest(w.source_repositories)
+        WITH ORDINALITY src(name,ordinality) LIMIT 101) src
+      LEFT JOIN cloud_v2_github_sources s ON s.workspace_id=w.id AND s.source_repository=lower(src.name)
+      LEFT JOIN cloud_github_source_verifications v ON v.org_id=w.org_id AND v.owner_user_id=w.creator_user_id
+        AND v.repository_id=s.repository_id AND v.fingerprint=$4
+      ORDER BY w.id,src.ordinality`, [workspaceIds, scope.organizationId, scope.userId, fingerprint]);
+    const byWorkspace = new Map<string, CatalogRow[]>();
+    for (const row of rows) {
+      const sources = byWorkspace.get(row.workspace_id) ?? [];
+      sources.push(row); byWorkspace.set(row.workspace_id, sources);
+    }
+    const result = new Map<string, CloudGithubCatalogAuthority | HttpError>();
+    for (const id of workspaceIds) {
+      try {
+        const sources = byWorkspace.get(id) ?? [], first = sources[0];
+        if (!first) throw sourceReviewRequired();
+        if (!first.live) throw new HttpError(404, "not_found", "Cloud workspace not found.");
+        const fresh = admission(sources, started);
+        for (const source of sources) {
+          if (!source.failure_code || !source.failure_status) continue;
+          const error = new HttpError(source.failure_status, source.failure_code, "GitHub repository access could not be verified.");
+          if (isGithubAccessRevoked(error)) throw error;
+        }
+        result.set(id, { proof: { accessEpoch: first.access_epoch, loginRevision: first.login_revision },
+          state: first.state, repository: first.repository,
+          sources: JSON.stringify(sources.map(row => [row.source.toLowerCase(), row.repository_id])), admission: fresh });
+      } catch (error) {
+        if (!(error instanceof HttpError)) throw error;
+        result.set(id, error);
+      }
+    }
+    return result;
+  }
 
   private observation(row: Row | undefined, started: number): GithubVerification | null {
     if (!row) return null;

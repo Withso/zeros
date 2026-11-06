@@ -1,18 +1,14 @@
 import { RuntimeReleaseSchema, type RuntimeRelease } from "../../apps/control-plane/src/cloud/runtime-release";
 import { PromotionError, requireCheck } from "./contracts";
 import { sleep } from "./io";
-import { RuntimeManifest, assertRuntimeLive, type RuntimeReleaseConfig, type RuntimeLiveState, type RuntimePin } from "./runtime-contracts";
+import { RuntimeManifest, assertRuntimeLive, type RuntimeReleaseConfig, type RuntimeLiveState, type RuntimePin, type RuntimeReleaseReceipt } from "./runtime-contracts";
 import { boundRuntimeDrainLease, assertActiveRuntimeDrain, assertRuntimeDrainReleased,
   assertRuntimeDrainBudget, RUNTIME_STAGE_BUDGET_MS, RUNTIME_READINESS_BUDGET_MS, RUNTIME_CLEANUP_BUDGET_MS,
   type RuntimeDrainLease, type RuntimeDrainStatus, type RuntimeDrainEnd } from "./runtime-drain";
 
 export { assertEmptyRuntimeDrain } from "./runtime-drain";
 export type { RuntimeDrainLease, RuntimeDrainStatus, RuntimeDrainEnd } from "./runtime-drain";
-export type RuntimeReleaseReceipt = {
-  version: 1; status: "success"; channel: RuntimeReleaseConfig["channel"]; action: RuntimeReleaseConfig["action"];
-  repository: string; workflowSha: string; runId: string; runAttempt: number; cpSourceSha: string;
-  previousRuntimeSha256: string; runtime: RuntimeRelease; deploymentId: string; completedAt: string;
-};
+export type { RuntimeReleaseReceipt } from "./runtime-contracts";
 export type RuntimeReleaseDependencies = {
   source(): Promise<void>;
   current(staged?: RuntimePin): Promise<RuntimeLiveState>;
@@ -45,7 +41,7 @@ export async function releaseRuntime(config: RuntimeReleaseConfig, deps: Runtime
     requireCheck(manifest.repository === config.repository &&
       (config.action === "publish" ? manifest.sourceSha === config.sourceSha : manifest.sha256 === digest), "Runtime archive does not match the selected immutable source or digest");
     requireCheck(manifest.sha256 !== live.current.sha256, "The selected runtime digest is already active; the previous rollback pin is preserved");
-    stage = "Alpha qualification and deletion";
+    stage = "runtime publication provenance";
     let release: RuntimeRelease;
     if (config.channel === "alpha") release = RuntimeReleaseSchema.parse(await deps.qualify(manifest));
     else {

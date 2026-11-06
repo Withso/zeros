@@ -410,6 +410,21 @@
   --color-blue-pill-bg: var(--blue-pill-bg); /* #08233A — Workspace link pill fill; Light separates it from the composer surface */
   --color-blue-pill-hover: var(--blue-pill-hover); /* #0E304D — Workspace link pill hover fill */
   /* @generated tokens:utilities-local-links:end */
+
+  /* Solid accept fills for merge conflicts, in white type (with the solid
+     destructive fill above). */
+  /* @generated tokens:utilities-green-secondary:start */
+  --color-green-secondary: var(--green-secondary); /* #2A653F — solid Accept current change fills (merge conflicts) */
+  --color-green-secondary-hover: var(--green-secondary-hover); /* #2F794A — Accept current change hover fill */
+  --color-green-secondary-fg: var(--green-secondary-fg); /* #FFFFFF — text on SOLID --green-secondary fills. THEME-STATIC white, as on the solid destructive fill. */
+  --color-blue-secondary: var(--blue-secondary); /* #405A6C — solid Accept incoming change fills (merge conflicts) */
+  --color-blue-secondary-hover: var(--blue-secondary-hover); /* #4C6C82 — Accept incoming change hover fill */
+  --color-blue-secondary-fg: var(--blue-secondary-fg); /* #FFFFFF — text on SOLID --blue-secondary fills. THEME-STATIC white. */
+  --color-neutral-secondary: var(--neutral-secondary); /* #444444 — solid neutral fills: Accept both (merge conflicts) */
+  --color-neutral-secondary-hover: var(--neutral-secondary-hover); /* #565656 — neutral solid hover fill */
+  --color-neutral-secondary-fg: var(--neutral-secondary-fg); /* #FFFFFF — text on SOLID --neutral-secondary fills. THEME-STATIC white. */
+  --color-conflict-neutral: var(--conflict-neutral); /* #F0F0F00D — merge conflict separator, ancestor and accept rows */
+  /* @generated tokens:utilities-green-secondary:end */
 }
 
 /* ── STACKING LAYERS → utilities ──
@@ -639,6 +654,20 @@
   --blue-fg: hsl(211 96% 78%); /* #91C5FD — text/icon on --blue-bg */
   --blue-pill-bg: var(--blue-bg); /* #08233A — Workspace link pill fill; Light separates it from the composer surface */
   --blue-pill-hover: hsl(207.62 69.231% 17.843%); /* #0E304D — Workspace link pill hover fill */
+  --green-secondary: hsl(141.36 41.259% 28.039%); /* #2A653F — solid Accept current change fills (merge conflicts) */
+  --green-secondary-hover: hsl(141.89 44.048% 32.941%); /* #2F794A — Accept current change hover fill */
+  --green-secondary-fg: var(--red-secondary-fg); /* #FFFFFF — text on SOLID --green-secondary fills. THEME-STATIC white, as on the solid destructive fill. */
+  --blue-secondary: hsl(204.55 25.581% 33.725%); /* #405A6C — solid Accept incoming change fills (merge conflicts) */
+  --blue-secondary-hover: hsl(204.44 26.214% 40.392%); /* #4C6C82 — Accept incoming change hover fill */
+  --blue-secondary-fg: var(--red-secondary-fg); /* #FFFFFF — text on SOLID --blue-secondary fills. THEME-STATIC white. */
+  --neutral-secondary: hsl(0 0% 26.667%); /* #444444 — solid neutral fills: Accept both (merge conflicts) */
+  --neutral-secondary-hover: hsl(0 0% 33.725%); /* #565656 — neutral solid hover fill */
+  --neutral-secondary-fg: var(--red-secondary-fg); /* #FFFFFF — text on SOLID --neutral-secondary fills. THEME-STATIC white. */
+  --conflict-current: hsl(142 69% 58% / 0.12); /* #4ADE801F — merge conflict current rows; translucent so selection shows through */
+  --conflict-current-band: hsl(142 69% 58% / 0.26); /* #4ADE8042 — merge conflict HEAD band (the <<<<<<< row) */
+  --conflict-incoming: hsl(205 80% 73% / 0.18); /* #83C3F12E — merge conflict incoming rows */
+  --conflict-incoming-band: hsl(205 80% 73% / 0.34); /* #83C3F157 — merge conflict branch band (the >>>>>>> row) */
+  --conflict-neutral: hsl(0 0% 94% / 0.05); /* #F0F0F00D — merge conflict separator, ancestor and accept rows */
   --violet-primary: hsl(271 80% 73%); /* #BC83F1 — done · merged */
   --violet-bg: hsl(255 21% 18%); /* #292438 — done container surface */
   --violet-fg: hsl(265 66% 77%); /* #BE9EEB — text/icon on --violet-bg */
@@ -882,6 +911,17 @@
   --blue-fg: hsl(224 77% 48%); /* #1C4ED9 — text/icon on --blue-bg */
   --blue-pill-bg: hsl(214 100% 87%); /* #BDD9FF — Workspace link pill fill; Light separates it from the composer surface */
   --blue-pill-hover: hsl(214 100% 86.5%); /* #BAD8FF — Workspace link pill hover fill */
+  --green-secondary: var(--green-primary); /* #107234 — solid Accept current change fills (merge conflicts) */
+  --green-secondary-hover: hsl(142 75% 23.529%); /* #0F6930 — Accept current change hover fill */
+  --blue-secondary: var(--blue-primary); /* #1556E2 — solid Accept incoming change fills (merge conflicts) */
+  --blue-secondary-hover: hsl(220.95 83.26% 44.51%); /* #134FD0 — Accept incoming change hover fill */
+  --neutral-secondary: var(--fg2); /* #514D49 — solid neutral fills: Accept both (merge conflicts) */
+  --neutral-secondary-hover: hsl(30 5.634% 27.843%); /* #4B4743 — neutral solid hover fill */
+  --conflict-current: hsl(142 75% 25.5% / 0.12); /* #1072341F — merge conflict current rows; translucent so selection shows through */
+  --conflict-current-band: hsl(142 75% 25.5% / 0.26); /* #10723442 — merge conflict HEAD band (the <<<<<<< row) */
+  --conflict-incoming: hsl(221 83% 48.5% / 0.12); /* #1556E21F — merge conflict incoming rows */
+  --conflict-incoming-band: hsl(221 83% 48.5% / 0.26); /* #1556E242 — merge conflict branch band (the >>>>>>> row) */
+  --conflict-neutral: hsl(30 10% 15.686% / 0.05); /* #2C28240D — merge conflict separator, ancestor and accept rows */
   --violet-primary: hsl(271 80% 51%); /* #851EE6 — done · merged */
   --violet-bg: hsl(274 93% 94%); /* #F2E1FE — done container surface */
   --violet-fg: hsl(263 61% 46%); /* #652EBD — text/icon on --violet-bg */

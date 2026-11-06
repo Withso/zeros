@@ -1,0 +1,9 @@
+{
+  "id": "cloud-runtime-initial-readiness-budget",
+  "kind": "seeded",
+  "area": "scripts-release",
+  "fixedBy": "pr:849",
+  "symptom": "A non-slow runtime-adoption integration case failed its initial connected assertion while a valid first worker configuration was still pending beyond Vitest's one-second default poll window.",
+  "rule": "The CI-red playbook requires a controlled wait at the real producer boundary. Hold the first configuration response beyond the default poll window, use the existing five-second fixture I/O allowance for initial connection, and join that bootstrap before teardown. Preserve the exact connected matcher, the 35-second case budget and every production deadline.",
+  "check": "pnpm exec vitest run --config scripts/release/vitest.config.ts scripts/release/runtime-adoption.integration.test.ts"
+}

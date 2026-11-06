@@ -1,7 +1,7 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import pg from "pg";
 import { Hono } from "hono";
-import { beforeAll, beforeEach, afterAll, describe, expect, it } from "vitest";
+import { beforeAll, beforeEach, afterAll, describe, expect, it, vi } from "vitest";
 import { HttpError } from "../authz.js";
 import { resetMigratedTestDatabase } from "../test-database.js";
 import { grantTestPro } from "../test-pro.js";
@@ -38,6 +38,19 @@ d("environment report boot identity", () => {
       headers: { authorization: `Bearer ${token}`, "x-zeros-worker-boot": bootId, "content-type": "application/json" }, body: JSON.stringify(body) });
     return { workspace, owner, store, saved, boot, report };
   }
+
+  it("hints waiting relays once, on commit, when the ready report makes the workspace running", async () => {
+    const listener = await pool.connect(), notices: string[] = [];
+    try {
+      listener.on("notification", notice => { if (notice.channel === "zeros_cloud_v2_ready") notices.push(notice.payload ?? ""); });
+      await listener.query("LISTEN zeros_cloud_v2_ready");
+      const f = await fixture();
+      await vi.waitFor(() => expect(notices).toEqual([f.workspace.id]));
+      expect((await f.report(f.boot, { versionId: f.saved.versionId, sequence: 2, state: "ready" })).status).toBe(200);
+      await new Promise(resolve => setTimeout(resolve, 100));
+      expect(notices).toEqual([f.workspace.id]);
+    } finally { await listener.query("UNLISTEN *").catch(() => {}); listener.release(); }
+  });
 
   it.each(["lowercase", "uppercase"])("a late failure cannot revoke ready for the %s spelling of the same authenticated boot", async spelling => {
     const f = await fixture(), boot = spelling === "uppercase" ? f.boot.toUpperCase() : f.boot;

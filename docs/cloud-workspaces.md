@@ -135,7 +135,11 @@ link or credentials. The worker then freezes admission, flushes durable state,
 and authorizes a one-use switch bound to its token, VM, boot, configuration,
 source, access and Stop generations. A local permit races Stop's revocation
 immediately before activation. Foreground work arriving after commitment waits
-for the replacement. Only the worker service restarts; adoption never stops,
+for the replacement. Commitment fixes a 120-second total deadline: the first
+60 seconds cover activation, and the remaining time is reserved for restoring
+the previous runtime. A control-plane restart, slow provider reply or another
+rollback boot cannot renew that deadline. Hello and private readiness requests
+each have a 30-second budget, including credential reads. Only the worker service restarts; adoption never stops,
 resumes or checkpoints the VM. It emits no app notice or catalog state change.
 
 The replacement boot remains private until fresh environment and service
@@ -144,12 +148,26 @@ executions and provider conversations, and does not rerun setup. Failed
 activation restores the previous verified runtime privately; only server logs
 record the failure. Interrupted private boots cannot reuse a readiness proof.
 Rollback permits at most three fresh boots, and unresolved recovery keeps
-foreground admission fenced. A later natural boot retires obsolete handoffs.
+foreground admission fenced. Recovery must publish the restored boot within
+the original 120 seconds. If neither runtime can become ready within that
+bound, the desktop ends its connection wait rather than waiting indefinitely;
+no expired private boot gains authority. A later natural boot retires obsolete handoffs.
 The VM retains the current and previous runtime, plus at most one prepared
 candidate. Older workers update on natural wake. Deploy the migration and
 control-plane support in every serving role before publishing a runtime that
 negotiates in-place adoption. Local Personal and organization-local lifecycle
 and permissions are unchanged.
+
+The desktop's cloud handshake, readiness wait and unsent foreground reads share
+one 120-second allowance across transient reconnect attempts. During that wait
+the app retains its connecting state and existing content, with no new notice.
+Stopped, failed or deleted workspaces, access or source revocation, and
+definitive HTTP 4xx refusals end admission immediately. The outer workspace-open
+operation retains its three-minute total cap, including ticket acquisition and
+checkout confirmation; a dead worker cannot extend it with retries. Local
+Personal and organization-local handshake, readiness and reconnect deadlines
+are unchanged. The desktop change ships with the next Alpha feed; older
+desktops retain their shorter connection wait.
 
 Each organization has one Cloud Computer: a configured recipe and an active
 named snapshot. Admins edit the recipe (repositories, branch or tag, setup
@@ -786,6 +804,25 @@ historical source provenance. Withheld PR data is not replaced by a stale
 cached discussion. A denied repository is never made accessible merely by
 belonging to its Zeros organization.
 
+## Web page and desktop link
+
+`app.zeros.build/workspace/<id>` shows one cloud workspace to its creator. The
+page reads `GET /v1/cloud-v2/workspaces/<id>` through the web's control-plane
+proxy, which admits only that exact read, and offers Open in Zeros:
+`zeros[-alpha|-beta|-dev]://cloud-workspace/<organizationId>/<workspaceId>`,
+with the deployment's scheme
+([`cloud-workspace-link.ts`](../packages/protocol/src/cloud-workspace-link.ts)).
+The link carries no secret and grants nothing. Electron main accepts only its
+channel's scheme and two UUIDs and passes the link on the navigation intent
+Local links use, so it opens a window and waits for the signed-in app; a local
+development build ignores it. The desktop reads the workspace as the signed-in
+account, switches to its organization and opens it as the sidebar does: a
+stopped workspace wakes and an archived one opens read-only. An organization
+the account is not in, a 404, or a deleting workspace says the workspace
+couldn't be found, and nothing switches. A cloud workspace's context menu has
+Copy link, which copies the page for the build's web app (`VITE_APP_BASE_URL`).
+There is no invite route: cloud workspaces are creator-only.
+
 ## Lifecycle
 
 Each lifecycle replica admits up to four workspace steps concurrently and
@@ -806,7 +843,8 @@ do not renew it; an untouched shell eventually becomes idle. Passive history rea
 the VM, and neither do reconnects: `/connect` accepts `{ "wake": false }`, and
 the single-use ticket carries that intent through bridge admission. The app
 asks to wake for explicit navigation from the sidebar, Dashboard or repository
-rows, or a trusted pointer press or keystroke inside the active cloud workspace.
+rows, an Open in Zeros link from the workspace's web page, or a trusted pointer
+press or keystroke inside the active cloud workspace.
 This includes empty space, the composer and the Files editor. There is no wake
 notice; a save joins a pending wake before dispatch. Without a pending wake, a
 save against a stopped workspace rejects as a temporary transport failure so its

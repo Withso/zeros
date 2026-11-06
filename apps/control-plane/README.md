@@ -301,10 +301,13 @@ URL. Do not replace it with a `3xx`: browsers retain the cross-site AuthKit
 navigation context across redirect hops and will correctly withhold the Strict
 cookie, making the first signed-in page appear signed out.
 
-Both Web and Desktop authorization URLs always select `provider=authkit`.
-Hosted AuthKit owns provider choice, credentials, verification, MFA, recovery,
-and identity linking. Caller-supplied provider, connection, or organization
-selectors are ignored and never reach the WorkOS SDK.
+The web sign-in page's Continue with Google and Continue with GitHub send one
+exact `provider=google` or `provider=github`, which the app's `/auth/start`
+maps to `GoogleOAuth` or `GitHubOAuth`. Every other Web, Ops and Desktop
+authorization URL selects `provider=authkit`, where Hosted AuthKit owns provider
+choice, credentials, verification, MFA, recovery and identity linking. Any other
+provider value, and every connection or organization selector, is ignored and
+never reaches the WorkOS SDK.
 
 WorkOS Multiple Applications deliberately use one issuer for every application
 in an environment: the issuer references the default Application, while the

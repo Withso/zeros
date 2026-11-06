@@ -1,0 +1,9 @@
+{
+  "id": "inline-shell-host-policy",
+  "kind": "scenario",
+  "area": "web",
+  "fixedBy": "5b903826299359f53ffaad0a9e3423708c79b69c",
+  "symptom": "A page moved onto the shared centred shell would render unstyled where its policy has no inline style source: the Ops host sends style-src 'self', and the control plane's pages sent default-src 'none'.",
+  "rule": "Read the policy a page is served under (its own header, else its host's) before it adopts the inline-styled shell; allow the stylesheet by its CSP hash, pinned by a test that hashes the rendered style.",
+  "check": "pnpm --dir apps/control-plane exec vitest run src/hosted-page.test.ts"
+}

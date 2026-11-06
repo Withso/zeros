@@ -1,0 +1,9 @@
+{
+  "id": "runtime-release-cli-node-loader",
+  "kind": "replay",
+  "area": "scripts-release",
+  "fixedBy": "pr:852",
+  "symptom": "The dispatched runtime build used Node 22 despite the worker's Node 24 engine, and the build, release and cleanup CLIs crashed while synchronously importing an ESM packager with top-level await.",
+  "rule": "Match the workflow's build Node major to the worker engine and load the ESM packager only when building. Exercise every workflow CLI in a fresh credential-free process using its actual runner command and Node major; imported unit tests alone do not prove an entry point loads (ci-red, principles 10, 13, 16 and 18).",
+  "check": "pnpm exec vitest run --config scripts/release/vitest.config.ts scripts/release/runtime-workflow.test.ts scripts/release/runtime-build.test.ts"
+}

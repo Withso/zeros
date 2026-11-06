@@ -5,6 +5,7 @@
 // a pane makes its chat the global active chat, and a workspace in view always
 // has an active chat.
 
+import { toast } from "../../shared/ui/primitives/elements";
 import React, {
   useCallback,
   useEffect,
@@ -457,7 +458,6 @@ export function ConversationPaneLayout({
       // Fresh read — the pane-focus pointerdown that preceded this click
       // may have re-pointed the global selection this same tick.
       const globalActive = useWorkspaceStore.getState().activeChatId;
-      const navigationVersion = useWorkspaceStore.getState().navigationVersion;
       const wasActive = globalActive === chat.id;
 
       // Prefer the pane-local neighbor (tab to the right, else left) so
@@ -483,7 +483,11 @@ export function ConversationPaneLayout({
       // conversation/chat-close for the exact "never used" contract. Draft inputs:
       // the keystroke-fresh live mirror (this active tab) plus the
       // unmount-flushed store copy (a background tab closed via its ×).
-      const discard = isChatDiscardableOnClose({
+      // A chat whose agent was working at close is archived, never discarded,
+      // even when its first message has not reached the local transcript yet.
+      const closeActivity = chat.kind === "terminal" ? null : sessions.getCloseActivity(chat.id);
+      const wasRunning = !!closeActivity && (closeActivity.running || closeActivity.queuedCount > 0);
+      const discard = !wasRunning && isChatDiscardableOnClose({
         kind: chat.kind,
         title: chat.title,
         messageCount,
@@ -491,26 +495,13 @@ export function ConversationPaneLayout({
         storedDraft: useWorkspaceStore.getState().chatComposerDrafts[chat.id],
       });
 
-      const finish = (deferred = false) => {
+      const finish = () => {
         const state = useWorkspaceStore.getState();
         const current = state.chats.find((row) => row.id === chat.id);
         if (!current || current.archived || current.folder !== closedFolder) return;
-        const selectionChanged = state.navigationVersion !== navigationVersion || state.activeChatId !== globalActive;
-        let next = replacement, hasSibling = visibleChats.length > 1;
-        let currentPaneChats = paneChats;
-        if (deferred) {
-          // A background tab can disappear without changing navigation. Keep
-          // the same-pane preference, but resolve it from still-live records.
-          const live = new Set(state.chats.filter(row => !row.archived && row.folder === closedFolder).map(row => row.id));
-          currentPaneChats = paneChats.filter(row => live.has(row.id));
-          const index = currentPaneChats.findIndex(row => row.id === chat.id);
-          next = index < 0 ? null : currentPaneChats[index + 1] ?? currentPaneChats[index - 1] ?? null;
-          hasSibling = live.size > 1;
-        }
-        // A cloud close can wait while its final transcript lands. Preserve
-        // that history even when the tab was pristine at the original click.
-        dispatch({ type: discard && !deferred ? "DELETE_CHAT" : "ARCHIVE_CHAT", id: chat.id });
-        if (deferred && selectionChanged) return;
+        const next = replacement, hasSibling = visibleChats.length > 1;
+        const currentPaneChats = paneChats;
+        dispatch({ type: discard ? "DELETE_CHAT" : "ARCHIVE_CHAT", id: chat.id });
 
         if (wasActive) {
           if (next) {
@@ -546,17 +537,27 @@ export function ConversationPaneLayout({
           }
         }
       };
-      // Local close remains synchronous. Cloud close joins the exact durable
-      // Stop and its detach ACK before this gesture may archive the tab.
       switch (tabCloseResourceAction({ kind: chat.kind, discard })) {
         case "kill-terminal":
           void ptyKill({ sessionId: chat.id });
           break;
         case "close-session": {
+          // The tab closes now. A cloud close finishes its durable Stop and
+          // detach in the background; only an unconfirmed Stop of a chat that
+          // was working is surfaced, with a way back to it.
           const closing = closeSession(chat.id);
-          if (closing) {
-            void closing.then((confirmed) => { if (confirmed) finish(true); }).catch(() => {});
-            return;
+          if (closing && wasRunning) {
+            const agentName = chat.agentName?.trim() || chat.agentId?.trim() || "The agent";
+            void closing.then((confirmed) => {
+              if (confirmed) return;
+              toast.error(`Couldn't confirm ${agentName} stopped`, {
+                description: "It may still be running in the cloud workspace.",
+                action: { label: "Reopen chat", onClick: () => {
+                  dispatch({ type: "UNARCHIVE_CHAT", id: chat.id });
+                  dispatch({ type: "SET_ACTIVE_CHAT", id: chat.id });
+                } },
+              });
+            }).catch(() => {});
           }
           break;
         }

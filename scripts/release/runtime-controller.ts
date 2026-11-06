@@ -10,9 +10,8 @@ import { runtimeDrain } from "./runtime-drain";
 import { runtimeGithub } from "./runtime-github";
 import { writeRuntimeHandoff } from "./runtime-handoff";
 import { runtimeJournal } from "./runtime-journal";
-import { runtimeJson, verifyRuntimeQualification } from "./runtime-proof";
+import { runtimeJson, verifyRuntimeQualification, prepareRuntimePublication, completeRuntimePublication } from "./runtime-proof";
 import { runtimeProvider } from "./runtime-provider";
-import { qualifyRuntime } from "./runtime-qualification";
 import { releaseRuntime, type RuntimeReleaseReceipt } from "./runtime-release";
 import { runtimeReleaseStore, runtimeStoreConfig } from "./runtime-storage";
 
@@ -20,7 +19,7 @@ export async function runRuntimeController(env: NodeJS.ProcessEnv, options: {
   root?: string; signal?: AbortSignal; fetch?: typeof fetch;
   services?: {
     store?: typeof runtimeReleaseStore; github?: typeof runtimeGithub; provider?: typeof runtimeProvider;
-    database?: typeof withRuntimeDatabase; drain?: typeof runtimeDrain; qualify?: typeof qualifyRuntime;
+    database?: typeof withRuntimeDatabase; drain?: typeof runtimeDrain;
     read?: typeof readRuntimeJson; write?: typeof writeRuntimeJson; pool?: typeof createMigrationPool; planetScale?: typeof planetScaleClient;
     handoff?: typeof writeRuntimeHandoff;
   };
@@ -37,7 +36,11 @@ export async function runRuntimeController(env: NodeJS.ProcessEnv, options: {
   const activeFetch: typeof fetch = (url, init) => fetcher(url, { ...init,
     ...(options.signal ? { signal: AbortSignal.any([options.signal, ...(init?.signal ? [init.signal] : [])]) } : {}) });
   const github = (services.github ?? runtimeGithub)(config, env, { fetch: activeFetch });
-  const source = async () => { checkActive(); await github.source(); checkActive(); };
+  const source = async () => {
+    checkActive(); await github.source();
+    if (config.action === "promote") await github.alphaCurrent(config.runtimeSha256!);
+    checkActive();
+  };
   const record = runtimeJournal(config, async event => {
     await store.saveEvent(event);
     await write(join(directory, "events", `${String(event.sequence).padStart(4, "0")}.json`), event);
@@ -49,6 +52,7 @@ export async function runRuntimeController(env: NodeJS.ProcessEnv, options: {
     record: async intent => { if (intent.kind !== "restore") checkActive(); await record(intent); if (intent.kind !== "restore") checkActive(); },
   });
   let receipt: RuntimeReleaseReceipt | undefined;
+  let publication: ReturnType<typeof prepareRuntimePublication> | undefined;
   try {
     await source(); await provider.current();
     const artifact = config.action === "publish" ? await verifyRuntimeBuild(config,
@@ -80,10 +84,9 @@ export async function runRuntimeController(env: NodeJS.ProcessEnv, options: {
         },
         qualify: async manifest => {
           checkActive();
-          const proof = await (services.qualify ?? qualifyRuntime)(config, manifest, env, pool, { record, fetch: fetcher,
-            ...(options.signal ? { signal: options.signal } : {}) });
-          checkActive(); await store.saveQualification(proof);
-          await write(join(directory, "runtime-qualification.json"), proof); return proof.release;
+          publication = prepareRuntimePublication(config, manifest);
+          await write(join(directory, "runtime-publication-intent.json"), publication.intent);
+          checkActive(); return publication.release;
         },
         qualification: async (manifest, origin, pinnedPrevious) => {
           checkActive();
@@ -98,6 +101,12 @@ export async function runRuntimeController(env: NodeJS.ProcessEnv, options: {
     });
     checkActive(); requireCheck(receipt, "Runtime release did not confirm a final receipt");
     await store.saveReceipt(receipt); await write(join(directory, "runtime-receipt.json"), receipt);
+    if (config.channel === "alpha") {
+      checkActive();
+      requireCheck(publication, "Alpha release did not retain its publication intent");
+      const proof = completeRuntimePublication(publication, receipt);
+      await store.saveQualification(proof); await write(join(directory, "runtime-qualification.json"), proof);
+    }
     return receipt;
   } catch (error) {
     throw new PromotionError(error instanceof PromotionError ? error.message : "Runtime release failed; private diagnostics withheld. Reconcile its durable intent before retrying.");

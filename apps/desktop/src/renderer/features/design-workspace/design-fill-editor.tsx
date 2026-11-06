@@ -10,6 +10,7 @@ import { cn } from "../../shared/ui/cn";
 import {
   DesignColorPanel,
   DesignColorPickerBody,
+  DesignColorPreviewScope,
   DesignColorValueInputs,
   DesignColorSwatch,
   type DesignColorPanelHandle,
@@ -148,6 +149,7 @@ export function DesignFillEditor({
   // so switching Solid ↔ Gradient ↔ Image inside the open popover never
   // remounts (and closes) it.
   return (
+    <DesignColorPreviewScope>
     <div
       data-design-color-field=""
       data-design-style-property="background-color"
@@ -162,6 +164,7 @@ export function DesignFillEditor({
           tokenName={tokenName}
           tokenDescription={tokenDescription}
           onPreview={(next) => onPreview?.({ "background-color": next })}
+          onCancelPreview={onCancelPreview}
           onCommit={(next) =>
             onCommit({ "background-color": next, "background-image": "none" })
           }
@@ -177,6 +180,7 @@ export function DesignFillEditor({
         </span>
       )}
     </div>
+    </DesignColorPreviewScope>
   );
 }
 

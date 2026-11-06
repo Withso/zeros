@@ -1,4 +1,4 @@
-import { designConstraintGuides, designSelectionBoxCorners, type DesignCanvasRect, type DesignConstraintSides, type DesignSelectionBox } from "./design-canvas-math";
+import { designConstraintGuides, designSelectionBoxCorners, designSelectionLocalDelta, type DesignCanvasRect, type DesignConstraintSides, type DesignSelectionBox } from "./design-canvas-math";
 import type { DesignRuntimeCoordinateSpace } from "@zeros/protocol/design-runtime";
 
 /** Geometry for the canvas's direct layout tools — padding bands, gap
@@ -306,10 +306,20 @@ export function designLocalAxisDelta(input: {
   dy: number;
   axis: "x" | "y";
   rotation?: number;
+  /** The owner's real axes; a mirrored axis is read the way it points. */
+  linear?: readonly [number, number, number, number];
   zoom: number;
   scale?: DesignLayoutToolScale;
 }): number {
   const zoom = Number.isFinite(input.zoom) && input.zoom > 0 ? input.zoom : 1;
+  if (input.linear) {
+    const local = designSelectionLocalDelta(
+      { x: input.dx / zoom, y: input.dy / zoom },
+      { affine: input.linear, rotation: input.rotation ?? 0 },
+    );
+    const scale = safeScale(input.scale);
+    return input.axis === "x" ? local.x / scale.x : local.y / scale.y;
+  }
   const radians = (normalizedDegrees(input.rotation ?? 0) * Math.PI) / 180;
   const cos = Math.cos(radians);
   const sin = Math.sin(radians);

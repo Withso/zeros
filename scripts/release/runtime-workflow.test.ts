@@ -1,11 +1,27 @@
-import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
+import { delimiter, dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 const { load } = createRequire(import.meta.url)("js-yaml") as { load(value: string): any };
 const text = readFileSync(new URL("../../.github/workflows/runtime-release.yml", import.meta.url), "utf8"), workflow = load(text);
 const step = (job: any, name: string) => job.steps.find((entry: any) => entry.name === name);
+const root = fileURLToPath(new URL("../../", import.meta.url));
+const worker = JSON.parse(readFileSync(new URL("../../apps/cloud-worker/package.json", import.meta.url), "utf8"));
+const workerNodeMajor = Number(worker.engines.node.match(/>=(\d+)/)?.[1]);
+const nodeSetups = (job: any) => job.steps.filter((entry: any) => entry.uses?.startsWith("actions/setup-node@"));
 
 describe("runtime release workflow authority", () => {
+  it("builds with the Node major required by the cloud worker", () => {
+    expect(workerNodeMajor).toBeGreaterThan(0);
+    const setups = nodeSetups(workflow.jobs.build);
+    expect(setups).toHaveLength(1);
+    expect(Number(setups[0].with["node-version"])).toBe(workerNodeMajor);
+  });
+  it("publishes to Alpha without any candidate fixture or signing credentials", () => {
+    expect(text).not.toMatch(/CLOUD_V2_RUNTIME_CANARY|CLOUD_RUNTIME_CANARY|CLOUD_RUNTIME_FIXTURE|WORKOS_CLIENT_ID|WORKOS_API_KEY|gate0/);
+  });
   it("always cleans the exact attempt on the same ephemeral runner before any artifact action", () => {
     const release = workflow.jobs.release, cleanup = step(release, "Retire runtime release authority");
     expect(cleanup?.if).toBe("always()");
@@ -74,8 +90,59 @@ describe("runtime release workflow authority", () => {
   });
 });
 
+describe("runtime release CLI loading", () => {
+  const commands = Object.entries(workflow.jobs).flatMap(([job, value]: [string, any]) =>
+    value.steps.filter((entry: any) => entry.run?.startsWith("pnpm exec tsx scripts/release/")).map((entry: any) => ({
+      job, name: entry.name, command: entry.run, major: Number(nodeSetups(value).at(-1).with["node-version"]),
+    })));
+
+  it("covers the build, release and cleanup commands", () => {
+    expect(commands.map(entry => [entry.job, entry.name])).toEqual([
+      ["build", "Build exact runtime"], ["release", "Qualify and pin runtime"], ["release", "Retire runtime release authority"],
+    ]);
+  });
+
+  it.each(commands)("loads $job / $name on its declared Node major before refusing arguments", ({ command, major }) => {
+    const candidates = [...new Set([process.execPath, ...(process.env.PATH ?? "").split(delimiter).map(path => join(path, "node"))])];
+    const node = candidates.filter(existsSync).find(path => {
+      const version = spawnSync(path, ["-p", "process.versions.node.split('.')[0]"], {
+        env: { PATH: dirname(path) }, encoding: "utf8", timeout: 5_000,
+      });
+      return version.status === 0 && Number(version.stdout.trim()) === major;
+    });
+    expect(node, `Node ${major} must be installed before testing runtime-release.yml`).toBeDefined();
+    const [runner, ...args] = command.split(" ");
+    expect(runner).toBe("pnpm");
+    const env = { PATH: [dirname(node!), process.env.PATH].join(delimiter) };
+    const version = spawnSync(runner, ["exec", "node", "-p", "process.versions.node.split('.')[0]"], {
+      cwd: root, env, encoding: "utf8", timeout: 20_000,
+    });
+    expect(version.status).toBe(0);
+    expect(Number(version.stdout.trim())).toBe(major);
+    const result = spawnSync(runner, [...args, "--workflow-load-probe"], {
+      cwd: root, env, encoding: "utf8", timeout: 20_000,
+    });
+    expect(result.error).toBeUndefined();
+    expect(result.status).toBe(1);
+    expect(result.stderr.trim()).toBe(command.includes("runtime-build-cli.ts")
+      ? "Runtime build takes its immutable inputs from the workflow environment"
+      : "Usage: runtime-cli.ts --execute | --cleanup in the dispatched runtime release workflow");
+  });
+});
+
 describe("runtime release database CI admission", () => {
   afterEach(() => vi.unstubAllEnvs());
+
+  it.each(["ci.yml", "preflight.yml"])("installs every runtime CLI's Node major in %s", file => {
+    const pipeline = load(readFileSync(new URL(`../../.github/workflows/${file}`, import.meta.url), "utf8"));
+    const job = (Object.values(pipeline.jobs) as any[]).find(value =>
+      value.steps?.some((entry: any) => entry.run?.includes("--config scripts/release/vitest.config.ts")));
+    const majors = nodeSetups(job).map((entry: any) => Number(entry.with["node-version"]));
+    const required = [workerNodeMajor, ...Object.values(workflow.jobs).flatMap(value =>
+      nodeSetups(value).map((entry: any) => Number(entry.with["node-version"])))];
+    expect(majors).toEqual(expect.arrayContaining(required));
+    expect(majors.at(-1)).toBe(22);
+  });
 
   it.each(["ci.yml", "preflight.yml"])("runs the real database controls in %s against its own healthy PostgreSQL service", file => {
     const pipeline = load(readFileSync(new URL(`../../.github/workflows/${file}`, import.meta.url), "utf8"));

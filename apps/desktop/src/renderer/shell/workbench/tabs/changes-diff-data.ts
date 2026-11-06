@@ -5,7 +5,9 @@ import {
   type FileDiffLoadedFiles,
   type FileDiffMetadata,
 } from "@pierre/diffs";
+import { parseMergeConflicts } from "@zeros/protocol/merge-conflicts";
 import { KeyedAsyncCache } from "@/renderer/shared/lib/keyed-async-cache";
+import { isCloudWorkspace } from "@/renderer/platform/bridge/cloud-workspace-key";
 import {
   loadWorkspaceFileDiff,
   loadWorkspaceFileRead,
@@ -22,6 +24,11 @@ export interface ChangesDiffData {
   message?: string;
   notice?: string;
   copyText?: string;
+  /** A Git-conflicted file with markers: its working-tree text, shown with
+   * the blocks marked in place instead of a diff. */
+  conflictFile?: FileContents;
+  /** People cannot write it here (a cloud Design path), so no accept rows. */
+  conflictReadOnly?: boolean;
 }
 
 const MAX_PLACEHOLDER_FILES = 4096;
@@ -147,6 +154,7 @@ export function changesDiffDataWeight(value: ChangesDiffData): number {
   for (const line of value.fileDiff?.additionLines ?? []) lines += line.length;
   lines += value.loadedFiles?.oldFile?.contents.length ?? 0;
   lines += value.loadedFiles?.newFile.contents.length ?? 0;
+  lines += value.conflictFile?.contents.length ?? 0;
   return Math.max(
     1,
     2 * (lines + (value.copyText?.length ?? 0) + (value.message?.length ?? 0)),
@@ -209,6 +217,27 @@ export function loadChangesDiffData(
     () =>
       bounded(async () => {
         if (file.binary) return { message: "Binary file changed" };
+        if (file.status === "conflicted") {
+          const result = await loadWorkspaceFileRead(
+            { cwd, path: file.path },
+            { maxAgeMs: 15_000 },
+          );
+          const contents = result.kind === "text" ? (result.content ?? "") : "";
+          const parsed = parseMergeConflicts(contents);
+          if (parsed.conflicts.length || parsed.errors.length)
+            return {
+              conflictFile: {
+                name: file.path,
+                contents,
+                cacheKey: `conflict:${hashString(contents)}`,
+              },
+              ...(result.designPath === true && isCloudWorkspace(cwd)
+                ? { conflictReadOnly: true }
+                : {}),
+              copyText: contents,
+            };
+          // No markers left (or none to show): the ordinary diff explains it.
+        }
         const patch = await loadWorkspaceFileDiff(
           { ...query, fullContext: true },
           { maxAgeMs: 15_000 },

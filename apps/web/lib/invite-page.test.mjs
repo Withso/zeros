@@ -166,7 +166,7 @@ test("the post-AuthKit resume page recovers only the tab-scoped invitation", () 
   });
 
   assert.match(page.html, /sessionStorage\.getItem/);
-  assert.match(page.html, /Invitation session expired/);
+  assert.match(page.html, /This session expired\. Open the invitation email again\./);
   assert.doesNotMatch(page.html, /invite link is incomplete/i);
   assert.doesNotMatch(page.html, new RegExp(TOKEN));
 });
@@ -197,7 +197,7 @@ test("a rejected post-AuthKit session stops after one authentication attempt", a
   assert.deepEqual(rejectedResume.replacements, []);
   assert.equal(
     rejectedResume.elements.get("message").textContent,
-    "Sign-in did not establish a Zeros session. Open the original invitation email and try again.",
+    "Sign-in didn’t create a session. Open the email again.",
   );
 });
 
@@ -212,4 +212,38 @@ test("invalid tokens never enter script or deep-link output", () => {
 
   assert.match(page.html, /invite link is incomplete/i);
   assert.doesNotMatch(page.html, /alert\(1\)|\/api\/v1\/invitations\/accept/);
+});
+
+test("the invitation pages follow the canvas copy on the shared shell", () => {
+  const base = { token: TOKEN, scheme: "zeros-alpha", marketingOrigin: "https://zeros.build", nonce: "testnonce" };
+  const landing = renderInvitationPage({ ...base, mode: "landing" }).html;
+  assert.match(landing, /<style nonce="testnonce">/);
+  assert.match(landing, /<div class="title">You’re invited to Zeros<\/div>/);
+  assert.match(landing, /<div class="sub">Accept with the email this invite was sent to\.<\/div>/);
+  assert.match(landing, /<div class="acts"><a class="btn" href="zeros-alpha:\/\/invite\?token=[^"]+">Open in Zeros<\/a><a class="btn ghost" href="[^"]+">Continue in browser<\/a><button class="btn ghost" id="copy" type="button">Copy link<\/button><\/div>/);
+  assert.match(landing, /<p class="meta">Don’t have Zeros\? <a href="https:\/\/zeros\.build">Download it<\/a><\/p>/);
+  assert.ok(landing.includes('"Copy this page’s address from the address bar."'));
+  assert.ok(landing.includes('copy.setAttribute("aria-pressed", "true")'));
+
+  const accept = renderInvitationPage({ ...base, mode: "web" }).html;
+  assert.match(accept, /<div class="title">Accept your invitation<\/div>/);
+  assert.match(accept, /<div class="sub" id="sub">Join using the account you’re signed in with\.<\/div>/);
+  for (const copy of [
+    "This invite is for another email. Switch accounts to accept.",
+    "Zeros is unreachable. Your invitation wasn’t changed.",
+    "Sign-in didn’t create a session. Open the email again.",
+    "This invite expired or was used. Ask for a new one.",
+    "Setup was still finishing. Nothing changed; try again.",
+    "We couldn’t verify the invite. Nothing was changed.",
+    "We couldn’t accept this invite. Nothing was changed.",
+    "Allow tab storage, then open the email link again.",
+  ]) {
+    assert.ok(accept.includes(copy), copy);
+  }
+  assert.doesNotMatch(accept, /Choose Accept invitation/);
+
+  const incomplete = renderInvitationPage({ ...base, token: "", mode: "landing" }).html;
+  assert.match(incomplete, /<div class="title">This invite link is incomplete<\/div>/);
+  assert.match(incomplete, /<p class="meta">Don’t have Zeros\? <a href="https:\/\/zeros\.build">Download it<\/a><\/p>/);
+  assert.doesNotMatch(incomplete, /Get Zeros/);
 });

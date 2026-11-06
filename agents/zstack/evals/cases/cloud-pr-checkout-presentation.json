@@ -1,0 +1,9 @@
+{
+  "id": "cloud-pr-checkout-presentation",
+  "kind": "replay",
+  "area": "renderer-state",
+  "fixedBy": "pr:864",
+  "symptom": "A cloud checkout HEAD change discarded the last confirmed same-branch PR presentation and returned Review to loading.",
+  "rule": "Separate presentation lifetime from mutation authority: retain the same branch's snapshot while retiring old reads and write proofs, including HEAD A to B to A; agents/zstack/changes/pr-checkout-observation.md.",
+  "check": "pnpm test:git apps/desktop/src/renderer/platform/__tests__/cloud-pr-presentation.test.ts"
+}

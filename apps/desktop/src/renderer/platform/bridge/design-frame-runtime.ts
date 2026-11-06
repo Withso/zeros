@@ -203,6 +203,9 @@ export interface DesignFrameRuntimeConnection {
     scale?: number,
     signal?: AbortSignal,
     priority?: DesignCapturePriority,
+    /** `isolate` pictures the node alone on transparency; older runtimes
+     * ignore it and answer with a crop of the frame. */
+    options?: { isolate?: boolean },
   ): Promise<DesignRuntimeScreenshot>;
   captureViewportScreenshot(
     crop: DesignRuntimeRect,
@@ -1071,10 +1074,12 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
     scale = 1,
     signal?: AbortSignal,
     priority: DesignCapturePriority = "explicit",
+    options: { isolate?: boolean } = {},
   ): Promise<DesignRuntimeScreenshot> {
     const result = await this.capture({
         ...(nodeId ? { nodeId } : {}),
         scale,
+        ...(nodeId && options.isolate ? { isolate: true } : {}),
       }, signal, priority);
     if (
       !isRuntimeScreenshot(result) ||

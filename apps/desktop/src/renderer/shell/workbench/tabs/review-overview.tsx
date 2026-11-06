@@ -236,6 +236,55 @@ export function ReviewHeader({
   );
 }
 
+/** The header rows the workspace already knows before GitHub answers: the
+ *  repository and number, the branches and Open on GitHub. Shown when the
+ *  pull request read fails, above the tab's banner with Retry. */
+export function ReviewKnownHeader({
+  prNumber,
+  repoSlug,
+  hostLabel,
+  prUrl,
+  baseBranch,
+  branch,
+}: {
+  prNumber: number;
+  repoSlug: string | null;
+  hostLabel: string;
+  prUrl: string | null;
+  baseBranch: string;
+  branch: string;
+}) {
+  return (
+    <header data-review-header="" data-review-header-known="" className="flex shrink-0 flex-col px-5 pt-4 pb-3.5">
+      <div className="flex min-h-7 min-w-0 items-center gap-0.5">
+        <span className="flex-1" />
+        {prUrl ? (
+          <IconButton size="standard" label={`Open pull request #${prNumber} on ${hostLabel}`} asChild>
+            <a href={prUrl} target="_blank" rel="noreferrer">
+              <ExternalLink aria-hidden />
+            </a>
+          </IconButton>
+        ) : null}
+      </div>
+      <p className="text-fg3 m-0 text-xs tabular-nums">
+        {repoSlug ? `${repoSlug} · ` : ""}#{prNumber}
+      </p>
+      <div className="mt-3 flex min-w-0 flex-wrap items-center gap-x-5 gap-y-2">
+        <span className="inline-flex max-w-full min-w-0 items-center gap-1.5">
+          <BranchChip title="Base branch">{baseBranch}</BranchChip>
+          <ArrowLeft aria-label="from" className="text-fg3 size-3.5 shrink-0" />
+          <BranchChip title={branch} shrink>
+            {branch}
+          </BranchChip>
+          <IconButton size="compact" label={`Copy ${branch}`} onClick={() => copyWithToast(branch, "branch name")}>
+            <Copy aria-hidden />
+          </IconButton>
+        </span>
+      </div>
+    </header>
+  );
+}
+
 // ── sub-tabs ────────────────────────────────────────────────
 
 /** Overview, Description, Activity, Checks and Commits: the workbench's 28px

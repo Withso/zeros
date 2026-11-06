@@ -9,6 +9,7 @@ import { createCloudV2 } from "./composition.js";
 import { createCloudV2WorkerRoutes } from "./worker-routes.js";
 import { newCloudV2Token } from "./tokens.js";
 import type { CloudV2Workspace } from "./store.js";
+import type { CloudV2RelayDeps } from "./relay.js";
 
 const github = vi.hoisted(() => ({
   workspaceToken: vi.fn(async () => ({ token: "synthetic-user-token", expiresAt: Date.now() + 120_000 })),
@@ -18,16 +19,25 @@ const github = vi.hoisted(() => ({
   workspaceSetup: vi.fn(async () => null),
   source: { invalidate: vi.fn(), targets: vi.fn(async () => {}) },
   binding: vi.fn(async () => ({ repository: "owner/project" })),
+  workerConfiguration: vi.fn(),
 }));
 vi.mock("./github-composition.js", () => ({ createCloudGithubServices: () => github }));
 vi.mock("../postgres-notifications.js", () => ({ postgresNotificationSubscription: () => null }));
-vi.mock("./agent-logins.js", async original => ({ ...await original<typeof import("./agent-logins.js")>(), createCloudV2AgentLogins: () => async () => null }));
+vi.mock("../db.js", async original => ({ ...await original<typeof import("../db.js")>(),
+  withSystemTx: async (_pool: pg.Pool, read: (tx: unknown) => unknown) => read({ query: vi.fn() }) }));
+vi.mock("./agent-logins.js", async original => ({ ...await original<typeof import("./agent-logins.js")>(),
+  createCloudV2AgentLogins: () => Object.assign(async () => null, { all: async () => ({ codex: null, claude: null, cursor: null }) }) }));
 vi.mock("../mcp/composition.js", () => ({ createMcpServices: () => null }));
 vi.mock("./lifecycle.js", async original => ({ ...await original<typeof import("./lifecycle.js")>(),
   CloudV2Lifecycle: class { constructor(readonly deps: CloudV2LifecycleDeps) {} },
 }));
 
 it("wires workspace git, gh, legacy, hydration and restore credentials to the creator while Computer builds keep automation credentials", async () => {
+  github.workerConfiguration.mockImplementation(async workspace => ({ repositoryBinding: await github.binding(), loginRevision: "0",
+    gitIdentity: async () => {
+      await github.authorizeSource();
+      return github.connections.gitIdentity({ organizationId: workspace.organizationId, userId: workspace.creatorUserId });
+    } }));
   const config = {
     github: null, deploymentChannel: "alpha", cloudAgentCredentials: { settingsSecretKeyV1: Buffer.alloc(32, 1).toString("base64url") },
     cloudV2: { boat: { apiKey: "synthetic-boat-credential" }, apiUrl: "https://api.example.test", realtimeUrl: "https://rt.example.test",
@@ -77,4 +87,30 @@ it("wires workspace git, gh, legacy, hydration and restore credentials to the cr
   const configuring = assembled.workers.config(workspace), outcome = expect(configuring).rejects.toThrow("Source revoked");
   try { await waiting; revoked = true; } finally { release(); }
   await outcome;
+});
+
+it("passes the relay room's proof into configuration authority after entry continuation", async () => {
+  const config = {
+    github: null, deploymentChannel: "alpha", cloudAgentCredentials: { settingsSecretKeyV1: Buffer.alloc(32, 1).toString("base64url") },
+    cloudV2: { boat: { apiKey: "synthetic-boat-credential" }, apiUrl: "https://api.example.test", realtimeUrl: "https://rt.example.test",
+      workerSigningKey: generateKeyPairSync("ed25519").privateKey.export({ type: "pkcs8", format: "der" }).toString("base64"),
+      runtime: { sha256: "a".repeat(64), store: { endpoint: "https://store.example.test", bucket: "fixture", accessKeyId: "fixture", secretAccessKey: "fixture" } } },
+  } as Config;
+  const assembled = createCloudV2(config, { query: vi.fn() } as unknown as pg.Pool, { relay: true, lifecycle: false })!;
+  vi.spyOn(assembled.routes.environments!, "resolve").mockResolvedValue(undefined);
+  vi.spyOn(assembled.store, "baseCommit").mockResolvedValue(null);
+  vi.spyOn(assembled.store, "loginRevision").mockResolvedValue("5");
+  github.workerConfiguration.mockResolvedValue({ repositoryBinding: { repository: "owner/project" }, loginRevision: "5", gitIdentity: async () => null });
+  const workspace = { id: randomUUID(), organizationId: randomUUID(), creatorUserId: randomUUID(), state: "running", repository: "owner/project", branch: "topic", baseBranch: "main" } as CloudV2Workspace;
+  const relay = assembled.connections as unknown as { deps: CloudV2RelayDeps };
+  const proof = { accessEpoch: "3", loginRevision: "5" };
+  github.continueSource.mockClear();
+  await relay.deps.config(workspace, "continuation", proof);
+  expect(github.continueSource.mock.calls).toEqual([[workspace, proof]]);
+  expect(github.workerConfiguration).toHaveBeenLastCalledWith(workspace, "continuation", proof);
+  github.continueSource.mockClear();
+  await relay.deps.config(workspace, "continuation");
+  expect(github.continueSource.mock.calls).toEqual([[workspace, undefined]]);
+  expect(github.workerConfiguration).toHaveBeenLastCalledWith(workspace, "continuation", undefined);
+  assembled.connections?.close();
 });

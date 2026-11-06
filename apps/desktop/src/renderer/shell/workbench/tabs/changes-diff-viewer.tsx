@@ -13,7 +13,12 @@ import {
   type CodeViewHandle,
   type CodeViewItem,
 } from "@pierre/diffs/react";
-import type { FileDiffMetadata } from "@pierre/diffs";
+import type { FileContents, FileDiffMetadata } from "@pierre/diffs";
+import {
+  parseMergeConflicts,
+  type ConflictChoice,
+  type MergeConflictParseResult,
+} from "@zeros/protocol/merge-conflicts";
 import {
   AlignJustify,
   Columns2,
@@ -34,11 +39,7 @@ import { FileTypeIcon } from "@/renderer/features/agent/composer-editor/file-typ
 import { useCodeTheme } from "@/renderer/shared/theme/use-code-theme";
 import { finishDiffRender } from "@/renderer/shared/theme/diff-theme";
 import { savedScrollOffset, useScrollMemory } from "../../scroll-memory";
-import {
-  loadWorkspaceFileRead,
-  useWorkspaceFileReadSnapshot,
-  type WorkspaceFileDiffQuery,
-} from "../../workspace-file-data-cache";
+import type { WorkspaceFileDiffQuery } from "../../workspace-file-data-cache";
 import type { ChangedFile } from "./changes-parse";
 import { setDiffStyle, useDiffStyle } from "./diff-style-store";
 import {
@@ -74,13 +75,21 @@ import {
   REVIEW_GUTTER_CSS,
 } from "@/renderer/features/code-review/review-pierre-options";
 import type { CodeReviewExternalSource } from "@/renderer/features/code-review/review-thread-model";
-import {
-  liveReviewHunkSource,
-  reviewComparisonForScope,
-  type ReviewLiveHunkSource,
-} from "@/renderer/features/code-review/review-hunk-model";
 import { reviewContentRevision } from "@/renderer/features/code-review/review-anchors";
-import { useOpenFileInWorkbench } from "../use-open-file";
+import { ConflictNavigator } from "@/renderer/features/code-review/conflict-navigator";
+import {
+  ConflictAnnotationView,
+  conflictAnnotations,
+  conflictRowsStyle,
+  syncConflictRowsStyle,
+  type ConflictAnnotation,
+} from "@/renderer/features/code-review/merge-conflict-pierre";
+import {
+  actionableConflicts,
+  stepConflict,
+} from "@/renderer/features/code-review/merge-conflict-rows";
+import { acceptCardConflict } from "./changes-conflict-accept";
+import { changesReviewOptions } from "./changes-review-options";
 
 interface Props {
   active: boolean;
@@ -98,7 +107,38 @@ interface Props {
   reviewExternal?: CodeReviewExternalSource;
   /** Only a caller displaying a confirmed published PR-head diff supplies this. */
   reviewPrRevision?: string;
-  readOnly?: boolean;
+}
+
+/** Review threads, plus a conflicted card's accept rows and notice. */
+type ChangesAnnotationPayload = ReviewAnnotationPayload & {
+  conflict?: ConflictAnnotation;
+};
+
+/** One parse, row style and annotation list per conflicted snapshot. */
+interface ConflictCard {
+  parsed: MergeConflictParseResult;
+  css: string;
+  annotations: NonNullable<
+    Extract<CodeViewItem<ChangesAnnotationPayload>, { type: "file" }>["annotations"]
+  >;
+}
+const conflictCards = new WeakMap<FileContents, ConflictCard>();
+function conflictCard(file: FileContents, readOnly: boolean): ConflictCard {
+  const known = conflictCards.get(file);
+  if (known) return known;
+  const parsed = parseMergeConflicts(file.contents);
+  const card = {
+    parsed,
+    // A card is resolved, not commented on: no comment + on its numbers.
+    css: `${conflictRowsStyle(parsed)}[data-utility-button]{display:none}`,
+    annotations: conflictAnnotations<ChangesAnnotationPayload>(parsed, {
+      canAccept: !readOnly,
+      readOnlyNotice: "Open the live editable file to resolve these conflicts.",
+      payload: (conflict, id) => ({ id, threads: [], conflict }),
+    }),
+  };
+  conflictCards.set(file, card);
+  return card;
 }
 
 const initialData = new WeakMap<ChangedFile, ChangesDiffData>();
@@ -109,23 +149,6 @@ function initial(file: ChangedFile) {
     initialData.set(file, data);
   }
   return data;
-}
-
-function liveHunkSignature(
-  cwd: string,
-  query: WorkspaceFileDiffQuery,
-  file: ChangedFile,
-  refreshKey: number,
-): string {
-  return JSON.stringify([
-    cwd,
-    query.workspaceId,
-    query.diffScope,
-    file.path,
-    file.hash ?? hashString(file.patch),
-    file.status,
-    refreshKey,
-  ]);
 }
 
 /** One Pierre virtualizer owns all visible files and lines. Switching to one
@@ -145,9 +168,8 @@ export function ChangesDiffViewer({
   toolbarContainer,
   reviewExternal,
   reviewPrRevision,
-  readOnly = false,
 }: Props) {
-  const view = useRef<CodeViewHandle<ReviewAnnotationPayload, undefined>>(null);
+  const view = useRef<CodeViewHandle<ChangesAnnotationPayload, undefined>>(null);
   const shown = useMemo(
     () =>
       presentation === "single"
@@ -166,40 +188,16 @@ export function ChangesDiffViewer({
   const inlineReview = useInlineReview(review, active, shownPaths);
   const { annotationsForDiff, snapshotFor } = inlineReview;
   const retainedReviewItems = useMemo(
-    () => new Map<string, CodeViewItem<ReviewAnnotationPayload>>(),
+    () => new Map<string, CodeViewItem<ChangesAnnotationPayload>>(),
     // eslint-disable-next-line react-hooks/exhaustive-deps -- Pierre's prepared items must not cross a retained comparison owner
     [ownerKey],
   );
+  // The navigator's block per conflicted card; a card has no caret.
+  const [conflictAt, setConflictAt] = useState<ReadonlyMap<string, number>>(
+    () => new Map(),
+  );
+  const [accepting, setAccepting] = useState<string | null>(null);
   const [scroller, setScroller] = useState<HTMLDivElement | null>(null);
-  const [hunkSources, setHunkSources] = useState(
-    new Map<
-      string,
-      { signature: string; source: ReviewLiveHunkSource | undefined }
-    >(),
-  );
-  const publishHunkSource = useCallback(
-    (
-      file: ChangedFile,
-      signature: string,
-      source: ReviewLiveHunkSource | undefined,
-    ) => {
-      setHunkSources((old) => {
-        const existing = old.get(file.path);
-        if (
-          existing?.signature === signature &&
-          existing.source?.contentRevision === source?.contentRevision &&
-          existing.source?.patch === source?.patch
-        )
-          return old;
-        const next = new Map(old);
-        next.delete(file.path);
-        next.set(file.path, { signature, source });
-        while (next.size > 96) next.delete(next.keys().next().value!);
-        return next;
-      });
-    },
-    [],
-  );
   const [folds, setFolds] = useState({
     all: false,
     exceptions: new Set<string>(),
@@ -283,7 +281,7 @@ export function ChangesDiffViewer({
     },
     [],
   );
-  const items = useMemo<CodeViewItem<ReviewAnnotationPayload>[]>(
+  const items = useMemo<CodeViewItem<ChangesAnnotationPayload>[]>(
     () =>
       shown.map((file) => {
         const entry = data.get(file.path);
@@ -299,6 +297,19 @@ export function ChangesDiffViewer({
           : undefined;
         const cached = key ? peekChangesDiffData(key) : undefined;
         const value = cached ?? current?.value;
+        if (value?.conflictFile) {
+          const card = conflictCard(value.conflictFile, !!value.conflictReadOnly);
+          return retainReviewCodeViewItem(retainedReviewItems, {
+            id: file.path,
+            type: "file",
+            file: value.conflictFile,
+            annotations: card.annotations,
+            collapsed: collapsed(file.path),
+            version: diffViewVersion(
+              `${reviewContentRevision(value.conflictFile.contents)}:${active}:${collapsed(file.path)}:${accepting === file.path}`,
+            ),
+          });
+        }
         const fileDiff = value?.fileDiff ?? seed.fileDiff;
         const message = value?.message ?? seed.message;
         const revision = reviewContentRevision(
@@ -306,24 +317,14 @@ export function ChangesDiffViewer({
             value?.patch ||
             JSON.stringify([fileDiff?.additionLines, fileDiff?.deletionLines]),
         );
-        const live = hunkSources.get(file.path);
-        const hunkSource =
-          live?.signature ===
-          liveHunkSignature(cwd, queryForFile(file), file, refreshKey)
-            ? live.source
-            : undefined;
         const annotations = fileDiff
-          ? annotationsForDiff(
-              file.path,
-              {
-                kind: "diff",
-                path: file.path,
-                revision,
-                fileDiff,
-                confirmedRevision: reviewPrRevision,
-              },
-              hunkSource,
-            )
+          ? annotationsForDiff(file.path, {
+              kind: "diff",
+              path: file.path,
+              revision,
+              fileDiff,
+              confirmedRevision: reviewPrRevision,
+            })
           : undefined;
         const common = {
           id: file.path,
@@ -357,10 +358,69 @@ export function ChangesDiffViewer({
       annotationsForDiff,
       reviewPrRevision,
       retainedReviewItems,
-      hunkSources,
-      cwd,
       active,
+      accepting,
     ],
+  );
+  // Rendered conflicted cards by path, for the row styles and navigators.
+  const conflictItems = useMemo(() => {
+    const cards = new Map<string, { file: FileContents; card: ConflictCard }>();
+    for (const item of items)
+      if (item.type === "file") {
+        const card = conflictCards.get(item.file);
+        if (card) cards.set(item.id, { file: item.file, card });
+      }
+    return cards;
+  }, [items]);
+  const conflictStyles = useRef(conflictItems);
+  conflictStyles.current = conflictItems;
+  const stepCardConflict = useCallback(
+    (path: string, direction: 1 | -1) => {
+      const entry = conflictItems.get(path);
+      const conflicts = actionableConflicts(entry?.card.parsed);
+      const next = stepConflict(conflictAt.get(path), conflicts.length, direction);
+      if (next < 0) return;
+      setConflictAt((old) => new Map(old).set(path, next));
+      view.current?.scrollTo({
+        type: "line",
+        id: path,
+        lineNumber: conflicts[next]!.startLine,
+        align: "center",
+      });
+    },
+    [conflictItems, conflictAt],
+  );
+  const acceptConflict = useCallback(
+    (path: string, shown: string, index: number, choice: ConflictChoice) => {
+      if (accepting) return;
+      setAccepting(path);
+      void acceptCardConflict(cwd, path, shown, index, choice).finally(() =>
+        setAccepting((current) => (current === path ? null : current)),
+      );
+    },
+    [accepting, cwd],
+  );
+  const renderAnnotation = useCallback(
+    (
+      annotation: Parameters<typeof inlineReview.renderAnnotation>[0] & {
+        metadata: ChangesAnnotationPayload;
+      },
+      item: CodeViewItem<ChangesAnnotationPayload>,
+    ) => {
+      const conflict = annotation.metadata.conflict;
+      if (!conflict) return inlineReview.renderAnnotation(annotation);
+      return (
+        <ConflictAnnotationView
+          annotation={conflict}
+          disabled={!active || accepting !== null}
+          onAccept={(index, choice) => {
+            if (item.type === "file")
+              acceptConflict(item.id, item.file.contents, index, choice);
+          }}
+        />
+      );
+    },
+    [inlineReview, active, accepting, acceptConflict],
   );
   useEffect(() => {
     const paths = new Set(shown.map((file) => file.path));
@@ -401,17 +461,27 @@ export function ChangesDiffViewer({
     [byPath, queryForFile, refreshKey, cwd, publish],
   );
   const options = useMemo(() => {
-    const shared = changesDiffOptions<ReviewAnnotationPayload>({
+    const shared = changesDiffOptions<ChangesAnnotationPayload>({
       diffStyle,
       codeThemeId: theme,
     });
     return {
       ...shared,
-      ...inlineReview.options,
+      ...changesReviewOptions(inlineReview.options),
       unsafeCSS: `${shared.unsafeCSS ?? ""}\n${REVIEW_GUTTER_CSS}`,
-      onPostRender: (node: HTMLElement) => {
+      onPostRender: (node: HTMLElement, instance: unknown) => {
         finishDiffRender(node);
         labelReviewGutter(node);
+        const file = (instance as { type?: string; file?: FileContents }).type === "file"
+          ? (instance as { file?: FileContents }).file
+          : undefined;
+        const entry = file && conflictStyles.current.get(file.name);
+        syncConflictRowsStyle(
+          node,
+          entry && (entry.file === file || entry.file.contents === file.contents)
+            ? entry.card.css
+            : null,
+        );
       },
       stickyHeaders: true,
       hunkSeparators: "line-info" as const,
@@ -443,11 +513,12 @@ export function ChangesDiffViewer({
   const allCollapsed =
     files.length > 0 && files.every((file) => collapsed(file.path));
   const renderHeader = useCallback(
-    (item: CodeViewItem<ReviewAnnotationPayload>) => {
+    (item: CodeViewItem<ChangesAnnotationPayload>) => {
       void viewedVersion;
       const file = byPath.get(item.id);
       if (!file) return null;
       const entry = data.get(file.path);
+      const conflicts = actionableConflicts(conflictItems.get(file.path)?.card.parsed);
       return (
         <ChangesDiffHeader
           file={file}
@@ -462,9 +533,15 @@ export function ChangesDiffViewer({
           hydrateOnMount={initial(file).message === "Loading diff…"}
           notice={entry?.value.notice}
           viewed={isFileViewed(workspaceId, file.path)}
-          patch={file.patch || entry?.value.patch || ""}
-          readOnly={readOnly || !!reviewPrRevision}
-          onHunkSource={publishHunkSource}
+          conflicts={
+            conflicts.length
+              ? {
+                  count: conflicts.length,
+                  shown: Math.min(conflictAt.get(file.path) ?? 0, conflicts.length - 1) + 1,
+                  onStep: (direction) => stepCardConflict(file.path, direction),
+                }
+              : null
+          }
         />
       );
       // Viewed is external state. Reconcile the existing header portals on updates.
@@ -481,9 +558,9 @@ export function ChangesDiffViewer({
       toggle,
       publish,
       viewedVersion,
-      readOnly,
-      reviewPrRevision,
-      publishHunkSource,
+      conflictItems,
+      conflictAt,
+      stepCardConflict,
     ],
   );
 
@@ -590,7 +667,7 @@ export function ChangesDiffViewer({
           items={items}
           options={options}
           renderCustomHeader={renderHeader}
-          renderAnnotation={inlineReview.renderAnnotation}
+          renderAnnotation={renderAnnotation}
           renderCodeViewFooter={() => (
             <>
               {inlineReview.issue && (
@@ -643,9 +720,7 @@ function ChangesDiffHeader({
   hydrateOnMount,
   notice,
   viewed,
-  patch,
-  readOnly,
-  onHunkSource,
+  conflicts,
 }: {
   file: ChangedFile;
   query: WorkspaceFileDiffQuery;
@@ -659,13 +734,12 @@ function ChangesDiffHeader({
   hydrateOnMount: boolean;
   notice?: string;
   viewed: boolean;
-  patch: string;
-  readOnly: boolean;
-  onHunkSource: (
-    file: ChangedFile,
-    signature: string,
-    source: ReviewLiveHunkSource | undefined,
-  ) => void;
+  /** An expanded conflicted card's navigator. */
+  conflicts?: {
+    count: number;
+    shown: number;
+    onStep: (direction: 1 | -1) => void;
+  } | null;
 }) {
   const key = changesDiffDataKey(query, file, refreshKey);
   const [failure, setFailure] = useState<{ key: string; error: string | null }>(
@@ -679,68 +753,17 @@ function ChangesDiffHeader({
   const [pendingKey, setPendingKey] = useState<string | null>(null);
   const pending = pendingKey === key;
   const [copied, setCopied] = useState(false);
-  const openFile = useOpenFileInWorkbench();
-  const readQuery = useMemo(() => ({ cwd, path: file.path }), [cwd, file.path]);
-  const readSnapshot = useWorkspaceFileReadSnapshot(readQuery);
-  const supportsHunks =
-    !readOnly &&
-    !file.binary &&
-    file.status !== "conflicted" &&
-    !!reviewComparisonForScope(query.diffScope);
   const managed = useWorkbenchStatusSource(
     {
       active,
-      error: error ?? (supportsHunks ? readSnapshot.error : null),
-      pending:
-        pending ||
-        (supportsHunks &&
-          !collapsed &&
-          (readSnapshot.loading || readSnapshot.refreshing)),
+      error,
+      pending,
       retry: async () => {
-        await Promise.allSettled([
-          load(),
-          ...(supportsHunks
-            ? [loadWorkspaceFileRead(readQuery, { force: true })]
-            : []),
-        ]);
+        await load().catch(() => {});
       },
     },
     key,
   );
-  useEffect(() => {
-    if (active && !collapsed && supportsHunks)
-      void loadWorkspaceFileRead(readQuery, { maxAgeMs: 15_000 }).catch(
-        () => {},
-      );
-  }, [active, collapsed, supportsHunks, readQuery, refreshKey]);
-  const hunkSource = useMemo(
-    () =>
-      supportsHunks
-        ? liveReviewHunkSource({
-            cwd,
-            path: file.path,
-            patch,
-            scope: query.diffScope,
-            read: readSnapshot.data,
-            deleted: file.status === "deleted",
-            untracked: file.status === "untracked" || file.isNewFile,
-          })
-        : undefined,
-    [
-      supportsHunks,
-      cwd,
-      file.path,
-      file.status,
-      file.isNewFile,
-      patch,
-      query.diffScope,
-      readSnapshot.data,
-    ],
-  );
-  const hunkSignature = liveHunkSignature(cwd, query, file, refreshKey);
-  useEffect(() => {
-    onHunkSource(file, hunkSignature, hunkSource);
-  }, [onHunkSource, file, hunkSignature, hunkSource]);
   const latest = useRef({ file, query, cwd, onData });
   latest.current = { file, query, cwd, onData };
   const load = useCallback(async () => {
@@ -823,6 +846,15 @@ function ChangesDiffHeader({
         <span className="text-green-primary">+{file.additions}</span>
         <span className="text-red-primary">−{file.deletions}</span>
       </span>
+      {conflicts && !collapsed && (
+        <ConflictNavigator
+          count={conflicts.count}
+          shown={conflicts.shown}
+          onPrevious={() => conflicts.onStep(-1)}
+          onNext={() => conflicts.onStep(1)}
+          disabled={!active}
+        />
+      )}
       {/* The header's one action, on the file that failed; the error rides
           in its tooltip. */}
       {error && !managed && (
@@ -847,15 +879,6 @@ function ChangesDiffHeader({
             className="text-yellow-primary size-3.5 shrink-0"
           />
         </Tooltip>
-      )}
-      {file.status === "conflicted" && (
-        <Button
-          variant="ghost"
-          disabled={!active}
-          onClick={() => openFile(file.path, { viewerMode: "edit" })}
-        >
-          Resolve conflicts
-        </Button>
       )}
       <Tooltip label="Copy file">
         <IconButton

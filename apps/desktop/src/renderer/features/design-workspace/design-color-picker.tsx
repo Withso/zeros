@@ -1,4 +1,4 @@
-import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import React, { createContext, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Check, Pipette } from "lucide-react";
 
 import {
@@ -15,6 +15,7 @@ import {
 } from "../../shared/ui/primitives";
 import { cn } from "../../shared/ui/cn";
 import { beginDesignPointerGesture } from "./design-pointer-gesture";
+import { DesignDetachVariableButton, DesignVariableGlyph } from "./design-inspector-kit";
 import {
   InspectorIconButton,
   InspectorSegmented,
@@ -151,17 +152,47 @@ function checkerboardBackground(): React.CSSProperties {
   };
 }
 
-function safePreview(
-  handler: DesignColorCallbacks["onPreview"],
-  value: string,
-) {
-  if (!handler) return;
-  void Promise.resolve(handler(value)).catch(() => {});
-}
-
 function safeCancel(handler: DesignColorCallbacks["onCancelPreview"]) {
   if (!handler) return;
   void Promise.resolve(handler()).catch(() => {});
+}
+
+/** One color field's canvas preview has one owner: the picker and the hex and
+ * opacity inputs beside it share this. Every preview and every write claims
+ * it (a write previews too), so a failed write restores the canvas only while
+ * nothing newer has painted. */
+interface DesignColorPreviewOwner {
+  generation: number;
+}
+const DesignColorPreviewOwnerContext = createContext<DesignColorPreviewOwner | null>(null);
+
+/** Gives a color row's picker and inputs one preview owner. */
+export function DesignColorPreviewScope({ children }: { children: React.ReactNode }) {
+  const [owner] = useState<DesignColorPreviewOwner>(() => ({ generation: 0 }));
+  return (
+    <DesignColorPreviewOwnerContext.Provider value={owner}>
+      {children}
+    </DesignColorPreviewOwnerContext.Provider>
+  );
+}
+
+function useDesignColorPreviewOwner(): DesignColorPreviewOwner {
+  const shared = useContext(DesignColorPreviewOwnerContext);
+  const [own] = useState<DesignColorPreviewOwner>(() => ({ generation: 0 }));
+  return shared ?? own;
+}
+
+/** After a failed write, put the canvas back only if this write still owns
+ * its preview, once the preview it made has finished. */
+function restoreFailedPreview(
+  owner: DesignColorPreviewOwner,
+  generation: number,
+  shown: Promise<unknown>,
+  onCancelPreview: DesignColorCallbacks["onCancelPreview"],
+) {
+  void shown.then(() => {
+    if (owner.generation === generation) safeCancel(onCancelPreview);
+  });
 }
 
 export function DesignColorSwatch({
@@ -244,6 +275,8 @@ export function DesignColorPanel({
   const pendingValuesRef = useRef<Array<{ id: number; value: string; key: string }>>([]);
   const sequenceRef = useRef(0);
   const previewingRef = useRef(false);
+  const previewOwner = useDesignColorPreviewOwner();
+  const lastPreviewRef = useRef<Promise<unknown>>(Promise.resolve());
   const skipBlurCommitRef = useRef(false);
   const draggingRef = useRef(false);
   const gestureCancelRef = useRef<(() => void) | null>(null);
@@ -319,7 +352,8 @@ export function DesignColorPanel({
     setDraft(designColorValueText(hsvaToRgba(next), format));
     setAlphaDraft(String(Math.round(next.a * 100)));
     previewingRef.current = true;
-    safePreview(onPreview, nextValue);
+    previewOwner.generation += 1;
+    lastPreviewRef.current = Promise.resolve(onPreview?.(nextValue)).catch(() => {});
     return nextValue;
   };
 
@@ -350,13 +384,18 @@ export function DesignColorPanel({
     baselineRef.current = next;
     previewingRef.current = false;
     setDraft(colorValueText(next, formatRef.current));
+    const generation = ++previewOwner.generation;
+    const shown = lastPreviewRef.current;
     void Promise.resolve(onCommit(next)).catch(() => {
-      if (!mountedRef.current) return;
       const index = pendingValuesRef.current.findIndex((entry) => entry.id === id);
       if (index < 0) return;
       const latest = index === pendingValuesRef.current.length - 1;
       pendingValuesRef.current.splice(index, 1);
-      if (latest)
+      if (!latest) return;
+      // The canvas still shows the refused color until something restores it,
+      // even after this panel has closed.
+      restoreFailedPreview(previewOwner, generation, shown, onCancelPreview);
+      if (mountedRef.current)
         adoptColorValue(pendingValuesRef.current.at(-1)?.value ?? confirmedValueRef.current);
     });
   };
@@ -1109,6 +1148,7 @@ export function DesignColorValueInputs({
   tokenName,
   tokenDescription,
   onPreview,
+  onCancelPreview,
   onCommit,
 }: Pick<
   DesignColorFieldProps,
@@ -1118,9 +1158,11 @@ export function DesignColorValueInputs({
   | "tokenName"
   | "tokenDescription"
   | "onPreview"
+  | "onCancelPreview"
   | "onCommit"
 >) {
   const [hexFocused, setHexFocused] = useState(false);
+  const previewOwner = useDesignColorPreviewOwner();
   const [acceptedValue, setAcceptedValue] = useState(value);
   const confirmedValueRef = useRef(value);
   const pendingRef = useRef<Array<{ id: number; value: string; key: string }>>(
@@ -1156,16 +1198,18 @@ export function DesignColorValueInputs({
     const id = ++sequenceRef.current;
     pendingRef.current.push({ id, value: next, key: colorInputKey(next) });
     setAcceptedValue(next);
-    void Promise.resolve(onPreview?.(next)).catch(() => {});
+    const generation = ++previewOwner.generation;
+    const shown = Promise.resolve(onPreview?.(next)).catch(() => {});
     void Promise.resolve(onCommit(next)).catch(() => {
       const index = pendingRef.current.findIndex((entry) => entry.id === id);
       if (index < 0) return;
       const latest = index === pendingRef.current.length - 1;
       pendingRef.current.splice(index, 1);
-      if (latest)
-        setAcceptedValue(
-          pendingRef.current.at(-1)?.value ?? confirmedValueRef.current,
-        );
+      if (!latest) return;
+      setAcceptedValue(
+        pendingRef.current.at(-1)?.value ?? confirmedValueRef.current,
+      );
+      restoreFailedPreview(previewOwner, generation, shown, onCancelPreview);
     });
   };
 
@@ -1254,6 +1298,7 @@ export function DesignColorValueInputs({
     acceptedValue === value;
   return (
     <>
+      {tokenShown ? <DesignVariableGlyph className="ml-1.5" /> : null}
       <input
         ref={hexRef}
         value={tokenShown ? tokenName!.replace(/^--/, "") : hexDraft}
@@ -1288,7 +1333,12 @@ export function DesignColorValueInputs({
         }}
         onKeyDown={keyDown(() => setHexDraft(displayHex))}
       />
-      {parsed ? (
+      {tokenShown ? (
+        <DesignDetachVariableButton
+          disabled={disabled}
+          onDetach={() => commitColor(value)}
+        />
+      ) : parsed ? (
         <>
           <span className="bg-border2 h-4 w-px shrink-0" aria-hidden="true" />
           <input
@@ -1332,6 +1382,7 @@ export function DesignColorField({
   onCommit,
 }: DesignColorFieldProps) {
   return (
+    <DesignColorPreviewScope>
     <div
       data-design-color-field=""
       data-design-style-property={property}
@@ -1359,8 +1410,10 @@ export function DesignColorField({
         tokenName={tokenName}
         tokenDescription={tokenDescription}
         onPreview={onPreview}
+        onCancelPreview={onCancelPreview}
         onCommit={onCommit}
       />
     </div>
+    </DesignColorPreviewScope>
   );
 }

@@ -36,7 +36,7 @@ beforeAll(async () => {
         ` : args.path.endsWith("tab-status") ? "export const useWorkbenchStatusSource = () => {};"
           : args.path.endsWith("scroll-memory") ? "export const useScrollMemory = () => {};"
           : args.path.endsWith("use-code-theme") ? 'export const useCodeTheme = () => "github-dark";'
-          : 'export const zerosCodeViewOptions = () => ({ theme: "github-dark", diffStyle: "unified", disableFileHeader: true, expandUnchanged: true });',
+          : 'export const NEW_FILE_DIFF_CSS = ""; export const zerosCodeViewOptions = () => ({ theme: "github-dark", diffStyle: "unified", disableFileHeader: true, expandUnchanged: true });',
       }));
     } }],
     logLevel: "silent",

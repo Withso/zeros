@@ -16,6 +16,9 @@ import { HttpError } from "../authz.js";
 import { grantTestPro } from "../test-pro.js";
 import { CloudV2Computers } from "./computer.js";
 import { PostgresGithubVerificationStore } from "./github-verification-store.js";
+import { Hono } from "hono";
+import { createCloudV2Routes } from "./routes.js";
+import { observeTransactionTiming, requestTiming, type RequestDatabaseCost } from "../request-timing.js";
 
 const database = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 database("cloud GitHub composition", () => {
@@ -149,6 +152,160 @@ database("cloud GitHub composition", () => {
     });
     return { workspace, token, boot };
   }
+
+  it("bounds warm PR reads through the HTTP route without repeating source admission", async () => {
+    const { workspace } = await fixture();
+    const app = new Hono();
+    app.use("*", async (c, next) => {
+      c.set("user", { id: userId } as never);
+      await next();
+    });
+    app.route("/", createCloudV2Routes({
+      store: workspaces,
+      computers: new CloudV2Computers(pool),
+      installedRepositories: async () => null,
+      remoteHead: (org, user, target, branch) => services.remoteHead(org, user, target.repository, branch, target.repositoryId),
+      bridgeBaseUrl: "wss://bridge.example.test",
+      github: services,
+    }));
+    await services.authorizeSource(await workspaces.get(workspace.id, userId));
+    const samples: Array<{ op: string; transactions: number; githubCalls: number }> = [];
+    for (const present of [false, true]) {
+      created = present;
+      for (const op of present ? ["gh.prSync", "gh.prGet"] : ["gh.prSync"]) {
+        fetcher.mockClear();
+        const response = await observeTransactionTiming(() => app.request(`/v1/cloud-v2/workspaces/${workspace.id}/github`, {
+          method: "POST", headers: { "content-type": "application/json" },
+          body: JSON.stringify({ op, params: op === "gh.prGet" ? { prNumber: 7 } : {} }),
+        }), summary => samples.push({ op, transactions: summary.transactions, githubCalls: fetcher.mock.calls.length }));
+        expect(response.status).toBe(200);
+        expect((await response.json()).result).toEqual(present ? expect.objectContaining({ number: 7 }) : null);
+      }
+    }
+    expect(samples).toEqual([
+      { op: "gh.prSync", transactions: expect.any(Number), githubCalls: expect.any(Number) },
+      { op: "gh.prSync", transactions: expect.any(Number), githubCalls: expect.any(Number) },
+      { op: "gh.prGet", transactions: expect.any(Number), githubCalls: expect.any(Number) },
+    ]);
+    console.info("PR read cost", samples);
+    expect(samples, JSON.stringify(samples)).toSatisfy(rows => rows.every((row: typeof samples[number]) => row.transactions <= 10 && row.githubCalls <= 2));
+  });
+
+  it("bounds warm worker GitHub credential requests while retaining source authorization", async () => {
+    const f = await fixture(), workspace = await workspaces.get(f.workspace.id, userId);
+    await services.authorizeSource(workspace);
+    const samples: Array<{ transactions: number; githubCalls: number }> = [];
+    for (let i = 0; i < 2; i++) {
+      fetcher.mockClear();
+      const result = await observeTransactionTiming(() => services.workspaceToken(workspace, "user", "gh"),
+        summary => samples.push({ transactions: summary.transactions, githubCalls: fetcher.mock.calls.length }));
+      expect(result.expiresAt).toBeGreaterThan(Date.now());
+    }
+    console.info("Worker credential service cost", samples);
+    expect(samples, JSON.stringify(samples)).toSatisfy(rows => rows.every((row: typeof samples[number]) => row.transactions <= 8 && row.githubCalls <= 2));
+  });
+
+  it("bounds warm workspace catalog reads independently of same-owner row count", async () => {
+    created = true;
+    const fixtures = await Promise.all([fixture(), fixture(), fixture()]);
+    for (const { workspace } of fixtures)
+      await services.service.execute(workspace.id, userId, { op: "gh.prSync", params: {} });
+    const app = new Hono(), costs: RequestDatabaseCost[] = [];
+    app.use("*", requestTiming({ slowMs: Infinity, databasePool: pool, costObserver: cost => { costs.push(cost); } }));
+    app.use("*", async (c, next) => { c.set("user", { id: userId } as never); await next(); });
+    app.route("/", createCloudV2Routes({ store: workspaces, computers: new CloudV2Computers(pool),
+      installedRepositories: async () => null, remoteHead: async () => head,
+      bridgeBaseUrl: "wss://bridge.example.test", github: services }));
+    const list = `/v1/cloud-v2/workspaces?organizationId=${organizationId}`;
+    expect((await app.request(list)).status).toBe(200);
+    const samples: Array<{ kind: string; transactions: number; queries: number; githubCalls: number }> = [];
+    const measure = async (kind: string, path: string) => {
+      fetcher.mockClear();
+      const response = await observeTransactionTiming(() => app.request(path),
+        summary => samples.push({ kind, transactions: summary.transactions, queries: costs.at(-1)!.queriesStarted, githubCalls: fetcher.mock.calls.length }));
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      const rows = body.workspaces ?? [body.workspace];
+      expect(rows).toHaveLength(path === list ? 3 : 1);
+      for (const row of rows) {
+        expect(row).toMatchObject({ github: { prNumber: 7 } });
+        expect(row).not.toHaveProperty("accessEpoch");
+        expect(row).not.toHaveProperty("loginRevision");
+        expect(row).not.toHaveProperty("proof");
+      }
+    };
+    await measure("running-get", `/v1/cloud-v2/workspaces/${fixtures[0]!.workspace.id}`);
+    await measure("running-list", list);
+    for (const { workspace } of fixtures) await workspaces.transition(workspace.id, ["running"], "stopped");
+    await measure("stopped-list", list);
+    console.info("Workspace catalog cost", samples);
+    expect(samples, JSON.stringify(samples)).toSatisfy(rows => rows.every((row: typeof samples[number]) => row.transactions <= 6 && row.queries <= 18 && row.githubCalls === 0));
+  });
+
+  it("binds the first PR snapshot when the original repository name has not moved", async () => {
+    owner = "former";
+    const { workspace } = await fixture();
+    created = true;
+    await services.service.execute(workspace.id, userId, { op: "gh.prSync", params: {} });
+    expect(await services.metadata.context(workspace.id, userId)).toMatchObject({
+      repositoryId: "42", repository: "former/project",
+    });
+    const { rows } = await pool.query("SELECT pr_number FROM cloud_v2_github_workspaces WHERE workspace_id=$1", [workspace.id]);
+    expect(rows[0]).toMatchObject({ pr_number: 7 });
+  });
+
+  it("keeps credential issuance independent of an authorized checkout branch change", async () => {
+    const f = await fixture(), workspace = await workspaces.get(f.workspace.id, userId);
+    await services.authorizeSource(workspace);
+    fetcher.mockImplementation(async (value, init) => {
+      if (new URL(String(value)).pathname.endsWith("/branches"))
+        await services.metadata.checkout(f.token, f.boot, { sequence: 2, branch: "other", baseBranch: "main", headSha: "c".repeat(40) });
+      return defaultFetch(value, init);
+    });
+    const result = await services.workspaceToken(workspace, "user", "gh");
+    expect(result.expiresAt).toBeGreaterThan(Date.now());
+    expect(result.expiresAt).toBeLessThanOrEqual(Date.now() + 120_000);
+    expect((await services.metadata.context(workspace.id, userId)).branch).toBe("other");
+  });
+
+  it.each(["membership", "connection", "checkout", "source", "denial", "expired observation"] as const)(
+    "fences a %s change while a PR read is in flight", async change => {
+      const f = await fixture();
+      await services.authorizeSource(await workspaces.get(f.workspace.id, userId));
+      let reached!: () => void, release!: () => void;
+      const reading = new Promise<void>(resolve => { reached = resolve; });
+      const held = new Promise<void>(resolve => { release = resolve; });
+      fetcher.mockImplementation(async (value, init) => {
+        if (new URL(String(value)).pathname.endsWith("/pulls/7")) { reached(); await held; }
+        return defaultFetch(value, init);
+      });
+      const pending = services.service.execute(f.workspace.id, userId, { op: "gh.prGet", params: { prNumber: 7 } })
+        .then(value => ({ value }), error => ({ error }));
+      try {
+        await reading;
+        if (change === "membership") {
+          expect((await pool.query("DELETE FROM organization_members WHERE org_id=$1 AND user_id=$2 RETURNING user_id", [organizationId, userId])).rowCount).toBe(1);
+        } else if (change === "connection") {
+          const scope = { organizationId, userId };
+          await services.connections.store.save(scope, await services.connections.fingerprintFor(scope),
+            { id: "12", login: "contributor" }, { method: "pat", accessToken: "replacement-synthetic-pat", expiresAt: null });
+        } else if (change === "checkout") {
+          await services.metadata.checkout(f.token, f.boot, { sequence: 2, branch: "other", baseBranch: "main", headSha: "c".repeat(40) });
+        } else if (change === "source") {
+          expect((await pool.query("DELETE FROM cloud_v2_github_sources WHERE workspace_id=$1 RETURNING workspace_id", [f.workspace.id])).rowCount).toBe(1);
+        } else if (change === "expired observation") {
+          expect((await pool.query("UPDATE cloud_github_source_verifications SET verified_at=clock_timestamp()-interval '31 seconds' WHERE org_id=$1 RETURNING repository_id", [organizationId])).rowCount).toBe(1);
+        } else {
+          expect((await pool.query(`UPDATE cloud_github_source_verifications SET verified_at=NULL,
+            failure_code='github_cloud_access_denied',failure_status=403,retry_at=clock_timestamp()+interval '1 minute'
+            WHERE org_id=$1 AND owner_user_id=$2 RETURNING repository_id`, [organizationId, userId])).rowCount).toBe(1);
+        }
+        release();
+        expect(await pending).toMatchObject({ error: expect.any(Error) });
+        expect((await pool.query("SELECT pr_number FROM cloud_v2_github_workspaces WHERE workspace_id=$1", [f.workspace.id])).rows[0].pr_number).toBeNull();
+      } finally { release(); await pending; }
+    },
+  );
 
   it.each([503, 403] as const)("retains existing workspace access across replicas during GitHub status %s", async status => {
     const f = await fixture();
@@ -432,6 +589,109 @@ database("cloud GitHub composition", () => {
     expect((await services.documents([workspace]))[0]).not.toHaveProperty(
       "github",
     );
+  });
+  it.each(["membership", "login", "access", "state", "sources"] as const)(
+    "withdraws catalog metadata when %s changes during its read", async change => {
+      const f = await fixture();
+      created = true;
+      await services.service.execute(f.workspace.id, userId, { op: "gh.prSync", params: {} });
+      const workspace = await workspaces.get(f.workspace.id, userId);
+      const original = services.metadata.documents.bind(services.metadata);
+      vi.spyOn(services.metadata, "documents").mockImplementationOnce(async (...args) => {
+        const result = await original(...args);
+        if (change === "membership") await pool.query("DELETE FROM organization_members WHERE org_id=$1 AND user_id=$2", [organizationId, userId]);
+        else if (change === "login") await pool.query("UPDATE cloud_v2_workspaces SET login_revision=login_revision+1 WHERE id=$1", [workspace.id]);
+        else if (change === "access") await pool.query("UPDATE cloud_v2_workspaces SET access_epoch=access_epoch+1 WHERE id=$1", [workspace.id]);
+        else if (change === "state") await workspaces.transition(workspace.id, ["running"], "stopped");
+        else await pool.query("DELETE FROM cloud_v2_github_sources WHERE workspace_id=$1", [workspace.id]);
+        return result;
+      });
+      const [document] = await services.documents([workspace]);
+      expect(document).not.toHaveProperty("github");
+      expect(document).toHaveProperty("githubUnavailableReason");
+      expect(document?.repository).toBe(workspace.repository);
+      expect(Date.parse(document!.updatedAt)).toBeGreaterThanOrEqual(Date.parse(workspace.updatedAt));
+    },
+  );
+  it("withdraws a catalog row when a secondary source is denied during the metadata read", async () => {
+    const id = randomUUID();
+    // Historical workspaces retain every source from their original snapshot.
+    await pool.query(`INSERT INTO cloud_v2_workspaces(id,org_id,creator_user_id,name,repository,branch,base_branch,state,source_repositories)
+      VALUES($1,$2,$3,'Historical workspace','former/project','topic','main','creating',$4)`,
+      [id, organizationId, userId, ["former/project", "secondary/project"]]);
+    await pool.query(`INSERT INTO cloud_v2_github_sources(workspace_id,source_repository,repository_id)
+      VALUES($1,'former/project',42),($1,'secondary/project',43)`, [id]);
+    const token = await workspaces.rotateWorkerToken(id), boot = randomUUID();
+    await workspaces.acceptWorkerHello(token, boot);
+    await services.metadata.checkout(token, boot, { sequence: 1, branch: "topic", baseBranch: "main", headSha: head });
+    fetcher.mockImplementation(async (value, init) => new URL(String(value)).pathname === "/repositories/43"
+      ? Response.json({ ...repo(), id: 43, owner: { login: "secondary" } }) : defaultFetch(value, init));
+    created = true;
+    await services.service.execute(id, userId, { op: "gh.prSync", params: {} });
+    const workspace = await workspaces.get(id, userId);
+    const original = services.metadata.documents.bind(services.metadata);
+    vi.spyOn(services.metadata, "documents").mockImplementationOnce(async (...args) => {
+      const result = await original(...args);
+      await pool.query(`UPDATE cloud_github_source_verifications SET verified_at=NULL,failure_code='github_cloud_access_denied',
+        failure_status=403,retry_at=clock_timestamp()+interval '1 minute' WHERE org_id=$1 AND owner_user_id=$2 AND repository_id=43`, [organizationId, userId]);
+      return result;
+    });
+    const [document] = await services.documents([workspace]);
+    expect(document).not.toHaveProperty("github");
+    expect(document?.githubUnavailableReason).toBe("access-denied");
+  });
+  it.each(["held-creator", "cloud-disabled"] as const)("withholds catalog metadata without stopping work when local access is %s", async reason => {
+    const { workspace } = await fixture();
+    created = true;
+    await services.service.execute(workspace.id, userId, { op: "gh.prSync", params: {} });
+    if (reason === "cloud-disabled") await pool.query("UPDATE organizations SET cloud_workspaces_allowed=false WHERE id=$1", [organizationId]);
+    else {
+      for (let i = 0; i < 5; i++) {
+        const member = randomUUID();
+        await pool.query("INSERT INTO users(id,email,display_name) VALUES($1,$2,'Free member')", [member, `${member}@example.test`]);
+        await pool.query("INSERT INTO organization_members(org_id,user_id,role) VALUES($1,$2,'member')", [organizationId, member]);
+      }
+      await pool.query("UPDATE account_entitlements SET status='cancelled',cloud_workspaces_allowed=false WHERE user_id=$1", [userId]);
+    }
+    await expect(workspaces.get(workspace.id, userId)).rejects.toMatchObject({ code: reason === "held-creator" ? "organization_member_on_hold" : "not_found" });
+    expect((await pool.query("SELECT state FROM cloud_v2_workspaces WHERE id=$1", [workspace.id])).rows[0].state).toBe("running");
+    const rows = await workspaces.list(organizationId, userId);
+    expect(rows).toHaveLength(1);
+    const [document] = await services.documents(rows);
+    expect(document).not.toHaveProperty("github");
+    expect(document).toHaveProperty("githubUnavailableReason");
+    expect((await pool.query("SELECT state FROM cloud_v2_workspaces WHERE id=$1", [workspace.id])).rows[0].state).toBe("running");
+  });
+  it("keeps stopped catalog admission fresh instead of borrowing a running continuation", async () => {
+    const f = await fixture();
+    await services.service.execute(f.workspace.id, userId, { op: "gh.prSync", params: {} });
+    const running = await workspaces.get(f.workspace.id, userId);
+    await services.documents([running]);
+    await pool.query("UPDATE cloud_github_source_verifications SET verified_at=clock_timestamp()-interval '31 seconds' WHERE org_id=$1", [organizationId]);
+    await workspaces.transition(running.id, ["running"], "stopped");
+    fetcher.mockImplementation(async () => new Response(null, { status: 503 }));
+    const [document] = await services.documents([await workspaces.get(running.id, userId)]);
+    expect(fetcher).toHaveBeenCalled();
+    expect(document).not.toHaveProperty("github");
+    expect(document?.githubUnavailableReason).toBe("unavailable");
+    expect((await workspaces.get(running.id, userId)).state).toBe("stopped");
+  });
+  it("never shares a catalog fingerprint or proof across organizations", async () => {
+    const first = await fixture(), firstOrg = organizationId;
+    created = true;
+    await services.service.execute(first.workspace.id, userId, { op: "gh.prSync", params: {} });
+    organizationId = randomUUID();
+    await pool.query("INSERT INTO organizations(id,slug,name,created_by,is_personal,cloud_workspaces_allowed) VALUES($1,$2,'Other',$3,false,true)",
+      [organizationId, `org-${organizationId}`, userId]);
+    await pool.query("INSERT INTO organization_members(org_id,user_id,role) VALUES($1,$2,'owner')", [organizationId, userId]);
+    const second = await fixture();
+    const rows = await Promise.all([first, second].map(f => workspaces.get(f.workspace.id, userId)));
+    for (const ordered of [rows, [...rows].reverse(), rows]) {
+      const documents = await services.documents(ordered);
+      expect(documents.find(row => row.organizationId === firstOrg)).toMatchObject({ github: { prNumber: 7 } });
+      expect(documents.find(row => row.organizationId === organizationId)).not.toHaveProperty("github");
+      expect(documents.find(row => row.organizationId === organizationId)?.githubUnavailableReason).toBe("connection-required");
+    }
   });
   it("keeps catalog versions monotonic when authorization withdraws newer PR metadata", async () => {
     const { workspace } = await fixture();

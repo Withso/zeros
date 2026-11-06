@@ -3,6 +3,7 @@
 // replacement API key, each reaching the live execution without a reconnect.
 
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { CODEX_AUTH_ENV } from "../adapters/shared/provider-connection";
 import { seedProviderCredentials } from "../provider-credentials";
 import { AgentGateway } from "../gateway";
 import type { AgentAdapter, ProviderCredentialUpdate } from "../types";
@@ -115,6 +116,73 @@ describe("Local provider connection projection", () => {
         ...blankedTokens,
       });
       expect(updates).toHaveLength(3);
+    } finally {
+      await gateway.dispose();
+    }
+  });
+
+  it("tells a live Codex execution when its connection becomes an API key", async () => {
+    for (const name of ["OPENAI_API_KEY", "CODEX_HOME", CODEX_AUTH_ENV]) vi.stubEnv(name, undefined);
+    const seedCodex = (method: "apiKey" | "cli", apiKey?: string) =>
+      expect(seedProviderCredentials({
+        claude: null,
+        codex: apiKey ? { apiKey } : null,
+        cursor: null,
+        cursorSubscription: null,
+        authMethods: { codex: method },
+        accountProfiles: UNSET_PROFILES,
+      })).toBe(true);
+    seedCodex("cli");
+    const gateway = new AgentGateway({
+      projectRoot: "/tmp/zeros-connection-projection",
+      executionBoundary: testExecutionBoundary(),
+      events: {
+        onSessionUpdate: () => {},
+        onPermissionRequest: () => {},
+        onQuestionRequest: () => {},
+        onAgentStderr: () => {},
+        onAgentExit: () => {},
+      },
+    });
+    const updates: ProviderCredentialUpdate[] = [];
+    const internals = gateway as unknown as {
+      adapters: Map<string, AgentAdapter>;
+      executionToAgent: Map<string, string>;
+      executionToCwd: Map<string, string>;
+      executionAuthFingerprint: Map<string, string>;
+      providerAuthConfigFingerprint: (agentId: string) => string;
+    };
+    internals.adapters.set("codex", {
+      agentId: "codex",
+      prompt: async () => ({ response: { stopReason: "end_turn" } }),
+      dispose: async () => {},
+      capabilityPorts: {
+        runtimeConfiguration: {
+          updateCredentials: async (update: ProviderCredentialUpdate) => {
+            updates.push(update);
+          },
+        },
+      },
+    } as unknown as AgentAdapter);
+    internals.executionToAgent.set("live", "codex");
+    internals.executionToCwd.set("live", "/tmp/zeros-connection-projection");
+    internals.executionAuthFingerprint.set("live", internals.providerAuthConfigFingerprint("codex"));
+    const send = () => gateway.prompt("codex", "live", [{ type: "text", text: "Continue" }]);
+    try {
+      // The chat started without a connection; the user then adds a key.
+      seedCodex("apiKey", "added-fixture-key");
+      await send();
+      expect(updates.at(-1)?.env).toEqual({
+        OPENAI_API_KEY: "added-fixture-key",
+        [CODEX_AUTH_ENV]: "api-key",
+      });
+      expect(updates.at(-1)?.keys).toContain(CODEX_AUTH_ENV);
+
+      // Back to the device login: the marker is removed, not left behind.
+      seedCodex("cli", "added-fixture-key");
+      await send();
+      expect(updates.at(-1)?.env).toEqual({ OPENAI_API_KEY: "" });
+      expect(updates).toHaveLength(2);
     } finally {
       await gateway.dispose();
     }

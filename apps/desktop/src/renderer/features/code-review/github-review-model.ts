@@ -11,7 +11,7 @@ import type { CodeReviewThreadItem } from "./review-thread-model";
 
 const threadItems = new WeakMap<
   PrReviewThread,
-  { revision: string; item: CodeReviewThreadItem }
+  { key: string; item: CodeReviewThreadItem }
 >();
 const annotationItems = new WeakMap<
   PrCodeAnnotation,
@@ -59,12 +59,16 @@ export function githubLineCommentForAnchor(
   };
 }
 
+type GithubViewer = NonNullable<PrInlineReview["viewer"]>;
+
 export function githubReviewThreadItem(
   thread: PrReviewThread,
   revision: string,
+  viewer: GithubViewer | null = null,
 ): CodeReviewThreadItem {
+  const key = JSON.stringify([revision, viewer?.login ?? null, viewer?.avatarUrl ?? null]);
   const cached = threadItems.get(thread);
-  if (cached?.revision === revision) return cached.item;
+  if (cached?.key === key) return cached.item;
   const endLine = thread.line ?? thread.originalLine ?? 1;
   const startLine = Math.min(
     thread.startLine ?? thread.originalStartLine ?? endLine,
@@ -87,6 +91,9 @@ export function githubReviewThreadItem(
         id: `github:${comment.author.login}`,
         name: comment.author.login,
         kind: comment.author.kind === "bot" ? "integration" : "human",
+        ...(comment.author.avatarUrl
+          ? { avatarUrl: comment.author.avatarUrl }
+          : {}),
       },
       body: comment.body,
       createdAt: comment.createdAt,
@@ -94,9 +101,15 @@ export function githubReviewThreadItem(
     resolved: thread.isResolved,
     version: JSON.stringify([
       revision,
+      viewer?.login ?? null,
+      viewer?.avatarUrl ?? null,
       thread.isResolved,
       thread.isOutdated,
-      thread.comments.map((comment) => [comment.id, comment.updatedAt]),
+      thread.comments.map((comment) => [
+        comment.id,
+        comment.updatedAt,
+        comment.author.avatarUrl,
+      ]),
     ]),
     outdated: thread.isOutdated || thread.line === null,
     anchorMissing: thread.line === null && thread.originalLine === null,
@@ -104,8 +117,12 @@ export function githubReviewThreadItem(
     ...(thread.comments[0]?.url ? { url: thread.comments[0].url } : {}),
     canReply: thread.comments[0]?.databaseId != null,
     canResolve: thread.isResolved ? thread.canUnresolve : thread.canResolve,
+    // A reply posts through the GitHub account that made this read.
+    replyAs: viewer
+      ? { name: viewer.login, ...(viewer.avatarUrl ? { avatarUrl: viewer.avatarUrl } : {}) }
+      : null,
   };
-  threadItems.set(thread, { revision, item });
+  threadItems.set(thread, { key, item });
   return item;
 }
 
@@ -157,7 +174,7 @@ export function githubReviewItems(
   const revision = githubReviewRevision(target, snapshot);
   return [
     ...snapshot.threads.map((thread) =>
-      githubReviewThreadItem(thread, revision),
+      githubReviewThreadItem(thread, revision, snapshot.viewer ?? null),
     ),
     ...snapshot.annotations.map((annotation) =>
       githubAnnotationItem(annotation, revision),

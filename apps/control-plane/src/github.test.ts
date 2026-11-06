@@ -69,6 +69,35 @@ describe("GitHub routes without a registered App", () => {
   });
 });
 
+describe("cloud GitHub connection page", () => {
+  it("finishes on the shared page shell, styled by hash only", async () => {
+    const calls: Array<[string, string | undefined, boolean]> = [];
+    const app = createGithubPublicRoutes({} as pg.Pool, githubConfig, {
+      cloudCallback: async (state, code, denied) => {
+        calls.push([state, code, denied]);
+      },
+    });
+    const state = `zcg_${"a".repeat(40)}`;
+
+    const response = await app.request(
+      `/v1/github/oauth/callback?state=${state}&code=temporary-code`,
+    );
+
+    expect(response.status).toBe(200);
+    expect(calls).toEqual([[state, "temporary-code", false]]);
+    const policy = response.headers.get("content-security-policy") ?? "";
+    expect(policy).toContain("default-src 'none'");
+    expect(policy).toMatch(/style-src 'sha256-[A-Za-z0-9+/]+=*'/);
+    expect(policy).not.toContain("unsafe-inline");
+    const page = await response.text();
+    expect(page).toContain('<div class="title">GitHub connected</div>');
+    expect(page).toContain(
+      '<div class="sub">Return to Zeros to continue. You can close this tab.</div>',
+    );
+    expect(page).toMatch(/<svg class="hero-logo"/);
+  });
+});
+
 describe("GitHub OAuth flow selection", () => {
   it("limits the hosted gesture to one minute plus desktop exchange grace", () => {
     expect(GITHUB_HANDOFF_TTL_MS).toBe(90_000);

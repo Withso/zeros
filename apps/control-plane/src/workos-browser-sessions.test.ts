@@ -240,6 +240,16 @@ describe("Railway WorkOS browser-session coordinator", () => {
       `href="${APP_ORIGIN}/after?one=1&amp;two=2"`,
     );
     expect(completionDocument).not.toContain("?one=1&two=2");
+    expect(completionDocument).toContain('<div class="title">Completing sign in</div>');
+    expect(completionDocument).toContain(
+      '<div class="sub">Your secure Zeros session is ready. Continue to open the app.</div>',
+    );
+    expect(completionDocument).toContain(
+      `<div class="acts"><a class="btn" href="${APP_ORIGIN}/after?one=1&amp;two=2">Continue to Zeros</a></div>`,
+    );
+    expect(completed.headers.get("content-security-policy")).toMatch(
+      /style-src 'sha256-[A-Za-z0-9+/]+=*'/,
+    );
     const setCookies = completed.headers.getSetCookie();
     const sessionCookie = setCookies.find((cookie) =>
       cookie.startsWith(`${WORKOS_SESSION_COOKIE}=`),
@@ -252,7 +262,47 @@ describe("Railway WorkOS browser-session coordinator", () => {
     expect(cookies).not.toContain(state);
   });
 
-  it("does not forward provider, connection, or organization selectors", async () => {
+  it("forwards only an exact Google or GitHub choice, never a connection or organization", async () => {
+    const authorizationUrl = vi.fn(
+      ({ state, codeChallenge }: { state: string; codeChallenge: string }) =>
+        `https://api.workos.test/authorize?state=${state}&code_challenge=${codeChallenge}`,
+    );
+    const value = subject({ provider: provider({ authorizationUrl }) });
+    const app = createWorkOSBrowserSessionRoutes(value.sessions, APP_ORIGIN, {
+      socialProviders: true,
+    });
+
+    const paths = [
+      "/auth/start?provider=github&connection=conn_attacker&organization=org_attacker",
+      "/auth/start?provider=google",
+      "/auth/start?provider=GitHubOAuth",
+      "/auth/start?provider=authkit",
+      "/auth/start?provider=sso",
+      "/auth/start?provider=google&provider=github",
+      "/auth/start",
+    ];
+    for (const path of paths) {
+      expect((await app.request(path)).status).toBe(303);
+    }
+
+    const options = authorizationUrl.mock.calls.map((call) => call[0] as Record<string, unknown>);
+    expect(options.map((option) => option.socialProvider)).toEqual([
+      "github",
+      "google",
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+    ]);
+    for (const option of options) {
+      expect(option).not.toHaveProperty("provider");
+      expect(option).not.toHaveProperty("connection");
+      expect(option).not.toHaveProperty("organization");
+    }
+  });
+
+  it("keeps routes without social providers, such as Ops, on Hosted AuthKit", async () => {
     const authorizationUrl = vi.fn(
       ({ state, codeChallenge }: { state: string; codeChallenge: string }) =>
         `https://api.workos.test/authorize?state=${state}&code_challenge=${codeChallenge}`,
@@ -260,18 +310,32 @@ describe("Railway WorkOS browser-session coordinator", () => {
     const value = subject({ provider: provider({ authorizationUrl }) });
     const app = createWorkOSBrowserSessionRoutes(value.sessions, APP_ORIGIN);
 
-    const response = await app.request(
-      "/auth/start?provider=github&connection=conn_attacker&organization=org_attacker",
-    );
+    const response = await app.request("/auth/start?provider=github&max_age=300");
 
     expect(response.status).toBe(303);
-    expect(authorizationUrl).toHaveBeenCalledOnce();
-    expect(authorizationUrl.mock.calls[0]?.[0]).not.toHaveProperty("provider");
-    expect(authorizationUrl.mock.calls[0]?.[0]).not.toHaveProperty(
-      "connection",
+    expect(authorizationUrl.mock.calls[0]?.[0]).not.toHaveProperty("socialProvider");
+    expect(authorizationUrl.mock.calls[0]?.[0]).toMatchObject({ maxAge: 300 });
+  });
+
+  it("ends a failed callback on the shared page with the reason and Try again", async () => {
+    const value = subject();
+    const app = createWorkOSBrowserSessionRoutes(value.sessions, APP_ORIGIN);
+
+    const missing = await app.request("/auth/callback?state=only-state");
+    const denied = await app.request("/auth/callback?error=access_denied");
+
+    expect(missing.status).toBe(400);
+    expect(missing.headers.get("content-type")).toMatch(/^text\/html/);
+    expect(missing.headers.get("cache-control")).toBe("no-store");
+    expect(missing.headers.get("content-security-policy")).toMatch(/default-src 'none'/);
+    const page = await missing.text();
+    expect(page).toContain('<div class="title">Sign-in didn’t finish</div>');
+    expect(page).toContain(
+      '<div class="sub">The sign-in response was incomplete. Nothing was changed.</div>',
     );
-    expect(authorizationUrl.mock.calls[0]?.[0]).not.toHaveProperty(
-      "organization",
+    expect(page).toContain('<div class="acts"><a class="btn" href="/">Try again</a></div>');
+    expect(await denied.text()).toContain(
+      '<div class="sub">The identity provider didn’t finish. Nothing was changed.</div>',
     );
   });
 

@@ -23,6 +23,11 @@ import {
   turnHistoryCursorSchema,
   type TurnHistoryCursor,
 } from "@zeros/protocol/changes-history";
+import {
+  isTurnCommitSha,
+  TURN_COMMIT_LOOKUP_LIMIT,
+  type TurnCommitLink,
+} from "@zeros/protocol/turns";
 
 export type TurnFileStatus = "added" | "modified" | "deleted" | "renamed";
 
@@ -82,6 +87,8 @@ export interface TurnRow {
   files: TurnFile[];
   /** Tokens/cost for this turn (null when the agent reported none). */
   usage: TurnUsageJson | null;
+  /** Full SHAs this turn's own tools committed (see TurnInfo.commits). */
+  commits: string[];
 }
 
 export interface TurnDbRow {
@@ -100,7 +107,19 @@ export interface TurnDbRow {
   post_snapshot: string | null;
   files: string | null;
   usage: string | null;
+  /** Absent from reset-undo rows captured before migration v45. */
+  commits?: string | null;
   rev: number;
+}
+
+function parseCommits(raw: string | null | undefined): string[] {
+  if (!raw) return [];
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter(isTurnCommitSha) : [];
+  } catch {
+    return [];
+  }
 }
 
 function parseFiles(raw: string | null): TurnFile[] {
@@ -158,11 +177,12 @@ function toTurnRow(r: TurnDbRow): TurnRow {
     postSnapshot: r.post_snapshot,
     files: parseFiles(r.files),
     usage: parseUsage(r.usage),
+    commits: parseCommits(r.commits),
   };
 }
 
 const SELECT_COLS = `chat_id, turn_id, workspace_id, folder, agent_id, ord, summary,
-  started_at, ended_at, stop_reason, status, pre_snapshot, post_snapshot, files, usage, rev`;
+  started_at, ended_at, stop_reason, status, pre_snapshot, post_snapshot, files, usage, commits, rev`;
 
 /** Record a turn as it STARTS (status='running'), before the agent runs. `ord`
  *  is MAX+1 within the chat so turns sort chronologically even across sessions.
@@ -344,6 +364,8 @@ export function finishTurn(
     /** Tokens/cost this turn billed; omitted/null when the agent
      *  reported none. Existing newer snapshots survive finalization. */
     usage?: TurnUsageJson | null;
+    /** Resolved full SHAs this turn committed; omitted/empty when none. */
+    commits?: string[];
   },
 ): void {
   if (!chatId || !turnId) return;
@@ -356,7 +378,7 @@ export function finishTurn(
     ? existing : patch.usage;
   db.prepare(
     `UPDATE turns SET ended_at = ?, stop_reason = ?, status = ?, post_snapshot = ?,
-       files = ?, usage = ?, rev = ?
+       files = ?, usage = ?, commits = ?, rev = ?
      WHERE chat_id = ? AND turn_id = ?`,
   ).run(
     patch.endedAt,
@@ -365,6 +387,7 @@ export function finishTurn(
     patch.postSnapshot,
     JSON.stringify(patch.files ?? []),
     usage ? JSON.stringify(usage) : null,
+    patch.commits?.length ? JSON.stringify(patch.commits) : null,
     nextRev(),
     chatId,
     turnId,
@@ -545,19 +568,48 @@ export function reinsertTurns(rows: TurnDbRow[]): void {
     `INSERT OR REPLACE INTO turns
        (chat_id, turn_id, workspace_id, folder, agent_id, ord, summary,
         started_at, ended_at, stop_reason, status, pre_snapshot, post_snapshot,
-        files, usage, rev)
+        files, usage, commits, rev)
      VALUES
        (@chat_id, @turn_id, @workspace_id, @folder, @agent_id, @ord, @summary,
         @started_at, @ended_at, @stop_reason, @status, @pre_snapshot,
-        @post_snapshot, @files, @usage, @rev)`,
+        @post_snapshot, @files, @usage, @commits, @rev)`,
   );
   const tx = db.transaction((items: TurnDbRow[]) => {
-    // Default `usage` explicitly — a reset-undo record captured BEFORE
-    // migration v20 has no `usage` key, and better-sqlite3 throws on a
-    // missing named parameter.
+    // Default `usage` and `commits` explicitly — reset-undo records captured
+    // before migrations v20 and v45 lack those keys, and better-sqlite3 throws
+    // on a missing named parameter.
     for (const r of items) {
-      stmt.run({ ...r, usage: r.usage ?? null, rev: nextRev() });
+      stmt.run({ ...r, usage: r.usage ?? null, commits: r.commits ?? null, rev: nextRev() });
     }
   });
   tx(rows);
+}
+
+/** Which turn made each of these commits, among this workspace's turns. A
+ *  commit made again by another turn (a cherry-pick) keeps the first turn. */
+export function listTurnCommitLinks(
+  workspaceId: string,
+  shas: string[],
+  options: { localMainRoots?: string[] } = {},
+): TurnCommitLink[] {
+  const wanted = new Set(shas.filter(isTurnCommitSha).slice(0, TURN_COMMIT_LOOKUP_LIMIT));
+  if (!workspaceId || wanted.size === 0) return [];
+  const roots = options.localMainRoots;
+  const owner = roots?.length
+    ? `(workspace_id IN (?, 'local-main') AND folder IN (${roots.map(() => "?").join(",")}))`
+    : "workspace_id = ?";
+  const rows = openZerosDb()
+    .prepare(
+      `SELECT chat_id, turn_id, commits FROM turns
+       WHERE ${owner} AND commits IS NOT NULL
+       ORDER BY started_at ASC, chat_id ASC, turn_id ASC`,
+    )
+    .all(workspaceId, ...(roots ?? [])) as Array<{ chat_id: string; turn_id: string; commits: string | null }>;
+  const links = new Map<string, TurnCommitLink>();
+  for (const row of rows) {
+    for (const sha of parseCommits(row.commits)) {
+      if (wanted.has(sha) && !links.has(sha)) links.set(sha, { sha, chatId: row.chat_id, turnId: row.turn_id });
+    }
+  }
+  return [...links.values()];
 }

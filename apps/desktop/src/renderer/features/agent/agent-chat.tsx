@@ -60,6 +60,7 @@ import {
 import { newChatId } from "../../state/chat-id";
 import { retryAgentTurn, warmRetryTranscript } from "./retry-agent-turn";
 import { cloudPromptTurnActivity } from "./cloud-prompt-presentation";
+import { promptTerminal } from "./cloud-prompt-channel";
 import { useCloudFailureRecovery } from "./use-cloud-failure-recovery";
 import { TurnFailureCard } from "./turn-failure-card";
 import { expandMentionsInText } from "./mentions";
@@ -4385,6 +4386,8 @@ function AgentChatBody({
                     sessionStreaming: isStreaming && (!session.cloudOutbox || receipt.active),
                     pendingLocalTurn: turnIsPendingLocal,
                     hasEvents: turn.events.length > 0,
+                    durableAwaitingStart: receipt.durable && !receipt.presentation && !promptTerminal(receipt.state) &&
+                      isProviderTurnTail(turns, i),
                   })}
                   recovered={authenticationRecoveredAt > i}
                   initialContent={initialCachedTurnIndex >= 0 ? Math.abs(i - initialCachedTurnIndex) <= 4 : i >= turns.length - 6}

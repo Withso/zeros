@@ -12,10 +12,12 @@ export function reviewCodeViewVersion(identity: string, active = true): number {
 }
 
 /** Retain the exact item Pierre prepared when only a sibling's review changed. */
-export function retainReviewCodeViewItem(
-  retained: Map<string, CodeViewItem<ReviewAnnotationPayload>>,
-  item: CodeViewItem<ReviewAnnotationPayload>,
-): CodeViewItem<ReviewAnnotationPayload> {
+export function retainReviewCodeViewItem<
+  Payload extends ReviewAnnotationPayload = ReviewAnnotationPayload,
+>(
+  retained: Map<string, CodeViewItem<Payload>>,
+  item: CodeViewItem<Payload>,
+): CodeViewItem<Payload> {
   const previous = retained.get(item.id);
   if (
     previous &&

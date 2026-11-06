@@ -4,11 +4,17 @@ import type {
 } from "@zeros/protocol/code-review";
 
 /** UI shape shared by durable workspace discussions, GitHub threads and checks. */
+/** A comment as a thread draws it. GitHub authors also carry the avatar the
+ *  engine already sanitised: a person's photo or a review app's logo. */
+export type CodeReviewThreadComment = Omit<CodeReviewComment, "author"> & {
+  author: CodeReviewComment["author"] & { avatarUrl?: string };
+};
+
 export interface CodeReviewThreadItem {
   id: string;
   source: "workspace" | "github" | "check";
   anchor: CodeReviewAnchor;
-  comments: readonly CodeReviewComment[];
+  comments: readonly CodeReviewThreadComment[];
   resolved: boolean;
   version: number | string;
   outdated?: boolean;
@@ -22,6 +28,10 @@ export interface CodeReviewThreadItem {
   commentsComplete?: boolean;
   commentsCursor?: string;
   commentsCursorAfter?: number;
+  /** Who a reply posts as when that is not the signed-in Zeros user: a GitHub
+   *  thread replies through the connected GitHub account. Null when that
+   *  account is unknown, so the reply row shows no avatar. */
+  replyAs?: { name: string; avatarUrl?: string | null } | null;
 }
 
 export interface CodeReviewExternalSource {

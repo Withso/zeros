@@ -1,0 +1,9 @@
+{
+  "id": "codex-api-key-env-ignored",
+  "kind": "replay",
+  "area": "desktop-agents",
+  "fixedBy": "pr:855",
+  "symptom": "Adding a Codex API key in Settings still failed the next message with \"Your access token could not be refreshed because your refresh token was revoked\": the restarted app-server received OPENAI_API_KEY but authenticated with the device ChatGPT login in ~/.codex/auth.json.",
+  "rule": "Qualify how a provider binary reads credentials against the executable Zeros launches, not a mocked runtime. Codex's app-server ignores OPENAI_API_KEY and CODEX_API_KEY, so a selected key is logged in through account/login/start with an ephemeral credential store, and an API selection without a key stays signed out.",
+  "check": "pnpm exec vitest run apps/desktop/src/engine/agents/adapters/codex/__tests__/app-server-api-key-login.test.ts apps/desktop/src/engine/settings/__tests__/provider-env.test.ts apps/desktop/src/engine/agents/__tests__/gateway-connection-projection.test.ts"
+}

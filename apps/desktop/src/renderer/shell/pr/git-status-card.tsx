@@ -60,7 +60,7 @@ export function GitStatusCard({
     ["Conflicts", checklist.conflicts == null ? "Unknown" : checklist.conflicts ? "Yes" : "None"],
     [
       `Against ${checklist.baseBranch}`,
-      checklist.behindBase && checklist.behindBase > 0
+      checklist.behindBase === null ? "Unknown" : checklist.behindBase > 0
         ? `${checklist.behindBase} ${checklist.behindBase === 1 ? "commit" : "commits"} behind`
         : "Up to date",
     ],

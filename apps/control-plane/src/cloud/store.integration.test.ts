@@ -265,6 +265,20 @@ d("cloud v2 store", () => {
     expect((await store.get(w.id, creator)).state).toBe("running");
   });
 
+  it("hints waiting relays once, on commit, when a worker hello makes the workspace running", async () => {
+    const listener = await pool.connect(), notices: string[] = [];
+    try {
+      listener.on("notification", notice => { if (notice.channel === "zeros_cloud_v2_ready") notices.push(notice.payload ?? ""); });
+      await listener.query("LISTEN zeros_cloud_v2_ready");
+      const w = await create(), token = await store.rotateWorkerToken(w.id), boot = randomUUID();
+      await store.acceptWorkerHello(token, boot);
+      await vi.waitFor(() => expect(notices).toEqual([w.id]));
+      expect(await store.acceptWorkerHello(token, boot)).not.toBeNull();
+      await new Promise(resolve => setTimeout(resolve, 100));
+      expect(notices).toEqual([w.id]);
+    } finally { await listener.query("UNLISTEN *").catch(() => {}); listener.release(); }
+  });
+
   it("records a checkout failure after hello and preserves the first failure on an HTTP retry", async () => {
     const w = await create(), token = await store.rotateWorkerToken(w.id), boot = randomUUID();
     await store.acceptWorkerHello(token, boot);

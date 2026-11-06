@@ -1,0 +1,9 @@
+{
+  "id": "cloud-terminal-quiet-stop-resume",
+  "kind": "replay",
+  "area": "renderer-ui",
+  "fixedBy": "pr:859",
+  "symptom": "After a cloud workspace stopped and resumed, an idle terminal showed '[process exited with code 0] — press any key to restart' and 'Workspace resumed — new shell' even though no command had run.",
+  "rule": "A workspace stop is not a user-visible shell exit. Start a clean shell when nothing ran; when commands ran, keep their output and say once that a new shell started, before its prompt, and never when another client already resumed the live shell.",
+  "check": "pnpm vitest run apps/desktop/src/renderer/shell/terminal/__tests__/cloud-terminal-resume.test.ts"
+}

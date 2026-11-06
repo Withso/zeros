@@ -822,6 +822,177 @@
         }
       }
     },
+    "green-secondary": {
+      "$type": "color",
+      "$value": "{tokens.green-primary}",
+      "$description": "solid Accept current change fills (merge conflicts)",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--green-secondary",
+          "section": "light-red-primary",
+          "utility": "--color-green-secondary",
+          "utilitySection": "utilities-green-secondary",
+          "utilityOrder": 128
+        }
+      }
+    },
+    "green-secondary-hover": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [142.0, 75.0, 23.529]
+      },
+      "$description": "Accept current change hover fill",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--green-secondary-hover",
+          "section": "light-red-primary",
+          "utility": "--color-green-secondary-hover",
+          "utilitySection": "utilities-green-secondary",
+          "utilityOrder": 129
+        }
+      }
+    },
+    "blue-secondary": {
+      "$type": "color",
+      "$value": "{tokens.blue-primary}",
+      "$description": "solid Accept incoming change fills (merge conflicts)",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--blue-secondary",
+          "section": "light-red-primary",
+          "utility": "--color-blue-secondary",
+          "utilitySection": "utilities-green-secondary",
+          "utilityOrder": 131
+        }
+      }
+    },
+    "blue-secondary-hover": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [220.95, 83.26, 44.51]
+      },
+      "$description": "Accept incoming change hover fill",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--blue-secondary-hover",
+          "section": "light-red-primary",
+          "utility": "--color-blue-secondary-hover",
+          "utilitySection": "utilities-green-secondary",
+          "utilityOrder": 132
+        }
+      }
+    },
+    "neutral-secondary": {
+      "$type": "color",
+      "$value": "{tokens.fg2}",
+      "$description": "solid neutral fills: Accept both (merge conflicts)",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--neutral-secondary",
+          "section": "light-red-primary",
+          "utility": "--color-neutral-secondary",
+          "utilitySection": "utilities-green-secondary",
+          "utilityOrder": 134
+        }
+      }
+    },
+    "neutral-secondary-hover": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [30.0, 5.634, 27.843]
+      },
+      "$description": "neutral solid hover fill",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--neutral-secondary-hover",
+          "section": "light-red-primary",
+          "utility": "--color-neutral-secondary-hover",
+          "utilitySection": "utilities-green-secondary",
+          "utilityOrder": 135
+        }
+      }
+    },
+    "conflict-current": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [142.0, 75.0, 25.5],
+        "alpha": 0.12
+      },
+      "$description": "merge conflict current rows; translucent so selection shows through",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--conflict-current",
+          "section": "light-red-primary"
+        }
+      }
+    },
+    "conflict-current-band": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [142.0, 75.0, 25.5],
+        "alpha": 0.26
+      },
+      "$description": "merge conflict HEAD band (the <<<<<<< row)",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--conflict-current-band",
+          "section": "light-red-primary"
+        }
+      }
+    },
+    "conflict-incoming": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [221.0, 83.0, 48.5],
+        "alpha": 0.12
+      },
+      "$description": "merge conflict incoming rows",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--conflict-incoming",
+          "section": "light-red-primary"
+        }
+      }
+    },
+    "conflict-incoming-band": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [221.0, 83.0, 48.5],
+        "alpha": 0.26
+      },
+      "$description": "merge conflict branch band (the >>>>>>> row)",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--conflict-incoming-band",
+          "section": "light-red-primary"
+        }
+      }
+    },
+    "conflict-neutral": {
+      "$type": "color",
+      "$value": {
+        "colorSpace": "hsl",
+        "components": [30.0, 10.0, 15.686],
+        "alpha": 0.05
+      },
+      "$description": "merge conflict separator, ancestor and accept rows",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--conflict-neutral",
+          "section": "light-red-primary",
+          "utility": "--color-conflict-neutral",
+          "utilitySection": "utilities-green-secondary",
+          "utilityOrder": 137
+        }
+      }
+    },
     "violet-primary": {
       "$type": "color",
       "$value": {

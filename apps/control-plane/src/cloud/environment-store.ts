@@ -7,6 +7,7 @@ import { memberOnHoldSql, organizationMemberOnHold } from "../organization-seats
 import type { CloudAgentCredentialKeys } from "../agent-credentials/agent-credential-envelope.js";
 import { CLOUD_V2_LIVE_ACCESS } from "./workspace-access.js";
 import { hashCloudV2Token } from "./tokens.js";
+import { notifyCloudV2WorkerReady } from "./worker-ready.js";
 import type { CloudV2Workspace } from "./store.js";
 import { CLOUD_ENVIRONMENT_ERRORS, CLOUD_ENVIRONMENT_LIMITS, CloudEnvironmentMaterialSchema, CloudEnvironmentPatchSchema,
   CloudEnvironmentReportSchema, CloudEnvironmentRepositoryIdSchema, cloudEnvironmentMetadata,
@@ -170,8 +171,8 @@ export class CloudEnvironments {
     });
   }
 
-  async resolve(workspace: CloudV2Workspace): Promise<CloudWorkspaceEnvironment | undefined> {
-    return withSystemTx(this.pool, async tx => {
+  async resolve(workspace: CloudV2Workspace, transaction?: Tx): Promise<CloudWorkspaceEnvironment | undefined> {
+    const read = async (tx: Tx): Promise<CloudWorkspaceEnvironment | undefined> => {
       const row = (await tx.query<{ id: string; repository_id: string; revision: string; envelope: CloudEnvironmentEnvelope }>(
         `SELECT v.id,p.repository_id::text,v.revision::text,v.envelope FROM cloud_workspace_environment_pins p
          JOIN cloud_v2_workspaces w ON w.id=p.workspace_id AND w.org_id=p.org_id AND w.creator_user_id=p.owner_user_id
@@ -188,7 +189,8 @@ export class CloudEnvironments {
         return { versionId: row.id, repositoryId: row.repository_id, ...openCloudEnvironment(row.envelope,
           { organizationId: workspace.organizationId, userId: workspace.creatorUserId, repositoryId: row.repository_id, versionId: row.id, revision: Number(row.revision) }, this.keys) };
       } catch { throw unreadable(); }
-    });
+    };
+    return transaction ? read(transaction) : withSystemTx(this.pool, read);
   }
 
   async report(token: string, bootId: string, raw: unknown): Promise<void> {
@@ -212,6 +214,7 @@ export class CloudEnvironments {
         await tx.query(`UPDATE cloud_v2_workspaces SET state='running',attempts=0,next_attempt_at=NULL,
           active_at=CASE WHEN state='running' THEN active_at ELSE clock_timestamp() END,
           updated_at=CASE WHEN state='running' THEN updated_at ELSE clock_timestamp() END WHERE id=$1`, [row.id]);
+        if (row.state !== "running") await notifyCloudV2WorkerReady(tx, row.id);
       } else {
         await tx.query(`UPDATE cloud_v2_workspaces SET state='failed',error_code=$2,access_epoch=access_epoch+1,worker_route_url=NULL,worker_port_token=NULL,
           attempts=0,next_attempt_at=NULL,updated_at=clock_timestamp() WHERE id=$1`, [row.id, report.errorCode]);

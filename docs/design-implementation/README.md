@@ -746,6 +746,157 @@ Each landed step appends one line: date, workstream, what landed, evidence.
   rename check failed on the old outlined field. The canvas smoke's
   geometry check caught the theme editor's Close sitting flush once its
   padding was trimmed, so the 12px padding stays.
+- 2026-11-05 · 5 · Web app (plans.md §8): sign-in is one page with Continue
+  with Google and Continue with GitHub, primary with their logos and stacked
+  at 260px. Each sends one exact `provider=google|github`, which the app's
+  `/auth/start` maps to `GoogleOAuth` or `GitHubOAuth`; the owner chose this
+  over the hosted chooser, and Ops, workspace pages and step-ups keep Hosted
+  AuthKit (`docs/workos-authentication-migration.md`). The centred page shell
+  (`apps/web/lib/page.ts`) now follows the canvas recipe, with the logo and
+  mark inline so it renders under every page's policy. The invitation and
+  workspace pages, which had their own shells, use it with their nonce, and
+  the control plane's sign-in completion, failure and cloud GitHub pages use
+  a verbatim copy allowed by a CSP hash. Every centred app page has its
+  frame's copy; the account states moved out of the dashboard layout onto
+  the shell with one primary and a copyable recovery code; an expired GitHub
+  handoff keeps Open Zeros without its nonce. The canvas (version 366) drops
+  the four frames for code removed with Auth0 and the badges of 25 built
+  frames. Left: the dashboard rebuild, Ops (its host allows no inline style)
+  and Open in Zeros on a cloud workspace.
+  Evidence: `node --test apps/web/lib/*.test.mjs` 138 tests; the full
+  control-plane suite (135 files, 1,846 tests; database files skipped here);
+  both typechecks; red first for the provider choice on both sides, the
+  shell's tokens against `styles/zeros-tokens.css`, the copy of each page and
+  the server's shell copy; local renders of all 19 page states in both themes.
+- 2026-11-05 · 5 · Web app (plans.md §8): the dashboard and Ops follow
+  their 25 frames. One set of markup builders in `public/dashboard.js` paints
+  the server's first frame and every re-render. The web lists cloud
+  organizations only, Personal being each device's local space; without one,
+  Profile is the only section and offers Create organization when allowed,
+  and an unreachable control plane keeps Profile with a retry. The switcher
+  shows your role, Members gains a More actions menu and Leave, and
+  recoverable organizations show by name (`GET /v1/deletions` returns
+  `targetName`). Ops' centred states use the shared shell with Ops beside the
+  logo; its console uses the dashboard layout, with Identity recovery as a
+  platform owner's own section. Each Ops page sends the host's policy plus
+  one nonce. `check:ui` now exempts the control plane's three hosted-page
+  files, which round 1 pushed without running it. The canvas (version 367)
+  drops the 25 frames' badges and adds the Identity recovery frame; only
+  Open in Zeros on a cloud workspace is left.
+  Evidence: `node --test apps/web/lib/*.test.mjs` 160 tests, with a builder
+  test per dashboard frame state and the Ops pages' policy, hooks and
+  escaping; red first for `targetName` in the deletion integration suite;
+  the full control-plane suite against a local Postgres, database files
+  included (198 files, 2,920 tests); both typechecks, lint, `check:ui` and
+  `check:secrets`. `pnpm test:git` caught `web-shell-tokens.test.ts`, which
+  round 1 broke and which now reads the exported tokens; its other failures
+  here come from this container (the Playwright browser build, injected
+  commit signing, the proxy and Git 2.43) and touch none of these files; local renders of the 18 dashboard and 8 Ops states in both
+  themes beside their frames, served under each page's real policy, plus the
+  member menu, switching, focus after navigation and the phone layout.
+- 2026-11-05 · 5 · Web app (plans.md §8): Open in Zeros on a cloud workspace.
+  The workspace page had been broken since cloud v1 was retired: it read the
+  removed `/v1/cloud-workspaces/<id>`, and its invite page posted to a removed
+  accept route. It now reads `GET /v1/cloud-v2/workspaces/<id>`, which answers
+  only the creator while they are a member and is the only cloud route the web
+  proxy admits. Its Ready state offers Open in Zeros through
+  `zeros[-channel]://cloud-workspace/<organization>/<workspace>`, with the
+  deployment's scheme (`packages/protocol/src/cloud-workspace-link.ts`; a root
+  test keeps the web's string equal to the desktop parser). Electron main
+  accepts the link for its own channel only and carries it on the Local links'
+  navigation intent, which opens a window and waits for the signed-in app.
+  The renderer reads the workspace as the signed-in account, switches to its
+  organization and opens it as the sidebar does; bridge changes never retire
+  that read. A cloud workspace's menu gains Copy link, which copies the page.
+  The invite route and its two frames are gone, the Ready frame and the route
+  map lose their badge (canvas version 368), and the route map is refitted to
+  its rows: round 2 had removed four without shrinking it. Nothing in §8 is
+  left.
+  Evidence: red first for the link format (20 tests), main's routing (14)
+  and the web page (5 of its 7 tests); the navigator (18), the subscription
+  and the bridge-free observer (3), and the navigator's mount (2, one
+  mutation-checked); Copy link (11, for the menu, the copy action and the page
+  URL); the parity test (5); `node --test apps/web/lib/*.test.mjs` 161 tests;
+  typecheck, lint, `check:ui`, `check:preload`, `check:deep-link-schemes`,
+  `check:protocol` and `check:secrets`; `pnpm test:git` with 22,619 tests
+  passing, where 164 of its 165 failures are round 2's environmental set (the
+  Playwright browser build, injected commit signing, Git 2.43 and the proxy)
+  and the other, the zstack pack's playbook budget, came from this round's
+  lesson and is folded back; local renders of the Ready,
+  Unavailable and Loading states in both themes under the page's real
+  headers. Not run here: link handling in the packaged macOS app (a cold
+  launch, and a launch with every window closed).
+- 2026-11-05 · 5 · Web app: the loaders. Round 1 took the Planned badge off
+  the workspace loading and GitHub checking frames on their copy alone; both
+  draw a 16px loader the pages never had, and round 2 drew the dashboard's
+  loader as a round ring. The shared shell now carries the app's square Orbit
+  (`shared/ui/loading/zeros-spinner.tsx`: a 1200ms lap over a `muted-fg`
+  track at 40%, resting under reduced motion) in an 18px row 24px below the
+  line, the control plane's copy follows it, and the dashboard draws the same
+  Orbit. The GitHub page hides it as soon as its script names the outcome.
+  Evidence: red first for the shell, both pages and the shared recipe;
+  `node --test apps/web/lib/*.test.mjs` 165 tests; the control plane's
+  shell-copy test; renders of both loading states and the dashboard's beside
+  their frames, in both themes.
+- 2026-11-05 · 5 · Changes, Files and Design (plans.md §3 to §7): hunk
+  review is gone, code included (`git.reviewHunks`, `git.reviewHunk`, their
+  decision store and schemas). Diff rows draw their + or − in the number's
+  padding with a solid 2px bar, a new file keeps its bars without the row
+  wash, and the caret line lifts by fg1 5%. Comment authors show a photo or
+  initials, an agent's mark with an Agent badge, or a review app's logo with
+  a Bot badge, in Local and cloud threads. Merge conflicts resolve in place:
+  three accept buttons above each block, one undoable edit per accept, a
+  navigator beside the file name, a Changes card that accepts only over the
+  exact text it shows, and Diff view waiting while Git lists the file as
+  conflicted; the Resolve panel and `git.resolveConflict` are gone. In
+  Design, a bound field shows the variable glyph and Detach variable, the
+  selection header names the layer, and each theme row has Rename… and
+  Delete with the reason when one waits. RevProviders is now a Reference:
+  GitLab and Bitbucket are not built now (owner). Canvas version 373: 22
+  Planned badges off, the frames corrected where the code differs, and
+  ThemeEditor's Row actions section; another writer's composer changes were
+  synced first and kept. Evidence: every registered Design smoke scenario
+  (27, 1,062 checks) and the style-refinements scenario again on the final
+  code; the conflict, editor-history, protocol and Changes-accept suites;
+  the Design workspace test folder (99 files) with the browser path set;
+  typecheck, lint (one earlier warning), check:ui, check:secrets and
+  check:protocol; plain local renders of every changed frame in both themes.
+  The full root suite (23,130 tests) failed 88: 87 fail the same way on main
+  in this container (Git signing, network, Git 2.43), and the token identity
+  test, which CI also caught, passes now that the palette reader parses
+  `hsl()` with an alpha. CI's composer smoke failed a File Edit check that
+  pinned CodeMirror's default 6px line padding; it now compares the indented
+  line with an unindented one, and still fails with the old
+  `padding-left: Nch` hack restored. CodeRabbit's review: a Changes card
+  accept no longer shares a file read that began before the click, conflict
+  cards offer no comment +, blocked theme-row items stay reachable by arrow
+  keys, the rename field composes the inline `Input`, and theme renames and
+  deletes stop before 256 operations; each has a test or smoke check.
+- 2026-11-06 · 5 · Review leftovers (plans.md §1), Local and cloud: Checks
+  marks the checks the base branch requires, lists required checks that
+  haven't reported in Expected, and Re-run failed restarts the head's failed
+  Actions runs, refused once the head moves; one run GitHub refuses doesn't
+  hide those that restarted. Turns record the commits their own shell tools
+  made once git finds them (engine migration v45, the worker's turn record),
+  and `turns.commits` names the chat behind each pull request commit: Commits
+  rows link to it beside the commit's combined check result, and Activity
+  names it and adds the head's check failures with View checks. The comment
+  box and a GitHub thread's reply row show the GitHub account that posts.
+  RevEmpty names another host and opens its page; a failed first read keeps
+  the known header rows above the banner's Retry. A Changes conflict card's
+  save refuses a file that changed since it showed (`expectedContent` on all
+  three write paths), and a refused Design colour write puts the canvas back.
+  Button gained a Link variant for actions inside a line of text. Canvas
+  version 381: the last 7 Planned badges off, and RevEmpty's load-failed
+  state shows the banner standard. Evidence: the touched suites in the
+  engine (db 186, workspace, git), cloud worker (262), control plane (1,875)
+  and renderer (workbench, platform, primitives with the browser path set);
+  the protocol parser test; the narrow typecheck plus the worker, protocol
+  and control-plane typechecks; lint (the one earlier warning), check:ui,
+  check:secrets, check:protocol and check:preload; the workbench-status,
+  code-review, cloud-github-pr and pr-actions smokes. Failures that remain
+  are this container's: Git commit signing, the Playwright build without the
+  browser path, and GitHub URL rewriting, each failing the same way on main.
 - 2026-11-05 · 2, 5 · Agent chat: the composer edge and the stack fade. The
   composer, Create, sent prompts, review drafts, every dock card and the
   docked @, / and # pickers take the new semantic `--composer-border`

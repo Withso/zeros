@@ -257,7 +257,7 @@ function makeOctokitMock() {
   return {
     octokit: fake,
     calls,
-    setUser(u: { login: string }) {
+    setUser(u: { login: string; avatar_url?: string | null }) {
       user = u;
     },
     setUserResponse(fn: (() => unknown) | null) {
@@ -595,6 +595,14 @@ describe("github", () => {
       const status = await getAuthStatus();
       expect(status.authenticated).toBe(true);
       expect(status.login).toBe("Acme");
+    });
+
+    it("returns the account's photo only when it is a plain https URL", async () => {
+      store.setToken("ghp_test_token");
+      mock.setUser({ login: "Acme", avatar_url: "https://avatars.githubusercontent.com/u/7" });
+      expect((await getAuthStatus()).avatarUrl).toBe("https://avatars.githubusercontent.com/u/7");
+      mock.setUser({ login: "Acme", avatar_url: "javascript:alert(1)" });
+      expect(await getAuthStatus()).not.toHaveProperty("avatarUrl");
     });
 
     it("clears the token on 401", async () => {

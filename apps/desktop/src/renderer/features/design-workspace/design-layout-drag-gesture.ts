@@ -1,5 +1,8 @@
 import type React from "react";
-import type { DesignRuntimeNodeDetails } from "@zeros/protocol/design-runtime";
+import type {
+  DesignRuntimeNodeDetails,
+  DesignRuntimeNodeGeometry,
+} from "@zeros/protocol/design-runtime";
 import type { DesignCanvasFrameWire } from "../../platform/git";
 import { designFrameRuntime } from "../../platform/bridge/design-frame-runtime";
 import {
@@ -22,6 +25,7 @@ import {
   DESIGN_MOVE_ACTIVATION_PIXELS,
   designSettledRelocation,
 } from "./design-movement-geometry";
+import { designTranslatedNodeGeometry } from "./design-canvas-math";
 import {
   captureDesignPageOwner,
   designWorkspaceView,
@@ -41,10 +45,10 @@ export function startDesignLayoutDrag(input: {
   details: DesignRuntimeNodeDetails;
   zoom: () => number;
   point?: (pointer: { clientX: number; clientY: number }) => { x: number; y: number };
+  /** Paint the selection where the layer is (a measurement) or where the
+   * pointer puts it (its measured shape, moved). */
   paint: (
-    details:
-      | DesignRuntimeNodeDetails
-      | { rect: DesignRuntimeNodeDetails["rect"] },
+    details: DesignRuntimeNodeDetails | DesignRuntimeNodeGeometry,
     parent?: DesignRuntimeNodeDetails,
   ) => void;
   finished: () => void;
@@ -183,6 +187,14 @@ export function startDesignLayoutDrag(input: {
   line.hidden = true;
   article.appendChild(line);
   const origin = () => ({ x: point.x - grab.x, y: point.y - grab.y });
+  const movedDetails = () => {
+    const moved = origin();
+    return designTranslatedNodeGeometry(
+      details,
+      moved.x - details.rect.x,
+      moved.y - details.rect.y,
+    );
+  };
   const paintLine = (drop: DesignLayoutDrop | null) => {
     const rect = drop?.indicator;
     line.hidden = !rect;
@@ -220,17 +232,19 @@ export function startDesignLayoutDrag(input: {
         { ...frame, sourceVersion: runtime.sourceVersion },
         details,
         article,
+        { selection: true },
       );
       presentation?.paint(origin());
-      input.paint({ rect: { ...details.rect, ...origin() } });
+      input.paint(movedDetails());
       // Outside its frame the layer can only be shown by its pixels. Capture
-      // them once, directly (background work is paused during a gesture),
-      // when none were cached for this generation.
-      if (presentation && !presentation.hasPixels && !capturing) {
+      // the layer alone, once and directly (background work is paused during
+      // a gesture), at the resolution it is drawn: a cached crop carries the
+      // frame behind it and was rendered for a smaller zoom.
+      if (presentation && !presentation.isolated && !capturing) {
         capturing = true;
-        const scale = Math.min(2, Math.max(1, input.zoom() * window.devicePixelRatio));
+        const scale = Math.min(4, Math.max(1, input.zoom() * window.devicePixelRatio));
         void runtime
-          .captureScreenshot(details.oid, scale, undefined, "explicit")
+          .captureScreenshot(details.oid, scale, undefined, "explicit", { isolate: true })
           .then((captured) => {
             if (stopped || !isCurrent()) return;
             presentation?.adopt(captured);
@@ -445,7 +459,7 @@ export function startDesignLayoutDrag(input: {
     const predicted = resolveDrop?.(point, origin());
     if (!targets || predicted === null || predicted?.styles.position === "absolute")
       input.paint(
-        { rect: { ...details.rect, ...origin() } },
+        movedDetails(),
         predicted ? targets?.find((target) => target.oid === predicted.parentId) : undefined,
       );
     // The external visual follows every pointer, even while the source port
@@ -556,7 +570,7 @@ export function startDesignLayoutDrag(input: {
         );
         if (duplicateNodeId) await runtime.clearPreviewStructure?.(transactionId).catch(() => {});
         if (!transferred) await restore();
-        else presentation?.remove();
+        else presentation?.remove({ transferred: true });
         return;
       }
       if (

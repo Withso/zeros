@@ -148,6 +148,13 @@ export const CloudGithubPrRequestSchema = z.discriminatedUnion("op", [
     .strict(),
   z
     .object({
+      op: z.literal("gh.prRerunFailed"),
+      expected: CloudGithubPrAuthoritySchema,
+      params: z.object({ prNumber: number, ...revision }).strict(),
+    })
+    .strict(),
+  z
+    .object({
       op: z.literal("gh.prMerge"),
       expected: CloudGithubPrAuthoritySchema,
       params: z
@@ -219,6 +226,7 @@ export const CLOUD_GITHUB_PR_WRITES: ReadonlySet<string> = new Set([
   "gh.prMarkReady",
   "gh.prMerge",
   "gh.prComment",
+  "gh.prRerunFailed",
 ]);
 export const CLOUD_GITHUB_PR_OPERATIONS: ReadonlySet<string> = new Set([
   "gh.authStatus",

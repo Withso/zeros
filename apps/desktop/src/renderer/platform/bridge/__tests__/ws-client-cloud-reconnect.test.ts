@@ -52,6 +52,111 @@ function fixture(local = false) {
   return { client, sockets, refresh, ready, offers, target, environment };
 }
 
+it("retains connecting when an unopened cloud ticket expires during the same bounded wait", async () => {
+  const h = fixture(), states: string[] = [];
+  h.client.onStatusChange(status => states.push(status));
+  await h.client.connect();
+  const failed = vi.fn(), waiting = h.client.waitUntilReady().catch(failed);
+  await vi.advanceTimersByTimeAsync(60_000);
+  expect(h.client.status).toBe("connecting");
+  expect(states).not.toContain("disconnected");
+  await vi.advanceTimersByTimeAsync(1_000);
+  expect(h.refresh).toHaveBeenCalledOnce();
+  await h.ready(h.sockets[1]); await waiting;
+  expect(failed).not.toHaveBeenCalled();
+});
+
+it("retains connecting through a transient cloud socket construction failure", async () => {
+  const h = fixture(), states: string[] = [];
+  h.client.onStatusChange(status => states.push(status));
+  vi.spyOn(h.environment, "createWebSocket").mockImplementationOnce(() => { throw new Error("Transport unavailable"); });
+  await h.client.connect();
+  expect(h.client.status).toBe("connecting");
+  expect(states).not.toContain("disconnected");
+  const failed = vi.fn(), waiting = h.client.waitUntilReady().catch(failed);
+  await vi.advanceTimersByTimeAsync(1_000);
+  await h.ready(h.sockets[0]); await waiting;
+  expect(failed).not.toHaveBeenCalled();
+});
+
+it("keeps a foreground read queued through the committed handoff window and completes it after the same handshake", async () => {
+  const h = fixture(); await h.client.connect(); h.sockets[0].open();
+  let failed: unknown;
+  const connected = h.client.waitUntilReady().catch(error => { failed = error; });
+  const reading = h.client.request({ type: "WORKSPACE_REQUEST", op: "file.read", params: { path: "retained.txt" } }, 1000)
+    .catch(error => { failed = error; });
+  await vi.advanceTimersByTimeAsync(11_000);
+  expect(h.sockets).toHaveLength(1); expect(h.sockets[0].readyState).toBe(1); expect(failed).toBeUndefined();
+  await vi.advanceTimersByTimeAsync(108_000);
+  expect(h.client.status).toBe("connecting"); expect(failed).toBeUndefined();
+  h.sockets[0].answer(h.sockets[0].sent.find(frame => frame.op === "workspace.list")!);
+  await vi.advanceTimersByTimeAsync(0); await connected;
+  expect(h.client.status).toBe("connected");
+  const request = h.sockets[0].sent.find(frame => frame.op === "file.read"); expect(request).toBeDefined();
+  h.sockets[0].answer(request!);
+  expect(await reading).toMatchObject({ type: "WORKSPACE_RESPONSE", op: "file.read" });
+  expect(failed).toBeUndefined(); expect(h.refresh).not.toHaveBeenCalled();
+});
+
+it("bounds a handoff handshake that never becomes ready", async () => {
+  const h = fixture(); await h.client.connect(); h.sockets[0].open();
+  let failed: unknown;
+  const connected = h.client.waitUntilReady().catch(error => { failed = error; });
+  await vi.advanceTimersByTimeAsync(119_999);
+  expect(failed).toBeUndefined(); expect(h.sockets[0].readyState).toBe(1);
+  await vi.advanceTimersByTimeAsync(1); await connected;
+  expect(failed).toBeInstanceOf(Error); expect(h.sockets[0].readyState).toBe(3);
+});
+
+it("does not renew the cloud connection deadline after a transient reconnect", async () => {
+  const h = fixture(); await h.client.connect(); h.sockets[0].open();
+  const failure = vi.fn();
+  const waiting = h.client.waitUntilReady().catch(failure);
+  await vi.advanceTimersByTimeAsync(90_000);
+  h.sockets[0].close(1013);
+  await vi.advanceTimersByTimeAsync(1_000);
+  expect(h.sockets).toHaveLength(2); h.sockets[1].open();
+  await vi.advanceTimersByTimeAsync(28_999);
+  expect(failure).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(1); await waiting;
+  expect(failure).toHaveBeenCalledOnce();
+  expect(h.client.lastRejection?.code).toBe("cloud_actor_runtime_unavailable");
+  expect(h.sockets[1].readyState).toBe(3);
+  await vi.advanceTimersByTimeAsync(120_000);
+  expect(h.sockets).toHaveLength(2);
+});
+
+it.each([4001, 4003])("ends a definitive cloud refusal immediately (close %s)", async code => {
+  const h = fixture(); await h.client.connect(); h.sockets[0].open();
+  const connectFailure = vi.fn(), readFailure = vi.fn();
+  const waiting = h.client.waitUntilReady().catch(connectFailure);
+  const reading = h.client.request({ type: "WORKSPACE_REQUEST", op: "file.read", params: { path: "retained.txt" } }).catch(readFailure);
+  h.sockets[0].close(code); await vi.advanceTimersByTimeAsync(0);
+  expect(connectFailure).toHaveBeenCalledOnce(); expect(readFailure).toHaveBeenCalledOnce();
+  await waiting; await reading;
+  await vi.advanceTimersByTimeAsync(120_000);
+  expect(h.sockets).toHaveLength(1); expect(h.refresh).not.toHaveBeenCalled();
+  await expect(h.client.request({ type: "WORKSPACE_REQUEST", op: "workspace.list" })).rejects.toThrow();
+});
+
+it.each([400, 401, 403, 404, 408, 409, 429])("does not retry a definitive ticket HTTP %s refusal", async status => {
+  const h = fixture(); await h.client.connect(); await h.ready(h.sockets[0]);
+  h.refresh.mockRejectedValue({ status, code: status === 409 ? "cloud_workspace_not_running" : "request_failed" });
+  h.sockets[0].close(1006);
+  const failure = vi.fn(); const waiting = h.client.waitUntilReady().catch(failure);
+  await vi.advanceTimersByTimeAsync(0);
+  expect(failure).toHaveBeenCalledOnce(); await waiting;
+  await vi.advanceTimersByTimeAsync(120_000);
+  expect(h.refresh).toHaveBeenCalledOnce(); expect(h.sockets).toHaveLength(1);
+});
+
+it.each(["Personal", "organization-local"])("retains the 30 second Local readiness bound for %s", async () => {
+  const h = fixture(true), failure = vi.fn();
+  const waiting = h.client.waitUntilReady().catch(failure);
+  await vi.advanceTimersByTimeAsync(29_999); expect(failure).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(1); await waiting; expect(failure).toHaveBeenCalledOnce();
+});
+
 it.each([true, false])("rejects stopped-worker admission and queued writes promptly (handshake completed: %s)", async ready => {
   const h = fixture(); await h.client.connect();
   if (ready) await h.ready(h.sockets[0]);

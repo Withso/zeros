@@ -45,6 +45,10 @@ suite("Settings changes reach connected cloud workers", () => {
         fetch: async () => Response.json({ id: 42, name: "project", owner: { login: "example" }, default_branch: "main", private: true,
           archived: false, permissions: { pull: true, push: true } }) }),
     });
+    vi.spyOn(CloudGithubConnections.prototype, "workerProfile").mockImplementation(async (credential, assertCurrent) => {
+      await assertCurrent();
+      return credential.identity;
+    });
     await resetMigratedTestDatabase(pool);
     owner = await seedCredentialOwner(pool);
     const service = new DatabaseCloudAgentCredentialService(pool, { currentKeyVersion: 1, keys: { 1: key } });
@@ -57,9 +61,14 @@ suite("Settings changes reach connected cloud workers", () => {
       workerSigningKey: generateKeyPairSync("ed25519").privateKey.export({ type: "pkcs8", format: "der" }).toString("base64"),
       runtime: { sha256: "b".repeat(64), store: { endpoint: "https://storage.example.test", bucket: "test", accessKeyId: "fixture", secretAccessKey: "fixture" } },
     } } as Config, pool, { relay: true, lifecycle: false }, undefined, listener)!;
+    const scope = { organizationId: owner.organizationId, userId: owner.userId }, github = runtime.routes.githubConnections!;
+    await github.store.save(scope, await github.store.fingerprint(scope), { id: "1", login: "fixture" },
+      { method: "pat", accessToken: "synthetic-github-token", expiresAt: null });
+    await pool.query(`INSERT INTO cloud_github_source_verifications(org_id,owner_user_id,repository_id,fingerprint,verified_at,canonical_repository)
+      VALUES($1,$2,42,$3,clock_timestamp(),'example/project')`, [owner.organizationId, owner.userId, await github.store.fingerprint(scope)]);
     await runtime.loginChanges?.start();
     const workspace = await runtime.store.createWorkspace({ id: randomUUID(), creatorUserId: owner.userId, organizationId: owner.organizationId,
-      repository: "example/project", branch: "zeros/test", baseBranch: "main", name: "Test", computerBuildId: null });
+      repository: "example/project", sourceRepositoryId: "42", branch: "zeros/test", baseBranch: "main", name: "Test", computerBuildId: null });
     workspaceId = workspace.id;
     const workerToken = await runtime.store.rotateWorkerToken(workspace.id);
     workerServer = new WebSocketServer({ port: 0, host: "127.0.0.1", handleProtocols: () => "zeros.cloud.v2.worker" });

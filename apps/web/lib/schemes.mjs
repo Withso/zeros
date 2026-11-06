@@ -52,3 +52,13 @@ export function schemeForDeploymentEnvironment(environment, requestedScheme) {
   }
   return DEPLOYMENT_SCHEMES[environment];
 }
+
+/** This deployment's app link, for an Open Zeros that carries no callback (an
+ * expired or incomplete handoff). An unknown environment opens the packaged app. */
+export function deploymentAppLink(environment) {
+  try {
+    return `${schemeForDeploymentEnvironment(environment)}://`;
+  } catch {
+    return `${DEFAULT_SCHEME}://`;
+  }
+}

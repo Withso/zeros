@@ -1,12 +1,13 @@
 import type pg from "pg";
 import { createHash } from "node:crypto";
-import { withSystemTx, type Tx } from "../db.js";
+import { withSystemStatement, withSystemTx, type Tx } from "../db.js";
+import { sql, SqlFragment } from "../sql-fragment.js";
 import type { AuthedUser } from "../auth.js";
 import { securityStreamAuthority } from "../security-events.js";
 import { HttpError } from "../authz.js";
 import type { CloudV2HistoryState, CloudV2MessageRow } from "./contract.js";
 import { hashCloudV2Token, newCloudV2Token } from "./tokens.js";
-import { CLOUD_V2_CREATOR_ON_HOLD, CLOUD_V2_LIVE_ACCESS as LIVE_ACCESS } from "./workspace-access.js";
+import { CLOUD_V2_CREATOR_ON_HOLD, CLOUD_V2_LIVE_ACCESS as LIVE_ACCESS, CLOUD_V2_LIVE_ACCESS_SQL } from "./workspace-access.js";
 import { memberOnHoldSql, organizationMemberOnHold } from "../organization-seats.js";
 import { CloudV2PromptOutbox } from "./prompt-outbox.js";
 import { computerSourceReviewRequired, readComputerSourceTargets } from "./computer-provenance.js";
@@ -19,6 +20,8 @@ import { mirrorMessageSearch, type SearchOptions } from "./history-search.js";
 import { MESSAGE_SEARCH_DEADLINE_MS } from "./message-search.js";
 import { consumeRuntimeCanary } from "./runtime-canary-store.js";
 import type { RuntimeCanaryAdmission } from "./runtime-canary.js";
+import { RUNTIME_HANDOFF_SESSION } from "./runtime-handoff-store.js";
+import { notifyCloudV2WorkerReady } from "./worker-ready.js";
 
 export type CloudV2WorkspaceState =
   | "creating" | "running" | "stopping" | "stopped" | "starting" | "deleting" | "deleted" | "failed";
@@ -105,8 +108,9 @@ type Row = {
   error_code: string | null; active_at: Date | null; archived_at: Date | null; created_at: Date; updated_at: Date;
 };
 
-const COLUMNS = `id, org_id, creator_user_id, name, repository, branch, base_branch, state, boat_sandbox_id,
+const WORKSPACE_COLUMNS_SQL = sql`id, org_id, creator_user_id, name, repository, branch, base_branch, state, boat_sandbox_id,
   computer_build_id, error_code, active_at, archived_at, created_at, updated_at`;
+const COLUMNS = WORKSPACE_COLUMNS_SQL.text;
 
 type LifecycleRow = Row & {
   lease_renewed_at: Date | null; base_commit: string | null; restore_pending: boolean; restore_attempt: string | null;
@@ -201,9 +205,9 @@ const notFound = () => new HttpError(404, "not_found", "Cloud workspace not foun
 
 /** v2 is creator-only: the caller must have created the workspace and still
  * belong to its organization. Anyone else sees the same 404. */
-async function ownedRow(tx: Tx, id: string, userId: string, lock = false): Promise<Row> {
-  const { rows } = await tx.query<Row>(
-    `SELECT ${COLUMNS} FROM cloud_v2_workspaces w
+async function ownedRow(tx: Tx, id: string, userId: string, lock = false): Promise<Row & { access_epoch: string; login_revision: string }> {
+  const { rows } = await tx.query<Row & { access_epoch: string; login_revision: string }>(
+    `SELECT ${COLUMNS}, access_epoch::text, login_revision::text FROM cloud_v2_workspaces w
      WHERE w.id = $1 AND w.creator_user_id = $2 AND w.state <> 'deleted'
        AND ${LIVE_ACCESS}
      ${lock ? "FOR UPDATE OF w" : ""}`,
@@ -298,6 +302,15 @@ export class CloudV2Store {
 
   async get(id: string, userId: string): Promise<CloudV2Workspace> {
     return workspace(await withSystemTx(this.pool, tx => ownedRow(tx, id, userId)));
+  }
+
+  async promptContext(id: string, userId: string) {
+    const { rows } = await withSystemStatement<Row & { access_epoch: string; login_revision: string }>(this.pool,
+      sql`SELECT ${WORKSPACE_COLUMNS_SQL}, access_epoch::text, login_revision::text FROM cloud_v2_workspaces w
+        WHERE w.id=${SqlFragment.uuid(id.toLowerCase())} AND w.creator_user_id=${SqlFragment.uuid(userId.toLowerCase())}
+          AND w.state<>'deleted' AND ${CLOUD_V2_LIVE_ACCESS_SQL}`);
+    const row = rows[0] ?? await withSystemTx(this.pool, tx => ownedRow(tx, id, userId));
+    return { workspace: workspace(row), proof: { accessEpoch: row.access_epoch, loginRevision: row.login_revision } };
   }
 
   async list(organizationId: string, userId: string): Promise<CloudV2Workspace[]> {
@@ -466,7 +479,8 @@ export class CloudV2Store {
   }
 
   async acceptWorkerHello(token: string, bootId: string, proof?: { accessEpoch: string; loginRevision: string }): Promise<CloudV2WorkerSession | null> {
-    const { rows } = await withSystemTx(this.pool, tx => tx.query<Row & { access_epoch: string; login_revision: string; prior_state: "creating" | "starting" | "running"; hello_ms: number }>(
+    const { rows } = await withSystemTx(this.pool, async tx => {
+      const result = await tx.query<Row & { access_epoch: string; login_revision: string; prior_state: "creating" | "starting" | "running"; hello_ms: number }>(
       `WITH prior AS MATERIALIZED (
          SELECT id AS prior_id, state AS prior_state, updated_at AS prior_updated_at,
            NOT EXISTS (SELECT 1 FROM cloud_workspace_environment_pins p WHERE p.workspace_id=w.id
@@ -483,17 +497,27 @@ export class CloudV2Store {
        FROM prior WHERE w.id=prior.prior_id
        RETURNING ${COLUMNS.replace(/\b(\w+)\b/g, "w.$1")}, access_epoch::text, login_revision::text, prior.prior_state,
          greatest(0, extract(epoch FROM (clock_timestamp()-prior.prior_updated_at))*1000)::float8 AS hello_ms`,
-      [hashCloudV2Token(token), bootId, proof?.accessEpoch ?? null, proof?.loginRevision ?? null]));
+      [hashCloudV2Token(token), bootId, proof?.accessEpoch ?? null, proof?.loginRevision ?? null]);
+      const ready = result.rows[0];
+      if (ready?.state === "running" && ready.prior_state !== "running") await notifyCloudV2WorkerReady(tx, ready.id);
+      return result;
+    });
     const row = rows[0];
     return row ? { ...workspace(row), accessEpoch: row.access_epoch, loginRevision: row.login_revision,
       ...(row.prior_state === "running" || row.state !== "running" ? {} : { helloTiming: { state: row.prior_state, durationMs: Math.round(row.hello_ms) } }) } : null;
   }
 
-  async workerSession(token: string, bootId: string): Promise<CloudV2WorkerSession | null> {
-    const { rows } = await withSystemTx(this.pool, tx => tx.query<Row & { access_epoch: string; login_revision: string }>(
+  async workerSession(token: string, bootId: string, handoff?: { id: string; sha256?: string }): Promise<CloudV2WorkerSession | null> {
+    const { rows } = handoff ? await withSystemTx(this.pool, tx => tx.query<Row & { access_epoch: string; login_revision: string }>(
       `SELECT ${COLUMNS}, access_epoch::text, login_revision::text FROM cloud_v2_workspaces w
-       WHERE worker_token_hash=$1 AND worker_boot_id=$2 AND state NOT IN ('deleting','deleted') AND ${LIVE_ACCESS}`,
-      [hashCloudV2Token(token), bootId]));
+       WHERE worker_token_hash=$1 AND ${RUNTIME_HANDOFF_SESSION}
+       AND state NOT IN ('deleting','deleted') AND ${LIVE_ACCESS}`,
+      [hashCloudV2Token(token), bootId, handoff.id, handoff.sha256 ?? null]))
+      : await withSystemStatement<Row & { access_epoch: string; login_revision: string }>(this.pool,
+        sql`SELECT ${WORKSPACE_COLUMNS_SQL}, access_epoch::text, login_revision::text FROM cloud_v2_workspaces w
+          WHERE worker_token_hash=decode(${SqlFragment.text(hashCloudV2Token(token).toString("hex"), /^[0-9a-f]{64}$/)}, 'hex')
+            AND worker_boot_id=${SqlFragment.uuid(bootId.toLowerCase())}
+            AND state NOT IN ('deleting','deleted') AND ${CLOUD_V2_LIVE_ACCESS_SQL}`);
     const row = rows[0];
     return row ? { ...workspace(row), accessEpoch: row.access_epoch, loginRevision: row.login_revision } : null;
   }
@@ -672,9 +696,10 @@ export class CloudV2Store {
 
   /** Offered during initial configuration and retries until a checkpoint
    * confirms that the workspace branch already exists. */
-  async baseCommit(id: string): Promise<string | null> {
-    const { rows } = await withSystemTx(this.pool, tx => tx.query<{ base_commit: string | null }>(
-      `SELECT base_commit FROM cloud_v2_workspaces WHERE id=$1 AND state IN ('creating','starting','running') AND checkpoint_object IS NULL`, [id]));
+  async baseCommit(id: string, transaction?: Tx): Promise<string | null> {
+    const query = (tx: Tx) => tx.query<{ base_commit: string | null }>(
+      `SELECT base_commit FROM cloud_v2_workspaces WHERE id=$1 AND state IN ('creating','starting','running') AND checkpoint_object IS NULL`, [id]);
+    const { rows } = await (transaction ? query(transaction) : withSystemTx(this.pool, query));
     return rows[0]?.base_commit ?? null;
   }
 

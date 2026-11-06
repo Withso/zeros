@@ -13,13 +13,14 @@ import { CloudGithubPrService } from "./github-pr-service.js";
 import { CloudGithubActions } from "./github-actions.js";
 import { createSelectedCloudGithubTokens } from "./github-selected-tokens.js";
 import type { CloudV2Store, CloudV2Workspace } from "./store.js";
-import type { CloudGithubWorkspaceDocument } from "./routes.js";
-import type { CloudGithubUnavailableReason } from "./github-connection-contract.js";
 import type { CloudV2ComputerSourceResolver } from "./computer-provenance.js";
 import type { CloudV2Computers } from "./computer.js";
 import { z } from "zod";
-import { cloudGithubUnavailableReason as unavailableReason } from "./github-failure.js";
 import { setupSelectionUnavailable, workspaceSetupBuild } from "./setup-selection.js";
+import { withSystemTx } from "../db.js";
+import { cloudGithubRequestContext } from "./github-request-context.js";
+import { createCloudGithubWorkerConfig } from "./github-worker-config.js";
+import { createCloudGithubCatalog } from "./github-catalog.js";
 
 export function createCloudGithubServices(
   pool: pg.Pool,
@@ -143,21 +144,24 @@ export function createCloudGithubServices(
       );
     return { ...value, repositoryId: primary.repositoryId };
   };
+  const open = cloudGithubRequestContext({ pool, connections, metadata, actions, verifications,
+    authorize: async (id, userId) => authorizeSource(await workspaces.get(id, userId)), fetch: fetchImpl });
   const service = new CloudGithubPrService({
-    context,
-    access: (value) =>
-      connections.access({
-        organizationId: value.organizationId,
-        userId: value.creatorUserId,
-      }),
+    open,
     repository: async (value, identity, access) => {
-      await access.assertCurrent();
-      await metadata.repository(value, identity);
-      await access.assertCurrent();
+      if (value.repositoryBound && value.repositoryId === identity.repositoryId && value.repository === identity.repository) return;
+      await withSystemTx(pool, async tx => {
+        await access.assertCurrent(tx);
+        await metadata.repository(value, identity, undefined, tx);
+        await access.assertCurrent(tx);
+      });
     },
     recordPr: async (value, pr, access) => {
-      await access.assertCurrent();
-      await metadata.recordPr(value, pr, access.generation);
+      await withSystemTx(pool, async tx => {
+        await access.assertCurrent(tx);
+        await metadata.recordPr(value, pr, access.generation, tx);
+        await access.assertCurrent(tx);
+      });
       await access.assertCurrent();
     },
     mutate: async (id, userId, action) => {
@@ -165,60 +169,9 @@ export function createCloudGithubServices(
       return actions.run(id, action);
     },
   });
-  const documents = async (
-    rows: readonly CloudV2Workspace[],
-  ): Promise<CloudGithubWorkspaceDocument[]> => {
-    // Metadata is safe to retain for its owner. Published PR state/capabilities
-    // are released only after the entire original source scope is authorized.
-    const allowed = new Map<string, string>();
-    const unavailable = new Map<string, CloudGithubUnavailableReason>();
-    await Promise.all(
-      rows.map(async (row) => {
-        const scope = {
-          organizationId: row.organizationId,
-          userId: row.creatorUserId,
-        };
-        try {
-          const generation = await connections.fingerprintFor(scope);
-          if (row.state === "running") await continueSource(row);
-          else await authorizeSource(row);
-          await connections.store.assertCurrent(scope, generation);
-          allowed.set(row.id, generation);
-        } catch (error) {
-          unavailable.set(row.id, unavailableReason(error));
-        }
-      }),
-    );
-    const enriched = new Map(
-      (await metadata.documents(rows, allowed)).map((row) => [row.id, row]),
-    );
-    return Promise.all(
-      rows.map(async (row) => {
-        const generation = allowed.get(row.id);
-        if (generation)
-          try {
-            await connections.store.assertCurrent(
-              { organizationId: row.organizationId, userId: row.creatorUserId },
-              generation,
-            );
-            return enriched.get(row.id) ?? row;
-          } catch (error) {
-            unavailable.set(row.id, unavailableReason(error));
-          }
-        // Keep recovery controls visible, but never publish upstream text or
-        // protected PR metadata when source or connection authority is absent.
-        // Withdrawing access must not roll the catalog's version back to the
-        // older lifecycle timestamp: clients would correctly reject it as stale
-        // and retain the protected PR view. Only the timestamp survives here.
-        return {
-          ...row,
-          updatedAt: enriched.get(row.id)?.updatedAt ?? row.updatedAt,
-          githubUnavailableReason: unavailable.get(row.id) ?? "unavailable",
-        };
-      }),
-    );
-  };
-  const binding = async (workspace: CloudV2Workspace, mode: "admission" | "continuation" = "admission") => {
+  const documents = createCloudGithubCatalog({ pool, connections: connections.store, metadata, verifications,
+    authorizeSource, continueSource, retireRevoked });
+  const binding = async (workspace: CloudV2Workspace, mode: "admission" | "continuation" = "admission", pending?: ReturnType<CloudGithubConnections["access"]>) => {
     const target = await identities.primary(workspace);
     if (mode === "continuation") {
       // Configuration refresh must still apply provider removals during an
@@ -233,10 +186,10 @@ export function createCloudGithubServices(
       if (saved.repositoryId) return { repositoryId: saved.repositoryId, repository: saved.repository,
         previousRepositories: await metadata.aliases(workspace) };
     }
-    const grant = await connections.access({
+    const grant = await (pending ?? connections.access({
         organizationId: workspace.organizationId,
         userId: workspace.creatorUserId,
-      });
+      }));
     const identity = await grant.api.repository(target),
       previousRepositories = await metadata.aliases(workspace);
     await grant.assertCurrent();
@@ -251,12 +204,24 @@ export function createCloudGithubServices(
       previousRepositories,
     };
   };
+  const workerIdentity = async (workspace: CloudV2Workspace, mode: "admission" | "continuation") => {
+    const scope = { organizationId: workspace.organizationId, userId: workspace.creatorUserId };
+    const access = connections.access(scope);
+    const [repositoryBinding, gitIdentity] = await Promise.all([binding(workspace, mode, access), connections.gitIdentity(scope, access)]);
+    return { repositoryBinding, gitIdentity };
+  };
+  const workerConfiguration = createCloudGithubWorkerConfig({ pool, connections, metadata, authorizeSource, continueSource, binding, retireRevoked });
   const workspaceToken = async (
     workspace: CloudV2Workspace,
     access: "read" | "write" | "user" = "read",
     purpose: "git" | "gh" = "git",
     failedTokenSha256?: string,
   ) => {
+    if (!failedTokenSha256) {
+      const { context: value, access: grant } = await open(workspace.id, workspace.creatorUserId, { checkout: false });
+      return token({ organizationId: value.organizationId, userId: value.creatorUserId },
+        { repository: value.repository, repositoryId: value.repositoryId }, access, purpose, () => grant.assertCurrent(), undefined, grant);
+    }
     await authorizeSource(workspace);
     return token(
       {
@@ -305,6 +270,8 @@ export function createCloudGithubServices(
     authorizeSource,
     continueSource,
     binding,
+    workerIdentity,
+    workerConfiguration,
     token,
     workspaceToken,
     resolveRepository,

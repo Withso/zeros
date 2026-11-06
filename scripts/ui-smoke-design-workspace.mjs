@@ -1030,7 +1030,7 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
   const pageSelectionPoint = await designCanvasPoint(page, { empty: true });
   await page.mouse.click(pageSelectionPoint.x, pageSelectionPoint.y);
   await waitFor(
-    async () => (await inspectorHeader.textContent())?.trim() === "Page",
+    async () => (await inspectorHeader.getAttribute("data-design-selection-type")) === "Page",
     "design-page-background-selection",
   );
   const pageBackgroundEditor = inspector.locator(
@@ -1069,7 +1069,7 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
   await page.keyboard.press("Escape");
   await layersPanel.locator('[data-design-layer-id="home-heading"]').click();
   await waitFor(
-    async () => (await inspectorHeader.textContent())?.trim() === "Text",
+    async () => (await inspectorHeader.getAttribute("data-design-selection-type")) === "Text",
     "design-page-background-return-to-layer",
   );
   check(
@@ -1141,7 +1141,7 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
   check(
     "CSS mode keeps the Style and selection rows above one-line computed declarations",
     (await stylePanelHeader.isVisible()) &&
-      (await inspectorHeader.textContent())?.trim() === "Text" &&
+      (await inspectorHeader.getAttribute("data-design-selection-type")) === "Text" &&
       (await computedCssEditor.isVisible()) &&
       (await computedCssLines.count()) > 0 &&
       (await computedCssLines.allTextContents()).every(
@@ -1241,7 +1241,7 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
   await homeFrameRow.click();
   const frameStyleReady = await waitFor(
     async () =>
-      (await inspectorHeader.textContent())?.trim() === "Frame" &&
+      (await inspectorHeader.getAttribute("data-design-selection-type")) === "Frame" &&
       (await inspector.locator("[data-design-style-editor]").isVisible()) &&
       (await inspector.getByLabel("Opacity", { exact: true }).count()) === 1,
     "design-frame-complete-style-editor",
@@ -1334,13 +1334,15 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
   await layersPanel.locator('[data-design-layer-id="home-heading"]').click();
   await waitFor(
     async () =>
-      (await inspectorHeader.textContent())?.trim() === "Text" &&
+      (await inspectorHeader.getAttribute("data-design-selection-type")) === "Text" &&
       (await inspector.locator("[data-design-style-editor]").isVisible()),
     "design-heading-style-editor-restored",
   );
   check(
     "design inspector shows one name row without tags, metadata, or frame actions",
-    (await inspectorHeader.textContent())?.trim() === "Text" &&
+    (await inspectorHeader.getAttribute("data-design-selection-type")) === "Text" &&
+      // The row names the layer itself, not just its type.
+      ((await inspectorHeader.textContent()) ?? "").includes("Make the next move unmistakable.") &&
       (await inspectorHeader.evaluate(
         (header) => header.parentElement?.children.length,
       )) === 1 &&
@@ -1962,6 +1964,7 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
       return Math.abs(handleCenter - bandCenter) < 1;
     }),
   );
+  // The white edge is an inset shadow, so it stays one screen pixel at any zoom.
   check(
     "padding uses blue and gap uses pink with white line borders",
     (await inlinePaddingLeft
@@ -1970,7 +1973,8 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
         const style = getComputedStyle(line);
         return (
           style.backgroundColor === "rgb(12, 140, 233)" &&
-          style.borderColor === "rgb(255, 255, 255)"
+          style.boxShadow.includes("rgb(255, 255, 255)") &&
+          style.boxShadow.includes("inset")
         );
       })) &&
       (await inlineGapHandle
@@ -1980,7 +1984,8 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
           const style = getComputedStyle(line);
           return (
             style.backgroundColor === "rgb(245, 49, 179)" &&
-            style.borderColor === "rgb(255, 255, 255)"
+            style.boxShadow.includes("rgb(255, 255, 255)") &&
+            style.boxShadow.includes("inset")
           );
         })),
   );
@@ -4300,8 +4305,9 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
   check(
     "text edit mode replaces transform handles with one clean editing boundary",
     await waitFor(async () => {
-      const outline = await inlineText.evaluate(
-        (editor) => getComputedStyle(editor).outlineColor,
+      // The boundary is a shadow: an outline's width rounds up before zoom.
+      const boundary = await inlineText.evaluate(
+        (editor) => getComputedStyle(editor).boxShadow,
       );
       const runtimePaint = await runtimeHeading.evaluate((heading) => ({
         color: getComputedStyle(heading).color,
@@ -4310,7 +4316,7 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
       return (
         (await homeFrame.locator(".zd-design-selection-handle").count()) ===
           0 &&
-        outline === "rgb(12, 140, 233)" &&
+        boundary.includes("rgb(12, 140, 233)") &&
         runtimePaint.color !== "rgba(0, 0, 0, 0)" &&
         runtimePaint.fill === "rgba(0, 0, 0, 0)"
       );

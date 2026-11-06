@@ -43,6 +43,10 @@ const threadSchema = z.object({
 type Thread = z.infer<typeof threadSchema>;
 const threadPageSchema = z.object({
   data: z.object({
+    viewer: z
+      .object({ login: z.string().min(1).max(100), avatarUrl: z.string().max(2048) })
+      .nullable()
+      .optional(),
     node: z
       .object({
         id: nodeId,
@@ -57,6 +61,7 @@ const threadPageSchema = z.object({
   }),
 });
 const threadsQuery = `query($id:ID!,$after:String) {
+  viewer { login avatarUrl }
   node(id:$id) { ... on PullRequest { id headRefOid baseRefOid
     reviewThreads(first:50,after:$after) { pageInfo { hasNextPage endCursor } nodes {
       id path diffSide startLine line originalStartLine originalLine isResolved isOutdated viewerCanResolve viewerCanUnresolve
@@ -202,7 +207,8 @@ export class CloudGithubReviewApi {
     const threads: ReturnType<typeof projectThread>[] = [];
     let after: string | null = null,
       threadsTruncated = false,
-      bytes = 0;
+      bytes = 0,
+      viewer: { login: string; avatarUrl: string | null } | null = null;
     for (let page = 0; page < 10; page++) {
       const result: z.infer<typeof threadPageSchema> = await this.api.http.json(
         "/graphql",
@@ -214,6 +220,9 @@ export class CloudGithubReviewApi {
       );
       const pr = result.data.node;
       if (!pr || pr.id !== pull.node_id) throw identityChanged();
+      // The account a reply posts as, for the avatar beside the reply field.
+      if (page === 0 && result.data.viewer)
+        viewer = { login: result.data.viewer.login, avatarUrl: safeUrl(result.data.viewer.avatarUrl) };
       if (
         pr.headRefOid !== revision.headSha ||
         pr.baseRefOid !== revision.baseSha
@@ -248,6 +257,7 @@ export class CloudGithubReviewApi {
       annotations: [] as Annotation[],
       annotationsTruncated: false,
       annotationError: null as string | null,
+      viewer,
     };
     const path = `/repositories/${repo.repositoryId}`;
     try {

@@ -57,6 +57,7 @@ import {
   readFile,
   readFileRange,
   readImageThumbnail,
+  writeFile,
   type ReadFileResult,
   type ReadImageThumbnailResult,
 } from "../files";
@@ -107,6 +108,33 @@ function rotatedJpegFixture(width: number, height: number): Buffer {
   sof.writeUInt16BE(width, 7);
   return Buffer.concat([Buffer.from([0xff, 0xd8]), app1, exif, sof]);
 }
+
+describe("write_file", () => {
+  let dir = "";
+  beforeEach(() => {
+    dir = realTempDir("zeros-write-");
+    sidecarMock.root = dir;
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+    sidecarMock.root = null;
+  });
+  const write = (args: Record<string, unknown>) =>
+    (writeFile as unknown as (a: Record<string, unknown>) => { kind: string; error?: string })({ cwd: dir, ...args });
+
+  it("replaces a file only while it holds the text the caller expects", () => {
+    writeFileSync(path.join(dir, "conflict.txt"), "shown\n");
+    expect(write({ path: "conflict.txt", content: "accepted\n", expectedContent: "shown\n" })).toMatchObject({ kind: "success" });
+    writeFileSync(path.join(dir, "conflict.txt"), "edited elsewhere\n");
+    expect(write({ path: "conflict.txt", content: "stale\n", expectedContent: "accepted\n" })).toMatchObject({
+      kind: "error",
+      error: expect.stringContaining("The file changed"),
+    });
+    expect(readFileSync(path.join(dir, "conflict.txt"), "utf8")).toBe("edited elsewhere\n");
+    expect(write({ path: "conflict.txt", content: "x", expectedContent: 3 })).toMatchObject({ kind: "error" });
+    expect(readFileSync(path.join(dir, "conflict.txt"), "utf8")).toBe("edited elsewhere\n");
+  });
+});
 
 describe("read_file", () => {
   it("opts into video through the existing trusted workspace boundary", () => {

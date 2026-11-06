@@ -15,7 +15,7 @@
 //   menu-open-project  {} (File → Open Folder / Cmd+O → renderer openProject)
 //   menu-edit-history  { direction: "undo" | "redo" } (focused app surface)
 //   deep-link          string
-//   local-navigation   string (validated chat/workspace link; navigation only)
+//   local-navigation   string (validated Local chat/workspace or cloud workspace link; navigation only)
 //   engine-restarted   { port: number }
 //   engine-crash       { ... } (watchdog could not respawn)
 //   gh:device-code     { ... } (GitHub device-flow verification code)

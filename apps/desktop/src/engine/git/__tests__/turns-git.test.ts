@@ -25,6 +25,7 @@ import {
   treesIdentical,
   deleteAllChatSnapshotRefs,
   pruneResetSnapshots,
+  resolveTurnCommits,
 } from "../turns-git";
 import type { AgentMessage } from "@zeros/protocol/agent-messages";
 
@@ -974,5 +975,25 @@ PATCH"`;
     const blind = await undoTurnReset(root, res.preResetSnapshot!, ["a.txt"]);
     expect(blind[0].result).toBe("restored");
     expect(await read(root, "a.txt")).toBe("l1 agent\nl2\nl3\n");
+  });
+});
+
+describe("resolveTurnCommits", () => {
+  it("keeps only commits that exist here, as full SHAs in the order printed", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "zeros-turn-commits-"));
+    try {
+      await initRepo(root);
+      await writeFile(path.join(root, "made.txt"), "made\n");
+      await exec("git", ["add", "."], { cwd: root });
+      await exec("git", ["commit", "-q", "-m", "made"], { cwd: root });
+      const head = (await exec("git", ["rev-parse", "HEAD"], { cwd: root })).stdout.trim();
+      const first = (await exec("git", ["rev-parse", "HEAD~1"], { cwd: root })).stdout.trim();
+      const tree = (await exec("git", ["rev-parse", "HEAD^{tree}"], { cwd: root })).stdout.trim();
+      expect(await resolveTurnCommits(root, [head.slice(0, 7), "1234567", first.slice(0, 9), head, tree.slice(0, 8), "--all"]))
+        .toEqual([head, first]);
+      expect(await resolveTurnCommits(root, [])).toEqual([]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });

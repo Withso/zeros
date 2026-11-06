@@ -1,63 +1,36 @@
 # Git review actions
 
-Hunk review is available for the live Uncommitted (`HEAD` to worktree) and
-Unstaged (index to worktree) comparisons. Accept keeps the file and index as
-they are and records a decision. Reject requires confirmation, validates that
-the displayed patch remains one exact live hunk, and reverses only that hunk.
-Neither action stages source or changes Git history. Historical, committed,
-binary, rename, copy, and file-mode changes are outside this action contract.
-Rejecting a tracked file deletion restores its content and regular-file mode
-from the validated deleted-file header for the selected comparison: HEAD for
-Uncommitted, index for Unstaged. The staged blob and mode remain unchanged.
+Per-hunk review (Accept and Reject under each hunk, with stored decisions) was
+retired with the Changes redesign: diffs carry comments only. Stage, unstage
+and discard keep their own hunk operations. Decisions stored under the
+`git.hunk-review.v1:` settings prefix are no longer read and need no
+migration.
 
-Decisions are local metadata in the existing SQLite settings bag. The durable
-`git.hunk-review.v1:` prefix is followed by a SHA-256 hash of the physical
-workspace root. Each decision hashes the relative path, comparison, complete
-hunk patch, and entire confirmed file content. A changed file snapshot must be
-reviewed again. Records contain hashes and decision metadata rather than source
-or patch text, and retention is bounded to 1024 decisions per root and a bounded
-serialized value. Rowless primary checkouts have the same persistence behavior.
+Merge conflicts resolve in place, where the file is shown. Each normal or
+diff3 block is marked in its rows (current under its HEAD band, incoming above
+its branch band) with Accept current change, Accept incoming change and Accept
+both above it; Both keeps current followed by incoming. Accepting rewrites only
+that block, so unrelated source, CRLF line endings and a missing final newline
+stay exact (`conflictReplacement` in `@zeros/protocol/merge-conflicts`). Markers
+that cannot all be paired get one notice naming the line and no actions, so
+nothing rewrites a broken file.
 
-Merge conflict choices support normal and diff3 blocks, including multiple
-blocks, CRLF, and files without a final newline. Current, Incoming, and Both
-update an editor preview immediately; Both keeps current followed by incoming.
-Unrelated source slices remain exact. Save resolution is a separate explicit
-action. The engine reconstructs the choices against the original snapshot,
-requires every conflict to be chosen, and verifies that the path is still
-unmerged. It leaves the index and merge/rebase continuation to explicit Git
-actions.
+In the Files editor (`code-editor/merge-conflict-blocks.ts`) an accept is one
+ordinary editor transaction: ⌘Z undoes it, it shares the draft and undo history
+with typed edits, and the file autosaves or saves with ⌘S like any other. A
+navigator beside the file name steps between blocks. Diff view waits while Git
+still lists the file as conflicted, so no accept swaps editors and drops its
+undo history. A Changes card (`features/code-review/merge-conflict-pierre.tsx`)
+shows the same blocks, buttons and navigator; an accept there rewrites the file
+through the ordinary file write, only over the exact text the card shows. A
+file that changed since is refreshed instead. Read-only views mark the blocks
+and point to the editable file. Design files resolve like any other file;
+people's writes to cloud Design paths stay refused by the engine.
 
-Source writes use workspace-relative path validation, the existing cloud file
-authority, and Design recognition from current, index, HEAD, registry, and
-sticky evidence. Code review refuses Design authoring and path aliases. Guarded
-writes compare bounded UTF-8 bytes and file generation before preparing a
-temporary file and immediately before atomic replacement. Restored-file
-permissions are set on the temporary file before local/cloud ownership
-publication and replacement. Creation modes are an internal Git-derived option,
-never a file-write IPC parameter. Existing targets retain their permissions. A
-stale or unsafe write returns an error; the renderer retains the preview and
-choices. A changed confirmed snapshot requires an explicit Reload latest to
-discard an unsaved resolution preview.
-
-The standalone renderer components live in
-`features/code-review/hunk-review-actions.tsx` and
-`features/code-review/merge-conflict-actions.tsx`. Their owner receives the
-confirmed disk content separately from the preview and gates inactive, read-only,
-historical, and Design surfaces. Ordinary unguarded editor Save must be disabled
-while displaying a resolution preview or routed through the conflict action.
-Separate unsaved source edits must be saved or undone before choosing a
-resolution. While Save resolution is pending, the editor and Discard preview
-remain disabled; failure retains the choices and preview for retry. The parent
-tracks the save lifetime so an early disk refresh cannot erase an editor draft.
-Decision reads share a bounded exact-file cache; events invalidate the affected
-workspace and active consumers revalidate while keeping confirmed data visible.
-
-The protocol leaf `@zeros/protocol/git-review-actions` owns schemas and the pure
-patch/conflict helpers. The workspace operations are `git.reviewHunks`,
-`git.reviewHunk`, and `git.resolveConflict`; registration must retain write
-admission, lifecycle serialization, cloud policy, Design guards, and workspace
-change events. Engine and renderer clients never infer a historical patch is a
-live mutation target.
+Saving never stages: Git keeps listing the file as conflicted until it is
+staged, and merge or rebase continuation stays an explicit Git action. The
+former Resolve conflicts panel, its preview strip and the `git.resolveConflict`
+workspace operation are gone; nothing persisted belongs to them.
 
 ## Direct commits and your Git setup
 

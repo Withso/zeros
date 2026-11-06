@@ -16,8 +16,6 @@ import {
 } from "./review-annotations";
 import type { CodeReviewController } from "./use-code-review";
 import { reviewRangeLabel, reviewThreadKey } from "./review-thread-model";
-import { HunkReviewActions } from "./hunk-review-actions";
-import { triggerGitRefresh } from "@/renderer/shell/use-git-refresh-key";
 
 export function ReviewAnnotationView({
   payload,
@@ -36,24 +34,14 @@ export function ReviewAnnotationView({
 }) {
   const commentsAvailable = review.commentsAvailable !== false;
   const workspaceCommentsAvailable = review.workspaceCommentsAvailable !== false;
-  const selection = commentsAvailable ? payload.selection : undefined;
-  if (!commentsAvailable && !payload.hunks?.length) return null;
+  if (!commentsAvailable) return null;
+  const selection = payload.selection;
   return (
     <div
       data-review-annotation
       className="flex min-w-0 flex-col gap-2 p-2 font-sans text-xs"
     >
-      {payload.hunks?.map(({ key, ...hunk }) => (
-        <HunkReviewActions
-          key={key}
-          {...hunk}
-          active={active}
-          onReviewed={(result) => {
-            if (result.fileChanged) triggerGitRefresh(hunk.cwd);
-          }}
-        />
-      ))}
-      {commentsAvailable && payload.threads.map(({ thread, state }) => (
+      {payload.threads.map(({ thread, state }) => (
         <InlineReviewThread
           key={reviewThreadKey(thread)}
           thread={thread}

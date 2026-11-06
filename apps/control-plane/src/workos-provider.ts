@@ -36,13 +36,22 @@ export type WorkOSRestoreResult =
   | ({ status: "active" } & WorkOSExchange)
   | { status: "terminal"; reason: string };
 
+/** The web sign-in page's two direct choices; every other start uses Hosted AuthKit. */
+export type WorkOSSocialProvider = "google" | "github";
+
+const WORKOS_SOCIAL_PROVIDERS: Readonly<Record<WorkOSSocialProvider, string>> =
+  Object.freeze({ google: "GoogleOAuth", github: "GitHubOAuth" });
+
 export interface WorkOSBrowserProvider {
-  /** Build the Hosted AuthKit URL. Callers cannot select a connection or IdP. */
+  /** Build the authorization URL: Hosted AuthKit, or the Google or GitHub
+   * choice the web sign-in page names. Callers cannot select a connection, an
+   * organization or any other identity provider. */
   authorizationUrl(options: {
     state: string;
     codeChallenge: string;
     redirectUri: string;
     maxAge?: number;
+    socialProvider?: WorkOSSocialProvider;
   }): string;
   exchange(options: {
     code: string;
@@ -230,9 +239,12 @@ export class RailwayWorkOSProvider
     codeChallenge: string;
     redirectUri: string;
     maxAge?: number;
+    socialProvider?: WorkOSSocialProvider;
   }): string {
     return this.client.userManagement.getAuthorizationUrl({
-      provider: "authkit",
+      provider: options.socialProvider
+        ? WORKOS_SOCIAL_PROVIDERS[options.socialProvider]
+        : "authkit",
       state: options.state,
       codeChallenge: options.codeChallenge,
       codeChallengeMethod: "S256",

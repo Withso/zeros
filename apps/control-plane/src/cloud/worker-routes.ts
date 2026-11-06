@@ -27,7 +27,7 @@ export type CloudV2WorkerRouteDeps = {
   timing?: (record: CloudV2TimingRecord) => void;
   logger?: Pick<Console, "warn">;
   waitForPrompts?(workspaceId: string, waitMs: number, signal: AbortSignal): { wait: Promise<void>; dispose(): void };
-  config(workspace: CloudV2Workspace, mode?: "admission" | "continuation"): Promise<ConfigFrame>;
+  config(workspace: CloudV2Workspace, mode?: "admission" | "continuation", proof?: CloudSourceProof): Promise<ConfigFrame>;
   authorizeSource?(workspace: CloudV2Workspace): Promise<void>;
   continueSource?(workspace: CloudV2Workspace, proof?: CloudSourceProof): Promise<CloudSourceContinuation>;
   githubToken(workspace: CloudV2Workspace, purpose?: "git" | "gh", failedTokenSha256?: string): Promise<{ token: string; expiresAt: number }>;
@@ -74,11 +74,21 @@ async function configuration(deps: CloudV2WorkerRouteDeps, workspace: CloudV2Wor
   if (mode === "continuation" && deps.continueSource) await deps.continueSource(workspace, workspace);
   else await deps.authorizeSource?.(workspace);
   for (let attempt = 0; attempt < 8; attempt++) {
-    const revision = await deps.store.loginRevision(workspace.id);
-    if (revision === null || !await currentSession(deps, token, bootId, handoff)) throw unauthorized();
-    const config = await deps.config(workspace, mode);
-    if (!await currentSession(deps, token, bootId, handoff)) throw unauthorized();
-    if (revision === await deps.store.loginRevision(workspace.id)) {
+    const before = await currentSession(deps, token, bootId, handoff);
+    if (!before) throw unauthorized();
+    let config: ConfigFrame;
+    try { config = await deps.config(before, mode, before); }
+    catch (error) {
+      if (!(error instanceof HttpError) || error.code !== "github_authorization_changed") throw error;
+      const current = await currentSession(deps, token, bootId, handoff);
+      if (!current || current.accessEpoch !== before.accessEpoch) throw unauthorized();
+      if (current.loginRevision === before.loginRevision) throw error;
+      continue;
+    }
+    const after = await currentSession(deps, token, bootId, handoff);
+    if (!after || before.accessEpoch !== after.accessEpoch) throw unauthorized();
+    const revision = before.loginRevision;
+    if (revision === after.loginRevision) {
       const { mcpServers, githubPullRequests, githubUserTokens, gitIdentity, agentInteractions, codeReview, historyReplacement: _historyReplacement, environment, runtimeUpdate: _runtimeUpdate, ...legacy } = config;
       if (environment && !features.has("workspace-environment-v1"))
         throw new HttpError(409, "cloud_environment_runtime_required", "Update the cloud runtime before opening this workspace.");
@@ -136,13 +146,15 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
       throw new HttpError(409, "worker_runtime_mismatch", "Worker runtime requires an update");
     const workspace = await deps.store.beginWorkerHello(token, input.bootId);
     if (!workspace) throw unauthorized();
+    const configStarted = Date.now();
     const config = await configuration(deps, workspace, token, input.bootId, workerFeatures(c));
+    const configMs = Math.max(0, Date.now() - configStarted);
     const ready = await deps.store.acceptWorkerHello(token, input.bootId, {
       accessEpoch: workspace.accessEpoch, loginRevision: config.loginRevision ?? workspace.loginRevision,
     });
     if (!ready) throw unauthorized();
     if (workerFeatures(c).has("runtime-update-v1")) await deps.runtimeHandoffs?.recordRuntime(token, input.bootId, input.runtimeSha256);
-    if (ready.helloTiming) emitCloudV2Timing(deps.timing, { workspaceId: ready.id.slice(0, 8), phase: "worker_hello", ...ready.helloTiming });
+    if (ready.helloTiming) emitCloudV2Timing(deps.timing, { workspaceId: ready.id.slice(0, 8), phase: "worker_hello", ...ready.helloTiming, configMs });
     return c.json({ config });
   });
   app.post(`${CLOUD_V2_WORKER_API}/runtime`, async c => {

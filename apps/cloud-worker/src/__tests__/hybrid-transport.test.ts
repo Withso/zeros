@@ -129,6 +129,83 @@ it("registers its process boot and rereads the worker credential on every HTTP c
   await expect.poll(() => f.incoming.some(frame => frame.t === "reply" && frame.id === id)).toBe(true);
   expect(f.requests.every(request => request.authorized)).toBe(true);
 });
+it("finishes a replacement hello slower than ten seconds without abandoning its boot", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hybrid-slow-hello-")), tokenFile = join(directory, "token");
+  await writeFile(tokenFile, "synthetic-worker-token", { mode: 0o600 });
+  const keys = generateKeyPairSync("ed25519"), statuses: string[] = [];
+  let entered!: () => void, release!: () => void;
+  const waiting = new Promise<void>(resolve => { entered = resolve; }), held = new Promise<void>(resolve => { release = resolve; });
+  const open = vi.fn(async () => {}), frame = vi.fn(async () => {});
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+  const fetcher = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+    entered();
+    await new Promise<void>((resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(new Error("Hello timed out")), { once: true });
+      void held.then(resolve);
+    });
+    return Response.json({ config });
+  });
+  const transport = new HybridTransport({ apiUrl: "https://api.example.test", workspaceId: config.workspace.id,
+    runtimeSha256: "a".repeat(64), tokenFile, port: 0, publicKeys: [keys.publicKey.export({ type: "spki", format: "pem" }).toString()],
+    runtimeHandoff: { id: randomUUID(), bootId: randomUUID() }, fetch: fetcher, onStatus: status => statuses.push(status) });
+  cleanups.push(async () => { release(); await transport.dispose(); await rm(directory, { recursive: true, force: true }); });
+  transport.start({ open, frame, close: () => {} });
+  await waiting;
+  await vi.advanceTimersByTimeAsync(11_000);
+  expect(statuses).toEqual([]);
+  release();
+  await expect.poll(() => statuses).toEqual(["connected"]);
+  expect(open).toHaveBeenCalledOnce(); expect(frame).toHaveBeenCalledExactlyOnceWith(config);
+  expect(fetcher).toHaveBeenCalledOnce();
+});
+
+it.each(["finish", "cancel", "deadline"])("bounds a slow private-ready request including token I/O (%s)", async outcome => {
+  const f = await fixture();
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+  let reading!: () => void, releaseToken!: () => void, fetching!: () => void, releaseFetch!: () => void;
+  const tokenRead = new Promise<void>(resolve => { reading = resolve; }), tokenHeld = new Promise<void>(resolve => { releaseToken = resolve; });
+  const fetched = new Promise<void>(resolve => { fetching = resolve; }), fetchHeld = new Promise<void>(resolve => { releaseFetch = resolve; });
+  const read = vi.spyOn(workerToken, "readWorkerToken").mockImplementationOnce(async () => { reading(); await tokenHeld; return "synthetic-worker-token"; });
+  const id = randomUUID(), controller = new AbortController();
+  vi.mocked(f.fetcher).mockImplementationOnce(async (_url, init) => {
+    fetching();
+    await new Promise<void>((resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(new Error("Ready cancelled")), { once: true });
+      void fetchHeld.then(resolve);
+    });
+    return Response.json({ status: "completed", id });
+  });
+  const pending = f.transport.runtimeUpdate({ op: "ready", id }, controller.signal);
+  const result = pending.then(value => ({ value }), () => ({ refused: true }));
+  try {
+    await tokenRead; await vi.advanceTimersByTimeAsync(2000); releaseToken(); await fetched;
+    await vi.advanceTimersByTimeAsync(9000);
+    if (outcome === "cancel") controller.abort();
+    else if (outcome === "deadline") await vi.advanceTimersByTimeAsync(19_000);
+    else releaseFetch();
+    expect(await result).toEqual(outcome === "finish" ? { value: { status: "completed", id } } : { refused: true });
+  } finally { releaseToken(); releaseFetch(); read.mockRestore(); }
+});
+
+it.each(["cancel", "deadline", "dispose"])("ends a private-ready wait while the credential read is still held (%s)", async outcome => {
+  const f = await fixture();
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+  let entered!: () => void, release!: () => void;
+  const waiting = new Promise<void>(resolve => { entered = resolve; }), held = new Promise<void>(resolve => { release = resolve; });
+  const read = vi.spyOn(workerToken, "readWorkerToken").mockImplementationOnce(async () => { entered(); await held; return "synthetic-worker-token"; });
+  const controller = new AbortController(), refused = vi.fn(), before = vi.mocked(f.fetcher).mock.calls.length;
+  const pending = f.transport.runtimeUpdate({ op: "ready", id: randomUUID() }, controller.signal).catch(refused);
+  try {
+    await waiting;
+    if (outcome === "deadline") await vi.advanceTimersByTimeAsync(30_000);
+    else if (outcome === "cancel") controller.abort();
+    else await f.transport.dispose();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(refused).toHaveBeenCalledOnce();
+    expect(vi.mocked(f.fetcher).mock.calls).toHaveLength(before);
+  } finally { release(); await pending; read.mockRestore(); }
+  expect(vi.mocked(f.fetcher).mock.calls).toHaveLength(before);
+});
 it("allows a credential response slower than ten seconds and retains its typed refusal", async () => {
   const f = await fixture();
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });

@@ -1,4 +1,8 @@
 import {
+  parseCloudWorkspaceLink,
+  type CloudWorkspaceLink,
+} from "@zeros/protocol/cloud-workspace-link";
+import {
   parseLocalLink,
   type LocalLink,
   type LocalLinkScheme,
@@ -6,6 +10,10 @@ import {
 import { isChannel, schemeForChannel } from "../../engine/runtime";
 import { CHANNEL } from "../config/release-channel";
 import { isNativeRuntime, nativeInvoke, nativeListen } from "./runtime";
+
+/** Main's one navigation intent: a Local chat or workspace, or a cloud
+ * workspace opened from its web page. */
+export type NavigationLink = LocalLink | CloudWorkspaceLink;
 
 let scheme: Promise<LocalLinkScheme> | null = null;
 let navigationSubscription: object | null = null;
@@ -34,7 +42,7 @@ export function resolveLocalLinkScheme(): Promise<LocalLinkScheme> {
 /** Subscribe before consuming the windowless intent. A live event that races
  * the IPC reply wins; neither malformed nor foreign-channel URLs reach UI. */
 export async function onLocalNavigation(
-  handler: (link: LocalLink) => void,
+  handler: (link: NavigationLink) => void,
 ): Promise<() => void> {
   const native = isNativeRuntime();
   const subscription = {};
@@ -44,7 +52,9 @@ export async function onLocalNavigation(
   let revision = 0;
   let sawLiveEvent = false;
   const deliver = (value: unknown) => {
-    const link = typeof value === "string" ? parseLocalLink(value) : null;
+    const link = typeof value === "string"
+      ? parseLocalLink(value) ?? parseCloudWorkspaceLink(value)
+      : null;
     if (!link) return;
     const ticket = ++revision;
     void resolveLocalLinkScheme().then((expected) => {

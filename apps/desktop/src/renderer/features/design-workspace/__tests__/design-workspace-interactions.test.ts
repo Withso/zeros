@@ -466,8 +466,11 @@ describe("design workspace interaction wiring", () => {
     expect(source).toContain("data-design-resize-edge");
     expect(source).toContain("DESIGN_EDGE_RESIZE_HANDLES");
     // Visible squares are corner-only for every selection; edges keep their
-    // invisible resize strips.
-    expect(source).toContain("const handles = DESIGN_CORNER_RESIZE_HANDLES;");
+    // invisible resize strips. A selection too small on screen for them keeps
+    // its body for moving instead (zoom in to resize).
+    expect(source).toContain(
+      "const handles = layout.corners ? DESIGN_CORNER_RESIZE_HANDLES : [];",
+    );
     expect(source).not.toContain("cornersOnly");
   });
 
@@ -491,9 +494,11 @@ describe("design workspace interaction wiring", () => {
     expect(source).toContain("data-design-rotate-corner={corner}");
     expect(source).toContain("DESIGN_ROTATION_CORNERS.map(");
     // The zone starts outside the box so the corner resize square keeps its
-    // own hit area, and its cursor is aimed by the selection's own rotation.
+    // own hit area, and its cursor is aimed by the selection's own rotation —
+    // or, for a mirrored selection, by where the corner sits on screen.
     expect(source).toContain("`calc(100% - ${inset})`");
-    expect(source).toContain("designRotationCursor(rotation + cursorAngle)");
+    expect(source).toContain(": rotation + cursorAngle,");
+    expect(source).toContain("designRotationCornerCursorAngle({ x, y }, box)");
     // Rotation and its pivot belong to the Select tool only.
     expect(source).toContain(
       'const rotationToolsActive = activeTool === "select";',
@@ -540,8 +545,10 @@ describe("design workspace interaction wiring", () => {
     // Repainting the pre-gesture angle on release snapped the outline upright
     // for a frame while the transient preview kept the element turned.
     expect(source).toContain("settle(latestRotation);");
+    // A mirrored overlay is anchored on its corner, so the held angle turns
+    // that corner about the pivot rather than only changing its rotation.
     expect(source).toContain(
-      "const settle = (rotation: number) => {\n        paintDesignNodeOverlayGeometry(overlay, { ...overlayFrame, rotation });",
+      "const settle = (rotation: number) => {\n        paintDesignNodeOverlayGeometry(\n          overlay,\n          designRotatedOverlayFrame(overlayFrame, rotation - overlayFrame.rotation),\n        );",
     );
     // A failed save retires the loop first, so a late preview answer cannot
     // turn the restored outline again.
@@ -554,10 +561,11 @@ describe("design workspace interaction wiring", () => {
   });
 
   it("keeps rotated direct manipulation on the element's own axes", () => {
-    // Resize travel rotates into the element's axes, and the authored offset
-    // cancels the drift CSS growth-plus-pivot introduces.
+    // Resize travel maps into the element's own axes — through the inverse of
+    // its whole linear map, so a mirrored axis is not read backwards — and the
+    // authored offset cancels the drift CSS growth-plus-pivot introduces.
     expect(source).toContain(
-      "designLocalDelta({ x: screenX, y: screenY }, box.rotation)",
+      "designSelectionLocalDelta({ x: screenX, y: screenY }, box)",
     );
     expect(source).toContain("designResizeLayoutOffset({");
     expect(source).toContain("designRotatedResizeOrigin({");

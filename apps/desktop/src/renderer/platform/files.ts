@@ -265,8 +265,14 @@ export async function writeWorkspaceFile(
   cwd: string,
   relPath: string,
   content: string,
+  options?: {
+    /** Replace the file only while it still holds exactly this text. A
+     *  changed file comes back as an error result and stays as it is. */
+    expectedContent?: string;
+  },
 ): Promise<WriteFileResult | null> {
   if (!cwd || !relPath) return null;
+  const expectedContent = options?.expectedContent;
   // Desktop: Local main (a registered project root) has no workspace row
   // and isn't under electron-main's trusted IPC roots, so write it over the
   // engine bridge. Worktrees stay on the faster electron IPC path below.
@@ -275,26 +281,27 @@ export async function writeWorkspaceFile(
       cwd,
       "write the repository file",
     );
-    return bridgeFileWrite(bridge, workspaceId, relPath, content);
+    return bridgeFileWrite(bridge, workspaceId, relPath, content, expectedContent);
   }
   if (!isNativeRuntime()) {
     const { bridge, workspaceId } = await resolveBridgeFileTarget(
       cwd,
       "write the workspace file",
     );
-    return bridgeFileWrite(bridge, workspaceId, relPath, content);
+    return bridgeFileWrite(bridge, workspaceId, relPath, content, expectedContent);
   }
   try {
     return await nativeInvoke<WriteFileResult>("write_file", {
       cwd,
       path: relPath,
       content,
+      ...(expectedContent !== undefined ? { expectedContent } : {}),
     });
   } catch {
     const { bridge, workspaceId } = await resolveBridgeFileTarget(
       cwd,
       "write the workspace file",
     );
-    return bridgeFileWrite(bridge, workspaceId, relPath, content);
+    return bridgeFileWrite(bridge, workspaceId, relPath, content, expectedContent);
   }
 }

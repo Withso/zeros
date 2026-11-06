@@ -26,10 +26,6 @@ import {
   codeReviewCache,
   codeReviewCacheKey,
 } from "../../features/code-review/review-cache";
-import {
-  hunkReviewCache,
-  hunkReviewCacheKey,
-} from "../../features/code-review/hunk-review-cache";
 
 vi.mock("../../shared/ui/primitives/elements", () => ({
   toast: { success: vi.fn(), info: vi.fn(), error: vi.fn() },
@@ -110,7 +106,6 @@ beforeEach(() => {
   setSidebarWorkspaceSort("updated");
   vi.clearAllMocks();
   codeReviewCache.clear();
-  hunkReviewCache.clear();
   vi.mocked(loadProjects).mockReturnValue([
     {
       id: "archive-fixture",
@@ -171,29 +166,16 @@ describe("sidebar archive presentation", () => {
 
 function seedReviewCaches(folder: string, workspaceId = target.id) {
   const reviewKey = codeReviewCacheKey(folder, workspaceId);
-  const hunkKey = hunkReviewCacheKey("engine", folder, "file.ts");
   const review = {
     workspaceId,
     threads: [],
     partial: true,
     nextCursor: "retained-history",
   };
-  const hunks = [
-    {
-      key: "a".repeat(64),
-      path: "file.ts",
-      comparison: "worktree-vs-head" as const,
-      decision: "accepted" as const,
-      updatedAt: 1,
-    },
-  ];
   codeReviewCache.setData(reviewKey, review);
-  hunkReviewCache.setData(hunkKey, hunks);
   return {
     reviewKey,
-    hunkKey,
     review: codeReviewCache.peekSnapshot(reviewKey).data!,
-    hunks,
   };
 }
 
@@ -204,7 +186,6 @@ function expectReviewCachesRetained(
     expect(codeReviewCache.peekSnapshot(entry.reviewKey).data).toBe(
       entry.review,
     );
-    expect(hunkReviewCache.peekSnapshot(entry.hunkKey).data).toBe(entry.hunks);
   }
 }
 
@@ -256,12 +237,11 @@ describe("confirmed workspace deletion review caches", () => {
       expect(
         codeReviewCache.peekSnapshot(entry.reviewKey).data,
       ).toBeUndefined();
-      expect(hunkReviewCache.peekSnapshot(entry.hunkKey).data).toBeUndefined();
     }
     expectReviewCachesRetained(preserved);
   });
 
-  it("preserves review and hunk history on archive for restoration under the same owner", async () => {
+  it("preserves review history on archive for restoration under the same owner", async () => {
     const entries = [
       seedReviewCaches(target.path),
       seedReviewCaches(`${target.path}/packages/app`),

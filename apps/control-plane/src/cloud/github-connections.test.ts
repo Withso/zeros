@@ -86,6 +86,13 @@ describe("selected cloud GitHub credentials", () => {
     expect(f.store.credential).toHaveBeenLastCalledWith(scope, expect.any(Function), createHash("sha256").update(f.snapshot.material.accessToken).digest("hex"));
     expect(f.fetcher).toHaveBeenCalledTimes(2);
   });
+  it("passes on the profile photo only when it is a plain https URL", async () => {
+    const f = fixture("github-app");
+    f.fetcher.mockResolvedValueOnce(Response.json({ id: 12, login: "contributor", avatar_url: "https://avatars.githubusercontent.com/u/12" }));
+    expect((await f.service.access(scope)).avatarUrl).toBe("https://avatars.githubusercontent.com/u/12");
+    f.fetcher.mockResolvedValueOnce(Response.json({ id: 12, login: "contributor", avatar_url: "http://avatars.example/u/12" }));
+    expect(await f.service.access(scope)).not.toHaveProperty("avatarUrl");
+  });
   it.each([401, 403])("bounds identity recovery without replaying a mutation on HTTP %s", async status => {
     const f = fixture("github-app");
     f.fetcher.mockImplementation(async () => new Response(null, { status }));

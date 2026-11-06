@@ -56,6 +56,22 @@ export interface TurnInfo {
   files: TurnFile[];
   /** Tokens/cost this turn billed (null when none was reported). */
   usage?: TurnUsageInfo | null;
+  /** Full SHAs of the commits this turn's own tools made, each resolved in the
+   *  repository when the turn settled. Absent on rows recorded before. */
+  commits?: string[];
+}
+
+/** Which chat's turn made a commit (the Review tab's commit and Activity links). */
+export interface TurnCommitLink {
+  sha: string;
+  chatId: string;
+  turnId: string;
+}
+
+/** A pull request lists at most 250 commits; a lookup names full SHAs only. */
+export const TURN_COMMIT_LOOKUP_LIMIT = 250;
+export function isTurnCommitSha(value: unknown): value is string {
+  return typeof value === "string" && /^[a-f0-9]{40}(?:[a-f0-9]{24})?$/.test(value);
 }
 
 /** Mirrored on the opening prompt; identities come from its owning chat/row. */

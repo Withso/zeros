@@ -547,6 +547,46 @@ function DesignFrameDocumentBuffer({
       });
   }, [autoCapture, onSnapshot, playbackSessionId, runtimeActive, selected]);
 
+  // A frame's canvas size is its document's viewport, so a resize reflows the
+  // document without a new source generation and the confirmed boxes must be
+  // measured again. The document can report the old viewport for a frame or
+  // more after the canvas draws the new size; such a read is retried.
+  const viewportKey = `${frame.width}\u0000${frame.height}`;
+  const viewportKeyRef = useRef(viewportKey);
+  useEffect(() => {
+    if (viewportKeyRef.current === viewportKey) return;
+    viewportKeyRef.current = viewportKey;
+    const connection = connectionRef.current;
+    if (!ready || !runtimeActive || buffer !== "displayed" || playbackSessionId || !connection) return;
+    const sourceVersion = connection.sourceVersion;
+    const previous = useDesignRuntimeStore.getState().byWorkspace[workspaceId]?.frames[frame.file]?.snapshot?.viewport;
+    let cancelled = false;
+    const current = () => !cancelled && connectionRef.current === connection &&
+      connection.isActive?.() !== false && connection.sourceVersion === sourceVersion;
+    void (async () => {
+      for (let attempt = 0; attempt < 8; attempt += 1) {
+        await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+        if (!current() || !sourceVersion) return;
+        const snapshot = await connection.getSnapshot().catch(() => null);
+        if (!snapshot || !current()) return;
+        if (previous && snapshot.viewport.width === previous.width && snapshot.viewport.height === previous.height)
+          continue;
+        const nodeIds = designWorkspaceView(workspaceId).selectedTargets
+          .filter((target) => target.frame === frame.file && target.nodeId)
+          .map((target) => target.nodeId!);
+        const details = (await Promise.all(nodeIds.map((nodeId) => connection.getNodeDetails(nodeId).catch(() => null))))
+          .filter((value): value is NonNullable<typeof value> => value !== null && value.sourceVersion === sourceVersion);
+        if (!current()) return;
+        // The snapshot's root details are just as fresh: the inspector edits a
+        // selected frame through them.
+        const refreshed = [snapshot.frame, ...details.filter((value) => value.oid !== snapshot.frame.oid)];
+        useDesignRuntimeStore.getState().replaceFrameGeometry(workspaceId, frame.file, sourceVersion, snapshot, refreshed);
+        return;
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [buffer, frame.file, playbackSessionId, ready, runtimeActive, viewportKey, workspaceId]);
+
   useEffect(() => {
     if (!ready || !runtimeActive || buffer !== "displayed" || !playbackSessionId || !connectedRuntime) return;
     const controller = new AbortController();

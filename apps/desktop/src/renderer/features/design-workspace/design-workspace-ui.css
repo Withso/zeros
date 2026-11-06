@@ -1028,6 +1028,63 @@
  * variable so these colors remain crisp even before React settles the view. */
 .zd-design-selection-outline {
   outline-color: var(--design-selection-stroke);
+  --design-stroke-color: var(--design-selection-stroke);
+}
+
+/* Canvas chrome strokes keep their screen width at every zoom. Chromium
+ * rounds a border or outline width under 1 CSS px up to a whole pixel before
+ * the camera scale applies, so a `2px / zoom` outline painted zoom times too
+ * thick above 200% and buried the handles of a small frame. A box-shadow
+ * spread is not rounded. */
+/* An agent's draft in progress: a quiet dashed edge, one screen pixel wide. */
+.zd-design-agent-draft-edge {
+  --design-dash-color: var(--border2);
+}
+
+/* A resting frame's quiet edge; the GPU plane reads the same color. */
+.zd-design-frame-edge {
+  --design-frame-stroke: var(--border2);
+  --design-stroke-color: var(--design-frame-stroke);
+}
+
+.zd-design-stroke {
+  box-shadow: 0 0 0
+    calc(var(--design-stroke-width, 1) * 1px * var(--design-canvas-inverse-zoom))
+    var(--design-stroke-color, var(--design-selection-stroke));
+}
+
+/* Dashed and dotted chrome draws its dashes as gradients for the same
+ * reason; a dashed border is rounded like a solid one. */
+.zd-design-dashed-line {
+  --design-dash: calc(4px * var(--design-canvas-inverse-zoom));
+  --design-dash-period: calc(7px * var(--design-canvas-inverse-zoom));
+  background-image: repeating-linear-gradient(
+    var(--design-dash-direction, 90deg),
+    var(--design-dash-color, var(--design-selection-stroke)) 0 var(--design-dash),
+    transparent 0 var(--design-dash-period)
+  );
+}
+
+.zd-design-dashed-box {
+  --design-dash-width: calc(1px * var(--design-canvas-inverse-zoom));
+  --design-dash: calc(var(--design-dash-length, 4px) * var(--design-canvas-inverse-zoom));
+  --design-dash-period: calc(var(--design-dash-repeat, 7px) * var(--design-canvas-inverse-zoom));
+  --design-dash-run-x: repeating-linear-gradient(
+    90deg,
+    var(--design-dash-color, var(--design-selection-stroke)) 0 var(--design-dash),
+    transparent 0 var(--design-dash-period)
+  );
+  --design-dash-run-y: repeating-linear-gradient(
+    180deg,
+    var(--design-dash-color, var(--design-selection-stroke)) 0 var(--design-dash),
+    transparent 0 var(--design-dash-period)
+  );
+  background-image: var(--design-dash-run-x), var(--design-dash-run-x),
+    var(--design-dash-run-y), var(--design-dash-run-y);
+  background-size: 100% var(--design-dash-width), 100% var(--design-dash-width),
+    var(--design-dash-width) 100%, var(--design-dash-width) 100%;
+  background-position: 0 0, 0 100%, 0 0, 100% 0;
+  background-repeat: no-repeat;
 }
 
 /* The frame a drag would nest into. The attribute is painted outside React
@@ -1039,6 +1096,7 @@
 
 .zd-design-hover-outline {
   outline-color: var(--design-hover-stroke);
+  --design-stroke-color: var(--design-hover-stroke);
 }
 
 .zd-design-selection-border {
@@ -1050,8 +1108,9 @@
 }
 
 .zd-design-selection-handle {
-  border-color: var(--design-selection-stroke);
   background-color: var(--design-selection-handle-fill);
+  box-shadow: inset 0 0 0 calc(1px * var(--design-canvas-inverse-zoom))
+    var(--design-selection-stroke);
 }
 
 /* The rotation pivot: a reticle in the selection color. It sits over authored
@@ -1080,15 +1139,15 @@
 
 /* Snap anchors, revealed only while the pivot is being dragged. */
 .zd-design-origin-anchor {
-  border-style: dashed;
-  border-color: var(--design-selection-stroke);
+  --design-dash-length: 2px;
+  --design-dash-repeat: 4px;
 }
 
 /* Constraint runs from a pinned element to its parent's edges, and the
  * dotted parent they are measured against. Softer than the selection stroke
  * so they read as hints, never as selection. */
 .zd-design-parent-guide {
-  border-color: color-mix(
+  --design-dash-color: color-mix(
     in srgb,
     var(--design-selection-stroke) 72%,
     transparent
@@ -1096,8 +1155,9 @@
 }
 
 .zd-design-constraint-parent {
-  outline-style: dotted;
-  outline-color: color-mix(
+  --design-dash-length: 1px;
+  --design-dash-repeat: 3px;
+  --design-dash-color: color-mix(
     in srgb,
     var(--design-selection-stroke) 72%,
     transparent
@@ -1130,7 +1190,7 @@
 }
 
 .zd-design-creation-draft {
-  outline-color: var(--design-selection-stroke);
+  --design-stroke-color: var(--design-selection-stroke);
   background-color: color-mix(
     in srgb,
     var(--design-selection-soft) 42%,
@@ -1183,11 +1243,13 @@
   outline: 0;
 }
 
-/* Ticks: a short pill across the drag axis, bordered so it reads on any fill. */
+/* Ticks: a short pill across the drag axis, edged so it reads on any fill.
+ * The edge is an inset shadow so it stays one screen pixel at deep zoom. */
 .zd-design-inline-spacing-line {
   opacity: 0;
-  border-color: var(--design-spacing-line-border);
   background-color: var(--design-padding-stroke);
+  box-shadow: inset 0 0 0 calc(1px * var(--design-canvas-inverse-zoom))
+    var(--design-spacing-line-border);
 }
 
 .zd-design-inline-gap-handle .zd-design-inline-spacing-line {
@@ -1276,11 +1338,15 @@
 .zd-design-inline-padding-control[data-active] .zd-design-inline-spacing-line,
 .zd-design-inline-gap-handle[data-active] .zd-design-inline-spacing-line {
   opacity: 1;
-  box-shadow: 0 0 0 1px var(--design-padding-stroke);
+  box-shadow:
+    inset 0 0 0 calc(1px * var(--design-canvas-inverse-zoom)) var(--design-spacing-line-border),
+    0 0 0 calc(1px * var(--design-canvas-inverse-zoom)) var(--design-padding-stroke);
 }
 
 .zd-design-inline-gap-handle[data-active] .zd-design-inline-spacing-line {
-  box-shadow: 0 0 0 1px var(--design-gap-stroke);
+  box-shadow:
+    inset 0 0 0 calc(1px * var(--design-canvas-inverse-zoom)) var(--design-spacing-line-border),
+    0 0 0 calc(1px * var(--design-canvas-inverse-zoom)) var(--design-gap-stroke);
 }
 
 /* The readout of a gap drag whose spaces reflow has removed for the moment. */
@@ -1298,13 +1364,16 @@
 
 .zd-design-inline-spacing-handle:focus-visible:where(:not([data-zeros-focus-visible="false"])) > .zd-design-inline-spacing-line,
 .zd-design-inline-gap-handle:focus-visible:where(:not([data-zeros-focus-visible="false"])) .zd-design-inline-spacing-line {
-  outline: 1px solid var(--design-spacing-line-border);
+  box-shadow:
+    inset 0 0 0 calc(1px * var(--design-canvas-inverse-zoom)) var(--design-spacing-line-border),
+    0 0 0 calc(1px * var(--design-canvas-inverse-zoom)) var(--design-spacing-line-border);
 }
 
 /* Typing happens in the readout itself: the same pill, now editable. */
 .zd-design-inline-spacing-input {
-  border-style: solid;
-  border-color: var(--design-spacing-line-border);
+  border: 0;
+  box-shadow: inset 0 0 0 calc(1px * var(--design-canvas-inverse-zoom))
+    var(--design-spacing-line-border);
   background-color: var(--design-padding-stroke);
   color: var(--design-selection-label-fg);
   caret-color: var(--design-selection-label-fg);
@@ -1314,7 +1383,8 @@
 }
 
 .zd-design-inline-spacing-input[aria-invalid="true"] {
-  border-color: var(--red-primary);
+  box-shadow: inset 0 0 0 calc(1px * var(--design-canvas-inverse-zoom))
+    var(--red-primary);
 }
 
 .zd-design-inline-spacing-input::selection {
@@ -1331,7 +1401,7 @@
 }
 
 .zd-design-grid-line {
-  border-color: color-mix(
+  --design-dash-color: color-mix(
     in srgb,
     var(--design-selection-stroke) 72%,
     transparent
@@ -1357,11 +1427,8 @@
 }
 
 .zd-design-grid-track-label {
-  border-color: color-mix(
-    in srgb,
-    var(--design-selection-stroke) 55%,
-    transparent
-  );
+  box-shadow: inset 0 0 0 calc(1px * var(--design-canvas-inverse-zoom))
+    color-mix(in srgb, var(--design-selection-stroke) 55%, transparent);
   background-color: color-mix(in srgb, var(--bg1) 90%, transparent);
   color: var(--design-selection-stroke);
 }
@@ -1503,8 +1570,9 @@
 }
 
 .zd-design-motion-path-point {
-  border-color: var(--design-selection-stroke);
   background-color: var(--design-selection-handle-fill);
+  box-shadow: inset 0 0 0 calc(1px * var(--design-canvas-inverse-zoom))
+    var(--design-selection-stroke);
 }
 
 .zd-design-motion-path-point:hover,
@@ -1515,8 +1583,8 @@
 
 .zd-design-motion-path-point-selected {
   box-shadow:
-    0 0 0 2px var(--design-selection-handle-fill),
-    0 0 0 3px var(--design-selection-stroke);
+    0 0 0 calc(2px * var(--design-canvas-inverse-zoom)) var(--design-selection-handle-fill),
+    0 0 0 calc(3px * var(--design-canvas-inverse-zoom)) var(--design-selection-stroke);
 }
 
 .zd-design-motion-property-active {
@@ -1536,16 +1604,27 @@
   background: var(--design-selection-stroke);
   z-index: var(--z-panel);
 }
+/* A dragged layer's picture outside its frame. The layer's own selection
+ * rides on it (an axis-aligned edge around a turned layer drew a second,
+ * wrong outline), so only the pixels clip. */
 .zd-design-drag-preview {
   position: absolute;
   top: 0;
   left: 0;
   pointer-events: none;
+  will-change: transform;
+}
+
+.zd-design-drag-pixels {
+  position: absolute;
+  inset: 0;
   overflow: hidden;
   contain: layout paint;
-  will-change: transform;
-  outline: calc(1px * var(--design-canvas-inverse-zoom, 1)) solid
-    var(--design-selection-stroke);
+}
+
+/* The frame's own overlay would sit beneath the picture it describes. */
+[data-design-drag-detached] {
+  visibility: hidden;
 }
 
 .zd-design-drag-preview[hidden] {
@@ -1595,6 +1674,9 @@
   /* The GPU owns the screen-pixel outline; a transparent CSS outline still
      consumes inverse zoom and invalidates every artboard on each wheel. */
   outline-width: 0 !important;
+}
+[data-design-frame-tiled]:not([data-design-nest-target]) {
+  box-shadow: none !important;
 }
 [data-design-frame-tiled][data-design-frame-compact-controls]:not(:hover):not(:focus-within):not([data-design-frame-pointer]) {
   --design-canvas-zoom: 1;

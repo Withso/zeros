@@ -6,6 +6,9 @@ export interface MergeConflict {
   start: number;
   end: number;
   startLine: number;
+  /** The `=======` line; `baseLine` is a diff3 `|||||||` line when present. */
+  separatorLine: number;
+  baseLine?: number;
   endLine: number;
   currentLabel: string;
   incomingLabel: string;
@@ -58,8 +61,10 @@ export function parseMergeConflicts(source: string): MergeConflictParseResult {
         label: string;
         currentStart: number;
         currentEnd?: number;
+        baseLine?: number;
         baseStart?: number;
         baseEnd?: number;
+        separatorLine?: number;
         incomingStart?: number;
       }
     | undefined;
@@ -70,7 +75,7 @@ export function parseMergeConflicts(source: string): MergeConflictParseResult {
       if (open) {
         result.errors.push({
           line: line.number,
-          message: "Nested conflict markers need manual resolution.",
+          message: `Line ${line.number} opens a conflict inside another.`,
         });
         continue;
       }
@@ -88,14 +93,14 @@ export function parseMergeConflicts(source: string): MergeConflictParseResult {
       if (token.kind !== "=")
         result.errors.push({
           line: line.number,
-          message: "Conflict marker has no opening block.",
+          message: `Line ${line.number} has a conflict marker outside any conflict.`,
         });
       continue;
     }
     if (token.width !== open.width) {
       result.errors.push({
         line: line.number,
-        message: "Conflict marker widths do not match.",
+        message: `Line ${line.number} has a marker of a different length.`,
       });
       continue;
     }
@@ -105,6 +110,7 @@ export function parseMergeConflicts(source: string): MergeConflictParseResult {
       open.incomingStart === undefined
     ) {
       open.currentEnd = line.start;
+      open.baseLine = line.number;
       open.baseStart = line.end;
     } else if (
       token.kind === "=" &&
@@ -113,6 +119,7 @@ export function parseMergeConflicts(source: string): MergeConflictParseResult {
     ) {
       if (open.baseStart !== undefined) open.baseEnd = line.start;
       else open.currentEnd = line.start;
+      open.separatorLine = line.number;
       open.incomingStart = line.end;
     } else if (
       token.kind === ">" &&
@@ -124,6 +131,8 @@ export function parseMergeConflicts(source: string): MergeConflictParseResult {
         start: open.line.start,
         end: line.end,
         startLine: open.line.number,
+        separatorLine: open.separatorLine!,
+        ...(open.baseLine !== undefined ? { baseLine: open.baseLine } : {}),
         endLine: line.number,
         currentLabel: open.label,
         incomingLabel: token.label,
@@ -138,16 +147,37 @@ export function parseMergeConflicts(source: string): MergeConflictParseResult {
     } else {
       result.errors.push({
         line: line.number,
-        message: "Conflict markers are incomplete or out of order.",
+        message: `Line ${line.number} has conflict markers out of order.`,
       });
     }
   }
   if (open)
     result.errors.push({
       line: open.line.number,
-      message: "Conflict block is missing its separator or closing marker.",
+      message: `Line ${open.line.number} has no separator or closing marker.`,
     });
   return result;
+}
+
+/** The text that replaces one block for a choice. Marker-delimited sides end
+ * with a newline even when the file does not, so a block that ends the file
+ * keeps that boundary. */
+export function conflictReplacement(
+  source: string,
+  conflict: MergeConflict,
+  choice: ConflictChoice,
+): string {
+  if (choice !== "current" && choice !== "incoming" && choice !== "both")
+    throw new Error("Invalid conflict choice.");
+  const selected =
+    choice === "current"
+      ? conflict.current
+      : choice === "incoming"
+        ? conflict.incoming
+        : conflict.current + conflict.incoming;
+  return conflict.end === source.length && !conflict.finalNewline
+    ? selected.replace(/\r?\n$/, "")
+    : selected;
 }
 
 export function applyConflictChoices(
@@ -168,21 +198,7 @@ export function applyConflictChoices(
     if (choice === undefined) {
       content += source.slice(conflict.start, conflict.end);
       remaining += 1;
-    } else {
-      if (choice !== "current" && choice !== "incoming" && choice !== "both")
-        throw new Error("Invalid conflict choice.");
-      let selected =
-        choice === "current"
-          ? conflict.current
-          : choice === "incoming"
-            ? conflict.incoming
-            : conflict.current + conflict.incoming;
-      // Marker-delimited sides end with a newline even when the original file
-      // does not. Keep that file boundary when its last block is replaced.
-      if (conflict.end === source.length && !conflict.finalNewline)
-        selected = selected.replace(/\r?\n$/, "");
-      content += selected;
-    }
+    } else content += conflictReplacement(source, conflict, choice);
     from = conflict.end;
   }
   return { content: content + source.slice(from), remaining };

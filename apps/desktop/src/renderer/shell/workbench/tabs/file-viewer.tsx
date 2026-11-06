@@ -48,12 +48,12 @@ import {
   type CodeReviewController,
 } from "@/renderer/features/code-review/use-code-review";
 import type { CodeReviewExternalSource } from "@/renderer/features/code-review/review-thread-model";
-import {
-  liveReviewHunkSource,
-  type ReviewLiveHunkSource,
-} from "@/renderer/features/code-review/review-hunk-model";
 import { useWorkspaceReviewStatus } from "@/renderer/features/code-review/use-workspace-review-status";
-import { MergeConflictActions } from "@/renderer/features/code-review/merge-conflict-actions";
+import { ConflictNavigator } from "@/renderer/features/code-review/conflict-navigator";
+import { conflictRowsStyle } from "@/renderer/features/code-review/merge-conflict-pierre";
+import { conflictMarkerNotice } from "@/renderer/features/code-review/merge-conflict-rows";
+import { parseMergeConflicts } from "@zeros/protocol/merge-conflicts";
+import { MessageRow } from "@/renderer/shared/ui/primitives/message-row";
 import { SourceEditor } from "./code-editor/source-editor";
 import { forgetEditorDraft } from "./code-editor/draft-journal";
 import { FileEditorOptions, type FileEditorControls } from "./code-editor/file-editor-options";
@@ -61,7 +61,6 @@ import { useFileEditorPreferences } from "./code-editor/editor-preferences";
 import { parseContextAttachmentPath } from "@zeros/protocol/attachment-policy";
 import { useScrollMemory, useScrollMemoryRef } from "../../scroll-memory";
 import {
-  Button,
   Checkbox,
   IconButton,
   Tabs,
@@ -295,6 +294,8 @@ export function FileViewer({
   const [editorControls, setEditorControls] = useState<{ key: string; value: FileEditorControls | null } | null>(null);
   const editorKey = JSON.stringify([cwd, path, contentRevision ?? 0]);
   const onEditorControls = useCallback((value: FileEditorControls | null) => setEditorControls({ key: editorKey, value }), [editorKey]);
+  const currentEditorControls = editorControls?.key === editorKey ? editorControls.value : null;
+  const editorConflicts = currentEditorControls?.conflicts ?? null;
   const review = useCodeReview({
     cwd,
     workspaceId,
@@ -670,31 +671,19 @@ export function FileViewer({
   // Design paths stay refused by the engine (assertNoDesignPathWrites).
   const designReadOnly = result?.designPath === true && isCloudWorkspace(cwd);
   const sourceReadOnly = readOnly || designReadOnly;
-  const hunkSource = useMemo(
-    () =>
-      liveReviewHunkSource({
-        cwd: cwd ?? "",
-        path,
-        patch: diffPatch,
-        scope: diffScope,
-        read: diskResult,
-        deleted: fileMissing,
-        untracked: isNewFile,
-        readOnly: sourceReadOnly,
-        conflicted: isGitConflict,
-      }),
-    [
-      cwd,
-      path,
-      diffPatch,
-      diffScope,
-      diskResult,
-      fileMissing,
-      isNewFile,
-      sourceReadOnly,
-      isGitConflict,
-    ],
-  );
+  // A read-only view marks a Git conflict's blocks without actions and says
+  // once where to resolve them (or which marker cannot be paired).
+  const readOnlyConflicts = useMemo(() => {
+    if (!sourceReadOnly || !isGitConflict || !sourceShown) return null;
+    const parsed = parseMergeConflicts(result?.content ?? "");
+    const broken = conflictMarkerNotice(parsed);
+    if (!broken && !parsed.conflicts.length) return null;
+    return {
+      broken: !!broken,
+      notice: broken ?? "Open the live editable file to resolve these conflicts.",
+      rows: broken ? null : conflictRowsStyle(parsed),
+    };
+  }, [sourceReadOnly, isGitConflict, sourceShown, result?.content]);
 
   // Mode toggle: markdown → Preview/Edit (+ Diff when a diff is available); other
   // text → Edit (+ Diff). "Diff" stays available for notInCommit so the user can
@@ -736,14 +725,18 @@ export function FileViewer({
               className={WORKBENCH_TITLE_ACTION_CLS}
             />
           )}
+          {sourceShown && editorConflicts && (
+            <ConflictNavigator
+              count={editorConflicts.count}
+              shown={editorConflicts.shown}
+              onPrevious={editorConflicts.previous}
+              onNext={editorConflicts.next}
+              disabled={!active}
+            />
+          )}
         </div>
       </Inline>
       <Inline gap={1} align="center" className="ml-auto shrink-0">
-        {isGitConflict && !sourceShown && (
-          <Button variant="ghost" onClick={() => onViewerModeChange?.("edit")}>
-            Resolve conflicts
-          </Button>
-        )}
         {/* Viewed — only while a diff is on screen, the one place a file is
           reviewed. Dims its Changes-list row; the Changes host then moves on
           to the next change, a File tab stays on the file. */}
@@ -812,8 +805,9 @@ export function FileViewer({
         )}
         {fileEditor && isText && !sourceReadOnly && (
           <FileEditorOptions key={editorKey} active={active}
-            controls={editorControls?.key === editorKey ? editorControls.value : null}
+            controls={currentEditorControls}
             canDiff={!!workspaceId}
+            diffWaiting={isGitConflict}
             onDiffViewChange={() => onViewerModeChange?.("edit")} />
         )}
         {headerTrailing}
@@ -890,7 +884,6 @@ export function FileViewer({
                   scrollKey={diffScrollKey}
                   review={review}
                   active={active}
-                  hunkSource={hunkSource}
                 />
               ))}
             {previewShown && previewHtml !== null && (
@@ -909,17 +902,15 @@ export function FileViewer({
                   </div>
                 )}
                 <div className="flex min-h-0 flex-1 flex-col">
-                  <MergeConflictActions
-                    cwd={cwd ?? ""}
-                    path={path}
-                    content={result?.content ?? ""}
-                    isGitConflict={isGitConflict}
-                    active={active}
-                    readOnly
-                    designPath={designReadOnly}
-                    onPreview={() => {}}
-                    onSaved={() => {}}
-                  />
+                  {readOnlyConflicts?.notice && !designReadOnly && (
+                    <MessageRow
+                      bar
+                      role="status"
+                      tone={readOnlyConflicts.broken ? "error" : "neutral"}
+                    >
+                      {readOnlyConflicts.notice}
+                    </MessageRow>
+                  )}
                   <div className="min-h-0 flex-1">
                     <ReadOnlySource
                       path={path}
@@ -927,6 +918,7 @@ export function FileViewer({
                       scrollKey={JSON.stringify([scrollKeyBase, "source"])}
                       review={review}
                       active={active}
+                      conflictRows={readOnlyConflicts?.rows}
                     />
                   </div>
                 </div>
@@ -1003,7 +995,6 @@ function DiffView({
   scrollKey,
   review,
   active,
-  hunkSource,
 }: {
   path: string;
   patch: string;
@@ -1011,7 +1002,6 @@ function DiffView({
   scrollKey?: string;
   review: CodeReviewController;
   active: boolean;
-  hunkSource?: ReviewLiveHunkSource;
 }) {
   const [scroller, setScroller] = useState<HTMLElement | null>(null);
   useScrollMemory(scroller, scrollKey ?? null);
@@ -1023,7 +1013,6 @@ function DiffView({
       review={review}
       active={active}
       onScroller={setScroller}
-      hunkSource={hunkSource}
     />
   );
 }
@@ -1034,12 +1023,14 @@ function ReadOnlySource({
   scrollKey,
   review,
   active,
+  conflictRows,
 }: {
   path: string;
   content: string;
   scrollKey?: string;
   review: CodeReviewController;
   active: boolean;
+  conflictRows?: string | null;
 }) {
   const [scroller, setScroller] = useState<HTMLElement | null>(null);
   useScrollMemory(scroller, scrollKey ?? null);
@@ -1050,6 +1041,7 @@ function ReadOnlySource({
       review={review}
       active={active}
       onScroller={setScroller}
+      conflictRows={conflictRows}
     />
   );
 }

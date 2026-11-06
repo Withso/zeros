@@ -1,0 +1,9 @@
+{
+  "id": "cloud-relay-temporary-source-grace",
+  "kind": "replay",
+  "area": "control-plane",
+  "fixedBy": "pr:865",
+  "symptom": "Under slow database reads, a source re-verification exceeded its 5 s wait (`github_verification_busy`/`expired`). The relay's non-admission re-check then revoked the whole room, and the user's bridge and every client dropped mid-session on Alpha.",
+  "rule": "A temporary verification failure keeps an already-authorized room only until the source authority's original absolute grace deadline, under the same proof, with a bounded retry. Revocations, changed proofs or source revisions, admission and app/session reads stay fresh (principles 4, 9, 11).",
+  "check": "pnpm --dir apps/control-plane test src/cloud/relay.test.ts src/cloud/source-availability.test.ts"
+}

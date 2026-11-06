@@ -290,6 +290,17 @@ export function loadWorkspaceFileRead(
   );
 }
 
+/** A read that guards a write. It never shares a read that began before the
+ * call, so the content it returns was on disk after the caller asked. */
+export function loadWorkspaceFileReadForWrite(
+  query: WorkspaceFileReadQuery,
+): Promise<ReadFileResult> {
+  // A stale key makes a pending read queue a follow-up instead of being
+  // shared, and keeps that earlier response from being published.
+  readCacheFor(query.cwd).invalidate(workspaceFileReadKey(query));
+  return loadWorkspaceFileRead(query, { force: true });
+}
+
 export function loadWorkspaceFileDiff(
   query: WorkspaceFileDiffQuery,
   options: { force?: boolean; maxAgeMs?: number } = {},
