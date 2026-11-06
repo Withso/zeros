@@ -303,7 +303,7 @@ export class CloudV2SourceAuthority {
     await this.observeSources(workspace.organizationId, workspace.creatorUserId, sources.names, sources.ids);
   }
 
-  /** proof comes only from the current worker token or room/session database
+  /** proof comes only from a live creator, worker token or room/session database
    * read. Never accept these revisions from request bodies or a cached client. */
   async continueWorkspace(workspace: CloudV2Workspace, proof?: CloudSourceProof): Promise<CloudSourceContinuation> {
     if (workspace.state !== "running") {
