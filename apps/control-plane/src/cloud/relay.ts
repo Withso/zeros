@@ -16,6 +16,8 @@ import { emitCloudV2Timing, type CloudV2TimingRecord } from "./lifecycle.js";
 import { isGithubAccessRevoked } from "../github-availability.js";
 import { CLOUD_SOURCE_REFRESH_MS, type CloudSourceContinuation, type CloudSourceProof } from "./source-authority.js";
 
+/** Bounds a lost cross-replica revocation notice for app frames between reads. */
+const APP_AUTHORITY_WINDOW_MS = 5_000;
 export const CLOUD_V2_BRIDGE_PROTOCOL = "zeros.cloud.v2";
 export const CLOUD_V2_EXPLICIT_WAKE_PROTOCOL = "zeros.cloud.v2.explicit-wake";
 const BRIDGE_PATH = /^\/v2\/cloud\/workspaces\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/bridge$/;
@@ -53,6 +55,8 @@ type Room = {
   worker: WebSocket | null; ready: boolean; loginRevision: string | null; configAt: number;
   configFlight?: ConfigFlight; dialing?: Promise<void>; idleTimer?: NodeJS.Timeout;
   authorityFlight?: Promise<Authority>; sourceCheckAt: number;
+  /** App frames forward without a read until this time, at this security revision. */
+  authorizedUntil?: number; authorizedRevision?: number;
   clients: Map<string, { ws: WebSocket; sessionId: string | null }>; queued: Map<string, unknown[]>;
   admitting: Map<string, WebSocket>;
   delivered: Map<string, Map<string, DeliveredPrompt>>;
@@ -169,6 +173,7 @@ export class CloudV2Relay {
   private async authorize(room: Room, admittingSessionId: string | null, admission: boolean): Promise<Authority> {
     if (room.revoked || this.closed) return "revoked";
     const revision = this.securityRevision;
+    const readStartedAt = this.deps.now?.() ?? Date.now();
     const sessions = new Set([...room.clients.values()].flatMap(client => client.sessionId ? [client.sessionId] : []));
     if (admittingSessionId) sessions.add(admittingSessionId);
     let snapshot;
@@ -222,13 +227,20 @@ export class CloudV2Relay {
       const ws = room.worker;
       void this.refreshConfig(room, ws, Date.now() - room.configAt >= CONFIG_REFRESH_MS).catch(() => ws.close(1011, "config_unavailable"));
     }
+    if (!admission && revision === this.securityRevision && !room.revoked) {
+      // A client admitted during this read is not in its expiry; the next frame re-reads.
+      if ([...room.clients.values()].every(client => !client.sessionId || sessions.has(client.sessionId))) {
+        room.authorizedUntil = Math.min(room.sourceCheckAt, snapshot.validUntil ?? Infinity, readStartedAt + APP_AUTHORITY_WINDOW_MS);
+        room.authorizedRevision = revision;
+      } else delete room.authorizedUntil;
+    }
     return "allowed";
   }
-  private revalidate(): void { for (const room of this.rooms.values()) void this.authorized(room); }
+  private revalidate(): void { for (const room of this.rooms.values()) { delete room.authorizedUntil; void this.authorized(room); } }
   readonly revalidateSources = AsyncResource.bind((scope: { organizationId?: string; ownerUserId?: string }): void => {
     this.securityRevision++;
     for (const room of this.rooms.values()) if ((!scope.organizationId || room.workspace.organizationId === scope.organizationId) &&
-      (!scope.ownerUserId || room.workspace.creatorUserId === scope.ownerUserId)) void this.authorized(room);
+      (!scope.ownerUserId || room.workspace.creatorUserId === scope.ownerUserId)) { delete room.authorizedUntil; void this.authorized(room); }
   }, "cloud-v2-source-wake");
   private watch(socket: WebSocket): void { this.alive.add(socket); socket.on("pong", () => this.alive.add(socket)); }
   private heartbeat(): void {
@@ -480,6 +492,8 @@ export class CloudV2Relay {
       if (room.worker && workspace.state !== "running") { room.worker.terminate(); room.worker = null; room.ready = false; }
       if (!room.worker) room.workspace = workspace;
       room.clients.set(clientId, { ws, sessionId });
+      // The window predates this session's expiry; the next app frame re-reads.
+      delete room.authorizedUntil;
       if (room.ready) send(room.worker, { t: "open", clientId });
       else {
         if (wake && ws.protocol !== CLOUD_V2_EXPLICIT_WAKE_PROTOCOL) { room.wakeAllowed = true; this.wake(room); }
@@ -519,6 +533,13 @@ export class CloudV2Relay {
     // The worker ignores this empty transport frame too. It cannot release
     // data, wake a VM or turn socket keepalive into a database permission poll.
     if ((frame as { type?: unknown } | null)?.type === "HEARTBEAT") return;
+    // A recent allowance covers the next app frames, so interactive requests
+    // do not each wait on a database read. Revocation clears it immediately on
+    // this replica; the short window bounds a lost cross-replica notice.
+    if (room.ready && room.worker && !room.revoked && room.clients.has(clientId) &&
+        room.authorizedRevision === this.securityRevision && (this.deps.now?.() ?? Date.now()) < (room.authorizedUntil ?? 0)) {
+      this.forward(room, room.worker, clientId, frame); return;
+    }
     if (await this.authorized(room) !== "allowed" || !room.clients.has(clientId)) return;
     if (room.ready && room.worker) { this.forward(room, room.worker, clientId, frame); return; }
     // Connection housekeeping is not explicit workspace activity. Bridge
