@@ -90,7 +90,7 @@ const DIAGNOSTIC_REQUEST_TYPES = new Set(["WORKSPACE_REQUEST", "PTY_LIST", "PTY_
   "AGENT_LIST_AGENTS", "AGENT_INIT_AGENT", "AGENT_NEW_SESSION", "AGENT_LOAD_SESSION", "AGENT_PROMPT", ...CLOUD_CONTROL_REQUESTS]);
 const DIAGNOSTIC_OPERATIONS = new Set(["workspace.list", "workspace.get", "workspace.lifecycleStatus",
   "chats.list", "chats.replaceAll", "messages.window", "messages.windowOlder",
-  "git.status", "git.diff", "git.log", "git.reviewHunks", "file.read", "file.list", "design.status"]);
+  "git.status", "git.diff", "git.log", "file.read", "file.list", "design.status"]);
 type CloudDiagnosticEvent = "close" | "request_failed" | "reconnect" | "connect" | "ready" | "rejection";
 /** Secret-free connection identity attached to cloud bridge diagnostics. */
 type CloudDiagnosticScope = { organizationId: string; workspaceId: string; generation: number; authorityEpoch: number;

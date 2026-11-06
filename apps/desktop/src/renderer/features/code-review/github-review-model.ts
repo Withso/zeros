@@ -87,6 +87,9 @@ export function githubReviewThreadItem(
         id: `github:${comment.author.login}`,
         name: comment.author.login,
         kind: comment.author.kind === "bot" ? "integration" : "human",
+        ...(comment.author.avatarUrl
+          ? { avatarUrl: comment.author.avatarUrl }
+          : {}),
       },
       body: comment.body,
       createdAt: comment.createdAt,
@@ -96,7 +99,11 @@ export function githubReviewThreadItem(
       revision,
       thread.isResolved,
       thread.isOutdated,
-      thread.comments.map((comment) => [comment.id, comment.updatedAt]),
+      thread.comments.map((comment) => [
+        comment.id,
+        comment.updatedAt,
+        comment.author.avatarUrl,
+      ]),
     ]),
     outdated: thread.isOutdated || thread.line === null,
     anchorMissing: thread.line === null && thread.originalLine === null,

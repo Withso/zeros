@@ -1030,7 +1030,7 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
   const pageSelectionPoint = await designCanvasPoint(page, { empty: true });
   await page.mouse.click(pageSelectionPoint.x, pageSelectionPoint.y);
   await waitFor(
-    async () => (await inspectorHeader.textContent())?.trim() === "Page",
+    async () => (await inspectorHeader.getAttribute("data-design-selection-type")) === "Page",
     "design-page-background-selection",
   );
   const pageBackgroundEditor = inspector.locator(
@@ -1069,7 +1069,7 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
   await page.keyboard.press("Escape");
   await layersPanel.locator('[data-design-layer-id="home-heading"]').click();
   await waitFor(
-    async () => (await inspectorHeader.textContent())?.trim() === "Text",
+    async () => (await inspectorHeader.getAttribute("data-design-selection-type")) === "Text",
     "design-page-background-return-to-layer",
   );
   check(
@@ -1141,7 +1141,7 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
   check(
     "CSS mode keeps the Style and selection rows above one-line computed declarations",
     (await stylePanelHeader.isVisible()) &&
-      (await inspectorHeader.textContent())?.trim() === "Text" &&
+      (await inspectorHeader.getAttribute("data-design-selection-type")) === "Text" &&
       (await computedCssEditor.isVisible()) &&
       (await computedCssLines.count()) > 0 &&
       (await computedCssLines.allTextContents()).every(
@@ -1241,7 +1241,7 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
   await homeFrameRow.click();
   const frameStyleReady = await waitFor(
     async () =>
-      (await inspectorHeader.textContent())?.trim() === "Frame" &&
+      (await inspectorHeader.getAttribute("data-design-selection-type")) === "Frame" &&
       (await inspector.locator("[data-design-style-editor]").isVisible()) &&
       (await inspector.getByLabel("Opacity", { exact: true }).count()) === 1,
     "design-frame-complete-style-editor",
@@ -1334,13 +1334,15 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
   await layersPanel.locator('[data-design-layer-id="home-heading"]').click();
   await waitFor(
     async () =>
-      (await inspectorHeader.textContent())?.trim() === "Text" &&
+      (await inspectorHeader.getAttribute("data-design-selection-type")) === "Text" &&
       (await inspector.locator("[data-design-style-editor]").isVisible()),
     "design-heading-style-editor-restored",
   );
   check(
     "design inspector shows one name row without tags, metadata, or frame actions",
-    (await inspectorHeader.textContent())?.trim() === "Text" &&
+    (await inspectorHeader.getAttribute("data-design-selection-type")) === "Text" &&
+      // The row names the layer itself, not just its type.
+      ((await inspectorHeader.textContent()) ?? "").includes("Make the next move unmistakable.") &&
       (await inspectorHeader.evaluate(
         (header) => header.parentElement?.children.length,
       )) === 1 &&

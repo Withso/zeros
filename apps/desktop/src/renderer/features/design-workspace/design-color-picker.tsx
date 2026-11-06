@@ -15,6 +15,7 @@ import {
 } from "../../shared/ui/primitives";
 import { cn } from "../../shared/ui/cn";
 import { beginDesignPointerGesture } from "./design-pointer-gesture";
+import { DesignDetachVariableButton, DesignVariableGlyph } from "./design-inspector-kit";
 import {
   InspectorIconButton,
   InspectorSegmented,
@@ -1254,6 +1255,7 @@ export function DesignColorValueInputs({
     acceptedValue === value;
   return (
     <>
+      {tokenShown ? <DesignVariableGlyph className="ml-1.5" /> : null}
       <input
         ref={hexRef}
         value={tokenShown ? tokenName!.replace(/^--/, "") : hexDraft}
@@ -1288,7 +1290,12 @@ export function DesignColorValueInputs({
         }}
         onKeyDown={keyDown(() => setHexDraft(displayHex))}
       />
-      {parsed ? (
+      {tokenShown ? (
+        <DesignDetachVariableButton
+          disabled={disabled}
+          onDetach={() => commitColor(value)}
+        />
+      ) : parsed ? (
         <>
           <span className="bg-border2 h-4 w-px shrink-0" aria-hidden="true" />
           <input

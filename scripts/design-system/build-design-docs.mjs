@@ -55,6 +55,7 @@ const NEUTRAL_GROUPS = [
   ["Text and icons", ["fg1", "fg2", "fg3", "muted-fg"]],
   ["Borders and focus", ["border1", "border2", "border3", "border4", "highlighted-bright"]],
   ["Inverted pair and primary button", ["inverted-bg", "inverted-fg", "primary-button-bg", "primary-button-hover", "primary-button-fg"]],
+  ["Neutral solid fills", ["neutral-secondary", "neutral-secondary-hover", "neutral-secondary-fg"]],
 ];
 const FAMILIES = [
   ["red", "error · −N"],
@@ -140,7 +141,7 @@ export function renderTokenReference(root) {
   );
   for (const [family, meaning] of FAMILIES) {
     const roles = ["primary", "bg", "fg"];
-    if (family === "red") roles.push("secondary", "secondary-hover", "secondary-fg");
+    if (["red", "green", "blue"].includes(family)) roles.push("secondary", "secondary-hover", "secondary-fg");
     if (family === "yellow") roles.push("icon");
     roles.forEach((role, index) => {
       const token = `${family}-${role}`;

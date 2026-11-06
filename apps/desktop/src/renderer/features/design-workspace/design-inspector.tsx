@@ -94,12 +94,16 @@ import {
   type DesignStyleOriginLabel,
 } from "./design-style-provenance";
 import {
+  DesignDetachVariableButton,
+  DesignVariableGlyph,
   InspectorGlyph,
   InspectorSection,
   InspectorSelect,
 } from "./design-inspector-kit";
 import {
+  designFrameDisplayName,
   designFrameLayerLabel,
+  designRuntimeLayerDisplayName,
   designRuntimeLayerLabel,
 } from "./design-layer-label";
 import {
@@ -611,6 +615,7 @@ function InspectorEditField({
             {glyph ? <InspectorGlyph name={glyph} /> : labelText}
           </Label>
         </button>
+        {tokenShown ? <DesignVariableGlyph className="mr-1.5" /> : null}
         <Input
           ref={inputRef}
           id={id}
@@ -711,6 +716,20 @@ function InspectorEditField({
           }}
         />
         {suffix && !tokenShown ? <span className="zd-field-suffix">{suffix}</span> : null}
+        {tokenShown && !motion ? (
+          <DesignDetachVariableButton
+            disabled={disabled}
+            onDetach={() => {
+              // The variable's resolved value, written as a plain value; the
+              // commit path would treat it as unchanged.
+              void onCommit(String(value)).catch((fieldError) =>
+                toast.error(`Couldn't update ${label.toLowerCase()}`, {
+                  description: errorMessage(fieldError),
+                }),
+              );
+            }}
+          />
+        ) : null}
         {showUnit ? (
           <Select
             value={presentation.unit!}
@@ -2229,6 +2248,21 @@ export const DesignInspector = React.memo(function DesignInspector({
               ? designRuntimeLayerLabel(selectedNode)
               : "Nothing selected"
             : "Page";
+  // The layer's own name, as in Layers; the type sits beside it when the name
+  // says something else. `selectionName` stays the type, as the glyph and
+  // `data-design-selection-type` read it.
+  const selectionTitle =
+    styleNodeIds.length > 1
+      ? null
+      : frameSelected && frame && !selectedNodeId
+        ? designFrameDisplayName(frame)
+        : selectedNode && selectedNodeId && selectedNode.oid === selectedNodeId
+          ? designRuntimeLayerDisplayName(selectedNode)
+          : elementDetails
+            ? designRuntimeLayerDisplayName(elementDetails)
+            : null;
+  const selectionType =
+    selectionTitle && selectionTitle !== selectionName ? selectionName : null;
   const SelectionGlyph =
     styleNodeIds.length > 1
       ? Layers
@@ -2246,6 +2280,7 @@ export const DesignInspector = React.memo(function DesignInspector({
     <section className="border-border1 shrink-0 border-b">
       <div
         data-design-inspector-header=""
+        data-design-selection-type={selectionName}
         className="flex h-9 min-w-0 items-center gap-2 pr-1.5 pl-3"
       >
         {selectionName === "Page" && workspaceId && pages?.length ? (
@@ -2253,7 +2288,10 @@ export const DesignInspector = React.memo(function DesignInspector({
             activePageId={activePageId} frames={pageFrames ?? []} active={active} />
         ) : <>
           <SelectionGlyph className="text-fg2 size-3.5 shrink-0" aria-hidden="true" />
-          <span className="text-fg1 min-w-0 flex-1 truncate text-xs font-medium">{selectionName}</span>
+          <span className="text-fg1 min-w-0 flex-1 truncate text-xs font-medium">{selectionTitle ?? selectionName}</span>
+          {selectionType ? (
+            <span className="text-fg3 shrink-0 text-3xxs leading-4 tabular-nums">{selectionType}</span>
+          ) : null}
         </>}
       </div>
     </section>

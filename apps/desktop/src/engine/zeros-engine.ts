@@ -511,8 +511,6 @@ const DESIGN_OWNER_REGISTRY_CHANGE_OPS = new Set<string>([
  * identity publication. Native Code and Git remain unrestricted; qualified
  * cloud Code additionally performs its immutable authority handoff. */
 const DESIGN_RECOGNITION_PATH_OPS = new Set<string>([
-  "git.reviewHunk",
-  "git.resolveConflict",
   "file.write",
   "git.stage",
   "git.unstage",
@@ -562,7 +560,6 @@ function workspaceOpCanChangeDesignRecognition(
   inspectedHunkPaths: readonly string[] = [],
 ): boolean {
   if (!DESIGN_RECOGNITION_PATH_OPS.has(op)) return false;
-  if (op === "git.reviewHunk" && params.decision !== "rejected") return false;
   // `git apply` accepts traditional/quoted/binary/rename patches that cannot
   // be classified safely with a `diff --git` regex. The caller asks Git's own
   // parser first, so ordinary source hunks keep the fast path while a settings
@@ -580,7 +577,7 @@ function workspaceOpCanChangeDesignRecognition(
     return true;
   }
   const candidates =
-    op === "file.write" || op === "git.resolveConflict"
+    op === "file.write"
       ? [params.path]
       : Array.isArray(params.paths)
         ? params.paths
@@ -7757,7 +7754,7 @@ export class ZerosEngine {
             )
           : await operation;
       const changed = dbChangedKinds(op, result);
-      const workspaceIds = changed && (changed.includes("codeReview") || changed.includes("gitReview")) && typeof params.workspaceId === "string"
+      const workspaceIds = changed && changed.includes("codeReview") && typeof params.workspaceId === "string"
         ? [params.workspaceId]
         : changed?.includes("workspaces")
         ? dbChangedWorkspaceIds(params, result)

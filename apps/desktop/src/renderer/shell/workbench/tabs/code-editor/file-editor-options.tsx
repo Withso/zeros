@@ -10,6 +10,7 @@ import {
   Switch,
 } from "@/renderer/shared/ui/primitives";
 import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
+import { cn } from "@/renderer/shared/ui/cn";
 import {
   setFileEditorPreferences,
   useFileEditorPreferences,
@@ -22,17 +23,28 @@ export interface FileEditorControls {
   canDiscard: boolean;
   save: () => void;
   discard: () => void;
+  /** Conflict blocks still in the draft, for the header navigator. */
+  conflicts: {
+    count: number;
+    /** 1-based block at or after the caret. */
+    shown: number;
+    previous: () => void;
+    next: () => void;
+  } | null;
 }
 
 export function FileEditorOptions({
   active,
   controls,
   canDiff,
+  diffWaiting = false,
   onDiffViewChange,
 }: {
   active: boolean;
   controls: FileEditorControls | null;
   canDiff: boolean;
+  /** Git still lists the file as conflicted, so Diff view waits. */
+  diffWaiting?: boolean;
   onDiffViewChange: () => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -83,13 +95,23 @@ export function FileEditorOptions({
         <Separator className="-mx-1 my-1 w-auto" />
         <label
           htmlFor={`${id}-diff`}
-          className="text-fg1 flex min-h-7 cursor-pointer items-center justify-between gap-4 rounded-lg px-2 py-1 text-xs leading-4.5"
+          className={cn(
+            "text-fg1 flex min-h-7 items-center justify-between gap-4 rounded-lg px-2 py-1 text-xs leading-4.5",
+            canDiff && !diffWaiting && "cursor-pointer",
+          )}
         >
-          Diff view
+          <span className="flex min-w-0 flex-col">
+            Diff view
+            {diffWaiting && (
+              <span className="text-fg3 text-3xxs leading-4">
+                Resolve conflicts first
+              </span>
+            )}
+          </span>
           <Switch
             id={`${id}-diff`}
             checked={preferences.diffView}
-            disabled={!canDiff}
+            disabled={!canDiff || diffWaiting}
             onCheckedChange={(diffView) => {
               setFileEditorPreferences({ diffView });
               onDiffViewChange();

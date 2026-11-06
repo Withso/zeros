@@ -119,5 +119,5 @@ successfully loaded discussions. Markdown uses the existing sanitized renderer.
 Adjacent engine, cloud-policy and renderer tests cover revision changes,
 ownership denial, malformed anchors, pagination bounds, identity preservation,
 cache isolation, stale responses and stable row reuse. The real-browser review
-smoke is `scripts/ui-smoke-code-review.mjs`; guarded hunk/conflict behavior is
-documented in [Git review actions](git-review-actions.md).
+smoke is `scripts/ui-smoke-code-review.mjs`; retired hunk review and in-place
+merge conflicts are documented in [Git review actions](git-review-actions.md).

@@ -248,7 +248,7 @@ const DropdownMenuContent = React.forwardRef<
 DropdownMenuContent.displayName = DropdownMenuPrimitive.Content.displayName;
 
 const ROW =
-  "focus:bg-bg3-hover focus:text-fg1 focus:[&_.text-muted-fg]:text-fg3 relative flex cursor-default items-center transition-colors outline-none select-none data-[disabled]:pointer-events-none data-[disabled]:opacity-50";
+  "focus:bg-bg3-hover focus:text-fg1 focus:[&_.text-muted-fg]:text-fg3 relative flex cursor-default items-center transition-colors outline-none select-none data-[disabled]:pointer-events-none data-[disabled]:opacity-50 aria-disabled:opacity-50";
 
 const DropdownMenuItem = React.forwardRef<
   React.ComponentRef<typeof DropdownMenuPrimitive.Item>,

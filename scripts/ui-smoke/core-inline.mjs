@@ -1790,6 +1790,11 @@ export async function runDiffFilesSmoke({
     .evaluate((line) => {
       const cs = getComputedStyle(line);
       const paddingLeft = parseFloat(cs.paddingLeft);
+      // The unindented first line carries only the editor theme's padding.
+      const plainPaddingLeft = parseFloat(
+        getComputedStyle(line.parentElement.querySelector(".cm-line"))
+          .paddingLeft,
+      );
       const textIndent = parseFloat(cs.textIndent);
       // `text-indent: <n>ch hanging` — the keyword is the whole mechanism, so
       // read it rather than inferring it from the sign.
@@ -1810,6 +1815,7 @@ export async function runDiffFilesSmoke({
       rows.sort((a, b) => a.top - b.top);
       return {
         paddingLeft,
+        plainPaddingLeft,
         textIndent,
         hanging,
         contentLeft,
@@ -1830,12 +1836,14 @@ export async function runDiffFilesSmoke({
   // Row 1 stays inside the content box. The classic `padding-left: Nch;
   // text-indent: -Nch` pair hung the same rows but pulled row 1 OUT of it,
   // which drags the CSS tab-stop origin along and renders leading tabs short.
+  // The pair also pads an indented line beyond an unindented one; the theme's
+  // own padding is the same on both.
   check(
     "Row 1 is not pulled out of the line's content box (tab stops intact)",
     hang !== null &&
-      hang.paddingLeft === 6 &&
+      hang.paddingLeft === hang.plainPaddingLeft &&
       Math.abs(hang.rowLefts[0] - hang.contentLeft) < 0.5,
-    `row 1 at ${hang?.rowLefts[0]?.toFixed(1)}, content box at ${hang?.contentLeft?.toFixed(1)}, padding-left ${hang?.paddingLeft}px`,
+    `row 1 at ${hang?.rowLefts[0]?.toFixed(1)}, content box at ${hang?.contentLeft?.toFixed(1)}, padding-left ${hang?.paddingLeft}px (unindented line ${hang?.plainPaddingLeft}px)`,
   );
   check(
     "Continuation rows align with row 1's indent point",

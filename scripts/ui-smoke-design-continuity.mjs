@@ -187,7 +187,7 @@ async function installSampler() {
         runtimeOwnerPath: c.measurement.runtime.getState().byWorkspace[owner]?.folder ?? null,
         retainedSurfaces: host?.querySelectorAll("[data-design-retained-workspace]").length ?? 0,
         frameSelected: view?.frameSelected ?? false,
-        inspectorHeader: inspector?.querySelector("[data-design-inspector-header]")?.textContent?.trim() ?? "",
+        inspectorHeader: inspector?.querySelector("[data-design-inspector-header]")?.getAttribute("data-design-selection-type") ?? "",
         fields, selectedRows, layerCount,
         pendingLayers: /Loading frame|Preparing frame/i.test(layers?.textContent ?? ""),
         layersHidden: active && Boolean(file) && !visible(layers),

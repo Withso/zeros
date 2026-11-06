@@ -18,6 +18,7 @@ import { publishNativeSurfaceOverlayIntent } from "@/renderer/shared/ui/native-s
 import {
   ClipboardPaste,
   Clock3,
+  Ellipsis,
   Hash,
   Layers,
   Palette,
@@ -40,6 +41,10 @@ import type {
 import {
   Button,
   DialogCloseButton,
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
   Input,
   ScrollArea,
   ScrollBar,
@@ -67,9 +72,14 @@ import {
   parseDesignCssVariables,
   type DesignCssVariableImport,
   type DesignTokenValueType,
+  designThemeDeleteBlocker,
+  designThemeDeleteOperations,
+  designThemeRenameBlocker,
+  designThemeRenameOperations,
   designThemeVariableNameIssue,
 } from "./design-theme-css";
 import { DesignColorPicker, DesignColorSwatch } from "./design-color-picker";
+import { DesignThemeVariableDeleteDialog } from "./design-theme-variable-delete-dialog";
 import { scrubDesignNumericValue } from "./design-style-values";
 import {
   DesignThemeSourceRail,
@@ -458,6 +468,10 @@ export const DesignThemeEditor = React.memo(function DesignThemeEditor({
   );
   const [newVariableOpen, setNewVariableOpen] = useState(false);
   const [newVariableName, setNewVariableName] = useState("");
+  const [renamingVariable, setRenamingVariable] = useState<string | null>(null);
+  const [variableDraft, setVariableDraft] = useState("");
+  const variableRenameCancelled = useRef(false);
+  const [deletingVariable, setDeletingVariable] = useState<DesignTokenWire | null>(null);
   const [newVariableValue, setNewVariableValue] = useState("");
   const [newThemeOpen, setNewThemeOpen] = useState(false);
   const [newTheme, setNewTheme] = useState("");
@@ -699,6 +713,58 @@ export const DesignThemeEditor = React.memo(function DesignThemeEditor({
         description: errorMessage(error),
       });
     }
+  };
+
+  const operationId = () => `theme-variable-${crypto.randomUUID()}`;
+  const startVariableRename = (token: DesignTokenWire) => {
+    variableRenameCancelled.current = false;
+    setVariableDraft(token.name);
+    setRenamingVariable(token.name);
+  };
+  const renameVariable = async (token: DesignTokenWire) => {
+    if (variableRenameCancelled.current) return;
+    variableRenameCancelled.current = true;
+    const next = variableDraft.trim();
+    setRenamingVariable(null);
+    if (!next || next === token.name) return;
+    const issue = designThemeVariableNameIssue(next, tokens);
+    if (issue !== null) {
+      toast.error(`Couldn't rename ${token.name}`, {
+        description: issue === "taken" ? `${next} already exists` : "Names start with --",
+      });
+      return;
+    }
+    try {
+      await applyOperations(
+        `rename:${token.name}`,
+        `Rename ${token.name} to ${next}`,
+        designThemeRenameOperations(token, next, operationId),
+      );
+    } catch (error) {
+      toast.error(`Couldn't rename ${token.name}`, {
+        description: errorMessage(error),
+      });
+    }
+  };
+  const deleteVariable = async (token: DesignTokenWire) => {
+    setDeletingVariable(null);
+    try {
+      await applyOperations(
+        `delete:${token.name}`,
+        `Delete ${token.name}`,
+        designThemeDeleteOperations(token, operationId),
+      );
+    } catch (error) {
+      toast.error(`Couldn't delete ${token.name}`, {
+        description: errorMessage(error),
+      });
+    }
+  };
+  // A variable something reads asks first; its uses fall back without it.
+  const requestDelete = (token: DesignTokenWire) => {
+    if (token.usageCount > 0 || token.usageCountKnown === false)
+      setDeletingVariable(token);
+    else void deleteVariable(token);
   };
 
   const canEdit = Boolean(
@@ -1376,7 +1442,7 @@ export const DesignThemeEditor = React.memo(function DesignThemeEditor({
                             key={token.name}
                             role="row"
                             data-design-theme-row=""
-                            className="zd-theme-row"
+                            className="zd-theme-row group/theme-row"
                             onKeyDown={moveThemeRowFocus}
                           >
                             <div role="cell" className="zd-theme-name-cell">
@@ -1391,21 +1457,58 @@ export const DesignThemeEditor = React.memo(function DesignThemeEditor({
                                   className="text-fg3 size-3.5 shrink-0"
                                 />
                               )}
-                              <Tooltip
-                                className="zd-theme-tooltip"
-                                label={
-                                  readOnly
-                                    ? `${token.name} · ${selectedSource!.path}`
-                                    : `${token.name}${token.usageCountKnown === false ? "" : ` · ${token.usageCount} ${token.usageCount === 1 ? "use" : "uses"}`}${overrides ? ` · overrides ${overrides.join(", ")}` : ""}`
-                                }
-                              >
-                                <span
-                                  tabIndex={0}
-                                  className="zd-theme-token-name"
+                              {renamingVariable === token.name ? (
+                                <Input
+                                  autoFocus
+                                  value={variableDraft}
+                                  aria-label={`Rename ${token.name}`}
+                                  aria-invalid={
+                                    variableDraft.trim() !== token.name &&
+                                    designThemeVariableNameIssue(variableDraft, tokens) !== null
+                                      ? true
+                                      : undefined
+                                  }
+                                  spellCheck={false}
+                                  autoComplete="off"
+                                  size="compact"
+                                  appearance="inline"
+                                  mono
+                                  // Shown only while renaming, so it keeps the
+                                  // editing fill under the pointer too.
+                                  className="bg-bg1 hover:bg-bg1 min-w-0 flex-1"
+                                  onFocus={(event) => event.currentTarget.select()}
+                                  onChange={(event) => setVariableDraft(event.currentTarget.value)}
+                                  onKeyDown={(event) => {
+                                    event.stopPropagation();
+                                    if (event.nativeEvent.isComposing) return;
+                                    if (event.key === "Enter") {
+                                      event.preventDefault();
+                                      event.currentTarget.blur();
+                                    } else if (event.key === "Escape") {
+                                      event.preventDefault();
+                                      variableRenameCancelled.current = true;
+                                      setRenamingVariable(null);
+                                    }
+                                  }}
+                                  onBlur={() => void renameVariable(token)}
+                                />
+                              ) : (
+                                <Tooltip
+                                  className="zd-theme-tooltip"
+                                  label={
+                                    readOnly
+                                      ? `${token.name} · ${selectedSource!.path}`
+                                      : `${token.name}${token.usageCountKnown === false ? "" : ` · ${token.usageCount} ${token.usageCount === 1 ? "use" : "uses"}`}${overrides ? ` · overrides ${overrides.join(", ")}` : ""}`
+                                  }
                                 >
-                                  {token.name}
-                                </span>
-                              </Tooltip>
+                                  <span
+                                    tabIndex={0}
+                                    className="zd-theme-token-name"
+                                  >
+                                    {token.name}
+                                  </span>
+                                </Tooltip>
+                              )}
                               {overrides ? (
                                 <Layers
                                   aria-hidden="true"
@@ -1489,7 +1592,16 @@ export const DesignThemeEditor = React.memo(function DesignThemeEditor({
                                 )}
                               </div>
                             ))}
-                            <div role="cell" />
+                            <div role="cell" className="flex justify-center">
+                              {readOnly ? null : (
+                                <VariableActions
+                                  token={token}
+                                  disabled={!canEdit}
+                                  onRename={() => startVariableRename(token)}
+                                  onDelete={() => requestDelete(token)}
+                                />
+                              )}
+                            </div>
                           </div>
                         );
                       })}
@@ -1527,8 +1639,89 @@ export const DesignThemeEditor = React.memo(function DesignThemeEditor({
               </ScrollArea>
             </div>
           </div>
+          <DesignThemeVariableDeleteDialog
+            variable={deletingVariable}
+            onCancel={() => setDeletingVariable(null)}
+            onDelete={(variable) => void deleteVariable(variable)}
+          />
         </DialogPrimitive.Content>
       </DialogPrimitive.Portal>
     </DialogPrimitive.Root>
   );
 });
+
+/** A variable's ⋯: Rename and Delete, each saying why when it cannot run. */
+function VariableActions({
+  token,
+  disabled,
+  onRename,
+  onDelete,
+}: {
+  token: DesignTokenWire;
+  disabled: boolean;
+  onRename: () => void;
+  onDelete: () => void;
+}) {
+  const renameBlocker = designThemeRenameBlocker(token);
+  const deleteBlocker = designThemeDeleteBlocker(token);
+  // Rename starts once the menu has gone: its focus trap would pull the new
+  // field's focus back, and a keyboard close would refocus this trigger.
+  const renameChosen = useRef(false);
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <IconButton
+          size="compact"
+          label={`${token.name} actions`}
+          disabled={disabled}
+          className="opacity-0 group-hover/theme-row:opacity-100 group-focus-within/theme-row:opacity-100 data-[state=open]:opacity-100"
+        >
+          <Ellipsis />
+        </IconButton>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent
+        align="end"
+        className="min-w-44"
+        onCloseAutoFocus={(event) => {
+          if (!renameChosen.current) return;
+          renameChosen.current = false;
+          event.preventDefault();
+          onRename();
+        }}
+      >
+        {/* aria-disabled, not disabled: arrow keys still reach the reason. */}
+        <DropdownMenuItem
+          aria-disabled={renameBlocker !== null || undefined}
+          onSelect={(event) => {
+            if (renameBlocker !== null) {
+              event.preventDefault();
+              return;
+            }
+            renameChosen.current = true;
+          }}
+        >
+          Rename…
+          {renameBlocker ? (
+            <span className="text-fg3 ml-auto pl-3 text-3xxs">{renameBlocker}</span>
+          ) : null}
+        </DropdownMenuItem>
+        <DropdownMenuItem
+          variant="destructive"
+          aria-disabled={deleteBlocker !== null || undefined}
+          onSelect={(event) => {
+            if (deleteBlocker !== null) {
+              event.preventDefault();
+              return;
+            }
+            onDelete();
+          }}
+        >
+          Delete
+          {deleteBlocker ? (
+            <span className="text-fg3 ml-auto pl-3 text-3xxs">{deleteBlocker}</span>
+          ) : null}
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}

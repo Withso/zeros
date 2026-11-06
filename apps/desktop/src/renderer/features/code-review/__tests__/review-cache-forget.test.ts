@@ -3,18 +3,12 @@ import type {
   CodeReviewListResult,
   CodeReviewThread,
 } from "@zeros/protocol/code-review";
-import type { HunkReviewDecision } from "@zeros/protocol/git-review-actions";
 import { listCodeReviewThreads } from "@/renderer/platform/bridge/code-review-bridge";
 import {
   codeReviewCache,
   codeReviewCacheKey,
   publishCodeReviewThread,
 } from "../review-cache";
-import {
-  hunkReviewCache,
-  hunkReviewCacheKey,
-  publishHunkReview,
-} from "../hunk-review-cache";
 import {
   beginReviewCacheRequest,
   forgetReviewCachesForFolders,
@@ -74,7 +68,6 @@ const key = codeReviewCacheKey(folder, "workspace");
 beforeEach(() => {
   forgetReviewCachesForFolders(() => true);
   codeReviewCache.clear();
-  hunkReviewCache.clear();
   vi.clearAllMocks();
 });
 
@@ -96,30 +89,13 @@ describe("review cache owner removal", () => {
     expect(codeReviewCache.peekSnapshot(key).data).toBe(reopened);
   });
 
-  it("fences a late hunk decision while allowing a separately owned pending request", async () => {
-    const hunkKey = hunkReviewCacheKey("engine", folder, "file.ts");
+  it("keeps a separately owned nested request current when its parent owner is removed", () => {
     const request = beginReviewCacheRequest(folder);
     const nested = beginReviewCacheRequest(`${folder}/nested`);
-    const response = deferred<HunkReviewDecision>();
-    const mutation = response.promise
-      .then((result) =>
-        publishHunkReview(hunkReviewCache, hunkKey, result, request),
-      )
-      .finally(() => request.finish());
-    hunkReviewCache.setData(hunkKey, []);
     forgetReviewCachesForFolders((cwd) => cwd === folder);
-    const reopened: HunkReviewDecision[] = [];
-    hunkReviewCache.setData(hunkKey, reopened);
-    response.resolve({
-      key: "a".repeat(64),
-      path: "file.ts",
-      comparison: "worktree-vs-head",
-      decision: "accepted",
-      updatedAt: 1,
-    });
-    await mutation;
-    expect(hunkReviewCache.peekSnapshot(hunkKey).data).toBe(reopened);
+    expect(request.isCurrent()).toBe(false);
     expect(nested.isCurrent()).toBe(true);
+    request.finish();
     nested.finish();
   });
 

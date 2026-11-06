@@ -130,18 +130,75 @@ export function finishDiffRender(node: HTMLElement): void {
 
 /** Workbench diffs (Changes and the Files Diff view) read in the plain
  *  editor's type, so turning Diff view on or off moves no text: 12px mono on
- *  a 1.6 line, numbers padded 12px each side, and the editor's fg1 18%
- *  selection over any row wash. The virtualizer's line estimate is the same
+ *  a 1.6 line, numbers padded 12px each side with code 4px past them, and the
+ *  editor's fg1 18% selection over any row wash. The virtualizer's line estimate is the same
  *  height, or the estimates drift from the painted rows across files. Chat
  *  EditCards and Review keep the 13/20 chat code style. */
 const WORKBENCH_DIFF_LINE_HEIGHT = 19.2;
+
+/** A new or untracked file keeps its bars and signs but no row or gutter
+ *  wash, so a whole file never turns green; its numbers read as context. */
+const NEW_FILE_ROWS = `
+    --diffs-bg-addition-override: var(--diffs-bg);
+    --diffs-bg-addition-number-override: var(--diffs-bg);
+    --diffs-fg-number-addition-override: var(--diffs-fg-number);
+`;
+/** Each change drawn into its row: a solid 2px bar on the gutter edge (Pierre
+ *  draws 4px, striped for deletions) and a + or − in the number's right
+ *  padding, on the first visual line of a wrapped row like the number. The
+ *  comment chip takes that corner on the row it shows on. */
+const CHANGE_GUTTER_CSS = `
+  [data-indicators="bars"] [data-column-number]:is([data-line-type="change-addition"], [data-line-type="change-deletion"])::before {
+    width: 2px;
+  }
+  [data-indicators="bars"] [data-column-number][data-line-type="change-deletion"]::before {
+    background-image: none;
+    background-color: var(--diffs-deletion-base);
+  }
+  [data-column-number]:is([data-line-type="change-addition"], [data-line-type="change-deletion"])::after {
+    position: absolute;
+    top: 0;
+    right: 1px;
+    width: 10px;
+    text-align: center;
+    user-select: none;
+    pointer-events: none;
+  }
+  [data-column-number][data-line-type="change-addition"]::after { content: "+"; }
+  [data-column-number][data-line-type="change-deletion"]::after { content: "\\2212"; }
+  [data-column-number]:has([data-utility-button])::after { content: none; }
+  [data-diffs-header][data-change-type="new"] ~ pre {${NEW_FILE_ROWS}  }
+`;
+/** The editor's caret line lifts by fg1 5% over any row colour, number cell
+ *  included, instead of Pierre's outlined theme highlight. */
+const CARET_LINE_CSS = `
+  [data-line][data-editor-active-line], [data-column-number][data-editor-active-line] {
+    --diffs-computed-editor-active-line-bg: color-mix(in srgb, var(--diffs-computed-selected-line-bg) 95%, var(--fg1));
+  }
+  /* Pierre layers this sheet but not its editor's, so only important wins. */
+  [data-line][data-editor-active-line]::after { box-shadow: none !important; }
+  [data-column-number][data-editor-active-line][data-line-type^="context"] { color: var(--fg1); }
+  [data-column-number][data-editor-active-line][data-line-type="change-addition"] {
+    color: var(--diffs-fg-number-addition-override, var(--diffs-addition-base));
+  }
+  [data-column-number][data-editor-active-line][data-line-type="change-deletion"] {
+    color: var(--diffs-fg-number-deletion-override, var(--diffs-deletion-base));
+  }
+`;
 const WORKBENCH_DIFF_CSS = `
   :host {
     --diffs-font-size: 12px;
     --diffs-line-height: ${WORKBENCH_DIFF_LINE_HEIGHT}px;
   }
-  [data-column-number] { padding-inline: 12px; }
+  [data-column-number] { padding-inline: 12px; border-right-width: 0; }
+  [data-line] { padding-inline: 4px 6px; }
   ::selection { background-color: color-mix(in srgb, var(--fg1) 18%, transparent); }
+${CHANGE_GUTTER_CSS}${CARET_LINE_CSS}`;
+
+/** For a single-file diff whose base is empty (the Files Diff view of a new
+ *  or untracked file), which has no Pierre file header to key on. */
+export const NEW_FILE_DIFF_CSS = `
+  pre {${NEW_FILE_ROWS}  }
 `;
 
 /** Shared diff render options for the `options` prop of PatchDiff /

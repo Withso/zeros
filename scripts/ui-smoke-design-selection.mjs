@@ -45,7 +45,7 @@ export async function runDesignDoubleClickSelectionSmoke({ page, check }) {
       return post.call(this, message, ...rest);
     };
     const sample = () => {
-      const header = document.querySelector("[data-design-inspector-header]")?.textContent?.trim();
+      const header = document.querySelector("[data-design-inspector-header]")?.getAttribute("data-design-selection-type");
       if (probe.headers.at(-1) !== header) probe.headers.push(header);
       if (!probe.done) requestAnimationFrame(sample);
     };

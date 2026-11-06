@@ -3,9 +3,10 @@
 // ------------------------------------------------------------
 // Reads the color primitives in styles/zeros-tokens.css as data: the dark
 // `:root` block and the `[data-theme="light"]` override (light inherits every
-// token it does not redeclare). Resolves `var(--x)` aliases and HSL/RGB/RGBA
-// literals to sRGB and computes WCAG 2.x contrast, including alpha
-// composites such as `red-secondary/0.9@bg1` (the /90 hover fill over bg1).
+// token it does not redeclare). Resolves `var(--x)` aliases and HSL/RGB
+// literals (with or without alpha) to sRGB channels and computes WCAG 2.x
+// contrast, including alpha composites such as `red-secondary/0.9@bg1` (the
+// /90 hover fill over bg1).
 //
 // Shared by the contrast-contract test and the generated token reference
 // (scripts/design-system/build-design-docs.mjs), so both read the palette the
@@ -84,7 +85,7 @@ export function resolveValue(theme, name, seen = new Set()) {
 /** Intrinsic sRGB channels (0–1), quantized to 8 bits; no alpha compositing. */
 export function resolveRgb(theme, name) {
   const value = resolveValue(theme, name);
-  const hsl = value.match(/^hsl\(\s*([\d.]+)\s+([\d.]+)%\s+([\d.]+)%\s*\)$/);
+  const hsl = value.match(/^hsl\(\s*([\d.]+)\s+([\d.]+)%\s+([\d.]+)%\s*(?:\/\s*[\d.]+\s*)?\)$/);
   if (hsl) return hslToRgb(+hsl[1], +hsl[2], +hsl[3]).map((c) => Math.round(c * 255) / 255);
   const rgb = value.match(/^rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)(?:\s*,\s*[\d.]+)?\s*\)$/);
   if (rgb) return rgb.slice(1, 4).map((channel) => Math.round(+channel) / 255);

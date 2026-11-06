@@ -94,6 +94,30 @@ export async function runDesignStyleTokensSmoke({ page, check }) {
   );
   await page.getByRole("button", { name: "Style", exact: true }).click();
 
+  // A bound field shows the variable glyph and offers Detach variable, which
+  // writes the value the variable resolves to as a plain value.
+  const fillField = page.locator(
+    '[data-design-inspector] [data-design-style-property="background-color"]',
+  );
+  await fillField.locator("svg.lucide-variable").waitFor({ timeout: 5_000 });
+  await fillField
+    .getByRole("button", { name: "Detach variable", exact: true })
+    .click();
+  await page.waitForFunction(
+    () => {
+      const input = document.querySelector(
+        '[data-design-inspector] [data-design-style-property="background-color"] input[aria-label="Fill"]',
+      );
+      return input && !input.hasAttribute("data-design-style-token") && /^2F4F4F$/i.test(input.value);
+    },
+    undefined,
+    { timeout: 10_000 },
+  );
+  check(
+    "Detach variable keeps the colour and drops the variable",
+    (await fillField.getByRole("button", { name: "Detach variable", exact: true }).count()) === 0,
+  );
+
   await select("home-heading");
   await page.waitForFunction(
     () =>
@@ -111,5 +135,46 @@ export async function runDesignStyleTokensSmoke({ page, check }) {
     (await text.inputValue()) === "brand" &&
       ((await text.getAttribute("title")) ?? "").includes("Manual"),
     (await text.getAttribute("title")) ?? "",
+  );
+
+  // A number field detaches the same way: the resolved length, as a plain value.
+  await page.goto(
+    `${origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html?designTokens&numberToken`,
+    { waitUntil: "networkidle" },
+  );
+  await page
+    .locator(
+      '[data-design-frame="home.html"] iframe[data-design-document-buffer="displayed"][data-design-document-ready]',
+    )
+    .first()
+    .waitFor({ timeout: 10_000 });
+  await select("home-heading");
+  const tracking = page.locator(
+    '[data-design-inspector] [data-design-style-property="letter-spacing"]',
+  );
+  await page.waitForFunction(
+    () =>
+      document
+        .querySelector('[data-design-inspector] [data-design-style-property="letter-spacing"] input')
+        ?.getAttribute("data-design-style-token") === "--tracking",
+    undefined,
+    { timeout: 10_000 },
+  );
+  await tracking.locator("svg.lucide-variable").waitFor({ timeout: 5_000 });
+  await tracking.getByRole("button", { name: "Detach variable", exact: true }).click();
+  await page.waitForFunction(
+    () => {
+      const input = document.querySelector(
+        '[data-design-inspector] [data-design-style-property="letter-spacing"] input',
+      );
+      return input && !input.hasAttribute("data-design-style-token") && /^-1(px)?$/.test(input.value);
+    },
+    undefined,
+    { timeout: 10_000 },
+  );
+  check(
+    "a number field bound to a variable detaches to the length it resolves to",
+    (await tracking.getByRole("button", { name: "Detach variable", exact: true }).count()) === 0,
+    await tracking.locator("input").first().inputValue(),
   );
 }
