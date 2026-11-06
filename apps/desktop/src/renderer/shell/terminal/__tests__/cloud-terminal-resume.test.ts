@@ -100,7 +100,7 @@ describe("cloud terminal resume", () => {
   });
 });
 
-describe("cloud terminal resume races (P review of #859)", () => {
+describe("cloud terminal resume races", () => {
   it("does not announce a restart when a peer wins between registry read and create", async () => {
     const h = harness();
     h.ptyCreate.mockResolvedValue({ cols: 80, rows: 24, reattached: true, replay: "Peer shell" });
