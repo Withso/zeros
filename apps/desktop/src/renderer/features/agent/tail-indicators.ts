@@ -46,8 +46,14 @@ export function tailTurnInFlight(input: {
   pendingLocalTurn: boolean;
   /** The turn has already rendered at least one agent event. */
   hasEvents: boolean;
+  /** Cloud: this tail turn's durable prompt is saved and not yet terminal. */
+  durableAwaitingStart?: boolean;
 }): boolean {
   if (input.sessionStreaming) return true;
+  // A cloud send settles locally at its receipt, before the worker starts the
+  // turn. Until the first agent event or a terminal prompt state, the turn is
+  // still running from the user's point of view.
+  if (input.durableAwaitingStart && !input.hasEvents) return true;
   // A send pending session (re)creation: the prompt is committed to the
   // transcript but the agent has not started, so the turn is not settled and
   // must not render a "0s" footer.

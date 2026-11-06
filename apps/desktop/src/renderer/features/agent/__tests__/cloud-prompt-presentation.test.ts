@@ -127,3 +127,11 @@ it("does not clear a legacy turn or its admission wait when the capability arriv
   const settled = { ...stopping, ...cloudPromptSessionPatch(stopping, cloudPromptView(record, "ready")) };
   expect(settled.status).toBe("streaming"); expect(settled.activeTurnStartedAt).toBe(1);
 });
+it.each(["queued", "inboxed", "dispatching", "accepted"] as const)("anchors a %s prompt's live timer at the user's send", state => {
+  const record = journal(); record.entries = [record.entries[0]!]; record.entries[0]!.state = state;
+  record.entries[0]!.receipt = { epoch: "0", sequence: "1" } as never; record.entries[0]!.payload.startedAt = 1234;
+  const base = { ...BLANK, cwd, agentId: "codex", status: "ready" as const };
+  const slot = { ...base, ...cloudPromptSessionPatch(base, cloudPromptView(record, "ready")) };
+  const turns = groupMessagesIntoTurns(projectCloudPromptSession(slot).messages);
+  expect(cloudPromptTurnActivity(slot, turns, turns.length - 1)).toMatchObject({ active: true, startedAt: 1234 });
+});
