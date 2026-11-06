@@ -15,13 +15,15 @@ import {
   CircleCheck,
   CircleSlash,
   CircleX,
+  ArrowUpRight,
 } from "lucide-react";
 
-import type { PR, PrCheck } from "../../../platform/git";
+import type { PR, PrCheck, PrCommitChecks } from "../../../platform/git";
 import {
   Avatar,
   AvatarFallback,
   AvatarImage,
+  Button,
 } from "@/renderer/shared/ui/primitives";
 import { cn } from "@/renderer/shared/ui/cn";
 import { ZerosSpinner } from "@/renderer/shared/ui/loading";
@@ -245,5 +247,46 @@ export function RowChevron({ open }: { open: boolean }) {
     <ChevronDown className="text-fg2 size-3.5 shrink-0" />
   ) : (
     <ChevronRight className="text-fg2 size-3.5 shrink-0" />
+  );
+}
+
+// ── text link and commit check glyph ─────────────────────────
+
+/** An in-app link inside a meta line: fg2 text that brightens on hover. */
+export function ReviewTextLink({
+  children,
+  onClick,
+  label,
+  arrow = true,
+}: {
+  children: React.ReactNode;
+  onClick: () => void;
+  /** Accessible name when the visible text is ambiguous out of context. */
+  label?: string;
+  /** The trailing arrow marks a link that leaves this tab for another surface. */
+  arrow?: boolean;
+}) {
+  return (
+    <Button variant="link" onClick={onClick} aria-label={label}>
+      <span className="truncate">{children}</span>
+      {arrow && <ArrowUpRight aria-hidden className="size-3" />}
+    </Button>
+  );
+}
+
+const COMMIT_CHECKS = {
+  passed: { outcome: "passed", label: "Checks passed" },
+  failed: { outcome: "failed", label: "A check failed" },
+  pending: { outcome: "pending", label: "Checks running" },
+} as const;
+
+/** A commit's combined check result; nothing when no check reported on it. */
+export function CommitChecksGlyph({ checks }: { checks: PrCommitChecks | null | undefined }) {
+  if (!checks) return null;
+  const { outcome, label } = COMMIT_CHECKS[checks];
+  return (
+    <span role="img" aria-label={label} title={label} data-review-commit-checks={checks} className="inline-flex shrink-0">
+      <OutcomeGlyph outcome={outcome} />
+    </span>
   );
 }

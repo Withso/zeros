@@ -120,9 +120,12 @@ export async function prepareCheckout(workspace: WorkerConfig["workspace"], gitE
     const pinned = !exists && baseCommit !== undefined && await run(["cat-file", "-e", `${baseCommit}^{commit}`]).then(() => true, () => false);
     const startCommit = exists ? undefined : pinned ? baseCommit
       : (await run(["rev-parse", "--verify", `refs/remotes/origin/${baseBranch}^{commit}`])).trim();
-    await measureStartup("worker_checkout_switch", () => exists
-      ? run(["switch", "--", branch])
-      : run(["switch", "--no-track", "-c", branch, startCommit!]), timing);
+    // A resumed disk already has its branch checked out. A no-op switch would
+    // still refresh the whole index, which is slow on a freshly restored disk.
+    const current = exists ? await run(["symbolic-ref", "-q", "HEAD"]).then(value => value.trim(), () => "") : "";
+    await measureStartup("worker_checkout_switch", () => !exists
+      ? run(["switch", "--no-track", "-c", branch, startCommit!])
+      : current === `refs/heads/${branch}` ? Promise.resolve("") : run(["switch", "--", branch]), timing);
     return { createdBranch: !exists, refresh: new BackgroundRefresh(!exists && !pinned, run, branch, baseBranch, startCommit, timing) };
   } catch { throw new WorkspaceError("WORKSPACE_UNAVAILABLE", "Could not prepare the workspace branch. Existing work has been retained."); }
 }

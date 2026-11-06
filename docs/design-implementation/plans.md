@@ -76,11 +76,22 @@ and Bots once an App has taken part and folds an App's review to one line
 until Show; Checks opens on a summary card (counts, Add failures to chat, one
 bar) and ends with deployment cards; Commits group by day with co-authors,
 Copy, Open and the short SHA; the merge menu says what each method does to
-the commits. Still open, each needing data the renderer doesn't have:
-Re-run failed, Required badges and the Expected group (rerun and
-branch-protection reads in the engine and control plane), a commit's check
-state and chat link, and RevEmpty's own Create pull request (it stays in the
-status row above) with step 7's narrow fold of the header.
+the commits.
+
+Status (2026-11-06): the data-backed leftovers landed, Local through the
+engine and cloud through the control plane and the worker. Checks marks the
+checks the base branch requires (branch protection and rules), lists required
+checks that haven't reported in Expected, and Re-run failed restarts the
+head's failed Actions runs only while the reader still sees that head. A turn
+records the commits its own shell tools made once git finds them
+(`TurnInfo.commits`, engine migration v45), and `turns.commits` names the
+chat behind a pull request's commits: Commits rows link to it beside their
+combined check result (`statusCheckRollup`), and Activity says which chat a
+commit came from and adds the head's check failures with View checks. The
+comment box shows the GitHub account it posts as, and a GitHub thread's reply
+row shows the account its read used. RevEmpty says when the remote is another
+host, and a first read that fails keeps the known header rows above the
+banner's Retry. Still open: step 2 (posting from Changes).
 
 RevProviders is a layout reference, not planned work (owner, 2026-11-05):
 GitLab merge requests and Bitbucket pull requests are not being built now.

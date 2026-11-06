@@ -79,6 +79,7 @@ export class CloudGithubPrStore {
       creatorUserId: row.creator_user_id,
       repository: g?.canonical_repository ?? row.repository,
       repositoryId: g?.repository_id == null ? null : String(g.repository_id),
+      repositoryBound: g?.repository_id != null && !!g.canonical_repository,
       branch: observed ? g!.branch : row.branch,
       baseBranch: g?.base_branch ?? row.base_branch,
       headSha: g?.head_sha ?? null,
@@ -86,7 +87,8 @@ export class CloudGithubPrStore {
     };
   }
 
-  context(workspaceId: string, userId: string): Promise<CloudGithubPrContext> {
+  context(workspaceId: string, userId: string, tx?: Tx): Promise<CloudGithubPrContext> {
+    if (tx) return this.readContext(tx, workspaceId, userId);
     return withSystemTx(this.pool, (tx) =>
       this.readContext(tx, workspaceId, userId),
     );
@@ -116,8 +118,9 @@ export class CloudGithubPrStore {
     context: CloudGithubPrContext,
     identity: Pick<CloudGithubRepositoryIdentity, "repositoryId" | "repository">,
     observation?: { at: Date; assertCurrent(tx: Tx): Promise<void> },
+    transaction?: Tx,
   ): Promise<void> {
-    return withSystemTx(this.pool, async (tx) => {
+    const write = async (tx: Tx) => {
       await observation?.assertCurrent(tx);
       const current = await this.assertContext(tx, context);
       if (current.repositoryId && current.repositoryId !== identity.repositoryId)
@@ -148,7 +151,8 @@ export class CloudGithubPrStore {
           }),
         ]);
       }
-    });
+    };
+    return transaction ? write(transaction) : withSystemTx(this.pool, write);
   }
 
   async aliases(workspace: CloudV2Workspace): Promise<string[]> {
@@ -236,8 +240,9 @@ export class CloudGithubPrStore {
     context: CloudGithubPrContext,
     pr: CloudGithubPullRequest | null,
     generation: string,
+    transaction?: Tx,
   ): Promise<void> {
-    return withSystemTx(this.pool, async (tx) => {
+    const write = async (tx: Tx) => {
       await this.assertContext(tx, context);
       await tx.query(
         `UPDATE cloud_v2_github_workspaces SET pr_number=$2,pr_state=$3,pr_url=$4,pr_connection_generation=$5,
@@ -251,7 +256,8 @@ export class CloudGithubPrStore {
           generation,
         ],
       );
-    });
+    };
+    return transaction ? write(transaction) : withSystemTx(this.pool, write);
   }
 
   async documents(

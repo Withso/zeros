@@ -28,6 +28,10 @@ export interface CodeReviewThreadItem {
   commentsComplete?: boolean;
   commentsCursor?: string;
   commentsCursorAfter?: number;
+  /** Who a reply posts as when that is not the signed-in Zeros user: a GitHub
+   *  thread replies through the connected GitHub account. Null when that
+   *  account is unknown, so the reply row shows no avatar. */
+  replyAs?: { name: string; avatarUrl?: string | null } | null;
 }
 
 export interface CodeReviewExternalSource {

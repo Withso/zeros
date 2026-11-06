@@ -143,6 +143,9 @@ revision in the same checkout and compare failing test names.
 
 ## Browser, Vite and UI smoke
 
+- `pnpm check:ui` reads `#` followed by hex digits in renderer source and
+  tests as a raw color, so a PR reference such as `#859` in a `describe` title or
+  comment fails it. Write `PR 859` instead.
 - Vite refuses private directories such as `.context`. Put a browser
   qualification checkout beside the main checkout instead.
 - Root Vitest starts Vite servers on the same dependency cache as UI smoke. Run
@@ -177,6 +180,10 @@ revision in the same checkout and compare failing test names.
   messages record what an explicit `$skill` turn injected. Cursor's SDK
   (`@cursor/sdk`) loads project rules and skills, but resolves no `@rule` or
   `/skill` mention in message text.
+- `gh pr ready` starts a new CI run and cancels the draft's run. Until the new
+  run finishes, `pnpm agent:merge` refuses because of the cancelled checks; it
+  arms only one PR at a time, so queue the others behind it. Mark a PR ready
+  before its final push, not after its CI is already green.
 - Long local batches die with the agent session unless detached. Run them with
   `setsid nohup` under a shared slot and append results to a summary file.
 - Never list full process command lines or environments: agent launch arguments

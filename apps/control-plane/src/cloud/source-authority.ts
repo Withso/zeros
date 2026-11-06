@@ -12,7 +12,7 @@ const repositorySchema = z.string().max(201).regex(/^[A-Za-z0-9_.-]{1,100}\/[A-Z
 const repositoryIdSchema = z.string().regex(/^[1-9][0-9]{0,15}$/).refine(value => Number.isSafeInteger(Number(value)));
 export const CloudSourceTargetSchema = z.object({ repository: repositorySchema, repositoryId: repositoryIdSchema }).strict();
 export type CloudSourceTarget = z.infer<typeof CloudSourceTargetSchema>;
-const ADMISSION_LEASE_MS = 30_000;
+export const CLOUD_SOURCE_ADMISSION_MS = 30_000;
 // Worker HTTP requests allow ten seconds, including configuration after admission.
 const VERIFICATION_WAIT_MS = 5_000;
 export const CLOUD_SOURCE_REFRESH_MS = 10 * 60_000;
@@ -21,7 +21,9 @@ const MAX_LEASES = 1024;
 type SourceRevision = { id: number; invalidated?: HttpError };
 type SourceObservation = { scope: RepositoryRequest; fingerprint: string; revision: SourceRevision; until: number; recheckAt: number; refresh?: Promise<void> };
 export type CloudSourceProof = { accessEpoch: string; loginRevision: string };
-export type CloudSourceContinuation = { recheckAt: number; refresh?: Promise<void> };
+/** graceUntil is the earliest original verification time plus the grace across
+ * every source; cached and grace continuations repeat it, never extend it. */
+export type CloudSourceContinuation = { recheckAt: number; refresh?: Promise<void>; graceUntil?: number };
 type SourceVerifier = Pick<GithubRepositoryAuthority, "check" | "fingerprintFor"> & {
   verify?(input: RepositoryRequest): Promise<{ fingerprint: string; repositories: readonly CloudSourceTarget[] }>;
 };
@@ -161,7 +163,7 @@ export class CloudV2SourceAuthority {
         for (let attempt = 0; ; attempt++) {
           this.assertRevision(scope, revision);
           if (this.now() >= deadline) throw new GithubTemporaryError("github_verification_busy");
-          if (other?.verifiedAt != null && !other.failure && other.verifiedAt + ADMISSION_LEASE_MS > this.now()) return other;
+          if (other?.verifiedAt != null && !other.failure && other.verifiedAt + CLOUD_SOURCE_ADMISSION_MS > this.now()) return other;
           if (other?.failure && other.retryAt > this.now()) throw other.failure;
           if (!other?.claimId || other.claimUntil <= this.now()) {
             claim = await this.verificationStore!.claim(persistent);
@@ -239,7 +241,7 @@ export class CloudV2SourceAuthority {
     const fingerprint = await this.waitFor(this.fingerprint(scope), deadline);
     this.assertRevision(scope, revision);
     const key = JSON.stringify([organizationId, userId, owner, name, repositoryId ?? null, fingerprint]);
-    const freshness = continuation ? CLOUD_SOURCE_REFRESH_MS : ADMISSION_LEASE_MS;
+    const freshness = continuation ? CLOUD_SOURCE_REFRESH_MS : CLOUD_SOURCE_ADMISSION_MS;
     let value = this.observations.get(key);
     const fresh = () => value?.verifiedAt !== null && value?.verifiedAt !== undefined && !value.failure && value.verifiedAt + freshness > this.now();
     // The workspace proof fast path above this layer avoids these reads.
@@ -252,7 +254,7 @@ export class CloudV2SourceAuthority {
       else { this.observations.delete(key); value = undefined; }
     }
     const observation = (record: GithubVerification, recheckAt: number, refresh?: Promise<GithubVerification>): SourceObservation => ({
-      scope, fingerprint, revision, until: record.verifiedAt! + (continuation ? CLOUD_SOURCE_GRACE_MS : ADMISSION_LEASE_MS),
+      scope, fingerprint, revision, until: record.verifiedAt! + (continuation ? CLOUD_SOURCE_GRACE_MS : CLOUD_SOURCE_ADMISSION_MS),
       recheckAt: Math.min(recheckAt, record.verifiedAt! + CLOUD_SOURCE_GRACE_MS),
       ...(refresh ? { refresh: refresh.then(() => {}) } : {}),
     });
@@ -303,12 +305,12 @@ export class CloudV2SourceAuthority {
     await this.observeSources(workspace.organizationId, workspace.creatorUserId, sources.names, sources.ids);
   }
 
-  /** proof comes only from the current worker token or room/session database
+  /** proof comes only from a live creator, worker token or room/session database
    * read. Never accept these revisions from request bodies or a cached client. */
   async continueWorkspace(workspace: CloudV2Workspace, proof?: CloudSourceProof): Promise<CloudSourceContinuation> {
     if (workspace.state !== "running") {
       await this.workspace(workspace);
-      return { recheckAt: this.now() + ADMISSION_LEASE_MS };
+      return { recheckAt: this.now() + CLOUD_SOURCE_ADMISSION_MS };
     }
     const key = JSON.stringify([workspace.id, workspace.organizationId, workspace.creatorUserId, workspace.repository]);
     const scope = { organizationId: workspace.organizationId, userId: workspace.creatorUserId };
@@ -333,7 +335,8 @@ export class CloudV2SourceAuthority {
       const observations = await this.observeSources(workspace.organizationId, workspace.creatorUserId, sources.names, sources.ids, true);
       this.assertRevision(scope, sourceRevision);
       const refreshes = observations.flatMap(value => value.refresh ? [value.refresh] : []);
-      const value: CloudSourceContinuation = { recheckAt: Math.min(...observations.map(value => value.recheckAt)) };
+      const value: CloudSourceContinuation = { recheckAt: Math.min(...observations.map(value => value.recheckAt)),
+        graceUntil: Math.min(...observations.map(value => value.until)) };
       const lease = { proof: revision, revision: sourceRevision, organizationId: workspace.organizationId, userId: workspace.creatorUserId, value };
       if (this.workspaceLeases.size >= MAX_LEASES) this.workspaceLeases.delete(this.workspaceLeases.keys().next().value!);
       this.workspaceLeases.set(key, lease);

@@ -844,6 +844,23 @@ describe("WorkspaceService", () => {
     expect(fs.readFileSync(path.join(dir, "ordinary/design.toml"), "utf8")).toBe('name = "ordinary"\n');
   });
 
+  it("file.write replaces a file only while it holds the expected text", async () => {
+    const { upsertRepoByRoot } = await import("../../db/projects");
+    upsertRepoByRoot({ repoRoot: dir, repoSlug: "expected-content" });
+    fs.writeFileSync(path.join(dir, "conflict.txt"), "shown\n");
+    await expect(svc.handle("file.write", {
+      workspaceId: dir, path: "conflict.txt", content: "accepted\n", expectedContent: "shown\n",
+    })).resolves.toMatchObject({ kind: "success" });
+    fs.writeFileSync(path.join(dir, "conflict.txt"), "edited elsewhere\n");
+    await expect(svc.handle("file.write", {
+      workspaceId: dir, path: "conflict.txt", content: "stale\n", expectedContent: "accepted\n",
+    })).resolves.toMatchObject({ kind: "error", error: expect.stringContaining("The file changed") });
+    expect(fs.readFileSync(path.join(dir, "conflict.txt"), "utf8")).toBe("edited elsewhere\n");
+    await expect(svc.handle("file.write", {
+      workspaceId: dir, path: "conflict.txt", content: "x", expectedContent: 1,
+    })).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+  });
+
   it("file.write writes a registered repo ROOT file for LOCAL; remote raw-path + non-strings rejected", async () => {
     const { upsertRepoByRoot } = await import("../../db/projects");
     const repoC = fs.mkdtempSync(path.join(os.tmpdir(), "zeros-write-op-"));
@@ -4599,6 +4616,32 @@ describe("WorkspaceService", () => {
     ).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
   });
 
+  it.each(["", "HEAD", "a".repeat(39), "A".repeat(40), `--${"a".repeat(38)}`])(
+    "refuses to re-run checks for a head that isn't a full commit (%j)",
+    async (headSha) => {
+      await expect(
+        svc.handle("gh.prRerunFailed", { workspaceId: LOCAL_MAIN_WORKSPACE_ID, prNumber: 7, headSha }),
+      ).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+    },
+  );
+
+  it("names the chats behind full commit SHAs and refuses anything else", async () => {
+    await expect(svc.handle("turns.commits", { workspaceId: LOCAL_MAIN_WORKSPACE_ID, shas: ["a".repeat(40)] }))
+      .resolves.toEqual({ commits: [] });
+    for (const shas of [["abc1234"], "a".repeat(40), Array.from({ length: 251 }, (_, i) => i.toString(16).padStart(40, "0"))])
+      await expect(svc.handle("turns.commits", { workspaceId: LOCAL_MAIN_WORKSPACE_ID, shas }))
+        .rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+  });
+
+  it("hands a full head to the GitHub re-run", async () => {
+    // The op must reach the GitHub client; a missing export fails as a TypeError.
+    const error = await svc
+      .handle("gh.prRerunFailed", { workspaceId: LOCAL_MAIN_WORKSPACE_ID, prNumber: 7, headSha: "a".repeat(40) })
+      .catch((caught: unknown) => caught);
+    expect(error).not.toBeInstanceOf(TypeError);
+    expect(error).toMatchObject({ code: expect.any(String) });
+  });
+
   it("classifies read vs write ops (incl. GitHub PR mutations)", () => {
     expect(svc.isWriteOp("git.commit")).toBe(true);
     expect(svc.isWriteOp("git.push")).toBe(true);
@@ -4609,6 +4652,7 @@ describe("WorkspaceService", () => {
     expect(svc.isWriteOp("gh.prCreate")).toBe(true);
     expect(svc.isWriteOp("gh.prMerge")).toBe(true);
     expect(svc.isWriteOp("gh.prComment")).toBe(true);
+    expect(svc.isWriteOp("gh.prRerunFailed")).toBe(true);
     expect(svc.isWriteOp("gh.prGet")).toBe(false);
     expect(svc.isWriteOp("gh.authStatus")).toBe(false);
   });

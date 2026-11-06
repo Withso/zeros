@@ -5,8 +5,9 @@
 // The PR's commits (GitHub's list — authoritative even when the local branch
 // is behind) under recency buckets (Today / Yesterday / Last 7 days / Last 30
 // days / month), newest first. Rows are summaries only — author(s), age, file
-// count, ±stats and the short SHA, with Copy and Open on hover. The diff
-// itself lives in the Changes tab, so nothing here reads the object store.
+// count, ±stats, the chat that made the commit when a recorded turn did, its
+// combined check result and the short SHA, with Copy and Open on hover. The
+// diff itself lives in the Changes tab, so nothing here reads the object store.
 
 import React, { useMemo } from "react";
 import { ArrowUpRight, Copy } from "lucide-react";
@@ -20,10 +21,13 @@ import {
 } from "./review-model";
 import {
   AuthorAvatar,
+  CommitChecksGlyph,
   DiffStat,
   ErrorCallout,
+  ReviewTextLink,
 } from "./review-shared-components";
 import { copyWithToast } from "./review-overview";
+import type { ReviewCommitChat } from "./review-commit-chats";
 
 export function ReviewCommitsSection({
   commits,
@@ -31,6 +35,8 @@ export function ReviewCommitsSection({
   error,
   prUrl,
   onRetry,
+  chats,
+  onOpenChat,
 }: {
   commits: PrCommitSummary[] | null;
   loading: boolean;
@@ -38,6 +44,9 @@ export function ReviewCommitsSection({
   /** The pull request's page; a commit opens beneath it. */
   prUrl: string | null;
   onRetry: () => void;
+  /** sha → the chat whose turn made the commit. */
+  chats?: ReadonlyMap<string, ReviewCommitChat>;
+  onOpenChat?: (chatId: string) => void;
 }) {
   const groups = useMemo(() => groupCommitsByRecency(commits ?? []), [commits]);
 
@@ -59,7 +68,13 @@ export function ReviewCommitsSection({
           </div>
           <div className="-mx-2.5 flex min-w-0 flex-col">
             {g.commits.map((c) => (
-              <CommitRow key={c.sha} commit={c} prUrl={prUrl} />
+              <CommitRow
+                key={c.sha}
+                commit={c}
+                prUrl={prUrl}
+                chat={chats?.get(c.sha)}
+                onOpenChat={onOpenChat}
+              />
             ))}
           </div>
         </section>
@@ -71,9 +86,13 @@ export function ReviewCommitsSection({
 function CommitRow({
   commit: c,
   prUrl,
+  chat,
+  onOpenChat,
 }: {
   commit: PrCommitSummary;
   prUrl: string | null;
+  chat?: ReviewCommitChat;
+  onOpenChat?: (chatId: string) => void;
 }) {
   const files =
     c.changedFiles != null
@@ -112,6 +131,14 @@ function CommitRow({
               <DiffStat additions={c.additions ?? 0} deletions={c.deletions ?? 0} />
             </>
           )}
+          {chat && onOpenChat && (
+            <>
+              <span className="shrink-0">·</span>
+              <ReviewTextLink onClick={() => onOpenChat(chat.chatId)} label={`Open the chat ${chat.title}`}>
+                {chat.title}
+              </ReviewTextLink>
+            </>
+          )}
         </span>
       </div>
       <span className="flex shrink-0 items-center opacity-0 transition-opacity duration-120 ease-out group-focus-within:opacity-100 group-hover:opacity-100">
@@ -135,6 +162,7 @@ function CommitRow({
           </Tooltip>
         )}
       </span>
+      <CommitChecksGlyph checks={c.checks} />
       <span className="bg-bg2 text-fg2 text-3xxs shrink-0 rounded-sm px-1.5 font-mono leading-5">
         {c.abbreviatedSha}
       </span>

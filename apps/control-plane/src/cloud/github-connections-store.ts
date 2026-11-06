@@ -171,14 +171,15 @@ export class CloudGithubConnectionStore {
       assertCurrent,
     };
   }
-  async fingerprint(scope: CloudGithubConnectionScope): Promise<string> {
-    return (await this.read(scope)).generation;
+  async fingerprint(scope: CloudGithubConnectionScope, tx?: Tx): Promise<string> {
+    return (await (tx ? this.snapshot(tx, scope) : this.read(scope))).generation;
   }
   async assertCurrent(
     scope: CloudGithubConnectionScope,
     generation: string,
+    tx?: Tx,
   ): Promise<void> {
-    if ((await this.fingerprint(scope)) !== generation) throw changed();
+    if ((await this.fingerprint(scope, tx)) !== generation) throw changed();
   }
   async lockCurrent(
     tx: Tx,
@@ -410,26 +411,32 @@ export class CloudGithubConnectionStore {
       );
     });
   }
+  private selectedCredential(value: Snapshot) {
+    const row = value.rows.find(row => row.method === value.actor.selected_method);
+    if (!row) throw required();
+    try {
+      return { row, material: openGithubCredential(
+        { nonce: row.nonce, ciphertext: row.ciphertext, authTag: row.auth_tag }, binding(row), this.keys,
+      ) };
+    } catch { throw expired(); }
+  }
+
+  /** The caller owns a live source/context fence in this same transaction.
+   * Renewal stays outside it so no database connection waits for GitHub. */
+  async currentCredential(tx: Tx, scope: CloudGithubConnectionScope): Promise<CloudGithubCredentialSnapshot | null> {
+    const value = await this.snapshot(tx, scope), { row, material } = this.selectedCredential(value);
+    if ((material.expiresAt !== null && material.expiresAt <= Date.now() + 60_000) ||
+      (row.expires_at !== null && row.expires_at.getTime() <= Date.now() + 60_000) || row.refresh_lease !== null) return null;
+    return { material, identity: { id: row.github_user_id, login: row.github_login }, generation: value.generation,
+      assertCurrent: () => this.assertCurrent(scope, value.generation) };
+  }
+
   async credential(
     scope: CloudGithubConnectionScope,
     refresh?: RefreshCloudGithub,
     failedTokenSha256?: string,
   ): Promise<CloudGithubCredentialSnapshot> {
-    const value = await this.read(scope),
-      row = value.rows.find(
-        (row) => row.method === value.actor.selected_method,
-      );
-    if (!row) throw required();
-    let material: CloudGithubCredential;
-    try {
-      material = openGithubCredential(
-        { nonce: row.nonce, ciphertext: row.ciphertext, authTag: row.auth_tag },
-        binding(row),
-        this.keys,
-      );
-    } catch {
-      throw expired();
-    }
+    const value = await this.read(scope), { row, material } = this.selectedCredential(value);
     if (failedTokenSha256 === createHash("sha256").update(material.accessToken).digest("hex")) {
       const marked = await this.edit(scope, value.generation, async tx => (await tx.query(
         "UPDATE cloud_github_credentials SET expires_at=LEAST(expires_at,now()),updated_at=now() WHERE id=$1 AND version=$2 RETURNING id",

@@ -3,7 +3,8 @@ import { constants } from "node:fs";
 import { mkdtemp, open, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { authoredPathsFromMessages } from "@zeros/protocol/turn-attribution";
+import { authoredPathsFromMessages, commitShasFromMessages } from "@zeros/protocol/turn-attribution";
+import { isTurnCommitSha, TURN_COMMIT_LOOKUP_LIMIT, type TurnCommitLink } from "@zeros/protocol/turns";
 import { changesHistorySchema, turnHistoryCursorSchema } from "@zeros/protocol/changes-history";
 import { applyTurnSpanReset, undoTurnReset, type TurnInfo } from "@zeros/protocol/turns";
 import type { AgentTextMessage } from "@zeros/protocol/agent-messages";
@@ -97,8 +98,11 @@ export class TurnService {
   private async finishTurn(chatId: string, turnId: string, state?: Pick<TurnInfo, "status" | "stopReason">): Promise<AgentTextMessage | undefined> {
     const turn = this.store.turnRecord(chatId, turnId);
     if (!turn) return;
-    const paths = authoredPathsFromMessages(this.store.messagesForTurn(chatId, turnId), this.scope.root)
+    const messages = this.store.messagesForTurn(chatId, turnId);
+    const paths = authoredPathsFromMessages(messages, this.scope.root)
       .map(file => file.path).filter(path => { try { this.scope.path(path); return true; } catch { return false; } });
+    // Commits this turn's shell tools reported, kept only when they exist here.
+    const commits = state ? await this.resolveCommits(commitShasFromMessages(messages)) : turn.commits;
     const postSnapshot = turn.preSnapshot ? await this.snapshot(chatId, turnId, "post") : null;
     let files = turn.files;
     let confirmedPost = turn.postSnapshot;
@@ -112,7 +116,35 @@ export class TurnService {
       catch { /* A failed refresh retains the last confirmed comparison. */ }
     }
     return this.store.saveTurn({ ...turn, ...state, endedAt: state ? Date.now() : turn.endedAt,
-      postSnapshot: confirmedPost, files });
+      postSnapshot: confirmedPost, files, ...(commits?.length ? { commits } : {}) });
+  }
+
+  private async resolveCommits(candidates: string[]): Promise<string[]> {
+    const valid = candidates.filter(sha => /^[0-9a-f]{7,64}$/.test(sha));
+    if (!valid.length) return [];
+    try {
+      const output = await this.git(["cat-file", "--batch-check=%(objectname) %(objecttype)"],
+        { input: valid.map(sha => `${sha}^{commit}\n`).join("") });
+      const out: string[] = [];
+      for (const line of output.split("\n")) {
+        const [sha, type] = line.trim().split(" ");
+        if (type === "commit" && isTurnCommitSha(sha) && !out.includes(sha)) out.push(sha);
+      }
+      return out;
+    } catch { return []; }
+  }
+
+  /** Which turn made each commit; a commit made again later keeps its first turn. */
+  private commitLinks(shas: unknown): TurnCommitLink[] {
+    if (!Array.isArray(shas) || shas.length > TURN_COMMIT_LOOKUP_LIMIT || !shas.every(isTurnCommitSha))
+      throw new WorkspaceError("VALIDATION_FAILED", "turns.commits requires full commit SHAs.");
+    const wanted = new Set(shas);
+    const links = new Map<string, TurnCommitLink>();
+    for (const turn of this.store.turnRecords().sort((a, b) => a.startedAt - b.startedAt)) {
+      for (const sha of turn.commits ?? [])
+        if (wanted.has(sha) && !links.has(sha)) links.set(sha, { sha, chatId: turn.chatId, turnId: turn.turnId });
+    }
+    return [...links.values()];
   }
 
   async deleteChatSnapshots(chatId: string): Promise<void> {
@@ -174,6 +206,7 @@ export class TurnService {
 
   async handle(op: string, params: Record<string, unknown>): Promise<unknown> {
     this.scope.assertId(params.workspaceId);
+    if (op === "turns.commits") return { commits: this.commitLinks(params.shas) };
     if (op === "turns.list") {
       let turns = this.recorded();
       if (params.before !== undefined) {

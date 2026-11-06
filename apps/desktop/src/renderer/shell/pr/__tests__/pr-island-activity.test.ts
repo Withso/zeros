@@ -6,6 +6,7 @@ import * as refreshRules from "../pr-status-refresh";
 import { isCloudWorkspace, parseCloudScopedId } from "../../../platform/bridge/cloud-workspace-key";
 import { documentIsForeground } from "../../../shared/lib/element-activity";
 import { CloudPrStatusReads } from "../cloud-pr-status-reads";
+import { invalidateWorkspacePrRefs, workspacePrRefVersion } from "../pr-ref-version";
 
 vi.mock("react", () => ({ useSyncExternalStore: (_subscribe: unknown, snapshot: () => unknown) => snapshot() }));
 import { useDocumentActive } from "../../../state/use-document-active";
@@ -17,7 +18,7 @@ const source = ts.createSourceFile("pr-status-island.tsx", readFileSync(new URL(
 const effects: string[] = [], declarations: string[] = [];
 function visit(node: ts.Node) {
   if (ts.isFunctionDeclaration(node) && ["livePr", "rememberIslandData"].includes(node.name?.text ?? "")) declarations.push(node.getText(source));
-  if (ts.isVariableDeclaration(node) && ["local", "cloudDocument", "scope", "nativeReads", "foreground", "observing", "ISLAND_FRESH_MS", "MAX_PR_ISLAND_SNAPSHOTS"].includes(node.name.getText(source)))
+  if (ts.isVariableDeclaration(node) && ["local", "cloudDocument", "scope", "refsVersion", "nativeReads", "foreground", "observing", "ISLAND_FRESH_MS", "MAX_PR_ISLAND_SNAPSHOTS"].includes(node.name.getText(source)))
     declarations.push(`const ${node.getText(source)};`);
   if (ts.isCallExpression(node) && node.expression.getText(source) === "useEffect") {
     const body = node.arguments[0]?.getText(source) ?? "";
@@ -46,21 +47,21 @@ beforeEach(() => {
 });
 afterEach(() => { unmount(); expect(vi.getTimerCount()).toBe(0); vi.useRealTimers(); vi.unstubAllGlobals(); });
 function mount(path = "/personal/project", id = "personal-workspace", rawKind = "ready", cache = new Map(),
-  options: { refreshKey?: number; failed?: boolean; reads?: ReturnType<typeof vi.fn>[];
+  options: { refreshKey?: number; forceRefreshAt?: number; failed?: boolean; reads?: ReturnType<typeof vi.fn>[];
     prState?: string; sync?: ReturnType<typeof vi.fn>; cloudStatus?: string } = {}) {
   const reads = options.reads ?? [vi.fn(async () => null), vi.fn(async () => null),
     vi.fn(async () => { if (options.failed) throw new Error("unavailable"); return { number: 42, state: "ready" }; }), vi.fn(async () => null)];
   const setLive = vi.fn();
   const context = {
     ...refreshRules, useDocumentActive, documentIsForeground, isCloudWorkspace, parseCloudScopedId,
-    document, window, Date, Promise, cloudPrReads, reconciledCloudPrReads,
+    document, window, Date, Promise, cloudPrReads, reconciledCloudPrReads, workspacePrRefVersion,
     useCloudGithubPrDocument: () => ({ status: options.cloudStatus ?? "ready" }),
     useCloudGithubPrScope: () => cloudScope, cloudGithubPrScope: () => cloudScope,
     workspace: { id, path, repoRoot: path, prState: options.prState ?? "ready", repoSlug: "repo", prNumber: 42 },
-    active: true, localDesktop: true, prNumber: 42, dataKey: `${id}#42`, refreshKey: options.refreshKey ?? 1, forceRefreshAt: 0,
+    active: true, localDesktop: true, prNumber: 42, dataKey: `${id}#42`, refreshKey: options.refreshKey ?? 1, forceRefreshAt: options.forceRefreshAt ?? 0,
     activationKeyRef: { current: null }, lastRequestAtRef: { current: 0 }, lastKnownData: cache,
     statusForGeneration: reads[0], changeCountsForGeneration: reads[1], ghPrGet: reads[2], ghPrChecks: reads[3],
-    ghPrSync: options.sync ?? vi.fn(), notifyWorkspacesChanged: vi.fn(), setLive, setForceRefreshAt: vi.fn(),
+    ghPrSync: options.sync ?? vi.fn(async () => null), notifyWorkspacesChanged: vi.fn(), setLive, setForceRefreshAt: vi.fn(),
     checkingRetryRef: { current: { key: "", tries: 0 } }, stabilityKey: id, rawKind,
     disposers: [] as Array<() => void>,
   };
@@ -69,6 +70,70 @@ function mount(path = "/personal/project", id = "personal-workspace", rawKind = 
 }
 
 describe("Local PR island activity", () => {
+  it("refreshes an acknowledged cloud ref change without dropping the confirmed row", async () => {
+    const id = "cloud://organization/refs", cache = new Map();
+    const first = mount(id, id, "ready", cache);
+    await vi.advanceTimersByTimeAsync(0); unmount();
+    const confirmed = cache.get(`${id}#42`);
+    invalidateWorkspacePrRefs([id]);
+    mount(id, id, "ready", cache, { refreshKey: 2, reads: first.reads });
+    expect(cache.get(`${id}#42`).pr).toBe(confirmed.pr);
+    expect(cache.get(`${id}#42`).checks).toBe(confirmed.checks);
+    expect(cache.get(`${id}#42`).status).toBe(confirmed.status);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(first.reads[2]).toHaveBeenCalledTimes(2);
+    expect(first.reads[3]).toHaveBeenCalledTimes(2);
+  });
+  it.each(["refs", "explicit"])("joins the unfinished GitHub observation after %s refresh and remount", async trigger => {
+    const id = "cloud://organization/remount", cache = new Map();
+    const first = mount(id, id, "ready", cache);
+    await vi.advanceTimersByTimeAsync(0); unmount();
+    let finish!: (value: unknown) => void;
+    first.reads[2].mockResolvedValue({ number: 42, state: "draft" });
+    first.reads[3].mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    if (trigger === "refs") invalidateWorkspacePrRefs([id]);
+    else await vi.advanceTimersByTimeAsync(31_000);
+    const refreshKey = trigger === "refs" ? 2 : 1;
+    mount(id, id, "ready", cache, { refreshKey, forceRefreshAt: Date.now(), reads: first.reads });
+    await vi.advanceTimersByTimeAsync(0); unmount();
+    mount(id, id, "ready", cache, { refreshKey, reads: first.reads });
+    finish(null); await vi.advanceTimersByTimeAsync(0);
+    expect(cache.get(`${id}#42`).pr.state).toBe("draft");
+    expect(first.reads[2]).toHaveBeenCalledTimes(2);
+  });
+  it.each(["refs", "explicit"])("joins unfinished Git state after %s refresh and remount", async trigger => {
+    const id = "cloud://organization/remount-git", cache = new Map();
+    const first = mount(id, id, "ready", cache);
+    await vi.advanceTimersByTimeAsync(0); unmount();
+    let finish!: (value: unknown) => void;
+    const pending = new Promise(resolve => { finish = resolve; });
+    first.reads[0].mockReturnValue(pending);
+    if (trigger === "refs") invalidateWorkspacePrRefs([id]);
+    else await vi.advanceTimersByTimeAsync(31_000);
+    const refreshKey = trigger === "refs" ? 2 : 1;
+    mount(id, id, "ready", cache, { refreshKey, forceRefreshAt: Date.now(), reads: first.reads });
+    await vi.advanceTimersByTimeAsync(0); unmount();
+    mount(id, id, "ready", cache, { refreshKey, reads: first.reads });
+    const status = { branch: "topic", ahead: 2 };
+    finish(status); await vi.advanceTimersByTimeAsync(0);
+    expect(cache.get(`${id}#42`).status).toBe(status);
+    expect(first.reads[2]).toHaveBeenCalledTimes(2);
+  });
+  it.each([
+    ["/personal/project", "personal-workspace"],
+    ["/organization/project", "organization-workspace"],
+    ["cloud://organization/workspace", "cloud://organization/workspace"],
+  ])("publishes Git status while checks are still pending for %s", async (path, id) => {
+    let finish!: (value: unknown) => void;
+    const status = { branch: "topic", ahead: 1 }, counts = { all: 2 };
+    const reads = [vi.fn(async () => status), vi.fn(async () => counts),
+      vi.fn(async () => ({ number: 42, state: "ready" })), vi.fn(() => new Promise(resolve => { finish = resolve; }))];
+    const { cache } = mount(path, id, "ready", new Map(), { reads });
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      expect(cache.get(`${id}#42`)).toMatchObject({ status, counts, checks: null });
+    } finally { finish(null); await vi.advanceTimersByTimeAsync(0); }
+  });
   it.each([
     ["/personal/project", "hidden"], ["/personal/project", "blurred"],
     ["/organization/project", "hidden"], ["/organization/project", "blurred"],
@@ -118,7 +183,7 @@ describe("Local PR island activity", () => {
     expect(reads[1]).not.toHaveBeenCalled();
     expect(reads[2]).toHaveBeenCalledOnce();
     expect(reads[3]).toHaveBeenCalledOnce();
-    expect(setLive).toHaveBeenCalledOnce();
+    expect(setLive).toHaveBeenLastCalledWith({ key: `${id}#42`, data: expect.objectContaining({ githubLoaded: true, refreshing: false }) });
   });
   it("does not publish a late PR result after the cloud connection is replaced", async () => {
     const id = "cloud://organization/workspace";
@@ -127,11 +192,13 @@ describe("Local PR island activity", () => {
       vi.fn(() => new Promise(resolve => { finish = resolve; })), vi.fn(async () => null)];
     const { setLive, cache } = mount(id, id, "ready", new Map(), { reads });
     await vi.advanceTimersByTimeAsync(0);
+    const before = cache.get(`${id}#42`), publications = setLive.mock.calls.length;
     cloudScope = "1";
     finish({ number: 42, state: "ready" });
     await vi.advanceTimersByTimeAsync(0);
-    expect(setLive).not.toHaveBeenCalled();
-    expect(cache.size).toBe(0);
+    expect(setLive).toHaveBeenCalledTimes(publications);
+    expect(cache.get(`${id}#42`)).toBe(before);
+    expect(before.pr).toBeNull();
   });
   it("does not repeat a failed durable reconciliation for every reuse of a cloud PR observation", async () => {
     const id = "cloud://organization/workspace", cache = new Map();

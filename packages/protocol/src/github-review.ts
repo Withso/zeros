@@ -53,6 +53,9 @@ export interface PrInlineReview {
   annotationsTruncated: boolean;
   /** A failed annotations read must not hide successfully loaded discussions. */
   annotationError: string | null;
+  /** The GitHub account this read used, which a reply posts as. Absent from
+   *  older readers; the reply row then shows no avatar. */
+  viewer?: { login: string; avatarUrl: string | null } | null;
 }
 
 export interface PrReviewDiff {

@@ -385,7 +385,9 @@ All, editing, portals and vendor surfaces across owners, placements and themes.
   primitive sizes them); empty states use a 32px `fg3` icon.
 - Primary (`variant="primary"`) is the single focal action of a view; Secondary
   is the default button; Ghost for quiet text actions and a dialog's Cancel;
-  icon-only actions are `IconButton`. Toggles use `aria-pressed` on Secondary,
+  Link (`variant="link"`) for an action inside a line of text, `fg2` that
+  brightens to `fg1`, with no fill or padding; icon-only actions are
+  `IconButton`. Toggles use `aria-pressed` on Secondary,
   Ghost or IconButton, which press to the `selected-bg` fill with no edge; a
   toolbar's active tool is `pressedTone="tool"`.
 

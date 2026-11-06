@@ -2,8 +2,10 @@ import { describe, expect, it, vi } from "vitest";
 import { CloudGithubApi } from "./github-api.js";
 import {
   CloudGithubPrService,
+  assertCloudGithubPrContext,
   type CloudGithubPrContext,
 } from "./github-pr-service.js";
+import { HttpError } from "../authz.js";
 
 const head = "a".repeat(40),
   base = "b".repeat(40);
@@ -99,7 +101,17 @@ function fixture() {
     ),
   };
   return {
-    service: new CloudGithubPrService(deps),
+    service: new CloudGithubPrService({ ...deps, open: async (workspaceId, userId) => {
+      const captured = await deps.context();
+      if (captured.workspaceId !== workspaceId || captured.creatorUserId !== userId)
+        throw new HttpError(404, "not_found", "Cloud workspace not found.");
+      const access = await deps.access();
+      const fence = async () => {
+        await access.assertCurrent();
+        assertCloudGithubPrContext(captured, await deps.context());
+      };
+      return { context: captured, access: { ...access, assertCurrent: fence, api: access.api.withFence(fence) } };
+    } }),
     deps,
     fetch,
     setContext: (next: Partial<CloudGithubPrContext>) => {
@@ -128,6 +140,22 @@ describe("cloud PR service authority", () => {
       result: { authenticated: true, login: "contributor" },
     });
     expect(deps.mutate).not.toHaveBeenCalled();
+  });
+  it("reports the selected account's photo with its login", async () => {
+    const { service, deps } = fixture();
+    deps.access.mockResolvedValueOnce({
+      ...(await deps.access()),
+      avatarUrl: "https://avatars.githubusercontent.com/u/5",
+    } as never);
+    await expect(
+      service.execute("workspace", "creator", { op: "gh.authStatus", params: {} }),
+    ).resolves.toMatchObject({
+      result: {
+        authenticated: true,
+        login: "contributor",
+        avatarUrl: "https://avatars.githubusercontent.com/u/5",
+      },
+    });
   });
   it("reads a stopped workspace entirely through GitHub without a lifecycle mutation", async () => {
     const { service, deps } = fixture();

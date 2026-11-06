@@ -1,0 +1,9 @@
+{
+  "id": "cloud-pr-request-amplification",
+  "kind": "replay",
+  "area": "control-plane",
+  "fixedBy": "pr:857",
+  "symptom": "Warm cloud PR sync/get requests performed 78 database transactions and four GitHub calls, leaving Review and Changes waiting for seconds despite a fast in-VM GitHub CLI.",
+  "rule": "Measure request amplification through the production HTTP composition and real database. Bound repeated admission work while preserving live membership, credential, source and checkout fences before and after I/O and publication; zstack-review database cost and concurrency checks.",
+  "check": "pnpm --dir apps/control-plane test src/cloud/github-composition.integration.test.ts --maxWorkers=1"
+}

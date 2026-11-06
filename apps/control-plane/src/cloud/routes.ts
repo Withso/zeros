@@ -11,7 +11,7 @@ import { CloudV2DraftSchema, CloudV2RecipeSchema, type CloudV2Computers } from "
 import { readCloudV2History } from "./history.js";
 import { CLOUD_V2_BRIDGE_PROTOCOL } from "./relay.js";
 import { createCloudV2PromptRoutes } from "./prompt-routes.js";
-import { CloudSourceTargetSchema, type CloudSourceTarget, type CloudSourceContinuation } from "./source-authority.js";
+import { CloudSourceTargetSchema, type CloudSourceTarget, type CloudSourceContinuation, type CloudSourceProof } from "./source-authority.js";
 import { CloudGithubPrService } from "./github-pr-service.js";
 import type { CloudGithubConnections } from "./github-connections.js";
 import { createCloudGithubConnectionRoutes } from "./github-connection-routes.js";
@@ -45,7 +45,7 @@ const CreateSchema = z.object({
 const ConnectSchema = z.object({ wake: z.boolean().default(true) }).strict();
 
 export type CloudV2RouteDeps = {
-  store: Pick<CloudV2Store, "activeComputer" | "createWorkspace" | "createWorkspaceOnce" | "readCreateReceipt" | "get" | "list" | "requestLifecycle" | "transition" | "issueToken" | "listChats" | "messageWindow" | "searchMessages"> & Partial<Pick<CloudV2Store, "prompts">>;
+  store: Pick<CloudV2Store, "activeComputer" | "createWorkspace" | "createWorkspaceOnce" | "readCreateReceipt" | "get" | "promptContext" | "list" | "requestLifecycle" | "transition" | "issueToken" | "listChats" | "messageWindow" | "searchMessages"> & Partial<Pick<CloudV2Store, "prompts">>;
   /** Roll out only with a runtime that advertises durable prompt delivery. */
   promptOutbox?: boolean;
   computers: Pick<CloudV2Computers, "requireMember" | "requireAdmin" | "overview" | "enqueue" | "buildConfigured" | "saveRecipe" | "discardRecipe" | "reactivate" | "log" | "logRepositories">;
@@ -57,7 +57,7 @@ export type CloudV2RouteDeps = {
   authorizeBuildRepository?(organizationId: string, userId: string, buildId: string, repository: string): Promise<CloudSourceTarget>;
   remoteHead(organizationId: string, userId: string, target: CloudSourceTarget, branch: string): Promise<string | null>;
   authorizeSource?(workspace: CloudV2Workspace): Promise<void>;
-  continueSource?(workspace: CloudV2Workspace): Promise<CloudSourceContinuation>;
+  continueSource?(workspace: CloudV2Workspace, proof?: CloudSourceProof): Promise<CloudSourceContinuation>;
   /** Public wss:// base of the realtime service, e.g. wss://realtime.example.com. */
   bridgeBaseUrl: string;
   /** Default branch names start with this, e.g. "zeros/". */
@@ -85,8 +85,8 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
   const documents = async (workspaces: readonly CloudV2Workspace[]) =>
     (deps.github ? await deps.github.documents(workspaces) : workspaces).map(workspace => workspaceDocument(workspace, deps.promptOutbox === true));
   const document = async (workspace: CloudV2Workspace) => (await documents([workspace]))[0]!;
-  const continueWorkspace = async (workspace: CloudV2Workspace) => {
-    if (workspace.state === "running" && deps.continueSource) await deps.continueSource(workspace);
+  const continueWorkspace = async (workspace: CloudV2Workspace, proof?: CloudSourceProof) => {
+    if (workspace.state === "running" && deps.continueSource) await deps.continueSource(workspace, proof);
     else await deps.authorizeSource?.(workspace);
   };
   const authorizeReceipt = async (response: Record<string, unknown>, userId: string) => {
@@ -97,7 +97,8 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
   if (deps.promptOutbox) {
     if (!deps.store.prompts) throw new Error("Cloud prompt store is required");
     app.route("/", createCloudV2PromptRoutes(deps.store.prompts, async (id, userId) => {
-      await continueWorkspace(await deps.store.get(id, userId));
+      const { workspace, proof } = await deps.store.promptContext(id, userId);
+      await continueWorkspace(workspace, proof);
     }));
   }
   const prefix = deps.branchPrefix ?? "zeros/";

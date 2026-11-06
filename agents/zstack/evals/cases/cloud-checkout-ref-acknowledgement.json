@@ -1,0 +1,9 @@
+{
+  "id": "cloud-checkout-ref-acknowledgement",
+  "kind": "replay",
+  "area": "cloud-worker",
+  "fixedBy": "pr:864",
+  "symptom": "The worker published a ref-change hint before its checkout acknowledgement, so the app could refresh GitHub against the previous checkout.",
+  "rule": "Publish ref invalidation after the current checkout is acknowledged; coalesce older flights and retain failed hints for the existing retry path; agents/zstack/changes/pr-checkout-observation.md.",
+  "check": "pnpm --dir apps/cloud-worker test src/workspace/__tests__/checkout-notifications.test.ts"
+}

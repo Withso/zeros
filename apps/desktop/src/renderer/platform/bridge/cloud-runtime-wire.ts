@@ -259,6 +259,8 @@ export function cloudIncoming(
       result.turn = mapTurnIdentity(scope, result.turn, "in");
     if (message.op === "turns.list" && Array.isArray(result.turns))
       result.turns = result.turns.map((turn) => mapTurnIdentity(scope, turn, "in"));
+    if (message.op === "turns.commits" && Array.isArray(result.commits))
+      result.commits = result.commits.map((link) => mapTurnIdentity(scope, link, "in"));
     if (message.op === "codeReview.list" && Array.isArray(result.threads))
       result.threads = result.threads.map((thread) => mapFields(scope, record(thread), "in"));
     const workspace = (row: unknown) => ({

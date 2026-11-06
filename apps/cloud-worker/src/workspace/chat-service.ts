@@ -34,7 +34,7 @@ export class ChatService {
     const number = (key: string): number | undefined => typeof params[key] === "number" && Number.isFinite(params[key]) ? params[key] : undefined;
     const chatId = () => reqString(params, "chatId");
     switch (op) {
-      case "turns.get": case "turns.list": case "turns.diff": return this.turns.handle(op, params);
+      case "turns.get": case "turns.list": case "turns.diff": case "turns.commits": return this.turns.handle(op, params);
       case "turns.reset": {
         const id = chatId(), turnId = reqString(params, "turnId"), mode = params.mode ?? "filesAndTranscript";
         if (!["filesAndTranscript", "filesOnly", "transcriptOnly"].includes(String(mode)))

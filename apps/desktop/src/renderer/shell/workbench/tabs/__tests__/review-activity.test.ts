@@ -46,6 +46,18 @@ beforeEach(async () => {
 afterEach(() => { unmount(); expect(vi.getTimerCount()).toBe(0); vi.useRealTimers(); vi.unstubAllGlobals(); });
 
 describe("Local Review observation activity", () => {
+  it.each(["personal-workspace", "organization-workspace", "cloud://org/workspace"])(
+    "refreshes %s immediately on a ref hint while retaining its confirmed PR", async id => {
+      const { invalidateWorkspacePrRefs } = await import("../../../pr/pr-ref-version");
+      await review.prefetchReviewLiveData(provider, id, 42);
+      const confirmed = review.peekReviewLiveData(provider, id, 42).pr;
+      Fixture(id); unmount(); vi.mocked(provider.getPr).mockClear();
+      invalidateWorkspacePrRefs([id]); Fixture(id, true, 2);
+      expect(review.peekReviewLiveData(provider, id, 42).pr).toBe(confirmed);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(provider.getPr).toHaveBeenCalledOnce();
+    },
+  );
   it.each([
     ["personal-workspace", "hidden"], ["personal-workspace", "blurred"], ["personal-workspace", "retained"],
     ["organization-workspace", "hidden"], ["organization-workspace", "blurred"],
@@ -93,6 +105,47 @@ describe("Local Review observation activity", () => {
     focused = true; window.dispatchEvent(new Event("focus"));
     await vi.advanceTimersByTimeAsync(0);
     expect(provider.getPr).toHaveBeenCalledOnce();
+  });
+
+  it("names a cloud post by the account the caller knows, since cloud reads skip the account check", async () => {
+    let posted: (value: { id: number; url: string }) => void = () => {};
+    vi.mocked(provider.addComment).mockImplementation(() => new Promise((resolve) => { posted = resolve; }));
+    Fixture("cloud://org/workspace");
+    await vi.advanceTimersByTimeAsync(0);
+    const live = Fixture("cloud://org/workspace");
+    expect(provider.authStatus).not.toHaveBeenCalled();
+    expect(live.snap.login).toBeNull();
+    const sending = live.postComment("Ship it", { login: "reviewer", avatarUrl: "https://avatars.githubusercontent.com/u/3" });
+    expect(Fixture("cloud://org/workspace").snap.timeline?.at(-1)).toMatchObject({
+      author: "reviewer",
+      authorAvatarUrl: "https://avatars.githubusercontent.com/u/3",
+      optimistic: true,
+    });
+    posted({ id: 9, url: "https://github.com/o/r/pull/42#issuecomment-9" });
+    await sending;
+  });
+
+  it("keeps the GitHub account's photo for the comment box and a posting comment", async () => {
+    vi.mocked(provider.authStatus).mockResolvedValue({
+      authenticated: true,
+      login: "reviewer",
+      avatarUrl: "https://avatars.githubusercontent.com/u/3",
+    });
+    let posted: (value: { id: number; url: string }) => void = () => {};
+    vi.mocked(provider.addComment).mockImplementation(() => new Promise((resolve) => { posted = resolve; }));
+    // The first render starts the read; the second sees what it returned.
+    Fixture();
+    await vi.advanceTimersByTimeAsync(0);
+    const live = Fixture();
+    expect(live.snap).toMatchObject({ login: "reviewer", avatarUrl: "https://avatars.githubusercontent.com/u/3" });
+    const sending = live.postComment("Ship it");
+    expect(Fixture().snap.timeline?.at(-1)).toMatchObject({
+      author: "reviewer",
+      authorAvatarUrl: "https://avatars.githubusercontent.com/u/3",
+      optimistic: true,
+    });
+    posted({ id: 9, url: "https://github.com/o/r/pull/42#issuecomment-9" });
+    await sending;
   });
 
   it("restores only the exact owner through A to hidden B to A", async () => {

@@ -129,5 +129,49 @@ export function authoredPathsFromMessages(
   return [...byPath.entries()].map(([path, kind]) => ({ path, kind }));
 }
 
+const SHELL_KINDS = new Set(["execute", "bash", "shell"]);
+const MAX_SCANNED_OUTPUT = 256 * 1024;
+const MAX_TURN_COMMITS = 100;
+// git commit, commit --amend, revert and cherry-pick print `[<branch> <sha>]`;
+// a first commit adds `(root-commit)` and a detached head names itself.
+const COMMIT_SUMMARY = /^\[(?:detached HEAD|[^\s\]]+)(?: \(root-commit\))? ([0-9a-f]{7,40})\] \S/gm;
+
+function shellOutputTexts(t: AgentToolMessage): string[] {
+  const texts: string[] = [];
+  const raw = t.rawOutput;
+  if (typeof raw === "string") texts.push(raw);
+  else if (raw && typeof raw === "object") {
+    for (const key of ["output", "stdout", "aggregatedOutput", "formatted_output"]) {
+      const value = (raw as Record<string, unknown>)[key];
+      if (typeof value === "string") texts.push(value);
+    }
+  }
+  for (const item of t.content ?? []) {
+    if (item?.type === "content" && item.content?.type === "text") texts.push(item.content.text);
+  }
+  return texts.map((text) => text.slice(0, MAX_SCANNED_OUTPUT));
+}
+
+/** Abbreviated SHAs of the commits THIS turn's shell tools reported making.
+ *  Only candidates: callers resolve each against the repository before
+ *  recording it, so an amended-away or unreachable commit records nothing.
+ *  A failed command still counts, since it may have committed before failing. */
+export function commitShasFromMessages(messages: AgentMessage[]): string[] {
+  const out: string[] = [];
+  for (const m of messages) {
+    if (m.kind !== "tool") continue;
+    const t = m as AgentToolMessage;
+    if (t.status === "pending" || !SHELL_KINDS.has((t.toolKind ?? "").toLowerCase())) continue;
+    const command = (t.rawInput as Record<string, unknown> | undefined)?.command;
+    if (typeof command !== "string" || !/\bgit\b/.test(command)) continue;
+    for (const text of shellOutputTexts(t)) {
+      for (const match of text.matchAll(COMMIT_SUMMARY)) {
+        if (!out.includes(match[1]!)) out.push(match[1]!);
+        if (out.length >= MAX_TURN_COMMITS) return out;
+      }
+    }
+  }
+  return out;
+}
 
 export { authoredPathsFromShellCommand, type ShellAuthoredKind, type ShellAuthoredPath } from "./shell-authored-paths";
