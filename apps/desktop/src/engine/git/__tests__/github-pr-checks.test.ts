@@ -20,7 +20,7 @@ vi.mock("../state", async (original) => ({
 vi.mock("../../settings/repo-git", () => ({ resolveRepoGit: () => ({ remote: "origin" }) }));
 
 import {
-  getPrChecks, rerunFailedPrChecks, setOctokitFactoryForTesting, setTokenStoreForTesting,
+  commitChecksFromRollup, getPrChecks, getPrCommits, rerunFailedPrChecks, setOctokitFactoryForTesting, setTokenStoreForTesting,
 } from "../github";
 
 const head = "a".repeat(40);
@@ -30,11 +30,23 @@ const run = (name: string, conclusion: string | null, slug = "github-actions") =
   started_at: "2026-01-01T00:00:00Z", completed_at: conclusion ? "2026-01-01T00:01:00Z" : null,
   app: { slug },
 });
+const commit = (sha: string) => ({
+  sha, author: { login: "octocat", avatar_url: null },
+  commit: { message: `Commit ${sha.slice(0, 7)}`, author: { name: "Octo Cat", date: "2026-01-01T00:00:00Z" } },
+});
 function client() {
   return {
     pulls: {
       get: vi.fn(async () => ({ data: { number: 7, base: { ref: "main" }, head: { ref: "topic", sha: head } } })),
+      listCommits: vi.fn(async () => ({ data: ["1", "2", "3"].map((ch) => commit(ch.repeat(40))) })),
     },
+    graphql: vi.fn(async () => ({
+      repository: { pullRequest: { commits: { nodes: [
+        { commit: { oid: "1".repeat(40), additions: 1, deletions: 0, changedFilesIfAvailable: 1, statusCheckRollup: { state: "FAILURE" }, authors: { nodes: [] } } },
+        { commit: { oid: "2".repeat(40), additions: 2, deletions: 1, changedFilesIfAvailable: 1, statusCheckRollup: { state: "SUCCESS" }, authors: { nodes: [] } } },
+        { commit: { oid: "3".repeat(40), additions: 0, deletions: 4, changedFilesIfAvailable: 2, statusCheckRollup: null, authors: { nodes: [] } } },
+      ] } } },
+    })),
     checks: {
       listForRef: vi.fn(async () => ({
         data: { check_runs: [run("test", "failure"), run("lint", "success"), run("CodeRabbit", "failure", "coderabbitai")] },
@@ -115,5 +127,26 @@ describe("Local pull request checks", () => {
     await expect(rerunFailedPrChecks({ workspaceId: "ws-moved", prNumber: 7, headSha: "b".repeat(40) }))
       .rejects.toMatchObject({ code: "VALIDATION_FAILED" });
     expect(oct.actions.reRunWorkflowFailedJobs).not.toHaveBeenCalled();
+  });
+});
+
+describe("Local pull request commits", () => {
+  it("names each commit's combined check result", async () => {
+    const commits = await getPrCommits({ workspaceId: "ws-commits", prNumber: 7 });
+    expect(commits.map(({ sha, checks }) => [sha[0], checks])).toEqual([["1", "failed"], ["2", "passed"], ["3", null]]);
+  });
+
+  it("keeps the commits when their stats and checks cannot be read", async () => {
+    oct.graphql.mockRejectedValue(new Error("GraphQL unavailable"));
+    const commits = await getPrCommits({ workspaceId: "ws-commits-down", prNumber: 7 });
+    expect(commits).toHaveLength(3);
+    expect(commits.every((c) => c.checks === null && c.additions === null)).toBe(true);
+  });
+
+  it.each([
+    ["SUCCESS", "passed"], ["FAILURE", "failed"], ["ERROR", "failed"],
+    ["PENDING", "pending"], ["EXPECTED", "pending"], [undefined, null], ["SOMETHING_NEW", null],
+  ])("reads GitHub's %s rollup as %s", (state, checks) => {
+    expect(commitChecksFromRollup(state)).toBe(checks);
   });
 });

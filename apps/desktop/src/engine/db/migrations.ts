@@ -1650,6 +1650,15 @@ export const MIGRATIONS: Migration[] = [
       );
     `,
   },
+  {
+    version: 45,
+    name: "commits a turn made",
+    up: `
+      -- JSON array of full SHAs the turn's own tools committed, resolved in
+      -- the repository when it settled. Null on older rows and commit-free turns.
+      ALTER TABLE turns ADD COLUMN commits TEXT;
+    `,
+  },
 ];
 
 /** Run all pending migrations in order, each in its own transaction. Idempotent

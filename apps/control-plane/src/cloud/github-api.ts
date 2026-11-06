@@ -487,8 +487,55 @@ export class CloudGithubApi {
     return { id: row.id, url: row.html_url };
   }
 
+  /** Each of the newest commits' combined check state, by SHA. Cosmetic: a
+   *  failed read returns no states rather than failing the commit list. */
+  private async commitChecks(nodeId: string): Promise<Map<string, "passed" | "failed" | "pending">> {
+    const schema = z.object({
+      data: z.object({
+        node: z
+          .object({
+            id: z.string().max(256),
+            commits: z.object({
+              nodes: z
+                .array(
+                  z.object({
+                    commit: z.object({
+                      oid: githubSha,
+                      statusCheckRollup: z.object({ state: z.string().max(32) }).nullable(),
+                    }),
+                  }),
+                )
+                .max(100),
+            }),
+          })
+          .nullable(),
+      }),
+    });
+    const query = `query ($id: ID!) { node(id: $id) { ... on PullRequest { id
+      commits(last: 100) { nodes { commit { oid statusCheckRollup { state } } } } } } }`;
+    const states = new Map<string, "passed" | "failed" | "pending">();
+    try {
+      const result = await this.http.json("/graphql", schema, {
+        method: "POST",
+        body: { query, variables: { id: nodeId } },
+      });
+      if (result.data.node?.id !== nodeId) return states;
+      for (const { commit } of result.data.node.commits.nodes) {
+        const state = commit.statusCheckRollup?.state;
+        const checks = state === "SUCCESS" ? "passed"
+          : state === "FAILURE" || state === "ERROR" ? "failed"
+          : state === "PENDING" || state === "EXPECTED" ? "pending" : null;
+        if (checks) states.set(commit.oid, checks);
+      }
+    } catch {
+      // Commit rows stay useful without their check glyphs.
+    }
+    return states;
+  }
+
   async commits(target: CloudGithubPrTarget, number: number) {
     const { repo, pull } = await this.readPull(target, number);
+    const checks = this.commitChecks(pull.node_id);
     const rows = await this.http.pages(
       `${repoPath(repo)}/pulls/${number}/commits`,
       z.object({
@@ -506,6 +553,7 @@ export class CloudGithubApi {
       }),
     );
     await this.sameRevision(target, repo, pull);
+    const states = await checks;
     return rows.map((row) => ({
       sha: row.sha,
       abbreviatedSha: row.sha.slice(0, 7),
@@ -523,6 +571,7 @@ export class CloudGithubApi {
       additions: null,
       deletions: null,
       changedFiles: null,
+      checks: states.get(row.sha) ?? null,
     }));
   }
 

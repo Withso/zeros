@@ -305,12 +305,14 @@ import {
 } from "./db/chats";
 import {
   authoredPathsFromMessages,
+  commitShasFromMessages,
   deleteSnapshotRefs,
   isGitWorkTree,
   repoToplevel,
   snapshotRef,
   snapshotWorkingTree,
   treesIdentical,
+  resolveTurnCommits,
   turnFileDiffs,
 } from "./git/turns-git";
 
@@ -7294,6 +7296,12 @@ export class ZerosEngine {
             snapshotRef(ctx.chatId, ctx.turnId, "post"),
           )
         : null;
+      // What this turn's own shell tools reported committing, kept only when
+      // the commit exists here, so the Review tab can name the chat behind it.
+      const commitCandidates = ctx.isGit ? commitShasFromMessages(turnMsgs) : [];
+      const commits = commitCandidates.length
+        ? await resolveTurnCommits(ctx.root, commitCandidates)
+        : [];
       let files: TurnFile[];
       if (ctx.pre && post && authored.length > 0) {
         // Real ±counts/status, restricted to authored paths (concurrency-safe).
@@ -7317,6 +7325,7 @@ export class ZerosEngine {
         postSnapshot: post,
         files,
         usage: usage ?? null,
+        commits,
       });
       // Conversational, denied, failed-without-write, and net-zero turns remain
       // as lightweight timeline rows for duration/transcript reset, but their

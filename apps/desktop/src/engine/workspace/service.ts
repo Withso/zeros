@@ -36,7 +36,8 @@ import {
   changesHistorySchema,
   turnHistoryCursorSchema,
 } from "@zeros/protocol/changes-history";
-import { historyDiff, listHistoryTurns } from "../git/history-diff";
+import { historyDiff, listHistoryCommitLinks, listHistoryTurns } from "../git/history-diff";
+import { isTurnCommitSha, TURN_COMMIT_LOOKUP_LIMIT } from "@zeros/protocol/turns";
 import {
   getPrInlineReview,
   getPrReviewDiff,
@@ -1176,10 +1177,12 @@ const REMOTE_READABLE = new Set<string>([
   "git.remoteBranches",
   "git.repoBranchCatalog",
   "git.hasChanges",
-  // Turn reads (footer pills, per-turn changes filter, per-turn diff)
+  // Turn reads (footer pills, per-turn changes filter, per-turn diff, and
+  // which chat made a pull request's commits)
   "turns.list",
   "turns.get",
   "turns.diff",
+  "turns.commits",
   // GitHub PR reads
   "gh.authStatus",
   "gh.repoOwnerAvatar",
@@ -5431,6 +5434,12 @@ export class WorkspaceService {
                 : turnHistoryCursorSchema.parse(params.after),
           }),
         };
+      case "turns.commits": {
+        const shas = params.shas;
+        if (!Array.isArray(shas) || shas.length > TURN_COMMIT_LOOKUP_LIMIT || !shas.every(isTurnCommitSha))
+          throw new GitError({ code: "VALIDATION_FAILED", message: "turns.commits requires full commit SHAs" });
+        return { commits: await listHistoryCommitLinks(reqStr(params, "workspaceId"), shas) };
+      }
       case "turns.get":
         return {
           turn: getTurn(reqStr(params, "chatId"), reqStr(params, "turnId")),

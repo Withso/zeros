@@ -2143,7 +2143,12 @@ export interface PrCommitSummary {
   additions: number | null;
   deletions: number | null;
   changedFiles: number | null;
+  /** The commit's combined check result; null when nothing reported on it
+   *  or the lookup failed. Absent from older readers. */
+  checks?: PrCommitChecks | null;
 }
+
+export type PrCommitChecks = "passed" | "failed" | "pending";
 
 export interface PrTimelineItem {
   kind: "review" | "comment";

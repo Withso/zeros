@@ -4625,6 +4625,14 @@ describe("WorkspaceService", () => {
     },
   );
 
+  it("names the chats behind full commit SHAs and refuses anything else", async () => {
+    await expect(svc.handle("turns.commits", { workspaceId: LOCAL_MAIN_WORKSPACE_ID, shas: ["a".repeat(40)] }))
+      .resolves.toEqual({ commits: [] });
+    for (const shas of [["abc1234"], "a".repeat(40), Array.from({ length: 251 }, (_, i) => i.toString(16).padStart(40, "0"))])
+      await expect(svc.handle("turns.commits", { workspaceId: LOCAL_MAIN_WORKSPACE_ID, shas }))
+        .rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+  });
+
   it("hands a full head to the GitHub re-run", async () => {
     // The op must reach the GitHub client; a missing export fails as a TypeError.
     const error = await svc

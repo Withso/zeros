@@ -68,6 +68,7 @@ import {
 } from "../tab-status";
 import { ReviewCommitsSection } from "./review-commits";
 import { ReviewChecksSection } from "./review-checks";
+import { useReviewCommitChats } from "./review-commit-chats";
 import { ReviewTimelineSection } from "./review-timeline";
 import type { ReviewSubtab } from "../tab-model";
 
@@ -226,6 +227,19 @@ export function ReviewView({
 
   const dispatch = useWorkspaceDispatch();
   const activeChatId = useWorkspaceStore((s) => s.activeChatId);
+  const chats = useWorkspaceStore((s) => s.chats);
+  // Which chat made each commit: read only while a surface that names it shows.
+  const commitChats = useReviewCommitChats(
+    workspaceId,
+    snap.commits,
+    chats,
+    active && (sub === "commits" || sub === "activity"),
+  );
+  const openChat = useCallback(
+    (chatId: string) => dispatch({ type: "SET_ACTIVE_CHAT", id: chatId }),
+    [dispatch],
+  );
+  const viewChecks = useCallback(() => onSubChange("checks"), [onSubChange]);
   const addToChat = useCallback(
     (text: string) => {
       appendCounter += 1;
@@ -685,6 +699,8 @@ export function ReviewView({
               error={null}
               prUrl={pr.url || prUrl}
               onRetry={() => void refresh()}
+              chats={commitChats}
+              onOpenChat={openChat}
             />
           </div>
         )}
@@ -720,6 +736,10 @@ export function ReviewView({
             onAddToChat={addToChat}
             onPostComment={postComment}
             onRetry={() => void refresh()}
+            checks={snap.checks}
+            chats={commitChats}
+            onOpenChat={openChat}
+            onViewChecks={viewChecks}
           />
         )}
       </div>

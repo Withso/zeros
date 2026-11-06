@@ -21,7 +21,9 @@ import {
   Globe,
 } from "lucide-react";
 
-import type { PR, PrCommitSummary } from "../../../platform/git";
+import type { PR, PrChecksResult, PrCommitSummary } from "../../../platform/git";
+import { AgentIcon } from "@/renderer/features/agent/agent-icon";
+import type { ReviewCommitChat } from "./review-commit-chats";
 import {
   Badge,
   Button,
@@ -44,7 +46,12 @@ import {
   type ReviewTimelineEvent,
   type TimelineFilter,
 } from "./review-model";
-import { AuthorAvatar, ErrorCallout } from "./review-shared-components";
+import {
+  AuthorAvatar,
+  ErrorCallout,
+  OutcomeGlyph,
+  ReviewTextLink,
+} from "./review-shared-components";
 import { REVIEW_CARD, ReviewSection, SUBTAB_FRAME } from "./review-overview";
 import { ZerosSpinner } from "@/renderer/shared/ui/loading";
 import { useScrollMemoryRef } from "../../scroll-memory";
@@ -63,6 +70,10 @@ export function ReviewTimelineSection({
   onAddToChat,
   onPostComment,
   onRetry,
+  checks = null,
+  chats,
+  onOpenChat,
+  onViewChecks,
 }: {
   pr: PR | null;
   prNumber: number;
@@ -79,6 +90,13 @@ export function ReviewTimelineSection({
   onAddToChat: (text: string) => void;
   onPostComment: (body: string) => Promise<void>;
   onRetry: () => void;
+  /** The head commit's checks; its failures join the stream. */
+  checks?: PrChecksResult | null;
+  /** sha → the chat whose turn made the commit. */
+  chats?: ReadonlyMap<string, ReviewCommitChat>;
+  onOpenChat?: (chatId: string) => void;
+  /** Show the Checks sub-tab (a failure's View checks). */
+  onViewChecks?: () => void;
 }) {
   const timelineScrollRef = useScrollMemoryRef(scrollKey);
   const events = useMemo(
@@ -87,8 +105,9 @@ export function ReviewTimelineSection({
         pr,
         commits: commits ?? [],
         items: timeline ?? [],
+        checks,
       }),
-    [pr, commits, timeline],
+    [pr, commits, timeline, checks],
   );
   const optimisticIds = useMemo(
     () =>
@@ -130,6 +149,9 @@ export function ReviewTimelineSection({
               optimisticIds.has(e.item.id)
             }
             onAddToChat={onAddToChat}
+            chat={e.kind === "commit" ? chats?.get(e.commit.sha) : undefined}
+            onOpenChat={onOpenChat}
+            onViewChecks={onViewChecks}
           />
         ))}
       </ol>
@@ -175,6 +197,8 @@ function eventKey(e: ReviewTimelineEvent, i: number): string {
   switch (e.kind) {
     case "commit":
       return `commit-${e.commit.sha}`;
+    case "check":
+      return `check-${e.sha}-${e.check.name}-${e.at}`;
     case "review":
     case "comment":
       return `${e.kind}-${e.item.id}`;
@@ -192,12 +216,19 @@ function TimelineRow({
   prNumber,
   optimistic,
   onAddToChat,
+  chat,
+  onOpenChat,
+  onViewChecks,
 }: {
   event: ReviewTimelineEvent;
   last: boolean;
   prNumber: number;
   optimistic: boolean;
   onAddToChat: (text: string) => void;
+  /** The chat whose turn made this commit. */
+  chat?: ReviewCommitChat;
+  onOpenChat?: (chatId: string) => void;
+  onViewChecks?: () => void;
 }) {
   const isCard = event.kind === "review" || event.kind === "comment";
   return (
@@ -205,7 +236,7 @@ function TimelineRow({
       {/* rail */}
       <div className="flex w-6 shrink-0 flex-col items-center">
         <div className="flex h-6 shrink-0 items-center justify-center">
-          <EventGlyph event={event} />
+          <EventGlyph event={event} chat={chat} />
         </div>
         {!last && <div className="bg-border2 w-px flex-1" />}
       </div>
@@ -215,18 +246,34 @@ function TimelineRow({
           prNumber={prNumber}
           optimistic={optimistic}
           onAddToChat={onAddToChat}
+          chat={chat}
+          onOpenChat={onOpenChat}
+          onViewChecks={onViewChecks}
         />
       </div>
     </li>
   );
 }
 
-function EventGlyph({ event }: { event: ReviewTimelineEvent }) {
+function EventGlyph({
+  event,
+  chat,
+}: {
+  event: ReviewTimelineEvent;
+  chat?: ReviewCommitChat;
+}) {
   switch (event.kind) {
     case "opened":
       return <GitPullRequestArrow className="text-green-primary size-3.5" />;
     case "commit":
-      return <GitCommit className="text-fg2 size-3.5" />;
+      // A chat's commit wears its agent's mark, as the chat's own rows do.
+      return chat?.agentId ? (
+        <AgentIcon agentId={chat.agentId} iconUrl={null} size={14} />
+      ) : (
+        <GitCommit className="text-fg2 size-3.5" />
+      );
+    case "check":
+      return <OutcomeGlyph outcome="failed" />;
     case "merged":
       return <GitMerge className="text-violet-primary size-3.5" />;
     case "closed":
@@ -247,11 +294,17 @@ function EventBody({
   prNumber,
   optimistic,
   onAddToChat,
+  chat,
+  onOpenChat,
+  onViewChecks,
 }: {
   event: ReviewTimelineEvent;
   prNumber: number;
   optimistic: boolean;
   onAddToChat: (text: string) => void;
+  chat?: ReviewCommitChat;
+  onOpenChat?: (chatId: string) => void;
+  onViewChecks?: () => void;
 }) {
   switch (event.kind) {
     case "opened":
@@ -262,20 +315,56 @@ function EventBody({
           at={event.at}
         />
       );
-    case "commit":
+    case "commit": {
+      const coAuthor = event.commit.coAuthors[0]?.name;
       return (
-        <div className="flex h-6 min-w-0 items-center gap-1.5 text-xs">
+        <div className="flex h-6 min-w-0 items-center gap-1.5 text-xs" data-review-event-commit={event.commit.abbreviatedSha}>
           <span className="text-fg1 shrink-0 font-medium">
             {event.commit.authorLogin ?? event.commit.authorName}
           </span>
+          {coAuthor && (
+            <>
+              <span className="text-fg2 shrink-0">and</span>
+              <span className="text-fg1 shrink-0 font-medium">{coAuthor}</span>
+            </>
+          )}
           <span className="text-fg2 shrink-0">committed</span>
           <span className="bg-bg2 text-fg2 text-3xxs shrink-0 rounded-sm px-1.5 font-mono leading-5">
             {event.commit.abbreviatedSha}
           </span>
-          <span className="text-fg1 min-w-0 truncate">
-            {event.commit.message.split("\n")[0]}
+          {chat && onOpenChat ? (
+            <>
+              <span className="text-fg2 shrink-0">from the chat</span>
+              <ReviewTextLink onClick={() => onOpenChat(chat.chatId)} label={`Open the chat ${chat.title}`}>
+                {chat.title}
+              </ReviewTextLink>
+            </>
+          ) : (
+            <span className="text-fg1 min-w-0 truncate">
+              {event.commit.message.split("\n")[0]}
+            </span>
+          )}
+          <span className="text-muted-fg shrink-0">{relTime(event.at)}</span>
+        </div>
+      );
+    }
+    case "check":
+      return (
+        <div className="flex h-6 min-w-0 items-center gap-1.5 text-xs" data-review-event-check={event.check.name}>
+          <span className="text-fg1 min-w-0 truncate font-medium">{event.check.name}</span>
+          <span className="text-fg2 shrink-0">failed on</span>
+          <span className="bg-bg2 text-fg2 text-3xxs shrink-0 rounded-sm px-1.5 font-mono leading-5">
+            {event.sha.slice(0, 7)}
           </span>
           <span className="text-muted-fg shrink-0">{relTime(event.at)}</span>
+          {onViewChecks && (
+            <>
+              <span className="text-muted-fg shrink-0">·</span>
+              <ReviewTextLink onClick={onViewChecks} arrow={false}>
+                View checks
+              </ReviewTextLink>
+            </>
+          )}
         </div>
       );
     case "merged":

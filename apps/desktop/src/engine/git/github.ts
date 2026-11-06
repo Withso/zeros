@@ -2350,6 +2350,20 @@ export interface PrCommitSummary {
   additions: number | null;
   deletions: number | null;
   changedFiles: number | null;
+  /** The commit's combined check result; null when nothing reported on it
+   *  or the lookup failed. Absent from older readers. */
+  checks?: PrCommitChecks | null;
+}
+
+export type PrCommitChecks = "passed" | "failed" | "pending";
+
+/** GitHub's combined status for a commit (StatusCheckRollupState). Expected
+ *  required checks count as still running. */
+export function commitChecksFromRollup(state: string | null | undefined): PrCommitChecks | null {
+  if (state === "SUCCESS") return "passed";
+  if (state === "FAILURE" || state === "ERROR") return "failed";
+  if (state === "PENDING" || state === "EXPECTED") return "pending";
+  return null;
 }
 
 /** Shape of the per-commit stats GraphQL query below. */
@@ -2363,6 +2377,7 @@ interface PrCommitStatsQuery {
             additions: number;
             deletions: number;
             changedFilesIfAvailable: number | null;
+            statusCheckRollup?: { state: string } | null;
             authors: {
               nodes: Array<{
                 name: string | null;
@@ -2405,6 +2420,7 @@ export async function getPrCommits(opts: {
                     additions
                     deletions
                     changedFilesIfAvailable
+                    statusCheckRollup { state }
                     authors(first: 6) {
                       nodes { name user { login avatarUrl } }
                     }
@@ -2448,6 +2464,7 @@ export async function getPrCommits(opts: {
       additions: s?.additions ?? null,
       deletions: s?.deletions ?? null,
       changedFiles: s?.changedFilesIfAvailable ?? null,
+      checks: commitChecksFromRollup(s?.statusCheckRollup?.state),
     };
   });
 }

@@ -41,6 +41,7 @@ import type {
   ContextGraphListWire,
 } from "../context-graph";
 import type {
+  TurnCommitLink,
   TurnInfo,
   TurnResetResult,
   TurnUndoResult,
@@ -178,6 +179,18 @@ export async function bridgeTurnsList(
     ...options,
   })) as { turns?: TurnInfo[] } | undefined;
   return r?.turns ?? [];
+}
+
+/** Which of this workspace's turns made each commit (full SHAs, ≤250). */
+export async function bridgeTurnsCommits(
+  bridge: RuntimeClient,
+  workspaceId: string,
+  shas: string[],
+): Promise<TurnCommitLink[]> {
+  const r = (await workspaceOp(bridge, "turns.commits", { workspaceId, shas })) as
+    | { commits?: TurnCommitLink[] }
+    | undefined;
+  return r?.commits ?? [];
 }
 
 export async function bridgeTurnsGet(

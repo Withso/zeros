@@ -77,6 +77,27 @@ describe("cloud recorded turn changes", () => {
     expect(store.turnRecord("other", "other-turn")!.files.map(file => file.path)).toEqual(["other.txt"]);
   });
 
+  it("records the commits a turn's own shell made and names that chat for each", async () => {
+    const { root, git, store, chat, begin, finish } = await setup();
+    await begin();
+    await begin("other", "other-turn");
+    await writeFile(join(root, "made.txt"), "made\n");
+    await git("add", "made.txt"); await git("commit", "-m", "Made in the chat");
+    const sha = await git("rev-parse", "HEAD");
+    const shell = (chatId: string, id: string, rawOutput: string) => store.fold(chatId, { sessionId: "execution", update: {
+      sessionUpdate: "tool_call", toolCallId: id, title: "git commit", kind: "execute", status: "completed",
+      rawInput: { command: "git commit -m 'Made in the chat'" }, rawOutput } });
+    await shell("chat", "commit", `[workspace/fixture ${sha.slice(0, 7)}] Made in the chat\n 1 file changed`);
+    await shell("chat", "ghost", "[main 1234567] Never made here\n");
+    await shell("other", "log", `[workspace/fixture ${sha.slice(0, 7)}] Made in the chat\n`);
+    await finish();
+    expect(store.turnRecord("chat", "opening")!.commits).toEqual([sha]);
+    await finish("other", "other-turn");
+    expect(await chat.handle("turns.commits", { shas: [sha, "f".repeat(40)] }))
+      .toEqual({ commits: [{ sha, chatId: "chat", turnId: "opening" }] });
+    await expect(chat.handle("turns.commits", { shas: [sha.slice(0, 7)] })).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+  });
+
   it("mirrors summary metadata with the opening prompt and restores exact diffs after restart", async () => {
     const { root, state, scope, store, turns, begin, tool, finish } = await setup();
     const relay = new FakeRelay(); relay.connected = true;

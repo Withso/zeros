@@ -227,6 +227,8 @@ export function reviewActionBlockReason(
 export type ReviewTimelineEvent =
   | { kind: "opened"; at: number; author: string }
   | { kind: "commit"; at: number; commit: PrCommitSummary }
+  /** A check that failed on the head commit, at the time it finished. */
+  | { kind: "check"; at: number; check: PrCheck; sha: string }
   | { kind: "review"; at: number; item: PrTimelineItem }
   | { kind: "comment"; at: number; item: PrTimelineItem }
   | { kind: "merged"; at: number }
@@ -236,14 +238,24 @@ export function composeTimeline(args: {
   pr: PR | null;
   commits: PrCommitSummary[];
   items: PrTimelineItem[];
+  /** The head commit's checks; their failures join the stream. */
+  checks?: PrChecksResult | null;
 }): ReviewTimelineEvent[] {
   const events: ReviewTimelineEvent[] = [];
-  const { pr, commits, items } = args;
+  const { pr, commits, items, checks } = args;
   if (pr && pr.createdAt > 0) {
     events.push({ kind: "opened", at: pr.createdAt, author: pr.authorLogin });
   }
   for (const c of commits) {
     if (c.date > 0) events.push({ kind: "commit", at: c.date, commit: c });
+  }
+  // Only the head's checks are known by name; a failure without a finish
+  // time has no place in the order and stays on the Checks tab.
+  if (pr?.headSha && checks) {
+    for (const check of checks.checks) {
+      if (checkOutcome(check) === "failed" && check.completedAt && check.completedAt > 0)
+        events.push({ kind: "check", at: check.completedAt, check, sha: pr.headSha });
+    }
   }
   for (const it of items) {
     events.push({
@@ -511,6 +523,8 @@ export function filterTimelineEvents(
 ): ReviewTimelineEvent[] {
   if (filter === "all") return [...events];
   return events.filter((event) => {
+    // A check result is neither a person's nor an App's comment.
+    if (event.kind === "check") return false;
     const actor = eventActor(event);
     const bot = actor != null && isBotLogin(actor);
     return filter === "bots" ? bot : !bot;

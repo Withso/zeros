@@ -444,6 +444,28 @@ describe("cloud GitHub API", () => {
     refuse = new Set([11, 13]);
     await expect(api.rerunFailed(target, 7, head)).rejects.toBeTruthy();
   });
+  it("names each commit's combined check result and keeps the list when that read fails", async () => {
+    const rows = ["1", "2"].map((ch) => ({
+      sha: ch.repeat(40), author: null,
+      commit: { message: "Change", author: { name: "Octo", date: "2026-01-01T00:00:00Z" }, committer: null },
+    }));
+    let graphqlDown = false;
+    const { api } = fixture((path) => {
+      if (path === "/repositories/42") return Response.json(repository);
+      if (path.includes("/commits")) return Response.json(rows);
+      if (path === "/graphql") return graphqlDown ? new Response(null, { status: 502 }) : Response.json({ data: { node: {
+        id: pull.node_id,
+        commits: { nodes: [
+          { commit: { oid: "1".repeat(40), statusCheckRollup: { state: "ERROR" } } },
+          { commit: { oid: "2".repeat(40), statusCheckRollup: { state: "EXPECTED" } } },
+        ] },
+      } } });
+      return Response.json(pull);
+    });
+    expect((await api.commits(target, 7)).map(({ checks }) => checks)).toEqual(["failed", "pending"]);
+    graphqlDown = true;
+    expect((await api.commits(target, 7)).map(({ checks }) => checks)).toEqual([null, null]);
+  });
   it("keeps checks from an old head out of a refreshed PR", async () => {
     let reads = 0;
     const { api } = fixture((path) => {

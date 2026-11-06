@@ -14,15 +14,16 @@ import { getActiveBridge } from "./bridge/active-bridge";
 import type { TurnHistoryCursor } from "@zeros/protocol/changes-history";
 import {
   bridgeTurnsList,
+  bridgeTurnsCommits,
   bridgeTurnsGet,
   bridgeTurnsDiff,
   bridgeTurnsReset,
   bridgeTurnsUndoReset,
 } from "./bridge/workspace-bridge";
 
-import type { TurnInfo } from "@zeros/protocol/turns";
+import type { TurnCommitLink, TurnInfo } from "@zeros/protocol/turns";
 export type {
-  TurnFileStatus, TurnFile, TurnStatus, TurnModelUsage, TurnUsageInfo, TurnInfo,
+  TurnFileStatus, TurnFile, TurnStatus, TurnModelUsage, TurnUsageInfo, TurnInfo, TurnCommitLink,
 } from "@zeros/protocol/turns";
 
 export interface ResetFileOutcome {
@@ -85,6 +86,15 @@ export async function turnsList(
 ): Promise<TurnInfo[]> {
   if (!workspaceId) return [];
   return bridgeTurnsList(requireBridge("list turns"), workspaceId, options);
+}
+
+/** Which chat's turn made each of these commits (the Review tab's links). */
+export async function turnCommitLinks(
+  workspaceId: string,
+  shas: string[],
+): Promise<TurnCommitLink[]> {
+  if (!workspaceId || shas.length === 0) return [];
+  return bridgeTurnsCommits(requireBridge("read commit chats"), workspaceId, shas);
 }
 
 /** One turn's recorded metadata (footer duration + authored file pills). */

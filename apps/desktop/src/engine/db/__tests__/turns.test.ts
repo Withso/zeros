@@ -18,6 +18,9 @@ import {
   deleteTurnsForChat,
   turnsWithSnapshotsBeyond,
   clearTurnSnapshots,
+  listTurnCommitLinks,
+  getRawTurnsFrom,
+  reinsertTurns,
 } from "../turns";
 
 function tmpDbFile(): string {
@@ -175,6 +178,41 @@ describe("turns table", () => {
   afterEach(() => {
     closeZerosDb();
     setZerosDbPathForTesting(null);
+  });
+
+  it("records a finished turn's commits and finds the turn that made each", () => {
+    setZerosDbPathForTesting(tmpDbFile());
+    const [a, b, c] = ["a", "b", "c"].map((ch) => ch.repeat(40));
+    const turn = (chatId: string, turnId: string, workspaceId: string, startedAt: number, commits: string[]) => {
+      startTurn({ chatId, turnId, agentId: "claude", workspaceId, folder: null, summary: null, startedAt, preSnapshot: null });
+      finishTurn(chatId, turnId, { endedAt: startedAt + 1, status: "completed", stopReason: "end_turn", postSnapshot: null, files: [], commits });
+    };
+    turn("chat-1", "t1", "ws", 10, [a]);
+    turn("chat-2", "t2", "ws", 20, [a, b]);
+    turn("chat-3", "t3", "other-ws", 5, [c]);
+    turn("chat-4", "t4", "ws", 30, []);
+    expect(getTurn("chat-2", "t2")?.commits).toEqual([a, b]);
+    expect(getTurn("chat-4", "t4")?.commits).toEqual([]);
+    expect(listTurnCommitLinks("ws", [a, b, c, "not-a-sha"])).toEqual([
+      { sha: a, chatId: "chat-1", turnId: "t1" },
+      { sha: b, chatId: "chat-2", turnId: "t2" },
+    ]);
+    expect(listTurnCommitLinks("ws", [])).toEqual([]);
+  });
+
+  it("keeps a turn's commits through reset undo, including rows captured before they existed", () => {
+    setZerosDbPathForTesting(tmpDbFile());
+    const sha = "d".repeat(40);
+    startTurn({ chatId: "chat", turnId: "t1", agentId: "codex", workspaceId: "ws", folder: null, summary: null, startedAt: 1, preSnapshot: null });
+    finishTurn("chat", "t1", { endedAt: 2, status: "completed", stopReason: "end_turn", postSnapshot: null, files: [], commits: [sha] });
+    const captured = getRawTurnsFrom("chat", "t1");
+    deleteTurnsFrom("chat", "t1");
+    reinsertTurns(captured);
+    expect(getTurn("chat", "t1")?.commits).toEqual([sha]);
+    const legacy = captured.map(({ commits: _commits, ...row }) => row);
+    deleteTurnsFrom("chat", "t1");
+    reinsertTurns(legacy);
+    expect(getTurn("chat", "t1")?.commits).toEqual([]);
   });
 
   it("records a running turn then finalizes it", () => {
