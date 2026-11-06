@@ -389,6 +389,11 @@
               {
                 "type": "object",
                 "properties": {
+                  "credential_id": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
                   "name": {
                     "type": "string",
                     "minLength": 1,
@@ -408,6 +413,13 @@
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 4096
+                  },
+                  "listen_url": {
+                    "type": "string",
+                    "maxLength": 4096,
+                    "format": "uri",
+                    "description": "Loopback HTTP endpoint (127.0.0.1, localhost or [::1]) where this command serves MCP. Zeros starts the command when it is first needed. No credentials or fragment.",
+                    "pattern": "^http://(?:127\\.0\\.0\\.1|localhost|\\[::1\\])(?::(?:6553[0-5]|655[0-2]\\d|65[0-4]\\d{2}|6[0-4]\\d{3}|[1-5]\\d{4}|\\d{1,4}))?(?:[/?][^#]*)?$"
                   },
                   "args": {
                     "description": "Arguments passed to the command.",
@@ -440,6 +452,11 @@
               {
                 "type": "object",
                 "properties": {
+                  "credential_id": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
                   "name": {
                     "type": "string",
                     "minLength": 1,
@@ -453,6 +470,16 @@
                     "type": "string",
                     "minLength": 1,
                     "description": "Streamable-HTTP endpoint URL."
+                  },
+                  "env": {
+                    "description": "Secure variables available to configured header references.",
+                    "type": "object",
+                    "propertyNames": {
+                      "type": "string"
+                    },
+                    "additionalProperties": {
+                      "type": "string"
+                    }
                   },
                   "headers": {
                     "description": "HTTP headers sent on every request (e.g. Authorization; non-secret / refs). Applies to auth=\"none\" (injected directly) and auth=\"header\" (sent alongside the brokered secret); IGNORED for auth=\"oauth\" (the gateway manages the connection).",
@@ -477,6 +504,23 @@
                     "description": "For auth=\"header\": the header NAME the gateway sets (e.g. Authorization). The value is stored in the engine secret vault, not this file.",
                     "type": "string"
                   },
+                  "header_names": {
+                    "maxItems": 128,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "pattern": "^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,128}$"
+                    }
+                  },
+                  "oauth_client_mode": {
+                    "type": "string",
+                    "enum": [
+                      "auto",
+                      "metadata",
+                      "dynamic",
+                      "custom"
+                    ]
+                  },
                   "oauth_client_id": {
                     "description": "For auth=\"oauth\": a pre-registered OAuth client_id for servers that don't support Dynamic Client Registration (Auth0/Okta/Cognito/enterprise). Non-secret. Omit to auto-register (DCR).",
                     "type": "string"
@@ -491,7 +535,7 @@
                     }
                   },
                   "disabled_tools": {
-                    "description": "For a gateway-fronted server (auth oauth/header): tool NAMES to hide from agents — e.g. to stay under Cursor's ~40-tool cap. Empty/absent = all tools exposed.",
+                    "description": "For a gateway-fronted server (auth oauth/header): tool NAMES to hide from agents. Empty/absent = all tools exposed.",
                     "type": "array",
                     "items": {
                       "type": "string"
@@ -511,6 +555,11 @@
               {
                 "type": "object",
                 "properties": {
+                  "credential_id": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
                   "name": {
                     "type": "string",
                     "minLength": 1,
@@ -524,6 +573,16 @@
                     "type": "string",
                     "minLength": 1,
                     "description": "SSE endpoint URL."
+                  },
+                  "env": {
+                    "description": "Secure variables available to configured header references.",
+                    "type": "object",
+                    "propertyNames": {
+                      "type": "string"
+                    },
+                    "additionalProperties": {
+                      "type": "string"
+                    }
                   },
                   "headers": {
                     "description": "HTTP headers sent on every request (e.g. Authorization; non-secret / refs). Applies to auth=\"none\" (injected directly) and auth=\"header\" (sent alongside the brokered secret); IGNORED for auth=\"oauth\" (the gateway manages the connection).",
@@ -548,6 +607,23 @@
                     "description": "For auth=\"header\": the header NAME the gateway sets (e.g. Authorization). The value is stored in the engine secret vault, not this file.",
                     "type": "string"
                   },
+                  "header_names": {
+                    "maxItems": 128,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "pattern": "^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,128}$"
+                    }
+                  },
+                  "oauth_client_mode": {
+                    "type": "string",
+                    "enum": [
+                      "auto",
+                      "metadata",
+                      "dynamic",
+                      "custom"
+                    ]
+                  },
                   "oauth_client_id": {
                     "description": "For auth=\"oauth\": a pre-registered OAuth client_id for servers that don't support Dynamic Client Registration (Auth0/Okta/Cognito/enterprise). Non-secret. Omit to auto-register (DCR).",
                     "type": "string"
@@ -562,7 +638,7 @@
                     }
                   },
                   "disabled_tools": {
-                    "description": "For a gateway-fronted server (auth oauth/header): tool NAMES to hide from agents — e.g. to stay under Cursor's ~40-tool cap. Empty/absent = all tools exposed.",
+                    "description": "For a gateway-fronted server (auth oauth/header): tool NAMES to hide from agents. Empty/absent = all tools exposed.",
                     "type": "array",
                     "items": {
                       "type": "string"

@@ -15,7 +15,10 @@ import {
 import {
   readCodexSessionTools,
   authenticateCodexSessionTool,
+  withCodexMcpNames,
+  type CodexMcpNames,
 } from "./session-tools";
+import { codexMcpServers } from "./mcp-overrides";
 // ──────────────────────────────────────────────────────────
 // Codex app-server adapter — AgentAdapter implementation.
 // ──────────────────────────────────────────────────────────
@@ -382,6 +385,7 @@ export interface CodexSession {
   /** Codex threadId — captured from thread/start (new) or thread/resume (load). */
   threadId: string;
   excludedMcpServers: Set<string>;
+  mcpNames: CodexMcpNames;
   /** Account inventory follows the scope admitted with this thread. */
   accountExtensionsEnabled?: boolean;
   /** An imported local namesake is not the provider's account app bridge. */
@@ -548,17 +552,18 @@ export class CodexAppServerAdapter implements AgentAdapter {
         // the latest native login result into the existing MCP status fields.
         return {
           ...result,
+          entries: withCodexMcpNames(result.entries, session.mcpNames),
           groups: result.groups?.map((group) => {
             if (group.kind !== "mcp") return group;
             return {
               ...group,
-              entries: group.entries.map((entry) => {
+              entries: withCodexMcpNames(group.entries.map((entry) => {
                 const state = session.translator.mcpOauthInventoryState(entry.id, entry.status);
                 if (!state) return entry;
                 const status = state === "opening" ? "connecting"
                   : state === "connected" && entry.status === "error" ? "error" : state;
                 return { ...entry, status, canAuthenticate: state !== "connected" };
-              }),
+              }), session.mcpNames),
             };
           }),
         };
@@ -573,14 +578,14 @@ export class CodexAppServerAdapter implements AgentAdapter {
           throw new Error("This chat session ended.");
         return {
           ...result,
-          entries: result.entries.filter(
+          entries: withCodexMcpNames(result.entries.filter(
             (entry) => !session.excludedMcpServers.has(entry.id),
-          ),
+          ), session.mcpNames),
         };
       },
       authenticate: async ({ sessionId, toolId }) => {
         const session = this.requireSession(sessionId);
-        if (session.excludedMcpServers.has(toolId))
+        if (session.excludedMcpServers.has(toolId) || session.mcpNames.unavailable.some((server) => server.id === toolId))
           throw new Error("This tool is not connected to the chat.");
         const key = JSON.stringify([sessionId, toolId]);
         const existing = this.toolAuthFlights.get(key);
@@ -2507,7 +2512,8 @@ export class CodexAppServerAdapter implements AgentAdapter {
     let runtime: CodexAppServerHandle;
     let effectiveBrowserUse = opts.browserUse;
     let nativeBrowserSkill: CodexNativeBrowserSkill | null = null;
-    let mcpServers = opts.mcpServers ?? this.ctx.mcpServers;
+    const codexMcp = codexMcpServers(opts.mcpServers ?? this.ctx.mcpServers);
+    let mcpServers = codexMcp.servers;
     // Zeros' own Browser registration, retired once if a native declaration of
     // the same server changes its effective definition (see below).
     let nativeBrowserRegistration: {
@@ -2517,12 +2523,11 @@ export class CodexAppServerAdapter implements AgentAdapter {
       zerosBrowserFallback: boolean;
       withoutNative: string;
     } | null = null;
-    if (mcpServers.some((server) => server.transport === "sse")) {
+    if ((opts.mcpServers ?? this.ctx.mcpServers).some((server) => server.transport === "sse")) {
       this.ctx.emit.onAgentStderr(
         this.agentId,
         "[codex-app-server] Direct SSE MCP connections are unavailable in Codex. Use Streamable HTTP, or an authenticated server through the Zeros gateway. Other MCP servers remain available.",
       );
-      mcpServers = mcpServers.filter((server) => server.transport !== "sse");
     }
     if (opts.browserUse?.kind === "codex-app-server") {
       // Agent control admits `zeros_browser` for Codex too. It stays only when
@@ -2967,6 +2972,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
       excludedMcpServers: new Set(
         Object.keys((nativeMcpConfig.mcp_servers ?? {}) as object),
       ),
+      mcpNames: { labels: codexMcp.labels, unavailable: codexMcp.unavailable },
       zerosSessionId,
       cwd: opts.cwd,
       env: opts.env,

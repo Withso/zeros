@@ -273,6 +273,7 @@ export class DesignAgentMcpServer {
   private activeToolCalls = 0;
   private readonly sessions = new Map<string, StreamableHTTPServerTransport>();
   private readonly initializing = new Set<StreamableHTTPServerTransport>();
+  private listed = false;
 
   constructor(
     private readonly options: {
@@ -290,6 +291,16 @@ export class DesignAgentMcpServer {
     ),
   ) {}
 
+  get name(): string {
+    return this.options.name ?? SERVER_NAME;
+  }
+
+  /** The provider holding this capability listed the tools, which is the
+   * evidence that it connected. */
+  get listedTools(): boolean {
+    return this.listed;
+  }
+
   get url(): string {
     if (!this.httpServer || this.port < 1) {
       throw new Error("The Design-agent MCP server is not running.");
@@ -299,7 +310,7 @@ export class DesignAgentMcpServer {
 
   get registration(): Extract<McpServerRegistration, { transport: "http" }> {
     return {
-      name: this.options.name ?? SERVER_NAME,
+      name: this.name,
       transport: "http",
       url: this.url,
       headersFromEnv: {
@@ -365,12 +376,14 @@ export class DesignAgentMcpServer {
 
   private makeServer(): Server {
     const server = new Server(
-      { name: this.options.name ?? SERVER_NAME, version: SERVER_VERSION },
+      { name: this.name, version: SERVER_VERSION },
       { capabilities: { tools: {} } },
     );
-    server.setRequestHandler(ListToolsRequestSchema, async () => ({
-      tools: (this.options.handler?.listTools() ?? TOOLS) as never,
-    }));
+    server.setRequestHandler(ListToolsRequestSchema, async () => {
+      const tools = (this.options.handler?.listTools() ?? TOOLS) as never;
+      this.listed = true;
+      return { tools };
+    });
     server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       if (this.activeToolCalls >= MAX_CONCURRENT_REQUESTS) {
         throw new Error(

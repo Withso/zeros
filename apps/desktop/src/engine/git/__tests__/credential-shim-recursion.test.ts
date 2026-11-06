@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { copyFile, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import fs from "node:fs";
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 import * as outerBroker from "../credential-broker";
 import { runFile } from "../git-exec";
 
@@ -124,6 +125,43 @@ describe("credential shim executable resolution", () => {
       },
       timeoutMs: 2_000,
     })).rejects.toMatchObject({ code: 126, stderr: expect.stringContaining("recursive executable") });
+  });
+
+  it.each(["git", "gh"])("acts as the %s it shadows for a child that keeps PATH but not the broker variables", async (name) => {
+    const env = await outerEnvironment();
+    const shimDirectory = env.PATH!.split(path.delimiter)[0]!;
+    // Another broker's shim, or a copy of this one, must never run: two copies
+    // on PATH would otherwise exec each other forever.
+    const otherBroker = path.join(directory, "zeros-git-auth-other");
+    const copy = path.join(directory, "copy");
+    await mkdir(otherBroker);
+    await mkdir(copy);
+    await writeFile(path.join(otherBroker, name), "#!/bin/sh\nexit 99\n", { mode: 0o700 });
+    await copyFile(path.join(shimDirectory, name), path.join(copy, name));
+    // The reduced environment an MCP SDK, Codex or Cursor gives a stdio server.
+    const reduced = {
+      PATH: [shimDirectory, otherBroker, copy, env.PATH!].join(path.delimiter),
+      HOME: directory,
+      ZEROS_TEST_GIT_LOG: path.join(directory, "git-spawns"),
+      ZEROS_TEST_GIT_BINARY: actualGit,
+    };
+    const result = await promisify(execFile)(path.join(shimDirectory, name), name === "git" ? ["--version"] : ["status"], {
+      env: reduced,
+      timeout: 2_000,
+    });
+    expect(result.stdout).toContain(name === "git" ? "git version" : "gh fixture");
+  });
+
+  it.each([
+    { name: "git", message: "Git is not installed." },
+    { name: "gh", message: "GitHub CLI is not installed." },
+  ])("reports a missing $name instead of a missing broker variable", async ({ name, message }) => {
+    const env = await outerEnvironment();
+    const shimDirectory = env.PATH!.split(path.delimiter)[0]!;
+    await expect(promisify(execFile)(path.join(shimDirectory, name), ["--version"], {
+      env: { PATH: shimDirectory, HOME: directory },
+      timeout: 2_000,
+    })).rejects.toMatchObject({ code: 127, stderr: `${message}\n` });
   });
 
   it("preserves a normal local invocation and its credential helper", async () => {

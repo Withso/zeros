@@ -21,7 +21,7 @@ import type { McpServerRegistration } from "../types";
 
 // The gateway normalizes the MCP registry before fanning it
 // out to the adapters, so a duplicate name/endpoint can't double-load (which
-// would burn Cursor's ~40-tool cap and clobber name-keyed injection maps).
+// would offer its tools twice and clobber name-keyed injection maps).
 
 const http = (name: string, url: string): McpServerRegistration => ({
   name,
@@ -375,6 +375,33 @@ enabled = false
     expect(resolveMcpServers().gatewayBackends).toEqual([]);
     expect(resolveMcpServers().servers).toEqual(result.servers);
   });
+  it("lets only a personal backend on this machine reach loopback, as the connection check does", () => {
+    writeUser(`[[mcp.servers]]
+name = "ipv4"
+transport = "http"
+url = "http://127.0.0.1:47831/key/mcp"
+auth = "header"
+[[mcp.servers]]
+name = "named"
+transport = "http"
+url = "http://localhost:47832/oauth/mcp"
+auth = "oauth"
+[[mcp.servers]]
+name = "ipv6"
+transport = "sse"
+url = "http://[::1]:47833/sse"
+auth = "header"
+[[mcp.servers]]
+name = "remote"
+transport = "http"
+url = "https://remote.example/mcp"
+auth = "oauth"
+`);
+    const backends = resolveMcpServers().gatewayBackends;
+    expect(Object.fromEntries(backends.map((backend) => [backend.name, backend.allowLoopback]))).toEqual({
+      ipv4: true, named: true, ipv6: true, remote: undefined,
+    });
+  });
   const writeRepoFile = (root: string, file: string, toml: string) => {
     mkdirSync(path.join(root, ".zeros"), { recursive: true });
     writeFileSync(path.join(root, ".zeros", file), toml);
@@ -708,6 +735,33 @@ enabled = false
     const r = resolveMcpServers();
     expect(r.servers.map((s) => s.name)).toEqual(["ok"]);
     expect(r.sources).toEqual(["managed"]);
+  });
+
+  it("leaves out only a server whose saved variable cannot be referenced", async () => {
+    const broken = (name: string, script: string) =>
+      `[[mcp.servers]]\nname = "${name}"\ntransport = "stdio"\ncommand = "node"\nargs = ["${script}"]\n` +
+      `credential_id = "6f1c2d4e-8a9b-4c3d-9e2f-1a2b3c4d5e6f"\nenv = { "API-KEY" = "\${zeros.secret}" }\n\n`;
+    const unavailable = (name: string) => ({
+      name,
+      detail: "This server has an invalid saved variable name. Edit the server to fix it.",
+    });
+    writeUser(
+      broken("hand-edited", "user.js") +
+        `[[mcp.servers]]\nname = "healthy"\ntransport = "stdio"\ncommand = "npx"\n\n` +
+        `[[mcp.servers]]\nname = "keyed"\ntransport = "stdio"\ncommand = "node"\nargs = ["keyed.js"]\n\n` +
+        `[[mcp.servers]]\nname = "remote"\ntransport = "http"\nurl = "https://remote/mcp"\nauth = "oauth"\n`,
+    );
+    const global = resolveMcpServers();
+    expect(global.servers.map((s) => s.name)).toEqual(["healthy", "keyed"]);
+    expect(global.gatewayBackends.map((b) => b.name)).toEqual(["remote"]);
+    expect(global.unavailable).toEqual([unavailable("hand-edited")]);
+
+    // Like a disabled entry, the broken project entry keeps its name, so the
+    // user's "keyed" does not silently stand in for it.
+    writeRepoFile(repoDir, "settings.local.toml", broken("keyed", "repo.js"));
+    const project = await resolveMcpServersForRepo(repoDir);
+    expect(project.servers.map((s) => s.name)).toEqual(["healthy"]);
+    expect(project.unavailable).toEqual([unavailable("keyed"), unavailable("hand-edited")]);
   });
 
   it('partitions auth:"oauth" http servers into gatewayBackends (not direct servers)', () => {

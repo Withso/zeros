@@ -14,10 +14,26 @@ import { Badge } from "../../shared/ui/primitives/badge";
 import { mcpDraftError } from "./mcp-form-save";
 import { mcpConnectionView } from "./mcp-connection-view";
 
-/** Ephemeral draft comparison, including write-only edits but excluding row IDs. */
+/** An HTTP server's variables only fill ${NAME} in its headers, so they apply
+ * exactly where the Headers field is shown. */
+function variablesApply(draft: Draft): boolean {
+  return draft.transport === "stdio" || draft.auth === "header" || (draft.auth === "oauth" && draft.headers.length > 0);
+}
+
+/** What a save or connection check sends. Dormant input stays in the draft
+ * when changing methods, but never leaves it. */
+function usableDraft(draft: Draft): Draft {
+  return { ...draft,
+    headers: draft.auth === "none" || draft.transport === "stdio" ? [] : draft.headers,
+    env: variablesApply(draft) ? draft.env : [],
+  };
+}
+
+/** Ephemeral draft comparison, including write-only edits but excluding row IDs
+ * and the empty rows a save drops. */
 function connectionDraftKey(draft: Draft): string {
   const { name: _name, description: _description, argsText: _argsText, disabledTools: _disabledTools, env, headers, ...connection } = draft;
-  const values = (rows: KV[]) => rows.map(({ id: _id, ...row }) => row);
+  const values = (rows: KV[]) => rows.filter(row => row.key.trim() || row.value).map(({ id: _id, ...row }) => row);
   return JSON.stringify([connection, values(env), values(headers)]);
 }
 
@@ -113,6 +129,8 @@ export function McpServerEditor({ initial, target, onSave, onBack, onSaved = onB
   connectOnOpen?: boolean;
 }) {
   const id = useId();
+  // One feedback slot per editor: a repeated outcome replaces its toast.
+  const feedback = useMemo(() => ({ id: `mcp-server-editor-${id}` }), [id]);
   const [draft, setDraft] = useState(() => secureDraftFromServer(initial));
   const [args, setArgs] = useState(() => (draft.args ?? []).map(value => ({ id: nextKvId(), value })));
   const [busy, setBusy] = useState(false);
@@ -135,14 +153,12 @@ export function McpServerEditor({ initial, target, onSave, onBack, onSaved = onB
   useEffect(() => { if (!surfaceActive) requestedProbe.current = null; }, [surfaceActive]);
   const connectAfterProbe = useRef<(() => void) | null>(null);
   const [connection, setConnection] = useState<{ key: string; configurationKey: string; checking?: boolean; result?: McpProbeResult } | null>(null);
+  const latestConnection = useRef(connection);
+  latestConnection.current = connection;
   const [catalog, setCatalog] = useState<{ key: string; tools: string[] } | null>(null);
-  // Keep dormant input in the draft when changing methods, but never send it
-  // with a No sign-in request or save.
-  const effectiveDraft = useMemo(() => ({ ...draft, args: args.map(row => row.value),
-    headers: draft.auth === "none" || draft.transport === "stdio" ? [] : draft.headers,
-  }), [draft, args]);
+  const effectiveDraft = useMemo(() => ({ ...usableDraft(draft), args: args.map(row => row.value) }), [draft, args]);
   const initialDraft = useMemo(() => secureDraftFromServer(initial), [initial]);
-  const connectionChanged = Boolean(initial && connectionDraftKey(effectiveDraft) !== connectionDraftKey(initialDraft));
+  const connectionChanged = Boolean(initial && connectionDraftKey(effectiveDraft) !== connectionDraftKey(usableDraft(initialDraft)));
   const hasChanges = !initial || connectionChanged || draft.name !== initialDraft.name || draft.description !== initialDraft.description
     || JSON.stringify(draft.disabledTools) !== JSON.stringify(initialDraft.disabledTools);
   const set = <K extends keyof Draft>(key: K, value: Draft[K]) => setDraft(current => ({ ...current, [key]: value }));
@@ -153,7 +169,7 @@ export function McpServerEditor({ initial, target, onSave, onBack, onSaved = onB
   currentProbeKey.current = probeKey;
   const requestProbe = (action: "connect" | "test" | "refresh") => {
     const error = mcpDraftError({ ...effectiveDraft, name: effectiveDraft.name.trim() || "connection-check" });
-    if (error) { toast.error(error); return; }
+    if (error) { toast.error(error, feedback); return; }
     requestedProbe.current = { key: configurationKey, action };
     setProbeAttempt(value => value + 1);
   };
@@ -162,6 +178,10 @@ export function McpServerEditor({ initial, target, onSave, onBack, onSaved = onB
   useEffect(() => {
     if (!probe || !surfaceActive || busy || savedConnection?.connecting || initial?.enabled === false || draft.transport === "stdio" || !draft.url.trim()
       || mcpDraftError({ ...latestDraft.current, name: latestDraft.current.name.trim() || "connection-check" })) return;
+    // Saving, signing in or switching surfaces pauses checks; resuming keeps a
+    // finished check of this exact configuration instead of repeating it.
+    const settled = latestConnection.current;
+    if (settled?.key === probeKey && settled.result && !settled.checking) return;
     const abort = new AbortController();
     const action = requestedProbe.current?.key === configurationKey ? requestedProbe.current.action : undefined;
     const timer = setTimeout(() => {
@@ -176,14 +196,14 @@ export function McpServerEditor({ initial, target, onSave, onBack, onSaved = onB
         if (result.status === "connected" && result.tools !== undefined) setCatalog({ key: configurationKey, tools: result.tools });
         if (!connectionChanged) onVerified?.(checkedDraft, result);
         if (action === "connect" && result.status === "needs-auth" && checkedDraft.auth !== "header") connectAfterProbe.current?.();
-        else if (action && result.status === "failed") toast.error("Could not connect to this MCP server. Check the connection details and try again.");
+        else if (action && result.status === "failed") toast.error("Could not connect to this MCP server. Check the connection details and try again.", feedback);
       };
       void probe(checkedDraft, abort.signal).then(finish).catch(() => finish({ status: "failed", stages: [] }));
     }, action ? 0 : 600);
     return () => { clearTimeout(timer); abort.abort(); };
   // The serialized configuration key includes every probe input, including
   // write-only edits, without retriggering for names or tool policy.
-  }, [probe, probeKey, configurationKey, draft.transport, draft.url, surfaceActive, busy, onVerified, connectionChanged, savedConnection?.connecting, initial?.enabled]);
+  }, [probe, probeKey, configurationKey, draft.transport, draft.url, surfaceActive, busy, onVerified, connectionChanged, savedConnection?.connecting, initial?.enabled, feedback]);
 
   const fill = (server: RawServer) => {
     const next = secureDraftFromServer(server);
@@ -242,9 +262,9 @@ export function McpServerEditor({ initial, target, onSave, onBack, onSaved = onB
       // RPC may settle late; it must not keep the save lock or block Retry.
       releaseSave();
       if (connect && saved) await savedConnection?.onConnect?.(saved);
-      else { toast.success(initial ? "MCP server saved" : "MCP server added"); onSaved(); }
+      else { toast.success(initial ? "MCP server saved" : "MCP server added", feedback); onSaved(); }
     } catch (error) {
-      if (current()) toast.error(error instanceof Error ? error.message : "Could not save the MCP server.");
+      if (current()) toast.error(error instanceof Error ? error.message : "Could not save the MCP server.", feedback);
     } finally { releaseSave(); }
   };
   connectAfterProbe.current = () => { if (canAuthorize) void save(true, true); };
@@ -352,9 +372,9 @@ export function McpServerEditor({ initial, target, onSave, onBack, onSaved = onB
           </div></CollapsibleContent>
         </Collapsible>}
       </Section>}
-      <Section title="Variables" description={draft.transport === "stdio" ? "Stored securely." : "Use in headers as ${NAME}."}>
+      {variablesApply(draft) && <Section title="Variables" description={draft.transport === "stdio" ? "Stored securely." : "Use in headers as ${NAME}."}>
         <div><KeyValueFields kind="variable" rows={draft.env} onChange={rows => set("env", rows)} /></div>
-      </Section>
+      </Section>}
       <Collapsible open={importOpen} onOpenChange={setImportOpen}>
         <CollapsibleTrigger asChild><Button variant="ghost" className="text-fg2 px-0"><span>Import a configuration</span>{importOpen ? <ChevronDown aria-hidden="true" /> : <ChevronRight aria-hidden="true" />}</Button></CollapsibleTrigger>
         <CollapsibleContent className="pt-3"><SettingsList>

@@ -1,0 +1,9 @@
+{
+  "id": "mcp-server-git-shim-without-broker",
+  "kind": "replay",
+  "area": "desktop-git",
+  "fixedBy": "pr:851",
+  "symptom": "git inside a Cursor or Codex stdio MCP server failed with \"ZEROS_REAL_GIT_PATH: parameter null or not set\": the PATH kept the Zeros credential shim while the broker variables were removed.",
+  "rule": "The git and gh shims act as the real tool whenever the broker variables are absent, and MCP servers get a PATH without the shim directories. Principle 13.",
+  "check": "pnpm exec vitest run --config vitest.config.ts apps/desktop/src/engine/git/__tests__/credential-shim-recursion.test.ts -t 'keeps PATH but not the broker variables'"
+}

@@ -4,7 +4,7 @@ import { McpHostControl } from "./agents/gateway/host-control";
 import { OrganizationMcpRuntime } from "./agents/gateway/organization-runtime";
 import { runFile } from "./git/git-exec";
 import { McpOAuthCallback } from "./agents/gateway/oauth-callback";
-import { ScopedMcpGateways } from "./agents/gateway/scoped-gateways";
+import { ScopedMcpGateways, sameGatewayBackends } from "./agents/gateway/scoped-gateways";
 import { commitMcpCredentials, mcpSaveInputSchema } from "./settings/mcp-configuration";
 import { probeMcpServer } from "./agents/gateway/probe";
 import { claudeOrganizationStartupCode } from "@zeros/protocol/claude-startup-notice";
@@ -207,6 +207,7 @@ import { createRepoTaskBoundaryFactory } from "./agents/containment/repo-task-bo
 import type { ExecutionBoundary } from "./agents/containment/types";
 import { buildPtyEnv } from "./pty/shell-setup";
 import { resolveMcpServers, resolveMcpServersForRepo, type GatewayBackend } from "./agents/mcp-registry";
+import { McpServerStartError } from "./agents/mcp-registration";
 import {
   CONFIG_ROOT_ENV_VARS,
   stripEngineAuthorityEnv,
@@ -2202,7 +2203,7 @@ export class ZerosEngine {
         const saved = vault.readEntry(server.credentialKey)?.env;
         for (const [name, alias] of Object.entries(server.envFromEnv ?? {})) {
           const value = saved?.[name];
-          if (value === undefined) throw new Error(`The saved variable ${name} for MCP server ${server.name} is unavailable. Edit the server to restore it.`);
+          if (value === undefined) throw new McpServerStartError(`The saved variable ${name} is unavailable. Edit the server to enter it again.`);
           env[alias] = value;
         }
       }
@@ -2285,13 +2286,16 @@ export class ZerosEngine {
    *  the agent-facing endpoint stays stable so live sessions aren't dropped).
    *  Starts the gateway if a backend was just added. Removing the last backend
    *  publishes an empty catalog to existing clients; engine shutdown owns the
-   *  listener's lifetime. New sessions omit an empty gateway. */
-  private reloadGateway(): void {
+   *  listener's lifetime. New sessions omit an empty gateway. Unforced reloads
+   *  (settings file changes) keep an unchanged backend set: reconnecting would
+   *  cancel the sign-in Save & connect starts right after its own write. */
+  private reloadGateway(force = true): void {
     // Serialize onto the chain: re-read this.mcpGateway AFTER each await so two
     // queued reloads can never both construct a gateway on the fixed port.
     const run = async () => {
       try {
         const { gatewayBackends } = resolveMcpServers();
+        if (!force && this.gatewayError === null && this.mcpGateway && sameGatewayBackends(this.mcpGateway.backends, gatewayBackends)) return;
         if (gatewayBackends.length === 0) {
           if (this.mcpGateway) {
             await this.mcpGateway.reload([]);
@@ -2316,7 +2320,7 @@ export class ZerosEngine {
     const refresh = async () => {
       await run();
       for (const root of this.scopedMcpGateways.roots().filter(root => !root.startsWith("organization:"))) {
-        try { await this.scopedMcpGateways.get(root, (await resolveMcpServersForRepo(root)).gatewayBackends, true); }
+        try { await this.scopedMcpGateways.get(root, (await resolveMcpServersForRepo(root)).gatewayBackends, force); }
         catch { /* A scoped failure is reported by that project’s next operation. */ }
       }
     };
@@ -2778,7 +2782,7 @@ export class ZerosEngine {
         // write). Re-resolve the global MCP registry so the change reaches each
         // agent's next session live, then tell clients to refetch.
         this.loadMcpRegistry();
-        this.reloadGateway();
+        this.reloadGateway(false);
         const scoped = this.settingsReconcileScope(changedPaths);
         this.scheduleDesignTerritoryReconcile(
           scoped ?? listWorkspaces({ archived: false }),

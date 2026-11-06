@@ -659,18 +659,6 @@ export function CustomizeMcpSection({
   const handleToggle = (index: number, enabled: boolean) => void persist(servers[index], withToggled([servers[index]], 0, enabled)[0]);
   const handleToolToggle = (index: number, tool: string, disabled: boolean) => void persist(servers[index], withToolDisabled([servers[index]], 0, tool, disabled)[0]);
 
-  // Cursor caps total MCP tools at ~40; sum the ENABLED tools across connected
-  // gateway servers so the user can keep under it (a lower bound — direct
-  // servers add more, unknown to us).
-  const gwToolTotal = useMemo(
-    () =>
-      [...gwStatus.values()].reduce(
-        (n, s) => n + (s.state === "connected" ? s.toolCount : 0),
-        0,
-      ),
-    [gwStatus],
-  );
-
   // Stable row keys: the server NAME (unique per scope — the form enforces
   // it), disambiguated by occurrence for hand-written dupes. Index keys would
   // bleed per-row state (an open tools expander) onto the next server when a
@@ -709,8 +697,6 @@ export function CustomizeMcpSection({
     ? "Changes apply to new chats."
     : `For ${scope.kind === "repo" ? scope.project.name : "this repository"} only. Changes apply to new chats.`;
 
-  const toolLine = `${gwToolTotal} ${gwToolTotal === 1 ? "tool" : "tools"} on · Cursor allows about 40.`;
-
   return (
     <div className="flex flex-col gap-8" {...(!surfaceActive ? { inert: "" } : {})}>
       <section aria-label="MCP servers" className="flex flex-col gap-2">
@@ -728,11 +714,6 @@ export function CustomizeMcpSection({
           )}
         </div>
         <SettingsList aria-busy={(loading && servers.length === 0) || undefined}>
-          {gwToolTotal > 40 && (
-            <MessageRow tone="warning" flush>
-              {`${toolLine} Turn some off.`}
-            </MessageRow>
-          )}
           {error && (
             <MessageRow tone="error" role="alert" flush>
               {error}
@@ -777,9 +758,6 @@ export function CustomizeMcpSection({
           )}
           <SettingsAddRow label="Add server" onClick={onNew} disabled={loading || busy} />
         </SettingsList>
-        {gwToolTotal > 0 && gwToolTotal <= 40 && (
-          <p className="text-fg3 m-0 px-0.5 text-3xxs leading-4">{toolLine}</p>
-        )}
         {!isUser && (
           <p className="text-fg3 m-0 px-0.5 text-3xxs leading-4">
             Your User servers apply here too.{" "}

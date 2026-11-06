@@ -349,3 +349,71 @@ export const TOOLCHAIN_ENV_NAMES = [
   "HOMEBREW_CELLAR",
   "HOMEBREW_REPOSITORY",
 ] as const;
+
+/** The whole inherited environment of a command the engine runs on someone
+ *  else's behalf: a repository's setup script, a stdio MCP server. The engine's
+ *  own env carries provider API keys, the GitHub OAuth token, Zeros' tokens,
+ *  every MCP server's secrets, AWS/SSH creds, etc. Such a command must not be
+ *  able to read those, so it gets these basics plus what its caller adds.
+ *
+ *  The list is deliberately wider than "shell basics", because a setup script is
+ *  almost always a dependency install and the 11-var version made it fail in
+ *  ways the Terminal tab never did — the tab inherits the full desktop env:
+ *
+ *    • proxy + CA vars — behind a corporate proxy or a TLS-inspecting
+ *      middlebox, `pnpm install` hung or died on a cert error here while the
+ *      same command in the terminal worked,
+ *    • XDG_* + toolchain roots — where npm/pnpm/cargo/go keep their config,
+ *      caches and package stores. Missing, they silently re-resolved to
+ *      defaults, so an install could re-download the world or miss a registry.
+ *
+ *  Every entry is a path, a locale, or a proxy/CA endpoint — never a token. The
+ *  one judgement call is the proxy URLs, which CAN embed `user:password@`: they
+ *  are in because without them an ordinary install cannot reach the network at
+ *  all, and a proxy credential is a far narrower grant than the secrets this rule exists
+ *  for (provider API keys, the GitHub OAuth token, cloud creds, DSNs).
+ *
+ *  SSH_AUTH_SOCK is deliberately NOT here, though it would make `git+ssh://`
+ *  dependencies work. "The script runs as the user and owns ~/.ssh anyway" is
+ *  false exactly where it matters: a passphrase-protected key is useless
+ *  without the passphrase, and a hardware-backed key (Secure Enclave, YubiKey,
+ *  1Password agent) can never be read from disk at all — so forwarding the
+ *  socket would hand a branch-supplied script or a third-party MCP package the
+ *  ability to sign as the user with keys the user believes are hardware-locked.
+ *  A failing `git+ssh` install is a loud, fixable error; that is the better
+ *  trade. */
+export const SCRUBBED_COMMAND_ENV_NAMES = [
+  // Core shell + locale.
+  "PATH",
+  "HOME",
+  "USER",
+  "LOGNAME",
+  "SHELL",
+  "LANG",
+  "LANGUAGE",
+  "LC_ALL",
+  "LC_CTYPE",
+  "TERM",
+  "TMPDIR",
+  "TZ",
+  // Network reachability: proxies and the CA bundles a TLS-inspecting proxy
+  // needs. Lower-case forms are the ones curl/git actually read.
+  "HTTP_PROXY",
+  "HTTPS_PROXY",
+  "ALL_PROXY",
+  "NO_PROXY",
+  "http_proxy",
+  "https_proxy",
+  "all_proxy",
+  "no_proxy",
+  "NODE_EXTRA_CA_CERTS",
+  "SSL_CERT_FILE",
+  "SSL_CERT_DIR",
+  "CURL_CA_BUNDLE",
+  "REQUESTS_CA_BUNDLE",
+  "GIT_SSL_CAINFO",
+  // Config/cache roots + toolchain locations — the shared list, so a newly
+  // supported version manager lands here and in the remote-shell allowlist at
+  // once instead of only wherever it was first noticed.
+  ...TOOLCHAIN_ENV_NAMES,
+] as const;

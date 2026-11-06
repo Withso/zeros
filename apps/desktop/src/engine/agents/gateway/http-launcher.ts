@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { BoundaryProcess, PreparedBoundary, RepoTaskBoundaryFactory } from "../containment/types";
+import { McpServerStartError } from "../mcp-registration";
 import { validateMcpWorkingDirectory } from "../mcp-working-directory";
 import { createConnection } from "node:net";
 import { homedir } from "node:os";
@@ -27,7 +28,7 @@ export function resolveMcpCwd(cwd: string | undefined, workspaceRoot: string, ho
 export function loopbackMcpUrl(value: string): URL {
   const url = new URL(value);
   if (url.protocol !== "http:" || !["127.0.0.1", "[::1]", "localhost"].includes(url.hostname) || url.username || url.password || url.hash)
-    throw new Error("A launched MCP endpoint must be a loopback HTTP URL.");
+    throw new McpServerStartError("A launched MCP endpoint must be a loopback HTTP URL.");
   // Do not resolve a user-controlled localhost DNS answer outside loopback.
   if (url.hostname === "localhost") url.hostname = "127.0.0.1";
   return url;
@@ -75,8 +76,11 @@ export class McpHttpLauncher {
     this.url = loopbackMcpUrl(options.listenUrl);
     this.endpoint = this.url.href;
     if (!options.command.trim() || [options.command, ...(options.args ?? []), options.cwd ?? ""].some(value => value.includes("\0")))
-      throw new Error("Invalid MCP launch configuration.");
+      throw new McpServerStartError("Invalid MCP launch configuration.");
   }
+
+  /** Holds no process, startup or unproven cleanup. */
+  get idle(): boolean { return !this.boundary && !this.starting; }
 
   async ensureRunning(signal?: AbortSignal): Promise<void> {
     if (this.closed) throw new Error("MCP launcher is closed.");
@@ -98,7 +102,7 @@ export class McpHttpLauncher {
     const signal = AbortSignal.any([cancel, AbortSignal.timeout(this.options.startupTimeoutMs ?? 15_000)]);
     try {
       await this.stopProcess();
-      if (await listening(this.url, signal)) throw new Error("MCP endpoint is already in use.");
+      if (await listening(this.url, signal)) throw new McpServerStartError("Its Also listens on address is already in use by another process.");
       signal.throwIfAborted();
       const cwd = await validateMcpWorkingDirectory(this.options.cwd || this.options.workspaceRoot, this.options.workspaceRoot);
       signal.throwIfAborted();
@@ -116,18 +120,18 @@ export class McpHttpLauncher {
       let exited = false;
       void child.wait().then(() => { exited = true; if (this.child === child) this.ready = false; }, () => { exited = true; });
       while (!signal.aborted) {
-        if (exited) throw new Error("MCP process did not start.");
+        if (exited) throw new McpServerStartError("The server exited before it started listening.");
         if (await listening(this.url, signal)) {
-          if (exited || this.closed) throw new Error("MCP process did not start.");
+          if (exited || this.closed) throw new McpServerStartError("The server exited before it started listening.");
           this.ready = true;
           return;
         }
         await delay(75, undefined, { signal });
       }
-      throw new Error("MCP process did not start before the deadline.");
+      throw new McpServerStartError("The server did not start listening in time.");
     } catch (error) {
       await this.stopProcess();
-      if (signal.aborted) throw new Error("MCP process startup was cancelled or timed out.");
+      if (signal.aborted) throw new McpServerStartError("The server did not start listening in time.");
       throw error;
     }
   }

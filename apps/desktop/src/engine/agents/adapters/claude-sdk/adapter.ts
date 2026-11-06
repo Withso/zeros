@@ -4365,7 +4365,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
             sessionMcp.map((s) => [
               s.name,
               s.transport === "stdio"
-                ? claudeMcpStdio(s, state.cwd)
+                ? claudeMcpStdio(s, state.cwd, state.env?.PATH ?? process.env.PATH)
                 : {
                     type: s.transport,
                     url: s.url,

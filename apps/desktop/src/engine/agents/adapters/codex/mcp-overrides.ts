@@ -1,4 +1,50 @@
+import { createHash } from "node:crypto";
 import type { McpServerRegistration } from "../../types";
+
+const CODEX_SERVER_NAME = /^[A-Za-z0-9_-]+$/;
+
+export interface CodexMcpServerSet {
+  /** What Codex starts, each under a name Codex accepts. */
+  servers: McpServerRegistration[];
+  /** Codex's name → the server's own name, where they differ. */
+  labels: ReadonlyMap<string, string>;
+  /** Servers this chat cannot give Codex, listed under their own names. */
+  unavailable: readonly { id: string; name: string; detail: string }[];
+}
+
+/** Codex takes only letters, digits, "_" and "-" in a server name: the name
+ * is part of every tool name, and `-c` splits keys at dots. Claude and Cursor
+ * turn every other character into "_", so Codex gets that same name and the
+ * chat still shows the user's own. A name another server already holds is
+ * reported rather than merged into that server's definition. */
+export function codexMcpServers(registrations: readonly McpServerRegistration[]): CodexMcpServerSet {
+  const servers: McpServerRegistration[] = [];
+  const labels = new Map<string, string>();
+  const unavailable: { id: string; name: string; detail: string }[] = [];
+  const report = (name: string, detail: string) => unavailable.push({
+    id: `unavailable:${createHash("sha256").update(name).digest("hex")}`, name: name.slice(0, 512), detail,
+  });
+  const taken = new Set(registrations.filter((s) => s.transport !== "sse" && CODEX_SERVER_NAME.test(s.name)).map((s) => s.name));
+  for (const server of registrations) {
+    if (server.transport === "sse") {
+      report(server.name, "Codex can’t connect to SSE servers. Use Streamable HTTP for this server.");
+      continue;
+    }
+    if (CODEX_SERVER_NAME.test(server.name)) {
+      servers.push(server);
+      continue;
+    }
+    const name = server.name.replace(/[^A-Za-z0-9_-]/g, "_");
+    if (taken.has(name)) {
+      report(server.name, `Codex names this server “${name}”, and another server already uses that name. Rename one of them.`.slice(0, 1000));
+      continue;
+    }
+    taken.add(name);
+    labels.set(name, server.name);
+    servers.push({ ...server, name });
+  }
+  return { servers, labels, unavailable };
+}
 
 /** Translate Zeros-registered MCP servers into `-c` overrides codex's
  *  config loader accepts. Codex parses `-c key=value` where value is
@@ -16,10 +62,9 @@ export function buildMcpServerOverrides(
 ): string[] {
   const args: string[] = [];
   for (const s of servers) {
-    // Names go into TOML keys; only allow alnum + underscore + dash to
-    // avoid syntax injection. Skip silently rather than throw — a
-    // misconfigured MCP entry shouldn't kill the boot.
-    if (!/^[A-Za-z0-9_-]+$/.test(s.name)) continue;
+    // Names go into TOML keys. codexMcpServers gives each server a name
+    // Codex accepts and reports the rest; this only keeps syntax out of a key.
+    if (!CODEX_SERVER_NAME.test(s.name)) continue;
     // Codex cannot express legacy SSE. The adapter reports the omission; never
     // coerce it to Streamable HTTP or treat it as a subprocess.
     if (s.transport === "sse") continue;

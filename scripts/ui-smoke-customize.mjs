@@ -104,9 +104,24 @@ export async function runCustomizeSmoke({ page, check }) {
     fullPage: true,
   });
   await runMcpConcurrentAuthSmoke({ page, check });
+  await runMcpLargeCatalogSmoke({ page, check });
   await runMcpToolsSmoke({ page, check });
   await runOrganizationMcpSmoke({ page, check });
   await runMcpConnectionSmoke({ page, check });
+}
+
+export async function runMcpLargeCatalogSmoke({ page, check }) {
+  const url = new URL("/apps/desktop/src/renderer/harnesses/harness-customize.html", page.url());
+  url.searchParams.set("gatewayState", "needs-auth");
+  await page.goto(url.href);
+  await page.getByRole("tab", { name: "MCP servers", exact: true }).click();
+  await page.evaluate(() => { window.mcpFormFixture.gatewayToolNames = Array.from({ length: 59 }, (_, i) => `tool_${i}`); });
+  await page.getByRole("button", { name: "Connect", exact: true }).click();
+  // The row count and any total come from one status snapshot, so a limit
+  // notice would already be on screen once the row shows 59 tools.
+  await expect(page.getByRole("button", { name: "59 tools", exact: true })).toBeVisible();
+  await expect(page.getByText(/allows about|Turn some off/)).toHaveCount(0);
+  check("A gateway server with more than 40 tools shows no tool-limit notice", true);
 }
 
 export async function runMcpConcurrentAuthSmoke({ page, check }) {

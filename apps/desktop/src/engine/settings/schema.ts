@@ -225,6 +225,19 @@ const promptsSchema = z
 // per-server toggle). Secrets: prefer non-secret coordinates + env-var refs
 // here; raw tokens in a *committed* repo file would leak (same caution as the
 // repo `[env]` table) — keychain-backed secret refs land with the panel UI.
+
+function isLoopbackHttpUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" && ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname) && !url.username && !url.password && !url.hash;
+  } catch {
+    return false; // zod still runs refinements after .url() fails
+  }
+}
+// isLoopbackHttpUrl is the rule; editors only get its usual spellings
+// (lowercase, no IPv4 shorthand), each with a valid port.
+const LOOPBACK_HTTP_URL_PATTERN = String.raw`^http://(?:127\.0\.0\.1|localhost|\[::1\])(?::(?:6553[0-5]|655[0-2]\d|65[0-4]\d{2}|6[0-4]\d{3}|[1-5]\d{4}|\d{1,4}))?(?:[/?][^#]*)?$`;
+
 const mcpStdioServerSchema = z.object({
   credential_id: z.uuid().optional(),
   name: z.string().min(1).describe("Unique server name (the tool namespace)."),
@@ -235,10 +248,10 @@ const mcpStdioServerSchema = z.object({
     .describe("Executable to spawn for the stdio server."),
   cwd: z.string().trim().min(1).max(4096).refine((v) => !v.includes("\0"), "Invalid working directory").optional()
     .describe("Folder for this local MCP process. Relative paths resolve against the chat workspace; ~/ uses the engine user's home. Omit to preserve the provider default."),
-  listen_url: z.string().url().max(4096).refine(value => {
-    const url = new URL(value);
-    return url.protocol === "http:" && ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname) && !url.username && !url.password && !url.hash;
-  }, "Use an HTTP loopback endpoint").optional(),
+  listen_url: z.string().url().max(4096).refine(isLoopbackHttpUrl, "Use an HTTP loopback endpoint").meta({
+    description: "Loopback HTTP endpoint (127.0.0.1, localhost or [::1]) where this command serves MCP. Zeros starts the command when it is first needed. No credentials or fragment.",
+    pattern: LOOPBACK_HTTP_URL_PATTERN,
+  }).optional(),
   args: z
     .array(z.string())
     .optional()
@@ -292,7 +305,7 @@ const mcpHttpServerSchema = z.object({
     .array(z.string())
     .optional()
     .describe(
-      "For a gateway-fronted server (auth oauth/header): tool NAMES to hide from agents — e.g. to stay under Cursor's ~40-tool cap. Empty/absent = all tools exposed.",
+      "For a gateway-fronted server (auth oauth/header): tool NAMES to hide from agents. Empty/absent = all tools exposed.",
     ),
   enabled: z
     .boolean()

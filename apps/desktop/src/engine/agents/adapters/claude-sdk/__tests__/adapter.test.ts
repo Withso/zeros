@@ -1652,10 +1652,15 @@ describe("Claude cloud connector inventory", () => {
       await vi.advanceTimersByTimeAsync(1_000);
       await adapter.capabilityPorts.sessionTools.list({ sessionId: session.executionId });
       expect(captured).toHaveLength(2);
-      for (const options of captured) expect(options).toMatchObject({ mcpServers: {
-        reports: { type: "sse", url: "https://reports.example/events", headers: { Authorization: "test-header" } },
-        "local-files": { type: "stdio", command: "/bin/sh", args: ["-c", 'cd -- "$1" && shift && exec "$@"', "zeros-mcp", "/tmp/tools", "node", "server.js"] },
-      } });
+      for (const options of captured) {
+        const servers = options.mcpServers as Record<string, { args?: string[]; env?: Record<string, string> }>;
+        expect(servers.reports).toMatchObject({ type: "sse", url: "https://reports.example/events", headers: { Authorization: "test-header" } });
+        expect(servers["local-files"]).toMatchObject({ type: "stdio", command: "/bin/sh" });
+        const args = servers["local-files"]!.args!;
+        expect([args[0], ...args.slice(2)]).toEqual(["-c", "zeros-mcp", expect.stringContaining("=PATH="), "/tmp/tools", "node", "server.js"]);
+        expect(args[3]).not.toContain("MCP_TEST_CREDENTIAL");
+        expect(servers["local-files"]!.env ?? {}).not.toHaveProperty("MCP_TEST_CREDENTIAL");
+      }
     } finally {
       await adapter.dispose();
       vi.useRealTimers();

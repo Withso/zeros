@@ -243,6 +243,23 @@ describe("composed session tools", () => {
     expect(control.dispose).toHaveBeenCalledOnce();
   });
 
+  it("reports which product servers each execution's provider listed", async () => {
+    let listed: string[] = [];
+    const design = { ...named("design-draft", "DESIGN_CAP"), listedMcpServers: () => listed };
+    const local = named("zeros_local", "LOCAL_CAP");
+    const control = { ...named("zeros_browser", "CONTROL_CAP"), listedMcpServers: () => ["zeros_browser"] };
+    const registry = new AgentSessionToolRegistry(composeAgentSessionToolFactories([async () => design, async () => local, async () => control]));
+    await registry.admit({ executionId: "run", cwd: "/w" }, [], {});
+    expect(registry.listedMcpServers("run")).toEqual(["zeros_browser"]);
+    listed = ["design-draft"];
+    expect(registry.listedMcpServers("run")).toEqual(["design-draft", "zeros_browser"]);
+    expect(registry.listedMcpServers("other")).toEqual([]);
+    // A retiring execution's servers no longer answer its provider.
+    const stopping = registry.stop("run");
+    expect(registry.listedMcpServers("run")).toEqual([]);
+    await stopping;
+  });
+
   it("returns null when no owner admits tools", async () => {
     await expect(composeAgentSessionToolFactories([async () => null])(input)).resolves.toBeNull();
   });

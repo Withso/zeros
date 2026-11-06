@@ -1,0 +1,9 @@
+{
+  "id": "settings-toml-inline-reshape-comments",
+  "kind": "replay",
+  "area": "desktop-engine",
+  "fixedBy": "pr:851",
+  "symptom": "Changing a hand-written inline MCP server from stdio to http erased every comment in settings.toml. toml-patch 2.0.0 returned broken TOML for the reshaped entry, and the writer's round-trip guard replaced the patch with a whole-file rewrite; 3.0.3 and later patch it in place.",
+  "rule": "When a guard's fallback hides a library bug, test what the fallback loses (here, comments) as well as the data, and cover the guard with mocked bad outputs so it stays tested after the library is fixed (principle 13).",
+  "check": "pnpm exec vitest run --config vitest.config.ts apps/desktop/src/engine/settings/__tests__/files.test.ts -t 'reshapes a hand-written inline servers array'"
+}

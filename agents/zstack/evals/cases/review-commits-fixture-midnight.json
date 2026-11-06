@@ -1,0 +1,9 @@
+{
+  "id": "review-commits-fixture-midnight",
+  "kind": "scenario",
+  "area": "renderer-ui",
+  "fixedBy": "pr:851",
+  "symptom": "The review UI smoke failed only between 00:00 and 03:00 UTC. The Commits fixture dated two commits 2 and 3 hours back, and the tab groups commits by the viewer's calendar day, so just after midnight both fell into Yesterday and no Today section rendered.",
+  "rule": "Keep fixture dates that a view groups by calendar day inside their intended local day, and have the smoke pin a time zone at the edge hour instead of depending on when CI runs (principle 15).",
+  "check": "pnpm test:ui-smoke --shard=1/3"
+}

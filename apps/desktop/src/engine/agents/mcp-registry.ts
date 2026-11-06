@@ -1,15 +1,15 @@
 import { mcpCredentialKey } from "./gateway/credential-key";
+import { isLoopbackHost } from "./gateway/oauth-url";
 // ──────────────────────────────────────────────────────────
 // MCP registry helpers — normalize before handing to adapters.
 // ──────────────────────────────────────────────────────────
 //
 // The gateway holds one MCP server registry (AgentGateway.mcpServers) and
 // fans it out to all three agent adapters. Before that fan-out we collapse
-// duplicates so nothing double-loads — which matters because Cursor caps
-// the total tool count (~40 across all servers), and because the agents
-// key their injected MCP maps by name (a second same-name entry would
-// silently overwrite the first on Claude/Cursor, or deep-merge oddly on
-// Codex).
+// duplicates so nothing double-loads — a repeated endpoint would offer its
+// tools twice, and the agents key their injected MCP maps by name (a second
+// same-name entry would silently overwrite the first on Claude/Cursor, or
+// deep-merge oddly on Codex).
 
 import { stat } from "node:fs/promises";
 import { existsSync } from "node:fs";
@@ -36,6 +36,7 @@ import {
   type SettingsLayerName,
 } from "../settings/schema";
 import type { McpServerRegistration } from "./types";
+import { INVALID_SAVED_VARIABLE_NAME, type UnavailableMcpServer } from "./mcp-registration";
 import { mcpSecretEnvAlias } from "@zeros/protocol/mcp-secrets";
 
 /** De-duplicate the MCP registry, FIRST-WINS (registry order = precedence,
@@ -43,7 +44,7 @@ import { mcpSecretEnvAlias } from "@zeros/protocol/mcp-secrets";
  *  of duplicate are dropped:
  *   - same `name` — agents key by name; a duplicate would clobber/merge.
  *   - same endpoint (`url`) under a different name — would connect to the
- *     same server twice, doubling its tools against Cursor's ~40-tool cap.
+ *     same server twice, doubling its tools.
  *
  *  Scope note: this deduplicates the Zeros registry against itself. Native
  *  pass-through agent configuration remains outside this registry. */
@@ -184,6 +185,9 @@ export interface GatewayBackend {
   variables?: Record<string, string>;
   sealedHeaders?: string[];
   clientMode?: "auto" | "metadata" | "dynamic" | "custom";
+  /** A personal backend on this machine may use loopback HTTP, as its
+   *  connection check does. Organisation backends never set it. */
+  allowLoopback?: boolean;
   name: string;
   /** Omitted by older callers: Streamable HTTP. */
   transport?: "http" | "sse";
@@ -200,8 +204,8 @@ export interface GatewayBackend {
   /** For auth:"oauth": a pre-registered client_id (no-DCR providers). Non-secret. */
   clientId?: string;
   scopes?: string[];
-  /** Tool NAMES to hide from agents (the Cursor 40-cap allowlist). The gateway
-   *  filters these out of the aggregated set it serves. */
+  /** Tool NAMES the user turned off. The gateway filters these out of the
+   *  aggregated set it serves. */
   disabledTools?: string[];
   source: SettingsLayerName;
 }
@@ -213,6 +217,9 @@ export interface ResolvedMcpRegistry {
   sources: SettingsLayerName[];
   /** Gateway-managed (auth:"oauth") servers, partitioned out of direct injection. */
   gatewayBackends: GatewayBackend[];
+  /** Enabled servers whose saved entry cannot be used as written (a
+   *  hand-edited variable name). Chats start without them and list them. */
+  unavailable: UnavailableMcpServer[];
   /** Human-readable notes (e.g. a committed-repo stdio server that was gated). */
   warnings: string[];
 }
@@ -395,6 +402,14 @@ export async function resolveMcpServersForRepo(
   );
 }
 
+function isLoopbackUrl(raw: string): boolean {
+  try {
+    return isLoopbackHost(new URL(raw).hostname);
+  } catch {
+    return false;
+  }
+}
+
 /** Compose per-layer raw docs into the effective registry: highest precedence
  *  first, dedup first-wins. Unlike scalar/table settings, `mcp.servers` is an
  *  ARRAY that replaces whole on merge — so we read each layer's OWN array and
@@ -416,6 +431,7 @@ function composeMcpRegistry(
   const servers: McpServerRegistration[] = [];
   const sources: SettingsLayerName[] = [];
   const gatewayBackends: GatewayBackend[] = [];
+  const unavailable: UnavailableMcpServer[] = [];
   const seenNames = new Set<string>();
   const seenTargets = new Set<string>();
 
@@ -453,6 +469,7 @@ function composeMcpRegistry(
           ...(s.oauth_client_mode ? { clientMode: s.oauth_client_mode } : {}),
           ...(s.transport === "sse" ? { transport: "sse" as const } : {}),
           url: s.url,
+          ...(isLoopbackUrl(s.url) ? { allowLoopback: true } : {}),
           auth: s.auth,
           ...(s.env ? { variables: s.env } : {}),
           ...(s.headers ? { sealedHeaders: Object.entries(s.headers).filter(([, value]) => value === MCP_SECRET_SENTINEL).map(([name]) => name) } : {}),
@@ -481,17 +498,25 @@ function composeMcpRegistry(
         seenNames.add(s.name);
         continue;
       }
-      const reg = toRegistration(s, secretRoot);
       const target =
-        reg.transport !== "stdio"
-          ? `${reg.transport}:${reg.url}`
-          : `stdio:${JSON.stringify([reg.command, reg.args ?? [], reg.cwd ?? ""])}`;
-      if (seenNames.has(reg.name) || seenTargets.has(target)) continue; // first-wins = higher precedence
-      seenNames.add(reg.name);
+        s.transport !== "stdio"
+          ? `${s.transport}:${s.url}`
+          : `stdio:${JSON.stringify([s.command, s.args ?? [], s.cwd ?? ""])}`;
+      if (seenNames.has(s.name) || seenTargets.has(target)) continue; // first-wins = higher precedence
+      seenNames.add(s.name);
       seenTargets.add(target);
+      let reg: McpServerRegistration;
+      try {
+        reg = toRegistration(s, secretRoot);
+      } catch {
+        // The entry keeps its name, so a less specific layer's server of the
+        // same name cannot silently stand in for it.
+        unavailable.push({ name: s.name, detail: INVALID_SAVED_VARIABLE_NAME });
+        continue;
+      }
       servers.push(reg);
       sources.push(layer);
     }
   }
-  return { servers, sources, gatewayBackends, warnings };
+  return { servers, sources, gatewayBackends, unavailable, warnings };
 }

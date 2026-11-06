@@ -443,7 +443,7 @@ PACKAGE INVENTORY (693 resolved package/version records)
   Source: https://github.com/cursor/cursor
   License documents: 8d17330e28e3
 
-@decimalturn/toml-patch@2.0.0
+@decimalturn/toml-patch@3.3.2
   License: MIT
   Surfaces: root pnpm workspace
   Source: https://github.com/DecimalTurn/toml-patch
@@ -25811,8 +25811,8 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ================================================================================
 DOCUMENT eecb5c151fde
 SHA-256: eecb5c151fdeb9acc9c4f1cbe0d285158a0b522e2cb58bc01537e17bd2a71b73
-Applies to: @decimalturn/toml-patch@2.0.0
-Source labels: @decimalturn/toml-patch@2.0.0 — LICENSE
+Applies to: @decimalturn/toml-patch@3.3.2
+Source labels: @decimalturn/toml-patch@3.3.2 — LICENSE
 ================================================================================
 
 MIT License

@@ -381,15 +381,12 @@ describe("updateSettingsFile", () => {
     ).toEqual(replaced);
   });
 
-  it("recovers when toml-patch silently emits invalid TOML for an inline servers array", () => {
+  it("reshapes a hand-written inline servers array in place, keeping comments", () => {
     const file = path.join(dir, "settings.toml");
     // A hand-written / imported file with a single-line INLINE array-of-tables.
-    // Reshaping the entry's key set makes @decimalturn/toml-patch drop the closing
-    // brace WITHOUT throwing — the serializer must round-trip + fall back, not write
-    // corrupt TOML that wedges every later write with "refusing to overwrite malformed".
     writeFileSync(
       file,
-      '[mcp]\nservers = [{name="a",transport="stdio",command="x"}]\n',
+      '# keep me\n[mcp]\nservers = [{name="a",transport="stdio",command="x"}]\n',
       "utf8",
     );
     const replaced = [{ name: "b", transport: "http", url: "https://y" }];
@@ -401,6 +398,19 @@ describe("updateSettingsFile", () => {
     const read = readSettingsFile(file);
     expect(read.error).toBeUndefined();
     expect((read.doc.mcp as { servers: unknown[] }).servers).toEqual(replaced);
+    expect(read.text).toContain("# keep me");
+  });
+
+  it("writes an empty servers array without padding after the last server is removed", () => {
+    const file = path.join(dir, "settings.toml");
+    const original = "# keep me\n[mcp]\nservers = []\n";
+    writeFileSync(file, original, "utf8");
+    const server = { name: "one", transport: "http", url: "https://one.example.test/mcp" };
+    updateSettingsFile(file, { mcp: { servers: [server] } }, { schemaUrl: null });
+    updateSettingsFile(file, { mcp: { servers: [] } }, { schemaUrl: null });
+    const text = readFileSync(file, "utf8");
+    expect(text).toMatch(/^servers = \[\]$/m);
+    expect(text).toBe(original);
   });
 
   it("preserves comments + sibling keys when adding mcp.servers to an existing file", () => {
@@ -449,6 +459,52 @@ describe("updateSettingsFile", () => {
       (readSettingsFile(file).doc.models as { claude_code: unknown })
         .claude_code,
     ).toEqual({ budget_cap_usd: 2 });
+  });
+
+  it("keeps hand-written datetimes and comments through an unrelated write", () => {
+    const file = path.join(dir, "settings.toml");
+    writeFileSync(
+      file,
+      [
+        "# keep me",
+        "[[mcp.servers]]",
+        'name = "fixture"',
+        'transport = "stdio"',
+        'command = "fixture"',
+        "reviewed_at = 2026-01-02T03:04:05Z",
+        "reviewed_on = 2026-01-02",
+        "",
+        "[scripts]",
+        'run = "old"',
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    updateSettingsFile(file, { scripts: { run: "new" } }, { schemaUrl: null });
+    expect(readFileSync(file, "utf8")).toContain("# keep me");
+    const [server] = (
+      readSettingsFile(file).doc.mcp as { servers: Record<string, unknown>[] }
+    ).servers;
+    expect(JSON.parse(JSON.stringify(server))).toMatchObject({
+      reviewed_at: "2026-01-02T03:04:05.000Z",
+      reviewed_on: "2026-01-02",
+    });
+  });
+
+  it("ends the file with one newline however often it is written", () => {
+    const file = path.join(dir, "settings.toml");
+    writeSettingsFile(file, { scripts: { run: "a" } }, { schemaUrl: null });
+    for (const run of ["b", "c", "d"]) {
+      updateSettingsFile(file, { scripts: { run } }, { schemaUrl: null });
+    }
+    expect(readFileSync(file, "utf8")).toBe('[scripts]\nrun = "d"\n');
+  });
+
+  it("drops trailing blank lines left by earlier writes, keeping line endings", () => {
+    const file = path.join(dir, "settings.toml");
+    writeFileSync(file, '# keep me\r\n[scripts]\r\nrun = "a"\r\n\r\n\r\n', "utf8");
+    updateSettingsFile(file, { scripts: { run: "b" } }, { schemaUrl: null });
+    expect(readFileSync(file, "utf8")).toBe('# keep me\r\n[scripts]\r\nrun = "b"\r\n');
   });
 
   it("falls back to a full rewrite when existingText can't be patched (never throws)", () => {

@@ -62,8 +62,9 @@ revision in the same checkout and compare failing test names.
   `CLAUDE_CONFIG_DIR`) reaches engine suites. Rerun them with `env -i` (HOME,
   USER, SHELL, LANG and a plain PATH) and a real `TMPDIR`.
 - On macOS the default `TMPDIR` is reached through the `/var` symlink, so
-  path-safety suites fail with `*_unsafe` or "not canonical". Set `TMPDIR` under
-  `/private/tmp`.
+  path-safety suites fail with `*_unsafe` or "not canonical". Use a private
+  folder in your own group, since `/private/tmp` files get group `wheel`:
+  `export TMPDIR="$(mktemp -d /private/tmp/zs.XXXXXX)" && chgrp "$(id -g)" "$TMPDIR"`.
 - Typecheck and tests do not load bundle entries. After removing an engine entry
   point, run `pnpm build:engine` and `pnpm electron:compile`.
 - Vitest's Vite environment supplies `import.meta.env` and similar; when desktop

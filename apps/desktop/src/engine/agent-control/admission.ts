@@ -345,6 +345,8 @@ export class AgentControlToolAdmissions {
         await Promise.allSettled(admitted.map((set) => set.tools.endPrompt()));
       },
       cancel: () => admitted.forEach((set) => set.tools.cancel()),
+      listedMcpServers: () =>
+        admitted.filter((set) => set.server.listedTools).map((set) => set.server.name),
       revoke: () => admitted.forEach((set) => set.tools.dispose()),
       dispose: () => (disposal ??= retire().finally(release)),
     };
