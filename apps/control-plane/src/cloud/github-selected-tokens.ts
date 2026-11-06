@@ -41,8 +41,9 @@ export function createSelectedCloudGithubTokens(
     purpose: "git" | "gh" | "computer" = "git",
     beforeRelease: () => Promise<void> = async () => {},
     failedTokenSha256?: string,
+    prepared?: Awaited<ReturnType<CloudGithubConnections["access"]>>,
   ) => {
-    const grant = await connections.access(scope, failedTokenSha256),
+    const grant = prepared ?? await connections.access(scope, failedTokenSha256),
       repository = await grant.api.repository(target);
     if (access === "write" && !repository.canPush)
       throw new HttpError(
