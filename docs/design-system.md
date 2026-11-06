@@ -125,8 +125,22 @@ exported page by page to [design-implementation/](design-implementation/README.m
    `border2`, 12px corners, the dropdown shadow, a 4px inset and 28px rows with
    8px corners (`shared/ui/menu-surface.ts`, `Surface kind="floating"`). The
    chat composer, user messages and everything docked above the composer
-   (dock cards and the @, / and # pickers) share `sidebar-bg` with `border2`
-   and no shadow, 8px apart.
+   (dock cards and the @, / and # pickers) share `sidebar-bg` with the
+   `--composer-border` edge (#323232 in Dark, `border2` in Light) and no
+   shadow, 8px apart. The transcript dissolves into the pane over the 32px
+   above the top of that stack (`COMPOSER_DOCK_FADE`,
+   `shared/ui/composer-surface.ts`): above the composer alone, above the
+   highest card once cards dock, and on a docked picker's own top edge while
+   it opens above. Editing a sent message happens in the composer itself:
+   the same card, surface, 18px corners, drag edge and 28px controls around
+   the same editor and pills. A sent message spans the lane like the
+   composer, however short. Taller than six lines, it folds to five that
+   dissolve over their last 32px above a Ghost **Show more**; unfolded it shows up to
+   fifteen and scrolls inside, fading only the edges its text runs past,
+   above **Show less** (`features/agent/prompt-fold.tsx`).
+   `features/agent/__tests__/composer-chrome-style.test.ts`,
+   `features/agent/__tests__/prompt-fold.test.ts` and the composer ui-smokes
+   hold all of it.
 5. **One height per row.** 28 standard, 24 compact, 20 inline; glyphs 14, 12
    and 12. Controls in one row share a height; toolbars are 36px bars of 28px
    tools.
@@ -157,6 +171,28 @@ exported page by page to [design-implementation/](design-implementation/README.m
     motion respected.
 12. **Local and cloud are both first class.** Every surface states its Local
     and cloud behavior; cloud lifecycle never enters a tab banner.
+13. **Split panes are solid islands on the chrome** (2026-11-06). The
+    workspace header row draws no divider (`PanelHeader divider={false}`) and
+    keeps one 28px glyph slot for branch, folder and cloud, so the name always
+    starts at one column; whether a branch is published never changes the
+    glyph. A lone chat pane runs edge to edge. Only while the column is split,
+    panes stand apart as solid surfaces on the `bg1` chrome: 12px apart both
+    ways (the divider is that gap and the resize handle), 12px in from the
+    column's left and bottom edges and from its right edge when Workbench is
+    not beside it, every corner 12px, and nothing fading between them, at the
+    tab strip or along a seam. An unfocused pane takes `sidebar-bg` (never
+    `bg0`); the focused pane keeps `bg1`, so the gaps beside it read as part
+    of it. The transcript fades out over the 32px under its strip and starts
+    32px down; a tab's drop zone is a soft `highlighted-bg` fill without a
+    border; chat tabs are content-sized from 70px to 176px. The side column
+    keeps its tab row on `bg1` and holds the open tab in one island under it:
+    a canvas `Surface` 12px in from the column's sides and bottom, 12px
+    corners, a `border1` edge, no seam against the chat, and the first tab
+    12px in. This replaces the 2026-07-11 flush column and the soft valleys
+    tried earlier the same day. `shell/conversation/__tests__/pane-surfaces.test.ts`,
+    `shell/conversation/__tests__/pane-sizing.test.ts`,
+    `shell/workbench/__tests__/workbench-island.test.ts`
+    and `scripts/ui-smoke-chat-surfaces.mjs` hold it.
 
 ### How the direction changes
 
@@ -235,9 +271,9 @@ imports, following property paths such as `chip.cls`). The ledger counts
 | Surface | Fill | Hover / selected | Border | Notes |
 | --- | --- | --- | --- | --- |
 | Canvas, active chat, dialogs, sheets | `bg-bg1` | `bg-bg1-hover` | `border-border1` | Dialogs sit on `bg-scrim` |
-| Inactive chat pane | `bg-(--pane-bg)` (= `bg0`) | — | — | Dims the fill only; text keeps full contrast |
+| Inactive chat pane | `bg-(--pane-bg)` (= `sidebar-bg`) | — | — | Sets the fill apart only; text keeps full contrast. Split panes stand 12px apart on the `bg1` chrome with 12px corners, no seam and no fade |
 | Raised: tiles | `bg-bg2` | `bg-bg2-hover` | `border-border2` | `bg-bg1-bright` for cards and settings groups |
-| Chat composer, user messages and what docks above the composer | `bg-sidebar-bg` | `bg-sidebar-bg-hover` | `border-border2` | No shadow; 18px composer corners, 12px elsewhere. Dock cards use `DOCK_CARD_CLS`; the docked pickers use `PopoverContent surface="composer"` |
+| Chat composer, user messages and what docks above the composer | `bg-sidebar-bg` | `bg-sidebar-bg-hover` | `border-(--composer-border)` | No shadow; 18px corners on the Create, workspace and edit composers, 12px elsewhere. Dock cards use `DOCK_CARD_CLS`; the docked pickers use `PopoverContent surface="composer"`; review drafts take `COMPOSER_SURFACE_CLS`. The top of the stack carries `COMPOSER_DOCK_FADE`. Sent messages span the lane and fold long text with `PromptFold` |
 | Floating: menus, selects, command, popovers, tooltips, hover cards, toasts | `bg-bg3` | `bg-bg3-hover` | `border-border2` | 12px corners, 4px inset, lift = `shadow-[var(--shadow-dropdown)]`; feature panels take the fill from `FLOATING_SURFACE` |
 | Repository sidebar | `bg-sidebar-bg` | `bg-sidebar-bg-hover` | `border-border2` | Settings navigation uses the default surfaces |
 | Grouped content on canvas | `bg-bg1-highlight` | — | — | A wash, never the only boundary |
@@ -342,6 +378,9 @@ All, editing, portals and vendor surfaces across owners, placements and themes.
   perceptibility floors of 1.45:1 for border3 and 1.6:1 for border4 on every
   surface controls sit on, and a ≥1.15× hover step on bg2. The user-message
   bubble is excluded because controls do not sit on it. Focus is the strong cue.
+  The composer family has its own semantic edge, `--composer-border`
+  (`styles/semantic-tokens.css`): #323232 in Dark, between border2 and
+  border3 with no primitive of its own, and border2 in Light.
 - **Focus** is an opaque `border-highlighted-bright`, `ring-highlighted-bright`,
   or `outline-highlighted-bright` (the radio uses an outline so its checked
   border cannot override it); the `ring-highlighted-bright/50` halo is
@@ -528,7 +567,7 @@ state, `aria-*`, `data-*` hooks) at the caller.
 | A form field | `Field` around `Input`, `Textarea` or a Select trigger | One label (13/18 medium), one hint (12/16 `fg3`) that an error replaces (12/16 `red-primary`); wires `id`, `aria-describedby` and `aria-invalid`. `Input` has `size="compact"`, `appearance="inline"` (rename) and `mono`. |
 | A reference chip or a status tag | `Pill` · `Badge` | `Pill` is an interactive reference: `size="inline"` 20px or `"control"` 24px, `tone` neutral / failed / mode / gone / invalid. `Badge` is inert state: one 20px size, tinted `neutral` / `outline` / `success` / `failure` / `warning` / `info` / `merged`. |
 | A shortcut | `Kbd` · `KbdKeys` | An 18px `border2` chip on `bg2`; `KbdKeys keys="⌘⇧T"` draws one chip per key. Menus, tooltips and the command palette all use it. |
-| Window chrome or a panel heading | `PanelHeader` (+ `PanelHeaderTitle`, `PanelHeaderActions`) | Required `size="window"` (40px, gap-1, px-2, `bg-bg1`) or `size="panel"` (36px, gap-2, px-3); border1 bottom divider; a 13 medium `fg1` title that truncates; actions 2px apart. |
+| Window chrome or a panel heading | `PanelHeader` (+ `PanelHeaderTitle`, `PanelHeaderActions`) | Required `size="window"` (40px, gap-1, px-2, `bg-bg1`) or `size="panel"` (36px, gap-2, px-3); border1 bottom divider unless `divider={false}` (the workspace header row); a 13 medium `fg1` title that truncates; actions 2px apart. |
 | A compact tool disclosure or hover trigger | `ListRow` | 28px button row on `bg1-hover` with the keyboard ring; expanded adds no fill. The caller owns `aria-expanded`, `aria-controls`, labels, state, and events. |
 | A tool row whose file or link targets sit beside its name | `ListRowGroup` with a `ListRow` disclosure (`data-list-row-disclosure`, `LIST_ROW_IN_GROUP`) | The same 28px row with 8px sides and 6px corners: the group hovers, shows the keyboard ring and toggles on a click in its gaps; the targets keep their own clicks. |
 | A message inside content | `MessageRow` (`shared/ui/primitives/message-row.tsx`) | The banner anatomy without the bar: a 32px row, the 16px icon carries `tone` (`error` / `warning` / `success` / `neutral` / `pending`), one 13/18 `fg2` line that truncates, 24px Ghost `actions`. `bar` adds the `border1` rule under a toolbar; `flush` drops the side padding inside a padded card. The caller sets `role="alert"` for errors. |
@@ -562,7 +601,7 @@ state, `aria-*`, `data-*` hooks) at the caller.
 styles/zeros-tokens.css      Tailwind import, @source allowlist, @theme wiring,
                              :root (Dark) + [data-theme="light"] primitives,
                              named z utilities, base border/outline defaults
-styles/semantic-tokens.css   feature aliases (switch, loader, PR island, design)
+styles/semantic-tokens.css   feature aliases (composer edge, switch, loader, PR island, design)
 styles/globals.css           ordered cross-boundary modules in styles/global/
 ```
 

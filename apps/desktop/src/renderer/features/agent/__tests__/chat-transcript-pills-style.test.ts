@@ -85,13 +85,13 @@ describe("concise always, full only on right-click", () => {
     expect(pills()).not.toContain("Add chat transcripts:");
   });
 
-  it("leads the row with a conversation glyph, not a paperclip", () => {
-    // 2026-07-30 founder direction. The row sits with the folder/branch/
-    // terminal provenance rows, whose icons all name WHAT the row is about;
-    // a paperclip named the mechanism instead. The paperclip survives in the
-    // right-click menu, where "Attach full transcript" IS the mechanism.
+  it("leads the row with its label alone, without a glyph", () => {
+    // 2026-11-06 direction (Zeros Design v378) replaces the 2026-07-30
+    // conversation glyph: "Add chat transcripts" is a plain label. The
+    // paperclip still lives only in the right-click menu, where "Attach full
+    // transcript" names the mechanism.
     const src = pills();
-    expect(src).toContain('<MessageCircleMore className="size-3.5"');
+    expect(src).not.toContain("<MessageCircleMore");
     expect(src).not.toContain('<Paperclip className="size-3.5"');
   });
 
@@ -350,10 +350,11 @@ describe("the pill is live and the chip is fixed", () => {
 });
 
 describe("row geometry", () => {
-  it("indents the pills to the provenance rows' text column", () => {
-    // 14px icon + 8px gap = 22px, so the pills line up under the sentence
-    // rather than under its icon.
-    expect(pills()).toContain('className="ml-[22px] flex flex-wrap gap-1.5"');
+  it("lines the pills up under the label's first letter, with no indent", () => {
+    // The label has no glyph to clear any more, so the pills start where it
+    // starts.
+    expect(pills()).toContain('className="flex flex-wrap gap-1.5"');
+    expect(pills()).not.toContain("ml-[22px]");
   });
 
   it("keeps the pills on the 24px control step", () => {

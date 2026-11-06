@@ -101,7 +101,9 @@ import {
   clampPaneSplitRatio,
   clearTabDrag,
   growablePaneSurfaceWidth,
+  paneSurfaceMinimumSize,
   paneTreeMinimumSize,
+  splitPaneGutters,
   type PaneTreeMinimumSize,
   usePanePortalsStore,
   useTabDragStore,
@@ -142,11 +144,15 @@ function measureSplitCapacity(surface: HTMLElement | null): {
   const rect = surface.getBoundingClientRect();
   const workbenchWidth =
     workbenchPaneFor(surface)?.getBoundingClientRect().width ?? 0;
+  // Every split tree sits inside the split gutters, so they come out of the
+  // budget before the first split as well as after it.
+  const gutters = splitPaneGutters(workbenchWidth > 0);
+  const width = rect.width - gutters.width;
   return {
-    containerWidth: rect.width,
-    containerHeight: rect.height,
+    containerWidth: width,
+    containerHeight: rect.height - gutters.height,
     growableWidth: growablePaneSurfaceWidth(
-      rect.width,
+      width,
       workbenchWidth,
       WORKBENCH_MIN_PX,
     ),
@@ -208,10 +214,14 @@ export function ConversationPaneLayout({
   stripLeading = null,
   stripTrailing = null,
   bodyAside = null,
+  workbenchBeside = false,
 }: {
   workspace?: Workspace | null;
   readOnly?: boolean;
   emptyContent?: ReactNode;
+  /** Workbench is open beside the column: its island keeps 12px from the
+   *  column, so a split takes no right gutter of its own. */
+  workbenchBeside?: boolean;
   onMinimumSizeChange?: (minimumSize: PaneTreeMinimumSize) => void;
   /** Pinned to the leading edge of the first pane's chat strip — Code's
    *  conversation column passes its mode toggle here now that the column has no
@@ -366,8 +376,8 @@ export function ConversationPaneLayout({
 
   const layout = usePaneLayout(layoutFolder);
   const minimumSize = useMemo(
-    () => paneTreeMinimumSize(layout.root),
-    [layout.root],
+    () => paneSurfaceMinimumSize(layout.root, workbenchBeside),
+    [layout.root, workbenchBeside],
   );
   useLayoutEffect(() => {
     onMinimumSizeChange?.(minimumSize);
@@ -736,6 +746,7 @@ export function ConversationPaneLayout({
   );
 
   const paneCountValue = leafIds(layout.root).length;
+  const split = paneCountValue > 1;
 
   const ctx = useMemo<PaneCtx>(
     () => ({
@@ -831,7 +842,12 @@ export function ConversationPaneLayout({
       <div
         ref={paneSurfaceRef}
         data-pane-layout-surface=""
-        className="flex min-h-0 min-w-0 flex-1"
+        // The chrome: bg1, which shows in a split's gaps and gutters.
+        className={cn(
+          "flex min-h-0 min-w-0 flex-1 bg-bg1",
+          split && "pb-3 pl-3",
+          split && !workbenchBeside && "pr-3",
+        )}
       >
         <PaneNodeView node={layout.root} ctx={ctx} />
       </div>
@@ -1074,26 +1090,15 @@ function PaneSplitter({
       role="separator"
       aria-orientation={isRow ? "vertical" : "horizontal"}
       aria-label="Resize panes"
+      // The 12px gap between the panes is the handle; it draws nothing.
       className={cn(
         "relative z-10 flex shrink-0",
-        isRow ? "w-1.5 cursor-ew-resize" : "h-1.5 cursor-ns-resize",
+        isRow ? "w-3 cursor-ew-resize" : "h-3 cursor-ns-resize",
       )}
       onPointerDown={onPointerDown}
       onDoubleClick={resetToBalanced}
       {...hintHandlers}
     >
-      {/* Resting 1px seam so the two panes read as separate surfaces. The
-          resize cursor + the idle "Drag to resize" hint above the pointer
-          are the only other affordances. */}
-      <div
-        className={cn(
-          "bg-border1 pointer-events-none absolute",
-          isRow
-            ? "inset-y-0 left-1/2 w-px -translate-x-1/2"
-            : "inset-x-0 top-1/2 h-px -translate-y-1/2",
-        )}
-        aria-hidden="true"
-      />
       {hint}
     </div>
   );
@@ -1111,6 +1116,7 @@ function ChatPane({ paneId, ctx }: { paneId: string; ctx: PaneCtx }) {
     paneChats,
   );
   const isFocused = ctx.focusedPaneId === paneId;
+  const split = ctx.paneCount > 1;
   const onSelectChat = ctx.onSelectChat;
 
   // Publish this pane's displayed chat for the terminal deck.
@@ -1322,13 +1328,16 @@ function ChatPane({ paneId, ctx }: { paneId: string; ctx: PaneCtx }) {
       ref={rootRef}
       data-pane-root=""
       data-pane-focused={isFocused ? "true" : "false"}
-      // --pane-bg is the window surface: bg1 on the focused pane, bg0 elsewhere so
-      // inactive windows read recessed. Everything inside inherits it, so the window
-      // re-tints as one. That fill is the only inactive treatment; text and controls
-      // keep full contrast (a former veil dropped text below WCAG AA).
+      // --pane-bg is the window surface: bg1 on the focused pane, the sidebar's
+      // fill elsewhere (bg0 read too dark once panes lost their seams).
+      // Everything inside inherits it, so the window re-tints as one. That fill
+      // is the only inactive treatment: text and controls keep full contrast
+      // (a former veil dropped text below WCAG AA). Split panes are solid
+      // shapes on the chrome, so every corner rounds.
       className={cn(
         "relative flex min-h-0 min-w-0 flex-1 flex-col bg-(--pane-bg)",
-        !isFocused && "[--pane-bg:var(--bg0)]",
+        split && "overflow-hidden rounded-[calc(var(--radius-lg)*1.5)]",
+        !isFocused && "[--pane-bg:var(--sidebar-bg)]",
       )}
     >
       <ChatTabs
@@ -1500,7 +1509,7 @@ function PaneDropOverlay({
       {zone && (
         <div
           className={cn(
-            "border-highlighted-bright/50 bg-highlighted-bg/40 pointer-events-none absolute rounded-sm border",
+            "bg-highlighted-bg/40 pointer-events-none absolute rounded-sm",
             zone === "center" && "inset-1",
             zone === "right" && "inset-y-1 right-1 left-1/2",
             zone === "down" && "inset-x-1 top-1/2 bottom-1",

@@ -17,8 +17,13 @@ function code(relativePath: string): string {
 }
 
 describe("narrow transcript message overflow", () => {
-  it("bounds user bubbles to their lane and shrinks unbroken text", () => {
-    expect(code("../turn-container.tsx")).toContain("max-w-[min(800px,100%)]");
+  it("bounds user bubbles to their lane and wraps unbroken text", () => {
+    // The row caps at the 800px lane and the bubble fills it, however short.
+    const turnContainer = code("../turn-container.tsx");
+    expect(turnContainer).toContain(
+      '"zeros-agent-turn-prompt group/usermsg relative flex w-full max-w-[800px] min-w-0 flex-col"',
+    );
+    expect(turnContainer).toContain('"w-full min-w-0 cursor-text border px-3 py-2 select-text"');
 
     const textMessage = code("../renderers/text-message.tsx");
     expect(textMessage.match(/wrap-anywhere/g)).toHaveLength(2);
@@ -38,9 +43,10 @@ describe("narrow transcript message overflow", () => {
     );
   });
 
-  it("renders every sent user message in full without a reveal overlay", () => {
+  it("folds a long sent message behind its own Show more, never a reveal overlay", () => {
     const turnContainer = code("../turn-container.tsx");
 
+    expect(turnContainer).toContain("<PromptFold surfaceActive={surfaceActive}>");
     expect(turnContainer).not.toContain("ClampedUserPrompt");
     expect(turnContainer).not.toContain("max-h-[600px]");
     expect(turnContainer).not.toContain("group/more");

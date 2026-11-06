@@ -9,10 +9,11 @@ import {
 import { CODE_REVIEW_BODY_LIMIT } from "@zeros/protocol/code-review";
 import { Button, ButtonShortcut, Textarea } from "@/renderer/shared/ui/primitives";
 import { cn } from "@/renderer/shared/ui/cn";
+import { COMPOSER_SURFACE_CLS } from "@/renderer/features/agent/composer-shell";
 import type { ReviewDraftStore } from "./review-draft-store";
 
-/** The agent composer's look for review drafts: sidebar-bg with a border2
- *  edge that stays put on focus, the range as its title, a borderless 13/20
+/** The agent composer's look for review drafts: its surface with an edge
+ *  that stays put on focus, the range as its title, a borderless 13/20
  *  text area and one footer (where it goes, Cancel, then the primary submit
  *  with its ⌘↵). */
 export function ReviewComposer({
@@ -77,7 +78,8 @@ export function ReviewComposer({
       aria-label={label}
       aria-busy={draft.busy || undefined}
       className={cn(
-        "border-border2 bg-sidebar-bg flex min-w-0 flex-col border font-sans",
+        COMPOSER_SURFACE_CLS,
+        "flex min-w-0 flex-col border font-sans",
         reply ? "rounded-md" : "rounded-lg",
       )}
       onSubmit={(event) => {

@@ -111,9 +111,21 @@ Principle 16 applies to every claim.
   with the merge base in a worktree outside `.context/` that runs its own
   `pnpm install --frozen-lockfile`. A failure the base reproduces is existing
   and left to CI's Linux shards; any other blocks handoff.
+- A smoke or capture switches themes with `document.documentElement.dataset.theme`
+  (a class on `<html>` does nothing) and asserts a resolved token, such as a
+  `var(--bg1)` probe, differs between the passes, so a missed switch fails.
 
 ## When a check fails
 
 Read `agents/zstack/gotchas.md` before chasing a failure your diff does not
 explain: it lists the shell, Git, Node, dependency, permission, PostgreSQL,
-browser and CI facts that have already cost a loop.
+browser and CI facts that have already cost a loop. Search the waiting
+fragments too (`grep -ril '<error text>' agents/zstack/gotchas.md
+agents/zstack/changes`): facts sit there until the pack owner folds them.
+
+A smoke's `Failed to fetch dynamically imported module` for a module whose
+import graph, barrels such as `primitives/index.ts` included, holds nothing
+you changed is a dev-server fetch: rerun that scenario alone twice on the same
+head (a scratch runner imports it from `scripts/ui-smoke/scenarios.mjs`
+against its own dev server) and report the shard and the reruns together;
+never call the shard green.

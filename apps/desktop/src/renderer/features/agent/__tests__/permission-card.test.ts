@@ -252,7 +252,7 @@ describe("canonical permission-card variants", () => {
     );
 
     // The dock card surface; context items sit in bg1 wells with border1.
-    expect(html).toContain("border-border2 bg-sidebar-bg");
+    expect(html).toContain("border-(--composer-border) bg-sidebar-bg");
     expect(html).toContain("border-border1 bg-bg1");
     // Options are plain rows with 18px keycaps, not bordered buttons.
     expect(html).not.toContain("border-border3");

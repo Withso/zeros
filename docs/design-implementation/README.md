@@ -914,3 +914,115 @@ Each landed step appends one line: date, workstream, what landed, evidence.
   code-review, cloud-github-pr and pr-actions smokes. Failures that remain
   are this container's: Git commit signing, the Playwright build without the
   browser path, and GitHub URL rewriting, each failing the same way on main.
+- 2026-11-05 · 2, 5 · Agent chat: the composer edge and the stack fade. The
+  composer, Create, sent prompts, review drafts, every dock card and the
+  docked @, / and # pickers take the new semantic `--composer-border`
+  (#323232 in Dark, between border2 and border3 with no primitive of its
+  own; border2 in Light), and a file drag dashes that edge. The transcript
+  dissolves into the pane in one 32px gradient that starts at the top edge
+  of the stack, with no solid band (`COMPOSER_DOCK_FADE`). The dock column
+  carries it, so it sits on the composer alone and above the highest card
+  once one docks; a docked picker is portaled, so
+  `PopoverContent surface="composer"` carries its own while it opens
+  upward, scrolls in an inner box so the card no longer clips it, and hides
+  it when the picker flips below. Canvas version 374 draws both: Feature
+  tokens gains a Composer section (the token and the fade in three states),
+  Borders lists composer-border, and the chat kit applies the edge and the
+  fade on the window boards. An earlier draft held the fade solid over its
+  lower 40%, which read as an offset above the edge; the unit pin now
+  refuses any colour stop, and the pixel readings require the dissolve to
+  begin at the edge.
+  Evidence: Vitest 521 files (5,962 tests) across agent, primitives, theme
+  and shell, plus 19 code-review files; the new dock-fade smoke (cloud,
+  Local and organization-local, both themes, decoded pixels; moving the
+  fade into the composer or holding it solid at the edge fails it) and the
+  suggestions smoke (the picker fade for all three owners and the flipped
+  narrow window); the three
+  ui-smoke shards pass (623, 1,162 and 1,039 checks); typecheck,
+  lint, check:ui, check:tokens, check:secrets and build:ui pass. Of the
+  full root suite's 19 failing files, 11 pass with a neutral `HOME` (the
+  container signs commits) and 8 fail identically on the base commit.
+- 2026-11-05 · 5 · Agent chat: editing a sent message happens in the
+  composer itself. `TurnPromptEditor` owns the composer's card (its surface,
+  18px corners, dashed drag edge and drop veil from
+  `features/agent/composer-shell.tsx`)
+  around the same editor and pills, with the 28px Send geometry and 4px tool
+  gaps; the 12px `bg2` card, its inner drag ring and the 32px Resend retire.
+  Its pickers anchor to the card, matching its width 8px above it. Fixed on
+  the way: using a portaled picker or menu from the edit (even a tab) read as
+  a click away and cancelled it; the card now marks pointerdowns from its
+  React subtree as inside. Canvas: the chat kit's edit card takes the same
+  edge and corners. Evidence: the composer-attachments smoke checks the
+  edit card's computed surface and corners in both themes, a 28 × 28 Resend,
+  the picker geometry and that clicking inside the picker keeps the edit
+  open (it failed before the fix).
+- 2026-11-05 · 5 · Agent chat: sent messages span the lane and long ones
+  fold. Every sent message, a one-word one included, is as wide as the
+  800px lane and the composer, with the Sent from header at its left edge.
+  `PromptFold` (`features/agent/prompt-fold.tsx`) folds a message taller
+  than six lines to five that dissolve over their last 32px above a Ghost
+  Show more; unfolded it shows up to fifteen and scrolls inside, fading only
+  the edges its text runs past, above Show less. A message folding would
+  not shorten stays whole, the fold commits before the first paint,
+  measures only while its chat is surfaced, and folds back when the chat is
+  switched away. Canvas version 375 adds Messages · Long prompt (Folded,
+  Unfolded, Scrolled) to the board row and its All states, and the chat
+  kit's bubbles span the lane. Evidence: `prompt-fold.test.ts` (SSR pins
+  and Chromium checks of the first frame, the thresholds, the toggle, edge
+  tracking and hidden chats) failed red on a stub; the new prompt-fold smoke
+  (cloud, Local and organization-local, decoded pixels in both themes)
+  fails when the folded mask is removed or the bubble fits its content; the
+  local-links smoke now checks the lane width. The three ui-smoke shards pass
+  on that head (623, 1,163 and 1,040 checks).
+- 2026-11-05 · 5 · Agent chat: the sender line. A message another chat sent
+  (`localFrom`) no longer carries "Sent from" and a chat pill: it shows the
+  sending chat's name in fg1, centred on its agent's 16px logo after it,
+  right-aligned above the full-width bubble like a sender in a chat app.
+  `LocalLinkPill appearance="sender"` draws it with no border or fill; on
+  hover only the name takes the bg1-hover fill and its text stays fg1, and a
+  click (or middle click) opens that chat as the pill did. A chat that is
+  gone reads fg3. "Sent from" stays for screen readers. Canvas version 377
+  draws it on Messages · Local chat links with a hovered state, also in its
+  All states. Evidence: the local-links unit test (the sender's classes,
+  name-then-logo order and muted target; the right-aligned header) and smoke
+  (geometry for sent, steered, saved and short senders; fg1 at rest and
+  hovered, the name-only fill, no border and the click to its chat, in both
+  themes; narrow-pane truncation) failed red before the change.
+- 2026-11-06 · 3, 5, 6 · Agent chat and the side column (canvas versions 378
+  to 390): panes meet as surfaces, not boxes (design-system.md §0 item 13).
+  Chat tabs cap at 176px; "Add chat transcripts" is a plain label whose pills
+  start under its first letter. The workspace header row draws no divider
+  (`PanelHeader` gains `divider`), and branch, folder and cloud keep one 28px
+  glyph slot: unpublished Git no longer swaps its glyph for a Local badge.
+  Split panes draw no seam and leave no gap (the resize strip overlays the
+  second pane, `PANE_SPLITTER_PX` is 0, so two panes need 720px); an
+  unfocused pane takes `sidebar-bg` instead of `bg0` (option B of the three
+  Split focus boards); top corners round 12px where panes meet; every strip
+  fades in from the `bg1` chrome over 8px; and unfocused panes dissolve into
+  the chrome over 8px at stacked seams and along the stretches they share
+  side by side (`shell/conversation/pane-edges.ts`). The transcript fades out
+  over 32px under its strip and starts 32px down; a tab's drop zone is a soft
+  fill with no border. The side column holds the open tab in a canvas
+  `Surface` island 12px in from its sides and bottom, with 12px corners, a
+  `border1` edge, no seam against the chat and its first tab 12px in,
+  replacing the 2026-07-11 flush column; the docked terminal sizes against
+  the island. Evidence: the chat-tab-width, panel-header, workspace-header,
+  transcript-top-fade, pane-edges, pane-surfaces, pane-sizing and
+  workbench-island tests failed red first; the new chat-surfaces smoke (the
+  island's insets, edge and fill; abutting panes, fills, corners, strip
+  fades and the T-junction valley, each in Dark and Light) passes; the
+  draft-indicators smoke follows the cap and now really switches to Light,
+  and the conversation-summary smoke follows the retired badge.
+- 2026-11-06 · 5, 6 · Split chat panes go solid (canvas version 391, "Solid
+  split", replacing the soft valleys in the entry above): only while the
+  column is split, panes sit 12px apart, the divider being the gap and the
+  resize handle (`PANE_SPLITTER_PX` is 12, so two panes need 732px), and 12px
+  in from the column's left and bottom edges and from its right edge when
+  Workbench is not beside it, whose island keeps the same 12px
+  (`splitPaneGutters`, charged to the column's floor and to the split gate);
+  every corner rounds 12px, and the tab-strip and seam fades are gone with
+  `pane-edges.ts`. A lone pane is unchanged. Evidence: the pane-sizing and
+  pane-surfaces tests failed red first; the chat-surfaces smoke measures the
+  gutters, the 12px gaps, the 12px to the side island, the right gutter with
+  the side column hidden, every radius and the absent fades, in Dark and
+  Light.

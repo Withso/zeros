@@ -42,11 +42,16 @@ describe("shared PR status row placement", () => {
     expect(row).toMatch(
       /return \(\s*<PanelHeader size="window" className="gap-2"/,
     );
+    // The row keeps PanelHeader's default divider (only the workspace header
+    // row turns it off).
+    expect(row).not.toContain("divider={false}");
     const primitive = source(
       "apps/desktop/src/renderer/shared/ui/primitives/panel-header.tsx",
     );
     const emptyRowClasses = primitive.match(/window:\s*"([^"]+)"/)?.[1];
-    expect(new Set(emptyRowClasses?.split(/\s+/))).toEqual(
+    const dividerClasses = primitive.match(/const HEADER_DIVIDER_CLS = "([^"]+)"/)?.[1];
+    expect(primitive).toContain("divider = true");
+    expect(new Set([...(emptyRowClasses?.split(/\s+/) ?? []), ...(dividerClasses?.split(/\s+/) ?? [])])).toEqual(
       new Set(
         "border-border1 bg-bg1 flex h-10 shrink-0 items-center gap-1 border-b pr-1.5 pl-3".split(/\s+/),
       ),

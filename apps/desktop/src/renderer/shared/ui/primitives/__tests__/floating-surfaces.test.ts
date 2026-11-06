@@ -171,11 +171,53 @@ describe("Popover", () => {
   // Regression: the @, / and # pickers docked on the composer floated on bg3
   // with a lift while every other card above the composer sat on its surface.
   it("floats on bg3 with the lift, or docks on the composer's own surface", () => {
-    expect(popover).toMatch(/floating: "[^"]*shadow-\[var\(--shadow-dropdown\)\]"/);
-    expect(popover).toContain('composer: "bg-sidebar-bg"');
+    expect(popover).toMatch(/floating:\s*"[^"]*border-border2 shadow-\[var\(--shadow-dropdown\)\]/);
+    expect(popover).toMatch(/composer:\s*"bg-sidebar-bg border-\(--composer-border\) /);
+    expect(popover).not.toMatch(/composer:\s*"[^"]*shadow/);
     expect(popover).toContain('surface = "floating"');
     const suggestions = source("../../features/agent/composer-editor/suggestion-popup.tsx");
     expect(suggestions).toContain('surface={placement === "composer" ? "composer" : "floating"}');
     expect(suggestions).toContain('<Surface kind={placement === "composer" ? "sidebar" : "floating"}>');
+  });
+
+  // Portaled, a docked picker sits over the transcript instead of in the dock
+  // column, so it carries the composer stack's fade on its own top edge.
+  it("carries the composer dock fade above a docked picker, never under a flipped one", () => {
+    expect(popover).toContain('import { COMPOSER_DOCK_FADE } from "@/renderer/shared/ui/composer-surface";');
+    const fade = popover.slice(popover.indexOf("<span"), popover.indexOf("/>", popover.indexOf("<span")));
+    expect(fade).toContain('data-composer-dock-fade=""');
+    expect(fade).toContain('aria-hidden="true"');
+    // Shown only while the picker opens above its anchor. Positioned from
+    // inside the card's 1px border, it reaches out past the border at each
+    // side and sits on top of it, so the edge stays drawn.
+    expect(fade).toContain(
+      'cn(COMPOSER_DOCK_FADE, "-inset-x-px mb-px hidden group-data-[side=top]/composer-dock:block")',
+    );
+    expect(popover).toMatch(/composer:\s*"[^"]*group\/composer-dock relative flex flex-col"/);
+    // The scroll box moves inside, so the card no longer clips its own fade;
+    // the floating surface keeps scrolling itself.
+    expect(popover).toContain('"min-h-0 overflow-x-hidden overflow-y-auto overscroll-contain rounded-[inherit]"');
+    expect(popover).toMatch(/floating:\s*"[^"]*overflow-x-hidden overflow-y-auto overscroll-contain"/);
+  });
+});
+
+describe("the composer dock fade", () => {
+  it("dissolves the transcript into its pane over 32px, above the edge it sits on", async () => {
+    const { COMPOSER_DOCK_FADE } = await import("../../composer-surface");
+    for (const cls of [
+      "pointer-events-none",
+      "absolute",
+      "inset-x-0",
+      "bottom-full",
+      "h-8",
+      "bg-gradient-to-t",
+      "from-(--pane-bg)",
+      "to-transparent",
+    ]) {
+      expect(COMPOSER_DOCK_FADE.split(" ")).toContain(cls);
+    }
+    // One dissolve that starts at the edge: no solid band or extra stop
+    // between the card's top and the transcript.
+    expect(COMPOSER_DOCK_FADE).not.toMatch(/(?:from|via|to)-\d+%|via-/);
   });
 });

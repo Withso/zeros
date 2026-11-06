@@ -351,11 +351,14 @@ describe("Code seats its column controls above the chat strips", () => {
     );
   });
 
-  it("dims an unfocused pane through its window fill, never over its text", () => {
-    // An unfocused pane recedes by swapping its window fill to bg0. It must not
-    // lay a wash OVER its content: the former bg0/30 veil pushed the pane's
-    // text, tabs and controls below WCAG AA (styles/policy/contrast-contract.json).
-    expect(paneLayoutSource).toContain('!isFocused && "[--pane-bg:var(--bg0)]"');
+  it("sets an unfocused pane apart through its window fill, never over its text", () => {
+    // An unfocused pane swaps its window fill to the sidebar's (2026-11-06,
+    // option B: a hair lighter than bg1, so nothing darkens; bg0 read too
+    // dark once panes lost their seams). It must not lay a wash OVER its
+    // content: the former bg0/30 veil pushed the pane's text, tabs and controls
+    // below WCAG AA (styles/policy/contrast-contract.json).
+    expect(paneLayoutSource).toContain('!isFocused && "[--pane-bg:var(--sidebar-bg)]"');
+    expect(paneLayoutSource).not.toContain("[--pane-bg:var(--bg0)]");
     expect(paneLayoutSource).not.toMatch(/bg-bg0\/\d+ pointer-events-none absolute inset-0/);
 
     // The two column-level controls still sit above pane-level layers: they act

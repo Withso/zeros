@@ -3,6 +3,7 @@ import * as PopoverPrimitive from "@radix-ui/react-popover";
 
 import { cn } from "@/renderer/shared/ui/cn";
 import { ANCHORED_OVERLAY_MOTION } from "@/renderer/shared/ui/anchored-overlay-motion";
+import { COMPOSER_DOCK_FADE } from "@/renderer/shared/ui/composer-surface";
 import { MENU_SURFACE_RADIUS } from "@/renderer/shared/ui/menu-surface";
 import { suppressPointerRefocus } from "@/renderer/shared/ui/overlay-focus";
 import { useOverlayEscape } from "@/renderer/shared/ui/overlay-escape";
@@ -57,14 +58,19 @@ export interface PopoverContentProps extends React.ComponentPropsWithoutRef<
   padding?: "default" | "none";
   /** floating (the default) is the bg3 menu surface with the dropdown lift;
    *  composer is for a picker docked on the composer, which takes the
-   *  composer's own surface like every card above it: sidebar-bg, border2 and
-   *  no lift. */
+   *  composer's own surface like every card above it: sidebar-bg, the
+   *  composer-border edge and no lift. While it opens above its anchor it is
+   *  the top of the composer stack, so it carries the stack's fade. */
   surface?: "floating" | "composer";
 }
 
 const POPOVER_SURFACE = {
-  floating: "bg-bg3 shadow-[var(--shadow-dropdown)]",
-  composer: "bg-sidebar-bg",
+  floating:
+    "bg-bg3 border-border2 shadow-[var(--shadow-dropdown)] overflow-x-hidden overflow-y-auto overscroll-contain",
+  // The card only bounds the height; its content scrolls in an inner box, so
+  // the card never clips the fade it carries above its top edge.
+  composer:
+    "bg-sidebar-bg border-(--composer-border) group/composer-dock relative flex flex-col",
 } as const;
 
 const POPOVER_WIDTH = {
@@ -82,6 +88,7 @@ const PopoverContent = React.forwardRef<
   (
     {
       className,
+      children,
       align = "center",
       sideOffset = 4,
       onCloseAutoFocus,
@@ -116,7 +123,7 @@ const PopoverContent = React.forwardRef<
           }}
           className={cn(
             ANCHORED_OVERLAY_MOTION,
-            "border-border2 text-fg1 z-dropdown max-w-(--radix-popover-content-available-width) max-h-(--radix-popover-content-available-height) overflow-x-hidden overflow-y-auto overscroll-contain border outline-none",
+            "text-fg1 z-dropdown max-w-(--radix-popover-content-available-width) max-h-(--radix-popover-content-available-height) border outline-none",
             POPOVER_SURFACE[surface],
             MENU_SURFACE_RADIUS,
             POPOVER_WIDTH[size],
@@ -126,7 +133,26 @@ const PopoverContent = React.forwardRef<
           {...props}
           {...escapeHandlers}
           data-zeros-native-overlay="popover"
-        />
+        >
+          {surface === "composer" ? (
+            <>
+              {/* Offsets resolve inside the 1px border, so -inset-x-px and
+                  mb-px reach past it without covering it. Flipped below its
+                  anchor the picker covers the composer, so the fade shows only
+                  while it opens above. */}
+              <span
+                aria-hidden="true"
+                data-composer-dock-fade=""
+                className={cn(COMPOSER_DOCK_FADE, "-inset-x-px mb-px hidden group-data-[side=top]/composer-dock:block")}
+              />
+              <div className="min-h-0 overflow-x-hidden overflow-y-auto overscroll-contain rounded-[inherit]">
+                {children}
+              </div>
+            </>
+          ) : (
+            children
+          )}
+        </PopoverPrimitive.Content>
       </PopoverPrimitive.Portal>
     );
   },

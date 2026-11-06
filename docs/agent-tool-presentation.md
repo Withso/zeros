@@ -498,9 +498,13 @@ suites, `features/agent/__tests__/fallback-transcript.test.ts`,
   as the same compact terminal row — **Chat finished**, **Permission
   requested**, **Question asked** with the source chat's pill — never a user
   bubble, and count as tool calls. A steered note joins the accepting turn.
-  `localFrom` rows are messages: a right-aligned **Sent from** header with the
-  sender's pill sits above the bubble (live, steered and saved history alike);
-  the bubble holds the sender's own text, Copy only. Both arrive live as
+  `localFrom` rows are messages: a sender line, as in a chat app, sits
+  right-aligned above the full-width bubble (live, steered and saved history
+  alike). It is the sending chat's name in `fg1`, then its agent's 16px logo,
+  with no pill (`LocalLinkPill appearance="sender"`); on hover only the name
+  takes the `bg1-hover` fill, with no border, and a click opens that chat.
+  "Sent from" is announced to screen readers only. The bubble holds the
+  sender's own text, Copy only. Both arrive live as
   `user_message_recorded` updates ([Local CLI](local-cli.md#delivery)).
 - Links for this channel's scheme (`zeros…://chat|workspace/…`) render as
   pills in prose, bubbles, tool rows and the composer, with the composer

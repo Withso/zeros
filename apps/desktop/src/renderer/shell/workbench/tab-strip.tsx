@@ -164,7 +164,7 @@ export function WorkbenchTabStrip({
   };
 
   return (
-    <div className="flex h-full min-w-0 items-center pl-1">
+    <div className="flex h-full min-w-0 items-center pl-2">
       <div className={STICKY_TAB_VIEWPORT_CLS}>
         <div
           ref={strip.navRef}

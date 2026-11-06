@@ -81,6 +81,59 @@ export async function runComposerAttachmentsSmoke({ page, check }) {
     exact: true,
   });
   await expect(remove).toBeEnabled();
+  // Editing a sent message happens in the composer itself: its surface, 18px
+  // corners and 28px Resend, with pickers docked on the card.
+  const editCard = page.locator(".zeros-agent-turn-prompt.is-editing");
+  for (const mode of ["dark", "light"]) {
+    await page.evaluate(async (next) => {
+      const { setPrefs } = await import("/apps/desktop/src/renderer/shared/theme/store.ts");
+      setPrefs({ mode: next });
+    }, mode);
+    await expect(page.locator("html")).toHaveAttribute("data-theme", mode);
+    const surface = await editCard.evaluate((card) => {
+      const probe = document.createElement("span");
+      probe.style.backgroundColor = "var(--sidebar-bg)";
+      probe.style.borderTopColor = "var(--composer-border)";
+      document.body.append(probe);
+      const expected = getComputedStyle(probe);
+      const actual = getComputedStyle(card);
+      const result = {
+        background: actual.backgroundColor === expected.backgroundColor,
+        border: actual.borderTopColor === expected.borderTopColor,
+        radius: actual.borderTopLeftRadius,
+      };
+      probe.remove();
+      return result;
+    });
+    expect(surface, mode).toEqual({ background: true, border: true, radius: "18px" });
+  }
+  const resend = page.getByRole("button", { name: "Resend edited prompt", exact: true });
+  expect(await resend.boundingBox()).toMatchObject({ width: 28, height: 28 });
+  await page.locator("#root > div").evaluate((root) => { root.style.paddingTop = "320px"; });
+  const editEditor = editCard.locator('.composer-pm[contenteditable="true"]');
+  await editEditor.press("End");
+  await editEditor.pressSequentially(" /");
+  const picker = page.locator('[data-composer-suggestions="/"]');
+  await expect(picker).toHaveAttribute("data-side", "top");
+  await expect.poll(async () => {
+    const card = await editCard.boundingBox(), popup = await picker.boundingBox();
+    return !!card && !!popup && Math.abs(popup.x - card.x) < 1 &&
+      Math.abs(popup.width - card.width) < 1 && Math.abs(popup.y + popup.height + 8 - card.y) < 1;
+  }).toBe(true);
+  // The picker is portaled outside the card, yet it belongs to this edit: using
+  // it must not read as a click away that cancels the edit.
+  await picker.getByRole("button", { name: /^Commands/ }).click();
+  await expect(editCard).toBeVisible();
+  await expect(picker).toBeVisible();
+  await editEditor.press("Backspace");
+  await editEditor.press("Backspace");
+  await expect(picker).toHaveCount(0);
+  await page.locator("#root > div").evaluate((root) => { root.style.paddingTop = ""; });
+  await page.evaluate(async () => {
+    const { setPrefs } = await import("/apps/desktop/src/renderer/shared/theme/store.ts");
+    setPrefs({ mode: "dark" });
+  });
+  check("editing a sent message uses the composer's surface, corners, 28px Resend and card-docked pickers in both themes, and using a picker keeps the edit open", true);
   await page
     .getByRole("button", { name: "Resend edited prompt", exact: true })
     .click();

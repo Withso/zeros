@@ -221,6 +221,41 @@ describe("Local link identity and presentation", () => {
     },
   );
 
+  it("draws a sender line as the chat's name, then its 16px logo, with no pill", () => {
+    const classesOf = (html: string, marker: string) =>
+      new Set(
+        (html.split("<").find((tag) => tag.slice(0, tag.indexOf(">")).includes(marker))?.match(/class="([^"]*)"/)?.[1] ?? "")
+          .replaceAll("&amp;", "&")
+          .split(/\s+/),
+      );
+    const html = render(h(LocalLinkPill, { href: "zeros-dev://chat/codex", appearance: "sender" }));
+    expect(html).toContain('data-local-link-appearance="sender"');
+    expect(html).toContain('aria-label="Open chat: codex review"');
+    // The name comes first; the logo follows it at 16px.
+    expect(html.indexOf("data-local-link-label")).toBeLessThan(html.indexOf("<svg"));
+    const button = classesOf(html, 'data-local-link-pill="chat"');
+    for (const cls of ["border-0", "bg-transparent", "hover:bg-transparent", "p-0", "gap-0.5", "items-center", "text-fg1", "hover:text-fg1", "[&_svg]:size-4"]) {
+      expect(button, cls).toContain(cls);
+    }
+    for (const cls of ["bg-bg2", "border-border2", "h-5", "hover:bg-bg2-highlight", "hover:border-border3", "text-fg3"]) {
+      expect(button, cls).not.toContain(cls);
+    }
+    // Hovered, only the name takes a fill; its text stays fg1.
+    const name = classesOf(html, "data-local-link-label");
+    for (const cls of ["rounded-sm", "px-1", "py-px", "group-hover/sender:bg-bg1-hover", "truncate"]) {
+      expect(name, cls).toContain(cls);
+    }
+    expect([...name].some((cls) => cls.includes("text-"))).toBe(false);
+    // A chat that is gone reads muted, still without a pill.
+    const missing = classesOf(
+      render(h(LocalLinkPill, { href: "zeros-dev://chat/missing", fallback: { title: "Saved", agentId: "codex" }, appearance: "sender" })),
+      'data-local-link-pill="chat"',
+    );
+    expect(missing).toContain("text-fg3");
+    expect(missing).toContain("border-0");
+    expect(missing).not.toContain("bg-bg2-hover");
+  });
+
   it("renders workspace labels and the existing workspace glyph", () => {
     expect(
       render(h(LocalLinkPill, { href: "zeros-dev://workspace/ws_child" })),
@@ -356,18 +391,23 @@ describe("Local link identity and presentation", () => {
     } as RendererContext;
     const body = h(TextMessage, { message: { ...message, localFrom: ref }, ctx });
     const from = render(h(TurnPromptHeader, { originalText: message.text, localFrom: ref, children: body }));
-    expect(from).toContain("Sent from");
     expect(from).toContain("The actual body");
     expect(from).not.toContain("[Zeros]");
     expect(render(body)).not.toContain("Sent from");
-    // The bubble fits its message and stays flush right; the header keeps
-    // its own width, starting at the group's left edge, 8px above.
-    expect(from).toMatch(/data-local-from=""[^>]*class="[^"]*\bself-start\b/);
+    // A sender line, as in a chat app: right-aligned 8px above the
+    // full-width bubble, the chat's name and logo with no pill. "Sent from"
+    // is for screen readers only.
+    expect(from).toContain('<span class="sr-only">Sent from</span>');
+    expect(from).toContain('data-local-link-appearance="sender"');
+    expect(from).toMatch(/data-local-from=""[^>]*class="[^"]*\bself-end\b/);
+    expect(from).not.toMatch(/data-local-from=""[^>]*class="[^"]*\bself-start\b/);
+    expect(from).not.toMatch(/data-local-from=""[^>]*class="[^"]*\btext-fg3\b/);
     expect(from).toMatch(/data-local-from=""[^>]*class="[^"]*\bmb-2\b/);
-    expect(from).toMatch(/data-local-from-group=""[^>]*class="[^"]*\bitems-end\b/);
-    expect(from).toMatch(/data-user-bubble=""[^>]*class="[^"]*\bw-fit\b/);
-    expect(from).not.toMatch(/data-user-bubble=""[^>]*class="[^"]*\bw-full\b/);
-    expect(from.indexOf("Sent from")).toBeLessThan(from.indexOf('data-user-bubble=""'));
+    expect(from).toMatch(/data-local-from-group=""[^>]*class="[^"]*\bw-full\b/);
+    expect(from).not.toMatch(/data-local-from-group=""[^>]*class="[^"]*\bitems-end\b/);
+    expect(from).toMatch(/data-user-bubble=""[^>]*class="[^"]*\bw-full\b/);
+    expect(from).not.toMatch(/data-user-bubble=""[^>]*class="[^"]*\bw-fit\b/);
+    expect(from.indexOf("data-local-from")).toBeLessThan(from.indexOf('data-user-bubble=""'));
     expect(from).not.toContain('aria-label="Edit message"');
     const note = render(
       h(TextMessage, {

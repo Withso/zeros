@@ -19,11 +19,11 @@ const Message = React.forwardRef<HTMLDivElement, MessageProps>(
       data-role={from}
       className={cn(
         // Assistant + system read left-to-right as editorial body copy.
-        // User messages are the exception: their alignment + bubble shape
-        // are owned by TurnPromptHeader (right-aligned, fit-to-content), so
-        // here the user variant only zeroes the wrapper's vertical padding
-        // (py-0) — the bubble already supplies its own px-3 py-2, and the old
-        // py-2 doubled it. Content stays left-aligned WITHIN the bubble.
+        // User messages are the exception: their width + bubble shape are
+        // owned by TurnPromptHeader (the full lane), so here the user variant
+        // only zeroes the wrapper's vertical padding (py-0) — the bubble
+        // already supplies its own px-3 py-2, and the old py-2 doubled it.
+        // Content stays left-aligned WITHIN the bubble.
         "group/message flex w-full gap-3 py-2",
         from === "user" && "justify-start py-0",
         from === "assistant" && "justify-start",

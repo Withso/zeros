@@ -100,7 +100,7 @@ import { turnGet } from "../../platform/turns";
 import { turnRowCache, turnRowKey } from "../../state/read-caches";
 import { useCachedRead } from "../../state/use-cached-read";
 import { findProjectForFolder } from "../../state/workspace-resolution";
-import { Bot, Square, ArrowLeft, Upload, Check } from "lucide-react";
+import { Bot, Square, ArrowLeft, Check } from "lucide-react";
 import {
   encodeAttachments,
   reportSkippedAttachments,
@@ -109,11 +109,15 @@ import type { ComposerAttachment } from "./composer-attachments";
 import { isSubmittedComposerDocument } from "./composer-submission";
 import { useCloudWorkspaceAccountAccess } from "../team/cloud-workspace-account-access";
 import {
+  COMPOSER_DRAG_CLS,
   COMPOSER_FILE_ACCEPT,
+  COMPOSER_SEND_CLS,
   COMPOSER_SURFACE_CLS,
   COMPOSER_SURFACE_RADIUS,
+  ComposerDropVeil,
   TRANSCRIPT_STATUS_ROW_CLS,
 } from "./composer-shell";
+import { COMPOSER_DOCK_FADE } from "@/renderer/shared/ui/composer-surface";
 import { ComposerAttachmentMenu } from "./composer-attachment-menu";
 import { ComposerDesignTag } from "./composer-design-tag";
 import { ComposerDesignFrame, useComposerDesignFrame } from "./composer-design-frame";
@@ -4288,10 +4292,10 @@ function AgentChatBody({
         >
           <ConversationContent
             // flex-none matters: ConversationContent's flex-1 would pin this box to the
-            // scroller's height, so pb-8 would never reach the real bottom. pt-3 matches
-            // the sticky prompt's top-3; px-7 clears the checkpoint rail. Mirror any change
-            // on the composer column.
-            className="zeros-agent-messages mx-auto flex w-full max-w-[856px] min-w-0 flex-none flex-col gap-5 overflow-visible px-7 pt-3 pb-8"
+            // scroller's height, so pb-8 would never reach the real bottom. pt-8 starts the
+            // first message below the 32px top fade; px-7 clears the checkpoint rail.
+            // Mirror any change on the composer column.
+            className="zeros-agent-messages mx-auto flex w-full max-w-[856px] min-w-0 flex-none flex-col gap-5 overflow-visible px-7 pt-8 pb-8"
           >
             {/* Older history auto-pages in via the nearTop effect above, with
               no visible affordance: scrolling back should show everything. */}
@@ -4450,10 +4454,10 @@ function AgentChatBody({
             restore never pops it in; it never takes clicks. */}
         <div
           aria-hidden="true"
-          // h-3 (12px) ends where the transcript column starts (pt-3), so the
-          // first prompt never sits under the wash while scrolled content
-          // still fades under the strip. The via stop feathers the edge.
-          className="pointer-events-none absolute inset-x-0 top-0 z-1 h-3 bg-gradient-to-b from-(--pane-bg) via-(--pane-bg)/40 to-transparent"
+          // It ends where the transcript column starts (pt-8), so the first
+          // message never sits under it while scrolled content still dissolves
+          // under the strip.
+          className="pointer-events-none absolute inset-x-0 top-0 z-1 h-8 bg-gradient-to-b from-(--pane-bg) to-transparent"
         />
         {/* A sibling of the scroller so the rail stays pinned; z-2 paints above
             the top mask. */}
@@ -4477,7 +4481,11 @@ function AgentChatBody({
         />
         {/* max-w-[856px] stays in lock-step with the transcript band above. */}
         {readOnly ? composerReplacement : (
-        <div className="mx-auto box-border flex w-full max-w-[856px] min-w-0 shrink-0 flex-col gap-2 border-t-0 bg-transparent px-7 pt-0 pb-4">
+        <div className="relative mx-auto box-border flex w-full max-w-[856px] min-w-0 shrink-0 flex-col gap-2 border-t-0 bg-transparent px-7 pt-0 pb-4">
+          {/* pt-0 puts the column's top on its topmost card, so this one fade
+              sits on the composer alone or on the highest docked card.
+              Portaled pickers carry their own. */}
+          <div aria-hidden="true" data-composer-dock-fade="" className={COMPOSER_DOCK_FADE} />
           {/* Docked cards and the composer stand 8px apart; queued messages
               are a card of their own rather than tucked under the composer. */}
           {/* Embedded-terminal command (Claude /mcp, /login, …): a banner →
@@ -4573,14 +4581,12 @@ function AgentChatBody({
               ref={composerCardRef}
               className={cn(
                 "relative flex w-full min-w-0 flex-col border px-3.5 py-3 transition-[border-color,background,box-shadow] duration-150 ease-out",
-                // sidebar-bg + border2, shared with Create, user messages and
-                // the cards docked above; focusing or typing changes nothing.
+                // sidebar-bg + composer-border, shared with Create, user
+                // messages and the cards docked above; focusing or typing
+                // changes nothing.
                 COMPOSER_SURFACE_CLS,
                 COMPOSER_SURFACE_RADIUS,
-                // Drag: the same border2 edge, dashed, with a soft ring; `!`
-                // keeps it identical whether or not the composer is focused.
-                dragActive &&
-                  "!border-border2 ring-highlighted-bright/30 border-dashed ring-2",
+                dragActive && COMPOSER_DRAG_CLS,
                 // Guarded modes (Claude Plan / Codex Ask / Cursor Ask): hide the
                 // solid border; the SVG dotted frame below provides the visible
                 // edge (spaced round dots, --border4).
@@ -4599,20 +4605,7 @@ function AgentChatBody({
               so the popover matches the composer width,
               not the full-width wrapper above. */}
               {composerSuggestionPopup}
-              {dragActive && (
-                <div
-                  className={cn(
-                    "bg-bg3/75 text-fg2 pointer-events-none absolute inset-0 z-[5] flex flex-col items-center justify-center gap-1.5 p-3 text-xs",
-                    // Tracks the card's corners so the drop veil doesn't square
-                    // off inside them.
-                    COMPOSER_SURFACE_RADIUS,
-                  )}
-                  aria-hidden="true"
-                >
-                  <Upload size={20} />
-                  <span>Drop files to attach</span>
-                </div>
-              )}
+              {dragActive && <ComposerDropVeil />}
               <PromptInput
                 onSubmit={(e) => {
                   e.preventDefault();
@@ -4767,8 +4760,7 @@ function AgentChatBody({
                                 ? !queuedEditHasContent
                                 : !canSend
                         }
-                        // 28px like every toolbar control; Send is the only circle.
-                        className="disabled:bg-bg2-hover disabled:text-fg2 aria-disabled:bg-bg2-hover aria-disabled:text-fg2 size-7 disabled:opacity-100"
+                        className={COMPOSER_SEND_CLS}
                       >
                         {composerStreaming ? (
                           <Square className="size-3" />

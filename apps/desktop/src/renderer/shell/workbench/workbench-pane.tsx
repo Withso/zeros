@@ -65,6 +65,7 @@ import { adjacentNavigationIndex, navigationShortcutBlocked, resolveNavigationSh
 import { hasShortcutPriorityClaim } from "../../features/agent/shortcut-priority";
 
 import { popoverBoundaryProps } from "@/renderer/shared/ui/popover-boundary";
+import { Surface } from "@/renderer/shared/ui/layout/surface";
 // Proportional columns (2026-07-17): workbench grows by `(1 - ratio)·100`,
 // the complement of conversation pane's `--zeros-column-2-ratio` grow factor (see
 // CONVERSATION_DEFAULT_WIDTH_CLS in conversation/conversation-pane.tsx) — so a window
@@ -73,13 +74,16 @@ import { popoverBoundaryProps } from "@/renderer/shared/ui/popover-boundary";
 // grow factors decide the split; `min-w-[200px]` floors it. The ×100
 // scale keeps the grow sum ≥ 1 so workbench absorbs ALL the remainder
 // when conversation pane freezes at its 2400px cap on ultrawide windows (bare
-// 0..1 factors leave an empty gap at the right edge there). Flush
-// treatment (2026-07-11, replacing the floating islands): the column
-// runs edge-to-edge — no gutter, no rounding — with a `border-l`
-// seam against conversation pane. No top inset (2026-07-12): the h-10 header is the
-// column's full 0..40px title strip, like repository panel and conversation pane.
+// 0..1 factors leave an empty gap at the right edge there). No top inset
+// (2026-07-12): the h-10 header is the column's full 0..40px title strip, like
+// repository panel and conversation pane. The column draws no seam against
+// conversation pane: the island's edge (WORKBENCH_ISLAND_CLS) separates them.
 const WORKBENCH_PANE_CLS =
-  "border-border1 relative flex min-h-0 min-w-[200px] flex-col overflow-hidden border-l bg-bg1 [flex:calc((1_-_var(--zeros-column-2-ratio,0.5))*100)_1_0px]";
+  "relative flex min-h-0 min-w-[200px] flex-col overflow-hidden bg-bg1 [flex:calc((1_-_var(--zeros-column-2-ratio,0.5))*100)_1_0px]";
+/** Everything under the header. Rendered as a canvas Surface, which paints
+ *  bg1 and binds --surface-border to border1. */
+const WORKBENCH_ISLAND_CLS =
+  "mx-3 mb-3 flex min-h-0 flex-1 flex-col overflow-hidden rounded-[calc(var(--radius-lg)*1.5)] border border-(--surface-border)";
 /** Bound rich File/diff DOM while making the common recent-tab path instant. */
 const MAX_RETAINED_WORKBENCH_VIEWS = 6;
 /** Iframes are expensive, so preserve the recent cross-workspace working set
@@ -315,6 +319,8 @@ export function WorkbenchPane({
   );
 
   const workbenchRef = useRef<HTMLDivElement | null>(null);
+  // The docked terminal panel sizes against the island it lives in.
+  const islandRef = useRef<HTMLDivElement | null>(null);
 
   // Collapse hides the whole column with display:none, which clamps every
   // scroller inside to 0 (unlike the visibility-hidden retention pattern the
@@ -509,110 +515,128 @@ export function WorkbenchPane({
           // "Setting up workspace" loading row — no Open file/Changes/Review
           // strip, no Setup/Run/Terminal strip — then everything mounts at
           // once when the settling flag clears (see the reveal effect above).
-          <>
-            <SettingUpRow grow />
-            <SettingUpRow />
-          </>
+          // The header band stays, empty, so the island holds its place
+          // through the reveal.
+          <div data-tauri-drag-region className={WORKBENCH_HEADER_CLS} aria-hidden="true" />
         ) : (
-          <>
-            {/* Primary File / Design / Changes / Review / Browser / Terminal tabs. */}
-            <div className={WORKBENCH_CONTENT_CLS}>
-              <div
-                data-tauri-drag-region
-                data-testid="workbench-header"
-                className={WORKBENCH_HEADER_CLS}
-              >
-                <div className="h-full min-w-0 flex-1">
-                  <WorkbenchTabStrip
-                    tabs={tabs}
-                    activeId={activeId}
-                    folderKey={folderKey}
-                    workspaceId={refreshWorkspaceId}
-                  />
-                </div>
-                <WorkbenchToggleButton
-                  workbenchCollapsed={false}
-                  onToggle={onToggleWorkbench}
+            // Primary File / Design / Changes / Review / Browser / Terminal tabs.
+            <div
+              data-tauri-drag-region
+              data-testid="workbench-header"
+              className={WORKBENCH_HEADER_CLS}
+            >
+              <div className="h-full min-w-0 flex-1">
+                <WorkbenchTabStrip
+                  tabs={tabs}
+                  activeId={activeId}
+                  folderKey={folderKey}
+                  workspaceId={refreshWorkspaceId}
                 />
               </div>
-              {showSharedPrStatusRow && (
-                <PrStatusRow
-                  workspace={activeWorkspace}
-                  originUrl={activeProject?.originUrl ?? null}
-                  active={surfaceActive && !collapsed}
-                />
-              )}
-              <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-                <RetainedDesignDeck
-                  workspace={activeWorkspace}
-                  folder={folderKey}
-                  active={surfaceActive && !collapsed && activeWorkbenchTab?.type === "design"}
-                />
-                {/* Pinned sources and active/dirty File surfaces stay mounted;
-                  only the active tab is visible. */}
-                {mountedTabs.map((tab) => {
-                  const isActive =
-                    surfaceActive && !collapsed && tab.id === activeId;
-                  return (
-                    <div
-                      key={tab.id}
-                      // Retained-but-hidden tab bodies (diff views, editors)
-                      // are pinned during seam drags so only the active tab
-                      // re-lays-out per frame. See resize-gesture-freeze.ts.
-                      {...(!isActive
-                        ? { inert: "", "data-zeros-resize-freeze": "" }
-                        : {})}
-                      className={[
-                        "absolute inset-0 flex min-h-0 min-w-0 flex-col overflow-hidden",
-                        isActive
-                          ? "pointer-events-auto visible opacity-100"
-                          : "pointer-events-none invisible opacity-0",
-                      ].join(" ")}
-                      aria-hidden={!isActive}
-                    >
-                      <WorkbenchTabContent
-                        tab={tab}
-                        active={isActive}
-                        scope={folderKey}
-                      />
-                    </div>
-                  );
-                })}
-                <div
-                  ref={setTerminalHost}
-                  {...(activeWorkbenchTab?.type !== "terminal" ||
-                  !surfaceActive ||
-                  collapsed
-                    ? { inert: "" }
-                    : {})}
-                  aria-hidden={
-                    activeWorkbenchTab?.type !== "terminal" ||
+              <WorkbenchToggleButton
+                workbenchCollapsed={false}
+                onToggle={onToggleWorkbench}
+              />
+            </div>
+        )}
+        {/* One island for both states. It stays mounted through the reveal, so
+            the docked terminal's resizer finds it attached when the panel
+            mounts: React attaches a parent's ref only after its children's
+            layout effects, and an island mounting with the panel would leave
+            the stored height unapplied. */}
+        <Surface
+          ref={islandRef}
+          kind="canvas"
+          className={WORKBENCH_ISLAND_CLS}
+          data-workbench-island=""
+        >
+          {settling ? (
+            <>
+              <SettingUpRow grow />
+              <SettingUpRow />
+            </>
+          ) : (
+            <>
+              <div className={WORKBENCH_CONTENT_CLS}>
+                {showSharedPrStatusRow && (
+                  <PrStatusRow
+                    workspace={activeWorkspace}
+                    originUrl={activeProject?.originUrl ?? null}
+                    active={surfaceActive && !collapsed}
+                  />
+                )}
+                <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+                  <RetainedDesignDeck
+                    workspace={activeWorkspace}
+                    folder={folderKey}
+                    active={surfaceActive && !collapsed && activeWorkbenchTab?.type === "design"}
+                  />
+                  {/* Pinned sources and active/dirty File surfaces stay mounted;
+                    only the active tab is visible. */}
+                  {mountedTabs.map((tab) => {
+                    const isActive =
+                      surfaceActive && !collapsed && tab.id === activeId;
+                    return (
+                      <div
+                        key={tab.id}
+                        // Retained-but-hidden tab bodies (diff views, editors)
+                        // are pinned during seam drags so only the active tab
+                        // re-lays-out per frame. See resize-gesture-freeze.ts.
+                        {...(!isActive
+                          ? { inert: "", "data-zeros-resize-freeze": "" }
+                          : {})}
+                        className={[
+                          "absolute inset-0 flex min-h-0 min-w-0 flex-col overflow-hidden",
+                          isActive
+                            ? "pointer-events-auto visible opacity-100"
+                            : "pointer-events-none invisible opacity-0",
+                        ].join(" ")}
+                        aria-hidden={!isActive}
+                      >
+                        <WorkbenchTabContent
+                          tab={tab}
+                          active={isActive}
+                          scope={folderKey}
+                        />
+                      </div>
+                    );
+                  })}
+                  <div
+                    ref={setTerminalHost}
+                    {...(activeWorkbenchTab?.type !== "terminal" ||
                     !surfaceActive ||
                     collapsed
-                  }
-                  className={
-                    activeWorkbenchTab?.type === "terminal" &&
-                    surfaceActive &&
-                    !collapsed
-                      ? "absolute inset-0 flex min-h-0 min-w-0 flex-col overflow-hidden"
-                      : "pointer-events-none invisible absolute inset-0 flex min-h-0 min-w-0 flex-col overflow-hidden"
-                  }
-                />
-                <RetainedBrowserDeck
-                  activeId={activeId}
-                  surfaceActive={surfaceActive && !collapsed}
-                />
+                      ? { inert: "" }
+                      : {})}
+                    aria-hidden={
+                      activeWorkbenchTab?.type !== "terminal" ||
+                      !surfaceActive ||
+                      collapsed
+                    }
+                    className={
+                      activeWorkbenchTab?.type === "terminal" &&
+                      surfaceActive &&
+                      !collapsed
+                        ? "absolute inset-0 flex min-h-0 min-w-0 flex-col overflow-hidden"
+                        : "pointer-events-none invisible absolute inset-0 flex min-h-0 min-w-0 flex-col overflow-hidden"
+                    }
+                  />
+                  <RetainedBrowserDeck
+                    activeId={activeId}
+                    surfaceActive={surfaceActive && !collapsed}
+                  />
+                </div>
               </div>
-            </div>
-            <TerminalPanel
-              folderKey={folderKey}
-              chatCwd={chatCwd}
-              surfaceActive={surfaceActive && !collapsed}
-              workbenchHost={terminalHost}
-              containerRef={workbenchRef}
-            />
-          </>
-        )}
+              <TerminalPanel
+                folderKey={folderKey}
+                chatCwd={chatCwd}
+                surfaceActive={surfaceActive && !collapsed}
+                workbenchHost={terminalHost}
+                containerRef={islandRef}
+              />
+            </>
+          )}
+        </Surface>
       </div>
       </ActivityScope.Provider>
     </DiffWorkerPoolProvider>

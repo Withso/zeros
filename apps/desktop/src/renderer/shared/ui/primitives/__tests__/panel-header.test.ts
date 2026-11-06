@@ -68,6 +68,22 @@ describe("PanelHeader markup equivalence", () => {
     );
   });
 
+  it("drops only the divider when divider is false", () => {
+    // The workspace header row (2026-11-06): its fill and the chat strip below
+    // already separate the rows, so it draws no bottom border.
+    const markup = renderToStaticMarkup(
+      createElement(PanelHeader, { size: "window", divider: false }, "heading"),
+    );
+    expect(new Set(markup.match(/class="([^"]*)"/)![1]!.split(/\s+/))).toEqual(
+      new Set("bg-bg1 flex h-10 shrink-0 items-center gap-1 pr-1.5 pl-3".split(" ")),
+    );
+    const panel = renderToStaticMarkup(
+      createElement(PanelHeader, { size: "panel", divider: false }, "heading"),
+    );
+    expect(panel).not.toContain("border-b");
+    expect(panel).not.toContain("border-border1");
+  });
+
   it("retains the inspector header's DOM hook", () => {
     const markup = renderToStaticMarkup(
       createElement(PanelHeader, {

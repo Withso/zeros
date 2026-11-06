@@ -16,7 +16,14 @@ import { autoActionIcon } from "./auto-action";
 import { cn } from "@/renderer/shared/ui/cn";
 import { Tooltip } from "@/renderer/shared/ui/primitives";
 import type { ComposerAttachment } from "./composer-attachments";
-import { COMPOSER_SURFACE_CLS, PROMPT_SURFACE_RADIUS } from "./composer-shell";
+import {
+  COMPOSER_DRAG_CLS,
+  COMPOSER_SEND_CLS,
+  COMPOSER_SURFACE_CLS,
+  COMPOSER_SURFACE_RADIUS,
+  ComposerDropVeil,
+  PROMPT_SURFACE_RADIUS,
+} from "./composer-shell";
 import {
   useComposerEditor,
   messageToEditorContent,
@@ -44,6 +51,7 @@ import { isPristineEditDraft } from "./edit-draft-content";
 import { registerLiveEditDraft } from "./edit-live-drafts";
 import type { Turn } from "./turn-grouping";
 import { LocalLinkPill } from "./local-links/pill";
+import { PromptFold } from "./prompt-fold";
 
 export {
   groupMessagesIntoTurns,
@@ -238,51 +246,41 @@ export const TurnPromptHeader = memo(function TurnPromptHeader({
     onRequestEdit?.(null);
   }, [onRequestEdit]);
 
-  // Edit mode expands to a full-width card that echoes the bottom composer's
-  // chrome; TurnPromptEditor neutralizes its own InputGroup chrome.
+  // Edit mode is the bottom composer at full width. Mounted only while
+  // editing, so its document-level drag listeners exist for the active edit
+  // alone.
   if (editing && onEdit) {
     return (
-      <div
-        className={cn(
-          "zeros-agent-turn-prompt is-editing border-border2 bg-bg2 w-full border px-3.5 py-3",
-          PROMPT_SURFACE_RADIUS,
-        )}
-      >
-        {/* Mounted only while editing, so its document-level drag listeners exist
-            for the active edit alone. */}
-        <TurnPromptEditor
-          key={editStashKey}
-          chatId={chatId}
-          draftKey={editStashKey}
-          originalText={originalText ?? ""}
-          originalAttachments={originalAttachments}
-          originalSegments={originalSegments}
-          stash={editStash}
-          onPersistDraft={persistEditStash}
-          onClearDraft={clearEditStash}
-          onEdit={onEdit}
-          onCancel={exitEdit}
-          editToolbarPills={editToolbarPills}
-          agentContext={editAgentContext}
-          surfaceActive={surfaceActive}
-        />
-      </div>
+      <TurnPromptEditor
+        key={editStashKey}
+        chatId={chatId}
+        draftKey={editStashKey}
+        originalText={originalText ?? ""}
+        originalAttachments={originalAttachments}
+        originalSegments={originalSegments}
+        stash={editStash}
+        onPersistDraft={persistEditStash}
+        onClearDraft={clearEditStash}
+        onEdit={onEdit}
+        onCancel={exitEdit}
+        editToolbarPills={editToolbarPills}
+        agentContext={editAgentContext}
+        surfaceActive={surfaceActive}
+      />
     );
   }
 
-  // A right-aligned, fit-to-content bubble capped at min(800px, 100%), matching
-  // the answer lane's cap (turn-event-list.tsx). The 100% arm matters: w-fit
-  // floors at min-content width, and an unbreakable paste would spill off the
-  // left edge, where the scroller clips it. text-message.tsx pairs it with
-  // wrap-anywhere. The text is selectable; editing uses the hover row's button.
-  // Long prompts are never truncated: oversized clipboard text becomes a .txt
-  // attachment before send.
+  // Every sent message spans the lane, as the composer does, however short:
+  // the row caps at 800px like the answer lane (turn-event-list.tsx), so it
+  // also holds the hover row's right edge. The text is selectable; editing
+  // uses the hover row's button. A long message folds (prompt-fold.tsx), and
+  // oversized clipboard text still becomes a .txt attachment before send.
   const AutoIcon = autoAction ? autoActionIcon(autoAction) : null;
   const bubble = (
     <div
       data-user-bubble=""
       className={cn(
-        "w-fit max-w-[min(800px,100%)] cursor-text border px-3 py-2 select-text",
+        "w-full min-w-0 cursor-text border px-3 py-2 select-text",
         PROMPT_SURFACE_RADIUS,
         autoAction
           ?
@@ -292,33 +290,30 @@ export const TurnPromptHeader = memo(function TurnPromptHeader({
           : COMPOSER_SURFACE_CLS,
       )}
     >
-      {/* Two block wrappers keep the fit-content width geometry unchanged. */}
-      <div className="relative">
-        <div>
-          {AutoIcon ? (
-            <div className="flex items-start gap-1.5">
-              <AutoIcon
-                className="text-brown-fg mt-0.5 size-4 shrink-0"
-                strokeWidth={2}
-              />
-              <div className="min-w-0">{children}</div>
-            </div>
-          ) : (
-            children
-          )}
-        </div>
-      </div>
+      <PromptFold surfaceActive={surfaceActive}>
+        {AutoIcon ? (
+          <div className="flex items-start gap-1.5">
+            <AutoIcon
+              className="text-brown-fg mt-0.5 size-4 shrink-0"
+              strokeWidth={2}
+            />
+            <div className="min-w-0">{children}</div>
+          </div>
+        ) : (
+          children
+        )}
+      </PromptFold>
     </div>
   );
   return (
-    <div className="zeros-agent-turn-prompt group/usermsg relative flex flex-col items-end">
+    <div className="zeros-agent-turn-prompt group/usermsg relative flex w-full max-w-[800px] min-w-0 flex-col">
       {localFrom ? (
-        // Provenance and its bubble form one right-aligned group; the header keeps its
-        // own width at the group's left edge.
-        <div data-local-from-group="" className="flex w-fit max-w-[min(800px,100%)] min-w-0 flex-col items-end">
-          <div data-local-from="" className="mb-2 flex max-w-full min-w-0 items-center gap-1 self-start text-xs text-fg3">
-            <span className="shrink-0">Sent from</span>
-            <LocalLinkPill href={localFrom.link} fallback={localFrom} className="mr-0 shrink" />
+        // A sender line, as in a chat app: the sending chat's name and logo,
+        // right-aligned above its bubble. "Sent from" is for screen readers.
+        <div data-local-from-group="" className="flex w-full min-w-0 flex-col">
+          <div data-local-from="" className="mb-2 flex max-w-full min-w-0 items-center self-end text-xs">
+            <span className="sr-only">Sent from</span>
+            <LocalLinkPill href={localFrom.link} fallback={localFrom} appearance="sender" className="shrink" />
           </div>
           {bubble}
         </div>
@@ -504,11 +499,14 @@ function TurnPromptEditor({
     if (editor) focusEditor();
   }, [editor, focusEditor]);
 
-  // Pills and menus render in-tree, so a contains check covers everything that
-  // belongs to the editor.
+  // The @, / and # pickers and the pills' menus are portaled out of the card,
+  // so DOM containment cannot see they belong to this edit. React events still
+  // pass through the card's capture handler on their way to the document, so
+  // that handler marks the event as inside.
+  const insidePointerRef = useRef<Event | null>(null);
   useEffect(() => {
     const onDocPointerDown = (e: PointerEvent) => {
-      if (submittingRef.current) return;
+      if (submittingRef.current || e === insidePointerRef.current) return;
       const root = wrapperRef.current;
       if (!root) return;
       const target = e.target;
@@ -628,67 +626,68 @@ function TurnPromptEditor({
   return (
     <div
       ref={wrapperRef}
+      className={cn(
+        "zeros-agent-turn-prompt is-editing relative w-full border px-3.5 py-3",
+        COMPOSER_SURFACE_CLS,
+        COMPOSER_SURFACE_RADIUS,
+        dragActive && COMPOSER_DRAG_CLS,
+      )}
       // Stop clicks from re-firing the parent's beginEdit.
       onClick={(e) => e.stopPropagation()}
+      onPointerDownCapture={(e) => {
+        insidePointerRef.current = e.nativeEvent;
+      }}
+      {...(submitting ? {} : dragHandlers)}
     >
+      {/* Pickers anchor to this card, as on the bottom composer. */}
+      {suggestionPopup}
+      {dragActive && <ComposerDropVeil />}
       <PromptInput
         onSubmit={(e) => {
           e.preventDefault();
           if (!sendDisabled) submitEdit();
         }}
       >
-        <div
-          // The edit composer drops its own card chrome so the outer wrapper's shows
-          // through.
-          className={cn(
-            "zeros-agent-turn-prompt-edit relative",
-            dragActive && "ring-highlighted-bright/40 ring-2",
-          )}
-          {...(submitting ? {} : dragHandlers)}
-        >
-          <PromptInputBody className="items-stretch rounded-none border-0 bg-transparent p-0 shadow-none has-[[data-slot=input-group-control]:focus-visible]:border-0 has-[[data-slot=input-group-control]:focus-visible]:shadow-none has-[[data-slot=input-group-control]:focus-visible]:ring-0">
-            {suggestionPopup}
-            {editorContent}
-            <PromptInputToolbar
-              data-permission-feedback-boundary=""
-              className="min-w-0 flex-nowrap gap-1.5 pt-1 pr-0 pb-1 pl-0"
-            >
-              <PromptInputTools className="min-w-0 flex-nowrap gap-0.5">
-                <IconButton
-                  size="standard"
-                  type="button"
-                  onClick={() => fileInputRef.current?.click()}
-                  label="Attach file"
-                  disabled={submitting}
-                  className="rounded-sm"
-                >
-                  <Plus size={14} />
-                </IconButton>
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  disabled={submitting}
-                  multiple
-                  hidden
-                  onChange={(e) => {
-                    const files = e.target.files;
-                    if (files) void addFiles(files);
-                    e.target.value = "";
-                  }}
-                />
-                {editToolbarPills}
-              </PromptInputTools>
-              <Tooltip label="Resend" shortcut="↵">
-                <PromptInputSubmit
-                  data-composer-toolbar-actions=""
-                  disabled={sendDisabled}
-                  aria-label="Resend edited prompt"
-                  className="disabled:bg-bg2-hover disabled:text-fg2 size-8 disabled:opacity-100"
-                />
-              </Tooltip>
-            </PromptInputToolbar>
-          </PromptInputBody>
-        </div>
+        <PromptInputBody className="items-stretch rounded-none border-0 bg-transparent p-0 shadow-none has-[[data-slot=input-group-control]:focus-visible]:border-0 has-[[data-slot=input-group-control]:focus-visible]:shadow-none has-[[data-slot=input-group-control]:focus-visible]:ring-0">
+          {editorContent}
+          <PromptInputToolbar
+            data-permission-feedback-boundary=""
+            className="min-w-0 flex-nowrap gap-1.5 pt-1 pr-0 pb-1 pl-0"
+          >
+            <PromptInputTools className="min-w-0 flex-nowrap gap-1">
+              <IconButton
+                size="standard"
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                label="Attach file"
+                disabled={submitting}
+              >
+                <Plus size={14} />
+              </IconButton>
+              <input
+                ref={fileInputRef}
+                type="file"
+                disabled={submitting}
+                multiple
+                hidden
+                onChange={(e) => {
+                  const files = e.target.files;
+                  if (files) void addFiles(files);
+                  e.target.value = "";
+                }}
+              />
+              {editToolbarPills}
+            </PromptInputTools>
+            <Tooltip label="Resend" shortcut="↵">
+              <PromptInputSubmit
+                data-composer-toolbar-actions=""
+                disabled={sendDisabled}
+                aria-label="Resend edited prompt"
+                className={COMPOSER_SEND_CLS}
+              />
+            </Tooltip>
+          </PromptInputToolbar>
+        </PromptInputBody>
       </PromptInput>
       {imagePreviewOverlay}
     </div>

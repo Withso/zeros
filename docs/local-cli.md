@@ -185,8 +185,8 @@ sender's own text with `localFrom` (chat, title, agent, link), or a note's
 plain summary with `localNote` (event, status, card) — and pushes it at once
 as a `user_message_recorded` session update, so it streams mid-turn like a
 tool call instead of appearing when the turn ends. Renderers draw `localFrom`
-with a right-aligned "Sent from" header above the bubble and `localNote` as a
-compact tool-style row.
+as a right-aligned sender line above the bubble (the sending chat's name and
+agent logo, which open that chat) and `localNote` as a compact tool-style row.
 Notifications keep their presentation in `note_json` (migration 42). Rows
 written before this change keep their labelled text.
 

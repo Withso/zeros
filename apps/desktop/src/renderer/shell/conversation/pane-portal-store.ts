@@ -25,12 +25,36 @@ export const MIN_PANE_WIDTH = 360;
 /** 40px strip + the 118px resting dock + about three transcript lines; at
  *  160 a split-down pane collapsed the transcript and clipped Send. */
 export const MIN_PANE_HEIGHT = 240;
-/** The rendered `w-1.5` / `h-1.5` divider occupies six layout pixels. */
-export const PANE_SPLITTER_PX = 6;
+/** The divider is the gap between two split panes: 12px of the bg1 chrome that
+ *  draws nothing and takes the resize drag. */
+export const PANE_SPLITTER_PX = 12;
+/** While split, the panes sit this far in from the column's left and bottom
+ *  edges, and from its right edge unless Workbench is beside it, whose island
+ *  keeps the same 12px from the column. A lone pane runs edge to edge. */
+export const PANE_SPLIT_GUTTER_PX = 12;
 
 export interface PaneTreeMinimumSize {
   width: number;
   height: number;
+}
+
+/** The space a split tree's gutters take from the pane surface. */
+export function splitPaneGutters(workbenchBeside: boolean): PaneTreeMinimumSize {
+  return {
+    width: PANE_SPLIT_GUTTER_PX * (workbenchBeside ? 1 : 2),
+    height: PANE_SPLIT_GUTTER_PX,
+  };
+}
+
+/** The pane surface's floor: the tree's own, plus its gutters once split. */
+export function paneSurfaceMinimumSize(
+  root: PaneNode,
+  workbenchBeside: boolean,
+): PaneTreeMinimumSize {
+  const tree = paneTreeMinimumSize(root);
+  if (root.type === "leaf") return tree;
+  const gutters = splitPaneGutters(workbenchBeside);
+  return { width: tree.width + gutters.width, height: tree.height + gutters.height };
 }
 
 function combinePaneMinimumSizes(
@@ -53,7 +77,7 @@ function combinePaneMinimumSizes(
 /** The physical box required by a persisted split tree. A row adds both
  * child widths; a column only needs the wider child. Keeping this recursive
  * (instead of multiplying the total leaf count) matters for mixed layouts:
- * two vertically stacked chats beside one chat need 726px, not 1092px. */
+ * two vertically stacked chats beside one chat need 732px, not 1104px. */
 export function paneTreeMinimumSize(node: PaneNode): PaneTreeMinimumSize {
   if (node.type === "leaf") {
     return { width: MIN_PANE_WIDTH, height: MIN_PANE_HEIGHT };
@@ -199,8 +223,8 @@ export interface PaneTreeSplitRequest {
  * That exception is bounded by what is actually REACHABLE. Growth stops at
  * Workbench's own 200px floor (repository navigation is a fixed 248px and the
  * window itself floors at 840px), so an unconditional "the first right split
- * always fits" offered a split that no layout can honor: two 360px leaves plus
- * their seam need 726px, and a minimum-width window can only ever hand the
+ * always fits" offered a split that no layout can honor: two 360px leaves
+ * and their gap need 732px, and a minimum-width window can only ever hand the
  * conversation column 392px. Accepting it produced a clipped row that
  * `clampConversationRatio` then refused to drag back. */
 export function canSplitPaneTree({
@@ -219,17 +243,22 @@ export function canSplitPaneTree({
     collapsedPaneId,
   );
   if (!nextMinimum) return false;
-  if (direction !== "row") {
-    return (
-      Number.isFinite(containerHeight) && containerHeight >= nextMinimum.height
-    );
-  }
+  // Width binds a down split too: the first split from a lone pane adds the
+  // split gutters, and the budgets arrive net of them.
   const budgets = [containerWidth];
   if (!paneTreeHasDirection(root, "row")) budgets.push(growableWidth ?? NaN);
   const available = Math.max(
     ...budgets.filter((value) => Number.isFinite(value)),
   );
-  return Number.isFinite(available) && available >= nextMinimum.width;
+  const widthFits = Number.isFinite(available) && available >= nextMinimum.width;
+  if (direction !== "row") {
+    return (
+      widthFits &&
+      Number.isFinite(containerHeight) &&
+      containerHeight >= nextMinimum.height
+    );
+  }
+  return widthFits;
 }
 
 /** The widest the pane surface can get without resizing the window: its own
@@ -262,7 +291,7 @@ export function canSplitPaneDimension(
 }
 
 /** Convert a pointer offset into the grow ratio for the two FLEXIBLE children.
- * The fixed divider is not part of their available width/height, so subtract
+ * The divider's gap is not part of their available width/height, so subtract
  * it before calculating both the ratio and pixel floors. */
 export function clampPaneSplitRatio(
   pointerOffset: number,

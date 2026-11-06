@@ -76,7 +76,8 @@
 
    BORDERS (4 tiers — borders only, never text):
      --border1              default for bg1 surfaces
-     --border2              sidebar, composer focus, bg2 surfaces, popover panels
+     --border2              sidebar, bg2 surfaces, popover panels (the composer
+                            family's edge is --composer-border, semantic-tokens.css)
      --border3              secondary button, dropdown TRIGGER, input field
      --border4              highlighted state of border3 consumers (dropdown hover)
 
@@ -283,7 +284,7 @@
   /* ── BORDERS — `border-border1`..`border-border4` ── */
   /* @generated tokens:utilities-border1:start */
   --color-border1: var(--border1); /* #242424 — default for bg1 surfaces */
-  --color-border2: var(--border2); /* #2E2E2E — sidebar / composer focus / bg2 */
+  --color-border2: var(--border2); /* #2E2E2E — sidebar / bg2 / floating panels */
   --color-border3: var(--border3); /* #444444 — secondary btn / dropdown / input */
   --color-border4: var(--border4); /* #575757 — highlighted state of border3 */
   /* @generated tokens:utilities-border1:end */
@@ -547,7 +548,7 @@
   /* ── BORDERS ── */
   /* @generated tokens:base-border1:start */
   --border1: hsl(0 0% 14%); /* #242424 — default for bg1 surfaces */
-  --border2: hsl(0 0% 18%); /* #2E2E2E — sidebar / composer focus / bg2 */
+  --border2: hsl(0 0% 18%); /* #2E2E2E — sidebar / bg2 / floating panels */
   --border3: hsl(0 0% 26.667%); /* #444444 — secondary btn / dropdown / input */
   --border4: hsl(0 0% 34.118%); /* #575757 — highlighted state of border3 */
   /* @generated tokens:base-border1:end */
@@ -839,7 +840,7 @@
   /* ── BORDERS ── */
   /* @generated tokens:light-border1:start */
   --border1: hsl(34.29 14.894% 90.784%); /* #EBE8E4 — default for bg1 surfaces */
-  --border2: hsl(30 12.903% 87.843%); /* #E4E0DC — sidebar / composer focus / bg2 */
+  --border2: hsl(30 12.903% 87.843%); /* #E4E0DC — sidebar / bg2 / floating panels */
   /* @generated tokens:light-border1:end */
   /* Subtle rest/hover outlines on control surfaces, below WCAG 1.4.11's
    * 3:1 by reviewed design. Keyboard focus remains the strong opaque cue. */

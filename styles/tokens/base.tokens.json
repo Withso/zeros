@@ -394,7 +394,7 @@
         "colorSpace": "hsl",
         "components": [0.0, 0.0, 18.0]
       },
-      "$description": "sidebar / composer focus / bg2",
+      "$description": "sidebar / bg2 / floating panels",
       "$extensions": {
         "org.zeros": {
           "cssName": "--border2",
