@@ -249,6 +249,46 @@ describe("cloud v2 relay", () => {
       await vi.waitFor(() => expect(connectedWorkers).toHaveLength(1));
       expect(deps.workerRoute).toHaveBeenCalledTimes(2);
     });
+    it("restarts the retry backoff after a ready hint so a refused first dial is retried at the base delay", async () => {
+      deps.retryBaseMs = 1; deps.retryMaxMs = 60_000;
+      state = "starting";
+      const waits: number[] = [], target = relay as unknown as { retryWait(room: unknown, ms: number): Promise<boolean> };
+      const wait = target.retryWait.bind(relay);
+      vi.spyOn(target, "retryWait").mockImplementation((room, ms) => { waits.push(ms); return wait(room, ms); });
+      const original = vi.mocked(deps.workerRoute).getMockImplementation()!;
+      let refused = false;
+      vi.mocked(deps.workerRoute).mockImplementation(async id => {
+        const route = await original(id);
+        if (state !== "running" || refused || !route) return route;
+        refused = true; return { ...route, url: "http://127.0.0.1:9/" };
+      });
+      await app();
+      await vi.waitFor(() => expect(waits).toContain(16));
+      state = "running"; relay.hintReady(workspaceId);
+      await vi.waitFor(() => expect(connectedWorkers).toHaveLength(1));
+      expect(refused).toBe(true);
+      expect(waits.at(-1)).toBe(1);
+    });
+  it("keeps Stop boot rotation across a ready hint after a rejected dial", async () => {
+    state = "stopping";
+    const oldBoot = "11111111-1111-4111-8111-111111111111", nextBoot = "22222222-2222-4222-8222-222222222222";
+    const minted: string[] = [];
+    const original = vi.mocked(deps.workerRoute).getMockImplementation()!;
+    vi.mocked(deps.workerRoute).mockImplementation(async id => ({ ...(await original(id))!, stopBootIds: [oldBoot, nextBoot] }));
+    deps.mintWorkerToken = (_id, boot) => { minted.push(boot); return boot === nextBoot ? "synthetic-grant" : "synthetic-wrong-boot"; };
+    let hinted = false;
+    workerServer.options.verifyClient = ({ req }) => {
+      if (req.headers["x-zeros-worker-auth"] === "synthetic-grant") return true;
+      if (!hinted) { hinted = true; relay.hintReady(workspaceId); }
+      return false;
+    };
+    workerServer.once("connection", socket => socket.on("message", raw => {
+      const frame = JSON.parse(String(raw));
+      if (frame.t === "stop") socket.send(JSON.stringify({ t: "stop-ack", id: frame.id }));
+    }));
+    expect(await relay.stopWorkspace(workspace(state), 1000)).toBe(true);
+    expect(minted).toEqual([oldBoot, nextBoot]);
+  });
     it("keeps a ready hint that lands while the route read is in flight", async () => {
       deps.retryBaseMs = 60_000; deps.retryMaxMs = 60_000;
       state = "starting";
@@ -360,7 +400,7 @@ describe("cloud v2 relay", () => {
     deps.config = async ws => { now += 75; return original(ws); };
     await app();
     await vi.waitFor(() => expect(timing).toHaveBeenCalledTimes(1));
-    expect(timing).toHaveBeenCalledWith({ workspaceId: workspaceId.slice(0, 8), phase: "relay_ready", durationMs: 75, dialMs: 0, configMs: 75 });
+    expect(timing).toHaveBeenCalledWith({ workspaceId: workspaceId.slice(0, 8), phase: "relay_ready", durationMs: 75, dialMs: 0, configMs: 75, attempts: 2 });
     expect(deps.workerRoute).toHaveBeenCalledTimes(2);
   });
 

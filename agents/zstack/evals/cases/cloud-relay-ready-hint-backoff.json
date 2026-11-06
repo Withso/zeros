@@ -1,0 +1,9 @@
+{
+  "id": "cloud-relay-ready-hint-backoff",
+  "kind": "replay",
+  "area": "control-plane",
+  "fixedBy": "pr:879",
+  "symptom": "After a resumed worker said hello, the relay took 1.0-6.2 s more to dial it, which delayed the waiting app's ENGINE_READY. A ready hint woke the relay's retry loop, but a failed first attempt after the hint waited the grown backoff (up to 2 s) before trying again.",
+  "rule": "zstack-review locks and time windows: an event that signals readiness must reset retry backoff, not only interrupt the current wait. Record attempt counts on readiness timings so post-hint failures are visible.",
+  "check": "pnpm --dir apps/control-plane exec vitest run src/cloud/relay.test.ts -t \"restarts the retry backoff\""
+}
