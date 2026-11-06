@@ -258,6 +258,8 @@ it("boots through the runtime symlink, waits for a token, serves a dial-in PTY a
     await expect.poll(() => messages.some(message => message.t === "frame" && message.frame.type === "PTY_DATA"
       && message.frame.data.includes("BUNDLED_PTY_OK")), { timeout: 5000 }).toBe(true);
     expect(requests.some(request => request.path === "hello" && request.generation === "initial")).toBe(true);
+    expect(output).toMatch(/^cloud-worker boot loaded \d+$/m);
+    await expect.poll(() => output).toMatch(/^cloud-worker boot connected \d+$/m);
     const publishedSocket = () => /BUNDLED_BROKER_PATH=(\/[^\r\n]+)/.exec(messages
       .filter(message => message.t === "frame" && message.frame.type === "PTY_DATA" && message.frame.sessionId === "package-shell")
       .map(message => message.frame.data).join(""))?.[1];

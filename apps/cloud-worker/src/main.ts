@@ -25,14 +25,18 @@ export function readBootEnvironment(environment: NodeJS.ProcessEnv = process.env
 export function startWorker(options: BootOptions): { worker: CloudWorker; stop: (code?: number) => Promise<void> } {
   const directory = options.directory ?? WORKER_STATE_DIRECTORY;
   const runtimeHandoff = consumeRuntimeHandoff(directory, options.runtimeHandoff);
-  let stopping: Promise<void> | undefined;
+  let stopping: Promise<void> | undefined, connected = false;
   const log = (event: string) => { process.stdout.write(`cloud-worker ${event}\n`); };
+  // Process uptime splits a resume's wait before hello into module loading and the rest.
+  const uptime = () => Math.round(process.uptime() * 1000);
+  log(`boot loaded ${uptime()}`);
   const transport = new HybridTransport({ apiUrl: options.apiUrl, workspaceId: options.workspaceId, runtimeSha256: options.runtimeSha256,
     ...(runtimeHandoff ? { runtimeHandoff } : {}),
     ...(options.publicKeys ? { publicKeys: options.publicKeys } : {}), ...(options.port === undefined ? {} : { port: options.port }),
     tokenFile: options.tokenFile ?? WORKER_TOKEN_FILE,
     onStatus: status => {
       log(status);
+      if (status === "connected" && !connected) { connected = true; log(`boot connected ${uptime()}`); }
       if (["unauthorized", "stopped", "protocol-error"].includes(status)) void stop(status === "protocol-error" ? 1 : 0);
     },
   });
