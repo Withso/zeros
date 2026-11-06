@@ -172,6 +172,10 @@ it("reports the first hello from its prior lifecycle state and accepts bounded o
   expect(f.deps.timing).toHaveBeenCalledWith({ workspaceId: original!.id.slice(0, 8), phase: "worker_hello", state: "starting", durationMs: 1250, configMs: expect.any(Number) });
   expect((await f.request("timing", { phase: "worker_services", durationMs: 23 })).status).toBe(200);
   expect(f.deps.timing).toHaveBeenLastCalledWith({ workspaceId: original!.id.slice(0, 8), phase: "worker_services", durationMs: 23 });
+  for (const phase of ["worker_workspace_state", "worker_workspace_metadata", "worker_workspace_remote", "worker_workspace_poll", "worker_workspace_watch"]) {
+    expect((await f.request("timing", { phase, durationMs: 23 })).status).toBe(200);
+    expect(f.deps.timing).toHaveBeenLastCalledWith({ workspaceId: original!.id.slice(0, 8), phase, durationMs: 23 });
+  }
   for (const input of [{ phase: "private-command", durationMs: 1 }, { phase: "worker_services", durationMs: -1 }, { phase: "worker_services", durationMs: 1, token: "do-not-log" }])
     expect((await f.request("timing", input)).status).toBe(400);
   expect((await f.request("timing", { phase: "worker_services", durationMs: 23 }, { "x-zeros-worker-boot": randomUUID() })).status).toBe(401);
