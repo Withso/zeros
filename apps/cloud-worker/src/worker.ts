@@ -315,7 +315,8 @@ export class CloudWorker {
     if (!this.scope) {
       if (!await this.initialize(scope, config, timing)) return;
     } else {
-      await this.workspace!.configure(config.workspace); await this.mcp!.configure(config.mcpServers ?? [], config.loginRevision);
+      await measureStartup("worker_reconfigure_workspace", () => this.workspace!.configure(config.workspace), timing);
+      await measureStartup("worker_reconfigure_mcp", () => this.mcp!.configure(config.mcpServers ?? [], config.loginRevision), timing);
       if (!this.stopping) await this.reviews!.configure(config.codeReview);
       if (!this.reviews!.enabled) this.workspaceMcp.revoke();
       this.agents!.configure(config);
@@ -327,7 +328,7 @@ export class CloudWorker {
       this.configurationRevision = revision;
       return;
     }
-    await this.options.transport.readyRuntime?.();
+    await measureStartup("worker_reconfigure_ready", async () => { await this.options.transport.readyRuntime?.(); }, initial ? undefined : timing);
     if (this.disposed || this.stopping) return;
     this.options.runtimeResume?.ready?.();
     this.runtimePublished = true;
@@ -359,6 +360,7 @@ export class CloudWorker {
     this.configuredReviewAvailable = this.reviews?.enabled === true;
     await this.reportIdle(true);
     if (initial) recordStartupTiming("worker_configure", started, timing);
+    else recordStartupTiming("worker_reconfigure", started, timing);
   }
 
   private async initialize(scope: WorkspaceScope, config: WorkerConfig, timing?: StartupTimingObserver): Promise<boolean> {
@@ -406,9 +408,9 @@ export class CloudWorker {
         this.lastMutationAt = Date.now(); void this.reportIdle();
         void this.broadcast(createMessage({ type: "DB_CHANGED", source: "engine", kinds: ["codeReview"], workspaceIds: [scope.workspace.id] }));
       });
-      await reviews.configure(config.codeReview);
+      await measureStartup("worker_services_review", () => reviews!.configure(config.codeReview), timing);
       if (this.disposed || this.stopping) return false;
-      workspace = await WorkspaceService.open(scope, this.options.directory, {
+      workspace = await measureStartup("worker_services_workspace", () => WorkspaceService.open(scope, this.options.directory, {
         historyDiff: params => agents!.turns.historyDiff(params),
         ...this.options.workspaceServices,
         codeReview: reviews,
@@ -422,11 +424,11 @@ export class CloudWorker {
           return run(program, args, options);
         },
         publish: (frame) => { if (workspace && this.workspace === workspace) void this.broadcast(frame); },
-      });
+      }), timing);
       if (this.disposed || this.stopping) return false;
       mcp = new McpGateway({ workspaceRoot: scope.root, authorization: this.options.transport.mcpAuthorization?.bind(this.options.transport), admit: async () => this.runtimeGate.admit(),
         onFailure: (executionId, failure) => agents?.mcpFailure(executionId, failure) });
-      await mcp.configure(config.mcpServers ?? [], config.loginRevision);
+      await measureStartup("worker_services_mcp", () => mcp!.configure(config.mcpServers ?? [], config.loginRevision), timing);
       if (this.disposed || this.stopping) return false;
       agents = new Agents(store, scope, this.options.drivers ?? {
         codex: () => new CodexDriver({ gitEnvironment: this.gitEnvironment }), claude: () => new ClaudeDriver({ gitEnvironment: this.gitEnvironment }),
