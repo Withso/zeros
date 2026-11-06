@@ -117,6 +117,88 @@ describe("cloud v2 relay", () => {
     return ws;
   };
 
+  describe("app frame authority window", () => {
+    const ready = async () => {
+      const w = await worker(), a = sockets[0]!, frames: any[] = [];
+      w.on("message", raw => { const value = JSON.parse(String(raw)); if (value.t === "frame") frames.push(value.frame); });
+      await vi.waitFor(() => expect(deps.config).toHaveBeenCalledTimes(1));
+      return { w, a, frames };
+    };
+    it("forwards app frames inside the window without another access read", async () => {
+      let now = 1000; deps.now = () => now;
+      const { a, frames } = await ready();
+      vi.mocked(deps.store.appAccessSnapshot).mockClear();
+      a.send(JSON.stringify({ type: "PING_A", id: "1" })); a.send(JSON.stringify({ type: "PING_B", id: "2" }));
+      await vi.waitFor(() => expect(frames.map(frame => frame.id)).toEqual(["1", "2"]));
+      expect(deps.store.appAccessSnapshot).not.toHaveBeenCalled();
+      now += 4_000;
+      a.send(JSON.stringify({ type: "PING_C", id: "3" }));
+      await vi.waitFor(() => expect(frames.map(frame => frame.id)).toEqual(["1", "2", "3"]));
+      expect(deps.store.appAccessSnapshot).not.toHaveBeenCalled();
+    });
+    it("re-reads access once the window, anchored before the read, has passed; forwarding never renews it", async () => {
+      let now = 1000; deps.now = () => now;
+      const { a, frames } = await ready();
+      vi.mocked(deps.store.appAccessSnapshot).mockClear();
+      now += 4_999; a.send(JSON.stringify({ type: "PING", id: "1" }));
+      await vi.waitFor(() => expect(frames).toHaveLength(1));
+      now += 2; a.send(JSON.stringify({ type: "PING", id: "2" }));
+      await vi.waitFor(() => expect(frames).toHaveLength(2));
+      expect(deps.store.appAccessSnapshot).toHaveBeenCalledOnce();
+    });
+    it("honors a session expiry earlier than the window", async () => {
+      let now = 1000; deps.now = () => now;
+      vi.mocked(deps.store.appAccessSnapshot).mockImplementation(async (_id, sessions) =>
+        authorized ? { accessEpoch, activeSessionIds: sessions.filter(id => !revokedSessions.has(id)), validUntil: now + 1_000 } : null);
+      const { a, frames } = await ready();
+      vi.mocked(deps.store.appAccessSnapshot).mockClear();
+      now += 1_001; a.send(JSON.stringify({ type: "PING", id: "1" }));
+      await vi.waitFor(() => expect(frames).toHaveLength(1));
+      expect(deps.store.appAccessSnapshot).toHaveBeenCalledOnce();
+    });
+    it("forwards nothing more after a security event revokes access mid-window", async () => {
+      let now = 1000; deps.now = () => now;
+      const { a, frames } = await ready();
+      authorized = false;
+      notification.emit("notification", { channel: "zeros_security_event" });
+      a.send(JSON.stringify({ type: "PING", id: "late" }));
+      await vi.waitFor(() => expect(a.readyState).toBe(WebSocket.CLOSED));
+      expect(frames).toEqual([]);
+    });
+    it("re-reads after a sibling joins, so the sibling's own session expiry applies", async () => {
+      let now = 1000; deps.now = () => now;
+      const { w, frames } = await ready();
+      const opens: any[] = [];
+      w.on("message", raw => { const value = JSON.parse(String(raw)); if (value.t === "open") opens.push(value); });
+      ticketSession = "session-b";
+      const b = await app();
+      await vi.waitFor(() => expect(opens).toHaveLength(1));
+      vi.mocked(deps.store.appAccessSnapshot).mockClear();
+      b.send(JSON.stringify({ type: "PING", id: "b1" }));
+      await vi.waitFor(() => expect(frames.map(frame => frame.id)).toEqual(["b1"]));
+      expect(deps.store.appAccessSnapshot).toHaveBeenCalledOnce();
+      expect(deps.store.appAccessSnapshot).toHaveBeenCalledWith(workspaceId, expect.arrayContaining(["session-a", "session-b"]));
+    });
+    it("does not reuse a window across a source revalidation that is still reading", async () => {
+      let now = 1000; deps.now = () => now;
+      const { a, frames } = await ready();
+      let release!: () => void;
+      const original = vi.mocked(deps.store.appAccessSnapshot).getMockImplementation()!;
+      vi.mocked(deps.store.appAccessSnapshot).mockImplementationOnce(async (id, sessions) => {
+        await new Promise<void>(resolve => { release = resolve; });
+        authorized = false;
+        return original(id, sessions);
+      });
+      relay.revalidateSources({});
+      a.send(JSON.stringify({ type: "PING", id: "held" }));
+      await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+      expect(frames).toEqual([]);
+      release();
+      await vi.waitFor(() => expect(a.readyState).toBe(WebSocket.CLOSED));
+      expect(frames).toEqual([]);
+    });
+  });
+
   it("times the first dial through readiness, including retry and configuration", async () => {
     const timing = vi.fn(); deps.timing = timing;
     let now = 1000; deps.now = () => now;
@@ -487,13 +569,14 @@ describe("cloud v2 relay", () => {
     expect(await reply).toEqual({ type: "WORKSPACE_RESPONSE", requestId: "r1" });
   });
 
-  it("revalidates an already-open app socket before forwarding after membership removal", async () => {
+  it("revalidates an already-open app socket before forwarding once the authority window passes after membership removal", async () => {
+    let now = 1000; deps.now = () => now;
     const w = await worker();
     const openFrame = nextMessage(w);
     const a = await app(); await openFrame;
     const frames: unknown[] = [];
     w.on("message", data => frames.push(JSON.parse(String(data))));
-    authorized = false;
+    authorized = false; now += 5_000;
     a.send(JSON.stringify({ type: "WORKSPACE_REQUEST", id: "after-removal", op: "file.write", params: { path: "file.txt", content: "changed" } }));
     await vi.waitFor(() => expect(a.readyState).toBe(WebSocket.CLOSED));
     expect(frames).toEqual([]);
@@ -531,7 +614,8 @@ describe("cloud v2 relay", () => {
     expect(frames.some(frame => frame.frame?.id === "revoked-prompt")).toBe(false);
   });
 
-  it("revalidates the sender's session when a notification is lost", async () => {
+  it("revalidates the sender's session once the authority window passes when a notification is lost", async () => {
+    let now = 1000; deps.now = () => now;
     const w = await worker(), opens: any[] = [];
     w.on("message", raw => opens.push(JSON.parse(String(raw))));
     const a = await app();
@@ -539,7 +623,7 @@ describe("cloud v2 relay", () => {
     ticketSession = "session-b";
     const b = await app();
     await vi.waitFor(() => expect(opens.filter(frame => frame.t === "open")).toHaveLength(2));
-    revokedSessions.add("session-a");
+    revokedSessions.add("session-a"); now += 5_000;
     a.send(JSON.stringify({ type: "AGENT_PROMPT", id: "after-signout" }));
     await vi.waitFor(() => expect(a.readyState).toBe(WebSocket.CLOSED));
     expect(b.readyState).toBe(WebSocket.OPEN);
@@ -623,7 +707,8 @@ describe("cloud v2 relay", () => {
     expect(connectedWorkers).toHaveLength(1);
   });
 
-  it("does not apply an older session snapshot to a newly admitted sibling", async () => {
+  it("does not apply an older session snapshot to a newly admitted sibling, nor open a window from it", async () => {
+    let now = 1000; deps.now = () => now;
     const w = await worker();
     const frames: any[] = [];
     w.on("message", raw => frames.push(JSON.parse(String(raw))));
@@ -636,6 +721,7 @@ describe("cloud v2 relay", () => {
       await new Promise<void>(resolve => { release = resolve; });
       return captured;
     });
+    now += 5_000;
     a.send(JSON.stringify({ type: "AGENT_PROMPT", id: "held-proof" }));
     await vi.waitFor(() => expect(release).toBeTypeOf("function"));
     ticketSession = "session-b";
@@ -645,6 +731,10 @@ describe("cloud v2 relay", () => {
     await vi.waitFor(() => expect(frames.some(frame => frame.frame?.id === "held-proof")).toBe(true));
     expect(b.readyState).toBe(WebSocket.OPEN);
     expect(w.readyState).toBe(WebSocket.OPEN);
+    vi.mocked(deps.store.appAccessSnapshot).mockClear();
+    b.send(JSON.stringify({ type: "PING", id: "sibling" }));
+    await vi.waitFor(() => expect(frames.some(frame => frame.frame?.id === "sibling")).toBe(true));
+    expect(deps.store.appAccessSnapshot).toHaveBeenCalledWith(workspaceId, expect.arrayContaining(["session-a", "session-b"]));
   });
 
   it("rechecks a delayed admission proof when sign-out commits during the read", async () => {
