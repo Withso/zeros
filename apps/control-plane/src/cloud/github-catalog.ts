@@ -51,7 +51,7 @@ export function createCloudGithubCatalog(deps: {
           const authority = group.authority.get(row.id);
           if (!authority || authority instanceof HttpError) {
             const error = authority ?? changed();
-            await deps.retireRevoked(row, error);
+            if (error.code !== "not_found") await deps.retireRevoked(row, error);
             throw error;
           }
           if (authority.repository !== row.repository) throw changed();

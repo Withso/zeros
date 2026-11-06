@@ -640,6 +640,28 @@ database("cloud GitHub composition", () => {
     expect(document).not.toHaveProperty("github");
     expect(document?.githubUnavailableReason).toBe("access-denied");
   });
+  it.each(["held-creator", "cloud-disabled"] as const)("withholds catalog metadata without stopping work when local access is %s", async reason => {
+    const { workspace } = await fixture();
+    created = true;
+    await services.service.execute(workspace.id, userId, { op: "gh.prSync", params: {} });
+    if (reason === "cloud-disabled") await pool.query("UPDATE organizations SET cloud_workspaces_allowed=false WHERE id=$1", [organizationId]);
+    else {
+      for (let i = 0; i < 5; i++) {
+        const member = randomUUID();
+        await pool.query("INSERT INTO users(id,email,display_name) VALUES($1,$2,'Free member')", [member, `${member}@example.test`]);
+        await pool.query("INSERT INTO organization_members(org_id,user_id,role) VALUES($1,$2,'member')", [organizationId, member]);
+      }
+      await pool.query("UPDATE account_entitlements SET status='cancelled',cloud_workspaces_allowed=false WHERE user_id=$1", [userId]);
+    }
+    await expect(workspaces.get(workspace.id, userId)).rejects.toMatchObject({ code: reason === "held-creator" ? "organization_member_on_hold" : "not_found" });
+    expect((await pool.query("SELECT state FROM cloud_v2_workspaces WHERE id=$1", [workspace.id])).rows[0].state).toBe("running");
+    const rows = await workspaces.list(organizationId, userId);
+    expect(rows).toHaveLength(1);
+    const [document] = await services.documents(rows);
+    expect(document).not.toHaveProperty("github");
+    expect(document).toHaveProperty("githubUnavailableReason");
+    expect((await pool.query("SELECT state FROM cloud_v2_workspaces WHERE id=$1", [workspace.id])).rows[0].state).toBe("running");
+  });
   it("keeps stopped catalog admission fresh instead of borrowing a running continuation", async () => {
     const f = await fixture();
     await services.service.execute(f.workspace.id, userId, { op: "gh.prSync", params: {} });

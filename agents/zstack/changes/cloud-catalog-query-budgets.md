@@ -12,3 +12,7 @@ admission, and a failure keeps recovery metadata and its monotonic version.
 
 Target: principle 8. Enforcer: github-composition.integration.test.ts covers
 transaction/query budgets, per-scope isolation and held-read revocation races.
+
+A failed local membership/seat proof withholds presentation; it is not a
+GitHub revocation. Keep its synthetic error out of source retirement, and
+retain the read-only catalog regression for held creators and disabled cloud.
