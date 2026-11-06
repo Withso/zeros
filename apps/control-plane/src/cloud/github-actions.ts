@@ -2,7 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import type pg from "pg";
 import { HttpError } from "../authz.js";
-import { withSystemTx } from "../db.js";
+import { withSystemTx, type Tx } from "../db.js";
 
 /** Durable short lease, with no transaction/connection held over GitHub I/O.
  * A failed request is never retried here. The API's operation-specific recovery
@@ -13,16 +13,16 @@ export class CloudGithubActions {
     lease: string;
   }>();
   constructor(private readonly pool: pg.Pool) {}
-  async assertCurrent(workspaceId: string): Promise<void> {
+  async assertCurrent(workspaceId: string, transaction?: Tx): Promise<void> {
     const action = this.current.getStore();
     if (!action || action.workspaceId !== workspaceId) return;
-    const { rows } = await withSystemTx(this.pool, (tx) =>
+    const read = (tx: Tx) =>
       tx.query(
         `SELECT 1 FROM cloud_v2_github_workspaces
       WHERE workspace_id=$1 AND mutation_lease=$2 AND mutation_until>clock_timestamp()+interval '20 seconds'`,
         [workspaceId, action.lease],
-      ),
-    );
+      );
+    const { rows } = await (transaction ? read(transaction) : withSystemTx(this.pool, read));
     if (!rows.length)
       throw new HttpError(
         409,

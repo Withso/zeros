@@ -20,6 +20,8 @@ import type { CloudV2Computers } from "./computer.js";
 import { z } from "zod";
 import { cloudGithubUnavailableReason as unavailableReason } from "./github-failure.js";
 import { setupSelectionUnavailable, workspaceSetupBuild } from "./setup-selection.js";
+import { withSystemTx } from "../db.js";
+import { cloudGithubRequestContext } from "./github-request-context.js";
 
 export function createCloudGithubServices(
   pool: pg.Pool,
@@ -143,21 +145,24 @@ export function createCloudGithubServices(
       );
     return { ...value, repositoryId: primary.repositoryId };
   };
+  const open = cloudGithubRequestContext({ pool, connections, metadata, actions, verifications,
+    authorize: async (id, userId) => authorizeSource(await workspaces.get(id, userId)), fetch: fetchImpl });
   const service = new CloudGithubPrService({
-    context,
-    access: (value) =>
-      connections.access({
-        organizationId: value.organizationId,
-        userId: value.creatorUserId,
-      }),
+    open,
     repository: async (value, identity, access) => {
-      await access.assertCurrent();
-      await metadata.repository(value, identity);
-      await access.assertCurrent();
+      if (value.repositoryBound && value.repositoryId === identity.repositoryId && value.repository === identity.repository) return;
+      await withSystemTx(pool, async tx => {
+        await access.assertCurrent(tx);
+        await metadata.repository(value, identity, undefined, tx);
+        await access.assertCurrent(tx);
+      });
     },
     recordPr: async (value, pr, access) => {
-      await access.assertCurrent();
-      await metadata.recordPr(value, pr, access.generation);
+      await withSystemTx(pool, async tx => {
+        await access.assertCurrent(tx);
+        await metadata.recordPr(value, pr, access.generation, tx);
+        await access.assertCurrent(tx);
+      });
       await access.assertCurrent();
     },
     mutate: async (id, userId, action) => {
@@ -263,6 +268,11 @@ export function createCloudGithubServices(
     purpose: "git" | "gh" = "git",
     failedTokenSha256?: string,
   ) => {
+    if (!failedTokenSha256) {
+      const { context: value, access: grant } = await open(workspace.id, workspace.creatorUserId, { checkout: false });
+      return token({ organizationId: value.organizationId, userId: value.creatorUserId },
+        { repository: value.repository, repositoryId: value.repositoryId }, access, purpose, () => grant.assertCurrent(), undefined, grant);
+    }
     await authorizeSource(workspace);
     return token(
       {

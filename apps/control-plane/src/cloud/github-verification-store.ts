@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
 import type pg from "pg";
-import { withSystemTx } from "../db.js";
+import { withSystemTx, type Tx } from "../db.js";
 import { HttpError } from "../authz.js";
 import { isGithubAccessRevoked } from "../github-availability.js";
+import { CLOUD_SOURCE_ADMISSION_MS, CloudSourceTargetSchema } from "./source-authority.js";
 
 export type GithubVerificationScope = {
   organizationId: string; userId: string; repositoryId: string; fingerprint: string;
@@ -43,6 +44,34 @@ const params = (scope: GithubVerificationScope) => [scope.organizationId, scope.
  * replicas; CAS prevents a late result from replacing a newer observation. */
 export class PostgresGithubVerificationStore implements GithubVerificationStore {
   constructor(private readonly pool: pg.Pool, private readonly now = () => Date.now()) {}
+
+  /** A fresh positive for every immutable source, read with the caller's live
+   * membership, credential and checkout checks. A miss needs ordinary admission. */
+  async workspaceAdmission(tx: Tx, workspaceId: string, scope: { organizationId: string; userId: string }, fingerprint: string) {
+    const started = this.now();
+    const { rows } = await tx.query<{
+      repository: string; source: string; repository_id: string | null; source_count: number;
+      verified_at: Date | null; failure_code: string | null; database_now: Date;
+    }>(`SELECT w.repository,src.name AS source,s.repository_id::text,cardinality(w.source_repositories) AS source_count,
+        v.verified_at,v.failure_code,clock_timestamp() AS database_now
+      FROM cloud_v2_workspaces w CROSS JOIN LATERAL unnest(w.source_repositories) src(name)
+      LEFT JOIN cloud_v2_github_sources s ON s.workspace_id=w.id AND s.source_repository=lower(src.name)
+      LEFT JOIN cloud_github_source_verifications v ON v.org_id=w.org_id AND v.owner_user_id=w.creator_user_id
+        AND v.repository_id=s.repository_id AND v.fingerprint=$4
+      WHERE w.id=$1 AND w.org_id=$2 AND w.creator_user_id=$3 AND w.state NOT IN ('deleted','deleting')
+      LIMIT 101`, [workspaceId, scope.organizationId, scope.userId, fingerprint]);
+    const primary = rows.find(row => row.source.toLowerCase() === row.repository.toLowerCase());
+    if (!primary || rows.length > 100 || rows.length !== primary.source_count || rows.some(row =>
+      !CloudSourceTargetSchema.safeParse({ repository: row.source, repositoryId: row.repository_id }).success))
+      throw new HttpError(409, "cloud_source_review_required", "This workspace needs its original source identities verified. Its files have been retained.");
+    let until = Infinity;
+    for (const row of rows) {
+      const age = row.verified_at ? row.database_now.getTime() - row.verified_at.getTime() : -1;
+      if (row.failure_code || age < 0 || age >= CLOUD_SOURCE_ADMISSION_MS) return null;
+      until = Math.min(until, started + CLOUD_SOURCE_ADMISSION_MS - age);
+    }
+    return { repositoryId: primary.repository_id!, until };
+  }
 
   private observation(row: Row | undefined, started: number): GithubVerification | null {
     if (!row) return null;

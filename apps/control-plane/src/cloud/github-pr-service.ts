@@ -8,6 +8,7 @@ import {
   type CloudGithubPrRequest,
 } from "./github-pr-contract.js";
 import type { CloudGithubRepositoryIdentity } from "./github-http.js";
+import type { Tx } from "../db.js";
 
 export interface CloudGithubPrContext {
   workspaceId: string;
@@ -15,6 +16,7 @@ export interface CloudGithubPrContext {
   creatorUserId: string;
   repository: string;
   repositoryId: string | null;
+  repositoryBound?: boolean;
   branch: string | null;
   baseBranch: string;
   headSha: string | null;
@@ -24,12 +26,11 @@ export interface CloudGithubPrAccess {
   api: CloudGithubApi;
   login?: string;
   generation: string;
-  assertCurrent(): Promise<void>;
+  assertCurrent(tx?: Tx): Promise<void>;
 }
 export interface CloudGithubPrDependencies {
   /** Reads and verifies creator, membership, source access and current metadata. */
-  context(workspaceId: string, userId: string): Promise<CloudGithubPrContext>;
-  access(context: CloudGithubPrContext): Promise<CloudGithubPrAccess>;
+  open(workspaceId: string, userId: string): Promise<{ context: CloudGithubPrContext; access: CloudGithubPrAccess }>;
   /** Reconciles canonical metadata only; original checkout and source scope stay fixed. */
   repository(
     context: CloudGithubPrContext,
@@ -53,6 +54,13 @@ const changed = () =>
     "github_authorization_changed",
     "Your GitHub connection or workspace changed. Refresh before continuing.",
   );
+
+export function assertCloudGithubPrContext(expected: CloudGithubPrContext, current: CloudGithubPrContext, checkout = true): void {
+  if (current.workspaceId !== expected.workspaceId || current.organizationId !== expected.organizationId ||
+    current.creatorUserId !== expected.creatorUserId || (checkout && (current.revision !== expected.revision ||
+    current.branch !== expected.branch || current.baseBranch !== expected.baseBranch)) ||
+    (current.repositoryId && current.repositoryId !== expected.repositoryId)) throw changed();
+}
 
 /** All published PR data uses HTTPS and the creator's selected user credential.
  * Neither reads nor GitHub API writes start a worker or touch its checkout. */
@@ -80,7 +88,7 @@ export class CloudGithubPrService {
     userId: string,
     request: CloudGithubPrRequest,
   ) {
-    const context = await this.deps.context(workspaceId, userId);
+    const { context, access } = await this.deps.open(workspaceId, userId);
     if (context.workspaceId !== workspaceId || context.creatorUserId !== userId)
       throw new HttpError(404, "not_found", "Cloud workspace not found.");
     if (!context.branch)
@@ -89,7 +97,6 @@ export class CloudGithubPrService {
         "github_checkout_unavailable",
         "Open this workspace on a branch to enable pull requests.",
       );
-    const access = await this.deps.access(context);
     const target = {
       repository: context.repository,
       repositoryId: context.repositoryId,
@@ -115,26 +122,13 @@ export class CloudGithubPrService {
     )
       throw changed();
     await this.deps.repository(context, identity, access);
-    const assertCurrent = async () => {
-      await access.assertCurrent();
-      const current = await this.deps.context(workspaceId, userId);
-      if (
-        current.workspaceId !== context.workspaceId ||
-        current.organizationId !== context.organizationId ||
-        current.creatorUserId !== userId ||
-        current.revision !== context.revision ||
-        current.branch !== context.branch ||
-        current.baseBranch !== context.baseBranch ||
-        (current.repositoryId && current.repositoryId !== identity.repositoryId)
-      )
-        throw changed();
-    };
+    const assertCurrent = () => access.assertCurrent();
     const canonical = {
       ...target,
       repository: identity.repository,
       repositoryId: identity.repositoryId,
     };
-    const api = access.api.withFence(assertCurrent);
+    const api = access.api.withRepository(identity);
     const review = new CloudGithubReviewApi(api);
     await assertCurrent();
     // Exact revisions are mandatory for every mutation of an existing PR.
