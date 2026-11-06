@@ -359,6 +359,91 @@ describe("cloud GitHub API", () => {
     });
   });
 
+  it("marks required checks, lists unreported ones and names Actions runs", async () => {
+    const run = (name: string, conclusion: string | null, slug: string) => ({
+      name, status: conclusion ? "completed" : "in_progress", conclusion,
+      details_url: null, html_url: null, started_at: null, completed_at: null, app: { slug },
+    });
+    const { api } = fixture((path) => {
+      if (path === "/repositories/42") return Response.json(repository);
+      if (path.includes("/check-runs"))
+        return Response.json({
+          total_count: 2,
+          check_runs: [run("test", "failure", "github-actions"), run("CodeRabbit", "success", "coderabbitai")],
+        });
+      if (path.includes("/statuses")) return Response.json([]);
+      if (path === "/repositories/42/branches/main")
+        return Response.json({ protection: { required_status_checks: { contexts: ["test"], checks: [] } } });
+      if (path === "/repositories/42/rules/branches/main")
+        return Response.json([
+          { type: "required_status_checks", parameters: { required_status_checks: [{ context: "Preview deployment" }] } },
+        ]);
+      return Response.json(pull);
+    });
+    const result = await api.checks(target, 7);
+    expect(result.checks.map(({ name, required, rerunnable }) => ({ name, required, rerunnable }))).toEqual([
+      { name: "test", required: true, rerunnable: true },
+      { name: "CodeRabbit", required: false, rerunnable: false },
+    ]);
+    expect(result.expected).toEqual([{ name: "Preview deployment" }]);
+  });
+  it("keeps the checks when the base branch's requirements cannot be read", async () => {
+    const { api } = fixture((path) => {
+      if (path === "/repositories/42") return Response.json(repository);
+      if (path.includes("/check-runs")) return Response.json({ total_count: 0, check_runs: [] });
+      if (path.includes("/statuses")) return Response.json([]);
+      if (path.includes("/branches/") ) return new Response(null, { status: 404 });
+      return Response.json(pull);
+    });
+    const result = await api.checks(target, 7);
+    expect(result).not.toHaveProperty("expected");
+  });
+  it("re-runs the failed Actions runs of the head it was asked about", async () => {
+    const posted: string[] = [];
+    const { api } = fixture((path, init) => {
+      if (path === "/repositories/42") return Response.json({ ...repository, permissions: { push: true } });
+      if (path.startsWith("/repositories/42/actions/runs?"))
+        return Response.json({
+          workflow_runs: [
+            { id: 11, head_sha: head, status: "completed", conclusion: "failure" },
+            { id: 12, head_sha: head, status: "completed", conclusion: "success" },
+            { id: 13, head_sha: head, status: "in_progress", conclusion: null },
+          ],
+        });
+      if (init.method === "POST") {
+        posted.push(path);
+        return new Response(null, { status: 201 });
+      }
+      return Response.json(pull);
+    });
+    await expect(api.rerunFailed(target, 7, head)).resolves.toEqual({ rerun: 1 });
+    expect(posted).toEqual(["/repositories/42/actions/runs/11/rerun-failed-jobs"]);
+    await expect(api.rerunFailed(target, 7, "c".repeat(40))).rejects.toMatchObject({ code: "github_pr_changed" });
+    expect(posted).toHaveLength(1);
+  });
+  it("counts the runs that restarted when GitHub refuses one, and fails only when it refuses all", async () => {
+    let refuse = new Set([11]);
+    const { api } = fixture((path, init) => {
+      if (path === "/repositories/42") return Response.json({ ...repository, permissions: { push: true } });
+      if (path.startsWith("/repositories/42/actions/runs?"))
+        return Response.json({
+          workflow_runs: [
+            { id: 11, head_sha: head, status: "completed", conclusion: "failure" },
+            { id: 13, head_sha: head, status: "completed", conclusion: "timed_out" },
+          ],
+        });
+      if (init.method === "POST") {
+        const id = Number(/runs\/(\d+)\//.exec(path)?.[1]);
+        return refuse.has(id)
+          ? Response.json({ message: "This workflow run cannot be rerun" }, { status: 403 })
+          : new Response(null, { status: 201 });
+      }
+      return Response.json(pull);
+    });
+    await expect(api.rerunFailed(target, 7, head)).resolves.toEqual({ rerun: 1 });
+    refuse = new Set([11, 13]);
+    await expect(api.rerunFailed(target, 7, head)).rejects.toBeTruthy();
+  });
   it("keeps checks from an old head out of a refreshed PR", async () => {
     let reads = 0;
     const { api } = fixture((path) => {

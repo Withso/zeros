@@ -2146,6 +2146,11 @@ export interface PrCheck {
    *  Commit statuses don't report timing, so both stay null there. */
   startedAt: number | null;
   completedAt: number | null;
+  /** Branch protection or a ruleset requires it before merging. Absent when
+   *  the base branch's requirements could not be read. */
+  required?: boolean;
+  /** A GitHub Actions run, which Re-run failed can start again. */
+  rerunnable?: boolean;
 }
 
 export interface PrDeployment {
@@ -2163,6 +2168,76 @@ export interface PrChecksResult {
   passed: number;
   failed: number;
   pending: number;
+  /** Required checks that have not reported on the head commit yet. */
+  expected?: Array<{ name: string }>;
+}
+
+/** The check names the base branch requires, from classic branch protection
+ *  and from rulesets. Null when neither could be read: a missing or private
+ *  setting must never fail the checks themselves. */
+async function requiredCheckNames(owner: string, repo: string, branch: string): Promise<Set<string> | null> {
+  const [protection, rules] = await Promise.allSettled([
+    withAuthRetry((oct) => oct.repos.getBranch({ owner, repo, branch }), ["repos.getBranch", owner, repo, branch]),
+    withAuthRetry(
+      (oct) => oct.request("GET /repos/{owner}/{repo}/rules/branches/{branch}", { owner, repo, branch }),
+      ["rules.branch", owner, repo, branch],
+    ),
+  ]);
+  if (protection.status === "rejected" && rules.status === "rejected") return null;
+  const names = new Set<string>();
+  if (protection.status === "fulfilled") {
+    const required = (protection.value.data as {
+      protection?: { required_status_checks?: { contexts?: string[]; checks?: Array<{ context: string }> } };
+    }).protection?.required_status_checks;
+    for (const context of required?.contexts ?? []) names.add(context);
+    for (const check of required?.checks ?? []) names.add(check.context);
+  }
+  if (rules.status === "fulfilled") {
+    const list = rules.value.data as Array<{
+      type?: string;
+      parameters?: { required_status_checks?: Array<{ context: string }> };
+    }>;
+    for (const rule of Array.isArray(list) ? list : [])
+      if (rule.type === "required_status_checks")
+        for (const check of rule.parameters?.required_status_checks ?? []) names.add(check.context);
+  }
+  return names;
+}
+
+const RERUNNABLE_CONCLUSIONS = new Set(["failure", "timed_out", "cancelled", "startup_failure"]);
+
+/** Start the failed jobs of the head commit's failed GitHub Actions runs
+ *  again. Refuses when the pull request has moved past `headSha`, so it only
+ *  re-runs the failures the caller saw. */
+export async function rerunFailedPrChecks(opts: {
+  workspaceId: string;
+  prNumber: number;
+  headSha: string;
+}): Promise<{ rerun: number }> {
+  const { owner, repo } = await workspaceRemote(opts.workspaceId);
+  const pr = await withAuthRetry((oct) => oct.pulls.get({ owner, repo, pull_number: opts.prNumber }));
+  const sha = (pr.data as { head: { sha: string } }).head.sha;
+  if (sha !== opts.headSha) {
+    throw new GitError({
+      code: "VALIDATION_FAILED",
+      message: "The pull request has new commits. Refresh its checks before re-running them.",
+    });
+  }
+  const runs = await withAuthRetry((oct) =>
+    oct.actions.listWorkflowRunsForRepo({ owner, repo, head_sha: sha, per_page: 100 }),
+  );
+  const failed = runs.data.workflow_runs.filter(
+    (run) => run.head_sha === sha && run.status === "completed" && RERUNNABLE_CONCLUSIONS.has(run.conclusion ?? ""),
+  );
+  // One refused run (too old to re-run, or already restarted) must not hide
+  // the ones that did restart; only a total refusal is an error.
+  const results = await Promise.allSettled(
+    failed.map((run) => withAuthRetry((oct) => oct.actions.reRunWorkflowFailedJobs({ owner, repo, run_id: run.id }))),
+  );
+  const rerun = results.filter((result) => result.status === "fulfilled").length;
+  const refused = results.find((result) => result.status === "rejected");
+  if (rerun === 0 && refused) throw refused.reason;
+  return { rerun };
 }
 
 /** CI checks + deploy/preview statuses for a PR's head commit. Combines
@@ -2178,6 +2253,8 @@ export async function getPrChecks(opts: {
     ["pulls.get", owner, repo, opts.prNumber],
   );
   const sha = (pr.data as { head: { sha: string } }).head.sha;
+  const base = (pr.data as { base?: { ref?: string } }).base?.ref;
+  const requiredNames = base ? requiredCheckNames(owner, repo, base).catch(() => null) : Promise.resolve(null);
   const [runs, statuses] = await Promise.all([
     withAuthRetry((oct) =>
       oct.checks.listForRef({ owner, repo, ref: sha, per_page: 100 }),
@@ -2200,6 +2277,7 @@ export async function getPrChecks(opts: {
     detailsUrl: c.details_url ?? c.html_url ?? null,
     startedAt: c.started_at ? new Date(c.started_at).getTime() : null,
     completedAt: c.completed_at ? new Date(c.completed_at).getTime() : null,
+    rerunnable: c.app?.slug === "github-actions",
   }));
   // Commit statuses: keep only the latest per context (the API returns
   // newest-first). Surface deploy-like contexts as deployment cards.
@@ -2226,6 +2304,13 @@ export async function getPrChecks(opts: {
       });
     }
   }
+  const required = await requiredNames;
+  let expected: Array<{ name: string }> | undefined;
+  if (required) {
+    for (const check of checks) check.required = required.has(check.name);
+    const reported = new Set(checks.map((check) => check.name));
+    expected = [...required].filter((name) => !reported.has(name)).map((name) => ({ name }));
+  }
   const isPass = (c: PrCheck) =>
     c.conclusion === "success" ||
     c.conclusion === "neutral" ||
@@ -2242,6 +2327,7 @@ export async function getPrChecks(opts: {
     passed: checks.filter(isPass).length,
     failed: checks.filter(isFail).length,
     pending: checks.filter((c) => c.conclusion === null).length,
+    ...(expected ? { expected } : {}),
   };
 }
 

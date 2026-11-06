@@ -4616,6 +4616,24 @@ describe("WorkspaceService", () => {
     ).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
   });
 
+  it.each(["", "HEAD", "a".repeat(39), "A".repeat(40), `--${"a".repeat(38)}`])(
+    "refuses to re-run checks for a head that isn't a full commit (%j)",
+    async (headSha) => {
+      await expect(
+        svc.handle("gh.prRerunFailed", { workspaceId: LOCAL_MAIN_WORKSPACE_ID, prNumber: 7, headSha }),
+      ).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+    },
+  );
+
+  it("hands a full head to the GitHub re-run", async () => {
+    // The op must reach the GitHub client; a missing export fails as a TypeError.
+    const error = await svc
+      .handle("gh.prRerunFailed", { workspaceId: LOCAL_MAIN_WORKSPACE_ID, prNumber: 7, headSha: "a".repeat(40) })
+      .catch((caught: unknown) => caught);
+    expect(error).not.toBeInstanceOf(TypeError);
+    expect(error).toMatchObject({ code: expect.any(String) });
+  });
+
   it("classifies read vs write ops (incl. GitHub PR mutations)", () => {
     expect(svc.isWriteOp("git.commit")).toBe(true);
     expect(svc.isWriteOp("git.push")).toBe(true);
@@ -4626,6 +4644,7 @@ describe("WorkspaceService", () => {
     expect(svc.isWriteOp("gh.prCreate")).toBe(true);
     expect(svc.isWriteOp("gh.prMerge")).toBe(true);
     expect(svc.isWriteOp("gh.prComment")).toBe(true);
+    expect(svc.isWriteOp("gh.prRerunFailed")).toBe(true);
     expect(svc.isWriteOp("gh.prGet")).toBe(false);
     expect(svc.isWriteOp("gh.authStatus")).toBe(false);
   });

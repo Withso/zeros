@@ -151,7 +151,11 @@ export class CloudGithubHttp {
       return null;
     }
     const reader = response.body?.getReader();
-    if (!reader) throw unavailable();
+    if (!reader) {
+      // A write may answer 201 with no body at all (re-running workflow jobs).
+      if (mutation) return null;
+      throw unavailable();
+    }
     let text = "",
       bytes = 0;
     const decoder = new TextDecoder();
@@ -182,6 +186,8 @@ export class CloudGithubHttp {
     // replaying it. Protected reads always revalidate before releasing data.
     if (!mutation) await this.options.assertCurrent();
     if (input.text) return text;
+    // Some writes answer 201 with no body (re-running workflow jobs).
+    if (mutation && text.trim() === "") return null;
     try {
       return JSON.parse(text) as unknown;
     } catch {

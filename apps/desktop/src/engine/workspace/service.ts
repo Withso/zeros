@@ -129,6 +129,7 @@ import {
   fetch,
   getAuthStatus,
   getPrChecks,
+  rerunFailedPrChecks,
   getPrCommits,
   getPrReviews,
   getRepositoryOwnerAvatar,
@@ -578,6 +579,7 @@ const WRITE_OPS = new Set<string>([
   "gh.prMarkReady",
   "gh.prMerge",
   "gh.prComment",
+  "gh.prRerunFailed",
   // Detect + backfill a workspace's PR (prNumber/prState/prUrl) from GitHub for
   // PRs opened outside the engine (agent `gh pr create`, terminal, github.com).
   // Writes only the workspace's OWN row from real GitHub state (no client-
@@ -4799,6 +4801,16 @@ export class WorkspaceService {
           workspaceId: reqStr(params, "workspaceId"),
           prNumber: reqNum(params, "prNumber"),
         });
+      case "gh.prRerunFailed": {
+        const headSha = reqStr(params, "headSha");
+        if (!/^[a-f0-9]{40}$/.test(headSha))
+          throw new GitError({ code: "VALIDATION_FAILED", message: "gh.prRerunFailed requires the head commit it re-runs" });
+        return rerunFailedPrChecks({
+          workspaceId: reqStr(params, "workspaceId"),
+          prNumber: reqNum(params, "prNumber"),
+          headSha,
+        });
+      }
       case "gh.prCommits":
         return getPrCommits({
           workspaceId: reqStr(params, "workspaceId"),

@@ -1572,6 +1572,18 @@ export async function bridgeGhPrChecks(
   })) as PrChecksResult;
 }
 
+export async function bridgeGhPrRerunFailed(
+  bridge: RuntimeClient,
+  args: { workspaceId: string; prNumber: number; headSha: string },
+): Promise<{ rerun: number }> {
+  return (await workspaceOp(
+    bridge,
+    "gh.prRerunFailed",
+    { workspaceId: args.workspaceId, prNumber: args.prNumber, headSha: args.headSha },
+    NETWORK_GIT_TIMEOUT_MS,
+  )) as { rerun: number };
+}
+
 export async function bridgeGhPrCommits(
   bridge: RuntimeClient,
   args: { workspaceId: string; prNumber: number },

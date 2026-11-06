@@ -249,6 +249,13 @@ export class CloudGithubPrService {
         );
         result = remembered;
         break;
+      case "gh.prRerunFailed":
+        result = await api.rerunFailed(
+          canonical,
+          request.params.prNumber,
+          request.params.headSha,
+        );
+        break;
       case "gh.prMerge":
         result = await api.merge(
           canonical,

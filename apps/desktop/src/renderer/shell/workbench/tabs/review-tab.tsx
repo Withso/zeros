@@ -206,7 +206,7 @@ export function ReviewView({
   gitStatus?: React.ReactNode;
 }) {
   const filesKey = reviewFilesKey(provider.cacheKey, workspaceId, prNumber, baseBranch);
-  const { snap, refresh, postComment, merge, markReady, updateBody } = useReviewLiveData({
+  const { snap, refresh, postComment, merge, markReady, updateBody, rerunFailedChecks } = useReviewLiveData({
     provider,
     workspaceId,
     prNumber,
@@ -529,6 +529,17 @@ export function ReviewView({
     [merge, prNumber, repoSlug],
   );
 
+  const runRerunFailed = useCallback(async () => {
+    if (!rerunFailedChecks) return;
+    try {
+      const rerun = await rerunFailedChecks();
+      if (rerun > 0) toast.success(rerun === 1 ? "Re-running 1 failed run" : `Re-running ${rerun} failed runs`);
+      else toast.info("No failed runs to re-run", { description: "These checks come from apps Zeros can’t restart." });
+    } catch (e) {
+      toast.error("Couldn’t re-run the failed checks", { description: humanGitError(e) });
+    }
+  }, [rerunFailedChecks]);
+
   const runMarkReady = useCallback(async () => {
     setBusy(true);
     try {
@@ -687,6 +698,7 @@ export function ReviewView({
               branch={branch || pr.headBranch}
               onAddToChat={addToChat}
               onRetry={() => void refresh()}
+              onRerunFailed={rerunFailedChecks ? runRerunFailed : undefined}
             />
           </div>
         )}

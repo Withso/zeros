@@ -46,6 +46,7 @@ import {
   bridgeGhAuthStatus,
   bridgeGhPrSync,
   bridgeGhPrChecks,
+  bridgeGhPrRerunFailed,
   bridgeGhPrCommits,
   bridgeGhPrReviews,
   bridgeGhPrCreate,
@@ -2099,6 +2100,10 @@ export interface PrCheck {
   /** Epoch ms — check-run timing (null for commit statuses). */
   startedAt: number | null;
   completedAt: number | null;
+  /** The base branch requires it; absent when that couldn't be read. */
+  required?: boolean;
+  /** A GitHub Actions run, which Re-run failed can start again. */
+  rerunnable?: boolean;
 }
 
 export interface PrDeployment {
@@ -2115,6 +2120,8 @@ export interface PrChecksResult {
   passed: number;
   failed: number;
   pending: number;
+  /** Required checks that haven't reported on the head commit. */
+  expected?: Array<{ name: string }>;
 }
 
 export interface PrCommitAuthor {
@@ -2164,6 +2171,18 @@ export async function ghPrChecks(args: {
   });
   inflightPrChecks.set(key, request);
   return request;
+}
+
+/** Start the failed GitHub Actions jobs on `headSha` again. Refused when the
+ *  pull request has moved on, so it only re-runs the failures shown. */
+export async function ghPrRerunFailed(args: {
+  workspaceId: string;
+  prNumber: number;
+  headSha: string;
+}): Promise<{ rerun: number }> {
+  const cloud = cloudTargetForValue(args.workspaceId);
+  if (cloud) return requestCloudGithubPr(cloud, "gh.prRerunFailed", args) as Promise<{ rerun: number }>;
+  return bridgeGhPrRerunFailed(requireBridge("re-run the failed checks"), args);
 }
 
 export async function ghPrCommits(args: {

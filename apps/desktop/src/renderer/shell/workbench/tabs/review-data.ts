@@ -443,6 +443,9 @@ export interface ReviewLiveData {
   markReady: () => Promise<void>;
   /** Absent when the provider can't write the description. */
   updateBody: ((body: string) => Promise<void>) | null;
+  /** Start the head commit's failed runs again and reread the checks; resolves
+   *  to how many runs restarted. Absent when the provider can't. */
+  rerunFailedChecks: (() => Promise<number>) | null;
 }
 
 /** Warm or revalidate one exact PR snapshot from pointer/focus intent. Calls
@@ -482,6 +485,8 @@ export function peekReviewLiveData(
 ): ReviewSnapshot {
   return entryFor(reviewCacheKey(provider, workspaceId, prNumber)).snap;
 }
+
+const RERUN_REREAD_MS = 4_000;
 
 export function useReviewLiveData(args: {
   provider: ReviewProvider;
@@ -703,5 +708,36 @@ export function useReviewLiveData(args: {
     [provider, key, refresh],
   );
 
-  return { snap, refresh, postComment, merge, markReady, updateBody: provider.updateBody ? writeBody : null };
+  const rerunFailed = useCallback(
+    async () => {
+      const entry = entryFor(key);
+      if (!currentReviewEntry(provider, target, key, entry)) throw new Error("Your GitHub connection changed. Refresh before continuing.");
+      // The head the reader saw: a push since then refuses rather than
+      // restarting runs of commits the checks list no longer shows.
+      const headSha = entry.snap.pr?.headSha;
+      if (!headSha) throw new Error("Refresh the pull request before re-running its checks.");
+      const { rerun } = await provider.rerunFailedChecks!(target, headSha);
+      if (currentReviewEntry(provider, target, key, entry)) {
+        void refreshChecksOnly(provider, target, key);
+        // GitHub queues the restarted runs a moment after it accepts them; a
+        // second read finds them running, which arms the fast checks lane.
+        setTimeout(() => {
+          if (currentReviewEntry(provider, target, key, entry)) void refreshChecksOnly(provider, target, key);
+        }, RERUN_REREAD_MS);
+      }
+      return rerun;
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- target is derived from key
+    [provider, key],
+  );
+
+  return {
+    snap,
+    refresh,
+    postComment,
+    merge,
+    markReady,
+    updateBody: provider.updateBody ? writeBody : null,
+    rerunFailedChecks: provider.rerunFailedChecks ? rerunFailed : null,
+  };
 }
