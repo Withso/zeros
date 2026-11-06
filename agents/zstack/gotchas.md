@@ -230,7 +230,12 @@ revision in the same checkout and compare failing test names.
   `stopped` added about 13 s of lag before the lifecycle began (52.8 s versus
   22.5 s). Read the per-phase `[cloud-v2] timing` lines and the VM journal
   (`journalctl -b`) before choosing an optimization.
-- Do not judge whether a PlanetScale table has data from `pg_stat_user_tables`
-  counters, which reset (`schema_migrations` showed 0 while holding 216 rows), or
-  from MCP `count(*)`, which row-level security can hide. Use
-  `pg_relation_size(oid) > 0`.
+- Nothing cheap proves whether a PlanetScale table holds rows:
+  - `pg_stat_user_tables` counters reset (`schema_migrations` showed 0 while it
+    held 216 rows);
+  - MCP `count(*)` runs under row-level security;
+  - `pg_relation_size` keeps an emptied heap's page, and partitioned parents
+    have no storage.
+
+  Read rows with an authorized role whose row-level security visibility is
+  known, or report presence as unknown.
