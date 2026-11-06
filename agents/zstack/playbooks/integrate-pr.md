@@ -43,10 +43,12 @@ session itself.
    added later starts a new CI run for the same head and cancels the running
    one, whose roll-ups then fail with "Invalid … selection/result"; read the
    newest run instead.
-   CI-definition PRs need the owner's merge. Before arming, wait for the PR's
-   `CodeQL` alert check (separate from the `codeql` job). It is not required,
-   so auto-merge won't wait for it; a new high alert, even in a test, is fixed
-   before merge.
+   CI-definition PRs need the owner's merge. Auto-merge stays on when an armed
+   PR gains a CI-definition path, so disarm it before that push (GraphQL
+   `disablePullRequestAutoMerge`) and confirm `autoMergeRequest` is null.
+   Before arming, wait for the PR's `CodeQL` alert check (separate from the
+   `codeql` job). It is not required, so auto-merge won't wait for it; a new
+   high alert, even in a test, is fixed before merge.
    - **Stacked PRs.** After the base PR squash-merges, the next PR in the stack
      conflicts (add/add) on files the base created and the stack later changed.
      Replay only that PR's own commits onto `main`

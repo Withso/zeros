@@ -11,7 +11,9 @@ description: "Choose and run the right checks for a Zeros change, Local and clou
 
 Run the whole test directories you touched, then the static gates:
 `pnpm typecheck`, `pnpm lint`, `pnpm check:ui`, `pnpm test:git` (filtered to the
-touched area, under `umask 022`) and `pnpm check:secrets`.
+touched area, under `umask 022`) and `pnpm check:secrets`. `pnpm lint` exits 0
+with warnings, so read its list: fix a warning in a touched file at its cause,
+never with a disable comment, unless the merge base already has it.
 
 | Touched | Also run |
 |---|---|
@@ -102,6 +104,12 @@ Principle 16 applies to every claim.
 - Every time in a record comes from a clock read: write it with
   `$(date -u +%H:%M)` inside the command that appends it.
 - Don't claim macOS-only checks from Linux.
+- macOS UI smoke is not the Linux gate. Run one `--shard=k/3` at a time (a
+  crash ends its shard; stub the crashing scenario through
+  `runSmokeScenarios`' `loadModule` to reach the rest) and compare each failure
+  with the merge base in a worktree outside `.context/` that runs its own
+  `pnpm install --frozen-lockfile`. A failure the base reproduces is existing
+  and left to CI's Linux shards; any other blocks handoff.
 
 ## When a check fails
 

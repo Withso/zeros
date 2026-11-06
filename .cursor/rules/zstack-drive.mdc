@@ -89,6 +89,13 @@ With Playwright, call `page.screenshot({ path, fullPage: true })` after the
 assertion. Record the route/feature, host, owner/placement, assertion result,
 source revision and whether transport was real or fixture-backed. A screenshot
 alone does not prove persistence, a completed provider turn or a live VM.
+A hidden window pauses toast timers, animation frames and passive reads, so
+check `document.visibilityState` before reporting a toast, spinner or read that
+lingers. Bring the instance forward with `open -b <its CFBundleIdentifier>`,
+confirm no second main process started, and count live toasts with
+`[data-sonner-toast]:not([data-removed="true"])`, not from screenshots. Pick a
+model with the keyboard: a click at an option's centre can hit its Set as
+default control.
 Capture the task's surface only; omit credentials, private profiles and raw
 provider/session dumps. Native performance claims additionally need the
 measurements required by `zstack-verify`.
