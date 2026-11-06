@@ -27,7 +27,7 @@ export type CloudV2WorkerRouteDeps = {
   timing?: (record: CloudV2TimingRecord) => void;
   logger?: Pick<Console, "warn">;
   waitForPrompts?(workspaceId: string, waitMs: number, signal: AbortSignal): { wait: Promise<void>; dispose(): void };
-  config(workspace: CloudV2Workspace, mode?: "admission" | "continuation"): Promise<ConfigFrame>;
+  config(workspace: CloudV2Workspace, mode?: "admission" | "continuation", proof?: CloudSourceProof): Promise<ConfigFrame>;
   authorizeSource?(workspace: CloudV2Workspace): Promise<void>;
   continueSource?(workspace: CloudV2Workspace, proof?: CloudSourceProof): Promise<CloudSourceContinuation>;
   githubToken(workspace: CloudV2Workspace, purpose?: "git" | "gh", failedTokenSha256?: string): Promise<{ token: string; expiresAt: number }>;
@@ -76,7 +76,15 @@ async function configuration(deps: CloudV2WorkerRouteDeps, workspace: CloudV2Wor
   for (let attempt = 0; attempt < 8; attempt++) {
     const before = await currentSession(deps, token, bootId, handoff);
     if (!before) throw unauthorized();
-    const config = await deps.config(before, mode);
+    let config: ConfigFrame;
+    try { config = await deps.config(before, mode, before); }
+    catch (error) {
+      if (!(error instanceof HttpError) || error.code !== "github_authorization_changed") throw error;
+      const current = await currentSession(deps, token, bootId, handoff);
+      if (!current || current.accessEpoch !== before.accessEpoch) throw unauthorized();
+      if (current.loginRevision === before.loginRevision) throw error;
+      continue;
+    }
     const after = await currentSession(deps, token, bootId, handoff);
     if (!after || before.accessEpoch !== after.accessEpoch) throw unauthorized();
     const revision = before.loginRevision;

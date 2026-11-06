@@ -4,6 +4,7 @@
 import { postgresNotificationSubscription } from "../postgres-notifications.js";
 import { randomUUID } from "node:crypto";
 import type pg from "pg";
+import { withSystemTx } from "../db.js";
 import type { PostgresSecurityEventBroker } from "../security-events.js";
 import type { Config } from "../config.js";
 import { HttpError } from "../authz.js";
@@ -118,23 +119,20 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
 
   const workerConfig = async (workspace: CloudV2Workspace & Partial<Pick<CloudV2WorkerSession, "loginRevision">>, mode: "admission" | "continuation" = "admission",
     proof?: CloudSourceProof): Promise<ConfigFrame> => {
-    // HTTP and relay admission authorize before entering; configuration still
-    // rechecks the source after credential and repository reads settle.
-    const authorize = () => mode === "continuation" ? continueSource(workspace, proof) : authorizeSource(workspace);
     const proxy = async () => {
       const issued = await store.issueToken({ workspaceId: workspace.id, kind: "proxy", userId: null, ttlMs: PROXY_TOKEN_TTL_MS });
       return { token: issued.token, expiresAt: issued.expiresAt.getTime() };
     };
-    const [selectedLogins, setup, baseCommit, { repositoryBinding, gitIdentity }, environment] = await Promise.all([
-      logins.all(workspace.creatorUserId, workspace.organizationId),
-      github.workspaceSetup(workspace, computers),
-      store.baseCommit(workspace.id),
-      github.workerIdentity(workspace, mode),
-      environments.resolve(workspace),
-    ]);
+    const access = await github.workerConfiguration(workspace, mode, proof), { repositoryBinding } = access;
+    const setup = await github.workspaceSetup(workspace, computers);
+    const { selectedLogins, baseCommit, environment, mcpServers } = await withSystemTx(pool, async tx => ({
+      selectedLogins: await logins.all(workspace.creatorUserId, workspace.organizationId, tx),
+      baseCommit: await store.baseCommit(workspace.id, tx),
+      environment: await environments.resolve(workspace, tx),
+      mcpServers: mcp ? await mcp.store.resolve(workspace.organizationId, workspace.creatorUserId, workspace.repository, repositoryBinding, tx) : undefined,
+    }), { consistentRead: true });
     const agents = await cloudV2AgentConfig(selectedLogins, proxyBase, proxy);
-    const mcpServers = mcp ? await mcp.store.resolve(workspace.organizationId, workspace.creatorUserId, workspace.repository, repositoryBinding) : undefined;
-    await authorize();
+    const gitIdentity = await access.gitIdentity();
     return {
       t: "config",
       gitIdentity,
@@ -144,7 +142,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
       agentInteractions: 1,
       runtimeUpdate: 1,
       ...(v2.promptOutbox ? { promptOutbox: 1 as const } : {}),
-      loginRevision: workspace.loginRevision ?? await store.loginRevision(workspace.id) ?? "0",
+      loginRevision: access.loginRevision,
       workspace: {
         id: workspace.id, organizationId: workspace.organizationId, repository: workspace.repository,
         checkoutPath: `${CLOUD_V2_HOME}/${workspace.repository}`, branch: workspace.branch, baseBranch: workspace.baseBranch,

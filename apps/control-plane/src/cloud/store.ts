@@ -687,9 +687,10 @@ export class CloudV2Store {
 
   /** Offered during initial configuration and retries until a checkpoint
    * confirms that the workspace branch already exists. */
-  async baseCommit(id: string): Promise<string | null> {
-    const { rows } = await withSystemTx(this.pool, tx => tx.query<{ base_commit: string | null }>(
-      `SELECT base_commit FROM cloud_v2_workspaces WHERE id=$1 AND state IN ('creating','starting','running') AND checkpoint_object IS NULL`, [id]));
+  async baseCommit(id: string, transaction?: Tx): Promise<string | null> {
+    const query = (tx: Tx) => tx.query<{ base_commit: string | null }>(
+      `SELECT base_commit FROM cloud_v2_workspaces WHERE id=$1 AND state IN ('creating','starting','running') AND checkpoint_object IS NULL`, [id]);
+    const { rows } = await (transaction ? query(transaction) : withSystemTx(this.pool, query));
     return rows[0]?.base_commit ?? null;
   }
 

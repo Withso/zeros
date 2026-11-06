@@ -171,8 +171,8 @@ export class CloudEnvironments {
     });
   }
 
-  async resolve(workspace: CloudV2Workspace): Promise<CloudWorkspaceEnvironment | undefined> {
-    return withSystemTx(this.pool, async tx => {
+  async resolve(workspace: CloudV2Workspace, transaction?: Tx): Promise<CloudWorkspaceEnvironment | undefined> {
+    const read = async (tx: Tx): Promise<CloudWorkspaceEnvironment | undefined> => {
       const row = (await tx.query<{ id: string; repository_id: string; revision: string; envelope: CloudEnvironmentEnvelope }>(
         `SELECT v.id,p.repository_id::text,v.revision::text,v.envelope FROM cloud_workspace_environment_pins p
          JOIN cloud_v2_workspaces w ON w.id=p.workspace_id AND w.org_id=p.org_id AND w.creator_user_id=p.owner_user_id
@@ -189,7 +189,8 @@ export class CloudEnvironments {
         return { versionId: row.id, repositoryId: row.repository_id, ...openCloudEnvironment(row.envelope,
           { organizationId: workspace.organizationId, userId: workspace.creatorUserId, repositoryId: row.repository_id, versionId: row.id, revision: Number(row.revision) }, this.keys) };
       } catch { throw unreadable(); }
-    });
+    };
+    return transaction ? read(transaction) : withSystemTx(this.pool, read);
   }
 
   async report(token: string, bootId: string, raw: unknown): Promise<void> {

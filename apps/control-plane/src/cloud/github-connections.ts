@@ -19,6 +19,7 @@ import {
   CloudGithubConnectionStore,
   type CloudGithubConnectionScope,
   type CloudGithubAccount,
+  type CloudGithubCredentialSnapshot,
 } from "./github-connections-store.js";
 import {
   CloudGithubCredentialSchema,
@@ -170,6 +171,11 @@ export class CloudGithubConnections {
       }
       throw error;
     }
+  }
+  async workerProfile(credential: CloudGithubCredentialSnapshot, assertCurrent: () => Promise<void>) {
+    const identity = await this.identity(credential.material.accessToken, assertCurrent);
+    if (identity.id !== credential.identity.id) throw changed();
+    return identity;
   }
   async connectPat(
     scope: CloudGithubConnectionScope,
