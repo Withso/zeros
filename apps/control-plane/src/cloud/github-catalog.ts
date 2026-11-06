@@ -31,7 +31,7 @@ export function createCloudGithubCatalog(deps: {
     const unavailable = new Map<string, CloudGithubUnavailableReason>();
     for (const row of rows) {
       const key = JSON.stringify([row.organizationId, row.creatorUserId]);
-      const group = groups.get(key) ?? { scope: { organizationId: row.organizationId, userId: row.creatorUserId }, rows: [], authority: new Map() };
+      const group: ScopeRead = groups.get(key) ?? { scope: { organizationId: row.organizationId, userId: row.creatorUserId }, rows: [], authority: new Map() };
       group.rows.push(row); groups.set(key, group);
     }
     await Promise.all([...groups.values()].map(async group => {
