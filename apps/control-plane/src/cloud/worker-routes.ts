@@ -138,13 +138,15 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
       throw new HttpError(409, "worker_runtime_mismatch", "Worker runtime requires an update");
     const workspace = await deps.store.beginWorkerHello(token, input.bootId);
     if (!workspace) throw unauthorized();
+    const configStarted = Date.now();
     const config = await configuration(deps, workspace, token, input.bootId, workerFeatures(c));
+    const configMs = Math.max(0, Date.now() - configStarted);
     const ready = await deps.store.acceptWorkerHello(token, input.bootId, {
       accessEpoch: workspace.accessEpoch, loginRevision: config.loginRevision ?? workspace.loginRevision,
     });
     if (!ready) throw unauthorized();
     if (workerFeatures(c).has("runtime-update-v1")) await deps.runtimeHandoffs?.recordRuntime(token, input.bootId, input.runtimeSha256);
-    if (ready.helloTiming) emitCloudV2Timing(deps.timing, { workspaceId: ready.id.slice(0, 8), phase: "worker_hello", ...ready.helloTiming });
+    if (ready.helloTiming) emitCloudV2Timing(deps.timing, { workspaceId: ready.id.slice(0, 8), phase: "worker_hello", ...ready.helloTiming, configMs });
     return c.json({ config });
   });
   app.post(`${CLOUD_V2_WORKER_API}/runtime`, async c => {
