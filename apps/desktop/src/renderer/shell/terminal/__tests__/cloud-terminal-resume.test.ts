@@ -33,7 +33,7 @@ function harness(cwd = folder, engine = "new-engine", visible = true, commandsRa
     setReadPending: vi.fn(), setReadFailure: vi.fn(), setHasScrollback: vi.fn(), markExited: vi.fn(), markAlive: vi.fn(),
     useTerminalStore: { getState: () => ({ sessions: [row] }) }, isCloudWorkspace, parseCloudWorkspaceKey, managed: true,
     cloudWorkspaceDocument: () => ({ status: "ready", capabilities: { canWrite: true }, deletedAt: null, error: null }),
-    cloudCommandsRan: new Set(commandsRan ? ["shell"] : []), RESUMED_LINE,
+    cloudCommandsRan: new Set(commandsRan ? ["shell"] : []), RESUMED_LINE, resumeHoldRef: { current: null },
   };
   vm.runInNewContext(code, context);
   context.row = row;
@@ -99,3 +99,34 @@ describe("cloud terminal resume", () => {
     expect(h.ptyCreate).not.toHaveBeenCalled(); expect(h.setReadFailure).not.toHaveBeenCalledWith(expect.any(Error));
   });
 });
+
+describe("cloud terminal resume races (P review of #859)", () => {
+  it("does not announce a restart when a peer wins between registry read and create", async () => {
+    const h = harness();
+    h.ptyCreate.mockResolvedValue({ cols: 80, rows: 24, reattached: true, replay: "Peer shell" });
+    await h.actions.spawn(h.term, true);
+    expect(h.term.writeln).not.toHaveBeenCalled();
+  });
+  it("does not consume a resume announcement when hidden during registry read", async () => {
+    const h = harness();
+    let release!: (terms: unknown[]) => void;
+    h.ptyTerminals.mockReturnValue(new Promise(resolve => { release = resolve; }));
+    const pending = h.actions.spawn(h.term, true);
+    h.visibleRef.current = false;
+    release([]);
+    await pending;
+    expect(h.ptyCreate).not.toHaveBeenCalled();
+    expect(h.term.writeln).not.toHaveBeenCalled();
+    expect(h.cloudCommandsRan.has("shell")).toBe(true);
+  });
+  it("writes the restored line before output the new shell produced during create", async () => {
+    const h = harness();
+    h.ptyCreate.mockImplementation(async () => { h.resumeHoldRef.current?.push("prompt$ "); return { cols: 80, rows: 24, reattached: false }; });
+    const order: string[] = [];
+    h.term.writeln.mockImplementation((line: string) => order.push(line));
+    h.term.write.mockImplementation((data: string) => order.push(data));
+    await h.actions.spawn(h.term, true);
+    expect(order).toEqual([RESUMED_LINE, "prompt$ "]);
+  });
+});
+

@@ -174,6 +174,8 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
   const fitRef = useRef<FitAddon | null>(null);
   const trySpawnRef = useRef<((allowFallback?: boolean) => void) | null>(null);
   const spawnStartedRef = useRef(false);
+  /** Output held while a resumed shell's announcement waits on its create. */
+  const resumeHoldRef = useRef<string[] | null>(null);
   const resizeSchedulerRef = useRef<ReturnType<
     typeof createTerminalResizeScheduler
   > | null>(null);
@@ -533,7 +535,6 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
         if (xtermRef.current !== term) return;
         resuming ||= canResumeCloudTerminal();
         if (terms === null) throw new Error("Terminal connection unavailable");
-        if (!terms.some(t => t.sessionId === sessionId && t.exited !== true)) announceResume();
         const live = terms.some(
           (t) => t.sessionId === sessionId && t.exited !== true,
         );
@@ -566,14 +567,26 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
         reconnectPendingRef.current = true;
         return;
       }
-      const info = await ptyCreate({
-        sessionId,
-        cwd,
-        cols,
-        rows,
-        ephemeral,
-        loginProvider,
-      });
+      // A resumed shell that ran commands announces itself before its new
+      // prompt. Hold output until this client's own create settles, so a peer's
+      // reattach or a failed create never prints the line or loses it.
+      if (resuming && cloudCommandsRan.has(sessionId)) resumeHoldRef.current = [];
+      let info: Awaited<ReturnType<typeof ptyCreate>>;
+      try {
+        info = await ptyCreate({
+          sessionId,
+          cwd,
+          cols,
+          rows,
+          ephemeral,
+          loginProvider,
+        });
+        if (info && !info.reattached && xtermRef.current === term) announceResume();
+      } finally {
+        const held = resumeHoldRef.current;
+        resumeHoldRef.current = null;
+        if (held && xtermRef.current === term) for (const data of held) term.write(data);
+      }
       if (xtermRef.current !== term) return;
       if (!info) {
         setReadFailure(new Error("Terminal connection unavailable"));
@@ -610,7 +623,6 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
       if (resuming) {
         markAlive(sessionId);
         agentLaunchedRef.current = true; // Resume a shell; never replay a launch command.
-        if (!info.reattached) announceResume();
       }
       // If the main-side PTY's dims drifted from what we just measured
       // (re-attach into a session that was resized in another renderer),
@@ -730,6 +742,7 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
       // replay. Appending live bytes now would duplicate that history. Once
       // attachment starts, continue buffering output through later hides.
       if (!spawnStartedRef.current) return;
+      if (resumeHoldRef.current) { resumeHoldRef.current.push(data); return; }
       xtermRef.current?.write(data);
     });
   }, [sessionId]);
