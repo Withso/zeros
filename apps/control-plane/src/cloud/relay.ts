@@ -343,7 +343,7 @@ export class CloudV2Relay {
         else room.wakeRequested = false;
         // A stopped Boat route hangs instead of refusing; never dial it. A
         // bound boot becomes dialable only after hello configuration succeeds.
-        const bootId = room.stops.size && route.stopBootIds?.length ? route.stopBootIds[attempt % route.stopBootIds.length] : route.bootId;
+        const bootId = room.stops.size && route.stopBootIds?.length ? route.stopBootIds[attempts % route.stopBootIds.length] : route.bootId;
         if (route.url && route.token && bootId && (route.workspace.state === "running" || (route.workspace.state === "stopping" && room.stops.size))) {
           const dialStarted = this.deps.now?.() ?? Date.now();
           ws = await dialWorker(route, this.deps.mintWorkerToken(room.workspace.id, bootId));
