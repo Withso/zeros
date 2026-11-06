@@ -1,0 +1,9 @@
+{
+  "id": "cloud-workspace-unchanged-metadata",
+  "kind": "replay",
+  "area": "cloud-worker",
+  "fixedBy": "pr:876",
+  "symptom": "A cold cloud resume spent 6.5 seconds in WorkspaceService.open metadata persistence and another 9.3 seconds in the same persistence during reconfiguration, although the saved workspace metadata was unchanged. The temp-file write and file/directory fsyncs blocked ENGINE_READY and the first workspace read on a restored disk.",
+  "rule": "Principles 4, 13, 14 and 16: measure persistence through the real worker boundary, compare against confirmed serialized state inside the metadata queue, and keep every actual change durable before publication. Invalidate the saved comparison before write I/O: directory sync can fail after rename, so even a later request for the old state must repair disk.",
+  "check": "pnpm --dir apps/cloud-worker exec vitest run src/workspace/__tests__/metadata-persistence.test.ts"
+}
