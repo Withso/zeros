@@ -191,6 +191,51 @@ database("cloud GitHub composition", () => {
     expect(samples, JSON.stringify(samples)).toSatisfy(rows => rows.every((row: typeof samples[number]) => row.transactions <= 10 && row.githubCalls <= 2));
   });
 
+  it.each(["gh.prGet", "gh.prChecks"] as const)("restarts an expired PR read through fresh source admission: %s", async op => {
+    const { workspace } = await fixture();
+    await services.authorizeSource(await workspaces.get(workspace.id, userId));
+    const app = new Hono();
+    app.use("*", async (c, next) => { c.set("user", { id: userId } as never); await next(); });
+    app.route("/", createCloudV2Routes({ store: workspaces, computers: new CloudV2Computers(pool),
+      installedRepositories: async () => null, remoteHead: async () => head,
+      bridgeBaseUrl: "wss://bridge.example.test", github: services }));
+    app.onError((error, c) => {
+      if (error instanceof HttpError) return c.json({ error: { code: error.code } }, error.status);
+      throw error;
+    });
+    let reads = 0, admissions = 0;
+    fetcher.mockClear();
+    fetcher.mockImplementation(async (value, init) => {
+      const path = new URL(String(value)).pathname;
+      if (path.endsWith(op === "gh.prGet" ? "/pulls/7" : "/check-runs")) {
+        reads++;
+        if (reads === 1) {
+          expect((await pool.query(`UPDATE cloud_github_source_verifications
+            SET verified_at=clock_timestamp()-interval '31 seconds' WHERE org_id=$1 RETURNING repository_id`, [organizationId])).rowCount).toBe(1);
+        }
+        return Response.json(op === "gh.prGet" ? { ...pull(), title: reads === 1 ? "Discarded" : "Fresh", draft: reads === 1 } : {
+          total_count: 1, check_runs: [{ name: reads === 1 ? "Discarded" : "Fresh", status: "completed", conclusion: "success" }],
+        });
+      }
+      if (path.endsWith("/rules/branches/main") || path.endsWith("/statuses")) return Response.json([]);
+      if (path.endsWith("/branches/main")) return Response.json({});
+      if (path.endsWith("/branches")) admissions++;
+      return defaultFetch(value, init);
+    });
+    let cost: { transactions: number; githubCalls: number } | undefined;
+    const response = await observeTransactionTiming(() => app.request(`/v1/cloud-v2/workspaces/${workspace.id}/github`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ op, params: { prNumber: 7 } }),
+    }), summary => { cost = { transactions: summary.transactions, githubCalls: fetcher.mock.calls.length }; });
+    const body = await response.json();
+    console.info("PR expiry recovery cost", { op, ...cost, status: response.status, code: body.error?.code, reads, admissions });
+    expect(response.status, JSON.stringify(body)).toBe(200);
+    expect(body.result).toMatchObject(op === "gh.prGet" ? { title: "Fresh" } : { checks: [{ name: "Fresh" }] });
+    expect(reads).toBe(2);
+    expect(admissions).toBe(1);
+    expect((await pool.query("SELECT pr_state FROM cloud_v2_github_workspaces WHERE workspace_id=$1", [workspace.id])).rows[0].pr_state)
+      .toBe(op === "gh.prGet" ? "ready" : null);
+  });
+
   it("bounds warm worker GitHub credential requests while retaining source authorization", async () => {
     const f = await fixture(), workspace = await workspaces.get(f.workspace.id, userId);
     await services.authorizeSource(workspace);
@@ -272,11 +317,16 @@ database("cloud GitHub composition", () => {
     "fences a %s change while a PR read is in flight", async change => {
       const f = await fixture();
       await services.authorizeSource(await workspaces.get(f.workspace.id, userId));
-      let reached!: () => void, release!: () => void;
+      let reached!: () => void, release!: () => void, reads = 0;
       const reading = new Promise<void>(resolve => { reached = resolve; });
       const held = new Promise<void>(resolve => { release = resolve; });
       fetcher.mockImplementation(async (value, init) => {
-        if (new URL(String(value)).pathname.endsWith("/pulls/7")) { reached(); await held; }
+        if (new URL(String(value)).pathname.endsWith("/pulls/7")) {
+          reads++;
+          reached(); await held;
+          if (change === "expired observation" && reads > 1)
+            expect((await pool.query("UPDATE cloud_github_source_verifications SET verified_at=clock_timestamp()-interval '31 seconds' WHERE org_id=$1 RETURNING repository_id", [organizationId])).rowCount).toBe(1);
+        }
         return defaultFetch(value, init);
       });
       const pending = services.service.execute(f.workspace.id, userId, { op: "gh.prGet", params: { prNumber: 7 } })
@@ -302,10 +352,53 @@ database("cloud GitHub composition", () => {
         }
         release();
         expect(await pending).toMatchObject({ error: expect.any(Error) });
+        if (change === "expired observation") expect(reads).toBe(2);
         expect((await pool.query("SELECT pr_number FROM cloud_v2_github_workspaces WHERE workspace_id=$1", [f.workspace.id])).rows[0].pr_number).toBeNull();
       } finally { release(); await pending; }
     },
   );
+
+  it.each([
+    ["membership", "not_found"], ["connection", "github_authorization_changed"], ["checkout", "github_authorization_changed"],
+    ["denial", "github_cloud_access_denied"], ["backoff", "github_unavailable"],
+  ] as const)("refuses an expired read when %s changes during source admission", async (change, code) => {
+    const f = await fixture();
+    await services.authorizeSource(await workspaces.get(f.workspace.id, userId));
+    let reads = 0, admissions = 0;
+    fetcher.mockImplementation(async (value, init) => {
+      const path = new URL(String(value)).pathname;
+      if (path.endsWith("/pulls/7")) {
+        reads++;
+        expect((await pool.query("UPDATE cloud_github_source_verifications SET verified_at=clock_timestamp()-interval '31 seconds' WHERE org_id=$1 RETURNING repository_id", [organizationId])).rowCount).toBe(1);
+      }
+      if (path.endsWith("/branches")) {
+        admissions++;
+        if (change === "membership")
+          expect((await pool.query("DELETE FROM organization_members WHERE org_id=$1 AND user_id=$2 RETURNING user_id", [organizationId, userId])).rowCount).toBe(1);
+        if (change === "connection") {
+          const scope = { organizationId, userId };
+          await services.connections.store.save(scope, await services.connections.fingerprintFor(scope),
+            { id: "12", login: "contributor" }, { method: "pat", accessToken: "replacement-synthetic-pat", expiresAt: null });
+        }
+        if (change === "checkout")
+          await services.metadata.checkout(f.token, f.boot, { sequence: 2, branch: "other", baseBranch: "main", headSha: "c".repeat(40) });
+        if (change === "denial") return new Response(null, { status: 403 });
+        if (change === "backoff") return new Response(null, { status: 503, headers: { "retry-after": "60" } });
+      }
+      return defaultFetch(value, init);
+    });
+    await expect(services.service.execute(f.workspace.id, userId, { op: "gh.prGet", params: { prNumber: 7 } }))
+      .rejects.toMatchObject({ code });
+    expect(reads).toBe(1);
+    expect(admissions).toBe(1);
+    expect((await pool.query("SELECT pr_number FROM cloud_v2_github_workspaces WHERE workspace_id=$1", [f.workspace.id])).rows[0].pr_number).toBeNull();
+    if (change === "backoff") {
+      fetcher.mockClear();
+      await expect(services.service.execute(f.workspace.id, userId, { op: "gh.prGet", params: { prNumber: 7 } }))
+        .rejects.toMatchObject({ code });
+      expect(fetcher).not.toHaveBeenCalled();
+    }
+  });
 
   it.each([503, 403] as const)("retains existing workspace access across replicas during GitHub status %s", async status => {
     const f = await fixture();

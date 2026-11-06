@@ -114,6 +114,7 @@ function fixture() {
     } }),
     deps,
     fetch,
+    assertCurrent,
     setContext: (next: Partial<CloudGithubPrContext>) => {
       context = { ...context, ...next };
     },
@@ -166,6 +167,72 @@ describe("cloud PR service authority", () => {
       }),
     ).resolves.toMatchObject({ authority, result: { number: 7 } });
     expect(deps.mutate).not.toHaveBeenCalled();
+  });
+  it.each(["organization", "checkout", "repository", "missing repository", "connection"] as const)(
+    "rejects a %s change when an expired read is admitted again", async change => {
+      const f = fixture(), access = await f.deps.access();
+      f.deps.access.mockClear();
+      if (change === "connection") f.deps.access.mockResolvedValueOnce(access)
+        .mockResolvedValueOnce({ ...access, generation: "connection-2" });
+      f.assertCurrent.mockImplementationOnce(async () => {
+        if (change === "organization") f.setContext({ organizationId: "other" });
+        if (change === "checkout") f.setContext({ branch: "other", revision: "boot-1:2" });
+        if (change === "repository") f.setContext({ repositoryId: "99" });
+        if (change === "missing repository") f.setContext({ repositoryId: null });
+        throw new HttpError(503, "github_verification_expired", "Expired");
+      });
+      await expect(f.service.execute("workspace", "creator", { op: "gh.prGet", params: { prNumber: 7 } }))
+        .rejects.toMatchObject({ code: "github_authorization_changed" });
+      expect(f.deps.access).toHaveBeenCalledTimes(2);
+      expect(f.fetch).not.toHaveBeenCalled();
+      expect(f.deps.recordPr).not.toHaveBeenCalled();
+    },
+  );
+  it("propagates a second expiry without admitting a third read", async () => {
+    const f = fixture(), expired = new HttpError(503, "github_verification_expired", "Expired");
+    f.assertCurrent.mockRejectedValue(expired);
+    await expect(f.service.execute("workspace", "creator", { op: "gh.prGet", params: { prNumber: 7 } })).rejects.toBe(expired);
+    expect(f.deps.access).toHaveBeenCalledTimes(2);
+    expect(f.fetch).not.toHaveBeenCalled();
+    expect(f.deps.recordPr).not.toHaveBeenCalled();
+  });
+  it.each([
+    [503, "github_unavailable"], [429, "github_rate_limited"], [403, "github_cloud_access_denied"],
+    [409, "github_authorization_changed"], [409, "github_verification_expired"],
+  ] as const)("does not restart a read for %s %s", async (status, code) => {
+    const f = fixture(), error = new HttpError(status, code, "Refused");
+    f.assertCurrent.mockRejectedValue(error);
+    await expect(f.service.execute("workspace", "creator", { op: "gh.prGet", params: { prNumber: 7 } })).rejects.toBe(error);
+    expect(f.deps.access).toHaveBeenCalledOnce();
+    expect(f.fetch).not.toHaveBeenCalled();
+  });
+  it("does not restart an untyped expiry or a write", async () => {
+    for (const write of [false, true]) {
+      const f = fixture(), error = write ? new HttpError(503, "github_verification_expired", "Expired")
+        : Object.assign(new Error("Expired"), { code: "github_verification_expired", status: 503 });
+      f.assertCurrent.mockRejectedValue(error);
+      await expect(f.service.execute("workspace", "creator", write ? merge : { op: "gh.prGet", params: { prNumber: 7 } }))
+        .rejects.toBe(error);
+      expect(f.deps.access).toHaveBeenCalledOnce();
+      expect(f.fetch).not.toHaveBeenCalled();
+    }
+  });
+  it("preserves a confirmed write receipt when the source admission expires afterwards", async () => {
+    const f = fixture(), original = f.fetch.getMockImplementation()!;
+    let writes = 0;
+    f.fetch.mockImplementation(async (url, input) => {
+      const response = await original(url, input);
+      if (input?.method === "PUT") writes++;
+      return response;
+    });
+    f.assertCurrent.mockImplementation(async () => {
+      if (writes) throw new HttpError(503, "github_verification_expired", "Expired");
+    });
+    await expect(f.service.execute("workspace", "creator", merge)).resolves.toMatchObject({
+      authorityCurrent: false, result: { sha: "c".repeat(40) },
+    });
+    expect(writes).toBe(1);
+    expect(f.deps.access).toHaveBeenCalledOnce();
   });
   it("rejects another creator before requesting a credential or GitHub data", async () => {
     const { service, deps, fetch } = fixture();

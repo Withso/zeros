@@ -89,7 +89,28 @@ export class CloudGithubPrService {
     userId: string,
     request: CloudGithubPrRequest,
   ) {
-    const { context, access } = await this.deps.open(workspaceId, userId);
+    const initial = await this.deps.open(workspaceId, userId);
+    try {
+      return await this.perform(workspaceId, userId, request, initial);
+    } catch (error) {
+      if (CLOUD_GITHUB_PR_WRITES.has(request.op) || !(error instanceof HttpError) ||
+        error.status !== 503 || error.code !== "github_verification_expired") throw error;
+      // A new admission can restart a read, never extend the failed attempt's
+      // deadline or publish its bytes under a different checkout or credential.
+      const current = await this.deps.open(workspaceId, userId);
+      assertCloudGithubPrContext(initial.context, current.context);
+      if (current.access.generation !== initial.access.generation ||
+        current.context.repositoryId !== initial.context.repositoryId) throw changed();
+      return this.perform(workspaceId, userId, request, current);
+    }
+  }
+
+  private async perform(
+    workspaceId: string,
+    userId: string,
+    request: CloudGithubPrRequest,
+    { context, access }: Awaited<ReturnType<CloudGithubPrDependencies["open"]>>,
+  ) {
     if (context.workspaceId !== workspaceId || context.creatorUserId !== userId)
       throw new HttpError(404, "not_found", "Cloud workspace not found.");
     if (!context.branch)
