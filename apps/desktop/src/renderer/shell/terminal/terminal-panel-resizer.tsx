@@ -109,15 +109,20 @@ export function isTerminalPanelDoubleClick(
  *    re-run this effect, so the live drag is never clobbered. */
 function useApplyTerminalPanelHeight(
   containerRef: RefObject<HTMLDivElement | null>,
+  seamRef: RefObject<HTMLDivElement | null>,
 ): void {
   const heightPct = useTerminalPanelLayoutStore(
     (state) => state.layout.heightPct,
   );
   useLayoutEffect(() => {
-    containerRef.current
+    // The panel is found beside the resizer's own seam: React attaches a
+    // parent's ref only after its children's layout effects, so a container
+    // that mounted in this same commit is still null here.
+    const scope = seamRef.current?.parentElement ?? containerRef.current;
+    scope
       ?.querySelector<HTMLElement>(PANEL_SELECTOR)
       ?.style.setProperty(TERMINAL_PANEL_HEIGHT_VAR, `${heightPct}%`);
-  }, [containerRef, heightPct]);
+  }, [containerRef, seamRef, heightPct]);
 }
 
 interface TerminalPanelResizerProps {
@@ -134,7 +139,8 @@ export function TerminalPanelResizer({
   const reset = useTerminalPanelLayoutStore((state) => state.reset);
   const lastPctRef = useRef(TERMINAL_PANEL_DEFAULT_PCT);
   const lastDownRef = useRef({ at: 0, y: 0 });
-  useApplyTerminalPanelHeight(containerRef);
+  const seamRef = useRef<HTMLDivElement | null>(null);
+  useApplyTerminalPanelHeight(containerRef, seamRef);
 
   const openAtCenter = useCallback(() => {
     reset();
@@ -317,7 +323,7 @@ export function TerminalPanelResizer({
   );
 
   return (
-    <div className="bg-border1 relative h-px shrink-0">
+    <div ref={seamRef} className="bg-border1 relative h-px shrink-0">
       {/* Invisible grab strip — the resize cursor + the idle "Drag to resize"
           hint above the pointer are the only affordances. */}
       <div
