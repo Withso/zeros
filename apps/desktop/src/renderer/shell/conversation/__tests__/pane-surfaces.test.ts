@@ -33,8 +33,9 @@ describe("split pane surfaces", () => {
   it("draws no resting seam and keeps the 6px resize strip out of layout", () => {
     const splitter = component(paneLayout(), "PaneSplitter");
     expect(splitter).not.toContain("bg-border1");
-    expect(splitter).toContain('"-mr-1.5 w-1.5 cursor-ew-resize"');
-    expect(splitter).toContain('"-mb-1.5 h-1.5 cursor-ns-resize"');
+    // 2px over the first pane, 4px over the second: the first tab starts 4px in.
+    expect(splitter).toContain('"-mr-1 -ml-0.5 w-1.5 cursor-ew-resize"');
+    expect(splitter).toContain('"-mt-0.5 -mb-1 h-1.5 cursor-ns-resize"');
     expect(PANE_SPLITTER_PX).toBe(0);
   });
 

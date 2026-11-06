@@ -26,8 +26,8 @@ export const MIN_PANE_WIDTH = 360;
  *  160 a split-down pane collapsed the transcript and clipped Send. */
 export const MIN_PANE_HEIGHT = 240;
 /** Layout pixels the divider takes between two panes: none since 2026-11-06.
- *  It draws no seam, and its 6px resize strip overlays the second pane's
- *  leading edge instead of sitting between the panes. */
+ *  It draws no seam, and its 6px resize strip overlays the panes' shared edge
+ *  (2px of the first, 4px of the second) instead of sitting between them. */
 export const PANE_SPLITTER_PX = 0;
 
 export interface PaneTreeMinimumSize {

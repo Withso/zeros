@@ -1085,11 +1085,12 @@ function PaneSplitter({
       aria-orientation={isRow ? "vertical" : "horizontal"}
       aria-label="Resize panes"
       // No resting seam (2026-11-06): the panes' fills, corners and fades
-      // separate them. The 6px strip takes no layout space; it overlays the
-      // second pane's leading edge, so the first pane's scrollbar stays clear.
+      // separate them. The 6px strip takes no layout space: it overlays 2px of
+      // the first pane (most of its 6px scrollbar stays clear) and 4px of the
+      // second, ending where that pane's first tab starts.
       className={cn(
         "relative z-10 flex shrink-0",
-        isRow ? "-mr-1.5 w-1.5 cursor-ew-resize" : "-mb-1.5 h-1.5 cursor-ns-resize",
+        isRow ? "-mr-1 -ml-0.5 w-1.5 cursor-ew-resize" : "-mt-0.5 -mb-1 h-1.5 cursor-ns-resize",
       )}
       onPointerDown={onPointerDown}
       onDoubleClick={resetToBalanced}

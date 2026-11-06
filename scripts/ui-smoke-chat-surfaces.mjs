@@ -95,6 +95,7 @@ export async function runChatSurfacesSmoke({ page, check, harnessBase }) {
           topLeft: style.borderTopLeftRadius,
           topRight: style.borderTopRightRadius,
           strip: getComputedStyle(pane.firstElementChild).backgroundImage,
+          firstTabLeft: pane.querySelector('[role="tab"]').getBoundingClientRect().left,
           fades: [...pane.querySelectorAll("[data-pane-seam-fade]")].map((fade) => ({ side: fade.dataset.paneSeamFade, box: box(fade) })),
         };
       }),
@@ -108,11 +109,13 @@ export async function runChatSurfacesSmoke({ page, check, harnessBase }) {
     const state = await read();
     const [left, right] = state.panes;
     expect(state.headerBorder).toBe("0px");
-    // The panes abut: the 6px resize strip overlays the second pane and draws nothing.
+    // The panes abut: the 6px resize strip draws nothing and overlays 2px of
+    // the first pane and 4px of the second, short of its first tab.
     expect(Math.abs(left.box.right - right.box.left)).toBeLessThan(0.5);
     expect(state.separators).toHaveLength(1);
     expect(state.separators[0].box.width).toBe(6);
-    expect(Math.abs(state.separators[0].box.left - right.box.left)).toBeLessThan(0.5);
+    expect(Math.abs(state.separators[0].box.left - (right.box.left - 2))).toBeLessThan(0.5);
+    expect(state.separators[0].box.right).toBeLessThanOrEqual(right.firstTabLeft + 0.5);
     expect(state.separators[0].children).toBe(0);
     for (const pane of state.panes) {
       expect(pane.fill).toBe(pane.focused ? state.bg1 : state.sidebar);
