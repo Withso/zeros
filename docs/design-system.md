@@ -171,6 +171,26 @@ exported page by page to [design-implementation/](design-implementation/README.m
     motion respected.
 12. **Local and cloud are both first class.** Every surface states its Local
     and cloud behavior; cloud lifecycle never enters a tab banner.
+13. **Panes meet as surfaces, not boxes** (2026-11-06). The workspace header
+    row draws no divider (`PanelHeader divider={false}`) and keeps one 28px
+    glyph slot for branch, folder and cloud, so the name always starts at one
+    column; whether a branch is published never changes the glyph. Split chat
+    panes draw no seam and leave no gap: an unfocused pane takes `sidebar-bg`
+    (never `bg0`), top corners round 12px where panes meet, every tab strip
+    starts in the chrome (`bg1`) and dissolves into its pane over 8px, and an
+    unfocused pane dissolves into the chrome over 8px along a stacked seam and
+    along any stretch it shares with another unfocused pane
+    (`shell/conversation/pane-edges.ts`). The transcript fades out over the
+    32px under its strip and starts 32px down; a tab's drop zone is a soft
+    `highlighted-bg` fill without a border; chat tabs are content-sized from
+    70px to 176px. The side column keeps its tab row on `bg1` and holds the
+    open tab in one island under it: a canvas `Surface` 12px in from the
+    column's sides and bottom, 12px corners, a `border1` edge, no seam against
+    the chat, and the first tab 12px in. This replaces the 2026-07-11 flush
+    column. `shell/conversation/__tests__/pane-surfaces.test.ts`,
+    `shell/conversation/__tests__/pane-edges.test.ts`,
+    `shell/workbench/__tests__/workbench-island.test.ts`
+    and `scripts/ui-smoke-chat-surfaces.mjs` hold it.
 
 ### How the direction changes
 
@@ -249,7 +269,7 @@ imports, following property paths such as `chip.cls`). The ledger counts
 | Surface | Fill | Hover / selected | Border | Notes |
 | --- | --- | --- | --- | --- |
 | Canvas, active chat, dialogs, sheets | `bg-bg1` | `bg-bg1-hover` | `border-border1` | Dialogs sit on `bg-scrim` |
-| Inactive chat pane | `bg-(--pane-bg)` (= `bg0`) | — | — | Dims the fill only; text keeps full contrast |
+| Inactive chat pane | `bg-(--pane-bg)` (= `sidebar-bg`) | — | — | Sets the fill apart only; text keeps full contrast. No seam: corners and 8px fades into the `bg1` chrome separate panes (`shell/conversation/pane-edges.ts`) |
 | Raised: tiles | `bg-bg2` | `bg-bg2-hover` | `border-border2` | `bg-bg1-bright` for cards and settings groups |
 | Chat composer, user messages and what docks above the composer | `bg-sidebar-bg` | `bg-sidebar-bg-hover` | `border-(--composer-border)` | No shadow; 18px corners on the Create, workspace and edit composers, 12px elsewhere. Dock cards use `DOCK_CARD_CLS`; the docked pickers use `PopoverContent surface="composer"`; review drafts take `COMPOSER_SURFACE_CLS`. The top of the stack carries `COMPOSER_DOCK_FADE`. Sent messages span the lane and fold long text with `PromptFold` |
 | Floating: menus, selects, command, popovers, tooltips, hover cards, toasts | `bg-bg3` | `bg-bg3-hover` | `border-border2` | 12px corners, 4px inset, lift = `shadow-[var(--shadow-dropdown)]`; feature panels take the fill from `FLOATING_SURFACE` |
@@ -541,7 +561,7 @@ state, `aria-*`, `data-*` hooks) at the caller.
 | A form field | `Field` around `Input`, `Textarea` or a Select trigger | One label (13/18 medium), one hint (12/16 `fg3`) that an error replaces (12/16 `red-primary`); wires `id`, `aria-describedby` and `aria-invalid`. `Input` has `size="compact"`, `appearance="inline"` (rename) and `mono`. |
 | A reference chip or a status tag | `Pill` · `Badge` | `Pill` is an interactive reference: `size="inline"` 20px or `"control"` 24px, `tone` neutral / failed / mode / gone / invalid. `Badge` is inert state: one 20px size, tinted `neutral` / `outline` / `success` / `failure` / `warning` / `info` / `merged`. |
 | A shortcut | `Kbd` · `KbdKeys` | An 18px `border2` chip on `bg2`; `KbdKeys keys="⌘⇧T"` draws one chip per key. Menus, tooltips and the command palette all use it. |
-| Window chrome or a panel heading | `PanelHeader` (+ `PanelHeaderTitle`, `PanelHeaderActions`) | Required `size="window"` (40px, gap-1, px-2, `bg-bg1`) or `size="panel"` (36px, gap-2, px-3); border1 bottom divider; a 13 medium `fg1` title that truncates; actions 2px apart. |
+| Window chrome or a panel heading | `PanelHeader` (+ `PanelHeaderTitle`, `PanelHeaderActions`) | Required `size="window"` (40px, gap-1, px-2, `bg-bg1`) or `size="panel"` (36px, gap-2, px-3); border1 bottom divider unless `divider={false}` (the workspace header row); a 13 medium `fg1` title that truncates; actions 2px apart. |
 | A compact tool disclosure or hover trigger | `ListRow` | 28px button row on `bg1-hover` with the keyboard ring; expanded adds no fill. The caller owns `aria-expanded`, `aria-controls`, labels, state, and events. |
 | A tool row whose file or link targets sit beside its name | `ListRowGroup` with a `ListRow` disclosure (`data-list-row-disclosure`, `LIST_ROW_IN_GROUP`) | The same 28px row with 8px sides and 6px corners: the group hovers, shows the keyboard ring and toggles on a click in its gaps; the targets keep their own clicks. |
 | A message inside content | `MessageRow` (`shared/ui/primitives/message-row.tsx`) | The banner anatomy without the bar: a 32px row, the 16px icon carries `tone` (`error` / `warning` / `success` / `neutral` / `pending`), one 13/18 `fg2` line that truncates, 24px Ghost `actions`. `bar` adds the `border1` rule under a toolbar; `flush` drops the side padding inside a padded card. The caller sets `role="alert"` for errors. |

@@ -820,3 +820,28 @@ Each landed step appends one line: date, workstream, what landed, evidence.
   (geometry for sent, steered, saved and short senders; fg1 at rest and
   hovered, the name-only fill, no border and the click to its chat, in both
   themes; narrow-pane truncation) failed red before the change.
+- 2026-11-06 · 3, 5, 6 · Agent chat and the side column (canvas versions 378
+  to 390): panes meet as surfaces, not boxes (design-system.md §0 item 13).
+  Chat tabs cap at 176px; "Add chat transcripts" is a plain label whose pills
+  start under its first letter. The workspace header row draws no divider
+  (`PanelHeader` gains `divider`), and branch, folder and cloud keep one 28px
+  glyph slot: unpublished Git no longer swaps its glyph for a Local badge.
+  Split panes draw no seam and leave no gap (the resize strip overlays the
+  second pane, `PANE_SPLITTER_PX` is 0, so two panes need 720px); an
+  unfocused pane takes `sidebar-bg` instead of `bg0` (option B of the three
+  Split focus boards); top corners round 12px where panes meet; every strip
+  fades in from the `bg1` chrome over 8px; and unfocused panes dissolve into
+  the chrome over 8px at stacked seams and along the stretches they share
+  side by side (`shell/conversation/pane-edges.ts`). The transcript fades out
+  over 32px under its strip and starts 32px down; a tab's drop zone is a soft
+  fill with no border. The side column holds the open tab in a canvas
+  `Surface` island 12px in from its sides and bottom, with 12px corners, a
+  `border1` edge, no seam against the chat and its first tab 12px in,
+  replacing the 2026-07-11 flush column; the docked terminal sizes against
+  the island. Evidence: the chat-tab-width, panel-header, workspace-header,
+  transcript-top-fade, pane-edges, pane-surfaces, pane-sizing and
+  workbench-island tests failed red first; the new chat-surfaces smoke (the
+  island's insets, edge and fill; abutting panes, fills, corners, strip
+  fades and the T-junction valley, each in Dark and Light) passes; the
+  draft-indicators smoke follows the cap and now really switches to Light,
+  and the conversation-summary smoke follows the retired badge.
