@@ -101,9 +101,22 @@ Principle 16 applies to every claim.
 - Every time in a record comes from a clock read: write it with
   `$(date -u +%H:%M)` inside the command that appends it.
 - Don't claim macOS-only checks from Linux.
+- A smoke or capture switches themes with `document.documentElement.dataset.theme`
+  (a class on `<html>` does nothing), and each theme pass asserts at least one
+  resolved token, such as a `var(--bg1)` probe, so a switch that never happened
+  fails instead of re-checking the default.
 
 ## When a check fails
 
 Read `agents/zstack/gotchas.md` before chasing a failure your diff does not
 explain: it lists the shell, Git, Node, dependency, permission, PostgreSQL,
-browser and CI facts that have already cost a loop.
+browser and CI facts that have already cost a loop. Search the waiting
+fragments too (`grep -ril '<error text>' agents/zstack/gotchas.md
+agents/zstack/changes`): facts sit there until the pack owner folds them.
+
+A smoke failure that is `Failed to fetch dynamically imported module` for a
+module outside the diff's import graph is a dev-server fetch, not a
+regression: confirm the module imports nothing you changed, then rerun that
+scenario alone twice on the same head (a scratch runner imports it from
+`scripts/ui-smoke/scenarios.mjs` against its own dev server). Report the shard
+and the isolated reruns together; never call the shard green.
