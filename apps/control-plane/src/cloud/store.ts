@@ -202,9 +202,9 @@ const notFound = () => new HttpError(404, "not_found", "Cloud workspace not foun
 
 /** v2 is creator-only: the caller must have created the workspace and still
  * belong to its organization. Anyone else sees the same 404. */
-async function ownedRow(tx: Tx, id: string, userId: string, lock = false): Promise<Row> {
-  const { rows } = await tx.query<Row>(
-    `SELECT ${COLUMNS} FROM cloud_v2_workspaces w
+async function ownedRow(tx: Tx, id: string, userId: string, lock = false): Promise<Row & { access_epoch: string; login_revision: string }> {
+  const { rows } = await tx.query<Row & { access_epoch: string; login_revision: string }>(
+    `SELECT ${COLUMNS}, access_epoch::text, login_revision::text FROM cloud_v2_workspaces w
      WHERE w.id = $1 AND w.creator_user_id = $2 AND w.state <> 'deleted'
        AND ${LIVE_ACCESS}
      ${lock ? "FOR UPDATE OF w" : ""}`,
@@ -299,6 +299,13 @@ export class CloudV2Store {
 
   async get(id: string, userId: string): Promise<CloudV2Workspace> {
     return workspace(await withSystemTx(this.pool, tx => ownedRow(tx, id, userId)));
+  }
+
+  async promptContext(id: string, userId: string) {
+    return withSystemTx(this.pool, async tx => {
+      const row = await ownedRow(tx, id, userId);
+      return { workspace: workspace(row), proof: { accessEpoch: row.access_epoch, loginRevision: row.login_revision } };
+    });
   }
 
   async list(organizationId: string, userId: string): Promise<CloudV2Workspace[]> {
