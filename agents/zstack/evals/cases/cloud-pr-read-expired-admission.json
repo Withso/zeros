@@ -1,0 +1,9 @@
+{
+  "id": "cloud-pr-read-expired-admission",
+  "kind": "replay",
+  "area": "control-plane",
+  "fixedBy": "pr:871",
+  "symptom": "Cloud PR details and checks fail with 503 when a still-valid source observation expires during the read; the next manual refresh succeeds after fresh admission.",
+  "rule": "Principles 1, 6 and 7 in agents/zstack/principles.md require exact identity fences, observation-anchored deadlines and bounded typed recovery. Discard an expired read and admit one replacement through ordinary source verification, preserving the original checkout and credential generation. Never extend the old deadline or retry writes, denials, provider failures or a second expiry. Run the regression with disposable PostgreSQL; skipped database cases are unverified.",
+  "check": "pnpm --dir apps/control-plane test src/cloud/github-pr-service.test.ts src/cloud/github-composition.integration.test.ts --maxWorkers=1"
+}
