@@ -21,7 +21,9 @@ const MAX_LEASES = 1024;
 type SourceRevision = { id: number; invalidated?: HttpError };
 type SourceObservation = { scope: RepositoryRequest; fingerprint: string; revision: SourceRevision; until: number; recheckAt: number; refresh?: Promise<void> };
 export type CloudSourceProof = { accessEpoch: string; loginRevision: string };
-export type CloudSourceContinuation = { recheckAt: number; refresh?: Promise<void> };
+/** graceUntil is the earliest original verification time plus the grace across
+ * every source; cached and grace continuations repeat it, never extend it. */
+export type CloudSourceContinuation = { recheckAt: number; refresh?: Promise<void>; graceUntil?: number };
 type SourceVerifier = Pick<GithubRepositoryAuthority, "check" | "fingerprintFor"> & {
   verify?(input: RepositoryRequest): Promise<{ fingerprint: string; repositories: readonly CloudSourceTarget[] }>;
 };
@@ -333,7 +335,8 @@ export class CloudV2SourceAuthority {
       const observations = await this.observeSources(workspace.organizationId, workspace.creatorUserId, sources.names, sources.ids, true);
       this.assertRevision(scope, sourceRevision);
       const refreshes = observations.flatMap(value => value.refresh ? [value.refresh] : []);
-      const value: CloudSourceContinuation = { recheckAt: Math.min(...observations.map(value => value.recheckAt)) };
+      const value: CloudSourceContinuation = { recheckAt: Math.min(...observations.map(value => value.recheckAt)),
+        graceUntil: Math.min(...observations.map(value => value.until)) };
       const lease = { proof: revision, revision: sourceRevision, organizationId: workspace.organizationId, userId: workspace.creatorUserId, value };
       if (this.workspaceLeases.size >= MAX_LEASES) this.workspaceLeases.delete(this.workspaceLeases.keys().next().value!);
       this.workspaceLeases.set(key, lease);
