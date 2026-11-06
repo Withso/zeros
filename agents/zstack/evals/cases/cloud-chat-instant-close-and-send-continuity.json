@@ -1,0 +1,9 @@
+{
+  "id": "cloud-chat-instant-close-and-send-continuity",
+  "kind": "replay",
+  "area": "desktop",
+  "fixedBy": "pending",
+  "symptom": "In cloud workspaces, closing an idle chat tab showed an agent loader and waited for a durable Stop round trip before the tab disappeared; after sending, the footer loader and timer vanished for seconds while the durable prompt waited for the worker, then reappeared; the Design tab showed although cloud Design authoring is unavailable.",
+  "rule": "A user gesture's visible result must not wait on a network round trip that cannot change it: close the tab at once and finish cloud Stop in the background, surfacing only a failed Stop of a working chat. Keep a turn in flight from send until its first agent event or a terminal prompt state, timed from the send. Hide surfaces a placement cannot serve.",
+  "check": "pnpm vitest run apps/desktop/src/renderer/shell/conversation/__tests__/cloud-chat-close-ordering.test.ts apps/desktop/src/renderer/features/agent/__tests__/tail-indicators.test.ts apps/desktop/src/renderer/features/agent/__tests__/cloud-prompt-presentation.test.ts apps/desktop/src/renderer/shell/workbench/__tests__/tab-capabilities.test.ts"
+}
