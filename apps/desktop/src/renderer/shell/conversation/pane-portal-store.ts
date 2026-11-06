@@ -243,17 +243,22 @@ export function canSplitPaneTree({
     collapsedPaneId,
   );
   if (!nextMinimum) return false;
-  if (direction !== "row") {
-    return (
-      Number.isFinite(containerHeight) && containerHeight >= nextMinimum.height
-    );
-  }
+  // Width binds a down split too: the first split from a lone pane adds the
+  // split gutters, and the budgets arrive net of them.
   const budgets = [containerWidth];
   if (!paneTreeHasDirection(root, "row")) budgets.push(growableWidth ?? NaN);
   const available = Math.max(
     ...budgets.filter((value) => Number.isFinite(value)),
   );
-  return Number.isFinite(available) && available >= nextMinimum.width;
+  const widthFits = Number.isFinite(available) && available >= nextMinimum.width;
+  if (direction !== "row") {
+    return (
+      widthFits &&
+      Number.isFinite(containerHeight) &&
+      containerHeight >= nextMinimum.height
+    );
+  }
+  return widthFits;
 }
 
 /** The widest the pane surface can get without resizing the window: its own

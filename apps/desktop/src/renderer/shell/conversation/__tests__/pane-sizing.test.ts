@@ -54,6 +54,28 @@ describe("split pane gaps and gutters", () => {
     expect(splitPaneGutters(false)).toEqual({ width: 24, height: 12 });
   });
 
+  // A lone pane runs edge to edge, so the first split down adds the gutters'
+  // width. Zoomed in at the window's minimum width, a surface under 384 CSS px
+  // with Workbench hidden would leave both panes below their 360px floor.
+  it("refuses a down split whose gutters would take its panes below the width floor", () => {
+    const only = leaf("only");
+    const downSplit = (width: number, workbenchWidth: number) =>
+      canSplitPaneTree({
+        root: only,
+        targetPaneId: "only",
+        direction: "column",
+        containerWidth: width,
+        containerHeight: 800,
+        growableWidth: growablePaneSurfaceWidth(width, workbenchWidth, WORKBENCH_MIN_PX),
+      });
+    // Budgets as measured: the surface less its split gutters.
+    expect(downSplit(370 - 24, 0)).toBe(false);
+    expect(downSplit(384 - 24, 0)).toBe(true);
+    // Beside Workbench the column borrows the 12px from Workbench's slack.
+    expect(downSplit(360 - 12, 400)).toBe(true);
+    expect(downSplit(360 - 12, WORKBENCH_MIN_PX)).toBe(false);
+  });
+
   it("charges the gutters to the surface's floor only while split", () => {
     for (const workbenchBeside of [true, false]) {
       expect(paneSurfaceMinimumSize(leaf("only"), workbenchBeside)).toEqual({
