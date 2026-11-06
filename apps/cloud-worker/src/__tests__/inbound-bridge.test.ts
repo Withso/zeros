@@ -54,6 +54,8 @@ it("binds only loopback and authenticates before upgrading or accepting a frame"
   expect(connected.features.split(",")).toContain("repository-setup-v1");
   expect(connected.features.split(",")).toContain("checkout-v2");
   expect(connected.features.split(",")).toContain("history-replace-v1");
+  // The relay builds its configuration from this list, so it must match hello's.
+  expect(connected.features.split(",")).toEqual(expect.arrayContaining(["github-pr-v1", "prompt-outbox-v1"]));
   expect(await f.refusal(auth)).toBe(401);
 });
 
