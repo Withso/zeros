@@ -221,11 +221,7 @@ revision in the same checkout and compare failing test names.
   can report as new, so confirm it against the base before arming.
 - Alpha's clock differs from this host by about 0.5 s. Compare time windows with
   documented bounds, never exact values.
-- Vitest transforms without type-checking, so a name a barrel doesn't export
-  imports as `undefined` and only fails when called. A service op whose
-  validation test throws first passes while its real path is broken
-  (`gh.prRerunFailed`, 2026-11-06). Give each new op one test that reaches its
-  handler with valid input, and type-check the changed files before
-  committing; in a container where the full `pnpm typecheck` runs out of
-  memory, a tsconfig that lists only the changed files (plus the `.d.ts`
-  files) is enough.
+- Vitest doesn't type-check: a name a barrel doesn't export is `undefined`
+  until called, so an op tested only by inputs that throw first can ship
+  broken (`gh.prRerunFailed`, 2026-11-06). Test each new op with valid input,
+  and type-check changed files before committing.
