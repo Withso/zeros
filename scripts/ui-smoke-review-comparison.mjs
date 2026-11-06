@@ -2,6 +2,13 @@
 import { chromium, expect } from "@playwright/test";
 import { pathToFileURL } from "node:url";
 
+/** An `Etc/GMT` zone whose local hour is `hour` right now. Its sign is
+ * inverted: Etc/GMT+2 is two hours behind UTC. */
+function zoneAtLocalHour(hour) {
+  const offset = ((hour - new Date().getUTCHours() + 36) % 24) - 12;
+  return offset === 0 ? "Etc/GMT" : `Etc/GMT${offset < 0 ? "+" : "-"}${Math.abs(offset)}`;
+}
+
 /** Real ReviewView must follow confirmed remote comparison changes without a
  * Git refresh-key bump, including changes during a shared pending diff read. */
 export async function runReviewComparisonSmoke({
@@ -468,6 +475,22 @@ export async function runReviewComparisonSmoke({
     await expect(page.locator('section[aria-label="Yesterday"]')).toBeVisible();
     await expect(page.locator('[data-review-commit="a1b2c3d"]')).toContainText("Alex Morgan and Claude");
     check("Commits group by day with co-authors and the short SHA", true);
+
+    // Just after local midnight, "2 hours ago" is already yesterday.
+    const night = await page.context().browser().newContext({
+      timezoneId: zoneAtLocalHour(1),
+    });
+    try {
+      const nightPage = await night.newPage();
+      nightPage.on("pageerror", onError);
+      await nightPage.goto(`${base}/harness-review-comparison.html?rich&sub=commits`);
+      await expect(nightPage.locator("[data-review-commit]")).toHaveCount(3);
+      await expect(nightPage.locator('section[aria-label="Today"]')).toBeVisible();
+      await expect(nightPage.locator('section[aria-label="Yesterday"]')).toBeVisible();
+    } finally {
+      await night.close();
+    }
+    check("Commits keep Today and Yesterday just after local midnight", true);
     expect(errors).toEqual([]);
   } finally {
     page.off("pageerror", onError);
