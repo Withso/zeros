@@ -1,0 +1,9 @@
+{
+  "id": "settings-toml-mcp-remove-padding",
+  "kind": "replay",
+  "area": "desktop-engine",
+  "fixedBy": "pr:851",
+  "symptom": "Removing the last MCP server left the removed entry's width as spaces inside `servers = [ ]`, so every add and remove cycle grew settings.toml. toml-patch 2.0.0 kept that padding; 3.0.2 and later write `servers = []`.",
+  "rule": "Test a settings writer over repeated add and remove cycles through the real MCP operations, and look for the fix in newer releases of a misbehaving library before working around it (principle 13).",
+  "check": "pnpm exec vitest run --config vitest.config.ts apps/desktop/src/engine/settings/__tests__/mcp-configuration.test.ts -t 'same size across add and remove'"
+}
