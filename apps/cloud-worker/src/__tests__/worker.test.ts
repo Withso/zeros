@@ -112,7 +112,6 @@ describe("worker bridge routing through a fake relay", () => {
     }
     expect(relay.bridge("ENGINE_READY")).toHaveLength(1);
     await relay.receive(config);
-    // A later configuration reports only its own reconfiguration phases.
     expect(reportTiming.mock.calls.filter(([record]) => !record.phase.startsWith("worker_reconfigure"))).toHaveLength(7);
   });
 
