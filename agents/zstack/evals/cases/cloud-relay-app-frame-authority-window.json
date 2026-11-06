@@ -2,7 +2,7 @@
   "id": "cloud-relay-app-frame-authority-window",
   "kind": "replay",
   "area": "control-plane",
-  "fixedBy": "pr:PENDING",
+  "fixedBy": "pr:861",
   "symptom": "Every app-to-worker relay frame awaited a database access read, adding about 240 ms to each cloud request round trip (file reads, Git, terminal input, prompts).",
   "rule": "Authority for hot frames is a bounded, revision-fenced window anchored before the read: security events and source revalidation clear it at once, it never renews by forwarding, it honors the earliest session or source expiry, and a newly admitted client forces a fresh read (principles 4, 9, 11).",
   "check": "pnpm --dir apps/control-plane test src/cloud/relay.test.ts"
