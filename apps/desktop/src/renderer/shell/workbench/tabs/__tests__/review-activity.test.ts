@@ -103,9 +103,10 @@ describe("Local Review observation activity", () => {
     });
     let posted: (value: { id: number; url: string }) => void = () => {};
     vi.mocked(provider.addComment).mockImplementation(() => new Promise((resolve) => { posted = resolve; }));
-    let live = Fixture();
+    // The first render starts the read; the second sees what it returned.
+    Fixture();
     await vi.advanceTimersByTimeAsync(0);
-    live = Fixture();
+    const live = Fixture();
     expect(live.snap).toMatchObject({ login: "reviewer", avatarUrl: "https://avatars.githubusercontent.com/u/3" });
     const sending = live.postComment("Ship it");
     expect(Fixture().snap.timeline?.at(-1)).toMatchObject({
