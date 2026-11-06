@@ -223,6 +223,13 @@ export async function runLocalLinksSmoke({ page, harnessBase, check }) {
       .toEqual({ border: "0px", fill: "rgba(0, 0, 0, 0)", name: "fg1", nameFill: "bg1-hover" });
   }
   await toggleTheme.click();
+  // Let the theme's 120ms color transitions finish: the checks below compare
+  // computed colors, and a read mid-transition lands between two tokens.
+  // getAnimations() flushes style first, so it sees the transitions the toggle
+  // just started.
+  await page.evaluate(() =>
+    Promise.all(globalThis.document.getAnimations().map((animation) => animation.finished.catch(() => undefined))),
+  );
   await sender.click();
   await expect(navigation).toHaveText("chat:codex");
   check(
