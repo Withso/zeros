@@ -154,6 +154,45 @@ it.each([false, true])("a failed fetch leaves the %s existing branch available",
   expect(await git(checkout, "branch", "--show-current")).toBe(workspace.branch);
 });
 
+/** Records each Git subcommand the worker runs, delegating to the real Git. */
+async function logGit(root: string) {
+  const bin = join(root, "log-bin"), log = join(root, "git.log");
+  const realGit = (await run("sh", ["-c", "command -v git"])).stdout.trim();
+  await mkdir(bin);
+  await writeFile(join(bin, "git"), `#!${process.execPath}
+const fs = require('node:fs');
+const { spawn } = require('node:child_process');
+fs.appendFileSync(${JSON.stringify(log)}, process.argv.slice(2).join(" ") + "\\n");
+const child = spawn(${JSON.stringify(realGit)}, process.argv.slice(2), { stdio: 'inherit' });
+child.once('error', () => process.exit(1));
+child.once('exit', code => process.exit(code ?? 1));
+`, { mode: 0o700 });
+  vi.stubEnv("PATH", `${bin}:${process.env.PATH ?? ""}`);
+  return async () => (await readFile(log, "utf8").catch(() => "")).split("\n").filter(Boolean);
+}
+
+it("does not refresh the index with a no-op switch when the workspace branch is already checked out", async () => {
+  const { root, checkout, git, workspace } = await fixture();
+  await git(checkout, "switch", "-c", workspace.branch);
+  const commands = await logGit(root);
+  const result = await prepareCheckout(workspace);
+  cleanups.push(() => result.refresh?.dispose() ?? Promise.resolve());
+  expect(result.createdBranch).toBe(false);
+  expect((await commands()).filter(command => command.startsWith("switch"))).toEqual([]);
+  expect(await git(checkout, "symbolic-ref", "--short", "HEAD")).toBe(workspace.branch);
+});
+
+it("still switches to an existing workspace branch that is not checked out", async () => {
+  const { root, checkout, git, workspace } = await fixture();
+  await git(checkout, "switch", "-c", workspace.branch);
+  await git(checkout, "switch", "main");
+  const commands = await logGit(root);
+  const result = await prepareCheckout(workspace);
+  cleanups.push(() => result.refresh?.dispose() ?? Promise.resolve());
+  expect((await commands()).filter(command => command.startsWith("switch"))).toEqual([`switch -- ${workspace.branch}`]);
+  expect(await git(checkout, "symbolic-ref", "--short", "HEAD")).toBe(workspace.branch);
+});
+
 it("admits activity while fetch is held and never fast-forwards after it", async () => {
   const { root, checkout, git, workspace, advance } = await fixture();
   const remote = await advance(), held = await holdGit(root, "fetch");
