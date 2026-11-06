@@ -2,7 +2,6 @@ import type { ListMcpServerStatusResponse } from "./generated/v2/ListMcpServerSt
 import type { McpServerOauthLoginResponse } from "./generated/v2/McpServerOauthLoginResponse";
 import type { SessionToolInventoryEntry, SessionToolsSnapshot } from "@zeros/protocol/agent-extensions";
 import { normalizeExternalHttpUrl } from "@zeros/protocol/external-url";
-import { redactLogSecrets } from "@zeros/protocol/scrub";
 import type { CodexAppServerHandle } from "./app-server";
 import type { CodexMcpServerSet } from "./mcp-overrides";
 
@@ -52,17 +51,11 @@ export async function readCodexSessionTools(
       // Disabled local declarations are not part of this session's Tools list.
       if (server.runtimeStatus === "disabled") continue;
       // A connected transport can still have no usable tool catalog. Null is
-      // a successful discovery (including an empty or cached catalog).
+      // a successful discovery (including an empty or cached catalog). Codex's
+      // error text can carry paths, URLs or credentials, so it is not shown.
       const toolsError =
         typeof server.toolsError === "string"
-          ? redactLogSecrets(
-              server.toolsError.replace(
-                /\b(https?:\/\/)[^/\s]+@/gi,
-                "$1[redacted]@",
-              ),
-            )
-              .trim()
-              .slice(0, 1000) || "Tool discovery failed."
+          ? "Codex could not load this server's tools."
           : "";
       const status =
         server.runtimeStatus === "authenticationRequired"

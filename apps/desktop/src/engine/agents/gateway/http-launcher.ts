@@ -79,6 +79,9 @@ export class McpHttpLauncher {
       throw new McpServerStartError("Invalid MCP launch configuration.");
   }
 
+  /** Holds no process, startup or unproven cleanup. */
+  get idle(): boolean { return !this.boundary && !this.starting; }
+
   async ensureRunning(signal?: AbortSignal): Promise<void> {
     if (this.closed) throw new Error("MCP launcher is closed.");
     signal?.throwIfAborted();

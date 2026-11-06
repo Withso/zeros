@@ -12,12 +12,13 @@ Target: `skills/zstack-verify` (UI smoke on macOS).
   scenarios after it never ran. The first base comparison never started: Vite
   ignores a tree under `.context/`, and a symlinked `node_modules` is outside
   its development serving boundary.
-- **Rule.** On macOS, run each `--shard=k/3` separately and treat CI's Linux
-  shards as the gate for these scenarios. To reach scenarios after a crash,
-  stub the crashing one through `runSmokeScenarios`' `loadModule` in a
-  temporary runner. Compare each failing check with the merge base in a
-  worktree outside `.context/` with its own `node_modules` (`cp -cR` clones
-  it on APFS in seconds), and report failures shared with the base as
-  existing.
+- **Rule.** On macOS, run each `--shard=k/3` separately. To reach scenarios
+  after a crash, stub the crashing one through `runSmokeScenarios`'
+  `loadModule` in a temporary runner. Compare each failing check with the
+  merge base in a worktree outside `.context/` that installs its own
+  dependencies (`pnpm install --frozen-lockfile`), so a dependency change on
+  the branch cannot fail the base too. Report a failure the base reproduces
+  as existing; CI's Linux shards gate that scenario. A failure the base does
+  not reproduce is new and blocks handoff until it is fixed or explained.
 - **Encoded in.** Guidance only. Pressing `ControlOrMeta+A` in
   `ui-smoke-scroll-area-drag.mjs` would make that check platform-neutral.

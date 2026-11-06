@@ -253,7 +253,8 @@ describe("AgentGateway per-session MCP resolution", () => {
       `[[mcp.servers]]\nname = "healthy"\ntransport = "stdio"\ncommand = "npx"\n\n` +
         `[[mcp.servers]]\nname = "listener"\ntransport = "stdio"\ncommand = "node"\nargs = ["listener.js"]\nlisten_url = "http://127.0.0.1:47999/mcp"\n\n` +
         `[[mcp.servers]]\nname = "keyed"\ntransport = "stdio"\ncommand = "node"\nargs = ["keyed.js"]\ncredential_id = "6f1c2d4e-8a9b-4c3d-9e2f-1a2b3c4d5e6f"\nenv = { API_KEY = "\${zeros.secret}" }\n\n` +
-        `[[mcp.servers]]\nname = "elsewhere"\ntransport = "stdio"\ncommand = "node"\nargs = ["elsewhere.js"]\ncwd = "missing-folder"\n`,
+        `[[mcp.servers]]\nname = "elsewhere"\ntransport = "stdio"\ncommand = "node"\nargs = ["elsewhere.js"]\ncwd = "missing-folder"\n\n` +
+        `[[mcp.servers]]\nname = "hand-edited"\ntransport = "stdio"\ncommand = "node"\nargs = ["hand-edited.js"]\ncredential_id = "7a2b3c4d-5e6f-4a1b-8c2d-3e4f5a6b7c8d"\nenv = { "API-KEY" = "\${zeros.secret}" }\n`,
     );
     const gw = makeGateway();
     gw.setMcpSecretResolver((servers) => {
@@ -277,12 +278,13 @@ describe("AgentGateway per-session MCP resolution", () => {
       const tools = await gw.readSessionToolInventory("claude", session.sessionId, repoDir);
       expect(tools.entries.map(({ name, status, detail }) => ({ name, status, detail }))).toEqual([
         { name: "healthy", status: "connected", detail: undefined },
+        { name: "hand-edited", status: "error", detail: "This server has an invalid saved variable name. Edit the server to fix it." },
         { name: "keyed", status: "error", detail: "The saved variable API_KEY is unavailable. Edit the server to restore it." },
         { name: "elsewhere", status: "error", detail: "MCP working directory must be an existing, accessible folder on the machine running the server." },
         { name: "listener", status: "error", detail: "The server exited before it started listening." },
       ]);
-      expect(new Set(tools.entries.map((entry) => entry.id)).size).toBe(4);
-      expect(tools.groups?.find((group) => group.kind === "mcp")?.entries).toHaveLength(4);
+      expect(new Set(tools.entries.map((entry) => entry.id)).size).toBe(5);
+      expect(tools.groups?.find((group) => group.kind === "mcp")?.entries).toHaveLength(5);
     } finally {
       await gw.dispose();
     }

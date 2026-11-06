@@ -36,7 +36,14 @@ export class LaunchedMcpServers {
           args: server.args, cwd: server.cwd, env: processEnv, listenUrl: server.listenUrl, workspaceRoot: cwd, repoRoot, boundaryFactory: this.boundaryFactory }) };
         this.entries.set(key, entry);
       }
-      await entry.launcher.ensureRunning(signal);
+      try {
+        await entry.launcher.ensureRunning(signal);
+      } catch (error) {
+        // A failed start whose stop was proven holds no process, so it stops
+        // counting toward the limit; an unproven one keeps its handle for a retry.
+        if (entry.launcher.idle && this.entries.get(key) === entry) this.entries.delete(key);
+        throw error;
+      }
       return entry.launcher.endpoint;
     };
     const run = async () => {

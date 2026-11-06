@@ -65,6 +65,16 @@ describe("MCP edits of servers saved in settings.toml", () => {
     expect(read().map(row => row.name)).toEqual(["remote"]);
   });
 
+  it("keeps a hand-written datetime a datetime when its server is saved", async () => {
+    const [, files] = read();
+    const reviewedAt = () => (opSettingsRead("user").doc.mcp as { servers: Record<string, unknown>[] }).servers[1].reviewed_at;
+    await save(files, files);
+    expect(reviewedAt()).toBeInstanceOf(Date);
+    await save(files, { ...files, args: ["-y", "fixture-server", "--verbose"] });
+    expect(reviewedAt()).toBeInstanceOf(Date);
+    expect(readFileSync(path.join(directory, "settings.toml"), "utf8")).toMatch(/^reviewed_at = 2026-01-02T03:04:05/m);
+  });
+
   it("still refuses a server that changed in the file after it was read", async () => {
     const [remote, files] = read();
     opSettingsWrite("user", { mcp: { servers: [remote, { ...files, command: "other" }] } });

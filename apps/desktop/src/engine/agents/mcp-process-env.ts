@@ -3,7 +3,8 @@ import { SCRUBBED_COMMAND_ENV_NAMES, stripLauncherBinFromPath } from "../env/lau
 
 /** A stdio MCP server's PATH: the chat's own, without the Zeros Git credential
  * shim or the launcher's bin directories. Git inside a server then uses the
- * user's own Git setup, not the GitHub account selected for the chat. */
+ * user's own Git setup, not the GitHub account selected for the chat.
+ * Undefined when only shims were on it: the server then gets no PATH. */
 export function mcpServerPath(pathValue: string | undefined): string | undefined {
   if (!pathValue) return undefined;
   return stripLauncherBinFromPath(withoutCredentialShimDirectories(pathValue)) || undefined;
@@ -23,5 +24,6 @@ export function mcpServerEnvironment(
   }
   const pathValue = mcpServerPath(env.PATH);
   if (pathValue) env.PATH = pathValue;
+  else delete env.PATH;
   return { ...env, ...own };
 }

@@ -74,6 +74,32 @@ describe("launched MCP owner lifetime", () => {
     await pool.stop();
   });
 
+  it("does not count servers that failed to start against the running limit", async () => {
+    const pool = new LaunchedMcpServers(vi.fn());
+    vi.mocked(McpHttpLauncher.prototype.ensureRunning).mockRejectedValue(new McpServerStartError("The server did not start listening in time."));
+    for (let index = 0; index < 64; index++)
+      expect((await pool.resolve([server], `/w${index}`, {}, `w${index}`, `/w${index}`, false)).unavailable).toHaveLength(1);
+    vi.mocked(McpHttpLauncher.prototype.ensureRunning).mockResolvedValue();
+    await expect(pool.resolve([server], "/next", {}, "next", "/next", false)).resolves.toEqual({
+      servers: [{ name: "fixture", transport: "http", url: "http://127.0.0.1:3222/mcp" }],
+      unavailable: [],
+    });
+    await pool.stop();
+  });
+
+  it("keeps a server that failed to start until its unproven cleanup is retried", async () => {
+    const pool = new LaunchedMcpServers(vi.fn());
+    vi.mocked(McpHttpLauncher.prototype.ensureRunning).mockImplementationOnce(async function (this: McpHttpLauncher) {
+      // A start whose stop could not be proven keeps its boundary handle.
+      (this as unknown as { boundary: unknown }).boundary = {};
+      throw new Error("Fixture cleanup refusal");
+    });
+    await pool.resolve([server], "/a", {}, "a", "/a", false);
+    expect(McpHttpLauncher.prototype.dispose).not.toHaveBeenCalled();
+    await pool.stop();
+    expect(McpHttpLauncher.prototype.dispose).toHaveBeenCalledOnce();
+  });
+
   it("fences a queued workspace even before it has a process entry", async () => {
     const pool = new LaunchedMcpServers(vi.fn()), held = deferred();
     vi.mocked(McpHttpLauncher.prototype.ensureRunning).mockImplementationOnce(() => held.promise);

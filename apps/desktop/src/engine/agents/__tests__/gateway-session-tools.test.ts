@@ -148,9 +148,15 @@ describe("session tools authority", () => {
       sessionTools: AgentSessionToolRegistry;
     };
     const unknown = (name: string) => ({ id: name, name, status: "unverified" as const, detail: "Cursor does not report whether this server connected." });
+    // The flat list has no "unverified"; Cursor reports those rows as errors.
+    const unknownFlat = (name: string) => ({ id: name, name, status: "error" as const, detail: "Cursor cannot verify this connection through its SDK." });
     const inventory = vi.fn().mockResolvedValue({
       state: "unsupported",
-      entries: [],
+      entries: [
+        unknownFlat("design-draft"),
+        unknownFlat("zeros_browser"),
+        { id: "zeros_device", name: "zeros_device", status: "error", detail: "The provider reported a failure." },
+      ],
       groups: [{ kind: "mcp", state: "partial", entries: [
         unknown("design-draft"),
         unknown("zeros_browser"),
@@ -165,26 +171,44 @@ describe("session tools authority", () => {
     } as unknown as AgentAdapter);
     internal.executionToAgent.set("session-a", "cursor");
     internal.executionToCwd.set("session-a", "/fixture/a");
-    const rows = async () =>
-      (await gateway.readSessionToolInventory("cursor", "session-a", "/fixture/a"))
-        .groups?.[0]?.entries.map((entry) => [entry.name, entry.status]);
+    const rows = async () => {
+      const snapshot = await gateway.readSessionToolInventory("cursor", "session-a", "/fixture/a");
+      return {
+        grouped: snapshot.groups?.[0]?.entries.map((entry) => [entry.name, entry.status]),
+        flat: snapshot.entries.map((entry) => [entry.name, entry.status]),
+      };
+    };
     try {
       await internal.sessionTools.admit({ agentId: "cursor", executionId: "session-a", cwd: "/fixture/a" }, [], {});
-      expect(await rows()).toEqual([
-        ["design-draft", "unverified"],
-        ["zeros_browser", "unverified"],
-        ["zeros_device", "error"],
-        ["zeros_computer", "unverified"],
-      ]);
+      expect(await rows()).toEqual({
+        grouped: [
+          ["design-draft", "unverified"],
+          ["zeros_browser", "unverified"],
+          ["zeros_device", "error"],
+          ["zeros_computer", "unverified"],
+        ],
+        flat: [
+          ["design-draft", "error"],
+          ["zeros_browser", "error"],
+          ["zeros_device", "error"],
+        ],
+      });
       // A provider-reported status wins, and a provider's own settings row is
       // not the engine-hosted server.
       listed = ["design-draft", "zeros_device", "zeros_computer"];
-      expect(await rows()).toEqual([
-        ["design-draft", "connected"],
-        ["zeros_browser", "unverified"],
-        ["zeros_device", "error"],
-        ["zeros_computer", "unverified"],
-      ]);
+      expect(await rows()).toEqual({
+        grouped: [
+          ["design-draft", "connected"],
+          ["zeros_browser", "unverified"],
+          ["zeros_device", "error"],
+          ["zeros_computer", "unverified"],
+        ],
+        flat: [
+          ["design-draft", "connected"],
+          ["zeros_browser", "error"],
+          ["zeros_device", "error"],
+        ],
+      });
     } finally {
       await gateway.dispose();
     }

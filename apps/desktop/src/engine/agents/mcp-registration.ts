@@ -13,6 +13,8 @@ export interface UnavailableMcpServer {
   detail: string;
 }
 
+export const INVALID_SAVED_VARIABLE_NAME = "This server has an invalid saved variable name. Edit the server to fix it.";
+
 /** Other failures can carry paths or process output, so they get a fixed
  * message instead. */
 export function unavailableMcpServer(name: string, error: unknown): UnavailableMcpServer {
@@ -35,7 +37,7 @@ export function materializeMcpServerRegistration(
   if (registration.transport === "stdio" && registration.envFromEnv) {
     const values = { ...(registration.env ?? {}) };
     for (const [name, reference] of Object.entries(registration.envFromEnv)) {
-      if (!ENV_NAME.test(name) || !ENV_NAME.test(reference)) throw new McpServerStartError("This server has an invalid saved variable name. Edit the server to fix it.");
+      if (!ENV_NAME.test(name) || !ENV_NAME.test(reference)) throw new McpServerStartError(INVALID_SAVED_VARIABLE_NAME);
       if (env[reference] === undefined) throw new McpServerStartError("This server is missing a saved variable. Edit the server to enter it again.");
       values[name] = env[reference]!;
     }

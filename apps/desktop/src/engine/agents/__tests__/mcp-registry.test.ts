@@ -737,6 +737,33 @@ auth = "oauth"
     expect(r.sources).toEqual(["managed"]);
   });
 
+  it("leaves out only a server whose saved variable cannot be referenced", async () => {
+    const broken = (name: string, script: string) =>
+      `[[mcp.servers]]\nname = "${name}"\ntransport = "stdio"\ncommand = "node"\nargs = ["${script}"]\n` +
+      `credential_id = "6f1c2d4e-8a9b-4c3d-9e2f-1a2b3c4d5e6f"\nenv = { "API-KEY" = "\${zeros.secret}" }\n\n`;
+    const unavailable = (name: string) => ({
+      name,
+      detail: "This server has an invalid saved variable name. Edit the server to fix it.",
+    });
+    writeUser(
+      broken("hand-edited", "user.js") +
+        `[[mcp.servers]]\nname = "healthy"\ntransport = "stdio"\ncommand = "npx"\n\n` +
+        `[[mcp.servers]]\nname = "keyed"\ntransport = "stdio"\ncommand = "node"\nargs = ["keyed.js"]\n\n` +
+        `[[mcp.servers]]\nname = "remote"\ntransport = "http"\nurl = "https://remote/mcp"\nauth = "oauth"\n`,
+    );
+    const global = resolveMcpServers();
+    expect(global.servers.map((s) => s.name)).toEqual(["healthy", "keyed"]);
+    expect(global.gatewayBackends.map((b) => b.name)).toEqual(["remote"]);
+    expect(global.unavailable).toEqual([unavailable("hand-edited")]);
+
+    // Like a disabled entry, the broken project entry keeps its name, so the
+    // user's "keyed" does not silently stand in for it.
+    writeRepoFile(repoDir, "settings.local.toml", broken("keyed", "repo.js"));
+    const project = await resolveMcpServersForRepo(repoDir);
+    expect(project.servers.map((s) => s.name)).toEqual(["healthy"]);
+    expect(project.unavailable).toEqual([unavailable("keyed"), unavailable("hand-edited")]);
+  });
+
   it('partitions auth:"oauth" http servers into gatewayBackends (not direct servers)', () => {
     writeUser(
       `[[mcp.servers]]\nname = "sentry"\ntransport = "http"\nurl = "https://sentry/mcp"\n\n` +

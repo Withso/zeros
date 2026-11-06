@@ -117,7 +117,7 @@ describe("Codex grouped session inventory", () => {
     const failed = await f.read();
     expect(failed.entries[0]).toMatchObject({
       status: "error",
-      detail: expect.stringContaining("Tool discovery failed."),
+      detail: "Codex could not load this server's tools.",
     });
     expect(
       failed.groups!.find((group) => group.kind === "apps")!.entries,

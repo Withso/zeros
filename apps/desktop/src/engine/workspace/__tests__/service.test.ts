@@ -5643,7 +5643,7 @@ describe("WorkspaceService", () => {
 
   it("keeps public OAuth configuration in inherited server overrides", async () => {
     const resolve = vi.spyOn(mcpRegistry, "resolveMcpServers").mockReturnValue({
-      servers: [], sources: [], warnings: [],
+      servers: [], sources: [], unavailable: [], warnings: [],
       gatewayBackends: [{ name: "docs", url: "https://example.test/mcp", auth: "oauth", source: "managed", clientId: "registered", scopes: ["read"] }],
     });
     try {

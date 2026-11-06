@@ -1,0 +1,9 @@
+{
+  "id": "mcp-hand-edited-variable-stops-every-chat",
+  "kind": "replay",
+  "area": "desktop-agents",
+  "fixedBy": "pr:851",
+  "symptom": "A hand-edited MCP server that sealed a variable under a name no process can read (\"API-KEY\") made composing the MCP registry throw, so every Local chat failed to start instead of leaving out that one server.",
+  "rule": "Turn each saved entry into a registration on its own: a broken entry keeps its name, shows why it is unavailable, and never stops its siblings. Test with entries a person can write by hand (principle 13).",
+  "check": "pnpm exec vitest run --config vitest.config.ts apps/desktop/src/engine/agents/__tests__/mcp-registry.test.ts -t 'saved variable cannot be referenced'"
+}

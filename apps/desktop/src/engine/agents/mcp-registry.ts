@@ -36,6 +36,7 @@ import {
   type SettingsLayerName,
 } from "../settings/schema";
 import type { McpServerRegistration } from "./types";
+import { INVALID_SAVED_VARIABLE_NAME, type UnavailableMcpServer } from "./mcp-registration";
 import { mcpSecretEnvAlias } from "@zeros/protocol/mcp-secrets";
 
 /** De-duplicate the MCP registry, FIRST-WINS (registry order = precedence,
@@ -216,6 +217,9 @@ export interface ResolvedMcpRegistry {
   sources: SettingsLayerName[];
   /** Gateway-managed (auth:"oauth") servers, partitioned out of direct injection. */
   gatewayBackends: GatewayBackend[];
+  /** Enabled servers whose saved entry cannot be used as written (a
+   *  hand-edited variable name). Chats start without them and list them. */
+  unavailable: UnavailableMcpServer[];
   /** Human-readable notes (e.g. a committed-repo stdio server that was gated). */
   warnings: string[];
 }
@@ -427,6 +431,7 @@ function composeMcpRegistry(
   const servers: McpServerRegistration[] = [];
   const sources: SettingsLayerName[] = [];
   const gatewayBackends: GatewayBackend[] = [];
+  const unavailable: UnavailableMcpServer[] = [];
   const seenNames = new Set<string>();
   const seenTargets = new Set<string>();
 
@@ -493,17 +498,25 @@ function composeMcpRegistry(
         seenNames.add(s.name);
         continue;
       }
-      const reg = toRegistration(s, secretRoot);
       const target =
-        reg.transport !== "stdio"
-          ? `${reg.transport}:${reg.url}`
-          : `stdio:${JSON.stringify([reg.command, reg.args ?? [], reg.cwd ?? ""])}`;
-      if (seenNames.has(reg.name) || seenTargets.has(target)) continue; // first-wins = higher precedence
-      seenNames.add(reg.name);
+        s.transport !== "stdio"
+          ? `${s.transport}:${s.url}`
+          : `stdio:${JSON.stringify([s.command, s.args ?? [], s.cwd ?? ""])}`;
+      if (seenNames.has(s.name) || seenTargets.has(target)) continue; // first-wins = higher precedence
+      seenNames.add(s.name);
       seenTargets.add(target);
+      let reg: McpServerRegistration;
+      try {
+        reg = toRegistration(s, secretRoot);
+      } catch {
+        // The entry keeps its name, so a less specific layer's server of the
+        // same name cannot silently stand in for it.
+        unavailable.push({ name: s.name, detail: INVALID_SAVED_VARIABLE_NAME });
+        continue;
+      }
       servers.push(reg);
       sources.push(layer);
     }
   }
-  return { servers, sources, gatewayBackends, warnings };
+  return { servers, sources, gatewayBackends, unavailable, warnings };
 }

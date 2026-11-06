@@ -1448,20 +1448,25 @@ function withListedMcp(
 ): SessionToolsInventorySnapshot {
   if (!listed.length || !snapshot.groups) return snapshot;
   const names = new Set(listed);
+  const detail = "The agent loaded this server's tools in this chat.";
+  const confirmed = new Set<string>();
+  const groups = snapshot.groups.map((group) =>
+    group.kind !== "mcp"
+      ? group
+      : {
+          ...group,
+          entries: group.entries.map((entry): SessionToolInventoryEntry => {
+            if (entry.status !== "unverified" || entry.source === "local" || !names.has(entry.name)) return entry;
+            confirmed.add(entry.id);
+            return { ...entry, status: "connected", detail };
+          }),
+        },
+  );
   return {
     ...snapshot,
-    groups: snapshot.groups.map((group) =>
-      group.kind !== "mcp"
-        ? group
-        : {
-            ...group,
-            entries: group.entries.map((entry): SessionToolInventoryEntry =>
-              entry.status === "unverified" && entry.source !== "local" && names.has(entry.name)
-                ? { ...entry, status: "connected", detail: "The agent loaded this server's tools in this chat." }
-                : entry,
-            ),
-          },
-    ),
+    // The flat list has no "unverified", so its row follows the grouped one.
+    entries: snapshot.entries.map((entry) => confirmed.has(entry.id) ? { ...entry, status: "connected", detail } : entry),
+    groups,
   };
 }
 
@@ -4200,9 +4205,10 @@ export class AgentGateway {
       return launch(await this.validateSessionMcp(await this.organizationMcpResolver(workspaceId!, env ?? {}, signal), cwd, unavailable));
     }
     try {
-      const { servers, gatewayBackends, warnings } =
+      const { servers, gatewayBackends, unavailable: unusable, warnings } =
         await resolveMcpServersForRepo(mainRepoRoot ?? cwd);
       for (const w of warnings) console.warn(`[agents] ${agentId} MCP: ${w}`);
+      unavailable.push(...unusable);
       const injected: McpServerRegistration[] = [];
       // The gateway endpoint fronting the auth:"oauth"/"header" backends.
       const gateway = this.scopedMcpGateway

@@ -74,7 +74,9 @@ export function claudeMcpStdio(
 ) {
   const pathValue = mcpServerPath(sessionPath);
   const env = { ...(pathValue ? { PATH: pathValue } : {}), ...server.env };
-  const keep = new Set([...SCRUBBED_COMMAND_ENV_NAMES, ...Object.keys(env)].filter(name => name && !name.includes("=")));
+  // PATH is kept only when set here; Claude's own still has the credential shim.
+  const basics = SCRUBBED_COMMAND_ENV_NAMES.filter(name => name !== "PATH");
+  const keep = new Set([...basics, ...Object.keys(env)].filter(name => name && !name.includes("=")));
   return {
     type: "stdio" as const,
     command: "/bin/sh",

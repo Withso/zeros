@@ -121,6 +121,32 @@ describe("MCP per-server working directory", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+  it("does not let Claude pass on its own PATH when only the credential shim was on the chat's", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "mcp-env-"));
+    try {
+      const shim = path.join(root, "zeros-git-auth-fixture");
+      await mkdir(shim);
+      const config = claudeMcpStdio(
+        {
+          name: "probe",
+          transport: "stdio",
+          command: process.execPath,
+          args: ["-e", "process.stdout.write(JSON.stringify(process.env))"],
+        },
+        root,
+        shim,
+      );
+      const { stdout } = await promisify(execFile)(config.command, config.args, {
+        cwd: root,
+        env: { HOME: root, PATH: shim, ...config.env },
+      });
+      const env = JSON.parse(stdout) as Record<string, string>;
+      expect(env.HOME).toBe(root);
+      expect(env).not.toHaveProperty("PATH");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
   it("preserves the folder through validation and registry projection", () => {
     expect(mcpServerSchema.parse(server)).toEqual(server);
     expect(mcpServersFromSettings({ mcp: { servers: [server] } })).toEqual([

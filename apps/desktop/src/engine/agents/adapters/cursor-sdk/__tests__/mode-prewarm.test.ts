@@ -527,6 +527,50 @@ describe("Cursor session tools", () => {
     });
   });
 
+  it("stops counting a server's earlier use once its declaration changes", async () => {
+    await withCursorConfigs(async (workspace) => {
+      const ok = { status: "success", value: { isError: false, content: [{ text: { text: "ok" } }] } };
+      sendSpy.mockImplementation(async () => ({
+        ...makeRun(),
+        stream: async function* () {
+          for (const [call_id, server] of [["a", "imported"], ["b", "home-tools"], ["c", "repo-tools"]]) {
+            yield { type: "tool_call", call_id, name: "mcp", status: "running", args: { providerIdentifier: server, toolName: "probe", args: {} } };
+            yield { type: "tool_call", call_id, name: "mcp", status: "completed", result: ok };
+          }
+        },
+      }));
+      // Without a per-session registry the adapter reads the shared one, which
+      // can change while the chat stays open.
+      const shared = [imported];
+      const adapter = new CursorSdkAdapter({ ...makeCtx(), mcpServers: shared });
+      try {
+        const { session } = await adapter.newSession({ cwd: workspace, env: { CURSOR_API_KEY: "key_test" } });
+        const sessionId = session.executionId;
+        const statuses = async () =>
+          (await adapter.capabilityPorts.sessionTools.inventory({ sessionId })).groups
+            .find((group) => group.kind === "mcp")!
+            .entries.map((entry) => [entry.name, entry.status]);
+        await adapter.prompt({ sessionId, prompt: TEXT });
+        expect(await statuses()).toEqual([
+          ["imported", "connected"],
+          ["home-tools", "connected"],
+          ["repo-tools", "connected"],
+        ]);
+        shared.splice(0, 1, { ...imported, url: "https://example.test/moved" });
+        await writeFile(path.join(workspace, ".cursor", "mcp.json"), JSON.stringify({
+          mcpServers: { "repo-tools": { command: "node", args: ["other.js"] } },
+        }));
+        expect(await statuses()).toEqual([
+          ["imported", "unverified"],
+          ["home-tools", "connected"],
+          ["repo-tools", "unverified"],
+        ]);
+      } finally {
+        await adapter.dispose();
+      }
+    });
+  });
+
   it("lists no Local servers when the host opt-out keeps native settings off", async () => {
     await withCursorConfigs(async (workspace) => {
       vi.stubEnv("ZEROS_NATIVE_MCP_PASSTHROUGH", "0");

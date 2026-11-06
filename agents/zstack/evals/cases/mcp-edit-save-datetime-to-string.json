@@ -1,0 +1,9 @@
+{
+  "id": "mcp-edit-save-datetime-to-string",
+  "kind": "replay",
+  "area": "desktop-engine",
+  "fixedBy": "pr:851",
+  "symptom": "Saving an MCP server from the editor, even unchanged, rewrote its hand-written TOML datetimes as quoted ISO strings: the editor holds a JSON copy and the save wrote that copy as it was.",
+  "rule": "Where a JSON copy from the renderer equals the saved value, write the parsed original back; test saves over files with every TOML value type a person can write (principle 13).",
+  "check": "pnpm exec vitest run --config vitest.config.ts apps/desktop/src/engine/settings/__tests__/mcp-configuration.test.ts -t 'hand-written datetime a datetime'"
+}
