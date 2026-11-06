@@ -120,7 +120,7 @@ export async function runDraftIndicatorsSmoke({
     await expectCovered();
     await action.evaluate((node) => node.blur());
     check(
-      `${theme}: ${cap === 140 ? "close" : "archive"} covers its 12 × 12 pencil on hover and keyboard focus without resizing the tab`,
+      `${theme}: ${cap === 176 ? "close" : "archive"} covers its 12 × 12 pencil on hover and keyboard focus without resizing the tab`,
       true,
     );
   }
@@ -130,7 +130,7 @@ export async function runDraftIndicatorsSmoke({
       document.documentElement.className = theme;
     }, theme);
     await page.setViewportSize({ width: 440, height: 340 });
-    await verifySlot(chat("a"), "Close chat", 140, theme);
+    await verifySlot(chat("a"), "Close chat", 176, theme);
   }
   await selectWorkspace("b");
   await page.setViewportSize({ width: 360, height: 340 });

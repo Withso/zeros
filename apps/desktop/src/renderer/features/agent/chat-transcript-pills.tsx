@@ -20,7 +20,6 @@ import {
 import {
   Check,
   ChevronDown,
-  MessageCircleMore,
   MessageSquareText,
   Paperclip,
 } from "lucide-react";
@@ -479,23 +478,15 @@ export function ChatTranscriptPills({
 
   return (
     <div className="flex flex-col gap-2">
+      {/* A plain label (2026-11-06): no glyph, no colon and no trailing
+          control. The pills are self-evidently the objects of the verb. */}
       <div className="text-fg2 flex items-center gap-2 text-sm">
-        {/* A conversation glyph, not a paperclip: like the folder/branch/
-            terminal rows it sits beside, this icon names WHAT the row is about
-            — chats — rather than the mechanism that gets them there. */}
-        <span className="flex size-3.5 shrink-0 items-center justify-center">
-          <MessageCircleMore className="size-3.5" aria-hidden="true" />
-        </span>
-        {/* No colon and no trailing control: the pills are self-evidently the
-            objects of the verb, and the mode switch that used to sit here is
-            gone. */}
         <span>Add chat transcripts</span>
       </div>
-      {/* Indented to the provenance rows' TEXT column (14px icon + 8px gap) so
-          the pills read as belonging to the sentence above them without a box,
-          a rule, or a heading. */}
+      {/* Flush with the label, so the pills read as belonging to the sentence
+          above them without a box, a rule, or a heading. */}
       <div
-        className="ml-[22px] flex flex-wrap gap-1.5"
+        className="flex flex-wrap gap-1.5"
         role="group"
         aria-label="Add chat transcripts"
       >

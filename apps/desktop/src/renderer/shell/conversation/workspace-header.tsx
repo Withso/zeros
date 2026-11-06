@@ -1,14 +1,12 @@
 import { useCallback, useSyncExternalStore, type ReactNode } from "react";
-import { Folder, GitBranch, HardDrive } from "lucide-react";
+import { Folder, GitBranch } from "lucide-react";
 import type { Workspace } from "../../platform/git";
 import { parseCloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
 import { getOrganizationStoreGeneration } from "../../features/team/team-store";
 import { cloudCatalogGeneration, cloudWorkspaceDocument, subscribeCloudWorkspaces } from "../../state/cloud-workspace-catalog";
 import { useActiveWorkspace } from "../../state/use-active-workspace";
-import { useProjectForFolder } from "../../state/use-projects";
-import { useRepositoryRemote } from "../../features/repositories/use-repository-remote";
 import { useWorkspaceStore } from "../../state/workspace-store";
-import { Badge, PanelHeader, Tooltip } from "../../shared/ui/primitives";
+import { PanelHeader, Tooltip } from "../../shared/ui/primitives";
 import { workspaceLabel } from "../workspace-tabs";
 import { CloudWorkspaceDetails } from "./cloud-workspace-details";
 
@@ -39,23 +37,15 @@ export function WorkspaceHeader({ folder, ...props }: {
 }) {
   return folder && parseCloudWorkspaceKey(folder)
     ? <CloudHeader key={`${getOrganizationStoreGeneration()}:${cloudCatalogGeneration()}:${folder}`} {...props} folder={folder} />
-    : <LocalHeader {...props} folder={folder} />;
+    : <LocalHeader {...props} />;
 }
 
-function LocalHeader({ folder, ...props }: Parameters<typeof WorkspaceHeader>[0]) {
-  const project = useProjectForFolder(folder);
-  const active = useWorkspaceStore(state => state.activePage === "workspace");
-  const git = !!props.branch && project?.isGitRepository !== false;
-  const { localOnly } = useRepositoryRemote(project?.repoRoot, project?.originUrl ?? null, active && git);
-  const unpublished = git && project && localOnly;
-  const icon = unpublished ? (
-    <Badge variant="outline">
-      <HardDrive aria-hidden="true" />
-      Local
-    </Badge>
-  ) : (
-    // The 28px box the Cloud details button takes, so the name starts at one
-    // column for branch, folder and cloud workspaces.
+function LocalHeader(props: Omit<Parameters<typeof WorkspaceHeader>[0], "folder">) {
+  // The 28px box the Cloud details button takes, so the name starts at one
+  // column for branch, folder and cloud workspaces. Whether the branch is
+  // published does not change the glyph (2026-11-06: the "Local" badge that
+  // replaced it for unpublished Git is retired).
+  const icon = (
     <span className="-ml-1.5 inline-flex size-7 items-center justify-center">
       {props.branch ? <GitBranch className="size-4" /> : <Folder className="size-4" />}
     </span>
@@ -80,7 +70,9 @@ export function WorkspaceHeaderView({ name, icon, actions, readOnly, windowContr
   windowControlsInset?: boolean;
   trailing?: ReactNode;
 }) {
-  return <PanelHeader size="window" aria-label="Workspace header" data-workspace-header="" data-tauri-drag-region="">
+  // No divider: the header's bg1 runs straight into the chat strips below,
+  // whose own top fade separates a recessed (unfocused) pane from it.
+  return <PanelHeader size="window" divider={false} aria-label="Workspace header" data-workspace-header="" data-tauri-drag-region="">
     {windowControlsInset && <span className="block h-full w-[108px] shrink-0" aria-hidden="true" data-window-controls-reserve="" />}
     <div className="text-fg2 inline-flex shrink-0 items-center" data-workspace-placement="">{icon}</div>
     <Tooltip label={name}>

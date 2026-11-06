@@ -68,54 +68,54 @@ describe("workspace column header", () => {
     expect(html).not.toContain("Cloud workspace details"); expect(html).not.toContain("Share workspace");
     expect(html).not.toContain("Port forwarding"); expect(state.reads).toEqual([]);
   });
-  it.each(["/local/personal", "/organizations/example/local"])("labels unpublished Git in %s as Local before the workspace name", folder => {
+  // 2026-11-06 direction (Zeros Design v378): branch, folder and cloud share
+  // one 28px glyph slot so the name always starts at the same column; the
+  // unpublished-Git "Local" badge that replaced the glyph is gone.
+  const slot = (html: string) => html.match(/<div[^>]*data-workspace-placement=""[^>]*>([\s\S]*?)<\/div>/)?.[1] ?? "";
+  it.each(["/local/personal", "/organizations/example/local"])("keeps unpublished Git in %s on the branch glyph, with no Local badge", folder => {
     state.projects[folder].originUrl = null;
     const html = render({ folder, name: "Unpublished feature", branch: true });
-    expect(html).toContain("lucide-hard-drive");
-    expect(html).toContain(">Local<");
-    expect(html.indexOf(">Local<")).toBeLessThan(html.indexOf("Unpublished feature"));
-    expect(html).not.toContain("lucide-git-branch");
+    expect(slot(html)).toContain("inline-flex size-7");
+    expect(slot(html)).toContain("lucide-git-branch");
+    expect(html).not.toContain(">Local<");
+    expect(html).not.toContain("lucide-hard-drive");
     expect(html).toContain('aria-label="Summary"');
     expect(state.reads).toEqual([]);
   });
-  it("keeps plain folders and repositories on other hosts distinct from unpublished Git", () => {
+  it("gives a plain folder the folder glyph in the same 28px slot", () => {
     const folder = "/local/personal";
     state.projects[folder].originUrl = null;
     state.projects[folder].isGitRepository = false;
-    expect(render({ folder })).toContain("lucide-folder");
-    expect(render({ folder })).not.toContain(">Local<");
-    state.projects[folder].isGitRepository = true;
-    state.projects[folder].originUrl = "https://gitlab.com/example/repo.git";
-    expect(render({ folder, branch: true })).toContain("lucide-git-branch");
-    expect(render({ folder, branch: true })).not.toContain(">Local<");
+    const html = render({ folder });
+    expect(slot(html)).toContain("inline-flex size-7");
+    expect(slot(html)).toContain("lucide-folder");
+    expect(html).not.toContain(">Local<");
   });
-  it("uses exact project metadata through publication and Local/cloud/Local switches", () => {
+  it("shows the same glyph whatever the remote, through publication and Local/cloud/Local switches", () => {
     const folder = "/local/personal";
+    const branchOnly = (html: string) => slot(html).includes("lucide-git-branch") && !html.includes(">Local<") && !html.includes("lucide-hard-drive");
     state.projects[folder].originUrl = null;
-    expect(render({ folder, branch: true })).toContain(">Local<");
-    expect(render({ folder: "/organizations/example/local", branch: true })).not.toContain(">Local<");
+    expect(branchOnly(render({ folder, branch: true }))).toBe(true);
     expect(render()).toContain("Cloud workspace details");
-    expect(render()).not.toContain(">Local<");
-    expect(render({ folder, branch: true })).toContain(">Local<");
-    state.projects[folder].originUrl = "git@github.com:example/repo.git";
-    expect(render({ folder, branch: true })).toContain("lucide-git-branch");
-    expect(render({ folder, branch: true })).not.toContain(">Local<");
-  });
-  it("does not label a configured GitHub remote as Local just because it is not named origin", () => {
-    const folder = "/local/personal";
-    state.projects[folder].originUrl = null;
+    expect(branchOnly(render({ folder: "/organizations/example/local", branch: true }))).toBe(true);
     createBranchCatalogCache.setData(JSON.stringify([folder, null]), {
       effectiveRemote: "upstream",
       remotes: [{ name: "upstream", url: "git@github.com:example/repo.git", isGitHub: true }],
     } as RepoBranchCatalog);
-    const html = render({ folder, branch: true });
-    expect(html).toContain("lucide-git-branch");
-    expect(html).not.toContain(">Local<");
+    expect(branchOnly(render({ folder, branch: true }))).toBe(true);
     createBranchCatalogCache.invalidate(JSON.stringify([folder, null]));
     createBranchCatalogCache.setError(JSON.stringify([folder, null]), new Error("Engine disconnected"));
-    expect(render({ folder, branch: true })).toContain("lucide-git-branch");
-    state.projects["/organizations/example/local"].originUrl = null;
-    expect(render({ folder: "/organizations/example/local", branch: true })).toContain(">Local<");
+    expect(branchOnly(render({ folder, branch: true }))).toBe(true);
+    state.projects[folder].originUrl = "https://gitlab.com/example/repo.git";
+    expect(branchOnly(render({ folder, branch: true }))).toBe(true);
+    state.projects[folder].originUrl = "git@github.com:example/repo.git";
+    expect(branchOnly(render({ folder, branch: true }))).toBe(true);
+  });
+  it.each([null, "/local/personal", "/organizations/example/local", first])("draws no divider under the %s header row", folder => {
+    const header = render({ folder, branch: true }).match(/<div[^>]*data-workspace-header=""[^>]*>/)?.[0] ?? "";
+    expect(header).toContain("h-10");
+    expect(header).not.toMatch(/\bborder-b\b/);
+    expect(header).not.toContain("border-border1");
   });
   it("uses cloud metadata and renders the column actions once", () => {
     const html = render();

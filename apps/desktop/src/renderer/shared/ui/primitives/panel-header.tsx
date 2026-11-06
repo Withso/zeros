@@ -6,13 +6,16 @@ import { IconButtonSizeContext } from "./icon-button";
 export interface PanelHeaderProps extends React.HTMLAttributes<HTMLElement> {
   as?: "div" | "section" | "header";
   size: "window" | "panel";
+  /** The bottom border1 rule. Off where the row's own fill and the row below
+   * already separate them (the workspace header above the chat strips). */
+  divider?: boolean;
 }
 
 const HEADER_CLASSES = {
-  window:
-    "border-border1 bg-bg1 flex h-10 shrink-0 items-center gap-1 border-b pr-1.5 pl-3",
-  panel: "border-border1 flex h-9 items-center gap-2 border-b pr-1 pl-3",
+  window: "bg-bg1 flex h-10 shrink-0 items-center gap-1 pr-1.5 pl-3",
+  panel: "flex h-9 items-center gap-2 pr-1 pl-3",
 } as const;
+const HEADER_DIVIDER_CLS = "border-border1 border-b";
 
 /** Window chrome (40px) and panel headings (36px) share their own geometry:
  * text starts 12px in, and a trailing 28px icon button ends as far from the
@@ -21,12 +24,12 @@ const HEADER_CLASSES = {
  * Legacy geometry overrides in className (window h-9 or gap-2) are
  * `@deprecated`: preserves a pre-existing recipe; unify during the UI iteration. */
 const PanelHeader = React.forwardRef<HTMLElement, PanelHeaderProps>(
-  ({ as = "div", size, className, ...props }, ref) => (
+  ({ as = "div", size, divider = true, className, ...props }, ref) => (
     <IconButtonSizeContext.Provider value="standard">
       {React.createElement(as, {
         ...props,
         ref,
-        className: cn(HEADER_CLASSES[size], className),
+        className: cn(HEADER_CLASSES[size], divider && HEADER_DIVIDER_CLS, className),
       })}
     </IconButtonSizeContext.Provider>
   ),

@@ -29,7 +29,7 @@
 //     the conversation column to two 360px panes; later splits wait until the
 //     resulting whole tree fits. Split Down follows the corresponding height
 //     check. Both directions still respect the pane cap.
-//   - Tabs are content-sized pills from 70px through 140px, then
+//   - Tabs are content-sized pills from 70px through 176px, then
 //     truncate. Click → activate. Hover → ×. Right-click → Rename /
 //     Close. Drag a tab onto a pane body to move it there (or onto the
 //     right/bottom band to split — see PaneDropOverlay).
@@ -175,14 +175,14 @@ const TAB_NAV_CLS =
  *  tab gap match the workspace strip; History and "+" stay outside it. */
 const TAB_ROW_CLS = "relative flex h-full w-max items-center gap-1 px-1";
 
-/** The one Zeros tab — content-sized from 70px through a 140px cap (then
+/** The one Zeros tab — content-sized from 70px through a 176px cap (then
  *  truncates), no divider, and doesn't shrink (the strip scrolls instead).
  *  `relative` + `overflow-hidden` pin the close overlay and its fade to the
  *  rounded right edge. On the --pane-bg window fill an inactive tab has no
  *  resting fill, hover is bg1-hover, and the active tab is bg2 with medium
  *  fg1 text. --tab-fill carries the current fill so the fade matches it. */
 const TAB_BASE_CLS =
-  "group/tab relative flex h-7 min-w-[70px] max-w-[140px] shrink-0 cursor-pointer select-none items-center gap-2 overflow-hidden rounded-md px-2 text-left text-xs text-fg2 transition-none [--tab-fill:transparent] not-data-[active=true]:focus-within:bg-bg1-hover not-data-[active=true]:focus-within:text-fg1 not-data-[active=true]:focus-within:[--tab-fill:var(--bg1-hover)] not-data-[active=true]:data-[hovered=true]:bg-bg1-hover not-data-[active=true]:data-[hovered=true]:text-fg1 not-data-[active=true]:data-[hovered=true]:[--tab-fill:var(--bg1-hover)] data-[active=true]:sticky data-[active=true]:left-1 data-[active=true]:right-1 data-[active=true]:z-20 data-[active=true]:bg-bg2 data-[active=true]:font-medium data-[active=true]:text-fg1 data-[active=true]:[--tab-fill:var(--bg2)]";
+  "group/tab relative flex h-7 min-w-[70px] max-w-44 shrink-0 cursor-pointer select-none items-center gap-2 overflow-hidden rounded-md px-2 text-left text-xs text-fg2 transition-none [--tab-fill:transparent] not-data-[active=true]:focus-within:bg-bg1-hover not-data-[active=true]:focus-within:text-fg1 not-data-[active=true]:focus-within:[--tab-fill:var(--bg1-hover)] not-data-[active=true]:data-[hovered=true]:bg-bg1-hover not-data-[active=true]:data-[hovered=true]:text-fg1 not-data-[active=true]:data-[hovered=true]:[--tab-fill:var(--bg1-hover)] data-[active=true]:sticky data-[active=true]:left-1 data-[active=true]:right-1 data-[active=true]:z-20 data-[active=true]:bg-bg2 data-[active=true]:font-medium data-[active=true]:text-fg1 data-[active=true]:[--tab-fill:var(--bg2)]";
 
 // 13/18 so descenders are never clipped.
 const TAB_LABEL_CLS = "min-w-0 truncate text-xs leading-4.5";
@@ -207,7 +207,7 @@ const TITLE_INPUT_CLS = cn(
 /** Synthetic "Untitled" tab — rendered while the workspace has zero
  *  visible chats (the selection keeper is mid-spawn). */
 const TAB_UNTITLED_CLS =
-  "group/tab relative flex h-7 min-w-[70px] max-w-[140px] shrink-0 cursor-default select-none items-center gap-2 overflow-hidden rounded-md bg-bg2 px-2 text-xs font-medium text-fg1";
+  "group/tab relative flex h-7 min-w-[70px] max-w-44 shrink-0 cursor-default select-none items-center gap-2 overflow-hidden rounded-md bg-bg2 px-2 text-xs font-medium text-fg1";
 
 const CHAT_CONTENT_INSET_PX = 4;
 const CHAT_STICKY_EDGE_INSET_PX = 4;

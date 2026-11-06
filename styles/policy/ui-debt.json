@@ -3,9 +3,6 @@
   "exceptions": [],
   "debt": {
     "arbitrary-value": {
-      "apps/desktop/src/renderer/features/agent/chat-transcript-pills.tsx": {
-        "ml-[22px]": 1
-      },
       "apps/desktop/src/renderer/features/agent/composer-attachments.tsx": {
         "py-[3px]": 1
       },
