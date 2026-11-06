@@ -69,7 +69,8 @@ export type CloudV2TimingRecord = {
   runtimeChanged?: boolean;
   /** Whether a checkpoint command uploaded a new object or kept the last one. */
   checkpoint?: "saved" | "unchanged";
-  /** relay_ready: the worker socket dial, and the time from it to readiness. */
+  /** relay_ready: the worker socket dial, and the time from it to readiness.
+   * worker_hello: configMs is the control plane's configuration inside hello. */
   dialMs?: number; configMs?: number;
 };
 type TimingDetail = Pick<CloudV2TimingRecord, "runtimeChanged" | "checkpoint">;
