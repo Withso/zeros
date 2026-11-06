@@ -23,6 +23,8 @@ export async function runChatSurfacesSmoke({ page, check, harnessBase }) {
   // open tab's content sits in one island 12px in from the column's sides and
   // bottom, on the column's own bg1 with a border1 edge and 12px corners.
   await expect(page.locator("[data-workbench-island]")).toBeVisible();
+  // Each pass's resolved bg1 must differ, or the theme never switched.
+  const islandBg1 = [];
   for (const theme of ["dark", "light"]) {
     await page.evaluate((value) => {
       document.documentElement.dataset.theme = value;
@@ -60,7 +62,9 @@ export async function runChatSurfacesSmoke({ page, check, harnessBase }) {
     expect(island.radius).toBe("12px");
     expect(island.border).toEqual(["1px", island.border1]);
     expect(island.fill).toBe(island.bg1);
+    islandBg1.push(island.bg1);
   }
+  expect(new Set(islandBg1).size).toBe(2);
   check("Side column: the open tab sits in a bg1 island 12px in with a border1 edge, under the tab row and in line with its first tab, in Dark and Light", true);
 
   const read = () => page.evaluate(() => {
@@ -117,11 +121,13 @@ export async function runChatSurfacesSmoke({ page, check, harnessBase }) {
   await page.getByRole("menuitem", { name: "Split Right", exact: true }).click();
   await expect(panes).toHaveCount(2);
 
+  const splitBg1 = [];
   for (const theme of ["dark", "light"]) {
     await page.evaluate((value) => {
       document.documentElement.dataset.theme = value;
     }, theme);
     const state = await read();
+    splitBg1.push(state.bg1);
     const [left, right] = state.panes;
     expect(state.headerBorder).toBe("0px");
     // 12px in from the left and bottom; Workbench's island keeps the 12px on
@@ -144,6 +150,7 @@ export async function runChatSurfacesSmoke({ page, check, harnessBase }) {
     }
     expect(state.fades).toBe(0);
   }
+  expect(new Set(splitBg1).size).toBe(2);
   check("Split Right: solid panes 12px apart and 12px in from the left and bottom, 12px from the side island, rounded at every corner, only the unfocused one on the sidebar's fill, in Dark and Light", true);
 
   // With Workbench hidden the column runs to the window's edge, so the split

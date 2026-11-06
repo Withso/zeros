@@ -14,6 +14,8 @@ check's own status through the pipe.
 **Rule.** Never chain a commit, push or merge after a check piped into `tail`,
 `grep` or `head`. Write the check's output to a log, read its status, then act:
 `pnpm check:ui > "$log" 2>&1; status=$?; tail -3 "$log"; [ "$status" -eq 0 ]
-&& git commit …`, or run the chain under `set -o pipefail`.
+&& git commit …`. `set -o pipefail` is no substitute: a `head` that stops
+reading early can end a passing check with SIGPIPE, and pipefail then reports
+it as a failure.
 
 **Encoded in.** This fragment, for `gotchas.md` at the next pack version.

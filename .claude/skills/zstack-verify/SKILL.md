@@ -103,9 +103,10 @@ Principle 16 applies to every claim.
   `$(date -u +%H:%M)` inside the command that appends it.
 - Don't claim macOS-only checks from Linux.
 - A smoke or capture switches themes with `document.documentElement.dataset.theme`
-  (a class on `<html>` does nothing), and each theme pass asserts at least one
-  resolved token, such as a `var(--bg1)` probe, so a switch that never happened
-  fails instead of re-checking the default.
+  (a class on `<html>` does nothing), and asserts that a resolved token, such
+  as a `var(--bg1)` probe, differs between the passes or matches each theme's
+  own value. A value compared only within one pass cannot catch a switch that
+  never happened.
 
 ## When a check fails
 
@@ -117,7 +118,8 @@ agents/zstack/changes`): facts sit there until the pack owner folds them.
 
 A smoke failure that is `Failed to fetch dynamically imported module` for a
 module outside the diff's import graph is a dev-server fetch, not a
-regression: confirm the module imports nothing you changed, then rerun that
+regression: confirm nothing you changed is in its import graph, through
+barrels such as `primitives/index.ts` too, then rerun that
 scenario alone twice on the same head (a scratch runner imports it from
 `scripts/ui-smoke/scenarios.mjs` against its own dev server). Report the shard
 and the isolated reruns together; never call the shard green.
