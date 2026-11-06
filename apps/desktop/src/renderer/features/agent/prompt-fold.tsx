@@ -25,6 +25,8 @@ export const PROMPT_FOLD_COLLAPSED_CLS =
   "max-h-[108px] overflow-clip mask-b-from-[calc(100%-2rem)]";
 export const PROMPT_FOLD_EXPANDED_CLS =
   "max-h-[308px] overflow-y-auto [scrollbar-width:thin] data-more-above:mask-t-from-[calc(100%-2rem)] data-more-below:mask-b-from-[calc(100%-2rem)]";
+/** The folded view's last 32px dissolve: a control there is not plainly in view. */
+const PROMPT_FOLD_FADE_PX = 32;
 
 /** Whether a message of this natural height folds: only when the folded view
  *  and its toggle are shorter, so Show more never reveals a lone line. */
@@ -51,6 +53,7 @@ export function PromptFold({
   const unfolded = folds && expanded;
   const unfoldedRef = useRef(false);
   const revealToggle = useRef(false);
+  const revealFocused = useRef<HTMLElement | null>(null);
 
   const syncEdges = useCallback(() => {
     const viewport = viewportRef.current;
@@ -94,7 +97,24 @@ export function PromptFold({
       revealToggle.current = false;
       toggleRef.current?.scrollIntoView({ block: "nearest" });
     }
+    if (unfolded && revealFocused.current) {
+      revealFocused.current.scrollIntoView({ block: "nearest" });
+      revealFocused.current = null;
+    }
   }, [unfolded, syncEdges]);
+
+  // Folded, the box clips rather than scrolls, so a link or attachment that
+  // keyboard focus reaches below the fold would stay out of sight, its ring
+  // with it: unfold, then bring it into view.
+  const unfoldForFocus = useCallback((event: React.FocusEvent<HTMLDivElement>) => {
+    const viewport = viewportRef.current;
+    const target = event.target;
+    if (!viewport || target === viewport || !(target instanceof HTMLElement)) return;
+    const fadeTop = viewport.getBoundingClientRect().bottom - PROMPT_FOLD_FADE_PX;
+    if (target.getBoundingClientRect().bottom <= fadeTop) return;
+    revealFocused.current = target;
+    setExpanded(true);
+  }, []);
 
   const toggle = useCallback(() => {
     // Folding back starts the message from its top again.
@@ -112,6 +132,7 @@ export function PromptFold({
         data-more-above={unfolded && edges.above ? "" : undefined}
         data-more-below={unfolded && edges.below ? "" : undefined}
         onScroll={unfolded ? syncEdges : undefined}
+        onFocus={folds && !expanded ? unfoldForFocus : undefined}
         className={cn("-m-1 p-1", folds && (expanded ? PROMPT_FOLD_EXPANDED_CLS : PROMPT_FOLD_COLLAPSED_CLS))}
       >
         <div ref={contentRef}>{children}</div>

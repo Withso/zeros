@@ -33,7 +33,24 @@ describe("side column island", () => {
       ]),
     );
     // Surface kind="canvas" paints bg1 and binds --surface-border to border1.
-    expect(read("workbench-pane.tsx").match(/<Surface\s[^>]*kind="canvas"[^>]*className=\{WORKBENCH_ISLAND_CLS\}/g)).toHaveLength(2);
+    expect(read("workbench-pane.tsx").match(/<Surface\s[^>]*kind="canvas"[^>]*className=\{WORKBENCH_ISLAND_CLS\}/g)).toHaveLength(1);
+  });
+
+  it("keeps one island mounted through the setting-up reveal, so the docked terminal finds it", () => {
+    // The terminal panel's resizer applies the stored height from a layout
+    // effect that reads its containerRef, and React attaches a parent's ref
+    // only after its children's layout effects. An island that mounted with
+    // the panel was still null there, so a panel revealed after setting up
+    // fell back to the boot-time height.
+    const src = read("workbench-pane.tsx");
+    const islands = src.match(/<Surface\b[^>]*>/g) ?? [];
+    expect(islands).toHaveLength(1);
+    const island = islands[0] ?? "";
+    expect(island).toContain("ref={islandRef}");
+    const start = src.indexOf(island);
+    const inside = src.slice(start, src.indexOf("</Surface>", start));
+    expect(inside).toContain("<SettingUpRow grow />");
+    expect(inside).toContain("<TerminalPanel");
   });
 
   it("keeps the tab row outside the island and the PR row, tab bodies and docked terminal inside it", () => {

@@ -31,6 +31,12 @@ interface JumpToPromptPillProps {
   promptEl: HTMLElement | null;
 }
 
+/** What of the prompt shows on screen: a folded prompt's bubble clips its
+ *  text, so the text's own box runs on below the bubble. */
+function visiblePrompt(promptEl: HTMLElement): HTMLElement {
+  return promptEl.closest<HTMLElement>("[data-user-bubble]") ?? promptEl;
+}
+
 export const JumpToPromptPill = memo(function JumpToPromptPill({
   scrollEl,
   promptEl,
@@ -42,9 +48,10 @@ export const JumpToPromptPill = memo(function JumpToPromptPill({
       setPromptAbove(false);
       return;
     }
+    const shown = visiblePrompt(promptEl);
     const update = () => {
       const containerTop = scrollEl.getBoundingClientRect().top;
-      const promptBottom = promptEl.getBoundingClientRect().bottom;
+      const promptBottom = shown.getBoundingClientRect().bottom;
       setPromptAbove(promptBottom < containerTop);
     };
     update();
@@ -52,6 +59,8 @@ export const JumpToPromptPill = memo(function JumpToPromptPill({
     const ro = new ResizeObserver(update);
     ro.observe(scrollEl);
     ro.observe(promptEl);
+    // Folding and unfolding resize the bubble, not the text.
+    if (shown !== promptEl) ro.observe(shown);
     return () => {
       scrollEl.removeEventListener("scroll", update);
       ro.disconnect();

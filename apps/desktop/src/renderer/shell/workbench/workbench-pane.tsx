@@ -517,16 +517,9 @@ export function WorkbenchPane({
           // once when the settling flag clears (see the reveal effect above).
           // The header band stays, empty, so the island holds its place
           // through the reveal.
-          <>
-            <div data-tauri-drag-region className={WORKBENCH_HEADER_CLS} aria-hidden="true" />
-            <Surface kind="canvas" className={WORKBENCH_ISLAND_CLS} data-workbench-island="">
-              <SettingUpRow grow />
-              <SettingUpRow />
-            </Surface>
-          </>
+          <div data-tauri-drag-region className={WORKBENCH_HEADER_CLS} aria-hidden="true" />
         ) : (
-          <>
-            {/* Primary File / Design / Changes / Review / Browser / Terminal tabs. */}
+            // Primary File / Design / Changes / Review / Browser / Terminal tabs.
             <div
               data-tauri-drag-region
               data-testid="workbench-header"
@@ -545,12 +538,25 @@ export function WorkbenchPane({
                 onToggle={onToggleWorkbench}
               />
             </div>
-            <Surface
-              ref={islandRef}
-              kind="canvas"
-              className={WORKBENCH_ISLAND_CLS}
-              data-workbench-island=""
-            >
+        )}
+        {/* One island for both states. It stays mounted through the reveal, so
+            the docked terminal's resizer finds it attached when the panel
+            mounts: React attaches a parent's ref only after its children's
+            layout effects, and an island mounting with the panel would leave
+            the stored height unapplied. */}
+        <Surface
+          ref={islandRef}
+          kind="canvas"
+          className={WORKBENCH_ISLAND_CLS}
+          data-workbench-island=""
+        >
+          {settling ? (
+            <>
+              <SettingUpRow grow />
+              <SettingUpRow />
+            </>
+          ) : (
+            <>
               <div className={WORKBENCH_CONTENT_CLS}>
                 {showSharedPrStatusRow && (
                   <PrStatusRow
@@ -628,9 +634,9 @@ export function WorkbenchPane({
                 workbenchHost={terminalHost}
                 containerRef={islandRef}
               />
-            </Surface>
-          </>
-        )}
+            </>
+          )}
+        </Surface>
       </div>
       </ActivityScope.Provider>
     </DiffWorkerPoolProvider>

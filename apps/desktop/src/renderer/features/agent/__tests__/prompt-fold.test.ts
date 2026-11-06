@@ -88,10 +88,17 @@ const script = buildSync({
       import { PromptFold } from "./features/agent/prompt-fold";
       const root = createRoot(document.querySelector("#app"));
       window.fold = {
-        render(height, surfaceActive = true) {
+        render(height, surfaceActive = true, controls = false) {
           flushSync(() => root.render(
             <PromptFold surfaceActive={surfaceActive}>
-              <div id="content" style={{ height }} />
+              <div id="content" style={{ height, position: "relative" }}>
+                {controls ? (
+                  <>
+                    <button id="near" type="button">near</button>
+                    <button id="far" type="button" style={{ position: "absolute", bottom: 0 }}>far</button>
+                  </>
+                ) : null}
+              </div>
             </PromptFold>,
           ));
         },
@@ -227,6 +234,37 @@ describe("sent message fold in a browser", () => {
       await page.evaluate(() => (window as any).fold.render(50, true));
       await frames(page);
       expect(await state(page)).toMatchObject({ fold: null, toggle: null });
+    });
+  });
+
+  // Folded, the box clips rather than scrolls, so nothing would bring a
+  // focused link or attachment below the fold into view.
+  it("unfolds to show a control that keyboard focus reaches below the fold", async () => {
+    await withPage(async (page) => {
+      await page.evaluate(() => (window as any).fold.render(400, true, true));
+      await frames(page);
+      expect(await state(page)).toMatchObject({ fold: "collapsed" });
+      await page.focus("#far");
+      await frames(page);
+      expect(await state(page)).toMatchObject({ fold: "expanded", toggle: "Show less" });
+      expect(await page.evaluate(() => {
+        const viewport = document.querySelector<HTMLElement>("#content")!.parentElement!.parentElement!.getBoundingClientRect();
+        const far = document.querySelector<HTMLElement>("#far")!.getBoundingClientRect();
+        return {
+          focused: document.activeElement?.id,
+          inView: far.top >= viewport.top - 0.5 && far.bottom <= viewport.bottom + 0.5,
+        };
+      })).toEqual({ focused: "far", inView: true });
+    });
+  });
+
+  it("keeps the fold when focus lands on a control already in view", async () => {
+    await withPage(async (page) => {
+      await page.evaluate(() => (window as any).fold.render(400, true, true));
+      await frames(page);
+      await page.focus("#near");
+      await frames(page);
+      expect(await state(page)).toMatchObject({ fold: "collapsed", toggle: "Show more" });
     });
   });
 
