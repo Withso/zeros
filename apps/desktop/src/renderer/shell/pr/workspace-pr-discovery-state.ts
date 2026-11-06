@@ -1,5 +1,7 @@
 import { useCallback, useSyncExternalStore } from "react";
 import { registerPrWorkspaceCacheForget } from "./pr-cache-forget";
+import type { Workspace } from "../../platform/git";
+import { cloudGithubPrScope } from "../../platform/cloud-github-pr-scope";
 
 export interface WorkspacePrDiscoverySnapshot {
   pending: boolean;
@@ -9,6 +11,13 @@ export interface WorkspacePrDiscoverySnapshot {
 
 const EMPTY: WorkspacePrDiscoverySnapshot = { pending: false, checked: false, error: null };
 const entries = new Map<string, { snapshot: WorkspacePrDiscoverySnapshot; listeners: Set<() => void> }>();
+
+export function workspacePrDiscoveryKey(
+  workspace: Pick<Workspace, "id" | "repoSlug" | "branch" | "baseBranch"> | null,
+  scope = cloudGithubPrScope(workspace?.id),
+): string | null {
+  return workspace ? `${workspace.id}#${JSON.stringify([workspace.repoSlug, workspace.branch, workspace.baseBranch, scope])}` : null;
+}
 
 function entryFor(id: string) {
   let entry = entries.get(id);
@@ -47,7 +56,9 @@ export function useWorkspacePrDiscoveryState(id: string | null): WorkspacePrDisc
 }
 
 registerPrWorkspaceCacheForget((id) => {
-  const entry = entries.get(id);
-  entries.delete(id);
-  for (const listener of entry?.listeners ?? []) listener();
+  for (const [key, entry] of entries) {
+    if (key !== id && !key.startsWith(`${id}#`)) continue;
+    entries.delete(key);
+    for (const listener of entry.listeners) listener();
+  }
 });

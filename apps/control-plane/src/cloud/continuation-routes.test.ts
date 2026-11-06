@@ -13,19 +13,21 @@ function fixture(state: CloudV2Workspace["state"] = "running") {
   const list = vi.fn(async () => ({ prompts: [] })), stop = vi.fn(async () => ({ epoch: "1" }));
   const issueToken = vi.fn(), requestLifecycle = vi.fn();
   const get = vi.fn(async () => workspace);
+  const proof = { accessEpoch: "3", loginRevision: "7" };
+  const promptContext = vi.fn(async () => ({ workspace, proof }));
   const listChats = vi.fn(async () => ({ chats: [] }));
   const app = new Hono();
   app.use("*", async (c, next) => { c.set("user", { id: "user" } as never); await next(); });
   app.onError((error, c) => error instanceof HttpError ? c.json({ error: { code: error.code } }, error.status) : c.json({ error: "internal" }, 500));
   app.route("/", createCloudV2Routes({
-    store: { get, prompts: { enqueue, list, stop }, issueToken, requestLifecycle, listChats },
+    store: { get, promptContext, prompts: { enqueue, list, stop }, issueToken, requestLifecycle, listChats },
     promptOutbox: true, authorizeSource, continueSource, bridgeBaseUrl: "wss://example.test",
   } as unknown as CloudV2RouteDeps));
   const request = (path: string, value?: unknown) => app.request(`/v1/cloud-v2/workspaces/${id}/${path}`, {
     method: value === undefined ? "GET" : "POST", headers: { "content-type": "application/json" },
     ...(value === undefined ? {} : { body: JSON.stringify(value) }),
   });
-  return { request, authorizeSource, continueSource, enqueue, list, stop, issueToken, requestLifecycle, get, listChats };
+  return { request, authorizeSource, continueSource, enqueue, list, stop, issueToken, requestLifecycle, get, promptContext, workspace, proof, listChats };
 }
 const prompt = { chatId: "chat", userMessageId: "message", agentId: "codex", startedAt: 1000, prompt: [{ type: "text", text: "Continue" }] };
 
@@ -37,6 +39,9 @@ it("accepts durable prompts and their status during continuation grace", async (
   expect(f.list).toHaveBeenCalledTimes(1);
   expect(f.authorizeSource).not.toHaveBeenCalled();
   expect(f.continueSource).toHaveBeenCalledTimes(2);
+  expect(f.continueSource).toHaveBeenCalledWith(f.workspace, f.proof);
+  expect(f.promptContext).toHaveBeenCalledWith(id, "user");
+  expect(f.get).not.toHaveBeenCalled();
 });
 
 it.each(["stopped", "starting"] as const)("requires fresh verification before a prompt can start a %s workspace", async state => {
@@ -66,7 +71,7 @@ it("keeps Stop available after grace expires or a repository is denied", async (
 
 it("retains creator authorization before reading cached source permission", async () => {
   const f = fixture();
-  f.get.mockRejectedValue(new HttpError(404, "not_found", "not found"));
+  f.promptContext.mockRejectedValue(new HttpError(404, "not_found", "not found"));
   expect((await f.request("prompts", prompt)).status).toBe(404);
   expect(f.continueSource).not.toHaveBeenCalled();
   expect(f.enqueue).not.toHaveBeenCalled();
@@ -77,6 +82,8 @@ it("keeps running workspace history readable during grace while a stopped worksp
   expect((await active.request("history", { op: "chats.list", params: {} })).status).toBe(200);
   expect(active.listChats).toHaveBeenCalledOnce();
   expect(active.authorizeSource).not.toHaveBeenCalled();
+  expect(active.continueSource).toHaveBeenCalledWith(active.workspace, undefined);
+  expect(active.promptContext).not.toHaveBeenCalled();
   const stopped = fixture("stopped");
   expect((await stopped.request("history", { op: "chats.list", params: {} })).status).toBe(503);
   expect(stopped.listChats).not.toHaveBeenCalled();

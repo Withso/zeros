@@ -106,3 +106,15 @@ describe("tailTurnInFlight", () => {
     expect(inFlight({ pendingLocalTurn: false, hasEvents: true })).toBe(false);
   });
 });
+
+describe("tailTurnInFlight across a cloud send's handoff", () => {
+  it("stays in flight after the local send settles while the durable prompt has not started", () => {
+    // Receipt returned (no local pending turn), worker not started yet (no
+    // stream, no events): the loader and timer must not drop out.
+    expect(tailTurnInFlight({ sessionStreaming: false, pendingLocalTurn: false, hasEvents: false, durableAwaitingStart: true })).toBe(true);
+  });
+  it("settles once the agent produced output or the durable prompt is terminal", () => {
+    expect(tailTurnInFlight({ sessionStreaming: false, pendingLocalTurn: false, hasEvents: true, durableAwaitingStart: true })).toBe(false);
+    expect(tailTurnInFlight({ sessionStreaming: false, pendingLocalTurn: false, hasEvents: false, durableAwaitingStart: false })).toBe(false);
+  });
+});

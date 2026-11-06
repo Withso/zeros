@@ -46,6 +46,18 @@ beforeEach(async () => {
 afterEach(() => { unmount(); expect(vi.getTimerCount()).toBe(0); vi.useRealTimers(); vi.unstubAllGlobals(); });
 
 describe("Local Review observation activity", () => {
+  it.each(["personal-workspace", "organization-workspace", "cloud://org/workspace"])(
+    "refreshes %s immediately on a ref hint while retaining its confirmed PR", async id => {
+      const { invalidateWorkspacePrRefs } = await import("../../../pr/pr-ref-version");
+      await review.prefetchReviewLiveData(provider, id, 42);
+      const confirmed = review.peekReviewLiveData(provider, id, 42).pr;
+      Fixture(id); unmount(); vi.mocked(provider.getPr).mockClear();
+      invalidateWorkspacePrRefs([id]); Fixture(id, true, 2);
+      expect(review.peekReviewLiveData(provider, id, 42).pr).toBe(confirmed);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(provider.getPr).toHaveBeenCalledOnce();
+    },
+  );
   it.each([
     ["personal-workspace", "hidden"], ["personal-workspace", "blurred"], ["personal-workspace", "retained"],
     ["organization-workspace", "hidden"], ["organization-workspace", "blurred"],

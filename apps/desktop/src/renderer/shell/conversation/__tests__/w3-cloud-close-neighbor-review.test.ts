@@ -60,7 +60,7 @@ function harness(folder = cloud) {
       messages: [{ kind: "text", role: "user", text: "saved history", id: "message-a", createdAt: 1 }] } } }) },
     chatsByPane: new Map([["pane", chats]]), visibleChats: chats, getLiveChatDraft: () => null,
     ptyKill: vi.fn(), closeSession, dispatch, spawnDefaultChatForWorkspace: spawn,
-    sessions: {}, activeWorkspacePath: folder, setPaneActiveChat: vi.fn(),
+    sessions: { getCloseActivity: () => ({ running: false, queuedCount: 0 }) }, toast: { error: vi.fn() }, activeWorkspacePath: folder, setPaneActiveChat: vi.fn(),
     resolvePaneActiveChatId: () => a.id, layout: {},
   });
   vm.runInContext(code, context);
@@ -69,37 +69,16 @@ function harness(folder = cloud) {
     state: useWorkspaceStore.getState };
 }
 
-describe("W3 cloud close with a changing pane neighbor", () => {
-  it.each(["ARCHIVE_CHAT", "DELETE_CHAT"] as const)("selects a live sibling after %s retires the captured neighbor during the wait", async type => {
-    const h = harness(); h.close();
-    expect(h.closeSession).toHaveBeenCalledOnce();
-    h.state().dispatch({ type, id: h.b.id });
-    // Retiring a background sibling does not itself navigate the active tab.
-    expect(h.state().activeChatId).toBe(h.a.id);
-    expect(h.state().navigationVersion).toBe(0);
-    h.confirm(true);
-    await vi.waitFor(() => expect(h.state().chats.find(row => row.id === h.a.id)?.archived).toBe(true));
-    expect(h.state().activeChatId).toBe(h.c.id);
-    expect(h.state().chats.find(row => row.id === h.state().activeChatId)?.archived).not.toBe(true);
-  });
-
-  it("keeps the originally preferred neighbor when that neighbor is still live", async () => {
-    const h = harness(); h.close(); h.confirm(true);
-    await vi.waitFor(() => expect(h.state().chats.find(row => row.id === h.a.id)?.archived).toBe(true));
-    expect(h.state().activeChatId).toBe(h.b.id);
-  });
-
-  it("preserves a newer explicit selection while the old close completes", async () => {
-    const h = harness(); h.close(); h.state().dispatch({ type: "SET_ACTIVE_CHAT", id: h.c.id });
-    expect(h.state().navigationVersion).toBeGreaterThan(0);
-    h.confirm(true);
-    await vi.waitFor(() => expect(h.state().chats.find(row => row.id === h.a.id)?.archived).toBe(true));
-    expect(h.state().activeChatId).toBe(h.c.id);
-  });
-
-  it.each(["/personal/project", "/organization/project"])("keeps %s close and neighbor selection synchronous", folder => {
+describe("cloud close selects the pane neighbor at once, like Local", () => {
+  it.each([cloud, "/personal/project", "/organization/project"])("archives and selects the live neighbor synchronously at %s", folder => {
     const h = harness(folder); h.close();
     expect(h.state().chats.find(row => row.id === h.a.id)?.archived).toBe(true);
     expect(h.state().activeChatId).toBe(h.b.id);
+  });
+
+  it("keeps a newer explicit selection made after an instant cloud close", () => {
+    const h = harness(); h.close(); h.state().dispatch({ type: "SET_ACTIVE_CHAT", id: h.c.id });
+    h.confirm(true);
+    expect(h.state().activeChatId).toBe(h.c.id);
   });
 });

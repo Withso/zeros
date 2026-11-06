@@ -164,10 +164,13 @@ describe("Review GitHub connection banner (cloud)", () => {
   it("names the cloud connection instead of the Mac's GitHub methods", async () => {
     // The Mac's App needs re-authorization; that must not describe the cloud.
     ghAuthStatusCache.setData("auth", reauthorize);
+    const authStatus = vi.fn(async () => ({ authenticated: false }));
+    const refused = await engineError("NOT_AUTHENTICATED", "Reconnect your cloud GitHub connection.");
     const { source, message } = await primaryBanner(
-      provider("github:cloud-signed-out", { authStatus: async () => ({ authenticated: false }) }),
+      provider("github:cloud-signed-out", { authStatus, getPr: async () => { throw refused; } }),
       CLOUD,
     );
+    expect(authStatus).not.toHaveBeenCalled();
     expect(message).toBe("Reconnect your cloud GitHub connection to load this pull request.");
     expect(source.hasContent).toBe(false);
   });

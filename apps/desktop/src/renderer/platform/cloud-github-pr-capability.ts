@@ -6,12 +6,12 @@ import type { CloudWorkspaceDocument } from "./cloud-workspace-contract";
 
 // Capability projection only, owned by the catalog. Keeping this module free
 // of UI/state imports lets every read/write boundary use the same gate.
-type CatalogContext = Readonly<{ signature: string; version: number }>;
+type CatalogContext = Readonly<{ signature: string; presentation: string; version: number }>;
 let contexts: ReadonlyMap<string, CatalogContext> = new Map();
 let version = 0;
-const listeners = new Set<(key: string) => void>();
+const listeners = new Set<(key: string, retainPresentation: boolean) => void>();
 export function onCloudGithubPrContextChange(
-  listener: (key: string) => void,
+  listener: (key: string, retainPresentation: boolean) => void,
 ): () => void {
   listeners.add(listener);
   return () => {
@@ -29,19 +29,19 @@ export function publishCloudGithubPrCapabilities(
       organizationId: document.organizationId,
       workspaceId: document.id,
     });
-    const signature = JSON.stringify([
+    const presentation = JSON.stringify([
       document.repository,
       github?.repositoryId,
       github?.branch,
       github?.baseBranch,
-      github?.headSha,
     ]);
+    const signature = JSON.stringify([presentation, github?.headSha]);
     const previous = contexts.get(key);
     next.set(
       key,
       previous?.signature === signature
         ? previous
-        : { signature, version: ++version },
+        : { signature, presentation, version: ++version },
     );
   }
   const previous = contexts;
@@ -50,7 +50,7 @@ export function publishCloudGithubPrCapabilities(
   // new authority. An A → B → A round trip never restores an old lifetime.
   for (const key of new Set([...previous.keys(), ...next.keys()])) {
     if (previous.get(key) !== next.get(key))
-      for (const listener of listeners) listener(key);
+      for (const listener of listeners) listener(key, !!next.get(key) && previous.get(key)?.presentation === next.get(key)?.presentation);
   }
 }
 export function hasCloudGithubPrCapability(

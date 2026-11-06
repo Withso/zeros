@@ -47,6 +47,7 @@ import {
 } from "./review-data";
 import { useReviewGithubFailure } from "../../pr/review-github-failure";
 import { derivePrStatusView, reviewFindings, summarizeChecks } from "./review-model";
+import { reviewRepositoryLabel } from "./review-repository-label";
 import { ErrorCallout } from "./review-shared-components";
 import {
   FindingsSection,
@@ -206,6 +207,7 @@ export function ReviewView({
    *  git-status presentation, owned by the surface that knows the workspace. */
   gitStatus?: React.ReactNode;
 }) {
+  const repositoryLabel = reviewRepositoryLabel(workspaceId, repoSlug);
   const filesKey = reviewFilesKey(provider.cacheKey, workspaceId, prNumber, baseBranch);
   const { snap, refresh, postComment, merge, markReady, updateBody, rerunFailedChecks } = useReviewLiveData({
     provider,
@@ -603,7 +605,7 @@ export function ReviewView({
         branch={branch}
         baseBranch={baseBranch}
         prNumber={prNumber}
-        repoSlug={repoSlug}
+        repoSlug={repositoryLabel}
         sub={sub}
         onSubChange={onSubChange}
       />
@@ -615,7 +617,7 @@ export function ReviewView({
       <WorkbenchTabToolbar>
         <ReviewHeader
           pr={pr}
-          repoSlug={repoSlug}
+          repoSlug={repositoryLabel}
           hostLabel={provider.hostLabel}
           prUrl={prUrl}
           changes={changeCounts}

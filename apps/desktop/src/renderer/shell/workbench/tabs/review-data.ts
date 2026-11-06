@@ -46,6 +46,7 @@ import {
   shouldPollPrStatus,
 } from "../../pr/pr-status-refresh";
 import { registerPrWorkspaceCacheForget } from "../../pr/pr-cache-forget";
+import { workspacePrRefVersion } from "../../pr/pr-ref-version";
 import { isCloudWorkspace, parseCloudScopedId } from "../../../platform/bridge/cloud-workspace-key";
 import { cloudGithubPrScope, useCloudGithubPrScope } from "../../../platform/cloud-github-pr-scope";
 import { documentIsForeground, observeForeground, pollWhileForeground } from "../../../shared/lib/element-activity";
@@ -101,7 +102,7 @@ export interface ReviewSnapshot {
   };
   /** True while ANY fetch for this snapshot is in flight. */
   refreshing: boolean;
-  /** Epoch ms of the last successful full refresh (0 = never). */
+  /** Epoch ms of the last confirmed PR read (0 = never). */
   loadedAt: number;
   /** A refresh signal arrived while the tab was inactive/hidden. */
   stale: boolean;
@@ -129,6 +130,7 @@ interface Entry {
   inflightChecks: Promise<void> | null;
   /** Invalidates reads that began before a newer refresh signal or mutation. */
   generation: number;
+  refsVersion: number;
 }
 
 const cache = new Map<string, Entry>();
@@ -244,6 +246,7 @@ function entryFor(key: string): Entry {
       inflightFull: null,
       inflightChecks: null,
       generation: 0,
+      refsVersion: 0,
     };
     cache.set(key, e);
     // Bound the cache: PR review snapshots are small, but a long session
@@ -293,6 +296,7 @@ async function refreshFull(
   const e = entryFor(key);
   if (e.inflightFull) return e.inflightFull;
   const generation = e.generation;
+  e.refsVersion = workspacePrRefVersion(target.workspaceId);
   e.inflightFull = (async () => {
     let superseded = false;
     let stopAfterAuth = false;
@@ -302,7 +306,7 @@ async function refreshFull(
       // verdict (authed === true). While still unauthenticated we re-probe on
       // every refresh, so signing in flips the gate open on the next poll; a
       // NOT_AUTHENTICATED read below re-arms this by flipping authed to false.
-      if (e.snap.authed !== true) {
+      if (isLocalReviewWorkspace(target.workspaceId) && e.snap.authed !== true) {
         const status = await provider.authStatus(target.workspaceId);
         if (!currentReviewEntry(provider, target, key, e)) return;
         if (e.generation !== generation) {
@@ -317,47 +321,41 @@ async function refreshFull(
         }
       }
       if (!superseded && !stopAfterAuth) {
-        const [pr, checks, commits, timeline] = await Promise.allSettled([
-          provider.getPr(target),
-          provider.getChecks(target),
-          provider.getCommits(target),
-          provider.getTimeline(target),
-        ]);
-        if (!currentReviewEntry(provider, target, key, e)) return;
-        if (e.generation !== generation) {
-          superseded = true;
-        } else {
-          // A revoked token mid-session: any read rejecting NOT_AUTHENTICATED
-          // flips the surface back to the sign-in gate.
-          if (
-            [pr, checks, commits, timeline].some(
-              (r) => r.status === "rejected" && isAuthFailure(r.reason),
-            )
-          ) {
-            patch(key, { authed: false });
-          } else {
-            const next: Partial<ReviewSnapshot> = {};
-            if (pr.status === "fulfilled" && livePr(pr.value))
-              next.pr = pr.value;
-            if (checks.status === "fulfilled") next.checks = checks.value;
-            if (commits.status === "fulfilled") next.commits = commits.value;
-            if (timeline.status === "fulfilled") next.timeline = timeline.value;
-            next.resourceErrors = {
-              checks: checks.status === "rejected" ? reviewReadFailure(checks.reason) : null,
-              commits: commits.status === "rejected" ? reviewReadFailure(commits.reason) : null,
-              timeline: timeline.status === "rejected" ? reviewReadFailure(timeline.reason) : null,
-            };
-            if (pr.status === "rejected") {
-              // Retain the confirmed PR and expose revalidation failure to the
-              // tab's banner, even when there is still useful content.
-              next.error = reviewReadFailure(pr.reason);
-            } else if (pr.status === "fulfilled") {
-              next.error = null;
+        let authFailed = false;
+        const publish = (update: Partial<ReviewSnapshot>) => {
+          if (!currentReviewEntry(provider, target, key, e)) return;
+          if (e.generation !== generation) { superseded = true; return; }
+          patch(key, update);
+        };
+        const read = async <K extends "pr" | "checks" | "commits" | "timeline">(
+          resource: K, load: () => Promise<ReviewSnapshot[K]>,
+        ) => {
+          try {
+            const value = await load();
+            if (authFailed) return;
+            if (resource === "pr") {
+              publish({ ...(livePr(value as PR | null) ? { pr: value as PR } : {}), authed: true, error: null, loadedAt: Date.now() });
+            } else {
+              publish({ [resource]: value, resourceErrors: { ...e.snap.resourceErrors, [resource]: null } });
             }
-            if (pr.status === "fulfilled") next.loadedAt = Date.now();
-            patch(key, next);
+          } catch (error) {
+            if (isAuthFailure(error)) {
+              authFailed = true;
+              publish({ authed: false });
+            } else if (!authFailed) {
+              publish(resource === "pr" ? { error: reviewReadFailure(error) }
+                : { resourceErrors: { ...e.snap.resourceErrors, [resource]: reviewReadFailure(error) } });
+            }
           }
-        }
+        };
+        // Each read authorizes itself in cloud. Publish confirmed resources as
+        // they arrive; a slow checks/timeline read cannot hold the PR header.
+        await Promise.all([
+          read("pr", () => provider.getPr(target)),
+          read("checks", () => provider.getChecks(target)),
+          read("commits", () => provider.getCommits(target)),
+          read("timeline", () => provider.getTimeline(target)),
+        ]);
       }
     } catch (err) {
       // authStatus threw (network / engine down): retain prior exact-key data
@@ -462,6 +460,7 @@ export function prefetchReviewLiveData(
     if (entry.inflightFull) return entry.inflightFull;
     if (
       entry.snap.loadedAt > 0 &&
+      entry.refsVersion === workspacePrRefVersion(workspaceId) &&
       !entry.snap.stale &&
       Date.now() - entry.snap.loadedAt <= FULL_POLL_MS
     ) {
@@ -502,6 +501,7 @@ export function useReviewLiveData(args: {
   const scope = useCloudGithubPrScope(workspaceId);
   const key = reviewCacheKey(provider, workspaceId, prNumber, scope);
   const target = targetForReview(provider, workspaceId, prNumber);
+  const refsVersion = workspacePrRefVersion(workspaceId);
 
   const read = () => entryFor(key).snap;
   const snap = useSyncExternalStore(
@@ -543,10 +543,11 @@ export function useReviewLiveData(args: {
   const lastRefreshKey = useRef(refreshKey);
   const trailingRefresh = useRef<number | null>(null);
   useEffect(() => {
-    if (refreshKey === lastRefreshKey.current) return;
+    const refsChanged = entryFor(key).refsVersion !== refsVersion;
+    if (refreshKey === lastRefreshKey.current && !refsChanged) return;
     lastRefreshKey.current = refreshKey;
     if (
-      !shouldRefreshReviewSnapshot(
+      !refsChanged && !shouldRefreshReviewSnapshot(
         effectivePrPollState(entryFor(key).snap.pr),
         "refresh-key",
       )
@@ -557,8 +558,10 @@ export function useReviewLiveData(args: {
       invalidate(key);
       return;
     }
-    const delay = refreshKeyRefreshDelay(entryFor(key).snap.loadedAt);
+    const delay = refsChanged ? 0 : refreshKeyRefreshDelay(entryFor(key).snap.loadedAt);
     if (delay === 0) {
+      if (trailingRefresh.current != null) window.clearTimeout(trailingRefresh.current);
+      trailingRefresh.current = null;
       void refresh();
       return;
     }
@@ -568,7 +571,7 @@ export function useReviewLiveData(args: {
       if (!documentIsForeground()) invalidate(key);
       else void refresh();
     }, delay);
-  }, [refreshKey, active, key, refresh]);
+  }, [refreshKey, refsVersion, active, key, refresh]);
   // A pending trailing read belongs to this key's visible surface. Leaving
   // keeps its signal as staleness for the activation effect instead.
   useEffect(() => {

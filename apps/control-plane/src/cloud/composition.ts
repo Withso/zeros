@@ -15,7 +15,8 @@ import { BoatCloudV2Compute } from "./boat.js";
 import type { CloudV2ControlFrame } from "./contract.js";
 import { CloudV2ComputerBuilder, CloudV2Computers } from "./computer.js";
 import { createCloudGithubServices } from "./github-composition.js";
-import { hydrateCloudRepository, type CloudSourceTarget } from "./source-authority.js";
+import { CLOUD_V2_READY_CHANNEL } from "./worker-ready.js";
+import { hydrateCloudRepository, type CloudSourceProof, type CloudSourceTarget } from "./source-authority.js";
 import { HISTORY_OPS, readCloudV2History } from "./history.js";
 import { CLOUD_V2_HOME, CloudV2Lifecycle, type CloudV2TimingRecord } from "./lifecycle.js";
 import { cloudV2CheckpointStorage, openCheckpointKey, sealCheckpointKey } from "./checkpoint.js";
@@ -115,10 +116,11 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   const mcp = createMcpServices(pool, config, github.connections.authorizeRepositoryConfiguration.bind(github.connections));
   const timing = (record: CloudV2TimingRecord) => console.log(`[cloud-v2] timing ${JSON.stringify(record)}`);
 
-  const workerConfig = async (workspace: CloudV2Workspace & Partial<Pick<CloudV2WorkerSession, "loginRevision">>, mode: "admission" | "continuation" = "admission"): Promise<ConfigFrame> => {
+  const workerConfig = async (workspace: CloudV2Workspace & Partial<Pick<CloudV2WorkerSession, "loginRevision">>, mode: "admission" | "continuation" = "admission",
+    proof?: CloudSourceProof): Promise<ConfigFrame> => {
     // HTTP and relay admission authorize before entering; configuration still
     // rechecks the source after credential and repository reads settle.
-    const authorize = () => mode === "continuation" ? continueSource(workspace) : authorizeSource(workspace);
+    const authorize = () => mode === "continuation" ? continueSource(workspace, proof) : authorizeSource(workspace);
     const proxy = async () => {
       const issued = await store.issueToken({ workspaceId: workspace.id, kind: "proxy", userId: null, ttlMs: PROXY_TOKEN_TTL_MS });
       return { token: issued.token, expiresAt: issued.expiresAt.getTime() };
@@ -173,9 +175,9 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   const connections = roles.relay || roles.lifecycle ? new CloudV2Relay({
     store, timing, authorizeSource, continueSource, ...(securityEvents ? { securityEvents } : {}),
     runtimeAdmission: runtimeHandoffs,
-    config: async (workspace, mode = "admission") => {
-      if (mode === "continuation") await continueSource(workspace); else await authorizeSource(workspace);
-      return workerConfig(workspace, mode);
+    config: async (workspace, mode = "admission", proof) => {
+      if (mode === "continuation") await continueSource(workspace, proof); else await authorizeSource(workspace);
+      return workerConfig(workspace, mode, proof);
     },
     workerRoute: async id => {
       const route = await store.workerRoute(id);
@@ -210,11 +212,15 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   }) : null;
   void promptChanges?.start().catch(() => {});
   const loginChanges = postgresNotificationSubscription(listenerPool, {
-    // The existing shared LISTEN connection carries both hints. No connection
-    // or polling loop is added for permission-cache invalidation.
-    channels: ["zeros_cloud_v2_logins", "zeros_cloud_github_access"],
+    // The existing shared LISTEN connection carries these hints. No connection
+    // or polling loop is added for permission-cache invalidation or readiness.
+    channels: ["zeros_cloud_v2_logins", "zeros_cloud_github_access", CLOUD_V2_READY_CHANNEL],
     onReady: () => { source.invalidate(); relay?.revalidateSources({}); void relay?.refreshLogins(); },
     onNotification: notice => {
+      if (notice.channel === CLOUD_V2_READY_CHANNEL) {
+        if (/^[a-f0-9-]{36}$/.test(notice.payload ?? "")) connections?.hintReady(notice.payload!);
+        return;
+      }
       try {
         const scope = JSON.parse(notice.payload ?? "");
         if ((typeof scope?.ownerUserId === "string" || scope?.ownerUserId === null) && (scope.organizationId === null || typeof scope.organizationId === "string")) {

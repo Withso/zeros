@@ -30,7 +30,8 @@ type ConfigFrame = Extract<CloudV2ControlFrame, { t: "config" }>;
 export type CloudV2RelayDeps = {
   store: Pick<CloudV2Store, "consumeConnectTicket" | "get" | "accessEpoch" | "appAccessSnapshot" | "loginRevision">;
   securityEvents?: Pick<PostgresSecurityEventBroker, "start" | "subscribe">;
-  config(workspace: CloudV2Workspace, mode?: "admission" | "continuation"): Promise<ConfigFrame>;
+  /** proof, when present, comes from this room's current allowed database read. */
+  config(workspace: CloudV2Workspace, mode?: "admission" | "continuation", proof?: CloudSourceProof): Promise<ConfigFrame>;
   runtimeAdmission?: {
     admitClient(workspaceId: string, clientId: string): Promise<boolean>;
     renewClient(workspaceId: string, clientId: string): Promise<boolean>;
@@ -55,8 +56,10 @@ type Room = {
   worker: WebSocket | null; ready: boolean; loginRevision: string | null; configAt: number;
   configFlight?: ConfigFlight; dialing?: Promise<void>; idleTimer?: NodeJS.Timeout;
   authorityFlight?: Promise<Authority>; sourceCheckAt: number;
-  /** App frames forward without a read until this time, at this security revision. */
-  authorizedUntil?: number; authorizedRevision?: number;
+  /** App frames and the relay's own re-checks skip the read until this time, at this security revision. */
+  authorizedUntil?: number; authorizedRevision?: number; authorizedProof?: CloudSourceProof;
+  /** Ends a connect retry wait early; a hint that lands outside the wait is kept. */
+  retryNow?: () => void; readyHinted?: boolean;
   clients: Map<string, { ws: WebSocket; sessionId: string | null }>; queued: Map<string, unknown[]>;
   admitting: Map<string, WebSocket>;
   delivered: Map<string, Map<string, DeliveredPrompt>>;
@@ -119,6 +122,14 @@ export class CloudV2Relay {
     if (!this.closed && room?.ready && !room.revoked) send(room.worker, { t: "prompts" });
   }
 
+  /** Best-effort latency hint: a room waiting for this workspace's worker
+   * retries now instead of after its backoff. Polling remains the fallback. */
+  hintReady(workspaceId: string): void {
+    const room = this.rooms.get(workspaceId);
+    if (this.closed || !room?.dialing || room.ready || room.revoked) return;
+    room.readyHinted = true; room.retryNow?.();
+  }
+
   /** Used by lifecycle replicas too: Stop must work when no app is attached. */
   async stopWorkspace(workspace: CloudV2Workspace, timeoutMs = 25_000): Promise<boolean> {
     const epoch = await this.deps.store.accessEpoch(workspace.id);
@@ -161,6 +172,13 @@ export class CloudV2Relay {
     if (this.rooms.get(room.workspace.id) === room) this.rooms.delete(room.workspace.id);
   }
 
+  private fresh(room: Room): boolean {
+    return !room.revoked && room.authorizedRevision === this.securityRevision && (this.deps.now?.() ?? Date.now()) < (room.authorizedUntil ?? 0);
+  }
+  /** The relay's own re-checks share the app frame window; outside it they read. */
+  private current(room: Room): Promise<Authority> {
+    return this.fresh(room) ? Promise.resolve("allowed") : this.authorized(room);
+  }
   private authorized(room: Room, admittingSessionId: string | null = null, admission = false): Promise<Authority> {
     if (!admission && room.authorityFlight) return room.authorityFlight;
     const flight = this.authorize(room, admittingSessionId, admission).finally(() => {
@@ -232,6 +250,8 @@ export class CloudV2Relay {
       if ([...room.clients.values()].every(client => !client.sessionId || sessions.has(client.sessionId))) {
         room.authorizedUntil = Math.min(room.sourceCheckAt, snapshot.validUntil ?? Infinity, readStartedAt + APP_AUTHORITY_WINDOW_MS);
         room.authorizedRevision = revision;
+        if (snapshot.loginRevision !== undefined) room.authorizedProof = { accessEpoch: snapshot.accessEpoch, loginRevision: snapshot.loginRevision };
+        else delete room.authorizedProof;
       } else delete room.authorizedUntil;
     }
     return "allowed";
@@ -280,7 +300,7 @@ export class CloudV2Relay {
     const started = this.deps.now?.() ?? Date.now();
     const deadline = Date.now() + 60_000;
     for (let attempt = 0; this.wanted(room) && Date.now() < deadline; attempt++) {
-      if (await this.authorized(room) !== "allowed") return;
+      if (await this.current(room) !== "allowed") return;
       let ws: WebSocket | undefined;
       try {
         const route = await this.deps.workerRoute(room.workspace.id);
@@ -299,14 +319,17 @@ export class CloudV2Relay {
         // bound boot becomes dialable only after hello configuration succeeds.
         const bootId = room.stops.size && route.stopBootIds?.length ? route.stopBootIds[attempt % route.stopBootIds.length] : route.bootId;
         if (route.url && route.token && bootId && (route.workspace.state === "running" || (route.workspace.state === "stopping" && room.stops.size))) {
+          const dialStarted = this.deps.now?.() ?? Date.now();
           ws = await dialWorker(route, this.deps.mintWorkerToken(room.workspace.id, bootId));
-          if (!this.wanted(room) || await this.authorized(room) !== "allowed") { ws.terminate(); return; }
+          const dialed = this.deps.now?.() ?? Date.now();
+          if (!this.wanted(room) || await this.current(room) !== "allowed") { ws.terminate(); return; }
           room.worker = ws; room.loginRevision = null; this.attachWorker(room, ws);
           const controlOnly = !room.clients.size && room.stops.size > 0;
           if ((controlOnly || await this.refreshConfig(room, ws, true)) && room.worker === ws && ws.readyState === WebSocket.OPEN) {
-            room.ready = true; room.wakeAllowed = false;
+            room.ready = true; room.wakeAllowed = false; delete room.readyHinted;
+            const at = this.deps.now?.() ?? Date.now();
             emitCloudV2Timing(this.deps.timing, { workspaceId: room.workspace.id.slice(0, 8), phase: "relay_ready",
-              durationMs: Math.max(0, Math.round((this.deps.now?.() ?? Date.now()) - started)) });
+              durationMs: Math.max(0, Math.round(at - started)), dialMs: Math.max(0, Math.round(dialed - dialStarted)), configMs: Math.max(0, Math.round(at - dialed)) });
             for (const [clientId, client] of room.clients) {
               if (client.ws.readyState !== WebSocket.OPEN) continue;
               send(ws, { t: "open", clientId });
@@ -320,12 +343,25 @@ export class CloudV2Relay {
         }
       } catch { ws?.terminate(); /* Errors can include route headers; never log them. */ }
       const ms = Math.min(this.deps.retryMaxMs ?? 2000, (this.deps.retryBaseMs ?? 250) * 2 ** Math.min(attempt, 4));
-      await delay(ms, undefined, { signal: room.abort.signal }).catch(() => {});
+      await this.retryWait(room, ms);
     }
     if (!room.revoked && this.wanted(room)) {
       for (const { ws: client } of room.clients.values()) client.close(1013, "workspace_starting");
       for (const finish of room.stops.values()) finish(false);
     }
+  }
+  private retryWait(room: Room, ms: number): Promise<void> {
+    if (room.readyHinted || room.abort.signal.aborted) { delete room.readyHinted; return Promise.resolve(); }
+    return new Promise(resolve => {
+      const done = () => {
+        clearTimeout(timer); room.abort.signal.removeEventListener("abort", done);
+        if (room.retryNow === done) delete room.retryNow;
+        delete room.readyHinted; resolve();
+      };
+      const timer = setTimeout(done, ms);
+      room.abort.signal.addEventListener("abort", done, { once: true });
+      room.retryNow = done;
+    });
   }
   private attachWorker(room: Room, ws: WebSocket): void {
     this.watch(ws);
@@ -403,6 +439,8 @@ export class CloudV2Relay {
       if (!room.ready || !room.worker || (scope && ((scope.ownerUserId && scope.ownerUserId !== room.workspace.creatorUserId) ||
           (scope.organizationId && scope.organizationId !== room.workspace.organizationId)))) return;
       const ws = room.worker;
+      // Changed credentials are delivered only after a fresh authority read.
+      delete room.authorizedUntil;
       await this.refreshConfig(room, ws, Date.now() - room.configAt >= CONFIG_REFRESH_MS).catch(() => ws.close(1011, "config_unavailable"));
     }));
   }, "cloud-v2-login-wake");
@@ -423,9 +461,10 @@ export class CloudV2Relay {
       const revision = await this.deps.store.loginRevision(room.workspace.id);
       if (revision === null) { this.revoke(room); return false; }
       if (!force && revision === room.loginRevision) continue;
-      if (await this.authorized(room) !== "allowed" || room.worker !== ws) return false;
-      const config = await this.deps.config(room.workspace, "continuation");
-      if (await this.authorized(room) !== "allowed" || room.worker !== ws) return false;
+      if (await this.current(room) !== "allowed" || room.worker !== ws) return false;
+      // Only a proof inside the fresh window lets source continuation reuse its lease.
+      const config = await this.deps.config(room.workspace, "continuation", this.fresh(room) ? room.authorizedProof : undefined);
+      if (await this.current(room) !== "allowed" || room.worker !== ws) return false;
       if (revision !== await this.deps.store.loginRevision(room.workspace.id)) { flight.requested = true; flight.force = true; continue; }
       if (room.worker !== ws || room.revoked) return false;
       const { mcpServers, githubPullRequests, githubUserTokens, gitIdentity, agentInteractions, codeReview, historyReplacement: _historyReplacement, environment, runtimeUpdate, ...legacy } = config;
@@ -536,8 +575,7 @@ export class CloudV2Relay {
     // A recent allowance covers the next app frames, so interactive requests
     // do not each wait on a database read. Revocation clears it immediately on
     // this replica; the short window bounds a lost cross-replica notice.
-    if (room.ready && room.worker && !room.revoked && room.clients.has(clientId) &&
-        room.authorizedRevision === this.securityRevision && (this.deps.now?.() ?? Date.now()) < (room.authorizedUntil ?? 0)) {
+    if (room.ready && room.worker && room.clients.has(clientId) && this.fresh(room)) {
       this.forward(room, room.worker, clientId, frame); return;
     }
     if (await this.authorized(room) !== "allowed" || !room.clients.has(clientId)) return;

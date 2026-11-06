@@ -196,5 +196,8 @@ export function cloudPromptTurnActivity(slot: AgentSessionState, turns: Turn[], 
   const active = !presentation && current && (slot.status === "streaming" || turn.recordedTurnId === view.pendingId && turn.recordedTurnId !== view.activeId) && !promptTerminal(view.states[turn.recordedTurnId!]);
   return { active, activityTail: active && isProviderTurnTail(turns, index), current: current && isProviderTurnTail(turns, index),
     durable: !!id && view.rows.some(row => row.id === id), state, presentation,
-    startedAt: turn?.recordedTurnId ? slot.cloudTurnPresentations?.[turn.recordedTurnId]?.startedAt : undefined };
+    // A running prompt's timer counts from the user's send, so it does not
+    // restart when the worker's own start time arrives.
+    startedAt: (state && !promptTerminal(state) ? view.rows.find(row => row.id === id)?.createdAt : undefined) ??
+      (turn?.recordedTurnId ? slot.cloudTurnPresentations?.[turn.recordedTurnId]?.startedAt : undefined) };
 }

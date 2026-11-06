@@ -10,6 +10,39 @@ beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(1_000_000); });
 afterEach(() => { expect(vi.getTimerCount()).toBe(0); vi.useRealTimers(); });
 
 describe("cloud PR observation cadence", () => {
+  it("refreshes a healthy observation immediately for an acknowledged ref change", async () => {
+    const cache = new CloudPrStatusReads(), load = vi.fn(async () => success());
+    await cache.read("workspace#42", load, 1);
+    await cache.read("workspace#42", load, 1);
+    expect(load).toHaveBeenCalledOnce();
+    await cache.read("workspace#42", load, 2);
+    expect(load).toHaveBeenCalledTimes(2);
+    load.mockResolvedValue(failure());
+    await cache.read("workspace#42", load, 3);
+    await cache.read("workspace#42", load, 4);
+    expect(load).toHaveBeenCalledTimes(3);
+  });
+  it("coalesces ref changes during a read into one successor and never returns the old observation", async () => {
+    const cache = new CloudPrStatusReads();
+    let release!: (result: Result) => void;
+    const first = cache.read("workspace#42", () => new Promise<Result>(resolve => { release = resolve; }), 1);
+    await Promise.resolve();
+    const load = vi.fn(async () => success(43));
+    expect(cache.read("workspace#42", load, 2)).toBe(first);
+    expect(cache.read("workspace#42", load, 3)).toBe(first);
+    release(success());
+    await expect(first).resolves.toEqual(success(43));
+    expect(load).toHaveBeenCalledOnce();
+  });
+  it("does not let an older observer bypass the newer ref observation's freshness window", async () => {
+    const cache = new CloudPrStatusReads(), load = vi.fn(async () => success());
+    await cache.read("workspace#42", load, 3);
+    await cache.read("workspace#42", load, 2);
+    expect(load).toHaveBeenCalledOnce();
+    vi.advanceTimersByTime(30_000);
+    await cache.read("workspace#42", load, 3);
+    expect(load).toHaveBeenCalledTimes(2);
+  });
   it("shares only the exact workspace/PR flight and keeps A-B-A isolated", async () => {
     const cache = new CloudPrStatusReads();
     let release!: (result: Result) => void;

@@ -70,3 +70,21 @@ describe("Review tab availability", () => {
       .some((tab) => tab.type === "review")).toBe(true);
   });
 });
+
+describe("Design tab availability", () => {
+  const github = { isGitRepository: true, originUrl: "git@github.com:example/project.git" };
+
+  it("hides the Design home in cloud workspaces until cloud Design authoring exists", () => {
+    const { tabs } = defaultTabs();
+    const visible = availableWorkspaceTabs(tabs, { ...github, repoRoot: "cloud://org/workspace-1" });
+    expect(visible.some((tab) => tab.type === "design")).toBe(false);
+    expect(visible.some((tab) => tab.type === "changes")).toBe(true);
+  });
+
+  it("keeps the Design home in Local workspaces", () => {
+    const { tabs } = defaultTabs();
+    for (const repoRoot of ["/Users/me/project", undefined]) {
+      expect(availableWorkspaceTabs(tabs, { ...github, repoRoot }).some((tab) => tab.type === "design")).toBe(true);
+    }
+  });
+});
