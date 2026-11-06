@@ -872,3 +872,28 @@ Each landed step appends one line: date, workstream, what landed, evidence.
   cards offer no comment +, blocked theme-row items stay reachable by arrow
   keys, the rename field composes the inline `Input`, and theme renames and
   deletes stop before 256 operations; each has a test or smoke check.
+- 2026-11-06 · 5 · Review leftovers (plans.md §1), Local and cloud: Checks
+  marks the checks the base branch requires, lists required checks that
+  haven't reported in Expected, and Re-run failed restarts the head's failed
+  Actions runs, refused once the head moves; one run GitHub refuses doesn't
+  hide those that restarted. Turns record the commits their own shell tools
+  made once git finds them (engine migration v45, the worker's turn record),
+  and `turns.commits` names the chat behind each pull request commit: Commits
+  rows link to it beside the commit's combined check result, and Activity
+  names it and adds the head's check failures with View checks. The comment
+  box and a GitHub thread's reply row show the GitHub account that posts.
+  RevEmpty names another host and opens its page; a failed first read keeps
+  the known header rows above the banner's Retry. A Changes conflict card's
+  save refuses a file that changed since it showed (`expectedContent` on all
+  three write paths), and a refused Design colour write puts the canvas back.
+  Button gained a Link variant for actions inside a line of text. Canvas
+  version 381: the last 7 Planned badges off, and RevEmpty's load-failed
+  state shows the banner standard. Evidence: the touched suites in the
+  engine (db 186, workspace, git), cloud worker (262), control plane (1,875)
+  and renderer (workbench, platform, primitives with the browser path set);
+  the protocol parser test; the narrow typecheck plus the worker, protocol
+  and control-plane typechecks; lint (the one earlier warning), check:ui,
+  check:secrets, check:protocol and check:preload; the workbench-status,
+  code-review, cloud-github-pr and pr-actions smokes. Failures that remain
+  are this container's: Git commit signing, the Playwright build without the
+  browser path, and GitHub URL rewriting, each failing the same way on main.
