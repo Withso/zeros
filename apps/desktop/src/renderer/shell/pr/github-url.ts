@@ -87,3 +87,46 @@ export function githubCompareUrl(
     baseBranch,
   )}...${enc(headBranch)}?expand=1`;
 }
+
+/** The repository's page on its own host, for a remote Zeros can't review
+ *  yet. Keeps group paths (GitLab subgroups) and drops a port, because the
+ *  web page is plain https. Null for anything that isn't a network remote. */
+export function remoteWebUrl(
+  originUrl: string | null | undefined,
+): { host: string; url: string } | null {
+  const raw = originUrl?.trim();
+  if (!raw) return null;
+  let host: string;
+  let path: string;
+  const scp = raw.includes("://") ? null : raw.match(/^(?:[^@/:\s]+@)?([^:/\s]+):(.+)$/);
+  if (scp) {
+    host = scp[1]!;
+    path = scp[2]!;
+  } else {
+    try {
+      const url = new URL(raw);
+      if (!["https:", "http:", "ssh:", "git:"].includes(url.protocol)) return null;
+      host = url.hostname;
+      path = url.pathname;
+    } catch {
+      return null;
+    }
+  }
+  const segments = path
+    .replace(/\.git$/i, "")
+    .split("/")
+    .filter((part) => part && part !== "." && part !== "..");
+  if (!host || segments.length < 2) return null;
+  return {
+    host,
+    url: `https://${host}/${segments.map((part) => encodeURIComponent(decodeURIComponentSafe(part))).join("/")}`,
+  };
+}
+
+function decodeURIComponentSafe(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}

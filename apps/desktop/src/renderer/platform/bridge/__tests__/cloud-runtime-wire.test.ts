@@ -48,6 +48,13 @@ describe("cloud branch navigation identities", () => {
       result: [{ name: "foreign", worktreePath }] })).toThrow(/worktree/);
   });
 
+  it("names a commit's chat with the UI's cloud chat key", () => {
+    const sha = "a".repeat(40);
+    expect(cloudIncoming(scope, { type: "WORKSPACE_RESPONSE", op: "turns.commits",
+      result: { commits: [{ sha, chatId: "native-chat", turnId: "opening" }] } }).result)
+      .toEqual({ commits: [{ sha, chatId: cloudScopedId(scope, "native-chat"), turnId: "opening" }] });
+  });
+
   it("leaves unrelated file arrays opaque", () => {
     const rows = [{ worktreePath: "/arbitrary/file/content" }];
     expect(cloudIncoming(scope, { type: "WORKSPACE_RESPONSE", op: "file.list", result: rows }).result).toBe(rows);

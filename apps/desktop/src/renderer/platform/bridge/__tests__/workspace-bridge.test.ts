@@ -20,6 +20,7 @@ import {
   bridgeGhPrCreate,
   bridgeGhBranchList,
   bridgeGhPrMarkReady,
+  bridgeGhPrRerunFailed,
   bridgeGhPrMerge,
   bridgeGhPrSync,
   bridgeWorkspaceArchive,
@@ -779,6 +780,11 @@ describe("git/gh write timeouts", () => {
           prNumber: 7,
           method: "squash",
         }),
+    ],
+    [
+      "gh.prRerunFailed",
+      (b: RuntimeClient) =>
+        bridgeGhPrRerunFailed(b, { workspaceId: "ws1", prNumber: 7, headSha: "a".repeat(40) }),
     ],
     [
       "gh.prSync",

@@ -493,8 +493,55 @@ export class CloudGithubApi {
     return { id: row.id, url: row.html_url };
   }
 
+  /** Each of the newest commits' combined check state, by SHA. Cosmetic: a
+   *  failed read returns no states rather than failing the commit list. */
+  private async commitChecks(nodeId: string): Promise<Map<string, "passed" | "failed" | "pending">> {
+    const schema = z.object({
+      data: z.object({
+        node: z
+          .object({
+            id: z.string().max(256),
+            commits: z.object({
+              nodes: z
+                .array(
+                  z.object({
+                    commit: z.object({
+                      oid: githubSha,
+                      statusCheckRollup: z.object({ state: z.string().max(32) }).nullable(),
+                    }),
+                  }),
+                )
+                .max(100),
+            }),
+          })
+          .nullable(),
+      }),
+    });
+    const query = `query ($id: ID!) { node(id: $id) { ... on PullRequest { id
+      commits(last: 100) { nodes { commit { oid statusCheckRollup { state } } } } } } }`;
+    const states = new Map<string, "passed" | "failed" | "pending">();
+    try {
+      const result = await this.http.json("/graphql", schema, {
+        method: "POST",
+        body: { query, variables: { id: nodeId } },
+      });
+      if (result.data.node?.id !== nodeId) return states;
+      for (const { commit } of result.data.node.commits.nodes) {
+        const state = commit.statusCheckRollup?.state;
+        const checks = state === "SUCCESS" ? "passed"
+          : state === "FAILURE" || state === "ERROR" ? "failed"
+          : state === "PENDING" || state === "EXPECTED" ? "pending" : null;
+        if (checks) states.set(commit.oid, checks);
+      }
+    } catch {
+      // Commit rows stay useful without their check glyphs.
+    }
+    return states;
+  }
+
   async commits(target: CloudGithubPrTarget, number: number) {
     const { repo, pull } = await this.readPull(target, number);
+    const checks = this.commitChecks(pull.node_id);
     const rows = await this.http.pages(
       `${repoPath(repo)}/pulls/${number}/commits`,
       z.object({
@@ -512,6 +559,7 @@ export class CloudGithubApi {
       }),
     );
     await this.sameRevision(target, repo, pull);
+    const states = await checks;
     return rows.map((row) => ({
       sha: row.sha,
       abbreviatedSha: row.sha.slice(0, 7),
@@ -529,6 +577,7 @@ export class CloudGithubApi {
       additions: null,
       deletions: null,
       changedFiles: null,
+      checks: states.get(row.sha) ?? null,
     }));
   }
 
@@ -584,10 +633,107 @@ export class CloudGithubApi {
     ].sort((a, b) => a.createdAt - b.createdAt || a.id - b.id);
   }
 
+  /** The check names the base branch requires, from classic protection and
+   * rulesets; null when neither can be read, which never fails the checks. */
+  private async requiredCheckNames(path: string, branch: string): Promise<Set<string> | null> {
+    const ref = branch.split("/").map(encodeURIComponent).join("/");
+    const context = z.object({ context: z.string().max(512) });
+    const [protection, rules] = await Promise.allSettled([
+      this.http.json(
+        `${path}/branches/${ref}`,
+        z.object({
+          protection: z
+            .object({
+              required_status_checks: z
+                .object({
+                  contexts: z.array(z.string().max(512)).max(200).optional(),
+                  checks: z.array(context).max(200).optional(),
+                })
+                .nullable()
+                .optional(),
+            })
+            .nullable()
+            .optional(),
+        }),
+      ),
+      this.http.json(
+        `${path}/rules/branches/${ref}`,
+        z
+          .array(
+            z.object({
+              type: z.string().max(100),
+              parameters: z
+                .object({ required_status_checks: z.array(context).max(200).optional() })
+                .passthrough()
+                .nullable()
+                .optional(),
+            }),
+          )
+          .max(500),
+      ),
+    ]);
+    if (protection.status === "rejected" && rules.status === "rejected") return null;
+    const names = new Set<string>();
+    if (protection.status === "fulfilled") {
+      const required = protection.value.protection?.required_status_checks;
+      for (const name of required?.contexts ?? []) names.add(name);
+      for (const check of required?.checks ?? []) names.add(check.context);
+    }
+    if (rules.status === "fulfilled")
+      for (const rule of rules.value)
+        if (rule.type === "required_status_checks")
+          for (const check of rule.parameters?.required_status_checks ?? []) names.add(check.context);
+    return names;
+  }
+
+  /** Start the failed jobs of the head commit's failed Actions runs again. */
+  async rerunFailed(target: CloudGithubPrTarget, number: number, headSha: string) {
+    const { repo, pull } = await this.readPull(target, number);
+    this.writeAccess(repo);
+    if (pull.head.sha !== headSha) throw prChanged();
+    const path = repoPath(repo);
+    const runs = await this.http.json(
+      `${path}/actions/runs?head_sha=${headSha}&per_page=100`,
+      z.object({
+        workflow_runs: z
+          .array(
+            z.object({
+              id: githubId,
+              head_sha: githubSha,
+              status: z.string().max(64).nullable(),
+              conclusion: z.string().max(64).nullable(),
+            }),
+          )
+          .max(100),
+      }),
+    );
+    const failed = runs.workflow_runs.filter(
+      (run) =>
+        run.head_sha === headSha &&
+        run.status === "completed" &&
+        ["failure", "timed_out", "cancelled", "startup_failure"].includes(run.conclusion ?? ""),
+    );
+    // One refused run (too old to re-run, or already restarted) must not hide
+    // the ones that did restart; only a total refusal is an error.
+    const results = await Promise.allSettled(
+      failed.map((run) =>
+        this.http.request(`${path}/actions/runs/${run.id}/rerun-failed-jobs`, {
+          method: "POST",
+          body: {},
+        }),
+      ),
+    );
+    const rerun = results.filter((result) => result.status === "fulfilled").length;
+    const refused = results.find((result) => result.status === "rejected");
+    if (rerun === 0 && refused) throw refused.reason;
+    return { rerun };
+  }
+
   async checks(target: CloudGithubPrTarget, number: number) {
     const { repo, pull } = await this.readPull(target, number),
       path = repoPath(repo),
       sha = pull.head.sha;
+    const requiredNames = this.requiredCheckNames(path, pull.base.ref).catch(() => null);
     const check = z.object({
       name: z.string().max(512),
       status: z.string().max(64),
@@ -596,6 +742,7 @@ export class CloudGithubApi {
       html_url: z.string().nullable().optional(),
       started_at: githubDate.nullable().optional(),
       completed_at: githubDate.nullable().optional(),
+      app: z.object({ slug: z.string().max(100) }).nullable().optional(),
     });
     const runs: z.infer<typeof check>[] = [];
     for (let page = 1; page <= 10; page++) {
@@ -624,13 +771,23 @@ export class CloudGithubApi {
         description: z.string().nullable(),
       }),
     );
-    const checks = runs.map((row) => ({
+    const checks: {
+      name: string;
+      status: string;
+      conclusion: string | null;
+      detailsUrl: string | null;
+      startedAt: number | null;
+      completedAt: number | null;
+      rerunnable?: boolean;
+      required?: boolean;
+    }[] = runs.map((row) => ({
       name: row.name,
       status: row.status,
       conclusion: row.conclusion,
       detailsUrl: row.details_url ?? row.html_url ?? null,
       startedAt: row.started_at ? Date.parse(row.started_at) : null,
       completedAt: row.completed_at ? Date.parse(row.completed_at) : null,
+      rerunnable: row.app?.slug === "github-actions",
     }));
     const deployments: {
         environment: string;
@@ -659,6 +816,13 @@ export class CloudGithubApi {
           completedAt: null,
         });
     }
+    const required = await requiredNames;
+    let expected: { name: string }[] | undefined;
+    if (required) {
+      for (const row of checks) row.required = required.has(row.name);
+      const reported = new Set(checks.map((row) => row.name));
+      expected = [...required].filter((name) => !reported.has(name)).map((name) => ({ name }));
+    }
     await this.sameRevision(target, repo, pull);
     const passed = checks.filter((row) =>
       ["success", "neutral", "skipped"].includes(row.conclusion ?? ""),
@@ -681,6 +845,7 @@ export class CloudGithubApi {
       passed,
       failed,
       pending: checks.length - passed - failed,
+      ...(expected ? { expected } : {}),
     };
   }
 }

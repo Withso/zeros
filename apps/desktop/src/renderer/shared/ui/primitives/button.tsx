@@ -53,6 +53,10 @@ const buttonVariants = cva(
         // red-primary text carries the danger cue.
         "destructive-secondary":
           "border-border3 bg-transparent text-red-primary hover:border-border4 hover:bg-bg2-highlight",
+        // LINK — an action inside a line of text (a meta row's chat name,
+        // View checks): fg2 text that brightens on hover, on the text's own
+        // 16px line box, with no fill, edge or padding.
+        link: "h-auto min-w-0 rounded-sm px-0 py-0 font-normal leading-4 text-fg2 hover:text-fg1",
       },
       // Two control heights (docs/design-system.md → Controls):
       //   standard 28px — every button by default, identical to the Select

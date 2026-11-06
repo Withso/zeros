@@ -187,7 +187,11 @@ export class CloudGithubHttp {
       return null;
     }
     const reader = response.body?.getReader();
-    if (!reader) throw unavailable();
+    if (!reader) {
+      // A write may answer 201 with no body at all (re-running workflow jobs).
+      if (mutation) return null;
+      throw unavailable();
+    }
     let text = "",
       bytes = 0;
     const decoder = new TextDecoder();
@@ -221,6 +225,8 @@ export class CloudGithubHttp {
       if (cacheKey) rememberConditional(cacheKey, response.headers.get("etag"), text);
       return text;
     }
+    // Some writes answer 201 with no body (re-running workflow jobs).
+    if (mutation && text.trim() === "") return null;
     try {
       const value = JSON.parse(text) as unknown;
       if (cacheKey) rememberConditional(cacheKey, response.headers.get("etag"), text);

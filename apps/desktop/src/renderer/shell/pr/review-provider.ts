@@ -24,6 +24,7 @@ import {
   ghPrUpdate,
   ghPrMerge,
   ghPrReviews,
+  ghPrRerunFailed,
   type AuthStatusResult,
   type PR,
   type PrChecksResult,
@@ -91,6 +92,9 @@ export interface ReviewProvider {
   markReady(target: ReviewTarget): Promise<PR>;
   /** Replace the description; Description offers Edit only when present. */
   updateBody?(target: ReviewTarget, body: string): Promise<PR>;
+  /** Start the head commit's failed runs again; Checks offers Re-run failed
+   *  only when present. */
+  rerunFailedChecks?(target: ReviewTarget, headSha: string): Promise<{ rerun: number }>;
 }
 
 function githubPrNumber(target: ReviewTarget): number {
@@ -144,6 +148,7 @@ const githubProvider: ReviewProvider = {
   },
   markReady: (target) => ghPrMarkReady(githubArgs(target)),
   updateBody: (target, body) => ghPrUpdate({ ...githubArgs(target), body }),
+  rerunFailedChecks: (target, headSha) => ghPrRerunFailed({ ...githubArgs(target), headSha }),
 };
 
 /** Pick the provider for an explicit workspace origin host. Unsupported hosts

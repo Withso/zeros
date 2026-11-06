@@ -571,6 +571,32 @@ export async function applyArchiveSnapshotOntoCurrent(
  *  change but whose files escaped attribution (keep the refs as a recovery
  *  net; retention prunes them later). Returns false on any error — the
  *  conservative direction (refs are kept). */
+/** Resolve a turn's abbreviated commit candidates to the full SHAs of commits
+ *  that exist in this repository, in order. One `cat-file` reads them all; an
+ *  unknown or ambiguous candidate, or a read failure, records nothing. */
+export async function resolveTurnCommits(
+  cwd: string,
+  candidates: string[],
+): Promise<string[]> {
+  const valid = candidates.filter((sha) => /^[0-9a-f]{7,64}$/.test(sha));
+  if (valid.length === 0) return [];
+  try {
+    const { stdout } = await runGit(
+      cwd,
+      ["cat-file", "--batch-check=%(objectname) %(objecttype)"],
+      { input: valid.map((sha) => `${sha}^{commit}\n`).join(""), readOnly: true, timeoutMs: 10_000 },
+    );
+    const out: string[] = [];
+    for (const line of stdout.split("\n")) {
+      const [sha, type] = line.trim().split(" ");
+      if (type === "commit" && sha && /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(sha) && !out.includes(sha)) out.push(sha);
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
 export async function treesIdentical(
   cwd: string,
   commitA: string,
@@ -838,7 +864,7 @@ export async function turnPatch(
 
 // ── Attribution (tool calls → authored paths) ────────────
 
-export { pathsFromTool, authoredPathsFromMessages, type AuthoredPath } from "@zeros/protocol/turn-attribution";
+export { pathsFromTool, authoredPathsFromMessages, commitShasFromMessages, type AuthoredPath } from "@zeros/protocol/turn-attribution";
 
 // ── 3-way merge (text only) ──────────────────────────────
 

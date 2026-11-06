@@ -370,6 +370,7 @@ export const writeFile: CommandHandler = (args) => {
   const cwd = String(args.cwd ?? "");
   const rel = String(args.path ?? "");
   const content = typeof args.content === "string" ? args.content : null;
+  const expectedContent = args.expectedContent;
   const approvedRoot = cwd ? trustedWorkspaceRoot(cwd) : null;
   if (!approvedRoot) {
     return {
@@ -387,5 +388,17 @@ export const writeFile: CommandHandler = (args) => {
       error: "missing content",
     } satisfies WriteFileResult;
   }
-  return writeWorkspaceFile(approvedRoot, rel, content, { remote: false, canonicalRoot: approvedRoot });
+  if (expectedContent !== undefined && typeof expectedContent !== "string") {
+    return {
+      kind: "error",
+      path: rel,
+      bytes: 0,
+      error: "expected content must be text",
+    } satisfies WriteFileResult;
+  }
+  return writeWorkspaceFile(approvedRoot, rel, content, {
+    remote: false,
+    canonicalRoot: approvedRoot,
+    ...(expectedContent !== undefined ? { expectedContent } : {}),
+  });
 };

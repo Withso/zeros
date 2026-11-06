@@ -40,13 +40,19 @@ export async function acceptCardConflict(
     conflictReplacement(shown, conflict, choice) +
     shown.slice(conflict.end);
   recordWorkspaceActivity(cwd);
-  const result = await writeWorkspaceFile(cwd, path, content).catch(
-    (error: unknown) => ({
-      kind: "error" as const,
-      error: error instanceof Error ? error.message : String(error),
-    }),
-  );
+  // The write itself refuses a file that changed after that read.
+  const result = await writeWorkspaceFile(cwd, path, content, {
+    expectedContent: shown,
+  }).catch((error: unknown) => ({
+    kind: "error" as const,
+    error: error instanceof Error ? error.message : String(error),
+  }));
   if (result?.kind !== "success") {
+    if (await changedSince(cwd, path, shown)) {
+      toast.info(`${path} changed, so its conflicts were refreshed.`);
+      triggerGitRefresh(cwd);
+      return;
+    }
     toast.error(`Couldn't save ${path}`, {
       description:
         result?.error ?? "Try again when the workspace is available.",
@@ -54,5 +60,11 @@ export async function acceptCardConflict(
     return;
   }
   triggerGitRefresh(cwd);
+}
+
+/** Whether a refused write met a file that no longer holds the shown text. */
+async function changedSince(cwd: string, path: string, shown: string): Promise<boolean> {
+  const fresh = await loadWorkspaceFileReadForWrite({ cwd, path }).catch(() => null);
+  return !!fresh && (fresh.kind !== "text" || (fresh.content ?? "") !== shown);
 }
 

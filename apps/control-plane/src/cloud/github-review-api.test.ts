@@ -118,6 +118,32 @@ describe("cloud published review", () => {
       after: null,
     });
   });
+  it("names the GitHub account a reply posts as, with only a safe avatar", async () => {
+    const page = (viewer: unknown) =>
+      Response.json({
+        data: {
+          viewer,
+          node: {
+            id: pull.node_id,
+            headRefOid: head,
+            baseRefOid: base,
+            reviewThreads: { pageInfo, nodes: [thread] },
+          },
+        },
+      });
+    let viewer: unknown = { login: "priya", avatarUrl: "https://avatars.githubusercontent.com/u/9" };
+    const { api, fetch } = fixture((path) => (path === "/graphql" ? page(viewer) : undefined));
+    expect((await api.get(target, 7)).viewer).toEqual({
+      login: "priya",
+      avatarUrl: "https://avatars.githubusercontent.com/u/9",
+    });
+    viewer = { login: "priya", avatarUrl: "http://evil.test/a.png" };
+    expect((await api.get(target, 7)).viewer).toEqual({ login: "priya", avatarUrl: null });
+    viewer = undefined;
+    expect((await api.get(target, 7)).viewer).toBeNull();
+    const call = fetch.mock.calls.find(([url]) => String(url).endsWith("/graphql"));
+    expect(JSON.parse(String(call?.[1]?.body)).query).toContain("viewer { login avatarUrl }");
+  });
   it("rejects another pull request node even when its revisions match", async () => {
     const { api } = fixture((path) =>
       path === "/graphql"

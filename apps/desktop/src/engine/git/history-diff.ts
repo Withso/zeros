@@ -4,7 +4,8 @@ import type {
   TurnIdentity,
   TurnHistoryCursor,
 } from "@zeros/protocol/changes-history";
-import { listTurnsForWorkspace, type TurnRow } from "../db/turns";
+import { listTurnCommitLinks, listTurnsForWorkspace, type TurnRow } from "../db/turns";
+import type { TurnCommitLink } from "@zeros/protocol/turns";
 import { diff, type DiffOptions, type DiffResult } from "./diff";
 import { GitError } from "./errors";
 import { runGitRead } from "./git-exec";
@@ -44,6 +45,20 @@ export async function listHistoryTurns(
         : {}),
     },
   );
+}
+
+/** Which of this workspace's turns made each commit, scoped like the history. */
+export async function listHistoryCommitLinks(
+  workspaceId: string,
+  shas: string[],
+): Promise<TurnCommitLink[]> {
+  const workspace = await resolveRepoForGitOp(workspaceId);
+  const primary =
+    workspace.id === "local-main" || workspace.id === workspace.repoRoot;
+  const root = primary ? await repoToplevel(workspace.path) : null;
+  return listTurnCommitLinks(primary ? workspace.repoRoot : workspace.id, shas, primary
+    ? { localMainRoots: [...new Set([workspace.path, ...(root ? [root] : [])])] }
+    : {});
 }
 
 function invalid(message: string): never {

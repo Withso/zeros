@@ -23,10 +23,11 @@ import { useWorkspaceDispatch } from "@/renderer/state/store";
 import { useGitRefreshKey } from "../../use-git-refresh-key";
 import { useWorkspaceAgentWorking } from "../../pr/use-agent-working";
 import { type WorkbenchTab } from "../tab-model";
-import { parseRemote } from "../../pr/github-url";
+import { parseRemote, remoteWebUrl } from "../../pr/github-url";
 import { resolveReviewProvider } from "../../pr/review-provider";
 import { EmptyState, useSourceTarget } from "./changes-tab";
 import { ReviewView } from "./review-tab";
+import { ReviewHostUnavailable, reviewSurfaceState } from "./review-surface-state";
 import { isWorkspacePrSyncEligible, retryWorkspacePrDiscovery } from "../../pr/use-workspace-pr-sync";
 import { useWorkspacePrDiscoveryState, workspacePrDiscoveryKey } from "../../pr/workspace-pr-discovery-state";
 import { useReviewGithubFailure } from "../../pr/review-github-failure";
@@ -57,9 +58,9 @@ export const ReviewSurface = React.memo(function ReviewSurface({
   // without one, so a missing host is "unknown", not "not GitHub". A workspace
   // only carries a prNumber because a GitHub engine path stamped it, so falling
   // back to github.com keeps that PR reviewable instead of claiming the repo
-  // lives on another forge.
-  const originHost = parseRemote(project?.originUrl)?.host ?? "github.com";
-  const provider = resolveReviewProvider(originHost);
+  // lives on another forge. A known host Zeros can't review says so.
+  const remoteHost = parseRemote(project?.originUrl)?.host ?? null;
+  const provider = resolveReviewProvider(remoteHost ?? "github.com");
   // Agent turn-end / git & gh writes / editor saves → re-pull the PR surface.
   const refreshKey = useGitRefreshKey(workspace?.path, changesTarget, active);
   // Parks the header's Merge / Mark-as-ready writes while a turn is in flight.
@@ -85,16 +86,21 @@ export const ReviewSurface = React.memo(function ReviewSurface({
 
   // The trunk ("Local main") never has a PR — main is the base a PR merges
   // INTO — and a workspace without one has nothing to review yet.
+  const state = reviewSurfaceState({
+    discovering: discovering && !discovery.checked,
+    remoteHost,
+    hasProvider: provider !== null,
+    hasPullRequest: !!workspace && !isLocalMain && workspace.prNumber != null,
+  });
   const body =
-    discovering && !discovery.checked ? (
+    state === "discovering" ? (
       <WorkbenchEmptyState type="review" />
-    ) : !workspace || isLocalMain || workspace.prNumber == null ? (
+    ) : state === "other-host" && remoteHost ? (
+      <ReviewHostUnavailable host={remoteHost} url={remoteWebUrl(project?.originUrl)?.url ?? null} />
+    ) : state !== "review" || !workspace || workspace.prNumber == null || !provider ? (
       <EmptyState
         title="No pull request"
       />
-    ) : !provider ? (
-      // The one line says why, so the state is not a dead end.
-      <EmptyState title="Review needs a github.com remote" />
     ) : (
       <ReviewView
         // Per-workspace remount — don't carry a prior workspace's PR / auth

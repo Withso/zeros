@@ -25,6 +25,7 @@ export interface CloudGithubPrContext {
 export interface CloudGithubPrAccess {
   api: CloudGithubApi;
   login?: string;
+  avatarUrl?: string;
   generation: string;
   assertCurrent(tx?: Tx): Promise<void>;
 }
@@ -156,6 +157,7 @@ export class CloudGithubPrService {
         result = {
           authenticated: true,
           ...(access.login ? { login: access.login } : {}),
+          ...(access.login && access.avatarUrl ? { avatarUrl: access.avatarUrl } : {}),
         };
         break;
       case "gh.repoAccess":
@@ -240,6 +242,13 @@ export class CloudGithubPrService {
           request.params.headSha,
         );
         result = remembered;
+        break;
+      case "gh.prRerunFailed":
+        result = await api.rerunFailed(
+          canonical,
+          request.params.prNumber,
+          request.params.headSha,
+        );
         break;
       case "gh.prMerge":
         result = await api.merge(

@@ -134,6 +134,7 @@ const WORKSPACE_MUTATIONS = new Set([
   "gh.prMarkReady",
   "gh.prMerge",
   "gh.prComment",
+  "gh.prRerunFailed",
   "gh.prSync",
 
   // Turn restore changes both files and the transcript. Message invalidation is

@@ -684,6 +684,18 @@ export async function runWorkbenchStatusSmoke({ page, check, harnessBase }) {
         exact: true,
       }),
     ).not.toBeVisible();
+    if (type === "review") {
+      // The rows the workspace knows stay above the banner: repository and
+      // number, the branches, and the sections without counts.
+      const known = page.locator("[data-workbench-toolbar] [data-review-header-known]");
+      await expect(known).toContainText("example/fixture · #42");
+      await expect(known).toContainText("main");
+      await expect(known).toContainText("feature");
+      await expect(
+        page.locator("[data-workbench-toolbar]").getByRole("tab", { name: "Overview" }),
+      ).toBeVisible();
+      check("review: a failed first load keeps its known header and tabs above the banner", true);
+    }
     await noToast();
     await screenshot(type, "feature-load-failure");
     await page.evaluate(async () => {

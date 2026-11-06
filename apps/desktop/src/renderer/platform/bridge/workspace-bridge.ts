@@ -41,6 +41,7 @@ import type {
   ContextGraphListWire,
 } from "../context-graph";
 import type {
+  TurnCommitLink,
   TurnInfo,
   TurnResetResult,
   TurnUndoResult,
@@ -178,6 +179,18 @@ export async function bridgeTurnsList(
     ...options,
   })) as { turns?: TurnInfo[] } | undefined;
   return r?.turns ?? [];
+}
+
+/** Which of this workspace's turns made each commit (full SHAs, ≤250). */
+export async function bridgeTurnsCommits(
+  bridge: RuntimeClient,
+  workspaceId: string,
+  shas: string[],
+): Promise<TurnCommitLink[]> {
+  const r = (await workspaceOp(bridge, "turns.commits", { workspaceId, shas })) as
+    | { commits?: TurnCommitLink[] }
+    | undefined;
+  return r?.commits ?? [];
 }
 
 export async function bridgeTurnsGet(
@@ -996,11 +1009,15 @@ export async function bridgeFileWrite(
   workspaceId: string,
   path: string,
   content: string,
+  /** Replace the file only while it holds exactly this text. An older cloud
+   *  worker ignores it and writes as before. */
+  expectedContent?: string,
 ): Promise<WriteFileResult> {
   return (await workspaceOp(bridge, "file.write", {
     workspaceId,
     path,
     content,
+    ...(expectedContent !== undefined ? { expectedContent } : {}),
   })) as WriteFileResult;
 }
 
@@ -1566,6 +1583,18 @@ export async function bridgeGhPrChecks(
     workspaceId: args.workspaceId,
     prNumber: args.prNumber,
   })) as PrChecksResult;
+}
+
+export async function bridgeGhPrRerunFailed(
+  bridge: RuntimeClient,
+  args: { workspaceId: string; prNumber: number; headSha: string },
+): Promise<{ rerun: number }> {
+  return (await workspaceOp(
+    bridge,
+    "gh.prRerunFailed",
+    { workspaceId: args.workspaceId, prNumber: args.prNumber, headSha: args.headSha },
+    NETWORK_GIT_TIMEOUT_MS,
+  )) as { rerun: number };
 }
 
 export async function bridgeGhPrCommits(

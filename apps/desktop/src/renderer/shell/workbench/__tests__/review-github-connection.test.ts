@@ -24,7 +24,7 @@ vi.mock("@/renderer/features/code-review/use-github-review", () => ({
   useGithubReview: () => ({ source: undefined, snapshot: undefined, refresh: async () => {}, error: undefined, notice: undefined }),
 }));
 vi.mock("@/renderer/state/store", () => ({
-  useWorkspaceStore: (select: (state: { activeChatId: null }) => unknown) => select({ activeChatId: null }),
+  useWorkspaceStore: (select: (state: { activeChatId: null; chats: never[] }) => unknown) => select({ activeChatId: null, chats: [] }),
   useWorkspaceDispatch: () => () => {},
 }));
 vi.mock("@/renderer/state/use-projects", () => ({ notifyWorkspacesChanged: () => {} }));

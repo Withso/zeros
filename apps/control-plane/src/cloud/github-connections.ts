@@ -31,7 +31,22 @@ const changed = () =>
     "github_authorization_changed",
     "Your cloud GitHub connection changed. Refresh before continuing.",
   );
-const profile = z.object({ id: githubId, login: githubName, name: z.unknown().optional() });
+const profile = z.object({
+  id: githubId,
+  login: githubName,
+  name: z.unknown().optional(),
+  avatar_url: z.unknown().optional(),
+});
+/** The account's photo for "you" in the Review tab: https, no credentials. */
+function avatarUrlOf(value: unknown): string | undefined {
+  if (typeof value !== "string" || value.length > 2048) return undefined;
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && !url.username && !url.password ? url.toString() : undefined;
+  } catch {
+    return undefined;
+  }
+}
 type AppCredential = Extract<CloudGithubCredential, { method: "github-app" }>;
 export type CloudGithubConnectionHealth =
   | "connected"
@@ -70,11 +85,13 @@ export class CloudGithubConnections {
   private async identity(
     token: string,
     assertCurrent: () => Promise<void>,
-  ): Promise<CloudGithubAccount> {
+  ): Promise<CloudGithubAccount & { avatarUrl?: string }> {
     const user = await this.http(token, assertCurrent).json("/user", profile);
     const name = typeof user.name === "string" ? user.name.trim() : "";
+    const avatarUrl = avatarUrlOf(user.avatar_url);
     return { id: String(user.id), login: user.login,
-      ...(name && name.length <= 256 && !/[<>\p{Cc}]/u.test(name) ? { name } : {}) };
+      ...(name && name.length <= 256 && !/[<>\p{Cc}]/u.test(name) ? { name } : {}),
+      ...(avatarUrl ? { avatarUrl } : {}) };
   }
   private async refresh(
     credential: AppCredential,
@@ -105,7 +122,7 @@ export class CloudGithubConnections {
   async access(scope: CloudGithubConnectionScope, failedTokenSha256?: string) {
     const refresh = (credential: AppCredential, account: CloudGithubAccount) => this.refresh(credential, account);
     let snapshot = await this.store.credential(scope, refresh, failedTokenSha256);
-    let identity: CloudGithubAccount;
+    let identity: CloudGithubAccount & { avatarUrl?: string };
     try {
       identity = await this.identity(snapshot.material.accessToken, snapshot.assertCurrent);
     } catch (error) {
@@ -119,6 +136,7 @@ export class CloudGithubConnections {
       ...snapshot,
       identity,
       login: identity.login,
+      ...(identity.avatarUrl ? { avatarUrl: identity.avatarUrl } : {}),
       api: new CloudGithubApi({
         apiBaseUrl: this.config?.apiBaseUrl ?? "https://api.github.com",
         token: snapshot.material.accessToken,

@@ -19,6 +19,7 @@ import {
   reviewActionBlockReason,
   reviewFindings,
   summarizeChecks,
+  reviewCommentViewer,
 } from "../review-model";
 import type {
   PR,
@@ -477,5 +478,19 @@ describe("timeline people and bots", () => {
     expect(filterTimelineEvents(events, "all")).toHaveLength(6);
     expect(filterTimelineEvents(events, "people").map((e) => e.at)).toEqual([1, 2, 5, 6]);
     expect(filterTimelineEvents(events, "bots").map((e) => e.at)).toEqual([3, 4]);
+  });
+});
+
+describe("the account a conversation comment posts as", () => {
+  const inline = { login: "inline-reader", avatarUrl: "https://avatars.githubusercontent.com/u/9" };
+  it("prefers the account the pull request read checked (Local)", () => {
+    expect(reviewCommentViewer({ login: "reviewer", avatarUrl: null }, inline)).toEqual({ login: "reviewer", avatarUrl: null });
+  });
+  it("falls back to the inline review read's account (cloud reads skip the check)", () => {
+    expect(reviewCommentViewer({ login: null, avatarUrl: null }, inline)).toEqual(inline);
+  });
+  it("shows no account when neither read has named one", () => {
+    expect(reviewCommentViewer({ login: null, avatarUrl: null }, null)).toBeNull();
+    expect(reviewCommentViewer({ login: null, avatarUrl: null }, undefined)).toBeNull();
   });
 });

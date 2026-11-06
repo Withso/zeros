@@ -11,6 +11,19 @@ const TEXT_LIMIT = 2_000_000, IMAGE_LIMIT = 5 * 1024 * 1024;
 const IMAGE_TYPES: Record<string, string> = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp", ".bmp": "image/bmp", ".ico": "image/x-icon", ".avif": "image/avif", ".svg": "image/svg+xml" };
 const VIDEO_TYPES: Record<string, string> = { ".mp4": "video/mp4", ".m4v": "video/mp4", ".webm": "video/webm", ".mov": "video/quicktime", ".ogv": "video/ogg", ".mkv": "video/x-matroska" };
 const byBytes = (a: string, b: string) => a < b ? -1 : a > b ? 1 : 0;
+const FILE_CHANGED = "The file changed. Refresh it before saving; your draft is still available.";
+
+/** The target's text without following a final symlink, or null when absent. */
+async function currentText(path: string): Promise<string | null> {
+  let handle;
+  try { handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return null; throw error; }
+  try {
+    const info = await handle.stat();
+    if (!info.isFile() || info.size > TEXT_LIMIT) return null;
+    return await handle.readFile("utf8");
+  } finally { await handle.close(); }
+}
 
 export class FileService {
   readonly checked: CheckedFiles;
@@ -27,7 +40,9 @@ export class FileService {
       case "file.readRange": return this.readRange(params);
       case "file.write": {
         if (typeof params.content !== "string") throw new WorkspaceError("VALIDATION_FAILED", "File content must be text.");
-        return this.write(typeof params.path === "string" ? params.path : "", params.content);
+        if (params.expectedContent !== undefined && typeof params.expectedContent !== "string")
+          throw new WorkspaceError("VALIDATION_FAILED", "Expected file content must be text.");
+        return this.write(typeof params.path === "string" ? params.path : "", params.content, params.expectedContent);
       }
       case "file.tree": {
         const args = ["ls-files", "--cached", "--others", ...(params.includeIgnored === true ? [] : ["--exclude-standard"]), "-z"];
@@ -109,7 +124,7 @@ export class FileService {
     } finally { await file.close(); }
   }
 
-  private async write(input: string, content: string): Promise<unknown> {
+  private async write(input: string, content: string, expectedContent?: string): Promise<unknown> {
     let path = input;
     try {
       path = this.scope.relative(input);
@@ -117,13 +132,19 @@ export class FileService {
       if (bytes > TEXT_LIMIT) return { kind: "too-large", path, bytes };
       const { parent, mode } = await this.checked.writeParent(input);
       const temporary = `${descriptorPath(parent)}/.zeros-write-${randomUUID()}`;
+      const target = `${descriptorPath(parent)}/${basename(path)}`;
+      // A guarded write replaces only the exact text the client showed; read it
+      // again just before the rename so a change in between is not overwritten.
+      const stillExpected = async () => expectedContent === undefined || await currentText(target) === expectedContent;
       try {
+        if (!await stillExpected()) return { kind: "error", path, bytes: 0, error: FILE_CHANGED };
         await this.checked.assertDescriptor(parent);
         const handle = await open(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, mode);
         try { await handle.writeFile(content, "utf8"); await handle.chmod(mode); await handle.sync(); }
         finally { await handle.close(); }
         await this.checked.assertDescriptor(parent);
-        await rename(temporary, `${descriptorPath(parent)}/${basename(path)}`);
+        if (!await stillExpected()) return { kind: "error", path, bytes: 0, error: FILE_CHANGED };
+        await rename(temporary, target);
         await parent.sync(); this.changed();
         return { kind: "success", path, bytes };
       } finally { await rm(temporary, { force: true }).catch(() => {}); await parent.close(); }

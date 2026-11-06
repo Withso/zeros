@@ -46,13 +46,14 @@ import {
   useReviewLiveData,
 } from "./review-data";
 import { useReviewGithubFailure } from "../../pr/review-github-failure";
-import { derivePrStatusView, reviewFindings, summarizeChecks } from "./review-model";
+import { derivePrStatusView, reviewCommentViewer, reviewFindings, summarizeChecks } from "./review-model";
 import { reviewRepositoryLabel } from "./review-repository-label";
 import { ErrorCallout } from "./review-shared-components";
 import {
   FindingsSection,
   PrStatusCard,
   ReviewHeader,
+  ReviewKnownHeader,
   ReviewOverviewLayout,
   ReviewRail,
   ReviewSection,
@@ -68,6 +69,7 @@ import {
 } from "../tab-status";
 import { ReviewCommitsSection } from "./review-commits";
 import { ReviewChecksSection } from "./review-checks";
+import { useReviewCommitChats } from "./review-commit-chats";
 import { ReviewTimelineSection } from "./review-timeline";
 import type { ReviewSubtab } from "../tab-model";
 
@@ -207,7 +209,7 @@ export function ReviewView({
 }) {
   const repositoryLabel = reviewRepositoryLabel(workspaceId, repoSlug);
   const filesKey = reviewFilesKey(provider.cacheKey, workspaceId, prNumber, baseBranch);
-  const { snap, refresh, postComment, merge, markReady, updateBody } = useReviewLiveData({
+  const { snap, refresh, postComment, merge, markReady, updateBody, rerunFailedChecks } = useReviewLiveData({
     provider,
     workspaceId,
     prNumber,
@@ -227,6 +229,19 @@ export function ReviewView({
 
   const dispatch = useWorkspaceDispatch();
   const activeChatId = useWorkspaceStore((s) => s.activeChatId);
+  const chats = useWorkspaceStore((s) => s.chats);
+  // Which chat made each commit: read only while a surface that names it shows.
+  const commitChats = useReviewCommitChats(
+    workspaceId,
+    snap.commits,
+    chats,
+    active && (sub === "commits" || sub === "activity"),
+  );
+  const openChat = useCallback(
+    (chatId: string) => dispatch({ type: "SET_ACTIVE_CHAT", id: chatId }),
+    [dispatch],
+  );
+  const viewChecks = useCallback(() => onSubChange("checks"), [onSubChange]);
   const addToChat = useCallback(
     (text: string) => {
       appendCounter += 1;
@@ -469,6 +484,15 @@ export function ReviewView({
     },
     "review-resources",
   );
+  const inlineViewer = githubReview.snapshot?.viewer;
+  const commentViewer = useMemo(
+    () => reviewCommentViewer({ login: snap.login, avatarUrl: snap.avatarUrl }, inlineViewer),
+    [snap.login, snap.avatarUrl, inlineViewer],
+  );
+  const postAsViewer = useCallback(
+    (body: string) => postComment(body, commentViewer),
+    [postComment, commentViewer],
+  );
   const checksSummary = summarizeChecks(snap.checks);
   const conversationCount = snap.timeline?.length ?? null;
   // The pull request's own totals; an older engine falls back to the diff.
@@ -526,6 +550,17 @@ export function ReviewView({
     [merge, prNumber, repoSlug],
   );
 
+  const runRerunFailed = useCallback(async () => {
+    if (!rerunFailedChecks) return;
+    try {
+      const rerun = await rerunFailedChecks();
+      if (rerun > 0) toast.success(rerun === 1 ? "Re-running 1 failed run" : `Re-running ${rerun} failed runs`);
+      else toast.info("No failed runs to re-run", { description: "These checks come from apps Zeros can’t restart." });
+    } catch (e) {
+      toast.error("Couldn’t re-run the failed checks", { description: humanGitError(e) });
+    }
+  }, [rerunFailedChecks]);
+
   const runMarkReady = useCallback(async () => {
     setBusy(true);
     try {
@@ -544,8 +579,28 @@ export function ReviewView({
   if (signedOut) return <WorkbenchEmptyState type="review" />;
   if (!pr) {
     if (snap.error) {
+      // The rows the workspace knows stay; the tab's banner names the failure
+      // and offers Retry, and the body keeps the tab's one-line fallback.
       return (
-        <div className="p-3">
+        <div className="flex h-full min-h-0 flex-col" data-review-load-failed="">
+          <WorkbenchTabToolbar>
+            <ReviewKnownHeader
+              prNumber={prNumber}
+              repoSlug={repoSlug}
+              hostLabel={provider.hostLabel}
+              prUrl={prUrl}
+              baseBranch={baseBranch}
+              branch={branch}
+            />
+            <ReviewSubnav
+              sub={sub}
+              onSubChange={onSubChange}
+              activityCount={null}
+              commitsCount={null}
+              checksCount={null}
+              checks={summarizeChecks(null)}
+            />
+          </WorkbenchTabToolbar>
           <WorkbenchEmptyState type="review" />
         </div>
       );
@@ -651,6 +706,8 @@ export function ReviewView({
               error={null}
               prUrl={pr.url || prUrl}
               onRetry={() => void refresh()}
+              chats={commitChats}
+              onOpenChat={openChat}
             />
           </div>
         )}
@@ -664,6 +721,7 @@ export function ReviewView({
               branch={branch || pr.headBranch}
               onAddToChat={addToChat}
               onRetry={() => void refresh()}
+              onRerunFailed={rerunFailedChecks ? runRerunFailed : undefined}
             />
           </div>
         )}
@@ -681,9 +739,14 @@ export function ReviewView({
               pr.number,
             ])}
             hostLabel={provider.hostLabel}
+            viewer={commentViewer}
             onAddToChat={addToChat}
-            onPostComment={postComment}
+            onPostComment={postAsViewer}
             onRetry={() => void refresh()}
+            checks={snap.checks}
+            chats={commitChats}
+            onOpenChat={openChat}
+            onViewChecks={viewChecks}
           />
         )}
       </div>

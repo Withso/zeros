@@ -141,6 +141,22 @@ describe("cloud PR service authority", () => {
     });
     expect(deps.mutate).not.toHaveBeenCalled();
   });
+  it("reports the selected account's photo with its login", async () => {
+    const { service, deps } = fixture();
+    deps.access.mockResolvedValueOnce({
+      ...(await deps.access()),
+      avatarUrl: "https://avatars.githubusercontent.com/u/5",
+    } as never);
+    await expect(
+      service.execute("workspace", "creator", { op: "gh.authStatus", params: {} }),
+    ).resolves.toMatchObject({
+      result: {
+        authenticated: true,
+        login: "contributor",
+        avatarUrl: "https://avatars.githubusercontent.com/u/5",
+      },
+    });
+  });
   it("reads a stopped workspace entirely through GitHub without a lifecycle mutation", async () => {
     const { service, deps } = fixture();
     await expect(

@@ -293,6 +293,7 @@ export {
   getAuthStatus,
   getPr,
   getPrChecks,
+  rerunFailedPrChecks,
   getPrCommits,
   getPrReviews,
   getRepositoryOwnerAvatar,

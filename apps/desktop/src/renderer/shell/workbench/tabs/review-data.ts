@@ -83,6 +83,8 @@ export interface ReviewSnapshot {
   authed: boolean | null;
   /** The signed-in login (labels optimistic comments). */
   login: string | null;
+  /** That account's photo, beside the comment box and on a posting comment. */
+  avatarUrl: string | null;
   pr: PR | null;
   checks: PrChecksResult | null;
   commits: PrCommitSummary[] | null;
@@ -109,6 +111,7 @@ export interface ReviewSnapshot {
 const EMPTY_SNAPSHOT: ReviewSnapshot = {
   authed: null,
   login: null,
+  avatarUrl: null,
   pr: null,
   checks: null,
   commits: null,
@@ -312,6 +315,7 @@ async function refreshFull(
           patch(key, {
             authed: status.authenticated,
             login: status.login ?? null,
+            avatarUrl: status.avatarUrl ?? null,
           });
           stopAfterAuth = !status.authenticated;
         }
@@ -431,12 +435,16 @@ export interface ReviewLiveData {
   /** Silent full refresh (deduped). */
   refresh: () => Promise<void>;
   /** Post a conversation comment with an optimistic timeline entry. Throws on
-   *  failure (after rolling the optimistic entry back). */
-  postComment: (body: string) => Promise<void>;
+   *  failure (after rolling the optimistic entry back). `as` names the
+   *  posting account when this snapshot hasn't (cloud skips the account check). */
+  postComment: (body: string, as?: { login: string; avatarUrl: string | null } | null) => Promise<void>;
   merge: (method: ReviewMergeMethod) => Promise<void>;
   markReady: () => Promise<void>;
   /** Absent when the provider can't write the description. */
   updateBody: ((body: string) => Promise<void>) | null;
+  /** Start the head commit's failed runs again and reread the checks; resolves
+   *  to how many runs restarted. Absent when the provider can't. */
+  rerunFailedChecks: (() => Promise<number>) | null;
 }
 
 /** Warm or revalidate one exact PR snapshot from pointer/focus intent. Calls
@@ -477,6 +485,8 @@ export function peekReviewLiveData(
 ): ReviewSnapshot {
   return entryFor(reviewCacheKey(provider, workspaceId, prNumber)).snap;
 }
+
+const RERUN_REREAD_MS = 4_000;
 
 export function useReviewLiveData(args: {
   provider: ReviewProvider;
@@ -627,14 +637,14 @@ export function useReviewLiveData(args: {
   }, [pollChecks, provider, key]);
 
   const postComment = useCallback(
-    async (body: string) => {
+    async (body: string, as?: { login: string; avatarUrl: string | null } | null) => {
       const e = entryFor(key);
       if (!currentReviewEntry(provider, target, key, e)) throw new Error("Your GitHub connection changed. Refresh before posting.");
       const optimistic: ReviewTimelineEntry = {
         kind: "comment",
         id: -Date.now(),
-        author: e.snap.login ?? "you",
-        authorAvatarUrl: null,
+        author: e.snap.login ?? as?.login ?? "you",
+        authorAvatarUrl: e.snap.login ? e.snap.avatarUrl : (as?.avatarUrl ?? null),
         state: "",
         body,
         url: null,
@@ -702,5 +712,36 @@ export function useReviewLiveData(args: {
     [provider, key, refresh],
   );
 
-  return { snap, refresh, postComment, merge, markReady, updateBody: provider.updateBody ? writeBody : null };
+  const rerunFailed = useCallback(
+    async () => {
+      const entry = entryFor(key);
+      if (!currentReviewEntry(provider, target, key, entry)) throw new Error("Your GitHub connection changed. Refresh before continuing.");
+      // The head the reader saw: a push since then refuses rather than
+      // restarting runs of commits the checks list no longer shows.
+      const headSha = entry.snap.pr?.headSha;
+      if (!headSha) throw new Error("Refresh the pull request before re-running its checks.");
+      const { rerun } = await provider.rerunFailedChecks!(target, headSha);
+      if (currentReviewEntry(provider, target, key, entry)) {
+        void refreshChecksOnly(provider, target, key);
+        // GitHub queues the restarted runs a moment after it accepts them; a
+        // second read finds them running, which arms the fast checks lane.
+        setTimeout(() => {
+          if (currentReviewEntry(provider, target, key, entry)) void refreshChecksOnly(provider, target, key);
+        }, RERUN_REREAD_MS);
+      }
+      return rerun;
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- target is derived from key
+    [provider, key],
+  );
+
+  return {
+    snap,
+    refresh,
+    postComment,
+    merge,
+    markReady,
+    updateBody: provider.updateBody ? writeBody : null,
+    rerunFailedChecks: provider.rerunFailedChecks ? rerunFailed : null,
+  };
 }
