@@ -489,21 +489,21 @@ it("renders up to its concurrency at once, never the same picture twice, and one
   }
 });
 
-it("renders up to 64 pictures at once for a batching engine and names their owner to the scheduler", async () => {
+it("renders up to 128 pictures at once for a batching engine and names their owner to the scheduler", async () => {
   const waiting: Array<() => void> = [];
   const h = harness({
-    concurrency: () => 100,
+    concurrency: () => 200,
     render: (_owner, input) => new Promise(resolve => waiting.push(() => resolve({ sourceVersion: input.sourceVersion, theme: input.theme,
       mimeType: "image/png", width: 128, height: 80, data: PNG }))),
   });
-  h.previews.setDemand(h.token, demand(local, Array.from({ length: 70 }, (_, index) => [`f${index}.html`, 1] as [string, number])));
+  h.previews.setDemand(h.token, demand(local, Array.from({ length: 140 }, (_, index) => [`f${index}.html`, 1] as [string, number])));
   await h.settle();
-  // Bounded at 64 even when an owner asks for more.
-  expect(h.renders).toHaveLength(64);
-  expect(h.scheduled.slice(0, 64).every(capture => capture?.owner === local)).toBe(true);
+  // Bounded at 128 (two engine batches) even when an owner asks for more.
+  expect(h.renders).toHaveLength(128);
+  expect(h.scheduled.slice(0, 128).every(capture => capture?.owner === local)).toBe(true);
   for (const finish of waiting.splice(0)) finish();
   await h.settle();
-  expect(h.renders).toHaveLength(70);
+  expect(h.renders).toHaveLength(140);
 });
 
 it("bounds large pictures by their own level limit while small ones fill the batch", async () => {

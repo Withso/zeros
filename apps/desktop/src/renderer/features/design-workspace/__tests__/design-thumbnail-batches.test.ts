@@ -4,9 +4,9 @@ import { DesignThumbnailBatches, type DesignThumbnailBatchRender, type DesignThu
 const version = (n: number) => n.toString(16).padStart(24, "0");
 const group: DesignThumbnailGroup = { workspaceId: "workspace-1", directoryId: "design_main", theme: "dark", colorScheme: "light", maxDimension: 128 };
 
-function harness(render: DesignThumbnailBatchRender, maxItems = 64) {
+function harness(render: DesignThumbnailBatchRender, maxItems = 64, inFlight?: number) {
   const timers: Array<() => void> = [];
-  const batches = new DesignThumbnailBatches(render, { maxItems, setTimer: (callback) => { timers.push(callback); return callback; } });
+  const batches = new DesignThumbnailBatches(render, { maxItems, inFlight, setTimer: (callback) => { timers.push(callback); return callback; } });
   return { batches, tick: () => { for (const timer of timers.splice(0)) timer(); } };
 }
 const pictureOf = (file: string, sourceVersion: string) => ({ file, sourceVersion, width: 128, height: 80, data: `png:${file}` });
@@ -120,4 +120,21 @@ it("asks again for frames a reply deferred, first in the next batch, and stops a
   expect(seen[1]).toEqual(["b.html", "stuck.html"]);
   expect(seen.slice(2, 4)).toEqual([["stuck.html"], ["stuck.html"]]);
   expect(seen.at(-1)).toEqual(["c.html"]);
+});
+
+it("keeps as many batches at the engine as it runs at once, so one composes while another captures", async () => {
+  const finish: Array<() => void> = [];
+  const render = vi.fn<DesignThumbnailBatchRender>((_group, frames) => new Promise(resolve => finish.push(() =>
+    resolve({ pictures: frames.map(frame => pictureOf(frame.file, frame.sourceVersion)), stale: [], failed: [] }))));
+  const { batches } = harness(render, 2, 2);
+  const requests = ["a", "b", "c", "d", "e", "f"].map(name => batches.request(group, { file: `${name}.html`, sourceVersion: version(1) }));
+  // Two full batches leave at once; the third waits for either to return.
+  expect(render).toHaveBeenCalledTimes(2);
+  finish.shift()!();
+  await requests[0];
+  await new Promise(resolve => setTimeout(resolve, 0));
+  expect(render).toHaveBeenCalledTimes(3);
+  while (finish.length) finish.shift()!();
+  await Promise.all(requests);
+  expect(render.mock.calls.map(call => call[1].map(frame => frame.file))).toEqual([["a.html", "b.html"], ["c.html", "d.html"], ["e.html", "f.html"]]);
 });

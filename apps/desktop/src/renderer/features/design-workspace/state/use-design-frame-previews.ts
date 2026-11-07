@@ -113,11 +113,11 @@ function nativeDesignPreview(owner: DesignPreviewOwner, input: { file: string; s
   return input.capture ? designCaptureScheduler.schedule(input.capture.key, input.capture.priority, render, signal) : render();
 }
 
-/** Pictures in flight for an engine that batches them: enough to fill one
- * 64-frame capture batch while the previous one renders. Larger levels stay
+/** Pictures in flight for an engine that batches them: enough to fill both
+ * 64-frame batches it runs at once while the next fills. Larger levels stay
  * few: zooming in asks for many at once, and each is a large render, decode
  * and encode that would otherwise saturate the renderer mid-gesture. */
-const DESIGN_THUMBNAIL_BATCH_CONCURRENCY = 64;
+const DESIGN_THUMBNAIL_BATCH_CONCURRENCY = 128;
 const DESIGN_LARGE_PICTURE_CONCURRENCY: Partial<Record<DesignPreviewLevel, number>> = { overview: 16, detail: DESIGN_SOURCE_PREVIEW_CONCURRENCY };
 
 /** Local engines with a capture host render many frames per capture, out of
@@ -127,6 +127,7 @@ function thumbnailsAvailable(owner: DesignPreviewOwner): boolean {
     getActiveBridge()?.supportsEngineCapability?.(DESIGN_THUMBNAILS_CAPABILITY, owner.workspaceId) === true;
 }
 
+/** The engine runs two thumbnail batches at once: one composes while the other captures. */
 const designThumbnailBatches = new DesignThumbnailBatches((group, frames, signal) => {
   const bridge = getActiveBridge();
   if (!bridge) return Promise.reject(new Error("Design thumbnails need a connected engine."));
@@ -134,7 +135,7 @@ const designThumbnailBatches = new DesignThumbnailBatches((group, frames, signal
     directoryId: group.directoryId, theme: group.theme, colorScheme: group.colorScheme,
     maxDimension: group.maxDimension, frames,
   }, { signal });
-});
+}, { inFlight: 2 });
 
 export const designFramePreviews = new DesignFramePreviews({
   displayBudget: designImageResidency,

@@ -48,18 +48,21 @@ interface Batch {
 
 /** Coalesces one-frame picture requests into engine batches: requests that
  * arrive within a short window (or fill a batch) are rendered together, and
- * each caller receives exactly its own frame's answer. The engine renders one
- * preview job at a time, so a workspace has one batch at the engine while the
- * next fills. A caller that cancels is answered at once; a batch whose callers
+ * each caller receives exactly its own frame's answer. A workspace keeps as
+ * many batches at the engine as it runs at once (one composes while another
+ * captures) while the next fills. A caller that cancels is answered at once; a batch whose callers
  * have all cancelled is aborted; a frame appears once per batch. */
 export class DesignThumbnailBatches {
   /** Waiting batches in arrival order. */
   private readonly waiting: Batch[] = [];
   private readonly flushing = new Set<AbortController>();
-  private readonly busy = new Set<string>();
+  /** Batches at the engine per workspace. */
+  private readonly busy = new Map<string, number>();
 
   constructor(private readonly render: DesignThumbnailBatchRender, private readonly options: {
     maxItems?: number;
+    /** Batches one workspace's engine runs at once (default one). */
+    inFlight?: number;
     windowMs?: number;
     setTimer?: (callback: () => void, ms: number) => unknown;
   } = {}) {}
@@ -102,15 +105,15 @@ export class DesignThumbnailBatches {
     return { waiting: this.waiting.reduce((sum, batch) => sum + batch.entries.length, 0), batches: this.flushing.size };
   }
 
-  /** Sends the workspace's oldest ready batch unless one is at the engine. */
+  /** Sends the workspace's oldest ready batches while its engine has room. */
   private pump(workspaceId: string): void {
-    if (this.busy.has(workspaceId)) return;
+    if ((this.busy.get(workspaceId) ?? 0) >= Math.max(1, this.options.inFlight ?? 1)) return;
     const index = this.waiting.findIndex((batch) => batch.group.workspaceId === workspaceId && batch.ready);
     if (index < 0) return;
     const [batch] = this.waiting.splice(index, 1);
     const entries = batch!.entries.filter((entry) => !entry.settled);
     if (!entries.length) { this.pump(workspaceId); return; }
-    this.busy.add(workspaceId);
+    this.busy.set(workspaceId, (this.busy.get(workspaceId) ?? 0) + 1);
     const controller = new AbortController();
     this.flushing.add(controller);
     // Every caller cancelled: nothing awaits this batch's pictures.
@@ -142,8 +145,12 @@ export class DesignThumbnailBatches {
     }).finally(() => {
       this.flushing.delete(controller);
       for (const entry of entries) entry.signal?.removeEventListener("abort", abandon);
-      this.busy.delete(workspaceId);
+      const remaining = (this.busy.get(workspaceId) ?? 1) - 1;
+      if (remaining > 0) this.busy.set(workspaceId, remaining);
+      else this.busy.delete(workspaceId);
       this.pump(workspaceId);
     });
+    // Fill another slot when the engine runs more than one batch.
+    this.pump(workspaceId);
   }
 }

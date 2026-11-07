@@ -210,8 +210,8 @@ interface Picture {
 
 /** Encoded pictures remain cacheable independently of visible pixel leases. */
 const POOL_MAX_ENTRIES = 10_000;
-/** At most this many pictures render at once (a batching engine's capture). */
-const DESIGN_PREVIEW_MAX_PARALLEL = 64;
+/** At most this many pictures render at once (two batches of a batching engine). */
+const DESIGN_PREVIEW_MAX_PARALLEL = 128;
 
 interface Attempt {
   failures: number;
