@@ -1,4 +1,4 @@
-import { gitCredential } from "./client";
+import { gitCredential } from "./broker";
 import { githubAuthenticationMessage } from "./github-failure";
 
 try {

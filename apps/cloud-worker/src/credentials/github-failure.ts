@@ -1,4 +1,6 @@
-import { CloudGithubUnavailableReasonSchema, type CloudGithubUnavailableReason } from "@zeros/protocol/cloud-github-connection";
+// Type-only: the Git credential and askpass helpers bundle this module, and
+// Git starts one helper process per request, so it must not load zod.
+import type { CloudGithubUnavailableReason } from "@zeros/protocol/cloud-github-connection";
 
 export const GITHUB_REQUEST_TIMEOUT_MS = 20_000;
 export const GITHUB_HTTP_TIMEOUT_MS = 15_000;
@@ -17,13 +19,17 @@ const messages: Record<CloudGithubUnavailableReason, string> = {
   unavailable: "GitHub authentication is unavailable. Try again shortly.",
 };
 
+// `messages` is typed by the protocol enum, so its keys are exactly the reasons.
+function isReason(value: unknown): value is CloudGithubUnavailableReason {
+  return typeof value === "string" && Object.hasOwn(messages, value);
+}
+
 export class GithubAuthenticationError extends Error {
   constructor(readonly reason: CloudGithubUnavailableReason) { super(messages[reason]); }
 }
 
 export function githubAuthenticationError(reason: unknown = "unavailable"): GithubAuthenticationError {
-  const parsed = CloudGithubUnavailableReasonSchema.safeParse(reason);
-  return new GithubAuthenticationError(parsed.success ? parsed.data : "unavailable");
+  return new GithubAuthenticationError(isReason(reason) ? reason : "unavailable");
 }
 
 export function githubAuthenticationMessage(error: unknown): string {
