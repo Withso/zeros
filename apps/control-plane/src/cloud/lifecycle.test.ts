@@ -50,7 +50,7 @@ function vmCommands(f: { compute: CloudV2Compute }, overrides: { checkpoint?: st
 }
 const vmCommand = (f: { compute: CloudV2Compute }, marker: string) => vi.mocked(f.compute.exec).mock.calls.find(([, command]) => command.includes(marker));
 
-function setup(claimed: (CloudV2LifecycleWorkspace & { attempts: number })[], options: { snapshot?: string | null; prune?: string[]; stock?: true; idle?: CloudV2Workspace[]; stopIdle?: CloudV2LifecycleDeps["stopIdle"]; timing?: CloudV2LifecycleDeps["timing"]; now?: () => number;
+function setup(claimed: (CloudV2LifecycleWorkspace & { attempts: number })[], options: { snapshot?: string | null; prune?: string[]; stock?: true; checkout?: true; idle?: CloudV2Workspace[]; stopIdle?: CloudV2LifecycleDeps["stopIdle"]; timing?: CloudV2LifecycleDeps["timing"]; now?: () => number;
   checkpoints?: ReturnType<typeof checkpointsFake>; remoteHead?: CloudV2LifecycleDeps["remoteHead"]; githubToken?: CloudV2LifecycleDeps["githubToken"]; uploadHorizon?: string;
   checkpointRetry?: boolean; retries?: RetryRow[]; prepareRepository?: CloudV2LifecycleDeps["prepareRepository"]; pruneEnvironments?: () => Promise<void>;
   runtimeForWorkspace?: CloudV2LifecycleDeps["runtimeForWorkspace"]; bootEnv?: CloudV2LifecycleDeps["bootEnv"]; builds?: CloudV2LifecycleDeps["builds"] } = {}) {
@@ -78,7 +78,7 @@ function setup(claimed: (CloudV2LifecycleWorkspace & { attempts: number })[], op
     transition: vi.fn(async () => null),
     rotateWorkerToken: vi.fn(async () => token),
     workspaceImage: vi.fn(async () => options.snapshot === null ? null
-      : { from: options.stock ? null : options.snapshot === undefined ? "cv2-alpha-org-1" : options.snapshot, prune: options.prune ?? [] }),
+      : { from: options.stock ? null : options.snapshot === undefined ? "cv2-alpha-org-1" : options.snapshot, prune: options.prune ?? [], checkout: options.checkout === true }),
     revoke: vi.fn(async () => {}),
     idleSince: vi.fn(async () => options.idle ?? []),
     nextLifecycleDue: vi.fn(async (): Promise<number | null> => null),
@@ -810,6 +810,18 @@ describe("cloud v2 lifecycle", () => {
     expect(vi.mocked(f.compute.exec).mock.calls[prune]![1]).not.toContain("/home/user/o/r");
     expect(vi.mocked(f.compute.exec).mock.invocationCallOrder[prune]).toBeLessThan(vi.mocked(f.compute.hostPort).mock.invocationCallOrder[0]!);
     expect(f.compute.create).toHaveBeenCalledWith(expect.objectContaining({ from: "cv2-alpha-org-1" }));
+  });
+
+  it("hydrates only an image that lacks the workspace's checkout", async () => {
+    // Hydration is a detached command plus GitHub token and binding reads,
+    // seconds of work that a source-holding image makes pointless.
+    for (const [options, hydrates] of [[{ checkout: true }, false], [{}, true], [{ stock: true }, true]] as const) {
+      const prepareRepository = vi.fn(async () => {});
+      const f = setup([workspace("creating")], { ...options, prepareRepository });
+      await f.lifecycle.tick();
+      expect(prepareRepository, JSON.stringify(options)).toHaveBeenCalledTimes(hydrates ? 1 : 0);
+      expect(f.store.rotateWorkerToken, JSON.stringify(options)).toHaveBeenCalledOnce();
+    }
   });
 
   it("starts a narrower source scope from Boat's stock image with git-lfs", async () => {

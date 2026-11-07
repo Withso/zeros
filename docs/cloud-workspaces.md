@@ -305,12 +305,22 @@ New workspaces start from the build they pinned at creation:
 - **Creator can read every repository of a v3 build:** the scope records them
   all, and the VM starts from the build's snapshot. The other checkouts are
   removed before the worker or any agent can reach them, so agents cannot
-  work on or push to them.
+  work on or push to them. The image already holds the workspace's clone, so
+  creation skips hydration: no token, binding read or detached command.
 - **Anyone else:** the scope is the selected repository only. The VM starts
   from Boat's stock image with git-lfs, and the control plane clones only that
   repository.
 - **v2 build:** the VM starts from its source-free snapshot and clones the
   selected repository.
+
+Create checks the requested repository first, then the creator's access to the
+other build repositories in order. The source authority verifies one repository
+at a time per creator, and a denial invalidates the checks queued behind it, so
+they never run together. The base branch is read while the others are checked.
+Boat's detached commands (hydration and long setup) are polled after 250 ms,
+backing off to every five seconds. Only a recorded exit status ends one; a poll
+that times out or reads nothing keeps waiting until the command's deadline. The lifecycle logs `source_authorize` and
+`repository_prepare` timings beside its other phases.
 
 Restores after a lost disk apply the same rule to the active build and record
 their choice, so a retried restore replays it without another lookup. The worker switches to the workspace
