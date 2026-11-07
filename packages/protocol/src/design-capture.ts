@@ -152,6 +152,9 @@ export const DESIGN_BATCH_CAPTURE_MAX_DIMENSION = 1280;
 export const DESIGN_BATCH_CAPTURE_STYLESHEET_BYTES = 16 * 1024 * 1024;
 export const DESIGN_BATCH_CAPTURE_HTML_BYTES = 32 * 1024 * 1024;
 export const DESIGN_BATCH_CAPTURE_TIMEOUT_MS = 60_000;
+/** A batch's pictures together stay within this many pixels (64 thumbnails
+ * fit easily; detail pictures go a few at a time), bounding the reply. */
+export const DESIGN_BATCH_CAPTURE_PIXELS = 16 * 1024 * 1024;
 export const designCaptureSheetUrl = (hash: string) => `${DESIGN_CAPTURE_SHEET_SCHEME}://css/${hash}`;
 const sheetHash = z.string().regex(/^[a-f0-9]{64}$/);
 export const designBatchCaptureRequestSchema = z
@@ -173,6 +176,8 @@ export const designBatchCaptureRequestSchema = z
   .strict()
   .refine(input => new Set(input.items.map(item => item.id)).size === input.items.length,
     { message: "Batch capture item ids must be unique." })
+  .refine(input => input.items.reduce((sum, item) => sum + item.maxDimension * item.maxDimension, 0) <= DESIGN_BATCH_CAPTURE_PIXELS,
+    { message: "Batch capture exceeds its pixel budget." })
   .refine(input => Object.values(input.stylesheets).reduce((sum, css) => sum + css.length, 0) <= DESIGN_BATCH_CAPTURE_STYLESHEET_BYTES &&
     input.items.reduce((sum, item) => sum + item.html.length, 0) <= DESIGN_BATCH_CAPTURE_HTML_BYTES,
     { message: "Batch capture exceeds its byte budget." });

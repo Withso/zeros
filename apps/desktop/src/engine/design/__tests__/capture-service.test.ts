@@ -323,6 +323,9 @@ it("refuses a batch whose sheets are not content-addressed or are missing, befor
   const missing = batchInput([{ ...batchInput().items[0]!, html: `<link rel="stylesheet" href="zeros-capture://css/${"0".repeat(64)}">` }]);
   expect((await batchRequest(service, missing)).status).toBe(422);
   expect((await batchRequest(service, { ...batchInput(), items: [] })).status).toBe(422);
+  // Detail pictures go a few per batch: 64 at 1,280 px would exceed the pixel budget.
+  const detail = batchInput(Array.from({ length: 11 }, (_, index) => ({ ...batchInput().items[0]!, id: `d${index}`, maxDimension: 1280 })));
+  expect((await batchRequest(service, detail)).status).toBe(422);
   expect(renderBatch).not.toHaveBeenCalled();
 });
 
