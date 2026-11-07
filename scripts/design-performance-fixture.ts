@@ -5,8 +5,8 @@
  * and write meta/canvas.json once through the engine's own encoder, then read
  * it back through the engine, so thousands of frames take seconds. */
 import { execFileSync } from "node:child_process";
-import { constants, existsSync, readFileSync, readdirSync, statSync } from "node:fs";
-import { copyFile, cp, mkdir, readFile, writeFile } from "node:fs/promises";
+import { constants, readFileSync, readdirSync, statSync } from "node:fs";
+import { copyFile, cp, mkdir, open, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import {
   DESIGN_MAX_FRAMES_PER_PAGE,
@@ -53,7 +53,12 @@ interface SourcePage { folder: string; frames: SourceFrame[]; files: string[] }
 /** Frames grouped by source page, plus each page folder's non-HTML files
  * (page stylesheets) that its frames link by a relative name. */
 function readSourcePages(designRoot: string, only?: readonly string[]): { pages: SourcePage[]; document: Record<string, unknown> } {
-  const canvasText = readFileSync(path.join(designRoot, "meta/canvas.json"), "utf8");
+  let canvasText: string;
+  try {
+    canvasText = readFileSync(path.join(designRoot, "meta/canvas.json"), "utf8");
+  } catch {
+    throw new Error("--source must be a paged Design directory with meta/canvas.json.");
+  }
   const document = decodeCanvasFile(canvasText, { version: 2 }) as Record<string, unknown> & {
     pages: { folder: string; frames: string[] }[];
     frames: Record<string, { w: number; h: number }>;
@@ -64,14 +69,18 @@ function readSourcePages(designRoot: string, only?: readonly string[]): { pages:
     folder: page.folder,
     frames: page.frames.flatMap((id) => {
       const file = fileById.get(id);
-      if (!file || !existsSync(path.join(designRoot, file))) return [];
+      if (!file || !statSync(path.join(designRoot, file), { throwIfNoEntry: false })?.isFile()) return [];
       const geometry = document.frames[file]!, info = document.frame_info[file]!;
       return [{ file, title: info.title, width: geometry.w, height: geometry.h, kind: info.kind }];
     }),
-    files: existsSync(path.join(designRoot, page.folder))
-      ? readdirSync(path.join(designRoot, page.folder), { withFileTypes: true })
-        .filter((entry) => entry.isFile() && !/\.html$/i.test(entry.name)).map((entry) => entry.name)
-      : [],
+    files: (() => {
+      try {
+        return readdirSync(path.join(designRoot, page.folder), { withFileTypes: true })
+          .filter((entry) => entry.isFile() && !/\.html$/i.test(entry.name)).map((entry) => entry.name);
+      } catch {
+        return [];
+      }
+    })(),
   })).filter((page) => page.frames.length > 0 && (!only || only.includes(page.folder)));
   if (!pages.length) throw new Error("The source Design directory has no registered frames to replicate.");
   if (only?.some((folder) => !pages.some((page) => page.folder === folder)))
@@ -92,19 +101,30 @@ async function copyStyleClosure(sourceRoot: string, outputRoot: string, entries:
     if (seen.has(relative)) continue;
     seen.add(relative);
     const from = path.join(sourceRoot, relative);
-    if (!inside(from) || !existsSync(from)) continue;
-    const to = path.join(outputRoot, relative);
-    await mkdir(path.dirname(to), { recursive: true });
-    if (statSync(from).isDirectory()) {
-      // pnpm links packages into its store; copy their files, not the link.
-      await cp(from, to, { recursive: true, dereference: true, mode: CLONE, errorOnExist: false, force: false });
+    if (!inside(from)) continue;
+    // Inspect and read one opened file, never a path checked earlier.
+    const handle = await open(from, "r").catch(() => null);
+    if (!handle) continue;
+    let text: string;
+    try {
+      const info = await handle.stat();
+      const to = path.join(outputRoot, relative);
+      await mkdir(path.dirname(to), { recursive: true });
+      if (info.isDirectory()) {
+        // pnpm links packages into its store; copy their files, not the link.
+        await cp(from, to, { recursive: true, dereference: true, mode: CLONE, errorOnExist: false, force: false });
+        copied++;
+        continue;
+      }
+      if (!info.isFile()) continue;
+      const bytes = await handle.readFile();
+      await writeFile(to, bytes);
       copied++;
-      continue;
+      if (!/\.(?:css|scss|sass)$/i.test(relative)) continue;
+      text = bytes.toString("utf8");
+    } finally {
+      await handle.close();
     }
-    await copyFile(from, to, CLONE);
-    copied++;
-    if (!/\.(?:css|scss|sass)$/i.test(relative)) continue;
-    const text = readFileSync(from, "utf8");
     for (const match of text.matchAll(/@import\s+(?:url\()?\s*["']([^"']+)["']|url\(\s*["']?([^"')]+)["']?\s*\)/g)) {
       const specifier = (match[1] ?? match[2] ?? "").split(/[?#]/)[0]!;
       if (!specifier || /^(?:[a-z]+:|\/\/|#)/i.test(specifier) || specifier === "tailwindcss" || specifier.startsWith("tailwindcss/")) continue;
@@ -115,7 +135,7 @@ async function copyStyleClosure(sourceRoot: string, outputRoot: string, entries:
       const name = specifier.startsWith("@") ? specifier.split("/").slice(0, 2).join("/") : specifier.split("/")[0]!;
       for (let directory = path.dirname(from); inside(directory); directory = path.dirname(directory)) {
         const candidate = path.join(directory, "node_modules", name);
-        if (existsSync(candidate)) {
+        if (statSync(candidate, { throwIfNoEntry: false })) {
           pending.push(path.relative(sourceRoot, candidate));
           break;
         }
@@ -181,8 +201,6 @@ async function main() {
   const output = path.resolve(argument("--output") ?? `.context/design-performance-fixture-${pageCount}x${perPage}`);
   const started = Date.now();
   const sourceRoot = source === undefined ? undefined : path.resolve(source);
-  if (sourceRoot && !existsSync(path.join(sourceRoot, "meta/canvas.json")))
-    throw new Error("--source must be a paged Design directory with meta/canvas.json.");
   const replica = sourceRoot ? readSourcePages(sourceRoot, argument("--source-pages")?.split(",")) : undefined;
   // Every page cycles through all source frames, so each page folder needs
   // the union of the source pages' stylesheets; a name clash would rebind one.
@@ -208,9 +226,8 @@ async function main() {
   const initial = decodeCanvasFile(await readFile(canvasFile, "utf8"), { version: 2 });
   if (sourceRoot) {
     for (const shared of ["tokens.css", "assets", "components"]) {
-      const from = path.join(sourceRoot, shared);
-      if (!existsSync(from)) continue;
-      await cp(from, path.join(root, shared), { recursive: true, mode: CLONE, force: true });
+      await cp(path.join(sourceRoot, shared), path.join(root, shared), { recursive: true, mode: CLONE, force: true })
+        .catch((error: NodeJS.ErrnoException) => { if (error.code !== "ENOENT") throw error; });
     }
   } else {
     await writeFile(path.join(root, "performance.css"), PERFORMANCE_CSS);
