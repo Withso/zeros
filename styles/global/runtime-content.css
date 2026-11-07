@@ -133,7 +133,7 @@
   -webkit-user-select: text;
   user-select: text;
   white-space: normal;
-  font-size: 14px;
+  font-size: var(--reading-text-size);
   /* Emergency break for unbroken tokens (long URLs, hashes, JSON runs) so
      they wrap inside the 800px answer lane instead of clipping against the
      scroller's overflow-x-hidden. break-word (not anywhere) on purpose:
@@ -149,7 +149,7 @@
 }
 [data-Zeros-root] .zeros-agent-md p {
   margin: 0 0 14px;
-  font-size: 14px;
+  font-size: var(--reading-text-size);
   line-height: 1.65;
 }
 [data-Zeros-root] .zeros-agent-md h1,
@@ -186,7 +186,7 @@
 [data-Zeros-root] .zeros-agent-md ol {
   margin: 0 0 14px;
   padding-left: 24px;
-  font-size: 14px;
+  font-size: var(--reading-text-size);
 }
 [data-Zeros-root] .zeros-agent-md ul,
 [data-Zeros-root] .zeros-agent-md ul ul,
@@ -248,7 +248,7 @@
   vertical-align: bottom;
   color: var(--brown-primary);
   font-family: var(--font-sans);
-  font-size: 14px;
+  font-size: var(--reading-text-size);
   word-break: normal;
   overflow-wrap: normal;
   text-decoration: none;
@@ -306,7 +306,7 @@
   color: var(--fg1);
   word-break: break-word;
 }
-/* Internal file references share the same 14px sans face as prose, without a
+/* Internal file references share prose's reading-size sans face, without a
    background. Keep paths whole; long labels ellipsize and expose the full path
    in their title. Plain inline code above retains its monospace presentation. */
 [data-Zeros-root] .zeros-agent-md .zeros-md-filepath {
@@ -322,7 +322,7 @@
   border: none;
   color: var(--brown-primary);
   font-family: var(--font-sans);
-  font-size: 14px;
+  font-size: var(--reading-text-size);
   cursor: pointer;
   word-break: normal;
   overflow-wrap: normal;
@@ -487,7 +487,7 @@
    --weight-medium so it visually leads the definition row. */
 [data-Zeros-root] .zeros-agent-md dl {
   margin: 0 0 14px;
-  font-size: 14px;
+  font-size: var(--reading-text-size);
 }
 [data-Zeros-root] .zeros-agent-md dt {
   margin-top: 8px;

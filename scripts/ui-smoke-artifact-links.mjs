@@ -25,8 +25,8 @@ export async function runArtifactLinksSmoke({ page, check }) {
     };
   });
   check(
-    "File references use 14px sans, no background, 3px padding and no word breaking",
-    appearance.size === "14px" &&
+    "File references use the 15px reading size in sans, no background, 3px padding and no word breaking",
+    appearance.size === "15px" &&
       /Geist/.test(appearance.font) &&
       !/Mono/.test(appearance.font) &&
       appearance.bg === "rgba(0, 0, 0, 0)" &&
@@ -42,7 +42,7 @@ export async function runArtifactLinksSmoke({ page, check }) {
   const externalCode = prose.locator('a[href="https://example.com/external"]');
   await expect(externalCode.locator("[data-file-path]")).toHaveCount(0);
   await expect(external).toHaveAttribute("target", "_blank");
-  await expect(external).toHaveCSS("font-size", "14px");
+  await expect(external).toHaveCSS("font-size", "15px");
   const icon = await external.evaluate(
     (el) => getComputedStyle(el, "::after").display,
   );

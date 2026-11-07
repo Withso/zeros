@@ -65,7 +65,8 @@ export async function runToolPresentationSmoke({ page, check }) {
     exact: true,
   });
   await expect(bash.locator("[data-tool-preview]")).toBeVisible();
-  // The description is a 20px chip, the height of the file tags beside it.
+  // The description is a 20px chip of 13px text, the height and size of the
+  // file tags beside it; the tool's name reads at the chat's 15px.
   const previewHeight = await bash
     .locator("[data-tool-preview]")
     .evaluate((element) => element.getBoundingClientRect().height);
@@ -74,6 +75,8 @@ export async function runToolPresentationSmoke({ page, check }) {
     previewHeight === 20,
     `height ${previewHeight}`,
   );
+  await expect(bash.locator("[data-tool-preview]")).toHaveCSS("font-size", "13px");
+  await expect(bash.getByText("Bash", { exact: true })).toHaveCSS("font-size", "15px");
   await bash.focus();
   await page.keyboard.press("Enter");
   await expect(bash).toHaveAttribute("aria-expanded", "true");
@@ -141,6 +144,11 @@ export async function runToolPresentationSmoke({ page, check }) {
   });
   const editButton = edit.getByRole("button", { name: /^Edit card.ts/ });
   const editPill = edit.locator("[data-file-path]");
+  await expect(editPill).toHaveCSS("font-size", "13px");
+  check(
+    "A tool row's file tag is a 20px chip of 13px text",
+    (await editPill.evaluate((element) => element.getBoundingClientRect().height)) === 20,
+  );
   const hoverPreview = page.locator(
     "[data-slot='hover-card-content'] [data-agent-diff-preview]",
   );
@@ -239,6 +247,8 @@ async function expectRowShape({ page, feed, check, label }) {
     .filter({ has: page.locator("button[aria-expanded]") })
     .first();
   for (const [targets, row] of [[false, plain], [true, withTargets]]) {
+    // The mouse only hovers what is on screen; the fixture runs past the fold.
+    await row.scrollIntoViewIfNeeded();
     const box = await row.boundingBox();
     // The row's own left padding, not its name: the fill covers the whole row.
     await page.mouse.move(box.x + 3, box.y + box.height / 2);

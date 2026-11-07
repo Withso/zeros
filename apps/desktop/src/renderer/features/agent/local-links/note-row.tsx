@@ -22,7 +22,7 @@ export function LocalNoteRow({ note }: { note: LocalMessageNote }) {
       className="text-fg3 -ml-2 flex min-w-0 flex-wrap items-center gap-2 px-2 py-1 text-xs"
     >
       <Terminal className="text-fg2 size-3 shrink-0" aria-hidden="true" />
-      <span className="text-fg1 text-sm">{LABELS[note.event]}</span>
+      <span className="text-fg1 text-reading leading-5">{LABELS[note.event]}</span>
       <LocalLinkPill href={note.link} fallback={note} />
       {related.map((href) => <LocalLinkPill key={href} href={href} />)}
       {detail && (

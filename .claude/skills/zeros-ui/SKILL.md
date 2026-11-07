@@ -48,7 +48,8 @@ The full guide is `docs/design-system.md`; token values are in
    opacity (`text-fg2/60`). On a tinted `bg-<family>-bg`, text is
    `text-<family>-fg`.
 6. **Scales:** text `text-xxs` 10 · `text-2xxs` 11 · `text-3xxs` 12 · `text-xs`
-   13/18 · `text-sm` 14/20. Controls are 28 standard, 24 compact or 20 inline
+   13/18 · `text-sm` 14/20, and `text-reading` 15/22 for the chat's reading
+   text only. Controls are 28 standard, 24 compact or 20 inline
    (IconButton), with 14, 12 and 12px glyphs; never mix heights in one row.
    Radius `rounded-sm` 4 (inline controls, pills, badges, kbd, checkboxes) ·
    `rounded-md` 6 (buttons, fields, tabs, tooltips, tools) · `rounded-lg` 8

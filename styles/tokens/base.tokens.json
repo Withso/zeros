@@ -504,6 +504,20 @@
         }
       }
     },
+    "reading-text-size": {
+      "$type": "dimension",
+      "$value": {
+        "value": 0.9375,
+        "unit": "rem"
+      },
+      "$description": "15px chat reading text",
+      "$extensions": {
+        "org.zeros": {
+          "cssName": "--reading-text-size",
+          "section": "base-reading-text-size"
+        }
+      }
+    },
     "highlighted-bg": {
       "$type": "color",
       "$value": "{tokens.bg2}",

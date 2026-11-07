@@ -1026,3 +1026,15 @@ Each landed step appends one line: date, workstream, what landed, evidence.
   gutters, the 12px gaps, the 12px to the side island, the right gutter with
   the side column hidden, every radius and the absent fades, in Dark and
   Light.
+- 2026-11-07 · 5 · The chat reads at 15px (`docs/design-system.md` §0 item
+  14): a `--reading-text-size` token and `text-reading` utility (15px on
+  22px) set agent output prose, sent messages, the composer, thinking and
+  the agent notice; the transcript's one-line rows and status lines take
+  the same 15px on 20px lines, so rows stay 28px; a sent message folds to
+  five 22px lines (110px); the chip beside a tool's name, its command or
+  its file, is 13px on its 20px chip; dialog titles keep their own 15px
+  token. The canvas's chat kits and its design system's type list carry the
+  same sizes. Evidence: `chat-reading-type.test.ts` failed red first; the
+  fold and composer smoke measures 15px/22px text and the 22px fold lines,
+  the tool smoke 15px names, 13px chips and file tags and 28px rows, and
+  the markdown smoke 15px file references and links.

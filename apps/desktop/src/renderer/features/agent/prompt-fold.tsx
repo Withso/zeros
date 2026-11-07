@@ -9,10 +9,10 @@ import { flushSync } from "react-dom";
 import { cn } from "@/renderer/shared/ui/cn";
 import { Button } from "@/renderer/shared/ui/primitives/button";
 
-/** The text a folded message keeps: five 20px lines. */
-export const PROMPT_FOLD_COLLAPSED_PX = 100;
+/** The text a folded message keeps: five 22px lines of the reading size. */
+export const PROMPT_FOLD_COLLAPSED_PX = 110;
 /** The most an unfolded message shows before it scrolls: fifteen lines. */
-export const PROMPT_FOLD_EXPANDED_PX = 300;
+export const PROMPT_FOLD_EXPANDED_PX = 330;
 /** The toggle's row: a 4px gap and the 24px compact Ghost button. */
 export const PROMPT_FOLD_TOGGLE_ROW_PX = 28;
 
@@ -22,9 +22,9 @@ export const PROMPT_FOLD_TOGGLE_ROW_PX = 28;
 // cannot be scrolled by a selection drag. Unfolded, the wheel passes to the
 // transcript at the message's end.
 export const PROMPT_FOLD_COLLAPSED_CLS =
-  "max-h-[108px] overflow-clip mask-b-from-[calc(100%-2rem)]";
+  "max-h-[118px] overflow-clip mask-b-from-[calc(100%-2rem)]";
 export const PROMPT_FOLD_EXPANDED_CLS =
-  "max-h-[308px] overflow-y-auto [scrollbar-width:thin] data-more-above:mask-t-from-[calc(100%-2rem)] data-more-below:mask-b-from-[calc(100%-2rem)]";
+  "max-h-[338px] overflow-y-auto [scrollbar-width:thin] data-more-above:mask-t-from-[calc(100%-2rem)] data-more-below:mask-b-from-[calc(100%-2rem)]";
 /** The folded view's last 32px dissolve: a control there is not plainly in view. */
 const PROMPT_FOLD_FADE_PX = 32;
 

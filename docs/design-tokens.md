@@ -159,6 +159,7 @@ Contrast ladders (each upper tier must have at least the listed factor more cont
 | `text-2xxs` | 11px | inherited |
 | `text-3xxs` | 12px | inherited |
 | `text-xs` | 13px | 18px |
+| `text-reading` | 15px | 22px |
 | `text-dialog-title` | 15px | inherited |
 | `text-sm` | 14px | 20px (Tailwind default) |
 

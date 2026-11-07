@@ -58,7 +58,8 @@ The full guide is `docs/design-system.md`; token values are in
    opacity (`text-fg2/60`). On a tinted `bg-<family>-bg`, text is
    `text-<family>-fg`.
 6. **Scales:** text `text-xxs` 10 · `text-2xxs` 11 · `text-3xxs` 12 · `text-xs`
-   13/18 · `text-sm` 14/20. Controls are 28 standard, 24 compact or 20 inline
+   13/18 · `text-sm` 14/20, and `text-reading` 15/22 for the chat's reading
+   text only. Controls are 28 standard, 24 compact or 20 inline
    (IconButton), with 14, 12 and 12px glyphs; never mix heights in one row.
    Radius `rounded-sm` 4 (inline controls, pills, badges, kbd, checkboxes) ·
    `rounded-md` 6 (buttons, fields, tabs, tooltips, tools) · `rounded-lg` 8
@@ -193,6 +194,19 @@ exported page by page to [design-implementation/](design-implementation/README.m
     `shell/conversation/__tests__/pane-sizing.test.ts`,
     `shell/workbench/__tests__/workbench-island.test.ts`
     and `scripts/ui-smoke-chat-surfaces.mjs` hold it.
+14. **The chat reads at 15px** (2026-11-07). What people read in the chat is
+    `text-reading`, 15px on 22px lines, one step above the 14px chrome: agent
+    output prose (still at its 1.65 line height), sent messages, the composer,
+    thinking and the agent notice. The transcript's one-line rows and status
+    lines (tool and sub-agent names, the "N tool calls" roll-up, workflow,
+    browser and note rows, provider and wake-up notices) take the same 15px
+    on 20px lines, so a row stays 28px. A sent message folds to five 22px
+    lines. The chip beside a tool's name, its command or its file, is 13px on
+    a 20px chip. Tool details, code and the chrome around the chat keep their sizes,
+    and dialog titles keep their own 15px token. `features/agent/__tests__/chat-reading-type.test.ts`,
+    `features/agent/__tests__/prompt-fold.test.ts`,
+    `scripts/ui-smoke-composer-prompt-fold.mjs` and
+    `scripts/ui-smoke-tool-presentation.mjs` hold it.
 
 ### How the direction changes
 
@@ -318,8 +332,13 @@ imports, following property paths such as `chip.cls`). The ledger counts
 
 **Type scale** (chrome): `text-xxs` 10px · `text-2xxs` 11px · `text-3xxs` 12px ·
 `text-xs` 13px on 18px · `text-sm` 14px on 20px · `text-dialog-title` 15px.
-Page titles use `text-base` / `text-lg`. Agent markdown (`.zeros-agent-md`) has
-its own scale in `styles/global/runtime-content.css`.
+Page titles use `text-base` / `text-lg`. **Reading text** in the chat is
+`text-reading`, 15px on 22px (`--reading-text-size`): agent output, sent
+messages, the composer, thinking and notices; the transcript's one-line rows
+add `leading-5` so they stay 28px. Agent markdown
+(`.zeros-agent-md`) sets its prose in that size at a 1.65 line height and keeps
+its own steps for the rest in `styles/global/runtime-content.css` (headings 20
+and 16, code blocks 13, inline code and tables 12).
 
 **Weights** are one notch lighter than Tailwind's: `font-normal` 400,
 `font-medium` 450, `font-semibold` 500, `font-bold` 600. Hand-written CSS uses

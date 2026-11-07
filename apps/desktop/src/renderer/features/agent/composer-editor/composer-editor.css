@@ -1,8 +1,8 @@
 /* ──────────────────────────────────────────────────────────
    composer-editor.css — ProseMirror content area + placeholder
    ──────────────────────────────────────────────────────────
-   The contenteditable is styled to read exactly like the old textarea
-   (text-sm / leading-snug / no chrome). Paragraphs are flattened so a
+   The contenteditable reads like a sent message: the chat's reading size
+   (text-reading, 15/22) and no chrome. Paragraphs are flattened so a
    Shift+Enter split reads as a single newline, and the Placeholder
    extension's empty hint is painted via ::before. */
 

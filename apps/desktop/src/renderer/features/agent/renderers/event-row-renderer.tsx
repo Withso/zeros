@@ -124,7 +124,7 @@ export const EventRowRenderer: Renderer<AgentMessage> = memo(
     ) {
       return (
         <div
-          className="text-fg1 flex items-center gap-2 py-1 text-sm"
+          className="text-fg1 flex items-center gap-2 py-1 text-reading leading-5"
           role="status"
           aria-live="polite"
         >
@@ -148,7 +148,7 @@ export const EventRowRenderer: Renderer<AgentMessage> = memo(
         (message.severity === "error" && !message.recoverable) || message.code === "strict_safety_review"
       );
       if (!blocksChat || usage)
-        return <div role="status" className="text-fg2 py-1 text-sm" data-provider-notice=""
+        return <div role="status" className="text-fg2 py-1 text-reading leading-5" data-provider-notice=""
           data-provider-usage-notice={usage ? "" : undefined}
           data-chrome-setup-notice={chromeSetup ? "" : undefined}>
           <AgentNoticeText message={message.message} />
@@ -386,8 +386,8 @@ export function renderDetail(
       .filter((paragraph) => paragraph.trim());
     if (paragraphs.length === 0) return null;
     return (
-      // On the row label's 20px column, at 20px lines.
-      <div className="text-fg2 flex select-text flex-col gap-2 pr-3 pl-5 text-sm leading-5">
+      // On the row label's 20px column, in the reading size's 22px lines.
+      <div className="text-fg2 flex select-text flex-col gap-2 pr-3 pl-5 text-reading">
         {paragraphs.map((paragraph, index) => (
           <p key={index} className="m-0 wrap-anywhere whitespace-pre-wrap">
             {paragraph}

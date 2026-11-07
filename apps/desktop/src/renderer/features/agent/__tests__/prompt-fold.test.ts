@@ -47,16 +47,16 @@ describe("sent message width", () => {
 
 describe("sent message fold", () => {
   it("folds only when the folded view and its toggle are shorter than the message", () => {
-    // Five 20px lines folded, fifteen unfolded, a 28px toggle row (4px gap and
-    // the 24px compact Ghost button).
-    expect(PROMPT_FOLD_COLLAPSED_PX).toBe(5 * 20);
-    expect(PROMPT_FOLD_EXPANDED_PX).toBe(15 * 20);
+    // Five 22px lines of the reading size folded, fifteen unfolded, a 28px
+    // toggle row (4px gap and the 24px compact Ghost button).
+    expect(PROMPT_FOLD_COLLAPSED_PX).toBe(5 * 22);
+    expect(PROMPT_FOLD_EXPANDED_PX).toBe(15 * 22);
     expect(PROMPT_FOLD_TOGGLE_ROW_PX).toBe(28);
     expect(promptFolds(0)).toBe(false);
-    expect(promptFolds(6 * 20)).toBe(false);
+    expect(promptFolds(6 * 22)).toBe(false);
     expect(promptFolds(PROMPT_FOLD_COLLAPSED_PX + PROMPT_FOLD_TOGGLE_ROW_PX)).toBe(false);
     expect(promptFolds(PROMPT_FOLD_COLLAPSED_PX + PROMPT_FOLD_TOGGLE_ROW_PX + 1)).toBe(true);
-    expect(promptFolds(7 * 20)).toBe(true);
+    expect(promptFolds(7 * 22)).toBe(true);
   });
 
   it("clips the folded text and dissolves its last 32px; unfolded, scrolls and fades only the edges text runs past", () => {
@@ -117,8 +117,8 @@ const script = buildSync({
 // Stands in for the utilities: the fold's own heights and scrolling, so the
 // edge tracking has something to scroll.
 const FOLD_CSS = `
-  [data-prompt-fold="collapsed"] { max-height: 108px; overflow: clip; }
-  [data-prompt-fold="expanded"] { max-height: 308px; overflow-y: auto; }
+  [data-prompt-fold="collapsed"] { max-height: 118px; overflow: clip; }
+  [data-prompt-fold="expanded"] { max-height: 338px; overflow-y: auto; }
 `;
 
 async function withPage(run: (page: Page) => Promise<void>) {
@@ -173,10 +173,10 @@ describe("sent message fold in a browser", () => {
 
   it("leaves a message that folding would not shorten as it is", async () => {
     await withPage(async (page) => {
-      await page.evaluate(() => (window as any).fold.render(128));
+      await page.evaluate(() => (window as any).fold.render(138));
       await frames(page);
       expect(await state(page)).toMatchObject({ fold: null, toggle: null });
-      await page.evaluate(() => (window as any).fold.render(129));
+      await page.evaluate(() => (window as any).fold.render(139));
       await frames(page);
       expect(await state(page)).toMatchObject({ fold: "collapsed", toggle: "Show more", expanded: "false", controls: true });
     });

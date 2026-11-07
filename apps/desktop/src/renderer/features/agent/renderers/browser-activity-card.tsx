@@ -114,7 +114,7 @@ export const BrowserActivityCard = memo(function BrowserActivityCard({
             }
           />
         </span>
-        <span className="text-fg1 min-w-0 truncate text-sm">{statusLabel}</span>
+        <span className="text-fg1 min-w-0 truncate text-reading leading-5">{statusLabel}</span>
         {liveText ? (
           <span className="text-fg2 min-w-0 truncate text-xs">{liveText}</span>
         ) : null}
