@@ -30,6 +30,14 @@ describe("surface cost", () => {
     expect(designTextImageBytes(`.a { width: ${"9".repeat(200_000)}x }`)).toBe(0);
   });
 
+  it("finds images that entities or escapes spell out, with or without a serialization", () => {
+    const shell = (body: string) => `<!doctype html><html><head></head><body>${body}</body></html>`;
+    expect(designSurfaceCost(shell('<img src="data&#58;image/png;base64,' + PNG + '">'))?.imageBytes).toBe(8);
+    expect(designSurfaceCost(shell('<i style="background:url(d\\61ta:image/png;base64,' + PNG + ')"></i>'))?.imageBytes).toBe(8);
+    expect(designSurfaceCost(shell('<b style="background:url(data:image/png;base64,' + PNG + ')"><p>x</b>y</p>'))?.imageBytes).toBe(16);
+    expect(designSurfaceCost(shell("<main><p>plain text, no images</p></main>"))).toMatchObject({ imageBytes: 0, nodes: 5 });
+  });
+
   it("keeps a placeholder unknown unless the CSS it stands for was measured", () => {
     const skeleton = '<!doctype html><html><head><style data-zeros-sheet="s0-x"></style></head><body><main data-oid="m"></main></body></html>';
     expect(designSurfaceCost(skeleton, [{ css: "", bytes: 100 }])).toBeNull();
