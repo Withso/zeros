@@ -4,6 +4,11 @@ import { DESIGN_MANIFEST_FILE, parseDesignManifest } from "./manifest";
 import { DESIGN_CANVAS_FILE, decodeCanvasFile } from "./canvas-file";
 import { isDesignFrameFile } from "@zeros/protocol/design-path";
 import {
+  DESIGN_MAX_FRAMES_PER_PAGE,
+  DESIGN_MAX_PAGES,
+} from "@zeros/protocol/design-pages";
+import { designPageOverLimitMessage } from "./frame-limits";
+import {
   DesignRenderBudgetError,
   MAX_DESIGN_TEXT_BYTES,
   utf8Bytes,
@@ -57,7 +62,6 @@ import { readSafeRegularFile } from "./safe-files";
 const FRAME_MIN_WIDTH = 1;
 const FRAME_MIN_HEIGHT = 1;
 const FRAME_MAX_SIZE = 16_384;
-export const MAX_FRAME_COUNT = 256;
 export const DEFAULT_FRAME_WIDTH = 1_440;
 export const DEFAULT_FRAME_HEIGHT = 900;
 const MAX_DESIGN_METADATA_BYTES = 16 * 1024 * 1024;
@@ -123,7 +127,7 @@ export function normalizeGeometry(
     y: finiteBetween(value?.y, fallback.y, -1_000_000, 1_000_000),
     w: finiteBetween(value?.w, fallback.w, FRAME_MIN_WIDTH, FRAME_MAX_SIZE),
     h: finiteBetween(value?.h, fallback.h, FRAME_MIN_HEIGHT, FRAME_MAX_SIZE),
-    z: Math.round(finiteBetween(value?.z, fallback.z, 0, MAX_FRAME_COUNT)),
+    z: Math.round(finiteBetween(value?.z, fallback.z, 0, DESIGN_MAX_FRAMES_PER_PAGE)),
   };
 }
 
@@ -185,6 +189,8 @@ export async function readCanvas(
     foundation?: unknown;
     frame_info?: unknown;
   };
+  // decodeCanvasFile already validated every canvas.json source path.
+  const decodedSources = file.endsWith(`/${DESIGN_CANVAS_FILE}`);
   try {
     raw = (
       file.endsWith(`/${DESIGN_MANIFEST_FILE}`)
@@ -218,18 +224,24 @@ export async function readCanvas(
       : {};
   const frames: Record<string, DesignFrameGeometry> = {};
   if (
-    (raw.frames !== undefined &&
-      (!raw.frames ||
-        typeof raw.frames !== "object" ||
-        Array.isArray(raw.frames))) ||
-    Object.keys(sourceFrames).length > MAX_FRAME_COUNT
+    raw.frames !== undefined &&
+    (!raw.frames || typeof raw.frames !== "object" || Array.isArray(raw.frames))
   )
     throw new Error("Invalid Design frame metadata.");
-  for (const [file, geometry] of Object.entries(sourceFrames).slice(
-    0,
-    MAX_FRAME_COUNT,
-  )) {
-    if (!isFrameFile(file)) {
+  // Only paged canvases spread frames across pages; every older layout is one.
+  const frameCount = Object.keys(sourceFrames).length;
+  if (layout?.canvasVersion === 2) {
+    if (frameCount > DESIGN_MAX_PAGES * DESIGN_MAX_FRAMES_PER_PAGE)
+      throw new Error("Invalid Design frame metadata.");
+  } else if (frameCount > DESIGN_MAX_FRAMES_PER_PAGE)
+    throw new Error(
+      designPageOverLimitMessage(
+        (raw as CanvasDocument).pages?.[0]?.title ?? "Design",
+        frameCount,
+      ),
+    );
+  for (const [file, geometry] of Object.entries(sourceFrames)) {
+    if (!decodedSources && !isFrameFile(file)) {
       throw new Error("Invalid Design frame reference.");
     }
     const normalized = normalizeGeometry(geometry, {
@@ -268,7 +280,7 @@ export async function readCanvas(
     for (const [file, value] of Object.entries(raw.frame_info)) {
       const info = value as Partial<FrameMeta> | null;
       if (
-        !isFrameFile(file) ||
+        (!decodedSources && !isFrameFile(file)) ||
         !Object.hasOwn(frames, file) ||
         !info ||
         typeof info.title !== "string" ||
@@ -321,7 +333,8 @@ export async function writeCanvas(
     }
     for (const page of pages) {
       const ids = members.get(page.id)!;
-      page.frames = [...page.frames.filter(id => ids.has(id)), ...[...ids].filter(id => !page.frames.includes(id))];
+      const listed = new Set(page.frames);
+      page.frames = [...page.frames.filter(id => ids.has(id)), ...[...ids].filter(id => !listed.has(id))];
     }
   }
   if (!readDirectoryDesignManifest(workspacePath, directory)?.canvas) {
@@ -437,11 +450,15 @@ export async function discoverFrameFiles(
   } catch {
     return [];
   }
-  return entries
+  const files = entries
     .filter((entry) => entry.isFile() && isFrameFile(entry.name))
     .map((entry) => entry.name)
-    .sort(comparePortableNames)
-    .slice(0, MAX_FRAME_COUNT);
+    .sort(comparePortableNames);
+  // Every root HTML file of an unregistered legacy directory is a frame on its
+  // single page. Dropping the excess would silently unregister authored work.
+  if (files.length > DESIGN_MAX_FRAMES_PER_PAGE)
+    throw new Error(designPageOverLimitMessage("Design", files.length));
+  return files;
 }
 
 export async function readBoundedDesignFrameSource(

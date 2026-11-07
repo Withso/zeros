@@ -66,6 +66,46 @@ describe("Design workspace boot cache", () => {
     vi.unstubAllGlobals();
   });
 
+  const pagedSnapshot = (pages: number, perPage: number, prepared: number) => {
+    const current = snapshot("page-1/frame-0.html");
+    current.pages = Array.from({ length: pages }, (_, page) => ({
+      id: `page_${page}`, title: `Page ${page + 1}`, folder: `page-${page + 1}`,
+      frameFiles: Array.from({ length: perPage }, (_, frame) => `page-${page + 1}/frame-${frame}.html`),
+      frameIds: Array.from({ length: perPage }, (_, frame) => `frame_${page}_${frame}`),
+    }));
+    current.frames = Array.from({ length: prepared }, (_, frame) => ({
+      ...current.frames[0]!, file: `page-1/frame-${frame}.html`, frameId: `frame_0_${frame}`, pageId: "page_0", z: frame,
+    }));
+    current.lint.checkedFiles = current.frames.map((frame) => frame.file);
+    return current;
+  };
+
+  it("mirrors a full page past the old 256 frames with per-page stacking up to the cap", async () => {
+    const cache = await import("../state/design-workspace-boot-cache");
+    const full = pagedSnapshot(2, 1_000, 1_000);
+    full.frames[999]!.z = 1_000;
+    expect(cache.safeDesignWorkspaceBootSnapshot(full)?.frames).toHaveLength(1_000);
+    cache.queueDesignWorkspaceBootSnapshot("ws_full", full);
+    vi.runAllTimers();
+    cache.resetDesignWorkspaceBootCacheForTests();
+    expect(cache.readDesignWorkspaceBootSnapshots().get("ws_full")?.frames).toHaveLength(1_000);
+    full.frames[999]!.z = 1_001;
+    expect(cache.safeDesignWorkspaceBootSnapshot(full)).toBeNull();
+  });
+
+  it("validates a 26-page catalog and drops a stored entry its size no longer fits", async () => {
+    const cache = await import("../state/design-workspace-boot-cache");
+    const large = pagedSnapshot(26, 1_000, 1_000);
+    expect(cache.safeDesignWorkspaceBootSnapshot(large)?.pages).toHaveLength(26);
+    cache.queueDesignWorkspaceBootSnapshot("ws_large", pagedSnapshot(1, 10, 10));
+    vi.runAllTimers();
+    expect(cache.readDesignWorkspaceBootSnapshots().has("ws_large")).toBe(true);
+    cache.queueDesignWorkspaceBootSnapshot("ws_large", large);
+    vi.runAllTimers();
+    cache.resetDesignWorkspaceBootCacheForTests();
+    expect(cache.readDesignWorkspaceBootSnapshots().has("ws_large")).toBe(false);
+  });
+
   it("evicts the oldest workspace even when several snapshots settle in one millisecond", async () => {
     const cache = await import("../state/design-workspace-boot-cache");
     for (let index = 0; index < 5; index += 1) {

@@ -4,18 +4,25 @@ import {
   isDesignPageFolder,
   portableDesignName,
 } from "./design-path";
-import { designPageIdSchema } from "./design-pages";
+import {
+  DESIGN_MAX_FRAMES_PER_PAGE,
+  DESIGN_MAX_PAGES,
+  designPageIdSchema,
+} from "./design-pages";
 
 export const DESIGN_CATALOG_READ_CAPABILITY = "design.catalog.read.v1";
 export const DESIGN_CATALOG_READ_OPERATION = "design.catalog.read";
 export const DESIGN_CATALOG_BATCH_ENTRIES = 256;
 export const DESIGN_CATALOG_BATCH_BYTES = 256 * 1024;
-export const DESIGN_CATALOG_DESCRIPTOR_LIMIT = 10_000;
+/** Every admissible directory fits; byte budgets bound what a read retains. */
+export const DESIGN_CATALOG_DESCRIPTOR_LIMIT =
+  DESIGN_MAX_PAGES * DESIGN_MAX_FRAMES_PER_PAGE;
 
 const identity = z.string().min(1).max(4096);
 const directoryId = z.string().regex(/^design_[A-Za-z0-9_-]{1,64}$/);
 const revision = z.string().regex(/^[a-f0-9]{64}$/);
 const count = z.number().int().min(0).max(DESIGN_CATALOG_DESCRIPTOR_LIMIT);
+const pageCount = z.number().int().min(0).max(DESIGN_MAX_FRAMES_PER_PAGE);
 const intent = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
 const cursor = z.string().min(1).max(256);
 
@@ -49,7 +56,7 @@ export const designCatalogPageSchema = z
     folder: z
       .string()
       .refine((value) => value === "" || isDesignPageFolder(value)),
-    count,
+    count: pageCount,
   })
   .strict();
 
@@ -64,8 +71,8 @@ export const designCatalogFrameSchema = z
     y: z.number().finite().min(-1_000_000).max(1_000_000),
     width: z.number().finite().min(1).max(16_384),
     height: z.number().finite().min(1).max(16_384),
-    z: z.number().int().min(0).max(256),
-    order: count,
+    z: z.number().int().min(0).max(DESIGN_MAX_FRAMES_PER_PAGE),
+    order: pageCount,
     preparation: z.literal("unprepared"),
   })
   .strict();
@@ -97,7 +104,7 @@ export const designCatalogBatchSchema = z
     binding: revision,
     revision,
     intent,
-    pages: z.array(designCatalogPageSchema).min(1).max(64),
+    pages: z.array(designCatalogPageSchema).min(1).max(DESIGN_MAX_PAGES),
     total: count,
     offset: count,
     frames: z.array(designCatalogFrameSchema).max(DESIGN_CATALOG_BATCH_ENTRIES),

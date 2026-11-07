@@ -214,6 +214,12 @@ describe("Code-session Design tools", () => {
     expect(changed).toHaveBeenCalledTimes(2);
   });
 
+  it("pages the frame list past the old 256-frame directory bound", async () => {
+    const listed = await call("design_document_list", { offset: 320, limit: 64 });
+    expect(listed).toMatchObject({ frames: [], nextOffset: null });
+    await expect(call("design_document_list", { offset: -1 })).rejects.toThrow();
+  });
+
   it("keeps inspection available in Code and rejects Design writes", async () => {
     let mode = { mode: "code" as "code" | "design", revision: 0 };
     const tools = session(actorId, { mode: () => mode });

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { DESIGN_MAX_FRAMES_PER_PAGE } from "./design-pages";
 
 /** Optional duplicate identity/placement on Local copy gestures. Older engines
  * must never receive a copy as a move that removes its source. */
@@ -208,7 +209,7 @@ export const designMovementGuardSchema = z
         y: coordinate,
         w: z.number().finite().positive().max(16_384),
         h: z.number().finite().positive().max(16_384),
-        z: z.number().int().min(0).max(256),
+        z: z.number().int().min(0).max(DESIGN_MAX_FRAMES_PER_PAGE),
       })
       .strict()
       .optional(),
@@ -225,7 +226,7 @@ const frameGeometry = z
     y: coordinate,
     w: z.number().finite().positive().max(16_384),
     h: z.number().finite().positive().max(16_384),
-    z: z.number().int().min(0).max(256),
+    z: z.number().int().min(0).max(DESIGN_MAX_FRAMES_PER_PAGE),
   })
   .strict();
 /** Several selected canvas frames moved together: each names the geometry

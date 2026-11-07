@@ -1,7 +1,8 @@
 # Bounded Design rendering primitives
 
 These renderer-side helpers are preparation for representation integration, not
-10,000-frame workspace support. The engine still admits at most 256 frames.
+large-workspace support by themselves. The engine admits 1,000 frames per page
+and up to 64 pages, with no separate directory-wide frame cap.
 The preview cache holds the canvas's frame pictures
 (`state/design-frame-previews.ts`); the spatial index has no canvas consumer
 yet. Strict latest-in-flight scheduling is opt-in; legacy queue callers and PNG

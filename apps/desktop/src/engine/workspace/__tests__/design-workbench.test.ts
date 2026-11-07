@@ -112,6 +112,23 @@ describe("Design in the shared workbench", () => {
     await expect(service.handle("design.frames.move", { ...params, moves: [moves[0], moves[0]] })).rejects.toThrow();
   });
 
+  it("stores per-page stacking above the old 256 bound and clamps only past the page cap", async () => {
+    const params = { workspaceId: workspace.workspaceId };
+    await service.handle("design.initialize", params);
+    const { frame } = (await service.handle("design.frame.create", { ...params, title: "Top" })) as { frame: { file: string } };
+    type Geometry = { geometry: { z: number }; snapshot: { frames: { file: string; x: number; y: number; width: number; height: number; z: number }[] } };
+    const update = (z: number) => service.handle("design.canvas.update", { ...params, frame: frame.file, x: 0, y: 0, w: 400, h: 300, z }) as Promise<Geometry>;
+    expect((await update(900)).geometry.z).toBe(900);
+    const clamped = await update(5_000);
+    expect(clamped.geometry.z).toBe(1_000);
+    expect(clamped.snapshot.frames.find((candidate) => candidate.file === frame.file)!.z).toBe(1_000);
+    const from = { x: 0, y: 0, w: 400, h: 300, z: 1_000 };
+    await service.handle("design.frames.move", { ...params, moves: [{ frame: frame.file, from, to: { ...from, x: 10 } }] });
+    await expect(service.handle("design.frames.move", {
+      ...params, moves: [{ frame: frame.file, from: { ...from, x: 10 }, to: { ...from, z: 1_001 } }],
+    })).rejects.toThrow();
+  });
+
   it("initializes and edits Design without changing presentation, HEAD or the index", async () => {
     const beforeHead = git(workspace.path, "rev-parse", "HEAD");
     const beforeIndex = git(workspace.path, "write-tree");

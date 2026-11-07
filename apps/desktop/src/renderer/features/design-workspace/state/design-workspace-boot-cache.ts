@@ -6,7 +6,12 @@
 // Every hydrated entry is marked stale by the owner cache and revalidated.
 
 import { designContextReferenceSchema } from "@zeros/protocol/design-context";
-import { designPageCatalogSchema, normalizeDesignPagesSnapshot } from "@zeros/protocol/design-pages";
+import { DESIGN_CATALOG_DESCRIPTOR_LIMIT } from "@zeros/protocol/design-catalog";
+import {
+  DESIGN_MAX_FRAMES_PER_PAGE,
+  designPageCatalogSchema,
+  normalizeDesignPagesSnapshot,
+} from "@zeros/protocol/design-pages";
 import { isDesignFrameFile } from "@zeros/protocol/design-path";
 import type { DesignWorkspaceSnapshotWire } from "../../../platform/git";
 import { getSetting, setSetting } from "../../../platform/settings";
@@ -15,7 +20,9 @@ const STORAGE_KEY = "design-workspace-snapshots-v1";
 const MAX_STORED_WORKSPACES = 4;
 const MAX_STORED_ENTRY_CHARS = 750_000;
 const MAX_STORED_TOTAL_CHARS = 2_000_000;
-const MAX_FRAMES = 256;
+/** A snapshot never lists more frames than its directory can hold; the entry
+ * character budget decides which large directories are mirrored at all. */
+const MAX_FRAMES = DESIGN_CATALOG_DESCRIPTOR_LIMIT;
 const MAX_TOKENS = 4_096;
 const MAX_THEME_VALUES = 64;
 const MAX_ASSETS = 128;
@@ -83,6 +90,9 @@ export function safeDesignWorkspaceBootSnapshot(
     return null;
   }
 
+  const pageByFile = new Map(
+    pages?.flatMap((page) => page.frameFiles.map((file) => [file, page] as const)),
+  );
   const frames: DesignWorkspaceSnapshotWire["frames"] = [];
   for (const frame of candidate.frames) {
     const frameId = designContextReferenceSchema.shape.frameId.safeParse(frame?.frameId);
@@ -120,7 +130,7 @@ export function safeDesignWorkspaceBootSnapshot(
       y > 1_000_000 ||
       !Number.isInteger(z) ||
       z < 0 ||
-      z > MAX_FRAMES ||
+      z > DESIGN_MAX_FRAMES_PER_PAGE ||
       !Number.isSafeInteger(nodeCount) ||
       nodeCount < 0 ||
       modifiedAt < 0 ||
@@ -131,7 +141,7 @@ export function safeDesignWorkspaceBootSnapshot(
       return null;
     }
     const layerCount = finiteNumber(frame?.layerCount);
-    const page = pages?.find((page) => page.frameFiles.includes(file));
+    const page = pageByFile.get(file);
     if (pages && (!page || (frame.pageId !== undefined && frame.pageId !== page.id))) return null;
     frames.push({
       file,
@@ -403,6 +413,19 @@ function cancelPendingFlush(): void {
   }
 }
 
+/** Characters the page catalog alone serializes to, counted without allocating
+ * so a directory too large to mirror is never validated on the idle path. */
+function pageCatalogChars(value: DesignWorkspaceSnapshotWire): number {
+  let chars = 0;
+  if (!Array.isArray(value.pages)) return chars;
+  for (const page of value.pages) {
+    for (const list of [page?.frameFiles, page?.frameIds])
+      if (Array.isArray(list))
+        for (const entry of list) chars += typeof entry === "string" ? entry.length + 3 : 0;
+  }
+  return chars;
+}
+
 function flushPendingSnapshots(): void {
   cancelPendingFlush();
   pendingFlush = null;
@@ -411,6 +434,10 @@ function flushPendingSnapshots(): void {
   for (const [workspaceId, value] of pendingSnapshots) {
     pendingSnapshots.delete(workspaceId);
     if (!WORKSPACE_ID_PATTERN.test(workspaceId)) continue;
+    if (pageCatalogChars(value) > MAX_STORED_ENTRY_CHARS) {
+      delete entries[workspaceId];
+      continue;
+    }
     const snapshot = safeDesignWorkspaceBootSnapshot(value);
     if (!snapshot) continue;
     if (JSON.stringify(snapshot).length > MAX_STORED_ENTRY_CHARS) {
