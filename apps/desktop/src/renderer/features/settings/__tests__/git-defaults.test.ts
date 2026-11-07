@@ -179,10 +179,10 @@ describe("the neutral badge chip", () => {
       .split(/\s+/)
       .filter((c) => /^font-(normal|medium|semibold|bold)$/.test(c));
 
-  it("is the one badge size: 12px medium, merged or raw", () => {
+  it("is the one badge size: 13px medium, merged or raw", () => {
     // Variants carry colour only, so the raw cva call is unambiguous too.
     for (const cls of [cn(badgeVariants({ variant: "neutral" })), badgeVariants({ variant: "neutral" })]) {
-      expect(sizes(cls)).toEqual(["text-3xxs"]);
+      expect(sizes(cls)).toEqual(["text-xs"]);
       expect(weights(cls)).toEqual(["font-medium"]);
     }
   });

@@ -153,8 +153,7 @@ export const EventRow = memo(function EventRow({
       onPointerEnter={warmFile}
       onFocus={warmFile}
       onClick={() => { if (canOpen && path) openFilePill(ctx.attachmentCwd, path, destination); }}
-      // 13px like the command chip; the inline Pill elsewhere stays 12px.
-      className={cn("text-xs", sTone === "fail" && "border-red-primary/25 bg-red-bg text-red-primary hover:bg-red-bg [&_*]:text-red-primary!")}
+      className={cn(sTone === "fail" && "border-red-primary/25 bg-red-bg text-red-primary hover:bg-red-bg [&_*]:text-red-primary!")}
     />
   ) : null;
   if (filePill && hoverPreview) {

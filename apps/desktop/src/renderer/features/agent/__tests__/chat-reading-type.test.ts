@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { cn } from "@/renderer/shared/ui/cn";
+import { PILL_METRICS, PILL_SHELL } from "@/renderer/features/agent/composer-editor/pill-views";
 
 // The chat's reading text is 15px on 22px lines (`text-reading`), one step
 // above the 14px chrome: agent output, sent messages, the composer and the
@@ -120,7 +121,17 @@ describe("chat reading type", () => {
   it("sets the chip beside a tool's name at 13px, still 20px tall", () => {
     const row = source(`${R}/features/agent/renderers/event-row.tsx`);
     expect(row).toContain('"max-w-[440px] min-w-0 truncate rounded-sm px-1.5 py-0.5 text-xs leading-4 font-medium"');
-    expect(row).toMatch(/<FileTag[\s\S]*?className=\{cn\("text-xs",/);
+    // The file tag is the inline Pill, already 13px; it sets no size of its own.
+    const fileTag = /<FileTag[\s\S]*?\/>/.exec(row)?.[0] ?? "";
+    expect(fileTag).toContain("className=");
+    expect(fileTag).not.toMatch(/\btext-(?:xxs|2xxs|3xxs|xs|sm)\b/);
+  });
+
+  it("draws every pill in the composer and sent messages at 13/16 in its 20px box", () => {
+    const metrics = PILL_METRICS.split(/\s+/);
+    for (const cls of ["h-5", "text-xs", "leading-4"]) expect(metrics, cls).toContain(cls);
+    expect(metrics).not.toContain("text-3xxs");
+    expect(PILL_SHELL.startsWith(PILL_METRICS)).toBe(true);
   });
 
   it("merges the reading size as a font size, not a color", () => {

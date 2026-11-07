@@ -13,7 +13,7 @@ import { FileTypeIcon } from "./file-type-icon";
 import { Tooltip } from "@/renderer/shared/ui/primitives";
 
 // Unified pill recipe: the neutral inline Pill (20px, 4px corners, bg2 +
-// border2, 12/16, 4px gap, 6px padding) — the SAME chrome as the tool-row
+// border2, 13/16, 4px gap, 6px padding) — the SAME chrome as the tool-row
 // FileTag and the turn-footer file pills, so composer pills, sent-bubble
 // pills, and transcript pills all read as one family.
 // FLAG: the 3px subtraction is the paired 1.5px inline-alignment margins used
@@ -21,7 +21,7 @@ import { Tooltip } from "@/renderer/shared/ui/primitives";
 // must cap its complete margin box at the composer/bubble width; the truncating
 // label then absorbs the squeeze while attachment remove buttons remain usable.
 export const PILL_METRICS =
-  "inline-flex h-5 max-w-[calc(100%-3px)] mx-[1.5px] items-center rounded-sm align-middle text-3xxs leading-4 select-none";
+  "inline-flex h-5 max-w-[calc(100%-3px)] mx-[1.5px] items-center rounded-sm align-middle text-xs leading-4 select-none";
 export const PILL_SHELL = `${PILL_METRICS} gap-1 border border-border2 bg-bg2 text-fg1`;
 export const COMPOSER_PILL_SPACING = "gap-1 px-1.5";
 /** An interactive pill's hover, on the whole pill (its inner buttons paint no

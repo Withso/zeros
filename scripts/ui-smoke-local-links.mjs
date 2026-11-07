@@ -45,7 +45,7 @@ export async function runLocalLinksSmoke({ page, harnessBase, check }) {
       border: "1px",
       padding: "6px",
       radius: "4px",
-      font: "12px",
+      font: "13px",
       weight: "400",
       gap: "4px",
       icon: 13,

@@ -1075,3 +1075,15 @@ Each landed step appends one line: date, workstream, what landed, evidence.
   `markdown-preview.test.ts` cases failed red first; the file-pill smoke
   opens a sibling and a parent-folder link by click and Enter for Local,
   organization, cloud and a nested folder, and a missing file opens no tab.
+- 2026-11-07 · 3, 5 · Badges and every pill are 13px on 16px lines in their
+  20px box (were 12/16): the `Badge` primitive, the inline `Pill` and
+  `PILL_METRICS`, which the composer's mention, skill and attachment pills,
+  sent messages' inline pills and the chat and workspace link pills share.
+  The control pills, the context files chip and the tool targets already
+  were 13px; the tool row's file tag drops its own `text-xs`, since the
+  inline Pill now carries it. Icons stay 12px, a mono badge 11px, and the
+  PR chip, which the Pills board files under "Not pills", keeps 12px. The
+  canvas kits draw badges and inline pills at 13px and the Badge, Pills and
+  Type boards say so (canvas version 397). Evidence: `pill.test.ts`,
+  `git-defaults.test.ts` and `chat-reading-type.test.ts` failed red first;
+  the local-links smoke measures the link pill at 13px.

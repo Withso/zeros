@@ -204,7 +204,10 @@ exported page by page to [design-implementation/](design-implementation/README.m
     lines. Everything smaller in the chat is 13px: the chip beside a tool's
     name (its command or its file, on a 20px chip), code blocks, inline code,
     tables, every tool detail including the markdown inside one, and the
-    chrome's headers, popover titles and menu rows. The plan keeps the reading
+    chrome's headers, popover titles and menu rows. Badges and every pill
+    are 13px on 16px lines in their 20px box, everywhere: `Badge`, the
+    inline `Pill` and the composer's and sent messages' pills; a mono badge
+    keeps 11px. The plan keeps the reading
     size inside its detail (`zeros-agent-md--document`), review markdown
     outside the chat keeps 14px (`zeros-agent-md--panel`), labels and
     metadata stay 12px, keys 11px, and dialog titles keep their own 15px
@@ -603,7 +606,7 @@ state, `aria-*`, `data-*` hooks) at the caller.
 | A group of tools | `Toolbar` (+ `ToolbarSeparator`, `ToolbarText`) | One 36px bar of 28px tools: `bg2`, `border2`, 10px corners, `elevation="floating"` (dropdown shadow) or `"docked"`, `orientation`. One Tab stop: arrow keys, Home and End move between enabled tools. |
 | An action with related choices | `SplitButton` / `splitButtonClasses` | Two bordered halves, each with Button's focus ring; `variant="primary" \| "secondary"`, `size`, `loading` (the menu waits). |
 | A form field | `Field` around `Input`, `Textarea` or a Select trigger | One label (13/18 medium), one hint (12/16 `fg3`) that an error replaces (12/16 `red-primary`); wires `id`, `aria-describedby` and `aria-invalid`. `Input` has `size="compact"`, `appearance="inline"` (rename) and `mono`. |
-| A reference chip or a status tag | `Pill` · `Badge` | `Pill` is an interactive reference: `size="inline"` 20px or `"control"` 24px, `tone` neutral / failed / mode / gone / invalid. `Badge` is inert state: one 20px size, tinted `neutral` / `outline` / `success` / `failure` / `warning` / `info` / `merged`. |
+| A reference chip or a status tag | `Pill` · `Badge` | `Pill` is an interactive reference: `size="inline"` 20px at 13/16 or `"control"` 24px at 13/18, `tone` neutral / failed / mode / gone / invalid. `Badge` is inert state: one 20px size at 13/16 medium, tinted `neutral` / `outline` / `success` / `failure` / `warning` / `info` / `merged`. |
 | A shortcut | `Kbd` · `KbdKeys` | An 18px `border2` chip on `bg2`; `KbdKeys keys="⌘⇧T"` draws one chip per key. Menus, tooltips and the command palette all use it. |
 | Window chrome or a panel heading | `PanelHeader` (+ `PanelHeaderTitle`, `PanelHeaderActions`) | Required `size="window"` (40px, gap-1, px-2, `bg-bg1`) or `size="panel"` (36px, gap-2, px-3); border1 bottom divider unless `divider={false}` (the workspace header row); a 13 medium `fg1` title that truncates; actions 2px apart. |
 | A compact tool disclosure or hover trigger | `ListRow` | 28px button row on `bg1-hover` with the keyboard ring; expanded adds no fill. The caller owns `aria-expanded`, `aria-controls`, labels, state, and events. |

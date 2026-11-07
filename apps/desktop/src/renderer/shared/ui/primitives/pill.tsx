@@ -3,7 +3,7 @@ import { cva, type VariantProps } from "class-variance-authority";
 
 import { cn } from "@/renderer/shared/ui/cn";
 
-// Two sizes: inline (20px, 12/16, 4px corners) for text and rows, control
+// Two sizes: inline (20px, 13/16, 4px corners) for text and rows, control
 // (24px, 13/18, 6px corners) around the composer. One neutral look for every
 // reference — bg2 + border2, hover border3 + bg2-highlight, on the selected
 // fill with the resting edge unchanged — and tints only where they mean
@@ -13,7 +13,7 @@ const pillVariants = cva(
   {
     variants: {
       size: {
-        inline: "h-5 gap-1 rounded-sm px-1.5 text-3xxs leading-4 [&_svg]:size-3",
+        inline: "h-5 gap-1 rounded-sm px-1.5 text-xs leading-4 [&_svg]:size-3",
         control: "h-6 gap-1 rounded-md px-2 text-xs leading-4.5 [&_svg]:size-3.5",
       },
       tone: {
