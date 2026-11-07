@@ -7,6 +7,7 @@
 // persists fixture mutations while rendering, selection, and editing use the
 // production components.
 
+import { DESIGN_MAX_FRAMES_PER_PAGE } from "@zeros/protocol/design-pages";
 import "../../../../../styles/zeros-tokens.css";
 import "../../../../../styles/semantic-tokens.css";
 import "../../../../../styles/globals.css";
@@ -2500,7 +2501,7 @@ async function main() {
           refresh: () => designWorkspaceSnapshotCache.invalidate(workspaceId),
         } : undefined,
         frames(frames: DesignWorkspaceSnapshotWire["frames"]) {
-          if (frames.length > 256) throw new Error("Performance fixtures keep the supported 256-frame bound.");
+          if (frames.length > DESIGN_MAX_FRAMES_PER_PAGE) throw new Error("Performance fixtures keep one page within its frame limit.");
           for (const frame of frames) {
             if (frame.file !== "home.html" && frame.file !== "pricing.html")
               performanceSources.set(frame.file, currentHomeSource);
