@@ -1297,13 +1297,18 @@ export async function prepareRegisteredDesignFrameParts(workspacePath: string, f
   });
 }
 
+/** The canvas a worker read for the revision the engine checked. */
+let workerCanvas: { root: string; revision: string; canvas: CanvasDocument } | null = null;
+
 /** A worker's share of a preparation batch: identities with the durable
  * reads behind them, for the engine to remember. It only reads: the engine
- * recovered, checked the catalog and holds the document lock meanwhile. */
+ * recovered, checked the catalog and holds the document lock meanwhile, and
+ * its own check after the batch refuses it if the catalog moved. */
 export async function prepareDesignFrameIdentitiesInWorker(workspacePath: string, catalogRevision: string, files: readonly string[]) {
-  const before = inspectDesignCatalog(workspacePath, designDirectoryNameFor(workspacePath), { revision: false });
-  if (designCatalogRevision(before) !== catalogRevision) throw new DesignCatalogError("stale");
-  const { canvas } = await readSharedCanvasContext(workspacePath);
+  const root = path.resolve(workspacePath);
+  if (workerCanvas?.root !== root || workerCanvas.revision !== catalogRevision)
+    workerCanvas = { root, revision: catalogRevision, canvas: (await readSharedCanvasContext(workspacePath)).canvas };
+  const { canvas } = workerCanvas;
   const results: DesignWorkerFrameIdentity[] = [];
   for (const file of files) {
     try {
