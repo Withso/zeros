@@ -27,7 +27,7 @@ afterEach(async () => { vi.restoreAllMocks(); forgetDesignDirectoryName(root); a
 it("opens 256 descriptors without reading frame HTML, then prepares only the requested files", async () => {
   const reads = vi.spyOn(safeFiles, "readSafeRegularFile");
   const navigation = await readDesignNavigationSnapshot(root);
-  expect(navigation.snapshot.pages[0]!.frameFiles).toHaveLength(256);
+  expect(navigation.snapshot.pages![0]!.frameFiles).toHaveLength(256);
   expect(navigation.snapshot.frames).toEqual([]);
   expect(navigation.snapshot.lint.checkedFiles).toEqual([]);
   expect(reads.mock.calls.filter(([, file]) => file.endsWith(".html"))).toHaveLength(0);
@@ -42,7 +42,7 @@ it("acknowledges an edit among 256 frames by preparing only affected source, wit
   const snapshot = await readDesignMutationSnapshot(root, ["page-1/f0.html", "removed.html"]);
   expect(snapshot.frames.map(frame => frame.file)).toEqual(["page-1/f0.html"]);
   expect(snapshot.mutationCatalog?.frames).toHaveLength(256);
-  expect(snapshot.pages[0]!.frameFiles).toHaveLength(256);
+  expect(snapshot.pages![0]!.frameFiles).toHaveLength(256);
   expect(new Set(reads.mock.calls.filter(([, file]) => file.endsWith(".html")).map(([, file]) => path.basename(file))))
     .toEqual(new Set(["f0.html"]));
   expect(snapshot.frames[0]!.sourceVersion).toBe((await readDesignFrame(root, "page-1/f0.html")).sourceVersion);

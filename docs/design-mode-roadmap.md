@@ -2180,6 +2180,28 @@ late reads. Legacy layouts, larger affected sets and catalog races retain the
 aggregate fallback. Personal and organization-owned Local use the same path;
 cloud Design remains unavailable.
 
+Engines that also negotiate `design.page-scoped-mutations.v1` keep those
+acknowledgements proportional to the edited page. A navigation read requested
+with `pageHashes: true` returns a 128-bit content hash per page. Scoped writes
+send the hashes the renderer's confirmed projection holds as `knownPages`, and
+the reply replaces `pages` and `mutationCatalog` with `pageCatalog`: every
+page's summary and hash, plus descriptors only for pages whose hash some waiting
+client lacks, so a concurrent native edit on another page is resent too. The
+renderer reuses its descriptions for every page it was not resent only while
+that page's hash still matches. A page that no longer matches stays visible as
+last confirmed, drops out of the held hashes, and the cache revalidates. On a
+26-page × 1,000-frame directory an acknowledgement is about 42 KB instead of
+9 MB. Engines without the capability, missing or malformed hashes and older
+renderers keep the complete reply.
+
+Creates that arrive while an earlier create waits for the document lock share
+its turn and one canvas write, each with its own page, room and validation
+result. Acknowledgements waiting for the lock share one read admitted after
+every joiner's write. A large canvas is validated once per distinct content;
+every read still receives fresh objects. Agent tool calls carry their own write
+authority and never join a batch. On that directory, eight concurrent creates on
+eight pages acknowledge within about 1.7 s in the Linux sandbox (15 s before).
+
 A single application-wide incoming generation may overlap steady admission;
 both generations' source costs and vector bytes remain charged until removal.
 The outgoing surface stays visible until its replacement image loads; HTML

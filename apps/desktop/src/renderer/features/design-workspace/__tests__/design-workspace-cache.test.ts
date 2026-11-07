@@ -109,6 +109,7 @@ import {
   createDesignPageCached,
   renameDesignPageCached,
   deleteDesignPageCached,
+  primeDesignWorkspaceSnapshot,
 } from "../state/design-workspace-cache";
 import {
   designWorkspaceSnapshotMatchesPath,
@@ -2715,4 +2716,32 @@ describe("design workspace cache", () => {
     expect(safeDesignWorkspaceBootSnapshot({ ...next, directoryId: "bad\0id" })).toBeNull();
   });
 
+});
+
+describe("page-scoped write acknowledgements", () => {
+  it("keeps confirmed pages it was not resent and revalidates one the engine no longer matches", () => {
+    resetDesignWorkspaceCacheForTests();
+    const workspaceId = "ws_page_scoped_ack";
+    const description = (file: string, frameId: string, pageId: string) => ({ preparation: "unprepared" as const, file, frameId, pageId,
+      title: frameId, kind: "frame" as const, x: 0, y: 0, width: 100, height: 100, z: 0 });
+    const base = { ...snapshot([]), directoryId: "design_pages", frames: [] };
+    const previous: DesignWorkspaceSnapshotWire = { ...base, preparation: { revision: "a".repeat(64), epoch: 1, current: [], errors: {},
+      descriptions: [description("one/a.html", "a", "one")], pageHashes: { one: "1".repeat(32), two: "2".repeat(32) } } };
+    designWorkspaceSnapshotCache.setData(workspaceId, previous);
+    const ack = (oneHash: string): DesignWorkspaceSnapshotWire => ({ ...base, pageCatalog: { revision: "b".repeat(64), pages: [
+      { id: "one", title: "One", folder: "one", count: 1, hash: oneHash },
+      { id: "two", title: "Two", folder: "two", count: 1, hash: "3".repeat(32) }],
+      frames: [{ id: "b", pageId: "two", source: "two/b.html", title: "b", kind: "html", x: 0, y: 0, width: 100, height: 100, z: 0,
+        order: 0, preparation: "unprepared" }] } });
+    const read = () => designWorkspaceSnapshotCache.peekSnapshot(workspaceId);
+    const version = read().invalidationVersion;
+    primeDesignWorkspaceSnapshot(workspaceId, ack("1".repeat(32)));
+    expect(read().invalidationVersion).toBe(version);
+    expect(read().data?.preparation?.pageHashes).toEqual({ one: "1".repeat(32), two: "3".repeat(32) });
+    expect(read().data?.pages?.map((page) => page.frameFiles)).toEqual([["one/a.html"], ["two/b.html"]]);
+    primeDesignWorkspaceSnapshot(workspaceId, ack("9".repeat(32)));
+    expect(read().invalidationVersion).toBe(version + 1);
+    expect(read().data?.preparation?.stalePages).toEqual(["one"]);
+    expect(read().data?.pages?.[0]?.frameFiles).toEqual(["one/a.html"]);
+  });
 });

@@ -73,3 +73,21 @@ it("refuses incoherent page membership even when a peer repeats the same revisio
   f.bootstrap.snapshot.pages![0]!.frameFiles = ["page/other.html"];
   await expect(readDesignNavigation("local")).rejects.toThrow(/membership/);
 });
+
+it("requests and keeps page hashes only from engines that negotiate page-scoped acknowledgements", async () => {
+  const f = fixture();
+  const hashes = { page: "d".repeat(32) };
+  Object.assign(f.bootstrap, { pageHashes: hashes });
+  expect((await readDesignNavigation("local"))?.preparation?.pageHashes).toEqual(hashes);
+  expect((f.request.mock.calls[0] as unknown as [{ params: Record<string, unknown> }])[0].params.pageHashes).toBe(true);
+  for (const unusable of [{ other: "d".repeat(32) }, { page: "short" }, {}]) {
+    Object.assign(f.bootstrap, { pageHashes: unusable });
+    expect((await readDesignNavigation("local"))?.preparation).not.toHaveProperty("pageHashes");
+  }
+  f.request.mockClear();
+  (active.bridge as unknown as { supportsEngineCapability: (capability: string) => boolean }).supportsEngineCapability =
+    (capability) => capability !== "design.page-scoped-mutations.v1";
+  Object.assign(f.bootstrap, { pageHashes: hashes });
+  expect((await readDesignNavigation("local"))?.preparation).not.toHaveProperty("pageHashes");
+  expect((f.request.mock.calls[0] as unknown as [{ params: Record<string, unknown> }])[0].params).not.toHaveProperty("pageHashes");
+});

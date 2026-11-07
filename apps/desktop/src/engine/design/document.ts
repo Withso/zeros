@@ -1,6 +1,7 @@
 import { readDirectoryDesignManifest } from "./metadata";
-import { inspectDesignCatalog, readDesignCatalogMetadataWithContext } from "./catalog-storage";
-import { DesignCatalogError } from "./catalog";
+import { inspectDesignCatalog, readDesignCatalogMetadataWithContext, sameDesignCatalogInspection } from "./catalog-storage";
+import type { DesignPageHashes } from "@zeros/protocol/design-catalog";
+import { DesignCatalogError, designCatalogPageHashes } from "./catalog";
 import { escapeText, escapeAttribute } from "./source";
 import {
   listDesignAssets,
@@ -1042,19 +1043,23 @@ async function mapDesignFramesBounded<T>(
 
 /** Metadata/controls for opening a registered Local canvas. Recovery keeps
  * the same transaction boundary as aggregate reads; no HTML is scanned. */
-export async function readDesignNavigationSnapshot(workspacePath: string, affectedFiles?: readonly string[]): Promise<{
-  snapshot: DesignWorkspaceSnapshot; catalogRevision: string; directoryId: string;
+export async function readDesignNavigationSnapshot(workspacePath: string, affectedFiles?: readonly string[],
+  options: { pageHashes?: boolean } = {}): Promise<{
+  snapshot: DesignWorkspaceSnapshot; catalogRevision: string; directoryId: string; pageHashes?: DesignPageHashes;
 }> {
-  return withDocumentWrite(workspacePath, () => readDesignNavigationSnapshotUnlocked(workspacePath, affectedFiles));
+  return withDocumentWrite(workspacePath, () => readDesignNavigationSnapshotUnlocked(workspacePath, affectedFiles, options));
 }
 
-async function readDesignNavigationSnapshotUnlocked(workspacePath: string, affectedFiles?: readonly string[]): Promise<{
-  snapshot: DesignWorkspaceSnapshot; catalogRevision: string; directoryId: string;
+/** `known` holds each waiting client's page hashes: their acknowledgement
+ * then names every page and resends only pages one of them lacks. */
+async function readDesignNavigationSnapshotUnlocked(workspacePath: string, affectedFiles?: readonly string[],
+  options: { pageHashes?: boolean; known?: readonly DesignPageHashes[] } = {}): Promise<{
+  snapshot: DesignWorkspaceSnapshot; catalogRevision: string; directoryId: string; pageHashes?: DesignPageHashes;
 }> {
   {
     await recoverPendingDesignTransactionUnlocked(workspacePath);
     const directory = designDirectoryNameFor(workspacePath);
-    const { metadata, context } = await readDesignCatalogMetadataWithContext(workspacePath, directory);
+    const { metadata, context, inspection } = await readDesignCatalogMetadataWithContext(workspacePath, directory);
     const [tokens, assets, styles, frames] = await Promise.all([
       readDesignTokensDocument(workspacePath, context, { includeUsage: false }),
       listDesignAssets(workspacePath),
@@ -1062,13 +1067,22 @@ async function readDesignNavigationSnapshotUnlocked(workspacePath: string, affec
       Promise.all(metadata.frames.filter(frame => affectedFiles?.includes(frame.source)).map(frame =>
         prepareRegisteredDesignFrame(workspacePath, frame.source, context.canvas))),
     ]);
-    if (inspectDesignCatalog(workspacePath, directory).revision !== metadata.revision) throw new DesignCatalogError("stale");
-    return { catalogRevision: metadata.revision, directoryId: metadata.directoryId, snapshot: {
-      pages: metadata.pages.map((page) => ({ id: page.id, title: page.title, folder: page.folder,
+    if (!sameDesignCatalogInspection(inspection, inspectDesignCatalog(workspacePath, directory, { revision: false })))
+      throw new DesignCatalogError("stale");
+    const known = affectedFiles ? options.known : undefined;
+    const hashes = options.pageHashes || known ? designCatalogPageHashes(metadata) : undefined;
+    const changed = known && new Set(metadata.pages.filter((page) =>
+      known.some((pages) => pages[page.id] !== hashes!.get(page.id))).map((page) => page.id));
+    return { catalogRevision: metadata.revision, directoryId: metadata.directoryId,
+      ...(options.pageHashes ? { pageHashes: Object.fromEntries(hashes!) } : {}), snapshot: {
+      ...(changed ? {} : { pages: metadata.pages.map((page) => ({ id: page.id, title: page.title, folder: page.folder,
         frameFiles: metadata.frames.filter((frame) => frame.pageId === page.id).map((frame) => frame.source),
-        frameIds: metadata.frames.filter((frame) => frame.pageId === page.id).map((frame) => frame.id) })),
+        frameIds: metadata.frames.filter((frame) => frame.pageId === page.id).map((frame) => frame.id) })) }),
       frames, tokens: tokens.tokens, tokenSourceVersion: tokens.sourceVersion, assets,
-      ...(affectedFiles ? { mutationCatalog: { revision: metadata.revision, frames: metadata.frames } } : {}),
+      ...(affectedFiles && !changed ? { mutationCatalog: { revision: metadata.revision, frames: metadata.frames } } : {}),
+      ...(changed ? { pageCatalog: { revision: metadata.revision,
+        pages: metadata.pages.map((page) => ({ ...page, hash: hashes!.get(page.id)! })),
+        frames: metadata.frames.filter((frame) => changed.has(frame.pageId)) } } : {}),
       styleSources: styles.sources.map(({ css: _css, fontImports: _fonts, ...status }) => status),
       styleSourceErrors: styles.errors,
       themes: mergeDesignThemes(readDesignThemeCatalog(context.canvas), [...tokens.themes, ...styles.sources.flatMap((source) => source.themes)]),
@@ -1081,7 +1095,9 @@ const MAX_MUTATION_SNAPSHOT_FILES = 16;
 /** Acknowledgements waiting for the lock share one read once it is admitted:
  * each joined only after its own write committed, so the shared read is
  * fresh for every one of them, and it prepares the union of their frames. */
-const mutationSnapshotBatches = new Map<string, { files: Set<string>; sealed: boolean; snapshot: Promise<DesignWorkspaceSnapshot> }>();
+const mutationSnapshotBatches = new Map<string, {
+  files: Set<string>; known?: DesignPageHashes[]; sealed: boolean; snapshot: Promise<DesignWorkspaceSnapshot>;
+}>();
 let mutationSnapshotReads = 0;
 
 export function designMutationSnapshotReadsForTests(): number {
@@ -1091,22 +1107,25 @@ export function designMutationSnapshotReadsForTests(): number {
 /** A write acknowledgement never scans unrelated HTML on registered layouts.
  * Legacy documents retain the aggregate contract; metadata races re-read
  * authoritatively instead of turning an applied write into an apparent failure. */
-export async function readDesignMutationSnapshot(workspacePath: string, files: readonly string[]): Promise<DesignWorkspaceSnapshot> {
+export async function readDesignMutationSnapshot(workspacePath: string, files: readonly string[],
+  knownPages?: DesignPageHashes): Promise<DesignWorkspaceSnapshot> {
   if (files.length > MAX_MUTATION_SNAPSHOT_FILES) return readDesignWorkspaceSnapshot(workspacePath);
-  const key = JSON.stringify([path.resolve(workspacePath), designDirectoryNameFor(workspacePath)]);
+  const key = JSON.stringify([path.resolve(workspacePath), designDirectoryNameFor(workspacePath), knownPages ? "page-scoped" : "complete"]);
   const open = mutationSnapshotBatches.get(key);
   if (open && !open.sealed && new Set([...open.files, ...files]).size <= MAX_MUTATION_SNAPSHOT_FILES) {
     for (const file of files) open.files.add(file);
+    if (knownPages) open.known!.push(knownPages);
     return open.snapshot;
   }
-  const batch = { files: new Set(files), sealed: false, snapshot: Promise.resolve() as unknown as Promise<DesignWorkspaceSnapshot> };
+  const batch = { files: new Set(files), ...(knownPages ? { known: [knownPages] } : {}), sealed: false,
+    snapshot: Promise.resolve() as unknown as Promise<DesignWorkspaceSnapshot> };
   mutationSnapshotBatches.set(key, batch);
   batch.snapshot = (async () => {
     try {
       return await withDocumentWrite(workspacePath, async () => {
         batch.sealed = true;
         mutationSnapshotReads++;
-        return (await readDesignNavigationSnapshotUnlocked(workspacePath, [...batch.files])).snapshot;
+        return (await readDesignNavigationSnapshotUnlocked(workspacePath, [...batch.files], { known: batch.known })).snapshot;
       });
     } catch (error) {
       if (!(error instanceof DesignCatalogError)) throw error;
