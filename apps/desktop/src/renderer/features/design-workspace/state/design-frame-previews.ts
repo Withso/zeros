@@ -104,11 +104,21 @@ export interface DesignPreviewDemandItem {
   readonly near?: boolean;
 }
 
+/** A frame whose generation is not known yet: its identity is still being
+ * prepared, as for every frame right after the app starts. Its newest stored
+ * picture of any generation paints at once as an unchecked cover until the
+ * prepared generation confirms or replaces it. Nothing is rendered for it. */
+export interface DesignPreviewCover {
+  readonly file: string;
+  readonly level: DesignPreviewLevel;
+}
+
 /** One canvas's wanted pictures, most important first. */
 export interface DesignPreviewDemand {
   readonly owner: DesignPreviewOwner;
   readonly theme: string | null;
   readonly items: readonly DesignPreviewDemandItem[];
+  readonly covers?: readonly DesignPreviewCover[];
 }
 
 export function activeDesignPreviewDemand(
@@ -116,11 +126,27 @@ export function activeDesignPreviewDemand(
   owner: DesignPreviewOwner | null,
   theme: string | null,
   items: readonly DesignPreviewDemandItem[],
+  covers: readonly DesignPreviewCover[] = [],
 ): DesignPreviewDemand | null {
   // An HTML-only canvas still opens the small metadata index once so stale
   // disk pictures are pruned. Empty items never read blobs or start captures;
   // a hidden canvas remains inert.
-  return active && owner ? { owner, theme, items } : null;
+  return active && owner ? { owner, theme, items, ...(covers.length ? { covers } : {}) } : null;
+}
+
+/** Cover levels for frames whose generation is not known yet: what their
+ * painted size needs, never above overview (a cover is temporary). */
+export function designPreviewCovers(input: {
+  frames: readonly { file: string; width: number; height: number }[];
+  zoom: number;
+  devicePixelRatio: number;
+}): DesignPreviewCover[] {
+  const zoom = Number.isFinite(input.zoom) && input.zoom > 0 ? input.zoom : 1;
+  const ratio = Number.isFinite(input.devicePixelRatio) && input.devicePixelRatio > 0 ? input.devicePixelRatio : 1;
+  return input.frames.map((frame) => {
+    const level = designPreviewLevelFor(Math.max(frame.width, frame.height) * zoom * ratio);
+    return { file: frame.file, level: level === "detail" ? "overview" : level };
+  });
 }
 
 export interface DesignFramePreviewDependencies {
@@ -310,6 +336,9 @@ function sameDemand(a: DesignPreviewDemand | null, b: DesignPreviewDemand | null
   if (a === b) return true;
   if (!a || !b || !sameOwner(a.owner, b.owner) || a.theme !== b.theme || a.items.length !== b.items.length)
     return false;
+  const covers = a.covers ?? [], others = b.covers ?? [];
+  if (covers.length !== others.length || covers.some((cover, index) =>
+    cover.file !== others[index]!.file || cover.level !== others[index]!.level)) return false;
   return a.items.every((item, index) => {
     const other = b.items[index]!;
     return item.file === other.file && item.sourceVersion === other.sourceVersion &&
@@ -688,6 +717,17 @@ export class DesignFramePreviews {
           stored(item.level) ??
           (shown?.current ? undefined : alternatives.map(stored).find((key) => key !== undefined)) ??
           (shown ? undefined : pictureLevels(item.level).map((level) => levels?.get(level)).find((key) => key !== undefined));
+        if (key && !this.pictures.has(key) && !this.reading.has(key) && !keys.includes(key)) keys.push(key);
+      }
+      // A frame without a known generation reads its newest stored picture,
+      // preferring its own level, then sharper, then smaller; a detail
+      // picture would spend the display budget on a temporary cover.
+      for (const cover of demand.covers ?? []) {
+        const frameKey = designPreviewFrameKey(demand.owner, cover.file, demand.theme);
+        const levels = this.diskNewest.get(frameKey);
+        if (!levels || this.newest.has(frameKey)) continue;
+        const key = pictureLevels(cover.level).filter((level) => level !== "detail" || cover.level === "detail")
+          .map((level) => levels.get(level)).find((key) => key !== undefined);
         if (key && !this.pictures.has(key) && !this.reading.has(key) && !keys.includes(key)) keys.push(key);
       }
       for (let start = 0; start < keys.length; start += READ_BATCH) this.read(keys.slice(start, start + READ_BATCH));
