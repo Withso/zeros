@@ -1059,9 +1059,9 @@ Each landed step appends one line: date, workstream, what landed, evidence.
   (`renderMarkdownSegments(text, { fileReferences: false })`) because nothing
   in the preview opens a file chip. The Files tab's Markdown preview board
   draws it with the chat kit (canvas version 395). Evidence:
-  `markdown-preview.test.ts` failed red first; the diff and files smoke
-  measures 15px prose and one code card in the preview, and the
-  text-selection smoke still selects its text.
+  `markdown-preview.test.ts` failed red first; the file-pill smoke
+  measures 15px prose, one code card and a 15px sans file link in the real
+  viewer, and the text-selection smoke still selects its text.
 - 2026-11-07 · 5 · Links to files in the Markdown preview open in the Files
   tab. `markdownLinkTarget` (`shell/workbench/tabs/markdown-links.ts`)
   resolves a link as GitHub does, from the previewed file's folder or from the

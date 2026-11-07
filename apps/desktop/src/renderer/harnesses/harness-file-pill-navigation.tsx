@@ -49,7 +49,7 @@ setWorkspaceRowsForTesting(workspace.repoSlug, [workspace]);
 // A previewed document links a sibling, a parent-folder file, a file that does
 // not read and an external page.
 const markdownSource =
-  "# Guide\n\nRead [the guide](guide.md), [the rules](../RULES.md), [a missing page](missing.md) and [the site](https://example.com).\n";
+  "# Guide\n\nRead [the guide](guide.md), [the rules](../RULES.md), [a missing page](missing.md) and [the site](https://example.com).\n\n```ts\nconst ready = true;\n```\n";
 let held = params.has("hold");
 const fail = params.has("fail");
 let gitFailures = 0;

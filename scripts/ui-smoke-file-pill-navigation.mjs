@@ -150,6 +150,25 @@ export async function runFilePillNavigationSmoke({ page, check }) {
       await expect(
         source.getByRole("link", { name: "the site" }),
       ).toHaveAttribute("href", "https://example.com");
+      // The preview reads like the chat: 15px prose, fences as the chat's
+      // code cards, and a file link drawn as the chat's 15px sans reference.
+      const look = await source.evaluate((element) => {
+        const chip = element.querySelector(".zeros-md-filepath");
+        return {
+          prose: getComputedStyle(element.querySelector(".zeros-md-prose p")).fontSize,
+          codeCards: element.querySelectorAll(".zeros-md-codeblock").length,
+          plainPre: element.querySelectorAll(".zeros-md-prose pre").length,
+          link: getComputedStyle(chip).fontSize,
+          mono: getComputedStyle(chip).fontFamily.toLowerCase().includes("mono"),
+        };
+      });
+      expect(look).toEqual({
+        prose: "15px",
+        codeCards: 1,
+        plainPre: 0,
+        link: "15px",
+        mono: false,
+      });
       await link("a missing page").click();
       await link("the guide").click();
       await expect(opened).toHaveText("docs/guide.md");

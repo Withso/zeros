@@ -1916,43 +1916,10 @@ export async function runDiffFilesSmoke({
   );
 
   check(
-    "Markdown Preview keeps unbroken text and code inside its column",
+    "Markdown Preview wraps unbroken text and code",
     await page
       .getByTestId("markdown-preview-host")
       .evaluate((el) => el.scrollWidth <= el.clientWidth + 1),
-  );
-  const markdownPreview = await page
-    .getByTestId("markdown-preview-host")
-    .evaluate((el) => ({
-      prose: getComputedStyle(el.querySelector(".zeros-md-prose p")).fontSize,
-      codeCard: el.querySelectorAll(".zeros-md-codeblock").length,
-      plainPre: el.querySelectorAll(".zeros-md-prose pre").length,
-    }));
-  check(
-    "Markdown Preview reads like the chat: 15px prose, fences as code cards",
-    markdownPreview.prose === "15px" &&
-      markdownPreview.codeCard === 1 &&
-      markdownPreview.plainPre === 0,
-    JSON.stringify(markdownPreview),
-  );
-  const markdownLink = page
-    .getByTestId("markdown-preview-host")
-    .locator(".zeros-md-filepath");
-  const markdownLinkLook = await markdownLink.evaluate((el) => ({
-    size: getComputedStyle(el).fontSize,
-    mono: getComputedStyle(el).fontFamily.toLowerCase().includes("mono"),
-    path: el.getAttribute("data-file-path"),
-  }));
-  await markdownLink.click();
-  check(
-    "Markdown Preview shows a file link as the chat's file reference and opens it",
-    markdownLinkLook.size === "15px" &&
-      !markdownLinkLook.mono &&
-      markdownLinkLook.path === "docs/guide.md" &&
-      (await page
-        .getByTestId("markdown-preview-host")
-        .getAttribute("data-opened")) === "docs/guide.md",
-    JSON.stringify(markdownLinkLook),
   );
 
   // Modern manifests must use the same dedicated section as legacy documents.
