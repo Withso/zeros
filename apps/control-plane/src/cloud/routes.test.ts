@@ -390,3 +390,36 @@ describe("cloud v2 archive routes", () => {
     expect(store.requestLifecycle).not.toHaveBeenCalled();
   });
 });
+
+describe("cloud v2 focused-window activity", () => {
+  const id = "44444444-4444-4444-8444-444444444444";
+  function setup(state: string, refused = false) {
+    const store = {
+      get: vi.fn(async () => { if (refused) throw new HttpError(404, "not_found", "Cloud workspace not found"); return { id, state }; }),
+      markActive: vi.fn(async () => {}),
+    };
+    const app = new Hono();
+    app.use("*", async (c, next) => { c.set("user", { id: member } as never); await next(); });
+    app.onError((error, c) => error instanceof HttpError
+      ? c.json({ error: { code: error.code } }, error.status) : c.json({ error: { code: "internal" } }, 500));
+    app.route("/", createCloudV2Routes({ store, bridgeBaseUrl: "wss://dev.example.test" } as unknown as CloudV2RouteDeps));
+    return { app, store };
+  }
+  const ping = (app: Hono) => app.request(`/v1/cloud-v2/workspaces/${id}/activity`, { method: "POST" });
+
+  it("keeps a running workspace awake for the creator's focused window without waking a stopped one", async () => {
+    const running = setup("running");
+    expect(await (await ping(running.app)).json()).toEqual({ running: true });
+    expect(running.store.get).toHaveBeenCalledWith(id, member);
+    expect(running.store.markActive).toHaveBeenCalledWith(id);
+    const stopped = setup("stopped");
+    expect(await (await ping(stopped.app)).json()).toEqual({ running: false });
+    expect(stopped.store.markActive).not.toHaveBeenCalled();
+  });
+
+  it("refuses anyone the workspace does not belong to", async () => {
+    const other = setup("running", true);
+    expect((await ping(other.app)).status).toBe(404);
+    expect(other.store.markActive).not.toHaveBeenCalled();
+  });
+});

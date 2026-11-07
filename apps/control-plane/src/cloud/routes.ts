@@ -1,5 +1,6 @@
 // Cloud workspace v2 HTTP API under /v1, so the normal authentication
 // middleware always sets c.get("user"). Workspaces are creator-only.
+import { rateLimit } from "../ratelimit.js";
 import { createHash, randomUUID } from "node:crypto";
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
@@ -45,7 +46,7 @@ const CreateSchema = z.object({
 const ConnectSchema = z.object({ wake: z.boolean().default(true) }).strict();
 
 export type CloudV2RouteDeps = {
-  store: Pick<CloudV2Store, "activeComputer" | "createWorkspace" | "createWorkspaceOnce" | "readCreateReceipt" | "get" | "promptContext" | "list" | "requestLifecycle" | "transition" | "issueToken" | "listChats" | "messageWindow" | "searchMessages"> & Partial<Pick<CloudV2Store, "prompts">>;
+  store: Pick<CloudV2Store, "activeComputer" | "createWorkspace" | "createWorkspaceOnce" | "readCreateReceipt" | "get" | "promptContext" | "list" | "requestLifecycle" | "transition" | "issueToken" | "listChats" | "messageWindow" | "searchMessages" | "markActive"> & Partial<Pick<CloudV2Store, "prompts">>;
   /** Roll out only with a runtime that advertises durable prompt delivery. */
   promptOutbox?: boolean;
   computers: Pick<CloudV2Computers, "requireMember" | "requireAdmin" | "overview" | "enqueue" | "buildConfigured" | "saveRecipe" | "discardRecipe" | "reactivate" | "log" | "logRepositories">;
@@ -246,6 +247,18 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
       protocols: [CLOUD_V2_BRIDGE_PROTOCOL, `ticket.${ticket.token}`],
       expiresAt: ticket.expiresAt.toISOString(),
     });
+  });
+
+  /** A focused app window counts as activity, like the worker's reports.
+   * It keeps a running VM awake and never wakes a stopped one; the store
+   * writes at most every 30 seconds per workspace. */
+  app.post("/v1/cloud-v2/workspaces/:id/activity", rateLimit("cloud-workspace-activity", 12, 60_000), async c => {
+    const id = uuid.safeParse(c.req.param("id"));
+    if (!id.success) throw new HttpError(404, "not_found", "Cloud workspace not found");
+    const workspace = await deps.store.get(id.data, c.get("user").id);
+    const running = workspace.state === "running";
+    if (running) await deps.store.markActive(workspace.id);
+    return c.json({ running });
   });
 
   /** History reads from the control plane's mirror; never wakes the VM. */

@@ -171,6 +171,12 @@ export const CloudV2ConnectSchema = z.object({
 });
 /** Only an explicit open/input starts compute. The additive query keeps the
  * strict connect body readable by older control planes. */
+/** A focused window keeps a running VM awake; it never wakes a stopped one. */
+export async function pingCloudV2WorkspaceActivity(target: CloudWorkspaceTarget): Promise<void> {
+  await cloudAccountRequest(`/v1/cloud-v2/workspaces/${uuid.parse(target.workspaceId)}/activity`, z.object({ running: z.boolean() }),
+    { body: {}, idempotencyKey: crypto.randomUUID() });
+}
+
 export async function connectCloudV2Workspace(target: CloudWorkspaceTarget, options: { wake: boolean; signal?: AbortSignal }) {
   return cloudAccountRequest(`/v1/cloud-v2/workspaces/${uuid.parse(target.workspaceId)}/connect?wakePolicy=explicit`, CloudV2ConnectSchema,
     { body: { wake: options.wake }, idempotencyKey: key() }, { signal: options.signal });
