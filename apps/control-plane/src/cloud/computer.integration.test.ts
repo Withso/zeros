@@ -10,6 +10,7 @@ import { resetMigratedTestDatabase } from "../test-database.js";
 import { grantTestPro } from "../test-pro.js";
 import type { CloudV2Compute } from "./boat.js";
 import { CloudV2ComputerBuilder, CloudV2Computers, cloudV2SnapshotName } from "./computer.js";
+import { HttpError } from "../authz.js";
 import { CloudProviderError } from "./provider-error.js";
 import { CloudV2Store } from "./store.js";
 import type { CloudV2ComputerSourceResolver } from "./computer-provenance.js";
@@ -58,6 +59,19 @@ d("cloud v2 Cloud Computer builds", () => {
       deleteSnapshot: vi.fn(async () => {}),
     };
   }
+
+  it("names a repository the GitHub App cannot reach and how to restore access", async () => {
+    const boat = compute();
+    const builder = new CloudV2ComputerBuilder({ computers, compute: boat, channel: "alpha", runtime,
+      cloneToken: async () => { throw new HttpError(503, "github_repository_unavailable", "GitHub could not verify repository access."); } });
+    const build = await computers.enqueue(org, admin, recipe);
+    await builder.tick();
+    expect((await computers.overview(org)).builds[0]).toMatchObject({ state: "failed", errorCode: "github_repository_unavailable" });
+    const log = await computers.log(org, build.id);
+    expect(log).toContain("[zeros] GitHub did not allow access to withso/zeros.");
+    expect(log).toContain('Use "Grant Zeros access in GitHub" in Integrations, or remove the repository, then build again.');
+    expect(log).not.toContain("[zeros] clone withso/zeros");
+  });
 
   it("lets only owners and admins build, one build at a time", async () => {
     await expect(computers.requireAdmin(org, member)).rejects.toMatchObject({ status: 403 });

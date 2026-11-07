@@ -835,6 +835,9 @@ const REASON_LABEL: Record<CloudV2BuildReason, string> = {
   manual: "", reactivate: " (activating an earlier build)", runtime: " (runtime update)", refresh: " (daily refresh)",
 };
 
+/** GitHub refusals a repository grant can fix; the build log names the repository. */
+const GITHUB_ACCESS_FAILURES = new Set(["github_repository_unavailable", "github_app_access_required", "github_cloud_access_denied"]);
+
 /** Runs queued builds on Boat, a few organizations at a time. */
 export class CloudV2ComputerBuilder {
   private lastRefreshScan = Number.NEGATIVE_INFINITY;
@@ -1071,12 +1074,21 @@ export class CloudV2ComputerBuilder {
       assertHeld();
       if (!await computers.running(job.id)) return [];
       if (!job.createdBy) throw Object.assign(new Error("no creator"), { code: "computer_build_creator_missing" });
-      const [target] = await computers.resolveSourceTargets(job.organizationId, job.createdBy, [sources[index]!]);
+      const creator = job.createdBy;
+      const reach = async <T>(step: () => Promise<T>): Promise<T> => {
+        try { return await step(); }
+        catch (error) {
+          if (GITHUB_ACCESS_FAILURES.has(String((error as { code?: unknown } | null)?.code)))
+            await log(`[zeros] GitHub did not allow access to ${entry.repository}. Use "Grant Zeros access in GitHub" in Integrations, or remove the repository, then build again.\n`);
+          throw error;
+        }
+      };
+      const [target] = await reach(() => computers.resolveSourceTargets(job.organizationId, creator, [sources[index]!]));
       const current = async () => {
         const [latest] = await computers.resolveSourceTargets(job.organizationId, job.createdBy!, [target!]);
         if (latest!.repository.toLowerCase() !== target!.repository.toLowerCase()) throw computerSourceReviewRequired();
       };
-      const token = await this.deps.cloneToken(job.organizationId, job.createdBy, target!);
+      const token = await reach(() => this.deps.cloneToken(job.organizationId, creator, target!));
       await current();
       if (!await computers.running(job.id)) return [];
       const dir = `/home/user/${entry.repository}`;

@@ -48,6 +48,18 @@ function avatarUrlOf(value: unknown): string | undefined {
     return undefined;
   }
 }
+const installationPage = z.object({
+  installations: z.array(z.object({ id: githubId, app_id: githubId, suspended_at: z.string().nullable() })).max(100),
+});
+const installationRepositories = z.object({ repositories: z.array(githubRepositorySchema).max(100) });
+const repositoryOption = (row: z.infer<typeof githubRepositorySchema>) => ({
+  id: String(row.id),
+  owner: row.owner.login,
+  name: row.name,
+  defaultBranch: row.default_branch,
+  private: row.private,
+  canPush: row.permissions?.push === true || row.permissions?.admin === true,
+});
 type AppCredential = Extract<CloudGithubCredential, { method: "github-app" }>;
 export type CloudGithubConnectionHealth =
   | "connected"
@@ -340,25 +352,46 @@ export class CloudGithubConnections {
     if (!Number.isSafeInteger(page) || page < 1 || page > 100)
       throw new HttpError(422, "invalid_input", "Invalid repository page.");
     const access = await this.access(scope);
+    if (access.material.method === "github-app")
+      return { generation: access.generation, ...(await this.installedRepositories(access.api.http, page)) };
     const rows = await access.api.http.json(
       `/user/repos?sort=full_name&per_page=100&page=${page}`,
       z.array(githubRepositorySchema).max(100),
     );
     return {
       generation: access.generation,
-      repositories: rows
-        .filter((row) => !row.archived && !row.disabled)
-        .map((row) => ({
-          id: String(row.id),
-          owner: row.owner.login,
-          name: row.name,
-          defaultBranch: row.default_branch,
-          private: row.private,
-          canPush:
-            row.permissions?.push === true || row.permissions?.admin === true,
-        })),
+      repositories: rows.filter((row) => !row.archived && !row.disabled).map(repositoryOption),
       nextPage: rows.length === 100 && page < 100 ? page + 1 : null,
       complete: rows.length < 100,
+    };
+  }
+  /** An App can clone only what one of its installations grants; /user/repos
+   * also returns every public repository the human can see. */
+  private async installedRepositories(http: CloudGithubHttp, page: number) {
+    const installations: number[] = [];
+    for (let index = 1; index <= 10; index++) {
+      const rows = await http.json(`/user/installations?per_page=100&page=${index}`, installationPage);
+      installations.push(...rows.installations
+        .filter((row) => row.app_id === this.config?.appId && row.suspended_at === null).map((row) => row.id));
+      if (rows.installations.length < 100) break;
+    }
+    const reachable = new Map<number, z.infer<typeof githubRepositorySchema>>();
+    let truncated = false;
+    for (const installation of installations) {
+      for (let index = 1; ; index++) {
+        const rows = await http.json(`/user/installations/${installation}/repositories?per_page=100&page=${index}`, installationRepositories);
+        for (const row of rows.repositories) reachable.set(row.id, row);
+        if (rows.repositories.length < 100) break;
+        if (index === 10) { truncated = true; break; }
+      }
+    }
+    const sorted = [...reachable.values()].filter((row) => !row.archived && !row.disabled)
+      .sort((a, b) => `${a.owner.login}/${a.name}`.toLowerCase().localeCompare(`${b.owner.login}/${b.name}`.toLowerCase()));
+    const more = sorted.length > page * 100;
+    return {
+      repositories: sorted.slice((page - 1) * 100, page * 100).map(repositoryOption),
+      nextPage: more && page < 100 ? page + 1 : null,
+      complete: !more && !truncated,
     };
   }
   private scope(

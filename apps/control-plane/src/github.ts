@@ -996,6 +996,18 @@ export function createGithubPublicRoutes(
   const now = dependencies.now ?? Date.now;
 
   app.get("/v1/github/oauth/callback", async (c) => {
+    const setupAction = c.req.query("setup_action");
+    if (c.req.query("state") === undefined && (setupAction === "install" || setupAction === "update")) {
+      // GitHub returns here after repository access changes on its own page. Without
+      // a Zeros state there is nothing to exchange, and the change already applied.
+      c.header("Content-Security-Policy", `default-src 'none'; style-src ${HOSTED_PAGE_STYLE_SOURCE}; frame-ancestors 'none'`);
+      c.header("Referrer-Policy", "no-referrer");
+      return c.html(hostedPage(
+        "GitHub access updated",
+        `<div class="title">GitHub access updated</div>
+      <div class="sub">Return to Zeros to continue. You can close this tab.</div>`,
+      ));
+    }
     // Hash the validated, trimmed nonce; validation and lookup must use the same bytes.
     const parsedState = NonceSchema.safeParse(c.req.query("state") ?? "");
     if (!parsedState.success) {
