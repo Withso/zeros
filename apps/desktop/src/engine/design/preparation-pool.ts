@@ -47,10 +47,9 @@ function workerUrl(): URL {
 }
 
 function spawn(): PoolWorker {
-  const script = workerUrl();
-  const worker = process.versions.bun
-    ? new Worker(script)
-    : new Worker(new URL("./preparation-worker-node.mjs", import.meta.url), { workerData: { entry: script.href } });
+  // Bun loads the TypeScript worker directly. Node cannot, so a Node engine
+  // falls back to its own thread; tests start a bundled worker instead.
+  const worker = new Worker(workerUrl());
   const entry: PoolWorker & { answered?: boolean } = { worker, pending: new Map() };
   const fail = (error: Error) => {
     pool = pool.filter((candidate) => candidate !== entry);

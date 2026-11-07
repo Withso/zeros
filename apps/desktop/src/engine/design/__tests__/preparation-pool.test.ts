@@ -2,7 +2,8 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { build } from "esbuild";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { DESIGN_DIRECTORY_NAME, initializeDesignDocument, prepareDesignNavigationFrames, readDesignNavigationSnapshot } from "../document";
 import { designIdentityCacheStatsForTests, resetDesignIdentityCacheForTests } from "../identity-cache";
 import {
@@ -13,6 +14,27 @@ import {
 } from "../preparation-pool";
 
 const PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
+
+/** The worker as one ESM file. Node cannot load the engine's TypeScript in
+ * a worker thread (Bun, which ships the engine, can), so tests bundle it. */
+let bundle: { directory: string; url: URL };
+beforeAll(async () => {
+  // Inside the checkout, so the bundle's external packages resolve from its node_modules.
+  const cache = path.resolve(__dirname, "../../../../../../node_modules/.cache");
+  await mkdir(cache, { recursive: true });
+  const directory = await mkdtemp(path.join(cache, "zeros-preparation-worker-"));
+  const outfile = path.join(directory, "preparation-worker.mjs");
+  await build({
+    entryPoints: [path.join(__dirname, "../preparation-worker.ts")],
+    bundle: true, platform: "node", format: "esm", target: "node22", outfile, logLevel: "error",
+    external: ["better-sqlite3", "node-pty", "bun:sqlite", "fsevents", "@tailwindcss/oxide", "lightningcss", "*.node"],
+    banner: { js: 'import { createRequire as __workerRequire } from "node:module"; const require = __workerRequire(import.meta.url);' },
+  });
+  bundle = { directory, url: pathToFileURL(outfile) };
+}, 120_000);
+afterAll(async () => {
+  await rm(bundle.directory, { recursive: true, force: true });
+});
 
 describe("Design preparation workers", () => {
   let root: string;
@@ -60,7 +82,7 @@ describe("Design preparation workers", () => {
     const single = await prepareDesignNavigationFrames(root, navigation.catalogRevision, files);
     expect(single.errors).toEqual([]);
     resetDesignIdentityCacheForTests();
-    configureDesignPreparationWorkersForTests(2);
+    configureDesignPreparationWorkersForTests(2, { workerUrl: bundle.url });
     const before = designPreparationWorkerStatsForTests().frames;
     const pooled = await prepareDesignNavigationFrames(root, navigation.catalogRevision, files);
     expect(designPreparationWorkerStatsForTests().frames - before).toBe(files.length);
@@ -96,7 +118,7 @@ describe("Design preparation workers", () => {
     canvas.fonts = [{ family: "Inter", provider: "google" }];
     await writeFile(canvasFile, JSON.stringify(canvas, null, 2));
     const navigation = await readDesignNavigationSnapshot(root);
-    configureDesignPreparationWorkersForTests(2);
+    configureDesignPreparationWorkersForTests(2, { workerUrl: bundle.url });
     const before = designPreparationWorkerStatsForTests().frames;
     const prepared = await prepareDesignNavigationFrames(root, navigation.catalogRevision, files);
     expect(prepared.frames).toHaveLength(files.length);
