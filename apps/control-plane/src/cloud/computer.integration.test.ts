@@ -499,6 +499,26 @@ d("cloud v2 Cloud Computer builds", () => {
     } finally { await rm(root, { recursive: true, force: true }); }
   }, 60_000);
 
+  it("waits one scan interval after starting before it queues an automatic refresh", async () => {
+    // A rolling deploy briefly runs the old replica beside the new one. A build
+    // the new replica queues at boot may need code the old one lacks; the old
+    // one claimed such a build and failed it on Alpha (Computer v11, 2026-11-07).
+    const boat = compute();
+    await computers.enqueue(org, admin, recipe);
+    await new CloudV2ComputerBuilder({ computers, compute: boat, channel: "alpha", runtime, cloneToken: async () => "ghs_token" }).tick();
+    let now = Date.now();
+    const started = new CloudV2ComputerBuilder({ computers, compute: boat, channel: "alpha", runtime: { sha256: "c".repeat(64), url: runtime.url },
+      cloneToken: async () => "ghs_token", now: () => now });
+    await started.scheduleRefreshes();
+    expect((await computers.overview(org)).builds).toHaveLength(1);
+    now += 10 * 60_000 - 1;
+    await started.scheduleRefreshes();
+    expect((await computers.overview(org)).builds).toHaveLength(1);
+    now += 1;
+    await started.scheduleRefreshes();
+    expect((await computers.overview(org)).builds[0]).toMatchObject({ reason: "runtime", state: "queued", runtimeSha256: "c".repeat(64) });
+  });
+
   it("rebuilds a clean image on runtime changes, verifies the pinned recipe, and backs off failures", async () => {
     const boat = compute();
     await computers.enqueue(org, admin, recipe);
@@ -506,7 +526,7 @@ d("cloud v2 Cloud Computer builds", () => {
     vi.mocked(boat.execLong).mockClear();
     const next = { sha256: "c".repeat(64), url: runtime.url };
     let now = Date.now();
-    const builder = new CloudV2ComputerBuilder({ computers, compute: boat, channel: "alpha", runtime: next, cloneToken: async () => "ghs_token", now: () => now });
+    const builder = new CloudV2ComputerBuilder({ refreshDelayMs: 0, computers, compute: boat, channel: "alpha", runtime: next, cloneToken: async () => "ghs_token", now: () => now });
     vi.mocked(boat.create).mockResolvedValueOnce({ sandboxId: "bx_build2" });
     await builder.scheduleRefreshes(); await builder.tick();
     let overview = await computers.overview(org);
@@ -517,7 +537,7 @@ d("cloud v2 Cloud Computer builds", () => {
 
     // A refresh that keeps failing is retried later, not on every scan.
     const failing = { sha256: "d".repeat(64), url: runtime.url };
-    const retrying = new CloudV2ComputerBuilder({ computers, compute: boat, channel: "alpha", runtime: failing, cloneToken: async () => "ghs_token", now: () => now });
+    const retrying = new CloudV2ComputerBuilder({ refreshDelayMs: 0, computers, compute: boat, channel: "alpha", runtime: failing, cloneToken: async () => "ghs_token", now: () => now });
     vi.mocked(boat.exec).mockResolvedValueOnce({ exitCode: 1, stdout: "", timedOut: false });
     await retrying.scheduleRefreshes(); await retrying.tick();
     overview = await computers.overview(org);
@@ -534,7 +554,7 @@ d("cloud v2 Cloud Computer builds", () => {
     // Builds from before migration 0204 have no recorded runtime.
     await pool.query(`UPDATE cloud_v2_computer_builds SET runtime_sha256 = NULL WHERE org_id = $1`, [org]);
     vi.mocked(boat.execLong).mockClear();
-    const builder = new CloudV2ComputerBuilder({ computers, compute: boat, channel: "alpha", runtime, cloneToken: async () => "ghs_token" });
+    const builder = new CloudV2ComputerBuilder({ refreshDelayMs: 0, computers, compute: boat, channel: "alpha", runtime, cloneToken: async () => "ghs_token" });
     vi.mocked(boat.create).mockResolvedValueOnce({ sandboxId: "bx_build2" });
     await builder.scheduleRefreshes(); await builder.tick();
     expect((await computers.overview(org)).builds[0]).toMatchObject({ reason: "runtime", state: "succeeded", runtimeSha256: runtime.sha256,
@@ -580,7 +600,7 @@ d("cloud v2 Cloud Computer builds", () => {
     await pool.query(`UPDATE cloud_v2_computer_builds SET created_at = now() - interval '25 hours', finished_at = now() - interval '25 hours' WHERE org_id = $1`, [org]);
     let now = Date.now(), head: string | null = commit;
     const remoteHead = vi.fn(async () => head);
-    const builder = () => new CloudV2ComputerBuilder({ computers, compute: boat, channel: "alpha", runtime, cloneToken: async () => "ghs_token", remoteHead, now: () => now });
+    const builder = () => new CloudV2ComputerBuilder({ refreshDelayMs: 0, computers, compute: boat, channel: "alpha", runtime, cloneToken: async () => "ghs_token", remoteHead, now: () => now });
     // No recent cloud use: nothing to keep fresh.
     await builder().scheduleRefreshes();
     expect(remoteHead).not.toHaveBeenCalled();
@@ -618,7 +638,7 @@ d("cloud v2 Cloud Computer builds", () => {
     await new CloudV2Store(pool).createWorkspace({ id: randomUUID(), organizationId: org, creatorUserId: admin, name: "w",
       repository: "withso/zeros", branch: "zeros/w", baseBranch: "master", computerBuildId: null });
     const remoteHead = vi.fn(async () => "c".repeat(40));
-    await new CloudV2ComputerBuilder({ computers, compute: boat, channel: "alpha", runtime, cloneToken: async () => "ghs_token", remoteHead }).scheduleRefreshes();
+    await new CloudV2ComputerBuilder({ refreshDelayMs: 0, computers, compute: boat, channel: "alpha", runtime, cloneToken: async () => "ghs_token", remoteHead }).scheduleRefreshes();
     expect(remoteHead).not.toHaveBeenCalled();
     expect((await computers.overview(org)).builds).toHaveLength(2);
   });
@@ -700,7 +720,7 @@ d("cloud v2 Cloud Computer builds", () => {
     await pool.query(`INSERT INTO organizations (id, slug, name, created_by, is_personal, cloud_workspaces_allowed) VALUES ($1, $2, 'Due', $3, false, true)`, [due, `org-${due}`, admin]);
     await pool.query(`INSERT INTO organization_members (org_id, user_id, role) VALUES ($1, $2, 'owner')`, [due, admin]);
     await computers.enqueue(due, admin, recipe);
-    await new CloudV2ComputerBuilder({ computers, compute: boat, channel: "alpha", runtime: { sha256: "c".repeat(64), url: runtime.url }, cloneToken: async () => "ghs_token" }).tick();
+    await new CloudV2ComputerBuilder({ refreshDelayMs: 0, computers, compute: boat, channel: "alpha", runtime: { sha256: "c".repeat(64), url: runtime.url }, cloneToken: async () => "ghs_token" }).tick();
     // The first computer is current and was built recently: nothing is due there.
     await pool.query(`UPDATE cloud_v2_computer_builds SET finished_at = now() - interval '2 hours' WHERE org_id = $1`, [org]);
     const candidates = await computers.refreshCandidates("c".repeat(64), 1);
@@ -742,7 +762,7 @@ d("cloud v2 Cloud Computer builds", () => {
     await pool.query(`INSERT INTO organization_members (org_id, user_id, role) VALUES ($1, $2, 'owner')`, [other, admin]);
     let answer!: (sha: string | null) => void;
     const remoteHead = vi.fn(() => new Promise<string | null>(resolve => { answer = resolve; }));
-    const builder = new CloudV2ComputerBuilder({ computers, compute: boat, channel: "alpha", runtime, cloneToken: async () => "ghs_token", remoteHead });
+    const builder = new CloudV2ComputerBuilder({ refreshDelayMs: 0, computers, compute: boat, channel: "alpha", runtime, cloneToken: async () => "ghs_token", remoteHead });
     const manual = await computers.enqueue(other, admin, recipe);
     await builder.tick();
     expect(remoteHead).toHaveBeenCalledOnce();
@@ -815,7 +835,7 @@ d("cloud v2 Cloud Computer builds", () => {
     let now = Date.now();
     const scan = async () => {
       now += 11 * 60_000;
-      const builder = new CloudV2ComputerBuilder({ computers, compute: boat, channel: "alpha", runtime, cloneToken: async () => "ghs_token",
+      const builder = new CloudV2ComputerBuilder({ refreshDelayMs: 0, computers, compute: boat, channel: "alpha", runtime, cloneToken: async () => "ghs_token",
         remoteHead, refreshPage: 2, now: () => now });
       await builder.scheduleRefreshes();
     };

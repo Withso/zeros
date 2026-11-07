@@ -33,7 +33,7 @@ suite("Computer interruption recovery", () => {
     };
   }
   function builder(boat: CloudV2Compute, sha256 = oldRuntime) {
-    return new CloudV2ComputerBuilder({ computers, compute: boat, runtime: { sha256, url: async () => "https://fixture.example.test/runtime.tar.gz" },
+    return new CloudV2ComputerBuilder({ refreshDelayMs: 0, computers, compute: boat, runtime: { sha256, url: async () => "https://fixture.example.test/runtime.tar.gz" },
       channel: "alpha", cloneToken: async () => "synthetic-token" });
   }
   async function live() {
