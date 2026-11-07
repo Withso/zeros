@@ -50,6 +50,9 @@ export interface DesignFrameResidencyInput<T extends DesignSpatialFrame> {
   /** A camera gesture is live: frames may mount, but none unmounts, no source
    * is newly admitted and an overview does not end until the camera rests. */
   readonly gesture?: boolean;
+  /** The camera rested only moments ago, as between the steps of one zoom:
+   * nothing unmounts and an overview does not end, but sources may load. */
+  readonly settling?: boolean;
 }
 
 function intersects(a: DesignSpatialRect, b: DesignSpatialRect): boolean {
@@ -66,6 +69,8 @@ export function createDesignFrameResidencyReader<T extends DesignSpatialFrame>()
     let overview = false;
     const available = new Map(input.frames.map((frame) => [frame.file, frame]));
     const mounted = new Set<string>();
+    /** Mounted for this view, before frames held from earlier views. */
+    let placed: ReadonlySet<string> = mounted;
     const visibleFiles = new Set<string>();
     let candidates: T[] = [];
     if (input.active && input.viewport.width > 0 && input.viewport.height > 0) {
@@ -103,7 +108,8 @@ export function createDesignFrameResidencyReader<T extends DesignSpatialFrame>()
       nearby.sort((a, b) => Number(priorFiles.has(b.file)) - Number(priorFiles.has(a.file)) ||
         distance(a) - distance(b) || a.file.localeCompare(b.file));
       const wasOverview = previous?.owner === input.owner && previous.overview;
-      overview = (input.gesture && wasOverview) ||
+      const holding = input.gesture || input.settling;
+      overview = (holding && wasOverview) ||
         visibleFiles.size > (wasOverview ? DESIGN_OVERVIEW_EXIT_FRAMES : DESIGN_SOURCE_SURFACE_LIMITS.frames);
       // An overview frame is a picture or a placeholder, never a document. The
       // whole neighbourhood stays mounted so a pan moves pixels instead of
@@ -111,7 +117,8 @@ export function createDesignFrameResidencyReader<T extends DesignSpatialFrame>()
       for (const frame of overview ? nearby : nearby.slice(0, DESIGN_MAX_NEARBY_FRAME_SURFACES)) mounted.add(frame.file);
       // Unmounting is never urgent mid-gesture; reconciling the page for it
       // was a dropped frame per camera step. The rest applies it once.
-      if (input.gesture) for (const frame of prior?.frames ?? []) if (available.has(frame.file)) mounted.add(frame.file);
+      placed = new Set(mounted);
+      if (holding) for (const frame of prior?.frames ?? []) if (available.has(frame.file)) mounted.add(frame.file);
       // Layer trees and editing can need a bounded runtime outside the viewport.
       const demanded = new Set([...mounted, ...(input.protectedFiles ?? []), ...input.requiredFiles, ...(input.selectedFrame ? [input.selectedFrame] : [])]);
       candidates = input.frames.filter((frame) => demanded.has(frame.file));
@@ -130,7 +137,8 @@ export function createDesignFrameResidencyReader<T extends DesignSpatialFrame>()
     const needsSource = (frame: T) => !overview ||
       Math.max(frame.width, frame.height) * input.view.zoom * ratio > DESIGN_PREVIEW_LEVELS.overview;
     const sourceCandidates = input.sourceSurfacesEnabled && input.active
-      ? [...input.frames.filter(frame => mounted.has(frame.file) && needsSource(frame)),
+      // A frame held only for an earlier view loads no new document.
+      ? [...input.frames.filter(frame => placed.has(frame.file) && needsSource(frame)),
           ...input.frames.filter(frame => !mounted.has(frame.file) && prior?.sources.has(frame.file) && !overview)] as SourceFrame[] : [];
     // Previous source is paint-only. The original descriptors still exclude
     // these frames from live/editor admission and continue preparation demand.
