@@ -375,16 +375,26 @@ export class CloudV2SourceAuthority {
 
 /** Removes the other recipe checkouts a v3 image starts with, before the
  * worker or any agent can reach them. Idempotent across create retries; a
- * parent owner directory goes only when nothing else is left in it. */
+ * parent owner directory goes only when nothing else is left in it.
+ *
+ * Each checkout's Git data goes first, so nothing left behind can be used
+ * for Git, and then the tree leaves its path in one rename. Deleting the
+ * files took 16.6 s for Withso/zeros on a restored disk, so that finishes in
+ * the background, off the create. The creator can read every repository of
+ * such an image, so the files gain no reader while they are deleted. */
 export function pruneCloudRepositories(repositories: readonly string[]): string {
   const q = (value: string) => `'${value.replace(/'/g, `'\\''`)}'`;
   const steps = repositories.map(repository => {
     if (!repositorySchema.safeParse(repository).success || repository.split("/").some(part => part === "." || part === ".."))
       throw new Error("Invalid repository");
     const directory = `/home/user/${repository}`;
-    return `rm -rf -- ${q(directory)} && { rmdir -- ${q(directory.slice(0, directory.lastIndexOf("/")))} 2>/dev/null || true; }`;
+    return `if [ -L ${q(directory)} ]; then rm -f -- ${q(directory)}; elif [ -e ${q(directory)} ]; then `
+      + `rm -rf -- ${q(`${directory}/.git`)} && mv -T -- ${q(directory)} "$trash/$((n += 1))"; fi`
+      + ` && { rmdir -- ${q(directory.slice(0, directory.lastIndexOf("/")))} 2>/dev/null || true; }`;
   });
-  return `bash -lc ${q(["set -eu", ...steps].join("\n"))}`;
+  return `bash -lc ${q(["set -eu", "trash=$(mktemp -d /home/user/.zeros-pruned.XXXXXXXX)", "n=0", ...steps,
+    // Detached with its own output, so the command returns at once.
+    'setsid nohup nice -n 19 rm -rf -- "$trash" >/dev/null 2>&1 </dev/null &'].join("\n"))}`;
 }
 
 /** New clean images contain no checkout. Retries never reset an existing
