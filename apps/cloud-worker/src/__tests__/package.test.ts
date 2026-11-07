@@ -66,6 +66,16 @@ it("ships a relocatable dependency graph and a complete SHA-256 inventory", asyn
   expect(files.some(name => name.includes("@cursor/sdk-linux-") && name.endsWith("/rg"))).toBe(true);
 }, 60_000);
 
+it("keeps the per-request Git helpers small enough to start like bare Node", async () => {
+  // Git starts a helper process for every credential or askpass request; the
+  // shared protocol schemas made each one 768 KB and three times slower.
+  for (const name of ["git-credential.mjs", "git-askpass.mjs"]) {
+    const source = await readFile(join(dist, name), "utf8");
+    expect(source.length, name).toBeLessThan(64 * 1024);
+    expect(source, name).not.toContain("ZodError");
+  }
+});
+
 it("loads pinned binaries and SDKs through the runtime symlink without the checkout or pnpm store", async () => {
   const script = `
     import { createRequire } from 'node:module';
