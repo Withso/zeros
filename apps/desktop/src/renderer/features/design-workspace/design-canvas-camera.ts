@@ -177,8 +177,10 @@ export function observeDesignCanvasChrome(world: HTMLDivElement): () => void {
     if (records.some(record => record.type === "childList" ? record.target === world :
       record.target instanceof HTMLElement && record.target.parentElement === world)) refresh();
   });
+  // Compact controls are this painter's own output: observing them repeated
+  // every camera paint that changed one, a second pass over the whole world.
   observer.observe(world, { subtree: true, childList: true, attributes: true,
-    attributeFilter: ["class", "data-design-frame-tiled", "data-design-frame-controls", "data-design-frame-compact-controls",
+    attributeFilter: ["class", "data-design-frame-tiled", "data-design-frame-controls",
       "data-design-frame-chrome-protected", "data-design-nest-target"] });
   // Hover transitions can follow a wheel paint in the same display interval.
   // Batch hover-only work; the next camera write adopts it before composing.

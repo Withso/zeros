@@ -249,3 +249,26 @@ it("keeps distant automatic controls compact until the same camera paint brings 
     expect(await frame.locator("[data-design-frame-chrome]").evaluate(element => element.getBoundingClientRect().height)).toBe(28);
   } finally { await page.close(); }
 });
+
+it("paints a camera change that compacts frame controls once, never again for its own attribute writes", async () => {
+  // Each repeat was a second pass over every mounted frame per zoom step.
+  const page = await open();
+  try {
+    await page.mouse.move(600, 400);
+    const frame = page.locator('[data-design-frame="near"]');
+    await frame.evaluate(element => element.setAttribute("data-design-frame-controls", "automatic"));
+    await paint(page, 2, 0, 500);
+    const result = await page.evaluate(async () => {
+      const world = document.querySelector<HTMLDivElement>("#world")!;
+      const api = (window as any).camera;
+      let count = 0;
+      const stop = api.observeDesignCanvasPaint(world, () => count++);
+      count = 0;
+      api.paintDesignCanvasCamera(world, { zoom: .5, panX: 0, panY: 0 }, true);
+      await new Promise(requestAnimationFrame); await new Promise(requestAnimationFrame);
+      stop();
+      return { count, compact: document.querySelector('[data-design-frame="near"]')!.hasAttribute("data-design-frame-compact-controls") };
+    });
+    expect(result).toEqual({ count: 1, compact: true });
+  } finally { await page.close(); }
+});
