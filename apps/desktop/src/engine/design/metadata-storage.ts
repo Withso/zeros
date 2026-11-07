@@ -28,6 +28,9 @@ export function assertSafeDesignStoragePath(
   root: string,
   relative: string,
   createParents = false,
+  /** A directory leaf gets the checks of an intermediate component; callers
+   * otherwise append a sentinel file name, which lists the whole directory. */
+  leaf: "file" | "directory" = "file",
 ): string {
   const parts = relative.split("/");
   if (
@@ -64,7 +67,7 @@ export function assertSafeDesignStoragePath(
       if (
         info.isSymbolicLink() ||
         realpathSync(candidate) !== candidate ||
-        (index < parts.length - 1
+        (index < parts.length - 1 || leaf === "directory"
           ? !info.isDirectory()
           : !info.isFile() || info.nlink !== 1)
       )

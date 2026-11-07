@@ -128,6 +128,10 @@ export async function readSharedCanvasContext(
       (!snapshot.registration ||
         readDesignStorageFile(workspacePath, snapshot.registration.file) === snapshot.registration.source)
     ) {
+      // The checks readCanvas makes beyond these bytes, so a shared read
+      // fails wherever a fresh one would.
+      assertNoLegacyCanvasBeside(workspacePath, designDirectoryEntry(workspacePath, directory, layout));
+      assertSafeDesignPageFolders(workspacePath, layout, cached.canvas.pages);
       sharedCanvases.delete(key);
       sharedCanvases.set(key, cached);
       return cached;
@@ -182,6 +186,29 @@ export function normalizeGeometry(
   };
 }
 
+function assertNoLegacyCanvasBeside(workspacePath: string, registered: { path: string } | undefined): void {
+  if (
+    registered &&
+    readDesignStorageFile(
+      workspacePath,
+      `${registered.path}/.zeros-canvas.json`,
+    ) !== null
+  )
+    throw new Error(
+      "Both legacy and registered Design metadata exist. Resolve this conflict before editing.",
+    );
+}
+
+function assertSafeDesignPageFolders(
+  workspacePath: string,
+  layout: ReturnType<typeof readDirectoryDesignLayout>,
+  pages: CanvasDocument["pages"],
+): void {
+  if (layout?.kind !== "meta-v3") return;
+  for (const page of pages ?? [])
+    assertSafeDesignStoragePath(workspacePath, `${layout.directory}/${page.folder}`, false, "directory");
+}
+
 export async function readCanvas(
   workspacePath: string,
   layout = readDirectoryDesignLayout(
@@ -210,16 +237,7 @@ export async function readCanvas(
         registration: { file: registrationFile, source: registrationSource },
       },
     });
-  if (
-    registered &&
-    readDesignStorageFile(
-      workspacePath,
-      `${registered.path}/.zeros-canvas.json`,
-    ) !== null
-  )
-    throw new Error(
-      "Both legacy and registered Design metadata exist. Resolve this conflict before editing.",
-    );
+  assertNoLegacyCanvasBeside(workspacePath, registered);
   if (source === null) {
     if (registered || existsSync(target)) {
       throw new Error(
@@ -257,10 +275,7 @@ export async function readCanvas(
   }
   if (!raw || typeof raw !== "object" || Array.isArray(raw))
     throw new Error("Design canvas metadata must be an object.");
-  if (layout?.kind === "meta-v3") {
-    for (const page of (raw as CanvasDocument).pages ?? [])
-      assertSafeDesignStoragePath(workspacePath, `${layout.directory}/${page.folder}/.zeros-validation`);
-  }
+  assertSafeDesignPageFolders(workspacePath, layout, (raw as CanvasDocument).pages);
   if (
     raw.version !== undefined &&
     raw.version !== 1 &&
