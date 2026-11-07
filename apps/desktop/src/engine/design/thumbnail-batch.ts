@@ -25,7 +25,8 @@ import {
 } from "@zeros/protocol/design-capture";
 import { resolveDesignCaptureConfig, type DesignCaptureConfig } from "./capture-client";
 import { designDirectoryNameFor } from "./directory-registry";
-import { assertDesignThemeName } from "./document";
+import { designCatalogRevision, inspectDesignCatalog } from "./catalog-storage";
+import { assertDesignThemeName, prepareRegisteredDesignFrameParts } from "./document";
 import { assertFrameFile, designDirectory, readSharedCanvasContext } from "./document-storage";
 import { designDirectoryEntry } from "./metadata";
 import { MAX_DESIGN_TEXT_BYTES } from "./render-budget";
@@ -50,6 +51,9 @@ const HTML_NAMESPACE = "http://www.w3.org/1999/xhtml";
 const MAX_REPLY_BYTES = DESIGN_BATCH_CAPTURE_MAX_ITEMS * Math.ceil((DESIGN_CAPTURE_PNG_BYTES * 4) / 3) + 1024 * 1024;
 
 type Frame = { file: string; sourceVersion: string };
+/** A frame sent without a version is pictured, and prepared, as it is now. */
+type Requested = { file: string; sourceVersion?: string };
+type PreparedFrame = NonNullable<DesignThumbnailsReply["prepared"]>[number];
 type Item = DesignBatchCaptureRequest["items"][number];
 export interface DesignThumbnailBatch {
   request: DesignBatchCaptureRequest;
@@ -151,8 +155,12 @@ export async function composeDesignThumbnailBatches(
   root: string,
   input: DesignThumbnailsRender,
   signal?: AbortSignal,
-): Promise<{ batches: DesignThumbnailBatch[]; stale: Frame[]; failed: Array<{ file: string; error: string }> }> {
+): Promise<{ batches: DesignThumbnailBatch[]; stale: Frame[]; failed: Array<{ file: string; error: string }>; prepared: PreparedFrame[] }> {
   await assertThumbnailTarget(root, input);
+  // Records are only as good as the catalog they came from: the caller's
+  // revision, unchanged from before the first build to after the last.
+  let prepared: PreparedFrame[] | null = input.frames.some((frame) => frame.sourceVersion === undefined)
+    && catalogAt(root, input.catalogRevision) ? [] : null;
   const { canvas } = await readSharedCanvasContext(root);
   const catalog = readDesignStyleSourceCatalog(canvas);
   const tailwind = new Set(catalog.declarations.filter((declaration) => declaration.kind === "tailwind").map((declaration) => declaration.id));
@@ -178,13 +186,20 @@ export async function composeDesignThumbnailBatches(
       const file = assertFrameFile(requested.file);
       const geometry = canvas.frames[file];
       if (!geometry || !canvas.frame_info[file]) throw new Error("This frame is not on the canvas.");
-      const safe = await readSafeRegularFile(design, path.join(design, file), MAX_DESIGN_TEXT_BYTES);
-      if (!safe) throw new Error("The frame source is unavailable or exceeds its limit.");
-      const render = await prepareFrameRenderSource(root, safe.body.toString("utf8"), { width: geometry.w, height: geometry.h },
-        undefined, undefined, file, canvas, { parts: true });
-      if (render.sourceVersion !== requested.sourceVersion) {
-        stale.push({ file, sourceVersion: render.sourceVersion });
-        continue;
+      let render: Awaited<ReturnType<typeof prepareFrameRenderSource>>;
+      if (requested.sourceVersion === undefined) {
+        const built = await prepareRegisteredDesignFrameParts(root, file, canvas);
+        prepared?.push(built.frame as PreparedFrame);
+        render = built.render;
+      } else {
+        const safe = await readSafeRegularFile(design, path.join(design, file), MAX_DESIGN_TEXT_BYTES);
+        if (!safe) throw new Error("The frame source is unavailable or exceeds its limit.");
+        render = await prepareFrameRenderSource(root, safe.body.toString("utf8"), { width: geometry.w, height: geometry.h },
+          undefined, undefined, file, canvas, { parts: true });
+        if (render.sourceVersion !== requested.sourceVersion) {
+          stale.push({ file, sourceVersion: render.sourceVersion });
+          continue;
+        }
       }
       const pruned: Part[] = (render.sheets ?? []).map(({ token, css, foreign }) => ({ token, css, ...(foreign ? { foreign } : {}) }));
       let parts = pruned;
@@ -206,7 +221,7 @@ export async function composeDesignThumbnailBatches(
         return designCaptureSheetUrl(hash);
       });
       if (html.length > DESIGN_CAPTURE_HTML_BYTES) throw new Error("This frame is too large to picture.");
-      composed.push({ frame: { file, sourceVersion: requested.sourceVersion }, sheets, item: {
+      composed.push({ frame: { file, sourceVersion: render.sourceVersion }, sheets, item: {
         id: `f${index}`, html, maxDimension: input.maxDimension,
         viewport: {
           width: Math.max(1, Math.min(MAX_LAYOUT_SIDE, Math.ceil(geometry.w))),
@@ -249,7 +264,17 @@ export async function composeDesignThumbnailBatches(
     current.html += item.html.length;
   }
   close();
-  return { batches, stale, failed };
+  if (prepared && !catalogAt(root, input.catalogRevision)) prepared = null;
+  return { batches, stale, failed, prepared: prepared ?? [] };
+}
+
+function catalogAt(root: string, revision: string | undefined): boolean {
+  if (revision === undefined) return false;
+  try {
+    return designCatalogRevision(inspectDesignCatalog(root, designDirectoryNameFor(root), { revision: false })) === revision;
+  } catch {
+    return false;
+  }
 }
 
 function waitForCapacity(ms: number, signal: AbortSignal | undefined): Promise<void> {
@@ -364,15 +389,16 @@ export async function renderDesignThumbnails(
   // A stored picture answers only when the host's pipeline is known exactly:
   // after an app update, the last pipeline seen is not the one drawing now.
   const current = await currentDesignThumbnailPipeline();
-  const misses: Frame[] = [];
+  const misses: Requested[] = [];
   for (const frame of input.frames) {
     const id = frameId(canvas, frame.file);
-    const stored = current.exact && id ? await readStoredDesignThumbnail(root, input.directoryId, id, variant) : null;
+    const stored = current.exact && id && frame.sourceVersion !== undefined
+      ? await readStoredDesignThumbnail(root, input.directoryId, id, variant) : null;
     if (stored && stored.sourceVersion === frame.sourceVersion && stored.pipeline === current.pipeline)
-      take(frame, { width: stored.width, height: stored.height, data: stored.bytes.toString("base64") });
+      take({ file: frame.file, sourceVersion: stored.sourceVersion }, { width: stored.width, height: stored.height, data: stored.bytes.toString("base64") });
     else misses.push(frame);
   }
-  const { batches, stale, failed } = misses.length === 0 ? { batches: [], stale: [], failed: [] }
+  const { batches, stale, failed, prepared } = misses.length === 0 ? { batches: [], stale: [], failed: [], prepared: [] }
     : await composeDesignThumbnailBatches(root, { ...input, frames: misses }, deps.signal);
   const named = current.exact ? current.pipeline : null;
   let pipeline: string | null = null;
@@ -411,7 +437,8 @@ export async function renderDesignThumbnails(
     }
     await Promise.all(stores);
   }
-  return designThumbnailsReplySchema.parse({ pipeline: pipeline ?? named ?? DESIGN_THUMBNAIL_COMPOSER, pictures, stale, failed, deferred });
+  return designThumbnailsReplySchema.parse({ pipeline: pipeline ?? named ?? DESIGN_THUMBNAIL_COMPOSER, pictures, stale, failed, deferred,
+    ...(prepared.length ? { prepared } : {}) });
 }
 
 const READ_CONCURRENCY = 32;

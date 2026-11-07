@@ -9,6 +9,7 @@ import {
   DESIGN_BATCH_CAPTURE_STYLESHEET_BYTES,
   designBatchCaptureRequestSchema,
   designCaptureRasterSize,
+  designThumbnailsRenderSchema,
   type DesignBatchCaptureRequest,
 } from "@zeros/protocol/design-capture";
 import { MAX_BRIDGE_FRAME_BYTES } from "@zeros/protocol/schemas";
@@ -20,6 +21,7 @@ import { designDirectoryNameFor } from "../directory-registry";
 import { designDirectoryEntry } from "../metadata";
 import { configureDesignFonts, resetDesignFontsForTests, settleDesignFontDownloadsForTests } from "../style-fonts";
 import { readCanvas } from "../document-storage";
+import { designIdentityCacheStatsForTests, resetDesignIdentityCacheForTests } from "../identity-cache";
 import { prepareFrameRenderSource } from "../render-preparation";
 import { sharedDesignParseStatsForTests } from "../shared-parse";
 import { composeDesignThumbnailBatches, readDesignThumbnails, renderDesignThumbnails } from "../thumbnail-batch";
@@ -393,6 +395,35 @@ describe("batch Design thumbnails", () => {
       const hits = host("fixture");
       expect((await renderDesignThumbnails(root, input(frames.slice(0, 3)), { capture: hits })).pictures).toEqual(repeat.pictures);
       expect(hits).not.toHaveBeenCalled();
+    });
+
+    it("prepares a frame sent without its version once, returning the record design.frames.prepare would", async () => {
+      await writeFile(path.join(folder, "page-1/b.html"), frame("b", "hero m-2 card").replace("x</main>",
+        `x<img data-oid="i" src="data:image/png;base64,${png(2, 2).toString("base64")}"><svg data-oid="s" viewBox="0 0 4 4"><path d="M0 0h4"/></svg></main>`));
+      const navigation = await readDesignNavigationSnapshot(root);
+      const files = ["page-1/a.html", "page-1/b.html"];
+      const unversioned = { ...input(files.map((file) => ({ file })) as never), catalogRevision: navigation.catalogRevision };
+      const capture = host("fixture");
+      // Both cold: neither may lean on the other's remembered identities.
+      resetDesignIdentityCacheForTests();
+      const reply = await renderDesignThumbnails(root, unversioned, { capture });
+      resetDesignIdentityCacheForTests();
+      const expected = await prepareDesignNavigationFrames(root, navigation.catalogRevision, files);
+      expect(expected.frames.every((entry) => entry.surfaceCost)).toBe(true);
+      expect(reply.prepared).toEqual(expected.frames);
+      // The fused build remembers identities, so a later preparation of those frames is warm.
+      resetDesignIdentityCacheForTests();
+      await renderDesignThumbnails(root, unversioned, { capture });
+      const before = designIdentityCacheStatsForTests();
+      expect((await prepareDesignNavigationFrames(root, navigation.catalogRevision, files)).frames).toEqual(expected.frames);
+      expect(designIdentityCacheStatsForTests().hits - before.hits).toBe(files.length);
+      expect(reply.pictures.map((picture) => [picture.file, picture.sourceVersion])).toEqual(expected.frames.map((entry) => [entry.file, entry.sourceVersion]));
+      expect(reply.stale).toEqual([]);
+      // Without the caller's catalog revision, the pictures still come but no records.
+      const elsewhere = await renderDesignThumbnails(root, { ...unversioned, catalogRevision: "0".repeat(64) }, { capture });
+      expect(elsewhere.prepared).toBeUndefined();
+      expect(elsewhere.pictures).toHaveLength(2);
+      expect(() => designThumbnailsRenderSchema.parse({ ...unversioned, catalogRevision: undefined })).toThrow(/catalog revision/);
     });
 
     it("lets the host's pipeline win over a wrong name, asking again for pictures stored under the name", async () => {

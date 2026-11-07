@@ -25,7 +25,7 @@ import { randomBytes } from "node:crypto";
 import { openBoundedDirectorySync } from "./files/bounded-read-sync";
 
 import { DESIGN_CATALOG_READ_CAPABILITY, DESIGN_CATALOG_READ_OPERATION, DESIGN_LAZY_PREPARATION_CAPABILITY, DESIGN_MUTATION_SNAPSHOTS_CAPABILITY, DESIGN_PAGE_SCOPED_MUTATIONS_CAPABILITY } from "@zeros/protocol/design-catalog";
-import { DESIGN_PREVIEW_JOBS_CAPABILITY, DESIGN_THUMBNAILS_CAPABILITY, DESIGN_THUMBNAILS_STORE_CAPABILITY } from "@zeros/protocol/design-capture";
+import { DESIGN_PREVIEW_JOBS_CAPABILITY, DESIGN_THUMBNAILS_CAPABILITY, DESIGN_THUMBNAILS_PREPARE_CAPABILITY, DESIGN_THUMBNAILS_STORE_CAPABILITY } from "@zeros/protocol/design-capture";
 import { DESIGN_SOURCE_SURFACES_CAPABILITY } from "@zeros/protocol/design-surface";
 import { DESIGN_COPY_PLACEMENT_CAPABILITY } from "@zeros/protocol/design-relocation";
 import {
@@ -9128,7 +9128,7 @@ export class ZerosEngine {
         minProtocolVersion: MIN_SUPPORTED_PROTOCOL,
         capabilities: [DESIGN_CATALOG_READ_CAPABILITY, CONVERSATION_REPLAY_CAPABILITY, ...(client.kind === "local" ? [DESIGN_PREVIEW_JOBS_CAPABILITY, DESIGN_LAZY_PREPARATION_CAPABILITY, DESIGN_SOURCE_SURFACES_CAPABILITY, DESIGN_COPY_PLACEMENT_CAPABILITY, DESIGN_MUTATION_SNAPSHOTS_CAPABILITY, DESIGN_PAGE_SCOPED_MUTATIONS_CAPABILITY, DESIGN_THUMBNAILS_STORE_CAPABILITY,
           // Batch thumbnails need a capture host to draw them.
-          ...(resolveDesignCaptureConfig() ? [DESIGN_THUMBNAILS_CAPABILITY] : [])] : [])],
+          ...(resolveDesignCaptureConfig() ? [DESIGN_THUMBNAILS_CAPABILITY, DESIGN_THUMBNAILS_PREPARE_CAPABILITY] : [])] : [])],
       }),
     );
   }
