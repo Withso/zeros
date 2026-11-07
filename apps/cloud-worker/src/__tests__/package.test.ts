@@ -241,10 +241,11 @@ it("boots through the runtime symlink, waits for a token, serves a dial-in PTY a
   await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
   const address = server.address() as AddressInfo;
   const harness = join(dist, "boot-smoke.mjs");
+  const compileCache = join(directory, "compile-cache");
   await writeFile(harness, `import { startWorker, readBootEnvironment } from './worker.mjs';\nconst network = globalThis.fetch; globalThis.fetch = (url, options) => String(url) === 'https://api.github.com/user' ? Promise.resolve(new Response(null, { status: 200 })) : network(url, options);\nstartWorker({...readBootEnvironment(),tokenFile:${JSON.stringify(tokenFile)},directory:${JSON.stringify(state)},publicKeys:${JSON.stringify(publicKeys)},port:${port}});\n`);
   let child: ChildProcess | undefined, socket: WebSocket | undefined; let output = "";
   try {
-    child = spawn(process.execPath, [harness], { cwd: directory, env: { ...workerChildEnvironment(), HOME: root,
+    child = spawn(process.execPath, [harness], { cwd: directory, env: { ...workerChildEnvironment(), HOME: root, NODE_COMPILE_CACHE: compileCache,
       CLOUD_V2_API_URL: `http://127.0.0.1:${address.port}`, CLOUD_V2_RUNTIME_SHA256: "a".repeat(64), ZEROS_WORKSPACE_ID: WORKSPACE_ID }, stdio: ["ignore", "pipe", "pipe"] });
     child.stdout!.on("data", data => { output += data; }); child.stderr!.on("data", data => { output += data; });
     await expect.poll(() => output.includes("credential-unavailable")).toBe(true);
@@ -270,6 +271,9 @@ it("boots through the runtime symlink, waits for a token, serves a dial-in PTY a
     expect(requests.some(request => request.path === "hello" && request.generation === "initial")).toBe(true);
     expect(output).toMatch(/^cloud-worker boot loaded \d+$/m);
     await expect.poll(() => output).toMatch(/^cloud-worker boot connected \d+$/m);
+    // Written while the worker still runs: a stopped VM may never give it a normal exit.
+    const compiled = async () => (await readdir(compileCache, { recursive: true, withFileTypes: true }).catch(() => [])).filter(entry => entry.isFile()).length;
+    await expect.poll(compiled).toBeGreaterThan(0); expect(child.exitCode).toBeNull();
     const publishedSocket = () => /BUNDLED_BROKER_PATH=(\/[^\r\n]+)/.exec(messages
       .filter(message => message.t === "frame" && message.frame.type === "PTY_DATA" && message.frame.sessionId === "package-shell")
       .map(message => message.frame.data).join(""))?.[1];

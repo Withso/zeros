@@ -8,6 +8,7 @@ import { providerBindingForResume } from "@zeros/protocol/identities";
 import { mapClaudeContextUsage } from "@zeros/protocol/context-usage";
 import { redactDriverMessage, redactDriverValue, type Driver, type DriverOpen } from "../driver";
 import { driverTiming } from "../../agent-timings";
+import { persistCompileCache } from "../../compile-cache";
 import { agentEnvironment } from "../shared/agent-environment";
 import { InputQueue, createDeferred, type Deferred } from "./input-queue";
 import { isClaudeBackgroundAcknowledgement, isUnownedClaudeResult } from "./result-ownership";
@@ -29,8 +30,11 @@ interface NativeQuery extends AsyncIterable<unknown> {
 /** The SDK's 1.3 MB entry and its dependencies load once, on first use. */
 let sdkQuery: Promise<NonNullable<ClaudeOptions["query"]>> | undefined;
 function loadClaudeQuery(): Promise<NonNullable<ClaudeOptions["query"]>> {
-  sdkQuery ??= import("@anthropic-ai/claude-agent-sdk").then(sdk => sdk.query as NonNullable<ClaudeOptions["query"]>,
-    error => { sdkQuery = undefined; throw error; });
+  sdkQuery ??= import("@anthropic-ai/claude-agent-sdk").then(sdk => {
+    // Keep its compiled code for the next boot on this disk.
+    setImmediate(persistCompileCache);
+    return sdk.query as NonNullable<ClaudeOptions["query"]>;
+  }, error => { sdkQuery = undefined; throw error; });
   return sdkQuery;
 }
 

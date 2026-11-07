@@ -5,6 +5,7 @@ import { CloudWorker } from "./worker";
 import { HybridTransport } from "./hybrid-transport";
 import { WORKER_TOKEN_FILE } from "./worker-token";
 import { runtimePermit } from "./runtime-permit";
+import { persistCompileCache } from "./compile-cache";
 
 export const WORKER_STATE_DIRECTORY = "/home/user/.local/share/zeros/cloud-worker";
 interface BootOptions { apiUrl: string; workspaceId: string; runtimeSha256: string; tokenFile?: string; directory?: string; publicKeys?: readonly string[]; port?: number;
@@ -36,7 +37,7 @@ export function startWorker(options: BootOptions): { worker: CloudWorker; stop: 
     tokenFile: options.tokenFile ?? WORKER_TOKEN_FILE,
     onStatus: status => {
       log(status);
-      if (status === "connected" && !connected) { connected = true; log(`boot connected ${uptime()}`); }
+      if (status === "connected" && !connected) { connected = true; log(`boot connected ${uptime()}`); setImmediate(persistCompileCache); }
       if (["unauthorized", "stopped", "protocol-error"].includes(status)) void stop(status === "protocol-error" ? 1 : 0);
     },
   });
