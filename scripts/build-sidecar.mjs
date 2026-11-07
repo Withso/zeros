@@ -18,11 +18,10 @@
 // ──────────────────────────────────────────────────────────
 
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdirSync, existsSync, mkdtempSync } from "node:fs";
+import { chmodSync, mkdirSync, existsSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { releaseBunVersion, sidecarBunMismatch } from "./bun-release-pin.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, "..");
@@ -50,6 +49,26 @@ if (!mapping) {
 const entry = resolve(repoRoot, "apps/desktop/src/cli.ts");
 if (!existsSync(entry)) {
   console.error(`build-sidecar: entry not found at ${entry}`);
+  process.exit(1);
+}
+
+// The binary embeds the Bun that compiled it, so a crash in a build made with
+// any other Bun need not reproduce in a release. Every workflow pins the same
+// version (scripts/__tests__/renovate-coverage.test.ts).
+const pinnedBun = /^\s+bun-version:\s*(\d+\.\d+\.\d+)\s*$/m.exec(
+  readFileSync(resolve(repoRoot, ".github/workflows/release.yml"), "utf8"),
+)?.[1];
+if (!pinnedBun) {
+  console.error("build-sidecar: no bun-version pin in .github/workflows/release.yml.");
+  process.exit(1);
+}
+const bunVersion = execFileSync("bun", ["--version"], { encoding: "utf8" }).trim();
+if (bunVersion !== pinnedBun && process.env.ZEROS_SIDECAR_ANY_BUN !== "1") {
+  console.error(
+    `build-sidecar: bun ${bunVersion} differs from the release pin ${pinnedBun} (.github/workflows/release.yml). ` +
+      `Install it with: curl -fsSL https://bun.sh/install | bash -s "bun-v${pinnedBun}". ` +
+      `Or set ZEROS_SIDECAR_ANY_BUN=1 to build with ${bunVersion} anyway.`,
+  );
   process.exit(1);
 }
 
@@ -83,12 +102,6 @@ const cmdArgs = [
 // accumulating in the project root.
 const buildCwd = mkdtempSync(join(tmpdir(), "zeros-sidecar-"));
 
-const bunVersion = execFileSync("bun", ["--version"], { encoding: "utf8" }).trim();
-const mismatch = sidecarBunMismatch(bunVersion, releaseBunVersion(repoRoot));
-if (mismatch) {
-  console.error(`build-sidecar: ${mismatch}`);
-  process.exit(1);
-}
 console.log(`[build-sidecar] bun ${cmdArgs.join(" ")}`);
 execFileSync("bun", cmdArgs, { stdio: "inherit", cwd: buildCwd });
 

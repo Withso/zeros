@@ -150,6 +150,19 @@ export function fenceLegacyNativeLaunch(root, runId) {
   }
 }
 
+/** The engine stage's own checkout, so this run builds and smoke-tests its
+ * own sidecar without replacing the checkout's binaries/. */
+export function stageNativeEngineBuild(repo, root) {
+  const stage = path.join(root, "engine"); fs.mkdirSync(stage);
+  for (const name of ["apps", "packages", "node_modules"]) fs.symlinkSync(path.join(repo, name), path.join(stage, name), "dir");
+  // build-sidecar.mjs reads the release workflow's Bun pin.
+  for (const file of ["package.json", "tsconfig.json", ".github/workflows/release.yml", "scripts/build-sidecar.mjs", "scripts/smoke-engine.mjs"]) {
+    fs.mkdirSync(path.dirname(path.join(stage, file)), { recursive: true });
+    fs.copyFileSync(path.join(repo, file), path.join(stage, file));
+  }
+  return stage;
+}
+
 function status() {
   try {
     const latest = readSmallJson(path.join(evidenceRoot, "latest.json"));
@@ -296,11 +309,7 @@ async function main() {
       save();
     }
     if (!controller.signal.aborted && selected.includes("engine")) {
-      const stage = path.join(root, "engine"); fs.mkdirSync(stage); fs.mkdirSync(path.join(stage, "scripts"));
-      for (const name of ["apps", "packages", "node_modules"]) fs.symlinkSync(path.join(repo, name), path.join(stage, name), "dir");
-      for (const name of ["package.json", "tsconfig.json"]) fs.copyFileSync(path.join(repo, name), path.join(stage, name));
-      for (const name of ["build-sidecar.mjs", "smoke-engine.mjs"])
-        fs.copyFileSync(path.join(repo, "scripts", name), path.join(stage, "scripts", name));
+      const stage = stageNativeEngineBuild(repo, root);
       const built = await run("engine-build", process.execPath, [path.join(stage, "scripts/build-sidecar.mjs")], stage);
       if (built.exitCode === 0 && !controller.signal.aborted)
         await run("engine-smoke", process.execPath, [path.join(stage, "scripts/smoke-engine.mjs")], stage);

@@ -46,9 +46,11 @@ export async function buildNativeProduction({ repo, root, env, run }) {
     try { await fs.access(path.join(repo, directory)); await fs.symlink(path.join(repo, directory), path.join(stage, directory), "dir"); }
     catch (error) { if (error.code !== "ENOENT") throw error; }
   }
-  await fs.copyFile(path.join(repo, "package.json"), path.join(stage, "package.json"));
-  await fs.mkdir(path.join(stage, "scripts"));
-  await fs.copyFile(path.join(repo, "scripts/build-sidecar.mjs"), path.join(stage, "scripts/build-sidecar.mjs"));
+  // build-sidecar.mjs reads the release workflow's Bun pin.
+  for (const file of ["package.json", ".github/workflows/release.yml", "scripts/build-sidecar.mjs"]) {
+    await fs.mkdir(path.dirname(path.join(stage, file)), { recursive: true });
+    await fs.copyFile(path.join(repo, file), path.join(stage, file));
+  }
   await fs.writeFile(path.join(root, "engine-build.log"), await run(process.execPath, [path.join(stage, "scripts/build-sidecar.mjs")], { env }));
   await fs.writeFile(path.join(root, "main-build.log"), await run("pnpm", ["exec", "tsup", "--config", "apps/desktop/electron/tsup.config.ts", "--out-dir", path.join(stage, "dist-electron")], { env }));
   // Without cli.ts the existing native resolver selects this run's compiled
