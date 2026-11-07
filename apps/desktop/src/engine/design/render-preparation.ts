@@ -190,6 +190,8 @@ interface LinkedStylesheet {
   imageBytes?: number;
   /** The imported style source this placeholder stands for. */
   source?: string;
+  /** The placeholder is inside <svg> or <math>, where a <link> is no stylesheet. */
+  foreign?: true;
 }
 
 /** Replace each local stylesheet link with an empty, hash-tagged placeholder. */
@@ -241,7 +243,8 @@ async function linkLocalStylesheets(
           );
         }
         const token = `${index}-${prepared.hash}`;
-        sheets.push({ token, css: prepared.css, variables: prepared.variables });
+        sheets.push({ token, css: prepared.css, variables: prepared.variables,
+          ...(element.namespaceURI === "http://www.w3.org/1999/xhtml" ? {} : { foreign: true as const }) });
         replacement = `<style data-zeros-source="${escapeAttribute(cssFile)}" data-zeros-sheet="${token}"></style>`;
         resultBytes += utf8Bytes(prepared.css);
       }
@@ -548,6 +551,8 @@ export interface DesignFrameRenderSheet {
   css: string;
   /** Set for an imported style source; absent for a linked stylesheet. */
   source?: string;
+  /** The placeholder is inside <svg> or <math>, where a <link> is no stylesheet. */
+  foreign?: true;
 }
 
 export function prepareFrameRenderSource(
@@ -635,7 +640,7 @@ async function prepareSharedFrameRenderSource(
     if (bytes > MAX_SANITIZED_RENDER_BYTES)
       throw new DesignRenderBudgetError("Sanitized frame HTML exceeded the 15 MiB per-frame render limit.");
     return { sanitized: skeleton, sourceVersion, surfaceCost: null,
-      sheets: sheets.map(({ token, css, source }) => ({ token, css, ...(source === undefined ? {} : { source }) })) };
+      sheets: sheets.map(({ token, css, source, foreign }) => ({ token, css, ...(source === undefined ? {} : { source }), ...(foreign ? { foreign } : {}) })) };
   }
   const sanitized = spliceStylesheets(skeleton, sheets);
   assertRenderByteLimit(

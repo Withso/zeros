@@ -19,6 +19,9 @@ import { DESIGN_DIRECTORY_NAME, initializeDesignDocument, prepareDesignNavigatio
 import { designDirectoryNameFor } from "../directory-registry";
 import { designDirectoryEntry } from "../metadata";
 import { configureDesignFonts, resetDesignFontsForTests, settleDesignFontDownloadsForTests } from "../style-fonts";
+import { readCanvas } from "../document-storage";
+import { prepareFrameRenderSource } from "../render-preparation";
+import { sharedDesignParseStatsForTests } from "../shared-parse";
 import { composeDesignThumbnailBatches, readDesignThumbnails, renderDesignThumbnails } from "../thumbnail-batch";
 import { currentDesignThumbnailPipeline, resetDesignThumbnailStoreForTests, settleDesignThumbnailStoreForTests, storeDesignThumbnail } from "../thumbnail-store";
 
@@ -156,6 +159,38 @@ describe("batch Design thumbnails", () => {
     expect(inline[0]!.namespaceURI).toBe("http://www.w3.org/2000/svg");
     expect(inline[0]!.childNodes?.map((child) => child.value).join("")).toContain(".icon");
     expect(elements.filter((element) => element.tagName === "main" || element.tagName === "path")).toHaveLength(2);
+  });
+
+  it("links sheets and themes the root without parsing a frame again, inline SVG icons included", async () => {
+    const file = path.join(folder, "meta/canvas.json");
+    const canvas = JSON.parse(await readFile(file, "utf8"));
+    canvas.themes = [{ id: "light", base: true }, { id: "dusk" }];
+    await writeFile(file, JSON.stringify(canvas, null, 2));
+    await writeFile(path.join(folder, "page-1/b.html"), "<!doctype html><!-- before the root --><html data-zd-theme=\"light\"><head><link rel=\"stylesheet\" href=\"../tokens.css\"></head><body><main data-oid=\"m\" class=\"hero\">x<svg data-oid=\"i\" viewBox=\"0 0 4 4\"><path d=\"M0 0h4\"/></svg></main></body></html>");
+    const current = await versions(["page-1/a.html", "page-1/b.html"]);
+    const frames = [...current].map(([frameFile, sourceVersion]) => ({ file: frameFile, sourceVersion }));
+    await composeDesignThumbnailBatches(root, input(frames));
+    const parsed = async (run: () => Promise<unknown>) => {
+      const before = sharedDesignParseStatsForTests().parses;
+      await run();
+      return sharedDesignParseStatsForTests().parses - before;
+    };
+    const document = await readCanvas(root);
+    const prepare = await parsed(async () => {
+      for (const frame of frames) {
+        const source = await readFile(path.join(folder, frame.file), "utf8");
+        await prepareFrameRenderSource(root, source, { width: 320, height: 200 }, undefined, undefined, frame.file, document, { parts: true });
+      }
+    });
+    let request!: DesignBatchCaptureRequest;
+    const compose = await parsed(async () => { request = (await composeDesignThumbnailBatches(root, { ...input(frames), theme: "dusk" })).batches[0]!.request; });
+    expect(compose).toBe(prepare);
+    for (const item of request.items) {
+      const rootElement = parse(item.html).childNodes.find((node) => (node as { tagName?: string }).tagName === "html") as { attrs: Array<{ name: string; value: string }> };
+      expect(rootElement.attrs.filter((attribute) => attribute.name === "data-zd-theme")).toEqual([{ name: "data-zd-theme", value: "dusk" }]);
+      expect(links(item.html).length).toBeGreaterThan(0);
+      expect(item.html).not.toMatch(/<style[^>]*data-zeros-sheet="[^"]*"><\/style>/);
+    }
   });
 
   it("gives each frame the App fonts its own chosen sources import", async () => {
