@@ -3,6 +3,27 @@
 Each entry records the lesson behind the change as symptom → cause → rule →
 where it is encoded.
 
+## 0.3.1
+
+- **Zooming a 1,000-frame Design page dropped half its frames.** Traces showed
+  whole-document style recalcs of about 11,500 elements, 90-100 ms each. They
+  were scheduled by ordinary picture swaps through the global
+  `body:has(<open overlay>) [data-tauri-drag-region]` rule, whose argument Blink
+  cannot narrow. Rule: a global `:has()` styles its anchor (a custom property
+  on `body`), never its descendants. Encoded in `native-window-chrome.test.ts`
+  and the performance playbook.
+- **A camera painter observed its own writes.** Each compact-controls toggle
+  re-ran a full pass over every mounted frame. Rule: painters never observe
+  attributes they write, and zoom-derived chrome holds during a gesture.
+  Encoded in `design-canvas-camera.test.ts` and the performance playbook.
+- **Remote Mac measurements ran on stale files.** The workspace sync skipped
+  deleted-and-recreated paths and a case-only name collision. Rule: a fresh
+  overlay directory per build, checksum-verified. Encoded in the performance
+  playbook.
+- **A seven-PR stack needed seven rebase-and-CI rounds after squash merges.**
+  Rule: collapse it into its top PR, dropping only patch-id-identical commits.
+  Encoded in `integrate-pr.md`.
+
 ## 0.3.0
 
 - **A long session's lessons were lost to compaction.** The co-master session
