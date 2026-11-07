@@ -99,20 +99,18 @@ are in `agents/zstack/records/design-performance-measurements.md`.
   session that installed it. Never override document visibility to pass a soak.
 - Scope camera style inheritance as well as DOM residency; camera-only
   visibility changes must not reconcile every cached frame tree.
-- A global `:has()` rule styles its anchor, never its descendants. In
-  `body:has(X) Y`, an argument Blink cannot narrow (anything under
-  `:is(...) *`) makes every DOM mutation restyle the whole document: a picture
-  swap on a 1,000-frame page cost ~45 ms instead of ~3 ms. Find such causes
-  with the trace category `disabled-by-default-devtools.timeline.invalidationTracking`
+- A global `:has()` styles its anchor, never descendants: `body:has(X) Y`
+  with an argument Blink cannot narrow (`:is(...) *`) restyles the whole
+  document on every DOM mutation (a 1,000-frame picture swap: ~45 ms, not
+  ~3 ms). Find it with `disabled-by-default-devtools.timeline.invalidationTracking`
   and the `elementCount` of `UpdateLayoutTree` events.
-- A camera painter must not observe attributes it writes: each write re-runs
-  a full pass per step. Inside a gesture, hold zoom-derived chrome values and
-  write exact ones at rest (tldraw's debounced zoom). Count the O(frames)
-  passes per display frame (painter, pointer, residency, scene rows): at 1,000
-  frames each one is a visible share of the 16.7 ms budget.
-- On a remote Mac, the workspace sync skips recreated paths and Mac paths are
-  case-insensitive: stage each build overlay in a fresh directory and compare
-  checksums before measuring.
+- Painters never observe attributes they write. Hold zoom-derived chrome
+  during a gesture and write exact values at rest (tldraw's debounced zoom).
+  At 1,000 frames each O(frames) pass per display frame (painter, pointer,
+  residency, scene rows) is a visible share of 16.7 ms.
+- On a remote Mac, build from Git there and compare tree hashes: the
+  workspace sync skips recreated paths and Mac paths are case-insensitive.
+  `electron <dir>` is a dev engine (Chokidar in Bun, no watch host).
 - Keep provisional editing geometry out of confirmed selection state, and bind
   text previews and cancellation to the runtime that began the edit.
 - Charge displayed and inactive loaded images to one retention pool, reclaim

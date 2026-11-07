@@ -3,6 +3,19 @@
 Each entry records the lesson behind the change as symptom → cause → rule →
 where it is encoded.
 
+## 0.3.2
+
+- **Two PRs that each fit the performance playbook's budget broke it
+  together.** #914 and #920 each passed CI. Once both were merged, main failed
+  `zstack-pack.test.ts` (2,025 of 2,000 tokens), and so did every open PR's
+  Vitest shard. Rule: fold or cut text, never raise a budget. Encoded in the
+  trimmed playbook.
+- **A Mac bench measured a watcher that packaged users never run.**
+  `electron <dir>` sets `process.defaultApp`, so the engine is a dev runtime.
+  It has no Node watch host, so Chokidar watches each directory inside Bun,
+  which stalled Bun 1.4.4 on a 26,000-frame directory. Rule: say which runtime
+  path a measurement exercises. Encoded in the performance playbook.
+
 ## 0.3.1
 
 - **Zooming a 1,000-frame Design page dropped half its frames.** Traces showed
