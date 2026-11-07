@@ -42,7 +42,7 @@
    workspace toolbar, settings navigation, etc.) doesn't
    need a rename. Interactive descendants opt back out below. */
 [data-tauri-drag-region] {
-  -webkit-app-region: drag;
+  -webkit-app-region: var(--zeros-window-drag-region, drag);
 }
 
 /* Interactive descendants inside a drag region opt back out so native window
@@ -64,14 +64,17 @@
    While an interactive overlay owns input, let the renderer receive its
    outside click. This includes conditionally mounted dialogs without a Radix
    data-state (the composer image preview). Closed/inert overlays and hover
-   tooltips must not disable the titlebar. Restore it with the closing paint. */
+   tooltips must not disable the titlebar. Restore it with the closing paint.
+   The rule styles body itself and drag regions inherit the variable. Its
+   argument looks under closed and hidden surfaces, so any DOM change re-checks
+   it; styling body's descendants here restyled the whole document each time. */
 body:has(:is(
   [role="dialog"], [role="alertdialog"], [role="menu"], [role="listbox"]
 ):not(
   [data-state="closed"], [hidden], [inert], [aria-hidden="true"],
   :is([data-state="closed"], [hidden], [inert], [aria-hidden="true"]) *
-)) [data-tauri-drag-region] {
-  -webkit-app-region: no-drag;
+)) {
+  --zeros-window-drag-region: no-drag;
 }
 
 /* ──────────────────────────────────────────────────────────
