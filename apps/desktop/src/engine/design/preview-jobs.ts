@@ -1,6 +1,10 @@
 import type { DesignCatalogAdmission } from "./catalog";
 import { DesignCaptureCleanupUnconfirmedError, DESIGN_PREVIEW_JOB_TIMEOUT_MS } from "@zeros/protocol/design-capture";
 
+/** How far ahead a cancellation still fences a delayed request. Beyond it, a
+ * job no request could have started is settled without a record. */
+const CANCEL_FENCE_MS = 10 * 60_000;
+
 export interface DesignPreviewJobOwner {
   workspaceId: string;
   directoryId: string;
@@ -36,10 +40,10 @@ export class DesignPreviewJobs {
     return JSON.stringify([admission.connectionId, admission.authority, owner.workspaceId, owner.directoryId, owner.jobId]);
   }
 
-  private create(owner: DesignPreviewJobOwner, admission: DesignCatalogAdmission): Job {
+  private create(owner: DesignPreviewJobOwner, admission: DesignCatalogAdmission, horizon = DESIGN_PREVIEW_JOB_TIMEOUT_MS + 1_000): Job {
     if (this.unconfirmed) throw new DesignCaptureCleanupUnconfirmedError();
     if (this.stopped || !admission.authorized()) throw new Error("Design preview owner retired.");
-    if (!Number.isSafeInteger(owner.deadline) || owner.deadline > Date.now() + DESIGN_PREVIEW_JOB_TIMEOUT_MS + 1_000) throw new Error("Invalid Design preview deadline.");
+    if (!Number.isSafeInteger(owner.deadline) || owner.deadline > Date.now() + horizon) throw new Error("Invalid Design preview deadline.");
     for (const [key, job] of this.jobs) if (job.done && !job.unconfirmed && job.owner.deadline < Date.now()) this.jobs.delete(key);
     for (const [key, job] of this.jobs) {
       if (this.jobs.size < 128) break;
@@ -112,8 +116,10 @@ export class DesignPreviewJobs {
 
   async cancel(owner: DesignPreviewJobOwner, admission: DesignCatalogAdmission): Promise<{ settled: true }> {
     const key = this.key(owner, admission);
-    if (!this.jobs.has(key) && owner.deadline < Date.now()) return { settled: true };
-    const job = this.jobs.get(key) ?? this.create(owner, admission);
+    if (!this.jobs.has(key) && (owner.deadline < Date.now() || owner.deadline > Date.now() + CANCEL_FENCE_MS)) return { settled: true };
+    // A deadline run() refused today becomes admissible later, so the
+    // tombstone may extend past the run bound.
+    const job = this.jobs.get(key) ?? this.create(owner, admission, CANCEL_FENCE_MS);
     job.controller.abort(new Error("Design preview cancelled."));
     if (job.cancelQueued) {
       this.pending = this.pending.filter((candidate) => candidate !== job);
