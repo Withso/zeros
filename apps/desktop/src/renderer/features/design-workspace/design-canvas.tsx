@@ -219,7 +219,7 @@ import { useDesignHistoryGeometryPreview, useDesignHistorySelection } from "./st
 import { useDesignFramePreparation } from "./state/use-design-frame-preparation";
 import { designBackgroundWork } from "./state/design-background-work";
 import { designSourceTiles } from "./design-source-tiles";
-import { activeDesignPreviewDemand, designPreviewDemandItems, type DesignPreviewLevel } from "./state/design-frame-previews";
+import { activeDesignPreviewDemand, designPreviewCovers, designPreviewDemandItems, type DesignPreviewLevel } from "./state/design-frame-previews";
 import {
   useDesignFramePictured,
   useDesignFramePreviewDemand,
@@ -274,7 +274,7 @@ import {
 } from "./state/design-workspace-ui";
 import { useDesignFoundation } from "./state/use-design-foundation";
 
-import { DesignFrameRenderSurface } from "./design-frame-render-surface";
+import { DesignFrameCover, DesignFrameRenderSurface } from "./design-frame-render-surface";
 import { hasAsyncCanvasWheel } from "../../platform/runtime";
 import { createDesignGestureFrameClock } from "./design-gesture-frame-clock";
 import { useDesignSavedEditing } from "./design-saved-editing";
@@ -1373,9 +1373,17 @@ export const DesignCanvas = React.memo(function DesignCanvas({
     for (const item of previewItems) if (!levels.has(item.file)) levels.set(item.file, item.level);
     return levels;
   }, [previewItems]);
+  // Frames with no prepared generation at all (every frame right after the
+  // app starts) paint their newest stored picture at once.
+  const previewCovers = useMemo(
+    () => designPreviewCovers({ frames: mountedFrames.filter(frame => !isPreparedDesignFrame(frame) && !frame.previous),
+      zoom: admissionView.zoom, devicePixelRatio }),
+    [admissionView.zoom, devicePixelRatio, mountedFrames],
+  );
+  const coverLevels = useMemo(() => new Map(previewCovers.map(cover => [cover.file, cover.level])), [previewCovers]);
   const previewDemand = useMemo(
-    () => activeDesignPreviewDemand(active, previewOwner, frameTheme, previewItems),
-    [active, frameTheme, previewItems, previewOwner],
+    () => activeDesignPreviewDemand(active, previewOwner, frameTheme, previewItems, previewCovers),
+    [active, frameTheme, previewCovers, previewItems, previewOwner],
   );
   useDesignFramePreviewDemand(previewDemand);
   // A zoom-in's first source paint would otherwise create the shared GPU
@@ -7649,7 +7657,10 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                 className={cn("pointer-events-none absolute", description.kind === "text" ? "invisible" : "bg-bg1")}
                 style={{ left: description.x, top: description.y, width: description.width, height: description.height,
                   zIndex: description.z }}
-              />
+              >
+                {previewOwner && active ? <DesignFrameCover owner={previewOwner} file={description.file} theme={frameTheme}
+                  level={coverLevels.get(description.file) ?? "thumbnail"} /> : null}
+              </DesignPreparingFrame>
             );
             const framePlaying = currentPlayback?.file === frame.file;
             const paintedFrame = frameGeometryPreviewsRef.current.get(

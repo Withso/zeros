@@ -14,6 +14,7 @@ import {
   activeDesignPreviewDemand,
   createDesignFramePicturedReader,
   designFrameAutoCapture,
+  designPreviewCovers,
   designPreviewDemandItems,
   designPreviewFrameKey,
   designPreviewKey,
@@ -237,6 +238,41 @@ it("asks a dense page's off-screen neighbours for mini covers and its visible fr
 it("chooses the smallest level that stays sharp for the painted size", () => {
   expect([1, 64, 65, 128, 129, 384, 385].map(designPreviewLevelFor))
     .toEqual(["mini", "mini", "thumbnail", "thumbnail", "overview", "overview", "detail"]);
+});
+
+it("paints a frame's newest stored picture at once while its generation is unknown, rendering nothing for it", async () => {
+  const store = memoryStore();
+  // A previous session pictured a.html at generation 1.
+  const first = harness({ store });
+  first.previews.setDemand(first.token, { owner: local, theme: "dark", items: [{ file: "a.html", sourceVersion: version(1), level: "thumbnail", live: false }] });
+  await first.settle();
+  expect(first.renders).toHaveLength(1);
+  // The app restarts: memory is empty and no identity is prepared yet.
+  const h = harness({ store });
+  const cover = { owner: local, file: "a.html", sourceVersion: "", theme: "dark", level: "thumbnail" as const };
+  h.previews.setDemand(h.token, activeDesignPreviewDemand(true, local, "dark", [], [{ file: "a.html", level: "thumbnail" }]));
+  await h.settle();
+  expect(h.renders).toHaveLength(0);
+  expect(h.previews.picture(cover)).toMatchObject({ sourceVersion: version(1), level: "thumbnail", current: false });
+  // Another theme or frame of the same owner never borrows it.
+  expect(h.previews.picture({ ...cover, theme: "light" })).toBeNull();
+  expect(h.previews.picture({ ...cover, file: "b.html" })).toBeNull();
+  // Preparation confirms generation 1: the same picture becomes current, no render.
+  h.previews.setDemand(h.token, { owner: local, theme: "dark", items: [{ file: "a.html", sourceVersion: version(1), level: "thumbnail", live: false }] });
+  await h.settle();
+  expect(h.renders).toHaveLength(0);
+  expect(h.previews.picture({ ...cover, sourceVersion: version(1) })?.current).toBe(true);
+  // A changed frame renders its new generation; the old cover holds until then.
+  h.previews.setDemand(h.token, { owner: local, theme: "dark", items: [{ file: "a.html", sourceVersion: version(2), level: "thumbnail", live: false }] });
+  await h.settle();
+  expect(h.renders.map(row => row.sourceVersion)).toEqual([version(2)]);
+  expect(h.previews.picture({ ...cover, sourceVersion: version(2) })?.current).toBe(true);
+});
+
+it("chooses each unknown-generation cover's level from its painted size, never above overview", () => {
+  const frames = [{ file: "small.html", width: 1440, height: 900 }, { file: "big.html", width: 1440, height: 900 }];
+  expect(designPreviewCovers({ frames: frames.slice(0, 1), zoom: 0.02, devicePixelRatio: 2 })).toEqual([{ file: "small.html", level: "mini" }]);
+  expect(designPreviewCovers({ frames: frames.slice(1), zoom: 1, devicePixelRatio: 2 })).toEqual([{ file: "big.html", level: "overview" }]);
 });
 
 it("discards opaque legacy previews on restart without discarding current-format pictures", async () => {

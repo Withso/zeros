@@ -96,6 +96,17 @@ function DesignFramePicture({ image, url, current, screenshot }: {
   return <div ref={host} data-design-frame-pixel-cover="" className="pointer-events-none absolute inset-0" />;
 }
 
+/** The newest stored picture of a frame whose generation is not known yet
+ * (its identity is still being prepared). It paints at once as an unchecked
+ * cover; the prepared frame's own surface confirms or replaces it, reusing
+ * the same decoded image. */
+export function DesignFrameCover({ owner, file, theme, level }: {
+  owner: DesignPreviewOwner; file: string; theme: string | null; level: DesignPreviewLevel;
+}) {
+  const picture = useDesignFramePreview({ owner, file, sourceVersion: "", theme, level });
+  return picture ? <DesignFramePicture image={picture.image} url={picture.url} current={false} /> : null;
+}
+
 // ============================================
 // COMPONENT: DesignFrameRenderSurface
 // PURPOSE: Swap far frame runtimes for exact-generation raster snapshots
