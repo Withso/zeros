@@ -11,6 +11,7 @@ import {
   designCaptureRasterSize,
   type DesignBatchCaptureRequest,
 } from "@zeros/protocol/design-capture";
+import { MAX_BRIDGE_FRAME_BYTES } from "@zeros/protocol/schemas";
 import { setDesignCaptureConfig } from "../capture-client";
 import { DesignCaptureAdmission } from "../capture-admission";
 import { assertDesignBatchStylesheets, startDesignCaptureService, type DesignCaptureService } from "../capture-service";
@@ -65,8 +66,11 @@ describe("batch Design thumbnails", () => {
   };
   const versions = async (files: string[]) => {
     const navigation = await readDesignNavigationSnapshot(root);
-    const prepared = await prepareDesignNavigationFrames(root, navigation.catalogRevision, files);
-    return new Map(prepared.frames.map((entry) => [entry.file, entry.sourceVersion!]));
+    const versions = new Map<string, string>();
+    for (let start = 0; start < files.length; start += 16)
+      for (const entry of (await prepareDesignNavigationFrames(root, navigation.catalogRevision, files.slice(start, start + 16))).frames)
+        versions.set(entry.file, entry.sourceVersion!);
+    return versions;
   };
   const input = (frames: Array<{ file: string; sourceVersion: string }>, maxDimension = 128) =>
     ({ workspaceId: "w", directoryId, theme: null, colorScheme: "light" as const, maxDimension, frames });
@@ -242,6 +246,23 @@ describe("batch Design thumbnails", () => {
       ["page-1/b.html", current.get("page-1/b.html"), 128, 80],
     ]);
     expect(renderBatch).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps its reply within one bridge frame, deferring pictures past the budget without capturing more", async () => {
+    const files = Array.from({ length: 30 }, (_, index) => `page-1/g${index}.html`);
+    for (const file of files) await writeFile(path.join(folder, file), frame(file, "hero"));
+    await register(files);
+    const current = await versions(files);
+    const capture = vi.fn(async (request: DesignBatchCaptureRequest) => ({ version: 1 as const, revision: request.revision, renderer: "big",
+      // Near the host's 1 MiB PNG bound: a noisy detail picture.
+      items: request.items.map((item) => ({ id: item.id, width: 1280, height: 800, data: "A".repeat(1_300_000) })) }));
+    const reply = await renderDesignThumbnails(root, input(files.map((file) => ({ file, sourceVersion: current.get(file)! })), 1280), { capture });
+    expect(JSON.stringify(reply).length).toBeLessThan(MAX_BRIDGE_FRAME_BYTES - 1024 * 1024);
+    expect(reply.pictures.length).toBeGreaterThan(0);
+    expect([...reply.pictures.map((picture) => picture.file), ...reply.deferred.map((frame) => frame.file)].sort()).toEqual([...files].sort());
+    expect(reply.deferred).toContainEqual({ file: files.at(-1), sourceVersion: current.get(files.at(-1)!) });
+    // Batches after the budget is spent are not captured at all.
+    expect(capture.mock.calls.length).toBeLessThan(Math.ceil(files.length / Math.floor(DESIGN_BATCH_CAPTURE_PIXELS / (1280 * 1280))));
   });
 
   it("fails frames a reply leaves out, names by path, or a restarted renderer drew, keeping the first pipeline", async () => {
