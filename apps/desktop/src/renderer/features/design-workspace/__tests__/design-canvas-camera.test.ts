@@ -272,3 +272,25 @@ it("paints a camera change that compacts frame controls once, never again for it
     expect(result).toEqual({ count: 1, compact: true });
   } finally { await page.close(); }
 });
+
+it("holds frame chrome scale through small steps of a live camera gesture and settles it exactly at rest", async () => {
+  // Rewriting every visible frame's scale on each zoom step restyled every
+  // frame subtree per frame; small drifts inside a gesture are not visible.
+  const page = await open();
+  try {
+    const inverse = () => page.locator('[data-design-frame="near"]').evaluate(element =>
+      Number(getComputedStyle(element).getPropertyValue("--design-canvas-inverse-zoom")));
+    await paint(page, 2, 0, 500);
+    expect(await inverse()).toBeCloseTo(0.5);
+    await paint(page, 2.1);
+    expect(await inverse()).toBeCloseTo(0.5);
+    // A large step inside the gesture is written at once.
+    await paint(page, 3);
+    expect(await inverse()).toBeCloseTo(1 / 3);
+    await paint(page, 3.2);
+    expect(await inverse()).toBeCloseTo(1 / 3);
+    // At rest every frame has its exact scale.
+    await page.evaluate(() => (window as any).camera.paintDesignCanvasCamera(document.querySelector("#world"), { zoom: 3.2, panX: 0, panY: 0 }, false));
+    expect(await inverse()).toBeCloseTo(1 / 3.2);
+  } finally { await page.close(); }
+});
