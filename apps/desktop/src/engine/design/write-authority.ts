@@ -19,6 +19,11 @@ export function assertDesignWriteAuthorized(): void {
   authority.getStore()?.();
 }
 
+/** Writes may share a lock turn only under the same scoped authority. */
+export function currentDesignWriteAuthority(): (() => void) | undefined {
+  return authority.getStore();
+}
+
 /** A durable journal was already admitted. Revocation cannot strand its
  * recovery halfway through a multi-file transaction. */
 export function finishAdmittedDesignWrite<T>(

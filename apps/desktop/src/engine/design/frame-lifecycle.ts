@@ -90,6 +90,8 @@ import { legacyFrameId } from "./canvas-file";
 import { isDeepStrictEqual } from "node:util";
 import { assertDesignFrameRestorePage, designFramePage, designPageForWrite, designPageFrameFiles } from "./pages";
 import { assertDesignPageHasRoom } from "./frame-limits";
+import { currentDesignWriteAuthority } from "./write-authority";
+import { portableDesignName } from "@zeros/protocol/design-path";
 import { DESIGN_MAX_FRAMES_PER_PAGE } from "@zeros/protocol/design-pages";
 import { designTitleSlug } from "./design-naming";
 import {
@@ -99,93 +101,175 @@ import {
 } from "@zeros/protocol/design-relocation";
 import { assertDesignRelocationSource, designRelocationFlowRootStyles, designRelocationRootStyles } from "./relocation-source";
 
+export interface DesignFrameCreateInput {
+  title?: string;
+  pageId?: string;
+  geometry?: Partial<DesignFrameGeometry>;
+  seed?: {
+    kind: "text";
+    nodeId: string;
+    text: string;
+    fixedSize: boolean;
+  };
+}
+
+interface PendingFrameCreate {
+  input: DesignFrameCreateInput;
+  resolve: (created: { frame: DesignFrameSummary; restorePoint: DesignFrameRestorePoint }) => void;
+  reject: (error: unknown) => void;
+}
+
+/** Creates that arrive while an earlier create waits for the document lock
+ * share its turn and one canvas write: a large canvas is rewritten whole on
+ * every commit. Agent calls carry their own write authority and never join. */
+const frameCreateBatches = new Map<string, { requests: PendingFrameCreate[]; sealed: boolean }>();
+let frameCreateBatchCount = 0;
+
+export function designFrameCreateBatchesForTests(): number {
+  return frameCreateBatchCount;
+}
+
 export async function createDesignFrame(
   workspacePath: string,
-  input: {
-    title?: string;
-    pageId?: string;
-    geometry?: Partial<DesignFrameGeometry>;
-    seed?: {
-      kind: "text";
-      nodeId: string;
-      text: string;
-      fixedSize: boolean;
-    };
-  } = {},
+  input: DesignFrameCreateInput = {},
 ): Promise<DesignFrameSummary> {
-  return withDocumentWrite(workspacePath, async () => {
-    await initializeDesignDocumentUnlocked(workspacePath);
-    const directory = designDirectory(workspacePath);
-    const canvas = await readCanvas(workspacePath);
-    const page = designPageForWrite(canvas, input.pageId);
-    assertDesignPageHasRoom(page.title, designPageFrameFiles(canvas, page).length);
-    const folder = page.folder;
-    const title = input.title?.trim().slice(0, 120) || "Frame";
-    const base = designTitleSlug(title, { maxLength: 72, fallback: "frame" });
-    let file = folder ? `${folder}/${base}.html` : `${base}.html`;
-    for (let suffix = 2; existsSync(path.join(directory, file)); suffix++) {
-      file = folder ? `${folder}/${base}-${suffix}.html` : `${base}-${suffix}.html`;
+  return (await createDesignFrameWithRestorePoint(workspacePath, input)).frame;
+}
+
+/** The restore point is the exact committed frame, for creation history. */
+export function createDesignFrameWithRestorePoint(
+  workspacePath: string,
+  input: DesignFrameCreateInput = {},
+): Promise<{ frame: DesignFrameSummary; restorePoint: DesignFrameRestorePoint }> {
+  return new Promise((resolve, reject) => {
+    const request = { input, resolve, reject };
+    const key = JSON.stringify([path.resolve(workspacePath), designDirectoryNameFor(workspacePath)]);
+    const shared = !currentDesignWriteAuthority();
+    const open = shared ? frameCreateBatches.get(key) : undefined;
+    if (open && !open.sealed) {
+      open.requests.push(request);
+      return;
     }
-    const oid = `f-${createHash("sha256")
-      .update(`${file}:${Date.now()}:${randomUUID()}`)
-      .digest("hex")
-      .slice(0, 8)}`;
-    const automaticGeometry = nextFrameGeometry(designPageFrameFiles(canvas, page).map(file => canvas.frames[file]!), {
-      width: DEFAULT_FRAME_WIDTH,
-      height: DEFAULT_FRAME_HEIGHT,
+    const batch = { requests: [request], sealed: false };
+    if (shared) frameCreateBatches.set(key, batch);
+    withDocumentWrite(workspacePath, async () => {
+      batch.sealed = true;
+      if (frameCreateBatches.get(key) === batch) frameCreateBatches.delete(key);
+      await createDesignFramesUnlocked(workspacePath, batch.requests);
+    }).catch((error: unknown) => {
+      if (frameCreateBatches.get(key) === batch) frameCreateBatches.delete(key);
+      for (const pending of batch.requests) pending.reject(error);
     });
-    const geometry = input.geometry
-      ? normalizeGeometry(input.geometry, automaticGeometry)
-      : automaticGeometry;
-    const textSeed = input.seed;
-    if (textSeed && textSeed.text.length > 10_000) {
-      throw new Error("Design text is too long.");
-    }
-    const source = textSeed
-      ? TEXT_FRAME_SEED(
-          title,
-          assertDesignNodeId(textSeed.nodeId),
-          textSeed.text,
-          geometry.w,
-          geometry.h,
-          textSeed.fixedSize,
-          folder ? "../tokens.css" : "./tokens.css",
-        )
-      : FRAME_SEED(
-          title,
-          oid,
-          geometry.w,
-          geometry.h,
-          folder ? "../tokens.css" : "./tokens.css",
-          // With synced app styles the frame shows the app's page background.
-          readDesignStyleSourceCatalog(canvas).declarations.length > 0,
-        );
-    canvas.frames[file] = geometry;
-    canvas.frame_info[file] = { id: `frame_${randomUUID().replace(/-/g, "")}`, title, kind: textSeed ? "text" : "frame" };
-    await writeCanvas(workspacePath, canvas, [
-      {
+  });
+}
+
+async function createDesignFramesUnlocked(
+  workspacePath: string,
+  requests: readonly PendingFrameCreate[],
+): Promise<void> {
+  await initializeDesignDocumentUnlocked(workspacePath);
+  const directory = designDirectory(workspacePath);
+  const canvas = await readCanvas(workspacePath);
+  const styledFrames = readDesignStyleSourceCatalog(canvas).declarations.length > 0;
+  const reserved = new Set<string>();
+  const sourceChanges: DesignStorageChange[] = [];
+  const created: Array<{ request: PendingFrameCreate; frame: Omit<DesignFrameSummary, "modifiedAt">; restorePoint: DesignFrameRestorePoint }> = [];
+  for (const request of requests) {
+    try {
+      const { input } = request;
+      const page = designPageForWrite(canvas, input.pageId);
+      assertDesignPageHasRoom(page.title, designPageFrameFiles(canvas, page).length);
+      const folder = page.folder;
+      const title = input.title?.trim().slice(0, 120) || "Frame";
+      const base = designTitleSlug(title, { maxLength: 72, fallback: "frame" });
+      const taken = (file: string) =>
+        reserved.has(portableDesignName(file)) || existsSync(path.join(directory, file));
+      let file = folder ? `${folder}/${base}.html` : `${base}.html`;
+      for (let suffix = 2; taken(file); suffix++) {
+        file = folder ? `${folder}/${base}-${suffix}.html` : `${base}-${suffix}.html`;
+      }
+      const oid = `f-${createHash("sha256")
+        .update(`${file}:${Date.now()}:${randomUUID()}`)
+        .digest("hex")
+        .slice(0, 8)}`;
+      const automaticGeometry = nextFrameGeometry(designPageFrameFiles(canvas, page).map(file => canvas.frames[file]!), {
+        width: DEFAULT_FRAME_WIDTH,
+        height: DEFAULT_FRAME_HEIGHT,
+      });
+      const geometry = input.geometry
+        ? normalizeGeometry(input.geometry, automaticGeometry)
+        : automaticGeometry;
+      const textSeed = input.seed;
+      if (textSeed && textSeed.text.length > 10_000) {
+        throw new Error("Design text is too long.");
+      }
+      const source = textSeed
+        ? TEXT_FRAME_SEED(
+            title,
+            assertDesignNodeId(textSeed.nodeId),
+            textSeed.text,
+            geometry.w,
+            geometry.h,
+            textSeed.fixedSize,
+            folder ? "../tokens.css" : "./tokens.css",
+          )
+        : FRAME_SEED(
+            title,
+            oid,
+            geometry.w,
+            geometry.h,
+            folder ? "../tokens.css" : "./tokens.css",
+            // With synced app styles the frame shows the app's page background.
+            styledFrames,
+          );
+      const kind = textSeed ? "text" : "frame";
+      const metadata = { id: `frame_${randomUUID().replace(/-/g, "")}`, title, kind } as const;
+      reserved.add(portableDesignName(file));
+      canvas.frames[file] = geometry;
+      canvas.frame_info[file] = { ...metadata };
+      sourceChanges.push({
         file: `${designDirectoryNameFor(workspacePath)}/${file}`,
         before: null,
         after: source,
-      },
-    ]);
-    const info = await stat(path.join(directory, file));
-    return {
-      file,
-      frameId: canvas.frame_info[file]!.id,
-      pageId: page.id,
-      title,
-      kind: textSeed ? "text" : "frame",
-      width: geometry.w,
-      height: geometry.h,
-      x: geometry.x,
-      y: geometry.y,
-      z: geometry.z,
-      nodeCount: 1,
-      layerCount: textSeed ? 1 : 0,
-      modifiedAt: info.mtimeMs,
-    };
-  });
+      });
+      created.push({
+        request,
+        frame: {
+          file,
+          frameId: metadata.id,
+          pageId: page.id,
+          title,
+          kind,
+          width: geometry.w,
+          height: geometry.h,
+          x: geometry.x,
+          y: geometry.y,
+          z: geometry.z,
+          nodeCount: 1,
+          layerCount: textSeed ? 1 : 0,
+        },
+        restorePoint: { file, pageId: page.id, source, geometry: { ...geometry }, metadata: { ...metadata } },
+      });
+    } catch (error) {
+      request.reject(error);
+    }
+  }
+  if (created.length === 0) return;
+  frameCreateBatchCount++;
+  try {
+    await writeCanvas(workspacePath, canvas, sourceChanges);
+  } catch (error) {
+    for (const { request } of created) request.reject(error);
+    return;
+  }
+  for (const { request, frame, restorePoint } of created) {
+    try {
+      const info = await stat(path.join(directory, frame.file));
+      request.resolve({ frame: { ...frame, modifiedAt: info.mtimeMs }, restorePoint });
+    } catch (error) {
+      request.reject(error);
+    }
+  }
 }
 
 
@@ -195,9 +279,10 @@ export { healDesignOids } from "./node-identities";
 export async function designFrameTarget(
   workspacePath: string,
   frame: string,
+  context?: DesignCanvasReadContext,
 ): Promise<{ file: string; target: string }> {
   const file = assertFrameFile(frame);
-  if (!(await discoverFrameFiles(workspacePath)).includes(file)) {
+  if (!(await discoverFrameFiles(workspacePath, context)).includes(file)) {
     throw new Error(`Design frame not found: ${file}`);
   }
   return {
@@ -526,14 +611,15 @@ async function designFrameRestorePointUnlocked(
   frame: string,
 ): Promise<{ target: string; restorePoint: DesignFrameRestorePoint }> {
   const file = assertFrameFile(frame);
-  const { target } = await designFrameTarget(workspacePath, file);
+  const context = await readCanvasContext(workspacePath);
+  const { target } = await designFrameTarget(workspacePath, file, context);
   const source = await readBoundedDesignFrameSource(workspacePath, file);
+  const canvas = context.canvas;
   const meta = readFrameMeta(
     parse(source, { sourceCodeLocationInfo: true }),
     file,
-    await readCanvas(workspacePath),
+    canvas,
   );
-  const canvas = await readCanvas(workspacePath);
   const geometry = canvas.frames[file] ?? {
     x: 0,
     y: 0,
