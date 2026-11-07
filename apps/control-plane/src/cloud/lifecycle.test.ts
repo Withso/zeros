@@ -671,6 +671,32 @@ describe("cloud v2 lifecycle", () => {
     } finally { await stop(); vi.useRealTimers(); }
   });
 
+  it("treats a quick Computer build check as idle but keeps the fast cadence while a build runs", async () => {
+    vi.useFakeTimers();
+    let release!: () => void;
+    const running = new Promise<void>(resolve => { release = resolve; });
+    let checks = 0;
+    const builds = { tick: vi.fn(() => ++checks === 3 ? running : new Promise<void>(resolve => setTimeout(resolve, 50))), close: vi.fn() };
+    const f = setup([], { builds });
+    const stop = f.lifecycle.start();
+    try {
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(builds.tick).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(58_000);
+      expect(builds.tick).toHaveBeenCalledTimes(1);
+      // The idle minute starts once the 50 ms check has settled.
+      await vi.advanceTimersByTimeAsync(2_100);
+      expect(builds.tick).toHaveBeenCalledTimes(2);
+      f.lifecycle.wake();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(builds.tick).toHaveBeenCalledTimes(3);
+      // The sweep that starts the build waits its one-second settle, then 2 s each.
+      await vi.advanceTimersByTimeAsync(5_100);
+      expect(f.store.idleSince).toHaveBeenCalledTimes(5);
+      release();
+    } finally { release(); await stop(); vi.useRealTimers(); }
+  });
+
   it("sweeps when a deferred step falls due rather than a minute later", async () => {
     vi.useFakeTimers();
     const f = setup([]);
