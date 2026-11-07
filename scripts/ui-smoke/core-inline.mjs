@@ -1916,10 +1916,24 @@ export async function runDiffFilesSmoke({
   );
 
   check(
-    "Markdown Preview wraps unbroken text and code",
+    "Markdown Preview keeps unbroken text and code inside its column",
     await page
       .getByTestId("markdown-preview-host")
       .evaluate((el) => el.scrollWidth <= el.clientWidth + 1),
+  );
+  const markdownPreview = await page
+    .getByTestId("markdown-preview-host")
+    .evaluate((el) => ({
+      prose: getComputedStyle(el.querySelector(".zeros-md-prose p")).fontSize,
+      codeCard: el.querySelectorAll(".zeros-md-codeblock").length,
+      plainPre: el.querySelectorAll(".zeros-md-prose pre").length,
+    }));
+  check(
+    "Markdown Preview reads like the chat: 15px prose, fences as code cards",
+    markdownPreview.prose === "15px" &&
+      markdownPreview.codeCard === 1 &&
+      markdownPreview.plainPre === 0,
+    JSON.stringify(markdownPreview),
   );
 
   // Modern manifests must use the same dedicated section as legacy documents.

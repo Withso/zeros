@@ -205,11 +205,16 @@ exported page by page to [design-implementation/](design-implementation/README.m
     name (its command or its file, on a 20px chip), code blocks, inline code,
     tables, every tool detail including the markdown inside one, and the
     chrome's headers, popover titles and menu rows. The plan keeps the reading
-    size inside its detail (`zeros-agent-md--document`), markdown outside the
-    chat keeps 14px (`zeros-agent-md--panel`), labels and metadata stay 12px,
-    keys 11px, and dialog titles keep their own 15px token. The Agent chat
-    page's Type frames draw every case. `features/agent/__tests__/chat-reading-type.test.ts`,
+    size inside its detail (`zeros-agent-md--document`), review markdown
+    outside the chat keeps 14px (`zeros-agent-md--panel`), labels and
+    metadata stay 12px, keys 11px, and dialog titles keep their own 15px
+    token. A Markdown file in the Files tab reads exactly like an answer:
+    its preview renders through the chat's markdown, fences as the same
+    highlighted code cards, and leaves file references as plain code and
+    links because nothing there opens them. The Agent chat page's Type
+    frames draw every case. `features/agent/__tests__/chat-reading-type.test.ts`,
     `features/agent/__tests__/agent-markdown-sizes.test.ts`,
+    `shell/workbench/tabs/__tests__/markdown-preview.test.ts`,
     `features/agent/__tests__/prompt-fold.test.ts`,
     `scripts/ui-smoke-composer-prompt-fold.mjs` and
     `scripts/ui-smoke-tool-presentation.mjs` hold it.
@@ -343,8 +348,10 @@ Page titles use `text-base` / `text-lg`. **Reading text** in the chat is
 messages, the composer, thinking and notices; the transcript's one-line rows
 add `leading-5` so they stay 28px. Agent markdown
 (`.zeros-agent-md`) sets its prose from `--agent-md-text` at a 1.65 line
-height: the reading size in the chat, 13px inside a tool detail, the reading
-size for the plan (`--document`) and 14px outside the chat (`--panel`). Its
+height: the reading size in the chat and the Files tab's Markdown preview,
+13px inside a tool detail, the reading size for the plan
+(`zeros-agent-md--document`) and 14px in the Review tab and review threads
+(`zeros-agent-md--panel`). Its
 other steps live in `styles/global/runtime-content.css`: headings 20 and 16,
 code blocks, inline code and tables 13, captions and keys 12.
 

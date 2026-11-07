@@ -74,9 +74,6 @@
       },
       "apps/desktop/src/renderer/shell/workbench/tabs/browser-tab.tsx": {
         "rounded-[2px]": 2
-      },
-      "apps/desktop/src/renderer/shell/workbench/tabs/file-viewer.tsx": {
-        "text-[0.85em]": 1
       }
     },
     "ignore-directive": {
@@ -229,11 +226,6 @@
       "apps/desktop/src/renderer/shell/terminal/terminal-workbench-layout.tsx": {
         "pr-16": 1,
         "pr-9": 1
-      }
-    },
-    "off-scale-text": {
-      "apps/desktop/src/renderer/shell/workbench/tabs/file-viewer.tsx": {
-        "text-xl": 1
       }
     },
     "raw-control": {

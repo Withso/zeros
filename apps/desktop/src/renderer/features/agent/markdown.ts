@@ -182,8 +182,9 @@ function wrapTablesInScroller(html: string): string {
 // `{type:"code"}` segment the renderer mounts as a component. Code nested
 // inside a list / blockquote is NOT a top-level token, so it stays inline in
 // the prose HTML (styled <pre>) and its surrounding structure is preserved.
-// renderMarkdown (string) is left untouched for its other callers (file
-// viewer .md preview, plan-mode + subagent cards).
+// The Files tab's `.md` preview renders the same segments without file chips;
+// renderMarkdown (string) is left untouched for its other callers (plan-mode
+// + subagent cards).
 
 export type MarkdownSegment =
   | { type: "html"; html: string }
@@ -249,12 +250,17 @@ function markdownSegmentInput(text: string): string {
     : text;
 }
 
-export function renderMarkdownSegments(text: string): MarkdownSegment[] {
+/** `fileReferences: false` keeps inline code and file links as written, for a
+ *  surface where nothing opens a file chip. */
+export function renderMarkdownSegments(
+  text: string,
+  { fileReferences = true }: { fileReferences?: boolean } = {},
+): MarkdownSegment[] {
   if (!text) return [];
-  return renderMarkdownTokenSegments(marked.lexer(markdownSegmentInput(text)));
+  return renderMarkdownTokenSegments(marked.lexer(markdownSegmentInput(text)), fileReferences);
 }
 
-function renderMarkdownTokenSegments(tokens: TokensList): MarkdownSegment[] {
+function renderMarkdownTokenSegments(tokens: TokensList, fileReferences = true): MarkdownSegment[] {
   const segments: MarkdownSegment[] = [];
   let prose: Token[] = [];
   const flushProse = () => {
@@ -267,7 +273,7 @@ function renderMarkdownTokenSegments(tokens: TokensList): MarkdownSegment[] {
     const html = wrapTablesInScroller(sanitizeProse(marked.parser(slice)));
     segments.push({
       type: "html",
-      html: linkifyFilePaths(html),
+      html: fileReferences ? linkifyFilePaths(html) : html,
     });
     prose = [];
   };

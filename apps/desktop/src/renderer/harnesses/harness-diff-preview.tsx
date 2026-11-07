@@ -18,7 +18,7 @@ async function main() {
   const { TurnFileRow } = await import("../features/agent/turn-footer");
   const { CodeEditor } = await import("../shell/workbench/tabs/code-editor");
   const { MarkdownPreview } =
-    await import("../shell/workbench/tabs/file-viewer");
+    await import("../shell/workbench/tabs/markdown-preview");
   const { primeWorkspaceFileDiff, primeWorkspaceFileRead } =
     await import("../shell/workspace-file-data-cache");
   const { WorkspaceFileTree } =
@@ -409,10 +409,11 @@ async function main() {
           <DesignFilesFixture />
           <div
             data-testid="markdown-preview-host"
+            data-zeros-root=""
             className="h-[180px] w-[450px] overflow-x-hidden overflow-y-auto"
           >
             <MarkdownPreview
-              html={`<p>${"unbroken-preview-token".repeat(80)}</p><pre><code>${newLine}</code></pre>`}
+              markdown={`${"unbroken-preview-token".repeat(80)}\n\n\`\`\`ts\n${newLine}\n\`\`\`\n`}
             />
           </div>
           {separatorEdits.map(({ provider, message }) => (

@@ -38,7 +38,6 @@ import {
 } from "lucide-react";
 import { isGitErrorShape } from "@/renderer/platform/git";
 import { FileTypeIcon } from "@/renderer/features/agent/composer-editor/file-type-icon";
-import { renderMarkdown } from "@/renderer/features/agent/markdown";
 import {
   ReviewDiffView,
   ReviewSourceView,
@@ -111,6 +110,7 @@ import { statusForGeneration } from "./changes-tab";
 import type { SkillSource } from "../../../platform/skill-source";
 import { Inline } from "@/renderer/shared/ui/layout/inline";
 import { FileMediaPreview } from "./file-media-preview";
+import { MarkdownPreview } from "./markdown-preview";
 import { fileMediaType } from "@zeros/protocol/file-media";
 const FilePdfPreview = React.lazy(() => import("./file-pdf-preview").then(module => ({ default: module.FilePdfPreview })));
 const FileWordPreview = React.lazy(() => import("./file-word-preview").then(module => ({ default: module.FileWordPreview })));
@@ -658,10 +658,6 @@ export function FileViewer({
         );
       });
   }, [workspaceId, cwd, path, discardTarget, dispatch, isNewFile]);
-  const previewHtml = useMemo(
-    () => (previewShown ? renderMarkdown(result?.content ?? "") : null),
-    [previewShown, result],
-  );
 
   const canCopy = isText && result.content != null;
   const isMedia = result?.kind === "image" || result?.kind === "video";
@@ -886,12 +882,12 @@ export function FileViewer({
                   active={active}
                 />
               ))}
-            {previewShown && previewHtml !== null && (
+            {previewShown && (
               <div
                 ref={previewScrollRef}
                 className="h-full overflow-x-hidden overflow-y-auto px-5 py-4"
               >
-                <MarkdownPreview html={previewHtml} />
+                <MarkdownPreview markdown={result?.content ?? ""} />
               </div>
             )}
             {sourceShown && sourceReadOnly && (
@@ -1042,37 +1038,6 @@ function ReadOnlySource({
       active={active}
       onScroller={setScroller}
       conflictRows={conflictRows}
-    />
-  );
-}
-
-// ── Markdown preview ───────────────────────────────────────
-
-/** A centred reading column; prose keeps the chat's 14px reading size. */
-export function MarkdownPreview({ html }: { html: string }) {
-  return (
-    <div
-      className={cn(
-        "text-fg1 mx-auto max-w-3xl min-w-0 select-text text-sm leading-relaxed wrap-anywhere",
-        "[&_h1]:mt-6 [&_h1]:mb-3 [&_h1]:text-xl [&_h1]:font-semibold first:[&_h1]:mt-0",
-        "[&_h2]:mt-6 [&_h2]:mb-2 [&_h2]:text-lg [&_h2]:font-semibold",
-        "[&_h3]:mt-4 [&_h3]:mb-2 [&_h3]:text-base [&_h3]:font-semibold",
-        "[&_p]:my-3",
-        "[&_ul]:my-3 [&_ul]:list-disc [&_ul]:pl-6",
-        "[&_ol]:my-3 [&_ol]:list-decimal [&_ol]:pl-6",
-        "[&_li]:my-1",
-        "[&_a]:underline [&_a]:underline-offset-2",
-        "[&_code]:bg-bg2 [&_code]:rounded-sm [&_code]:px-1 [&_code]:py-0.5 [&_code]:font-mono [&_code]:text-[0.85em]",
-        "[&_pre]:bg-bg2/40 [&_pre]:my-3 [&_pre]:overflow-x-hidden [&_pre]:rounded-lg [&_pre]:p-3 [&_pre]:break-words [&_pre]:whitespace-pre-wrap",
-        "[&_pre_code]:bg-transparent [&_pre_code]:p-0 [&_pre_code]:break-words [&_pre_code]:whitespace-pre-wrap",
-        "[&_blockquote]:border-border2 [&_blockquote]:text-fg2 [&_blockquote]:my-3 [&_blockquote]:border-l-2 [&_blockquote]:pl-3",
-        "[&_table]:my-3 [&_table]:w-full [&_table]:table-fixed [&_table]:border-collapse",
-        "[&_th]:border-border1 [&_th]:border [&_th]:px-2 [&_th]:py-1 [&_th]:text-left [&_th]:wrap-anywhere",
-        "[&_td]:border-border1 [&_td]:border [&_td]:px-2 [&_td]:py-1 [&_td]:wrap-anywhere",
-        "[&_hr]:border-border1 [&_hr]:my-5",
-        "[&_img]:max-w-full",
-      )}
-      dangerouslySetInnerHTML={{ __html: html }}
     />
   );
 }

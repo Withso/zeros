@@ -1051,3 +1051,14 @@ Each landed step appends one line: date, workstream, what landed, evidence.
   `chat-reading-type.test.ts` and `agent-markdown-sizes.test.ts` failed red
   first (the second measures the cascade in Chromium and fails on the old
   stylesheet).
+- 2026-11-07 · 5 · A Markdown file in the Files tab reads like an agent
+  answer: its preview (`shell/workbench/tabs/markdown-preview.tsx`) renders
+  through the chat's markdown, `.zeros-agent-md` at the reading size with
+  fences as the chat's highlighted code cards, replacing its own 14px
+  document styles. File references stay plain code and links
+  (`renderMarkdownSegments(text, { fileReferences: false })`) because nothing
+  in the preview opens a file chip. The Files tab's Markdown preview board
+  draws it with the chat kit (canvas version 395). Evidence:
+  `markdown-preview.test.ts` failed red first; the diff and files smoke
+  measures 15px prose and one code card in the preview, and the
+  text-selection smoke still selects its text.

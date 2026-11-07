@@ -106,7 +106,8 @@
    no JSX source so Tailwind utilities cannot bind to them.
    Scoped to .zeros-agent-md so they only affect rendered
    markdown content (not surrounding chrome).
-   Consumer: marked-rendered HTML inside text-message renderer */
+   Consumers: agent text messages and the Files tab's `.md` preview
+   (shell/workbench/tabs/markdown-preview.tsx), among others. */
 
 /* Markdown output scale (2026-05-24, final).
    This is the ONE place in the Zeros Mac app where text grows above
@@ -142,10 +143,11 @@
      and the table horizontal scroller (markdown.ts) keep their behavior. */
   overflow-wrap: break-word;
 }
-/* Agent markdown takes its size from where it sits: the chat's reading size,
-   13px inside a tool detail, the reading size again for the plan (the turn's
-   focal document, shown in its detail), and 14px in the Review tab and inline
-   review threads, outside the chat. */
+/* Agent markdown takes its size from where it sits: the chat's reading size
+   (the Files tab's `.md` preview included), 13px inside a tool detail, the
+   reading size again for the plan (the turn's focal document, shown in its
+   detail), and 14px in the Review tab and inline review threads, outside the
+   chat. */
 [data-Zeros-root] [data-tool-detail] .zeros-agent-md {
   --agent-md-text: 13px;
 }
