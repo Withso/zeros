@@ -849,7 +849,7 @@ const GITHUB_ACCESS_FAILURES = new Set(["github_repository_unavailable", "github
 
 /** Runs queued builds on Boat, a few organizations at a time. */
 export class CloudV2ComputerBuilder {
-  private lastRefreshScan = Number.NEGATIVE_INFINITY;
+  private lastRefreshScan: number;
   private refreshing: Promise<void> | null = null;
   private closed = false;
 
@@ -867,9 +867,16 @@ export class CloudV2ComputerBuilder {
     remoteHead?(organizationId: string, userId: string, target: CloudSourceTarget, branch: string): Promise<string | null>;
     /** Candidates visited per refresh scan. */
     refreshPage?: number;
+    /** How long a new replica waits before its first automatic refresh. A
+     * rolling deploy briefly runs the old replica beside it, and a build queued
+     * at boot may need code the old one lacks; the old one could claim and
+     * fail it. Defaults to one scan interval. */
+    refreshDelayMs?: number;
     now?: () => number;
     logger?: Pick<Console, "warn">;
-  }) {}
+  }) {
+    this.lastRefreshScan = (deps.now?.() ?? Date.now()) - REFRESH_SCAN_MS + (deps.refreshDelayMs ?? REFRESH_SCAN_MS);
+  }
 
   async tick(): Promise<void> {
     if (this.closed) return;
@@ -912,8 +919,8 @@ export class CloudV2ComputerBuilder {
     }).catch(() => this.deps.logger?.warn("[cloud-v2] Computer build will retry"));
   }
 
-  /** Queues the refreshes nobody asked for: a new runtime right away, and new
-   * commits once a day while the organization uses cloud workspaces. */
+  /** Queues the refreshes nobody asked for: a new runtime at the next scan, and
+   * new commits once a day while the organization uses cloud workspaces. */
   async scheduleRefreshes(): Promise<void> {
     if (this.closed) return;
     const now = this.deps.now?.() ?? Date.now();

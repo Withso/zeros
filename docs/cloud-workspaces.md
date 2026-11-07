@@ -266,7 +266,12 @@ not checked again for a day, one GitHub cannot answer for an hour, and
 organizations are visited earliest-due first. An automatic refresh
 is fenced to the live build it was scheduled from, so a build that became live
 meanwhile is never relabelled or rolled back, and a rebuilt older build is never
-refreshed this way. Scans run beside build admission, never ahead of it. Each
+refreshed this way. Scans run beside build admission, never ahead of it, every
+ten minutes. A newly started process waits one interval before its first scan:
+during a rolling deploy the old process still claims builds, and a build that
+needs the new code would fail there. On Alpha (Computer v11, 2026-11-07) the
+old process failed a source policy v3 refresh as `cloud_source_review_required`,
+which also paused that organization's runtime refreshes for six hours. Each
 lifecycle process runs one build at a time: a build holds a dedicated lock
 connection for its whole run.
 
