@@ -386,7 +386,7 @@ export async function handleDesignWorkspaceRoute(
       if (!options.previewAdmission)
         throw new Error("Design thumbnail cancellation requires a live Local connection.");
       return host.previewJobs.run({ workspaceId: input.workspaceId, directoryId: input.directoryId, jobId: input.jobId,
-        deadline: input.deadline! }, options.previewAdmission, run);
+        deadline: input.deadline! }, options.previewAdmission, run, "thumbnails");
     }
     case "design.thumbnails.read": {
       // Stored pictures only, from private engine storage.
