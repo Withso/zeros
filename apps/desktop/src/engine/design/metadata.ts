@@ -49,7 +49,7 @@ import {
   parseDesignManifest,
   serializeDesignRegistration,
 } from "./manifest";
-import { DESIGN_CANVAS_FILE, decodeCanvasFile, encodeCanvasFile } from "./canvas-file";
+import { DESIGN_CANVAS_FILE, decodeCanvasFile, encodeCanvasFile, isCanonicalDesignCanvas } from "./canvas-file";
 import { resolveDesignManifestLayout } from "./layout";
 import {
   isDesignFrameFile,
@@ -944,9 +944,12 @@ export function commitDesignMetadata(
       model = { ...normalized };
     }
     const canvasAfter = encodeCanvasFile(model, { version: layout?.canvasVersion ?? 1 });
-    // Preserve formatting when the authored scene itself is unchanged.
-    const unchanged = canvasBefore !== null &&
-      isDeepStrictEqual(JSON.parse(canvasBefore), JSON.parse(canvasAfter));
+    // Preserve formatting when the authored scene itself is unchanged. Two
+    // canonical encodings of one scene have one length, so a length change
+    // proves a change without parsing either document.
+    const unchanged = canvasBefore !== null && (canvasBefore === canvasAfter ||
+      ((canvasBefore.length === canvasAfter.length || !isCanonicalDesignCanvas(canvasBefore)) &&
+        isDeepStrictEqual(JSON.parse(canvasBefore), JSON.parse(canvasAfter))));
     changes.push({ file: canvasFile, before: canvasBefore, after: unchanged ? canvasBefore : canvasAfter });
     changes.push({ file: metadata, before, after: manifest?.canvas ? before : serializeDesignRegistration(entryId) });
     const rules = `${folder}/rules.md`;

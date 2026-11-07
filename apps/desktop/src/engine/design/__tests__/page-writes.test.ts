@@ -21,7 +21,7 @@ import {
   restoreDesignFrameChanges,
   transferDesignNode,
 } from "../document";
-import { readCanvas } from "../document-storage";
+import { readCanvas, writeCanvas } from "../document-storage";
 import { withDesignDirectoryNameLease } from "../directory-registry";
 import { pagesCanvas, pagesDirectory, pagesManifest } from "./pages-fixtures";
 
@@ -233,6 +233,30 @@ describe("page-owned frame writes", () => {
       for (const result of results.filter((result) => result.status === "rejected"))
         expect(String((result as PromiseRejectedResult).reason)).toMatch(full);
       expect(await pageFrames("screens")).toHaveLength(1_000);
+    }));
+
+  it("keeps native canvas formatting when a write leaves the scene unchanged", () =>
+    run(async () => {
+      // The first write adds the migrated Foundation manifest the fixture lacks.
+      await writeCanvas(root, await readCanvas(root));
+      const compact = JSON.stringify(JSON.parse(read("meta/canvas.json")));
+      writeFileSync(path.join(root, pagesDirectory, "meta/canvas.json"), compact);
+      await writeCanvas(root, await readCanvas(root), [
+        { file: `${pagesDirectory}/page-1/home.html`, before: read("page-1/home.html"), after: "<h1>Edited</h1>" },
+      ]);
+      expect(read("meta/canvas.json")).toBe(compact);
+      const canvas = await readCanvas(root);
+      canvas.frames["page-1/home.html"]!.x = 640;
+      await writeCanvas(root, canvas);
+      const canonical = read("meta/canvas.json");
+      expect(canonical).not.toBe(compact);
+      expect(JSON.parse(canonical).frames.home.x).toBe(640);
+      const again = await readCanvas(root);
+      again.frames["page-1/home.html"]!.x = 960;
+      await writeCanvas(root, again);
+      expect(JSON.parse(read("meta/canvas.json")).frames.home.x).toBe(960);
+      await writeCanvas(root, await readCanvas(root));
+      expect(JSON.parse(read("meta/canvas.json")).frames.home.x).toBe(960);
     }));
 
   it("records the page identity and refuses restoration after page deletion or folder reuse", () =>

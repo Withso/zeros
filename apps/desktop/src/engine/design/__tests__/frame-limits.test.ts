@@ -9,7 +9,12 @@ import {
   DESIGN_MAX_FRAMES_PER_PAGE,
   DESIGN_MAX_PAGES,
 } from "@zeros/protocol/design-pages";
-import { decodeCanvasFile, encodeCanvasFile } from "../canvas-file";
+import {
+  decodeCanvasFile,
+  designCanvasValidationsForTests,
+  encodeCanvasFile,
+  isCanonicalDesignCanvas,
+} from "../canvas-file";
 import { DESIGN_DIRECTORY_NAME, initializeDesignDocument } from "../document";
 import { discoverFrameFiles, readCanvas } from "../document-storage";
 import { pagedCanvasFixture } from "./frame-limit-fixtures";
@@ -118,5 +123,34 @@ describe("Design page frame admission", () => {
         else await expect(readCanvas(root)).rejects.toThrow(/has 1,001 frames; a page holds at most 1,000/);
       }
     });
+  });
+});
+
+describe("validated canvas reuse", () => {
+  it("validates identical bytes once and hands every caller its own objects", () => {
+    const source = JSON.stringify(pagedCanvasFixture(2, 50), null, 2) + "\n";
+    const before = designCanvasValidationsForTests();
+    const first = decodeCanvasFile(source, { version: 2 }) as { pages: { frames: string[] }[]; frames: Record<string, { x: number }> };
+    const second = decodeCanvasFile(source, { version: 2 }) as typeof first;
+    expect(designCanvasValidationsForTests() - before).toBe(1);
+    expect(second).toEqual(first);
+    first.pages[0]!.frames.push("frame_mutated");
+    Object.values(first.frames)[0]!.x = 123;
+    expect(second.pages[0]!.frames).not.toContain("frame_mutated");
+    expect(decodeCanvasFile(source, { version: 2 })).toEqual(second);
+    expect(() => decodeCanvasFile(source, { version: 1 })).toThrow(/requires canvas version 1/);
+  });
+
+  it("primes the encoder's own output so the next read skips validation, and still validates edited bytes", () => {
+    const document = decodeCanvasFile(JSON.stringify(pagedCanvasFixture(1, 20)), { version: 2 });
+    (document.frames as Record<string, { x: number }>)[Object.keys(document.frames as object)[0]!]!.x = 77;
+    const encoded = encodeCanvasFile(document, { version: 2 });
+    const before = designCanvasValidationsForTests();
+    expect(Object.values(decodeCanvasFile(encoded, { version: 2 }).frames as Record<string, { x: number }>)[0]!.x).toBe(77);
+    expect(designCanvasValidationsForTests()).toBe(before);
+    expect(isCanonicalDesignCanvas(encoded)).toBe(true);
+    const edited = encoded.replace('"title": "Frame 1"', `"title": "${"x".repeat(121)}"`);
+    expect(isCanonicalDesignCanvas(edited)).toBe(false);
+    expect(() => decodeCanvasFile(edited, { version: 2 })).toThrow(/Invalid Design canvas/);
   });
 });
