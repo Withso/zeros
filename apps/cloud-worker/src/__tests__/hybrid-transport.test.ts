@@ -70,18 +70,19 @@ const socketBoundary = (socket: WebSocket) => new Promise<void>((resolve, reject
 });
 
 async function idleInbox() {
-  let inbox: PromptInbox | undefined, parked!: () => void;
+  let hint = () => {}, parked!: () => void;
   let waiting = new Promise<void>(resolve => { parked = resolve; });
-  const f = await fixture({ onFrame: frame => { if (frame.t === "prompts") inbox?.hint(); } });
+  const f = await fixture({ onFrame: frame => { if (frame.t === "prompts") hint(); } });
   const socket = await connectRelay(f);
   socket.send(JSON.stringify({ t: "push", prompts: true })); await socketBoundary(socket);
   const store = { onChange: () => () => {}, outboxEntries: () => [] } as unknown as SessionStore;
   const agents = { setOutboxDispatch: () => {} } as unknown as Agents;
-  inbox = new PromptInbox(store, agents, async (operation, body, signal) => {
+  const inbox = new PromptInbox(store, agents, async (operation, body, signal) => {
     if (operation === "pull" && (body as { waitMs: number }).waitMs) parked();
     return f.transport.promptRequest(operation, body, signal);
   });
-  cleanups.push(() => inbox!.dispose());
+  hint = () => inbox.hint();
+  cleanups.push(() => inbox.dispose());
   inbox.start(); await waiting;
   return { ...f, socket, inbox, wait: () => waiting, nextWait: () => { waiting = new Promise<void>(resolve => { parked = resolve; }); } };
 }
