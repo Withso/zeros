@@ -40,6 +40,8 @@ function loadClaudeQuery(): Promise<NonNullable<ClaudeOptions["query"]>> {
 
 interface ClaudeOptions {
   query?: (args: { prompt: AsyncIterable<SDKUserMessage>; options: Options }) => NativeQuery;
+  /** Loads the SDK's query on the first turn; tests hold it open. */
+  loadQuery?: () => Promise<NonNullable<ClaudeOptions["query"]>>;
   executable?: string;
   environment?: NodeJS.ProcessEnv;
   gitEnvironment?: NodeJS.ProcessEnv;
@@ -75,6 +77,8 @@ export class ClaudeDriver implements Driver {
   private active?: Turn;
   private stopping?: Promise<void>;
   private disposed = false;
+  /** Counts every Stop, including one before any query exists. */
+  private interruptions = 0;
   private running = false;
   private contextUsageRevision = 0;
 
@@ -93,9 +97,15 @@ export class ClaudeDriver implements Driver {
   }
 
   async prompt(content: ContentBlock[]): Promise<PromptResponse> {
-    // The SDK loads on the first turn, not at worker start; checks follow the
-    // await so a concurrent prompt still meets the active turn.
-    const start = this.options.query ?? await loadClaudeQuery();
+    // The SDK loads on the first turn, not at worker start. A Stop or dispose
+    // while it loads cancels this turn before it starts, as it would a running
+    // one. Checks follow the await, so a concurrent prompt meets the active turn.
+    let start = this.options.query;
+    if (!start) {
+      const interruptions = this.interruptions;
+      start = await (this.options.loadQuery ?? loadClaudeQuery)();
+      if (this.disposed || this.interruptions !== interruptions) return { stopReason: "cancelled" };
+    }
     this.ready();
     if (this.active || this.stopping) throw new Error("Claude already has an active turn.");
     const message = nativeContent(content);
@@ -177,6 +187,7 @@ export class ClaudeDriver implements Driver {
   }
 
   interrupt(): Promise<void> {
+    this.interruptions++;
     if (this.stopping) return this.stopping;
     const process = this.process;
     if (!process) return Promise.resolve();
