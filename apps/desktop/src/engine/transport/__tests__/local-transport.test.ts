@@ -13,10 +13,13 @@
 // we get byte-level control over the exact inputs the gate keys on (Origin,
 // Host, ?token) — the `ws` client manages those headers itself.
 
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import net from "node:net";
 import http from "node:http";
+import { WebSocket } from "ws";
 import { confirmLoopbackOwnership, LocalTransport } from "../local";
+import type { EngineMessage } from "../../types";
+import type { TransportClient } from "../types";
 import { ENGINE_PORT_SPAN } from "../../runtime";
 
 const TOKEN = "launch-secret-token";
@@ -401,5 +404,53 @@ describe("LocalTransport — early ownership and bounded walk", () => {
     } finally {
       await new Promise<void>((resolve) => squatter.close(() => resolve()));
     }
+  });
+});
+
+describe("LocalTransport — a connection that ended is never written again", () => {
+  const ping = { type: "ENGINE_PING" } as unknown as EngineMessage;
+  async function connect(t: LocalTransport) {
+    const connected = new Promise<TransportClient>((resolve) => t.onConnect(resolve));
+    const peer = new WebSocket(`ws://127.0.0.1:${t.actualPort}/ws`);
+    peer.on("error", () => {});
+    const [client] = await Promise.all([connected, new Promise<void>((resolve) => peer.once("open", () => resolve()))]);
+    const [socket] = [...(t as unknown as { clients: Map<WebSocket, unknown> }).clients.keys()];
+    return { peer, client, socket: socket! };
+  }
+
+  it("stops writing at the first error, before any close event, and reports the disconnect once", async () => {
+    const t = await startTransport({});
+    const disconnects: string[] = [];
+    t.onDisconnect((client) => disconnects.push(client.id));
+    const { peer, client, socket } = await connect(t);
+    const sent = vi.spyOn(socket, "send");
+    client.send(ping);
+    expect(sent).toHaveBeenCalledTimes(1);
+    socket.emit("error", new Error("connection reset"));
+    expect(disconnects).toEqual([client.id]);
+    client.send(ping);
+    t.broadcast(ping);
+    expect(sent).toHaveBeenCalledTimes(1);
+    expect(t.connectionCount).toBe(0);
+    const closed = new Promise<void>((resolve) => socket.once("close", () => resolve()));
+    peer.close();
+    await closed;
+    expect(disconnects).toEqual([client.id]);
+  });
+
+  it("stops writing once the engine closes a connection or a write throws", async () => {
+    const t = await startTransport({});
+    const first = await connect(t);
+    const sent = vi.spyOn(first.socket, "send");
+    first.client.close(1000, "done");
+    first.client.send(ping);
+    expect(sent).not.toHaveBeenCalled();
+    first.peer.terminate();
+    const second = await connect(t);
+    const throwing = vi.spyOn(second.socket, "send").mockImplementation(() => { throw new Error("native write failed"); });
+    second.client.send(ping);
+    second.client.send(ping);
+    expect(throwing).toHaveBeenCalledTimes(1);
+    second.peer.terminate();
   });
 });
