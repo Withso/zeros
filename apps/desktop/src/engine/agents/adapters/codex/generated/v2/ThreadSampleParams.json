@@ -30,6 +30,13 @@
       "description": "The loaded source's latest completed, failed, or interrupted turn. Stale or active sources are rejected.",
       "type": "string"
     },
+    "interruptOnCancel": {
+      "description": "Override upstream interruption on cancellation for this sample; otherwise inherit the parent.",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
     "prompt": {
       "type": "string"
     },
