@@ -10,7 +10,7 @@ import {
 } from "./document";
 import { readSafeRegularFile } from "./safe-files";
 import { isDesignFrameFile } from "@zeros/protocol/design-path";
-import { discoverFrameFiles } from "./document-storage";
+import { discoverFrameFiles, readSharedCanvasContext } from "./document-storage";
 import { prepareDesignSurfaceDocument } from "./surface-document";
 
 const MAX_TEXT_RESOURCE_BYTES = 2 * 1024 * 1024;
@@ -176,7 +176,12 @@ export async function readDesignProtocolResource(
     (extension === ".css" && !relativePath.includes("/")) ||
     (relativePath.startsWith("assets/") && MIME_TYPES[extension]);
   if (!frameHtml && !allowedResource) return response(404, "Not found.");
-  if (frameHtml?.includes("/") && !(await discoverFrameFiles(workspacePath)).includes(frameHtml)) return response(404, "Not found.");
+  // A frame document is requested per visible frame; at tens of thousands of
+  // frames, decoding the canvas for each would dominate the request.
+  const context = frameHtml ? await readSharedCanvasContext(workspacePath) : undefined;
+  if (frameHtml?.includes("/") && !(context?.layout?.manifest.canvas
+    ? Object.hasOwn(context.canvas.frames, frameHtml)
+    : (await discoverFrameFiles(workspacePath, context)).includes(frameHtml))) return response(404, "Not found.");
   const byteLimit =
     frameHtml || extension === ".css"
       ? MAX_TEXT_RESOURCE_BYTES
@@ -201,6 +206,7 @@ export async function readDesignProtocolResource(
         workspacePath,
         frameHtml,
         authored,
+        context?.canvas,
       );
     } catch (error) {
       if (error instanceof DesignRenderBudgetError) {

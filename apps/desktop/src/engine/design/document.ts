@@ -97,8 +97,10 @@ import {
   finiteBetween,
   nextFrameGeometry,
   readBoundedDesignFrameSource,
+  freezeDeep,
   readCanvas,
   readCanvasContext,
+  readSharedCanvasContext,
   type DesignCanvasReadContext,
   readFrameMeta,
   writeCanvas,
@@ -896,12 +898,15 @@ export async function readDesignFrameRenderSourceFromSource(
   workspacePath: string,
   frame: string,
   source: string,
+  canvas?: CanvasDocument,
 ): Promise<DesignFrameRenderSource> {
   const file = assertFrameFile(frame);
   const render = await prepareFrameRenderSourceForFile(
     workspacePath,
     file,
     source,
+    {},
+    canvas,
   );
   return {
     file,
@@ -965,7 +970,7 @@ export async function readDesignFrame(
   options: DesignReadOptions = {},
 ): Promise<DesignFrameDocument> {
   const file = assertFrameFile(frame);
-  const context = await readCanvasContext(workspacePath);
+  const context = options.writeBack ? await readCanvasContext(workspacePath) : await readSharedCanvasContext(workspacePath);
   if (!options.writeBack && context.layout?.canvasVersion === 2 && context.canvas.frames[file]) {
     const prepared = await prepareRegisteredDesignFrame(workspacePath, file, context.canvas);
     return readDesignFrameFromSummary(workspacePath, prepared, depth);
@@ -1166,14 +1171,6 @@ async function prepareRegisteredDesignFrame(workspacePath: string, file: string,
 let preparationContext: {
   key: string; revision: string; inspection: ReturnType<typeof inspectDesignCatalog>; context: Awaited<ReturnType<typeof readCanvasContext>>;
 } | null = null;
-
-function freezeDeep<T>(value: T): T {
-  if (value && typeof value === "object" && !Object.isFrozen(value)) {
-    Object.freeze(value);
-    for (const entry of Object.values(value)) freezeDeep(entry);
-  }
-  return value;
-}
 
 export async function prepareDesignNavigationFrames(workspacePath: string, catalogRevision: string, files: readonly string[], directoryId?: string) {
   if (!files.length || files.length > 16 || new Set(files).size !== files.length) throw new Error("Invalid Design preparation batch.");
