@@ -1,5 +1,7 @@
 import { isSettingsSectionAvailable } from "./settings-section-availability";
-import { CloudComputerPanel, prefetchCloudComputer } from "./cloud-computer-panel";
+import { CloudComputerPanel } from "./cloud-computer-panel";
+import { prefetchCloudComputer, useCloudComputerRepositories } from "./cloud-computer-store";
+import { CLOUD_REPOSITORY_TABS, CloudRepositoryPanel, type CloudRepositoryTab } from "./cloud-repository-panel";
 import { CloudGithubSection } from "./cloud-github-section";
 import { EnvironmentPanel } from "./environment-panel";
 import { KeepAwakeSetting } from "./keep-awake-setting";
@@ -25,6 +27,7 @@ import {
   Blocks,
   KeyRound,
   Box,
+  FolderGit2,
   GitPullRequest,
   FlaskConical,
   CircleUser,
@@ -196,7 +199,7 @@ type SectionDef = {
   /** Optional per-row nav override, appended AFTER `SIDEBAR_ENTRY_CLS` so
    *  twMerge lets it win (see `INTERNAL_NAV_CLS`). */
   navClassName?: string;
-  Panel: ComponentType<{ surfaceActive?: boolean }>;
+  Panel: ComponentType<{ surfaceActive?: boolean; openCloudRepository?(repository: string): void }>;
 };
 
 // Internal's row is the one colored entry: label and icon carry
@@ -339,7 +342,8 @@ type RepoPage = RepoSectionId | typeof REPO_OVERVIEW;
 
 type Selection =
   | { scope: "user"; section: SectionId }
-  | { scope: "repo"; repoId: string; section: RepoPage };
+  | { scope: "repo"; repoId: string; section: RepoPage }
+  | { scope: "cloud-repo"; repository: string; tab: CloudRepositoryTab };
 
 function userSelection(section: SectionId): string {
   return `user:${section}`;
@@ -347,6 +351,11 @@ function userSelection(section: SectionId): string {
 
 function repoSelection(repoId: string, section: RepoPage): string {
   return `repo:${repoId}:${section}`;
+}
+
+/** A Cloud Computer repository page: `cloud-repo:<tab>:<owner>/<name>`. */
+function cloudRepoSelection(repository: string, tab: CloudRepositoryTab): string {
+  return `cloud-repo:${tab}:${repository}`;
 }
 
 function isRepoPage(value: string): value is RepoPage {
@@ -360,6 +369,14 @@ function isStaticSection(value: string): value is SectionId {
 /** Decode the persisted active string into a structured selection,
  *  tolerating the legacy bare-section / `repo:<id>` shapes. */
 function parseSelection(active: string): Selection {
+  if (active.startsWith("cloud-repo:")) {
+    const rest = active.slice("cloud-repo:".length), colon = rest.indexOf(":");
+    const tab = rest.slice(0, colon), repository = rest.slice(colon + 1);
+    const known = CLOUD_REPOSITORY_TABS.find((item) => item.id === tab);
+    return known && /^[A-Za-z0-9-]{1,39}\/[A-Za-z0-9._-]{1,100}$/.test(repository)
+      ? { scope: "cloud-repo", repository, tab: known.id }
+      : { scope: "user", section: "cloud-computer" };
+  }
   if (active.startsWith("repo:")) {
     const rest = active.slice("repo:".length);
     // The pre-revamp empty sentinel (`repo:` with no id) → the Repos list.
@@ -425,7 +442,9 @@ function loadInitialSection(owner: string): string {
   );
   return sel.scope === "user"
     ? userSelection(sel.section)
-    : repoSelection(sel.repoId, sel.section);
+    : sel.scope === "repo"
+      ? repoSelection(sel.repoId, sel.section)
+      : cloudRepoSelection(sel.repository, sel.tab);
 }
 
 // The shared 32px nav row (the web dashboard's too): 13/18 fg2 with a 14px fg3
@@ -570,22 +589,28 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
     selection.scope === "user"
       ? (availableSections.find((s) => s.id === selection.section) ??
         availableSections[0])
-      : local ? null : availableSections[0];
+      : local || selection.scope === "cloud-repo" ? null : availableSections[0];
   // Rewrite a selection whose gate just closed; otherwise no row is active and the
   // retired selection reactivates if the gate reopens.
+  const selectedSection = selection.scope === "cloud-repo" ? null : selection.section;
   useEffect(() => {
-    if (selection.scope !== "user" && local) return;
-    if (selection.scope === "user" && availableSections.some((s) => s.id === selection.section)) return;
+    if (selection.scope === "repo" && local) return;
+    if (selection.scope === "user" && availableSections.some((s) => s.id === selectedSection)) return;
+    if (selection.scope === "cloud-repo" && availableSections.some((s) => s.id === "cloud-computer")) return;
     const fallback = availableSections[0]?.id;
     if (fallback) setActive(userSelection(fallback));
     // setActive is stable for the component's lifetime (state setter + setSetting).
-  }, [availableSections, selection.scope, selection.section, local, setActive]);
+  }, [availableSections, selection.scope, selectedSection, local, setActive]);
   // Visited form panels remain mounted so local drafts, scroll-adjacent DOM,
   // provider state, and resolved settings do not restart on every sidebar click.
   const availableSectionIds = useMemo(
     () => new Set(availableSections.map((section) => section.id)),
     [availableSections],
   );
+  // The Cloud Computer's repositories each get a page; only its managers see them.
+  const cloudRepositories = useCloudComputerRepositories(me?.user.id ?? null,
+    !local && availableSectionIds.has("cloud-computer") ? organization : null, pageActive);
+  const openCloudRepository = useCallback((repository: string) => setActive(cloudRepoSelection(repository, "git")), [setActive]);
   const sectionIdsToRender = useRetainedViewKeys(
     activeSection?.id ?? null,
     availableSections.length,
@@ -682,6 +707,24 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
                 </React.Fragment>
               );
             })}
+            {cloudRepositories.length > 0 && (
+              <>
+                {cloudRepositories.length === 1 ? (
+                  <div className={SETTINGS_GROUP_RULE_CLS} aria-hidden="true" />
+                ) : (
+                  <div className={SETTINGS_GROUP_HEADER_CLS}>Repositories</div>
+                )}
+                <div className="flex flex-col gap-0.5">
+                  {cloudRepositories.map((repository) => {
+                    const current = selection.scope === "cloud-repo" && selection.repository === repository;
+                    return (
+                      <SectionNavButton key={repository} icon={FolderGit2} label={repository} isActive={current}
+                        onClick={() => setActive(cloudRepoSelection(repository, current ? selection.tab : "git"))} />
+                    );
+                  })}
+                </div>
+              </>
+            )}
           </nav>
         </div>
 
@@ -705,6 +748,16 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
               {/* A transient repo-scope selection (legacy deep link) renders
                   nothing for one frame — the redirect effect above re-routes
                   it to the repo page. */}
+              {selection.scope === "cloud-repo" && (
+                <div className="flex flex-col gap-8">
+                  <header className="flex min-w-0 flex-col gap-1">
+                    <h1 className={PAGE_HEADING_CLS}>{selection.repository}</h1>
+                  </header>
+                  <CloudRepositoryPanel key={selection.repository} repository={selection.repository} tab={selection.tab}
+                    onTabChange={(tab) => setActive(cloudRepoSelection(selection.repository, tab))}
+                    onOpenComputer={() => setActive(userSelection("cloud-computer"))} surfaceActive={pageActive} />
+                </div>
+              )}
               {sectionIdsToRender.map((sectionId) => {
                 const section = availableSections.find(
                   (candidate) => candidate.id === sectionId,
@@ -735,7 +788,7 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
                       {fileScopeControls}
                     </header>
                     {!local && !cloudEnabled && <CloudWorkspacePausedNotice />}
-                    <Panel surfaceActive={pageActive && isActive} />
+                    <Panel surfaceActive={pageActive && isActive} openCloudRepository={openCloudRepository} />
                   </div>
                 );
               })}

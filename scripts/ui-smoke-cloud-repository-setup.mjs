@@ -32,7 +32,7 @@ export async function runCloudRepositorySetupSmoke({ page, check }) {
       await expect.poll(() => writes.at(-1)?.input.repositories[0].setupScript).toBe(path);
       await expect(field).toHaveValue(path);
       expect(writes.at(-1).input.repositories[0].setup).toBe("pnpm install");
-      check(`Cloud Computer saves the selected script without replacing build validation in ${theme}`, true);
+      check(`A Cloud Computer repository's Environment saves the selected script without replacing build validation in ${theme}`, true);
     }
     held = new Promise(done => { release = done; });
     await field.fill("scripts/held-owner-a.sh");
