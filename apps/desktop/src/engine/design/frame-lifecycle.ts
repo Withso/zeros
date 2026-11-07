@@ -1373,7 +1373,8 @@ export async function prepareFrameRenderSourceForFile(
   sanitized: string;
   sourceVersion: string;
 }> {
-  const document = parse(healDesignOids(source).html, { sourceCodeLocationInfo: true });
+  const healed = healDesignOids(source);
+  const document = healed.document ?? parse(healed.html, { sourceCodeLocationInfo: true });
   const canvas = await readCanvas(workspacePath);
   const meta = readFrameMeta(document, file, canvas);
   const geometry = canvas.frames[file];

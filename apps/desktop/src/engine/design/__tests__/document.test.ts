@@ -448,7 +448,10 @@ describe("design document", () => {
     ]);
     expect(first.html.match(/\bdata-oid\b/g)).toHaveLength(2);
     expect(first.html).not.toMatch(/data-oid(?:\s|>)/);
-    expect(second).toEqual({ html: first.html, changed: false, fixed: [] });
+    expect(second).toMatchObject({ html: first.html, changed: false, fixed: [] });
+    // Only an unchanged source hands back its parse for reuse.
+    expect(second.document).toBeDefined();
+    expect(first.document).toBeUndefined();
   });
 
   it("reports a blank data-oid exactly once before healing", async () => {

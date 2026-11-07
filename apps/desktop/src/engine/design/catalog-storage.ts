@@ -49,17 +49,21 @@ export function inspectDesignCatalog(root: string, directory: string, options: {
     registration,
     source,
     binding: JSON.stringify(roots),
-    revision: options.revision === false ? "" : createHash("sha256")
-      .update(
-        JSON.stringify([
-          layout.manifestFile,
-          registration,
-          layout.documentFile,
-          source,
-        ]),
-      )
-      .digest("hex"),
+    revision: options.revision === false ? "" : designCatalogRevision({ layout, registration, source }),
   };
+}
+
+export function designCatalogRevision(inspection: Pick<ReturnType<typeof inspectDesignCatalog>, "layout" | "registration" | "source">): string {
+  return createHash("sha256")
+    .update(
+      JSON.stringify([
+        inspection.layout.manifestFile,
+        inspection.registration,
+        inspection.layout.documentFile,
+        inspection.source,
+      ]),
+    )
+    .digest("hex");
 }
 
 /** The same metadata bytes and roots as an earlier inspection. */
