@@ -130,16 +130,30 @@
    the scale, so rendered markdown drifts heavier than the chrome beside it
    the next time the weights move. */
 [data-Zeros-root] .zeros-agent-md {
+  --agent-md-text: var(--reading-text-size);
   -webkit-user-select: text;
   user-select: text;
   white-space: normal;
-  font-size: var(--reading-text-size);
+  font-size: var(--agent-md-text);
   /* Emergency break for unbroken tokens (long URLs, hashes, JSON runs) so
      they wrap inside the 800px answer lane instead of clipping against the
      scroller's overflow-x-hidden. break-word (not anywhere) on purpose:
      it doesn't alter intrinsic min-content sizing, so table column widths
      and the table horizontal scroller (markdown.ts) keep their behavior. */
   overflow-wrap: break-word;
+}
+/* Agent markdown takes its size from where it sits: the chat's reading size,
+   13px inside a tool detail, the reading size again for the plan (the turn's
+   focal document, shown in its detail), and 14px in the Review tab and inline
+   review threads, outside the chat. */
+[data-Zeros-root] [data-tool-detail] .zeros-agent-md {
+  --agent-md-text: 13px;
+}
+[data-Zeros-root] .zeros-agent-md.zeros-agent-md--document {
+  --agent-md-text: var(--reading-text-size);
+}
+[data-Zeros-root] .zeros-agent-md.zeros-agent-md--panel {
+  --agent-md-text: 14px;
 }
 [data-Zeros-root] .zeros-agent-md > *:first-child {
   margin-top: 0;
@@ -149,7 +163,7 @@
 }
 [data-Zeros-root] .zeros-agent-md p {
   margin: 0 0 14px;
-  font-size: var(--reading-text-size);
+  font-size: var(--agent-md-text);
   line-height: 1.65;
 }
 [data-Zeros-root] .zeros-agent-md h1,
@@ -186,7 +200,7 @@
 [data-Zeros-root] .zeros-agent-md ol {
   margin: 0 0 14px;
   padding-left: 24px;
-  font-size: var(--reading-text-size);
+  font-size: var(--agent-md-text);
 }
 [data-Zeros-root] .zeros-agent-md ul,
 [data-Zeros-root] .zeros-agent-md ul ul,
@@ -248,7 +262,7 @@
   vertical-align: bottom;
   color: var(--brown-primary);
   font-family: var(--font-sans);
-  font-size: var(--reading-text-size);
+  font-size: var(--agent-md-text);
   word-break: normal;
   overflow-wrap: normal;
   text-decoration: none;
@@ -298,7 +312,7 @@
 }
 [data-Zeros-root] .zeros-agent-md code {
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: 13px;
   padding: 1px 5px; /* check:ui ignore-line — compact inline-code geometry */
   background: var(--bg1);
   border: 1px solid var(--border1);
@@ -322,7 +336,7 @@
   border: none;
   color: var(--brown-primary);
   font-family: var(--font-sans);
-  font-size: var(--reading-text-size);
+  font-size: var(--agent-md-text);
   cursor: pointer;
   word-break: normal;
   overflow-wrap: normal;
@@ -434,7 +448,7 @@
 }
 [data-Zeros-root] .zeros-agent-md table {
   border-collapse: collapse;
-  font-size: 12px;
+  font-size: 13px;
   /* `width: 100%` makes narrow tables fill the column. Wide tables
      can still overflow horizontally; `min-width: max-content` ensures
      the table grows to fit its content rather than wrapping awkwardly
@@ -487,7 +501,7 @@
    --weight-medium so it visually leads the definition row. */
 [data-Zeros-root] .zeros-agent-md dl {
   margin: 0 0 14px;
-  font-size: var(--reading-text-size);
+  font-size: var(--agent-md-text);
 }
 [data-Zeros-root] .zeros-agent-md dt {
   margin-top: 8px;

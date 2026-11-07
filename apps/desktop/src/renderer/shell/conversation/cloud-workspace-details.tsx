@@ -61,7 +61,7 @@ export function CloudWorkspaceDetails({ folder }: { folder: string }) {
       <PopoverContent align="start" sideOffset={6} className="w-[320px]" aria-label="Cloud workspace details">
         {workspace ? (
           <>
-            <p className="text-fg1 mb-3 truncate text-sm font-medium">{workspace.name}</p>
+            <p className="text-fg1 mb-3 truncate text-xs leading-4.5 font-medium">{workspace.name}</p>
             <dl className="space-y-2">
               {rows.map(({ Icon, label, value }) => (
                 <div key={label} className="flex min-w-0 items-center gap-2">

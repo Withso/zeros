@@ -201,9 +201,15 @@ exported page by page to [design-implementation/](design-implementation/README.m
     lines (tool and sub-agent names, the "N tool calls" roll-up, workflow,
     browser and note rows, provider and wake-up notices) take the same 15px
     on 20px lines, so a row stays 28px. A sent message folds to five 22px
-    lines. The chip beside a tool's name, its command or its file, is 13px on
-    a 20px chip. Tool details, code and the chrome around the chat keep their sizes,
-    and dialog titles keep their own 15px token. `features/agent/__tests__/chat-reading-type.test.ts`,
+    lines. Everything smaller in the chat is 13px: the chip beside a tool's
+    name (its command or its file, on a 20px chip), code blocks, inline code,
+    tables, every tool detail including the markdown inside one, and the
+    chrome's headers, popover titles and menu rows. The plan keeps the reading
+    size inside its detail (`zeros-agent-md--document`), markdown outside the
+    chat keeps 14px (`zeros-agent-md--panel`), labels and metadata stay 12px,
+    keys 11px, and dialog titles keep their own 15px token. The Agent chat
+    page's Type frames draw every case. `features/agent/__tests__/chat-reading-type.test.ts`,
+    `features/agent/__tests__/agent-markdown-sizes.test.ts`,
     `features/agent/__tests__/prompt-fold.test.ts`,
     `scripts/ui-smoke-composer-prompt-fold.mjs` and
     `scripts/ui-smoke-tool-presentation.mjs` hold it.
@@ -336,9 +342,11 @@ Page titles use `text-base` / `text-lg`. **Reading text** in the chat is
 `text-reading`, 15px on 22px (`--reading-text-size`): agent output, sent
 messages, the composer, thinking and notices; the transcript's one-line rows
 add `leading-5` so they stay 28px. Agent markdown
-(`.zeros-agent-md`) sets its prose in that size at a 1.65 line height and keeps
-its own steps for the rest in `styles/global/runtime-content.css` (headings 20
-and 16, code blocks 13, inline code and tables 12).
+(`.zeros-agent-md`) sets its prose from `--agent-md-text` at a 1.65 line
+height: the reading size in the chat, 13px inside a tool detail, the reading
+size for the plan (`--document`) and 14px outside the chat (`--panel`). Its
+other steps live in `styles/global/runtime-content.css`: headings 20 and 16,
+code blocks, inline code and tables 13, captions and keys 12.
 
 **Weights** are one notch lighter than Tailwind's: `font-normal` 400,
 `font-medium` 450, `font-semibold` 500, `font-bold` 600. Hand-written CSS uses

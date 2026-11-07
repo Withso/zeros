@@ -179,7 +179,7 @@ export const SubagentCard: Renderer<AgentToolMessage> = memo(
                   aria-controls={promptId}
                 >
                   <MessageSquare className="text-fg2 size-3 shrink-0" />
-                  <span className="text-fg1 text-sm">Prompt</span>
+                  <span className="text-fg1 text-reading leading-5">Prompt</span>
                 </ListRow>
                 {promptOpen && (
                   <LocalLinkHtml

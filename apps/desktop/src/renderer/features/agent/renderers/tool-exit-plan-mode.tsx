@@ -102,7 +102,7 @@ export const ExitPlanModeCard: Renderer<AgentToolMessage> = memo(
     // with the detail card's 12px sides so it never touches the border.
     const detail = planHtml ? (
       <LocalLinkHtml
-        className="zeros-agent-md text-fg1 px-3 py-2.5 text-reading"
+        className="zeros-agent-md zeros-agent-md--document text-fg1 px-3 py-2.5 text-reading"
         html={planHtml}
       />
     ) : (

@@ -283,7 +283,7 @@ function SafetyReviewDetail({
     }
   };
   return (
-    <div className="text-fg2 space-y-2 text-sm">
+    <div className="text-fg2 space-y-2 text-xs">
       <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs">
         <span>Status: {review.retried ? "Retried" : review.status}</span>
         {review.actionType ? <span>Action: {review.actionType}</span> : null}
@@ -402,7 +402,7 @@ export function renderDetail(
     const m = message as { message?: string };
     if (!m.message) return null;
     return (
-      <div className="text-fg2 px-3 py-2 text-sm whitespace-pre-wrap">{modelRejectionDisplayText(m.message)}</div>
+      <div className="text-fg2 px-3 py-2 text-xs whitespace-pre-wrap">{modelRejectionDisplayText(m.message)}</div>
     );
   }
   return null;
@@ -516,7 +516,7 @@ function renderToolOutput(tool: AgentToolMessage, ctx: RendererContext): React.R
       </div>
     ))}</div>}
     {body}
-    {sources.length > 0 && <div data-generated-image-sources="" className="flex flex-wrap items-center gap-1.5 px-3 py-2 text-sm text-fg3">
+    {sources.length > 0 && <div data-generated-image-sources="" className="flex flex-wrap items-center gap-1.5 px-3 py-2 text-xs text-fg3">
       <span>Edited from</span>
       {sources.map((source) => {
         const active = ctx.attachmentImagesActive !== false && !!filePillPath(ctx.attachmentCwd, source);
@@ -532,7 +532,7 @@ function renderToolOutput(tool: AgentToolMessage, ctx: RendererContext): React.R
 }
 
 function GeneratedImagePlaceholder({ codex = true }: { codex?: boolean }) {
-  return <p data-generated-image-placeholder="" className="px-3 py-2 text-sm text-fg3">{codex ? "Image saved by Codex" : "Image preview unavailable"}</p>;
+  return <p data-generated-image-placeholder="" className="px-3 py-2 text-xs text-fg3">{codex ? "Image saved by Codex" : "Image preview unavailable"}</p>;
 }
 
 function GeneratedImagePreview({ src, codex }: { src: string; codex: boolean }) {
@@ -564,7 +564,7 @@ function renderToolBody(
   if (tool.toolKind === "read" && tool.status !== "failed" && !isImagePath(readPathOf(tool))) {
     const text = readToolText(tool);
     if (text === "" && tool.status === "completed")
-      return <div className="text-fg2 px-3 py-2 text-sm">No lines returned.</div>;
+      return <div className="text-fg2 px-3 py-2 text-xs">No lines returned.</div>;
     if (text && text.length > 0) {
       const { code, startLine } = parseReadBody(text, tool.rawInput);
       return (

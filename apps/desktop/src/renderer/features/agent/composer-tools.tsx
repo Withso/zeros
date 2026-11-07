@@ -243,7 +243,7 @@ function ToolsPopover({
         }}
       >
         <div className="mb-2 flex items-center justify-between gap-2">
-          <h2 id={titleId} className="text-fg1 text-sm font-medium">
+          <h2 id={titleId} className="text-fg1 text-xs leading-4.5 font-medium">
             Tools
           </h2>
           <IconButton

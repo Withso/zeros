@@ -561,7 +561,7 @@ function TimelineCard({
         )}
       </div>
       {item.body ? (
-        <div className="zeros-agent-md px-3 pt-1 pb-2.5 [&_.zeros-md-prose>:first-child]:mt-0 [&_.zeros-md-prose>:last-child]:mb-0">
+        <div className="zeros-agent-md zeros-agent-md--panel px-3 pt-1 pb-2.5 [&_.zeros-md-prose>:first-child]:mt-0 [&_.zeros-md-prose>:last-child]:mb-0">
           <div
             className="zeros-md-prose text-sm"
             dangerouslySetInnerHTML={{ __html: html }}

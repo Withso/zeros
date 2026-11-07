@@ -64,7 +64,7 @@ export async function runArtifactLinksSmoke({ page, check }) {
   await fixture.evaluate((el) => el.classList.remove("zeros-working-feed"));
   await prose.evaluate((el) => el.removeAttribute("data-role"));
   const mono = prose.locator("code").filter({ hasText: "@scope/package" });
-  await expect(mono).toHaveCSS("font-size", "12px");
+  await expect(mono).toHaveCSS("font-size", "13px");
   const long = prose.locator("[data-file-path$='/long.png']");
   check(
     "Long file labels stay inside the transcript",

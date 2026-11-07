@@ -1038,3 +1038,16 @@ Each landed step appends one line: date, workstream, what landed, evidence.
   fold and composer smoke measures 15px/22px text and the 22px fold lines,
   the tool smoke 15px names, 13px chips and file tags and 28px rows, and
   the markdown smoke 15px file references and links.
+- 2026-11-07 · 5 · The chat's smaller text is 13px: code blocks, inline code
+  and tables (were 12), every tool detail including markdown inside one
+  (`[data-tool-detail]` sets `--agent-md-text: 13px`), the leftover 14px
+  detail lines, and the Tools and cloud-details popover titles. The plan keeps
+  the reading size in its detail (`zeros-agent-md--document`); the Review tab
+  and inline review threads keep the 14px they had (`zeros-agent-md--panel`),
+  which the first 15px change had moved by accident. The sub-agent's Prompt
+  row joins the other rows at 15/20. The canvas gains four Type frames on the
+  Agent chat page (agent output, messages and composer, transcript rows and
+  tool details, chat chrome) and its kits carry the same sizes. Evidence:
+  `chat-reading-type.test.ts` and `agent-markdown-sizes.test.ts` failed red
+  first (the second measures the cascade in Chromium and fails on the old
+  stylesheet).
