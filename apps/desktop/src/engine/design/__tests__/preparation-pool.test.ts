@@ -10,6 +10,7 @@ import {
   configureDesignPreparationWorkersForTests,
   designPreparationWorkerCount,
   designPreparationWorkerStatsForTests,
+  prepareFrameIdentitiesInWorkers,
   stopDesignPreparationWorkers,
 } from "../preparation-pool";
 
@@ -92,6 +93,24 @@ describe("Design preparation workers", () => {
     const hits = designIdentityCacheStatsForTests().hits;
     expect(await prepareDesignNavigationFrames(root, navigation.catalogRevision, files)).toEqual(single);
     expect(designIdentityCacheStatsForTests().hits - hits).toBe(files.length);
+  }, 60_000);
+
+  it("keeps the workers of a batch in flight when the previous batch's idle deadline passes", async () => {
+    const navigation = await readDesignNavigationSnapshot(root);
+    configureDesignPreparationWorkersForTests(2, { workerUrl: bundle.url });
+    const prepared = (results: Awaited<ReturnType<typeof prepareFrameIdentitiesInWorkers>>) =>
+      results.filter((result) => "identity" in result).length;
+    // Only the pool's own idle deadline moves; the workers run on real time.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      expect(prepared(await prepareFrameIdentitiesInWorkers(root, navigation.catalogRevision, files))).toBe(files.length);
+      vi.advanceTimersByTime(29_000);
+      const second = prepareFrameIdentitiesInWorkers(root, navigation.catalogRevision, files);
+      vi.advanceTimersByTime(2_000);
+      expect(prepared(await second)).toBe(files.length);
+    } finally {
+      vi.useRealTimers();
+    }
   }, 60_000);
 
   it("stays on the engine's thread, warning once, when a worker cannot start", async () => {

@@ -30,6 +30,8 @@ interface PoolWorker {
 
 let pool: PoolWorker[] = [];
 let idle: NodeJS.Timeout | null = null;
+/** Batches with work on the pool: the idle stop waits for all of them. */
+let inFlight = 0;
 let next = 0;
 /** Set once a worker failed before it answered anything: the pool stays off
  * for this process instead of starting a failing worker for every batch. */
@@ -88,20 +90,29 @@ export async function prepareFrameIdentitiesInWorkers(workspacePath: string, cat
   files: readonly string[]): Promise<DesignWorkerFrameIdentity[]> {
   const count = unavailable ? 0 : Math.min(designPreparationWorkerCount(), files.length);
   if (count === 0) return [];
+  // An idle stop armed by an earlier batch must not end this one's workers.
+  if (idle) clearTimeout(idle);
+  idle = null;
   try {
     while (pool.length < count) pool.push(spawn());
   } catch {
+    if (inFlight === 0) scheduleIdleStop();
     return [];
   }
   const shares = Array.from({ length: count }, (_, index) => files.filter((_, at) => at % count === index));
-  const settled = await Promise.allSettled(shares.map((share, index) => new Promise<DesignWorkerFrameIdentity[]>((resolve, reject) => {
-    const entry = pool[index]!;
-    const id = ++next;
-    entry.pending.set(id, { resolve, reject });
-    entry.worker.ref();
-    entry.worker.postMessage({ id, workspacePath, catalogRevision, files: share });
-  })));
-  scheduleIdleStop();
+  inFlight++;
+  let settled: PromiseSettledResult<DesignWorkerFrameIdentity[]>[];
+  try {
+    settled = await Promise.allSettled(shares.map((share, index) => new Promise<DesignWorkerFrameIdentity[]>((resolve, reject) => {
+      const entry = pool[index]!;
+      const id = ++next;
+      entry.pending.set(id, { resolve, reject });
+      entry.worker.ref();
+      entry.worker.postMessage({ id, workspacePath, catalogRevision, files: share });
+    })));
+  } finally {
+    if (--inFlight === 0) scheduleIdleStop();
+  }
   const results = settled.flatMap((result) => result.status === "fulfilled" ? result.value : []);
   testing.frames += results.filter((result) => "identity" in result).length;
   return results;
