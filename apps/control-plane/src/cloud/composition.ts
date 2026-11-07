@@ -19,7 +19,7 @@ import { createCloudGithubServices } from "./github-composition.js";
 import { CLOUD_V2_READY_CHANNEL } from "./worker-ready.js";
 import { hydrateCloudRepository, type CloudSourceProof, type CloudSourceTarget } from "./source-authority.js";
 import { HISTORY_OPS, readCloudV2History } from "./history.js";
-import { CLOUD_V2_HOME, CloudV2Lifecycle, type CloudV2TimingRecord } from "./lifecycle.js";
+import { CLOUD_V2_HOME, CLOUD_V2_LIFECYCLE_CHANNEL, CloudV2Lifecycle, type CloudV2TimingRecord } from "./lifecycle.js";
 import { cloudV2CheckpointStorage, openCheckpointKey, sealCheckpointKey } from "./checkpoint.js";
 import { runtimeStorageClient } from "./runtime-source.js";
 import { CLOUD_V2_PROXY_PREFIX, type CloudV2ProxyDeps } from "./proxy.js";
@@ -278,5 +278,13 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     githubToken: (workspace: CloudV2Workspace) => github.workspaceToken(workspace),
     logger: console,
   }) : null;
-  return { store, compute, routes, proxy, workers, relay, connections, lifecycle, runtimeUpdates, loginChanges, promptChanges, promptSignals };
+  // Lifecycle rows notify on change. Reconnecting sweeps once, covering any
+  // notice lost meanwhile; the shared LISTEN session carries the channel.
+  const lifecycleChanges = lifecycle ? postgresNotificationSubscription(listenerPool, {
+    channels: [CLOUD_V2_LIFECYCLE_CHANNEL],
+    onReady: () => lifecycle.wake(),
+    onNotification: () => lifecycle.wake(),
+  }) : null;
+  void lifecycleChanges?.start().catch(() => {});
+  return { store, compute, routes, proxy, workers, relay, connections, lifecycle, runtimeUpdates, loginChanges, promptChanges, lifecycleChanges, promptSignals };
 }

@@ -80,6 +80,7 @@ function setup(claimed: (CloudV2LifecycleWorkspace & { attempts: number })[], op
     computerSnapshot: vi.fn(async () => options.snapshot === undefined ? "cv2-alpha-org-1" : options.snapshot),
     revoke: vi.fn(async () => {}),
     idleSince: vi.fn(async () => options.idle ?? []),
+    nextLifecycleDue: vi.fn(async (): Promise<number | null> => null),
     setWorkerRoute: vi.fn(async () => true),
     leasesDue: vi.fn(async () => []),
     markLeaseRenewed: vi.fn(async () => true),
@@ -651,6 +652,38 @@ describe("cloud v2 lifecycle", () => {
       expect(f.store.claimPending).toHaveBeenCalledTimes(1);
       expect(f.store.claimPending).toHaveBeenCalledWith(4, 120_000, [], ["creating", "starting", "deleting"]);
     } finally { release(); await Promise.all([first, overlapping, later]); }
+  });
+
+  it("sweeps once a minute while idle and at once when a lifecycle notification wakes it", async () => {
+    vi.useFakeTimers();
+    const f = setup([]);
+    const stop = f.lifecycle.start();
+    try {
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(f.store.idleSince).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(59_000);
+      expect(f.store.idleSince).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(f.store.idleSince).toHaveBeenCalledTimes(2);
+      f.lifecycle.wake();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(f.store.idleSince).toHaveBeenCalledTimes(3);
+    } finally { await stop(); vi.useRealTimers(); }
+  });
+
+  it("sweeps when a deferred step falls due rather than a minute later", async () => {
+    vi.useFakeTimers();
+    const f = setup([]);
+    vi.mocked(f.store.nextLifecycleDue).mockResolvedValue(30_000);
+    const stop = f.lifecycle.start();
+    try {
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(f.store.idleSince).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(29_999);
+      expect(f.store.idleSince).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(f.store.idleSince).toHaveBeenCalledTimes(2);
+    } finally { await stop(); vi.useRealTimers(); }
   });
 
   it("continues interval admission while a step waits and drains it on shutdown", async () => {

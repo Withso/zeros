@@ -638,6 +638,16 @@ export class CloudV2Store {
 
   /** Leases up to `limit` workspaces in a transitional state to one lifecycle
    * worker. A crashed worker's lease simply expires. */
+  /** Milliseconds until a lifecycle row next becomes claimable, by the
+   * database clock that claims use; null when no row is in a lifecycle state. */
+  async nextLifecycleDue(): Promise<number | null> {
+    const { rows } = await withSystemTx(this.pool, tx => tx.query<{ due_in_ms: number | null }>(
+      `SELECT (extract(epoch FROM min(coalesce(next_attempt_at, clock_timestamp())) - clock_timestamp()) * 1000)::float8 AS due_in_ms
+         FROM cloud_v2_workspaces WHERE state IN ('creating','starting','stopping','deleting')`));
+    const due = rows[0]?.due_in_ms ?? null;
+    return due === null ? null : Math.max(0, due);
+  }
+
   async claimPending(limit: number, leaseMs: number, excludeIds: readonly string[] = [],
     states: readonly CloudV2WorkspaceState[] = ["creating", "starting", "stopping", "deleting"]): Promise<(CloudV2LifecycleWorkspace & { attempts: number })[]> {
     const { rows } = await withSystemTx(this.pool, tx => tx.query<LifecycleRow & { attempts: number }>(

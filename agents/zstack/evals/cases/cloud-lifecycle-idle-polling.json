@@ -1,0 +1,9 @@
+{
+  "id": "cloud-lifecycle-idle-polling",
+  "kind": "replay",
+  "area": "control-plane",
+  "fixedBy": "pending",
+  "symptom": "An idle control plane with no users ran its lifecycle loop every 2 seconds, about 8 queries per sweep. PlanetScale insights on Production showed 77,875 set_config, 21,570 claim and 10,785 runs of each other sweep query in 6 hours, holding a PS-5 primary near 43% CPU. An empty result also needs care: greatest(0, NULL) is 0 in Postgres, which would have kept the fast cadence forever.",
+  "rule": "zstack-review database-cost: a background loop wakes on change notifications and due deadlines and keeps a fast cadence only while work is in flight. Measure idle query rates with PlanetScale insights before and after, and test empty-set aggregates against a real database.",
+  "check": "pnpm --dir apps/control-plane exec vitest run src/cloud/lifecycle.test.ts -t \"sweeps\""
+}

@@ -832,6 +832,14 @@ they use at most two of the slots, and a slow stop never holds up another
 workspace's creation. Running VMs receive a 24-hour Boat
 lease; a bounded background scan renews it after about 12 hours.
 
+The loop sweeps every 2 seconds only while it has work in flight. Otherwise it
+sleeps until the next deferred step falls due, at most a minute. Database
+triggers notify `zeros_cloud_v2_lifecycle` when a workspace enters `creating`,
+`starting`, `stopping` or `deleting`, a prompt asks to wake a stopped
+workspace, or a Cloud Computer build changes, and each notice starts a sweep
+at once. Reconnecting the shared LISTEN session sweeps once, covering notices
+lost meanwhile. Idle stops and other time-based scans run within that minute.
+
 The lifecycle loop stops a running VM after 15 minutes without activity
 reports (`CLOUD_V2_IDLE_STOP_MS`). Turns, workspace setup, attachment transfers,
 recent terminal input/output, and explicit file/Git mutations keep reports
