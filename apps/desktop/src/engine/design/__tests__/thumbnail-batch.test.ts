@@ -24,7 +24,7 @@ import { readCanvas } from "../document-storage";
 import { designIdentityCacheStatsForTests, resetDesignIdentityCacheForTests } from "../identity-cache";
 import { prepareFrameRenderSource } from "../render-preparation";
 import { sharedDesignParseStatsForTests } from "../shared-parse";
-import { composeDesignThumbnailBatches, readDesignThumbnails, renderDesignThumbnails } from "../thumbnail-batch";
+import { composeDesignThumbnailBatches, configureDesignThumbnailBatchTailwindForTests, readDesignThumbnails, renderDesignThumbnails } from "../thumbnail-batch";
 import { currentDesignThumbnailPipeline, resetDesignThumbnailStoreForTests, settleDesignThumbnailStoreForTests, storeDesignThumbnail } from "../thumbnail-store";
 
 /** A valid RGBA PNG of the given size; the capture service checks each picture's dimensions. */
@@ -237,6 +237,24 @@ describe("batch Design thumbnails", () => {
     const css = Object.values(request.stylesheets).join("\n");
     expect(css).toContain(".card");
     expect(css).not.toContain(".unused");
+  });
+
+  it("links one Tailwind sheet for the whole batch when enabled, holding every frame's utilities", async () => {
+    const current = await versions(["page-1/a.html", "page-1/b.html"]);
+    const frames = [...current].map(([file, sourceVersion]) => ({ file, sourceVersion }));
+    const perFrame = designBatchCaptureRequestSchema.parse((await composeDesignThumbnailBatches(root, input(frames))).batches[0]!.request);
+    configureDesignThumbnailBatchTailwindForTests(true);
+    try {
+      const request = designBatchCaptureRequestSchema.parse((await composeDesignThumbnailBatches(root, input(frames))).batches[0]!.request);
+      assertDesignBatchStylesheets(request);
+      const [a, b] = request.items.map((item) => links(item.html));
+      const shared = a!.filter((hash) => b!.includes(hash)).map((hash) => request.stylesheets[hash]!);
+      expect(shared.some((css) => css.includes(".p-3") && css.includes(".m-2"))).toBe(true);
+      expect(Object.keys(request.stylesheets).length).toBe(Object.keys(perFrame.stylesheets).length - 1);
+      expect(a!.length).toBe(links(perFrame.items[0]!.html).length);
+    } finally {
+      configureDesignThumbnailBatchTailwindForTests(false);
+    }
   });
 
   it("returns a frame whose source moved on as stale with its version, and an unknown frame as failed", async () => {
