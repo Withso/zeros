@@ -186,6 +186,8 @@ interface LinkedStylesheet {
   variables?: readonly string[];
   /** Identity only: the size of CSS left empty here. */
   bytes?: number;
+  /** Identity only: image bytes that CSS carries, when every image is known. */
+  imageBytes?: number;
 }
 
 /** Replace each local stylesheet link with an empty, hash-tagged placeholder. */
@@ -511,7 +513,9 @@ async function importedStylesheets(
   });
   for (const [index, source] of sources.entries()) {
     const token = `s${index}-${source.revision}`;
-    sheets.push({ token, css: source.css.replace(/<\/style/gi, "<\\/style"), ...(source.bytes === undefined ? {} : { bytes: source.bytes }) });
+    sheets.push({ token, css: source.css.replace(/<\/style/gi, "<\\/style"),
+      ...(source.bytes === undefined ? {} : { bytes: source.bytes }),
+      ...(source.imageBytes === undefined ? {} : { imageBytes: source.imageBytes }) });
     markup += `<style data-zeros-style-source="${source.id}" data-zeros-sheet="${token}"></style>`;
   }
   // Imported sources come first in head, so their layers (Tailwind's
