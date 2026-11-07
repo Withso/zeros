@@ -10,7 +10,8 @@ import type { DesignCatalogAdmission } from "./catalog";
 import { encodeDesignFramePath } from "@zeros/protocol/design-path";
 import { DESIGN_MAX_FRAMES_PER_PAGE, designPageCreateInputSchema, designPageDeleteInputSchema, designPageIdSchema, designPageRenameInputSchema } from "@zeros/protocol/design-pages";
 import { selectDesignPageHint } from "./page-selection";
-import { DESIGN_CAPTURE_TIMEOUT_MS, designPreviewCancelSchema, designPreviewRequestSchema, designWorkspaceCaptureSchema } from "@zeros/protocol/design-capture";
+import { DESIGN_CAPTURE_TIMEOUT_MS, designPreviewCancelSchema, designPreviewRequestSchema, designThumbnailsRenderSchema, designWorkspaceCaptureSchema } from "@zeros/protocol/design-capture";
+import { renderDesignThumbnails } from "./thumbnail-batch";
 import type { DesignPreviewJobs } from "./preview-jobs";
 import { captureWorkspaceDesign, previewWorkspaceDesign } from "./workspace-capture";
 import { openDesignVerification, designFramePreviewUrl } from "./verification-service";
@@ -254,6 +255,7 @@ const DESIGN_WORKSPACE_ROUTES = new Set([
   "design.capture",
   "design.preview",
   "design.preview.cancel",
+  "design.thumbnails.render",
   "design.styleBuilds.presence",
   "design.styles.refresh",
   "design.context.create",
@@ -367,6 +369,23 @@ export async function handleDesignWorkspaceRoute(
       if (!options.previewAdmission || !input.directoryId || !input.deadline || remote)
         throw new Error("Design preview cancellation requires a live Local connection and directory.");
       return host.previewJobs.run({ workspaceId: input.workspaceId, directoryId: input.directoryId, jobId: input.jobId, deadline: input.deadline }, options.previewAdmission, run);
+    }
+    case "design.thumbnails.render": {
+      // Pictures for many saved frames in batch captures; never changes the checkout.
+      if (remote) {
+        throw new GitError({
+          code: "REMOTE_RESTRICTED",
+          message: "Design thumbnails are available only in the desktop app.",
+        });
+      }
+      const input = designThumbnailsRenderSchema.parse(params);
+      const run = (signal?: AbortSignal) =>
+        host.withDesignReadWorkspace(input.workspaceId, false, ({ root }) => renderDesignThumbnails(root, input, { signal }));
+      if (!input.jobId) return run();
+      if (!options.previewAdmission)
+        throw new Error("Design thumbnail cancellation requires a live Local connection.");
+      return host.previewJobs.run({ workspaceId: input.workspaceId, directoryId: input.directoryId, jobId: input.jobId,
+        deadline: input.deadline! }, options.previewAdmission, run);
     }
     case "design.preview.cancel": {
       const input = designPreviewCancelSchema.parse(params);

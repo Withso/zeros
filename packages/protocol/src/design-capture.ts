@@ -199,3 +199,42 @@ export const designBatchCaptureReplySchema = z
   })
   .strict();
 export type DesignBatchCaptureReply = z.infer<typeof designBatchCaptureReplySchema>;
+
+/** Local engines that compose many frames' thumbnails into capture batches. */
+export const DESIGN_THUMBNAILS_CAPABILITY = "design.thumbnails.v1";
+const thumbnailFrame = z.object({
+  file: z.string().min(1).max(255),
+  sourceVersion: z.string().regex(/^[a-f0-9]{24}$/),
+}).strict();
+/** design.thumbnails.render: pictures of saved frames at one size, theme and
+ * color scheme. A frame whose source moved on comes back as stale, with its
+ * current version, rather than as a picture of other content. */
+export const designThumbnailsRenderSchema = z.object({
+  workspaceId: z.string().min(1).max(128),
+  directoryId: z.string().min(1).max(128),
+  theme: z.string().regex(/^[a-z][a-z0-9_-]{0,63}$/).nullable(),
+  colorScheme: z.enum(["light", "dark"]),
+  maxDimension: z.number().int().min(DESIGN_CAPTURE_MIN_DIMENSION).max(DESIGN_BATCH_CAPTURE_MAX_DIMENSION),
+  frames: z.array(thumbnailFrame).min(1).max(DESIGN_BATCH_CAPTURE_MAX_ITEMS),
+  /** As for previews: cancelled through design.preview.cancel. */
+  jobId: previewJobId.optional(),
+  deadline: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
+}).strict()
+  .refine((input) => new Set(input.frames.map((frame) => frame.file)).size === input.frames.length, "Thumbnail frames must be distinct.")
+  .refine((input) => (input.jobId === undefined) === (input.deadline === undefined), "Thumbnail job and deadline must be supplied together.");
+export type DesignThumbnailsRender = z.infer<typeof designThumbnailsRenderSchema>;
+export const designThumbnailsReplySchema = z.object({
+  /** Identifies how the pictures were made (composer and capture renderer):
+   * stored pictures from another pipeline are not reused. */
+  pipeline: z.string().min(1).max(256),
+  pictures: z.array(thumbnailFrame.extend({
+    mimeType: z.literal("image/png"),
+    width: z.number().int().min(1).max(DESIGN_BATCH_CAPTURE_MAX_DIMENSION),
+    height: z.number().int().min(1).max(DESIGN_BATCH_CAPTURE_MAX_DIMENSION),
+    data: z.string().min(1).max(Math.ceil((DESIGN_CAPTURE_PNG_BYTES * 4) / 3) + 4),
+  }).strict()).max(DESIGN_BATCH_CAPTURE_MAX_ITEMS),
+  stale: z.array(thumbnailFrame).max(DESIGN_BATCH_CAPTURE_MAX_ITEMS),
+  failed: z.array(z.object({ file: z.string().min(1).max(255), error: z.string().min(1).max(500) }).strict())
+    .max(DESIGN_BATCH_CAPTURE_MAX_ITEMS),
+}).strict();
+export type DesignThumbnailsReply = z.infer<typeof designThumbnailsReplySchema>;
