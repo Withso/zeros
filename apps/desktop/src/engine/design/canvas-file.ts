@@ -79,6 +79,49 @@ const plainObject = (value: unknown): value is RecordValue =>
 const singlePageTitle = (pages: unknown): unknown =>
   Array.isArray(pages) && plainObject(pages[0]) ? pages[0].title : "Design";
 
+type ParsedPage = z.infer<typeof pageSchema> & { folder?: string };
+
+/** Cross-references the schema cannot express: every frame on exactly one
+ * page, inside its page folder, with a portable source no other frame uses. */
+function assertCanvasMembership(
+  version: 1 | 2,
+  pages: readonly ParsedPage[],
+  frames: Record<string, z.infer<typeof frameSchema>>,
+): Map<string, { page: ParsedPage; index: number }> {
+  const order = pages.flatMap((page) => page.frames);
+  const placement = new Map(
+    pages.flatMap((page) =>
+      page.frames.map((frameId, index) => [frameId, { page, index }] as const),
+    ),
+  );
+  if (
+    version === 2 &&
+    (new Set(pages.map((page) => page.id)).size !== pages.length ||
+      new Set(pages.map((page) => portableDesignName(String(page.folder))))
+        .size !== pages.length)
+  )
+    throw new Error("Design pages must have distinct IDs and folders.");
+  if (
+    placement.size !== order.length ||
+    order.length !== Object.keys(frames).length ||
+    order.some((frameId) => !Object.hasOwn(frames, frameId))
+  )
+    throw new Error(
+      "Every Design frame must appear exactly once on a canvas page.",
+    );
+  const files = new Set<string>();
+  for (const [frameId, { source: file }] of Object.entries(frames)) {
+    const { page } = placement.get(frameId)!;
+    if (version === 1 ? file.includes("/") : file.split("/")[0] !== page.folder || file.split("/").length !== 2)
+      throw new Error("Design frame source must be inside its page folder.");
+    const portable = portableDesignName(file);
+    if (files.has(portable))
+      throw new Error("Design frames must have distinct source files.");
+    files.add(portable);
+  }
+  return placement;
+}
+
 /** The public file is a small scene index. The existing HTML engine continues
  * to address documents by source path; its IPC/document IDs remain compatible. */
 export function decodeCanvasFile(source: string, options?: { version: 1 | 2 }): RecordValue {
@@ -118,28 +161,7 @@ export function decodeCanvasFile(source: string, options?: { version: 1 | 2 }): 
     pages = [{ id: "main", title: "Design", frames: Object.keys(frames) }],
     ...rest
   } = parsed;
-  const order = pages.flatMap((page) => page.frames);
-  const placement = new Map(
-    pages.flatMap((page) =>
-      page.frames.map((frameId, index) => [frameId, { page, index }] as const),
-    ),
-  );
-  if (
-    parsed.version === 2 &&
-    (new Set(pages.map((page) => page.id)).size !== pages.length ||
-      new Set(pages.map((page) => portableDesignName(String(page.folder))))
-        .size !== pages.length)
-  )
-    throw new Error("Design pages must have distinct IDs and folders.");
-  if (
-    new Set(order).size !== order.length ||
-    order.length !== Object.keys(frames).length ||
-    order.some((frameId) => !Object.hasOwn(frames, frameId))
-  )
-    throw new Error(
-      "Every Design frame must appear exactly once on a canvas page.",
-    );
-  const files = new Set<string>();
+  const placement = assertCanvasMembership(parsed.version, pages, frames);
   const geometry: RecordValue = {};
   const info: RecordValue = {};
   for (const [frameId, frame] of Object.entries(frames)) {
@@ -155,13 +177,7 @@ export function decodeCanvasFile(source: string, options?: { version: 1 | 2 }): 
       geometryMetadata,
       ...extensions
     } = frame;
-    const { page, index } = placement.get(frameId)!;
-    if (parsed.version === 1 ? file.includes("/") : file.split("/")[0] !== page.folder || file.split("/").length !== 2)
-      throw new Error("Design frame source must be inside its page folder.");
-    const portable = portableDesignName(file);
-    if (files.has(portable))
-      throw new Error("Design frames must have distinct source files.");
-    files.add(portable);
+    const { index } = placement.get(frameId)!;
     geometry[file] = {
       ...geometryMetadata,
       x,
@@ -259,7 +275,8 @@ export function encodeCanvasFile(document: RecordValue, options: { version: 1 | 
       suppliedId === undefined ? legacyFrameId(file) : id.parse(suppliedId);
     if (Object.hasOwn(authored, frameId))
       throw new Error("Duplicate Design frame identity.");
-    authored[frameId] = frameSchema.parse({
+    // The whole-document parse below validates and orders every frame.
+    authored[frameId] = {
       ...extensions,
       kind: kind === "text" ? "text" : "html",
       source: file,
@@ -270,7 +287,7 @@ export function encodeCanvasFile(document: RecordValue, options: { version: 1 | 
       height: geometry.h,
       ...(geometry.z !== (pageOrder?.get(frameId) ?? position) ? { z: geometry.z } : {}),
       ...(Object.keys(geometryMetadata).length ? { geometryMetadata } : {}),
-    });
+    } as z.infer<typeof frameSchema>;
     position++;
   }
   const outputPages = options.version === 2
@@ -283,7 +300,6 @@ export function encodeCanvasFile(document: RecordValue, options: { version: 1 | 
     frames: authored,
   });
   // Validate cross references and portable source aliases before persistence.
-  const sourceText = JSON.stringify(result, null, 2) + "\n";
-  decodeCanvasFile(sourceText);
-  return sourceText;
+  assertCanvasMembership(options.version, result.pages ?? [], result.frames);
+  return JSON.stringify(result, null, 2) + "\n";
 }

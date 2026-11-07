@@ -7,7 +7,6 @@ export function designPageOverLimitMessage(title: string, frames: number): strin
   return `Design page ${JSON.stringify(title)} has ${count(frames)} frames; a page holds at most ${count(DESIGN_MAX_FRAMES_PER_PAGE)}. Move some to another page or remove them, then refresh Design.`;
 }
 
-/** Refuse an admission that would put one more frame on a full page. */
 export function assertDesignPageHasRoom(title: string, frames: number): void {
   if (frames >= DESIGN_MAX_FRAMES_PER_PAGE)
     throw new Error(

@@ -1,0 +1,25 @@
+{
+  "repository": "https://github.com/Withso/zeros",
+  "revision": "2435964e1bdde90623da1042449a6438131f5582",
+  "license": "MIT",
+  "exports": "export { decodeCanvasFile, encodeCanvasFile } from './apps/desktop/src/engine/design/canvas-file.ts';\nexport { designPageCatalogSchema } from './packages/protocol/src/design-pages.ts';\nexport { designCatalogFrameSchema } from './packages/protocol/src/design-catalog.ts';",
+  "sha256": "03533d349c4ef3fc370a4ba87ec0ac8c45da3c7733d81a06e512dfd8bd53ba18",
+  "sources": [
+    {
+      "path": "apps/desktop/src/engine/design/canvas-file.ts",
+      "sha256": "376ef241e2ce008bb1f987f880ba315eac79f574d13ba9b8418951b7155957a8"
+    },
+    {
+      "path": "packages/protocol/src/design-catalog.ts",
+      "sha256": "fbc42e2d5db5537dd6956530c95e1f9a6e45f7bea1583333ba6517c833031799"
+    },
+    {
+      "path": "packages/protocol/src/design-pages.ts",
+      "sha256": "5ddc47afee887123a1165358ccb25f49a4faef5e931565a9e86da1f36549e51e"
+    },
+    {
+      "path": "packages/protocol/src/design-path.ts",
+      "sha256": "d9e0dc7d4a44fb6ed484e9e4a3c0d70e4f78bb942c91dab6170943f58e20c9e4"
+    }
+  ]
+}

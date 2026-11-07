@@ -739,7 +739,7 @@ async function applyDesignFrameChangesUnlocked(
       after: change.after?.source ?? null,
     });
   }
-  // Apply every change first: a move off a full page may precede its arrival.
+  // Count after applying every change: a frame leaving a full page may be listed after the one arriving.
   for (const change of changes) {
     if (!change.after || change.before) continue;
     const page = designFramePage(canvas, change.after.file);

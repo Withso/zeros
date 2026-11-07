@@ -5,7 +5,9 @@
 `WorkspaceRuntimeClient` passive facade through `bridgeDesignCatalog`; it never
 opens a peer, reconnects, wakes a VM, falls back to Local, requests a legacy full
 snapshot, or prepares HTML. It has no shared canvas or selection consumer yet.
-Authored v1/v2 and the current 256-frame production admission are unchanged.
+Authored v1/v2 formats are unchanged. Admission is per page: at most 1,000
+frames on each page (`DESIGN_MAX_FRAMES_PER_PAGE`), 1–64 pages
+(`DESIGN_MAX_PAGES`), and no directory-wide frame count beyond what those imply.
 
 ## Caller lifetime and publication
 
@@ -74,15 +76,21 @@ Configuration can lower, never raise, these defaults:
 | ----------------------------------------------------------------- | ------------------------: |
 | Owned authority entries, including executing retired entries      |                         4 |
 | Concurrent sequences / outstanding bridge callbacks               |                         4 |
-| Descriptors per coherent catalog                                  | 10,000 (protocol ceiling) |
-| Aggregate owned descriptors, including cache/staging/retired work |                    40,000 |
+| Descriptors per coherent catalog                                  | 64,000 (protocol ceiling) |
+| Aggregate owned descriptors, including cache/staging/retired work |                   128,000 |
 | Pages per packet/catalog                                          |     64 (protocol ceiling) |
-| Per-sequence staged payload and remembered cursor estimate        |                     8 MiB |
-| Shared owned payload estimate, including reservations             |                    32 MiB |
+| Per-sequence staged payload and remembered cursor estimate        |                    48 MiB |
+| Shared owned payload estimate, including reservations             |                    96 MiB |
 | Reserved incoming parsed-response allowance per active callback   |                     2 MiB |
-| Cumulative serialized transfer per sequence                       |              32 MiB UTF-8 |
+| Cumulative serialized transfer per sequence                       |              48 MiB UTF-8 |
 | Round trips per sequence                                          |                    10,000 |
 | Deadline anchored at admission, never renewed                     |                60 seconds |
+
+The protocol ceiling is pages × frames per page. The byte defaults are priced
+from the 16 MiB canvas metadata cap: descriptors serialize to at most about
+twice their canvas entries and the estimate doubles for UTF-16, so every
+admissible directory assembles and two can at once. A 26-page × 1,000-frame
+directory with engine-shaped identities is about 6.6 MB of descriptors.
 
 Requests ask for the protocol maximum of 256 descriptors; each packet still has
 the existing 256-KiB producer/wire ceiling. A sparse legal sequence can hit a
@@ -106,7 +114,7 @@ bound. Existing facade/transport limits and the producer's independent lifetime
 ledger remain in force; this adapter cannot retire remote computation hidden
 behind a settled transport timeout.
 
-The synthetic 10k metadata tests measure assembly, coverage and pool accounting
-only. They do not establish registered 10k admission, source preparation,
+The synthetic 26-page metadata tests measure assembly, coverage and pool accounting
+only. They do not establish source preparation,
 rendered performance, Mac/native or deployed-cloud parity. Shared scene wiring
 still waits for the Captain-routed corrected selection→geometry integration.

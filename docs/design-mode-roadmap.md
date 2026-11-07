@@ -519,7 +519,17 @@ exactly one folder segment, unique globally under NFC/case folding. Each frame
 must appear exactly once in its page's `frames` array and point inside that
 page's folder. Unregistered HTML remains source, not an implicit frame.
 
-The format admits 1–64 pages and at most 256 frames directory-wide. Page folders
+The format admits 1–64 pages and at most 1,000 frames on each page
+(`DESIGN_MAX_PAGES` and `DESIGN_MAX_FRAMES_PER_PAGE` in
+`@zeros/protocol/design-pages`). A directory has no frame cap of its own; the
+16 MiB canvas metadata bound (about 60,000 frames with engine-shaped IDs) is its
+only aggregate limit. A page past 1,000 frames, including one written natively,
+fails to read with a plain reason naming the page; storage is never truncated
+or rewritten to fit, and every admitting write refuses a full page before any
+journal. Releases before per-page admission (256 frames directory-wide,
+stacking 0–256) fail closed on a directory past those bounds: their schema
+rejects the canvas before any write, and both releases read and write identical
+bytes within the old bounds (`frame-limits-compatibility.test.ts`). Page folders
 match `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`, cannot end in `.`, cannot be
 dot-prefixed, and exclude `meta`, `assets` and `components` case-insensitively.
 Folders and page IDs are unique; folder comparisons use case folding. Generated
@@ -535,7 +545,7 @@ membership in the page catalog and report lint while omitting those renders;
 direct frame reads and authoring validation still reject missing source.
 Geometry remains dimensions 1–16384 and positions within ±1,000,000.
 `frame.set-geometry` rejects geometry outside those bounds (and a `z` outside
-0–256) with a plain reason before any journal is admitted, so storage never
+0–1,000) with a plain reason before any journal is admitted, so storage never
 normalizes a committed revision. Canvas move/resize, a newly drawn
 top-level frame and Resize to fit stop at the limits, frame W/H/X/Y fields
 settle inside them, and automatic placement widens its three-column grid
@@ -2596,8 +2606,8 @@ admission limits are not OS CPU/RSS/GPU quotas.
 ### Negotiated metadata-only catalog reads
 
 `design.catalog.read.v1` is an additive engine capability for the distinct
-`design.catalog.read` operation. It is **not** a large-directory admission
-capability: production canvas admission and stacking bounds remain 256.
+`design.catalog.read` operation. It is **not** an admission capability:
+admission is per page (1,000 frames, stacking 0–1,000) for every client.
 Authored canvas v1/v2, registration, source paths and internal canvas v3 do not
 change. Increasing frame count does not by itself require a public canvas v3.
 
@@ -2634,8 +2644,8 @@ wire validator refuses pagination/coverage fields.
 Authenticated cursors bind the retained revision, connection/account authority,
 workspace/root, directory, intent and position. Continuations revalidate current
 metadata and root identity. Changed revisions return `stale`; retired, evicted
-or expired cursors cannot continue. Reads retain at most 16 sessions, an 8-MiB
-encoded-string estimate per snapshot and 32 MiB in total, with at most four
+or expired cursors cannot continue. Reads retain at most 16 sessions, a 48-MiB
+encoded-string estimate per snapshot and 96 MiB in total, with at most four
 concurrent reads and no wait queue. The 60-second deadline starts at admission
 and never extends while paging. These are retained-payload budgets, not RSS
 guarantees. Disconnect retires the connection's sessions and held publications.
@@ -2652,15 +2662,23 @@ Pending metadata, page-layout or semantic journals return `unsettled`; this
 read-only API does not recover, migrate or rewrite them. Existing lifecycle
 recovery owns settlement. Cloud v2 does not advertise this Design capability.
 
-Negotiated scoped mutation snapshots integrate the current bounded canvas with
-the metadata catalog; larger admission remains a separate integration layer. Before
-raising admission, update every lifecycle/order/undo/checkpoint guard and reject
-unnegotiated prospective-large writes **before** committing. Keep resource
-budgets independent: Foundation's 1,024 files/16 MiB bound one entry/dependency
-snapshot, semantic journals have a 32-MiB ceiling, metadata lifecycle journals
-have a 64-MiB/2,052-path ceiling, and page-layout migration uses an 8-MiB journal
-with separate payloads. A 10k metadata-helper fixture does not prove a registered
-10k directory, lifecycle recovery, rendered fidelity or pan/zoom performance.
+Per-page admission is enforced on every lifecycle, order, undo and checkpoint
+path before a journal is admitted: create, duplicate, restore of a deleted
+frame, layer transfer and its undo/redo (moves between pages included), page
+catalog undo/redo and page-layout migration. The canvas encoder refuses a page
+past the cap as the final guard. No capability negotiation is needed: the Local
+engine serves only same-build loopback clients and cloud v2 has no Design, so
+the only older readers are older installs opening the checkout, which fail
+closed. Keep resource budgets independent: Foundation's 1,024 files/16 MiB bound
+one entry/dependency snapshot, semantic journals have a 32-MiB ceiling, metadata
+lifecycle journals have a 64-MiB/2,052-path ceiling, and page-layout migration
+uses an 8-MiB journal with separate payloads. A full page fits the path ceiling
+(1,000 deletions plus metadata); deleting a page whose sources and canvas exceed
+64 MiB is refused before any change, so delete such a page's frames in groups.
+A 26-page × 1,000-frame replica of `Zeros - Design` (40 MiB of sources per
+page) deletes a page within the journal. Measured catalog and write costs live
+in `frame-limits-scale.test.ts`; they do not prove rendered fidelity or
+pan/zoom performance.
 
 ### Performance and safety ceilings
 
@@ -2670,8 +2688,9 @@ boundaries, not targets to relax casually:
 - textual state: 2 MiB per file; one frame document (the frame and the files
   it links) holds at most 1,024 files and 16 MiB. There is no directory-wide
   size budget;
-- canvas catalog: 1–64 pages, 256 frames directory-wide; one portable page-folder
-  segment, 64 characters maximum, and per-page stacking;
+- canvas catalog: 1–64 pages, 1,000 frames per page, no directory-wide frame cap
+  beyond the 16 MiB canvas metadata; one portable page-folder segment, 64
+  characters maximum, and per-page stacking 0–1,000;
 - page view memory: 32 recent pages per workspace, with two retained workspace
   canvases in total; page switching allocates no retained canvas;
 - page migration: 8 MiB hash/path journal with private payload files, 20,000
@@ -2788,6 +2807,12 @@ bridge/capture stand-ins and srcDoc lifetime cannot qualify native Electron.
 For native work, generate a new disposable checkout with
 `pnpm exec tsx scripts/design-performance-fixture.ts --frames 256 --complex --output /private/tmp/zeros-design-performance-256`
 (the path must not exist), then open it as a Local workspace in the exact build.
+For many pages, `--pages 26 --frames-per-page 1000` writes synthetic frames, and
+`--source "<repository>/Zeros - Design" --pages 26 --frames-per-page 1000`
+replicates a real directory's frames (cycling every source frame on each page,
+with its page stylesheets, tokens and style-source closure). Both clone file
+bytes (APFS clones cost almost no disk) and write `meta/canvas.json` once
+through the engine encoder, then read it back through the engine.
 With that isolated Electron instance exposing a loopback debugging endpoint,
 `node scripts/design-baseline.mjs --native-cdp http://127.0.0.1:9222 --scenario fixed-view-256 --output .context/design-native-256.json`
 checks Electron and the authenticated zeros-design protocol before sampling.

@@ -189,6 +189,8 @@ export async function readCanvas(
     foundation?: unknown;
     frame_info?: unknown;
   };
+  // decodeCanvasFile already validated every canvas.json source path.
+  const decodedSources = file.endsWith(`/${DESIGN_CANVAS_FILE}`);
   try {
     raw = (
       file.endsWith(`/${DESIGN_MANIFEST_FILE}`)
@@ -239,7 +241,7 @@ export async function readCanvas(
       ),
     );
   for (const [file, geometry] of Object.entries(sourceFrames)) {
-    if (!isFrameFile(file)) {
+    if (!decodedSources && !isFrameFile(file)) {
       throw new Error("Invalid Design frame reference.");
     }
     const normalized = normalizeGeometry(geometry, {
@@ -278,7 +280,7 @@ export async function readCanvas(
     for (const [file, value] of Object.entries(raw.frame_info)) {
       const info = value as Partial<FrameMeta> | null;
       if (
-        !isFrameFile(file) ||
+        (!decodedSources && !isFrameFile(file)) ||
         !Object.hasOwn(frames, file) ||
         !info ||
         typeof info.title !== "string" ||

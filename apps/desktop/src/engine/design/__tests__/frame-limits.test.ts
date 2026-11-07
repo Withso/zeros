@@ -29,7 +29,7 @@ describe("Design page frame admission", () => {
       const decoded = performance.now();
       expect(Object.keys(document.frames as object)).toHaveLength(26_000);
       expect(encodeCanvasFile(document, { version: 2 })).toBe(source);
-      // Diagnostics only: quadratic membership lookups took tens of seconds here.
+      // Timings are diagnostics only; never assert them.
       console.info(`26x1000 canvas.json ${Buffer.byteLength(source)} bytes; decode ${Math.round(decoded - started)} ms, encode ${Math.round(performance.now() - decoded)} ms`);
     });
 
