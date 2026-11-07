@@ -1,8 +1,8 @@
 import { lstatSync, realpathSync } from "node:fs";
 import path from "node:path";
 import { DesignCatalogError, projectDesignCatalog } from "./catalog";
-import { readCanvasContext } from "./document-storage";
-import { canvasReadSnapshot } from "./document-model";
+import { freezeDeep, readCanvasContext, readSharedCanvasContext } from "./document-storage";
+import { canvasReadSnapshot, type CanvasDocument } from "./document-model";
 import {
   assertLegacyDesignDraftWritable,
   readDirectoryDesignLayout,
@@ -14,7 +14,9 @@ import {
 import { designPagesMigrationJournalName } from "./pages-migration";
 import { createHash } from "node:crypto";
 
-export function inspectDesignCatalog(root: string, directory: string) {
+/** `revision: false` skips hashing the canvas for a caller that compares the
+ * returned bytes with an inspection it already holds. */
+export function inspectDesignCatalog(root: string, directory: string, options: { revision?: boolean } = {}) {
   assertLegacyDesignDraftWritable(root);
   const layout = readDirectoryDesignLayout(root, directory);
   if (!layout?.manifest.canvas)
@@ -47,17 +49,39 @@ export function inspectDesignCatalog(root: string, directory: string) {
     registration,
     source,
     binding: JSON.stringify(roots),
-    revision: createHash("sha256")
-      .update(
-        JSON.stringify([
-          layout.manifestFile,
-          registration,
-          layout.documentFile,
-          source,
-        ]),
-      )
-      .digest("hex"),
+    revision: options.revision === false ? "" : designCatalogRevision({ layout, registration, source }),
   };
+}
+
+export function designCatalogRevision(inspection: {
+  layout: { manifestFile: string; documentFile: string };
+  registration: string;
+  source: string;
+}): string {
+  // Revisions live only within an engine session. The canvas follows a NUL,
+  // which JSON text never contains, rather than being escaped into the array.
+  return createHash("sha256")
+    .update(
+      JSON.stringify([
+        inspection.layout.manifestFile,
+        inspection.registration,
+        inspection.layout.documentFile,
+      ]),
+    )
+    .update("\0")
+    .update(inspection.source)
+    .digest("hex");
+}
+
+/** The same metadata bytes and roots as an earlier inspection. */
+export function sameDesignCatalogInspection(
+  before: ReturnType<typeof inspectDesignCatalog>,
+  after: ReturnType<typeof inspectDesignCatalog>,
+): boolean {
+  return before.binding === after.binding && before.source === after.source &&
+    before.registration === after.registration &&
+    before.layout.manifestFile === after.layout.manifestFile &&
+    before.layout.documentFile === after.layout.documentFile;
 }
 
 export async function readDesignCatalogMetadata(
@@ -67,30 +91,51 @@ export async function readDesignCatalogMetadata(
   return (await readDesignCatalogMetadataWithContext(root, directory)).metadata;
 }
 
+/** The catalog last projected from a shared canvas. One slot, frozen like
+ * the canvas: revalidating an unchanged directory projects nothing again. */
+let sharedProjection: { canvas: CanvasDocument; projection: ReturnType<typeof projectDesignCatalog> } | null = null;
+let sharedProjections = 0;
+
+export function designSharedCatalogProjectionsForTests(): number {
+  return sharedProjections;
+}
+
 /** The canvas read the catalog was projected from, so a caller that needs
- * both decodes a large canvas once. Never retained beside a catalog session. */
+ * both decodes a large canvas once. Never retained beside a catalog session,
+ * except that `shared` readers reuse the frozen shared canvas and its
+ * projection while the canvas bytes are unchanged. */
 export async function readDesignCatalogMetadataWithContext(
   root: string,
   directory: string,
+  options: { shared?: boolean } = {},
 ) {
   const before = inspectDesignCatalog(root, directory);
-  const context = await readCanvasContext(root);
+  const context = options.shared ? await readSharedCanvasContext(root) : await readCanvasContext(root);
   const captured = context.canvas[canvasReadSnapshot];
-  const after = inspectDesignCatalog(root, directory);
+  const after = inspectDesignCatalog(root, directory, { revision: false });
   if (
-    before.binding !== after.binding ||
-    before.revision !== after.revision ||
+    !sameDesignCatalogInspection(before, after) ||
     captured?.source !== before.source ||
     captured.registration?.source !== before.registration
   )
     throw new DesignCatalogError("stale");
+  let projection: ReturnType<typeof projectDesignCatalog>;
+  if (!options.shared) projection = projectDesignCatalog(context.canvas);
+  else {
+    if (sharedProjection?.canvas !== context.canvas) {
+      sharedProjections++;
+      sharedProjection = { canvas: context.canvas, projection: freezeDeep(projectDesignCatalog(context.canvas)) };
+    }
+    projection = sharedProjection.projection;
+  }
   return {
     context,
+    inspection: before,
     metadata: {
       directoryId: before.layout.manifest.id,
       binding: before.binding,
       revision: before.revision,
-      ...projectDesignCatalog(context.canvas),
+      ...projection,
     },
   };
 }

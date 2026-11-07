@@ -1,12 +1,16 @@
 import path from "node:path";
+import { DESIGN_MAX_FRAMES_PER_PAGE } from "@zeros/protocol/design-pages";
 import { isDesignFrameFile } from "@zeros/protocol/design-path";
 import { designDirectoryNameFor } from "./directory-registry";
 import { designPagesMigrationGeneration } from "./pages-migration";
 
 import type { DesignLintViolation } from "./document";
 
-const MAX_AUDITS = 256;
+/** Every frame of a full page keeps its audit; the warning total holds
+ * retained memory to the earlier bound of 256 full audits. */
+const MAX_AUDITS = DESIGN_MAX_FRAMES_PER_PAGE;
 const MAX_WARNINGS_PER_AUDIT = 128;
+const MAX_RETAINED_WARNINGS = 256 * MAX_WARNINGS_PER_AUDIT;
 const RUNTIME_RULE_IDS = new Set([
   "contrast",
   "overflow",
@@ -29,6 +33,14 @@ interface DesignRuntimeAuditEntry extends DesignRuntimeAuditInput {
 }
 
 const audits = new Map<string, DesignRuntimeAuditEntry>();
+let retainedWarnings = 0;
+
+function forgetAudit(key: string): void {
+  const audit = audits.get(key);
+  if (!audit) return;
+  audits.delete(key);
+  retainedWarnings -= audit.warnings.length;
+}
 
 function auditKey(workspacePath: string, frame: string): string {
   return `${path.resolve(workspacePath)}\u0000${frame}`;
@@ -58,7 +70,7 @@ export function setDesignRuntimeAudit(input: DesignRuntimeAuditInput): void {
   });
   const key = auditKey(input.workspacePath, input.frame);
   const directory = designDirectoryNameFor(input.workspacePath);
-  audits.delete(key);
+  forgetAudit(key);
   audits.set(key, {
     ...input,
     workspacePath: path.resolve(input.workspacePath),
@@ -66,10 +78,11 @@ export function setDesignRuntimeAudit(input: DesignRuntimeAuditInput): void {
     directory,
     migrationGeneration: designPagesMigrationGeneration(input.workspacePath, directory),
   });
-  while (audits.size > MAX_AUDITS) {
+  retainedWarnings += warnings.length;
+  while (audits.size > MAX_AUDITS || retainedWarnings > MAX_RETAINED_WARNINGS) {
     const oldest = audits.keys().next().value as string | undefined;
     if (!oldest) break;
-    audits.delete(oldest);
+    forgetAudit(oldest);
   }
 }
 
@@ -83,7 +96,7 @@ export function getDesignRuntimeAudit(
   if (!audit) return [];
   if (audit.sourceVersion !== sourceVersion ||
       audit.migrationGeneration !== designPagesMigrationGeneration(workspacePath, audit.directory)) {
-    audits.delete(key);
+    forgetAudit(key);
     return [];
   }
   audits.delete(key);
@@ -93,11 +106,12 @@ export function getDesignRuntimeAudit(
 
 export function forgetDesignRuntimeAudits(workspacePath: string): void {
   const prefix = `${path.resolve(workspacePath)}\u0000`;
-  for (const key of audits.keys()) {
-    if (key.startsWith(prefix)) audits.delete(key);
+  for (const key of [...audits.keys()]) {
+    if (key.startsWith(prefix)) forgetAudit(key);
   }
 }
 
 export function resetDesignRuntimeAuditsForTests(): void {
   audits.clear();
+  retainedWarnings = 0;
 }

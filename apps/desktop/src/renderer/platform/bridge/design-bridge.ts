@@ -27,7 +27,7 @@ import {
   type DesignPreviewReply,
 } from "@zeros/protocol/design-capture";
 import { designPageCatalogSchema, designPageIdSchema, normalizeDesignPagesSnapshot, type DesignPageSummary } from "@zeros/protocol/design-pages";
-import { DESIGN_LAZY_PREPARATION_CAPABILITY, DESIGN_MUTATION_SNAPSHOTS_CAPABILITY, designMutationCatalogSchema, designPreparedFrameSchema, designFramesPrepareSchema, designFramesPrepareReplySchema, type DesignMutationCatalog } from "@zeros/protocol/design-catalog";
+import { DESIGN_LAZY_PREPARATION_CAPABILITY, DESIGN_MUTATION_SNAPSHOTS_CAPABILITY, DESIGN_PAGE_SCOPED_MUTATIONS_CAPABILITY, designMutationCatalogSchema, designPageScopedCatalogSchema, designPreparedFrameSchema, designFramesPrepareSchema, designFramesPrepareReplySchema, type DesignMutationCatalog, type DesignPageHashes, type DesignPageScopedCatalog } from "@zeros/protocol/design-catalog";
 import { DESIGN_SOURCE_SURFACES_CAPABILITY } from "@zeros/protocol/design-surface";
 import { isCloudWorkspace } from "./cloud-workspace-key";
 
@@ -216,6 +216,8 @@ export interface DesignAssetWire {
 
 export interface DesignWorkspaceSnapshotWire {
   mutationCatalog?: DesignMutationCatalog;
+  /** Page-scoped acknowledgement: every page's hash, descriptors of resent pages only. */
+  pageCatalog?: DesignPageScopedCatalog;
   /** Renderer-owned projection, never an authored or persisted source version. */
   preparation?: {
     revision: string;
@@ -223,6 +225,10 @@ export interface DesignWorkspaceSnapshotWire {
     descriptions: DesignFrameDescriptionWire[];
     current: string[];
     errors: Record<string, string>;
+    /** Hashes of the pages this projection holds exactly as the engine confirmed them. */
+    pageHashes?: DesignPageHashes;
+    /** Pages kept from an earlier projection that the engine no longer matches. */
+    stalePages?: string[];
   };
   /** Absent only on older engines and pre-migration boot snapshots. */
   directoryId?: string;
@@ -282,13 +288,34 @@ export function isDesignWorkspaceSnapshotWire(
         return !description || description.pageId !== page.id || description.order !== index || page.frameIds?.[index] !== description.id;
       }))) return false;
   }
+  if (snapshot.pageCatalog !== undefined) {
+    const catalog = designPageScopedCatalogSchema.safeParse(snapshot.pageCatalog);
+    if (!catalog.success || !snapshot.directoryId || !Array.isArray(snapshot.frames) ||
+      snapshot.pages !== undefined || snapshot.mutationCatalog !== undefined) return false;
+    const descriptions = new Map(catalog.data.frames.map(frame => [frame.source, frame]));
+    const resent = new Set(catalog.data.frames.map(frame => frame.pageId));
+    const pages = new Set(catalog.data.pages.map(page => page.id));
+    const files = new Set<string>();
+    // A resent page is complete, so its prepared frames must match it; a
+    // frame on a page that was not resent is checked when it is projected.
+    if (snapshot.frames.some(frame => {
+      if (!designPreparedFrameSchema.safeParse(frame).success || files.has(frame.file) || !pages.has(frame.pageId!)) return true;
+      files.add(frame.file);
+      const description = descriptions.get(frame.file);
+      if (!description) return resent.has(frame.pageId!);
+      return frame.frameId !== description.id || frame.pageId !== description.pageId ||
+        (frame.kind === "text" ? "text" : "html") !== description.kind ||
+        (["title", "x", "y", "width", "height", "z"] as const).some(key => frame[key] !== description[key]);
+    })) return false;
+  }
   if (Object.hasOwn(snapshot, "nextCursor") || Object.hasOwn(snapshot, "coverage")) return false;
   if (snapshot.pages !== undefined) {
     const files = new Set<string>();
+    const pageByFile = new Map(snapshot.pages.flatMap((page) => page.frameFiles.map((file) => [file, page] as const)));
     if (!Array.isArray(snapshot.frames) || snapshot.frames.some((frame) => {
       if (!frame || typeof frame.file !== "string" || files.has(frame.file)) return true;
       files.add(frame.file);
-      const page = snapshot.pages!.find((page) => page.frameFiles.includes(frame.file));
+      const page = pageByFile.get(frame.file);
       return !page || (frame.pageId !== undefined && frame.pageId !== page.id);
     })) return false;
   }
@@ -1150,9 +1177,17 @@ export async function bridgeDesignTransferNode(
   return { frame: value.frame, nodeId: value.nodeId, snapshot: value.snapshot };
 }
 
+let knownPagesReader: ((workspaceId: string) => DesignPageHashes | undefined) | undefined;
+/** The renderer cache names the page hashes its confirmed projection holds. */
+export function setDesignKnownPagesReader(reader: typeof knownPagesReader): void {
+  knownPagesReader = reader;
+}
+
 function scopedMutationSnapshot(bridge: RuntimeClient, workspaceId: string) {
-  return !isCloudWorkspace(workspaceId) && bridge.supportsEngineCapability?.(DESIGN_MUTATION_SNAPSHOTS_CAPABILITY, workspaceId)
-    ? { snapshotMode: "scoped" } : {};
+  if (isCloudWorkspace(workspaceId) || !bridge.supportsEngineCapability?.(DESIGN_MUTATION_SNAPSHOTS_CAPABILITY, workspaceId)) return {};
+  const knownPages = bridge.supportsEngineCapability(DESIGN_PAGE_SCOPED_MUTATIONS_CAPABILITY, workspaceId)
+    ? knownPagesReader?.(workspaceId) : undefined;
+  return { snapshotMode: "scoped", ...(knownPages ? { knownPages } : {}) };
 }
 
 export async function bridgeDesignUpdateStyles(
