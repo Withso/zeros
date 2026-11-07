@@ -5,6 +5,11 @@ import {
   designPageFolderProblem,
   portableDesignName,
 } from "@zeros/protocol/design-path";
+import {
+  DESIGN_MAX_FRAMES_PER_PAGE,
+  DESIGN_MAX_PAGES,
+} from "@zeros/protocol/design-pages";
+import { assertDesignPagesWithinFrameLimit } from "./frame-limits";
 
 export const DESIGN_CANVAS_FILE = "canvas.json";
 const id = z.string().regex(/^[A-Za-z][A-Za-z0-9_-]{0,127}$/);
@@ -21,7 +26,7 @@ const frameSchema = z
     y: coordinate,
     width: size,
     height: size,
-    z: z.number().int().min(0).max(256).optional(),
+    z: z.number().int().min(0).max(DESIGN_MAX_FRAMES_PER_PAGE).optional(),
     geometryMetadata: z.record(z.string(), z.unknown()).optional(),
   })
   .passthrough();
@@ -29,7 +34,7 @@ const pageSchema = z
   .object({
     id,
     title,
-    frames: z.array(id).max(256),
+    frames: z.array(id).max(DESIGN_MAX_FRAMES_PER_PAGE),
   })
   .passthrough();
 const canvasSchema = z
@@ -40,7 +45,7 @@ const canvasSchema = z
     pages: z.array(pageSchema).length(1).optional(),
     frames: z
       .record(id, frameSchema)
-      .refine((frames) => Object.keys(frames).length <= 256),
+      .refine((frames) => Object.keys(frames).length <= DESIGN_MAX_FRAMES_PER_PAGE),
   })
   .passthrough();
 const PAGE_FOLDER_ISSUE = "zeros-design-page-folder";
@@ -55,7 +60,11 @@ const pageFolderSchema = z.string().superRefine((folder, context) => {
 });
 const pagedCanvasSchema = canvasSchema.extend({
   version: z.literal(2),
-  pages: z.array(pageSchema.extend({ folder: pageFolderSchema })).min(1).max(64),
+  pages: z.array(pageSchema.extend({ folder: pageFolderSchema })).min(1).max(DESIGN_MAX_PAGES),
+  // Every frame sits on exactly one page, so the page caps bound the total.
+  frames: z
+    .record(id, frameSchema)
+    .refine((frames) => Object.keys(frames).length <= DESIGN_MAX_PAGES * DESIGN_MAX_FRAMES_PER_PAGE),
 });
 
 type RecordValue = Record<string, unknown>;
@@ -64,6 +73,11 @@ const record = (value: unknown): RecordValue => {
     throw new Error("Design canvas metadata must contain objects.");
   return value as RecordValue;
 };
+const plainObject = (value: unknown): value is RecordValue =>
+  !!value && typeof value === "object" && !Array.isArray(value);
+/** Canvas v1 is one page: its frames record is the page's membership. */
+const singlePageTitle = (pages: unknown): unknown =>
+  Array.isArray(pages) && plainObject(pages[0]) ? pages[0].title : "Design";
 
 /** The public file is a small scene index. The existing HTML engine continues
  * to address documents by source path; its IPC/document IDs remain compatible. */
@@ -73,6 +87,11 @@ export function decodeCanvasFile(source: string, options?: { version: 1 | 2 }): 
     throw new Error(`Unsupported design canvas version: ${value?.version}`);
   if (options && options.version !== value.version)
     throw new Error(`Design layout requires canvas version ${options.version}; found ${value.version}.`);
+  assertDesignPagesWithinFrameLimit(
+    value.version === 2
+      ? Array.isArray(value.pages) ? value.pages.filter(plainObject) : []
+      : [{ title: singlePageTitle(value.pages), frames: plainObject(value.frames) ? Object.keys(value.frames) : [] }],
+  );
   const result = (value.version === 2 ? pagedCanvasSchema : canvasSchema).safeParse(value);
   if (!result.success) {
     // A page folder an agent chose natively gets its own explanation and a
@@ -100,6 +119,11 @@ export function decodeCanvasFile(source: string, options?: { version: 1 | 2 }): 
     ...rest
   } = parsed;
   const order = pages.flatMap((page) => page.frames);
+  const placement = new Map(
+    pages.flatMap((page) =>
+      page.frames.map((frameId, index) => [frameId, { page, index }] as const),
+    ),
+  );
   if (
     parsed.version === 2 &&
     (new Set(pages.map((page) => page.id)).size !== pages.length ||
@@ -131,7 +155,7 @@ export function decodeCanvasFile(source: string, options?: { version: 1 | 2 }): 
       geometryMetadata,
       ...extensions
     } = frame;
-    const page = pages.find((page) => page.frames.includes(frameId))!;
+    const { page, index } = placement.get(frameId)!;
     if (parsed.version === 1 ? file.includes("/") : file.split("/")[0] !== page.folder || file.split("/").length !== 2)
       throw new Error("Design frame source must be inside its page folder.");
     const portable = portableDesignName(file);
@@ -144,7 +168,7 @@ export function decodeCanvasFile(source: string, options?: { version: 1 | 2 }): 
       y,
       w: width,
       h: height,
-      z: z ?? page.frames.indexOf(frameId),
+      z: z ?? index,
     };
     info[file] = {
       ...extensions,
@@ -176,6 +200,11 @@ export function encodeCanvasFile(document: RecordValue, options: { version: 1 | 
     pages,
     ...rest
   } = document;
+  assertDesignPagesWithinFrameLimit(
+    options.version === 2
+      ? Array.isArray(pages) ? pages.filter(plainObject) : []
+      : [{ title: singlePageTitle(pages), frames: Object.keys(record(frames === undefined ? {} : frames)) }],
+  );
   const pagedPages = options.version === 2 ? pagedCanvasSchema.shape.pages.parse(pages) : undefined;
   const pageOrder = pagedPages && new Map(pagedPages.flatMap((page) =>
     page.frames.map((frameId, index) => [frameId, index] as const),
@@ -204,19 +233,17 @@ export function encodeCanvasFile(document: RecordValue, options: { version: 1 | 
       y: bounded(old.y, 0, -1_000_000, 1_000_000),
       w: bounded(old.w, 1440, 1, 16384),
       h: bounded(old.h, 900, 1, 16384),
-      z: Math.round(bounded(old.z, 0, 0, 256)),
+      z: Math.round(bounded(old.z, 0, 0, DESIGN_MAX_FRAMES_PER_PAGE)),
     };
   };
   const entries = Object.entries(record(frames === undefined ? {} : frames))
     .map(([file, geometry]) => [file, geometryFor(geometry)] as const)
     .sort(([, left], [, right]) => Number(left.z ?? 0) - Number(right.z ?? 0));
-  if (
-    Object.keys(information).some(
-      (file) => !entries.some(([source]) => source === file),
-    )
-  )
+  const sources = new Set(entries.map(([file]) => file));
+  if (Object.keys(information).some((file) => !sources.has(file)))
     throw new Error("Invalid Design frame information reference.");
   const authored: Record<string, z.infer<typeof frameSchema>> = {};
+  let position = 0;
   for (const [file, value] of entries) {
     const geometry = record(value);
     const { x: _x, y: _y, w: _w, h: _h, z: _z, ...geometryMetadata } = geometry;
@@ -241,9 +268,10 @@ export function encodeCanvasFile(document: RecordValue, options: { version: 1 | 
       y: geometry.y,
       width: geometry.w,
       height: geometry.h,
-      ...(geometry.z !== (pageOrder?.get(frameId) ?? Object.keys(authored).length) ? { z: geometry.z } : {}),
+      ...(geometry.z !== (pageOrder?.get(frameId) ?? position) ? { z: geometry.z } : {}),
       ...(Object.keys(geometryMetadata).length ? { geometryMetadata } : {}),
     });
+    position++;
   }
   const outputPages = options.version === 2
     ? pagedPages

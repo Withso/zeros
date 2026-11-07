@@ -6,6 +6,7 @@ import {
   portableDesignName,
 } from "@zeros/protocol/design-path";
 import {
+  DESIGN_MAX_PAGES,
   designPageCreateInputSchema,
   designPageDeleteInputSchema,
   designPageRenameInputSchema,
@@ -45,8 +46,8 @@ export async function createDesignPage(
     const canvas = await readCanvas(workspace);
     const before = capture ? captureDesignCatalogPoint(workspace, canvas) : undefined;
     const pages = canvas.pages!;
-    if (pages.length >= 64)
-      throw new Error("Design directory exceeds the 64-page limit.");
+    if (pages.length >= DESIGN_MAX_PAGES)
+      throw new Error(`Design directory exceeds the ${DESIGN_MAX_PAGES}-page limit.`);
     const occupied = new Set(
       [
         ...(await readdir(designDirectory(workspace))),

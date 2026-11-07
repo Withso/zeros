@@ -18,6 +18,7 @@ import {
   isDesignPageFolder,
   portableDesignName,
 } from "@zeros/protocol/design-path";
+import { DESIGN_MAX_PAGES } from "@zeros/protocol/design-pages";
 import {
   decodeCanvasFile,
   encodeCanvasFile,
@@ -71,7 +72,7 @@ const journalSchema = z
       "invalidated",
       "complete",
     ]),
-    folders: z.array(z.string().refine(isDesignPageFolder)).min(1).max(64),
+    folders: z.array(z.string().refine(isDesignPageFolder)).min(1).max(DESIGN_MAX_PAGES),
     changes: z
       .array(
         z

@@ -25,6 +25,7 @@ import {
 import { designPrivateStorageDirectory } from "../metadata-storage";
 import { createDesignFrame } from "../frame-lifecycle";
 import { withDesignWorkspaceMutation } from "../document-write-lock";
+import { DESIGN_MAX_FRAMES_PER_PAGE } from "@zeros/protocol/design-pages";
 
 const directory = "Product - Design";
 function scene(count: number, version = 2) {
@@ -213,23 +214,25 @@ describe("observational registered catalog metadata", () => {
     await symlink(path.join(root, "foreign.json"), target);
     await expect(readDesignCatalogMetadata(root, directory)).rejects.toThrow();
   });
-  it("keeps 256 production admission and rejects a prospective 257th legacy write", async () => {
-    await seed(256);
+  it("keeps per-page production admission and rejects a prospective write past it", async () => {
+    await seed(DESIGN_MAX_FRAMES_PER_PAGE);
     const file = path.join(root, directory, "meta/canvas.json");
     const before = await readFile(file, "utf8");
     expect(
       (await readDesignCatalogMetadata(root, directory)).frames,
-    ).toHaveLength(256);
+    ).toHaveLength(DESIGN_MAX_FRAMES_PER_PAGE);
     await expect(
       withDesignDirectoryNameLease(root, directory, () =>
         createDesignFrame(root, { pageId: "p", title: "Overflow" }),
       ),
-    ).rejects.toThrow(/256/);
+    ).rejects.toThrow(/already has 1,000 frames/);
     expect(await readFile(file, "utf8")).toBe(before);
     expect(await readdir(path.join(root, directory, "page-1"))).toHaveLength(
-      256,
+      DESIGN_MAX_FRAMES_PER_PAGE,
     );
-    await write(`${directory}/meta/canvas.json`, JSON.stringify(scene(257)));
-    await expect(readDesignCatalogMetadata(root, directory)).rejects.toThrow();
+    await write(`${directory}/meta/canvas.json`, JSON.stringify(scene(DESIGN_MAX_FRAMES_PER_PAGE + 1)));
+    await expect(readDesignCatalogMetadata(root, directory)).rejects.toThrow(
+      /has 1,001 frames; a page holds at most 1,000/,
+    );
   });
 });

@@ -81,7 +81,9 @@ export const DESIGN_DOCUMENT_BODY_ID = "::zeros-document-body";
  * by the adapter so storage never has to normalize a committed revision. */
 export const DESIGN_FRAME_MAX_SIZE = 16_384;
 export const DESIGN_FRAME_COORDINATE_LIMIT = 1_000_000;
-export const DESIGN_FRAME_MAX_LAYER = 256;
+/** Per-page stacking bound; mirrors `DESIGN_MAX_FRAMES_PER_PAGE` in
+ * `@zeros/protocol/design-pages` (parity-tested, this package has no protocol dependency). */
+export const DESIGN_FRAME_MAX_LAYER = 1_000;
 
 export function designFrameGeometryError(geometry: {
   x: number;
@@ -103,7 +105,7 @@ export function designFrameGeometryError(geometry: {
   )
     return "Frame position must be within ±1,000,000 px.";
   if (!Number.isInteger(geometry.z) || !within(geometry.z, 0, DESIGN_FRAME_MAX_LAYER))
-    return "Frame layer must be between 0 and 256.";
+    return `Frame layer must be between 0 and ${DESIGN_FRAME_MAX_LAYER.toLocaleString("en-US")}.`;
   return null;
 }
 /** Document identities may include one portable source-folder segment. The

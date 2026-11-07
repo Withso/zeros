@@ -15,7 +15,14 @@ import {
   type DesignCatalogReply,
 } from "@zeros/protocol/design-catalog";
 import { portableDesignName } from "@zeros/protocol/design-path";
+import { DESIGN_MAX_PAGES } from "@zeros/protocol/design-pages";
 import type { CanvasDocument } from "./document-model";
+
+/** A catalog projects canvas metadata capped at 16 MiB. Its JSON stays within
+ * about twice that metadata, and the retained estimate doubles it for UTF-16,
+ * so this keeps every admissible directory readable. Two such reads fit. */
+const MAX_SNAPSHOT_ESTIMATE_BYTES = 48 * 1024 * 1024;
+const MAX_RETAINED_ESTIMATE_BYTES = 2 * MAX_SNAPSHOT_ESTIMATE_BYTES;
 
 export interface DesignCatalogAdmission {
   connectionId: string;
@@ -47,7 +54,7 @@ export function projectDesignCatalog(
     Object.entries(canvas.frame_info).map(([file, info]) => [info.id, file]),
   );
   const pages = canvas.pages;
-  if (!pages?.length || pages.length > 64 || fileById.size !== entries.length)
+  if (!pages?.length || pages.length > DESIGN_MAX_PAGES || fileById.size !== entries.length)
     throw new DesignCatalogError("unsupported-layout");
   const seen = new Set<string>();
   const sources = new Set<string>();
@@ -251,23 +258,14 @@ export class DesignCatalogReader {
         if (snapshot.frames.length > DESIGN_CATALOG_DESCRIPTOR_LIMIT)
           throw new DesignCatalogError("too-large");
         const bytes = Buffer.byteLength(JSON.stringify(snapshot)) * 2;
-        if (
-          bytes >
-          Math.min(8 * 1024 * 1024, this.options.maxBytes ?? 32 * 1024 * 1024)
-        )
+        const maxBytes = this.options.maxBytes ?? MAX_RETAINED_ESTIMATE_BYTES;
+        if (bytes > Math.min(MAX_SNAPSHOT_ESTIMATE_BYTES, maxBytes))
           throw new DesignCatalogError("too-large");
         for (const [oldKey] of this.sessions) {
-          if (
-            this.retainedBytes + bytes <=
-            (this.options.maxBytes ?? 32 * 1024 * 1024)
-          )
-            break;
+          if (this.retainedBytes + bytes <= maxBytes) break;
           if (oldKey !== key) this.retireSession(oldKey);
         }
-        if (
-          this.retainedBytes + bytes >
-          (this.options.maxBytes ?? 32 * 1024 * 1024)
-        )
+        if (this.retainedBytes + bytes > maxBytes)
           throw new DesignCatalogError("busy");
         session.snapshot = snapshot;
         session.bytes = bytes;

@@ -8,7 +8,7 @@ import { designCatalogReadSchema, designNavigationReadSchema, designFramesPrepar
 import { prepareDesignNavigationFrames } from "./document";
 import type { DesignCatalogAdmission } from "./catalog";
 import { encodeDesignFramePath } from "@zeros/protocol/design-path";
-import { designPageCreateInputSchema, designPageDeleteInputSchema, designPageIdSchema, designPageRenameInputSchema } from "@zeros/protocol/design-pages";
+import { DESIGN_MAX_FRAMES_PER_PAGE, designPageCreateInputSchema, designPageDeleteInputSchema, designPageIdSchema, designPageRenameInputSchema } from "@zeros/protocol/design-pages";
 import { selectDesignPageHint } from "./page-selection";
 import { DESIGN_CAPTURE_TIMEOUT_MS, designPreviewCancelSchema, designPreviewRequestSchema, designWorkspaceCaptureSchema } from "@zeros/protocol/design-capture";
 import type { DesignPreviewJobs } from "./preview-jobs";
@@ -1464,7 +1464,7 @@ export async function handleDesignWorkspaceRoute(
         y: Math.min(1_000_000, Math.max(-1_000_000, reqNum(params, "y"))),
         w: Math.min(16_384, Math.max(1, reqNum(params, "w"))),
         h: Math.min(16_384, Math.max(1, reqNum(params, "h"))),
-        z: Math.round(Math.min(256, Math.max(0, reqNum(params, "z")))),
+        z: Math.round(Math.min(DESIGN_MAX_FRAMES_PER_PAGE, Math.max(0, reqNum(params, "z")))),
       };
       const operationId = randomUUID();
       const applied = await applyDesktopDesignOperation(

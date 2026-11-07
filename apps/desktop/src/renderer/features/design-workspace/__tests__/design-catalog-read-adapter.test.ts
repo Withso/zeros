@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  DESIGN_CATALOG_DESCRIPTOR_LIMIT,
   DESIGN_CATALOG_READ_CAPABILITY,
   DESIGN_CATALOG_READ_OPERATION,
   designCatalogBatchSchema,
@@ -7,6 +8,7 @@ import {
   type DesignCatalogOwner,
   type DesignCatalogRead,
 } from "@zeros/protocol/design-catalog";
+import { DESIGN_MAX_FRAMES_PER_PAGE } from "@zeros/protocol/design-pages";
 import {
   WorkspaceRuntimeClient,
   type CloudPeer,
@@ -809,9 +811,9 @@ describe("coherent Design catalog read adapter", () => {
         expect(observation.charged).toBeGreaterThanOrEqual(
           observation.lowerBound,
         );
-        expect(observation.lowerBound).toBeLessThanOrEqual(32 * 1024 * 1024);
+        expect(observation.lowerBound).toBeLessThanOrEqual(96 * 1024 * 1024);
         for (const stage of observation.stages)
-          expect(stage).toBeLessThanOrEqual(8 * 1024 * 1024);
+          expect(stage).toBeLessThanOrEqual(48 * 1024 * 1024);
       }
     } finally {
       authorities.forEach((a) => a.retire());
@@ -1012,10 +1014,15 @@ describe("coherent Design catalog read adapter", () => {
     },
   );
 
-  it("assembles ten thousand synthetic metadata descriptors within explicit pool bounds", async () => {
+  it("assembles 26 full pages of engine-shaped descriptors within the default pool bounds", async () => {
     const f = await fixture();
     const a = lifetime(f.owner);
     const adapter = new DesignCatalogReadAdapter(f.client);
+    const total = 26 * DESIGN_MAX_FRAMES_PER_PAGE;
+    const hex = (value: number) => value.toString(16).padStart(32, "0");
+    const pages = Array.from({ length: 26 }, (_, page) => ({
+      id: `page_${hex(page)}`, title: `Page ${page + 1}`, folder: `page-${page + 1}`, count: DESIGN_MAX_FRAMES_PER_PAGE,
+    }));
     let offset = 0,
       peakBytes = 0,
       peakDescriptors = 0;
@@ -1023,20 +1030,30 @@ describe("coherent Design catalog read adapter", () => {
       const usage = adapter.getUsage();
       peakBytes = Math.max(peakBytes, usage.bytes);
       peakDescriptors = Math.max(peakDescriptors, usage.descriptors);
-      const count = Math.min(256, 10_000 - offset);
-      const next = packet(f.owner, 10_000, offset, count, input.intent);
+      const count = Math.min(256, total - offset);
+      const next: DesignCatalogBatch = {
+        ...packet(f.owner, total, offset, count, input.intent),
+        pages,
+        frames: Array.from({ length: count }, (_, index) => {
+          const position = offset + index, page = Math.floor(position / DESIGN_MAX_FRAMES_PER_PAGE);
+          const order = position % DESIGN_MAX_FRAMES_PER_PAGE;
+          return { id: `frame_${hex(position)}`, pageId: pages[page]!.id, source: `page-${page + 1}/frame-${order}.html`,
+            title: `Frame ${order + 1}`, kind: "html" as const, x: (order % 16) * 640, y: Math.floor(order / 16) * 440,
+            width: 560, height: 360, z: order, order, preparation: "unprepared" as const };
+        }),
+      };
       offset += count;
-      return next;
+      return designCatalogBatchSchema.parse(next);
     });
     const result = await adapter.read(a.authority, 1);
-    expect(result.status).toBe("coherent");
+    expect(result).toMatchObject({ status: "coherent" });
     if (result.status !== "coherent")
       throw new Error("Synthetic metadata assembly failed");
-    expect(result.catalog.frames).toHaveLength(10_000);
-    expect(f.calls).toHaveLength(40);
-    expect(peakBytes).toBeLessThanOrEqual(32 * 1024 * 1024);
-    expect(peakDescriptors).toBeLessThanOrEqual(40_000);
-    expect(adapter.getUsage()).toMatchObject({ reads: 0, descriptors: 10_000 });
+    expect(result.catalog.frames).toHaveLength(total);
+    expect(f.calls).toHaveLength(Math.ceil(total / 256));
+    expect(peakBytes).toBeLessThanOrEqual(96 * 1024 * 1024);
+    expect(peakDescriptors).toBeLessThanOrEqual(2 * DESIGN_CATALOG_DESCRIPTOR_LIMIT);
+    expect(adapter.getUsage()).toMatchObject({ reads: 0, descriptors: total });
     adapter.retire(a.authority);
     expect(adapter.getUsage()).toEqual({
       owners: 0,

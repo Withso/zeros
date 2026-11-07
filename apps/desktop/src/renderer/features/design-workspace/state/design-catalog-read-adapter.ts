@@ -49,14 +49,17 @@ export type DesignCatalogAssemblyResult =
   | { status: "coherent"; catalog: CoherentDesignCatalog }
   | { status: "unavailable"; reason: FailureReason };
 
+/** Priced like the engine reader: canvas metadata is capped at 16 MiB, its
+ * descriptors stay within about twice that, and the estimate doubles for
+ * UTF-16, so any admissible directory assembles; two can at once. */
 const LIMITS: DesignCatalogReadLimits = {
   maxOwners: 4,
   maxReads: 4,
-  maxOwnedDescriptors: 40_000,
-  maxBytes: 32 * 1024 * 1024,
-  maxSnapshotBytes: 8 * 1024 * 1024,
+  maxOwnedDescriptors: 2 * DESIGN_CATALOG_DESCRIPTOR_LIMIT,
+  maxBytes: 96 * 1024 * 1024,
+  maxSnapshotBytes: 48 * 1024 * 1024,
   maxRoundTrips: 10_000,
-  maxTransferBytes: 32 * 1024 * 1024,
+  maxTransferBytes: 48 * 1024 * 1024,
   maxDurationMs: 60_000,
 };
 const RESPONSE_RESERVE = DESIGN_CATALOG_BATCH_BYTES * 8;

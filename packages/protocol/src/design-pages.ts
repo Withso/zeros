@@ -5,6 +5,11 @@ import {
   portableDesignName,
 } from "./design-path";
 
+/** Frames one page admits; per-page stacking `z` spans 0 through this value.
+ * A directory has no frame cap of its own beyond its page count. */
+export const DESIGN_MAX_FRAMES_PER_PAGE = 1_000;
+export const DESIGN_MAX_PAGES = 64;
+
 /** Directory-wide catalog. An empty folder denotes a virtual legacy root page. */
 export interface DesignPageSummary {
   id: string;
@@ -42,7 +47,7 @@ export const designPageDeleteInputSchema = z
     pageId: designPageIdSchema,
     expectedFrameIds: z
       .array(designPageIdSchema)
-      .max(256)
+      .max(DESIGN_MAX_FRAMES_PER_PAGE)
       .refine(
         (ids) => new Set(ids).size === ids.length,
         "Expected frame IDs must be distinct.",
@@ -58,12 +63,12 @@ export const designPageCatalogSchema = z
       folder: z
         .string()
         .refine((folder) => folder === "" || isDesignPageFolder(folder)),
-      frameFiles: z.array(designFrameFileSchema).max(256),
-      frameIds: z.array(designPageIdSchema).max(256).optional(),
+      frameFiles: z.array(designFrameFileSchema).max(DESIGN_MAX_FRAMES_PER_PAGE),
+      frameIds: z.array(designPageIdSchema).max(DESIGN_MAX_FRAMES_PER_PAGE).optional(),
     }),
   )
   .min(1)
-  .max(64)
+  .max(DESIGN_MAX_PAGES)
   .superRefine((pages, ctx) => {
     const ids = new Set<string>(),
       folders = new Set<string>(),
@@ -112,11 +117,6 @@ export const designPageCatalogSchema = z
         files.add(portable);
       }
     }
-    if (files.size > 256)
-      ctx.addIssue({
-        code: "custom",
-        message: "Design exceeds the directory-wide frame limit.",
-      });
   });
 
 /** Compatible wire normalization only; authored canvas documents are never

@@ -628,7 +628,7 @@ describe("web transaction adapter", () => {
       ["too-wide", { x: 0, y: 0, width: 20_000, height: 100, z: 0 }],
       ["too-small", { x: 0, y: 0, width: 0.5, height: 100, z: 0 }],
       ["too-far", { x: 1_000_001, y: 0, width: 100, height: 100, z: 0 }],
-      ["too-deep", { x: 0, y: 0, width: 100, height: 100, z: 257 }],
+      ["too-deep", { x: 0, y: 0, width: 100, height: 100, z: 1_001 }],
     ] as const)
       expect(() =>
         session.apply(
@@ -642,7 +642,7 @@ describe("web transaction adapter", () => {
           ]),
         ),
       ).toThrow(
-        /Frame (size must be between 1 and 16,384 px|position must be within ±1,000,000 px|layer must be between 0 and 256)/,
+        /Frame (size must be between 1 and 16,384 px|position must be within ±1,000,000 px|layer must be between 0 and 1,000)/,
       );
     expect(
       new DesignTransactionSession(
@@ -654,11 +654,11 @@ describe("web transaction adapter", () => {
             operationId: "largest-frame",
             type: "frame.set-geometry",
             frame: "index.html",
-            geometry: { x: 0, y: 0, width: 16_384, height: 16_384, z: 0 },
+            geometry: { x: 0, y: 0, width: 16_384, height: 16_384, z: 1_000 },
           },
         ]),
       ).state.frames["index.html"],
-    ).toMatchObject({ width: 16_384, height: 16_384 });
+    ).toMatchObject({ width: 16_384, height: 16_384, z: 1_000 });
     expect(() =>
       session.apply(
         webTransaction(initial, "unidentified-component", [

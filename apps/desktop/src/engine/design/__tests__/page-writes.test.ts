@@ -13,6 +13,7 @@ import {
   captureDesignFrameRestorePoint,
   createDesignFrame,
   createDesignPage,
+  deleteDesignFrame,
   deleteDesignPage,
   duplicateDesignFrame,
   readDesignFrameRenderIdentity,
@@ -150,36 +151,88 @@ describe("page-owned frame writes", () => {
       ]);
     }));
 
-  it("enforces the 256-frame budget across pages", () =>
+  /** Register native frames on one page until it holds `total`. */
+  const fillPage = (pageIndex: number, total: number) => {
+    const canvas = JSON.parse(read("meta/canvas.json"));
+    const page = canvas.pages[pageIndex];
+    for (let index = page.frames.length; index < total; index++) {
+      const id = `${page.id}_filler_${index}`;
+      const source = `${page.folder}/filler-${index}.html`;
+      canvas.frames[id] = { kind: "html", source, title: "Filler", x: 0, y: 0, width: 10, height: 10 };
+      page.frames.push(id);
+      writeFileSync(path.join(root, pagesDirectory, source), "<h1>Filler</h1>");
+    }
+    writeFileSync(path.join(root, pagesDirectory, "meta/canvas.json"), JSON.stringify(canvas));
+  };
+  const pageFrames = async (pageId: string) =>
+    (await readCanvas(root)).pages!.find((page) => page.id === pageId)!.frames;
+  const full = /Design page "Screens" already has 1,000 frames, the most a page holds/;
+
+  it("caps frames per page, not per directory, on every admitting write", () =>
     run(async () => {
-      const canvas = JSON.parse(read("meta/canvas.json"));
-      for (let index = 2; index < 256; index++) {
-        const id = `f_${index}`;
-        canvas.frames[id] = {
-          kind: "html",
-          source: `page-1/frame-${index}.html`,
-          title: "Frame",
-          x: 0,
-          y: 0,
-          width: 10,
-          height: 10,
-        };
-        canvas.pages[0].frames.push(id);
-        writeFileSync(
-          path.join(root, pagesDirectory, `page-1/frame-${index}.html`),
-          "<h1>Frame</h1>",
-        );
-      }
-      writeFileSync(
-        path.join(root, pagesDirectory, "meta/canvas.json"),
-        JSON.stringify(canvas),
-      );
-      await expect(
-        createDesignFrame(root, { pageId: "empty" }),
-      ).rejects.toThrow(/256|too many frames|frame limit/i);
-      expect(
-        existsSync(path.join(root, pagesDirectory, "empty/frame.html")),
-      ).toBe(false);
+      fillPage(0, 1_000);
+      const before = read("meta/canvas.json");
+      await expect(createDesignFrame(root, { pageId: "screens" })).rejects.toThrow(full);
+      await expect(duplicateDesignFrame(root, "checkout/home.html", { pageId: "screens" })).rejects.toThrow(full);
+      const identity = await readDesignFrameRenderIdentity(root, "checkout/home.html");
+      await expect(transferDesignNode(root, {
+        frame: "checkout/home.html", sourceVersion: identity.sourceVersion, nodeId: "label",
+        pageId: "screens", geometry: { x: 0, y: 0, w: 390, h: 844, z: 0 },
+      })).rejects.toThrow(/too many frames|1,000 frames/);
+      expect(read("meta/canvas.json")).toBe(before);
+      expect(existsSync(path.join(root, pagesDirectory, "page-1/frame.html"))).toBe(false);
+      expect(existsSync(path.join(root, pagesDirectory, "page-1/home-copy.html"))).toBe(false);
+      // The directory already holds 1,001 frames; other pages still admit more.
+      const elsewhere = await createDesignFrame(root, { pageId: "empty" });
+      expect(elsewhere.pageId).toBe("empty");
+      expect(await duplicateDesignFrame(root, "page-1/home.html", { pageId: "checkout" })).toMatchObject({ pageId: "checkout" });
+      expect(await pageFrames("screens")).toHaveLength(1_000);
+    }));
+
+  it("refuses to restore a deleted frame or redo a layer move onto a page that filled up", () =>
+    run(async () => {
+      fillPage(0, 1_000);
+      const restore = await captureDesignFrameRestorePoint(root, "page-1/home.html");
+      await deleteDesignFrame(root, "page-1/home.html");
+      await createDesignFrame(root, { pageId: "screens", title: "Late" });
+      await expect(restoreDesignFrame(root, restore)).rejects.toThrow(full);
+      expect(existsSync(path.join(root, pagesDirectory, "page-1/home.html"))).toBe(false);
+      const identity = await readDesignFrameRenderIdentity(root, "checkout/home.html");
+      const moved = await transferDesignNode(root, {
+        frame: "checkout/home.html", sourceVersion: identity.sourceVersion, nodeId: "label",
+        pageId: "empty", geometry: { x: 0, y: 0, w: 390, h: 844, z: 0 },
+      });
+      await restoreDesignFrameChanges(root, moved.changes, "undo");
+      fillPage(2, 1_000);
+      await expect(restoreDesignFrameChanges(root, moved.changes, "redo")).rejects.toThrow(/too many frames|1,000 frames/);
+      expect(await pageFrames("empty")).toHaveLength(1_000);
+      expect(existsSync(path.join(root, pagesDirectory, moved.frame))).toBe(false);
+    }));
+
+  it("admits concurrent creates on different pages without losing any", () =>
+    run(async () => {
+      const titles = ["One", "Two", "Three", "Four", "Five"];
+      for (const title of titles) await createDesignPage(root, { title });
+      const pages = (await readCanvas(root)).pages!;
+      expect(pages).toHaveLength(8);
+      const created = await Promise.all(pages.map((page, index) =>
+        createDesignFrame(root, { pageId: page.id, title: `Concurrent ${index}` })));
+      const canvas = await readCanvas(root);
+      for (const [index, page] of canvas.pages!.entries())
+        expect(page.frames).toContain(created[index]!.frameId);
+      expect(new Set(created.map((frame) => frame.file)).size).toBe(8);
+      for (const frame of created) expect(existsSync(path.join(root, pagesDirectory, frame.file))).toBe(true);
+    }));
+
+  it("admits exactly the remaining room when creates race into one nearly full page", () =>
+    run(async () => {
+      fillPage(0, 999);
+      const results = await Promise.allSettled([1, 2, 3].map((index) =>
+        createDesignFrame(root, { pageId: "screens", title: `Race ${index}` })));
+      expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+      for (const result of results.filter((result) => result.status === "rejected"))
+        expect(String((result as PromiseRejectedResult).reason)).toMatch(full);
+      expect(await pageFrames("screens")).toHaveLength(1_000);
     }));
 
   it("records the page identity and refuses restoration after page deletion or folder reuse", () =>
