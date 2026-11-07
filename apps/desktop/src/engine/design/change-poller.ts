@@ -32,11 +32,15 @@ export interface DesignChangePollerOptions {
   maxFiles?: number;
   /** At most this many checkouts are polled at once. */
   maxRoots?: number;
+  now?: () => number;
+  scanDirectory?: typeof scanDesignDirectory;
 }
 
 const DEFAULT_INTERVAL_MS = 300;
 const DEFAULT_MAX_FILES = 2_000;
 const DEFAULT_MAX_ROOTS = 8;
+/** An oversized directory is the worktree watcher's; recheck in case it shrank. */
+const OVERSIZED_RECHECK_MS = 15_000;
 const MAX_REMEMBERED_DIRECTORIES = 64;
 
 /** The Design directory each checkout's latest canvas read resolved. Reads
@@ -63,7 +67,16 @@ export async function designDirectorySignature(
   directory: string,
   maxFiles = DEFAULT_MAX_FILES,
 ): Promise<string | null> {
-  const entries: string[] = [];
+  const scan = await scanDesignDirectory(directory, maxFiles);
+  return scan && "signature" in scan ? scan.signature : null;
+}
+
+/** Listing comes first, so a directory past `maxFiles` costs no stat calls. */
+export async function scanDesignDirectory(
+  directory: string,
+  maxFiles = DEFAULT_MAX_FILES,
+): Promise<{ signature: string } | { oversized: true } | null> {
+  const files: string[] = [];
   const pending = [""];
   while (pending.length > 0) {
     const relative = pending.pop()!;
@@ -82,17 +95,21 @@ export async function designDirectorySignature(
         continue;
       }
       if (!child.isFile()) continue;
-      if (entries.length >= maxFiles) return null;
-      const info = await stat(path.join(directory, file)).catch(() => null);
-      if (info) entries.push(`${file}\0${info.size}\0${info.mtimeMs}\0${info.ino}`);
+      if (files.length >= maxFiles) return { oversized: true };
+      files.push(file);
     }
   }
+  const entries: string[] = [];
+  for (const file of files) {
+    const info = await stat(path.join(directory, file)).catch(() => null);
+    if (info) entries.push(`${file}\0${info.size}\0${info.mtimeMs}\0${info.ino}`);
+  }
   entries.sort();
-  return createHash("sha1").update(entries.join("\n")).digest("hex");
+  return { signature: createHash("sha1").update(entries.join("\n")).digest("hex") };
 }
 
 export class DesignChangePoller {
-  private readonly baselines = new Map<string, { directory: string; signature: string | null }>();
+  private readonly baselines = new Map<string, { directory: string; signature: string | null; oversizedAt?: number }>();
   private readonly scans = new Map<string, Promise<void>>();
   /** A scan requested while one runs, and whether it reports a change. */
   private readonly rescans = new Map<string, boolean>();
@@ -100,6 +117,8 @@ export class DesignChangePoller {
   private readonly intervalMs: number;
   private readonly maxFiles: number;
   private readonly maxRoots: number;
+  private readonly now: () => number;
+  private readonly scanDirectory: typeof scanDesignDirectory;
   private stopped = false;
 
   constructor(
@@ -109,6 +128,8 @@ export class DesignChangePoller {
     this.intervalMs = options.intervalMs ?? DEFAULT_INTERVAL_MS;
     this.maxFiles = options.maxFiles ?? DEFAULT_MAX_FILES;
     this.maxRoots = options.maxRoots ?? DEFAULT_MAX_ROOTS;
+    this.now = options.now ?? Date.now;
+    this.scanDirectory = options.scanDirectory ?? scanDesignDirectory;
   }
 
   start(): void {
@@ -189,13 +210,18 @@ export class DesignChangePoller {
       this.baselines.delete(root);
       return;
     }
-    const signature = await designDirectorySignature(
+    const previous = this.baselines.get(root);
+    if (previous?.directory === directory && previous.oversizedAt !== undefined &&
+        this.now() - previous.oversizedAt <= OVERSIZED_RECHECK_MS)
+      return;
+    const scan = await this.scanDirectory(
       path.join(root, ...directory.split("/")),
       this.maxFiles,
     ).catch(() => null);
     if (this.stopped) return;
-    const previous = this.baselines.get(root);
-    this.baselines.set(root, { directory, signature });
+    const signature = scan && "signature" in scan ? scan.signature : null;
+    this.baselines.set(root, { directory, signature,
+      ...(scan && "oversized" in scan ? { oversizedAt: this.now() } : {}) });
     // The first scan of a shown directory only sets its baseline; a switch
     // to another directory refreshes through its own read.
     if (!report || !previous || previous.directory !== directory) return;
