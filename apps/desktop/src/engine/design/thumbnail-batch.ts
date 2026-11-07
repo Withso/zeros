@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import path from "node:path";
+import { parse } from "parse5";
 import {
   DESIGN_BATCH_CAPTURE_HTML_BYTES,
   DESIGN_BATCH_CAPTURE_MAX_ITEMS,
@@ -65,16 +66,58 @@ const failure = (error: unknown, root: string) => {
   return !message || message.includes(path.resolve(root)) || message.includes(homedir()) ? UNPICTURED : message;
 };
 
+// Placeholders are the engine's own empty <style> elements, inserted as text,
+// so a string search finds the ones the canvas splices into.
+const PLACEHOLDER = /<style((?: [^\s"'>/=]+="[^"<>]*")*)><\/style>/g;
+const BEFORE_HEAD = /<(?:head|body)[\s/>]/i;
+
+type Part = { token: string; css: string; foreign?: true };
+
 /** Each placeholder of the frame's skeleton becomes a link to its sheet, in
  * place. A placeholder inside SVG keeps its CSS inline: a <link> there is
  * not a stylesheet. */
-function linkSheets(skeleton: string, sheets: ReadonlyArray<{ token: string; css: string }>, link: (css: string) => string): string {
+function linkSheets(skeleton: string, sheets: readonly Part[], link: (css: string) => string): string {
   if (sheets.length === 0) return skeleton;
-  const css = new Map(sheets.map((sheet) => [sheet.token, sheet.css]));
+  const parts = new Map(sheets.map((sheet) => [sheet.token, sheet]));
+  const edits: Array<{ start: number; end: number; text: string }> = [];
+  for (const match of skeleton.matchAll(PLACEHOLDER)) {
+    const token = /(?:^| )data-zeros-sheet="([^"]*)"/.exec(match[1]!)?.[1];
+    const part = token === undefined ? undefined : parts.get(token);
+    if (!part) continue;
+    edits.push({ start: match.index, end: match.index + match[0].length, text: part.foreign
+      ? `<style${match[1]}>${part.css}</style>`
+      : `<link rel="stylesheet" href="${link(part.css)}"${match[1]}>` });
+  }
+  if (edits.length !== parts.size) return linkParsedSheets(skeleton, parts, link);
+  let html = "", at = 0;
+  for (const edit of edits) {
+    html += skeleton.slice(at, edit.start) + edit.text;
+    at = edit.end;
+  }
+  return html + skeleton.slice(at);
+}
+
+/** The canvas's theme on the root element, as applyDesignSurfaceTheme sets
+ * it, parsing only the text before <head> or <body> that holds the root tag. */
+function themeRoot(html: string, theme: string | null): string {
+  const end = html.search(BEFORE_HEAD);
+  const prefix = end > 0 ? parse(html.slice(0, end), { sourceCodeLocationInfo: true }) : null;
+  const location = prefix && elementRecords(prefix).find(({ element }) => element.tagName === "html")?.element.sourceCodeLocation;
+  if (!location?.startTag) return applyDesignSurfaceTheme(html, theme);
+  const authored = location.attrs?.["data-zd-theme"];
+  const attribute = theme === null ? "" : `data-zd-theme="${theme}"`;
+  if (authored) return `${html.slice(0, authored.startOffset)}${attribute}${html.slice(authored.endOffset)}`;
+  if (theme === null) return html;
+  const at = location.startTag.startOffset + "<html".length;
+  return `${html.slice(0, at)} ${attribute}${html.slice(at)}`;
+}
+
+/** The same edits, found by a parse when the text search does not account for every sheet. */
+function linkParsedSheets(skeleton: string, parts: ReadonlyMap<string, Part>, link: (css: string) => string): string {
   const edits: Array<{ start: number; end: number; text: string }> = [];
   for (const { element } of elementRecords(parseDesignSource(skeleton))) {
     const token = element.tagName === "style" ? element.attrs.find((attribute) => attribute.name === "data-zeros-sheet")?.value : undefined;
-    const sheet = token === undefined ? undefined : css.get(token);
+    const sheet = token === undefined ? undefined : parts.get(token)?.css;
     const location = element.sourceCodeLocation;
     if (sheet === undefined || !location?.startTag || !location.endTag) continue;
     const attributes = skeleton.slice(location.startTag.startOffset + "<style".length, location.startTag.endOffset - 1);
@@ -98,6 +141,7 @@ function frameId(canvas: { frame_info: Record<string, unknown> }, file: string):
   const id = (canvas.frame_info[file] as { id?: unknown } | undefined)?.id;
   return typeof id === "string" ? id : null;
 }
+
 
 /** Compose saved frames for batch capture: every frame of a page folder links
  * the same bytes for its linked stylesheets and for each imported source
@@ -142,23 +186,25 @@ export async function composeDesignThumbnailBatches(
         stale.push({ file, sourceVersion: render.sourceVersion });
         continue;
       }
-      const pruned = (render.sheets ?? []).map(({ token, css }) => ({ token, css }));
+      const pruned: Part[] = (render.sheets ?? []).map(({ token, css, foreign }) => ({ token, css, ...(foreign ? { foreign } : {}) }));
       let parts = pruned;
       if (render.sheets?.some((sheet) => sheet.source !== undefined && !tailwind.has(sheet.source))) {
         const sources = await wholeSources(file);
-        parts = render.sheets.map((sheet) => ({ token: sheet.token,
-          css: sheet.source !== undefined && !tailwind.has(sheet.source) ? sources.get(sheet.source) ?? sheet.css : sheet.css }));
+        parts = pruned.map((part, index) => {
+          const source = render.sheets![index]!.source;
+          return source !== undefined && !tailwind.has(source) ? { ...part, css: sources.get(source) ?? part.css } : part;
+        });
         // A frame the canvas can draw is never refused for sharing: past the
         // budget it carries its own pruned CSS instead.
         const bytes = [...new Set(parts.map((part) => part.css))].reduce((total, css) => total + css.length, 0);
         if (bytes > DESIGN_BATCH_CAPTURE_STYLESHEET_BYTES) parts = pruned;
       }
       const sheets = new Map<string, string>();
-      const html = applyDesignSurfaceTheme(linkSheets(render.sanitized, parts, (css) => {
+      const html = linkSheets(themeRoot(render.sanitized, input.theme), parts, (css) => {
         const hash = sha256(css);
         sheets.set(hash, css);
         return designCaptureSheetUrl(hash);
-      }), input.theme);
+      });
       if (html.length > DESIGN_CAPTURE_HTML_BYTES) throw new Error("This frame is too large to picture.");
       composed.push({ frame: { file, sourceVersion: requested.sourceVersion }, sheets, item: {
         id: `f${index}`, html, maxDimension: input.maxDimension,
