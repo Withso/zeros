@@ -65,9 +65,13 @@ const cloudWorkspacesEnabled =
 // injection (CodeQL js/shell-command-injection-from-environment). Keeping the argv
 // as an array and handing it to execFileSync means no shell parses it at all —
 // paths with spaces just work, and there is nothing left to quote.
+// Design preparation workers run from their own embedded entrypoint (see
+// workerUrl in apps/desktop/src/engine/design/preparation-pool.ts).
+const preparationWorker = resolve(repoRoot, "apps/desktop/src/engine/design/preparation-worker.ts");
 const cmdArgs = [
   "build",
   entry,
+  preparationWorker,
   "--compile",
   `--target=${mapping.bunTarget}`,
   "--define",
