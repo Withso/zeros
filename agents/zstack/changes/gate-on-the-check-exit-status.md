@@ -18,4 +18,14 @@ check's own status through the pipe.
 reading early can end a passing check with SIGPIPE, and pipefail then reports
 it as a failure.
 
+**Rerun it after the last docs edit.** A later handoff reported `check:ui`
+passing, but the pushed commit failed it: the guide's last wording edit came
+after the gate ran, and two backticked short names (`--document`, `--panel`,
+meaning the `zeros-agent-md--document` and `zeros-agent-md--panel` classes)
+are not declared custom properties. `check:ui` resolves every backticked span
+in `docs/design-system.md`, `docs/design-tokens.md` and RULES.md §3 as a path,
+custom property, `pnpm` script or class. Run it after the final edit to those
+docs, backtick only full names, and name a file type in words ("a Markdown
+file") rather than as a span such as `.md`.
+
 **Encoded in.** This fragment, for `gotchas.md` at the next pack version.
