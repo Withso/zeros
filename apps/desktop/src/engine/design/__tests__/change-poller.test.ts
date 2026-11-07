@@ -7,6 +7,7 @@ import {
   designDirectorySignature,
   designSnapshotDirectory,
   noteDesignSnapshotDirectory,
+  scanDesignDirectory,
 } from "../change-poller";
 
 const roots: string[] = [];
@@ -131,6 +132,29 @@ describe("Design change poller", () => {
     directory = "Missing - Design";
     await poller.tick();
     expect(changed).not.toHaveBeenCalled();
+    poller.stop();
+  });
+
+  it("backs off an oversized directory the worktree watcher already covers, then rechecks it", async () => {
+    const { root } = await checkout();
+    await writeFile(path.join(root, "App - Design", "page-1", "card.html"), "<main/>");
+    let time = 0;
+    const scans: string[] = [];
+    const poller = new DesignChangePoller(
+      { presentRoots: () => [root], directory: () => "App - Design", changed: vi.fn() },
+      { maxFiles: 1, now: () => time,
+        scanDirectory: (directory, maxFiles) => { scans.push(directory); return scanDesignDirectory(directory, maxFiles); } },
+    );
+    expect(await scanDesignDirectory(path.join(root, "App - Design"), 1)).toEqual({ oversized: true });
+    await poller.tick();
+    expect(scans).toHaveLength(1);
+    time = 14_000;
+    await poller.tick();
+    await poller.check(root);
+    expect(scans).toHaveLength(1);
+    time = 15_001;
+    await poller.tick();
+    expect(scans).toHaveLength(2);
     poller.stop();
   });
 
