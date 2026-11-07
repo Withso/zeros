@@ -22,6 +22,7 @@ import { chmodSync, mkdirSync, existsSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { releaseBunVersion, sidecarBunMismatch } from "./bun-release-pin.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, "..");
@@ -82,6 +83,12 @@ const cmdArgs = [
 // accumulating in the project root.
 const buildCwd = mkdtempSync(join(tmpdir(), "zeros-sidecar-"));
 
+const bunVersion = execFileSync("bun", ["--version"], { encoding: "utf8" }).trim();
+const mismatch = sidecarBunMismatch(bunVersion, releaseBunVersion(repoRoot));
+if (mismatch) {
+  console.error(`build-sidecar: ${mismatch}`);
+  process.exit(1);
+}
 console.log(`[build-sidecar] bun ${cmdArgs.join(" ")}`);
 execFileSync("bun", cmdArgs, { stdio: "inherit", cwd: buildCwd });
 
