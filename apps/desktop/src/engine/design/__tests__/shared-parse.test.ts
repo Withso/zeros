@@ -147,9 +147,9 @@ describe("shared frame parses", () => {
     before = sharedDesignParseStatsForTests();
     await prepare();
     const after = sharedDesignParseStatsForTests();
-    // Linking reads the healed text, and sanitize and strip read the inlined text unchanged.
+    // Linking reads the healed text; sanitize, strip and the surface cost read the inlined text unchanged.
     expect(after.parses - before.parses).toBe(2);
-    expect(after.shared - before.shared).toBe(3);
+    expect(after.shared - before.shared).toBe(4);
   });
 
   it("puts head markup where a fresh parse would after any edit that follows an explicit head tag", () => {

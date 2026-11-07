@@ -37,12 +37,13 @@ import {
   designCssRuleCount,
   designFrameFeatures,
   indexDesignCss,
-  measureDesignFrameSources,
+  measureDesignFrameSourceCosts,
   parseAndIndexDesignCss,
   pruneDesignFrameSources,
   splitDesignCss,
   type DesignCssIndex,
 } from "./style-prune";
+import { designTextImageBytes } from "./surface-document";
 import {
   compileDesignTailwind,
   designTailwindCandidates,
@@ -1503,11 +1504,13 @@ export interface FrameStyleSource {
   revision: string;
   /** Identity only: the CSS length a document render would carry. */
   bytes?: number;
+  /** Identity only: image bytes that CSS carries, when every image is known. */
+  imageBytes?: number;
 }
 
 /** Identity sizes by frame signature and source revisions, so snapshots do
  * not prune every frame again. */
-const identitySizes = new Map<string, number[]>();
+const identitySizes = new Map<string, Array<{ length: number; imageBytes: number | null }>>();
 const MAX_IDENTITY_SIZES = 512;
 
 function assertTailwindFrameBudget(css: string): void {
@@ -1583,12 +1586,15 @@ export async function frameStyleSources(
     let sizes = identitySizes.get(sizeKey);
     if (!sizes) {
       const measured = entries.filter((entry) => entry.index);
-      const lengths = measureDesignFrameSources(measured.map((entry) => entry.index!), features);
-      sizes = entries.map((entry) => (entry.index ? lengths[measured.indexOf(entry)]! : 0));
+      const costs = measureDesignFrameSourceCosts(measured.map((entry) => entry.index!), features, designTextImageBytes);
+      sizes = entries.map((entry) => (entry.index ? costs[measured.indexOf(entry)]! : { length: 0, imageBytes: null }));
       identitySizes.set(sizeKey, sizes);
       while (identitySizes.size > MAX_IDENTITY_SIZES) identitySizes.delete(identitySizes.keys().next().value!);
     }
-    return entries.map((entry, at) => ({ id: entry.id, css: "", revision: revisions[at]!, bytes: sizes[at]! }));
+    return entries.map((entry, at) => {
+      const { length, imageBytes } = sizes[at]!;
+      return { id: entry.id, css: "", revision: revisions[at]!, bytes: length, ...(imageBytes === null ? {} : { imageBytes }) };
+    });
   }
   const pruned = pruneDesignFrameSources(
     entries.map((entry) => entry.index ?? parseAndIndexDesignCss(entry.css ?? "")),
