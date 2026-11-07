@@ -8,10 +8,13 @@ import { HybridTransport } from "../hybrid-transport";
 import { InboundBridge } from "../inbound-bridge";
 import { config } from "./worker-fixtures";
 import * as workerToken from "../worker-token";
+import { PromptInbox } from "../prompt-inbox";
+import type { Agents } from "../agents";
+import type { SessionStore } from "../sessions/session-store";
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); vi.useRealTimers(); });
-async function fixture(options: { hello?: Promise<void> } = {}) {
+async function fixture(options: { hello?: Promise<void>; onFrame?: (frame: any) => void } = {}) {
   const directory = await mkdtemp(join(tmpdir(), "hybrid-transport-")), tokenFile = join(directory, "token");
   let expected = "synthetic-worker-token", revision = "0", failHistory = false, lostReply = false;
   await writeFile(tokenFile, expected, { mode: 0o600 });
@@ -30,6 +33,7 @@ async function fixture(options: { hello?: Promise<void> } = {}) {
     if (path === "hello") await options.hello;
     if (path === "hello" || path === "config") return Response.json({ config: { ...config, loginRevision: revision } });
     if (path === "activity") return Response.json({ state: "running", loginRevision: revision });
+    if (path === "pull") return Response.json({ prompts: [], stops: [] });
     if (path === "history") {
       if (lostReply) { lostReply = false; throw new Error("Lost committed response"); }
       return failHistory ? new Response(null, { status: 503 }) : Response.json({ sequence: body.sequence });
@@ -39,13 +43,144 @@ async function fixture(options: { hello?: Promise<void> } = {}) {
   });
   const transport = new HybridTransport({ apiUrl: "https://api.example.test", workspaceId: config.workspace.id, runtimeSha256: "a".repeat(64),
     tokenFile, publicKeys, port: 0, fetch: fetcher, retryBaseMs: 10, retryMaxMs: 20 });
-  transport.start({ open: async () => {}, close: () => {}, frame: async frame => { incoming.push(frame); } });
+  transport.start({ open: async () => {}, close: () => {}, frame: async frame => { incoming.push(frame); options.onFrame?.(frame); } });
   cleanups.push(async () => { await transport.dispose(); await rm(directory, { recursive: true, force: true }); });
   await expect.poll(() => options.hello ? requests.length > 0 : incoming.some(frame => frame.t === "config")).toBe(true);
   return { transport, requests, incoming, fetcher, port, keys, revise: (next: string) => { revision = next; },
     rotate: async () => { expected = "synthetic-rotated-worker-token"; await writeFile(tokenFile, expected, { mode: 0o600 }); },
     failHistory: (value: boolean) => { failHistory = value; }, loseReply: () => { lostReply = true; } };
 }
+
+async function connectRelay(f: Awaited<ReturnType<typeof fixture>>) {
+  const now = Math.floor(Date.now() / 1000);
+  const claims = Buffer.from(JSON.stringify({ iss: "zeros-cp", aud: config.workspace.id, boot: f.transport.bootId,
+    iat: now, exp: now + 60, jti: randomUUID() })).toString("base64url");
+  const payload = `v1.${claims}`;
+  const grant = `${payload}.${sign(null, Buffer.from(payload), f.keys.privateKey).toString("base64url")}`;
+  const socket = new WebSocket(`ws://127.0.0.1:${f.port}/v2/worker/bridge`, "zeros.cloud.v2.worker", { headers: { "X-Zeros-Worker-Auth": grant } });
+  cleanups.push(async () => { socket.terminate(); });
+  await new Promise<void>((resolve, reject) => { socket.once("open", resolve); socket.once("error", reject); });
+  return socket;
+}
+
+const socketBoundary = (socket: WebSocket) => new Promise<void>((resolve, reject) => {
+  const closed = () => { socket.off("pong", pong); reject(new Error("Socket closed before boundary")); };
+  const pong = () => { socket.off("close", closed); resolve(); };
+  socket.once("pong", pong); socket.once("close", closed); socket.ping();
+});
+
+async function idleInbox() {
+  let inbox: PromptInbox | undefined, parked!: () => void;
+  let waiting = new Promise<void>(resolve => { parked = resolve; });
+  const f = await fixture({ onFrame: frame => { if (frame.t === "prompts") inbox?.hint(); } });
+  const socket = await connectRelay(f);
+  socket.send(JSON.stringify({ t: "push", prompts: true })); await socketBoundary(socket);
+  const store = { onChange: () => () => {}, outboxEntries: () => [] } as unknown as SessionStore;
+  const agents = { setOutboxDispatch: () => {} } as unknown as Agents;
+  inbox = new PromptInbox(store, agents, async (operation, body, signal) => {
+    if (operation === "pull" && (body as { waitMs: number }).waitMs) parked();
+    return f.transport.promptRequest(operation, body, signal);
+  });
+  cleanups.push(() => inbox!.dispose());
+  inbox.start(); await waiting;
+  return { ...f, socket, inbox, wait: () => waiting, nextWait: () => { waiting = new Promise<void>(resolve => { parked = resolve; }); } };
+}
+
+it("parks idle HTTPS pulls and uses only relay activity after a negotiated push offer", async () => {
+  const f = await fixture(), socket = await connectRelay(f), frames: any[] = [];
+  socket.on("message", raw => {
+    const frame = JSON.parse(String(raw)); frames.push(frame);
+    if (frame.t === "activity") socket.send(JSON.stringify({ t: "activity-reply", id: frame.id,
+      loginRevision: "0", state: "running", prompts: false }));
+  });
+  socket.send(JSON.stringify({ t: "push", prompts: true }));
+  const received = new Promise<void>(resolve => {
+    socket.once("pong", () => resolve()); socket.once("close", () => resolve());
+  });
+  socket.ping(); await received;
+  const controller = new AbortController();
+  const pending = f.transport.promptRequest("pull", { waitMs: 25_000, held: [] }, controller.signal).catch(() => {});
+  try {
+    await f.transport.send({ t: "idle", idle: true });
+    await expect.poll(() => frames.some(frame => frame.t === "activity") || f.requests.some(request => request.path === "activity")).toBe(true);
+    console.info("Negotiated idle HTTP requests", f.requests.filter(request => ["activity", "pull"].includes(request.path)).length);
+    expect(f.requests.filter(request => ["activity", "pull"].includes(request.path))).toEqual([]);
+    expect(frames.filter(frame => frame.t === "activity")).toHaveLength(1);
+    expect(socket.readyState).toBe(WebSocket.OPEN);
+  } finally { controller.abort(); await pending; }
+});
+
+it("drains on hints and repairs a missed hint from the safety status reply", async () => {
+  const f = await idleInbox();
+  expect(f.requests.filter(request => request.path === "pull").map(request => request.body.waitMs)).toEqual([0]);
+  f.nextWait(); f.socket.send(JSON.stringify({ t: "prompts" })); await f.wait();
+  expect(f.requests.filter(request => request.path === "pull").map(request => request.body.waitMs)).toEqual([0, 0]);
+  f.socket.on("message", raw => {
+    const frame = JSON.parse(String(raw));
+    if (frame.t === "activity") f.socket.send(JSON.stringify({ t: "activity-reply", id: frame.id,
+      loginRevision: "0", state: "running", prompts: true }));
+  });
+  f.nextWait(); await f.transport.send({ t: "idle", idle: true }); await f.wait();
+  expect(f.requests.filter(request => request.path === "pull").map(request => request.body.waitMs)).toEqual([0, 0, 0]);
+  expect(f.requests.some(request => request.path === "activity")).toBe(false);
+});
+
+it.each(["listener-gap", "socket-close"])("resumes HTTPS promptly after %s and drains on a new subscription", async loss => {
+  const f = await idleInbox();
+  f.nextWait();
+  if (loss === "listener-gap") f.socket.send(JSON.stringify({ t: "push", prompts: false }));
+  else f.socket.terminate();
+  await f.wait();
+  await expect.poll(() => f.requests.some(request => request.path === "pull" && request.body.waitMs === 25_000)).toBe(true);
+  const socket = loss === "socket-close" ? await connectRelay(f) : f.socket;
+  f.nextWait(); socket.send(JSON.stringify({ t: "push", prompts: true })); await f.wait();
+  expect(f.requests.filter(request => request.path === "pull").at(-1)!.body.waitMs).toBe(0);
+});
+
+it("keeps one safety pulse per minute at a stable random boot phase without idle HTTPS work", async () => {
+  const f = await fixture(), socket = await connectRelay(f), pulses: number[] = [];
+  socket.on("message", raw => {
+    const frame = JSON.parse(String(raw));
+    if (frame.t !== "activity") return;
+    pulses.push(Date.now());
+    socket.send(JSON.stringify({ t: "activity-reply", id: frame.id, loginRevision: "0", state: "running", prompts: false }));
+  });
+  socket.send(JSON.stringify({ t: "push", prompts: true })); await socketBoundary(socket);
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+  await f.transport.send({ t: "idle", idle: true });
+  await expect.poll(() => pulses.length).toBe(1); await socketBoundary(socket);
+  const started = Date.now();
+  for (let count = 2; count <= 7; count++) {
+    await vi.advanceTimersToNextTimerAsync();
+    await expect.poll(() => pulses.length).toBe(count); await socketBoundary(socket);
+  }
+  expect(pulses[1]! - started).toBeGreaterThan(0);
+  expect(pulses[1]! - started).toBeLessThanOrEqual(60_000);
+  expect(pulses.slice(2).map((at, index) => at - pulses[index + 1]!)).toEqual(Array(5).fill(60_000));
+  expect(f.requests.filter(request => request.path === "activity")).toEqual([]);
+});
+
+it("falls back to authenticated HTTPS after losing the activity ACK socket", async () => {
+  const f = await fixture(), socket = await connectRelay(f);
+  socket.on("message", raw => { if (JSON.parse(String(raw)).t === "activity") socket.terminate(); });
+  socket.send(JSON.stringify({ t: "push", prompts: true })); await socketBoundary(socket);
+  await f.rotate(); await f.transport.send({ t: "idle", idle: false });
+  await expect.poll(() => f.requests.filter(request => request.path === "activity")).toEqual([{ path: "activity", body: { idle: false }, authorized: true }]);
+});
+
+it("repairs a missed login notification from the relay status without a second activity request", async () => {
+  const f = await fixture(), socket = await connectRelay(f); f.revise("4");
+  socket.on("message", raw => {
+    const frame = JSON.parse(String(raw));
+    if (frame.t === "activity") socket.send(JSON.stringify({ t: "activity-reply", id: frame.id,
+      loginRevision: "4", state: "running", prompts: false }));
+  });
+  socket.send(JSON.stringify({ t: "push", prompts: true })); await socketBoundary(socket);
+  await f.transport.send({ t: "idle", idle: true });
+  await expect.poll(() => f.incoming.at(-1)?.loginRevision).toBe("4");
+  expect(f.requests.some(request => request.path === "config")).toBe(true);
+  expect(f.requests.some(request => request.path === "activity")).toBe(false);
+});
 it("authenticates a checkout failure with the current worker token and boot, without source or error text", async () => {
   const f = await fixture();
   const original = vi.mocked(f.fetcher).getMockImplementation()!;
@@ -289,7 +424,7 @@ it("ignores an older control plane that rejects a newer timing phase", async () 
 });
 it("advertises outbox support without changing the strict hello body, and rereads credentials on pull", async () => {
   const f = await fixture();
-  expect(new Headers(vi.mocked(f.fetcher).mock.calls[0]![1]?.headers).get("x-zeros-worker-features")).toBe("prompt-outbox-v1,mcp-v1,workspace-setup-v1,checkout-v2,agent-interactions-v1,github-pr-v1,git-identity-v1,github-user-token-v1,code-review-v1,history-replace-v1,workspace-environment-v1,repository-setup-v1,runtime-update-v1");
+  expect(new Headers(vi.mocked(f.fetcher).mock.calls[0]![1]?.headers).get("x-zeros-worker-features")).toBe("prompt-outbox-v1,mcp-v1,workspace-setup-v1,checkout-v2,agent-interactions-v1,github-pr-v1,git-identity-v1,github-user-token-v1,code-review-v1,history-replace-v1,workspace-environment-v1,repository-setup-v1,runtime-update-v1,worker-push-v1");
   expect(Object.keys(f.requests[0]!.body).sort()).toEqual(["bootId", "protocol", "runtimeSha256"]);
   await f.rotate();
   vi.mocked(f.fetcher).mockImplementationOnce(async (_url, init) => {
@@ -337,6 +472,7 @@ it("retains a history retry whose timer fires during an earlier configuration re
 });
 it("throttles busy activity and still heartbeats while idle", async () => {
   const f = await fixture();
+  vi.spyOn(workerToken, "readWorkerToken").mockResolvedValue("synthetic-worker-token");
   vi.useFakeTimers({ toFake: ["setTimeout", "setInterval", "Date"] });
   // Sending idle also schedules the unconditional heartbeat after bootstrap.
   await f.transport.send({ t: "idle", idle: false });

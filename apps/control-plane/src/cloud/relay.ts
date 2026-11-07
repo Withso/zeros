@@ -9,9 +9,9 @@ import { setTimeout as delay } from "node:timers/promises";
 import WebSocket, { WebSocketServer, type RawData } from "ws";
 import { CLOUD_V2_MAX_FRAME_BYTES, CloudV2WorkerFrameSchema, type CloudV2ControlFrame } from "./contract.js";
 import type { PostgresSecurityEventBroker } from "../security-events.js";
-import type { CloudV2Store, CloudV2Workspace } from "./store.js";
+import type { CloudV2Store, CloudV2Workspace, CloudV2WorkerBinding } from "./store.js";
 import { isCloudV2Token } from "./tokens.js";
-import { dialWorker, workerSupportsCheckout, workerSupportsMcp, workerSupportsSetup, workerSupportsRepositorySetup, workerSupportsGithub, workerSupportsGitIdentity, workerSupportsGithubUserTokens, workerSupportsAgentInteractions, workerSupportsCodeReview, workerSupportsHistoryReplacement, workerSupportsEnvironment, workerSupportsRuntimeUpdate, type WorkerRoute } from "./worker-connection.js";
+import { dialWorker, workerSupportsCheckout, workerSupportsMcp, workerSupportsSetup, workerSupportsRepositorySetup, workerSupportsGithub, workerSupportsGitIdentity, workerSupportsGithubUserTokens, workerSupportsAgentInteractions, workerSupportsCodeReview, workerSupportsHistoryReplacement, workerSupportsEnvironment, workerSupportsRuntimeUpdate, workerSupportsPush, type WorkerRoute } from "./worker-connection.js";
 import { emitCloudV2Timing, type CloudV2TimingRecord } from "./lifecycle.js";
 import { isGithubAccessRevoked, isGithubTemporary } from "../github-availability.js";
 import { CLOUD_SOURCE_REFRESH_MS, type CloudSourceContinuation, type CloudSourceProof } from "./source-authority.js";
@@ -28,6 +28,7 @@ const MAX_QUEUED_FRAMES = 64;
 const MAX_QUEUED_OUTPUT_FRAMES = 1024;
 const MAX_QUEUED_OUTPUT_BYTES = 4 * 1024 * 1024;
 type ConfigFrame = Extract<CloudV2ControlFrame, { t: "config" }>;
+type ActivityReply = Omit<Extract<CloudV2ControlFrame, { t: "activity-reply" }>, "t" | "id">;
 
 export type CloudV2RelayDeps = {
   store: Pick<CloudV2Store, "consumeConnectTicket" | "get" | "accessEpoch" | "appAccessSnapshot" | "loginRevision">;
@@ -42,6 +43,7 @@ export type CloudV2RelayDeps = {
   authorizeSource?(workspace: CloudV2Workspace): Promise<void>;
   continueSource?(workspace: CloudV2Workspace, proof?: CloudSourceProof): Promise<CloudSourceContinuation>;
   workerRoute(workspaceId: string): Promise<WorkerRoute | null>;
+  workerActivity?(binding: CloudV2WorkerBinding, idle: boolean): Promise<ActivityReply | null>;
   mintWorkerToken(workspaceId: string, bootId: string): string;
   wake(workspace: CloudV2Workspace): Promise<void>;
   answerOffline(workspace: CloudV2Workspace, frame: unknown): Promise<unknown | null>;
@@ -56,6 +58,7 @@ type Authority = "allowed" | "revoked" | "unavailable";
 type Room = {
   workspace: CloudV2Workspace; accessEpoch: string; revoked: boolean;
   worker: WebSocket | null; ready: boolean; loginRevision: string | null; configAt: number;
+  workerBinding?: CloudV2WorkerBinding;
   configFlight?: ConfigFlight; dialing?: Promise<void>; idleTimer?: NodeJS.Timeout;
   authorityFlight?: Promise<Authority>; sourceCheckAt: number;
   /** App frames and the relay's own re-checks skip the read until this time, at this security revision. */
@@ -95,6 +98,7 @@ export class CloudV2Relay {
   private readonly unsubscribeSecurity: (() => void) | undefined;
   private readonly alive = new WeakSet<WebSocket>();
   private closed = false;
+  private promptNotificationsHealthy = false;
 
   constructor(private readonly deps: CloudV2RelayDeps) {
     this.ping.unref();
@@ -124,6 +128,21 @@ export class CloudV2Relay {
   hintPrompts(workspaceId: string): void {
     const room = this.rooms.get(workspaceId);
     if (!this.closed && room?.ready && !room.revoked) send(room.worker, { t: "prompts" });
+  }
+
+  /** A LISTEN gap restores HTTPS delivery before the socket itself is lost. */
+  promptNotifications(healthy: boolean): void {
+    this.promptNotificationsHealthy = healthy;
+    for (const room of this.rooms.values()) {
+      this.offerPush(room);
+      if (healthy) this.hintPrompts(room.workspace.id);
+    }
+  }
+
+  private offerPush(room: Room): void {
+    if (!this.closed && room.ready && !room.revoked && room.worker && room.workerBinding &&
+        this.deps.workerActivity && workerSupportsPush(room.worker))
+      send(room.worker, { t: "push", prompts: this.promptNotificationsHealthy });
   }
 
   /** Best-effort latency hint: a room waiting for this workspace's worker
@@ -349,10 +368,16 @@ export class CloudV2Relay {
           ws = await dialWorker(route, this.deps.mintWorkerToken(room.workspace.id, bootId));
           const dialed = this.deps.now?.() ?? Date.now();
           if (!this.wanted(room) || await this.current(room) !== "allowed") { ws.terminate(); return; }
-          room.worker = ws; room.loginRevision = null; this.attachWorker(room, ws);
+          room.worker = ws; room.loginRevision = null;
+          if (route.workerTokenHash && route.bootId === bootId) room.workerBinding = {
+            workspaceId: room.workspace.id, bootId, accessEpoch: room.accessEpoch, workerTokenHash: route.workerTokenHash,
+          };
+          else delete room.workerBinding;
+          this.attachWorker(room, ws);
           const controlOnly = !room.clients.size && room.stops.size > 0;
           if ((controlOnly || await this.refreshConfig(room, ws, true)) && room.worker === ws && ws.readyState === WebSocket.OPEN) {
             room.ready = true; room.wakeAllowed = false; delete room.readyHinted;
+            if (!controlOnly) this.offerPush(room);
             const at = this.deps.now?.() ?? Date.now();
             emitCloudV2Timing(this.deps.timing, { workspaceId: room.workspace.id.slice(0, 8), phase: "relay_ready",
               durationMs: Math.max(0, Math.round(at - started)), dialMs: Math.max(0, Math.round(dialed - dialStarted)), configMs: Math.max(0, Math.round(at - dialed)),
@@ -398,6 +423,8 @@ export class CloudV2Relay {
   }
   private attachWorker(room: Room, ws: WebSocket): void {
     this.watch(ws);
+    const binding = room.workerBinding;
+    let activityPending = false;
     type Output = Extract<ReturnType<typeof CloudV2WorkerFrameSchema.parse>, { t: "frame" }>;
     let pending: Output[] | undefined, queuedBytes = 0;
     const forward = (frame: Output) => {
@@ -412,6 +439,18 @@ export class CloudV2Relay {
       try {
         const frame = CloudV2WorkerFrameSchema.parse(binary ? null : parse(data));
         if (frame.t === "stop-ack") { room.stops.get(frame.id)?.(true); return; }
+        if (frame.t === "activity" && binding && workerSupportsPush(ws) && this.deps.workerActivity) {
+          if (activityPending) { ws.close(1013, "activity_backpressure"); return; }
+          activityPending = true;
+          // This proves the worker's current boot directly. An app session or
+          // source outage must not suppress an active worker's idle-stop receipt.
+          void this.deps.workerActivity(binding, frame.idle).then(reply => {
+            if (room.worker !== ws || room.revoked || ws.readyState !== WebSocket.OPEN) return;
+            if (!reply) { ws.close(4001, "worker_unauthorized"); return; }
+            send(ws, { t: "activity-reply", id: frame.id, ...reply });
+          }).catch(() => ws.close(1013, "activity_unavailable")).finally(() => { activityPending = false; });
+          return;
+        }
         if (frame.t !== "frame") { ws.close(4003, "invalid_carrier"); return; }
         // Keep normal streaming synchronous. Only buffer while a due authority
         // read is in flight, with both frame and byte bounds against a stalled DB.
@@ -431,7 +470,7 @@ export class CloudV2Relay {
     ws.on("close", () => {
       this.failDelivered(room, ws);
       if (room.worker !== ws) return;
-      room.worker = null; room.ready = false; room.loginRevision = null;
+      room.worker = null; room.ready = false; room.loginRevision = null; delete room.workerBinding;
       // A close during initial configuration is handled by connect's retry.
       if (!room.dialing) this.ensureConnected(room);
     });

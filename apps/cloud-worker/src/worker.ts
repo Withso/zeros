@@ -260,6 +260,7 @@ export class CloudWorker {
       await client.send(this.readyFrame());
       return;
     }
+    if (message.t !== "frame") return;
     const client = this.clients.get(message.clientId);
     if (!client || client.rejected) return;
     await this.configuring;

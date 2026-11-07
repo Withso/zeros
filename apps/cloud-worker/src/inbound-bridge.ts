@@ -11,8 +11,14 @@ import { readWorkerPublicKeys, WorkerTokenVerifier } from "./worker-auth";
 interface Options {
   workspaceId: string; bootId: string; port?: number; publicKeys?: readonly string[]; publicKeysFile?: string;
   failedAuthLimit?: number; pingIntervalMs?: number;
+  onPushChange?: () => void;
 }
-interface Connection { socket: WebSocket; clients: Map<string, string>; stops: Map<string, string>; alive: boolean }
+type ActivityReply = Extract<CloudV2ControlFrame, { t: "activity-reply" }>;
+interface Connection {
+  socket: WebSocket; clients: Map<string, string>; stops: Map<string, string>; alive: boolean;
+  push?: { prompts: boolean };
+  activity?: { id: string; finish: (reply: ActivityReply | null) => void };
+}
 
 /** Boat's protected route forwards to this loopback-only listener. Never log
  * request headers: Boat forwards its private _port_auth cookie too. */
@@ -31,6 +37,7 @@ export class InboundBridge {
   private ping?: ReturnType<typeof setInterval>;
   private failures = 0;
   private failureWindow = 0;
+  private readonly pushWaiters = new Set<() => void>();
 
   constructor(private readonly options: Options) {
     this.websockets.on("headers", headers => { headers.push(`X-Zeros-Worker-Features: ${CLOUD_WORKER_FEATURES}`); });
@@ -85,6 +92,44 @@ export class InboundBridge {
     return false;
   }
 
+  get promptPush(): boolean {
+    return [...this.connections].some(connection => connection.push?.prompts && connection.socket.readyState === WebSocket.OPEN);
+  }
+
+  /** A prompt hint aborts the inbox's wait; losing push instead resumes HTTPS. */
+  async waitForPromptFallback(signal?: AbortSignal): Promise<void> {
+    if (!this.promptPush) return;
+    await new Promise<void>((resolve, reject) => {
+      const dispose = () => { this.pushWaiters.delete(check); signal?.removeEventListener("abort", abort); };
+      const check = () => { if (!this.promptPush) { dispose(); resolve(); } };
+      const abort = () => { dispose(); reject(new Error("Prompt wait cancelled.")); };
+      this.pushWaiters.add(check);
+      if (signal?.aborted) abort(); else signal?.addEventListener("abort", abort, { once: true });
+      check();
+    });
+  }
+
+  async activity(idle: boolean): Promise<ActivityReply | null> {
+    const connection = [...this.connections].find(peer => peer.push && peer.socket.readyState === WebSocket.OPEN);
+    if (!connection || connection.activity) return null;
+    const id = randomUUID();
+    return new Promise(resolve => {
+      const finish = (reply: ActivityReply | null) => {
+        if (connection.activity?.id !== id) return;
+        clearTimeout(timer); delete connection.activity; resolve(reply);
+      };
+      const timer = setTimeout(() => { connection.socket.terminate(); finish(null); }, 2_000);
+      timer.unref();
+      connection.activity = { id, finish };
+      void this.write(connection.socket, { t: "activity", id, idle }).then(sent => { if (!sent) finish(null); });
+    });
+  }
+
+  private pushChanged(): void {
+    for (const wake of [...this.pushWaiters]) wake();
+    this.options.onPushChange?.();
+  }
+
   async dispose(): Promise<void> {
     clearInterval(this.ping);
     for (const connection of this.connections) connection.socket.terminate();
@@ -114,7 +159,15 @@ export class InboundBridge {
       let frame: CloudV2ControlFrame;
       try { frame = CloudV2ControlFrameSchema.parse(JSON.parse(data.toString())); }
       catch { socket.close(4003); return; }
-      if (frame.t === "open") {
+      if (frame.t === "push") {
+        const changed = !connection.push || connection.push.prompts !== frame.prompts;
+        connection.push = { prompts: frame.prompts };
+        if (changed) this.pushChanged();
+        return;
+      } else if (frame.t === "activity-reply") {
+        if (connection.activity?.id === frame.id) connection.activity.finish(frame);
+        return;
+      } else if (frame.t === "open") {
         if (connection.clients.has(frame.clientId) || connection.clients.size >= 256) { socket.close(4003); return; }
         const id = randomUUID();
         connection.clients.set(frame.clientId, id); this.routes.set(id, { connection, clientId: frame.clientId });
@@ -132,6 +185,8 @@ export class InboundBridge {
     });
     socket.on("close", () => {
       this.connections.delete(connection);
+      connection.activity?.finish(null);
+      if (connection.push) this.pushChanged();
       for (const clientId of connection.clients.values()) {
         this.routes.delete(clientId);
         void this.receive!({ t: "close", clientId }).catch(() => {});

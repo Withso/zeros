@@ -43,6 +43,13 @@ export type CloudV2WorkerSession = CloudV2Workspace & {
   /** Present only on the hello that actually changes a booting state to running. */
   helloTiming?: { state: "creating" | "starting"; durationMs: number };
 };
+/** Kept on the CP side of the authenticated dial, never supplied in a frame. */
+export type CloudV2WorkerBinding = { workspaceId: string; bootId: string; accessEpoch: string; workerTokenHash: string };
+const PENDING_WORKER_PROMPTS_SQL = sql`(
+  EXISTS (SELECT 1 FROM cloud_v2_prompt_outbox p JOIN cloud_v2_prompt_chats c USING(workspace_id,chat_id)
+    WHERE p.workspace_id=w.id AND p.state IN ('queued','inboxed') AND p.epoch=c.epoch
+      AND p.access_epoch=w.access_epoch AND NOT p.cancel_requested AND p.payload IS NOT NULL)
+  OR EXISTS (SELECT 1 FROM cloud_v2_prompt_chats c WHERE c.workspace_id=w.id AND c.stop_acked_epoch<c.epoch))`;
 export type CloudV2AppGrant = { userId: string; accessEpoch: string; wake: boolean; sessionId: string | null };
 
 export type CloudV2Workspace = {
@@ -438,12 +445,12 @@ export class CloudV2Store {
   }
 
   /** Internal only: private route data is deliberately absent from workspace(). */
-  async workerRoute(id: string): Promise<{ workspace: CloudV2Workspace; accessEpoch: string; url: string | null; portToken: unknown; bootId: string | null } | null> {
-    const { rows } = await withSystemTx(this.pool, tx => tx.query<Row & { access_epoch: string; worker_route_url: string | null; worker_port_token: unknown; worker_boot_id: string | null }>(
-      `SELECT ${COLUMNS}, access_epoch::text, worker_route_url, worker_port_token, worker_boot_id
+  async workerRoute(id: string): Promise<{ workspace: CloudV2Workspace; accessEpoch: string; url: string | null; portToken: unknown; bootId: string | null; workerTokenHash: string | null } | null> {
+    const { rows } = await withSystemTx(this.pool, tx => tx.query<Row & { access_epoch: string; worker_route_url: string | null; worker_port_token: unknown; worker_boot_id: string | null; worker_token_hash: string | null }>(
+      `SELECT ${COLUMNS}, access_epoch::text, worker_route_url, worker_port_token, worker_boot_id, encode(worker_token_hash,'hex') AS worker_token_hash
        FROM cloud_v2_workspaces w WHERE id=$1 AND state NOT IN ('deleting','deleted') AND ${LIVE_ACCESS}`, [id]));
     const row = rows[0];
-    return row ? { workspace: workspace(row), accessEpoch: row.access_epoch, url: row.worker_route_url, portToken: row.worker_port_token, bootId: row.worker_boot_id } : null;
+    return row ? { workspace: workspace(row), accessEpoch: row.access_epoch, url: row.worker_route_url, portToken: row.worker_port_token, bootId: row.worker_boot_id, workerTokenHash: row.worker_token_hash } : null;
   }
 
   async setWorkerRoute(id: string, sandboxId: string, url: string, portToken: unknown): Promise<boolean> {
@@ -520,6 +527,30 @@ export class CloudV2Store {
             AND state NOT IN ('deleting','deleted') AND ${CLOUD_V2_LIVE_ACCESS_SQL}`);
     const row = rows[0];
     return row ? { ...workspace(row), accessEpoch: row.access_epoch, loginRevision: row.login_revision } : null;
+  }
+
+  async relayActivity(binding: CloudV2WorkerBinding, idle: boolean): Promise<(CloudV2WorkerSession & { promptsPending: boolean }) | null> {
+    type ActivityRow = Row & { access_epoch: string; login_revision: string; prompts_pending: boolean };
+    const { rows } = idle ? await withSystemStatement<ActivityRow>(this.pool, sql`
+      SELECT ${WORKSPACE_COLUMNS_SQL}, access_epoch::text, login_revision::text, ${PENDING_WORKER_PROMPTS_SQL} AS prompts_pending
+      FROM cloud_v2_workspaces w WHERE w.id=${SqlFragment.uuid(binding.workspaceId)}
+        AND worker_boot_id=${SqlFragment.uuid(binding.bootId)}
+        AND access_epoch=${SqlFragment.text(binding.accessEpoch, /^(0|[1-9][0-9]{0,18})$/)}::bigint
+        AND worker_token_hash=decode(${SqlFragment.text(binding.workerTokenHash, /^[0-9a-f]{64}$/)},'hex')
+        AND state NOT IN ('deleting','deleted') AND ${CLOUD_V2_LIVE_ACCESS_SQL}`)
+      : await withSystemTx(this.pool, async tx => {
+        // Membership and boot are read in a fresh statement after the row lock.
+        await tx.query("SELECT id FROM cloud_v2_workspaces WHERE id=$1 FOR UPDATE", [binding.workspaceId]);
+        return tx.query<ActivityRow>(`UPDATE cloud_v2_workspaces w SET active_at=CASE
+          WHEN state='running' AND coalesce(active_at,'-infinity')<clock_timestamp()-interval '30 seconds'
+          THEN clock_timestamp() ELSE active_at END
+          WHERE id=$1 AND worker_boot_id=$2 AND access_epoch=$3::bigint AND worker_token_hash=decode($4,'hex')
+            AND state NOT IN ('deleting','deleted') AND ${LIVE_ACCESS}
+          RETURNING ${COLUMNS}, access_epoch::text, login_revision::text, ${PENDING_WORKER_PROMPTS_SQL.text} AS prompts_pending`,
+        [binding.workspaceId, binding.bootId, binding.accessEpoch, binding.workerTokenHash]);
+      });
+    const row = rows[0];
+    return row ? { ...workspace(row), accessEpoch: row.access_epoch, loginRevision: row.login_revision, promptsPending: row.prompts_pending } : null;
   }
 
   /** Hello precedes checkout. Only that same live boot can fail its admission;

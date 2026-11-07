@@ -184,6 +184,12 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
       return { ...route, bootId: handoff.blocked ? null : route.bootId, ...(handoff.stopBootIds ? { stopBootIds: handoff.stopBootIds } : {}),
         token: route.portToken ? openPortToken(route.portToken, id, keys) : null };
     },
+    workerActivity: async (binding, idle) => {
+      const current = await store.relayActivity(binding, idle);
+      if (!current) return null;
+      if (!idle && current.state === "running") void continueSource(current, current).catch(() => {});
+      return { state: current.state, loginRevision: current.loginRevision, prompts: current.promptsPending };
+    },
     mintWorkerToken: (id, boot) => signer.mint(id, boot),
     wake: async workspace => { await store.transition(workspace.id, ["stopped"], "starting"); },
     answerOffline: (workspace, frame) => answerCloudV2Offline(store, workspace, frame),
@@ -202,7 +208,8 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     promptOutbox: v2.promptOutbox === true, waitForPrompts: (id, ms, signal) => promptSignals.wait(id, ms, signal) };
   const promptChanges = v2.promptOutbox ? postgresNotificationSubscription(listenerPool, {
     channels: ["zeros_cloud_v2_prompts"],
-    onReady: () => promptSignals.wakeAll(),
+    onReady: () => { promptSignals.wakeAll(); connections?.promptNotifications(true); },
+    onDisconnect: () => { connections?.promptNotifications(false); promptSignals.wakeAll(); },
     onNotification: notice => {
       if (!/^[a-f0-9-]{36}$/.test(notice.payload ?? "")) return;
       promptSignals.wake(notice.payload!); connections?.hintPrompts(notice.payload!);
