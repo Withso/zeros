@@ -19,12 +19,15 @@ import type {
 } from "@zeros/design-web";
 import type { DesignRuntimeMatchedDeclaration } from "@zeros/protocol/design-runtime";
 import {
+  DESIGN_BATCH_CAPTURE_TIMEOUT_MS,
   DESIGN_CAPTURE_TIMEOUT_MS,
   DESIGN_PREVIEW_JOBS_CAPABILITY,
   DESIGN_PREVIEW_JOB_TIMEOUT_MS,
   DesignCaptureCleanupUnconfirmedError,
   designPreviewReplySchema,
+  designThumbnailsReplySchema,
   type DesignPreviewReply,
+  type DesignThumbnailsReply,
 } from "@zeros/protocol/design-capture";
 import { designPageCatalogSchema, designPageIdSchema, normalizeDesignPagesSnapshot, type DesignPageSummary } from "@zeros/protocol/design-pages";
 import { DESIGN_LAZY_PREPARATION_CAPABILITY, DESIGN_MUTATION_SNAPSHOTS_CAPABILITY, DESIGN_PAGE_SCOPED_MUTATIONS_CAPABILITY, designMutationCatalogSchema, designPageScopedCatalogSchema, designPreparedFrameSchema, designFramesPrepareSchema, designFramesPrepareReplySchema, type DesignMutationCatalog, type DesignPageHashes, type DesignPageScopedCatalog } from "@zeros/protocol/design-catalog";
@@ -681,60 +684,102 @@ export async function bridgeDesignPreview(
   },
   options: { signal?: AbortSignal; priority?: DesignCapturePriority; /** Producer retains admission through PNG re-encoding. */ admitted?: boolean } = {},
 ): Promise<DesignPreviewReply> {
-  const work = async (signal: AbortSignal) => {
-    const cancellable = bridge.supportsEngineCapability?.(DESIGN_PREVIEW_JOBS_CAPABILITY, workspaceId) === true;
-    const jobId = cancellable ? crypto.randomUUID() : undefined;
-    const deadline = Date.now() + DESIGN_PREVIEW_JOB_TIMEOUT_MS;
-    let terminal = false;
-    let lostConnection = false;
-    const offStatus = bridge.onStatusChange?.((status) => {
-      if (status !== "connected") lostConnection = true;
-    });
-    let cancellation: Promise<void> | undefined;
-    const cancel = () => {
-      if (cancellation) return;
-      // A cancellation on another socket could acknowledge an empty job while
-      // the original connection is still draining. Never use it as proof.
-      cancellation = !jobId || lostConnection
-        ? Promise.reject(new DesignCaptureCleanupUnconfirmedError())
-        : rawWorkspaceOp(bridge, "design.preview.cancel", {
-        workspaceId, directoryId: input.directoryId, jobId, deadline,
-      }, DESIGN_CAPTURE_TIMEOUT_MS + 15_000).then((result) => {
-        if (lostConnection || (result as { settled?: unknown })?.settled !== true) throw new DesignCaptureCleanupUnconfirmedError();
-      });
-      // Attach immediately; the original job is still awaited below.
-      void cancellation.catch(() => {});
-    };
-    signal.addEventListener("abort", cancel, { once: true });
-    let outcome: { reply: DesignPreviewReply } | { error: unknown };
-    try {
-      signal.throwIfAborted();
-      const result = await rawWorkspaceOp(bridge, "design.preview", { workspaceId, ...input, ...(jobId ? { jobId, deadline } : {}) },
-        DESIGN_CAPTURE_TIMEOUT_MS + 15_000);
-      terminal = true;
-      signal.throwIfAborted();
+  const work = (signal: AbortSignal) => runDesignPreviewJob(bridge, workspaceId, input.directoryId, "design.preview", input,
+    DESIGN_PREVIEW_JOB_TIMEOUT_MS, DESIGN_CAPTURE_TIMEOUT_MS + 15_000, signal, (result) => {
       const reply = designPreviewReplySchema.safeParse(result);
       if (!reply.success) throw new Error("design.preview: malformed engine response");
-      outcome = { reply: reply.data };
-    } catch (error) {
-      cancel();
-      outcome = { error };
-    } finally {
-      signal.removeEventListener("abort", cancel);
-    }
-    try { await cancellation; }
-    catch {
-      if (!terminal) {
-        designCaptureScheduler.quarantine();
-        throw new DesignCaptureCleanupUnconfirmedError();
-      }
-    } finally { offStatus?.(); }
-    if ("error" in outcome) throw outcome.error;
-    return outcome.reply;
-  };
+      return reply.data;
+    });
   return options.admitted
     ? work(options.signal ?? new AbortController().signal)
     : designCaptureScheduler.schedule(JSON.stringify(["native", workspaceId, input]), options.priority ?? "visible", work, options.signal);
+}
+
+/** A cancellable engine capture job: a job id and deadline when the engine
+ * supports jobs, and a cancellation that must be confirmed on the same live
+ * connection before its capture slot counts as released. */
+async function runDesignPreviewJob<T>(
+  bridge: RuntimeClient,
+  workspaceId: string,
+  directoryId: string,
+  op: "design.preview" | "design.thumbnails.render",
+  params: Record<string, unknown>,
+  jobTimeoutMs: number,
+  requestTimeoutMs: number,
+  signal: AbortSignal,
+  parse: (result: unknown) => T,
+): Promise<T> {
+  const cancellable = bridge.supportsEngineCapability?.(DESIGN_PREVIEW_JOBS_CAPABILITY, workspaceId) === true;
+  const jobId = cancellable ? crypto.randomUUID() : undefined;
+  const deadline = Date.now() + jobTimeoutMs;
+  let terminal = false;
+  let lostConnection = false;
+  const offStatus = bridge.onStatusChange?.((status) => {
+    if (status !== "connected") lostConnection = true;
+  });
+  let cancellation: Promise<void> | undefined;
+  const cancel = () => {
+    if (cancellation) return;
+    // A cancellation on another socket could acknowledge an empty job while
+    // the original connection is still draining. Never use it as proof.
+    cancellation = !jobId || lostConnection
+      ? Promise.reject(new DesignCaptureCleanupUnconfirmedError())
+      : rawWorkspaceOp(bridge, "design.preview.cancel", {
+      workspaceId, directoryId, jobId, deadline,
+    }, DESIGN_CAPTURE_TIMEOUT_MS + 15_000).then((result) => {
+      if (lostConnection || (result as { settled?: unknown })?.settled !== true) throw new DesignCaptureCleanupUnconfirmedError();
+    });
+    // Attach immediately; the original job is still awaited below.
+    void cancellation.catch(() => {});
+  };
+  signal.addEventListener("abort", cancel, { once: true });
+  let outcome: { reply: T } | { error: unknown };
+  try {
+    signal.throwIfAborted();
+    const result = await rawWorkspaceOp(bridge, op, { workspaceId, ...params, ...(jobId ? { jobId, deadline } : {}) },
+      requestTimeoutMs);
+    terminal = true;
+    signal.throwIfAborted();
+    outcome = { reply: parse(result) };
+  } catch (error) {
+    cancel();
+    outcome = { error };
+  } finally {
+    signal.removeEventListener("abort", cancel);
+  }
+  try { await cancellation; }
+  catch {
+    if (!terminal) {
+      designCaptureScheduler.quarantine();
+      throw new DesignCaptureCleanupUnconfirmedError();
+    }
+  } finally { offStatus?.(); }
+  if ("error" in outcome) throw outcome.error;
+  return outcome.reply;
+}
+
+/** Pictures of many saved frames at one size, theme and color scheme, in
+ * engine batch captures. A frame whose source moved on comes back stale. */
+export async function bridgeDesignThumbnailsRender(
+  bridge: RuntimeClient,
+  workspaceId: string,
+  input: {
+    directoryId: string;
+    theme: string | null;
+    colorScheme: "light" | "dark";
+    maxDimension: number;
+    frames: ReadonlyArray<{ file: string; sourceVersion: string }>;
+  },
+  options: { signal?: AbortSignal } = {},
+): Promise<DesignThumbnailsReply> {
+  return runDesignPreviewJob(bridge, workspaceId, input.directoryId, "design.thumbnails.render",
+    { ...input, frames: input.frames.map(({ file, sourceVersion }) => ({ file, sourceVersion })) },
+    DESIGN_BATCH_CAPTURE_TIMEOUT_MS, DESIGN_BATCH_CAPTURE_TIMEOUT_MS + 15_000,
+    options.signal ?? new AbortController().signal, (result) => {
+      const reply = designThumbnailsReplySchema.safeParse(result);
+      if (!reply.success) throw new Error("design.thumbnails.render: malformed engine response");
+      return reply.data;
+    });
 }
 
 export async function bridgeDesignTokens(

@@ -169,7 +169,7 @@ export interface DesignFramePreviewDependencies {
   /** Remaining camera-gesture quiet time; canvas-wide notices wait for it. */
   quietMs?(): number;
   /** The canvas background lane: one task at a time, after input settles. */
-  schedule<T>(work: () => Promise<T>, capture?: { key: string; signal: AbortSignal; priority: "visible" | "detail" | "nearby" }): Promise<T | null>;
+  schedule<T>(work: () => Promise<T>, capture?: { key: string; signal: AbortSignal; priority: "visible" | "detail" | "nearby"; owner?: DesignPreviewOwner }): Promise<T | null>;
   /** Re-encode a PNG picture smaller where the platform can. */
   encode(png: Blob, level: DesignPreviewLevel): Promise<Blob>;
   /** Scales a larger picture down to an exact size; a smaller level of an
@@ -209,6 +209,8 @@ interface Picture {
 
 /** Encoded pictures remain cacheable independently of visible pixel leases. */
 const POOL_MAX_ENTRIES = 10_000;
+/** At most this many pictures render at once (a batching engine's capture). */
+const DESIGN_PREVIEW_MAX_PARALLEL = 64;
 
 interface Attempt {
   failures: number;
@@ -887,7 +889,7 @@ export class DesignFramePreviews {
 
   private pump(): void {
     if (!this.demand) return;
-    const limit = Math.max(1, Math.min(8, Math.floor(this.deps.concurrency?.(this.demand.owner) ?? 1)));
+    const limit = Math.max(1, Math.min(DESIGN_PREVIEW_MAX_PARALLEL, Math.floor(this.deps.concurrency?.(this.demand.owner) ?? 1)));
     if (this.productions.size >= limit) return;
     if (this.pumpTimer !== null) {
       this.deps.clearTimer(this.pumpTimer);
@@ -922,7 +924,7 @@ export class DesignFramePreviews {
     this.producingKeys.add(key);
     const priority = item.near === false ? "nearby" : item.level === "detail" ? "detail" : "visible";
     void this.deps.schedule(() => this.produce(demand, item, key, epoch, production.controller.signal, priority), {
-      key, signal: production.controller.signal, priority,
+      key, signal: production.controller.signal, priority, owner: demand.owner,
     })
       .catch(() => {})
       .finally(() => {

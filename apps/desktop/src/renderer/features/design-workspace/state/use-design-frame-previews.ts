@@ -19,6 +19,10 @@ import { designCaptureScheduler } from "../../../platform/bridge/design-capture-
 import { designSourceVectorCache, type DesignSourceVectorTarget } from "../design-source-vector";
 import { loadDesignSurfaceVector, rasterizeDesignVector, renderDesignSourcePreview, type DesignSourcePreviewDeps } from "../design-source-preview";
 import { designWorkspaceSnapshotCache } from "./design-workspace-cache";
+import { DesignThumbnailBatches } from "./design-thumbnail-batches";
+import { getActiveBridge } from "../../../platform/bridge/active-bridge";
+import { bridgeDesignThumbnailsRender } from "../../../platform/bridge/design-bridge";
+import { DESIGN_THUMBNAILS_CAPABILITY } from "@zeros/protocol/design-capture";
 import {
   DESIGN_PREVIEW_LEVELS,
   DesignFramePreviews,
@@ -46,7 +50,7 @@ const scopeListeners = new Set<() => void>();
 const DESIGN_SOURCE_PREVIEW_CONCURRENCY = 4;
 
 /** Counts for the explicit resources diagnostic; reasons carry no paths. */
-const sourcePreviewUsage = { vector: 0, native: 0, fallbacks: 0, ineligible: {} as Record<string, number>, lastFallback: "",
+const sourcePreviewUsage = { batched: 0, vector: 0, native: 0, fallbacks: 0, ineligible: {} as Record<string, number>, lastFallback: "",
   /** Summed milliseconds per vector stage, to locate a slow producer. */
   ms: { load: 0, raster: 0, encode: 0 } };
 const recordStage = (stage: "load" | "raster" | "encode", ms: number) => { sourcePreviewUsage.ms[stage] += ms; };
@@ -106,6 +110,26 @@ function nativeDesignPreview(owner: DesignPreviewOwner, input: { file: string; s
   return input.capture ? designCaptureScheduler.schedule(input.capture.key, input.capture.priority, render, signal) : render();
 }
 
+/** Pictures in flight for an engine that batches them: enough to fill one
+ * 64-frame capture batch while the previous one renders. */
+const DESIGN_THUMBNAIL_BATCH_CONCURRENCY = 64;
+
+/** Local engines with a capture host render many frames per capture, out of
+ * the renderer process. */
+function thumbnailsAvailable(owner: DesignPreviewOwner): boolean {
+  return !isCloudWorkspace(owner.workspaceId) &&
+    getActiveBridge()?.supportsEngineCapability?.(DESIGN_THUMBNAILS_CAPABILITY, owner.workspaceId) === true;
+}
+
+const designThumbnailBatches = new DesignThumbnailBatches((group, frames, signal) => {
+  const bridge = getActiveBridge();
+  if (!bridge) return Promise.reject(new Error("Design thumbnails need a connected engine."));
+  return bridgeDesignThumbnailsRender(bridge, group.workspaceId, {
+    directoryId: group.directoryId, theme: group.theme, colorScheme: group.colorScheme,
+    maxDimension: group.maxDimension, frames,
+  }, { signal });
+});
+
 export const designFramePreviews = new DesignFramePreviews({
   displayBudget: designImageResidency,
   store: createIndexedDbDesignPreviewStore(),
@@ -113,6 +137,20 @@ export const designFramePreviews = new DesignFramePreviews({
   // renderer: milliseconds each, several at once, the same pixels the canvas
   // tiles draw. Anything else (and any vector failure) keeps the native host.
   render: async (owner, input, signal) => {
+    if (thumbnailsAvailable(owner)) {
+      try {
+        // Today's previews render in the light scheme; batches keep the same pixels.
+        const reply = await designThumbnailBatches.request({ workspaceId: owner.workspaceId, directoryId: owner.directoryId,
+          theme: input.theme, colorScheme: "light", maxDimension: input.maxDimension },
+        { file: input.file, sourceVersion: input.sourceVersion }, signal);
+        sourcePreviewUsage.batched++;
+        return reply;
+      } catch (error) {
+        if (signal?.aborted) throw error;
+        sourcePreviewUsage.fallbacks++;
+        sourcePreviewUsage.lastFallback = (error instanceof Error ? error.message : String(error)).slice(0, 120);
+      }
+    }
     const source = designSourcePreviewTarget(owner, input);
     if (source) {
       try {
@@ -129,13 +167,21 @@ export const designFramePreviews = new DesignFramePreviews({
     sourcePreviewUsage.native++;
     return nativeDesignPreview(owner, input, signal);
   },
-  concurrency: (owner) => (isCloudWorkspace(owner.workspaceId) ? 1 : DESIGN_SOURCE_PREVIEW_CONCURRENCY),
+  concurrency: (owner) => (isCloudWorkspace(owner.workspaceId) ? 1
+    : thumbnailsAvailable(owner) ? DESIGN_THUMBNAIL_BATCH_CONCURRENCY : DESIGN_SOURCE_PREVIEW_CONCURRENCY),
   quietMs: () => designBackgroundWork.quietRemainingMs(),
   // A render waits for a quiet slot in the canvas's background lane and then
   // leaves it, so tiles and audits never queue behind its round trip. Each
-  // parallel render waits under its own key.
-  schedule: async (work, capture) =>
-    (await designBackgroundWork.schedule(`design-preview:${capture?.key ?? ""}`, async () => true)) ? work() : null,
+  // parallel render waits under its own key. A batching engine renders out of
+  // this process: its requests only wait for input to rest, together, so a
+  // batch can fill instead of leaving the lane one idle callback at a time.
+  schedule: async (work, capture) => {
+    if (capture?.owner && thumbnailsAvailable(capture.owner)) {
+      await designBackgroundWork.whenQuiet(capture.signal);
+      return work();
+    }
+    return (await designBackgroundWork.schedule(`design-preview:${capture?.key ?? ""}`, async () => true)) ? work() : null;
+  },
   encode: encodeDesignPreview,
   downscale: downscaleDesignPreview,
   canProduce: (owner) => {
