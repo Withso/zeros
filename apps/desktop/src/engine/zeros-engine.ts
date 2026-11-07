@@ -11,6 +11,7 @@ import { claudeOrganizationStartupCode } from "@zeros/protocol/claude-startup-no
 import { conversationModePort } from "./design/conversation-mode";
 import { resolveDesignCaptureConfig, setDesignCaptureConfig } from "./design/capture-client";
 import { stopDesignVerification, revokeDesignVerification } from "./design/verification-service";
+import { stopDesignPreparationWorkers } from "./design/preparation-pool";
 import { configureDesignStyleBuilds, designStyleInputChanged, presentDesignStyleBuildRoots, stopDesignStyleBuilds } from "./design/style-builds";
 import { DesignChangePoller, designSnapshotDirectory } from "./design/change-poller";
 import { configureDesignFonts } from "./design/style-fonts";
@@ -2973,6 +2974,7 @@ export class ZerosEngine {
     const productToolsRetired = settle(() => this.agents.revokeSessionTools());
     const previewsRetired = settle(() => this.workspace.stopDesignPreviews?.());
     await settle(() => stopDesignVerification());
+    await settle(() => stopDesignPreparationWorkers());
     configureDesignStyleBuilds(null);
     configureDesignFonts({ onReady: null });
     const captureService = this.designCaptureService;
