@@ -22,7 +22,8 @@ export function useDesignFrameResidency<T extends DesignSpatialFrame>(
   const hiddenLive = useSyncExternalStore(designHiddenDocuments.subscribe, readHidden, readHidden);
   const index = useMemo(() => new DesignFrameSpatialIndex(input.frames), [input.frames]);
   const [, invalidate] = useReducer((value: number) => value + 1, 0);
-  const read = () => reader({ ...input, hiddenLive, index, view: input.camera.current ?? input.view, geometry: input.geometry() });
+  const read = () => reader({ ...input, hiddenLive, index, view: input.camera.current ?? input.view, geometry: input.geometry(),
+    gesture: input.camera.current !== null });
   const result = read();
   useLayoutEffect(() => {
     designHiddenDocuments.update(token, {

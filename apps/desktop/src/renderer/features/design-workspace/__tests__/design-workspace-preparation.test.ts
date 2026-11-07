@@ -74,6 +74,26 @@ it("prepares only view demand, one bounded batch, while distant descriptors stay
   expect(coordinator.usage().running).toBe(0);
 });
 
+it("starts no new preparation batch while a camera gesture is live, then resumes once it rests", async () => {
+  // Each batch republishes the page; on a 1,000-frame page a batch completing
+  // mid-pan re-rendered the whole canvas inside the gesture.
+  vi.useFakeTimers();
+  try {
+    let current = snapshot(1, 40), quiet = 120;
+    const prepare = vi.fn(async (_workspace: string, _directory: string, _revision: string, files: readonly string[]) => reply(files));
+    const coordinator = new DesignFramePreparation({ snapshot: () => current, publish: (_, value) => { current = value; },
+      canPrepare: () => true, prepare, quietMs: () => quiet });
+    coordinator.setDemand({}, { workspaceId: "personal", files: ["f0.html", "f1.html"] });
+    expect(prepare).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(60);
+    expect(prepare).not.toHaveBeenCalled();
+    quiet = 0;
+    await vi.advanceTimersByTimeAsync(60);
+    expect(prepare).toHaveBeenCalledTimes(1);
+    expect(prepare.mock.calls[0]![3]).toEqual(["f0.html", "f1.html"]);
+  } finally { vi.useRealTimers(); }
+});
+
 it("fences late batches across identical catalog revisions, owner switches, and mutation publication", async () => {
   let current = snapshot();
   const pending = [deferred<ReturnType<typeof reply>>(), deferred<ReturnType<typeof reply>>()];

@@ -39,6 +39,9 @@ export class DesignCanvasPointer {
 
   private invalidate = () => { this.bounds = null; this.point = null; };
 
+  /** The frame this pointer currently marks with `data-design-frame-pointer`. */
+  get intentFrame(): HTMLElement | null { return this.intent?.isConnected ? this.intent : null; }
+
   private setIntent(frame: HTMLElement | null): boolean {
     if (this.intent === frame) return false;
     this.intent?.removeAttribute("data-design-frame-pointer");
@@ -53,11 +56,13 @@ export class DesignCanvasPointer {
     const x = (this.point.x - view.panX) / view.zoom, y = (this.point.y - view.panY) / view.zoom;
     let candidate: HTMLElement | null = null, front = -Infinity;
     for (const node of this.world.children) {
-      if (!(node instanceof HTMLElement) || !node.hasAttribute("data-design-frame") || node.hidden ||
-        node.classList.contains("hidden") || node.classList.contains("invisible") ||
-        node.style.display === "none" || node.style.visibility === "hidden") continue;
+      if (!(node instanceof HTMLElement)) continue;
+      // Cached authored bounds reject almost every frame before any other DOM read.
       const box = this.readBounds(node);
       if (!box || box.z < front || x < box.x || y < box.y || x > box.x + box.width || y > box.y + box.height) continue;
+      if (!node.hasAttribute("data-design-frame") || node.hidden ||
+        node.classList.contains("hidden") || node.classList.contains("invisible") ||
+        node.style.display === "none" || node.style.visibility === "hidden") continue;
       if (!node.hasAttribute("data-design-frame-tiled") && !node.querySelector(
         "[data-design-source-ready], [data-design-document-ready], [data-design-frame-pixels-ready], [data-design-frame-load-error]")) continue;
       // Equal z follows DOM order, including a source replacement or reorder.

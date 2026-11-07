@@ -1,3 +1,4 @@
+import { designBackgroundWork } from "./design-background-work";
 import { DESIGN_LAZY_PREPARATION_CAPABILITY, DESIGN_PAGE_SCOPED_MUTATIONS_CAPABILITY, designCatalogOwnerSchema, designPageHashesSchema, type DesignCatalogFrame, type DesignCatalogOwner } from "@zeros/protocol/design-catalog";
 import type { RuntimeClient } from "../../../platform/bridge/ws-client";
 import { getActiveBridge } from "../../../platform/bridge/active-bridge";
@@ -179,6 +180,10 @@ export interface DesignPreparationDeps {
   snapshot(workspaceId: string): DesignWorkspaceSnapshotWire | undefined;
   publish(workspaceId: string, snapshot: DesignWorkspaceSnapshotWire): void;
   canPrepare(workspaceId: string): boolean;
+  /** Remaining camera-gesture quiet time. Each batch republishes the whole
+   * page, so a new batch waits for the camera to rest; work already sent to
+   * the engine is never cancelled. Defaults to the shared background lane. */
+  quietMs?(): number;
   prepare(workspaceId: string, directoryId: string, revision: string, files: readonly string[]): Promise<{
     frames: DesignWorkspaceSnapshotWire["frames"]; errors: Array<{ file: string; message: string }>; catalogRevision: string;
   }>;
@@ -228,6 +233,7 @@ export class DesignFramePreparation {
   private running: Promise<PreparationReply> | null = null;
   private revalidating = 0;
   private preparations = 0;
+  private resumeTimer: ReturnType<typeof setTimeout> | null = null;
   constructor(private readonly deps: DesignPreparationDeps) {}
   usage() { return { running: this.running ? 1 : 0, prepared: this.preparations, demanded: this.demand?.input.files.length ?? 0 }; }
   setDemand(token: object, input: DesignPreparationDemand | null): void {
@@ -298,6 +304,13 @@ export class DesignFramePreparation {
   private pump(): void {
     const demand = this.demand;
     if (this.running || this.revalidating || !demand || !this.deps.canPrepare(demand.input.workspaceId)) return;
+    // On a 1,000-frame page every publication re-renders the whole canvas;
+    // starting batches mid-pan turned each into a dropped display frame.
+    const quiet = this.deps.quietMs?.() ?? designBackgroundWork.quietRemainingMs();
+    if (quiet > 0) {
+      this.resumeTimer ??= setTimeout(() => { this.resumeTimer = null; this.pump(); }, quiet);
+      return;
+    }
     const { workspaceId } = demand.input;
     const snapshot = this.deps.snapshot(workspaceId);
     const preparation = snapshot?.preparation;
