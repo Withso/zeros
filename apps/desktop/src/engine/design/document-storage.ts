@@ -1,7 +1,7 @@
 import { nextFrameGeometry, readFrameMeta } from "./frame-metadata";
 export { nextFrameGeometry, readFrameMeta } from "./frame-metadata";
 import { DESIGN_MANIFEST_FILE, parseDesignManifest } from "./manifest";
-import { DESIGN_CANVAS_FILE, decodeCanvasFile } from "./canvas-file";
+import { DESIGN_CANVAS_FILE, decodeCanvasFile, encodeCanvasFile } from "./canvas-file";
 import { isDesignFrameFile } from "@zeros/protocol/design-path";
 import {
   DESIGN_MAX_FRAMES_PER_PAGE,
@@ -399,8 +399,9 @@ export async function writeCanvas(
   if (readDirectoryDesignLayout(workspacePath, directory)?.canvasVersion === 2) {
     const pages = canvas.pages ?? [];
     const members = new Map(pages.map(page => [page.id, new Set<string>()]));
+    const prefixes = pages.map(page => [page.folder ? `${page.folder}/` : null, page] as const);
     for (const file of Object.keys(canvas.frames)) {
-      const page = pages.find(page => page.folder && file.startsWith(page.folder + "/"));
+      const page = prefixes.find(([prefix]) => prefix !== null && file.startsWith(prefix))?.[1];
       if (!page) throw new Error("Design frame has no current page: " + file + ". Refresh before writing.");
       const info = canvas.frame_info[file];
       if (!info?.id) throw new Error("Design frame requires a stable canvas ID: " + file);
@@ -412,7 +413,8 @@ export async function writeCanvas(
       page.frames = [...page.frames.filter(id => ids.has(id)), ...[...ids].filter(id => !listed.has(id))];
     }
   }
-  if (!readDirectoryDesignManifest(workspacePath, directory)?.canvas) {
+  const declaresCanvas = readDirectoryDesignManifest(workspacePath, directory)?.canvas;
+  if (!declaresCanvas) {
     for (const relative of ["assets/.gitkeep", "components/.gitkeep"]) {
       const file = `${directory}/${relative}`;
       if (readDesignStorageFile(workspacePath, file) === "")
@@ -461,16 +463,23 @@ export async function writeCanvas(
       `view-${createHash("sha256").update(designDirectoryNameFor(workspacePath)).digest("hex").slice(0, 24)}.json`,
       JSON.stringify(view),
     );
-  const source = `${JSON.stringify(tracked, null, 2)}\n`;
-  if (utf8Bytes(source) > MAX_DESIGN_METADATA_BYTES) {
-    throw new Error("Design canvas metadata exceeds the 16 MiB limit.");
-  }
+  const expected = canvas[canvasReadSnapshot];
+  const limited = (source: string) => {
+    if (utf8Bytes(source) > MAX_DESIGN_METADATA_BYTES)
+      throw new Error("Design canvas metadata exceeds the 16 MiB limit.");
+    return source;
+  };
+  // The read snapshot pins the manifest the commit verifies, so the commit
+  // can encode this canvas directly rather than parse a JSON copy of it.
+  if (declaresCanvas && expected)
+    return commitDesignMetadata(workspacePath, directory, "", sourceChanges, expected, undefined,
+      { ...options, encodeCanvas: (version) => limited(encodeCanvasFile(tracked, { version })) });
   return commitDesignMetadata(
     workspacePath,
     designDirectoryNameFor(workspacePath),
-    source,
+    limited(`${JSON.stringify(tracked, null, 2)}\n`),
     sourceChanges,
-    canvas[canvasReadSnapshot],
+    expected,
     undefined,
     options,
   );

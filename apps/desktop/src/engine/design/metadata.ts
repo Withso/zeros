@@ -817,7 +817,13 @@ export function commitDesignMetadata(
   sourceChanges: DesignStorageChange[] = [],
   expected?: DesignMetadataSnapshot,
   restoredId?: string,
-  options?: { rollbackOnFailure?: boolean; assertInputs?: () => void },
+  options?: {
+    rollbackOnFailure?: boolean;
+    assertInputs?: () => void;
+    /** Encodes `directory`'s canvas file directly, in place of parsing
+     * `document`; only for a manifest that declares its canvas. */
+    encodeCanvas?: (version: 1 | 2) => string;
+  },
 ): string[] {
   assertDesignWriteAuthorized();
   if (sanitizeDesignDirectoryName(directory) !== directory)
@@ -910,40 +916,47 @@ export function commitDesignMetadata(
     const canvasBefore = readDesignStorageFile(workspace, canvasFile);
     if (canvasBefore !== null && !manifest?.canvas && expected?.file !== canvasFile)
       throw new Error(`The existing ${canvasFile} conflicts with legacy Design metadata. Preserve both files before migrating.`);
-    const json = folder === directory ? document : oldSource;
-    if (json === null)
-      throw new Error(
-        `The registered Design metadata for ${folder} is missing.`,
-      );
-    let model = JSON.parse(json) as Record<string, unknown>;
-    if (!manifest?.canvas) {
-      // Old documents discovered every top-level HTML file. Capture that
-      // membership and inline metadata before switching to explicit entries,
-      // including other folders migrated with a shared central registry.
-      const normalized = decodeCanvasFile(encodeCanvasFile(model)) as unknown as CanvasDocument;
-      const information = (model.frame_info ?? {}) as Record<string, unknown>;
-      const names = new Set([
-        ...Object.keys(normalized.frames),
-        ...(existsSync(path.join(workspace, folder)) ? readdirSync(path.join(workspace, folder), { withFileTypes: true }) : [])
-          .filter((entry) => entry.isFile() && isDesignFrameFile(entry.name))
-          .map((entry) => entry.name),
-      ]);
-      for (const file of [...names].sort()) {
-        const pending = sourceChanges.find((change) => change.file === `${folder}/${file}`);
-        if (pending?.after === null) continue;
-        if (Object.hasOwn(information, file) && normalized.frames[file]) continue;
-        const source = pending?.after ?? readDesignStorageFile(workspace, `${folder}/${file}`, 2 * 1024 * 1024);
-        if (source === null) {
-          if (normalized.frames[file]) continue; // Preserve an existing missing reference for recovery.
-          throw new Error(`Design frame source is missing: ${folder}/${file}`);
+    const documentModel = (json: string | null): Record<string, unknown> => {
+      if (json === null)
+        throw new Error(
+          `The registered Design metadata for ${folder} is missing.`,
+        );
+      const model = JSON.parse(json) as Record<string, unknown>;
+      if (!manifest?.canvas) {
+        // Old documents discovered every top-level HTML file. Capture that
+        // membership and inline metadata before switching to explicit entries,
+        // including other folders migrated with a shared central registry.
+        const normalized = decodeCanvasFile(encodeCanvasFile(model)) as unknown as CanvasDocument;
+        const information = (model.frame_info ?? {}) as Record<string, unknown>;
+        const names = new Set([
+          ...Object.keys(normalized.frames),
+          ...(existsSync(path.join(workspace, folder)) ? readdirSync(path.join(workspace, folder), { withFileTypes: true }) : [])
+            .filter((entry) => entry.isFile() && isDesignFrameFile(entry.name))
+            .map((entry) => entry.name),
+        ]);
+        for (const file of [...names].sort()) {
+          const pending = sourceChanges.find((change) => change.file === `${folder}/${file}`);
+          if (pending?.after === null) continue;
+          if (Object.hasOwn(information, file) && normalized.frames[file]) continue;
+          const source = pending?.after ?? readDesignStorageFile(workspace, `${folder}/${file}`, 2 * 1024 * 1024);
+          if (source === null) {
+            if (normalized.frames[file]) continue; // Preserve an existing missing reference for recovery.
+            throw new Error(`Design frame source is missing: ${folder}/${file}`);
+          }
+          const meta = readFrameMeta(parseHtml(source, { sourceCodeLocationInfo: true }), file);
+          normalized.frames[file] ??= nextFrameGeometry(Object.values(normalized.frames), meta);
+          normalized.frame_info[file] = { ...normalized.frame_info[file], title: meta.title, kind: meta.kind };
         }
-        const meta = readFrameMeta(parseHtml(source, { sourceCodeLocationInfo: true }), file);
-        normalized.frames[file] ??= nextFrameGeometry(Object.values(normalized.frames), meta);
-        normalized.frame_info[file] = { ...normalized.frame_info[file], title: meta.title, kind: meta.kind };
+        return { ...normalized };
       }
-      model = { ...normalized };
-    }
-    const canvasAfter = encodeCanvasFile(model, { version: layout?.canvasVersion ?? 1 });
+      return model;
+    };
+    const encode = folder === directory ? options?.encodeCanvas : undefined;
+    if (encode && !manifest?.canvas)
+      throw new Error("Design metadata changed while this edit was being prepared. Refresh before retrying.");
+    const canvasAfter = encode
+      ? encode(layout?.canvasVersion ?? 1)
+      : encodeCanvasFile(documentModel(folder === directory ? document : oldSource), { version: layout?.canvasVersion ?? 1 });
     // Preserve formatting when the authored scene itself is unchanged. Two
     // canonical encodings of one scene have one length, so a length change
     // proves a change without parsing either document.

@@ -58,15 +58,18 @@ export function designCatalogRevision(inspection: {
   registration: string;
   source: string;
 }): string {
+  // Revisions live only within an engine session. The canvas follows a NUL,
+  // which JSON text never contains, rather than being escaped into the array.
   return createHash("sha256")
     .update(
       JSON.stringify([
         inspection.layout.manifestFile,
         inspection.registration,
         inspection.layout.documentFile,
-        inspection.source,
       ]),
     )
+    .update("\0")
+    .update(inspection.source)
     .digest("hex");
 }
 
