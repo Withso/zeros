@@ -23,6 +23,7 @@ const repository = {
   permissions: { pull: true, push: true },
 };
 const config = {
+  appId: 99,
   apiBaseUrl: "https://api.github.com",
   webBaseUrl: "https://github.com",
   appSlug: "zeros-test",
@@ -204,6 +205,40 @@ describe("selected cloud GitHub credentials", () => {
       }),
     ).rejects.toMatchObject({ code: "github_cloud_access_denied" });
   });
+  it("offers only repositories this GitHub App can clone, not every repository the human can see", async () => {
+    const { service, fetcher } = fixture("github-app");
+    const reachable = { ...repository, id: 42, name: "project", owner: { login: "owner" } };
+    const outside = { ...repository, id: 43, name: "public-elsewhere", owner: { login: "owner" }, private: false };
+    fetcher.mockImplementation(async (url: string | URL | Request) => {
+      const path = new URL(String(url)).pathname;
+      if (path === "/user") return Response.json({ id: 12, login: "contributor" });
+      if (path === "/user/installations") return Response.json({ total_count: 3, installations: [
+        { id: 7, app_id: 99, account: { login: "owner" }, suspended_at: null },
+        { id: 8, app_id: 123, account: { login: "owner" }, suspended_at: null },
+        { id: 9, app_id: 99, account: { login: "paused" }, suspended_at: "2026-11-01T00:00:00Z" },
+      ] });
+      if (path === "/user/installations/7/repositories") return Response.json({ total_count: 1, repositories: [reachable] });
+      if (path === "/user/repos") return Response.json([reachable, outside]);
+      return Response.json({ message: "Not Found" }, { status: 404 });
+    });
+    const page = await service.repositories(scope, 1);
+    expect(page.repositories.map(row => `${row.owner}/${row.name}`)).toEqual(["owner/project"]);
+    expect(page).toMatchObject({ nextPage: null, complete: true });
+    const paths = fetcher.mock.calls.map(([url]) => new URL(String(url)).pathname);
+    expect(paths).not.toContain("/user/repos");
+    expect(paths).not.toContain("/user/installations/8/repositories");
+    expect(paths).not.toContain("/user/installations/9/repositories");
+  });
+
+  it("keeps offering every repository a personal access token can see", async () => {
+    const { service, fetcher } = fixture("pat");
+    const outside = { ...repository, id: 43, name: "public-elsewhere", private: false };
+    fetcher.mockImplementation(async (url: string | URL | Request) =>
+      Response.json(new URL(String(url)).pathname === "/user" ? { id: 12, login: "contributor" } : [repository, outside]));
+    const page = await service.repositories(scope, 1);
+    expect(page.repositories.map(row => row.name)).toEqual(["project", "public-elsewhere"]);
+  });
+
   it("rejects requested writes for a read-only human", async () => {
     const { service, fetcher } = fixture();
     fetcher.mockImplementation(async (url) =>

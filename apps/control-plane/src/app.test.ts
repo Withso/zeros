@@ -416,6 +416,21 @@ describe("app assembly — GitHub App registered", () => {
     expect(response.headers.get("pragma")).toBe("no-cache");
   });
 
+  it("answers GitHub's own post-installation redirect instead of rejecting it as a sign-in", async () => {
+    // Granting repositories from GitHub's page returns here without a Zeros
+    // state; there is nothing to exchange, and the grant already succeeded.
+    for (const action of ["install", "update"]) {
+      const response = await app.request(`/v1/github/oauth/callback?code=synthetic-code&installation_id=7&setup_action=${action}`);
+      expect(response.status).toBe(200);
+      expect(await response.text()).toContain("GitHub access updated");
+      expect(response.headers.get("cache-control")).toBe("no-store");
+      expect(response.headers.get("content-security-policy")).toContain("default-src 'none'");
+    }
+    const unsolicited = await app.request("/v1/github/oauth/callback?code=synthetic-code");
+    expect(unsolicited.status).toBe(422);
+    expect(await unsolicited.json()).toMatchObject({ error: { code: "invalid_oauth_state" } });
+  });
+
   it("keeps every other GitHub route behind auth", async () => {
     const response = await app.request("/v1/github/oauth/start", {
       method: "POST",
