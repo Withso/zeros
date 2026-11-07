@@ -143,8 +143,8 @@ it("renders a batch of thumbnails as one cancellable engine job and validates it
   // The engine refuses a job deadline beyond its preview job window.
   expect(seen[0]!.params.deadline as number).toBeLessThanOrEqual(Date.now() + DESIGN_PREVIEW_JOB_TIMEOUT_MS + 1_000);
   finish({ pipeline: "batch-v1", pictures: [{ file: "a.html", sourceVersion: "a".repeat(24), mimeType: "image/png", width: 128, height: 80, data: "iVBORw0KGgo=" }],
-    stale: [{ file: "b.html", sourceVersion: "c".repeat(24) }], failed: [] });
-  await expect(done).resolves.toMatchObject({ pictures: [{ file: "a.html" }], stale: [{ file: "b.html" }] });
+    stale: [{ file: "b.html", sourceVersion: "c".repeat(24) }], failed: [], deferred: [{ file: "c.html", sourceVersion: "d".repeat(24) }] });
+  await expect(done).resolves.toMatchObject({ pictures: [{ file: "a.html" }], stale: [{ file: "b.html" }], deferred: [{ file: "c.html" }] });
   // A malformed engine answer never reaches the picture store.
   await expect(bridgeDesignThumbnailsRender(bridgeReturning({ pictures: "nope" }), "workspace", input)).rejects.toThrow("malformed");
   // Cancelling asks the engine to stop the same job.

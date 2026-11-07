@@ -93,3 +93,31 @@ it("rejects every caller when the batch fails and keeps one frame per batch", as
   await expect(again).rejects.toThrow("capture host unavailable");
   expect(render).toHaveBeenCalledTimes(2);
 });
+
+it("asks again for frames a reply deferred, first in the next batch, and stops after repeated deferrals", async () => {
+  const seen: string[][] = [];
+  const render = vi.fn<DesignThumbnailBatchRender>(async (_group, frames) => {
+    seen.push(frames.map(frame => frame.file));
+    // The first reply pictures a.html and defers the rest; stuck.html is deferred every time.
+    const first = seen.length === 1;
+    const pictured = frames.filter(frame => frame.file !== "stuck.html" && (!first || frame.file === "a.html"));
+    return { pictures: pictured.map(frame => pictureOf(frame.file, frame.sourceVersion)), stale: [], failed: [],
+      deferred: frames.filter(frame => !pictured.includes(frame)) };
+  });
+  const { batches, tick } = harness(render);
+  const a = batches.request(group, { file: "a.html", sourceVersion: version(1) });
+  const b = batches.request(group, { file: "b.html", sourceVersion: version(1) });
+  const stuck = batches.request(group, { file: "stuck.html", sourceVersion: version(1) });
+  tick();
+  await expect(a).resolves.toMatchObject({ data: "png:a.html" });
+  const later = batches.request(group, { file: "c.html", sourceVersion: version(1) });
+  await expect(b).resolves.toMatchObject({ data: "png:b.html" });
+  await expect(stuck).rejects.toThrow("kept deferring");
+  tick();
+  await expect(later).resolves.toMatchObject({ data: "png:c.html" });
+  // Deferred frames leave before newer requests and keep their order.
+  expect(seen[0]).toEqual(["a.html", "b.html", "stuck.html"]);
+  expect(seen[1]).toEqual(["b.html", "stuck.html"]);
+  expect(seen.slice(2, 4)).toEqual([["stuck.html"], ["stuck.html"]]);
+  expect(seen.at(-1)).toEqual(["c.html"]);
+});

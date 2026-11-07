@@ -17,6 +17,8 @@ export interface DesignThumbnailBatchReply {
   readonly pictures: ReadonlyArray<DesignThumbnailFrame & { width: number; height: number; data: string }>;
   readonly stale: readonly DesignThumbnailFrame[];
   readonly failed: ReadonlyArray<{ file: string; error: string }>;
+  /** Left out to keep the reply within one bridge frame: ask again. */
+  readonly deferred?: readonly DesignThumbnailFrame[];
 }
 export type DesignThumbnailBatchRender = (
   group: DesignThumbnailGroup,
@@ -24,12 +26,16 @@ export type DesignThumbnailBatchRender = (
   signal: AbortSignal,
 ) => Promise<DesignThumbnailBatchReply>;
 
+/** Asks for one frame before it fails over to the next picture route. */
+const MAX_DEFERRALS = 4;
+
 interface Entry {
   readonly frame: DesignThumbnailFrame;
   readonly signal?: AbortSignal;
   readonly resolve: (reply: DesignPreviewReply) => void;
   readonly reject: (error: unknown) => void;
   settled: boolean;
+  deferrals: number;
   release(): void;
 }
 interface Batch {
@@ -65,7 +71,7 @@ export class DesignThumbnailBatches {
     const key = JSON.stringify([group.workspaceId, group.directoryId, group.theme, group.colorScheme, group.maxDimension]);
     return new Promise<DesignPreviewReply>((resolve, reject) => {
       const entry: Entry = {
-        frame, signal, settled: false,
+        frame, signal, settled: false, deferrals: 0,
         resolve: (reply) => { if (!entry.settled) { entry.settled = true; entry.release(); resolve(reply); } },
         reject: (error) => { if (!entry.settled) { entry.settled = true; entry.release(); reject(error); } },
         release: () => {},
@@ -115,6 +121,8 @@ export class DesignThumbnailBatches {
       const pictures = new Map(reply.pictures.map((picture) => [picture.file, picture]));
       const stale = new Map(reply.stale.map((frame) => [frame.file, frame]));
       const failed = new Map(reply.failed.map((frame) => [frame.file, frame]));
+      const deferred = new Set((reply.deferred ?? []).map((frame) => frame.file));
+      const again: Entry[] = [];
       for (const entry of entries) {
         const picture = pictures.get(entry.frame.file);
         const moved = stale.get(entry.frame.file);
@@ -122,8 +130,13 @@ export class DesignThumbnailBatches {
           entry.resolve({ sourceVersion: picture.sourceVersion, theme: group.theme, mimeType: "image/png",
             width: picture.width, height: picture.height, data: picture.data });
         } else if (moved) entry.resolve({ stale: true, sourceVersion: moved.sourceVersion });
+        else if (deferred.has(entry.frame.file) && ++entry.deferrals < MAX_DEFERRALS) again.push(entry);
+        else if (deferred.has(entry.frame.file)) entry.reject(new Error("Design thumbnail batch kept deferring this frame."));
         else entry.reject(new Error(failed.get(entry.frame.file)?.error ?? "Design thumbnail batch did not picture this frame."));
       }
+      // The engine fits each reply's first picture, so deferred frames leave
+      // first, in order, and every ask pictures at least one of them.
+      if (again.some((entry) => !entry.settled)) this.waiting.unshift({ key: batch!.key, group, entries: again, ready: true });
     }, (error: unknown) => {
       for (const entry of entries) entry.reject(error);
     }).finally(() => {
