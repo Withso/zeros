@@ -19,7 +19,8 @@ import { DESIGN_DIRECTORY_NAME, initializeDesignDocument, prepareDesignNavigatio
 import { designDirectoryNameFor } from "../directory-registry";
 import { designDirectoryEntry } from "../metadata";
 import { configureDesignFonts, resetDesignFontsForTests, settleDesignFontDownloadsForTests } from "../style-fonts";
-import { composeDesignThumbnailBatches, renderDesignThumbnails } from "../thumbnail-batch";
+import { composeDesignThumbnailBatches, readDesignThumbnails, renderDesignThumbnails } from "../thumbnail-batch";
+import { currentDesignThumbnailPipeline, resetDesignThumbnailStoreForTests, settleDesignThumbnailStoreForTests, storeDesignThumbnail } from "../thumbnail-store";
 
 /** A valid RGBA PNG of the given size; the capture service checks each picture's dimensions. */
 function png(width: number, height: number): Buffer {
@@ -76,6 +77,7 @@ describe("batch Design thumbnails", () => {
     ({ workspaceId: "w", directoryId, theme: null, colorScheme: "light" as const, maxDimension, frames });
 
   beforeEach(async () => {
+    resetDesignThumbnailStoreForTests();
     registered = 0;
     root = await mkdtemp(path.join(tmpdir(), "zeros-thumbnails-"));
     process.env.ZEROS_DATA_DIR = path.join(root, "private");
@@ -96,6 +98,8 @@ describe("batch Design thumbnails", () => {
     await Promise.all(services.splice(0).map((service) => service.stop()));
     await settleDesignFontDownloadsForTests();
     resetDesignFontsForTests();
+    await settleDesignThumbnailStoreForTests();
+    resetDesignThumbnailStoreForTests();
     delete process.env.ZEROS_DATA_DIR;
     await rm(root, { recursive: true, force: true });
   });
@@ -286,5 +290,101 @@ describe("batch Design thumbnails", () => {
       { file: files[perBatch + 1], error: "Design capture returned no picture for this frame." },
       ...files.slice(perBatch + 2).map((file) => ({ file, error: "The capture renderer changed; try again." })),
     ]);
+  });
+
+  describe("with the thumbnail store", () => {
+    const named = (renderer: string) => setDesignCaptureConfig({ url: "http://127.0.0.1:9/", token: "a".repeat(64), renderer });
+    const host = (renderer: string, size = 64) => vi.fn(async (request: DesignBatchCaptureRequest) => ({ version: 1 as const, revision: request.revision, renderer,
+      items: request.items.map((item) => {
+        const raster = designCaptureRasterSize(item.viewport, item.maxDimension);
+        const bytes = png(raster.width, raster.height);
+        return { id: item.id, width: raster.width, height: raster.height, data: Buffer.concat([bytes, Buffer.alloc(Math.max(0, size - bytes.length))]).toString("base64") };
+      }) }));
+    const many = async (count: number) => {
+      const files = Array.from({ length: count }, (_, index) => `page-1/s${index}.html`);
+      for (const file of files) await writeFile(path.join(folder, file), frame(file, "hero"));
+      await register(files);
+      const current = await versions(files);
+      return files.map((file) => ({ file, sourceVersion: current.get(file)! }));
+    };
+
+    it("answers from the store when the host's pipeline is named at launch, and stores deferred pictures for the next ask", async () => {
+      named("fixture");
+      const frames = await many(30);
+      const first = host("fixture", 900_000);
+      const reply = await renderDesignThumbnails(root, input(frames, 1280), { capture: first });
+      expect(reply.pipeline).toBe("thumbnails-1:fixture");
+      expect(reply.deferred.length).toBeGreaterThan(0);
+      const captured = first.mock.calls.flatMap(([request]) => request.items.length);
+      const again = host("fixture", 900_000);
+      const next = await renderDesignThumbnails(root, input(reply.deferred, 1280), { capture: again });
+      // Deferred pictures that were captured come from the store; only frames never captured are drawn.
+      const drawn = again.mock.calls.flatMap(([request]) => request.items).length;
+      expect(drawn).toBe(frames.length - captured.reduce((total, count) => total + count, 0));
+      expect(next.pictures.length + next.deferred.length).toBe(reply.deferred.length);
+      const third = host("fixture");
+      const repeat = await renderDesignThumbnails(root, input(frames.slice(0, 3)), { capture: third });
+      expect(third).toHaveBeenCalledTimes(1);
+      const hits = host("fixture");
+      expect((await renderDesignThumbnails(root, input(frames.slice(0, 3)), { capture: hits })).pictures).toEqual(repeat.pictures);
+      expect(hits).not.toHaveBeenCalled();
+    });
+
+    it("lets the host's pipeline win over a wrong name, asking again for pictures stored under the name", async () => {
+      named("named");
+      const frames = await many(3);
+      await renderDesignThumbnails(root, input(frames.slice(0, 2)), { capture: host("named") });
+      const actual = host("actual");
+      const reply = await renderDesignThumbnails(root, input([frames[0]!, frames[2]!]), { capture: actual });
+      expect(reply.pipeline).toBe("thumbnails-1:actual");
+      expect(reply.pictures.map((picture) => picture.file)).toEqual([frames[2]!.file]);
+      expect(reply.deferred).toEqual([frames[0]]);
+      expect(await currentDesignThumbnailPipeline()).toEqual({ pipeline: "thumbnails-1:actual", exact: false });
+      const again = host("actual");
+      expect((await renderDesignThumbnails(root, input([frames[0]!]), { capture: again })).pictures).toHaveLength(1);
+      expect(again).toHaveBeenCalledTimes(1);
+    });
+
+    it("reads each frame's newest stored picture for covers at open, keyed by frame id", async () => {
+      const current = await versions(["page-1/a.html", "page-1/b.html"]);
+      await renderDesignThumbnails(root, input([...current].map(([file, sourceVersion]) => ({ file, sourceVersion }))), { capture: host("fixture") });
+      await writeFile(path.join(folder, "page-1/a.html"), frame("a", "hero changed"));
+      // Moving b to another file keeps its frame id, so its picture follows.
+      await writeFile(path.join(folder, "page-1/moved.html"), frame("b", "hero m-2"));
+      await rm(path.join(folder, "page-1/b.html"));
+      const file = path.join(folder, "meta/canvas.json");
+      const canvas = JSON.parse(await readFile(file, "utf8"));
+      canvas.frames.frame_1.source = "page-1/moved.html";
+      await writeFile(file, JSON.stringify(canvas, null, 2));
+      await writeFile(path.join(folder, "page-1/c.html"), frame("c", "hero"));
+      await register(["page-1/c.html"]);
+      const read = { workspaceId: "w", directoryId, theme: null, colorScheme: "light" as const, maxDimension: 128 };
+      const reply = await readDesignThumbnails(root, { ...read, frames: [{ file: "page-1/a.html" }, { file: "page-1/moved.html" }, { file: "page-1/c.html" }, { file: "page-1/none.html" }] });
+      expect(reply.pipeline).toBe("thumbnails-1:fixture");
+      expect(reply.pictures.map((picture) => [picture.file, picture.sourceVersion, picture.pipeline])).toEqual([
+        ["page-1/a.html", current.get("page-1/a.html"), "thumbnails-1:fixture"],
+        ["page-1/moved.html", current.get("page-1/b.html"), "thumbnails-1:fixture"],
+      ]);
+      expect(reply.missing).toEqual(["page-1/c.html", "page-1/none.html"]);
+      expect(reply.deferred).toEqual([]);
+      // Another size, theme or color scheme is another picture.
+      expect((await readDesignThumbnails(root, { ...read, colorScheme: "dark", frames: [{ file: "page-1/a.html" }] })).missing).toEqual(["page-1/a.html"]);
+      await expect(readDesignThumbnails(root, { ...read, directoryId: "design_other", frames: [{ file: "page-1/a.html" }] })).rejects.toThrow(/directory changed/);
+    });
+
+    it("keeps a read within one bridge frame, deferring frames it did not look up", async () => {
+      const frames = await many(16);
+      const big = Buffer.alloc(1_000_000);
+      png(1280, 800).copy(big);
+      for (const [index] of frames.entries())
+        await storeDesignThumbnail(root, directoryId, `frame_${index + 2}`, { theme: null, colorScheme: "light", maxDimension: 1280 },
+          { sourceVersion: frames[index]!.sourceVersion, pipeline: "thumbnails-1:x", bytes: big });
+      const reply = await readDesignThumbnails(root, { workspaceId: "w", directoryId, theme: null, colorScheme: "light", maxDimension: 1280,
+        frames: frames.map(({ file }) => ({ file })) });
+      expect(JSON.stringify(reply).length).toBeLessThan(MAX_BRIDGE_FRAME_BYTES - 1024 * 1024);
+      expect(reply.pictures.length).toBeGreaterThan(0);
+      expect(reply.missing).toEqual([]);
+      expect([...reply.pictures.map((picture) => picture.file), ...reply.deferred]).toEqual(frames.map(({ file }) => file));
+    });
   });
 });

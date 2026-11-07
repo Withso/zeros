@@ -12,10 +12,13 @@ import {
   DESIGN_THUMBNAILS_REPLY_DATA_BYTES,
   designBatchCaptureReplySchema,
   designCaptureSheetUrl,
+  designThumbnailsReadReplySchema,
+  designThumbnailsReadSchema,
   designThumbnailsRenderSchema,
   designThumbnailsReplySchema,
   type DesignBatchCaptureReply,
   type DesignBatchCaptureRequest,
+  type DesignThumbnailsReadReply,
   type DesignThumbnailsRender,
   type DesignThumbnailsReply,
 } from "@zeros/protocol/design-capture";
@@ -31,9 +34,16 @@ import { parseDesignSource } from "./shared-parse";
 import { elementRecords } from "./source";
 import { frameStyleSourceIds, frameStyleSources, readDesignStyleSourceCatalog } from "./style-sources";
 import { applyDesignSurfaceTheme } from "./surface-document";
+import {
+  DESIGN_THUMBNAIL_COMPOSER,
+  currentDesignThumbnailPipeline,
+  designThumbnailPipeline,
+  noteDesignThumbnailPipeline,
+  readStoredDesignThumbnail,
+  storeDesignThumbnail,
+  type DesignThumbnailVariant,
+} from "./thumbnail-store";
 
-/** Bump whenever composing a thumbnail changes its pixels for the same frame. */
-const DESIGN_THUMBNAIL_PIPELINE = "thumbnails-1";
 const MAX_LAYOUT_SIDE = 16_384;
 const HTML_NAMESPACE = "http://www.w3.org/1999/xhtml";
 const MAX_REPLY_BYTES = DESIGN_BATCH_CAPTURE_MAX_ITEMS * Math.ceil((DESIGN_CAPTURE_PNG_BYTES * 4) / 3) + 1024 * 1024;
@@ -78,6 +88,17 @@ function linkSheets(skeleton: string, sheets: ReadonlyArray<{ token: string; css
   return html;
 }
 
+async function assertThumbnailTarget(root: string, input: { directoryId: string; theme: string | null }): Promise<void> {
+  if (designDirectoryEntry(root, designDirectoryNameFor(root))?.id !== input.directoryId)
+    throw new Error("The active Design directory changed. Refresh before rendering thumbnails.");
+  if (input.theme !== null) await assertDesignThemeName(root, input.theme);
+}
+
+function frameId(canvas: { frame_info: Record<string, unknown> }, file: string): string | null {
+  const id = (canvas.frame_info[file] as { id?: unknown } | undefined)?.id;
+  return typeof id === "string" ? id : null;
+}
+
 /** Compose saved frames for batch capture: every frame of a page folder links
  * the same bytes for its linked stylesheets and for each imported source
  * (whole, not pruned per frame), so the capture host parses them once. A
@@ -87,9 +108,7 @@ export async function composeDesignThumbnailBatches(
   input: DesignThumbnailsRender,
   signal?: AbortSignal,
 ): Promise<{ batches: DesignThumbnailBatch[]; stale: Frame[]; failed: Array<{ file: string; error: string }> }> {
-  if (designDirectoryEntry(root, designDirectoryNameFor(root))?.id !== input.directoryId)
-    throw new Error("The active Design directory changed. Refresh before rendering thumbnails.");
-  if (input.theme !== null) await assertDesignThemeName(root, input.theme);
+  await assertThumbnailTarget(root, input);
   const { canvas } = await readSharedCanvasContext(root);
   const catalog = readDesignStyleSourceCatalog(canvas);
   const tailwind = new Set(catalog.declarations.filter((declaration) => declaration.kind === "tailwind").map((declaration) => declaration.id));
@@ -260,36 +279,108 @@ export async function renderDesignThumbnails(
   const config = deps.capture ? null : resolveDesignCaptureConfig();
   if (!deps.capture && !config) throw new Error("No qualified Design capture host is available.");
   const capture = deps.capture ?? ((request, signal) => requestDesignBatchCapture(config!, request, signal));
-  const { batches, stale, failed } = await composeDesignThumbnailBatches(root, input, deps.signal);
+  await assertThumbnailTarget(root, input);
+  const { canvas } = await readSharedCanvasContext(root);
+  const variant: DesignThumbnailVariant = { theme: input.theme, colorScheme: input.colorScheme, maxDimension: input.maxDimension };
   const pictures: DesignThumbnailsReply["pictures"] = [];
   const deferred: Frame[] = [];
   let budget = DESIGN_THUMBNAILS_REPLY_DATA_BYTES;
-  let renderer: string | null = null;
+  const take = (frame: Frame, picture: { width: number; height: number; data: string }) => {
+    if (picture.data.length > budget) {
+      deferred.push(frame);
+      budget = 0;
+      return;
+    }
+    budget -= picture.data.length;
+    pictures.push({ ...frame, mimeType: "image/png", width: picture.width, height: picture.height, data: picture.data });
+  };
+  // A stored picture answers only when the host's pipeline is known exactly:
+  // after an app update, the last pipeline seen is not the one drawing now.
+  const current = await currentDesignThumbnailPipeline();
+  const misses: Frame[] = [];
+  for (const frame of input.frames) {
+    const id = frameId(canvas, frame.file);
+    const stored = current.exact && id ? await readStoredDesignThumbnail(root, input.directoryId, id, variant) : null;
+    if (stored && stored.sourceVersion === frame.sourceVersion && stored.pipeline === current.pipeline)
+      take(frame, { width: stored.width, height: stored.height, data: stored.bytes.toString("base64") });
+    else misses.push(frame);
+  }
+  const { batches, stale, failed } = misses.length === 0 ? { batches: [], stale: [], failed: [] }
+    : await composeDesignThumbnailBatches(root, { ...input, frames: misses }, deps.signal);
+  const named = current.exact ? current.pipeline : null;
+  let pipeline: string | null = null;
   for (const batch of batches) {
     if (budget === 0) {
       deferred.push(...batch.frames.values());
       continue;
     }
     const reply = await capture(batch.request, deps.signal);
-    renderer ??= reply.renderer;
+    const drawn = designThumbnailPipeline(reply.renderer);
+    if (pipeline === null) {
+      pipeline = drawn;
+      await noteDesignThumbnailPipeline(drawn);
+      if (named !== null && drawn !== named) {
+        // The host draws with another pipeline than the one named at launch,
+        // so the stored pictures answered so far are not current: ask again.
+        for (const picture of pictures.splice(0)) deferred.push({ file: picture.file, sourceVersion: picture.sourceVersion });
+        budget = DESIGN_THUMBNAILS_REPLY_DATA_BYTES;
+      }
+    }
     const answered = new Map(reply.items.map((item) => [item.id, item]));
+    const stores: Array<Promise<boolean>> = [];
     for (const [id, frame] of batch.frames) {
       const item = answered.get(id);
       if (!item) failed.push({ file: frame.file, error: "Design capture returned no picture for this frame." });
       else if ("error" in item) failed.push({ file: frame.file, error: failure(new Error(item.error), root) });
       // The reply names one pipeline, so pictures from a host that restarted between batches can't join it.
-      else if (reply.renderer !== renderer) failed.push({ file: frame.file, error: "The capture renderer changed; try again." });
-      else if (item.data.length > budget) {
-        deferred.push(frame);
+      else if (drawn !== pipeline) failed.push({ file: frame.file, error: "The capture renderer changed; try again." });
+      else {
+        // Stored before the reply, so a deferred picture is a store hit when asked for again.
+        const stored = frameId(canvas, frame.file);
+        if (stored) stores.push(storeDesignThumbnail(root, input.directoryId, stored, variant,
+          { sourceVersion: frame.sourceVersion, pipeline: drawn, bytes: Buffer.from(item.data, "base64") }));
+        take(frame, item);
+      }
+    }
+    await Promise.all(stores);
+  }
+  return designThumbnailsReplySchema.parse({ pipeline: pipeline ?? named ?? DESIGN_THUMBNAIL_COMPOSER, pictures, stale, failed, deferred });
+}
+
+const READ_CONCURRENCY = 32;
+
+/** design.thumbnails.read on one Local workspace: each frame's newest stored
+ * picture, of any generation, for covers at open. Nothing is drawn. */
+export async function readDesignThumbnails(root: string, raw: unknown): Promise<DesignThumbnailsReadReply> {
+  const input = designThumbnailsReadSchema.parse(raw);
+  await assertThumbnailTarget(root, input);
+  const { canvas } = await readSharedCanvasContext(root);
+  const variant: DesignThumbnailVariant = { theme: input.theme, colorScheme: input.colorScheme, maxDimension: input.maxDimension };
+  const reply: DesignThumbnailsReadReply = { pipeline: (await currentDesignThumbnailPipeline()).pipeline, pictures: [], missing: [], deferred: [] };
+  let budget = DESIGN_THUMBNAILS_REPLY_DATA_BYTES;
+  for (let start = 0; start < input.frames.length; start += READ_CONCURRENCY) {
+    const files = input.frames.slice(start, start + READ_CONCURRENCY).map((frame) => frame.file);
+    if (budget === 0) {
+      reply.deferred.push(...files);
+      continue;
+    }
+    const stored = await Promise.all(files.map((file) => {
+      const id = frameId(canvas, file);
+      return id ? readStoredDesignThumbnail(root, input.directoryId, id, variant) : null;
+    }));
+    for (const [index, picture] of stored.entries()) {
+      const file = files[index]!;
+      const data = picture?.bytes.toString("base64");
+      if (!picture || !data) reply.missing.push(file);
+      else if (data.length > budget) {
+        reply.deferred.push(file);
         budget = 0;
       } else {
-        budget -= item.data.length;
-        pictures.push({ ...frame, mimeType: "image/png", width: item.width, height: item.height, data: item.data });
+        budget -= data.length;
+        reply.pictures.push({ file, sourceVersion: picture.sourceVersion, pipeline: picture.pipeline, mimeType: "image/png",
+          width: picture.width, height: picture.height, data });
       }
     }
   }
-  return designThumbnailsReplySchema.parse({
-    pipeline: renderer === null ? DESIGN_THUMBNAIL_PIPELINE : `${DESIGN_THUMBNAIL_PIPELINE}:${renderer}`,
-    pictures, stale, failed, deferred,
-  });
+  return designThumbnailsReadReplySchema.parse(reply);
 }
