@@ -188,6 +188,8 @@ interface LinkedStylesheet {
   bytes?: number;
   /** Identity only: image bytes that CSS carries, when every image is known. */
   imageBytes?: number;
+  /** The imported style source this placeholder stands for. */
+  source?: string;
 }
 
 /** Replace each local stylesheet link with an empty, hash-tagged placeholder. */
@@ -513,7 +515,7 @@ async function importedStylesheets(
   });
   for (const [index, source] of sources.entries()) {
     const token = `s${index}-${source.revision}`;
-    sheets.push({ token, css: source.css.replace(/<\/style/gi, "<\\/style"),
+    sheets.push({ token, css: source.css.replace(/<\/style/gi, "<\\/style"), source: source.id,
       ...(source.bytes === undefined ? {} : { bytes: source.bytes }),
       ...(source.imageBytes === undefined ? {} : { imageBytes: source.imageBytes }) });
     markup += `<style data-zeros-style-source="${source.id}" data-zeros-sheet="${token}"></style>`;
@@ -535,6 +537,17 @@ export interface FrameRenderOptions {
   /** Return only the generation; `sanitized` is then a skeleton whose
    * stylesheet placeholders are empty. Snapshots need no document. */
   identityOnly?: boolean;
+  /** Build every stylesheet, as a document does, but return the skeleton and
+   * the sheets for its placeholders instead of splicing them in. */
+  parts?: boolean;
+}
+
+/** One stylesheet a skeleton placeholder (`data-zeros-sheet="token"`) stands for. */
+export interface DesignFrameRenderSheet {
+  token: string;
+  css: string;
+  /** Set for an imported style source; absent for a linked stylesheet. */
+  source?: string;
 }
 
 export function prepareFrameRenderSource(
@@ -546,7 +559,7 @@ export function prepareFrameRenderSource(
   entryFile = "",
   canvas?: CanvasDocument,
   options: FrameRenderOptions = {},
-): Promise<{ sanitized: string; sourceVersion: string; surfaceCost: DesignSurfaceCost | null }> {
+): Promise<{ sanitized: string; sourceVersion: string; surfaceCost: DesignSurfaceCost | null; sheets?: DesignFrameRenderSheet[] }> {
   return withSharedDesignParses(() =>
     prepareSharedFrameRenderSource(workspacePath, source, viewport, sources, readAsset, entryFile, canvas, options));
 }
@@ -560,7 +573,7 @@ async function prepareSharedFrameRenderSource(
   entryFile: string,
   canvas: CanvasDocument | undefined,
   options: FrameRenderOptions,
-): Promise<{ sanitized: string; sourceVersion: string; surfaceCost: DesignSurfaceCost | null }> {
+): Promise<{ sanitized: string; sourceVersion: string; surfaceCost: DesignSurfaceCost | null; sheets?: DesignFrameRenderSheet[] }> {
   assertRenderByteLimit(
     source,
     MAX_DESIGN_TEXT_BYTES,
@@ -615,6 +628,14 @@ async function prepareSharedFrameRenderSource(
       throw new DesignRenderBudgetError("Sanitized frame HTML exceeded the 15 MiB per-frame render limit.");
     }
     return { sanitized: skeleton, sourceVersion, surfaceCost: designSurfaceCost(skeleton, sheets) };
+  }
+  if (options.parts) {
+    // The same size bound a document has, so parts fail where documents fail.
+    const bytes = sheets.reduce((total, sheet) => total + utf8Bytes(sheet.css), utf8Bytes(skeleton));
+    if (bytes > MAX_SANITIZED_RENDER_BYTES)
+      throw new DesignRenderBudgetError("Sanitized frame HTML exceeded the 15 MiB per-frame render limit.");
+    return { sanitized: skeleton, sourceVersion, surfaceCost: null,
+      sheets: sheets.map(({ token, css, source }) => ({ token, css, ...(source === undefined ? {} : { source }) })) };
   }
   const sanitized = spliceStylesheets(skeleton, sheets);
   assertRenderByteLimit(

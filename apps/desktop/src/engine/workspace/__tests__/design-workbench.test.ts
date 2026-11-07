@@ -4,6 +4,8 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { designCaptureRasterSize } from "@zeros/protocol/design-capture";
+import { DesignCaptureAdmission } from "../../design/capture-admission";
 import { startDesignCaptureService } from "../../design/capture-service";
 import { setDesignCaptureConfig } from "../../design/capture-client";
 import { WorkspaceService } from "../service";
@@ -41,6 +43,45 @@ describe("Design in the shared workbench", () => {
     resetWorkspaceDesignApisForTests();
     closeState();
     await rm(root, { recursive: true, force: true });
+  });
+
+  it("renders batch thumbnails of saved frames through the capture host for Local callers only", async () => {
+    const params = { workspaceId: workspace.workspaceId };
+    expect(service.isWriteOp("design.thumbnails.render")).toBe(false);
+    expect(service.isRemoteAllowed("design.thumbnails.render")).toBe(false);
+    expect(service.lifecycleMutationWorkspaceId("design.thumbnails.render", params)).toBe(workspace.workspaceId);
+    await service.handle("design.initialize", params);
+    const created = await service.handle("design.frame.create", { ...params, title: "Thumbnail" }) as { frame: { file: string } };
+    const snapshot = await service.handle("design.snapshot", params) as {
+      snapshot: { directoryId: string; frames: { file: string; sourceVersion: string }[] };
+    };
+    const frame = snapshot.snapshot.frames.find((candidate) => candidate.file === created.frame.file)!;
+    const renderBatch = vi.fn(async (request: { items: Array<{ id: string; viewport: { width: number; height: number }; maxDimension: number }> }) => ({
+      renderer: "batch-fixture",
+      items: request.items.map((item) => {
+        const raster = designCaptureRasterSize(item.viewport, item.maxDimension);
+        const bytes = Buffer.alloc(24);
+        Buffer.from("89504e470d0a1a0a", "hex").copy(bytes);
+        bytes.write("IHDR", 12); bytes.writeUInt32BE(raster.width, 16); bytes.writeUInt32BE(raster.height, 20);
+        return { id: item.id, bytes };
+      }),
+    }));
+    const capture = await startDesignCaptureService(vi.fn(), new DesignCaptureAdmission(), renderBatch);
+    setDesignCaptureConfig(capture);
+    const input = { ...params, directoryId: snapshot.snapshot.directoryId, theme: null, colorScheme: "light", maxDimension: 128,
+      frames: [{ file: frame.file, sourceVersion: frame.sourceVersion }] };
+    try {
+      await expect(service.handle("design.thumbnails.render", input, { remote: true }))
+        .rejects.toMatchObject({ code: "REMOTE_RESTRICTED" });
+      const reply = await service.handle("design.thumbnails.render", input);
+      expect(reply).toMatchObject({ pipeline: "thumbnails-1:batch-fixture", stale: [], failed: [],
+        pictures: [{ file: frame.file, sourceVersion: frame.sourceVersion, mimeType: "image/png" }] });
+      expect(JSON.stringify(reply)).not.toContain(capture.token);
+      expect(JSON.stringify(reply)).not.toContain(root);
+      expect(renderBatch).toHaveBeenCalledOnce();
+    } finally {
+      await capture.stop();
+    }
   });
 
   it("renders a canvas preview of the saved frame through the capture host, refusing stale versions without one", async () => {

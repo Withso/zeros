@@ -140,18 +140,21 @@ export function designSurfaceCost(source: string, sheets: readonly DesignSurface
   return Number.isSafeInteger(imageBytes) ? { sourceBytes, nodes: records.length, imageBytes } : null;
 }
 
+/** The canvas's theme on the document element: a named theme replaces any
+ * authored one, and the base theme removes an authored one. */
+export function applyDesignSurfaceTheme(html: string, theme: string | null): string {
+  if (theme !== null) return withDesignTheme(html, theme);
+  const root = elementRecords(parse(html, { sourceCodeLocationInfo: true })).find(({ element }) => element.tagName === "html")?.element;
+  const attribute = root?.sourceCodeLocation?.attrs?.["data-zd-theme"];
+  return attribute ? html.slice(0, attribute.startOffset) + html.slice(attribute.endOffset) : html;
+}
+
 export function prepareDesignSurfaceDocument(source: string, sourceVersion: string, theme: string | null): { html: string; csp: string } {
   const script = designSurfaceReadyScript(sourceVersion, theme, true);
   const csp = `default-src 'none'; script-src 'sha256-${createHash("sha256").update(script).digest("base64")}'; ` +
     "style-src 'unsafe-inline'; img-src data:; font-src data:; media-src 'none'; connect-src 'none'; " +
     "worker-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; sandbox allow-scripts";
-  let html = sanitizeDesignFrameMarkup(source);
-  if (theme !== null) html = withDesignTheme(html, theme);
-  else {
-    const root = elementRecords(parse(html, { sourceCodeLocationInfo: true })).find(({ element }) => element.tagName === "html")?.element;
-    const attribute = root?.sourceCodeLocation?.attrs?.["data-zd-theme"];
-    if (attribute) html = html.slice(0, attribute.startOffset) + html.slice(attribute.endOffset);
-  }
+  let html = applyDesignSurfaceTheme(sanitizeDesignFrameMarkup(source), theme);
   html = insertDesignHeadMarkup(html, `<style data-zeros-design-surface>${DESIGN_SURFACE_STATIC_CSS}</style><script data-zeros-design-surface>${script}</script>`);
   return { html, csp };
 }
