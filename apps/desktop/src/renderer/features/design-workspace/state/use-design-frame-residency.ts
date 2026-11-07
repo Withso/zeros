@@ -6,9 +6,11 @@ import { createDesignFrameResidencyReader, type DesignFrameResidencyInput } from
 import { DesignFrameSpatialIndex, type DesignSpatialFrame, type DesignSpatialRect } from "../design-frame-spatial-index";
 
 /** After the camera rests, the page stays as the camera left it this long, so
- * the steps of one zoom do not unmount and remount hundreds of frames between
- * them; then the change applies once. */
-export const DESIGN_RESIDENCY_SETTLE_MS = 1200;
+ * back-to-back steps of one zoom do not unmount and remount hundreds of frames
+ * between them; then the change applies once. Short enough that offscreen
+ * wrappers still retire promptly: continuity is bounded picture ownership, not
+ * a mounted page. */
+export const DESIGN_RESIDENCY_SETTLE_MS = 400;
 
 /** The painted camera is read once per requested animation frame. Publishing
  * happens only when residency changes, not on every pixel of a pan. The durable
