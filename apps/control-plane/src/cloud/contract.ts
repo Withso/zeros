@@ -80,6 +80,8 @@ export const CloudV2WorkerFrameSchema = z.discriminatedUnion("t", [
   CloudV2HistoryFrameSchema,
   /** Idle means no running agent turn or recent terminal activity. */
   z.object({ t: z.literal("idle"), idle: z.boolean() }).strict(),
+  /** Negotiated worker-push-v1 only; the socket supplies workspace authority. */
+  z.object({ t: z.literal("activity"), id: z.string().uuid(), idle: z.boolean() }).strict(),
   z.object({ t: z.literal("request"), id: z.string().uuid(), kind: z.literal("github-token"), purpose: z.enum(["git", "gh"]).optional(), failedTokenSha256: z.string().length(64).regex(/^[a-f0-9]{64}$/).optional() }).strict(),
   z.object({ t: z.literal("stop-ack"), id: z.string().uuid() }).strict(),
 ]);
@@ -106,6 +108,11 @@ export const RuntimeMcpServerSchema = z.discriminatedUnion("transport", [
 export type RuntimeMcpServer = z.infer<typeof RuntimeMcpServerSchema>;
 
 export const CloudV2ControlFrameSchema = z.discriminatedUnion("t", [
+  z.object({ t: z.literal("push"), prompts: z.boolean() }).strict(),
+  z.object({ t: z.literal("activity-reply"), id: z.string().uuid(), prompts: z.boolean(),
+    loginRevision: z.string().regex(/^(0|[1-9][0-9]{0,19})$/),
+    state: z.enum(["creating", "starting", "running", "stopping", "stopped", "failed", "deleting", "deleted"]),
+  }).strict(),
   z.object({ t: z.literal("prompts") }).strict(),
   z.object({ t: z.literal("open"), clientId }).strict(),
   z.object({ t: z.literal("close"), clientId }).strict(),

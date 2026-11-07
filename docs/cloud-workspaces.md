@@ -106,7 +106,19 @@ The worker keeps outbound HTTPS to the control plane under
 and configuration, the history mirror, activity reports and GitHub
 credentials. Each request carries the worker credential and the
 worker's boot identity; history batches are sequenced per boot so a retried
-batch is a no-op. A renderer `workspace.list` row from the worker uses native
+batch is a no-op. When both peers negotiate `worker-push-v1`, an attached relay
+carries activity reports and their acknowledgements. Each report checks the
+current membership, workspace access epoch, worker credential fingerprint and
+boot recorded by that socket's dial. The worker uses one relay for each report;
+an unacknowledged report falls back to authenticated HTTPS after two seconds.
+Its relay slot stays occupied until the delayed reply or socket close, so a
+database delay neither detaches the app nor overlaps relay activity reports.
+Busy work still refreshes activity, while an idle safety pulse only reads
+status. Its once-per-minute cadence has a random phase per worker, and returns
+the login revision and a pending-prompt/Stop hint to repair missed notifications.
+It neither renews source authority nor keeps the VM awake.
+
+A renderer `workspace.list` row from the worker uses native
 paths and the workspace UUID, not the HTTP workspace document shape; the
 renderer translates native checkout paths and IDs into scoped `cloud://`
 identities.
@@ -119,7 +131,7 @@ The same step writes the control plane's public verification keys to
 root-owned `/opt/zeros/worker-auth.json`. Every wake rotates the worker
 credential in `/home/user/.config/zeros/worker-token` (mode `0600`) and
 restarts the worker, which registers a new boot identity in `hello` before the
-control plane dials it. The worker rereads the credential on every request.
+control plane dials it. The worker rereads the credential on every HTTPS request.
 
 Workers supporting `runtime-update-v1` can also adopt a changed pin while the
 VM remains running. Adoption waits for 30 continuous quiet seconds with no
@@ -1237,9 +1249,19 @@ stays in the composer. The old in-memory FIFO transfers in order and removes
 each entry only after that private commit.
 
 The worker pulls through `/v2/cloud/worker/prompts/*`. A hint over an existing
-hybrid connection shortens the wait; a missed hint is repaired by a bounded
-long poll. Polling holds no database connection, reports no activity and never
-keeps an idle VM warm. Nothing polls or dials a stopped VM. Pending explicit
+hybrid connection shortens the wait. With `worker-push-v1`, the control plane
+offers prompt push while its shared LISTEN subscription is healthy. After an
+initial drain, an empty inbox waits locally for a hint; the minute safety pulse
+repairs a missed hint without leasing an empty batch. A LISTEN gap or loss of
+the last negotiated relay resumes the 25-second HTTPS long poll immediately;
+reconnection drains once before waiting again. Payloads, inbox ACKs, dispatch
+and Stop receipts always use the same durable HTTPS routes.
+
+The relay is retained for attached apps, so a worker with no attached app still
+uses HTTPS prompt polling and activity until the ordinary 15-minute idle stop.
+Older workers or control planes also keep that fallback. Polling holds no
+database connection, reports no activity and never keeps an idle VM warm.
+Nothing polls or dials a stopped VM. Pending explicit
 work prevents idle stop and resumes delivery when the VM is ready.
 
 Delivery has separate durable boundaries:

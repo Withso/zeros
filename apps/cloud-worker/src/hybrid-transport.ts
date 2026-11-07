@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { randomInt, randomUUID } from "node:crypto";
 import { CLOUD_WORKER_FEATURES } from "./worker-features";
 import { CLOUD_V2_MAX_FRAME_BYTES, CLOUD_V2_RELAY_PROTOCOL, CloudV2ControlFrameSchema, CloudV2WorkerActivityReplySchema,
   CloudV2WorkerFrameSchema, CloudV2WorkerTimingSchema, type CloudV2WorkerTiming, type CloudV2ControlFrame, type CloudV2WorkerFrame } from "@zeros/protocol/cloud-v2-relay";
@@ -55,6 +55,8 @@ export class HybridTransport implements Transport {
   private applying: Promise<void> = Promise.resolve();
   private activityFlight?: Promise<void>;
   private activityRequested = false;
+  private readonly pulsePhase = randomInt(60_000);
+  private readonly promptPolls = new Set<AbortController>();
   private historySequence = 0;
   private pendingHistory?: { sequence: number; frame: Extract<CloudV2WorkerFrame, { t: "history" }> };
   private historyFlight: Promise<boolean> = Promise.resolve(true);
@@ -69,6 +71,11 @@ export class HybridTransport implements Transport {
         url.username || url.password || url.search || url.hash || url.pathname !== "/") throw new Error("Invalid worker API URL");
     if (!/^[a-f0-9]{64}$/.test(options.runtimeSha256)) throw new Error("Invalid worker runtime pin");
     this.listener = new InboundBridge({ workspaceId: options.workspaceId, bootId: this.bootId,
+      onPushChange: () => {
+        for (const controller of this.promptPolls) controller.abort();
+        // Reconcile once after subscribing, and on loss of the last carrier.
+        void this.handlers?.frame({ t: "prompts" }).catch(() => {});
+      },
       ...(options.publicKeys ? { publicKeys: options.publicKeys } : {}), ...(options.publicKeysFile ? { publicKeysFile: options.publicKeysFile } : {}),
       ...(options.port === undefined ? {} : { port: options.port }) });
   }
@@ -127,8 +134,16 @@ export class HybridTransport implements Transport {
     this.handlers?.close();
   }
   async promptRequest(operation: PromptOperation, body: unknown, signal?: AbortSignal): Promise<unknown> {
-    try { return await this.request(`prompts/${operation}`, body, signal, operation === "pull" ? 35_000 : 10_000); }
+    const controller = new AbortController();
+    const lifetime = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
+    if (operation === "pull") this.promptPolls.add(controller);
+    try {
+      if (operation === "pull" && (body as { waitMs?: unknown } | null)?.waitMs !== 0)
+        await this.listener.waitForPromptFallback(lifetime);
+      return await this.request(`prompts/${operation}`, body, lifetime, operation === "pull" ? 35_000 : 10_000);
+    }
     catch (error) { if (error instanceof HttpFailure && error.status === 401) this.failed(error); throw error; }
+    finally { this.promptPolls.delete(controller); }
   }
   async runtimeUpdate(input: CloudRuntimeUpdateRequest, signal?: AbortSignal): Promise<CloudRuntimeUpdateReply> {
     return CloudRuntimeUpdateReplySchema.parse(await this.request("runtime", input, signal, input.op === "prepare" ? 310_000 : input.op === "ready" ? 30_000 : 10_000));
@@ -274,7 +289,9 @@ export class HybridTransport implements Transport {
       do {
         this.activityRequested = false;
         if (!this.idle) this.lastBusy = Date.now();
-        const reply = CloudV2WorkerActivityReplySchema.parse(await this.request("activity", { idle: this.idle }));
+        const pushed = await this.listener.activity(this.idle);
+        const reply = pushed ?? CloudV2WorkerActivityReplySchema.parse(await this.request("activity", { idle: this.idle }));
+        if (pushed?.prompts) await this.handlers!.frame({ t: "prompts" });
         if (["stopped", "failed", "deleting", "deleted"].includes(reply.state)) { this.options.onStatus?.("stopped"); return; }
         if (reply.loginRevision !== this.applied?.loginRevision || Date.now() - this.configAt >= 12 * 60 * 60_000)
           await this.configuration(await this.request("config"));
@@ -285,7 +302,10 @@ export class HybridTransport implements Transport {
   private scheduleHeartbeat(): void {
     clearTimeout(this.heartbeat);
     if (this.stopped) return;
-    this.heartbeat = setTimeout(() => { void this.activity(); }, 60_000);
+    // A random boot phase spreads safety reads without extending the minute
+    // repair bound or turning the socket's ping cadence into database work.
+    const elapsed = ((Date.now() - this.pulsePhase) % 60_000 + 60_000) % 60_000;
+    this.heartbeat = setTimeout(() => { void this.activity(); }, 60_000 - elapsed);
     this.heartbeat.unref();
   }
   private failed(error: unknown): void {

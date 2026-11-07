@@ -133,6 +133,31 @@ database("durable prompt request cost", () => {
     await expect(f.store.promptContext(f.workspace.id, f.userId)).rejects.toMatchObject({ code: "not_found" });
   });
 
+  it("bounds the database work of an empty HTTPS fallback poll and idle activity", async () => {
+    const f = await fixture(), signals = new CloudV2PromptSignals(), app = f.app(signals);
+    const pull = f.store.prompts.pull.bind(f.store.prompts);
+    const spy = vi.spyOn(f.store.prompts, "pull").mockImplementation(async (...args) => {
+      const batch = await pull(...args);
+      signals.wake(f.workspace.id);
+      return batch;
+    });
+    const request = (path: string, body: object) => app.request(`/v2/cloud/worker/${path}`, {
+      method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${f.token}`, "x-zeros-worker-boot": f.boot },
+      body: JSON.stringify(body),
+    });
+    try {
+      expect(await (await request("prompts/pull", { waitMs: 25_000, held: [] })).json()).toEqual({ prompts: [], stops: [] });
+      expect(await (await request("activity", { idle: true })).json()).toMatchObject({ state: "running" });
+      const queries = f.costs.map(cost => ({ route: cost.route, queries: cost.queriesStarted, transactions: cost.transactions, statements: cost.sqlStatements }));
+      console.info("Idle HTTPS fallback cost", queries);
+      expect(queries).toMatchObject([
+        { route: "/v2/cloud/worker/prompts/pull", queries: 14, transactions: 4 },
+        { route: "/v2/cloud/worker/activity", queries: 1, transactions: 1 },
+      ]);
+      expect(f.fetcher).not.toHaveBeenCalled();
+    } finally { spy.mockRestore(); signals.wakeAll(); }
+  });
+
   it("leases a full batch in constant database work and preserves delivery IDs on a lost reply", async () => {
     const f = await fixture(), app = f.app();
     const messages = Array.from({ length: 16 }, () => randomUUID());

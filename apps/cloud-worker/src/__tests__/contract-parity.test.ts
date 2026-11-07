@@ -161,6 +161,22 @@ it("keeps durable HTTP prompt bounds and strict schemas identical across Zod ver
   }
 });
 
+it("keeps negotiated worker push frames strict and excludes caller-supplied authority", () => {
+  const activity = { t: "activity", id: CLIENT_A, idle: true };
+  const controls = [{ t: "push", prompts: true }, { t: "push", prompts: false },
+    { t: "activity-reply", id: CLIENT_A, state: "running", loginRevision: "0", prompts: false }];
+  for (const contract of [shared, control]) {
+    expect(contract.CloudV2WorkerFrameSchema.parse(activity)).toEqual(activity);
+    for (const frame of controls) expect(contract.CloudV2ControlFrameSchema.parse(frame)).toEqual(frame);
+    for (const authority of [{ workspaceId: WORKSPACE_ID }, { bootId: CLIENT_A }, { accessEpoch: "0" }, { token: "synthetic" }])
+      expect(contract.CloudV2WorkerFrameSchema.safeParse({ ...activity, ...authority }).success).toBe(false);
+    expect(contract.CloudV2WorkerFrameSchema.safeParse({ ...activity, idle: "true" }).success).toBe(false);
+    expect(contract.CloudV2ControlFrameSchema.safeParse({ ...controls[2], loginRevision: "-1" }).success).toBe(false);
+  }
+  expect(legacyWorkerFrame.safeParse(config).success).toBe(true);
+  expect(legacyWorkerFrame.safeParse(controls[0]).success).toBe(false);
+});
+
 it("preserves optional attachment groups through both durable prompt contracts without weakening bounds", () => {
   const segment = { type: "attachment", name: "frame.jpg", mimeType: "image/jpeg", kind: "image",
     delivery: "reference", diskPath: ".context/local/attachments/att-1/frame.jpg", attachmentId: "att-1" };

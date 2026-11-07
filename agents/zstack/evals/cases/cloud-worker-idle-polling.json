@@ -1,0 +1,9 @@
+{
+  "id": "cloud-worker-idle-polling",
+  "kind": "replay",
+  "area": "cloud-worker",
+  "fixedBy": "pr:881",
+  "symptom": "An attached idle cloud worker kept issuing 25-second prompt polls and minute activity requests even though the relay could carry hints. The measured five-minute budget for those paths was 173 database driver round trips and 53 transactions.",
+  "rule": "Principles 8, 9, 11, 13 and 16: measure idle work through the real transport and PostgreSQL boundaries, distinguishing driver calls from SQL statements. Negotiate push, retain durable HTTPS delivery and fallback, bind activity to the exact boot and credential, and repair missed hints with a jittered safety pulse. Attached-relay savings do not cover the no-app fallback before idle stop.",
+  "check": "pnpm --dir apps/cloud-worker exec vitest run src/__tests__/hybrid-transport.test.ts -t 'parks idle HTTPS pulls and uses only relay activity after a negotiated push offer'"
+}

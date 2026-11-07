@@ -117,6 +117,73 @@ describe("cloud v2 relay", () => {
     return ws;
   };
 
+  describe("negotiated worker activity", () => {
+    const enable = () => {
+      workerServer.on("headers", headers => { headers.push("X-Zeros-Worker-Features: worker-push-v1"); });
+      vi.mocked(deps.workerRoute).mockImplementation(async () => ({ workspace: workspace(state), accessEpoch, url: workerUrl,
+        token: "synthetic-port-token", bootId: workspaceId, workerTokenHash: "a".repeat(64) }));
+      deps.workerActivity = vi.fn(async () => ({ state, loginRevision, prompts: false }));
+      const frames: any[] = [];
+      workerServer.on("connection", ws => { ws.on("message", data => { frames.push(JSON.parse(String(data))); }); });
+      return frames;
+    };
+
+    it("binds activity to the dial proof and never forwards its reply to the app", async () => {
+      const frames = enable(); relay.promptNotifications(true);
+      const w = await worker(), a = sockets[0]!, appFrames: unknown[] = [];
+      a.on("message", data => appFrames.push(JSON.parse(String(data))));
+      await vi.waitFor(() => expect(frames).toContainEqual({ t: "push", prompts: true }));
+      const before = vi.mocked(deps.store.appAccessSnapshot).mock.calls.length;
+      w.send(JSON.stringify({ t: "activity", id: workspaceId, idle: true }));
+      await vi.waitFor(() => expect(frames).toContainEqual({ t: "activity-reply", id: workspaceId, state: "running", loginRevision: "0", prompts: false }));
+      expect(deps.workerActivity).toHaveBeenCalledExactlyOnceWith({ workspaceId, bootId: workspaceId, accessEpoch: "0", workerTokenHash: "a".repeat(64) }, true);
+      expect(deps.store.appAccessSnapshot).toHaveBeenCalledTimes(before);
+      expect(appFrames).toEqual([]);
+    });
+
+    it("withdraws prompt push during a LISTEN gap and reconciles on reconnect", async () => {
+      const frames = enable(); relay.promptNotifications(true); await worker();
+      await vi.waitFor(() => expect(frames).toContainEqual({ t: "push", prompts: true }));
+      frames.length = 0; relay.promptNotifications(false);
+      await vi.waitFor(() => expect(frames).toContainEqual({ t: "push", prompts: false }));
+      expect(frames).not.toContainEqual({ t: "prompts" });
+      frames.length = 0; relay.promptNotifications(true);
+      await vi.waitFor(() => expect(frames).toContainEqual({ t: "prompts" }));
+      expect(frames).toContainEqual({ t: "push", prompts: true });
+    });
+
+    it("does not publish an activity read after the worker socket was replaced", async () => {
+      const frames = enable();
+      let entered!: () => void, release!: () => void;
+      const reading = new Promise<void>(resolve => { entered = resolve; }), hold = new Promise<void>(resolve => { release = resolve; });
+      deps.workerActivity = vi.fn(async () => { entered(); await hold; return { state, loginRevision, prompts: true }; });
+      const w = await worker();
+      await vi.waitFor(() => expect(frames).toContainEqual({ t: "push", prompts: false }));
+      w.send(JSON.stringify({ t: "activity", id: workspaceId, idle: true })); await reading;
+      try {
+        w.terminate();
+        await vi.waitFor(() => expect(connectedWorkers).toHaveLength(2));
+        const successor = connectedWorkers[1]!;
+        release();
+        const boundary = new Promise<void>(resolve => successor.once("pong", () => resolve())); successor.ping(); await boundary;
+        expect(frames.filter(frame => frame.t === "activity-reply")).toEqual([]);
+      } finally { release(); }
+    });
+
+    it("keeps old workers on HTTPS and refuses an unnegotiated activity carrier", async () => {
+      deps.workerActivity = vi.fn(async () => ({ state, loginRevision, prompts: false }));
+      const frames: any[] = [];
+      workerServer.on("connection", ws => { ws.on("message", data => { frames.push(JSON.parse(String(data))); }); });
+      const w = await worker();
+      await vi.waitFor(() => expect(frames.some(frame => frame.t === "config")).toBe(true));
+      expect(frames.some(frame => frame.t === "push")).toBe(false);
+      const closed = new Promise<number>(resolve => w.once("close", resolve));
+      w.send(JSON.stringify({ t: "activity", id: workspaceId, idle: true }));
+      expect(await closed).toBe(4003);
+      expect(deps.workerActivity).not.toHaveBeenCalled();
+    });
+  });
+
   describe("app frame authority window", () => {
     const ready = async () => {
       const w = await worker(), a = sockets[0]!, frames: any[] = [];

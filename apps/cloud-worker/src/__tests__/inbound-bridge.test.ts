@@ -1,14 +1,14 @@
 import { generateKeyPairSync, randomUUID, sign } from "node:crypto";
 import { once } from "node:events";
 import WebSocket from "ws";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { InboundBridge } from "../inbound-bridge";
 import type { CloudV2ControlFrame } from "@zeros/protocol/cloud-v2-relay";
 
 const key = generateKeyPairSync("ed25519"), workspaceId = randomUUID(), bootId = randomUUID();
 const protocol = "zeros.cloud.v2.worker";
 const cleanups: Array<() => Promise<void>> = [];
-afterEach(async () => { for (const fn of cleanups.splice(0).reverse()) await fn(); });
+afterEach(async () => { for (const fn of cleanups.splice(0).reverse()) await fn(); vi.useRealTimers(); });
 function token(boot = bootId): string {
   const now = Math.floor(Date.now() / 1000);
   const body = `v1.${Buffer.from(JSON.stringify({ iss: "zeros-cp", aud: workspaceId, boot, iat: now, exp: now + 60, jti: randomUUID() })).toString("base64url")}`;
@@ -97,6 +97,48 @@ it("accepts an authenticated prompt hint with no app client and no payload", asy
   cp.ws.send(JSON.stringify({ t: "prompts" }));
   await expect.poll(() => f.incoming).toEqual([{ t: "prompts" }]);
   expect(cp.ws.readyState).toBe(WebSocket.OPEN);
+});
+
+it("accepts an activity ACK only from the chosen relay and releases waits on its close", async () => {
+  const f = await fixture(), one = await f.connect(), two = await f.connect();
+  for (const { ws } of [one, two]) ws.send(JSON.stringify({ t: "push", prompts: true }));
+  await expect.poll(() => f.listener.promptPush).toBe(true);
+  let settled = false;
+  const pending = f.listener.activity(false).then(reply => { settled = true; return reply; });
+  await expect.poll(() => one.frames.length).toBe(1);
+  expect(two.frames).toEqual([]);
+  const id = one.frames[0]!.id;
+  const reply = { t: "activity-reply", id, state: "running", loginRevision: "0", prompts: false };
+  two.ws.send(JSON.stringify(reply));
+  const boundary = once(two.ws, "pong"); two.ws.ping(); await boundary;
+  expect(settled).toBe(false);
+  one.ws.send(JSON.stringify(reply)); expect(await pending).toEqual(reply);
+  const lost = f.listener.activity(true); one.ws.terminate(); expect(await lost).toBeNull();
+  expect(f.listener.promptPush).toBe(true);
+  two.ws.terminate(); await expect.poll(() => f.listener.promptPush).toBe(false);
+});
+
+it("bounds a slow activity without dropping the carrier or overlapping another report", async () => {
+  const f = await fixture(), cp = await f.connect();
+  cp.ws.send(JSON.stringify({ t: "push", prompts: true }));
+  await expect.poll(() => f.listener.promptPush).toBe(true);
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+  const pending = f.listener.activity(true);
+  await expect.poll(() => cp.frames.length).toBe(1);
+  await vi.advanceTimersByTimeAsync(2_000);
+  expect(await pending).toBeNull();
+  expect(cp.ws.readyState).toBe(WebSocket.OPEN);
+  expect(f.listener.promptPush).toBe(true);
+  expect(await f.listener.activity(false)).toBeNull();
+  expect(cp.frames).toHaveLength(1);
+  cp.ws.send(JSON.stringify({ t: "activity-reply", id: cp.frames[0]!.id, state: "running", loginRevision: "8", prompts: true }));
+  const boundary = once(cp.ws, "pong"); cp.ws.ping(); await boundary;
+  const next = f.listener.activity(false);
+  await expect.poll(() => cp.frames.length).toBe(2);
+  expect(cp.frames[1]!.id).not.toBe(cp.frames[0]!.id);
+  const reply = { t: "activity-reply", id: cp.frames[1]!.id, state: "running", loginRevision: "0", prompts: false };
+  cp.ws.send(JSON.stringify(reply));
+  expect(await next).toEqual(reply);
 });
 
 it("closes quiesced replicas after Stop, preserving each outstanding Stop acknowledgement", async () => {
