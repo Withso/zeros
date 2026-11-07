@@ -48,8 +48,9 @@ export interface DesignStyleBuildSetting {
 export interface DesignStyleBuildHost {
   boundaryFactory: RepoTaskBoundaryFactory;
   /** Views of this checkout should refresh. A build output is usually ignored
-   * by Git, so no Git change announces it. */
-  changed(workspacePath: string): void;
+   * by Git, so no Git change announces it. `output` is false when only a
+   * build's state or message changed, so no frame's styles did. */
+  changed(workspacePath: string, change?: { output: boolean }): void;
   /** Throws when this checkout may not start repository code now. */
   assertStartAllowed?(workspacePath: string): void;
   /** Null when the checkout is ready; otherwise settles when its workspace
@@ -108,6 +109,8 @@ interface Session {
   idle: ReturnType<typeof setTimeout> | null;
   expiry: ReturnType<typeof setTimeout> | null;
   changed: ReturnType<typeof setTimeout> | null;
+  /** An output changed since the last announcement. */
+  outputChanged: boolean;
 }
 
 let host: DesignStyleBuildHost | null = null;
@@ -187,12 +190,15 @@ function later(build: LiveBuild, delayMs: number, run: () => void): void {
   build.timers.add(timer);
 }
 
-function announce(session: Session): void {
+function announce(session: Session, output = false): void {
   // Several outputs and status changes in one burst become one refresh.
+  session.outputChanged ||= output;
   if (session.changed) return;
   session.changed = setTimeout(() => {
     session.changed = null;
-    host?.changed(session.root);
+    const change = { output: session.outputChanged };
+    session.outputChanged = false;
+    host?.changed(session.root, change);
   }, OUTPUT_SETTLE_MS);
   session.changed.unref?.();
 }
@@ -282,8 +288,9 @@ async function outputSignature(session: Session, build: LiveBuild): Promise<stri
 async function settleOneShot(session: Session, build: LiveBuild, before: { state: DesignStyleBuildState; error: string | null }): Promise<void> {
   const signature = await outputSignature(session, build);
   if (signature === build.outputSignature && build.state === before.state && build.error === before.error) return;
+  const output = signature !== build.outputSignature;
   build.outputSignature = signature;
-  announce(session);
+  announce(session, output);
 }
 
 function launch(session: Session, build: LiveBuild): void {
@@ -360,7 +367,7 @@ async function watchFiles(session: Session, build: LiveBuild): Promise<void> {
       build.state = "live";
       build.restarts = 0;
     }
-    announce(session);
+    announce(session, true);
   });
   outputWatcher.on("error", () => undefined);
   build.watchers.push(outputWatcher);
@@ -510,7 +517,7 @@ export async function setDesignStyleBuildPresence(
     return;
   }
   if (!session) {
-    session = { root, present: false, builds: new Map(), idle: null, expiry: null, changed: null };
+    session = { root, present: false, builds: new Map(), idle: null, expiry: null, changed: null, outputChanged: false };
     sessions.set(root, session);
     for (const [key, remembered] of sessions) {
       if (sessions.size <= MAX_SESSIONS) break;

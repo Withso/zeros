@@ -12,6 +12,11 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   captureDesignFrameRestorePoint,
   createDesignFrame,
+  createDesignFrameWithRestorePoint,
+  designFrameCreateBatchesForTests,
+  designMutationSnapshotReadsForTests,
+  readDesignMutationSnapshot,
+  readDesignNavigationSnapshot,
   createDesignPage,
   deleteDesignFrame,
   deleteDesignPage,
@@ -21,7 +26,8 @@ import {
   restoreDesignFrameChanges,
   transferDesignNode,
 } from "../document";
-import { readCanvas } from "../document-storage";
+import { readCanvas, writeCanvas } from "../document-storage";
+import { designPageScopedCatalogSchema } from "@zeros/protocol/design-catalog";
 import { withDesignDirectoryNameLease } from "../directory-registry";
 import { pagesCanvas, pagesDirectory, pagesManifest } from "./pages-fixtures";
 
@@ -224,6 +230,66 @@ describe("page-owned frame writes", () => {
       for (const frame of created) expect(existsSync(path.join(root, pagesDirectory, frame.file))).toBe(true);
     }));
 
+  it("lands concurrent creates in one canvas write with distinct files, isolating a bad request", () =>
+    run(async () => {
+      const before = designFrameCreateBatchesForTests();
+      const results = await Promise.allSettled([
+        ...Array.from({ length: 6 }, () => createDesignFrameWithRestorePoint(root, { pageId: "empty", title: "Same" })),
+        createDesignFrameWithRestorePoint(root, { pageId: "missing", title: "Lost" }),
+        createDesignFrameWithRestorePoint(root, { pageId: "checkout", title: "Other" }),
+      ]);
+      expect(designFrameCreateBatchesForTests() - before).toBe(1);
+      expect(results[6]).toMatchObject({ status: "rejected" });
+      const created = results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
+      expect(created.map(({ frame }) => frame.file)).toEqual([
+        "empty/same.html", "empty/same-2.html", "empty/same-3.html", "empty/same-4.html",
+        "empty/same-5.html", "empty/same-6.html", "checkout/other.html",
+      ]);
+      expect(await pageFrames("empty")).toEqual(created.slice(0, 6).map(({ frame }) => frame.frameId));
+      for (const { frame, restorePoint } of created)
+        expect(await captureDesignFrameRestorePoint(root, frame.file)).toEqual(restorePoint);
+    }));
+
+  it("shares one acknowledgement read among writers waiting for it, preparing every affected frame", () =>
+    run(async () => {
+      const files = ["page-1/home.html", "checkout/home.html"];
+      const before = designMutationSnapshotReadsForTests();
+      const [first, second] = await Promise.all(files.map((file) => readDesignMutationSnapshot(root, [file])));
+      expect(designMutationSnapshotReadsForTests() - before).toBe(1);
+      for (const snapshot of [first!, second!])
+        expect(snapshot.frames.map((frame) => frame.file).sort()).toEqual([...files].sort());
+    }));
+
+  it("acknowledges a write with only the pages whose content hash the client lacks", () =>
+    run(async () => {
+      const navigation = await readDesignNavigationSnapshot(root, undefined, { pageHashes: true });
+      const known = navigation.pageHashes!;
+      expect(Object.keys(known).sort()).toEqual(["checkout", "empty", "screens"]);
+      expect((await readDesignNavigationSnapshot(root, undefined, { pageHashes: true })).pageHashes).toEqual(known);
+      const created = await createDesignFrame(root, { pageId: "empty", title: "New" });
+      const ack = await readDesignMutationSnapshot(root, [created.file], known);
+      expect(ack).not.toHaveProperty("pages");
+      expect(ack).not.toHaveProperty("mutationCatalog");
+      const catalog = designPageScopedCatalogSchema.parse(ack.pageCatalog);
+      expect(catalog.pages.map((page) => page.id)).toEqual(["screens", "checkout", "empty"]);
+      expect(catalog.frames.map((frame) => frame.id)).toEqual([created.frameId]);
+      expect(catalog.pages.find((page) => page.id === "screens")!.hash).toBe(known.screens);
+      expect(ack.frames.map((frame) => frame.file)).toEqual([created.file]);
+      const current = Object.fromEntries(catalog.pages.map((page) => [page.id, page.hash]));
+      const canvas = JSON.parse(read("meta/canvas.json"));
+      canvas.frames.checkout_home.x = 999;
+      writeFileSync(path.join(root, pagesDirectory, "meta/canvas.json"), JSON.stringify(canvas));
+      const native = await readDesignMutationSnapshot(root, [created.file], current);
+      expect(native.pageCatalog!.frames.map((frame) => frame.id)).toEqual(["checkout_home"]);
+      expect((await readDesignMutationSnapshot(root, [created.file], {})).pageCatalog!.frames).toHaveLength(3);
+      const [first, second] = await Promise.all([
+        readDesignMutationSnapshot(root, [created.file], { ...current, screens: "0".repeat(32) }),
+        readDesignMutationSnapshot(root, ["page-1/home.html"], { ...current, empty: "0".repeat(32) }),
+      ]);
+      expect(first).toBe(second);
+      expect(new Set(first!.pageCatalog!.frames.map((frame) => frame.pageId))).toEqual(new Set(["screens", "checkout", "empty"]));
+    }));
+
   it("admits exactly the remaining room when creates race into one nearly full page", () =>
     run(async () => {
       fillPage(0, 999);
@@ -233,6 +299,30 @@ describe("page-owned frame writes", () => {
       for (const result of results.filter((result) => result.status === "rejected"))
         expect(String((result as PromiseRejectedResult).reason)).toMatch(full);
       expect(await pageFrames("screens")).toHaveLength(1_000);
+    }));
+
+  it("keeps native canvas formatting when a write leaves the scene unchanged", () =>
+    run(async () => {
+      // The first write adds the migrated Foundation manifest the fixture lacks.
+      await writeCanvas(root, await readCanvas(root));
+      const compact = JSON.stringify(JSON.parse(read("meta/canvas.json")));
+      writeFileSync(path.join(root, pagesDirectory, "meta/canvas.json"), compact);
+      await writeCanvas(root, await readCanvas(root), [
+        { file: `${pagesDirectory}/page-1/home.html`, before: read("page-1/home.html"), after: "<h1>Edited</h1>" },
+      ]);
+      expect(read("meta/canvas.json")).toBe(compact);
+      const canvas = await readCanvas(root);
+      canvas.frames["page-1/home.html"]!.x = 640;
+      await writeCanvas(root, canvas);
+      const canonical = read("meta/canvas.json");
+      expect(canonical).not.toBe(compact);
+      expect(JSON.parse(canonical).frames.home.x).toBe(640);
+      const again = await readCanvas(root);
+      again.frames["page-1/home.html"]!.x = 960;
+      await writeCanvas(root, again);
+      expect(JSON.parse(read("meta/canvas.json")).frames.home.x).toBe(960);
+      await writeCanvas(root, await readCanvas(root));
+      expect(JSON.parse(read("meta/canvas.json")).frames.home.x).toBe(960);
     }));
 
   it("records the page identity and refuses restoration after page deletion or folder reuse", () =>

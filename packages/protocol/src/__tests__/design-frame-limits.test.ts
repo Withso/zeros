@@ -1,8 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
   DESIGN_CATALOG_DESCRIPTOR_LIMIT,
+  DESIGN_PAGE_SCOPED_MUTATIONS_CAPABILITY,
   designCatalogBatchSchema,
   designCatalogFrameSchema,
+  designNavigationReadSchema,
+  designPageHashesSchema,
+  designPageScopedCatalogSchema,
   designPreparedFrameSchema,
 } from "../design-catalog";
 import {
@@ -138,5 +142,37 @@ describe("Design frame admission limits", () => {
         total: batch.total + 1,
       }).success,
     ).toBe(false);
+  });
+});
+
+describe("page-scoped write acknowledgements", () => {
+  const hash = (seed: string) => seed.repeat(32).slice(0, 32);
+  const pages = [
+    { id: "one", title: "One", folder: "one", count: 2, hash: hash("a") },
+    { id: "two", title: "Two", folder: "two", count: 1, hash: hash("b") },
+  ];
+  const frame = (id: string, pageId: string, order: number) => ({
+    ...descriptor, id, pageId, source: `${pageId}/${id}.html`, order, z: order,
+  });
+
+  it("negotiates per-page hashes and carries descriptors only for whole pages", () => {
+    expect(DESIGN_PAGE_SCOPED_MUTATIONS_CAPABILITY).toBe("design.page-scoped-mutations.v1");
+    expect(designNavigationReadSchema.parse({ workspaceId: "w", pageHashes: true })).toEqual({ workspaceId: "w", pageHashes: true });
+    expect(designNavigationReadSchema.safeParse({ workspaceId: "w", pageHashes: false }).success).toBe(false);
+    expect(designPageHashesSchema.safeParse({ one: hash("a") }).success).toBe(true);
+    expect(designPageHashesSchema.safeParse({ one: "not-a-hash" }).success).toBe(false);
+    const catalog = { revision: "a".repeat(64), pages, frames: [frame("b1", "two", 0)] };
+    expect(designPageScopedCatalogSchema.safeParse(catalog).success).toBe(true);
+    expect(designPageScopedCatalogSchema.safeParse({ ...catalog, frames: [] }).success).toBe(true);
+    for (const frames of [
+      [frame("a1", "one", 0)],
+      [frame("b1", "two", 1)],
+      [frame("x", "missing", 0)],
+      [frame("b1", "two", 0), frame("a1", "one", 0), frame("a2", "one", 1)],
+    ])
+      expect(designPageScopedCatalogSchema.safeParse({ ...catalog, frames }).success).toBe(false);
+    expect(designPageScopedCatalogSchema.safeParse({
+      ...catalog, frames: [frame("a1", "one", 0), frame("a2", "one", 1), frame("b1", "two", 0)],
+    }).success).toBe(true);
   });
 });

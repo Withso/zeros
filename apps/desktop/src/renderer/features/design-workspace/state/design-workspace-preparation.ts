@@ -1,4 +1,4 @@
-import { DESIGN_LAZY_PREPARATION_CAPABILITY, designCatalogOwnerSchema, type DesignCatalogOwner } from "@zeros/protocol/design-catalog";
+import { DESIGN_LAZY_PREPARATION_CAPABILITY, DESIGN_PAGE_SCOPED_MUTATIONS_CAPABILITY, designCatalogOwnerSchema, designPageHashesSchema, type DesignCatalogFrame, type DesignCatalogOwner } from "@zeros/protocol/design-catalog";
 import type { RuntimeClient } from "../../../platform/bridge/ws-client";
 import { getActiveBridge } from "../../../platform/bridge/active-bridge";
 import { isCloudWorkspace } from "../../../platform/bridge/cloud-workspace-key";
@@ -9,25 +9,67 @@ import { DesignCatalogReadAdapter } from "./design-catalog-read-adapter";
 let intent = 0;
 const readers = new WeakMap<RuntimeClient, DesignCatalogReadAdapter>();
 
-/** Mutation replies carry every descriptor but read only affected source.
- * Unchecked same-owner frames retain pixels until on-demand preparation. */
+type FrameDescription = NonNullable<DesignWorkspaceSnapshotWire["preparation"]>["descriptions"][number];
+const describeFrame = (frame: DesignCatalogFrame): FrameDescription => ({ preparation: "unprepared" as const,
+  file: frame.source, frameId: frame.id, pageId: frame.pageId, title: frame.title,
+  kind: frame.kind === "text" ? "text" as const : "frame" as const,
+  x: frame.x, y: frame.y, width: frame.width, height: frame.height, z: frame.z });
+
+/** Mutation replies carry every descriptor, or only resent pages, but read
+ * only affected source. Unchecked same-owner frames retain pixels until
+ * on-demand preparation. */
 export function projectDesignMutationSnapshot(previous: DesignWorkspaceSnapshotWire | undefined, next: DesignWorkspaceSnapshotWire): DesignWorkspaceSnapshotWire {
-  if (!next.mutationCatalog) return next;
-  const { mutationCatalog, ...snapshot } = next;
-  const descriptions = mutationCatalog.frames.map(frame => ({ preparation: "unprepared" as const,
-    file: frame.source, frameId: frame.id, pageId: frame.pageId, title: frame.title,
-    kind: frame.kind === "text" ? "text" as const : "frame" as const,
-    x: frame.x, y: frame.y, width: frame.width, height: frame.height, z: frame.z }));
+  if (!next.mutationCatalog && !next.pageCatalog) return next;
+  const { mutationCatalog, pageCatalog, ...snapshot } = next;
   const sameOwner = !!previous && previous.directoryId === next.directoryId && previous.lint.workspacePath === next.lint.workspacePath &&
     previous.protocolCapability === next.protocolCapability;
+  let descriptions: FrameDescription[];
+  let paged: Pick<NonNullable<DesignWorkspaceSnapshotWire["preparation"]>, "pageHashes" | "stalePages"> = {};
+  let pages = snapshot.pages;
+  if (pageCatalog) {
+    // A page the engine did not resend keeps its confirmed descriptions only
+    // while its hash still matches; otherwise it is shown stale and revalidated.
+    const prior = sameOwner ? previous.preparation : undefined;
+    const held = new Map<string, FrameDescription[]>();
+    for (const description of prior?.descriptions ?? []) {
+      const list = held.get(description.pageId!);
+      if (list) list.push(description);
+      else held.set(description.pageId!, [description]);
+    }
+    const resent = new Map<string, FrameDescription[]>();
+    for (const frame of pageCatalog.frames) {
+      const list = resent.get(frame.pageId);
+      if (list) list.push(describeFrame(frame));
+      else resent.set(frame.pageId, [describeFrame(frame)]);
+    }
+    const pageHashes: Record<string, string> = {};
+    const stalePages: string[] = [];
+    const byPage = pageCatalog.pages.map((page) => {
+      const fresh = page.count === 0 ? [] : resent.get(page.id);
+      if (fresh) {
+        pageHashes[page.id] = page.hash;
+        return fresh;
+      }
+      const kept = held.get(page.id) ?? [];
+      if (prior?.pageHashes?.[page.id] === page.hash && kept.length === page.count) pageHashes[page.id] = page.hash;
+      else stalePages.push(page.id);
+      return kept;
+    });
+    descriptions = byPage.flat();
+    pages = pageCatalog.pages.map((page, index) => ({ id: page.id, title: page.title, folder: page.folder,
+      frameFiles: byPage[index]!.map((description) => description.file),
+      frameIds: byPage[index]!.map((description) => description.frameId!) }));
+    paged = { pageHashes, ...(stalePages.length ? { stalePages } : {}) };
+  } else descriptions = mutationCatalog!.frames.map(describeFrame);
   const retained = sameOwner ? new Map(previous.frames.map(frame => [frame.file, frame])) : new Map();
   const prepared = new Map(next.frames.map(frame => [frame.file, frame]));
-  return { ...snapshot, lint: sameOwner ? scopedLint(previous, next.lint, new Set(descriptions.map(description => description.file))) : next.lint,
+  return { ...snapshot, ...(pages ? { pages } : {}),
+    lint: sameOwner ? scopedLint(previous, next.lint, new Set(descriptions.map(description => description.file))) : next.lint,
     frames: descriptions.flatMap(description => {
     const frame = prepared.get(description.file) ?? retained.get(description.file);
     return frame?.frameId === description.frameId ? [frame] : [];
-  }), preparation: { revision: mutationCatalog.revision, epoch: ++intent, descriptions,
-    current: next.frames.map(frame => frame.file), errors: {} } };
+  }), preparation: { revision: (pageCatalog ?? mutationCatalog)!.revision, epoch: ++intent, descriptions,
+    current: next.frames.map(frame => frame.file), errors: {}, ...paged } };
 }
 /** A scoped reply lints only the files it names. Every other file keeps its
  * confirmed rows, except a frame that left the catalog. */
@@ -41,6 +83,22 @@ function scopedLint(previous: DesignWorkspaceSnapshotWire, lint: DesignWorkspace
     violations: [...violations, ...lint.violations] };
 }
 
+/** Each page lists exactly its descriptions, in order, and no description
+ * sits outside the pages. */
+function pagesListDescriptions(pages: DesignWorkspaceSnapshotWire["pages"], descriptions: readonly FrameDescription[]): pages is NonNullable<DesignWorkspaceSnapshotWire["pages"]> {
+  if (!pages) return false;
+  const byPage = new Map(pages.map((page) => [page.id, [] as string[]]));
+  for (const description of descriptions) {
+    const files = description.pageId === undefined ? undefined : byPage.get(description.pageId);
+    if (!files) return false;
+    files.push(description.file);
+  }
+  return pages.every((page) => {
+    const files = byPage.get(page.id)!;
+    return files.length === page.frameFiles.length && files.every((file, offset) => file === page.frameFiles[offset]);
+  });
+}
+
 /** An unsupported/legacy layout gets one aggregate read through the ordinary
  * keyed snapshot cache. Transport/authority failures never cause a scan. */
 export async function readDesignNavigation(workspaceId: string, previous?: DesignWorkspaceSnapshotWire): Promise<DesignWorkspaceSnapshotWire | null> {
@@ -51,10 +109,11 @@ export async function readDesignNavigation(workspaceId: string, previous?: Desig
   const off = bridge.onStatusChange((status) => { if (status !== "connected") controller.abort(); });
   let reader = readers.get(bridge);
   if (!reader) readers.set(bridge, (reader = new DesignCatalogReadAdapter(bridge)));
+  const pageScoped = bridge.supportsEngineCapability(DESIGN_PAGE_SCOPED_MUTATIONS_CAPABILITY, workspaceId);
   try {
     for (let attempt = 0; attempt < 2; attempt++) {
-      const raw = await workspaceOp(bridge, "design.navigation.read", { workspaceId }, 15_000) as {
-        unavailable?: string; snapshot?: DesignWorkspaceSnapshotWire; owner?: DesignCatalogOwner; catalogRevision?: string;
+      const raw = await workspaceOp(bridge, "design.navigation.read", { workspaceId, ...(pageScoped ? { pageHashes: true } : {}) }, 15_000) as {
+        unavailable?: string; snapshot?: DesignWorkspaceSnapshotWire; owner?: DesignCatalogOwner; catalogRevision?: string; pageHashes?: unknown;
       };
       controller.signal.throwIfAborted();
       if (getActiveBridge() !== bridge) throw new Error("Design navigation connection was retired.");
@@ -65,32 +124,37 @@ export async function readDesignNavigation(workspaceId: string, previous?: Desig
         !isDesignWorkspaceSnapshotWire(raw.snapshot) || raw.snapshot.directoryId !== owner.directoryId ||
         raw.snapshot.frames.length !== 0 || !/^[a-f0-9]{64}$/.test(raw.catalogRevision ?? ""))
         throw new Error("Invalid Design navigation response.");
-      const authority = { owner, signal: controller.signal,
-        isCurrent: () => getActiveBridge() === bridge && !controller.signal.aborted };
-      const result = await reader.read(authority, ++intent);
-      reader.retire(authority);
-      controller.signal.throwIfAborted();
-      if (result.status !== "coherent") {
-        if (result.reason === "unsupported-layout" || result.reason === "unsettled") return null;
-        if (result.reason === "stale" && attempt === 0) continue;
-        throw new Error(`Design catalog is ${result.reason}.`);
+      const pages = raw.snapshot.pages;
+      const sameOwner = previous?.directoryId === owner.directoryId && previous.lint.workspacePath === raw.snapshot.lint.workspacePath &&
+        previous.protocolCapability === raw.snapshot.protocolCapability;
+      // Within one engine process an unchanged revision names an unchanged
+      // catalog, so complete same-owner descriptions need no batch reads.
+      const prior = sameOwner ? previous.preparation : undefined;
+      const held = prior !== undefined && prior.revision === raw.catalogRevision && !prior.stalePages?.length &&
+        pagesListDescriptions(pages, prior.descriptions) ? prior.descriptions : null;
+      let descriptions = held;
+      if (!descriptions) {
+        const authority = { owner, signal: controller.signal,
+          isCurrent: () => getActiveBridge() === bridge && !controller.signal.aborted };
+        const result = await reader.read(authority, ++intent);
+        reader.retire(authority);
+        controller.signal.throwIfAborted();
+        if (result.status !== "coherent") {
+          if (result.reason === "unsupported-layout" || result.reason === "unsettled") return null;
+          if (result.reason === "stale" && attempt === 0) continue;
+          throw new Error(`Design catalog is ${result.reason}.`);
+        }
+        if (result.catalog.revision !== raw.catalogRevision) {
+          if (attempt === 0) continue;
+          throw new Error("The Design catalog changed while opening.");
+        }
+        descriptions = result.catalog.frames.map(describeFrame);
+        if (pages?.length !== result.catalog.pages.length || result.catalog.pages.some((page, index) =>
+          pages[index]!.id !== page.id || pages[index]!.folder !== page.folder || pages[index]!.title !== page.title) ||
+          !pagesListDescriptions(pages, descriptions))
+          throw new Error("Invalid Design catalog page membership.");
       }
-      if (result.catalog.revision !== raw.catalogRevision) {
-        if (attempt === 0) continue;
-        throw new Error("The Design catalog changed while opening.");
-      }
-      const descriptions = result.catalog.frames.map((frame) => ({
-        preparation: "unprepared" as const, file: frame.source, frameId: frame.id, pageId: frame.pageId,
-        title: frame.title, kind: frame.kind === "text" ? "text" as const : "frame" as const,
-        x: frame.x, y: frame.y, width: frame.width, height: frame.height, z: frame.z,
-      }));
       const available = new Map(descriptions.map((frame) => [frame.file, frame]));
-      if (raw.snapshot.pages?.length !== result.catalog.pages.length || result.catalog.pages.some((page, index) => {
-        const summary = raw.snapshot!.pages![index];
-        const files = descriptions.filter((frame) => frame.pageId === page.id).map((frame) => frame.file);
-        return !summary || summary.id !== page.id || summary.folder !== page.folder || summary.title !== page.title ||
-          summary.frameFiles.length !== files.length || summary.frameFiles.some((file, offset) => file !== files[offset]);
-      })) throw new Error("Invalid Design catalog page membership.");
       // Keep confirmed same-owner pixels only. They stay unprepared until the
       // source/dependency read finishes, even when metadata revision is equal.
       const frames = previous?.directoryId === owner.directoryId && previous.lint.workspacePath === raw.snapshot.lint.workspacePath
@@ -98,8 +162,13 @@ export async function readDesignNavigation(workspaceId: string, previous?: Desig
           const description = available.get(frame.file);
           return description && description.frameId === frame.frameId;
         }) : [];
-      return { ...raw.snapshot, frames, preparation: { revision: result.catalog.revision, epoch: ++intent,
-        descriptions, current: [], errors: {} } };
+      // Hashes that do not name exactly these pages are dropped: writes then get
+      // complete acknowledgements rather than trusting a partial page set.
+      const hashes = pageScoped ? designPageHashesSchema.safeParse(raw.pageHashes) : undefined;
+      const pageHashes = hashes?.success && Object.keys(hashes.data).length === pages!.length &&
+        pages!.every((page) => Object.hasOwn(hashes.data, page.id)) ? hashes.data : undefined;
+      return { ...raw.snapshot, frames, preparation: { revision: raw.catalogRevision!, epoch: ++intent,
+        descriptions, current: [], errors: {}, ...(pageHashes ? { pageHashes } : {}) } };
     }
     throw new Error("The Design catalog changed while opening.");
   } finally { controller.abort(); off(); }

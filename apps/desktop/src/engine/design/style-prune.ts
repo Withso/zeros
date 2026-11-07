@@ -759,6 +759,40 @@ export function measureDesignFrameSources(
   });
 }
 
+const partImageBytes = new WeakMap<(text: string) => number | null, WeakMap<DesignCssIndex, Map<number, number | null>>>();
+
+/** The length of each source's CSS for one frame, as measureDesignFrameSources
+ * returns it, and the image bytes `imageBytes` charges the CSS it keeps (null
+ * when any kept part is unknown). Each part is charged once per index. */
+export function measureDesignFrameSourceCosts(
+  indexes: readonly DesignCssIndex[],
+  frame: DesignFrameFeatures,
+  imageBytes: (text: string) => number | null,
+): Array<{ length: number; imageBytes: number | null }> {
+  let byIndex = partImageBytes.get(imageBytes);
+  if (!byIndex) partImageBytes.set(imageBytes, (byIndex = new WeakMap()));
+  return chooseUnits(indexes, frame).map((keep, at) => {
+    const index = indexes[at]!;
+    let charged = byIndex.get(index);
+    if (!charged) byIndex.set(index, (charged = new Map()));
+    let length = 0;
+    let parts = 0;
+    let images: number | null = 0;
+    emit(index, keep, (start, end, text, from) => {
+      length += text === undefined ? end - start : text.length;
+      parts += 1;
+      if (images === null || from === undefined) return;
+      let bytes = charged.get(from);
+      if (bytes === undefined) {
+        bytes = imageBytes(text ?? index.css.slice(start, end));
+        charged.set(from, bytes);
+      }
+      images = bytes === null ? null : images + bytes;
+    });
+    return { length: length + Math.max(0, parts - 1), imageBytes: images };
+  });
+}
+
 /** Choose the units of every source a frame uses. Font faces and keyframes
  * are kept for names any source's kept CSS or the frame refers to, so they
  * are decided across all sources at once. */
@@ -843,10 +877,12 @@ function chooseUnits(
 
 /** The kept units in source order, inside the wrappers they were in: each
  * part is a slice of the CSS, or literal text. */
+/** `part` receives a unit's index, or a wrapper's as its complement, for
+ * text taken from the source; closing braces have none. */
 function emit(
   index: DesignCssIndex,
   keep: Uint8Array,
-  part: (start: number, end: number, text?: string) => void,
+  part: (start: number, end: number, text?: string, from?: number) => void,
 ): void {
   const none: number[] = [];
   let open = none;
@@ -869,12 +905,12 @@ function emit(
     while (common < open.length && common < wrappers.length && open[common] === wrappers[common]) common += 1;
     for (let close = open.length; close > common; close -= 1) part(0, 0, "}");
     for (let at = common; at < wrappers.length; at += 1) {
-      part(index.wrapperStart[wrappers[at]!]!, index.wrapperOpenEnd[wrappers[at]!]!);
+      part(index.wrapperStart[wrappers[at]!]!, index.wrapperOpenEnd[wrappers[at]!]!, undefined, ~wrappers[at]!);
     }
     open = wrappers;
     const text = index.synthetic.get(unit);
-    if (text === undefined) part(index.start[unit]!, index.end[unit]!);
-    else part(0, 0, text);
+    if (text === undefined) part(index.start[unit]!, index.end[unit]!, undefined, unit);
+    else part(0, 0, text, unit);
   }
   for (let close = open.length; close > 0; close -= 1) part(0, 0, "}");
 }

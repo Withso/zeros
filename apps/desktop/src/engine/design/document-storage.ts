@@ -1,7 +1,7 @@
 import { nextFrameGeometry, readFrameMeta } from "./frame-metadata";
 export { nextFrameGeometry, readFrameMeta } from "./frame-metadata";
 import { DESIGN_MANIFEST_FILE, parseDesignManifest } from "./manifest";
-import { DESIGN_CANVAS_FILE, decodeCanvasFile } from "./canvas-file";
+import { DESIGN_CANVAS_FILE, decodeCanvasFile, encodeCanvasFile } from "./canvas-file";
 import { isDesignFrameFile } from "@zeros/protocol/design-path";
 import {
   DESIGN_MAX_FRAMES_PER_PAGE,
@@ -91,6 +91,61 @@ export async function readCanvasContext(
   return { layout, canvas: await readCanvas(workspacePath, layout) };
 }
 
+/** Make a decoded canvas immutable before callers share it. */
+export function freezeDeep<T>(value: T): T {
+  if (value && typeof value === "object" && !Object.isFrozen(value)) {
+    Object.freeze(value);
+    for (const entry of Object.values(value)) freezeDeep(entry);
+  }
+  return value;
+}
+
+/** Read-only callers (frame documents, frame reads) share the last decoded
+ * canvas while every byte it was decoded from still matches; it is frozen.
+ * Writers keep reading their own copy under the document lock. */
+const MAX_SHARED_CANVASES = 4;
+const sharedCanvases = new Map<string, DesignCanvasReadContext>();
+let sharedCanvasReads = 0;
+
+export function designSharedCanvasReadsForTests(): number {
+  return sharedCanvasReads;
+}
+
+export async function readSharedCanvasContext(
+  workspacePath: string,
+): Promise<DesignCanvasReadContext> {
+  const directory = designDirectoryNameFor(workspacePath);
+  const key = JSON.stringify([path.resolve(workspacePath), directory]);
+  const cached = sharedCanvases.get(key);
+  const snapshot = cached?.canvas[canvasReadSnapshot];
+  if (cached && snapshot) {
+    const layout = readDirectoryDesignLayout(workspacePath, directory);
+    if (
+      layout?.manifestFile === cached.layout?.manifestFile &&
+      layout?.documentFile === cached.layout?.documentFile &&
+      readDesignRegistrySource(workspacePath).source === snapshot.registry &&
+      readDesignStorageFile(workspacePath, snapshot.file) === snapshot.source &&
+      (!snapshot.registration ||
+        readDesignStorageFile(workspacePath, snapshot.registration.file) === snapshot.registration.source)
+    ) {
+      // The checks readCanvas makes beyond these bytes, so a shared read
+      // fails wherever a fresh one would.
+      assertNoLegacyCanvasBeside(workspacePath, designDirectoryEntry(workspacePath, directory, layout));
+      assertSafeDesignPageFolders(workspacePath, layout, cached.canvas.pages);
+      sharedCanvases.delete(key);
+      sharedCanvases.set(key, cached);
+      return cached;
+    }
+  }
+  sharedCanvasReads++;
+  const context = freezeDeep(await readCanvasContext(workspacePath));
+  sharedCanvases.delete(key);
+  sharedCanvases.set(key, context);
+  while (sharedCanvases.size > MAX_SHARED_CANVASES)
+    sharedCanvases.delete(sharedCanvases.keys().next().value!);
+  return context;
+}
+
 export function isFrameFile(value: string): boolean {
   return isDesignFrameFile(value);
 }
@@ -131,6 +186,29 @@ export function normalizeGeometry(
   };
 }
 
+function assertNoLegacyCanvasBeside(workspacePath: string, registered: { path: string } | undefined): void {
+  if (
+    registered &&
+    readDesignStorageFile(
+      workspacePath,
+      `${registered.path}/.zeros-canvas.json`,
+    ) !== null
+  )
+    throw new Error(
+      "Both legacy and registered Design metadata exist. Resolve this conflict before editing.",
+    );
+}
+
+function assertSafeDesignPageFolders(
+  workspacePath: string,
+  layout: ReturnType<typeof readDirectoryDesignLayout>,
+  pages: CanvasDocument["pages"],
+): void {
+  if (layout?.kind !== "meta-v3") return;
+  for (const page of pages ?? [])
+    assertSafeDesignStoragePath(workspacePath, `${layout.directory}/${page.folder}`, false, "directory");
+}
+
 export async function readCanvas(
   workspacePath: string,
   layout = readDirectoryDesignLayout(
@@ -159,16 +237,7 @@ export async function readCanvas(
         registration: { file: registrationFile, source: registrationSource },
       },
     });
-  if (
-    registered &&
-    readDesignStorageFile(
-      workspacePath,
-      `${registered.path}/.zeros-canvas.json`,
-    ) !== null
-  )
-    throw new Error(
-      "Both legacy and registered Design metadata exist. Resolve this conflict before editing.",
-    );
+  assertNoLegacyCanvasBeside(workspacePath, registered);
   if (source === null) {
     if (registered || existsSync(target)) {
       throw new Error(
@@ -206,10 +275,7 @@ export async function readCanvas(
   }
   if (!raw || typeof raw !== "object" || Array.isArray(raw))
     throw new Error("Design canvas metadata must be an object.");
-  if (layout?.kind === "meta-v3") {
-    for (const page of (raw as CanvasDocument).pages ?? [])
-      assertSafeDesignStoragePath(workspacePath, `${layout.directory}/${page.folder}/.zeros-validation`);
-  }
+  assertSafeDesignPageFolders(workspacePath, layout, (raw as CanvasDocument).pages);
   if (
     raw.version !== undefined &&
     raw.version !== 1 &&
@@ -241,7 +307,12 @@ export async function readCanvas(
       ),
     );
   for (const [file, geometry] of Object.entries(sourceFrames)) {
-    if (!decodedSources && !isFrameFile(file)) {
+    if (decodedSources) {
+      // Decoding validated these bounds and returned objects for this read.
+      frames[file] = geometry as DesignFrameGeometry;
+      continue;
+    }
+    if (!isFrameFile(file)) {
       throw new Error("Invalid Design frame reference.");
     }
     const normalized = normalizeGeometry(geometry, {
@@ -278,9 +349,13 @@ export async function readCanvas(
     )
       throw new Error("Invalid Design frame information.");
     for (const [file, value] of Object.entries(raw.frame_info)) {
+      if (decodedSources) {
+        frameInfo[file] = value as FrameMeta;
+        continue;
+      }
       const info = value as Partial<FrameMeta> | null;
       if (
-        (!decodedSources && !isFrameFile(file)) ||
+        !isFrameFile(file) ||
         !Object.hasOwn(frames, file) ||
         !info ||
         typeof info.title !== "string" ||
@@ -324,8 +399,9 @@ export async function writeCanvas(
   if (readDirectoryDesignLayout(workspacePath, directory)?.canvasVersion === 2) {
     const pages = canvas.pages ?? [];
     const members = new Map(pages.map(page => [page.id, new Set<string>()]));
+    const prefixes = pages.map(page => [page.folder ? `${page.folder}/` : null, page] as const);
     for (const file of Object.keys(canvas.frames)) {
-      const page = pages.find(page => page.folder && file.startsWith(page.folder + "/"));
+      const page = prefixes.find(([prefix]) => prefix !== null && file.startsWith(prefix))?.[1];
       if (!page) throw new Error("Design frame has no current page: " + file + ". Refresh before writing.");
       const info = canvas.frame_info[file];
       if (!info?.id) throw new Error("Design frame requires a stable canvas ID: " + file);
@@ -337,7 +413,8 @@ export async function writeCanvas(
       page.frames = [...page.frames.filter(id => ids.has(id)), ...[...ids].filter(id => !listed.has(id))];
     }
   }
-  if (!readDirectoryDesignManifest(workspacePath, directory)?.canvas) {
+  const declaresCanvas = readDirectoryDesignManifest(workspacePath, directory)?.canvas;
+  if (!declaresCanvas) {
     for (const relative of ["assets/.gitkeep", "components/.gitkeep"]) {
       const file = `${directory}/${relative}`;
       if (readDesignStorageFile(workspacePath, file) === "")
@@ -386,16 +463,23 @@ export async function writeCanvas(
       `view-${createHash("sha256").update(designDirectoryNameFor(workspacePath)).digest("hex").slice(0, 24)}.json`,
       JSON.stringify(view),
     );
-  const source = `${JSON.stringify(tracked, null, 2)}\n`;
-  if (utf8Bytes(source) > MAX_DESIGN_METADATA_BYTES) {
-    throw new Error("Design canvas metadata exceeds the 16 MiB limit.");
-  }
+  const expected = canvas[canvasReadSnapshot];
+  const limited = (source: string) => {
+    if (utf8Bytes(source) > MAX_DESIGN_METADATA_BYTES)
+      throw new Error("Design canvas metadata exceeds the 16 MiB limit.");
+    return source;
+  };
+  // The read snapshot pins the manifest the commit verifies, so the commit
+  // can encode this canvas directly rather than parse a JSON copy of it.
+  if (declaresCanvas && expected)
+    return commitDesignMetadata(workspacePath, directory, "", sourceChanges, expected, undefined,
+      { ...options, encodeCanvas: (version) => limited(encodeCanvasFile(tracked, { version })) });
   return commitDesignMetadata(
     workspacePath,
     designDirectoryNameFor(workspacePath),
-    source,
+    limited(`${JSON.stringify(tracked, null, 2)}\n`),
     sourceChanges,
-    canvas[canvasReadSnapshot],
+    expected,
     undefined,
     options,
   );
