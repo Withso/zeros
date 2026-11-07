@@ -39,6 +39,21 @@ function failedPathsMessage(action: string, failed: readonly string[]): string {
   }${sample ? ` (${sample})` : ""}.`;
 }
 
+/** A startup sweep that could not remove every historical ACE waits this long
+ * before the next one: it walks every tracked file while holding the
+ * workspace's mutation lane. Design mode and archive still sweep on use. */
+export const LEGACY_DESIGN_ACL_RETRY_MS = 7 * 24 * 60 * 60 * 1000;
+const DEFERRED = /^deferred:(\d+)$/;
+
+/** Whether a launch should sweep this workspace for historical ACLs. */
+export function legacyDesignAclCleanupDue(workspacePath: string, now = Date.now()): boolean {
+  const workspace = getWorkspaceByPath(path.resolve(workspacePath));
+  const state = workspace ? getWorkspaceMeta(workspace.id, LEGACY_DESIGN_ACL_CLEANUP_META_KEY) : null;
+  if (state === "complete") return false;
+  const deferred = state ? DEFERRED.exec(state) : null;
+  return !deferred || now - Number(deferred[1]) >= LEGACY_DESIGN_ACL_RETRY_MS;
+}
+
 function legacyAclCleanupComplete(workspacePath: string): boolean {
   const workspace = getWorkspaceByPath(path.resolve(workspacePath));
   return (
@@ -108,6 +123,7 @@ export async function cleanupLegacyDesignFilesystemGuards(
     ...(await releaseKnownDesignDirectoryAcls(workspacePath)),
   ];
   if (failed.length > 0) {
+    if (workspace) setWorkspaceMeta(workspace.id, LEGACY_DESIGN_ACL_CLEANUP_META_KEY, `deferred:${Date.now()}`);
     throw new Error(failedPathsMessage("cleanup", failed));
   }
   if (workspace) {

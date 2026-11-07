@@ -8,6 +8,7 @@ const maintenance = vi.hoisted(() => ({
   archiveRefs: vi.fn(),
   branchRefs: vi.fn(),
   cleanup: vi.fn(),
+  cleanupDue: vi.fn((_path: string) => true),
   transition: vi.fn(),
   workspaces: [] as Workspace[],
 }));
@@ -39,7 +40,8 @@ vi.mock("../git/worktree", async original => ({ ...await original<object>(),
 vi.mock("../git/cleanup", async original => ({ ...await original<object>(), pruneStaleHeavyDirTrash: async () => 0 }));
 vi.mock("../git/turn-recovery", () => ({ settleOrphanRunningTurns: async () => 0, repairUnattributedFinishedTurns: async () => 0 }));
 vi.mock("../git/design-mode", async original => ({ ...await original<object>(), reconcileDesignModeTransition: maintenance.transition }));
-vi.mock("../design/workspace-lock", async original => ({ ...await original<object>(), cleanupLegacyDesignFilesystemGuards: maintenance.cleanup }));
+vi.mock("../design/workspace-lock", async original => ({ ...await original<object>(), cleanupLegacyDesignFilesystemGuards: maintenance.cleanup,
+  legacyDesignAclCleanupDue: maintenance.cleanupDue }));
 
 import { ZerosEngine } from "../zeros-engine";
 import { RoutingExecutionBoundary } from "../agents/containment/routing-boundary";
@@ -79,6 +81,7 @@ beforeEach(() => {
   maintenance.archiveRefs.mockReset().mockResolvedValue(0);
   maintenance.branchRefs.mockReset().mockResolvedValue(0);
   maintenance.cleanup.mockReset().mockResolvedValue(undefined);
+  maintenance.cleanupDue.mockReset().mockImplementation(() => true);
   maintenance.transition.mockReset().mockResolvedValue(undefined);
   maintenance.workspaces = [];
   vi.spyOn(console, "log").mockImplementation(() => {});
@@ -105,6 +108,33 @@ describe("engine startup readiness", () => {
       expect(maintenance.transition).toHaveBeenCalledExactlyOnceWith("ws_local");
       expect(maintenance.cleanup).toHaveBeenCalledExactlyOnceWith(localPath);
     } finally {
+      await engine.stop();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("skips a workspace whose ACL sweep is not due without waiting on its mutation lane", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "zeros-startup-acl-backoff-"));
+    const waiting = path.join(root, "waiting");
+    const due = path.join(root, "due");
+    await Promise.all([mkdir(waiting), mkdir(due)]);
+    maintenance.workspaces = [storedWorkspace(waiting, { id: "ws_waiting" }), storedWorkspace(due, { id: "ws_due" })];
+    maintenance.cleanupDue.mockImplementation((cwd: string) => cwd !== waiting);
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    // The waiting workspace's lane stays busy: a skipped sweep must not queue behind it.
+    const lane = mutations.withWorkspaceMutation(waiting, () => held);
+    let visited!: () => void;
+    const visitedDue = new Promise<void>((resolve) => { visited = resolve; });
+    maintenance.cleanup.mockImplementation(async (cwd: string) => { if (cwd === due) visited(); });
+    const engine = fixture();
+    try {
+      await engine.start();
+      await visitedDue;
+      expect(maintenance.cleanup).toHaveBeenCalledExactlyOnceWith(due);
+    } finally {
+      release();
+      await lane;
       await engine.stop();
       await rm(root, { recursive: true, force: true });
     }
