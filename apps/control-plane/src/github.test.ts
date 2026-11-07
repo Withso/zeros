@@ -75,6 +75,7 @@ describe("cloud GitHub connection page", () => {
     const app = createGithubPublicRoutes({} as pg.Pool, githubConfig, {
       cloudCallback: async (state, code, denied) => {
         calls.push([state, code, denied]);
+        return "connected";
       },
     });
     const state = `zcg_${"a".repeat(40)}`;
@@ -95,6 +96,22 @@ describe("cloud GitHub connection page", () => {
       '<div class="sub">Return to Zeros to continue. You can close this tab.</div>',
     );
     expect(page).toMatch(/<svg class="hero-logo"/);
+  });
+});
+
+describe("cloud GitHub installation return", () => {
+  it("passes GitHub's setup action through and titles an access-only return", async () => {
+    const calls: Array<string | undefined> = [];
+    const app = createGithubPublicRoutes({} as pg.Pool, githubConfig, {
+      cloudCallback: async (_state, _code, _denied, setupAction) => {
+        calls.push(setupAction);
+        return "updated";
+      },
+    });
+    const response = await app.request(`/v1/github/oauth/callback?state=zcg_${"a".repeat(40)}&installation_id=7&setup_action=update`);
+    expect(response.status).toBe(200);
+    expect(calls).toEqual(["update"]);
+    expect(await response.text()).toContain('<div class="title">GitHub access updated</div>');
   });
 });
 

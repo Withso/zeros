@@ -110,7 +110,8 @@ export async function readSelectedCloudRepositories(
 }
 type Action =
   | { action: "pat"; token: string }
-  | { action: "oauth" | "cancel" }
+  | { action: "oauth"; install?: true }
+  | { action: "cancel" }
   | { action: "select" | "disconnect"; method: CloudGithubMethod };
 async function mutate<T>(
   userId: string,
@@ -144,7 +145,7 @@ export async function changeCloudGithubConnection(
   organizationId: string,
   expected: string,
   action:
-    | Exclude<Action, { action: "oauth" | "cancel" }>
+    | Exclude<Action, { action: "oauth" } | { action: "cancel" }>
     | { action: "cancel" },
 ) {
   const value = await mutate(
@@ -159,16 +160,19 @@ export async function changeCloudGithubConnection(
   cloudGithubConnectionCache.setData(key, value);
   return value;
 }
+/** `install` opens GitHub's installation page, where choosing repositories and
+ * signing in happen on one round trip; otherwise GitHub only signs in. */
 export async function beginCloudGithubConnection(
   userId: string,
   organizationId: string,
   expected: string,
+  install = false,
 ) {
   return mutate(
     userId,
     organizationId,
     expected,
-    { action: "oauth" },
+    install ? { action: "oauth", install: true } : { action: "oauth" },
     CloudGithubOauthStartedSchema,
   );
 }

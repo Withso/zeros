@@ -104,6 +104,15 @@ describe("cloud GitHub connection HTTP boundary", () => {
     expect(await response.json()).toEqual(status);
   });
 
+  it("starts an install-first attempt only when the client asks for one", async () => {
+    const f = fixture();
+    const response = await f.post({ organizationId, expected: generation, action: "oauth", install: true });
+    expect(response.status).toBe(200);
+    expect(f.service.begin).toHaveBeenCalledExactlyOnceWith(f.scope, generation, true);
+    const invalid = await f.post({ organizationId, expected: generation, action: "oauth", install: false });
+    expect(invalid.status).toBe(422);
+  });
+
   it.each(["select", "disconnect", "cancel", "oauth"] as const)(
     "fences %s with the supplied generation and authenticated scope",
     async (action) => {
@@ -119,6 +128,7 @@ describe("cloud GitHub connection HTTP boundary", () => {
         expect(f.service.begin).toHaveBeenCalledExactlyOnceWith(
           f.scope,
           generation,
+          false,
         );
       else if (action === "cancel")
         expect(f.service.store.cancelOauth).toHaveBeenCalledExactlyOnceWith(

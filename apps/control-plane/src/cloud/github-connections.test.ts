@@ -281,6 +281,46 @@ describe("selected cloud GitHub credentials", () => {
     );
     expect(result).not.toHaveProperty("verifier");
   });
+  it("starts an install-first attempt on GitHub's installation page, as Local does", async () => {
+    const { service, store } = fixture();
+    const result = await service.begin(scope, "g1", true);
+    const url = new URL(result.url);
+    expect(`${url.origin}${url.pathname}`).toBe("https://github.com/apps/zeros-test/installations/new");
+    expect(url.searchParams.get("state")).toMatch(/^zcg_/);
+    expect(url.searchParams.has("code_challenge")).toBe(false);
+    expect(store.beginOauth).toHaveBeenCalledWith(scope, "g1", url.searchParams.get("state"), expect.stringMatching(/^install:/));
+  });
+  it("exchanges an install-first code without a PKCE verifier", async () => {
+    const { service, store, fetcher } = fixture("github-app");
+    store.consumeOauth.mockResolvedValue({ scope, expected: "g2", verifier: "install:synthetic-verifier" });
+    let exchanged = "";
+    fetcher.mockImplementation(async (url: string | URL | Request, init?: RequestInit) => {
+      const path = new URL(String(url)).pathname;
+      if (path === "/login/oauth/access_token") {
+        exchanged = String(init?.body);
+        return Response.json({ access_token: "synthetic-app-token", expires_in: 28800, refresh_token: "synthetic-refresh-token", refresh_token_expires_in: 15897600 });
+      }
+      return Response.json({ id: 12, login: "contributor" });
+    });
+    await expect(service.callback("zcg_synthetic", "synthetic-code", false, "install")).resolves.toBe("connected");
+    expect(new URLSearchParams(exchanged).get("code")).toBe("synthetic-code");
+    expect(new URLSearchParams(exchanged).has("code_verifier")).toBe(false);
+    expect(store.save).toHaveBeenCalledOnce();
+  });
+  it("ends an install-first attempt that only changed repository access, without exchanging", async () => {
+    const { service, store, fetcher } = fixture();
+    store.consumeOauth.mockResolvedValue({ scope, expected: "g2", verifier: "install:synthetic-verifier" });
+    await expect(service.callback("zcg_synthetic", undefined, false, "update")).resolves.toBe("updated");
+    expect(store.cancelOauth).toHaveBeenCalledExactlyOnceWith(scope, "g2");
+    expect(store.save).not.toHaveBeenCalled();
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+  it("keeps a sign-in attempt without a code cancelled even when GitHub reports a setup action", async () => {
+    const { service, store } = fixture();
+    store.consumeOauth.mockResolvedValue({ scope, expected: "g2", verifier: "synthetic-verifier" });
+    await expect(service.callback("zcg_synthetic", undefined, false, "update")).rejects.toMatchObject({ code: "github_oauth_cancelled" });
+    expect(store.save).not.toHaveBeenCalled();
+  });
   it("retires a declined browser sign-in so Settings stops waiting for its consumed state", async () => {
     const { service, store, fetcher } = fixture();
     store.consumeOauth.mockResolvedValue({

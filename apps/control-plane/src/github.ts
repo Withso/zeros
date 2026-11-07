@@ -92,7 +92,7 @@ export interface GithubRouteDependencies {
   now?: () => number;
   random?: (bytes: number) => Buffer;
   /** Cloud credentials stay server-side; Local keeps its existing handoff. */
-  cloudCallback?: (state: string, code: string | undefined, denied: boolean) => Promise<void>;
+  cloudCallback?: (state: string, code: string | undefined, denied: boolean, setupAction?: string) => Promise<"connected" | "updated">;
 }
 
 /** Abandoned handoffs can retain live refresh tokens after logical expiry;
@@ -1015,12 +1015,13 @@ export function createGithubPublicRoutes(
     }
     const state = parsedState.data;
     if (state.startsWith("zcg_") && dependencies.cloudCallback) {
-      await dependencies.cloudCallback(state, c.req.query("code"), !!c.req.query("error"));
+      const outcome = await dependencies.cloudCallback(state, c.req.query("code"), !!c.req.query("error"), setupAction);
+      const title = outcome === "updated" ? "GitHub access updated" : "GitHub connected";
       c.header("Content-Security-Policy", `default-src 'none'; style-src ${HOSTED_PAGE_STYLE_SOURCE}; frame-ancestors 'none'`);
       c.header("Referrer-Policy", "no-referrer");
       return c.html(hostedPage(
-        "GitHub connected",
-        `<div class="title">GitHub connected</div>
+        title,
+        `<div class="title">${title}</div>
       <div class="sub">Return to Zeros to continue. You can close this tab.</div>`,
       ));
     }

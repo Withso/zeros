@@ -28,7 +28,7 @@ export const CloudGithubConnectionMutationSchema = z.discriminatedUnion(
         token: z.string().trim().min(1).max(4096),
       })
       .strict(),
-    z.object({ ...scope, action: z.literal("oauth") }).strict(),
+    z.object({ ...scope, action: z.literal("oauth"), install: z.literal(true).optional() }).strict(),
     z.object({ ...scope, action: z.literal("cancel") }).strict(),
     z
       .object({

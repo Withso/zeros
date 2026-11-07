@@ -469,7 +469,7 @@ describe("app assembly — cloud GitHub connections", () => {
     const app = createApp(config(githubConfig), pool, emailConfig as never, cloudDependencies(callback));
     const response = await app.request(`/v1/github/oauth/callback?state=${state}&code=synthetic-code`);
     expect(response.status).toBe(200);
-    expect(callback).toHaveBeenCalledExactlyOnceWith(state, "synthetic-code", false);
+    expect(callback).toHaveBeenCalledExactlyOnceWith(state, "synthetic-code", false, undefined);
     expect(response.headers.get("cache-control")).toBe("no-store");
     expect(response.headers.get("referrer-policy")).toBe("no-referrer");
     expect(response.headers.get("content-security-policy")).toContain("default-src 'none'");
