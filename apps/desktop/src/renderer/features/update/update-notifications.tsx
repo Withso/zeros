@@ -61,6 +61,19 @@ const RESHOW_INTERVAL_MS = 4 * 60 * 60 * 1000;
 // "Restart when idle" fires, so a brief gap between turns doesn't restart
 // mid-task.
 const IDLE_GRACE_MS = 30 * 1000;
+// The automatic preference restarts only once nobody has touched the Mac for
+// this long, so updates land while the user is away rather than mid-task.
+const USER_AWAY_SECONDS = 10 * 60;
+
+/** An unreadable idle time counts as activity: the restart waits for the next read. */
+async function readUserIdleSeconds(): Promise<number> {
+  try {
+    const seconds = await nativeInvoke<unknown>("system_idle_time");
+    return typeof seconds === "number" && Number.isFinite(seconds) && seconds >= 0 ? seconds : 0;
+  } catch {
+    return 0;
+  }
+}
 
 function openChangelog(): void {
   if (isElectron()) {
@@ -125,7 +138,7 @@ export function UpdateNotifications(): ReactElement | null {
             setRestartWhenIdle(false);
             if (getRestartAutomaticallyOnUpdate()) {
               toast.info(
-                "Zeros will restart when the update is ready and your agents are idle.",
+                "Zeros will restart to update once your agents are idle and you've been away for 10 minutes.",
               );
             }
           }
@@ -207,15 +220,36 @@ export function UpdateNotifications(): ReactElement | null {
   // ── Deferred "Restart when idle": fire once agents stay idle past the grace ──
   useEffect(() => {
     if (required || !shouldRestartWhenIdle || anyAgentRunning || !ready) return;
-    const id = window.setTimeout(() => {
-      // Work or opt-out can arrive before React runs this effect's cleanup.
-      if (anyAgentHasActiveWork(useSessionsStore.getState())) return;
-      if (!restartWhenIdle && !getRestartAutomaticallyOnUpdate()) return;
-      if (useRequiredUpdateStore.getState().required) return;
+    let cancelled = false;
+    let id = 0;
+    // Work or opt-out can arrive before React runs this effect's cleanup, and
+    // again while the idle time is being read.
+    const stillWanted = () =>
+      !cancelled &&
+      !anyAgentHasActiveWork(useSessionsStore.getState()) &&
+      (restartWhenIdle || getRestartAutomaticallyOnUpdate()) &&
+      !useRequiredUpdateStore.getState().required;
+    const attempt = () => {
+      if (!stillWanted()) return;
       // A stale ready snapshot must never arm main's install-on-download latch.
-      void install({ requireReady: true });
-    }, IDLE_GRACE_MS);
-    return () => window.clearTimeout(id);
+      if (restartWhenIdle) {
+        void install({ requireReady: true });
+        return;
+      }
+      void readUserIdleSeconds().then((idleSeconds) => {
+        if (!stillWanted()) return;
+        if (idleSeconds >= USER_AWAY_SECONDS) {
+          void install({ requireReady: true });
+          return;
+        }
+        id = window.setTimeout(attempt, (USER_AWAY_SECONDS - idleSeconds) * 1000);
+      });
+    };
+    id = window.setTimeout(attempt, IDLE_GRACE_MS);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(id);
+    };
   }, [required, shouldRestartWhenIdle, restartWhenIdle, anyAgentRunning, ready, version, install]);
 
   return required ? <RequiredUpdateScreen required={required} status={status} install={install} /> : null;

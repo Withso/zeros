@@ -4,6 +4,7 @@ import {
   collectDelivery,
   validateLedger,
 } from "../agent-runtime/delivery.mjs";
+import { LIMITS } from "../agent-runtime/config.mjs";
 import { renderDashboard } from "../agent-runtime/report.mjs";
 import { initialState } from "../agent-runtime/state.mjs";
 const source = "a".repeat(40);
@@ -50,6 +51,23 @@ describe("desktop and cloud delivery evidence", () => {
     expect(() =>
       validateLedger(
         { ...ledger, releases: [ledger.releases[0], ledger.releases[0]] },
+        "alpha",
+      ),
+    ).toThrow();
+  });
+
+  it("accepts a support window longer than 200 releases and bounds it", () => {
+    const releases = (count: number) =>
+      Array.from({ length: count }, (_, index) => ({
+        version: `0.1.0-alpha.${index + 1}`,
+        sourceSha: source,
+        publishedAt: new Date(Date.UTC(2026, 9, 12) + index * 60_000).toISOString(),
+      }));
+    const ledger = { version: 1, channel: "alpha", releases: releases(600) };
+    expect(validateLedger(ledger, "alpha")).toBe(ledger);
+    expect(() =>
+      validateLedger(
+        { ...ledger, releases: releases(LIMITS.ledgerReleases + 1) },
         "alpha",
       ),
     ).toThrow();

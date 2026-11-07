@@ -141,6 +141,7 @@ const commandTable: Record<string, CommandHandler> = {
   updater_status: notImpl("updater_status", 8),
   updater_require: notImpl("updater_require", 8),
   process_relaunch: notImpl("process_relaunch", 8),
+  system_idle_time: notImpl("system_idle_time", 8),
 
   // ── Agent attachment staging and context graph ───────────────
   // Moves base64 attachment bytes into the workspace's .context.

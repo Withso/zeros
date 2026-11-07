@@ -2,9 +2,17 @@ import { z } from "zod";
 import { PromotionError, SHA, requireCheck, type Channel } from "./contracts";
 import { poll } from "./io";
 
+// The control plane forces an upgrade 30 days after a version's next release and
+// treats versions older than the ledger as unsupported, so the ledger must cover
+// that whole window. Readers mirror these bounds (release-ledger-limits.test.ts).
+export const LEDGER_RETENTION_DAYS = 30;
+export const MAX_LEDGER_RELEASES = 2000;
+export const MAX_LEDGER_BYTES = 512 * 1024;
+const DAY_MS = 24 * 60 * 60 * 1000;
+
 const ReleaseEntry = z.object({ version: z.string(), publishedAt: z.string().datetime(), sourceSha: z.string().regex(SHA) }).strict();
 export const ReleaseLedger = z.object({ version: z.literal(1), channel: z.enum(["alpha", "beta", "production"]),
-  releases: z.array(ReleaseEntry).max(200) }).strict();
+  releases: z.array(ReleaseEntry).max(MAX_LEDGER_RELEASES) }).strict();
 export type Ledger = z.infer<typeof ReleaseLedger>;
 export type LedgerEntry = z.infer<typeof ReleaseEntry>;
 
@@ -52,13 +60,23 @@ export function buildReleaseLedger(channel: Channel, previous: unknown | null, e
     }
     releases.push(candidate.data);
   }
-  return { version: 1, channel, releases: releases.slice(-200) };
+  return { version: 1, channel, releases: retainSupportWindow(releases, Date.parse(candidate.data.publishedAt)) };
+}
+
+/** A version stays supported until 30 days after its next release, so the newest
+ * release before the window is kept too: it is still supported while its successor
+ * is inside the window. */
+function retainSupportWindow(releases: LedgerEntry[], now: number): LedgerEntry[] {
+  const cutoff = now - LEDGER_RETENTION_DAYS * DAY_MS;
+  const inside = releases.findIndex(release => Date.parse(release.publishedAt) >= cutoff);
+  const first = inside < 0 ? releases.length - 1 : Math.max(0, inside - 1);
+  return releases.slice(first).slice(-MAX_LEDGER_RELEASES);
 }
 
 async function readJson(response: Response): Promise<unknown> {
   requireCheck(response.ok, "Release ledger could not be read; refusing to discard publication history");
   const text = await response.text();
-  requireCheck(Buffer.byteLength(text) <= 256 * 1024, "Release ledger exceeds its size bound");
+  requireCheck(Buffer.byteLength(text) <= MAX_LEDGER_BYTES, "Release ledger exceeds its size bound");
   try { return JSON.parse(text); }
   catch { throw new PromotionError("Release ledger JSON is invalid; refusing to discard publication history"); }
 }
