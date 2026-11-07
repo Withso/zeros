@@ -2914,11 +2914,13 @@ export class ZerosEngine {
         await pruneOrphanWorkspaceBranchOwnershipRefs({ signal });
       } },
       { name: "design-acls", run: async (signal) => {
-        const { cleanupLegacyDesignFilesystemGuards } = await import("./design/workspace-lock");
+        const { cleanupLegacyDesignFilesystemGuards, legacyDesignAclCleanupDue } = await import("./design/workspace-lock");
         const { withWorkspaceMutation } = await import("./git/mutation-lock");
         for (const workspace of listWorkspaces()) {
           if (signal.aborted) break;
           if (workspace.placement === "cloud" || workspace.archivedAt != null) continue;
+          // A sweep that failed recently waits out its retry interval without queueing for the lane.
+          if (!legacyDesignAclCleanupDue(workspace.path)) continue;
           // Archive/delete/move share this lane. Recheck after admission so a
           // queued cleanup cannot walk a retired or replacement checkout.
           await withWorkspaceMutation(workspace.path, async () => {
@@ -2928,7 +2930,7 @@ export class ZerosEngine {
                 current.archivedAt != null || getWorkspaceLifecycleStatus(current.id).operation != null ||
                 !fs.existsSync(current.path)) return;
             await cleanupLegacyDesignFilesystemGuards(current.path).catch(() => {
-              console.warn("[Zeros] historical Design ACL cleanup deferred until next launch");
+              console.warn("[Zeros] historical Design ACL cleanup incomplete; a launch retries it after a week");
             });
           }, { signal });
           await new Promise<void>((resolve) => setImmediate(resolve));

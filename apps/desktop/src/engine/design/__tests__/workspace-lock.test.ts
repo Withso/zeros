@@ -28,10 +28,12 @@ vi.mock("../directory", () => ({
 vi.mock("../../git/state", () => ({
   getWorkspaceByPath: () => aclHarness.workspace,
   getWorkspaceMeta: () => aclHarness.cleanupState,
-  setWorkspaceMeta: vi.fn(),
+  setWorkspaceMeta: (_id: string, _key: string, value: string) => { aclHarness.cleanupState = value; },
 }));
 
 import {
+  LEGACY_DESIGN_ACL_RETRY_MS,
+  legacyDesignAclCleanupDue,
   cleanupLegacyDesignFilesystemGuards,
   unfenceDesignDirectory,
   unlockLegacyDesignWorkspaceLock,
@@ -67,6 +69,23 @@ describe("Design filesystem compatibility cleanup", () => {
 
     expect(aclHarness.unlock).toHaveBeenCalledTimes(1);
     expect(aclHarness.unfence).toHaveBeenCalledTimes(1);
+  });
+
+  it("waits out the retry interval at launch after a sweep that could not finish, while explicit callers still sweep", async () => {
+    aclHarness.workspace = { id: "ws_stuck" };
+    await mkdir(path.join(root, "Zeros Design"));
+    aclHarness.unlock.mockResolvedValue({ changed: 10, failed: ["locked.txt"] });
+    expect(legacyDesignAclCleanupDue(root)).toBe(true);
+    await expect(cleanupLegacyDesignFilesystemGuards(root)).rejects.toThrow(/1 path/);
+    expect(aclHarness.cleanupState).toMatch(/^deferred:\d+$/);
+    expect(legacyDesignAclCleanupDue(root)).toBe(false);
+    expect(legacyDesignAclCleanupDue(root, Date.now() + LEGACY_DESIGN_ACL_RETRY_MS)).toBe(true);
+    // Design mode and archive call it directly and still sweep.
+    aclHarness.unlock.mockResolvedValue({ changed: 10, failed: [] });
+    await cleanupLegacyDesignFilesystemGuards(root);
+    expect(aclHarness.unlock).toHaveBeenCalledTimes(2);
+    expect(aclHarness.cleanupState).toBe("complete");
+    expect(legacyDesignAclCleanupDue(root)).toBe(false);
   });
 
   it("does not rescan a workspace after its durable cleanup completed", async () => {
