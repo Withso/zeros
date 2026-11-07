@@ -1083,7 +1083,7 @@ export class ZerosEngine {
         return workspaceId ? this.setup.info(workspaceId).state : null;
       },
       // Only Design re-reads; Files and Changes ignore a rebuilt output.
-      changed: (workspacePath) => {
+      changed: (workspacePath, change) => {
         const workspaceId = getWorkspaceByPath(workspacePath)?.id;
         // Outputs live in ignored .zeros/design-styles/, so no watcher event
         // fences an aggregate read that began before this rebuild.
@@ -1092,7 +1092,8 @@ export class ZerosEngine {
           createMessage({
             type: "DB_CHANGED",
             source: "engine",
-            kinds: ["designStyles"],
+            // A state-only change refreshes statuses without re-preparing frames.
+            kinds: [change?.output === false ? "designStyleStatus" : "designStyles"],
             ...(workspaceId ? { workspaceIds: [workspaceId] } : {}),
           }),
         );

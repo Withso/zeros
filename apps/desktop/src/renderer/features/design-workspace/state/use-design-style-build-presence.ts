@@ -9,7 +9,7 @@ import {
   onActiveBridgeChange,
 } from "../../../platform/bridge/active-bridge";
 import { designStyleBuildPresence } from "../../../platform/git";
-import { invalidateDesignWorkspacesForStyleBuild } from "./design-workspace-cache";
+import { invalidateDesignWorkspacesForStyleBuild, refreshDesignWorkspacesForStyleStatus } from "./design-workspace-cache";
 
 /** The engine treats a silent renderer as gone after 90 s. */
 export const DESIGN_STYLE_BUILD_HEARTBEAT_MS = 30_000;
@@ -53,7 +53,8 @@ export function startDesignStyleBuildPresence(
 let styleEventsStarted = false;
 
 /** A rebuilt output arrives as DB_CHANGED "designStyles": refresh only the
- * named Design snapshots, never the Files or Changes caches. */
+ * named Design snapshots, never the Files or Changes caches. A build whose
+ * state alone changed arrives as "designStyleStatus". */
 function startDesignStyleBuildEvents(): void {
   if (styleEventsStarted) return;
   styleEventsStarted = true;
@@ -61,8 +62,9 @@ function startDesignStyleBuildEvents(): void {
   const attach = (bridge: ReturnType<typeof getActiveBridge>) => {
     stop?.();
     stop = bridge?.on("DB_CHANGED", (message) => {
-      if (message.type !== "DB_CHANGED" || !message.kinds.includes("designStyles")) return;
-      invalidateDesignWorkspacesForStyleBuild(message.workspaceIds);
+      if (message.type !== "DB_CHANGED") return;
+      if (message.kinds.includes("designStyles")) invalidateDesignWorkspacesForStyleBuild(message.workspaceIds);
+      else if (message.kinds.includes("designStyleStatus")) refreshDesignWorkspacesForStyleStatus(message.workspaceIds);
     });
   };
   attach(getActiveBridge());
