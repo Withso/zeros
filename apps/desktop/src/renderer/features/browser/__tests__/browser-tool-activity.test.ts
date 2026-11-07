@@ -515,6 +515,20 @@ describe("compact browser transcript activity", () => {
         }),
       ),
     ).toMatchObject({ surface: "computer", tool: "type", label: "Typed" });
+    // Opening a page in an app keeps the app's identity, never the page's.
+    const openUrl = browserToolActivity(
+      mcpTool("claude-open-url", "mcp__zeros_computer__open_url", {
+        bundle_id: "com.google.Chrome",
+        url: "https://cursor.com/",
+      }),
+    );
+    expect(openUrl).toMatchObject({
+      surface: "computer",
+      tool: "open",
+      label: "Opened link",
+      appId: "com.google.Chrome",
+    });
+    expect(openUrl?.url).toBeUndefined();
     // Cursor: providerIdentifier plus toolName.
     expect(
       browserToolActivity(
@@ -584,13 +598,17 @@ describe("compact browser transcript activity", () => {
       rawOutput: [{ type: "text", text }],
     });
     for (const [id, text] of [
-      ["blocked", "Safari is blocked in Settings > Computer use."],
-      ["off", "Computer use is turned off in Settings > Computer use."],
-      ["denied", "The user did not allow Codex to control Safari."],
+      ["blocked", "Safari is blocked in Settings > General."],
+      ["off", "Computer use is turned off in Settings > General."],
       [
         "permission",
-        "Zeros needs Accessibility access to use your Mac. The user can turn it on in Settings > Computer use.",
+        "Zeros needs Accessibility access to use your Mac. The user can turn it on in Settings > General.",
       ],
+      // Saved transcripts keep the sentences from before computer use moved
+      // into General.
+      ["blocked-saved", "Safari is blocked in Settings > Computer use."],
+      ["off-saved", "Computer use is turned off in Settings > Computer use."],
+      ["denied-saved", "The user did not allow Codex to control Safari."],
     ] as const) {
       expect(browserToolActivity(failedClick(id, text))).toMatchObject({
         surface: "computer",

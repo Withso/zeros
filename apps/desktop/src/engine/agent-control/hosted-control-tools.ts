@@ -101,6 +101,8 @@ export class HostedControlTools<TName extends string>
   private turn = new AbortController();
   private turnId = newTurnId();
   private usedThisTurn = false;
+  /** Set between a turn's end and the next turn's start. */
+  private afterTurn = false;
   private readonly tools: readonly Tool[];
 
   constructor(
@@ -148,7 +150,11 @@ export class HostedControlTools<TName extends string>
     if (turn.aborted) return errorResult(text.stopped);
     if (signal.aborted) return errorResult(text.cancelled);
     const call = AbortSignal.any([signal, turn, this.retired.signal]);
-    this.usedThisTurn = true;
+    // A shell command can outlive its turn (`&`, background jobs). It runs,
+    // but hands the surface back as soon as it finishes instead of holding it
+    // until a later turn ends.
+    const outOfTurn = this.afterTurn;
+    if (!outOfTurn) this.usedThisTurn = true;
     try {
       return this.toCallToolResult(
         await untilAborted(
@@ -169,10 +175,13 @@ export class HostedControlTools<TName extends string>
       }
       if (this.retired.signal.aborted) throw new Error(text.retired);
       return errorResult(turn.aborted ? text.stopped : text.cancelled);
+    } finally {
+      if (outOfTurn && this.afterTurn) void this.release("turn-end");
     }
   }
 
   beginPrompt(): void {
+    this.afterTurn = false;
     if (this.turn.signal.aborted) this.turn = new AbortController();
     this.turnId = newTurnId();
     this.usedThisTurn = false;
@@ -189,6 +198,7 @@ export class HostedControlTools<TName extends string>
 
   /** The provider turn settled. */
   async endPrompt(): Promise<void> {
+    this.afterTurn = true;
     if (!this.usedThisTurn) return;
     this.usedThisTurn = false;
     await this.release("turn-end");

@@ -1,19 +1,23 @@
-# Native Codex computer and browser use
+# Computer use
 
-Zeros runs Codex through its pinned app-server. The installed Computer Use,
-Chrome and Browser plugins remain provider capabilities; Zeros does not copy
-the user's browser credentials. The provider owns its tool definitions,
-skills, hooks, application and website approvals, and control-session
-lifecycle.
+Zeros runs Codex through its pinned app-server. Codex uses Zeros computer use
+and the Zeros browser like every agent: Zeros turns OpenAI's bundled Browser,
+Chrome, Computer Use and Unified Computer Use plugins off on every Codex
+thread, and disables the computer-use `cua_repl` / `computer-use` servers by
+name (`adapters/codex/built-in-plugins.ts`). Native MCP discovery disables the
+plugins' other servers like any unimported local server. One path keeps
+blocked apps, the control bar, Stop and parallel chats the same for every
+agent. Zeros does not copy the user's browser credentials.
 
-Separately, **Settings → Computer use** controls Zeros' own computer-control
-runtime (the pinned Cua driver below), which local agent families can use
-through the `zeros_computer` tools. It is available and enabled by default
-for every user; explicit opt-outs and managed restrictions still take precedence.
-The two paths are independent: Codex's native plugins stay provider-owned.
-Zeros still requires the Mac's Accessibility and Screen Recording grants,
-and each chat asks before using an app. The [rollout](agent-control.md#rollout)
-has reached the public `default` stage, with no Internal switch.
+**Settings → General → Computer use** controls Zeros' own computer-control
+runtime (the pinned Cua driver below), which every local agent family uses
+through `zeros computer` or the `zeros_computer` tools. It is available and
+enabled by default for every user; explicit opt-outs and managed restrictions
+still take precedence. Zeros requires the Mac's Accessibility and Screen
+Recording grants (shown under Settings → General → Privacy), and blocked apps
+stay off limits. Agents use any other app without asking. The
+[rollout](agent-control.md#rollout) has reached the public `default` stage,
+with no Internal switch.
 
 ## Zeros computer use (Cua driver)
 
@@ -66,38 +70,56 @@ walks the user through granting them (status polling, request, and deep links
 into System Settings). App and simulator approvals arrive as permission cards
 in the requesting chat and are answered through the agent-control contract in
 [`agent-control.md`](agent-control.md). Transcript rows reuse the browser
-activity card with a computer surface; another chat holding the computer shows
-a waiting line instead of the queued action.
+activity card with a computer surface; a chat waiting for an app another chat
+is using shows a waiting line ("Waiting for Codex in another chat to finish
+using Safari") instead of the queued action.
+
+Several chats can use the Mac at once (`electron/computer-use/controller.ts`).
+A chat leases each app it acts in, by bundle ID, until its turn ends, its
+composer Stop, a denied app, a driver failure or the user blocking that app;
+another chat that wants the same app waits in that app's line, first come
+first served, for up to five minutes. Two chats that would wait for each
+other's apps are refused at once. Listing apps and windows takes no lease.
+Chats share one app listing for 30 seconds, because the driver's listing walks
+every installed app (about a second); a call that sees an app the listing
+misses reads it again. An app Zeros launches takes the pid its launch reports,
+a page opened in a running app keeps the listing, and any other open discards
+it.
+Input is delivered in the background, so chats in different apps never
+interrupt the user or each other. Only actions macOS delivers to the frontmost
+window (modified clicks, drags, the ambiguous-key retry) take turns, one driver
+call at a time across all chats. The control bar names every chat acting ("Claude Code and Codex are using Safari
+and Notes"); its Stop stops all of them, and a composer Stop stops only that
+chat. The bar never claims a key: agents work in the background while the user
+keeps typing in other apps, so Esc stays with whatever app the user is in.
+
+Each chat has one trusted driver session for all of its apps. Its public label
+is the agent's name, numbered for an agent's later sessions ("Claude Code 2"),
+because the driver never gives a closed session's label to another; the label
+names that chat's agent cursor. Closing a session ends its label with
+`end_session` first. Keys sent to one window of an app with several are
+retried once in the foreground when the driver refuses them as ambiguous.
 
 ## Runtime and profile ownership
 
 Codex Desktop materializes its bundled plugins as `source.type = "local"`.
-That source type alone cannot distinguish a user-authored MCP from the native
-computer/browser runtime. `bundled-runtime-plugins.ts` admits only the recognized
-`openai-bundled` runtime names, with matching plugin/marketplace identity, a
-materialization under the session's selected `CODEX_HOME`, and a matching
-manifest. Both current directory copies and older links into that home's
-versioned plugin cache are supported. This is provenance classification, not a
-signature verifier.
+Zeros gives them no exemption: like every local package, their MCP servers are
+disabled unless imported through **Customize → Import**, and their plugin gates
+are off. Restricted actors and tool-free helper threads exclude the whole disk
+plugin surface. Native configuration follows the profile actually selected for
+execution; a separately signed-in, isolated Codex profile does not receive
+another profile's local plugins or configuration.
 
-The exception does not enable a disabled plugin, admit arbitrary local packages,
-borrow another account's plugin cache, or override a config-declared MCP with the
-same name. Direct local MCP declarations still require **Customize → Import**.
-Restricted actors and tool-free helper threads continue to exclude native
-plugins. Zeros' existing browser binding and provider stop/interrupt hooks
-remain in place.
-
-Native configuration follows the profile actually selected for execution.
-An adopted CLI account using the desktop's Codex home can reuse that profile's
-installed runtime and settings. A separately signed-in, isolated Codex profile
-does not automatically receive another profile's local plugins or configuration.
-Subscription authentication is not a settings-sync API. The helper and Chrome
-extension must also exist on the execution Mac; a cloud engine does not acquire
-control of a user's laptop merely by signing into the same account.
+Zeros passes its own servers (`zeros_computer`, `zeros_browser` and the rest)
+to `codex app-server` with `-c`. The `thread/start` and `thread/resume`
+`mcp_servers` table that disables native servers replaces those `-c` servers for
+that thread, so it restates each Zeros server exactly as `-c` passed it
+(`mcpDisabledThreadConfig`). Check what a thread really has with
+`mcpServerStatus/list` and its `threadId`; without one, Codex reports the
+process-level set.
 
 Organization cloud workspaces explicitly report **Native browser is unavailable
-in cloud workspaces.** Codex's official browser runtime is not available for
-Linux VMs. Claude's Chrome integration requires a direct Claude login, not an
+in cloud workspaces.** Claude's Chrome integration requires a direct Claude login, not an
 API key or setup token. Neither provider's cloud chat sign-in grants browser or
 computer control. The shared provider/session UI and Browser settings explain
 these limits without offering installation on the user's Mac. Ordinary cloud
@@ -111,10 +133,10 @@ does not constitute full cloud browser parity.
 
 ## Permissions
 
-Computer use setup is managed in Codex/ChatGPT and macOS System Settings.
-For the native provider implementation, OpenAI's setup instructions name
-**Codex Computer Use** for Accessibility and Screen Recording. Shell tools that
-run `osascript` or `screencapture` take a different path: macOS checks the
+Zeros computer use needs Accessibility and Screen Recording granted to Zeros
+itself; Settings → General → Privacy shows both next to Full Disk Access and
+opens System Settings. Full Disk Access grants neither. Shell tools that run
+`osascript` or `screencapture` take a different path: macOS checks the
 responsible app for that process chain. A development session launched by an IDE
 or terminal can remain attributed to that launcher. The app being controlled is
 not automatically the app that needs the grant. Do not infer the permission
@@ -135,28 +157,17 @@ attribution and authorization results for the specific permission. Accessibility
 denial, missing Automation entitlements, and missing tools are distinct failures.
 A generic "enable Zeros" instruction is not reliable without that attribution.
 
-Codex's native computer use has no Zeros settings page (the separate Zeros
-runtime above has its own); its setup stays in Codex/ChatGPT and macOS. The
-Tools inventory reports the selected session's runtime connection; it does
-not equate that connection or the helper's installation with macOS permission
-readiness.
+Codex's own computer use and Browser plugins are disabled on every Zeros
+thread, so their setup and grants in Codex/ChatGPT do not affect Zeros chats.
 
-The user enables permissions in macOS and restarts the helper if requested.
-Codex still enforces app/site approval, browser profile selection, locked-use
-preferences, organization policy, and user stop/deny decisions. Zeros forwards
-provider approval requests through its existing permission handling; it does
-not silently grant access or change these preferences.
-
-Official setup references: [Computer Use](https://learn.chatgpt.com/docs/computer-use),
-[Chrome extension](https://learn.chatgpt.com/docs/chrome-extension), and
-[App Server](https://learn.chatgpt.com/docs/app-server). Apple's
+Apple's
 [Apple Events entitlement](https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.security.automation.apple-events)
 describes the separate requirement for requesting Automation consent.
 
 ## Transcript contract
 
-Native `cua_repl.js` and `node_repl.js` retain their provider-authored action
-titles and ordinary Zeros tool-row expansion. Completion results become
+Native `cua_repl.js` and `node_repl.js` rows (older transcripts, from before
+Zeros disabled Codex's plugins) retain their provider-authored action titles and ordinary Zeros tool-row expansion. Completion results become
 canonical text/image content so screenshots are visible without exposing a
 base64 JSON envelope. Provider failure status, explicit `isError`, and native
 timeouts remain failures. Background MCP startup/reconnect messages remain in

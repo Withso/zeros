@@ -125,7 +125,7 @@ export function createAgentControlOverlayHost(options: {
   ipc: Pick<IpcMain, "on" | "removeListener">;
   createView(): WebContentsView;
   load(view: WebContentsView): Promise<void>;
-  /** The user pressed Stop, or Esc while the bar had focus. */
+  /** The user pressed Stop, or Esc while a bar that answers to it had focus. */
   onStop(sessionId: string): void;
   fadeMs?: number;
   releaseMs?: number;

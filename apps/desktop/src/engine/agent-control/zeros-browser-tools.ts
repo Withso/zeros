@@ -33,7 +33,7 @@ export interface ZerosBrowserToolPorts {
   stop(browserSessionId: string): Promise<boolean>;
 }
 
-const IN_APP_OFF = "The in-app browser is turned off in Settings > Browser.";
+const IN_APP_OFF = "Browser use is turned off in Settings > Browser.";
 const STOPPED = "Browser work was stopped.";
 const CANCELLED = "The browser action was cancelled.";
 const RETIRED = "Browser tools were retired for this agent session.";
@@ -47,23 +47,10 @@ const TOOLS: readonly Tool[] = BROWSER_TOOL_DEFINITIONS.map((definition) => ({
   inputSchema: definition.inputSchema as Tool["inputSchema"],
 }));
 
-/** Whether an agent family may call `zeros_browser` on its Settings route.
- * Codex keeps the tools on its built-in route because the app-server adapter
- * removes them once OpenAI's Browser plugin loads, and keeps them as the
- * fallback when it cannot. */
-export function zerosBrowserToolPolicy(
-  agentFamily: string,
-  route: BrowserRoute,
-): ZerosBrowserToolPolicy {
+/** Whether an agent may call `zeros_browser` on its Settings route. One
+ * switch decides for every agent, Codex included. */
+export function zerosBrowserToolPolicy(route: BrowserRoute): ZerosBrowserToolPolicy {
   if (route === "zeros") return { ok: true };
-  if (agentFamily === "codex") {
-    return route === "codex-native"
-      ? { ok: true }
-      : {
-          ok: false,
-          reason: "Browser use is turned off for Codex in Settings > Browser.",
-        };
-  }
   if (route === "claude-chrome") {
     return {
       ok: false,

@@ -14,74 +14,30 @@ export const CLAUDE_CHROME_EXTENSION_URL =
   "https://chromewebstore.google.com/detail/claude/fcoeoabgfenejglbffodgkkbkcdhcgfn";
 export const CLAUDE_CHROME_DOCS_URL = "https://code.claude.com/docs/en/chrome";
 
-export type BrowserBooleanSetting =
-  | "codex_enabled"
-  | "codex_native"
-  | "in_app_enabled"
-  | "claude_enabled"
-  | "auto_open"
-  | "show_agent_cursor";
-export type BrowserStringSetting = "navigation_approval";
-export type BrowserNavigationApproval = "always-ask" | "always-allow";
+export type BrowserBooleanSetting = "enabled" | "claude_enabled" | "auto_open";
 export type BrowserAgentFamily = "codex" | "claude" | "cursor";
 
-export interface BrowserUseSettingsValue {
-  codex_enabled: boolean;
-  codex_native: boolean;
-  in_app_enabled: boolean;
-  claude_enabled: boolean;
-  auto_open: boolean;
-  show_agent_cursor: boolean;
-  navigation_approval: BrowserNavigationApproval;
-}
+export type BrowserUseSettingsValue = Record<BrowserBooleanSetting, boolean>;
 
-/** The Settings → Agents → Browser surface: Codex's rows, then Claude's and
- * Cursor's, then the rows that apply to every agent. Keeping the user-facing
- * copy beside its behavioral keys keeps the contract testable without
- * mounting the settings bridge. */
-export const BROWSER_SETTINGS_ROWS = {
-  codex: [
-    {
-      key: "codex_enabled",
-      label: "Enable browser use",
-      hint: "Allow Codex to use the in-app browser.",
-    },
-    {
-      key: "codex_native",
-      label: "Use Codex’s built-in browser",
-      hint: "When off, Codex uses the Zeros browser tools.",
-    },
-  ],
-  inApp: [
-    {
-      key: "in_app_enabled",
-      label: "Allow Claude and Cursor to use the in-app browser",
-      hint: "Claude uses Chrome when that’s on.",
-    },
-    {
-      key: "claude_enabled",
-      label: "Use Claude Code with Chrome",
-      hint: "Requires a Claude login and Chrome extension.",
-    },
-  ],
-  shared: [
-    {
-      key: "auto_open",
-      label: "Open the Browser tab automatically",
-      hint: undefined,
-    },
-    {
-      key: "navigation_approval",
-      label: "Approval for opening websites",
-      hint: undefined,
-    },
-    {
-      key: "show_agent_cursor",
-      label: "Show agent cursor",
-      hint: undefined,
-    },
-  ],
-} as const;
+/** Settings → Browser, with its copy beside the keys it writes so the
+ * contract stays testable without mounting the settings bridge. One switch
+ * decides for every agent; Claude in Chrome stays opt-in. */
+export const BROWSER_SETTINGS_ROWS: Record<
+  BrowserBooleanSetting,
+  { label: string; hint?: string }
+> = {
+  enabled: {
+    label: "Enable browser use",
+    hint: "Agents can use the Zeros browser.",
+  },
+  claude_enabled: {
+    label: "Use Claude Code with Chrome",
+    hint: "Requires a Claude login and Chrome extension.",
+  },
+  auto_open: {
+    label: "Open the Browser tab automatically",
+  },
+};
 
 function browserTable(
   effective: SettingsDoc | null | undefined,
@@ -110,58 +66,17 @@ export function browserRoutesFromEffective(
   };
 }
 
-/** Whether any agent can drive the in-app browser, which is when the
- * every-agent rows (auto-open, website approval, cursor) apply. */
-export function inAppBrowserInUse(
-  values: Pick<BrowserUseSettingsValue, "codex_enabled" | "in_app_enabled">,
-  availability: Pick<AgentControlAvailability, "zerosBrowser">,
-): boolean {
-  return (
-    values.codex_enabled || (availability.zerosBrowser && values.in_app_enabled)
-  );
-}
-
 export function browserSettingsFromEffective(
   effective: SettingsDoc | null | undefined,
 ): BrowserUseSettingsValue {
   const browser = browserTable(effective);
-  // `enabled` predates provider-specific switches. Retain it as the fallback
-  // so existing settings and managed deployments preserve their behavior.
-  const legacyEnabled =
-    typeof browser.enabled === "boolean" ? browser.enabled : true;
+  const routing = browserRouteSettings(browser);
   return {
-    codex_enabled:
-      typeof browser.codex_enabled === "boolean"
-        ? browser.codex_enabled
-        : legacyEnabled,
-    codex_native:
-      typeof browser.codex_native === "boolean" ? browser.codex_native : true,
-    in_app_enabled:
-      typeof browser.in_app_enabled === "boolean"
-        ? browser.in_app_enabled
-        : true,
-    claude_enabled:
-      typeof browser.claude_enabled === "boolean"
-        ? browser.claude_enabled
-        : false,
+    enabled: routing.enabled,
+    claude_enabled: routing.claudeChrome,
     auto_open:
       typeof browser.auto_open === "boolean" ? browser.auto_open : true,
-    show_agent_cursor:
-      typeof browser.show_agent_cursor === "boolean"
-        ? browser.show_agent_cursor
-        : true,
-    navigation_approval:
-      browser.navigation_approval === "always-allow"
-        ? "always-allow"
-        : "always-ask",
   };
-}
-
-export function browserStringSettingPatch(
-  key: BrowserStringSetting,
-  value: BrowserNavigationApproval,
-): SettingsDoc {
-  return { browser: { [key]: value } };
 }
 
 export function browserSettingPatch(
@@ -173,39 +88,17 @@ export function browserSettingPatch(
 
 export function browserSettingIsManaged(
   sources: Record<string, unknown> | null | undefined,
-  key: BrowserBooleanSetting | BrowserStringSetting,
+  key: BrowserBooleanSetting,
 ): boolean {
   return sources?.[`browser.${key}`] === "managed";
 }
 
+/** An optimistic value yields once a newer resolved snapshot shows it, or
+ * managed policy takes the key. Serialized writes can broadcast an older
+ * intermediate value first, which must not flicker back. */
 export function browserSettingSnapshotSupersedesPending(input: {
   key: BrowserBooleanSetting;
   value: boolean;
-  settled: boolean;
-  baseline: unknown;
-  resolved: unknown;
-}): boolean {
-  if (
-    !input.settled ||
-    !input.resolved ||
-    typeof input.resolved !== "object" ||
-    input.resolved === input.baseline
-  ) {
-    return false;
-  }
-  const snapshot = input.resolved as {
-    effective?: SettingsDoc;
-    sources?: Record<string, unknown>;
-  };
-  if (browserSettingIsManaged(snapshot.sources, input.key)) return true;
-  return (
-    browserSettingsFromEffective(snapshot.effective)[input.key] === input.value
-  );
-}
-
-export function browserStringSettingSnapshotSupersedesPending(input: {
-  key: BrowserStringSetting;
-  value: BrowserNavigationApproval;
   settled: boolean;
   baseline: unknown;
   resolved: unknown;

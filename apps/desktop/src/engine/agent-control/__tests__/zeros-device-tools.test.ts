@@ -358,9 +358,11 @@ describe("agent-control admissions with simulators", () => {
           ZEROS_BROWSER_TOOLS_ENV,
           ZEROS_COMPUTER_TOOLS_ENV,
           ZEROS_DEVICE_TOOLS_ENV,
+          "ZEROS_BROWSER_TOOLS_URL",
+          "ZEROS_COMPUTER_TOOLS_URL",
         ].sort(),
       );
-      expect(new Set(Object.values(all!.env)).size).toBe(3);
+      expect(new Set(Object.values(all!.env)).size).toBe(5);
     } finally {
       await all!.dispose();
     }
@@ -469,6 +471,7 @@ describe("agent-control admissions with simulators", () => {
       transport: "http",
       headersFromEnv: { Authorization: ZEROS_DEVICE_TOOLS_ENV },
       toolTimeoutSec: 660,
+      defaultToolsApproval: "approve",
     });
     const bearer = tools!.env[ZEROS_DEVICE_TOOLS_ENV]!;
     const client = new Client({ name: "agent-control-test", version: "1.0.0" });

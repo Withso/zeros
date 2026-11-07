@@ -8,6 +8,7 @@ import {
   computerUseBlockedAppsPatch,
   computerUsePreferencesFromEffective,
   computerUseRoutesFromEffective,
+  computerUseSectionOpen,
   computerUseSettingIsManaged,
   computerUseSettingPatch,
   computerUseSettingSnapshotSupersedesPending,
@@ -19,55 +20,53 @@ import {
 } from "../computer-use-settings";
 
 describe("Computer use settings", () => {
-  it("enables Zeros computer use by default while keeping Codex's native route", () => {
+  it("enables computer use and the agent cursor by default", () => {
     expect(computerUseSettingsFromEffective({})).toEqual({
       enabled: true,
-      codexNative: true,
       showAgentCursor: true,
       blockedApps: [...DEFAULT_COMPUTER_BLOCKED_APPS],
     });
     expect(computerUseSettingsFromEffective(null).enabled).toBe(true);
   });
 
-  it("routes each agent the way the engine does", () => {
+  it("gives every agent Zeros computer use while it is on, Codex included", () => {
     const open = { computerUse: true };
     expect(computerUseRoutesFromEffective({}, open)).toEqual({
-      codex: "codex-native",
+      codex: "zeros",
       claude: "zeros",
       cursor: "zeros",
     });
-    expect(
-      computerUseRoutesFromEffective({ computer_use: { enabled: true } }, open),
-    ).toEqual({ codex: "codex-native", claude: "zeros", cursor: "zeros" });
+    // A retired codex_native key left in the file changes nothing.
     expect(
       computerUseRoutesFromEffective(
-        { computer_use: { enabled: true, codex_native: false } },
+        { computer_use: { enabled: true, codex_native: true } },
         open,
       ),
     ).toEqual({ codex: "zeros", claude: "zeros", cursor: "zeros" });
     expect(
+      computerUseRoutesFromEffective({ computer_use: { enabled: false } }, open),
+    ).toEqual({ codex: "off", claude: "off", cursor: "off" });
+    expect(
       computerUseRoutesFromEffective(
-        { computer_use: { enabled: false, codex_native: false } },
-        open,
+        { computer_use: { enabled: true } },
+        { computerUse: false },
       ),
     ).toEqual({ codex: "off", claude: "off", cursor: "off" });
   });
 
-  it("keeps Codex on its own computer use while Zeros computer use is not available", () => {
-    expect(
-      computerUseRoutesFromEffective(
-        { computer_use: { enabled: true, codex_native: false } },
-        { computerUse: false },
-      ),
-    ).toEqual({ codex: "codex-native", claude: "off", cursor: "off" });
+  it("keeps General's Computer use section while either of its features is open", () => {
+    expect(computerUseSectionOpen({ computerUse: true, zerosBrowser: false })).toBe(true);
+    // The agent cursor also serves the Zeros browser.
+    expect(computerUseSectionOpen({ computerUse: false, zerosBrowser: true })).toBe(true);
+    expect(computerUseSectionOpen({ computerUse: false, zerosBrowser: false })).toBe(false);
   });
 
   it("pushes only what Electron main enforces", () => {
     const effective = {
       computer_use: {
         enabled: true,
-        codex_native: false,
         show_agent_cursor: false,
+        app_access: "ask",
         blocked_apps: ["com.example.Mail", "com.EXAMPLE.mail", "not a bundle"],
       },
     };
@@ -90,9 +89,6 @@ describe("Computer use settings", () => {
   it("writes single keys and replaces the whole blocked list", () => {
     expect(computerUseSettingPatch("enabled", true)).toEqual({
       computer_use: { enabled: true },
-    });
-    expect(computerUseSettingPatch("codex_native", false)).toEqual({
-      computer_use: { codex_native: false },
     });
     expect(computerUseSettingPatch("show_agent_cursor", false)).toEqual({
       computer_use: { show_agent_cursor: false },
@@ -127,13 +123,22 @@ describe("Computer use settings", () => {
   });
 
   it("keeps row copy short and names the permissions macOS shows", () => {
-    for (const row of Object.values(COMPUTER_USE_SETTINGS_ROWS)) {
-      expect(row.hint.length).toBeLessThanOrEqual(96);
+    for (const row of [
+      ...Object.values(COMPUTER_USE_SETTINGS_ROWS),
+      ...Object.values(COMPUTER_PERMISSION_ROWS),
+    ]) {
+      expect(row.hint.length).toBeLessThanOrEqual(48);
     }
-    expect(COMPUTER_USE_SETTINGS_ROWS.enabled.label).toBe("Enable computer use");
-    expect(COMPUTER_USE_SETTINGS_ROWS.codex_native.label).toBe(
-      "Use Codex’s built-in computer use",
-    );
+    expect(COMPUTER_USE_SETTINGS_ROWS.enabled).toEqual({
+      label: "Enable computer use",
+      hint: "Agents can use any app except blocked apps.",
+    });
+    expect(COMPUTER_USE_SETTINGS_ROWS.show_agent_cursor.label).toBe("Show agent cursor");
+    expect(Object.keys(COMPUTER_USE_SETTINGS_ROWS).sort()).toEqual([
+      "blocked_apps",
+      "enabled",
+      "show_agent_cursor",
+    ]);
     expect(COMPUTER_PERMISSION_ROWS.accessibility.label).toBe("Accessibility");
     expect(COMPUTER_PERMISSION_ROWS["screen-recording"].label).toBe(
       "Screen Recording",
@@ -160,13 +165,11 @@ describe("Computer use settings", () => {
     const effective = {
       computer_use: {
         enabled: true,
-        codex_native: false,
         show_agent_cursor: false,
         blocked_apps: ["com.apple.Safari"],
       },
     };
     expect(computerUseSettingValue(effective, "enabled")).toBe(true);
-    expect(computerUseSettingValue(effective, "codex_native")).toBe(false);
     expect(computerUseSettingValue(effective, "show_agent_cursor")).toBe(false);
     expect(computerUseSettingValue(effective, "blocked_apps")).toEqual([
       "com.apple.Safari",

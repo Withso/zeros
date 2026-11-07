@@ -71,6 +71,18 @@ describe("classifyEngineStderrLine", () => {
         "[cursor-host] shell-parser: tree-sitter natives are unavailable in this artifact; shell command analysis degrades to parsingFailed",
       ),
     ).toBe("warn");
+    // The host's own notice when they are missing beside the SDK, and where it
+    // found them (transport debug only).
+    expect(
+      classifyEngineStderrLine(
+        "[cursor-host] shell-parser: tree-sitter natives are unavailable beside @cursor/sdk; shell command analysis is degraded",
+      ),
+    ).toBe("warn");
+    expect(
+      classifyEngineStderrLine(
+        "[cursor-host] shell-parser: tree-sitter natives at /Zeros.app/Contents/Resources/app.asar.unpacked/node_modules/@cursor/sdk-darwin-arm64/vendor",
+      ),
+    ).toBe("log");
     expect(
       classifyEngineStderrLine(
         "[cursor-host] Error initializing ignore mapping: Ripgrep path not configured",

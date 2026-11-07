@@ -38,6 +38,7 @@ export function classifyEngineStderrLine(line: string): EngineStderrLevel {
     /^(?:ready in|workspace prewarmed in) \d+ms\b/.test(cursor) ||
     /^run \S+ first model output after \d+ms\b/.test(cursor) ||
     /^\(set ZEROS_CURSOR_TRANSPORT_DEBUG=1\b/.test(cursor) ||
+    /^shell-parser: tree-sitter natives at \S/.test(cursor) ||
     /^[∑↳](?:\s|$)/.test(cursor) ||
     /^proxy tunnel .+ connected in \d+ms\b/.test(cursor) ||
     /^slow .+ took \d+ms \((?:ok|connected|tcp-connected|tls-ready|\d{3})\)$/.test(

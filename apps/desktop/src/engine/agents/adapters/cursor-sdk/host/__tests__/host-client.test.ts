@@ -148,6 +148,27 @@ describe("CursorHostClient proxy", () => {
     await sending;
     client.dispose();
   });
+  it("sends a confirmed model record beside create and resume options", async () => {
+    const { client, fake } = makeClient();
+    const record = { id: "composer-2.5", displayName: "Composer 2.5" };
+    const creating = client.module().Agent.create({ apiKey: "k" }, { localModelCatalog: [record] });
+    expect(fake.lastReq()).toMatchObject({
+      op: "agent.create",
+      args: { apiKey: "k", zerosLocalModelCatalog: [record] },
+    });
+    fake.emit({ k: "res", id: fake.lastReq().id, ok: true, result: { agentId: "a" } });
+    await creating;
+    const resuming = client.module().Agent.resume("a", { apiKey: "k" }, { localModelCatalog: [record] });
+    expect(fake.lastReq().args).toEqual({ agentId: "a", opts: { apiKey: "k" }, zerosLocalModelCatalog: [record] });
+    fake.emit({ k: "res", id: fake.lastReq().id, ok: true, result: { agentId: "a" } });
+    await resuming;
+    const plain = client.module().Agent.resume("a", { apiKey: "k" });
+    expect(fake.lastReq().args).toEqual({ agentId: "a", opts: { apiKey: "k" } });
+    fake.emit({ k: "res", id: fake.lastReq().id, ok: true, result: { agentId: "a" } });
+    await plain;
+    client.dispose();
+  });
+
   it("registers one exit callback per host generation", () => {
     const transport = {
       send: vi.fn(),

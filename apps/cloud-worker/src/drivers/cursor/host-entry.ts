@@ -2,6 +2,7 @@ import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { Agent, Cursor } from "@cursor/sdk";
 import { CursorHost } from "./host";
+import { nativeCursorSdk } from "./local-model-catalog";
 import { CURSOR_VERSION, type HostEvent, type HostRequest, type HostResponse, type OpenParams, type PromptParams } from "./native-types";
 
 const require = createRequire(import.meta.url);
@@ -24,7 +25,7 @@ function send(frame: HostEvent | HostResponse): Promise<void> {
   output = delivery.catch(disconnect);
   return delivery.finally(() => { pendingBytes -= bytes; });
 }
-const host = new CursorHost(Agent, send, process.env.CURSOR_API_KEY, options => Cursor.models.list(options));
+const host = new CursorHost(nativeCursorSdk(Agent), send, process.env.CURSOR_API_KEY, options => Cursor.models.list(options));
 const record = (value: unknown): Record<string, unknown> => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 const validSelection = (params: Record<string, unknown>) => typeof params.model === "string" && params.model.length > 0 && params.model.length <= 200 && !/\s/.test(params.model) &&
   (params.effort === undefined || typeof params.effort === "string") && (params.fast === undefined || typeof params.fast === "boolean");

@@ -1,8 +1,8 @@
 import type { BrowserAppearance } from "@zeros/protocol/browser-tools";
 
 /** The part of Electron's `webContents.debugger` this module uses. Electron
- * gives each page one CDP session, shared with Codex's built-in browser and
- * file uploads; whichever owner detaches ends it for everyone. */
+ * gives each page one CDP session, shared with file uploads; whichever owner
+ * detaches ends it for everyone. */
 export interface BrowserAppearanceDebugger {
   isAttached(): boolean;
   attach(protocolVersion?: string): void;

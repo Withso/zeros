@@ -1,22 +1,11 @@
-import {
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  type ReactNode,
-} from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AppWindow, Plus } from "lucide-react";
-import {
-  readComputerUseStatus,
-  type ComputerUseStatus,
-} from "@zeros/protocol/computer-use-tools";
+import type { ComputerUseStatus } from "@zeros/protocol/computer-use-tools";
 
 import { Button } from "../../shared/ui/primitives/button";
 import { Switch } from "../../shared/ui/primitives/switch";
 import { toast } from "../../shared/ui/primitives/elements";
 import { nativeInvoke } from "../../platform/runtime";
-import { pollWhileForeground } from "../../shared/lib/element-activity";
 import {
   useNativeAppIcon,
   useNativeAppName,
@@ -29,10 +18,17 @@ import {
   getActiveOrganizationIdSnapshot,
   useActiveOrganization,
 } from "../team/team-store";
+import { useAgentControlFeatureActive } from "./agent-control-rollout";
+import {
+  refreshComputerUseStatus,
+  requestComputerUsePermissions,
+  useComputerUseStatus,
+} from "./computer-use-status";
 import {
   COMPUTER_PERMISSION_ROWS,
   COMPUTER_USE_SETTINGS_ROWS,
   computerUseBlockedAppsPatch,
+  computerUseSectionOpen,
   computerUseSettingIsManaged,
   computerUseSettingPatch,
   computerUseSettingSnapshotSupersedesPending,
@@ -67,6 +63,21 @@ const PERMISSION_STATUS_FIELD: Record<
   "screen-recording": "screenRecording",
 };
 
+/** Whose controls for this Mac the selected owner shows. Ownership alone does
+ * not determine placement: an organization exposes them only in its
+ * confirmed local workspace. */
+function useDevicePlacement(): "local" | "cloud" | "loading" {
+  const organization = useActiveOrganization();
+  const { workspace } = useActiveWorkspace();
+  if (!organization && getActiveOrganizationIdSnapshot()) return "loading";
+  if (!organization || organization.isPersonal) return "local";
+  return workspace?.organizationId === organization.id &&
+    workspace.placement !== "cloud" &&
+    !isCloudWorkspace(workspace.path)
+    ? "local"
+    : "cloud";
+}
+
 function ComputerSwitchRow({
   id,
   row,
@@ -74,7 +85,6 @@ function ComputerSwitchRow({
   managed,
   disabled,
   onCheckedChange,
-  children,
 }: {
   id: string;
   row: { label: string; hint?: string };
@@ -82,12 +92,10 @@ function ComputerSwitchRow({
   managed: boolean;
   disabled: boolean;
   onCheckedChange: (checked: boolean) => void;
-  children?: ReactNode;
 }) {
   return (
     <SettingsRow label={row.label} hint={row.hint} htmlFor={id}>
       <div className="flex items-center gap-2">
-        {children}
         {managed ? <span className="text-fg3 text-xs">Managed</span> : null}
         <Switch
           id={id}
@@ -101,62 +109,59 @@ function ComputerSwitchRow({
   );
 }
 
-export function ComputerUsePanel({
+/** Settings → General: computer use, the agent cursor it shares with the
+ * Zeros browser, and the blocked apps. An organization's General, which has
+ * no Privacy card, shows the macOS grants here as well. */
+export function ComputerUseSettingsSection({
   surfaceActive = true,
+  withPermissions = false,
 }: {
   surfaceActive?: boolean;
+  withPermissions?: boolean;
 }) {
-  const organization = useActiveOrganization();
-  if (!organization && getActiveOrganizationIdSnapshot())
+  const placement = useDevicePlacement();
+  const computerUse = useAgentControlFeatureActive("computerUse");
+  const zerosBrowser = useAgentControlFeatureActive("zerosBrowser");
+  if (!computerUseSectionOpen({ computerUse, zerosBrowser })) return null;
+  if (placement === "loading") {
+    return <p className="text-fg2 text-xs">Loading organization settings…</p>;
+  }
+  if (placement === "cloud") {
     return (
-      <p className="text-fg2 text-xs">Loading organization settings…</p>
+      <SettingsGroup title="Computer use">
+        <SettingsRow
+          label="Unavailable in cloud workspaces"
+          hint="Only in local workspaces."
+        />
+      </SettingsGroup>
     );
-  if (organization && !organization.isPersonal)
-    return (
-      <OrganizationComputerUsePanel
-        organizationId={organization.id}
-        surfaceActive={surfaceActive}
-      />
-    );
-  return <LocalComputerUsePanel surfaceActive={surfaceActive} />;
-}
-
-function OrganizationComputerUsePanel({
-  organizationId,
-  surfaceActive,
-}: {
-  organizationId: string;
-  surfaceActive: boolean;
-}) {
-  const { workspace } = useActiveWorkspace();
-  // Ownership alone does not determine placement. Only the selected owner's
-  // confirmed local workspace may expose this device's computer controls.
-  if (
-    workspace?.organizationId === organizationId &&
-    workspace.placement !== "cloud" &&
-    !isCloudWorkspace(workspace.path)
-  )
-    return <LocalComputerUsePanel surfaceActive={surfaceActive} />;
+  }
   return (
-    <SettingsGroup title="Computer use">
-      <SettingsRow
-        label="Unavailable in cloud workspaces"
-        hint="Only in local workspaces."
-      />
-    </SettingsGroup>
+    <LocalComputerUseSettings
+      surfaceActive={surfaceActive}
+      computerUse={computerUse}
+      withPermissions={withPermissions}
+    />
   );
 }
 
-function LocalComputerUsePanel({ surfaceActive }: { surfaceActive: boolean }) {
+function LocalComputerUseSettings({
+  surfaceActive,
+  computerUse,
+  withPermissions,
+}: {
+  surfaceActive: boolean;
+  computerUse: boolean;
+  withPermissions: boolean;
+}) {
   const resolved = useResolvedSettings();
   const layer = useSettingsLayer("user");
+  const status = useComputerUseStatus(surfaceActive && computerUse);
   const [pending, setPending] = useState<
     Partial<Record<ComputerUseBooleanSetting, PendingComputerSetting>>
   >({});
   const [pendingBlockedApps, setPendingBlockedApps] =
     useState<PendingBlockedApps | null>(null);
-  const [status, setStatus] = useState<ComputerUseStatus | null>(null);
-  const [permissionRequesting, setPermissionRequesting] = useState(false);
   const [addingApp, setAddingApp] = useState(false);
   const sequenceRef = useRef(0);
   const writeTailRef = useRef<Promise<void>>(Promise.resolve());
@@ -172,32 +177,12 @@ function LocalComputerUsePanel({ surfaceActive }: { surfaceActive: boolean }) {
     | undefined;
   const values: Record<ComputerUseBooleanSetting, boolean> = {
     enabled: pending.enabled?.value ?? confirmed.enabled,
-    codex_native: pending.codex_native?.value ?? confirmed.codexNative,
     show_agent_cursor:
       pending.show_agent_cursor?.value ?? confirmed.showAgentCursor,
   };
   const blockedApps = pendingBlockedApps?.value ?? confirmed.blockedApps;
   const managed = (key: ComputerUseSettingKey) =>
     computerUseSettingIsManaged(sources, key);
-
-  const refreshStatus = useCallback(async () => {
-    try {
-      const next = readComputerUseStatus(
-        await nativeInvoke<unknown>("computer_use_status"),
-      );
-      // A malformed answer keeps the last confirmed state on screen.
-      if (next) setStatus(next);
-    } catch {
-      // No native bridge (web preview): the permission walkthrough stays out.
-    }
-  }, []);
-
-  // The user flips the macOS toggles in System Settings, outside this window,
-  // so poll while the panel is visible and refresh when the window refocuses.
-  useEffect(() => {
-    if (!surfaceActive) return;
-    return pollWhileForeground(() => void refreshStatus(), 5000);
-  }, [refreshStatus, surfaceActive]);
 
   // A write updates the layer cache immediately, while the resolved cache is
   // replaced by the following settings broadcast. Retain the optimistic value
@@ -225,9 +210,6 @@ function LocalComputerUsePanel({ surfaceActive }: { surfaceActive: boolean }) {
       }
       return changed ? next : current;
     });
-  }, [resolved.resolved]);
-
-  useEffect(() => {
     setPendingBlockedApps((current) =>
       current &&
       computerUseSettingSnapshotSupersedesPending({
@@ -247,21 +229,15 @@ function LocalComputerUsePanel({ surfaceActive }: { surfaceActive: boolean }) {
   // has to turn them on.
   const walkthroughPermissions = useCallback(async () => {
     try {
-      const current = readComputerUseStatus(
-        await nativeInvoke<unknown>("computer_use_status"),
-      );
-      if (!current) return;
-      setStatus(current);
+      const current = await refreshComputerUseStatus();
       if (
+        !current ||
         !current.available ||
         (current.accessibility && current.screenRecording)
       ) {
         return;
       }
-      const next = readComputerUseStatus(
-        await nativeInvoke<unknown>("computer_use_permissions_request"),
-      );
-      setStatus(next ?? current);
+      await requestComputerUsePermissions();
     } catch {
       // The bridge is gone; the permission rows keep the last known state.
     }
@@ -297,7 +273,7 @@ function LocalComputerUsePanel({ surfaceActive }: { surfaceActive: boolean }) {
             delete next[key];
             return next;
           });
-          toast.error("Computer use setting could not be saved.", {
+          toast.error("Setting could not be saved.", {
             description:
               error instanceof Error ? error.message : "Try again in a moment.",
           });
@@ -335,32 +311,6 @@ function LocalComputerUsePanel({ surfaceActive }: { surfaceActive: boolean }) {
         });
     },
     [layer, resolved],
-  );
-
-  const grantPermission = useCallback(
-    async (kind: ComputerPermissionKind) => {
-      setPermissionRequesting(true);
-      try {
-        const next = readComputerUseStatus(
-          await nativeInvoke<unknown>("computer_use_permissions_request"),
-        );
-        if (next) setStatus(next);
-        // The macOS prompt appears only once; a denied grant has to be turned
-        // on by hand, in the pane for exactly this permission.
-        if (!next?.[PERMISSION_STATUS_FIELD[kind]]) {
-          await nativeInvoke("computer_use_permissions_open", { kind });
-        }
-      } catch (error) {
-        toast.error("Couldn't ask macOS for access.", {
-          description:
-            error instanceof Error ? error.message : "Try again in a moment.",
-        });
-      } finally {
-        setPermissionRequesting(false);
-        void refreshStatus();
-      }
-    },
-    [refreshStatus],
   );
 
   const addBlockedApp = useCallback(async () => {
@@ -410,90 +360,155 @@ function LocalComputerUsePanel({ surfaceActive }: { surfaceActive: boolean }) {
     />
   );
 
-  // One "Computer use" heading over the agent switches, then the macOS
-  // permission walkthrough, the blocked-apps list, and the shared cursor row.
+  // One section: 12px between its cards, as a single page's cards.
   return (
     <div className="flex flex-col gap-3">
       <SettingsGroup title="Computer use">
-        {switchRow("enabled", COMPUTER_USE_SETTINGS_ROWS.enabled, {
-          inactive: status?.available === false && !values.enabled,
-        })}
-        {switchRow("codex_native", COMPUTER_USE_SETTINGS_ROWS.codex_native)}
-      </SettingsGroup>
-
-      {status && !status.available ? (
-        <SettingsGroup title="Permissions">
+        {computerUse
+          ? switchRow("enabled", COMPUTER_USE_SETTINGS_ROWS.enabled, {
+              inactive: status?.available === false && !values.enabled,
+            })
+          : null}
+        {computerUse && status && !status.available ? (
           <SettingsRow
             label="Computer use unavailable"
             hint="Needs macOS and the Zeros app."
           />
-        </SettingsGroup>
-      ) : null}
-      {status?.available ? (
-        <SettingsGroup
-          title="Permissions"
-          description="Zeros needs both."
-        >
-          {(
-            Object.keys(COMPUTER_PERMISSION_ROWS) as ComputerPermissionKind[]
-          ).map((kind) => {
-            const row = COMPUTER_PERMISSION_ROWS[kind];
-            const granted = status[PERMISSION_STATUS_FIELD[kind]];
-            return (
-              <SettingsRow key={kind} label={row.label} hint={row.hint}>
-                {granted ? (
-                  <span className="text-fg3 text-xs">On</span>
-                ) : (
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    disabled={permissionRequesting}
-                    onClick={() => void grantPermission(kind)}
-                  >
-                    Grant access
-                  </Button>
-                )}
-              </SettingsRow>
-            );
-          })}
-        </SettingsGroup>
-      ) : null}
-
-      <SettingsGroup
-        title={COMPUTER_USE_SETTINGS_ROWS.blocked_apps.label}
-        description={COMPUTER_USE_SETTINGS_ROWS.blocked_apps.hint}
-      >
-        {blockedApps.map((bundleId) => (
-          <BlockedAppRow
-            key={bundleId}
-            bundleId={bundleId}
-            active={surfaceActive}
-            disabled={blockedAppsDisabled}
-            onRemove={(id) => updateBlockedApps(withoutBlockedApp(blockedApps, id))}
-          />
-        ))}
-        <SettingsRow label="Add app">
-          <div className="flex items-center gap-2">
-            {managed("blocked_apps") ? (
-              <span className="text-fg3 text-xs">Managed</span>
-            ) : null}
-            <Button
-              variant="secondary"
-              size="sm"
-              disabled={blockedAppsDisabled || addingApp}
-              onClick={() => void addBlockedApp()}
-            >
-              <Plus className="size-3" aria-hidden="true" />
-              Add app
-            </Button>
-          </div>
-        </SettingsRow>
-      </SettingsGroup>
-
-      <SettingsGroup>
+        ) : null}
+        {withPermissions ? <ComputerPermissionRows surfaceActive={surfaceActive} /> : null}
         {switchRow("show_agent_cursor", COMPUTER_USE_SETTINGS_ROWS.show_agent_cursor)}
       </SettingsGroup>
+
+      {computerUse ? (
+        <SettingsGroup
+          title={COMPUTER_USE_SETTINGS_ROWS.blocked_apps.label}
+          description={COMPUTER_USE_SETTINGS_ROWS.blocked_apps.hint}
+        >
+          {blockedApps.map((bundleId) => (
+            <BlockedAppRow
+              key={bundleId}
+              bundleId={bundleId}
+              active={surfaceActive}
+              disabled={blockedAppsDisabled}
+              onRemove={(id) => updateBlockedApps(withoutBlockedApp(blockedApps, id))}
+            />
+          ))}
+          <SettingsRow label="Add app">
+            <div className="flex items-center gap-2">
+              {managed("blocked_apps") ? (
+                <span className="text-fg3 text-xs">Managed</span>
+              ) : null}
+              <Button
+                variant="secondary"
+                size="sm"
+                disabled={blockedAppsDisabled || addingApp}
+                onClick={() => void addBlockedApp()}
+              >
+                <Plus className="size-3" aria-hidden="true" />
+                Add app
+              </Button>
+            </div>
+          </SettingsRow>
+        </SettingsGroup>
+      ) : null}
     </div>
+  );
+}
+
+/** Settings → General → Privacy: the two macOS grants computer use needs,
+ * shaped like Full Disk Access beside them. */
+export function ComputerPermissionRows({
+  surfaceActive = true,
+}: {
+  surfaceActive?: boolean;
+}) {
+  const placement = useDevicePlacement();
+  const computerUse = useAgentControlFeatureActive("computerUse");
+  const watching = surfaceActive && computerUse && placement === "local";
+  const status = useComputerUseStatus(watching);
+  const [requesting, setRequesting] = useState(false);
+  if (!watching || !status?.available) return null;
+  return (
+    <>
+      {(Object.keys(COMPUTER_PERMISSION_ROWS) as ComputerPermissionKind[]).map(
+        (kind) => (
+          <ComputerPermissionRow
+            key={kind}
+            kind={kind}
+            status={status}
+            requesting={requesting}
+            onRequesting={setRequesting}
+          />
+        ),
+      )}
+    </>
+  );
+}
+
+function ComputerPermissionRow({
+  kind,
+  status,
+  requesting,
+  onRequesting,
+}: {
+  kind: ComputerPermissionKind;
+  status: ComputerUseStatus;
+  requesting: boolean;
+  onRequesting: (requesting: boolean) => void;
+}) {
+  const row = COMPUTER_PERMISSION_ROWS[kind];
+  const granted = status[PERMISSION_STATUS_FIELD[kind]];
+  const openPane = async () => {
+    try {
+      await nativeInvoke("computer_use_permissions_open", { kind });
+    } catch {
+      toast.error(
+        `Could not open System Settings. Open Privacy & Security > ${row.label} manually.`,
+      );
+    }
+  };
+  const grant = async () => {
+    onRequesting(true);
+    try {
+      const next = await requestComputerUsePermissions();
+      // The macOS prompt appears only once; a denied grant has to be turned
+      // on by hand, in the pane for exactly this permission.
+      if (!next?.[PERMISSION_STATUS_FIELD[kind]]) await openPane();
+    } catch (error) {
+      toast.error("Couldn't ask macOS for access.", {
+        description:
+          error instanceof Error ? error.message : "Try again in a moment.",
+      });
+    } finally {
+      onRequesting(false);
+      void refreshComputerUseStatus();
+    }
+  };
+  return (
+    <SettingsRow label={row.label} hint={row.hint}>
+      <div className="flex items-center gap-3">
+        <span
+          role="status"
+          className="text-fg3 text-xs whitespace-nowrap"
+          aria-label={`${row.label} status`}
+        >
+          {granted ? "Granted" : ""}
+        </span>
+        {granted ? (
+          <Button variant="secondary" onClick={() => void openPane()}>
+            Open System Settings
+          </Button>
+        ) : (
+          <Button
+            variant="secondary"
+            disabled={requesting}
+            onClick={() => void grant()}
+          >
+            Grant access
+          </Button>
+        )}
+      </div>
+    </SettingsRow>
   );
 }
 

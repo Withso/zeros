@@ -6,6 +6,7 @@ import { FallbackModelSelection } from "../shared/fallback-model-selection";
 import { isCuratedModel } from "../shared/curated-models";
 import modelCatalogJson from "../../../../../../../catalogs/models-v1.json";
 import { exactModelFallbackError, requireExplicitModel } from "../shared/exact-model-selection";
+import { isZerosControlShellCommand } from "./zeros-control-commands";
 import {
   AccountModelDiscovery,
   type AccountModelState,
@@ -3225,7 +3226,8 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       }
       if (
         state.permissionMode !== "plan" &&
-        isZerosControlTool(toolName, zerosControlServers, options.mcpServer) &&
+        (isZerosControlTool(toolName, zerosControlServers, options.mcpServer) ||
+          isZerosControlShellCommand(toolName, input, zerosControlServers)) &&
         // Explicit user and SDK approval requirements win for every control
         // namespace, including browser and computer actions.
         !claudeRequiresExplicitApproval(options)

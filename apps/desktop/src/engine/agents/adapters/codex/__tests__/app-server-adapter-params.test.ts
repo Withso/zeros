@@ -19,7 +19,6 @@ import path from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import type { AgentBrowserUse } from "../../../types";
 
 import {
   buildThreadStartParams,
@@ -154,32 +153,28 @@ describe("buildThreadStartParams", () => {
     },
   );
 
-  it("keeps the bundled Browser plugin off without a native host binding", () => {
+  it("turns every built-in browser and computer-use plugin off", () => {
     const params = buildThreadStartParams("/tmp", undefined, "ask");
 
     expect(params.config).toEqual({
       "plugins.browser@openai-bundled.enabled": false,
-    });
-  });
-
-  it("uses only the official Browser plugin when a native IAB host is bound", () => {
-    const browserUse: AgentBrowserUse = {
-      kind: "codex-app-server",
-      browserSessionId: "browser-session",
-    };
-
-    const params = buildThreadStartParams(
-      "/tmp",
-      undefined,
-      "ask",
-      undefined,
-      browserUse,
-    );
-
-    expect(params.config).toEqual({
-      "plugins.browser@openai-bundled.enabled": true,
+      "plugins.chrome@openai-bundled.enabled": false,
+      "plugins.computer-use@openai-bundled.enabled": false,
+      "plugins.unified-computer-use@openai-bundled.enabled": false,
     });
     expect(params).not.toHaveProperty("dynamicTools");
+  });
+
+  it("keeps the plugin gates over native MCP disables", () => {
+    const params = buildThreadStartParams("/tmp", undefined, "ask", undefined, {
+      mcp_servers: { notes: { enabled: false, command: "zeros-disabled-mcp-server" } },
+      "plugins.browser@openai-bundled.enabled": true,
+    });
+
+    expect(params.config).toMatchObject({
+      mcp_servers: { notes: { enabled: false } },
+      "plugins.browser@openai-bundled.enabled": false,
+    });
   });
 });
 

@@ -55,6 +55,7 @@ import type {
   SdkRun,
   CursorLocalStore,
   CursorModelListItem,
+  CursorNativeCallOptions,
   CursorSdkSendOptions,
   CursorAgentUsage,
 } from "../adapter";
@@ -560,6 +561,7 @@ export class CursorHostClient {
       send: async (
         message: unknown,
         options?: CursorSdkSendOptions,
+        native?: CursorNativeCallOptions,
       ): Promise<SdkRun> => {
         // Assign the runId + register its stream queue BEFORE the request, so a
         // run.msg event can never arrive before its queue exists.
@@ -578,6 +580,7 @@ export class CursorHostClient {
               runId,
               message,
               options: wireOptions,
+              ...(native ? { zerosLocalModelCatalog: native.localModelCatalog } : {}),
               observers: {
                 delta: typeof onDelta === "function",
                 step: typeof onStep === "function",
@@ -634,17 +637,19 @@ export class CursorHostClient {
   module(): CursorSdkModule {
     return {
       Agent: {
-        create: async (opts) => {
+        // The host strips `zerosLocalModelCatalog` before calling the SDK.
+        create: async (opts, native) => {
           const res = await this.request<{ agentId: string; handleId?: string }>(
             "agent.create",
-            opts,
+            native ? { ...opts, zerosLocalModelCatalog: native.localModelCatalog } : opts,
           );
           return this.makeAgent(res.agentId, res.handleId);
         },
-        resume: async (agentId, opts) => {
+        resume: async (agentId, opts, native) => {
           const res = await this.request<{ agentId: string; handleId?: string }>("agent.resume", {
             agentId,
             opts: opts ?? {},
+            ...(native ? { zerosLocalModelCatalog: native.localModelCatalog } : {}),
           });
           return this.makeAgent(res.agentId, res.handleId);
         },

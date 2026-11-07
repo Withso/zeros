@@ -308,6 +308,11 @@ export class DesignAgentMcpServer {
     return `http://127.0.0.1:${this.port}/mcp`;
   }
 
+  /** The single-call route shell commands use beside `/mcp`. */
+  get callUrl(): string {
+    return this.url.replace(/\/mcp$/, "/call");
+  }
+
   get registration(): Extract<McpServerRegistration, { transport: "http" }> {
     return {
       name: this.name,
@@ -522,7 +527,10 @@ export class DesignAgentMcpServer {
     return server;
   }
 
-  private allowedRequest(request: http.IncomingMessage): boolean {
+  private allowedRequest(
+    request: http.IncomingMessage,
+    route: "/mcp" | "/call" = "/mcp",
+  ): boolean {
     const host = (request.headers.host ?? "").toLowerCase();
     if (
       host !== `127.0.0.1:${this.port}` &&
@@ -530,7 +538,7 @@ export class DesignAgentMcpServer {
     ) {
       return false;
     }
-    if (request.url !== "/mcp") return false;
+    if (request.url !== route) return false;
     const origin = request.headers.origin?.toLowerCase();
     if (
       origin !== undefined &&
@@ -556,11 +564,95 @@ export class DesignAgentMcpServer {
     );
   }
 
+  /** One product tool per request for shell commands such as
+   * `zeros computer open`: the same capability, admission and handler as
+   * `/mcp`, without an MCP session. A shell sends no Origin, so any Origin is
+   * refused. Only handler-backed servers (agent control) offer it. */
+  private async handleCall(
+    request: http.IncomingMessage,
+    response: http.ServerResponse,
+  ): Promise<void> {
+    const handler = this.options.handler;
+    if (!handler || request.headers.origin !== undefined || !this.allowedRequest(request, "/call")) {
+      request.resume();
+      endStatus(response, request.headers.origin ? 403 : 401);
+      return;
+    }
+    if (request.method !== "POST") {
+      request.resume();
+      endStatus(response, 405);
+      return;
+    }
+    if (
+      this.activeRequests >= MAX_CONCURRENT_REQUESTS ||
+      this.activeToolCalls >= MAX_CONCURRENT_REQUESTS
+    ) {
+      request.resume();
+      endStatus(response, 429);
+      return;
+    }
+    this.activeRequests += 1;
+    let body: unknown;
+    try {
+      body = await readBoundedJsonBody(request);
+    } finally {
+      this.activeRequests -= 1;
+    }
+    const call =
+      body && typeof body === "object" && !Array.isArray(body)
+        ? (body as Record<string, unknown>)
+        : null;
+    const args = call?.arguments ?? {};
+    if (
+      !call ||
+      typeof call.name !== "string" ||
+      call.name.length > 64 ||
+      !args ||
+      typeof args !== "object" ||
+      Array.isArray(args)
+    ) {
+      endStatus(response, 400);
+      return;
+    }
+    if (this.activeToolCalls >= MAX_CONCURRENT_REQUESTS) {
+      endStatus(response, 429);
+      return;
+    }
+    // Reading the body yields; the capability may have been revoked meanwhile.
+    try {
+      this.assertActive();
+    } catch {
+      endStatus(response, 401);
+      return;
+    }
+    const abort = new AbortController();
+    const onClose = () => {
+      if (!response.writableFinished) abort.abort();
+    };
+    response.on("close", onClose);
+    this.activeToolCalls += 1;
+    try {
+      const result = await handler.callTool(call.name, args, abort.signal);
+      if (response.writableEnded) return;
+      response.statusCode = 200;
+      response.setHeader("Content-Type", "application/json");
+      response.setHeader("Cache-Control", "no-store");
+      response.end(JSON.stringify(result));
+    } finally {
+      this.activeToolCalls -= 1;
+      response.off("close", onClose);
+    }
+  }
+
   private async handle(
     request: http.IncomingMessage,
     response: http.ServerResponse,
   ): Promise<void> {
     try {
+      if (request.url === "/call") {
+        await this.handleCall(request, response);
+        return;
+      }
       if (!this.allowedRequest(request)) {
         endStatus(response, request.headers.origin ? 403 : 401);
         return;

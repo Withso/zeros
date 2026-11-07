@@ -25,7 +25,6 @@ import {
   app,
   BrowserWindow,
   dialog,
-  globalShortcut,
   ipcMain,
   nativeImage,
   nativeTheme,
@@ -166,6 +165,7 @@ import {
   shouldRevokeBrowserSurfaceForNavigation,
 } from "./browser/surface";
 import { createComputerControlPanel } from "./computer-use/control-panel";
+import { openUrlInApp } from "./computer-use/launch-services";
 import {
   createCuaDriverHost,
   cuaDriverBinaryPath,
@@ -1379,23 +1379,17 @@ app.whenReady().then(async () => {
   });
   setCommand("browser_ui_preferences_update", async (args, event) => {
     trustedBrowserWindow(event);
+    // An older renderer's codexNativeEnabled and navigationApproval are
+    // ignored: neither has a Settings row any more.
     if (
       typeof args.browserEnabled !== "boolean" ||
-      (args.codexNativeEnabled !== undefined &&
-        typeof args.codexNativeEnabled !== "boolean") ||
-      typeof args.showAgentCursor !== "boolean" ||
-      (args.navigationApproval !== "always-ask" &&
-        args.navigationApproval !== "always-allow")
+      typeof args.showAgentCursor !== "boolean"
     ) {
       throw new Error("Invalid browser UI preferences.");
     }
     (await readyBrowserService()).setUiPreferences({
       browserEnabled: args.browserEnabled,
-      ...(typeof args.codexNativeEnabled === "boolean"
-        ? { codexNativeEnabled: args.codexNativeEnabled }
-        : {}),
       showAgentCursor: args.showAgentCursor,
-      navigationApproval: args.navigationApproval,
     });
     return true;
   });
@@ -1453,6 +1447,10 @@ app.whenReady().then(async () => {
   const agentControl = createAgentControlRuntime({
     platform: process.platform,
     selfPid: process.pid,
+    ...(process.platform === "darwin"
+      ? { openUrl: (bundleId: string, url: string, signal: AbortSignal) =>
+          openUrlInApp(bundleId, url, signal) }
+      : {}),
     host: createCuaDriverHost({
       loadSdk: async () => {
         await fs.promises.mkdir(computerUseHome, {
@@ -1523,7 +1521,6 @@ app.whenReady().then(async () => {
         workArea: () =>
           screen.getDisplayNearestPoint(screen.getCursorScreenPoint())
             .workArea,
-        shortcuts: globalShortcut,
         onStop,
       }),
     driverInstalled: () => cuaDriverExecutable() !== null,

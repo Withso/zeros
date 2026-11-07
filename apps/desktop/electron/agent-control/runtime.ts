@@ -35,7 +35,7 @@ export interface AgentControlRuntimeOptions {
   selfPid: number;
   host: ComputerDriverHost;
   permissions: MacComputerPermissions;
-  /** The floating control bar. `onStop` is the user's Stop or Esc. */
+  /** The floating control bar. `onStop` is the user's Stop. */
   createPanel(onStop: () => void): ComputerControlPanelHost;
   /** This build ships the driver executable. */
   driverInstalled(): boolean;
@@ -44,8 +44,10 @@ export interface AgentControlRuntimeOptions {
   onConfirmationRequest(request: AgentControlConfirmationRequest): void;
   onConfirmationSettled(confirmationId: string): void;
   onComputerState(state: ComputerUseStateSnapshot): void;
-  /** Simulator use, where Zeros has simulators. Approvals go through the
-   * same broker as computer use. */
+  /** Launch Services URL hand-off for `open_url`; macOS only. */
+  openUrl?(bundleId: string, url: string, signal: AbortSignal): Promise<void>;
+  /** Simulator use, where Zeros has simulators. Its approvals go through
+   * the confirmation broker. */
   devices?: Omit<DeviceUseControllerOptions, "confirm" | "denyConfirmations">;
   startService?: typeof startAgentControlService;
   log?(message: string): void;
@@ -95,12 +97,9 @@ export function createAgentControlRuntime(
     host: options.host,
     permissions: options.permissions,
     panel,
-    confirm: (input, signal) => confirmations.confirm(input, signal),
-    denyConfirmations: (workspaceId, conversationId) => {
-      confirmations.denyOwner(workspaceId, conversationId);
-    },
     onState: options.onComputerState,
     selfPid: options.selfPid,
+    ...(options.openUrl ? { openUrl: options.openUrl } : {}),
   });
   const controller = computer;
   const devices = options.devices

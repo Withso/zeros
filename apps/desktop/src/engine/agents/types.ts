@@ -40,7 +40,6 @@ import type {
 import type { ExecutionId, ProviderBinding } from "@zeros/protocol/identities";
 import type {
   AccountDetails,
-  AgentCapabilityNotice,
   SteerOutcome,
 } from "@zeros/protocol/messages";
 import type {
@@ -199,19 +198,6 @@ export interface AgentGatewayEvents {
     outcome: QuestionOutcome,
   ) => void;
   onAgentStderr: (agentId: string, line: string) => void;
-  /** A session started without a native provider capability the user can
-   * act on. Delivered to local desktop clients only. */
-  onCapabilityNotice?: (
-    agentId: string,
-    event: { sessionId?: string; notice: AgentCapabilityNotice },
-  ) => void;
-  /** The provider's own computer use started acting in this session
-   * (`active`, repeated while it keeps acting) or its turn ended. Zeros'
-   * computer use makes other chats wait meanwhile. */
-  onNativeComputerUse?: (
-    agentId: string,
-    event: { sessionId: string; active: boolean },
-  ) => void;
   onAgentExit: (
     agentId: string,
     code: number | null,
@@ -244,11 +230,6 @@ export type McpServerRegistration =
       /** Native vault identity; never serialized into provider configuration. */
       credentialKey?: string;
       listenUrl?: string;
-      /** Provider startup allowance for heavyweight local MCP runtimes. */
-      startupTimeoutSec?: number;
-      /** Codex merges a same-name native declaration into this one. True makes
-       * `args` and pass-through `env_vars` exactly this registration's. */
-      replaceNativeLists?: true;
     }
   | McpRemoteServerRegistration<"http">
   | McpRemoteServerRegistration<"sse">;
@@ -268,9 +249,9 @@ export interface McpRemoteServerRegistration<T extends "http" | "sse"> {
   /** Provider wait for one tool call. Only Codex has a short default (60 s);
    * other providers already wait for the server. */
   toolTimeoutSec?: number;
-  /** Engine-registered servers that make their own allow/deny decision (the
-   * Zeros Local CLI tool) skip the provider's per-call approval. Never set
-   * from user or repository configuration. */
+  /** Engine-registered servers that make their own allow/deny decision (Zeros
+   * Local, computer, browser and simulator use) skip the provider's per-call
+   * approval. Never set from user or repository configuration. */
   defaultToolsApproval?: "approve";
 }
 
@@ -345,33 +326,15 @@ export interface AgentFilesystemTerritory {
   writeCapabilities: AgentWriteCapabilities;
 }
 
-/** Provider-native browser capability for one agent session.
- *
- * Codex uses its official bundled Browser plugin and app-server tool surface;
- * `browserSessionId` binds that plugin's IAB pipe traffic to the durable Zeros
- * browser tab owned by the conversation. Claude uses Claude Code's official
- * Chrome integration through the Agent SDK. Cursor intentionally has no entry
- * until its SDK exposes a native browser contract. This descriptor never
- * contains tool definitions or an execute callback, so adapters cannot turn it
- * into a Zeros MCP/custom-tool namespace. */
-export type AgentBrowserUse =
-  | {
-      readonly kind: "codex-app-server";
-      readonly browserSessionId: string;
-    }
-  | {
-      readonly kind: "claude-agent-sdk";
-    };
-
-/** Codex's built-in computer use (OpenAI's bundled computer-use plugins) for
- * one Local session. Absent leaves the provider's own configuration alone.
- * Zeros' computer use reaches agents as `zeros_computer` MCP tools through
- * the session tool factory instead. */
-export interface AgentComputerUse {
-  /** False when Settings send Codex to Zeros' computer use or turn it off:
-   * the thread then gets neither the plugins nor their servers. */
-  readonly codexNative: boolean;
-}
+/** Provider-native browser capability for one agent session: Claude Code's
+ * official Chrome integration through the Agent SDK, when the user chose it.
+ * Codex and Cursor use the Zeros browser tools; Codex's built-in browser
+ * plugins are disabled on every thread. This descriptor never contains tool
+ * definitions or an execute callback, so adapters cannot turn it into a Zeros
+ * MCP/custom-tool namespace. */
+export type AgentBrowserUse = {
+  readonly kind: "claude-agent-sdk";
+};
 
 /** Narrow, engine-owned capability ports. The gateway consumes these product
  * domains rather than reaching into a provider's generic protocol surface.
@@ -617,7 +580,6 @@ export interface AgentAdapter {
     cliBinary?: string;
     mcpServers?: McpServerRegistration[];
     browserUse?: AgentBrowserUse;
-    computerUse?: AgentComputerUse;
     systemInstruction?: string;
     territory?: AgentFilesystemTerritory;
     /** Zeros-owned outer process boundary. Adapters must route every process
@@ -642,7 +604,6 @@ export interface AgentAdapter {
     cliBinary?: string;
     mcpServers?: McpServerRegistration[];
     browserUse?: AgentBrowserUse;
-    computerUse?: AgentComputerUse;
     systemInstruction?: string;
     territory?: AgentFilesystemTerritory;
     executionBoundary?: PreparedBoundary;

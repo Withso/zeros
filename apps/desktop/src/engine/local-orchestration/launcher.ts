@@ -16,15 +16,23 @@ function shellQuote(value: string): string {
   return "'" + value.replace(/'/g, "'\"'\"'") + "'";
 }
 
+/** The commands the shared `zeros` launcher passes to the engine binary. */
+export const ZEROS_LAUNCHER_COMMANDS = ["local", "computer", "browser"] as const;
+
 export function localCliLauncher(invocation: LocalCliInvocation): string {
+  // The invocation ends with its own command ("local"); the launcher passes
+  // the caller's command instead.
+  const base = invocation.args.at(-1) === "local" ? invocation.args.slice(0, -1) : invocation.args;
   return [
     "#!/bin/sh",
-    'if [ "${1-}" != local ]; then',
-    "  printf '%s\\n' 'Only `zeros local …` is available here.' >&2",
-    "  exit 2",
-    "fi",
-    "shift",
-    "exec " + [invocation.executable, ...invocation.args].map(shellQuote).join(" ") + ' "$@"',
+    'case "${1-}" in',
+    "  " + ZEROS_LAUNCHER_COMMANDS.join("|") + ") ;;",
+    "  *)",
+    "    printf '%s\\n' 'Only `zeros local`, `zeros computer` and `zeros browser` are available here.' >&2",
+    "    exit 2",
+    "    ;;",
+    "esac",
+    "exec " + [invocation.executable, ...base].map(shellQuote).join(" ") + ' "$@"',
     "",
   ].join("\n");
 }

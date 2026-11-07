@@ -45,28 +45,26 @@ describe("Zeros computer-use tool contract", () => {
     }
   });
 
-  it("routes each agent by the computer-use table", () => {
+  it("routes every agent, Codex included, by the one switch", () => {
     const defaults = computerUseSettings(undefined);
     expect(defaults).toEqual({
       enabled: true,
-      codexNative: true,
       showAgentCursor: true,
       blockedApps: [...DEFAULT_COMPUTER_BLOCKED_APPS],
     });
-    const on = { ...defaults, enabled: true };
-    const codexOff = { ...on, codexNative: false };
+    const off = { ...defaults, enabled: false };
     expect(
       ["codex", "claude", "cursor", "gemini"].map((agent) => [
         resolveComputerUseRoute(agent, defaults),
-        resolveComputerUseRoute(agent, on),
-        resolveComputerUseRoute(agent, codexOff),
-        resolveComputerUseRoute(agent, { ...defaults, enabled: false, codexNative: false }),
+        resolveComputerUseRoute(agent, off),
+        // A retired `codex_native = true` no longer keeps Codex's built-in.
+        resolveComputerUseRoute(agent, computerUseSettings({ enabled: false, codex_native: true })),
       ]),
     ).toEqual([
-      ["codex-native", "codex-native", "zeros", "off"],
-      ["zeros", "zeros", "zeros", "off"],
-      ["zeros", "zeros", "zeros", "off"],
-      ["off", "off", "off", "off"],
+      ["zeros", "off", "off"],
+      ["zeros", "off", "off"],
+      ["zeros", "off", "off"],
+      ["off", "off", "off"],
     ]);
   });
 
@@ -86,10 +84,13 @@ describe("Zeros computer-use tool contract", () => {
       }),
     ).toEqual({
       enabled: true,
-      codexNative: false,
       showAgentCursor: false,
       blockedApps: ["com.apple.Safari", "com.apple.Notes"],
     });
+    // Retired keys have no Settings row, so they change nothing.
+    expect(computerUseSettings({ app_access: "ask", codex_native: true })).toEqual(
+      computerUseSettings(undefined),
+    );
     expect(computerUseSettings({ blocked_apps: [] }).blockedApps).toEqual([]);
     expect(
       computerUseSettings({
@@ -272,6 +273,29 @@ describe("computer tool argument validation", () => {
     );
   });
 
+  it("opens only http and https URLs in an app", () => {
+    expect(
+      parseComputerToolCall("open_url", {
+        bundle_id: "com.google.Chrome",
+        url: "https://cursor.com",
+      }),
+    ).toEqual({
+      ok: true,
+      call: { tool: "open_url", bundleId: "com.google.Chrome", url: "https://cursor.com/" },
+    });
+    for (const url of [
+      "file:///etc/passwd",
+      "javascript:alert(1)",
+      "x-apple.systempreferences:com.apple.preference.security",
+      "https://user:secret@example.com/",
+      "not a url",
+      `https://example.com/${"a".repeat(9_000)}`,
+    ]) {
+      expect(parseComputerToolCall("open_url", { bundle_id: "com.google.Chrome", url }).ok).toBe(false);
+    }
+    expect(parseComputerToolCall("open_url", { url: "https://cursor.com" }).ok).toBe(false);
+  });
+
   it("rejects unknown tools and non-object arguments", () => {
     expect(parseComputerToolCall("set_config", {}).ok).toBe(false);
     expect(parseComputerToolCall("list_apps", null).ok).toBe(false);
@@ -286,7 +310,6 @@ describe("computer-use state for the transcript", () => {
     conversationId: "conv_a",
     agent: "codex",
     app: "Safari",
-    native: false,
   };
   const waiter = { workspaceId: "ws_1", conversationId: "conv_b", agent: "claude" };
 
@@ -294,13 +317,14 @@ describe("computer-use state for the transcript", () => {
     expect(
       readComputerUseState({ version: 1, holders: [holder], waiting: [waiter] }),
     ).toEqual({ version: 1, holders: [holder], waiting: [waiter] });
+    // An older main's `native` flag is read past, not kept.
     expect(
       readComputerUseState({
         version: 1,
-        holders: [{ ...holder, app: null, native: true }],
+        holders: [{ ...holder, app: null, native: false }],
         waiting: [],
       })?.holders[0],
-    ).toMatchObject({ app: null, native: true });
+    ).toEqual({ ...holder, app: null });
   });
 
   it("rejects malformed snapshots", () => {
@@ -309,13 +333,48 @@ describe("computer-use state for the transcript", () => {
       { version: 2, holders: [], waiting: [] },
       { version: 1, holders: {}, waiting: [] },
       { version: 1, holders: [{ ...holder, agent: "droid" }], waiting: [] },
-      { version: 1, holders: [{ ...holder, native: "no" }], waiting: [] },
       { version: 1, holders: [{ ...holder, app: 3 }], waiting: [] },
       { version: 1, holders: [], waiting: [{ ...waiter, conversationId: "" }] },
       { version: 1, holders: [], waiting: Array(65).fill(waiter) },
+      { version: 1, holders: [], waiting: [{ ...waiter, app: 7 }] },
+      { version: 1, holders: [], waiting: [{ ...waiter, app: "x".repeat(201) }] },
     ]) {
       expect(readComputerUseState(value)).toBeNull();
     }
+  });
+
+  it("keeps the app a chat waits for, and reads snapshots without it", () => {
+    expect(
+      readComputerUseState({ version: 1, holders: [], waiting: [{ ...waiter, app: "Safari" }] })
+        ?.waiting,
+    ).toEqual([{ ...waiter, app: "Safari" }]);
+    expect(
+      readComputerUseState({ version: 1, holders: [], waiting: [{ ...waiter, app: null }] })
+        ?.waiting,
+    ).toEqual([{ ...waiter, app: null }]);
+    expect(
+      readComputerUseState({ version: 1, holders: [], waiting: [waiter] })?.waiting[0],
+    ).not.toHaveProperty("app");
+  });
+
+  it("names the app a chat waits for and the chat using it", () => {
+    const notes = { ...holder, conversationId: "conv_c", agent: "cursor", app: "Notes" };
+    const waitsForNotes = { ...waiter, app: "Notes" };
+    const state = readComputerUseState({
+      version: 1,
+      holders: [holder, notes],
+      waiting: [waitsForNotes],
+    });
+    expect(computerUseWaitText(state, "conv_b")).toBe(
+      "Waiting for Cursor in another chat to finish using Notes",
+    );
+    // Behind another waiting chat, with nobody holding the app yet.
+    expect(
+      computerUseWaitText(
+        readComputerUseState({ version: 1, holders: [holder], waiting: [waitsForNotes] }),
+        "conv_b",
+      ),
+    ).toBe("Waiting for another chat to finish using Notes");
   });
 
   it("explains why a chat waits", () => {
@@ -351,9 +410,11 @@ describe("computer-use settings between the renderer and main", () => {
       showAgentCursor: false,
       blockedApps: ["com.apple.Safari", "com.apple.Notes"],
     });
+    // An older renderer's appAccess is ignored, not a reason to reject.
     expect(
       readComputerUsePreferences({
         enabled: false,
+        appAccess: "ask",
         showAgentCursor: true,
         blockedApps: [],
       }),

@@ -275,7 +275,17 @@ const SETTINGS = [
   {
     id: "general",
     label: "General",
-    keywords: ["startup", "updates", "notifications"],
+    keywords: [
+      "startup",
+      "updates",
+      "notifications",
+      "computer use",
+      "blocked apps",
+      "agent cursor",
+      "accessibility",
+      "screen recording",
+      "privacy",
+    ],
   },
   {
     id: "appearance",
@@ -298,11 +308,6 @@ const SETTINGS = [
     keywords: ["recipe", "snapshot", "organization"],
   },
   { id: "browser-use", label: "Browser", keywords: ["chrome", "automation"] },
-  {
-    id: "computer-use",
-    label: "Computer use",
-    keywords: ["desktop", "automation"],
-  },
   {
     id: "simulators",
     label: "Simulators",

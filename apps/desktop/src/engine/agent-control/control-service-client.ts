@@ -1,7 +1,6 @@
 import {
   isAgentControlFamily,
   isBrowserProductId,
-  type AgentControlFamily,
 } from "@zeros/protocol/browser-tools";
 import {
   COMPUTER_USE_SERVICE_VERSION,
@@ -191,29 +190,6 @@ export async function releaseZerosComputerUse(
     throw new Error("Zeros agent control returned an invalid release result.");
   }
   return result.released;
-}
-
-/** Tell main that Codex's built-in computer use started or stopped in this
- * chat, so other chats wait for it. */
-export async function reportNativeComputerUse(
-  owner: ComputerUseOwner,
-  agent: AgentControlFamily,
-  active: boolean,
-  options: ClientOptions = {},
-): Promise<boolean> {
-  if (!validOwner(owner) || !isAgentControlFamily(agent)) return false;
-  const config = resolveAgentControlServiceConfig(options.env);
-  if (!config) return false;
-  const result = asRecord(
-    await postJson(
-      options.fetchImpl ?? fetch,
-      config,
-      "/v1/computer/native-activity",
-      { version: COMPUTER_USE_SERVICE_VERSION, owner, agent, active },
-      CONTROL_TIMEOUT_MS,
-    ),
-  );
-  return result.accepted === true;
 }
 
 async function postJson(

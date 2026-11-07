@@ -3,9 +3,11 @@ import { isFeatureEnabled } from "../config/release-channel";
 import { useAgentSessions } from "../features/agent/sessions-hooks";
 import { isFeedbackConfigured } from "../features/feedback/submit-feedback";
 import {
+  agentControlAvailability,
   isAgentControlFeatureActive,
   useAgentControlFeatureActive,
 } from "../features/settings/agent-control-rollout";
+import { computerUseSectionOpen } from "../features/settings/computer-use-settings";
 import {
   isExperimentalEnabled,
   useExperimentalFeature,
@@ -158,7 +160,10 @@ function CommandPaletteSession({
   const activeTabId = useActiveWorkbenchTabId();
   const activeFile = tabs.find((tab) => tab.id === activeTabId)?.filePath;
   const [terminalAgents] = useExperimentalFeature("terminalAgents");
-  const computerUseActive = useAgentControlFeatureActive("computerUse");
+  const computerUseSectionActive = computerUseSectionOpen({
+    computerUse: useAgentControlFeatureActive("computerUse"),
+    zerosBrowser: useAgentControlFeatureActive("zerosBrowser"),
+  });
   const simulatorsActive = useAgentControlFeatureActive("simulators");
   useSyncExternalStore(
     subscribeCloudWorkspaces,
@@ -218,7 +223,7 @@ function CommandPaletteSession({
     local: localOwner,
     cloudEnabled: isFeatureEnabled("cloud-workspaces"),
     terminalAgentsEnabled: terminalAgents,
-    computerUseActive,
+    computerUseSectionActive,
     simulatorsActive,
     internalUser: false,
   };
@@ -392,7 +397,7 @@ function CommandPaletteSession({
       !settingsPaletteEntries({
         ...settingsAvailability,
         terminalAgentsEnabled: isExperimentalEnabled("terminalAgents"),
-        computerUseActive: isAgentControlFeatureActive("computerUse"),
+        computerUseSectionActive: computerUseSectionOpen(agentControlAvailability()),
         simulatorsActive: isAgentControlFeatureActive("simulators"),
       }).some((row) => row.id === entry.id)
     )

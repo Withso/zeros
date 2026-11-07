@@ -51,6 +51,7 @@ class FakeSession implements CuaTrustedSession {
     const step = this.next.shift();
     return step ? step() : ok();
   }
+
   close() {
     this.closed = true;
   }
@@ -58,10 +59,12 @@ class FakeSession implements CuaTrustedSession {
 
 class FakeWorker implements CuaWorker {
   dead = false;
+  /** How a dead worker answers the health probe. */
+  deathTag = "Shutdown";
   shutdowns = 0;
   readonly sessions: FakeSession[] = [];
   async metadata() {
-    if (this.dead) throw new FakeDriverError("Shutdown");
+    if (this.dead) throw new FakeDriverError(this.deathTag);
     return { pid: 4242 };
   }
   async shutdown() {
@@ -202,7 +205,9 @@ describe("computer-use driver host", () => {
     ]);
     first.close();
     second.close();
-    expect(workers[0]!.sessions.every((session) => session.closed)).toBe(true);
+    await vi.waitFor(() =>
+      expect(workers[0]!.sessions.every((session) => session.closed)).toBe(true),
+    );
   });
 
   it("sends tool arguments as JSON with the caller's signal and converts the result", async () => {
@@ -348,6 +353,18 @@ describe("computer-use driver host", () => {
     expect((await session.call("list_apps", {}, signal())).isError).toBe(false);
   });
 
+  it("replaces a killed worker whose health probe reports an interrupted request", async () => {
+    // On macOS a worker process that was killed between turns answers the
+    // probe with ActionInterrupted, not Shutdown.
+    const { host, workers } = setup();
+    (await host.openSession("Claude Code", signal())).close();
+    workers[0]!.dead = true;
+    workers[0]!.deathTag = "ActionInterrupted";
+    const session = await host.openSession("Claude Code", signal());
+    expect(workers).toHaveLength(2);
+    expect((await session.call("list_apps", {}, signal())).isError).toBe(false);
+  });
+
   it("asks for a new session instead of calling a closed or replaced one", async () => {
     const { host, workers } = setup();
     const session = await host.openSession("Codex", signal());
@@ -357,7 +374,25 @@ describe("computer-use driver host", () => {
       isError: true,
       errorCode: "session_unavailable",
     });
-    expect(workers[0]!.sessions[0]!.calls).toEqual([]);
+    // Only the label's own end ran; the caller's list_apps never reached it.
+    expect(workers[0]!.sessions[0]!.calls.map((call) => call.name)).toEqual(["end_session"]);
+  });
+
+  it("gives every later session of one agent a fresh label and ends each on close", async () => {
+    const { host, workers, sessionOptions } = setup();
+    const first = await host.openSession("Claude Code", signal());
+    expect(first.label).toBe("Claude Code");
+    first.close();
+    expect(workers[0]!.sessions[0]!.calls).toEqual([
+      expect.objectContaining({ name: "end_session", args: { session: "Claude Code" } }),
+    ]);
+    await vi.waitFor(() => expect(workers[0]!.sessions[0]!.closed).toBe(true));
+    // The driver never lets a later session take a closed session's label.
+    const second = await host.openSession("Claude Code", signal());
+    expect(second.label).toBe("Claude Code 2");
+    expect(sessionOptions.at(-1)).toMatchObject({ publicSession: "Claude Code 2" });
+    const codex = await host.openSession("Codex", signal());
+    expect(codex.label).toBe("Codex");
   });
 
   it("stops the worker and its sessions, and starts again on next use", async () => {

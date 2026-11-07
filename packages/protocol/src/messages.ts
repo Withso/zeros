@@ -1077,38 +1077,6 @@ export interface AgentAgentStderrMessage extends BaseMessage {
   line: string;
 }
 
-/** Closed reasons a session started without one of its provider's native
- *  capabilities. The renderer owns the wording. */
-export type AgentCapabilityNoticeCode =
-  /** ChatGPT's Browser plugin is installed but missing files it needs. */
-  | "codex-browser-plugin-incomplete"
-  /** ChatGPT's Browser plugin uses a layout this Zeros build cannot load. */
-  | "codex-browser-plugin-unsupported"
-  /** A Codex configuration layer changes node_repl beyond the inert settings
-   *  Zeros accepts from the user's own config, so the verified Browser runtime
-   *  cannot start for this chat. */
-  | "codex-browser-config-conflict"
-  /** Codex's built-in browser could not start for another reason. Sent only
-   *  with a `fallback`; without one the loss stays in the agent log. */
-  | "codex-browser-unavailable";
-
-export interface AgentCapabilityNotice {
-  code: AgentCapabilityNoticeCode;
-  /** Provider plugin version, when the notice concerns a specific build. */
-  version?: string;
-  /** The capability Zeros substituted. Absent: the session has none. */
-  fallback?: "zeros-browser";
-}
-
-/** Local-desktop-only notice that a session's provider capability degraded.
- *  Additive and ignorable: a renderer without this type drops the frame. */
-export interface AgentCapabilityNoticeMessage extends BaseMessage {
-  type: "AGENT_CAPABILITY_NOTICE";
-  agentId: string;
-  sessionId?: string;
-  notice: AgentCapabilityNotice;
-}
-
 export interface AgentAgentExitedMessage extends BaseMessage {
   type: "AGENT_AGENT_EXITED";
   agentId: string;
@@ -1427,7 +1395,6 @@ export type BridgeMessage =
   | AgentPromptCompleteMessage
   | AgentPromptFailedMessage
   | AgentAgentStderrMessage
-  | AgentCapabilityNoticeMessage
   | AgentAgentExitedMessage
   | AgentErrorMessage
   // Remote workspace

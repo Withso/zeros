@@ -271,12 +271,6 @@ export interface BrowserSessionAcquireRequest {
 export interface BrowserSessionAcquireResponse {
   version: typeof BROWSER_SERVICE_VERSION;
   browserSessionId: string;
-  /** Proves that this main-process build owns the private IAB socket consumed
-   * by OpenAI's bundled Browser plugin. Older Zeros browser hosts exposed only
-   * the legacy canonical-tool service and must fail closed for Codex. */
-  capabilities: {
-    codexIab: true;
-  };
 }
 
 export interface BrowserSessionReleaseRequest {
@@ -472,19 +466,23 @@ export function canonicalBrowserOriginGrantKey(value: string): string | null {
 }
 
 /** Which browser an agent family uses in a Local workspace. Cloud workspaces
- * get none of these; callers check placement first. */
-export type BrowserRoute = "off" | "codex-native" | "claude-chrome" | "zeros";
+ * get none of these; callers check placement first. Codex uses the Zeros
+ * browser like every agent; Zeros disables its built-in browser plugins. */
+export type BrowserRoute = "off" | "claude-chrome" | "zeros";
 
-/** The `[browser]` settings table, normalized with the shipped defaults. */
+/** The `[browser]` settings table, normalized with the shipped defaults.
+ * Every key has a row in Settings > Browser; retired keys (`codex_enabled`,
+ * `in_app_enabled`, `codex_native`, `provider`, `navigation_approval`,
+ * `show_agent_cursor`) are ignored. */
 export interface BrowserRouteSettings {
-  /** "Enable browser use" for Codex. */
-  codexEnabled: boolean;
-  /** "Use Codex's built-in browser". Off routes Codex to `zeros_browser`. */
-  codexNative: boolean;
-  /** "Use Claude Code with Chrome". Takes Claude off the in-app browser. */
+  /** "Enable browser use": one switch for every agent. */
+  enabled: boolean;
+  /** "Use Claude Code with Chrome": Claude uses the user's Chrome instead of
+   * the in-app browser. */
   claudeChrome: boolean;
-  /** "Allow Claude and Cursor to use the in-app browser". */
-  inAppEnabled: boolean;
+  /** Whether the Zeros browser is open in this build (rollout). Not a
+   * setting; the rollout gate clears it. */
+  inAppAvailable: boolean;
 }
 
 export function browserRouteSettings(raw: unknown): BrowserRouteSettings {
@@ -494,31 +492,27 @@ export function browserRouteSettings(raw: unknown): BrowserRouteSettings {
       : {};
   const flag = (key: string, fallback: boolean) =>
     typeof table[key] === "boolean" ? (table[key] as boolean) : fallback;
-  // `enabled` predates the per-provider switches; it still decides Codex
-  // when `codex_enabled` was never written.
   return {
-    codexEnabled: flag("codex_enabled", flag("enabled", true)),
-    codexNative: flag("codex_native", true),
+    enabled: flag("enabled", true),
     claudeChrome: flag("claude_enabled", false),
-    inAppEnabled: flag("in_app_enabled", true),
+    inAppAvailable: true,
   };
 }
 
-/** The routing table in docs/agent-control.md. A Codex built-in browser that
- * turns out to be unusable falls back to `zeros` at session start. */
+/** The routing table in docs/agent-control.md. "Enable browser use" decides
+ * for every agent, Claude's Chrome included. */
 export function resolveBrowserRoute(
   agentFamily: string,
   settings: BrowserRouteSettings,
 ): BrowserRoute {
+  if (!settings.enabled) return "off";
+  const inApp: BrowserRoute = settings.inAppAvailable ? "zeros" : "off";
   switch (agentFamily) {
-    case "codex":
-      if (!settings.codexEnabled) return "off";
-      return settings.codexNative ? "codex-native" : "zeros";
     case "claude":
-      if (settings.claudeChrome) return "claude-chrome";
-      return settings.inAppEnabled ? "zeros" : "off";
+      return settings.claudeChrome ? "claude-chrome" : inApp;
+    case "codex":
     case "cursor":
-      return settings.inAppEnabled ? "zeros" : "off";
+      return inApp;
     default:
       return "off";
   }

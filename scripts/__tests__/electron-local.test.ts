@@ -95,6 +95,28 @@ describe("Local checkout identity and environment", () => {
     expect(env.ELECTRON_RENDERER_URL).toBe("http://localhost:6400");
   });
 
+  // Regression (Mac, 2026-11-07): a Cursor debug round started with
+  // ZEROS_CURSOR_TRANSPORT_DEBUG=1 never reached the Cursor host.
+  it("keeps the Cursor host's diagnostic dials and nothing else of ZEROS_CURSOR_*", () => {
+    const env = localEnvironment({
+      identity: checkoutIdentity(directory()),
+      vitePort: 6400,
+      engineBase: 31000,
+      environment: {
+        ZEROS_CURSOR_TRANSPORT_DEBUG: "1",
+        ZEROS_CURSOR_SLOW_OP_MS: "1000",
+        ZEROS_CURSOR_SLOW_FIRST_ITEM_MS: "2000",
+        ZEROS_CURSOR_SDK_ENTRY: "/elsewhere/@cursor/sdk/dist/cjs/index.js",
+        ZEROS_CURSOR_HOST_SCRIPT: "/elsewhere/cursor-host.cjs",
+      },
+    });
+    expect(env.ZEROS_CURSOR_TRANSPORT_DEBUG).toBe("1");
+    expect(env.ZEROS_CURSOR_SLOW_OP_MS).toBe("1000");
+    expect(env.ZEROS_CURSOR_SLOW_FIRST_ITEM_MS).toBe("2000");
+    expect(env.ZEROS_CURSOR_SDK_ENTRY).toBeUndefined();
+    expect(env.ZEROS_CURSOR_HOST_SCRIPT).toBeUndefined();
+  });
+
   it("checks every engine/gateway port and keeps Local outside hosted Dev's port grid", async () => {
     const id = checkoutIdentity(directory());
     const first = await pickLocalPorts(id.slug);

@@ -324,7 +324,13 @@ exhausted read remains a recoverable connection failure and preserves the saved
 conversation and model. A successful catalog missing the schema remains an
 account/model refusal. Authentication, throttling and malformed responses do not
 automatically retry. Recheck the original Local account or cloud
-lifetime after the wait. A missing registry schema marks the live model unavailable
+lifetime after the wait. @cursor/sdk validates the model inside every
+create/resume against its own fresh `/v1/models` read, so while the account's
+catalog is fresh the engine hands the session host the selected model's
+confirmed record, and the host exposes it through the SDK's
+`CURSOR_SDK_LOCAL_MODEL_CATALOG_JSON` for that call only. The cloud host does
+the same with the catalog it just read. An unconfirmed, expired or invalidated
+catalog, or a resume under a just-changed key, leaves validation to Cursor. A missing registry schema marks the live model unavailable
 and refuses the attempt with an action to
 choose another model; it neither guesses parameters nor swaps the requested
 Grok model. Late responses cannot
@@ -494,6 +500,19 @@ suites, `features/agent/__tests__/fallback-transcript.test.ts`,
   The target chat/workspace pill comes from the operand or, for create, the
   result envelope; the mono command preview follows. Compound commands and
   expansions stay ordinary shell rows.
+- A literal `zeros computer …` or `zeros browser …` shell command
+  (`features/browser/control-cli-activity.ts`) is the same activity as the
+  matching `zeros_computer` or `zeros_browser` call: it joins that burst's
+  **Used the computer** or Browser group and counts as one tool call under the
+  computer or browser icon. The row keeps the tool-call label (**Opened app**,
+  **Opened link**, **Typed**, **Read page**; a literal `batch -` heredoc says
+  **Ran N steps**), then the app (`--app` as written, or the installed name for
+  a bundle ID) or the opened site, then how long the command ran: the `ms` of
+  its own `--json` line, else creation to settlement. Typed text, refs and keys
+  never reach the collapsed row. Only a bundle ID or the `--json` report's
+  `data.bundleId` selects an app icon; a name never guesses one. Expanded, the
+  row is the ordinary command and its output. Help, unknown verbs, pipes,
+  expansions and unquoted heredocs with expansion stay ordinary shell rows.
 - `localNote` user rows (a note the CLI delivered to a following chat) render
   as the same compact terminal row — **Chat finished**, **Permission
   requested**, **Question asked** with the source chat's pill — never a user

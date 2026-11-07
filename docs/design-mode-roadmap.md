@@ -4029,7 +4029,7 @@ Reproduction tools (outputs stay under gitignored/private test storage):
 | `scripts/design-native-qualification.ts`                   | Real Electron capture/isolation/teardown; requires macOS                                   |
 | `scripts/design-native-run.mjs`                            | Mac terminal runner for the native host, isolated Personal Local product fixtures and fresh packaged-engine smoke; reports each selected stage |
 | `scripts/design-native-acceptance.mjs`                     | Optimized renderer/compiled-engine presentation traces, paired idle CPU and a 100-cycle memory workload on macOS; budget failures exit nonzero |
-| `scripts/design-verification-native.ts`                    | Exact-source macOS shell capture, HTTP preview and official Browser host-contract checks; not a live model turn |
+| `scripts/design-verification-native.ts`                    | Exact-source macOS shell capture and HTTP preview checks; not a live model turn                                 |
 | `scripts/ui-smoke-design-mode.mjs`                         | Production menu/tag/tool rows with synthetic transport                                     |
 | `scripts/ui-smoke-design-preview.mjs`                      | Real Inspector preview actions with delayed replies, directory replacement and unmount     |
 | `engine/design/__tests__/native-authoring-browser.test.ts` | Real Chromium layout/refresh and observational source preservation                         |

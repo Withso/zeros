@@ -8,18 +8,11 @@ describe("resolveSettings — precedence", () => {
     expect(r.effective.scripts).toEqual({ run_mode: "concurrent" });
     expect(r.effective.browser).toEqual({
       enabled: true,
-      codex_enabled: true,
-      codex_native: true,
       claude_enabled: false,
-      in_app_enabled: true,
-      provider: "isolated",
       auto_open: true,
-      show_agent_cursor: true,
-      navigation_approval: "always-ask",
     });
     expect(r.effective.computer_use).toEqual({
       enabled: true,
-      codex_native: true,
       show_agent_cursor: true,
       blocked_apps: [
         "com.apple.keychainaccess",
@@ -185,83 +178,102 @@ describe("resolveSettings — layer hygiene", () => {
     ).toBe(true);
   });
 
-  it("keeps external Claude Chrome opt-in while honoring legacy disablement", () => {
-    const legacyEnabled = resolveSettings({
-      user: { browser: { enabled: true } },
-    });
-    expect(legacyEnabled.effective.browser).toMatchObject({
-      enabled: true,
-      codex_enabled: true,
-      claude_enabled: false,
-    });
-    expect(legacyEnabled.sources["browser.codex_enabled"]).toBe("user");
-    expect(legacyEnabled.sources["browser.claude_enabled"]).toBe("default");
+  it("keeps Claude's Chrome opt-in and lets one switch turn browser use off", () => {
+    const on = resolveSettings({ user: { browser: { enabled: true } } });
+    expect(on.effective.browser).toEqual({ enabled: true, claude_enabled: false, auto_open: true });
+    expect(on.sources["browser.enabled"]).toBe("user");
+    expect(on.sources["browser.claude_enabled"]).toBe("default");
 
-    const disabled = resolveSettings({
-      user: {
-        browser: { enabled: false, codex_enabled: true },
-      },
-      repoLocal: { browser: { enabled: true, provider: "isolated" } },
+    const off = resolveSettings({
+      user: { browser: { enabled: false } },
+      repoLocal: { browser: { enabled: true } },
     });
-    expect(disabled.effective.browser).toEqual({
-      enabled: false,
-      codex_enabled: true,
-      codex_native: true,
-      claude_enabled: false,
-      in_app_enabled: false,
-      provider: "isolated",
-      auto_open: true,
-      show_agent_cursor: true,
-      navigation_approval: "always-ask",
-    });
-    expect(disabled.sources["browser.in_app_enabled"]).toBe("user");
-    expect(disabled.sources["browser.enabled"]).toBe("user");
-    expect(disabled.sources["browser.codex_enabled"]).toBe("user");
-    expect(disabled.sources["browser.claude_enabled"]).toBe("user");
-    expect(disabled.sources["browser.provider"]).toBe("default");
+    expect(off.effective.browser).toMatchObject({ enabled: false });
+    expect(off.sources["browser.enabled"]).toBe("user");
     expect(
-      disabled.warnings.some((warning) =>
-        warning.startsWith("repo-local: browser"),
-      ),
+      off.warnings.some((warning) => warning.startsWith("repo-local: browser")),
     ).toBe(true);
   });
 
-  it("lets a managed shared browser policy override weaker provider settings", () => {
+  it("lets an organization turn browser use off for every agent", () => {
     const resolved = resolveSettings({
-      user: {
-        browser: {
-          codex_enabled: true,
-          claude_enabled: true,
-          in_app_enabled: true,
-        },
-      },
+      user: { browser: { enabled: true, claude_enabled: true } },
       managed: { browser: { enabled: false } },
     });
-    expect(resolved.effective.browser).toMatchObject({
-      codex_enabled: false,
-      claude_enabled: false,
-      in_app_enabled: false,
-    });
-    expect(resolved.sources["browser.codex_enabled"]).toBe("managed");
-    expect(resolved.sources["browser.claude_enabled"]).toBe("managed");
-    expect(resolved.sources["browser.in_app_enabled"]).toBe("managed");
+    expect(resolved.effective.browser).toMatchObject({ enabled: false, claude_enabled: true });
+    expect(resolved.sources["browser.enabled"]).toBe("managed");
   });
 
-  it("never lets the legacy browser switch turn the in-app browser back on", () => {
-    const resolved = resolveSettings({
-      user: { browser: { in_app_enabled: false } },
-      managed: { browser: { enabled: true } },
+  it("ignores retired browser and computer-use switches in every layer", () => {
+    for (const layer of ["user", "managed"] as const) {
+      const resolved = resolveSettings({
+        [layer]: {
+          browser: { codex_enabled: true, in_app_enabled: true, codex_native: true, provider: "isolated" },
+          computer_use: { app_access: "ask", codex_native: true },
+        },
+      });
+      expect(resolved.effective.browser).toEqual({ enabled: true, claude_enabled: false, auto_open: true });
+      expect(resolved.effective.computer_use).not.toHaveProperty("app_access");
+      expect(resolved.effective.computer_use).not.toHaveProperty("codex_native");
+      expect(resolved.warnings).toEqual(
+        expect.arrayContaining([
+          expect.stringContaining("computer_use.app_access"),
+          expect.stringContaining("browser.codex_native"),
+        ]),
+      );
+    }
+  });
+
+  it("keeps a retired opt-out in force in the layer that set it", () => {
+    // An organization that turned browser use off for any agent keeps it off
+    // for every agent, locked as managed, even before or without a migration.
+    for (const browser of [{ codex_enabled: false }, { in_app_enabled: false }]) {
+      const resolved = resolveSettings({
+        user: { browser: { enabled: true }, computer_use: { show_agent_cursor: true } },
+        managed: { browser: { ...browser, show_agent_cursor: false } },
+      });
+      expect(resolved.effective.browser).toMatchObject({ enabled: false });
+      expect(resolved.sources["browser.enabled"]).toBe("managed");
+      expect(resolved.effective.computer_use).toMatchObject({ show_agent_cursor: false });
+      expect(resolved.sources["computer_use.show_agent_cursor"]).toBe("managed");
+      expect(resolved.effective.browser).not.toHaveProperty("in_app_enabled");
+      expect(resolved.effective.browser).not.toHaveProperty("show_agent_cursor");
+    }
+    const user = resolveSettings({ user: { browser: { enabled: true, in_app_enabled: false } } });
+    expect(user.effective.browser).toMatchObject({ enabled: false });
+    expect(user.sources["browser.enabled"]).toBe("user");
+  });
+
+  it("turns browser use off where an organization required asking before every website", () => {
+    // Zeros no longer asks before opening a website. A managed "always-ask"
+    // fails closed instead of silently dropping the question it required.
+    const managed = resolveSettings({
+      user: { browser: { enabled: true } },
+      managed: { browser: { navigation_approval: "always-ask" } },
     });
-    expect(resolved.effective.browser).toMatchObject({
-      codex_enabled: true,
-      in_app_enabled: false,
-    });
-    expect(resolved.sources["browser.in_app_enabled"]).toBe("user");
+    expect(managed.effective.browser).toMatchObject({ enabled: false });
+    expect(managed.sources["browser.enabled"]).toBe("managed");
+    expect(managed.warnings).toEqual(
+      expect.arrayContaining([expect.stringContaining("managed: browser.navigation_approval")]),
+    );
+    for (const doc of [
+      { managed: { browser: { navigation_approval: "always-allow" } } },
+      { user: { browser: { navigation_approval: "always-ask" } } },
+    ]) {
+      expect(resolveSettings(doc).effective.browser).toMatchObject({ enabled: true });
+    }
+  });
+
+  it("does not mutate a layer while folding its retired keys", () => {
+    const managed = { browser: { in_app_enabled: false, show_agent_cursor: false } };
+    const snapshot = structuredClone(managed);
+    resolveSettings({ managed });
+    expect(managed).toEqual(snapshot);
   });
 
   it("enables public agent controls by default while preserving computer-use opt-outs", () => {
     const defaults = resolveSettings({});
-    expect(defaults.effective.browser).toMatchObject({ in_app_enabled: true });
+    expect(defaults.effective.browser).toMatchObject({ enabled: true });
     expect(defaults.effective.computer_use).toMatchObject({ enabled: true });
     expect(defaults.effective.simulators).toMatchObject({ enabled: true });
     for (const layer of ["user", "managed"] as const) {
@@ -276,7 +288,6 @@ describe("resolveSettings — layer hygiene", () => {
       user: {
         computer_use: {
           enabled: true,
-          codex_native: false,
           blocked_apps: ["com.apple.Notes"],
         },
       },
@@ -285,7 +296,6 @@ describe("resolveSettings — layer hygiene", () => {
     });
     expect(resolved.effective.computer_use).toMatchObject({
       enabled: false,
-      codex_native: false,
       blocked_apps: ["com.apple.Notes"],
     });
     expect(resolved.sources["computer_use.enabled"]).toBe("managed");

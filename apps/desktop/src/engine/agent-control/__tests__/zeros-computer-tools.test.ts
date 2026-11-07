@@ -54,15 +54,11 @@ function hanging() {
 }
 
 describe("zeros_computer routing policy", () => {
-  it.each<[string, ComputerUseRoute, boolean, RegExp?]>([
-    ["claude", "zeros", true],
-    ["cursor", "zeros", true],
-    ["codex", "zeros", true],
-    ["claude", "off", false, /turned off in Settings > Computer use/],
-    ["codex", "off", false, /turned off for Codex/],
-    ["codex", "codex-native", false, /built-in computer use/],
-  ])("%s with route %s → allowed %s", (family, route, ok, reason) => {
-    const policy = zerosComputerToolPolicy(family, route);
+  it.each<[ComputerUseRoute, boolean, RegExp?]>([
+    ["zeros", true],
+    ["off", false, /turned off in Settings > General/],
+  ])("route %s → allowed %s", (route, ok, reason) => {
+    const policy = zerosComputerToolPolicy(route);
     expect(policy.ok).toBe(ok);
     if (!policy.ok) expect(policy.reason).toMatch(reason!);
   });
@@ -113,13 +109,13 @@ describe("zeros_computer tools", () => {
     );
     vi.mocked(port.policy).mockReturnValue({
       ok: false,
-      reason: "Computer use is turned off in Settings > Computer use.",
+      reason: "Computer use is turned off in Settings > General.",
     });
     await expect(tools.callTool("list_apps", {}, signal)).resolves.toEqual({
       content: [
         {
           type: "text",
-          text: "Computer use is turned off in Settings > Computer use.",
+          text: "Computer use is turned off in Settings > General.",
         },
       ],
       isError: true,
@@ -195,6 +191,22 @@ describe("zeros_computer tools", () => {
     await expect(
       tools.callTool("list_apps", {}, new AbortController().signal),
     ).resolves.not.toHaveProperty("isError");
+  });
+
+  it("hands the Mac back at once after a call that outlives its turn", async () => {
+    const port = ports({ invoke: async () => OK });
+    const tools = new ZerosComputerTools(port);
+    tools.beginPrompt();
+    await tools.endPrompt();
+    vi.mocked(port.release).mockClear();
+    await expect(
+      tools.callTool("list_apps", {}, new AbortController().signal),
+    ).resolves.not.toHaveProperty("isError");
+    await vi.waitFor(() => expect(port.release).toHaveBeenCalledWith("turn-end"));
+    vi.mocked(port.release).mockClear();
+    tools.beginPrompt();
+    await tools.callTool("list_apps", {}, new AbortController().signal);
+    expect(port.release).not.toHaveBeenCalled();
   });
 
   it("aborts the request to main when the provider cancels one call", async () => {
@@ -292,14 +304,15 @@ describe("agent-control admissions with computer use", () => {
     ]);
     await browserOnly!.dispose();
 
-    const native = new AgentControlToolAdmissions({
+    // Codex uses Zeros computer use like every agent.
+    const codex = await new AgentControlToolAdmissions({
       resolveWorkspace: () => workspace,
       browser: browser(),
-      computer: computer("codex-native"),
-    });
-    const codex = await native.admit(input({ agentId: "codex" }));
+      computer: computer(),
+    }).admit(input({ agentId: "codex" }));
     expect(codex!.mcpServers.map((server) => server.name)).toEqual([
       "zeros_browser",
+      "zeros_computer",
     ]);
     await codex!.dispose();
 
@@ -314,13 +327,58 @@ describe("agent-control admissions with computer use", () => {
         "zeros_computer",
       ]);
       expect(Object.keys(both!.env).sort()).toEqual(
-        [ZEROS_BROWSER_TOOLS_ENV, ZEROS_COMPUTER_TOOLS_ENV].sort(),
+        [
+          ZEROS_BROWSER_TOOLS_ENV,
+          ZEROS_COMPUTER_TOOLS_ENV,
+          "ZEROS_BROWSER_TOOLS_URL",
+          "ZEROS_COMPUTER_TOOLS_URL",
+        ].sort(),
       );
+      expect(both!.env.ZEROS_COMPUTER_TOOLS_URL).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/call$/);
       expect(both!.env[ZEROS_BROWSER_TOOLS_ENV]).not.toBe(
         both!.env[ZEROS_COMPUTER_TOOLS_ENV],
       );
     } finally {
       await both!.dispose();
+    }
+  });
+
+  it("puts the zeros launcher on PATH and briefs only the admitted surfaces", async () => {
+    const withBin = (computerRoute: ComputerUseRoute, binDir: string | null) =>
+      new AgentControlToolAdmissions({
+        resolveWorkspace: () => workspace,
+        browser: browser(),
+        computer: computer(computerRoute),
+        binDir: () => binDir,
+      }).admit(input());
+
+    const both = await withBin("zeros", "/tmp/zeros-bin");
+    try {
+      expect(both!.pathPrepend).toEqual(["/tmp/zeros-bin"]);
+      const brief = await both!.preparePrompt!();
+      expect(brief).toContain("zeros computer open --app NAME");
+      expect(brief).toContain("zeros browser open URL");
+      // The verbs are in the brief, so it never sends agents to --help first.
+      expect(brief).not.toMatch(/run `zeros computer --help`/);
+    } finally {
+      await both!.dispose();
+    }
+
+    const browserOnly = await withBin("off", "/tmp/zeros-bin");
+    try {
+      const brief = await browserOnly!.preparePrompt!();
+      expect(brief).toContain("zeros browser open URL");
+      expect(brief).not.toContain("zeros computer");
+    } finally {
+      await browserOnly!.dispose();
+    }
+
+    const noLauncher = await withBin("zeros", null);
+    try {
+      expect(noLauncher!.pathPrepend).toBeUndefined();
+      expect(noLauncher!.preparePrompt).toBeUndefined();
+    } finally {
+      await noLauncher!.dispose();
     }
   });
 
@@ -417,6 +475,7 @@ describe("agent-control admissions with computer use", () => {
       transport: "http",
       headersFromEnv: { Authorization: ZEROS_COMPUTER_TOOLS_ENV },
       toolTimeoutSec: 660,
+      defaultToolsApproval: "approve",
     });
     const bearer = tools!.env[ZEROS_COMPUTER_TOOLS_ENV]!;
     const client = new Client({ name: "agent-control-test", version: "1.0.0" });

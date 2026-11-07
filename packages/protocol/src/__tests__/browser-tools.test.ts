@@ -61,60 +61,59 @@ describe("Zeros browser tool contract", () => {
 
   it("reads the browser table with the shipped defaults", () => {
     expect(browserRouteSettings(undefined)).toEqual({
-      codexEnabled: true,
-      codexNative: true,
+      enabled: true,
       claudeChrome: false,
-      inAppEnabled: true,
+      inAppAvailable: true,
     });
-    // `enabled` predates the per-provider switches and still governs Codex
-    // when `codex_enabled` was never written.
-    expect(browserRouteSettings({ enabled: false }).codexEnabled).toBe(false);
-    expect(
-      browserRouteSettings({ enabled: false, codex_enabled: true }).codexEnabled,
-    ).toBe(true);
+    expect(browserRouteSettings({ enabled: false, claude_enabled: true })).toEqual({
+      enabled: false,
+      claudeChrome: true,
+      inAppAvailable: true,
+    });
+    // Retired keys have no Settings row, so they change nothing.
     expect(
       browserRouteSettings({
-        codex_native: false,
-        claude_enabled: true,
+        codex_enabled: false,
         in_app_enabled: false,
+        codex_native: true,
+        navigation_approval: "always-ask",
       }),
-    ).toEqual({
-      codexEnabled: true,
-      codexNative: false,
-      claudeChrome: true,
-      inAppEnabled: false,
-    });
-    expect(browserRouteSettings({ codex_native: "no" }).codexNative).toBe(true);
+    ).toEqual({ enabled: true, claudeChrome: false, inAppAvailable: true });
+    expect(browserRouteSettings({ enabled: "no" }).enabled).toBe(true);
   });
 
   it.each([
-    // agent, codex_enabled, codex_native, claude_enabled, in_app_enabled, route
-    ["codex", true, true, false, true, "codex-native"],
-    ["codex", true, false, false, true, "zeros"],
-    ["codex", true, false, false, false, "zeros"],
-    ["codex", false, true, false, true, "off"],
-    ["codex", false, false, false, true, "off"],
-    ["claude", true, true, false, true, "zeros"],
-    ["claude", true, true, true, true, "claude-chrome"],
-    ["claude", true, true, true, false, "claude-chrome"],
-    ["claude", false, false, false, false, "off"],
-    ["cursor", true, true, true, true, "zeros"],
-    ["cursor", false, false, false, true, "zeros"],
-    ["cursor", true, true, false, false, "off"],
-    ["droid", true, true, true, true, "off"],
+    // agent, enabled, claude_enabled, in-app available, route
+    ["codex", true, false, true, "zeros"],
+    ["codex", true, true, true, "zeros"],
+    ["codex", false, false, true, "off"],
+    ["codex", true, false, false, "off"],
+    ["claude", true, false, true, "zeros"],
+    ["claude", true, true, true, "claude-chrome"],
+    ["claude", true, true, false, "claude-chrome"],
+    ["claude", false, true, true, "off"],
+    ["claude", true, false, false, "off"],
+    ["cursor", true, true, true, "zeros"],
+    ["cursor", false, false, true, "off"],
+    ["droid", true, true, true, "off"],
   ] as const)(
-    "routes %s (codex %s, built-in %s, Chrome %s, in-app %s) to %s",
-    (agent, codexEnabled, codexNative, claudeChrome, inAppEnabled, route) => {
-      expect(
-        resolveBrowserRoute(agent, {
-          codexEnabled,
-          codexNative,
-          claudeChrome,
-          inAppEnabled,
-        }),
-      ).toBe(route);
+    "routes %s (browser use %s, Chrome %s, in-app open %s) to %s",
+    (agent, enabled, claudeChrome, inAppAvailable, route) => {
+      expect(resolveBrowserRoute(agent, { enabled, claudeChrome, inAppAvailable })).toBe(
+        route,
+      );
     },
   );
+
+  it("never routes Codex to its built-in browser", () => {
+    for (const enabled of [true, false]) {
+      for (const claudeChrome of [true, false]) {
+        expect(
+          resolveBrowserRoute("codex", browserRouteSettings({ enabled, claude_enabled: claudeChrome, codex_native: true })),
+        ).toBe(enabled ? "zeros" : "off");
+      }
+    }
+  });
 
   it("accepts only an explicit light or dark page appearance", () => {
     expect(normalizeBrowserAppearance("light")).toBe("light");
@@ -123,15 +122,6 @@ describe("Zeros browser tool contract", () => {
     for (const value of ["system", "Dark", "", null, undefined, 1, {}]) {
       expect(normalizeBrowserAppearance(value)).toBeUndefined();
     }
-  });
-
-  it("advertises the native Codex IAB host on acquired sessions", () => {
-    const response = {
-      version: 1,
-      browserSessionId: "browser_native",
-      capabilities: { codexIab: true },
-    } satisfies import("../browser-tools").BrowserSessionAcquireResponse;
-    expect(response.capabilities.codexIab).toBe(true);
   });
 });
 

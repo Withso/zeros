@@ -7,7 +7,6 @@ import {
   invokeZerosDeviceTool,
   releaseZerosComputerUse,
   releaseZerosDeviceUse,
-  reportNativeComputerUse,
   resolveAgentControlServiceConfig,
 } from "../control-service-client";
 
@@ -303,27 +302,5 @@ describe("agent control service client", () => {
         fetchImpl: vi.fn<typeof fetch>(async () => json({ released: true })),
       }),
     ).rejects.toThrow("invalid release result");
-  });
-
-  it("reports Codex's built-in computer use to main", async () => {
-    const fetchImpl = vi.fn<typeof fetch>(async () =>
-      json({ version: 1, accepted: true }),
-    );
-    await expect(
-      reportNativeComputerUse(OWNER, "codex", true, { env: ENV, fetchImpl }),
-    ).resolves.toBe(true);
-    expect(String(fetchImpl.mock.calls[0]?.[0])).toBe(
-      "http://127.0.0.1:43124/v1/computer/native-activity",
-    );
-    expect(body(fetchImpl)).toEqual({
-      version: 1,
-      owner: OWNER,
-      agent: "codex",
-      active: true,
-    });
-    await expect(
-      reportNativeComputerUse(OWNER, "codex", false, { env: {}, fetchImpl }),
-    ).resolves.toBe(false);
-    expect(fetchImpl).toHaveBeenCalledOnce();
   });
 });

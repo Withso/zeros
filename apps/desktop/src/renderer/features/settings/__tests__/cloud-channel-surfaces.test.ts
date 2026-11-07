@@ -67,6 +67,27 @@ describe("paused cloud entry points", () => {
     expect(state.cloudPanel).not.toHaveBeenCalled();
   });
 
+  it("opens an organization's General for a saved Computer use page", () => {
+    state.section = "user:computer-use";
+    const html = settings();
+    expect(html).toMatch(/<h1[^>]*>General<\/h1>/);
+    expect(html).toContain("Computer use");
+    expect(html).not.toMatch(/<span class="truncate">Computer use<\/span>/);
+    // Unknown sections still land on Agents for an organization.
+    state.section = "user:retired-page";
+    expect(settings()).toContain("agents-fixture");
+  });
+
+  it("opens the Local General, with computer use in it, for a saved Computer use page", () => {
+    state.organization = { id: "personal", isPersonal: true } as OrganizationSummary;
+    state.section = "user:computer-use";
+    const html = settings();
+    expect(html).toMatch(/<h1[^>]*>General<\/h1>/);
+    expect(html).toContain("Restart automatically on update");
+    expect(html).toContain("Enable computer use");
+    expect(html).not.toMatch(/<span class="truncate">Computer use<\/span>/);
+  });
+
   it("uses the device GitHub integration while cloud is paused", () => {
     state.section = "user:integrations";
     const html = settings();

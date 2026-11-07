@@ -34,12 +34,12 @@ function request(
 ): AgentControlConfirmationRequest {
   return {
     id,
-    kind: "app",
+    kind: "device",
     workspaceId: "workspace-a",
     conversationId,
     agent: "codex",
-    subject: "Safari",
-    subjectId: "com.apple.Safari",
+    subject: "iPhone 16 Pro",
+    subjectId: "1A2B3C4D-0000-4000-8000-000000000001",
     createdAt,
   };
 }
@@ -110,19 +110,19 @@ describe("agent control confirmation queue", () => {
     expect(drainAgentControlConfirmations()).toEqual([]);
   });
 
-  it("adapts an app approval into the PermissionCard contract", () => {
+  it("adapts a simulator approval into the PermissionCard contract", () => {
     const card = agentControlConfirmationToPermissionRequest(
       request("confirmation-1"),
     );
     expect(card).toMatchObject({
       sessionId: "conversation-a",
-      title: "Allow Codex to control Safari?",
+      title: "Allow Codex to use iPhone 16 Pro?",
       useOptionNames: true,
       allowLocalPolicies: false,
       nativeRequestId: "confirmation-1",
       toolCall: {
         toolCallId: "confirmation-1",
-        title: "Safari",
+        title: "iPhone 16 Pro",
         kind: "other",
       },
     });
@@ -133,8 +133,8 @@ describe("agent control confirmation queue", () => {
       ],
     );
     expect(card.contextItems).toEqual([
-      "Controlling an app on your Mac, for this chat",
-      "com.apple.Safari",
+      "Using a simulator, for this chat",
+      "1A2B3C4D-0000-4000-8000-000000000001",
     ]);
   });
 

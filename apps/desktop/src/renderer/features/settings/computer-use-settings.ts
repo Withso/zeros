@@ -15,23 +15,17 @@ import {
 import type { SettingsDoc } from "../../platform/bridge/workspace-bridge";
 import type { BrowserAgentFamily } from "./browser-use-settings";
 
-export type ComputerUseBooleanSetting =
-  | "enabled"
-  | "codex_native"
-  | "show_agent_cursor";
+export type ComputerUseBooleanSetting = "enabled" | "show_agent_cursor";
 export type ComputerUseSettingKey = ComputerUseBooleanSetting | "blocked_apps";
 export type ComputerPermissionKind = "accessibility" | "screen-recording";
 
-/** Settings → Agents → Computer use, with its copy beside the keys it writes
- * so the contract stays testable without mounting the settings bridge. */
+/** Settings → General, with its copy beside the keys it writes so the
+ * contract stays testable without mounting the settings bridge. The agent
+ * cursor is one switch for computer use and the Zeros browser. */
 export const COMPUTER_USE_SETTINGS_ROWS = {
   enabled: {
     label: "Enable computer use",
-    hint: "Each chat asks before it uses an app.",
-  },
-  codex_native: {
-    label: "Use Codex’s built-in computer use",
-    hint: "When off, Codex uses Zeros computer use.",
+    hint: "Agents can use any app except blocked apps.",
   },
   blocked_apps: {
     label: "Blocked apps",
@@ -39,21 +33,22 @@ export const COMPUTER_USE_SETTINGS_ROWS = {
   },
   show_agent_cursor: {
     label: "Show agent cursor",
-    hint: "Show where the agent points and clicks.",
+    hint: "In apps and the browser.",
   },
 } as const;
 
+/** Settings → General → Privacy, beside Full Disk Access. */
 export const COMPUTER_PERMISSION_ROWS: Record<
   ComputerPermissionKind,
   { label: string; hint: string }
 > = {
   accessibility: {
     label: "Accessibility",
-    hint: "Lets Zeros click, type and scroll in apps.",
+    hint: "For computer use.",
   },
   "screen-recording": {
     label: "Screen Recording",
-    hint: "Lets Zeros see the windows of apps it uses.",
+    hint: "For computer use.",
   },
 };
 
@@ -78,6 +73,14 @@ export function computerUseSettingsFromEffective(
   effective: SettingsDoc | null | undefined,
 ): ComputerUseSettings {
   return computerUseSettings(effective?.computer_use);
+}
+
+/** General's Computer use section has rows while computer use or the Zeros
+ * browser, whose agent cursor it holds, is open. */
+export function computerUseSectionOpen(
+  availability: Pick<AgentControlAvailability, "computerUse" | "zerosBrowser">,
+): boolean {
+  return availability.computerUse || availability.zerosBrowser;
 }
 
 /** Which computer use each agent gets, by the same table the engine applies
@@ -165,8 +168,6 @@ function settingValue<K extends ComputerUseSettingKey>(
   switch (key) {
     case "enabled":
       return settings.enabled as ComputerUseSettingValue<K>;
-    case "codex_native":
-      return settings.codexNative as ComputerUseSettingValue<K>;
     case "show_agent_cursor":
       return settings.showAgentCursor as ComputerUseSettingValue<K>;
     default:

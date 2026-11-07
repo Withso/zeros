@@ -95,14 +95,14 @@ describe("Local CLI launcher", () => {
     expect(readdirSync(directory)).toEqual(["zeros"]);
   });
 
-  it("refuses every namespace except local, including a missing argument", async () => {
+  it("refuses every namespace except local, computer and browser, including a missing argument", async () => {
     const root = temporary();
     const directory = await ensureLocalCliBinDir({ dataDir: root, execPath: "/not/invoked" });
     for (const argv of [[], ["serve"], ["design"], ["cloud"], ["--help"]]) {
       const result = spawnSync(path.join(directory, "zeros"), argv, { encoding: "utf8" });
       expect(result.status).toBe(2);
       expect(result.stdout).toBe("");
-      expect(result.stderr).toBe("Only `zeros local …` is available here.\n");
+      expect(result.stderr).toBe("Only `zeros local`, `zeros computer` and `zeros browser` are available here.\n");
     }
   });
 
@@ -130,9 +130,11 @@ describe("Local CLI launcher", () => {
     const result = spawnSync(path.join(links, "zeros"), ["local", "--message", "safe $(uname) 'text'"], { encoding: "utf8" });
     expect(result.status).toBe(0);
     expect(result.stdout).toBe("<local>\n<--message>\n<safe $(uname) 'text'>\n");
+    const computer = spawnSync(path.join(links, "zeros"), ["computer", "apps"], { encoding: "utf8" });
+    expect(computer.stdout).toBe("<computer>\n<apps>\n");
     const refused = spawnSync(packaged, ["serve"], { encoding: "utf8" });
     expect(refused.status).toBe(2);
-    expect(refused.stderr).toBe("Only `zeros local …` is available here.\n");
+    expect(refused.stderr).toBe("Only `zeros local`, `zeros computer` and `zeros browser` are available here.\n");
   });
 
   it("rejects NUL instead of generating a broken shell script", () => {

@@ -8,6 +8,7 @@ import {
 
 import {
   ComputerUseController,
+  computerControlBar,
   computerDriverArguments,
 } from "../computer-use/controller";
 import {
@@ -120,9 +121,9 @@ class FakeSession implements ComputerDriverSession {
 function setup(
   options: {
     handle?: (call: FakeCall, signal: AbortSignal) => Promise<ComputerDriverResult> | undefined;
-    decision?: "allow" | "deny";
     enabled?: boolean;
     showAgentCursor?: boolean;
+    openUrl?: (bundleId: string, url: string, signal: AbortSignal) => Promise<void>;
   } = {},
 ) {
   const sessions: FakeSession[] = [];
@@ -138,25 +139,18 @@ function setup(
   const panel = {
     show: vi.fn(),
     hide: vi.fn(),
-    withoutEscape: vi.fn(<T>(work: () => Promise<T>) => work()),
   };
-  const confirm = vi.fn(
-    async (_input: unknown, _signal: AbortSignal) => options.decision ?? "allow",
-  );
-  const denyConfirmations = vi.fn();
   const states: unknown[] = [];
   const controller = new ComputerUseController({
     host,
     permissions: { status: () => ({ ...permissions }) },
     panel: panel as ComputerControlPanel,
-    confirm: confirm as never,
-    denyConfirmations,
     onState: (state) => states.push(state),
     selfPid: SELF_PID,
     idleStopMs: 10_000,
     waitTimeoutMs: 60_000,
     actionTimeoutMs: 5_000,
-    nativeActivityTtlMs: 30_000,
+    ...(options.openUrl ? { openUrl: options.openUrl } : {}),
   });
   if (options.enabled !== false) {
     controller.setPreferences({
@@ -165,7 +159,7 @@ function setup(
       blockedApps: ["com.apple.keychainaccess"],
     });
   }
-  return { controller, host, sessions, permissions, panel, confirm, denyConfirmations, states };
+  return { controller, host, sessions, permissions, panel, states };
 }
 
 function request(
@@ -196,6 +190,26 @@ async function settle(): Promise<void> {
   for (let index = 0; index < 50; index += 1) await Promise.resolve();
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+function release(
+  controller: ComputerUseController,
+  conversationId: string,
+  reason: "turn-end" | "stop" | "retire" = "turn-end",
+): boolean {
+  return controller.release({
+    version: 1,
+    owner: { workspaceId: "ws_1", conversationId },
+    reason,
+  });
+}
+
 describe("Zeros computer use controller", () => {
   afterEach(() => {
     vi.useRealTimers();
@@ -207,13 +221,13 @@ describe("Zeros computer use controller", () => {
       request("click", { pid: 501, element_token: "sdeadbeef:1" }),
     );
     expect(result.success).toBe(false);
-    expect(text(result)).toMatch(/turned off in Settings > Computer use/);
+    expect(text(result)).toMatch(/turned off in Settings > General/);
 
     const ungranted = setup();
     ungranted.permissions.screenRecording = false;
     const missing = await ungranted.controller.invoke(request("list_apps", {}));
     expect(text(missing)).toBe(
-      "Zeros needs Screen Recording access to use your Mac. The user can turn it on in Settings > Computer use.",
+      "Zeros needs Screen Recording access to use your Mac. The user can turn it on in Settings > General.",
     );
     ungranted.permissions.accessibility = false;
     expect(
@@ -223,22 +237,13 @@ describe("Zeros computer use controller", () => {
     expect(ungranted.host.openSession).not.toHaveBeenCalled();
   });
 
-  it("asks once per app in a chat, acts in that app and shows the control bar", async () => {
-    const { controller, sessions, panel, confirm } = setup();
+  it("acts in any app that is not blocked, without asking, and shows the control bar", async () => {
+    const { controller, sessions, panel } = setup();
     const result = await controller.invoke(
       request("click", { pid: 501, element_token: "sdeadbeef:1" }),
     );
     expect(result.success).toBe(true);
     expect(text(result)).toBe("click done via screenshot");
-    expect(confirm).toHaveBeenCalledTimes(1);
-    expect(confirm.mock.calls[0]![0]).toEqual({
-      kind: "app",
-      workspaceId: "ws_1",
-      conversationId: "conv_a",
-      agent: "codex",
-      subject: "Safari",
-      subjectId: "com.apple.Safari",
-    });
     expect(sessions).toHaveLength(1);
     expect(sessions[0]!.label).toBe("Codex");
     expect(sessions[0]!.actions()).toEqual([
@@ -254,49 +259,30 @@ describe("Zeros computer use controller", () => {
         conversationId: "conv_a",
         agent: "codex",
         app: "Safari",
-        native: false,
       },
     ]);
 
-    await controller.invoke(request("type_text", { pid: 501, text: "hi" }));
-    expect(confirm).toHaveBeenCalledTimes(1);
-
-    expect(
-      controller.release({
-        version: 1,
-        owner: { workspaceId: "ws_1", conversationId: "conv_a" },
-        reason: "turn-end",
-      }),
-    ).toBe(true);
+    expect(release(controller, "conv_a")).toBe(true);
     expect(sessions[0]!.closed).toBe(true);
     expect(panel.hide).toHaveBeenCalled();
     expect(controller.state().holders).toEqual([]);
-
-    // Approvals last for the chat, across turns, until it retires.
-    await controller.invoke(
+    // A retired chat's next turn acts at once too: there is no approval to forget.
+    release(controller, "conv_a", "retire");
+    const again = await controller.invoke(
       request("click", { pid: 501, element_token: "sdeadbeef:1" }, { turnId: "turn_2" }),
     );
-    expect(confirm).toHaveBeenCalledTimes(1);
-    controller.release({
-      version: 1,
-      owner: { workspaceId: "ws_1", conversationId: "conv_a" },
-      reason: "retire",
-    });
-    await controller.invoke(
-      request("click", { pid: 501, element_token: "sdeadbeef:1" }, { turnId: "turn_3" }),
-    );
-    expect(confirm).toHaveBeenCalledTimes(2);
+    expect(again.success).toBe(true);
   });
 
   it("refuses Zeros and blocked apps before anything reaches the driver", async () => {
-    const { controller, sessions, confirm } = setup();
+    const { controller, sessions } = setup();
     expect(
       text(
         await controller.invoke(
           request("click", { pid: 503, element_token: "sdeadbeef:1" }),
         ),
       ),
-    ).toBe("Keychain Access is blocked in Settings > Computer use.");
+    ).toBe("Keychain Access is blocked in Settings > General.");
     expect(
       text(await controller.invoke(request("type_text", { pid: SELF_PID, text: "x" }))),
     ).toBe("Agents cannot control Zeros.");
@@ -315,7 +301,7 @@ describe("Zeros computer use controller", () => {
           request("open_app", { bundle_id: "COM.APPLE.KEYCHAINACCESS" }),
         ),
       ),
-    ).toBe("Keychain Access is blocked in Settings > Computer use.");
+    ).toBe("Keychain Access is blocked in Settings > General.");
 
     const apps = text(await controller.invoke(request("list_apps", {})));
     expect(apps).toContain("Safari (pid 501) com.apple.Safari");
@@ -331,7 +317,6 @@ describe("Zeros computer use controller", () => {
     expect(windows).toContain("window 12: TextEdit (pid 502)");
     expect(windows).not.toMatch(/window 13|window 14|window 15/);
 
-    expect(confirm).not.toHaveBeenCalled();
     expect(sessions[0]!.actions()).toEqual([]);
   });
 
@@ -351,79 +336,53 @@ describe("Zeros computer use controller", () => {
     ]);
   });
 
-  it("ends the session when the user denies an app and does not ask again that turn", async () => {
-    const { controller, sessions, confirm, panel } = setup({ decision: "deny" });
-    const denied = await controller.invoke(
-      request("click", { pid: 502, element_token: "sdeadbeef:1" }),
-    );
-    expect(denied.success).toBe(false);
-    expect(text(denied)).toBe("The user did not allow Codex to control TextEdit.");
-    expect(sessions[0]!.closed).toBe(true);
-    expect(sessions[0]!.actions()).toEqual([]);
-    expect(panel.show).not.toHaveBeenCalled();
-    expect(controller.state().holders).toEqual([]);
-
-    expect(
-      text(
-        await controller.invoke(
-          request("click", { pid: 502, element_token: "sdeadbeef:1" }),
-        ),
-      ),
-    ).toBe("The user did not allow Codex to control TextEdit.");
-    expect(confirm).toHaveBeenCalledTimes(1);
-
-    await controller.invoke(
-      request("click", { pid: 502, element_token: "sdeadbeef:1" }, { turnId: "turn_2" }),
-    );
-    expect(confirm).toHaveBeenCalledTimes(2);
-  });
-
-  it("lets one chat use the computer at a time and tells the others why they wait", async () => {
+  it("queues a chat behind the chat using the same app and tells it why", async () => {
     const { controller, sessions } = setup();
     await controller.invoke(request("click", { pid: 501, element_token: "sdeadbeef:1" }));
 
     const waiting = controller.invoke(
       request(
         "type_text",
-        { pid: 502, text: "from b" },
+        { pid: 501, text: "from b" },
         { conversationId: "conv_b", agent: "claude" },
       ),
     );
-    await settle();
+    await vi.waitFor(() => expect(controller.state().waiting).toHaveLength(1));
     const state = controller.state();
     expect(state.waiting).toEqual([
-      { workspaceId: "ws_1", conversationId: "conv_b", agent: "claude" },
+      { workspaceId: "ws_1", conversationId: "conv_b", agent: "claude", app: "Safari" },
     ]);
     expect(computerUseWaitText(state, "conv_b")).toBe(
-      "Waiting for Codex in another chat to finish using the computer",
+      "Waiting for Codex in another chat to finish using Safari",
     );
-    expect(sessions).toHaveLength(1);
+    // The waiting chat already has its own session and cursor.
+    expect(sessions.map((session) => session.label)).toEqual(["Codex", "Claude Code"]);
+    expect(sessions[1]!.actions()).toEqual([]);
 
-    controller.release({
-      version: 1,
-      owner: { workspaceId: "ws_1", conversationId: "conv_a" },
-      reason: "turn-end",
-    });
+    release(controller, "conv_a");
     const result = await waiting;
     expect(result.success).toBe(true);
-    expect(sessions).toHaveLength(2);
-    expect(sessions[1]!.label).toBe("Claude Code");
+    expect(sessions[1]!.actions()).toEqual([
+      { tool: "type_text", args: { pid: 501, text: "from b" } },
+    ]);
     expect(controller.state()).toMatchObject({
-      holders: [{ conversationId: "conv_b", app: "TextEdit" }],
+      holders: [{ conversationId: "conv_b", app: "Safari" }],
       waiting: [],
     });
   });
 
-  it("gives up waiting after the limit and leaves the line", async () => {
+  it("gives up waiting for an app after the limit and leaves its line", async () => {
     vi.useFakeTimers();
     const { controller } = setup();
     await controller.invoke(request("click", { pid: 501, element_token: "sdeadbeef:1" }));
     const waiting = controller.invoke(
-      request("list_apps", {}, { conversationId: "conv_b" }),
+      request("click", { pid: 501, element_token: "sdeadbeef:1" }, { conversationId: "conv_b" }),
     );
+    await vi.advanceTimersByTimeAsync(0);
+    expect(controller.state().waiting).toHaveLength(1);
     await vi.advanceTimersByTimeAsync(60_000);
     expect(text(await waiting)).toBe(
-      "Another chat is still using the computer. Try again when it finishes.",
+      "Another chat is still using Safari. Try again when it finishes.",
     );
     expect(controller.state().waiting).toEqual([]);
   });
@@ -466,47 +425,6 @@ describe("Zeros computer use controller", () => {
     expect(nextTurn.success).toBe(true);
   });
 
-  it("counts Codex's built-in computer use until its turn ends or goes quiet", async () => {
-    vi.useFakeTimers();
-    const { controller } = setup();
-    const native = {
-      version: 1 as const,
-      owner: { workspaceId: "ws_1", conversationId: "conv_native" },
-      agent: "codex" as const,
-    };
-    expect(controller.nativeActivity({ ...native, active: true })).toBe(true);
-    expect(controller.state().holders).toEqual([
-      {
-        workspaceId: "ws_1",
-        conversationId: "conv_native",
-        agent: "codex",
-        app: null,
-        native: true,
-      },
-    ]);
-
-    const waiting = controller.invoke(request("list_apps", {}));
-    await vi.advanceTimersByTimeAsync(0);
-    expect(computerUseWaitText(controller.state(), "conv_a")).toBe(
-      "Waiting for Codex in another chat to finish using the computer",
-    );
-    controller.nativeActivity({ ...native, active: false });
-    expect((await waiting).success).toBe(true);
-    controller.release({
-      version: 1,
-      owner: { workspaceId: "ws_1", conversationId: "conv_a" },
-      reason: "turn-end",
-    });
-
-    controller.nativeActivity({ ...native, active: true });
-    const second = controller.invoke(
-      request("list_apps", {}, { conversationId: "conv_b" }),
-    );
-    await vi.advanceTimersByTimeAsync(30_000);
-    expect((await second).success).toBe(true);
-    expect(controller.state().holders.some((holder) => holder.native)).toBe(false);
-  });
-
   it("renders a window screenshot with its element tokens and readable images", async () => {
     const { controller, sessions } = setup();
     const result = await controller.invoke(
@@ -529,14 +447,6 @@ describe("Zeros computer use controller", () => {
         args: { pid: 502, window_id: 12, include_accessibility_tree: false },
       },
     ]);
-  });
-
-  it("releases its Esc while the agent presses Escape", async () => {
-    const { controller, panel } = setup();
-    await controller.invoke(request("press_key", { pid: 502, key: "escape" }));
-    expect(panel.withoutEscape).toHaveBeenCalledTimes(1);
-    await controller.invoke(request("press_key", { pid: 502, key: "return" }));
-    expect(panel.withoutEscape).toHaveBeenCalledTimes(1);
   });
 
   it("uses a quiet agent cursor, or hides it", async () => {
@@ -657,30 +567,36 @@ describe("Zeros computer use controller", () => {
     const { controller, sessions, panel } = setup();
     await controller.invoke(request("click", { pid: 501, element_token: "sdeadbeef:1" }));
     const waiting = controller.invoke(
-      request("list_apps", {}, { conversationId: "conv_b" }),
+      request("click", { pid: 501, element_token: "sdeadbeef:1" }, { conversationId: "conv_b" }),
     );
-    await settle();
+    await vi.waitFor(() => expect(controller.state().waiting).toHaveLength(1));
     controller.setPreferences({
       enabled: false,
       showAgentCursor: true,
       blockedApps: [],
     });
-    expect(sessions[0]!.closed).toBe(true);
+    expect(sessions.every((session) => session.closed)).toBe(true);
     expect(panel.hide).toHaveBeenCalled();
     expect(text(await waiting)).toMatch(/turned off/);
     expect(controller.state()).toEqual({ version: 1, holders: [], waiting: [] });
   });
 
-  it("ends a lease whose app becomes blocked", async () => {
-    const { controller, sessions } = setup();
+  it("ends only the lease of an app that becomes blocked", async () => {
+    const { controller, sessions, panel } = setup();
     await controller.invoke(request("click", { pid: 501, element_token: "sdeadbeef:1" }));
+    await controller.invoke(request("type_text", { pid: 502, text: "hi" }));
     controller.setPreferences({
       enabled: true,
       showAgentCursor: true,
       blockedApps: ["com.apple.Safari"],
     });
-    expect(sessions[0]!.closed).toBe(true);
-    expect(controller.state().holders).toEqual([]);
+    expect(sessions[0]!.closed).toBe(false);
+    expect(controller.state().holders.map((holder) => holder.app)).toEqual(["TextEdit"]);
+    expect(panel.show).toHaveBeenLastCalledWith({ title: "Codex", detail: "is using TextEdit" });
+    expect(
+      text(await controller.invoke(request("click", { pid: 501, element_token: "sdeadbeef:1" }))),
+    ).toBe("Safari is blocked in Settings > General.");
+    expect((await controller.invoke(request("type_text", { pid: 502, text: "ok" }))).success).toBe(true);
   });
 
   it("rejects malformed requests", async () => {
@@ -708,14 +624,6 @@ describe("Zeros computer use controller", () => {
         version: 1,
         owner: { workspaceId: "ws_1", conversationId: "conv_a" },
         reason: "later" as never,
-      }),
-    ).toBe(false);
-    expect(
-      controller.nativeActivity({
-        version: 1,
-        owner: { workspaceId: "ws_1", conversationId: "conv_a" },
-        agent: "codex",
-        active: "yes" as never,
       }),
     ).toBe(false);
   });
@@ -785,5 +693,502 @@ describe("computer driver arguments", () => {
       amount: 3,
       by: "page",
     });
+  });
+});
+
+describe("Zeros computer use with access to every app", () => {
+  it("acts without a card but still refuses blocked apps and Zeros", async () => {
+    const t = setup();
+    const clicked = await t.controller.invoke(
+      request("click", { pid: 502, element_token: "sdeadbeef:1" }),
+    );
+    expect(clicked.success).toBe(true);
+    expect(t.panel.show).toHaveBeenCalledWith(
+      expect.objectContaining({ detail: "is using TextEdit" }),
+    );
+    const blocked = await t.controller.invoke(
+      request("click", { pid: 503, element_token: "sdeadbeef:1" }),
+    );
+    expect(text(blocked)).toContain("blocked");
+    const self = await t.controller.invoke(
+      request("click", { pid: SELF_PID, element_token: "sdeadbeef:1" }),
+    );
+    expect(text(self)).toBe("Agents cannot control Zeros.");
+  });
+
+  it("opens a URL in an allowed app through Launch Services", async () => {
+    const openUrl = vi.fn(async () => undefined);
+    const t = setup({ openUrl });
+    const opened = await t.controller.invoke(
+      request("open_url", { bundle_id: "com.apple.safari", url: "https://cursor.com" }),
+    );
+    expect(text(opened)).toBe("Opened https://cursor.com/ in Safari.");
+    expect(openUrl).toHaveBeenCalledWith("com.apple.Safari", "https://cursor.com/", expect.any(AbortSignal));
+    const blocked = await t.controller.invoke(
+      request("open_url", { bundle_id: "com.apple.keychainaccess", url: "https://cursor.com" }),
+    );
+    expect(opened.success && !blocked.success).toBe(true);
+    expect(openUrl).toHaveBeenCalledTimes(1);
+  });
+
+  it("brings the named window forward when background keys are ambiguous", async () => {
+    const t = setup({
+      handle: (call) =>
+        call.tool === "press_key" && call.args.delivery_mode === undefined
+          ? Promise.resolve({
+              isError: true,
+              errorCode: null,
+              text: "Background input refused (same_pid_keyboard_ambiguity): pid 501 owns 2 other eligible top-level window(s)",
+              structured: null,
+              images: [],
+            })
+          : undefined,
+    });
+    const pressed = await t.controller.invoke(
+      request("press_key", { pid: 501, window_id: 11, key: "return" }),
+    );
+    expect(pressed.success).toBe(true);
+    const keys = t.sessions[0]!.calls.filter((call) => call.tool === "press_key");
+    expect(keys.map((call) => call.args.delivery_mode)).toEqual([undefined, "foreground"]);
+  });
+
+  it("reuses one app listing across a burst of actions, then reads it again", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const t = setup();
+      for (let index = 0; index < 3; index += 1) {
+        await t.controller.invoke(request("click", { pid: 502, element_token: "sdeadbeef:1" }));
+      }
+      const listings = () => t.sessions[0]!.calls.filter((call) => call.tool === "list_apps");
+      expect(listings()).toHaveLength(1);
+      vi.setSystemTime(Date.now() + 29_000);
+      await t.controller.invoke(request("click", { pid: 502, element_token: "sdeadbeef:1" }));
+      expect(listings()).toHaveLength(1);
+      vi.setSystemTime(Date.now() + 1_001);
+      await t.controller.invoke(request("click", { pid: 502, element_token: "sdeadbeef:1" }));
+      expect(listings()).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("Zeros computer use in parallel", () => {
+  const click = (pid: number, conversationId = "conv_a", extra: Partial<ComputerToolInvokeRequest> = {}) =>
+    request("click", { pid, element_token: "sdeadbeef:1" }, { conversationId, ...extra });
+
+  it("lets chats in different apps act at the same time", async () => {
+    const gate = deferred<ComputerDriverResult>();
+    const started = deferred<void>();
+    const t = setup({
+      handle: (call) => {
+        if (call.tool !== "click" || call.args.pid !== 501) return undefined;
+        started.resolve();
+        return gate.promise;
+      },
+    });
+    const a = t.controller.invoke(click(501));
+    await started.promise;
+    // A's click is still in Safari while B finishes in TextEdit.
+    const b = await t.controller.invoke(
+      request("type_text", { pid: 502, text: "hi" }, { conversationId: "conv_b", agent: "claude" }),
+    );
+    expect(b.success).toBe(true);
+    expect(t.sessions.map((session) => session.label)).toEqual(["Codex", "Claude Code"]);
+    expect(
+      t.controller.state().holders.map((holder) => [holder.conversationId, holder.app]),
+    ).toEqual([
+      ["conv_a", "Safari"],
+      ["conv_b", "TextEdit"],
+    ]);
+    expect(t.controller.state().waiting).toEqual([]);
+    expect(t.panel.show).toHaveBeenLastCalledWith({
+      title: "Codex and Claude Code",
+      detail: "are using Safari and TextEdit",
+    });
+    gate.resolve(ok("clicked"));
+    expect((await a).success).toBe(true);
+  });
+
+  it("gives each chat one cursor session for all of its apps", async () => {
+    const t = setup();
+    await t.controller.invoke(click(501));
+    await t.controller.invoke(request("type_text", { pid: 502, text: "hi" }));
+    await t.controller.invoke(request("list_apps", {}, { conversationId: "conv_b", agent: "claude" }));
+    expect(t.sessions).toHaveLength(2);
+    const cursors = (session: FakeSession) =>
+      session.calls.filter((call) => call.tool === "set_agent_cursor_enabled");
+    expect(cursors(t.sessions[0]!)).toEqual([
+      { tool: "set_agent_cursor_enabled", args: { session: "Codex", enabled: true } },
+    ]);
+    expect(cursors(t.sessions[1]!)).toEqual([
+      { tool: "set_agent_cursor_enabled", args: { session: "Claude Code", enabled: true } },
+    ]);
+    // Looking around holds no app; acting does, and the bar names the last one.
+    expect(t.controller.state().holders.map((holder) => [holder.conversationId, holder.app])).toEqual([
+      ["conv_a", "Safari"],
+      ["conv_a", "TextEdit"],
+    ]);
+    expect(t.panel.show).toHaveBeenLastCalledWith({ title: "Codex", detail: "is using TextEdit" });
+  });
+
+  it("lets one chat at a time bring a window forward", async () => {
+    const gate = deferred<ComputerDriverResult>();
+    const dragging = deferred<void>();
+    const order: string[] = [];
+    const t = setup({
+      handle: (call) => {
+        if (call.tool === "drag") {
+          order.push("A drags");
+          dragging.resolve();
+          return gate.promise.then((result) => {
+            order.push("A drag ends");
+            return result;
+          });
+        }
+        if (call.tool === "click") {
+          order.push(call.args.delivery_mode === "foreground" ? "B clicks in front" : "B clicks");
+        }
+        return undefined;
+      },
+    });
+    const drag = t.controller.invoke(
+      request("drag", { pid: 501, window_id: 11, from_x: 1, from_y: 1, to_x: 9, to_y: 9 }),
+    );
+    await dragging.promise;
+    const b = { conversationId: "conv_b", agent: "claude" as const };
+    expect((await t.controller.invoke(request("click", { pid: 502, element_token: "sdeadbeef:1" }, b))).success).toBe(true);
+    const modified = t.controller.invoke(
+      request("click", { pid: 502, element_token: "sdeadbeef:1", modifiers: ["cmd"] }, b),
+    );
+    await settle();
+    expect(order).toEqual(["A drags", "B clicks"]);
+    gate.resolve(ok("dragged"));
+    expect((await drag).success).toBe(true);
+    expect((await modified).success).toBe(true);
+    expect(order).toEqual(["A drags", "B clicks", "A drag ends", "B clicks in front"]);
+  });
+
+  it("does not hold the front for a chat that stops while waiting for it", async () => {
+    const gate = deferred<ComputerDriverResult>();
+    const dragging = deferred<void>();
+    const t = setup({
+      handle: (call) => {
+        if (call.tool !== "drag") return undefined;
+        dragging.resolve();
+        return gate.promise;
+      },
+    });
+    const drag = t.controller.invoke(
+      request("drag", { pid: 501, window_id: 11, from_x: 1, from_y: 1, to_x: 9, to_y: 9 }),
+    );
+    await dragging.promise;
+    const b = { conversationId: "conv_b", agent: "claude" as const };
+    const modified = t.controller.invoke(
+      request("click", { pid: 502, element_token: "sdeadbeef:1", modifiers: ["cmd"] }, b),
+    );
+    await settle();
+    expect(release(t.controller, "conv_b", "stop")).toBe(true);
+    expect(text(await modified)).toBe("The computer action was cancelled.");
+    gate.resolve(ok("dragged"));
+    expect((await drag).success).toBe(true);
+    // The front is free again for the next chat.
+    const c = await t.controller.invoke(
+      request("click", { pid: 502, element_token: "sdeadbeef:1", modifiers: ["cmd"] }, { conversationId: "conv_c" }),
+    );
+    expect(c.success).toBe(true);
+  });
+
+  it("stops one chat on its composer Stop and every chat shown on the bar's Stop", async () => {
+    const t = setup();
+    const b = { agent: "claude" as const };
+    await t.controller.invoke(click(501));
+    await t.controller.invoke(click(502, "conv_b", b));
+    expect(release(t.controller, "conv_a", "stop")).toBe(true);
+    expect(t.sessions[0]!.closed).toBe(true);
+    expect(t.sessions[1]!.closed).toBe(false);
+    expect(t.panel.show).toHaveBeenLastCalledWith({ title: "Claude Code", detail: "is using TextEdit" });
+    expect((await t.controller.invoke(click(502, "conv_b", b))).success).toBe(true);
+
+    await t.controller.invoke(click(501, "conv_a", { turnId: "turn_2" }));
+    expect(t.controller.stopFromUser()).toBe(true);
+    expect(t.sessions.every((session) => session.closed)).toBe(true);
+    expect(t.panel.hide).toHaveBeenCalled();
+    expect(t.controller.state().holders).toEqual([]);
+    expect(text(await t.controller.invoke(click(502, "conv_b", b)))).toMatch(/The user stopped computer use/);
+    expect(text(await t.controller.invoke(click(501, "conv_a", { turnId: "turn_2" })))).toMatch(
+      /The user stopped computer use/,
+    );
+  });
+
+  it("refuses at once when two chats would wait for each other's apps", async () => {
+    const t = setup();
+    const b = { agent: "claude" as const };
+    await t.controller.invoke(click(501));
+    await t.controller.invoke(click(502, "conv_b", b));
+    const aWaits = t.controller.invoke(click(502));
+    await vi.waitFor(() => expect(t.controller.state().waiting).toHaveLength(1));
+    expect(text(await t.controller.invoke(click(501, "conv_b", b)))).toBe(
+      "Another chat is using Safari and is waiting for an app this chat is using. Try again when that chat finishes.",
+    );
+    expect(t.controller.state().waiting).toHaveLength(1);
+    release(t.controller, "conv_b");
+    expect((await aWaits).success).toBe(true);
+    expect(t.controller.state().holders.map((holder) => holder.app)).toEqual(["Safari", "TextEdit"]);
+  });
+
+  it("ends every chat when the driver they share is lost", async () => {
+    let lose = false;
+    const t = setup({
+      handle: (call) =>
+        lose && call.tool === "click" ? Promise.reject(new ComputerDriverLostError()) : undefined,
+    });
+    await t.controller.invoke(click(501));
+    await t.controller.invoke(click(502, "conv_b"));
+    lose = true;
+    expect(text(await t.controller.invoke(click(501)))).toBe(
+      "Computer use stopped unexpectedly. Try again.",
+    );
+    expect(t.sessions.every((session) => session.closed)).toBe(true);
+    expect(t.controller.state().holders).toEqual([]);
+    expect(t.host.stop).toHaveBeenCalledTimes(1);
+  });
+
+  it("restarts the driver for new macOS access only once no other chat has a session", async () => {
+    const t = setup();
+    await t.controller.invoke(request("list_apps", {}));
+    t.permissions.screenRecording = false;
+    t.controller.permissionStatus();
+    t.permissions.screenRecording = true;
+    await t.controller.invoke(request("list_apps", {}, { conversationId: "conv_b" }));
+    expect(t.host.stop).not.toHaveBeenCalled();
+    expect(t.sessions[0]!.closed).toBe(false);
+    release(t.controller, "conv_a");
+    release(t.controller, "conv_b");
+    await t.controller.invoke(request("list_apps", {}, { conversationId: "conv_c" }));
+    expect(t.host.stop).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("computer control bar", () => {
+  it("names every chat acting now", () => {
+    expect(computerControlBar([])).toBeNull();
+    expect(computerControlBar([{ label: "Codex", app: "Safari" }])).toEqual({
+      title: "Codex",
+      detail: "is using Safari",
+    });
+    expect(
+      computerControlBar([
+        { label: "Claude Code", app: "Safari" },
+        { label: "Claude Code 2", app: "Safari" },
+      ]),
+    ).toEqual({ title: "Claude Code and Claude Code 2", detail: "are using Safari" });
+    expect(
+      computerControlBar([
+        { label: "Codex", app: "Safari" },
+        { label: "Codex", app: "Notes" },
+      ]),
+    ).toEqual({ title: "2 agents", detail: "are using Safari and Notes" });
+    expect(
+      computerControlBar([
+        { label: "Codex", app: "Safari" },
+        { label: "Claude Code", app: "Notes" },
+        { label: "Cursor", app: "Mail" },
+      ]),
+    ).toEqual({ title: "3 agents", detail: "are using 3 apps" });
+    expect(computerControlBar([{ label: "Codex", app: null }])).toEqual({
+      title: "Codex",
+      detail: "is using your Mac",
+    });
+  });
+});
+
+describe("the shared app listing", () => {
+  const PREVIEW = { name: "Preview", bundle_id: "com.apple.Preview", pid: 777, running: true };
+  const listingCalls = (t: ReturnType<typeof setup>) =>
+    t.sessions.flatMap((session) => session.calls).filter((call) => call.tool === "list_apps");
+
+  it("serves every handler and chat from one driver read", async () => {
+    const t = setup({ openUrl: async () => undefined });
+    await t.controller.invoke(request("list_apps", {}));
+    await t.controller.invoke(request("list_windows", {}));
+    await t.controller.invoke(
+      request("click", { pid: 502, element_token: "sdeadbeef:1" }, { conversationId: "conv_b" }),
+    );
+    expect(listingCalls(t)).toHaveLength(1);
+    // A page opened in a running app keeps that app's process: no new read.
+    await t.controller.invoke(
+      request("open_url", { bundle_id: "com.apple.Safari", url: "https://example.com" }),
+    );
+    await t.controller.invoke(request("click", { pid: 501, element_token: "sdeadbeef:1" }));
+    expect(listingCalls(t)).toHaveLength(1);
+    // Notes was not running, so Launch Services starts it: the listing goes.
+    await t.controller.invoke(
+      request("open_url", { bundle_id: "com.apple.Notes", url: "https://example.com" }),
+    );
+    expect(listingCalls(t)).toHaveLength(1);
+    await t.controller.invoke(request("click", { pid: 501, element_token: "sdeadbeef:1" }));
+    expect(listingCalls(t)).toHaveLength(2);
+  });
+
+  it("acts in a launched app with the pid the launch reported", async () => {
+    let launchText = "Launched Notes (pid 600) in background.";
+    const t = setup({
+      handle: (call) => (call.tool === "launch_app" ? Promise.resolve(ok(launchText)) : undefined),
+    });
+    await t.controller.invoke(request("open_app", { bundle_id: "com.apple.Notes" }));
+    expect(listingCalls(t)).toHaveLength(1);
+    const clicked = await t.controller.invoke(
+      request("click", { pid: 600, element_token: "sdeadbeef:1" }),
+    );
+    expect(clicked.success).toBe(true);
+    expect(listingCalls(t)).toHaveLength(1);
+    expect(t.controller.state().holders.map((holder) => holder.app)).toEqual(["Notes"]);
+
+    // Relaunching an app that runs keeps the listing even without a pid.
+    launchText = "TextEdit is already open.";
+    await t.controller.invoke(request("open_app", { bundle_id: "com.apple.TextEdit" }));
+    await t.controller.invoke(request("click", { pid: 502, element_token: "sdeadbeef:1" }));
+    expect(listingCalls(t)).toHaveLength(1);
+  });
+
+  it("reads the listing again after a launch that reports no pid", async () => {
+    const t = setup();
+    await t.controller.invoke(request("open_app", { bundle_id: "com.apple.Notes" }));
+    expect(listingCalls(t)).toHaveLength(1);
+    await t.controller.invoke(request("click", { pid: 501, element_token: "sdeadbeef:1" }));
+    expect(listingCalls(t)).toHaveLength(2);
+  });
+
+  it("does not let a read that predates a launch undo it", async () => {
+    const gate = deferred<ComputerDriverResult>();
+    let reads = 0;
+    const t = setup({
+      handle: (call) => {
+        if (call.tool === "launch_app") return Promise.resolve(ok("Launched Notes (pid 600) in background."));
+        if (call.tool !== "list_apps") return undefined;
+        reads += 1;
+        return reads === 2 ? gate.promise : undefined;
+      },
+    });
+    await t.controller.invoke(request("list_apps", {}));
+    // Chat B starts a read for a pid the listing misses; it is still under way…
+    const b = t.controller.invoke(
+      request("click", { pid: 31_337, element_token: "sdeadbeef:1" }, { conversationId: "conv_b" }),
+    );
+    await vi.waitFor(() => expect(reads).toBe(2));
+    // …when chat A launches Notes from the listing it already has.
+    await t.controller.invoke(request("open_app", { bundle_id: "com.apple.Notes" }));
+    gate.resolve(ok("apps", { apps: APPS }));
+    expect((await b).success).toBe(false);
+    // Notes keeps the pid its launch reported.
+    expect(
+      (await t.controller.invoke(request("click", { pid: 600, element_token: "sdeadbeef:1" }))).success,
+    ).toBe(true);
+    expect(reads).toBe(2);
+  });
+
+  it("reads again once when the listing misses an app", async () => {
+    let apps = APPS;
+    const t = setup({
+      handle: (call) =>
+        call.tool === "list_apps" ? Promise.resolve(ok("apps", { apps })) : undefined,
+    });
+    await t.controller.invoke(request("list_apps", {}));
+    apps = [...APPS, PREVIEW];
+    expect(
+      (await t.controller.invoke(request("click", { pid: 777, element_token: "sdeadbeef:1" }))).success,
+    ).toBe(true);
+    expect(listingCalls(t)).toHaveLength(2);
+    // A pid that is no app: one more read, then the refusal.
+    expect(
+      text(await t.controller.invoke(request("click", { pid: 31_337, element_token: "sdeadbeef:1" }))),
+    ).toBe("No app you can control has process ID 31337. Call list_apps.");
+    expect(listingCalls(t)).toHaveLength(3);
+  });
+
+  it("notices an app opened outside Zeros from its window", async () => {
+    let apps = APPS;
+    const notesWindow = { window_id: 21, pid: 600, app_name: "Notes", title: "Notes", bounds: null };
+    const t = setup({
+      handle: (call) => {
+        if (call.tool === "list_apps") return Promise.resolve(ok("apps", { apps }));
+        if (call.tool === "list_windows" && call.args.pid === undefined) {
+          return Promise.resolve(ok("windows", { windows: [...WINDOWS, notesWindow] }));
+        }
+        return undefined;
+      },
+    });
+    await t.controller.invoke(request("click", { pid: 502, element_token: "sdeadbeef:1" }));
+    // Notes was opened from the shell: listed as not running, but it has a window.
+    apps = APPS.map((app) => (app.name === "Notes" ? { ...app, pid: 600, running: true } : app));
+    const listed = text(await t.controller.invoke(request("list_apps", { running_only: true })));
+    expect(listed).toContain("Notes");
+    expect(listingCalls(t)).toHaveLength(2);
+    // Windows of processes the listing never names (the driver itself) do not
+    // force another read.
+    await t.controller.invoke(request("list_apps", {}));
+    expect(listingCalls(t)).toHaveLength(2);
+  });
+
+  it("shares one read between chats asking at once", async () => {
+    const gate = deferred<ComputerDriverResult>();
+    const t = setup({
+      handle: (call) => (call.tool === "list_apps" ? gate.promise : undefined),
+    });
+    const a = t.controller.invoke(request("list_apps", {}));
+    const b = t.controller.invoke(request("list_apps", {}, { conversationId: "conv_b" }));
+    await vi.waitFor(() => expect(listingCalls(t)).toHaveLength(1));
+    await settle();
+    expect(listingCalls(t)).toHaveLength(1);
+    gate.resolve(ok("apps", { apps: APPS }));
+    expect(text(await a)).toContain("TextEdit");
+    expect(text(await b)).toContain("TextEdit");
+    expect(listingCalls(t)).toHaveLength(1);
+  });
+
+  it("keeps a read going for other chats when the chat that started it stops", async () => {
+    const gate = deferred<ComputerDriverResult>();
+    const t = setup({
+      // Like the driver, an aborted call stops.
+      handle: (call, signal) =>
+        call.tool === "list_apps"
+          ? new Promise<ComputerDriverResult>((resolve, reject) => {
+              void gate.promise.then(resolve);
+              signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+            })
+          : undefined,
+    });
+    const cancel = new AbortController();
+    const a = t.controller.invoke(request("list_apps", {}), cancel.signal);
+    await vi.waitFor(() => expect(listingCalls(t)).toHaveLength(1));
+    const b = t.controller.invoke(request("list_apps", {}, { conversationId: "conv_b" }));
+    await settle();
+    cancel.abort();
+    expect(text(await a)).toBe("The computer action was cancelled.");
+    gate.resolve(ok("apps", { apps: APPS }));
+    expect(text(await b)).toContain("TextEdit");
+    expect(listingCalls(t)).toHaveLength(1);
+  });
+
+  it("reads again on its own session when another chat's read fails on its session", async () => {
+    const gate = deferred<ComputerDriverResult>();
+    let reads = 0;
+    const t = setup({
+      handle: (call) => {
+        if (call.tool !== "list_apps") return undefined;
+        reads += 1;
+        return reads === 1 ? gate.promise : Promise.resolve(ok("apps", { apps: APPS }));
+      },
+    });
+    const a = t.controller.invoke(request("list_apps", {}));
+    await vi.waitFor(() => expect(reads).toBe(1));
+    const b = t.controller.invoke(request("list_apps", {}, { conversationId: "conv_b" }));
+    await settle();
+    gate.resolve({ ...ok("gone"), isError: true, errorCode: "session_unavailable" });
+    expect(text(await a)).toMatch(/session expired/);
+    expect(text(await b)).toContain("TextEdit");
+    expect(t.sessions[1]!.calls.filter((call) => call.tool === "list_apps")).toHaveLength(1);
+    expect(t.sessions[1]!.closed).toBe(false);
   });
 });

@@ -129,7 +129,7 @@ describe("agent control rollout", () => {
     ).toBe(false);
   });
 
-  it("routes browsers as before the Zeros browser while it is closed", () => {
+  it("gives no agent the in-app browser while it is closed, and keeps Claude's Chrome", () => {
     const table: Array<{
       raw: Record<string, unknown>;
       open: Record<(typeof FAMILIES)[number], string>;
@@ -137,24 +137,25 @@ describe("agent control rollout", () => {
     }> = [
       {
         raw: {},
-        open: { codex: "codex-native", claude: "zeros", cursor: "zeros" },
-        closed: { codex: "codex-native", claude: "off", cursor: "off" },
-      },
-      {
-        raw: { codex_native: false },
         open: { codex: "zeros", claude: "zeros", cursor: "zeros" },
-        // The Codex fallback to the Zeros browser goes with it.
-        closed: { codex: "codex-native", claude: "off", cursor: "off" },
+        closed: { codex: "off", claude: "off", cursor: "off" },
       },
       {
-        raw: { codex_enabled: false, claude_enabled: true },
-        open: { codex: "off", claude: "claude-chrome", cursor: "zeros" },
+        // A retired `codex_native` no longer sends Codex to its built-in.
+        raw: { codex_native: true },
+        open: { codex: "zeros", claude: "zeros", cursor: "zeros" },
+        closed: { codex: "off", claude: "off", cursor: "off" },
+      },
+      {
+        raw: { claude_enabled: true },
+        open: { codex: "zeros", claude: "claude-chrome", cursor: "zeros" },
         closed: { codex: "off", claude: "claude-chrome", cursor: "off" },
       },
       {
-        raw: { in_app_enabled: false },
-        open: { codex: "codex-native", claude: "off", cursor: "off" },
-        closed: { codex: "codex-native", claude: "off", cursor: "off" },
+        // "Enable browser use" off: no agent gets a browser, Chrome included.
+        raw: { enabled: false, claude_enabled: true },
+        open: { codex: "off", claude: "off", cursor: "off" },
+        closed: { codex: "off", claude: "off", cursor: "off" },
       },
     ];
     for (const row of table) {
@@ -173,23 +174,18 @@ describe("agent control rollout", () => {
     }
   });
 
-  it("keeps Codex's own computer use and nothing else while computer use is closed", () => {
-    for (const raw of [
-      {},
-      { enabled: true },
-      { enabled: true, codex_native: false },
-      { codex_native: false },
-    ]) {
+  it("gives no agent computer use while it is closed", () => {
+    for (const raw of [{}, { enabled: true }, { enabled: true, codex_native: true }]) {
       const settings = computerUseSettings(raw);
       const gated = gateComputerUseSettings(settings, CLOSED);
       expect(gated.blockedApps).toEqual(settings.blockedApps);
       expect(gated.showAgentCursor).toBe(settings.showAgentCursor);
-      expect(resolveComputerUseRoute("codex", gated)).toBe("codex-native");
-      expect(resolveComputerUseRoute("claude", gated)).toBe("off");
-      expect(resolveComputerUseRoute("cursor", gated)).toBe("off");
+      for (const family of FAMILIES) {
+        expect(resolveComputerUseRoute(family, gated)).toBe("off");
+      }
       expect(gateComputerUseSettings(settings, OPEN)).toBe(settings);
     }
-    const on = computerUseSettings({ enabled: true, codex_native: false });
+    const on = computerUseSettings({ enabled: true });
     for (const family of FAMILIES) {
       expect(
         resolveComputerUseRoute(family, gateComputerUseSettings(on, OPEN)),

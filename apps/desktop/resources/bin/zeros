@@ -1,8 +1,11 @@
 #!/bin/sh
-if [ "${1-}" != local ]; then
-  printf '%s\n' 'Only `zeros local …` is available here.' >&2
-  exit 2
-fi
+case "${1-}" in
+  local|computer|browser) ;;
+  *)
+    printf '%s\n' 'Only `zeros local`, `zeros computer` and `zeros browser` are available here.' >&2
+    exit 2
+    ;;
+esac
 
 launcher=$0
 case "$launcher" in

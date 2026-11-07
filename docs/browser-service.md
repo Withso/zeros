@@ -1,18 +1,17 @@
 # Zeros browser service
 
-Zeros hosts the in-app browser that agents drive in the Browser tab. Codex uses
-OpenAI's official bundled Browser plugin over the app-server IAB protocol by
-default. Claude and Cursor, and Codex when its built-in browser is switched off
-or cannot start, use the Zeros `zeros_browser` tools against the same pages.
-Claude can instead use Anthropic's official Claude-in-Chrome integration.
+Zeros hosts the in-app browser that agents drive in the Browser tab. Every
+agent, Codex included, uses the Zeros `zeros_browser` tools (or the
+`zeros browser` command) against the same pages; Zeros disables Codex's
+built-in Browser and Chrome plugins on every thread. Claude can instead use
+Anthropic's official Claude-in-Chrome integration.
 [Agent control](agent-control.md) owns that routing table, the tools,
 approvals, the control bar and Stop; this guide owns hosting, identity,
 isolation and artifacts.
 
 ## Organization cloud availability and compatibility
 
-**Native browser is unavailable in cloud workspaces.** Codex's official browser
-runtime is not available for Linux VMs. Claude's Chrome integration requires a
+**Native browser is unavailable in cloud workspaces.** Claude's Chrome integration requires a
 direct Claude login, not an API key or setup token; cloud chat credentials do
 not supply that login. The `zeros_browser` tools drive pages on the user's Mac
 and are admitted only for Local placements. These limits do not disable
@@ -36,8 +35,8 @@ require separate runtime/auth qualification and execution authority.
 Settings → Agents → Browser, organization provider connections, and the chat's
 Tools panel share the unavailability explanation without Mac or Local install
 actions. Organization Browser settings never read or write Local browser
-preferences. Local defaults remain Codex enabled unless disabled and Claude
-explicit opt-in. Full native cloud browser parity remains a separate, blocked
+preferences. Local defaults keep browser use on unless disabled, and Claude's
+Chrome an explicit opt-in. Full native cloud browser parity remains a separate, blocked
 feature; installing Chromium alone would not provide it.
 
 ## Ownership and identity
@@ -50,7 +49,7 @@ The service receives only Zeros identities:
 | `conversationId`           | Zeros               | durable                  | owns one browser resource                                   |
 | `browserSessionId`         | Zeros main process  | one app-service lifetime | opaque browser lease handle                                 |
 | `executionId`              | Zeros engine        | one live agent execution | never a browser key                                         |
-| `ProviderBinding.resumeId` | Codex/Claude/Cursor | provider-defined         | Codex only: maps native IAB traffic; never owns the browser |
+| `ProviderBinding.resumeId` | Codex/Claude/Cursor | provider-defined         | never a browser key                                         |
 
 Acquiring again for the same workspace and conversation returns the same
 process-local browser session. Agent restart, provider resume, and provider
@@ -80,15 +79,11 @@ the credential. Renderer IPC receives only bounded state events and an opaque
 caller is the current trusted Zeros window.
 
 The loopback engine/main contract is versioned independently at
-`@zeros/protocol/browser-tools`. Its provider-native product lifecycle has
-three operations:
+`@zeros/protocol/browser-tools`. Its product lifecycle has two operations:
 
 1. acquire an opaque session for `{ workspaceId, conversationId,
-workspaceRoot }`;
-2. register a native Codex thread with that opaque browser session and settle a
-   terminal app-server turn so an unfinalized native batch is handed back
-   safely; and
-3. release the opaque record by durable workspace/conversation owner when its
+workspaceRoot }`; and
+2. release the opaque record by durable workspace/conversation owner when its
    conversation is deleted.
 
 The package also defines the semantic executor schema
@@ -110,122 +105,12 @@ reclaimed after 20 minutes.
 
 ### Codex
 
-Codex receives exactly one browser surface. On its default route that is
-OpenAI's bundled Browser plugin. For a browser-enabled thread, Zeros sends the
-app-server config override `plugins.browser@openai-bundled.enabled = true`.
-The plugin's official tool dependency is OpenAI's `node_repl` MCP server, so
-Zeros registers the verified official executable as `node_repl` and the chat
-receives its native `js` tool. Once the plugin loads, the adapter removes the
-`zeros_browser` MCP server from that thread. When the plugin cannot start, or
-"Use Codex's built-in browser" is off, Codex keeps `zeros_browser` instead
-([Codex fallback](agent-control.md#codex-fallback)).
-
-The public `@openai/codex` CLI package does not currently ship the separate
-desktop `cua_node` runtime. At thread boot, Zeros locates an installed official
-ChatGPT/Codex Desktop `cua_node` bundle (or a future packaged copy), follows its
-manifest-declared executable/module paths, locates the materialized
-`browser@openai-bundled` plugin under the selected CODEX_HOME's
-`.tmp/bundled-marketplaces/openai-bundled/plugins/browser` (then older cache
-roots), and pins the plugin's trusted code. Plugins up to 26.803 ran their
-client in the kernel, so Zeros hashes `scripts/browser-client.mjs` into
-`NODE_REPL_TRUSTED_BROWSER_CLIENT_SHA256S`. From 26.1007 the client calls
-`nodeRepl.rpc("browser")`, so Zeros names the plugin's `browser-service.mjs` in
-`NODE_REPL_TRUSTED_SERVICES` and makes sure `NODE_REPL_TRUSTED_CODE_PATHS`
-covers the plugin's folder, mirroring what ChatGPT Desktop passes. It replaces
-any user-configured MCP entry named `node_repl` with that verified
-registration.
-
-ChatGPT Desktop also writes its own `[mcp_servers.node_repl]` to the user's
-`$CODEX_HOME/config.toml`, and Codex merges Zeros' override into that table.
-Zeros' values win every key it sets, and its `args` and `env_vars` lists replace
-the native ones. The remaining keys are verified against `config/read`'s layer
-provenance: when only the user's own layer declares `node_repl` and it adds
-only use-case instruction text, a bounded `tool_timeout_sec`, or a
-`SKY_CUA_SERVICE_PATH` equal to the
-`<CODEX_HOME>/computer-use/Codex Computer Use.app` default the computer-use
-client derives anyway, the built-in browser stays on. A repository's
-`.codex/config.toml`, a system layer, or any other key (trust lists, Node
-options, another service path) still conflicts; Zeros then restarts the thread
-once without the built-in browser, disables the native declaration and shows a
-toast. Other MCP conflicts keep blocking the chat.
-
-If the official runtime, plugin manifest, trusted Browser client,
-Codex executable, architecture, or platform does not match, the built-in
-browser fails closed for that thread. The normal Codex agent remains available
-and uses `zeros_browser` when its route allows; the reason reaches the user as
-a toast.
-
-Local Code threads run natively, so on macOS the official Browser helper can
-install its mandatory Seatbelt profile normally. Composer Design
-mode shares that provider session and does not change its execution boundary.
-Browser capability policy remains independent of the
-[Design authoring contract](design-mode-roadmap.md#actor-and-execution-contract).
-Qualified cloud deployments retain their own capability matrix. Runtime
-discovery failures leave the ordinary Codex Code session usable, with
-`zeros_browser` as its browser in Local workspaces.
-
-After `thread/start` or `thread/resume` returns the native thread id, the engine
-registers `{ nativeSessionId, browserSessionId }` with the authenticated
-loopback service. The Electron main process exposes a private socket under
-`/tmp/codex-browser-use` on macOS/Linux (a named pipe on Windows), using the
-length-prefixed JSON-RPC protocol expected by Codex's Browser plugin. The
-socket and its parent directory are current-user-only, every session-bound
-request must carry the registered app-server session and turn ids, tab ids are
-checked against the exact conversation lease, and CDP events are sent only to
-the owning socket.
-The official client's metadata-free `ping` is answered as a data-free transport
-probe. Its metadata-free `focusTab` may inherit identity only from the last
-successfully authenticated request on that same private socket; no other
-sessionless method receives that exception.
-
-The official Browser skill therefore produces the same batched
-`node_repl.js` calls as Codex itself: titles such as “Browse nammatn.in” wrap a
-sequence of Playwright/CDP actions, and native result metadata continues to
-carry `codex/browserUse` and `codex/toolSurface`. Zeros does not render every
-snapshot, click, and scroll as a separate MCP call. It merely implements the
-plugin's IAB backend methods (`getInfo`, tab creation/listing/claim, targeted
-CDP execution/events, pointer movement, finalize, and turn end) against the
-conversation's existing `WebContentsView`.
-
-For explicit interactive website prompts, the adapter also passes the verified
-plugin skill as app-server's typed `{ type: "skill", name, path }` user input
-alongside its `$control-in-app-browser` marker. App-server therefore injects
-the exact installed `SKILL.md`; the model does not search the filesystem or
-construct a versioned plugin-cache path (and cannot accidentally look beneath
-an unrelated bundled plugin such as Sites).
-
-The transcript nests consecutive native browser calls inside one Browser
-activity row. Child completion does not close that row because app-server can
-append another native batch on the next stream update. It remains **Browsing**
-until a later narration, final output, permission/question, or unrelated tool
-closes the chronological batch; only then does it become
-**Used the browser** (or **Browser use failed** when every child failed). This
-boundary rule prevents a completed child from producing a
-Browsing → Used → Browsing label flash.
-
-`markDeliverable` / `markHandoff` and `finalizeTabs` both participate in the
-official retention contract. A marked or explicitly kept deliverable/handoff tab
-loses its debugger, cursor, working treatment, and agent ownership, then
-becomes the normal user-controlled Browser tab without navigation or reload.
-An explicit empty keep list closes the page. The current official IAB client
-does not emit its optional `turnEnded` event, and a Node REPL timeout/kernel
-reset can bypass `finalizeTabs`. Zeros therefore treats terminal app-server
-turn completion as an authenticated fallback: the engine posts the registered
-native thread and opaque browser ids back to main, which blocks late commands
-from that completed turn and performs the same safe handoff. The socket
-`turnEnded` handler remains compatible with official backends that do emit it.
-`getUserTabs` returns the live WebContents id as a string because the current
-official IAB claim command validates that field as a positive integer before it
-sends `claimUserTab`. The native session binding, current conversation lease,
-actor, and exact live tab id are all rechecked at the host, so a later native
-call can resume the retained page without crossing conversations. Stop blocks
-Browser work for the rest of the same Codex turn and hands the current page to
-the user, but it does not call app-server `turn/interrupt`: Codex can still
-write its chat response, and a later turn may claim that retained page.
-
-When Browser use is unavailable, the same per-thread key is explicitly false,
-so Codex cannot select a Browser skill with no matching IAB host. The override
-is thread-local and never changes the user's global Codex configuration.
+Codex uses the Zeros browser like Cursor. Zeros turns OpenAI's bundled
+Browser and Chrome plugins (`browser@openai-bundled`, `chrome@openai-bundled`)
+off on every thread with thread-local `plugins.<id>.enabled = false` keys, and
+native MCP discovery disables the plugins' servers (such as `node_repl`) like
+any unimported local server. The override never changes the user's global
+Codex configuration. Electron main hosts no IAB pipe or Codex provider routes.
 
 ### Claude
 
@@ -343,10 +228,10 @@ in place before the click target is revalidated. The view sets no background
 color, because Electron also paints that color behind pages that set no
 background of their own.
 
-Collapsing the workbench while Codex owns the page—or beginning Browser work
+Collapsing the workbench while an agent owns the page—or beginning Browser work
 while the workbench is already collapsed—rehosts that same view in a
 responsive picture-in-picture surface. PiP size and controls are a Zeros host
-concern—Codex app-server has no PiP geometry API. The compact card fits the
+concern. The compact card fits the
 last full Browser viewport aspect into a bounded fraction of the available
 workspace instead of using one fixed thumbnail size. Electron applies a
 uniform page zoom so the native PiP
@@ -369,20 +254,14 @@ host-only DOM marker namespace and removes the old markers. A numeric position
 cannot therefore be reused against a later DOM walk, and stale refs or
 pre-seeded marker collisions fail instead of selecting an unrelated element.
 
-Zeros never exposes raw CDP as an agent tool. Codex's official Browser plugin
-does use CDP behind its private IAB socket; the host scopes every command and
-event to the registered conversation and exact WebContents. Full/developer CDP
-is reported as disabled. File paths, bearer credentials, renderer IPC, other
-tabs, and host-computer control are absent from that protocol. The
-`zeros_browser` tools are the semantic executor: refs, clicks, typing and
-screenshots, never raw CDP.
+Zeros never exposes raw CDP as an agent tool. File paths, bearer credentials,
+renderer IPC, other tabs, and host-computer control are absent from the
+agent-facing protocol. The `zeros_browser` tools are the semantic executor:
+refs, clicks, typing and screenshots, never raw CDP.
 
-Safety follows the native owner. Codex's Browser skill and app-server MCP
-elicitation flow own origin consent plus semantic confirmation for downloads,
-uploads, raw CDP, history, and other protected browser operations; those
-requests stay inline in the owning chat. Claude and its browser extension own
-the corresponding external-Chrome flow. For `zeros_browser`, the Zeros host
-owns those decisions. In every case the Zeros Electron host independently gates
+Safety follows the owner. Claude and its browser extension own the
+external-Chrome flow. For the in-app browser, which every agent uses through
+`zeros_browser`, the Zeros host owns those decisions. In every case the Zeros Electron host independently gates
 boundaries it can enforce authoritatively:
 
 - cross-site navigation for `zeros_browser` when no provider-native origin
@@ -393,36 +272,15 @@ boundaries it can enforce authoritatively:
 - downloads; and
 - browser/device permissions requested by the in-app Chromium session.
 
-An explicit Codex navigation, redirect, or page-authored top-level navigation
-is URL-policy, site-status, and origin-consent checked by OpenAI's Browser
-plugin before/while it is lowered to IAB/CDP. During that authenticated native
-turn, Electron defers origin prompts to the official plugin rather than stacking
-a second Zeros permission card. If a site immediately redirects between its
-apex and `www` host, one explicit approval is reused only for that pair and
-only within that same Browser turn; a different scheme, port, arbitrary
-subdomain, or later turn still asks through the provider. A host-created
-browser/device-permission scope may likewise be allowed for a site. These Zeros
+A host-created
+browser/device-permission scope may be allowed for a site. These Zeros
 grants remain scoped to the opaque browser session, origin, category, and exact
-scope; provider-native Codex decisions remain provider-owned. Closing the
+scope. Closing the
 trusted Zeros window revokes host grants, denies pending host work, and
 destroys every live page lease (while retaining each opaque conversation-owned
 record), so a hidden page cannot retain device or network activity without a
 confirmation surface. Missing renderer, queue overflow, timeout, malformed
 response, and session teardown all fail closed.
-
-Codex MCP approvals use the same card dock above the composer as other
-blocking input, but render as direct one-click decisions instead of a selectable question plus
-a second Submit action. The card preserves the provider's exact `accept`,
-`persist: session`, `persist: always`, decline, and cancel response semantics;
-only the presentation labels are adapted (for example, Browser origin access
-offers Allow once, Deny, and the provider-supported persistent choice).
-
-For Codex downloads, the official Browser plugin first obtains its native MCP
-elicitation approval and then calls IAB `allowDownload(tabId, url)`. Zeros
-stores that exact normalized URL as a one-shot authorization for the matching
-Electron download, so the user sees one inline approval rather than two. A
-different URL, a later download, or a non-Codex download still enters the host
-confirmation path.
 
 Confirmation requests carry their durable workspace and conversation owners.
 The renderer places them in the exact conversation's existing
@@ -435,26 +293,25 @@ hydration recovers a pending card across renderer startup; a settlement
 tombstone removes a request that timed out or resolved during that race. A
 malformed, overflowed, timed-out, unmounted, or stale request is denied.
 
-Native Codex navigation, reading, clicking, typing, scrolling, and capture are
-classified from the IAB/CDP method into safe high-level presentation labels.
+Agent navigation, reading, clicking, typing, scrolling, and capture are
+classified into safe high-level presentation labels.
 The page receives a compact black/white agent arrow with a subtle violet-blue
 glow/click pulse and persistent cyan working treatment for the full
-provider-owned browser interval. The site's native cursor is hidden while that
+agent-owned browser interval. The site's native cursor is hidden while that
 ownership is active so two pointers never overlap. The ordinary Browser header
 does not change; the working tab pill shimmers left-to-right and owns an
 icon-only Stop action. A control bar at the bottom center of the page names
 the agent and offers Stop and Esc
 ([Agent control](agent-control.md#the-control-bar)).
-Because the native guest sits above React, only the visual treatment is
-injected into the page, while the real interaction lock stays in Electron: page
-mouse/keyboard input and Browser chrome are blocked for the whole native
-Browser turn, not merely one primitive call. Stop invalidates browser ownership
-for the current provider turn, stops navigation and active downloads, dismisses
-only a blocking Browser-use approval if present, and releases the page to the
-user. It does not call app-server `turn/interrupt`, so the surrounding Codex
-chat turn may handle the stopped Browser tool and continue. Once Codex finalizes
-or the turn ends, the decoration disappears and the same page remains directly
-interactive.
+Because the page sits above React, only the visual treatment is injected into
+the page, while the real interaction lock stays in Electron: page mouse and
+keyboard input and Browser chrome are blocked for the whole agent turn, not
+merely one primitive call. Stop invalidates browser ownership for the current
+turn, stops navigation and active downloads, dismisses only a blocking
+Browser-use approval if present, and releases the page to the user. It does not
+interrupt the provider turn, so the surrounding chat turn may handle the stopped
+browser tool and continue. Once the turn ends, the decoration disappears and
+the same page remains directly interactive.
 
 Chromium may report `net::ERR_ABORTED` when a requested page successfully
 redirects and supersedes the original navigation. Zeros waits for any guarded
@@ -463,22 +320,19 @@ one false error only when the live HTTP(S) document is different from both the
 source and requested URL. An unchanged page, denial, timeout, or another error
 such as `ERR_BLOCKED_BY_CLIENT` remains a genuine failed child action.
 
-Codex dispatches trusted input through its Browser plugin and the IAB CDP
-channel. The host raises `agentInputDepth` around those commands so Electron's
-own input observer does not mistake the visible agent cursor for user takeover.
-The same depth lets keys an agent sends, Esc included, reach the page, while a
-user's Esc in an agent-owned page stops the agent.
-For `zeros_browser`, page-authored cross-site main-frame
-navigation still passes through the Zeros website-opening policy. Under native
-Codex ownership the official plugin owns that origin gate; subframes are never
+The host raises `agentInputDepth` around agent input so Electron's own input
+observer does not mistake the visible agent cursor for user takeover. The same
+depth lets keys an agent sends, Esc included, reach the page, while a user's Esc
+in an agent-owned page stops the agent. Page-authored cross-site main-frame
+navigation passes through the Zeros website-opening policy; subframes are never
 promoted into prompt storms by Zeros.
 
 The pointer and working tint are cosmetic and contain no typed value. There is
-no page-gesture takeover: the lock does not expire between native batches, so a
+no page-gesture takeover: the lock does not expire between agent actions, so a
 direct click or keystroke is refused rather than reassigning the controller.
-Ownership returns only through native finalize/turnEnded, Stop (including Esc
-in the page), or the semantic `close` tool, which `zeros_browser` also sends
-when a turn that used the browser ends. In the semantic executor, one of those
+Ownership returns only through Stop (including Esc in the page) or the semantic
+`close` tool, which `zeros_browser` sends when a turn that used the browser
+ends. In the semantic executor, one of those
 handoffs landing while a click, type, key, or upload is being inspected, staged,
 or confirmed aborts the mutation and requires a fresh snapshot. Type and upload
 also recheck the target's tag, input type, accessible label, visibility, and
@@ -610,16 +464,13 @@ Ordinary tabs set the iframe's `color-scheme`, which updates the page's
 `prefers-color-scheme` without a reload. Agent-owned tabs emulate the media
 feature with CDP `Emulation.setEmulatedMedia`. Chromium keeps that override
 across navigations only while the page's single CDP session stays attached, so
-when another owner detaches it (Codex releases its debugger at the end of each
-turn) the host attaches again and reapplies the choice. The renderer sends the
+when the session detaches the host attaches again and reapplies the choice. The renderer sends the
 choice for every agent session, including tabs that are not mounted.
 
 The internal semantic executor's classification is defense in depth, not a
 semantic proof of arbitrary page JavaScript. DOM structure catches form
 submissions and bounded heuristics recognize common account, payment, publish,
-destructive, and send controls, but native Codex CDP traffic does not claim to
-pass through that classifier: OpenAI's Browser skill owns its semantic policy.
-Any page event can itself initiate network activity. This is why this phase has
+destructive, and send controls. Any page event can itself initiate network activity. This is why this phase has
 no shared authenticated profile, blocks popups and host-computer control, and
 gives every conversation an ephemeral isolated profile. A future stronger
 host policy may confirm every mutation or interpose at the network layer
@@ -638,32 +489,25 @@ The durable setting belongs to the engine settings model, not renderer
 ```toml
 [browser]
 enabled = true
-codex_enabled = true
-codex_native = true
 claude_enabled = false
-in_app_enabled = true
-provider = "isolated"
 auto_open = true
-show_agent_cursor = true
-navigation_approval = "always-ask"
 ```
 
 `browser` is user/managed-only and is rejected from committed, repo-local, and
 workspace-local files so a cloned repository cannot enable or replace a
-privileged browser backend. `isolated` is the only provider in this phase.
+privileged browser backend.
 [Agent control](agent-control.md#which-browser-each-agent-uses) explains how
 these keys route each agent.
 
-The compact controls appear under Settings → Agents → Browser: Codex's rows
-("Enable browser use", "Use Codex's built-in browser"), then the in-app and
-Chrome rows for Claude and Cursor, then the rows for every agent (automatic
-reveal, website-opening approval, "Show agent cursor"). Claude's external
-signed-in Chrome integration is explicit opt-in. The legacy `enabled` leaf
-remains a Codex compatibility fallback and a managed fail-closed master
-disable, but legacy enablement never opts Claude into Chrome.
-
-`navigation_approval` accepts `always-ask` (the default) or `always-allow`.
-This website-opening preference never applies to consequential actions.
+Settings → Browser has one row per key: "Enable browser use" (every agent,
+Codex included), "Use Claude Code with Chrome" (Claude's external signed-in
+Chrome integration, explicit opt-in) and "Open the Browser tab automatically".
+The agent's pointer follows "Show agent cursor" in Settings → General
+(`[computer_use] show_agent_cursor`). Agents open websites without asking;
+consequential actions still confirm. Retired keys (`codex_enabled`,
+`in_app_enabled`, `codex_native`, `provider`, `show_agent_cursor`,
+`navigation_approval`) are ignored and folded out of the user's file at engine
+start.
 
 For every agent, with `auto_open = true`, the first valid HTTP(S) navigation for the
 active conversation activates its Browser workbench tab and reveals the
@@ -706,16 +550,13 @@ or confirmation into a replacement document. The renderer subscribes before
 reading a bounded authoritative session snapshot, retains latest state plus an
 unresolved first-open intent per conversation while chats hydrate, then routes
 it as soon as its durable owner appears. This closes the missed-startup-event
-race that previously left the Browser tab closed while Codex was already
+race that previously left the Browser tab closed while an agent was already
 working.
 
-Turning a route off applies immediately: the host rejects new and queued work
-(IAB traffic for Codex's built-in browser, `zeros_browser` calls for the
-others), and closes active isolated pages once no agent uses the in-app
-browser. A provider fixes its browser when it boots: Codex loads OpenAI's
-Browser plugin and its verified `node_repl` registration, Claude Code takes
-`--chrome` or `--no-chrome`, and every agent lists the `zeros_browser` tools
-once. So when an agent family's route changes to anything other than off
+Turning browser use off applies immediately: the host rejects new and queued
+`zeros_browser` calls and closes active isolated pages. A provider fixes its
+browser when it boots: Claude Code takes `--chrome` or `--no-chrome`, and every
+agent lists the `zeros_browser` tools once. So when an agent family's route changes to anything other than off
 (`browserRouteRefreshAction`), Zeros queues each live execution of that family
 for a guarded refresh: it waits for the exact chat to be idle with no queued
 sends, closes only that ephemeral execution, and resumes the same durable
@@ -736,9 +577,9 @@ to apply the toggle.
 
 ## Deliberate exclusions
 
-Zeros does not implement shared-profile attachment for Codex, cloud browsers,
-raw developer CDP, or a Zeros-authored replacement Browser skill. Codex's
-official bundled plugin and Claude's official extension remain provider-owned.
+Zeros does not implement shared-profile attachment, cloud browsers, or raw
+developer CDP. Codex's bundled Browser and Chrome plugins are disabled on every
+Zeros thread; Claude's official extension remains provider-owned.
 This guide covers browser use, not control of the user's Mac; see
 [Agent control](agent-control.md) for the other surfaces agents can drive.
 
@@ -748,12 +589,3 @@ For authored Design frames, use the HTTP preview supplied in frame context or
 browser URL policy may reject `file://`. Normal shell validation and PNG capture
 are independently available through the engine's `design` command.
 
-Current Desktop can materialize `control-in-app-browser/SKILL.md` without that
-file being present in its cached source archive. Runtime discovery checks the
-materialized package first and retains the same manifest, safe-path and exact
-client-hash checks. Missing-runtime discovery leaves the Code conversation
-usable. `unified-computer-use@openai-bundled` / `cua_repl` remains a provider-owned
-surface; provenance recognition alone does not establish IAB compatibility.
-Only the verified `browser@openai-bundled` / `node_repl` integration is registered
-with Zeros' IAB host. Do not fabricate an unavailable backend; when it is
-unavailable, Codex uses `zeros_browser`.

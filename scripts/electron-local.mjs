@@ -91,6 +91,10 @@ export function localEnvironment({
     "ZEROS_NO_ENGINE_HMR",
     "ZEROS_NO_MAIN_HMR",
     "ZEROS_DEVTOOLS",
+    // The Cursor host's own diagnostic dials (cursor-host.cjs).
+    "ZEROS_CURSOR_TRANSPORT_DEBUG",
+    "ZEROS_CURSOR_SLOW_OP_MS",
+    "ZEROS_CURSOR_SLOW_FIRST_ITEM_MS",
   ]) {
     if (environment[key] !== undefined) env[key] = environment[key];
   }

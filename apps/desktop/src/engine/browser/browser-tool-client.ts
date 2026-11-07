@@ -28,7 +28,6 @@ import { opSettingsResolve } from "../settings/ops";
 const URL_ENV = "ZEROS_BROWSER_SERVICE_URL";
 const TOKEN_ENV = "ZEROS_BROWSER_SERVICE_TOKEN";
 const ACQUIRE_TIMEOUT_MS = 5_000;
-const TURN_SETTLE_TIMEOUT_MS = 2_000;
 // One action can wait for a website approval (4 min) and then a download
 // (5 min) inside the host. Stay above both so the host reports the outcome.
 const INVOKE_TIMEOUT_MS = 10 * 60_000;
@@ -65,20 +64,6 @@ interface ActiveBrowserBinding {
 }
 
 interface ReleaseZerosBrowserConversationOptions {
-  env?: BrowserServiceEnv;
-  fetchImpl?: typeof fetch;
-}
-
-interface RegisterCodexBrowserUseSessionOptions {
-  browserSessionId: string;
-  nativeSessionId: string;
-  env?: BrowserServiceEnv;
-  fetchImpl?: typeof fetch;
-}
-
-interface SettleCodexBrowserUseTurnOptions {
-  browserSessionId: string;
-  nativeSessionId: string;
   env?: BrowserServiceEnv;
   fetchImpl?: typeof fetch;
 }
@@ -136,86 +121,35 @@ export function stripBrowserServiceCredentials(
   return safe;
 }
 
-/** Resolve the trusted Browser-use setting without allocating a Zeros browser
- * session. Claude's official Chrome integration needs only this policy bit;
- * Cursor receives no browser capability; Codex separately acquires an IAB host
- * below. */
-export function browserUseEnabledForWorkspace(
+/** Whether Claude uses its official Chrome integration here: "Use Claude
+ * Code with Chrome" is on, and so is browser use. No other provider has a
+ * provider-owned browser in Zeros. */
+export function claudeChromeEnabledForWorkspace(
   workspaceRoot: string,
   mainRepoRoot?: string,
-  provider: "codex" | "claude" = "codex",
 ): boolean {
-  const browser = opSettingsResolve(workspaceRoot, mainRepoRoot).effective
-    .browser as
-    | {
-        enabled?: boolean;
-        codex_enabled?: boolean;
-        claude_enabled?: boolean;
-        provider?: string;
-      }
-    | undefined;
-  const providerEnabled =
-    provider === "claude" ? browser?.claude_enabled : browser?.codex_enabled;
-  if (providerEnabled === false) return false;
-  if (provider === "claude" && providerEnabled !== true) return false;
-  if (providerEnabled === undefined && browser?.enabled === false) return false;
-  if (browser?.provider !== undefined && browser.provider !== "isolated") {
-    throw new Error("Unsupported Zeros browser provider setting.");
-  }
-  return true;
+  return browserRouteForWorkspace("claude", workspaceRoot, mainRepoRoot) === "claude-chrome";
 }
 
-/** Which browser `agentFamily` uses in this Local workspace. Throws on an
- * unsupported host backend so callers fail the capability closed. */
+/** Which browser `agentFamily` uses in this Local workspace. */
 export function browserRouteForWorkspace(
   agentFamily: string,
   workspaceRoot: string,
   mainRepoRoot?: string,
 ): BrowserRoute {
-  const browser = opSettingsResolve(workspaceRoot, mainRepoRoot).effective
-    .browser as { provider?: unknown } | undefined;
-  if (browser?.provider !== undefined && browser.provider !== "isolated") {
-    throw new Error("Unsupported Zeros browser provider setting.");
-  }
   return resolveBrowserRoute(
     agentFamily,
     gateBrowserRouteSettings(
-      browserRouteSettings(browser),
+      browserRouteSettings(opSettingsResolve(workspaceRoot, mainRepoRoot).effective.browser),
       agentControlAvailability(),
     ),
   );
 }
 
-/** Acquire the conversation's browser as the IAB host for Codex's built-in
- * Browser plugin. Null unless Codex's route is its built-in browser; malformed
- * or unreachable configured services reject so the gateway can emit one
- * diagnostic and continue agent startup without it. */
-export async function acquireZerosBrowserHost(
-  options: AcquireZerosBrowserHostOptions,
-): Promise<{ browserSessionId: string } | null> {
-  if (
-    browserRouteForWorkspace(
-      "codex",
-      options.workspaceRoot,
-      options.mainRepoRoot,
-    ) !== "codex-native"
-  ) {
-    return null;
-  }
-  return acquireOwnerSession(options, true);
-}
-
-/** Acquire the same conversation-owned browser for the `zeros_browser` tools.
+/** Acquire the conversation-owned browser for the `zeros_browser` tools.
  * The caller has already applied the routing table for its agent. */
 export async function acquireZerosBrowserToolSession(
   options: Omit<AcquireZerosBrowserHostOptions, "mainRepoRoot">,
-): Promise<{ browserSessionId: string } | null> {
-  return acquireOwnerSession(options, false);
-}
-
-async function acquireOwnerSession(
-  options: AcquireZerosBrowserHostOptions,
-  requireCodexIab: boolean,
 ): Promise<{ browserSessionId: string } | null> {
   if (!isBrowserProductId(options.workspaceId)) {
     throw new Error("Zeros browser workspace identity is invalid.");
@@ -242,7 +176,7 @@ async function acquireOwnerSession(
     },
     ACQUIRE_TIMEOUT_MS,
   );
-  const parsed = parseAcquireResponse(acquired, requireCodexIab);
+  const parsed = parseAcquireResponse(acquired);
   const binding = {
     browserSessionId: parsed.browserSessionId,
     config,
@@ -258,78 +192,6 @@ async function acquireOwnerSession(
   activeBindings.set(key, binding);
 
   return { browserSessionId: parsed.browserSessionId };
-}
-
-/** Bind an app-server thread id to the conversation-owned IAB browser host.
- * The service credential stays inside the engine and the app-server receives
- * neither this bearer token nor a Zeros MCP/custom-tool endpoint. */
-export async function registerCodexBrowserUseSession(
-  options: RegisterCodexBrowserUseSessionOptions,
-): Promise<boolean> {
-  if (
-    !isBrowserProductId(options.browserSessionId) ||
-    !options.browserSessionId.startsWith("browser_") ||
-    !isNativeSessionId(options.nativeSessionId)
-  ) {
-    return false;
-  }
-  const config = resolveBrowserServiceConfig(options.env);
-  if (!config) return false;
-  const result = asRecord(
-    await requestJson(
-      options.fetchImpl ?? fetch,
-      `${config.baseUrl}/v1/providers/codex/register`,
-      config,
-      {
-        version: BROWSER_SERVICE_VERSION,
-        browserSessionId: options.browserSessionId,
-        nativeSessionId: options.nativeSessionId,
-      },
-      ACQUIRE_TIMEOUT_MS,
-    ),
-  );
-  return result.registered === true;
-}
-
-/** Tell the host that the owning app-server turn is terminal. OpenAI's IAB
- * client deliberately does not emit its optional `turnEnded` wire event, and
- * a timed-out/reset node_repl batch can skip `tabs.finalize()`. This
- * authenticated engine-owned fallback releases only the matching registered
- * native session; it never exposes a Zeros tool surface to Codex. */
-export async function settleCodexBrowserUseTurn(
-  options: SettleCodexBrowserUseTurnOptions,
-): Promise<boolean> {
-  if (
-    !isBrowserProductId(options.browserSessionId) ||
-    !options.browserSessionId.startsWith("browser_") ||
-    !isNativeSessionId(options.nativeSessionId)
-  ) {
-    return false;
-  }
-  const config = resolveBrowserServiceConfig(options.env);
-  if (!config) return false;
-  const result = asRecord(
-    await requestJson(
-      options.fetchImpl ?? fetch,
-      `${config.baseUrl}/v1/providers/codex/turn-ended`,
-      config,
-      {
-        version: BROWSER_SERVICE_VERSION,
-        browserSessionId: options.browserSessionId,
-        nativeSessionId: options.nativeSessionId,
-      },
-      TURN_SETTLE_TIMEOUT_MS,
-    ),
-  );
-  if (
-    result.version !== BROWSER_SERVICE_VERSION ||
-    typeof result.settled !== "boolean"
-  ) {
-    throw new Error(
-      "Zeros browser service returned an invalid native turn result.",
-    );
-  }
-  return result.settled;
 }
 
 /** Run one `zeros_browser` tool in the conversation's browser. Tool failures
@@ -505,28 +367,14 @@ async function requestJson(
   }
 }
 
-function parseAcquireResponse(
-  value: unknown,
-  requireCodexIab: boolean,
-): { browserSessionId: string } {
+function parseAcquireResponse(value: unknown): { browserSessionId: string } {
   const record = asRecord(value);
-  const capabilities =
-    record.capabilities &&
-    typeof record.capabilities === "object" &&
-    !Array.isArray(record.capabilities)
-      ? (record.capabilities as Record<string, unknown>)
-      : {};
   if (
     record.version !== BROWSER_SERVICE_VERSION ||
     !isToolSessionId(record.browserSessionId)
   ) {
     throw new Error(
       "Zeros browser service returned an invalid session identity.",
-    );
-  }
-  if (requireCodexIab && capabilities.codexIab !== true) {
-    throw new Error(
-      "Zeros browser service does not provide native Codex IAB; restart the desktop app.",
     );
   }
   return { browserSessionId: record.browserSessionId };
@@ -583,12 +431,4 @@ function asRecord(value: unknown): Record<string, unknown> {
 
 function ownerKey(workspaceId: string, conversationId: string): string {
   return `${workspaceId}\u0000${conversationId}`;
-}
-
-function isNativeSessionId(value: string): boolean {
-  return (
-    value.length > 0 &&
-    value.length <= 256 &&
-    /^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(value)
-  );
 }

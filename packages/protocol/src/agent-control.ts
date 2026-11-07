@@ -1,4 +1,5 @@
-// Approvals for Zeros-owned control of apps and simulators.
+// Approvals for Zeros-owned control of simulators. Apps need none: agents may
+// use any app except blocked apps.
 //
 // Electron main creates every request; tool arguments never choose its id,
 // owner or subject. The renderer shows it in the chat's PermissionCard next to
@@ -13,7 +14,6 @@ import {
 import type { ConversationId, WorkspaceId } from "./identities";
 
 export const AGENT_CONTROL_CONFIRMATION_KINDS = [
-  "app",
   "device",
   "device-boot",
 ] as const;
@@ -30,9 +30,9 @@ export interface AgentControlConfirmationRequest {
   workspaceId: WorkspaceId;
   conversationId: ConversationId;
   agent: AgentControlFamily;
-  /** What the user knows it as, such as "Safari" or "iPhone 16 Pro". */
+  /** What the user knows it as, such as "iPhone 16 Pro". */
   subject: string;
-  /** A bundle ID or a device UDID. */
+  /** A device UDID. */
   subjectId: string;
   createdAt: number;
 }
@@ -71,14 +71,12 @@ export function isAgentControlConfirmationRequest(
   );
 }
 
-/** The PermissionCard question, such as "Allow Codex to control Safari?" */
+/** The PermissionCard question, such as "Allow Codex to use iPhone 16 Pro?" */
 export function agentControlConfirmationTitle(
   request: Pick<AgentControlConfirmationRequest, "kind" | "agent" | "subject">,
 ): string {
   const agent = agentControlName(request.agent);
   switch (request.kind) {
-    case "app":
-      return `Allow ${agent} to control ${request.subject}?`;
     case "device":
       return `Allow ${agent} to use ${request.subject}?`;
     case "device-boot":
@@ -91,8 +89,6 @@ export function agentControlConfirmationContext(
   kind: AgentControlConfirmationKind,
 ): string {
   switch (kind) {
-    case "app":
-      return "Controlling an app on your Mac, for this chat";
     case "device":
       return "Using a simulator, for this chat";
     case "device-boot":

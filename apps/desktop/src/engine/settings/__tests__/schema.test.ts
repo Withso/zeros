@@ -128,11 +128,8 @@ describe("sanitizeLayer", () => {
       workspaces: { path: "/x" },
       browser: {
         enabled: true,
-        codex_enabled: false,
         claude_enabled: true,
-        provider: "isolated",
         auto_open: false,
-        show_agent_cursor: false,
       },
       tool_approvals_enabled: true,
       github: {
@@ -152,72 +149,61 @@ describe("sanitizeLayer", () => {
     expect(repo.warnings).toHaveLength(6);
   });
 
-  it("keeps browser posture engine-owned and rejects provider escape hatches", () => {
-    expect(
-      sanitizeLayer(
-        {
-          browser: {
-            enabled: false,
-            codex_enabled: true,
-            codex_native: false,
-            claude_enabled: false,
-            in_app_enabled: false,
-            provider: "isolated",
-            auto_open: false,
-            show_agent_cursor: true,
-          },
-        },
-        "user",
-      ),
-    ).toEqual({
-      doc: {
-        browser: {
-          enabled: false,
-          codex_enabled: true,
-          codex_native: false,
-          claude_enabled: false,
-          in_app_enabled: false,
-          provider: "isolated",
-          auto_open: false,
-          show_agent_cursor: true,
-        },
-      },
-      warnings: [],
-    });
+  it("keeps browser posture engine-owned and drops retired or unknown switches", () => {
+    const valid = { browser: { enabled: false, claude_enabled: false, auto_open: false } };
+    expect(sanitizeLayer(valid, "user")).toEqual({ doc: valid, warnings: [] });
 
+    // Retired switches have no Settings row any more and never reach
+    // effective settings; their opt-outs fold into the keys that replaced
+    // them, so an opt-out never turns into access.
     const invalid = sanitizeLayer(
       {
         browser: {
           enabled: true,
+          codex_enabled: false,
+          codex_native: true,
+          in_app_enabled: false,
           provider: "shared-chrome",
+          show_agent_cursor: false,
+          navigation_approval: "always-ask",
           developer_cdp_enabled: true,
         },
       },
       "user",
     );
     expect(invalid.doc).toEqual({
-      browser: { enabled: true },
+      browser: { enabled: false },
+      computer_use: { show_agent_cursor: false },
     });
+    expect(
+      sanitizeLayer(
+        { browser: { enabled: true, codex_enabled: true, codex_native: false, navigation_approval: "always-ask" } },
+        "user",
+      ).doc,
+    ).toEqual({ browser: { enabled: true } });
     expect(invalid.warnings).toEqual(
-      expect.arrayContaining([
-        expect.stringContaining("browser.provider"),
-        expect.stringContaining("browser.developer_cdp_enabled"),
-      ]),
+      expect.arrayContaining(
+        [
+          "codex_enabled",
+          "codex_native",
+          "in_app_enabled",
+          "provider",
+          "show_agent_cursor",
+          "navigation_approval",
+          "developer_cdp_enabled",
+        ].map((key) => expect.stringContaining(`browser.${key}`)),
+      ),
     );
 
-    const repo = sanitizeLayer(
-      { browser: { enabled: true, provider: "isolated" } },
-      "repo",
-    );
+    const repo = sanitizeLayer({ browser: { enabled: true } }, "repo");
     expect(repo.doc.browser).toBeUndefined();
     expect(repo.warnings).toEqual([expect.stringContaining("user-only")]);
   });
 
-  it("keeps computer use engine-owned and drops unknown control switches", () => {
+  it("keeps computer use engine-owned and drops retired or unknown switches", () => {
     const valid = {
       computer_use: {
         enabled: true,
-        codex_native: false,
         show_agent_cursor: false,
         blocked_apps: ["com.apple.Notes"],
       },
@@ -230,6 +216,8 @@ describe("sanitizeLayer", () => {
         computer_use: {
           enabled: "yes",
           unrestricted: true,
+          app_access: "ask",
+          codex_native: true,
           blocked_apps: "com.apple.Notes",
         },
       },
@@ -240,6 +228,8 @@ describe("sanitizeLayer", () => {
       expect.arrayContaining([
         expect.stringContaining("computer_use.enabled"),
         expect.stringContaining("computer_use.unrestricted"),
+        expect.stringContaining("computer_use.app_access"),
+        expect.stringContaining("computer_use.codex_native"),
         expect.stringContaining("computer_use.blocked_apps"),
       ]),
     );

@@ -15,20 +15,12 @@ afterEach(() => {
   rmSync(fixtureRoot, { recursive: true, force: true });
 });
 
-const { acquire, enabled } = vi.hoisted(() => ({
-  acquire: vi.fn(),
-  enabled: vi.fn(
-    (
-      _workspaceRoot: string,
-      _mainRepoRoot?: string,
-      _provider: "codex" | "claude" = "codex",
-    ) => true,
-  ),
+const { enabled } = vi.hoisted(() => ({
+  enabled: vi.fn((_workspaceRoot: string, _mainRepoRoot?: string) => true),
 }));
 
 vi.mock("../../browser/browser-tool-client", () => ({
-  acquireZerosBrowserHost: acquire,
-  browserUseEnabledForWorkspace: enabled,
+  claudeChromeEnabledForWorkspace: enabled,
   stripBrowserServiceCredentials: (env: Record<string, string> | undefined) =>
     env,
 }));
@@ -54,13 +46,11 @@ import { testExecutionBoundary } from "./helpers/test-execution-boundary";
 
 describe("AgentGateway Zeros browser ownership", () => {
   beforeEach(() => {
-    acquire.mockReset();
     enabled.mockReset();
     enabled.mockReturnValue(true);
   });
 
-  it("binds Codex to the native app-server Browser host without exposing Zeros tools", async () => {
-    acquire.mockResolvedValue({ browserSessionId: "browser-opaque" });
+  it("gives Codex no built-in browser binding: it uses the Zeros browser tools", async () => {
     let received: AgentBrowserUse | undefined;
     const adapter = {
       agentId: "codex",
@@ -107,18 +97,9 @@ describe("AgentGateway Zeros browser ownership", () => {
       conversationId: "conversation-zeros",
     });
 
-    expect(acquire).toHaveBeenCalledWith({
-      workspaceId: "workspace-zeros",
-      conversationId: "conversation-zeros",
-      workspaceRoot: fixtureRoot,
-      mainRepoRoot: fixtureRoot,
-    });
-    expect(received).toEqual({
-      kind: "codex-app-server",
-      browserSessionId: "browser-opaque",
-    });
-    expect(acquire.mock.calls[0]?.[0]).not.toHaveProperty("executionId");
-    expect(acquire.mock.calls[0]?.[0]).not.toHaveProperty("providerBinding");
+    expect(received).toBeUndefined();
+    // Codex has no provider-owned browser to resolve.
+    expect(enabled).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -174,12 +155,10 @@ describe("AgentGateway Zeros browser ownership", () => {
       });
 
       expect(received).toEqual(expected);
-      expect(acquire).not.toHaveBeenCalled();
       if (agentId === "claude") {
         expect(enabled).toHaveBeenCalledWith(
           fixtureRoot,
           fixtureRoot,
-          "claude",
         );
       }
     },
@@ -221,9 +200,8 @@ describe("AgentGateway Zeros browser ownership", () => {
 
     await gateway.newSession("claude", { cwd: fixtureRoot });
 
-    expect(enabled).toHaveBeenCalledWith(fixtureRoot, undefined, "claude");
+    expect(enabled).toHaveBeenCalledWith(fixtureRoot, undefined);
     expect(received).toEqual({ kind: "claude-agent-sdk" });
-    expect(acquire).not.toHaveBeenCalled();
   });
 
   it("reconciles Claude's latest Chrome switch before an unbound first prompt", async () => {
@@ -349,10 +327,8 @@ describe("AgentGateway Zeros browser ownership", () => {
     );
   });
 
-  it("resolves each provider's Browser switch independently", async () => {
-    enabled.mockImplementation((_root, _mainRoot, provider) => {
-      return provider === "claude";
-    });
+  it("resolves only Claude's provider-owned browser", async () => {
+    enabled.mockReturnValue(true);
     const received = new Map<string, AgentBrowserUse | undefined>();
     const gateway = new AgentGateway({
       projectRoot: fixtureRoot,
@@ -401,10 +377,7 @@ describe("AgentGateway Zeros browser ownership", () => {
 
     expect(received.get("codex")).toBeUndefined();
     expect(received.get("claude")).toEqual({ kind: "claude-agent-sdk" });
-    expect(enabled.mock.calls.map((call) => call[2])).toEqual([
-      "codex",
-      "claude",
-    ]);
-    expect(acquire).not.toHaveBeenCalled();
+    // Only Claude has a provider-owned browser (Chrome) to resolve.
+    expect(enabled).toHaveBeenCalledTimes(1);
   });
 });

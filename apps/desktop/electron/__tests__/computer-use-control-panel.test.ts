@@ -68,16 +68,6 @@ function setup() {
     ...args: unknown[]
   ) => handlers.get(channel)?.({ sender, senderFrame: frame }, ...args);
   const windows: FakePanelWindow[] = [];
-  const registered = new Map<string, () => void>();
-  const shortcuts = {
-    register: vi.fn((accelerator: string, callback: () => void) => {
-      registered.set(accelerator, callback);
-      return true;
-    }),
-    unregister: vi.fn((accelerator: string) => {
-      registered.delete(accelerator);
-    }),
-  };
   const onStop = vi.fn();
   const load = vi.fn(async () => undefined);
   const panel = createComputerControlPanel({
@@ -89,7 +79,6 @@ function setup() {
     },
     load,
     workArea: () => ({ x: 0, y: 25, width: 1440, height: 875 }),
-    shortcuts,
     onStop,
     fadeMs: 160,
     releaseMs: 30_000,
@@ -99,8 +88,6 @@ function setup() {
     handlers,
     fire,
     windows,
-    registered,
-    shortcuts,
     onStop,
     load,
   };
@@ -136,7 +123,7 @@ describe("computer-use control bar", () => {
     expect(window.webContents.sent).toEqual([]);
     fire(AGENT_CONTROL_CHANNELS.ready, window.webContents);
     expect(window.webContents.sent).toEqual([
-      { title: "Codex", detail: "is using Safari", visible: true },
+      { title: "Codex", detail: "is using Safari", visible: true, escapeHint: false },
     ]);
     panel.show(SAFARI);
     expect(window.webContents.sent).toHaveLength(1);
@@ -145,37 +132,18 @@ describe("computer-use control bar", () => {
       title: "Codex",
       detail: "is using TextEdit",
       visible: true,
+      escapeHint: false,
     });
   });
 
-  it("holds Esc while it shows and stops the agent with it", () => {
-    const { panel, registered, onStop } = setup();
-    expect(registered.has("Escape")).toBe(false);
+  it("never claims Esc: agents work while the user keeps typing in other apps", () => {
+    const { panel, windows, fire } = setup();
     panel.show(SAFARI);
-    expect(registered.has("Escape")).toBe(true);
-    registered.get("Escape")!();
-    expect(onStop).toHaveBeenCalledTimes(1);
-    panel.hide();
-    expect(registered.has("Escape")).toBe(false);
-  });
-
-  it("releases Esc while the agent presses Escape itself", async () => {
-    const { panel, registered } = setup();
-    panel.show(SAFARI);
-    let heldDuringWork: boolean | null = null;
-    const result = await panel.withoutEscape(async () => {
-      heldDuringWork = registered.has("Escape");
-      return "pressed";
-    });
-    expect(result).toBe("pressed");
-    expect(heldDuringWork).toBe(false);
-    expect(registered.has("Escape")).toBe(true);
-    await expect(
-      panel.withoutEscape(async () => {
-        throw new Error("driver failed");
-      }),
-    ).rejects.toThrow("driver failed");
-    expect(registered.has("Escape")).toBe(true);
+    fire(AGENT_CONTROL_CHANNELS.ready, windows[0]!.webContents);
+    // The page is told Esc does not stop the agent here, so it shows no hint
+    // and listens for no key; only Stop does.
+    expect(windows[0]!.webContents.sent.every((state) => (state as { escapeHint?: boolean }).escapeHint === false)).toBe(true);
+    expect(Object.keys(panel)).not.toContain("withoutEscape");
   });
 
   it("takes clicks only while the pointer is over Stop", () => {
@@ -237,11 +205,10 @@ describe("computer-use control bar", () => {
   });
 
   it("lets go of everything when disposed", () => {
-    const { panel, windows, registered, handlers } = setup();
+    const { panel, windows, handlers } = setup();
     panel.show(SAFARI);
     panel.dispose();
     expect(windows[0]!.destroyed).toBe(true);
-    expect(registered.size).toBe(0);
     expect(handlers.size).toBe(0);
     panel.show(SAFARI);
     expect(windows).toHaveLength(1);
