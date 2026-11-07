@@ -1,6 +1,4 @@
-// ──────────────────────────────────────────────────────────
-// composer-ask.tsx — the Ask pill an unfocused split pane's composer becomes
-// ──────────────────────────────────────────────────────────
+// The Ask pill an unfocused split pane's composer becomes.
 //
 // 2026-11-07 (Zeros Design v401, "Chat window · Ask to focus"): while the chat
 // column is split, an unfocused pane's composer card collapses into one pill,
@@ -10,7 +8,6 @@
 // over 220ms while its label fades out and the composer's contents, kept laid
 // out at full width, fade in; the composer the focus leaves folds back over
 // 180ms. Cards docked above the composer stay where they are.
-// ──────────────────────────────────────────────────────────
 
 import { useLayoutEffect, useRef, type RefObject } from "react";
 
