@@ -20,6 +20,8 @@ interface DependencyReadSet {
   pathPolicyCount: number;
   checks: Array<() => void>;
   failure: Error | null;
+  /** Record only: a failed set is discarded instead of failing the read. */
+  lenient?: boolean;
 }
 
 const currentReadSet = new AsyncLocalStorage<DependencyReadSet>();
@@ -48,7 +50,10 @@ export function observeDesignFileDependency(root: string, dependency: DesignFile
       reads.pathPolicyCount += 1;
     }
   }
-  if (reads.failure) throw reads.failure;
+  if (reads.failure) {
+    if (reads.lenient) return;
+    throw reads.failure;
+  }
   reads.files.set(key, { ...dependency, root, pathPolicies });
 }
 
@@ -61,7 +66,10 @@ export function observeDesignDependencyCheck(check: () => void): void {
   const reads = currentReadSet.getStore();
   if (!reads) return;
   if (reads.checks.length >= 2052) reads.failure ??= new Error("The movement dependency read set exceeds the bounded check limit.");
-  if (reads.failure) throw reads.failure;
+  if (reads.failure) {
+    if (reads.lenient) return;
+    throw reads.failure;
+  }
   reads.checks.push(check);
 }
 
@@ -110,4 +118,81 @@ export async function captureDesignDependencies(read: () => Promise<unknown>): P
       for (const check of reads.checks) check();
     },
   };
+}
+
+// Durable read sets. A stored set names its path policies, since a function
+// cannot be stored; a set holding an unnamed policy or a check stays in memory.
+const namedPolicies = new Map<string, (relativePath: string) => boolean>();
+const policyNames = new Map<(relativePath: string) => boolean, string>();
+
+/** One shared function per name, so a durable read set can restore it. */
+export function namedDesignPathPolicy(name: string, allow: (relativePath: string) => boolean): (relativePath: string) => boolean {
+  const existing = namedPolicies.get(name);
+  if (existing) return existing;
+  namedPolicies.set(name, allow);
+  policyNames.set(allow, name);
+  return allow;
+}
+
+export interface DurableDesignDependency {
+  root: string;
+  target: string;
+  limit: number;
+  fingerprint: string | null;
+  policies: string[];
+}
+
+/** Run `read`, recording what it read without ever failing it. `complete`
+ * is false when the set overflowed or a file changed while it was read;
+ * `durable` is null when a dependency cannot be stored (an unnamed policy,
+ * or a check such as font readiness); `current` re-verifies the set here. */
+export async function captureDurableDesignDependencies<T>(read: () => Promise<T>): Promise<{
+  value: T; complete: boolean; durable: DurableDesignDependency[] | null; current: () => boolean;
+}> {
+  const reads: DependencyReadSet = { files: new Map(), pathPolicyCount: 0, checks: [], failure: null, lenient: true };
+  const value = await currentReadSet.run(reads, read);
+  if (reads.failure) return { value, complete: false, durable: null, current: () => false };
+  const files = [...reads.files.values()];
+  const durable = reads.checks.length || files.some((file) => [...file.pathPolicies].some((policy) => !policyNames.has(policy)))
+    ? null
+    : files.map((file) => ({ root: file.root, target: file.target, limit: file.limit, fingerprint: file.fingerprint,
+      policies: [...file.pathPolicies].map((policy) => policyNames.get(policy)!).sort() }));
+  return {
+    value,
+    complete: true,
+    durable,
+    current: () => {
+      for (const dependency of files) if (currentFingerprint(dependency) !== dependency.fingerprint) return false;
+      try {
+        for (const check of reads.checks) check();
+      } catch {
+        return false;
+      }
+      return true;
+    },
+  };
+}
+
+/** Whether every stored dependency still has its fingerprint. `memo` shares
+ * fingerprints of files several sets read, within one caller's pass. */
+export function durableDesignDependenciesCurrent(
+  dependencies: readonly DurableDesignDependency[],
+  memo?: Map<string, string | null>,
+): boolean {
+  for (const dependency of dependencies) {
+    const key = `${dependency.root}\0${dependency.target}\0${dependency.limit}\0${dependency.policies.join(",")}`;
+    let fingerprint = memo?.get(key);
+    if (fingerprint === undefined && !memo?.has(key)) {
+      const pathPolicies = new Set<(relativePath: string) => boolean>();
+      for (const name of dependency.policies) {
+        const policy = namedPolicies.get(name);
+        if (!policy) return false;
+        pathPolicies.add(policy);
+      }
+      fingerprint = currentFingerprint({ ...dependency, pathPolicies });
+      memo?.set(key, fingerprint);
+    }
+    if (fingerprint !== dependency.fingerprint) return false;
+  }
+  return true;
 }
