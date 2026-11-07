@@ -89,6 +89,39 @@ it("batches disjoint frames while preserving DOM hit targets, alpha and the fram
   } finally { await page.close(); }
 });
 
+it("admits a batch of sources without a computed-style read per admission and still composes every frame", async () => {
+  // Each admission runs inside a React layout effect next to other DOM writes.
+  // A computed-style read there forced one full style recalculation per frame:
+  // about 2.8 s of a warm 256-frame reopen on the reference Mac.
+  const page = await open();
+  try {
+    const result = await page.evaluate(async () => {
+      const w = window as any;
+      const rows = [];
+      for (let i = 0; i < 24; i++) rows.push(await w.add({ key: `batch/${i}`, x: 10 + (i % 6) * 76, y: 40 + Math.floor(i / 6) * 76,
+        width: 64, height: 64, z: i, color: w.tileColors.blueAlpha, background: w.tileColors.lightBackground }));
+      w.paint();
+      const original = window.getComputedStyle;
+      let reads = 0;
+      window.getComputedStyle = function (this: Window, ...args: Parameters<typeof getComputedStyle>) {
+        reads++; return original.apply(this, args);
+      } as typeof getComputedStyle;
+      const releases = rows.map((row: any, i: number) => {
+        row.article.toggleAttribute("data-batch-written", true);
+        return w.tiles.attachDesignSourceTiles(row.image, `batch-${i}`);
+      });
+      const duringAdmission = reads;
+      await Promise.resolve();
+      w.paint();
+      window.getComputedStyle = original;
+      w.releases = releases;
+      return { duringAdmission, tiled: document.querySelectorAll("[data-design-source-tiled]").length };
+    });
+    expect(result.duringAdmission).toBe(0);
+    expect(result.tiled).toBe(24);
+  } finally { await page.close(); }
+});
+
 it("qualifies the displayed GPU output and exact source together, refusing a hidden or missing output", async () => {
   const page = await open();
   try {

@@ -1,6 +1,14 @@
-import { observeDesignCanvasPaint, readDesignCanvasFrameBounds, repaintDesignCanvasPixels } from "./design-canvas-camera";
+import { canvasChromeObserved, designCanvasPointerFrame, observeDesignCanvasPaint, readDesignCanvasFrameBounds,
+  repaintDesignCanvasPixels } from "./design-canvas-camera";
 import type { DesignViewport, DesignViewportSize } from "./design-canvas-math";
-import { DESIGN_TILE_OUTPUT_BYTES, designSourceTiles, type DesignTileFrame, type DesignTileSource } from "./design-source-tiles";
+import { DESIGN_TILE_OUTPUT_BYTES, designSourceTiles, designTileDensity, type DesignTileFrame, type DesignTileSource } from "./design-source-tiles";
+
+/** A live pan replans speculative tiles at most this often; planning walks
+ * every registered source, which costs O(page) on each display frame of a
+ * large page. A zoom exposes new area and density on every frame, so any zoom
+ * change, like a rest paint, always plans (the pan perimeter is 64 px and a
+ * fast pan moves about 50 px in this interval). */
+const GESTURE_PREFETCH_PLAN_MS = 64;
 
 type SourceAnchor = HTMLSpanElement & { designSourceImage: HTMLImageElement };
 const sourceAnchors = new WeakMap<HTMLImageElement, SourceAnchor>();
@@ -11,7 +19,13 @@ interface Registration {
   background: DesignTileFrame["background"];
   outline: DesignTileFrame["outline"];
   anchor?: SourceAnchor;
+  /** Colors resolve together before the next composition. Reading computed
+   * style inside each admission's layout effect forced one full style
+   * recalculation per frame: seconds for a warm 256-frame page. */
+  colorsPending?: boolean;
 }
+
+const UNRESOLVED_BACKGROUND: DesignTileFrame["background"] = Object.freeze([0, 0, 0, 0] as const);
 
 /** CSS hiding leaves SVG resource documents attached to Chromium's visible
  * document lifecycle. Keep the loaded image in its original ownerDocument,
@@ -140,6 +154,10 @@ class DesignSourceScene {
   private pendingPaint = false;
   private composition: Composition | null = null;
   private layoutRows: readonly LayoutRow[] | null = null;
+  private plannedAt = -Infinity;
+  private plannedDensity = 0;
+  private plannedDirection = 0;
+  private plannedZoom = 0;
   private readonly geometryObserver: MutationObserver;
   private readonly themeObserver: MutationObserver;
 
@@ -175,7 +193,7 @@ class DesignSourceScene {
   private refreshBackgrounds() {
     this.layoutRows = null;
     this.restore();
-    for (const row of this.registrations) Object.assign(row, frameColors(row.frame));
+    for (const row of this.registrations) { Object.assign(row, frameColors(row.frame)); row.colorsPending = false; }
   }
 
   private readGeometryChanges(records: MutationRecord[]): boolean {
@@ -203,7 +221,9 @@ class DesignSourceScene {
     // A same-frame replacement may mount before the old effect cleanup. Reuse
     // its unmodified background, not the transparent compositor override.
     const existing = [...this.registrations].find(row => row.frame === frame);
-    const registration = { frame, source, ...(existing ? { background: existing.background, outline: existing.outline } : frameColors(frame)) };
+    const registration: Registration = existing && !existing.colorsPending
+      ? { frame, source, background: existing.background, outline: existing.outline }
+      : { frame, source, background: UNRESOLVED_BACKGROUND, outline: undefined, colorsPending: true };
     this.registrations.add(registration);
     this.layoutRows = null;
     if (this.affectsView(frame)) this.requestPaint();
@@ -225,10 +245,21 @@ class DesignSourceScene {
     };
   }
 
+  private resolveColors() {
+    // One pass of reads after the commit's writes: the first computed-style
+    // read recalculates once and every later frame reuses that result.
+    for (const row of this.registrations) if (row.colorsPending) {
+      Object.assign(row, frameColors(row.frame));
+      row.colorsPending = false;
+      this.layoutRows = null;
+    }
+  }
+
   private layout(): readonly LayoutRow[] {
     // A direct drag/resize or React commit may precede the observer callback.
     // Drain those records before using the cached geometry and paint order.
     this.readGeometryChanges(this.geometryObserver.takeRecords());
+    this.resolveColors();
     if (this.layoutRows) return this.layoutRows;
     const registered = new Map([...this.registrations].map(row => [row.frame, row]));
     // Explicit z wins; equal z keeps the existing DOM order. Never infer
@@ -261,7 +292,10 @@ class DesignSourceScene {
 
   private rows(view: DesignViewport, size: DesignViewportSize): Row[] {
     const focused = this.world.ownerDocument.activeElement?.closest("[data-design-frame]");
-    const hovered = this.world.querySelector("[data-design-frame-pointer]") ?? this.world.querySelector("[data-design-frame]:hover");
+    // Tracked pointer/hover state: two subtree selector scans per camera paint
+    // cost O(every retained frame's DOM) on large pages.
+    const hovered = designCanvasPointerFrame(this.world) ??
+      (canvasChromeObserved(this.world) ? null : this.world.querySelector("[data-design-frame-pointer]") ?? this.world.querySelector("[data-design-frame]:hover"));
     return this.layout().map(row => {
       const chrome = row.compact && row.element !== hovered && row.element !== focused ? 0 : 48 / view.zoom;
       const visible = row.protected || !((row.x + row.width) * view.zoom + view.panX < -2 || row.x * view.zoom + view.panX > size.width + 2 ||
@@ -362,8 +396,13 @@ class DesignSourceScene {
       // A zoom-out admits sources beyond today's viewport. Plan against all
       // completed source rows, within the same bounded next-density queue.
       // A simultaneous fallback scene must not replace the output owner's plan.
-      if (plane) designSourceTiles.prefetch(rows.filter(row => row.registration), view, size, dpr, this.direction,
-        this.anchor ?? { x: size.width / 2, y: size.height / 2 });
+      const density = designTileDensity(view.zoom, dpr), now = performance.now();
+      if (plane && (!this.world.hasAttribute("data-design-camera-gesture") || density !== this.plannedDensity ||
+          view.zoom !== this.plannedZoom || this.direction !== this.plannedDirection || now - this.plannedAt >= GESTURE_PREFETCH_PLAN_MS)) {
+        this.plannedAt = now; this.plannedDensity = density; this.plannedDirection = this.direction; this.plannedZoom = view.zoom;
+        designSourceTiles.prefetch(rows.filter(row => row.registration), view, size, dpr, this.direction,
+          this.anchor ?? { x: size.width / 2, y: size.height / 2 });
+      }
     } finally { this.painting = false; }
   }
 
