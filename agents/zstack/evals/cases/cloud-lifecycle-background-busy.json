@@ -1,0 +1,9 @@
+{
+  "id": "cloud-lifecycle-background-busy",
+  "kind": "replay",
+  "area": "control-plane",
+  "fixedBy": "pr:882",
+  "symptom": "After #880 made the cloud lifecycle event-driven, Alpha still swept about every 2.2 s while idle: 401 sweeps in 15 idle minutes against 480 before. Each sweep started a Cloud Computer build check in the background, and the cadence was chosen before it settled, so every sweep looked like a running build. The unit fixture had no builder, so tests passed.",
+  "rule": "zstack-verify live evidence: after a cost optimization, re-measure the production path (PlanetScale insights for a fixed idle window) before calling it done. Unit fixtures must wire the same background collaborators the live composition does.",
+  "check": "pnpm --dir apps/control-plane exec vitest run src/cloud/lifecycle.test.ts -t \"quick Computer build check\""
+}
