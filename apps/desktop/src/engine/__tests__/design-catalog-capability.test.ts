@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { ZerosEngine } from "../zeros-engine";
 import type { TransportClient } from "../transport/types";
 import { DESIGN_CATALOG_READ_CAPABILITY, DESIGN_LAZY_PREPARATION_CAPABILITY, DESIGN_MUTATION_SNAPSHOTS_CAPABILITY, DESIGN_PAGE_SCOPED_MUTATIONS_CAPABILITY } from "@zeros/protocol/design-catalog";
-import { DESIGN_PREVIEW_JOBS_CAPABILITY } from "@zeros/protocol/design-capture";
+import { DESIGN_PREVIEW_JOBS_CAPABILITY, DESIGN_THUMBNAILS_STORE_CAPABILITY } from "@zeros/protocol/design-capture";
 import { DESIGN_SOURCE_SURFACES_CAPABILITY } from "@zeros/protocol/design-surface";
 import { DESIGN_COPY_PLACEMENT_CAPABILITY } from "@zeros/protocol/design-relocation";
 import { CONVERSATION_REPLAY_CAPABILITY } from "@zeros/protocol/conversation-replay";
@@ -35,7 +35,8 @@ describe("Design catalog capability advertisement", () => {
       expect(client.send).toHaveBeenCalledWith(
         expect.objectContaining({
           type: "ENGINE_READY",
-          capabilities: [DESIGN_CATALOG_READ_CAPABILITY, CONVERSATION_REPLAY_CAPABILITY, ...(kind === "local" ? [DESIGN_PREVIEW_JOBS_CAPABILITY, DESIGN_LAZY_PREPARATION_CAPABILITY, DESIGN_SOURCE_SURFACES_CAPABILITY, DESIGN_COPY_PLACEMENT_CAPABILITY, DESIGN_MUTATION_SNAPSHOTS_CAPABILITY, DESIGN_PAGE_SCOPED_MUTATIONS_CAPABILITY] : [])],
+          capabilities: [DESIGN_CATALOG_READ_CAPABILITY, CONVERSATION_REPLAY_CAPABILITY, ...(kind === "local" ? [DESIGN_PREVIEW_JOBS_CAPABILITY, DESIGN_LAZY_PREPARATION_CAPABILITY, DESIGN_SOURCE_SURFACES_CAPABILITY, DESIGN_COPY_PLACEMENT_CAPABILITY, // Stored thumbnails need no capture host; batch rendering does, and none runs here.
+            DESIGN_MUTATION_SNAPSHOTS_CAPABILITY, DESIGN_PAGE_SCOPED_MUTATIONS_CAPABILITY, DESIGN_THUMBNAILS_STORE_CAPABILITY] : [])],
         }),
       );
       expect(JSON.stringify(vi.mocked(client.send).mock.calls)).not.toContain(
