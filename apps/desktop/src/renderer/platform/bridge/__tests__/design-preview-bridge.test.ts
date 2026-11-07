@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from "vitest";
-import { DESIGN_CAPTURE_TIMEOUT_MS } from "@zeros/protocol/design-capture";
+import { DESIGN_CAPTURE_TIMEOUT_MS, DESIGN_PREVIEW_JOB_TIMEOUT_MS } from "@zeros/protocol/design-capture";
 import { bridgeDesignPreview, rememberDesignDirectoryIdentity } from "../design-bridge";
 import { designCaptureScheduler } from "../design-capture-scheduler";
 import type { RuntimeClient } from "../ws-client";
@@ -140,6 +140,8 @@ it("renders a batch of thumbnails as one cancellable engine job and validates it
   expect(seen[0]).toMatchObject({ op: "design.thumbnails.render", params: { workspaceId: "workspace", directoryId: "design_directory",
     colorScheme: "light", maxDimension: 128, frames: input.frames } });
   expect(typeof seen[0]!.params.jobId).toBe("string");
+  // The engine refuses a job deadline beyond its preview job window.
+  expect(seen[0]!.params.deadline as number).toBeLessThanOrEqual(Date.now() + DESIGN_PREVIEW_JOB_TIMEOUT_MS + 1_000);
   finish({ pipeline: "batch-v1", pictures: [{ file: "a.html", sourceVersion: "a".repeat(24), mimeType: "image/png", width: 128, height: 80, data: "iVBORw0KGgo=" }],
     stale: [{ file: "b.html", sourceVersion: "c".repeat(24) }], failed: [] });
   await expect(done).resolves.toMatchObject({ pictures: [{ file: "a.html" }], stale: [{ file: "b.html" }] });

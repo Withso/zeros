@@ -51,6 +51,8 @@ const DESIGN_SOURCE_PREVIEW_CONCURRENCY = 4;
 
 /** Counts for the explicit resources diagnostic; reasons carry no paths. */
 const sourcePreviewUsage = { batched: 0, vector: 0, native: 0, fallbacks: 0, ineligible: {} as Record<string, number>, lastFallback: "",
+  /** The first batch failure: later ones can follow from it. */
+  firstBatchFailure: "",
   /** Summed milliseconds per vector stage, to locate a slow producer. */
   ms: { load: 0, raster: 0, encode: 0 } };
 const recordStage = (stage: "load" | "raster" | "encode", ms: number) => { sourcePreviewUsage.ms[stage] += ms; };
@@ -149,6 +151,11 @@ export const designFramePreviews = new DesignFramePreviews({
         if (signal?.aborted) throw error;
         sourcePreviewUsage.fallbacks++;
         sourcePreviewUsage.lastFallback = (error instanceof Error ? error.message : String(error)).slice(0, 120);
+        if (!sourcePreviewUsage.firstBatchFailure) {
+          const cause = error instanceof Error && error.cause instanceof Error ? ` (cause: ${error.cause.message})` : "";
+          sourcePreviewUsage.firstBatchFailure = `${sourcePreviewUsage.lastFallback || "unknown"}${cause}`.slice(0, 400);
+          console.warn(`[Zeros Design] thumbnail batch failed; using renderer pictures: ${sourcePreviewUsage.firstBatchFailure}`);
+        }
       }
     }
     const source = designSourcePreviewTarget(owner, input);

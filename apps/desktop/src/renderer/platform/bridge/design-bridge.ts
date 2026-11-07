@@ -19,7 +19,6 @@ import type {
 } from "@zeros/design-web";
 import type { DesignRuntimeMatchedDeclaration } from "@zeros/protocol/design-runtime";
 import {
-  DESIGN_BATCH_CAPTURE_TIMEOUT_MS,
   DESIGN_CAPTURE_TIMEOUT_MS,
   DESIGN_PREVIEW_JOBS_CAPABILITY,
   DESIGN_PREVIEW_JOB_TIMEOUT_MS,
@@ -751,7 +750,8 @@ async function runDesignPreviewJob<T>(
   catch {
     if (!terminal) {
       designCaptureScheduler.quarantine();
-      throw new DesignCaptureCleanupUnconfirmedError();
+      // Keep the operation's own failure for diagnostics.
+      throw Object.assign(new DesignCaptureCleanupUnconfirmedError(), "error" in outcome ? { cause: outcome.error } : {});
     }
   } finally { offStatus?.(); }
   if ("error" in outcome) throw outcome.error;
@@ -774,7 +774,9 @@ export async function bridgeDesignThumbnailsRender(
 ): Promise<DesignThumbnailsReply> {
   return runDesignPreviewJob(bridge, workspaceId, input.directoryId, "design.thumbnails.render",
     { ...input, frames: input.frames.map(({ file, sourceVersion }) => ({ file, sourceVersion })) },
-    DESIGN_BATCH_CAPTURE_TIMEOUT_MS, DESIGN_BATCH_CAPTURE_TIMEOUT_MS + 15_000,
+    // A batch is an engine preview job: its deadline stays within the job
+    // window the engine accepts (a 64-frame batch takes seconds).
+    DESIGN_PREVIEW_JOB_TIMEOUT_MS, DESIGN_PREVIEW_JOB_TIMEOUT_MS + 15_000,
     options.signal ?? new AbortController().signal, (result) => {
       const reply = designThumbnailsReplySchema.safeParse(result);
       if (!reply.success) throw new Error("design.thumbnails.render: malformed engine response");

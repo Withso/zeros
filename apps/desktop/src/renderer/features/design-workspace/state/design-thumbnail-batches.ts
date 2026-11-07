@@ -32,25 +32,30 @@ interface Entry {
   settled: boolean;
   release(): void;
 }
-interface Pending {
+interface Batch {
+  readonly key: string;
   readonly group: DesignThumbnailGroup;
-  entries: Entry[];
-  timer: unknown;
+  readonly entries: Entry[];
+  /** The batching window has passed (or the batch is full): it may leave. */
+  ready: boolean;
 }
 
 /** Coalesces one-frame picture requests into engine batches: requests that
  * arrive within a short window (or fill a batch) are rendered together, and
- * each caller receives exactly its own frame's answer. A caller that cancels
- * is answered at once; a batch whose callers have all cancelled is aborted. */
+ * each caller receives exactly its own frame's answer. The engine renders one
+ * preview job at a time, so a workspace has one batch at the engine while the
+ * next fills. A caller that cancels is answered at once; a batch whose callers
+ * have all cancelled is aborted; a frame appears once per batch. */
 export class DesignThumbnailBatches {
-  private readonly pending = new Map<string, Pending>();
+  /** Waiting batches in arrival order. */
+  private readonly waiting: Batch[] = [];
   private readonly flushing = new Set<AbortController>();
+  private readonly busy = new Set<string>();
 
   constructor(private readonly render: DesignThumbnailBatchRender, private readonly options: {
     maxItems?: number;
     windowMs?: number;
     setTimer?: (callback: () => void, ms: number) => unknown;
-    clearTimer?: (timer: unknown) => void;
   } = {}) {}
 
   private get maxItems() { return Math.max(1, this.options.maxItems ?? 64); }
@@ -59,16 +64,6 @@ export class DesignThumbnailBatches {
     if (signal?.aborted) return Promise.reject(signal.reason ?? new Error("Design thumbnail request cancelled."));
     const key = JSON.stringify([group.workspaceId, group.directoryId, group.theme, group.colorScheme, group.maxDimension]);
     return new Promise<DesignPreviewReply>((resolve, reject) => {
-      let pending = this.pending.get(key);
-      if (pending?.entries.some((entry) => entry.frame.file === frame.file && !entry.settled)) {
-        // One frame appears once per batch: a second ask for it waits for the next.
-        this.flush(key);
-        pending = undefined;
-      }
-      if (!pending) {
-        pending = { group, entries: [], timer: null };
-        this.pending.set(key, pending);
-      }
       const entry: Entry = {
         frame, signal, settled: false,
         resolve: (reply) => { if (!entry.settled) { entry.settled = true; entry.release(); resolve(reply); } },
@@ -80,31 +75,43 @@ export class DesignThumbnailBatches {
         signal.addEventListener("abort", aborted, { once: true });
         entry.release = () => signal.removeEventListener("abort", aborted);
       }
-      pending.entries.push(entry);
-      if (pending.entries.length >= this.maxItems) this.flush(key);
-      else if (pending.timer === null)
-        pending.timer = (this.options.setTimer ?? ((callback, ms) => setTimeout(callback, ms)))(() => this.flush(key), this.options.windowMs ?? 8);
+      let batch: Batch | undefined;
+      for (let index = this.waiting.length - 1; index >= 0 && !batch; index--)
+        if (this.waiting[index]!.key === key) batch = this.waiting[index];
+      if (!batch || batch.entries.length >= this.maxItems ||
+        batch.entries.some((other) => !other.settled && other.frame.file === frame.file)) {
+        batch = { key, group, entries: [], ready: false };
+        this.waiting.push(batch);
+        const opened = batch;
+        (this.options.setTimer ?? ((callback, ms) => setTimeout(callback, ms)))(() => { opened.ready = true; this.pump(group.workspaceId); },
+          this.options.windowMs ?? 8);
+      }
+      batch.entries.push(entry);
+      if (batch.entries.length >= this.maxItems) { batch.ready = true; this.pump(group.workspaceId); }
     });
   }
 
   /** Requests and batches still waiting on the engine. */
   usage() {
-    return { waiting: [...this.pending.values()].reduce((sum, pending) => sum + pending.entries.length, 0), batches: this.flushing.size };
+    return { waiting: this.waiting.reduce((sum, batch) => sum + batch.entries.length, 0), batches: this.flushing.size };
   }
 
-  private flush(key: string): void {
-    const pending = this.pending.get(key);
-    if (!pending) return;
-    this.pending.delete(key);
-    if (pending.timer !== null) (this.options.clearTimer ?? ((timer) => clearTimeout(timer as ReturnType<typeof setTimeout>)))(pending.timer);
-    const entries = pending.entries.filter((entry) => !entry.settled);
-    if (!entries.length) return;
+  /** Sends the workspace's oldest ready batch unless one is at the engine. */
+  private pump(workspaceId: string): void {
+    if (this.busy.has(workspaceId)) return;
+    const index = this.waiting.findIndex((batch) => batch.group.workspaceId === workspaceId && batch.ready);
+    if (index < 0) return;
+    const [batch] = this.waiting.splice(index, 1);
+    const entries = batch!.entries.filter((entry) => !entry.settled);
+    if (!entries.length) { this.pump(workspaceId); return; }
+    this.busy.add(workspaceId);
     const controller = new AbortController();
     this.flushing.add(controller);
     // Every caller cancelled: nothing awaits this batch's pictures.
     const abandon = () => { if (entries.every((entry) => entry.settled)) controller.abort(new Error("Design thumbnail batch abandoned.")); };
     for (const entry of entries) entry.signal?.addEventListener("abort", abandon, { once: true });
-    void this.render(pending.group, entries.map((entry) => entry.frame), controller.signal).then((reply) => {
+    const group = batch!.group;
+    void this.render(group, entries.map((entry) => entry.frame), controller.signal).then((reply) => {
       const pictures = new Map(reply.pictures.map((picture) => [picture.file, picture]));
       const stale = new Map(reply.stale.map((frame) => [frame.file, frame]));
       const failed = new Map(reply.failed.map((frame) => [frame.file, frame]));
@@ -112,7 +119,7 @@ export class DesignThumbnailBatches {
         const picture = pictures.get(entry.frame.file);
         const moved = stale.get(entry.frame.file);
         if (picture && picture.sourceVersion === entry.frame.sourceVersion) {
-          entry.resolve({ sourceVersion: picture.sourceVersion, theme: pending.group.theme, mimeType: "image/png",
+          entry.resolve({ sourceVersion: picture.sourceVersion, theme: group.theme, mimeType: "image/png",
             width: picture.width, height: picture.height, data: picture.data });
         } else if (moved) entry.resolve({ stale: true, sourceVersion: moved.sourceVersion });
         else entry.reject(new Error(failed.get(entry.frame.file)?.error ?? "Design thumbnail batch did not picture this frame."));
@@ -122,6 +129,8 @@ export class DesignThumbnailBatches {
     }).finally(() => {
       this.flushing.delete(controller);
       for (const entry of entries) entry.signal?.removeEventListener("abort", abandon);
+      this.busy.delete(workspaceId);
+      this.pump(workspaceId);
     });
   }
 }

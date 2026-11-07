@@ -6,8 +6,7 @@ const group: DesignThumbnailGroup = { workspaceId: "workspace-1", directoryId: "
 
 function harness(render: DesignThumbnailBatchRender, maxItems = 64) {
   const timers: Array<() => void> = [];
-  const batches = new DesignThumbnailBatches(render, { maxItems, setTimer: (callback) => { timers.push(callback); return callback; },
-    clearTimer: (timer) => { const index = timers.indexOf(timer as () => void); if (index >= 0) timers.splice(index, 1); } });
+  const batches = new DesignThumbnailBatches(render, { maxItems, setTimer: (callback) => { timers.push(callback); return callback; } });
   return { batches, tick: () => { for (const timer of timers.splice(0)) timer(); } };
 }
 const pictureOf = (file: string, sourceVersion: string) => ({ file, sourceVersion, width: 128, height: 80, data: `png:${file}` });
@@ -33,7 +32,7 @@ it("renders requests that arrive together as one batch and answers each caller w
   expect(render.mock.calls[0]![1].map(frame => frame.file)).toEqual(["a.html", "b.html", "c.html", "d.html"]);
 });
 
-it("sends a full batch at once and never mixes pictures of different sizes, themes or owners", async () => {
+it("sends a full batch at once, keeps one batch per workspace at the engine, and never mixes sizes, themes or owners", async () => {
   const render = vi.fn<DesignThumbnailBatchRender>(async (_group, frames) => ({
     pictures: frames.map(frame => pictureOf(frame.file, frame.sourceVersion)), stale: [], failed: [] }));
   const { batches, tick } = harness(render, 3);
@@ -46,9 +45,11 @@ it("sends a full batch at once and never mixes pictures of different sizes, them
   ];
   tick();
   await Promise.all([...requests, ...others]);
+  // The full batch left at once; another workspace never waits behind it;
+  // this workspace's other batches leave one at a time as each returns.
   expect(render.mock.calls.map(call => [call[0].workspaceId, call[0].theme, call[0].maxDimension, call[1].length])).toEqual([
-    ["workspace-1", "dark", 128, 3], ["workspace-1", "dark", 128, 1], ["workspace-1", "dark", 64, 1],
-    ["workspace-1", null, 128, 1], ["workspace-2", "dark", 128, 1],
+    ["workspace-1", "dark", 128, 3], ["workspace-2", "dark", 128, 1], ["workspace-1", "dark", 128, 1],
+    ["workspace-1", "dark", 64, 1], ["workspace-1", null, 128, 1],
   ]);
 });
 
@@ -84,9 +85,9 @@ it("rejects every caller when the batch fails and keeps one frame per batch", as
   const render = vi.fn<DesignThumbnailBatchRender>(async () => { throw new Error("capture host unavailable"); });
   const { batches, tick } = harness(render);
   const a = batches.request(group, { file: "a.html", sourceVersion: version(1) });
-  // The same frame again: the first batch leaves now, the second waits.
+  // The same frame again goes to the next batch, which follows the first.
   const again = batches.request(group, { file: "a.html", sourceVersion: version(2) });
-  expect(render).toHaveBeenCalledTimes(1);
+  expect(render).not.toHaveBeenCalled();
   tick();
   await expect(a).rejects.toThrow("capture host unavailable");
   await expect(again).rejects.toThrow("capture host unavailable");
