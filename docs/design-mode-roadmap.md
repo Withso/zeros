@@ -2193,6 +2193,21 @@ camera. Leaving a canvas during the wheel debounce settles the displayed camera
 into its still-current page before retirement. A replaced page or checkout
 cannot receive that gesture, and returning clears the gesture-only chrome state.
 
+While a camera gesture is live, one empty animation-frame request per refresh
+keeps renderer main frames on the display cadence; input-driven frames
+otherwise begin wherever an event lands in the interval, miss the compositor
+deadline and drop alternate frames. The clock retires when the gesture settles.
+Camera paints cost what changes, not the page: a frame whose inline style still
+holds the last scale write is skipped, hover and focus resolve once per paint
+from tracked pointer events, hit testing rejects by cached bounds, and a pure
+pan replans tile prefetch at most every 64 ms (zoom, density or direction
+changes replan on every paint). Source admission resolves frame colors in one
+batch before composition; a computed-style read per admission forced one style
+recalculation per frame inside React layout effects. Frame preparation yields
+to a live gesture, prepares the frames nearest the camera center first, and
+demands at most the source-surface admission limit beyond selected and live
+frames, so a large page never prepares content it cannot display.
+
 Canvas zoom is bounded to 800%. Passive and editing HTML retain the ordinary
 display density; camera motion changes only the outer transform. A global
 iframe `zoom: 8` is forbidden: on a Retina display it produces an effective
@@ -2374,8 +2389,18 @@ A frame with neither an admitted passive document nor a live editor paints a sav
 (`state/design-frame-previews.ts`). The workspace's capture host renders it
 through `design.preview`, the same renderer as `design capture`, at the frame's
 own canvas size (up to the 16,384 px frame limit; the pixel budget applies to
-the raster) and theme, scaled into a thumbnail (128 px), overview (384 px) or detail (1,280 px)
-raster by the frame's painted size times device pixel ratio. A changed frame
+the raster) and theme, scaled into a mini (64 px), thumbnail (128 px), overview (384 px) or
+detail (1,280 px) raster by the frame's painted size times device pixel ratio, never
+enlarged. A Local frame is pictured first from its passive source vector in the
+renderer (`design-source-preview.ts`: a temporary sandboxed surface document,
+rasterized once the camera rests, at most four at a time); the capture host stays
+the fallback and the only path for cloud. A mini picture renders at thumbnail
+resolution and is scaled down from those pixels, and any smaller level of an
+already pictured generation is scaled down from the larger one without a render.
+On an overview page, off-screen neighbours ask for mini covers, so the shared
+display budget serves the frames the camera shows first; a fitted 1,000-frame
+page needs about 25 MB of it. Cold frames paint their surface fill (no stroke or
+chrome) until their first ready content, so every frame's position shows at once. A changed frame
 answers `stale` instead of other pixels; a whole-pixel frame is proven by the
 generation the render reports, a fractional one by reading it again. The host
 renders one capture at a time: a preview yields a busy slot and asks again
@@ -2701,9 +2726,13 @@ boundaries, not targets to relax casually:
   and 16 MiB artifacts;
 - active canvas: visible frame surfaces plus at most 12 nearby surfaces, with
   240px admission / 480px retention margins; at most 12 live frame runtimes per
-  retained canvas. One incoming document replacement is admitted application-wide;
-- saved pictures: 16 MiB encoded memory / 48 MiB disposable IndexedDB cache;
-  128px thumbnail, 384px overview and 1280px detail levels. Display leases reserve
+  retained canvas. One incoming document replacement is admitted application-wide.
+  An overview (more than 256 frames visible, held until fewer than 192 are)
+  keeps the whole admission/retention neighbourhood mounted as pictures or
+  placeholders, admits sources only for frames painted above 384 device pixels,
+  and starts no live runtime for a small frame without explicit demand;
+- saved pictures: 16 MiB encoded memory / 96 MiB disposable IndexedDB cache;
+  64px mini, 128px thumbnail, 384px overview and 1280px detail levels. Display leases reserve
   a conservative decoded raster plus compositor copy (8 bytes/pixel) within a
   shared 64 MiB steady policy, including old/incoming pictures, at most 32 MiB of warm
   decoded previews, runtime covers and detail tiles. Warm decoders are evictable

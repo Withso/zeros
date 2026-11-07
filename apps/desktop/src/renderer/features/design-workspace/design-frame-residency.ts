@@ -5,13 +5,18 @@ import {
   type DesignViewportSize,
 } from "./design-canvas-math";
 import { DesignFrameSpatialIndex, type DesignSpatialFrame, type DesignSpatialRect } from "./design-frame-spatial-index";
-import { selectDesignSourceSurfaces } from "./design-source-surfaces";
+import { DESIGN_SOURCE_SURFACE_LIMITS, selectDesignSourceSurfaces } from "./design-source-surfaces";
+import { DESIGN_PREVIEW_LEVELS } from "./state/design-frame-previews";
 import type { DesignSurfaceCost } from "@zeros/protocol/design-surface";
 
 export const DESIGN_FRAME_OVERSCAN_PIXELS = 240;
 export const DESIGN_FRAME_RETENTION_PIXELS = 480;
 export const DESIGN_MAX_NEARBY_FRAME_SURFACES = 12;
 export const DESIGN_MAX_LIVE_FRAMES = 12;
+/** An overview starts above the source admission count and ends below this
+ * many visible frames, so a zoom near the boundary does not remount the page
+ * on every step. */
+export const DESIGN_OVERVIEW_EXIT_FRAMES = 192;
 
 export interface DesignFrameResidency<T extends DesignSpatialFrame> {
   readonly frames: readonly T[];
@@ -42,6 +47,9 @@ export interface DesignFrameResidencyInput<T extends DesignSpatialFrame> {
   readonly sourceUnavailable?: ReadonlyMap<string, string>;
   /** Small overlay for direct manipulation; the immutable index is unchanged. */
   readonly geometry?: ReadonlyMap<string, DesignSpatialRect>;
+  /** A camera gesture is live: frames may mount, but none unmounts, no source
+   * is newly admitted and an overview does not end until the camera rests. */
+  readonly gesture?: boolean;
 }
 
 function intersects(a: DesignSpatialRect, b: DesignSpatialRect): boolean {
@@ -52,9 +60,10 @@ function intersects(a: DesignSpatialRect, b: DesignSpatialRect): boolean {
 /** Metadata owns discovery and stacking. DOM lifetime is only a rendering
  * decision, so an offscreen frame remains selectable/movable/snappable. */
 export function createDesignFrameResidencyReader<T extends DesignSpatialFrame>() {
-  let previous: { owner: string; result: DesignFrameResidency<T> } | undefined;
+  let previous: { owner: string; result: DesignFrameResidency<T>; overview: boolean } | undefined;
   return (input: DesignFrameResidencyInput<T>): DesignFrameResidency<T> => {
     const prior = previous?.owner === input.owner ? previous.result : undefined;
+    let overview = false;
     const available = new Map(input.frames.map((frame) => [frame.file, frame]));
     const mounted = new Set<string>();
     const visibleFiles = new Set<string>();
@@ -93,7 +102,16 @@ export function createDesignFrameResidencyReader<T extends DesignSpatialFrame>()
       };
       nearby.sort((a, b) => Number(priorFiles.has(b.file)) - Number(priorFiles.has(a.file)) ||
         distance(a) - distance(b) || a.file.localeCompare(b.file));
-      for (const frame of nearby.slice(0, DESIGN_MAX_NEARBY_FRAME_SURFACES)) mounted.add(frame.file);
+      const wasOverview = previous?.owner === input.owner && previous.overview;
+      overview = (input.gesture && wasOverview) ||
+        visibleFiles.size > (wasOverview ? DESIGN_OVERVIEW_EXIT_FRAMES : DESIGN_SOURCE_SURFACE_LIMITS.frames);
+      // An overview frame is a picture or a placeholder, never a document. The
+      // whole neighbourhood stays mounted so a pan moves pixels instead of
+      // reconciling the page as frames cross the screen edge.
+      for (const frame of overview ? nearby : nearby.slice(0, DESIGN_MAX_NEARBY_FRAME_SURFACES)) mounted.add(frame.file);
+      // Unmounting is never urgent mid-gesture; reconciling the page for it
+      // was a dropped frame per camera step. The rest applies it once.
+      if (input.gesture) for (const frame of prior?.frames ?? []) if (available.has(frame.file)) mounted.add(frame.file);
       // Layer trees and editing can need a bounded runtime outside the viewport.
       const demanded = new Set([...mounted, ...(input.protectedFiles ?? []), ...input.requiredFiles, ...(input.selectedFrame ? [input.selectedFrame] : [])]);
       candidates = input.frames.filter((frame) => demanded.has(frame.file));
@@ -102,20 +120,37 @@ export function createDesignFrameResidencyReader<T extends DesignSpatialFrame>()
     // A return pan can reveal their existing layout in this paint instead of
     // starting a protocol navigation. New screen demand wins over warm entries.
     type SourceFrame = T & { sourceVersion?: string; surfaceCost?: DesignSurfaceCost | null; previous?: { file: string; sourceVersion: string; surfaceCost?: DesignSurfaceCost | null } };
+    // Level of detail: once more frames are visible than source surfaces can
+    // admit, every frame is painted small. Such frames show pictures rendered
+    // at least at their painted size (never upscaled) instead of each keeping a
+    // laid-out source document; only a frame painted above the overview level
+    // keeps a source. Zooming in below the exit count returns to sources while
+    // the pictures are still sharp.
+    const ratio = input.devicePixelRatio > 0 ? input.devicePixelRatio : 1;
+    const needsSource = (frame: T) => !overview ||
+      Math.max(frame.width, frame.height) * input.view.zoom * ratio > DESIGN_PREVIEW_LEVELS.overview;
     const sourceCandidates = input.sourceSurfacesEnabled && input.active
-      ? [...input.frames.filter(frame => mounted.has(frame.file)),
-          ...input.frames.filter(frame => !mounted.has(frame.file) && prior?.sources.has(frame.file))] as SourceFrame[] : [];
+      ? [...input.frames.filter(frame => mounted.has(frame.file) && needsSource(frame)),
+          ...input.frames.filter(frame => !mounted.has(frame.file) && prior?.sources.has(frame.file) && !overview)] as SourceFrame[] : [];
     // Previous source is paint-only. The original descriptors still exclude
     // these frames from live/editor admission and continue preparation demand.
-    const admittedSources = selectDesignSourceSurfaces(sourceCandidates.map(frame => frame.sourceVersion ? frame : frame.previous ?? frame).filter(frame =>
-      !!frame.sourceVersion && input.sourceUnavailable?.get(frame.file) !== frame.sourceVersion));
+    const admittedSources = input.gesture && prior
+      // A new source document would load mid-gesture; pictures cover until rest.
+      ? new Set([...prior.sources].filter(file => available.has(file) && input.sourceUnavailable?.get(file) !==
+          (available.get(file) as SourceFrame).sourceVersion))
+      : selectDesignSourceSurfaces(sourceCandidates.map(frame => frame.sourceVersion ? frame : frame.previous ?? frame).filter(frame =>
+        !!frame.sourceVersion && input.sourceUnavailable?.get(frame.file) !== frame.sourceVersion));
     const sources = prior && admittedSources.size === prior.sources.size && [...admittedSources].every(file => prior.sources.has(file)) ? prior.sources : admittedSources;
     for (const file of sources) mounted.add(file);
     const visible = prior && visibleFiles.size === prior.visible.size && [...visibleFiles].every(file => prior.visible.has(file)) ? prior.visible : visibleFiles;
     const next = input.active ? selectLiveDesignFrameFiles({
       // A descriptor has never mounted an editor. Do not later protect its
       // prospective slot as painted content while its passive HTML is loading.
-      frames: candidates.filter(frame => (frame as T & { preparation?: string }).preparation !== "unprepared").map((frame) => {
+      // In an overview a small frame waits for its picture instead of running
+      // a whole frame document; only explicit demand keeps an editor there.
+      frames: candidates.filter(frame => (frame as T & { preparation?: string }).preparation !== "unprepared" &&
+        (!overview || needsSource(frame) || frame.file === input.selectedFrame ||
+          input.requiredFiles.includes(frame.file) || (input.protectedFiles ?? []).includes(frame.file))).map((frame) => {
         const rect = input.geometry?.get(frame.file);
         return rect ? { ...frame, ...rect } : frame;
       }),
@@ -140,7 +175,7 @@ export function createDesignFrameResidencyReader<T extends DesignSpatialFrame>()
     const frames = input.frames.filter((frame) => mounted.has(frame.file));
     const sameFrames = prior && frames.length === prior.frames.length && frames.every((frame, index) => frame === prior.frames[index]);
     const result = sameFrames && live === prior.live && sources === prior.sources && visible === prior.visible ? prior : { frames: sameFrames ? prior.frames : frames, live, sources, visible };
-    previous = { owner: input.owner, result };
+    previous = { owner: input.owner, result, overview };
     return result;
   };
 }

@@ -68,6 +68,31 @@ async function changed(page: Page, before: Buffer, after: Buffer): Promise<numbe
   }, { before: before.toString("base64"), after: after.toString("base64") });
 }
 
+it("warms the shared GPU context once so the first source paint creates none", async () => {
+  const page = await open();
+  try {
+    const counts = await page.evaluate(() => {
+      const w = window as any;
+      const created: string[] = [];
+      const native = HTMLCanvasElement.prototype.getContext;
+      HTMLCanvasElement.prototype.getContext = function (this: HTMLCanvasElement, kind: string, ...rest: unknown[]) {
+        created.push(kind);
+        return (native as any).call(this, kind, ...rest);
+      } as typeof native;
+      const tiles = new w.tiles.DesignSourceTiles(64 * 1024 * 1024, true);
+      const warmed = [tiles.warm(), tiles.warm()];
+      const afterWarm = created.length;
+      const owner = {};
+      const output = tiles.acquireOutput(owner);
+      tiles.releaseOutput(owner);
+      HTMLCanvasElement.prototype.getContext = native;
+      return { warmed, afterWarm, total: created.length, output: output instanceof HTMLCanvasElement, kinds: created };
+    });
+    expect(counts.warmed).toEqual([true, true]);
+    expect(counts).toMatchObject({ afterWarm: 1, total: 1, output: true, kinds: ["webgl2"] });
+  } finally { await page.close(); }
+});
+
 it("batches disjoint frames while preserving DOM hit targets, alpha and the frame's themed background", async () => {
   const page = await open();
   try {
@@ -86,6 +111,39 @@ it("batches disjoint frames while preserving DOM hit targets, alpha and the fram
     expect(await page.locator("[data-design-source-tiled]").count()).toBe(2);
     expect(await changed(page, before, await page.screenshot())).toBeLessThan(12);
     expect(await page.evaluate(() => document.elementFromPoint(40, 100)?.closest("article")?.dataset.designFrame)).toBe("personal/a");
+  } finally { await page.close(); }
+});
+
+it("admits a batch of sources without a computed-style read per admission and still composes every frame", async () => {
+  // Each admission runs inside a React layout effect next to other DOM writes.
+  // A computed-style read there forced one full style recalculation per frame:
+  // about 2.8 s of a warm 256-frame reopen on the reference Mac.
+  const page = await open();
+  try {
+    const result = await page.evaluate(async () => {
+      const w = window as any;
+      const rows = [];
+      for (let i = 0; i < 24; i++) rows.push(await w.add({ key: `batch/${i}`, x: 10 + (i % 6) * 76, y: 40 + Math.floor(i / 6) * 76,
+        width: 64, height: 64, z: i, color: w.tileColors.blueAlpha, background: w.tileColors.lightBackground }));
+      w.paint();
+      const original = window.getComputedStyle;
+      let reads = 0;
+      window.getComputedStyle = function (this: Window, ...args: Parameters<typeof getComputedStyle>) {
+        reads++; return original.apply(this, args);
+      } as typeof getComputedStyle;
+      const releases = rows.map((row: any, i: number) => {
+        row.article.toggleAttribute("data-batch-written", true);
+        return w.tiles.attachDesignSourceTiles(row.image, `batch-${i}`);
+      });
+      const duringAdmission = reads;
+      await Promise.resolve();
+      w.paint();
+      window.getComputedStyle = original;
+      w.releases = releases;
+      return { duringAdmission, tiled: document.querySelectorAll("[data-design-source-tiled]").length };
+    });
+    expect(result.duringAdmission).toBe(0);
+    expect(result.tiled).toBe(24);
   } finally { await page.close(); }
 });
 

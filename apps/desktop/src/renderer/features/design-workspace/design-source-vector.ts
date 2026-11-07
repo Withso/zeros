@@ -45,6 +45,12 @@ function vectorBlob(svg: unknown): Blob | null {
   return blob.size <= 1024 * 1024 ? blob : null;
 }
 
+/** The validated self-contained data URL for a surface vector, or null. */
+export function designSourceVectorDataUrl(svg: unknown): string | null {
+  const blob = vectorBlob(svg);
+  return blob ? vectorDataUrl(blob, svg as string) : null;
+}
+
 function vectorDataUrl(_blob: Blob, svg: string): string {
   // Chromium treats foreignObject in a Blob URL as an origin-tainted canvas
   // input. A self-contained data URL keeps the same inert SVG image semantics

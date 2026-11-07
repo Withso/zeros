@@ -164,6 +164,11 @@ export class DesignPreviewCache<T extends CachedImage = DesignPreviewImage> {
     return this.entries.has(key);
   }
 
+  /** The cached image without a display lease or a recency change. */
+  peek(key: string): Readonly<T> | null {
+    return this.entries.get(key)?.image ?? null;
+  }
+
   put(key: string, image: T): boolean {
     const costs = imageCosts(key, image);
     if (

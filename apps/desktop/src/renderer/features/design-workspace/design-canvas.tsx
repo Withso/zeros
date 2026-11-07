@@ -218,6 +218,7 @@ import { designFrameViews, designFramesAtPresentedGeometry, isPreparedDesignFram
 import { useDesignHistoryGeometryPreview, useDesignHistorySelection } from "./state/design-history-presentation";
 import { useDesignFramePreparation } from "./state/use-design-frame-preparation";
 import { designBackgroundWork } from "./state/design-background-work";
+import { designSourceTiles } from "./design-source-tiles";
 import { activeDesignPreviewDemand, designPreviewDemandItems, type DesignPreviewLevel } from "./state/design-frame-previews";
 import {
   useDesignFramePictured,
@@ -275,6 +276,7 @@ import { useDesignFoundation } from "./state/use-design-foundation";
 
 import { DesignFrameRenderSurface } from "./design-frame-render-surface";
 import { hasAsyncCanvasWheel } from "../../platform/runtime";
+import { createDesignGestureFrameClock } from "./design-gesture-frame-clock";
 import { useDesignSavedEditing } from "./design-saved-editing";
 import {
   DesignAgentActivityChip,
@@ -1131,6 +1133,11 @@ export const DesignCanvas = React.memo(function DesignCanvas({
   const wheelSettleTimerRef = useRef<number | null>(null);
   const wheelBoundsRef = useRef<DOMRect | null>(null);
   const armWheelStartRef = useRef<(() => void) | null>(null);
+  // Main frames follow the display interval while a camera gesture is live.
+  const gestureFrameClock = useMemo(
+    () => createDesignGestureFrameClock(() => wheelViewportRef.current !== null),
+    [],
+  );
   /** The transient camera zoom. Continued native input paints at the display
    * callback; direct actions flush it first. A wheel or pinch keeps the store
    * 80ms behind, so a gesture that
@@ -1151,9 +1158,10 @@ export const DesignCanvas = React.memo(function DesignCanvas({
     }
     wheelViewportRef.current = null;
     wheelBoundsRef.current = null;
+    gestureFrameClock.stop();
     worldRef.current?.removeAttribute("data-design-camera-gesture");
     armWheelStartRef.current?.();
-  }, []);
+  }, [gestureFrameClock]);
   // A retained canvas may change workspace owner before an 80ms trackpad
   // settle fires. Never let that old gesture publish into a hidden owner.
   useEffect(
@@ -1327,8 +1335,22 @@ export const DesignCanvas = React.memo(function DesignCanvas({
   const sourceSurfaceRetired = useCallback((file: string, version: string) => {
     if (sourceSurfaceState.ready.get(file) === version) sourceSurfaceState.ready.delete(file);
   }, [sourceSurfaceState]);
+  // The lane prepares demand in order, 16 frames per engine read. On a large
+  // page, prepare what the camera centers on first instead of page order.
+  const preparationOrder = useMemo(() => {
+    // Demand order follows the settled camera; gesture math reads the painted one.
+    const settled = { zoom: view.zoom, panX: view.panX, panY: view.panY };
+    if (!(viewportSize.width > 0 && viewportSize.height > 0) || !(settled.zoom > 0)) return mountedFrames.map((frame) => frame.file);
+    const cx = (viewportSize.width / 2 - settled.panX) / settled.zoom, cy = (viewportSize.height / 2 - settled.panY) / settled.zoom;
+    return mountedFrames.map((frame) => ({ file: frame.file,
+      distance: Math.hypot(frame.x + frame.width / 2 - cx, frame.y + frame.height / 2 - cy) }))
+      .sort((a, b) => a.distance - b.distance || a.file.localeCompare(b.file)).map((entry) => entry.file);
+  }, [mountedFrames, view.panX, view.panY, view.zoom, viewportSize.height, viewportSize.width]);
+  // Every mounted frame is shown either as a source surface or, on a page with
+  // more frames visible than sources can admit, as a picture of its prepared
+  // generation, so all of them are demanded, centre first.
   useDesignFramePreparation(workspaceId,
-    [...(selectedDescription ? [selectedDescription.file] : []), ...liveFrameFiles, ...mountedFrames.map((frame) => frame.file)],
+    [...(selectedDescription ? [selectedDescription.file] : []), ...liveFrameFiles, ...preparationOrder],
     active, snapshot?.preparation?.epoch);
   const admissionView = wheelViewportRef.current ?? view;
   // Only admitted/nearby surfaces demand pictures. Distant metadata stays
@@ -1356,6 +1378,13 @@ export const DesignCanvas = React.memo(function DesignCanvas({
     [active, frameTheme, previewItems, previewOwner],
   );
   useDesignFramePreviewDemand(previewDemand);
+  // A zoom-in's first source paint would otherwise create the shared GPU
+  // context inside that frame; create it in a quiet moment after opening.
+  const sourceSurfacesAvailable = active && !!snapshot?.protocolCapability;
+  useEffect(() => {
+    if (sourceSurfacesAvailable)
+      void designBackgroundWork.schedule("design-source-tiles-warm", async () => designSourceTiles.warm(), { latest: true });
+  }, [sourceSurfacesAvailable]);
   const highResolutionTiles = useMemo(() => {
     const result = new Map<string, DesignHighResolutionViewportTile>();
     if (
@@ -5879,6 +5908,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         designWorkspaceView(workspaceId).directoryId === canvasDirectoryId;
       cancelPendingWheelGesture();
       wheelViewportRef.current = start;
+      gestureFrameClock.start();
       panGestureRef.current = true;
       let latest: DesignViewport = start;
 
@@ -5922,6 +5952,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
       canvasDirectoryId,
       canvasDocumentOwner,
       canvasPageOwner,
+      gestureFrameClock,
       setViewport,
       refreshFrameResidency,
       view,
@@ -7478,6 +7509,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         };
       }
       wheelViewportRef.current = latest;
+      gestureFrameClock.start();
       // Paint the first native response immediately. Deferring its commit can
       // keep the main frame one refresh behind the compositor for the gesture.
       // Continued input shares a display paint. Zoom can arrive before the
@@ -7502,7 +7534,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         }
       }, 80);
     },
-    [active, setViewport, view, workspaceId, canvasPageOwner, paintPendingWheelGesture, cancelPendingWheelGesture],
+    [active, setViewport, view, workspaceId, canvasPageOwner, paintPendingWheelGesture, cancelPendingWheelGesture, gestureFrameClock],
   );
   useLayoutEffect(() => {
     const viewport = viewportRef.current;
@@ -7612,7 +7644,9 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                   else frameElementsRef.current.delete(description.file);
                 }}
                 data-design-frame={description.file} data-design-preparing=""
-                className="invisible pointer-events-none absolute"
+                // Where the frame is, before its source is prepared: the same
+                // surface fill a cold prepared frame shows until its content.
+                className={cn("pointer-events-none absolute", description.kind === "text" ? "invisible" : "bg-bg1")}
                 style={{ left: description.x, top: description.y, width: description.width, height: description.height,
                   zIndex: description.z }}
               />

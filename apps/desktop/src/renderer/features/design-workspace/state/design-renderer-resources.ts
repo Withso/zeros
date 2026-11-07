@@ -3,7 +3,7 @@ import { designImageResidency } from "./design-image-residency";
 import { designResourceCounters } from "./design-resource-counters";
 import { useDesignRuntimeStore } from "./design-runtime-store";
 import { designFrameDocumentCache, designFoundationCache, designWorkspaceSnapshotCache, designFramePreparation } from "./design-workspace-cache";
-import { designFramePreviews, designPreviewDecodes } from "./use-design-frame-previews";
+import { designFramePreviews, designPreviewDecodes, designSourcePreviewUsage } from "./use-design-frame-previews";
 import { designCaptureScheduler } from "../../../platform/bridge/design-capture-scheduler";
 import { designHiddenDocuments } from "./design-hidden-documents";
 import { designSourceSurfaceBudget } from "../design-source-surfaces";
@@ -51,6 +51,7 @@ export function designRendererResources() {
     replacements: designDocumentReplacements.usage(),
     images: designImageResidency.usage(),
     previews: designFramePreviews.usage(),
+    sourcePreviews: designSourcePreviewUsage(),
     previewDecodes: designPreviewDecodes.usage(),
     source: { documents, sourceBytes, composedBytes,
       snapshots: designWorkspaceSnapshotCache.keys().length, foundations: designFoundationCache.keys().length },
