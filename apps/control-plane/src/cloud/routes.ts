@@ -162,24 +162,26 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
     if (!computer) throw await computerUnavailable(input.organizationId, c.get("user").id);
     // Display names can move. Select among the build's authorized ID bindings,
     // retaining the original recipe entry for checkout, setup and branch pins.
-    // Each check is a GitHub read, so they run together. The branch lookup
-    // needs only the requested repository and starts once that one resolves.
+    // The source authority verifies one repository at a time per creator, and
+    // a denial invalidates the checks queued behind it, so they run in order,
+    // the requested repository first. Only its branch read, a connection call
+    // that authority never invalidates, overlaps the rest.
     const userId = c.get("user").id, requested = (entry: CloudV2InstalledRepository) => entry.repository.toLowerCase() === input.repository.toLowerCase();
-    const resolving = computer.repositories.map(entry => buildRepository(input.organizationId, userId, computer.buildId, entry));
-    const named = computer.repositories.findIndex(requested);
-    const early = named < 0 ? undefined : resolving[named]!.then(({ entry, target }) => {
+    const named = computer.repositories.findIndex(requested), indices = [...computer.repositories.keys()];
+    const resolved: Awaited<ReturnType<typeof buildRepository>>[] = [];
+    let originalError: HttpError | undefined, early: Promise<string | null> | undefined;
+    for (const index of named < 0 ? indices : [named, ...indices.filter(other => other !== named)]) {
+      const entry = computer.repositories[index]!;
+      try { resolved[index] = await buildRepository(input.organizationId, userId, computer.buildId, entry); }
+      catch (error) {
+        if (!(error instanceof HttpError) || ![403, 404].includes(error.status)) throw error;
+        if (requested(entry)) originalError = error;
+        continue;
+      }
       const branch = input.baseBranch ?? entry.defaultBranch;
-      return branch ? deps.remoteHead(input.organizationId, userId, target, branch) : null;
-    });
-    early?.catch(() => {});
-    const candidates: Awaited<ReturnType<typeof buildRepository>>[] = [];
-    let originalError: HttpError | undefined;
-    for (const [index, result] of (await Promise.allSettled(resolving)).entries()) {
-      if (result.status === "fulfilled") { candidates.push(result.value); continue; }
-      const error: unknown = result.reason;
-      if (!(error instanceof HttpError) || ![403, 404].includes(error.status)) throw error;
-      if (requested(computer.repositories[index]!)) originalError = error;
+      if (index === named && branch) { early = deps.remoteHead(input.organizationId, userId, resolved[index].target, branch); early.catch(() => {}); }
     }
+    const candidates = resolved.filter(Boolean);
     const selected = candidates.find(({ target }) => target.repository.toLowerCase() === input.repository.toLowerCase())
       ?? candidates.find(({ entry }) => requested(entry));
     if (!selected) {

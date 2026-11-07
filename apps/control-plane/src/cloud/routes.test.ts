@@ -46,22 +46,26 @@ function fixture(repositories: { repository: string; defaultBranch: string | nul
 }
 
 describe("cloud v2 creation", () => {
-  it("checks every Computer repository at once and reads the branch as soon as its repository resolves", async () => {
-    const f = fixture([{ repository: "example/project", defaultBranch: "master" }, { repository: "example/docs", defaultBranch: "main" },
+  it("checks the requested repository first, then the rest in order, reading its branch meanwhile", async () => {
+    const f = fixture([{ repository: "example/docs", defaultBranch: "main" }, { repository: "example/project", defaultBranch: "master" },
       { repository: "example/site", defaultBranch: "main" }]);
-    const releases: Array<() => void> = [];
+    const pending = new Map<string, () => void>(), ids: Record<string, string> = { "example/docs": "41", "example/project": "40", "example/site": "42" };
     f.authorizeBuildRepository.mockImplementation((_org, _user, _build, repository) => new Promise(resolve => {
-      const repositoryId = String(40 + releases.length);
-      releases.push(() => resolve({ repository, repositoryId }));
+      pending.set(repository, () => resolve({ repository, repositoryId: ids[repository]! }));
     }));
     const response = f.create();
-    await vi.waitFor(() => expect(f.authorizeBuildRepository).toHaveBeenCalledTimes(3));
-    releases[0]!();
+    await vi.waitFor(() => expect(pending.has("example/project")).toBe(true));
+    expect(f.authorizeBuildRepository).toHaveBeenCalledOnce();
+    pending.get("example/project")!();
     await vi.waitFor(() => expect(f.remoteHead).toHaveBeenCalledWith(org, member, { repository: "example/project", repositoryId: "40" }, "master"));
-    releases[2]!(); releases[1]!();
+    await vi.waitFor(() => expect(pending.has("example/docs")).toBe(true));
+    expect(pending.has("example/site")).toBe(false);
+    pending.get("example/docs")!();
+    await vi.waitFor(() => expect(pending.has("example/site")).toBe(true));
+    pending.get("example/site")!();
     expect((await response).status).toBe(201);
     expect(f.remoteHead).toHaveBeenCalledOnce();
-    expect(f.createWorkspace).toHaveBeenCalledWith(expect.objectContaining({ sourceRepositoryId: "40", readableRepositoryIds: ["40", "41", "42"] }));
+    expect(f.createWorkspace).toHaveBeenCalledWith(expect.objectContaining({ sourceRepositoryId: "40", readableRepositoryIds: ["41", "40", "42"] }));
   });
 
   it("refuses a canary grant when this deployment has no canary authority", async () => {

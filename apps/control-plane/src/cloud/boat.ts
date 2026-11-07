@@ -184,7 +184,8 @@ export class BoatCloudV2Compute implements CloudV2Compute {
     const job = `/tmp/zeros-job-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     // The detached script records its own exit status, so it survives the
     // launching command's session ending.
-    const script = `(\n${command}\n)\necho $? > ${job}.exit\n`;
+    // The status file appears whole, so a poll never reads it half-written.
+    const script = `(\n${command}\n)\necho $? > ${job}.exit.tmp && mv -f ${job}.exit.tmp ${job}.exit\n`;
     const encoded = Buffer.from(script, "utf8").toString("base64");
     const started = await this.exec(sandboxId,
       `printf %s '${encoded}' | base64 -d > ${job}.sh && { setsid nohup bash ${job}.sh > ${job}.log 2>&1 < /dev/null & } ; echo started`, 30, signal);
@@ -196,9 +197,11 @@ export class BoatCloudV2Compute implements CloudV2Compute {
       await this.sleep(delay);
       const poll = await this.exec(sandboxId, `if [ -f ${job}.exit ]; then cat ${job}.exit; else echo running; fi`, 30, signal);
       const state = poll.stdout.trim();
-      if (state !== "running") {
-        const output = await this.exec(sandboxId, `tail -c 262144 ${job}.log; rm -f ${job}.sh ${job}.exit ${job}.log`, 30, signal);
-        return { exitCode: /^\d+$/.test(state) ? Number(state) : -1, stdout: output.stdout, timedOut: false };
+      // Only a recorded status ends the job. A poll that timed out, failed or
+      // read nothing on a busy VM says nothing, so polling continues.
+      if (/^\d+$/.test(state)) {
+        const output = await this.exec(sandboxId, `tail -c 262144 ${job}.log; rm -f ${job}.sh ${job}.exit ${job}.exit.tmp ${job}.log`, 30, signal);
+        return { exitCode: Number(state), stdout: output.stdout, timedOut: false };
       }
       if (Date.now() >= deadline) {
         await this.exec(sandboxId, `pkill -f ${job}.sh || true`, 30).catch(() => {});

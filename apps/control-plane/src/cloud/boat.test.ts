@@ -42,6 +42,25 @@ describe("cloud v2 Boat compute", () => {
     expect(sleeps).toEqual([250, 500, 1000, 2000, 4000, 5000, 5000]);
   });
 
+  it("keeps waiting for a detached command when a status poll times out, fails or reads nothing", async () => {
+    // Only a recorded exit status ends a job: an unanswered poll on a busy VM
+    // must not report failure or delete the files of a job that still runs.
+    const boat = client(), commands: string[] = [];
+    let polls = 0;
+    boat.request.mockImplementation(async (_route: string, args: { body: { command: string } }) => {
+      commands.push(args.body.command);
+      if (args.body.command.includes("echo started")) return { exitCode: 0, stdout: "started\n" };
+      if (!args.body.command.includes("echo running")) return { exitCode: 0, stdout: "" };
+      polls++;
+      return polls === 2 ? { exitCode: null, stdout: "", timedOut: true } : polls === 3 ? { exitCode: 1, stdout: "" }
+        : polls === 4 ? { exitCode: 0, stdout: "" } : { exitCode: 0, stdout: polls < 6 ? "running\n" : "0\n" };
+    });
+    const compute = new BoatCloudV2Compute(boat, "default", async () => {});
+    expect(await compute.execLong("bx_abc12345", "git clone fixture", 900)).toMatchObject({ exitCode: 0, timedOut: false });
+    expect(polls).toBe(6);
+    expect(commands.filter(command => command.includes("rm -f")).length).toBe(1);
+  });
+
   it("delivers bounded command input separately from every executable argument", async () => {
     const boat = client();
     boat.request.mockImplementation(async (route: string) => route.endsWith("/files")
