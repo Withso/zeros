@@ -241,7 +241,12 @@ export async function readCanvas(
       ),
     );
   for (const [file, geometry] of Object.entries(sourceFrames)) {
-    if (!decodedSources && !isFrameFile(file)) {
+    if (decodedSources) {
+      // Decoding validated these bounds and returned objects for this read.
+      frames[file] = geometry as DesignFrameGeometry;
+      continue;
+    }
+    if (!isFrameFile(file)) {
       throw new Error("Invalid Design frame reference.");
     }
     const normalized = normalizeGeometry(geometry, {
@@ -278,9 +283,13 @@ export async function readCanvas(
     )
       throw new Error("Invalid Design frame information.");
     for (const [file, value] of Object.entries(raw.frame_info)) {
+      if (decodedSources) {
+        frameInfo[file] = value as FrameMeta;
+        continue;
+      }
       const info = value as Partial<FrameMeta> | null;
       if (
-        (!decodedSources && !isFrameFile(file)) ||
+        !isFrameFile(file) ||
         !Object.hasOwn(frames, file) ||
         !info ||
         typeof info.title !== "string" ||

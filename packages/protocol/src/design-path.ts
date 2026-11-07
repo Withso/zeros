@@ -49,7 +49,8 @@ export function encodeDesignFramePath(file: string): string {
 
 /** Comparison key only; authored path spelling remains the source identity. */
 export function portableDesignName(value: string): string {
-  return value.normalize("NFC").toLowerCase();
+  // NFC leaves ASCII unchanged; skipping it keeps 26k-frame canvases cheap.
+  return (/[\u0080-\uffff]/.test(value) ? value.normalize("NFC") : value).toLowerCase();
 }
 
 export const designFrameFileSchema = z
