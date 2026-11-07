@@ -31,7 +31,7 @@ import {
 import { DESIGN_STYLE_BUILD_DIRECTORY, designBuildInputPathError, designBuildOutputPathError, designSassSourcePathError, designStyleSourcePathError } from "./style-source-path";
 import { compileDesignSass, DesignSassImportError } from "./style-sass";
 import { designStyleCache, designStyleCacheKey } from "./style-cache";
-import { designDependencyFingerprint, isDesignDependencyCaptureActive, observeDesignDependencyCheck, observeDesignFileDependency } from "./dependency-read-set";
+import { designDependencyFingerprint, isDesignDependencyCaptureActive, namedDesignPathPolicy, observeDesignDependencyCheck, observeDesignFileDependency } from "./dependency-read-set";
 import {
   concatDesignCssIndexes,
   designCssRuleCount,
@@ -555,6 +555,16 @@ async function embedStyleSourceAssets(
   return (await embedStyleSourceAssetsInRoot(root, sourcePath, parsed, assets)) ? parsed.toString() : css;
 }
 
+/** Assets a style source may embed: never Git internals or private state, except a private build output's own folder. */
+const STYLE_ASSET_PATH = namedDesignPathPolicy("style-asset", (file) => {
+  const top = file.split("/")[0];
+  return top !== ".git" && top !== ".zeros";
+});
+const PRIVATE_OUTPUT_ASSET_PATH = namedDesignPathPolicy("style-asset:private-output", (file) => {
+  const top = file.split("/")[0];
+  return top !== ".git" && (top !== ".zeros" || file.startsWith(`${DESIGN_STYLE_BUILD_DIRECTORY}/`));
+});
+
 /** Embed into a parsed stylesheet. Returns whether it had declarations. */
 async function embedStyleSourceAssetsInRoot(
   root: string,
@@ -563,10 +573,7 @@ async function embedStyleSourceAssetsInRoot(
   assets: ReturnType<typeof sourceAssets>,
 ): Promise<boolean> {
   const privateOutput = sourcePath.startsWith(`${DESIGN_STYLE_BUILD_DIRECTORY}/`);
-  const allowedAssetPath = (file: string) => {
-    const top = file.split("/")[0];
-    return top !== ".git" && (top !== ".zeros" || (privateOutput && file.startsWith(`${DESIGN_STYLE_BUILD_DIRECTORY}/`)));
-  };
+  const allowedAssetPath = privateOutput ? PRIVATE_OUTPUT_ASSET_PATH : STYLE_ASSET_PATH;
   const declarations: postcss.Declaration[] = [];
   parsed.walkDecls((declaration) => { declarations.push(declaration); });
   if (declarations.length === 0) return false;

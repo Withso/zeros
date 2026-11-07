@@ -24,6 +24,8 @@ import {
   prepareFrameRenderSource,
 } from "./render-preparation";
 import { parseDesignSource, sharedDesignParse, withSharedDesignParses } from "./shared-parse";
+import { designFrameIdentities, designFrameIdentityContext, type DesignFrameIdentity } from "./identity-cache";
+import { captureDurableDesignDependencies, isDesignDependencyCaptureActive } from "./dependency-read-set";
 import { elementRecords } from "./source";
 // ──────────────────────────────────────────────────────────
 // Design document — authored HTML/CSS frames and canvas metadata
@@ -121,7 +123,7 @@ import {
   prepareFrameRenderSourceForFile,
 } from "./frame-lifecycle";
 import { getDesignRuntimeAudit } from "./runtime-audits";
-import { readSafeRegularFile } from "./safe-files";
+import { inspectSafeRegularFile, readSafeRegularFile } from "./safe-files";
 import {
   DESIGN_FONTS_SOURCE_ID,
   frameStyleSourceIds,
@@ -1079,11 +1081,12 @@ async function readDesignNavigationSnapshotUnlocked(workspacePath: string, affec
     const { metadata, context, inspection } = await readDesignCatalogMetadataWithContext(workspacePath, directory, { shared: !affectedFiles });
     const affected = affectedFiles ? metadata.frames.filter(frame => affectedFiles.includes(frame.source)) : [];
     const pageIds = affected.length ? designFramePageIds(context.canvas) : undefined;
+    const identities = designFrameIdentities(workspacePath, directory);
     const [tokens, assets, styles, frames] = await Promise.all([
       readDesignTokensDocument(workspacePath, context, { includeUsage: false }),
       listDesignAssets(workspacePath),
       readDesignStyleSources(workspacePath, context.canvas),
-      Promise.all(affected.map(frame => prepareRegisteredDesignFrame(workspacePath, frame.source, context.canvas, pageIds))),
+      Promise.all(affected.map(frame => prepareRegisteredDesignFrame(workspacePath, frame.source, context.canvas, pageIds, identities))),
     ]);
     if (!sameDesignCatalogInspection(inspection, inspectDesignCatalog(workspacePath, directory, { revision: false })))
       throw new DesignCatalogError("stale");
@@ -1177,35 +1180,62 @@ export async function readDesignMutationSnapshot(workspacePath: string, files: r
 }
 
 /** Each frame id's page, built once per batch rather than scanned per frame. */
+const framePageIds = new WeakMap<CanvasDocument, ReadonlyMap<string, string>>();
 function designFramePageIds(canvas: CanvasDocument): ReadonlyMap<string, string> {
+  const cached = framePageIds.get(canvas);
+  if (cached) return cached;
   const ids = new Map<string, string>();
   for (const page of canvas.pages ?? []) for (const id of page.frames) if (!ids.has(id)) ids.set(id, page.id);
+  // A shared canvas is frozen, so its page membership cannot change under the map.
+  if (Object.isFrozen(canvas)) framePageIds.set(canvas, ids);
   return ids;
 }
 
 function prepareRegisteredDesignFrame(workspacePath: string, file: string, canvas: CanvasDocument,
-  pageIds = designFramePageIds(canvas)): Promise<DesignCanvasFrame> {
-  return withSharedDesignParses(() => prepareSharedRegisteredDesignFrame(workspacePath, file, canvas, pageIds));
+  pageIds = designFramePageIds(canvas),
+  identities = designFrameIdentities(workspacePath, designDirectoryNameFor(workspacePath))): Promise<DesignCanvasFrame> {
+  return withSharedDesignParses(() => prepareSharedRegisteredDesignFrame(workspacePath, file, canvas, pageIds, identities));
 }
 
 async function prepareSharedRegisteredDesignFrame(workspacePath: string, file: string, canvas: CanvasDocument,
-  pageIds: ReadonlyMap<string, string>): Promise<DesignCanvasFrame> {
+  pageIds: ReadonlyMap<string, string>, identities: ReturnType<typeof designFrameIdentities>): Promise<DesignCanvasFrame> {
   const geometry = canvas.frames[file];
   const info = canvas.frame_info[file];
   if (!geometry || !info) throw new Error("The registered Design frame changed.");
-  const directory = designDirectory(workspacePath);
-  const safe = await readSafeRegularFile(directory, path.join(directory, assertFrameFile(file)), MAX_DESIGN_TEXT_BYTES);
-  if (!safe) throw new Error("The registered Design source is unavailable or exceeds its limit.");
-  const source = safe.body.toString("utf8");
-  const healed = healDesignOids(source);
-  const document = healed.document ?? parseDesignSource(healed.html);
-  const render = await prepareFrameRenderSource(workspacePath, source, { width: geometry.w, height: geometry.h },
-    undefined, undefined, file, canvas, { identityOnly: true });
-  return { file, frameId: info.id, pageId: info.id === undefined ? undefined : pageIds.get(info.id),
+  const pageId = info.id === undefined ? undefined : pageIds.get(info.id);
+  const frame = (identity: DesignFrameIdentity, modifiedAt: number): DesignCanvasFrame => ({ file, frameId: info.id, pageId,
     title: info.title, kind: info.kind === "text" ? "text" : "frame",
     x: geometry.x, y: geometry.y, width: geometry.w, height: geometry.h, z: geometry.z,
-    nodeCount: designNodeRecords(document).length, layerCount: designLayerCount(document),
-    modifiedAt: safe.modifiedAt, sourceVersion: render.sourceVersion, surfaceCost: render.surfaceCost };
+    nodeCount: identity.nodeCount, layerCount: identity.layerCount,
+    modifiedAt, sourceVersion: identity.sourceVersion, surfaceCost: identity.surfaceCost });
+  const directory = designDirectory(workspacePath);
+  const target = path.join(directory, assertFrameFile(file));
+  // A capture already running (a movement guard) must record these reads itself.
+  const context = isDesignDependencyCaptureActive() ? null : designFrameIdentityContext(canvas, file, pageId);
+  if (context) {
+    const cached = await identities.read(file, context);
+    const metadata = cached && await inspectSafeRegularFile(directory, target, MAX_DESIGN_TEXT_BYTES);
+    if (cached && metadata) return frame(cached, metadata.modifiedAt);
+  }
+  const compute = async () => {
+    const safe = await readSafeRegularFile(directory, target, MAX_DESIGN_TEXT_BYTES);
+    if (!safe) throw new Error("The registered Design source is unavailable or exceeds its limit.");
+    const source = safe.body.toString("utf8");
+    const healed = healDesignOids(source);
+    const document = healed.document ?? parseDesignSource(healed.html);
+    const render = await prepareFrameRenderSource(workspacePath, source, { width: geometry.w, height: geometry.h },
+      undefined, undefined, file, canvas, { identityOnly: true });
+    const identity: DesignFrameIdentity = { sourceVersion: render.sourceVersion, surfaceCost: render.surfaceCost,
+      nodeCount: designNodeRecords(document).length, layerCount: designLayerCount(document) };
+    return { identity, modifiedAt: safe.modifiedAt };
+  };
+  if (!context) {
+    const { identity, modifiedAt } = await compute();
+    return frame(identity, modifiedAt);
+  }
+  const read = await captureDurableDesignDependencies(compute);
+  identities.remember(file, context, read.value.identity, read);
+  return frame(read.value.identity, read.value.modifiedAt);
 }
 
 /** The shared decoded canvas the last preparation batch read, by catalog
@@ -1239,10 +1269,11 @@ export async function prepareDesignNavigationFrames(workspacePath: string, catal
     const frames: DesignCanvasFrame[] = [];
     const errors: Array<{ file: string; message: string }> = [];
     const pageIds = designFramePageIds(context.canvas);
+    const identities = designFrameIdentities(workspacePath, directory);
     // One native preparation at a time; optional demand must not fan out large
     // decoder/source buffers across every frame in a batch.
     for (const file of files) {
-      try { frames.push(await prepareRegisteredDesignFrame(workspacePath, file, context.canvas, pageIds)); }
+      try { frames.push(await prepareRegisteredDesignFrame(workspacePath, file, context.canvas, pageIds, identities)); }
       catch (error) { errors.push({ file, message: error instanceof Error ? error.message : "Could not prepare this frame." }); }
     }
     if (!sameDesignCatalogInspection(before, inspectDesignCatalog(workspacePath, directory, { revision: false })))
