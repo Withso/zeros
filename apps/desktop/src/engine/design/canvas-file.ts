@@ -328,11 +328,14 @@ export function encodeCanvasFile(document: RecordValue, options: { version: 1 | 
       z: Math.round(bounded(old.z, 0, 0, DESIGN_MAX_FRAMES_PER_PAGE)),
     };
   };
+  // Undefined values are absent, as in the JSON this encodes: callers may
+  // pass their working objects rather than a JSON copy.
   const entries = Object.entries(record(frames === undefined ? {} : frames))
+    .filter(([, geometry]) => geometry !== undefined)
     .map(([file, geometry]) => [file, geometryFor(geometry)] as const)
     .sort(([, left], [, right]) => Number(left.z ?? 0) - Number(right.z ?? 0));
   const sources = new Set(entries.map(([file]) => file));
-  if (Object.keys(information).some((file) => !sources.has(file)))
+  if (Object.entries(information).some(([file, value]) => value !== undefined && !sources.has(file)))
     throw new Error("Invalid Design frame information reference.");
   const authored: Record<string, z.infer<typeof frameSchema>> = {};
   let position = 0;
@@ -362,7 +365,7 @@ export function encodeCanvasFile(document: RecordValue, options: { version: 1 | 
       width: geometry.w,
       height: geometry.h,
       ...(geometry.z !== (pageOrder?.get(frameId) ?? position) ? { z: geometry.z } : {}),
-      ...(Object.keys(geometryMetadata).length ? { geometryMetadata } : {}),
+      ...(Object.values(geometryMetadata).some((value) => value !== undefined) ? { geometryMetadata } : {}),
     } as z.infer<typeof frameSchema>;
     position++;
   }
