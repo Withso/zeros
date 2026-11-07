@@ -1,0 +1,9 @@
+{
+  "id": "computer-refresh-waits-out-deploy-overlap",
+  "kind": "replay",
+  "area": "control-plane-workers",
+  "fixedBy": "pr:903",
+  "symptom": "When source policy v3 (#897) deployed to Alpha, the new control plane's first refresh scan, one second after boot, queued Computer v11 as v3. The old replica was still draining; it claimed the build and failed it as cloud_source_review_required, because its code accepted only policy 2. That also paused the organization's runtime refreshes for six hours.",
+  "rule": "During a rolling deploy, any replica can claim work that a new replica queues, so that work must be runnable by the old code or wait out the overlap. A newly started builder waits one scan interval before its first automatic refresh. A value that old code rejects ships in a release before anything produces it.",
+  "check": "pnpm --dir apps/control-plane exec vitest run src/cloud/computer.integration.test.ts -t 'waits one scan interval after starting'"
+}
