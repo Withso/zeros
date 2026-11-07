@@ -1,8 +1,8 @@
 import { lstatSync, realpathSync } from "node:fs";
 import path from "node:path";
 import { DesignCatalogError, projectDesignCatalog } from "./catalog";
-import { readCanvasContext } from "./document-storage";
-import { canvasReadSnapshot } from "./document-model";
+import { freezeDeep, readCanvasContext, readSharedCanvasContext } from "./document-storage";
+import { canvasReadSnapshot, type CanvasDocument } from "./document-model";
 import {
   assertLegacyDesignDraftWritable,
   readDirectoryDesignLayout,
@@ -91,14 +91,26 @@ export async function readDesignCatalogMetadata(
   return (await readDesignCatalogMetadataWithContext(root, directory)).metadata;
 }
 
+/** The catalog last projected from a shared canvas. One slot, frozen like
+ * the canvas: revalidating an unchanged directory projects nothing again. */
+let sharedProjection: { canvas: CanvasDocument; projection: ReturnType<typeof projectDesignCatalog> } | null = null;
+let sharedProjections = 0;
+
+export function designSharedCatalogProjectionsForTests(): number {
+  return sharedProjections;
+}
+
 /** The canvas read the catalog was projected from, so a caller that needs
- * both decodes a large canvas once. Never retained beside a catalog session. */
+ * both decodes a large canvas once. Never retained beside a catalog session,
+ * except that `shared` readers reuse the frozen shared canvas and its
+ * projection while the canvas bytes are unchanged. */
 export async function readDesignCatalogMetadataWithContext(
   root: string,
   directory: string,
+  options: { shared?: boolean } = {},
 ) {
   const before = inspectDesignCatalog(root, directory);
-  const context = await readCanvasContext(root);
+  const context = options.shared ? await readSharedCanvasContext(root) : await readCanvasContext(root);
   const captured = context.canvas[canvasReadSnapshot];
   const after = inspectDesignCatalog(root, directory, { revision: false });
   if (
@@ -107,6 +119,15 @@ export async function readDesignCatalogMetadataWithContext(
     captured.registration?.source !== before.registration
   )
     throw new DesignCatalogError("stale");
+  let projection: ReturnType<typeof projectDesignCatalog>;
+  if (!options.shared) projection = projectDesignCatalog(context.canvas);
+  else {
+    if (sharedProjection?.canvas !== context.canvas) {
+      sharedProjections++;
+      sharedProjection = { canvas: context.canvas, projection: freezeDeep(projectDesignCatalog(context.canvas)) };
+    }
+    projection = sharedProjection.projection;
+  }
   return {
     context,
     inspection: before,
@@ -114,7 +135,7 @@ export async function readDesignCatalogMetadataWithContext(
       directoryId: before.layout.manifest.id,
       binding: before.binding,
       revision: before.revision,
-      ...projectDesignCatalog(context.canvas),
+      ...projection,
     },
   };
 }
