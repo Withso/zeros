@@ -1,7 +1,8 @@
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { pathToFileURL } from "node:url";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DESIGN_DIRECTORY_NAME, initializeDesignDocument, prepareDesignNavigationFrames, readDesignNavigationSnapshot } from "../document";
 import { designIdentityCacheStatsForTests, resetDesignIdentityCacheForTests } from "../identity-cache";
 import {
@@ -69,6 +70,24 @@ describe("Design preparation workers", () => {
     const hits = designIdentityCacheStatsForTests().hits;
     expect(await prepareDesignNavigationFrames(root, navigation.catalogRevision, files)).toEqual(single);
     expect(designIdentityCacheStatsForTests().hits - hits).toBe(files.length);
+  }, 60_000);
+
+  it("stays on the engine's thread, warning once, when a worker cannot start", async () => {
+    const navigation = await readDesignNavigationSnapshot(root);
+    const single = await prepareDesignNavigationFrames(root, navigation.catalogRevision, files);
+    resetDesignIdentityCacheForTests();
+    configureDesignPreparationWorkersForTests(2, { workerUrl: pathToFileURL(path.join(root, "missing-worker.mjs")) });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const before = designPreparationWorkerStatsForTests().frames;
+      expect(await prepareDesignNavigationFrames(root, navigation.catalogRevision, files)).toEqual(single);
+      resetDesignIdentityCacheForTests();
+      expect(await prepareDesignNavigationFrames(root, navigation.catalogRevision, files)).toEqual(single);
+      expect(designPreparationWorkerStatsForTests().frames).toBe(before);
+      expect(warn.mock.calls.filter(([message]) => String(message).includes("preparation workers unavailable"))).toHaveLength(1);
+    } finally {
+      warn.mockRestore();
+    }
   }, 60_000);
 
   it("leaves batches with App fonts to the engine's own thread", async () => {
