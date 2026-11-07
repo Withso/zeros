@@ -21,7 +21,7 @@ async function main() {
   const React = await import("react"), { createRoot } = await import("react-dom/client");
   const { Button, TooltipProvider } = await import("../shared/ui/primitives");
   const { EnvironmentPanel } = await import("../features/settings/environment-panel");
-  const { CloudComputerPanel } = await import("../features/settings/cloud-computer-panel");
+  const { CloudRepositoryPanel } = await import("../features/settings/cloud-repository-panel");
   const { acceptOrganizationSnapshot } = await import("../features/team/team-store");
   const { setActiveOrganizationSelection } = await import("../features/team/active-team");
   const { saveEnvironmentSelection } = await import("../features/settings/environment-selection");
@@ -61,7 +61,9 @@ async function main() {
           <Button variant="secondary" onClick={() => identity(accountId, "owner", true)}>Local owner</Button>
         </>}
       </nav>
-      {computer ? <CloudComputerPanel surfaceActive={active} /> : <EnvironmentPanel surfaceActive={active} />}
+      {computer
+        ? <CloudRepositoryPanel repository="fixture/repo" tab="environment" onTabChange={() => {}} onOpenComputer={() => {}} surfaceActive={active} />
+        : <EnvironmentPanel surfaceActive={active} />}
     </div></main></BridgeProvider></TooltipProvider>;
   }
   createRoot(document.getElementById("root")!).render(<React.StrictMode><Harness /></React.StrictMode>);
