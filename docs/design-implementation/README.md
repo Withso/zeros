@@ -1033,8 +1033,8 @@ Each landed step appends one line: date, workstream, what landed, evidence.
   the same 15px on 20px lines, so rows stay 28px; a sent message folds to
   five 22px lines (110px); the chip beside a tool's name, its command or
   its file, is 13px on its 20px chip; dialog titles keep their own 15px
-  token. The canvas's chat kits and its design system's type list carry the
-  same sizes. Evidence: `chat-reading-type.test.ts` failed red first; the
+  token. The canvas's chat kits and frames carry the same sizes (canvas
+  version 393); its installed design system copy is unchanged. Evidence: `chat-reading-type.test.ts` failed red first; the
   fold and composer smoke measures 15px/22px text and the 22px fold lines,
   the tool smoke 15px names, 13px chips and file tags and 28px rows, and
   the markdown smoke 15px file references and links.
