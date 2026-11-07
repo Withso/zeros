@@ -315,7 +315,7 @@ function MessageSegmentView({
       }); }}>
       <FileTypeIcon name={seg.files[0].name} kind="file" size={13} />
       <span className="max-w-[16rem] truncate">{seg.name}</span>
-      <span className="text-muted-fg text-xxs">+{seg.files.length - 1}</span>
+      <span className="text-muted-fg text-2xxs">+{seg.files.length - 1}</span>
     </Button></Tooltip>;
   }
   if (seg.type === "mention") {

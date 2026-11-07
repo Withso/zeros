@@ -1081,9 +1081,10 @@ Each landed step appends one line: date, workstream, what landed, evidence.
   sent messages' inline pills and the chat and workspace link pills share.
   The control pills, the context files chip and the tool targets already
   were 13px; the tool row's file tag drops its own `text-xs`, since the
-  inline Pill now carries it. Icons stay 12px, a mono badge 11px, and the
-  PR chip, which the Pills board files under "Not pills", keeps 12px. The
-  canvas kits draw badges and inline pills at 13px and the Badge, Pills and
-  Type boards say so (canvas version 397). Evidence: `pill.test.ts`,
-  `git-defaults.test.ts` and `chat-reading-type.test.ts` failed red first;
-  the local-links smoke measures the link pill at 13px.
+  inline Pill now carries it. The PR chip (`PrPill`, 24px) is 13px too, and
+  an attachment group's +N count is 11px (was 10). Icons stay 12px and a
+  mono badge 11px. The canvas kits draw badges, inline pills and the PR chip
+  at 13px and the count at 11px, and the Badge, Pills and Type boards say
+  so (canvas versions 397 and 398). Evidence: `pill.test.ts`,
+  `git-defaults.test.ts`, `pr-pill.test.ts` and `chat-reading-type.test.ts`
+  failed red first; the local-links smoke measures the link pill at 13px.

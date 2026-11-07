@@ -127,6 +127,15 @@ describe("chat reading type", () => {
     expect(fileTag).not.toMatch(/\btext-(?:xxs|2xxs|3xxs|xs|sm)\b/);
   });
 
+  it("counts the extra files in an attachment group at 11px, in the composer and sent messages", () => {
+    expect(source(`${R}/features/agent/composer-editor/pills.tsx`)).toContain(
+      '<span className="text-muted-fg shrink-0 text-2xxs">+{ids.length - 1}</span>',
+    );
+    expect(source(`${R}/features/agent/renderers/text-message.tsx`)).toContain(
+      '<span className="text-muted-fg text-2xxs">+{seg.files.length - 1}</span>',
+    );
+  });
+
   it("draws every pill in the composer and sent messages at 13/16 in its 20px box", () => {
     const metrics = PILL_METRICS.split(/\s+/);
     for (const cls of ["h-5", "text-xs", "leading-4"]) expect(metrics, cls).toContain(cls);

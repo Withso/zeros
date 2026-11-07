@@ -206,8 +206,9 @@ exported page by page to [design-implementation/](design-implementation/README.m
     tables, every tool detail including the markdown inside one, and the
     chrome's headers, popover titles and menu rows. Badges and every pill
     are 13px on 16px lines in their 20px box, everywhere: `Badge`, the
-    inline `Pill` and the composer's and sent messages' pills; a mono badge
-    keeps 11px. The plan keeps the reading
+    inline `Pill` and the composer's and sent messages' pills. The PR chip
+    is 13px on its 24px pill, an attachment group's +N count 11px, and a
+    mono badge keeps 11px. The plan keeps the reading
     size inside its detail (`zeros-agent-md--document`), review markdown
     outside the chat keeps 14px (`zeros-agent-md--panel`), labels and
     metadata stay 12px, keys 11px, and dialog titles keep their own 15px
