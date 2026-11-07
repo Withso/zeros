@@ -127,6 +127,11 @@ On create and wake, the control plane installs its selected runtime tarball
 from object storage, verifies its SHA-256 and caches it under
 `/opt/zeros/runtime/<sha256>`. `/opt/zeros/worker` points to that directory.
 The runtime is root-owned; `zeros-worker.service` runs `worker.mjs` as `user`.
+A resumed VM that already has the pinned runtime, unit, profile and keys exits
+the install step after comparing them, with no lock, `sudo` or rewrite. The unit
+keeps Node's compile cache in `/home/user/.cache/zeros/node-compile-cache`, and
+the worker loads the Claude Agent SDK on its first Claude turn rather than at
+start, so a wake parses less on a cold restored disk.
 The same step writes the control plane's public verification keys to
 root-owned `/opt/zeros/worker-auth.json`. Every wake rotates the worker
 credential in `/home/user/.config/zeros/worker-token` (mode `0600`) and

@@ -50,6 +50,8 @@ WorkingDirectory=/home/user
 EnvironmentFile=-/home/user/.config/zeros/worker.env
 EnvironmentFile=-/opt/zeros/worker-runtime.env
 Environment=PATH=${CURRENT}/bin:/usr/local/bin:/usr/bin:/bin
+# Compiled code persists on the VM disk, so a resumed worker skips most parsing.
+Environment=NODE_COMPILE_CACHE=/home/user/.cache/zeros/node-compile-cache
 ExecStart=/usr/bin/env node ${CURRENT}/worker.mjs
 Restart=always
 RestartSec=2
@@ -71,14 +73,25 @@ export function installRuntimeCommand(runtime: { sha256: string; url: string; pu
   const keys = runtime.publicKeys;
   if (keys && (!keys.length || keys.length > 4 || keys.some(key => key.length > 4096 || createPublicKey(key).asymmetricKeyType !== "ed25519")))
     throw new Error("Invalid worker verification keys");
+  const keysJson = keys ? JSON.stringify(keys) : null;
   const script = [
+    "set -eu",
+    // A resumed VM usually has everything already. Comparing first skips the
+    // lock, the download check and every privileged rewrite on a slow restored disk.
+    `unit=$(printf %s ${quote(b64(UNIT))} | base64 -d)`,
+    `profile=$(printf %s ${quote(b64(PROFILE))} | base64 -d)`,
+    ...(keysJson ? [`keys=$(printf %s ${quote(b64(keysJson))} | base64 -d)`] : []),
+    `if [ -f ${RUNTIMES}/${runtime.sha256}/.complete ] && [ "$(readlink ${CURRENT} 2>/dev/null || true)" = ${RUNTIMES}/${runtime.sha256} ] \\`,
+    "  && [ ! -e /opt/zeros/worker-runtime.env ] \\",
+    '  && [ "$(cat /etc/systemd/system/zeros-worker.service 2>/dev/null || true)" = "$unit" ] \\',
+    '  && [ "$(cat /etc/profile.d/zeros-worker.sh 2>/dev/null || true)" = "$profile" ]'
+      + (keysJson ? ' \\\n  && [ "$(cat /opt/zeros/worker-auth.json 2>/dev/null || true)" = "$keys" ]' : "") + "; then exit 0; fi",
     ...prepare,
     "sudo -n rm -f /opt/zeros/worker-runtime.env",
     ...(keys ? [
       `printf %s ${quote(b64(JSON.stringify(keys)))} | base64 -d | sudo -n tee /opt/zeros/worker-auth.json.next >/dev/null`,
       "sudo -n chown root:root /opt/zeros/worker-auth.json.next && sudo -n chmod 0644 /opt/zeros/worker-auth.json.next && sudo -n mv -T /opt/zeros/worker-auth.json.next /opt/zeros/worker-auth.json",
     ] : []),
-    `unit=$(printf %s ${quote(b64(UNIT))} | base64 -d)`,
     `if [ "$(cat /etc/systemd/system/zeros-worker.service 2>/dev/null)" != "$unit" ]; then`,
     `  printf '%s\\n' "$unit" | sudo -n tee /etc/systemd/system/zeros-worker.service >/dev/null`,
     "  sudo -n systemctl daemon-reload && sudo -n systemctl enable zeros-worker.service >/dev/null 2>&1",
