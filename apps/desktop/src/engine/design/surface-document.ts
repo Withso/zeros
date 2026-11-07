@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { parse, serialize } from "parse5";
 import { DESIGN_SURFACE_STATIC_CSS, designSurfaceReadyScript, type DesignSurfaceCost } from "@zeros/protocol/design-surface";
 import { elementRecords, insertDesignHeadMarkup, sanitizeDesignFrameMarkup, withDesignTheme } from "./source";
+import { sharedDesignParse } from "./shared-parse";
 
 /** Read dimensions without decoding image pixels. An unknown format is a
  * compatibility fallback, never an uncharged browser allocation. */
@@ -52,7 +53,7 @@ export function designSurfaceCost(source: string, sheets: readonly { css: string
   if (sheets.some(sheet => sheet.bytes !== undefined && sheet.bytes !== Buffer.byteLength(sheet.css))) return null;
   const sourceBytes = Buffer.byteLength(source) + sheets.reduce((sum, sheet) => sum + (sheet.bytes ?? Buffer.byteLength(sheet.css)), 0);
   if (sourceBytes > 1024 * 1024) return null;
-  const document = parse(source);
+  const document = sharedDesignParse(source) ?? parse(source);
   const records = elementRecords(document);
   if (records.some(({ element }) => ["video", "audio", "canvas"].includes(element.tagName))) return null;
   let imageBytes = 0;

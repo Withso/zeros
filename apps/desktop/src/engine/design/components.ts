@@ -2,6 +2,7 @@ import { realpath } from "node:fs/promises";
 import path from "node:path";
 
 import { parse, parseFragment, type DefaultTreeAdapterTypes } from "parse5";
+import { sharedDesignParse } from "./shared-parse";
 
 import { assertDesignComponentDefinitionIdentities, rebaseDesignCssReferences, rebaseDesignHtmlReferences } from "@zeros/design-web";
 
@@ -127,7 +128,7 @@ async function loadDefinitions(
     return { definitions: new Map(), errors };
   }
 
-  const frameDocument = parse(frameSource);
+  const frameDocument = sharedDesignParse(frameSource) ?? parse(frameSource);
   const pending = referencedComponentNames(frameDocument);
   const scheduled = new Set(pending);
   const definitions = new Map<string, ComponentDefinition>();
@@ -342,6 +343,19 @@ export async function expandDesignComponents(
     if (!(error instanceof ComponentBudgetExceeded)) throw error;
     return { html: Buffer.byteLength(source) <= MAX_EXPANSION_BYTES ? source : "", usedComponents: [], errors: [{ component: "", message: error.message }] };
   }
+}
+
+/** Expanded markup alone, for rendering. Element names come only from start
+ * tags, so without `<zd-` there is no instance and expansion is the identity;
+ * diagnostics such as the element budget need `expandDesignComponents`. */
+export async function expandDesignComponentsHtml(
+  workspacePath: string,
+  source: string,
+  sources?: Readonly<Record<string, string>>,
+  entryFile = "",
+): Promise<string> {
+  if (!/<zd-/i.test(source) && Buffer.byteLength(source) <= MAX_EXPANSION_BYTES) return source;
+  return (await expandDesignComponents(workspacePath, source, sources, entryFile)).html;
 }
 
 async function expandBoundedComponents(

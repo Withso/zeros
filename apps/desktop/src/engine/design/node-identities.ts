@@ -3,7 +3,8 @@ import {
   designShadowHostOfContent,
   nativeDesignIdentityBase,
 } from "@zeros/design-web";
-import { parse, type DefaultTreeAdapterTypes } from "parse5";
+import type { DefaultTreeAdapterTypes } from "parse5";
+import { parseDesignSource, sharedDesignDerivation } from "./shared-parse";
 import { elementRecords, type ElementRecord } from "./source";
 
 const NON_DESIGN_NODE_TAGS = new Set([
@@ -116,7 +117,7 @@ export function designLayerCount(
  * broad `[data-oid]` reset can no longer reveal head content or expose
  * document plumbing as selectable layers. */
 export function stripNonDesignOidsForRender(source: string): string {
-  const document = parse(source, { sourceCodeLocationInfo: true });
+  const document = parseDesignSource(source);
   const edits: Array<{ start: number; end: number }> = [];
   for (const { element } of elementRecords(document)) {
     if (isDesignNodeElement(element)) continue;
@@ -144,14 +145,23 @@ function oidForElement(
   return nativeDesignIdentityBase(element.tagName, offset, source);
 }
 
-export function healDesignOids(source: string): {
+export interface DesignOidHealing {
   html: string;
   changed: boolean;
   fixed: Array<{ kind: "missing" | "duplicate"; line: number; oid: string }>;
   /** The parse of an unchanged source, so a caller need not parse it again. */
   document?: DefaultTreeAdapterTypes.Document;
-} {
-  const document = parse(source, { sourceCodeLocationInfo: true });
+}
+
+const HEALING = Symbol("design-oid-healing");
+
+/** Within a shared-parse scope every caller receives the same read-only result. */
+export function healDesignOids(source: string): DesignOidHealing {
+  return sharedDesignDerivation(HEALING, source, () => healUnshared(source));
+}
+
+function healUnshared(source: string): DesignOidHealing {
+  const document = parseDesignSource(source);
   const records = designNodeRecords(document);
   const used = new Set<string>();
   const edits: Array<{ start: number; end: number; text: string }> = [];
