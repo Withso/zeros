@@ -872,14 +872,18 @@ workspace, or a Cloud Computer build changes, and each notice starts a sweep
 at once. Reconnecting the shared LISTEN session sweeps once, covering notices
 lost meanwhile. Idle stops and other time-based scans run within that minute.
 
-The lifecycle loop stops a running VM after 15 minutes without activity
-reports (`CLOUD_V2_IDLE_STOP_MS`). Turns, workspace setup, attachment transfers,
-recent terminal input/output, and explicit file/Git mutations keep reports
-flowing. The worker counts terminal input/output, file saves and Git mutations
-as activity until completion and for ten minutes afterwards
-(`RECENT_ACTIVITY_MS`), so a VM stops about 15 minutes after a turn ends and
-about 25 minutes after the last terminal input/output or save. Reads and polls
-do not renew it; an untouched shell eventually becomes idle. Passive history reads do not wake
+The lifecycle loop stops a running VM after 20 minutes without activity
+(`CLOUD_V2_IDLE_STOP_MS`), like Conductor's sandboxes. These count as activity:
+- turns, workspace setup and attachment transfers;
+- terminal input and output, file saves and Git mutations, each for one minute
+  afterwards (`RECENT_ACTIVITY_MS`, one report heartbeat);
+- a focused, visible Zeros window showing the running workspace. The app posts
+  `/activity` at most once a minute; the post never wakes a stopped VM, and
+  the store records it at most every 30 seconds.
+
+A VM therefore stops about 20 minutes after the last of these. There is no
+maximum lifetime: running VMs renew their Boat lease every 12 hours. Reads and
+polls do not renew it; an untouched shell eventually becomes idle. Passive history reads do not wake
 the VM, and neither do reconnects: `/connect` accepts `{ "wake": false }`, and
 the single-use ticket carries that intent through bridge admission. The app
 asks to wake for explicit navigation from the sidebar, Dashboard or repository

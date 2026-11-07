@@ -46,7 +46,7 @@ export const CLOUD_V2_LIFECYCLE_CHANNEL = "zeros_cloud_v2_lifecycle";
 /** Each sweep starts Computer build and maintenance checks in the background;
  * one that settles this quickly found nothing long-running to do. */
 const BACKGROUND_SETTLE_MS = 1_000;
-export const CLOUD_V2_IDLE_STOP_MS = 15 * 60_000;
+export const CLOUD_V2_IDLE_STOP_MS = 20 * 60_000;
 /** A failed stop checkpoint is retried on a fork of the stopped VM: first
  * after whatever failed has had time to pass, then less often. */
 const RETRY_FIRST_MS = 10 * 60_000;
