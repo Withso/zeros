@@ -15,6 +15,7 @@ const mocks = await vi.hoisted(async () => {
     setPermissionCheckHandler: vi.fn(),
     on: vi.fn(),
     webRequest: { onBeforeRequest: vi.fn() },
+    protocol: { handle: vi.fn() },
     clearStorageData: vi.fn(),
   };
   const contents = Object.assign(new EventEmitter(), {
@@ -34,6 +35,7 @@ const mocks = await vi.hoisted(async () => {
 });
 vi.mock("electron", () => ({
   session: { fromPartition: () => mocks.partition },
+  protocol: { registerSchemesAsPrivileged: vi.fn() },
   BrowserWindow: class {
     webContents = mocks.contents;
     constructor(options: unknown) {
