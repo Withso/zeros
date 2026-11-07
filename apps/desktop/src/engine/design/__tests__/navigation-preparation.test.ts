@@ -15,6 +15,7 @@ import {
 } from "../document";
 import { designSharedCanvasReadsForTests, readCanvas } from "../document-storage";
 import { designSharedCatalogProjectionsForTests } from "../catalog-storage";
+import { designCanvasMaterializationsForTests } from "../canvas-file";
 import { readDesignProtocolResource } from "../protocol-resource";
 
 let root: string;
@@ -185,4 +186,22 @@ it("serves navigation at an unchanged revision from one shared decode and projec
   expect(moved.pageHashes).not.toEqual(first.pageHashes);
   expect(designSharedCatalogProjectionsForTests() - projections).toBe(1);
   expect(moved.snapshot.pages).toEqual(first.snapshot.pages);
+});
+
+it("prepares from the shared decoded canvas, so navigation and preparation keep one copy", async () => {
+  const file = path.join(root, directory, "meta/canvas.json");
+  const canvas = JSON.parse(await readFile(file, "utf8"));
+  canvas.frames.f3.x = 999;
+  await writeFile(file, JSON.stringify(canvas));
+  const navigation = await readDesignNavigationSnapshot(root);
+  const decodes = designCanvasMaterializationsForTests();
+  await prepareDesignNavigationFrames(root, navigation.catalogRevision, ["page-1/f3.html"]);
+  await prepareDesignNavigationFrames(root, navigation.catalogRevision, ["page-1/f4.html"]);
+  expect(designCanvasMaterializationsForTests() - decodes).toBe(0);
+  canvas.frames.f3.x = 1_001;
+  await writeFile(file, JSON.stringify(canvas));
+  const moved = await readDesignNavigationSnapshot(root);
+  const before = designCanvasMaterializationsForTests();
+  expect((await prepareDesignNavigationFrames(root, moved.catalogRevision, ["page-1/f3.html"])).frames[0]!.x).toBe(1_001);
+  expect(designCanvasMaterializationsForTests() - before).toBe(0);
 });

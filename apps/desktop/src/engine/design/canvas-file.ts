@@ -159,6 +159,13 @@ export function designCanvasValidationsForTests(): number {
   return validations;
 }
 
+let materializations = 0;
+
+/** Test hook: decodes that built fresh canvas objects. */
+export function designCanvasMaterializationsForTests(): number {
+  return materializations;
+}
+
 /** Exactly the bytes this encoder produced, so formatting carries no meaning. */
 export function isCanonicalDesignCanvas(source: string): boolean {
   return validatedCanvases.get(canvasKey(source))?.canonical === true;
@@ -172,6 +179,7 @@ const cloneEntries = <T extends RecordValue | undefined>(value: T): T => {
 
 /** Fresh output objects every time: callers edit pages, frames and extensions. */
 function materializeCanvas(parsed: ParsedCanvas): RecordValue {
+  materializations++;
   const {
     frames,
     pages: parsedPages = [{ id: "main", title: "Design", frames: Object.keys(frames) }],

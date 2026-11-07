@@ -1208,9 +1208,9 @@ async function prepareSharedRegisteredDesignFrame(workspacePath: string, file: s
     modifiedAt: safe.modifiedAt, sourceVersion: render.sourceVersion, surfaceCost: render.surfaceCost };
 }
 
-/** The decoded canvas the last preparation batch read, by catalog revision.
- * A page opens in dozens of batches; they only read it, and it is frozen so
- * nothing can change it for the next batch. */
+/** The shared decoded canvas the last preparation batch read, by catalog
+ * revision. A page opens in dozens of batches; they only read it, and it is
+ * frozen so nothing can change it for the next batch. */
 let preparationContext: {
   key: string; revision: string; inspection: ReturnType<typeof inspectDesignCatalog>; context: Awaited<ReturnType<typeof readCanvasContext>>;
 } | null = null;
@@ -1230,10 +1230,11 @@ export async function prepareDesignNavigationFrames(workspacePath: string, catal
     if (revision !== catalogRevision || (directoryId !== undefined && before.layout.manifest.id !== directoryId)) throw new DesignCatalogError("stale");
     let context = reused?.context ?? null;
     if (!context) {
-      context = await readCanvasContext(workspacePath);
+      // The canvas navigation and identity reads share: one frozen copy per revision.
+      context = await readSharedCanvasContext(workspacePath);
       const captured = context.canvas[canvasReadSnapshot];
       if (captured?.source === before.source && captured.registration?.source === before.registration)
-        preparationContext = { key, revision, inspection: before, context: freezeDeep(context) };
+        preparationContext = { key, revision, inspection: before, context };
     }
     const frames: DesignCanvasFrame[] = [];
     const errors: Array<{ file: string; message: string }> = [];
