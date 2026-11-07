@@ -1242,7 +1242,8 @@ async function prepareSharedRegisteredDesignFrame(workspacePath: string, file: s
  * design.frames.prepare returns, and the parts the capture composes, so a
  * frame not prepared yet is read and parsed once. Its identity comes from,
  * and is remembered in, the durable identity cache like any preparation. */
-export async function prepareRegisteredDesignFrameParts(workspacePath: string, file: string, canvas: CanvasDocument) {
+export async function prepareRegisteredDesignFrameParts(workspacePath: string, file: string, canvas: CanvasDocument,
+  options: { deferTailwind?: boolean } = {}) {
   return withSharedDesignParses(async () => {
     const frame = await prepareSharedRegisteredDesignFrame(workspacePath, file, canvas, designFramePageIds(canvas),
       designFrameIdentities(workspacePath, designDirectoryNameFor(workspacePath)));
@@ -1253,7 +1254,7 @@ export async function prepareRegisteredDesignFrameParts(workspacePath: string, f
     // The same source text in the same parse scope: a build after a fresh
     // identity read reuses every parse that read made.
     const render = await prepareFrameRenderSource(workspacePath, safe.body.toString("utf8"), { width: geometry.w, height: geometry.h },
-      undefined, undefined, file, canvas, { parts: true });
+      undefined, undefined, file, canvas, { parts: true, deferTailwind: options.deferTailwind === true });
     if (render.sourceVersion !== frame.sourceVersion) throw new Error("The registered Design frame changed.");
     return { frame, render };
   });

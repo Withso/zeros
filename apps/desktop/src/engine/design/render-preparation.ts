@@ -192,6 +192,8 @@ interface LinkedStylesheet {
   source?: string;
   /** The placeholder is inside <svg> or <math>, where a <link> is no stylesheet. */
   foreign?: true;
+  /** A built Tailwind source: the candidates its utilities were compiled for. */
+  tailwindCandidates?: readonly string[];
 }
 
 /** Replace each local stylesheet link with an empty, hash-tagged placeholder. */
@@ -503,6 +505,7 @@ async function importedStylesheets(
   html: string,
   linked: readonly LinkedStylesheet[],
   identityOnly: boolean,
+  compileTailwind = true,
 ): Promise<{ markup: string; sheets: LinkedStylesheet[] }> {
   const document = canvas ?? (await readCanvas(workspacePath).catch(() => null));
   if (!document) return { markup: "", sheets: [] };
@@ -515,10 +518,12 @@ async function importedStylesheets(
     stylesheetVariables: linked.flatMap((sheet) => sheet.variables ?? []),
     stylesheets: linked.map((sheet) => sheet.css),
     build: !identityOnly,
+    compileTailwind,
   });
   for (const [index, source] of sources.entries()) {
     const token = `s${index}-${source.revision}`;
     sheets.push({ token, css: source.css.replace(/<\/style/gi, "<\\/style"), source: source.id,
+      ...(source.tailwindCandidates ? { tailwindCandidates: source.tailwindCandidates } : {}),
       ...(source.bytes === undefined ? {} : { bytes: source.bytes }),
       ...(source.imageBytes === undefined ? {} : { imageBytes: source.imageBytes }) });
     markup += `<style data-zeros-style-source="${source.id}" data-zeros-sheet="${token}"></style>`;
@@ -543,6 +548,9 @@ export interface FrameRenderOptions {
   /** Build every stylesheet, as a document does, but return the skeleton and
    * the sheets for its placeholders instead of splicing them in. */
   parts?: boolean;
+  /** Parts only: leave Tailwind sources uncompiled (empty CSS, with their
+   * candidates), for a caller that compiles them once for many frames. */
+  deferTailwind?: boolean;
 }
 
 /** One stylesheet a skeleton placeholder (`data-zeros-sheet="token"`) stands for. */
@@ -553,6 +561,8 @@ export interface DesignFrameRenderSheet {
   source?: string;
   /** The placeholder is inside <svg> or <math>, where a <link> is no stylesheet. */
   foreign?: true;
+  /** A built Tailwind source: the candidates its utilities were compiled for. */
+  tailwindCandidates?: readonly string[];
 }
 
 export function prepareFrameRenderSource(
@@ -600,7 +610,7 @@ async function prepareSharedFrameRenderSource(
   // Tailwind needs classes from the expanded frame and variables read by its
   // linked sheets. The latter are extracted once per prepared stylesheet.
   const imported = await importedStylesheets(workspacePath, entryFile, canvas, expanded,
-    linked.sheets, options.identityOnly === true);
+    linked.sheets, options.identityOnly === true, !(options.parts && options.deferTailwind));
   const withImported = !imported.markup
     ? linked.html
     : linked.headEnd === undefined
@@ -640,7 +650,8 @@ async function prepareSharedFrameRenderSource(
     if (bytes > MAX_SANITIZED_RENDER_BYTES)
       throw new DesignRenderBudgetError("Sanitized frame HTML exceeded the 15 MiB per-frame render limit.");
     return { sanitized: skeleton, sourceVersion, surfaceCost: null,
-      sheets: sheets.map(({ token, css, source, foreign }) => ({ token, css, ...(source === undefined ? {} : { source }), ...(foreign ? { foreign } : {}) })) };
+      sheets: sheets.map(({ token, css, source, foreign, tailwindCandidates }) => ({ token, css, ...(source === undefined ? {} : { source }),
+        ...(foreign ? { foreign } : {}), ...(tailwindCandidates ? { tailwindCandidates } : {}) })) };
   }
   const sanitized = spliceStylesheets(skeleton, sheets);
   assertRenderByteLimit(

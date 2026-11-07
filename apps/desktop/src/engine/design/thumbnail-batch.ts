@@ -34,7 +34,7 @@ import { prepareFrameRenderSource } from "./render-preparation";
 import { readSafeRegularFile } from "./safe-files";
 import { parseDesignSource } from "./shared-parse";
 import { elementRecords } from "./source";
-import { frameStyleSourceIds, frameStyleSources, readDesignStyleSourceCatalog } from "./style-sources";
+import { designTailwindBatchCss, frameStyleSourceIds, frameStyleSources, readDesignStyleSourceCatalog } from "./style-sources";
 import { applyDesignSurfaceTheme } from "./surface-document";
 import {
   DESIGN_THUMBNAIL_COMPOSER,
@@ -47,6 +47,17 @@ import {
 } from "./thumbnail-store";
 
 const MAX_LAYOUT_SIDE = 16_384;
+// Experimental: ZEROS_DESIGN_THUMBNAIL_BATCH_TAILWIND=1 turns it on for a
+// pixel comparison against per-frame builds.
+const testing = { batchTailwind: process.env.ZEROS_DESIGN_THUMBNAIL_BATCH_TAILWIND === "1" };
+/** One Tailwind sheet per batch, compiled for every frame's candidates,
+ * instead of one compile per frame. Off until the capture host shows it
+ * draws the same pixels as per-frame builds. */
+const batchTailwind = () => testing.batchTailwind;
+
+export function configureDesignThumbnailBatchTailwindForTests(enabled: boolean): void {
+  testing.batchTailwind = enabled;
+}
 const HTML_NAMESPACE = "http://www.w3.org/1999/xhtml";
 const MAX_REPLY_BYTES = DESIGN_BATCH_CAPTURE_MAX_ITEMS * Math.ceil((DESIGN_CAPTURE_PNG_BYTES * 4) / 3) + 1024 * 1024;
 
@@ -62,6 +73,8 @@ export interface DesignThumbnailBatch {
 }
 
 const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
+const distinctBytes = (parts: ReadonlyArray<{ css: string }>) =>
+  [...new Set(parts.map((part) => part.css))].reduce((total, css) => total + css.length, 0);
 const UNPICTURED = "This frame could not be pictured.";
 /** Per-frame errors reach the renderer path-free: system errors and messages
  * naming the checkout or home directory become a generic one. */
@@ -179,7 +192,8 @@ export async function composeDesignThumbnailBatches(
   const design = designDirectory(root);
   const stale: Frame[] = [];
   const failed: Array<{ file: string; error: string }> = [];
-  const composed: Array<{ frame: Frame; item: Item; sheets: Map<string, string> }> = [];
+  const built: Array<{ index: number; frame: Frame; geometry: { w: number; h: number }; skeleton: string;
+    parts: Part[]; tailwind: Array<{ part: number; source: string; candidates: readonly string[] }> }> = [];
   for (const [index, requested] of input.frames.entries()) {
     signal?.throwIfAborted();
     try {
@@ -188,40 +202,86 @@ export async function composeDesignThumbnailBatches(
       if (!geometry || !canvas.frame_info[file]) throw new Error("This frame is not on the canvas.");
       let render: Awaited<ReturnType<typeof prepareFrameRenderSource>>;
       if (requested.sourceVersion === undefined) {
-        const built = await prepareRegisteredDesignFrameParts(root, file, canvas);
-        prepared?.push(built.frame as PreparedFrame);
-        render = built.render;
+        const parts = await prepareRegisteredDesignFrameParts(root, file, canvas, { deferTailwind: batchTailwind() });
+        prepared?.push(parts.frame as PreparedFrame);
+        render = parts.render;
       } else {
         const safe = await readSafeRegularFile(design, path.join(design, file), MAX_DESIGN_TEXT_BYTES);
         if (!safe) throw new Error("The frame source is unavailable or exceeds its limit.");
         render = await prepareFrameRenderSource(root, safe.body.toString("utf8"), { width: geometry.w, height: geometry.h },
-          undefined, undefined, file, canvas, { parts: true });
+          undefined, undefined, file, canvas, { parts: true, deferTailwind: batchTailwind() });
         if (render.sourceVersion !== requested.sourceVersion) {
           stale.push({ file, sourceVersion: render.sourceVersion });
           continue;
         }
       }
-      const pruned: Part[] = (render.sheets ?? []).map(({ token, css, foreign }) => ({ token, css, ...(foreign ? { foreign } : {}) }));
+      const sheets = render.sheets ?? [];
+      const pruned: Part[] = sheets.map(({ token, css, foreign }) => ({ token, css, ...(foreign ? { foreign } : {}) }));
       let parts = pruned;
-      if (render.sheets?.some((sheet) => sheet.source !== undefined && !tailwind.has(sheet.source))) {
+      if (sheets.some((sheet) => sheet.source !== undefined && !tailwind.has(sheet.source))) {
         const sources = await wholeSources(file);
-        parts = pruned.map((part, index) => {
-          const source = render.sheets![index]!.source;
+        parts = pruned.map((part, at) => {
+          const source = sheets[at]!.source;
           return source !== undefined && !tailwind.has(source) ? { ...part, css: sources.get(source) ?? part.css } : part;
         });
         // A frame the canvas can draw is never refused for sharing: past the
         // budget it carries its own pruned CSS instead.
-        const bytes = [...new Set(parts.map((part) => part.css))].reduce((total, css) => total + css.length, 0);
-        if (bytes > DESIGN_BATCH_CAPTURE_STYLESHEET_BYTES) parts = pruned;
+        if (distinctBytes(parts) > DESIGN_BATCH_CAPTURE_STYLESHEET_BYTES) parts = pruned;
       }
-      const sheets = new Map<string, string>();
-      const html = linkSheets(themeRoot(render.sanitized, input.theme), parts, (css) => {
+      built.push({ index, frame: { file, sourceVersion: render.sourceVersion }, geometry, skeleton: render.sanitized, parts,
+        tailwind: sheets.flatMap((sheet, part) => sheet.source !== undefined && tailwind.has(sheet.source) && sheet.tailwindCandidates
+          ? [{ part, source: sheet.source, candidates: sheet.tailwindCandidates }] : []) });
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      failed.push({ file: requested.file, error: failure(error, root) });
+    }
+  }
+  const batchCss = new Map<string, string>();
+  if (batchTailwind()) {
+    const candidates = new Map<string, Set<string>>();
+    for (const frame of built) for (const sheet of frame.tailwind) {
+      const union = candidates.get(sheet.source) ?? new Set<string>();
+      for (const candidate of sheet.candidates) union.add(candidate);
+      candidates.set(sheet.source, union);
+    }
+    for (const [source, union] of candidates) {
+      signal?.throwIfAborted();
+      const css = await designTailwindBatchCss(root, canvas, source, union);
+      if (css !== null) batchCss.set(source, css);
+    }
+  }
+  const composed: Array<{ frame: Frame; item: Item; sheets: Map<string, string> }> = [];
+  for (const { index, frame, geometry, skeleton, parts: own, tailwind: sheets } of built) {
+    try {
+      let parts = own;
+      if (batchTailwind() && sheets.length) {
+        // Tailwind was left uncompiled: the batch's sheet, or this frame's
+        // own compile when the batch's could not be built or does not fit.
+        const compileOwn = async () => {
+          const filled = [...parts];
+          for (const sheet of sheets) {
+            const css = await designTailwindBatchCss(root, canvas, sheet.source, sheet.candidates);
+            if (css === null) throw new Error("This frame's Tailwind CSS is too large to picture.");
+            filled[sheet.part] = { ...filled[sheet.part]!, css };
+          }
+          return filled;
+        };
+        const shared = sheets.every((sheet) => batchCss.has(sheet.source))
+          ? parts.map((part, at) => {
+            const sheet = sheets.find((candidate) => candidate.part === at);
+            return sheet ? { ...part, css: batchCss.get(sheet.source)! } : part;
+          })
+          : null;
+        parts = shared && distinctBytes(shared) <= DESIGN_BATCH_CAPTURE_STYLESHEET_BYTES ? shared : await compileOwn();
+      }
+      const linked = new Map<string, string>();
+      const html = linkSheets(themeRoot(skeleton, input.theme), parts, (css) => {
         const hash = sha256(css);
-        sheets.set(hash, css);
+        linked.set(hash, css);
         return designCaptureSheetUrl(hash);
       });
       if (html.length > DESIGN_CAPTURE_HTML_BYTES) throw new Error("This frame is too large to picture.");
-      composed.push({ frame: { file, sourceVersion: render.sourceVersion }, sheets, item: {
+      composed.push({ frame, sheets: linked, item: {
         id: `f${index}`, html, maxDimension: input.maxDimension,
         viewport: {
           width: Math.max(1, Math.min(MAX_LAYOUT_SIDE, Math.ceil(geometry.w))),
@@ -229,8 +289,7 @@ export async function composeDesignThumbnailBatches(
         },
       } });
     } catch (error) {
-      if (signal?.aborted) throw error;
-      failed.push({ file: requested.file, error: failure(error, root) });
+      failed.push({ file: frame.file, error: failure(error, root) });
     }
   }
   // Split into requests the capture host admits: items, pixels and bytes.
