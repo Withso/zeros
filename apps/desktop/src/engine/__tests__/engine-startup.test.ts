@@ -106,7 +106,71 @@ describe("engine startup readiness", () => {
       await engine.start();
       await visitedLocal;
       expect(maintenance.transition).toHaveBeenCalledExactlyOnceWith("ws_local");
-      expect(maintenance.cleanup).toHaveBeenCalledExactlyOnceWith(localPath);
+      expect(maintenance.cleanup).toHaveBeenCalledExactlyOnceWith(localPath, expect.any(Function));
+    } finally {
+      await engine.stop();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("leaves the workspace lane free between steps of the ACL sweep", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "zeros-startup-acl-turns-"));
+    maintenance.workspaces = [storedWorkspace(root)];
+    const order: string[] = [];
+    let between!: () => void;
+    const betweenSteps = new Promise<void>((resolve) => { between = resolve; });
+    let releaseGate!: () => void;
+    const gate = new Promise<void>((resolve) => { releaseGate = resolve; });
+    let finished!: () => void;
+    const swept = new Promise<void>((resolve) => { finished = resolve; });
+    maintenance.cleanup.mockImplementation(async (_cwd: string, turn: <T>(step: () => Promise<T>) => Promise<T>) => {
+      await turn(async () => { order.push("step 1"); });
+      between();
+      // The test lets the sweep go on only after a Design read got the lane.
+      await gate;
+      await turn(async () => { order.push("step 2"); });
+      finished();
+    });
+    const engine = fixture();
+    try {
+      await engine.start();
+      await betweenSteps;
+      await mutations.withWorkspaceMutation(root, async () => { order.push("design read"); });
+      releaseGate();
+      await swept;
+      expect(order).toEqual(["step 1", "design read", "step 2"]);
+    } finally {
+      releaseGate();
+      await engine.stop();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("stops the ACL sweep without a warning when its checkout is archived between steps", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "zeros-startup-acl-retired-"));
+    const workspace = storedWorkspace(root);
+    maintenance.workspaces = [workspace];
+    const steps: string[] = [];
+    let settled!: (outcome: string) => void;
+    const outcome = new Promise<string>((resolve) => { settled = resolve; });
+    maintenance.cleanup.mockImplementation(async (_cwd: string, turn: <T>(step: () => Promise<T>) => Promise<T>) => {
+      try {
+        await turn(async () => { steps.push("step 1"); });
+        maintenance.workspaces = [{ ...workspace, archivedAt: Date.now() }];
+        await turn(async () => { steps.push("step 2"); });
+        settled("finished");
+      } catch (error) {
+        settled((error as Error).constructor.name);
+        throw error;
+      }
+    });
+    const engine = fixture();
+    try {
+      await engine.start();
+      expect(await outcome).toBe("DesignLockSweepStopped");
+      expect(steps).toEqual(["step 1"]);
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(vi.mocked(console.warn).mock.calls.flat().join(" ")).not.toContain("ACL cleanup incomplete");
     } finally {
       await engine.stop();
       await rm(root, { recursive: true, force: true });
@@ -131,7 +195,7 @@ describe("engine startup readiness", () => {
     try {
       await engine.start();
       await visitedDue;
-      expect(maintenance.cleanup).toHaveBeenCalledExactlyOnceWith(due);
+      expect(maintenance.cleanup).toHaveBeenCalledExactlyOnceWith(due, expect.any(Function));
     } finally {
       release();
       await lane;

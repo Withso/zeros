@@ -19,6 +19,7 @@ import {
   designLockSupported,
   unfenceDesignDirFiles,
   unlockCodebase,
+  type DesignLockTurn,
 } from "../files/design-lock";
 import {
   getWorkspaceByPath,
@@ -92,6 +93,7 @@ export async function withDesignDirectoryWritable<T>(
 
 async function releaseKnownDesignDirectoryAcls(
   workspacePath: string,
+  turn?: DesignLockTurn,
 ): Promise<string[]> {
   const names = new Set<string>([designDirectoryNameFor(workspacePath)]);
   for (const discovered of await discoverDesignDirectories(workspacePath)) {
@@ -101,7 +103,7 @@ async function releaseKnownDesignDirectoryAcls(
   for (const name of [...names].sort()) {
     const candidate = path.join(workspacePath, ...name.split("/"));
     if (!existsSync(candidate)) continue;
-    const result = await unfenceDesignDirFiles(workspacePath, name);
+    const result = await unfenceDesignDirFiles(workspacePath, name, turn);
     failed.push(...result.failed);
   }
   return failed;
@@ -113,14 +115,17 @@ async function releaseKnownDesignDirectoryAcls(
  * interaction path. */
 export async function cleanupLegacyDesignFilesystemGuards(
   workspacePath: string,
+  /** Each step of the sweep runs in a turn; a caller already holding the
+   * workspace's mutation lane passes none. */
+  turn?: DesignLockTurn,
 ): Promise<void> {
   if (!designLockSupported()) return;
   const workspace = getWorkspaceByPath(path.resolve(workspacePath));
   if (legacyAclCleanupComplete(workspacePath)) return;
-  const wholeTree = await unlockCodebase(workspacePath);
+  const wholeTree = await unlockCodebase(workspacePath, turn);
   const failed = [
     ...wholeTree.failed,
-    ...(await releaseKnownDesignDirectoryAcls(workspacePath)),
+    ...(await releaseKnownDesignDirectoryAcls(workspacePath, turn)),
   ];
   if (failed.length > 0) {
     if (workspace) setWorkspaceMeta(workspace.id, LEGACY_DESIGN_ACL_CLEANUP_META_KEY, `deferred:${Date.now()}`);

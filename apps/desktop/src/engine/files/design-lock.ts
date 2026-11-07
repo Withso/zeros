@@ -84,6 +84,15 @@ export interface DesignLockResult {
 }
 
 /** True when this platform can enforce a design lock at all. */
+/** Runs one bounded step of a sweep. A background sweep passes one that takes
+ * the workspace's mutation lane per step, so Design reads interleave with it
+ * instead of waiting out the whole tree. */
+export type DesignLockTurn = <T>(step: () => Promise<T>) => Promise<T>;
+const directTurn: DesignLockTurn = (step) => step();
+/** A turn refused the next step (the checkout changed or the sweep was
+ * cancelled): the sweep stops instead of counting its files as failed. */
+export class DesignLockSweepStopped extends Error {}
+
 export function designLockSupported(): boolean {
   return process.platform === "darwin";
 }
@@ -195,15 +204,17 @@ async function removeAclAce(
   cwd: string,
   files: readonly string[],
   ace = denyAce(),
+  turn: DesignLockTurn = directTurn,
 ): Promise<DesignLockResult> {
   let changed = 0;
   const failed: string[] = [];
   for (let i = 0; i < files.length; i += CHMOD_BATCH) {
     const batch = files.slice(i, i + CHMOD_BATCH);
     try {
-      await execFileAsync("chmod", ["-h", "-a", ace, ...batch], { cwd });
+      await turn(() => execFileAsync("chmod", ["-h", "-a", ace, ...batch], { cwd }));
       changed += batch.length;
     } catch (batchErr) {
+      if (batchErr instanceof DesignLockSweepStopped) throw batchErr;
       const batchStderr = String(
         (batchErr as { stderr?: unknown } | null)?.stderr ?? "",
       );
@@ -219,9 +230,10 @@ async function removeAclAce(
       }
       for (const file of batch) {
         try {
-          await execFileAsync("chmod", ["-h", "-a", ace, file], { cwd });
+          await turn(() => execFileAsync("chmod", ["-h", "-a", ace, file], { cwd }));
           changed += 1;
         } catch (err) {
+          if (err instanceof DesignLockSweepStopped) throw err;
           const stderr = String(
             (err as { stderr?: unknown } | null)?.stderr ?? "",
           );
@@ -414,16 +426,18 @@ export async function designDirFiles(
 export async function unfenceDesignDirFiles(
   cwd: string,
   designDir: string,
+  turn: DesignLockTurn = directTurn,
 ): Promise<DesignLockResult> {
   if (!designLockSupported()) return { changed: 0, failed: [] };
-  const { directories, files } = await designDirFenceEntries(cwd, designDir);
+  const { directories, files } = await turn(() => designDirFenceEntries(cwd, designDir));
   // Release leaves before parents, mirroring the hierarchy used by historical
   // builds and minimizing the partially cleaned subtree if removal fails.
-  const fileResult = await removeAclAce(cwd, files);
+  const fileResult = await removeAclAce(cwd, files, denyAce(), turn);
   const directoryResult = await removeAclAce(
     cwd,
     [...directories].reverse(),
     denyDirectoryAce(),
+    turn,
   );
   return {
     changed: directoryResult.changed + fileResult.changed,
@@ -441,8 +455,8 @@ export async function unfenceDesignDirFiles(
  *
  *  `chmod -a` on a file with no matching ACE is an error, so failures here are
  *  expected and non-fatal; they are counted, not thrown. */
-export async function unlockCodebase(cwd: string): Promise<DesignLockResult> {
+export async function unlockCodebase(cwd: string, turn: DesignLockTurn = directTurn): Promise<DesignLockResult> {
   if (!designLockSupported()) return { changed: 0, failed: [] };
-  const files = await lockableFiles(cwd, "");
-  return removeAclAce(cwd, files);
+  const files = await turn(() => lockableFiles(cwd, ""));
+  return removeAclAce(cwd, files, denyAce(), turn);
 }

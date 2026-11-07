@@ -31,6 +31,7 @@ vi.mock("../../git/state", () => ({
   setWorkspaceMeta: (_id: string, _key: string, value: string) => { aclHarness.cleanupState = value; },
 }));
 
+import type { DesignLockTurn } from "../../files/design-lock";
 import {
   LEGACY_DESIGN_ACL_RETRY_MS,
   legacyDesignAclCleanupDue,
@@ -86,6 +87,14 @@ describe("Design filesystem compatibility cleanup", () => {
     expect(aclHarness.unlock).toHaveBeenCalledTimes(2);
     expect(aclHarness.cleanupState).toBe("complete");
     expect(legacyDesignAclCleanupDue(root)).toBe(false);
+  });
+
+  it("runs both phases of the sweep in the caller's turns", async () => {
+    await mkdir(path.join(root, "Zeros Design"));
+    const turn: DesignLockTurn = (step) => step();
+    await cleanupLegacyDesignFilesystemGuards(root, turn);
+    expect(aclHarness.unlock).toHaveBeenCalledWith(root, turn);
+    expect(aclHarness.unfence).toHaveBeenCalledWith(root, "Zeros Design", turn);
   });
 
   it("does not rescan a workspace after its durable cleanup completed", async () => {

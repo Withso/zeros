@@ -2915,24 +2915,34 @@ export class ZerosEngine {
       } },
       { name: "design-acls", run: async (signal) => {
         const { cleanupLegacyDesignFilesystemGuards, legacyDesignAclCleanupDue } = await import("./design/workspace-lock");
+        const { DesignLockSweepStopped } = await import("./files/design-lock");
         const { withWorkspaceMutation } = await import("./git/mutation-lock");
         for (const workspace of listWorkspaces()) {
           if (signal.aborted) break;
           if (workspace.placement === "cloud" || workspace.archivedAt != null) continue;
           // A sweep that failed recently waits out its retry interval without queueing for the lane.
           if (!legacyDesignAclCleanupDue(workspace.path)) continue;
-          // Archive/delete/move share this lane. Recheck after admission so a
-          // queued cleanup cannot walk a retired or replacement checkout.
-          await withWorkspaceMutation(workspace.path, async () => {
-            if (signal.aborted) return;
+          // Archive/delete/move share this lane. The sweep takes it per step,
+          // never for the whole tree, so Design reads queued behind one step
+          // run before the next; each step rechecks the checkout first.
+          const turn = <T>(step: () => Promise<T>) => withWorkspaceMutation(workspace.path, async () => {
             const current = getWorkspaceById(workspace.id);
-            if (!current || current.path !== workspace.path || current.placement === "cloud" ||
+            if (signal.aborted || !current || current.path !== workspace.path || current.placement === "cloud" ||
                 current.archivedAt != null || getWorkspaceLifecycleStatus(current.id).operation != null ||
-                !fs.existsSync(current.path)) return;
-            await cleanupLegacyDesignFilesystemGuards(current.path).catch(() => {
-              console.warn("[Zeros] historical Design ACL cleanup incomplete; a launch retries it after a week");
-            });
-          }, { signal });
+                !fs.existsSync(current.path))
+              throw new DesignLockSweepStopped("The workspace changed during the historical Design ACL cleanup.");
+            return step();
+          }, { signal }).catch((error: unknown) => {
+            if (signal.aborted && !(error instanceof DesignLockSweepStopped)) throw new DesignLockSweepStopped("Startup maintenance stopped.");
+            throw error;
+          });
+          try {
+            // Admission: a sweep waiting on a busy lane starts nothing until it gets one.
+            await turn(async () => {});
+            await cleanupLegacyDesignFilesystemGuards(workspace.path, turn);
+          } catch (error) {
+            if (!(error instanceof DesignLockSweepStopped)) console.warn("[Zeros] historical Design ACL cleanup incomplete; a launch retries it after a week");
+          }
           await new Promise<void>((resolve) => setImmediate(resolve));
         }
       } },
