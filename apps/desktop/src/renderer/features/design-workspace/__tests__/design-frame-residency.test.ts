@@ -87,6 +87,30 @@ describe("Design frame surface residency", () => {
     expect(Math.max(200, 100) * 0.45 * 2).toBeLessThanOrEqual(384);
   });
 
+  it("defers unmounting, source admission and the end of an overview until a camera gesture rests", () => {
+    const frames = Array.from({ length: 1000 }, (_, index) => ({ ...frame(String(index), index % 40 * 240, Math.floor(index / 40) * 120),
+      sourceVersion: "a".repeat(24), surfaceCost: { sourceBytes: 2000, nodes: 80, imageBytes: 0 } }));
+    const input = { ...setup(frames), viewport: { width: 1440, height: 900 }, devicePixelRatio: 2, sourceSurfacesEnabled: true,
+      sourceReady: new Map(frames.map(frame => [frame.file, frame.sourceVersion])) };
+    const read = createDesignFrameResidencyReader();
+    const overview = read({ ...input, view: { zoom: 0.14, panX: 0, panY: 0 } });
+    expect(overview.frames).toHaveLength(1000);
+    // Zooming in past the overview's exit mid-gesture: nothing unmounts and no
+    // document starts loading; pictures keep covering every frame.
+    const zooming = read({ ...input, view: { zoom: 0.6, panX: 0, panY: 0 }, gesture: true });
+    expect(zooming.visible.size).toBeLessThanOrEqual(192);
+    expect(zooming.frames).toHaveLength(1000);
+    expect(zooming.sources.size).toBe(0);
+    expect(zooming.live.size).toBe(0);
+    // At rest the overview ends in one step: sources for what is visible.
+    const rested = read({ ...input, view: { zoom: 0.6, panX: 0, panY: 0 } });
+    expect(rested.frames.length).toBeLessThan(1000);
+    expect([...rested.visible].every(file => rested.sources.has(file))).toBe(true);
+    // Admitted sources stay while the next gesture moves away from them.
+    const panning = read({ ...input, view: { zoom: 0.6, panX: -3000, panY: 0 }, gesture: true });
+    expect([...rested.sources].every(file => panning.sources.has(file))).toBe(true);
+  });
+
   it("keeps offscreen descriptors out of the mounted set without changing scene order", () => {
     const frames = [frame("front", 100), frame("back", 100), ...Array.from({ length: 254 }, (_, i) => frame(`far-${i}`, 10000 + i * 400))];
     const read = createDesignFrameResidencyReader();
