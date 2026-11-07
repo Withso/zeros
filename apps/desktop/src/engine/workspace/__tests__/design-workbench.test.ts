@@ -79,6 +79,18 @@ describe("Design in the shared workbench", () => {
       expect(JSON.stringify(reply)).not.toContain(capture.token);
       expect(JSON.stringify(reply)).not.toContain(root);
       expect(renderBatch).toHaveBeenCalledOnce();
+      // The picture is kept: a read at open returns it without drawing.
+      const { frames: _frames, ...read } = input;
+      expect(service.isWriteOp("design.thumbnails.read")).toBe(false);
+      expect(service.isRemoteAllowed("design.thumbnails.read")).toBe(false);
+      expect(service.lifecycleMutationWorkspaceId("design.thumbnails.read", params)).toBeNull();
+      await expect(service.handle("design.thumbnails.read", { ...read, frames: [{ file: frame.file }] }, { remote: true }))
+        .rejects.toMatchObject({ code: "REMOTE_RESTRICTED" });
+      await expect(service.handle("design.thumbnails.read", { ...read, frames: [{ file: frame.file }] })).resolves.toMatchObject({
+        pipeline: "thumbnails-1:batch-fixture", missing: [], deferred: [],
+        pictures: [{ file: frame.file, sourceVersion: frame.sourceVersion, pipeline: "thumbnails-1:batch-fixture" }],
+      });
+      expect(renderBatch).toHaveBeenCalledOnce();
     } finally {
       await capture.stop();
     }

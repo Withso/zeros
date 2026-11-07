@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { DESIGN_MAX_FRAMES_PER_PAGE } from "./design-pages";
 export const DESIGN_CAPTURE_HTML_BYTES = 16 * 1024 * 1024;
 export const DESIGN_CAPTURE_PNG_BYTES = 1024 * 1024;
 export const DESIGN_CAPTURE_TIMEOUT_MS = 20_000;
@@ -245,3 +246,38 @@ export const designThumbnailsReplySchema = z.object({
   .refine((reply) => reply.pictures.reduce((total, picture) => total + picture.data.length, 0) <= DESIGN_THUMBNAILS_REPLY_DATA_BYTES,
     "Thumbnail pictures exceed one reply.");
 export type DesignThumbnailsReply = z.infer<typeof designThumbnailsReplySchema>;
+
+/** Local engines that keep frame thumbnails across launches. */
+export const DESIGN_THUMBNAILS_STORE_CAPABILITY = "design.thumbnails.store.v1";
+/** design.thumbnails.read: each frame's newest stored picture at one size,
+ * theme and color scheme, of any generation: the caller compares
+ * `sourceVersion` and `pipeline` to tell a current picture from a cover. */
+export const designThumbnailsReadSchema = z.object({
+  workspaceId: z.string().min(1).max(128),
+  directoryId: z.string().min(1).max(128),
+  theme: z.string().regex(/^[a-z][a-z0-9_-]{0,63}$/).nullable(),
+  colorScheme: z.enum(["light", "dark"]),
+  maxDimension: z.number().int().min(DESIGN_CAPTURE_MIN_DIMENSION).max(DESIGN_BATCH_CAPTURE_MAX_DIMENSION),
+  frames: z.array(z.object({ file: z.string().min(1).max(255) }).strict()).min(1).max(DESIGN_MAX_FRAMES_PER_PAGE),
+}).strict()
+  .refine((input) => new Set(input.frames.map((frame) => frame.file)).size === input.frames.length, "Thumbnail frames must be distinct.");
+export type DesignThumbnailsRead = z.infer<typeof designThumbnailsReadSchema>;
+export const designThumbnailsReadReplySchema = z.object({
+  /** The pipeline pictures drawn now carry; null until the engine knows it. */
+  pipeline: z.string().min(1).max(256).nullable(),
+  pictures: z.array(thumbnailFrame.extend({
+    /** Null when the store no longer knows which pipeline drew it. */
+    pipeline: z.string().min(1).max(256).nullable(),
+    mimeType: z.literal("image/png"),
+    width: z.number().int().min(1).max(DESIGN_BATCH_CAPTURE_MAX_DIMENSION),
+    height: z.number().int().min(1).max(DESIGN_BATCH_CAPTURE_MAX_DIMENSION),
+    data: z.string().min(1).max(Math.ceil((DESIGN_CAPTURE_PNG_BYTES * 4) / 3) + 4),
+  }).strict()).max(DESIGN_MAX_FRAMES_PER_PAGE),
+  /** No stored picture at this size, theme and color scheme. */
+  missing: z.array(z.string().min(1).max(255)).max(DESIGN_MAX_FRAMES_PER_PAGE),
+  /** Not looked up, to keep the reply within one frame: ask again. */
+  deferred: z.array(z.string().min(1).max(255)).max(DESIGN_MAX_FRAMES_PER_PAGE),
+}).strict()
+  .refine((reply) => reply.pictures.reduce((total, picture) => total + picture.data.length, 0) <= DESIGN_THUMBNAILS_REPLY_DATA_BYTES,
+    "Thumbnail pictures exceed one reply.");
+export type DesignThumbnailsReadReply = z.infer<typeof designThumbnailsReadReplySchema>;
