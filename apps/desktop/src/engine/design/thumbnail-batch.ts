@@ -9,6 +9,7 @@ import {
   DESIGN_BATCH_CAPTURE_TIMEOUT_MS,
   DESIGN_CAPTURE_HTML_BYTES,
   DESIGN_CAPTURE_PNG_BYTES,
+  DESIGN_THUMBNAILS_REPLY_DATA_BYTES,
   designBatchCaptureReplySchema,
   designCaptureSheetUrl,
   designThumbnailsRenderSchema,
@@ -261,8 +262,14 @@ export async function renderDesignThumbnails(
   const capture = deps.capture ?? ((request, signal) => requestDesignBatchCapture(config!, request, signal));
   const { batches, stale, failed } = await composeDesignThumbnailBatches(root, input, deps.signal);
   const pictures: DesignThumbnailsReply["pictures"] = [];
+  const deferred: Frame[] = [];
+  let budget = DESIGN_THUMBNAILS_REPLY_DATA_BYTES;
   let renderer: string | null = null;
   for (const batch of batches) {
+    if (budget === 0) {
+      deferred.push(...batch.frames.values());
+      continue;
+    }
     const reply = await capture(batch.request, deps.signal);
     renderer ??= reply.renderer;
     const answered = new Map(reply.items.map((item) => [item.id, item]));
@@ -272,11 +279,17 @@ export async function renderDesignThumbnails(
       else if ("error" in item) failed.push({ file: frame.file, error: failure(new Error(item.error), root) });
       // The reply names one pipeline, so pictures from a host that restarted between batches can't join it.
       else if (reply.renderer !== renderer) failed.push({ file: frame.file, error: "The capture renderer changed; try again." });
-      else pictures.push({ ...frame, mimeType: "image/png", width: item.width, height: item.height, data: item.data });
+      else if (item.data.length > budget) {
+        deferred.push(frame);
+        budget = 0;
+      } else {
+        budget -= item.data.length;
+        pictures.push({ ...frame, mimeType: "image/png", width: item.width, height: item.height, data: item.data });
+      }
     }
   }
   return designThumbnailsReplySchema.parse({
     pipeline: renderer === null ? DESIGN_THUMBNAIL_PIPELINE : `${DESIGN_THUMBNAIL_PIPELINE}:${renderer}`,
-    pictures, stale, failed,
+    pictures, stale, failed, deferred,
   });
 }

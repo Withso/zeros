@@ -223,6 +223,9 @@ export const designThumbnailsRenderSchema = z.object({
   .refine((input) => new Set(input.frames.map((frame) => frame.file)).size === input.frames.length, "Thumbnail frames must be distinct.")
   .refine((input) => (input.jobId === undefined) === (input.deadline === undefined), "Thumbnail job and deadline must be supplied together.");
 export type DesignThumbnailsRender = z.infer<typeof designThumbnailsRenderSchema>;
+/** Base64 picture data in one reply. The whole reply must fit one bridge
+ * frame (MAX_BRIDGE_FRAME_BYTES, 16 MiB), which a receiver drops when larger. */
+export const DESIGN_THUMBNAILS_REPLY_DATA_BYTES = 12 * 1024 * 1024;
 export const designThumbnailsReplySchema = z.object({
   /** Identifies how the pictures were made (composer and capture renderer):
    * stored pictures from another pipeline are not reused. */
@@ -236,5 +239,9 @@ export const designThumbnailsReplySchema = z.object({
   stale: z.array(thumbnailFrame).max(DESIGN_BATCH_CAPTURE_MAX_ITEMS),
   failed: z.array(z.object({ file: z.string().min(1).max(255), error: z.string().min(1).max(500) }).strict())
     .max(DESIGN_BATCH_CAPTURE_MAX_ITEMS),
-}).strict();
+  /** Not pictured in this reply, to keep it within one frame: ask again. */
+  deferred: z.array(thumbnailFrame).max(DESIGN_BATCH_CAPTURE_MAX_ITEMS),
+}).strict()
+  .refine((reply) => reply.pictures.reduce((total, picture) => total + picture.data.length, 0) <= DESIGN_THUMBNAILS_REPLY_DATA_BYTES,
+    "Thumbnail pictures exceed one reply.");
 export type DesignThumbnailsReply = z.infer<typeof designThumbnailsReplySchema>;
