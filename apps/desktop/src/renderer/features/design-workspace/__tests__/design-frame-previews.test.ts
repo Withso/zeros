@@ -61,7 +61,7 @@ function harness(options: {
   pictureBytes?: number;
   rendersFar?: (owner: DesignPreviewOwner) => boolean;
   renderGapMs?: (owner: DesignPreviewOwner) => number;
-  concurrency?: (owner: DesignPreviewOwner) => number;
+  concurrency?: (owner: DesignPreviewOwner, level?: DesignPreviewLevel) => number;
   quietMs?: () => number;
   downscale?: (picture: Blob, width: number, height: number, level: DesignPreviewLevel) => Promise<Blob>;
 } = {}) {
