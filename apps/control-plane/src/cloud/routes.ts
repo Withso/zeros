@@ -189,6 +189,8 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
       repository: repository.repository, branch: input.branch ?? `${prefix}${slug(name)}-${id.slice(0, 8)}`,
       baseBranch, computerBuildId: computer.buildId,
       sourceRepositoryId: target.repositoryId,
+      // Every build repository the creator can read: a v3 image needs them all.
+      readableRepositoryIds: candidates.map(candidate => candidate.target.repositoryId),
       ...(runtimeCanary ? { runtimeCanary } : {}),
     };
     if (key) {

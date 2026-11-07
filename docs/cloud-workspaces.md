@@ -192,14 +192,23 @@ the build still work, and their selection becomes the configured recipe.
 
 A build always starts from Boat's stock image. It installs the pinned runtime
 and git-lfs (configured system-wide; a build that can't install it still goes
-live and says so in its log), then waits for Boat to finish capturing a clean
-snapshot **before** delivering
-any repository credential, cloning source or running recipe scripts. It then
-validates the repositories and setup scripts on the disposable builder,
-recording each branch and commit. Only a successful validation makes that
-snapshot active. The shared image caches the runtime and git-lfs; it contains no project
-checkouts, dependency trees or setup outputs. Deleting a checkout after setup
-would not establish this boundary, because setup can copy source elsewhere.
+live and says so in its log). The build's `source_policy_version` then decides
+when the snapshot is captured:
+
+- **v3**, the default since migration 0223: the build clones every recipe
+  repository and runs its setup, recording each branch and commit. It
+  restores any tracked file a setup rewrote, then captures the snapshot. The
+  image holds every checkout and its dependencies, so a new workspace starts
+  with its code on disk.
+- **v2**, for a build queued by an older replica: the build captures a clean
+  snapshot **before** any repository credential, clone or recipe script, then
+  validates the repositories on the disposable builder.
+
+Only a successful build becomes active. Deleting a checkout after setup is no
+confidentiality boundary, because setup can copy source elsewhere. A v3 image
+therefore starts only a workspace whose immutable `source_repositories` scope
+covers the whole recipe (`cloudV2WorkspaceImage`). The source authority
+re-verifies that scope on every create and wake.
 
 The builder is deleted afterward. An inactive snapshot is deleted once no
 creating workspace still needs it; its recipe remains in history. Activating
@@ -277,9 +286,20 @@ provider effects and committed runtime adoptions. Expiry or a confirmed release
 restores admission. This drain never stops a user workspace or changes its
 catalog state.
 
-New workspaces fork the clean snapshot of the build they pinned at creation.
-After checking the creator's repository access, the control plane clones only
-the selected repository into that VM. The worker switches to the workspace
+New workspaces start from the build they pinned at creation:
+
+- **Creator can read every repository of a v3 build:** the scope records them
+  all, and the VM starts from the build's snapshot. The other checkouts are
+  removed before the worker or any agent can reach them, so agents cannot
+  work on or push to them.
+- **Anyone else:** the scope is the selected repository only. The VM starts
+  from Boat's stock image with git-lfs, and the control plane clones only that
+  repository.
+- **v2 build:** the VM starts from its source-free snapshot and clones the
+  selected repository.
+
+Restores after a lost disk apply the same rule to the active build and record
+their choice, so a retried restore replays it without another lookup. The worker switches to the workspace
 branch, creating it from the selected base only when absent; it never resets
 an existing branch. Setup runs inside the individual workspace. Creation and
 replacement-VM restore therefore need GitHub and can take longer; ordinary
