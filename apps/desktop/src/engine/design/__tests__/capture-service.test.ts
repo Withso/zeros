@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from "vitest";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   startDesignCaptureService,
   type DesignCaptureService,
@@ -282,4 +282,66 @@ it("expires tombstones while refusing the delayed original POST", async () => {
     await result.arrayBuffer();
     expect(render).not.toHaveBeenCalled();
   } finally { clock.mockRestore(); }
+});
+
+function batchRequest(service: DesignCaptureService, body: unknown) {
+  return fetch(`${service.url}/batch`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${service.token}`, "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+const css = "body{color:red}";
+const cssHash = createHash("sha256").update(css).digest("hex");
+const batchInput = (items = [{ id: "a", html: `<html><head><link rel="stylesheet" href="zeros-capture://css/${cssHash}"></head><body>A</body></html>`,
+  viewport: { width: 1, height: 1 }, maxDimension: 64 }]) => ({ version: 1, revision: "batch-a", colorScheme: "light",
+  stylesheets: { [cssHash]: css }, items });
+
+it("renders a batch of frames in one admitted reservation and checks every picture it returns", async () => {
+  const renderBatch = vi.fn(async (input: { items: Array<{ id: string }> }) => ({ renderer: "fixture",
+    items: input.items.map(item => item.id === "wrong" ? { id: item.id, bytes: Buffer.from("not a png") }
+      : item.id === "failed" ? { id: item.id, error: "layout failed" } : { id: item.id, bytes: png }) }));
+  const service = await startDesignCaptureService(vi.fn(), new DesignCaptureAdmission(), renderBatch);
+  services.push(service);
+  expect((await fetch(`${service.url}/batch`, { method: "POST" })).status).toBe(401);
+  const base = batchInput().items[0]!;
+  const reply = await (await batchRequest(service, batchInput([base, { ...base, id: "wrong" }, { ...base, id: "failed" }]))).json();
+  expect(reply).toEqual({ version: 1, revision: "batch-a", renderer: "fixture", items: [
+    { id: "a", width: 1, height: 1, data: png.toString("base64") },
+    { id: "wrong", error: "Design batch capture is not a bounded PNG at the requested size." },
+    { id: "failed", error: "layout failed" },
+  ] });
+  expect(renderBatch).toHaveBeenCalledTimes(1);
+});
+
+it("refuses a batch whose sheets are not content-addressed or are missing, before rendering", async () => {
+  const renderBatch = vi.fn(async () => ({ renderer: "fixture", items: [] }));
+  const service = await startDesignCaptureService(vi.fn(), new DesignCaptureAdmission(), renderBatch);
+  services.push(service);
+  const forged = { ...batchInput(), stylesheets: { [cssHash]: "body{color:blue}" } };
+  expect((await batchRequest(service, forged)).status).toBe(422);
+  const missing = batchInput([{ ...batchInput().items[0]!, html: `<link rel="stylesheet" href="zeros-capture://css/${"0".repeat(64)}">` }]);
+  expect((await batchRequest(service, missing)).status).toBe(422);
+  expect((await batchRequest(service, { ...batchInput(), items: [] })).status).toBe(422);
+  // Detail pictures go a few per batch: 64 at 1,280 px would exceed the pixel budget.
+  const detail = batchInput(Array.from({ length: 11 }, (_, index) => ({ ...batchInput().items[0]!, id: `d${index}`, maxDimension: 1280 })));
+  expect((await batchRequest(service, detail)).status).toBe(422);
+  expect(renderBatch).not.toHaveBeenCalled();
+});
+
+it("gives an explicit capture the slot over a background batch and refuses a batch while it is held", async () => {
+  const admission = new DesignCaptureAdmission();
+  const renderBatch = vi.fn(async () => ({ renderer: "fixture", items: [] }));
+  const service = await startDesignCaptureService(vi.fn(), admission, renderBatch);
+  services.push(service);
+  const owner = {};
+  expect(admission.reserve(owner, "explicit-job", true)).toBe(true);
+  expect((await batchRequest(service, batchInput())).status).toBe(429);
+  admission.release(owner, "explicit-job");
+  expect((await batchRequest(service, batchInput())).status).toBe(200);
+  expect(renderBatch).toHaveBeenCalledTimes(1);
+  // A service without a batch host keeps today's single-capture surface only.
+  const single = await startDesignCaptureService(vi.fn());
+  services.push(single);
+  expect((await batchRequest(single, batchInput())).status).toBe(404);
 });

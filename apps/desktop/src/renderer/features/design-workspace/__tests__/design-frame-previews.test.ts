@@ -61,13 +61,14 @@ function harness(options: {
   pictureBytes?: number;
   rendersFar?: (owner: DesignPreviewOwner) => boolean;
   renderGapMs?: (owner: DesignPreviewOwner) => number;
-  concurrency?: (owner: DesignPreviewOwner) => number;
+  concurrency?: (owner: DesignPreviewOwner, level?: DesignPreviewLevel) => number;
   quietMs?: () => number;
   downscale?: (picture: Blob, width: number, height: number, level: DesignPreviewLevel) => Promise<Blob>;
 } = {}) {
   let now = 1_000;
   const timers: Array<{ at: number; callback: () => void; cancelled: boolean }> = [];
   const renders: Array<{ owner: DesignPreviewOwner; file: string; sourceVersion: string; theme: string | null; maxDimension: number }> = [];
+  const scheduled: Array<{ key: string; owner?: DesignPreviewOwner } | undefined> = [];
   const created: string[] = [];
   const revoked: string[] = [];
   let urls = 0;
@@ -80,7 +81,7 @@ function harness(options: {
       const data = options.pictureBytes ? Buffer.alloc(options.pictureBytes, 1).toString("base64") : PNG;
       return { sourceVersion: input.sourceVersion, theme: input.theme, mimeType: "image/png", width, height: Math.round(width * 0.75), data };
     },
-    schedule: (work) => work(),
+    schedule: (work, capture) => { scheduled.push(capture); return work(); },
     encode: options.encode ?? (async (png) => png),
     canProduce: options.canProduce ?? (() => true),
     createUrl: () => { const url = `blob:test/${++urls}`; created.push(url); return url; },
@@ -109,7 +110,7 @@ function harness(options: {
     }
     await settle();
   };
-  return { previews, renders, created, revoked, settle, advance, token: {} };
+  return { previews, renders, created, revoked, settle, advance, scheduled, token: {} };
 }
 
 function demand(owner: DesignPreviewOwner, files: Array<[string, number] | [string, number, "overview" | "detail", boolean?, boolean?]>, theme: string | null = "dark"): DesignPreviewDemand {
@@ -486,6 +487,49 @@ it("renders up to its concurrency at once, never the same picture twice, and one
     expect(renders.map((render) => render.file).sort()).toEqual(["f0.html", "f1.html", "f2.html", "f3.html", "f4.html", "f5.html"]);
     expect(previews.usage().producing).toBe(0);
   }
+});
+
+it("renders up to 128 pictures at once for a batching engine and names their owner to the scheduler", async () => {
+  const waiting: Array<() => void> = [];
+  const h = harness({
+    concurrency: () => 200,
+    render: (_owner, input) => new Promise(resolve => waiting.push(() => resolve({ sourceVersion: input.sourceVersion, theme: input.theme,
+      mimeType: "image/png", width: 128, height: 80, data: PNG }))),
+  });
+  h.previews.setDemand(h.token, demand(local, Array.from({ length: 140 }, (_, index) => [`f${index}.html`, 1] as [string, number])));
+  await h.settle();
+  // Bounded at 128 (two engine batches) even when an owner asks for more.
+  expect(h.renders).toHaveLength(128);
+  expect(h.scheduled.slice(0, 128).every(capture => capture?.owner === local)).toBe(true);
+  for (const finish of waiting.splice(0)) finish();
+  await h.settle();
+  expect(h.renders).toHaveLength(140);
+});
+
+it("bounds large pictures by their own level limit while small ones fill the batch", async () => {
+  // Zooming in asks for many overview/detail pictures at once; each is a large
+  // render, decode and encode, so they stay few in flight.
+  const waiting: Array<() => void> = [];
+  const h = harness({
+    concurrency: (_owner, level) => level === "detail" ? 2 : 64,
+    render: (_owner, input) => new Promise(resolve => waiting.push(() => resolve({ sourceVersion: input.sourceVersion, theme: input.theme,
+      mimeType: "image/png", width: 128, height: 80, data: PNG }))),
+  });
+  h.previews.setDemand(h.token, demand(local, [
+    ...Array.from({ length: 6 }, (_, index) => [`d${index}.html`, 1, "detail"] as [string, number, "detail"]),
+    ...Array.from({ length: 10 }, (_, index) => [`t${index}.html`, 1] as [string, number]),
+  ]));
+  await h.settle();
+  const levels = (renders: typeof h.renders) => renders.map(render => render.maxDimension === 1280 ? "detail" : "small");
+  expect(levels(h.renders).filter(level => level === "detail")).toHaveLength(2);
+  expect(levels(h.renders).filter(level => level === "small")).toHaveLength(10);
+  for (const finish of waiting.splice(0)) finish();
+  await h.settle();
+  for (const finish of waiting.splice(0)) finish();
+  await h.settle();
+  for (const finish of waiting.splice(0)) finish();
+  await h.settle();
+  expect(levels(h.renders).filter(level => level === "detail")).toHaveLength(6);
 });
 
 it("holds the canvas-wide picture notice while a camera gesture is live", async () => {

@@ -1,8 +1,9 @@
-import { BrowserWindow, session } from "electron";
+import { BrowserWindow, protocol, session } from "electron";
 import { randomUUID } from "node:crypto";
 import { rendererProcessOwners } from "./renderer-process-owners";
 import { electronDesignCaptureAdmission } from "./design-capture-admission";
-import { DESIGN_STATIC_RENDER_CSS, DESIGN_STATIC_RENDER_SCRIPT } from "@zeros/protocol/design-capture";
+import { DESIGN_CAPTURE_SHEET_SCHEME, DESIGN_STATIC_RENDER_CSS, DESIGN_STATIC_RENDER_SCRIPT } from "@zeros/protocol/design-capture";
+import { createElectronDesignBatchCapture, DESIGN_CAPTURE_RENDERER } from "./design-capture-batch";
 import { prepareDesignCaptureViewport, captureScaledDesignPng } from "../src/engine/design/capture-viewport";
 import {
   startDesignCaptureService,
@@ -16,7 +17,7 @@ import {
 /** An on-demand invisible authored renderer. This partition is never shared
  * with browser-use sessions, the app renderer, or user cookies. Each capture
  * owns and destroys its window; a closed Design canvas is not required. */
-export async function startElectronDesignCapture(): Promise<DesignCaptureService> {
+export async function startElectronDesignCapture(): Promise<DesignCaptureService & { renderer: string }> {
   const partition = session.fromPartition(
     `zeros-design-capture-${randomUUID()}`,
     { cache: false },
@@ -26,11 +27,15 @@ export async function startElectronDesignCapture(): Promise<DesignCaptureService
   );
   partition.setPermissionCheckHandler(() => false);
   partition.on("will-download", (event) => event.preventDefault());
+  // Batch sheets and their content-addressed stylesheets are served by this
+  // partition's own handler from the batch being rendered; nothing else loads.
   partition.webRequest.onBeforeRequest((details, callback) => {
     callback({
-      cancel: !details.url.startsWith("data:") && details.url !== "about:blank",
+      cancel: !details.url.startsWith("data:") && details.url !== "about:blank" &&
+        !details.url.startsWith(`${DESIGN_CAPTURE_SHEET_SCHEME}://`),
     });
   });
+  const batch = createElectronDesignBatchCapture(partition);
   const service = await startDesignCaptureService(async (input, signal) => {
     signal.throwIfAborted();
     const window = new BrowserWindow({
@@ -121,7 +126,7 @@ export async function startElectronDesignCapture(): Promise<DesignCaptureService
       if (input.layoutViewport) {
         const bytes = await captureScaledDesignPng(input, params => whileAlive(window.webContents.debugger.sendCommand("Page.captureScreenshot", params)));
         signal.throwIfAborted();
-        return { bytes, renderer: `electron-${process.versions.electron}/chromium-${process.versions.chrome}` };
+        return { bytes, renderer: DESIGN_CAPTURE_RENDERER };
       }
       const captured = await whileAlive(window.webContents.capturePage(
         { x: 0, y: 0, width: input.width, height: input.height },
@@ -139,7 +144,7 @@ export async function startElectronDesignCapture(): Promise<DesignCaptureService
             });
       return {
         bytes: image.toPNG(),
-        renderer: `electron-${process.versions.electron}/chromium-${process.versions.chrome}`,
+        renderer: DESIGN_CAPTURE_RENDERER,
       };
     } finally {
       signal.removeEventListener("abort", destroy);
@@ -147,6 +152,15 @@ export async function startElectronDesignCapture(): Promise<DesignCaptureService
       await retired;
       await partition.clearStorageData();
     }
-  }, electronDesignCaptureAdmission);
-  return service;
+  }, electronDesignCaptureAdmission, batch);
+  return { ...service, renderer: DESIGN_CAPTURE_RENDERER, async stop() { await service.stop(); batch.retire(); } };
+}
+
+/** The batch capture scheme must be standard and secure before app ready, so
+ * sheet documents have an origin and frame policies can name the scheme. */
+export function registerDesignCaptureSheetPrivileges(): void {
+  protocol.registerSchemesAsPrivileged([{
+    scheme: DESIGN_CAPTURE_SHEET_SCHEME,
+    privileges: { standard: true, secure: true, supportFetchAPI: false, stream: false, corsEnabled: false },
+  }]);
 }

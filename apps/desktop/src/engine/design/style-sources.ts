@@ -49,6 +49,7 @@ import {
   designTailwindCandidates,
   DESIGN_TAILWIND_PLUGIN_VERSIONS,
   DESIGN_TAILWIND_VERSION,
+  MAX_TAILWIND_CANDIDATES,
   type DesignTailwindImportProblem,
   type DesignTailwindSkippedImport,
 } from "./style-tailwind";
@@ -1503,6 +1504,10 @@ export interface FrameStyleSourceOptions {
    * their revision and size with empty CSS. A Tailwind source is not
    * compiled for identity, so its size is unknown (0). */
   build?: boolean;
+  /** False to build every source but Tailwind, which then returns its
+   * revision and candidates with empty CSS: a capture batch compiles it once
+   * for all its frames. */
+  compileTailwind?: boolean;
 }
 
 export interface FrameStyleSource {
@@ -1513,6 +1518,8 @@ export interface FrameStyleSource {
   bytes?: number;
   /** Identity only: image bytes that CSS carries, when every image is known. */
   imageBytes?: number;
+  /** Built Tailwind only: the candidates its utilities were compiled for. */
+  tailwindCandidates?: readonly string[];
 }
 
 /** Identity sizes by frame signature and source revisions, so snapshots do
@@ -1559,7 +1566,7 @@ export async function frameStyleSources(
       continue;
     }
     if (declaration.kind === "tailwind" && !designStyleSourcePathError(declaration.path)) {
-      const frame = await tailwindFrameSource(workspacePath, declaration, candidates, build);
+      const frame = await tailwindFrameSource(workspacePath, declaration, candidates, build && options.compileTailwind !== false);
       if (frame) {
         fontImports.push(...frame.fontImports);
         entries.push({ id, revision: frame.revision, index: frame.index, css: frame.index?.css ?? null, tailwind: true });
@@ -1610,7 +1617,7 @@ export async function frameStyleSources(
   return entries.map((entry, at) => {
     const css = pruned[at]!;
     if (entry.tailwind) assertTailwindFrameBudget(css);
-    return { id: entry.id, css, revision: revisions[at]! };
+    return { id: entry.id, css, revision: revisions[at]!, ...(entry.tailwind ? { tailwindCandidates: candidates } : {}) };
   });
 }
 
@@ -1669,4 +1676,28 @@ export async function designFrameClassFonts(
     ...[...new Set(fontImports)].map((url) => googleFontsCss(url, workspacePath)),
   ]);
   return { source, complete: generation === designFontsGeneration() && states.every((state) => state.state === "ready") };
+}
+
+/** One Tailwind source compiled for many frames' candidates at once, for a
+ * capture batch whose frames all link it. Null when it cannot be: the source
+ * is not Tailwind, or the union is past a frame's candidate or size bound. */
+export async function designTailwindBatchCss(
+  workspacePath: string,
+  canvas: CanvasDocument,
+  sourceId: string,
+  candidates: Iterable<string>,
+): Promise<string | null> {
+  const declaration = readDesignStyleSourceCatalog(canvas).declarations.find((entry) => entry.id === sourceId);
+  if (!declaration || declaration.kind !== "tailwind" || designStyleSourcePathError(declaration.path)) return null;
+  const union = [...new Set(candidates)].sort();
+  if (union.length > MAX_TAILWIND_CANDIDATES) return null;
+  const frame = await tailwindFrameSource(workspacePath, declaration, union, true);
+  const css = frame?.index?.css;
+  if (css === undefined) return null;
+  try {
+    assertTailwindFrameBudget(css);
+  } catch {
+    return null;
+  }
+  return css.replace(/<\/style/gi, "<\\/style");
 }

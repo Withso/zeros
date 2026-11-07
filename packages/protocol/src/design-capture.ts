@@ -1,4 +1,6 @@
 import { z } from "zod";
+import { designPreparedFrameSchema } from "./design-catalog";
+import { DESIGN_MAX_FRAMES_PER_PAGE } from "./design-pages";
 export const DESIGN_CAPTURE_HTML_BYTES = 16 * 1024 * 1024;
 export const DESIGN_CAPTURE_PNG_BYTES = 1024 * 1024;
 export const DESIGN_CAPTURE_TIMEOUT_MS = 20_000;
@@ -141,3 +143,152 @@ export const designCaptureReplySchema = z
   })
   .strict();
 export type DesignCaptureReply = z.infer<typeof designCaptureReplySchema>;
+
+/** Batched thumbnails: many frames are laid out in one capture document per
+ * sheet, and stylesheets shared by those frames are parsed once per capture
+ * process. Each item's style blocks are replaced, at their own positions, by
+ * links to content-addressed sheets served only from this batch. */
+export const DESIGN_CAPTURE_SHEET_SCHEME = "zeros-capture";
+export const DESIGN_BATCH_CAPTURE_MAX_ITEMS = 64;
+export const DESIGN_BATCH_CAPTURE_MAX_DIMENSION = 1280;
+export const DESIGN_BATCH_CAPTURE_STYLESHEET_BYTES = 16 * 1024 * 1024;
+export const DESIGN_BATCH_CAPTURE_HTML_BYTES = 32 * 1024 * 1024;
+export const DESIGN_BATCH_CAPTURE_TIMEOUT_MS = 60_000;
+/** A batch's pictures together stay within this many pixels (64 thumbnails
+ * fit easily; detail pictures go a few at a time), bounding the reply. */
+export const DESIGN_BATCH_CAPTURE_PIXELS = 16 * 1024 * 1024;
+export const designCaptureSheetUrl = (hash: string) => `${DESIGN_CAPTURE_SHEET_SCHEME}://css/${hash}`;
+const sheetHash = z.string().regex(/^[a-f0-9]{64}$/);
+export const designBatchCaptureRequestSchema = z
+  .object({
+    version: z.literal(1),
+    revision: z.string().min(1).max(128),
+    colorScheme: z.enum(["light", "dark"]).default("light"),
+    stylesheets: z.record(sheetHash, z.string().max(DESIGN_BATCH_CAPTURE_STYLESHEET_BYTES)),
+    items: z.array(z.object({
+      id: z.string().regex(/^[A-Za-z0-9._:-]{1,128}$/),
+      html: z.string().min(1).max(DESIGN_CAPTURE_HTML_BYTES),
+      viewport: z.object({
+        width: z.number().int().min(1).max(16_384),
+        height: z.number().int().min(1).max(16_384),
+      }).strict(),
+      maxDimension: z.number().int().min(DESIGN_CAPTURE_MIN_DIMENSION).max(DESIGN_BATCH_CAPTURE_MAX_DIMENSION),
+    }).strict()).min(1).max(DESIGN_BATCH_CAPTURE_MAX_ITEMS),
+  })
+  .strict()
+  .refine(input => new Set(input.items.map(item => item.id)).size === input.items.length,
+    { message: "Batch capture item ids must be unique." })
+  .refine(input => input.items.reduce((sum, item) => sum + item.maxDimension * item.maxDimension, 0) <= DESIGN_BATCH_CAPTURE_PIXELS,
+    { message: "Batch capture exceeds its pixel budget." })
+  .refine(input => Object.values(input.stylesheets).reduce((sum, css) => sum + css.length, 0) <= DESIGN_BATCH_CAPTURE_STYLESHEET_BYTES &&
+    input.items.reduce((sum, item) => sum + item.html.length, 0) <= DESIGN_BATCH_CAPTURE_HTML_BYTES,
+    { message: "Batch capture exceeds its byte budget." });
+export type DesignBatchCaptureRequest = z.infer<typeof designBatchCaptureRequestSchema>;
+export const designBatchCaptureReplySchema = z
+  .object({
+    version: z.literal(1),
+    revision: z.string().min(1).max(128),
+    renderer: z.string().min(1).max(128),
+    items: z.array(z.union([
+      z.object({
+        id: z.string().min(1).max(128),
+        width: z.number().int().min(1).max(DESIGN_BATCH_CAPTURE_MAX_DIMENSION),
+        height: z.number().int().min(1).max(DESIGN_BATCH_CAPTURE_MAX_DIMENSION),
+        data: z.string().max(Math.ceil((DESIGN_CAPTURE_PNG_BYTES * 4) / 3) + 4),
+      }).strict(),
+      z.object({ id: z.string().min(1).max(128), error: z.string().min(1).max(500) }).strict(),
+    ])).max(DESIGN_BATCH_CAPTURE_MAX_ITEMS),
+  })
+  .strict();
+export type DesignBatchCaptureReply = z.infer<typeof designBatchCaptureReplySchema>;
+
+/** Local engines that compose many frames' thumbnails into capture batches. */
+export const DESIGN_THUMBNAILS_CAPABILITY = "design.thumbnails.v1";
+const thumbnailFrame = z.object({
+  file: z.string().min(1).max(255),
+  sourceVersion: z.string().regex(/^[a-f0-9]{24}$/),
+}).strict();
+/** Engines that prepare a frame sent without its version while picturing it. */
+export const DESIGN_THUMBNAILS_PREPARE_CAPABILITY = "design.thumbnails.prepare.v1";
+/** design.thumbnails.render: pictures of saved frames at one size, theme and
+ * color scheme. A frame whose source moved on comes back as stale, with its
+ * current version, rather than as a picture of other content. A frame sent
+ * without a version (design.thumbnails.prepare.v1) is pictured as it is now,
+ * and its design.frames.prepare record comes back too while the catalog is
+ * still at `catalogRevision`. */
+export const designThumbnailsRenderSchema = z.object({
+  workspaceId: z.string().min(1).max(128),
+  directoryId: z.string().min(1).max(128),
+  theme: z.string().regex(/^[a-z][a-z0-9_-]{0,63}$/).nullable(),
+  colorScheme: z.enum(["light", "dark"]),
+  maxDimension: z.number().int().min(DESIGN_CAPTURE_MIN_DIMENSION).max(DESIGN_BATCH_CAPTURE_MAX_DIMENSION),
+  frames: z.array(thumbnailFrame.partial({ sourceVersion: true })).min(1).max(DESIGN_BATCH_CAPTURE_MAX_ITEMS),
+  catalogRevision: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+  /** As for previews: cancelled through design.preview.cancel. */
+  jobId: previewJobId.optional(),
+  deadline: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
+}).strict()
+  .refine((input) => new Set(input.frames.map((frame) => frame.file)).size === input.frames.length, "Thumbnail frames must be distinct.")
+  .refine((input) => (input.jobId === undefined) === (input.deadline === undefined), "Thumbnail job and deadline must be supplied together.")
+  .refine((input) => input.catalogRevision !== undefined || input.frames.every((frame) => frame.sourceVersion !== undefined),
+    "A thumbnail frame without a version needs the catalog revision.");
+export type DesignThumbnailsRender = z.infer<typeof designThumbnailsRenderSchema>;
+/** Base64 picture data in one reply. The whole reply must fit one bridge
+ * frame (MAX_BRIDGE_FRAME_BYTES, 16 MiB), which a receiver drops when larger. */
+export const DESIGN_THUMBNAILS_REPLY_DATA_BYTES = 12 * 1024 * 1024;
+export const designThumbnailsReplySchema = z.object({
+  /** Identifies how the pictures were made (composer and capture renderer):
+   * stored pictures from another pipeline are not reused. */
+  pipeline: z.string().min(1).max(256),
+  pictures: z.array(thumbnailFrame.extend({
+    mimeType: z.literal("image/png"),
+    width: z.number().int().min(1).max(DESIGN_BATCH_CAPTURE_MAX_DIMENSION),
+    height: z.number().int().min(1).max(DESIGN_BATCH_CAPTURE_MAX_DIMENSION),
+    data: z.string().min(1).max(Math.ceil((DESIGN_CAPTURE_PNG_BYTES * 4) / 3) + 4),
+  }).strict()).max(DESIGN_BATCH_CAPTURE_MAX_ITEMS),
+  stale: z.array(thumbnailFrame).max(DESIGN_BATCH_CAPTURE_MAX_ITEMS),
+  failed: z.array(z.object({ file: z.string().min(1).max(255), error: z.string().min(1).max(500) }).strict())
+    .max(DESIGN_BATCH_CAPTURE_MAX_ITEMS),
+  /** Not pictured in this reply, to keep it within one frame: ask again. */
+  deferred: z.array(thumbnailFrame).max(DESIGN_BATCH_CAPTURE_MAX_ITEMS),
+  /** design.frames.prepare records of frames sent without a version. */
+  prepared: z.array(designPreparedFrameSchema).max(DESIGN_BATCH_CAPTURE_MAX_ITEMS).optional(),
+}).strict()
+  .refine((reply) => reply.pictures.reduce((total, picture) => total + picture.data.length, 0) <= DESIGN_THUMBNAILS_REPLY_DATA_BYTES,
+    "Thumbnail pictures exceed one reply.");
+export type DesignThumbnailsReply = z.infer<typeof designThumbnailsReplySchema>;
+
+/** Local engines that keep frame thumbnails across launches. */
+export const DESIGN_THUMBNAILS_STORE_CAPABILITY = "design.thumbnails.store.v1";
+/** design.thumbnails.read: each frame's newest stored picture at one size,
+ * theme and color scheme, of any generation: the caller compares
+ * `sourceVersion` and `pipeline` to tell a current picture from a cover. */
+export const designThumbnailsReadSchema = z.object({
+  workspaceId: z.string().min(1).max(128),
+  directoryId: z.string().min(1).max(128),
+  theme: z.string().regex(/^[a-z][a-z0-9_-]{0,63}$/).nullable(),
+  colorScheme: z.enum(["light", "dark"]),
+  maxDimension: z.number().int().min(DESIGN_CAPTURE_MIN_DIMENSION).max(DESIGN_BATCH_CAPTURE_MAX_DIMENSION),
+  frames: z.array(z.object({ file: z.string().min(1).max(255) }).strict()).min(1).max(DESIGN_MAX_FRAMES_PER_PAGE),
+}).strict()
+  .refine((input) => new Set(input.frames.map((frame) => frame.file)).size === input.frames.length, "Thumbnail frames must be distinct.");
+export type DesignThumbnailsRead = z.infer<typeof designThumbnailsReadSchema>;
+export const designThumbnailsReadReplySchema = z.object({
+  /** The pipeline pictures drawn now carry; null until the engine knows it. */
+  pipeline: z.string().min(1).max(256).nullable(),
+  pictures: z.array(thumbnailFrame.extend({
+    /** Null when the store no longer knows which pipeline drew it. */
+    pipeline: z.string().min(1).max(256).nullable(),
+    mimeType: z.literal("image/png"),
+    width: z.number().int().min(1).max(DESIGN_BATCH_CAPTURE_MAX_DIMENSION),
+    height: z.number().int().min(1).max(DESIGN_BATCH_CAPTURE_MAX_DIMENSION),
+    data: z.string().min(1).max(Math.ceil((DESIGN_CAPTURE_PNG_BYTES * 4) / 3) + 4),
+  }).strict()).max(DESIGN_MAX_FRAMES_PER_PAGE),
+  /** No stored picture at this size, theme and color scheme. */
+  missing: z.array(z.string().min(1).max(255)).max(DESIGN_MAX_FRAMES_PER_PAGE),
+  /** Not looked up, to keep the reply within one frame: ask again. */
+  deferred: z.array(z.string().min(1).max(255)).max(DESIGN_MAX_FRAMES_PER_PAGE),
+}).strict()
+  .refine((reply) => reply.pictures.reduce((total, picture) => total + picture.data.length, 0) <= DESIGN_THUMBNAILS_REPLY_DATA_BYTES,
+    "Thumbnail pictures exceed one reply.");
+export type DesignThumbnailsReadReply = z.infer<typeof designThumbnailsReadReplySchema>;

@@ -163,13 +163,14 @@ export interface DesignFramePreviewDependencies {
     },
     signal?: AbortSignal,
   ): Promise<DesignPreviewReply>;
-  /** Pictures rendered at once for this owner (default one). A renderer-side
-   * vector producer runs several; the native capture host stays serial. */
-  concurrency?(owner: DesignPreviewOwner): number;
+  /** Pictures rendered at once for this owner (default one), and with a
+   * level, at once of that level. A renderer-side vector producer runs
+   * several; the native capture host stays serial. */
+  concurrency?(owner: DesignPreviewOwner, level?: DesignPreviewLevel): number;
   /** Remaining camera-gesture quiet time; canvas-wide notices wait for it. */
   quietMs?(): number;
   /** The canvas background lane: one task at a time, after input settles. */
-  schedule<T>(work: () => Promise<T>, capture?: { key: string; signal: AbortSignal; priority: "visible" | "detail" | "nearby" }): Promise<T | null>;
+  schedule<T>(work: () => Promise<T>, capture?: { key: string; signal: AbortSignal; priority: "visible" | "detail" | "nearby"; owner?: DesignPreviewOwner }): Promise<T | null>;
   /** Re-encode a PNG picture smaller where the platform can. */
   encode(png: Blob, level: DesignPreviewLevel): Promise<Blob>;
   /** Scales a larger picture down to an exact size; a smaller level of an
@@ -209,6 +210,8 @@ interface Picture {
 
 /** Encoded pictures remain cacheable independently of visible pixel leases. */
 const POOL_MAX_ENTRIES = 10_000;
+/** At most this many pictures render at once (two batches of a batching engine). */
+const DESIGN_PREVIEW_MAX_PARALLEL = 128;
 
 interface Attempt {
   failures: number;
@@ -860,8 +863,22 @@ export class DesignFramePreviews {
     if (!demand) return null;
     let waitUntil = Infinity;
     const far = this.deps.rendersFar?.(demand.owner) ?? true;
+    // Each level has its own limit: large pictures cost far more to render,
+    // decode and encode than the small ones a batch fills.
+    const running = new Map<DesignPreviewLevel, number>();
+    for (const production of this.productions) running.set(production.item.level, (running.get(production.item.level) ?? 0) + 1);
+    const full = new Map<DesignPreviewLevel, boolean>();
+    const levelFull = (level: DesignPreviewLevel) => {
+      let value = full.get(level);
+      if (value === undefined) {
+        value = (running.get(level) ?? 0) >= Math.max(1, Math.floor(this.deps.concurrency?.(demand.owner, level) ?? 1));
+        full.set(level, value);
+      }
+      return value;
+    };
     for (const item of demand.items) {
       if (item.near === false && !far) continue;
+      if (levelFull(item.level)) continue;
       const key = designPreviewKey({ owner: demand.owner, theme: demand.theme, ...item });
       if (this.pictures.has(key) || this.reading.has(key) || this.stale.has(key) || this.made.has(key) ||
         this.producingKeys.has(key)) continue;
@@ -887,7 +904,7 @@ export class DesignFramePreviews {
 
   private pump(): void {
     if (!this.demand) return;
-    const limit = Math.max(1, Math.min(8, Math.floor(this.deps.concurrency?.(this.demand.owner) ?? 1)));
+    const limit = Math.max(1, Math.min(DESIGN_PREVIEW_MAX_PARALLEL, Math.floor(this.deps.concurrency?.(this.demand.owner) ?? 1)));
     if (this.productions.size >= limit) return;
     if (this.pumpTimer !== null) {
       this.deps.clearTimer(this.pumpTimer);
@@ -922,7 +939,7 @@ export class DesignFramePreviews {
     this.producingKeys.add(key);
     const priority = item.near === false ? "nearby" : item.level === "detail" ? "detail" : "visible";
     void this.deps.schedule(() => this.produce(demand, item, key, epoch, production.controller.signal, priority), {
-      key, signal: production.controller.signal, priority,
+      key, signal: production.controller.signal, priority, owner: demand.owner,
     })
       .catch(() => {})
       .finally(() => {

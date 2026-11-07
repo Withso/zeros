@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from "vitest";
-import { DESIGN_CAPTURE_TIMEOUT_MS } from "@zeros/protocol/design-capture";
+import { DESIGN_CAPTURE_TIMEOUT_MS, DESIGN_PREVIEW_JOB_TIMEOUT_MS } from "@zeros/protocol/design-capture";
 import { bridgeDesignPreview, rememberDesignDirectoryIdentity } from "../design-bridge";
 import { designCaptureScheduler } from "../design-capture-scheduler";
 import type { RuntimeClient } from "../ws-client";
@@ -119,4 +119,44 @@ it("quarantines admission when the original connection loses terminal proof", as
   expect(next).not.toHaveBeenCalled();
   expect(scheduler.usage()).toMatchObject({ unconfirmed: 1, queued: 0, reservedBytes: 256 * 1024 * 1024 });
   await expect(scheduler.schedule("later", "explicit", next)).rejects.toThrow(/cleanup/i);
+});
+
+it("renders a batch of thumbnails as one cancellable engine job and validates its reply", async () => {
+  const { bridgeDesignThumbnailsRender } = await import("../design-bridge");
+  const seen: Array<{ op: string; params: Record<string, unknown> }> = [];
+  let finish!: (value: unknown) => void;
+  const reply = new Promise((resolve) => { finish = resolve; });
+  const bridge = {
+    supportsEngineCapability: () => true,
+    request: async (message: { op: string; params: Record<string, unknown> }) => {
+      seen.push(message);
+      return { type: "WORKSPACE_RESPONSE", result: message.op === "design.thumbnails.render" ? await reply : { settled: true } };
+    },
+  } as unknown as RuntimeClient;
+  const input = { directoryId: "design_directory", theme: "dark", colorScheme: "light" as const, maxDimension: 128,
+    frames: [{ file: "a.html", sourceVersion: "a".repeat(24) }, { file: "b.html", sourceVersion: "b".repeat(24) }] };
+  const done = bridgeDesignThumbnailsRender(bridge, "workspace", input);
+  await vi.waitFor(() => expect(seen).toHaveLength(1));
+  expect(seen[0]).toMatchObject({ op: "design.thumbnails.render", params: { workspaceId: "workspace", directoryId: "design_directory",
+    colorScheme: "light", maxDimension: 128, frames: input.frames } });
+  expect(typeof seen[0]!.params.jobId).toBe("string");
+  // The engine refuses a job deadline beyond its preview job window.
+  expect(seen[0]!.params.deadline as number).toBeLessThanOrEqual(Date.now() + DESIGN_PREVIEW_JOB_TIMEOUT_MS + 1_000);
+  finish({ pipeline: "batch-v1", pictures: [{ file: "a.html", sourceVersion: "a".repeat(24), mimeType: "image/png", width: 128, height: 80, data: "iVBORw0KGgo=" }],
+    stale: [{ file: "b.html", sourceVersion: "c".repeat(24) }], failed: [], deferred: [{ file: "c.html", sourceVersion: "d".repeat(24) }] });
+  await expect(done).resolves.toMatchObject({ pictures: [{ file: "a.html" }], stale: [{ file: "b.html" }], deferred: [{ file: "c.html" }] });
+  // A malformed engine answer never reaches the picture store.
+  await expect(bridgeDesignThumbnailsRender(bridgeReturning({ pictures: "nope" }), "workspace", input)).rejects.toThrow("malformed");
+  // Cancelling asks the engine to stop the same job.
+  const controller = new AbortController();
+  seen.length = 0;
+  const pending = bridgeDesignThumbnailsRender({ ...bridge, request: async (message: { op: string; params: Record<string, unknown> }) => {
+    seen.push(message);
+    return message.op === "design.preview.cancel" ? { type: "WORKSPACE_RESPONSE", result: { settled: true } } : new Promise(() => {});
+  } } as unknown as RuntimeClient, "workspace", input, { signal: controller.signal });
+  await vi.waitFor(() => expect(seen).toHaveLength(1));
+  controller.abort(new Error("retired"));
+  await vi.waitFor(() => expect(seen).toHaveLength(2));
+  expect(seen[1]).toMatchObject({ op: "design.preview.cancel", params: { jobId: seen[0]!.params.jobId, directoryId: "design_directory" } });
+  void pending.catch(() => {});
 });

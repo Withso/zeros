@@ -17,7 +17,7 @@ import { hydrateShellPath } from "./shell-path";
 import { pathToFileURL } from "node:url";
 import { appDocumentPolicy } from "./app-document-security";
 import { rendererProcessOwners } from "./renderer-process-owners";
-import { startElectronDesignCapture } from "./design-capture";
+import { registerDesignCaptureSheetPrivileges, startElectronDesignCapture } from "./design-capture";
 import { setDesignCaptureEnvironment } from "./sidecar";
 import type { DesignCaptureService } from "../src/engine/design/capture-service";
 
@@ -194,6 +194,7 @@ let designCaptureService: DesignCaptureService | null = null;
 // itself is installed after ready, before the first renderer window loads.
 registerDesignProtocolPrivileges();
 registerFileMediaProtocolPrivileges();
+registerDesignCaptureSheetPrivileges();
 
 // Release channel baked at electron:compile time by apps/desktop/electron/tsup.config.ts's
 // `define`. "" in a normal dev compile; "beta" when the beta release workflow
@@ -1135,7 +1136,7 @@ app.whenReady().then(async () => {
   let browserRendererEpoch = 0;
   const designCaptureReady = startElectronDesignCapture().then(service => {
     designCaptureService = service;
-    setDesignCaptureEnvironment({ url: service.url, token: service.token });
+    setDesignCaptureEnvironment({ url: service.url, token: service.token, renderer: service.renderer });
   }).catch(() => { console.warn("[Zeros] Design capture service unavailable."); });
   // The bar that names the agent controlling a Browser tab page and lets the
   // user stop it. Its page is a second entry of the renderer build.

@@ -1,6 +1,10 @@
 import type { DesignCatalogAdmission } from "./catalog";
 import { DesignCaptureCleanupUnconfirmedError, DESIGN_PREVIEW_JOB_TIMEOUT_MS } from "@zeros/protocol/design-capture";
 
+/** A lane runs one job at a time, except thumbnail batches: two, so one
+ * composes while the other captures. Lanes share one record table. */
+const LANE_CONCURRENCY = { preview: 1, thumbnails: 2 } as const;
+export type DesignPreviewJobLane = keyof typeof LANE_CONCURRENCY;
 /** How far ahead a cancellation still fences a delayed request. Beyond it, a
  * job no request could have started is settled without a record. */
 const CANCEL_FENCE_MS = 10 * 60_000;
@@ -13,6 +17,7 @@ export interface DesignPreviewJobOwner {
 }
 interface Job {
   key: string;
+  lane: DesignPreviewJobLane;
   owner: DesignPreviewJobOwner;
   admission: DesignCatalogAdmission;
   controller: AbortController;
@@ -30,11 +35,11 @@ interface Job {
 export class DesignPreviewJobs {
   private jobs = new Map<string, Job>();
   private pending: Job[] = [];
-  private running: Job | null = null;
+  private running = new Set<Job>();
   private stopped = false;
   private unconfirmed = false;
 
-  usage() { return { running: this.running ? 1 : 0, queued: this.pending.length, records: this.jobs.size }; }
+  usage() { return { running: this.running.size, queued: this.pending.length, records: this.jobs.size }; }
 
   private key(owner: DesignPreviewJobOwner, admission: DesignCatalogAdmission) {
     return JSON.stringify([admission.connectionId, admission.authority, owner.workspaceId, owner.directoryId, owner.jobId]);
@@ -55,13 +60,14 @@ export class DesignPreviewJobs {
     if (this.jobs.size >= 128) throw new Error("Design preview capacity reached.");
     let finish!: () => void;
     const settled = new Promise<void>((resolve) => { finish = resolve; });
-    const job: Job = { key: this.key(owner, admission), owner: { ...owner }, admission,
+    const job: Job = { key: this.key(owner, admission), lane: "preview", owner: { ...owner }, admission,
       controller: new AbortController(), settled, finish, done: false };
     this.jobs.set(job.key, job);
     return job;
   }
 
-  run<T>(owner: DesignPreviewJobOwner, admission: DesignCatalogAdmission, work: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  run<T>(owner: DesignPreviewJobOwner, admission: DesignCatalogAdmission, work: (signal: AbortSignal) => Promise<T>,
+    lane: DesignPreviewJobLane = "preview"): Promise<T> {
     if (this.unconfirmed) return Promise.reject(new DesignCaptureCleanupUnconfirmedError());
     if (!Number.isSafeInteger(owner.deadline) || owner.deadline < Date.now()) return Promise.reject(new Error("Design preview job retired at its deadline."));
     const key = this.key(owner, admission);
@@ -70,6 +76,7 @@ export class DesignPreviewJobs {
     let job: Job;
     try { job = this.create(owner, admission); }
     catch (error) { return Promise.reject(error); }
+    job.lane = lane;
     const result = new Promise<T>((resolve, reject) => {
       job.cancelQueued = () => { reject(job.controller.signal.reason); job.done = true; job.finish(); };
       job.start = async () => {
@@ -94,7 +101,7 @@ export class DesignPreviewJobs {
           clearTimeout(timeout);
           job.done = true;
           job.finish();
-          if (this.running === job) this.running = null;
+          this.running.delete(job);
           this.pump();
         }
       };
@@ -105,13 +112,20 @@ export class DesignPreviewJobs {
   }
 
   private pump(): void {
-    if (this.running) return;
-    const job = this.pending.shift();
-    if (!job) return;
-    this.running = job;
-    const start = job.start!;
-    job.start = undefined;
-    void start();
+    for (let index = 0; index < this.pending.length;) {
+      const job = this.pending[index]!;
+      let busy = 0;
+      for (const other of this.running) if (other.lane === job.lane) busy++;
+      if (busy >= LANE_CONCURRENCY[job.lane]) {
+        index++;
+        continue;
+      }
+      this.pending.splice(index, 1);
+      this.running.add(job);
+      const start = job.start!;
+      job.start = undefined;
+      void start();
+    }
   }
 
   async cancel(owner: DesignPreviewJobOwner, admission: DesignCatalogAdmission): Promise<{ settled: true }> {
@@ -127,7 +141,7 @@ export class DesignPreviewJobs {
       job.cancelQueued();
       job.cancelQueued = undefined;
     }
-    if (!job.start && this.running !== job && !job.done) { job.done = true; job.finish(); }
+    if (!job.start && !this.running.has(job) && !job.done) { job.done = true; job.finish(); }
     // Cancel-before-start installs a bounded tombstone. A delayed request from
     // the same connection cannot start after this terminal acknowledgement.
     await job.settled;

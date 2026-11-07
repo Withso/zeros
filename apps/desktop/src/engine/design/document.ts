@@ -1238,6 +1238,28 @@ async function prepareSharedRegisteredDesignFrame(workspacePath: string, file: s
   return frame(read.value.identity, read.value.modifiedAt);
 }
 
+/** One read of a registered frame for a capture: the record
+ * design.frames.prepare returns, and the parts the capture composes, so a
+ * frame not prepared yet is read and parsed once. Its identity comes from,
+ * and is remembered in, the durable identity cache like any preparation. */
+export async function prepareRegisteredDesignFrameParts(workspacePath: string, file: string, canvas: CanvasDocument,
+  options: { deferTailwind?: boolean } = {}) {
+  return withSharedDesignParses(async () => {
+    const frame = await prepareSharedRegisteredDesignFrame(workspacePath, file, canvas, designFramePageIds(canvas),
+      designFrameIdentities(workspacePath, designDirectoryNameFor(workspacePath)));
+    const directory = designDirectory(workspacePath);
+    const safe = await readSafeRegularFile(directory, path.join(directory, assertFrameFile(file)), MAX_DESIGN_TEXT_BYTES);
+    if (!safe) throw new Error("The registered Design source is unavailable or exceeds its limit.");
+    const geometry = canvas.frames[file]!;
+    // The same source text in the same parse scope: a build after a fresh
+    // identity read reuses every parse that read made.
+    const render = await prepareFrameRenderSource(workspacePath, safe.body.toString("utf8"), { width: geometry.w, height: geometry.h },
+      undefined, undefined, file, canvas, { parts: true, deferTailwind: options.deferTailwind === true });
+    if (render.sourceVersion !== frame.sourceVersion) throw new Error("The registered Design frame changed.");
+    return { frame, render };
+  });
+}
+
 /** The shared decoded canvas the last preparation batch read, by catalog
  * revision. A page opens in dozens of batches; they only read it, and it is
  * frozen so nothing can change it for the next batch. */

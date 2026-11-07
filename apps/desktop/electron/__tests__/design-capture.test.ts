@@ -15,6 +15,7 @@ const mocks = await vi.hoisted(async () => {
     setPermissionCheckHandler: vi.fn(),
     on: vi.fn(),
     webRequest: { onBeforeRequest: vi.fn() },
+    protocol: { handle: vi.fn() },
     clearStorageData: vi.fn(),
   };
   const contents = Object.assign(new EventEmitter(), {
@@ -34,6 +35,7 @@ const mocks = await vi.hoisted(async () => {
 });
 vi.mock("electron", () => ({
   session: { fromPartition: () => mocks.partition },
+  protocol: { registerSchemesAsPrivileged: vi.fn() },
   BrowserWindow: class {
     webContents = mocks.contents;
     constructor(options: unknown) {
@@ -101,6 +103,13 @@ it("keeps a bounded hidden window while rendering the complete layout viewport",
   expect(result.bytes).toEqual(mocks.bytes);
   expect(mocks.destroy).toHaveBeenCalledOnce();
   expect(mocks.partition.clearStorageData).toHaveBeenCalledOnce();
+});
+
+it("tells the engine the renderer its capture replies name", async () => {
+  const service = await startElectronDesignCapture();
+  const result = await mocks.render!(input(), new AbortController().signal);
+  expect(service.renderer).toBe(result.renderer);
+  expect(service.renderer).toBe(`electron-${process.versions.electron}/chromium-${process.versions.chrome}`);
 });
 
 it("disposes the capture window and rejects late pixels after cancellation", async () => {

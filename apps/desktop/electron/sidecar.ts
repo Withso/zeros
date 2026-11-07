@@ -931,10 +931,10 @@ let engineSpawnBarrier: Promise<void> = Promise.resolve();
  * The engine captures and scrubs each URL/token pair before it spawns an
  * agent. */
 let browserServiceEnvironment: { url: string; token: string } | null = null;
-let designCaptureEnvironment: { url: string; token: string } | null = null;
+let designCaptureEnvironment: { url: string; token: string; renderer: string } | null = null;
 let agentControlServiceEnvironment: { url: string; token: string } | null =
   null;
-export function setDesignCaptureEnvironment(value: { url: string; token: string } | null): void {
+export function setDesignCaptureEnvironment(value: { url: string; token: string; renderer: string } | null): void {
   designCaptureEnvironment = value;
 }
 
@@ -1150,6 +1150,8 @@ async function doSpawnEngine(
   if (designCaptureEnvironment) {
     extraEnv.ZEROS_DESIGN_CAPTURE_URL = designCaptureEnvironment.url;
     extraEnv.ZEROS_DESIGN_CAPTURE_TOKEN = designCaptureEnvironment.token;
+    // Lets the engine match stored thumbnails to this host before it captures.
+    extraEnv.ZEROS_DESIGN_CAPTURE_RENDERER = designCaptureEnvironment.renderer;
   }
 
   if (browserServiceEnvironment) {
