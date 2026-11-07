@@ -1,7 +1,7 @@
 import { readDirectoryDesignManifest } from "./metadata";
 import { designCatalogRevision, inspectDesignCatalog, readDesignCatalogMetadataWithContext, sameDesignCatalogInspection } from "./catalog-storage";
 import type { DesignPageHashes } from "@zeros/protocol/design-catalog";
-import { DesignCatalogError, designCatalogPageHashes } from "./catalog";
+import { DesignCatalogError, designCatalogPageHashes, type DesignCatalogSnapshot } from "./catalog";
 import { escapeText, escapeAttribute } from "./source";
 import {
   listDesignAssets,
@@ -1075,8 +1075,9 @@ async function readDesignNavigationSnapshotUnlocked(workspacePath: string, affec
   {
     await recoverPendingDesignTransactionUnlocked(workspacePath);
     const directory = designDirectoryNameFor(workspacePath);
-    const { metadata, context, inspection } = await readDesignCatalogMetadataWithContext(workspacePath, directory);
-    const affected = metadata.frames.filter(frame => affectedFiles?.includes(frame.source));
+    // Navigation only reads the canvas; an acknowledgement follows a write and decodes the new canvas once.
+    const { metadata, context, inspection } = await readDesignCatalogMetadataWithContext(workspacePath, directory, { shared: !affectedFiles });
+    const affected = affectedFiles ? metadata.frames.filter(frame => affectedFiles.includes(frame.source)) : [];
     const pageIds = affected.length ? designFramePageIds(context.canvas) : undefined;
     const [tokens, assets, styles, frames] = await Promise.all([
       readDesignTokensDocument(workspacePath, context, { includeUsage: false }),
@@ -1087,14 +1088,13 @@ async function readDesignNavigationSnapshotUnlocked(workspacePath: string, affec
     if (!sameDesignCatalogInspection(inspection, inspectDesignCatalog(workspacePath, directory, { revision: false })))
       throw new DesignCatalogError("stale");
     const known = affectedFiles ? options.known : undefined;
-    const hashes = options.pageHashes || known ? designCatalogPageHashes(metadata) : undefined;
+    const view = designNavigationView(metadata, !!options.pageHashes || !!known);
+    const hashes = view.hashes;
     const changed = known && new Set(metadata.pages.filter((page) =>
       known.some((pages) => pages[page.id] !== hashes!.get(page.id))).map((page) => page.id));
     return { catalogRevision: metadata.revision, directoryId: metadata.directoryId,
       ...(options.pageHashes ? { pageHashes: Object.fromEntries(hashes!) } : {}), snapshot: {
-      ...(changed ? {} : { pages: metadata.pages.map((page) => ({ id: page.id, title: page.title, folder: page.folder,
-        frameFiles: metadata.frames.filter((frame) => frame.pageId === page.id).map((frame) => frame.source),
-        frameIds: metadata.frames.filter((frame) => frame.pageId === page.id).map((frame) => frame.id) })) }),
+      ...(changed ? {} : { pages: view.pages }),
       frames, tokens: tokens.tokens, tokenSourceVersion: tokens.sourceVersion, assets,
       ...(affectedFiles && !changed ? { mutationCatalog: { revision: metadata.revision, frames: metadata.frames } } : {}),
       ...(changed ? { pageCatalog: { revision: metadata.revision,
@@ -1106,6 +1106,28 @@ async function readDesignNavigationSnapshotUnlocked(workspacePath: string, affec
       lint: { workspacePath, checkedFiles: [], violations: [], healedOids: 0 },
     } };
   }
+}
+
+type NavigationPages = NonNullable<DesignWorkspaceSnapshot["pages"]>;
+const navigationViews = new WeakMap<object, { pages: NavigationPages; hashes?: Map<string, string> }>();
+
+/** Page summaries and hashes for a catalog projection, built in one pass;
+ * a frozen (shared) projection keeps them for its next reader. */
+function designNavigationView(metadata: Pick<DesignCatalogSnapshot, "pages" | "frames">, withHashes: boolean) {
+  const shared = Object.isFrozen(metadata.frames);
+  let view = shared ? navigationViews.get(metadata.frames) : undefined;
+  if (!view) {
+    const members = new Map(metadata.pages.map((page) => [page.id, { frameFiles: [] as string[], frameIds: [] as string[] }]));
+    for (const frame of metadata.frames) {
+      const page = members.get(frame.pageId);
+      if (page) { page.frameFiles.push(frame.source); page.frameIds.push(frame.id); }
+    }
+    const pages = metadata.pages.map((page) => ({ id: page.id, title: page.title, folder: page.folder, ...members.get(page.id)! }));
+    view = { pages: shared ? freezeDeep(pages) : pages };
+    if (shared) navigationViews.set(metadata.frames, view);
+  }
+  if (withHashes) view.hashes ??= designCatalogPageHashes(metadata);
+  return view;
 }
 
 const MAX_MUTATION_SNAPSHOT_FILES = 16;

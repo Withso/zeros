@@ -14,6 +14,7 @@ import {
   readDesignNavigationSnapshot,
 } from "../document";
 import { designSharedCanvasReadsForTests, readCanvas } from "../document-storage";
+import { designSharedCatalogProjectionsForTests } from "../catalog-storage";
 import { readDesignProtocolResource } from "../protocol-resource";
 
 let root: string;
@@ -149,9 +150,9 @@ it("serves frame documents from one decoded canvas while its bytes are unchanged
 
 it("reads frame identities and element offsets from the shared canvas, failing wherever a fresh read would", async () => {
   await writeFile(path.join(root, directory, "page-1/f2.html"), '<html><body><main data-oid="m">f2</main></body></html>');
+  const reads = designSharedCanvasReadsForTests();
   const navigation = await readDesignNavigationSnapshot(root);
   const prepared = await prepareDesignNavigationFrames(root, navigation.catalogRevision, ["page-1/f0.html"]);
-  const reads = designSharedCanvasReadsForTests();
   expect((await readDesignFrameSelectionIdentity(root, "page-1/f0.html")).sourceVersion).toBe(prepared.frames[0]!.sourceVersion);
   expect((await readDesignFrameRenderIdentity(root, "page-1/f1.html")).file).toBe("page-1/f1.html");
   expect((await readDesignElementOffsetMap(root, "page-1/f2.html")).map((offset) => offset.oid)).toEqual(["m"]);
@@ -166,4 +167,22 @@ it("reads frame identities and element offsets from the shared canvas, failing w
   await symlink(path.join(root, directory, "page-1-real"), path.join(root, directory, "page-1"));
   expect(await outcome(readCanvas(root))).toMatch(/real directories/);
   await matchesFreshRead();
+});
+
+it("serves navigation at an unchanged revision from one shared decode and projection", async () => {
+  const first = await readDesignNavigationSnapshot(root, undefined, { pageHashes: true });
+  const reads = designSharedCanvasReadsForTests();
+  const projections = designSharedCatalogProjectionsForTests();
+  expect(await readDesignNavigationSnapshot(root, undefined, { pageHashes: true })).toEqual(first);
+  expect(designSharedCanvasReadsForTests() - reads).toBe(0);
+  expect(designSharedCatalogProjectionsForTests() - projections).toBe(0);
+  const file = path.join(root, directory, "meta/canvas.json");
+  const canvas = JSON.parse(await readFile(file, "utf8"));
+  canvas.frames.f1.x = 777;
+  await writeFile(file, JSON.stringify(canvas));
+  const moved = await readDesignNavigationSnapshot(root, undefined, { pageHashes: true });
+  expect(moved.catalogRevision).not.toBe(first.catalogRevision);
+  expect(moved.pageHashes).not.toEqual(first.pageHashes);
+  expect(designSharedCatalogProjectionsForTests() - projections).toBe(1);
+  expect(moved.snapshot.pages).toEqual(first.snapshot.pages);
 });
