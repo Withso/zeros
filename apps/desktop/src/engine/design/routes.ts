@@ -89,7 +89,7 @@ import {
   transferDesignNode,
   moveDesignFrameGeometries,
   restoreDesignFrameChanges,
-  createDesignFrame,
+  createDesignFrameWithRestorePoint,
   createDesignPage,
   renameDesignPage,
   deleteDesignPage,
@@ -1347,7 +1347,7 @@ export async function handleDesignWorkspaceRoute(
           message: "Initial frame geometry requires x, y, w, h, and z.",
         });
       }
-      const frame = await createDesignFrame(workspace.path, {
+      const { frame, restorePoint } = await createDesignFrameWithRestorePoint(workspace.path, {
         title: optStr(params, "title"),
         pageId: designPageIdSchema.optional().parse(params.pageId),
         ...(suppliedGeometryKeys.length === geometryKeys.length
@@ -1374,10 +1374,7 @@ export async function handleDesignWorkspaceRoute(
       });
       host.recordDesignHistory(
         workspace.path,
-        frameDesignHistoryEntry(
-          null,
-          await captureDesignFrameRestorePoint(workspace.path, frame.file),
-        ),
+        frameDesignHistoryEntry(null, restorePoint),
       );
       return {
         frame,

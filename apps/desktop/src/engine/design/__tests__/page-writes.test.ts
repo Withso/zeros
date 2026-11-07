@@ -12,6 +12,10 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   captureDesignFrameRestorePoint,
   createDesignFrame,
+  createDesignFrameWithRestorePoint,
+  designFrameCreateBatchesForTests,
+  designMutationSnapshotReadsForTests,
+  readDesignMutationSnapshot,
   createDesignPage,
   deleteDesignFrame,
   deleteDesignPage,
@@ -222,6 +226,36 @@ describe("page-owned frame writes", () => {
         expect(page.frames).toContain(created[index]!.frameId);
       expect(new Set(created.map((frame) => frame.file)).size).toBe(8);
       for (const frame of created) expect(existsSync(path.join(root, pagesDirectory, frame.file))).toBe(true);
+    }));
+
+  it("lands concurrent creates in one canvas write with distinct files, isolating a bad request", () =>
+    run(async () => {
+      const before = designFrameCreateBatchesForTests();
+      const results = await Promise.allSettled([
+        ...Array.from({ length: 6 }, () => createDesignFrameWithRestorePoint(root, { pageId: "empty", title: "Same" })),
+        createDesignFrameWithRestorePoint(root, { pageId: "missing", title: "Lost" }),
+        createDesignFrameWithRestorePoint(root, { pageId: "checkout", title: "Other" }),
+      ]);
+      expect(designFrameCreateBatchesForTests() - before).toBe(1);
+      expect(results[6]).toMatchObject({ status: "rejected" });
+      const created = results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
+      expect(created.map(({ frame }) => frame.file)).toEqual([
+        "empty/same.html", "empty/same-2.html", "empty/same-3.html", "empty/same-4.html",
+        "empty/same-5.html", "empty/same-6.html", "checkout/other.html",
+      ]);
+      expect(await pageFrames("empty")).toEqual(created.slice(0, 6).map(({ frame }) => frame.frameId));
+      for (const { frame, restorePoint } of created)
+        expect(await captureDesignFrameRestorePoint(root, frame.file)).toEqual(restorePoint);
+    }));
+
+  it("shares one acknowledgement read among writers waiting for it, preparing every affected frame", () =>
+    run(async () => {
+      const files = ["page-1/home.html", "checkout/home.html"];
+      const before = designMutationSnapshotReadsForTests();
+      const [first, second] = await Promise.all(files.map((file) => readDesignMutationSnapshot(root, [file])));
+      expect(designMutationSnapshotReadsForTests() - before).toBe(1);
+      for (const snapshot of [first!, second!])
+        expect(snapshot.frames.map((frame) => frame.file).sort()).toEqual([...files].sort());
     }));
 
   it("admits exactly the remaining room when creates race into one nearly full page", () =>

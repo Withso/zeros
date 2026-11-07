@@ -132,7 +132,7 @@ export { designDirectoryNameFor } from "./directory-registry";
 export { createDesignPage, deleteDesignPage, renameDesignPage } from "./page-lifecycle";
 export { type DesignCanvasFrame,type DesignElementOffset,type DesignFrameChange,type DesignFrameDocument,type DesignFrameGeometry,type DesignFrameRenderIdentity,type DesignFrameRenderSource,type DesignFrameRestorePoint,type DesignFrameSelectionIdentity,type DesignFrameSummary,type DesignFrameTreeNode,type DesignLintReport,type DesignLintSeverity,type DesignLintViolation,type DesignMutationResult,type DesignSourceSpan,type DesignTokenMutationResult,type DesignTokenSummary,type DesignTokensDocument,type DesignWorkspaceSnapshot } from "./document-model";
 export { DESIGN_TOKENS_FILE,DESIGN_TRANSACTION_JOURNAL_FILE,commitDesignWebDocumentState,designTransactionJournalPath,designTransactionRecoveryDirectory,designWebDocumentId,readDesignWebDocumentState,recoverDesignStorageForArchive,recoverPendingDesignTransaction } from "./document-transactions";
-export { captureDesignFrameRestorePoint,createDesignFrame,deleteDesignFrame,duplicateDesignFrame,healDesignOids,listDesignFrames,moveDesignFrameGeometries,readDesignFrameRenderIdentityFromSource,renameDesignFrame,replaceDesignFrameFromHistory,restoreDesignFrame,restoreDesignFrameChanges,sameDesignFrameRestorePoint,transferDesignNode,updateDesignFrameGeometry } from "./frame-lifecycle";
+export { captureDesignFrameRestorePoint,createDesignFrame,createDesignFrameWithRestorePoint,designFrameCreateBatchesForTests,deleteDesignFrame,duplicateDesignFrame,healDesignOids,listDesignFrames,moveDesignFrameGeometries,readDesignFrameRenderIdentityFromSource,renameDesignFrame,replaceDesignFrameFromHistory,restoreDesignFrame,restoreDesignFrameChanges,sameDesignFrameRestorePoint,transferDesignNode,updateDesignFrameGeometry } from "./frame-lifecycle";
 export { stripNonDesignOidsForRender } from "./node-identities";
 export { DesignRenderBudgetError } from "./render-budget";
 export {
@@ -1045,7 +1045,13 @@ async function mapDesignFramesBounded<T>(
 export async function readDesignNavigationSnapshot(workspacePath: string, affectedFiles?: readonly string[]): Promise<{
   snapshot: DesignWorkspaceSnapshot; catalogRevision: string; directoryId: string;
 }> {
-  return withDocumentWrite(workspacePath, async () => {
+  return withDocumentWrite(workspacePath, () => readDesignNavigationSnapshotUnlocked(workspacePath, affectedFiles));
+}
+
+async function readDesignNavigationSnapshotUnlocked(workspacePath: string, affectedFiles?: readonly string[]): Promise<{
+  snapshot: DesignWorkspaceSnapshot; catalogRevision: string; directoryId: string;
+}> {
+  {
     await recoverPendingDesignTransactionUnlocked(workspacePath);
     const directory = designDirectoryNameFor(workspacePath);
     const { metadata, context } = await readDesignCatalogMetadataWithContext(workspacePath, directory);
@@ -1068,19 +1074,48 @@ export async function readDesignNavigationSnapshot(workspacePath: string, affect
       themes: mergeDesignThemes(readDesignThemeCatalog(context.canvas), [...tokens.themes, ...styles.sources.flatMap((source) => source.themes)]),
       lint: { workspacePath, checkedFiles: [], violations: [], healedOids: 0 },
     } };
-  });
+  }
+}
+
+const MAX_MUTATION_SNAPSHOT_FILES = 16;
+/** Acknowledgements waiting for the lock share one read once it is admitted:
+ * each joined only after its own write committed, so the shared read is
+ * fresh for every one of them, and it prepares the union of their frames. */
+const mutationSnapshotBatches = new Map<string, { files: Set<string>; sealed: boolean; snapshot: Promise<DesignWorkspaceSnapshot> }>();
+let mutationSnapshotReads = 0;
+
+export function designMutationSnapshotReadsForTests(): number {
+  return mutationSnapshotReads;
 }
 
 /** A write acknowledgement never scans unrelated HTML on registered layouts.
  * Legacy documents retain the aggregate contract; metadata races re-read
  * authoritatively instead of turning an applied write into an apparent failure. */
 export async function readDesignMutationSnapshot(workspacePath: string, files: readonly string[]): Promise<DesignWorkspaceSnapshot> {
-  if (files.length > 16) return readDesignWorkspaceSnapshot(workspacePath);
-  try { return (await readDesignNavigationSnapshot(workspacePath, files)).snapshot; }
-  catch (error) {
-    if (!(error instanceof DesignCatalogError)) throw error;
-    return readDesignWorkspaceSnapshot(workspacePath);
+  if (files.length > MAX_MUTATION_SNAPSHOT_FILES) return readDesignWorkspaceSnapshot(workspacePath);
+  const key = JSON.stringify([path.resolve(workspacePath), designDirectoryNameFor(workspacePath)]);
+  const open = mutationSnapshotBatches.get(key);
+  if (open && !open.sealed && new Set([...open.files, ...files]).size <= MAX_MUTATION_SNAPSHOT_FILES) {
+    for (const file of files) open.files.add(file);
+    return open.snapshot;
   }
+  const batch = { files: new Set(files), sealed: false, snapshot: Promise.resolve() as unknown as Promise<DesignWorkspaceSnapshot> };
+  mutationSnapshotBatches.set(key, batch);
+  batch.snapshot = (async () => {
+    try {
+      return await withDocumentWrite(workspacePath, async () => {
+        batch.sealed = true;
+        mutationSnapshotReads++;
+        return (await readDesignNavigationSnapshotUnlocked(workspacePath, [...batch.files])).snapshot;
+      });
+    } catch (error) {
+      if (!(error instanceof DesignCatalogError)) throw error;
+      return readDesignWorkspaceSnapshot(workspacePath);
+    } finally {
+      if (mutationSnapshotBatches.get(key) === batch) mutationSnapshotBatches.delete(key);
+    }
+  })();
+  return batch.snapshot;
 }
 
 async function prepareRegisteredDesignFrame(workspacePath: string, file: string, canvas: CanvasDocument): Promise<DesignCanvasFrame> {
