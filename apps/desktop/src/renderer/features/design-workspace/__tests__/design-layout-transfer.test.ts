@@ -489,6 +489,16 @@ describe("design-tool nesting", () => {
     expect(nest).not.toHaveBeenCalled();
   });
 
+  it("stacks a new frame above a deep page within the per-page bound, not the old 256 cap", async () => {
+    mocks.confirmedFrames = [{ ...source, z: 600 }];
+    await transferDesignLayerAtRelease({ ...input, details: measured, pointer: { x: 3000, y: 3000 }, nest: vi.fn() });
+    expect(mocks.transfer.mock.calls[0]?.[1]).toMatchObject({ z: 601 });
+    mocks.transfer.mockClear();
+    mocks.confirmedFrames = [{ ...source, z: 1000 }];
+    await transferDesignLayerAtRelease({ ...input, details: measured, pointer: { x: 3000, y: 3000 }, nest: vi.fn() });
+    expect(mocks.transfer.mock.calls[0]?.[1]).toMatchObject({ z: 1000 });
+  });
+
   it("waits for a destination frame that just went live, and refuses one that never loads", async () => {
     mocks.runtimeFor.mockImplementation((file: string) => (file === destination.file ? null : mocks.runtime));
     mocks.waitForRuntime.mockImplementationOnce(async () => {
