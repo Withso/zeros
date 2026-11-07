@@ -130,4 +130,14 @@ it("starts an independent cloud OAuth flow and retains its generation", async ()
     beginCloudGithubConnection(user, org, generation),
   ).resolves.toMatchObject({ generation: next });
   expect(f.request.mock.calls[0]?.[2].body.action).toBe("oauth");
+  expect(f.request.mock.calls[0]?.[2].body).not.toHaveProperty("install");
+});
+
+it("asks for an install-first flow only when choosing repositories", async () => {
+  f.request.mockResolvedValue({
+    url: "https://github.com/apps/zeros/installations/new?state=zcg_synthetic",
+    generation: next,
+  });
+  await beginCloudGithubConnection(user, org, generation, true);
+  expect(f.request.mock.calls[0]?.[2].body).toMatchObject({ action: "oauth", install: true });
 });

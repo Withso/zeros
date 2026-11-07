@@ -60,6 +60,10 @@ const repositoryOption = (row: z.infer<typeof githubRepositorySchema>) => ({
   private: row.private,
   canPush: row.permissions?.push === true || row.permissions?.admin === true,
 });
+/** GitHub's installation page takes no PKCE challenge, so an install-first
+ * attempt stores this marker in place of a verifier and never sends it.
+ * Base64url verifiers cannot contain ":". */
+const INSTALL_ATTEMPT = "install:";
 type AppCredential = Extract<CloudGithubCredential, { method: "github-app" }>;
 export type CloudGithubConnectionHealth =
   | "connected"
@@ -219,19 +223,27 @@ export class CloudGithubConnections {
       );
     return this.config;
   }
+  /** `install` starts on GitHub's installation page, where the human picks an
+   * account and repositories and signs in on the same round trip, as Local does. */
   async begin(
     scope: CloudGithubConnectionScope,
     expected: string,
+    install = false,
   ): Promise<{ url: string; generation: string }> {
     const config = this.requireApp(),
       state = `zcg_${randomBytes(32).toString("base64url")}`,
-      verifier = randomBytes(32).toString("base64url");
+      verifier = `${install ? INSTALL_ATTEMPT : ""}${randomBytes(32).toString("base64url")}`;
     const generation = await this.store.beginOauth(
       scope,
       expected,
       state,
       verifier,
     );
+    if (install) {
+      const url = new URL(`/apps/${encodeURIComponent(config.appSlug)}/installations/new`, config.webBaseUrl);
+      url.searchParams.set("state", state);
+      return { url: url.toString(), generation };
+    }
     const url = new URL("/login/oauth/authorize", config.webBaseUrl);
     url.search = new URLSearchParams({
       client_id: config.clientId,
@@ -247,10 +259,17 @@ export class CloudGithubConnections {
     state: string,
     code: string | undefined,
     denied: boolean,
-  ): Promise<void> {
+    setupAction?: string,
+  ): Promise<"connected" | "updated"> {
     const pending = await this.store.consumeOauth(state);
+    const install = pending.verifier.startsWith(INSTALL_ATTEMPT);
     try {
       const config = this.requireApp();
+      if (install && !denied && !code && (setupAction === "install" || setupAction === "update")) {
+        // GitHub changed repository access without signing in again: nothing to exchange.
+        await this.store.cancelOauth(pending.scope, pending.expected);
+        return "updated";
+      }
       if (denied || !code || code.length > 1024)
         throw new HttpError(
           422,
@@ -265,7 +284,7 @@ export class CloudGithubConnections {
           client_secret: config.clientSecret,
           redirect_uri: config.oauthCallbackUrl,
           code,
-          code_verifier: pending.verifier,
+          ...(install ? {} : { code_verifier: pending.verifier }),
         }),
         Date.now(),
       );
@@ -279,6 +298,7 @@ export class CloudGithubConnections {
         expiresAt: bundle.expiresAtMs,
         refreshExpiresAt: bundle.refreshTokenExpiresAtMs,
       });
+      return "connected";
     } catch (error) {
       // Consumed state cannot complete later. Retire only this attempt so the
       // desktop stops waiting, preserving a newer attempt and saved methods.

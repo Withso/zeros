@@ -56,7 +56,7 @@ export function createCloudGithubConnectionRoutes(
         case "oauth":
           return c.json(
             CloudGithubOauthStartedSchema.parse(
-              await service.begin(scope, input.expected),
+              await service.begin(scope, input.expected, input.install === true),
             ),
           );
         case "cancel":

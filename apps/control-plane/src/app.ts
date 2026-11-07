@@ -320,7 +320,7 @@ export function createApp(
   const cloudGithub = dependencies.cloudV2?.routes.githubConnections;
   if (config.github) {
     app.route("/", createGithubPublicRoutes(pool, config.github, cloudGithub
-      ? { cloudCallback: (state,code,denied) => cloudGithub.callback(state,code,denied) } : {}));
+      ? { cloudCallback: (state,code,denied,setupAction) => cloudGithub.callback(state,code,denied,setupAction) } : {}));
   } else {
     console.warn(
       "[control-plane] GitHub App sign-in is not configured — " +

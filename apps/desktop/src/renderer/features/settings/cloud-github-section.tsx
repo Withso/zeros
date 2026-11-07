@@ -127,12 +127,13 @@ export function CloudGithubSection({
       action,
     );
   };
-  const begin = async () => {
+  const begin = async (install: boolean) => {
     if (!snapshot.data) return;
     const result = await beginCloudGithubConnection(
       userId,
       organizationId,
       snapshot.data.generation,
+      install,
     );
     if (!current()) return;
     // Publish this attempt before polling so an older rendered snapshot cannot
@@ -235,7 +236,7 @@ export function CloudGithubSection({
                     }
                     onClick={() =>
                       method === "github-app"
-                        ? void run(begin)
+                        ? void run(() => begin(!summary?.configured))
                         : setPatOpen((value) => !value)
                     }
                   >
@@ -268,12 +269,12 @@ export function CloudGithubSection({
                   {cloudGithubHealthCopy[summary.health]}
                 </p>
               )}
-              {method === "github-app" && snapshot.data?.installUrl && (
+              {method === "github-app" && summary?.configured && (
                 <Button
                   variant="ghost"
                   className="self-start"
-                  disabled={busy}
-                  onClick={() => openUrl(snapshot.data!.installUrl!)}
+                  disabled={busy || !!waiting || !snapshot.data?.appAvailable}
+                  onClick={() => void run(() => begin(true))}
                 >
                   Grant Zeros access in GitHub
                   <ExternalLink className="size-3.5" />
