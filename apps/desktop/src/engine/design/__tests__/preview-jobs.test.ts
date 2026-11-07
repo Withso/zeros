@@ -104,6 +104,34 @@ it("disconnect and shutdown cancel queued work without starting it and drain cur
   expect(jobs.usage()).toEqual({ running: 0, queued: 0, records: 0 });
 });
 
+it("runs two thumbnail batches at once beside one preview, queueing the rest of each lane", async () => {
+  const jobs = new DesignPreviewJobs();
+  const started: string[] = [];
+  const gates = new Map<string, ReturnType<typeof deferred<void>>>();
+  const job = (jobId: string, lane?: "thumbnails") => {
+    const gate = deferred<void>();
+    gates.set(jobId, gate);
+    return jobs.run({ ...owner, jobId }, admission, async () => { started.push(jobId); await gate.promise; }, lane);
+  };
+  const thumbnails = ["t1", "t2", "t3"].map((jobId) => job(jobId, "thumbnails"));
+  const previews = ["p1", "p2"].map((jobId) => job(jobId));
+  await Promise.resolve();
+  expect(started).toEqual(["t1", "t2", "p1"]);
+  expect(jobs.usage()).toMatchObject({ running: 3, queued: 2 });
+  // Cancelling a running batch frees its slot for the queued one once its work settles.
+  const cancelled = jobs.cancel({ ...owner, jobId: "t1" }, admission);
+  gates.get("t1")!.resolve();
+  await cancelled;
+  await thumbnails[0]!.catch(() => {});
+  expect(started).toEqual(["t1", "t2", "p1", "t3"]);
+  gates.get("p1")!.resolve();
+  await previews[0];
+  expect(started.at(-1)).toBe("p2");
+  for (const id of ["t2", "t3", "p2"]) gates.get(id)!.resolve();
+  await Promise.all([thumbnails[1], thumbnails[2], previews[1]]);
+  expect(jobs.usage()).toMatchObject({ running: 0, queued: 0 });
+});
+
 function deferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
   const promise = new Promise<T>((done) => { resolve = done; });

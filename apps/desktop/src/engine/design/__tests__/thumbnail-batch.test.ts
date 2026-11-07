@@ -327,6 +327,36 @@ describe("batch Design thumbnails", () => {
     ]);
   });
 
+  it("captures concurrent batches one at a time, and lets a cancelled one leave the line at once", async () => {
+    const current = await versions(["page-1/a.html", "page-1/b.html"]);
+    const frames = [...current].map(([file, sourceVersion]) => ({ file, sourceVersion }));
+    let inFlight = 0, most = 0;
+    const release: Array<() => void> = [];
+    const capture = vi.fn(async (request: DesignBatchCaptureRequest) => {
+      most = Math.max(most, ++inFlight);
+      await new Promise<void>((resolve) => release.push(resolve));
+      inFlight--;
+      return { version: 1 as const, revision: request.revision, renderer: "turns", items: request.items.map((item) => {
+        const raster = designCaptureRasterSize(item.viewport, item.maxDimension);
+        return { id: item.id, width: raster.width, height: raster.height, data: png(raster.width, raster.height).toString("base64") };
+      }) };
+    });
+    const first = renderDesignThumbnails(root, input([frames[0]!]), { capture });
+    const second = renderDesignThumbnails(root, input([frames[1]!]), { capture });
+    const cancelled = new AbortController();
+    const third = renderDesignThumbnails(root, input(frames), { capture, signal: cancelled.signal });
+    await vi.waitFor(() => expect(capture).toHaveBeenCalledTimes(1));
+    cancelled.abort(new Error("cancelled"));
+    await expect(third).rejects.toThrow(/cancelled/);
+    expect(capture).toHaveBeenCalledTimes(1);
+    release.shift()!();
+    await vi.waitFor(() => expect(capture).toHaveBeenCalledTimes(2));
+    release.shift()!();
+    expect((await first).pictures).toHaveLength(1);
+    expect((await second).pictures).toHaveLength(1);
+    expect(most).toBe(1);
+  });
+
   describe("with the thumbnail store", () => {
     const named = (renderer: string) => setDesignCaptureConfig({ url: "http://127.0.0.1:9/", token: "a".repeat(64), renderer });
     const host = (renderer: string, size = 64) => vi.fn(async (request: DesignBatchCaptureRequest) => ({ version: 1 as const, revision: request.revision, renderer,

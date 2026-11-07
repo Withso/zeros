@@ -312,6 +312,27 @@ export async function requestDesignBatchCapture(
   }
 }
 
+let captureTail: Promise<void> = Promise.resolve();
+/** The host captures one batch at a time. Batches composed meanwhile take
+ * turns here rather than polling its busy reply; a cancelled one leaves the
+ * line at once. */
+async function inCaptureTurn<T>(signal: AbortSignal | undefined, run: () => Promise<T>): Promise<T> {
+  const previous = captureTail;
+  let release!: () => void;
+  captureTail = new Promise<void>((resolve) => { release = resolve; });
+  try {
+    await new Promise<void>((resolve, reject) => {
+      if (signal?.aborted) return reject(signal.reason);
+      const abort = () => reject(signal!.reason);
+      signal?.addEventListener("abort", abort, { once: true });
+      void previous.then(() => { signal?.removeEventListener("abort", abort); resolve(); });
+    });
+    return await run();
+  } finally {
+    release();
+  }
+}
+
 /** design.thumbnails.render on one Local workspace. */
 export async function renderDesignThumbnails(
   root: string,
@@ -360,7 +381,7 @@ export async function renderDesignThumbnails(
       deferred.push(...batch.frames.values());
       continue;
     }
-    const reply = await capture(batch.request, deps.signal);
+    const reply = await inCaptureTurn(deps.signal, () => capture(batch.request, deps.signal));
     const drawn = designThumbnailPipeline(reply.renderer);
     if (pipeline === null) {
       pipeline = drawn;
