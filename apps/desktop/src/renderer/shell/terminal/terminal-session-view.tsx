@@ -580,6 +580,10 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
           rows,
           ephemeral,
           loginProvider,
+          // A plain cloud shell comes back with its screen and directory after
+          // the VM sleeps. Run, setup and agent terminals must launch again.
+          ...(isCloudWorkspace(cwd) && !attachOnly && !ephemeral && !loginProvider &&
+            !initialCommand?.trim() && !agentId ? { restore: true } : {}),
         });
         if (info && !info.reattached && xtermRef.current === term) announceResume();
       } finally {

@@ -82,6 +82,9 @@ export class TerminalMirror {
    * screen even if it exceeds that budget; serializer failure keeps the last blob. */
   async snapshot(
     maxBytes: number = MIRROR_SNAPSHOT_MAX_BYTES,
+    /** For a shell that will be restored after its process is gone: only the
+     * normal buffer, without a full-screen program's screen or modes. */
+    options: { restore?: boolean } = {},
   ): Promise<TerminalSnapshot> {
     await this.flush();
     let data = "";
@@ -91,6 +94,7 @@ export class TerminalMirror {
       try {
         blob = this.serializer.serialize({
           scrollback: SNAPSHOT_SCROLLBACK_LADDER[rung],
+          ...(options.restore ? { excludeAltBuffer: true, excludeModes: true } : {}),
         });
       } catch {
         // Keep any smaller blob already produced; otherwise empty replay.

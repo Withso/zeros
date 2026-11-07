@@ -1,4 +1,6 @@
-import { realpath, type FileHandle } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { mkdir, readdir, readFile, readlink, realpath, rename, rm, stat, writeFile, type FileHandle } from "node:fs/promises";
+import { join } from "node:path";
 import { createMessage, type BridgeMessage, type PtyCreateMessage, type PtyTerminalInfo } from "@zeros/protocol/messages";
 import type { AppClient } from "../agents";
 import { RECENT_ACTIVITY_MS } from "../activity";
@@ -27,6 +29,12 @@ interface Options {
   shellArgs?: string[];
   broadcast?: (frame: BridgeMessage) => void | Promise<void>;
   activity?: () => void;
+  /** Private directory where restorable shells leave their last screen and
+   * directory for the next worker on this disk. Without it nothing is kept. */
+  records?: string;
+  recordDelayMs?: number;
+  /** The shell's live working directory; Linux exposes it under /proc. */
+  workingDirectory?: (pid: number) => Promise<string>;
 }
 interface Session extends PtyTerminalInfo {
   native: TerminalProcess; mirror: TerminalMirror; descriptor?: FileHandle;
@@ -35,7 +43,20 @@ interface Session extends PtyTerminalInfo {
   tail: Promise<void>; pendingBytes: number; paused: boolean; removed: boolean;
   attachments: number; hasOutput: boolean; exitPublished: boolean; lastActivityAt: number;
   exit?: { exitCode: number; signal?: number }; retirement?: Promise<void>;
+  /** Asked for restore and shared, so its screen and directory are kept. */
+  restorable: boolean; restored: boolean; recordTimer?: ReturnType<typeof setTimeout>;
 }
+/** What a restorable shell leaves for the next worker on this disk. */
+interface TerminalRecord { version: 1; sessionId: string; cwd: string; cols: number; rows: number; screen: string; savedAt: number }
+const RECORD_DELAY_MS = 2_000, RECORD_MAX_AGE_MS = 7 * 24 * 60 * 60_000, RECORD_LIMIT = 64, RECORD_MAX_BYTES = 1024 * 1024;
+// Matches the desktop's own line for a shell it had to start again.
+const RESTORED_NOTICE = "\r\n\x1b[2m--- Previous terminal session restored. Starting new shell... ---\x1b[0m\r\n";
+const isRecord = (value: unknown): value is TerminalRecord => {
+  if (!value || typeof value !== "object") return false;
+  const record = value as Record<string, unknown>;
+  return record.version === 1 && typeof record.sessionId === "string" && typeof record.cwd === "string" && typeof record.screen === "string"
+    && [record.cols, record.rows, record.savedAt].every(number => typeof number === "number" && Number.isFinite(number));
+};
 interface Pending { owner?: AppClient; cancelled: boolean; promise: Promise<Session> }
 
 /** The workspace computer's name in its shells, as the owner chose it:
@@ -69,7 +90,10 @@ export class Terminals {
   private readonly retiring = new Set<Promise<void>>();
   private readonly files: CheckedFiles;
   private disposed = false;
-  constructor(private readonly scope: WorkspaceScope, private readonly options: Options = {}) { this.files = new CheckedFiles(scope); }
+  constructor(private readonly scope: WorkspaceScope, private readonly options: Options = {}) {
+    this.files = new CheckedFiles(scope);
+    if (options.records) void this.pruneRecords(options.records);
+  }
 
   get busy(): boolean { return this.pending.size > 0 || [...this.sessions.values()].some(session => !session.exit && Date.now() - session.lastActivityAt < RECENT_ACTIVITY_MS); }
   get runtimeBusy(): boolean { return this.pending.size > 0 || this.retiring.size > 0 || [...this.sessions.values()].some(session => !session.exit || session.pendingBytes > 0 || session.attachments > 0); }
@@ -129,6 +153,12 @@ export class Terminals {
     if (this.disposed) return;
     this.disposed = true;
     for (const pending of this.pending.values()) pending.cancelled = true;
+    // A stopping VM takes its shells with it. Keep each restorable one's last
+    // screen and directory first; the kills below then leave the records alone.
+    await Promise.all([...this.sessions.values()].map(session => {
+      clearTimeout(session.recordTimer); session.recordTimer = undefined;
+      return this.enqueue(session, () => this.saveRecord(session));
+    }));
     for (const session of this.sessions.values()) void this.retire(session, true);
     await this.flush();
   }
@@ -170,7 +200,9 @@ export class Terminals {
     await this.enqueue(current, async () => {
       if (current.removed || this.retiredClients.has(client)) return;
       this.resize(current, message.cols, message.rows);
-      const reattached = current.attachments > 0;
+      // A restored shell is new, but its first client gets the saved screen
+      // as a reattach, so the desktop repaints it and never relaunches a command.
+      const reattached = current.attachments > 0 || current.restored;
       const replay = reattached || current.hasOutput ? await current.mirror.snapshot() : { data: "", bytes: 0, truncated: false };
       if (current.removed || this.retiredClients.has(client)) return;
       await client.send(createMessage({ type: "PTY_CREATED", source: "engine", requestId: message.id, sessionId: current.sessionId,
@@ -183,11 +215,17 @@ export class Terminals {
   }
 
   private async spawn(message: PtyCreateMessage, pending: Pending): Promise<Session> {
-    const descriptor = await this.files.directory(message.cwd ?? this.scope.root);
+    const restorable = message.restore === true && !pending.owner && !!this.options.records;
+    const record = restorable ? await this.readRecord(message.sessionId) : undefined;
+    // A client that didn't ask (an older desktop) starts this id over; an
+    // earlier sleep's record must not come back after its next one.
+    if (!restorable) { const path = this.recordPath(message.sessionId); if (path) await rm(path, { force: true }).catch(() => {}); }
+    const descriptor = record ? await this.files.directory(record.cwd).catch(() => this.files.directory(this.scope.root))
+      : await this.files.directory(message.cwd ?? this.scope.root);
     let native: TerminalProcess | undefined;
     try {
       const cwd = await realpath(descriptorPath(descriptor));
-      const cols = dim(message.cols, 80), rows = dim(message.rows, 24);
+      const cols = dim(message.cols, record?.cols ?? 80), rows = dim(message.rows, record?.rows ?? 24);
       native = await (this.options.spawn ?? nativeSpawn)({ shell: "/bin/bash", args: this.options.shellArgs ?? ["-l"],
         // Keep the descriptor owned by the worker while the native fork chdirs.
         cwd: `/proc/${process.pid}/fd/${descriptor.fd}`, cols, rows,
@@ -197,14 +235,16 @@ export class Terminals {
           PROMPT_COMMAND: namePrompt(terminalName(this.scope.workspace.id, [this.scope.workspace.repository])) },
       });
       await this.files.assertDescriptor(descriptor);
+      const mirror = await this.mirror(cols, rows, record);
       const session: Session = { sessionId: message.sessionId, workspaceId: this.scope.workspace.id, cwd, createdAt: Date.now(), cols, rows,
-        native, descriptor, mirror: this.options.mirror?.(cols, rows) ?? new TerminalMirror(cols, rows), owner: pending.owner,
+        native, descriptor, mirror, owner: pending.owner,
         subscribers: new Set(), disposers: [], tail: Promise.resolve(), pendingBytes: 0, paused: false, removed: false,
-        attachments: 0, hasOutput: false, exitPublished: false, lastActivityAt: Date.now() };
+        attachments: 0, hasOutput: !!record, exitPublished: false, lastActivityAt: Date.now(), restorable, restored: !!record };
       session.disposers.push(native.onData(data => this.data(session, data)), native.onExit(exit => this.exited(session, exit)));
       this.sessions.set(session.sessionId, session);
       if (pending.cancelled || this.disposed) { await this.retire(session, true); return session; }
       if (!session.owner) this.changed();
+      this.scheduleRecord(session);
       return session;
     } catch (error) {
       try { native?.kill(); } catch { /* Already gone. */ }
@@ -214,7 +254,7 @@ export class Terminals {
 
   private data(session: Session, data: string): void {
     if (session.removed || session.exit || !data) return;
-    this.activity(session);
+    this.activity(session); this.scheduleRecord(session);
     const bytes = Buffer.byteLength(data); session.pendingBytes += bytes;
     if (!session.paused && session.pendingBytes >= 256 * 1024) { session.paused = true; try { session.native.pause(); } catch { /* Exit may have won. */ } }
     void this.enqueue(session, async () => {
@@ -235,6 +275,10 @@ export class Terminals {
   private exited(session: Session, exit: { exitCode: number; signal?: number }): void {
     if (session.exit) return;
     session.exit = exit; this.options.activity?.();
+    clearTimeout(session.recordTimer); session.recordTimer = undefined;
+    // A shell that ended or was closed is not coming back. Only a stopping
+    // worker's kills keep their records.
+    if (session.restorable && !this.disposed) void this.enqueue(session, () => this.forgetRecord(session));
     void this.enqueue(session, async () => { session.exitPublished = true; await this.publish(session, this.exitFrame(session)); await this.closeDescriptor(session); });
     if (session.owner) void this.retire(session, false);
     else this.changed();
@@ -274,6 +318,74 @@ export class Terminals {
     }).catch(() => {}).finally(() => { this.retiring.delete(retirement); finished(); });
     if (!session.owner) this.changed(); this.options.activity?.();
     return retirement;
+  }
+  private async mirror(cols: number, rows: number, record?: TerminalRecord): Promise<TerminalMirror> {
+    if (!record) return this.options.mirror?.(cols, rows) ?? new TerminalMirror(cols, rows);
+    // Parse the saved screen at the size it was serialized at, then fit it.
+    const mirror = this.options.mirror?.(dim(record.cols, cols), dim(record.rows, rows)) ?? new TerminalMirror(dim(record.cols, cols), dim(record.rows, rows));
+    mirror.write(record.screen + RESTORED_NOTICE); await mirror.flush(); mirror.resize(cols, rows);
+    return mirror;
+  }
+  private recordPath(sessionId: string): string | undefined {
+    return this.options.records && join(this.options.records, `${createHash("sha256").update(sessionId).digest("hex")}.json`);
+  }
+  private scheduleRecord(session: Session): void {
+    if (!session.restorable || session.recordTimer || session.removed || session.exit) return;
+    session.recordTimer = setTimeout(() => {
+      session.recordTimer = undefined;
+      void this.enqueue(session, () => this.saveRecord(session));
+    }, this.options.recordDelayMs ?? RECORD_DELAY_MS);
+    session.recordTimer.unref?.();
+  }
+  private async saveRecord(session: Session): Promise<void> {
+    const path = this.recordPath(session.sessionId);
+    if (!path || !session.restorable || session.removed || session.exit) return;
+    // The program that owned an alternate screen or modes dies with the VM.
+    const screen = await session.mirror.snapshot(undefined, { restore: true });
+    let cwd = session.cwd;
+    try { cwd = this.scope.path(await (this.options.workingDirectory ?? (pid => readlink(`/proc/${pid}/cwd`)))(session.native.pid), true); }
+    catch { /* Outside the checkout or unreadable: keep where it started. */ }
+    if (session.exit && !this.disposed) return;
+    const record = (text: string) => JSON.stringify({ version: 1, sessionId: session.sessionId, cwd, cols: session.cols, rows: session.rows,
+      screen: text, savedAt: Date.now() } satisfies TerminalRecord);
+    // A screen too large to keep still leaves the latest directory, never an older record.
+    let body = record(screen.data);
+    if (Buffer.byteLength(body) > RECORD_MAX_BYTES) body = record("");
+    await mkdir(this.options.records!, { recursive: true, mode: 0o700 });
+    const temporary = `${path}.${randomUUID()}.tmp`;
+    try { await writeFile(temporary, body, { mode: 0o600, flag: "wx" }); await rename(temporary, path); }
+    finally { await rm(temporary, { force: true }); }
+  }
+  private async forgetRecord(session: Session): Promise<void> {
+    const path = this.recordPath(session.sessionId);
+    if (path) await rm(path, { force: true });
+  }
+  private async readRecord(sessionId: string): Promise<TerminalRecord | undefined> {
+    const path = this.recordPath(sessionId);
+    if (!path) return undefined;
+    try {
+      const raw = await readFile(path, "utf8");
+      const value: unknown = Buffer.byteLength(raw) > RECORD_MAX_BYTES ? undefined : JSON.parse(raw);
+      if (isRecord(value) && value.sessionId === sessionId && Date.now() - value.savedAt < RECORD_MAX_AGE_MS) return value;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    }
+    // Unreadable, foreign or stale: the new shell's own record replaces it.
+    await rm(path, { force: true }).catch(() => {});
+    return undefined;
+  }
+  /** Records outlive the shells that wrote them only until a client restores
+   * them; bound what closed tabs leave behind while the VM slept. */
+  private async pruneRecords(directory: string): Promise<void> {
+    try {
+      const kept: Array<{ path: string; at: number }> = [];
+      for (const name of await readdir(directory)) {
+        const path = join(directory, name), { mtimeMs } = await stat(path);
+        if (/^[0-9a-f]{64}\.json$/.test(name) && Date.now() - mtimeMs < RECORD_MAX_AGE_MS) kept.push({ path, at: mtimeMs });
+        else if (!name.endsWith(".tmp") || Date.now() - mtimeMs > 60_000) await rm(path, { force: true });
+      }
+      for (const old of kept.sort((a, b) => b.at - a.at).slice(RECORD_LIMIT)) await rm(old.path, { force: true });
+    } catch { /* No records yet. */ }
   }
   private async closeDescriptor(session: Session): Promise<void> { const descriptor = session.descriptor; session.descriptor = undefined; await descriptor?.close(); }
   private busyCount(): number { return this.pending.size + [...this.sessions.values()].filter(session => !session.exit).length; }
