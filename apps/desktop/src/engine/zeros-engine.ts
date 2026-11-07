@@ -14,6 +14,7 @@ import { stopDesignVerification, revokeDesignVerification } from "./design/verif
 import { configureDesignStyleBuilds, designStyleInputChanged, presentDesignStyleBuildRoots, stopDesignStyleBuilds } from "./design/style-builds";
 import { DesignChangePoller, designSnapshotDirectory } from "./design/change-poller";
 import { DesignFrameChanges } from "./design/frame-changes";
+import { localWorktreeNativeWatcher } from "./git/recursive-watch";
 import { configureDesignFonts } from "./design/style-fonts";
 import { fenceDesignSnapshotReads } from "./design/snapshot-epoch";
 import type { DesignCaptureService } from "./design/capture-service";
@@ -2833,6 +2834,7 @@ export class ZerosEngine {
       this.designChangePoller = this.createDesignChangePoller();
       this.designChangePoller.start();
     }
+    const nativeWorktreeWatcher = localWorktreeNativeWatcher(watchHost, process.platform);
     this.gitWatcher = startGitWatcher(
       () => this.workspace.gitWatchTargets(),
       (change) => {
@@ -2881,9 +2883,7 @@ export class ZerosEngine {
       {
         usePolling: !isDevRuntime() && !watchHost,
         worktreePollIntervalMs: 1_500,
-        ...(watchHost
-          ? { nativeWatcher: (root: string) => watchHost.watch(root) }
-          : {}),
+        ...(nativeWorktreeWatcher ? { nativeWatcher: nativeWorktreeWatcher } : {}),
       },
     );
 
