@@ -1,8 +1,9 @@
-import { BrowserWindow, session } from "electron";
+import { BrowserWindow, protocol, session } from "electron";
 import { randomUUID } from "node:crypto";
 import { rendererProcessOwners } from "./renderer-process-owners";
 import { electronDesignCaptureAdmission } from "./design-capture-admission";
-import { DESIGN_STATIC_RENDER_CSS, DESIGN_STATIC_RENDER_SCRIPT } from "@zeros/protocol/design-capture";
+import { DESIGN_CAPTURE_SHEET_SCHEME, DESIGN_STATIC_RENDER_CSS, DESIGN_STATIC_RENDER_SCRIPT } from "@zeros/protocol/design-capture";
+import { createElectronDesignBatchCapture } from "./design-capture-batch";
 import { prepareDesignCaptureViewport, captureScaledDesignPng } from "../src/engine/design/capture-viewport";
 import {
   startDesignCaptureService,
@@ -26,11 +27,15 @@ export async function startElectronDesignCapture(): Promise<DesignCaptureService
   );
   partition.setPermissionCheckHandler(() => false);
   partition.on("will-download", (event) => event.preventDefault());
+  // Batch sheets and their content-addressed stylesheets are served by this
+  // partition's own handler from the batch being rendered; nothing else loads.
   partition.webRequest.onBeforeRequest((details, callback) => {
     callback({
-      cancel: !details.url.startsWith("data:") && details.url !== "about:blank",
+      cancel: !details.url.startsWith("data:") && details.url !== "about:blank" &&
+        !details.url.startsWith(`${DESIGN_CAPTURE_SHEET_SCHEME}://`),
     });
   });
+  const batch = createElectronDesignBatchCapture(partition);
   const service = await startDesignCaptureService(async (input, signal) => {
     signal.throwIfAborted();
     const window = new BrowserWindow({
@@ -147,6 +152,15 @@ export async function startElectronDesignCapture(): Promise<DesignCaptureService
       await retired;
       await partition.clearStorageData();
     }
-  }, electronDesignCaptureAdmission);
-  return service;
+  }, electronDesignCaptureAdmission, batch);
+  return { ...service, async stop() { await service.stop(); batch.retire(); } };
+}
+
+/** The batch capture scheme must be standard and secure before app ready, so
+ * sheet documents have an origin and frame policies can name the scheme. */
+export function registerDesignCaptureSheetPrivileges(): void {
+  protocol.registerSchemesAsPrivileged([{
+    scheme: DESIGN_CAPTURE_SHEET_SCHEME,
+    privileges: { standard: true, secure: true, supportFetchAPI: false, stream: false, corsEnabled: false },
+  }]);
 }

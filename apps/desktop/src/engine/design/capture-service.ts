@@ -1,11 +1,19 @@
 import { createServer, type Server } from "node:http";
-import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { DesignCaptureAdmission } from "./capture-admission";
 import {
+  DESIGN_BATCH_CAPTURE_HTML_BYTES,
+  DESIGN_BATCH_CAPTURE_STYLESHEET_BYTES,
+  DESIGN_BATCH_CAPTURE_TIMEOUT_MS,
   DESIGN_CAPTURE_HTML_BYTES,
   DESIGN_CAPTURE_PNG_BYTES,
+  DESIGN_CAPTURE_SHEET_SCHEME,
   DESIGN_CAPTURE_TIMEOUT_MS,
+  designBatchCaptureRequestSchema,
+  designCaptureRasterSize,
   designCaptureRequestSchema,
+  type DesignBatchCaptureReply,
+  type DesignBatchCaptureRequest,
   type DesignCaptureReply,
   type DesignCaptureRequest,
 } from "@zeros/protocol/design-capture";
@@ -19,6 +27,27 @@ export type DesignCaptureHost = (
   input: DesignCaptureRequest,
   signal: AbortSignal,
 ) => Promise<{ bytes: Uint8Array; renderer: string }>;
+/** Renders a batch of frames; a failed item carries its own error. */
+export type DesignBatchCaptureHost = (
+  input: DesignBatchCaptureRequest,
+  signal: AbortSignal,
+) => Promise<{ items: Array<{ id: string; bytes: Uint8Array } | { id: string; error: string }>; renderer: string }>;
+
+/** JSON escapes can expand the bounded HTML and CSS strings. */
+const DESIGN_BATCH_CAPTURE_TRANSPORT_BYTES =
+  Math.ceil((DESIGN_BATCH_CAPTURE_HTML_BYTES + DESIGN_BATCH_CAPTURE_STYLESHEET_BYTES) * 1.25) + 1024 * 1024;
+const SHEET_LINK = new RegExp(`${DESIGN_CAPTURE_SHEET_SCHEME}://css/([a-f0-9]{64})`, "g");
+
+/** A batch's sheets are content-addressed: each key is its sheet's SHA-256,
+ * and every sheet an item links is present, so a host serves only verified
+ * bytes and a frame never renders against the wrong stylesheet. */
+export function assertDesignBatchStylesheets(input: DesignBatchCaptureRequest): void {
+  for (const [hash, css] of Object.entries(input.stylesheets))
+    if (createHash("sha256").update(css).digest("hex") !== hash) throw new Error("Design batch stylesheet hash mismatch.");
+  for (const item of input.items)
+    for (const match of item.html.matchAll(SHEET_LINK))
+      if (!Object.hasOwn(input.stylesheets, match[1]!)) throw new Error("Design batch item links a missing stylesheet.");
+}
 
 export function assertDesignCapturePng(
   bytes: Uint8Array,
@@ -47,6 +76,7 @@ export function assertDesignCapturePng(
 export async function startDesignCaptureService(
   render: DesignCaptureHost,
   admission = new DesignCaptureAdmission(),
+  renderBatch?: DesignBatchCaptureHost,
 ): Promise<DesignCaptureService> {
   const nativeOwner = {};
   const token = randomBytes(32).toString("hex");
@@ -57,7 +87,72 @@ export async function startDesignCaptureService(
   const cancelledJobs = new Map<string, number>();
   const completedJobs = new Set<string>();
   let flight: Promise<void> | null = null;
+  let batchController: AbortController | null = null;
+  let batchFlight: Promise<void> | null = null;
   let serviceUrl = "";
+  const failResponse = (response: import("node:http").ServerResponse, status: number, error: string) => {
+    response.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store", Connection: "close" });
+    response.end(JSON.stringify({ error }));
+  };
+  /** Thumbnails for many frames in one admitted reservation. Batches are
+   * background work: an explicit capture gets first refusal at admission, and
+   * a batch holds the one slot only for its bounded render. */
+  const batch = (request: import("node:http").IncomingMessage, response: import("node:http").ServerResponse) => {
+    if (!renderBatch) { failResponse(response, 404, "Unknown capture operation."); return; }
+    if (stopped) { failResponse(response, 429, "Design capture capacity reached. Wait for the active capture."); return; }
+    const reservationId = randomUUID();
+    if (!admission.reserve(nativeOwner, reservationId, false)) {
+      failResponse(response, 429, "Design capture capacity reached. Wait for the active capture.");
+      return;
+    }
+    const controller = new AbortController();
+    batchController = controller;
+    const timeout = setTimeout(() => controller.abort(new Error("Design batch capture timed out.")), DESIGN_BATCH_CAPTURE_TIMEOUT_MS);
+    const disconnect = () => { if (!response.writableEnded) controller.abort(new Error("Design batch capture disconnected.")); };
+    response.once("close", disconnect);
+    const abort = () => { if (!request.complete) request.destroy(); };
+    controller.signal.addEventListener("abort", abort, { once: true });
+    batchFlight = (async () => {
+      try {
+        let size = 0;
+        const chunks: Buffer[] = [];
+        for await (const chunk of request) {
+          size += chunk.length;
+          if (size > DESIGN_BATCH_CAPTURE_TRANSPORT_BYTES) { failResponse(response, 413, "Batch capture input is too large."); return; }
+          chunks.push(Buffer.from(chunk));
+        }
+        controller.signal.throwIfAborted();
+        const input = designBatchCaptureRequestSchema.parse(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+        assertDesignBatchStylesheets(input);
+        const result = await renderBatch(input, controller.signal);
+        controller.signal.throwIfAborted();
+        const rendered = new Map(result.items.map(item => [item.id, item]));
+        const value: DesignBatchCaptureReply = {
+          version: 1, revision: input.revision, renderer: result.renderer,
+          items: input.items.map(item => {
+            const picture = rendered.get(item.id);
+            if (!picture) return { id: item.id, error: "Design batch capture produced no picture." };
+            if ("error" in picture) return { id: item.id, error: picture.error.slice(0, 500) || "Design batch capture failed." };
+            const raster = designCaptureRasterSize(item.viewport, item.maxDimension);
+            try { assertDesignCapturePng(picture.bytes, raster.width, raster.height); }
+            catch { return { id: item.id, error: "Design batch capture is not a bounded PNG at the requested size." }; }
+            return { id: item.id, width: raster.width, height: raster.height, data: Buffer.from(picture.bytes).toString("base64") };
+          }),
+        };
+        response.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+        response.end(JSON.stringify(value));
+      } catch {
+        if (!response.destroyed && !response.headersSent) failResponse(response, 422, "Design batch capture failed. The source was not changed.");
+      } finally {
+        clearTimeout(timeout);
+        response.removeListener("close", disconnect);
+        controller.signal.removeEventListener("abort", abort);
+        if (batchController === controller) batchController = null;
+        batchFlight = null;
+        admission.release(nativeOwner, reservationId);
+      }
+    })();
+  };
   const server: Server = createServer(
     { maxHeaderSize: 16 * 1024 },
     (request, response) => {
@@ -101,6 +196,10 @@ export async function startDesignCaptureService(
           response.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
           response.end(JSON.stringify({ settled: true }));
         });
+        return;
+      }
+      if (request.method === "POST" && request.url === "/batch") {
+        batch(request, response);
         return;
       }
       if (request.method !== "POST" || request.url !== "/capture") {
@@ -229,9 +328,11 @@ export async function startDesignCaptureService(
       if (stopped) return;
       stopped = true;
       active?.abort(new Error("Design capture host stopped."));
+      batchController?.abort(new Error("Design capture host stopped."));
       // A trusted renderer must stop on AbortSignal. Do not release capacity
       // for another render while cleanup is still owned by the prior request.
       await flight;
+      await batchFlight;
       server.closeAllConnections();
       await new Promise<void>((resolve) => server.close(() => resolve()));
       cancelledJobs.clear();

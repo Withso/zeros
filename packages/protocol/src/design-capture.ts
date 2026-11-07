@@ -141,3 +141,56 @@ export const designCaptureReplySchema = z
   })
   .strict();
 export type DesignCaptureReply = z.infer<typeof designCaptureReplySchema>;
+
+/** Batched thumbnails: many frames are laid out in one capture document per
+ * sheet, and stylesheets shared by those frames are parsed once per capture
+ * process. Each item's style blocks are replaced, at their own positions, by
+ * links to content-addressed sheets served only from this batch. */
+export const DESIGN_CAPTURE_SHEET_SCHEME = "zeros-capture";
+export const DESIGN_BATCH_CAPTURE_MAX_ITEMS = 64;
+export const DESIGN_BATCH_CAPTURE_MAX_DIMENSION = 1280;
+export const DESIGN_BATCH_CAPTURE_STYLESHEET_BYTES = 16 * 1024 * 1024;
+export const DESIGN_BATCH_CAPTURE_HTML_BYTES = 32 * 1024 * 1024;
+export const DESIGN_BATCH_CAPTURE_TIMEOUT_MS = 60_000;
+export const designCaptureSheetUrl = (hash: string) => `${DESIGN_CAPTURE_SHEET_SCHEME}://css/${hash}`;
+const sheetHash = z.string().regex(/^[a-f0-9]{64}$/);
+export const designBatchCaptureRequestSchema = z
+  .object({
+    version: z.literal(1),
+    revision: z.string().min(1).max(128),
+    colorScheme: z.enum(["light", "dark"]).default("light"),
+    stylesheets: z.record(sheetHash, z.string().max(DESIGN_BATCH_CAPTURE_STYLESHEET_BYTES)),
+    items: z.array(z.object({
+      id: z.string().regex(/^[A-Za-z0-9._:-]{1,128}$/),
+      html: z.string().min(1).max(DESIGN_CAPTURE_HTML_BYTES),
+      viewport: z.object({
+        width: z.number().int().min(1).max(16_384),
+        height: z.number().int().min(1).max(16_384),
+      }).strict(),
+      maxDimension: z.number().int().min(DESIGN_CAPTURE_MIN_DIMENSION).max(DESIGN_BATCH_CAPTURE_MAX_DIMENSION),
+    }).strict()).min(1).max(DESIGN_BATCH_CAPTURE_MAX_ITEMS),
+  })
+  .strict()
+  .refine(input => new Set(input.items.map(item => item.id)).size === input.items.length,
+    { message: "Batch capture item ids must be unique." })
+  .refine(input => Object.values(input.stylesheets).reduce((sum, css) => sum + css.length, 0) <= DESIGN_BATCH_CAPTURE_STYLESHEET_BYTES &&
+    input.items.reduce((sum, item) => sum + item.html.length, 0) <= DESIGN_BATCH_CAPTURE_HTML_BYTES,
+    { message: "Batch capture exceeds its byte budget." });
+export type DesignBatchCaptureRequest = z.infer<typeof designBatchCaptureRequestSchema>;
+export const designBatchCaptureReplySchema = z
+  .object({
+    version: z.literal(1),
+    revision: z.string().min(1).max(128),
+    renderer: z.string().min(1).max(128),
+    items: z.array(z.union([
+      z.object({
+        id: z.string().min(1).max(128),
+        width: z.number().int().min(1).max(DESIGN_BATCH_CAPTURE_MAX_DIMENSION),
+        height: z.number().int().min(1).max(DESIGN_BATCH_CAPTURE_MAX_DIMENSION),
+        data: z.string().max(Math.ceil((DESIGN_CAPTURE_PNG_BYTES * 4) / 3) + 4),
+      }).strict(),
+      z.object({ id: z.string().min(1).max(128), error: z.string().min(1).max(500) }).strict(),
+    ])).max(DESIGN_BATCH_CAPTURE_MAX_ITEMS),
+  })
+  .strict();
+export type DesignBatchCaptureReply = z.infer<typeof designBatchCaptureReplySchema>;
