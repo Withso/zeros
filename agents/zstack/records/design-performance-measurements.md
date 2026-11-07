@@ -271,6 +271,13 @@ hidden for 48 s of lod5's open (production pauses while hidden).
 | lod6 | + 64 px mini level, SVG images released, raster after gestures | 1,000 at 189 s | 1.05 s | 50 ms / 117 | 2.1 / 1.8 GB |
 | lod7 | + overview neighbourhood mounted, mini covers off-screen | 1,000 at 163 s | — | 16.7 ms / 6 | 2.2 GB |
 | lod8 | + GPU tile context warmed at idle | 1,000 at 147 s (100 at 9 s, 500 at 55 s) | 1.03 s | 16.7 ms / 24–31 | 2.0–2.2 GB |
+| lod9 | #886 at 8e4ce9fa (catalog reads 1,224 → 204 per open) | 1,000 at 198 s (window hidden briefly) | 0.85 s | 16.7 ms / 2–3 | 1.9–2.3 GB |
+| lod10 | + residency changes held until a gesture rests | 1,000 at 138 s (100 at 8 s, 500 at 56 s) | 0.95 s | 16.7 ms / 2–3 | 2.1 GB |
+
+lod10 also measured: idle CPU 11.9% visible / 3.5% hidden (lod9: 127% /
+2.9% — its idle phase began while pictures were still being produced);
+inspect select→editor ready p50 542 ms, max 594 ms (lod8 max 8.3 s); zoom
+presented 171–175 of ~420 display frames (lod9 146–186), p95 183 ms.
 
 What each fix found:
 - Frames had no visible extent until content arrived; cold frames now paint
@@ -292,9 +299,12 @@ What each fix found:
 - The first zoom-in created the WebGL tile context inside a frame (538 ms
   waiting on a busy GPU process). It is created at idle after opening.
 
-Still open (2026-11-07): zoom from the fit view into frames drops ~260–310 of
-~420 frames (p95 183–217 ms; React renders as the overview ends, tile
-materialization and forced layouts in rAF callbacks). Renderer RSS stays near
+Still open (2026-11-07): zoom from the fit view into frames drops ~230–270 of
+~420 frames (p95 183 ms). The cost lands at each rest between pinch steps:
+page-wide mount/unmount and source admission, ~1.7 s of style recalculation
+from per-frame chrome scale writes (pictured overview frames are not GPU-tiled,
+so each keeps a CSS stroke), and tile materialization. Drawing overview
+pictures and outlines in the GPU plane would remove the per-frame DOM work. Renderer RSS stays near
 2 GB on this fixture (memory-infra: PartitionAlloc objects 499 MB, Oilpan
 263 MB, malloc 227 MB, V8 116 MB, cc tiles 87 MB) and needs a heap-level
 breakdown. A first open still costs ~0.4 s of mostly renderer-main-thread work
