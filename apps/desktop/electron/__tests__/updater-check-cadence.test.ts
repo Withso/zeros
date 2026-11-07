@@ -8,18 +8,23 @@ const fixture = vi.hoisted(() => ({
   nativeHandlers: new Map<string, () => void>(),
   check: vi.fn<() => Promise<unknown>>(),
   fetch: vi.fn(),
+  idleSeconds: 0,
 }));
+const library = vi.hoisted(() => ({ disableDifferentialDownload: undefined as boolean | undefined }));
 vi.mock("electron", () => ({
   app: { on: (event: string, handler: () => void) => fixture.appHandlers.set(event, handler) },
-  powerMonitor: { on: (event: string, handler: () => void) => fixture.powerHandlers.set(event, handler) },
+  powerMonitor: {
+    on: (event: string, handler: () => void) => fixture.powerHandlers.set(event, handler),
+    getSystemIdleTime: () => fixture.idleSeconds,
+  },
   autoUpdater: { on: (event: string, handler: () => void) => fixture.nativeHandlers.set(event, handler) },
   net: { fetch: fixture.fetch },
 }));
-vi.mock("electron-updater", () => ({ autoUpdater: {
+vi.mock("electron-updater", () => ({ autoUpdater: Object.assign(library, {
   checkForUpdates: fixture.check,
   on: (event: string, handler: (...args: unknown[]) => void) => fixture.updateHandlers.set(event, handler),
   setFeedURL: vi.fn(),
-} }));
+}) }));
 vi.mock("../runtime-mode", () => ({ get IS_PACKAGED() { return fixture.packaged; } }));
 vi.mock("../../src/engine/runtime", () => ({ channel: () => "stable" }));
 vi.mock("../ipc/events", () => ({ emitEvent: vi.fn() }));
@@ -36,6 +41,7 @@ beforeEach(() => {
   fixture.updateHandlers.clear(); fixture.nativeHandlers.clear();
   fixture.check.mockReset().mockResolvedValue({ isUpdateAvailable: false });
   fixture.fetch.mockReset().mockResolvedValue({ ok: true, text: async () => "version: 1.2.3\n" });
+  library.disableDifferentialDownload = undefined;
 });
 afterEach(() => {
   vi.clearAllTimers(); vi.useRealTimers();
@@ -50,6 +56,9 @@ async function setup() {
   updater.setupUpdater();
   await settle();
   return updater;
+}
+function publish(version: string) {
+  fixture.fetch.mockResolvedValue({ ok: true, text: async () => `version: ${version}\n` });
 }
 function stage() {
   fixture.updateHandlers.get("update-available")?.({ version: "1.2.3" });
@@ -158,6 +167,40 @@ describe("automatic update check cadence", () => {
     vi.setSystemTime(Date.now() - 1);
     await vi.advanceTimersByTimeAsync(35 * 60_000);
     expect(fixture.fetch.mock.calls.length).toBeGreaterThanOrEqual(polls + 5);
+  });
+
+  it("keeps a staged update for an hour before replacing it with a newer build", async () => {
+    await setup(); stage(); publish("1.2.4");
+    await vi.advanceTimersByTimeAsync(59 * 60_000);
+    expect(fixture.fetch.mock.calls.length).toBeGreaterThanOrEqual(10);
+    expect(fixture.check).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(6 * 60_000);
+    expect(fixture.check).toHaveBeenCalledTimes(2);
+  });
+
+  it("replaces a staged update below a new required minimum at once", async () => {
+    const updater = await setup(); stage(); publish("1.2.4");
+    updater.requireClientUpgrade({ minimumVersion: "1.2.4", latestVersion: "1.2.4" });
+    await settle();
+    expect(fixture.check).toHaveBeenCalledTimes(2);
+  });
+
+  it("never replaces a staged update that already satisfies the required minimum", async () => {
+    const updater = await setup(); stage(); publish("1.2.4");
+    updater.requireClientUpgrade({ minimumVersion: "1.2.3", latestVersion: "1.2.4" });
+    await vi.advanceTimersByTimeAsync(3 * 60 * 60_000);
+    expect(fixture.check).toHaveBeenCalledTimes(1);
+  });
+
+  it("downloads complete update archives", async () => {
+    await setup();
+    expect(library.disableDifferentialDownload).toBe(true);
+  });
+
+  it("reports how long the user has been away from the Mac", async () => {
+    const updater = await setup();
+    fixture.idleSeconds = 615;
+    expect(updater.systemIdleTime({}, {} as never)).toBe(615);
   });
 
   it("does not create checks or timers for an unpackaged app", async () => {

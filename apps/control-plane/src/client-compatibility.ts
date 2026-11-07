@@ -18,8 +18,11 @@ export type ClientUpgradeRequired = {
 const CACHE_MS = 5 * 60 * 1000;
 const FAILURE_CACHE_MS = 30_000;
 const FETCH_TIMEOUT_MS = 3_000;
-const MAX_LEDGER_BYTES = 65_536;
-const SUPPORT_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
+// Mirrors scripts/release/release-ledger.ts, which retains the whole support
+// window by date (release-ledger-limits.test.ts keeps the two in step).
+export const MAX_LEDGER_BYTES = 512 * 1024;
+export const MAX_LEDGER_RELEASES = 2000;
+export const SUPPORT_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 
 function parseVersion(value: string): DesktopVersion | null {
   if (value.length > 128) return null;
@@ -102,7 +105,7 @@ function parseLedger(value: unknown, channel: ReleaseChannel): ReleaseLedger {
     raw.channel !== channel ||
     !Array.isArray(raw.releases) ||
     !raw.releases.length ||
-    raw.releases.length > 200
+    raw.releases.length > MAX_LEDGER_RELEASES
   )
     throw new Error("invalid ledger");
   const releases: Release[] = [];

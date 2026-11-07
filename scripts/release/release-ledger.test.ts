@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { buildReleaseLedger, previousReleaseLedger, releaseLedgerAsset, releaseLedgerUrl, verifyPublishedReleaseLedger } from "./release-ledger";
+import { buildReleaseLedger, MAX_LEDGER_RELEASES, previousReleaseLedger, ReleaseLedger, releaseLedgerAsset, releaseLedgerUrl,
+  verifyPublishedReleaseLedger } from "./release-ledger";
 
 const repository = "example/zeros", sourceSha = "a".repeat(40);
 const entry = (number: number) => ({ version: `0.1.20-alpha.${number}`, publishedAt: new Date(Date.UTC(2026, 8, 1, 0, number)).toISOString(), sourceSha });
+const day = 24 * 60 * 60 * 1000, now = Date.UTC(2026, 10, 7, 12);
+const dated = (number: number, publishedAt: number) => ({ version: `0.1.20-alpha.${number}`, publishedAt: new Date(publishedAt).toISOString(), sourceSha });
 
 describe("cumulative desktop release ledger", () => {
   it.each(["alpha", "beta", "production"] as const)("builds the %s contract and channel asset", channel => {
@@ -10,11 +13,29 @@ describe("cumulative desktop release ledger", () => {
     expect(buildReleaseLedger(channel, null, release)).toEqual({ version: 1, channel, releases: [release] });
     expect(releaseLedgerUrl(repository, channel)).toBe(`https://github.com/${repository}/releases/${channel === "production" ? "latest/download" : `download/${channel}`}/${releaseLedgerAsset(channel)}`);
   });
-  it("appends without mutating its input and bounds history to the newest 200", () => {
-    const previous = { version: 1, channel: "alpha", releases: Array.from({ length: 200 }, (_, index) => entry(index + 1)) };
-    const snapshot = structuredClone(previous), ledger = buildReleaseLedger("alpha", previous, entry(201));
-    expect(previous).toEqual(snapshot); expect(ledger.releases).toHaveLength(200);
-    expect(ledger.releases[0]).toEqual(entry(2)); expect(ledger.releases.at(-1)).toEqual(entry(201));
+  it("keeps every release from the support window plus the newest one before it, without mutating its input", () => {
+    const previous = { version: 1, channel: "alpha", releases: [dated(1, now - 45 * day), dated(2, now - 31 * day),
+      dated(3, now - 30 * day), dated(4, now - day)] };
+    const snapshot = structuredClone(previous), ledger = buildReleaseLedger("alpha", previous, dated(5, now));
+    expect(previous).toEqual(snapshot);
+    expect(ledger.releases).toEqual([dated(2, now - 31 * day), dated(3, now - 30 * day), dated(4, now - day), dated(5, now)]);
+  });
+  it("retains a busy channel's whole support window beyond 200 releases", () => {
+    const releases = Array.from({ length: 600 }, (_, index) => dated(index + 1, now - 29 * day + index * 60_000));
+    const ledger = buildReleaseLedger("alpha", { version: 1, channel: "alpha", releases }, dated(601, now));
+    expect(ledger.releases).toHaveLength(601);
+    expect(ReleaseLedger.safeParse(ledger).success).toBe(true);
+  });
+  it("keeps the previous release when a quiet channel publishes after the window", () => {
+    const previous = buildReleaseLedger("alpha", null, dated(1, now - 90 * day));
+    expect(buildReleaseLedger("alpha", previous, dated(2, now)).releases).toEqual([dated(1, now - 90 * day), dated(2, now)]);
+  });
+  it("bounds history to the newest MAX_LEDGER_RELEASES entries", () => {
+    const releases = Array.from({ length: MAX_LEDGER_RELEASES }, (_, index) => dated(index + 1, now - day + index));
+    const ledger = buildReleaseLedger("alpha", { version: 1, channel: "alpha", releases }, dated(MAX_LEDGER_RELEASES + 1, now));
+    expect(ledger.releases).toHaveLength(MAX_LEDGER_RELEASES);
+    expect(ledger.releases[0]).toEqual(releases[1]);
+    expect(ReleaseLedger.safeParse({ ...ledger, releases: [...releases, dated(MAX_LEDGER_RELEASES + 1, now)] }).success).toBe(false);
   });
   it("uses stable chronological ordering, including simultaneous publications", () => {
     const first = entry(1), second = { ...entry(2), publishedAt: first.publishedAt };

@@ -3,6 +3,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   ClientCompatibility,
   createClientCompatibilityMiddleware,
+  MAX_LEDGER_BYTES,
+  MAX_LEDGER_RELEASES,
   releaseLedgerUrl,
 } from "./client-compatibility.js";
 import { loadConfig } from "./config.js";
@@ -30,6 +32,20 @@ const releases = [
   },
 ];
 const ledger = { version: 1, channel: "alpha", releases };
+
+/** A valid ledger of `count` releases, one minute apart, ending an hour ago. */
+function bulkLedger(count: number) {
+  const start = now - 60 * 60_000 - (count - 1) * 60_000;
+  return {
+    version: 1,
+    channel: "alpha",
+    releases: Array.from({ length: count }, (_, index) => ({
+      version: `0.1.30-alpha.${index + 1}`,
+      publishedAt: new Date(start + index * 60_000).toISOString(),
+      sourceSha: "d".repeat(40),
+    })),
+  };
+}
 
 function harness(body: unknown = ledger) {
   const fetchLedger = vi.fn(async () => Response.json(body));
@@ -236,6 +252,7 @@ describe("bounded channel ledger cache", () => {
     },
     { ...ledger, releases: [{ ...releases[0], sourceSha: "not-a-sha" }] },
     { ...ledger, releases: Array.from({ length: 201 }, () => releases[0]) },
+    bulkLedger(MAX_LEDGER_RELEASES + 1),
   ])(
     "fails open on an invalid ledger without logging its contents",
     async (body) => {
@@ -322,9 +339,32 @@ describe("bounded channel ledger cache", () => {
     expect(fetchLedger.mock.calls[0][1]?.signal?.aborted).toBe(true);
   });
 
+  it("enforces a full-size ledger that spans the whole support window", async () => {
+    const full = bulkLedger(MAX_LEDGER_RELEASES);
+    const body = `${JSON.stringify(full, null, 2)}\n`;
+    expect(new TextEncoder().encode(body).byteLength).toBeGreaterThan(65_536);
+    expect(new TextEncoder().encode(body).byteLength).toBeLessThanOrEqual(
+      MAX_LEDGER_BYTES,
+    );
+    const compatibility = new ClientCompatibility({
+      fetch: vi.fn(async () => new Response(body)),
+      now: () => now,
+      warn: vi.fn(),
+    });
+    expect(
+      await compatibility.check("desktop/alpha/0.1.30-alpha.1"),
+    ).toBeNull();
+    expect(
+      await compatibility.check("desktop/alpha/0.1.29-alpha.999"),
+    ).toMatchObject({
+      code: "client_upgrade_required",
+      minimumVersion: "0.1.30-alpha.1",
+    });
+  });
+
   it("bounds response bytes and rejects unsuccessful fetches", async () => {
     for (const response of [
-      new Response("x".repeat(65_537)),
+      new Response("x".repeat(MAX_LEDGER_BYTES + 1)),
       new Response("missing", { status: 404 }),
     ]) {
       const compatibility = new ClientCompatibility({

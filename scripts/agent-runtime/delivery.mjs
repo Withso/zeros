@@ -13,7 +13,7 @@ export function validateLedger(value, channel) {
     value?.version === 1 &&
       value.channel === channel &&
       Array.isArray(value.releases) &&
-      value.releases.length <= 200,
+      value.releases.length <= LIMITS.ledgerReleases,
     "Invalid public release ledger.",
   );
   const pattern =
@@ -65,13 +65,13 @@ export async function desktopDelivery(github, channel) {
   invariant(
     assets.length === 1 &&
       assets[0].browser_download_url === url &&
-      assets[0].size <= 256 * 1024,
+      assets[0].size <= LIMITS.ledgerBytes,
     "Release ledger asset mismatch.",
   );
   const { data } = await publicFetch(url, {
     fetchImpl: github.fetch,
     json: true,
-    maximum: 256 * 1024,
+    maximum: LIMITS.ledgerBytes,
   });
   const ledger = validateLedger(data, channel);
   const latest = [...ledger.releases]

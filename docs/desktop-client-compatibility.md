@@ -35,7 +35,12 @@ Each channel publishes a cumulative release ledger with its desktop feed:
 
 The asset is versioned JSON, with `version: 1`, its exact channel, and
 `releases` ordered oldest to newest. Each entry contains `version`, UTC
-`publishedAt`, and a 40-hex `sourceSha`; retain the newest 200 entries.
+`publishedAt`, and a 40-hex `sourceSha`. Publication retains every entry from
+the last 30 days plus the newest entry before them, because that version stays
+supported while its successor is inside the window. A busy channel such as
+Alpha therefore keeps its whole support window. The ledger holds at most 2,000
+entries and 512 KiB; the writer, control plane and agent-runtime reader share
+those bounds (`scripts/__tests__/release-ledger-limits.test.ts`).
 
 For a client version V, the newest version is always supported. Otherwise, V
 is supported until 30 days after the **next newer** entry's publication, not
@@ -52,7 +57,7 @@ authentication or tamper-resistance boundary.
 
 The control plane keeps at most three exact-channel cache entries, shares
 in-flight reads, and caches success for five minutes. Reads have a three-second
-timeout, a 64 KiB response limit, and strict ledger validation. Failures log
+timeout, a 512 KiB response limit, and strict ledger validation. Failures log
 only the channel and a safe warning, allow requests, and retry after 30 seconds.
 An expired snapshot is not used to enforce a minimum during an outage.
 
@@ -105,6 +110,21 @@ including renderer window recreation, and is merged monotonically so a late
 older response cannot lower the minimum. The additive `required` field and
 `updater_require` command carry validated version metadata only, never remote
 error text. Malformed 426 bodies still block with safe, unknown-version copy.
+
+## Update downloads
+
+The updater checks the channel feed at launch, every five minutes and on window
+focus or wake, and downloads a newer build in the background. It always
+downloads the complete archive: the release CDN rejects the multi-range requests
+a differential download makes (HTTP 501), so differential downloads stay off.
+
+Once a build is staged, a newer feed build replaces it at most once an hour, so
+a busy channel does not download every build. Each replacement attempt restarts
+that hour, including a failed one. A required minimum above the staged build
+replaces it at once. A staged build that already meets the required minimum is
+never replaced while the requirement stands, so the mandatory restart is not
+pushed back. Without automatic restart, the staged build installs on the next
+quit, as before.
 
 ## Update relaunch recovery (macOS)
 

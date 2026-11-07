@@ -71,6 +71,7 @@ import { designExportPng } from "./design-export";
 import { designCaptureAcquire, designCaptureRelease } from "../../design-capture-admission";
 import {
   processRelaunch,
+  systemIdleTime,
   updaterCheck,
   updaterInstall,
   updaterStatus,
@@ -213,6 +214,7 @@ export function registerAllCommands(): void {
   setCommand("updater_status", updaterStatus);
   setCommand("updater_require", updaterRequire);
   setCommand("process_relaunch", processRelaunch);
+  setCommand("system_idle_time", systemIdleTime);
 
   // Agent transcript and chat-list persistence moved to the engine's
   // unified Zeros DB (reached over the bridge); the retired electron/db.ts handlers are

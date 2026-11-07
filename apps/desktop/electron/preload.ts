@@ -104,6 +104,7 @@ const ALLOWED_COMMANDS = new Set<string>([
   "reveal_in_finder",
   "shell_open_url",
   "skills_list",
+  "system_idle_time",
   "updater_check",
   "updater_install",
   "updater_status",

@@ -17,6 +17,8 @@ export const LIMITS = Object.freeze({
   files: 4000,
   pages: 20,
   timeout: 25_000,
+  ledgerReleases: 2000,
+  ledgerBytes: 512 * 1024,
 });
 
 export const PROVIDERS = Object.freeze({

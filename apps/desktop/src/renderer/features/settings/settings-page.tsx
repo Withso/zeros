@@ -814,7 +814,7 @@ function GeneralPanel({ surfaceActive = true }: { surfaceActive?: boolean }) {
         </SettingsRow>
         <SettingsRow
           label="Restart automatically on update"
-          hint="Restarts when idle to install updates."
+          hint="Restarts to install updates after 10 minutes away."
           htmlFor="restart-automatically-on-update"
         >
           <Switch

@@ -101,7 +101,10 @@ as **Restart automatically on update** in Settings → General. Enabling it arms
 the existing restart-when-idle flow once the native installer confirms a staged
 update, including one already downloaded. Zeros waits for 30 continuous seconds
 without agent work across Local, organization-local and cloud sessions; new work
-resets that wait. Disabling it cancels automatic intent while preserving any
+resets that wait. It then also waits until nobody has used the Mac's keyboard,
+mouse or trackpad for 10 minutes, rechecking agent work after each idle reading.
+An unreadable idle time counts as activity. A manual "Restart when idle" does
+not wait for the user to be away. Disabling it cancels automatic intent while preserving any
 separately requested manual idle restart. This device preference applies across
 owner switches and does not restart cloud workers. Required updates retain their
 existing mandatory restart flow.

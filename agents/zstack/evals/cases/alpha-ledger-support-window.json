@@ -1,0 +1,9 @@
+{
+  "id": "alpha-ledger-support-window",
+  "kind": "replay",
+  "area": "scripts-release",
+  "fixedBy": "pr:891",
+  "symptom": "The release ledger kept only the newest 200 builds. Alpha publishes so often that 200 builds covered about three weeks, and the control plane forces every version older than the ledger, so Alpha desktops were forced to update after about three weeks instead of the documented 30 days.",
+  "rule": "A retention bound must be stated in the unit of the contract it serves: the ledger keeps every release in the 30-day support window plus the newest one before it, and every reader shares the writer's count and byte bounds through a parity test (principles 10 and 11).",
+  "check": "pnpm exec vitest run --config scripts/release/vitest.config.ts scripts/release/release-ledger.test.ts -t \"retains a busy channel's whole support window beyond 200 releases\""
+}

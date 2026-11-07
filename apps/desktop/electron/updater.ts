@@ -21,6 +21,9 @@ let relaunchGuard: ChildProcess | null = null;
 
 const CHECK_INTERVAL_MS = 5 * 60 * 1000;
 const MIN_OPPORTUNISTIC_CHECK_GAP_MS = 60 * 1000;
+// Fast channels publish many builds a day and every replacement is a full
+// download, so a staged build waits this long before a newer one replaces it.
+const STAGED_REPLACEMENT_HOLD_MS = 60 * 60 * 1000;
 // GitHub Releases is the serving layer. `/releases/latest/download/<asset>`
 // always resolves to whatever release is marked Latest (release.yml passes
 // `--latest`; prereleases never qualify), and the rolling `alpha` / `beta` tags
@@ -120,6 +123,7 @@ export function getUpdaterStatus(): UpdaterStatusSnapshot {
  *  install. Lets updater_install choose "download" vs "restart now". */
 let updateDownloaded = false;
 let stagedVersion = "";
+let replacementHeldSince: number | null = null;
 
 /** Set when the user clicks Install before the background download finishes —
  *  we then quitAndInstall the moment `update-downloaded` fires. */
@@ -228,6 +232,7 @@ function publishUnlessReady(status: UpdaterStatusState): void {
 
 function markUpdateStaged(version: string): void {
   stagedVersion = version || pendingVersion || stagedVersion;
+  replacementHeldSince = Date.now();
   updateDownloaded = true;
   stagedReplacementFallback = "";
   publish({ kind: "ready", version: stagedVersion });
@@ -275,6 +280,18 @@ function checkForUpdatesShared(): Promise<CheckResult> {
   return request;
 }
 
+/** A required minimum above the staged build replaces it at once; a staged build
+ * that already satisfies the requirement is about to be installed and is kept.
+ * Otherwise a staged build is replaced at most once per hold. */
+function stagedReplacementDue(staged: string): boolean {
+  if (requiredUpgrade) {
+    return Boolean(requiredUpgrade.minimumVersion && isVersionNewer(requiredUpgrade.minimumVersion, staged));
+  }
+  const now = Date.now();
+  const since = replacementHeldSince;
+  return since === null || now < since || now - since >= STAGED_REPLACEMENT_HOLD_MS;
+}
+
 /**
  * Squirrel.Mac can discard an already-staged directory when native
  * checkForUpdates runs again. Poll the tiny channel metadata first and
@@ -309,6 +326,9 @@ function checkForNewerThanStaged(reason: string, force = false): void {
     const candidate = parseFeedVersion(await response.text());
     if (candidate) lastStagedFeedSucceededAt = Date.now();
     if (!candidate || !isVersionNewer(candidate, previousVersion)) return;
+    if (!stagedReplacementDue(previousVersion)) return;
+    // A failed replacement keeps the staged build and waits a full hold again.
+    replacementHeldSince = Date.now();
     // The old ready toast is no longer actionable once Squirrel starts staging
     // its replacement. Hide it until the native event confirms the new build.
     updateDownloaded = false;
@@ -527,6 +547,9 @@ export function setupUpdater(): void {
   // to apply on the next natural quit — an update never forces a restart out
   // from under a running agent.
   autoUpdater.autoDownload = true;
+  // The release CDN rejects the multi-range requests a differential download
+  // makes (HTTP 501), so every update already ended in a full download.
+  autoUpdater.disableDifferentialDownload = true;
   autoUpdater.autoInstallOnAppQuit = true;
 
   // Point the updater at THIS build's channel feed. Dev never reaches here (the
@@ -723,6 +746,8 @@ export const updaterInstall: CommandHandler = async (args) => {
 /** Subscribe-then-snapshot renderer handshake. Events can be dropped while no
  * window exists; this monotonic snapshot makes the current staged state exact. */
 export const updaterStatus: CommandHandler = () => currentStatus;
+/** Seconds since the last keyboard, mouse or trackpad input anywhere on the Mac. */
+export const systemIdleTime: CommandHandler = () => powerMonitor.getSystemIdleTime();
 export const updaterRequire: CommandHandler = (args) => requireClientUpgrade(args);
 
 /** Explicit process relaunch. Kept for any caller that still needs an in-place

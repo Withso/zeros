@@ -7,6 +7,7 @@ const fixture = vi.hoisted(() => ({
   status: { kind: "idle", revision: 0 } as UpdaterStatus,
   enabled: false,
   working: false,
+  idleSeconds: 600,
   required: null as ClientUpgradeRequired | null,
   install: vi.fn(async () => {}),
   invoke: vi.fn(),
@@ -131,6 +132,10 @@ beforeEach(() => {
   fixture.status = { kind: "idle", revision: 0 };
   fixture.enabled = fixture.working = fixture.dirty = false;
   fixture.required = null;
+  fixture.idleSeconds = 600;
+  fixture.invoke.mockImplementation(async (command: string) =>
+    command === "system_idle_time" ? fixture.idleSeconds : undefined,
+  );
   fixture.states = [];
   fixture.effects = [];
   fixture.pendingEffects = [];
@@ -295,12 +300,14 @@ describe("optional automatic update restarts", () => {
     fixture.enabled = true;
     ready();
     await vi.advanceTimersByTimeAsync(20_000);
-    fixture.invoke.mockResolvedValue({ version: "1.2.3" });
+    fixture.invoke.mockImplementation(async (command: string) =>
+      command === "updater_check" ? { version: "1.2.3" } : fixture.idleSeconds,
+    );
     fixture.menuCheck!();
     await vi.advanceTimersByTimeAsync(0);
     render();
     expect(fixture.info).toHaveBeenCalledWith(
-      "Zeros will restart when the update is ready and your agents are idle.",
+      "Zeros will restart to update once your agents are idle and you've been away for 10 minutes.",
     );
     await vi.advanceTimersByTimeAsync(10_000);
     expect(fixture.install).toHaveBeenCalledOnce();
@@ -313,6 +320,76 @@ describe("optional automatic update restarts", () => {
     await vi.advanceTimersByTimeAsync(60_000);
     expect(fixture.install).not.toHaveBeenCalled();
     expect(fixture.showToast).not.toHaveBeenCalled();
+  });
+
+  it("waits until the user has been away for ten minutes", async () => {
+    fixture.enabled = true;
+    fixture.idleSeconds = 30;
+    ready();
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(fixture.install).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(569_999);
+    expect(fixture.install).not.toHaveBeenCalled();
+    fixture.idleSeconds = 600;
+    await vi.advanceTimersByTimeAsync(1);
+    expect(fixture.install).toHaveBeenCalledExactlyOnceWith({
+      requireReady: true,
+    });
+  });
+
+  it("keeps waiting while the user stays active and reads idle time sparingly", async () => {
+    fixture.enabled = true;
+    fixture.idleSeconds = 0;
+    ready();
+    await vi.advanceTimersByTimeAsync(60 * 60_000);
+    expect(fixture.install).not.toHaveBeenCalled();
+    const reads = fixture.invoke.mock.calls.filter(
+      ([command]) => command === "system_idle_time",
+    ).length;
+    expect(reads).toBeGreaterThan(0);
+    expect(reads).toBeLessThanOrEqual(7);
+  });
+
+  it("treats an unreadable idle time as activity", async () => {
+    fixture.enabled = true;
+    fixture.invoke.mockImplementation(async (command: string) => {
+      if (command === "system_idle_time") throw new Error("unavailable");
+    });
+    ready();
+    await vi.advanceTimersByTimeAsync(30 * 60_000);
+    expect(fixture.install).not.toHaveBeenCalled();
+  });
+
+  it("rechecks agent work after the idle read returns", async () => {
+    fixture.enabled = true;
+    let away!: (seconds: number) => void;
+    fixture.invoke.mockImplementation((command: string) =>
+      command === "system_idle_time"
+        ? new Promise<number>((resolve) => {
+            away = resolve;
+          })
+        : Promise.resolve(undefined),
+    );
+    ready();
+    await vi.advanceTimersByTimeAsync(30_000);
+    fixture.working = true;
+    away(600);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fixture.install).not.toHaveBeenCalled();
+  });
+
+  it("restarts a manually requested idle restart without waiting for the user to leave", async () => {
+    fixture.working = true;
+    fixture.idleSeconds = 0;
+    ready();
+    fixture.showToast.mock.lastCall![0].onRestartWhenIdle();
+    render();
+    fixture.working = false;
+    render();
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(fixture.install).toHaveBeenCalledExactlyOnceWith({
+      requireReady: true,
+    });
   });
 
   it("cleans up a pending restart on unmount", async () => {

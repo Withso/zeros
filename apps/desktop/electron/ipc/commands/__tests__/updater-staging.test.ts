@@ -129,12 +129,12 @@ describe("macOS updater staging boundary", () => {
     expect(mocks.libraryUpdater.checkForUpdates).toHaveBeenCalledTimes(checks);
   });
 
-  it("replaces a staged build when the feed advances", async () => {
+  it("replaces a staged build when the feed advances after the replacement hold", async () => {
     const focusHandler = mocks.app.on.mock.calls.find(
       ([event]) => event === "browser-window-focus",
     )?.[1] as (() => void) | undefined;
     const now = Date.now();
-    const clock = vi.spyOn(Date, "now").mockReturnValue(now + 301_000);
+    const clock = vi.spyOn(Date, "now").mockReturnValue(now + 60 * 60_000 + 1_000);
     mocks.net.fetch.mockResolvedValueOnce({
       ok: true,
       status: 200,
