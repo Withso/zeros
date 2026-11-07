@@ -41,6 +41,9 @@ const MAINTENANCE_SCAN_MS = 60_000;
  * deferrals wake it sooner. */
 const IDLE_SWEEP_MS = 60_000;
 export const CLOUD_V2_LIFECYCLE_CHANNEL = "zeros_cloud_v2_lifecycle";
+/** Each sweep starts Computer build and maintenance checks in the background;
+ * one that settles this quickly found nothing long-running to do. */
+const BACKGROUND_SETTLE_MS = 1_000;
 export const CLOUD_V2_IDLE_STOP_MS = 15 * 60_000;
 /** A failed stop checkpoint is retried on a fork of the stopped VM: first
  * after whatever failed has had time to pass, then less often. */
@@ -218,8 +221,9 @@ export class CloudV2Lifecycle {
     this.sweeping = true;
     let next = this.intervalMs;
     try {
+      const running = new Set([this.building, this.cleaning, this.retrying, this.renewing]);
       await this.poll();
-      next = await this.nextSweep();
+      next = await this.nextSweep(running);
     } catch (error) {
       this.deps.logger?.warn(`[cloud-v2] lifecycle poll failed (${errorCode(error)})`);
     } finally { this.sweeping = false; }
@@ -229,7 +233,13 @@ export class CloudV2Lifecycle {
 
   /** Work in progress keeps the fast cadence; otherwise the next due deferral,
    * bounded by the idle sweep, decides. */
-  private async nextSweep(): Promise<number> {
+  private async nextSweep(running: ReadonlySet<Promise<void> | null>): Promise<number> {
+    const background = [this.building, this.cleaning, this.retrying, this.renewing].filter(task => task !== null && !running.has(task));
+    if (background.length) {
+      let timer: NodeJS.Timeout | undefined;
+      await Promise.race([Promise.allSettled(background), new Promise(resolve => { timer = setTimeout(resolve, BACKGROUND_SETTLE_MS); })]);
+      clearTimeout(timer);
+    }
     if (this.inFlight.size || this.building || this.cleaning || this.retrying || this.renewing) return this.intervalMs;
     const due = await this.deps.store.nextLifecycleDue();
     return due === null ? IDLE_SWEEP_MS : Math.min(IDLE_SWEEP_MS, Math.max(this.intervalMs, due));
