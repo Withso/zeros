@@ -13,6 +13,10 @@ import { rendererProcessOwners } from "./renderer-process-owners";
 
 /** Capture processes rendering sheets at once. Beyond about four the frames'
  * layout competes for the same cores (measured on an M4 under load). */
+/** Names how pictures are made in every capture reply. The engine reuses a
+ * stored picture only when its renderer matches, so a Chromium update redraws. */
+export const DESIGN_CAPTURE_RENDERER = `electron-${process.versions.electron}/chromium-${process.versions.chrome}`;
+
 export const DESIGN_BATCH_CAPTURE_WINDOWS = Math.max(1, Math.min(4, Math.floor((os.availableParallelism?.() ?? os.cpus().length) / 2)));
 /** Idle capture processes are destroyed after this long: a burst of batches
  * reuses them, and a quiet app keeps none. */
@@ -180,7 +184,7 @@ export function createElectronDesignBatchCapture(partition: Session, options: {
       }));
       signal.throwIfAborted();
       return {
-        renderer: `electron-${process.versions.electron}/chromium-${process.versions.chrome}`,
+        renderer: DESIGN_CAPTURE_RENDERER,
         items: input.items.map((item) => results.get(item.id) ?? { id: item.id, error: "Design batch capture did not render this frame." }),
       };
     } finally {

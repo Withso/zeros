@@ -76,6 +76,7 @@ describe("Zeros browser tool client", () => {
         ZEROS_BROWSER_SERVICE_TOKEN: "secret",
         ZEROS_DESIGN_CAPTURE_URL: "http://127.0.0.1:2",
         ZEROS_DESIGN_CAPTURE_TOKEN: "fixture-private-capture",
+        ZEROS_DESIGN_CAPTURE_RENDERER: "electron-0/chromium-0",
         ZEROS_AGENT_CONTROL_SERVICE_URL: "http://127.0.0.1:3",
         ZEROS_AGENT_CONTROL_SERVICE_TOKEN: "control-secret",
       }),

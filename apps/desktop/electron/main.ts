@@ -1136,7 +1136,7 @@ app.whenReady().then(async () => {
   let browserRendererEpoch = 0;
   const designCaptureReady = startElectronDesignCapture().then(service => {
     designCaptureService = service;
-    setDesignCaptureEnvironment({ url: service.url, token: service.token });
+    setDesignCaptureEnvironment({ url: service.url, token: service.token, renderer: service.renderer });
   }).catch(() => { console.warn("[Zeros] Design capture service unavailable."); });
   // The bar that names the agent controlling a Browser tab page and lets the
   // user stop it. Its page is a second entry of the renderer build.

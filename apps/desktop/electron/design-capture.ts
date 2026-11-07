@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { rendererProcessOwners } from "./renderer-process-owners";
 import { electronDesignCaptureAdmission } from "./design-capture-admission";
 import { DESIGN_CAPTURE_SHEET_SCHEME, DESIGN_STATIC_RENDER_CSS, DESIGN_STATIC_RENDER_SCRIPT } from "@zeros/protocol/design-capture";
-import { createElectronDesignBatchCapture } from "./design-capture-batch";
+import { createElectronDesignBatchCapture, DESIGN_CAPTURE_RENDERER } from "./design-capture-batch";
 import { prepareDesignCaptureViewport, captureScaledDesignPng } from "../src/engine/design/capture-viewport";
 import {
   startDesignCaptureService,
@@ -17,7 +17,7 @@ import {
 /** An on-demand invisible authored renderer. This partition is never shared
  * with browser-use sessions, the app renderer, or user cookies. Each capture
  * owns and destroys its window; a closed Design canvas is not required. */
-export async function startElectronDesignCapture(): Promise<DesignCaptureService> {
+export async function startElectronDesignCapture(): Promise<DesignCaptureService & { renderer: string }> {
   const partition = session.fromPartition(
     `zeros-design-capture-${randomUUID()}`,
     { cache: false },
@@ -126,7 +126,7 @@ export async function startElectronDesignCapture(): Promise<DesignCaptureService
       if (input.layoutViewport) {
         const bytes = await captureScaledDesignPng(input, params => whileAlive(window.webContents.debugger.sendCommand("Page.captureScreenshot", params)));
         signal.throwIfAborted();
-        return { bytes, renderer: `electron-${process.versions.electron}/chromium-${process.versions.chrome}` };
+        return { bytes, renderer: DESIGN_CAPTURE_RENDERER };
       }
       const captured = await whileAlive(window.webContents.capturePage(
         { x: 0, y: 0, width: input.width, height: input.height },
@@ -144,7 +144,7 @@ export async function startElectronDesignCapture(): Promise<DesignCaptureService
             });
       return {
         bytes: image.toPNG(),
-        renderer: `electron-${process.versions.electron}/chromium-${process.versions.chrome}`,
+        renderer: DESIGN_CAPTURE_RENDERER,
       };
     } finally {
       signal.removeEventListener("abort", destroy);
@@ -153,7 +153,7 @@ export async function startElectronDesignCapture(): Promise<DesignCaptureService
       await partition.clearStorageData();
     }
   }, electronDesignCaptureAdmission, batch);
-  return { ...service, async stop() { await service.stop(); batch.retire(); } };
+  return { ...service, renderer: DESIGN_CAPTURE_RENDERER, async stop() { await service.stop(); batch.retire(); } };
 }
 
 /** The batch capture scheme must be standard and secure before app ready, so

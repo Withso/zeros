@@ -105,6 +105,13 @@ it("keeps a bounded hidden window while rendering the complete layout viewport",
   expect(mocks.partition.clearStorageData).toHaveBeenCalledOnce();
 });
 
+it("tells the engine the renderer its capture replies name", async () => {
+  const service = await startElectronDesignCapture();
+  const result = await mocks.render!(input(), new AbortController().signal);
+  expect(service.renderer).toBe(result.renderer);
+  expect(service.renderer).toBe(`electron-${process.versions.electron}/chromium-${process.versions.chrome}`);
+});
+
 it("disposes the capture window and rejects late pixels after cancellation", async () => {
   await startElectronDesignCapture();
   const controller = new AbortController();
