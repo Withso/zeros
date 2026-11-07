@@ -1,6 +1,7 @@
 import { mkdir, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, expect, it } from "vitest";
+import { Terminal } from "@xterm/headless";
 import type { BridgeMessage } from "@zeros/protocol/messages";
 import type { AppClient } from "../../agents";
 import { browserFrame } from "../../__tests__/worker-fixtures";
@@ -35,15 +36,19 @@ class FakeProcess implements TerminalProcess {
 async function workspace() {
   const fixture = await repositoryFixture();
   const records = join(fixture.state, "terminals");
-  const start = (options: { cwd?: string; recordDelayMs?: number } = {}) => {
+  const start = (options: { cwd?: string; liveDirectory?: () => string; recordDelayMs?: number } = {}) => {
     const natives: FakeProcess[] = [], spawned: TerminalSpawnOptions[] = [];
     const service = new Terminals(fixture.scope, { records, ...(options.recordDelayMs === undefined ? {} : { recordDelayMs: options.recordDelayMs }),
-      workingDirectory: async () => options.cwd ?? fixture.scope.root,
+      workingDirectory: async () => options.liveDirectory?.() ?? options.cwd ?? fixture.scope.root,
       spawn: async spawn => { spawned.push(spawn); const native = new FakeProcess(); natives.push(native); return native; } });
     services.push(service);
     return { service, natives, spawned };
   };
   return { ...fixture, records, start };
+}
+/** A worker whose shells report a directory that can change while they run. */
+function workspaceStart(start: Awaited<ReturnType<typeof workspace>>["start"], cwd: () => string) {
+  return start({ cwd: undefined, liveDirectory: cwd });
 }
 
 it("restores a plain shell's screen and directory in the next worker as a reattach", async () => {
@@ -134,3 +139,76 @@ it("ignores a corrupt record and replaces it with the new shell's", async () => 
   expect(b.created()).toMatchObject({ type: "PTY_CREATED" });
   expect((b.created() as { reattached?: boolean }).reattached).toBeFalsy();
 });
+
+it("restores a shell saved while a full-screen program ran without that program's screen or modes", async () => {
+  const { start } = await workspace();
+  const before = start(), a = client("a");
+  await before.service.handle(a.client, frame("PTY_CREATE", { sessionId: "plain", restore: true, cols: 80, rows: 24 }));
+  before.natives[0]!.emit("$ ls\r\nREADME.md\r\n$ vim README.md\r\n");
+  // vim: alternate screen, SGR mouse reporting, application cursor and keypad, hidden cursor.
+  before.natives[0]!.emit("\x1b[?1049h\x1b[?1000h\x1b[?1006h\x1b[?1h\x1b=\x1b[?25l\x1b[H\x1b[2JVIM-SCREEN");
+  await before.service.flush(); await before.service.dispose();
+
+  const after = start(), b = client("b");
+  await after.service.handle(b.client, frame("PTY_CREATE", { sessionId: "plain", restore: true, cols: 80, rows: 24 }));
+  const created = b.created();
+  if (created?.type !== "PTY_CREATED") throw new Error("Missing create reply");
+  // The desktop resets its xterm and writes the replay; then the new shell prints its prompt.
+  const desktop = new Terminal({ cols: 80, rows: 24, allowProposedApi: true });
+  try {
+    await new Promise<void>(resolve => desktop.write(`\x1bc${created.replay}$ `, resolve));
+    const screen = Array.from({ length: 24 }, (_, row) => desktop.buffer.active.getLine(row)?.translateToString(true) ?? "").join("\n");
+    expect({ buffer: desktop.buffer.active.type, mouse: desktop.modes.mouseTrackingMode, cursorKeys: desktop.modes.applicationCursorKeysMode,
+      keypad: desktop.modes.applicationKeypadMode }).toEqual({ buffer: "normal", mouse: "none", cursorKeys: false, keypad: false });
+    expect(screen).toContain("$ vim README.md"); expect(screen).not.toContain("VIM-SCREEN");
+  } finally { desktop.dispose(); }
+});
+
+it("keeps the latest directory when the latest screen is too large to save", async () => {
+  const { scope, start } = await workspace();
+  await mkdir(join(scope.root, "a")); await mkdir(join(scope.root, "b"));
+  const first = await realpath(join(scope.root, "a")), latest = await realpath(join(scope.root, "b"));
+  let cwd = first;
+  const before = workspaceStart(start, () => cwd), a = client("a");
+  await before.service.handle(a.client, frame("PTY_CREATE", { sessionId: "plain", restore: true, cols: 400, rows: 100 }));
+  before.natives[0]!.emit("old-output-marker\r\n"); await before.service.flush();
+  await before.service.dispose();
+  // A truecolor screen of this size serializes to well over the record cap.
+  const again = workspaceStart(start, () => cwd), c = client("c");
+  await again.service.handle(c.client, frame("PTY_CREATE", { sessionId: "plain", restore: true, cols: 400, rows: 100 }));
+  cwd = latest; again.natives[0]!.emit(art(400, 100)); await again.service.flush();
+  await again.service.dispose();
+
+  const after = start(), b = client("b");
+  await after.service.handle(b.client, frame("PTY_CREATE", { sessionId: "plain", restore: true, cols: 400, rows: 100 }));
+  expect(b.created()).toMatchObject({ cwd: latest });
+  expect((b.created() as { replay?: string }).replay ?? "").not.toContain("old-output-marker");
+});
+
+it("drops a shell's record when a client creates it without restore", async () => {
+  // An older desktop reattaching first must not leave the next restore an older sleep's screen.
+  const { start } = await workspace();
+  const first = start(), a = client("a");
+  await first.service.handle(a.client, frame("PTY_CREATE", { sessionId: "plain", restore: true }));
+  first.natives[0]!.emit("FIRST-SLEEP\r\n"); await first.service.flush(); await first.service.dispose();
+  const second = start(), old = client("old");
+  await second.service.handle(old.client, frame("PTY_CREATE", { sessionId: "plain" }));
+  second.natives[0]!.emit("SECOND-SLEEP\r\n"); await second.service.flush(); await second.service.dispose();
+
+  const third = start(), b = client("b");
+  await third.service.handle(b.client, frame("PTY_CREATE", { sessionId: "plain", restore: true }));
+  expect((b.created() as { replay?: string }).replay ?? "").not.toContain("FIRST-SLEEP");
+  expect((b.created() as { reattached?: boolean }).reattached).toBeFalsy();
+});
+
+const art = (cols: number, rows: number) => {
+  let screen = "\x1b[H";
+  for (let y = 0; y < rows; y++) {
+    for (let x = 0; x < cols; x++) {
+      const r = (x * 7 + y) % 256, g = (y * 5 + x * 3) % 256, b = (x * y) % 256;
+      screen += `\x1b[38;2;${r};${g};${b};48;2;${b};${r};${g}m\u2580`;
+    }
+    screen += "\x1b[0m" + (y < rows - 1 ? "\r\n" : "");
+  }
+  return screen;
+};

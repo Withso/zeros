@@ -217,6 +217,9 @@ export class Terminals {
   private async spawn(message: PtyCreateMessage, pending: Pending): Promise<Session> {
     const restorable = message.restore === true && !pending.owner && !!this.options.records;
     const record = restorable ? await this.readRecord(message.sessionId) : undefined;
+    // A client that didn't ask (an older desktop) starts this id over; an
+    // earlier sleep's record must not come back after its next one.
+    if (!restorable) { const path = this.recordPath(message.sessionId); if (path) await rm(path, { force: true }).catch(() => {}); }
     const descriptor = record ? await this.files.directory(record.cwd).catch(() => this.files.directory(this.scope.root))
       : await this.files.directory(message.cwd ?? this.scope.root);
     let native: TerminalProcess | undefined;
@@ -337,14 +340,17 @@ export class Terminals {
   private async saveRecord(session: Session): Promise<void> {
     const path = this.recordPath(session.sessionId);
     if (!path || !session.restorable || session.removed || session.exit) return;
-    const screen = await session.mirror.snapshot();
+    // The program that owned an alternate screen or modes dies with the VM.
+    const screen = await session.mirror.snapshot(undefined, { restore: true });
     let cwd = session.cwd;
     try { cwd = this.scope.path(await (this.options.workingDirectory ?? (pid => readlink(`/proc/${pid}/cwd`)))(session.native.pid), true); }
     catch { /* Outside the checkout or unreadable: keep where it started. */ }
     if (session.exit && !this.disposed) return;
-    const body = JSON.stringify({ version: 1, sessionId: session.sessionId, cwd, cols: session.cols, rows: session.rows,
-      screen: screen.data, savedAt: Date.now() } satisfies TerminalRecord);
-    if (Buffer.byteLength(body) > RECORD_MAX_BYTES) return;
+    const record = (text: string) => JSON.stringify({ version: 1, sessionId: session.sessionId, cwd, cols: session.cols, rows: session.rows,
+      screen: text, savedAt: Date.now() } satisfies TerminalRecord);
+    // A screen too large to keep still leaves the latest directory, never an older record.
+    let body = record(screen.data);
+    if (Buffer.byteLength(body) > RECORD_MAX_BYTES) body = record("");
     await mkdir(this.options.records!, { recursive: true, mode: 0o700 });
     const temporary = `${path}.${randomUUID()}.tmp`;
     try { await writeFile(temporary, body, { mode: 0o600, flag: "wx" }); await rename(temporary, path); }
