@@ -14,6 +14,7 @@ import * as metadata from "../../design/catalog-storage";
 import {
   designCatalogReplySchema,
   designFramesPrepareReplySchema,
+  designPageScopedCatalogSchema,
   DESIGN_CATALOG_READ_OPERATION,
 } from "@zeros/protocol/design-catalog";
 
@@ -111,6 +112,24 @@ describe("Design catalog service authority", () => {
     expect(legacy.frames[0]).not.toHaveProperty("surfaceCost");
     const capable = designFramesPrepareReplySchema.parse(await service.handle("design.frames.prepare", { ...input, surfaceCosts: true }));
     expect(capable.frames[0]).toHaveProperty("surfaceCost", { sourceBytes: expect.any(Number), nodes: 3, imageBytes: 0 });
+  });
+  it.each([null, "organization-local"])("negotiates page hashes and page-scoped write acknowledgements for %s", async organizationId => {
+    insert(root, organizationId);
+    const workspaceId = params.workspaceId;
+    expect(await service.handle("design.navigation.read", { workspaceId })).not.toHaveProperty("pageHashes");
+    const navigation = await service.handle("design.navigation.read", { workspaceId, pageHashes: true }) as { pageHashes: Record<string, string> };
+    expect(Object.keys(navigation.pageHashes)).toEqual(["p"]);
+    const scoped = await service.handle("design.frame.create", { workspaceId, pageId: "p", title: "Scoped",
+      snapshotMode: "scoped", knownPages: navigation.pageHashes }) as { frame: { file: string }; snapshot: Record<string, unknown> };
+    expect(scoped.snapshot).not.toHaveProperty("mutationCatalog");
+    expect(scoped.snapshot).not.toHaveProperty("pages");
+    expect(designPageScopedCatalogSchema.parse(scoped.snapshot.pageCatalog).frames.map((frame) => frame.source)).toContain(scoped.frame.file);
+    for (const extra of [{}, { knownPages: { p: "not-a-hash" } }]) {
+      const complete = await service.handle("design.frame.create", { workspaceId, pageId: "p", title: "Complete",
+        snapshotMode: "scoped", ...extra }) as { snapshot: Record<string, unknown> };
+      expect(complete.snapshot).toHaveProperty("mutationCatalog");
+      expect(complete.snapshot).not.toHaveProperty("pageCatalog");
+    }
   });
   it.each([null, "organization-local"])(
     "preserves exact Local ownership %s and never returns a full-snapshot envelope",

@@ -53,18 +53,18 @@ it.each([
   expect(idle()).toEqual({ t: "idle", idle: false });
 });
 
-it("expires mutation activity after ten minutes and never extends it for passive reads or polls", async () => {
+it("expires mutation activity after one minute and never extends it for passive reads or polls", async () => {
   const { op, relay, heartbeat, idle } = await fixture();
   await op("file.write", { path: "readme.txt", content: "saved\n" });
   expect(idle()).toEqual({ t: "idle", idle: false });
-  vi.setSystemTime(new Date("2026-11-03T00:09:59Z"));
+  vi.setSystemTime(new Date("2026-11-03T00:00:59Z"));
   heartbeat();
   await expect.poll(() => relay.frames.filter(frame => frame.t === "idle" && !frame.idle).length).toBe(2);
   await op("file.read", { path: "readme.txt" });
   await op("git.status");
   await op("workspace.get");
   await relay.request(CLIENT_A, browserFrame("PTY_LIST"));
-  vi.setSystemTime(new Date("2026-11-03T00:10:00Z"));
+  vi.setSystemTime(new Date("2026-11-03T00:01:00Z"));
   heartbeat();
   await expect.poll(idle).toEqual({ t: "idle", idle: true });
   const reports = relay.frames.filter(frame => frame.t === "idle").length;
@@ -74,7 +74,7 @@ it("expires mutation activity after ten minutes and never extends it for passive
   expect(relay.frames.filter(frame => frame.t === "idle")).toHaveLength(reports);
 });
 
-it("keeps an in-flight Git mutation busy past ten minutes, then bounds activity from completion", async () => {
+it("keeps an in-flight Git mutation busy past the activity window, then bounds activity from completion", async () => {
   let release!: () => void, entered = false;
   const hold = new Promise<void>(resolve => { release = resolve; });
   const { op, heartbeat, idle } = await fixture(run => async (program, args, options) => {
@@ -89,7 +89,7 @@ it("keeps an in-flight Git mutation busy past ten minutes, then bounds activity 
     heartbeat();
     expect(idle()).toEqual({ t: "idle", idle: false });
   } finally { release(); await writing; }
-  vi.setSystemTime(new Date("2026-11-03T00:21:00Z"));
+  vi.setSystemTime(new Date("2026-11-03T00:12:00Z"));
   heartbeat();
   await expect.poll(idle).toEqual({ t: "idle", idle: true });
 });

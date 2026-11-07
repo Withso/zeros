@@ -205,3 +205,128 @@ passed 43 tests with the previously failing fontconfig setting and its
 original pixel threshold unchanged. This test-only change does not alter
 application rendering or establish another native performance result. The
 CI playbook now records this environment distinction.
+
+## Canvas performance pass — 2026-11-07
+
+Mode: co-masters (Claude Opus 5.5 renderer + measurement; Claude Opus 5.5 max
+limits + engine scale), no subagents. Reference machine as above (MacBook Air
+M4, 16 GiB, macOS 26.3.1, Electron 43.8.3, Chromium 150), but measured while
+the owner kept working: built-in 60 Hz display, DPR 2, 1440 × 900 window,
+memory pressure with 9.7–9.9 GiB of swap in use, `BTLEServer` near one core.
+Treat absolute numbers as this machine's working state, not a quiet lab.
+
+Harness: a local CDP driver (not committed; evidence under `.context/bench/`)
+builds the optimized renderer and compiled engine with the native workload's
+helpers, launches an account-free Local profile in a floating window visible
+on all Spaces, and records per-process CPU/physical footprint, Chromium
+presentation traces and memory-infra dumps. Fixtures: the repository's own
+`Zeros - Design` page (37 frames), the 256-frame grid, and a 26-page × 1,000
+replica of the real frames from #885's fixture generator.
+
+Lessons that changed the method:
+- 120 Hz `Input.dispatchMouseEvent` wheel injection queues behind DevTools
+  acknowledgements. A trivial page also capped near 35 fps with ~85 ms
+  input→present, so early "30 fps" results were partly the harness. Chromium's
+  `Input.synthesizeScrollGesture`/`synthesizePinchGesture` (vsync-aligned,
+  Telemetry's smoothness input) gives a trivial page 60 fps, 0 dropped and
+  ~33 ms input→present. This Mac's swap→presentation floor is 21–23 ms.
+  Native CGEvent gestures need foreground ownership, which macOS refuses while
+  the owner works.
+- An occluded or other-Space window produces no frames; synthetic gestures
+  then wait forever. Keep the bench window on all Spaces, check visibility
+  before every phase, and treat hidden time as a paused measurement.
+- The bench engine lacked the native watch host, so idle engine CPU measured
+  the stat-polling fallback (production macOS uses FSEvents through it).
+- A peer agent's Conductor message into the measuring chat unbinds the
+  owner's Mac from that chat; co-masters coordinate through shared files.
+
+Root causes found and fixed (renderer, PR on branch
+`iamarunrk/canvas-performance-optimization-v3`):
+- Warm reopen of 256 frames spent 2.82 s of 3.11 s in `getPropertyValue`:
+  each source admission read computed style inside a React layout effect.
+  Colors now resolve in one batch before composition. Warm reopen
+  3,008 → 254 ms; real page 170 → 82 ms.
+- Camera paints did O(page) DOM work per frame. With chrome-write skipping,
+  tracked hover/focus, bounds-first hit testing and pan-only prefetch
+  throttling, the 256-frame pan improved (3 reps): p99 frame 66.7 → 33.3 ms,
+  partial frames 38 → 0, dropped 2 → 1, renderer CPU 35 → 22%, total
+  CPU 47 → 35%.
+- Input-driven main frames started mid-interval; a gesture frame clock keeps
+  them on the display cadence while a gesture is live.
+- On large pages the preparation lane prepared every mounted frame and
+  re-rendered the page mid-gesture. It now yields to live gestures and
+  prepares the frames nearest the camera center first. (An interim cap at the
+  source-surface admission limit was removed again by the overview below,
+  which shows every prepared frame as a picture.)
+
+### 1,000-frame overview (26 pages × 1,000 replica, first page) — 2026-11-07
+
+Builds: #886 (engine, through 627da1bc/cdda02fc) plus this renderer. Each row
+is one cold profile (pictures cache empty) on the same Mac; the window was
+hidden for 48 s of lod5's open (production pauses while hidden).
+
+| Run | Change | Frames showing content | Warm reopen | Pan p50 / dropped | Renderer RSS |
+|---|---|---|---|---|---|
+| lod5 | vector pictures, placeholders | 678 / 1,000 (display budget full) | never complete (31 s settle) | 116.7 ms / 158 | 2.1–2.6 GB |
+| lod6 | + 64 px mini level, SVG images released, raster after gestures | 1,000 at 189 s | 1.05 s | 50 ms / 117 | 2.1 / 1.8 GB |
+| lod7 | + overview neighbourhood mounted, mini covers off-screen | 1,000 at 163 s | — | 16.7 ms / 6 | 2.2 GB |
+| lod8 | + GPU tile context warmed at idle | 1,000 at 147 s (100 at 9 s, 500 at 55 s) | 1.03 s | 16.7 ms / 24–31 | 2.0–2.2 GB |
+| lod9 | #886 at 8e4ce9fa (catalog reads 1,224 → 204 per open) | 1,000 at 198 s (window hidden briefly) | 0.85 s | 16.7 ms / 2–3 | 1.9–2.3 GB |
+| lod10 | + residency changes held until a gesture rests | 1,000 at 138 s (100 at 8 s, 500 at 56 s) | 0.95 s | 16.7 ms / 2–3 | 2.1 GB |
+
+lod10 also measured: idle CPU 11.9% visible / 3.5% hidden (lod9: 127% /
+2.9% — its idle phase began while pictures were still being produced);
+inspect select→editor ready p50 542 ms, max 594 ms (lod8 max 8.3 s); zoom
+presented 171–175 of ~420 display frames (lod9 146–186), p95 183 ms.
+
+What each fix found:
+- Frames had no visible extent until content arrived; cold frames now paint
+  their surface fill, so all 1,000 positions show in the first frame.
+- Every real frame had `surfaceCost: null` (imported style sources), so all
+  pictures queued on the serial native capture host (~0.37 s each). #886 now
+  costs them; the renderer pictures Local frames from their source vector,
+  four at a time.
+- At the fit zoom a frame paints 22–51 device px, but the smallest level was
+  128 px at 8 bytes/pixel: 1,000 pictures needed ~98 MB of the 64 MiB display
+  budget and coverage stopped at 678. The 64 px mini level needs ~25 MB.
+- `rasterizeDesignVector` kept each decoded SVG image (a whole laid-out
+  document) until GC: 263 documents with 4 iframes. Its source is now removed
+  after drawing, as the vector cache already did.
+- Only the visible frames and 12 neighbours stayed mounted, so every pan step
+  remounted frames at the screen edge: one synchronous React render of the
+  page per camera change (pan main thread 3.8 s busy of 3.9 s, ~66 ms script
+  per step). An overview keeps the neighbourhood mounted; pan 8.6 → 60 fps.
+- The first zoom-in created the WebGL tile context inside a frame (538 ms
+  waiting on a busy GPU process). It is created at idle after opening.
+
+Still open (2026-11-07): zoom from the fit view into frames drops ~230–270 of
+~420 frames (p95 183 ms). The cost lands at each rest between pinch steps:
+page-wide mount/unmount and source admission, ~1.7 s of style recalculation
+from per-frame chrome scale writes (pictured overview frames are not GPU-tiled,
+so each keeps a CSS stroke), and tile materialization. Drawing overview
+pictures and outlines in the GPU plane would remove the per-frame DOM work. Renderer RSS stays near
+2 GB on this fixture (memory-infra: PartitionAlloc objects 499 MB, Oilpan
+263 MB, malloc 227 MB, V8 116 MB, cc tiles 87 MB) and needs a heap-level
+breakdown. A first open still costs ~0.4 s of mostly renderer-main-thread work
+per frame (surface document plus SVG raster), so 1,000 frames take ~2.5 min;
+moving frame documents out of the canvas process is the structural fix.
+#886 has the re-preparation fix for style-build status events pending.
+
+Caveats and open items (2026-11-07):
+- Every completed A/B set ran while a temporary instrumentation edit had
+  disabled the density-change replan for live gestures. Their zoom rows
+  showed dropped frames rising from 2 to 4–6 of ~365. The branch restores
+  zoom planning on every paint, as on origin/main. A clean zoom re-measure
+  is pending: after the owner's external display disconnected, macOS stopped
+  rendering the floating bench window during the owner's session.
+- Unchanged within noise: real-page pan/zoom (already 16.7 ms p50/p95),
+  inspect select→editor ready (real 128 → 123 ms, 256-frame 184 → 185 ms),
+  idle CPU, cold open (6.4 → 6.1 s for 256 frames; engine/vector bound) and
+  memory (256 frames ≈ 1.0–1.3 GB total).
+- 26 pages × 1,000 heavy frames: origin/main refuses the directory (fails
+  closed at the old 256-frame cap). With #885/#886 at 1d36f7b9 plus the
+  first renderer commits, cold open took 148–183 s, covered only 197–278 of
+  1,000 frames and was engine-bound (47–110% CPU, up to 1.3 GB RSS); pan ran
+  at 10–15 fps while preparation continued; total memory peaked at
+  2.2–3.4 GiB. The owner chose pictures for zoomed-out pages (sharp, never
+  enlarged, full quality once zoomed in); see the overview section above.

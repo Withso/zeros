@@ -31,18 +31,19 @@ import {
 import { DESIGN_STYLE_BUILD_DIRECTORY, designBuildInputPathError, designBuildOutputPathError, designSassSourcePathError, designStyleSourcePathError } from "./style-source-path";
 import { compileDesignSass, DesignSassImportError } from "./style-sass";
 import { designStyleCache, designStyleCacheKey } from "./style-cache";
-import { designDependencyFingerprint, isDesignDependencyCaptureActive, observeDesignDependencyCheck, observeDesignFileDependency } from "./dependency-read-set";
+import { designDependencyFingerprint, isDesignDependencyCaptureActive, namedDesignPathPolicy, observeDesignDependencyCheck, observeDesignFileDependency } from "./dependency-read-set";
 import {
   concatDesignCssIndexes,
   designCssRuleCount,
   designFrameFeatures,
   indexDesignCss,
-  measureDesignFrameSources,
+  measureDesignFrameSourceCosts,
   parseAndIndexDesignCss,
   pruneDesignFrameSources,
   splitDesignCss,
   type DesignCssIndex,
 } from "./style-prune";
+import { designTextImageBytes } from "./surface-document";
 import {
   compileDesignTailwind,
   designTailwindCandidates,
@@ -554,6 +555,16 @@ async function embedStyleSourceAssets(
   return (await embedStyleSourceAssetsInRoot(root, sourcePath, parsed, assets)) ? parsed.toString() : css;
 }
 
+/** Assets a style source may embed: never Git internals or private state, except a private build output's own folder. */
+const STYLE_ASSET_PATH = namedDesignPathPolicy("style-asset", (file) => {
+  const top = file.split("/")[0];
+  return top !== ".git" && top !== ".zeros";
+});
+const PRIVATE_OUTPUT_ASSET_PATH = namedDesignPathPolicy("style-asset:private-output", (file) => {
+  const top = file.split("/")[0];
+  return top !== ".git" && (top !== ".zeros" || file.startsWith(`${DESIGN_STYLE_BUILD_DIRECTORY}/`));
+});
+
 /** Embed into a parsed stylesheet. Returns whether it had declarations. */
 async function embedStyleSourceAssetsInRoot(
   root: string,
@@ -562,10 +573,7 @@ async function embedStyleSourceAssetsInRoot(
   assets: ReturnType<typeof sourceAssets>,
 ): Promise<boolean> {
   const privateOutput = sourcePath.startsWith(`${DESIGN_STYLE_BUILD_DIRECTORY}/`);
-  const allowedAssetPath = (file: string) => {
-    const top = file.split("/")[0];
-    return top !== ".git" && (top !== ".zeros" || (privateOutput && file.startsWith(`${DESIGN_STYLE_BUILD_DIRECTORY}/`)));
-  };
+  const allowedAssetPath = privateOutput ? PRIVATE_OUTPUT_ASSET_PATH : STYLE_ASSET_PATH;
   const declarations: postcss.Declaration[] = [];
   parsed.walkDecls((declaration) => { declarations.push(declaration); });
   if (declarations.length === 0) return false;
@@ -1503,11 +1511,13 @@ export interface FrameStyleSource {
   revision: string;
   /** Identity only: the CSS length a document render would carry. */
   bytes?: number;
+  /** Identity only: image bytes that CSS carries, when every image is known. */
+  imageBytes?: number;
 }
 
 /** Identity sizes by frame signature and source revisions, so snapshots do
  * not prune every frame again. */
-const identitySizes = new Map<string, number[]>();
+const identitySizes = new Map<string, Array<{ length: number; imageBytes: number | null }>>();
 const MAX_IDENTITY_SIZES = 512;
 
 function assertTailwindFrameBudget(css: string): void {
@@ -1583,12 +1593,15 @@ export async function frameStyleSources(
     let sizes = identitySizes.get(sizeKey);
     if (!sizes) {
       const measured = entries.filter((entry) => entry.index);
-      const lengths = measureDesignFrameSources(measured.map((entry) => entry.index!), features);
-      sizes = entries.map((entry) => (entry.index ? lengths[measured.indexOf(entry)]! : 0));
+      const costs = measureDesignFrameSourceCosts(measured.map((entry) => entry.index!), features, designTextImageBytes);
+      sizes = entries.map((entry) => (entry.index ? costs[measured.indexOf(entry)]! : { length: 0, imageBytes: null }));
       identitySizes.set(sizeKey, sizes);
       while (identitySizes.size > MAX_IDENTITY_SIZES) identitySizes.delete(identitySizes.keys().next().value!);
     }
-    return entries.map((entry, at) => ({ id: entry.id, css: "", revision: revisions[at]!, bytes: sizes[at]! }));
+    return entries.map((entry, at) => {
+      const { length, imageBytes } = sizes[at]!;
+      return { id: entry.id, css: "", revision: revisions[at]!, bytes: length, ...(imageBytes === null ? {} : { imageBytes }) };
+    });
   }
   const pruned = pruneDesignFrameSources(
     entries.map((entry) => entry.index ?? parseAndIndexDesignCss(entry.css ?? "")),

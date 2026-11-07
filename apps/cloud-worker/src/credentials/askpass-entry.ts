@@ -1,4 +1,4 @@
-import { askpass } from "./client";
+import { askpass } from "./broker";
 import { githubAuthenticationMessage } from "./github-failure";
 
 // stdout is Git's private askpass pipe, never a worker log.

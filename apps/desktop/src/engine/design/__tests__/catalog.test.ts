@@ -7,6 +7,7 @@ import {
 import type { CanvasDocument } from "../document-model";
 import {
   DESIGN_CATALOG_BATCH_BYTES,
+  designCatalogFrameSchema,
   type DesignCatalogRead,
 } from "@zeros/protocol/design-catalog";
 import { DESIGN_MAX_FRAMES_PER_PAGE } from "@zeros/protocol/design-pages";
@@ -321,6 +322,16 @@ describe("bounded revisioned metadata catalog", () => {
     } while (cursor);
     expect(found).toEqual(Array.from({ length: 10000 }, (_, i) => `f${i}`));
     expect(read.open).toHaveBeenCalledOnce();
+  });
+
+  it("projects only descriptors the wire schema accepts from a decoded canvas", () => {
+    const fixture = pagedCanvasFixture(26, DESIGN_MAX_FRAMES_PER_PAGE);
+    const first = Object.keys(fixture.frames)[0]!;
+    fixture.frames[first]!.z = DESIGN_MAX_FRAMES_PER_PAGE;
+    const canvas = decodeCanvasFile(JSON.stringify(fixture), { version: 2 });
+    const projected = projectDesignCatalog(canvas as unknown as CanvasDocument);
+    expect(projected.frames).toHaveLength(26_000);
+    for (const frame of projected.frames) designCatalogFrameSchema.parse(frame);
   });
 
   it("reads 26 full pages of engine-shaped descriptors within the default budgets", async () => {

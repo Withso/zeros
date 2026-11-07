@@ -8,8 +8,10 @@ import { CLOUD_V2_LEASE_SECONDS, type CloudV2Compute, type CloudV2CommandResult 
 import { BoatCreateRejectedError, BoatForkRefusedError, BoatSnapshotExpiredError } from "./boat-client.js";
 import { CloudProviderError } from "./provider-error.js";
 import { installRuntimeCommand, type CloudV2Runtime } from "./runtime.js";
+import { GIT_LFS_INSTALL_COMMAND } from "./computer.js";
+import { pruneCloudRepositories } from "./source-authority.js";
 import type { CloudV2CheckpointFork, CloudV2CheckpointReuse, CloudV2CheckpointRetry, CloudV2CheckpointScope, CloudV2Store, CloudV2Workspace,
-  CloudV2LifecycleWorkspace } from "./store.js";
+  CloudV2LifecycleWorkspace, CloudV2RestoreCreate } from "./store.js";
 import { CLOUD_V2_WORKER_PORT, type CloudV2WorkerTiming } from "./contract.js";
 import { CLOUD_V2_CHECKPOINT_ERRORS, CLOUD_V2_CHECKPOINT_SECONDS, checkpointCommand, cloudV2CheckpointObject, parseCheckpointResult, parseRestoreResult,
   restoreCommand, type CloudV2CheckpointError, type CloudV2CheckpointStorage } from "./checkpoint.js";
@@ -44,7 +46,7 @@ export const CLOUD_V2_LIFECYCLE_CHANNEL = "zeros_cloud_v2_lifecycle";
 /** Each sweep starts Computer build and maintenance checks in the background;
  * one that settles this quickly found nothing long-running to do. */
 const BACKGROUND_SETTLE_MS = 1_000;
-export const CLOUD_V2_IDLE_STOP_MS = 15 * 60_000;
+export const CLOUD_V2_IDLE_STOP_MS = 20 * 60_000;
 /** A failed stop checkpoint is retried on a fork of the stopped VM: first
  * after whatever failed has had time to pass, then less often. */
 const RETRY_FIRST_MS = 10 * 60_000;
@@ -67,7 +69,7 @@ export const CLOUD_V2_WORKER_TOKEN_PATH = "/home/user/.config/zeros/worker-token
 /** Non-secret boot settings for the worker's systemd unit (EnvironmentFile). */
 export const CLOUD_V2_WORKER_ENV_PATH = "/home/user/.config/zeros/worker.env";
 
-type LifecyclePhase = "boat_create" | "boat_resume" | "runtime_install" | "protected_route" | "token_delivery" | "checkpoint" | "checkpoint_restore" | "total";
+type LifecyclePhase = "boat_create" | "boat_resume" | "source_authorize" | "runtime_install" | "image_prepare" | "repository_prepare" | "protected_route" | "token_delivery" | "checkpoint" | "checkpoint_restore" | "total";
 export type CloudV2TimingRecord = {
   workspaceId: string;
   phase: LifecyclePhase | CloudV2WorkerTiming["phase"] | "worker_hello" | "relay_ready";
@@ -88,7 +90,7 @@ export function emitCloudV2Timing(observer: ((record: CloudV2TimingRecord) => vo
 }
 
 export type CloudV2LifecycleDeps = {
-  store: Pick<CloudV2Store, "claimPending" | "nextLifecycleDue" | "defer" | "transition" | "rotateWorkerToken" | "computerSnapshot" | "revoke" | "idleSince" | "setWorkerRoute" | "leasesDue" | "markLeaseRenewed" | "recordInitialSandbox"
+  store: Pick<CloudV2Store, "claimPending" | "nextLifecycleDue" | "defer" | "transition" | "rotateWorkerToken" | "workspaceImage" | "revoke" | "idleSince" | "setWorkerRoute" | "leasesDue" | "markLeaseRenewed" | "recordInitialSandbox"
     | "setBaseCommit" | "saveCheckpoint" | "checkpointFailed" | "checkpointUpload" | "checkpointUploadDone" | "checkpointUploadHorizon" | "stopCurrent"
     | "beginRestore" | "replaceSandbox" | "finishRestore" | "checkpointUnchanged" | "claimCheckpointRetry" | "beginCheckpointFork"
     | "checkpointForkCreated" | "checkpointForkGone" | "checkpointRetryNext">;
@@ -177,6 +179,8 @@ export class CloudV2Lifecycle {
   private running: Promise<void> | null = null;
   private readonly inFlight = new Map<string, Promise<void>>();
   private readonly stopping = new Set<string>();
+  /** A restore begun in this step, until the same step applies its checkpoint. */
+  private readonly recordedRestores = new Map<string, CloudV2RestoreCreate>();
 
   constructor(private readonly deps: CloudV2LifecycleDeps, private readonly intervalMs = 2_000) {}
 
@@ -361,7 +365,8 @@ export class CloudV2Lifecycle {
 
   private async step(workspace: CloudV2LifecycleWorkspace & { attempts: number }, now: number): Promise<void> {
     const { store, compute } = this.deps;
-    if (workspace.state === "creating" || workspace.state === "starting") await this.deps.authorizeSource?.(workspace);
+    if ((workspace.state === "creating" || workspace.state === "starting") && this.deps.authorizeSource)
+      await this.measure(workspace, "source_authorize", () => this.deps.authorizeSource!(workspace));
     switch (workspace.state) {
       case "creating": {
         if (now - Date.parse(workspace.createdAt) > BOOT_DEADLINE_MS) {
@@ -371,15 +376,15 @@ export class CloudV2Lifecycle {
         const boot = await this.boot(workspace);
         const baseCommit = workspace.baseCommit || !this.deps.remoteHead ? null : this.lookupBaseCommit(workspace);
         let sandboxId = workspace.boatSandboxId;
+        const image = await store.workspaceImage(workspace.id);
+        if (!image) {
+          await store.transition(workspace.id, ["creating"], "failed", { errorCode: "cloud_computer_build_required" });
+          return;
+        }
         if (!sandboxId) {
-          const from = await store.computerSnapshot(workspace.organizationId, workspace.computerBuildId);
-          if (!from) {
-            await store.transition(workspace.id, ["creating"], "failed", { errorCode: "cloud_computer_build_required" });
-            return;
-          }
           const renewedAt = new Date(this.deps.now?.() ?? Date.now());
           ({ sandboxId } = await this.measure(workspace, "boat_create", () => compute.create({
-            key: workspace.id, from, name: this.deps.sandboxName(workspace), env: boot.env,
+            key: workspace.id, ...(image.from ? { from: image.from } : {}), name: this.deps.sandboxName(workspace), env: boot.env,
           })));
           const recorded = await store.recordInitialSandbox(workspace.id, workspace.stopGeneration, sandboxId, renewedAt);
           if (!recorded || recorded.state !== "creating") {
@@ -388,9 +393,10 @@ export class CloudV2Lifecycle {
           }
         }
         await this.measure(workspace, "runtime_install", () => this.ensureRuntime(sandboxId, boot.runtime), runtimeChanged => ({ runtimeChanged }));
-        if (this.deps.prepareRepository) {
+        if (image.prune.length || !image.from) await this.measure(workspace, "image_prepare", () => this.prepareImage(sandboxId, image));
+        if (this.deps.prepareRepository && !image.checkout) {
           await store.defer(workspace.id, "creating", 17 * 60_000);
-          await this.deps.prepareRepository(workspace, sandboxId);
+          await this.measure(workspace, "repository_prepare", () => this.deps.prepareRepository!(workspace, sandboxId));
         }
         if (!await this.measure(workspace, "protected_route", () => this.host(workspace, sandboxId))) return;
         // The worker reads it with its configuration, after the token arrives.
@@ -436,6 +442,11 @@ export class CloudV2Lifecycle {
         // A runtime shipped while the VM slept is installed now.
         await this.measure(workspace, "runtime_install", () => this.ensureRuntime(sandboxId, boot.runtime), runtimeChanged => ({ runtimeChanged }));
         if (restoring) {
+          // Replayed as recorded: no lookup of a build that deletion may be retiring.
+          const recorded = this.recordedRestores.get(workspace.id) ?? workspace.restoreCreate;
+          this.recordedRestores.delete(workspace.id);
+          const image = { from: recorded?.from ?? null, prune: recorded?.prune ?? [] };
+          if (image.prune.length || !image.from) await this.measure(workspace, "image_prepare", () => this.prepareImage(sandboxId, image));
           await this.measure(workspace, "checkpoint_restore", () => this.applyCheckpoint(workspace, sandboxId));
           if (!await store.finishRestore(workspace.id, sandboxId)) return;
         }
@@ -514,10 +525,13 @@ export class CloudV2Lifecycle {
       if (lost) await compute.delete(lost).catch(() => {});
     }
     if (!attempt || !request) return null;
+    // This step's apply reads it; a later step reads the claimed row instead.
+    this.recordedRestores.set(workspace.id, request);
+    if (this.recordedRestores.size > 256) this.recordedRestores.delete(this.recordedRestores.keys().next().value!);
     const { requestedAt, ...body } = request;
     let sandboxId: string | null;
     if ((this.deps.now?.() ?? Date.now()) - Date.parse(requestedAt) < CREATE_KEY_MS) {
-      const create = () => compute.create({ key: `restore:${workspace.id}:${attempt}`, ...body });
+      const create = () => compute.create({ key: `restore:${workspace.id}:${attempt}`, name: body.name, env: body.env, ...(body.from ? { from: body.from } : {}) });
       ({ sandboxId } = workspace.state === "starting" ? await this.measure(workspace, "boat_create", create) : await create());
     } else {
       sandboxId = await compute.findSandbox(body.name, new Date(Date.parse(requestedAt) - 10 * 60_000));
@@ -759,6 +773,17 @@ export class CloudV2Lifecycle {
     const result = await this.execWhenReady(sandboxId, installRuntimeCommand({ sha256: runtime.sha256, url: await runtime.url(), publicKeys: this.deps.publicKeys }), 300);
     if (result.exitCode !== 0 || result.timedOut) throw Object.assign(new Error("runtime install failed"), { code: "worker_runtime_install_failed" });
     return result.stdout.split(/\r?\n/).includes("runtime-changed");
+  }
+
+  /** A v3 image keeps only this workspace's checkout; the stock image gets the
+   * git-lfs a Cloud Computer build would have added. Both are idempotent. */
+  private async prepareImage(sandboxId: string, image: { from: string | null; prune: string[] }): Promise<void> {
+    if (image.prune.length) {
+      const pruned = await this.deps.compute.exec(sandboxId, pruneCloudRepositories(image.prune), 120);
+      if (pruned.exitCode !== 0 || pruned.timedOut) throw Object.assign(new Error("prune failed"), { code: "cloud_source_prune_failed" });
+    }
+    // Without git-lfs a workspace still works; LFS files stay placeholders.
+    if (!image.from) await this.deps.compute.exec(sandboxId, GIT_LFS_INSTALL_COMMAND, 300).catch(() => undefined);
   }
 
   private async boot(workspace: CloudV2Workspace) {

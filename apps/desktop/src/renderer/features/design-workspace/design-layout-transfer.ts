@@ -1,3 +1,4 @@
+import { DESIGN_MAX_FRAMES_PER_PAGE } from "@zeros/protocol/design-pages";
 import {
   DESIGN_RUNTIME_DOCUMENT_BODY_ID,
   type DesignRuntimeNodeDetails,
@@ -344,7 +345,7 @@ export async function transferDesignLayerOnCanvas(input: {
       1,
       relocation ? details.rect.height : Math.round(details.rect.height),
     ),
-    z: Math.max(0, ...input.frames.map((candidate) => candidate.z + 1)),
+    z: Math.min(DESIGN_MAX_FRAMES_PER_PAGE, Math.max(0, ...input.frames.map((candidate) => candidate.z + 1))),
   };
   // The selection follows the move in the same render that publishes it. A
   // whole frame leaves its page there; were the selection published after,

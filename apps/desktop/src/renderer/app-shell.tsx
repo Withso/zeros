@@ -1,3 +1,4 @@
+import { useCloudFocusActivity } from "./state/use-cloud-focus-activity";
 import { subscribeChatSnapshots } from "./state/chat-snapshot-subscription";
 
 import React, { useEffect, useRef } from "react";
@@ -178,6 +179,11 @@ try {
  *  session skips cold start: the active chat's agent, then agents attached to
  *  chats, then every enabled registry agent. Fire-and-forget; already-warm
  *  agents are skipped. */
+function CloudFocusActivity() {
+  useCloudFocusActivity();
+  return null;
+}
+
 function PreWarmAgents() {
   const chats = useChats();
   const activeChatId = useActiveChatId();
@@ -1182,6 +1188,7 @@ export function AppShellBody() {
           <HydrateAiApiKey />
           <AnalyticsBoot />
           <PreWarmAgents />
+          <CloudFocusActivity />
           <ReloadOnProjectChange />
           <ChatsPersistence />
           <LocalLinkNavigation readChat={rowToThread} />

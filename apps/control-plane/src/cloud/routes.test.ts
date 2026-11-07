@@ -46,6 +46,28 @@ function fixture(repositories: { repository: string; defaultBranch: string | nul
 }
 
 describe("cloud v2 creation", () => {
+  it("checks the requested repository first, then the rest in order, reading its branch meanwhile", async () => {
+    const f = fixture([{ repository: "example/docs", defaultBranch: "main" }, { repository: "example/project", defaultBranch: "master" },
+      { repository: "example/site", defaultBranch: "main" }]);
+    const pending = new Map<string, () => void>(), ids: Record<string, string> = { "example/docs": "41", "example/project": "40", "example/site": "42" };
+    f.authorizeBuildRepository.mockImplementation((_org, _user, _build, repository) => new Promise(resolve => {
+      pending.set(repository, () => resolve({ repository, repositoryId: ids[repository]! }));
+    }));
+    const response = f.create();
+    await vi.waitFor(() => expect(pending.has("example/project")).toBe(true));
+    expect(f.authorizeBuildRepository).toHaveBeenCalledOnce();
+    pending.get("example/project")!();
+    await vi.waitFor(() => expect(f.remoteHead).toHaveBeenCalledWith(org, member, { repository: "example/project", repositoryId: "40" }, "master"));
+    await vi.waitFor(() => expect(pending.has("example/docs")).toBe(true));
+    expect(pending.has("example/site")).toBe(false);
+    pending.get("example/docs")!();
+    await vi.waitFor(() => expect(pending.has("example/site")).toBe(true));
+    pending.get("example/site")!();
+    expect((await response).status).toBe(201);
+    expect(f.remoteHead).toHaveBeenCalledOnce();
+    expect(f.createWorkspace).toHaveBeenCalledWith(expect.objectContaining({ sourceRepositoryId: "40", readableRepositoryIds: ["41", "40", "42"] }));
+  });
+
   it("refuses a canary grant when this deployment has no canary authority", async () => {
     const f = fixture();
     const response = await f.app.request("/v1/cloud-v2/workspaces", {
@@ -388,5 +410,38 @@ describe("cloud v2 archive routes", () => {
     const { app, store } = setup();
     expect((await app.request("/v1/cloud-v2/workspaces/invalid/archive", { method: "POST" })).status).toBe(404);
     expect(store.requestLifecycle).not.toHaveBeenCalled();
+  });
+});
+
+describe("cloud v2 focused-window activity", () => {
+  const id = "44444444-4444-4444-8444-444444444444";
+  function setup(state: string, refused = false) {
+    const store = {
+      get: vi.fn(async () => { if (refused) throw new HttpError(404, "not_found", "Cloud workspace not found"); return { id, state }; }),
+      markActive: vi.fn(async () => {}),
+    };
+    const app = new Hono();
+    app.use("*", async (c, next) => { c.set("user", { id: member } as never); await next(); });
+    app.onError((error, c) => error instanceof HttpError
+      ? c.json({ error: { code: error.code } }, error.status) : c.json({ error: { code: "internal" } }, 500));
+    app.route("/", createCloudV2Routes({ store, bridgeBaseUrl: "wss://dev.example.test" } as unknown as CloudV2RouteDeps));
+    return { app, store };
+  }
+  const ping = (app: Hono) => app.request(`/v1/cloud-v2/workspaces/${id}/activity`, { method: "POST" });
+
+  it("keeps a running workspace awake for the creator's focused window without waking a stopped one", async () => {
+    const running = setup("running");
+    expect(await (await ping(running.app)).json()).toEqual({ running: true });
+    expect(running.store.get).toHaveBeenCalledWith(id, member);
+    expect(running.store.markActive).toHaveBeenCalledWith(id);
+    const stopped = setup("stopped");
+    expect(await (await ping(stopped.app)).json()).toEqual({ running: false });
+    expect(stopped.store.markActive).not.toHaveBeenCalled();
+  });
+
+  it("refuses anyone the workspace does not belong to", async () => {
+    const other = setup("running", true);
+    expect((await ping(other.app)).status).toBe(404);
+    expect(other.store.markActive).not.toHaveBeenCalled();
   });
 });

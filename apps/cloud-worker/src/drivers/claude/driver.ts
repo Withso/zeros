@@ -1,13 +1,14 @@
 import { randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
-import { query, type Options, type Query, type Settings, type SDKUserMessage, type PermissionResult, type UserDialogRequest, type UserDialogResult } from "@anthropic-ai/claude-agent-sdk";
+import type { Options, Query, Settings, SDKUserMessage, PermissionResult, UserDialogRequest, UserDialogResult } from "@anthropic-ai/claude-agent-sdk";
 import { buildClaudeQuestionRequest, buildAskUserQuestionOutput, claudeQuestionHookOutput, formatAnswerForClaude, claudePermissionMode, claudeRequiresExplicitApproval, type QuestionResponse, type ContentBlock, type PromptResponse, type SessionNotification } from "@zeros/protocol/agent-events";
 import type { SteerOutcome } from "@zeros/protocol/messages";
 import { providerBindingForResume } from "@zeros/protocol/identities";
 import { mapClaudeContextUsage } from "@zeros/protocol/context-usage";
 import { redactDriverMessage, redactDriverValue, type Driver, type DriverOpen } from "../driver";
 import { driverTiming } from "../../agent-timings";
+import { persistCompileCache } from "../../compile-cache";
 import { agentEnvironment } from "../shared/agent-environment";
 import { InputQueue, createDeferred, type Deferred } from "./input-queue";
 import { isClaudeBackgroundAcknowledgement, isUnownedClaudeResult } from "./result-ownership";
@@ -26,8 +27,21 @@ interface NativeQuery extends AsyncIterable<unknown> {
   setPermissionMode?: Query["setPermissionMode"];
   getContextUsage?: (options: { detail: "summary" }) => Promise<unknown>;
 }
+/** The SDK's 1.3 MB entry and its dependencies load once, on first use. */
+let sdkQuery: Promise<NonNullable<ClaudeOptions["query"]>> | undefined;
+function loadClaudeQuery(): Promise<NonNullable<ClaudeOptions["query"]>> {
+  sdkQuery ??= import("@anthropic-ai/claude-agent-sdk").then(sdk => {
+    // Keep its compiled code for the next boot on this disk.
+    setImmediate(persistCompileCache);
+    return sdk.query as NonNullable<ClaudeOptions["query"]>;
+  }, error => { sdkQuery = undefined; throw error; });
+  return sdkQuery;
+}
+
 interface ClaudeOptions {
   query?: (args: { prompt: AsyncIterable<SDKUserMessage>; options: Options }) => NativeQuery;
+  /** Loads the SDK's query on the first turn; tests hold it open. */
+  loadQuery?: () => Promise<NonNullable<ClaudeOptions["query"]>>;
   executable?: string;
   environment?: NodeJS.ProcessEnv;
   gitEnvironment?: NodeJS.ProcessEnv;
@@ -63,6 +77,8 @@ export class ClaudeDriver implements Driver {
   private active?: Turn;
   private stopping?: Promise<void>;
   private disposed = false;
+  /** Counts every Stop, including one before any query exists. */
+  private interruptions = 0;
   private running = false;
   private contextUsageRevision = 0;
 
@@ -81,10 +97,19 @@ export class ClaudeDriver implements Driver {
   }
 
   async prompt(content: ContentBlock[]): Promise<PromptResponse> {
+    // The SDK loads on the first turn, not at worker start. A Stop or dispose
+    // while it loads cancels this turn before it starts, as it would a running
+    // one. Checks follow the await, so a concurrent prompt meets the active turn.
+    let start = this.options.query;
+    if (!start) {
+      const interruptions = this.interruptions;
+      start = await (this.options.loadQuery ?? loadClaudeQuery)();
+      if (this.disposed || this.interruptions !== interruptions) return { stopReason: "cancelled" };
+    }
     this.ready();
     if (this.active || this.stopping) throw new Error("Claude already has an active turn.");
     const message = nativeContent(content);
-    const process = this.ensureQuery(), uuid = randomUUID();
+    const process = this.ensureQuery(start), uuid = randomUUID();
     const turn: Turn = { ...createDeferred<PromptResponse>(), uuids: new Set([uuid]), model: this.model };
     this.active = turn; this.mapper!.beginTurn();
     driverTiming(this.input, "turn_sent");
@@ -162,6 +187,7 @@ export class ClaudeDriver implements Driver {
   }
 
   interrupt(): Promise<void> {
+    this.interruptions++;
     if (this.stopping) return this.stopping;
     const process = this.process;
     if (!process) return Promise.resolve();
@@ -193,7 +219,7 @@ export class ClaudeDriver implements Driver {
     this.listeners.clear(); this.input = undefined;
   }
 
-  private ensureQuery(): Process {
+  private ensureQuery(start: NonNullable<ClaudeOptions["query"]>): Process {
     if (this.process && !this.pendingRestart) return this.process;
     // Max is a creation-time Options.effort, outside Settings.effortLevel.
     // Like Local, consume its transition only at the next explicit prompt,
@@ -263,7 +289,7 @@ export class ClaudeDriver implements Driver {
       },
       pathToClaudeCodeExecutable: this.options.executable ?? pinnedExecutable(),
     };
-    process = { query: (this.options.query ?? query)({ prompt: input, options }), input, modeId: this.modeId, abort: new AbortController(), questions: new Map() };
+    process = { query: start({ prompt: input, options }), input, modeId: this.modeId, abort: new AbortController(), questions: new Map() };
     this.mapper!.beginProcess(); this.process = process;
     void this.consume(process);
     return process;

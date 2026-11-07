@@ -3,7 +3,7 @@ import { promisify } from "node:util";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, expect, it } from "vitest";
 import { activateRuntimeCommand, completeRuntimeCommand, prepareRuntimeCommand, pruneRuntimeCommand } from "./runtime.js";
 import { deliverWorkerTokenCommand } from "./lifecycle.js";
@@ -43,7 +43,10 @@ function fixture() {
 
 it("verifies and stages bytes without activation, then activates once and retains the previous cache", () => {
   const f = fixture();
+  const compiled = join(f.root, "home/user/.cache/zeros/node-compile-cache/v24-x64-tag-1000/entry");
+  mkdirSync(dirname(compiled), { recursive: true }); writeFileSync(compiled, "previous runtime");
   f.run(prepareRuntimeCommand({ sha256: f.sha256, url: "https://fixture.example.test/runtime.tar.gz" }));
+  expect(readFileSync(compiled, "utf8")).toBe("previous runtime");
   expect(readlinkSync(f.current)).toBe(join(f.runtimes, f.old));
   expect(readFileSync(f.auth, "utf8")).toBe("fixture verification material");
   expect(readFileSync(f.log, "utf8")).toBe("");
@@ -51,7 +54,11 @@ it("verifies and stages bytes without activation, then activates once and retain
   const id = randomUUID(); f.permit(id);
   const activation = { sha256: f.sha256, previousSha256: f.old, id, bootId: randomUUID(), instanceId: randomUUID(), tokenSha256: f.tokenSha256 };
   const command = activateRuntimeCommand({ ...activation, expectedBootIds: [f.bootId] });
-  f.run(command); f.run(command);
+  f.run(command);
+  // The old worker exits during the restart and cannot write its compiled code back.
+  expect(existsSync(dirname(dirname(compiled)))).toBe(false);
+  mkdirSync(dirname(compiled), { recursive: true }); writeFileSync(compiled, "current runtime");
+  f.run(command);
   expect(readlinkSync(f.current)).toBe(join(f.runtimes, f.sha256));
   expect(readFileSync(f.log, "utf8")).toBe("restart zeros-worker.service\n");
   f.run(pruneRuntimeCommand(f.sha256, f.old));
@@ -61,6 +68,7 @@ it("verifies and stages bytes without activation, then activates once and retain
   expect(readFileSync(join(f.root, "opt/zeros/worker-runtime.env"), "utf8")).toBe(`CLOUD_V2_RUNTIME_SHA256=${f.sha256}\n`);
   expect(readFileSync(join(f.root, "home/user/.local/share/zeros/cloud-worker/runtime-handoffs", `completed-${id}-${activation.bootId}`), "utf8")).toBe("");
   expect(readFileSync(f.log, "utf8")).toBe("restart zeros-worker.service\n");
+  expect(readFileSync(compiled, "utf8")).toBe("current runtime");
 });
 
 it("refuses a delayed activation when Stop withdrew its permit during the final preparation await", async () => {

@@ -1,6 +1,6 @@
 import { expect, it, vi } from "vitest";
 import { DesignPreviewJobs } from "../preview-jobs";
-import { DesignCaptureCleanupUnconfirmedError } from "@zeros/protocol/design-capture";
+import { DESIGN_PREVIEW_JOB_TIMEOUT_MS, DesignCaptureCleanupUnconfirmedError } from "@zeros/protocol/design-capture";
 
 const admission = { connectionId: "one", authority: "local-personal", authorized: () => true };
 const owner = { workspaceId: "workspace", directoryId: "design_one", jobId: "first", deadline: Date.now() + 30_000 };
@@ -12,6 +12,27 @@ it("does not evict a cancel-before-start tombstone under terminal-history pressu
   const work = vi.fn(async () => {});
   await expect(jobs.run(owner, admission, work)).rejects.toThrow(/retired/);
   expect(work).not.toHaveBeenCalled();
+});
+
+it("settles the cancel of a job whose deadline could never be admitted, which therefore never started", async () => {
+  const jobs = new DesignPreviewJobs();
+  const late = { ...owner, jobId: "too-late", deadline: Date.now() + DESIGN_PREVIEW_JOB_TIMEOUT_MS + 60_000 };
+  const work = vi.fn(async () => {});
+  await expect(jobs.run(late, admission, work)).rejects.toThrow(/deadline/);
+  await expect(jobs.cancel(late, admission)).resolves.toEqual({ settled: true });
+  // Once its deadline is near enough to admit, a delayed request is still fenced.
+  vi.useFakeTimers({ now: late.deadline - 10_000, toFake: ["Date"] });
+  try {
+    await expect(jobs.run(late, admission, work)).rejects.toThrow(/retired/);
+  } finally {
+    vi.useRealTimers();
+  }
+  expect(work).not.toHaveBeenCalled();
+  // Far beyond any fence, the cancel settles without keeping a record.
+  const absurd = { ...owner, jobId: "absurd", deadline: Date.now() + 365 * 24 * 60 * 60 * 1000 };
+  const before = jobs.usage().records;
+  await expect(jobs.cancel(absurd, admission)).resolves.toEqual({ settled: true });
+  expect(jobs.usage().records).toBe(before);
 });
 
 it("does not resurrect a cancelled running job when normal completions evict terminal history", async () => {

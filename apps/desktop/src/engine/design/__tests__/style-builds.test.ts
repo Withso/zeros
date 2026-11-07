@@ -154,7 +154,7 @@ describe("live build-command style sources", () => {
     await vi.waitFor(() => expect(lines("runs.log")).toBe(2), { timeout: 5_000 });
     await settleDesignStyleBuildRunsForTests();
     expect((await frameStyleSources(root, canvas, "page/home.html"))[0]!.css).toContain("--runs: 2");
-    await vi.waitFor(() => expect(changed).toHaveBeenCalledWith(path.resolve(root)));
+    await vi.waitFor(() => expect(changed).toHaveBeenCalledWith(path.resolve(root), { output: true }));
   });
 
   it("runs every one-shot build again when the person presses Update", async () => {
@@ -212,8 +212,11 @@ if (!fs.existsSync(out) || fs.readFileSync(out, "utf8") !== css) fs.writeFileSyn
       async () => expect((await status()).messages[0]!.text).toBe('Live: Zeros keeps "node watch.cjs" running while Design is open (from your settings).'),
       { timeout: 5_000 },
     );
+    changed.mockReset();
     writeFileSync(path.join(root, "src/app.css"), ":root { --gap: 7px; }");
     await vi.waitFor(async () => expect((await status()).css).toContain("--gap: 7px"), { timeout: 5_000 });
+    // A rewritten output re-reads frame styles.
+    await vi.waitFor(() => expect(changed).toHaveBeenCalledWith(path.resolve(root), { output: true }), { timeout: 5_000 });
     expect(hasRunningDesignStyleBuilds()).toBe(true);
     await leave();
     await vi.waitFor(() => expect(hasRunningDesignStyleBuilds()).toBe(false), { timeout: 5_000 });
@@ -239,6 +242,10 @@ if (!fs.existsSync(out) || fs.readFileSync(out, "utf8") !== css) fs.writeFileSyn
     setUp('command = "node crash.cjs"\nwatch = true');
     await open();
     await vi.waitFor(() => expect(lines("starts.log")).toBe(3), { timeout: 5_000 });
+    // Exits and restarts change only the build's state: no output, so no frame styles.
+    const own = () => changed.mock.calls.filter(([workspace]) => workspace === path.resolve(root));
+    await vi.waitFor(() => expect(own().length).toBeGreaterThan(0), { timeout: 5_000 });
+    expect(own().every(([, change]) => change?.output === false)).toBe(true);
     await vi.waitFor(
       async () => expect((await status()).messages[0]!.text).toMatch(/^The build failed: repository script exited 2\./),
       { timeout: 5_000 },

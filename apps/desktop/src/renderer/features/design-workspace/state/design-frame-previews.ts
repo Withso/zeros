@@ -31,13 +31,18 @@ import type {
   DesignPreviewStore,
 } from "../../../platform/design-preview-store";
 import { DesignPreviewCache, type DesignPreviewBlobImage } from "./design-preview-cache";
+import { DESIGN_SOURCE_SURFACE_LIMITS } from "../design-source-surfaces";
 import { DESIGN_IMAGE_DECODED_BYTES, type DesignImageResidency } from "./design-image-residency";
 
-/** Longest side, in device pixels, of each picture level. */
-export const DESIGN_PREVIEW_LEVELS = { thumbnail: 128, overview: 384, detail: 1280 } as const;
+/** Longest side, in device pixels, of each picture level. A 1,000-frame page fitted to
+ * the screen paints each frame at a few dozen device pixels; its mini pictures
+ * keep the whole page within the shared display budget. */
+export const DESIGN_PREVIEW_LEVELS = { mini: 64, thumbnail: 128, overview: 384, detail: 1280 } as const;
 export type DesignPreviewLevel = keyof typeof DESIGN_PREVIEW_LEVELS;
 export const DESIGN_PREVIEW_MEMORY_BYTES = 16 * 1024 * 1024;
-export const DESIGN_PREVIEW_DISK_BYTES = 48 * 1024 * 1024;
+/** Holds both small levels of every frame of a 26,000-frame directory (about
+ * 2.4 KB per frame) beside the larger pictures recently zoomed into. */
+export const DESIGN_PREVIEW_DISK_BYTES = 96 * 1024 * 1024;
 /** The capture host's PNG bound; an encoded picture is never larger. */
 const MAX_PICTURE_BYTES = 1024 * 1024;
 // Version 1 captures flattened transparent documents onto the native window's
@@ -127,13 +132,23 @@ export interface DesignFramePreviewDependencies {
       sourceVersion: string;
       theme: string | null;
       maxDimension: number;
+      /** Key and priority for a renderer that queues on the shared capture lane. */
+      capture?: { key: string; priority: "visible" | "detail" | "nearby" };
     },
     signal?: AbortSignal,
   ): Promise<DesignPreviewReply>;
+  /** Pictures rendered at once for this owner (default one). A renderer-side
+   * vector producer runs several; the native capture host stays serial. */
+  concurrency?(owner: DesignPreviewOwner): number;
+  /** Remaining camera-gesture quiet time; canvas-wide notices wait for it. */
+  quietMs?(): number;
   /** The canvas background lane: one task at a time, after input settles. */
   schedule<T>(work: () => Promise<T>, capture?: { key: string; signal: AbortSignal; priority: "visible" | "detail" | "nearby" }): Promise<T | null>;
   /** Re-encode a PNG picture smaller where the platform can. */
   encode(png: Blob, level: DesignPreviewLevel): Promise<Blob>;
+  /** Scales a larger picture down to an exact size; a smaller level of an
+   * already pictured generation then needs no render. */
+  downscale?(picture: Blob, width: number, height: number, level: DesignPreviewLevel): Promise<Blob>;
   /** Cloud pictures render only while the VM runs; Local always may. */
   canProduce(owner: DesignPreviewOwner): boolean;
   /** Whether frames beyond one viewport render too (default yes). A cloud
@@ -175,7 +190,7 @@ interface Attempt {
   retryAt: number;
 }
 
-const LEVELS: readonly DesignPreviewLevel[] = ["thumbnail", "overview", "detail"];
+const LEVELS: readonly DesignPreviewLevel[] = ["mini", "thumbnail", "overview", "detail"];
 
 function pictureLevels(level: DesignPreviewLevel): DesignPreviewLevel[] {
   const index = LEVELS.indexOf(level);
@@ -209,7 +224,8 @@ function isCurrentPreviewFormat(row: DesignPreviewIndexEntry): boolean {
 /** The level that stays sharp for a frame painted `devicePixels` on its
  * longest side. Above the detail level the canvas makes the frame live. */
 export function designPreviewLevelFor(devicePixels: number): DesignPreviewLevel {
-  return devicePixels <= DESIGN_PREVIEW_LEVELS.thumbnail ? "thumbnail" :
+  return devicePixels <= DESIGN_PREVIEW_LEVELS.mini ? "mini" :
+    devicePixels <= DESIGN_PREVIEW_LEVELS.thumbnail ? "thumbnail" :
     devicePixels <= DESIGN_PREVIEW_LEVELS.overview ? "overview" : "detail";
 }
 
@@ -250,6 +266,12 @@ export function designPreviewDemandItems(input: {
     frame.y + frame.height >= top - margin * height &&
     frame.y <= top + height + margin * height;
   const ranked: Array<{ item: DesignPreviewDemandItem; tier: number; distance: number }> = [];
+  // On a page denser than source admission (an overview), frames around the
+  // screen are covers for the next pan at the smallest level, so the shared
+  // display budget always serves what the camera shows first.
+  let shown = 0;
+  if (width > 0 && height > 0) for (const frame of input.frames) if (intersects(frame, 0)) shown++;
+  const dense = shown > DESIGN_SOURCE_SURFACE_LIMITS.frames;
   for (const frame of input.frames) {
     const live = input.live.has(frame.file);
     const visible = width > 0 && height > 0 && intersects(frame, 0);
@@ -257,9 +279,11 @@ export function designPreviewDemandItems(input: {
     const dx = frame.x + frame.width / 2 - centerX;
     const dy = frame.y + frame.height / 2 - centerY;
     const distance = dx * dx + dy * dy;
-    const level = visible && !live
-      ? designPreviewLevelFor(Math.max(frame.width, frame.height) * zoom * ratio)
-      : "overview";
+    const painted = designPreviewLevelFor(Math.max(frame.width, frame.height) * zoom * ratio);
+    // Off-screen and live covers stop at overview; on a dense zoomed-out page
+    // they are as small as the frames the camera shows.
+    const level = visible && !live ? painted : !visible && dense ? "mini" :
+      LEVELS.indexOf(painted) < LEVELS.indexOf("overview") ? painted : "overview";
     const tier = visible ? (live ? 1 : 0) : near ? 2 : 3;
     ranked.push({
       item: { file: frame.file, sourceVersion: frame.sourceVersion, level, live, ...(tier === 3 ? { near: false } : {}) },
@@ -333,8 +357,9 @@ export class DesignFramePreviews {
   /** Retiring or replacing the owning canvas invalidates pending work even
    * if it returns to the same owner and generation before that work ends. */
   private productionEpoch = 0;
-  private producing = false;
-  private production: { controller: AbortController; demand: DesignPreviewDemand; item: DesignPreviewDemandItem; epoch: number } | null = null;
+  /** Renders in flight, and their keys so a parallel slot never repeats one. */
+  private readonly productions = new Set<{ controller: AbortController; demand: DesignPreviewDemand; item: DesignPreviewDemandItem; epoch: number; key: string }>();
+  private readonly producingKeys = new Set<string>();
   private pumpTimer: unknown = null;
   private readonly attempts = new Map<string, Attempt>();
   /** Keys whose engine answer was stale; a refreshed snapshot supersedes them. */
@@ -490,7 +515,7 @@ export class DesignFramePreviews {
     const memory = this.memory.getUsage();
     return { memoryBytes: memory.encodedBytes, decodedBytes: memory.decodedBytes,
       retainedPictures: memory.entries, pictures: this.pictures.size, diskBytes: this.diskBytes,
-      diskPictures: this.index?.size ?? 0, reading: this.reading.size, producing: this.producing ? 1 : 0,
+      diskPictures: this.index?.size ?? 0, reading: this.reading.size, producing: this.productions.size,
       demanded: this.demand?.items.length ?? 0 };
   }
 
@@ -542,9 +567,9 @@ export class DesignFramePreviews {
   }
 
   private cancelObsoleteProduction(): void {
-    const production = this.production;
-    if (production && !this.canAccept(production.demand, production.item, production.epoch))
-      production.controller.abort(new Error("Design preview owner or generation retired."));
+    for (const production of this.productions)
+      if (!this.canAccept(production.demand, production.item, production.epoch))
+        production.controller.abort(new Error("Design preview owner or generation retired."));
   }
 
   // ── Owners ─────────────────────────────────────────────
@@ -771,12 +796,22 @@ export class DesignFramePreviews {
     if (this.versions.size > 8192) this.versions.delete(this.versions.keys().next().value!);
     for (const listener of [...(this.listeners.get(frameKey) ?? [])]) listener();
     if (this.changeTimer !== null) return;
-    this.changeTimer = this.deps.setTimer(() => {
-      this.changeTimer = null;
-      this.changeVersion++;
-      for (const listener of [...this.changeListeners]) listener();
-    }, CHANGE_BATCH_MS);
+    this.changeTimer = this.deps.setTimer(this.flushChanges, CHANGE_BATCH_MS);
   }
+
+  /** The batched notice re-renders the whole canvas's pictured set; on a
+   * 1,000-frame page that is a dropped display frame, so it waits for a live
+   * camera gesture to rest. Each frame's own picture still updates at once. */
+  private readonly flushChanges = () => {
+    this.changeTimer = null;
+    const quiet = this.deps.quietMs?.() ?? 0;
+    if (quiet > 0) {
+      this.changeTimer = this.deps.setTimer(this.flushChanges, quiet);
+      return;
+    }
+    this.changeVersion++;
+    for (const listener of [...this.changeListeners]) listener();
+  };
 
   // ── Production ─────────────────────────────────────────
 
@@ -788,7 +823,8 @@ export class DesignFramePreviews {
     for (const item of demand.items) {
       if (item.near === false && !far) continue;
       const key = designPreviewKey({ owner: demand.owner, theme: demand.theme, ...item });
-      if (this.pictures.has(key) || this.reading.has(key) || this.stale.has(key) || this.made.has(key)) continue;
+      if (this.pictures.has(key) || this.reading.has(key) || this.stale.has(key) || this.made.has(key) ||
+        this.producingKeys.has(key)) continue;
       // Stored but not yet read: the read in flight or the next hydrate paints it.
       if (this.index?.has(key)) continue;
       const attempt = this.attempts.get(key);
@@ -810,7 +846,9 @@ export class DesignFramePreviews {
   }
 
   private pump(): void {
-    if (this.producing || !this.demand) return;
+    if (!this.demand) return;
+    const limit = Math.max(1, Math.min(8, Math.floor(this.deps.concurrency?.(this.demand.owner) ?? 1)));
+    if (this.productions.size >= limit) return;
     if (this.pumpTimer !== null) {
       this.deps.clearTimer(this.pumpTimer);
       this.pumpTimer = null;
@@ -837,21 +875,23 @@ export class DesignFramePreviews {
       this.pumpTimer = this.deps.setTimer(() => { this.pumpTimer = null; this.pump(); }, readyAt - now);
       return;
     }
-    this.producing = true;
     const { item, key } = next;
     const epoch = this.productionEpoch;
-    const production = { controller: new AbortController(), demand, item, epoch };
-    this.production = production;
-    void this.deps.schedule(() => this.produce(demand, item, key, epoch, production.controller.signal), {
-      key, signal: production.controller.signal,
-      priority: item.near === false ? "nearby" : item.level === "detail" ? "detail" : "visible",
+    const production = { controller: new AbortController(), demand, item, epoch, key };
+    this.productions.add(production);
+    this.producingKeys.add(key);
+    const priority = item.near === false ? "nearby" : item.level === "detail" ? "detail" : "visible";
+    void this.deps.schedule(() => this.produce(demand, item, key, epoch, production.controller.signal, priority), {
+      key, signal: production.controller.signal, priority,
     })
       .catch(() => {})
       .finally(() => {
-        this.producing = false;
-        if (this.production === production) this.production = null;
+        this.productions.delete(production);
+        this.producingKeys.delete(key);
         this.pump();
       });
+    // Fill the remaining parallel slots with the next wanted pictures.
+    if (this.productions.size < limit) this.pump();
   }
 
   private canAccept(demand: DesignPreviewDemand, item: DesignPreviewDemandItem, epoch: number, exactLevel = false): boolean {
@@ -864,15 +904,31 @@ export class DesignFramePreviews {
         (candidate.near !== false || (this.deps.rendersFar?.(demand.owner) ?? true)));
   }
 
-  private async produce(demand: DesignPreviewDemand, item: DesignPreviewDemandItem, key: string, epoch: number, signal: AbortSignal): Promise<void> {
+  private async produce(demand: DesignPreviewDemand, item: DesignPreviewDemandItem, key: string, epoch: number, signal: AbortSignal,
+    priority: "visible" | "detail" | "nearby" = "visible"): Promise<void> {
     // The lane may run this after input settled for a while; re-check that
     // the picture is still wanted and allowed.
     if (signal.aborted || !this.canAccept(demand, item, epoch, true) || this.pictures.has(key)) return;
+    const target = { owner: demand.owner, theme: demand.theme, file: item.file, sourceVersion: item.sourceVersion };
+    // A smaller level of a generation already pictured larger is those pixels
+    // scaled down: no render, and never an upscale.
+    const larger = this.largerPicture(target, item.level);
+    if (larger) {
+      const derived = await this.derive(larger, item.level).catch(() => null);
+      if (!this.canAccept(demand, item, epoch)) return;
+      if (derived) {
+        this.accept(demand, item, key, epoch, derived);
+        return;
+      }
+    }
+    // A mini picture renders once at thumbnail resolution and is cut from those
+    // pixels, so zooming in a step later needs no second render.
+    const renderLevel: DesignPreviewLevel = item.level === "mini" && this.deps.downscale ? "thumbnail" : item.level;
     let reply: DesignPreviewReply;
     try {
       reply = await this.deps.render(demand.owner, {
         file: item.file, sourceVersion: item.sourceVersion, theme: demand.theme,
-        maxDimension: DESIGN_PREVIEW_LEVELS[item.level],
+        maxDimension: DESIGN_PREVIEW_LEVELS[renderLevel], capture: { key, priority },
       }, signal);
     } catch (error) {
       if (this.canAccept(demand, item, epoch)) this.failed(demand.owner, key, errorText(error));
@@ -892,24 +948,55 @@ export class DesignFramePreviews {
     }
     if (reply.sourceVersion !== item.sourceVersion || reply.theme !== demand.theme) return;
     const png = new Blob([decodeBase64(reply.data)], { type: "image/png" });
-    const encoded = await this.deps.encode(png, item.level).catch(() => png);
+    const encoded = await this.deps.encode(png, renderLevel).catch(() => png);
     if (!this.canAccept(demand, item, epoch)) return;
-    const blob = encoded.size > 0 && encoded.size <= png.size ? encoded : png;
-    if (blob.size > MAX_PICTURE_BYTES) {
+    const rendered = { blob: encoded.size > 0 && encoded.size <= png.size ? encoded : png, width: reply.width, height: reply.height };
+    if (rendered.blob.size > MAX_PICTURE_BYTES) {
       this.failed(demand.owner, key, "Design preview exceeded its encoded image limit.");
       return;
     }
+    if (renderLevel === item.level) {
+      this.accept(demand, item, key, epoch, rendered);
+      return;
+    }
+    // The wanted level first, so its display never decodes the larger one.
+    const derived = await this.derive(rendered, item.level).catch(() => null);
+    if (!this.canAccept(demand, item, epoch)) return;
+    if (derived) this.accept(demand, item, key, epoch, derived);
+    this.accept(demand, { ...item, level: renderLevel }, designPreviewKey({ ...target, level: renderLevel }), epoch, rendered);
+  }
+
+  /** The nearest larger picture of this exact generation held in memory. */
+  private largerPicture(target: Omit<DesignPreviewTarget, "level">, level: DesignPreviewLevel): DesignPreviewBlobImage | null {
+    if (!this.deps.downscale) return null;
+    for (const candidate of LEVELS.slice(LEVELS.indexOf(level) + 1)) {
+      const image = this.memory.peek(designPreviewKey({ ...target, level: candidate }));
+      if (image) return image;
+    }
+    return null;
+  }
+
+  private async derive(source: { blob: Blob; width: number; height: number }, level: DesignPreviewLevel) {
+    const scale = DESIGN_PREVIEW_LEVELS[level] / Math.max(source.width, source.height);
+    if (scale >= 1) return { blob: source.blob, width: source.width, height: source.height };
+    const width = Math.max(1, Math.round(source.width * scale)), height = Math.max(1, Math.round(source.height * scale));
+    const blob = await this.deps.downscale!(source.blob, width, height, level);
+    return blob.size > 0 && blob.size <= MAX_PICTURE_BYTES ? { blob, width, height } : null;
+  }
+
+  private accept(demand: DesignPreviewDemand, item: DesignPreviewDemandItem, key: string, epoch: number,
+    picture: { blob: Blob; width: number; height: number }): void {
     this.attempts.delete(key);
     this.made.add(key);
     if (this.made.size > 8192) this.made.delete(this.made.values().next().value!);
     const frameKey = designPreviewFrameKey(demand.owner, item.file, demand.theme);
     this.insert("render", frameKey, demand.owner.workspaceId, key, item.level, item.sourceVersion,
-      reply.width, reply.height, blob);
+      picture.width, picture.height, picture.blob);
     this.persist({
       key, frameKey, workspaceId: demand.owner.workspaceId, level: item.level,
-      sourceVersion: item.sourceVersion, width: reply.width, height: reply.height,
-      bytes: blob.size, savedAt: this.deps.now(), readAt: this.deps.now(),
-    }, blob, () => this.canAccept(demand, item, epoch));
+      sourceVersion: item.sourceVersion, width: picture.width, height: picture.height,
+      bytes: picture.blob.size, savedAt: this.deps.now(), readAt: this.deps.now(),
+    }, picture.blob, () => this.canAccept(demand, item, epoch));
   }
 
   private failed(owner: DesignPreviewOwner, key: string, message: string): void {
@@ -946,6 +1033,23 @@ export class DesignFramePreviews {
       this.indexRow(row);
       this.commit({ put: [{ record: { key: row.key, blob }, entry: row }], remove });
     });
+  }
+}
+
+/** A high-quality reduction of a picture to an exact smaller size, encoded
+ * like a render. Never used to enlarge. */
+export async function downscaleDesignPreview(picture: Blob, width: number, height: number, level: DesignPreviewLevel): Promise<Blob> {
+  if (typeof OffscreenCanvas === "undefined" || typeof createImageBitmap !== "function")
+    throw new Error("Design preview downscaling is unavailable.");
+  const bitmap = await createImageBitmap(picture, { resizeWidth: width, resizeHeight: height, resizeQuality: "high" });
+  try {
+    const canvas = new OffscreenCanvas(width, height);
+    const context = canvas.getContext("2d");
+    if (!context) throw new Error("Design preview downscaling is unavailable.");
+    context.drawImage(bitmap, 0, 0);
+    return encodeDesignPreview(await canvas.convertToBlob({ type: "image/png" }), level);
+  } finally {
+    bitmap.close();
   }
 }
 

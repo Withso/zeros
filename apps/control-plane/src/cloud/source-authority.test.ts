@@ -1,6 +1,6 @@
 import type pg from "pg";
 import { expect, it, vi } from "vitest";
-import { CloudV2SourceAuthority, hydrateCloudRepository, type CloudSourceTarget } from "./source-authority.js";
+import { CloudV2SourceAuthority, hydrateCloudRepository, pruneCloudRepositories, type CloudSourceTarget } from "./source-authority.js";
 import { mkdtemp, mkdir, writeFile, access, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -86,6 +86,46 @@ it("does not publish an interrupted clone over the workspace's final directory",
     await expect(child).rejects.toThrow();
     await expect(access(join(root, "example/project"))).rejects.toThrow();
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+it("removes only the named checkouts, and their owner directory once it is empty", async () => {
+  const root = await mkdtemp(join(tmpdir(), "zeros-prune-"));
+  try {
+    for (const path of ["withso/0docs/.git", "withso/zeros/.git", "other/my.repo/.git"]) await mkdir(join(root, path), { recursive: true });
+    const command = pruneCloudRepositories(["withso/0docs", "other/my.repo"]).replaceAll("/home/user", root).replace("bash -lc", "bash -c");
+    await promisify(execFile)("bash", ["-c", command]);
+    await expect(access(join(root, "withso/0docs"))).rejects.toThrow();
+    await expect(access(join(root, "other"))).rejects.toThrow();
+    await access(join(root, "withso/zeros/.git"));
+    // Retries are idempotent.
+    await promisify(execFile)("bash", ["-c", command]);
+    expect(() => pruneCloudRepositories(["withso/.."])).toThrow("Invalid repository");
+    expect(() => pruneCloudRepositories(["../etc"])).toThrow("Invalid repository");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+it("removes a pruned checkout's Git data at once and deletes its files off the create's critical path", async () => {
+  // Deleting a large checkout on a lazily restored disk took 16.6 s on Alpha.
+  const root = await mkdtemp(join(tmpdir(), "zeros-prune-slow-")), shims = await mkdtemp(join(tmpdir(), "zeros-prune-shims-"));
+  try {
+    await mkdir(join(root, "withso/zeros/.git/objects"), { recursive: true });
+    await writeFile(join(root, "withso/zeros/.git/objects/pack"), "pack");
+    await mkdir(join(root, "withso/zeros/src"), { recursive: true });
+    await writeFile(join(root, "withso/zeros/src/index.ts"), "export {};\n");
+    await mkdir(join(root, "withso/kept/.git"), { recursive: true });
+    // Deleting anything but Git data is slow here, as it is on a cold disk.
+    await writeFile(join(shims, "rm"), `#!/bin/bash\ncase "$*" in *"/.git"*) ;; *) sleep 1.5 ;; esac\nexec /bin/rm "$@"\n`, { mode: 0o755 });
+    const command = pruneCloudRepositories(["withso/zeros"]).replaceAll("/home/user", root).replace("bash -lc", "bash -c");
+    const started = Date.now();
+    await promisify(execFile)("bash", ["-c", command], { env: { ...process.env, PATH: `${shims}:${process.env.PATH}` } });
+    expect(Date.now() - started).toBeLessThan(1000);
+    await expect(access(join(root, "withso/zeros"))).rejects.toThrow();
+    await access(join(root, "withso/kept/.git"));
+    // What remains while it is deleted is no usable checkout.
+    const { stdout } = await promisify(execFile)("find", [root, "-path", "*/.git/objects/pack"]);
+    expect(stdout.trim()).toBe("");
+    await vi.waitFor(async () => expect((await promisify(execFile)("ls", ["-A", root])).stdout.split("\n").filter(Boolean)).toEqual(["withso"]), { timeout: 10_000 });
+  } finally { await rm(root, { recursive: true, force: true }); await rm(shims, { recursive: true, force: true }); }
 });
 
 it("requires every legacy source, even when the selected checkout is allowed", async () => {

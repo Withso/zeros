@@ -187,7 +187,60 @@ export const designMutationCatalogSchema = z.object({
   frames: z.array(designCatalogFrameSchema).max(DESIGN_CATALOG_DESCRIPTOR_LIMIT),
 }).strict();
 export type DesignMutationCatalog = z.infer<typeof designMutationCatalogSchema>;
-export const designNavigationReadSchema = z.object({ workspaceId: z.string().min(1).max(4096) }).strict();
+export const designNavigationReadSchema = z.object({
+  workspaceId: z.string().min(1).max(4096),
+  /** Only requested after design.page-scoped-mutations.v1 negotiation. */
+  pageHashes: z.literal(true).optional(),
+}).strict();
+
+/** Write acknowledgements carry every page's summary and content hash, but
+ * frame descriptors only for whole pages whose hash the client lacks. */
+export const DESIGN_PAGE_SCOPED_MUTATIONS_CAPABILITY = "design.page-scoped-mutations.v1";
+const pageHash = z.string().regex(/^[a-f0-9]{32}$/);
+export const designPageHashesSchema = z
+  .record(designPageIdSchema, pageHash)
+  .refine((hashes) => Object.keys(hashes).length <= DESIGN_MAX_PAGES);
+export type DesignPageHashes = z.infer<typeof designPageHashesSchema>;
+export const designPageScopedCatalogSchema = z
+  .object({
+    revision,
+    pages: z.array(designCatalogPageSchema.extend({ hash: pageHash }).strict()).min(1).max(DESIGN_MAX_PAGES),
+    frames: z.array(designCatalogFrameSchema).max(DESIGN_CATALOG_DESCRIPTOR_LIMIT),
+  })
+  .strict()
+  .superRefine((catalog, ctx) => {
+    const fail = () => ctx.addIssue({ code: "custom", message: "Invalid page-scoped Design catalog." });
+    const positions = new Map(catalog.pages.map((page, index) => [page.id, index]));
+    if (
+      positions.size !== catalog.pages.length ||
+      new Set(catalog.pages.map((page) => portableDesignName(page.folder))).size !== catalog.pages.length ||
+      (catalog.pages.length > 1 && catalog.pages.some((page) => page.folder === ""))
+    )
+      return fail();
+    const counts = new Map<string, number>();
+    const ids = new Set<string>();
+    const sources = new Set<string>();
+    let position = -1;
+    for (const frame of catalog.frames) {
+      const index = positions.get(frame.pageId);
+      const page = index === undefined ? undefined : catalog.pages[index]!;
+      const order = counts.get(frame.pageId) ?? 0;
+      const source = portableDesignName(frame.source);
+      if (
+        !page || index! < position || (index! > position && counts.has(frame.pageId)) ||
+        frame.order !== order || ids.has(frame.id) || sources.has(source) ||
+        (page.folder ? frame.source.split("/")[0] !== page.folder : frame.source.includes("/"))
+      )
+        return fail();
+      position = index!;
+      counts.set(frame.pageId, order + 1);
+      ids.add(frame.id);
+      sources.add(source);
+    }
+    for (const [pageId, count] of counts)
+      if (catalog.pages[positions.get(pageId)!]!.count !== count) return fail();
+  });
+export type DesignPageScopedCatalog = z.infer<typeof designPageScopedCatalogSchema>;
 export const designFramesPrepareSchema = z.object({
   workspaceId: z.string().min(1).max(4096),
   directoryId: z.string().regex(/^design_[A-Za-z0-9_-]{1,64}$/),

@@ -1,6 +1,7 @@
 import { readDirectoryDesignManifest } from "./metadata";
-import { inspectDesignCatalog, readDesignCatalogMetadataWithContext } from "./catalog-storage";
-import { DesignCatalogError } from "./catalog";
+import { designCatalogRevision, inspectDesignCatalog, readDesignCatalogMetadataWithContext, sameDesignCatalogInspection } from "./catalog-storage";
+import type { DesignPageHashes } from "@zeros/protocol/design-catalog";
+import { DesignCatalogError, designCatalogPageHashes, type DesignCatalogSnapshot } from "./catalog";
 import { escapeText, escapeAttribute } from "./source";
 import {
   listDesignAssets,
@@ -22,6 +23,9 @@ import {
   composeFrameSrcDoc,
   prepareFrameRenderSource,
 } from "./render-preparation";
+import { parseDesignSource, sharedDesignParse, withSharedDesignParses } from "./shared-parse";
+import { designFrameIdentities, designFrameIdentityContext, type DesignFrameIdentity } from "./identity-cache";
+import { captureDurableDesignDependencies, isDesignDependencyCaptureActive } from "./dependency-read-set";
 import { elementRecords } from "./source";
 // ──────────────────────────────────────────────────────────
 // Design document — authored HTML/CSS frames and canvas metadata
@@ -84,6 +88,7 @@ import {
   type DesignTokensDocument,
   type DesignWorkspaceSnapshot,
   type InlineStyleDeclaration,
+  canvasReadSnapshot,
 } from "./document-model";
 import { designCanvasPageCatalog } from "./pages";
 import { readDirectoryDesignLayout } from "./metadata";
@@ -95,8 +100,10 @@ import {
   finiteBetween,
   nextFrameGeometry,
   readBoundedDesignFrameSource,
+  freezeDeep,
   readCanvas,
   readCanvasContext,
+  readSharedCanvasContext,
   type DesignCanvasReadContext,
   readFrameMeta,
   writeCanvas,
@@ -116,7 +123,7 @@ import {
   prepareFrameRenderSourceForFile,
 } from "./frame-lifecycle";
 import { getDesignRuntimeAudit } from "./runtime-audits";
-import { readSafeRegularFile } from "./safe-files";
+import { inspectSafeRegularFile, readSafeRegularFile } from "./safe-files";
 import {
   DESIGN_FONTS_SOURCE_ID,
   frameStyleSourceIds,
@@ -132,7 +139,7 @@ export { designDirectoryNameFor } from "./directory-registry";
 export { createDesignPage, deleteDesignPage, renameDesignPage } from "./page-lifecycle";
 export { type DesignCanvasFrame,type DesignElementOffset,type DesignFrameChange,type DesignFrameDocument,type DesignFrameGeometry,type DesignFrameRenderIdentity,type DesignFrameRenderSource,type DesignFrameRestorePoint,type DesignFrameSelectionIdentity,type DesignFrameSummary,type DesignFrameTreeNode,type DesignLintReport,type DesignLintSeverity,type DesignLintViolation,type DesignMutationResult,type DesignSourceSpan,type DesignTokenMutationResult,type DesignTokenSummary,type DesignTokensDocument,type DesignWorkspaceSnapshot } from "./document-model";
 export { DESIGN_TOKENS_FILE,DESIGN_TRANSACTION_JOURNAL_FILE,commitDesignWebDocumentState,designTransactionJournalPath,designTransactionRecoveryDirectory,designWebDocumentId,readDesignWebDocumentState,recoverDesignStorageForArchive,recoverPendingDesignTransaction } from "./document-transactions";
-export { captureDesignFrameRestorePoint,createDesignFrame,deleteDesignFrame,duplicateDesignFrame,healDesignOids,listDesignFrames,moveDesignFrameGeometries,readDesignFrameRenderIdentityFromSource,renameDesignFrame,replaceDesignFrameFromHistory,restoreDesignFrame,restoreDesignFrameChanges,sameDesignFrameRestorePoint,transferDesignNode,updateDesignFrameGeometry } from "./frame-lifecycle";
+export { captureDesignFrameRestorePoint,createDesignFrame,createDesignFrameWithRestorePoint,designFrameCreateBatchesForTests,deleteDesignFrame,duplicateDesignFrame,healDesignOids,listDesignFrames,moveDesignFrameGeometries,readDesignFrameRenderIdentityFromSource,renameDesignFrame,replaceDesignFrameFromHistory,restoreDesignFrame,restoreDesignFrameChanges,sameDesignFrameRestorePoint,transferDesignNode,updateDesignFrameGeometry } from "./frame-lifecycle";
 export { stripNonDesignOidsForRender } from "./node-identities";
 export { DesignRenderBudgetError } from "./render-budget";
 export {
@@ -850,14 +857,22 @@ function designSourceSpan(location: {
 /** Stable oid → parse5 byte/line spans. Live selections validate against this
  * map, and source edits use the same exact offsets for minimal splices instead
  * of reserializing the document. */
-export async function readDesignElementOffsetMap(
+export function readDesignElementOffsetMap(
   workspacePath: string,
   frame: string,
 ): Promise<DesignElementOffset[]> {
-  await designFrameTarget(workspacePath, frame);
+  return withSharedDesignParses(() => readSharedDesignElementOffsetMap(workspacePath, frame));
+}
+
+async function readSharedDesignElementOffsetMap(
+  workspacePath: string,
+  frame: string,
+): Promise<DesignElementOffset[]> {
+  await designFrameTarget(workspacePath, frame, await readSharedCanvasContext(workspacePath));
   const source = await readBoundedDesignFrameSource(workspacePath, frame);
-  const document = parse(source, { sourceCodeLocationInfo: true });
-  const identified = designNodeRecords(parse(healDesignOids(source).html));
+  const document = parseDesignSource(source);
+  const healed = healDesignOids(source).html;
+  const identified = designNodeRecords(sharedDesignParse(healed) ?? parse(healed));
   const offsets: DesignElementOffset[] = [];
   let index = 0;
   for (const { element } of designNodeRecords(document)) {
@@ -894,12 +909,15 @@ export async function readDesignFrameRenderSourceFromSource(
   workspacePath: string,
   frame: string,
   source: string,
+  canvas?: CanvasDocument,
 ): Promise<DesignFrameRenderSource> {
   const file = assertFrameFile(frame);
   const render = await prepareFrameRenderSourceForFile(
     workspacePath,
     file,
     source,
+    {},
+    canvas,
   );
   return {
     file,
@@ -963,7 +981,7 @@ export async function readDesignFrame(
   options: DesignReadOptions = {},
 ): Promise<DesignFrameDocument> {
   const file = assertFrameFile(frame);
-  const context = await readCanvasContext(workspacePath);
+  const context = options.writeBack ? await readCanvasContext(workspacePath) : await readSharedCanvasContext(workspacePath);
   if (!options.writeBack && context.layout?.canvasVersion === 2 && context.canvas.frames[file]) {
     const prepared = await prepareRegisteredDesignFrame(workspacePath, file, context.canvas);
     return readDesignFrameFromSummary(workspacePath, prepared, depth);
@@ -989,7 +1007,8 @@ async function readDesignFrameFromSummary(
     workspacePath,
     summary.file,
   );
-  const document = parse(healDesignOids(source).html, { sourceCodeLocationInfo: true });
+  const healed = healDesignOids(source);
+  const document = healed.document ?? parse(healed.html, { sourceCodeLocationInfo: true });
   const composed = await composeFrameSrcDoc(workspacePath, source, {
     width: summary.width,
     height: summary.height,
@@ -1042,64 +1061,189 @@ async function mapDesignFramesBounded<T>(
 
 /** Metadata/controls for opening a registered Local canvas. Recovery keeps
  * the same transaction boundary as aggregate reads; no HTML is scanned. */
-export async function readDesignNavigationSnapshot(workspacePath: string, affectedFiles?: readonly string[]): Promise<{
-  snapshot: DesignWorkspaceSnapshot; catalogRevision: string; directoryId: string;
+export async function readDesignNavigationSnapshot(workspacePath: string, affectedFiles?: readonly string[],
+  options: { pageHashes?: boolean } = {}): Promise<{
+  snapshot: DesignWorkspaceSnapshot; catalogRevision: string; directoryId: string; pageHashes?: DesignPageHashes;
 }> {
-  return withDocumentWrite(workspacePath, async () => {
+  return withDocumentWrite(workspacePath, () => readDesignNavigationSnapshotUnlocked(workspacePath, affectedFiles, options));
+}
+
+/** `known` holds each waiting client's page hashes: their acknowledgement
+ * then names every page and resends only pages one of them lacks. */
+async function readDesignNavigationSnapshotUnlocked(workspacePath: string, affectedFiles?: readonly string[],
+  options: { pageHashes?: boolean; known?: readonly DesignPageHashes[] } = {}): Promise<{
+  snapshot: DesignWorkspaceSnapshot; catalogRevision: string; directoryId: string; pageHashes?: DesignPageHashes;
+}> {
+  {
     await recoverPendingDesignTransactionUnlocked(workspacePath);
     const directory = designDirectoryNameFor(workspacePath);
-    const { metadata, context } = await readDesignCatalogMetadataWithContext(workspacePath, directory);
+    // Navigation only reads the canvas; an acknowledgement follows a write and decodes the new canvas once.
+    const { metadata, context, inspection } = await readDesignCatalogMetadataWithContext(workspacePath, directory, { shared: !affectedFiles });
+    const affected = affectedFiles ? metadata.frames.filter(frame => affectedFiles.includes(frame.source)) : [];
+    const pageIds = affected.length ? designFramePageIds(context.canvas) : undefined;
+    const identities = designFrameIdentities(workspacePath, directory);
     const [tokens, assets, styles, frames] = await Promise.all([
       readDesignTokensDocument(workspacePath, context, { includeUsage: false }),
       listDesignAssets(workspacePath),
       readDesignStyleSources(workspacePath, context.canvas),
-      Promise.all(metadata.frames.filter(frame => affectedFiles?.includes(frame.source)).map(frame =>
-        prepareRegisteredDesignFrame(workspacePath, frame.source, context.canvas))),
+      Promise.all(affected.map(frame => prepareRegisteredDesignFrame(workspacePath, frame.source, context.canvas, pageIds, identities))),
     ]);
-    if (inspectDesignCatalog(workspacePath, directory).revision !== metadata.revision) throw new DesignCatalogError("stale");
-    return { catalogRevision: metadata.revision, directoryId: metadata.directoryId, snapshot: {
-      pages: metadata.pages.map((page) => ({ id: page.id, title: page.title, folder: page.folder,
-        frameFiles: metadata.frames.filter((frame) => frame.pageId === page.id).map((frame) => frame.source),
-        frameIds: metadata.frames.filter((frame) => frame.pageId === page.id).map((frame) => frame.id) })),
+    if (!sameDesignCatalogInspection(inspection, inspectDesignCatalog(workspacePath, directory, { revision: false })))
+      throw new DesignCatalogError("stale");
+    const known = affectedFiles ? options.known : undefined;
+    const view = designNavigationView(metadata, !!options.pageHashes || !!known);
+    const hashes = view.hashes;
+    const changed = known && new Set(metadata.pages.filter((page) =>
+      known.some((pages) => pages[page.id] !== hashes!.get(page.id))).map((page) => page.id));
+    return { catalogRevision: metadata.revision, directoryId: metadata.directoryId,
+      ...(options.pageHashes ? { pageHashes: Object.fromEntries(hashes!) } : {}), snapshot: {
+      ...(changed ? {} : { pages: view.pages }),
       frames, tokens: tokens.tokens, tokenSourceVersion: tokens.sourceVersion, assets,
-      ...(affectedFiles ? { mutationCatalog: { revision: metadata.revision, frames: metadata.frames } } : {}),
+      ...(affectedFiles && !changed ? { mutationCatalog: { revision: metadata.revision, frames: metadata.frames } } : {}),
+      ...(changed ? { pageCatalog: { revision: metadata.revision,
+        pages: metadata.pages.map((page) => ({ ...page, hash: hashes!.get(page.id)! })),
+        frames: metadata.frames.filter((frame) => changed.has(frame.pageId)) } } : {}),
       styleSources: styles.sources.map(({ css: _css, fontImports: _fonts, ...status }) => status),
       styleSourceErrors: styles.errors,
       themes: mergeDesignThemes(readDesignThemeCatalog(context.canvas), [...tokens.themes, ...styles.sources.flatMap((source) => source.themes)]),
       lint: { workspacePath, checkedFiles: [], violations: [], healedOids: 0 },
     } };
-  });
+  }
+}
+
+type NavigationPages = NonNullable<DesignWorkspaceSnapshot["pages"]>;
+const navigationViews = new WeakMap<object, { pages: NavigationPages; hashes?: Map<string, string> }>();
+
+/** Page summaries and hashes for a catalog projection, built in one pass;
+ * a frozen (shared) projection keeps them for its next reader. */
+function designNavigationView(metadata: Pick<DesignCatalogSnapshot, "pages" | "frames">, withHashes: boolean) {
+  const shared = Object.isFrozen(metadata.frames);
+  let view = shared ? navigationViews.get(metadata.frames) : undefined;
+  if (!view) {
+    const members = new Map(metadata.pages.map((page) => [page.id, { frameFiles: [] as string[], frameIds: [] as string[] }]));
+    for (const frame of metadata.frames) {
+      const page = members.get(frame.pageId);
+      if (page) { page.frameFiles.push(frame.source); page.frameIds.push(frame.id); }
+    }
+    const pages = metadata.pages.map((page) => ({ id: page.id, title: page.title, folder: page.folder, ...members.get(page.id)! }));
+    view = { pages: shared ? freezeDeep(pages) : pages };
+    if (shared) navigationViews.set(metadata.frames, view);
+  }
+  if (withHashes) view.hashes ??= designCatalogPageHashes(metadata);
+  return view;
+}
+
+const MAX_MUTATION_SNAPSHOT_FILES = 16;
+/** Acknowledgements waiting for the lock share one read once it is admitted:
+ * each joined only after its own write committed, so the shared read is
+ * fresh for every one of them, and it prepares the union of their frames. */
+const mutationSnapshotBatches = new Map<string, {
+  files: Set<string>; known?: DesignPageHashes[]; sealed: boolean; snapshot: Promise<DesignWorkspaceSnapshot>;
+}>();
+let mutationSnapshotReads = 0;
+
+export function designMutationSnapshotReadsForTests(): number {
+  return mutationSnapshotReads;
 }
 
 /** A write acknowledgement never scans unrelated HTML on registered layouts.
  * Legacy documents retain the aggregate contract; metadata races re-read
  * authoritatively instead of turning an applied write into an apparent failure. */
-export async function readDesignMutationSnapshot(workspacePath: string, files: readonly string[]): Promise<DesignWorkspaceSnapshot> {
-  if (files.length > 16) return readDesignWorkspaceSnapshot(workspacePath);
-  try { return (await readDesignNavigationSnapshot(workspacePath, files)).snapshot; }
-  catch (error) {
-    if (!(error instanceof DesignCatalogError)) throw error;
-    return readDesignWorkspaceSnapshot(workspacePath);
+export async function readDesignMutationSnapshot(workspacePath: string, files: readonly string[],
+  knownPages?: DesignPageHashes): Promise<DesignWorkspaceSnapshot> {
+  if (files.length > MAX_MUTATION_SNAPSHOT_FILES) return readDesignWorkspaceSnapshot(workspacePath);
+  const key = JSON.stringify([path.resolve(workspacePath), designDirectoryNameFor(workspacePath), knownPages ? "page-scoped" : "complete"]);
+  const open = mutationSnapshotBatches.get(key);
+  if (open && !open.sealed && new Set([...open.files, ...files]).size <= MAX_MUTATION_SNAPSHOT_FILES) {
+    for (const file of files) open.files.add(file);
+    if (knownPages) open.known!.push(knownPages);
+    return open.snapshot;
   }
+  const batch = { files: new Set(files), ...(knownPages ? { known: [knownPages] } : {}), sealed: false,
+    snapshot: Promise.resolve() as unknown as Promise<DesignWorkspaceSnapshot> };
+  mutationSnapshotBatches.set(key, batch);
+  batch.snapshot = (async () => {
+    try {
+      return await withDocumentWrite(workspacePath, async () => {
+        batch.sealed = true;
+        mutationSnapshotReads++;
+        return (await readDesignNavigationSnapshotUnlocked(workspacePath, [...batch.files], { known: batch.known })).snapshot;
+      });
+    } catch (error) {
+      if (!(error instanceof DesignCatalogError)) throw error;
+      return readDesignWorkspaceSnapshot(workspacePath);
+    } finally {
+      if (mutationSnapshotBatches.get(key) === batch) mutationSnapshotBatches.delete(key);
+    }
+  })();
+  return batch.snapshot;
 }
 
-async function prepareRegisteredDesignFrame(workspacePath: string, file: string, canvas: CanvasDocument): Promise<DesignCanvasFrame> {
+/** Each frame id's page, built once per batch rather than scanned per frame. */
+const framePageIds = new WeakMap<CanvasDocument, ReadonlyMap<string, string>>();
+function designFramePageIds(canvas: CanvasDocument): ReadonlyMap<string, string> {
+  const cached = framePageIds.get(canvas);
+  if (cached) return cached;
+  const ids = new Map<string, string>();
+  for (const page of canvas.pages ?? []) for (const id of page.frames) if (!ids.has(id)) ids.set(id, page.id);
+  // A shared canvas is frozen, so its page membership cannot change under the map.
+  if (Object.isFrozen(canvas)) framePageIds.set(canvas, ids);
+  return ids;
+}
+
+function prepareRegisteredDesignFrame(workspacePath: string, file: string, canvas: CanvasDocument,
+  pageIds = designFramePageIds(canvas),
+  identities = designFrameIdentities(workspacePath, designDirectoryNameFor(workspacePath))): Promise<DesignCanvasFrame> {
+  return withSharedDesignParses(() => prepareSharedRegisteredDesignFrame(workspacePath, file, canvas, pageIds, identities));
+}
+
+async function prepareSharedRegisteredDesignFrame(workspacePath: string, file: string, canvas: CanvasDocument,
+  pageIds: ReadonlyMap<string, string>, identities: ReturnType<typeof designFrameIdentities>): Promise<DesignCanvasFrame> {
   const geometry = canvas.frames[file];
   const info = canvas.frame_info[file];
   if (!geometry || !info) throw new Error("The registered Design frame changed.");
-  const directory = designDirectory(workspacePath);
-  const safe = await readSafeRegularFile(directory, path.join(directory, assertFrameFile(file)), MAX_DESIGN_TEXT_BYTES);
-  if (!safe) throw new Error("The registered Design source is unavailable or exceeds its limit.");
-  const source = safe.body.toString("utf8");
-  const document = parse(healDesignOids(source).html, { sourceCodeLocationInfo: true });
-  const render = await prepareFrameRenderSource(workspacePath, source, { width: geometry.w, height: geometry.h },
-    undefined, undefined, file, canvas, { identityOnly: true });
-  return { file, frameId: info.id, pageId: canvas.pages?.find((page) => page.frames.includes(info.id!))?.id,
+  const pageId = info.id === undefined ? undefined : pageIds.get(info.id);
+  const frame = (identity: DesignFrameIdentity, modifiedAt: number): DesignCanvasFrame => ({ file, frameId: info.id, pageId,
     title: info.title, kind: info.kind === "text" ? "text" : "frame",
     x: geometry.x, y: geometry.y, width: geometry.w, height: geometry.h, z: geometry.z,
-    nodeCount: designNodeRecords(document).length, layerCount: designLayerCount(document),
-    modifiedAt: safe.modifiedAt, sourceVersion: render.sourceVersion, surfaceCost: render.surfaceCost };
+    nodeCount: identity.nodeCount, layerCount: identity.layerCount,
+    modifiedAt, sourceVersion: identity.sourceVersion, surfaceCost: identity.surfaceCost });
+  const directory = designDirectory(workspacePath);
+  const target = path.join(directory, assertFrameFile(file));
+  // A capture already running (a movement guard) must record these reads itself.
+  const context = isDesignDependencyCaptureActive() ? null : designFrameIdentityContext(canvas, file, pageId);
+  if (context) {
+    const cached = await identities.read(file, context);
+    const metadata = cached && await inspectSafeRegularFile(directory, target, MAX_DESIGN_TEXT_BYTES);
+    if (cached && metadata) return frame(cached, metadata.modifiedAt);
+  }
+  const compute = async () => {
+    const safe = await readSafeRegularFile(directory, target, MAX_DESIGN_TEXT_BYTES);
+    if (!safe) throw new Error("The registered Design source is unavailable or exceeds its limit.");
+    const source = safe.body.toString("utf8");
+    const healed = healDesignOids(source);
+    const document = healed.document ?? parseDesignSource(healed.html);
+    const render = await prepareFrameRenderSource(workspacePath, source, { width: geometry.w, height: geometry.h },
+      undefined, undefined, file, canvas, { identityOnly: true });
+    const identity: DesignFrameIdentity = { sourceVersion: render.sourceVersion, surfaceCost: render.surfaceCost,
+      nodeCount: designNodeRecords(document).length, layerCount: designLayerCount(document) };
+    return { identity, modifiedAt: safe.modifiedAt };
+  };
+  if (!context) {
+    const { identity, modifiedAt } = await compute();
+    return frame(identity, modifiedAt);
+  }
+  const read = await captureDurableDesignDependencies(compute);
+  identities.remember(file, context, read.value.identity, read);
+  return frame(read.value.identity, read.value.modifiedAt);
 }
+
+/** The shared decoded canvas the last preparation batch read, by catalog
+ * revision. A page opens in dozens of batches; they only read it, and it is
+ * frozen so nothing can change it for the next batch. */
+let preparationContext: {
+  key: string; revision: string; inspection: ReturnType<typeof inspectDesignCatalog>; context: Awaited<ReturnType<typeof readCanvasContext>>;
+} | null = null;
 
 /** Bound the batch and validate metadata on both sides. Shared CSS, fonts,
  * assets and HTML are re-read by the existing exact render-identity path. */
@@ -1108,19 +1252,32 @@ export async function prepareDesignNavigationFrames(workspacePath: string, catal
   return withDocumentWrite(workspacePath, async () => {
     await recoverPendingDesignTransactionUnlocked(workspacePath);
     const directory = designDirectoryNameFor(workspacePath);
-    const before = inspectDesignCatalog(workspacePath, directory);
-    if (before.revision !== catalogRevision || (directoryId !== undefined && before.layout.manifest.id !== directoryId)) throw new DesignCatalogError("stale");
-    const context = await readCanvasContext(workspacePath);
+    const key = JSON.stringify([path.resolve(workspacePath), directory]);
+    const before = inspectDesignCatalog(workspacePath, directory, { revision: false });
+    const reused = preparationContext?.key === key && sameDesignCatalogInspection(preparationContext.inspection, before)
+      ? preparationContext : null;
+    const revision = reused?.revision ?? designCatalogRevision(before);
+    if (revision !== catalogRevision || (directoryId !== undefined && before.layout.manifest.id !== directoryId)) throw new DesignCatalogError("stale");
+    let context = reused?.context ?? null;
+    if (!context) {
+      // The canvas navigation and identity reads share: one frozen copy per revision.
+      context = await readSharedCanvasContext(workspacePath);
+      const captured = context.canvas[canvasReadSnapshot];
+      if (captured?.source === before.source && captured.registration?.source === before.registration)
+        preparationContext = { key, revision, inspection: before, context };
+    }
     const frames: DesignCanvasFrame[] = [];
     const errors: Array<{ file: string; message: string }> = [];
+    const pageIds = designFramePageIds(context.canvas);
+    const identities = designFrameIdentities(workspacePath, directory);
     // One native preparation at a time; optional demand must not fan out large
     // decoder/source buffers across every frame in a batch.
     for (const file of files) {
-      try { frames.push(await prepareRegisteredDesignFrame(workspacePath, file, context.canvas)); }
+      try { frames.push(await prepareRegisteredDesignFrame(workspacePath, file, context.canvas, pageIds, identities)); }
       catch (error) { errors.push({ file, message: error instanceof Error ? error.message : "Could not prepare this frame." }); }
     }
-    const after = inspectDesignCatalog(workspacePath, directory);
-    if (after.revision !== catalogRevision || after.binding !== before.binding) throw new DesignCatalogError("stale");
+    if (!sameDesignCatalogInspection(before, inspectDesignCatalog(workspacePath, directory, { revision: false })))
+      throw new DesignCatalogError("stale");
     return { directoryId: before.layout.manifest.id, catalogRevision, frames, errors };
   });
 }

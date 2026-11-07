@@ -1233,6 +1233,13 @@ export interface PtyCreateMessage extends BaseMessage {
   ephemeral?: boolean;
   /** Local, provider-owned one-shot sign-in. No renderer-supplied command. */
   loginProvider?: "claude" | "codex";
+  /** Cloud: a plain user shell that should come back after its worker
+   *  restarts (a wake or a runtime update). The worker keeps its last screen
+   *  and directory and answers the next create for this id with a new shell
+   *  there, as a reattach carrying that screen. Run, setup and agent terminals
+   *  never set it, because their launch command must run again. The Local
+   *  engine ignores it. */
+  restore?: true;
 }
 export interface PtyCreatedMessage extends BaseMessage {
   type: "PTY_CREATED";

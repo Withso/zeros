@@ -28,6 +28,9 @@ export function assertSafeDesignStoragePath(
   root: string,
   relative: string,
   createParents = false,
+  /** A directory leaf gets the checks of an intermediate component; callers
+   * otherwise append a sentinel file name, which lists the whole directory. */
+  leaf: "file" | "directory" = "file",
 ): string {
   const parts = relative.split("/");
   if (
@@ -64,7 +67,7 @@ export function assertSafeDesignStoragePath(
       if (
         info.isSymbolicLink() ||
         realpathSync(candidate) !== candidate ||
-        (index < parts.length - 1
+        (index < parts.length - 1 || leaf === "directory"
           ? !info.isDirectory()
           : !info.isFile() || info.nlink !== 1)
       )
@@ -78,6 +81,48 @@ export function assertSafeDesignStoragePath(
     parent = candidate;
   }
   return parent;
+}
+
+/** Large metadata (a 26k-frame canvas is ~8 MB) is re-read several times per
+ * request to compare generations. Identical bytes decode to the identical
+ * string, so a read returns the one decoded before: nothing decodes again,
+ * and comparing two reads of unchanged bytes is a pointer check. */
+const MIN_REUSED_DECODE_BYTES = 256 * 1024;
+const MAX_REUSED_DECODE_BYTES = 32 * 1024 * 1024;
+const reusedDecodes = new Map<string, { bytes: Buffer; source: string; strict?: boolean }>();
+let reusedDecodeBytes = 0;
+
+function decodeDesignStorageBytes(target: string, content: Buffer, strictUtf8: boolean): string {
+  const reusable = content.length >= MIN_REUSED_DECODE_BYTES && content.length <= MAX_REUSED_DECODE_BYTES / 2;
+  let entry = reusable ? reusedDecodes.get(target) : undefined;
+  if (entry && !entry.bytes.equals(content)) {
+    reusedDecodes.delete(target);
+    reusedDecodeBytes -= entry.bytes.length;
+    entry = undefined;
+  }
+  if (!entry) {
+    entry = { bytes: content, source: content.toString("utf8") };
+    if (reusable) {
+      reusedDecodes.set(target, entry);
+      reusedDecodeBytes += content.length;
+      while (reusedDecodeBytes > MAX_REUSED_DECODE_BYTES) {
+        const [oldest, value] = reusedDecodes.entries().next().value!;
+        reusedDecodes.delete(oldest);
+        reusedDecodeBytes -= value.bytes.length;
+      }
+    }
+  } else {
+    reusedDecodes.delete(target);
+    reusedDecodes.set(target, entry);
+  }
+  if (strictUtf8) {
+    entry.strict ??= Buffer.from(entry.source, "utf8").equals(content);
+    if (!entry.strict)
+      throw new Error(
+        "Design source is not valid UTF-8; repair it before migration.",
+      );
+  }
+  return entry.source;
 }
 
 export function readDesignStorageFile(
@@ -129,13 +174,7 @@ export function readDesignStorageFile(
       current.nlink !== 1
     )
       throw new Error("Design metadata changed during read.");
-    const content = bytes.subarray(0, offset);
-    const source = content.toString("utf8");
-    if (strictUtf8 && !Buffer.from(source, "utf8").equals(content))
-      throw new Error(
-        "Design source is not valid UTF-8; repair it before migration.",
-      );
-    return source;
+    return decodeDesignStorageBytes(target, bytes.subarray(0, offset), strictUtf8);
   } finally {
     closeSync(fd);
   }

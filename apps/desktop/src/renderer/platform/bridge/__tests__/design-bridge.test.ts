@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { bridgeDesignHistory, bridgeDesignSnapshot, bridgeDesignTransferNode, bridgeDesignDuplicateFrame, bridgeDesignMoveFrames, bridgeDesignUpdateCanvas, bridgeDesignCreateFrame, bridgeDesignDeleteFrame, bridgeDesignUpdateStyles, bridgeDesignSetText, bridgeDesignWriteHtml, bridgeDesignInsertAsset, isDesignWorkspaceSnapshotWire, normalizeDesignWorkspaceSnapshotPages } from "../design-bridge";
+import { setDesignKnownPagesReader, bridgeDesignHistory, bridgeDesignSnapshot, bridgeDesignTransferNode, bridgeDesignDuplicateFrame, bridgeDesignMoveFrames, bridgeDesignUpdateCanvas, bridgeDesignCreateFrame, bridgeDesignDeleteFrame, bridgeDesignUpdateStyles, bridgeDesignSetText, bridgeDesignWriteHtml, bridgeDesignInsertAsset, isDesignWorkspaceSnapshotWire, normalizeDesignWorkspaceSnapshotPages } from "../design-bridge";
 import type { RuntimeClient } from "../ws-client";
-import { DESIGN_MUTATION_SNAPSHOTS_CAPABILITY } from "@zeros/protocol/design-catalog";
+import { DESIGN_MUTATION_SNAPSHOTS_CAPABILITY, DESIGN_PAGE_SCOPED_MUTATIONS_CAPABILITY } from "@zeros/protocol/design-catalog";
 
 function scopedSnapshot() {
   const descriptor = { id: "home", pageId: "screens", source: "page-1/home.html", title: "Home", kind: "html" as const,
@@ -58,6 +58,40 @@ describe("Design bridge read budgets", () => {
     for (const [message] of request.mock.calls as unknown as Array<[{ params: Record<string, unknown> }]>) {
       expect(message.params.snapshotMode).toBe(scoped ? "scoped" : undefined);
     }
+  });
+
+  it.each([
+    ["page hashes", [DESIGN_MUTATION_SNAPSHOTS_CAPABILITY, DESIGN_PAGE_SCOPED_MUTATIONS_CAPABILITY], "local", true],
+    ["engine without page scoping", [DESIGN_MUTATION_SNAPSHOTS_CAPABILITY], "local", false],
+    ["cloud", [DESIGN_MUTATION_SNAPSHOTS_CAPABILITY, DESIGN_PAGE_SCOPED_MUTATIONS_CAPABILITY], "cloud://org/workspace", false],
+    ["no confirmed hashes", [DESIGN_MUTATION_SNAPSHOTS_CAPABILITY, DESIGN_PAGE_SCOPED_MUTATIONS_CAPABILITY], "unhashed", false],
+  ] as const)("offers the client's page hashes only when negotiated: %s", async (_label, capabilities, workspaceId, sent) => {
+    const hashes = { screens: "a".repeat(32) };
+    setDesignKnownPagesReader((id) => (id === "local" || id.startsWith("cloud") ? hashes : undefined));
+    const snapshot = scopedSnapshot();
+    const request = vi.fn(async () => ({ type: "WORKSPACE_RESPONSE", result: { frame: snapshot.frames[0], snapshot } }));
+    const bridge = { request, supportsEngineCapability: (capability: string) => (capabilities as readonly string[]).includes(capability) } as unknown as RuntimeClient;
+    await bridgeDesignCreateFrame(bridge, workspaceId, "New");
+    const [[message]] = request.mock.calls as unknown as Array<[{ params: Record<string, unknown> }]>;
+    expect(message.params.knownPages).toEqual(sent ? hashes : undefined);
+    setDesignKnownPagesReader(undefined);
+  });
+
+  it("validates a page-scoped acknowledgement as complete pages without the full catalog", () => {
+    const { mutationCatalog, pages: _pages, ...base } = scopedSnapshot();
+    const descriptor = mutationCatalog.frames[0]!;
+    const pageCatalog = { revision: "a".repeat(64),
+      pages: [{ id: "screens", title: "Screens", folder: "page-1", count: 1, hash: "b".repeat(32) },
+        { id: "other", title: "Other", folder: "other", count: 3, hash: "c".repeat(32) }],
+      frames: [descriptor] };
+    const snapshot = { ...base, pageCatalog };
+    expect(isDesignWorkspaceSnapshotWire(snapshot)).toBe(true);
+    expect(isDesignWorkspaceSnapshotWire({ ...snapshot, frames: [] , pageCatalog: { ...pageCatalog, frames: [] } })).toBe(true);
+    expect(isDesignWorkspaceSnapshotWire({ ...snapshot, pages: _pages })).toBe(false);
+    expect(isDesignWorkspaceSnapshotWire({ ...snapshot, mutationCatalog })).toBe(false);
+    expect(isDesignWorkspaceSnapshotWire({ ...snapshot, frames: [{ ...snapshot.frames[0]!, width: 400 }] })).toBe(false);
+    expect(isDesignWorkspaceSnapshotWire({ ...snapshot, frames: [{ ...snapshot.frames[0]!, pageId: "missing" }] })).toBe(false);
+    expect(isDesignWorkspaceSnapshotWire({ ...snapshot, pageCatalog: { ...pageCatalog, frames: [{ ...descriptor, order: 1 }] } })).toBe(false);
   });
 
   it("refuses a style acknowledgement whose scoped frame does not match its catalog", async () => {

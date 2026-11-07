@@ -127,6 +127,15 @@ On create and wake, the control plane installs its selected runtime tarball
 from object storage, verifies its SHA-256 and caches it under
 `/opt/zeros/runtime/<sha256>`. `/opt/zeros/worker` points to that directory.
 The runtime is root-owned; `zeros-worker.service` runs `worker.mjs` as `user`.
+A resumed VM that already has the pinned runtime, unit, profile and keys exits
+the install step after comparing them, with no lock, `sudo` or rewrite. The unit
+keeps Node's compile cache in `/home/user/.cache/zeros/node-compile-cache`, and
+the worker loads the Claude Agent SDK on its first Claude turn rather than at
+start, so a wake parses less on a cold restored disk. Node writes that cache
+only at a normal exit, which a stopped VM may never give the worker, so the
+worker also writes it once connected and after loading the SDK. Install and
+activation clear it before restarting onto another runtime, so it holds only
+the current runtime's code.
 The same step writes the control plane's public verification keys to
 root-owned `/opt/zeros/worker-auth.json`. Every wake rotates the worker
 credential in `/home/user/.config/zeros/worker-token` (mode `0600`) and
@@ -192,14 +201,23 @@ the build still work, and their selection becomes the configured recipe.
 
 A build always starts from Boat's stock image. It installs the pinned runtime
 and git-lfs (configured system-wide; a build that can't install it still goes
-live and says so in its log), then waits for Boat to finish capturing a clean
-snapshot **before** delivering
-any repository credential, cloning source or running recipe scripts. It then
-validates the repositories and setup scripts on the disposable builder,
-recording each branch and commit. Only a successful validation makes that
-snapshot active. The shared image caches the runtime and git-lfs; it contains no project
-checkouts, dependency trees or setup outputs. Deleting a checkout after setup
-would not establish this boundary, because setup can copy source elsewhere.
+live and says so in its log). The build's `source_policy_version` then decides
+when the snapshot is captured:
+
+- **v3**, the default since migration 0223: the build clones every recipe
+  repository and runs its setup, recording each branch and commit. It
+  restores any tracked file a setup rewrote, then captures the snapshot. The
+  image holds every checkout and its dependencies, so a new workspace starts
+  with its code on disk.
+- **v2**, for a build queued by an older replica: the build captures a clean
+  snapshot **before** any repository credential, clone or recipe script, then
+  validates the repositories on the disposable builder.
+
+Only a successful build becomes active. Deleting a checkout after setup is no
+confidentiality boundary, because setup can copy source elsewhere. A v3 image
+therefore starts only a workspace whose immutable `source_repositories` scope
+covers the whole recipe (`cloudV2WorkspaceImage`). The source authority
+re-verifies that scope on every create and wake.
 
 The builder is deleted afterward. An inactive snapshot is deleted once no
 creating workspace still needs it; its recipe remains in history. Activating
@@ -257,7 +275,12 @@ not checked again for a day, one GitHub cannot answer for an hour, and
 organizations are visited earliest-due first. An automatic refresh
 is fenced to the live build it was scheduled from, so a build that became live
 meanwhile is never relabelled or rolled back, and a rebuilt older build is never
-refreshed this way. Scans run beside build admission, never ahead of it. Each
+refreshed this way. Scans run beside build admission, never ahead of it, every
+ten minutes. A newly started process waits one interval before its first scan:
+during a rolling deploy the old process still claims builds, and a build that
+needs the new code would fail there. On Alpha (Computer v11, 2026-11-07) the
+old process failed a source policy v3 refresh as `cloud_source_review_required`,
+which also paused that organization's runtime refreshes for six hours. Each
 lifecycle process runs one build at a time: a build holds a dedicated lock
 connection for its whole run.
 
@@ -277,9 +300,33 @@ provider effects and committed runtime adoptions. Expiry or a confirmed release
 restores admission. This drain never stops a user workspace or changes its
 catalog state.
 
-New workspaces fork the clean snapshot of the build they pinned at creation.
-After checking the creator's repository access, the control plane clones only
-the selected repository into that VM. The worker switches to the workspace
+New workspaces start from the build they pinned at creation:
+
+- **Creator can read every repository of a v3 build:** the scope records them
+  all, and the VM starts from the build's snapshot. The other checkouts are
+  removed before the worker or any agent can reach them, so agents cannot
+  work on or push to them. Each one's Git data is deleted at once and its tree
+  leaves its path in one rename. The files are deleted in the background,
+  because thousands of them took 16.6 s on a restored disk. The image already
+  holds the workspace's clone, so creation skips hydration: no token, binding
+  read or detached command.
+- **Anyone else:** the scope is the selected repository only. The VM starts
+  from Boat's stock image with git-lfs, and the control plane clones only that
+  repository.
+- **v2 build:** the VM starts from its source-free snapshot and clones the
+  selected repository.
+
+Create checks the requested repository first, then the creator's access to the
+other build repositories in order. The source authority verifies one repository
+at a time per creator, and a denial invalidates the checks queued behind it, so
+they never run together. The base branch is read while the others are checked.
+Boat's detached commands (hydration and long setup) are polled after 250 ms,
+backing off to every five seconds. Only a recorded exit status ends one; a poll
+that times out or reads nothing keeps waiting until the command's deadline. The lifecycle logs `source_authorize` and
+`repository_prepare` timings beside its other phases.
+
+Restores after a lost disk apply the same rule to the active build and record
+their choice, so a retried restore replays it without another lookup. The worker switches to the workspace
 branch, creating it from the selected base only when absent; it never resets
 an existing branch. Setup runs inside the individual workspace. Creation and
 replacement-VM restore therefore need GitHub and can take longer; ordinary
@@ -852,14 +899,18 @@ workspace, or a Cloud Computer build changes, and each notice starts a sweep
 at once. Reconnecting the shared LISTEN session sweeps once, covering notices
 lost meanwhile. Idle stops and other time-based scans run within that minute.
 
-The lifecycle loop stops a running VM after 15 minutes without activity
-reports (`CLOUD_V2_IDLE_STOP_MS`). Turns, workspace setup, attachment transfers,
-recent terminal input/output, and explicit file/Git mutations keep reports
-flowing. The worker counts terminal input/output, file saves and Git mutations
-as activity until completion and for ten minutes afterwards
-(`RECENT_ACTIVITY_MS`), so a VM stops about 15 minutes after a turn ends and
-about 25 minutes after the last terminal input/output or save. Reads and polls
-do not renew it; an untouched shell eventually becomes idle. Passive history reads do not wake
+The lifecycle loop stops a running VM after 20 minutes without activity
+(`CLOUD_V2_IDLE_STOP_MS`), like Conductor's sandboxes. These count as activity:
+- turns, workspace setup and attachment transfers;
+- terminal input and output, file saves and Git mutations, each for one minute
+  afterwards (`RECENT_ACTIVITY_MS`, one report heartbeat);
+- a focused, visible Zeros window showing the running workspace. The app posts
+  `/activity` at most once a minute; the post never wakes a stopped VM, and
+  the store records it at most every 30 seconds.
+
+A VM therefore stops about 20 minutes after the last of these. There is no
+maximum lifetime: running VMs renew their Boat lease every 12 hours. Reads and
+polls do not renew it; an untouched shell eventually becomes idle. Passive history reads do not wake
 the VM, and neither do reconnects: `/connect` accepts `{ "wake": false }`, and
 the single-use ticket carries that intent through bridge admission. The app
 asks to wake for explicit navigation from the sidebar, Dashboard or repository
@@ -910,6 +961,17 @@ selecting the updated SHA-pinned worker runtime; create/wake installs it, so an
 already-running VM adopts it on its next wake. No schema migration is needed.
 Quitting the Mac app still leaves cloud agents and terminals running, while
 Local quit retains its existing stop behavior.
+
+A VM stop ends its shells, so the worker keeps what a plain terminal needs to
+come back. The desktop marks a cloud shell restorable (`PTY_CREATE.restore`)
+only when it has no Run, setup or agent launch; those must start again. For a
+restorable shell the worker writes its screen snapshot and live directory to
+`terminals/` in its private state, two seconds after output and at shutdown.
+After a wake, runtime update or app restart, the next create for that id
+starts a new shell in that directory and replies as a reattach carrying the
+saved screen. If the directory is gone or outside the checkout, the shell starts
+at the checkout root. A shell that exits or is closed drops its record. Records
+expire after seven days, and at most 64 are kept. Local terminals are unchanged.
 
 A new workspace branch starts from the authorized checkout hydrated into its
 own VM before worker startup. Before persisting a new workspace or allocating a

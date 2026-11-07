@@ -25,7 +25,7 @@ d("cloud initial allocation cleanup", () => {
     await pool.query("INSERT INTO organization_members(org_id,user_id,role) VALUES($1,$2,'owner')", [organization, creator]);
     await store.createWorkspace({ id: workspaceId, organizationId: organization, creatorUserId: creator,
       repository: "Owner/Project", branch: "zeros/create", baseBranch: "main", name: "Project", computerBuildId: null });
-    vi.spyOn(store, "computerSnapshot").mockResolvedValue("fixture-snapshot");
+    vi.spyOn(store, "workspaceImage").mockResolvedValue({ from: "fixture-snapshot", prune: [] });
   });
 
   it("retires a held create reply when another lifecycle replica deletes the workspace", async () => {

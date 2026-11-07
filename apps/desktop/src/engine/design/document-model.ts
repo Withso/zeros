@@ -199,7 +199,9 @@ export interface DesignMutationResult {
 
 export interface DesignWorkspaceSnapshot {
   mutationCatalog?: import("@zeros/protocol/design-catalog").DesignMutationCatalog;
-  pages: DesignPageSummary[];
+  /** Page-scoped acknowledgements carry `pageCatalog` instead of every page list. */
+  pageCatalog?: import("@zeros/protocol/design-catalog").DesignPageScopedCatalog;
+  pages?: DesignPageSummary[];
   /** Lightweight frames in canvas z-order. The custom protocol hydrates only
    * the bounded live-frame set, avoiding an all-frame HTML/srcDoc IPC payload. */
   frames: DesignCanvasFrame[];

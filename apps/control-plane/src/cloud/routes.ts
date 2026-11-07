@@ -1,5 +1,6 @@
 // Cloud workspace v2 HTTP API under /v1, so the normal authentication
 // middleware always sets c.get("user"). Workspaces are creator-only.
+import { rateLimit } from "../ratelimit.js";
 import { createHash, randomUUID } from "node:crypto";
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
@@ -45,7 +46,7 @@ const CreateSchema = z.object({
 const ConnectSchema = z.object({ wake: z.boolean().default(true) }).strict();
 
 export type CloudV2RouteDeps = {
-  store: Pick<CloudV2Store, "activeComputer" | "createWorkspace" | "createWorkspaceOnce" | "readCreateReceipt" | "get" | "promptContext" | "list" | "requestLifecycle" | "transition" | "issueToken" | "listChats" | "messageWindow" | "searchMessages"> & Partial<Pick<CloudV2Store, "prompts">>;
+  store: Pick<CloudV2Store, "activeComputer" | "createWorkspace" | "createWorkspaceOnce" | "readCreateReceipt" | "get" | "promptContext" | "list" | "requestLifecycle" | "transition" | "issueToken" | "listChats" | "messageWindow" | "searchMessages" | "markActive"> & Partial<Pick<CloudV2Store, "prompts">>;
   /** Roll out only with a runtime that advertises durable prompt delivery. */
   promptOutbox?: boolean;
   computers: Pick<CloudV2Computers, "requireMember" | "requireAdmin" | "overview" | "enqueue" | "buildConfigured" | "saveRecipe" | "discardRecipe" | "reactivate" | "log" | "logRepositories">;
@@ -161,17 +162,28 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
     if (!computer) throw await computerUnavailable(input.organizationId, c.get("user").id);
     // Display names can move. Select among the build's authorized ID bindings,
     // retaining the original recipe entry for checkout, setup and branch pins.
-    const candidates: Awaited<ReturnType<typeof buildRepository>>[] = [];
-    let originalError: HttpError | undefined;
-    for (const entry of computer.repositories) {
-      try { candidates.push(await buildRepository(input.organizationId, c.get("user").id, computer.buildId, entry)); }
+    // The source authority verifies one repository at a time per creator, and
+    // a denial invalidates the checks queued behind it, so they run in order,
+    // the requested repository first. Only its branch read, a connection call
+    // that authority never invalidates, overlaps the rest.
+    const userId = c.get("user").id, requested = (entry: CloudV2InstalledRepository) => entry.repository.toLowerCase() === input.repository.toLowerCase();
+    const named = computer.repositories.findIndex(requested), indices = [...computer.repositories.keys()];
+    const resolved: Awaited<ReturnType<typeof buildRepository>>[] = [];
+    let originalError: HttpError | undefined, early: Promise<string | null> | undefined;
+    for (const index of named < 0 ? indices : [named, ...indices.filter(other => other !== named)]) {
+      const entry = computer.repositories[index]!;
+      try { resolved[index] = await buildRepository(input.organizationId, userId, computer.buildId, entry); }
       catch (error) {
         if (!(error instanceof HttpError) || ![403, 404].includes(error.status)) throw error;
-        if (entry.repository.toLowerCase() === input.repository.toLowerCase()) originalError = error;
+        if (requested(entry)) originalError = error;
+        continue;
       }
+      const branch = input.baseBranch ?? entry.defaultBranch;
+      if (index === named && branch) { early = deps.remoteHead(input.organizationId, userId, resolved[index].target, branch); early.catch(() => {}); }
     }
+    const candidates = resolved.filter(Boolean);
     const selected = candidates.find(({ target }) => target.repository.toLowerCase() === input.repository.toLowerCase())
-      ?? candidates.find(({ entry }) => entry.repository.toLowerCase() === input.repository.toLowerCase());
+      ?? candidates.find(({ entry }) => requested(entry));
     if (!selected) {
       if (originalError) throw originalError;
       throw new HttpError(409, "repository_not_installed", "Add this repository to the Cloud Computer first");
@@ -180,7 +192,10 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
     if (runtimeCanary && runtimeCanary.repositoryId !== target.repositoryId) throw refuseRuntimeCanary();
     const baseBranch = input.baseBranch ?? repository.defaultBranch;
     if (!baseBranch) throw new HttpError(409, "repository_branch_required", "Select a branch or rebuild the Cloud Computer to record its default branch");
-    if (await deps.remoteHead(input.organizationId, c.get("user").id, target, baseBranch) === null)
+    // A renamed repository can select another entry than the early lookup read.
+    const head = early && selected.entry === computer.repositories[named] ? await early
+      : await deps.remoteHead(input.organizationId, userId, target, baseBranch);
+    if (head === null)
       throw new HttpError(404, "repository_branch_not_found", `Branch ${baseBranch} does not exist in ${target.repository}.`);
     const id = randomUUID();
     const name = input.name ?? input.repository.split("/")[1]!;
@@ -189,6 +204,8 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
       repository: repository.repository, branch: input.branch ?? `${prefix}${slug(name)}-${id.slice(0, 8)}`,
       baseBranch, computerBuildId: computer.buildId,
       sourceRepositoryId: target.repositoryId,
+      // Every build repository the creator can read: a v3 image needs them all.
+      readableRepositoryIds: candidates.map(candidate => candidate.target.repositoryId),
       ...(runtimeCanary ? { runtimeCanary } : {}),
     };
     if (key) {
@@ -244,6 +261,18 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
       protocols: [CLOUD_V2_BRIDGE_PROTOCOL, `ticket.${ticket.token}`],
       expiresAt: ticket.expiresAt.toISOString(),
     });
+  });
+
+  /** A focused app window counts as activity, like the worker's reports.
+   * It keeps a running VM awake and never wakes a stopped one; the store
+   * writes at most every 30 seconds per workspace. */
+  app.post("/v1/cloud-v2/workspaces/:id/activity", rateLimit("cloud-workspace-activity", 12, 60_000), async c => {
+    const id = uuid.safeParse(c.req.param("id"));
+    if (!id.success) throw new HttpError(404, "not_found", "Cloud workspace not found");
+    const workspace = await deps.store.get(id.data, c.get("user").id);
+    const running = workspace.state === "running";
+    if (running) await deps.store.markActive(workspace.id);
+    return c.json({ running });
   });
 
   /** History reads from the control plane's mirror; never wakes the VM. */

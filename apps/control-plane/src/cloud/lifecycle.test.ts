@@ -50,7 +50,7 @@ function vmCommands(f: { compute: CloudV2Compute }, overrides: { checkpoint?: st
 }
 const vmCommand = (f: { compute: CloudV2Compute }, marker: string) => vi.mocked(f.compute.exec).mock.calls.find(([, command]) => command.includes(marker));
 
-function setup(claimed: (CloudV2LifecycleWorkspace & { attempts: number })[], options: { snapshot?: string | null; idle?: CloudV2Workspace[]; stopIdle?: CloudV2LifecycleDeps["stopIdle"]; timing?: CloudV2LifecycleDeps["timing"]; now?: () => number;
+function setup(claimed: (CloudV2LifecycleWorkspace & { attempts: number })[], options: { snapshot?: string | null; prune?: string[]; stock?: true; checkout?: true; idle?: CloudV2Workspace[]; stopIdle?: CloudV2LifecycleDeps["stopIdle"]; timing?: CloudV2LifecycleDeps["timing"]; now?: () => number;
   checkpoints?: ReturnType<typeof checkpointsFake>; remoteHead?: CloudV2LifecycleDeps["remoteHead"]; githubToken?: CloudV2LifecycleDeps["githubToken"]; uploadHorizon?: string;
   checkpointRetry?: boolean; retries?: RetryRow[]; prepareRepository?: CloudV2LifecycleDeps["prepareRepository"]; pruneEnvironments?: () => Promise<void>;
   runtimeForWorkspace?: CloudV2LifecycleDeps["runtimeForWorkspace"]; bootEnv?: CloudV2LifecycleDeps["bootEnv"]; builds?: CloudV2LifecycleDeps["builds"] } = {}) {
@@ -77,7 +77,8 @@ function setup(claimed: (CloudV2LifecycleWorkspace & { attempts: number })[], op
     defer: vi.fn(async () => {}),
     transition: vi.fn(async () => null),
     rotateWorkerToken: vi.fn(async () => token),
-    computerSnapshot: vi.fn(async () => options.snapshot === undefined ? "cv2-alpha-org-1" : options.snapshot),
+    workspaceImage: vi.fn(async () => options.snapshot === null ? null
+      : { from: options.stock ? null : options.snapshot === undefined ? "cv2-alpha-org-1" : options.snapshot, prune: options.prune ?? [], checkout: options.checkout === true }),
     revoke: vi.fn(async () => {}),
     idleSince: vi.fn(async () => options.idle ?? []),
     nextLifecycleDue: vi.fn(async (): Promise<number | null> => null),
@@ -91,7 +92,7 @@ function setup(claimed: (CloudV2LifecycleWorkspace & { attempts: number })[], op
     setBaseCommit: vi.fn(async () => {}),
     saveCheckpoint: vi.fn(async (): Promise<{ replaced: string | null } | false> => ({ replaced: SAVED.object })),
     checkpointFailed: vi.fn(async () => {}),
-    beginRestore: vi.fn(async (_id: string, _lost: string | null, request: { attempt: string; name: string; env: Record<string, string> }): Promise<{ attempt: string; create: { from: string; name: string; env: Record<string, string>; requestedAt: string } } | "no_computer" | null> =>
+    beginRestore: vi.fn(async (_id: string, _lost: string | null, request: { attempt: string; name: string; env: Record<string, string> }): Promise<{ attempt: string; create: { from: string | null; prune?: string[]; name: string; env: Record<string, string>; requestedAt: string } } | "no_computer" | null> =>
       ({ attempt: request.attempt, create: { from: "cv2-alpha-org-2", name: request.name, env: request.env, requestedAt: new Date(NOW).toISOString() } })),
     checkpointUpload: vi.fn(async () => true),
     checkpointUploadHorizon: vi.fn(async (): Promise<string | null> => options.uploadHorizon ?? null),
@@ -192,7 +193,7 @@ describe("cloud v2 lifecycle", () => {
   it("allocates from the workspace's pinned computer build", async () => {
     const w = workspace("creating", { computerBuildId: "pinned-build" }), f = setup([w]);
     await f.lifecycle.tick();
-    expect(f.store.computerSnapshot).toHaveBeenCalledWith(w.organizationId, "pinned-build");
+    expect(f.store.workspaceImage).toHaveBeenCalledWith(w.id);
     expect(f.compute.create).toHaveBeenCalledWith(expect.objectContaining({ from: "cv2-alpha-org-1" }));
   });
 
@@ -350,7 +351,7 @@ describe("cloud v2 lifecycle", () => {
     await lostReply.lifecycle.tick();
     expect(lostReply.store.beginRestore).not.toHaveBeenCalled();
     // The recorded request is replayed byte for byte, even after a runtime release.
-    expect(lostReply.store.computerSnapshot).not.toHaveBeenCalled();
+    expect(lostReply.store.workspaceImage).not.toHaveBeenCalled();
     expect(lostReply.compute.create).toHaveBeenCalledWith({ key: `restore:${WS}:${PENDING}`, ...REPLAYED });
     expect(lostReply.store.finishRestore).toHaveBeenCalledWith(WS, "bx_new1");
 
@@ -398,7 +399,7 @@ describe("cloud v2 lifecycle", () => {
       vmCommands(f);
       await f.lifecycle.tick();
       // No lookup of the build, which organization deletion may already be retiring.
-      expect(f.store.computerSnapshot).not.toHaveBeenCalled();
+      expect(f.store.workspaceImage).not.toHaveBeenCalled();
       expect(f.compute.create).toHaveBeenCalledWith({ key: `restore:${WS}:${PENDING}`, ...REPLAYED });
       expect(vmCommand(f, "zeros-checkpoint-saved")).toBeUndefined();
       if (state === "stopping") expect(f.compute.stop).toHaveBeenCalledWith("bx_new1");
@@ -762,9 +763,10 @@ describe("cloud v2 lifecycle", () => {
     const idle = workspace("running"), stopIdle = vi.fn(async () => {});
     const f = setup([], { idle: [idle], stopIdle });
     await f.lifecycle.tick();
-    // Product decision: a running VM stops after 15 minutes without activity.
-    expect(stopIdle).toHaveBeenCalledWith(idle.id, new Date(NOW - 15 * 60_000));
-    expect(CLOUD_V2_IDLE_STOP_MS).toBe(15 * 60_000);
+    // Product decision (2026-11-07, like Conductor): a running VM stops after
+    // 20 minutes without activity; a focused app window counts as activity.
+    expect(stopIdle).toHaveBeenCalledWith(idle.id, new Date(NOW - 20 * 60_000));
+    expect(CLOUD_V2_IDLE_STOP_MS).toBe(20 * 60_000);
     expect(f.store.revoke).not.toHaveBeenCalled();
     expect(f.store.transition).not.toHaveBeenCalled();
   });
@@ -800,6 +802,63 @@ describe("cloud v2 lifecycle", () => {
     release(true); await step;
     expect(f.compute.stop).toHaveBeenCalledWith("bx_test");
   });
+  it("removes the other recipe checkouts a kept image starts with before the worker can be reached", async () => {
+    const f = setup([workspace("creating")], { prune: ["Example/Docs"] });
+    await f.lifecycle.tick();
+    const prune = vi.mocked(f.compute.exec).mock.calls.findIndex(([, command]) => command.includes("/home/user/Example/Docs") && command.includes("rmdir --"));
+    expect(prune).toBeGreaterThan(-1);
+    expect(vi.mocked(f.compute.exec).mock.calls[prune]![1]).not.toContain("/home/user/o/r");
+    expect(vi.mocked(f.compute.exec).mock.invocationCallOrder[prune]).toBeLessThan(vi.mocked(f.compute.hostPort).mock.invocationCallOrder[0]!);
+    expect(f.compute.create).toHaveBeenCalledWith(expect.objectContaining({ from: "cv2-alpha-org-1" }));
+  });
+
+  it("hydrates only an image that lacks the workspace's checkout", async () => {
+    // Hydration is a detached command plus GitHub token and binding reads,
+    // seconds of work that a source-holding image makes pointless.
+    for (const [options, hydrates] of [[{ checkout: true }, false], [{}, true], [{ stock: true }, true]] as const) {
+      const prepareRepository = vi.fn(async () => {});
+      const f = setup([workspace("creating")], { ...options, prepareRepository });
+      await f.lifecycle.tick();
+      expect(prepareRepository, JSON.stringify(options)).toHaveBeenCalledTimes(hydrates ? 1 : 0);
+      expect(f.store.rotateWorkerToken, JSON.stringify(options)).toHaveBeenCalledOnce();
+    }
+  });
+
+  it("starts a narrower source scope from Boat's stock image with git-lfs", async () => {
+    const f = setup([workspace("creating")], { stock: true });
+    await f.lifecycle.tick();
+    expect(vi.mocked(f.compute.create).mock.calls[0]![0]).not.toHaveProperty("from");
+    expect(vi.mocked(f.compute.exec).mock.calls.some(([, command]) => command.includes("git lfs install --system"))).toBe(true);
+    expect(vi.mocked(f.compute.exec).mock.calls.some(([, command]) => command.includes("rmdir --"))).toBe(false);
+  });
+
+  it("stops a create whose prune failed before the worker gets a route or token", async () => {
+    const f = setup([workspace("creating")], { prune: ["Example/Docs"] });
+    vi.mocked(f.compute.exec).mockImplementation(async (_id: string, command: string) =>
+      ({ exitCode: command.includes("rm -rf") ? 1 : 0, stdout: "", timedOut: false }));
+    await f.lifecycle.tick();
+    expect(f.compute.hostPort).not.toHaveBeenCalled();
+    expect(f.store.rotateWorkerToken).not.toHaveBeenCalled();
+  });
+
+  it("prunes a begun restore's recorded checkouts before applying its checkpoint", async () => {
+    const checkpoints = checkpointsFake();
+    const waking = workspace("starting", { boatSandboxId: "bx_expired", checkpoint: SAVED });
+    const f = setup([waking], { checkpoints });
+    vmCommands(f);
+    vi.mocked(f.store.beginRestore).mockImplementationOnce(async (_id, _lost, request) =>
+      ({ attempt: request.attempt, create: { from: "cv2-alpha-org-2", prune: ["Example/Docs"], name: request.name, env: request.env, requestedAt: new Date(NOW).toISOString() } }));
+    const { BoatSnapshotExpiredError } = await import("./boat-client.js");
+    vi.mocked(f.compute.resume).mockRejectedValueOnce(new BoatSnapshotExpiredError());
+    await f.lifecycle.tick();
+    const calls = vi.mocked(f.compute.exec).mock;
+    const prune = calls.calls.findIndex(([, command]) => command.includes("/home/user/Example/Docs") && command.includes("rmdir --"));
+    const restore = calls.calls.findIndex(([, command]) => command.includes("zeros-checkpoint-restored"));
+    expect(prune).toBeGreaterThan(-1);
+    expect(calls.invocationCallOrder[prune]).toBeLessThan(calls.invocationCallOrder[restore]!);
+    expect(f.store.workspaceImage).not.toHaveBeenCalled();
+  });
+
   it("creates the VM from the org snapshot with the workspace id as idempotency key, then delivers the token", async () => {
     const { lifecycle, compute, store } = setup([workspace("creating")]);
     await lifecycle.tick();

@@ -1,3 +1,4 @@
+import { DESIGN_MAX_FRAMES_PER_PAGE } from "@zeros/protocol/design-pages";
 import type React from "react";
 import { DESIGN_FRAME_COORDINATE_LIMIT } from "@zeros/design-core";
 import { DESIGN_RUNTIME_DOCUMENT_BODY_ID } from "@zeros/protocol/design-runtime";
@@ -196,7 +197,7 @@ export function startDesignFrameCopy(input: {
           throw new Error("The copy destination changed before release.");
         }
         const result = await duplicateDesignFrameCached(workspaceId, frame.file, owner.pageId, {
-          sourceVersion: frame.sourceVersion, geometry: { ...origin, w: frame.width, h: frame.height, z: Math.min(256, frame.z + 1) },
+          sourceVersion: frame.sourceVersion, geometry: { ...origin, w: frame.width, h: frame.height, z: Math.min(DESIGN_MAX_FRAMES_PER_PAGE, frame.z + 1) },
         });
         const copy = result.snapshot.frames.find(candidate => candidate.file === result.frame.file);
         if (copy && current()) {

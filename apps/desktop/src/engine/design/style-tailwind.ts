@@ -2,6 +2,7 @@ import path from "node:path";
 import { parse, type DefaultTreeAdapterTypes } from "parse5";
 import { compile, Features, __unstable__loadDesignSystem } from "tailwindcss";
 import { DESIGN_TAILWIND_PLUGIN_VERSIONS, DESIGN_TAILWIND_STYLESHEETS, DESIGN_TAILWIND_VERSION } from "./generated/tailwind-stylesheets";
+import { sharedDesignParse } from "./shared-parse";
 import { elementRecords } from "./source";
 
 // Compiled Tailwind style sources. A source names the application's Tailwind
@@ -83,7 +84,7 @@ const BUNDLED_BASE = "\0tailwindcss";
  * Tailwind emits a theme variable that frame CSS reads with var(). */
 export function designTailwindCandidates(html: string, stylesheetVariables: readonly string[] = [], document?: DefaultTreeAdapterTypes.Document): string[] {
   const candidates = new Set<string>(stylesheetVariables);
-  for (const { element } of elementRecords(document ?? parse(html))) {
+  for (const { element } of elementRecords(document ?? sharedDesignParse(html) ?? parse(html))) {
     const value = element.attrs.find((attribute) => attribute.name === "class")?.value;
     if (value) for (const token of value.split(/[\t\n\f\r ]+/)) if (token) candidates.add(token);
   }

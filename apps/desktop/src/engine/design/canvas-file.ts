@@ -122,9 +122,118 @@ function assertCanvasMembership(
   return placement;
 }
 
+type ParsedCanvas = z.infer<typeof canvasSchema> | z.infer<typeof pagedCanvasSchema>;
+interface ValidatedCanvas {
+  version: 1 | 2;
+  frames: number;
+  /** Absent for encoder output until a read needs it: its bytes are valid by construction. */
+  parsed?: ParsedCanvas;
+  canonical: boolean;
+}
+
+/** Canvases already validated, by content hash, most recently used last. A
+ * large canvas is validated once per distinct content instead of on every
+ * read and write; callers still receive fresh objects they may mutate. */
+const MAX_VALIDATED_CANVASES = 4;
+const validatedCanvases = new Map<string, ValidatedCanvas>();
+let validations = 0;
+const canvasKey = (source: string) =>
+  createHash("sha256").update(source).digest("hex");
+
+function rememberValidatedCanvas(key: string, entry: ValidatedCanvas): void {
+  validatedCanvases.delete(key);
+  validatedCanvases.set(key, entry);
+  let frames = 0;
+  for (const value of validatedCanvases.values()) frames += value.frames;
+  while (
+    validatedCanvases.size > MAX_VALIDATED_CANVASES ||
+    (validatedCanvases.size > 1 && frames > DESIGN_MAX_PAGES * DESIGN_MAX_FRAMES_PER_PAGE)
+  ) {
+    const [oldest, value] = validatedCanvases.entries().next().value!;
+    validatedCanvases.delete(oldest);
+    frames -= value.frames;
+  }
+}
+
+export function designCanvasValidationsForTests(): number {
+  return validations;
+}
+
+let materializations = 0;
+
+/** Test hook: decodes that built fresh canvas objects. */
+export function designCanvasMaterializationsForTests(): number {
+  return materializations;
+}
+
+/** Exactly the bytes this encoder produced, so formatting carries no meaning. */
+export function isCanonicalDesignCanvas(source: string): boolean {
+  return validatedCanvases.get(canvasKey(source))?.canonical === true;
+}
+
+const cloneEntries = <T extends RecordValue | undefined>(value: T): T => {
+  if (!value) return value;
+  for (const _key in value) return structuredClone(value);
+  return value;
+};
+
+/** Fresh output objects every time: callers edit pages, frames and extensions. */
+function materializeCanvas(parsed: ParsedCanvas): RecordValue {
+  materializations++;
+  const {
+    frames,
+    pages: parsedPages = [{ id: "main", title: "Design", frames: Object.keys(frames) }],
+    ...rest
+  } = parsed;
+  const pages = structuredClone(parsedPages);
+  const order = new Map(
+    pages.flatMap((page) => page.frames.map((frameId, index) => [frameId, index] as const)),
+  );
+  const geometry: RecordValue = {};
+  const info: RecordValue = {};
+  for (const [frameId, frame] of Object.entries(frames)) {
+    const {
+      source: file,
+      kind,
+      title,
+      x,
+      y,
+      width,
+      height,
+      z,
+      geometryMetadata,
+      ...extensions
+    } = frame;
+    geometry[file] = {
+      ...cloneEntries(geometryMetadata),
+      x,
+      y,
+      w: width,
+      h: height,
+      z: z ?? order.get(frameId)!,
+    };
+    info[file] = {
+      ...cloneEntries(extensions),
+      id: frameId,
+      title,
+      kind: kind === "text" ? "text" : "frame",
+    };
+  }
+  return { ...structuredClone(rest), version: 3, pages, frames: geometry, frame_info: info };
+}
+
 /** The public file is a small scene index. The existing HTML engine continues
  * to address documents by source path; its IPC/document IDs remain compatible. */
 export function decodeCanvasFile(source: string, options?: { version: 1 | 2 }): RecordValue {
+  const key = canvasKey(source);
+  const known = validatedCanvases.get(key);
+  if (known) {
+    if (options && options.version !== known.version)
+      throw new Error(`Design layout requires canvas version ${options.version}; found ${known.version}.`);
+    known.parsed ??= JSON.parse(source) as ParsedCanvas;
+    rememberValidatedCanvas(key, known);
+    return materializeCanvas(known.parsed);
+  }
   const value = JSON.parse(source);
   if (value?.version !== 1 && value?.version !== 2)
     throw new Error(`Unsupported design canvas version: ${value?.version}`);
@@ -156,44 +265,19 @@ export function decodeCanvasFile(source: string, options?: { version: 1 | 2 }): 
     );
   }
   const parsed = result.data;
-  const {
-    frames,
-    pages = [{ id: "main", title: "Design", frames: Object.keys(frames) }],
-    ...rest
-  } = parsed;
-  const placement = assertCanvasMembership(parsed.version, pages, frames);
-  const geometry: RecordValue = {};
-  const info: RecordValue = {};
-  for (const [frameId, frame] of Object.entries(frames)) {
-    const {
-      source: file,
-      kind,
-      title,
-      x,
-      y,
-      width,
-      height,
-      z,
-      geometryMetadata,
-      ...extensions
-    } = frame;
-    const { index } = placement.get(frameId)!;
-    geometry[file] = {
-      ...geometryMetadata,
-      x,
-      y,
-      w: width,
-      h: height,
-      z: z ?? index,
-    };
-    info[file] = {
-      ...extensions,
-      id: frameId,
-      title,
-      kind: kind === "text" ? "text" : "frame",
-    };
-  }
-  return { ...rest, version: 3, pages, frames: geometry, frame_info: info };
+  assertCanvasMembership(
+    parsed.version,
+    parsed.pages ?? [{ id: "main", title: "Design", frames: Object.keys(parsed.frames) }],
+    parsed.frames,
+  );
+  validations++;
+  rememberValidatedCanvas(key, {
+    version: parsed.version,
+    frames: Object.keys(parsed.frames).length,
+    parsed,
+    canonical: false,
+  });
+  return materializeCanvas(parsed);
 }
 
 export function legacyFrameId(file: string): string {
@@ -252,11 +336,14 @@ export function encodeCanvasFile(document: RecordValue, options: { version: 1 | 
       z: Math.round(bounded(old.z, 0, 0, DESIGN_MAX_FRAMES_PER_PAGE)),
     };
   };
+  // Undefined values are absent, as in the JSON this encodes: callers may
+  // pass their working objects rather than a JSON copy.
   const entries = Object.entries(record(frames === undefined ? {} : frames))
+    .filter(([, geometry]) => geometry !== undefined)
     .map(([file, geometry]) => [file, geometryFor(geometry)] as const)
     .sort(([, left], [, right]) => Number(left.z ?? 0) - Number(right.z ?? 0));
   const sources = new Set(entries.map(([file]) => file));
-  if (Object.keys(information).some((file) => !sources.has(file)))
+  if (Object.entries(information).some(([file, value]) => value !== undefined && !sources.has(file)))
     throw new Error("Invalid Design frame information reference.");
   const authored: Record<string, z.infer<typeof frameSchema>> = {};
   let position = 0;
@@ -286,7 +373,7 @@ export function encodeCanvasFile(document: RecordValue, options: { version: 1 | 
       width: geometry.w,
       height: geometry.h,
       ...(geometry.z !== (pageOrder?.get(frameId) ?? position) ? { z: geometry.z } : {}),
-      ...(Object.keys(geometryMetadata).length ? { geometryMetadata } : {}),
+      ...(Object.values(geometryMetadata).some((value) => value !== undefined) ? { geometryMetadata } : {}),
     } as z.infer<typeof frameSchema>;
     position++;
   }
@@ -301,5 +388,11 @@ export function encodeCanvasFile(document: RecordValue, options: { version: 1 | 
   });
   // Validate cross references and portable source aliases before persistence.
   assertCanvasMembership(options.version, result.pages ?? [], result.frames);
-  return JSON.stringify(result, null, 2) + "\n";
+  const text = JSON.stringify(result, null, 2) + "\n";
+  rememberValidatedCanvas(canvasKey(text), {
+    version: options.version,
+    frames: Object.keys(result.frames).length,
+    canonical: true,
+  });
+  return text;
 }

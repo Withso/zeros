@@ -47,14 +47,54 @@ export function repaintDesignCanvasPixels(world: HTMLDivElement): void {
 // chrome current as well as the pixels, without retaining a browser observer.
 const CHROME_OVERSCAN_PIXELS = 96;
 
+/** The scale this module last wrote and the inline style text it left. An
+ * unchanged attribute proves no other writer replaced those values, so a camera
+ * paint of an unchanged frame performs no declaration reads or writes. */
+const writtenScales = new WeakMap<HTMLElement, { zoom: number; style: string | null }>();
+
 function paintChromeScale(element: HTMLElement, zoom: number): void {
+  const style = element.getAttribute("style"), written = writtenScales.get(element);
+  if (written && written.zoom === zoom && written.style === style) return;
   for (const [name, value] of [["--design-canvas-zoom", zoom], ["--design-canvas-inverse-zoom", 1 / zoom]] as const) {
     const next = String(value);
     if (element.style.getPropertyValue(name) !== next) element.style.setProperty(name, next);
   }
+  const after = element.getAttribute("style");
+  writtenScales.set(element, { zoom, style: after });
+  // Camera scale is not geometry. Keep the parsed bounds for the new text so
+  // the next paint does not reparse four CSSOM lengths per frame.
+  const geometry = frameGeometry.get(element);
+  if (geometry && geometry.style === style && after !== style) frameGeometry.set(element, { style: after, bounds: geometry.bounds });
 }
 
-export function paintDesignFrameVisibility(element: HTMLElement): void {
+/** Chrome owned by one camera paint: the focused and hovered frames resolve
+ * once for the whole world instead of per frame. */
+interface ChromePaintContext { focusedFrame: Element | null; hoveredFrame: Element | null }
+const hoveredFrames = new WeakMap<HTMLDivElement, HTMLElement | null>();
+
+function frameOf(world: HTMLDivElement, node: EventTarget | null): HTMLElement | null {
+  const frame = node instanceof Element ? node.closest<HTMLElement>("[data-design-frame]") : null;
+  return frame?.parentElement === world ? frame : null;
+}
+
+function chromePaintContext(world: HTMLDivElement): ChromePaintContext {
+  const focused = world.ownerDocument.activeElement;
+  const tracked = hoveredFrames.get(world) ?? null;
+  return { focusedFrame: frameOf(world, focused),
+    hoveredFrame: tracked?.parentElement === world && tracked.matches(":hover") ? tracked : null };
+}
+
+/** Whether chrome observation (and with it hover tracking) owns this world. */
+export function canvasChromeObserved(world: HTMLDivElement): boolean {
+  return hoveredFrames.has(world);
+}
+
+/** The frame under pointer intent, else the frame whose chrome is hovered. */
+export function designCanvasPointerFrame(world: HTMLDivElement): HTMLElement | null {
+  return canvasPointers.get(world)?.intentFrame ?? chromePaintContext(world).hoveredFrame as HTMLElement | null;
+}
+
+export function paintDesignFrameVisibility(element: HTMLElement, context?: ChromePaintContext): void {
   const world = element.parentElement;
   if (!(world instanceof HTMLDivElement)) return;
   const viewport = paintedViews.get(world);
@@ -64,7 +104,7 @@ export function paintDesignFrameVisibility(element: HTMLElement): void {
     return;
   }
   const size = viewportSizes.get(world);
-  const focused = world.ownerDocument.activeElement;
+  const focusedFrame = context ? context.focusedFrame : frameOf(world, world.ownerDocument.activeElement);
   const bounds = readDesignCanvasFrameBounds(element);
   let outside = false, sourceOutside = false;
   if (size && size.width > 0 && size.height > 0) {
@@ -75,7 +115,7 @@ export function paintDesignFrameVisibility(element: HTMLElement): void {
       const width = bounds.width * viewport.zoom, height = bounds.height * viewport.zoom;
       sourceOutside = left + width < 0 || top + height < 0 || left > size.width || top > size.height;
       if (!element.hasAttribute("data-design-frame-chrome-protected") &&
-          !element.hasAttribute("data-design-nest-target") && !element.contains(focused))
+          !element.hasAttribute("data-design-nest-target") && focusedFrame !== element)
         outside = left + width < -CHROME_OVERSCAN_PIXELS || top + height < -CHROME_OVERSCAN_PIXELS ||
           left > size.width + CHROME_OVERSCAN_PIXELS || top > size.height + CHROME_OVERSCAN_PIXELS;
     }
@@ -96,7 +136,7 @@ export function paintDesignFrameVisibility(element: HTMLElement): void {
   const compact = element.hasAttribute("data-design-frame-tiled") &&
     element.hasAttribute("data-design-frame-compact-controls") && !element.hasAttribute("data-design-frame-chrome-protected") &&
     !element.hasAttribute("data-design-nest-target") && !element.hasAttribute("data-design-frame-pointer") &&
-    !element.matches(":hover") && !element.contains(focused);
+    (context ? context.hoveredFrame !== element : !element.matches(":hover")) && focusedFrame !== element;
   paintChromeScale(element, outside || compact ? 1 : viewport.zoom);
   if (!paintingWorlds.has(world)) repaintDesignCanvasPixels(world);
 }
@@ -107,8 +147,9 @@ function paintCanvasChrome(world: HTMLDivElement): void {
   paintingWorlds.add(world);
   try {
     canvasPointers.get(world)?.update(paintedViews.get(world));
+    const context = chromePaintContext(world);
     for (const element of world.children) {
-      if (element instanceof HTMLElement) paintDesignFrameVisibility(element);
+      if (element instanceof HTMLElement) paintDesignFrameVisibility(element, context);
     }
   } finally { paintingWorlds.delete(world); }
 }
@@ -142,15 +183,24 @@ export function observeDesignCanvasChrome(world: HTMLDivElement): () => void {
   // Hover transitions can follow a wheel paint in the same display interval.
   // Batch hover-only work; the next camera write adopts it before composing.
   // Focus/actions remain synchronous for keyboard and edits.
-  for (const event of ["pointerover", "pointerout"]) world.addEventListener(event, schedule);
+  // Track the hovered frame from the events that change it, so camera paints
+  // test one candidate instead of matching :hover on every retained frame.
+  hoveredFrames.set(world, null);
+  const hover = (event: Event) => {
+    const frame = frameOf(world, event.type === "pointerout" ? (event as PointerEvent).relatedTarget : event.target);
+    hoveredFrames.set(world, frame);
+    schedule();
+  };
+  for (const event of ["pointerover", "pointerout"]) world.addEventListener(event, hover);
   for (const event of ["focusin", "focusout"]) world.addEventListener(event, refresh);
   refresh();
   return () => {
     observer.disconnect();
     pointer?.dispose(); canvasPointers.delete(world);
+    hoveredFrames.delete(world);
     const pending = pendingChromePaints.get(world);
     if (pending !== undefined) { window.cancelAnimationFrame(pending); pendingChromePaints.delete(world); }
-    for (const event of ["pointerover", "pointerout"]) world.removeEventListener(event, schedule);
+    for (const event of ["pointerover", "pointerout"]) world.removeEventListener(event, hover);
     for (const event of ["focusin", "focusout"]) world.removeEventListener(event, refresh);
   };
 }

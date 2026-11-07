@@ -2,7 +2,7 @@ import { useDesignWorkspaceUiStore } from "./design-workspace-ui";
 import type { DesignMovementGuard } from "@zeros/protocol/design-relocation";
 import { normalizeDesignPagesSnapshot } from "@zeros/protocol/design-pages";
 import { forgetDesignLayerDisclosure } from "./design-layer-disclosure";
-import { rememberDesignDirectoryIdentity } from "../../../platform/bridge/design-bridge";
+import { rememberDesignDirectoryIdentity, setDesignKnownPagesReader } from "../../../platform/bridge/design-bridge";
 // Canvas, inspector and the Layers panel consume one aggregate engine response.
 // A bounded keyed cache stops those siblings issuing independent bridge requests
 // and keeps the last confirmed canvas while a disk edit revalidates.
@@ -747,6 +747,9 @@ export const designWorkspaceSnapshotCache =
 setDesignSelectionSnapshotReader(
   (workspaceId) => preparedDesignSnapshot(designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data),
 );
+setDesignKnownPagesReader(
+  (workspaceId) => designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.preparation?.pageHashes,
+);
 for (const [workspaceId, snapshot] of readDesignWorkspaceBootSnapshots()) {
   designWorkspaceSnapshotCache.setData(workspaceId, snapshot);
   // A boot preview paints synchronously but is never considered authoritative
@@ -828,6 +831,54 @@ export function invalidateDesignWorkspacesForStyleBuild(
     if (localMutation) localMutation.deferredRefresh = true;
     else designWorkspaceSnapshotCache.invalidate(workspaceId);
   }
+}
+
+/** A style build changed only its state or message (waiting, live, stopped),
+ * so no frame's styles changed: read the statuses and keep every prepared
+ * frame. Any other difference, and any read or edit meanwhile, takes the
+ * ordinary style-build revalidation instead. */
+export function refreshDesignWorkspacesForStyleStatus(
+  workspaceIds: readonly string[] | undefined,
+): void {
+  if (!workspaceIds?.length) {
+    invalidateDesignWorkspacesForStyleBuild(workspaceIds);
+    return;
+  }
+  for (const workspaceId of workspaceIds) void refreshDesignStyleStatus(workspaceId);
+}
+
+async function refreshDesignStyleStatus(workspaceId: string): Promise<void> {
+  const revalidate = () => invalidateDesignWorkspacesForStyleBuild([workspaceId]);
+  const started = designWorkspaceSnapshotCache.peekSnapshot(workspaceId);
+  const current = started.data;
+  if (!current?.preparation || started.loading || started.refreshing || pendingLocalMutationByWorkspace.has(workspaceId))
+    return revalidate();
+  let next: DesignWorkspaceSnapshotWire | null;
+  try {
+    next = await readDesignNavigation(workspaceId, current);
+  } catch {
+    return revalidate();
+  }
+  const latest = designWorkspaceSnapshotCache.peekSnapshot(workspaceId);
+  if (latest.data !== current || latest.invalidationVersion !== started.invalidationVersion ||
+    pendingLocalMutationByWorkspace.has(workspaceId)) return;
+  if (!next || !sameDesignStyleInputs(current, next)) return revalidate();
+  designWorkspaceSnapshotCache.setData(workspaceId, {
+    ...current,
+    styleSources: next.styleSources,
+    styleSourceErrors: next.styleSourceErrors,
+    themes: next.themes,
+  });
+}
+
+/** Everything a prepared frame's identity reads that a navigation reports. */
+function sameDesignStyleInputs(current: DesignWorkspaceSnapshotWire, next: DesignWorkspaceSnapshotWire): boolean {
+  const revisions = (snapshot: DesignWorkspaceSnapshotWire) =>
+    JSON.stringify((snapshot.styleSources ?? []).map((source) => [source.id, source.revision]));
+  return next.directoryId === current.directoryId && next.lint.workspacePath === current.lint.workspacePath &&
+    next.protocolCapability === current.protocolCapability &&
+    next.preparation?.revision === current.preparation?.revision &&
+    next.tokenSourceVersion === current.tokenSourceVersion && revisions(next) === revisions(current);
 }
 
 // A respawned engine re-composes every generation and authored revision, so
@@ -1333,6 +1384,9 @@ function publishDesignWorkspaceSnapshot(
   const retained = applyRetainedRuntimeAuditViolations(workspaceId, next);
   const stable = stabilizeDesignWorkspaceSnapshot(previous, retained);
   designWorkspaceSnapshotCache.setData(workspaceId, stable);
+  // Pages the engine no longer matches stay visible as last confirmed while a
+  // replacement read fetches them.
+  if (stable.preparation?.stalePages?.length) designWorkspaceSnapshotCache.invalidate(workspaceId);
   notifyDesignSelectionSnapshot(workspaceId);
   if (!stable.preparation) queueDesignWorkspaceBootSnapshot(workspaceId, stable);
   return stable;

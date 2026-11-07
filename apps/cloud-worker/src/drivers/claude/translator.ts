@@ -5,7 +5,14 @@ import { isClaudeBackgroundAcknowledgement, type ClaudeResultOwnership } from ".
 import { boundedStructuredOutput, canonicalResourceLinks, canonicalToolContent, mergeToolContent, type CanonicalToolContent } from "../shared/tool-content";
 
 import { createHash, randomUUID } from "node:crypto";
-import { LEGACY_TOOL_NAME_ALIASES, type BUILTIN_TOOL_NAMES } from "@anthropic-ai/claude-agent-sdk";
+import type { BUILTIN_TOOL_NAMES } from "@anthropic-ai/claude-agent-sdk";
+
+/** The SDK's own LEGACY_TOOL_NAME_ALIASES, kept here so the worker can start
+ * without loading the SDK; a test fails when the SDK's table changes. */
+export const LEGACY_TOOL_NAME_ALIASES: Readonly<Record<string, string>> = {
+  Task: "Agent", KillShell: "TaskStop", KillBash: "TaskStop", ListPeers: "ListAgents", Brief: "SendUserMessage",
+  ListMcpResources: "ListMcpResourcesTool", ReadMcpResource: "ReadMcpResourceTool", ReadMcpResourceDir: "ReadMcpResourceDirTool",
+};
 
 import type {
   BackgroundTask,
