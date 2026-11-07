@@ -66,9 +66,15 @@ function engineBuild(): string {
   return build;
 }
 
-// Development engines and test runs keep identities in memory: their code
-// changes without a new build stamp, and tests must not touch real storage.
-const durable = () => testing.durable ?? (!isDevRuntime() && !process.env.VITEST);
+/** Development engines and test runs keep identities in memory: their code
+ * changes without a new build stamp, and tests must not touch real storage.
+ * ZEROS_DESIGN_IDENTITY_CACHE=durable persists them in a development engine,
+ * to measure restarts as a packaged build sees them. It trusts the stamp, so
+ * clear private storage after editing preparation code. */
+export function designIdentityCacheDurable(env: NodeJS.ProcessEnv = process.env, development = isDevRuntime()): boolean {
+  return !env.VITEST && (!development || env.ZEROS_DESIGN_IDENTITY_CACHE === "durable");
+}
+const durable = () => testing.durable ?? designIdentityCacheDurable();
 const digest = (value: string) => createHash("sha256").update(value).digest("hex");
 
 /** Canvas inputs a frame's preparation may read: everything but other
