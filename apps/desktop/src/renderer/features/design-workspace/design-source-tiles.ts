@@ -45,8 +45,20 @@ function tileKey(source: DesignTileSource, tile: TileAddress): string {
   return `${source.key}\0${tile.density}:${tile.x}:${tile.y}`;
 }
 
+/** A loaded SVG's natural size is fixed for its source identity, but every
+ * read crosses into the image's native getters. Camera paints test each frame
+ * against the viewport, so read it once per registered source. */
+const naturalSizes = new WeakMap<DesignTileSource, { width: number; height: number }>();
+function naturalSize(source: DesignTileSource): { width: number; height: number } {
+  const cached = naturalSizes.get(source);
+  if (cached) return cached;
+  const size = { width: source.image.naturalWidth, height: source.image.naturalHeight };
+  if (size.width > 0 && size.height > 0) naturalSizes.set(source, size);
+  return size;
+}
+
 function tileExtent(source: DesignTileSource, { x, y, density }: TileAddress) {
-  const sourceWidth = source.image.naturalWidth, sourceHeight = source.image.naturalHeight;
+  const { width: sourceWidth, height: sourceHeight } = naturalSize(source);
   const width = Math.min(TILE_SIDE / density, sourceWidth - x * TILE_SIDE / density);
   const height = Math.min(TILE_SIDE / density, sourceHeight - y * TILE_SIDE / density);
   if (width <= 0 || height <= 0) return null;
@@ -69,8 +81,9 @@ export function designVisibleTiles(frame: DesignTileFrame, view: DesignViewport,
   // Most retained sources are outside a zoomed-in viewport. Their authored
   // bounds can reject them without entering the loaded SVG's native getters.
   if (right <= left || bottom <= top) return [];
-  right = Math.min(right, frame.source.image.naturalWidth);
-  bottom = Math.min(bottom, frame.source.image.naturalHeight);
+  const natural = naturalSize(frame.source);
+  right = Math.min(right, natural.width);
+  bottom = Math.min(bottom, natural.height);
   if (right <= left || bottom <= top) return [];
   const side = TILE_SIDE / density;
   const result: TileAddress[] = [];
