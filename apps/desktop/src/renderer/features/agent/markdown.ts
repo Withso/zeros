@@ -182,7 +182,8 @@ function wrapTablesInScroller(html: string): string {
 // `{type:"code"}` segment the renderer mounts as a component. Code nested
 // inside a list / blockquote is NOT a top-level token, so it stays inline in
 // the prose HTML (styled <pre>) and its surrounding structure is preserved.
-// The Files tab's `.md` preview renders the same segments without file chips;
+// The Files tab's `.md` preview renders the same segments but turns only links
+// into file chips, resolved from the previewed file (`fileLink`);
 // renderMarkdown (string) is left untouched for its other callers (plan-mode
 // + subagent cards).
 
@@ -250,17 +251,20 @@ function markdownSegmentInput(text: string): string {
     : text;
 }
 
-/** `fileReferences: false` keeps inline code and file links as written, for a
- *  surface where nothing opens a file chip. */
+/** The file a link's href opens, or null to keep the link. */
+type FileLink = (href: string) => string | null;
+
+/** `fileLink` replaces the chat's references: only links whose href it
+ *  resolves become file chips, and inline code stays code. */
 export function renderMarkdownSegments(
   text: string,
-  { fileReferences = true }: { fileReferences?: boolean } = {},
+  { fileLink }: { fileLink?: FileLink } = {},
 ): MarkdownSegment[] {
   if (!text) return [];
-  return renderMarkdownTokenSegments(marked.lexer(markdownSegmentInput(text)), fileReferences);
+  return renderMarkdownTokenSegments(marked.lexer(markdownSegmentInput(text)), fileLink);
 }
 
-function renderMarkdownTokenSegments(tokens: TokensList, fileReferences = true): MarkdownSegment[] {
+function renderMarkdownTokenSegments(tokens: TokensList, fileLink?: FileLink): MarkdownSegment[] {
   const segments: MarkdownSegment[] = [];
   let prose: Token[] = [];
   const flushProse = () => {
@@ -273,7 +277,7 @@ function renderMarkdownTokenSegments(tokens: TokensList, fileReferences = true):
     const html = wrapTablesInScroller(sanitizeProse(marked.parser(slice)));
     segments.push({
       type: "html",
-      html: fileReferences ? linkifyFilePaths(html) : html,
+      html: linkifyFilePaths(html, fileLink),
     });
     prose = [];
   };
@@ -304,9 +308,11 @@ function renderMarkdownTokenSegments(tokens: TokensList, fileReferences = true):
  *      the no-attribute match skips it) or `<pre><code>` (skipped by the
  *      protected preformatted section).
  *
+ *  With `fileLink`, only pass 1 runs, and it decides which hrefs are files.
+ *
  *  `data-file-path` drives the renderer's click handler; DOMPurify keeps the
  *  class / data-* / role / tabindex by default. */
-function linkifyFilePaths(html: string): string {
+function linkifyFilePaths(html: string, fileLink?: FileLink): string {
   // Work on sanitized, normalized HTML. Each section is visited once; a
   // missing closer ends the scan instead of retrying every later opener.
   const tags = /<(a|pre|code)\b[^>]*>/g;
@@ -321,9 +327,10 @@ function linkifyFilePaths(html: string): string {
     let replacement: string | null = null;
     if (tag === "a") {
       const href = /\shref="([^"]*)"/.exec(match[0])?.[1];
-      const file = href === undefined ? null : fileRefPath(decodeLinkText(href), true);
+      const target = href === undefined ? null : decodeLinkText(href);
+      const file = target === null ? null : fileLink ? fileLink(target) : fileRefPath(target, true);
       if (file) replacement = fileChip(file, inner);
-    } else if (tag === "code" && match[0] === "<code>" && !inner.includes("<")) {
+    } else if (!fileLink && tag === "code" && match[0] === "<code>" && !inner.includes("<")) {
       const file = fileRefPath(decodeLinkText(inner));
       if (file) replacement = fileChip(file, inner);
     }

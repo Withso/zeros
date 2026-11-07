@@ -369,7 +369,7 @@ function Harness() {
               />
             </div>
             <div data-testid="markdown-preview">
-              <MarkdownPreview markdown="Repository markdown remains selectable" />
+              <MarkdownPreview path="README.md" markdown="Repository markdown remains selectable" />
             </div>
             <div data-testid="diff" className="relative h-32">
               <CodeView

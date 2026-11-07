@@ -200,22 +200,7 @@ export function useOpenChatFileInWorkbench(): (
   cwd: string | undefined,
   rawPath: string,
 ) => void {
-  // Focus an already-open File tab, fill the FIXED Files home when it is blank,
-  // else add a new tab. The shared policy preserves an existing destination's
-  // tree choice; only a newly allocated File tab starts collapsed. Read the
-  // exact scope at completion time because an uncached agent reference can
-  // resolve after the user has switched tabs or workspaces.
-  const openTab = useCallback((cwd: string, target: string) => {
-    const scope = workbenchScopeForFolder(cwd);
-    const state = useWorkspaceStore.getState();
-    const scopeState = state.workbenchByScope[scope] ?? defaultScopeFor(scope);
-    state.dispatch(
-      buildDirectFileOpenAction(scopeState.tabs, target, {
-        preferredExistingTabId: scopeState.activeId,
-        scope,
-      }),
-    );
-  }, []);
+  const openTab = openDirectFileTab;
   return useCallback(
     (cwd, rawPath) => {
       let path = rawPath.trim();
@@ -269,6 +254,40 @@ export function useOpenChatFileInWorkbench(): (
       })();
     },
     [openTab],
+  );
+}
+
+/** Open the file a link in a previewed document names: exactly that path,
+ *  never a loose match, in the same tab policy as chat references. A link to a
+ *  file that does not read opens nothing. */
+export function useOpenLinkedFileInWorkbench(): (
+  cwd: string | undefined,
+  path: string,
+) => void {
+  return useCallback((cwd, path) => {
+    if (!cwd || !path) return;
+    if (peekWorkspaceFiles(cwd)?.includes(path)) openDirectFileTab(cwd, path);
+    else
+      void verifyThenOpen(cwd, path, (target) =>
+        openDirectFileTab(cwd, target),
+      ).catch(() => {});
+  }, []);
+}
+
+/** Focus an already-open File tab, fill the FIXED Files home when it is blank,
+ *  else add a new tab. The shared policy preserves an existing destination's
+ *  tree choice; only a newly allocated File tab starts collapsed. Reads the
+ *  exact scope at completion time because an uncached reference can resolve
+ *  after the user has switched tabs or workspaces. */
+function openDirectFileTab(cwd: string, target: string): void {
+  const scope = workbenchScopeForFolder(cwd);
+  const state = useWorkspaceStore.getState();
+  const scopeState = state.workbenchByScope[scope] ?? defaultScopeFor(scope);
+  state.dispatch(
+    buildDirectFileOpenAction(scopeState.tabs, target, {
+      preferredExistingTabId: scopeState.activeId,
+      scope,
+    }),
   );
 }
 

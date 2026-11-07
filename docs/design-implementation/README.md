@@ -1062,3 +1062,16 @@ Each landed step appends one line: date, workstream, what landed, evidence.
   `markdown-preview.test.ts` failed red first; the diff and files smoke
   measures 15px prose and one code card in the preview, and the
   text-selection smoke still selects its text.
+- 2026-11-07 · 5 · Links to files in the Markdown preview open in the Files
+  tab. `markdownLinkTarget` (`shell/workbench/tabs/markdown-links.ts`)
+  resolves a link as GitHub does, from the previewed file's folder or from the
+  workspace root after a leading `/`; URLs, anchors, folders and paths outside
+  the workspace stay links. Resolved links render as the chat's file
+  references, warm the file on hover or focus, and open exactly that file
+  (`useOpenLinkedFileInWorkbench`) in the chat's tab policy, leaving the
+  document open; a link to a file that does not read opens nothing. Inline
+  code stays code. The canvas's Markdown preview board shows a file link
+  (canvas version 396). Evidence: `markdown-links.test.ts` and the new
+  `markdown-preview.test.ts` cases failed red first; the file-pill smoke
+  opens a sibling and a parent-folder link by click and Enter for Local,
+  organization, cloud and a nested folder, and a missing file opens no tab.

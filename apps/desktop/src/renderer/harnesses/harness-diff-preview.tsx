@@ -413,7 +413,13 @@ async function main() {
             className="h-[180px] w-[450px] overflow-x-hidden overflow-y-auto"
           >
             <MarkdownPreview
-              markdown={`${"unbroken-preview-token".repeat(80)}\n\n\`\`\`ts\n${newLine}\n\`\`\`\n`}
+              path="docs/README.md"
+              markdown={`${"unbroken-preview-token".repeat(80)}\n\nSee [the guide](guide.md).\n\n\`\`\`ts\n${newLine}\n\`\`\`\n`}
+              onOpenFile={(target) =>
+                document
+                  .querySelector('[data-testid="markdown-preview-host"]')
+                  ?.setAttribute("data-opened", target)
+              }
             />
           </div>
           {separatorEdits.map(({ provider, message }) => (

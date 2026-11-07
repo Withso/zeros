@@ -1935,6 +1935,25 @@ export async function runDiffFilesSmoke({
       markdownPreview.plainPre === 0,
     JSON.stringify(markdownPreview),
   );
+  const markdownLink = page
+    .getByTestId("markdown-preview-host")
+    .locator(".zeros-md-filepath");
+  const markdownLinkLook = await markdownLink.evaluate((el) => ({
+    size: getComputedStyle(el).fontSize,
+    mono: getComputedStyle(el).fontFamily.toLowerCase().includes("mono"),
+    path: el.getAttribute("data-file-path"),
+  }));
+  await markdownLink.click();
+  check(
+    "Markdown Preview shows a file link as the chat's file reference and opens it",
+    markdownLinkLook.size === "15px" &&
+      !markdownLinkLook.mono &&
+      markdownLinkLook.path === "docs/guide.md" &&
+      (await page
+        .getByTestId("markdown-preview-host")
+        .getAttribute("data-opened")) === "docs/guide.md",
+    JSON.stringify(markdownLinkLook),
+  );
 
   // Modern manifests must use the same dedicated section as legacy documents.
   const designFilesFixture = page.getByTestId("design-files-fixture");

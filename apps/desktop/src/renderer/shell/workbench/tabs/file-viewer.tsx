@@ -79,7 +79,11 @@ import { cn } from "@/renderer/shared/ui/cn";
 import { useInstantViewSwitch } from "@/renderer/shared/ui/use-instant-view-switch";
 import { EmptyState } from "@/renderer/shared/ui/layout/empty-state";
 import { useWorkspaceDispatch } from "@/renderer/state/workspace-store";
-import { useOpenFileInWorkbench, type OpenFileOpts } from "../use-open-file";
+import {
+  useOpenFileInWorkbench,
+  useOpenLinkedFileInWorkbench,
+  type OpenFileOpts,
+} from "../use-open-file";
 import type { ViewerMode } from "../tab-model";
 import {
   WORKBENCH_TITLE_CHIP_CLS,
@@ -99,6 +103,7 @@ import { changeAdvanceIntent } from "./changes-open-intent";
 import {
   loadWorkspaceFileDiff,
   loadWorkspaceFileRead,
+  prefetchWorkspaceFileRead,
   useWorkspaceFileDiffSnapshot,
   useWorkspaceFileReadSnapshot,
   workspaceFileReadKey,
@@ -391,6 +396,17 @@ export function FileViewer({
   // Changes-list dimming stay in sync on any mark / unmark / auto-unmark.
   useViewedVersion();
   const openInWorkbench = useOpenFileInWorkbench();
+  const openLinkedFile = useOpenLinkedFileInWorkbench();
+  const openPreviewLink = useCallback(
+    (target: string) => openLinkedFile(cwd, target),
+    [openLinkedFile, cwd],
+  );
+  const warmPreviewLink = useCallback(
+    (target: string) => {
+      if (cwd) prefetchWorkspaceFileRead(cwd, target);
+    },
+    [cwd],
+  );
   const dispatch = useWorkspaceDispatch();
   const [discardTarget, setDiscardTarget] = useState<string | null>(null);
   const [discardingPath, setDiscardingPath] = useState<string | null>(null);
@@ -887,7 +903,12 @@ export function FileViewer({
                 ref={previewScrollRef}
                 className="h-full overflow-x-hidden overflow-y-auto px-5 py-4"
               >
-                <MarkdownPreview markdown={result?.content ?? ""} />
+                <MarkdownPreview
+                  markdown={result?.content ?? ""}
+                  path={path}
+                  onOpenFile={openPreviewLink}
+                  onWarmFile={warmPreviewLink}
+                />
               </div>
             )}
             {sourceShown && sourceReadOnly && (

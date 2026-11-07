@@ -124,6 +124,57 @@ export async function runFilePillNavigationSmoke({ page, check }) {
     await expect(opened).toHaveAttribute("data-open-type", "changes");
     await expect(opened).toHaveText(".context/task/notes.ts");
     check("Diff pills keep the Changes destination even without a Git target", true);
+    // A previewed Markdown file opens the exact file each link names, resolved
+    // from its own folder, in its own tab; a link to a file that does not read
+    // opens nothing, and an external link stays a link.
+    const link = (name) =>
+      source.locator(".zeros-md-filepath", { hasText: name });
+    for (const owner of ["personal", "organization", "cloud", "nested"]) {
+      await fixture.goto(
+        owner === "nested"
+          ? `${url}?owner=personal&nested`
+          : `${url}?owner=${owner}`,
+      );
+      await fixture.evaluate(() =>
+        window.__filePillFixture.open("docs/README.md"),
+      );
+      await expect(opened).toHaveText("docs/README.md");
+      await expect(link("the guide")).toHaveAttribute(
+        "data-file-path",
+        "docs/guide.md",
+      );
+      await expect(link("the rules")).toHaveAttribute(
+        "data-file-path",
+        "RULES.md",
+      );
+      await expect(
+        source.getByRole("link", { name: "the site" }),
+      ).toHaveAttribute("href", "https://example.com");
+      await link("a missing page").click();
+      await link("the guide").click();
+      await expect(opened).toHaveText("docs/guide.md");
+      await expect(source).toContainText(
+        /Saved source for (packages\/app\/)?docs\/guide\.md/,
+      );
+      await fixture
+        .getByRole("button", { name: "README.md", exact: true })
+        .click();
+      await expect(opened).toHaveText("docs/README.md");
+      await link("the rules").focus();
+      await fixture.keyboard.press("Enter");
+      await expect(opened).toHaveText("RULES.md");
+      const files = await fixture.evaluate(() =>
+        window.__filePillFixture
+          .state()
+          .tabs.filter((tab) => tab.type === "files" && tab.filePath)
+          .map((tab) => tab.filePath),
+      );
+      expect(files).toEqual(["docs/README.md", "docs/guide.md", "RULES.md"]);
+      check(
+        `${owner}: Markdown preview links open the exact file in its own Files tab; a missing file opens nothing`,
+        true,
+      );
+    }
     expect(errors).toEqual([]);
   } finally {
     await fixture.close();

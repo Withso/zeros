@@ -210,13 +210,17 @@ exported page by page to [design-implementation/](design-implementation/README.m
     metadata stay 12px, keys 11px, and dialog titles keep their own 15px
     token. A Markdown file in the Files tab reads exactly like an answer:
     its preview renders through the chat's markdown, fences as the same
-    highlighted code cards, and leaves file references as plain code and
-    links because nothing there opens them. The Agent chat page's Type
-    frames draw every case. `features/agent/__tests__/chat-reading-type.test.ts`,
+    highlighted code cards. Its links to files are the chat's file
+    references, resolved from the file's own folder as on GitHub, and open
+    exactly that file in the Files tab, or nothing when it does not read;
+    inline code stays code. The Agent chat page's Type frames draw every
+    case. `features/agent/__tests__/chat-reading-type.test.ts`,
     `features/agent/__tests__/agent-markdown-sizes.test.ts`,
     `shell/workbench/tabs/__tests__/markdown-preview.test.ts`,
+    `shell/workbench/tabs/__tests__/markdown-links.test.ts`,
     `features/agent/__tests__/prompt-fold.test.ts`,
-    `scripts/ui-smoke-composer-prompt-fold.mjs` and
+    `scripts/ui-smoke-composer-prompt-fold.mjs`,
+    `scripts/ui-smoke-file-pill-navigation.mjs` and
     `scripts/ui-smoke-tool-presentation.mjs` hold it.
 
 ### How the direction changes
