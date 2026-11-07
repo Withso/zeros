@@ -80,6 +80,7 @@
       "CONTRIBUTING.md",
       "SECURITY.md",
       "SUPPORT.md",
+      "docs/agent-control.md",
       "docs/agent-harness-capability-boundary.md",
       "docs/agent-identity-model.md",
       "docs/agent-tool-presentation.md",
@@ -425,6 +426,24 @@
       "id": "root-script-contract-tests",
       "include": ["scripts/__tests__/**"],
       "lanes": ["repository-contracts"]
+    },
+    {
+      "id": "zstack-pack",
+      "include": ["agents/zstack/**"],
+      "lanes": ["repository-contracts"]
+    },
+    {
+      "id": "packaged-agent-resources",
+      "include": [
+        "apps/desktop/resources/bin/**",
+        "apps/desktop/resources/zeros-local-cli-skill/**"
+      ],
+      "lanes": ["desktop-engine", "packaging"]
+    },
+    {
+      "id": "packaged-design-skill",
+      "include": ["apps/desktop/resources/zeros-design-skill/**"],
+      "lanes": ["design-containment", "desktop-engine", "packaging"]
     },
     {
       "id": "composer-smoke-infrastructure",

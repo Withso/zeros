@@ -327,6 +327,27 @@ describe("CI scope path ownership", () => {
     ]);
   });
 
+  it.each([
+    ["agents/zstack/changes/new-lesson.md", "A", ["repository-contracts"]],
+    ["agents/zstack/principles.md", "M", ["repository-contracts"]],
+    ["apps/desktop/resources/bin/zeros", "M", ["desktop-engine", "macos", "packaging"]],
+    [
+      "apps/desktop/resources/zeros-local-cli-skill/skills/zeros-local-cli/SKILL.md",
+      "M",
+      ["desktop-engine", "macos", "packaging"],
+    ],
+    [
+      "apps/desktop/resources/zeros-design-skill/SKILL.md",
+      "A",
+      ["design-containment", "desktop-engine", "macos", "packaging"],
+    ],
+    ["docs/agent-control.md", "M", ["docs-only"]],
+  ])("owns %s (%s) without the all-lanes fallback", (file, status, lanes) => {
+    const decision = decide([change(file, status)]);
+    expect(decision.full).toBe(false);
+    expect(selected(decision)).toEqual(lanes);
+  });
+
   it("derives database ownership from the existing input list", () => {
     for (const input of CONTROL_PLANE_DATABASE_INPUTS) {
       const file = input.endsWith("/") ? `${input}scope-input.ts` : input;
