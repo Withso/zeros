@@ -133,7 +133,7 @@ describe("release dependency and authority contracts", () => {
     expect(build).toContain("contents: read");
     expect(parsed.jobs.build.needs).toBe(channel === "production" ? "approve" : channel === "alpha" ? "metadata" : undefined);
     expect(build).toContain("if: github.event.repository.fork == false");
-    expect(publish).toContain(channel === "production" ? "needs: [approve, ci, build, hosted, notarize]" : channel === "alpha" ? "needs: [entry, hosted]" : "needs: [ci, build, hosted]");
+    expect(publish).toContain(channel === "production" ? "needs: [approve, ci, build, hosted, notarize, runtime-resolve, runtime]" : channel === "alpha" ? "needs: [entry, hosted, runtime-resolve, runtime]" : "needs: [ci, build, hosted, runtime-resolve, runtime]");
     expect(publish).toContain("contents: write");
     expect(publish).toContain("actions: read");
     expect(publish).toContain("ref: ${{ github.sha }}");
@@ -189,7 +189,7 @@ describe("release dependency and authority contracts", () => {
     expect(approve).not.toMatch(/secrets\.|uses: /);
     // Every job in the protected environment, and the hosted lane it calls, waits for that approval.
     const gated = [...release.matchAll(/^  ([a-z][a-z_-]*):\n(?:(?!^  [a-z][a-z_-]*:\n)[\s\S])*?^    environment: production$/gm)].map(match => match[1]);
-    expect(gated.sort()).toEqual(["build", "notarize", "publish", "submit"]);
+    expect(gated.sort()).toEqual(["build", "notarize", "publish", "runtime-resolve", "submit"]);
     for (const name of [...gated, "hosted"]) expect(job(release, name)).toMatch(/^    needs: (?:approve$|\[approve, )/m);
     // A direct Production cutover needs the same approval; Alpha and Beta skip it.
     const cutover = workflow("controlled-cutover");

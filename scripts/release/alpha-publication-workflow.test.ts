@@ -32,10 +32,10 @@ describe("concurrent Alpha preparation and serialized publication", () => {
     expect(called.on).toHaveProperty("workflow_call");
     expect(called.on.workflow_dispatch).toBeUndefined();
     expect(called.concurrency).toBeUndefined();
-    expect(Object.keys(called.jobs).sort()).toEqual(["entry", "hosted", "publish"]);
+    expect(Object.keys(called.jobs).sort()).toEqual(["entry", "hosted", "publish", "runtime", "runtime-resolve"]);
     expect(called.jobs.hosted.needs).toBe("entry");
     expect(called.jobs.hosted.uses).toBe("./.github/workflows/hosted-promotion.yml");
-    for (const id of ["publish"]) expect(called.jobs[id].needs).toEqual(["entry", "hosted"]);
+    for (const id of ["publish"]) expect(called.jobs[id].needs).toEqual(["entry", "hosted", "runtime-resolve", "runtime"]);
     expect(Object.keys(parent.jobs).sort()).toEqual(["build", "ci", "metadata", "publication"]);
   });
   it("freezes the original computed full version outside the lock and passes it to signing and every mutation checkpoint", () => {
@@ -118,7 +118,7 @@ describe("concurrent Alpha preparation and serialized publication", () => {
       expect(parsed.jobs.approve.environment).toBe("production-approval");
       expect(parsed.jobs.build.needs).toBe("approve");
       expect(commands(parsed.jobs.submit)).toContain("notarytool submit");
-      expect(parsed.jobs.publish.needs).toEqual(["approve", "ci", "build", "hosted", "notarize"]);
+      expect(parsed.jobs.publish.needs).toEqual(["approve", "ci", "build", "hosted", "notarize", "runtime-resolve", "runtime"]);
     }
   });
 });

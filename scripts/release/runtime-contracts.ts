@@ -2,6 +2,7 @@ import { z } from "zod";
 import { CHANNELS, DIGEST, SHA, requireCheck } from "./contracts";
 import { RuntimeCanaryReceiptSchema, RuntimeReleaseSchema } from "../../apps/control-plane/src/cloud/runtime-release";
 import { runtimeBuildDrainVersion } from "../../apps/control-plane/src/cloud/runtime-build-drain";
+import { RUNTIME_WORKFLOWS, runtimeCaller } from "./runtime-caller";
 
 export const RuntimeManifest = z.object({
   version: z.literal(1), repository: z.string().regex(/^[\w.-]+\/[\w.-]+$/),
@@ -56,6 +57,7 @@ export type RuntimeLiveState = { identity: RuntimeLiveIdentity; previous: Runtim
 
 export const RuntimeReleaseConfigSchema = z.object({
   channel: z.enum(["alpha", "beta", "production"]), action: z.enum(["publish", "promote", "rollback"]),
+  workflowFile: z.enum(RUNTIME_WORKFLOWS).optional(),
   repository: z.string().regex(/^[\w.-]+\/[\w.-]+$/), workflowSha: z.string().regex(SHA), branch: z.string(),
   runId: z.string().regex(/^[1-9][0-9]{0,19}$/), runAttempt: z.number().int().min(1).max(10_000),
   expectedCpSha: z.string().regex(SHA), expectedRuntimeSha256: z.string().regex(DIGEST),
@@ -76,9 +78,14 @@ function runtimeRequest(env: NodeJS.ProcessEnv): RuntimeReleaseConfig {
   });
   requireCheck(parsed.success, "Runtime release configuration is invalid");
   const config = parsed.data;
-  requireCheck(env.GITHUB_EVENT_NAME === "workflow_dispatch" && env.GITHUB_REF === `refs/heads/${config.branch}` &&
-    env.GITHUB_WORKFLOW_REF === `${config.repository}/.github/workflows/runtime-release.yml@refs/heads/${config.branch}` &&
-    env.GITHUB_WORKFLOW_SHA === config.workflowSha, "Runtime releases require the exact dispatched workflow");
+  const file = RUNTIME_WORKFLOWS.find(name => env.GITHUB_WORKFLOW_REF === `${config.repository}/.github/workflows/${name}@refs/heads/${config.branch}`);
+  requireCheck(file, "Runtime releases require an exact trusted workflow");
+  const caller = runtimeCaller(file, config.channel, config.action);
+  requireCheck(env.GITHUB_EVENT_NAME === caller.event && env.GITHUB_REF === `refs/heads/${config.branch}` &&
+    env.GITHUB_WORKFLOW_SHA === config.workflowSha, "Runtime releases require the exact trusted workflow attempt");
+  config.workflowFile = file;
+  requireCheck(file === "runtime-release.yml" || config.expectedCpSha === config.workflowSha &&
+    (config.action !== "publish" || config.sourceSha === config.workflowSha), "Automatic runtime release must use its exact release source");
   requireCheck(config.channel === "alpha" ? config.branch === "main" : /^release\/\d+\.\d+\.\d+$/.test(config.branch), "Runtime release branch does not belong to this channel");
   requireCheck(config.action !== "publish" || config.channel === "alpha" && !!config.sourceSha && !config.runtimeSha256 && !config.alphaRunId && !config.alphaRunAttempt,
     "Publishing requires one exact main source on Alpha");

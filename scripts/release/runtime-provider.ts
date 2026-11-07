@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { RuntimeReleaseSchema, runtimeReleaseIdentity } from "../../apps/control-plane/src/cloud/runtime-release";
+import { RuntimeReleaseSchema } from "../../apps/control-plane/src/cloud/runtime-release";
 import type { CloudV2RuntimeStore } from "../../apps/control-plane/src/cloud/runtime";
 import { validateDatabaseConnections } from "../../apps/control-plane/src/database-config";
 import { parseDatabaseTarget } from "../../apps/control-plane/src/database-target";
@@ -11,6 +11,7 @@ import { assertRuntimeDrainBudget, assertRuntimeDrainRecovery, boundRuntimeDrain
 import { runtimeJson } from "./runtime-proof";
 import { RuntimeProviderIntentSchema, type RuntimeProviderIntent, type RuntimeProviderRecovery } from "./runtime-journal";
 import { requireCurrentAlphaRuntime } from "./runtime-alpha";
+import { identityPin } from "./runtime-identity";
 
 const deploymentSchema = z.object({ id: z.string().regex(/^[a-zA-Z0-9_-]{1,128}$/), status: z.string(),
   projectId: z.string().uuid(), environmentId: z.string().uuid(), serviceId: z.string().uuid(),
@@ -32,19 +33,6 @@ function variablePin(variables: Record<string, unknown>, previous = false): Runt
     requireCheck(release.sha256 === sha256, "Runtime metadata does not belong to its pin");
   }
   return { sha256, release };
-}
-
-function identityPin(raw: any): RuntimePin {
-  const parsed = RuntimeLiveIdentity.safeParse(raw);
-  requireCheck(parsed.success, "Live runtime release identity is unsupported or unready");
-  const worker = raw.worker;
-  const release = raw.workerQualified ? RuntimeReleaseSchema.safeParse({ version: 1, sha256: worker.sha256,
-    sourceSha: worker.sourceSha, sourceSha256: worker.sourceSha256, qualification: worker.qualification }) : undefined;
-  requireCheck(!raw.workerQualified || release?.success, "Live runtime qualification is invalid");
-  const pin = { sha256: parsed.data.worker.sha256, release: release?.success ? release.data : null };
-  const expected = runtimeReleaseIdentity({ sha256: pin.sha256, ...(pin.release ? { release: pin.release } : {}) });
-  requireCheck(runtimeJson({ worker, workerQualified: raw.workerQualified }) === runtimeJson(expected), "Live runtime provenance contradicts its qualification");
-  return pin;
 }
 
 export function runtimeProvider(config: RuntimeReleaseConfig, env: NodeJS.ProcessEnv, storage: CloudV2RuntimeStore, options: {

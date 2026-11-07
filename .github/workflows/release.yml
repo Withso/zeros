@@ -52,8 +52,8 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # The single human approval for this release. Every job that can read
-  # Production secrets needs it, so one click authorizes the whole run.
+  # Hosted promotion and signing share this approval; the runtime transaction
+  # also keeps its own protected approval after resolving the exact pin.
   # `production-approval` holds the required reviewer and no secrets; the
   # `production` environment keeps the secrets, restricted to release/**.
   approve:
@@ -643,10 +643,76 @@ jobs:
             release/Zeros-*-arm64-mac.zip.blockmap
             release/latest-mac.yml
 
+  runtime-resolve:
+    name: Resolve cloud runtime
+    needs: [approve, hosted]
+    if: github.event.repository.fork == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: production
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      action: ${{ steps.resolve.outputs.action }}
+      reason: ${{ steps.resolve.outputs.reason }}
+      expected_cp_sha: ${{ steps.resolve.outputs.expected_cp_sha }}
+      expected_runtime_sha256: ${{ steps.resolve.outputs.expected_runtime_sha256 }}
+      source_sha: ${{ steps.resolve.outputs.source_sha }}
+      runtime_sha256: ${{ steps.resolve.outputs.runtime_sha256 }}
+      alpha_run_id: ${{ steps.resolve.outputs.alpha_run_id }}
+      alpha_run_attempt: ${{ steps.resolve.outputs.alpha_run_attempt }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_CHANNEL: production
+      RELEASE_SHA: ${{ github.sha }}
+      RELEASE_BRANCH: ${{ github.ref_name }}
+      ZEROS_CLOUD_WORKSPACES_ENABLED: ${{ vars.ZEROS_CLOUD_WORKSPACES_ENABLED || 'false' }}
+      ZEROS_RUNTIME_RELEASE: ${{ vars.ZEROS_RUNTIME_RELEASE }}
+      ZEROS_HOSTED_PROMOTION: ${{ vars.ZEROS_HOSTED_PROMOTION }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - run: pnpm --dir apps/control-plane install --frozen-lockfile --ignore-scripts
+      - name: Resolve exact runtime
+        id: resolve
+        run: pnpm exec tsx scripts/release/runtime-auto-cli.ts --resolve
+
+  runtime:
+    name: Cloud runtime
+    needs: runtime-resolve
+    if: needs.runtime-resolve.outputs.action == 'publish' || needs.runtime-resolve.outputs.action == 'promote'
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/runtime-release-run.yml
+    with:
+      channel: production
+      action: ${{ needs.runtime-resolve.outputs.action }}
+      expected_cp_sha: ${{ needs.runtime-resolve.outputs.expected_cp_sha }}
+      expected_runtime_sha256: ${{ needs.runtime-resolve.outputs.expected_runtime_sha256 }}
+      source_sha: ${{ needs.runtime-resolve.outputs.source_sha }}
+      runtime_sha256: ${{ needs.runtime-resolve.outputs.runtime_sha256 }}
+      alpha_run_id: ${{ needs.runtime-resolve.outputs.alpha_run_id }}
+      alpha_run_attempt: ${{ needs.runtime-resolve.outputs.alpha_run_attempt }}
+    secrets: inherit
+
   publish:
     name: Publish Production feed
-    needs: [approve, ci, build, hosted, notarize]
-    if: github.event.repository.fork == false
+    needs: [approve, ci, build, hosted, notarize, runtime-resolve, runtime]
+    if: >-
+      !cancelled() && github.event.repository.fork == false &&
+      needs.approve.result == 'success' && needs.ci.result == 'success' && needs.build.result == 'success' && needs.hosted.result == 'success' && needs.notarize.result == 'success' && needs.runtime-resolve.result == 'success' &&
+      (needs.runtime.result == 'success' || (needs.runtime.result == 'skipped' && needs.runtime-resolve.outputs.action == 'skip'))
     runs-on: ubuntu-latest
     environment: production
     permissions:

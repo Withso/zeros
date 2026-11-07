@@ -1418,11 +1418,16 @@ whether every running VM has adopted it. Runtime publication does not stop
 user workspaces or change their visible state. Local Personal and
 organization-local workspaces do not use this authority.
 
-The dispatch-only **Cloud runtime release** workflow builds from exact main
-source, qualifies one Alpha canary, deletes it, drains admitted Computer builds
-and runtime handoffs, and changes the channel pin through one redeploy of the
-unchanged control-plane commit. Beta promotion and rollback require an explicit
-dispatch; Production also requires the existing `production-approval` gate.
+The **Cloud runtime release** runner builds from exact main source, records a
+successful Alpha publication, drains admitted Computer builds and runtime
+handoffs, and changes the channel pin through one redeploy of the unchanged
+control-plane commit. Alpha releases publish when runtime inputs or qualifying
+control-plane/protocol code change. Beta and Production releases promote the
+compatible qualified Alpha pin after hosted promotion and before feed
+publication. Invalid or unavailable qualification fails the release; a matching
+qualified pin can skip. The dispatch wrapper remains available for manual
+publication, promotion and rollback. Production retains the existing
+`production-approval` gate for the runtime transaction.
 Promotions copy the same retained archive; rollback selects the channel's
 recorded previous digest. Neither path changes a recipe, stops a user workspace
 or affects Local Personal or organization-local workspaces. Silent adoption
