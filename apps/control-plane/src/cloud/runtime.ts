@@ -106,7 +106,7 @@ export function installRuntimeCommand(runtime: { sha256: string; url: string; pu
     `  if [ -n "$previous" ]; then sudo -n ln -sfn "$previous" /opt/zeros/worker-previous; fi`,
     `  if [ -e ${CURRENT} ] && [ ! -L ${CURRENT} ]; then sudo -n rm -rf ${CURRENT}; fi`,
     `  sudo -n ln -sfn "$dir" ${CURRENT}.next && sudo -n mv -T ${CURRENT}.next ${CURRENT}`,
-    `  rm -rf -- ${COMPILE_CACHE} 2>/dev/null || true`,
+    `  rm -rf ${COMPILE_CACHE} 2>/dev/null || true`,
     "  sudo -n systemctl try-restart zeros-worker.service || true",
     `  for old in ${RUNTIMES}/*; do [ "$old" = "$dir" ] || [ "$old" = "$previous" ] || sudo -n rm -rf "$old"; done`,
     "  echo runtime-changed",
@@ -176,7 +176,7 @@ export function activateRuntimeCommand(input: { sha256: string; previousSha256: 
     `sudo -n ln -sfn ${RUNTIMES}/${input.sha256} ${CURRENT}.next && sudo -n mv -T ${CURRENT}.next ${CURRENT}`,
     `sudo -n touch ${marker}`,
     `sync -f /opt/zeros; sync -f ${permits}`,
-    `rm -rf -- ${COMPILE_CACHE} 2>/dev/null || true`,
+    `rm -rf ${COMPILE_CACHE} 2>/dev/null || true`,
     "sudo -n systemctl restart zeros-worker.service",
     "echo activation-recorded",
   ].join("\n"))}`;
