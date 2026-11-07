@@ -9,7 +9,7 @@ import {
   onActiveBridgeChange,
 } from "../../../platform/bridge/active-bridge";
 import { designStyleBuildPresence } from "../../../platform/git";
-import { invalidateDesignWorkspacesForStyleBuild, refreshDesignWorkspacesForStyleStatus } from "./design-workspace-cache";
+import { applyDesignFramesChange, invalidateDesignWorkspacesForStyleBuild, refreshDesignWorkspacesForStyleStatus } from "./design-workspace-cache";
 
 /** The engine treats a silent renderer as gone after 90 s. */
 export const DESIGN_STYLE_BUILD_HEARTBEAT_MS = 30_000;
@@ -54,7 +54,8 @@ let styleEventsStarted = false;
 
 /** A rebuilt output arrives as DB_CHANGED "designStyles": refresh only the
  * named Design snapshots, never the Files or Changes caches. A build whose
- * state alone changed arrives as "designStyleStatus". */
+ * state alone changed arrives as "designStyleStatus". An engine that names the
+ * frames a worktree change reaches sends "designFrames": only those prepare. */
 function startDesignStyleBuildEvents(): void {
   if (styleEventsStarted) return;
   styleEventsStarted = true;
@@ -63,6 +64,8 @@ function startDesignStyleBuildEvents(): void {
     stop?.();
     stop = bridge?.on("DB_CHANGED", (message) => {
       if (message.type !== "DB_CHANGED") return;
+      if (message.kinds.includes("designFrames") && message.designFrames)
+        for (const workspaceId of message.workspaceIds ?? []) applyDesignFramesChange(workspaceId, message.designFrames);
       if (message.kinds.includes("designStyles")) invalidateDesignWorkspacesForStyleBuild(message.workspaceIds);
       else if (message.kinds.includes("designStyleStatus")) refreshDesignWorkspacesForStyleStatus(message.workspaceIds);
     });

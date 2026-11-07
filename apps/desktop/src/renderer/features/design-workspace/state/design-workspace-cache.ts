@@ -54,6 +54,9 @@ import { DesignFramePreparation, readDesignNavigation, projectDesignMutationSnap
 import { preparedDesignSnapshot } from "./design-frame-view";
 import { onActiveBridgeConnected } from "../../../platform/bridge/active-bridge";
 import { isCloudWorkspace } from "../../../platform/bridge/cloud-workspace-key";
+import { getActiveBridge } from "../../../platform/bridge/active-bridge";
+import { DESIGN_FRAMES_CHANGES_CAPABILITY } from "@zeros/protocol/design-catalog";
+import type { DesignFramesChange } from "@zeros/protocol/messages";
 import { classifyRpcError } from "../../../platform/bridge/failure";
 import { designFrameRuntime } from "../../../platform/bridge/design-frame-runtime";
 import { designStylePropertyAffectsLayout } from "../design-style-values";
@@ -2856,6 +2859,39 @@ const refreshVersionByWorkspace = new Map<string, number>();
 /** Coalesce two sibling hook mounts observing the same Git generation into one
  * cache invalidation. The map is bounded with the same LRU key discipline as
  * the snapshot cache. */
+/** A Local engine that names the Design frames each worktree change reaches
+ * (DB_CHANGED "designFrames"). Its canvas no longer re-reads everything on
+ * every Git refresh; a reconnect still revalidates once. */
+export function designFramesChangesSupported(workspaceId: string): boolean {
+  return !isCloudWorkspace(workspaceId) &&
+    getActiveBridge()?.supportsEngineCapability?.(DESIGN_FRAMES_CHANGES_CAPABILITY, workspaceId) === true;
+}
+
+/** Apply an engine's named frame changes: only those frames prepare again,
+ * each keeping its last record as a cover until its new generation arrives.
+ * A catalog, whole-directory or other-directory change re-reads the snapshot
+ * as a Git refresh did. */
+export function applyDesignFramesChange(workspaceId: string, change: DesignFramesChange): void {
+  const snapshot = designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data;
+  if (change.all || change.catalog || !snapshot?.preparation || snapshot.directoryId !== change.directoryId) {
+    invalidateDesignWorkspaceSnapshot(workspaceId);
+    return;
+  }
+  const changed = new Set(change.frames);
+  const preparation = snapshot.preparation;
+  if (!preparation.current.some((file) => changed.has(file)) && !Object.keys(preparation.errors).some((file) => changed.has(file))) return;
+  // A local edit's receipt owns the next generation of its own frames.
+  const mutation = pendingLocalMutationByWorkspace.get(workspaceId);
+  if (mutation) {
+    mutation.deferredRefresh = true;
+    return;
+  }
+  designWorkspaceSnapshotCache.setData(workspaceId, { ...snapshot, preparation: { ...preparation,
+    current: preparation.current.filter((file) => !changed.has(file)),
+    errors: Object.fromEntries(Object.entries(preparation.errors).filter(([file]) => !changed.has(file))) } });
+  designFramePreparation.resume();
+}
+
 export function applyDesignWorkspaceRefreshVersion(
   workspaceId: string,
   refreshVersion: number,
@@ -2871,6 +2907,8 @@ export function applyDesignWorkspaceRefreshVersion(
     refreshVersionByWorkspace.delete(oldest);
   }
   if (previous === undefined || previous === refreshVersion) return;
+  // The engine names exactly which frames a change reaches.
+  if (designFramesChangesSupported(workspaceId)) return;
   const localMutation = pendingLocalMutationByWorkspace.get(workspaceId);
   if (localMutation) {
     localMutation.deferredRefresh = true;
