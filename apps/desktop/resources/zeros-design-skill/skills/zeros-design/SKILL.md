@@ -46,7 +46,7 @@ Provider permissions and Plan mode still apply. Saving never stages or commits; 
 ## At a glance
 
 - Frames render HTML and CSS (classes, custom properties, `@keyframes`, transitions), inline SVG, and raster images and fonts from the Design directory or a style source. Scripts, inline event handlers, JSX/TSX, iframes and network requests do not run. The full table is in `reference/format.md`.
-- A directory holds up to 64 pages and 256 frames; 12 frames stay live on the canvas and the rest show a still image (`reference/format.md`, Limits).
+- A directory holds up to 64 pages of up to 1,000 frames each; 12 frames stay live on the canvas and the rest show a still image (`reference/format.md`, Limits).
 - Inspector edits land in the same files, mostly as declarations in the edited element's `style` attribute (`reference/editor.md`).
 
 ## Git, conflicts and concurrency

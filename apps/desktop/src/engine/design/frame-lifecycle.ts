@@ -71,7 +71,6 @@ import {
   DEFAULT_FRAME_WIDTH,
   designDirectory,
   discoverFrameFiles,
-  MAX_FRAME_COUNT,
   nextFrameGeometry,
   normalizeGeometry,
   readBoundedDesignFrameSource,
@@ -90,6 +89,8 @@ import { type DesignStorageChange } from "./metadata";
 import { legacyFrameId } from "./canvas-file";
 import { isDeepStrictEqual } from "node:util";
 import { assertDesignFrameRestorePage, designFramePage, designPageForWrite, designPageFrameFiles } from "./pages";
+import { assertDesignPageHasRoom } from "./frame-limits";
+import { DESIGN_MAX_FRAMES_PER_PAGE } from "@zeros/protocol/design-pages";
 import { designTitleSlug } from "./design-naming";
 import {
   DESIGN_FRAMES_MOVE_LIMIT,
@@ -117,7 +118,7 @@ export async function createDesignFrame(
     const directory = designDirectory(workspacePath);
     const canvas = await readCanvas(workspacePath);
     const page = designPageForWrite(canvas, input.pageId);
-    if (Object.keys(canvas.frames).length >= MAX_FRAME_COUNT) throw new Error(`Design document exceeds ${MAX_FRAME_COUNT} frames.`);
+    assertDesignPageHasRoom(page.title, designPageFrameFiles(canvas, page).length);
     const folder = page.folder;
     const title = input.title?.trim().slice(0, 120) || "Frame";
     const base = designTitleSlug(title, { maxLength: 72, fallback: "frame" });
@@ -460,7 +461,7 @@ export async function duplicateDesignFrame(
     await designFrameTarget(workspacePath, originalFile);
     const canvas = await readCanvas(workspacePath);
     const page = designPageForWrite(canvas, input.pageId);
-    if (Object.keys(canvas.frames).length >= MAX_FRAME_COUNT) throw new Error(`Design document exceeds ${MAX_FRAME_COUNT} frames.`);
+    assertDesignPageHasRoom(page.title, designPageFrameFiles(canvas, page).length);
     const original = await readBoundedDesignFrameSource(
       workspacePath,
       originalFile,
@@ -639,18 +640,15 @@ export async function restoreDesignFrame(
       sourceCodeLocationInfo: true,
     });
     const meta = { ...readFrameMeta(document, file), ...restorePoint.metadata };
-    if (
-      !Object.prototype.hasOwnProperty.call(canvas.frames, file) &&
-      Object.keys(canvas.frames).length >= MAX_FRAME_COUNT
-    ) {
-      throw new Error(`Design document exceeds ${MAX_FRAME_COUNT} frames.`);
-    }
+    const pageFrames = designPageFrameFiles(canvas, page).length;
+    if (!Object.prototype.hasOwnProperty.call(canvas.frames, file))
+      assertDesignPageHasRoom(page.title, pageFrames);
     const geometry = normalizeGeometry(restorePoint.geometry, {
       x: 0,
       y: 0,
       w: meta.width,
       h: meta.height,
-      z: Object.keys(canvas.frames).length,
+      z: pageFrames,
     });
     if (existsSync(target))
       throw new Error(`Design frame already exists: ${file}`);
@@ -741,8 +739,13 @@ async function applyDesignFrameChangesUnlocked(
       after: change.after?.source ?? null,
     });
   }
-  if (Object.keys(canvas.frames).length > MAX_FRAME_COUNT)
-    throw new Error("The canvas has too many frames.");
+  // Count after applying every change: a frame leaving a full page may be listed after the one arriving.
+  for (const change of changes) {
+    if (!change.after || change.before) continue;
+    const page = designFramePage(canvas, change.after.file);
+    if (designPageFrameFiles(canvas, page).length > DESIGN_MAX_FRAMES_PER_PAGE)
+      assertDesignPageHasRoom(page.title, DESIGN_MAX_FRAMES_PER_PAGE);
+  }
   const dependencies = await captureDesignDependencies(async () => {
     for (const change of changes) {
       const before = change.before;

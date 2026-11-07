@@ -1,5 +1,5 @@
 import { readDirectoryDesignManifest } from "./metadata";
-import { inspectDesignCatalog, readDesignCatalogMetadata } from "./catalog-storage";
+import { inspectDesignCatalog, readDesignCatalogMetadataWithContext } from "./catalog-storage";
 import { DesignCatalogError } from "./catalog";
 import { escapeText, escapeAttribute } from "./source";
 import {
@@ -1048,8 +1048,7 @@ export async function readDesignNavigationSnapshot(workspacePath: string, affect
   return withDocumentWrite(workspacePath, async () => {
     await recoverPendingDesignTransactionUnlocked(workspacePath);
     const directory = designDirectoryNameFor(workspacePath);
-    const metadata = await readDesignCatalogMetadata(workspacePath, directory);
-    const context = await readCanvasContext(workspacePath);
+    const { metadata, context } = await readDesignCatalogMetadataWithContext(workspacePath, directory);
     const [tokens, assets, styles, frames] = await Promise.all([
       readDesignTokensDocument(workspacePath, context, { includeUsage: false }),
       listDesignAssets(workspacePath),

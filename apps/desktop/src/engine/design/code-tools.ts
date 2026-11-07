@@ -9,6 +9,7 @@ import type { ComposerModeSnapshot } from "@zeros/protocol/composer-mode";
 import { isDesignFrameFile } from "@zeros/protocol/design-path";
 import { designCaptureRasterSize } from "@zeros/protocol/design-capture";
 import { designPageIdSchema } from "@zeros/protocol/design-pages";
+import { DESIGN_CATALOG_DESCRIPTOR_LIMIT } from "@zeros/protocol/design-catalog";
 import { readDesignPageContext } from "./page-selection";
 import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
@@ -73,7 +74,7 @@ const definitions = {
       "List authored frames in the admitted Design directory, independent of the visible UI.",
     schema: z
       .object({
-        offset: z.number().int().min(0).max(256).default(0),
+        offset: z.number().int().min(0).max(DESIGN_CATALOG_DESCRIPTOR_LIMIT).default(0),
         limit: z.number().int().min(1).max(64).default(32),
       })
       .strict(),

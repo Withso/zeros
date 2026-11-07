@@ -64,6 +64,15 @@ export async function readDesignCatalogMetadata(
   root: string,
   directory: string,
 ) {
+  return (await readDesignCatalogMetadataWithContext(root, directory)).metadata;
+}
+
+/** The canvas read the catalog was projected from, so a caller that needs
+ * both decodes a large canvas once. Never retained beside a catalog session. */
+export async function readDesignCatalogMetadataWithContext(
+  root: string,
+  directory: string,
+) {
   const before = inspectDesignCatalog(root, directory);
   const context = await readCanvasContext(root);
   const captured = context.canvas[canvasReadSnapshot];
@@ -76,9 +85,12 @@ export async function readDesignCatalogMetadata(
   )
     throw new DesignCatalogError("stale");
   return {
-    directoryId: before.layout.manifest.id,
-    binding: before.binding,
-    revision: before.revision,
-    ...projectDesignCatalog(context.canvas),
+    context,
+    metadata: {
+      directoryId: before.layout.manifest.id,
+      binding: before.binding,
+      revision: before.revision,
+      ...projectDesignCatalog(context.canvas),
+    },
   };
 }

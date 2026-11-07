@@ -58,7 +58,7 @@ To create a frame:
 ```
 
 - **IDs** start with a letter, use letters, digits, `_` or `-`, and are at most 128 characters. Never change an existing directory, page or frame ID. Renaming a file changes only its `source`.
-- **Geometry.** `width`/`height` (1–16,384) are the frame's viewport; `x`/`y` stay within ±1,000,000; optional `z` is 0–256 within its page.
+- **Geometry.** `width`/`height` (1–16,384) are the frame's viewport; `x`/`y` stay within ±1,000,000; optional `z` is 0–1,000 within its page.
 - **`data-oid`** is optional: the canvas derives selection identities for plain HTML, and visual edits save the IDs they need. Keep existing values when you edit; add stable, unique ones when selection must survive a large restructure. Document plumbing (`html`, `head`, `body`, `meta`, `link`, `title`, `style`, `script`, `template`) never takes one.
 - **References** resolve relative to the file that contains them, so frames in page folders link `../tokens.css` and `../assets/…`.
 - **Layout.** Prefer normal flow, flex and grid with `gap` and padding for content. Use absolute positioning for intentional overlays and decorative shapes inside a relative container.
@@ -71,7 +71,7 @@ To create a frame:
 - Add a page by appending `{ "id", "title", "folder", "frames": [] }` to `pages` and creating the folder.
 - Folder rules: 1–64 letters, digits, `.`, `_` or `-`; starts with a letter or digit; no trailing dot; unique case-insensitively; never `meta`, `assets` or `components`. A lowercase slug is best. A page titled "Components" therefore needs another folder, such as `components-2` (the folder Zeros page creation chooses for that title).
 - Renaming a page changes its title only; the folder never moves. Each frame belongs to exactly one page and its source stays in that page's folder.
-- 1–64 pages and at most 256 frames across the whole directory.
+- 1–64 pages and at most 1,000 frames per page. A directory has no separate frame limit; a page over 1,000 does not open until frames move to another page.
 
 ## Components
 
@@ -102,7 +102,7 @@ Represent controls as visual states (default, hover, pressed, focus, disabled) i
 
 | Resource | Limit |
 | --- | --- |
-| Pages / frames per directory | 64 / 256 |
+| Pages per directory / frames per page | 64 / 1,000 (no directory-wide frame limit) |
 | Text file (HTML, CSS, metadata) | 2 MiB each |
 | One frame and the files it links (tokens, page CSS, components) | 1,024 files, 16 MiB; there is no directory-wide size budget |
 | Stylesheets linked by one frame | 128 |

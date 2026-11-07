@@ -9,6 +9,9 @@ import {
   DESIGN_CATALOG_BATCH_BYTES,
   type DesignCatalogRead,
 } from "@zeros/protocol/design-catalog";
+import { DESIGN_MAX_FRAMES_PER_PAGE } from "@zeros/protocol/design-pages";
+import { decodeCanvasFile } from "../canvas-file";
+import { pagedCanvasFixture } from "./frame-limit-fixtures";
 
 const input: DesignCatalogRead = {
   version: 1,
@@ -24,20 +27,29 @@ const admission = {
 };
 function metadata(count: number): DesignCatalogSnapshot {
   const ids = Array.from({ length: count }, (_, i) => `f${i}`);
+  const folder = (i: number) => `page-${Math.floor(i / DESIGN_MAX_FRAMES_PER_PAGE) + 1}`;
   const canvas: Pick<CanvasDocument, "frames" | "frame_info" | "pages"> = {
     frames: Object.fromEntries(
       ids.map((id, i) => [
-        `page-1/${id}.html`,
+        `${folder(i)}/${id}.html`,
         { x: i, y: 0, w: 100, h: 100, z: 0 },
       ]),
     ),
     frame_info: Object.fromEntries(
-      ids.map((id) => [
-        `page-1/${id}.html`,
+      ids.map((id, i) => [
+        `${folder(i)}/${id}.html`,
         { id, title: id, kind: "frame" as const },
       ]),
     ),
-    pages: [{ id: "p", title: "Page", folder: "page-1", frames: ids }],
+    pages: Array.from(
+      { length: Math.max(1, Math.ceil(count / DESIGN_MAX_FRAMES_PER_PAGE)) },
+      (_, page) => ({
+        id: page ? `p${page + 1}` : "p",
+        title: "Page",
+        folder: `page-${page + 1}`,
+        frames: ids.slice(page * DESIGN_MAX_FRAMES_PER_PAGE, (page + 1) * DESIGN_MAX_FRAMES_PER_PAGE),
+      }),
+    ),
   };
   return {
     owner: {
@@ -179,9 +191,10 @@ describe("bounded revisioned metadata catalog", () => {
     ).toMatchObject({ status: "ready" });
   });
 
-  it("counts three retired executing snapshots inside the default 32 MiB aggregate ceiling", async () => {
+  it("counts three retired executing snapshots inside the default 96 MiB aggregate ceiling", async () => {
     const reader = new DesignCatalogReader();
-    const data = metadata(256);
+    // Sixteen fresh reads of this size need eviction under the ceiling.
+    const data = metadata(800);
     data.frames = data.frames.map((frame, index) => ({
       ...frame,
       source: `page-1/f${index}${"x".repeat(3900)}.html`,
@@ -234,7 +247,8 @@ describe("bounded revisioned metadata catalog", () => {
       (sum, session) => sum + session.bytes,
       0,
     );
-    expect(activeBytes + retiredBytes).toBeLessThanOrEqual(32 * 1024 * 1024);
+    expect(16 * size).toBeGreaterThan(96 * 1024 * 1024);
+    expect(activeBytes + retiredBytes).toBeLessThanOrEqual(96 * 1024 * 1024);
     expect(state.retainedBytes).toBe(activeBytes + retiredBytes);
     expect(retiredBytes).toBe(size * 3);
     expect(state.running).toBe(3);
@@ -284,7 +298,7 @@ describe("bounded revisioned metadata catalog", () => {
     ).toMatchObject({ status: "ready" });
   });
 
-  it("pages a bounded 10k metadata helper fixture without claiming production admission", async () => {
+  it("pages a 10k metadata helper fixture spread across ten pages", async () => {
     const reader = new DesignCatalogReader();
     const read = source(metadata(10000));
     const found: string[] = [];
@@ -306,6 +320,24 @@ describe("bounded revisioned metadata catalog", () => {
       cursor = batch.nextCursor ?? undefined;
     } while (cursor);
     expect(found).toEqual(Array.from({ length: 10000 }, (_, i) => `f${i}`));
+    expect(read.open).toHaveBeenCalledOnce();
+  });
+
+  it("reads 26 full pages of engine-shaped descriptors within the default budgets", async () => {
+    const canvas = decodeCanvasFile(JSON.stringify(pagedCanvasFixture(26, DESIGN_MAX_FRAMES_PER_PAGE)), { version: 2 });
+    const snapshot = { ...metadata(0), ...projectDesignCatalog(canvas as unknown as CanvasDocument) };
+    const reader = new DesignCatalogReader();
+    const read = source(snapshot);
+    let total = 0;
+    let cursor: string | undefined;
+    do {
+      const batch = await reader.read({ ...input, limit: 256, ...(cursor ? { cursor } : {}) }, admission, read);
+      if (batch.status !== "ready") throw new Error(`expected batch, got ${batch.reason}`);
+      expect(batch.pages).toHaveLength(26);
+      total += batch.frames.length;
+      cursor = batch.nextCursor ?? undefined;
+    } while (cursor);
+    expect(total).toBe(26_000);
     expect(read.open).toHaveBeenCalledOnce();
   });
   it("stops at the byte bound before the entry bound and completes small/empty catalogs", async () => {
