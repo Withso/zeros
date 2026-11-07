@@ -19,8 +19,17 @@ export async function runDesignLazyPreparationSmoke({ page: parent, check, captu
   check("fixed-view opening requests only visible/nearby sources", initial.calls.length === 1 &&
     initial.calls[0].files.every((file) => ["home.html", "pricing.html"].includes(file)));
   check("unprepared surfaces are included in resource accounting", initial.resources.counters.frameSurfaces.current > 0);
-  check("cold metadata keeps its bounds without painting placeholder frames", await page.evaluate(() =>
-    [...document.querySelectorAll('[data-design-frame]')].every(frame => getComputedStyle(frame).visibility === "hidden")));
+  // A cold frame shows where it is: its own surface fill, with no stroke,
+  // chrome or content until its first ready content (text frames have no
+  // surface and stay invisible).
+  check("cold metadata keeps its bounds and paints only a bare surface", await page.evaluate(() =>
+    [...document.querySelectorAll('[data-design-frame]')].every(frame => {
+      const style = getComputedStyle(frame);
+      const descendantsHidden = [...frame.querySelectorAll("*")].every(element => getComputedStyle(element).visibility === "hidden");
+      if (style.visibility === "hidden") return descendantsHidden;
+      return style.boxShadow === "none" && style.backgroundColor !== "rgba(0, 0, 0, 0)" && descendantsHidden &&
+        !frame.querySelector("iframe");
+    })));
   // Hold a same-epoch revalidation across the first preparation reply. The
   // reply must not publish during that read, but finishing the read must wake
   // the unchanged demand without a click, camera change or new catalog epoch.
@@ -59,7 +68,12 @@ export async function runDesignLazyPreparationSmoke({ page: parent, check, captu
   await page.locator('[data-design-frame-row="distant-0.html"]').click();
   await page.waitForFunction(() => window.__zerosHarnessDesignSurface.ui.getState().byWorkspace.ws_design_harness.selectedFrame === "distant-0.html");
   await page.locator('[data-design-frame="distant-0.html"][data-design-preparing]').waitFor({ state: "attached" });
-  check("Layers can navigate to a cold frame without exposing its placeholder", await page.locator('[data-design-frame="distant-0.html"]').isHidden());
+  check("Layers can navigate to a cold frame, which shows only its bare surface", await page.evaluate(() => {
+    const frame = document.querySelector('[data-design-frame="distant-0.html"]');
+    const style = getComputedStyle(frame);
+    return style.visibility === "visible" && style.boxShadow === "none" && style.backgroundColor !== "rgba(0, 0, 0, 0)" &&
+      !frame.querySelector("iframe") && [...frame.querySelectorAll("*")].every(element => getComputedStyle(element).visibility === "hidden");
+  }));
   await page.waitForFunction(() => {
     const rect = document.querySelector('[data-design-frame="distant-0.html"]').getBoundingClientRect();
     return rect.left < innerWidth && rect.right > 0 && rect.top < innerHeight && rect.bottom > 0;
