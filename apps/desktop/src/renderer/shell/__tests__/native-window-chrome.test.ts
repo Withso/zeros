@@ -96,6 +96,17 @@ describe("native window hit regions", () => {
     expect(await region()).toBe("drag");
   });
 
+  it("anchors each global :has() rule on the element it styles, so a change elsewhere restyles one element", () => {
+    // `body:has(<overlay>) [data-tauri-drag-region]` styled body's descendants:
+    // its argument cannot be narrowed (it looks under closed or hidden
+    // surfaces), so every DOM change anywhere restyled the whole document. A
+    // picture swap on a 1,000-frame Design page cost ~45 ms instead of ~3 ms.
+    const css = source("styles/global/platform.css").replace(/\/\*[\s\S]*?\*\//g, "");
+    const selectors = [...css.matchAll(/([^{}]*:has\([^{}]*)\{/g)].map(match => match[1].trim());
+    expect(selectors.length).toBeGreaterThan(0);
+    for (const selector of selectors) expect(selector.endsWith(")"), selector).toBe(true);
+  });
+
   it.each(["hidden", "inert", 'aria-hidden="true"', 'data-state="closed"'])(
     "ignores overlays retained under a %s surface",
     async attribute => {
