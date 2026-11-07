@@ -47,8 +47,10 @@ function workerUrl(): URL {
 }
 
 function spawn(): PoolWorker {
-  // Bun runs TypeScript workers itself; Node (tests) needs the loader.
-  const worker = new Worker(workerUrl(), process.versions.bun ? {} : { execArgv: ["--import", "tsx"] });
+  const script = workerUrl();
+  const worker = process.versions.bun
+    ? new Worker(script)
+    : new Worker(new URL("./preparation-worker-node.mjs", import.meta.url), { workerData: { entry: script.href } });
   const entry: PoolWorker & { answered?: boolean } = { worker, pending: new Map() };
   const fail = (error: Error) => {
     pool = pool.filter((candidate) => candidate !== entry);
