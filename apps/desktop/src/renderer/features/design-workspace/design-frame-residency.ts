@@ -137,9 +137,10 @@ export function createDesignFrameResidencyReader<T extends DesignSpatialFrame>()
     const needsSource = (frame: T) => !overview ||
       Math.max(frame.width, frame.height) * input.view.zoom * ratio > DESIGN_PREVIEW_LEVELS.overview;
     const sourceCandidates = input.sourceSurfacesEnabled && input.active
-      // A frame held only for an earlier view loads no new document.
+      // A frame held only for an earlier view loads no new document, but one
+      // it already has stays within the budget, like any warm document.
       ? [...input.frames.filter(frame => placed.has(frame.file) && needsSource(frame)),
-          ...input.frames.filter(frame => !mounted.has(frame.file) && prior?.sources.has(frame.file) && !overview)] as SourceFrame[] : [];
+          ...input.frames.filter(frame => !placed.has(frame.file) && prior?.sources.has(frame.file) && !overview)] as SourceFrame[] : [];
     // Previous source is paint-only. The original descriptors still exclude
     // these frames from live/editor admission and continue preparation demand.
     const admittedSources = input.gesture && prior
