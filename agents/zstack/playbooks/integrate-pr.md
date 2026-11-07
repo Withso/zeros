@@ -49,6 +49,11 @@ session itself.
    Before arming, wait for the PR's `CodeQL` alert check (separate from the
    `codeql` job). It is not required, so auto-merge won't wait for it; a new
    high alert, even in a test, is fixed before merge.
+   - **Collapsing a stack.** To land a long stack as its top PR, rebuild that
+     branch on `main` by cherry-picking each PR's own commits. Drop a commit
+     only when `git diff <a>^ <b> | git patch-id --stable` matches the merged
+     squash. Then run the full suite, retarget the PR and close the others as
+     landed in it.
    - **Stacked PRs.** After the base PR squash-merges, the next PR in the stack
      conflicts (add/add) on files the base created and the stack later changed.
      Replay only that PR's own commits onto `main`
