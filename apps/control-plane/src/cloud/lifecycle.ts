@@ -37,6 +37,10 @@ const CREATE_KEY_MS = 23 * 60 * 60_000;
 const MAX_ATTEMPTS = 8;
 const LEASE_RENEW_MS = 12 * 60 * 60_000;
 const MAINTENANCE_SCAN_MS = 60_000;
+/** An idle control plane sweeps this often; lifecycle notifications and due
+ * deferrals wake it sooner. */
+const IDLE_SWEEP_MS = 60_000;
+export const CLOUD_V2_LIFECYCLE_CHANNEL = "zeros_cloud_v2_lifecycle";
 export const CLOUD_V2_IDLE_STOP_MS = 15 * 60_000;
 /** A failed stop checkpoint is retried on a fork of the stopped VM: first
  * after whatever failed has had time to pass, then less often. */
@@ -81,7 +85,7 @@ export function emitCloudV2Timing(observer: ((record: CloudV2TimingRecord) => vo
 }
 
 export type CloudV2LifecycleDeps = {
-  store: Pick<CloudV2Store, "claimPending" | "defer" | "transition" | "rotateWorkerToken" | "computerSnapshot" | "revoke" | "idleSince" | "setWorkerRoute" | "leasesDue" | "markLeaseRenewed" | "recordInitialSandbox"
+  store: Pick<CloudV2Store, "claimPending" | "nextLifecycleDue" | "defer" | "transition" | "rotateWorkerToken" | "computerSnapshot" | "revoke" | "idleSince" | "setWorkerRoute" | "leasesDue" | "markLeaseRenewed" | "recordInitialSandbox"
     | "setBaseCommit" | "saveCheckpoint" | "checkpointFailed" | "checkpointUpload" | "checkpointUploadDone" | "checkpointUploadHorizon" | "stopCurrent"
     | "beginRestore" | "replaceSandbox" | "finishRestore" | "checkpointUnchanged" | "claimCheckpointRetry" | "beginCheckpointFork"
     | "checkpointForkCreated" | "checkpointForkGone" | "checkpointRetryNext">;
@@ -174,14 +178,13 @@ export class CloudV2Lifecycle {
   constructor(private readonly deps: CloudV2LifecycleDeps, private readonly intervalMs = 2_000) {}
 
   start(): () => Promise<void> {
-    this.timer = setInterval(() => {
-      void this.poll().catch(error => this.deps.logger?.warn(`[cloud-v2] lifecycle poll failed (${errorCode(error)})`));
-    }, this.intervalMs);
-    this.timer.unref();
+    this.started = true; this.stopped = false;
+    this.schedule(this.intervalMs);
     return async () => {
+      this.stopped = true;
       this.deps.runtimeUpdates?.close();
       this.deps.builds?.close?.();
-      if (this.timer) clearInterval(this.timer);
+      if (this.timer) clearTimeout(this.timer);
       this.timer = null;
       await this.running;
       await Promise.all(this.inFlight.values());
@@ -190,6 +193,46 @@ export class CloudV2Lifecycle {
       await this.building;
       await this.cleaning;
     };
+  }
+
+  private started = false;
+  private stopped = false;
+  private sweeping = false;
+  private woken = false;
+
+  /** A lifecycle row changed: sweep now rather than at the next deadline. */
+  wake(): void {
+    if (!this.started || this.stopped) return;
+    if (this.sweeping) this.woken = true;
+    else this.schedule(0);
+  }
+
+  private schedule(ms: number): void {
+    if (this.stopped) return;
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = setTimeout(() => { this.timer = null; void this.sweep(); }, ms);
+    this.timer.unref();
+  }
+
+  private async sweep(): Promise<void> {
+    this.sweeping = true;
+    let next = this.intervalMs;
+    try {
+      await this.poll();
+      next = await this.nextSweep();
+    } catch (error) {
+      this.deps.logger?.warn(`[cloud-v2] lifecycle poll failed (${errorCode(error)})`);
+    } finally { this.sweeping = false; }
+    if (this.woken) { this.woken = false; next = 0; }
+    this.schedule(next);
+  }
+
+  /** Work in progress keeps the fast cadence; otherwise the next due deferral,
+   * bounded by the idle sweep, decides. */
+  private async nextSweep(): Promise<number> {
+    if (this.inFlight.size || this.building || this.cleaning || this.retrying || this.renewing) return this.intervalMs;
+    const due = await this.deps.store.nextLifecycleDue();
+    return due === null ? IDLE_SWEEP_MS : Math.min(IDLE_SWEEP_MS, Math.max(this.intervalMs, due));
   }
 
   private building: Promise<void> | null = null;
