@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { parse, type DefaultTreeAdapterTypes } from "parse5";
 import { registerDesignTemplateContent } from "@zeros/design-web";
 import { DESIGN_RUNTIME_SOURCE } from "@zeros/protocol/design-runtime";
+import { parseDesignSource } from "./shared-parse";
 
 export interface ElementRecord {
   element: DefaultTreeAdapterTypes.Element;
@@ -107,7 +108,7 @@ function activeUrl(value: string): boolean {
  * handlers bypass them. This parser-backed sanitizer is shared by srcDoc and
  * custom-protocol rendering. */
 export function sanitizeDesignFrameMarkup(source: string): string {
-  const document = parse(source, { sourceCodeLocationInfo: true });
+  const document = parseDesignSource(source);
   const edits: DesignSourceEdit[] = [];
   const urlAttributes = new Set([
     "action",
@@ -205,23 +206,34 @@ export function insertDesignRuntimeScript(
 }
 
 export function insertDesignHeadMarkup(source: string, markup: string): string {
-  const document = parse(source, { sourceCodeLocationInfo: true });
+  const document = parseDesignSource(source);
   const records = elementRecords(document);
-  const head = records.find(
-    ({ element }) => element.tagName === "head",
-  )?.element;
   const html = records.find(
     ({ element }) => element.tagName === "html",
   )?.element;
   // An implicit head still accepts metadata after the opening html/doctype.
   // Keep the doctype first so inserting styles cannot switch to quirks mode.
   const insertAt =
-    head?.sourceCodeLocation?.startTag?.endOffset ??
+    explicitHeadEnd(records) ??
     html?.sourceCodeLocation?.startTag?.endOffset ??
     document.childNodes.find((node) => node.nodeName === "#documentType")
       ?.sourceCodeLocation?.endOffset ??
     0;
   return `${source.slice(0, insertAt)}${markup}${source.slice(insertAt)}`;
+}
+
+function explicitHeadEnd(records: readonly ElementRecord[]): number | undefined {
+  return records.find(({ element }) => element.tagName === "head")?.element
+    .sourceCodeLocation?.startTag?.endOffset;
+}
+
+/** Where `insertDesignHeadMarkup` puts markup in any text that differs from
+ * `document`'s only after its explicit head tag: that text parses to the same
+ * head, so the parse need not be repeated. Undefined without such a tag. */
+export function explicitDesignHeadEnd(
+  document: DefaultTreeAdapterTypes.Document,
+): number | undefined {
+  return explicitHeadEnd(elementRecords(document));
 }
 
 /** Theme names a frame can be shown in, as the canvas Themes control uses. */

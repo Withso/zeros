@@ -2,15 +2,16 @@ import { createHash } from "node:crypto";
 import type { DesignSurfaceCost } from "@zeros/protocol/design-surface";
 import { designSurfaceCost } from "./surface-document";
 import path from "node:path";
-import { parse } from "parse5";
 import postcss from "postcss";
 import { designCssUrlReferences, designSrcsetReferences, rebaseDesignCssReferences } from "@zeros/design-web";
-import { expandDesignComponents } from "./components";
+import { expandDesignComponentsHtml } from "./components";
+import { parseDesignSource, withSharedDesignParses } from "./shared-parse";
 import { designDirectoryNameFor } from "./directory-registry";
 import {
   applyDesignSourceEdits,
   createDesignRuntimeScript,
   elementRecords,
+  explicitDesignHeadEnd,
   insertDesignHeadMarkup,
   insertDesignRuntimeScript,
   sanitizeDesignFrameMarkup,
@@ -194,9 +195,9 @@ async function linkLocalStylesheets(
   sources?: Readonly<Record<string, string>>,
   readAsset?: DesignRenderAssetReader,
   entryFile = "",
-): Promise<{ html: string; sheets: LinkedStylesheet[]; assetBytes: number }> {
+): Promise<{ html: string; sheets: LinkedStylesheet[]; assetBytes: number; headEnd?: number }> {
   const directory = designDirectory(workspacePath);
-  const document = parse(source, { sourceCodeLocationInfo: true });
+  const document = parseDesignSource(source);
   const links = elementRecords(document)
     .map(({ element }) => element)
     .filter((element) => {
@@ -255,7 +256,11 @@ async function linkLocalStylesheets(
       text: replacement,
     });
   }
-  return { html: applyDesignSourceEdits(source, edits), sheets, assetBytes };
+  const headEnd = explicitDesignHeadEnd(document);
+  const html = applyDesignSourceEdits(source, edits);
+  return headEnd !== undefined && edits.every((edit) => edit.start >= headEnd)
+    ? { html, sheets, assetBytes, headEnd }
+    : { html, sheets, assetBytes };
 }
 
 /** In-flight text of a linked Design stylesheet, processed exactly as its
@@ -382,7 +387,7 @@ async function inlineLocalAssets(
   initialAssetBytes = 0,
 ): Promise<string> {
   const directory = designDirectory(workspacePath);
-  const document = parse(source, { sourceCodeLocationInfo: true });
+  const document = parseDesignSource(source);
   const edits: Array<{ start: number; end: number; text: string }> = [];
   const budget = { inlineAssetBytes: initialAssetBytes };
   let resultBytes = utf8Bytes(source);
@@ -528,7 +533,7 @@ export interface FrameRenderOptions {
   identityOnly?: boolean;
 }
 
-export async function prepareFrameRenderSource(
+export function prepareFrameRenderSource(
   workspacePath: string,
   source: string,
   viewport: { width: number; height: number },
@@ -538,31 +543,47 @@ export async function prepareFrameRenderSource(
   canvas?: CanvasDocument,
   options: FrameRenderOptions = {},
 ): Promise<{ sanitized: string; sourceVersion: string; surfaceCost: DesignSurfaceCost | null }> {
+  return withSharedDesignParses(() =>
+    prepareSharedFrameRenderSource(workspacePath, source, viewport, sources, readAsset, entryFile, canvas, options));
+}
+
+async function prepareSharedFrameRenderSource(
+  workspacePath: string,
+  source: string,
+  viewport: { width: number; height: number },
+  sources: Readonly<Record<string, string>> | undefined,
+  readAsset: DesignRenderAssetReader | undefined,
+  entryFile: string,
+  canvas: CanvasDocument | undefined,
+  options: FrameRenderOptions,
+): Promise<{ sanitized: string; sourceVersion: string; surfaceCost: DesignSurfaceCost | null }> {
   assertRenderByteLimit(
     source,
     MAX_DESIGN_TEXT_BYTES,
     "Authored frame HTML exceeded the 2 MiB source limit.",
   );
-  const expanded = await expandDesignComponents(workspacePath, healDesignOids(source).html, sources, entryFile);
+  const expanded = await expandDesignComponentsHtml(workspacePath, healDesignOids(source).html, sources, entryFile);
   assertRenderByteLimit(
-    expanded.html,
+    expanded,
     MAX_SANITIZED_RENDER_BYTES,
     "Expanded components exceeded the 15 MiB per-frame render limit.",
   );
   const linked = await linkLocalStylesheets(
     workspacePath,
-    expanded.html,
+    expanded,
     sources,
     readAsset,
     entryFile,
   );
   // Tailwind needs classes from the expanded frame and variables read by its
   // linked sheets. The latter are extracted once per prepared stylesheet.
-  const imported = await importedStylesheets(workspacePath, entryFile, canvas, expanded.html,
+  const imported = await importedStylesheets(workspacePath, entryFile, canvas, expanded,
     linked.sheets, options.identityOnly === true);
-  const withImported = imported.markup
-    ? insertDesignHeadMarkup(linked.html, imported.markup)
-    : linked.html;
+  const withImported = !imported.markup
+    ? linked.html
+    : linked.headEnd === undefined
+      ? insertDesignHeadMarkup(linked.html, imported.markup)
+      : `${linked.html.slice(0, linked.headEnd)}${imported.markup}${linked.html.slice(linked.headEnd)}`;
   const inlined = await inlineLocalAssets(
     workspacePath,
     withImported,
