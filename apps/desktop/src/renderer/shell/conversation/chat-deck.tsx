@@ -210,6 +210,8 @@ export function ChatDeck({
               surfaceActive={isActive}
               preparing={!readOnly && preparedChatId === chat.id && !isActive}
               readOnly={readOnly}
+              // An unfocused split pane's composer is its Ask pill.
+              paneId={paneId}
               composerReplacement={
                 historyWorkspace ? (
                   <WorkspaceHistoryBar

@@ -64,17 +64,38 @@ describe("split pane surfaces", () => {
     expect(pane).not.toMatch(/rounded-t[lr]-/);
   });
 
-  it("tells split panes apart by edge, not fill: border2 focused, border1 and a 90% dim elsewhere", () => {
+  it("tells split panes apart by edge, not fill: border2 focused, border1 and an 80% dim elsewhere", () => {
     const pane = component(paneLayout(), "ChatPane");
     // One fill for every pane: nothing overrides the bg1 window surface.
     expect(pane).toContain('"relative flex min-h-0 min-w-0 flex-1 flex-col bg-(--pane-bg)"');
     expect(pane).not.toContain("[--pane-bg:");
     expect(pane).not.toContain("sidebar-bg");
-    expect(pane).toContain('split && (isFocused ? "border-border2" : "border-border1 *:opacity-90")');
+    expect(pane).toContain('split && (isFocused ? "border-border2" : "border-border1 *:opacity-80")');
     // The dim is on the strip and body, so the edge keeps its own tier, and it
     // eases like every other opacity change.
     expect(pane).toContain("*:transition-opacity *:duration-120 *:ease-out motion-reduce:*:transition-none");
-    expect(pane).not.toMatch(/(?<!\*:)opacity-90/);
+    expect(pane).not.toMatch(/(?<!\*:)opacity-80/);
+  });
+
+  it("snaps a context switch but not a focus move between split panes", () => {
+    // Keyed on the active chat, the one-paint transition kill also froze every
+    // focus move between panes, so their edges, dims and the Ask pill never
+    // eased. Keyed on what each pane shows, only a real switch snaps.
+    const src = paneLayout();
+    expect(src).toContain(
+      "`panes:${activeWorkspacePath ?? activeFolder ?? \"none\"}:${displayedChatIds.join(\",\")}:${activeOffPane}`",
+    );
+    expect(src).toContain("resolvePaneActiveChatId(layout, paneId, selectedChatId, chatsByPane.get(paneId) ?? EMPTY_CHATS)");
+    expect(src).not.toContain("${activeChatId ?? \"none\"}`");
+  });
+
+  it("publishes each pane's focus and split apart from the slots the decks read whole", () => {
+    const pane = component(paneLayout(), "ChatPane");
+    expect(pane).toContain("setSlot(paneId, { activeChatId: paneActiveChatId });");
+    expect(pane).toContain("setPaneFocus(paneId, { focused: isFocused, split });");
+    expect(pane).toContain("[paneId, isFocused, split, setPaneFocus]");
+    const store = read("pane-portal-store.ts");
+    expect(store).toMatch(/interface PanePortalSlot \{\s*host: HTMLElement \| null;\s*activeChatId: string \| null;\s*\}/);
   });
 
   it("draws no seam fades, valleys or tab-strip fade", () => {

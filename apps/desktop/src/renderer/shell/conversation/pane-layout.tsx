@@ -274,10 +274,6 @@ export function ConversationPaneLayout({
       !!activeFolder &&
       chats.some((chat) => !chat.archived && chat.folder === activeFolder),
   });
-  useInstantViewSwitch(
-    `panes:${activeWorkspacePath ?? activeFolder ?? "none"}:${activeChatId ?? "none"}`,
-    paneSurfaceRef,
-  );
 
   // All chats owned by this workspace, sorted createdAt ASC (strip
   // order). Visible = live tabs, history = archived (newest first).
@@ -414,6 +410,19 @@ export function ConversationPaneLayout({
     }
     return map;
   }, [layout, visibleChats]);
+
+  // One paint without transitions whenever a pane's displayed chat or the
+  // workspace changes. Moving focus between split panes changes the active
+  // chat but not what any pane shows, so it is no context switch: the panes'
+  // edges and dims and the composer's Ask pill keep their motion.
+  const displayedChatIds = leafIds(layout.root).map(
+    (paneId) => resolvePaneActiveChatId(layout, paneId, selectedChatId, chatsByPane.get(paneId) ?? EMPTY_CHATS) ?? "none",
+  );
+  const activeOffPane = selectedChatId && !displayedChatIds.includes(selectedChatId) ? selectedChatId : "";
+  useInstantViewSwitch(
+    `panes:${activeWorkspacePath ?? activeFolder ?? "none"}:${displayedChatIds.join(",")}:${activeOffPane}`,
+    paneSurfaceRef,
+  );
 
   const focusedPaneId = useMemo(() => {
     if (selectedChatId && visibleChats.some((c) => c.id === selectedChatId)) {
@@ -1121,6 +1130,12 @@ function ChatPane({ paneId, ctx }: { paneId: string; ctx: PaneCtx }) {
   useLayoutEffect(() => {
     setSlot(paneId, { activeChatId: paneActiveChatId });
   }, [paneId, paneActiveChatId, setSlot]);
+  // And its focus, so an unfocused split pane's composer folds into its Ask
+  // pill in the same frame the edge and dim change.
+  const setPaneFocus = usePanePortalsStore((s) => s.setPaneFocus);
+  useLayoutEffect(() => {
+    setPaneFocus(paneId, { focused: isFocused, split });
+  }, [paneId, isFocused, split, setPaneFocus]);
   useEffect(
     () => () => {
       // Tree-shape changes REMOUNT a pane at a new position, and this passive
@@ -1328,13 +1343,13 @@ function ChatPane({ paneId, ctx }: { paneId: string; ctx: PaneCtx }) {
       // solid shapes on the chrome with every corner rounded, told apart by
       // their edge rather than their fill: border2 on the focused pane,
       // border1 elsewhere. An unfocused pane's strip and body (not its edge)
-      // dim to 90%, which keeps fg1 to fg3 at WCAG AA and muted-fg at its 3:1
-      // floor; at 80% they fall below them.
+      // dim to 80%, the owner's choice: fg1 and fg2 stay at WCAG AA, while fg3
+      // in Light and muted-fg in Dark dip below their floors there.
       className={cn(
         "relative flex min-h-0 min-w-0 flex-1 flex-col bg-(--pane-bg)",
         split &&
           "overflow-hidden rounded-[calc(var(--radius-lg)*1.5)] border *:transition-opacity *:duration-120 *:ease-out motion-reduce:*:transition-none",
-        split && (isFocused ? "border-border2" : "border-border1 *:opacity-90"),
+        split && (isFocused ? "border-border2" : "border-border1 *:opacity-80"),
       )}
     >
       <ChatTabs

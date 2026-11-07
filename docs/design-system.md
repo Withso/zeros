@@ -170,7 +170,10 @@ exported page by page to [design-implementation/](design-implementation/README.m
     of the chosen row. Several: a check column on the left. Destructive items
     last, in `red-primary`. Shortcuts are Kbd chips, one per key.
 11. **Motion is color, opacity and transform**, 120ms ease-out, with reduced
-    motion respected.
+    motion respected. The one shape morph is the composer's Ask pill (item
+    13). Moving focus between split panes is no context switch: the
+    one-paint transition freeze follows what each pane shows, not the active
+    chat.
 12. **Local and cloud are both first class.** Every surface states its Local
     and cloud behavior; cloud lifecycle never enters a tab banner.
 13. **Split panes are solid islands on the chrome** (2026-11-06; edges
@@ -184,10 +187,20 @@ exported page by page to [design-implementation/](design-implementation/README.m
     every corner 12px, and nothing fading between them, at the tab strip or
     along a seam. Every pane keeps `bg1`, and edges tell them apart: `border2`
     on the focused pane, `border1` on the others, whose strip and body (not
-    the edge) dim to 90% over 120ms. Focus here is which window takes input,
+    the edge) dim to 80% over 120ms. Focus here is which window takes input,
     not a selection, so item 8 does not apply: every split pane has an edge,
-    and focus only raises its tier. At 90% `fg1`–`fg3` stay AA and `muted-fg`
-    at its 3:1 floor; 80% would break both. The transcript fades out over the
+    and focus only raises its tier. 80% is the owner's choice: `fg1` and
+    `fg2` stay AA, while `fg3` in Light and `muted-fg` in Dark dip below their
+    floors in an unfocused pane. An unfocused pane's composer is its Ask pill:
+    "Ask Claude", "Ask Codex", "Ask Cursor" or the chat's agent, no shortcut,
+    32px tall and centred where the composer sits, on the composer's own
+    `sidebar-bg` and `composer-border` (hover `sidebar-bg-hover`, `border3`,
+    `fg1`). Every card docked above the composer stays above the pill, and a
+    streaming turn carries on. Pressing the pill, dropping files on it or any
+    click in the pane focuses the pane: the pill expands into the composer
+    over 220ms and the composer the focus leaves folds back over 180ms, on
+    `cubic-bezier(0.2,0,0,1)`, with the contents cross-fading at full width
+    (`shared/ui/composer-ask.tsx`). The transcript fades out over the
     32px under its strip and starts 32px down; a tab's drop zone is a soft
     `highlighted-bg` fill without a border; chat tabs are content-sized from
     70px to 176px. The side column keeps its tab row on `bg1` and holds the
@@ -198,7 +211,9 @@ exported page by page to [design-implementation/](design-implementation/README.m
     replaces the 2026-07-11 flush column, the soft valleys tried on 2026-11-06
     and the unfocused pane's `sidebar-bg` fill. `shell/conversation/__tests__/pane-surfaces.test.ts`,
     `shell/conversation/__tests__/pane-sizing.test.ts`,
-    `shell/workbench/__tests__/workbench-island.test.ts`
+    `shell/workbench/__tests__/workbench-island.test.ts`,
+    `features/agent/__tests__/composer-ask-pill.test.ts`,
+    `features/agent/__tests__/composer-ask-dock.test.ts`
     and `scripts/ui-smoke-chat-surfaces.mjs` hold it.
 14. **The chat reads at 15px** (2026-11-07). What people read in the chat is
     `text-reading`, 15px on 22px lines, one step above the 14px chrome: agent

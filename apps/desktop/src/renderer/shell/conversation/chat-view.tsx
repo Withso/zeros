@@ -62,6 +62,7 @@ import {
   sameProviderBinding,
   sameProviderMetadata,
 } from "@zeros/protocol/identities";
+import { usePaneComposerCollapsed } from "./pane-portal-store";
 
 export function ChatView({
   chatId,
@@ -69,6 +70,7 @@ export function ChatView({
   preparing = false,
   readOnly = false,
   composerReplacement,
+  paneId,
 }: {
   chatId: string;
   surfaceActive?: boolean;
@@ -76,9 +78,12 @@ export function ChatView({
   preparing?: boolean;
   readOnly?: boolean;
   composerReplacement?: React.ReactNode;
+  /** The split pane this chat shows in; unfocused, its composer is the Ask pill. */
+  paneId?: string;
 }) {
   // The displayed chat is an explicit prop, so each split pane shows its own.
   const active = useChatById(chatId);
+  const composerCollapsed = usePaneComposerCollapsed(paneId) && surfaceActive && !readOnly;
   const dispatch = useWorkspaceDispatch();
   const cloud = isCloudWorkspace(active?.folder);
   // Hidden cloud preparation may consume retained registry data and hydrate
@@ -147,6 +152,7 @@ export function ChatView({
       preparing={preparing}
       readOnly={readOnly}
       composerReplacement={composerReplacement}
+      composerCollapsed={composerCollapsed}
     />
   );
 }
@@ -303,6 +309,7 @@ function ChatBody({
   preparing,
   readOnly,
   composerReplacement,
+  composerCollapsed,
 }: {
   chatId: string;
   agentId: string;
@@ -312,6 +319,7 @@ function ChatBody({
   preparing: boolean;
   readOnly: boolean;
   composerReplacement?: React.ReactNode;
+  composerCollapsed: boolean;
 }) {
   const dispatch = useWorkspaceDispatch();
   const pendingAutoSend = usePendingAutoSend(chatId);
@@ -735,6 +743,7 @@ function ChatBody({
         liveTextUpdates={!readOnly}
         readOnly={readOnly}
         composerReplacement={composerReplacement}
+        composerCollapsed={composerCollapsed}
         session={session}
         onBack={() => session.reset()}
         headerActions={<></>}

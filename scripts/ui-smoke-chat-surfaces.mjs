@@ -8,7 +8,8 @@ import { expect } from "@playwright/test";
  *  row draws no divider, and the side column holds its open tab in a bg1
  *  island. 2026-11-07: every pane keeps bg1 and edges tell them apart, border2
  *  on the focused pane and border1 on the others, whose strip and body dim to
- *  90%; the island sits on the chat's resize line with a border2 edge. */
+ *  80%; the island sits on the chat's resize line with a border2 edge, and
+ *  an unfocused pane's composer is its Ask pill. */
 export async function runChatSurfacesSmoke({ page, check, harnessBase }) {
   const viewport = page.viewportSize();
   await page.evaluate(() => {
@@ -120,7 +121,7 @@ export async function runChatSurfacesSmoke({ page, check, harnessBase }) {
   const near = (actual, expected) => expect(Math.abs(actual - expected)).toBeLessThan(0.5);
   // A focus change eases the dim over 120ms, so wait for it to settle.
   const settledDims = () => expect.poll(async () => (await read()).panes.map((pane) =>
-    pane.dims.every((opacity) => opacity === (pane.focused ? "1" : "0.9")))).not.toContain(false);
+    pane.dims.every((opacity) => opacity === (pane.focused ? "1" : "0.8")))).not.toContain(false);
   const focusEdges = (state) => {
     for (const pane of state.panes) {
       expect(pane.fill).toBe(state.bg1);
@@ -166,14 +167,14 @@ export async function runChatSurfacesSmoke({ page, check, harnessBase }) {
     expect(state.panes.filter((pane) => pane.focused)).toHaveLength(1);
     focusEdges(state);
     for (const pane of state.panes) {
-      expect(pane.dims.every((opacity) => opacity === (pane.focused ? "1" : "0.9"))).toBe(true);
+      expect(pane.dims.every((opacity) => opacity === (pane.focused ? "1" : "0.8"))).toBe(true);
       expect(pane.radii).toEqual(["12px", "12px", "12px", "12px"]);
       expect(pane.strip).toBe("none");
     }
     expect(state.fades).toBe(0);
   }
   expect(new Set(splitBg1).size).toBe(2);
-  check("Split Right: solid panes 12px apart and 12px in from every side, 12px from the side island, rounded at every corner, all on bg1 with a border2 edge on the focused pane and border1 and a 90% dim on the other, in Dark and Light", true);
+  check("Split Right: solid panes 12px apart and 12px in from every side, 12px from the side island, rounded at every corner, all on bg1 with a border2 edge on the focused pane and border1 and an 80% dim on the other, in Dark and Light", true);
 
   // The split's right gutter is its own, so hiding Workbench changes nothing.
   await page.evaluate(() => {
@@ -188,6 +189,83 @@ export async function runChatSurfacesSmoke({ page, check, harnessBase }) {
   await expect(page.locator("[data-workbench-island]")).toBeVisible();
   await expect.poll(async () => (await read()).gutters).toEqual(["0px", "12px", "12px", "12px"]);
   check("A split keeps its 12px right gutter with the side column shown or hidden", true);
+
+  // An unfocused pane's composer is its Ask pill. Pressing it focuses that
+  // pane: the pill eases into the composer, which takes the caret, and the
+  // composer the focus leaves folds back. A focus move is no context switch, so
+  // nothing freezes the motion; watch the width frame by frame to prove it.
+  const unfocusedCard = () => page.evaluate(() => {
+    const pane = [...document.querySelectorAll("[data-pane-root]")].find((node) => node.dataset.paneFocused === "false");
+    return [...document.querySelectorAll("[data-pane-root]")].indexOf(pane);
+  });
+  const askState = () => page.evaluate(() => [...document.querySelectorAll("[data-pane-root]")].map((pane) => {
+    const card = [...pane.querySelectorAll("[data-composer-ask]")].find((node) => node.getClientRects().length);
+    const box = card.getBoundingClientRect();
+    const root = pane.getBoundingClientRect();
+    return {
+      focused: pane.dataset.paneFocused === "true",
+      ask: card.dataset.composerAsk,
+      label: card.querySelector("[data-composer-ask-pill]").textContent,
+      height: box.height,
+      centre: (box.left + box.right) / 2 - (root.left + root.right) / 2,
+      fromBottom: root.bottom - box.bottom,
+      radius: getComputedStyle(card).borderTopLeftRadius,
+      editorFocused: pane.querySelector(".ProseMirror")?.contains(document.activeElement) ?? false,
+    };
+  }));
+  for (const pane of await askState()) {
+    expect(pane.ask).toBe(pane.focused ? "composer" : "pill");
+    if (pane.focused) continue;
+    expect(pane.label).toBe("Ask Claude");
+    expect(pane.height).toBe(32);
+    near(pane.centre, 0);
+    // The dock column's 16px plus the pane's 1px edge.
+    near(pane.fromBottom, 17);
+    expect(pane.radius).toBe("16px");
+  }
+  const pressAndWatch = (index) => page.evaluate((target) => new Promise((resolve) => {
+    const pane = [...document.querySelectorAll("[data-pane-root]")][target];
+    const card = [...pane.querySelectorAll("[data-composer-ask]")].find((node) => node.getClientRects().length);
+    const pill = card.querySelector("[data-composer-ask-pill]");
+    const start = card.getBoundingClientRect().width;
+    pill.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, composed: true }));
+    pill.click();
+    const widths = [];
+    const tick = () => {
+      widths.push(card.getBoundingClientRect().width);
+      if (widths.length < 30) requestAnimationFrame(tick);
+      else resolve({ start, widths });
+    };
+    requestAnimationFrame(tick);
+  }), index);
+  const target = await unfocusedCard();
+  const morph = await pressAndWatch(target);
+  const opened = morph.widths.at(-1);
+  expect(opened).toBeGreaterThan(morph.start + 100);
+  expect(morph.widths.some((width) => width > morph.start + 2 && width < opened - 2)).toBe(true);
+  await expect.poll(async () => (await askState()).map((pane) => pane.ask)).toEqual(
+    target === 0 ? ["composer", "pill"] : ["pill", "composer"],
+  );
+  await expect.poll(async () => (await askState())[target].editorFocused).toBe(true);
+  check("Split panes: the unfocused pane's composer is an Ask Claude pill; pressing it focuses the pane and the pill eases into the composer, which takes the caret, while the other folds back", true);
+
+  // The keyboard path: a pill reached with Tab focuses its pane, and the caret
+  // moves on into the composer the pill becomes.
+  const keyed = await unfocusedCard();
+  await page.evaluate((index) => {
+    const pane = [...document.querySelectorAll("[data-pane-root]")][index];
+    [...pane.querySelectorAll("[data-composer-ask-pill]")].find((node) => node.getClientRects().length).focus();
+  }, keyed);
+  await expect.poll(async () => {
+    const pane = (await askState())[keyed];
+    return [pane.focused, pane.ask, pane.editorFocused];
+  }).toEqual([true, "composer", true]);
+  // Reduced motion swaps them in place.
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  const still = await pressAndWatch(await unfocusedCard());
+  expect(still.widths[0]).toBe(still.widths.at(-1));
+  await page.emulateMedia({ reducedMotion: null });
+  check("Keyboard: focusing the Ask pill focuses its pane and moves the caret into its composer; reduced motion swaps without movement", true);
 
   // Split the right pane down; the new lower-right pane takes focus.
   await panes.nth(1).getByRole("button", { name: "Pane options", exact: true }).click();

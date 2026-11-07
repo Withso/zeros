@@ -219,7 +219,16 @@ export async function runWorkspaceShortcutsSmoke({ page, check, harnessBase, scr
   await expect(panes).toHaveCount(2);
   const twoTabs = panes.filter({ has: page.locator(`[data-chat-id="${firstChatId}"]`) });
   const neighbor = panes.filter({ has: page.locator(`[data-chat-id="${thirdChatId}"]`) });
-  await twoTabs.locator(".composer-pm:visible").focus();
+  // An unfocused pane's composer is its Ask pill (2026-11-07): pressing it
+  // focuses the pane and puts the caret in the composer it becomes.
+  const enterPane = async (pane) => {
+    await pane.locator('[data-composer-ask="pill"] [data-composer-ask-pill]').click();
+    await expect(pane.locator(".composer-pm:visible")).toBeFocused();
+    // The transcripts re-pin to the bottom while the docks ease; measure scroll
+    // only once the morph has settled.
+    await expect(page.locator("[data-ask-morph]")).toHaveCount(0);
+  };
+  await enterPane(twoTabs);
   const neighborBefore = await neighbor.locator(".zeros-agent-body:visible").evaluate(node => node.scrollTop);
   const paneTabs = twoTabs.getByRole("tab");
   const paneIndex = await paneTabs.evaluateAll(nodes => nodes.findIndex(node => node.getAttribute("aria-selected") === "true"));
@@ -237,13 +246,13 @@ export async function runWorkspaceShortcutsSmoke({ page, check, harnessBase, scr
   await expect(neighbor.getByRole("tab")).toHaveAttribute("aria-selected", "true");
   check("Split panes route keys through the portaled composer without changing the neighboring chat", true);
 
-  await neighbor.locator(".composer-pm:visible").click();
+  await enterPane(neighbor);
   for (const key of ["ArrowLeft", "ArrowRight"]) {
     await page.keyboard.press(`Meta+${key}`);
     await expect(neighbor.locator(".composer-pm:visible")).toBeFocused();
     expect((await state()).chatId).toBe(thirdChatId);
   }
-  await twoTabs.locator(".composer-pm:visible").click();
+  await enterPane(twoTabs);
   check("A single-tab pane keeps its composer and selection when cycling", true);
 
   const beforeOverlay = await state();

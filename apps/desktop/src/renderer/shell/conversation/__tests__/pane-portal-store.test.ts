@@ -14,7 +14,7 @@ const globals = globalThis as unknown as { document?: Document };
 const originalDocument = globals.document;
 
 afterEach(() => {
-  usePanePortalsStore.setState({ panes: {} });
+  usePanePortalsStore.setState({ panes: {}, paneFocus: {} });
   useTabDragStore.setState({ drag: null });
   if (originalDocument) globals.document = originalDocument;
   else delete globals.document;
@@ -86,5 +86,33 @@ describe("pane tab drag cleanup", () => {
     clearTabDrag();
 
     expect(isTabDragArmCurrent(epoch)).toBe(false);
+  });
+});
+
+// 2026-11-07: an unfocused pane of a split column shows its composer as the
+// Ask pill. Focus lives apart from the slots, so moving it between panes never
+// changes the slot map the chat and terminal decks re-render on.
+describe("pane focus", () => {
+  it("keeps the slot map untouched and ignores a write that changes nothing", () => {
+    const store = usePanePortalsStore.getState();
+    store.setSlot("left", { activeChatId: "chat-a" });
+    const panes = usePanePortalsStore.getState().panes;
+    store.setPaneFocus("left", { focused: false, split: true });
+    const focus = usePanePortalsStore.getState().paneFocus;
+    expect(usePanePortalsStore.getState().panes).toBe(panes);
+    store.setPaneFocus("left", { focused: false, split: true });
+    expect(usePanePortalsStore.getState().paneFocus).toBe(focus);
+    store.setPaneFocus("left", { focused: true, split: true });
+    expect(usePanePortalsStore.getState().paneFocus.left).toEqual({ focused: true, split: true });
+    expect(usePanePortalsStore.getState().panes).toBe(panes);
+  });
+
+  it("forgets a destroyed pane's focus with its slot", () => {
+    const store = usePanePortalsStore.getState();
+    store.setPaneFocus("gone", { focused: false, split: true });
+    store.setPaneFocus("kept", { focused: true, split: true });
+    store.setSlot("gone", { activeChatId: "chat-a" });
+    destroyPanePortalSlots(["gone"]);
+    expect(Object.keys(usePanePortalsStore.getState().paneFocus)).toEqual(["kept"]);
   });
 });

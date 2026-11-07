@@ -386,6 +386,15 @@ export interface PanePortalSlot {
   activeChatId: string | null;
 }
 
+/** Whether a pane holds the global active chat, and whether the column is
+ *  split. Kept apart from the slots, whose map the chat and terminal decks
+ *  read whole, so moving focus between panes re-renders only the chats whose
+ *  composer folds or unfolds (usePaneComposerCollapsed). */
+export interface PaneFocusState {
+  focused: boolean;
+  split: boolean;
+}
+
 /** Per-pane portal registry. `host` is a store-owned DOM node rather than the
  *  React-owned mount point rendered by ChatPane: when a split reshapes the
  *  recursive tree, the replacement ChatPane reparents this SAME node into its
@@ -393,15 +402,24 @@ export interface PanePortalSlot {
  *  identity (and one xterm instance) across split/collapse churn. */
 export const usePanePortalsStore = create<{
   panes: Record<string, PanePortalSlot>;
+  paneFocus: Record<string, PaneFocusState>;
   setSlot: (paneId: string, slot: Partial<PanePortalSlot>) => void;
+  setPaneFocus: (paneId: string, focus: PaneFocusState) => void;
   getOrCreateHost: (paneId: string) => HTMLElement | null;
   clearSlot: (paneId: string) => void;
 }>((set, get) => ({
   panes: {},
+  paneFocus: {},
   setSlot: (paneId, slot) =>
     set((s) => {
       const prev = s.panes[paneId] ?? { host: null, activeChatId: null };
       return { panes: { ...s.panes, [paneId]: { ...prev, ...slot } } };
+    }),
+  setPaneFocus: (paneId, focus) =>
+    set((s) => {
+      const prev = s.paneFocus[paneId];
+      if (prev?.focused === focus.focused && prev.split === focus.split) return s;
+      return { paneFocus: { ...s.paneFocus, [paneId]: focus } };
     }),
   getOrCreateHost: (paneId) => {
     const existing = get().panes[paneId]?.host;
@@ -449,6 +467,18 @@ export function destroyPanePortalSlots(paneIds: readonly string[]): void {
       panes: Object.fromEntries(
         entries.filter(([paneId]) => !removed.has(paneId)),
       ),
+      paneFocus: Object.fromEntries(
+        Object.entries(state.paneFocus).filter(([paneId]) => !removed.has(paneId)),
+      ),
     };
+  });
+}
+
+/** True while `paneId` is an unfocused pane of a split column, whose composer
+ *  is then its Ask pill (shared/ui/composer-ask.tsx). */
+export function usePaneComposerCollapsed(paneId: string | null | undefined): boolean {
+  return usePanePortalsStore((state) => {
+    const focus = paneId ? state.paneFocus[paneId] : undefined;
+    return !!focus && focus.split && !focus.focused;
   });
 }

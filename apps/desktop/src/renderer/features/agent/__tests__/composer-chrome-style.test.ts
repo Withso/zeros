@@ -60,10 +60,10 @@ describe("composer chrome", () => {
     // Clicking in and typing change nothing: the border never moves on focus
     // and the card carries no stock shadow.
     const agentChat = code("../agent-chat.tsx");
-    expect(agentChat).toContain(
-      '"relative flex w-full min-w-0 flex-col border px-3.5 py-3 transition-[border-color,background,box-shadow] duration-150 ease-out",',
-    );
-    expect(agentChat).toMatch(/COMPOSER_SURFACE_CLS,\s*COMPOSER_SURFACE_RADIUS,/);
+    expect(agentChat).toContain('"relative flex w-full min-w-0 flex-col border px-3.5 py-3",');
+    // The edge and fill only ease; the Ask pill's morph (composer-ask.tsx)
+    // owns the card's transitions.
+    expect(agentChat).toMatch(/COMPOSER_SURFACE_CLS,\s*COMPOSER_SURFACE_RADIUS,\s*composerAskCardClasses\(askCollapsed\),/);
     expect(agentChat).not.toContain("shadow-xs");
   });
 
@@ -77,7 +77,7 @@ describe("composer chrome", () => {
       /export const COMPOSER_DRAG_CLS =\s*"!border-\(--composer-border\) ring-highlighted-bright\/30 border-dashed ring-2"/,
     );
     expect(agentChat).toContain("dragActive && COMPOSER_DRAG_CLS");
-    expect(agentChat).toContain("{dragActive && <ComposerDropVeil />}");
+    expect(agentChat).toContain("{dragActive && !askCollapsed && <ComposerDropVeil />}");
     expect(agentChat).toContain('"!border-transparent"');
   });
 

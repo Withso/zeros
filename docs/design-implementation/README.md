@@ -1114,3 +1114,24 @@ Each landed step appends one line: date, workstream, what landed, evidence.
   the chat-surfaces smoke measures the resize handle ending on the island's
   `border2` edge, every pane on `bg1` with its edge tier and dim, and the 12px
   right gutter with the side column shown and hidden, in Dark and Light.
+- 2026-11-07 · 5, 6 · Split panes: the composer becomes the Ask pill
+  (canvas versions 401 and 402, "Chat window · Ask to focus" and "Composer ·
+  Ask pill"). An unfocused pane's composer card collapses into "Ask Claude",
+  "Ask Codex", "Ask Cursor" or the chat's agent (`askPillAgentName`), 32px
+  and centred, on the composer's own surface; cards above it stay and
+  streaming carries on. Pressing it, a drop on it or any click in the pane
+  focuses the pane, and the card eases into the composer over 220ms (180ms
+  back) with its contents cross-fading at full width
+  (`shared/ui/composer-ask.tsx`); a pill reached with Tab hands the caret to
+  the editor, and reduced motion swaps in place. Each pane publishes its
+  focus to `paneFocus` beside the portal slots, so a focus move re-renders
+  only the two chats that fold or unfold. The unfocused dim moves to 80%, the
+  owner's choice. Two bugs fixed on the way: the pane surface froze every
+  transition for a paint whenever the active chat changed, so focus moves
+  between panes never eased (its key now follows each pane's displayed
+  chat), and a new `shared/ui/__tests__` folder sat outside Vitest's include
+  globs, so its test moved to `features/agent/__tests__`. Evidence: the
+  composer-ask pill, label and dock tests and the pane-surfaces, store and
+  contrast tests failed red first; the chat-surfaces smoke measures the
+  pill, watches the morph pass through intermediate widths frame by frame,
+  and checks the caret, the keyboard path and reduced motion.
