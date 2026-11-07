@@ -1,6 +1,6 @@
 import type pg from "pg";
 import { expect, it, vi } from "vitest";
-import { CloudV2SourceAuthority, hydrateCloudRepository, type CloudSourceTarget } from "./source-authority.js";
+import { CloudV2SourceAuthority, hydrateCloudRepository, pruneCloudRepositories, type CloudSourceTarget } from "./source-authority.js";
 import { mkdtemp, mkdir, writeFile, access, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -85,6 +85,22 @@ it("does not publish an interrupted clone over the workspace's final directory",
     child.child.stdin?.end("Authorization: synthetic\n");
     await expect(child).rejects.toThrow();
     await expect(access(join(root, "example/project"))).rejects.toThrow();
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+it("removes only the named checkouts, and their owner directory once it is empty", async () => {
+  const root = await mkdtemp(join(tmpdir(), "zeros-prune-"));
+  try {
+    for (const path of ["withso/0docs/.git", "withso/zeros/.git", "other/my.repo/.git"]) await mkdir(join(root, path), { recursive: true });
+    const command = pruneCloudRepositories(["withso/0docs", "other/my.repo"]).replaceAll("/home/user", root).replace("bash -lc", "bash -c");
+    await promisify(execFile)("bash", ["-c", command]);
+    await expect(access(join(root, "withso/0docs"))).rejects.toThrow();
+    await expect(access(join(root, "other"))).rejects.toThrow();
+    await access(join(root, "withso/zeros/.git"));
+    // Retries are idempotent.
+    await promisify(execFile)("bash", ["-c", command]);
+    expect(() => pruneCloudRepositories(["withso/.."])).toThrow("Invalid repository");
+    expect(() => pruneCloudRepositories(["../etc"])).toThrow("Invalid repository");
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

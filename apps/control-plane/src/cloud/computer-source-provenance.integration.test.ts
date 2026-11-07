@@ -129,7 +129,8 @@ suite("Cloud Computer immutable source provenance", () => {
       expect(await computers.recipeForRepositoryId(org, job.id, "42")).toMatchObject({ repository: "former/project", setup: "bash setup.sh", commit: head, branch: "main" });
       await expect(computers.recipeForRepositoryId(org, job.id, "99")).rejects.toMatchObject({ code: "cloud_source_review_required" });
       expect((await computers.overview(org)).activeBuildId).toBe(job.id);
-      expect(vi.mocked(f.compute.saveSnapshot).mock.invocationCallOrder[0]).toBeLessThan(f.cloneToken.mock.invocationCallOrder[0]!);
+      // v3: captured after the clone, so the workspace image holds the checkout.
+      expect(vi.mocked(f.compute.saveSnapshot).mock.invocationCallOrder[0]).toBeGreaterThan(f.cloneToken.mock.invocationCallOrder[0]!);
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 
@@ -142,7 +143,8 @@ suite("Cloud Computer immutable source provenance", () => {
     expect((await computers.overview(org)).builds[0]).toMatchObject({ state: "failed", errorCode: "cloud_source_review_required" });
     expect(vi.mocked(f.compute.execLong).mock.calls.some(([, command]) => command.includes("echo source-output"))).toBe(false);
     expect(await computers.logRepositories(org, job.id)).toEqual([{ repository: "former/project", repositoryId: "42" }]);
-    expect(f.compute.delete).toHaveBeenCalled(); expect(f.compute.deleteSnapshot).toHaveBeenCalled();
+    // A refused v3 build stops before its capture: there is no image to delete.
+    expect(f.compute.delete).toHaveBeenCalled(); expect(f.compute.saveSnapshot).not.toHaveBeenCalled();
   });
 
   it("records all source IDs before the first credential and retains them when a later repository fails", async () => {
@@ -221,7 +223,8 @@ suite("Cloud Computer immutable source provenance", () => {
     const f = builder(); await f.service.tick();
     expect(f.compute.create).toHaveBeenCalledWith(expect.objectContaining({ key: current.id, env: {} }));
     expect(vi.mocked(f.compute.create).mock.calls[0]![0]).not.toHaveProperty("from");
-    expect(vi.mocked(f.compute.saveSnapshot).mock.invocationCallOrder[0]).toBeLessThan(f.cloneToken.mock.invocationCallOrder[0]!);
+    // v3: captured after the clone, so the workspace image holds the checkout.
+      expect(vi.mocked(f.compute.saveSnapshot).mock.invocationCallOrder[0]).toBeGreaterThan(f.cloneToken.mock.invocationCallOrder[0]!);
     expect((await computers.overview(org)).activeBuildId).toBe(current.id);
     expect((await pool.query("SELECT source_policy_version,source_targets,log FROM cloud_v2_computer_builds WHERE id=$1", [legacy])).rows)
       .toEqual([{ source_policy_version: 1, source_targets: null, log: "legacy-source-canary" }]);

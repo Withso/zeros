@@ -373,6 +373,20 @@ export class CloudV2SourceAuthority {
   }
 }
 
+/** Removes the other recipe checkouts a v3 image starts with, before the
+ * worker or any agent can reach them. Idempotent across create retries; a
+ * parent owner directory goes only when nothing else is left in it. */
+export function pruneCloudRepositories(repositories: readonly string[]): string {
+  const q = (value: string) => `'${value.replace(/'/g, `'\\''`)}'`;
+  const steps = repositories.map(repository => {
+    if (!repositorySchema.safeParse(repository).success || repository.split("/").some(part => part === "." || part === ".."))
+      throw new Error("Invalid repository");
+    const directory = `/home/user/${repository}`;
+    return `rm -rf -- ${q(directory)} && { rmdir -- ${q(directory.slice(0, directory.lastIndexOf("/")))} 2>/dev/null || true; }`;
+  });
+  return `bash -lc ${q(["set -eu", ...steps].join("\n"))}`;
+}
+
 /** New clean images contain no checkout. Retries never reset an existing
  * worktree. Credentials are a one-command header, never a remote URL. */
 export function hydrateCloudRepository(workspace: CloudV2Workspace, canonicalRepository = workspace.repository): string {

@@ -2,6 +2,9 @@ import { createHash } from "node:crypto";
 
 // Each reviewed migration lists its exact exempted statements by rule.
 const reviewed: Readonly<Record<string, Readonly<Record<string, readonly string[]>>>> = {
+  "0223_cloud_computer_source_snapshots.sql": {
+    "widen-check": ["ALTER TABLE cloud_v2_computer_builds DROP CONSTRAINT cloud_v2_computer_builds_source_policy_version_check;"],
+  },
   "0221_cloud_computer_build_recovery.sql": {
     "new-table-privileges": [
       "REVOKE ALL ON cloud_runtime_build_drain FROM PUBLIC, zeros_app;",

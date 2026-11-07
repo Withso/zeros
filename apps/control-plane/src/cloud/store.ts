@@ -11,7 +11,7 @@ import { CLOUD_V2_CREATOR_ON_HOLD, CLOUD_V2_LIVE_ACCESS as LIVE_ACCESS, CLOUD_V2
 import { memberOnHoldSql, organizationMemberOnHold } from "../organization-seats.js";
 import { CloudV2PromptOutbox } from "./prompt-outbox.js";
 import { computerSourceReviewRequired, readComputerSourceTargets } from "./computer-provenance.js";
-import { CloudSourceTargetSchema } from "./source-authority.js";
+import { CloudSourceTargetSchema, type CloudSourceTarget } from "./source-authority.js";
 import { pinCloudEnvironment, releaseCloudEnvironment } from "./environment-store.js";
 import { originalSetupBuild } from "./setup-selection.js";
 
@@ -31,6 +31,8 @@ type CreateWorkspace = {
   id: string; organizationId: string; creatorUserId: string; name: string; repository: string; branch: string;
   baseBranch: string; computerBuildId: string | null;
   sourceRepositoryId?: string;
+  /** GitHub repository IDs the creator was just verified to read. */
+  readableRepositoryIds?: readonly string[];
   runtimeCanary?: RuntimeCanaryAdmission;
 };
 type CreateReceipt = { status: 201; response: Record<string, unknown> };
@@ -103,10 +105,26 @@ export type CloudV2LifecycleWorkspace = CloudV2Workspace & {
   /** A checkpoint retry's fork that may still exist at Boat. */
   checkpointRetryFork: CloudV2CheckpointFork | null;
 };
-export type CloudV2RestoreCreate = { from: string; name: string; env: Record<string, string>; requestedAt: string };
+/** `from` is null for Boat's stock image; `prune` lists the other recipe
+ * checkouts a v3 image starts with. */
+export type CloudV2RestoreCreate = { from: string | null; prune?: string[]; name: string; env: Record<string, string>; requestedAt: string };
+export type CloudV2WorkspaceImage = { from: string | null; prune: string[] };
+
+/** A v3 image holds every recipe repository, so it starts only a workspace
+ * whose immutable source scope covers them all; that workspace removes the
+ * other checkouts before its worker starts. Any other starts from Boat's
+ * stock image and clones its own repository. A v2 image holds no source. */
+export function cloudV2WorkspaceImage(input: { policy: number; snapshot: string; recipe: unknown; scope: readonly string[]; repository: string }): CloudV2WorkspaceImage {
+  if (input.policy !== 3) return { from: input.snapshot, prune: [] };
+  const entries = (input.recipe as { repositories?: { repository?: unknown }[] } | null)?.repositories ?? [];
+  const names = entries.flatMap(entry => typeof entry.repository === "string" ? [entry.repository] : []);
+  const scope = new Set(input.scope.map(name => name.toLowerCase()));
+  if (!names.length || names.length !== entries.length || !names.every(name => scope.has(name.toLowerCase()))) return { from: null, prune: [] };
+  return { from: input.snapshot, prune: names.filter(name => name.toLowerCase() !== input.repository.toLowerCase()) };
+}
 
 function restoreCreate(value: CloudV2RestoreCreate | null): CloudV2RestoreCreate | null {
-  return value && { from: value.from, name: value.name, env: value.env, requestedAt: value.requestedAt };
+  return value && { from: value.from, ...(value.prune?.length ? { prune: value.prune } : {}), name: value.name, env: value.env, requestedAt: value.requestedAt };
 }
 
 type Row = {
@@ -239,7 +257,7 @@ export class CloudV2Store {
   }
 
   private async insertWorkspace(tx: Tx, input: CreateWorkspace, createKey?: string): Promise<CloudV2Workspace> {
-    let sourceRepositoryId = input.sourceRepositoryId;
+    let sourceRepositoryId = input.sourceRepositoryId, scope: CloudSourceTarget[] | undefined;
     const member = await tx.query<{ pro: boolean; held: boolean }>(
       `SELECT account_pro_active(m.user_id) AS pro, ${memberOnHoldSql("m.org_id", "m.user_id")} AS held
        FROM organization_members m JOIN organizations o ON o.id = m.org_id AND o.deleted_at IS NULL
@@ -252,29 +270,33 @@ export class CloudV2Store {
     if (input.computerBuildId) {
       // Activation waits for this lock, so cleanup observes the new workspace
       // pin before it can retire an inactive source snapshot.
-      const selected = await tx.query<{ recipe: { repositories: { repository: string }[] }; source_targets: unknown }>(
-        `SELECT b.recipe,b.source_targets FROM cloud_v2_computers c
+      const selected = await tx.query<{ recipe: { repositories: { repository: string }[] }; source_targets: unknown; source_policy_version: number }>(
+        `SELECT b.recipe,b.source_targets,b.source_policy_version FROM cloud_v2_computers c
          JOIN cloud_v2_computer_builds b ON b.id=c.active_build_id AND b.org_id=c.org_id
          WHERE c.org_id=$1 AND c.active_build_id=$2 AND c.snapshot_name IS NOT NULL
-           AND b.state='succeeded' AND b.source_policy_version=2 AND b.snapshot_id=c.snapshot_name AND b.snapshot_deleted_at IS NULL AND b.cleanup_requested_at IS NULL
+           AND b.state='succeeded' AND b.source_policy_version IN (2,3) AND b.snapshot_id=c.snapshot_name AND b.snapshot_deleted_at IS NULL AND b.cleanup_requested_at IS NULL
          FOR SHARE OF c,b`, [input.organizationId, input.computerBuildId]);
       if (!selected.rowCount) throw new HttpError(409, "cloud_computer_changed", "The Cloud Computer changed. Create the workspace again.");
       const build = selected.rows[0]!;
-      const target = readComputerSourceTargets(build.recipe.repositories, build.source_targets)
-        .find(source => source.repository.toLowerCase() === input.repository.toLowerCase());
+      const targets = readComputerSourceTargets(build.recipe.repositories, build.source_targets);
+      const target = targets.find(source => source.repository.toLowerCase() === input.repository.toLowerCase());
       if (!target || sourceRepositoryId !== undefined && sourceRepositoryId !== target.repositoryId) throw computerSourceReviewRequired();
       sourceRepositoryId = target.repositoryId;
+      // A v3 image carries every recipe repository's source. Only a creator
+      // verified to read all of them may take that whole scope and start from it.
+      if (build.source_policy_version === 3 && targets.every(source => input.readableRepositoryIds?.includes(source.repositoryId))) scope = targets;
     }
     const row = (await tx.query<Row>(
       `INSERT INTO cloud_v2_workspaces (id, org_id, creator_user_id, name, repository, branch, base_branch, state, computer_build_id, source_repositories)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, 'creating', $8, ARRAY[lower($5)]) RETURNING ${COLUMNS}`,
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'creating', $8, $9::text[]) RETURNING ${COLUMNS}`,
       [input.id, input.organizationId, input.creatorUserId, input.name, input.repository, input.branch,
-        input.baseBranch, input.computerBuildId],
+        input.baseBranch, input.computerBuildId, (scope ?? [{ repository: input.repository }]).map(source => source.repository.toLowerCase())],
     )).rows[0]!;
     if (sourceRepositoryId !== undefined) {
       if (!CloudSourceTargetSchema.safeParse({ repository: input.repository, repositoryId: sourceRepositoryId }).success) throw new HttpError(422, "github_repository_invalid", "Invalid repository identity.");
-      await tx.query("INSERT INTO cloud_v2_github_sources(workspace_id,source_repository,repository_id) VALUES($1,lower($2),$3)",
-        [input.id, input.repository, sourceRepositoryId]);
+      for (const source of scope ?? [{ repository: input.repository, repositoryId: sourceRepositoryId }])
+        await tx.query("INSERT INTO cloud_v2_github_sources(workspace_id,source_repository,repository_id) VALUES($1,lower($2),$3)",
+          [input.id, source.repository, source.repositoryId]);
       await pinCloudEnvironment(tx, workspace(row), sourceRepositoryId);
     }
     if (input.runtimeCanary) await consumeRuntimeCanary(tx, workspace(row), input.runtimeCanary, sourceRepositoryId, createKey);
@@ -884,25 +906,27 @@ export class CloudV2Store {
    * that wins the race still finds the replacement. */
   async beginRestore(id: string, lostSandboxId: string | null, request: { attempt: string } & Omit<CloudV2RestoreCreate, "from" | "requestedAt">): Promise<{ attempt: string; create: CloudV2RestoreCreate } | "no_computer" | null> {
     return withSystemTx(this.pool, async tx => {
-      const { rows } = await tx.query<{ org_id: string; computer_build_id: string | null; restore_create: unknown }>(
-        `SELECT org_id,computer_build_id,restore_create FROM cloud_v2_workspaces WHERE id=$1 AND state='starting' AND boat_sandbox_id IS NOT DISTINCT FROM $2::text
+      const { rows } = await tx.query<{ org_id: string; computer_build_id: string | null; restore_create: unknown; repository: string; source_repositories: string[] }>(
+        `SELECT org_id,computer_build_id,restore_create,repository,source_repositories FROM cloud_v2_workspaces WHERE id=$1 AND state='starting' AND boat_sandbox_id IS NOT DISTINCT FROM $2::text
            AND checkpoint_object IS NOT NULL FOR UPDATE`, [id, lostSandboxId]);
       if (!rows[0]) return null;
       // As at creation: activation and cleanup wait for this pin.
-      const active = await tx.query<{ id: string; snapshot_name: string }>(
-        `SELECT b.id, c.snapshot_name FROM cloud_v2_computers c
+      const active = await tx.query<{ id: string; snapshot_name: string; source_policy_version: number; recipe: unknown }>(
+        `SELECT b.id, c.snapshot_name, b.source_policy_version, b.recipe FROM cloud_v2_computers c
          JOIN cloud_v2_computer_builds b ON b.id=c.active_build_id AND b.org_id=c.org_id
-         WHERE c.org_id=$1 AND c.snapshot_name IS NOT NULL AND b.state='succeeded' AND b.source_policy_version=2 AND b.snapshot_id=c.snapshot_name
+         WHERE c.org_id=$1 AND c.snapshot_name IS NOT NULL AND b.state='succeeded' AND b.source_policy_version IN (2,3) AND b.snapshot_id=c.snapshot_name
            AND b.snapshot_deleted_at IS NULL AND b.cleanup_requested_at IS NULL
          FOR SHARE OF c,b`, [rows[0].org_id]);
       if (!active.rows[0]) return "no_computer";
       const setup = originalSetupBuild(rows[0].computer_build_id, rows[0].restore_create);
+      const image = cloudV2WorkspaceImage({ policy: active.rows[0].source_policy_version, snapshot: active.rows[0].snapshot_name,
+        recipe: active.rows[0].recipe, scope: rows[0].source_repositories ?? [], repository: rows[0].repository });
       const recorded = await tx.query<{ restore_attempt: string; restore_create: CloudV2RestoreCreate }>(
         `UPDATE cloud_v2_workspaces SET restore_pending=true, restore_attempt=$3, boat_sandbox_id=NULL, computer_build_id=$2,
-           restore_create=jsonb_build_object('from',$4::text,'name',$5::text,'env',$6::jsonb,'requestedAt',clock_timestamp()) || $7::jsonb,
+           restore_create=jsonb_build_object('from',$4::text,'name',$5::text,'env',$6::jsonb,'requestedAt',clock_timestamp(),'prune',$8::jsonb) || $7::jsonb,
            worker_route_url=NULL, worker_port_token=NULL, worker_token_hash=NULL, worker_boot_id=NULL
          WHERE id=$1 RETURNING restore_attempt, restore_create`,
-        [id, active.rows[0].id, request.attempt, active.rows[0].snapshot_name, request.name, JSON.stringify(request.env), JSON.stringify(setup)]);
+        [id, active.rows[0].id, request.attempt, image.from, request.name, JSON.stringify(request.env), JSON.stringify(setup), JSON.stringify(image.prune)]);
       return { attempt: recorded.rows[0]!.restore_attempt, create: restoreCreate(recorded.rows[0]!.restore_create)! };
     });
   }
@@ -963,10 +987,30 @@ export class CloudV2Store {
     return rows[0]?.revision ?? null;
   }
 
+  /** The image a new or replacement VM for this workspace boots, by its
+   * pinned build (see cloudV2WorkspaceImage); null when that build is gone. */
+  async workspaceImage(workspaceId: string): Promise<CloudV2WorkspaceImage | null> {
+    const { rows } = await withSystemTx(this.pool, tx => tx.query<{ org_id: string; computer_build_id: string | null; repository: string;
+      source_repositories: string[] | null; snapshot_id: string | null; source_policy_version: number | null; recipe: unknown }>(
+      `SELECT w.org_id, w.computer_build_id, w.repository, w.source_repositories, b.snapshot_id, b.source_policy_version, b.recipe
+       FROM cloud_v2_workspaces w LEFT JOIN cloud_v2_computer_builds b ON b.id=w.computer_build_id AND b.org_id=w.org_id
+         AND b.state='succeeded' AND b.source_policy_version IN (2,3) AND b.snapshot_deleted_at IS NULL AND b.cleanup_requested_at IS NULL
+       WHERE w.id=$1`, [workspaceId]));
+    const row = rows[0];
+    if (!row) return null;
+    if (!row.computer_build_id) {
+      const legacy = await this.computerSnapshot(row.org_id, null);
+      return legacy ? { from: legacy, prune: [] } : null;
+    }
+    if (!row.snapshot_id || row.source_policy_version === null) return null;
+    return cloudV2WorkspaceImage({ policy: row.source_policy_version, snapshot: row.snapshot_id, recipe: row.recipe,
+      scope: row.source_repositories ?? [], repository: row.repository });
+  }
+
   async computerSnapshot(organizationId: string, buildId: string | null = null): Promise<string | null> {
     if (buildId) {
       const { rows } = await withSystemTx(this.pool, tx => tx.query<{ snapshot_id: string | null }>(
-        `SELECT snapshot_id FROM cloud_v2_computer_builds WHERE id=$1 AND org_id=$2 AND state='succeeded' AND source_policy_version=2
+        `SELECT snapshot_id FROM cloud_v2_computer_builds WHERE id=$1 AND org_id=$2 AND state='succeeded' AND source_policy_version IN (2,3)
          AND snapshot_deleted_at IS NULL AND cleanup_requested_at IS NULL`, [buildId, organizationId]));
       return rows[0]?.snapshot_id ?? null;
     }
@@ -982,7 +1026,7 @@ export class CloudV2Store {
     const { rows } = await withSystemTx(this.pool, tx => tx.query<{ id: string; recipe: { repositories?: { repository?: unknown; branch?: unknown }[] } }>(
       `SELECT build.id, build.recipe FROM cloud_v2_computers computer
        JOIN cloud_v2_computer_builds build ON build.id = computer.active_build_id AND build.org_id = computer.org_id
-       WHERE computer.org_id = $1 AND computer.snapshot_name IS NOT NULL AND build.state = 'succeeded' AND build.source_policy_version=2`,
+       WHERE computer.org_id = $1 AND computer.snapshot_name IS NOT NULL AND build.state = 'succeeded' AND build.source_policy_version IN (2,3)`,
       [organizationId],
     ));
     if (!rows[0]) return null;

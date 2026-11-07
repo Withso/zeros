@@ -168,7 +168,9 @@ d("cloud v2 Cloud Computer builds", () => {
     await builder.tick();
     expect((await computers.overview(org)).activeBuildId).toBeNull();
     expect((await computers.overview(org)).builds[0]).toMatchObject({ state: "cancelled", errorCode: "computer_admin_access_lost" });
-    expect(boat.deleteSnapshot).toHaveBeenCalledWith(cloudV2SnapshotName("alpha", org, job.version));
+    // A v3 image is captured only after setup, so a cancelled one never existed.
+    expect(boat.saveSnapshot).not.toHaveBeenCalled();
+    expect(boat.deleteSnapshot).not.toHaveBeenCalledWith(cloudV2SnapshotName("alpha", org, job.version));
   });
 
   it("keeps exact source IDs on clean builds and refuses inherited legacy log scope", async () => {
@@ -220,9 +222,10 @@ d("cloud v2 Cloud Computer builds", () => {
     expect(await computers.log(org, first.id)).toContain("[zeros] git-lfs installed");
     // A named snapshot is an independent copy: the builder goes as soon as it is ready.
     expect(boat.saveSnapshot).toHaveBeenCalledWith("bx_build1", cloudV2SnapshotName("alpha", org, 1));
-    // Shared images must be captured before any repository or setup script can
-    // leave source, caches, history, or copied artifacts anywhere on the disk.
-    expect(vi.mocked(boat.saveSnapshot).mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(boat.execLong).mock.invocationCallOrder[0]!);
+    // A v3 image is captured after every repository is cloned and set up, so a
+    // workspace starts with its checkout; only a covering source scope uses it.
+    expect(vi.mocked(boat.saveSnapshot).mock.invocationCallOrder[0]).toBeGreaterThan(Math.max(...vi.mocked(boat.execLong).mock.invocationCallOrder));
+    expect((await pool.query("SELECT source_policy_version FROM cloud_v2_computer_builds WHERE id=$1", [first.id])).rows[0].source_policy_version).toBe(3);
     expect(boat.delete).toHaveBeenCalledWith("bx_build1");
     expect(boat.stop).not.toHaveBeenCalled();
 
@@ -321,6 +324,31 @@ d("cloud v2 Cloud Computer builds", () => {
     expect(await computers.log(org, build.id)).toContain("[zeros] git-lfs could not be installed");
   });
 
+  it("keeps a build queued as source-free capturing its image before any repository", async () => {
+    const boat = compute();
+    const builder = new CloudV2ComputerBuilder({ computers, compute: boat, channel: "alpha", runtime, cloneToken: async () => "ghs_token" });
+    const queued = await computers.enqueue(org, admin, recipe);
+    // An older replica queued it during a rolling deploy.
+    await pool.query("UPDATE cloud_v2_computer_builds SET source_policy_version=2 WHERE id=$1", [queued.id]);
+    await builder.tick();
+    expect((await computers.overview(org)).builds[0]).toMatchObject({ id: queued.id, state: "succeeded" });
+    expect(vi.mocked(boat.saveSnapshot).mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(boat.execLong).mock.invocationCallOrder[0]!);
+    expect((await pool.query("SELECT source_policy_version FROM cloud_v2_computer_builds WHERE id=$1", [queued.id])).rows[0].source_policy_version).toBe(2);
+  });
+
+  it("restores tracked files a setup rewrote before capturing the kept checkout", async () => {
+    const boat = compute(), base = vi.mocked(boat.exec).getMockImplementation()!;
+    vi.mocked(boat.exec).mockImplementation(async (id: string, command: string, seconds: number) =>
+      command.includes("git status --porcelain --untracked-files=no") ? { exitCode: 0, stdout: "zeros-restored=2\n", timedOut: false } : base(id, command, seconds));
+    const builder = new CloudV2ComputerBuilder({ computers, compute: boat, channel: "alpha", runtime, cloneToken: async () => "ghs_token" });
+    const build = await computers.enqueue(org, admin, recipe);
+    await builder.tick();
+    const tidy = vi.mocked(boat.exec).mock.calls.findIndex(([, command]) => command.includes("git reset -q --hard HEAD"));
+    expect(tidy).toBeGreaterThan(-1);
+    expect(vi.mocked(boat.exec).mock.invocationCallOrder[tidy]).toBeLessThan(vi.mocked(boat.saveSnapshot).mock.invocationCallOrder[0]!);
+    expect(await computers.log(org, build.id)).toContain("[zeros] setup withso/zeros changed 2 tracked file(s); restored them so workspaces start clean");
+  });
+
   it("records a failed setup without touching the live snapshot", async () => {
     const boat = compute();
     vi.mocked(boat.execLong).mockResolvedValueOnce({ exitCode: 0, stdout: commit, timedOut: false })
@@ -332,8 +360,9 @@ d("cloud v2 Cloud Computer builds", () => {
     expect(overview.snapshotName).toBeNull();
     expect(overview.builds[0]).toMatchObject({ state: "failed", errorCode: "computer_setup_failed" });
     expect(await computers.log(org, build.id)).toContain("ERR! missing");
-    expect(boat.saveSnapshot).toHaveBeenCalledOnce();
-    expect(boat.deleteSnapshot).toHaveBeenCalled();
+    // Setup runs before a v3 capture: a failed one leaves no image to delete.
+    expect(boat.saveSnapshot).not.toHaveBeenCalled();
+    expect(boat.deleteSnapshot).not.toHaveBeenCalled();
     expect(boat.delete).toHaveBeenCalledWith("bx_build1");
   });
 
