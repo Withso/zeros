@@ -205,3 +205,55 @@ passed 43 tests with the previously failing fontconfig setting and its
 original pixel threshold unchanged. This test-only change does not alter
 application rendering or establish another native performance result. The
 CI playbook now records this environment distinction.
+
+## Canvas performance pass — 2026-11-07
+
+Mode: co-masters (Claude Opus 5.5 renderer + measurement; Claude Opus 5.5 max
+limits + engine scale), no subagents. Reference machine as above (MacBook Air
+M4, 16 GiB, macOS 26.3.1, Electron 43.8.3, Chromium 150), but measured while
+the owner kept working: built-in 60 Hz display, DPR 2, 1440 × 900 window,
+memory pressure with 9.7–9.9 GiB of swap in use, `BTLEServer` near one core.
+Treat absolute numbers as this machine's working state, not a quiet lab.
+
+Harness: a local CDP driver (not committed; evidence under `.context/bench/`)
+builds the optimized renderer and compiled engine with the native workload's
+helpers, launches an account-free Local profile in a floating window visible
+on all Spaces, and records per-process CPU/physical footprint, Chromium
+presentation traces and memory-infra dumps. Fixtures: the repository's own
+`Zeros - Design` page (37 frames), the 256-frame grid, and a 26-page × 1,000
+replica of the real frames from #885's fixture generator.
+
+Lessons that changed the method:
+- 120 Hz `Input.dispatchMouseEvent` wheel injection queues behind DevTools
+  acknowledgements. A trivial page also capped near 35 fps with ~85 ms
+  input→present, so early "30 fps" results were partly the harness. Chromium's
+  `Input.synthesizeScrollGesture`/`synthesizePinchGesture` (vsync-aligned,
+  Telemetry's smoothness input) gives a trivial page 60 fps, 0 dropped and
+  ~33 ms input→present. This Mac's swap→presentation floor is 21–23 ms.
+  Native CGEvent gestures need foreground ownership, which macOS refuses while
+  the owner works.
+- An occluded or other-Space window produces no frames; synthetic gestures
+  then wait forever. Keep the bench window on all Spaces, check visibility
+  before every phase, and treat hidden time as a paused measurement.
+- The bench engine lacked the native watch host, so idle engine CPU measured
+  the stat-polling fallback (production macOS uses FSEvents through it).
+- A peer agent's Conductor message into the measuring chat unbinds the
+  owner's Mac from that chat; co-masters coordinate through shared files.
+
+Root causes found and fixed (renderer, PR on branch
+`iamarunrk/canvas-performance-optimization-v3`):
+- Warm reopen of 256 frames spent 2.82 s of 3.11 s in `getPropertyValue`:
+  each source admission read computed style inside a React layout effect.
+  Colors now resolve in one batch before composition. Warm reopen
+  3,008 → 254 ms; real page 170 → 82 ms.
+- Camera paints did O(page) DOM work per frame. With chrome-write skipping,
+  tracked hover/focus, bounds-first hit testing and pan-only prefetch
+  throttling, the 256-frame pan improved (3 reps): p99 frame 66.7 → 33.3 ms,
+  partial frames 38 → 0, dropped 2 → 1, renderer CPU 35 → 22%, total
+  CPU 47 → 35%.
+- Input-driven main frames started mid-interval; a gesture frame clock keeps
+  them on the display cadence while a gesture is live.
+- On large pages the preparation lane prepared every mounted frame and
+  re-rendered the page mid-gesture. It now yields to live gestures, prepares
+  the frames nearest the camera center first, and demands at most the
+  source-surface admission limit.
