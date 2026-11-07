@@ -148,6 +148,8 @@ export function healDesignOids(source: string): {
   html: string;
   changed: boolean;
   fixed: Array<{ kind: "missing" | "duplicate"; line: number; oid: string }>;
+  /** The parse of an unchanged source, so a caller need not parse it again. */
+  document?: DefaultTreeAdapterTypes.Document;
 } {
   const document = parse(source, { sourceCodeLocationInfo: true });
   const records = designNodeRecords(document);
@@ -247,5 +249,5 @@ export function healDesignOids(source: string): {
   }
   parts.push(source.slice(offset));
   const html = parts.join("");
-  return { html, changed: edits.length > 0, fixed };
+  return { html, changed: edits.length > 0, fixed, ...(edits.length > 0 ? {} : { document }) };
 }

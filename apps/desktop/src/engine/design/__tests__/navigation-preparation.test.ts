@@ -107,3 +107,17 @@ it("includes local image, font and theme changes in source authority and revalid
   expect(resized.width).toBe(500);
   expect(resized.sourceVersion).not.toBe(theme.sourceVersion);
 });
+
+it("reuses a batch's decoded canvas only while the catalog revision is unchanged", async () => {
+  const navigation = await readDesignNavigationSnapshot(root);
+  const prepare = (revision: string, file: string) => prepareDesignNavigationFrames(root, revision, [file]);
+  expect((await prepare(navigation.catalogRevision, "page-1/f0.html")).frames[0]!.x).toBe(0);
+  expect((await prepare(navigation.catalogRevision, "page-1/f1.html")).frames[0]!.x).toBe(500);
+  const file = path.join(root, directory, "meta/canvas.json");
+  const canvas = JSON.parse(await readFile(file, "utf8"));
+  canvas.frames.f1.x = 777;
+  await writeFile(file, JSON.stringify(canvas));
+  await expect(prepare(navigation.catalogRevision, "page-1/f1.html")).rejects.toThrow(/stale/);
+  const next = await readDesignNavigationSnapshot(root);
+  expect((await prepare(next.catalogRevision, "page-1/f1.html")).frames[0]!.x).toBe(777);
+});
