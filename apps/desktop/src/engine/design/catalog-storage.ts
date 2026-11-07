@@ -14,7 +14,9 @@ import {
 import { designPagesMigrationJournalName } from "./pages-migration";
 import { createHash } from "node:crypto";
 
-export function inspectDesignCatalog(root: string, directory: string) {
+/** `revision: false` skips hashing the canvas for a caller that compares the
+ * returned bytes with an inspection it already holds. */
+export function inspectDesignCatalog(root: string, directory: string, options: { revision?: boolean } = {}) {
   assertLegacyDesignDraftWritable(root);
   const layout = readDirectoryDesignLayout(root, directory);
   if (!layout?.manifest.canvas)
@@ -47,7 +49,7 @@ export function inspectDesignCatalog(root: string, directory: string) {
     registration,
     source,
     binding: JSON.stringify(roots),
-    revision: createHash("sha256")
+    revision: options.revision === false ? "" : createHash("sha256")
       .update(
         JSON.stringify([
           layout.manifestFile,
@@ -58,6 +60,17 @@ export function inspectDesignCatalog(root: string, directory: string) {
       )
       .digest("hex"),
   };
+}
+
+/** The same metadata bytes and roots as an earlier inspection. */
+export function sameDesignCatalogInspection(
+  before: ReturnType<typeof inspectDesignCatalog>,
+  after: ReturnType<typeof inspectDesignCatalog>,
+): boolean {
+  return before.binding === after.binding && before.source === after.source &&
+    before.registration === after.registration &&
+    before.layout.manifestFile === after.layout.manifestFile &&
+    before.layout.documentFile === after.layout.documentFile;
 }
 
 export async function readDesignCatalogMetadata(
@@ -76,16 +89,16 @@ export async function readDesignCatalogMetadataWithContext(
   const before = inspectDesignCatalog(root, directory);
   const context = await readCanvasContext(root);
   const captured = context.canvas[canvasReadSnapshot];
-  const after = inspectDesignCatalog(root, directory);
+  const after = inspectDesignCatalog(root, directory, { revision: false });
   if (
-    before.binding !== after.binding ||
-    before.revision !== after.revision ||
+    !sameDesignCatalogInspection(before, after) ||
     captured?.source !== before.source ||
     captured.registration?.source !== before.registration
   )
     throw new DesignCatalogError("stale");
   return {
     context,
+    inspection: before,
     metadata: {
       directoryId: before.layout.manifest.id,
       binding: before.binding,

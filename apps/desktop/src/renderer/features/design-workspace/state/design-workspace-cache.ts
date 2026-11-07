@@ -2,7 +2,7 @@ import { useDesignWorkspaceUiStore } from "./design-workspace-ui";
 import type { DesignMovementGuard } from "@zeros/protocol/design-relocation";
 import { normalizeDesignPagesSnapshot } from "@zeros/protocol/design-pages";
 import { forgetDesignLayerDisclosure } from "./design-layer-disclosure";
-import { rememberDesignDirectoryIdentity } from "../../../platform/bridge/design-bridge";
+import { rememberDesignDirectoryIdentity, setDesignKnownPagesReader } from "../../../platform/bridge/design-bridge";
 // Canvas, inspector and the Layers panel consume one aggregate engine response.
 // A bounded keyed cache stops those siblings issuing independent bridge requests
 // and keeps the last confirmed canvas while a disk edit revalidates.
@@ -747,6 +747,9 @@ export const designWorkspaceSnapshotCache =
 setDesignSelectionSnapshotReader(
   (workspaceId) => preparedDesignSnapshot(designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data),
 );
+setDesignKnownPagesReader(
+  (workspaceId) => designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.preparation?.pageHashes,
+);
 for (const [workspaceId, snapshot] of readDesignWorkspaceBootSnapshots()) {
   designWorkspaceSnapshotCache.setData(workspaceId, snapshot);
   // A boot preview paints synchronously but is never considered authoritative
@@ -1333,6 +1336,9 @@ function publishDesignWorkspaceSnapshot(
   const retained = applyRetainedRuntimeAuditViolations(workspaceId, next);
   const stable = stabilizeDesignWorkspaceSnapshot(previous, retained);
   designWorkspaceSnapshotCache.setData(workspaceId, stable);
+  // Pages the engine no longer matches stay visible as last confirmed while a
+  // replacement read fetches them.
+  if (stable.preparation?.stalePages?.length) designWorkspaceSnapshotCache.invalidate(workspaceId);
   notifyDesignSelectionSnapshot(workspaceId);
   if (!stable.preparation) queueDesignWorkspaceBootSnapshot(workspaceId, stable);
   return stable;

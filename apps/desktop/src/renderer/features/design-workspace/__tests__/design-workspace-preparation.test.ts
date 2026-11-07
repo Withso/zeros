@@ -126,3 +126,38 @@ it("does not publish a failed preparation over an in-flight mutation", async () 
   await vi.waitFor(() => expect(coordinator.usage().running).toBe(0));
   expect(publish).not.toHaveBeenCalled();
 });
+
+it("projects a page-scoped acknowledgement onto unchanged pages it did not resend", () => {
+  const description = (file: string, pageId: string) => ({ ...frame(file), pageId, preparation: "unprepared" as const });
+  const strip = ({ sourceVersion: _s, nodeCount: _n, layerCount: _l, modifiedAt: _m, ...rest }: ReturnType<typeof description>) => rest;
+  const kept = [strip(description("one/a0.html", "one")), strip(description("one/a1.html", "one"))];
+  const previous: DesignWorkspaceSnapshotWire = { ...snapshot(), frames: [{ ...frame("one/a0.html"), pageId: "one" }],
+    preparation: { revision: "a".repeat(64), epoch: 1, current: [], errors: {},
+      descriptions: [...kept, strip(description("two/b0.html", "two"))], pageHashes: { one: "1".repeat(32), two: "2".repeat(32) } } };
+  const descriptor = (file: string, order: number) => ({ id: file.split("/")[1]!.replace(".html", ""), pageId: "two", source: file,
+    title: file, kind: "html" as const, x: 0, y: 0, width: 100, height: 100, z: 0, order, preparation: "unprepared" as const });
+  const created = { ...frame("two/b1.html"), frameId: "b1", pageId: "two", sourceVersion: "c".repeat(24) };
+  const ack = (oneHash: string): DesignWorkspaceSnapshotWire => ({ ...snapshot(), preparation: undefined, frames: [created],
+    pageCatalog: { revision: "b".repeat(64), pages: [
+      { id: "one", title: "One", folder: "one", count: 2, hash: oneHash },
+      { id: "two", title: "Two", folder: "two", count: 2, hash: "3".repeat(32) }],
+    frames: [descriptor("two/b0.html", 0), descriptor("two/b1.html", 1)] } });
+  const projected = projectDesignMutationSnapshot(previous, ack("1".repeat(32)));
+  expect(projected).not.toHaveProperty("pageCatalog");
+  expect(projected.preparation!.descriptions.slice(0, 2)).toEqual(kept);
+  expect(projected.preparation!.descriptions[0]).toBe(previous.preparation!.descriptions[0]);
+  expect(projected.preparation!.descriptions.map((entry) => entry.file)).toEqual(["one/a0.html", "one/a1.html", "two/b0.html", "two/b1.html"]);
+  expect(projected.pages!.map((page) => [page.id, page.frameFiles, page.frameIds])).toEqual([
+    ["one", ["one/a0.html", "one/a1.html"], ["one/a0", "one/a1"]], ["two", ["two/b0.html", "two/b1.html"], ["b0", "b1"]]]);
+  expect(projected.preparation).toMatchObject({ revision: "b".repeat(64), current: ["two/b1.html"],
+    pageHashes: { one: "1".repeat(32), two: "3".repeat(32) } });
+  expect(projected.preparation).not.toHaveProperty("stalePages");
+  expect(projected.frames.map((entry) => entry.file)).toEqual(["one/a0.html", "two/b1.html"]);
+  const drifted = projectDesignMutationSnapshot(previous, ack("9".repeat(32)));
+  expect(drifted.preparation!.stalePages).toEqual(["one"]);
+  expect(drifted.preparation!.pageHashes).toEqual({ two: "3".repeat(32) });
+  expect(drifted.preparation!.descriptions.slice(0, 2)).toEqual(kept);
+  const foreign = projectDesignMutationSnapshot({ ...previous, directoryId: "design_other" }, ack("1".repeat(32)));
+  expect(foreign.preparation!.stalePages).toEqual(["one"]);
+  expect(foreign.preparation!.descriptions.map((entry) => entry.file)).toEqual(["two/b0.html", "two/b1.html"]);
+});

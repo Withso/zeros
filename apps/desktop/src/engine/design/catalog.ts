@@ -1,10 +1,9 @@
-import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import {
   DESIGN_CATALOG_BATCH_BYTES,
   DESIGN_CATALOG_BATCH_ENTRIES,
   DESIGN_CATALOG_DESCRIPTOR_LIMIT,
   designCatalogBatchSchema,
-  designCatalogFrameSchema,
   designCatalogOwnerSchema,
   type DesignCatalogRead,
   type DesignCatalogBatch,
@@ -44,6 +43,24 @@ export class DesignCatalogError extends Error {
   }
 }
 
+/** Content identity of one page as a canvas shows it: its summary and every
+ * descriptor field. A client holding an equal hash needs nothing resent. */
+export function designCatalogPageHashes(
+  catalog: Pick<DesignCatalogSnapshot, "pages" | "frames">,
+): Map<string, string> {
+  const byPage = new Map<string, DesignCatalogFrame[]>();
+  for (const frame of catalog.frames) {
+    const frames = byPage.get(frame.pageId);
+    if (frames) frames.push(frame);
+    else byPage.set(frame.pageId, [frame]);
+  }
+  return new Map(catalog.pages.map((page) => [page.id, createHash("sha256").update(JSON.stringify([
+    page.id, page.title, page.folder, page.count,
+    (byPage.get(page.id) ?? []).map((frame) => [frame.id, frame.source, frame.title, frame.kind,
+      frame.x, frame.y, frame.width, frame.height, frame.z, frame.order]),
+  ])).digest("hex").slice(0, 32)]));
+}
+
 export function projectDesignCatalog(
   canvas: Pick<CanvasDocument, "frames" | "frame_info" | "pages">,
 ): Pick<DesignCatalogSnapshot, "pages" | "frames"> {
@@ -74,22 +91,22 @@ export function projectDesignCatalog(
         throw new DesignCatalogError("stale");
       seen.add(id);
       sources.add(portableDesignName(source));
-      frames.push(
-        designCatalogFrameSchema.parse({
-          id,
-          pageId: page.id,
-          source,
-          title: info.title,
-          kind: info.kind === "text" ? "text" : "html",
-          x: geometry.x,
-          y: geometry.y,
-          width: geometry.w,
-          height: geometry.h,
-          z: geometry.z,
-          order,
-          preparation: "unprepared",
-        }),
-      );
+      // The decoded canvas already satisfied every bound; batches are parsed
+      // again when served, so 26k descriptors are not validated per read.
+      frames.push({
+        id,
+        pageId: page.id,
+        source,
+        title: info.title,
+        kind: info.kind === "text" ? "text" : "html",
+        x: geometry.x,
+        y: geometry.y,
+        width: geometry.w,
+        height: geometry.h,
+        z: geometry.z,
+        order,
+        preparation: "unprepared",
+      });
     }
   }
   if (frames.length !== entries.length) throw new DesignCatalogError("stale");

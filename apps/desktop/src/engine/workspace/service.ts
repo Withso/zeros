@@ -8,7 +8,7 @@ import { assertDesignCheckoutReadable, readDesignCheckoutStatus } from "../desig
 import { DesignCatalogReader, DesignCatalogError, type DesignCatalogAdmission } from "../design/catalog";
 import { DesignPreviewJobs } from "../design/preview-jobs";
 import { inspectDesignCatalog, readDesignCatalogMetadata } from "../design/catalog-storage";
-import type { DesignCatalogRead, DesignCatalogOwner } from "@zeros/protocol/design-catalog";
+import type { DesignCatalogRead, DesignCatalogOwner, DesignPageHashes } from "@zeros/protocol/design-catalog";
 import {
   reqStr,
   reqNum,
@@ -1360,10 +1360,10 @@ export class WorkspaceService {
   private readonly catalogReader = new DesignCatalogReader();
   private readonly previewJobs = new DesignPreviewJobs();
   private readonly designRouteHost: DesignWorkspaceRouteHost = {
-    readDesignNavigation: (workspaceId, remote, hostLocalResources) =>
+    readDesignNavigation: (workspaceId, remote, hostLocalResources, options) =>
       this.withDesignReadWorkspace(workspaceId, remote, async ({ workspace, root, designDirectory }) => {
         try {
-          const navigation = await readDesignNavigationSnapshot(root);
+          const navigation = await readDesignNavigationSnapshot(root, undefined, { pageHashes: options?.pageHashes === true });
           noteDesignSnapshotDirectory(root, designDirectory);
           return {
             ...navigation,
@@ -2226,6 +2226,7 @@ export class WorkspaceService {
       /** Mutation replies must not share a read admitted before their write. */
       fresh?: boolean;
       affectedFrames?: string[];
+      knownPages?: DesignPageHashes;
     } = {},
   ) {
     const root = options.root ?? workspace.path;
@@ -2239,14 +2240,14 @@ export class WorkspaceService {
     // The resolved directory is equally load-bearing: two concurrent leases
     // can point synchronous document readers at different Design documents
     // under the same workspace root.
-    const key = `${workspace.id}\u0000${nodePath.resolve(root)}\u0000${writeBack ? "write" : "read"}\u0000${designDirectory}\u0000${hostLocalResources ? "host-resources" : "bridge-resources"}${options.affectedFrames ? `\u0000${JSON.stringify(options.affectedFrames)}` : ""}`;
+    const key = `${workspace.id}\u0000${nodePath.resolve(root)}\u0000${writeBack ? "write" : "read"}\u0000${designDirectory}\u0000${hostLocalResources ? "host-resources" : "bridge-resources"}${options.affectedFrames ? `\u0000${JSON.stringify([options.affectedFrames, options.knownPages ?? null])}` : ""}`;
     const epoch = designSnapshotReadEpoch(root);
     const current = this.designSnapshotFlights.get(key);
     if (current && !options.fresh && this.joinsDesignSnapshotFlight(current, epoch))
       return current;
     const request = (async () => {
       const snapshot = options.affectedFrames && hostLocalResources && !remote
-        ? await readDesignMutationSnapshot(root, options.affectedFrames)
+        ? await readDesignMutationSnapshot(root, options.affectedFrames, options.knownPages)
         : await readDesignWorkspaceSnapshot(root, { writeBack });
       // The directory this desktop's canvas shows, for prompt change polling.
       if (!remote) noteDesignSnapshotDirectory(root, designDirectory);

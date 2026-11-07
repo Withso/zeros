@@ -4,7 +4,7 @@ import {
   designMovementGuardSchema,
   designRelocationSchema,
 } from "@zeros/protocol/design-relocation";
-import { designCatalogReadSchema, designNavigationReadSchema, designFramesPrepareSchema, type DesignCatalogRead, type DesignCatalogReply } from "@zeros/protocol/design-catalog";
+import { designCatalogReadSchema, designNavigationReadSchema, designFramesPrepareSchema, designPageHashesSchema, type DesignCatalogRead, type DesignCatalogReply, type DesignPageHashes } from "@zeros/protocol/design-catalog";
 import { prepareDesignNavigationFrames } from "./document";
 import type { DesignCatalogAdmission } from "./catalog";
 import { encodeDesignFramePath } from "@zeros/protocol/design-path";
@@ -161,6 +161,13 @@ import {
 } from "./workspace-history";
 /** Files every linking frame renders: stylesheets (tokens.css included) and
  * component definitions. Frame metadata is design.toml and stays scoped. */
+/** Hashes the client holds after design.page-scoped-mutations.v1 negotiation.
+ * The write has committed, so malformed hashes get a complete acknowledgement. */
+function knownPagesParam(params: Params): { knownPages?: DesignPageHashes } {
+  const parsed = designPageHashesSchema.safeParse(params.knownPages);
+  return params.knownPages !== undefined && parsed.success ? { knownPages: parsed.data } : {};
+}
+
 function isSharedDesignSource(file: string): boolean {
   return /\.css$/i.test(file) || file.startsWith("components/");
 }
@@ -198,7 +205,7 @@ export interface DesignReadWorkspace {
   designDirectory: string;
 }
 export interface DesignWorkspaceRouteHost {
-  readDesignNavigation(workspaceId: string, remote: boolean, hostLocalResources: boolean): Promise<unknown>;
+  readDesignNavigation(workspaceId: string, remote: boolean, hostLocalResources: boolean, options?: { pageHashes?: boolean }): Promise<unknown>;
   previewJobs: DesignPreviewJobs;
   readDesignCatalog(input: DesignCatalogRead, remote: boolean, admission: DesignCatalogAdmission): Promise<DesignCatalogReply>;
   resolveDesignWorkspace(workspaceId: string, remote: boolean): Workspace;
@@ -231,6 +238,7 @@ export interface DesignWorkspaceRouteHost {
       hostLocalResources?: boolean;
       fresh?: boolean;
       affectedFrames?: string[];
+      knownPages?: DesignPageHashes;
     },
   ): Promise<DesignWorkspaceSnapshot & { protocolCapability: string | null }>;
   readDesignSnapshotRequest(
@@ -325,13 +333,14 @@ export async function handleDesignWorkspaceRoute(
       hostLocalResources,
       fresh: true,
       ...(params.snapshotMode === "scoped" && !affectedFiles.some(isSharedDesignSource)
-        ? { affectedFrames: [...new Set(frames)] }
+        ? { affectedFrames: [...new Set(frames)], ...knownPagesParam(params) }
         : {}),
     });
   switch (op) {
     case "design.navigation.read": {
       if (remote || !hostLocalResources) throw new Error("Design navigation requires a Local workspace.");
-      return host.readDesignNavigation(designNavigationReadSchema.parse(params).workspaceId, remote, hostLocalResources);
+      const input = designNavigationReadSchema.parse(params);
+      return host.readDesignNavigation(input.workspaceId, remote, hostLocalResources, { pageHashes: input.pageHashes === true });
     }
     case "design.frames.prepare": {
       if (remote || !hostLocalResources) throw new Error("Design preparation requires a Local workspace.");
@@ -742,13 +751,16 @@ export async function handleDesignWorkspaceRoute(
           }
           destination.push(entry);
           const snapshot = await restoredSnapshot(replacement ? [replacement.file] : []);
-          const affectedPage = snapshot.pages?.find(page => page.id === (replacement ?? expected)?.pageId);
+          const pageId = (replacement ?? expected)?.pageId;
+          const affectedPage = snapshot.pages?.find(page => page.id === pageId);
+          const scopedPage = snapshot.pageCatalog?.pages.find(page => page.id === pageId);
           return {
             result: null,
             snapshot,
             historySelection:
               replacement?.file ?? (affectedPage ? affectedPage.frameFiles[0]
-                : (snapshot.mutationCatalog?.frames[0]?.source ?? snapshot.frames[0]?.file)) ?? null,
+                : scopedPage ? (snapshot.pageCatalog!.frames.find(frame => frame.pageId === pageId)?.source ?? null)
+                : (snapshot.mutationCatalog?.frames[0]?.source ?? snapshot.pageCatalog?.frames[0]?.source ?? snapshot.frames[0]?.file)) ?? null,
             historyFrame: (replacement ?? expected)!.file,
           };
         }

@@ -16,6 +16,7 @@ import {
   designFrameCreateBatchesForTests,
   designMutationSnapshotReadsForTests,
   readDesignMutationSnapshot,
+  readDesignNavigationSnapshot,
   createDesignPage,
   deleteDesignFrame,
   deleteDesignPage,
@@ -26,6 +27,7 @@ import {
   transferDesignNode,
 } from "../document";
 import { readCanvas, writeCanvas } from "../document-storage";
+import { designPageScopedCatalogSchema } from "@zeros/protocol/design-catalog";
 import { withDesignDirectoryNameLease } from "../directory-registry";
 import { pagesCanvas, pagesDirectory, pagesManifest } from "./pages-fixtures";
 
@@ -256,6 +258,36 @@ describe("page-owned frame writes", () => {
       expect(designMutationSnapshotReadsForTests() - before).toBe(1);
       for (const snapshot of [first!, second!])
         expect(snapshot.frames.map((frame) => frame.file).sort()).toEqual([...files].sort());
+    }));
+
+  it("acknowledges a write with only the pages whose content hash the client lacks", () =>
+    run(async () => {
+      const navigation = await readDesignNavigationSnapshot(root, undefined, { pageHashes: true });
+      const known = navigation.pageHashes!;
+      expect(Object.keys(known).sort()).toEqual(["checkout", "empty", "screens"]);
+      expect((await readDesignNavigationSnapshot(root, undefined, { pageHashes: true })).pageHashes).toEqual(known);
+      const created = await createDesignFrame(root, { pageId: "empty", title: "New" });
+      const ack = await readDesignMutationSnapshot(root, [created.file], known);
+      expect(ack).not.toHaveProperty("pages");
+      expect(ack).not.toHaveProperty("mutationCatalog");
+      const catalog = designPageScopedCatalogSchema.parse(ack.pageCatalog);
+      expect(catalog.pages.map((page) => page.id)).toEqual(["screens", "checkout", "empty"]);
+      expect(catalog.frames.map((frame) => frame.id)).toEqual([created.frameId]);
+      expect(catalog.pages.find((page) => page.id === "screens")!.hash).toBe(known.screens);
+      expect(ack.frames.map((frame) => frame.file)).toEqual([created.file]);
+      const current = Object.fromEntries(catalog.pages.map((page) => [page.id, page.hash]));
+      const canvas = JSON.parse(read("meta/canvas.json"));
+      canvas.frames.checkout_home.x = 999;
+      writeFileSync(path.join(root, pagesDirectory, "meta/canvas.json"), JSON.stringify(canvas));
+      const native = await readDesignMutationSnapshot(root, [created.file], current);
+      expect(native.pageCatalog!.frames.map((frame) => frame.id)).toEqual(["checkout_home"]);
+      expect((await readDesignMutationSnapshot(root, [created.file], {})).pageCatalog!.frames).toHaveLength(3);
+      const [first, second] = await Promise.all([
+        readDesignMutationSnapshot(root, [created.file], { ...current, screens: "0".repeat(32) }),
+        readDesignMutationSnapshot(root, ["page-1/home.html"], { ...current, empty: "0".repeat(32) }),
+      ]);
+      expect(first).toBe(second);
+      expect(new Set(first!.pageCatalog!.frames.map((frame) => frame.pageId))).toEqual(new Set(["screens", "checkout", "empty"]));
     }));
 
   it("admits exactly the remaining room when creates race into one nearly full page", () =>
