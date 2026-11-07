@@ -2193,6 +2193,21 @@ camera. Leaving a canvas during the wheel debounce settles the displayed camera
 into its still-current page before retirement. A replaced page or checkout
 cannot receive that gesture, and returning clears the gesture-only chrome state.
 
+While a camera gesture is live, one empty animation-frame request per refresh
+keeps renderer main frames on the display cadence; input-driven frames
+otherwise begin wherever an event lands in the interval, miss the compositor
+deadline and drop alternate frames. The clock retires when the gesture settles.
+Camera paints cost what changes, not the page: a frame whose inline style still
+holds the last scale write is skipped, hover and focus resolve once per paint
+from tracked pointer events, hit testing rejects by cached bounds, and a pure
+pan replans tile prefetch at most every 64 ms (zoom, density or direction
+changes replan on every paint). Source admission resolves frame colors in one
+batch before composition; a computed-style read per admission forced one style
+recalculation per frame inside React layout effects. Frame preparation yields
+to a live gesture, prepares the frames nearest the camera center first, and
+demands at most the source-surface admission limit beyond selected and live
+frames, so a large page never prepares content it cannot display.
+
 Canvas zoom is bounded to 800%. Passive and editing HTML retain the ordinary
 display density; camera motion changes only the outer transform. A global
 iframe `zoom: 8` is forbidden: on a Retina display it produces an effective
