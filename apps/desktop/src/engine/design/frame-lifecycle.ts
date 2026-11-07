@@ -77,6 +77,7 @@ import {
   readBoundedDesignFrameSource,
   readCanvas,
   readCanvasContext,
+  readSharedCanvasContext,
   type DesignCanvasReadContext,
   readFrameMeta,
   stripLegacyFrameMeta,
@@ -1378,7 +1379,7 @@ export async function prepareFrameRenderSourceForFile(
 }> {
   const healed = healDesignOids(source);
   const document = healed.document ?? parse(healed.html, { sourceCodeLocationInfo: true });
-  const canvas = readCanvasDocument ?? (await readCanvas(workspacePath));
+  const canvas = readCanvasDocument ?? (await readSharedCanvasContext(workspacePath)).canvas;
   const meta = readFrameMeta(document, file, canvas);
   const geometry = canvas.frames[file];
   const width = geometry?.w ?? meta.width;

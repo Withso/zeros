@@ -23,7 +23,7 @@ import {
   composeFrameSrcDoc,
   prepareFrameRenderSource,
 } from "./render-preparation";
-import { parseDesignSource, withSharedDesignParses } from "./shared-parse";
+import { parseDesignSource, sharedDesignParse, withSharedDesignParses } from "./shared-parse";
 import { elementRecords } from "./source";
 // ──────────────────────────────────────────────────────────
 // Design document — authored HTML/CSS frames and canvas metadata
@@ -855,14 +855,22 @@ function designSourceSpan(location: {
 /** Stable oid → parse5 byte/line spans. Live selections validate against this
  * map, and source edits use the same exact offsets for minimal splices instead
  * of reserializing the document. */
-export async function readDesignElementOffsetMap(
+export function readDesignElementOffsetMap(
   workspacePath: string,
   frame: string,
 ): Promise<DesignElementOffset[]> {
-  await designFrameTarget(workspacePath, frame);
+  return withSharedDesignParses(() => readSharedDesignElementOffsetMap(workspacePath, frame));
+}
+
+async function readSharedDesignElementOffsetMap(
+  workspacePath: string,
+  frame: string,
+): Promise<DesignElementOffset[]> {
+  await designFrameTarget(workspacePath, frame, await readSharedCanvasContext(workspacePath));
   const source = await readBoundedDesignFrameSource(workspacePath, frame);
-  const document = parse(source, { sourceCodeLocationInfo: true });
-  const identified = designNodeRecords(parse(healDesignOids(source).html));
+  const document = parseDesignSource(source);
+  const healed = healDesignOids(source).html;
+  const identified = designNodeRecords(sharedDesignParse(healed) ?? parse(healed));
   const offsets: DesignElementOffset[] = [];
   let index = 0;
   for (const { element } of designNodeRecords(document)) {

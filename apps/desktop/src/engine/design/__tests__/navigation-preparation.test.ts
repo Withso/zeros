@@ -1,11 +1,19 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import * as safeFiles from "../safe-files";
 import { primeDesignDirectoryName, forgetDesignDirectoryName } from "../directory-registry";
-import { readDesignNavigationSnapshot, readDesignMutationSnapshot, prepareDesignNavigationFrames, readDesignFrame } from "../document";
-import { designSharedCanvasReadsForTests } from "../document-storage";
+import {
+  prepareDesignNavigationFrames,
+  readDesignElementOffsetMap,
+  readDesignFrame,
+  readDesignFrameRenderIdentity,
+  readDesignFrameSelectionIdentity,
+  readDesignMutationSnapshot,
+  readDesignNavigationSnapshot,
+} from "../document";
+import { designSharedCanvasReadsForTests, readCanvas } from "../document-storage";
 import { readDesignProtocolResource } from "../protocol-resource";
 
 let root: string;
@@ -137,4 +145,25 @@ it("serves frame documents from one decoded canvas while its bytes are unchanged
   expect((await readDesignProtocolResource(root, { path: "page-1/f2.html", sourceVersion: null })).status).toBe(404);
   expect((await readDesignProtocolResource(root, { path: "page-1/f0.html", sourceVersion: null })).status).toBe(200);
   expect(designSharedCanvasReadsForTests() - reads).toBe(2);
+});
+
+it("reads frame identities and element offsets from the shared canvas, failing wherever a fresh read would", async () => {
+  await writeFile(path.join(root, directory, "page-1/f2.html"), '<html><body><main data-oid="m">f2</main></body></html>');
+  const navigation = await readDesignNavigationSnapshot(root);
+  const prepared = await prepareDesignNavigationFrames(root, navigation.catalogRevision, ["page-1/f0.html"]);
+  const reads = designSharedCanvasReadsForTests();
+  expect((await readDesignFrameSelectionIdentity(root, "page-1/f0.html")).sourceVersion).toBe(prepared.frames[0]!.sourceVersion);
+  expect((await readDesignFrameRenderIdentity(root, "page-1/f1.html")).file).toBe("page-1/f1.html");
+  expect((await readDesignElementOffsetMap(root, "page-1/f2.html")).map((offset) => offset.oid)).toEqual(["m"]);
+  expect(designSharedCanvasReadsForTests() - reads).toBe(1);
+  const outcome = (read: Promise<unknown>) => read.then(() => "read", (error: Error) => error.message);
+  const matchesFreshRead = async () =>
+    expect(await outcome(readDesignFrameSelectionIdentity(root, "page-1/f0.html"))).toBe(await outcome(readCanvas(root)));
+  await writeFile(path.join(root, directory, ".zeros-canvas.json"), "{}");
+  await matchesFreshRead();
+  await rm(path.join(root, directory, ".zeros-canvas.json"));
+  await rename(path.join(root, directory, "page-1"), path.join(root, directory, "page-1-real"));
+  await symlink(path.join(root, directory, "page-1-real"), path.join(root, directory, "page-1"));
+  expect(await outcome(readCanvas(root))).toMatch(/real directories/);
+  await matchesFreshRead();
 });
