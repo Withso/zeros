@@ -55,6 +55,7 @@ import { withDesignDocumentWrite as withDocumentWrite } from "./document-write-l
 
 import { designDirectoryNameFor } from "./directory-registry";
 import {
+  type CanvasDocument,
   type DesignFrameChange,
   type DesignFrameGeometry,
   type DesignFrameMutationInput,
