@@ -8,6 +8,7 @@ import { assertRequiredCI, requiredCIEvidence, REQUIRED_CI } from "./ci";
 import { command, jsonClient, type Command } from "./io";
 import type { RuntimeReleaseConfig } from "./runtime-contracts";
 import { requireCurrentAlphaRuntime } from "./runtime-alpha";
+import { runtimeCaller, runtimeJobNames } from "./runtime-caller";
 
 export function runtimeGithub(config: RuntimeReleaseConfig, env: NodeJS.ProcessEnv, options: { fetch?: typeof fetch; command?: Command } = {}) {
   const json = jsonClient(options.fetch), execute = options.command ?? command;
@@ -52,8 +53,9 @@ export function runtimeGithub(config: RuntimeReleaseConfig, env: NodeJS.ProcessE
       requireCheck((await execute("git", ["rev-parse", "HEAD"])).trim() === config.workflowSha &&
         !(await execute("git", ["status", "--porcelain", "--untracked-files=normal"])).trim(), "Runtime controller checkout must be the clean dispatched commit");
       const run = await read(`/actions/runs/${config.runId}/attempts/${config.runAttempt}`);
+      const file = config.workflowFile ?? "runtime-release.yml", caller = runtimeCaller(file, config.channel, config.action);
       requireCheck(String(run?.id) === config.runId && run.run_attempt === config.runAttempt && run.head_sha === config.workflowSha && run.head_branch === config.branch &&
-        run.path === ".github/workflows/runtime-release.yml" && run.event === "workflow_dispatch" &&
+        run.path === caller.path && run.event === caller.event &&
         run.repository?.full_name === config.repository && run.head_repository?.full_name === config.repository &&
         ["queued", "in_progress"].includes(run.status), "Runtime release is not owned by the exact trusted workflow attempt");
       if (config.channel === "alpha") await mainSource(config.workflowSha);
@@ -69,7 +71,7 @@ export function runtimeGithub(config: RuntimeReleaseConfig, env: NodeJS.ProcessE
           steps: z.array(z.object({ name: z.string(), status: z.string(), conclusion: z.string().nullable() })) })) }).safeParse(
           await read(`/actions/runs/${config.runId}/attempts/${config.runAttempt}/jobs?per_page=100`));
         requireCheck(jobs.success && jobs.data.jobs.length === jobs.data.total_count && jobs.data.jobs.filter(job =>
-          job.name === "Approve runtime promotion" && String(job.run_id) === config.runId && job.run_attempt === config.runAttempt &&
+          runtimeJobNames(file, "approval").includes(job.name) && String(job.run_id) === config.runId && job.run_attempt === config.runAttempt &&
           job.head_sha === config.workflowSha && job.status === "completed" && job.conclusion === "success" &&
           job.steps.some(step => step.name === "Record runtime approval" && step.status === "completed" && step.conclusion === "success")).length === 1,
           "Production runtime promotion requires this exact attempt's protected approval job");

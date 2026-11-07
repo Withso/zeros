@@ -1,10 +1,11 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { RuntimeCanaryReceiptSchema, RuntimeReleaseSchema, type RuntimeRelease } from "../../apps/control-plane/src/cloud/runtime-release";
-import { requireCheck } from "./contracts";
+import { requireCheck, SHA } from "./contracts";
 import { RuntimeBuildSchema, RuntimeQualification, LegacyRuntimeQualification, RuntimePublication, RuntimePublicationIntent,
   type RuntimeManifest, type RuntimeReleaseConfig, type RuntimeReleaseReceipt } from "./runtime-contracts";
 import type { ReleaseCanary } from "./runtime-canary";
+import { alphaRuntimeWorkflow, runtimeJobNames } from "./runtime-caller";
 
 export function runtimeJson(value: unknown): string {
   const sorted = (entry: unknown): unknown => Array.isArray(entry) ? entry.map(sorted) : entry && typeof entry === "object"
@@ -67,20 +68,42 @@ export function completeRuntimePublication(prepared: ReturnType<typeof prepareRu
 }
 
 const WorkflowRun = z.object({ id: z.number().int().positive(), run_attempt: z.number().int().positive(),
-  head_sha: z.string(), head_branch: z.string(), path: z.string(), event: z.string(), status: z.string(), conclusion: z.string().nullable(),
+  head_sha: z.string(), head_branch: z.string(), path: z.string(), event: z.string(),
+  status: z.enum(["queued", "in_progress", "completed", "waiting", "pending", "requested"]), conclusion: z.string().nullable(),
   repository: z.object({ full_name: z.string() }), head_repository: z.object({ full_name: z.string() }) });
 const Jobs = z.object({ total_count: z.number().int().min(0).max(100), jobs: z.array(z.object({
   run_id: z.number(), run_attempt: z.number().optional(), head_sha: z.string(), name: z.string(), status: z.string(), conclusion: z.string().nullable(),
   steps: z.array(z.object({ name: z.string(), conclusion: z.string().nullable() })),
 })) });
 
-export function assertRuntimeBuildProducer(config: Pick<RuntimeReleaseConfig, "runId" | "runAttempt" | "workflowSha">, value: unknown): void {
+export function assertRuntimeBuildProducer(config: Pick<RuntimeReleaseConfig, "runId" | "runAttempt" | "workflowSha" | "workflowFile">, value: unknown): void {
   const jobs = Jobs.safeParse(value);
   requireCheck(jobs.success && jobs.data.total_count === jobs.data.jobs.length && jobs.data.jobs.filter(job =>
     String(job.run_id) === config.runId && (job.run_attempt === undefined || job.run_attempt === config.runAttempt) && job.head_sha === config.workflowSha &&
-    job.name === "Runtime archive build" && job.status === "completed" && job.conclusion === "success" &&
+    runtimeJobNames(config.workflowFile ?? "runtime-release.yml", "build").includes(job.name) && job.status === "completed" && job.conclusion === "success" &&
     ["Build exact runtime", "Save runtime archive"].every(name => job.steps.some(step => step.name === name && step.conclusion === "success"))).length === 1,
     "Runtime archive lacks its successful exact-attempt publication producer");
+}
+
+export async function runtimePublicationAttempt(repository: string, proof: Pick<RuntimeRelease["qualification"], "runId" | "runAttempt">,
+  read: (path: string) => Promise<unknown>): Promise<{ workflowSha: string } | null> {
+  requireCheck(/^[1-9][0-9]{0,19}$/.test(proof.runId) && Number.isSafeInteger(proof.runAttempt) && proof.runAttempt > 0 && proof.runAttempt <= 10_000,
+    "Runtime publication reference is invalid");
+  const run = WorkflowRun.safeParse(await read(`/actions/runs/${proof.runId}/attempts/${proof.runAttempt}`));
+  const workflowFile = run.success ? alphaRuntimeWorkflow(run.data.path, run.data.event) : undefined;
+  requireCheck(run.success && String(run.data.id) === proof.runId && run.data.run_attempt === proof.runAttempt &&
+    SHA.test(run.data.head_sha) && run.data.head_branch === "main" && workflowFile &&
+    run.data.repository.full_name === repository && run.data.head_repository.full_name === repository,
+    "Runtime qualification has no trusted Alpha workflow attempt");
+  if (run.data.status !== "completed" || run.data.conclusion !== "success") return null;
+  const jobs = Jobs.safeParse(await read(`/actions/runs/${proof.runId}/attempts/${proof.runAttempt}/jobs?per_page=100`));
+  requireCheck(jobs.success && jobs.data.jobs.length === jobs.data.total_count, "Runtime publication jobs are incomplete");
+  if (jobs.data.jobs.filter(job => job.run_id === run.data.id && (job.run_attempt === undefined || job.run_attempt === proof.runAttempt) &&
+    job.head_sha === run.data.head_sha && runtimeJobNames(workflowFile, "release").includes(job.name) &&
+    job.status === "completed" && job.conclusion === "success" &&
+    ["Qualify and pin runtime", "Save runtime receipt"].every(name => job.steps.some(step => step.name === name && step.conclusion === "success"))).length !== 1) return null;
+  assertRuntimeBuildProducer({ runId: proof.runId, runAttempt: proof.runAttempt, workflowSha: run.data.head_sha, workflowFile }, jobs.data);
+  return { workflowSha: run.data.head_sha };
 }
 
 export async function verifyRuntimeQualification(config: RuntimeReleaseConfig, manifest: RuntimeManifest, value: unknown, deps: {
@@ -113,19 +136,8 @@ export async function verifyRuntimeQualification(config: RuntimeReleaseConfig, m
   requireCheck(config.action === "promote" && config.channel !== "alpha" && record.version === 2 && record.receipt.action === "publish" &&
     record.intent.action === "publish" && config.runtimeSha256 === manifest.sha256 && config.alphaRunId === proof.runId && config.alphaRunAttempt === proof.runAttempt,
     "New promotions require the exact successful Alpha publication attempt; rollback and legacy gate0 receipts do not qualify");
-  const run = WorkflowRun.safeParse(await deps.read(`/actions/runs/${proof.runId}/attempts/${proof.runAttempt}`));
-  requireCheck(run.success && String(run.data.id) === proof.runId && run.data.run_attempt === proof.runAttempt &&
-    run.data.head_sha === record.workflowSha && run.data.head_branch === "main" && run.data.path === ".github/workflows/runtime-release.yml" &&
-    run.data.event === "workflow_dispatch" && run.data.status === "completed" && run.data.conclusion === "success" &&
-    run.data.repository.full_name === config.repository && run.data.head_repository.full_name === config.repository,
-    "Runtime qualification has no successful trusted Alpha workflow attempt");
-  const jobs = Jobs.safeParse(await deps.read(`/actions/runs/${proof.runId}/attempts/${proof.runAttempt}/jobs?per_page=100`));
-  requireCheck(jobs.success && jobs.data.jobs.length === jobs.data.total_count && jobs.data.jobs.some(job => job.run_id === run.data.id &&
-    (job.run_attempt === undefined || job.run_attempt === proof.runAttempt) && job.head_sha === record.workflowSha &&
-    job.name === "Runtime release transaction" && job.status === "completed" && job.conclusion === "success" &&
-    ["Qualify and pin runtime", "Save runtime receipt"].every(name => job.steps.some(step => step.name === name && step.conclusion === "success"))),
-    "Runtime qualification has no successful producing job");
-  assertRuntimeBuildProducer({ runId: proof.runId, runAttempt: proof.runAttempt, workflowSha: record.workflowSha }, jobs.data);
+  const producer = await runtimePublicationAttempt(config.repository, proof, deps.read);
+  requireCheck(producer?.workflowSha === record.workflowSha, "Runtime qualification has no successful trusted Alpha workflow attempt");
   const build = RuntimeBuildSchema.safeParse(await deps.buildArtifact(proof.runId, proof.runAttempt));
   requireCheck(build.success && build.data.repository === config.repository && build.data.workflowSha === record.workflowSha &&
     build.data.runId === proof.runId && build.data.runAttempt === proof.runAttempt && runtimeJson(build.data.manifest) === runtimeJson(manifest),

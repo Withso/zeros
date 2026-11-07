@@ -11,7 +11,7 @@ function fixture(channel: "alpha" | "beta" | "production" = "alpha") {
   const run = { id: 123, run_attempt: 2, head_sha: config.workflowSha, head_branch: config.branch, path: ".github/workflows/runtime-release.yml", event: "workflow_dispatch",
     repository: { full_name: config.repository }, head_repository: { full_name: config.repository }, status: "in_progress" };
   const artifact = { name: "runtime-release-123-2", expired: false, workflow_run: { head_sha: config.workflowSha } };
-  const state = { head: config.workflowSha, dirty: false, moved: false, ancestor: true, ci: "success", changedTree: false, symlink: false, oversize: false, approval: true, approvalAttempt: 2 };
+  const state = { head: config.workflowSha, dirty: false, moved: false, ancestor: true, ci: "success", changedTree: false, symlink: false, oversize: false, approval: true, approvalAttempt: 2, approvalName: "Approve runtime promotion" };
   const seen: string[] = [];
   const command = vi.fn(async (file: string, args: string[], options?: { env?: NodeJS.ProcessEnv }) => {
     if (file === "git") {
@@ -42,7 +42,7 @@ function fixture(channel: "alpha" | "beta" | "production" = "alpha") {
       }
       if (url.includes("/artifacts?")) return Response.json({ total_count: 1, artifacts: [artifact] });
       if (url.includes("/jobs?")) return Response.json({ total_count: 1, jobs: [{ run_id: 123, run_attempt: state.approvalAttempt, head_sha: config.workflowSha,
-        name: "Approve runtime promotion", status: "completed", conclusion: state.approval ? "success" : "failure",
+        name: state.approvalName, status: "completed", conclusion: state.approval ? "success" : "failure",
         steps: [{ name: "Record runtime approval", status: "completed", conclusion: "success" }] }] });
       if (url.includes("/commits/")) return Response.json({ sha: state.moved ? "9".repeat(40) : config.workflowSha });
       return Response.json(run);
@@ -51,6 +51,20 @@ function fixture(channel: "alpha" | "beta" | "production" = "alpha") {
 }
 
 describe("runtime release source and workflow provenance", () => {
+  it.each([
+    ["alpha", "release-alpha.yml", "push"], ["beta", "release-beta.yml", "push"], ["production", "release.yml", "workflow_dispatch"],
+  ] as const)("authenticates the %s automatic caller and its nested approval", async (channel, file, event) => {
+    const f = fixture(channel); Object.assign(f.config, { workflowFile: file });
+    f.run.path = `.github/workflows/${file}`; f.run.event = event; f.state.approvalName = "Cloud runtime / Approve runtime promotion";
+    await expect(f.client.source()).resolves.toBeUndefined();
+    f.run.path = ".github/workflows/runtime-release.yml";
+    await expect(f.client.source()).rejects.toThrow();
+  });
+  it.each(["Approve Production release", "Other / Approve runtime promotion", "Approve runtime promotion"])("refuses a different nested approval: %s", async name => {
+    const f = fixture("production"); Object.assign(f.config, { workflowFile: "release.yml" });
+    f.run.path = ".github/workflows/release.yml"; f.state.approvalName = name;
+    await expect(f.client.source()).rejects.toThrow();
+  });
   it("checks the clean controller, exact dispatched attempt, and both exact main-source CI histories", async () => {
     const f = fixture(); await f.client.source();
     expect(f.seen.filter(u => u.includes("/compare/"))).toHaveLength(2);

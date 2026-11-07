@@ -5,7 +5,8 @@ import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 const { load } = createRequire(import.meta.url)("js-yaml") as { load(value: string): any };
-const text = readFileSync(new URL("../../.github/workflows/runtime-release.yml", import.meta.url), "utf8"), workflow = load(text);
+const dispatch = load(readFileSync(new URL("../../.github/workflows/runtime-release.yml", import.meta.url), "utf8"));
+const text = readFileSync(new URL("../../.github/workflows/runtime-release-run.yml", import.meta.url), "utf8"), workflow = load(text);
 const step = (job: any, name: string) => job.steps.find((entry: any) => entry.name === name);
 const root = fileURLToPath(new URL("../../", import.meta.url));
 const worker = JSON.parse(readFileSync(new URL("../../apps/cloud-worker/package.json", import.meta.url), "utf8"));
@@ -34,14 +35,15 @@ describe("runtime release workflow authority", () => {
     expect(JSON.stringify(cleanup)).not.toMatch(/CLOUD_V2_RUNTIME_CANARY_PRIVATE_KEY|CLOUD_RUNTIME_ALPHA_STORE/);
   });
   it("is dispatch-only with closed channel/action choices and read-only GitHub access", () => {
-    expect(Object.keys(workflow.on)).toEqual(["workflow_dispatch"]);
-    expect(workflow.on.workflow_dispatch.inputs.channel.options).toEqual(["alpha", "beta", "production"]);
-    expect(workflow.on.workflow_dispatch.inputs.action.options).toEqual(["publish", "promote", "rollback"]);
+    expect(Object.keys(dispatch.on)).toEqual(["workflow_dispatch"]);
+    expect(dispatch.on.workflow_dispatch.inputs.channel.options).toEqual(["alpha", "beta", "production"]);
+    expect(dispatch.on.workflow_dispatch.inputs.action.options).toEqual(["publish", "promote", "rollback"]);
     expect(workflow.permissions).toEqual({ contents: "read", actions: "read" });
     expect(text).not.toMatch(/contents: write|actions: write|id-token: write|secrets: inherit/);
   });
   it("holds both existing destination locks for the entire publish/qualify/pin transaction", () => {
-    expect(workflow.concurrency).toEqual({ group: "release-${{ inputs.channel }}", "cancel-in-progress": false });
+    expect(dispatch.concurrency).toEqual({ group: "release-${{ inputs.channel }}", "cancel-in-progress": false });
+    expect(workflow.concurrency).toBeUndefined();
     expect(workflow.jobs.release.concurrency).toEqual({ group: "hosted-mutation-${{ inputs.channel }}", "cancel-in-progress": false });
     expect(step(workflow.jobs.release, "Qualify and pin runtime").run).toBe("pnpm exec tsx scripts/release/runtime-cli.ts --execute");
     expect(workflow.jobs.release["timeout-minutes"]).toBe(70);
@@ -98,7 +100,7 @@ describe("runtime release CLI loading", () => {
 
   it("covers the build, release and cleanup commands", () => {
     expect(commands.map(entry => [entry.job, entry.name])).toEqual([
-      ["build", "Build exact runtime"], ["release", "Qualify and pin runtime"], ["release", "Retire runtime release authority"],
+      ["ci", "Wait for exact runtime CI"], ["build", "Build exact runtime"], ["release", "Qualify and pin runtime"], ["release", "Retire runtime release authority"],
     ]);
   });
 
@@ -124,10 +126,11 @@ describe("runtime release CLI loading", () => {
     });
     expect(result.error).toBeUndefined();
     expect(result.status).toBe(1);
-    expect(result.stderr.trim()).toBe(command.includes("runtime-build-cli.ts")
+    expect(result.stderr.trim()).toBe(command.includes("runtime-auto-cli.ts")
+      ? "Usage: runtime-auto-cli.ts --resolve | --wait-ci in a release workflow" : command.includes("runtime-build-cli.ts")
       ? "Runtime build takes its immutable inputs from the workflow environment"
       : "Usage: runtime-cli.ts --execute | --cleanup in the dispatched runtime release workflow");
-  });
+  }, 60_000);
 });
 
 describe("runtime release database CI admission", () => {

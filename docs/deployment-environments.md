@@ -529,13 +529,42 @@ signed desktop artifact publication.
 
 ### Runtime release qualification
 
-The **Cloud runtime release** workflow (`runtime-release.yml`) is dispatch-only.
-It builds an exact main commit with successful Preflight and CodeQL, publishes
+The manual **Cloud runtime release** wrapper (`runtime-release.yml`) and the
+channel releases use the same `runtime-release-run.yml` runner. It builds an
+exact main commit with successful Preflight and CodeQL, publishes
 by SHA-256, then pins and deploys it on Alpha. Alpha is the canary: a broken
 runtime reaches Alpha users first, and rollback is the recovery. A successful
 Alpha publish attempt is required before promotion to Beta or Production.
 The workflow redeploys the unchanged live control-plane commit; it does not
 publish a desktop or web release.
+Automatic Alpha publication resolves the runtime after hosted promotion, inside
+the existing `release-alpha` publication lock. It publishes when the canonical
+archive inputs or the complete control-plane/protocol qualification trees
+change, or when the pin has no provenance. The runtime waits for full Preflight
+and CodeQL even when the hosted Alpha lane used its faster admission gate.
+Beta and Production resolve after hosted promotion and promote only Alpha's
+qualified pin from an ancestor with the same archive inputs and qualifying
+code as their release source. Unavailable, unqualified, newer or incompatible
+Alpha state fails the release; it does not silently keep a different old pin.
+A disabled cloud capability or a matching qualified pin can skip the runtime
+job. Feed publication waits for a successful runtime job or that verified skip.
+Pin metadata alone cannot authorize a skip: the resolver also checks the
+recorded Alpha attempt and its successful build/publication jobs. A known
+incomplete or failed enclosing Alpha attempt causes fresh Alpha publication;
+unavailable evidence fails resolution. This recovers a pin left behind when a
+later desktop publication failed without accepting that failed attempt for
+Beta or Production.
+The hosted control plane may already be deployed when a runtime job fails;
+the manual wrapper remains available for recovery, promotion and rollback.
+
+Only the caller holds `release-<channel>`. The reusable runner has no workflow
+lock and takes `hosted-mutation-<channel>` only for its mutation job, after
+hosted promotion has released it. Production retains the protected runtime
+approval, so an automatic Production release may need another approval after
+the initial hosted/signing approval. Caller paths, events, exact attempts and
+nested producer/approval names are checked together; historic manual proofs
+remain readable.
+
 Beta and Production promotion copies and re-hashes the same archive without
 rebuilding it. Archives, source manifests and qualification receipts are
 retained under `cloud-v2/runtime/releases/`, outside the ordinary publisher's

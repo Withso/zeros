@@ -738,8 +738,7 @@ describe("repository layout contracts", () => {
     expect(beta).toContain("environment: beta");
     expect(alpha).not.toContain("workflow_dispatch:");
     expect(beta).not.toContain("workflow_dispatch:");
-    // Signing (build), Apple submission/notarization polling and feed
-    // publication each need Production secrets; nothing else may declare it.
+    // The read-only resolver needs channel variables; the other jobs need secrets.
     const productionJobs = [
       ...stable.matchAll(
         /^  ([a-z][a-z_-]*):\n(?:(?!^  [a-z][a-z_-]*:\n)[\s\S])*?^    environment: production$/gm,
@@ -749,6 +748,7 @@ describe("repository layout contracts", () => {
       "build",
       "notarize",
       "publish",
+      "runtime-resolve",
       "submit",
     ]);
     expect(stable).toContain("Require a Beta-validated release branch");

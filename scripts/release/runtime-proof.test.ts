@@ -37,6 +37,22 @@ function fixture() {
 }
 
 describe("immutable runtime qualification provenance", () => {
+  it.each(["manual-wrapper", "automatic-alpha"])("accepts the exact nested %s producers", async mode => {
+    const f = fixture(), prefix = mode === "automatic-alpha" ? "Alpha publication / Cloud runtime / " : "Cloud runtime / ";
+    if (mode === "automatic-alpha") { f.run.path = ".github/workflows/release-alpha.yml"; f.run.event = "push"; }
+    for (const job of f.jobs.jobs) job.name = prefix + job.name;
+    expect(await verifyRuntimeQualification(f.promotion, f.manifest, f.record, f.deps)).toEqual(f.record);
+  });
+  it.each(["prefix", "event", "attempt", "build", "approval-parent"])("refuses nested %s substitution", async change => {
+    const f = fixture(); f.run.path = ".github/workflows/release-alpha.yml"; f.run.event = "push";
+    for (const job of f.jobs.jobs) job.name = "Alpha publication / Cloud runtime / " + job.name;
+    if (change === "prefix") f.jobs.jobs[0].name = "Untrusted / Runtime release transaction";
+    if (change === "event") f.run.event = "workflow_dispatch";
+    if (change === "attempt") f.jobs.jobs[0].run_attempt++;
+    if (change === "build") f.jobs.jobs[1].name = "Cloud runtime / Runtime archive build";
+    if (change === "approval-parent") f.run.path = ".github/workflows/release.yml";
+    await expect(verifyRuntimeQualification(f.promotion, f.manifest, f.record, f.deps)).rejects.toThrow();
+  });
   it("refuses legacy gate0-only evidence for a new promotion even when its Alpha workflow succeeded", async () => {
     const f = fixture(), config = { ...f.config, channel: "beta" as const, action: "promote" as const,
       branch: "release/1.2.3", runtimeSha256: f.manifest.sha256, alphaRunId: "123", alphaRunAttempt: 2 };
