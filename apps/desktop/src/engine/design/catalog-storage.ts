@@ -53,7 +53,11 @@ export function inspectDesignCatalog(root: string, directory: string, options: {
   };
 }
 
-export function designCatalogRevision(inspection: Pick<ReturnType<typeof inspectDesignCatalog>, "layout" | "registration" | "source">): string {
+export function designCatalogRevision(inspection: {
+  layout: { manifestFile: string; documentFile: string };
+  registration: string;
+  source: string;
+}): string {
   return createHash("sha256")
     .update(
       JSON.stringify([
