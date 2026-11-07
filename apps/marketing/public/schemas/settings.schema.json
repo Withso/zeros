@@ -894,44 +894,15 @@
       "properties": {
         "enabled": {
           "type": "boolean",
-          "description": "Legacy fallback for provider-specific browser integration switches."
-        },
-        "codex_enabled": {
-          "type": "boolean",
-          "description": "Enable Codex browser use in the in-app Chromium tab."
-        },
-        "codex_native": {
-          "type": "boolean",
-          "description": "Let Codex use its built-in Browser plugin. Off, Codex uses the Zeros browser tools instead."
+          "description": "Let agents use a browser: the in-app Zeros browser, or Chrome for Claude when chosen."
         },
         "claude_enabled": {
           "type": "boolean",
-          "description": "Enable Claude's official external Chrome integration."
-        },
-        "in_app_enabled": {
-          "type": "boolean",
-          "description": "Let Claude and Cursor use the in-app Zeros browser when Claude is not set to use Chrome."
-        },
-        "provider": {
-          "type": "string",
-          "const": "isolated",
-          "description": "In-app host backend for native Codex IAB. Currently supports isolated only."
+          "description": "Use Claude Code with Chrome: Claude uses your Chrome and its extension instead of the in-app browser."
         },
         "auto_open": {
           "type": "boolean",
           "description": "Reveal the Browser workbench tab when an active agent opens a page."
-        },
-        "show_agent_cursor": {
-          "type": "boolean",
-          "description": "Show the short-lived agent pointer inside the shared browser page."
-        },
-        "navigation_approval": {
-          "type": "string",
-          "enum": [
-            "always-ask",
-            "always-allow"
-          ],
-          "description": "Whether agents ask before opening a website. Consequential actions remain separately gated."
         }
       }
     },
@@ -940,15 +911,11 @@
       "properties": {
         "enabled": {
           "type": "boolean",
-          "description": "Let agents control Mac apps with Zeros computer use."
-        },
-        "codex_native": {
-          "type": "boolean",
-          "description": "Let Codex use its built-in computer use. Off, Codex uses Zeros computer use when it is enabled."
+          "description": "Let agents use apps on this Mac, except blocked apps."
         },
         "show_agent_cursor": {
           "type": "boolean",
-          "description": "Show the agent's cursor while it controls an app."
+          "description": "Show each agent's cursor while it uses an app or the in-app browser."
         },
         "blocked_apps": {
           "maxItems": 256,

@@ -16,7 +16,6 @@ import type { PluginReadResponse } from "./generated/v2/PluginReadResponse";
 import { codexPluginMcpServerNames } from "../../mcp-scan";
 import type { JsonValue as GenJsonValue } from "./generated/serde_json/JsonValue";
 import type { CodexAppServerHandle } from "./app-server";
-import { isBundledCodexRuntimePlugin } from "./bundled-runtime-plugins";
 import { isDeepStrictEqual } from "node:util";
 import { parse as parseToml } from "smol-toml";
 import { buildMcpServerOverrides } from "./mcp-overrides";
@@ -59,8 +58,6 @@ const CODEX_INTERNAL_SERVER_NAMES = ["codex_apps"] as const;
 export interface NativeMcpSurface {
   serverNames: string[];
   registeredServerNames?: string[];
-  /** Registered servers verified with inert keys from the user's own layer. */
-  userLayerServerNames?: string[];
   /** Local declarations must not inherit an internal account bridge's exemption. */
   shadowedAccountServerNames?: string[];
   /** Config-declared servers that use the Streamable HTTP transport, by name →
@@ -71,16 +68,6 @@ export interface NativeMcpSurface {
    *  `url`, never add a `command`. Includes disabled config entries, since a
    *  plugin or internal server can declare the same name. */
   httpServerUrls?: Record<string, string>;
-}
-
-/** One Zeros-owned registration whose effective definition may keep inert
- * keys from the user's own Codex configuration (`$CODEX_HOME/config.toml`).
- * Repository `.codex/config.toml`, system and every other layer stay refused,
- * and Zeros' own values must still win every key it sets. */
-export interface NativeDeclarationAllowance {
-  serverName: string;
-  /** `path` is `["env", name]` for an environment entry, else `[field]`. */
-  acceptsUserKey(path: readonly string[], value: unknown): boolean;
 }
 
 /** Read the native MCP surface a thread rooted at `cwd` would start.
@@ -106,7 +93,6 @@ export async function readNativeMcpSurface(
     includePlugins?: boolean;
     requireConfig?: boolean;
     registeredServers?: readonly McpServerRegistration[];
-    nativeDeclarationAllowance?: NativeDeclarationAllowance;
   },
 ): Promise<NativeMcpSurface> {
   let merged: unknown;
@@ -139,26 +125,12 @@ export async function readNativeMcpSurface(
       return { names: [] as string[], httpUrls: {} as Record<string, string> };
     });
   const registered = opts?.registeredServers ?? [];
-  const allowance = opts?.nativeDeclarationAllowance;
-  let registeredServerNames: string[];
-  let userLayerServerNames: string[] = [];
-  try {
-    registeredServerNames = verifiedRegistrations(merged, registered);
-  } catch (error) {
-    if (!allowance || !(error instanceof McpConfigurationConflictError) || error.serverName !== allowance.serverName)
-      throw error;
-    // Only a conflict on the allowed registration pays for the layer payload.
-    const accepted = await userLayerExtras(runtime, cwd, merged, registered, allowance, opts?.timeoutMs)
-      .catch(() => null);
-    if (!accepted) throw error;
-    registeredServerNames = verifiedRegistrations(merged, registered, { [allowance.serverName]: accepted });
-    userLayerServerNames = [allowance.serverName];
-  }
+  const registeredServerNames = verifiedRegistrations(merged, registered);
   let fromPlugins: string[] = [];
   try {
     fromPlugins =
       opts?.includePlugins === false
-        ? await localPluginMcpServerNames(runtime, cwd, opts?.codexHome)
+        ? await localPluginMcpServerNames(runtime, cwd)
         : codexPluginMcpServerNames(undefined, opts?.codexHome);
   } catch {
     // Older/partially available providers cannot prove which plugins belong
@@ -171,7 +143,6 @@ export async function readNativeMcpSurface(
   );
   return {
     ...(opts?.registeredServers ? { registeredServerNames } : {}),
-    ...(userLayerServerNames.length ? { userLayerServerNames } : {}),
     serverNames: [
       ...new Set([
         ...configured.names,
@@ -202,12 +173,10 @@ export class McpConfigurationConflictError extends Error {
 /** Codex 0.164 recursively merges even whole-table CLI overrides. A matching
  * name is not authority: verify the complete effective definition before
  * thread/start can spawn anything. Conflicts require an explicit native config
- * repair/import; never silently run a hybrid of two definitions. The single
- * exception is an allowance's verified user-layer extras (see userLayerExtras). */
+ * repair/import; never silently run a hybrid of two definitions. */
 function verifiedRegistrations(
   merged: unknown,
   servers: readonly McpServerRegistration[],
-  accepted: Readonly<Record<string, AcceptedExtras>> = {},
 ): string[] {
   const expected = expectedDefinitions(servers);
   const configured = merged && typeof merged === "object" && !Array.isArray(merged) ? merged as Record<string, unknown> : {};
@@ -215,20 +184,11 @@ function verifiedRegistrations(
   for (const [name, definition] of Object.entries(expected)) {
     const actual = Object.hasOwn(configured, name) ? configured[name] : undefined;
     if (actual === undefined) continue;
-    const extras = Object.hasOwn(accepted, name) ? accepted[name] : undefined;
-    const want = extras
-      ? { ...definition, ...extras.fields, env: { ...(plainRecord(definition.env) ?? {}), ...extras.env } }
-      : definition;
-    if (!actual || typeof actual !== "object" || Array.isArray(actual) || !isDeepStrictEqual(normalizeDefinition(actual as Record<string, unknown>), normalizeDefinition(want)))
+    if (!actual || typeof actual !== "object" || Array.isArray(actual) || !isDeepStrictEqual(normalizeDefinition(actual as Record<string, unknown>), normalizeDefinition(definition)))
       throw new McpConfigurationConflictError(name);
     names.push(name);
   }
   return names;
-}
-
-interface AcceptedExtras {
-  fields: Record<string, unknown>;
-  env: Record<string, string>;
 }
 
 /** The complete definitions Zeros passes, as Codex parses them. smol-toml
@@ -251,70 +211,11 @@ function normalizeDefinition(input: Record<string, unknown>): Record<string, unk
   return result;
 }
 
-function plainRecord(value: unknown): Record<string, unknown> | undefined {
-  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
-}
-
-/** Explain every effective difference by the user's own layer, or refuse.
- * Exactly one non-session layer may declare the server, and it must be
- * `user`; each extra key must equal that layer's value and pass the allowance.
- * Keys Zeros sets must still have Zeros' value. */
-async function userLayerExtras(
-  runtime: Pick<CodexAppServerHandle, "requestTyped">,
-  cwd: string | undefined,
-  merged: unknown,
-  servers: readonly McpServerRegistration[],
-  allowance: NativeDeclarationAllowance,
-  timeoutMs: number | undefined,
-): Promise<AcceptedExtras | null> {
-  const name = allowance.serverName;
-  const definition = expectedDefinitions(servers)[name];
-  const actual = plainRecord(plainRecord(merged)?.[name]);
-  if (!definition || !actual) return null;
-  const response = await runtime.requestTyped<
-    "config/read",
-    { layers?: Array<{ name?: { type?: unknown }; config?: unknown }> | null }
-  >("config/read", { includeLayers: true, ...(cwd ? { cwd } : {}) }, { timeoutMs: timeoutMs ?? 10_000 });
-  if (!Array.isArray(response?.layers)) return null;
-  let user: Record<string, unknown> | undefined;
-  for (const layer of response.layers) {
-    const declared = plainRecord(plainRecord(layer?.config)?.mcp_servers);
-    if (!declared || !Object.hasOwn(declared, name)) continue;
-    const type = layer?.name?.type;
-    if (type === "sessionFlags") continue;
-    const declaration = plainRecord(declared[name]);
-    if (type !== "user" || user || !declaration) return null;
-    user = declaration;
-  }
-  if (!user) return null;
-  const want = normalizeDefinition(definition);
-  const have = normalizeDefinition(actual);
-  const extras: AcceptedExtras = { fields: {}, env: {} };
-  for (const key of new Set([...Object.keys(want), ...Object.keys(have)])) {
-    if (key === "env" || isDeepStrictEqual(have[key], want[key])) continue;
-    if (Object.hasOwn(want, key) || !isDeepStrictEqual(user[key], have[key]) || !allowance.acceptsUserKey([key], have[key]))
-      return null;
-    extras.fields[key] = have[key];
-  }
-  const wantEnv = plainRecord(want.env) ?? {};
-  const haveEnv = plainRecord(have.env) ?? {};
-  const userEnv = plainRecord(user.env) ?? {};
-  for (const key of new Set([...Object.keys(wantEnv), ...Object.keys(haveEnv)])) {
-    const value = haveEnv[key];
-    if (isDeepStrictEqual(value, wantEnv[key])) continue;
-    if (Object.hasOwn(wantEnv, key) || typeof value !== "string" || userEnv[key] !== value || !allowance.acceptsUserKey(["env", key], value))
-      return null;
-    extras.env[key] = value;
-  }
-  return extras;
-}
-
 /** Account-managed packages may be materialized on disk too. Use provider
  * provenance rather than filesystem location or an HTTP transport heuristic. */
 async function localPluginMcpServerNames(
   runtime: Pick<CodexAppServerHandle, "requestTyped">,
   cwd?: string,
-  codexHome?: string,
 ): Promise<string[]> {
   const response = await runtime.requestTyped<
     "plugin/installed",
@@ -348,10 +249,6 @@ async function localPluginMcpServerNames(
       for (;;) {
         const item = local.shift();
         if (!item) return;
-        if (
-          await isBundledCodexRuntimePlugin(item.market, item.plugin, codexHome)
-        )
-          continue;
         const remaining = deadline - Date.now();
         if (remaining <= 0) throw new Error("Plugin discovery timed out");
         const result = await runtime.requestTyped<
@@ -433,18 +330,29 @@ export function scopeNativeMcpSurface(
  *  the SERVER by name is what actually takes effect, which is why this reaches
  *  into `mcp_servers` for names that were never declared there.
  *
- *  Nested rather than the dotted-key form `codexBrowserThreadConfig` uses:
+ *  Nested rather than the dotted-key form `codexBuiltInPluginsThreadConfig` uses:
  *  server names are user-authored TOML keys and may contain a `.`, which a key
  *  path would silently split into the wrong table.
+ *
+ *  A thread's `mcp_servers` table replaces the `-c` servers the app-server
+ *  was started with (verified on Codex 0.166), so the servers Zeros
+ *  registered are restated here exactly as `-c` passed them; otherwise every
+ *  Zeros tool (browser, computer, simulators, Local, Design) vanishes from
+ *  the thread. No secret is added: these are the same definitions, and HTTP
+ *  credentials stay environment references.
  *
  *  An empty surface yields an empty fragment, so a caller can spread this
  *  unconditionally. */
 export function mcpDisabledThreadConfig(
   surface: NativeMcpSurface,
+  registered: readonly McpServerRegistration[] = [],
 ): Record<string, GenJsonValue> {
   if (surface.serverNames.length === 0) return {};
   const servers: Record<string, GenJsonValue> = Object.create(null);
+  for (const [name, definition] of Object.entries(expectedDefinitions(registered)))
+    servers[name] = definition as GenJsonValue;
   for (const name of surface.serverNames) {
+    if (Object.hasOwn(servers, name)) continue;
     // An http server keeps its own `url` as the placeholder transport. Adding
     // `command` to a table that already has `url` makes codex reject the whole
     // config ("url is not supported for stdio") and the thread never starts —

@@ -4,7 +4,8 @@ export interface SettingsSectionAvailability {
   local: boolean;
   cloudEnabled: boolean;
   terminalAgentsEnabled: boolean;
-  computerUseActive: boolean;
+  /** `computerUseSectionOpen`: the only rows an organization's General has. */
+  computerUseSectionActive: boolean;
   simulatorsActive: boolean;
   internalUser: boolean;
 }
@@ -17,16 +18,18 @@ export function isSettingsSectionAvailable(
     (context.local
       ? id !== "cloud-computer"
       : [
+          // An organization's General holds only this Mac's computer use and
+          // privacy controls.
+          "general",
           "providers",
           "integrations",
           "cloud-computer",
           "browser-use",
-          "computer-use",
           "simulators",
         ].includes(id)) &&
     (context.cloudEnabled || id !== "cloud-computer") &&
     (context.terminalAgentsEnabled || id !== "terminal-agents") &&
-    (context.computerUseActive || id !== "computer-use") &&
+    (context.local || context.computerUseSectionActive || id !== "general") &&
     (context.simulatorsActive || id !== "simulators") &&
     (context.internalUser || id !== "internal")
   );

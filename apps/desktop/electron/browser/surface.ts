@@ -484,14 +484,10 @@ export function browserAgentNavigationDisposition(input: {
   navigationApproval: "always-ask" | "always-allow";
   siteAllowed: boolean;
   preapprovedOrigin: string | null;
-  /** The official provider plugin already elicited this top-level origin.
-   * Zeros must not stack a second native card over the provider's card. */
-  officialProviderOwnsOriginApproval?: boolean;
 }): BrowserAgentNavigationDisposition {
   if (
     !input.isMainFrame ||
     input.actor === "user" ||
-    input.officialProviderOwnsOriginApproval === true ||
     input.navigationApproval === "always-allow" ||
     input.siteAllowed ||
     input.currentOrigin === input.targetOrigin ||
@@ -967,49 +963,6 @@ export function browserAgentPointerOverlayScript(
     }
     return true;
   })()`;
-}
-
-/** Chromium reports Page.navigate `ERR_ABORTED` for a successful redirect
- * when the original request is superseded. Recover only after a different,
- * usable HTTP(S) document has committed; blocked/unchanged pages and every
- * other network error remain genuine failures. */
-export function normalizeCodexPageNavigateResult(
-  result: unknown,
-  context: {
-    requestedUrl: string;
-    previousUrl: string;
-    currentUrl: string;
-    usableDocument: boolean;
-  },
-): unknown {
-  if (!result || typeof result !== "object" || Array.isArray(result)) {
-    return result;
-  }
-  const response = result as Record<string, unknown>;
-  if (
-    response.errorText !== "net::ERR_ABORTED" ||
-    !context.usableDocument ||
-    !differentHttpDocument(context.previousUrl, context.currentUrl) ||
-    !differentHttpDocument(context.requestedUrl, context.currentUrl)
-  ) {
-    return result;
-  }
-  const normalized = { ...response };
-  delete normalized.errorText;
-  return normalized;
-}
-
-function differentHttpDocument(left: string, right: string): boolean {
-  try {
-    const leftUrl = new URL(left);
-    const rightUrl = new URL(right);
-    return (
-      (rightUrl.protocol === "http:" || rightUrl.protocol === "https:") &&
-      leftUrl.href !== rightUrl.href
-    );
-  } catch {
-    return false;
-  }
 }
 
 const BROWSER_NAMED_KEYS: ReadonlyMap<string, string> = new Map([

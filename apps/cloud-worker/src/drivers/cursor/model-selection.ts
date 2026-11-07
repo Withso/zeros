@@ -39,6 +39,13 @@ export class CursorModelCatalog {
     }
   }
 
+  /** The record @cursor/sdk finds for `selection`, by id or alias in listed order. */
+  nativeRecord(selection: CursorModelSelection): CursorModelRecord | undefined {
+    for (const record of this.records.values())
+      if (record.id === selection.id || record.aliases?.includes(selection.id)) return record;
+    return undefined;
+  }
+
   selection(requested: string, effort: string | undefined, fast: boolean): CursorModelSelection {
     const model = requested.trim();
     if (REGISTRY_MODELS.has(model) && !this.ids.has(model)) throw unavailableSettings();

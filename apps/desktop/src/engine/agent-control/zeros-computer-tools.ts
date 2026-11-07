@@ -33,25 +33,15 @@ export interface ZerosComputerToolPorts {
   release(reason: "turn-end" | "stop"): Promise<boolean>;
 }
 
-/** Whether an agent family may call `zeros_computer` on its Settings route. */
+/** Whether an agent may call `zeros_computer` on its Settings route. One
+ * switch decides for every agent, Codex included. */
 export function zerosComputerToolPolicy(
-  agentFamily: string,
   route: ComputerUseRoute,
 ): ZerosComputerToolPolicy {
   if (route === "zeros") return { ok: true };
-  if (route === "codex-native") {
-    return {
-      ok: false,
-      reason:
-        "Codex is set to use its built-in computer use in Settings > Computer use.",
-    };
-  }
   return {
     ok: false,
-    reason:
-      agentFamily === "codex"
-        ? "Computer use is turned off for Codex in Settings > Computer use."
-        : "Computer use is turned off in Settings > Computer use.",
+    reason: "Computer use is turned off in Settings > General.",
   };
 }
 
@@ -70,7 +60,7 @@ export class ZerosComputerTools extends HostedControlTools<ComputerToolName> {
         retired: "Computer tools were retired for this agent session.",
         failed: "The computer action failed.",
         unreadable:
-          "Computer use settings could not be read. Check Settings > Computer use.",
+          "Computer use settings could not be read. Check Settings > General.",
       },
     });
   }

@@ -8,9 +8,9 @@ behavior, and the staged rollout of these features.
 Related guides:
 
 - [Browser service](browser-service.md) owns page hosting, isolation, the
-  loopback service, Codex's IAB host and artifacts.
-- [Native computer and browser use](native-computer-use.md) owns the
-  provider-native Codex plugins and macOS permissions.
+  loopback service and artifacts.
+- [Computer use](native-computer-use.md) owns the Cua driver runtime, the
+  disabled Codex plugins and macOS permissions.
 - [Simulators](simulators.md) owns the Simulator tab and the `zeros_device`
   tools, which follow the approval, control bar and Stop rules here.
 
@@ -22,40 +22,40 @@ boots and again on every `zeros_browser` call, so a Settings change applies to
 a running agent. Settings and the Browser session controller use the same
 function, so the UI never disagrees with the engine.
 
-| Agent  | Route                                                                                                                                                                                                                  |
-| ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Codex  | Its built-in Browser plugin (`codex-native`) by default. With "Use Codex's built-in browser" off, `zeros_browser`. With the plugin unusable, `zeros_browser` and one toast. With "Enable browser use" off, no browser. |
-| Claude | Claude in Chrome (`claude-chrome`) when "Use Claude Code with Chrome" is on. Otherwise `zeros_browser`, unless "Allow Claude and Cursor to use the in-app browser" is off.                                             |
-| Cursor | `zeros_browser`, unless "Allow Claude and Cursor to use the in-app browser" is off.                                                                                                                                    |
+| Agent  | Route                                                                                              |
+| ------ | -------------------------------------------------------------------------------------------------- |
+| Codex  | `zeros_browser`. Codex never uses its built-in Browser plugin.                                     |
+| Claude | Claude in Chrome (`claude-chrome`) when "Use Claude Code with Chrome" is on, else `zeros_browser`. |
+| Cursor | `zeros_browser`.                                                                                   |
+
+"Enable browser use" decides for every agent: off, no agent gets a browser,
+Claude's Chrome included. While the Zeros browser rollout is closed, only
+Claude's chosen Chrome remains.
 
 The settings live in the engine-owned `[browser]` table, which only the user
-and managed layers may set:
+and managed layers may set. Every key has a row in Settings > Browser:
 
-| Key                   | Default        | Meaning                                                                      |
-| --------------------- | -------------- | ---------------------------------------------------------------------------- |
-| `codex_enabled`       | `true`         | Codex may browse. Falls back to the legacy `enabled` key when unset.         |
-| `codex_native`        | `true`         | Codex uses its built-in Browser plugin. Off routes Codex to `zeros_browser`. |
-| `claude_enabled`      | `false`        | Claude uses Claude in Chrome instead of the in-app browser.                  |
-| `in_app_enabled`      | `true`         | Claude and Cursor may use the in-app browser.                                |
-| `auto_open`           | `true`         | Reveal the Browser tab when any agent starts browsing.                       |
-| `show_agent_cursor`   | `true`         | Draw the agent's pointer in the page.                                        |
-| `navigation_approval` | `"always-ask"` | Whether agents ask before opening a website. Risky actions always ask.       |
+| Key              | Default | Meaning                                                                |
+| ---------------- | ------- | ---------------------------------------------------------------------- |
+| `enabled`        | `true`  | "Enable browser use": agents may use a browser.                        |
+| `claude_enabled` | `false` | "Use Claude Code with Chrome": Claude uses Chrome, not the in-app one. |
+| `auto_open`      | `true`  | "Open the Browser tab automatically" when any agent starts browsing.   |
 
-Electron main closes every in-app page when no agent's route uses the in-app
-browser, and rejects Codex IAB traffic when Codex's route is not
-`codex-native`.
+The agent's pointer follows `[computer_use] show_agent_cursor` ("Show agent
+cursor" in Settings > General). Retired keys (`codex_enabled`,
+`in_app_enabled`, `codex_native`, `provider`, `show_agent_cursor`,
+`navigation_approval`, and `[computer_use]` `app_access` and `codex_native`)
+have no effect except through the keys that replaced them. Each layer is folded
+as it is read (`settings/retired-agent-control.ts`), so an opt-out stays in
+force, and locked, in the layer that set it, managed included: a browser denied
+to any agent stays off for every agent, and a hidden pointer hides the agent
+cursor. Zeros no longer asks before opening a website, so a managed
+`navigation_approval = "always-ask"` turns browser use off instead of dropping
+the question; in the user's own file it is ignored. The engine removes the
+retired keys from the user's file at start (`settings/agent-control-migration.ts`).
 
-### Codex fallback
-
-Engine admission serves `zeros_browser` to Codex on both of its routes. When
-the app-server adapter loads OpenAI's Browser plugin, it removes
-`zeros_browser` from that thread, so Codex never sees two browsers. When the
-plugin cannot start (missing runtime, unrecognized plugin layout, kernel
-containment), the thread keeps `zeros_browser` and the engine emits an
-`AGENT_CAPABILITY_NOTICE`. The renderer shows an info toast once per notice
-and plugin version for the app session: "Codex's built-in browser isn't
-available, so Codex is using the Zeros browser." When the chat has no
-substitute, the toast is a warning that Codex will work without a browser.
+Electron main closes every in-app page when browser use is off. Codex's
+bundled Browser and Chrome plugins are disabled on every Codex thread.
 
 ## `zeros_browser` tools
 
@@ -73,8 +73,8 @@ are valid only for the latest snapshot.
 
 `ZerosBrowserTools` (`zeros-browser-tools.ts`) binds every call to the
 admitted workspace and conversation; tool arguments never choose either. It
-acquires the conversation's browser session, the same page the Browser tab and
-Codex's IAB host use. A call fails once the workspace is archived, moved or
+acquires the conversation's browser session, the same page the Browser tab
+shows. A call fails once the workspace is archived, moved or
 re-placed. Each call names the agent family to the browser host, which shows
 it in the control bar.
 
@@ -82,15 +82,38 @@ When a provider turn that used the browser ends, `endPrompt` sends `close`:
 a handoff that keeps the page, its history and cookies, and returns control
 to the user.
 
+## Shell commands
+
+Agents reach for their shell first, so every chat admitted for the Zeros
+browser or computer use also gets `zeros browser …` and `zeros computer …` on
+`PATH` (the shared `zeros` launcher, `pathPrepend`). Each command is one
+`POST /call {name, arguments}` to that chat's existing agent-control server,
+beside `/mcp`, with the same bearer (`ZEROS_*_TOOLS_CAPABILITY`) and a
+`ZEROS_COMPUTER_TOOLS_URL` / `ZEROS_BROWSER_TOOLS_URL` for the route. Admission,
+blocked apps, the control bar, Stop and the per-turn lease are therefore
+exactly the tools'. `/call` refuses any request with an `Origin`.
+
+One command can resolve an app by name, open a URL in it without taking focus
+(`open_url`, Launch Services `open -g -b`), wait for a window title, and save
+screenshots to files; `batch` runs several steps in one process. Browser reads
+are compacted to about 2,000 characters with refs kept (`--find`, `--full`).
+The CLI lives in `apps/desktop/src/engine/agent-control/control-cli.ts`; a
+one-line brief before each turn names it. A sandboxed shell that cannot open
+the loopback connection is told to use the tools instead.
+
 ## Approvals
 
-Website opening (per `navigation_approval`), sign-in, payment, publishing,
-destructive actions, form submission, uploads, downloads and browser
-permissions go through the browser host's confirmation broker. Each request
-appears as a `PermissionCard` in the owning chat. Claude skips its own
-per-call tool card for the engine-registered `zeros_browser` server, because
-the host already asks before risky actions; a project or plugin server with
-the same name keeps the normal card.
+Agents use any app that is not blocked, without a card, and open websites
+without asking. Sign-in, payment, publishing, destructive actions, form
+submission, uploads, downloads and browser permissions still go through the
+browser host's confirmation broker. Each request appears as a
+`PermissionCard` in the owning chat. Claude skips its own per-call tool card
+for the engine-registered `zeros_browser` server, because the host already
+asks before risky actions; a project or plugin server with the same name
+keeps the normal card. Codex gets the same: the engine registers
+`zeros_browser`, `zeros_computer` and `zeros_device` with
+`default_tools_approval_mode = "approve"`, so Codex does not add its own
+approval for each call.
 
 ## The control bar
 
@@ -134,9 +157,7 @@ own Stop does this directly.
 ## Transcript
 
 `zeros_browser` calls render as Browser activity rows with inline screenshots,
-whichever agent made them, through `groupBrowserToolActivity`. Codex's native
-browser and computer-use calls keep their provider titles inside the same
-grouping. See [Tool presentation](agent-tool-presentation.md).
+whichever agent made them, through `groupBrowserToolActivity`. See [Tool presentation](agent-tool-presentation.md).
 
 ## Local and cloud
 
@@ -150,8 +171,7 @@ Organizations can lock every switch above through managed settings.
 ## Rollout
 
 Four features reach users in stages through this table: the Zeros browser
-(`zeros_browser` for Claude Code and Cursor, and Codex's switch to it), Zeros
-computer use, simulators, and the [Zeros Local CLI](local-cli.md)
+(`zeros_browser` for every agent), Zeros computer use, simulators, and the [Zeros Local CLI](local-cli.md)
 (`localOrchestration`). The Codex browser fixes ship to everyone and have no
 gate. `AGENT_CONTROL_ROLLOUT` in
 `packages/protocol/src/agent-control-rollout.ts` sets each feature's stage,
@@ -169,8 +189,8 @@ them. Their normal Settings, approvals, managed policy and workspace support
 still apply: cloud does not gain Browser, computer use or simulators, and
 Zeros Local CLI remains scoped to Personal Local workspaces.
 Computer use also defaults on in normal settings; existing explicit opt-outs
-remain off. Accessibility, Screen Recording, blocked apps and per-app approval
-requirements still apply before an agent can control an app.
+remain off. Accessibility, Screen Recording and blocked apps still apply
+before an agent can control an app.
 
 The Internal tab instead offers a default-on Resource summary switch for
 authorized internal users. It shows live full-app memory in the sidebar and
@@ -182,15 +202,12 @@ own Settings, approvals or managed policy.
 
 A closed feature behaves as Zeros did before it:
 
-- **Zeros browser:** Codex keeps its built-in browser with no `zeros_browser`
-  fallback, so a plugin that cannot start shows the warning toast. Claude
-  Code keeps Claude in Chrome when that is on, and Cursor gets no browser.
-  Settings → Browser use hides "Use Codex's built-in browser", "Allow Claude
-  and Cursor to use the in-app browser" and "Show agent cursor". Pages get no
-  control bar, and Esc in an agent-owned page does not stop the agent.
-- **Computer use:** Settings → Computer use is hidden. Codex keeps its
-  built-in computer use, other agents get no `zeros_computer` tools, and
-  Electron main refuses computer use calls.
+- **Zeros browser:** no agent gets the in-app browser; Claude Code keeps
+  Claude in Chrome when that is on. Pages get no control bar, and Esc in an
+  agent-owned page does not stop the agent.
+- **Computer use:** the Computer use section of Settings → General is hidden,
+  no agent gets `zeros_computer` tools, and Electron main refuses computer use
+  calls.
 - **Simulators:** Settings → Simulators and the "+" menu entries are hidden,
   a restored Simulator tab says simulators aren't available, a dropped video
   attaches without key frames, and agents get no `zeros_device` tools.

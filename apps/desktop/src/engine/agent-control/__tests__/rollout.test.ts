@@ -71,38 +71,25 @@ describe("agent control rollout in the engine", () => {
     expect(agentControlFeatureAvailable("zerosBrowser")).toBe(false);
   });
 
-  it("routes browsers as they were before the Zeros browser while it is closed", () => {
-    settings({
-      browser: {
-        codex_native: false,
-        in_app_enabled: true,
-        provider: "isolated",
-      },
-    });
+  it("gives no agent the in-app browser while it is closed, keeping Claude's chosen Chrome", () => {
+    settings({ browser: { enabled: true } });
     setAgentControlAvailability(OPEN);
     expect(browserRoutes()).toEqual(["zeros", "zeros", "zeros"]);
 
     setAgentControlAvailability(CLOSED);
-    expect(browserRoutes()).toEqual(["codex-native", "off", "off"]);
+    expect(browserRoutes()).toEqual(["off", "off", "off"]);
 
-    // The switches that predate the Zeros browser keep working.
-    settings({
-      browser: {
-        codex_enabled: false,
-        claude_enabled: true,
-        provider: "isolated",
-      },
-    });
+    settings({ browser: { enabled: true, claude_enabled: true } });
     expect(browserRoutes()).toEqual(["off", "claude-chrome", "off"]);
   });
 
-  it("keeps Codex's built-in computer use and gives no one else any while it is closed", () => {
-    settings({ computer_use: { enabled: true, codex_native: false } });
+  it("gives no agent computer use while it is closed", () => {
+    settings({ computer_use: { enabled: true } });
     setAgentControlAvailability(OPEN);
     expect(computerRoutes()).toEqual(["zeros", "zeros", "zeros"]);
 
     setAgentControlAvailability({ ...OPEN, computerUse: false });
-    expect(computerRoutes()).toEqual(["codex-native", "off", "off"]);
+    expect(computerRoutes()).toEqual(["off", "off", "off"]);
   });
 
   it("gives no agent the simulator tools while simulators are closed", () => {
@@ -116,12 +103,12 @@ describe("agent control rollout in the engine", () => {
 
   it("closes each feature on its own", () => {
     settings({
-      browser: { codex_native: false, provider: "isolated" },
-      computer_use: { enabled: true, codex_native: false },
+      browser: { enabled: true },
+      computer_use: { enabled: true },
       simulators: { enabled: true },
     });
     setAgentControlAvailability({ ...OPEN, zerosBrowser: false });
-    expect(browserRoutes()).toEqual(["codex-native", "off", "off"]);
+    expect(browserRoutes()).toEqual(["off", "off", "off"]);
     expect(computerRoutes()).toEqual(["zeros", "zeros", "zeros"]);
     expect(deviceRoutes()).toEqual(["zeros", "zeros", "zeros"]);
   });

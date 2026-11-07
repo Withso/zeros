@@ -36,7 +36,6 @@ import {
   UserPlus,
   Lock,
   Globe2,
-  MousePointerClick,
   Smartphone,
   Trash2,
   type LucideIcon,
@@ -88,7 +87,11 @@ import { CodeThemePreview } from "./code-theme-preview";
 import { useOrganizationProjects } from "../../state/use-organization-projects";
 import { ProvidersPanel } from "./providers-panel";
 import { BrowserUsePanel } from "./browser-use-panel";
-import { ComputerUsePanel } from "./computer-use-panel";
+import {
+  ComputerPermissionRows,
+  ComputerUseSettingsSection,
+} from "./computer-use-panel";
+import { computerUseSectionOpen } from "./computer-use-settings";
 import { SimulatorsPanel } from "./simulators-panel";
 import { TerminalAgentsSection } from "./terminal-agents-section";
 import { GitDefaultsSection } from "./git-defaults-section";
@@ -180,7 +183,6 @@ type SectionId =
   | "models"
   | "providers"
   | "browser-use"
-  | "computer-use"
   | "simulators"
   | "terminal-agents"
   | "environment"
@@ -240,12 +242,6 @@ const SECTIONS: SectionDef[] = [
     label: "Browser",
     icon: Globe2,
     Panel: BrowserUsePanel,
-  },
-  {
-    id: "computer-use",
-    label: "Computer use",
-    icon: MousePointerClick,
-    Panel: ComputerUsePanel,
   },
   {
     id: "simulators",
@@ -324,7 +320,7 @@ const SECTION_GROUPS: Array<{ label: string; ids: SectionId[] }> = [
   },
   {
     label: "Agents",
-    ids: ["models", "providers", "browser-use", "computer-use", "simulators", "terminal-agents"],
+    ids: ["models", "providers", "browser-use", "simulators", "terminal-agents"],
   },
   { label: "Workspace", ids: ["cloud-computer", "environment", "git"] },
 ];
@@ -367,8 +363,9 @@ function isStaticSection(value: string): value is SectionId {
 }
 
 /** Decode the persisted active string into a structured selection,
- *  tolerating the legacy bare-section / `repo:<id>` shapes. */
-function parseSelection(active: string): Selection {
+ *  tolerating the legacy bare-section / `repo:<id>` shapes. Unknown and
+ *  retired sections land on the owner's first page, `fallback`. */
+function parseSelection(active: string, fallback: SectionId = "general"): Selection {
   if (active.startsWith("cloud-repo:")) {
     const rest = active.slice("cloud-repo:".length), colon = rest.indexOf(":");
     const tab = rest.slice(0, colon), repository = rest.slice(colon + 1);
@@ -407,13 +404,10 @@ function parseSelection(active: string): Selection {
   const rawBare = active.startsWith("user:")
     ? active.slice("user:".length)
     : active;
-  // Organization/Team administration moved to app.zeros.build. Old persisted
-  // selections resolve to General instead of exposing a retired desktop panel.
-  const bare =
-    rawBare === "organization" || rawBare === "team" || rawBare === "members"
-      ? "general"
-      : rawBare;
-  return { scope: "user", section: isStaticSection(bare) ? bare : "general" };
+  // Saved selections can still name the retired `computer-use` page, which
+  // is now part of General.
+  if (rawBare === "computer-use") return { scope: "user", section: "general" };
+  return { scope: "user", section: isStaticSection(rawBare) ? rawBare : fallback };
 }
 
 const PAGE_HEADING_CLS = "m-0 text-lg leading-6 font-medium text-fg1";
@@ -439,6 +433,7 @@ function loadInitialSection(owner: string): string {
   // against the project list in the mount-time effect once projects hydrate.
   const sel = parseSelection(
     readScopedSettingsSelection(owner, "section", owner === "local" ? "user:general" : "user:providers"),
+    owner === "local" ? "general" : "providers",
   );
   return sel.scope === "user"
     ? userSelection(sel.section)
@@ -490,7 +485,7 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
     setActiveState(next);
     writeScopedSettingsSelection(owner, "section", next);
   }, [owner]);
-  const selection = parseSelection(active);
+  const selection = parseSelection(active, local ? "general" : "providers");
   useInstantViewSwitch(`settings:${owner}:${active}`, pageSurfaceRef);
 
   // Deep links from action-error toasts must update this retained page as well
@@ -575,21 +570,32 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
   const internalUser = useIsInternalUser();
   // Agent control rollout (agent-control-rollout.ts): a closed feature has
   // no Settings page.
-  const computerUseActive = useAgentControlFeatureActive("computerUse");
+  const computerUseSectionActive = computerUseSectionOpen({
+    computerUse: useAgentControlFeatureActive("computerUse"),
+    zerosBrowser: useAgentControlFeatureActive("zerosBrowser"),
+  });
   const simulatorsActive = useAgentControlFeatureActive("simulators");
   const availableSections = useMemo(
     () =>
       SECTIONS.filter((section) => isSettingsSectionAvailable(section.id, {
-        local, cloudEnabled, terminalAgentsEnabled, computerUseActive,
+        local, cloudEnabled, terminalAgentsEnabled, computerUseSectionActive,
         simulatorsActive, internalUser,
       })),
-    [terminalAgentsEnabled, internalUser, local, cloudEnabled, computerUseActive, simulatorsActive],
+    [
+      terminalAgentsEnabled, internalUser, local, cloudEnabled,
+      computerUseSectionActive, simulatorsActive,
+    ],
   );
+  // Each owner falls back to its own first page: General for Local, Agents
+  // for an organization, whose General holds only this Mac's controls.
+  const fallbackSection =
+    availableSections.find((s) => s.id === (local ? "general" : "providers")) ??
+    availableSections[0];
   const activeSection: SectionDef | null =
     selection.scope === "user"
       ? (availableSections.find((s) => s.id === selection.section) ??
-        availableSections[0])
-      : local || selection.scope === "cloud-repo" ? null : availableSections[0];
+        fallbackSection)
+      : local || selection.scope === "cloud-repo" ? null : fallbackSection;
   // Rewrite a selection whose gate just closed; otherwise no row is active and the
   // retired selection reactivates if the gate reopens.
   const selectedSection = selection.scope === "cloud-repo" ? null : selection.section;
@@ -597,10 +603,10 @@ function ScopedSettingsPage({ owner }: { owner: string }) {
     if (selection.scope === "repo" && local) return;
     if (selection.scope === "user" && availableSections.some((s) => s.id === selectedSection)) return;
     if (selection.scope === "cloud-repo" && availableSections.some((s) => s.id === "cloud-computer")) return;
-    const fallback = availableSections[0]?.id;
+    const fallback = fallbackSection?.id;
     if (fallback) setActive(userSelection(fallback));
     // setActive is stable for the component's lifetime (state setter + setSetting).
-  }, [availableSections, selection.scope, selectedSection, local, setActive]);
+  }, [availableSections, fallbackSection, selection.scope, selectedSection, local, setActive]);
   // Visited form panels remain mounted so local drafts, scroll-adjacent DOM,
   // provider state, and resolved settings do not restart on every sidebar click.
   const availableSectionIds = useMemo(
@@ -848,6 +854,20 @@ function SectionNavButton({
 }
 
 function GeneralPanel({ surfaceActive = true }: { surfaceActive?: boolean }) {
+  const organization = useActiveOrganization();
+  // An organization's General holds only this Mac's controls; the app-wide
+  // preferences belong to the Local owner.
+  if (organization ? !organization.isPersonal : Boolean(getActiveOrganizationIdSnapshot())) {
+    return (
+      <div className="flex flex-col gap-8">
+        <ComputerUseSettingsSection surfaceActive={surfaceActive} withPermissions />
+      </div>
+    );
+  }
+  return <LocalGeneralPanel surfaceActive={surfaceActive} />;
+}
+
+function LocalGeneralPanel({ surfaceActive }: { surfaceActive: boolean }) {
   const showHidden = useShowHiddenWorkspaces();
   const restartAutomatically = useRestartAutomaticallyOnUpdate();
   return (
@@ -877,6 +897,7 @@ function GeneralPanel({ surfaceActive = true }: { surfaceActive?: boolean }) {
           />
         </SettingsRow>
       </SettingsGroup>
+      <ComputerUseSettingsSection surfaceActive={surfaceActive} />
       <PrivacyGroup surfaceActive={surfaceActive} />
     </div>
   );
@@ -1131,6 +1152,7 @@ function PrivacyGroup({ surfaceActive }: { surfaceActive: boolean }) {
   return (
     <SettingsGroup title="Privacy">
       <FullDiskAccessRow surfaceActive={surfaceActive} />
+      <ComputerPermissionRows surfaceActive={surfaceActive} />
       <SettingsRow
         label="Share anonymous usage data"
         hint="Never your code, prompts or keys."

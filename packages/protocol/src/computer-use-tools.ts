@@ -1,10 +1,10 @@
 // Zeros computer-use contract.
 //
-// Electron main owns the Cua Driver host, the one-chat-at-a-time lease and the
-// per-app approvals. The engine serves the curated `zeros_computer` tools to
-// Claude and Cursor when computer use is turned on, and to Codex when its
-// built-in computer use is switched off. Every action addresses one app window
-// by process ID; desktop-wide input, scripts and driver configuration are not
+// Electron main owns the Cua Driver host, each chat's driver session and the
+// per-app leases that let chats work in different apps at once. The engine
+// serves the curated `zeros_computer` tools to every agent, Codex included,
+// when computer use is turned on. Every action addresses one app window by
+// process ID; desktop-wide input, scripts and driver configuration are not
 // part of this contract.
 
 import {
@@ -32,6 +32,7 @@ export const COMPUTER_TOOL_NAMES = [
   "scroll",
   "drag",
   "open_app",
+  "open_url",
 ] as const;
 
 export type ComputerToolName = (typeof COMPUTER_TOOL_NAMES)[number];
@@ -57,6 +58,7 @@ export interface ComputerToolDefinition {
 }
 
 const MAX_TEXT = 20_000;
+const MAX_URL = 8_192;
 const MAX_COORDINATE = 100_000;
 const MAX_WINDOW_ID = 0xffff_ffff;
 const MAX_PID = 0x7fff_ffff;
@@ -123,7 +125,7 @@ export const COMPUTER_TOOL_DEFINITIONS: readonly ComputerToolDefinition[] = [
   {
     name: "screenshot",
     description:
-      "Capture one app window and list its accessibility elements. Pass element tokens from the latest screenshot of that window to click, type_text, press_key and scroll, or use x and y in the screenshot's pixels. The first time you use an app in this chat, the user is asked to allow it.",
+      "Capture one app window and list its accessibility elements. Pass element tokens from the latest screenshot of that window to click, type_text, press_key and scroll, or use x and y in the screenshot's pixels.",
     inputSchema: {
       type: "object",
       properties: {
@@ -132,7 +134,7 @@ export const COMPUTER_TOOL_DEFINITIONS: readonly ComputerToolDefinition[] = [
         query: {
           type: "string",
           maxLength: 200,
-          description: "Only list elements whose role, label or value match.",
+          description: "Only list elements whose role, label or value contain this text (one plain phrase, not a pattern).",
         },
         elements: {
           type: "boolean",
@@ -240,7 +242,7 @@ export const COMPUTER_TOOL_DEFINITIONS: readonly ComputerToolDefinition[] = [
   {
     name: "open_app",
     description:
-      "Open a Mac app by bundle ID without bringing it to the front. The first time you use an app in this chat, the user is asked to allow it.",
+      "Open a Mac app by bundle ID without bringing it to the front.",
     inputSchema: {
       type: "object",
       properties: {
@@ -254,9 +256,27 @@ export const COMPUTER_TOOL_DEFINITIONS: readonly ComputerToolDefinition[] = [
       additionalProperties: false,
     },
   },
+  {
+    name: "open_url",
+    description:
+      "Open an http or https URL in a Mac app by bundle ID, such as com.google.Chrome, without bringing it to the front. Faster than typing into the app's address bar.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        bundle_id: {
+          type: "string",
+          maxLength: 255,
+          description: "Bundle ID from list_apps, such as com.google.Chrome.",
+        },
+        url: { type: "string", maxLength: MAX_URL },
+      },
+      required: ["bundle_id", "url"],
+      additionalProperties: false,
+    },
+  },
 ] as const;
 
-/** Apps blocked until the user removes them in Settings > Computer use.
+/** Apps blocked until the user removes them in Settings > General.
  * Zeros itself is always blocked and never appears in this list. */
 export const DEFAULT_COMPUTER_BLOCKED_APPS = [
   "com.apple.keychainaccess",
@@ -281,13 +301,14 @@ export function sameComputerBundleId(a: string, b: string): boolean {
   return a.toLowerCase() === b.toLowerCase();
 }
 
-/** The `[computer_use]` settings table, normalized with the shipped defaults. */
+/** The `[computer_use]` settings table, normalized with the shipped defaults.
+ * Every key has a row in Settings > General; retired keys (`app_access`,
+ * `codex_native`) are ignored. */
 export interface ComputerUseSettings {
-  /** "Enable computer use": Zeros computer use for every agent. */
+  /** "Enable computer use": Zeros computer use for every agent, Codex
+   * included. */
   enabled: boolean;
-  /** "Use Codex's built-in computer use". Off routes Codex to Zeros. */
-  codexNative: boolean;
-  /** "Show agent cursor". */
+  /** "Show agent cursor", shared by computer use and the browser. */
   showAgentCursor: boolean;
   /** Bundle IDs no agent may observe or control. */
   blockedApps: string[];
@@ -315,14 +336,12 @@ export function computerUseSettings(raw: unknown): ComputerUseSettings {
   }
   return {
     enabled: flag("enabled", true),
-    codexNative: flag("codex_native", true),
     showAgentCursor: flag("show_agent_cursor", true),
     blockedApps,
   };
 }
 
-/** What Settings pushes to Electron main, which enforces it on every call.
- * `codexNative` stays with the engine, which routes Codex. */
+/** What Settings pushes to Electron main, which enforces it on every call. */
 export interface ComputerUsePreferences {
   enabled: boolean;
   showAgentCursor: boolean;
@@ -331,7 +350,8 @@ export interface ComputerUsePreferences {
 }
 
 /** Main reads the renderer's push strictly: one bad field rejects all of it,
- * so a malformed update never half-applies. */
+ * so a malformed update never half-applies. Fields it does not know, such as
+ * an older renderer's `appAccess`, are ignored. */
 export function readComputerUsePreferences(
   value: unknown,
 ): ComputerUsePreferences | null {
@@ -389,8 +409,10 @@ export function readComputerUseStatus(value: unknown): ComputerUseStatus | null 
 }
 
 /** Which computer use an agent family gets in a Local workspace. Cloud
- * workspaces get none; callers check placement first. */
-export type ComputerUseRoute = "off" | "codex-native" | "zeros";
+ * workspaces get none; callers check placement first. Codex never uses its
+ * built-in computer use: one path keeps blocked apps, the control bar, Stop
+ * and parallel chats the same for every agent. */
+export type ComputerUseRoute = "off" | "zeros";
 
 export function resolveComputerUseRoute(
   agentFamily: string,
@@ -398,8 +420,6 @@ export function resolveComputerUseRoute(
 ): ComputerUseRoute {
   switch (agentFamily) {
     case "codex":
-      if (settings.codexNative) return "codex-native";
-      return settings.enabled ? "zeros" : "off";
     case "claude":
     case "cursor":
       return settings.enabled ? "zeros" : "off";
@@ -447,6 +467,7 @@ export interface ComputerToolCall {
   elements?: boolean;
   runningOnly?: boolean;
   bundleId?: string;
+  url?: string;
 }
 
 export type ComputerToolCallParse =
@@ -481,6 +502,7 @@ const ALLOWED_ARGUMENTS: Record<ComputerToolName, readonly string[]> = {
   ],
   drag: ["pid", "window_id", "from_x", "from_y", "to_x", "to_y"],
   open_app: ["bundle_id"],
+  open_url: ["bundle_id", "url"],
 };
 
 class ArgumentError extends Error {}
@@ -566,6 +588,25 @@ function hasControlCharacter(value: string): boolean {
   return false;
 }
 
+/** Only web pages: a `file:` or custom scheme URL could launch arbitrary
+ * handlers outside the app the user allowed. */
+function webUrl(value: unknown): string {
+  if (typeof value !== "string" || value.length > MAX_URL || hasControlCharacter(value)) {
+    fail(`url must be an http or https URL of at most ${MAX_URL} characters.`);
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return fail("url must be an http or https URL.");
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    fail("url must be an http or https URL.");
+  }
+  if (parsed.username || parsed.password) fail("url cannot contain credentials.");
+  return parsed.href;
+}
+
 // Named keys (return, tab, f5, page_down) or one printable character.
 const KEY_NAME = /^(?:[A-Za-z][A-Za-z0-9_]{0,23}|[!-~])$/;
 
@@ -602,11 +643,12 @@ function parse(name: ComputerToolName, args: Record<string, unknown>): ComputerT
     if (!ALLOWED_ARGUMENTS[name].includes(key)) fail(`Unknown argument: ${key}.`);
   }
   const call: ComputerToolCall = { tool: name };
-  if (name === "open_app") {
+  if (name === "open_app" || name === "open_url") {
     if (!isComputerBundleId(args.bundle_id)) {
       fail("bundle_id must be an app bundle ID such as com.apple.TextEdit.");
     }
     call.bundleId = args.bundle_id;
+    if (name === "open_url") call.url = webUrl(args.url);
     return call;
   }
   if (name === "list_apps") {
@@ -772,26 +814,17 @@ export interface ComputerUseReleaseResponse {
   released: boolean;
 }
 
-/** Codex's built-in computer use runs outside Zeros. The engine reports when
- * a turn starts using it and when that turn ends, so other chats wait. */
-export interface ComputerUseNativeActivityRequest {
-  version: typeof COMPUTER_USE_SERVICE_VERSION;
-  owner: ComputerUseOwner;
-  agent: AgentControlFamily;
-  active: boolean;
-}
-
 /** A chat that is using the computer right now. */
 export interface ComputerUseHolder extends ComputerUseOwner {
   agent: AgentControlFamily;
   /** The app it controls, once known. */
   app: string | null;
-  /** Codex's built-in computer use, which Zeros observes but does not run. */
-  native: boolean;
 }
 
 export interface ComputerUseWaiter extends ComputerUseOwner {
   agent: AgentControlFamily;
+  /** The app it waits for. Main before parallel computer use sends none. */
+  app?: string | null;
 }
 
 /** Main → renderer: who uses the computer and which chats wait for it. */
@@ -838,9 +871,10 @@ export function readComputerUseState(
   for (const raw of record.holders) {
     const owner = readOwnerEntry(raw);
     const entry = raw as Record<string, unknown>;
+    // An older main's `native` flag is ignored: Codex's built-in computer
+    // use is disabled, so every holder is a Zeros chat.
     if (
       !owner ||
-      typeof entry.native !== "boolean" ||
       (entry.app !== null &&
         (typeof entry.app !== "string" || entry.app.length > 200))
     ) {
@@ -849,14 +883,19 @@ export function readComputerUseState(
     holders.push({
       ...owner,
       app: entry.app as string | null,
-      native: entry.native,
     });
   }
   const waiting: ComputerUseWaiter[] = [];
   for (const raw of record.waiting) {
     const owner = readOwnerEntry(raw);
     if (!owner) return null;
-    waiting.push(owner);
+    const app = (raw as Record<string, unknown>).app;
+    if (app === undefined) {
+      waiting.push(owner);
+      continue;
+    }
+    if (app !== null && (typeof app !== "string" || app.length > 200)) return null;
+    waiting.push({ ...owner, app });
   }
   return { version: COMPUTER_USE_SERVICE_VERSION, holders, waiting };
 }
@@ -866,13 +905,22 @@ export function computerUseWaitText(
   state: ComputerUseStateSnapshot | null,
   conversationId: string,
 ): string | null {
-  if (!state?.waiting.some((entry) => entry.conversationId === conversationId)) {
-    return null;
-  }
-  const holder = state.holders.find(
+  const waiter = state?.waiting.find((entry) => entry.conversationId === conversationId);
+  if (!state || !waiter) return null;
+  const others = state.holders.filter(
     (entry) => entry.conversationId !== conversationId,
   );
-  return holder
-    ? `Waiting for ${agentControlName(holder.agent)} in another chat to finish using the computer`
+  // Chats wait per app.
+  const holder = waiter.app
+    ? others.find((entry) => entry.app === waiter.app)
+    : others[0];
+  if (holder && waiter.app) {
+    return `Waiting for ${agentControlName(holder.agent)} in another chat to finish using ${waiter.app}`;
+  }
+  if (holder) {
+    return `Waiting for ${agentControlName(holder.agent)} in another chat to finish using the computer`;
+  }
+  return waiter.app
+    ? `Waiting for another chat to finish using ${waiter.app}`
     : "Waiting for another chat to finish using the computer";
 }

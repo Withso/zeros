@@ -74,11 +74,8 @@ export function BrowserSessionController({
   const availability = useAgentControlAvailability();
   const effective = resolved.resolved?.effective as
     | {
-        browser?: {
-          auto_open?: unknown;
-          show_agent_cursor?: unknown;
-          navigation_approval?: unknown;
-        };
+        browser?: { auto_open?: unknown };
+        computer_use?: { show_agent_cursor?: unknown };
       }
     | undefined;
   const routes = useMemo(
@@ -101,12 +98,8 @@ export function BrowserSessionController({
   // Some agent drives the in-app browser. Claude in Chrome does not.
   const browserEnabled =
     codexRoute !== "off" || claudeRoute === "zeros" || cursorRoute === "zeros";
-  const codexNativeEnabled = codexRoute === "codex-native";
-  const showAgentCursor = effective?.browser?.show_agent_cursor !== false;
-  const navigationApproval =
-    effective?.browser?.navigation_approval === "always-allow"
-      ? "always-allow"
-      : "always-ask";
+  // One "Show agent cursor" in General serves computer use and the browser.
+  const showAgentCursor = effective?.computer_use?.show_agent_cursor !== false;
   const autoOpenRef = useRef(autoOpen);
   const browserEnabledRef = useRef(browserEnabled);
   const revealRef = useRef(onRevealBrowser);
@@ -326,17 +319,9 @@ export function BrowserSessionController({
     if (!resolved.resolved) return;
     void nativeInvoke("browser_ui_preferences_update", {
       browserEnabled,
-      codexNativeEnabled,
       showAgentCursor,
-      navigationApproval,
     }).catch(() => {});
-  }, [
-    browserEnabled,
-    codexNativeEnabled,
-    navigationApproval,
-    resolved.resolved,
-    showAgentCursor,
-  ]);
+  }, [browserEnabled, resolved.resolved, showAgentCursor]);
 
   useEffect(() => {
     if (!resolved.resolved) return;
@@ -373,8 +358,8 @@ export function BrowserSessionController({
   ]);
 
   // The same edge rule for Computer use. `zeros_computer` tools are listed
-  // only when a provider boots on the "zeros" route, and Codex enables its
-  // built-in computer use at boot, so an idle resume carries the change.
+  // only when a provider boots on the "zeros" route, so an idle resume
+  // carries the change.
   useEffect(() => {
     if (!resolved.resolved) return;
     for (const providerFamily of ["codex", "claude", "cursor"] as const) {
@@ -382,11 +367,7 @@ export function BrowserSessionController({
         previousComputerRoutesRef.current[providerFamily] ?? null;
       const next = computerRoutes[providerFamily];
       previousComputerRoutesRef.current[providerFamily] = next;
-      const action = computerRouteRefreshAction({
-        providerFamily,
-        previous,
-        next,
-      });
+      const action = computerRouteRefreshAction({ previous, next });
       if (action === "refresh") {
         queueCapabilityRefreshes(providerFamily, "computer");
       } else if (action === "cancel") {

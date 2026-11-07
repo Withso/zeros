@@ -24,6 +24,7 @@ import {
   nativeToolSurface,
   nativeToolTitle,
 } from "../agent/renderers/native-tool-presentation";
+import { controlCliActivity } from "./control-cli-activity";
 
 /** What an agent was controlling. Each surface gets its own activity group. */
 export type AgentControlSurface = "browser" | "computer" | "simulator";
@@ -44,6 +45,10 @@ export interface BrowserToolActivity {
   external?: boolean;
   appId?: string;
   faviconUrl?: string;
+  /** Shown beside the label. Only shell rows set it, so tool-call rows keep
+   * their established icon-only look. */
+  rowTarget?: string;
+  durationMs?: number;
 }
 
 export type GroupedBrowserActivity =
@@ -365,6 +370,7 @@ const ZEROS_COMPUTER_LABELS: Record<ComputerToolName, string> = {
   scroll: "Scrolled",
   drag: "Dragged",
   open_app: "Opened app",
+  open_url: "Opened link",
 };
 
 /** BrowserToolActivity carries the browser tool enum for row icons; computer
@@ -379,6 +385,7 @@ const ZEROS_COMPUTER_TOOL_ICON: Record<ComputerToolName, BrowserToolName> = {
   scroll: "scroll",
   drag: "click",
   open_app: "open",
+  open_url: "open",
 };
 
 /** Zeros-owned computer use. Every provider family gets the same rows: an
@@ -411,7 +418,8 @@ function zerosComputerActivity(
 
 const KNOWN_COMPUTER_FAILURE =
   /^(?:Computer use\b|The user\b|Zeros needs\b)/;
-const BLOCKED_APP_FAILURE = / is blocked in Settings > Computer use\.$/;
+// Saved transcripts keep the "Computer use" page name from before General.
+const BLOCKED_APP_FAILURE = / is blocked in Settings > (?:General|Computer use)\.$/;
 
 /** Failure reasons from the computer-use controller are short, authored
  * sentences. Driver or Node errors can contain local paths, so anything
@@ -768,6 +776,8 @@ export function browserToolActivity(
   if (native) return native;
   const claudeChrome = nativeClaudeChromeActivity(toolMessage);
   if (claudeChrome) return claudeChrome;
+  const controlCli = controlCliActivity(toolMessage);
+  if (controlCli) return controlCli;
   const zerosComputer = zerosComputerActivity(toolMessage);
   if (zerosComputer) return zerosComputer;
   const zerosDevice = zerosDeviceActivity(toolMessage);

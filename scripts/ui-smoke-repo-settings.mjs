@@ -172,8 +172,10 @@ export async function runRepoSettingsSmoke({ page, check }) {
       expect(backBox.y + backBox.height).toBeLessThanOrEqual(bandBox.y + bandBox.height);
       expect(orgBox.y).toBeGreaterThanOrEqual(bandBox.y + bandBox.height);
       expect(await back.evaluate(node => getComputedStyle(node).getPropertyValue("-webkit-app-region"))).toBe("no-drag");
-      for (const feature of ["Browser", "Computer use", "Simulators"])
+      // Computer use lives in General for every owner; it has no page of its own.
+      for (const feature of ["General", "Browser", "Simulators"])
         await expect(sections.getByRole("tab", { name: feature, exact: true })).toBeVisible();
+      await expect(sections.getByRole("tab", { name: "Computer use", exact: true })).toHaveCount(0);
       await expect(sections.getByRole("tab", { name: "Internal", exact: true })).toHaveCount(0);
       await back.focus();
       await page.keyboard.press("Enter");

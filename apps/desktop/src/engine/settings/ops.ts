@@ -34,6 +34,7 @@ import {
 } from "./files";
 import { resolveSettings, type ResolvedSettings } from "./resolve";
 import { getTeamDoc } from "./team-context";
+import { withRetiredAgentControlCleared } from "./retired-agent-control";
 import {
   ensureLocalSettingsIgnored,
   migrateWorkspaceSettings,
@@ -453,6 +454,10 @@ export function opSettingsWrite(
     const migrated = readLocalLayer(layer, repoRoot);
     if (migrated.error) throw new Error(migrated.error);
     patch = { ...patch, settings_version: PERSONAL_SETTINGS_VERSION };
+  }
+  if (layer === "user") {
+    const current = readSettingsFile(filePath);
+    if (!current.error) patch = withRetiredAgentControlCleared(current.doc, patch);
   }
   // Re-run the format-preserving read/patch/write at the commit point. The
   // preview above is validation only; updateSettingsFile remains the atomic

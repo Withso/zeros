@@ -33,7 +33,6 @@ import {
   browserViewportPresentation,
   normalizeBrowserViewBounds,
   normalizeBrowserViewBoundsForHost,
-  normalizeCodexPageNavigateResult,
   queueBrowserTitleCandidate,
   shouldRevokeBrowserSurfaceForNavigation,
   usableBrowserDocument,
@@ -382,38 +381,6 @@ describe("Zeros native browser surface", () => {
     expect(script).not.toContain("__zerosWorkingTimer");
   });
 
-  it("treats ERR_ABORTED as a successful Page.navigate only after a usable redirect commits", () => {
-    const aborted = { frameId: "frame", errorText: "net::ERR_ABORTED" };
-    expect(
-      normalizeCodexPageNavigateResult(aborted, {
-        requestedUrl: "https://paper.design/snapshot",
-        previousUrl: "https://paper.design/docs/mcp",
-        currentUrl:
-          "https://chromewebstore.google.com/detail/paper-snapshot/example",
-        usableDocument: true,
-      }),
-    ).toEqual({ frameId: "frame" });
-    expect(
-      normalizeCodexPageNavigateResult(aborted, {
-        requestedUrl: "https://paper.design/sitemap.xml",
-        previousUrl: "https://paper.design/docs/mcp",
-        currentUrl: "https://paper.design/docs/mcp",
-        usableDocument: true,
-      }),
-    ).toEqual(aborted);
-    expect(
-      normalizeCodexPageNavigateResult(
-        { frameId: "frame", errorText: "net::ERR_BLOCKED_BY_CLIENT" },
-        {
-          requestedUrl: "https://paper.design/sitemap.xml",
-          previousUrl: "https://paper.design/docs/mcp",
-          currentUrl: "https://paper.design/docs/mcp",
-          usableDocument: true,
-        },
-      ),
-    ).toEqual({ frameId: "frame", errorText: "net::ERR_BLOCKED_BY_CLIENT" });
-  });
-
   it("keeps navigation/title events inside an in-flight agent action", () => {
     expect(
       browserNavigationPublishStatus({
@@ -557,7 +524,6 @@ describe("Zeros native browser surface", () => {
       navigationApproval: "always-ask" as const,
       siteAllowed: false,
       preapprovedOrigin: null,
-      officialProviderOwnsOriginApproval: false,
     };
     expect(browserAgentNavigationDisposition(base)).toBe("confirm");
     expect(
@@ -580,12 +546,6 @@ describe("Zeros native browser surface", () => {
     );
     expect(
       browserAgentNavigationDisposition({ ...base, isMainFrame: false }),
-    ).toBe("allow");
-    expect(
-      browserAgentNavigationDisposition({
-        ...base,
-        officialProviderOwnsOriginApproval: true,
-      }),
     ).toBe("allow");
     expect(
       browserAgentNavigationDisposition({

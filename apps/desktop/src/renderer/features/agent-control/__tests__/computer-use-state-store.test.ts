@@ -32,7 +32,6 @@ describe("computer use state mirror", () => {
           conversationId: "conversation-a",
           agent: "codex",
           app: "Safari",
-          native: false,
         },
       ],
       [
@@ -63,7 +62,6 @@ describe("computer use state mirror", () => {
             conversationId: "conversation-a",
             agent: "codex",
             app: null,
-            native: true,
           },
         ],
         [

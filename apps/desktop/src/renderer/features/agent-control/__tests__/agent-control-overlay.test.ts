@@ -22,13 +22,24 @@ const key = (
 
 describe("readAgentControlOverlayState", () => {
   it("accepts the state main sends", () => {
+    // The page an agent controls in the Zeros browser answers to Esc; an
+    // older main sends no escapeHint for it.
     expect(
       readAgentControlOverlayState({
         title: "Codex",
         detail: "Clicking…",
         visible: true,
       }),
-    ).toEqual({ title: "Codex", detail: "Clicking…", visible: true });
+    ).toEqual({ title: "Codex", detail: "Clicking…", visible: true, escapeHint: true });
+    // The computer-use bar floats over the user's apps and never takes Esc.
+    expect(
+      readAgentControlOverlayState({
+        title: "Codex",
+        detail: "is using Safari",
+        visible: true,
+        escapeHint: false,
+      }),
+    ).toEqual({ title: "Codex", detail: "is using Safari", visible: true, escapeHint: false });
   });
 
   it("ignores anything else", () => {
@@ -40,6 +51,7 @@ describe("readAgentControlOverlayState", () => {
       { title: 1, detail: "", visible: true },
       { title: "Codex", detail: null, visible: true },
       { title: "Codex", detail: "", visible: "yes" },
+      { title: "Codex", detail: "", visible: true, escapeHint: "no" },
     ]) {
       expect(readAgentControlOverlayState(value)).toBeNull();
     }

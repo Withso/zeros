@@ -18,4 +18,8 @@ export interface AgentControlOverlayState {
   /** What it is doing right now. */
   detail: string;
   visible: boolean;
+  /** Whether Esc stops the agent here. The page an agent controls in the
+   * Zeros browser answers to Esc; the computer-use bar floats over the
+   * user's own apps and never takes their keys. Absent means true. */
+  escapeHint?: boolean;
 }

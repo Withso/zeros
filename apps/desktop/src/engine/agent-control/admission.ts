@@ -51,6 +51,44 @@ export const ZEROS_BROWSER_TOOLS_ENV = "ZEROS_BROWSER_TOOLS_CAPABILITY" as const
 export const ZEROS_COMPUTER_TOOLS_ENV =
   "ZEROS_COMPUTER_TOOLS_CAPABILITY" as const;
 export const ZEROS_DEVICE_TOOLS_ENV = "ZEROS_DEVICE_TOOLS_CAPABILITY" as const;
+/** Where `zeros computer` / `zeros browser` reach the same server's `/call`.
+ * The bearer stays in the capability variable above. */
+export const ZEROS_COMPUTER_TOOLS_URL_ENV = "ZEROS_COMPUTER_TOOLS_URL" as const;
+export const ZEROS_BROWSER_TOOLS_URL_ENV = "ZEROS_BROWSER_TOOLS_URL" as const;
+
+/** Names an engine must drop from its own environment at start, so a Zeros
+ * launched from a chat's shell cannot use that chat's browser or computer. */
+export const AGENT_CONTROL_RESERVED_ENV: readonly string[] = [
+  ZEROS_BROWSER_TOOLS_ENV,
+  ZEROS_COMPUTER_TOOLS_ENV,
+  ZEROS_DEVICE_TOOLS_ENV,
+  ZEROS_COMPUTER_TOOLS_URL_ENV,
+  ZEROS_BROWSER_TOOLS_URL_ENV,
+];
+
+export function stripInheritedAgentControlEnv(
+  env: NodeJS.ProcessEnv | Record<string, string | undefined>,
+): void {
+  for (const name of AGENT_CONTROL_RESERVED_ENV) delete env[name];
+}
+
+/** Before each turn: agents use their shell first, so name the commands that
+ * keep Zeros' control bar, Stop and blocked apps. */
+export function agentControlBrief(surfaces: { computer: boolean; browser: boolean }): string {
+  const lines: string[] = [];
+  if (surfaces.computer) {
+    // The main verbs, so agents act without spending a turn on --help.
+    lines.push(
+      "Computer use on this Mac, from the shell: `zeros computer open --app NAME [URL] [--wait-title TEXT]` opens without taking focus; `zeros computer shot --app NAME` saves a screenshot (read the PNG path it prints) and lists element tokens; `click --app NAME --element TOKEN`, `type --app NAME TEXT`, `key --app NAME KEY [--mods cmd]`. One `type` (`type --app Calculator 12*34=`) beats clicking each on-screen button. Chain steps with `&&` or `batch -`; `--help` lists the rest. Use plain shell for files, git and CLIs. A sandboxed shell without network access cannot reach Zeros, so there use the zeros_computer tools from the start.",
+    );
+  }
+  if (surfaces.browser) {
+    lines.push(
+      "Zeros browser, from the shell: `zeros browser open URL` (prints the page), `read --find TEXT`, `click REF`, `type REF TEXT`; `--help` lists the rest. A sandboxed shell without network access cannot reach Zeros, so there use the zeros_browser tools from the start.",
+    );
+  }
+  return lines.join("\n");
+}
 // One browser action can wait for a website approval and then a download.
 const BROWSER_TOOL_TIMEOUT_SEC = 600;
 // One computer action can wait for another chat and then for an approval.
@@ -144,6 +182,7 @@ interface AdmittedToolSet {
   tools: ControlToolSet;
   server: DesignAgentMcpServer;
   credentialEnv: string;
+  urlEnv?: string;
 }
 
 /** Admit Zeros-owned control tools (browser, computer use and simulators) for
@@ -159,6 +198,8 @@ export class AgentControlToolAdmissions {
       browser: AgentControlBrowserHost;
       computer?: AgentControlComputerHost;
       device?: AgentControlDeviceHost;
+      /** The directory holding the shared `zeros` launcher, once it exists. */
+      binDir?: () => string | null;
     },
   ) {}
 
@@ -229,6 +270,7 @@ export class AgentControlToolAdmissions {
       tools: ControlToolSet;
       name: string;
       credentialEnv: string;
+      urlEnv?: string;
       toolTimeoutSec: number;
     }> = [];
     if (browser) {
@@ -237,7 +279,6 @@ export class AgentControlToolAdmissions {
           policy: () =>
             rolloutPolicy("zerosBrowser", () =>
               zerosBrowserToolPolicy(
-                family,
                 browser.route(family, workspace.path, workspace.repoRoot),
               ),
             ),
@@ -253,6 +294,7 @@ export class AgentControlToolAdmissions {
         }),
         name: BROWSER_TOOL_NAMESPACE,
         credentialEnv: ZEROS_BROWSER_TOOLS_ENV,
+        urlEnv: ZEROS_BROWSER_TOOLS_URL_ENV,
         toolTimeoutSec: BROWSER_TOOL_TIMEOUT_SEC,
       });
     }
@@ -262,7 +304,6 @@ export class AgentControlToolAdmissions {
           policy: () =>
             rolloutPolicy("computerUse", () =>
               zerosComputerToolPolicy(
-                family,
                 computer.route(family, workspace.path, workspace.repoRoot),
               ),
             ),
@@ -273,6 +314,7 @@ export class AgentControlToolAdmissions {
         }),
         name: COMPUTER_TOOL_NAMESPACE,
         credentialEnv: ZEROS_COMPUTER_TOOLS_ENV,
+        urlEnv: ZEROS_COMPUTER_TOOLS_URL_ENV,
         toolTimeoutSec: COMPUTER_TOOL_TIMEOUT_SEC,
       });
     }
@@ -322,6 +364,7 @@ export class AgentControlToolAdmissions {
           tools: candidate.tools,
           server,
           credentialEnv: candidate.credentialEnv,
+          ...(candidate.urlEnv ? { urlEnv: candidate.urlEnv } : {}),
         });
       }
       input.signal.throwIfAborted();
@@ -335,11 +378,25 @@ export class AgentControlToolAdmissions {
       return null;
     }
     let disposal: Promise<void> | undefined;
+    const binDir = this.options.binDir?.() ?? null;
+    const brief = binDir && agentControlBrief({
+      computer: admitted.some((set) => set.urlEnv === ZEROS_COMPUTER_TOOLS_URL_ENV),
+      browser: admitted.some((set) => set.urlEnv === ZEROS_BROWSER_TOOLS_URL_ENV),
+    });
     return {
       env: Object.fromEntries(
-        admitted.map((set) => [set.credentialEnv, `Bearer ${set.tools.token}`]),
+        admitted.flatMap((set) => [
+          [set.credentialEnv, `Bearer ${set.tools.token}`],
+          ...(set.urlEnv ? [[set.urlEnv, set.server.callUrl]] : []),
+        ]),
       ),
-      mcpServers: admitted.map((set) => set.server.registration),
+      // The host makes every allow/deny decision itself (blocked apps,
+      // consequential browser actions, simulator approvals), so a provider's
+      // own per-call card (Codex asks for each MCP call) would be a second,
+      // mid-turn prompt.
+      mcpServers: admitted.map((set) => ({ ...set.server.registration, defaultToolsApproval: "approve" as const })),
+      ...(binDir ? { pathPrepend: [binDir] } : {}),
+      ...(brief ? { preparePrompt: () => brief } : {}),
       beginPrompt: () => admitted.forEach((set) => set.tools.beginPrompt()),
       endPrompt: async () => {
         await Promise.allSettled(admitted.map((set) => set.tools.endPrompt()));

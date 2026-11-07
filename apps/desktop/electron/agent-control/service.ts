@@ -3,9 +3,8 @@
 // ──────────────────────────────────────────────────────────
 //
 // A loopback HTTP endpoint with a per-boot bearer token, like the browser
-// service. The engine forwards `zeros_computer` and `zeros_device` calls,
-// turn ends and Codex's built-in computer-use activity here; Electron main
-// decides everything else. The token reaches only the engine and never an
+// service. The engine forwards `zeros_computer` and `zeros_device` calls and
+// turn ends here; Electron main decides everything else. The token reaches only the engine and never an
 // agent process.
 // ──────────────────────────────────────────────────────────
 
@@ -21,7 +20,6 @@ import {
   COMPUTER_USE_SERVICE_VERSION,
   type ComputerToolInvokeRequest,
   type ComputerToolResult,
-  type ComputerUseNativeActivityRequest,
   type ComputerUseReleaseRequest,
 } from "@zeros/protocol/computer-use-tools";
 import {
@@ -38,7 +36,6 @@ export interface AgentControlComputerPort {
     signal: AbortSignal,
   ): Promise<ComputerToolResult>;
   release(request: ComputerUseReleaseRequest): boolean;
-  nativeActivity(request: ComputerUseNativeActivityRequest): boolean;
 }
 
 /** What the service needs from simulator use. */
@@ -175,16 +172,6 @@ export async function startAgentControlService(options: {
             version: COMPUTER_USE_SERVICE_VERSION,
             released: options.computer.release(
               body as unknown as ComputerUseReleaseRequest,
-            ),
-          });
-          return;
-        }
-        case "/v1/computer/native-activity": {
-          const body = asRecord(await readJsonBody(request));
-          sendJson(response, 200, {
-            version: COMPUTER_USE_SERVICE_VERSION,
-            accepted: options.computer.nativeActivity(
-              body as unknown as ComputerUseNativeActivityRequest,
             ),
           });
           return;

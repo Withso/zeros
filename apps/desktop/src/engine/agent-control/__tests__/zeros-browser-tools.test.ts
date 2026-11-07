@@ -44,19 +44,12 @@ function ports(overrides: Partial<ZerosBrowserToolPorts> = {}) {
 }
 
 describe("zeros_browser routing policy", () => {
-  it.each<[string, BrowserRoute, boolean, RegExp?]>([
-    // Codex keeps the tools only when its built-in browser is off or broken;
-    // the adapter removes them when the built-in browser loads.
-    ["codex", "codex-native", true],
-    ["codex", "zeros", true],
-    ["codex", "off", false, /turned off for Codex/],
-    ["claude", "zeros", true],
-    ["claude", "claude-chrome", false, /Claude is set to use Chrome/],
-    ["claude", "off", false, /in-app browser is turned off/],
-    ["cursor", "zeros", true],
-    ["cursor", "off", false, /in-app browser is turned off/],
-  ])("%s with route %s → allowed %s", (family, route, ok, reason) => {
-    const policy = zerosBrowserToolPolicy(family, route);
+  it.each<[BrowserRoute, boolean, RegExp?]>([
+    ["zeros", true],
+    ["claude-chrome", false, /Claude is set to use Chrome/],
+    ["off", false, /Browser use is turned off in Settings > Browser/],
+  ])("route %s → allowed %s", (route, ok, reason) => {
+    const policy = zerosBrowserToolPolicy(route);
     expect(policy.ok).toBe(ok);
     if (!policy.ok) expect(policy.reason).toMatch(reason!);
   });
@@ -300,10 +293,10 @@ describe("agent-control admissions", () => {
     ).resolves.toBeNull();
   });
 
-  it("admits no browser, not even Codex's fallback, while the Zeros browser is closed", async () => {
+  it("admits no browser while the Zeros browser is closed", async () => {
     setAgentControlAvailability({ ...OPEN, zerosBrowser: false });
     for (const [agentId, route] of [
-      ["codex", "codex-native"],
+      ["codex", "zeros"],
       ["claude", "zeros"],
       ["cursor", "zeros"],
     ] as const) {
@@ -366,6 +359,9 @@ describe("agent-control admissions", () => {
       transport: "http",
       headersFromEnv: { Authorization: ZEROS_BROWSER_TOOLS_ENV },
       toolTimeoutSec: 600,
+      // Zeros' host decides; no provider card per call (Codex asked twice
+      // per page before this).
+      defaultToolsApproval: "approve",
     });
     const bearer = tools!.env[ZEROS_BROWSER_TOOLS_ENV]!;
     expect(bearer).toMatch(/^Bearer [A-Za-z0-9_-]{40,}$/);

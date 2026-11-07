@@ -55,7 +55,7 @@ export interface ChosenComputerApp {
   name: string;
 }
 
-/** Settings > Computer use > Blocked apps > Add app. The user picks the app in
+/** Settings > General > Blocked apps > Add app. The user picks the app in
  * the macOS open panel and only its bundle ID and name come back. */
 export async function chooseComputerApp(
   showOpenDialog: (options: OpenDialogOptions) => Promise<OpenDialogReturnValue>,

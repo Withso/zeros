@@ -39,6 +39,7 @@ import { commandReadActions, displayCommand, type CommandReadAction } from "./to
 import { EventRow, WORKING_FEED_GAP } from "./event-row";
 import { cn } from "@/renderer/shared/ui/cn";
 import { ToolIdentityIcon } from "./tool-identity-icon";
+import { useNativeAppName } from "@/renderer/platform/native-app-artwork";
 import { isImagePath, nativeCodexBrowserPresentation } from "./event-meta";
 import {
   cachedBrowserFavicon,
@@ -324,11 +325,18 @@ export function NativeBrowserToolRow({
 }) {
   const session = useConversationBrowserActivity(ctx.chatId ?? undefined);
   const activity = browserActivityOverride ?? browserToolActivity(tool);
-  const meta = nativeCodexBrowserPresentation(
+  const active = ctx.attachmentImagesActive !== false;
+  const targetBundleId =
+    activity?.rowTarget && activity.rowTarget === activity.appId
+      ? activity.appId
+      : undefined;
+  const appName = useNativeAppName(targetBundleId, active);
+  const presentation = nativeCodexBrowserPresentation(
     tool,
     activity?.external ? undefined : session?.url,
     activity,
   );
+  const meta = appName ? { ...presentation, target: appName } : presentation;
   const usesWebsiteIcon = Boolean(
     activity && browserActivityUsesWebsiteIcon(activity),
   );
@@ -357,7 +365,7 @@ export function NativeBrowserToolRow({
             ? Smartphone
             : SquareMousePointer
       }
-      active={ctx.attachmentImagesActive !== false}
+      active={active}
       className="size-3"
     />
   );

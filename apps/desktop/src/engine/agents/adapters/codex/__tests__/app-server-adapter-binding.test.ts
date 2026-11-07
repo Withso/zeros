@@ -1,10 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import type {
-  AgentAdapterContext,
-  McpServerRegistration,
-} from "../../../types";
-import type { CodexNativeBrowserRuntime } from "../browser-tools";
+import type { AgentAdapterContext } from "../../../types";
 import type { ProviderBinding } from "@zeros/protocol/identities";
 
 type Handler = (params: unknown) => void;
@@ -24,19 +20,6 @@ const rt = vi.hoisted(() => ({
   configByRuntime: [] as Array<Record<string, unknown> | undefined>,
   /** `config/read { includeLayers: true }` layers, by boot order. */
   layersByRuntime: [] as Array<unknown[] | undefined>,
-}));
-
-const browserHost = vi.hoisted(() => ({
-  register: vi.fn(async () => true),
-  settle: vi.fn(async () => true),
-}));
-
-const browserRuntime = vi.hoisted(() => ({
-  resolve: vi.fn(),
-}));
-
-const browserCapability = vi.hoisted(() => ({
-  reason: null as string | null,
 }));
 
 const sessionPaths = vi.hoisted(() => ({
@@ -156,42 +139,11 @@ vi.mock("../../../session-paths", () => ({
   removeSessionDir: sessionPaths.remove,
 }));
 
-vi.mock("../../../../browser/browser-tool-client", () => ({
-  registerCodexBrowserUseSession: browserHost.register,
-  settleCodexBrowserUseTurn: browserHost.settle,
-}));
-
-vi.mock("../binary-resolver", () => ({
-  resolveCodexBinary: vi.fn(async () => ({ path: "/tmp/codex" })),
-}));
-
-vi.mock("../browser-tools", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../browser-tools")>();
-  return {
-    ...actual,
-    codexNativeBrowserUnavailableReason: vi.fn(
-      ({ contained }: { contained: boolean }) =>
-        contained ? browserCapability.reason : null,
-    ),
-    resolveCodexNativeBrowserRuntime: browserRuntime.resolve,
-    mergeCodexNativeBrowserMcp: vi.fn(
-      (
-        servers: readonly McpServerRegistration[],
-        runtime: CodexNativeBrowserRuntime,
-      ) => [
-        runtime.mcpServer,
-        ...servers.filter((server) => server.name !== runtime.mcpServer.name),
-      ],
-    ),
-  };
-});
-
 import { CodexAppServerAdapter } from "../app-server-adapter";
 
 function makeAdapter() {
   const onSessionUpdate = vi.fn();
   const onAgentStderr = vi.fn();
-  const onCapabilityNotice = vi.fn();
   const onAgentExit = vi.fn();
   const ctx = {
     projectRoot: "/tmp/proj",
@@ -203,14 +155,12 @@ function makeAdapter() {
       onQuestionRequest: vi.fn(),
       onAgentStderr,
       onAgentExit,
-      onCapabilityNotice,
     },
   } as unknown as AgentAdapterContext;
   return {
     adapter: new CodexAppServerAdapter(ctx),
     onSessionUpdate,
     onAgentStderr,
-    onCapabilityNotice,
     onAgentExit,
   };
 }
@@ -237,538 +187,37 @@ describe("Codex opaque provider bindings", () => {
     rt.startError = null;
     rt.configByRuntime = [];
     rt.layersByRuntime = [];
-    browserHost.register.mockClear();
-    browserHost.settle.mockClear();
-    browserRuntime.resolve.mockReset();
-    browserCapability.reason = null;
     sessionPaths.remove.mockClear();
-    const runtime = {
-      pluginId: "browser@openai-bundled",
-      pluginRoot:
-        "/tmp/.codex/plugins/cache/openai-bundled/browser/26.803.61601",
-      codexHome: "/tmp/.codex",
-      browserSkill: {
-        name: "control-in-app-browser",
-        path: "/tmp/.codex/plugins/cache/openai-bundled/browser/26.803.61601/skills/control-in-app-browser/SKILL.md",
-      },
-      mcpServer: {
-        name: "node_repl",
-        transport: "stdio",
-        command: "/tmp/node_repl",
-        replaceNativeLists: true,
-      },
-    } satisfies CodexNativeBrowserRuntime;
-    browserRuntime.resolve.mockResolvedValue(runtime);
   });
 
-  it("keeps the ChatGPT Browser plugin out of resumed Zeros threads", async () => {
+  // Codex uses Zeros computer use and the Zeros browser like every agent.
+  const BUILT_IN_PLUGINS_OFF = {
+    "plugins.browser@openai-bundled.enabled": false,
+    "plugins.chrome@openai-bundled.enabled": false,
+    "plugins.computer-use@openai-bundled.enabled": false,
+    "plugins.unified-computer-use@openai-bundled.enabled": false,
+  };
+
+  it("turns every built-in browser and computer-use plugin off on new and resumed threads", async () => {
     const { adapter } = makeAdapter();
 
+    await adapter.newSession({ executionId: "execution-new", cwd: "/tmp/proj" });
     await adapter.loadSession({
       executionId: "execution-resume",
       providerBinding: sourceBinding,
       cwd: "/tmp/proj",
     });
 
-    // The resume path carries the same thread config a fresh start does: the
-    // browser gate, while native MCP remains under provider configuration.
+    expect(rt.startParams.at(-1)).toMatchObject({ config: BUILT_IN_PLUGINS_OFF });
     expect(rt.resumeParams).toContainEqual(
       expect.objectContaining({
         threadId: "thread-source",
-        config: expect.objectContaining({
-          "plugins.browser@openai-bundled.enabled": false,
-        }),
+        config: expect.objectContaining(BUILT_IN_PLUGINS_OFF),
       }),
     );
+    // Zeros injects no runtime of its own for them.
+    expect(JSON.stringify(rt.bootOptions)).not.toContain("node_repl");
     await adapter.dispose();
-  });
-
-  it("hands native IAB control back when the owning app-server turn settles", async () => {
-    const { adapter } = makeAdapter();
-    const started = await adapter.newSession({
-      executionId: "execution-browser",
-      cwd: "/tmp/proj",
-      browserUse: {
-        kind: "codex-app-server",
-        browserSessionId: "browser_opaque",
-      },
-    });
-
-    await adapter.prompt({
-      sessionId: started.session.sessionId,
-      prompt: [{ type: "text", text: "browse" } as never],
-    });
-
-    expect(browserHost.register).toHaveBeenCalledWith({
-      browserSessionId: "browser_opaque",
-      nativeSessionId: "thread-source",
-    });
-    expect(browserHost.settle).toHaveBeenCalledWith({
-      browserSessionId: "browser_opaque",
-      nativeSessionId: "thread-source",
-    });
-    await adapter.dispose();
-  });
-
-  it("keeps contained macOS Codex usable while Browser fails closed", async () => {
-    browserCapability.reason =
-      "Official Browser cannot safely run inside the macOS containment boundary";
-    const { adapter, onAgentStderr } = makeAdapter();
-    const started = await adapter.newSession({
-      executionId: "execution-browser-contained",
-      cwd: "/tmp/proj",
-      executionBoundary: {
-        status: { actor: "agent-code", backend: "zeros-srt", state: "ready" },
-      } as never,
-      browserUse: {
-        kind: "codex-app-server",
-        browserSessionId: "browser_contained",
-      },
-    });
-
-    expect(browserRuntime.resolve).not.toHaveBeenCalled();
-    expect(rt.startParams.at(-1)).toMatchObject({
-      config: { "plugins.browser@openai-bundled.enabled": false },
-    });
-    expect(browserHost.register).not.toHaveBeenCalled();
-    expect(onAgentStderr).toHaveBeenCalledWith(
-      "codex",
-      expect.stringMatching(/cannot safely run inside the macOS containment/i),
-    );
-
-    await adapter.disposeSession(started.session.sessionId);
-  });
-
-  it("keeps Browser enabled behind the native lifecycle boundary", async () => {
-    browserCapability.reason =
-      "Official Browser cannot safely run inside the macOS containment boundary";
-    const { adapter } = makeAdapter();
-    const started = await adapter.newSession({
-      executionId: "execution-browser-native-host",
-      cwd: "/tmp/proj",
-      executionBoundary: {
-        status: { backend: "none", state: "ready" },
-      } as never,
-      browserUse: {
-        kind: "codex-app-server",
-        browserSessionId: "browser_native_host",
-      },
-    });
-
-    expect(browserRuntime.resolve).toHaveBeenCalledOnce();
-    expect(rt.startParams.at(-1)).toMatchObject({
-      config: { "plugins.browser@openai-bundled.enabled": true },
-    });
-    expect(browserHost.register).toHaveBeenCalledWith({
-      browserSessionId: "browser_native_host",
-      nativeSessionId: "thread-source",
-    });
-
-    await adapter.disposeSession(started.session.sessionId);
-  });
-
-  it("keeps Codex usable when official Browser runtime discovery fails", async () => {
-    browserRuntime.resolve.mockRejectedValueOnce(
-      new Error("browser plugin cache is unreadable"),
-    );
-    const { adapter, onAgentStderr } = makeAdapter();
-
-    const started = await adapter.newSession({
-      executionId: "execution-browser-discovery-failure",
-      cwd: "/tmp/proj",
-      browserUse: {
-        kind: "codex-app-server",
-        browserSessionId: "browser_discovery_failure",
-      },
-    });
-
-    expect(started.session.sessionId).toBe(
-      "execution-browser-discovery-failure",
-    );
-    expect(rt.bootOptions).toHaveLength(1);
-    expect(onAgentStderr).toHaveBeenCalledWith(
-      "codex",
-      expect.stringMatching(/Official Browser runtime discovery failed/i),
-    );
-    await adapter.dispose();
-  });
-
-  it("tells the desktop when the installed Browser plugin cannot be used", async () => {
-    browserRuntime.resolve.mockImplementationOnce(
-      async (options: {
-        onUnavailable?: (reason: Record<string, string>) => void;
-      }) => {
-        options.onUnavailable?.({
-          code: "plugin-unsupported",
-          version: "27.1.0",
-          detail: "scripts/browser-service.mjs does not export handleRpc",
-        });
-        return null;
-      },
-    );
-    const { adapter, onAgentStderr, onCapabilityNotice } = makeAdapter();
-
-    const started = await adapter.newSession({
-      executionId: "execution-browser-unsupported",
-      cwd: "/tmp/proj",
-      browserUse: {
-        kind: "codex-app-server",
-        browserSessionId: "browser_unsupported",
-      },
-    });
-
-    expect(rt.startParams.at(-1)).toMatchObject({
-      config: { "plugins.browser@openai-bundled.enabled": false },
-    });
-    expect(browserHost.register).not.toHaveBeenCalled();
-    expect(onCapabilityNotice).toHaveBeenCalledExactlyOnceWith("codex", {
-      sessionId: "execution-browser-unsupported",
-      notice: {
-        code: "codex-browser-plugin-unsupported",
-        version: "27.1.0",
-      },
-    });
-    expect(onAgentStderr).toHaveBeenCalledWith(
-      "codex",
-      expect.stringMatching(/27\.1\.0.*does not export handleRpc/),
-    );
-    await adapter.disposeSession(started.session.sessionId);
-  });
-
-  it("stays quiet on the desktop when ChatGPT Desktop is not installed", async () => {
-    browserRuntime.resolve.mockImplementationOnce(
-      async (options: {
-        onUnavailable?: (reason: Record<string, string>) => void;
-      }) => {
-        options.onUnavailable?.({ code: "runtime-missing" });
-        return null;
-      },
-    );
-    const { adapter, onAgentStderr, onCapabilityNotice } = makeAdapter();
-
-    const started = await adapter.newSession({
-      executionId: "execution-browser-not-installed",
-      cwd: "/tmp/proj",
-      browserUse: {
-        kind: "codex-app-server",
-        browserSessionId: "browser_not_installed",
-      },
-    });
-
-    expect(onCapabilityNotice).not.toHaveBeenCalled();
-    expect(onAgentStderr).toHaveBeenCalledWith(
-      "codex",
-      expect.stringMatching(/Official Browser runtime unavailable/),
-    );
-    await adapter.disposeSession(started.session.sessionId);
-  });
-
-  const zerosBrowser = {
-    name: "zeros_browser",
-    transport: "http",
-    url: "http://127.0.0.1:9/mcp",
-    headersFromEnv: { Authorization: "ZEROS_BROWSER_TOOLS_CAPABILITY" },
-  } satisfies McpServerRegistration;
-  const bootedServerNames = () =>
-    (rt.bootOptions.at(-1)!.mcpServers as McpServerRegistration[]).map(
-      (server) => server.name,
-    );
-
-  it("drops the Zeros browser tools when Codex's built-in browser loads", async () => {
-    const { adapter, onCapabilityNotice } = makeAdapter();
-    const started = await adapter.newSession({
-      executionId: "execution-browser-native-wins",
-      cwd: "/tmp/proj",
-      mcpServers: [zerosBrowser],
-      browserUse: {
-        kind: "codex-app-server",
-        browserSessionId: "browser_native_wins",
-      },
-    });
-
-    expect(bootedServerNames()).toEqual(["node_repl"]);
-    expect(onCapabilityNotice).not.toHaveBeenCalled();
-    await adapter.disposeSession(started.session.sessionId);
-  });
-
-  it.each([
-    [
-      "an unsupported plugin",
-      { code: "plugin-unsupported", version: "27.1.0", detail: "no handleRpc" },
-      {
-        code: "codex-browser-plugin-unsupported",
-        version: "27.1.0",
-        fallback: "zeros-browser",
-      },
-    ],
-    [
-      "an incomplete plugin",
-      { code: "plugin-incomplete", version: "26.1.0", detail: "missing files" },
-      {
-        code: "codex-browser-plugin-incomplete",
-        version: "26.1.0",
-        fallback: "zeros-browser",
-      },
-    ],
-    ["a missing ChatGPT app", { code: "runtime-missing" }, null],
-  ])(
-    "keeps the Zeros browser as Codex's fallback for %s",
-    async (_label, reason, notice) => {
-      browserRuntime.resolve.mockImplementationOnce(
-        async (options: {
-          onUnavailable?: (reason: Record<string, string>) => void;
-        }) => {
-          options.onUnavailable?.(reason);
-          return null;
-        },
-      );
-      const { adapter, onAgentStderr, onCapabilityNotice } = makeAdapter();
-      const started = await adapter.newSession({
-        executionId: "execution-browser-fallback",
-        cwd: "/tmp/proj",
-        mcpServers: [zerosBrowser],
-        browserUse: {
-          kind: "codex-app-server",
-          browserSessionId: "browser_fallback",
-        },
-      });
-
-      expect(bootedServerNames()).toEqual(["zeros_browser"]);
-      expect(rt.startParams.at(-1)).toMatchObject({
-        config: { "plugins.browser@openai-bundled.enabled": false },
-      });
-      if (notice) {
-        expect(onCapabilityNotice).toHaveBeenCalledExactlyOnceWith("codex", {
-          sessionId: "execution-browser-fallback",
-          notice,
-        });
-      } else {
-        expect(onCapabilityNotice).not.toHaveBeenCalled();
-      }
-      expect(onAgentStderr).toHaveBeenCalledWith(
-        "codex",
-        expect.stringMatching(/Codex will use the Zeros browser/),
-      );
-      await adapter.disposeSession(started.session.sessionId);
-    },
-  );
-
-  // ChatGPT Desktop writes its own [mcp_servers.node_repl] table to
-  // ~/.codex/config.toml. Codex merges Zeros' verified Browser override into
-  // it, so the effective definition is a hybrid. Never run that hybrid, but
-  // never strand the chat either: start once more without the built-in browser.
-  const chatgptNodeRepl = {
-    command: "/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node_repl",
-    args: [],
-    env_vars: ["HOME", "PATH", "TMPDIR"],
-    startup_timeout_sec: 120,
-    env: {
-      NODE_REPL_INSTRUCTIONS_USE_CASE_CHROME: "",
-      NODE_REPL_INSTRUCTIONS_USE_CASE_COMPUTER_USE: "",
-      SKY_CUA_SERVICE_PATH: "/Applications/ChatGPT.app/Contents/Resources/cua_node/service.mjs",
-    },
-  };
-  it.each([
-    ["the Zeros browser", [zerosBrowser], ["zeros_browser"], { code: "codex-browser-config-conflict", fallback: "zeros-browser" }],
-    ["no browser", [], [], { code: "codex-browser-config-conflict" }],
-  ] as const)(
-    "starts Codex with %s when ChatGPT's node_repl declaration conflicts",
-    async (_label, servers, fallbackNames, notice) => {
-      rt.configByRuntime = [
-        { mcp_servers: { node_repl: { ...chatgptNodeRepl, command: "/tmp/node_repl" } } },
-        { mcp_servers: { node_repl: chatgptNodeRepl } },
-      ];
-      const { adapter, onAgentStderr, onCapabilityNotice } = makeAdapter();
-      const started = await adapter.newSession({
-        executionId: "execution-browser-config-conflict",
-        cwd: "/tmp/proj",
-        mcpServers: [...servers],
-        browserUse: {
-          kind: "codex-app-server",
-          browserSessionId: "browser_config_conflict",
-        },
-      });
-
-      expect(
-        rt.bootOptions.map((options) =>
-          (options.mcpServers as McpServerRegistration[]).map((server) => server.name),
-        ),
-      ).toEqual([["node_repl"], fallbackNames]);
-      expect(rt.disposeCalls).toEqual([0]);
-      expect(rt.startParams).toHaveLength(1);
-      expect(rt.startParams[0]).toMatchObject({
-        config: {
-          "plugins.browser@openai-bundled.enabled": false,
-          mcp_servers: { node_repl: { enabled: false } },
-        },
-      });
-      expect(browserHost.register).not.toHaveBeenCalled();
-      expect(sessionPaths.remove).not.toHaveBeenCalled();
-      expect(onCapabilityNotice).toHaveBeenCalledExactlyOnceWith("codex", {
-        sessionId: "execution-browser-config-conflict",
-        notice,
-      });
-      expect(onAgentStderr).toHaveBeenCalledWith(
-        "codex",
-        expect.stringMatching(/node_repl.*Codex configuration/),
-      );
-      await adapter.disposeSession(started.session.sessionId);
-    },
-  );
-
-  // Every user's ChatGPT Desktop writes the same shape under their own
-  // CODEX_HOME. Only that user layer may keep the built-in browser.
-  const chatgptInert = {
-    SKY_CUA_SERVICE_PATH: "/tmp/.codex/computer-use/Codex Computer Use.app",
-    NODE_REPL_INSTRUCTIONS_USE_CASE_CHROME: "",
-    NODE_REPL_INSTRUCTIONS_USE_CASE_COMPUTER_USE: "",
-  };
-  const zerosLayer = { name: { type: "sessionFlags" }, version: "0", config: { mcp_servers: { node_repl: { command: "/tmp/node_repl", args: [], env_vars: [] } } } };
-  const userLayer = { name: { type: "user", file: "/tmp/.codex/config.toml" }, version: "1", config: { mcp_servers: { node_repl: { ...chatgptNodeRepl, env: { ...chatgptNodeRepl.env, ...chatgptInert } } } } };
-  const keptEffective = { mcp_servers: { node_repl: { command: "/tmp/node_repl", args: [], environment_id: "local", enabled: true, env: chatgptInert } } };
-
-  it("keeps Codex's built-in browser with ChatGPT's own node_repl settings", async () => {
-    rt.configByRuntime = [keptEffective];
-    rt.layersByRuntime = [[zerosLayer, userLayer]];
-    const { adapter, onAgentStderr, onCapabilityNotice } = makeAdapter();
-    const started = await adapter.newSession({
-      executionId: "execution-browser-user-declaration",
-      cwd: "/tmp/proj",
-      mcpServers: [zerosBrowser],
-      browserUse: { kind: "codex-app-server", browserSessionId: "browser_user_declaration" },
-    });
-
-    expect(rt.bootOptions).toHaveLength(1);
-    expect(bootedServerNames()).toEqual(["node_repl"]);
-    expect(rt.startParams[0]).toMatchObject({ config: { "plugins.browser@openai-bundled.enabled": true } });
-    expect((rt.startParams[0]!.config as { mcp_servers?: Record<string, unknown> }).mcp_servers ?? {}).not.toHaveProperty("node_repl");
-    expect(onCapabilityNotice).not.toHaveBeenCalled();
-    expect(browserHost.register).toHaveBeenCalledWith(expect.objectContaining({ browserSessionId: "browser_user_declaration" }));
-    expect(onAgentStderr).toHaveBeenCalledWith("codex", expect.stringMatching(/kept node_repl settings from the Codex user configuration/));
-    await adapter.disposeSession(started.session.sessionId);
-  });
-
-  it("drops the built-in browser when a repository's configuration declares node_repl", async () => {
-    const projectLayer = { name: { type: "project", dotCodexFolder: "/tmp/proj/.codex" }, version: "2", config: { mcp_servers: { node_repl: { env: { NODE_OPTIONS: "--require=./x.js" } } } } };
-    rt.configByRuntime = [
-      { mcp_servers: { node_repl: { ...keptEffective.mcp_servers.node_repl, env: { ...chatgptInert, NODE_OPTIONS: "--require=./x.js" } } } },
-      { mcp_servers: { node_repl: chatgptNodeRepl } },
-    ];
-    rt.layersByRuntime = [[zerosLayer, projectLayer, userLayer]];
-    const { adapter, onCapabilityNotice } = makeAdapter();
-    const started = await adapter.newSession({
-      executionId: "execution-browser-project-declaration",
-      cwd: "/tmp/proj",
-      mcpServers: [zerosBrowser],
-      browserUse: { kind: "codex-app-server", browserSessionId: "browser_project_declaration" },
-    });
-
-    expect(rt.bootOptions).toHaveLength(2);
-    expect(rt.startParams[0]).toMatchObject({ config: { "plugins.browser@openai-bundled.enabled": false } });
-    expect(onCapabilityNotice).toHaveBeenCalledExactlyOnceWith("codex", {
-      sessionId: "execution-browser-project-declaration",
-      notice: { code: "codex-browser-config-conflict", fallback: "zeros-browser" },
-    });
-    await adapter.disposeSession(started.session.sessionId);
-  });
-
-  it("ignores a late exit from the retired runtime after the fallback starts", async () => {
-    rt.configByRuntime = [
-      { mcp_servers: { node_repl: { ...chatgptNodeRepl, command: "/tmp/node_repl" } } },
-      { mcp_servers: { node_repl: chatgptNodeRepl } },
-    ];
-    const { adapter, onAgentExit } = makeAdapter();
-    const started = await adapter.newSession({
-      executionId: "execution-browser-late-exit",
-      cwd: "/tmp/proj",
-      browserUse: {
-        kind: "codex-app-server",
-        browserSessionId: "browser_late_exit",
-      },
-    });
-    const exitOf = (index: number) =>
-      rt.bootOptions[index]!.onExit as (code: number | null, signal: NodeJS.Signals | null) => void;
-
-    exitOf(0)(0, "SIGTERM");
-    expect(onAgentExit).not.toHaveBeenCalled();
-    exitOf(1)(1, null);
-    expect(onAgentExit).toHaveBeenCalledExactlyOnceWith(
-      "codex", 1, null, "execution-browser-late-exit",
-    );
-    await adapter.disposeSession(started.session.sessionId);
-  });
-
-  it("still refuses a conflicting registration Zeros does not own", async () => {
-    rt.configByRuntime = [
-      { mcp_servers: { owned: { command: "approved", env: { NODE_OPTIONS: "--require=./unapproved" } } } },
-    ];
-    const { adapter, onCapabilityNotice } = makeAdapter();
-
-    await expect(
-      adapter.newSession({
-        executionId: "execution-owned-conflict",
-        cwd: "/tmp/proj",
-        mcpServers: [{ name: "owned", transport: "stdio", command: "approved" }],
-        browserUse: {
-          kind: "codex-app-server",
-          browserSessionId: "browser_owned_conflict",
-        },
-      }),
-    ).rejects.toThrow(/MCP configuration conflict for owned/);
-
-    expect(rt.bootOptions).toHaveLength(1);
-    expect(rt.disposeCalls).toEqual([0]);
-    expect(rt.startParams).toHaveLength(0);
-    expect(sessionPaths.remove).toHaveBeenCalledWith("execution-owned-conflict");
-    expect(onCapabilityNotice).not.toHaveBeenCalled();
-    await adapter.dispose();
-  });
-
-  it("refuses a conflicting imported node_repl once the built-in browser is off", async () => {
-    rt.configByRuntime = [
-      { mcp_servers: { node_repl: { ...chatgptNodeRepl, command: "/tmp/node_repl" } } },
-      { mcp_servers: { node_repl: chatgptNodeRepl } },
-    ];
-    const { adapter } = makeAdapter();
-
-    await expect(
-      adapter.newSession({
-        executionId: "execution-imported-node-repl",
-        cwd: "/tmp/proj",
-        mcpServers: [{ name: "node_repl", transport: "stdio", command: "/opt/imported/node_repl" }],
-        browserUse: {
-          kind: "codex-app-server",
-          browserSessionId: "browser_imported_node_repl",
-        },
-      }),
-    ).rejects.toThrow(/MCP configuration conflict for node_repl/);
-
-    expect(rt.bootOptions).toHaveLength(2);
-    expect(rt.disposeCalls).toEqual([0, 1]);
-    expect(rt.startParams).toHaveLength(0);
-    expect(sessionPaths.remove).toHaveBeenCalledWith("execution-imported-node-repl");
-    await adapter.dispose();
-  });
-
-  it("tells the desktop Codex switched browsers when discovery fails", async () => {
-    browserRuntime.resolve.mockRejectedValueOnce(new Error("cache unreadable"));
-    const { adapter, onCapabilityNotice } = makeAdapter();
-    const started = await adapter.newSession({
-      executionId: "execution-browser-discovery-fallback",
-      cwd: "/tmp/proj",
-      mcpServers: [zerosBrowser],
-      browserUse: {
-        kind: "codex-app-server",
-        browserSessionId: "browser_discovery_fallback",
-      },
-    });
-
-    expect(bootedServerNames()).toEqual(["zeros_browser"]);
-    expect(onCapabilityNotice).toHaveBeenCalledExactlyOnceWith("codex", {
-      sessionId: "execution-browser-discovery-fallback",
-      notice: { code: "codex-browser-unavailable", fallback: "zeros-browser" },
-    });
-    await adapter.disposeSession(started.session.sessionId);
   });
 
   it("retires the runtime and session directory when thread startup fails", async () => {
@@ -779,10 +228,6 @@ describe("Codex opaque provider bindings", () => {
       adapter.newSession({
         executionId: "execution-browser-thread-failure",
         cwd: "/tmp/proj",
-        browserUse: {
-          kind: "codex-app-server",
-          browserSessionId: "browser_thread_failure",
-        },
       }),
     ).rejects.toThrow(/thread start failed/i);
 
@@ -790,43 +235,6 @@ describe("Codex opaque provider bindings", () => {
     expect(sessionPaths.remove).toHaveBeenCalledWith(
       "execution-browser-thread-failure",
     );
-    await adapter.dispose();
-  });
-
-  it("invokes the verified Browser skill directly for an interactive website prompt", async () => {
-    const { adapter } = makeAdapter();
-    const started = await adapter.newSession({
-      executionId: "execution-browser-skill",
-      cwd: "/tmp/proj",
-      browserUse: {
-        kind: "codex-app-server",
-        browserSessionId: "browser_skill",
-      },
-    });
-
-    await adapter.prompt({
-      sessionId: started.session.sessionId,
-      prompt: [
-        {
-          type: "text",
-          text: "Open https://example.com and explore the public pages.",
-        } as never,
-      ],
-    });
-
-    expect(rt.turnParams.at(-1)).toMatchObject({
-      input: [
-        {
-          type: "text",
-          text: "$control-in-app-browser Open https://example.com and explore the public pages.",
-        },
-        {
-          type: "skill",
-          name: "control-in-app-browser",
-          path: "/tmp/.codex/plugins/cache/openai-bundled/browser/26.803.61601/skills/control-in-app-browser/SKILL.md",
-        },
-      ],
-    });
     await adapter.dispose();
   });
 

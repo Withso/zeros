@@ -96,7 +96,8 @@ number instead of repeating them.
     smoke callers and accessible names. One admission fence covers every entry
     point. After deleting code, search for its path across `scripts/`,
     `agents/`, `.github/` and `docs/`, and fold retired checks to their Local
-    branch.
+    branch. Settings pages are listed per owner: a moved control updates every
+    owner's list and fallback page.
     Cases: `agent-runtime-pin-parity`, `codex-cloud-pin-parity`,
     `portable-census-consumer-faults`, `new-image-ref-form-unhandled-by-vm-helper`.
 
@@ -105,7 +106,10 @@ number instead of repeating them.
     new reader with the old one. Mirrored contracts carry parity tests, new
     runtime methods and capabilities are negotiated opt-ins, migration fixtures
     stay within their historical schema, and persisted identifiers change only
-    through a migration.
+    through a migration. A retired setting folds into its replacement as each
+    layer is read, managed included, keeping every opt-out. Verify provider
+    config semantics against the pinned binary: a Codex thread's
+    `mcp_servers` table replaces its `-c` servers.
     Cases: `base-registration-rollback-cache-version`,
     `recovery-migration-historical-checkpoint`, `control-plane-custody-import-boundary`.
 

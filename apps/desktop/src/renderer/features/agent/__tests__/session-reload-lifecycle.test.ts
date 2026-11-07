@@ -266,15 +266,10 @@ describe("session reload lifecycle", () => {
 
   it.each([
     // Settings first load: nothing booted under an older route.
-    ["codex", null, "codex-native", "none"],
-    ["codex", "codex-native", "codex-native", "none"],
+    ["codex", null, "zeros", "none"],
     // A new route that is not "off" changes what the provider loads at boot.
-    ["codex", "off", "codex-native", "refresh"],
     ["codex", "off", "zeros", "refresh"],
-    ["codex", "codex-native", "zeros", "refresh"],
-    ["codex", "zeros", "codex-native", "refresh"],
     // Zeros refuses an "off" route per call, so a queued refresh is moot.
-    ["codex", "codex-native", "off", "cancel"],
     ["codex", "zeros", "off", "cancel"],
     ["claude", "off", "zeros", "refresh"],
     ["claude", "zeros", "claude-chrome", "refresh"],
@@ -295,29 +290,15 @@ describe("session reload lifecycle", () => {
   );
 
   it.each([
-    ["codex", null, "codex-native", "none"],
-    ["codex", "zeros", "zeros", "none"],
-    // Codex keeps or drops its built-in computer use when it boots.
-    ["codex", "codex-native", "zeros", "refresh"],
-    ["codex", "zeros", "codex-native", "refresh"],
-    ["codex", "off", "codex-native", "refresh"],
-    ["codex", "codex-native", "off", "refresh"],
-    // A queued Codex refresh may still have to drop the built-in plugin.
-    ["codex", "zeros", "off", "none"],
-    // `zeros_computer` tools are listed only at boot.
-    ["claude", "off", "zeros", "refresh"],
-    ["cursor", "off", "zeros", "refresh"],
+    [null, "zeros", "none"],
+    ["zeros", "zeros", "none"],
+    // `zeros_computer` tools are listed only at boot, for every agent alike.
+    ["off", "zeros", "refresh"],
     // Zeros refuses its own tools per call once the route is off.
-    ["claude", "zeros", "off", "cancel"],
-    ["cursor", "zeros", "off", "cancel"],
-  ] as const)(
-    "%s Computer use route %s → %s needs %s",
-    (providerFamily, previous, next, action) => {
-      expect(
-        computerRouteRefreshAction({ providerFamily, previous, next }),
-      ).toBe(action);
-    },
-  );
+    ["zeros", "off", "cancel"],
+  ] as const)("Computer use route %s → %s needs %s", (previous, next, action) => {
+    expect(computerRouteRefreshAction({ previous, next })).toBe(action);
+  });
 
   it.each([
     [null, "zeros", "none"],

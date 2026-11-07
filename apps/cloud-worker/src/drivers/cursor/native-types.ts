@@ -1,6 +1,6 @@
 import type { AgentOptions, SDKUserMessage } from "@cursor/sdk";
 import type { DriverMcpServers } from "../../mcp/gateway";
-import type { CursorModelSelection } from "./model-selection";
+import type { CursorModelRecord, CursorModelSelection } from "./model-selection";
 
 export const CURSOR_VERSION = "1.2.0";
 export type { AgentUsage as CursorAgentUsage } from "@cursor/sdk";
@@ -19,13 +19,16 @@ export interface NativeSend {
 }
 export interface NativeAgent {
   agentId: string;
-  send(message: SDKUserMessage, options: NativeSend): Promise<NativeRun>;
+  send(message: SDKUserMessage, options: NativeSend, native?: NativeCallOptions): Promise<NativeRun>;
   close(): void;
   getUsage(): Promise<unknown>;
 }
+/** The catalog record for the selected model, so the SDK need not fetch the
+ * account's catalog again inside create, resume or send (local-model-catalog.ts). */
+export interface NativeCallOptions { localModelCatalog: CursorModelRecord[] }
 export interface NativeSDK {
-  create(options: AgentOptions): Promise<NativeAgent>;
-  resume(id: string, options: AgentOptions): Promise<NativeAgent>;
+  create(options: AgentOptions, native?: NativeCallOptions): Promise<NativeAgent>;
+  resume(id: string, options: AgentOptions, native?: NativeCallOptions): Promise<NativeAgent>;
 }
 export interface OpenParams { cwd: string; nativeSessionId?: string; model: string; effort?: string; fast?: boolean; mcpServers?: DriverMcpServers; modeId?: "agent" | "plan" }
 export interface PromptParams { turnId: string; content: SDKUserMessage; model: string; effort?: string; fast?: boolean; modeId?: "agent" | "plan" }

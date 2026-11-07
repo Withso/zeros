@@ -31,6 +31,21 @@ it("pins native cwd, full permissions and a model at create, resume and every se
   expect(f.events.at(-1)).toMatchObject({ kind: "result", turnId: "one", value: { result: { status: "finished" } } }); await f.host.dispose();
 });
 
+it("hands create and resume the listed record the SDK would find for the selection", async () => {
+  for (const nativeSessionId of [undefined, "native-agent"]) {
+    const record = { id: "composer-2.5", aliases: ["composer"] }, natives: unknown[] = [];
+    const agent: NativeAgent = { agentId: "native-agent", send: async () => { throw new Error("unused"); }, close() {}, getUsage: async () => ({}) };
+    const sdk: NativeSDK = {
+      create: async (_options, native) => { natives.push(native); return agent; },
+      resume: async (_id, _options, native) => { natives.push(native); return agent; },
+    };
+    const host = new CursorHost(sdk, async () => {}, "fixture-cursor", async () => [{ id: "grok-4.7", parameters: [] }, record]);
+    await host.open({ cwd: "/fixture", model: "composer", nativeSessionId });
+    expect(natives).toEqual([{ localModelCatalog: [record] }]);
+    await host.dispose();
+  }
+});
+
 it("passes admitted worker MCP servers into Cursor create and resume", async () => {
   for (const nativeSessionId of [undefined, "native-agent"]) {
     const f = fixture(), mcpServers = { tools: { type: "http" as const, url: "http://127.0.0.1:3222/mcp/fixture", headers: { Authorization: "Bearer fixture-mcp-secret" } } };

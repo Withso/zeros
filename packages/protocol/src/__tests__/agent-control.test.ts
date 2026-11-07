@@ -10,19 +10,19 @@ import {
 
 const request: AgentControlConfirmationRequest = {
   id: "confirm-1",
-  kind: "app",
+  kind: "device",
   workspaceId: "workspace-1",
   conversationId: "conversation-1",
   agent: "codex",
-  subject: "Safari",
-  subjectId: "com.apple.Safari",
+  subject: "iPhone 16 Pro",
+  subjectId: "1A2B3C4D-0000-4000-8000-000000000001",
   createdAt: 1,
 };
 
 describe("agent control confirmations", () => {
-  it("asks in the agent's name about the exact app or device", () => {
+  it("asks in the agent's name about the exact device", () => {
     expect(agentControlConfirmationTitle(request)).toBe(
-      "Allow Codex to control Safari?",
+      "Allow Codex to use iPhone 16 Pro?",
     );
     expect(
       agentControlConfirmationTitle({
@@ -40,16 +40,18 @@ describe("agent control confirmations", () => {
         subject: "Pixel 9",
       }),
     ).toBe("Allow Cursor to use Pixel 9?");
-    expect(agentControlConfirmationContext("app")).toMatch(/this chat/);
+    expect(agentControlConfirmationContext("device")).toMatch(/this chat/);
   });
 
   it("accepts only main-shaped requests and the two decisions", () => {
     expect(isAgentControlConfirmationRequest(request)).toBe(true);
     for (const broken of [
       { ...request, kind: "desktop" },
+      // Apps need no approval any more.
+      { ...request, kind: "app" },
       { ...request, agent: "gemini" },
       { ...request, subject: " " },
-      { ...request, subjectId: "com.apple.Safari; rm" },
+      { ...request, subjectId: "1A2B3C4D; rm" },
       { ...request, conversationId: "a/b" },
       { ...request, createdAt: -1 },
       null,

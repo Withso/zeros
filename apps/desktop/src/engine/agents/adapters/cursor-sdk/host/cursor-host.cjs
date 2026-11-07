@@ -889,6 +889,50 @@ installFirstTurnTracer();
 // run from source with no Electron host) fall back to ordinary module
 // resolution, which walks up to the repo node_modules.
 const sdkEntry = process.env.ZEROS_CURSOR_SDK_ENTRY;
+
+// @cursor/sdk parses each shell command with tree-sitter natives from its
+// platform package, which it looks for only above this script and the runtime
+// executable. pnpm and the packaged app keep that package beside the SDK, so
+// without this hand-off the parse fails: command analysis degrades and a team's
+// admin command denylist blocks every shell command.
+function treeSitterVendorDir(sdkPath) {
+  try {
+    const manifest = require.resolve(
+      `@cursor/sdk-${process.platform}-${process.arch}/package.json`,
+      { paths: [path.dirname(sdkPath)] },
+    );
+    const vendor = path.join(path.dirname(manifest), "vendor");
+    return fs.existsSync(path.join(vendor, "tree-sitter", "index.js"))
+      ? vendor
+      : null;
+  } catch {
+    return null;
+  }
+}
+if (!process.env.CURSOR_TREE_SITTER_VENDOR_DIR) {
+  let vendor = null;
+  try {
+    vendor = treeSitterVendorDir(
+      sdkEntry && sdkEntry.length > 0 ? sdkEntry : require.resolve("@cursor/sdk"),
+    );
+  } catch {
+    // An unresolvable SDK fails its load below, with the real error.
+  }
+  if (vendor) process.env.CURSOR_TREE_SITTER_VENDOR_DIR = vendor;
+  else
+    process.stderr.write(
+      "[cursor-host] shell-parser: tree-sitter natives are unavailable beside " +
+        "@cursor/sdk; shell command analysis is degraded\n",
+    );
+}
+if (cursorTransportDebug) {
+  process.stderr.write(
+    `[cursor-host] shell-parser: tree-sitter natives at ${
+      process.env.CURSOR_TREE_SITTER_VENDOR_DIR || "(none)"
+    }\n`,
+  );
+}
+
 let sdk;
 const sdkRequireStartedAt = Date.now();
 try {
@@ -1245,6 +1289,77 @@ async function prewarmWorkspace(opts) {
   return { prewarmed: true, elapsedMs: elapsed };
 }
 
+// Agent.create, Agent.resume and every send validate `model` against the
+// account's catalog. @cursor/sdk 1.2.0 builds a new platform, with an empty
+// model-list cache, for every create/resume, and a send validates on its
+// agent's platform, so each would wait on its own GET /v1/models inside the
+// engine's 30s control budget, after the engine already read the same catalog.
+// The SDK reads CURSOR_SDK_LOCAL_MODEL_CATALOG_JSON instead of that request, so
+// the engine sends the confirmed record for the selected model and the host
+// exposes it for that call only. Calls take turns so no call validates against
+// a record meant for another; children spawned meanwhile inherit only this
+// bounded, credential-free JSON.
+//
+// The SDK reads the variable before its first network request. A turn still
+// running after MODEL_VALIDATION_WINDOW_MS closes the window anyway, so a hung
+// call cannot hold every later call in this session; at worst a call starved
+// that long validates live.
+
+const LOCAL_MODEL_CATALOG_ENV = "CURSOR_SDK_LOCAL_MODEL_CATALOG_JSON";
+const MAX_LOCAL_MODEL_RECORDS = 8;
+const MAX_LOCAL_MODEL_CATALOG_CHARS = 64 * 1024;
+const MODEL_VALIDATION_WINDOW_MS = 10_000;
+let modelValidationTail = Promise.resolve();
+
+/** The SDK rejects a catalog entry without a string id as a terminal error,
+ *  so anything malformed falls back to its own live validation instead. */
+function localModelCatalogJson(records) {
+  if (!Array.isArray(records) || records.length === 0) return null;
+  if (records.length > MAX_LOCAL_MODEL_RECORDS) return null;
+  for (const record of records) {
+    if (!record || typeof record !== "object" || Array.isArray(record)) return null;
+    if (typeof record.id !== "string" || !record.id.trim()) return null;
+  }
+  let json;
+  try {
+    json = JSON.stringify(records);
+  } catch {
+    return null;
+  }
+  return json.length <= MAX_LOCAL_MODEL_CATALOG_CHARS ? json : null;
+}
+
+function withModelValidation(records, work) {
+  const json = localModelCatalogJson(records);
+  const turn = modelValidationTail;
+  let releaseTurn;
+  modelValidationTail = new Promise((resolve) => {
+    releaseTurn = resolve;
+  });
+  return turn.then(async () => {
+    const previous = process.env[LOCAL_MODEL_CATALOG_ENV];
+    let open = true;
+    const close = () => {
+      if (!open) return;
+      open = false;
+      if (json !== null) {
+        if (previous === undefined) delete process.env[LOCAL_MODEL_CATALOG_ENV];
+        else process.env[LOCAL_MODEL_CATALOG_ENV] = previous;
+      }
+      releaseTurn();
+    };
+    if (json !== null) process.env[LOCAL_MODEL_CATALOG_ENV] = json;
+    const timer = setTimeout(close, MODEL_VALIDATION_WINDOW_MS);
+    if (typeof timer.unref === "function") timer.unref();
+    try {
+      return await work();
+    } finally {
+      clearTimeout(timer);
+      close();
+    }
+  });
+}
+
 function send(msg) {
   try {
     process.stdout.write(JSON.stringify(msg) + "\n");
@@ -1426,12 +1541,17 @@ async function handle(m) {
       return;
     }
     case "agent.create": {
-      const agent = await Agent.create(withLocalStore(args));
+      const { zerosLocalModelCatalog, ...opts } = args;
+      const agent = await withModelValidation(zerosLocalModelCatalog, () =>
+        Agent.create(withLocalStore(opts)),
+      );
       ok(id, registerAgent(agent));
       return;
     }
     case "agent.resume": {
-      const agent = await Agent.resume(args.agentId, withLocalStore(args.opts));
+      const agent = await withModelValidation(args.zerosLocalModelCatalog, () =>
+        Agent.resume(args.agentId, withLocalStore(args.opts)),
+      );
       ok(id, registerAgent(agent));
       return;
     }
@@ -1488,7 +1608,14 @@ async function handle(m) {
       const sendStartedAt = Date.now();
       let run;
       try {
-        run = op === "agent.summarize" ? await agent.summarize() : await agent.send(args.message, sendOptions);
+        // send() validates the run's model again, on the agent's own
+        // platform, whose catalog cache create/resume left empty. A summarize
+        // validates the agent's stored model and never carries a record.
+        run = await withModelValidation(args.zerosLocalModelCatalog, () =>
+          op === "agent.summarize"
+            ? agent.summarize()
+            : agent.send(args.message, sendOptions),
+        );
       } catch (error) {
         observedRuns.delete(runId);
         throw error;

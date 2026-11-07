@@ -406,7 +406,7 @@ export interface CursorSdkSendOptions {
 
 export interface SdkAgent {
   readonly agentId: string;
-  send(message: unknown, options?: CursorSdkSendOptions): Promise<SdkRun>;
+  send(message: unknown, options?: CursorSdkSendOptions, native?: CursorNativeCallOptions): Promise<SdkRun>;
   summarize?(): Promise<SdkRun>;
   getUsage?(options?: { runId?: string }): Promise<CursorAgentUsage>;
   close?(): void;
@@ -905,10 +905,22 @@ export interface CursorLocalStore {
   };
   dispose(): Promise<void>;
 }
+/** Facts the session host may give @cursor/sdk for one create, resume or
+ *  send. The in-process loader ignores them. */
+export interface CursorNativeCallOptions {
+  /** The confirmed catalog record for the selected model. The SDK validates
+   *  against it instead of fetching the account's catalog again. */
+  localModelCatalog: CursorModelListItem[];
+}
+
 export interface CursorSdkModule {
   Agent: {
-    create(opts: Record<string, unknown>): Promise<SdkAgent>;
-    resume(agentId: string, opts?: Record<string, unknown>): Promise<SdkAgent>;
+    create(opts: Record<string, unknown>, native?: CursorNativeCallOptions): Promise<SdkAgent>;
+    resume(
+      agentId: string,
+      opts?: Record<string, unknown>,
+      native?: CursorNativeCallOptions,
+    ): Promise<SdkAgent>;
     list(
       opts?: Record<string, unknown>,
     ): Promise<
@@ -1086,6 +1098,10 @@ interface Session {
    * adapter may later activate another API key without changing this session's
    * model semantics. */
   modelState: CursorModelState;
+  /** The key `modelState` was activated for. A connection change replaces
+   *  `apiKey` before the new key's state exists, so until they match a send
+   *  leaves model validation to Cursor. */
+  modelStateApiKey: string;
   modelId: string;
   modeId: CursorSdkModeId;
   agent: SdkAgent;
@@ -1561,6 +1577,23 @@ export class CursorSdkAdapter implements AgentAdapter {
       });
     }
     return selection;
+  }
+
+  /** The record @cursor/sdk would find for `selection` in the account's
+   *  catalog, while this account's catalog is fresh. Create and resume would
+   *  otherwise fetch the catalog again before acting. An unconfirmed, expired
+   *  or invalidated catalog yields nothing, so Cursor validates live. */
+  private nativeCallArgs(
+    state: CursorModelState,
+    selection: CursorModelSelection,
+  ): [] | [CursorNativeCallOptions] {
+    const current = state.cache.current();
+    if (!current.models || !state.cache.isFresh(current)) return [];
+    for (const record of current.models.records.values()) {
+      if (record.id === selection.id || record.aliases?.includes(selection.id))
+        return [{ localModelCatalog: [record] }];
+    }
+    return [];
   }
 
   /** Start one credential-scoped discovery flight. ID-only selections retain
@@ -2139,10 +2172,11 @@ export class CursorSdkAdapter implements AgentAdapter {
           modelId,
           stage: "newSession",
         },
-        (id) =>
-          sdk.Agent.create({
+        (id) => {
+          const model = this.modelSelection(id, modelState, opts.env);
+          return sdk.Agent.create({
             apiKey,
-            model: this.modelSelection(id, modelState, opts.env),
+            model,
             // Pin cwd at BOTH the top level and on `local`. @cursor/sdk's local
             // executor roots shell commands at `local.cwd ?? process.cwd()`; the
             // host's process.cwd() is a neutral non-repo dir (see resolveHostCwd in
@@ -2158,7 +2192,8 @@ export class CursorSdkAdapter implements AgentAdapter {
             ),
             mode: sdkModeFor(initialMode),
             ...(sessionMcp ? { mcpServers: sessionMcp } : {}),
-          }),
+          }, ...this.nativeCallArgs(modelState, model));
+        },
       );
       agent = created.result;
       modelId = created.modelId;
@@ -2173,6 +2208,7 @@ export class CursorSdkAdapter implements AgentAdapter {
       apiKey,
       appliedApiKey: apiKey,
       modelState,
+      modelStateApiKey: apiKey,
       modelId,
       modeId: initialMode,
       agent,
@@ -2276,18 +2312,19 @@ export class CursorSdkAdapter implements AgentAdapter {
           modelId,
           stage: "loadSession",
         },
-        (id) =>
-          sdk.Agent.resume(providerResumeId, {
+        (id) => {
+          // Bind the resolved model on resume too. `Agent.resume` reconstructs
+          // the agent from Cursor's local SQLite store, which may hold NO
+          // persisted model (a cross-worktree id, a rotated cache, or a
+          // pre-SDK cursor-agent CLI id). Without an explicit model the
+          // resumed agent's internal `_model` is undefined and the next
+          // `send()` throws "Local SDK agents require an explicit `model`" —
+          // the exact error users hit on every reopened chat. `resume` takes a
+          // Partial<AgentOptions>, which accepts `model`.
+          const model = this.modelSelection(id, modelState, opts.env, "loadSession");
+          return sdk.Agent.resume(providerResumeId, {
             apiKey,
-            // Bind the resolved model on resume too. `Agent.resume` reconstructs
-            // the agent from Cursor's local SQLite store, which may hold NO
-            // persisted model (a cross-worktree id, a rotated cache, or a
-            // pre-SDK cursor-agent CLI id). Without an explicit model the
-            // resumed agent's internal `_model` is undefined and the next
-            // `send()` throws "Local SDK agents require an explicit `model`" —
-            // the exact error users hit on every reopened chat. `resume` takes a
-            // Partial<AgentOptions>, which accepts `model`.
-            model: this.modelSelection(id, modelState, opts.env, "loadSession"),
+            model,
             // Pin cwd here too — a resumed agent's executor roots at `local.cwd`,
             // and resuming a chat in a different worktree MUST retarget it (else
             // shells run wherever the agent was first created, or fall back to the
@@ -2300,7 +2337,8 @@ export class CursorSdkAdapter implements AgentAdapter {
               settingSources,
             ),
             ...(sessionMcp ? { mcpServers: sessionMcp } : {}),
-          }),
+          }, ...this.nativeCallArgs(modelState, model));
+        },
       );
       agent = resumed.result;
       modelId = resumed.modelId;
@@ -2340,10 +2378,11 @@ export class CursorSdkAdapter implements AgentAdapter {
             modelId,
             stage: "loadSession",
           },
-          (id) =>
-            sdk.Agent.create({
+          (id) => {
+            const model = this.modelSelection(id, modelState, opts.env, "loadSession");
+            return sdk.Agent.create({
               apiKey,
-              model: this.modelSelection(id, modelState, opts.env, "loadSession"),
+              model,
               // Same cwd pinning as the primary create — the fresh fallback agent
               // must also root at the worktree, never the host's process.cwd().
               cwd: opts.cwd,
@@ -2355,7 +2394,8 @@ export class CursorSdkAdapter implements AgentAdapter {
               ),
               mode: sdkModeFor(initialMode),
               ...(sessionMcp ? { mcpServers: sessionMcp } : {}),
-            }),
+            }, ...this.nativeCallArgs(modelState, model));
+          },
         );
         agent = created.result;
         modelId = created.modelId;
@@ -2371,6 +2411,7 @@ export class CursorSdkAdapter implements AgentAdapter {
       apiKey,
       appliedApiKey: apiKey,
       modelState,
+      modelStateApiKey: apiKey,
       modelId,
       modeId: initialMode,
       agent,
@@ -2728,7 +2769,9 @@ export class CursorSdkAdapter implements AgentAdapter {
               translator.feedStep(step);
             }
           },
-        });
+        }, ...(session.modelStateApiKey === session.apiKey
+          ? this.nativeCallArgs(session.modelState, current.selection)
+          : []));
       } catch (err) {
         acceptingUpdates = false;
         transcripts.dispose();
@@ -3189,13 +3232,19 @@ export class CursorSdkAdapter implements AgentAdapter {
       const apiKey = session.apiKey;
       const refresh = async () => {
         const sessionMcp = this.mcpServers(catalog.servers, session.env, session.cwd);
+        const model = this.modelSelection(session.modelId, session.modelState, session.env, "loadSession");
+        // A changed key can briefly hold the previous account's model state, so
+        // that resume keeps Cursor's own validation.
+        const native: [] | [CursorNativeCallOptions] = credentialChanged
+          ? []
+          : this.nativeCallArgs(session.modelState, model);
         const agent = await session.sdk.Agent.resume(previous.agentId, {
           apiKey,
-          model: this.modelSelection(session.modelId, session.modelState, session.env, "loadSession"),
+          model,
           cwd: session.cwd,
           local: this.buildLocalOpts(session.cwd, session.env, want, session.settingSources),
           ...(sessionMcp ? { mcpServers: sessionMcp } : {}),
-        });
+        }, ...native);
         if (session.disposing || this.sessions.get(session.zerosSessionId) !== session) {
           agent.close?.();
           return;
@@ -3248,6 +3297,7 @@ export class CursorSdkAdapter implements AgentAdapter {
     if (apiKey === session.apiKey) return;
     session.apiKey = apiKey;
     session.modelState = await this.activateModelState(apiKey);
+    session.modelStateApiKey = apiKey;
   }
 
   async disposeSession(sessionId: string): Promise<void> {

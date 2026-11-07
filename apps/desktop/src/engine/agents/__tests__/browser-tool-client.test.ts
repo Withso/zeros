@@ -3,15 +3,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { setAgentControlAvailability } from "../../agent-control/availability";
 import {
-  acquireZerosBrowserHost,
   acquireZerosBrowserToolSession,
   browserRouteForWorkspace,
-  browserUseEnabledForWorkspace,
+  claudeChromeEnabledForWorkspace,
   invokeZerosBrowserTool,
-  registerCodexBrowserUseSession,
   releaseZerosBrowserConversation,
   resolveBrowserServiceConfig,
-  settleCodexBrowserUseTurn,
   stopZerosBrowserAction,
   stripBrowserServiceCredentials,
 } from "../../browser/browser-tool-client";
@@ -90,153 +87,25 @@ describe("Zeros browser tool client", () => {
     ).toEqual({ KEEP: "yes" });
   });
 
-  it("resolves the browser setting without acquiring the Zeros host", () => {
-    expect(
-      browserUseEnabledForWorkspace("/tmp/project", undefined, "codex"),
-    ).toBe(true);
-    expect(
-      browserUseEnabledForWorkspace("/tmp/project", undefined, "claude"),
-    ).toBe(false);
-    vi.mocked(opSettingsResolve).mockReturnValue({
-      effective: {
-        browser: {
-          enabled: false,
-          codex_enabled: true,
-          claude_enabled: false,
-          provider: "isolated",
-        },
-      },
-      sources: {},
-      warnings: [],
-    });
-    expect(
-      browserUseEnabledForWorkspace("/tmp/project", undefined, "codex"),
-    ).toBe(true);
-    expect(
-      browserUseEnabledForWorkspace("/tmp/project", undefined, "claude"),
-    ).toBe(false);
-  });
-
-  it("registers the native Codex session with the IAB host", async () => {
-    const fetchImpl = vi.fn<typeof fetch>(async () =>
-      json({ registered: true }),
-    );
-
-    await expect(
-      registerCodexBrowserUseSession({
-        browserSessionId: "browser_opaque",
-        nativeSessionId: "codex-thread-1",
-        env: ENV,
-        fetchImpl,
-      }),
-    ).resolves.toBe(true);
-
-    expect(String(fetchImpl.mock.calls[0]?.[0])).toContain(
-      "/v1/providers/codex/register",
-    );
-    expect(JSON.parse(String(fetchImpl.mock.calls[0]?.[1]?.body))).toEqual({
-      version: 1,
-      browserSessionId: "browser_opaque",
-      nativeSessionId: "codex-thread-1",
-    });
-  });
-
-  it("settles the native Codex browser turn through the authenticated host", async () => {
-    const fetchImpl = vi.fn<typeof fetch>(async () =>
-      json({ version: 1, settled: true }),
-    );
-
-    await expect(
-      settleCodexBrowserUseTurn({
-        browserSessionId: "browser_opaque",
-        nativeSessionId: "codex-thread-1",
-        env: ENV,
-        fetchImpl,
-      }),
-    ).resolves.toBe(true);
-
-    expect(String(fetchImpl.mock.calls[0]?.[0])).toContain(
-      "/v1/providers/codex/turn-ended",
-    );
-    expect(fetchImpl.mock.calls[0]?.[1]?.headers).toMatchObject({
-      authorization: "Bearer service-secret",
-      "content-type": "application/json",
-    });
-    expect(JSON.parse(String(fetchImpl.mock.calls[0]?.[1]?.body))).toEqual({
-      version: 1,
-      browserSessionId: "browser_opaque",
-      nativeSessionId: "codex-thread-1",
-    });
-  });
-
-  it("rejects an invalid native turn settlement without contacting the host", async () => {
-    const fetchImpl = vi.fn<typeof fetch>();
-
-    await expect(
-      settleCodexBrowserUseTurn({
-        browserSessionId: "browser/unsafe",
-        nativeSessionId: "codex-thread-1",
-        env: ENV,
-        fetchImpl,
-      }),
-    ).resolves.toBe(false);
-    expect(fetchImpl).not.toHaveBeenCalled();
-  });
-
-  it("acquires only the opaque IAB host, not a Zeros tool binding", async () => {
-    const fetchImpl = vi.fn<typeof fetch>(async () =>
-      json({
-        version: 1,
-        browserSessionId: "browser_opaque",
-        capabilities: { codexIab: true },
-      }),
-    );
-    const binding = await acquireZerosBrowserHost({
-      workspaceId: "workspace-1",
-      conversationId: "conversation-1",
-      workspaceRoot: "/tmp/project",
-      env: ENV,
-      fetchImpl,
-    });
-
-    expect(binding).toEqual({ browserSessionId: "browser_opaque" });
-    expect(binding).not.toHaveProperty("definitions");
-    expect(binding).not.toHaveProperty("execute");
-    expect(JSON.parse(String(fetchImpl.mock.calls[0]?.[1]?.body))).toEqual({
-      version: 1,
-      owner: {
-        workspaceId: "workspace-1",
-        conversationId: "conversation-1",
-        workspaceRoot: "/tmp/project",
-      },
-    });
-    fetchImpl.mockImplementationOnce(
-      async () => new Response(null, { status: 204 }),
-    );
-    await expect(
-      releaseZerosBrowserConversation("workspace-1", "conversation-1"),
-    ).resolves.toBe(true);
-    expect(fetchImpl.mock.calls[1]?.[1]?.method).toBe("DELETE");
-  });
-
-  it("rejects a stale main-process host that does not advertise native Codex IAB", async () => {
-    const fetchImpl = vi.fn<typeof fetch>(async () =>
-      json({ version: 1, browserSessionId: "browser_stale" }),
-    );
-    await expect(
-      acquireZerosBrowserHost({
-        workspaceId: "workspace-stale",
-        conversationId: "conversation-stale",
-        workspaceRoot: "/tmp/project",
-        env: ENV,
-        fetchImpl,
-      }),
-    ).rejects.toThrow("native Codex IAB");
+  it("turns on Claude's Chrome only when browser use and Chrome are on", () => {
+    const resolveWith = (browser: Record<string, unknown>) =>
+      vi.mocked(opSettingsResolve).mockReturnValue({
+        effective: { browser },
+        sources: {},
+        warnings: [],
+      });
+    resolveWith({ enabled: true });
+    expect(claudeChromeEnabledForWorkspace("/tmp/project")).toBe(false);
+    resolveWith({ enabled: true, claude_enabled: true });
+    expect(claudeChromeEnabledForWorkspace("/tmp/project")).toBe(true);
+    // "Enable browser use" decides for every agent, Chrome included.
+    resolveWith({ enabled: false, claude_enabled: true });
+    expect(claudeChromeEnabledForWorkspace("/tmp/project")).toBe(false);
   });
 
   it("rejects malformed Zeros owner identifiers before contacting the service", async () => {
     await expect(
-      acquireZerosBrowserHost({
+      acquireZerosBrowserToolSession({
         workspaceId: "workspace/unsafe",
         conversationId: "codex-thread-1",
         workspaceRoot: "/tmp/project",
@@ -256,7 +125,7 @@ describe("Zeros browser tool client", () => {
         resolveAcquire = resolve;
       });
     });
-    const pending = acquireZerosBrowserHost({
+    const pending = acquireZerosBrowserToolSession({
       workspaceId: "workspace-race",
       conversationId: "conversation-race",
       workspaceRoot: "/tmp/project",
@@ -268,11 +137,7 @@ describe("Zeros browser tool client", () => {
       releaseZerosBrowserConversation("workspace-race", "conversation-race"),
     ).resolves.toBe(false);
     resolveAcquire(
-      json({
-        version: 1,
-        browserSessionId: "browser_race",
-        capabilities: { codexIab: true },
-      }),
+      json({ version: 1, browserSessionId: "browser_race" }),
     );
 
     await expect(pending).resolves.toBeNull();
@@ -304,116 +169,35 @@ describe("Zeros browser tool client", () => {
     });
   });
 
-  it("does not allocate an IAB host when Browser use is disabled", async () => {
-    vi.mocked(opSettingsResolve).mockReturnValue({
-      effective: { browser: { enabled: false, provider: "isolated" } },
-      sources: {},
-      warnings: [],
-    });
-    const fetchImpl = vi.fn<typeof fetch>();
-
-    await expect(
-      acquireZerosBrowserHost({
-        workspaceId: "workspace-disable",
-        conversationId: "conversation-disable",
-        workspaceRoot: "/tmp/project",
-        env: ENV,
-        fetchImpl,
-      }),
-    ).resolves.toBeNull();
-    expect(fetchImpl).not.toHaveBeenCalled();
-  });
-
-  it("does not allocate an IAB host when Codex should use the Zeros browser", async () => {
-    vi.mocked(opSettingsResolve).mockReturnValue({
-      effective: {
-        browser: { codex_enabled: true, codex_native: false, provider: "isolated" },
-      },
-      sources: {},
-      warnings: [],
-    });
-    const fetchImpl = vi.fn<typeof fetch>();
-
-    await expect(
-      acquireZerosBrowserHost({
-        workspaceId: "workspace-zeros-route",
-        conversationId: "conversation-zeros-route",
-        workspaceRoot: "/tmp/project",
-        env: ENV,
-        fetchImpl,
-      }),
-    ).resolves.toBeNull();
-    expect(fetchImpl).not.toHaveBeenCalled();
-  });
-
-  it("keeps Codex on its built-in browser while the Zeros browser is closed", async () => {
-    setAgentControlAvailability({
-      ...initialAgentControlAvailability(),
-      zerosBrowser: false,
-    });
-    vi.mocked(opSettingsResolve).mockReturnValue({
-      effective: {
-        browser: { codex_enabled: true, codex_native: false, provider: "isolated" },
-      },
-      sources: {},
-      warnings: [],
-    });
-    const fetchImpl = vi.fn<typeof fetch>(async () =>
-      json({
-        version: 1,
-        browserSessionId: "browser_native",
-        capabilities: { codexIab: true },
-      }),
-    );
-
-    await expect(
-      acquireZerosBrowserHost({
-        workspaceId: "workspace-closed",
-        conversationId: "conversation-closed",
-        workspaceRoot: "/tmp/project",
-        env: ENV,
-        fetchImpl,
-      }),
-    ).resolves.toEqual({ browserSessionId: "browser_native" });
-    fetchImpl.mockImplementationOnce(
-      async () => new Response(null, { status: 204 }),
-    );
-    await expect(
-      releaseZerosBrowserConversation("workspace-closed", "conversation-closed"),
-    ).resolves.toBe(true);
-  });
-
   it("routes each agent from the workspace browser settings", () => {
-    expect(browserRouteForWorkspace("codex", "/tmp/project")).toBe(
-      "codex-native",
-    );
-    expect(browserRouteForWorkspace("claude", "/tmp/project")).toBe("zeros");
-    expect(browserRouteForWorkspace("cursor", "/tmp/project")).toBe("zeros");
-    vi.mocked(opSettingsResolve).mockReturnValue({
-      effective: {
-        browser: {
-          codex_native: false,
-          claude_enabled: true,
-          in_app_enabled: false,
-          provider: "isolated",
-        },
-      },
-      sources: {},
-      warnings: [],
-    });
+    const resolveWith = (browser: Record<string, unknown>) =>
+      vi.mocked(opSettingsResolve).mockReturnValue({
+        effective: { browser },
+        sources: {},
+        warnings: [],
+      });
+    resolveWith({ enabled: true });
+    for (const agent of ["codex", "claude", "cursor"]) {
+      expect(browserRouteForWorkspace(agent, "/tmp/project")).toBe("zeros");
+    }
+    resolveWith({ enabled: true, claude_enabled: true });
     expect(browserRouteForWorkspace("codex", "/tmp/project")).toBe("zeros");
-    expect(browserRouteForWorkspace("claude", "/tmp/project")).toBe(
-      "claude-chrome",
-    );
-    expect(browserRouteForWorkspace("cursor", "/tmp/project")).toBe("off");
-    vi.mocked(opSettingsResolve).mockReturnValue({
-      effective: { browser: { provider: "remote" } },
-      sources: {},
-      warnings: [],
-    });
-    expect(() => browserRouteForWorkspace("cursor", "/tmp/project")).toThrow(
-      "Unsupported Zeros browser provider setting",
-    );
+    expect(browserRouteForWorkspace("claude", "/tmp/project")).toBe("claude-chrome");
+    expect(browserRouteForWorkspace("cursor", "/tmp/project")).toBe("zeros");
+    resolveWith({ enabled: false, claude_enabled: true });
+    for (const agent of ["codex", "claude", "cursor"]) {
+      expect(browserRouteForWorkspace(agent, "/tmp/project")).toBe("off");
+    }
+    // Retired keys, including a hand-written host backend, change nothing.
+    resolveWith({ enabled: true, provider: "remote", codex_native: true, in_app_enabled: false });
+    for (const agent of ["codex", "claude", "cursor"]) {
+      expect(browserRouteForWorkspace(agent, "/tmp/project")).toBe("zeros");
+    }
+    // While the Zeros browser is closed, only Claude's chosen Chrome remains.
+    setAgentControlAvailability({ ...initialAgentControlAvailability(), zerosBrowser: false });
+    resolveWith({ enabled: true, claude_enabled: true });
+    expect(browserRouteForWorkspace("codex", "/tmp/project")).toBe("off");
+    expect(browserRouteForWorkspace("claude", "/tmp/project")).toBe("claude-chrome");
   });
 
   it("acquires a tool session without the Codex switch or its IAB capability", async () => {
@@ -603,26 +387,6 @@ describe("Zeros browser tool client", () => {
       }),
     ).resolves.toBe(false);
     expect(fetchImpl).toHaveBeenCalledTimes(1);
-  });
-
-  it("rejects an unsupported browser host before allocating it", async () => {
-    vi.mocked(opSettingsResolve).mockReturnValue({
-      effective: { browser: { enabled: true, provider: "remote" } },
-      sources: {},
-      warnings: [],
-    });
-    const fetchImpl = vi.fn<typeof fetch>();
-
-    await expect(
-      acquireZerosBrowserHost({
-        workspaceId: "workspace-provider",
-        conversationId: "conversation-provider",
-        workspaceRoot: "/tmp/project",
-        env: ENV,
-        fetchImpl,
-      }),
-    ).rejects.toThrow("Unsupported Zeros browser provider setting");
-    expect(fetchImpl).not.toHaveBeenCalled();
   });
 });
 

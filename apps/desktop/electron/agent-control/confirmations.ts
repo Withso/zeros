@@ -29,7 +29,7 @@ interface AgentControlConfirmationBrokerOptions {
 const DEFAULT_TIMEOUT_MS = 4 * 60_000;
 const DEFAULT_MAX_PENDING = 16;
 
-/** Main-process authority for app and simulator approvals. Requests are
+/** Main-process authority for simulator approvals. Requests are
  * created here, never by tool arguments, and anything other than an explicit
  * Allow from the trusted window denies: timeouts, aborts, a missing renderer
  * and a full queue. */

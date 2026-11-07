@@ -76,23 +76,23 @@ import {
 } from "./design/metadata";
 import { DesignCodeToolAdmissions } from "./design/code-tool-admission";
 import { readAgentControlAvailability } from "@zeros/protocol/agent-control-rollout";
-import { isAgentControlFamily } from "@zeros/protocol/browser-tools";
-import type { ComputerUseOwner } from "@zeros/protocol/computer-use-tools";
-import { AgentControlToolAdmissions } from "./agent-control/admission";
+import {
+  AgentControlToolAdmissions,
+  stripInheritedAgentControlEnv,
+} from "./agent-control/admission";
 import {
   agentControlFeatureAvailable,
   setAgentControlAvailability,
 } from "./agent-control/availability";
 import { computerUseRouteForWorkspace } from "./agent-control/computer-use-settings";
+import { migrateRetiredAgentControlSettings } from "./settings/agent-control-migration";
 import {
   invokeZerosComputerTool,
   invokeZerosDeviceTool,
   releaseZerosComputerUse,
   releaseZerosDeviceUse,
-  reportNativeComputerUse,
   resolveAgentControlServiceConfig,
 } from "./agent-control/control-service-client";
-import { NativeComputerUseReports } from "./agent-control/native-computer-use";
 import { deviceToolRouteForWorkspace } from "./agent-control/simulator-settings";
 import { composeAgentSessionToolFactories } from "./agents/session-tools";
 import { recoverLocalRequestsAtBoot } from "./db/local-orchestration";
@@ -831,8 +831,6 @@ export class ZerosEngine {
   /** Restricted workspaces keep streams and permission prompts Local and refuse relay actions;
    * unmanaged sessions have no workspace entry. */
   private readonly sessionWorkspace = new Map<string, string>();
-  /** Codex's built-in computer use, forwarded so other chats wait for it. */
-  private readonly nativeComputerUse = new NativeComputerUseReports(reportNativeComputerUse);
   /** turns.reset must cancel live prompts in the engine before truncating their timeline, whichever client asks. */
   private readonly promptSessions = new Set<string>();
   /** Accepted prompts, including the pre-snapshot window before
@@ -1754,6 +1752,7 @@ export class ZerosEngine {
           invoke: (request, signal) => invokeZerosDeviceTool(request, { signal }),
           release: (owner, reason) => releaseZerosDeviceUse(owner, reason),
         },
+        binDir: () => this.localCliBinDir,
       }).admit, (input) => this.localOrchestration?.admissions.admit(input) ?? Promise.resolve(null)]),
       events: {
         onBoundaryStatusChanged: (agentId, executionId, status) => {
@@ -2112,35 +2111,6 @@ export class ZerosEngine {
             }),
           );
         },
-        onCapabilityNotice: (agentId, { sessionId, notice }) => {
-          // The capability is a desktop install (ChatGPT's Browser plugin), so
-          // only the desktop that owns it can act on the notice.
-          this.router.broadcastLocal(
-            createMessage({
-              type: "AGENT_CAPABILITY_NOTICE",
-              source: "engine",
-              agentId,
-              ...(sessionId ? { sessionId } : {}),
-              notice,
-            }),
-          );
-        },
-        onNativeComputerUse: (agentId, { sessionId, active }) => {
-          void this.nativeComputerUse.update(sessionId, active, () => {
-            const workspaceId = this.sessionWorkspace.get(sessionId);
-            const conversationId = this.sessionChat.get(sessionId);
-            // Only Zeros computer use waits for a built-in one.
-            if (!agentControlFeatureAvailable("computerUse") ||
-                !workspaceId || !conversationId || !isAgentControlFamily(agentId)) return null;
-            return {
-              owner: {
-                workspaceId: workspaceId as ComputerUseOwner["workspaceId"],
-                conversationId: conversationId as ComputerUseOwner["conversationId"],
-              },
-              agent: agentId,
-            };
-          });
-        },
         onAgentExit: (
           agentId: string,
           code: number | null,
@@ -2417,6 +2387,17 @@ export class ZerosEngine {
 
     // Nothing this engine starts inherits an outer chat's Local CLI access.
     stripInheritedLocalCliEnv(process.env);
+    // A Zeros started from a chat's shell must not drive the outer Zeros'
+    // browser or computer under that chat's capability.
+    stripInheritedAgentControlEnv(process.env);
+    // Browser and computer-use switches without a Settings row are retired.
+    try {
+      if (migrateRetiredAgentControlSettings()) {
+        console.log("[Zeros] retired browser and computer-use settings without a Settings row");
+      }
+    } catch (error) {
+      console.warn("[Zeros] could not retire old browser and computer-use settings", error);
+    }
 
     const startTime = Date.now();
     const bootPhases = new BootPhaseTimer();
@@ -2647,13 +2628,15 @@ export class ZerosEngine {
       } catch {
         /* best-effort — receipts only shape later replies */
       }
-      try {
-        this.localCliBinDir = await ensureLocalCliBinDir({ dataDir: zerosDataDir() });
-      } catch (error) {
-        console.warn(
-          `[Zeros] Local CLI launcher unavailable: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      }
+    }
+    // The same launcher serves `zeros computer` and `zeros browser`, which
+    // agent control admits beyond the Local Personal owner.
+    try {
+      this.localCliBinDir = await ensureLocalCliBinDir({ dataDir: zerosDataDir() });
+    } catch (error) {
+      console.warn(
+        `[Zeros] Local CLI launcher unavailable: ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
     try {
       const { repairUnattributedFinishedTurns, settleOrphanRunningTurns } =

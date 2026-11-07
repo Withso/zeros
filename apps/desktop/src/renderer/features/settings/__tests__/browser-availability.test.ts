@@ -86,26 +86,25 @@ describe("native browser availability rendering", () => {
     const html = renderToStaticMarkup(createElement(BrowserUsePanel));
     expect(html).not.toContain("unavailable in cloud workspaces");
     expect(html).toContain("Get extension");
-    expect(html).toMatch(/aria-checked="true"[^>]*id="browser-use-codex-enabled"/);
+    expect(html).toMatch(/aria-checked="true"[^>]*id="browser-use-enabled"/);
     expect(html).toMatch(/aria-checked="false"[^>]*id="browser-use-claude-enabled"/);
-    expect(html).toMatch(/aria-checked="true"[^>]*id="browser-use-codex-native"/);
-    expect(html).toMatch(/aria-checked="true"[^>]*id="browser-use-in-app-enabled"/);
     expect(html).toMatch(/aria-checked="true"[^>]*id="browser-use-auto-open"/);
-    expect(html).toMatch(/aria-checked="true"[^>]*id="browser-use-show-agent-cursor"/);
+    // One switch for every agent; no per-agent, approval or cursor rows.
+    expect(html.match(/role="switch"/g)).toHaveLength(3);
+    for (const retired of ["codex-enabled", "codex-native", "in-app-enabled", "show-agent-cursor"]) {
+      expect(html).not.toContain(`id="browser-use-${retired}"`);
+    }
+    expect(html).not.toContain("Approval for opening websites");
   });
 
-  it("shows only Codex's own browser and Claude in Chrome while the Zeros browser is not available", () => {
+  it("leaves Claude in Chrome alone while the Zeros browser is not available", () => {
     state.zerosBrowser = false;
     state.organization = { id: "personal", isPersonal: true };
     state.selected = "";
     const html = renderToStaticMarkup(createElement(BrowserUsePanel));
-    expect(html).toMatch(/aria-checked="true"[^>]*id="browser-use-codex-enabled"/);
+    expect(html).toMatch(/aria-checked="true"[^>]*id="browser-use-enabled"/);
     expect(html).toMatch(/aria-checked="false"[^>]*id="browser-use-claude-enabled"/);
-    expect(html).toMatch(/aria-checked="true"[^>]*id="browser-use-auto-open"/);
-    expect(html).toContain("Approval for opening websites");
-    expect(html).not.toContain('id="browser-use-codex-native"');
-    expect(html).not.toContain('id="browser-use-in-app-enabled"');
-    expect(html).not.toContain('id="browser-use-show-agent-cursor"');
+    expect(html).not.toContain('id="browser-use-auto-open"');
   });
 
   it("lists Cursor beside Codex and Claude in the cloud browser limits", () => {

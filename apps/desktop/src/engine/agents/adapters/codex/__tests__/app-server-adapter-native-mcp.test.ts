@@ -159,32 +159,59 @@ function makeAdapter(emit: Partial<AgentAdapterContext["emit"]> = {}) {
 const configOfThreadStart = (index = 0): Record<string, unknown> =>
   (rt.startThreadParams[index] as { config?: Record<string, unknown> })
     ?.config ?? {};
+const threadServers = (index = 0): Record<string, Record<string, unknown>> =>
+  (configOfThreadStart(index).mcp_servers ?? {}) as Record<string, Record<string, unknown>>;
+
+
+/** Codex's built-in computer-use servers, disabled on every thread: Codex
+ * uses Zeros computer use like every agent. */
+const COMPUTER_USE_OFF = {
+  cua_repl: { enabled: false, command: "zeros-disabled-mcp-server" },
+  "computer-use": { enabled: false, command: "zeros-disabled-mcp-server" },
+};
 
 describe("CodexAppServerAdapter native extension loading", () => {
   afterEach(() => vi.unstubAllEnvs());
 
+  it("reads the model catalog while the thread starts, not after it", async () => {
+    // A new chat waits for the catalog so its picker is right at once; the
+    // request rides alongside the MCP read and thread/start, and is made once.
+    const adapter = makeAdapter();
+    try {
+      await adapter.newSession({ cwd: "/tmp/proj" });
+      expect(rt.methodOrder.indexOf("model/list")).toBeGreaterThanOrEqual(0);
+      expect(rt.methodOrder.indexOf("model/list")).toBeLessThan(rt.methodOrder.indexOf("config/read"));
+      expect(rt.methodOrder.filter((method) => method === "model/list")).toHaveLength(1);
+    } finally {
+      await adapter.dispose();
+    }
+  });
+
   it.each(["/tmp/personal/project", "/tmp/organization/project"])(
-    "starts a chat in %s with the verified Browser environment intact",
+    "starts a chat in %s with a registered server's verified environment intact",
     async (cwd) => {
       const adapter = makeAdapter();
       rt.mcpServers = {
-        node_repl: {
-          command: "/opt/verified/node_repl", args: [], enabled: true,
-          environment_id: "local", startup_timeout_sec: 120, tool_timeout_sec: null,
-          env: { NODE_REPL_NODE_PATH: "/opt/verified/node" },
+        local_tools: {
+          command: "/opt/verified/local_tools", args: [], enabled: true,
+          environment_id: "local", tool_timeout_sec: null,
+          env: { TOOLS_HOME: "/opt/verified" },
         },
       };
       try {
         await adapter.newSession({
           cwd,
           mcpServers: [{
-            name: "node_repl", transport: "stdio", command: "/opt/verified/node_repl",
-            startupTimeoutSec: 120, env: { NODE_REPL_NODE_PATH: "/opt/verified/node" },
+            name: "local_tools", transport: "stdio", command: "/opt/verified/local_tools",
+            env: { TOOLS_HOME: "/opt/verified" },
           }],
         });
         expect(rt.methodOrder.indexOf("config/read")).toBeLessThan(rt.methodOrder.indexOf("thread/start"));
         expect(rt.startThreadParams).toHaveLength(1);
-        expect(configOfThreadStart().mcp_servers ?? {}).not.toHaveProperty("node_repl");
+        // Restated as registered (never disabled), so the thread keeps it.
+        expect(threadServers().local_tools).toEqual({
+          command: "/opt/verified/local_tools", env: { TOOLS_HOME: "/opt/verified" },
+        });
       } finally {
         await adapter.dispose();
       }
@@ -270,8 +297,10 @@ describe("CodexAppServerAdapter native extension loading", () => {
     };
     await adapter.newSession({ cwd: "/tmp/proj", mcpServers: [injected] });
     expect(configOfThreadStart().mcp_servers).toEqual({
+      zeros: { command: "zeros-mcp" },
       local_notes: { enabled: false, command: "zeros-disabled-mcp-server" },
       cloud_notes: { enabled: false, url: "https://notes.example/mcp" },
+      ...COMPUTER_USE_OFF,
     });
     const { bootCodexAppServerRuntime } = await import("../app-server");
     expect(bootCodexAppServerRuntime).toHaveBeenLastCalledWith(
@@ -297,6 +326,7 @@ describe("CodexAppServerAdapter native extension loading", () => {
             ? transport
             : { command: "zeros-disabled-mcp-server" }),
         },
+        ...COMPUTER_USE_OFF,
       });
       await adapter.dispose();
     },
@@ -357,6 +387,7 @@ describe("CodexAppServerAdapter explicit native MCP opt-out", () => {
     expect(configOfThreadStart().mcp_servers).toEqual({
       directus: { enabled: false, command: "zeros-disabled-mcp-server" },
       codex_apps: { enabled: false, url: "https://example.com/bridge" },
+      ...COMPUTER_USE_OFF,
     });
   });
 
@@ -401,63 +432,89 @@ describe("CodexAppServerAdapter explicit native MCP opt-out", () => {
     });
   });
 
-  it("never disables a server Zeros is injecting under the same name", async () => {
+  it("restates Zeros' own servers in a thread table that disables native ones", async () => {
+    // Codex lets a thread's `mcp_servers` table replace the `-c` servers it
+    // was started with (verified on 0.166): without restating them, a Codex
+    // chat silently loses zeros_browser, zeros_computer and the rest.
     const adapter = makeAdapter();
-    rt.mcpServers = { node_repl: { command: "/opt/node_repl" }, directus: {} };
+    rt.mcpServers = { directus: {} };
+    const { session } = await adapter.newSession({
+      cwd: "/tmp/proj",
+      mcpServers: [
+        {
+          name: "zeros_browser", transport: "http", url: "http://127.0.0.1:43124/mcp",
+          headersFromEnv: { Authorization: "ZEROS_BROWSER_TOOLS_CAPABILITY" }, toolTimeoutSec: 600,
+        },
+        { name: "local_tools", transport: "stdio", command: "/opt/local_tools", args: ["--serve"] },
+      ],
+    });
+    const config = configOfThreadStart();
+    expect(config.mcp_servers).toMatchObject({
+      directus: { enabled: false, command: "zeros-disabled-mcp-server" },
+      cua_repl: { enabled: false },
+      zeros_browser: {
+        url: "http://127.0.0.1:43124/mcp",
+        env_http_headers: { Authorization: "ZEROS_BROWSER_TOOLS_CAPABILITY" },
+        tool_timeout_sec: 600,
+      },
+      local_tools: { command: "/opt/local_tools", args: ["--serve"] },
+    });
+    expect(threadServers().zeros_browser).not.toHaveProperty("enabled");
+    // Restated servers stay in the chat's Tools; disabled ones do not.
+    rt.mcpStatus = [
+      { name: "codex_apps", runtimeStatus: "connected" },
+      { name: "zeros_browser", runtimeStatus: "connected" },
+      { name: "directus", runtimeStatus: "connected" },
+    ];
+    const tools = await adapter.capabilityPorts.sessionTools.list({ sessionId: session.executionId });
+    const ids = tools.entries.map((entry) => entry.id);
+    expect(ids).toContain("zeros_browser");
+    expect(ids).not.toContain("directus");
+    await adapter.dispose();
+  });
+
+  it("never disables a server Zeros is registering under the same name", async () => {
+    const adapter = makeAdapter();
+    rt.mcpServers = { local_tools: { command: "/opt/local_tools" }, directus: {} };
 
     // Zeros' registry lands in the same `mcp_servers` table, so a same-name
-    // entry merges. Disabling `node_repl` here would take Zeros' own injected
-    // server — the one behind native Browser Use — down with the native one.
+    // entry merges. Disabling `local_tools` here would take Zeros' own
+    // registered server down with the native one.
     await adapter.newSession({
       cwd: "/tmp/proj",
       mcpServers: [
-        { name: "node_repl", transport: "stdio", command: "/opt/node_repl" },
+        { name: "local_tools", transport: "stdio", command: "/opt/local_tools" },
       ],
     });
 
     const config = configOfThreadStart();
     expect(config.mcp_servers).toEqual({
+      local_tools: { command: "/opt/local_tools" },
       directus: { enabled: false, command: "zeros-disabled-mcp-server" },
       codex_apps: { enabled: false, command: "zeros-disabled-mcp-server" },
+      ...COMPUTER_USE_OFF,
     });
   });
 
-  it("leaves the Browser plugin gate to codexBrowserThreadConfig", async () => {
+  it("leaves the built-in plugin gates to codexBuiltInPluginsThreadConfig", async () => {
     const adapter = makeAdapter();
     rt.mcpServers = { directus: {} };
 
     await adapter.newSession({ cwd: "/tmp/proj" });
 
     // Nothing here writes a `plugins` table — disabling a plugin by id does
-    // not stop its servers, so the browser gate owns that namespace alone.
+    // not stop its servers, so the built-in plugin gates own that namespace.
     const config = configOfThreadStart();
     expect(config.plugins).toBeUndefined();
     expect(config["plugins.browser@openai-bundled.enabled"]).toBe(false);
   });
 
-  it("keeps Codex's built-in computer use unless Settings turn it off", async () => {
-    for (const computerUse of [undefined, { codexNative: true }]) {
-      const adapter = makeAdapter();
-      await adapter.newSession({
-        cwd: "/tmp/proj",
-        ...(computerUse ? { computerUse } : {}),
-      });
-      const config = configOfThreadStart();
-      expect(config.mcp_servers).not.toHaveProperty("cua_repl");
-      expect(
-        Object.keys(config).filter((key) => key.includes("computer-use")),
-      ).toEqual([]);
-      await adapter.dispose();
-    }
-  });
-
-  it("turns off Codex's built-in computer use for the thread", async () => {
+  it("turns off Codex's built-in computer use on every thread", async () => {
     const adapter = makeAdapter();
     // A configured HTTP namesake stays a valid transport when disabled.
     rt.mcpServers = { "computer-use": { url: "https://cu.example/mcp" } };
     await adapter.newSession({
       cwd: "/tmp/proj",
-      computerUse: { codexNative: false },
     });
     const config = configOfThreadStart();
     expect(config.mcp_servers).toMatchObject({
@@ -476,51 +533,10 @@ describe("CodexAppServerAdapter explicit native MCP opt-out", () => {
     rt.mcpServers = { cua_repl: { command: "own" } };
     await own.newSession({
       cwd: "/tmp/proj",
-      computerUse: { codexNative: false },
       mcpServers: [{ name: "cua_repl", transport: "stdio", command: "own" }],
     });
-    expect(configOfThreadStart().mcp_servers).not.toHaveProperty("cua_repl");
+    expect(threadServers().cua_repl).toEqual({ command: "own" });
     await own.dispose();
-  });
-
-  it("reports Codex's built-in computer use while it acts and when the turn settles", async () => {
-    const onNativeComputerUse = vi.fn();
-    const adapter = makeAdapter({ onNativeComputerUse });
-    const { session } = await adapter.newSession({ cwd: "/tmp/proj" });
-    const { bootCodexAppServerRuntime } = await import("../app-server");
-    const runtime = await vi.mocked(bootCodexAppServerRuntime).mock.results.at(
-      -1,
-    )!.value;
-    const itemStarted = (server: string, type = "mcpToolCall") => {
-      for (const [method, handler] of vi.mocked(runtime.onNotification).mock
-        .calls) {
-        if (method !== "item/started") continue;
-        (handler as (params: unknown) => void)({
-          threadId: "thread-title",
-          turnId: "turn-1",
-          item: { type, id: `call-${server}`, server, tool: "js", arguments: {}, status: "inProgress" },
-        });
-      }
-    };
-    itemStarted("node_repl");
-    itemStarted("cua_repl", "dynamicToolCall");
-    expect(onNativeComputerUse).not.toHaveBeenCalled();
-    itemStarted("cua_repl");
-    itemStarted("computer-use");
-    expect(onNativeComputerUse.mock.calls).toEqual([
-      ["codex", { sessionId: session.executionId, active: true }],
-    ]);
-
-    await adapter.prompt({
-      sessionId: session.executionId!,
-      prompt: [{ type: "text", text: "Use TextEdit" }],
-    });
-    expect(onNativeComputerUse).toHaveBeenLastCalledWith("codex", {
-      sessionId: session.executionId,
-      active: false,
-    });
-    await adapter.dispose();
-    expect(onNativeComputerUse).toHaveBeenCalledTimes(2);
   });
 
   it("does not start a chat with unimported local MCP when its configuration cannot be read", async () => {

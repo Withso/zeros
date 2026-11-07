@@ -2,16 +2,14 @@ import { strict as assert } from "node:assert";
 import { once } from "node:events";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
-import { endianness, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createConnection } from "node:net";
 
 import { app, BaseWindow, BrowserWindow, nativeImage } from "electron";
 import type { WebContents } from "electron";
 
 import type { AgentControlPresentation } from "../../apps/desktop/electron/agent-control/overlay";
 import { startZerosBrowserService } from "../../apps/desktop/electron/browser/service";
-import { encodeCodexBrowserUseFrame } from "../../apps/desktop/electron/codex-browser-use-pipe";
 import { setMainWindow } from "../../apps/desktop/electron/ipc/events";
 import { registerIframePickerCommands } from "../../apps/desktop/electron/ipc/iframe-picker";
 import { registerIpcHandlers } from "../../apps/desktop/electron/ipc/router";
@@ -682,8 +680,7 @@ app
       );
 
       // The Browser tab's Appearance is emulated per session and survives
-      // navigation. The Codex section below also ends the shared debugger
-      // session, after which the choice must come back.
+      // navigation.
       const pageScheme = async () =>
         /Page scheme (dark|light)/.exec(
           (await invoke("snapshot")).content[0]?.text ?? "",
@@ -709,134 +706,6 @@ app
       );
       assert.equal(await pageScheme(), chosenScheme);
 
-      // Native Codex IAB lifecycle: app-server turn completion must hand the
-      // exact retained WebContents back even when node_repl never calls
-      // tabs.finalize() (timeout/kernel reset). The settlement is idempotent,
-      // and Stop's blocked turn remains blocked until a different turn starts.
-      const nativeSessionId = "codex-smoke-thread";
-      const registered = await request("/v1/providers/codex/register", {
-        version: 1,
-        browserSessionId: first.browserSessionId,
-        nativeSessionId,
-      });
-      assert.deepEqual(await registered.json(), { registered: true });
-      const nativeParams = {
-        session_id: nativeSessionId,
-        turn_id: "native-turn-1",
-      };
-      assert.equal(
-        (
-          await nativeBrowserRequest<{ type: string }>(
-            service.codexBrowserUsePipePath,
-            "getInfo",
-            nativeParams,
-          )
-        ).result?.type,
-        "iab",
-      );
-      const nativeTab = (
-        await nativeBrowserRequest<{ id: number }>(
-          service.codexBrowserUsePipePath,
-          "createTab",
-          nativeParams,
-        )
-      ).result;
-      assert(nativeTab?.id);
-      // The split Browser client checks URL policy and origin consent against
-      // the committed URL before guarded commands, and falls back only on the
-      // exact no-handler text for optional methods it probes.
-      assert.equal(
-        (
-          await nativeBrowserRequest<string>(
-            service.codexBrowserUsePipePath,
-            "getCommittedTabUrl",
-            { ...nativeParams, tabId: nativeTab.id },
-          )
-        ).result,
-        `http://127.0.0.1:${fixturePort}/?role=reader`,
-      );
-      assert.equal(
-        (
-          await nativeBrowserRequest(
-            service.codexBrowserUsePipePath,
-            "executeTabRead",
-            { ...nativeParams, tabId: nativeTab.id },
-          )
-        ).error?.message,
-        "No handler registered for method: executeTabRead",
-      );
-      const settleNativeTurn = (browserSessionId = first.browserSessionId) =>
-        request("/v1/providers/codex/turn-ended", {
-          version: 1,
-          browserSessionId,
-          nativeSessionId,
-        });
-      assert.deepEqual(await (await settleNativeTurn()).json(), {
-        version: 1,
-        settled: true,
-      });
-      assert.deepEqual(await (await settleNativeTurn()).json(), {
-        version: 1,
-        settled: true,
-      });
-      const handedToUser = await nativeBrowserRequest<unknown[]>(
-        service.codexBrowserUsePipePath,
-        "getUserTabs",
-        {
-          session_id: nativeSessionId,
-          turn_id: "native-turn-2",
-        },
-      );
-      assert.equal(handedToUser.result?.length, 1);
-      await settleNativeTurn();
-
-      assert(
-        (
-          await nativeBrowserRequest<{ id: number }>(
-            service.codexBrowserUsePipePath,
-            "createTab",
-            {
-              session_id: nativeSessionId,
-              turn_id: "native-turn-stopped",
-            },
-          )
-        ).result?.id,
-      );
-      assert.equal(service.stopBrowserAction(first.browserSessionId), true);
-      assert.deepEqual(await (await settleNativeTurn()).json(), {
-        version: 1,
-        settled: true,
-      });
-      assert.match(
-        String(
-          (
-            await nativeBrowserRequest(
-              service.codexBrowserUsePipePath,
-              "getTabs",
-              {
-                session_id: nativeSessionId,
-                turn_id: "native-turn-stopped",
-              },
-            )
-          ).error?.message,
-        ),
-        /stopped by the user/,
-      );
-      const afterStoppedTurn = await nativeBrowserRequest<unknown[]>(
-        service.codexBrowserUsePipePath,
-        "getUserTabs",
-        {
-          session_id: nativeSessionId,
-          turn_id: "native-turn-3",
-        },
-      );
-      assert.equal(afterStoppedTurn.result?.length, 1);
-      await settleNativeTurn();
-
-      await assertEventually(
-        async () => (await pageScheme()) === chosenScheme,
-        "The Browser appearance did not return after Codex released the page.",
-      );
       assert.equal(service.setAppearance(first.browserSessionId, null), true);
       await assertEventually(
         async () => (await pageScheme()) === followedScheme,
@@ -1041,64 +910,6 @@ function owner(conversationId: string, workspaceRoot: string) {
     conversationId,
     workspaceRoot,
   };
-}
-
-interface NativeBrowserResponse<T> {
-  result?: T;
-  error?: { message?: unknown };
-}
-
-async function nativeBrowserRequest<T = unknown>(
-  pipePath: string,
-  method: string,
-  params: Record<string, unknown>,
-): Promise<NativeBrowserResponse<T>> {
-  const socket = createConnection(pipePath);
-  await Promise.race([
-    once(socket, "connect"),
-    once(socket, "error").then(([error]) => Promise.reject(error)),
-  ]);
-  const response = new Promise<NativeBrowserResponse<T>>((resolve, reject) => {
-    let buffered = Buffer.alloc(0);
-    const timeout = setTimeout(
-      () => reject(new Error(`Native Browser request timed out: ${method}`)),
-      10_000,
-    );
-    timeout.unref?.();
-    socket.on("data", (chunk) => {
-      buffered = Buffer.concat([buffered, chunk]);
-      if (buffered.byteLength < 4) return;
-      const length =
-        endianness() === "LE"
-          ? buffered.readUInt32LE(0)
-          : buffered.readUInt32BE(0);
-      if (buffered.byteLength < 4 + length) return;
-      clearTimeout(timeout);
-      try {
-        resolve(
-          JSON.parse(
-            buffered.subarray(4, 4 + length).toString("utf8"),
-          ) as NativeBrowserResponse<T>,
-        );
-      } catch (error) {
-        reject(error);
-      }
-    });
-    socket.once("error", reject);
-  });
-  socket.write(
-    encodeCodexBrowserUseFrame({
-      jsonrpc: "2.0",
-      id: 1,
-      method,
-      params,
-    }),
-  );
-  try {
-    return await response;
-  } finally {
-    socket.destroy();
-  }
 }
 
 async function assertEventually(

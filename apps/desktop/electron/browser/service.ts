@@ -106,32 +106,12 @@ import {
   normalizeBrowserViewBounds,
   normalizedBrowserFaviconMime,
   orderedBrowserFaviconCandidates,
-  normalizeCodexPageNavigateResult,
   parseBrowserKeyChord,
   queueBrowserTitleCandidate,
   safeBrowserSvgFavicon,
   usableBrowserDocument,
   type BrowserViewBounds,
 } from "./surface";
-import {
-  startCodexBrowserUsePipe,
-  type CodexBrowserUsePipeHandle,
-  type CodexBrowserUseRequest,
-} from "../codex-browser-use-pipe";
-import {
-  codexBrowserIabInfo,
-  codexFinalizeDisposition,
-  type CodexTabDisposition,
-  codexNativePreapprovedNavigationOrigin,
-  codexNativeTabMatches,
-  codexNativeUserTab,
-  codexTurnSettlementDisposition,
-  codexUserTabClaimMatches,
-  consumeCodexDownloadAuthorization,
-  releaseCodexNativeControl,
-  unsupportedCodexBrowserMethodMessage,
-} from "./codex-native-contract";
-
 const MAX_REQUEST_BYTES = 512 * 1024;
 const MAX_RESPONSE_BYTES = 12 * 1024 * 1024;
 const MAX_SESSIONS = 8;
@@ -157,10 +137,7 @@ const BROWSER_TITLE_SETTLE_MS = 300;
 const MAX_FAVICON_BYTES = 192 * 1024;
 const MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024;
 const MAX_STAGED_UPLOADS = 10;
-const MAX_CODEX_BROWSER_BINDINGS = 64;
-const BROWSER_USE_BOOTSTRAP_TIMEOUT_MS = 10_000;
 const BROWSER_USE_CDP_TIMEOUT_MS = 30_000;
-const BROWSER_USE_CDP_MAX_TIMEOUT_MS = 120_000;
 const MIN_VIEWPORT = { width: 320, height: 320 };
 const MAX_VIEWPORT = { width: 2_560, height: 1_800 };
 
@@ -235,12 +212,6 @@ interface BrowserLease {
   downloads: BrowserDownloadArtifact[];
   activeDownloads: Set<DownloadItem>;
   stagedUploads: StagedBrowserUpload[];
-  /** One exact URL already approved by the official Browser plugin's MCP
-   * elicitation. Consumed by the next matching Electron download only. */
-  codexApprovedDownloadUrl: string | null;
-  /** Retention explicitly requested through Tab.markDeliverable/Handoff for
-   * the current native turn. */
-  codexTabDisposition: CodexTabDisposition;
   pendingHostActions: Set<Promise<void>>;
   /** A host action can settle before the caller reaches its bounded wait.
    * Retain failures explicitly instead of losing them when the promise leaves
@@ -250,12 +221,6 @@ interface BrowserLease {
   disposeNetworkHandlers: () => void;
   disposePermissionHandlers: () => void;
   disposeDownloadHandler: () => void;
-  /** Native Codex Browser plugin state. Kept on the same lease so the exact
-   * WebContents becomes a normal user-controlled browser tab after finalize. */
-  browserUseReady: Promise<void> | null;
-  browserUseSocket: CodexBrowserUseRequest["socket"] | null;
-  browserUseTurnId: string | null;
-  disposeBrowserUseDebugger: () => void;
   appearance: BrowserAppearanceController;
 }
 
@@ -278,13 +243,6 @@ interface BrowserSessionRecord {
   appearance: BrowserAppearance | null;
   /** The agent that last drove the page, named on its control bar. */
   agent: AgentControlFamily | null;
-}
-
-interface CodexBrowserBinding {
-  browserSessionId: string;
-  touchedAt: number;
-  activeTurnId: string | null;
-  blockedTurnId: string | null;
 }
 
 export interface ZerosBrowserServiceOptions {
@@ -312,8 +270,6 @@ export interface ZerosBrowserServiceOptions {
 export interface ZerosBrowserServiceHandle {
   baseUrl: string;
   token: string;
-  /** Discovery endpoint consumed by Codex's official bundled Browser plugin. */
-  codexBrowserUsePipePath: string;
   acquire(owner: BrowserSessionOwner): Promise<BrowserSessionAcquireResponse>;
   release(workspaceId: string, conversationId: string): boolean;
   invoke(request: BrowserToolInvokeRequest): Promise<BrowserToolResult>;
@@ -353,12 +309,11 @@ export interface ZerosBrowserServiceHandle {
    * confirmation broker and `revokeConfirmationSurface` respectively. */
   clearBrowsingData(): Promise<number>;
   setUiPreferences(preferences: {
-    /** Some agent may use the in-app browser. Off closes every page. */
+    /** "Enable browser use": every agent may use the in-app browser. Off
+     * closes every page. */
     browserEnabled: boolean;
-    /** Codex may drive pages through OpenAI's Browser plugin. Defaults on. */
-    codexNativeEnabled?: boolean;
+    /** "Show agent cursor" in Settings > General. */
     showAgentCursor: boolean;
-    navigationApproval: "always-ask" | "always-allow";
   }): void;
   /** Re-reads `zerosBrowserAvailable` for every open page's control bar. */
   refreshAgentControl(): void;
@@ -502,13 +457,14 @@ export async function startZerosBrowserService(
   const token = randomBytes(32).toString("base64url");
   const records = new Map<string, BrowserSessionRecord>();
   const ownerSessions = new Map<string, string>();
-  const codexBrowserSessions = new Map<string, CodexBrowserBinding>();
   const cleanupTasks = new Set<Promise<void>>();
   let browserUiEnabled = true;
-  let codexNativeEnabled = true;
   let browserPolicyGeneration = 0;
   let showAgentCursor = true;
-  let navigationApproval: "always-ask" | "always-allow" = "always-ask";
+  // Agents open websites without asking. Sign-in, payment, publishing,
+  // destructive actions, external submits, uploads, downloads and browser
+  // permission requests still confirm through their own risk categories.
+  const navigationApproval = "always-allow" as "always-ask" | "always-allow";
   const maxSessions = boundedPositiveInteger(
     options.maxSessions ?? MAX_SESSIONS,
     "session limit",
@@ -543,11 +499,6 @@ export async function startZerosBrowserService(
     records.delete(record.id);
     if (ownerSessions.get(record.ownerKey) === record.id) {
       ownerSessions.delete(record.ownerKey);
-    }
-    for (const [nativeSessionId, binding] of codexBrowserSessions) {
-      if (binding.browserSessionId === record.id) {
-        codexBrowserSessions.delete(nativeSessionId);
-      }
     }
     publishState(options, record, "closed");
   };
@@ -593,7 +544,6 @@ export async function startZerosBrowserService(
       return {
         version: BROWSER_SERVICE_VERSION,
         browserSessionId: existing.id,
-        capabilities: { codexIab: true },
       };
     }
 
@@ -639,7 +589,6 @@ export async function startZerosBrowserService(
     return {
       version: BROWSER_SERVICE_VERSION,
       browserSessionId: id,
-      capabilities: { codexIab: true },
     };
   };
 
@@ -756,18 +705,18 @@ export async function startZerosBrowserService(
     if (!isBrowserProductId(browserSessionId)) return false;
     const record = records.get(browserSessionId);
     if (!record) return false;
-    for (const binding of codexBrowserSessions.values()) {
-      if (binding.browserSessionId === browserSessionId) {
-        binding.blockedTurnId = binding.activeTurnId;
-      }
-    }
     record.interruptionGeneration += 1;
     confirmations.clearSession(record.id);
     const lease = record.lease;
     if (!lease || lease.view.webContents.isDestroyed()) return false;
     lease.view.webContents.stop();
     for (const item of lease.activeDownloads) item.cancel();
-    releaseCodexNativeControl(lease);
+    lease.actor = "user";
+    lease.pointer = null;
+    lease.action = null;
+    lease.agentActivityUntil = 0;
+    lease.workingOverlayVisible = false;
+    lease.userInputGeneration += 1;
     void lease.view.webContents
       .executeJavaScript(
         `${agentPointerCleanupScript(lease.pointerOverlayId)};${agentWorkingOverlayScript(lease.workingOverlayId, false)}`,
@@ -922,96 +871,6 @@ export async function startZerosBrowserService(
       const url = new URL(request.url ?? "/", "http://127.0.0.1");
       if (
         request.method === "POST" &&
-        url.pathname === "/v1/providers/codex/register"
-      ) {
-        const body = asRecord(await readJsonBody(request));
-        const browserSessionId = String(body.browserSessionId ?? "");
-        const nativeSessionId = String(body.nativeSessionId ?? "");
-        if (
-          body.version !== BROWSER_SERVICE_VERSION ||
-          !isBrowserProductId(browserSessionId) ||
-          !browserSessionId.startsWith("browser_") ||
-          !validNativeBrowserSessionId(nativeSessionId) ||
-          !records.has(browserSessionId)
-        ) {
-          throw browserError("Invalid native Codex browser binding.");
-        }
-        // A conversation has one live provider session. Revoking an older
-        // thread here prevents a stale app-server process from reclaiming the
-        // browser after a resume/rebuild has installed its replacement.
-        for (const [existingId, binding] of codexBrowserSessions) {
-          if (binding.browserSessionId === browserSessionId) {
-            codexBrowserSessions.delete(existingId);
-          }
-        }
-        codexBrowserSessions.set(nativeSessionId, {
-          browserSessionId,
-          touchedAt: Date.now(),
-          activeTurnId: null,
-          blockedTurnId: null,
-        });
-        pruneCodexBrowserBindings(codexBrowserSessions);
-        sendJson(response, 200, { registered: true });
-        return;
-      }
-      if (
-        request.method === "POST" &&
-        url.pathname === "/v1/providers/codex/turn-ended"
-      ) {
-        const body = asRecord(await readJsonBody(request));
-        const browserSessionId = String(body.browserSessionId ?? "");
-        const nativeSessionId = String(body.nativeSessionId ?? "");
-        if (
-          body.version !== BROWSER_SERVICE_VERSION ||
-          !isBrowserProductId(browserSessionId) ||
-          !browserSessionId.startsWith("browser_") ||
-          !validNativeBrowserSessionId(nativeSessionId)
-        ) {
-          throw browserError("Invalid native Codex turn settlement.");
-        }
-        const binding = codexBrowserSessions.get(nativeSessionId);
-        const record = binding
-          ? records.get(binding.browserSessionId)
-          : undefined;
-        if (!binding || !record) {
-          if (binding) codexBrowserSessions.delete(nativeSessionId);
-          sendJson(response, 200, {
-            version: BROWSER_SERVICE_VERSION,
-            settled: false,
-          });
-          return;
-        }
-        const lease =
-          record.lease && !record.lease.view.webContents.isDestroyed()
-            ? record.lease
-            : null;
-        const disposition = codexTurnSettlementDisposition({
-          requestedBrowserSessionId: browserSessionId,
-          bindingBrowserSessionId: binding.browserSessionId,
-          activeTurnId: binding.activeTurnId,
-          blockedTurnId: binding.blockedTurnId,
-          leaseActor: lease?.actor ?? null,
-          leaseTurnId: lease?.browserUseTurnId ?? null,
-        });
-        if (disposition.settled) {
-          // Publish terminal ownership before any await so a racing request
-          // from the just-completed turn is rejected immediately.
-          binding.activeTurnId = disposition.activeTurnId;
-          binding.blockedTurnId = disposition.blockedTurnId;
-          binding.touchedAt = Date.now();
-          if (disposition.handoff && lease) {
-            await handBrowserLeaseToUser(record, lease, options);
-          }
-          touchRecord(record);
-        }
-        sendJson(response, 200, {
-          version: BROWSER_SERVICE_VERSION,
-          settled: disposition.settled,
-        });
-        return;
-      }
-      if (
-        request.method === "POST" &&
         url.pathname === "/v1/sessions/acquire"
       ) {
         const body = asRecord(await readJsonBody(request));
@@ -1119,36 +978,9 @@ export async function startZerosBrowserService(
     server.close();
     throw browserError("Zeros browser service did not bind a loopback port.");
   }
-  let browserUsePipe!: CodexBrowserUsePipeHandle;
-  try {
-    browserUsePipe = await startCodexBrowserUsePipe({
-      onRequest: (request) =>
-        handleCodexBrowserUseRequest(request, {
-          sessions: codexBrowserSessions,
-          records,
-          options,
-          confirmations,
-          pipe: () => browserUsePipe,
-          browserEnabled: () => browserUiEnabled,
-          codexNativeEnabled: () => codexNativeEnabled,
-          trustedSurfaceAvailable: () =>
-            options.isTrustedSurfaceAvailable?.() !== false,
-          showAgentCursor: () => showAgentCursor,
-          navigationApproval: () => navigationApproval,
-          touchRecord,
-          scheduleLeaseCleanup,
-          stopFromPage: stopFromControlBar,
-        }),
-    });
-  } catch (error) {
-    await new Promise<void>((resolve) => server.close(() => resolve()));
-    throw error;
-  }
-
   return {
     baseUrl: `http://127.0.0.1:${address.port}`,
     token,
-    codexBrowserUsePipePath: browserUsePipe.path,
     acquire,
     release,
     invoke,
@@ -1274,9 +1106,6 @@ export async function startZerosBrowserService(
       // queued work before closing WebContents so nothing can resume against a
       // newly acquired profile after this promise resolves.
       confirmations.revokeConfirmationSurface();
-      for (const binding of codexBrowserSessions.values()) {
-        binding.blockedTurnId = binding.activeTurnId;
-      }
       const cleanup: Promise<void>[] = [];
       let cleared = 0;
       for (const record of records.values()) {
@@ -1297,20 +1126,8 @@ export async function startZerosBrowserService(
         browserPolicyGeneration += 1;
       }
       browserUiEnabled = preferences.browserEnabled;
-      const nativeWasEnabled = codexNativeEnabled;
-      codexNativeEnabled = preferences.codexNativeEnabled !== false;
-      if (nativeWasEnabled && !codexNativeEnabled) {
-        // Pages stay open for the Zeros tools; only plugin work in flight ends.
-        for (const binding of codexBrowserSessions.values()) {
-          binding.blockedTurnId = binding.activeTurnId;
-        }
-      }
       showAgentCursor = preferences.showAgentCursor;
-      navigationApproval = preferences.navigationApproval;
       if (wasEnabled && !browserUiEnabled) {
-        for (const binding of codexBrowserSessions.values()) {
-          binding.blockedTurnId = binding.activeTurnId;
-        }
         for (const record of records.values()) {
           record.interruptionGeneration += 1;
           const lease = record.lease;
@@ -1319,11 +1136,6 @@ export async function startZerosBrowserService(
           record.lease = null;
           void scheduleLeaseCleanup(lease);
           publishState(options, record, "closed");
-        }
-      }
-      for (const record of records.values()) {
-        if (record.lease) {
-          record.lease.navigationApproval = navigationApproval;
         }
       }
       if (showAgentCursor) return;
@@ -1365,9 +1177,6 @@ export async function startZerosBrowserService(
     },
     async revokeConfirmationSurface() {
       const denied = confirmations.revokeConfirmationSurface();
-      for (const binding of codexBrowserSessions.values()) {
-        binding.blockedTurnId = binding.activeTurnId;
-      }
       const cleanup: Promise<void>[] = [];
       for (const record of records.values()) {
         record.interruptionGeneration += 1;
@@ -1383,566 +1192,10 @@ export async function startZerosBrowserService(
     async stop() {
       confirmations.stop();
       for (const record of [...records.values()]) destroyRecord(record);
-      await Promise.allSettled([browserUsePipe.stop(), ...cleanupTasks]);
+      await Promise.allSettled([...cleanupTasks]);
       await new Promise<void>((resolve) => server.close(() => resolve()));
     },
   };
-}
-
-interface CodexBrowserUseContext {
-  sessions: Map<string, CodexBrowserBinding>;
-  records: Map<string, BrowserSessionRecord>;
-  options: ZerosBrowserServiceOptions;
-  confirmations: BrowserConfirmationBroker;
-  pipe(): CodexBrowserUsePipeHandle;
-  browserEnabled(): boolean;
-  /** "Use Codex's built-in browser". Off leaves Codex the Zeros tools. */
-  codexNativeEnabled(): boolean;
-  trustedSurfaceAvailable(): boolean;
-  showAgentCursor(): boolean;
-  navigationApproval(): "always-ask" | "always-allow";
-  touchRecord(record: BrowserSessionRecord): void;
-  scheduleLeaseCleanup(lease: BrowserLease): Promise<void>;
-  /** The user pressed Esc in an agent-controlled page. */
-  stopFromPage(browserSessionId: string): void;
-}
-
-/** Native IAB backend consumed by Codex's official bundled Browser plugin.
- * The plugin continues to own its Browser skill, `node_repl.js` tool calls,
- * Playwright facade, batching, and result metadata. Zeros owns only the secure
- * Electron tab and its visible user/agent handoff. */
-async function handleCodexBrowserUseRequest(
-  request: CodexBrowserUseRequest,
-  context: CodexBrowserUseContext,
-): Promise<unknown> {
-  const binding = context.sessions.get(request.sessionId);
-  if (!binding) {
-    throw browserError(
-      "Browser turn does not belong to this Zeros conversation.",
-    );
-  }
-  const record = context.records.get(binding.browserSessionId);
-  if (!record) {
-    context.sessions.delete(request.sessionId);
-    throw browserError("The conversation browser session is unavailable.");
-  }
-  if (binding.blockedTurnId === request.turnId) {
-    throw browserError("Browser work was stopped by the user.");
-  }
-  if (binding.blockedTurnId && binding.blockedTurnId !== request.turnId) {
-    binding.blockedTurnId = null;
-  }
-  binding.activeTurnId = request.turnId;
-  binding.touchedAt = Date.now();
-  context.touchRecord(record);
-
-  if (request.method === "getInfo") {
-    return codexBrowserIabInfo(request.sessionId);
-  }
-  if (request.method === "ping") return "pong";
-  if (!context.browserEnabled()) {
-    throw browserError("Browser use is disabled in Settings.");
-  }
-  if (!context.codexNativeEnabled()) {
-    throw browserError(
-      "Codex’s built-in browser is turned off in Settings > Browser.",
-    );
-  }
-  if (!context.trustedSurfaceAvailable()) {
-    throw browserError("Browser use needs an open trusted Zeros window.");
-  }
-
-  const interruptedAtStart = record.interruptionGeneration;
-  const interrupted = () =>
-    binding.blockedTurnId === request.turnId ||
-    record.interruptionGeneration !== interruptedAtStart ||
-    context.records.get(record.id) !== record;
-  const currentLease = (): BrowserLease | null => {
-    const lease = record.lease;
-    return lease && !lease.view.webContents.isDestroyed() ? lease : null;
-  };
-  const requireLease = (): BrowserLease => {
-    const lease = currentLease();
-    if (!lease) throw browserError("Browser tab is no longer available.");
-    context.touchRecord(record);
-    return lease;
-  };
-  const controlledTab = (lease: BrowserLease) => ({
-    id: lease.view.webContents.id,
-    url: lease.view.webContents.getURL() || "about:blank",
-    title: lease.view.webContents.getTitle() || "New tab",
-    active: true,
-  });
-  const userTab = (lease: BrowserLease) =>
-    codexNativeUserTab(
-      {
-        browserSessionId: record.id,
-        webContentsId: lease.view.webContents.id,
-      },
-      {
-        url: lease.view.webContents.getURL() || "about:blank",
-        title: lease.view.webContents.getTitle() || "New tab",
-        touchedAt: record.touchedAt,
-      },
-    );
-  const beginNativeWork = async (
-    lease: BrowserLease,
-    tool: BrowserToolName,
-    label: string,
-  ) => {
-    if (lease.browserUseTurnId !== request.turnId) {
-      lease.codexTabDisposition = null;
-    }
-    lease.actor = "agent";
-    record.agent = "codex";
-    lease.browserUseTurnId = request.turnId;
-    lease.browserUseSocket = request.socket;
-    lease.navigationApproval = context.navigationApproval();
-    lease.agentActivityUntil = Date.now() + AGENT_ACTIVITY_LINGER_MS;
-    lease.action = {
-      sequence: ++lease.actionSequence,
-      kind: tool,
-      label,
-      startedAt: Date.now(),
-    };
-    if (!context.showAgentCursor() && lease.pointer) {
-      lease.pointer = null;
-      await lease.view.webContents
-        .executeJavaScript(
-          agentPointerCleanupScript(lease.pointerOverlayId),
-          true,
-        )
-        .catch(() => undefined);
-    }
-    publishState(context.options, record, "working", tool);
-  };
-  const ensureLease = async (): Promise<BrowserLease> => {
-    let lease = currentLease();
-    if (!lease) {
-      lease = createLease(record, {
-        options: context.options,
-        confirmations: context.confirmations,
-        actor: "agent",
-        showAgentCursor: context.showAgentCursor(),
-        navigationApproval: context.navigationApproval(),
-        interrupted,
-        stopFromPage: context.stopFromPage,
-      });
-      record.lease = lease;
-    }
-    await beginNativeWork(lease, "open", "Opening browser");
-    try {
-      await ensureCodexBrowserUseReady(lease);
-      ensureCodexBrowserUseDebugger(lease, context.pipe());
-    } catch (error) {
-      if (record.lease === lease) {
-        record.lease = null;
-        context.confirmations.clearSession(record.id);
-        publishState(context.options, record, "closed", "renderer-crash");
-        await context.scheduleLeaseCleanup(lease);
-      }
-      throw error;
-    }
-    return lease;
-  };
-
-  record.activeOperations += 1;
-  try {
-    switch (request.method) {
-      case "getTabs": {
-        const lease = currentLease();
-        return lease && lease.actor === "agent" ? [controlledTab(lease)] : [];
-      }
-      case "getUserTabs": {
-        const lease = currentLease();
-        return lease && lease.actor === "user" ? [userTab(lease)] : [];
-      }
-      case "getUserHistory":
-        // Browsing history is intentionally scoped to the visible retained tab;
-        // Zeros never exposes a user-wide history database to an agent.
-        return [];
-      case "createTab": {
-        const lease = await ensureLease();
-        return controlledTab(lease);
-      }
-      case "claimUserTab": {
-        const lease = requireLease();
-        if (lease.actor !== "user") {
-          throw browserError(
-            "The browser tab is already controlled by the agent.",
-          );
-        }
-        // The official IAB command layer currently accepts only a positive
-        // numeric string here. It still came from this conversation's fresh
-        // getUserTabs result, and both native session and lease are checked.
-        if (
-          !codexUserTabClaimMatches(request.params.tabId, {
-            browserSessionId: record.id,
-            webContentsId: lease.view.webContents.id,
-          })
-        ) {
-          throw browserError(
-            "Browser tab does not belong to this Zeros conversation.",
-          );
-        }
-        await beginNativeWork(lease, "snapshot", "Resuming browser");
-        await ensureCodexBrowserUseReady(lease);
-        ensureCodexBrowserUseDebugger(lease, context.pipe());
-        return controlledTab(lease);
-      }
-      case "attach": {
-        const lease = requireLease();
-        assertCodexBrowserTab(request.params, record, lease);
-        await beginNativeWork(lease, "snapshot", "Inspecting page");
-        ensureCodexBrowserUseDebugger(lease, context.pipe());
-        return {};
-      }
-      case "detach": {
-        const lease = requireLease();
-        assertCodexBrowserTab(request.params, record, lease);
-        return {};
-      }
-      case "getCommittedTabUrl": {
-        // The official client checks URL policy and origin consent against
-        // this before every guarded command. It is only a read, so it never
-        // claims the page or publishes agent activity.
-        const lease = requireLease();
-        assertCodexBrowserTab(request.params, record, lease);
-        await ensureCodexBrowserUseReady(lease);
-        if (currentLease() !== lease) {
-          throw browserError("Browser tab is no longer available.");
-        }
-        return lease.view.webContents.getURL() || undefined;
-      }
-      case "focusTab": {
-        const lease = requireLease();
-        assertCodexBrowserTab(request.params, record, lease);
-        await beginNativeWork(lease, "snapshot", "Inspecting page");
-        return {};
-      }
-      case "nameSession":
-        return {};
-      case "markTab": {
-        const lease = requireLease();
-        assertCodexBrowserTab(request.params, record, lease);
-        const status = request.params.status;
-        if (status !== "deliverable" && status !== "handoff") {
-          throw browserError("Unsupported browser tab disposition.");
-        }
-        lease.codexTabDisposition = status;
-        return {};
-      }
-      case "finalizeTabs": {
-        const lease = currentLease();
-        if (lease) {
-          if (
-            codexFinalizeDisposition(
-              request.params,
-              {
-                browserSessionId: record.id,
-                webContentsId: lease.view.webContents.id,
-              },
-              lease.codexTabDisposition,
-            ) === "keep"
-          ) {
-            await handBrowserLeaseToUser(record, lease, context.options);
-          } else {
-            record.lease = null;
-            context.confirmations.clearSession(record.id);
-            publishState(context.options, record, "closed");
-            await context.scheduleLeaseCleanup(lease);
-          }
-        }
-        binding.activeTurnId = null;
-        binding.blockedTurnId = null;
-        return {};
-      }
-      case "turnEnded": {
-        const lease = currentLease();
-        // A timeout or kernel reset can bypass tabs.finalize(). Never leave the
-        // page locked; retain its exact URL/history and return it to the user.
-        if (lease) await handBrowserLeaseToUser(record, lease, context.options);
-        binding.activeTurnId = null;
-        binding.blockedTurnId = null;
-        return {};
-      }
-      case "isFullCdpEnabled":
-        return false;
-      case "moveMouse": {
-        const lease = requireLease();
-        assertCodexBrowserTab(request.params, record, lease);
-        await beginNativeWork(lease, "click", "Moving on page");
-        ensureCodexBrowserUseDebugger(lease, context.pipe());
-        const x = finiteNumberField(request.params, "x");
-        const y = finiteNumberField(request.params, "y");
-        if (context.showAgentCursor()) {
-          await updateAgentPointer(lease, x, y, "move");
-          publishState(context.options, record, "working", "click");
-        }
-        await preparePageForAgent(lease.view.webContents);
-        lease.agentInputDepth += 1;
-        try {
-          await withTimeout(
-            lease.view.webContents.debugger.sendCommand(
-              "Input.dispatchMouseEvent",
-              { type: "mouseMoved", x, y },
-            ),
-            BROWSER_USE_CDP_TIMEOUT_MS,
-            nativeBrowserCommandTimeoutMessage("Input.dispatchMouseEvent"),
-          );
-        } finally {
-          lease.agentInputDepth = Math.max(0, lease.agentInputDepth - 1);
-        }
-        if (interrupted())
-          throw browserError("Browser work was stopped by the user.");
-        return {};
-      }
-      case "executeCdp": {
-        const lease = requireLease();
-        const target = asRecord(request.params.target);
-        assertCodexBrowserTab(target, record, lease);
-        const method = requireNativeBrowserMethod(request.params.method);
-        const commandParams = asRecord(request.params.commandParams);
-        if (method === "Page.close" || method === "Target.closeTarget") {
-          record.lease = null;
-          context.confirmations.clearSession(record.id);
-          publishState(context.options, record, "closed");
-          await context.scheduleLeaseCleanup(lease);
-          return {};
-        }
-        const activity = nativeBrowserActivity(method, commandParams);
-        await beginNativeWork(lease, activity.tool, activity.label);
-        ensureCodexBrowserUseDebugger(lease, context.pipe());
-        const pointer = pointerFromNativeCdpCommand(method, commandParams);
-        if (pointer && context.showAgentCursor()) {
-          await updateAgentPointer(lease, pointer.x, pointer.y, pointer.action);
-          publishState(context.options, record, "working", activity.tool);
-        } else if (
-          context.showAgentCursor() &&
-          lease.pointer &&
-          (method === "Input.dispatchKeyEvent" || method === "Input.insertText")
-        ) {
-          await updateAgentPointer(
-            lease,
-            lease.pointer.x,
-            lease.pointer.y,
-            "type",
-          );
-        }
-        const sessionId =
-          typeof target.sessionId === "string" ? target.sessionId : undefined;
-        const timeoutMs = browserUseCommandTimeout(request.params.timeoutMs);
-        const inputCommand = method.startsWith("Input.");
-        if (inputCommand) await preparePageForAgent(lease.view.webContents);
-        // OpenAI's Browser plugin has already applied URL policy, site-status,
-        // and origin-consent checks before its high-level navigate command is
-        // lowered to Page.navigate. Scope this preapproval to that one CDP
-        // dispatch so Electron does not ask twice. Any redirect to another
-        // origin, page-authored navigation, or click still hits the host gate.
-        const nativePreapprovedOrigin = codexNativePreapprovedNavigationOrigin(
-          method,
-          commandParams,
-        );
-        const previousPreapproval = lease.preapprovedNavigationOrigin;
-        if (nativePreapprovedOrigin) {
-          lease.preapprovedNavigationOrigin = nativePreapprovedOrigin;
-        }
-        if (inputCommand) lease.agentInputDepth += 1;
-        try {
-          let result: unknown;
-          if (method === "Page.captureScreenshot") {
-            result = await captureNativeBrowserScreenshot(
-              lease,
-              commandParams,
-              sessionId,
-              timeoutMs,
-            );
-          } else {
-            const previousUrl = lease.view.webContents.getURL();
-            result = await withTimeout(
-              lease.view.webContents.debugger.sendCommand(
-                method,
-                commandParams,
-                sessionId,
-              ),
-              timeoutMs,
-              nativeBrowserCommandTimeoutMessage(method),
-            );
-            if (
-              method === "Page.navigate" &&
-              asRecord(result).errorText === "net::ERR_ABORTED"
-            ) {
-              // A guarded cross-origin redirect is completed by a host action
-              // after the superseded Page.navigate request reports ABORTED.
-              // Wait for that permission/navigation transaction first, then
-              // give unguarded redirects a short commit window. A blocked or
-              // unchanged document retains errorText and remains a real error.
-              if (
-                lease.pendingHostActions.size > 0 ||
-                lease.hostActionFailures.length > 0
-              ) {
-                await waitForHostActions(lease, false);
-              }
-              result = await normalizeCodexPageNavigateAfterRedirect(
-                lease.view.webContents,
-                result,
-                {
-                  requestedUrl: String(commandParams.url ?? ""),
-                  previousUrl,
-                },
-              );
-            }
-          }
-          if (
-            lease.pendingHostActions.size > 0 ||
-            lease.hostActionFailures.length > 0
-          ) {
-            await waitForHostActions(lease, false);
-          }
-          if (interrupted()) {
-            throw browserError("Browser work was stopped by the user.");
-          }
-          return result;
-        } catch (error) {
-          if (isNativeBrowserCommandTimeout(error) && record.lease === lease) {
-            binding.blockedTurnId = request.turnId;
-            await handBrowserLeaseToUser(record, lease, context.options);
-          }
-          throw error;
-        } finally {
-          if (
-            nativePreapprovedOrigin &&
-            lease.preapprovedNavigationOrigin === nativePreapprovedOrigin
-          ) {
-            lease.preapprovedNavigationOrigin = previousPreapproval;
-          }
-          if (inputCommand) {
-            lease.agentInputDepth = Math.max(0, lease.agentInputDepth - 1);
-          }
-        }
-      }
-      case "attachTarget":
-      case "detachTarget":
-        return {};
-      case "allowDownload": {
-        const lease = requireLease();
-        assertCodexBrowserTab(request.params, record, lease);
-        lease.codexApprovedDownloadUrl = normalizeWebUrl(
-          requireString(request.params.url, "url"),
-        );
-        return {};
-      }
-      default:
-        // The official client treats only this exact text as "not
-        // implemented" and then uses its fallback: a cached CDP expression is
-        // resent in full through executeCdp (so Zeros never caches page code),
-        // and optional reads, host-only commands and credential-target
-        // protection fail closed. Any other text is a hard command failure.
-        throw browserError(
-          unsupportedCodexBrowserMethodMessage(request.method),
-        );
-    }
-  } finally {
-    record.activeOperations = Math.max(0, record.activeOperations - 1);
-  }
-}
-
-async function ensureCodexBrowserUseReady(lease: BrowserLease): Promise<void> {
-  if (lease.browserUseReady) return await lease.browserUseReady;
-  const contents = lease.view.webContents;
-  const pending = (async () => {
-    if (contents.isDestroyed()) {
-      throw browserError("Browser tab is no longer available.");
-    }
-    // A detached WebContentsView does not necessarily commit a renderer before
-    // its first navigation. Browser-client evaluates the initial document, so
-    // create a real blank document before accepting CDP commands.
-    if (!contents.getURL() || contents.getURL() === "about:blank") {
-      await withTimeout(
-        contents.loadURL("about:blank"),
-        BROWSER_USE_BOOTSTRAP_TIMEOUT_MS,
-        "Native browser initialization timed out.",
-      );
-    }
-  })();
-  lease.browserUseReady = pending;
-  try {
-    await pending;
-  } catch (error) {
-    if (lease.browserUseReady === pending) lease.browserUseReady = null;
-    throw error;
-  }
-}
-
-const NOOP = () => undefined;
-
-function ensureCodexBrowserUseDebugger(
-  lease: BrowserLease,
-  pipe: CodexBrowserUsePipeHandle,
-): void {
-  const contents = lease.view.webContents;
-  if (!contents.debugger.isAttached()) contents.debugger.attach("1.3");
-  if (lease.disposeBrowserUseDebugger !== NOOP) return;
-  const onMessage = (
-    _event: Electron.Event,
-    method: string,
-    params: unknown,
-    sessionId?: string,
-  ) => {
-    const socket = lease.browserUseSocket;
-    if (!socket) return;
-    pipe.notify(
-      "onCDPEvent",
-      {
-        source: {
-          tabId: contents.id,
-          ...(sessionId ? { sessionId } : {}),
-        },
-        method,
-        params: asRecord(params),
-      },
-      socket,
-    );
-  };
-  const onDetach = () => {
-    const socket = lease.browserUseSocket;
-    if (socket) pipe.notify("onCDPDetach", { tabId: contents.id }, socket);
-  };
-  contents.debugger.on("message", onMessage);
-  contents.debugger.on("detach", onDetach);
-  lease.disposeBrowserUseDebugger = () => {
-    contents.debugger.off("message", onMessage);
-    contents.debugger.off("detach", onDetach);
-    if (!contents.isDestroyed() && contents.debugger.isAttached()) {
-      contents.debugger.detach();
-    }
-    lease.disposeBrowserUseDebugger = NOOP;
-  };
-}
-
-async function handBrowserLeaseToUser(
-  record: BrowserSessionRecord,
-  lease: BrowserLease,
-  options: ZerosBrowserServiceOptions,
-): Promise<void> {
-  if (record.lease !== lease || lease.view.webContents.isDestroyed()) return;
-  releaseCodexNativeControl(lease);
-  await lease.view.webContents
-    .executeJavaScript(
-      `${agentPointerCleanupScript(lease.pointerOverlayId)};${agentWorkingOverlayScript(lease.workingOverlayId, false)}`,
-      true,
-    )
-    .catch(() => undefined);
-  // A fresh native turn can start while the cleanup script is awaiting the
-  // renderer. Never overwrite that newer turn's working state with the older
-  // handoff's ready publication.
-  if (
-    record.lease === lease &&
-    lease.actor === "user" &&
-    lease.browserUseTurnId === null
-  ) {
-    publishState(options, record, "ready");
-  }
 }
 
 /** User navigation starts Chromium's load at once, before any snapshot work;
@@ -2057,181 +1310,6 @@ function restoreUserBrowserPage(
   return publishState(context.options, record, "ready", "open");
 }
 
-async function captureNativeBrowserScreenshot(
-  lease: BrowserLease,
-  commandParams: Record<string, unknown>,
-  sessionId: string | undefined,
-  timeoutMs: number,
-): Promise<unknown> {
-  try {
-    return await withTimeout(
-      lease.view.webContents.debugger.sendCommand(
-        "Page.captureScreenshot",
-        commandParams,
-        sessionId,
-      ),
-      Math.min(5_000, timeoutMs),
-      "Native browser screenshot timed out.",
-    );
-  } catch {
-    // Electron's compositor capture remains available when a hidden/detached
-    // target cannot provide a raw CDP screenshot.
-  }
-  const clip = asRecord(commandParams.clip);
-  const hasClip =
-    Number.isFinite(Number(clip.x)) &&
-    Number.isFinite(Number(clip.y)) &&
-    Number.isFinite(Number(clip.width)) &&
-    Number.isFinite(Number(clip.height));
-  const image = await withTimeout(
-    lease.view.webContents.capturePage(
-      hasClip
-        ? {
-            x: Math.max(0, Math.round(Number(clip.x))),
-            y: Math.max(0, Math.round(Number(clip.y))),
-            width: Math.max(1, Math.round(Number(clip.width))),
-            height: Math.max(1, Math.round(Number(clip.height))),
-          }
-        : undefined,
-      { stayHidden: true, stayAwake: true },
-    ),
-    timeoutMs,
-    nativeBrowserCommandTimeoutMessage("Page.captureScreenshot"),
-  );
-  const format = commandParams.format === "jpeg" ? "jpeg" : "png";
-  const data =
-    format === "jpeg"
-      ? image.toJPEG(
-          Math.min(
-            100,
-            Math.max(0, Math.round(Number(commandParams.quality ?? 80))),
-          ),
-        )
-      : image.toPNG();
-  return { data: data.toString("base64") };
-}
-
-function nativeBrowserActivity(
-  method: string,
-  params: Record<string, unknown>,
-): { tool: BrowserToolName; label: string } {
-  if (method === "Page.navigate")
-    return { tool: "open", label: "Opening website" };
-  if (method === "Page.captureScreenshot") {
-    return { tool: "screenshot", label: "Capturing page" };
-  }
-  if (method === "Input.dispatchMouseEvent") {
-    return String(params.type ?? "") === "mouseWheel"
-      ? { tool: "scroll", label: "Scrolling page" }
-      : { tool: "click", label: "Interacting with page" };
-  }
-  if (method.startsWith("Input.")) {
-    return { tool: "type", label: "Typing in page" };
-  }
-  if (method === "Page.reload")
-    return { tool: "reload", label: "Reloading page" };
-  if (method.startsWith("Page.get") || method.startsWith("DOM.")) {
-    return { tool: "snapshot", label: "Inspecting page" };
-  }
-  return { tool: "snapshot", label: "Browsing page" };
-}
-
-function pointerFromNativeCdpCommand(
-  method: string,
-  params: Record<string, unknown>,
-): { x: number; y: number; action: BrowserAgentPointer["action"] } | null {
-  if (method !== "Input.dispatchMouseEvent") return null;
-  const x = Number(params.x);
-  const y = Number(params.y);
-  if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
-  const type = String(params.type ?? "");
-  return {
-    x,
-    y,
-    action:
-      type === "mouseMoved"
-        ? "move"
-        : type === "mouseWheel"
-          ? "scroll"
-          : "click",
-  };
-}
-
-function assertCodexBrowserTab(
-  value: unknown,
-  record: BrowserSessionRecord,
-  lease: BrowserLease,
-): void {
-  if (
-    !codexNativeTabMatches(value, {
-      browserSessionId: record.id,
-      webContentsId: lease.view.webContents.id,
-    })
-  ) {
-    throw browserError(
-      "Browser tab does not belong to this Zeros conversation.",
-    );
-  }
-}
-
-function browserUseCommandTimeout(value: unknown): number {
-  const timeout = Number(value);
-  if (!Number.isFinite(timeout) || timeout <= 0) {
-    return BROWSER_USE_CDP_TIMEOUT_MS;
-  }
-  return Math.min(
-    BROWSER_USE_CDP_MAX_TIMEOUT_MS,
-    Math.max(1_000, Math.round(timeout)),
-  );
-}
-
-function nativeBrowserCommandTimeoutMessage(method: string): string {
-  return `Native browser command timed out: ${method}`;
-}
-
-function isNativeBrowserCommandTimeout(error: unknown): boolean {
-  return (
-    error instanceof Error &&
-    error.message.startsWith("Native browser command timed out:")
-  );
-}
-
-function requireNativeBrowserMethod(value: unknown): string {
-  if (
-    typeof value !== "string" ||
-    value.length > 200 ||
-    !/^[A-Za-z][A-Za-z0-9]*\.[A-Za-z][A-Za-z0-9]*$/.test(value)
-  ) {
-    throw browserError("Invalid native browser method.");
-  }
-  return value;
-}
-
-function finiteNumberField(
-  value: Record<string, unknown>,
-  key: string,
-): number {
-  const result = Number(value[key]);
-  if (!Number.isFinite(result)) throw browserError(`Invalid ${key}.`);
-  return result;
-}
-
-function validNativeBrowserSessionId(value: string): boolean {
-  return /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(value);
-}
-
-function pruneCodexBrowserBindings(
-  bindings: Map<string, CodexBrowserBinding>,
-): void {
-  while (bindings.size > MAX_CODEX_BROWSER_BINDINGS) {
-    const oldest = [...bindings.entries()].sort(
-      (left, right) => left[1].touchedAt - right[1].touchedAt,
-    )[0];
-    if (!oldest) return;
-    bindings.delete(oldest[0]);
-  }
-}
-
 async function executeTool(
   record: BrowserSessionRecord,
   tool: BrowserToolName,
@@ -2275,7 +1353,6 @@ async function executeTool(
     lease.action = null;
     lease.agentActivityUntil = 0;
     lease.workingOverlayVisible = false;
-    lease.browserUseTurnId = null;
     await lease.view.webContents
       .executeJavaScript(
         `${agentPointerCleanupScript(lease.pointerOverlayId)};${agentWorkingOverlayScript(lease.workingOverlayId, false)}`,
@@ -3081,18 +2158,12 @@ function createLease(
     downloads: [],
     activeDownloads: new Set(),
     stagedUploads: [],
-    codexApprovedDownloadUrl: null,
-    codexTabDisposition: null,
     pendingHostActions: new Set(),
     hostActionFailures: [],
     trace: [],
     disposeNetworkHandlers: () => undefined,
     disposePermissionHandlers: () => undefined,
     disposeDownloadHandler: () => undefined,
-    browserUseReady: null,
-    browserUseSocket: null,
-    browserUseTurnId: null,
-    disposeBrowserUseDebugger: NOOP,
     appearance: createBrowserAppearanceController({
       debugger: view.webContents.debugger,
       isAlive: () => !view.webContents.isDestroyed(),
@@ -3145,7 +2216,6 @@ function createLease(
         "open-site",
       ),
       preapprovedOrigin: lease.preapprovedNavigationOrigin,
-      officialProviderOwnsOriginApproval: lease.browserUseTurnId !== null,
     });
     if (disposition === "allow") return;
     event.preventDefault();
@@ -3635,15 +2705,8 @@ async function handleBrowserDownload(
     item.on("updated", onUpdated);
     item.once("done", onDone);
   });
-  const nativeAuthorization = consumeCodexDownloadAuthorization(
-    lease.codexApprovedDownloadUrl,
-    url,
-  );
-  lease.codexApprovedDownloadUrl = nativeAuthorization.remaining;
-  let decision: BrowserConfirmationDecision = nativeAuthorization.authorized
-    ? "allow-once"
-    : "deny";
-  if (!nativeAuthorization.authorized) {
+  let decision: BrowserConfirmationDecision = "deny";
+  {
     beginBrowserConfirmation(record, lease, context.options, "download");
     try {
       decision = await context.confirmations.confirm({
@@ -3763,8 +2826,7 @@ async function confirmBrowserAction(
 /** Website access is its own permission. For the retained trusted semantic
  * executor, “Always allow” skips only this navigation gate; payments,
  * publishing, uploads, and other consequences still flow through
- * confirmBrowserAction. Provider-native Codex semantic policy remains owned by
- * OpenAI's Browser skill. User-authored URL-bar navigation is an explicit
+ * confirmBrowserAction. User-authored URL-bar navigation is an explicit
  * direct gesture and does not ask the user to approve themselves. */
 async function confirmBrowserNavigation(
   record: BrowserSessionRecord,
@@ -3890,7 +2952,7 @@ async function runGuardedBrowserNavigation(
       publishState(
         context.options,
         record,
-        lease.browserUseTurnId ? "working" : "ready",
+        "ready",
         tool,
       );
     }
@@ -4308,8 +3370,8 @@ function agentScrollAnimates(lease: BrowserLease): boolean {
 /** `sendInputEvent` returns before the page handles a mouse move, which
  * Chromium holds for the page's next frame, so hover handlers could run after
  * the click target was revalidated. A CDP move resolves once the page has
- * handled it. The page has one CDP session, which Codex and the Appearance
- * override may share; only a session opened here is closed again. */
+ * handled it. The page has one CDP session, which the Appearance override may
+ * share; only a session opened here is closed again. */
 async function dispatchAgentPointerMove(
   webContents: WebContents,
   x: number,
@@ -4790,9 +3852,7 @@ function resizeLease(
 async function destroyLease(lease: BrowserLease): Promise<void> {
   if (lease.displayTitleTimer) clearTimeout(lease.displayTitleTimer);
   lease.displayTitleTimer = null;
-  // First, so releasing Codex's debugger below cannot schedule a reapply.
   lease.appearance.dispose();
-  lease.disposeBrowserUseDebugger();
   lease.disposeNetworkHandlers();
   lease.disposePermissionHandlers();
   lease.disposeDownloadHandler();
@@ -5065,27 +4125,6 @@ async function browserDocumentIsUsable(
   } catch {
     return false;
   }
-}
-
-async function normalizeCodexPageNavigateAfterRedirect(
-  webContents: WebContents,
-  result: unknown,
-  context: { requestedUrl: string; previousUrl: string },
-): Promise<unknown> {
-  const deadline = Date.now() + 1_500;
-  while (!webContents.isDestroyed()) {
-    const normalized = normalizeCodexPageNavigateResult(result, {
-      ...context,
-      currentUrl: webContents.getURL(),
-      usableDocument: await browserDocumentIsUsable(webContents),
-    });
-    if (asRecord(normalized).errorText !== "net::ERR_ABORTED") {
-      return normalized;
-    }
-    if (Date.now() >= deadline) return result;
-    await delay(50);
-  }
-  return result;
 }
 
 function normalizeWebUrl(value: string): string {

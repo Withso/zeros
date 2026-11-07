@@ -13,12 +13,12 @@ import type { ComputerControlPanelHost } from "../computer-use/control-panel";
 
 const OWNER = { workspaceId: "ws_1", conversationId: "conv_a" };
 
-const SAFARI: AgentControlConfirmationInput = {
-  kind: "app",
+const IPHONE: AgentControlConfirmationInput = {
+  kind: "device",
   ...OWNER,
   agent: "codex",
-  subject: "Safari",
-  subjectId: "com.apple.Safari",
+  subject: "iPhone 16 Pro",
+  subjectId: "1A2B3C4D-0000-4000-8000-000000000001",
 } as AgentControlConfirmationInput;
 
 function setup(overrides: Partial<AgentControlRuntimeOptions> = {}) {
@@ -28,7 +28,6 @@ function setup(overrides: Partial<AgentControlRuntimeOptions> = {}) {
   const panel = {
     show: vi.fn(),
     hide: vi.fn(),
-    withoutEscape: <T,>(work: () => Promise<T>) => work(),
     dispose: vi.fn(),
   } satisfies ComputerControlPanelHost;
   let panelStop: (() => void) | null = null;
@@ -109,9 +108,9 @@ describe("agent control in Electron main", () => {
 
   it("asks the trusted window for approvals and denies without one", async () => {
     const shown = setup();
-    const pending = shown.runtime.confirmations.confirm(SAFARI);
+    const pending = shown.runtime.confirmations.confirm(IPHONE);
     expect(shown.requests).toHaveLength(1);
-    expect(shown.requests[0]).toMatchObject({ subject: "Safari", agent: "codex" });
+    expect(shown.requests[0]).toMatchObject({ subject: "iPhone 16 Pro", agent: "codex" });
     expect(
       shown.runtime.confirmations.respond(shown.requests[0]!.id, "allow"),
     ).toBe(true);
@@ -119,41 +118,31 @@ describe("agent control in Electron main", () => {
     expect(shown.settled).toEqual([shown.requests[0]!.id]);
 
     const hidden = setup({ isTrustedSurfaceAvailable: () => false });
-    await expect(hidden.runtime.confirmations.confirm(SAFARI)).resolves.toBe(
+    await expect(hidden.runtime.confirmations.confirm(IPHONE)).resolves.toBe(
       "deny",
     );
     expect(hidden.requests).toEqual([]);
   });
 
-  it("denies a chat's open approvals when its turn ends", async () => {
-    const { runtime } = setup();
-    const pending = runtime.confirmations.confirm(SAFARI);
-    const other = runtime.confirmations.confirm({
-      ...SAFARI,
-      conversationId: "conv_b",
-    } as AgentControlConfirmationInput);
-    runtime.computer.release({ version: 1, owner: OWNER, reason: "turn-end" });
+  it("denies a chat's open simulator approvals when its turn ends", async () => {
+    const { runtime } = setup({ devices: { hub: {} as never, automation: null } });
+    const card = {
+      kind: "device",
+      ...OWNER,
+      agent: "claude",
+      subject: "iPhone 17",
+      subjectId: "11111111-1111-4111-8111-111111111111",
+    } as AgentControlConfirmationInput;
+    const pending = runtime.confirmations.confirm(card);
+    const other = runtime.confirmations.confirm({ ...card, conversationId: "conv_b" });
+    runtime.devices!.release({ version: 1, owner: OWNER, reason: "turn-end" });
     await expect(pending).resolves.toBe("deny");
     expect(runtime.confirmations.pendingRequests()).toHaveLength(1);
     runtime.revokeConfirmationSurface();
     await expect(other).resolves.toBe("deny");
   });
 
-  it("sends who holds the computer to the renderer", () => {
-    const { runtime, states } = setup();
-    runtime.computer.nativeActivity({
-      version: 1,
-      owner: OWNER,
-      agent: "codex",
-      active: true,
-    });
-    expect(states.at(-1)?.holders).toEqual([
-      { ...OWNER, agent: "codex", app: null, native: true },
-    ]);
-    expect(runtime.computer.state().holders).toHaveLength(1);
-  });
-
-  it("stops the computer when the user presses Stop or Esc on the bar", () => {
+  it("stops the computer when the user presses Stop on the bar", () => {
     const { runtime, panelStop } = setup();
     const stop = vi.spyOn(runtime.computer, "stopFromUser");
     panelStop();
@@ -202,7 +191,7 @@ describe("agent control in Electron main", () => {
   it("releases everything on quit", async () => {
     const { runtime, service, panel, host } = setup();
     await runtime.ready;
-    const pending = runtime.confirmations.confirm(SAFARI);
+    const pending = runtime.confirmations.confirm(IPHONE);
     await runtime.stop();
     await expect(pending).resolves.toBe("deny");
     expect(service.stop).toHaveBeenCalledTimes(1);

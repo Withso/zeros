@@ -93,6 +93,9 @@ const DEFAULT_SESSION_TTL_SECONDS = 60 * 60;
 const DEFAULT_SESSION_IDLE_TTL_SECONDS = 15 * 60;
 const STARTUP_TIMEOUT_MS = 15_000;
 const SHUTDOWN_TIMEOUT_MS = 3_000;
+/** Ending a public session is local to the driver; never let it hold a chat
+ * for long. */
+const END_SESSION_TIMEOUT_MS = 2_000;
 /** The worker's stdio channel is gone or unusable. */
 const LOST_TAGS = new Set(["Worker", "Transport", "Shutdown", "Protocol"]);
 const UNAVAILABLE =
@@ -210,6 +213,12 @@ export function createCuaDriverHost(
   let losses = 0;
   let lostAt = 0;
   const open = new Set<() => void>();
+  /** A public label stays owned by the connection that created it: once that
+   * session closes, the driver refuses the label to every later session on
+   * the worker (start_session included). Each session after an agent's first
+   * therefore gets a numbered label, which its cursor shows. */
+  const labelUses = new Map<string, number>();
+  let labelWorker: CuaWorker | null = null;
 
   const closeSessions = () => {
     for (const close of [...open]) close();
@@ -313,8 +322,9 @@ export function createCuaDriverHost(
         return current;
       } catch (error) {
         if (signal.aborted) throw abortReason(signal);
-        const tag = driverErrorTag(loaded, error);
-        if (!tag || !LOST_TAGS.has(tag)) throw error;
+        // The probe changes nothing, so any driver error means this worker
+        // cannot serve a session. A killed worker answers ActionInterrupted.
+        if (!driverErrorTag(loaded, error)) throw error;
         lose(current);
       }
     }
@@ -340,10 +350,17 @@ export function createCuaDriverHost(
     async openSession(label, signal) {
       const loaded = await loadSdk();
       const current = await healthyWorker(loaded, signal);
+      if (labelWorker !== current) {
+        labelWorker = current;
+        labelUses.clear();
+      }
+      const uses = (labelUses.get(label) ?? 0) + 1;
+      labelUses.set(label, uses);
+      const publicSession = uses === 1 ? label : `${label} ${uses}`;
       let session: CuaTrustedSession;
       try {
         session = loaded.createTrustedSession(current, {
-          publicSession: label,
+          publicSession,
           mode: loaded.SessionPermissionMode.Standard,
           ttlSeconds: sessionTtl,
           idleTtlSeconds: idleTtl,
@@ -361,14 +378,28 @@ export function createCuaDriverHost(
         if (closed) return;
         closed = true;
         open.delete(close);
-        try {
-          session.close();
-        } catch {
-          // Already revoked with its worker.
+        const release = () => {
+          try {
+            session.close();
+          } catch {
+            // Already revoked with its worker.
+          }
+        };
+        if (worker !== current) {
+          release();
+          return;
         }
+        // End the label's cursor and recording before revoking the session.
+        void session
+          .callTool("end_session", JSON.stringify({ session: publicSession }), {
+            signal: AbortSignal.timeout(END_SESSION_TIMEOUT_MS),
+          })
+          .catch(() => undefined)
+          .finally(release);
       };
       open.add(close);
       const wrapped: ComputerDriverSession = {
+        label: publicSession,
         async call(tool, args, callSignal) {
           if (closed || worker !== current) {
             // Tell the controller to open a new session; nothing was sent.

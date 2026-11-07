@@ -265,20 +265,27 @@ describe("supported command availability", () => {
       local: true,
       cloudEnabled: true,
       terminalAgentsEnabled: false,
-      computerUseActive: false,
+      computerUseSectionActive: true,
       simulatorsActive: false,
       internalUser: true,
     };
-    const localIds = settingsPaletteEntries(context).map((entry) => entry.id);
+    const ids = (overrides: Partial<typeof context>) =>
+      settingsPaletteEntries({ ...context, ...overrides }).map((entry) => entry.id);
+    const localIds = ids({});
     expect(localIds).toContain("settings:appearance");
     expect(localIds).not.toContain("settings:cloud-computer");
     expect(localIds).not.toContain("settings:internal");
     expect(localIds).not.toContain("settings:terminal-agents");
-    const cloudIds = settingsPaletteEntries({ ...context, local: false }).map(
-      (entry) => entry.id,
-    );
+    expect(localIds).not.toContain("settings:computer-use");
+    const cloudIds = ids({ local: false });
     expect(cloudIds).toContain("settings:cloud-computer");
     expect(cloudIds).not.toContain("settings:environment");
+    // An organization's General holds only this Mac's computer use rows.
+    expect(cloudIds).toContain("settings:general");
+    expect(ids({ local: false, computerUseSectionActive: false })).not.toContain(
+      "settings:general",
+    );
+    expect(ids({ computerUseSectionActive: false })).toContain("settings:general");
   });
 });
 
@@ -331,7 +338,7 @@ describe("command search", () => {
         local: true,
         cloudEnabled: false,
         terminalAgentsEnabled: false,
-        computerUseActive: false,
+        computerUseSectionActive: true,
         simulatorsActive: false,
         internalUser: false,
       }),

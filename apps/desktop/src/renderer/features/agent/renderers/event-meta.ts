@@ -2,6 +2,7 @@ import { generatedImagePath, isImageGenerationTool } from "./tool-artifacts";
 import { modelRejectionDisplayText } from "@zeros/protocol/model-rejection";
 import { designToolLabel } from "./design-tool-presentation";
 import { ChromeIcon } from "@/renderer/shared/ui/chrome-icon";
+import { formatWorkingElapsed } from "@/renderer/shared/ui/loading/live-duration";
 // ──────────────────────────────────────────────────────────
 // event-meta — pure label/meta extractors per event kind
 // ──────────────────────────────────────────────────────────
@@ -536,14 +537,22 @@ export function nativeCodexBrowserPresentation(
       : running
         ? "Browsing"
         : "Used the browser";
+  const durationMs = browserActivityOverride?.durationMs;
   return {
     ...base,
     label,
-    target: undefined,
-    trailing: undefined,
+    target: browserActivityOverride?.rowTarget,
+    trailing:
+      durationMs === undefined ? undefined : formatToolDuration(durationMs),
     host,
     faviconMatchesLivePage: Boolean(host && liveHost === host),
   };
+}
+
+/** Sub-second commands keep milliseconds, the speed users compare; longer
+ * ones use the working timer's format. */
+export function formatToolDuration(ms: number): string {
+  return ms < 1000 ? `${Math.round(ms)}ms` : formatWorkingElapsed(ms);
 }
 
 function nativeBrowserResultUrl(tool: AgentToolMessage): string | undefined {

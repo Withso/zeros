@@ -23,15 +23,17 @@ export function readAgentControlOverlayState(
   value: unknown,
 ): AgentControlOverlayState | null {
   if (!value || typeof value !== "object") return null;
-  const { title, detail, visible } = value as Record<string, unknown>;
+  const { title, detail, visible, escapeHint } = value as Record<string, unknown>;
   if (
     typeof title !== "string" ||
     typeof detail !== "string" ||
-    typeof visible !== "boolean"
+    typeof visible !== "boolean" ||
+    (escapeHint !== undefined && typeof escapeHint !== "boolean")
   ) {
     return null;
   }
-  return { title, detail, visible };
+  // An older main sends no escapeHint: its page bar answered to Esc.
+  return { title, detail, visible, escapeHint: escapeHint !== false };
 }
 
 /** The same Esc the controlled page answers to (`browserInputStopsAgent`). */
@@ -80,7 +82,7 @@ export function AgentControlOverlayFrame({
         stopLabel={`Stop ${state.title}`}
         stopping={stopping}
         onStop={onStop}
-        escapeHint
+        escapeHint={state.escapeHint !== false}
       />
     </div>
   );
@@ -111,7 +113,8 @@ export function AgentControlOverlay({
   }, [bridge]);
 
   useEffect(() => {
-    if (!state.visible) return;
+    // The computer-use bar never takes the user's keys.
+    if (!state.visible || state.escapeHint === false) return;
     const onKeyDown = (event: KeyboardEvent) => {
       if (!isAgentControlStopKey(event)) return;
       event.preventDefault();
@@ -119,7 +122,7 @@ export function AgentControlOverlay({
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [state.visible, stop]);
+  }, [state.visible, state.escapeHint, stop]);
 
   useEffect(() => {
     const setInteractive = bridge.setInteractive?.bind(bridge);

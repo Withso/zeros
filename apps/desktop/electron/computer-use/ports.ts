@@ -32,6 +32,8 @@ export type ComputerDriverTool =
 /** A trusted driver session for one chat's lease. Its label is the agent's
  * name, which the driver shows on its cursor. */
 export interface ComputerDriverSession {
+  /** The label the driver shows on this session's cursor. */
+  readonly label?: string;
   call(
     tool: ComputerDriverTool,
     args: Record<string, unknown>,
@@ -73,11 +75,8 @@ export interface ComputerControlPresentation {
   detail: string;
 }
 
-/** The floating "Codex is using Safari · Stop · esc" bar. */
+/** The floating "Codex is using Safari · Stop" bar. */
 export interface ComputerControlPanel {
   show(presentation: ComputerControlPresentation): void;
   hide(): void;
-  /** Run `work` with the bar's global Esc released, so an Escape the agent
-   * sends is not taken as the user's Stop. */
-  withoutEscape<T>(work: () => Promise<T>): Promise<T>;
 }

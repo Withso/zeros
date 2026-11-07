@@ -89,11 +89,9 @@ import {
 import { repoSettingsPath, repoLocalSettingsPath } from "../settings/files";
 import { runGit } from "../git/git-exec";
 import {
-  acquireZerosBrowserHost,
-  browserUseEnabledForWorkspace,
+  claudeChromeEnabledForWorkspace,
   stripBrowserServiceCredentials,
 } from "../browser/browser-tool-client";
-import { computerUseRouteForWorkspace } from "../agent-control/computer-use-settings";
 import {
   AGENT_MANIFEST,
   bundledRuntimeVersion,
@@ -128,7 +126,6 @@ import {
 import type {
   AgentAdapter,
   AgentBrowserUse,
-  AgentComputerUse,
   AgentAdapterContext,
   AgentCapabilityPorts,
   AgentGatewayEvents,
@@ -4280,90 +4277,27 @@ export class AgentGateway {
     return validated.filter((server) => server !== null);
   }
 
-  /** Resolve only browser capabilities the selected provider exposes natively.
-   * Codex receives an opaque IAB host id for its official Browser plugin;
-   * Claude receives its official Agent SDK/Chrome flag. The in-app Zeros
-   * browser reaches every provider as `zeros_browser` MCP tools through the
-   * session tool factory instead. Browser startup failures degrade only this
-   * capability. */
+  /** Resolve only browser capabilities the selected provider exposes natively:
+   * Claude's official Agent SDK/Chrome flag when "Use Claude Code with Chrome"
+   * is on. The in-app Zeros browser reaches every provider, Codex included, as
+   * `zeros_browser` tools through the session tool factory instead. A settings
+   * failure degrades only this capability. */
   private async resolveBrowserUse(
     agentId: string,
     cwd: string,
-    workspaceId: string | undefined,
-    conversationId: string | undefined,
     mainRepoRoot?: string,
   ): Promise<AgentBrowserUse | undefined> {
-    if (agentId !== "claude" && agentId !== "codex") return undefined;
-    // Claude's Chrome integration is provider-owned and needs no Zeros browser
-    // lease, so it also works for chats bound directly to a folder. Codex's
-    // in-app host still needs durable workspace/conversation ownership.
-    if (agentId === "codex" && (!workspaceId || !conversationId)) {
-      return undefined;
-    }
+    if (agentId !== "claude") return undefined;
     try {
-      const workspaceRoot =
-        agentId === "claude"
-          ? cwd
-          : workspaceId
-            ? getWorkspaceById(workspaceId)?.path
-            : undefined;
-      if (!workspaceRoot) {
-        throw new Error("The owning Zeros workspace path is unavailable.");
-      }
-      const browserProvider = agentId === "claude" ? "claude" : "codex";
-      if (
-        !browserUseEnabledForWorkspace(
-          workspaceRoot,
-          mainRepoRoot,
-          browserProvider,
-        )
-      ) {
-        return undefined;
-      }
-      if (agentId === "claude") return { kind: "claude-agent-sdk" };
-      const browser = await acquireZerosBrowserHost({
-        workspaceId: workspaceId!,
-        conversationId: conversationId!,
-        workspaceRoot,
-        mainRepoRoot,
-      });
-      return browser
-        ? {
-            kind: "codex-app-server",
-            browserSessionId: browser.browserSessionId,
-          }
+      // Claude's Chrome integration is provider-owned and needs no Zeros
+      // browser lease, so it also works for chats bound directly to a folder.
+      return claudeChromeEnabledForWorkspace(cwd, mainRepoRoot)
+        ? { kind: "claude-agent-sdk" }
         : undefined;
     } catch (error) {
       this.events.onAgentStderr(
         agentId,
         `[zeros-browser] capability unavailable: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      );
-      return undefined;
-    }
-  }
-
-  /** Whether a Local Codex thread keeps its built-in computer use. Settings
-   * are read once per provider start; a change reaches a running chat when
-   * the renderer resumes it. Other agents get Zeros' computer use only, as
-   * `zeros_computer` tools from the session tool factory. */
-  private resolveComputerUse(
-    agentId: string,
-    cwd: string,
-    mainRepoRoot?: string,
-  ): AgentComputerUse | undefined {
-    if (agentId !== "codex" || process.platform !== "darwin") return undefined;
-    try {
-      return {
-        codexNative:
-          computerUseRouteForWorkspace(agentId, cwd, mainRepoRoot) ===
-          "codex-native",
-      };
-    } catch (error) {
-      this.events.onAgentStderr(
-        agentId,
-        `[zeros-computer] settings unavailable: ${
           error instanceof Error ? error.message : String(error)
         }`,
       );
@@ -5365,14 +5299,7 @@ export class AgentGateway {
       );
     const boundary = preparedBoundary.status;
     const browserUse =
-      await this.resolveBrowserUse(
-            agentId,
-            cwd,
-            opts.workspaceId,
-            opts.conversationId,
-            mainRepoRoot,
-          );
-    const computerUse = this.resolveComputerUse(agentId, cwd, mainRepoRoot);
+      await this.resolveBrowserUse(agentId, cwd, mainRepoRoot);
     // Keep the provider, user MCP registry, hooks and plugins in the same
     // session. Product tools have separately revocable engine authority.
     try {
@@ -5402,7 +5329,6 @@ export class AgentGateway {
         cliBinary: spawn.cliBinary,
         mcpServers,
         ...(browserUse ? { browserUse } : {}),
-        ...(computerUse ? { computerUse } : {}),
         ...(systemInstruction ? { systemInstruction } : {}),
         ...(territory && actor === "agent-code" ? { territory } : {}),
         executionBoundary,
@@ -5693,14 +5619,7 @@ export class AgentGateway {
         },
       );
     const boundary = preparedBoundary.status;
-    const browserUse = await this.resolveBrowserUse(
-      agentId,
-      cwd,
-      opts.workspaceId,
-      opts.conversationId,
-      mainRepoRoot,
-    );
-    const computerUse = this.resolveComputerUse(agentId, cwd, mainRepoRoot);
+    const browserUse = await this.resolveBrowserUse(agentId, cwd, mainRepoRoot);
     try {
       opts.onExecutionCreated?.(executionId);
       opts.admissionSignal?.throwIfAborted();
@@ -5722,7 +5641,6 @@ export class AgentGateway {
         cliBinary: spawn.cliBinary,
         mcpServers,
         ...(browserUse ? { browserUse } : {}),
-        ...(computerUse ? { computerUse } : {}),
         ...(systemInstruction ? { systemInstruction } : {}),
         ...(territory ? { territory } : {}),
         executionBoundary: preparedBoundary,
@@ -6527,10 +6445,9 @@ export class AgentGateway {
       if (cwd) {
         let enabled = false;
         try {
-          enabled = browserUseEnabledForWorkspace(
+          enabled = claudeChromeEnabledForWorkspace(
             cwd,
             this.executionToMainRepoRoot.get(sessionId),
-            "claude",
           );
         } catch (error) {
           // Browser is optional. A malformed/transient settings read must not

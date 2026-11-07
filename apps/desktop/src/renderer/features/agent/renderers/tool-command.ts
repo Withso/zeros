@@ -48,6 +48,47 @@ export function literalCommandWords(rawInput: unknown): string[] | null {
   return body === null ? words : literalWords(body, true);
 }
 
+/** A single stdin heredoc, never shell evaluation. Quoted bodies are literal;
+ * unquoted bodies with expansion or escaped newlines remain generic. Nothing
+ * may follow the terminator. Other redirects and compound commands still fail
+ * the literal command parser. */
+export function literalStdinHeredoc(
+  command: string,
+): { words: string[]; body: string } | null {
+  let quote = "";
+  for (let index = 0; index < command.length; index++) {
+    const char = command[index];
+    if (quote === "'") {
+      if (char === "'") quote = "";
+    } else if (char === "\\") {
+      index++;
+    } else if (char === quote) {
+      quote = "";
+    } else if (!quote && (char === "'" || char === '"')) {
+      quote = char;
+    } else if (!quote && char === "<") {
+      const redirect = /^<<(-?)[ \t]*(?:'([\w]+)'|"([\w]+)"|([\w]+))[ \t]*\r?\n/.exec(command.slice(index));
+      if (!redirect) return null;
+      let prefix = command.slice(0, index);
+      const fd = /(?:^|\s)(\d+)$/.exec(prefix);
+      if (fd) {
+        if (fd[1] !== "0") return null;
+        prefix = prefix.slice(0, -1);
+      }
+      const words = literalCommandWords({ command: prefix.trimStart().replace(/[ \t]+$/, "") });
+      if (!words) return null;
+      const delimiter = redirect[2] ?? redirect[3] ?? redirect[4];
+      const lines = command.slice(index + redirect[0].length).split(/\r?\n/);
+      const end = lines.findIndex((line) => (redirect[1] ? line.replace(/^\t+/, "") : line) === delimiter);
+      if (end < 0 || lines.slice(end + 1).some((line) => line.trim())) return null;
+      const body = lines.slice(0, end).map((line) => (redirect[1] ? line.replace(/^\t+/, "") : line));
+      if (redirect[4] && /[$`\\]/.test(body.join("\n"))) return null;
+      return { words, body: body.join("\n") };
+    }
+  }
+  return null;
+}
+
 function literalWords(command: string, singleCommand = false): string[] | null {
   const words: string[] = [];
   let word = "";

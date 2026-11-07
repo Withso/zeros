@@ -68,12 +68,12 @@ export function providerCapabilityRefreshExecution(input: {
 }
 
 /** What a change to one agent family's Browser route means for its live
- * sessions. A provider fixes its browser when it boots: Codex loads OpenAI's
- * Browser plugin, Claude Code takes `--chrome` or `--no-chrome`, and every
- * agent lists the `zeros_browser` tools once. Any new route other than "off"
- * therefore needs an idle resume. Zeros refuses an "off" route on each call,
- * so a refresh still queued for that family is moot ("cancel"), except that
- * only a resume removes Claude Code's `--chrome`. */
+ * sessions. A provider fixes its browser when it boots: Claude Code takes
+ * `--chrome` or `--no-chrome`, and every agent lists the `zeros_browser` tools
+ * once. Any new route other than "off" therefore needs an idle resume. Zeros
+ * refuses an "off" route on each call, so a refresh still queued for that
+ * family is moot ("cancel"), except that only a resume removes Claude Code's
+ * `--chrome`. */
 export function browserRouteRefreshAction(input: {
   providerFamily: CapabilityRefreshFamily;
   previous: BrowserRoute | null;
@@ -86,21 +86,16 @@ export function browserRouteRefreshAction(input: {
   return input.providerFamily === "claude" ? "none" : "cancel";
 }
 
-/** The same rule for Computer use. `zeros_computer` tools are listed only
- * when a provider boots on the "zeros" route, and Codex keeps or drops its
- * built-in computer use at boot, so every new route other than "off" needs an
- * idle resume. Zeros refuses its own tools per call once the route is "off",
- * but only a resume turns off Codex's built-in computer use. */
+/** The same rule for Computer use, which every agent family uses alike.
+ * `zeros_computer` tools are listed only when a provider boots on the "zeros"
+ * route; once it is "off" Zeros refuses them per call, so no resume is
+ * needed. */
 export function computerRouteRefreshAction(input: {
-  providerFamily: CapabilityRefreshFamily;
   previous: ComputerUseRoute | null;
   next: ComputerUseRoute;
 }): "refresh" | "cancel" | "none" {
   if (input.previous === null || input.previous === input.next) return "none";
-  if (input.next !== "off" || input.previous === "codex-native") {
-    return "refresh";
-  }
-  return input.providerFamily === "codex" ? "none" : "cancel";
+  return input.next === "zeros" ? "refresh" : "cancel";
 }
 
 /** The same rule for simulators, which every agent family uses alike.

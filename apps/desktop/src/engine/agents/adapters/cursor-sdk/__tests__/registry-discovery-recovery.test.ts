@@ -305,7 +305,9 @@ describe("Cursor registry discovery during Local resume", () => {
         version: 1, kind: "native", providerId: "cursor", resumeId: OPTIONS.sessionId,
       }, { cwd: root, env: OPTIONS.env, conversationId: "local-saved-chat" });
       expect(resumed.providerBinding?.resumeId).toBe(OPTIONS.sessionId);
-      expect(sdk.resume).toHaveBeenCalledExactlyOnceWith(OPTIONS.sessionId, expect.objectContaining({ model: EXPECTED }));
+      // The confirmed record rides along, so the host's SDK does not refetch it.
+      expect(sdk.resume).toHaveBeenCalledExactlyOnceWith(OPTIONS.sessionId, expect.objectContaining({ model: EXPECTED }),
+        { localModelCatalog: [GROK[0]] });
       expect(sdk.models).toHaveBeenCalledTimes(2);
       expect(sdk.create).not.toHaveBeenCalled();
       expect(fetch).not.toHaveBeenCalled();

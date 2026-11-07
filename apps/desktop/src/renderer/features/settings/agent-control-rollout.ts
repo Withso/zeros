@@ -44,7 +44,7 @@ export const AGENT_CONTROL_FEATURE_ROWS: Readonly<
 > = {
   zerosBrowser: {
     label: "Zeros browser",
-    hint: "Claude Code and Cursor can use the in-app browser, and Codex can switch to it.",
+    hint: "Agents can use the in-app browser.",
   },
   computerUse: {
     label: "Computer use",

@@ -3,11 +3,12 @@
 // ──────────────────────────────────────────────────────────
 //
 // While an agent controls the Mac, a small bar floats at the bottom center of
-// the screen the user is on: "Codex is using Safari · Stop · esc". It is the
+// the screen the user is on: "Codex is using Safari · Stop". It is the
 // Browser tab's control bar page in its own window, which never takes focus
 // from the app being controlled and is left out of screen captures. Clicks
-// pass through it everywhere except Stop, and Esc stops the agent from any
-// app while the bar shows.
+// pass through it everywhere except Stop. Agents work in the background while
+// the user keeps using other apps, so the bar never claims a key: Esc keeps
+// working in whatever app the user is in.
 // ──────────────────────────────────────────────────────────
 
 import type { IpcMain, IpcMainEvent, Rectangle } from "electron";
@@ -25,8 +26,6 @@ import type {
   ComputerControlPanel,
   ComputerControlPresentation,
 } from "./ports";
-
-const ESCAPE = "Escape";
 
 /** The parts of a `BrowserWindow` the bar uses. */
 export interface ControlPanelWindow {
@@ -57,11 +56,7 @@ export function createComputerControlPanel<
   load(window: W): Promise<void>;
   /** The work area of the display the user is on. */
   workArea(): Rectangle;
-  shortcuts: {
-    register(accelerator: string, callback: () => void): boolean;
-    unregister(accelerator: string): void;
-  };
-  /** Stop or Esc. */
+  /** The bar's Stop. */
   onStop(): void;
   fadeMs?: number;
   releaseMs?: number;
@@ -74,9 +69,8 @@ export function createComputerControlPanel<
     title: "",
     detail: "",
     visible: false,
+    escapeHint: false,
   };
-  let escapeHeld = false;
-  let escapeSuspended = 0;
   let hideTimer: ReturnType<typeof setTimeout> | null = null;
   let releaseTimer: ReturnType<typeof setTimeout> | null = null;
   let disposed = false;
@@ -99,26 +93,6 @@ export function createComputerControlPanel<
 
   const stopFromUser = () => {
     if (state.visible) options.onStop();
-  };
-
-  /** Esc belongs to the bar only while it shows and the agent is not
-   * pressing Escape itself. */
-  const syncEscape = () => {
-    const want = state.visible && escapeSuspended === 0 && !disposed;
-    if (want && !escapeHeld) {
-      try {
-        escapeHeld = options.shortcuts.register(ESCAPE, stopFromUser);
-      } catch {
-        escapeHeld = false;
-      }
-    } else if (!want && escapeHeld) {
-      escapeHeld = false;
-      try {
-        options.shortcuts.unregister(ESCAPE);
-      } catch {
-        // Already released.
-      }
-    }
   };
 
   const release = () => {
@@ -189,16 +163,15 @@ export function createComputerControlPanel<
       title: presentation.title,
       detail: presentation.detail,
       visible: true,
+      escapeHint: false,
     };
     current.showInactive();
     if (changed) send();
-    syncEscape();
   };
 
   const hide = () => {
     if (!state.visible) return;
     state = { ...state, visible: false };
-    syncEscape();
     send();
     const current = live();
     if (!current) return;
@@ -218,21 +191,10 @@ export function createComputerControlPanel<
   return {
     show,
     hide,
-    async withoutEscape(work) {
-      escapeSuspended += 1;
-      syncEscape();
-      try {
-        return await work();
-      } finally {
-        escapeSuspended -= 1;
-        syncEscape();
-      }
-    },
     dispose() {
       if (disposed) return;
       disposed = true;
       state = { ...state, visible: false };
-      syncEscape();
       release();
       options.ipc.removeListener(AGENT_CONTROL_CHANNELS.ready, onReady);
       options.ipc.removeListener(AGENT_CONTROL_CHANNELS.stop, onStop);

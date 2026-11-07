@@ -36,7 +36,6 @@ function fakeComputer(
   return {
     invoke: vi.fn(async () => done("Apps")),
     release: vi.fn(() => true),
-    nativeActivity: vi.fn(() => true),
     ...overrides,
   };
 }
@@ -192,19 +191,10 @@ describe("agent control service", () => {
       reason: "stop",
     });
 
-    const activity = await post("/v1/computer/native-activity", {
-      version: 1,
-      owner,
-      agent: "codex",
-      active: true,
-    });
-    expect(await activity.json()).toEqual({ version: 1, accepted: true });
-    expect(computer.nativeActivity).toHaveBeenCalledWith({
-      version: 1,
-      owner,
-      agent: "codex",
-      active: true,
-    });
+    // Codex's built-in computer use is disabled; its activity route is gone.
+    expect(
+      (await post("/v1/computer/native-activity", { version: 1, owner, agent: "codex", active: true })).status,
+    ).toBe(404);
   });
 
   it("rejects malformed, oversized and unknown requests", async () => {

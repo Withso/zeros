@@ -9,7 +9,11 @@ import type {
   AgentToolMessage,
   LocalMessageChatRef,
 } from "@zeros/protocol/agent-messages";
-import { displayCommand, literalCommandWords } from "./tool-command";
+import {
+  displayCommand,
+  literalCommandWords,
+  literalStdinHeredoc,
+} from "./tool-command";
 import { toolRecord } from "./native-tool-presentation";
 
 const LABELS: Record<LocalCommand, readonly [string, string]> = {
@@ -114,44 +118,6 @@ function recordInput(value: unknown): Record<string, unknown> {
   return toolRecord(value);
 }
 
-/** A single stdin heredoc, never shell evaluation. Quoted bodies are literal;
- * unquoted bodies with expansion or escaped newlines remain generic. Nothing
- * may follow the terminator. Other redirects and compound commands still fail
- * the literal command parser. */
-function stdinHeredoc(command: string): string[] | null {
-  let quote = "";
-  for (let index = 0; index < command.length; index++) {
-    const char = command[index];
-    if (quote === "'") {
-      if (char === "'") quote = "";
-    } else if (char === "\\") {
-      index++;
-    } else if (char === quote) {
-      quote = "";
-    } else if (!quote && (char === "'" || char === '"')) {
-      quote = char;
-    } else if (!quote && char === "<") {
-      const redirect = /^<<(-?)[ \t]*(?:'([\w]+)'|"([\w]+)"|([\w]+))[ \t]*\r?\n/.exec(command.slice(index));
-      if (!redirect) return null;
-      let prefix = command.slice(0, index);
-      const fd = /(?:^|\s)(\d+)$/.exec(prefix);
-      if (fd) {
-        if (fd[1] !== "0") return null;
-        prefix = prefix.slice(0, -1);
-      }
-      const words = literalCommandWords({ command: prefix.trimStart().replace(/[ \t]+$/, "") });
-      if (!words) return null;
-      const delimiter = redirect[2] ?? redirect[3] ?? redirect[4];
-      const lines = command.slice(index + redirect[0].length).split(/\r?\n/);
-      const end = lines.findIndex((line) => (redirect[1] ? line.replace(/^\t+/, "") : line) === delimiter);
-      if (end < 0 || lines.slice(end + 1).some((line) => line.trim())) return null;
-      if (redirect[4] && /[$`\\]/.test(lines.slice(0, end).join("\n"))) return null;
-      return words;
-    }
-  }
-  return null;
-}
-
 function invocation(
   tool: AgentToolMessage,
 ): { args: string[]; preview: string; stdin?: boolean } | null {
@@ -182,7 +148,7 @@ function invocation(
     "zeros",
   );
   const plain = literalCommandWords({ command: literal.trim() });
-  const words = plain ?? stdinHeredoc(literal);
+  const words = plain ?? literalStdinHeredoc(literal)?.words;
   return words &&
     /^(?:.*\/)?zeros$/.test(words[0] ?? "") &&
     words[1] === "local"

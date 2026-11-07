@@ -8,7 +8,6 @@ import { backfillLocalPromptTranscript, LocalPromptRecoveryError, requestLocalPr
 import { SendQueue } from "./send-queue";
 import { AGENT_UPDATE_BACKLOG_LIMIT, createAgentUpdateFlushScheduler } from "./agent-update-flush-scheduler";
 import { notifyAgentSendFailure } from "./agent-send-failure-toast";
-import { notifyAgentCapabilityNotice } from "./agent-capability-notice-toast";
 import { hasPromptAttachmentReferences, refreshPromptAttachments } from "./refresh-prompt-attachments";
 import { reconcileHistoryMessages } from "./history-message-identity";
 import React, {
@@ -31,7 +30,6 @@ import type {
   AgentBoundaryPortOpenedMessage,
   AgentAgentsListMessage,
   AgentAgentInitializedMessage,
-  AgentCapabilityNoticeMessage,
   AgentErrorMessage,
   AgentGoalChangedMessage,
   AgentConfigurationProvenanceMessage,
@@ -1140,13 +1138,6 @@ export function AgentSessionsProvider({
       else scheduler.schedule();
     });
 
-    const unsubCapabilityNotice = bridge.on(
-      "AGENT_CAPABILITY_NOTICE",
-      (raw) => {
-        notifyAgentCapabilityNotice(raw as AgentCapabilityNoticeMessage);
-      },
-    );
-
     const unsubExit = bridge.on("AGENT_AGENT_EXITED", (raw) => {
       const msg = raw as {
         agentId: string;
@@ -1185,7 +1176,6 @@ export function AgentSessionsProvider({
       unsubQuestionSettled();
       unsubProviderQuota();
       unsubStderr();
-      unsubCapabilityNotice();
       unsubExit();
       // Anything buffered during that final flush drains now; no frame or
       // timer callback outlives this listener set.

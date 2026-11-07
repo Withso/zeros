@@ -163,6 +163,8 @@ function showHelp() {
     status        Check if the engine is running
     design        Validate, capture or preview an authored Design frame
     local         Coordinate agents in Zeros Local workspaces
+    computer      Use Mac apps from an agent chat (open, shot, click, type)
+    browser       Drive the chat's Zeros browser (open, read, click, type)
 
   \x1b[1mServe Options:\x1b[0m
     --port <n>        Channel footprint base (stable 24193; beta 24203; dev 24293)
@@ -216,6 +218,13 @@ if (command === "serve") {
     runLocalCli(args.slice(1)),
   ).then((code) => { process.exitCode = code; }).catch(() => {
     console.error("Local CLI could not start. Reopen this chat in the current Zeros app.");
+    process.exitCode = 1;
+  });
+} else if (command === "computer" || command === "browser") {
+  void import("./engine/agent-control/control-cli").then(({ runControlCli }) =>
+    runControlCli(command, args.slice(1)),
+  ).then((code) => { process.exitCode = code; }).catch(() => {
+    console.error(`zeros ${command} could not start. Reopen this chat in the current Zeros app.`);
     process.exitCode = 1;
   });
 } else if (command === "status") {

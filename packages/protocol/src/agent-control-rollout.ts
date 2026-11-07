@@ -113,27 +113,23 @@ export function sameAgentControlAvailability(
   return AGENT_CONTROL_FEATURES.every((feature) => a[feature] === b[feature]);
 }
 
-/** Browser routing while the Zeros browser is closed is the routing from
- * before it: Codex keeps its built-in browser with no fallback, Claude Code
- * keeps Chrome, and Cursor gets no browser. */
+/** While the Zeros browser is closed, no agent gets the in-app browser;
+ * Claude Code keeps Chrome when the user chose it. */
 export function gateBrowserRouteSettings(
   settings: BrowserRouteSettings,
   availability: Pick<AgentControlAvailability, "zerosBrowser">,
 ): BrowserRouteSettings {
   return availability.zerosBrowser
     ? settings
-    : { ...settings, codexNative: true, inAppEnabled: false };
+    : { ...settings, inAppAvailable: false };
 }
 
-/** While Zeros computer use is closed, Codex keeps its built-in computer use
- * and no other agent gets any. */
+/** While Zeros computer use is closed, no agent gets any computer use. */
 export function gateComputerUseSettings<T extends ComputerUseSettings>(
   settings: T,
   availability: Pick<AgentControlAvailability, "computerUse">,
 ): T {
-  return availability.computerUse
-    ? settings
-    : { ...settings, enabled: false, codexNative: true };
+  return availability.computerUse ? settings : { ...settings, enabled: false };
 }
 
 /** While simulators are closed, no agent gets the simulator tools. */

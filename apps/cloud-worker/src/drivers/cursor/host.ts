@@ -29,11 +29,13 @@ export class CursorHost {
     this.opening = true;
     const models = new CursorModelCatalog(await this.listModels({ apiKey: this.apiKey }));
     if (this.disposed) throw new Error("Cursor host closed during model discovery.");
-    const options = { cwd: params.cwd, model: models.selection(params.model, params.effort, params.fast === true), apiKey: this.apiKey, mode: cursorSdkMode(params.modeId ?? "agent"),
+    const model = models.selection(params.model, params.effort, params.fast === true), record = models.nativeRecord(model);
+    const native = record ? { localModelCatalog: [record] } : undefined;
+    const options = { cwd: params.cwd, model, apiKey: this.apiKey, mode: cursorSdkMode(params.modeId ?? "agent"),
       ...(params.mcpServers ? { mcpServers: params.mcpServers } : {}),
       disallowedTools: ["askQuestion"], local: { cwd: params.cwd, autoReview: cursorAutoReview(params.modeId ?? "agent"), sandboxOptions: { enabled: false },
         enableAgentRetries: false, settingSources: ["project", "user"] as Array<"project" | "user">, subagentInherit: {} } };
-    const agent = params.nativeSessionId ? await this.sdk.resume(params.nativeSessionId, options) : await this.sdk.create(options);
+    const agent = params.nativeSessionId ? await this.sdk.resume(params.nativeSessionId, options, native) : await this.sdk.create(options, native);
     if (this.disposed || !agent.agentId || (params.nativeSessionId && agent.agentId !== params.nativeSessionId)) {
       agent.close(); throw new Error("Cursor returned a different or closed native session.");
     }
@@ -56,8 +58,10 @@ export class CursorHost {
       await this.publish({ t: "event", turnId: turn.id, kind, value });
     };
     try {
-      turn.run = await this.agent.send(params.content, { mode: cursorSdkMode(params.modeId ?? "agent"), model: this.models!.selection(params.model, params.effort, params.fast === true), local: { force: true },
-        idempotencyKey: `zeros-${turn.id}`, onDelta: ({ update }) => emit("delta", update), onStep: ({ step }) => emit("step", step) });
+      const model = this.models!.selection(params.model, params.effort, params.fast === true), record = this.models!.nativeRecord(model);
+      turn.run = await this.agent.send(params.content, { mode: cursorSdkMode(params.modeId ?? "agent"), model, local: { force: true },
+        idempotencyKey: `zeros-${turn.id}`, onDelta: ({ update }) => emit("delta", update), onStep: ({ step }) => emit("step", step) },
+      record ? { localModelCatalog: [record] } : undefined);
       if (this.disposed || this.turn !== turn) { await this.cancel(turn); throw new Error("Cursor turn was closed during send."); }
       await this.publish({ t: "event", turnId: turn.id, kind: "started", value: { agentId: this.agent.agentId, runId: turn.run.id } });
       if (turn.cancelled) await this.cancel(turn);

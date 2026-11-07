@@ -19,6 +19,7 @@
 // ──────────────────────────────────────────────────────────
 
 import { z } from "zod";
+import { foldRetiredAgentControl } from "./retired-agent-control";
 import { personalPreferencesSchema } from "@zeros/protocol/personal-preferences";
 import { GITHUB_AUTH_METHODS } from "@zeros/protocol/github-auth";
 import { SIMULATOR_IDLE_SHUTDOWN_CHOICES } from "@zeros/protocol/simulators";
@@ -586,77 +587,47 @@ const workspacesSchema = z
   })
   .partial();
 
-/** Browser-use routing policy (docs/agent-control.md). Codex uses its built-in
- * Browser plugin over the in-app IAB host, or the engine's `zeros_browser`
- * tools when that switch is off or the plugin cannot start. Claude uses its
- * official Chrome integration when chosen, otherwise `zeros_browser`, as does
- * Cursor. Keep the machine trust posture in the engine-owned settings file;
- * unknown keys in this table are never projected. */
+/** Browser-use policy (docs/agent-control.md). Every key has a row in
+ * Settings > Browser. Every agent uses the in-app Zeros browser; Claude uses
+ * its official Chrome integration instead when chosen. Keep the machine trust
+ * posture in the engine-owned settings file; unknown keys in this table are
+ * never projected, and retired keys are folded into their replacements as
+ * each layer is read (`foldRetiredAgentControl`). */
 const browserSchema = z
   .object({
-    /** Compatibility policy for settings written before provider-specific
-     * switches shipped. New UI writes codex_enabled / claude_enabled. */
     enabled: z
       .boolean()
       .describe(
-        "Legacy fallback for provider-specific browser integration switches.",
-      ),
-    codex_enabled: z
-      .boolean()
-      .describe("Enable Codex browser use in the in-app Chromium tab."),
-    codex_native: z
-      .boolean()
-      .describe(
-        "Let Codex use its built-in Browser plugin. Off, Codex uses the Zeros browser tools instead.",
+        "Let agents use a browser: the in-app Zeros browser, or Chrome for Claude when chosen.",
       ),
     claude_enabled: z
       .boolean()
-      .describe("Enable Claude's official external Chrome integration."),
-    in_app_enabled: z
-      .boolean()
       .describe(
-        "Let Claude and Cursor use the in-app Zeros browser when Claude is not set to use Chrome.",
-      ),
-    provider: z
-      .literal("isolated")
-      .describe(
-        "In-app host backend for native Codex IAB. Currently supports isolated only.",
+        "Use Claude Code with Chrome: Claude uses your Chrome and its extension instead of the in-app browser.",
       ),
     auto_open: z
       .boolean()
       .describe(
         "Reveal the Browser workbench tab when an active agent opens a page.",
       ),
-    show_agent_cursor: z
-      .boolean()
-      .describe(
-        "Show the short-lived agent pointer inside the shared browser page.",
-      ),
-    navigation_approval: z
-      .enum(["always-ask", "always-allow"])
-      .describe(
-        "Whether agents ask before opening a website. Consequential actions remain separately gated.",
-      ),
   })
   .partial();
 
-/** Computer-use policy (docs/agent-control.md). Zeros computer use drives Mac
- * apps through the bundled Cua Driver; Codex keeps its built-in computer use
- * unless that switch is off. Like `[browser]`, unknown keys are never
- * projected, so no hand-written switch can widen what agents may control. */
+/** Computer-use policy (docs/agent-control.md). Every key has a row in
+ * Settings > General. Zeros computer use drives Mac apps through the bundled
+ * Cua Driver for every agent, Codex included. Like `[browser]`, unknown keys
+ * are never projected, so no hand-written switch can widen what agents may
+ * control. */
 const computerUseSchema = z
   .object({
     enabled: z
       .boolean()
-      .describe("Let agents control Mac apps with Zeros computer use."),
-    codex_native: z
-      .boolean()
-      .describe(
-        "Let Codex use its built-in computer use. Off, Codex uses Zeros computer use when it is enabled.",
-      ),
+      .describe("Let agents use apps on this Mac, except blocked apps."),
     show_agent_cursor: z
       .boolean()
-      .describe("Show the agent's cursor while it controls an app."),
+      .describe(
+        "Show each agent's cursor while it uses an app or the in-app browser.",
+      ),
     blocked_apps: z
       .array(z.string().max(255))
       .max(256)
@@ -1116,8 +1087,14 @@ export function sanitizeLayer(
   const userOnly = USER_ONLY_BY_LAYER[layer] ?? [];
   const repositoryScoped = REPO_SCOPED_LAYERS.has(layer);
   const doc: RawSettingsDoc = {};
+  let source: Record<string, unknown> = raw;
+  if (!userOnly.includes("browser")) {
+    const folded = foldRetiredAgentControl(raw, layer);
+    source = folded.doc as Record<string, unknown>;
+    warnings.push(...folded.warnings);
+  }
 
-  for (const [key, value] of Object.entries(raw)) {
+  for (const [key, value] of Object.entries(source)) {
     if (DANGEROUS_KEYS.has(key)) continue; // prototype-pollution guard
     if (userOnly.includes(key)) {
       warnings.push(`${key}: user-only key — ignored in ${layer} settings`);

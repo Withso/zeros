@@ -9,17 +9,17 @@ function input(
   overrides: Partial<AgentControlConfirmationInput> = {},
 ): AgentControlConfirmationInput {
   return {
-    kind: "app",
+    kind: "device",
     workspaceId: "ws_1",
     conversationId: "conv_a",
     agent: "codex",
-    subject: "Safari",
-    subjectId: "com.apple.Safari",
+    subject: "iPhone 16 Pro",
+    subjectId: "1A2B3C4D-0000-4000-8000-000000000001",
     ...overrides,
   } as AgentControlConfirmationInput;
 }
 
-describe("Zeros app and simulator approvals", () => {
+describe("Zeros simulator approvals", () => {
   afterEach(() => {
     vi.useRealTimers();
   });
@@ -28,14 +28,14 @@ describe("Zeros app and simulator approvals", () => {
     const onRequest = vi.fn();
     const onSettled = vi.fn();
     const broker = new AgentControlConfirmationBroker({ onRequest, onSettled });
-    const pending = broker.confirm(input({ subject: "  Safari \n Web  " }));
+    const pending = broker.confirm(input({ subject: "  iPhone \n 16 Pro  " }));
 
     const request = onRequest.mock.calls[0]![0];
     expect(request).toMatchObject({
-      kind: "app",
+      kind: "device",
       agent: "codex",
-      subject: "Safari Web",
-      subjectId: "com.apple.Safari",
+      subject: "iPhone 16 Pro",
+      subjectId: "1A2B3C4D-0000-4000-8000-000000000001",
     });
     expect(request.id).toMatch(/^[0-9a-f-]{36}$/);
     expect(broker.respond(request.id, "maybe" as never)).toBe(false);
@@ -55,7 +55,7 @@ describe("Zeros app and simulator approvals", () => {
     await expect(broker.confirm(input({ subject: "Notes" }))).resolves.toBe("deny");
     await expect(
       new AgentControlConfirmationBroker({ onRequest }).confirm(
-        input({ subjectId: "com.apple Safari" }),
+        input({ subjectId: "1A2B 3C4D" }),
       ),
     ).resolves.toBe("deny");
     await expect(
