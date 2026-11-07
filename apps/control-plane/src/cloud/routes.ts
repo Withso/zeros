@@ -162,17 +162,26 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
     if (!computer) throw await computerUnavailable(input.organizationId, c.get("user").id);
     // Display names can move. Select among the build's authorized ID bindings,
     // retaining the original recipe entry for checkout, setup and branch pins.
+    // Each check is a GitHub read, so they run together. The branch lookup
+    // needs only the requested repository and starts once that one resolves.
+    const userId = c.get("user").id, requested = (entry: CloudV2InstalledRepository) => entry.repository.toLowerCase() === input.repository.toLowerCase();
+    const resolving = computer.repositories.map(entry => buildRepository(input.organizationId, userId, computer.buildId, entry));
+    const named = computer.repositories.findIndex(requested);
+    const early = named < 0 ? undefined : resolving[named]!.then(({ entry, target }) => {
+      const branch = input.baseBranch ?? entry.defaultBranch;
+      return branch ? deps.remoteHead(input.organizationId, userId, target, branch) : null;
+    });
+    early?.catch(() => {});
     const candidates: Awaited<ReturnType<typeof buildRepository>>[] = [];
     let originalError: HttpError | undefined;
-    for (const entry of computer.repositories) {
-      try { candidates.push(await buildRepository(input.organizationId, c.get("user").id, computer.buildId, entry)); }
-      catch (error) {
-        if (!(error instanceof HttpError) || ![403, 404].includes(error.status)) throw error;
-        if (entry.repository.toLowerCase() === input.repository.toLowerCase()) originalError = error;
-      }
+    for (const [index, result] of (await Promise.allSettled(resolving)).entries()) {
+      if (result.status === "fulfilled") { candidates.push(result.value); continue; }
+      const error: unknown = result.reason;
+      if (!(error instanceof HttpError) || ![403, 404].includes(error.status)) throw error;
+      if (requested(computer.repositories[index]!)) originalError = error;
     }
     const selected = candidates.find(({ target }) => target.repository.toLowerCase() === input.repository.toLowerCase())
-      ?? candidates.find(({ entry }) => entry.repository.toLowerCase() === input.repository.toLowerCase());
+      ?? candidates.find(({ entry }) => requested(entry));
     if (!selected) {
       if (originalError) throw originalError;
       throw new HttpError(409, "repository_not_installed", "Add this repository to the Cloud Computer first");
@@ -181,7 +190,10 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
     if (runtimeCanary && runtimeCanary.repositoryId !== target.repositoryId) throw refuseRuntimeCanary();
     const baseBranch = input.baseBranch ?? repository.defaultBranch;
     if (!baseBranch) throw new HttpError(409, "repository_branch_required", "Select a branch or rebuild the Cloud Computer to record its default branch");
-    if (await deps.remoteHead(input.organizationId, c.get("user").id, target, baseBranch) === null)
+    // A renamed repository can select another entry than the early lookup read.
+    const head = early && selected.entry === computer.repositories[named] ? await early
+      : await deps.remoteHead(input.organizationId, userId, target, baseBranch);
+    if (head === null)
       throw new HttpError(404, "repository_branch_not_found", `Branch ${baseBranch} does not exist in ${target.repository}.`);
     const id = randomUUID();
     const name = input.name ?? input.repository.split("/")[1]!;

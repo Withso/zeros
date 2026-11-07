@@ -108,19 +108,22 @@ export type CloudV2LifecycleWorkspace = CloudV2Workspace & {
 /** `from` is null for Boat's stock image; `prune` lists the other recipe
  * checkouts a v3 image starts with. */
 export type CloudV2RestoreCreate = { from: string | null; prune?: string[]; name: string; env: Record<string, string>; requestedAt: string };
-export type CloudV2WorkspaceImage = { from: string | null; prune: string[] };
+/** `checkout`: the image already holds this workspace's clone, so creation
+ * skips hydrating it. Only a source-holding (v3) image ever does. */
+export type CloudV2WorkspaceImage = { from: string | null; prune: string[]; checkout: boolean };
 
 /** A v3 image holds every recipe repository, so it starts only a workspace
  * whose immutable source scope covers them all; that workspace removes the
  * other checkouts before its worker starts. Any other starts from Boat's
  * stock image and clones its own repository. A v2 image holds no source. */
 export function cloudV2WorkspaceImage(input: { policy: number; snapshot: string; recipe: unknown; scope: readonly string[]; repository: string }): CloudV2WorkspaceImage {
-  if (input.policy !== 3) return { from: input.snapshot, prune: [] };
+  if (input.policy !== 3) return { from: input.snapshot, prune: [], checkout: false };
   const entries = (input.recipe as { repositories?: { repository?: unknown }[] } | null)?.repositories ?? [];
   const names = entries.flatMap(entry => typeof entry.repository === "string" ? [entry.repository] : []);
   const scope = new Set(input.scope.map(name => name.toLowerCase()));
-  if (!names.length || names.length !== entries.length || !names.every(name => scope.has(name.toLowerCase()))) return { from: null, prune: [] };
-  return { from: input.snapshot, prune: names.filter(name => name.toLowerCase() !== input.repository.toLowerCase()) };
+  if (!names.length || names.length !== entries.length || !names.every(name => scope.has(name.toLowerCase()))) return { from: null, prune: [], checkout: false };
+  const own = (name: string) => name.toLowerCase() === input.repository.toLowerCase();
+  return { from: input.snapshot, prune: names.filter(name => !own(name)), checkout: names.some(own) };
 }
 
 function restoreCreate(value: CloudV2RestoreCreate | null): CloudV2RestoreCreate | null {
@@ -1000,7 +1003,7 @@ export class CloudV2Store {
     if (!row) return null;
     if (!row.computer_build_id) {
       const legacy = await this.computerSnapshot(row.org_id, null);
-      return legacy ? { from: legacy, prune: [] } : null;
+      return legacy ? { from: legacy, prune: [], checkout: false } : null;
     }
     if (!row.snapshot_id || row.source_policy_version === null) return null;
     return cloudV2WorkspaceImage({ policy: row.source_policy_version, snapshot: row.snapshot_id, recipe: row.recipe,

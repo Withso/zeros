@@ -28,6 +28,20 @@ describe("cloud v2 Boat compute", () => {
     } finally { release(); await pending; }
   });
 
+  it("polls a detached command soon after it starts, backing off to five seconds", async () => {
+    // Hydrating a checkout an image already holds finishes in milliseconds; a
+    // flat five-second first poll made every such create wait for it.
+    const boat = client(), sleeps: number[] = [];
+    let polls = 0;
+    boat.request.mockImplementation(async (_route: string, args: { body: { command: string } }) =>
+      args.body.command.includes("echo started") ? { exitCode: 0, stdout: "started\n" }
+        : args.body.command.includes("echo running") ? { exitCode: 0, stdout: ++polls < 7 ? "running\n" : "0\n" }
+          : { exitCode: 0, stdout: "" });
+    const compute = new BoatCloudV2Compute(boat, "default", async ms => { sleeps.push(ms); });
+    expect(await compute.execLong("bx_abc12345", "true", 900)).toMatchObject({ exitCode: 0, timedOut: false });
+    expect(sleeps).toEqual([250, 500, 1000, 2000, 4000, 5000, 5000]);
+  });
+
   it("delivers bounded command input separately from every executable argument", async () => {
     const boat = client();
     boat.request.mockImplementation(async (route: string) => route.endsWith("/files")

@@ -69,7 +69,7 @@ export const CLOUD_V2_WORKER_TOKEN_PATH = "/home/user/.config/zeros/worker-token
 /** Non-secret boot settings for the worker's systemd unit (EnvironmentFile). */
 export const CLOUD_V2_WORKER_ENV_PATH = "/home/user/.config/zeros/worker.env";
 
-type LifecyclePhase = "boat_create" | "boat_resume" | "runtime_install" | "image_prepare" | "protected_route" | "token_delivery" | "checkpoint" | "checkpoint_restore" | "total";
+type LifecyclePhase = "boat_create" | "boat_resume" | "source_authorize" | "runtime_install" | "image_prepare" | "repository_prepare" | "protected_route" | "token_delivery" | "checkpoint" | "checkpoint_restore" | "total";
 export type CloudV2TimingRecord = {
   workspaceId: string;
   phase: LifecyclePhase | CloudV2WorkerTiming["phase"] | "worker_hello" | "relay_ready";
@@ -365,7 +365,8 @@ export class CloudV2Lifecycle {
 
   private async step(workspace: CloudV2LifecycleWorkspace & { attempts: number }, now: number): Promise<void> {
     const { store, compute } = this.deps;
-    if (workspace.state === "creating" || workspace.state === "starting") await this.deps.authorizeSource?.(workspace);
+    if ((workspace.state === "creating" || workspace.state === "starting") && this.deps.authorizeSource)
+      await this.measure(workspace, "source_authorize", () => this.deps.authorizeSource!(workspace));
     switch (workspace.state) {
       case "creating": {
         if (now - Date.parse(workspace.createdAt) > BOOT_DEADLINE_MS) {
@@ -393,9 +394,9 @@ export class CloudV2Lifecycle {
         }
         await this.measure(workspace, "runtime_install", () => this.ensureRuntime(sandboxId, boot.runtime), runtimeChanged => ({ runtimeChanged }));
         if (image.prune.length || !image.from) await this.measure(workspace, "image_prepare", () => this.prepareImage(sandboxId, image));
-        if (this.deps.prepareRepository) {
+        if (this.deps.prepareRepository && !image.checkout) {
           await store.defer(workspace.id, "creating", 17 * 60_000);
-          await this.deps.prepareRepository(workspace, sandboxId);
+          await this.measure(workspace, "repository_prepare", () => this.deps.prepareRepository!(workspace, sandboxId));
         }
         if (!await this.measure(workspace, "protected_route", () => this.host(workspace, sandboxId))) return;
         // The worker reads it with its configuration, after the token arrives.

@@ -15,13 +15,16 @@ describe("Cloud Computer image choice", () => {
   it("starts only a covering source scope from a v3 image, and prunes the other checkouts", () => {
     const recipe = { repositories: [{ repository: "Example/Project" }, { repository: "Example/Docs" }] };
     expect(cloudV2WorkspaceImage({ policy: 3, snapshot: "v3", recipe, scope: ["example/project", "example/docs"], repository: "example/project" }))
-      .toEqual({ from: "v3", prune: ["Example/Docs"] });
+      .toEqual({ from: "v3", prune: ["Example/Docs"], checkout: true });
     expect(cloudV2WorkspaceImage({ policy: 3, snapshot: "v3", recipe, scope: ["example/project"], repository: "example/project" }))
-      .toEqual({ from: null, prune: [] });
+      .toEqual({ from: null, prune: [], checkout: false });
     expect(cloudV2WorkspaceImage({ policy: 2, snapshot: "v2", recipe, scope: ["example/project"], repository: "example/project" }))
-      .toEqual({ from: "v2", prune: [] });
+      .toEqual({ from: "v2", prune: [], checkout: false });
     expect(cloudV2WorkspaceImage({ policy: 3, snapshot: "v3", recipe: { repositories: [{ repository: 7 }] }, scope: ["example/project"], repository: "example/project" }))
-      .toEqual({ from: null, prune: [] });
+      .toEqual({ from: null, prune: [], checkout: false });
+    // A covering image without this workspace's own repository still needs it cloned.
+    expect(cloudV2WorkspaceImage({ policy: 3, snapshot: "v3", recipe, scope: ["example/project", "example/docs", "example/other"], repository: "example/other" }))
+      .toEqual({ from: "v3", prune: ["Example/Project", "Example/Docs"], checkout: false });
   });
 });
 
@@ -75,7 +78,7 @@ suite("cloud create source scope", () => {
     const id = await create();
     expect(await scope(id)).toEqual({ names: ["example/project", "example/docs"],
       ids: [{ source_repository: "example/docs", repository_id: "43" }, { source_repository: "example/project", repository_id: "42" }] });
-    expect(await store.workspaceImage(id)).toEqual({ from: "snapshot-v3", prune: ["example/docs"] });
+    expect(await store.workspaceImage(id)).toEqual({ from: "snapshot-v3", prune: ["example/docs"], checkout: true });
   });
 
   it("keeps a creator without access to another v3 repository on the stock image with only their own source", async () => {
@@ -83,14 +86,14 @@ suite("cloud create source scope", () => {
     unreadable.add("example/docs");
     const id = await create();
     expect(await scope(id)).toEqual({ names: ["example/project"], ids: [{ source_repository: "example/project", repository_id: "42" }] });
-    expect(await store.workspaceImage(id)).toEqual({ from: null, prune: [] });
+    expect(await store.workspaceImage(id)).toEqual({ from: null, prune: [], checkout: false });
   });
 
   it("keeps v2 images source-free and narrow whatever the creator can read", async () => {
     await activeBuild(2);
     const id = await create();
     expect((await scope(id)).names).toEqual(["example/project"]);
-    expect(await store.workspaceImage(id)).toEqual({ from: "snapshot-v2", prune: [] });
+    expect(await store.workspaceImage(id)).toEqual({ from: "snapshot-v2", prune: [], checkout: false });
   });
 
   it.each([

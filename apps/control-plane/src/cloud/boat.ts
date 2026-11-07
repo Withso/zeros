@@ -190,8 +190,10 @@ export class BoatCloudV2Compute implements CloudV2Compute {
       `printf %s '${encoded}' | base64 -d > ${job}.sh && { setsid nohup bash ${job}.sh > ${job}.log 2>&1 < /dev/null & } ; echo started`, 30, signal);
     if (started.exitCode !== 0) return started;
     const deadline = Date.now() + timeoutSeconds * 1000;
-    for (;;) {
-      await this.sleep(5000);
+    // Many detached commands finish at once (a checkout that is already
+    // there), so poll soon and back off to Boat's five-second cadence.
+    for (let delay = 250; ; delay = Math.min(delay * 2, 5000)) {
+      await this.sleep(delay);
       const poll = await this.exec(sandboxId, `if [ -f ${job}.exit ]; then cat ${job}.exit; else echo running; fi`, 30, signal);
       const state = poll.stdout.trim();
       if (state !== "running") {

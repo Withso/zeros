@@ -46,6 +46,24 @@ function fixture(repositories: { repository: string; defaultBranch: string | nul
 }
 
 describe("cloud v2 creation", () => {
+  it("checks every Computer repository at once and reads the branch as soon as its repository resolves", async () => {
+    const f = fixture([{ repository: "example/project", defaultBranch: "master" }, { repository: "example/docs", defaultBranch: "main" },
+      { repository: "example/site", defaultBranch: "main" }]);
+    const releases: Array<() => void> = [];
+    f.authorizeBuildRepository.mockImplementation((_org, _user, _build, repository) => new Promise(resolve => {
+      const repositoryId = String(40 + releases.length);
+      releases.push(() => resolve({ repository, repositoryId }));
+    }));
+    const response = f.create();
+    await vi.waitFor(() => expect(f.authorizeBuildRepository).toHaveBeenCalledTimes(3));
+    releases[0]!();
+    await vi.waitFor(() => expect(f.remoteHead).toHaveBeenCalledWith(org, member, { repository: "example/project", repositoryId: "40" }, "master"));
+    releases[2]!(); releases[1]!();
+    expect((await response).status).toBe(201);
+    expect(f.remoteHead).toHaveBeenCalledOnce();
+    expect(f.createWorkspace).toHaveBeenCalledWith(expect.objectContaining({ sourceRepositoryId: "40", readableRepositoryIds: ["40", "41", "42"] }));
+  });
+
   it("refuses a canary grant when this deployment has no canary authority", async () => {
     const f = fixture();
     const response = await f.app.request("/v1/cloud-v2/workspaces", {
