@@ -1288,6 +1288,23 @@ let preparationContext: {
   key: string; revision: string; inspection: ReturnType<typeof inspectDesignCatalog>; context: Awaited<ReturnType<typeof readCanvasContext>>;
 } | null = null;
 
+/** The canvas the last preparation batch of this checkout's active directory
+ * read: what a connected renderer's frame records were prepared against. */
+export function lastPreparedDesignCanvas(workspacePath: string): CanvasDocument | null {
+  const key = JSON.stringify([path.resolve(workspacePath), designDirectoryNameFor(workspacePath)]);
+  return preparationContext?.key === key ? preparationContext.context.canvas : null;
+}
+
+/** Every registered frame's identity context on a canvas: what its
+ * remembered identity was computed for, besides the files it read. */
+export function designFrameIdentityContexts(canvas: CanvasDocument): Map<string, string | null> {
+  const pageIds = designFramePageIds(canvas);
+  return new Map(Object.keys(canvas.frames).map((file) => {
+    const id = canvas.frame_info[file]?.id;
+    return [file, designFrameIdentityContext(canvas, file, id === undefined ? undefined : pageIds.get(id))];
+  }));
+}
+
 /** Bound the batch and validate metadata on both sides. Shared CSS, fonts,
  * assets and HTML are re-read by the existing exact render-identity path. */
 export async function prepareDesignNavigationFrames(workspacePath: string, catalogRevision: string, files: readonly string[], directoryId?: string) {

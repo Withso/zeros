@@ -250,6 +250,10 @@ export const designFramesPrepareSchema = z.object({
   surfaceCosts: z.literal(true).optional(),
 }).strict();
 
+/** Local engines that name the Design frames a worktree change reaches, as
+ * DB_CHANGED "designFrames" (see DbChangedMessage.designFrames). */
+export const DESIGN_FRAMES_CHANGES_CAPABILITY = "design.frames.changes.v1";
+
 export const designPreparedFrameSchema = designCatalogFrameSchema.pick({
   title: true, x: true, y: true, width: true, height: true, z: true,
 }).extend({

@@ -148,10 +148,12 @@ export interface DurableDesignDependency {
  * or a check such as font readiness); `current` re-verifies the set here. */
 export async function captureDurableDesignDependencies<T>(read: () => Promise<T>): Promise<{
   value: T; complete: boolean; durable: DurableDesignDependency[] | null; current: () => boolean;
+  /** Every file the read looked up, stored or not. */
+  targets: string[];
 }> {
   const reads: DependencyReadSet = { files: new Map(), pathPolicyCount: 0, checks: [], failure: null, lenient: true };
   const value = await currentReadSet.run(reads, read);
-  if (reads.failure) return { value, complete: false, durable: null, current: () => false };
+  if (reads.failure) return { value, complete: false, durable: null, current: () => false, targets: [] };
   const files = [...reads.files.values()];
   const durable = reads.checks.length || files.some((file) => [...file.pathPolicies].some((policy) => !policyNames.has(policy)))
     ? null
@@ -161,6 +163,7 @@ export async function captureDurableDesignDependencies<T>(read: () => Promise<T>
     value,
     complete: true,
     durable,
+    targets: files.map((file) => file.target),
     current: () => {
       for (const dependency of files) if (currentFingerprint(dependency) !== dependency.fingerprint) return false;
       try {

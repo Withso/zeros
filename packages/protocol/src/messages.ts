@@ -225,6 +225,14 @@ export interface EngineReadyMessage extends BaseMessage {
  *  through cross-device synchronization. `kinds` names which lists or keyed
  *  surfaces changed (e.g. "chats", "projects", "setup"); optional opaque ids
  *  scope the pull, but row data is never sent in the event itself. */
+export interface DesignFramesChange {
+  directoryId: string;
+  sequence: number;
+  frames: string[];
+  catalog: boolean;
+  all: boolean;
+}
+
 export interface DbChangedMessage extends BaseMessage {
   type: "DB_CHANGED";
   kinds: string[];
@@ -241,6 +249,11 @@ export interface DbChangedMessage extends BaseMessage {
    * Consumers can refresh Design-directory targets without treating an
    * ordinary worktree edit as a repository-wide semantic change. */
   designRecognitionChanged?: boolean;
+  /** For a "designFrames" change (design.frames.changes.v1, Local only): the
+   * Design frames whose identity inputs changed. A consumer re-prepares
+   * exactly `frames`, re-reads the catalog when `catalog`, and revalidates
+   * everything as before when `all`. Sequences increase per engine launch. */
+  designFrames?: DesignFramesChange;
   /** For a "messages" change: the chat ids whose transcripts changed, so a
    *  client reconciles ONLY those chats (re-windows them) instead of every open
    *  one. Omitted for list-only changes (chats/projects); clients pull those

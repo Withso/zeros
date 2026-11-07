@@ -13,6 +13,7 @@ import { resolveDesignCaptureConfig, setDesignCaptureConfig } from "./design/cap
 import { stopDesignVerification, revokeDesignVerification } from "./design/verification-service";
 import { configureDesignStyleBuilds, designStyleInputChanged, presentDesignStyleBuildRoots, stopDesignStyleBuilds } from "./design/style-builds";
 import { DesignChangePoller, designSnapshotDirectory } from "./design/change-poller";
+import { DesignFrameChanges } from "./design/frame-changes";
 import { configureDesignFonts } from "./design/style-fonts";
 import { fenceDesignSnapshotReads } from "./design/snapshot-epoch";
 import type { DesignCaptureService } from "./design/capture-service";
@@ -24,7 +25,7 @@ import * as path from "node:path";
 import { randomBytes } from "node:crypto";
 import { openBoundedDirectorySync } from "./files/bounded-read-sync";
 
-import { DESIGN_CATALOG_READ_CAPABILITY, DESIGN_CATALOG_READ_OPERATION, DESIGN_LAZY_PREPARATION_CAPABILITY, DESIGN_MUTATION_SNAPSHOTS_CAPABILITY, DESIGN_PAGE_SCOPED_MUTATIONS_CAPABILITY } from "@zeros/protocol/design-catalog";
+import { DESIGN_CATALOG_READ_CAPABILITY, DESIGN_CATALOG_READ_OPERATION, DESIGN_FRAMES_CHANGES_CAPABILITY, DESIGN_LAZY_PREPARATION_CAPABILITY, DESIGN_MUTATION_SNAPSHOTS_CAPABILITY, DESIGN_PAGE_SCOPED_MUTATIONS_CAPABILITY } from "@zeros/protocol/design-catalog";
 import { DESIGN_PREVIEW_JOBS_CAPABILITY, DESIGN_THUMBNAILS_CAPABILITY, DESIGN_THUMBNAILS_PREPARE_CAPABILITY, DESIGN_THUMBNAILS_STORE_CAPABILITY } from "@zeros/protocol/design-capture";
 import { DESIGN_SOURCE_SURFACES_CAPABILITY } from "@zeros/protocol/design-surface";
 import { DESIGN_COPY_PLACEMENT_CAPABILITY } from "@zeros/protocol/design-relocation";
@@ -72,6 +73,7 @@ import { appendSecurityAudit } from "./auth/audit-log";
 import { MessageRouter } from "./transport/router";
 import { LOCAL_MAIN_WORKSPACE_ID, WorkspaceService } from "./workspace/service";
 import {
+  designDirectoryEntry,
   isDesignMetadataRepoPath,
 } from "./design/metadata";
 import { DesignCodeToolAdmissions } from "./design/code-tool-admission";
@@ -718,6 +720,8 @@ export class ZerosEngine {
   private watchHost: WatchHostClient | null = null;
   /** Forwards worktree content events to live one-shot style builds. */
   private stopStyleBuildInputs: (() => void) | null = null;
+  private designFrameChanges: DesignFrameChanges | null = null;
+  private stopDesignFrameChanges: (() => void) | null = null;
   /** Live canvas feedback for Local agents' native Design edits. Never
    * constructed for a cloud worker. */
   private designAgentActivity: DesignAgentActivity | null = null;
@@ -2807,6 +2811,19 @@ export class ZerosEngine {
     // One-shot Design style builds re-run on their inputs from this watcher,
     // rather than each running a watcher of its own.
     this.stopStyleBuildInputs = onWorktreeContentChange(designStyleInputChanged);
+    this.designFrameChanges = new DesignFrameChanges({
+      directory: (root) => {
+        const name = designSnapshotDirectory(root) ?? activeDesignDirectoryNameFor(root);
+        const id = name ? designDirectoryEntry(root, name)?.id : undefined;
+        return name && id ? { name, id } : null;
+      },
+      publish: (root, change) => {
+        const workspaceId = getWorkspaceByPath(root)?.id;
+        this.router.broadcastLocal(createMessage({ type: "DB_CHANGED", source: "engine", kinds: ["designFrames"],
+          ...(workspaceId ? { workspaceIds: [workspaceId] } : {}), designFrames: change }));
+      },
+    });
+    this.stopDesignFrameChanges = onWorktreeContentChange((root, file) => this.designFrameChanges?.note(root, file));
     this.designAgentActivity = this.createDesignAgentActivity();
     // A packaged Local engine on macOS cannot arm FSEvents itself (see the
     // options below). Its Node watch host can, with one recursive watch per
@@ -3025,6 +3042,10 @@ export class ZerosEngine {
     this.gitWatcher = null;
     this.stopStyleBuildInputs?.();
     this.stopStyleBuildInputs = null;
+    this.stopDesignFrameChanges?.();
+    this.stopDesignFrameChanges = null;
+    this.designFrameChanges?.stop();
+    this.designFrameChanges = null;
     // Release the watch host before the Design poller, so a host that gives
     // up during teardown cannot start a replacement poller.
     const watchHost = this.watchHost;
@@ -8076,6 +8097,8 @@ export class ZerosEngine {
   ): void {
     this.sessionUpdateBatcher?.flush(prompt.sessionId);
     if (state !== "running") this.designAgentActivity?.endExecution(prompt.sessionId);
+    // Agents also change what no watcher reports (installed packages, ignored folders).
+    if (state !== "running") void this.designFrameChanges?.verifyAll();
     this.routeSessionScoped(
       prompt.sessionId,
       createMessage({
@@ -9128,7 +9151,7 @@ export class ZerosEngine {
         port: this.actualPort,
         protocolVersion: PROTOCOL_VERSION,
         minProtocolVersion: MIN_SUPPORTED_PROTOCOL,
-        capabilities: [DESIGN_CATALOG_READ_CAPABILITY, CONVERSATION_REPLAY_CAPABILITY, ...(client.kind === "local" ? [DESIGN_PREVIEW_JOBS_CAPABILITY, DESIGN_LAZY_PREPARATION_CAPABILITY, DESIGN_SOURCE_SURFACES_CAPABILITY, DESIGN_COPY_PLACEMENT_CAPABILITY, DESIGN_MUTATION_SNAPSHOTS_CAPABILITY, DESIGN_PAGE_SCOPED_MUTATIONS_CAPABILITY, DESIGN_THUMBNAILS_STORE_CAPABILITY,
+        capabilities: [DESIGN_CATALOG_READ_CAPABILITY, CONVERSATION_REPLAY_CAPABILITY, ...(client.kind === "local" ? [DESIGN_PREVIEW_JOBS_CAPABILITY, DESIGN_LAZY_PREPARATION_CAPABILITY, DESIGN_SOURCE_SURFACES_CAPABILITY, DESIGN_COPY_PLACEMENT_CAPABILITY, DESIGN_MUTATION_SNAPSHOTS_CAPABILITY, DESIGN_PAGE_SCOPED_MUTATIONS_CAPABILITY, DESIGN_THUMBNAILS_STORE_CAPABILITY, DESIGN_FRAMES_CHANGES_CAPABILITY,
           // Batch thumbnails need a capture host to draw them.
           ...(resolveDesignCaptureConfig() ? [DESIGN_THUMBNAILS_CAPABILITY, DESIGN_THUMBNAILS_PREPARE_CAPABILITY] : [])] : [])],
       }),

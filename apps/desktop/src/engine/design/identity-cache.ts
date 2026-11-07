@@ -35,6 +35,8 @@ interface Entry {
   /** Null for a read set that cannot be stored; `current` then verifies it. */
   dependencies: DurableDesignDependency[] | null;
   current?: () => boolean;
+  /** The files an unstored read set looked up, to say which changes reach it. */
+  targets?: string[];
 }
 
 interface Page {
@@ -219,15 +221,66 @@ export function designFrameIdentities(workspacePath: string, directory: string) 
       return entry.identity;
     },
     remember(file: string, context: string, identity: DesignFrameIdentity,
-      read: { complete: boolean; durable: DurableDesignDependency[] | null; current: () => boolean }): void {
+      read: { complete: boolean; durable: DurableDesignDependency[] | null; current: () => boolean; targets?: string[] }): void {
       if (!read.complete) return;
       const page = pageFor(workspacePath, directory, file);
       page.entries.delete(file);
-      page.entries.set(file, { context, identity, dependencies: read.durable, ...(read.durable ? {} : { current: read.current }) });
+      page.entries.set(file, { context, identity, dependencies: read.durable,
+        ...(read.durable ? {} : { current: read.current, ...(read.targets ? { targets: read.targets } : {}) }) });
       while (page.entries.size > MAX_PAGE_ENTRIES) page.entries.delete(page.entries.keys().next().value!);
       if (read.durable) scheduleWrite(page);
     },
   };
+}
+
+function* directoryEntries(workspacePath: string, directory: string): Generator<[string, Entry]> {
+  const prefix = `${path.resolve(workspacePath)}\0${directory}\0`;
+  for (const [key, page] of pages) if (key.startsWith(prefix)) yield* page.entries;
+}
+
+/** Frames of a directory whose remembered identity read one of `targets`
+ * (absolute paths), including lookups that found nothing. `unknown` names
+ * frames whose read set could not be stored, so no path can be ruled out.
+ * This covers every frame the engine prepared since it started, which is
+ * every frame a connected renderer holds: a renderer revalidates on connect. */
+export function designFramesReading(workspacePath: string, directory: string,
+  targets: ReadonlySet<string>): { frames: string[]; unknown: string[] } {
+  const frames: string[] = [];
+  const unknown: string[] = [];
+  for (const [file, entry] of directoryEntries(workspacePath, directory)) {
+    const read = entry.dependencies?.map((dependency) => dependency.target) ?? entry.targets;
+    if (!read) unknown.push(file);
+    else if (read.some((target) => targets.has(target))) frames.push(file);
+  }
+  return { frames, unknown };
+}
+
+/** Checkouts with remembered frame identities, by active directory. */
+export function designIdentityDirectories(): Array<{ workspacePath: string; directory: string }> {
+  const seen = new Map<string, { workspacePath: string; directory: string }>();
+  for (const key of pages.keys()) {
+    const [workspacePath, directory] = key.split("\0");
+    if (workspacePath && directory !== undefined) seen.set(`${workspacePath}\0${directory}`, { workspacePath, directory });
+  }
+  return [...seen.values()];
+}
+
+/** Frames whose remembered identity no longer holds, by the same checks a
+ * read makes, for changes no watcher reported (installed packages, ignored
+ * folders, font downloads). Null past `limit` remembered frames. */
+export async function designFramesWithStaleIdentities(workspacePath: string, directory: string,
+  limit: number): Promise<string[] | null> {
+  const entries = [...directoryEntries(workspacePath, directory)];
+  if (entries.length > limit) return null;
+  const memo = new Map<string, string | null>();
+  const stale: string[] = [];
+  for (const [index, [file, entry]] of entries.entries()) {
+    // Fingerprints hash file bytes; give other engine work a turn now and then.
+    if (index > 0 && index % 64 === 0) await new Promise((resolve) => setImmediate(resolve));
+    const current = entry.dependencies ? durableDesignDependenciesCurrent(entry.dependencies, memo) : entry.current?.() === true;
+    if (!current) stale.push(file);
+  }
+  return stale;
 }
 
 /** Test hooks: persistence, the build stamp, hit counts, and settling writes. */
