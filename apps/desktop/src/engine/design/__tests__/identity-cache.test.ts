@@ -12,6 +12,7 @@ import {
 import { DESIGN_DIRECTORY_NAME, initializeDesignDocument, prepareDesignNavigationFrames, readDesignNavigationSnapshot } from "../document";
 import {
   configureDesignIdentityCacheForTests,
+  designIdentityCacheDurable,
   designIdentityCacheStatsForTests,
   flushDesignIdentityCacheForTests,
   resetDesignIdentityCacheForTests,
@@ -22,6 +23,17 @@ import { sharedDesignParseStatsForTests } from "../shared-parse";
 // A 1x1 transparent PNG, and a 2x1 one.
 const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=", "base64");
 const WIDE = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAYAAAD0In+KAAAAEUlEQVR42mNkYGD4z8DAwMAAAA4AAWHKSr8AAAAASUVORK5CYII=", "base64");
+
+describe("where Design frame identities persist", () => {
+  it("persists packaged identities, keeps development and tests in memory unless a development engine opts in", () => {
+    expect(designIdentityCacheDurable({}, false)).toBe(true);
+    expect(designIdentityCacheDurable({}, true)).toBe(false);
+    expect(designIdentityCacheDurable({ ZEROS_DESIGN_IDENTITY_CACHE: "durable" }, true)).toBe(true);
+    expect(designIdentityCacheDurable({ ZEROS_DESIGN_IDENTITY_CACHE: "yes" }, true)).toBe(false);
+    expect(designIdentityCacheDurable({ VITEST: "true", ZEROS_DESIGN_IDENTITY_CACHE: "durable" }, true)).toBe(false);
+    expect(designIdentityCacheDurable({ VITEST: "true" }, false)).toBe(false);
+  });
+});
 
 describe("durable Design frame identities", () => {
   let root: string;
