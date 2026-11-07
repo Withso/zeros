@@ -1,6 +1,7 @@
 import { ChevronDown, File } from "lucide-react";
 import { useLayoutEffect, useRef, useState } from "react";
 import {
+  DESIGN_MAX_PAGES,
   designPageTitleSchema,
   type DesignPageSummary,
 } from "@zeros/protocol/design-pages";
@@ -293,7 +294,7 @@ export function DesignPagePicker({
             <DropdownMenuSeparator />
             <DropdownMenuItem
               className="h-7"
-              disabled={pending || pages.length >= 64}
+              disabled={pending || pages.length >= DESIGN_MAX_PAGES}
               onSelect={() => void create()}
             >
               New page

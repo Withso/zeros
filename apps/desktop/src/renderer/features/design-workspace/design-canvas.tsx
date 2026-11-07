@@ -40,7 +40,7 @@ import {
   type DesignOperation,
 } from "@zeros/design-core";
 import type { DesignAuthoredKeyframes } from "@zeros/design-web";
-import { normalizeDesignPagesSnapshot } from "@zeros/protocol/design-pages";
+import { DESIGN_MAX_FRAMES_PER_PAGE, normalizeDesignPagesSnapshot } from "@zeros/protocol/design-pages";
 import {
   DESIGN_RUNTIME_DOCUMENT_BODY_ID,
   type DesignRuntimeNodeDetails,
@@ -1917,7 +1917,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                 w: width,
                 h: height,
                 z: Math.min(
-                  256,
+                  DESIGN_MAX_FRAMES_PER_PAGE,
                   Math.max(
                     0,
                     ...frameViews.map((frame) => frame.z + 1),
@@ -6830,7 +6830,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
           w: Math.max(1, rect.width),
           h: Math.max(1, rect.height),
           z: Math.min(
-            256,
+            DESIGN_MAX_FRAMES_PER_PAGE,
             Math.max(
               0,
               ...frameViews.map((frame) => frame.z + 1),
