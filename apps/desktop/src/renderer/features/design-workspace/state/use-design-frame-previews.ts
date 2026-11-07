@@ -31,6 +31,7 @@ import {
   downscaleDesignPreview,
   encodeDesignPreview,
   type DesignPreviewDemand,
+  type DesignPreviewLevel,
   type DesignPreviewOwner,
   type DesignPreviewPicture,
   type DesignPreviewTarget,
@@ -113,8 +114,11 @@ function nativeDesignPreview(owner: DesignPreviewOwner, input: { file: string; s
 }
 
 /** Pictures in flight for an engine that batches them: enough to fill one
- * 64-frame capture batch while the previous one renders. */
+ * 64-frame capture batch while the previous one renders. Larger levels stay
+ * few: zooming in asks for many at once, and each is a large render, decode
+ * and encode that would otherwise saturate the renderer mid-gesture. */
 const DESIGN_THUMBNAIL_BATCH_CONCURRENCY = 64;
+const DESIGN_LARGE_PICTURE_CONCURRENCY: Partial<Record<DesignPreviewLevel, number>> = { overview: 16, detail: DESIGN_SOURCE_PREVIEW_CONCURRENCY };
 
 /** Local engines with a capture host render many frames per capture, out of
  * the renderer process. */
@@ -174,8 +178,9 @@ export const designFramePreviews = new DesignFramePreviews({
     sourcePreviewUsage.native++;
     return nativeDesignPreview(owner, input, signal);
   },
-  concurrency: (owner) => (isCloudWorkspace(owner.workspaceId) ? 1
-    : thumbnailsAvailable(owner) ? DESIGN_THUMBNAIL_BATCH_CONCURRENCY : DESIGN_SOURCE_PREVIEW_CONCURRENCY),
+  concurrency: (owner, level) => (isCloudWorkspace(owner.workspaceId) ? 1
+    : !thumbnailsAvailable(owner) ? DESIGN_SOURCE_PREVIEW_CONCURRENCY
+    : (level && DESIGN_LARGE_PICTURE_CONCURRENCY[level]) ?? DESIGN_THUMBNAIL_BATCH_CONCURRENCY),
   quietMs: () => designBackgroundWork.quietRemainingMs(),
   // A render waits for a quiet slot in the canvas's background lane and then
   // leaves it, so tiles and audits never queue behind its round trip. Each

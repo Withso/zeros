@@ -163,9 +163,10 @@ export interface DesignFramePreviewDependencies {
     },
     signal?: AbortSignal,
   ): Promise<DesignPreviewReply>;
-  /** Pictures rendered at once for this owner (default one). A renderer-side
-   * vector producer runs several; the native capture host stays serial. */
-  concurrency?(owner: DesignPreviewOwner): number;
+  /** Pictures rendered at once for this owner (default one), and with a
+   * level, at once of that level. A renderer-side vector producer runs
+   * several; the native capture host stays serial. */
+  concurrency?(owner: DesignPreviewOwner, level?: DesignPreviewLevel): number;
   /** Remaining camera-gesture quiet time; canvas-wide notices wait for it. */
   quietMs?(): number;
   /** The canvas background lane: one task at a time, after input settles. */
@@ -862,8 +863,22 @@ export class DesignFramePreviews {
     if (!demand) return null;
     let waitUntil = Infinity;
     const far = this.deps.rendersFar?.(demand.owner) ?? true;
+    // Each level has its own limit: large pictures cost far more to render,
+    // decode and encode than the small ones a batch fills.
+    const running = new Map<DesignPreviewLevel, number>();
+    for (const production of this.productions) running.set(production.item.level, (running.get(production.item.level) ?? 0) + 1);
+    const full = new Map<DesignPreviewLevel, boolean>();
+    const levelFull = (level: DesignPreviewLevel) => {
+      let value = full.get(level);
+      if (value === undefined) {
+        value = (running.get(level) ?? 0) >= Math.max(1, Math.floor(this.deps.concurrency?.(demand.owner, level) ?? 1));
+        full.set(level, value);
+      }
+      return value;
+    };
     for (const item of demand.items) {
       if (item.near === false && !far) continue;
+      if (levelFull(item.level)) continue;
       const key = designPreviewKey({ owner: demand.owner, theme: demand.theme, ...item });
       if (this.pictures.has(key) || this.reading.has(key) || this.stale.has(key) || this.made.has(key) ||
         this.producingKeys.has(key)) continue;

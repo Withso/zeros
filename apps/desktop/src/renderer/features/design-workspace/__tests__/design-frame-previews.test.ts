@@ -506,6 +506,32 @@ it("renders up to 64 pictures at once for a batching engine and names their owne
   expect(h.renders).toHaveLength(70);
 });
 
+it("bounds large pictures by their own level limit while small ones fill the batch", async () => {
+  // Zooming in asks for many overview/detail pictures at once; each is a large
+  // render, decode and encode, so they stay few in flight.
+  const waiting: Array<() => void> = [];
+  const h = harness({
+    concurrency: (_owner, level) => level === "detail" ? 2 : 64,
+    render: (_owner, input) => new Promise(resolve => waiting.push(() => resolve({ sourceVersion: input.sourceVersion, theme: input.theme,
+      mimeType: "image/png", width: 128, height: 80, data: PNG }))),
+  });
+  h.previews.setDemand(h.token, demand(local, [
+    ...Array.from({ length: 6 }, (_, index) => [`d${index}.html`, 1, "detail"] as [string, number, "detail"]),
+    ...Array.from({ length: 10 }, (_, index) => [`t${index}.html`, 1] as [string, number]),
+  ]));
+  await h.settle();
+  const levels = (renders: typeof h.renders) => renders.map(render => render.maxDimension === 1280 ? "detail" : "small");
+  expect(levels(h.renders).filter(level => level === "detail")).toHaveLength(2);
+  expect(levels(h.renders).filter(level => level === "small")).toHaveLength(10);
+  for (const finish of waiting.splice(0)) finish();
+  await h.settle();
+  for (const finish of waiting.splice(0)) finish();
+  await h.settle();
+  for (const finish of waiting.splice(0)) finish();
+  await h.settle();
+  expect(levels(h.renders).filter(level => level === "detail")).toHaveLength(6);
+});
+
 it("holds the canvas-wide picture notice while a camera gesture is live", async () => {
   let quiet = 500;
   const { previews, settle, advance, token } = harness({ quietMs: () => quiet });
