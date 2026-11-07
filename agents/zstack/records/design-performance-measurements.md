@@ -257,3 +257,26 @@ Root causes found and fixed (renderer, PR on branch
   re-rendered the page mid-gesture. It now yields to live gestures, prepares
   the frames nearest the camera center first, and demands at most the
   source-surface admission limit.
+
+Caveats and open items (2026-11-07):
+- Every completed A/B set ran while a temporary instrumentation edit had
+  disabled the density-change replan for live gestures. Their zoom rows
+  showed dropped frames rising from 2 to 4–6 of ~365. The branch restores
+  zoom planning on every paint, as on origin/main. A clean zoom re-measure
+  is pending: after the owner's external display disconnected, macOS stopped
+  rendering the floating bench window during the owner's session.
+- Unchanged within noise: real-page pan/zoom (already 16.7 ms p50/p95),
+  inspect select→editor ready (real 128 → 123 ms, 256-frame 184 → 185 ms),
+  idle CPU, cold open (6.4 → 6.1 s for 256 frames; engine/vector bound) and
+  memory (256 frames ≈ 1.0–1.3 GB total).
+- 26 pages × 1,000 heavy frames: origin/main refuses the directory (fails
+  closed at the old 256-frame cap). With #885/#886 at 1d36f7b9 plus this
+  renderer, cold open took 148–183 s, covered only 197–278 of 1,000 frames
+  and was engine-bound (47–110% CPU, up to 1.3 GB RSS); pan ran at 10–15 fps
+  while preparation continued; total memory peaked at 2.2–3.4 GiB. That is
+  not acceptable. Since then the renderer caps preparation at the
+  source-surface admission limit and yields to gestures, and #886 removed
+  the per-batch and per-document canvas re-reads (frame document
+  441 → 71 ms on Linux). Native requalification of that combination is the
+  next step. A level-of-detail policy for overviews of more than ~256
+  visible frames remains a product decision.
