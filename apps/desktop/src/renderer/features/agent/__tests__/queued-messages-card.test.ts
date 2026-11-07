@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
@@ -27,6 +28,17 @@ describe("cloud readiness in the existing queued card", () => {
     expect(html).toMatch(/aria-label="Delete"(?![^>]*disabled)/);
     expect(html).toMatch(/aria-label="Waiting for agent"[^>]*disabled/);
     expect(html).not.toContain('role="alert"'); expect(html).not.toContain("AGENT STOPPED");
+  });
+  it("has no Stop while a send waits for its workspace: the waiting message keeps Delete", () => {
+    const html = render({ waiting: true, statusMessage: "Starting workspace…" });
+    expect(html).toContain("Starting workspace…");
+    expect(html).not.toMatch(/>Stop</);
+    expect(html).toMatch(/aria-label="Delete"(?![^>]*disabled)/);
+    expect(readFileSync(new URL("../queued-messages-card.tsx", import.meta.url), "utf8")).not.toContain("onStop");
+    const chat = readFileSync(new URL("../agent-chat.tsx", import.meta.url), "utf8");
+    const card = /<QueuedMessagesCard[\s\S]*?\/>/.exec(chat)?.[0] ?? "";
+    expect(card).toContain("waiting=");
+    expect(card).not.toContain("onStop");
   });
   it("retains a neutral Not sent row with retry/edit/remove after a terminal cause or timeout", () => {
     const html = render({ paused: true, notSent: true });

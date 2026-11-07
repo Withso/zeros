@@ -81,7 +81,6 @@ export interface QueuedMessagesCardProps {
   /** Workspace-start display origin, separate from an accepted turn's clock. */
   statusStartedAt?: number;
   active?: boolean;
-  onStop?: () => void;
   onReconnect?: () => void;
   /** Name for a provider without mid-turn steering. */
   agentName: string;
@@ -107,7 +106,6 @@ export const QueuedMessagesCard = memo(function QueuedMessagesCard({
   statusMessage,
   statusStartedAt,
   active = true,
-  onStop,
   onReconnect,
   agentName,
 }: QueuedMessagesCardProps) {
@@ -141,7 +139,6 @@ export const QueuedMessagesCard = memo(function QueuedMessagesCard({
             <ChevronDown size={16} aria-hidden="true" />
           )}
         </button>
-          {onStop && <Button variant="ghost" size="compact" onClick={onStop}>Stop</Button>}
           {onReconnect && <Button variant="ghost" size="compact" onClick={onReconnect}>Reconnect</Button>}
         </div>
         {statusMessage && <div role="status" className="text-fg3 px-3.5 pb-2 text-xs">

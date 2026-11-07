@@ -1088,3 +1088,13 @@ Each landed step appends one line: date, workstream, what landed, evidence.
   so (canvas versions 397 and 398). Evidence: `pill.test.ts`,
   `git-defaults.test.ts`, `pr-pill.test.ts` and `chat-reading-type.test.ts`
   failed red first; the local-links smoke measures the link pill at 13px.
+- 2026-11-07 · 5 · The queue card has no Stop. While a cloud send waits for
+  its workspace, the header is the collapse toggle alone, the title on the
+  left and the chevron on the right, and the status line keeps its timer.
+  Deleting a message that waits for readiness cancels that wait, as Stop
+  did, and a wait that runs out turns the card to Not sent with Retry. A
+  message the cloud has already saved stays Sending… and runs when the
+  workspace starts, where the composer's Stop applies. Local queues never
+  showed it. The Queued messages board's Waiting state drops the button
+  (canvas version 399). Evidence: `queued-messages-card.test.ts` failed red
+  first.

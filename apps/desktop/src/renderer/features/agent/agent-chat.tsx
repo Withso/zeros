@@ -4536,9 +4536,6 @@ function AgentChatBody({
             statusStartedAt={isCloudWorkspace(session.cwd) && session.cloudSendWait?.state === "waiting" && session.cloudSendWait.phase === "starting-workspace"
               ? session.cloudSendWait.startedAt : undefined}
             active={surfaceActive}
-            onStop={interactive && !readOnly && isCloudWorkspace(session.cwd) &&
-                (session.cloudSendWait?.state === "waiting" || session.cloudPromptPending || queuedMessages.some(message => message.queuedDelivery === "sending"))
-              ? () => { void session.cancel(); } : undefined}
             agentName={steeringAgentName}
           />
           {/* The only permission gate: it docks above the still-usable composer.
