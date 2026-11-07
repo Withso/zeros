@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { designPreparedFrameSchema } from "./design-catalog";
 import { DESIGN_MAX_FRAMES_PER_PAGE } from "./design-pages";
 export const DESIGN_CAPTURE_HTML_BYTES = 16 * 1024 * 1024;
 export const DESIGN_CAPTURE_PNG_BYTES = 1024 * 1024;
@@ -207,22 +208,30 @@ const thumbnailFrame = z.object({
   file: z.string().min(1).max(255),
   sourceVersion: z.string().regex(/^[a-f0-9]{24}$/),
 }).strict();
+/** Engines that prepare a frame sent without its version while picturing it. */
+export const DESIGN_THUMBNAILS_PREPARE_CAPABILITY = "design.thumbnails.prepare.v1";
 /** design.thumbnails.render: pictures of saved frames at one size, theme and
  * color scheme. A frame whose source moved on comes back as stale, with its
- * current version, rather than as a picture of other content. */
+ * current version, rather than as a picture of other content. A frame sent
+ * without a version (design.thumbnails.prepare.v1) is pictured as it is now,
+ * and its design.frames.prepare record comes back too while the catalog is
+ * still at `catalogRevision`. */
 export const designThumbnailsRenderSchema = z.object({
   workspaceId: z.string().min(1).max(128),
   directoryId: z.string().min(1).max(128),
   theme: z.string().regex(/^[a-z][a-z0-9_-]{0,63}$/).nullable(),
   colorScheme: z.enum(["light", "dark"]),
   maxDimension: z.number().int().min(DESIGN_CAPTURE_MIN_DIMENSION).max(DESIGN_BATCH_CAPTURE_MAX_DIMENSION),
-  frames: z.array(thumbnailFrame).min(1).max(DESIGN_BATCH_CAPTURE_MAX_ITEMS),
+  frames: z.array(thumbnailFrame.partial({ sourceVersion: true })).min(1).max(DESIGN_BATCH_CAPTURE_MAX_ITEMS),
+  catalogRevision: z.string().regex(/^[a-f0-9]{64}$/).optional(),
   /** As for previews: cancelled through design.preview.cancel. */
   jobId: previewJobId.optional(),
   deadline: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
 }).strict()
   .refine((input) => new Set(input.frames.map((frame) => frame.file)).size === input.frames.length, "Thumbnail frames must be distinct.")
-  .refine((input) => (input.jobId === undefined) === (input.deadline === undefined), "Thumbnail job and deadline must be supplied together.");
+  .refine((input) => (input.jobId === undefined) === (input.deadline === undefined), "Thumbnail job and deadline must be supplied together.")
+  .refine((input) => input.catalogRevision !== undefined || input.frames.every((frame) => frame.sourceVersion !== undefined),
+    "A thumbnail frame without a version needs the catalog revision.");
 export type DesignThumbnailsRender = z.infer<typeof designThumbnailsRenderSchema>;
 /** Base64 picture data in one reply. The whole reply must fit one bridge
  * frame (MAX_BRIDGE_FRAME_BYTES, 16 MiB), which a receiver drops when larger. */
@@ -242,6 +251,8 @@ export const designThumbnailsReplySchema = z.object({
     .max(DESIGN_BATCH_CAPTURE_MAX_ITEMS),
   /** Not pictured in this reply, to keep it within one frame: ask again. */
   deferred: z.array(thumbnailFrame).max(DESIGN_BATCH_CAPTURE_MAX_ITEMS),
+  /** design.frames.prepare records of frames sent without a version. */
+  prepared: z.array(designPreparedFrameSchema).max(DESIGN_BATCH_CAPTURE_MAX_ITEMS).optional(),
 }).strict()
   .refine((reply) => reply.pictures.reduce((total, picture) => total + picture.data.length, 0) <= DESIGN_THUMBNAILS_REPLY_DATA_BYTES,
     "Thumbnail pictures exceed one reply.");
