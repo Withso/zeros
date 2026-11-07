@@ -469,6 +469,39 @@ function useDelayedColdBusy(loading: boolean): boolean {
   return visible;
 }
 
+const stopDesignControlEvent = (event: React.SyntheticEvent) => event.stopPropagation();
+
+/** A frame's Play control. The canvas re-renders a page of up to a thousand
+ * frames as pictures arrive and selection changes; with a stable toggle each
+ * control and its tooltip re-render only when its own frame's state does. */
+const DesignFramePlayControl = React.memo(function DesignFramePlayControl({ file, title, playing, disabled, onToggle }: {
+  file: string;
+  title: string;
+  playing: boolean;
+  disabled: boolean;
+  onToggle(file: string): void;
+}) {
+  return (
+    <DesignToolbarButton
+      data-design-frame-play={file}
+      label={`Play ${title}`}
+      tooltip={playing ? "Stop playback (Esc)" : "Play frame"}
+      className="zd-frame-play"
+      tool
+      pressed={playing}
+      disabled={disabled}
+      onPointerDown={stopDesignControlEvent}
+      onDoubleClick={stopDesignControlEvent}
+      onClick={(event) => {
+        event.stopPropagation();
+        onToggle(file);
+      }}
+    >
+      <Play />
+    </DesignToolbarButton>
+  );
+});
+
 const DesignPreparingFrame = React.forwardRef<HTMLElement, React.ComponentPropsWithoutRef<"article">>(function DesignPreparingFrame(props, ref) {
   useLayoutEffect(() => retainDesignResource("frameSurfaces"), []);
   return <article {...props} ref={ref} />;
@@ -1180,6 +1213,8 @@ export const DesignCanvas = React.memo(function DesignCanvas({
       : null;
   const currentPlaybackRef = useRef(currentPlayback);
   currentPlaybackRef.current = currentPlayback;
+  const framePlaybackToggleRef = useRef<(file: string) => void>(() => {});
+  const toggleFramePlayback = useCallback((file: string) => framePlaybackToggleRef.current(file), []);
   useLayoutEffect(() => {
     if (playbackSession && !currentPlayback) setPlaybackSession(null);
   }, [currentPlayback, playbackSession]);
@@ -7587,6 +7622,32 @@ export const DesignCanvas = React.memo(function DesignCanvas({
     };
   }, [active, handleWheel, paintPendingWheelGesture]);
 
+  // Play reads this render's frames and playback when pressed, so every frame
+  // shares one stable toggle and an unchanged frame's control never re-renders.
+  framePlaybackToggleRef.current = (file: string) => {
+    const description = mountedFrames.find((candidate) => candidate.file === file);
+    const frame = description && (isPreparedDesignFrame(description) ? description : description.previous);
+    if (!frame) return;
+    if (currentPlayback?.file === frame.file) {
+      stopFramePlayback(currentPlayback.id);
+      return;
+    }
+    if (!workspaceId || !canvasPageOwner) return;
+    gestureCancelRef.current?.();
+    activateTool("select");
+    onMotionTimelineOpenChange(false);
+    setHitStackMenu(null);
+    clearCanvasHover(frame);
+    // Selection is published synchronously before its
+    // durable bridge write; Play never waits on that I/O.
+    void selectDesignFrame(workspaceId, frame, { selected: false, owner: canvasPageOwner }).catch(() => {});
+    const session = { id: crypto.randomUUID(), owner: playbackOwner,
+      file: frame.file, sourceVersion: frame.sourceVersion,
+      selectionEvent: designWorkspaceView(workspaceId).selectionEvent };
+    currentPlaybackRef.current = session;
+    setPlaybackSession(session);
+  };
+
   // --- RENDER ---
 
   return (
@@ -7984,40 +8045,13 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                       className="absolute right-0 bottom-full origin-bottom-right"
                       style={{ transform: `translateY(${designCanvasScreenPixels(-8)}) scale(${DESIGN_CANVAS_INVERSE_ZOOM})` }}
                     >
-                      <DesignToolbarButton
-                        data-design-frame-play={frame.file}
-                        label={`Play ${frame.title}`}
-                        tooltip={framePlaying ? "Stop playback (Esc)" : "Play frame"}
-                        className="zd-frame-play"
-                        tool
-                        pressed={framePlaying}
+                      <DesignFramePlayControl
+                        file={frame.file}
+                        title={frame.title}
+                        playing={framePlaying}
                         disabled={!active || !workspaceId || !folder || Boolean(inlineTextEdit || renamingFrame)}
-                        onPointerDown={(event) => event.stopPropagation()}
-                        onDoubleClick={(event) => event.stopPropagation()}
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          if (currentPlayback?.file === frame.file) {
-                            stopFramePlayback(currentPlayback.id);
-                            return;
-                          }
-                          if (!workspaceId || !canvasPageOwner) return;
-                          gestureCancelRef.current?.();
-                          activateTool("select");
-                          onMotionTimelineOpenChange(false);
-                          setHitStackMenu(null);
-                          clearCanvasHover(frame);
-                          // Selection is published synchronously before its
-                          // durable bridge write; Play never waits on that I/O.
-                          void selectDesignFrame(workspaceId, frame, { selected: false, owner: canvasPageOwner }).catch(() => {});
-                          const session = { id: crypto.randomUUID(), owner: playbackOwner,
-                            file: frame.file, sourceVersion: frame.sourceVersion,
-                            selectionEvent: designWorkspaceView(workspaceId).selectionEvent };
-                          currentPlaybackRef.current = session;
-                          setPlaybackSession(session);
-                        }}
-                      >
-                        <Play />
-                      </DesignToolbarButton>
+                        onToggle={toggleFramePlayback}
+                      />
                     </div>
                   </>
                 ) : null}

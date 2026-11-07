@@ -5,6 +5,13 @@ import type { DesignViewport } from "../design-canvas-math";
 import { createDesignFrameResidencyReader, type DesignFrameResidencyInput } from "../design-frame-residency";
 import { DesignFrameSpatialIndex, type DesignSpatialFrame, type DesignSpatialRect } from "../design-frame-spatial-index";
 
+/** After the camera rests, the page stays as the camera left it this long, so
+ * back-to-back steps of one zoom do not unmount and remount hundreds of frames
+ * between them; then the change applies once. Short enough that offscreen
+ * wrappers still retire promptly: continuity is bounded picture ownership, not
+ * a mounted page. */
+export const DESIGN_RESIDENCY_SETTLE_MS = 400;
+
 /** The painted camera is read once per requested animation frame. Publishing
  * happens only when residency changes, not on every pixel of a pan. The durable
  * camera continues to commit through the existing gesture-settle path. */
@@ -22,8 +29,11 @@ export function useDesignFrameResidency<T extends DesignSpatialFrame>(
   const hiddenLive = useSyncExternalStore(designHiddenDocuments.subscribe, readHidden, readHidden);
   const index = useMemo(() => new DesignFrameSpatialIndex(input.frames), [input.frames]);
   const [, invalidate] = useReducer((value: number) => value + 1, 0);
+  const cameraAt = useRef(-Infinity);
+  const settleTimer = useRef<number | null>(null);
   const read = () => reader({ ...input, hiddenLive, index, view: input.camera.current ?? input.view, geometry: input.geometry(),
-    gesture: input.camera.current !== null });
+    gesture: input.camera.current !== null,
+    settling: input.camera.current === null && performance.now() - cameraAt.current < DESIGN_RESIDENCY_SETTLE_MS });
   const result = read();
   useLayoutEffect(() => {
     designHiddenDocuments.update(token, {
@@ -40,6 +50,13 @@ export function useDesignFrameResidency<T extends DesignSpatialFrame>(
   const pending = useRef<number | null>(null);
   const refresh = useCallback((reason?: "camera") => {
     const { input } = latest.current, current = committed.current;
+    if (reason === "camera") {
+      cameraAt.current = performance.now();
+      if (settleTimer.current !== null) window.clearTimeout(settleTimer.current);
+      // Apply what the settling camera held back once it has rested.
+      settleTimer.current = window.setTimeout(() => { settleTimer.current = null; refreshAfterSettle.current(); },
+        DESIGN_RESIDENCY_SETTLE_MS + 16);
+    }
     // A complete passive canvas already owns every source and needs no live
     // document. Camera paint handles visibility directly. Avoid another rAF,
     // spatial query and admission allocation for that unchanged working set.
@@ -67,9 +84,13 @@ export function useDesignFrameResidency<T extends DesignSpatialFrame>(
         flushSync(invalidate);
     });
   }, []);
+  const refreshAfterSettle = useRef(() => refresh());
+  refreshAfterSettle.current = () => refresh();
   useLayoutEffect(() => () => {
     if (pending.current !== null) window.cancelAnimationFrame(pending.current);
     pending.current = null;
+    if (settleTimer.current !== null) window.clearTimeout(settleTimer.current);
+    settleTimer.current = null;
   }, [input.active, input.owner]);
   return { frames: result.frames, live: result.live, sources: result.sources, refresh };
 }

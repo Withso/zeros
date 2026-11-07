@@ -111,6 +111,43 @@ describe("Design frame surface residency", () => {
     expect([...rested.sources].every(file => panning.sources.has(file))).toBe(true);
   });
 
+  it("keeps a zoom's page mounted between its steps, loads sources for large frames, and trims once the camera rests", () => {
+    const frames = Array.from({ length: 1000 }, (_, index) => ({ ...frame(String(index), index % 40 * 240, Math.floor(index / 40) * 120),
+      sourceVersion: "a".repeat(24), surfaceCost: { sourceBytes: 2000, nodes: 80, imageBytes: 0 } }));
+    const input = { ...setup(frames), viewport: { width: 1440, height: 900 }, devicePixelRatio: 2, sourceSurfacesEnabled: true,
+      sourceReady: new Map(frames.map(frame => [frame.file, frame.sourceVersion])) };
+    const read = createDesignFrameResidencyReader();
+    expect(read({ ...input, view: { zoom: 0.14, panX: 0, panY: 0 } }).frames).toHaveLength(1000);
+    // The camera rests between two steps of one zoom: unmounting 900 frames
+    // here and mounting them again on the way out was the zoom's lag.
+    const between = read({ ...input, view: { zoom: 1.2, panX: 0, panY: 0 }, settling: true });
+    expect(between.frames).toHaveLength(1000);
+    // Frames painted large still get their documents at once.
+    expect(between.visible.size).toBeGreaterThan(0);
+    expect([...between.visible].every(file => between.sources.has(file))).toBe(true);
+    // Zooming back out within the zoom remounts nothing.
+    const out = read({ ...input, view: { zoom: 0.14, panX: 0, panY: 0 }, gesture: true });
+    expect(out.frames).toHaveLength(1000);
+    // Once the camera has rested, the overview ends in one step.
+    read({ ...input, view: { zoom: 1.2, panX: 0, panY: 0 }, settling: true });
+    const rested = read({ ...input, view: { zoom: 1.2, panX: 0, panY: 0 } });
+    expect(rested.frames.length).toBeLessThan(100);
+    expect([...rested.visible].every(file => rested.sources.has(file))).toBe(true);
+  });
+
+  it("keeps the documents of frames it holds while the camera settles, so a return pan finds them alive", () => {
+    const frames = Array.from({ length: 256 }, (_, index) => ({ ...frame(String(index), index % 16 * 400, Math.floor(index / 16) * 200),
+      sourceVersion: "a".repeat(24), surfaceCost: { sourceBytes: 2000, nodes: 80, imageBytes: 0 } }));
+    const input = { ...setup(frames), sourceSurfacesEnabled: true, sourceReady: new Map(frames.map(frame => [frame.file, frame.sourceVersion])) };
+    const read = createDesignFrameResidencyReader();
+    const start = read({ ...input, view: { zoom: 0.5, panX: 0, panY: 0 } });
+    expect(start.sources.size).toBeGreaterThan(0);
+    // Pan away and rest briefly: what had a document keeps it.
+    read({ ...input, view: { zoom: 0.5, panX: -1200, panY: 0 }, gesture: true });
+    const settling = read({ ...input, view: { zoom: 0.5, panX: -1200, panY: 0 }, settling: true });
+    expect([...start.sources].every(file => settling.sources.has(file))).toBe(true);
+  });
+
   it("keeps offscreen descriptors out of the mounted set without changing scene order", () => {
     const frames = [frame("front", 100), frame("back", 100), ...Array.from({ length: 254 }, (_, i) => frame(`far-${i}`, 10000 + i * 400))];
     const read = createDesignFrameResidencyReader();

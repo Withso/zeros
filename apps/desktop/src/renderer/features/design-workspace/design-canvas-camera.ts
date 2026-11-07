@@ -52,9 +52,16 @@ const CHROME_OVERSCAN_PIXELS = 96;
  * paint of an unchanged frame performs no declaration reads or writes. */
 const writtenScales = new WeakMap<HTMLElement, { zoom: number; style: string | null }>();
 
-function paintChromeScale(element: HTMLElement, zoom: number): void {
+/** Inside a live camera gesture, chrome keeps its written scale until the
+ * zoom moves this far from it. Rewriting every visible frame's scale on each
+ * step restyled each frame subtree per display frame; rest writes it exactly. */
+const CHROME_SCALE_GESTURE_HOLD = 0.15;
+
+function paintChromeScale(element: HTMLElement, zoom: number, gesture = false): void {
   const style = element.getAttribute("style"), written = writtenScales.get(element);
   if (written && written.zoom === zoom && written.style === style) return;
+  if (gesture && written && written.style === style && written.zoom !== 1 && zoom !== 1 &&
+    Math.abs(zoom / written.zoom - 1) < CHROME_SCALE_GESTURE_HOLD) return;
   for (const [name, value] of [["--design-canvas-zoom", zoom], ["--design-canvas-inverse-zoom", 1 / zoom]] as const) {
     const next = String(value);
     if (element.style.getPropertyValue(name) !== next) element.style.setProperty(name, next);
@@ -69,7 +76,7 @@ function paintChromeScale(element: HTMLElement, zoom: number): void {
 
 /** Chrome owned by one camera paint: the focused and hovered frames resolve
  * once for the whole world instead of per frame. */
-interface ChromePaintContext { focusedFrame: Element | null; hoveredFrame: Element | null }
+interface ChromePaintContext { focusedFrame: Element | null; hoveredFrame: Element | null; gesture?: boolean }
 const hoveredFrames = new WeakMap<HTMLDivElement, HTMLElement | null>();
 
 function frameOf(world: HTMLDivElement, node: EventTarget | null): HTMLElement | null {
@@ -137,17 +144,18 @@ export function paintDesignFrameVisibility(element: HTMLElement, context?: Chrom
     element.hasAttribute("data-design-frame-compact-controls") && !element.hasAttribute("data-design-frame-chrome-protected") &&
     !element.hasAttribute("data-design-nest-target") && !element.hasAttribute("data-design-frame-pointer") &&
     (context ? context.hoveredFrame !== element : !element.matches(":hover")) && focusedFrame !== element;
-  paintChromeScale(element, outside || compact ? 1 : viewport.zoom);
+  paintChromeScale(element, outside || compact ? 1 : viewport.zoom,
+    context ? context.gesture : world.hasAttribute("data-design-camera-gesture"));
   if (!paintingWorlds.has(world)) repaintDesignCanvasPixels(world);
 }
 
-function paintCanvasChrome(world: HTMLDivElement): void {
+function paintCanvasChrome(world: HTMLDivElement, gesture = world.hasAttribute("data-design-camera-gesture")): void {
   const pending = pendingChromePaints.get(world);
   if (pending !== undefined) { window.cancelAnimationFrame(pending); pendingChromePaints.delete(world); }
   paintingWorlds.add(world);
   try {
     canvasPointers.get(world)?.update(paintedViews.get(world));
-    const context = chromePaintContext(world);
+    const context = { ...chromePaintContext(world), gesture };
     for (const element of world.children) {
       if (element instanceof HTMLElement) paintDesignFrameVisibility(element, context);
     }
@@ -177,8 +185,10 @@ export function observeDesignCanvasChrome(world: HTMLDivElement): () => void {
     if (records.some(record => record.type === "childList" ? record.target === world :
       record.target instanceof HTMLElement && record.target.parentElement === world)) refresh();
   });
+  // Compact controls are this painter's own output: observing them repeated
+  // every camera paint that changed one, a second pass over the whole world.
   observer.observe(world, { subtree: true, childList: true, attributes: true,
-    attributeFilter: ["class", "data-design-frame-tiled", "data-design-frame-controls", "data-design-frame-compact-controls",
+    attributeFilter: ["class", "data-design-frame-tiled", "data-design-frame-controls",
       "data-design-frame-chrome-protected", "data-design-nest-target"] });
   // Hover transitions can follow a wheel paint in the same display interval.
   // Batch hover-only work; the next camera write adopts it before composing.
@@ -235,7 +245,7 @@ export function paintDesignCanvasCamera(
   if (!world) return;
   if (size) { viewportSizes.set(world, size); canvasPointers.get(world)?.resize(size); }
   paintedViews.set(world, viewport);
-  paintCanvasChrome(world);
+  paintCanvasChrome(world, gestureActive);
   const style = designCanvasCameraStyle(viewport);
   world.style.transform = String(style.transform);
   world.toggleAttribute("data-design-camera-gesture", gestureActive);
