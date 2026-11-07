@@ -155,15 +155,24 @@ function healthNonceMatches(
 
 class LocalClient implements TransportClient {
   readonly kind = "local" as const;
+  /** Under Bun, a socket's native side can be released while readyState still
+   * reads OPEN (an error before its close event), and writing to it then
+   * faults in native code. Once retired, nothing is written to it again. */
+  retired = false;
   constructor(
     readonly id: string,
     private readonly ws: WebSocket,
   ) {}
   send(msg: EngineMessage): void {
-    if (this.ws.readyState === WebSocket.OPEN)
+    if (this.retired || this.ws.readyState !== WebSocket.OPEN) return;
+    try {
       this.ws.send(JSON.stringify(msg));
+    } catch {
+      this.retired = true;
+    }
   }
   close(code = 1000, reason?: string): void {
+    this.retired = true;
     try {
       this.ws.close(code, reason);
     } catch {
@@ -269,6 +278,7 @@ export class LocalTransport implements Transport {
       this.clients.set(ws, client);
 
       ws.on("message", (data) => {
+        if (client.retired) return;
         let raw: unknown;
         try {
           raw = JSON.parse(data.toString());
@@ -279,13 +289,16 @@ export class LocalTransport implements Transport {
         if (!msg) return;
         this.onMessageCb?.(client, msg);
       });
-      ws.on("close", () => {
-        this.clients.delete(ws);
+      // An error ends the connection as surely as its close event, which may
+      // come later or not at all: whichever arrives first retires the client
+      // and reports the disconnect, once.
+      const gone = () => {
+        client.retired = true;
+        if (!this.clients.delete(ws)) return;
         this.onDisconnectCb?.(client);
-      });
-      ws.on("error", () => {
-        this.clients.delete(ws);
-      });
+      };
+      ws.on("close", gone);
+      ws.on("error", gone);
 
       this.onConnectCb?.(client);
     });
