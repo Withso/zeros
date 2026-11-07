@@ -16,8 +16,9 @@ vi.mock("../../team/team-store", () => ({
 vi.mock("../../../state/use-cached-read", () => ({
   useCachedRead: () => ({ data: state.data, error: state.error, loading: false, refresh: () => {} }),
 }));
-vi.mock("../cloud-repository-picker", () => ({
-  CloudRepositoryPicker: ({ label }: { label?: string }) => createElement("span", { "data-picker": "" }, label),
+vi.mock("../cloud-repository-chooser", () => ({
+  CloudRepositoryChooser: ({ chosenCount }: { chosenCount: number }) =>
+    createElement("span", { "data-chooser": "" }, `${chosenCount} repositories selected`),
 }));
 
 import { CloudComputerPanel } from "../cloud-computer-panel";
@@ -44,14 +45,13 @@ beforeEach(() => {
 });
 
 describe("Cloud Computer settings panel", () => {
-  it("shows the selected workspace script alongside the separate build command", () => {
+  it("lists chosen repositories as links to their own settings, not inline setup fields", () => {
     state.data = { ...state.data!, recipe: { repositories: [{ repository: "fixture/repo", setup: "pnpm install", setupScript: "scripts/bootstrap.sh" }] } };
     const html = render();
-    expect(html).toContain('aria-label="fixture/repo workspace setup script"');
-    expect(html).toContain('value="scripts/bootstrap.sh"');
-    expect(text(html)).toContain("Tracked Bash script, relative to the repository");
-    state.role = "member";
-    expect(render()).not.toContain("workspace setup script");
+    expect(html).toContain('title="Open fixture/repo settings"');
+    expect(html).toContain('aria-label="Remove fixture/repo"');
+    expect(html).not.toContain("workspace setup script");
+    expect(text(html)).toContain("1 repositories selected");
   });
   it("keeps the configured computer visible without announcing a first refresh failure", () => {
     state.error = new Error("temporary network failure");
@@ -66,9 +66,7 @@ describe("Cloud Computer settings panel", () => {
     expect(html).toContain("History (2)");
     expect(html).not.toContain("Unbuilt changes");
     expect(html).not.toContain("Discard");
-    // The installed repository is listed as configured, with its live branch as the hint.
     expect(html).toContain("iamarunrk/0kit");
-    expect(render()).toContain('placeholder="Branch or tag (default: main)"');
   });
 
   it("keeps the installed repository beside an added one and reports the unbuilt change", () => {
@@ -79,7 +77,7 @@ describe("Cloud Computer settings panel", () => {
     expect(html).toContain("Discard");
     expect(html).toContain("iamarunrk/0kit");
     expect(html).toContain("withso/zeros-dev-fixture");
-    expect(html).toContain("Add or remove repositories");
+    expect(html).toContain("2 repositories selected");
   });
 
   it("shows a removal as unbuilt until the computer is built again", () => {

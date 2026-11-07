@@ -5,110 +5,38 @@
 // stay until an admin removes them, and every edit waits for the next build.
 // Older builds stay in the history and can be made active again, which
 // rebuilds them at the same commits.
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import { ChevronDown, ChevronUp, CircleCheck, CircleMinus, CircleX, LoaderCircle, TriangleAlert, X } from "lucide-react";
-import { Button, GithubIcon, Input } from "../../shared/ui";
-import { Badge, CodeTextarea } from "../../shared/ui/primitives";
+import { Button } from "../../shared/ui";
+import { Badge, Pill } from "../../shared/ui/primitives";
 import { MessageRow } from "../../shared/ui/primitives/message-row";
-import { KeyedAsyncCache } from "../../shared/lib/keyed-async-cache";
 import { useRecoveringRead } from "../../state/use-recovering-read";
-import { getOrganizationStoreGeneration, getTeamStoreState, useActiveOrganization, useTeams } from "../team/team-store";
-import { CONTROL_PLANE_URL, ControlPlaneError } from "../team/control-plane";
+import { useActiveOrganization, useTeams } from "../team/team-store";
+import { assertComputerOwner, computerKey, computers, MAX_REPOSITORIES, message, publishRecipe, useRecipeDraft } from "./cloud-computer-store";
 import { SettingsGroup, SettingsSection } from "./settings-ui";
-import { CloudRepositoryPicker, type CloudRepositorySelection } from "./cloud-repository-picker";
+import { CloudRepositoryChooser } from "./cloud-repository-chooser";
+import type { ChooserRepository } from "./cloud-repository-chooser-model";
 import {
   activateCloudV2Build, buildCloudV2Computer, buildConfiguredCloudV2Computer, discardCloudV2ComputerRecipe,
-  getCloudV2Computer, saveCloudV2ComputerRecipe, type CloudV2Build, type CloudV2Computer, type CloudV2RepositoryDraft,
+  getCloudV2Computer, type CloudV2Build, type CloudV2RepositoryDraft,
 } from "../../platform/cloud-v2";
-import { computerChanges, computerStatus, editableRepositories, historyNote, newerRecipe, RecipeSaveQueue, relativeAge, type ComputerStatus } from "./cloud-computer-model";
+import { computerChanges, computerStatus, editableRepositories, historyNote, relativeAge, type ComputerStatus } from "./cloud-computer-model";
+export { prefetchCloudComputer } from "./cloud-computer-store";
 
-const computers = new KeyedAsyncCache<CloudV2Computer>({ maxEntries: 16 });
-const MAX_REPOSITORIES = 10;
-/** Typing in a branch or setup field saves after a pause; list edits at once. */
-const TYPING_SAVE_MS = 600;
-
-const computerKey = (userId: string, organizationId: string) => JSON.stringify([CONTROL_PLANE_URL, getOrganizationStoreGeneration(), userId, organizationId]);
-function assertComputerOwner(key: string, organizationId: string): void {
-  const me = getTeamStoreState().me, organization = (me?.organizations ?? me?.teams)?.find(row => row.id === organizationId);
-  if (!me || key !== computerKey(me.user.id, organizationId) || !organization || organization.isPersonal ||
-      (organization.role !== "owner" && organization.role !== "admin")) throw new Error("The Cloud Computer account changed. Reopen its settings.");
-}
-/** Intent warming for the Settings entry; only owners and admins can read it. */
-export function prefetchCloudComputer(userId: string, organization: { id: string; isPersonal: boolean; role?: string }): void {
-  if (organization.isPersonal || (organization.role !== "owner" && organization.role !== "admin")) return;
-  void computers.load(computerKey(userId, organization.id), () => getCloudV2Computer(organization.id), { maxAgeMs: 30_000 })
-    .catch(() => undefined);
-}
-
-function message(error: unknown): string {
-  if (error instanceof ControlPlaneError) return error.message;
-  return "The Cloud Computer request failed. Try again.";
-}
-
-export function CloudComputerPanel({ surfaceActive = true }: { surfaceActive?: boolean }) {
+export function CloudComputerPanel({ surfaceActive = true, openCloudRepository }: {
+  surfaceActive?: boolean; openCloudRepository?(repository: string): void;
+}) {
   const organization = useActiveOrganization();
   const { me } = useTeams();
   if (!organization || organization.isPersonal || !me) return null;
   const canManage = organization.role === "owner" || organization.role === "admin";
   return <CloudComputerScope key={computerKey(me.user.id, organization.id)} userId={me.user.id}
-    organizationId={organization.id} canManage={canManage} active={surfaceActive} />;
+    organizationId={organization.id} canManage={canManage} active={surfaceActive} openRepository={openCloudRepository} />;
 }
 
-/** Merges a recipe reply into the freshest cached overview. A late reply
- * never replaces a newer revision a refresh has already shown. */
-function publishRecipe(key: string, latest: { current: { data: CloudV2Computer | undefined; revision: number | undefined } },
-  saved: { recipe: NonNullable<CloudV2Computer["recipe"]>; recipeRevision: number }): void {
-  const next = newerRecipe(computers.getSnapshot(key).data ?? latest.current.data, saved);
-  if (!next) return;
-  latest.current = { data: next, revision: saved.recipeRevision };
-  computers.setData(key, next);
-}
-
-/** Local edits over the configured repositories, saved in order at the
- * revision they started from. A newer revision from elsewhere wins. */
-function useRecipeDraft(organizationId: string, key: string, data: CloudV2Computer | undefined,
-  refresh: () => void, onError: (text: string) => void) {
-  const [local, setLocal] = useState<CloudV2RepositoryDraft[] | null>(null);
-  const legacy = data !== undefined && data.recipeRevision === undefined;
-  const latest = useRef({ data, revision: data?.recipeRevision });
-  latest.current = { data, revision: data?.recipeRevision };
-  const callbacks = useRef({ refresh, onError });
-  callbacks.current = { refresh, onError };
-  const [queue] = useState(() => new RecipeSaveQueue<CloudV2RepositoryDraft[]>({
-    save: async (repositories, revision) => {
-      assertComputerOwner(key, organizationId);
-      const saved = await saveCloudV2ComputerRecipe(organizationId, repositories, revision);
-      assertComputerOwner(key, organizationId);
-      publishRecipe(key, latest, saved);
-      return saved.recipeRevision;
-    },
-    serverRevision: () => latest.current.revision,
-    onSaved: () => setLocal(null),
-    onError: error => {
-      setLocal(null); callbacks.current.refresh();
-      callbacks.current.onError(error instanceof ControlPlaneError && error.code === "computer_recipe_changed"
-        ? "The Cloud Computer changed elsewhere. The latest repositories are shown." : message(error));
-    },
-  }));
-  // Owner navigation can finish an authored save, but a retired account must
-  // not send its queued selection under the replacement account's authority.
-  useEffect(() => () => {
-    if (!queue.waiting) return;
-    try { assertComputerOwner(key, organizationId); void queue.flush(); }
-    catch { queue.cancel(); }
-  }, [queue, key, organizationId]);
-
-  const edit = useCallback((next: CloudV2RepositoryDraft[], delayMs: number) => {
-    setLocal(next);
-    if (!legacy) queue.push(next, delayMs);
-  }, [legacy, queue]);
-  const reset = useCallback(() => { queue.cancel(); setLocal(null); }, [queue]);
-  return { local, legacy, edit, settle: () => queue.settle(), revision: () => queue.revision(), reset, latest };
-}
-
-function CloudComputerScope({ userId, organizationId, canManage, active }: {
-  userId: string; organizationId: string; canManage: boolean; active: boolean;
+function CloudComputerScope({ userId, organizationId, canManage, active, openRepository }: {
+  userId: string; organizationId: string; canManage: boolean; active: boolean; openRepository?(repository: string): void;
 }) {
   const key = computerKey(userId, organizationId);
   const computer = useRecoveringRead(computers, canManage ? key : null, () => getCloudV2Computer(organizationId),
@@ -135,8 +63,6 @@ function CloudComputerScope({ userId, organizationId, canManage, active }: {
   const changes = computerChanges(configured, live);
   const status = computerStatus({ builds, activeBuildId: data?.activeBuildId ?? null, changes,
     configuredCount: configured.length, now: Date.now(), loaded: data !== undefined });
-  const liveBranch = (repository: string) =>
-    activeBuild?.recipe.repositories.find(row => row.repository.toLowerCase() === repository.toLowerCase())?.branch;
 
   const run = async (work: () => Promise<unknown>) => {
     setBusy(true); setError(null);
@@ -164,22 +90,25 @@ function CloudComputerScope({ userId, organizationId, canManage, active }: {
   });
   const activate = (buildId: string) => run(() => { assertComputerOwner(key, organizationId); return activateCloudV2Build(organizationId, buildId); });
 
-  const update = (repository: string, patch: { ref?: string; setup?: string; setupScript?: string }) =>
-    draft.edit(configured.map(row => {
-      if (row.repository !== repository) return row;
-      const next = { ...row, ...patch };
-      return { repository: next.repository, ...(next.ref?.trim() ? { ref: next.ref.trim() } : {}), ...(next.setup?.trim() ? { setup: next.setup } : {}),
-        ...(next.setupScript ? { setupScript: next.setupScript } : {}) };
-    }), TYPING_SAVE_MS);
   const remove = (repository: string) => draft.edit(configured.filter(row => row.repository !== repository), 0);
   const same = (row: CloudV2RepositoryDraft, repository: { owner: string; name: string }) =>
     row.repository.toLowerCase() === `${repository.owner}/${repository.name}`.toLowerCase();
-  const toggle = (repository: CloudRepositorySelection) => {
+  const isChosen = useCallback((repository: { owner: string; name: string }) => configured.some(row => same(row, repository)), [configured]);
+  const limit = () => setError(`A Cloud Computer holds up to ${MAX_REPOSITORIES} repositories.`);
+  const toggle = (repository: ChooserRepository) => {
     const existing = configured.find(row => same(row, repository));
     if (existing) { remove(existing.repository); return; }
-    if (configured.length >= MAX_REPOSITORIES) { setError(`A Cloud Computer holds up to ${MAX_REPOSITORIES} repositories.`); return; }
+    if (configured.length >= MAX_REPOSITORIES) { limit(); return; }
     setError(null);
     draft.edit([...configured, { repository: `${repository.owner}/${repository.name}` }], 0);
+  };
+  const chooseAll = (repositories: ChooserRepository[], choose: boolean) => {
+    if (!choose) { draft.edit(configured.filter(row => !repositories.some(repository => same(row, repository))), 0); return; }
+    const added = repositories.filter(repository => !configured.some(row => same(row, repository)))
+      .map(repository => ({ repository: `${repository.owner}/${repository.name}` }));
+    const room = MAX_REPOSITORIES - configured.length;
+    if (added.length > room) limit(); else setError(null);
+    if (room > 0) draft.edit([...configured, ...added.slice(0, room)], 0);
   };
 
   if (!canManage)
@@ -222,37 +151,23 @@ function CloudComputerScope({ userId, organizationId, canManage, active }: {
       </SettingsGroup>
 
       <SettingsGroup title="Repositories" description="Changes apply after the next build.">
-        {configured.map(row => (
-          <div key={row.repository} className="flex flex-col gap-2">
-            <div className="flex items-center justify-between gap-3">
-              <span className="text-fg1 inline-flex min-w-0 items-center gap-2 text-xs font-medium">
-                <GithubIcon className="size-3.5 shrink-0" aria-hidden />
-                <span className="truncate">{row.repository}</span>
-              </span>
-              <IconButton size="standard" label={`Remove ${row.repository}`}
-                onClick={() => remove(row.repository)} disabled={locked}>
-                <X aria-hidden />
-              </IconButton>
-            </div>
-            <Input aria-label={`${row.repository} branch`} placeholder={`Branch or tag (default: ${liveBranch(row.repository) ?? "the repository's default"})`}
-              value={row.ref ?? ""} onChange={event => update(row.repository, { ref: event.target.value })} disabled={locked} />
-            <CodeTextarea aria-label={`${row.repository} setup command`} value={row.setup ?? ""}
-              readOnly={locked} offscreen={!active} onChange={value => update(row.repository, { setup: value })}
-              description={row.setupScript ? "Build validation command (e.g. pnpm install). Workspaces use the selected script below."
-                : "Runs at each build and in each new workspace"} />
-            <label className="text-fg2 flex flex-col gap-1 text-xs">
-              Workspace setup script (optional)
-              <Input aria-label={`${row.repository} workspace setup script`} placeholder="scripts/setup.sh" maxLength={512}
-                value={row.setupScript ?? ""} onChange={event => update(row.repository, { setupScript: event.target.value })} disabled={locked} />
-              <span className="text-fg3 text-3xxs">Tracked Bash script, relative to the repository. Replaces the command in workspaces and runs once on each new disk, after environment files are ready.</span>
-            </label>
-          </div>
-        ))}
-        <div className="flex flex-col gap-1">
-          <CloudRepositoryPicker userId={userId} organizationId={organizationId} multiple active={active}
-            disabled={locked || data === undefined} label={configured.length ? "Add or remove repositories" : "Add repositories"}
-            isSelected={repository => configured.some(row => same(row, repository))} onToggle={toggle} />
-        </div>
+        <CloudRepositoryChooser userId={userId} organizationId={organizationId} active={active}
+          disabled={locked || data === undefined} chosenCount={configured.length} isChosen={isChosen}
+          onToggle={toggle} onChooseAll={chooseAll} />
+        {configured.length > 0 && (
+          <ul className="m-0 flex list-none flex-wrap gap-2 p-0" aria-label="Chosen repositories">
+            {configured.map(row => (
+              <li key={row.repository} className="inline-flex items-center gap-0.5">
+                <Pill size="control" onClick={() => openRepository?.(row.repository)} title={`Open ${row.repository} settings`}>
+                  {row.repository}
+                </Pill>
+                <IconButton size="compact" label={`Remove ${row.repository}`} onClick={() => remove(row.repository)} disabled={locked}>
+                  <X aria-hidden />
+                </IconButton>
+              </li>
+            ))}
+          </ul>
+        )}
       </SettingsGroup>
     </div>
   );
