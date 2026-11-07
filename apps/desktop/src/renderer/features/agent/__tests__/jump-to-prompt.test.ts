@@ -49,7 +49,7 @@ const script = buildSync({
 }).outputFiles[0]!.text;
 
 // The fold's own clip, standing in for its utilities.
-const FOLD_CSS = `[data-prompt-fold="collapsed"] { max-height: 108px; overflow: clip; }`;
+const FOLD_CSS = `[data-prompt-fold="collapsed"] { max-height: 118px; overflow: clip; }`;
 
 async function withPage(run: (page: Page) => Promise<void>) {
   const browser = await chromium.launch();

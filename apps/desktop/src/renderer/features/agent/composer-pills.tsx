@@ -51,8 +51,8 @@ import type { BridgeRegistryAgent } from "../../platform/bridge/messages";
 // The one canonical composer-toolbar pill chrome. Density variants pass an
 // override through cn(TOOLBAR_PILL, …) so tailwind-merge resolves the px delta.
 // Every toolbar control is 28px with 6px corners and the shared icon-button
-// hover (bg2-highlight). Labels are text-xs, one step under the textarea's
-// text-sm, so chrome reads quieter than the text being written.
+// hover (bg2-highlight). Labels are text-xs, under the editor's 15px reading
+// size, so chrome reads quieter than the text being written.
 export const TOOLBAR_PILL =
   "inline-flex h-7 items-center gap-1 rounded-md border-0 bg-transparent px-2 py-0 text-xs font-medium text-fg2 cursor-pointer transition-[background-color,color] duration-150 ease-out hover:bg-bg2-highlight hover:text-fg1";
 

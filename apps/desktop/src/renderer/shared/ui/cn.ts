@@ -6,7 +6,7 @@
 //
 // twMerge is extended with the app's custom type-scale steps
 // (zeros-tokens.css: text-xxs 10px, text-2xxs 11px, text-3xxs
-// 12px). Without this, tailwind-merge can't classify them as
+// 12px, text-reading 15px). Without this, tailwind-merge can't classify them as
 // font sizes, files them in the text-COLOR group, and silently
 // drops them whenever the same cn() call also sets a text color
 // (e.g. `text-2xxs text-fg2` → `text-fg2`).
@@ -17,7 +17,7 @@ import { extendTailwindMerge } from "tailwind-merge";
 const twMerge = extendTailwindMerge({
   extend: {
     classGroups: {
-      "font-size": [{ text: ["xxs", "2xxs", "3xxs", "dialog-title"] }],
+      "font-size": [{ text: ["xxs", "2xxs", "3xxs", "reading", "dialog-title"] }],
       // Named stacking layers (zeros-tokens.css @utility z-*), so
       // `cn("z-10", "z-modal")` resolves to one z-index like any other pair.
       z: [{ z: ["panel", "chrome", "dropdown", "modal", "toast"] }],

@@ -153,7 +153,7 @@ export const EventRow = memo(function EventRow({
       onPointerEnter={warmFile}
       onFocus={warmFile}
       onClick={() => { if (canOpen && path) openFilePill(ctx.attachmentCwd, path, destination); }}
-      className={sTone === "fail" ? "border-red-primary/25 bg-red-bg text-red-primary hover:bg-red-bg [&_*]:text-red-primary!" : undefined}
+      className={cn(sTone === "fail" && "border-red-primary/25 bg-red-bg text-red-primary hover:bg-red-bg [&_*]:text-red-primary!")}
     />
   ) : null;
   if (filePill && hoverPreview) {
@@ -170,8 +170,8 @@ export const EventRow = memo(function EventRow({
   </>;
   const preview = meta.target && !open ? (
     <span data-tool-preview="" className={cn(
-      // A 20px chip: 12/16 on bg2, the height of the file tags beside it.
-      "max-w-[440px] min-w-0 truncate rounded-sm px-1.5 py-0.5 text-3xxs leading-4 font-medium",
+      // A 20px chip: 13/16 on bg2, the height and size of the file tags beside it.
+      "max-w-[440px] min-w-0 truncate rounded-sm px-1.5 py-0.5 text-xs leading-4 font-medium",
       localCli && sTone !== "fail" && "font-mono",
       sTone === "fail" ? "bg-red-bg text-red-primary" : "bg-bg2 text-fg2",
     )}>{meta.target}</span>
@@ -255,7 +255,7 @@ export const EventRow = memo(function EventRow({
       {/* Stable operation name; a long native/MCP name must still fit the lane. */}
       <span
         className={cn(
-          "max-w-[60ch] min-w-0 truncate text-sm",
+          "max-w-[60ch] min-w-0 truncate text-reading leading-5",
           sTone === "fail" ? "text-red-primary" : "text-fg1",
         )}
       >

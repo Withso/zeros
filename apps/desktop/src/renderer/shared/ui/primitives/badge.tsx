@@ -3,12 +3,12 @@ import { cva, type VariantProps } from "class-variance-authority";
 
 import { cn } from "@/renderer/shared/ui/cn";
 
-// One size: 20px, 12/16 medium, 6px sides, 4px corners. Badges are state,
+// One size: 20px, 13/16 medium, 6px sides, 4px corners. Badges are state,
 // not actions: no hover shift and no stock shadow. Status badges are tinted
 // pairs, family-bg with family-fg (docs/design-system.md); callers do not
 // reshape them.
 const badgeVariants = cva(
-  "inline-flex h-5 shrink-0 items-center gap-1 whitespace-nowrap rounded-sm border border-transparent px-1.5 text-3xxs leading-4 font-medium [&_svg]:size-3 [&_svg]:shrink-0",
+  "inline-flex h-5 shrink-0 items-center gap-1 whitespace-nowrap rounded-sm border border-transparent px-1.5 text-xs leading-4 font-medium [&_svg]:size-3 [&_svg]:shrink-0",
   {
     variants: {
       variant: {

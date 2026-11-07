@@ -57,7 +57,7 @@ export function AgentNotice({
       data-agent-notice
       {...props}
       className={cn(
-        "bg-brown-bg text-fg1 min-w-0 px-3 py-2 text-sm",
+        "bg-brown-bg text-fg1 min-w-0 px-3 py-2 text-reading",
         PROMPT_SURFACE_RADIUS,
         className,
       )}

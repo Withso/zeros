@@ -145,7 +145,7 @@ export const TextMessage: Renderer<AgentTextMessage> = memo(
     if (message.resumeBoundary || message.retracted) return null;
     if (message.localNote) return <LocalNoteRow note={message.localNote} />;
     if (message.wakeupNotice) return (
-      <div data-wakeup-notice role={ctx.isStreaming ? "status" : undefined} className="text-fg3 flex items-start gap-2 py-1 text-sm">
+      <div data-wakeup-notice role={ctx.isStreaming ? "status" : undefined} className="text-fg3 flex items-start gap-2 py-1 text-reading leading-5">
         <AlarmClock aria-hidden="true" className="text-fg2 mt-0.5 size-4 shrink-0" />
         <span>{wakeupDisplayText(message.wakeupNotice)}</span>
       </div>
@@ -180,7 +180,7 @@ export const TextMessage: Renderer<AgentTextMessage> = memo(
               // break opportunities in min-content sizing, so a pasted log or
               // JSON blob never makes the message's min-content wider than the
               // lane, and the text wraps at the bubble's edge.
-              <div className="leading-5 wrap-anywhere whitespace-pre-wrap">
+              <div className="text-reading wrap-anywhere whitespace-pre-wrap">
                 {displaySegments.map((seg, i) => (
                   <MessageSegmentView
                     key={i}
@@ -252,12 +252,13 @@ export const TextMessage: Renderer<AgentTextMessage> = memo(
                     )}
                   </div>
                 ) : (
-                  // Plain text (user / system). `leading-snug` + `whitespace-
-                  // pre-wrap` match the composer exactly. User bubbles trim
+                  // Plain text (user / system). The reading size and
+                  // `whitespace-pre-wrap` match the composer exactly; a system
+                  // notice keeps its 13px on 20px lines. User bubbles trim
                   // trailing whitespace so stray end-of-message newlines/spaces
                   // don't balloon the bubble; interior/leading spacing is kept.
                   // wrap-anywhere: see the segments branch above.
-                  <div className="leading-5 wrap-anywhere whitespace-pre-wrap">
+                  <div className={cn(message.role === "system" ? "leading-5" : "text-reading", "wrap-anywhere whitespace-pre-wrap")}>
                     <LocalLinkText text={message.role === "user"
                       ? text.trimEnd()
                       : text} />
@@ -314,7 +315,7 @@ function MessageSegmentView({
       }); }}>
       <FileTypeIcon name={seg.files[0].name} kind="file" size={13} />
       <span className="max-w-[16rem] truncate">{seg.name}</span>
-      <span className="text-muted-fg text-xxs">+{seg.files.length - 1}</span>
+      <span className="text-muted-fg text-2xxs">+{seg.files.length - 1}</span>
     </Button></Tooltip>;
   }
   if (seg.type === "mention") {

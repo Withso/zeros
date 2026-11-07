@@ -159,7 +159,7 @@ export const EventStripe = memo(function EventStripe({
           {/* The roll-up FIRST: "<N> tool calls, <M> messages, <K> agents".
               Natural width (truncates if the row is narrow) so the icons sit
               directly after it rather than at the far right edge. */}
-          <span className="text-fg2 min-w-0 truncate text-sm">
+          <span className="text-fg2 min-w-0 truncate text-reading leading-5">
             {formatEventSummary(countEventSummary(events))}
           </span>
           {/* Activity icons at the END, after the text: deduped tool kinds +

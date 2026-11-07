@@ -193,6 +193,7 @@
    *   text-3xxs   12px   (shortcut-palette category tags; other 12px literals consolidate here)
    *   text-xs     13px on an 18px line (the Button / Select metric)
    *   text-sm     14px on a 20px line (Tailwind default)
+   *   text-reading 15px on a 22px line (the chat's reading text)
    * text-xs MUST declare its own line height: overriding only the size
    * kept Tailwind's 12px ratio (1.333), so 13px text sat on a 17.33px line
    * and rows measured 25.33 / 29.33px instead of whole pixels. 18 / 13
@@ -203,6 +204,8 @@
   --text-3xxs: 0.75rem;
   --text-xs: 0.8125rem;
   --text-xs--line-height: calc(18 / 13);
+  --text-reading: var(--reading-text-size);
+  --text-reading--line-height: calc(22 / 15);
   --text-dialog-title: var(--dialog-title-size);
 
   /* ── FONT WEIGHTS — softened from Tailwind's defaults ──
@@ -565,6 +568,11 @@
   --dialog-title-size: 0.9375rem; /* 0.9375rem — 15px shared popup heading */
   --scrim: rgba(0, 0, 0, 0.5); /* #00000080 — modal overlay veil */
   /* @generated tokens:base-dialog-title-size:end */
+  /* The chat's reading text: agent output, sent messages, the composer and
+     the transcript's rows. A primitive so runtime-content.css can read it. */
+  /* @generated tokens:base-reading-text-size:start */
+  --reading-text-size: 0.9375rem; /* 0.9375rem — 15px chat reading text */
+  /* @generated tokens:base-reading-text-size:end */
 
   /* ── HIGHLIGHTED (neutral interaction emphasis) ── */
   /* User-message bubble. Neutral Dark ALIASES this to bg2 so the bubble reads

@@ -13,6 +13,7 @@ import { relativeWorkspaceFilePath } from "../platform/workspace-file-path";
 import { useWorkspaceStore } from "../state/workspace-store";
 import { setWorkspaceRowsForTesting } from "../state/use-projects";
 import { defaultScopeFor } from "../shell/workbench/tab-model";
+import { buildDirectFileOpenAction } from "../shell/workbench/direct-file-open";
 import {
   ChangesSurface,
   ChangesWorkbenchSurface,
@@ -45,6 +46,10 @@ const workspace = {
   baseBranch: "main",
 } as Workspace;
 setWorkspaceRowsForTesting(workspace.repoSlug, [workspace]);
+// A previewed document links a sibling, a parent-folder file, a file that does
+// not read and an external page.
+const markdownSource =
+  "# Guide\n\nRead [the guide](guide.md), [the rules](../RULES.md), [a missing page](missing.md) and [the site](https://example.com).\n\n```ts\nconst ready = true;\n```\n";
 let held = params.has("hold");
 const fail = params.has("fail");
 let gitFailures = 0;
@@ -121,7 +126,11 @@ class FixtureBridge extends WorkspaceRuntimeClient {
     if (request.op === "workspace.list") result = [workspace];
     if (request.op === "file.read") {
       const path = request.params?.path ?? "";
-      result = path.endsWith(".svg")
+      result = path.endsWith("missing.md")
+        ? { kind: "error", path, error: "file no longer exists on disk" }
+        : path.endsWith("README.md")
+          ? { kind: "text", path, bytes: markdownSource.length, content: markdownSource }
+          : path.endsWith(".svg")
         ? {
             kind: "image",
             path,
@@ -167,6 +176,16 @@ Object.assign(window, {
     },
     failures: () => gitFailures,
     settled: () => settledReads,
+    open: (path: string) => {
+      const state = useWorkspaceStore.getState();
+      const scope = state.workbenchByScope[cwd];
+      state.dispatch(
+        buildDirectFileOpenAction(scope.tabs, path, {
+          preferredExistingTabId: scope.activeId,
+          scope: cwd,
+        }),
+      );
+    },
   },
 });
 

@@ -161,7 +161,7 @@ const ReviewCommentBody = memo(function ReviewCommentBody({
   return (
     <div
       data-review-comment-body
-      className="zeros-agent-md min-w-0 break-words mt-0.5 [&_.zeros-md-prose]:text-xs [&_.zeros-md-prose]:leading-5 [&_.zeros-md-prose>:first-child]:mt-0 [&_.zeros-md-prose>:last-child]:mb-0 [&_pre]:max-w-full [&_pre]:overflow-x-auto [&_pre]:text-xs"
+      className="zeros-agent-md zeros-agent-md--panel min-w-0 break-words mt-0.5 [&_.zeros-md-prose]:text-xs [&_.zeros-md-prose]:leading-5 [&_.zeros-md-prose>:first-child]:mt-0 [&_.zeros-md-prose>:last-child]:mb-0 [&_pre]:max-w-full [&_pre]:overflow-x-auto [&_pre]:text-xs"
       onPointerDown={(event) => event.stopPropagation()}
       onMouseDown={(event) => event.stopPropagation()}
       onClick={(event) => event.stopPropagation()}

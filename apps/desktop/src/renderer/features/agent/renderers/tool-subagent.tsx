@@ -136,7 +136,7 @@ export const SubagentCard: Renderer<AgentToolMessage> = memo(
             data-agent-label=""
             className={cn(
               // A half-row cap hides effort even when the full label fits.
-              "min-w-0 truncate text-sm",
+              "min-w-0 truncate text-reading leading-5",
               failed ? "text-red-primary" : "text-fg1",
             )}
           >
@@ -179,7 +179,7 @@ export const SubagentCard: Renderer<AgentToolMessage> = memo(
                   aria-controls={promptId}
                 >
                   <MessageSquare className="text-fg2 size-3 shrink-0" />
-                  <span className="text-fg1 text-sm">Prompt</span>
+                  <span className="text-fg1 text-reading leading-5">Prompt</span>
                 </ListRow>
                 {promptOpen && (
                   <LocalLinkHtml

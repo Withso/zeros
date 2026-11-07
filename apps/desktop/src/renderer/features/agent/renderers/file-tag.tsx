@@ -35,7 +35,7 @@ export const FileTag = forwardRef<HTMLButtonElement, {
     <Pill
       ref={ref}
       {...props}
-      // The neutral inline pill: 20px, 12/16, 4px corners.
+      // The neutral inline pill: 20px, 13/16, 4px corners.
       className={cn("min-w-0 max-w-[440px]", className)}
     >
       <FileTypeIcon name={name} kind={kind} size={12} className="shrink-0" />

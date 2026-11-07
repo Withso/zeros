@@ -58,7 +58,8 @@ The full guide is `docs/design-system.md`; token values are in
    opacity (`text-fg2/60`). On a tinted `bg-<family>-bg`, text is
    `text-<family>-fg`.
 6. **Scales:** text `text-xxs` 10 · `text-2xxs` 11 · `text-3xxs` 12 · `text-xs`
-   13/18 · `text-sm` 14/20. Controls are 28 standard, 24 compact or 20 inline
+   13/18 · `text-sm` 14/20, and `text-reading` 15/22 for the chat's reading
+   text only. Controls are 28 standard, 24 compact or 20 inline
    (IconButton), with 14, 12 and 12px glyphs; never mix heights in one row.
    Radius `rounded-sm` 4 (inline controls, pills, badges, kbd, checkboxes) ·
    `rounded-md` 6 (buttons, fields, tabs, tooltips, tools) · `rounded-lg` 8
@@ -193,6 +194,38 @@ exported page by page to [design-implementation/](design-implementation/README.m
     `shell/conversation/__tests__/pane-sizing.test.ts`,
     `shell/workbench/__tests__/workbench-island.test.ts`
     and `scripts/ui-smoke-chat-surfaces.mjs` hold it.
+14. **The chat reads at 15px** (2026-11-07). What people read in the chat is
+    `text-reading`, 15px on 22px lines, one step above the 14px chrome: agent
+    output prose (still at its 1.65 line height), sent messages, the composer,
+    thinking and the agent notice. The transcript's one-line rows and status
+    lines (tool and sub-agent names, the "N tool calls" roll-up, workflow,
+    browser and note rows, provider and wake-up notices) take the same 15px
+    on 20px lines, so a row stays 28px. A sent message folds to five 22px
+    lines. Everything smaller in the chat is 13px: the chip beside a tool's
+    name (its command or its file, on a 20px chip), code blocks, inline code,
+    tables, every tool detail including the markdown inside one, and the
+    chrome's headers, popover titles and menu rows. Badges and every pill
+    are 13px on 16px lines in their 20px box, everywhere: `Badge`, the
+    inline `Pill` and the composer's and sent messages' pills. The PR chip
+    is 13px on its 24px pill, an attachment group's +N count 11px, and a
+    mono badge keeps 11px. The plan keeps the reading
+    size inside its detail (`zeros-agent-md--document`), review markdown
+    outside the chat keeps 14px (`zeros-agent-md--panel`), labels and
+    metadata stay 12px, keys 11px, and dialog titles keep their own 15px
+    token. A Markdown file in the Files tab reads exactly like an answer:
+    its preview renders through the chat's markdown, fences as the same
+    highlighted code cards. Its links to files are the chat's file
+    references, resolved from the file's own folder as on GitHub, and open
+    exactly that file in the Files tab, or nothing when it does not read;
+    inline code stays code. The Agent chat page's Type frames draw every
+    case. `features/agent/__tests__/chat-reading-type.test.ts`,
+    `features/agent/__tests__/agent-markdown-sizes.test.ts`,
+    `shell/workbench/tabs/__tests__/markdown-preview.test.ts`,
+    `shell/workbench/tabs/__tests__/markdown-links.test.ts`,
+    `features/agent/__tests__/prompt-fold.test.ts`,
+    `scripts/ui-smoke-composer-prompt-fold.mjs`,
+    `scripts/ui-smoke-file-pill-navigation.mjs` and
+    `scripts/ui-smoke-tool-presentation.mjs` hold it.
 
 ### How the direction changes
 
@@ -318,8 +351,17 @@ imports, following property paths such as `chip.cls`). The ledger counts
 
 **Type scale** (chrome): `text-xxs` 10px · `text-2xxs` 11px · `text-3xxs` 12px ·
 `text-xs` 13px on 18px · `text-sm` 14px on 20px · `text-dialog-title` 15px.
-Page titles use `text-base` / `text-lg`. Agent markdown (`.zeros-agent-md`) has
-its own scale in `styles/global/runtime-content.css`.
+Page titles use `text-base` / `text-lg`. **Reading text** in the chat is
+`text-reading`, 15px on 22px (`--reading-text-size`): agent output, sent
+messages, the composer, thinking and notices; the transcript's one-line rows
+add `leading-5` so they stay 28px. Agent markdown
+(`.zeros-agent-md`) sets its prose from `--agent-md-text` at a 1.65 line
+height: the reading size in the chat and the Files tab's Markdown preview,
+13px inside a tool detail, the reading size for the plan
+(`zeros-agent-md--document`) and 14px in the Review tab and review threads
+(`zeros-agent-md--panel`). Its
+other steps live in `styles/global/runtime-content.css`: headings 20 and 16,
+code blocks, inline code and tables 13, captions and keys 12.
 
 **Weights** are one notch lighter than Tailwind's: `font-normal` 400,
 `font-medium` 450, `font-semibold` 500, `font-bold` 600. Hand-written CSS uses
@@ -565,7 +607,7 @@ state, `aria-*`, `data-*` hooks) at the caller.
 | A group of tools | `Toolbar` (+ `ToolbarSeparator`, `ToolbarText`) | One 36px bar of 28px tools: `bg2`, `border2`, 10px corners, `elevation="floating"` (dropdown shadow) or `"docked"`, `orientation`. One Tab stop: arrow keys, Home and End move between enabled tools. |
 | An action with related choices | `SplitButton` / `splitButtonClasses` | Two bordered halves, each with Button's focus ring; `variant="primary" \| "secondary"`, `size`, `loading` (the menu waits). |
 | A form field | `Field` around `Input`, `Textarea` or a Select trigger | One label (13/18 medium), one hint (12/16 `fg3`) that an error replaces (12/16 `red-primary`); wires `id`, `aria-describedby` and `aria-invalid`. `Input` has `size="compact"`, `appearance="inline"` (rename) and `mono`. |
-| A reference chip or a status tag | `Pill` · `Badge` | `Pill` is an interactive reference: `size="inline"` 20px or `"control"` 24px, `tone` neutral / failed / mode / gone / invalid. `Badge` is inert state: one 20px size, tinted `neutral` / `outline` / `success` / `failure` / `warning` / `info` / `merged`. |
+| A reference chip or a status tag | `Pill` · `Badge` | `Pill` is an interactive reference: `size="inline"` 20px at 13/16 or `"control"` 24px at 13/18, `tone` neutral / failed / mode / gone / invalid. `Badge` is inert state: one 20px size at 13/16 medium, tinted `neutral` / `outline` / `success` / `failure` / `warning` / `info` / `merged`. |
 | A shortcut | `Kbd` · `KbdKeys` | An 18px `border2` chip on `bg2`; `KbdKeys keys="⌘⇧T"` draws one chip per key. Menus, tooltips and the command palette all use it. |
 | Window chrome or a panel heading | `PanelHeader` (+ `PanelHeaderTitle`, `PanelHeaderActions`) | Required `size="window"` (40px, gap-1, px-2, `bg-bg1`) or `size="panel"` (36px, gap-2, px-3); border1 bottom divider unless `divider={false}` (the workspace header row); a 13 medium `fg1` title that truncates; actions 2px apart. |
 | A compact tool disclosure or hover trigger | `ListRow` | 28px button row on `bg1-hover` with the keyboard ring; expanded adds no fill. The caller owns `aria-expanded`, `aria-controls`, labels, state, and events. |

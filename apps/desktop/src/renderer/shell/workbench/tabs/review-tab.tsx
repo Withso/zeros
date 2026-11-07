@@ -884,7 +884,7 @@ function DescriptionSection({
           </div>
         </div>
       ) : pr.body.trim() ? (
-        <div className="zeros-agent-md [&_.zeros-md-prose>:first-child]:mt-0 [&_.zeros-md-prose>:last-child]:mb-0">
+        <div className="zeros-agent-md zeros-agent-md--panel [&_.zeros-md-prose>:first-child]:mt-0 [&_.zeros-md-prose>:last-child]:mb-0">
           <div className="zeros-md-prose text-sm" dangerouslySetInnerHTML={{ __html: html }} />
         </div>
       ) : (

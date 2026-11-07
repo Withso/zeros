@@ -18,7 +18,7 @@ import { PermissionCard } from "../features/agent/permission-card";
 import type { RendererContext } from "../features/agent/renderers/types";
 import { useComposerEditor } from "../features/agent/composer-editor";
 import { CodeEditor } from "../shell/workbench/tabs/code-editor";
-import { MarkdownPreview } from "../shell/workbench/tabs/file-viewer";
+import { MarkdownPreview } from "../shell/workbench/tabs/markdown-preview";
 import { zerosCodeViewOptions } from "../shared/theme/diff-theme";
 import { Button } from "../shared/ui/primitives/button";
 import { Input } from "../shared/ui/primitives/input";
@@ -369,7 +369,7 @@ function Harness() {
               />
             </div>
             <div data-testid="markdown-preview">
-              <MarkdownPreview html="<p>Repository markdown remains selectable</p>" />
+              <MarkdownPreview path="README.md" markdown="Repository markdown remains selectable" />
             </div>
             <div data-testid="diff" className="relative h-32">
               <CodeView

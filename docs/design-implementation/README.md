@@ -1026,3 +1026,65 @@ Each landed step appends one line: date, workstream, what landed, evidence.
   gutters, the 12px gaps, the 12px to the side island, the right gutter with
   the side column hidden, every radius and the absent fades, in Dark and
   Light.
+- 2026-11-07 · 5 · The chat reads at 15px (`docs/design-system.md` §0 item
+  14): a `--reading-text-size` token and `text-reading` utility (15px on
+  22px) set agent output prose, sent messages, the composer, thinking and
+  the agent notice; the transcript's one-line rows and status lines take
+  the same 15px on 20px lines, so rows stay 28px; a sent message folds to
+  five 22px lines (110px); the chip beside a tool's name, its command or
+  its file, is 13px on its 20px chip; dialog titles keep their own 15px
+  token. The canvas's chat kits and frames carry the same sizes (canvas
+  version 393); its installed design system copy is unchanged. Evidence: `chat-reading-type.test.ts` failed red first; the
+  fold and composer smoke measures 15px/22px text and the 22px fold lines,
+  the tool smoke 15px names, 13px chips and file tags and 28px rows, and
+  the markdown smoke 15px file references and links.
+- 2026-11-07 · 5 · The chat's smaller text is 13px: code blocks, inline code
+  and tables (were 12), every tool detail including markdown inside one
+  (`[data-tool-detail]` sets `--agent-md-text: 13px`), the leftover 14px
+  detail lines, and the Tools and cloud-details popover titles. The plan keeps
+  the reading size in its detail (`zeros-agent-md--document`); the Review tab
+  and inline review threads keep the 14px they had (`zeros-agent-md--panel`),
+  which the first 15px change had moved by accident. The sub-agent's Prompt
+  row joins the other rows at 15/20. The canvas gains four Type frames on the
+  Agent chat page (agent output, messages and composer, transcript rows and
+  tool details, chat chrome) and its kits carry the same sizes. Evidence:
+  `chat-reading-type.test.ts` and `agent-markdown-sizes.test.ts` failed red
+  first (the second measures the cascade in Chromium and fails on the old
+  stylesheet).
+- 2026-11-07 · 5 · A Markdown file in the Files tab reads like an agent
+  answer: its preview (`shell/workbench/tabs/markdown-preview.tsx`) renders
+  through the chat's markdown, `.zeros-agent-md` at the reading size with
+  fences as the chat's highlighted code cards, replacing its own 14px
+  document styles. File references stay plain code and links
+  (`renderMarkdownSegments(text, { fileReferences: false })`) because nothing
+  in the preview opens a file chip. The Files tab's Markdown preview board
+  draws it with the chat kit (canvas version 395). Evidence:
+  `markdown-preview.test.ts` failed red first; the file-pill smoke
+  measures 15px prose, one code card and a 15px sans file link in the real
+  viewer, and the text-selection smoke still selects its text.
+- 2026-11-07 · 5 · Links to files in the Markdown preview open in the Files
+  tab. `markdownLinkTarget` (`shell/workbench/tabs/markdown-links.ts`)
+  resolves a link as GitHub does, from the previewed file's folder or from the
+  workspace root after a leading `/`; URLs, anchors, folders and paths outside
+  the workspace stay links. Resolved links render as the chat's file
+  references, warm the file on hover or focus, and open exactly that file
+  (`useOpenLinkedFileInWorkbench`) in the chat's tab policy, leaving the
+  document open; a link to a file that does not read opens nothing. Inline
+  code stays code. The canvas's Markdown preview board shows a file link
+  (canvas version 396). Evidence: `markdown-links.test.ts` and the new
+  `markdown-preview.test.ts` cases failed red first; the file-pill smoke
+  opens a sibling and a parent-folder link by click and Enter for Local,
+  organization, cloud and a nested folder, and a missing file opens no tab.
+- 2026-11-07 · 3, 5 · Badges and every pill are 13px on 16px lines in their
+  20px box (were 12/16): the `Badge` primitive, the inline `Pill` and
+  `PILL_METRICS`, which the composer's mention, skill and attachment pills,
+  sent messages' inline pills and the chat and workspace link pills share.
+  The control pills, the context files chip and the tool targets already
+  were 13px; the tool row's file tag drops its own `text-xs`, since the
+  inline Pill now carries it. The PR chip (`PrPill`, 24px) is 13px too, and
+  an attachment group's +N count is 11px (was 10). Icons stay 12px and a
+  mono badge 11px. The canvas kits draw badges, inline pills and the PR chip
+  at 13px and the count at 11px, and the Badge, Pills and Type boards say
+  so (canvas versions 397 and 398). Evidence: `pill.test.ts`,
+  `git-defaults.test.ts`, `pr-pill.test.ts` and `chat-reading-type.test.ts`
+  failed red first; the local-links smoke measures the link pill at 13px.

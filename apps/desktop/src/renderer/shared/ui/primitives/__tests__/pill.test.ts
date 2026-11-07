@@ -18,9 +18,10 @@ describe("Pill", () => {
     expect(markup).toContain("1.24 GB");
   });
 
-  it("comes in two sizes: 20px inline and 24px control", () => {
+  it("comes in two sizes: 20px inline at 13/16 and 24px control at 13/18", () => {
     const inline = classes(renderToStaticMarkup(createElement(Pill, null, "a.ts")));
-    for (const cls of ["h-5", "rounded-sm", "text-3xxs", "leading-4"]) expect(inline, cls).toContain(cls);
+    for (const cls of ["h-5", "rounded-sm", "text-xs", "leading-4"]) expect(inline, cls).toContain(cls);
+    expect(inline).not.toContain("text-3xxs");
     const control = classes(renderToStaticMarkup(createElement(Pill, { size: "control" }, "a.ts")));
     for (const cls of ["h-6", "rounded-md", "text-xs", "leading-4.5"]) expect(control, cls).toContain(cls);
   });
@@ -39,9 +40,9 @@ describe("Pill", () => {
 });
 
 describe("Badge", () => {
-  it("is one 20px size with 12px medium text and no stock shadow", () => {
+  it("is one 20px size with 13/16 medium text and no stock shadow", () => {
     const set = classes(renderToStaticMarkup(createElement(Badge, null, "Admin")));
-    for (const cls of ["h-5", "px-1.5", "rounded-sm", "text-3xxs", "font-medium", "bg-bg2", "text-fg2"]) {
+    for (const cls of ["h-5", "px-1.5", "rounded-sm", "text-xs", "leading-4", "font-medium", "bg-bg2", "text-fg2"]) {
       expect(set, cls).toContain(cls);
     }
     expect([...set].some((cls) => /^shadow(-|$)/.test(cls))).toBe(false);

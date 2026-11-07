@@ -112,7 +112,7 @@ export const WorkflowActivity = memo(function WorkflowActivity({
           aria-label={`${label}: ${workflow.name}`}
         >
           <Workflow className="text-fg2 size-3 shrink-0" aria-hidden="true" />
-          <span className="text-fg1 truncate text-sm">{label}</span>
+          <span className="text-fg1 truncate text-reading leading-5">{label}</span>
         </ListRow>
       </HoverCardTrigger>
       <HoverCardContent

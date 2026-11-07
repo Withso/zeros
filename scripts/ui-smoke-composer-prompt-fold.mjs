@@ -28,9 +28,12 @@ async function rowInk(page, clip, fill) {
   }, { data: png.toString("base64"), fill });
 }
 
+/** A sent message's line: the chat's 15px reading size on 22px lines. */
+const LINE = 22;
+
 /** The brightest row of text line `n` (1-based) in a fold box whose first
  *  line starts 4px in. */
-const lineInk = (rows, n) => Math.max(...rows.slice(4 + (n - 1) * 20, 4 + n * 20));
+const lineInk = (rows, n) => Math.max(...rows.slice(4 + (n - 1) * LINE, 4 + n * LINE));
 
 async function promptGeometry(page, needle) {
   return page.evaluate((text) => {
@@ -55,9 +58,11 @@ async function promptGeometry(page, needle) {
       toggleTextLeft = range.getBoundingClientRect().left;
     }
     const textLeft = box(content.querySelector('[data-role="user"]') ?? content).left;
+    const body = content.querySelector(".whitespace-pre-wrap");
     const [r, g, bl] = getComputedStyle(bubble).backgroundColor.match(/\d+/g).map(Number);
     return {
       spansLane: Math.abs(b.left - laneLeft) <= 1 && Math.abs(b.right - laneRight) <= 1,
+      type: body ? `${getComputedStyle(body).fontSize}/${getComputedStyle(body).lineHeight}` : null,
       // The box reaches 4px past the text on every side.
       footprint: Math.round(v.height - 8),
       natural: Math.round(box(content).height),
@@ -109,32 +114,35 @@ export async function checkPromptFold({ page, check, harnessBase }) {
     const at = (needle) => expect.poll(() => promptGeometry(page, needle), { message: `${placement}: ${needle}` });
 
     await post(index, `hi ${tag}`);
-    await at(`hi ${tag}`).toMatchObject({ spansLane: true, footprint: 20, fold: null, toggle: null });
+    await at(`hi ${tag}`).toMatchObject({ spansLane: true, type: "15px/22px", footprint: LINE, fold: null, toggle: null });
+    // The composer writes in the same reading size the message is sent in.
+    await expect(page.locator(".composer-pm:visible").first()).toHaveCSS("font-size", "15px");
+    await expect(page.locator(".composer-pm:visible").first()).toHaveCSS("line-height", "22px");
 
     await post(index, lines(6, `${tag} six`));
-    await at(`${tag} six line 1`).toMatchObject({ spansLane: true, footprint: 120, natural: 120, fold: null, toggle: null, overflowY: "visible" });
+    await at(`${tag} six line 1`).toMatchObject({ spansLane: true, footprint: 6 * LINE, natural: 6 * LINE, fold: null, toggle: null, overflowY: "visible" });
 
     await post(index, lines(7, `${tag} seven`));
     await at(`${tag} seven line 1`).toMatchObject({
-      spansLane: true, footprint: 100, natural: 140, fold: "collapsed", toggle: "Show more", expanded: "false",
+      spansLane: true, footprint: 5 * LINE, natural: 7 * LINE, fold: "collapsed", toggle: "Show more", expanded: "false",
       controls: true, toggleGap: 4, bottomPad: 8, toggleAligned: true,
     });
 
     const long = `${tag} long`;
     await post(index, lines(60, long));
-    await at(`${long} line 1`).toMatchObject({ footprint: 100, natural: 1200, fold: "collapsed", toggle: "Show more", overflowY: "clip", overflows: true });
+    await at(`${long} line 1`).toMatchObject({ footprint: 5 * LINE, natural: 60 * LINE, fold: "collapsed", toggle: "Show more", overflowY: "clip", overflows: true });
     await toggleIn(page, `${long} line 1`).click();
     await at(`${long} line 1`).toMatchObject({
-      footprint: 300, fold: "expanded", toggle: "Show less", expanded: "true", overflowY: "auto", overflows: true,
+      footprint: 15 * LINE, fold: "expanded", toggle: "Show less", expanded: "true", overflowY: "auto", overflows: true,
       above: false, below: true, scrollTop: 0, toggleGap: 4, bottomPad: 8,
     });
     await scrollFold(page, `${long} line 1`, 200);
     await at(`${long} line 1`).toMatchObject({ above: true, below: true, scrollTop: 200 });
     await scrollFold(page, `${long} line 1`, 10_000);
-    await at(`${long} line 1`).toMatchObject({ above: true, below: false, scrollTop: 900 });
+    await at(`${long} line 1`).toMatchObject({ above: true, below: false, scrollTop: 45 * LINE });
     await toggleIn(page, `${long} line 1`).click();
     await at(`${long} line 1`).toMatchObject({
-      footprint: 100, fold: "collapsed", toggle: "Show more", above: false, below: false, scrollTop: 0, firstLineAtTop: true,
+      footprint: 5 * LINE, fold: "collapsed", toggle: "Show more", above: false, below: false, scrollTop: 0, firstLineAtTop: true,
     });
 
     // Switched away, the chat folds its unfolded message back.
@@ -143,7 +151,7 @@ export async function checkPromptFold({ page, check, harnessBase }) {
     const other = placement === "Cloud" ? "Local" : "Cloud";
     await page.getByRole("button", { name: other, exact: true }).click();
     await page.getByRole("button", { name: placement, exact: true }).click();
-    await at(`${long} line 1`).toMatchObject({ footprint: 100, fold: "collapsed", toggle: "Show more" });
+    await at(`${long} line 1`).toMatchObject({ footprint: 5 * LINE, fold: "collapsed", toggle: "Show more" });
   }
 
   await page.getByRole("button", { name: "Local", exact: true }).click();
