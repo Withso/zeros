@@ -42,6 +42,20 @@ export class DesignBackgroundWorkQueue {
     return Math.max(0, this.quietUntil - Date.now());
   }
 
+  /** Resolves once no gesture holds the lane and recent input has rested. */
+  async whenQuiet(signal?: AbortSignal): Promise<void> {
+    for (;;) {
+      signal?.throwIfAborted();
+      const wait = this.active > 0 ? this.quietMs : this.quietRemainingMs();
+      if (wait <= 0) return;
+      await new Promise<void>((resolve) => {
+        const done = () => { clearTimeout(timer); signal?.removeEventListener("abort", done); resolve(); };
+        const timer = setTimeout(done, wait);
+        signal?.addEventListener("abort", done, { once: true });
+      });
+    }
+  }
+
   pause(): () => void {
     this.active++;
     const resumeCapture = designCaptureScheduler.pause();

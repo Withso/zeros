@@ -8,6 +8,7 @@ import type {
   DesignPreviewStore,
 } from "../../../platform/design-preview-store";
 import {
+  DESIGN_PREVIEW_LEVELS,
   DESIGN_PREVIEW_LIVE_SETTLE_MS,
   DesignFramePreviews,
   activeDesignPreviewDemand,
@@ -16,6 +17,7 @@ import {
   designPreviewDemandItems,
   designPreviewFrameKey,
   designPreviewKey,
+  designPreviewLevelFor,
   type DesignPreviewDemand,
   type DesignPreviewLevel,
   type DesignPreviewOwner,
@@ -58,6 +60,9 @@ function harness(options: {
   pictureBytes?: number;
   rendersFar?: (owner: DesignPreviewOwner) => boolean;
   renderGapMs?: (owner: DesignPreviewOwner) => number;
+  concurrency?: (owner: DesignPreviewOwner) => number;
+  quietMs?: () => number;
+  downscale?: (picture: Blob, width: number, height: number, level: DesignPreviewLevel) => Promise<Blob>;
 } = {}) {
   let now = 1_000;
   const timers: Array<{ at: number; callback: () => void; cancelled: boolean }> = [];
@@ -89,6 +94,9 @@ function harness(options: {
     diskBytes: options.diskBytes,
     ...(options.rendersFar ? { rendersFar: options.rendersFar } : {}),
     ...(options.renderGapMs ? { renderGapMs: options.renderGapMs } : {}),
+    ...(options.concurrency ? { concurrency: options.concurrency } : {}),
+    ...(options.quietMs ? { quietMs: options.quietMs } : {}),
+    ...(options.downscale ? { downscale: options.downscale } : {}),
   });
   const settle = async () => { for (let round = 0; round < 40; round++) await Promise.resolve(); };
   const advance = async (ms: number) => {
@@ -155,6 +163,80 @@ it.each(["frame", "text"] as const)("keeps all 256 tiny visible %s frames painta
   expect(h.previews.usage().decodedBytes).toBeLessThanOrEqual(64 * 1024 * 1024);
   for (const lease of leases) lease?.release();
   expect(h.previews.usage().decodedBytes).toBe(0);
+});
+
+it("keeps every frame of a 1,000-frame page fitted to the screen paintable within the decoded image budget", async () => {
+  const downscale = vi.fn(async (_picture: Blob, width: number, height: number) => new Blob([new Uint8Array(width * height / 64)]));
+  const h = harness({ downscale });
+  // 40 columns of 1,440 × 1,400 frames on a 1,512 × 900 window at the fit zoom.
+  const frames = Array.from({ length: 1000 }, (_, i) => ({
+    file: `frame-${i}.html`, sourceVersion: version(1), x: (i % 40) * 1840, y: Math.floor(i / 40) * 2800, width: 1440, height: 1400,
+  }));
+  const items = designPreviewDemandItems({ frames, view: { zoom: 0.0106, panX: 0, panY: 0 },
+    viewport: { width: 1512, height: 900 }, devicePixelRatio: 2, live: new Set() });
+  expect(new Set(items.map(item => item.level))).toEqual(new Set(["mini"]));
+  h.previews.setDemand(h.token, { owner: local, theme: "dark", items });
+  for (let index = 0; index < 1000; index++) await h.settle();
+  const leases = frames.map((frame) => h.previews.acquire({ owner: local, theme: "dark", ...frame, level: "mini" }));
+  expect(leases.filter(Boolean)).toHaveLength(1000);
+  expect(leases.every(lease => lease?.picture.level === "mini" && Math.max(lease.picture.width, lease.picture.height) <= 64)).toBe(true);
+  expect(h.previews.usage().decodedBytes).toBeLessThanOrEqual(64 * 1024 * 1024);
+  for (const lease of leases) lease?.release();
+});
+
+it("renders a mini picture once at thumbnail resolution and cuts the mini from those pixels", async () => {
+  const downscale = vi.fn(async () => new Blob([new Uint8Array(4)], { type: "image/webp" }));
+  const h = harness({ downscale });
+  const target = { owner: local, file: "a.html", sourceVersion: version(1), theme: "dark" };
+  h.previews.setDemand(h.token, { owner: local, theme: "dark", items: [{ file: "a.html", sourceVersion: version(1), level: "mini", live: false }] });
+  await h.settle();
+  expect(h.renders.map(row => row.maxDimension)).toEqual([DESIGN_PREVIEW_LEVELS.thumbnail]);
+  expect(downscale).toHaveBeenCalledWith(expect.any(Blob), 64, 48, "mini");
+  expect(h.previews.picture({ ...target, level: "mini" })).toMatchObject({ level: "mini", width: 64, height: 48, current: true });
+  expect(h.previews.picture({ ...target, level: "thumbnail" })).toMatchObject({ level: "thumbnail", width: 128, height: 96 });
+  // A step of zoom later, the thumbnail is already there.
+  h.previews.setDemand(h.token, { owner: local, theme: "dark", items: [{ file: "a.html", sourceVersion: version(1), level: "thumbnail", live: false }] });
+  await h.settle();
+  expect(h.renders).toHaveLength(1);
+});
+
+it("scales a smaller level down from a larger picture of the same generation without rendering", async () => {
+  const downscale = vi.fn(async () => new Blob([new Uint8Array(4)], { type: "image/webp" }));
+  const h = harness({ downscale });
+  h.previews.setDemand(h.token, demand(local, [["a.html", 1, "overview"]]));
+  await h.settle();
+  expect(h.renders).toHaveLength(1);
+  h.previews.setDemand(h.token, { owner: local, theme: "dark", items: [{ file: "a.html", sourceVersion: version(1), level: "thumbnail", live: false }] });
+  await h.settle();
+  expect(h.renders).toHaveLength(1);
+  expect(downscale).toHaveBeenCalledWith(expect.any(Blob), 128, 96, "thumbnail");
+  // Another generation is never scaled from older pixels.
+  h.previews.setDemand(h.token, { owner: local, theme: "dark", items: [{ file: "a.html", sourceVersion: version(2), level: "thumbnail", live: false }] });
+  await h.settle();
+  expect(h.renders.map(row => [row.sourceVersion, row.maxDimension])).toEqual([[version(1), 384], [version(2), 128]]);
+});
+
+it("asks a dense page's off-screen neighbours for mini covers and its visible frames for their painted size", () => {
+  const frames = Array.from({ length: 1000 }, (_, i) => ({
+    file: `frame-${i}.html`, sourceVersion: version(1), x: (i % 40) * 1840, y: Math.floor(i / 40) * 2800, width: 1440, height: 1400,
+  }));
+  // 0.03 zoom: about 300 frames painted at 86 device px, the rest around them.
+  const items = designPreviewDemandItems({ frames, view: { zoom: 0.03, panX: 0, panY: 0 },
+    viewport: { width: 1512, height: 900 }, devicePixelRatio: 2, live: new Set() });
+  const visible = items.filter(item => item.level === "thumbnail");
+  expect(visible.length).toBeGreaterThan(256);
+  expect(items.filter(item => item.level !== "thumbnail").every(item => item.level === "mini")).toBe(true);
+  // Visible first: every thumbnail precedes every cover.
+  expect(items.findIndex(item => item.level === "mini")).toBe(visible.length);
+  // A sparse page keeps sharper covers for the frames just off-screen.
+  const sparse = designPreviewDemandItems({ frames: frames.slice(0, 40), view: { zoom: 0.03, panX: 0, panY: 0 },
+    viewport: { width: 600, height: 900 }, devicePixelRatio: 2, live: new Set() });
+  expect(new Set(sparse.map(item => item.level))).toEqual(new Set(["thumbnail"]));
+});
+
+it("chooses the smallest level that stays sharp for the painted size", () => {
+  expect([1, 64, 65, 128, 129, 384, 385].map(designPreviewLevelFor))
+    .toEqual(["mini", "mini", "thumbnail", "thumbnail", "overview", "overview", "detail"]);
 });
 
 it("discards opaque legacy previews on restart without discarding current-format pictures", async () => {
@@ -343,6 +425,45 @@ it("renders each wanted picture once, one at a time, and paints it as current", 
   previews.setDemand(token, demand(local, [["a.html", 1], ["b.html", 2]]));
   await settle();
   expect(renders).toHaveLength(2);
+});
+
+it("renders up to its concurrency at once, never the same picture twice, and one at a time by default", async () => {
+  // A 1,000-frame overview pictured one at a time took minutes; a renderer-side
+  // vector producer runs several while the native host stays serial.
+  for (const [limit, expected] of [[undefined, 1], [3, 3]] as const) {
+    const held: Array<() => void> = [];
+    let inFlight = 0, peak = 0;
+    const { previews, renders, settle, token } = harness({
+      ...(limit ? { concurrency: () => limit } : {}),
+      render: async (_owner, input) => {
+        inFlight++; peak = Math.max(peak, inFlight);
+        await new Promise<void>((resolve) => held.push(resolve));
+        inFlight--;
+        return { sourceVersion: input.sourceVersion, theme: input.theme, mimeType: "image/png", width: 128, height: 96, data: PNG };
+      },
+    });
+    previews.setDemand(token, demand(local, Array.from({ length: 6 }, (_, index) => [`f${index}.html`, index + 1] as [string, number])));
+    await settle();
+    expect(inFlight).toBe(expected);
+    while (held.length) { held.shift()!(); await settle(); }
+    expect(peak).toBe(expected);
+    expect(renders.map((render) => render.file).sort()).toEqual(["f0.html", "f1.html", "f2.html", "f3.html", "f4.html", "f5.html"]);
+    expect(previews.usage().producing).toBe(0);
+  }
+});
+
+it("holds the canvas-wide picture notice while a camera gesture is live", async () => {
+  let quiet = 500;
+  const { previews, settle, advance, token } = harness({ quietMs: () => quiet });
+  let notices = 0;
+  previews.subscribeChanges(() => notices++);
+  previews.setDemand(token, demand(local, [["a.html", 1]]));
+  await settle();
+  await advance(100);
+  expect(notices).toBe(0);
+  quiet = 0;
+  await advance(500);
+  expect(notices).toBe(1);
 });
 
 it("repaints a reopened canvas from disk without rendering anything", async () => {

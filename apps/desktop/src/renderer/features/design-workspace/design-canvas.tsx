@@ -218,6 +218,7 @@ import { designFrameViews, designFramesAtPresentedGeometry, isPreparedDesignFram
 import { useDesignHistoryGeometryPreview, useDesignHistorySelection } from "./state/design-history-presentation";
 import { useDesignFramePreparation } from "./state/use-design-frame-preparation";
 import { designBackgroundWork } from "./state/design-background-work";
+import { designSourceTiles } from "./design-source-tiles";
 import { activeDesignPreviewDemand, designPreviewDemandItems, type DesignPreviewLevel } from "./state/design-frame-previews";
 import {
   useDesignFramePictured,
@@ -276,7 +277,6 @@ import { useDesignFoundation } from "./state/use-design-foundation";
 import { DesignFrameRenderSurface } from "./design-frame-render-surface";
 import { hasAsyncCanvasWheel } from "../../platform/runtime";
 import { createDesignGestureFrameClock } from "./design-gesture-frame-clock";
-import { DESIGN_SOURCE_SURFACE_LIMITS } from "./design-source-surfaces";
 import { useDesignSavedEditing } from "./design-saved-editing";
 import {
   DesignAgentActivityChip,
@@ -1346,13 +1346,11 @@ export const DesignCanvas = React.memo(function DesignCanvas({
       distance: Math.hypot(frame.x + frame.width / 2 - cx, frame.y + frame.height / 2 - cy) }))
       .sort((a, b) => a.distance - b.distance || a.file.localeCompare(b.file)).map((entry) => entry.file);
   }, [mountedFrames, view.panX, view.panY, view.zoom, viewportSize.height, viewportSize.width]);
-  // Prepare no more frames than the canvas can display as source surfaces:
-  // on a 1,000-frame page the lane otherwise kept the engine busy for minutes
-  // preparing frames whose content could never be admitted. The window moves
-  // with the camera; selected and live frames are always demanded.
+  // Every mounted frame is shown either as a source surface or, on a page with
+  // more frames visible than sources can admit, as a picture of its prepared
+  // generation, so all of them are demanded, centre first.
   useDesignFramePreparation(workspaceId,
-    [...(selectedDescription ? [selectedDescription.file] : []), ...liveFrameFiles,
-      ...preparationOrder.slice(0, DESIGN_SOURCE_SURFACE_LIMITS.frames)],
+    [...(selectedDescription ? [selectedDescription.file] : []), ...liveFrameFiles, ...preparationOrder],
     active, snapshot?.preparation?.epoch);
   const admissionView = wheelViewportRef.current ?? view;
   // Only admitted/nearby surfaces demand pictures. Distant metadata stays
@@ -1380,6 +1378,13 @@ export const DesignCanvas = React.memo(function DesignCanvas({
     [active, frameTheme, previewItems, previewOwner],
   );
   useDesignFramePreviewDemand(previewDemand);
+  // A zoom-in's first source paint would otherwise create the shared GPU
+  // context inside that frame; create it in a quiet moment after opening.
+  const sourceSurfacesAvailable = active && !!snapshot?.protocolCapability;
+  useEffect(() => {
+    if (sourceSurfacesAvailable)
+      void designBackgroundWork.schedule("design-source-tiles-warm", async () => designSourceTiles.warm(), { latest: true });
+  }, [sourceSurfacesAvailable]);
   const highResolutionTiles = useMemo(() => {
     const result = new Map<string, DesignHighResolutionViewportTile>();
     if (
@@ -7639,7 +7644,9 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                   else frameElementsRef.current.delete(description.file);
                 }}
                 data-design-frame={description.file} data-design-preparing=""
-                className="invisible pointer-events-none absolute"
+                // Where the frame is, before its source is prepared: the same
+                // surface fill a cold prepared frame shows until its content.
+                className={cn("pointer-events-none absolute", description.kind === "text" ? "invisible" : "bg-bg1")}
                 style={{ left: description.x, top: description.y, width: description.width, height: description.height,
                   zIndex: description.z }}
               />

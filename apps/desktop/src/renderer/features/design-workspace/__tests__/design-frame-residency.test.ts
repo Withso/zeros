@@ -48,6 +48,45 @@ describe("Design frame surface residency", () => {
     expect(close.visible.size).toBeLessThan(10);
     expect(read({ ...input, active: false }).sources.size).toBe(0);
   });
+  it("shows pictures instead of source documents once more frames are visible than sources admit", () => {
+    // A 1,000-frame overview: every frame is painted far below the overview
+    // picture level, so none keeps a laid-out source document.
+    const frames = Array.from({ length: 1000 }, (_, index) => ({ ...frame(String(index), index % 40 * 240, Math.floor(index / 40) * 120),
+      sourceVersion: "a".repeat(24), surfaceCost: { sourceBytes: 2000, nodes: 80, imageBytes: 0 } }));
+    const input = { ...setup(frames), viewport: { width: 1440, height: 900 }, devicePixelRatio: 2, sourceSurfacesEnabled: true,
+      sourceReady: new Map(frames.map(frame => [frame.file, frame.sourceVersion])) };
+    const read = createDesignFrameResidencyReader();
+    const overview = read({ ...input, view: { zoom: 0.14, panX: 0, panY: 0 } });
+    expect(overview.visible.size).toBeGreaterThan(256);
+    expect(overview.sources.size).toBe(0);
+    expect(overview.frames).toHaveLength(overview.visible.size);
+    // No frame document runs for a small frame waiting for its picture,
+    // even with nothing pictured yet; explicit demand still gets an editor.
+    const cold = read({ ...input, view: { zoom: 0.14, panX: 0, panY: 0 }, pictured: new Set<string>() });
+    expect(cold.live.size).toBe(0);
+    expect(read({ ...input, view: { zoom: 0.14, panX: 0, panY: 0 }, pictured: new Set<string>(), selectedFrame: "3" }).live)
+      .toEqual(new Set(["3"]));
+    // Panned so part of the page is off-screen: the neighbourhood stays mounted
+    // beyond the 12 nearby wrappers, so crossing the edge reconciles nothing.
+    const panned = read({ ...input, view: { zoom: 0.14, panX: -200, panY: -100 } });
+    expect(panned.visible.size).toBeLessThan(1000);
+    expect(panned.frames.length).toBeGreaterThan(panned.visible.size + 12);
+    // Just below the admission count the overview holds (no remount per zoom
+    // step); clearly below its exit count, sources return while every frame
+    // is still painted below the overview picture size.
+    const closer = read({ ...input, view: { zoom: 0.45, panX: 0, panY: 0 } });
+    expect(closer.visible.size).toBeLessThanOrEqual(256);
+    expect(closer.visible.size).toBeGreaterThan(192);
+    expect(closer.sources.size).toBe(0);
+    const closest = read({ ...input, view: { zoom: 0.6, panX: 0, panY: 0 } });
+    expect(closest.visible.size).toBeLessThanOrEqual(192);
+    expect([...closest.visible].every(file => closest.sources.has(file))).toBe(true);
+    // Arriving at the same camera without an overview behind it uses sources.
+    const fresh = createDesignFrameResidencyReader()({ ...input, view: { zoom: 0.45, panX: 0, panY: 0 } });
+    expect([...fresh.visible].every(file => fresh.sources.has(file))).toBe(true);
+    expect(Math.max(200, 100) * 0.45 * 2).toBeLessThanOrEqual(384);
+  });
+
   it("keeps offscreen descriptors out of the mounted set without changing scene order", () => {
     const frames = [frame("front", 100), frame("back", 100), ...Array.from({ length: 254 }, (_, i) => frame(`far-${i}`, 10000 + i * 400))];
     const read = createDesignFrameResidencyReader();

@@ -68,6 +68,31 @@ async function changed(page: Page, before: Buffer, after: Buffer): Promise<numbe
   }, { before: before.toString("base64"), after: after.toString("base64") });
 }
 
+it("warms the shared GPU context once so the first source paint creates none", async () => {
+  const page = await open();
+  try {
+    const counts = await page.evaluate(() => {
+      const w = window as any;
+      const created: string[] = [];
+      const native = HTMLCanvasElement.prototype.getContext;
+      HTMLCanvasElement.prototype.getContext = function (this: HTMLCanvasElement, kind: string, ...rest: unknown[]) {
+        created.push(kind);
+        return (native as any).call(this, kind, ...rest);
+      } as typeof native;
+      const tiles = new w.tiles.DesignSourceTiles(64 * 1024 * 1024, true);
+      const warmed = [tiles.warm(), tiles.warm()];
+      const afterWarm = created.length;
+      const owner = {};
+      const output = tiles.acquireOutput(owner);
+      tiles.releaseOutput(owner);
+      HTMLCanvasElement.prototype.getContext = native;
+      return { warmed, afterWarm, total: created.length, output: output instanceof HTMLCanvasElement, kinds: created };
+    });
+    expect(counts.warmed).toEqual([true, true]);
+    expect(counts).toMatchObject({ afterWarm: 1, total: 1, output: true, kinds: ["webgl2"] });
+  } finally { await page.close(); }
+});
+
 it("batches disjoint frames while preserving DOM hit targets, alpha and the frame's themed background", async () => {
   const page = await open();
   try {

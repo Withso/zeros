@@ -16,11 +16,15 @@ import { designImageResidency } from "./design-image-residency";
 import { DesignPreviewDecodes, type DesignDecodedPreviewLease } from "./design-preview-decodes";
 import { useDesignImageState } from "./use-design-image-display";
 import { designCaptureScheduler } from "../../../platform/bridge/design-capture-scheduler";
-import { designSourceVectorCache } from "../design-source-vector";
+import { designSourceVectorCache, type DesignSourceVectorTarget } from "../design-source-vector";
+import { loadDesignSurfaceVector, rasterizeDesignVector, renderDesignSourcePreview, type DesignSourcePreviewDeps } from "../design-source-preview";
+import { designWorkspaceSnapshotCache } from "./design-workspace-cache";
 import {
+  DESIGN_PREVIEW_LEVELS,
   DesignFramePreviews,
   createDesignFramePicturedReader,
   designPreviewFrameKey,
+  downscaleDesignPreview,
   encodeDesignPreview,
   type DesignPreviewDemand,
   type DesignPreviewOwner,
@@ -37,25 +41,103 @@ let cloudScope: string | null = null;
 let accountGeneration = 0;
 const scopeListeners = new Set<() => void>();
 
+/** Pictures rendered from the frame's source vector at once. They share the
+ * canvas's eight source load slots; native captures stay one at a time. */
+const DESIGN_SOURCE_PREVIEW_CONCURRENCY = 4;
+
+/** Counts for the explicit resources diagnostic; reasons carry no paths. */
+const sourcePreviewUsage = { vector: 0, native: 0, fallbacks: 0, ineligible: {} as Record<string, number>, lastFallback: "",
+  /** Summed milliseconds per vector stage, to locate a slow producer. */
+  ms: { load: 0, raster: 0, encode: 0 } };
+const recordStage = (stage: "load" | "raster" | "encode", ms: number) => { sourcePreviewUsage.ms[stage] += ms; };
+const sourcePreviewDeps: DesignSourcePreviewDeps = {
+  loadVector: loadDesignSurfaceVector,
+  rasterize: rasterizeDesignVector,
+  quiet: (signal) => designBackgroundWork.whenQuiet(signal),
+};
+export function designSourcePreviewUsage() {
+  return { ...sourcePreviewUsage, ineligible: { ...sourcePreviewUsage.ineligible }, ms: { ...sourcePreviewUsage.ms } };
+}
+function ineligible(reason: string): null {
+  sourcePreviewUsage.ineligible[reason] = (sourcePreviewUsage.ineligible[reason] ?? 0) + 1;
+  return null;
+}
+
+/** A Local frame the vector path can picture. A frame with an admitted surface
+ * cost also warms its vector for a later zoom-in. One without (its cost is
+ * unknown, e.g. imported style sources) is pictured from its vector only at
+ * the small overview levels; detail stays with the native capture host. */
+/** One lookup per picture instead of a scan of a directory's frames. */
+const frameIndexes = new WeakMap<readonly { file: string }[], Map<string, { file: string }>>();
+function framesByFile<T extends { file: string }>(frames: readonly T[]): Map<string, T> {
+  let index = frameIndexes.get(frames) as Map<string, T> | undefined;
+  if (!index) frameIndexes.set(frames, index = new Map(frames.map((frame) => [frame.file, frame])));
+  return index;
+}
+
+function designSourcePreviewTarget(owner: DesignPreviewOwner, input: { file: string; sourceVersion: string; theme: string | null; maxDimension: number }):
+  { target: DesignSourceVectorTarget; cache: boolean } | null {
+  if (isCloudWorkspace(owner.workspaceId)) return ineligible("cloud");
+  const snapshot = designWorkspaceSnapshotCache.peekSnapshot(owner.workspaceId).data;
+  if (!snapshot) return ineligible("snapshot");
+  if (snapshot.directoryId !== owner.directoryId) return ineligible("directory");
+  if (!snapshot.protocolCapability) return ineligible("capability");
+  const frame = framesByFile(snapshot.frames).get(input.file);
+  if (!frame || frame.sourceVersion !== input.sourceVersion) return ineligible("frame");
+  const cost = frame.surfaceCost;
+  const admitted = !!cost && cost.nodes > 0 && cost.sourceBytes > 0;
+  if (!admitted && input.maxDimension > DESIGN_PREVIEW_LEVELS.overview) return ineligible("cost");
+  return { cache: admitted, target: { workspaceId: owner.workspaceId, folder: snapshot.lint.workspacePath, directoryId: owner.directoryId,
+    capability: snapshot.protocolCapability, file: input.file, sourceVersion: input.sourceVersion, theme: input.theme,
+    width: frame.width, height: frame.height, imageBytes: admitted ? cost!.imageBytes : 0 } };
+}
+
+function nativeDesignPreview(owner: DesignPreviewOwner, input: { file: string; sourceVersion: string; theme: string | null;
+  maxDimension: number; capture?: { key: string; priority: "visible" | "detail" | "nearby" } }, signal?: AbortSignal) {
+  const render = () => designPreview(owner.workspaceId, {
+    directoryId: owner.directoryId,
+    frame: input.file,
+    sourceVersion: input.sourceVersion,
+    theme: input.theme,
+    maxDimension: input.maxDimension,
+  }, { signal, admitted: true });
+  // The engine's capture host renders one picture at a time, shared with
+  // in-frame captures; queue there rather than in the background lane.
+  return input.capture ? designCaptureScheduler.schedule(input.capture.key, input.capture.priority, render, signal) : render();
+}
+
 export const designFramePreviews = new DesignFramePreviews({
   displayBudget: designImageResidency,
   store: createIndexedDbDesignPreviewStore(),
-  render: (owner, input, signal) =>
-    designPreview(owner.workspaceId, {
-      directoryId: owner.directoryId,
-      frame: input.file,
-      sourceVersion: input.sourceVersion,
-      theme: input.theme,
-      maxDimension: input.maxDimension,
-    }, { signal, admitted: true }),
+  // Frames the source vector can represent are pictured from it in the
+  // renderer: milliseconds each, several at once, the same pixels the canvas
+  // tiles draw. Anything else (and any vector failure) keeps the native host.
+  render: async (owner, input, signal) => {
+    const source = designSourcePreviewTarget(owner, input);
+    if (source) {
+      try {
+        const reply = await renderDesignSourcePreview(source.target, input.maxDimension, signal, sourcePreviewDeps,
+          { cache: source.cache, timing: recordStage });
+        sourcePreviewUsage.vector++;
+        return reply;
+      } catch (error) {
+        if (signal?.aborted) throw error;
+        sourcePreviewUsage.fallbacks++;
+        sourcePreviewUsage.lastFallback = (error instanceof Error ? error.message : String(error)).slice(0, 120);
+      }
+    }
+    sourcePreviewUsage.native++;
+    return nativeDesignPreview(owner, input, signal);
+  },
+  concurrency: (owner) => (isCloudWorkspace(owner.workspaceId) ? 1 : DESIGN_SOURCE_PREVIEW_CONCURRENCY),
+  quietMs: () => designBackgroundWork.quietRemainingMs(),
   // A render waits for a quiet slot in the canvas's background lane and then
-  // leaves it: the engine renders out of process, so tiles and audits never
-  // queue behind its round trip.
+  // leaves it, so tiles and audits never queue behind its round trip. Each
+  // parallel render waits under its own key.
   schedule: async (work, capture) =>
-    (await designBackgroundWork.schedule("design-preview", async () => true))
-      ? capture ? designCaptureScheduler.schedule(capture.key, capture.priority, work, capture.signal) : work()
-      : null,
+    (await designBackgroundWork.schedule(`design-preview:${capture?.key ?? ""}`, async () => true)) ? work() : null,
   encode: encodeDesignPreview,
+  downscale: downscaleDesignPreview,
   canProduce: (owner) => {
     if (!isCloudWorkspace(owner.workspaceId)) return true;
     const target = parseCloudWorkspaceKey(owner.workspaceId);

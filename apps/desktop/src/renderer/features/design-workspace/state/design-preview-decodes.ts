@@ -135,8 +135,8 @@ export class DesignPreviewDecodes {
         this.entries.delete(owned.picture.key);
         this.entries.set(owned.picture.key, owned);
         if (this.warmBytes > this.maxWarmBytes) {
-          const victims = [...this.entries.values()].filter(candidate => !candidate.users).sort((a, b) =>
-            Number(a.picture.level === "thumbnail") - Number(b.picture.level === "thumbnail"));
+          const small = (entry: Entry) => Number(entry.picture.level === "mini" || entry.picture.level === "thumbnail");
+          const victims = [...this.entries.values()].filter(candidate => !candidate.users).sort((a, b) => small(a) - small(b));
           for (const candidate of victims) {
             if (this.warmBytes <= this.maxWarmBytes) break;
             this.remove(candidate);
