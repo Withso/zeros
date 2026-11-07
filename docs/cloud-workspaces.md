@@ -111,6 +111,8 @@ carries activity reports and their acknowledgements. Each report checks the
 current membership, workspace access epoch, worker credential fingerprint and
 boot recorded by that socket's dial. The worker uses one relay for each report;
 an unacknowledged report falls back to authenticated HTTPS after two seconds.
+Its relay slot stays occupied until the delayed reply or socket close, so a
+database delay neither detaches the app nor overlaps relay activity reports.
 Busy work still refreshes activity, while an idle safety pulse only reads
 status. Its once-per-minute cadence has a random phase per worker, and returns
 the login revision and a pending-prompt/Stop hint to repair missed notifications.

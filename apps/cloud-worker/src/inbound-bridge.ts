@@ -118,7 +118,9 @@ export class InboundBridge {
         if (connection.activity?.id !== id) return;
         clearTimeout(timer); delete connection.activity; resolve(reply);
       };
-      const timer = setTimeout(() => { connection.socket.terminate(); finish(null); }, 2_000);
+      // Keep the slot until its ACK or close: a slow read must neither overlap
+      // the next relay report nor detach the app. A late reply only frees it.
+      const timer = setTimeout(() => resolve(null), 2_000);
       timer.unref();
       connection.activity = { id, finish };
       void this.write(connection.socket, { t: "activity", id, idle }).then(sent => { if (!sent) finish(null); });

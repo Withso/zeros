@@ -118,7 +118,7 @@ it("accepts an activity ACK only from the chosen relay and releases waits on its
   two.ws.terminate(); await expect.poll(() => f.listener.promptPush).toBe(false);
 });
 
-it("bounds an unacknowledged activity request and withdraws its dead push carrier", async () => {
+it("bounds a slow activity without dropping the carrier or overlapping another report", async () => {
   const f = await fixture(), cp = await f.connect();
   cp.ws.send(JSON.stringify({ t: "push", prompts: true }));
   await expect.poll(() => f.listener.promptPush).toBe(true);
@@ -127,7 +127,18 @@ it("bounds an unacknowledged activity request and withdraws its dead push carrie
   await expect.poll(() => cp.frames.length).toBe(1);
   await vi.advanceTimersByTimeAsync(2_000);
   expect(await pending).toBeNull();
-  await expect.poll(() => f.listener.promptPush).toBe(false);
+  expect(cp.ws.readyState).toBe(WebSocket.OPEN);
+  expect(f.listener.promptPush).toBe(true);
+  expect(await f.listener.activity(false)).toBeNull();
+  expect(cp.frames).toHaveLength(1);
+  cp.ws.send(JSON.stringify({ t: "activity-reply", id: cp.frames[0]!.id, state: "running", loginRevision: "8", prompts: true }));
+  const boundary = once(cp.ws, "pong"); cp.ws.ping(); await boundary;
+  const next = f.listener.activity(false);
+  await expect.poll(() => cp.frames.length).toBe(2);
+  expect(cp.frames[1]!.id).not.toBe(cp.frames[0]!.id);
+  const reply = { t: "activity-reply", id: cp.frames[1]!.id, state: "running", loginRevision: "0", prompts: false };
+  cp.ws.send(JSON.stringify(reply));
+  expect(await next).toEqual(reply);
 });
 
 it("closes quiesced replicas after Stop, preserving each outstanding Stop acknowledgement", async () => {

@@ -168,6 +168,36 @@ it("falls back to authenticated HTTPS after losing the activity ACK socket", asy
   await expect.poll(() => f.requests.filter(request => request.path === "activity")).toEqual([{ path: "activity", body: { idle: false }, authorized: true }]);
 });
 
+it("uses HTTPS during a slow relay activity without detaching the app or adopting its late reply", async () => {
+  const f = await fixture(), socket = await connectRelay(f), frames: any[] = [];
+  socket.on("message", raw => { frames.push(JSON.parse(String(raw))); });
+  socket.send(JSON.stringify({ t: "push", prompts: true })); await socketBoundary(socket);
+  vi.spyOn(workerToken, "readWorkerToken").mockResolvedValue("synthetic-worker-token");
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+  await f.transport.send({ t: "idle", idle: true });
+  await expect.poll(() => frames.filter(frame => frame.t === "activity").length).toBe(1);
+  await vi.advanceTimersByTimeAsync(2_000);
+  await expect.poll(() => f.requests.filter(request => request.path === "activity").length).toBe(1);
+  expect(socket.readyState).toBe(WebSocket.OPEN);
+  await socketBoundary(socket);
+  await f.transport.send({ t: "idle", idle: true });
+  await expect.poll(() => f.requests.filter(request => request.path === "activity").length).toBe(2);
+  expect(f.requests.filter(request => request.path === "activity").every(request => request.authorized)).toBe(true);
+  expect(frames.filter(frame => frame.t === "activity")).toHaveLength(1);
+  socket.send(JSON.stringify({ t: "activity-reply", id: frames.find(frame => frame.t === "activity").id,
+    loginRevision: "99", state: "stopped", prompts: true }));
+  await socketBoundary(socket);
+  expect(f.requests.some(request => request.path === "config")).toBe(false);
+  expect(f.incoming.filter(frame => frame.t === "prompts")).toHaveLength(1);
+  await f.transport.send({ t: "idle", idle: true });
+  await expect.poll(() => frames.filter(frame => frame.t === "activity").length).toBe(2);
+  const next = frames.filter(frame => frame.t === "activity")[1];
+  socket.send(JSON.stringify({ t: "activity-reply", id: next.id, loginRevision: "0", state: "running", prompts: false }));
+  await socketBoundary(socket);
+  expect(socket.readyState).toBe(WebSocket.OPEN);
+  expect(f.requests.filter(request => request.path === "activity")).toHaveLength(2);
+});
+
 it("repairs a missed login notification from the relay status without a second activity request", async () => {
   const f = await fixture(), socket = await connectRelay(f); f.revise("4");
   socket.on("message", raw => {
