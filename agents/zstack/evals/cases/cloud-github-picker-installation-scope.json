@@ -1,0 +1,9 @@
+{
+  "id": "cloud-github-picker-installation-scope",
+  "kind": "replay",
+  "area": "control-plane",
+  "fixedBy": "pr:890",
+  "symptom": "On Beta, the Cloud Computer picker offered every public repository the human could see (/user/repos), including ones outside the Zeros GitHub App installation. Two builds then failed before cloning with only github_repository_unavailable, because GitHub refuses an installation token for an unselected repository. Listing and cloning were tested separately with fixtures that returned the same repository to both.",
+  "rule": "A picker must list from the authority that later performs the action: for GitHub App connections, list installation repositories, not the human's visibility. Fixtures must include a repository the human can see that is outside the installation.",
+  "check": "pnpm --dir apps/control-plane exec vitest run src/cloud/github-connections.test.ts -t \"only repositories this GitHub App can clone\""
+}
