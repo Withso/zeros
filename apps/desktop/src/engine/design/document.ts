@@ -1061,11 +1061,32 @@ async function mapDesignFramesBounded<T>(
 
 /** Metadata/controls for opening a registered Local canvas. Recovery keeps
  * the same transaction boundary as aggregate reads; no HTML is scanned. */
+type DesignNavigationRead = Awaited<ReturnType<typeof readDesignNavigationSnapshotUnlocked>>;
+const navigationReads = new Map<string, { started: boolean; read: Promise<DesignNavigationRead> }>();
+
 export async function readDesignNavigationSnapshot(workspacePath: string, affectedFiles?: readonly string[],
   options: { pageHashes?: boolean } = {}): Promise<{
   snapshot: DesignWorkspaceSnapshot; catalogRevision: string; directoryId: string; pageHashes?: DesignPageHashes;
 }> {
-  return withDocumentWrite(workspacePath, () => readDesignNavigationSnapshotUnlocked(workspacePath, affectedFiles, options));
+  if (affectedFiles !== undefined)
+    return withDocumentWrite(workspacePath, () => readDesignNavigationSnapshotUnlocked(workspacePath, affectedFiles, options));
+  // A read still waiting for the workspace lane is shared by every later
+  // request for it: it runs after each of them was asked, so each sees state
+  // at least as new as its own request. A renderer retrying after its own
+  // timeout therefore joins the waiting read rather than queueing another
+  // behind it. A read that has started is never joined.
+  const key = JSON.stringify([path.resolve(workspacePath), options.pageHashes === true]);
+  const waiting = navigationReads.get(key);
+  if (waiting && !waiting.started) return waiting.read;
+  const flight: { started: boolean; read: Promise<DesignNavigationRead> } = { started: false, read: Promise.resolve(null as never) };
+  flight.read = withDocumentWrite(workspacePath, () => {
+    flight.started = true;
+    return readDesignNavigationSnapshotUnlocked(workspacePath, undefined, options);
+  }).finally(() => {
+    if (navigationReads.get(key) === flight) navigationReads.delete(key);
+  });
+  navigationReads.set(key, flight);
+  return flight.read;
 }
 
 /** `known` holds each waiting client's page hashes: their acknowledgement
