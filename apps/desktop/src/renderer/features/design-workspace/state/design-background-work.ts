@@ -37,6 +37,11 @@ export class DesignBackgroundWorkQueue {
     designCaptureScheduler.touch();
   }
 
+  /** Time until the latest camera/direct input is considered at rest. */
+  quietRemainingMs(): number {
+    return Math.max(0, this.quietUntil - Date.now());
+  }
+
   pause(): () => void {
     this.active++;
     const resumeCapture = designCaptureScheduler.pause();
