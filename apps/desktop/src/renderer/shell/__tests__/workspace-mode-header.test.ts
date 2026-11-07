@@ -5,6 +5,12 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import { describe, expect, it, vi } from "vitest";
 
+import {
+  contrastRatio,
+  readThemes,
+  resolveRgb,
+  resolveSurface,
+} from "../../../../../../scripts/design-system/token-palette.mjs";
 import { TooltipProvider } from "../../shared/ui/primitives/tooltip";
 import {
   CREATE_DESIGN_DIRECTORY_LABEL,
@@ -351,15 +357,25 @@ describe("Code seats its column controls above the chat strips", () => {
     );
   });
 
-  it("sets an unfocused pane apart through its window fill, never over its text", () => {
-    // An unfocused pane swaps its window fill to the sidebar's (2026-11-06,
-    // option B: a hair lighter than bg1, so nothing darkens; bg0 read too
-    // dark once panes lost their seams). It must not lay a wash OVER its
-    // content: the former bg0/30 veil pushed the pane's text, tabs and controls
-    // below WCAG AA (styles/policy/contrast-contract.json).
-    expect(paneLayoutSource).toContain('!isFocused && "[--pane-bg:var(--sidebar-bg)]"');
-    expect(paneLayoutSource).not.toContain("[--pane-bg:var(--bg0)]");
+  it("sets an unfocused pane apart by its edge and a dim that keeps every text tier at its floor", () => {
+    // 2026-11-07: split panes share bg1 and are told apart by their edge, and
+    // an unfocused pane's strip and body dim. The former bg0/30 veil, a wash
+    // laid OVER the content, pushed text below WCAG AA, so the dim must keep
+    // fg1 to fg3 at AA and muted-fg at its 3:1 floor in both themes
+    // (styles/policy/contrast-contract.json). 80% breaks both.
+    expect(paneLayoutSource).not.toContain("[--pane-bg:");
     expect(paneLayoutSource).not.toMatch(/bg-bg0\/\d+ pointer-events-none absolute inset-0/);
+    const dim = /isFocused \? "border-border2" : "border-border1 \*:opacity-(\d+)"/.exec(paneLayoutSource);
+    expect(dim).not.toBeNull();
+    const alpha = Number(dim?.[1]) / 100;
+    const themes = readThemes();
+    for (const theme of [themes.dark, themes.light]) {
+      const pane = resolveRgb(theme, "bg1");
+      for (const [tier, floor] of [["fg1", 4.5], ["fg2", 4.5], ["fg3", 4.5], ["muted-fg", 3]] as const) {
+        const dimmed = resolveSurface(theme, `${tier}/${alpha}@bg1`);
+        expect(contrastRatio(dimmed, pane), tier).toBeGreaterThanOrEqual(floor);
+      }
+    }
 
     // The two column-level controls still sit above pane-level layers: they act
     // on the whole workspace/column and only borrow a corner of one pane's strip.

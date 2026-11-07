@@ -158,7 +158,8 @@ exported page by page to [design-implementation/](design-implementation/README.m
    and a chosen chip or option fill with `selected-bg` and hold it under the
    pointer. A control's resting edge stays as it is; selection never adds a
    border, ring, outline or shadow. Only keyboard focus rings, and objects on
-   the Design canvas keep the selection stroke. `ui/selection-edge` enforces
+   the Design canvas keep the selection stroke. A split chat pane's focus edge
+   is item 13's. `ui/selection-edge` enforces
    it in class variants, in classes a selection condition adds
    (`selected && …`, `tab === activeTab ? … : …`) and in the renderer's
    stylesheets.
@@ -172,25 +173,30 @@ exported page by page to [design-implementation/](design-implementation/README.m
     motion respected.
 12. **Local and cloud are both first class.** Every surface states its Local
     and cloud behavior; cloud lifecycle never enters a tab banner.
-13. **Split panes are solid islands on the chrome** (2026-11-06). The
-    workspace header row draws no divider (`PanelHeader divider={false}`) and
-    keeps one 28px glyph slot for branch, folder and cloud, so the name always
-    starts at one column; whether a branch is published never changes the
-    glyph. A lone chat pane runs edge to edge. Only while the column is split,
-    panes stand apart as solid surfaces on the `bg1` chrome: 12px apart both
-    ways (the divider is that gap and the resize handle), 12px in from the
-    column's left and bottom edges and from its right edge when Workbench is
-    not beside it, every corner 12px, and nothing fading between them, at the
-    tab strip or along a seam. An unfocused pane takes `sidebar-bg` (never
-    `bg0`); the focused pane keeps `bg1`, so the gaps beside it read as part
-    of it. The transcript fades out over the 32px under its strip and starts
-    32px down; a tab's drop zone is a soft `highlighted-bg` fill without a
-    border; chat tabs are content-sized from 70px to 176px. The side column
-    keeps its tab row on `bg1` and holds the open tab in one island under it:
-    a canvas `Surface` 12px in from the column's sides and bottom, 12px
-    corners, a `border1` edge, no seam against the chat, and the first tab
-    12px in. This replaces the 2026-07-11 flush column and the soft valleys
-    tried earlier the same day. `shell/conversation/__tests__/pane-surfaces.test.ts`,
+13. **Split panes are solid islands on the chrome** (2026-11-06; edges
+    2026-11-07). The workspace header row draws no divider
+    (`PanelHeader divider={false}`) and keeps one 28px glyph slot for branch,
+    folder and cloud, so the name always starts at one column; whether a
+    branch is published never changes the glyph. A lone chat pane runs edge to
+    edge. Only while the column is split, panes stand apart as solid surfaces
+    on the `bg1` chrome: 12px apart both ways (the divider is that gap and the
+    resize handle), 12px in from the column's left, right and bottom edges,
+    every corner 12px, and nothing fading between them, at the tab strip or
+    along a seam. Every pane keeps `bg1`, and edges tell them apart: `border2`
+    on the focused pane, `border1` on the others, whose strip and body (not
+    the edge) dim to 90% over 120ms. Focus here is which window takes input,
+    not a selection, so item 8 does not apply: every split pane has an edge,
+    and focus only raises its tier. At 90% `fg1`–`fg3` stay AA and `muted-fg`
+    at its 3:1 floor; 80% would break both. The transcript fades out over the
+    32px under its strip and starts 32px down; a tab's drop zone is a soft
+    `highlighted-bg` fill without a border; chat tabs are content-sized from
+    70px to 176px. The side column keeps its tab row on `bg1` and holds the
+    open tab in one island under it: a canvas `Surface` on the column's left
+    edge, the line the chat's resize handle runs along, and 12px in from its
+    right and bottom, 12px corners, a `border2` edge (what sits inside keeps
+    `border1`), no seam against the chat, and the first tab 12px in. This
+    replaces the 2026-07-11 flush column, the soft valleys tried on 2026-11-06
+    and the unfocused pane's `sidebar-bg` fill. `shell/conversation/__tests__/pane-surfaces.test.ts`,
     `shell/conversation/__tests__/pane-sizing.test.ts`,
     `shell/workbench/__tests__/workbench-island.test.ts`
     and `scripts/ui-smoke-chat-surfaces.mjs` hold it.

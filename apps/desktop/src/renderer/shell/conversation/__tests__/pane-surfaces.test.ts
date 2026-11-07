@@ -28,8 +28,11 @@ function classConstant(src: string, name: string): string[] {
 // 2026-11-06 direction (Zeros Design v391, "Solid split", replacing the soft
 // valleys of v378 to v383): only while the column is split, panes stand apart
 // as solid surfaces on the bg1 chrome, 12px apart and 12px in from the
-// column's edges, with 12px corners and nothing fading between them. An
-// unfocused pane keeps the sidebar's fill. A lone pane runs edge to edge.
+// column's edges, with 12px corners and nothing fading between them. A lone
+// pane runs edge to edge. 2026-11-07: every pane keeps bg1 and edges tell them
+// apart, border2 on the focused pane and border1 on the others, whose content
+// dims to 90%. The side island sits on the column's edge, so the split keeps
+// its own right gutter.
 describe("split pane surfaces", () => {
   it("makes the divider the 12px gap between split panes, still the resize handle", () => {
     expect(PANE_SPLITTER_PX).toBe(12);
@@ -39,25 +42,39 @@ describe("split pane surfaces", () => {
     expect(splitter).not.toContain("bg-border1");
   });
 
-  it("insets a split from the column's left and bottom, and its right when Workbench is not beside it", () => {
+  it("insets a split 12px from the column's left, right and bottom, with or without Workbench beside it", () => {
     expect(PANE_SPLIT_GUTTER_PX).toBe(12);
     const src = paneLayout();
     expect(src).toContain('"flex min-h-0 min-w-0 flex-1 bg-bg1"');
-    expect(src).toContain('split && "pb-3 pl-3"');
-    expect(src).toContain('split && !workbenchBeside && "pr-3"');
-    expect(read("conversation-pane.tsx")).toContain("workbenchBeside={!workbenchCollapsed}");
+    expect(src).toContain('split && "px-3 pb-3"');
+    // The side island sits on the column's edge, so nothing about Workbench
+    // changes the gutters.
+    expect(src).not.toContain("workbenchBeside");
+    expect(read("conversation-pane.tsx")).not.toContain("workbenchBeside");
     // The column's floor and the split gate both charge the gutters, the gate
     // before any split exists.
-    expect(src).toContain("paneSurfaceMinimumSize(layout.root, workbenchBeside)");
-    expect(component(src, "measureSplitCapacity")).toContain("splitPaneGutters(workbenchWidth > 0)");
+    expect(src).toContain("paneSurfaceMinimumSize(layout.root)");
+    expect(component(src, "measureSplitCapacity")).toContain("splitPaneGutters()");
   });
 
   it("rounds every corner of a split pane and none of a lone pane", () => {
     const pane = component(paneLayout(), "ChatPane");
     expect(pane).toContain("const split = ctx.paneCount > 1;");
-    expect(pane).toContain('split && "overflow-hidden rounded-[calc(var(--radius-lg)*1.5)]"');
+    expect(pane).toContain('"overflow-hidden rounded-[calc(var(--radius-lg)*1.5)] border');
     expect(pane).not.toMatch(/rounded-t[lr]-/);
-    expect(pane).toContain('!isFocused && "[--pane-bg:var(--sidebar-bg)]"');
+  });
+
+  it("tells split panes apart by edge, not fill: border2 focused, border1 and a 90% dim elsewhere", () => {
+    const pane = component(paneLayout(), "ChatPane");
+    // One fill for every pane: nothing overrides the bg1 window surface.
+    expect(pane).toContain('"relative flex min-h-0 min-w-0 flex-1 flex-col bg-(--pane-bg)"');
+    expect(pane).not.toContain("[--pane-bg:");
+    expect(pane).not.toContain("sidebar-bg");
+    expect(pane).toContain('split && (isFocused ? "border-border2" : "border-border1 *:opacity-90")');
+    // The dim is on the strip and body, so the edge keeps its own tier, and it
+    // eases like every other opacity change.
+    expect(pane).toContain("*:transition-opacity *:duration-120 *:ease-out motion-reduce:*:transition-none");
+    expect(pane).not.toMatch(/(?<!\*:)opacity-90/);
   });
 
   it("draws no seam fades, valleys or tab-strip fade", () => {

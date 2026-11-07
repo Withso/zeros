@@ -41,7 +41,7 @@
         "colorSpace": "hsl",
         "components": [0.0, 0.0, 5.0]
       },
-      "$description": "INACTIVE chat window fill (below bg1)",
+      "$description": "one step below bg1; the Browser tab's backdrop",
       "$extensions": {
         "org.zeros": {
           "cssName": "--bg0",
@@ -73,7 +73,7 @@
     "pane-bg": {
       "$type": "color",
       "$value": "{tokens.bg1}",
-      "$description": "contextual chat-pane surface; unfocused panes override it to bg0",
+      "$description": "contextual chat-pane surface; bg1 on every pane",
       "$extensions": {
         "org.zeros": {
           "cssName": "--pane-bg",

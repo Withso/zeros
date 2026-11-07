@@ -49,9 +49,10 @@ describe("split pane gaps and gutters", () => {
     expect(PANE_SPLIT_GUTTER_PX).toBe(12);
   });
 
-  it("insets a split from the left and bottom, and from the right unless Workbench is beside it", () => {
-    expect(splitPaneGutters(true)).toEqual({ width: 12, height: 12 });
-    expect(splitPaneGutters(false)).toEqual({ width: 24, height: 12 });
+  // The side island sits on the column's edge, so the split keeps its own
+  // right gutter whether or not Workbench is beside it.
+  it("insets a split from the left, right and bottom", () => {
+    expect(splitPaneGutters()).toEqual({ width: 24, height: 12 });
   });
 
   // A lone pane runs edge to edge, so the first split down adds the gutters'
@@ -71,30 +72,15 @@ describe("split pane gaps and gutters", () => {
     // Budgets as measured: the surface less its split gutters.
     expect(downSplit(370 - 24, 0)).toBe(false);
     expect(downSplit(384 - 24, 0)).toBe(true);
-    // Beside Workbench the column borrows the 12px from Workbench's slack.
-    expect(downSplit(360 - 12, 400)).toBe(true);
-    expect(downSplit(360 - 12, WORKBENCH_MIN_PX)).toBe(false);
+    // Beside Workbench the column borrows the 24px from Workbench's slack.
+    expect(downSplit(360 - 24, 400)).toBe(true);
+    expect(downSplit(360 - 24, WORKBENCH_MIN_PX)).toBe(false);
   });
 
   it("charges the gutters to the surface's floor only while split", () => {
-    for (const workbenchBeside of [true, false]) {
-      expect(paneSurfaceMinimumSize(leaf("only"), workbenchBeside)).toEqual({
-        width: 360,
-        height: 240,
-      });
-    }
-    expect(paneSurfaceMinimumSize(pair("row"), true)).toEqual({
-      width: 744,
-      height: 252,
-    });
-    expect(paneSurfaceMinimumSize(pair("row"), false)).toEqual({
-      width: 756,
-      height: 252,
-    });
-    expect(paneSurfaceMinimumSize(pair("column"), true)).toEqual({
-      width: 372,
-      height: 504,
-    });
+    expect(paneSurfaceMinimumSize(leaf("only"))).toEqual({ width: 360, height: 240 });
+    expect(paneSurfaceMinimumSize(pair("row"))).toEqual({ width: 756, height: 252 });
+    expect(paneSurfaceMinimumSize(pair("column"))).toEqual({ width: 384, height: 504 });
   });
 });
 

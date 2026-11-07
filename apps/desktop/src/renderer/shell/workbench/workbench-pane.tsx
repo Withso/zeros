@@ -81,9 +81,11 @@ import { Surface } from "@/renderer/shared/ui/layout/surface";
 const WORKBENCH_PANE_CLS =
   "relative flex min-h-0 min-w-[200px] flex-col overflow-hidden bg-bg1 [flex:calc((1_-_var(--zeros-column-2-ratio,0.5))*100)_1_0px]";
 /** Everything under the header. Rendered as a canvas Surface, which paints
- *  bg1 and binds --surface-border to border1. */
+ *  bg1 and binds --surface-border to border1 for what sits inside; only the
+ *  island's own edge is border2. It keeps no left inset, so that edge is the
+ *  line the chat column's resize handle runs along. */
 const WORKBENCH_ISLAND_CLS =
-  "mx-3 mb-3 flex min-h-0 flex-1 flex-col overflow-hidden rounded-[calc(var(--radius-lg)*1.5)] border border-(--surface-border)";
+  "mr-3 mb-3 flex min-h-0 flex-1 flex-col overflow-hidden rounded-[calc(var(--radius-lg)*1.5)] border border-border2";
 /** Bound rich File/diff DOM while making the common recent-tab path instant. */
 const MAX_RETAINED_WORKBENCH_VIEWS = 6;
 /** Iframes are expensive, so preserve the recent cross-workspace working set

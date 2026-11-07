@@ -1098,3 +1098,19 @@ Each landed step appends one line: date, workstream, what landed, evidence.
   showed it. The Queued messages board's Waiting state drops the button
   (canvas version 399). Evidence: `queued-messages-card.test.ts` failed red
   first.
+- 2026-11-07 · 2, 5, 6 · Split panes are told apart by their edge, not their
+  fill (`docs/design-system.md` §0 item 13; canvas version 400, seams "Solid
+  with focus edges", now the Solid split boards' default). Every pane keeps
+  `bg1`; the focused pane takes a `border2` edge and the others `border1`,
+  their strip and body at 90% opacity, easing over 120ms. Cursor's reference
+  dims to about 80%, which would take `fg3` below AA in Light and `muted-fg`
+  below its 3:1 floor in Dark; at 90% every tier holds. The side island drops
+  its left inset, so its edge is the line the chat's resize handle runs along,
+  and only that outer edge is `border2`. A split therefore keeps its own 12px
+  right gutter: `splitPaneGutters()` is 24px wide, so two panes beside
+  Workbench need 756px (was 744), and `ConversationPaneLayout` loses its
+  `workbenchBeside` prop. The `bg0` and `--pane-bg` token descriptions follow.
+  Evidence: the pane-surfaces and workbench-island tests failed red first;
+  the chat-surfaces smoke measures the resize handle ending on the island's
+  `border2` edge, every pane on `bg1` with its edge tier and dim, and the 12px
+  right gutter with the side column shown and hidden, in Dark and Light.

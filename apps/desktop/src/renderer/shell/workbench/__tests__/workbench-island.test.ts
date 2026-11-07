@@ -24,15 +24,19 @@ describe("side column island", () => {
     expect(pane).toContain("bg-bg1");
   });
 
-  it("holds the content in a bg1 island 12px in, with a 12px radius and a border1 edge", () => {
+  // 2026-11-07: the island's left edge is the chat's resize line, so it keeps
+  // no left inset, and only its own outer edge steps up to border2.
+  it("holds the content in a bg1 island on the resize line, 12px in from the right and bottom, with a 12px radius and a border2 edge", () => {
     const island = classConstant(read("workbench-pane.tsx"), "WORKBENCH_ISLAND_CLS");
     expect(island).toEqual(
       expect.arrayContaining([
-        "mx-3", "mb-3", "flex", "min-h-0", "flex-1", "flex-col", "overflow-hidden",
-        "rounded-[calc(var(--radius-lg)*1.5)]", "border", "border-(--surface-border)",
+        "mr-3", "mb-3", "flex", "min-h-0", "flex-1", "flex-col", "overflow-hidden",
+        "rounded-[calc(var(--radius-lg)*1.5)]", "border", "border-border2",
       ]),
     );
-    // Surface kind="canvas" paints bg1 and binds --surface-border to border1.
+    expect(island.filter((name) => /^(?:mx|ml|pl|px)-/.test(name))).toEqual([]);
+    // Inside, Surface kind="canvas" still binds --surface-border to border1.
+    expect(island).not.toContain("border-(--surface-border)");
     expect(read("workbench-pane.tsx").match(/<Surface\s[^>]*kind="canvas"[^>]*className=\{WORKBENCH_ISLAND_CLS\}/g)).toHaveLength(1);
   });
 
@@ -68,7 +72,7 @@ describe("side column island", () => {
     expect(inside).toContain("containerRef={islandRef}");
   });
 
-  it("starts the first tab 12px in, in line with the island's edge", () => {
+  it("starts the first tab 12px in from the column's edge", () => {
     expect(read("tab-strip.tsx")).toContain('<div className="flex h-full min-w-0 items-center pl-2">');
   });
 });

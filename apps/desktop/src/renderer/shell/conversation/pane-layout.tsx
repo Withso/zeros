@@ -146,7 +146,7 @@ function measureSplitCapacity(surface: HTMLElement | null): {
     workbenchPaneFor(surface)?.getBoundingClientRect().width ?? 0;
   // Every split tree sits inside the split gutters, so they come out of the
   // budget before the first split as well as after it.
-  const gutters = splitPaneGutters(workbenchWidth > 0);
+  const gutters = splitPaneGutters();
   const width = rect.width - gutters.width;
   return {
     containerWidth: width,
@@ -214,14 +214,10 @@ export function ConversationPaneLayout({
   stripLeading = null,
   stripTrailing = null,
   bodyAside = null,
-  workbenchBeside = false,
 }: {
   workspace?: Workspace | null;
   readOnly?: boolean;
   emptyContent?: ReactNode;
-  /** Workbench is open beside the column: its island keeps 12px from the
-   *  column, so a split takes no right gutter of its own. */
-  workbenchBeside?: boolean;
   onMinimumSizeChange?: (minimumSize: PaneTreeMinimumSize) => void;
   /** Pinned to the leading edge of the first pane's chat strip — Code's
    *  conversation column passes its mode toggle here now that the column has no
@@ -376,8 +372,8 @@ export function ConversationPaneLayout({
 
   const layout = usePaneLayout(layoutFolder);
   const minimumSize = useMemo(
-    () => paneSurfaceMinimumSize(layout.root, workbenchBeside),
-    [layout.root, workbenchBeside],
+    () => paneSurfaceMinimumSize(layout.root),
+    [layout.root],
   );
   useLayoutEffect(() => {
     onMinimumSizeChange?.(minimumSize);
@@ -842,11 +838,11 @@ export function ConversationPaneLayout({
       <div
         ref={paneSurfaceRef}
         data-pane-layout-surface=""
-        // The chrome: bg1, which shows in a split's gaps and gutters.
+        // The chrome: bg1, which shows in a split's gaps and gutters. The side
+        // island sits on the column's edge, so the right gutter is the split's.
         className={cn(
           "flex min-h-0 min-w-0 flex-1 bg-bg1",
-          split && "pb-3 pl-3",
-          split && !workbenchBeside && "pr-3",
+          split && "px-3 pb-3",
         )}
       >
         <PaneNodeView node={layout.root} ctx={ctx} />
@@ -1328,16 +1324,17 @@ function ChatPane({ paneId, ctx }: { paneId: string; ctx: PaneCtx }) {
       ref={rootRef}
       data-pane-root=""
       data-pane-focused={isFocused ? "true" : "false"}
-      // --pane-bg is the window surface: bg1 on the focused pane, the sidebar's
-      // fill elsewhere (bg0 read too dark once panes lost their seams).
-      // Everything inside inherits it, so the window re-tints as one. That fill
-      // is the only inactive treatment: text and controls keep full contrast
-      // (a former veil dropped text below WCAG AA). Split panes are solid
-      // shapes on the chrome, so every corner rounds.
+      // --pane-bg is the window surface, bg1 on every pane. Split panes are
+      // solid shapes on the chrome with every corner rounded, told apart by
+      // their edge rather than their fill: border2 on the focused pane,
+      // border1 elsewhere. An unfocused pane's strip and body (not its edge)
+      // dim to 90%, which keeps fg1 to fg3 at WCAG AA and muted-fg at its 3:1
+      // floor; at 80% they fall below them.
       className={cn(
         "relative flex min-h-0 min-w-0 flex-1 flex-col bg-(--pane-bg)",
-        split && "overflow-hidden rounded-[calc(var(--radius-lg)*1.5)]",
-        !isFocused && "[--pane-bg:var(--sidebar-bg)]",
+        split &&
+          "overflow-hidden rounded-[calc(var(--radius-lg)*1.5)] border *:transition-opacity *:duration-120 *:ease-out motion-reduce:*:transition-none",
+        split && (isFocused ? "border-border2" : "border-border1 *:opacity-90"),
       )}
     >
       <ChatTabs
