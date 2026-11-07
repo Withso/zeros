@@ -91,6 +91,57 @@ export async function readCanvasContext(
   return { layout, canvas: await readCanvas(workspacePath, layout) };
 }
 
+/** Make a decoded canvas immutable before callers share it. */
+export function freezeDeep<T>(value: T): T {
+  if (value && typeof value === "object" && !Object.isFrozen(value)) {
+    Object.freeze(value);
+    for (const entry of Object.values(value)) freezeDeep(entry);
+  }
+  return value;
+}
+
+/** Read-only callers (frame documents, frame reads) share the last decoded
+ * canvas while every byte it was decoded from still matches; it is frozen.
+ * Writers keep reading their own copy under the document lock. */
+const MAX_SHARED_CANVASES = 4;
+const sharedCanvases = new Map<string, DesignCanvasReadContext>();
+let sharedCanvasReads = 0;
+
+export function designSharedCanvasReadsForTests(): number {
+  return sharedCanvasReads;
+}
+
+export async function readSharedCanvasContext(
+  workspacePath: string,
+): Promise<DesignCanvasReadContext> {
+  const directory = designDirectoryNameFor(workspacePath);
+  const key = JSON.stringify([path.resolve(workspacePath), directory]);
+  const cached = sharedCanvases.get(key);
+  const snapshot = cached?.canvas[canvasReadSnapshot];
+  if (cached && snapshot) {
+    const layout = readDirectoryDesignLayout(workspacePath, directory);
+    if (
+      layout?.manifestFile === cached.layout?.manifestFile &&
+      layout?.documentFile === cached.layout?.documentFile &&
+      readDesignRegistrySource(workspacePath).source === snapshot.registry &&
+      readDesignStorageFile(workspacePath, snapshot.file) === snapshot.source &&
+      (!snapshot.registration ||
+        readDesignStorageFile(workspacePath, snapshot.registration.file) === snapshot.registration.source)
+    ) {
+      sharedCanvases.delete(key);
+      sharedCanvases.set(key, cached);
+      return cached;
+    }
+  }
+  sharedCanvasReads++;
+  const context = freezeDeep(await readCanvasContext(workspacePath));
+  sharedCanvases.delete(key);
+  sharedCanvases.set(key, context);
+  while (sharedCanvases.size > MAX_SHARED_CANVASES)
+    sharedCanvases.delete(sharedCanvases.keys().next().value!);
+  return context;
+}
+
 export function isFrameFile(value: string): boolean {
   return isDesignFrameFile(value);
 }

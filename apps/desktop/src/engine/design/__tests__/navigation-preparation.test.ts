@@ -5,6 +5,8 @@ import path from "node:path";
 import * as safeFiles from "../safe-files";
 import { primeDesignDirectoryName, forgetDesignDirectoryName } from "../directory-registry";
 import { readDesignNavigationSnapshot, readDesignMutationSnapshot, prepareDesignNavigationFrames, readDesignFrame } from "../document";
+import { designSharedCanvasReadsForTests } from "../document-storage";
+import { readDesignProtocolResource } from "../protocol-resource";
 
 let root: string;
 const directory = "Product - Design";
@@ -120,4 +122,19 @@ it("reuses a batch's decoded canvas only while the catalog revision is unchanged
   await expect(prepare(navigation.catalogRevision, "page-1/f1.html")).rejects.toThrow(/stale/);
   const next = await readDesignNavigationSnapshot(root);
   expect((await prepare(next.catalogRevision, "page-1/f1.html")).frames[0]!.x).toBe(777);
+});
+
+it("serves frame documents from one decoded canvas while its bytes are unchanged", async () => {
+  const reads = designSharedCanvasReadsForTests();
+  for (const file of ["page-1/f0.html", "page-1/f1.html", "page-1/f2.html"])
+    expect((await readDesignProtocolResource(root, { path: file })).status).toBe(200);
+  expect(designSharedCanvasReadsForTests() - reads).toBe(1);
+  const file = path.join(root, directory, "meta/canvas.json");
+  const canvas = JSON.parse(await readFile(file, "utf8"));
+  canvas.pages[0].frames = canvas.pages[0].frames.filter((id: string) => id !== "f2");
+  delete canvas.frames.f2;
+  await writeFile(file, JSON.stringify(canvas));
+  expect((await readDesignProtocolResource(root, { path: "page-1/f2.html" })).status).toBe(404);
+  expect((await readDesignProtocolResource(root, { path: "page-1/f0.html" })).status).toBe(200);
+  expect(designSharedCanvasReadsForTests() - reads).toBe(2);
 });
