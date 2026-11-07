@@ -1697,18 +1697,29 @@
   display: none !important;
   visibility: hidden !important;
 }
-/* Reveal each cold frame, including its chrome, with its first ready content.
-   Visibility preserves loading/layout; a display gate would deadlock hidden
-   documents. Warm outgoing documents stay painted during replacement, and
-   an actual load failure remains actionable. */
+/* A cold frame shows where it is at once: its own surface, without stroke,
+   chrome or content, until its first ready content reveals everything
+   together. Visibility preserves loading/layout; a display gate would
+   deadlock hidden documents. Warm outgoing documents stay painted during
+   replacement, and an actual load failure remains actionable. A surface
+   fill needs no camera-scaled stroke, so a 1,000-frame page adds no
+   per-frame work while panning or zooming. */
 .zd-design-frame:not(:has(
   [data-design-source-buffer="displayed"][data-design-source-ready],
   iframe[data-design-document-buffer="displayed"][data-design-document-ready],
   [data-design-frame-pixels-ready],
   [data-design-frame-load-error]
 )) {
-  visibility: hidden;
+  box-shadow: none;
   pointer-events: none;
+}
+.zd-design-frame:not(:has(
+  [data-design-source-buffer="displayed"][data-design-source-ready],
+  iframe[data-design-document-buffer="displayed"][data-design-document-ready],
+  [data-design-frame-pixels-ready],
+  [data-design-frame-load-error]
+)) > * {
+  visibility: hidden;
 }
 /* Retained HTML and pictures cover editor startup. Painting them beneath a ready editor
    would composite authored alpha twice. Switch both surfaces in one style pass. */

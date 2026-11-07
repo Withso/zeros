@@ -152,6 +152,14 @@ export class DesignSourceTiles {
     return this.backing as HTMLCanvasElement;
   }
 
+  /** Creates the shared GPU context before the first source paint needs it.
+   * Its first creation waits on the GPU process, which at a busy canvas's
+   * first zoom-in was a half-second frame. The warm context keeps a 1x1
+   * backing until a scene draws. */
+  warm(): boolean {
+    return this.directOutput && this.initialize();
+  }
+
   onOutputAvailable(listener: () => void): () => void {
     this.outputAvailable.add(listener);
     return () => { this.outputAvailable.delete(listener); };

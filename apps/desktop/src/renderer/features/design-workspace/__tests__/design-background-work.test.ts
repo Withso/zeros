@@ -4,6 +4,26 @@ import { DesignBackgroundWorkQueue } from "../state/design-background-work";
 afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
 
 describe("design background work", () => {
+  it("resolves whenQuiet only after a held gesture ends and recent input rests", async () => {
+    vi.useFakeTimers();
+    const queue = new DesignBackgroundWorkQueue(4, 150);
+    const resume = queue.pause();
+    let quiet = false;
+    void queue.whenQuiet().then(() => { quiet = true; });
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(quiet).toBe(false);
+    resume();
+    await vi.advanceTimersByTimeAsync(149);
+    expect(quiet).toBe(false);
+    await vi.advanceTimersByTimeAsync(151);
+    expect(quiet).toBe(true);
+    const controller = new AbortController();
+    queue.touch();
+    const cancelled = queue.whenQuiet(controller.signal);
+    controller.abort(new Error("retired"));
+    await expect(cancelled).rejects.toThrow("retired");
+    queue.reset();
+  });
   it("makes bounded progress when the browser never offers an idle period", async () => {
     vi.useFakeTimers();
     vi.stubGlobal("window", {
