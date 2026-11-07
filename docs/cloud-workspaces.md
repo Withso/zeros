@@ -940,6 +940,17 @@ already-running VM adopts it on its next wake. No schema migration is needed.
 Quitting the Mac app still leaves cloud agents and terminals running, while
 Local quit retains its existing stop behavior.
 
+A VM stop ends its shells, so the worker keeps what a plain terminal needs to
+come back. The desktop marks a cloud shell restorable (`PTY_CREATE.restore`)
+only when it has no Run, setup or agent launch; those must start again. For a
+restorable shell the worker writes its screen snapshot and live directory to
+`terminals/` in its private state, two seconds after output and at shutdown.
+After a wake, runtime update or app restart, the next create for that id
+starts a new shell in that directory and replies as a reattach carrying the
+saved screen. If the directory is gone or outside the checkout, the shell starts
+at the checkout root. A shell that exits or is closed drops its record. Records
+expire after seven days, and at most 64 are kept. Local terminals are unchanged.
+
 A new workspace branch starts from the authorized checkout hydrated into its
 own VM before worker startup. Before persisting a new workspace or allocating a
 VM, creation checks the requested branch (or the build's recorded default)

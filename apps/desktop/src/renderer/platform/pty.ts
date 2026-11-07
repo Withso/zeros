@@ -113,6 +113,9 @@ export async function ptyCreate(args: {
    *  and leaves no "(exited)" tab. The caller disposes it explicitly. */
   ephemeral?: boolean;
   loginProvider?: "claude" | "codex";
+  /** Cloud plain shell: the worker restores its last screen and directory
+   *  after a restart and answers as a reattach. Local engines ignore it. */
+  restore?: boolean;
 }): Promise<PtySessionInfo | null> {
   // The engine resolves the workspace from `cwd` (an id OR a real path)
   // server-side, so we pass the folder unchanged — no renderer-side id mapping.

@@ -840,6 +840,14 @@ describe("parseBridgeMessage — trust-boundary validation", () => {
     expect(KNOWN_MESSAGE_TYPES).toContain("AGENT_BINARY_RESOLVED");
   });
 
+  it("accepts restore only as true on a shared, non-sign-in PTY_CREATE", () => {
+    const b = { ...base, source: "browser" as const, type: "PTY_CREATE", sessionId: "s" };
+    expect(parseBridgeMessage({ ...b, restore: true }).type).toBe("PTY_CREATE");
+    for (const fields of [{ restore: false }, { restore: "yes" }, { restore: true, ephemeral: true },
+      { restore: true, ephemeral: true, loginProvider: "claude" }])
+      expect(() => parseBridgeMessage({ ...b, ...fields })).toThrow(/restore/);
+  });
+
   it("safeParseBridgeMessage returns null on a malformed write payload", () => {
     const b = { ...base, source: "browser" as const };
     expect(

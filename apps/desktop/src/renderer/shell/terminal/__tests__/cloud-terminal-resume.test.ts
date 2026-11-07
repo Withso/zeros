@@ -100,6 +100,33 @@ describe("cloud terminal resume", () => {
   });
 });
 
+describe("cloud terminal restore", () => {
+  it("asks the worker to restore a plain cloud shell and repaints its saved screen without a second resume line", async () => {
+    const h = harness();
+    h.ptyCreate.mockResolvedValue({ cols: 80, rows: 24, reattached: true, replay: "saved screen" });
+    await h.actions.spawn(h.term, true);
+    expect(h.ptyCreate).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ sessionId: "shell", cwd: folder, restore: true }));
+    expect(h.term.write).toHaveBeenCalledExactlyOnceWith("\x1bcsaved screen"); expect(h.term.writeln).not.toHaveBeenCalled();
+  });
+  it.each([
+    ["a Run or setup command", (h: any) => { h.initialCommand = "pnpm dev"; }],
+    ["an agent terminal", (h: any) => { h.agentId = "claude"; }],
+    // One-shots are only ever created fresh; a reconnect never resumes them.
+    ["a one-shot terminal", (h: any) => { h.ephemeral = true; h.createdRef.current = false; }],
+  ])("never asks to restore %s, whose launch must run again", async (_name, configure) => {
+    const h = harness(); configure(h);
+    await h.actions.spawn(h.term, h.createdRef.current);
+    expect(h.ptyCreate).toHaveBeenCalledOnce();
+    expect(h.ptyCreate.mock.calls[0][0]).not.toHaveProperty("restore");
+  });
+  it("never asks a Local engine to restore", async () => {
+    const h = harness("/local/worktree"); h.createdRef.current = false;
+    await h.actions.spawn(h.term, false);
+    expect(h.ptyCreate).toHaveBeenCalledOnce();
+    expect(h.ptyCreate.mock.calls[0][0]).not.toHaveProperty("restore");
+  });
+});
+
 describe("cloud terminal resume races", () => {
   it("does not announce a restart when a peer wins between registry read and create", async () => {
     const h = harness();
