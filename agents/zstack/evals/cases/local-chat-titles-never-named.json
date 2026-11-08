@@ -1,0 +1,9 @@
+{
+  "id": "local-chat-titles-never-named",
+  "kind": "replay",
+  "area": "renderer-agents",
+  "fixedBy": "pr:928",
+  "symptom": "In Zeros Local every chat stayed Untitled or New chat, so another agent's brief arrived as From agent \"Untitled\". Local blanks the control-plane URL and has no sign-in, and requestAiChatTitle returned before the prompt-words fallback that #569 added for a failed service; a unit test even asserted that an unconfigured build names nothing.",
+  "rule": "A fallback added for a failing remote path must also cover the configurations where the remote path never runs (Local, unconfigured builds). Principle 2: an unavailable service is not a reason to leave state unknown forever when a local answer exists.",
+  "check": "pnpm exec vitest run apps/desktop/src/renderer/features/agent/__tests__/chat-title-request.test.ts -t 'names the chat from its prompt, without a request'"
+}

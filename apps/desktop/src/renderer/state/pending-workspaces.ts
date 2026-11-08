@@ -200,6 +200,28 @@ function cloudWorkspaceProvisioning(folder: string | null | undefined): boolean 
   return !document || !["ready", "busy"].includes(document.status);
 }
 
+/** A Local create announced this folder, but `git worktree add` may not have
+ * made it yet, so reading it fails. Cloud provisioning is a VM lifecycle with
+ * its own reads and is not included. */
+function localCreateFor(
+  creates: readonly PendingWorkspaceCreate[],
+  folder: string | null | undefined,
+): boolean {
+  return (
+    !!folder &&
+    !parseCloudWorkspaceKey(folder) &&
+    creates.some((create) => create.placement !== "cloud" && create.path === folder)
+  );
+}
+
+export function isLocalWorkspaceCreating(folder: string | null | undefined): boolean {
+  return localCreateFor(usePendingWorkspacesStore.getState().creates, folder);
+}
+
+export function useLocalWorkspaceCreating(folder: string | null | undefined): boolean {
+  return usePendingWorkspacesStore((state) => localCreateFor(state.creates, folder));
+}
+
 /** Imperative exact-key provisioning check for event handlers. */
 export function isWorkspaceProvisioning(
   folder: string | null | undefined,

@@ -110,6 +110,23 @@ describe("fallbackChatTitle", () => {
     expect(fallbackChatTitle("zeros-dev://chat/x")).toBeNull();
     expect(Array.from(fallbackChatTitle("a".repeat(200))!).length).toBeLessThanOrEqual(60);
   });
+  it("keeps links and invisible formatting characters out of the title", async () => {
+    const { fallbackChatTitle } = await import("../chat-title");
+    // A tab shows the title outside the transcript: a link can carry a token.
+    expect(fallbackChatTitle("Open https://example.test/reset?token=synthetic and fix it")).toBe("Open and fix it");
+    expect(fallbackChatTitle("ssh://host.test/repo.git")).toBeNull();
+    // A bidirectional override would make the tab read in a misleading order.
+    expect(fallbackChatTitle("Rename \u202Etxt.exe\u202C\tfiles now")).toBe("Rename txt.exe files now");
+    // An invisible character inside a link must not split its query off.
+    expect(fallbackChatTitle("Open https://example.test/reset?\u200Btoken=synthetic")).toBe("Open");
+    expect(fallbackChatTitle("Open https:\u200B//example.test/?token=synthetic now")).toBe("Open now");
+    expect(fallbackChatTitle("Open https:\u200D/\u200C/example.test/?token=synthetic now")).toBe("Open now");
+    expect(fallbackChatTitle("Open https://example.test/?a\u0007token=synthetic now")).toBe("Open now");
+    // Joiners shape words in several scripts and stay.
+    expect(fallbackChatTitle("Review \u0915\u094D\u200D\u0937 and \u0645\u06CC\u200C\u062E\u0648\u0627\u0647\u0645")).toBe(
+      "Review \u0915\u094D\u200D\u0937 and \u0645\u06CC\u200C\u062E\u0648\u0627\u0647\u0645",
+    );
+  });
 });
 
 describe("compactTitlePrompt", () => {

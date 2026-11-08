@@ -331,6 +331,15 @@ describe("Local CLI chat creation", () => {
     expect(ports.chats.get(created.chatId)!.title).toBe("New chat");
   });
 
+  it.each(["Untitled", "New chat", "  "])("never names a sender by its unnamed placeholder %j", async (placeholder) => {
+    ports.upsertChat(chat("p", WS_A, { title: placeholder }));
+    const created = ok<{ chatId: string }>(await call(parent, "chat.create", { message: "Write the docs", title: "Docs" }));
+    // The link alone identifies a sender that has no name yet.
+    expect(ports.started[0]!.text).toBe("[Zeros] From agent (zeros-dev://chat/p):\n\nWrite the docs");
+    expect(ports.started[0]!.presentation?.localFrom).toMatchObject({ chatId: "p", link: "zeros-dev://chat/p" });
+    expect(ports.chats.get(created.chatId)!.title).toBe("Docs");
+  });
+
   it("never opens a tab for an agent whose account is signed out", async () => {
     ports.disconnected.add("cursor");
     const before = ports.chats.size;

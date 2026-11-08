@@ -3,6 +3,7 @@
 // the renderer. Missing credentials, offline service, and bad replies are quiet.
 import type { AgentMessage } from "@zeros/protocol/agent-messages";
 import { getSession, onAuthStateChange } from "../auth/auth-store";
+import { isLocalDevelopment } from "../../platform/runtime";
 import { CONTROL_PLANE_URL } from "../team/control-plane";
 import { controlPlaneFetch } from "../update/control-plane-fetch";
 import { useWorkspaceStore, type Action } from "../../state/workspace-store";
@@ -79,11 +80,20 @@ export function sanitizeAiTitle(raw: string): string | null {
 }
 
 /** A title from the prompt's own opening words, for when the service cannot
- * name the chat: better than leaving it Untitled for good. */
+ * name the chat: better than leaving it Untitled for good. Tabs show titles
+ * outside the transcript, so links (which can carry tokens) and invisible
+ * format characters such as bidirectional overrides never reach one. A link
+ * is dropped as a whole word, judged without format characters or joiners, so
+ * none hidden inside it can split off or disguise its query. Zero-width
+ * joiners otherwise stay: several scripts need them to shape words. */
 export function fallbackChatTitle(prompt: string): string | null {
   for (const raw of prompt.split(/\r?\n/)) {
     const words = raw
-      .replace(/\bzeros(?:-alpha|-beta|-dev)?:\/\/\S+/g, " ")
+      .replace(/(?![\u200C\u200D])\p{Cf}/gu, "")
+      .split(/\s+/)
+      .filter((word) => !/[a-z][a-z\d+.-]*:\/\//i.test(word.replace(/[\u200C\u200D]/g, "")))
+      .join(" ")
+      .replace(/\p{Cc}/gu, " ")
       .replace(/[`*_#>]/g, "")
       .split(/\s+/)
       .filter((word) => /[\p{L}\p{N}]/u.test(word))
@@ -105,7 +115,8 @@ type TitleTry = "titled" | "retry" | "give-up" | "unauthorized" | "quiet";
 
 /** At most one naming flight per chat/message, including remounts. Both the
  * exact owner and seeded title must still match after each response; a manual
- * rename wins, and stops any retry. */
+ * rename wins, and stops any retry. Returns whether a service request is in
+ * flight or settled for this chat: the backfill budgets those, not local names. */
 export function requestAiChatTitle(
   args: {
     chatId: string;
@@ -116,11 +127,20 @@ export function requestAiChatTitle(
   },
   authChanged = false,
 ): boolean {
-  if (!CONTROL_PLANE_URL || !args.prompt.trim()) return false;
+  if (!args.prompt.trim()) return false;
   const original = useWorkspaceStore
     .getState()
     .chats.find((chat) => chat.id === args.chatId);
   if (!original || original.title !== args.expectedTitle) return false;
+  // Zeros Local has no account or hosted services, and a build without a
+  // control plane has nowhere to ask. Waiting would leave the chat Untitled for
+  // good, so its own opening words name it, without any network request.
+  if (!CONTROL_PLANE_URL || isLocalDevelopment()) {
+    const title = fallbackChatTitle(args.prompt);
+    if (title)
+      args.dispatch({ type: "UPDATE_CHAT_TITLE_IF", id: args.chatId, title, expectedTitle: args.expectedTitle });
+    return false;
+  }
   const { folder, createdAt } = original;
   const current = () => {
     const chat = useWorkspaceStore

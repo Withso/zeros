@@ -86,7 +86,11 @@ import { parseCloudWorkspaceKey } from "../../../platform/bridge/cloud-workspace
 import { filePillPath } from "../../../shell/workbench/file-pill-navigation";
 import { validSkillSource } from "../../../platform/skill-source";
 import { useBrowserPickerSelection } from "../../../state/workspace-store";
-import { useWorkspaceProvisioning } from "../../../state/pending-workspaces";
+import {
+  isLocalWorkspaceCreating,
+  useLocalWorkspaceCreating,
+  useWorkspaceProvisioning,
+} from "../../../state/pending-workspaces";
 import type {
   ComposerAttachment,
   ComposerAttachmentPreview,
@@ -380,10 +384,20 @@ export function useComposerEditor(
   // Called through a ref to break the getPrItems → ensurePrsLoaded → refresh
   // declaration cycle.
   const refreshRef = useRef<() => void>(() => {});
+  // A new workspace's composer is live before `git worktree add` makes its
+  // folder; reads wait for the create to settle instead of failing.
   const filesSearch = useMemo(
-    () => new MentionFileSearch(() => refreshRef.current()),
+    () =>
+      new MentionFileSearch(
+        () => refreshRef.current(),
+        (dir) => !isLocalWorkspaceCreating(dir),
+      ),
     [],
   );
+  const creatingWorkspace = useLocalWorkspaceCreating(cwd ?? null);
+  useEffect(() => {
+    if (!creatingWorkspace) filesSearch.resume();
+  }, [creatingWorkspace, filesSearch]);
   const prsSearch = useMemo(
     () => new ComposerPrSearch(() => refreshRef.current()),
     [],
