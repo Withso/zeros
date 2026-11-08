@@ -1137,8 +1137,8 @@ Each landed step appends one line: date, workstream, what landed, evidence.
   and checks the caret, the keyboard path and reduced motion.
 - 2026-11-08 · 5, 6 · Split chat panes sit 8px apart both ways (canvas
   version 403, the Solid split boards): the divider, still the resize handle,
-  is 8px (`PANE_SPLITTER_PX`, `w-2` and `h-2`), while the column's 12px
-  gutters beside the sidebar, along the bottom and beside the side column stay
+  is 8px (`PANE_SPLITTER_PX`, `w-2` and `h-2`), while the column's gutters
+  beside the sidebar, along the bottom and beside the side column stay 12px
   (`PANE_SPLIT_GUTTER_PX`). Two panes side by side need 728px (was 732) and
   752px with the gutters (was 756); a stack needs 488px (was 492) and three
   across 1096px (was 1104). The canvas's solid split rule draws 8px, and the

@@ -4,13 +4,13 @@ import { expect } from "@playwright/test";
  *  column is split, panes stand apart as solid surfaces on the bg1 chrome. They
  *  sit 8px apart both ways (12px until 2026-11-08), the gap being the resize
  *  handle, and 12px in from the column's left, right and bottom edges. Every
- *  corner rounds at 12px, nothing
- *  fades between panes, and a lone pane runs edge to edge. The workspace header
- *  row draws no divider, and the side column holds its open tab in a bg1
- *  island. 2026-11-07: every pane keeps bg1 and edges tell them apart, border2
- *  on the focused pane and border1 on the others, whose strip and body dim to
- *  80%; the island sits on the chat's resize line with a border2 edge, and
- *  an unfocused pane's composer is its Ask pill. */
+ *  corner rounds at 12px, nothing fades between panes, and a lone pane runs
+ *  edge to edge. The workspace header row draws no divider, and the side
+ *  column holds its open tab in a bg1 island. 2026-11-07: every pane keeps
+ *  bg1 and edges tell them apart, border2 on the focused pane and border1 on
+ *  the others, whose strip and body dim to 80%; the island sits on the chat's
+ *  resize line with a border2 edge, and an unfocused pane's composer is its
+ *  Ask pill. */
 export async function runChatSurfacesSmoke({ page, check, harnessBase }) {
   const viewport = page.viewportSize();
   await page.evaluate(() => {
