@@ -28,9 +28,9 @@ export const MIN_PANE_HEIGHT = 240;
 /** The divider is the gap between two split panes: 12px of the bg1 chrome that
  *  draws nothing and takes the resize drag. */
 export const PANE_SPLITTER_PX = 12;
-/** While split, the panes sit this far in from the column's left and bottom
- *  edges, and from its right edge unless Workbench is beside it, whose island
- *  keeps the same 12px from the column. A lone pane runs edge to edge. */
+/** While split, the panes sit this far in from the column's left, right and
+ *  bottom edges. Workbench's island sits on the column's edge, so the right
+ *  gutter is the split's own. A lone pane runs edge to edge. */
 export const PANE_SPLIT_GUTTER_PX = 12;
 
 export interface PaneTreeMinimumSize {
@@ -39,21 +39,15 @@ export interface PaneTreeMinimumSize {
 }
 
 /** The space a split tree's gutters take from the pane surface. */
-export function splitPaneGutters(workbenchBeside: boolean): PaneTreeMinimumSize {
-  return {
-    width: PANE_SPLIT_GUTTER_PX * (workbenchBeside ? 1 : 2),
-    height: PANE_SPLIT_GUTTER_PX,
-  };
+export function splitPaneGutters(): PaneTreeMinimumSize {
+  return { width: PANE_SPLIT_GUTTER_PX * 2, height: PANE_SPLIT_GUTTER_PX };
 }
 
 /** The pane surface's floor: the tree's own, plus its gutters once split. */
-export function paneSurfaceMinimumSize(
-  root: PaneNode,
-  workbenchBeside: boolean,
-): PaneTreeMinimumSize {
+export function paneSurfaceMinimumSize(root: PaneNode): PaneTreeMinimumSize {
   const tree = paneTreeMinimumSize(root);
   if (root.type === "leaf") return tree;
-  const gutters = splitPaneGutters(workbenchBeside);
+  const gutters = splitPaneGutters();
   return { width: tree.width + gutters.width, height: tree.height + gutters.height };
 }
 
@@ -392,6 +386,15 @@ export interface PanePortalSlot {
   activeChatId: string | null;
 }
 
+/** Whether a pane holds the global active chat, and whether the column is
+ *  split. Kept apart from the slots, whose map the chat and terminal decks
+ *  read whole, so moving focus between panes re-renders only the chats whose
+ *  composer folds or unfolds (usePaneComposerCollapsed). */
+export interface PaneFocusState {
+  focused: boolean;
+  split: boolean;
+}
+
 /** Per-pane portal registry. `host` is a store-owned DOM node rather than the
  *  React-owned mount point rendered by ChatPane: when a split reshapes the
  *  recursive tree, the replacement ChatPane reparents this SAME node into its
@@ -399,15 +402,24 @@ export interface PanePortalSlot {
  *  identity (and one xterm instance) across split/collapse churn. */
 export const usePanePortalsStore = create<{
   panes: Record<string, PanePortalSlot>;
+  paneFocus: Record<string, PaneFocusState>;
   setSlot: (paneId: string, slot: Partial<PanePortalSlot>) => void;
+  setPaneFocus: (paneId: string, focus: PaneFocusState) => void;
   getOrCreateHost: (paneId: string) => HTMLElement | null;
   clearSlot: (paneId: string) => void;
 }>((set, get) => ({
   panes: {},
+  paneFocus: {},
   setSlot: (paneId, slot) =>
     set((s) => {
       const prev = s.panes[paneId] ?? { host: null, activeChatId: null };
       return { panes: { ...s.panes, [paneId]: { ...prev, ...slot } } };
+    }),
+  setPaneFocus: (paneId, focus) =>
+    set((s) => {
+      const prev = s.paneFocus[paneId];
+      if (prev?.focused === focus.focused && prev.split === focus.split) return s;
+      return { paneFocus: { ...s.paneFocus, [paneId]: focus } };
     }),
   getOrCreateHost: (paneId) => {
     const existing = get().panes[paneId]?.host;
@@ -455,6 +467,18 @@ export function destroyPanePortalSlots(paneIds: readonly string[]): void {
       panes: Object.fromEntries(
         entries.filter(([paneId]) => !removed.has(paneId)),
       ),
+      paneFocus: Object.fromEntries(
+        Object.entries(state.paneFocus).filter(([paneId]) => !removed.has(paneId)),
+      ),
     };
+  });
+}
+
+/** True while `paneId` is an unfocused pane of a split column, whose composer
+ *  is then its Ask pill (shared/ui/composer-ask.tsx). */
+export function usePaneComposerCollapsed(paneId: string | null | undefined): boolean {
+  return usePanePortalsStore((state) => {
+    const focus = paneId ? state.paneFocus[paneId] : undefined;
+    return !!focus && focus.split && !focus.focused;
   });
 }

@@ -195,10 +195,9 @@ export function ChatDeck({
             data-zeros-root=""
             className={cn(
               // --pane-bg is the chat-WINDOW fill, inherited from the pane
-              // this layer is portaled into: bg1 on the focused pane (the
-              // active window looks like the plain app canvas), bg0 on
-              // unfocused panes so inactive windows read as recessed while
-              // their text keeps full contrast. See --pane-bg in zeros-tokens.css.
+              // this layer is portaled into: bg1 on every pane, the plain app
+              // canvas. Split panes tell focus apart by their edge and an
+              // unfocused pane's dim (ChatPane). See --pane-bg in zeros-tokens.css.
               "absolute inset-0 flex min-h-0 min-w-0 flex-col overflow-hidden bg-(--pane-bg)",
               isActive
                 ? "pointer-events-auto visible"
@@ -211,6 +210,8 @@ export function ChatDeck({
               surfaceActive={isActive}
               preparing={!readOnly && preparedChatId === chat.id && !isActive}
               readOnly={readOnly}
+              // An unfocused split pane's composer is its Ask pill.
+              paneId={paneId}
               composerReplacement={
                 historyWorkspace ? (
                   <WorkspaceHistoryBar

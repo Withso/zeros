@@ -103,7 +103,7 @@ describe("AgentChat wiring", () => {
       expect(index, needle).toBeGreaterThan(-1);
       return index;
     };
-    const composer = at("<ComposerConcealedContext.Provider value={composerConcealed}>");
+    const composer = at("<ComposerConcealedContext.Provider value={composerConcealed || askCollapsed}>");
     expect(at("<PermissionCard\n")).toBeLessThan(composer);
     expect(at("<QuestionCard\n")).toBeLessThan(composer);
     expect(at("<PlanReviewCard\n")).toBeLessThan(composer);

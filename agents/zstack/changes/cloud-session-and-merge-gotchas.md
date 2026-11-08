@@ -1,4 +1,4 @@
-# Cloud sessions and merges: Git signing, a stale typecheck cache, a resting pointer
+# Cloud sessions and merges: Git signing, a stale typecheck cache, a resting pointer, a merged branch
 
 Target: `gotchas.md` (Node, Vitest and TypeScript; browser and harness).
 
@@ -23,3 +23,6 @@ Target: `gotchas.md` (Node, Vitest and TypeScript; browser and harness).
   left the pointer on the handle. Park the pointer (`page.mouse.move`) before a
   keyboard path, and rerun the full smoke registry after a merge, because
   either side's layout can move what sits under the pointer.
+- **A merged branch is gone.** GitHub deletes a merged PR's branch. When
+  `git ls-remote` lists none, restart it from `origin/main` and push plain:
+  no force-push, which auto mode refuses. Drop the stale tracking ref first.

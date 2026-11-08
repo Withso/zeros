@@ -75,7 +75,9 @@ vi.mock("../pane-portal-store", async (original) => ({
     (selector: (state: unknown) => unknown) =>
       selector({
         panes: harness.slots,
+        paneFocus: {},
         setSlot: () => {},
+        setPaneFocus: () => {},
         getOrCreateHost: () => null,
       }),
     { getState: () => ({ panes: harness.slots, clearSlot: () => {} }) },

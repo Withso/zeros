@@ -375,7 +375,6 @@ export function ConversationPane({
                 workspace={workspace}
                 readOnly={readOnly}
                 emptyContent={emptyHistory}
-                workbenchBeside={!workbenchCollapsed}
                 onMinimumSizeChange={setPaneMinimumSize}
                 bodyAside={!readOnly && <ConversationSummaryIsland />}
               />

@@ -26,18 +26,14 @@
    ─── TOKEN TAXONOMY ─────────────────────────────────────────
 
    BACKGROUNDS (10 surfaces):
-     --bg0                  INACTIVE chat window fill — one step BELOW bg1.
-                            The ACTIVE chat window keeps the plain bg1 canvas
-                            (indistinguishable from the pre-split app); every
-                            OTHER pane fills bg0 (the "one active window"
-                            cue). Text is never veiled: it keeps full contrast.
-                            Consumed via --pane-bg (see below), never directly
-                            as a window fill.
+     --bg0                  One step BELOW bg1; the Browser tab's backdrop.
+                            Never a chat window fill: every chat pane keeps
+                            bg1, and split panes tell focus apart by their
+                            edge and an unfocused pane's dim (ChatPane).
      --pane-bg              CONTEXTUAL alias — the surface color of the chat
-                            window an element sits in. :root defaults it to
-                            bg1; ChatPane flips it to bg0 on unfocused panes,
-                            so the window fill, tab-strip edge fades and the
-                            transcript scroll mask all re-tint together.
+                            window an element sits in, bg1 on every pane.
+                            The window fill, tab-strip edge fades and the
+                            transcript scroll mask all read it.
      --bg1                  default canvas / app backdrop + ACTIVE chat window
      --bg1-hover            hover state on bg1 (tool calls, tabs)
      --bg1-highlight        highlighted content above bg1
@@ -251,7 +247,7 @@
 
   /* ── BACKGROUNDS — `bg-bg0`..`bg-bg5` + hovers ── */
   /* @generated tokens:utilities-bg0:start */
-  --color-bg0: var(--bg0); /* #0D0D0D — INACTIVE chat window fill (below bg1) */
+  --color-bg0: var(--bg0); /* #0D0D0D — one step below bg1; the Browser tab's backdrop */
   --color-bg1: var(--bg1); /* #141414 — default canvas / app backdrop + active chat window */
   --color-bg1-hover: var(--bg1-hover); /* #1F1F1F — hover on bg1 (tool calls, tabs) */
   --color-bg1-highlight: var(--bg1-highlight); /* #171717 — highlighted content above bg1 */
@@ -490,17 +486,16 @@
 
   /* ── BACKGROUNDS ── */
   /* @generated tokens:base-bg0:start */
-  --bg0: hsl(0 0% 5%); /* #0D0D0D — INACTIVE chat window fill (below bg1) */
+  --bg0: hsl(0 0% 5%); /* #0D0D0D — one step below bg1; the Browser tab's backdrop */
   --bg1: hsl(
     0 0% 7.843%
   ); /* #141414 — default canvas / app backdrop + active chat window */
   /* @generated tokens:base-bg0:end */
-  /* Contextual chat-window surface. Defaults to bg1 so the ACTIVE window (and
-   * any chat chrome rendered outside a pane) looks exactly like the plain app
-   * canvas; ChatPane overrides it to bg0 on unfocused panes. Consumers use
-   * bg-(--pane-bg) / from-(--pane-bg) so they re-tint with their pane. */
+  /* Contextual chat-window surface: bg1, so every pane (and any chat chrome
+   * rendered outside a pane) looks exactly like the plain app canvas.
+   * Consumers use bg-(--pane-bg) / from-(--pane-bg) to follow their pane. */
   /* @generated tokens:base-pane-bg:start */
-  --pane-bg: var(--bg1); /* #141414 — contextual chat-pane surface; unfocused panes override it to bg0 */
+  --pane-bg: var(--bg1); /* #141414 — contextual chat-pane surface; bg1 on every pane */
   --bg1-hover: hsl(0 0% 12%); /* #1F1F1F — hover on bg1 (tool calls, tabs) */
   --bg1-highlight: hsl(0 0% 9%); /* #171717 — highlighted content above bg1 */
   --bg1-bright: hsl(0 0% 11%); /* #1C1C1C — filled section card on bg1 */
@@ -805,7 +800,7 @@
 
   /* ── BACKGROUNDS ── */
   /* @generated tokens:light-bg0:start */
-  --bg0: hsl(30 20% 98.039%); /* #FBFAF9 — INACTIVE chat window fill (below bg1) */
+  --bg0: hsl(30 20% 98.039%); /* #FBFAF9 — one step below bg1; the Browser tab's backdrop */
   --bg1: hsl(
     0 0% 100%
   ); /* #FFFFFF — default canvas / app backdrop + active chat window */

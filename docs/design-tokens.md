@@ -10,7 +10,7 @@ Values for every public token in both themes, the contrast each declared pairing
 
 | Token | Dark | Light | Role |
 | --- | --- | --- | --- |
-| `--bg0` | `#0D0D0D` | `#FBFAF9` | INACTIVE chat window fill (below bg1) |
+| `--bg0` | `#0D0D0D` | `#FBFAF9` | one step below bg1; the Browser tab's backdrop |
 | `--bg1` | `#141414` | `#FFFFFF` | default canvas / app backdrop + active chat window |
 | `--bg1-hover` | `#1F1F1F` | `#F4F2F0` | hover on bg1 (tool calls, tabs) |
 | `--bg1-highlight` | `#171717` | `#F8F7F5` | highlighted content above bg1 |

@@ -79,6 +79,13 @@ import { EmbeddedTerminalCommand } from "./embedded-terminal-command";
 import { AddedDirectories } from "./added-directories";
 import { PermissionCard } from "./permission-card";
 import { useComposerCardFocus } from "./use-composer-card-focus";
+import { askPillAgentName } from "./ask-pill-label";
+import {
+  ComposerAskPill,
+  composerAskCardClasses,
+  composerAskContentClasses,
+  useComposerAskMorph,
+} from "@/renderer/shared/ui/composer-ask";
 import {
   browserConfirmationShouldTakeComposer,
   useBrowserConfirmation,
@@ -321,6 +328,9 @@ interface AgentChatProps {
   /** Saved workspace history shares the transcript, with all writing disabled. */
   readOnly?: boolean;
   composerReplacement?: React.ReactNode;
+  /** The chat shows in an unfocused split pane, so its composer is the Ask
+   *  pill (shared/ui/composer-ask.tsx). */
+  composerCollapsed?: boolean;
   session: AgentSessionState &
     AgentSessionControls & { hydrateChat(): Promise<void> };
   onBack: () => void;
@@ -351,6 +361,7 @@ function AgentChatBody({
   liveTextUpdates = false,
   readOnly = false,
   composerReplacement,
+  composerCollapsed = false,
   session,
   onBack,
   headerActions,
@@ -424,6 +435,9 @@ function AgentChatBody({
   const updateLiveDraftRef = useRef<() => void>(() => {});
   const composerFocusRef = useRef<() => void>(() => {});
   const composerCardRef = useRef<HTMLDivElement>(null);
+  const composerDockRef = useRef<HTMLDivElement>(null);
+  const askPillRef = useRef<HTMLButtonElement>(null);
+  const askLabelRef = useRef<HTMLSpanElement>(null);
   const navigateFailureRecovery = useCallback((page: "settings" | "customize") => {
     dispatch({ type: "SET_ACTIVE_PAGE", page });
   }, [dispatch]);
@@ -3075,6 +3089,29 @@ function AgentChatBody({
     cardHoldsKeyboard && interactive && (!chatId || activeChatId === chatId),
   );
 
+  // In an unfocused split pane the composer is its Ask pill. Every card above
+  // it stays; pressing the pill, dropping files on it or any click in the pane
+  // makes this the active chat, which focuses the pane and expands it.
+  const askCollapsed = interactive && composerCollapsed;
+  const askAgentName = askPillAgentName(
+    chatThread?.agentId ?? session.agentId,
+    chatThread?.agentName ?? session.agentName,
+  );
+  const activateAskPane = useCallback(() => {
+    if (chatId && useWorkspaceStore.getState().activeChatId !== chatId) {
+      dispatch({ type: "SET_ACTIVE_CHAT", id: chatId });
+    }
+  }, [chatId, dispatch]);
+  useComposerAskMorph({
+    cardRef: composerCardRef,
+    columnRef: composerDockRef,
+    labelRef: askLabelRef,
+    pillRef: askPillRef,
+    collapsed: askCollapsed,
+    revealed: surfaceActive,
+    onPillFocusHandoff: () => composerFocusRef.current(),
+  });
+
   // Focus this chat's composer when it becomes the active chat (new tab, tab or
   // pane switch, History open, a card resolving). Only the global active chat
   // pulls focus, and never away from another input, dialog or the workbench
@@ -4481,7 +4518,7 @@ function AgentChatBody({
         />
         {/* max-w-[856px] stays in lock-step with the transcript band above. */}
         {readOnly ? composerReplacement : (
-        <div className="relative mx-auto box-border flex w-full max-w-[856px] min-w-0 shrink-0 flex-col gap-2 border-t-0 bg-transparent px-7 pt-0 pb-4">
+        <div ref={composerDockRef} className="relative mx-auto box-border flex w-full max-w-[856px] min-w-0 shrink-0 flex-col gap-2 border-t-0 bg-transparent px-7 pt-0 pb-4">
           {/* pt-0 puts the column's top on its topmost card, so this one fade
               sits on the composer alone or on the highest docked card.
               Portaled pickers carry their own. */}
@@ -4536,9 +4573,6 @@ function AgentChatBody({
             statusStartedAt={isCloudWorkspace(session.cwd) && session.cloudSendWait?.state === "waiting" && session.cloudSendWait.phase === "starting-workspace"
               ? session.cloudSendWait.startedAt : undefined}
             active={surfaceActive}
-            onStop={interactive && !readOnly && isCloudWorkspace(session.cwd) &&
-                (session.cloudSendWait?.state === "waiting" || session.cloudPromptPending || queuedMessages.some(message => message.queuedDelivery === "sending"))
-              ? () => { void session.cancel(); } : undefined}
             agentName={steeringAgentName}
           />
           {/* The only permission gate: it docks above the still-usable composer.
@@ -4576,36 +4610,48 @@ function AgentChatBody({
             the card (ModelPill) to close while the composer is concealed —
             their portaled content would otherwise strand at the viewport
             origin once this card goes display:none. */}
-          <ComposerConcealedContext.Provider value={composerConcealed}>
+          <ComposerConcealedContext.Provider value={composerConcealed || askCollapsed}>
             <div
               ref={composerCardRef}
+              data-composer-ask={askCollapsed ? "pill" : "composer"}
               className={cn(
-                "relative flex w-full min-w-0 flex-col border px-3.5 py-3 transition-[border-color,background,box-shadow] duration-150 ease-out",
+                "relative flex w-full min-w-0 flex-col border px-3.5 py-3",
                 // sidebar-bg + composer-border, shared with Create, user
                 // messages and the cards docked above; focusing or typing
                 // changes nothing.
                 COMPOSER_SURFACE_CLS,
                 COMPOSER_SURFACE_RADIUS,
+                composerAskCardClasses(askCollapsed),
                 dragActive && COMPOSER_DRAG_CLS,
                 // Guarded modes (Claude Plan / Codex Ask / Cursor Ask): hide the
                 // solid border; the SVG dotted frame below provides the visible
-                // edge (spaced round dots, --border4).
-                composerGuarded && !dragActive && "!border-transparent",
+                // edge (spaced round dots, --border4). The pill keeps its edge.
+                composerGuarded && !dragActive && !askCollapsed && "!border-transparent",
                 // Hidden only while the chat isn't interactive; cards dock
                 // above it instead. hidden (not unmount) so the typed draft +
                 // attachments survive.
                 composerConcealed && "hidden",
               )}
-              {...(dragHandlers ?? {})}
+              {...(askCollapsed && dragHandlers
+                ? { ...dragHandlers, onDrop: (event: React.DragEvent) => { dragHandlers.onDrop(event); activateAskPane(); } }
+                : (dragHandlers ?? {}))}
             >
               {/* Guarded-mode dotted frame (spaced round dots) — overlays the
               card edge; anchors to this relative card. */}
-              {composerGuarded && !dragActive && <PlanModeFrame />}
+              {composerGuarded && !dragActive && !askCollapsed && <PlanModeFrame />}
               {/* Slash / @ / # pickers anchor to THIS card (position: relative)
               so the popover matches the composer width,
               not the full-width wrapper above. */}
-              {composerSuggestionPopup}
-              {dragActive && <ComposerDropVeil />}
+              {!askCollapsed && composerSuggestionPopup}
+              {dragActive && !askCollapsed && <ComposerDropVeil />}
+              <ComposerAskPill
+                agent={askAgentName}
+                collapsed={askCollapsed}
+                onActivate={activateAskPane}
+                buttonRef={askPillRef}
+                labelRef={askLabelRef}
+              />
+              <div className={composerAskContentClasses(askCollapsed)} {...(askCollapsed ? { inert: "" } : {})}>
               <PromptInput
                 onSubmit={(e) => {
                   e.preventDefault();
@@ -4668,7 +4714,7 @@ function AgentChatBody({
                       AgentChat. Modal/file actions remain deferred past Radix
                       focus restoration inside the island. */}
                       <ComposerAttachmentMenu
-                        concealed={composerConcealed}
+                        concealed={composerConcealed || askCollapsed}
                         onAttachFiles={handleAttachFiles}
                         onAttachTranscript={openTranscriptPicker}
                         onLinkWorkspace={openWorkspacePicker}
@@ -4704,7 +4750,7 @@ function AgentChatBody({
                         agentId={session.agentId ?? chatThread?.agentId ?? null}
                         sessionId={session.executionId}
                         workspaceId={session.cwd ?? chatThread?.folder ?? null}
-                        concealed={composerConcealed || !surfaceActive}
+                        concealed={composerConcealed || askCollapsed || !surfaceActive}
                         onPrepare={prepareSessionTools}
                         preparing={
                           workspaceProvisioning || session.status === "warming"
@@ -4787,6 +4833,7 @@ function AgentChatBody({
                   </PromptInputToolbar>
                 </PromptInputBody>
               </PromptInput>
+              </div>
             </div>
           </ComposerConcealedContext.Provider>
           {/* Keeps the same height as EmptyComposer's toolbar so the chrome doesn't

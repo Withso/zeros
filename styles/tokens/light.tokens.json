@@ -8,7 +8,7 @@
         "colorSpace": "hsl",
         "components": [30.0, 20.0, 98.039]
       },
-      "$description": "INACTIVE chat window fill (below bg1)",
+      "$description": "one step below bg1; the Browser tab's backdrop",
       "$extensions": {
         "org.zeros": {
           "cssName": "--bg0",

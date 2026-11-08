@@ -1088,3 +1088,50 @@ Each landed step appends one line: date, workstream, what landed, evidence.
   so (canvas versions 397 and 398). Evidence: `pill.test.ts`,
   `git-defaults.test.ts`, `pr-pill.test.ts` and `chat-reading-type.test.ts`
   failed red first; the local-links smoke measures the link pill at 13px.
+- 2026-11-07 · 5 · The queue card has no Stop. While a cloud send waits for
+  its workspace, the header is the collapse toggle alone, the title on the
+  left and the chevron on the right, and the status line keeps its timer.
+  Deleting a message that waits for readiness cancels that wait, as Stop
+  did, and a wait that runs out turns the card to Not sent with Retry. A
+  message the cloud has already saved stays Sending… and runs when the
+  workspace starts, where the composer's Stop applies. Local queues never
+  showed it. The Queued messages board's Waiting state drops the button
+  (canvas version 399). Evidence: `queued-messages-card.test.ts` failed red
+  first.
+- 2026-11-07 · 2, 5, 6 · Split panes are told apart by their edge, not their
+  fill (`docs/design-system.md` §0 item 13; canvas version 400, seams "Solid
+  with focus edges", now the Solid split boards' default). Every pane keeps
+  `bg1`; the focused pane takes a `border2` edge and the others `border1`,
+  their strip and body at 90% opacity, easing over 120ms. Cursor's reference
+  dims to about 80%, which would take `fg3` below AA in Light and `muted-fg`
+  below its 3:1 floor in Dark; at 90% every tier holds. The side island drops
+  its left inset, so its edge is the line the chat's resize handle runs along,
+  and only that outer edge is `border2`. A split therefore keeps its own 12px
+  right gutter: `splitPaneGutters()` is 24px wide, so two panes beside
+  Workbench need 756px (was 744), and `ConversationPaneLayout` loses its
+  `workbenchBeside` prop. The `bg0` and `--pane-bg` token descriptions follow.
+  Evidence: the pane-surfaces and workbench-island tests failed red first;
+  the chat-surfaces smoke measures the resize handle ending on the island's
+  `border2` edge, every pane on `bg1` with its edge tier and dim, and the 12px
+  right gutter with the side column shown and hidden, in Dark and Light.
+- 2026-11-07 · 5, 6 · Split panes: the composer becomes the Ask pill
+  (canvas versions 401 and 402, "Chat window · Ask to focus" and "Composer ·
+  Ask pill"). An unfocused pane's composer card collapses into "Ask Claude",
+  "Ask Codex", "Ask Cursor" or the chat's agent (`askPillAgentName`), 32px
+  and centred, on the composer's own surface; cards above it stay and
+  streaming carries on. Pressing it, a drop on it or any click in the pane
+  focuses the pane, and the card eases into the composer over 220ms (180ms
+  back) with its contents cross-fading at full width
+  (`shared/ui/composer-ask.tsx`); a pill reached with Tab hands the caret to
+  the editor, and reduced motion swaps in place. Each pane publishes its
+  focus to `paneFocus` beside the portal slots, so a focus move re-renders
+  only the two chats that fold or unfold. The unfocused dim moves to 80%, the
+  owner's choice. Two bugs fixed on the way: the pane surface froze every
+  transition for a paint whenever the active chat changed, so focus moves
+  between panes never eased (its key now follows each pane's displayed
+  chat), and a new `shared/ui/__tests__` folder sat outside Vitest's include
+  globs, so its test moved to `features/agent/__tests__`. Evidence: the
+  composer-ask pill, label and dock tests and the pane-surfaces, store and
+  contrast tests failed red first; the chat-surfaces smoke measures the
+  pill, watches the morph pass through intermediate widths frame by frame,
+  and checks the caret, the keyboard path and reduced motion.
