@@ -3,6 +3,7 @@
 // the renderer. Missing credentials, offline service, and bad replies are quiet.
 import type { AgentMessage } from "@zeros/protocol/agent-messages";
 import { getSession, onAuthStateChange } from "../auth/auth-store";
+import { isLocalDevelopment } from "../../platform/runtime";
 import { CONTROL_PLANE_URL } from "../team/control-plane";
 import { controlPlaneFetch } from "../update/control-plane-fetch";
 import { useWorkspaceStore, type Action } from "../../state/workspace-store";
@@ -105,7 +106,8 @@ type TitleTry = "titled" | "retry" | "give-up" | "unauthorized" | "quiet";
 
 /** At most one naming flight per chat/message, including remounts. Both the
  * exact owner and seeded title must still match after each response; a manual
- * rename wins, and stops any retry. */
+ * rename wins, and stops any retry. Returns whether a service request is in
+ * flight or settled for this chat: the backfill budgets those, not local names. */
 export function requestAiChatTitle(
   args: {
     chatId: string;
@@ -116,11 +118,20 @@ export function requestAiChatTitle(
   },
   authChanged = false,
 ): boolean {
-  if (!CONTROL_PLANE_URL || !args.prompt.trim()) return false;
+  if (!args.prompt.trim()) return false;
   const original = useWorkspaceStore
     .getState()
     .chats.find((chat) => chat.id === args.chatId);
   if (!original || original.title !== args.expectedTitle) return false;
+  // Zeros Local has no account or hosted services, and a build without a
+  // control plane has nowhere to ask. Waiting would leave the chat Untitled for
+  // good, so its own opening words name it, without any network request.
+  if (!CONTROL_PLANE_URL || isLocalDevelopment()) {
+    const title = fallbackChatTitle(args.prompt);
+    if (title)
+      args.dispatch({ type: "UPDATE_CHAT_TITLE_IF", id: args.chatId, title, expectedTitle: args.expectedTitle });
+    return false;
+  }
   const { folder, createdAt } = original;
   const current = () => {
     const chat = useWorkspaceStore

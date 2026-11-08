@@ -112,6 +112,23 @@ export interface ProviderUsageDependencies {
   ): Promise<ProviderUsageData>;
 }
 
+/** What a usage read is for: the selection and the selected profile's
+ * identity, credential generation and state. Selection changes bump
+ * `selectionRevision` and replaced credentials bump the profile's `revision`,
+ * so A→B→A still differs. Status probes also merge plan and expiry into the
+ * profile; those details do not change whose usage was read. */
+function usageOwner(store: ProviderAccountStore): string {
+  const selected = store.accounts.find((account) => account.id === store.activeId);
+  return JSON.stringify([
+    store.method,
+    store.activeId ?? null,
+    store.selectionRevision ?? 0,
+    selected
+      ? [selected.id, selected.revision ?? 0, selected.configDir ?? null, selected.state, selected.email ?? null, selected.organization ?? null]
+      : null,
+  ]);
+}
+
 /** No credentials or provider response bodies cross IPC. An account switch
  * during a slow read invalidates the response, including A→B→A changes that
  * replaced A's credentials. Reads neither change account selection nor launch
@@ -135,7 +152,7 @@ export async function readSelectedProviderUsage(
   ) {
     throw new Error("The connection changed. Refresh to view its usage.");
   }
-  const before = JSON.stringify(store);
+  const owner = usageOwner(store);
   let data: ProviderUsageData;
   try {
     data = await deps.readUsage(
@@ -147,7 +164,7 @@ export async function readSelectedProviderUsage(
     throw new Error("Usage is unavailable right now. Try refreshing.");
   }
   if (
-    JSON.stringify(deps.readStore()) !== before ||
+    usageOwner(deps.readStore()) !== owner ||
     (request.identity !== undefined && data.identity !== request.identity)
   )
     throw new Error("The connection changed. Refresh to view its usage.");

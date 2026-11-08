@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // ──────────────────────────────────────────────────────────
-// Zeros doctor — one-shot memory / process census (`pnpm doctor`)
+// Zeros doctor — one-shot memory / process census (`pnpm run doctor`)
 // ──────────────────────────────────────────────────────────
 //
 // The engine self-logs `[Zeros mem]` (its own rss) and main logs `[Zeros
@@ -151,7 +151,7 @@ if (orphans.length) {
     }
     console.log(`\n  ${green(`reaped ${killed} orphan(s).`)}`);
   } else {
-    console.log(`\n  ${dim("run `pnpm doctor --kill-orphans` to reap them.")}`);
+    console.log(`\n  ${dim("run `pnpm run doctor --kill-orphans` to reap them.")}`);
   }
 }
 

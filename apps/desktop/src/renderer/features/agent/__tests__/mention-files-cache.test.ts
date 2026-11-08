@@ -6,6 +6,12 @@ import {
   invalidateMentionFiles,
   clearMentionFilesCache,
 } from "../mention-files-cache";
+import {
+  beginPendingCreate,
+  bindPendingCreate,
+  finishPendingCreate,
+  isLocalWorkspaceCreating,
+} from "../../../state/pending-workspaces";
 
 vi.mock("../../../platform/git", () => ({
   listWorkspaceMentionPaths: vi.fn(),
@@ -292,5 +298,59 @@ describe("mention file search", () => {
     await tick();
     expect(new Set(list.mock.calls.map((call) => call[2])).size).toBe(2);
     search.clear();
+  });
+});
+
+describe("a workspace whose checkout is still being created", () => {
+  const folder = "/workspaces/repo/Nickel";
+  const readable = (cwd: string) => !isLocalWorkspaceCreating(cwd);
+
+  it("asks for its files only once the create settles", async () => {
+    list.mockResolvedValue(["src/app.ts"]);
+    const token = beginPendingCreate({ repoRoot: "/repo", repoSlug: "repo", path: folder });
+    const search = new MentionFileSearch(() => {}, readable);
+    // Focus intent, an open @ menu and typing all wait for the folder.
+    search.prefetch(folder);
+    search.search(folder, "");
+    search.refresh(folder, "");
+    await tick();
+    expect(list).not.toHaveBeenCalled();
+    // Unknown, not empty: the menu keeps loading rather than showing no files.
+    expect(search.snapshot(folder, "")).toMatchObject({ data: undefined, error: null });
+
+    finishPendingCreate(token);
+    search.resume();
+    await tick();
+    expect(list).toHaveBeenCalledExactlyOnceWith(folder, "", expect.any(String));
+    expect(search.snapshot(folder, "").data).toContainEqual({ path: "src/app.ts", kind: "file" });
+    search.resume();
+    await tick();
+    expect(list).toHaveBeenCalledOnce();
+    search.clear();
+  });
+
+  it("forgets a waiting read when the composer moves on", async () => {
+    list.mockResolvedValue([]);
+    const token = beginPendingCreate({ repoRoot: "/repo", repoSlug: "repo", path: folder });
+    const search = new MentionFileSearch(() => {}, readable);
+    search.search(folder, "");
+    search.clear();
+    finishPendingCreate(token);
+    search.resume();
+    await tick();
+    expect(list).not.toHaveBeenCalled();
+  });
+
+  it("leaves cloud workspaces and settled folders to the ordinary reads", () => {
+    const local = beginPendingCreate({ repoRoot: "/repo", repoSlug: "repo", path: folder });
+    const cloud = beginPendingCreate({ repoRoot: "/repo", repoSlug: "repo", placement: "cloud" });
+    bindPendingCreate(cloud, "cloud://org/ws");
+    expect(isLocalWorkspaceCreating(folder)).toBe(true);
+    expect(isLocalWorkspaceCreating("cloud://org/ws")).toBe(false);
+    expect(isLocalWorkspaceCreating("/repo")).toBe(false);
+    expect(isLocalWorkspaceCreating(null)).toBe(false);
+    finishPendingCreate(local);
+    finishPendingCreate(cloud);
+    expect(isLocalWorkspaceCreating(folder)).toBe(false);
   });
 });

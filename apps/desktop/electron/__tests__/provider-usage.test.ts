@@ -132,6 +132,50 @@ describe("selected account usage boundary", () => {
     finish({ windows: [] });
     await expect(pending).rejects.toThrow("connection changed");
   });
+  const readDuring = (change: (store: ProviderAccountStore) => ProviderAccountStore) => {
+    let store = makeStore();
+    let finish!: (value: { windows: [] }) => void;
+    const pending = readSelectedProviderUsage(
+      { provider: "claude", action: "usage", method: "account", accountId: id },
+      {
+        readStore: () => store,
+        readUsage: () => new Promise<{ windows: [] }>((resolve) => { finish = resolve; }),
+      },
+    );
+    store = change(store);
+    finish({ windows: [] });
+    return pending;
+  };
+  const selected = (store: ProviderAccountStore, patch: Partial<ProviderAccountStore["accounts"][number]>) => ({
+    ...store,
+    accounts: store.accounts.map((account) => account.id === id ? { ...account, ...patch } : account),
+  });
+
+  it("keeps a result when a status probe only refreshes the profile's plan or expiry", async () => {
+    // Right after sign-in the status probe merges details into the new profile
+    // while its first usage read is in flight; that is not a different account.
+    await expect(
+      readDuring((store) => ({
+        ...selected(store, { plan: "max", expiresAtMs: 1_900_000_000_000 }),
+        accounts: [
+          ...selected(store, { plan: "max", expiresAtMs: 1_900_000_000_000 }).accounts,
+          { id: "00000000-0000-4000-8000-000000000002", state: "connected", configDir: "/owned/account-b" },
+        ],
+      })),
+    ).resolves.toMatchObject({ provider: "claude", accountId: id, windows: [] });
+  });
+
+  it.each<[string, (store: ProviderAccountStore) => ProviderAccountStore]>([
+    ["its credentials were replaced (A to B to A)", (store) => selected(store, { revision: 1 })],
+    ["the selection changed and came back", (store) => ({ ...store, selectionRevision: 1 })],
+    ["the profile expired", (store) => selected(store, { state: "expired" })],
+    ["the profile signed in as someone else", (store) => selected(store, { email: "b@example.test" })],
+    ["the profile moved", (store) => selected(store, { configDir: "/owned/account-b" })],
+    ["the connection method changed", (store) => ({ ...store, method: "cli" })],
+  ])("still rejects a late result when %s", async (_label, change) => {
+    await expect(readDuring(change)).rejects.toThrow("connection changed");
+  });
+
   it("rejects a renderer account/method mismatch without reading any credential", async () => {
     const readUsage = vi.fn();
     await expect(

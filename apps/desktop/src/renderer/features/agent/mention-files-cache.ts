@@ -156,10 +156,17 @@ export function clearMentionFilesCache(): void {
 export class MentionFileSearch {
   private key: string | null = null;
   private queued: string | null = null;
+  /** A read held back because its folder could not be read yet. */
+  private deferred: string | null = null;
   private running: { key: string; cwd: string; version: number } | null = null;
   private unsubscribe: (() => void) | undefined;
 
-  constructor(private readonly notify: () => void) {}
+  /** `readable` holds every read of a folder that does not exist yet (a
+   * workspace still being created); `resume` asks again once it does. */
+  constructor(
+    private readonly notify: () => void,
+    private readonly readable: (cwd: string) => boolean = () => true,
+  ) {}
 
   snapshot(cwd: string, query: string) {
     const snapshot = mentionFilesCache.getSnapshot(keyFor(cwd, query));
@@ -178,6 +185,7 @@ export class MentionFileSearch {
     this.unsubscribe?.();
     this.key = key;
     this.queued = null;
+    this.deferred = null;
     if (key && workspace) {
       pruneWorkspaces();
       let version = mentionFilesCache.getSnapshot(key).invalidationVersion;
@@ -215,7 +223,7 @@ export class MentionFileSearch {
    * so typing @ answers immediately. It neither subscribes to file changes nor
    * mints a revision, and repeats within WARM_REUSE_MS are free. */
   prefetch(cwd: string | null): void {
-    if (!cwd) return;
+    if (!cwd || !this.readable(cwd)) return;
     const workspace = warmWorkspace(cwd);
     pruneWorkspaces();
     if (
@@ -229,17 +237,29 @@ export class MentionFileSearch {
       .catch(() => {}); // The exact-key snapshot reports failure and retains rows.
   }
 
+  /** Ask for the read `readable` held back, if the composer still wants it. */
+  resume(): void {
+    const key = this.deferred;
+    this.deferred = null;
+    if (key && key === this.key) this.request(key);
+  }
+
   clear(): void {
     this.unsubscribe?.();
     this.unsubscribe = undefined;
     this.key = null;
     this.queued = null;
+    this.deferred = null;
   }
 
   private request(key: string): void {
     const snapshot = mentionFilesCache.getSnapshot(key);
     const version = snapshot.invalidationVersion;
     const [cwd] = JSON.parse(key) as [string, string];
+    if (!this.readable(cwd)) {
+      this.deferred = key;
+      return;
+    }
     if (this.running?.cwd === cwd) {
       // Repeated focus/open intent shares this read. Only a different query or
       // an intervening file change warrants another request after it settles.

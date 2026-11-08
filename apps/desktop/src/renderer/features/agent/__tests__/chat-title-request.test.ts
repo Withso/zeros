@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const state = vi.hoisted(() => ({
   url: "https://api.example.test",
+  localDevelopment: false,
   chats: [{ id: "chat-1", title: "Untitled", folder: "/repo", createdAt: 1 }],
   session: vi.fn(),
   subscribe: vi.fn(),
@@ -14,6 +15,10 @@ vi.mock("../../team/control-plane", () => ({
   get CONTROL_PLANE_URL() {
     return state.url;
   },
+}));
+vi.mock("../../../platform/runtime", async (original) => ({
+  ...(await original<object>()),
+  isLocalDevelopment: () => state.localDevelopment,
 }));
 vi.mock("../../../state/workspace-store", () => ({
   useWorkspaceStore: { getState: () => ({ chats: state.chats }) },
@@ -34,6 +39,7 @@ const settled = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 beforeEach(() => {
   vi.resetModules();
   state.url = "https://api.example.test";
+  state.localDevelopment = false;
   state.chats = [
     { id: "chat-1", title: "Untitled", folder: "/repo", createdAt: 1 },
   ];
@@ -292,13 +298,10 @@ describe("background chat title requests", () => {
       vi.useRealTimers();
     }
   });
-  it("makes no request while signed out, unconfigured, blank, or already renamed", async () => {
+  it("makes no request while signed out, blank, or already renamed", async () => {
     const { requestAiChatTitle } = await import("../chat-title");
     const input = args();
     expect(requestAiChatTitle({ ...input, prompt: "  " })).toBe(false);
-    state.url = "";
-    expect(requestAiChatTitle(input)).toBe(false);
-    state.url = "https://api.example.test";
     state.chats[0]!.title = "Manual title";
     expect(requestAiChatTitle(input)).toBe(false);
     state.chats[0]!.title = "Untitled";
@@ -306,6 +309,35 @@ describe("background chat title requests", () => {
     requestAiChatTitle(input);
     await settled();
     expect(fetch).not.toHaveBeenCalled();
+    expect(input.dispatch).not.toHaveBeenCalled();
+  });
+  it.each([
+    ["no title service is configured", () => { state.url = ""; }],
+    ["the app is Zeros Local", () => { state.localDevelopment = true; }],
+  ])("names the chat from its prompt, without a request, when %s", async (_label, setUp) => {
+    setUp();
+    const { requestAiChatTitle } = await import("../chat-title");
+    const input = args();
+    // No paid request was made, so the backfill's request budget is untouched.
+    expect(requestAiChatTitle(input)).toBe(false);
+    expect(input.dispatch).toHaveBeenCalledExactlyOnceWith({
+      type: "UPDATE_CHAT_TITLE_IF",
+      id: "chat-1",
+      title: "Fix the login redirect bug",
+      expectedTitle: "Untitled",
+    });
+    await settled();
+    expect(state.session).not.toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalled();
+  });
+  it("leaves a renamed or blank chat alone when there is no title service", async () => {
+    state.localDevelopment = true;
+    const { requestAiChatTitle } = await import("../chat-title");
+    const input = args();
+    expect(requestAiChatTitle({ ...input, prompt: "  " })).toBe(false);
+    expect(requestAiChatTitle({ ...input, prompt: "```" })).toBe(false);
+    state.chats[0]!.title = "Manual title";
+    expect(requestAiChatTitle(input)).toBe(false);
     expect(input.dispatch).not.toHaveBeenCalled();
   });
 });
