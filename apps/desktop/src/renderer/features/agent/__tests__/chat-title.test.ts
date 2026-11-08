@@ -117,6 +117,13 @@ describe("fallbackChatTitle", () => {
     expect(fallbackChatTitle("ssh://host.test/repo.git")).toBeNull();
     // A bidirectional override would make the tab read in a misleading order.
     expect(fallbackChatTitle("Rename \u202Etxt.exe\u202C\tfiles now")).toBe("Rename txt.exe files now");
+    // An invisible character inside a link must not split its query off.
+    expect(fallbackChatTitle("Open https://example.test/reset?\u200Btoken=synthetic")).toBe("Open");
+    expect(fallbackChatTitle("Open https:\u200B//example.test/?token=synthetic now")).toBe("Open now");
+    // Joiners shape words in several scripts and stay.
+    expect(fallbackChatTitle("Review \u0915\u094D\u200D\u0937 and \u0645\u06CC\u200C\u062E\u0648\u0627\u0647\u0645")).toBe(
+      "Review \u0915\u094D\u200D\u0937 and \u0645\u06CC\u200C\u062E\u0648\u0627\u0647\u0645",
+    );
   });
 });
 

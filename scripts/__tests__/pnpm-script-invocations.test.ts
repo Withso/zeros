@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { lstatSync, readFileSync } from "node:fs";
+import { closeSync, constants, fstatSync, openSync, readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 // `pnpm <name>` runs a package script only when <name> is not a pnpm command.
@@ -23,6 +23,21 @@ const scripts = Object.keys(
   (JSON.parse(readFileSync("package.json", "utf8")) as { scripts: Record<string, string> }).scripts,
 );
 const shadowed = scripts.filter((name) => PNPM_BUILT_INS.has(name));
+
+/** A tracked symlink can point outside the checkout and is not guidance: open
+ * without following links and read through the validated descriptor. */
+function readRegularFile(file: string): string | null {
+  let fd: number | undefined;
+  try {
+    fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW);
+    return fstatSync(fd).isFile() ? readFileSync(fd, "utf8") : null;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ELOOP") return null;
+    throw error;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
 
 /** 1-based lines that invoke one of `names` without `run`, including a command
  * a shell continuation splits across lines. */
@@ -50,11 +65,11 @@ describe("package scripts named like pnpm commands", () => {
     expect(shadowed.length).toBeGreaterThan(0);
     const files = execFileSync("git", ["ls-files"], { encoding: "utf8" })
       .split("\n")
-      // A tracked symlink can point outside the checkout; it is not guidance.
-      .filter((file) => GUIDANCE.test(file) && TEXT.test(file) && lstatSync(file).isFile());
-    const offenders = files.flatMap((file) =>
-      shadowedInvocations(readFileSync(file, "utf8"), shadowed).map((line) => `${file}:${line}`),
-    );
+      .filter((file) => GUIDANCE.test(file) && TEXT.test(file));
+    const offenders = files.flatMap((file) => {
+      const text = readRegularFile(file);
+      return text === null ? [] : shadowedInvocations(text, shadowed).map((line) => `${file}:${line}`);
+    });
     expect(offenders).toEqual([]);
   });
 });
