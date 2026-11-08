@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { lstatSync, readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 // `pnpm <name>` runs a package script only when <name> is not a pnpm command.
@@ -24,17 +24,36 @@ const scripts = Object.keys(
 );
 const shadowed = scripts.filter((name) => PNPM_BUILT_INS.has(name));
 
+/** 1-based lines that invoke one of `names` without `run`, including a command
+ * a shell continuation splits across lines. */
+function shadowedInvocations(text: string, names: readonly string[]): number[] {
+  // `pnpm licenses:generate` names a different script, so `:`, `.` and `-`
+  // continue the name.
+  const invocation = new RegExp(`\\bpnpm\\s+(?:${names.join("|")})(?![\\w:.-])`);
+  const lines = text.split("\n");
+  return lines.flatMap((line, index) => {
+    let command = line;
+    for (let next = index; command.endsWith("\\") && next + 1 < lines.length; next++)
+      command = command.slice(0, -1) + " " + lines[next + 1]!;
+    return invocation.test(command) ? [index + 1] : [];
+  });
+}
+
 describe("package scripts named like pnpm commands", () => {
+  it("finds an invocation a shell continuation splits", () => {
+    const name = shadowed[0]!;
+    expect(shadowedInvocations(`pnpm \\\n  ${name} --flag`, [name])).toEqual([1]);
+    expect(shadowedInvocations(`pnpm run ${name}\npnpm ${name}-like`, [name])).toEqual([]);
+  });
+
   it("are always invoked with pnpm run", () => {
     expect(shadowed.length).toBeGreaterThan(0);
-    const invocation = new RegExp(`\\bpnpm\\s+(?:${shadowed.join("|")})\\b`);
     const files = execFileSync("git", ["ls-files"], { encoding: "utf8" })
       .split("\n")
-      .filter((file) => GUIDANCE.test(file) && TEXT.test(file));
+      // A tracked symlink can point outside the checkout; it is not guidance.
+      .filter((file) => GUIDANCE.test(file) && TEXT.test(file) && lstatSync(file).isFile());
     const offenders = files.flatMap((file) =>
-      readFileSync(file, "utf8")
-        .split("\n")
-        .flatMap((line, index) => (invocation.test(line) ? [`${file}:${index + 1}`] : [])),
+      shadowedInvocations(readFileSync(file, "utf8"), shadowed).map((line) => `${file}:${line}`),
     );
     expect(offenders).toEqual([]);
   });

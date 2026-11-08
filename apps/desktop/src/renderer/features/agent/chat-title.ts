@@ -80,11 +80,14 @@ export function sanitizeAiTitle(raw: string): string | null {
 }
 
 /** A title from the prompt's own opening words, for when the service cannot
- * name the chat: better than leaving it Untitled for good. */
+ * name the chat: better than leaving it Untitled for good. Tabs show titles
+ * outside the transcript, so links (which can carry tokens) and invisible
+ * format characters such as bidirectional overrides never reach one. */
 export function fallbackChatTitle(prompt: string): string | null {
   for (const raw of prompt.split(/\r?\n/)) {
     const words = raw
-      .replace(/\bzeros(?:-alpha|-beta|-dev)?:\/\/\S+/g, " ")
+      .replace(/[\p{Cc}\p{Cf}]/gu, " ")
+      .replace(/\b[a-z][a-z\d+.-]*:\/\/\S+/gi, " ")
       .replace(/[`*_#>]/g, "")
       .split(/\s+/)
       .filter((word) => /[\p{L}\p{N}]/u.test(word))

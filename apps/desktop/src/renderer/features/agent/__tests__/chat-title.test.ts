@@ -110,6 +110,14 @@ describe("fallbackChatTitle", () => {
     expect(fallbackChatTitle("zeros-dev://chat/x")).toBeNull();
     expect(Array.from(fallbackChatTitle("a".repeat(200))!).length).toBeLessThanOrEqual(60);
   });
+  it("keeps links and invisible formatting characters out of the title", async () => {
+    const { fallbackChatTitle } = await import("../chat-title");
+    // A tab shows the title outside the transcript: a link can carry a token.
+    expect(fallbackChatTitle("Open https://example.test/reset?token=synthetic and fix it")).toBe("Open and fix it");
+    expect(fallbackChatTitle("ssh://host.test/repo.git")).toBeNull();
+    // A bidirectional override would make the tab read in a misleading order.
+    expect(fallbackChatTitle("Rename \u202Etxt.exe\u202C\tfiles now")).toBe("Rename txt.exe files now");
+  });
 });
 
 describe("compactTitlePrompt", () => {

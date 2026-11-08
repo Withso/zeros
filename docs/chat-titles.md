@@ -19,9 +19,10 @@ separator. The server rejects inputs exceeding 500 rather than accepting an
 unbounded payload. Attachment-only or blank first messages do not use a later
 message as a substitute.
 
-Valid titles contain 3–5 whitespace-separated words, at most 80 code points.
-Wrapping quotes, simple markdown and emoji are removed; extra words are clamped
-to five. Refusals, diagnostics, malformed or incomplete responses are rejected.
+Valid service titles contain 3–5 whitespace-separated words, at most 80 code
+points. Wrapping quotes, simple markdown and emoji are removed; extra words are
+clamped to five. Refusals, diagnostics, malformed or incomplete responses are
+rejected.
 
 A missing sign-in or a refused session (HTTP 401) keeps the seeded title and
 waits for the next sign-in. A busy or failing service (HTTP 429 or 5xx), a
@@ -94,11 +95,12 @@ workspace state update, and visible chat tab, including delayed sign-in and the
 input/output limits. Authentication and OpenAI output are fixtures,
 so this test makes no paid requests. It does not replace a deployed-app check.
 
-The title limit is **3–5 words per title**, not 3–5 output tokens. The dashboard
-aggregates usage across requests, and tokenization plus response formatting can
-make token counts larger than word counts. `max_output_tokens: 32` is a ceiling,
-not a fixed charge; successful output is still sanitized to at most five words.
-See OpenAI's [output-token accounting](https://developers.openai.com/api/docs/guides/token-counting).
+The service title limit is **3–5 words per title**, not 3–5 output tokens. The
+dashboard aggregates usage across requests, and tokenization plus response
+formatting can make token counts larger than word counts.
+`max_output_tokens: 32` is a ceiling, not a fixed charge; successful output is
+still sanitized to at most five words. See OpenAI's [output-token
+accounting](https://developers.openai.com/api/docs/guides/token-counting).
 
 OpenAI documents the exact [Luna model and supported reasoning settings](https://developers.openai.com/api/docs/models/gpt-6-luna).
 Character limits bound input size but are not token counts; actual cost depends

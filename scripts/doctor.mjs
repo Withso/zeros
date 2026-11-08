@@ -151,7 +151,9 @@ if (orphans.length) {
     }
     console.log(`\n  ${green(`reaped ${killed} orphan(s).`)}`);
   } else {
-    console.log(`\n  ${dim("run `pnpm run doctor --kill-orphans` to reap them.")}`);
+    // Not a recommendation: the reap is machine-wide, and another checkout's
+    // processes are never ours to kill.
+    console.log(`\n  ${dim("--kill-orphans reaps every process listed, from any checkout; stop only your own.")}`);
   }
 }
 
