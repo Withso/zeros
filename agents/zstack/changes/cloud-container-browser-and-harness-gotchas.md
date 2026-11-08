@@ -8,6 +8,9 @@ Target: `gotchas.md` (browser and harness section).
   `PLAYWRIGHT_BROWSERS_PATH` at a scratch directory holding
   `chromium-<wanted>` and `chromium_headless_shell-<wanted>` symlinks to the
   installed builds; Chromium-backed Vitest and ui-smoke suites then run.
+  `native-window-chrome.test.ts` still fails 11 cases on an untouched
+  checkout there (build 1243 computes `-webkit-app-region` as `none`), so
+  rerun it on a stash before blaming a change.
 - **One module graph.** A `tsx` script written as `.mts` (top-level `await`)
   that imports engine modules got its own instance of
   `directory-registry.ts`, so `primeDesignDirectoryName` never reached

@@ -2,8 +2,9 @@ import { expect } from "@playwright/test";
 
 /** 2026-11-06 direction (Zeros Design v391, "Solid split"): only while the chat
  *  column is split, panes stand apart as solid surfaces on the bg1 chrome. They
- *  sit 12px apart, the gap being the resize handle, and 12px in from the
- *  column's left, right and bottom edges. Every corner rounds at 12px, nothing
+ *  sit 8px apart both ways (12px until 2026-11-08), the gap being the resize
+ *  handle, and 12px in from the column's left, right and bottom edges. Every
+ *  corner rounds at 12px, nothing
  *  fades between panes, and a lone pane runs edge to edge. The workspace header
  *  row draws no divider, and the side column holds its open tab in a bg1
  *  island. 2026-11-07: every pane keeps bg1 and edges tell them apart, border2
@@ -158,11 +159,11 @@ export async function runChatSurfacesSmoke({ page, check, harnessBase }) {
     for (const pane of state.panes) near(pane.box.bottom, state.surface.bottom - 12);
     near(right.box.right, state.surface.right - 12);
     near(state.islandLeft - right.box.right, 12);
-    // The 12px gap is the resize handle and draws nothing.
-    near(right.box.left - left.box.right, 12);
+    // The 8px gap is the resize handle and draws nothing.
+    near(right.box.left - left.box.right, 8);
     expect(state.separators).toHaveLength(1);
     near(state.separators[0].box.left, left.box.right);
-    expect(state.separators[0].box.width).toBe(12);
+    expect(state.separators[0].box.width).toBe(8);
     expect(state.separators[0].children).toBe(0);
     expect(state.panes.filter((pane) => pane.focused)).toHaveLength(1);
     focusEdges(state);
@@ -174,7 +175,7 @@ export async function runChatSurfacesSmoke({ page, check, harnessBase }) {
     expect(state.fades).toBe(0);
   }
   expect(new Set(splitBg1).size).toBe(2);
-  check("Split Right: solid panes 12px apart and 12px in from every side, 12px from the side island, rounded at every corner, all on bg1 with a border2 edge on the focused pane and border1 and an 80% dim on the other, in Dark and Light", true);
+  check("Split Right: solid panes 8px apart and 12px in from every side, 12px from the side island, rounded at every corner, all on bg1 with a border2 edge on the focused pane and border1 and an 80% dim on the other, in Dark and Light", true);
 
   // The split's right gutter is its own, so hiding Workbench changes nothing.
   await page.evaluate(() => {
@@ -275,15 +276,22 @@ export async function runChatSurfacesSmoke({ page, check, harnessBase }) {
   await settledDims();
   const grid = await read();
   const [whole, top, bottom] = grid.panes;
-  near(bottom.box.top - top.box.bottom, 12);
-  near(top.box.left - whole.box.right, 12);
-  near(bottom.box.left - whole.box.right, 12);
+  near(bottom.box.top - top.box.bottom, 8);
+  near(top.box.left - whole.box.right, 8);
+  near(bottom.box.left - whole.box.right, 8);
   expect(grid.separators).toHaveLength(2);
+  // The side-by-side handle, then the stacked one: each is the 8px gap.
+  expect(grid.separators[0].box.width).toBe(8);
+  expect(grid.separators[1].box.height).toBe(8);
+  // The outer gutters stay 12px.
+  near(whole.box.left, grid.surface.left + 12);
+  near(bottom.box.bottom, grid.surface.bottom - 12);
+  near(top.box.right, grid.surface.right - 12);
   for (const pane of grid.panes) expect(pane.radii).toEqual(["12px", "12px", "12px", "12px"]);
   focusEdges(grid);
   expect([whole.edge[1], top.edge[1], bottom.edge[1]]).toEqual([grid.border1, grid.border1, grid.border2]);
   expect(grid.fades).toBe(0);
-  check("Split Down beside a pane: a crisp 12px gap both ways at the T-junction, every pane rounded on bg1, only the focused one on border2, nothing fading", true);
+  check("Split Down beside a pane: a crisp 8px gap both ways at the T-junction inside 12px gutters, every pane rounded on bg1, only the focused one on border2, nothing fading", true);
 
   await page.evaluate(() => {
     localStorage.clear();

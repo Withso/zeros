@@ -27,17 +27,18 @@ function classConstant(src: string, name: string): string[] {
 
 // 2026-11-06 direction (Zeros Design v391, "Solid split", replacing the soft
 // valleys of v378 to v383): only while the column is split, panes stand apart
-// as solid surfaces on the bg1 chrome, 12px apart and 12px in from the
-// column's edges, with 12px corners and nothing fading between them. A lone
-// pane runs edge to edge. 2026-11-07: every pane keeps bg1 and edges tell them
-// apart, border2 on the focused pane and border1 on the others, whose content
-// dims to 90%. The side island sits on the column's edge, so the split keeps
-// its own right gutter.
+// as solid surfaces on the bg1 chrome, 12px in from the column's edges, with
+// 12px corners and nothing fading between them. A lone pane runs edge to edge.
+// 2026-11-07: every pane keeps bg1 and edges tell them apart, border2 on the
+// focused pane and border1 on the others, whose content dims to 80%. The side
+// island sits on the column's edge, so the split keeps its own right gutter.
+// 2026-11-08: panes sit 8px apart both ways; the outer gutters keep 12px.
 describe("split pane surfaces", () => {
-  it("makes the divider the 12px gap between split panes, still the resize handle", () => {
-    expect(PANE_SPLITTER_PX).toBe(12);
+  it("makes the divider the 8px gap between split panes both ways, still the resize handle", () => {
+    expect(PANE_SPLITTER_PX).toBe(8);
     const splitter = component(paneLayout(), "PaneSplitter");
-    expect(splitter).toContain('isRow ? "w-3 cursor-ew-resize" : "h-3 cursor-ns-resize"');
+    // w-2 and h-2 are the 8px the split math charges for the divider.
+    expect(splitter).toContain('isRow ? "w-2 cursor-ew-resize" : "h-2 cursor-ns-resize"');
     expect(splitter).not.toMatch(/-m[lrtbxy]?-/);
     expect(splitter).not.toContain("bg-border1");
   });

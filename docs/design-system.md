@@ -177,12 +177,12 @@ exported page by page to [design-implementation/](design-implementation/README.m
 12. **Local and cloud are both first class.** Every surface states its Local
     and cloud behavior; cloud lifecycle never enters a tab banner.
 13. **Split panes are solid islands on the chrome** (2026-11-06; edges
-    2026-11-07). The workspace header row draws no divider
+    2026-11-07; 8px gaps 2026-11-08). The workspace header row draws no divider
     (`PanelHeader divider={false}`) and keeps one 28px glyph slot for branch,
     folder and cloud, so the name always starts at one column; whether a
     branch is published never changes the glyph. A lone chat pane runs edge to
     edge. Only while the column is split, panes stand apart as solid surfaces
-    on the `bg1` chrome: 12px apart both ways (the divider is that gap and the
+    on the `bg1` chrome: 8px apart both ways (the divider is that gap and the
     resize handle), 12px in from the column's left, right and bottom edges,
     every corner 12px, and nothing fading between them, at the tab strip or
     along a seam. Every pane keeps `bg1`, and edges tell them apart: `border2`
@@ -325,7 +325,7 @@ imports, following property paths such as `chip.cls`). The ledger counts
 | Surface | Fill | Hover / selected | Border | Notes |
 | --- | --- | --- | --- | --- |
 | Canvas, active chat, dialogs, sheets | `bg-bg1` | `bg-bg1-hover` | `border-border1` | Dialogs sit on `bg-scrim` |
-| Inactive chat pane | `bg-(--pane-bg)` (= `sidebar-bg`) | — | — | Sets the fill apart only; text keeps full contrast. Split panes stand 12px apart on the `bg1` chrome with 12px corners, no seam and no fade |
+| Split chat pane | `bg-(--pane-bg)` (= `bg1`) | — | `border-border2` focused, `border-border1` otherwise | Only while the column is split: 8px apart both ways on the `bg1` chrome and 12px in from its edges, with 12px corners, no seam and no fade; an unfocused pane's strip and body dim to 80% (§0 item 13) |
 | Raised: tiles | `bg-bg2` | `bg-bg2-hover` | `border-border2` | `bg-bg1-bright` for cards and settings groups |
 | Chat composer, user messages and what docks above the composer | `bg-sidebar-bg` | `bg-sidebar-bg-hover` | `border-(--composer-border)` | No shadow; 18px corners on the Create, workspace and edit composers, 12px elsewhere. Dock cards use `DOCK_CARD_CLS`; the docked pickers use `PopoverContent surface="composer"`; review drafts take `COMPOSER_SURFACE_CLS`. The top of the stack carries `COMPOSER_DOCK_FADE`. Sent messages span the lane and fold long text with `PromptFold` |
 | Floating: menus, selects, command, popovers, tooltips, hover cards, toasts | `bg-bg3` | `bg-bg3-hover` | `border-border2` | 12px corners, 4px inset, lift = `shadow-[var(--shadow-dropdown)]`; feature panels take the fill from `FLOATING_SURFACE` |

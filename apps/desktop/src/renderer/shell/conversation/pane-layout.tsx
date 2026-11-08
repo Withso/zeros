@@ -1066,7 +1066,7 @@ function PaneSplitter({
       };
 
       // Lock the cursor + suppress text selection for the gesture, like the
-      // other seams. Without it a fast drag that outruns the 6px strip put an
+      // other seams. Without it a fast drag that outruns the 8px strip put an
       // I-beam over the transcript and started selecting message text.
       document.body.style.cursor = isRow ? "ew-resize" : "ns-resize";
       document.body.style.userSelect = "none";
@@ -1095,10 +1095,11 @@ function PaneSplitter({
       role="separator"
       aria-orientation={isRow ? "vertical" : "horizontal"}
       aria-label="Resize panes"
-      // The 12px gap between the panes is the handle; it draws nothing.
+      // The gap between the panes is the handle and draws nothing; w-2 and h-2
+      // are the PANE_SPLITTER_PX the split math charges for it.
       className={cn(
         "relative z-10 flex shrink-0",
-        isRow ? "w-3 cursor-ew-resize" : "h-3 cursor-ns-resize",
+        isRow ? "w-2 cursor-ew-resize" : "h-2 cursor-ns-resize",
       )}
       onPointerDown={onPointerDown}
       onDoubleClick={resetToBalanced}
