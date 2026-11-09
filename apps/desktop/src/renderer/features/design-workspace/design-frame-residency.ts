@@ -191,6 +191,14 @@ export function createDesignFrameResidencyReader<T extends DesignSpatialFrame>()
     const frames = input.frames.filter((frame) => mounted.has(frame.file));
     const sameFrames = prior && frames.length === prior.frames.length && frames.every((frame, index) => frame === prior.frames[index]);
     const result = sameFrames && live === prior.live && sources === prior.sources && visible === prior.visible ? prior : { frames: sameFrames ? prior.frames : frames, live, sources, visible };
+    // QA only: log each change of the live set with the inputs behind it.
+    if (prior && live !== prior.live && typeof window !== "undefined") {
+      const qa = ((window as unknown as { __qaResidency?: unknown[] }).__qaResidency ??= []);
+      if (qa.length < 400) qa.push({ t: Math.round(performance.now()), before: [...prior.live], after: [...live],
+        selected: input.selectedFrame, required: [...input.requiredFiles], protectedFiles: [...(input.protectedFiles ?? [])],
+        covered: [...(input.covered ?? input.pictured)], sources: [...sources], ready: [...(input.sourceReady?.keys() ?? [])],
+        visible: [...visibleFiles], gesture: !!input.gesture, settling: !!input.settling });
+    }
     previous = { owner: input.owner, result, overview };
     return result;
   };
