@@ -26,7 +26,8 @@ import {
   type DesignBatchRecordRequest,
 } from "@zeros/protocol/design-capture";
 import { DESIGN_CAPTURE_FRAME_CSP } from "../src/engine/design/capture-sheet";
-import { designRecorderDocument, designRecorderMetrics } from "./design-recorder-document";
+import { designRecorderMetrics } from "./design-recorder-document";
+import { createDesignRecorderDocuments } from "./design-recorder-documents";
 import { designRecorderFrameGuard } from "./design-recorder-frame";
 import { designRecorderRecordScript } from "./design-recorder-scripts";
 import { externalizeRecordedLayer, RecordedTypefaceIds } from "./design-recorder-typefaces";
@@ -153,7 +154,8 @@ const typefacesWritten = new Set<string>();
 const typefaceIds = new RecordedTypefaceIds();
 
 async function recordItem(slot: Slot, documents: Map<string, string>, item: DesignBatchRecordRequest["items"][number],
-  colorScheme: "light" | "dark", folder: string, typefaceFolder: string, signal: AbortSignal): Promise<DesignBatchRecordReply["items"][number]> {
+  document: Promise<string>, colorScheme: "light" | "dark", folder: string, typefaceFolder: string,
+  signal: AbortSignal): Promise<DesignBatchRecordReply["items"][number]> {
   const guard = designRecorderFrameGuard({ gone: slot.gone, signal });
   const whileAlive = guard.run;
   const key = randomUUID();
@@ -162,7 +164,7 @@ async function recordItem(slot: Slot, documents: Map<string, string>, item: Desi
   let mark = performance.now();
   const step = (name: string) => { const now = performance.now(); steps[name] = Math.round((now - mark) * 10) / 10; mark = now; };
   try {
-    documents.set(key, await whileAlive(designRecorderDocument(item.html, colorScheme)));
+    documents.set(key, await whileAlive(document));
     step("document");
     // The frame lays out at its own viewport whatever the window's size.
     const viewport = `${item.viewport.width}x${item.viewport.height}`;
@@ -231,7 +233,10 @@ void app.whenReady().then(async () => {
     answered: boolean;
     done(): void;
   }
-  const jobs: Array<{ item: DesignBatchRecordRequest["items"][number]; batch: Batch }> = [];
+  // Each frame's document is prepared on a worker thread from the moment its
+  // batch arrives, so a window that takes the frame finds it ready.
+  const frameDocuments = createDesignRecorderDocuments({ workerFile: path.join(__dirname, "design-recorder-document-worker.cjs") });
+  const jobs: Array<{ item: DesignBatchRecordRequest["items"][number]; batch: Batch; document: Promise<string> }> = [];
   const stylesheetUsers = new Map<string, number>();
   let windowsWorking = 0;
   let batches = 0;
@@ -244,12 +249,12 @@ void app.whenReady().then(async () => {
   };
   const work = async () => {
     for (let job = jobs.shift(); job; job = jobs.shift()) {
-      const { item, batch } = job;
+      const { item, batch, document } = job;
       if (batch.signal.aborted) { finish(batch, item.id, null); continue; }
       let slot: Slot | null = null;
       try {
         slot = await acquire();
-        finish(batch, item.id, await recordItem(slot, documents, item, batch.colorScheme, batch.folder, typefaceFolder, batch.signal));
+        finish(batch, item.id, await recordItem(slot, documents, item, document, batch.colorScheme, batch.folder, typefaceFolder, batch.signal));
       } catch (error) {
         // A failed frame keeps no window or files: the next one starts clean.
         if (slot && !slot.window.isDestroyed()) slot.window.destroy();
@@ -311,7 +316,12 @@ void app.whenReady().then(async () => {
         const finished = new Promise<void>((resolve) => { done = resolve; });
         const batch: Batch = { colorScheme: input.colorScheme, folder, signal: controller.signal, results,
           pending: new Set(input.items.map((item) => item.id)), answered: false, done };
-        for (const item of input.items) jobs.push({ item, batch });
+        for (const item of input.items) {
+          const document = frameDocuments.prepare(item.html, input.colorScheme);
+          // A dropped frame's document may fail with nobody waiting on it.
+          document.catch(() => {});
+          jobs.push({ item, batch, document });
+        }
         pump();
         const stopped = new Promise<void>((resolve) => {
           if (controller.signal.aborted) resolve();
