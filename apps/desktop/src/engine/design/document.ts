@@ -124,7 +124,7 @@ import {
   prepareFrameRenderSourceForFile,
 } from "./frame-lifecycle";
 import { getDesignRuntimeAudit } from "./runtime-audits";
-import { inspectSafeRegularFile, readSafeRegularFile } from "./safe-files";
+import { inspectSafeRegularFile, readSafeRegularFile, withDesignReadScope } from "./safe-files";
 import {
   DESIGN_FONTS_SOURCE_ID,
   designStyleSourcesUseFonts,
@@ -1428,7 +1428,8 @@ export async function prepareDesignNavigationFrames(workspacePath: string, catal
     }
     return { directory, before, revision, context };
   });
-  const prepared = await withPreparingBatch(() => withDesignDirectoryNameLease(workspacePath, directory, async () => {
+  // One read scope per batch: its frames share their stylesheet, font and package reads.
+  const prepared = await withPreparingBatch(() => withDesignDirectoryNameLease(workspacePath, directory, () => withDesignReadScope(async () => {
     const frames: DesignCanvasFrame[] = [];
     const errors: Array<{ file: string; message: string }> = [];
     const pageIds = designFramePageIds(context.canvas);
@@ -1441,7 +1442,7 @@ export async function prepareDesignNavigationFrames(workspacePath: string, catal
       catch (error) { errors.push({ file, message: error instanceof Error ? error.message : "Could not prepare this frame." }); }
     }
     return { frames, errors };
-  }));
+  })));
   if (designDirectoryNameFor(workspacePath) !== directory ||
     !sameDesignCatalogInspection(before, inspectDesignCatalog(workspacePath, directory, { revision: false })))
     throw new DesignCatalogError("stale");

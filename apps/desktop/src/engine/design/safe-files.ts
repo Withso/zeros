@@ -1,7 +1,14 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { constants } from "node:fs";
 import { lstat, open, realpath, stat, type FileHandle } from "node:fs/promises";
 import path from "node:path";
-import { observeDesignDependencyBytes } from "./dependency-read-set";
+import {
+  designDependencyFingerprint,
+  isDesignDependencyCaptureActive,
+  isDesignDependencyGuardActive,
+  observeDesignDependencyBytes,
+  observeDesignFileDependency,
+} from "./dependency-read-set";
 
 export interface SafeRegularFileMetadata {
   size: number;
@@ -14,6 +21,74 @@ export interface SafeRegularFile extends SafeRegularFileMetadata {
 
 function within(root: string, target: string): boolean {
   return target === root || target.startsWith(`${root}${path.sep}`);
+}
+
+type PathPolicy = (relativePath: string) => boolean;
+
+/** One request's verified reads. Every frame of a page reads the same
+ * stylesheets, fonts and package files; inside a scope each is opened once,
+ * and each frame still records the dependency it read. A scope never
+ * outlives its request, so a file changed meanwhile is read again by the
+ * next request rather than served from memory. */
+export interface DesignReadScope {
+  roots: Map<string, Promise<string | null>>;
+  reads: Map<string, { file: Promise<SafeRegularFile | null>; fingerprint?: string | null }>;
+  inspected: Map<string, Promise<SafeRegularFileMetadata | null>>;
+  values: Map<string, Promise<unknown>>;
+  bytes: number;
+  budget: number;
+}
+
+const MAX_SCOPE_BYTES = 32 * 1024 * 1024;
+const MAX_SCOPE_ENTRIES = 4096;
+const readScopes = new AsyncLocalStorage<DesignReadScope>();
+const policyIds = new WeakMap<PathPolicy, number>();
+let nextPolicyId = 0;
+
+export function createDesignReadScope(options: { budgetBytes?: number } = {}): DesignReadScope {
+  return { roots: new Map(), reads: new Map(), inspected: new Map(), values: new Map(), bytes: 0,
+    budget: options.budgetBytes ?? MAX_SCOPE_BYTES };
+}
+
+/** Run `work` with one read scope; an enclosing scope is kept. A movement
+ * guard records what it reads itself, so it never starts or uses one. */
+export function withDesignReadScope<T>(work: () => Promise<T>, scope: DesignReadScope = createDesignReadScope()): Promise<T> {
+  if (readScopes.getStore() || isDesignDependencyGuardActive()) return work();
+  return readScopes.run(scope, work);
+}
+
+/** `compute` once per read scope, for a value its frames share; outside a
+ * scope, every call computes. */
+export function designReadScopeValue<T>(key: string, compute: () => Promise<T>): Promise<T> {
+  const scope = activeReadScope();
+  if (!scope) return compute();
+  let value = scope.values.get(key) as Promise<T> | undefined;
+  if (!value) {
+    scope.values.set(key, (value = compute()));
+    value.catch(() => scope.values.delete(key));
+  }
+  return value;
+}
+
+function activeReadScope(): DesignReadScope | undefined {
+  const scope = readScopes.getStore();
+  return scope && !isDesignDependencyGuardActive() ? scope : undefined;
+}
+
+function scopeKey(root: string, target: string, maxBytes: number, allowCanonicalPath?: PathPolicy): string {
+  let policy = 0;
+  if (allowCanonicalPath) {
+    policy = policyIds.get(allowCanonicalPath) ?? ++nextPolicyId;
+    policyIds.set(allowCanonicalPath, policy);
+  }
+  return `${path.resolve(root)}\0${path.resolve(target)}\0${maxBytes}\0${policy}`;
+}
+
+function canonicalRootOf(root: string, scope: DesignReadScope | undefined): Promise<string | null> {
+  if (!scope) return realpath(root).catch(() => null);
+  let canonical = scope.roots.get(root);
+  if (!canonical) scope.roots.set(root, (canonical = realpath(root).catch(() => null)));
+  return canonical;
 }
 
 async function canonicalPathForHandle(
@@ -55,9 +130,10 @@ async function openVerifiedRegularFile(
   target: string,
   maxBytes: number,
   allowCanonicalPath?: (relativePath: string) => boolean,
+  scope?: DesignReadScope,
 ): Promise<{ handle: FileHandle; metadata: SafeRegularFileMetadata } | null> {
   if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) return null;
-  const canonicalRoot = await realpath(root).catch(() => null);
+  const canonicalRoot = await canonicalRootOf(root, scope);
   if (!canonicalRoot) return null;
   const resolvedTarget = path.resolve(target);
   if (
@@ -122,13 +198,14 @@ export async function diagnoseSafeRegularFile(
   return info.size > maxBytes ? "too-large" : "unreadable";
 }
 
-export async function inspectSafeRegularFile(
+async function inspectVerifiedRegularFile(
   root: string,
   target: string,
   maxBytes: number,
-  allowCanonicalPath?: (relativePath: string) => boolean,
+  allowCanonicalPath: PathPolicy | undefined,
+  scope: DesignReadScope | undefined,
 ): Promise<SafeRegularFileMetadata | null> {
-  const opened = await openVerifiedRegularFile(root, target, maxBytes, allowCanonicalPath);
+  const opened = await openVerifiedRegularFile(root, target, maxBytes, allowCanonicalPath, scope);
   if (!opened) return null;
   try {
     return opened.metadata;
@@ -137,18 +214,38 @@ export async function inspectSafeRegularFile(
   }
 }
 
-export async function readSafeRegularFile(
+export async function inspectSafeRegularFile(
   root: string,
   target: string,
   maxBytes: number,
-  /** Optional policy checked against the opened descriptor's canonical path. */
   allowCanonicalPath?: (relativePath: string) => boolean,
-): Promise<SafeRegularFile | null> {
-  const opened = await openVerifiedRegularFile(root, target, maxBytes, allowCanonicalPath);
-  if (!opened) {
-    observeDesignDependencyBytes(root, target, maxBytes, null, allowCanonicalPath);
-    return null;
+): Promise<SafeRegularFileMetadata | null> {
+  const scope = activeReadScope();
+  if (!scope) return inspectVerifiedRegularFile(root, target, maxBytes, allowCanonicalPath, undefined);
+  const key = scopeKey(root, target, maxBytes, allowCanonicalPath);
+  const read = scope.reads.get(key);
+  const file = read && await read.file.catch(() => null);
+  if (file) return { size: file.size, modifiedAt: file.modifiedAt };
+  let inspected = scope.inspected.get(key);
+  if (!inspected) {
+    inspected = inspectVerifiedRegularFile(root, target, maxBytes, allowCanonicalPath, scope);
+    if (scope.inspected.size < MAX_SCOPE_ENTRIES) {
+      scope.inspected.set(key, inspected);
+      inspected.catch(() => scope.inspected.delete(key));
+    }
   }
+  return inspected;
+}
+
+async function readVerifiedRegularFile(
+  root: string,
+  target: string,
+  maxBytes: number,
+  allowCanonicalPath: PathPolicy | undefined,
+  scope: DesignReadScope | undefined,
+): Promise<SafeRegularFile | null> {
+  const opened = await openVerifiedRegularFile(root, target, maxBytes, allowCanonicalPath, scope);
+  if (!opened) return null;
   try {
     // fstat already established the descriptor's bounded size. Read one byte
     // beyond that exact generation so growth racing the stat fails closed,
@@ -166,15 +263,11 @@ export async function readSafeRegularFile(
       if (bytesRead === 0) break;
       offset += bytesRead;
     }
-    if (offset > expectedSize || offset > maxBytes) {
-      observeDesignDependencyBytes(root, target, maxBytes, null, allowCanonicalPath);
-      return null;
-    }
+    if (offset > expectedSize || offset > maxBytes) return null;
     // Buffer.subarray would retain the read buffer (and, for pooled buffers,
     // potentially an even larger slab). Give callers an exact backing store.
     const body = Buffer.alloc(offset);
     buffer.copy(body, 0, 0, offset);
-    observeDesignDependencyBytes(root, target, maxBytes, body, allowCanonicalPath);
     return {
       body,
       size: offset,
@@ -183,4 +276,43 @@ export async function readSafeRegularFile(
   } finally {
     await opened.handle.close().catch(() => {});
   }
+}
+
+/** Inside a read scope, callers of the same file share one result: its
+ * body must not be modified. */
+export async function readSafeRegularFile(
+  root: string,
+  target: string,
+  maxBytes: number,
+  /** Optional policy checked against the opened descriptor's canonical path. */
+  allowCanonicalPath?: (relativePath: string) => boolean,
+): Promise<SafeRegularFile | null> {
+  const scope = activeReadScope();
+  if (!scope) {
+    const file = await readVerifiedRegularFile(root, target, maxBytes, allowCanonicalPath, undefined);
+    observeDesignDependencyBytes(root, target, maxBytes, file?.body ?? null, allowCanonicalPath);
+    return file;
+  }
+  const key = scopeKey(root, target, maxBytes, allowCanonicalPath);
+  let entry = scope.reads.get(key);
+  if (!entry) {
+    entry = { file: readVerifiedRegularFile(root, target, maxBytes, allowCanonicalPath, scope) };
+    if (scope.reads.size < MAX_SCOPE_ENTRIES) {
+      const held = entry;
+      scope.reads.set(key, held);
+      held.file.then((file) => {
+        scope.bytes += file?.size ?? 0;
+        if (scope.bytes > scope.budget && scope.reads.get(key) === held) {
+          scope.reads.delete(key);
+          scope.bytes -= file?.size ?? 0;
+        }
+      }, () => { if (scope.reads.get(key) === held) scope.reads.delete(key); });
+    }
+  }
+  const file = await entry.file;
+  if (isDesignDependencyCaptureActive()) {
+    if (entry.fingerprint === undefined) entry.fingerprint = designDependencyFingerprint(file?.body ?? null);
+    observeDesignFileDependency(root, { target, limit: maxBytes, fingerprint: entry.fingerprint, allowCanonicalPath });
+  }
+  return file;
 }

@@ -33,7 +33,7 @@ import { designDirectoryEntry } from "./metadata";
 import { MAX_DESIGN_TEXT_BYTES } from "./render-budget";
 import { composeFrameSourcesInWorkers, designPreparationWorkerCount } from "./preparation-pool";
 import { prepareFrameRenderSource } from "./render-preparation";
-import { readSafeRegularFile } from "./safe-files";
+import { designReadScopeValue, readSafeRegularFile, withDesignReadScope } from "./safe-files";
 import { parseDesignSource } from "./shared-parse";
 import { elementRecords } from "./source";
 import { designStyleSourcesUseFonts, designTailwindBatchCss, frameStyleSourceIds, frameStyleSources, readDesignStyleSourceCatalog } from "./style-sources";
@@ -179,7 +179,8 @@ async function composeFrameSource(root: string, file: string, size: { width: num
  * frame it can't compose is left to the engine's thread, which reports it. */
 export async function composeDesignFrameSourcesInWorker(workspacePath: string,
   frames: ReadonlyArray<{ file: string; width: number; height: number }>, options: { deferTailwind: boolean }) {
-  const { canvas } = await readSharedCanvasContext(workspacePath);
+  // An engine call's frames reach a worker one message at a time: they share one canvas read.
+  const { canvas } = await designReadScopeValue(`canvas\0${path.resolve(workspacePath)}`, () => readSharedCanvasContext(workspacePath));
   const results: Array<{ file: string; sourceVersion: string; sanitized: string; sheets?: ComposedRender["sheets"] } | { file: string; error: string }> = [];
   for (const frame of frames) {
     try {
@@ -224,7 +225,16 @@ let composeFallbackNoticed = false;
  * the same bytes for its linked stylesheets and for each imported source
  * (whole, not pruned per frame), so the capture host parses them once. A
  * Tailwind source compiles utilities per frame and stays per frame. */
-export async function composeDesignThumbnailBatches(
+export function composeDesignThumbnailBatches(
+  root: string,
+  input: DesignThumbnailsRender,
+  signal?: AbortSignal,
+): Promise<{ batches: DesignThumbnailBatch[]; stale: Frame[]; failed: Array<{ file: string; error: string }>; prepared: PreparedFrame[] }> {
+  // One read scope per call: its frames share stylesheet, font and package reads.
+  return withDesignReadScope(() => composeThumbnailBatchesInScope(root, input, signal));
+}
+
+async function composeThumbnailBatchesInScope(
   root: string,
   input: DesignThumbnailsRender,
   signal?: AbortSignal,
