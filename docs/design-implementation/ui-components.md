@@ -360,7 +360,7 @@ Owner today: `shared/ui/primitives/separator.tsx · scroll-area.tsx7 and 6 uses`
 
 Changes:
 - One rule: border1 on the canvas, border2 inside floating surfaces and toolbars.
-- Every scroll thumb, the always-visible ones included, is `--scrollbar-thumb`, #222 in Dark and #EAEAEA in Light: 4px at rest in its 6px slot and 6px under the pointer, with no color change (2026-11-09; the board's border2 and border3 retire).
+- The always-visible scroll thumb is border2 at rest and border3 on hover (border1 at 1.2:1 today).
 - Resizable edges in the Design tab (panel width, the Layers split and the Motion strip) show a 2px border4 line on hover and drag; today only the Motion strip shows anything, in the selection blue.
 
 ## Alert — variants (`Alert`)

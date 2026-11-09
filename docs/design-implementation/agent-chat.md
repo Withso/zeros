@@ -603,12 +603,12 @@ Owner today: `features/agent/model-fallback.ts (fallbackDisplayText) · renderer
 
 No change beyond the shared foundation and primitives.
 
-## Pills · Jump to latest (`ChatJumpPills`)
+## Pills · Jump to prompt and latest (`ChatJumpPills`)
 
-Owner today: `features/agent/jump-pills.tsx (JumpToLatestButton) · agent-chat.tsx`
+Owner today: `features/agent/jump-pills.tsx (JumpToPromptPill, JumpToLatestPill) · agent-chat.tsx`
 
-Changes:
-- Jump to your prompt is retired (2026-11-09); Jump to latest, 8px above the composer and centred on its column, is the chat's one jump control, and the board shows only it.
+Code notes:
+- Jump to your prompt is absolute inside the scroller, so it scrolls off-screen exactly when it should show; it is 27px tall and pinned to the scroller, not the column. (`features/agent/jump-pills.tsx:76 · features/agent/agent-chat.tsx:4257-4261,4409`)
 
 ## Pills · Checkpoint rail (`ChatCheckpointRail`)
 
