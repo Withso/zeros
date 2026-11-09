@@ -7,7 +7,11 @@ import { designBatchRecordRequestSchema, type DesignBatchRecordReply, type Desig
 import { DESIGN_DIRECTORY_NAME, initializeDesignDocument, prepareDesignNavigationFrames, readDesignNavigationSnapshot } from "../document";
 import { designDirectoryNameFor } from "../directory-registry";
 import { designDirectoryEntry } from "../metadata";
-import { DESIGN_RECORDER_FOLDER_PREFIX, designRecordingPipeline, readDesignRecordings, renderDesignRecordings } from "../recording-batch";
+import { DesignRecordingAhead, DESIGN_RECORDING_AHEAD_QUIET_MS, designRecordingAheadDeps } from "../recording-ahead";
+import {
+  DESIGN_RECORDER_FOLDER_PREFIX, designRecordingPipeline, designRecordingsRendering, onDesignRecordingTarget, readDesignRecordings,
+  recordDesignFramesAhead, renderDesignRecordings, type DesignRecordingTarget,
+} from "../recording-batch";
 import { designRecordingChunkId } from "../recording-chunks";
 import { resetDesignRecordingStoreCachesForTests } from "../recording-store";
 import { settleDesignFontDownloadsForTests, resetDesignFontsForTests } from "../style-fonts";
@@ -264,6 +268,92 @@ describe("Design recordings", () => {
     expect(read.missing).toEqual(["page-1/b.html"]);
     expect(read.chunks.length).toBeGreaterThan(0);
   });
+
+  it("records frames ahead without answering, so the canvas's next request reads them from the store", async () => {
+    const frames = await versions(["page-1/a.html", "page-1/b.html"]);
+    const host = recorder();
+    const ahead = await recordDesignFramesAhead(root, { workspaceId: "w", directoryId, theme: null, frames }, { record: host.record, recorder: RECORDER });
+    expect(host.calls).toHaveLength(1);
+    expect(ahead.failed).toEqual([]);
+    expect(ahead.recordings).toEqual([]);
+    expect(ahead.chunks).toEqual([]);
+    // Recorded once: neither more work ahead nor the canvas records again.
+    await recordDesignFramesAhead(root, { workspaceId: "w", directoryId, theme: null, frames }, { record: host.record, recorder: RECORDER });
+    const canvas = await renderDesignRecordings(root, { workspaceId: "w", directoryId, theme: null, frames }, { record: host.record, recorder: RECORDER });
+    expect(host.calls).toHaveLength(1);
+    expect(canvas.recordings.map((r) => r.file)).toEqual(["page-1/a.html", "page-1/b.html"]);
+  });
+
+  it("tells work ahead what a canvas draws, once its request passes its checks", async () => {
+    const seen: DesignRecordingTarget[] = [];
+    const stop = onDesignRecordingTarget((target) => seen.push(target));
+    try {
+      const frames = await versions(["page-1/a.html"]);
+      let release!: () => void;
+      const held = new Promise<void>((resolve) => { release = resolve; });
+      const host = recorder();
+      const rendering = renderDesignRecordings(root, { workspaceId: "w", directoryId, theme: null, colorScheme: "dark", frames },
+        { record: async (request) => { await held; return host.record(request); }, recorder: RECORDER });
+      await vi.waitFor(() => expect(seen).toHaveLength(1));
+      expect(seen[0]).toEqual({ workspaceId: "w", root, directoryId, theme: null, colorScheme: "dark" });
+      expect(designRecordingsRendering()).toBe(true);
+      release();
+      await rendering;
+      expect(designRecordingsRendering()).toBe(false);
+      await expect(renderDesignRecordings(root, { workspaceId: "w", directoryId: "design_other", theme: null, frames },
+        { record: host.record, recorder: RECORDER })).rejects.toThrow(/directory changed/);
+      await recordDesignFramesAhead(root, { workspaceId: "w", directoryId, theme: null, frames }, { record: host.record, recorder: RECORDER });
+      expect(seen).toHaveLength(1);
+    } finally {
+      stop();
+    }
+  });
+
+  it("records a frame an edit reaches before its page is opened again", async () => {
+    const host = recorder();
+    const ahead = new DesignRecordingAhead(designRecordingAheadDeps({ record: host.record, recorder: RECORDER }));
+    try {
+      ahead.noteTarget({ workspaceId: "w", root, directoryId, theme: null, colorScheme: "light" });
+      await writeFile(path.join(folder, "page-1/c.html"), frame("c, edited"));
+      ahead.noteChange(root, { directoryId, sequence: 1, frames: ["page-1/c.html"], catalog: false, all: false });
+      const frames = await versions(["page-1/c.html"]);
+      // Stored, not just sent to the recorder: until then the canvas would record it too.
+      await vi.waitFor(async () => {
+        const read = await readDesignRecordings(root, { workspaceId: "w", directoryId, theme: null, frames: [{ file: "page-1/c.html" }] });
+        expect(read.recordings.map((r) => r.sourceVersion)).toEqual([frames[0]!.sourceVersion]);
+      }, { timeout: DESIGN_RECORDING_AHEAD_QUIET_MS + 8_000, interval: 50 });
+      // The canvas opens the page: the edited frame comes from the store.
+      const canvas = await renderDesignRecordings(root, { workspaceId: "w", directoryId, theme: null, frames }, { record: host.record, recorder: RECORDER });
+      expect(canvas.recordings.map((r) => [r.file, r.sourceVersion])).toEqual([["page-1/c.html", frames[0]!.sourceVersion]]);
+      expect(host.calls).toHaveLength(1);
+    } finally {
+      ahead.stop();
+    }
+  }, 20_000);
+
+  it("records a frame an agent adds to the catalog, and only that frame", async () => {
+    const host = recorder();
+    const ahead = new DesignRecordingAhead(designRecordingAheadDeps({ record: host.record, recorder: RECORDER }));
+    try {
+      // The canvas's catalog is read once it first draws: a, b and c are known.
+      await ahead.noteTarget({ workspaceId: "w", root, directoryId, theme: null, colorScheme: "light" });
+      const canvasFile = path.join(folder, "meta/canvas.json");
+      const canvas = JSON.parse(await readFile(canvasFile, "utf8"));
+      await writeFile(path.join(folder, "page-1/d.html"), frame("d"));
+      canvas.frames.frame_3 = { kind: "html", source: "page-1/d.html", title: "d", x: 1200, y: 0, width: 320, height: 200 };
+      canvas.pages[0].frames.push("frame_3");
+      await writeFile(canvasFile, JSON.stringify(canvas, null, 2));
+      ahead.noteChange(root, { directoryId, sequence: 1, frames: [], catalog: true, all: false });
+      const frames = await versions(["page-1/d.html"]);
+      await vi.waitFor(async () => {
+        const read = await readDesignRecordings(root, { workspaceId: "w", directoryId, theme: null, frames: [{ file: "page-1/d.html" }] });
+        expect(read.recordings.map((r) => r.sourceVersion)).toEqual([frames[0]!.sourceVersion]);
+      }, { timeout: DESIGN_RECORDING_AHEAD_QUIET_MS + 8_000, interval: 50 });
+      expect(host.calls.flatMap((call) => call.items)).toHaveLength(1);
+    } finally {
+      ahead.stop();
+    }
+  }, 20_000);
 
   it("refuses a directory that is no longer active", async () => {
     const frames = await versions(["page-1/a.html"]);
