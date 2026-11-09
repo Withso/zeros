@@ -183,13 +183,16 @@ export class DesignRecordingAhead {
 /** The engine's own preparation, catalog and recording path. */
 export function designRecordingAheadDeps(recording: DesignRecordingDeps = {}): DesignRecordingAheadDeps {
   return {
-    frames: async (target) => Object.keys((await readSharedCanvasContext(target.root)).canvas.frames),
+    frames: async (target) => {
+      const { canvas } = await readSharedCanvasContext(target.root);
+      return Object.keys(canvas.frames).filter((file) => canvas.frame_info[file]);
+    },
     revision: async (target) => {
       const inspection = inspectDesignCatalog(target.root, designDirectoryNameFor(target.root), { revision: false });
       return inspection.layout.manifest.id === target.directoryId ? designCatalogRevision(inspection) : null;
     },
     prepare: async (target, revision, files) =>
-      (await prepareDesignNavigationFrames(target.root, revision, files, target.directoryId)).frames,
+      (await prepareDesignNavigationFrames(target.root, revision, files, target.directoryId, { forRenderer: false })).frames,
     record: async (target, frames) => {
       await recordDesignFramesAhead(target.root, { workspaceId: target.workspaceId, directoryId: target.directoryId,
         theme: target.theme, colorScheme: target.colorScheme, frames: [...frames] }, recording);
