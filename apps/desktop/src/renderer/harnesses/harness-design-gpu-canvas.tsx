@@ -171,7 +171,8 @@ function Harness() {
   // The canvas's mount order: the recorded canvas mounts first, the camera
   // paints next, and the viewport size is measured last (it starts at 0 × 0).
   const [size, setSize] = useState({ width: 0, height: 0 });
-  const owner = useMemo(() => ({ workspaceId: "/harness/workspace", directoryId: "design_harness", theme }), [theme]);
+  const owner = useMemo(() => ({ workspaceId: "/harness/workspace", directoryId: "design_harness", theme,
+    colorScheme: "light" as const }), [theme]);
   window.designGpuHarness = { frames, requests, setView, select, setTheme, fill: designGpuHarnessFill,
     failed: () => [...runtime.recordings.failedFiles(owner)].sort() };
   const live = useMemo(() => new Set<string>(), []);

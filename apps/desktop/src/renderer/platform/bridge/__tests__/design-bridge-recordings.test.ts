@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { DESIGN_PREVIEW_JOBS_CAPABILITY } from "@zeros/protocol/design-capture";
 import { bridgeDesignRecordingsRead, bridgeDesignRecordingsRender } from "../design-bridge";
-import { DESIGN_RECORDINGS_READ_FAILURES_CAPABILITY } from "../../../features/design-workspace/gpu/design-recordings-wire";
+import { DESIGN_RECORDINGS_COLOR_SCHEME_CAPABILITY, DESIGN_RECORDINGS_READ_FAILURES_CAPABILITY } from "../../../features/design-workspace/gpu/design-recordings-wire";
 import type { RuntimeClient } from "../ws-client";
 
 const version = "a".repeat(24);
@@ -56,6 +56,20 @@ describe("Design recordings bridge", () => {
     const unknown = bridgeReturning(() => ({ ...renderReply, failed: [{ ...retryable, severity: 2 }] }), [DESIGN_PREVIEW_JOBS_CAPABILITY]);
     await expect(bridgeDesignRecordingsRender(unknown.bridge, "/work/local", { directoryId: "design_a", theme: null,
       frames, knownChunks: [] })).rejects.toThrow(/malformed/);
+  });
+
+  it("names the canvas's color scheme only to an engine that records schemes apart", async () => {
+    const reply = () => ({ recordings: [], typefaces: [], chunks: [], missing: [recording.file], deferred: [] });
+    const input = { directoryId: "design_a", theme: null, colorScheme: "dark" as const, frames: [{ file: recording.file }], knownChunks: [] };
+    const older = bridgeReturning(reply);
+    await bridgeDesignRecordingsRead(older.bridge, "/work/local", input);
+    expect(older.request.mock.calls[0]![0].params).not.toHaveProperty("colorScheme");
+    const newer = bridgeReturning((op) => (op === "design.recordings.read" ? reply() : renderReply),
+      [DESIGN_RECORDINGS_COLOR_SCHEME_CAPABILITY, DESIGN_PREVIEW_JOBS_CAPABILITY]);
+    await bridgeDesignRecordingsRead(newer.bridge, "/work/local", input);
+    await bridgeDesignRecordingsRender(newer.bridge, "/work/local", { ...input, frames: [{ file: recording.file, sourceVersion: version }] });
+    expect(newer.request.mock.calls.map(([message]) => [message.op, message.params.colorScheme]))
+      .toEqual(expect.arrayContaining([["design.recordings.read", "dark"], ["design.recordings.render", "dark"]]));
   });
 
   it("asks a read for known failures only from an engine that advertises them", async () => {

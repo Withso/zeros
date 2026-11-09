@@ -17,8 +17,8 @@ import {
 } from "../gpu/design-recordings-wire";
 
 const version = (n: number) => n.toString(16).padStart(24, "0");
-const owner: DesignRecordingsOwner = { workspaceId: "/work/a", directoryId: "design_a", theme: null };
-const other: DesignRecordingsOwner = { workspaceId: "/work/b", directoryId: "design_b", theme: "dark" };
+const owner: DesignRecordingsOwner = { workspaceId: "/work/a", directoryId: "design_a", theme: null, colorScheme: "light" };
+const other: DesignRecordingsOwner = { workspaceId: "/work/b", directoryId: "design_b", theme: "dark", colorScheme: "light" };
 const chunk = (text: string) => ({
   id: createHash("sha256").update(text).digest("hex").slice(0, 32),
   data: Buffer.from(text).toString("base64"),
@@ -208,6 +208,24 @@ describe("Design recordings", () => {
     recordings.demand(owner, [{ file: "a.html", sourceVersion: version(7) }]);
     expect(recordings.recording(owner, "a.html")).toMatchObject({ sourceVersion: version(7), current: true });
     expect(calls).toHaveLength(2);
+  });
+
+  it("keeps a frame's light and dark recordings apart: a scheme switch is an owner change", async () => {
+    const { calls, recordings } = harness();
+    const dark: DesignRecordingsOwner = { ...owner, colorScheme: "dark" };
+    expect(designRecordingsOwnerKey(dark)).not.toBe(designRecordingsOwnerKey(owner));
+    const frames = [{ file: "a.html", sourceVersion: version(1) }];
+    recordings.demand(owner, frames);
+    // The canvas switches to dark before the light reply lands.
+    recordings.demand(owner, []);
+    recordings.demand(dark, frames);
+    expect(calls.map((call) => call.owner.colorScheme)).toEqual(["light", "dark"]);
+    calls[0]!.resolve(readReply(frames, []));
+    await recordings.settled();
+    expect(recordings.recording(dark, "a.html")).toBeNull();
+    calls[1]!.resolve(readReply(frames, [], calls[1]!.known, { versions: { "a.html": version(1) } }));
+    await recordings.settled();
+    expect(recordings.recording(dark, "a.html")).toMatchObject({ sourceVersion: version(1), current: true });
   });
 
   it("fences replies by exact owner and drops a forgotten owner's late reply", async () => {
