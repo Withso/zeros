@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, open, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -18,6 +18,12 @@ function picture(font: Uint8Array): Uint8Array {
   return Buffer.concat([info, Buffer.of(1), tag("tpfc"), u32(1), record, tag("eof ")]);
 }
 const idOf = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex").slice(0, 32);
+/** A file's modification time and bytes, both from one open handle. */
+async function fileState(file: string): Promise<{ modified: number; bytes: Uint8Array }> {
+  const handle = await open(file, "r");
+  try { return { modified: (await handle.stat()).mtimeMs, bytes: new Uint8Array(await handle.readFile()) }; }
+  finally { await handle.close(); }
+}
 
 describe("recorder typefaces", () => {
   let folder: string;
@@ -32,14 +38,15 @@ describe("recorder typefaces", () => {
     const written = new Set<string>();
     const a = await externalizeRecordedLayer(first, folder, written);
     expect(a).toEqual({ typefaces: [{ id: idOf(font), path: path.join(folder, `${idOf(font)}.font`) }] });
-    const fontFile = await stat(a.typefaces[0]!.path);
+    const fontFile = await fileState(a.typefaces[0]!.path);
     const b = await externalizeRecordedLayer(second, folder, written);
     expect(b.typefaces).toEqual(a.typefaces);
-    expect((await stat(a.typefaces[0]!.path)).mtimeMs).toBe(fontFile.mtimeMs);
+    const fontAfter = await fileState(a.typefaces[0]!.path);
+    expect(fontAfter.modified).toBe(fontFile.modified);
     const rewritten = new Uint8Array(await readFile(first));
     expect(rewritten.length).toBeLessThan(1_000);
     expect(designPictureTypefaceReferences(rewritten)).toEqual([idOf(font)]);
-    const fontBytes = new Uint8Array(await readFile(a.typefaces[0]!.path));
+    const fontBytes = fontAfter.bytes;
     expect(Buffer.from(internalizeDesignPictureTypefaces(rewritten, (id) => (id === idOf(font) ? fontBytes : null))!)).toEqual(Buffer.from(picture(font)));
   });
 

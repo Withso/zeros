@@ -1,4 +1,4 @@
-import { lstat, realpath, rm, rmdir } from "node:fs/promises";
+import { realpath, rm, rmdir } from "node:fs/promises";
 import { constants } from "node:fs";
 import { open } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
@@ -211,13 +211,11 @@ async function readRecorderFile(file: string, name: RegExp, limit: number): Prom
     !relative.split(path.sep)[0]!.startsWith(DESIGN_RECORDER_FOLDER_PREFIX) || !name.test(path.basename(resolved)))
     throw outside;
   // The boundary is the recorder's private 0700 folder, which only this user
-  // can write. Comparing the file checked before the open with the one held
-  // narrows a swap to the instant between realpath and lstat.
-  const checked = await lstat(resolved).catch(() => { throw outside; });
-  const handle = await open(resolved, constants.O_RDONLY | constants.O_NOFOLLOW);
+  // can write; realpath above resolved every link. Everything else is checked
+  // on the opened file itself, never on the path again.
+  const handle = await open(resolved, constants.O_RDONLY | constants.O_NOFOLLOW).catch(() => { throw outside; });
   try {
     const info = await handle.stat();
-    if (info.dev !== checked.dev || info.ino !== checked.ino) throw outside;
     if (!info.isFile() || info.size < 1 || info.size > limit) throw new Error("This frame's recording is too large.");
     return await handle.readFile();
   } finally {
