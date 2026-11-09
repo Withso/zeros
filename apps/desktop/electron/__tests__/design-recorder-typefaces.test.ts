@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { designPictureTypefaceReferences, internalizeDesignPictureTypefaces } from "../../shared/design-picture-typefaces";
-import { externalizeRecordedLayer } from "../design-recorder-typefaces";
+import { externalizeRecordedLayer, RecordedTypefaceIds } from "../design-recorder-typefaces";
 
 /** A minimal picture in the canvaskit/0.42.0 layout: one typeface record
  * embedding `font`, then the end tag. */
@@ -41,6 +41,29 @@ describe("recorder typefaces", () => {
     expect(designPictureTypefaceReferences(rewritten)).toEqual([idOf(font)]);
     const fontBytes = new Uint8Array(await readFile(a.typefaces[0]!.path));
     expect(Buffer.from(internalizeDesignPictureTypefaces(rewritten, (id) => (id === idOf(font) ? fontBytes : null))!)).toEqual(Buffer.from(picture(font)));
+  });
+
+  it("hashes a font once a session, reusing its id only for identical bytes", async () => {
+    let hashed = 0;
+    const ids = new RecordedTypefaceIds({ budgetBytes: 150_000, hash: async (bytes) => { hashed++; return idOf(bytes); } });
+    const font = randomBytes(70_000), sameLength = randomBytes(70_000), large = randomBytes(90_000);
+    expect(await ids.contentId(font)).toBe(idOf(font));
+    // The same bytes in another picture's buffer, at an offset.
+    const elsewhere = Buffer.concat([Buffer.alloc(13), font]).subarray(13);
+    expect(await ids.contentId(elsewhere)).toBe(idOf(font));
+    expect(hashed).toBe(1);
+    expect(await ids.contentId(sameLength)).toBe(idOf(sameLength));
+    expect(hashed).toBe(2);
+    // Past the budget a font is still hashed correctly, just not kept.
+    expect(await ids.contentId(large)).toBe(idOf(large));
+    expect(await ids.contentId(large)).toBe(idOf(large));
+    expect(hashed).toBe(4);
+    const file = path.join(folder, "d.skp");
+    await writeFile(file, picture(font));
+    const result = await externalizeRecordedLayer(file, folder, new Set(), ids);
+    expect(result.typefaces.map((typeface) => typeface.id)).toEqual([idOf(font)]);
+    expect(hashed).toBe(4);
+    expect(designPictureTypefaceReferences(new Uint8Array(await readFile(file)))).toEqual([idOf(font)]);
   });
 
   it("leaves a picture it does not understand as written", async () => {

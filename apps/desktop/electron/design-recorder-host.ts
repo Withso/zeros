@@ -28,7 +28,7 @@ import {
 import { designCaptureFramePolicy } from "../src/engine/design/capture-sheet";
 import { insertDesignHeadMarkup, sanitizeDesignFrameMarkup } from "../src/engine/design/source";
 import { DESIGN_RECORDER_PREPARE_SCRIPT } from "./design-recorder-scripts";
-import { externalizeRecordedLayer } from "./design-recorder-typefaces";
+import { externalizeRecordedLayer, RecordedTypefaceIds } from "./design-recorder-typefaces";
 
 const token = process.env.ZEROS_DESIGN_RECORDER_TOKEN ?? "";
 delete process.env.ZEROS_DESIGN_RECORDER_TOKEN;
@@ -121,6 +121,7 @@ async function pictureSize(file: string): Promise<string> {
 
 /** Font data written this session, by content id: one file each. */
 const typefacesWritten = new Set<string>();
+const typefaceIds = new RecordedTypefaceIds();
 
 async function recordItem(slot: Slot, documents: Map<string, string>, item: DesignBatchRecordRequest["items"][number],
   colorScheme: "light" | "dark", folder: string, typefaceFolder: string, signal: AbortSignal): Promise<DesignBatchRecordReply["items"][number]> {
@@ -170,7 +171,7 @@ async function recordItem(slot: Slot, documents: Map<string, string>, item: Desi
       return { id: item.id, error: `This frame paints on ${layers.length} composited layers (${sizes.join(", ")}), so it is shown as a picture.`.slice(0, 500) };
     }
     const picture = path.join(directory, layers[0]!);
-    const { typefaces } = await externalizeRecordedLayer(picture, typefaceFolder, typefacesWritten);
+    const { typefaces } = await externalizeRecordedLayer(picture, typefaceFolder, typefacesWritten, typefaceIds);
     step("externalize");
     if (TIMINGS) void appendFile(TIMINGS, `${JSON.stringify({ id: item.id, ...steps })}\n`).catch(() => {});
     return { id: item.id, scale: slot.ratio, layers: [{ x: 0, y: 0, width: Math.round(item.viewport.width * slot.ratio),

@@ -161,15 +161,20 @@ function rewrite(skp: Uint8Array, records: readonly DesignPictureTypefaceRecord[
 
 /** Replaces each embedded font file with a reference to its content id and
  * returns those files once each. A picture without embedded fonts, or one
- * whose structure is not understood, comes back unchanged. */
-export async function externalizeDesignPictureTypefaces(skp: Uint8Array):
+ * whose structure is not understood, comes back unchanged. `contentId` lets a
+ * caller reuse ids it has already computed; it must return exactly
+ * `designTypefaceContentId(bytes)`, since a reader verifies every font
+ * against its id. */
+export async function externalizeDesignPictureTypefaces(skp: Uint8Array,
+  options: { contentId?: (bytes: Uint8Array) => Promise<string> } = {}):
   Promise<{ skp: Uint8Array; typefaces: Array<{ id: string; bytes: Uint8Array }>; skipped?: string }> {
   let records: DesignPictureTypefaceRecord[];
   try { records = inspectDesignPictureTypefaces(skp); }
   catch (error) { return { skp, typefaces: [], skipped: error instanceof Error ? error.message : String(error) }; }
   const embedded = records.filter((record) => !record.reference && record.dataLength > 0);
   if (!embedded.length) return { skp, typefaces: [] };
-  const ids = await Promise.all(embedded.map((record) => designTypefaceContentId(skp.subarray(record.dataStart, record.dataStart + record.dataLength))));
+  const contentId = options.contentId ?? designTypefaceContentId;
+  const ids = await Promise.all(embedded.map((record) => contentId(skp.subarray(record.dataStart, record.dataStart + record.dataLength))));
   const byRecord = new Map(embedded.map((record, index) => [record, ids[index]!]));
   const typefaces = new Map<string, Uint8Array>();
   for (const [record, id] of byRecord) if (!typefaces.has(id))
