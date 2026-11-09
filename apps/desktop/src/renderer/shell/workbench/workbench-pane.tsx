@@ -76,16 +76,16 @@ import { Surface } from "@/renderer/shared/ui/layout/surface";
 // when conversation pane freezes at its 2400px cap on ultrawide windows (bare
 // 0..1 factors leave an empty gap at the right edge there). No top inset
 // (2026-07-12): the h-10 header is the column's full 0..40px title strip, like
-// repository panel and conversation pane. The column draws no seam against
-// conversation pane: the island's edge (WORKBENCH_ISLAND_CLS) separates them.
+// repository panel and conversation pane. Flush (2026-11-09, as on 2026-07-11):
+// the column runs to the window's right and bottom edges, and its `border-l`
+// is the one seam against conversation pane, the line that pane's resize
+// handle runs along.
 const WORKBENCH_PANE_CLS =
-  "relative flex min-h-0 min-w-[200px] flex-col overflow-hidden bg-bg1 [flex:calc((1_-_var(--zeros-column-2-ratio,0.5))*100)_1_0px]";
-/** Everything under the header. Rendered as a canvas Surface, which paints
- *  bg1 and binds --surface-border to border1 for what sits inside; only the
- *  island's own edge is border2. It keeps no left inset, so that edge is the
- *  line the chat column's resize handle runs along. */
-const WORKBENCH_ISLAND_CLS =
-  "mr-3 mb-3 flex min-h-0 flex-1 flex-col overflow-hidden rounded-[calc(var(--radius-lg)*1.5)] border border-border2";
+  "border-border1 relative flex min-h-0 min-w-[200px] flex-col overflow-hidden border-l bg-bg1 [flex:calc((1_-_var(--zeros-column-2-ratio,0.5))*100)_1_0px]";
+/** Everything under the header, flush under it. Rendered as a canvas Surface,
+ *  which paints bg1 and binds --surface-border to border1 for what sits
+ *  inside. */
+const WORKBENCH_BODY_CLS = "flex min-h-0 flex-1 flex-col overflow-hidden";
 /** Bound rich File/diff DOM while making the common recent-tab path instant. */
 const MAX_RETAINED_WORKBENCH_VIEWS = 6;
 /** Iframes are expensive, so preserve the recent cross-workspace working set
@@ -321,8 +321,8 @@ export function WorkbenchPane({
   );
 
   const workbenchRef = useRef<HTMLDivElement | null>(null);
-  // The docked terminal panel sizes against the island it lives in.
-  const islandRef = useRef<HTMLDivElement | null>(null);
+  // The docked terminal panel sizes against the body it lives in.
+  const bodyRef = useRef<HTMLDivElement | null>(null);
 
   // Collapse hides the whole column with display:none, which clamps every
   // scroller inside to 0 (unlike the visibility-hidden retention pattern the
@@ -517,7 +517,7 @@ export function WorkbenchPane({
           // "Setting up workspace" loading row — no Open file/Changes/Review
           // strip, no Setup/Run/Terminal strip — then everything mounts at
           // once when the settling flag clears (see the reveal effect above).
-          // The header band stays, empty, so the island holds its place
+          // The header band stays, empty, so the body holds its place
           // through the reveal.
           <div data-tauri-drag-region className={WORKBENCH_HEADER_CLS} aria-hidden="true" />
         ) : (
@@ -541,16 +541,16 @@ export function WorkbenchPane({
               />
             </div>
         )}
-        {/* One island for both states. It stays mounted through the reveal, so
+        {/* One body for both states. It stays mounted through the reveal, so
             the docked terminal's resizer finds it attached when the panel
             mounts: React attaches a parent's ref only after its children's
-            layout effects, and an island mounting with the panel would leave
+            layout effects, and a body mounting with the panel would leave
             the stored height unapplied. */}
         <Surface
-          ref={islandRef}
+          ref={bodyRef}
           kind="canvas"
-          className={WORKBENCH_ISLAND_CLS}
-          data-workbench-island=""
+          className={WORKBENCH_BODY_CLS}
+          data-workbench-body=""
         >
           {settling ? (
             <>
@@ -634,7 +634,7 @@ export function WorkbenchPane({
                 chatCwd={chatCwd}
                 surfaceActive={surfaceActive && !collapsed}
                 workbenchHost={terminalHost}
-                containerRef={islandRef}
+                containerRef={bodyRef}
               />
             </>
           )}

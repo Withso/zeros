@@ -1259,3 +1259,17 @@ Each landed step appends one line: date, workstream, what landed, evidence.
   workspace-header smoke checks both placements' order, rest and hover fills
   in both themes and their popups, and the summary smoke closes the Local
   details on A → B → A for personal and organization owners.
+- 2026-11-09 · 5, 6 · Split panes and the side column run flush
+  (`docs/design-system.md` §0 item 13; canvas versions 414 and 415, where
+  the split boards drop their islands, the Side column boards turn flush and
+  Chat window · Split with the side column shows both together), replacing
+  the solid islands of 2026-11-06 to 2026-11-08. Every chat pane runs edge to
+  edge with square corners, no gutters and no edge of its own; the 8px
+  resize strip between two panes draws one 1px `border1` line; an unfocused
+  pane keeps its 80% dim and Ask pill. The side column fills to the window's
+  right and bottom edges on its 1px `border1` seam, which the chat's resize
+  handle meets, with the first tab 8px in. The split gutters leave the split
+  math, so two panes side by side need 728px. Evidence: the pane-surfaces
+  and workbench-column tests failed red first; the chat-surfaces smoke
+  measures the seam, the divider lines, zero gutters, square edgeless panes
+  and the dims in both themes, with the side column shown and hidden.

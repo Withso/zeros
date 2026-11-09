@@ -1,16 +1,14 @@
 import { expect } from "@playwright/test";
 
-/** 2026-11-06 direction (Zeros Design v391, "Solid split"): only while the chat
- *  column is split, panes stand apart as solid surfaces on the bg1 chrome. They
- *  sit 8px apart both ways (12px until 2026-11-08), the gap being the resize
- *  handle, and 12px in from the column's left, right and bottom edges. Every
- *  corner rounds at 12px, nothing fades between panes, and a lone pane runs
- *  edge to edge. The workspace header row draws no divider, and the side
- *  column holds its open tab in a bg1 island. 2026-11-07: every pane keeps
- *  bg1 and edges tell them apart, border2 on the focused pane and border1 on
- *  the others, whose strip and body dim to 80%; the island sits on the chat's
- *  resize line with a border2 edge, and an unfocused pane's composer is its
- *  Ask pill. */
+/** 2026-11-09 direction (Zeros Design v414, "Flush"), replacing the solid
+ *  islands of 2026-11-06 to 2026-11-08: split panes run edge to edge like a
+ *  lone pane, with no gutter, gap or rounded corner, and nothing fades between
+ *  them. The divider is an 8px resize strip that draws one 1px border1 line,
+ *  bg1 like the panes either side. Every pane keeps bg1 and draws no edge of
+ *  its own; an unfocused pane's strip and body dim to 80% and its composer is
+ *  its Ask pill. The workspace header row draws no divider, and the side column
+ *  runs flush to the window's right and bottom edges on a 1px border1 seam,
+ *  the line the chat's resize handle meets. */
 export async function runChatSurfacesSmoke({ page, check, harnessBase }) {
   const viewport = page.viewportSize();
   await page.evaluate(() => {
@@ -22,18 +20,17 @@ export async function runChatSurfacesSmoke({ page, check, harnessBase }) {
   await page.keyboard.press("Meta+Digit1");
   await expect(page.getByRole("tablist", { name: "Chat sessions" }).getByRole("tab")).toHaveCount(3);
 
-  // Side column island (2026-11-06): the tab row stays on the column and the
-  // open tab's content sits in one island on the column's own bg1 with 12px
-  // corners. Since 2026-11-07 it keeps no left inset, so its edge is the line
-  // the chat's resize handle runs along, and that outer edge is border2.
-  await expect(page.locator("[data-workbench-island]")).toBeVisible();
+  // Side column (2026-11-09, flush): its tab row and the open tab fill the
+  // column to the window's right and bottom edges, and its 1px border1 left
+  // edge is the seam the chat's resize handle meets.
+  await expect(page.locator("[data-workbench-body]")).toBeVisible();
   // Each pass's resolved bg1 must differ, or the theme never switched.
-  const islandBg1 = [];
+  const columnBg1 = [];
   for (const theme of ["dark", "light"]) {
     await page.evaluate((value) => {
       document.documentElement.dataset.theme = value;
     }, theme);
-    const island = await page.evaluate(() => {
+    const column = await page.evaluate(() => {
       const rgb = (value) => {
         const probe = document.createElement("div");
         probe.style.color = value;
@@ -42,38 +39,40 @@ export async function runChatSurfacesSmoke({ page, check, harnessBase }) {
         probe.remove();
         return color;
       };
-      const column = document.querySelector("[data-zeros-column-3]");
-      const node = column.querySelector("[data-workbench-island]");
-      const header = column.querySelector('[data-testid="workbench-header"]').getBoundingClientRect();
-      const firstTab = column.querySelector('[role="tablist"][aria-label="Workspace panels"] [role="tab"]').getBoundingClientRect();
-      const outer = column.getBoundingClientRect();
-      const rect = node.getBoundingClientRect();
-      const style = getComputedStyle(node);
+      const node = document.querySelector("[data-zeros-column-3]");
+      const body = node.querySelector("[data-workbench-body]");
+      const header = node.querySelector('[data-testid="workbench-header"]').getBoundingClientRect();
+      const firstTab = node.querySelector('[role="tablist"][aria-label="Workspace panels"] [role="tab"]').getBoundingClientRect();
+      const outer = node.getBoundingClientRect();
+      const columnStyle = getComputedStyle(node);
+      const rect = body.getBoundingClientRect();
+      const style = getComputedStyle(body);
       return {
         bg1: rgb("var(--bg1)"),
-        border2: rgb("var(--border2)"),
-        columnSeam: getComputedStyle(column).borderLeftWidth,
+        border1: rgb("var(--border1)"),
+        seam: [columnStyle.borderLeftWidth, columnStyle.borderLeftColor],
         handleRight: document.querySelector('[role="separator"][aria-label="Resize chat panel"]').getBoundingClientRect().right,
-        islandLeft: rect.left,
+        columnLeft: outer.left,
         insets: [rect.left - outer.left, outer.right - rect.right, outer.bottom - rect.bottom, rect.top - header.bottom],
         firstTabOffset: firstTab.left - rect.left,
         radius: style.borderTopLeftRadius,
-        border: [style.borderTopWidth, style.borderTopColor],
+        border: style.borderTopWidth,
         fill: style.backgroundColor,
       };
     });
-    expect(island.columnSeam).toBe("0px");
-    expect(island.insets.map(Math.round)).toEqual([0, 12, 12, 0]);
-    // The chat's resize handle ends on the island's edge.
-    expect(Math.abs(island.handleRight - island.islandLeft)).toBeLessThan(0.5);
-    expect(Math.abs(island.firstTabOffset - 12)).toBeLessThan(0.5);
-    expect(island.radius).toBe("12px");
-    expect(island.border).toEqual(["1px", island.border2]);
-    expect(island.fill).toBe(island.bg1);
-    islandBg1.push(island.bg1);
+    expect(column.seam).toEqual(["1px", column.border1]);
+    // Inside the seam the body touches every edge of the column and the header.
+    expect(column.insets.map(Math.round)).toEqual([1, 0, 0, 0]);
+    // The chat's resize handle ends on the seam.
+    expect(Math.abs(column.handleRight - column.columnLeft)).toBeLessThan(0.5);
+    expect(Math.abs(column.firstTabOffset - 8)).toBeLessThan(0.5);
+    expect(column.radius).toBe("0px");
+    expect(column.border).toBe("0px");
+    expect(column.fill).toBe(column.bg1);
+    columnBg1.push(column.bg1);
   }
-  expect(new Set(islandBg1).size).toBe(2);
-  check("Side column: the open tab sits in a bg1 island on the chat's resize line, 12px in from the right and bottom, with a border2 edge and the first tab 12px in, in Dark and Light", true);
+  expect(new Set(columnBg1).size).toBe(2);
+  check("Side column: flush to the window's right and bottom edges on a 1px border1 seam the chat's resize handle meets, the open tab with no inset, corner or edge, the first tab 8px in, in Dark and Light", true);
 
   // 2026-11-09: the fixed tabs are text only and the Files home reads Files;
   // a closable tab such as Setup keeps its glyph (its hover ✕ is a button).
@@ -105,19 +104,22 @@ export async function runChatSurfacesSmoke({ page, check, harnessBase }) {
     };
     const surface = document.querySelector("[data-pane-layout-surface]");
     const surfaceStyle = getComputedStyle(surface);
-    const island = document.querySelector("[data-workbench-island]");
+    const column = document.querySelector("[data-zeros-column-3]");
     return {
       bg1: rgb("var(--bg1)"),
       border1: rgb("var(--border1)"),
-      border2: rgb("var(--border2)"),
       headerBorder: getComputedStyle(document.querySelector("[data-workspace-header]")).borderBottomWidth,
       surface: box(surface),
       gutters: [surfaceStyle.paddingTop, surfaceStyle.paddingRight, surfaceStyle.paddingBottom, surfaceStyle.paddingLeft],
-      islandLeft: island && island.getClientRects().length ? island.getBoundingClientRect().left : null,
-      separators: [...document.querySelectorAll('[role="separator"][aria-label="Resize panes"]')].map((node) => ({
-        box: box(node),
-        children: node.children.length,
-      })),
+      seamLeft: column && column.getClientRects().length ? column.getBoundingClientRect().left : null,
+      separators: [...document.querySelectorAll('[role="separator"][aria-label="Resize panes"]')].map((node) => {
+        const line = node.firstElementChild;
+        return {
+          box: box(node),
+          children: node.children.length,
+          line: line ? { box: box(line), fill: getComputedStyle(line).backgroundColor } : null,
+        };
+      }),
       fades: document.querySelectorAll("[data-pane-seam-fade]").length,
       panes: [...document.querySelectorAll("[data-pane-root]")].map((pane) => {
         const style = getComputedStyle(pane);
@@ -138,11 +140,26 @@ export async function runChatSurfacesSmoke({ page, check, harnessBase }) {
   // A focus change eases the dim over 120ms, so wait for it to settle.
   const settledDims = () => expect.poll(async () => (await read()).panes.map((pane) =>
     pane.dims.every((opacity) => opacity === (pane.focused ? "1" : "0.8")))).not.toContain(false);
-  const focusEdges = (state) => {
+  // No pane draws an edge: every pane is bg1, square, with the dim alone
+  // marking focus.
+  const flushPanes = (state) => {
     for (const pane of state.panes) {
       expect(pane.fill).toBe(state.bg1);
-      expect(pane.edge).toEqual(["1px", pane.focused ? state.border2 : state.border1]);
+      expect(pane.edge[0]).toBe("0px");
+      expect(pane.radii).toEqual(["0px", "0px", "0px", "0px"]);
     }
+  };
+  // Each divider is its 8px strip with one 1px border1 line inside it.
+  const dividerLine = (state, separator, isRow) => {
+    expect(separator.children).toBe(1);
+    expect(separator.line.fill).toBe(state.border1);
+    expect(isRow ? separator.line.box.width : separator.line.box.height).toBe(1);
+    expect(isRow ? separator.line.box.height : separator.line.box.width).toBe(isRow ? separator.box.height : separator.box.width);
+    const [start, size, lineStart] = isRow
+      ? [separator.box.left, separator.box.width, separator.line.box.left]
+      : [separator.box.top, separator.box.height, separator.line.box.top];
+    expect(lineStart).toBeGreaterThanOrEqual(start);
+    expect(lineStart + 1).toBeLessThanOrEqual(start + size);
   };
 
   // A lone pane runs edge to edge: no gutters and no corners.
@@ -236,7 +253,7 @@ export async function runChatSurfacesSmoke({ page, check, harnessBase }) {
   check("Chat scrollbar: programmatic scrolls never reveal it; the reader's wheel shows the thumb in #222 (Dark) or #EAEAEA (Light), and it hides again once they stop", true);
 
   await page.getByRole("button", { name: "Show design panel", exact: true }).click();
-  await expect(page.locator("[data-workbench-island]")).toBeVisible();
+  await expect(page.locator("[data-workbench-body]")).toBeVisible();
   await expect(summaryIsland).toHaveCount(0);
   const undocked = await chatLayout();
   expect(undocked.island).toBeNull();
@@ -258,44 +275,42 @@ export async function runChatSurfacesSmoke({ page, check, harnessBase }) {
     splitBg1.push(state.bg1);
     const [left, right] = state.panes;
     expect(state.headerBorder).toBe("0px");
-    // 12px in from the left, right and bottom. Workbench's island sits on the
-    // column's edge, so the right gutter is the split's own.
-    expect(state.gutters).toEqual(["0px", "12px", "12px", "12px"]);
-    near(left.box.left, state.surface.left + 12);
-    for (const pane of state.panes) near(pane.box.bottom, state.surface.bottom - 12);
-    near(right.box.right, state.surface.right - 12);
-    near(state.islandLeft - right.box.right, 12);
-    // The 8px gap is the resize handle and draws nothing.
+    // Edge to edge: no gutters, and the right pane meets the side column's seam.
+    expect(state.gutters).toEqual(["0px", "0px", "0px", "0px"]);
+    near(left.box.left, state.surface.left);
+    for (const pane of state.panes) near(pane.box.bottom, state.surface.bottom);
+    near(right.box.right, state.surface.right);
+    near(state.seamLeft - right.box.right, 0);
+    // The 8px strip between them is the resize handle and draws one line.
     near(right.box.left - left.box.right, 8);
     expect(state.separators).toHaveLength(1);
     near(state.separators[0].box.left, left.box.right);
     expect(state.separators[0].box.width).toBe(8);
-    expect(state.separators[0].children).toBe(0);
+    dividerLine(state, state.separators[0], true);
     expect(state.panes.filter((pane) => pane.focused)).toHaveLength(1);
-    focusEdges(state);
+    flushPanes(state);
     for (const pane of state.panes) {
       expect(pane.dims.every((opacity) => opacity === (pane.focused ? "1" : "0.8"))).toBe(true);
-      expect(pane.radii).toEqual(["12px", "12px", "12px", "12px"]);
       expect(pane.strip).toBe("none");
     }
     expect(state.fades).toBe(0);
   }
   expect(new Set(splitBg1).size).toBe(2);
-  check("Split Right: solid panes 8px apart and 12px in from every side, 12px from the side island, rounded at every corner, all on bg1 with a border2 edge on the focused pane and border1 and an 80% dim on the other, in Dark and Light", true);
+  check("Split Right: square panes edge to edge on bg1 with no gutters or edges, one 1px border1 line in the 8px resize strip between them, the right pane on the side column's seam, and an 80% dim on the unfocused pane, in Dark and Light", true);
 
-  // The split's right gutter is its own, so hiding Workbench changes nothing.
+  // Edge to edge with the side column shown or hidden.
   await page.evaluate(() => {
     document.documentElement.dataset.theme = "dark";
   });
   await page.getByRole("button", { name: "Hide design panel", exact: true }).click();
-  await expect(page.locator("[data-workbench-island]")).toBeHidden();
-  await expect.poll(async () => (await read()).gutters).toEqual(["0px", "12px", "12px", "12px"]);
+  await expect(page.locator("[data-workbench-body]")).toBeHidden();
+  await expect.poll(async () => (await read()).gutters).toEqual(["0px", "0px", "0px", "0px"]);
   const hidden = await read();
-  near(hidden.panes[1].box.right, hidden.surface.right - 12);
+  near(hidden.panes[1].box.right, hidden.surface.right);
   await page.getByRole("button", { name: "Show design panel", exact: true }).click();
-  await expect(page.locator("[data-workbench-island]")).toBeVisible();
-  await expect.poll(async () => (await read()).gutters).toEqual(["0px", "12px", "12px", "12px"]);
-  check("A split keeps its 12px right gutter with the side column shown or hidden", true);
+  await expect(page.locator("[data-workbench-body]")).toBeVisible();
+  await expect.poll(async () => (await read()).gutters).toEqual(["0px", "0px", "0px", "0px"]);
+  check("A split runs edge to edge with the side column shown or hidden", true);
 
   // An unfocused pane's composer is its Ask pill. Pressing it focuses that
   // pane: the pill eases into the composer, which takes the caret, and the
@@ -326,8 +341,8 @@ export async function runChatSurfacesSmoke({ page, check, harnessBase }) {
     expect(pane.label).toBe("Ask Claude");
     expect(pane.height).toBe(32);
     near(pane.centre, 0);
-    // The dock column's 16px plus the pane's 1px edge.
-    near(pane.fromBottom, 17);
+    // The dock column's 16px; the pane draws no edge.
+    near(pane.fromBottom, 16);
     expect(pane.radius).toBe("16px");
   }
   const pressAndWatch = (index) => page.evaluate((target) => new Promise((resolve) => {
@@ -386,18 +401,19 @@ export async function runChatSurfacesSmoke({ page, check, harnessBase }) {
   near(top.box.left - whole.box.right, 8);
   near(bottom.box.left - whole.box.right, 8);
   expect(grid.separators).toHaveLength(2);
-  // The side-by-side handle, then the stacked one: each is the 8px gap.
+  // The side-by-side strip, then the stacked one: 8px each, one line each.
   expect(grid.separators[0].box.width).toBe(8);
   expect(grid.separators[1].box.height).toBe(8);
-  // The outer gutters stay 12px.
-  near(whole.box.left, grid.surface.left + 12);
-  near(bottom.box.bottom, grid.surface.bottom - 12);
-  near(top.box.right, grid.surface.right - 12);
-  for (const pane of grid.panes) expect(pane.radii).toEqual(["12px", "12px", "12px", "12px"]);
-  focusEdges(grid);
-  expect([whole.edge[1], top.edge[1], bottom.edge[1]]).toEqual([grid.border1, grid.border1, grid.border2]);
+  dividerLine(grid, grid.separators[0], true);
+  dividerLine(grid, grid.separators[1], false);
+  // Edge to edge: no gutters.
+  near(whole.box.left, grid.surface.left);
+  near(bottom.box.bottom, grid.surface.bottom);
+  near(top.box.right, grid.surface.right);
+  flushPanes(grid);
+  expect(grid.panes.map((pane) => pane.dims.every((opacity) => opacity === "0.8"))).toEqual([true, true, false]);
   expect(grid.fades).toBe(0);
-  check("Split Down beside a pane: a crisp 8px gap both ways at the T-junction inside 12px gutters, every pane rounded on bg1, only the focused one on border2, nothing fading", true);
+  check("Split Down beside a pane: 1px border1 lines meet in a T, each in its 8px resize strip; every pane square and edge to edge on bg1, only the dim marking focus, nothing fading", true);
 
   await page.evaluate(() => {
     localStorage.clear();

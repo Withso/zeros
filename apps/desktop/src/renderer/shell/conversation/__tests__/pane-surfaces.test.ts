@@ -3,7 +3,8 @@ import { resolve } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { PANE_SPLITTER_PX, PANE_SPLIT_GUTTER_PX } from "../pane-portal-store";
+import * as panePortalStore from "../pane-portal-store";
+import { PANE_SPLITTER_PX } from "../pane-portal-store";
 
 const read = (path: string) =>
   readFileSync(resolve(process.cwd(), "apps/desktop/src/renderer/shell/conversation", path), "utf8");
@@ -25,56 +26,59 @@ function classConstant(src: string, name: string): string[] {
   return match[1].split(/\s+/);
 }
 
-// 2026-11-06 direction (Zeros Design v391, "Solid split", replacing the soft
-// valleys of v378 to v383): only while the column is split, panes stand apart
-// as solid surfaces on the bg1 chrome, 12px in from the column's edges, with
-// 12px corners and nothing fading between them. A lone pane runs edge to edge.
-// 2026-11-07: every pane keeps bg1 and edges tell them apart, border2 on the
-// focused pane and border1 on the others, whose content dims to 80%. The side
-// island sits on the column's edge, so the split keeps its own right gutter.
-// 2026-11-08: panes sit 8px apart both ways; the outer gutters keep 12px.
+// 2026-11-09 direction (Zeros Design v414, "Flush"), replacing the solid
+// islands of 2026-11-06 to 2026-11-08: split panes run edge to edge like a lone
+// pane, with no gutter, gap or rounded corner. Between two panes the divider is
+// an 8px resize strip that draws one 1px border1 line; it is bg1 like the panes,
+// so they meet at that line. Every pane keeps bg1 and draws no edge of its own:
+// an unfocused pane's strip and body dim to 80% and its composer is its Ask pill.
 describe("split pane surfaces", () => {
-  it("makes the divider the 8px gap between split panes both ways, still the resize handle", () => {
+  it("makes the divider an 8px resize strip that draws one crisp 1px border1 line", () => {
     expect(PANE_SPLITTER_PX).toBe(8);
     const splitter = component(paneLayout(), "PaneSplitter");
     // w-2 and h-2 are the 8px the split math charges for the divider.
     expect(splitter).toContain('isRow ? "w-2 cursor-ew-resize" : "h-2 cursor-ns-resize"');
     expect(splitter).not.toMatch(/-m[lrtbxy]?-/);
-    expect(splitter).not.toContain("bg-border1");
+    const line = /className=\{cn\(\s*"bg-border1 pointer-events-none absolute",\s*isRow\s*\?\s*"([^"]+)"\s*:\s*"([^"]+)",?\s*\)\}/.exec(splitter);
+    expect(line, "the divider's line").not.toBeNull();
+    expect(line![1].split(" ")).toEqual(["inset-y-0", "left-1/2", "w-px"]);
+    expect(line![2].split(" ")).toEqual(["inset-x-0", "top-1/2", "h-px"]);
+    // No transform, so the line lands on whole pixels instead of blurring.
+    expect(splitter).not.toContain("translate");
   });
 
-  it("insets a split 12px from the column's left, right and bottom, with or without Workbench beside it", () => {
-    expect(PANE_SPLIT_GUTTER_PX).toBe(12);
+  it("runs a split edge to edge: no gutters, with or without Workbench beside it", () => {
+    expect("PANE_SPLIT_GUTTER_PX" in panePortalStore).toBe(false);
+    expect("splitPaneGutters" in panePortalStore).toBe(false);
+    expect("paneSurfaceMinimumSize" in panePortalStore).toBe(false);
     const src = paneLayout();
-    expect(src).toContain('"flex min-h-0 min-w-0 flex-1 bg-bg1"');
-    expect(src).toContain('split && "px-3 pb-3"');
-    // The side island sits on the column's edge, so nothing about Workbench
-    // changes the gutters.
+    expect(src).toContain('className="flex min-h-0 min-w-0 flex-1 bg-bg1"');
+    expect(src).not.toContain("px-3 pb-3");
     expect(src).not.toContain("workbenchBeside");
     expect(read("conversation-pane.tsx")).not.toContain("workbenchBeside");
-    // The column's floor and the split gate both charge the gutters, the gate
-    // before any split exists.
-    expect(src).toContain("paneSurfaceMinimumSize(layout.root)");
-    expect(component(src, "measureSplitCapacity")).toContain("splitPaneGutters()");
+    // The column's floor and the split gate charge the panes alone.
+    expect(src).toContain("paneTreeMinimumSize(layout.root)");
+    const capacity = component(src, "measureSplitCapacity");
+    expect(capacity).toContain("containerWidth: rect.width,");
+    expect(capacity).toContain("containerHeight: rect.height,");
   });
 
-  it("rounds every corner of a split pane and none of a lone pane", () => {
+  it("squares every pane and draws no pane edge, split or not", () => {
     const pane = component(paneLayout(), "ChatPane");
     expect(pane).toContain("const split = ctx.paneCount > 1;");
-    expect(pane).toContain('"overflow-hidden rounded-[calc(var(--radius-lg)*1.5)] border');
-    expect(pane).not.toMatch(/rounded-t[lr]-/);
+    expect(pane).not.toMatch(/\brounded-/);
+    expect(pane).not.toMatch(/\bborder-border[12]\b/);
+    expect(pane).not.toMatch(/"[^"]*\bborder\b[^"]*"/);
   });
 
-  it("tells split panes apart by edge, not fill: border2 focused, border1 and an 80% dim elsewhere", () => {
+  it("tells a split pane's focus by the 80% dim alone, eased like every opacity change", () => {
     const pane = component(paneLayout(), "ChatPane");
     // One fill for every pane: nothing overrides the bg1 window surface.
     expect(pane).toContain('"relative flex min-h-0 min-w-0 flex-1 flex-col bg-(--pane-bg)"');
     expect(pane).not.toContain("[--pane-bg:");
     expect(pane).not.toContain("sidebar-bg");
-    expect(pane).toContain('split && (isFocused ? "border-border2" : "border-border1 *:opacity-80")');
-    // The dim is on the strip and body, so the edge keeps its own tier, and it
-    // eases like every other opacity change.
-    expect(pane).toContain("*:transition-opacity *:duration-120 *:ease-out motion-reduce:*:transition-none");
+    expect(pane).toContain('split && "*:transition-opacity *:duration-120 *:ease-out motion-reduce:*:transition-none"');
+    expect(pane).toContain('split && !isFocused && "*:opacity-80"');
     expect(pane).not.toMatch(/(?<!\*:)opacity-80/);
   });
 

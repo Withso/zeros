@@ -163,8 +163,8 @@ exported page by page to [design-implementation/](design-implementation/README.m
    and a chosen chip or option fill with `selected-bg` and hold it under the
    pointer. A control's resting edge stays as it is; selection never adds a
    border, ring, outline or shadow. Only keyboard focus rings, and objects on
-   the Design canvas keep the selection stroke. A split chat pane's focus edge
-   is item 13's. `ui/selection-edge` enforces
+   the Design canvas keep the selection stroke. A split chat pane marks focus
+   with item 13's dim, never an edge. `ui/selection-edge` enforces
    it in class variants, in classes a selection condition adds
    (`selected && …`, `tab === activeTab ? … : …`) and in the renderer's
    stylesheets.
@@ -186,8 +186,8 @@ exported page by page to [design-implementation/](design-implementation/README.m
     chat.
 12. **Local and cloud are both first class.** Every surface states its Local
     and cloud behavior; cloud lifecycle never enters a tab banner.
-13. **Split panes are solid islands on the chrome** (2026-11-06; edges
-    2026-11-07; 8px gaps 2026-11-08). The workspace header row draws no divider
+13. **Split panes and the side column run flush** (2026-11-09, replacing the
+    solid islands of 2026-11-06 to 2026-11-08). The workspace header row draws no divider
     (`PanelHeader divider={false}`) and starts with the workspace's name, then
     where it lives, 6px after it (2026-11-09): a 16px laptop for every Local
     workspace (branch, folder or unpublished, personal or organization) and a
@@ -196,16 +196,14 @@ exported page by page to [design-implementation/](design-implementation/README.m
     `bg2-highlight` on hover and while open. It opens the workspace's details:
     for Local, its branch, its folder (`~` for the home folder) and Local in
     `fg3`; for cloud, the cloud details (repository, created and status, with
-    Start and Stop). A lone chat pane runs edge to
-    edge. Only while the column is split, panes stand apart as solid surfaces
-    on the `bg1` chrome: 8px apart both ways (the divider is that gap and the
-    resize handle), 12px in from the column's left, right and bottom edges,
-    every corner 12px, and nothing fading between them, at the tab strip or
-    along a seam. Every pane keeps `bg1`, and edges tell them apart: `border2`
-    on the focused pane, `border1` on the others, whose strip and body (not
-    the edge) dim to 80% over 120ms. Focus here is which window takes input,
-    not a selection, so item 8 does not apply: every split pane has an edge,
-    and focus only raises its tier. 80% is the owner's choice: `fg1` and
+    Start and Stop). Every chat pane runs edge to edge, split or not: no
+    gutter, gap or rounded corner, and nothing fading between panes, at the
+    tab strip or along a seam. Between two panes, side by side or stacked, the
+    divider is an 8px resize strip that draws one 1px `border1` line, placed
+    without a transform so it stays on whole pixels; the strip is `bg1` like
+    the panes, so they meet at that line. Every pane keeps `bg1` and draws no
+    edge of its own; an unfocused pane's strip and body dim to 80% over
+    120ms. 80% is the owner's choice: `fg1` and
     `fg2` stay AA, while `fg3` in Light and `muted-fg` in Dark dip below their
     floors in an unfocused pane. An unfocused pane's composer is its Ask pill:
     "Ask Claude", "Ask Codex", "Ask Cursor" or the chat's agent, no shortcut,
@@ -219,15 +217,16 @@ exported page by page to [design-implementation/](design-implementation/README.m
     (`shared/ui/composer-ask.tsx`). The transcript fades out over the
     32px under its strip and starts 32px down; a tab's drop zone is a soft
     `highlighted-bg` fill without a border; chat tabs are content-sized from
-    70px to 176px. The side column keeps its tab row on `bg1` and holds the
-    open tab in one island under it: a canvas `Surface` on the column's left
-    edge, the line the chat's resize handle runs along, and 12px in from its
-    right and bottom, 12px corners, a `border2` edge (what sits inside keeps
-    `border1`), no seam against the chat, and the first tab 12px in. This
-    replaces the 2026-07-11 flush column, the soft valleys tried on 2026-11-06
-    and the unfocused pane's `sidebar-bg` fill. `shell/conversation/__tests__/pane-surfaces.test.ts`,
+    70px to 176px. The side column runs flush too, as it did from 2026-07-11:
+    its tab row and the open tab fill the column to the window's right and
+    bottom edges, with no inset, corner or edge of their own (a canvas
+    `Surface`, whose contents keep `border1`); its 1px `border1` left edge is
+    the one seam against the chat and the line the chat's resize handle meets;
+    and the first tab starts 8px in. This replaces the side island, the soft
+    valleys tried on 2026-11-06 and the unfocused pane's `sidebar-bg` fill.
+    `shell/conversation/__tests__/pane-surfaces.test.ts`,
     `shell/conversation/__tests__/pane-sizing.test.ts`,
-    `shell/workbench/__tests__/workbench-island.test.ts`,
+    `shell/workbench/__tests__/workbench-column.test.ts`,
     `features/agent/__tests__/composer-ask-pill.test.ts`,
     `features/agent/__tests__/composer-ask-dock.test.ts`
     and `scripts/ui-smoke-chat-surfaces.mjs` hold it.
@@ -388,7 +387,7 @@ imports, following property paths such as `chip.cls`). The ledger counts
 | Surface | Fill | Hover / selected | Border | Notes |
 | --- | --- | --- | --- | --- |
 | Canvas, active chat, dialogs, sheets | `bg-bg1` | `bg-bg1-hover` | `border-border1` | Dialogs sit on `bg-scrim` |
-| Split chat pane | `bg-(--pane-bg)` (= `bg1`) | — | `border-border2` focused, `border-border1` otherwise | Only while the column is split: 8px apart both ways on the `bg1` chrome and 12px in from its edges, with 12px corners, no seam and no fade; an unfocused pane's strip and body dim to 80% (§0 item 13) |
+| Split chat pane | `bg-(--pane-bg)` (= `bg1`) | — | none | Edge to edge like a lone pane, square, with no gutter or fade; the 8px resize strip between two panes draws one 1px `border1` line; an unfocused pane's strip and body dim to 80% and its composer is its Ask pill (§0 item 13) |
 | Raised: tiles | `bg-bg2` | `bg-bg2-hover` | `border-border2` | `bg-bg1-bright` for cards and settings groups |
 | Chat composer and what docks above it | `bg-sidebar-bg` | `bg-sidebar-bg-hover` | `border-(--composer-border)` | No shadow; 18px corners on the Create, workspace and edit composers, 12px elsewhere. Dock cards use `DOCK_CARD_CLS`; the docked pickers use `PopoverContent surface="composer"`; review drafts take `COMPOSER_SURFACE_CLS`. The top of the stack carries `COMPOSER_DOCK_FADE` |
 | Sent user message | `bg-bg2` | — | none | At the lane's right edge, as wide as its text up to 7/8 of the lane (`max-w-7/8`), 12px corners; its pills take `--prompt-pill-bg`, a step lighter; folds long text with `PromptFold` (§0 item 4) |
