@@ -1370,15 +1370,45 @@ export function designFrameIdentityContexts(canvas: CanvasDocument): Map<string,
   }));
 }
 
+/** Batches preparing frames at once, past their catalog check: a renderer
+ * keeps a few in flight so the workers never idle between them, and any
+ * more wait for a slot. */
+const MAX_PREPARING_BATCHES = 4;
+let preparingBatches = 0;
+const waitingBatches: Array<() => void> = [];
+
+export function designPreparingBatchesForTests(): { preparing: number; waiting: number } {
+  return { preparing: preparingBatches, waiting: waitingBatches.length };
+}
+
+async function withPreparingBatch<T>(run: () => Promise<T>): Promise<T> {
+  if (preparingBatches < MAX_PREPARING_BATCHES) preparingBatches++;
+  else await new Promise<void>((resolve) => waitingBatches.push(resolve));
+  try {
+    return await run();
+  } finally {
+    // A waiting batch takes this slot over; otherwise it is freed.
+    const next = waitingBatches.shift();
+    if (next) next();
+    else preparingBatches--;
+  }
+}
+
 /** Bound the batch and validate metadata on both sides. Shared CSS, fonts,
  * assets and HTML are re-read by the existing exact render-identity path.
+ * Only recovery and the catalog check hold the workspace's mutation lane:
+ * preparing frames only reads, so batches overlap and writes never wait for
+ * one. Like an external edit, a write may then be seen half applied; each
+ * frame's identity is computed from the bytes it read, and the watcher
+ * prepares it again. The directory is leased for the batch, and a batch whose
+ * catalog or directory moved meanwhile is refused.
  * `forRenderer: false` (work ahead of an open, recording-ahead.ts) reuses a
  * matching context but never publishes one: change attribution diffs the
  * canvas it holds against the current one, as what renderers prepared against. */
 export async function prepareDesignNavigationFrames(workspacePath: string, catalogRevision: string, files: readonly string[], directoryId?: string,
   options: { forRenderer?: boolean } = {}) {
   if (!files.length || files.length > 16 || new Set(files).size !== files.length) throw new Error("Invalid Design preparation batch.");
-  return withDocumentWrite(workspacePath, async () => {
+  const { directory, before, revision, context } = await withDocumentWrite(workspacePath, async () => {
     await recoverPendingDesignTransactionUnlocked(workspacePath);
     const directory = designDirectoryNameFor(workspacePath);
     const key = JSON.stringify([path.resolve(workspacePath), directory]);
@@ -1395,6 +1425,9 @@ export async function prepareDesignNavigationFrames(workspacePath: string, catal
       if (options.forRenderer !== false && captured?.source === before.source && captured.registration?.source === before.registration)
         preparationContext = { key, revision, inspection: before, context };
     }
+    return { directory, before, revision, context };
+  });
+  const prepared = await withPreparingBatch(() => withDesignDirectoryNameLease(workspacePath, directory, async () => {
     const frames: DesignCanvasFrame[] = [];
     const errors: Array<{ file: string; message: string }> = [];
     const pageIds = designFramePageIds(context.canvas);
@@ -1406,10 +1439,12 @@ export async function prepareDesignNavigationFrames(workspacePath: string, catal
       try { frames.push(fromWorkers.get(file) ?? await prepareRegisteredDesignFrame(workspacePath, file, context.canvas, pageIds, identities)); }
       catch (error) { errors.push({ file, message: error instanceof Error ? error.message : "Could not prepare this frame." }); }
     }
-    if (!sameDesignCatalogInspection(before, inspectDesignCatalog(workspacePath, directory, { revision: false })))
-      throw new DesignCatalogError("stale");
-    return { directoryId: before.layout.manifest.id, catalogRevision, frames, errors };
-  });
+    return { frames, errors };
+  }));
+  if (designDirectoryNameFor(workspacePath) !== directory ||
+    !sameDesignCatalogInspection(before, inspectDesignCatalog(workspacePath, directory, { revision: false })))
+    throw new DesignCatalogError("stale");
+  return { directoryId: before.layout.manifest.id, catalogRevision, ...prepared };
 }
 
 /** Aggregate lightweight canvas metadata in one exact-key request. Exact
