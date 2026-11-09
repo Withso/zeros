@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdtemp, open, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, open, readFile, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
@@ -59,6 +59,31 @@ it("reads a repository without changing its branch, index or files", async () =>
   expect(await snapshot()).toEqual(before);
   expect(await readFile(join(repository, "a.txt"), "utf8")).toBe("changed\n");
   await expect(warmCheckout(join(repository, "missing"), new AbortController().signal)).resolves.toBeUndefined();
+});
+
+// A setup's `git submodule update --init` leaves a populated submodule in a v3
+// snapshot. Plain diff-files ran `git status` in it, which rewrote its index.
+it("leaves a populated submodule's index and a configured fsmonitor alone", async () => {
+  const root = await temporary("zeros-warmup-submodule-");
+  const env = { ...process.env, GIT_AUTHOR_NAME: "Fixture", GIT_AUTHOR_EMAIL: "fixture@example.test", GIT_COMMITTER_NAME: "Fixture",
+    GIT_COMMITTER_EMAIL: "fixture@example.test", GIT_CONFIG_NOSYSTEM: "1", HOME: root };
+  const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, env, encoding: "utf8" });
+  await mkdir(join(root, "sub")); await mkdir(join(root, "super"));
+  git(join(root, "sub"), "init", "-q", "-b", "main"); await writeFile(join(root, "sub", "a.txt"), "a\n");
+  git(join(root, "sub"), "add", "."); git(join(root, "sub"), "commit", "-q", "-m", "sub");
+  git(join(root, "super"), "init", "-q", "-b", "main"); await writeFile(join(root, "super", "m.txt"), "m\n");
+  git(join(root, "super"), "add", "."); git(join(root, "super"), "-c", "protocol.file.allow=always", "submodule", "add", "-q", "../sub", "dep");
+  git(join(root, "super"), "commit", "-q", "-m", "super");
+  git(root, "-c", "protocol.file.allow=always", "clone", "-q", "--recurse-submodules", join(root, "super"), "checkout");
+  const checkout = join(root, "checkout"), monitored = join(root, "fsmonitor-ran");
+  git(checkout, "config", "core.fsmonitor", `touch ${monitored}`);
+  // A restored disk: the same content with newer stat data.
+  const later = new Date(Date.now() + 5_000);
+  await utimes(join(checkout, "dep", "a.txt"), later, later);
+  const submoduleIndex = join(checkout, ".git", "modules", "dep", "index"), before = await readFile(submoduleIndex);
+  await warmCheckout(checkout, new AbortController().signal);
+  expect((await readFile(submoduleIndex)).equals(before)).toBe(true);
+  await expect(readFile(monitored)).rejects.toThrow();
 });
 
 it("reads the checkout path setting only in its exact shape", () => {

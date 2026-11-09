@@ -109,7 +109,10 @@ class BackgroundRefresh implements CheckoutRefresh {
  * every tracked file while hello runs. Read-only: no branch change, hook or LFS
  * download; the checkout itself still waits for the configuration. */
 export async function warmCheckout(checkoutPath: string, signal: AbortSignal): Promise<void> {
-  await git(checkoutPath, {})(["diff-files", "--quiet"], signal).catch(() => {});
+  // As the worker's other read-only Git: no optional index refresh, no
+  // `git status` child per populated submodule, and no fsmonitor or hook command.
+  await git(checkoutPath, { GIT_OPTIONAL_LOCKS: "0" })(["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
+    "diff-files", "--quiet", "--ignore-submodules"], signal).catch(() => {});
 }
 
 export async function prepareCheckout(workspace: WorkerConfig["workspace"], gitEnvironment: NodeJS.ProcessEnv = {}, timing?: StartupTimingObserver): Promise<CheckoutResult> {

@@ -1437,8 +1437,9 @@ credential comes from the token file.
 A create also writes `ZEROS_CHECKOUT_PATH` (`/home/user/<owner>/<name>`).
 The VM restores its disk lazily from the Cloud Computer snapshot, so while
 hello runs, the worker warms that checkout with a read-only
-`git diff-files --quiet`. The warm-up changes no branch, runs no hook and
-downloads nothing. The checkout itself still waits for hello's
+`git diff-files --quiet --ignore-submodules`, using `GIT_OPTIONAL_LOCKS=0`
+and with fsmonitor and hooks disabled. The warm-up changes no branch or
+index, skips submodules and downloads nothing. The checkout itself still waits for hello's
 configuration, and the warm-up stops when the checkout starts. Wakes and
 runtime resumes skip it. The Dev hosted-profile launcher takes
 `ZEROS_CLOUD_V2_RUNTIME_SHA256` and maps it to the control-plane runtime pin,
