@@ -1513,11 +1513,13 @@ export const DesignCanvas = React.memo(function DesignCanvas({
   const publishSelection = useCallback(
     (
       frame: DesignFrameView | null,
-      options?: { selected?: boolean; reveal?: boolean; explicit?: boolean; additive?: boolean },
+      options?: { selected?: boolean; reveal?: boolean; explicit?: boolean; additive?: boolean; onError?: () => void },
     ) => {
       if (!workspaceId) return;
-      void selectDesignFrame(workspaceId, frame, { ...options, owner: canvasPageOwner }).catch(
+      const { onError, ...selection } = options ?? {};
+      void selectDesignFrame(workspaceId, frame, { ...selection, owner: canvasPageOwner }).catch(
         (selectionError) => {
+          onError?.();
           toast.error("Couldn't update the design selection", {
             description: errorMessage(selectionError),
           });
@@ -1534,6 +1536,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
   // after a reconnect (the engine keeps selection in memory only).
   const passiveSelection = useRef<DesignPassiveSelectionPublisher | null>(null);
   passiveSelection.current ??= new DesignPassiveSelectionPublisher();
+  const forgetPassiveSelection = useCallback(() => passiveSelection.current?.forget(), []);
   const [selectionConnection, setSelectionConnection] = useState(0);
   useEffect(() => onActiveBridgeConnected((_client, { initial }) => {
     if (initial) return;
@@ -1551,10 +1554,12 @@ export const DesignCanvas = React.memo(function DesignCanvas({
     if (view.selectedNodeId) return;
     if (!passiveSelection.current!.offer({ workspaceId, owner: canvasPageOwner, frame: selectedDescription ?? null,
       selected: view.frameSelected, event: view.selectionEvent })) return;
-    publishSelection(selectedDescription ?? null, { selected: view.frameSelected, explicit: false });
+    // A failed write is published again by the next snapshot update.
+    publishSelection(selectedDescription ?? null, { selected: view.frameSelected, explicit: false, onError: forgetPassiveSelection });
   }, [
     active,
     canvasPageOwner,
+    forgetPassiveSelection,
     publishSelection,
     selectedDescription,
     selectionConnection,
