@@ -174,7 +174,7 @@ async function recordItem(slot: Slot, documents: Map<string, string>, item: Desi
       // EXPERIMENT: show the whole page zoomed far out, so the hidden window rasters tiny tiles; layout and the recorded picture are unchanged.
       await whileAlive(contents.debugger.sendCommand("Emulation.setDeviceMetricsOverride",
         { width: item.viewport.width, height: item.viewport.height, deviceScaleFactor: slot.ratio, mobile: false,
-          viewport: { x: 0, y: 0, width: item.viewport.width, height: item.viewport.height, scale: 0.05 } }));
+          viewport: { x: 0, y: 0, width: item.viewport.width, height: item.viewport.height, scale: 1 / 16 } }));
       slot.viewport = viewport;
     }
     if (slot.colorScheme !== colorScheme) {
