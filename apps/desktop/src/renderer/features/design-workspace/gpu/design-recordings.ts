@@ -291,7 +291,7 @@ export class DesignRecordings {
   private pump(state: OwnerState): void {
     if (this.owners.get(state.key) !== state) return;
     const now = this.deps.now?.() ?? Date.now();
-    const limit = state.replied ? Math.max(1, this.deps.inFlight ?? 2) : 1;
+    const limit = state.replied ? Math.max(1, this.deps.inFlight ?? 1) : 1;
     let nextRetry = Infinity;
     while (state.inFlight.size < limit) {
       let op: "read" | "render" | null = null;
