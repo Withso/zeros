@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, utimes, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, mkdtemp, readFile, readdir, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it } from "vitest";
@@ -47,4 +48,29 @@ it("leaves a populated submodule's index and a configured fsmonitor alone", asyn
   warm(checkout, env);
   expect((await readFile(submoduleIndex)).equals(before)).toBe(true);
   await expect(readFile(monitored)).rejects.toThrow();
+});
+
+const hasLfs = (() => { try { execFileSync("git", ["lfs", "version"], { stdio: "ignore" }); return true; } catch { return false; } })();
+// Minimal stat checking lets a racily clean entry reach a content comparison,
+// which for LFS starts git-lfs's clean filter. Nothing may persist from it.
+it.skipIf(!hasLfs)("changes nothing in an LFS checkout, .git included, even when git-lfs's clean filter runs", async () => {
+  const repository = await temporary("zeros-warmup-lfs-"), env = { ...process.env, ...identity };
+  const git = (...args: string[]) => execFileSync("git", args, { cwd: repository, env, encoding: "utf8" });
+  git("init", "-q", "-b", "main"); git("lfs", "install", "--local");
+  git("lfs", "track", "*.bin");
+  await writeFile(join(repository, "data.bin"), Buffer.alloc(64 * 1024, 7));
+  await writeFile(join(repository, "a.txt"), "a\n");
+  git("add", "."); git("commit", "-q", "-m", "fixture");
+  for (const name of ["data.bin", "a.txt"]) execFileSync("sh", ["-c", `cp -p ${name} ${name}.restored && mv ${name}.restored ${name}`], { cwd: repository });
+  const listing = async () => {
+    const entries = await readdir(repository, { recursive: true, withFileTypes: true });
+    const files = await Promise.all(entries.filter(entry => entry.isFile()).map(async entry => {
+      const path = join(entry.parentPath, entry.name);
+      return `${path.slice(repository.length)} ${createHash("sha256").update(await readFile(path)).digest("hex")}`;
+    }));
+    return files.sort();
+  };
+  const before = await listing();
+  warm(repository, env);
+  expect(await listing()).toEqual(before);
 });

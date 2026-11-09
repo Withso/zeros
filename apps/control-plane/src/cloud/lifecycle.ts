@@ -168,7 +168,10 @@ export function checkoutWarmupCommand(checkoutPath: string): string | null {
   return `cd -- '${checkoutPath}' && setsid nohup sh -c '${CHECKOUT_WARMUP_SCRIPT}' >/dev/null 2>&1 </dev/null &`;
 }
 /** Run in the checkout. Compared by mtime and size alone, restored files stay
- * clean, so `diff-files --quiet` visits every file instead of the first. */
+ * clean, so `diff-files --quiet` visits every file instead of the first; on
+ * Zeros Dev only this variant brought the switch down to ~0.6 s. A racily
+ * clean entry gets a content comparison, which for LFS starts git-lfs's clean
+ * filter. That writes nothing persistent (checkout-warmup.test.ts). */
 export const CHECKOUT_WARMUP_SCRIPT = `${READ_ONLY_GIT} ls-tree -r -z HEAD >/dev/null 2>&1 & ` +
   `${READ_ONLY_GIT} -c core.checkStat=minimal -c core.trustctime=false diff-files --quiet --ignore-submodules >/dev/null 2>&1; wait`;
 

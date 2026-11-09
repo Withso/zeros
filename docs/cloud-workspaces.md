@@ -1445,8 +1445,9 @@ read-only warm-up as the VM user as soon as the VM accepts commands: `git
 ls-tree -r HEAD` reads the pack, and `git diff-files --quiet
 --ignore-submodules` with `core.checkStat=minimal` stats every file. It runs
 with `GIT_OPTIONAL_LOCKS=0`, fsmonitor and hooks disabled and a 60 s
-timeout. It writes nothing and downloads nothing, so it may overlap the
-worker's own checkout. Its failure never fails the create, and wakes skip
+timeout. A racily clean file can still get a content comparison, which for
+LFS files starts git-lfs's clean filter. The warm-up still writes nothing
+and downloads nothing, so it may overlap the worker's own checkout. Its failure never fails the create, and wakes skip
 it. The Dev hosted-profile launcher takes
 `ZEROS_CLOUD_V2_RUNTIME_SHA256` and maps it to the control-plane runtime pin,
 and derives each Dev generation's worker signing key.
