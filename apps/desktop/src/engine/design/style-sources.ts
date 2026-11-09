@@ -1701,3 +1701,19 @@ export async function designTailwindBatchCss(
   }
   return css.replace(/<\/style/gi, "<\\/style");
 }
+
+/** Whether the canvas's font catalog or any of its style sources brings App
+ * fonts, whose download state lives in this process only. */
+export async function designStyleSourcesUseFonts(workspacePath: string, canvas: CanvasDocument): Promise<boolean> {
+  if (readDesignFontCatalog(canvas).fonts.length > 0) return true;
+  for (const declaration of readDesignStyleSourceCatalog(canvas).declarations) {
+    if (declaration.kind === "build") {
+      if (designBuildOutputPathError(declaration.path)) continue;
+      if ((await importCssSource(workspacePath, outputDeclaration(declaration))).fontImports?.length) return true;
+    } else if (declaration.kind === "tailwind") {
+      if (designStyleSourcePathError(declaration.path)) continue;
+      if ((await tailwindGeneration(workspacePath, declaration)).result.fontImports?.length) return true;
+    } else if ((await resolveDesignStyleSource(workspacePath, declaration)).fontImports?.length) return true;
+  }
+  return false;
+}
