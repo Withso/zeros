@@ -15,6 +15,8 @@ import { stopDesignPreparationWorkers } from "./design/preparation-pool";
 import { configureDesignStyleBuilds, designStyleInputChanged, presentDesignStyleBuildRoots, stopDesignStyleBuilds } from "./design/style-builds";
 import { DesignChangePoller, designSnapshotDirectory } from "./design/change-poller";
 import { DesignFrameChanges } from "./design/frame-changes";
+import { DesignRecordingAhead, designRecordingAheadDeps } from "./design/recording-ahead";
+import { onDesignRecordingTarget } from "./design/recording-batch";
 import { localWorktreeNativeWatcher } from "./git/recursive-watch";
 import { configureDesignFonts } from "./design/style-fonts";
 import { fenceDesignSnapshotReads } from "./design/snapshot-epoch";
@@ -724,6 +726,11 @@ export class ZerosEngine {
   private stopStyleBuildInputs: (() => void) | null = null;
   private designFrameChanges: DesignFrameChanges | null = null;
   private stopDesignFrameChanges: (() => void) | null = null;
+  /** Records frames a change reaches before their page is opened again; inert
+   * until a recorded canvas asks for recordings. */
+  private designRecordingAhead: DesignRecordingAhead | null = null;
+  private stopDesignRecordingTargets: (() => void) | null = null;
+  private stopDesignRecordingFiles: (() => void) | null = null;
   /** Live canvas feedback for Local agents' native Design edits. Never
    * constructed for a cloud worker. */
   private designAgentActivity: DesignAgentActivity | null = null;
@@ -2796,6 +2803,10 @@ export class ZerosEngine {
     // One-shot Design style builds re-run on their inputs from this watcher,
     // rather than each running a watcher of its own.
     this.stopStyleBuildInputs = onWorktreeContentChange(designStyleInputChanged);
+    const recordingAhead = new DesignRecordingAhead(designRecordingAheadDeps());
+    this.designRecordingAhead = recordingAhead;
+    this.stopDesignRecordingTargets = onDesignRecordingTarget((target) => void recordingAhead.noteTarget(target));
+    this.stopDesignRecordingFiles = onWorktreeContentChange((root, file) => recordingAhead.noteFile(root, file));
     this.designFrameChanges = new DesignFrameChanges({
       directory: (root) => {
         const name = designSnapshotDirectory(root) ?? activeDesignDirectoryNameFor(root);
@@ -2806,6 +2817,7 @@ export class ZerosEngine {
         const workspaceId = getWorkspaceByPath(root)?.id;
         this.router.broadcastLocal(createMessage({ type: "DB_CHANGED", source: "engine", kinds: ["designFrames"],
           ...(workspaceId ? { workspaceIds: [workspaceId] } : {}), designFrames: change }));
+        recordingAhead.noteChange(root, change);
       },
     });
     this.stopDesignFrameChanges = onWorktreeContentChange((root, file) => this.designFrameChanges?.note(root, file));
@@ -3041,6 +3053,12 @@ export class ZerosEngine {
     this.stopDesignFrameChanges = null;
     this.designFrameChanges?.stop();
     this.designFrameChanges = null;
+    this.stopDesignRecordingTargets?.();
+    this.stopDesignRecordingTargets = null;
+    this.stopDesignRecordingFiles?.();
+    this.stopDesignRecordingFiles = null;
+    this.designRecordingAhead?.stop();
+    this.designRecordingAhead = null;
     // Release the watch host before the Design poller, so a host that gives
     // up during teardown cannot start a replacement poller.
     const watchHost = this.watchHost;

@@ -1371,8 +1371,12 @@ export function designFrameIdentityContexts(canvas: CanvasDocument): Map<string,
 }
 
 /** Bound the batch and validate metadata on both sides. Shared CSS, fonts,
- * assets and HTML are re-read by the existing exact render-identity path. */
-export async function prepareDesignNavigationFrames(workspacePath: string, catalogRevision: string, files: readonly string[], directoryId?: string) {
+ * assets and HTML are re-read by the existing exact render-identity path.
+ * `forRenderer: false` (work ahead of an open, recording-ahead.ts) reuses a
+ * matching context but never publishes one: change attribution diffs the
+ * canvas it holds against the current one, as what renderers prepared against. */
+export async function prepareDesignNavigationFrames(workspacePath: string, catalogRevision: string, files: readonly string[], directoryId?: string,
+  options: { forRenderer?: boolean } = {}) {
   if (!files.length || files.length > 16 || new Set(files).size !== files.length) throw new Error("Invalid Design preparation batch.");
   return withDocumentWrite(workspacePath, async () => {
     await recoverPendingDesignTransactionUnlocked(workspacePath);
@@ -1388,7 +1392,7 @@ export async function prepareDesignNavigationFrames(workspacePath: string, catal
       // The canvas navigation and identity reads share: one frozen copy per revision.
       context = await readSharedCanvasContext(workspacePath);
       const captured = context.canvas[canvasReadSnapshot];
-      if (captured?.source === before.source && captured.registration?.source === before.registration)
+      if (options.forRenderer !== false && captured?.source === before.source && captured.registration?.source === before.registration)
         preparationContext = { key, revision, inspection: before, context };
     }
     const frames: DesignCanvasFrame[] = [];
