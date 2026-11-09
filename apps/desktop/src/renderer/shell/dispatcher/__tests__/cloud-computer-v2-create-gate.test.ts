@@ -42,6 +42,9 @@ vi.mock("../../../state/use-cached-read", () => ({
 import {
   CloudComputerV2CreateNotice,
   cloudComputerRepositoriesCache,
+  cloudComputerRepositoriesKey,
+  keepCloudComputerRepositoriesWarm,
+  readCloudComputerRepositories,
   useCloudComputerV2CreateGate,
 } from "../../../features/settings/cloud-computer-v2-create-gate";
 
@@ -135,6 +138,33 @@ describe("cloud create admission", () => {
     state.repositories = [computerRepository("example", "project")];
     state.error = new Error("offline");
     expect(readGate().reason).toBeNull();
+  });
+  // On Alpha the prompt section's intent warming refetched a list older than
+  // 30 s at the moment of Create; its checks serialized with the create's on
+  // the server and the create took 6.5 s.
+  it("keeps the list inside the server's 30 s check window while the Create page is shown", () => {
+    vi.useFakeTimers();
+    try {
+      const refresh = vi.fn();
+      const stop = keepCloudComputerRepositoriesWarm(refresh);
+      vi.advanceTimersByTime(9_999); expect(refresh).not.toHaveBeenCalled();
+      vi.advanceTimersByTime(1); expect(refresh).toHaveBeenCalledOnce();
+      vi.advanceTimersByTime(20_000); expect(refresh).toHaveBeenCalledTimes(3);
+      stop(); vi.advanceTimersByTime(60_000); expect(refresh).toHaveBeenCalledTimes(3);
+    } finally { vi.useRealTimers(); }
+  });
+  it("keeps the rendered list when a refresh finds nothing new", async () => {
+    const key = cloudComputerRepositoriesKey(computerUser, computerOrg);
+    const load = () => cloudComputerRepositoriesCache.load(key, () => readCloudComputerRepositories(key), { force: true });
+    state.installed.mockResolvedValue([computerRepository("example", "project")]);
+    await load();
+    const first = cloudComputerRepositoriesCache.peekSnapshot(key).data;
+    state.installed.mockResolvedValue([computerRepository("example", "project")]);
+    await load();
+    expect(cloudComputerRepositoriesCache.peekSnapshot(key).data).toBe(first);
+    state.installed.mockResolvedValue([computerRepository("example", "other")]);
+    await load();
+    expect(cloudComputerRepositoriesCache.peekSnapshot(key).data).not.toBe(first);
   });
   it("gates reads and intent warming on owner and activity", () => {
     for (const [personal, active] of [[true, true], [false, false]] as const) {
