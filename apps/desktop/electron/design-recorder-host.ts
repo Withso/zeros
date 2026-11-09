@@ -21,7 +21,6 @@ import {
   DESIGN_BATCH_CAPTURE_TIMEOUT_MS,
   DESIGN_CAPTURE_SHEET_SCHEME,
   DESIGN_RECORDER_FOLDER_PREFIX,
-  DESIGN_STATIC_RENDER_SCRIPT,
   designBatchRecordRequestSchema,
   type DesignBatchRecordReply,
   type DesignBatchRecordRequest,
@@ -29,7 +28,7 @@ import {
 import { DESIGN_CAPTURE_FRAME_CSP } from "../src/engine/design/capture-sheet";
 import { designRecorderDocument, designRecorderMetrics } from "./design-recorder-document";
 import { designRecorderFrameGuard } from "./design-recorder-frame";
-import { DESIGN_RECORDER_PREPARE_SCRIPT } from "./design-recorder-scripts";
+import { designRecorderRecordScript } from "./design-recorder-scripts";
 import { externalizeRecordedLayer, RecordedTypefaceIds } from "./design-recorder-typefaces";
 
 const token = process.env.ZEROS_DESIGN_RECORDER_TOKEN ?? "";
@@ -181,15 +180,10 @@ async function recordItem(slot: Slot, documents: Map<string, string>, item: Desi
     await whileAlive(slot.window.loadURL(`${DESIGN_CAPTURE_SHEET_SCHEME}://sheet/${key}`));
     step("load");
     guard.signal.throwIfAborted();
-    await whileAlive(contents.executeJavaScript(DESIGN_STATIC_RENDER_SCRIPT));
-    step("still");
-    await whileAlive(contents.executeJavaScript(DESIGN_RECORDER_PREPARE_SCRIPT));
-    step("prepare");
-    guard.signal.throwIfAborted();
     const directory = path.join(folder, item.id);
     await mkdir(directory, { mode: 0o700 });
-    await whileAlive(contents.executeJavaScript(`chrome.gpuBenchmarking.printToSkPicture(${JSON.stringify(directory)})`));
-    step("print");
+    await whileAlive(contents.executeJavaScript(designRecorderRecordScript(directory)));
+    step("page");
     const layers = (await whileAlive(readdir(directory))).filter((name) => /^layer_\d+\.skp$/.test(name));
     // Only a recorded frame's folder is handed to the engine, which removes it.
     if (layers.length === 0) { await rm(directory, { recursive: true, force: true }); return { id: item.id, error: "The recorder produced no picture for this frame." }; }

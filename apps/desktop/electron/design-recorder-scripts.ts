@@ -1,5 +1,6 @@
 // Host-evaluated scripts of the Design recorder (design-recorder-host.ts),
 // kept apart so they can be tested without Electron.
+import { DESIGN_STATIC_RENDER_SCRIPT } from "@zeros/protocol/design-capture";
 
 /** Content Chromium would composite onto a layer of its own, which a
  * picture of the page's layer doesn't include, made to paint into it while
@@ -63,3 +64,13 @@ export const DESIGN_RECORDER_PREPARE_SCRIPT = `(() => {
     .then(() => { const converted = flattenDesignScrollers();
       return new Promise(resolve => requestAnimationFrame(() => setTimeout(() => resolve(converted), 0))); });
 })()`;
+
+/** A loaded frame stilled, prepared and printed to `directory` in one
+ * evaluation: three were three round trips through the recorder's main
+ * process, which drives every window. The same scripts run in the same
+ * order, so the recorder identity, which names them, is unchanged. */
+export function designRecorderRecordScript(directory: string,
+  parts: { still: string; prepare: string } = { still: DESIGN_STATIC_RENDER_SCRIPT, prepare: DESIGN_RECORDER_PREPARE_SCRIPT }): string {
+  return `Promise.resolve(${parts.still}).then(() => ${parts.prepare})` +
+    `.then(() => chrome.gpuBenchmarking.printToSkPicture(${JSON.stringify(directory)}))`;
+}
