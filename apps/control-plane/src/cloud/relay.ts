@@ -13,6 +13,7 @@ import type { CloudV2Store, CloudV2Workspace, CloudV2WorkerBinding } from "./sto
 import { isCloudV2Token } from "./tokens.js";
 import { dialWorker, workerSupportsCheckout, workerSupportsMcp, workerSupportsSetup, workerSupportsRepositorySetup, workerSupportsGithub, workerSupportsGitIdentity, workerSupportsGithubUserTokens, workerSupportsAgentInteractions, workerSupportsCodeReview, workerSupportsHistoryReplacement, workerSupportsEnvironment, workerSupportsRuntimeUpdate, workerSupportsPush, type WorkerRoute } from "./worker-connection.js";
 import { emitCloudV2Timing, type CloudV2TimingRecord } from "./lifecycle.js";
+import { HttpError } from "../authz.js";
 import { isGithubAccessRevoked, isGithubTemporary } from "../github-availability.js";
 import { CLOUD_SOURCE_REFRESH_MS, type CloudSourceContinuation, type CloudSourceProof } from "./source-authority.js";
 
@@ -20,6 +21,8 @@ import { CLOUD_SOURCE_REFRESH_MS, type CloudSourceContinuation, type CloudSource
 const APP_AUTHORITY_WINDOW_MS = 5_000;
 /** Retry spacing for a temporary source failure inside the original grace. */
 const SOURCE_RETRY_MS = 10_000, SOURCE_RETRY_MAX_MS = 60_000;
+// A pending create resolves within seconds; its room re-checks this often.
+const SOURCE_PENDING_RECHECK_MS = 1_000;
 export const CLOUD_V2_BRIDGE_PROTOCOL = "zeros.cloud.v2";
 export const CLOUD_V2_EXPLICIT_WAKE_PROTOCOL = "zeros.cloud.v2.explicit-wake";
 const BRIDGE_PATH = /^\/v2\/cloud\/workspaces\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/bridge$/;
@@ -266,7 +269,11 @@ export class CloudV2Relay {
       if (revision !== this.securityRevision) return this.authorize(room, admittingSessionId, admission);
       if (isGithubAccessRevoked(error)) { this.revoke(room); return "revoked"; }
       const now = this.deps.now?.() ?? Date.now();
-      if (!admission && isGithubTemporary(error) && proofKey && room.sourceGrace?.proof === proofKey && now < room.sourceGrace.until) {
+      if (error instanceof HttpError && error.code === "cloud_source_pending") {
+        // A create that returned before its GitHub checks, by a fresh read: no
+        // VM, worker or metadata exists to protect. Check again within a second.
+        room.sourceCheckAt = now + SOURCE_PENDING_RECHECK_MS;
+      } else if (!admission && isGithubTemporary(error) && proofKey && room.sourceGrace?.proof === proofKey && now < room.sourceGrace.until) {
         // A slow or unavailable verification keeps an authorized room until the
         // source authority's original deadline; it never extends that deadline.
         room.sourceRetryMs = Math.min(SOURCE_RETRY_MAX_MS, (room.sourceRetryMs ?? SOURCE_RETRY_MS / 2) * 2);

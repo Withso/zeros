@@ -10,6 +10,7 @@ import { CloudProviderError } from "./provider-error.js";
 import { installRuntimeCommand, type CloudV2Runtime } from "./runtime.js";
 import { GIT_LFS_INSTALL_COMMAND } from "./computer.js";
 import { pruneCloudRepositories } from "./source-authority.js";
+import type { PendingSourceOutcome } from "./pending-create.js";
 import type { CloudV2CheckpointFork, CloudV2CheckpointReuse, CloudV2CheckpointRetry, CloudV2CheckpointScope, CloudV2Store, CloudV2Workspace,
   CloudV2LifecycleWorkspace, CloudV2RestoreCreate } from "./store.js";
 import { CLOUD_V2_WORKER_PORT, type CloudV2WorkerTiming } from "./contract.js";
@@ -69,7 +70,7 @@ export const CLOUD_V2_WORKER_TOKEN_PATH = "/home/user/.config/zeros/worker-token
 /** Non-secret boot settings for the worker's systemd unit (EnvironmentFile). */
 export const CLOUD_V2_WORKER_ENV_PATH = "/home/user/.config/zeros/worker.env";
 
-type LifecyclePhase = "boat_create" | "boat_resume" | "source_authorize" | "runtime_install" | "image_prepare" | "repository_prepare" | "protected_route" | "token_delivery" | "checkpoint" | "checkpoint_restore" | "total";
+type LifecyclePhase = "boat_create" | "boat_resume" | "source_resolve" | "source_authorize" | "runtime_install" | "image_prepare" | "repository_prepare" | "protected_route" | "token_delivery" | "checkpoint" | "checkpoint_restore" | "total";
 export type CloudV2TimingRecord = {
   workspaceId: string;
   phase: LifecyclePhase | CloudV2WorkerTiming["phase"] | "worker_hello" | "relay_ready";
@@ -122,6 +123,8 @@ export type CloudV2LifecycleDeps = {
   /** renew: the worker's hello follows within seconds, so a positive near
    * expiry is renewed in the background. */
   authorizeSource?(workspace: CloudV2Workspace, options?: { renew?: boolean }): Promise<void>;
+  /** A pending create's GitHub checks and its one-time source scope. */
+  resolvePendingSource?(workspace: CloudV2Workspace): Promise<PendingSourceOutcome>;
   prepareRepository?(workspace: CloudV2Workspace, sandboxId: string): Promise<void>;
   /** Cloud Computer builds share this loop; one runs at a time. */
   builds?: { tick(): Promise<void>; cleanup?(): Promise<void>; close?(): void };
@@ -389,6 +392,24 @@ export class CloudV2Lifecycle {
 
   private async step(workspace: CloudV2LifecycleWorkspace & { attempts: number }, now: number): Promise<void> {
     const { store, compute } = this.deps;
+    if (workspace.state === "creating" && workspace.sourcePending) {
+      // A create that returned before its GitHub checks: they run here, before
+      // any VM exists. The database refuses a sandbox while it is pending.
+      if (now - Date.parse(workspace.createdAt) > BOOT_DEADLINE_MS) {
+        await store.transition(workspace.id, ["creating"], "failed", { errorCode: "worker_boot_timeout" });
+        return;
+      }
+      const outcome = this.deps.resolvePendingSource
+        ? await this.measure(workspace, "source_resolve", () => this.deps.resolvePendingSource!(workspace))
+        : { errorCode: "cloud_source_pending_unsupported" };
+      if ("skipped" in outcome) return;
+      if ("errorCode" in outcome) {
+        await store.transition(workspace.id, ["creating"], "failed", { errorCode: outcome.errorCode });
+        return;
+      }
+      const { sourcePending: _resolved, ...rest } = workspace;
+      workspace = { ...rest, baseCommit: workspace.baseCommit ?? outcome.baseCommit };
+    }
     if ((workspace.state === "creating" || workspace.state === "starting") && this.deps.authorizeSource)
       await this.measure(workspace, "source_authorize", () => this.deps.authorizeSource!(workspace, { renew: true }));
     switch (workspace.state) {

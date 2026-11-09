@@ -1,5 +1,6 @@
 import { BoatBootPendingError } from "./boat-client.js";
 import { describe, expect, it, vi } from "vitest";
+import { GithubTemporaryError } from "../github-availability.js";
 import type { CloudV2Compute } from "./boat.js";
 import { CLOUD_V2_IDLE_STOP_MS, CLOUD_V2_WORKER_TOKEN_PATH, CloudV2Lifecycle, checkoutWarmupCommand, deliverWorkerTokenCommand, type CloudV2LifecycleDeps } from "./lifecycle.js";
 import type { CloudV2CheckpointFork, CloudV2CheckpointRetry, CloudV2Workspace, CloudV2LifecycleWorkspace } from "./store.js";
@@ -55,7 +56,7 @@ function setup(claimed: (CloudV2LifecycleWorkspace & { attempts: number })[], op
   checkpoints?: ReturnType<typeof checkpointsFake>; remoteHead?: CloudV2LifecycleDeps["remoteHead"]; githubToken?: CloudV2LifecycleDeps["githubToken"]; uploadHorizon?: string;
   checkpointRetry?: boolean; retries?: RetryRow[]; prepareRepository?: CloudV2LifecycleDeps["prepareRepository"]; pruneEnvironments?: () => Promise<void>;
   runtimeForWorkspace?: CloudV2LifecycleDeps["runtimeForWorkspace"]; bootEnv?: CloudV2LifecycleDeps["bootEnv"]; builds?: CloudV2LifecycleDeps["builds"];
-  authorizeSource?: CloudV2LifecycleDeps["authorizeSource"] } = {}) {
+  authorizeSource?: CloudV2LifecycleDeps["authorizeSource"]; resolvePendingSource?: CloudV2LifecycleDeps["resolvePendingSource"] } = {}) {
   const retries = [...options.retries ?? []];
   const compute: CloudV2Compute = {
     create: vi.fn(async () => ({ sandboxId: "bx_new1" })),
@@ -130,9 +131,64 @@ function setup(claimed: (CloudV2LifecycleWorkspace & { attempts: number })[], op
     ...(options.pruneEnvironments ? { pruneEnvironments: options.pruneEnvironments } : {}),
     ...(options.builds ? { builds: options.builds } : {}),
     ...(options.authorizeSource ? { authorizeSource: options.authorizeSource } : {}),
+    ...(options.resolvePendingSource ? { resolvePendingSource: options.resolvePendingSource } : {}),
   });
   return { lifecycle, compute, store, stopWorker, logs };
 }
+
+describe("a create that returned before its GitHub checks", () => {
+  const pending = (extra: Partial<CloudV2LifecycleWorkspace & { attempts: number }> = {}) => workspace("creating", { sourcePending: true, computerBuildId: "build", ...extra });
+
+  it("runs them before any VM, then boots with the base commit they read", async () => {
+    const row = pending(), order: string[] = [];
+    const resolvePendingSource = vi.fn<NonNullable<CloudV2LifecycleDeps["resolvePendingSource"]>>(async () => { order.push("resolve"); return { baseCommit: "d".repeat(40) }; });
+    const authorizeSource = vi.fn<NonNullable<CloudV2LifecycleDeps["authorizeSource"]>>(async () => { order.push("authorize"); });
+    const remoteHead = vi.fn(async () => "e".repeat(40));
+    const f = setup([row], { resolvePendingSource, authorizeSource, remoteHead });
+    vi.mocked(f.compute.create).mockImplementation(async () => { order.push("create"); return { sandboxId: "bx_new1" }; });
+    await f.lifecycle.tick();
+    expect(resolvePendingSource).toHaveBeenCalledExactlyOnceWith(row);
+    expect(order.slice(0, 3)).toEqual(["resolve", "authorize", "create"]);
+    expect(authorizeSource.mock.calls[0]![0]).not.toHaveProperty("sourcePending");
+    expect(remoteHead).not.toHaveBeenCalled();
+    expect(f.store.setBaseCommit).not.toHaveBeenCalled();
+    expect(vmCommand(f, CLOUD_V2_WORKER_TOKEN_PATH)).toBeDefined();
+  });
+
+  it.each(["cloud_source_access_denied", "repository_branch_not_found", "cloud_computer_changed"])("fails it with %s and no VM", async errorCode => {
+    const f = setup([pending()], { resolvePendingSource: async () => ({ errorCode }) });
+    await f.lifecycle.tick();
+    expect(f.store.transition).toHaveBeenCalledWith(WS, ["creating"], "failed", { errorCode });
+    expect(f.compute.create).not.toHaveBeenCalled();
+  });
+
+  it("leaves a row that stopped being pending to its new state", async () => {
+    const f = setup([pending()], { resolvePendingSource: async () => ({ skipped: true }) });
+    await f.lifecycle.tick();
+    expect(f.store.transition).not.toHaveBeenCalled();
+    expect(f.compute.create).not.toHaveBeenCalled();
+  });
+
+  it("retries a temporary GitHub failure with backoff", async () => {
+    const f = setup([pending()], { resolvePendingSource: async () => { throw new GithubTemporaryError("github_unavailable"); } });
+    await f.lifecycle.tick();
+    expect(f.store.defer).toHaveBeenCalledWith(WS, "creating", expect.any(Number), expect.objectContaining({ failure: true }));
+    expect(f.store.transition).not.toHaveBeenCalled();
+    expect(f.compute.create).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["past the boot deadline", { createdAt: new Date(NOW - 11 * 60_000).toISOString() }, true, "worker_boot_timeout"],
+    ["on a replica without the resolver", {}, false, "cloud_source_pending_unsupported"],
+  ] as const)("fails it %s without GitHub or a VM", async (_case, extra, resolver, errorCode) => {
+    const resolvePendingSource = vi.fn(async () => ({ baseCommit: null }));
+    const f = setup([pending(extra)], resolver ? { resolvePendingSource } : {});
+    await f.lifecycle.tick();
+    expect(f.store.transition).toHaveBeenCalledWith(WS, ["creating"], "failed", { errorCode });
+    expect(resolvePendingSource).not.toHaveBeenCalled();
+    expect(f.compute.create).not.toHaveBeenCalled();
+  });
+});
 
 // The worker's hello follows these checks within seconds; a positive about
 // to expire is renewed so that hello needn't verify GitHub itself.

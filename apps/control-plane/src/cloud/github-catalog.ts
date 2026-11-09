@@ -30,6 +30,9 @@ export function createCloudGithubCatalog(deps: {
     const deadlines = new Map<string, number>(), freshAdmissions = new Set<string>();
     const unavailable = new Map<string, CloudGithubUnavailableReason>();
     for (const row of rows) {
+      // A pending create has no source or GitHub metadata yet; the lifecycle
+      // verifies it before any exists. It reads as a plain creating row.
+      if (row.sourcePending) continue;
       const key = JSON.stringify([row.organizationId, row.creatorUserId]);
       const group: ScopeRead = groups.get(key) ?? { scope: { organizationId: row.organizationId, userId: row.creatorUserId }, rows: [], authority: new Map() };
       group.rows.push(row); groups.set(key, group);
@@ -97,6 +100,7 @@ export function createCloudGithubCatalog(deps: {
       }
     }));
     return rows.map(row => {
+      if (row.sourcePending) return row;
       if (allowed.has(row.id) && Date.now() < deadlines.get(row.id)!) return enriched.get(row.id) ?? row;
       // Only the newer timestamp survives a withdrawal. Rolling its version
       // back would make clients retain the protected snapshot as newer data.

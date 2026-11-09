@@ -10,7 +10,7 @@ const computerPath = `/v1/cloud-v2/organizations/${org}/computer`;
 
 function fixture(repositories: { repository: string; defaultBranch: string | null }[] | null = [
   { repository: "example/project", defaultBranch: "master" },
-]) {
+], extra: Partial<CloudV2RouteDeps> = {}) {
   const requireMember = vi.fn(async () => {});
   const authorizeRepository = vi.fn(async () => {});
   const authorizeSourceTargets = vi.fn(async () => {});
@@ -36,7 +36,7 @@ function fixture(repositories: { repository: string; defaultBranch: string | nul
     : c.json({ error: { code: "internal" } }, 500));
   app.route("/", createCloudV2Routes({
     store: { createWorkspace, activeComputer, get, readCreateReceipt, createWorkspaceOnce }, computers: { requireMember, requireAdmin, overview, log, logRepositories }, installedRepositories, authorizeRepository, authorizeSourceTargets, authorizeBuildRepository, authorizeSource, remoteHead,
-    sourceRepositoryId, bridgeBaseUrl: "wss://dev.example.test",
+    sourceRepositoryId, bridgeBaseUrl: "wss://dev.example.test", ...extra,
   } as unknown as CloudV2RouteDeps));
   const create = (body: Record<string, unknown> = {}, key?: string) => app.request("/v1/cloud-v2/workspaces", {
     method: "POST", headers: { "content-type": "application/json", ...(key ? { "Idempotency-Key": key } : {}) },
@@ -296,6 +296,52 @@ describe("cloud v2 creation", () => {
     ]);
   });
 
+  describe("returning before its GitHub checks", () => {
+    const pendingFixture = (repositories?: Parameters<typeof fixture>[0], asyncCreate = () => true) =>
+      fixture(repositories, { asyncCreate } as Partial<CloudV2RouteDeps>);
+
+    it("records a pending create from the Computer's entry without a GitHub call", async () => {
+      const f = pendingFixture([{ repository: "example/docs", defaultBranch: "main" }, { repository: "Example/Project", defaultBranch: "master" }]);
+      const response = await f.create({ name: "Fast" });
+      expect(response.status).toBe(201);
+      expect(f.createWorkspace).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ organizationId: org, creatorUserId: member,
+        repository: "Example/Project", baseBranch: "master", name: "Fast", computerBuildId: f.buildId, pendingSource: true }));
+      expect(f.createWorkspace.mock.calls[0]![0]).not.toHaveProperty("sourceRepositoryId");
+      expect(f.authorizeBuildRepository).not.toHaveBeenCalled();
+      expect(f.remoteHead).not.toHaveBeenCalled();
+    });
+
+    it("keeps the creation key's receipt, replayed without a source check while pending", async () => {
+      const f = pendingFixture();
+      f.get.mockResolvedValue({ id: "55555555-5555-4555-8555-555555555555", sourcePending: true } as never);
+      expect((await f.create({}, "pending-key")).status).toBe(201);
+      expect(f.createWorkspaceOnce).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ pendingSource: true }), "pending-key", expect.any(String), expect.any(Function));
+      f.readCreateReceipt.mockResolvedValue({ status: 201, response: { workspace: { id: "55555555-5555-4555-8555-555555555555" } } });
+      expect((await f.create({}, "pending-key")).status).toBe(201);
+      expect(f.authorizeSource).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ["before the deploy gate opens", () => pendingFixture(undefined, () => false), {}],
+      ["for a renamed repository's new name", () => pendingFixture(), { repository: "example/renamed" }],
+    ] as const)("stays synchronous %s", async (_case, make, body) => {
+      const f = make();
+      f.authorizeBuildRepository.mockImplementation(async () => ({ repository: "example/renamed", repositoryId: "42" }));
+      expect((await f.create(body)).status).toBe(201);
+      expect(f.authorizeBuildRepository).toHaveBeenCalled();
+      expect(f.createWorkspace.mock.calls[0]![0]).not.toHaveProperty("pendingSource");
+    });
+
+    it("refuses a missing default branch without a GitHub call", async () => {
+      const f = pendingFixture([{ repository: "example/project", defaultBranch: null }]);
+      const response = await f.create();
+      expect(response.status).toBe(409);
+      expect(await response.json()).toMatchObject({ error: { code: "repository_branch_required" } });
+      expect(f.authorizeBuildRepository).not.toHaveBeenCalled();
+      expect(f.createWorkspace).not.toHaveBeenCalled();
+    });
+  });
+
   describe("warming the selected repository's access", () => {
     const warm = (f: ReturnType<typeof fixture>, body: unknown) => f.app.request(`${computerPath}/repositories/warm`, {
       method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
@@ -362,6 +408,24 @@ describe("cloud v2 connect wake intent", () => {
     app.route("/", createCloudV2Routes({ store, bridgeBaseUrl: "wss://dev.example.test" } as unknown as CloudV2RouteDeps));
     return { app, store };
   }
+
+  it("issues a pending create's ticket without a source check", async () => {
+    const store = {
+      get: vi.fn(async () => ({ id, state: "creating", archivedAt: null, sourcePending: true })),
+      transition: vi.fn(async () => null),
+      issueToken: vi.fn(async () => ({ token: "synthetic-connect-ticket", expiresAt: new Date(60_000) })),
+    };
+    const authorizeSource = vi.fn(async () => { throw new HttpError(409, "cloud_source_pending", "Pending"); });
+    const app = new Hono();
+    app.use("*", async (c, next) => { c.set("user", { id: member } as never); await next(); });
+    app.onError((error, c) => error instanceof HttpError
+      ? c.json({ error: { code: error.code } }, error.status) : c.json({ error: { code: "internal" } }, 500));
+    app.route("/", createCloudV2Routes({ store, authorizeSource, bridgeBaseUrl: "wss://dev.example.test" } as unknown as CloudV2RouteDeps));
+    const response = await app.request(path, { method: "POST" });
+    expect(response.status).toBe(200);
+    expect(authorizeSource).not.toHaveBeenCalled();
+    expect(store.issueToken).toHaveBeenCalledOnce();
+  });
 
   it.each([
     ["no body", undefined, true], ["omitted wake", {}, true],
