@@ -355,6 +355,25 @@ describe("Design recordings", () => {
     }
   }, 20_000);
 
+  it("records a frame whose source file an agent edits, though no change event names it", async () => {
+    const host = recorder();
+    const ahead = new DesignRecordingAhead(designRecordingAheadDeps({ record: host.record, recorder: RECORDER }));
+    try {
+      await ahead.noteTarget({ workspaceId: "w", root, directoryId, theme: null, colorScheme: "light" });
+      await writeFile(path.join(folder, "page-1/b.html"), frame("b, by an agent"));
+      ahead.noteFile(root, path.join(folder, "page-1/b.html"));
+      ahead.noteFile(root, path.join(folder, "tokens.css"));
+      const frames = await versions(["page-1/b.html"]);
+      await vi.waitFor(async () => {
+        const read = await readDesignRecordings(root, { workspaceId: "w", directoryId, theme: null, frames: [{ file: "page-1/b.html" }] });
+        expect(read.recordings.map((r) => r.sourceVersion)).toEqual([frames[0]!.sourceVersion]);
+      }, { timeout: DESIGN_RECORDING_AHEAD_QUIET_MS + 8_000, interval: 50 });
+      expect(host.calls.flatMap((call) => call.items)).toHaveLength(1);
+    } finally {
+      ahead.stop();
+    }
+  }, 20_000);
+
   it("refuses a directory that is no longer active", async () => {
     const frames = await versions(["page-1/a.html"]);
     await expect(renderDesignRecordings(root, { workspaceId: "w", directoryId: "design_other", theme: null, frames }, { record: recorder().record, recorder: RECORDER }))

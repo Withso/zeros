@@ -20,7 +20,8 @@ function fakes(catalog: string[][] = [["page-1/a.html", "page-1/b.html"]]) {
   const prepare = vi.fn(async (_target: DesignRecordingAheadTarget, _revision: string, files: readonly string[]) =>
     files.map((file) => ({ file, sourceVersion: `v-${file}` })));
   const record = vi.fn(async (_target: DesignRecordingAheadTarget, _frames: ReadonlyArray<{ file: string; sourceVersion: string }>) => {});
-  const deps: DesignRecordingAheadDeps = { frames, revision, prepare, record, busy: () => busy };
+  const deps: DesignRecordingAheadDeps = { frames, revision, prepare, record, busy: () => busy,
+    folder: (t) => `${t.root}/Zeros Design` };
   return { deps, frames, revision, prepare, record, setBusy: (value: boolean) => { busy = value; } };
 }
 
@@ -82,6 +83,22 @@ describe("recording Design frames ahead of their next open", () => {
     await vi.advanceTimersByTimeAsync(DESIGN_RECORDING_AHEAD_QUIET_MS);
     await vi.waitFor(() => expect(f.record).toHaveBeenCalledTimes(1));
     expect(f.prepare.mock.calls[0]![2]).toEqual(["page-2/new.html"]);
+    ahead.stop();
+  });
+
+  it("records a frame whose own source file changed, though no change event named it", async () => {
+    // After a restart the engine has prepared nothing, so its change events
+    // can't name frames an agent edits on a page no canvas has opened.
+    const f = fakes();
+    const ahead = new DesignRecordingAhead(f.deps);
+    await ahead.noteTarget(target());
+    ahead.noteFile("/checkouts/app", "/checkouts/app/Zeros Design/page-1/b.html");
+    ahead.noteFile("/checkouts/app", "/checkouts/app/Zeros Design/styles/tokens.css");
+    ahead.noteFile("/checkouts/app", "/checkouts/app/src/b.html");
+    ahead.noteFile("/checkouts/other", "/checkouts/other/Zeros Design/page-1/a.html");
+    await vi.advanceTimersByTimeAsync(DESIGN_RECORDING_AHEAD_QUIET_MS);
+    await vi.waitFor(() => expect(f.record).toHaveBeenCalledTimes(1));
+    expect(f.prepare.mock.calls[0]![2]).toEqual(["page-1/b.html"]);
     ahead.stop();
   });
 
