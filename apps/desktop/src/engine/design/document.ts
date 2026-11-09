@@ -26,6 +26,7 @@ import {
 import { parseDesignSource, sharedDesignParse, withSharedDesignParses } from "./shared-parse";
 import { designFrameIdentities, designFrameIdentityContext, type DesignFrameIdentity } from "./identity-cache";
 import { captureDurableDesignDependencies, isDesignDependencyCaptureActive } from "./dependency-read-set";
+import { designPreparationWorkerCount, prepareFrameIdentitiesInWorkers, type DesignWorkerFrameIdentity } from "./preparation-pool";
 import { elementRecords } from "./source";
 // ──────────────────────────────────────────────────────────
 // Design document — authored HTML/CSS frames and canvas metadata
@@ -126,6 +127,7 @@ import { getDesignRuntimeAudit } from "./runtime-audits";
 import { inspectSafeRegularFile, readSafeRegularFile } from "./safe-files";
 import {
   DESIGN_FONTS_SOURCE_ID,
+  designStyleSourcesUseFonts,
   frameStyleSourceIds,
   readDesignStyleSourceCatalog,
   readDesignStyleSources,
@@ -1218,17 +1220,42 @@ function prepareRegisteredDesignFrame(workspacePath: string, file: string, canva
   return withSharedDesignParses(() => prepareSharedRegisteredDesignFrame(workspacePath, file, canvas, pageIds, identities));
 }
 
+function registeredFrameRecord(canvas: CanvasDocument, file: string, pageIds: ReadonlyMap<string, string>,
+  identity: DesignFrameIdentity, modifiedAt: number): DesignCanvasFrame {
+  const geometry = canvas.frames[file]!;
+  const info = canvas.frame_info[file]!;
+  return { file, frameId: info.id, pageId: info.id === undefined ? undefined : pageIds.get(info.id),
+    title: info.title, kind: info.kind === "text" ? "text" : "frame",
+    x: geometry.x, y: geometry.y, width: geometry.w, height: geometry.h, z: geometry.z,
+    nodeCount: identity.nodeCount, layerCount: identity.layerCount,
+    modifiedAt, sourceVersion: identity.sourceVersion, surfaceCost: identity.surfaceCost };
+}
+
+/** A registered frame's identity, from its saved source. Main and worker
+ * preparation run exactly this. */
+async function computeRegisteredFrameIdentity(workspacePath: string, file: string, canvas: CanvasDocument) {
+  const geometry = canvas.frames[file];
+  if (!geometry || !canvas.frame_info[file]) throw new Error("The registered Design frame changed.");
+  const directory = designDirectory(workspacePath);
+  const safe = await readSafeRegularFile(directory, path.join(directory, assertFrameFile(file)), MAX_DESIGN_TEXT_BYTES);
+  if (!safe) throw new Error("The registered Design source is unavailable or exceeds its limit.");
+  const source = safe.body.toString("utf8");
+  const healed = healDesignOids(source);
+  const document = healed.document ?? parseDesignSource(healed.html);
+  const render = await prepareFrameRenderSource(workspacePath, source, { width: geometry.w, height: geometry.h },
+    undefined, undefined, file, canvas, { identityOnly: true });
+  const identity: DesignFrameIdentity = { sourceVersion: render.sourceVersion, surfaceCost: render.surfaceCost,
+    nodeCount: designNodeRecords(document).length, layerCount: designLayerCount(document) };
+  return { identity, modifiedAt: safe.modifiedAt };
+}
+
 async function prepareSharedRegisteredDesignFrame(workspacePath: string, file: string, canvas: CanvasDocument,
   pageIds: ReadonlyMap<string, string>, identities: ReturnType<typeof designFrameIdentities>): Promise<DesignCanvasFrame> {
   const geometry = canvas.frames[file];
   const info = canvas.frame_info[file];
   if (!geometry || !info) throw new Error("The registered Design frame changed.");
   const pageId = info.id === undefined ? undefined : pageIds.get(info.id);
-  const frame = (identity: DesignFrameIdentity, modifiedAt: number): DesignCanvasFrame => ({ file, frameId: info.id, pageId,
-    title: info.title, kind: info.kind === "text" ? "text" : "frame",
-    x: geometry.x, y: geometry.y, width: geometry.w, height: geometry.h, z: geometry.z,
-    nodeCount: identity.nodeCount, layerCount: identity.layerCount,
-    modifiedAt, sourceVersion: identity.sourceVersion, surfaceCost: identity.surfaceCost });
+  const frame = (identity: DesignFrameIdentity, modifiedAt: number) => registeredFrameRecord(canvas, file, pageIds, identity, modifiedAt);
   const directory = designDirectory(workspacePath);
   const target = path.join(directory, assertFrameFile(file));
   // A capture already running (a movement guard) must record these reads itself.
@@ -1238,18 +1265,7 @@ async function prepareSharedRegisteredDesignFrame(workspacePath: string, file: s
     const metadata = cached && await inspectSafeRegularFile(directory, target, MAX_DESIGN_TEXT_BYTES);
     if (cached && metadata) return frame(cached, metadata.modifiedAt);
   }
-  const compute = async () => {
-    const safe = await readSafeRegularFile(directory, target, MAX_DESIGN_TEXT_BYTES);
-    if (!safe) throw new Error("The registered Design source is unavailable or exceeds its limit.");
-    const source = safe.body.toString("utf8");
-    const healed = healDesignOids(source);
-    const document = healed.document ?? parseDesignSource(healed.html);
-    const render = await prepareFrameRenderSource(workspacePath, source, { width: geometry.w, height: geometry.h },
-      undefined, undefined, file, canvas, { identityOnly: true });
-    const identity: DesignFrameIdentity = { sourceVersion: render.sourceVersion, surfaceCost: render.surfaceCost,
-      nodeCount: designNodeRecords(document).length, layerCount: designLayerCount(document) };
-    return { identity, modifiedAt: safe.modifiedAt };
-  };
+  const compute = () => computeRegisteredFrameIdentity(workspacePath, file, canvas);
   if (!context) {
     const { identity, modifiedAt } = await compute();
     return frame(identity, modifiedAt);
@@ -1279,6 +1295,55 @@ export async function prepareRegisteredDesignFrameParts(workspacePath: string, f
     if (render.sourceVersion !== frame.sourceVersion) throw new Error("The registered Design frame changed.");
     return { frame, render };
   });
+}
+
+/** The canvas a worker read for the revision the engine checked. */
+let workerCanvas: { root: string; revision: string; canvas: CanvasDocument } | null = null;
+
+/** A worker's share of a preparation batch: identities with the durable
+ * reads behind them, for the engine to remember. It only reads: the engine
+ * recovered, checked the catalog and holds the document lock meanwhile, and
+ * its own check after the batch refuses it if the catalog moved. */
+export async function prepareDesignFrameIdentitiesInWorker(workspacePath: string, catalogRevision: string, files: readonly string[]) {
+  const root = path.resolve(workspacePath);
+  if (workerCanvas?.root !== root || workerCanvas.revision !== catalogRevision)
+    workerCanvas = { root, revision: catalogRevision, canvas: (await readSharedCanvasContext(workspacePath)).canvas };
+  const { canvas } = workerCanvas;
+  const results: DesignWorkerFrameIdentity[] = [];
+  for (const file of files) {
+    try {
+      const read = await withSharedDesignParses(() => captureDurableDesignDependencies(() => computeRegisteredFrameIdentity(workspacePath, file, canvas)));
+      results.push({ file, identity: read.value.identity, modifiedAt: read.value.modifiedAt, complete: read.complete, durable: read.durable });
+    } catch (error) {
+      results.push({ file, error: error instanceof Error ? error.message : "Could not prepare this frame." });
+    }
+  }
+  return results;
+}
+
+/** Cold frames of a batch prepared by workers beside the engine's thread,
+ * when the pool is on and nothing a worker could see differently is in
+ * play: App fonts (download state is per process) or a running dependency
+ * capture. Anything a worker did not prepare, main prepares as before. */
+async function prepareColdFramesInWorkers(workspacePath: string, catalogRevision: string, files: readonly string[],
+  canvas: CanvasDocument, pageIds: ReadonlyMap<string, string>, identities: ReturnType<typeof designFrameIdentities>) {
+  const prepared = new Map<string, DesignCanvasFrame>();
+  if (designPreparationWorkerCount() === 0 || files.length < 2 || isDesignDependencyCaptureActive()) return prepared;
+  if (await designStyleSourcesUseFonts(workspacePath, canvas)) return prepared;
+  const cold: Array<{ file: string; context: string }> = [];
+  for (const file of files) {
+    const info = canvas.frame_info[file];
+    const context = info ? designFrameIdentityContext(canvas, file, info.id === undefined ? undefined : pageIds.get(info.id)) : null;
+    if (context !== null && !(await identities.read(file, context))) cold.push({ file, context });
+  }
+  if (cold.length < 2) return prepared;
+  for (const result of await prepareFrameIdentitiesInWorkers(workspacePath, catalogRevision, cold.map(({ file }) => file))) {
+    const entry = cold.find(({ file }) => file === result.file);
+    if (!entry || !("identity" in result)) continue;
+    if (result.durable) identities.remember(result.file, entry.context, result.identity, { complete: result.complete, durable: result.durable, current: () => false });
+    prepared.set(result.file, registeredFrameRecord(canvas, result.file, pageIds, result.identity, result.modifiedAt));
+  }
+  return prepared;
 }
 
 /** The shared decoded canvas the last preparation batch read, by catalog
@@ -1330,10 +1395,11 @@ export async function prepareDesignNavigationFrames(workspacePath: string, catal
     const errors: Array<{ file: string; message: string }> = [];
     const pageIds = designFramePageIds(context.canvas);
     const identities = designFrameIdentities(workspacePath, directory);
+    const fromWorkers = await prepareColdFramesInWorkers(workspacePath, revision, files, context.canvas, pageIds, identities);
     // One native preparation at a time; optional demand must not fan out large
     // decoder/source buffers across every frame in a batch.
     for (const file of files) {
-      try { frames.push(await prepareRegisteredDesignFrame(workspacePath, file, context.canvas, pageIds, identities)); }
+      try { frames.push(fromWorkers.get(file) ?? await prepareRegisteredDesignFrame(workspacePath, file, context.canvas, pageIds, identities)); }
       catch (error) { errors.push({ file, message: error instanceof Error ? error.message : "Could not prepare this frame." }); }
     }
     if (!sameDesignCatalogInspection(before, inspectDesignCatalog(workspacePath, directory, { revision: false })))
