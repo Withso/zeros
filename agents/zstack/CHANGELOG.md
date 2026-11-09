@@ -3,6 +3,17 @@
 Each entry records the lesson behind the change as symptom → cause → rule →
 where it is encoded.
 
+## 0.3.3
+
+- **A bench reported that the preparation pool gave no gain, but the pool was
+  never on.** `scripts/electron-local.mjs` `localEnvironment()` deletes every
+  inherited `ZEROS_*` variable outside its keep-list. The canvas bench builds
+  the app's environment with it, so `ZEROS_DESIGN_PREPARATION_WORKERS` on the
+  bench command line never reached the engine. Every app run before
+  2026-11-09 measured one thread. Rule: pass each dial explicitly, and record
+  in the receipt which dials the engine read. Encoded in the performance
+  playbook.
+
 ## 0.3.2
 
 - **Two PRs that each fit the performance playbook's budget broke it

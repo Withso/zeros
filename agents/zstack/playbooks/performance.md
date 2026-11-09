@@ -15,7 +15,7 @@ Numbers refer to `agents/zstack/principles.md`; 9 and 16 apply throughout.
    owning renderer/engine/GPU work. A CPU profiler itself costs CPU; record idle
    acceptance separately with profiling stopped. Preserve the failed evidence.
    When a platform workaround replaces an event source with polling, record its
-   cost per unit (per root, file or tick).
+   cost per root, file or tick.
 3. Add a deterministic regression for ownership, stale replies, invalidation,
    cancellation or capacity failures through the real producer/consumer
    boundary. Keep timing assertions out of noisy unit tests. Test selected-tab
@@ -23,8 +23,8 @@ Numbers refer to `agents/zstack/principles.md`; 9 and 16 apply throughout.
    not necessarily visible. A performance change keeps the ordering, freshness
    and liveness contracts of the work it removes.
 4. Run `pnpm check:design-performance` for the fast resource, driver and
-   acceptance checks (they also run in the root Vitest CI lane). They do not
-   certify physical GPU memory, energy, FPS or native input latency.
+   acceptance checks (also in the root Vitest lane). They do not certify
+   physical GPU memory, energy, FPS or native input latency.
 5. On a Mac, first recover `pnpm design:performance:native --status`; a lost
    result does not authorize another launch. Then run
    `pnpm design:performance:native`, optionally with `--source-digest <sha256>`.
@@ -85,8 +85,8 @@ are in `agents/zstack/records/design-performance-measurements.md`.
   `app.jsonl`, under `com.zeros.local.<16 hex>`. Detach Mac runs with `nohup`
   (60 s command limit), type only after `HIDIdleTime` shows the user idle, and
   recheck that Zeros is frontmost before each input. A prompt sent 0.3 s after
-  typing hides none of the agent's startup. `electron:local` drops inherited
-  `ZEROS_*` dials outside its keep-list.
+  typing hides none of the agent's startup. `electron:local` and its benches
+  drop inherited `ZEROS_*` dials outside the keep-list.
 
 ## Design canvas specifics
 
@@ -119,7 +119,8 @@ are in `agents/zstack/records/design-performance-measurements.md`.
 - Build and open the actual qualification entry: Vite can strip exports or
   duplicate stores even when source-level imports pass. Retirement verifies
   every observed process identity, including reparented helpers.
-- Receipts carry source/build identity, hardware, OS, Electron/Chromium,
-  viewport/DPR, warm-up, samples, raw traces, repetitions and limits. Larger
-  documents, Cloud Design and new rendering backends are separately qualified
-  projects; never inherit a pass from an older source digest.
+- Receipts carry source/build identity, dials the engine read, hardware, OS,
+  Electron/Chromium, viewport/DPR, warm-up, samples, raw traces, repetitions
+  and limits. Larger documents, Cloud Design and new rendering backends are
+  separately qualified projects; never inherit a pass from an older source
+  digest.
