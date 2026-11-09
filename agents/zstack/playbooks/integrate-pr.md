@@ -59,7 +59,9 @@ session itself.
      Replay only that PR's own commits onto `main`
      (`git cherry-pick <base-tip>..<stack-tip>`), re-run its checks and
      force-push with `--force-with-lease`. Keep a stacked branch's copies of
-     the base's eval files byte-identical (same `pr:<n>` pins).
+     the base's eval files byte-identical (same `pr:<n>` pins). An armed
+     auto-merge survives that force-push (`--match-head-commit` is checked
+     only when arming): disarm before asking for a rebase, re-arm the final head.
    - **Before READY, run the repository-wide invariant suites** the change can
      reach; targeted adjacent runs miss them:
      - control-plane SQL, locks or imports: `src/database-lock-tags.test.ts`,

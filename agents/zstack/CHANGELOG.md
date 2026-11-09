@@ -3,6 +3,15 @@
 Each entry records the lesson behind the change as symptom → cause → rule →
 where it is encoded.
 
+## 0.3.4
+
+- **A reviewer's armed merge landed a force-pushed head.** #953 was armed at
+  its reviewed head, then rebased by its author after its base squash-merged.
+  GitHub kept auto-merge enabled and merged the new head once green, because
+  `--match-head-commit` is checked only when the merge is armed. The tree
+  happened to match the review. Rule: disarm before asking for a rebase, and
+  re-arm only the final, re-verified head. Encoded in `integrate-pr.md`.
+
 ## 0.3.3
 
 - **A bench reported that the preparation pool gave no gain, but the pool was
