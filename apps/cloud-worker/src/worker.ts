@@ -19,7 +19,7 @@ import { SessionStore } from "./sessions/session-store";
 import { HistoryMirror } from "./sessions/history-mirror";
 import type { Transport } from "./transport";
 import { ChatService } from "./workspace/chat-service";
-import { prepareCheckout, warmCheckout, type CheckoutRefresh, type CheckoutResult } from "./workspace/checkout";
+import { prepareCheckout, type CheckoutRefresh, type CheckoutResult } from "./workspace/checkout";
 import { WorkspaceSetup, type SetupRunner } from "./workspace/setup";
 import { WorkspaceError, WorkspaceScope, type WorkerConfig } from "./workspace/scope";
 import { WorkspaceService, type WorkspaceServiceOptions } from "./workspace/service";
@@ -51,9 +51,6 @@ interface WorkerOptions {
   transport: Transport;
   drivers?: DriverFactories;
   prepareCheckout?: (workspace: WorkerConfig["workspace"], gitEnvironment: NodeJS.ProcessEnv, timing?: StartupTimingObserver) => Promise<CheckoutResult | void>;
-  /** A create's checkout, from the control plane's boot settings, to warm before hello. */
-  checkoutWarmup?: string;
-  warmCheckout?: (checkoutPath: string, signal: AbortSignal) => Promise<void>;
   setupRunner?: SetupRunner;
   gitAskpassPath?: string;
   githubFetch?: typeof fetch;
@@ -128,7 +125,6 @@ export class CloudWorker {
   private configuredReviewAvailable = false;
   private environmentVersion?: string;
   private readonly environmentLifetime = new AbortController();
-  private readonly warmup = new AbortController();
   private idle?: boolean;
   private activeMutations = 0;
   private lastMutationAt = -Infinity;
@@ -146,8 +142,6 @@ export class CloudWorker {
   start(): void {
     if (this.started || this.disposed) return;
     this.started = true;
-    if (this.options.checkoutWarmup && !this.options.runtimeResume)
-      void (this.options.warmCheckout ?? warmCheckout)(this.options.checkoutWarmup, this.warmup.signal).catch(() => {});
     this.heartbeat = setInterval(() => { void this.reportIdle(this.busy); }, 55_000);
     this.heartbeat.unref?.();
     this.options.transport.start({
@@ -184,7 +178,6 @@ export class CloudWorker {
   async dispose(): Promise<void> {
     if (this.disposed) return;
     this.disposed = true; this.runtimeUpdater?.stop(); clearInterval(this.heartbeat); this.tokens.dispose(); this.githubCredentials.invalidate();
-    this.warmup.abort();
     const workspaceTools = this.workspaceMcp.dispose();
     const agentsClosing = this.agents?.dispose();
     this.environmentLifetime.abort();
@@ -414,7 +407,6 @@ export class CloudWorker {
     try {
       await this.github.start();
       if (this.disposed || this.stopping) return false;
-      this.warmup.abort();
       const checking = measureStartup("worker_checkout", () => this.options.runtimeResume ? Promise.resolve(undefined)
         : (this.options.prepareCheckout ?? prepareCheckout)(config.workspace, this.gitEnvironment, timing), timing)
         .catch(async error => {

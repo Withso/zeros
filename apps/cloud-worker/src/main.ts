@@ -9,14 +9,10 @@ import { persistCompileCache } from "./compile-cache";
 
 export const WORKER_STATE_DIRECTORY = "/home/user/.local/share/zeros/cloud-worker";
 interface BootOptions { apiUrl: string; workspaceId: string; runtimeSha256: string; tokenFile?: string; directory?: string; publicKeys?: readonly string[]; port?: number;
-  runtimeHandoff?: { id: string; bootId: string; instanceId: string }; checkoutWarmup?: string }
-
-/** `/home/user/<owner>/<name>`, as the control plane's lifecycle writes it. */
-const CHECKOUT_PATH = /^\/home\/user(?:\/(?!\.\.?(?:\/|$))[A-Za-z0-9._-]{1,100}){2}$/;
+  runtimeHandoff?: { id: string; bootId: string; instanceId: string } }
 
 /** The service receives only non-secret boot configuration. Model configuration
- * and the checkout arrive over authenticated HTTPS after hello; a create's
- * checkout path only lets the worker warm the disk meanwhile. */
+ * and the checkout arrive over authenticated HTTPS after hello. */
 export function readBootEnvironment(environment: NodeJS.ProcessEnv = process.env): BootOptions {
   const apiUrl = environment.CLOUD_V2_API_URL, workspaceId = environment.ZEROS_WORKSPACE_ID, runtimeSha256 = environment.CLOUD_V2_RUNTIME_SHA256;
   if (!apiUrl || !runtimeSha256 || !/^[a-f0-9]{64}$/.test(runtimeSha256) || !workspaceId || !/^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i.test(workspaceId))
@@ -24,9 +20,7 @@ export function readBootEnvironment(environment: NodeJS.ProcessEnv = process.env
   const { ZEROS_RUNTIME_HANDOFF: id, ZEROS_RUNTIME_BOOT: bootId, ZEROS_RUNTIME_INSTANCE: instanceId } = environment;
   const uuid = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
   if ([id, bootId, instanceId].some(Boolean) && ![id, bootId, instanceId].every(value => value && uuid.test(value))) throw new Error("Invalid runtime handoff.");
-  const checkout = environment.ZEROS_CHECKOUT_PATH;
-  return { apiUrl, workspaceId, runtimeSha256, ...(id && bootId && instanceId ? { runtimeHandoff: { id, bootId, instanceId } } : {}),
-    ...(checkout && CHECKOUT_PATH.test(checkout) ? { checkoutWarmup: checkout } : {}) };
+  return { apiUrl, workspaceId, runtimeSha256, ...(id && bootId && instanceId ? { runtimeHandoff: { id, bootId, instanceId } } : {}) };
 }
 
 export function startWorker(options: BootOptions): { worker: CloudWorker; stop: (code?: number) => Promise<void> } {
@@ -53,7 +47,6 @@ export function startWorker(options: BootOptions): { worker: CloudWorker; stop: 
   renameSync(`${bootPath}.${transport.bootId}`, bootPath);
   const worker = new CloudWorker({ directory, workspaceId: options.workspaceId, transport, runtimePermit: runtimePermit(directory, transport.bootId),
     ...(runtimeHandoff ? { runtimeResume: { instanceId: runtimeHandoff.instanceId, ready: () => completeRuntimeHandoff(directory, runtimeHandoff) } } : {}),
-    ...(options.checkoutWarmup ? { checkoutWarmup: options.checkoutWarmup } : {}),
     gitAskpassPath: fileURLToPath(new URL("./bin/git-askpass", import.meta.url)), onError: code => log(code),
     onTiming: record => log(`timing ${JSON.stringify(record)}`),
     onReconfigure: changed => log(`reconfigure ${changed.join(",")}`),

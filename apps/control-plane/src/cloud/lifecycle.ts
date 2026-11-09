@@ -153,14 +153,27 @@ function errorCode(error: unknown): string {
   return typeof code === "string" && /^[a-z0-9_]{1,64}$/.test(code) ? code : "provider_request_failed";
 }
 
-/** `/home/user/<owner>/<name>`, as apps/cloud-worker/src/main.ts reads it. */
+/** `/home/user/<owner>/<name>`, with no `.` or `..` segment. */
 const CHECKOUT_PATH = /^\/home\/user(?:\/(?!\.\.?(?:\/|$))[A-Za-z0-9._-]{1,100}){2}$/;
-/** A create's VM restores its disk lazily from the Cloud Computer snapshot, so
- * the worker warms its checkout while hello runs. Omitted when the path is unusual. */
-function checkoutWarmup(workspace: CloudV2Workspace): Record<string, string> {
-  const path = `${CLOUD_V2_HOME}/${workspace.repository}`;
-  return CHECKOUT_PATH.test(path) ? { ZEROS_CHECKOUT_PATH: path } : {};
+const READ_ONLY_GIT = "GIT_OPTIONAL_LOCKS=0 timeout 60 git -c core.fsmonitor=false -c core.hooksPath=/dev/null";
+/** A create's VM restores its disk lazily from the Cloud Computer snapshot, and
+ * the restore gives every file a new inode. On fresh VMs with Withso/zeros,
+ * the first pack read took ~3 s and `git switch` 3.3–3.7 s cold, versus 0.55 s
+ * once the trees and every file's stat were read. Started detached when the VM
+ * is ready, as the VM user, so it overlaps the rest of the create and the
+ * worker's boot. Read-only: no index lock, submodule, fsmonitor or hook, so it
+ * cannot collide with the worker's own checkout. Null for an unusual path. */
+export function checkoutWarmupCommand(checkoutPath: string): string | null {
+  if (!CHECKOUT_PATH.test(checkoutPath)) return null;
+  return `cd -- '${checkoutPath}' && setsid nohup sh -c '${CHECKOUT_WARMUP_SCRIPT}' >/dev/null 2>&1 </dev/null &`;
 }
+/** Run in the checkout. Compared by mtime and size alone, restored files stay
+ * clean, so `diff-files --quiet` visits every file instead of the first; on
+ * Zeros Dev only this variant brought the switch down to ~0.6 s. A racily
+ * clean entry gets a content comparison, which for LFS starts git-lfs's clean
+ * filter. That writes nothing persistent (checkout-warmup.test.ts). */
+export const CHECKOUT_WARMUP_SCRIPT = `${READ_ONLY_GIT} ls-tree -r -z HEAD >/dev/null 2>&1 & ` +
+  `${READ_ONLY_GIT} -c core.checkStat=minimal -c core.trustctime=false diff-files --quiet --ignore-submodules >/dev/null 2>&1; wait`;
 
 /** Writes the worker credential and its boot settings owner-only, re-enables
  * the unit a stop disabled so a reboot keeps it, then restarts the worker.
@@ -170,8 +183,7 @@ function checkoutWarmup(workspace: CloudV2Workspace): Record<string, string> {
 export function deliverWorkerTokenCommand(token: string, bootEnv: Readonly<Record<string, string>> = {}): string {
   if (!/^zw2w_[A-Za-z0-9_-]{43}$/.test(token)) throw new Error("Invalid worker token");
   for (const [name, value] of Object.entries(bootEnv))
-    if (name === "ZEROS_CHECKOUT_PATH" ? !CHECKOUT_PATH.test(value)
-      : !["CLOUD_V2_API_URL", "CLOUD_V2_RUNTIME_SHA256", "ZEROS_WORKSPACE_ID"].includes(name) || !/^[\x21-\x7e]{1,2048}$/.test(value)) throw new Error("Invalid worker boot setting");
+    if (!["CLOUD_V2_API_URL", "CLOUD_V2_RUNTIME_SHA256", "ZEROS_WORKSPACE_ID"].includes(name) || !/^[\x21-\x7e]{1,2048}$/.test(value)) throw new Error("Invalid worker boot setting");
   const b64 = (value: string) => Buffer.from(value, "utf8").toString("base64");
   const dir = CLOUD_V2_WORKER_TOKEN_PATH.slice(0, CLOUD_V2_WORKER_TOKEN_PATH.lastIndexOf("/"));
   const envFile = Object.entries(bootEnv).map(([name, value]) => `${name}=${value}\n`).join("");
@@ -408,6 +420,10 @@ export class CloudV2Lifecycle {
         const routed = this.measure(workspace, "protected_route", () => this.host(workspace, sandboxId));
         routed.catch(() => {});
         await this.measure(workspace, "runtime_install", () => this.ensureRuntime(sandboxId, boot.runtime), runtimeChanged => ({ runtimeChanged }));
+        // Never awaited: Boat's exec returns only when the warm-up finishes, and
+        // the worker must not wait for it. Its failure never fails the create.
+        const warmup = image.checkout ? checkoutWarmupCommand(`${CLOUD_V2_HOME}/${workspace.repository}`) : null;
+        if (warmup) void this.deps.compute.exec(sandboxId, warmup, 30).catch(() => undefined);
         if (image.prune.length || !image.from) await this.measure(workspace, "image_prepare", () => this.prepareImage(sandboxId, image));
         if (this.deps.prepareRepository && !image.checkout) {
           await store.defer(workspace.id, "creating", 17 * 60_000);
@@ -417,7 +433,7 @@ export class CloudV2Lifecycle {
         // The worker reads it with its configuration, after the token arrives.
         const commit = await baseCommit;
         if (commit) await store.setBaseCommit(workspace.id, commit);
-        await this.measure(workspace, "token_delivery", () => this.deliverToken(workspace, sandboxId, { ...boot.env, ...checkoutWarmup(workspace) }));
+        await this.measure(workspace, "token_delivery", () => this.deliverToken(workspace, sandboxId, boot.env));
         await store.defer(workspace.id, "creating", HELLO_POLL_MS);
         return;
       }
