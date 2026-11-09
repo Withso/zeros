@@ -12,7 +12,9 @@ const state = vi.hoisted(() => ({
   org: "",
   user: "",
   refresh: vi.fn(),
+  warmAccess: vi.fn(),
 }));
+vi.mock("../cloud-create-access-warm", () => ({ warmCloudCreateAccess: state.warmAccess }));
 vi.mock("../../../features/team/team-store", () => ({
   getActiveOrganizationIdSnapshot: () => state.personal ? null : state.org,
   useActiveOrganization: () => ({
@@ -47,10 +49,10 @@ import { parseComputerRepositorySelections, rememberComputerRepository } from ".
 
 const first = computerRepository("example", "project", "trunk");
 const second = computerRepository("Example", "Another");
-function create(source: Parameters<typeof useCloudCreate>[1] = null) {
+function create(source: Parameters<typeof useCloudCreate>[1] = null, active = true) {
   let result!: ReturnType<typeof useCloudCreate>;
   function Probe() {
-    result = useCloudCreate(true, source);
+    result = useCloudCreate(active, source);
     return null;
   }
   renderToStaticMarkup(createElement(Probe));
@@ -63,9 +65,29 @@ beforeEach(() => {
   state.user = computerUser;
   state.repositories = [first, second];
   state.refresh.mockReset();
+  state.warmAccess.mockReset();
   rememberComputerRepository(JSON.stringify([computerUser, computerOrg]), null);
 });
 describe("Create from the active Cloud Computer", () => {
+  it("warms GitHub access for the selected or hovered repository on intent to create", () => {
+    state.repositories = [first, second];
+    const cloud = create();
+    cloud.warm();
+    cloud.warmAccess();
+    cloud.warmRepositoryAccess(second);
+    expect(state.warmAccess.mock.calls).toEqual([[state.org, "example/project"], [state.org, "example/project"], [state.org, "Example/Another"]]);
+  });
+
+  it.each([
+    ["an inactive page", () => { state.repositories = [first]; return create(null, false); }],
+    ["Personal", () => { state.personal = true; return create(); }],
+    ["an organization without a live build", () => { state.repositories = null; return create(); }],
+  ])("doesn't warm GitHub access for %s", (_case, render) => {
+    const cloud = render();
+    cloud.warm(); cloud.warmAccess(); cloud.warmRepositoryAccess(first);
+    expect(state.warmAccess).not.toHaveBeenCalled();
+  });
+
   it("keeps the cloud picker selected while the exact owner's repository list is cold", () => {
     state.repositories = undefined;
     const result = create();

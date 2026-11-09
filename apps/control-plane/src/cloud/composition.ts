@@ -101,12 +101,12 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   const authorizeRepositories = async (org: string, user: string, repositories: readonly string[]) => {
     await source.repositories(org, user, repositories);
   };
-  const authorizeSourceTargets = async (org: string, user: string, targets: readonly CloudSourceTarget[]) => {
-    await source.targets(org, user, targets);
+  const authorizeSourceTargets = async (org: string, user: string, targets: readonly CloudSourceTarget[], options?: { renew?: boolean }) => {
+    await source.targets(org, user, targets, options?.renew);
   };
-  const authorizeBuildRepository = async (org: string, user: string, buildId: string, repository: string, options?: { fresh?: boolean }) => {
-    const target = await computers.resolveBuildRepository(org, user, buildId, repository, options);
-    await authorizeSourceTargets(org, user, [target]);
+  const authorizeBuildRepository = async (org: string, user: string, buildId: string, repository: string, options?: { fresh?: boolean; renew?: boolean }) => {
+    const target = await computers.resolveBuildRepository(org, user, buildId, repository, options?.fresh ? { fresh: true } : undefined);
+    await authorizeSourceTargets(org, user, [target], options?.renew ? { renew: true } : undefined);
     return target;
   };
   const authorizeSource = github.authorizeSource;

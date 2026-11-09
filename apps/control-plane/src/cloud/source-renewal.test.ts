@@ -169,3 +169,17 @@ it("adds at most one verification to a booting workspace polled every 2 s for tw
   expect(await verifications(false)).toBe(windows);
   expect(await verifications(true)).toBeLessThanOrEqual(windows + 1);
 });
+
+// A create request checks its requested repository by target, before any
+// workspace exists; it asks to renew as the lifecycle does.
+it("renews a create's requested repository by target only when asked", async () => {
+  const quiet = fixture(AGING);
+  await quiet.source.targets("org", "user", [{ repository: "o/r", repositoryId: "42" }]);
+  await vi.advanceTimersByTimeAsync(0);
+  expect(quiet.store.claim).not.toHaveBeenCalled();
+  const f = fixture(AGING);
+  await f.source.targets("org", "user", [{ repository: "o/r", repositoryId: "42" }], true);
+  await vi.advanceTimersByTimeAsync(0);
+  expect(f.github.check).toHaveBeenCalledTimes(1);
+  expect(f.store.finish).toHaveBeenCalledWith(expect.anything(), "renewal", { allowed: true });
+});

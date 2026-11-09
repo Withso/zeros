@@ -284,6 +284,66 @@ describe("cloud v2 creation", () => {
     expect(f.requireMember).toHaveBeenCalledWith(org, member);
     expect(f.createWorkspace).not.toHaveBeenCalled();
   });
+
+  // A create's requested repository often reuses a verification the Create
+  // page's list made 20–30 s earlier, which can expire inside the request.
+  it("asks the requested repository's check to renew and reads the other repositories fresh", async () => {
+    const f = fixture([{ repository: "example/docs", defaultBranch: "main" }, { repository: "example/project", defaultBranch: "master" }]);
+    expect((await f.create()).status).toBe(201);
+    expect(f.authorizeBuildRepository.mock.calls).toEqual([
+      [org, member, f.buildId, "example/project", { renew: true }],
+      [org, member, f.buildId, "example/docs", { fresh: true }],
+    ]);
+  });
+
+  describe("warming the selected repository's access", () => {
+    const warm = (f: ReturnType<typeof fixture>, body: unknown) => f.app.request(`${computerPath}/repositories/warm`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+    });
+
+    it("checks a member's selected repository with renewal, by the Computer's own spelling", async () => {
+      const f = fixture([{ repository: "example/docs", defaultBranch: "main" }, { repository: "Example/Project", defaultBranch: "master" }]);
+      const response = await warm(f, { repository: "example/project" });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ ok: true });
+      expect(response.headers.get("cache-control")).toBe("no-store");
+      expect(f.requireMember).toHaveBeenCalledWith(org, member);
+      expect(f.authorizeBuildRepository.mock.calls).toEqual([[org, member, f.buildId, "Example/Project", { renew: true }]]);
+      expect(f.createWorkspace).not.toHaveBeenCalled();
+      expect(f.remoteHead).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ["a repository the Computer doesn't hold", { repository: "example/other" }, 404],
+      ["a malformed repository", { repository: "not a repository" }, 400],
+      ["a path-like name the Computer can't hold", { repository: "../project" }, 404],
+      ["extra fields", { repository: "example/project", baseBranch: "main" }, 400],
+    ] as const)("refuses %s without a GitHub check", async (_case, body, status) => {
+      const f = fixture();
+      expect((await warm(f, body)).status).toBe(status);
+      expect(f.authorizeBuildRepository).not.toHaveBeenCalled();
+    });
+
+    it("refuses a non-member before reading the Computer", async () => {
+      const f = fixture(); f.requireMember.mockRejectedValue(new HttpError(403, "forbidden", "Not a member"));
+      expect((await warm(f, { repository: "example/project" })).status).toBe(403);
+      expect(f.activeComputer).not.toHaveBeenCalled();
+      expect(f.authorizeBuildRepository).not.toHaveBeenCalled();
+    });
+
+    it("refuses when the organization has no live Computer", async () => {
+      const f = fixture(null);
+      expect((await warm(f, { repository: "example/project" })).status).toBe(404);
+      expect(f.authorizeBuildRepository).not.toHaveBeenCalled();
+    });
+
+    it("passes a refused check through", async () => {
+      const f = fixture(); f.authorizeBuildRepository.mockRejectedValue(new HttpError(404, "github_repository_not_found", "Repository access could not be verified."));
+      const response = await warm(f, { repository: "example/project" });
+      expect(response.status).toBe(404);
+      expect(await response.json()).toMatchObject({ error: { code: "github_repository_not_found" } });
+    });
+  });
 });
 
 describe("cloud v2 connect wake intent", () => {

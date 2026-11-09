@@ -9,6 +9,8 @@ import type { DispatcherBase } from "./dispatcher-source";
 import { useComputerRepositorySelection } from "./cloud-computer-repository-selection";
 import { useCloudComputerV2CreateGate } from "../../features/settings/cloud-computer-v2-create-gate";
 import { createCloudComputerRecovery } from "./cloud-create-request";
+import { warmCloudCreateAccess } from "./cloud-create-access-warm";
+import type { CloudComputerRepository } from "../../features/settings/cloud-computer-v2-create-gate";
 
 const capabilityCache = new KeyedAsyncCache<{ enabled: boolean }>(1);
 
@@ -69,6 +71,12 @@ export function useCloudCreate(
   const source = cloudSourceBaseBranch(computerBase);
   const reason = availability.reason ?? computer.reason ??
     (!computerRepository ? "Add a repository to your Cloud Computer." : source.reason);
+  // Intent to create: the server checks GitHub access to this repository now,
+  // so the create request reuses that check instead of waiting on GitHub.
+  const warmAccess = (target: Pick<CloudComputerRepository, "owner" | "name"> | null) => {
+    if (active && computerMode && target && availability.reason === null && computer.reason === null)
+      warmCloudCreateAccess(availability.organization?.id, `${target.owner}/${target.name}`);
+  };
   return {
     reason,
     checking: availability.checking || computer.checking,
@@ -87,7 +95,10 @@ export function useCloudCreate(
     refreshComputer: computer.refresh,
     recoverComputerError: (error: unknown, observedOwner: string | null) => recovery.current!.recover(error, observedOwner, recoverySurface.current),
     isCurrentComputerSource: (owner: string | null) => owner !== null && owner === recoverySurface.current.owner,
-    warm: () => { availability.warm(); computer.warm(); },
+    warm: () => { availability.warm(); computer.warm(); warmAccess(computerRepository); },
+    /** Typing and other repeated intent; throttled per repository. */
+    warmAccess: () => warmAccess(computerRepository),
+    warmRepositoryAccess: (target: CloudComputerRepository) => warmAccess(target),
     computerRequired: computer.required,
     computerReason: computer.reason,
     canManageComputer: computer.canManage,
