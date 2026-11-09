@@ -140,7 +140,7 @@ async function main() {
     // tuning set on the bench's command line must be passed on explicitly.
     report.passedEnv = {};
     for (const key of ["ZEROS_DESIGN_PREPARATION_WORKERS", "ZEROS_DESIGN_RECORDINGS_TIMINGS", "ZEROS_DESIGN_RECORDER_WINDOWS",
-      "ZEROS_DESIGN_RECORDER_FRAMES_PER_WINDOW"]) if (process.env[key]) { env[key] = process.env[key]; report.passedEnv[key] = process.env[key]; }
+      "ZEROS_DESIGN_RECORDER_FRAMES_PER_WINDOW", "ZEROS_DESIGN_RECORDER_PROCESSES"]) if (process.env[key]) { env[key] = process.env[key]; report.passedEnv[key] = process.env[key]; }
     // Production macOS engines watch through the native watch host; without it
     // the compiled engine falls back to stat polling and idle CPU measures that.
     const watchHostScript = path.join(repo, "apps/desktop/src/engine/git/watch-host.cjs");
