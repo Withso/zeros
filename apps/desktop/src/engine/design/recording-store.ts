@@ -20,8 +20,9 @@ import { chunkDesignRecording, designRecordingChunkId, DESIGN_RECORDING_CHUNKER,
 
 const FRAME_ID = /^[A-Za-z][A-Za-z0-9_-]{0,127}$/;
 const SOURCE_VERSION = /^[a-f0-9]{24}$/;
-const THEME = /^(?:_|[a-z][a-z0-9_-]{0,63})$/;
-const MANIFEST = /^(_|[a-z][a-z0-9_-]{0,63})~([a-f0-9]{24})~([a-f0-9]{16})\.json$/;
+/** A theme name ("_" without one), with "@dark" for the dark color scheme. */
+const THEME = /^(?:_|[a-z][a-z0-9_-]{0,63})(?:@dark)?$/;
+const MANIFEST = /^((?:_|[a-z][a-z0-9_-]{0,63})(?:@dark)?)~([a-f0-9]{24})~([a-f0-9]{16})\.json$/;
 const MANIFEST_BYTES = 4 * 1024 * 1024;
 /** Reading a recording marks it recently used at most this often. */
 const TOUCH_MS = 60 * 60 * 1000;
@@ -330,7 +331,14 @@ export async function readDesignRecordingFailure(
   return error;
 }
 
-const FAILURE = /^(_|[a-z][a-z0-9_-]{0,63})~([a-f0-9]{24})~([a-f0-9]{16})\.failed$/;
+const FAILURE = /^((?:_|[a-z][a-z0-9_-]{0,63})(?:@dark)?)~([a-f0-9]{24})~([a-f0-9]{16})\.failed$/;
+
+/** What the store calls a theme: the frame's theme and color scheme, since a
+ * frame draws differently in each (native controls, \`light-dark()\`, media
+ * queries). Light keeps the bare theme name. */
+export function designRecordingVariant(theme: string | null, colorScheme: "light" | "dark"): string | null {
+  return colorScheme === "dark" ? `${theme ?? "_"}@dark` : theme;
+}
 
 /** The generation of this frame (in this theme) that this recorder is known
  * not to record, if any: at most one is kept per theme. */

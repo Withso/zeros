@@ -30,6 +30,7 @@ import {
   readDesignRecordingFailure,
   readDesignRecordingTypeface,
   readNewestDesignRecordingFailure,
+  designRecordingVariant,
   readStoredDesignRecording,
   storeDesignRecording,
   storeDesignRecordingFailure,
@@ -249,6 +250,7 @@ export async function renderDesignRecordings(
   const record = deps.record ?? ((request, signal) => requestDesignBatchRecord(config!, request, signal));
   await assertRecordingTarget(root, input);
   const { canvas } = await readSharedCanvasContext(root);
+  const variant = designRecordingVariant(input.theme, input.colorScheme);
   const known = deps.recorder !== undefined ? deps.recorder : config?.recorder ?? null;
   let pipeline = known === null ? null : designRecordingPipeline(known);
   const reply = new ReplyBuilder(input.knownChunks);
@@ -261,9 +263,9 @@ export async function renderDesignRecordings(
     const id = frameId(canvas, frame.file);
     if (!pipeline || !id) return { frame, stored: null, known: null };
     const wanted = { sourceVersion: frame.sourceVersion, pipeline };
-    const stored = await readStoredDesignRecording(root, input.directoryId, id, input.theme, wanted);
+    const stored = await readStoredDesignRecording(root, input.directoryId, id, variant, wanted);
     // A frame this recorder can't record is answered without recording again.
-    return { frame, stored, known: stored ? null : await readDesignRecordingFailure(root, input.directoryId, id, input.theme, wanted) };
+    return { frame, stored, known: stored ? null : await readDesignRecordingFailure(root, input.directoryId, id, variant, wanted) };
   });
   for (const { frame, stored, known } of lookups) {
     if (known) { failed.push({ file: frame.file, error: known }); continue; }
@@ -273,7 +275,7 @@ export async function renderDesignRecordings(
   }
   if (misses.length) {
     const composed = await composeDesignThumbnailBatches(root, { workspaceId: input.workspaceId, directoryId: input.directoryId,
-      theme: input.theme, colorScheme: "light", maxDimension: COMPOSE_DIMENSION, frames: misses }, deps.signal);
+      theme: input.theme, colorScheme: input.colorScheme, maxDimension: COMPOSE_DIMENSION, frames: misses }, deps.signal);
     stale.push(...composed.stale);
     failed.push(...composed.failed);
     for (const batch of composed.batches) {
@@ -294,7 +296,7 @@ export async function renderDesignRecordings(
           if ("error" in item) {
             const error = failure(new Error(item.error), root);
             if (item.permanent && id && drawn === pipeline)
-              await storeDesignRecordingFailure(root, input.directoryId, id, input.theme, { sourceVersion: frame.sourceVersion, pipeline: drawn, error });
+              await storeDesignRecordingFailure(root, input.directoryId, id, variant, { sourceVersion: frame.sourceVersion, pipeline: drawn, error });
             failed.push(item.permanent ? { file: frame.file, error } : { file: frame.file, error, retryable: true });
             continue;
           }
@@ -303,7 +305,7 @@ export async function renderDesignRecordings(
             const layers = [];
             for (const layer of item.layers) layers.push({ x: layer.x, y: layer.y, width: layer.width, height: layer.height,
               bytes: await readRecorderFile(layer.path, LAYER_FILE, DESIGN_RECORDING_MAX_BYTES), typefaces: await storeLayerTypefaces(layer.typefaces) });
-            const stored = id ? await storeDesignRecording(root, input.directoryId, id, input.theme,
+            const stored = id ? await storeDesignRecording(root, input.directoryId, id, variant,
               { sourceVersion: frame.sourceVersion, pipeline: drawn, width: viewport.width, height: viewport.height, scale: item.scale, layers }) : null;
             if (!stored) { failed.push({ file: frame.file, error: "This frame's recording could not be stored.", retryable: true }); continue; }
             const outcome = await reply.add(frame, stored);
@@ -334,6 +336,7 @@ export async function readDesignRecordings(root: string, raw: unknown,
   await assertRecordingTarget(root, input);
   const { canvas } = await readSharedCanvasContext(root);
   const reply = new ReplyBuilder(input.knownChunks);
+  const variant = designRecordingVariant(input.theme, input.colorScheme);
   const missing: string[] = [];
   const deferred: string[] = [];
   const failed: Array<{ file: string; sourceVersion: string; error: string }> = [];
@@ -342,13 +345,13 @@ export async function readDesignRecordings(root: string, raw: unknown,
   const pipeline = recorder ? designRecordingPipeline(recorder) : null;
   const lookups = await mapLimit(input.frames, LOOKUPS, async (frame) => {
     const id = frameId(canvas, frame.file);
-    const stored = id ? await readStoredDesignRecording(root, input.directoryId, id, input.theme,
+    const stored = id ? await readStoredDesignRecording(root, input.directoryId, id, variant,
       frame.sourceVersion ? { sourceVersion: frame.sourceVersion } : {}) : null;
     if (stored || !id || !pipeline) return { frame, stored, known: null };
     const known = frame.sourceVersion
-      ? await readDesignRecordingFailure(root, input.directoryId, id, input.theme, { sourceVersion: frame.sourceVersion, pipeline })
+      ? await readDesignRecordingFailure(root, input.directoryId, id, variant, { sourceVersion: frame.sourceVersion, pipeline })
         .then((error) => (error ? { sourceVersion: frame.sourceVersion!, error } : null))
-      : await readNewestDesignRecordingFailure(root, input.directoryId, id, input.theme, pipeline);
+      : await readNewestDesignRecordingFailure(root, input.directoryId, id, variant, pipeline);
     return { frame, stored, known };
   });
   for (const { frame, stored, known } of lookups) {
