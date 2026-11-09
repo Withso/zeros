@@ -378,6 +378,28 @@ it("records a batch of frames in one admitted reservation, answering every item 
   } finally { await service.stop(); }
 });
 
+it("takes two record batches at once beside an active capture, and refuses a third", async () => {
+  const gates: Array<() => void> = [];
+  const recordBatch = vi.fn(async (input: { items: Array<{ id: string }> }) => {
+    await new Promise<void>((resolve) => gates.push(resolve));
+    return { recorder: "fixture/skp", items: input.items.map((item) => ({ id: item.id, error: "Multiple layers." })) };
+  });
+  const admission = new DesignCaptureAdmission();
+  const service = await startDesignCaptureService(vi.fn(), admission, undefined, recordBatch);
+  try {
+    // An explicit capture holds the capture reservation; recordings don't need it.
+    expect(admission.reserve({}, "explicit-job")).toBe(true);
+    const first = recordRequest(service, recordInput()), second = recordRequest(service, recordInput());
+    await vi.waitFor(() => expect(gates).toHaveLength(2));
+    const third = await recordRequest(service, recordInput());
+    expect(third.status).toBe(429);
+    await third.arrayBuffer();
+    while (gates.length) gates.shift()!();
+    expect((await first).status).toBe(200);
+    expect((await second).status).toBe(200);
+  } finally { await service.stop(); }
+});
+
 it("refuses a record batch whose stylesheets don't match their content address, and has no /record without a recorder", async () => {
   const recordBatch = vi.fn();
   const service = await startDesignCaptureService(vi.fn(), new DesignCaptureAdmission(), undefined, recordBatch);

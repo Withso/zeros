@@ -132,22 +132,30 @@ class ReplyBuilder {
   }
 }
 
-let recordTail: Promise<void> = Promise.resolve();
-/** The capture host records one batch at a time; batches take turns here. */
+/** Batches at the recorder at once: its windows share their frames, so the
+ * next batch's frames start while the last ones of another finish. */
+const RECORD_TURNS = 2;
+let turnsRunning = 0;
+const turnsWaiting: Array<() => void> = [];
+/** Batches take turns here, a few at a time, in arrival order. */
 async function inRecordTurn<T>(signal: AbortSignal | undefined, run: () => Promise<T>): Promise<T> {
-  const previous = recordTail;
-  let release!: () => void;
-  recordTail = new Promise<void>((resolve) => { release = resolve; });
-  try {
+  if (turnsRunning < RECORD_TURNS) turnsRunning++;
+  else {
+    // A finishing batch hands its turn to the first waiter directly.
     await new Promise<void>((resolve, reject) => {
       if (signal?.aborted) return reject(signal.reason);
-      const abort = () => reject(signal!.reason);
+      const go = () => { signal?.removeEventListener("abort", abort); resolve(); };
+      const abort = () => { turnsWaiting.splice(turnsWaiting.indexOf(go), 1); reject(signal!.reason); };
       signal?.addEventListener("abort", abort, { once: true });
-      void previous.then(() => { signal?.removeEventListener("abort", abort); resolve(); });
+      turnsWaiting.push(go);
     });
+  }
+  try {
     return await run();
   } finally {
-    release();
+    const next = turnsWaiting.shift();
+    if (next) next();
+    else turnsRunning--;
   }
 }
 

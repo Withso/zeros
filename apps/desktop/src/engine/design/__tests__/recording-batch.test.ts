@@ -182,6 +182,35 @@ describe("Design recordings", () => {
     expect(reply.recordings.map((recording) => recording.file)).toEqual(files);
   });
 
+  it("lets two batches reach the recorder at once, and a third wait its turn", async () => {
+    const frames = await versions(["page-1/a.html", "page-1/b.html", "page-1/c.html"]);
+    let active = 0, peak = 0;
+    const gates: Array<() => void> = [];
+    const host = recorder();
+    const record = async (request: DesignBatchRecordRequest) => {
+      active++; peak = Math.max(peak, active);
+      await new Promise<void>((resolve) => gates.push(resolve));
+      try { return await host.record(request); } finally { active--; }
+    };
+    const replies = frames.map((frame) => renderDesignRecordings(root, { workspaceId: "w", directoryId, theme: null, frames: [frame] }, { record, recorder: RECORDER }));
+    // Turns are shared by every test: release them whatever happens here.
+    const release = setInterval(() => { if (!replying) return; while (gates.length) gates.shift()!(); }, 5);
+    let replying = false;
+    try {
+      await vi.waitFor(() => expect(gates).toHaveLength(2));
+      expect(active).toBe(2);
+      // One finishes; the third takes its turn.
+      gates.shift()!();
+      await vi.waitFor(() => expect(gates).toHaveLength(2));
+    } finally {
+      replying = true;
+      await Promise.allSettled(replies);
+      clearInterval(release);
+    }
+    expect((await Promise.all(replies)).map((reply) => reply.recordings.map((r) => r.file))).toEqual(frames.map((frame) => [frame.file]));
+    expect(peak).toBe(2);
+  });
+
   it("writes each render request's time by phase when asked to", async () => {
     const file = path.join(root, "timings.jsonl");
     process.env.ZEROS_DESIGN_RECORDINGS_TIMINGS = file;

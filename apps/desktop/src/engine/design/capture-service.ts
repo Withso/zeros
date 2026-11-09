@@ -82,6 +82,9 @@ export function assertDesignCapturePng(
  * authority cross this boundary; it receives already composed authored HTML.
  * One admitted request includes upload, render and cleanup. Saturation fails
  * immediately instead of retaining queued HTML or allocating more browsers. */
+/** Record batches the capture service passes to the recorder at once. */
+export const DESIGN_RECORD_BATCHES = 2;
+
 export async function startDesignCaptureService(
   render: DesignCaptureHost,
   admission = new DesignCaptureAdmission(),
@@ -163,17 +166,18 @@ export async function startDesignCaptureService(
       }
     })();
   };
-  /** Recordings of many frames in one admitted reservation, admitted and
-   * bounded like batch thumbnails: background work an explicit capture
-   * outranks. The reply names layer files, never their bytes. */
+  /** Recordings of many frames. The recorder is its own process with its own
+   * windows, so recordings don't take the capture reservation; a couple of
+   * batches at once keep its windows busy between batches. The reply names
+   * layer files, never their bytes. */
+  let recordsActive = 0;
   const record = (request: import("node:http").IncomingMessage, response: import("node:http").ServerResponse) => {
     if (!recordBatch) { failResponse(response, 404, "Unknown capture operation."); return; }
-    if (stopped) { failResponse(response, 429, "Design capture capacity reached. Wait for the active capture."); return; }
-    const reservationId = randomUUID();
-    if (!admission.reserve(nativeOwner, reservationId, false)) {
+    if (stopped || recordsActive >= DESIGN_RECORD_BATCHES) {
       failResponse(response, 429, "Design capture capacity reached. Wait for the active capture.");
       return;
     }
+    recordsActive++;
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(new Error("Design batch record timed out.")), DESIGN_BATCH_CAPTURE_TIMEOUT_MS);
     const disconnect = () => { if (!response.writableEnded) controller.abort(new Error("Design batch record disconnected.")); };
@@ -207,7 +211,7 @@ export async function startDesignCaptureService(
         clearTimeout(timeout);
         response.removeListener("close", disconnect);
         controller.signal.removeEventListener("abort", abort);
-        admission.release(nativeOwner, reservationId);
+        recordsActive--;
       }
     })();
   };
