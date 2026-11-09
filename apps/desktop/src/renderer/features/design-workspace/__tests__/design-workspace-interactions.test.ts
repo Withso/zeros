@@ -111,7 +111,7 @@ describe("design workspace interaction wiring", () => {
       "publishSelection(frame, { selected: true, reveal: true });",
     );
     expect(source).toContain(
-      "publishSelection(selectedDescription ?? null, { selected: view.frameSelected, explicit: false });",
+      "publishSelection(selectedDescription ?? null, { selected: view.frameSelected, explicit: false, onError: forgetPassiveSelection });",
     );
     expect(source).toContain(
       "paintedSelectedTargets.some(target => target.frame === frame.file && !target.nodeId)",

@@ -1535,6 +1535,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
   // after a reconnect (the engine keeps selection in memory only).
   const passiveSelection = useRef<DesignPassiveSelectionPublisher | null>(null);
   passiveSelection.current ??= new DesignPassiveSelectionPublisher();
+  const forgetPassiveSelection = useCallback(() => passiveSelection.current?.forget(), []);
   const [selectionConnection, setSelectionConnection] = useState(0);
   useEffect(() => onActiveBridgeConnected((_client, { initial }) => {
     if (initial) return;
@@ -1553,11 +1554,11 @@ export const DesignCanvas = React.memo(function DesignCanvas({
     if (!passiveSelection.current!.offer({ workspaceId, owner: canvasPageOwner, frame: selectedDescription ?? null,
       selected: view.frameSelected, event: view.selectionEvent })) return;
     // A failed write is published again by the next snapshot update.
-    publishSelection(selectedDescription ?? null, { selected: view.frameSelected, explicit: false,
-      onError: () => passiveSelection.current?.forget() });
+    publishSelection(selectedDescription ?? null, { selected: view.frameSelected, explicit: false, onError: forgetPassiveSelection });
   }, [
     active,
     canvasPageOwner,
+    forgetPassiveSelection,
     publishSelection,
     selectedDescription,
     selectionConnection,
