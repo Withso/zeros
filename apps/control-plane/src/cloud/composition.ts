@@ -123,8 +123,11 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
       const issued = await store.issueToken({ workspaceId: workspace.id, kind: "proxy", userId: null, ttlMs: PROXY_TOKEN_TTL_MS });
       return { token: issued.token, expiresAt: issued.expiresAt.getTime() };
     };
-    const access = await github.workerConfiguration(workspace, mode, proof), { repositoryBinding } = access;
-    const setup = await github.workspaceSetup(workspace, computers);
+    // Every worker hello waits on this. The build's setup is read beside
+    // GitHub access. The Git identity stays last: its fence covers every
+    // read before it.
+    const [access, setup] = await Promise.all([github.workerConfiguration(workspace, mode, proof), github.workspaceSetup(workspace, computers)]);
+    const { repositoryBinding } = access;
     const { selectedLogins, baseCommit, environment, mcpServers } = await withSystemTx(pool, async tx => ({
       selectedLogins: await logins.all(workspace.creatorUserId, workspace.organizationId, tx),
       baseCommit: await store.baseCommit(workspace.id, tx),
