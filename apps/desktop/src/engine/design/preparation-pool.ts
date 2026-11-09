@@ -1,7 +1,9 @@
 import { availableParallelism } from "node:os";
+import path from "node:path";
 import { Worker } from "node:worker_threads";
 import type { DurableDesignDependency } from "./dependency-read-set";
 import { designDirectoryNameFor } from "./directory-registry";
+import { designRecordedCanvasActive } from "./retained-frames";
 import type { DesignFrameIdentity } from "./identity-cache";
 import type { DesignFrameRenderSheet } from "./render-preparation";
 
@@ -15,11 +17,11 @@ export type DesignWorkerFrameIdentity =
   | { file: string; error: string };
 
 export type DesignWorkerComposedFrame =
-  | { file: string; sourceVersion: string; sanitized: string; sheets?: DesignFrameRenderSheet[] }
+  | { file: string; sourceVersion: string; sanitized: string; sheets?: DesignFrameRenderSheet[]; reused?: true }
   | { file: string; error: string };
 
-const testing: { workers: number | null; frames: number; composed: number; workerUrl: URL | null } =
-  { workers: null, frames: 0, composed: 0, workerUrl: null };
+const testing: { workers: number | null; frames: number; composed: number; reused: number; workerUrl: URL | null } =
+  { workers: null, frames: 0, composed: 0, reused: 0, workerUrl: null };
 
 /** Experimental, off by default: ZEROS_DESIGN_PREPARATION_WORKERS=<n>
  * prepares cold frame identities on up to n workers, leaving two cores. */
@@ -39,6 +41,11 @@ let pool: PoolWorker[] = [];
 let idle: NodeJS.Timeout | null = null;
 /** Each call's messages share one read scope on each worker they reach. */
 let scopes = 0;
+/** The worker that prepared a frame keeps its identity read, so the frame's
+ * capture is composed there when that worker is free to take it. */
+const preparedOn = new Map<string, PoolWorker>();
+const MAX_PREPARED_ON = 4096;
+const frameKey = (workspacePath: string, file: string) => `${path.resolve(workspacePath)}\0${file}`;
 /** Batches with work on the pool: the idle stop waits for all of them. */
 let inFlight = 0;
 let next = 0;
@@ -64,6 +71,7 @@ function spawn(): PoolWorker {
   const entry: PoolWorker & { answered?: boolean } = { worker, pending: new Map() };
   const fail = (error: Error) => {
     pool = pool.filter((candidate) => candidate !== entry);
+    for (const [key, worker] of preparedOn) if (worker === entry) preparedOn.delete(key);
     if (!entry.answered && !unavailable) {
       unavailable = true;
       console.warn(`[Zeros] Design preparation workers unavailable; preparing on the engine thread: ${error.message}`);
@@ -98,8 +106,17 @@ function scheduleIdleStop(): void {
 export async function prepareFrameIdentitiesInWorkers(workspacePath: string, catalogRevision: string,
   files: readonly string[]): Promise<DesignWorkerFrameIdentity[]> {
   const directory = designDirectoryNameFor(workspacePath);
+  const retain = designRecordedCanvasActive(workspacePath);
   const results = await inWorkers<string, DesignWorkerFrameIdentity>(files,
-    (file) => ({ workspacePath, directory, catalogRevision, files: [file] }));
+    (file) => ({ workspacePath, directory, catalogRevision, files: [file], retain }), {
+      answered: (file, worker, answer) => {
+        if (!answer.some((result) => "identity" in result)) return;
+        const key = frameKey(workspacePath, file);
+        preparedOn.delete(key);
+        preparedOn.set(key, worker);
+        if (preparedOn.size > MAX_PREPARED_ON) preparedOn.delete(preparedOn.keys().next().value!);
+      },
+    });
   testing.frames += results.filter((result) => "identity" in result).length;
   return results;
 }
@@ -107,16 +124,21 @@ export async function prepareFrameIdentitiesInWorkers(workspacePath: string, cat
 /** Compose frames' render sources across the pool, for capture batches. As
  * with preparation, whatever a worker did not compose the caller composes. */
 export async function composeFrameSourcesInWorkers(workspacePath: string,
-  frames: ReadonlyArray<{ file: string; width: number; height: number }>, options: { deferTailwind: boolean }):
+  frames: ReadonlyArray<{ file: string; width: number; height: number; sourceVersion?: string }>, options: { deferTailwind: boolean }):
   Promise<DesignWorkerComposedFrame[]> {
   const directory = designDirectoryNameFor(workspacePath);
-  const results = await inWorkers<{ file: string; width: number; height: number }, DesignWorkerComposedFrame>(frames,
-    (frame) => ({ kind: "compose", workspacePath, directory, frames: [frame], deferTailwind: options.deferTailwind }));
+  const results = await inWorkers<{ file: string; width: number; height: number; sourceVersion?: string }, DesignWorkerComposedFrame>(frames,
+    (frame) => ({ kind: "compose", workspacePath, directory, frames: [frame], deferTailwind: options.deferTailwind }),
+    { prefer: (frame) => preparedOn.get(frameKey(workspacePath, frame.file)) });
   testing.composed += results.filter((result) => "sanitized" in result).length;
+  testing.reused += results.filter((result) => "reused" in result).length;
   return results;
 }
 
-async function inWorkers<T, R>(items: readonly T[], message: (item: T) => Record<string, unknown>): Promise<R[]> {
+async function inWorkers<T, R>(items: readonly T[], message: (item: T) => Record<string, unknown>, options: {
+  prefer?: (item: T) => PoolWorker | undefined;
+  answered?: (item: T, worker: PoolWorker, results: R[]) => void;
+} = {}): Promise<R[]> {
   const count = unavailable ? 0 : Math.min(designPreparationWorkerCount(), items.length);
   if (count === 0) return [];
   // An idle stop armed by an earlier batch must not end this one's workers.
@@ -131,14 +153,29 @@ async function inWorkers<T, R>(items: readonly T[], message: (item: T) => Record
   // Each worker takes the next item as it finishes one, so heavy frames
   // never wait behind a fixed share. A failed worker stops taking items;
   // whatever is left is done on the engine's thread.
-  const queue = [...items];
   const results: R[] = [];
   const scope = ++scopes;
   const workers = pool.slice(0, count);
+  // A worker takes its own items first, then unclaimed ones, then another
+  // worker's, so a preference never leaves a worker idle.
+  const own = new Map<PoolWorker, T[]>(workers.map((worker) => [worker, []]));
+  const shared: T[] = [];
+  for (const item of items) {
+    const preferred = options.prefer?.(item);
+    ((preferred && own.get(preferred)) ?? shared).push(item);
+  }
+  const steal = () => {
+    for (const queue of own.values()) if (queue.length) return queue.pop();
+    return undefined;
+  };
+  const next = (entry: PoolWorker) => own.get(entry)!.shift() ?? shared.shift() ?? steal();
   const take = async (entry: PoolWorker) => {
-    for (let item = queue.shift(); item !== undefined; item = queue.shift()) {
-      try { results.push(...await ask(entry, { ...message(item), scope }) as R[]); }
-      catch { return; }
+    for (let item = next(entry); item !== undefined; item = next(entry)) {
+      try {
+        const answer = await ask(entry, { ...message(item), scope }) as R[];
+        results.push(...answer);
+        options.answered?.(item, entry, answer);
+      } catch { return; }
     }
   };
   inFlight++;
@@ -165,6 +202,7 @@ function ask(entry: PoolWorker, request: Record<string, unknown>): Promise<unkno
 export async function stopDesignPreparationWorkers(): Promise<void> {
   if (idle) clearTimeout(idle);
   idle = null;
+  preparedOn.clear();
   const stopping = pool;
   pool = [];
   await Promise.all(stopping.map(({ worker }) => worker.terminate().catch(() => 0)));
@@ -176,6 +214,6 @@ export function configureDesignPreparationWorkersForTests(workers: number | null
   unavailable = false;
 }
 
-export function designPreparationWorkerStatsForTests(): { frames: number; composed: number } {
-  return { frames: testing.frames, composed: testing.composed };
+export function designPreparationWorkerStatsForTests(): { frames: number; composed: number; reused: number } {
+  return { frames: testing.frames, composed: testing.composed, reused: testing.reused };
 }

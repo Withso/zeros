@@ -13,6 +13,7 @@ import { selectDesignPageHint } from "./page-selection";
 import { DESIGN_CAPTURE_TIMEOUT_MS, designPreviewCancelSchema, designPreviewRequestSchema, designRecordingsReadSchema, designRecordingsRenderSchema, designThumbnailsReadSchema, designThumbnailsRenderSchema, designWorkspaceCaptureSchema } from "@zeros/protocol/design-capture";
 import { readDesignThumbnails, renderDesignThumbnails } from "./thumbnail-batch";
 import { readDesignRecordings, renderDesignRecordings } from "./recording-batch";
+import { noteDesignRecordedCanvas } from "./retained-frames";
 import type { DesignPreviewJobs } from "./preview-jobs";
 import { captureWorkspaceDesign, previewWorkspaceDesign } from "./workspace-capture";
 import { openDesignVerification, designFramePreviewUrl } from "./verification-service";
@@ -412,7 +413,10 @@ export async function handleDesignWorkspaceRoute(
       }
       const input = designRecordingsRenderSchema.parse(params);
       const run = (signal?: AbortSignal) =>
-        host.withDesignReadWorkspace(input.workspaceId, false, ({ root }) => renderDesignRecordings(root, input, { signal }));
+        host.withDesignReadWorkspace(input.workspaceId, false, ({ root }) => {
+          noteDesignRecordedCanvas(root);
+          return renderDesignRecordings(root, input, { signal });
+        });
       if (!input.jobId) return run();
       if (!options.previewAdmission)
         throw new Error("Design recording cancellation requires a live Local connection.");
@@ -428,7 +432,11 @@ export async function handleDesignWorkspaceRoute(
         });
       }
       const input = designRecordingsReadSchema.parse(params);
-      return host.withDesignReadWorkspace(input.workspaceId, false, ({ root }) => readDesignRecordings(root, input));
+      return host.withDesignReadWorkspace(input.workspaceId, false, ({ root }) => {
+        // Its frames are captured after they are prepared: preparation keeps their reads.
+        noteDesignRecordedCanvas(root);
+        return readDesignRecordings(root, input);
+      });
     }
     case "design.preview.cancel": {
       const input = designPreviewCancelSchema.parse(params);
