@@ -111,7 +111,7 @@ describe("composer chrome", () => {
     // alone and moves above the highest card once cards dock over it.
     const agentChat = code("../agent-chat.tsx");
     const column = agentChat.indexOf(
-      '"relative mx-auto box-border flex w-full max-w-[856px] min-w-0 shrink-0 flex-col gap-2 border-t-0 bg-transparent px-7 pt-0 pb-4"',
+      '"relative mx-auto box-border flex w-full max-w-(--chat-column) min-w-0 shrink-0 flex-col gap-2 border-t-0 bg-transparent px-7 pt-0 pb-4"',
     );
     expect(column, "dock column").toBeGreaterThanOrEqual(0);
     const fade = agentChat.indexOf(
@@ -147,13 +147,14 @@ describe("composer chrome", () => {
     expect(code("../turn-container.tsx")).toContain("PROMPT_SURFACE_RADIUS");
   });
 
-  it("paints the sent user message on the composer's own surface", () => {
+  it("keeps the composer's own surface off the sent user message", () => {
     // One sidebar-bg + composer-border surface for the composer, Create and
-    // the sent message, so a prompt keeps its look after it is sent.
+    // the edit composer. Since 2026-11-09 a sent message is a bg2 bubble with
+    // no edge (prompt-fold.test.ts), told apart from the prompt being written.
     expect(code("../composer-shell.tsx")).toContain(
       'export const COMPOSER_SURFACE_CLS = "border-(--composer-border) bg-sidebar-bg"',
     );
-    expect(code("../turn-container.tsx")).toContain(": COMPOSER_SURFACE_CLS,");
+    expect(code("../turn-container.tsx")).not.toContain(": COMPOSER_SURFACE_CLS,");
     expect(code("../agent-chat.tsx")).toContain("COMPOSER_SURFACE_CLS,");
     expect(code("../../../shell/dispatcher/dispatcher-composer.tsx")).toContain("COMPOSER_SURFACE_CLS,");
     // Focusing or typing changes nothing.

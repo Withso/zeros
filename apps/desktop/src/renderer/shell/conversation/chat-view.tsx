@@ -731,9 +731,9 @@ function ChatBody({
 
   return (
     <>
-      {/* In the transcript's 856px column, as the shared error row. */}
+      {/* In the transcript's column, as the shared error row. */}
       {readOnly && historyError && (
-        <div className="mx-auto w-full max-w-[856px] shrink-0 px-7 pt-2">
+        <div className="mx-auto w-full max-w-(--chat-column) shrink-0 px-7 pt-2">
           <MessageRow tone="error" flush role="alert">
             {historyError}
           </MessageRow>

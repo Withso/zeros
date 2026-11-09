@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import { createElement as h } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -24,18 +25,34 @@ function classesOf(markup: string, marker: string): Set<string> {
   return new Set(value.replaceAll("&amp;", "&").split(/\s+/));
 }
 
+// 2026-11-09: a sent message sits at the lane's right edge again, as wide as
+// its text up to 7/8 of the lane, so even a long one reads as the reader's own.
+// It fills bg2 with no edge, apart from the composer's surface.
 describe("sent message width", () => {
-  it("spans the lane at any length, like the composer", () => {
+  const render = (props: Record<string, unknown> = {}) =>
+    renderToStaticMarkup(h(TurnPromptHeader, { originalText: "hi", ...props, children: "hi" }));
+
+  it("sits at the lane's right edge, as wide as its text up to 7/8 of the lane", () => {
     for (const props of [{}, { autoAction: "create-pr" }]) {
-      const markup = renderToStaticMarkup(h(TurnPromptHeader, { originalText: "hi", ...props, children: "hi" }));
+      const markup = render(props);
       const prompt = classesOf(markup, "zeros-agent-turn-prompt group/usermsg");
       expect(prompt).toContain("w-full");
-      expect(prompt).toContain("max-w-[800px]");
-      expect(prompt).not.toContain("items-end");
+      expect(prompt).toContain("max-w-(--chat-lane)");
+      expect(prompt).toContain("items-end");
       const bubble = classesOf(markup, 'data-user-bubble=""');
-      expect(bubble).toContain("w-full");
-      expect(bubble).not.toContain("w-fit");
+      expect(bubble).toContain("w-fit");
+      expect(bubble).toContain("max-w-7/8");
+      expect(bubble).not.toContain("w-full");
     }
+  });
+
+  it("fills bg2 with no edge, while Zeros' own messages keep their brown fill", () => {
+    const own = [...classesOf(render(), 'data-user-bubble=""')];
+    expect(own).toContain("bg-bg2");
+    expect(own.filter((cls) => /^border|^bg-sidebar-bg$/.test(cls))).toEqual([]);
+    const auto = [...classesOf(render({ autoAction: "create-pr" }), 'data-user-bubble=""')];
+    expect(auto).toContain("bg-brown-bg");
+    expect(auto.filter((cls) => cls.startsWith("border"))).toEqual([]);
   });
 
   it("renders a short message without a fold toggle", () => {
@@ -67,13 +84,22 @@ describe("sent message fold", () => {
       `max-h-[${PROMPT_FOLD_COLLAPSED_PX + 8}px]`, "overflow-clip", "mask-b-from-[calc(100%-2rem)]",
     ]));
     const expanded = PROMPT_FOLD_EXPANDED_CLS.split(" ");
-    expect(expanded).toEqual(expect.arrayContaining([
-      `max-h-[${PROMPT_FOLD_EXPANDED_PX + 8}px]`, "overflow-y-auto",
-      "data-more-above:mask-t-from-[calc(100%-2rem)]", "data-more-below:mask-b-from-[calc(100%-2rem)]",
-    ]));
+    expect(expanded).toEqual([
+      `max-h-[${PROMPT_FOLD_EXPANDED_PX + 8}px]`, "overflow-y-auto", "zeros-prompt-fold-scroll",
+    ]);
     // Reaching its end hands the wheel back to the transcript.
     expect(expanded).not.toContain("overscroll-contain");
-    expect(expanded.some((cls) => cls.startsWith("mask-"))).toBe(false);
+    // 2026-11-09: the edge fades leave its scrollbar alone. The fade is one
+    // gradient unioned with an opaque strip the width of the scrollbar slot,
+    // so the app's thumb stays solid at both ends.
+    const css = readFileSync(path.resolve(process.cwd(), "styles/global/scrollbars.css"), "utf8");
+    expect(css).toContain(".zeros-prompt-fold-scroll {");
+    expect(css).toContain(
+      "linear-gradient(to left, black var(--scrollbar-size), transparent var(--scrollbar-size))",
+    );
+    expect(css).toContain("mask-composite: add;");
+    expect(css).toContain(".zeros-prompt-fold-scroll[data-more-above] {\n  --prompt-fold-fade-top: 2rem;");
+    expect(css).toContain(".zeros-prompt-fold-scroll[data-more-below] {\n  --prompt-fold-fade-bottom: 2rem;");
   });
 });
 

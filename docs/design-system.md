@@ -125,17 +125,22 @@ exported page by page to [design-implementation/](design-implementation/README.m
    floating menus, popovers, tooltips, hover cards and toasts share `bg3` with
    `border2`, 12px corners, the dropdown shadow, a 4px inset and 28px rows with
    8px corners (`shared/ui/menu-surface.ts`, `Surface kind="floating"`). The
-   chat composer, user messages and everything docked above the composer
-   (dock cards and the @, / and # pickers) share `sidebar-bg` with the
-   `--composer-border` edge (#323232 in Dark, `border2` in Light) and no
-   shadow, 8px apart. The transcript dissolves into the pane over the 32px
+   chat composer and everything docked above it (dock cards and the @, / and
+   # pickers) share `sidebar-bg` with the `--composer-border` edge (#323232
+   in Dark, `border2` in Light) and no shadow, 8px apart. The transcript dissolves into the pane over the 32px
    above the top of that stack (`COMPOSER_DOCK_FADE`,
    `shared/ui/composer-surface.ts`): above the composer alone, above the
    highest card once cards dock, and on a docked picker's own top edge while
    it opens above. Editing a sent message happens in the composer itself:
    the same card, surface, 18px corners, drag edge and 28px controls around
-   the same editor and pills. A sent message spans the lane like the
-   composer, however short. Taller than six lines, it folds to five that
+   the same editor and pills. A sent message is a `bg2` bubble with no edge
+   at the lane's right edge (2026-11-09), as wide as its text up to 7/8 of
+   the lane, so even a long one reads as the reader's own; Zeros' own
+   messages keep their brown fill. Its pills sit a step lighter than the
+   bubble, on their `border2` edge: `--prompt-pill-bg`, `bg2-hover` in Dark
+   and `sidebar-bg` in Light (Light's next step lighter is too faint to
+   see), handed to them as `--pill-bg`; the composer's keep `bg2`. Taller
+   than six lines, it folds to five that
    dissolve over their last 32px above a Ghost **Show more**; unfolded it shows up to
    fifteen and scrolls inside, fading only the edges its text runs past,
    above **Show less** (`features/agent/prompt-fold.tsx`).
@@ -158,14 +163,19 @@ exported page by page to [design-implementation/](design-implementation/README.m
    and a chosen chip or option fill with `selected-bg` and hold it under the
    pointer. A control's resting edge stays as it is; selection never adds a
    border, ring, outline or shadow. Only keyboard focus rings, and objects on
-   the Design canvas keep the selection stroke. A split chat pane's focus edge
-   is item 13's. `ui/selection-edge` enforces
+   the Design canvas keep the selection stroke. A split chat pane marks focus
+   with item 13's dim, never an edge. `ui/selection-edge` enforces
    it in class variants, in classes a selection condition adds
    (`selected && …`, `tab === activeTab ? … : …`) and in the renderer's
    stylesheets.
 9. **Two tab styles.** A segmented control switches a view; one strip tab
    serves chrome, workbench and chat. A closable tab shows ✕ on hover or focus
-   over a fade in its own fill, so it never changes width.
+   over a fade in its own fill, so it never changes width. The side column's
+   fixed tabs, Files, Design, Changes and Review, are text only (2026-11-09):
+   the first always reads Files, with no file name, glyph, status letter or
+   ✕, whatever it shows; extra File, Browser and terminal tabs keep their
+   glyphs. `shell/workbench/__tests__/fixed-tab-pills.test.ts` and
+   `scripts/ui-smoke-chat-surfaces.mjs` hold it.
 10. **Menus say what kind of choice they are.** One choice: a check at the end
     of the chosen row. Several: a check column on the left. Destructive items
     last, in `red-primary`. Shortcuts are Kbd chips, one per key.
@@ -176,20 +186,24 @@ exported page by page to [design-implementation/](design-implementation/README.m
     chat.
 12. **Local and cloud are both first class.** Every surface states its Local
     and cloud behavior; cloud lifecycle never enters a tab banner.
-13. **Split panes are solid islands on the chrome** (2026-11-06; edges
-    2026-11-07). The workspace header row draws no divider
-    (`PanelHeader divider={false}`) and keeps one 28px glyph slot for branch,
-    folder and cloud, so the name always starts at one column; whether a
-    branch is published never changes the glyph. A lone chat pane runs edge to
-    edge. Only while the column is split, panes stand apart as solid surfaces
-    on the `bg1` chrome: 12px apart both ways (the divider is that gap and the
-    resize handle), 12px in from the column's left, right and bottom edges,
-    every corner 12px, and nothing fading between them, at the tab strip or
-    along a seam. Every pane keeps `bg1`, and edges tell them apart: `border2`
-    on the focused pane, `border1` on the others, whose strip and body (not
-    the edge) dim to 80% over 120ms. Focus here is which window takes input,
-    not a selection, so item 8 does not apply: every split pane has an edge,
-    and focus only raises its tier. 80% is the owner's choice: `fg1` and
+13. **Split panes and the side column run flush** (2026-11-09, replacing the
+    solid islands of 2026-11-06 to 2026-11-08). The workspace header row draws no divider
+    (`PanelHeader divider={false}`) and starts with the workspace's name, then
+    where it lives, 6px after it (2026-11-09): a 16px laptop for every Local
+    workspace (branch, folder or unpublished, personal or organization) and a
+    cloud for cloud; whether a branch is published never changes the icon.
+    Name and icon are one 28px Ghost control with no fill at rest and
+    `bg2-highlight` on hover and while open. It opens the workspace's details:
+    for Local, its branch, its folder (`~` for the home folder) and Local in
+    `fg3`; for cloud, the cloud details (repository, created and status, with
+    Start and Stop). Every chat pane runs edge to edge, split or not: no
+    gutter, gap or rounded corner, and nothing fading between panes, at the
+    tab strip or along a seam. Between two panes, side by side or stacked, the
+    divider is an 8px resize strip that draws one 1px `border1` line, placed
+    without a transform so it stays on whole pixels; the strip is `bg1` like
+    the panes, so they meet at that line. Every pane keeps `bg1` and draws no
+    edge of its own; an unfocused pane's strip and body dim to 80% over
+    120ms. 80% is the owner's choice: `fg1` and
     `fg2` stay AA, while `fg3` in Light and `muted-fg` in Dark dip below their
     floors in an unfocused pane. An unfocused pane's composer is its Ask pill:
     "Ask Claude", "Ask Codex", "Ask Cursor" or the chat's agent, no shortcut,
@@ -203,15 +217,17 @@ exported page by page to [design-implementation/](design-implementation/README.m
     (`shared/ui/composer-ask.tsx`). The transcript fades out over the
     32px under its strip and starts 32px down; a tab's drop zone is a soft
     `highlighted-bg` fill without a border; chat tabs are content-sized from
-    70px to 176px. The side column keeps its tab row on `bg1` and holds the
-    open tab in one island under it: a canvas `Surface` on the column's left
-    edge, the line the chat's resize handle runs along, and 12px in from its
-    right and bottom, 12px corners, a `border2` edge (what sits inside keeps
-    `border1`), no seam against the chat, and the first tab 12px in. This
-    replaces the 2026-07-11 flush column, the soft valleys tried on 2026-11-06
-    and the unfocused pane's `sidebar-bg` fill. `shell/conversation/__tests__/pane-surfaces.test.ts`,
+    70px to 176px. The side column runs flush too, as it did from 2026-07-11:
+    its tab row and the open tab fill the column to the window's right and
+    bottom edges, with no inset, corner or edge of their own (a canvas
+    `Surface`, whose contents keep `border1`) apart from the 1px `border1`
+    separator that ends the 40px tab row; its 1px `border1` left edge is
+    the one seam against the chat and the line the chat's resize handle meets;
+    and the first tab starts 8px in. This replaces the side island, the soft
+    valleys tried on 2026-11-06 and the unfocused pane's `sidebar-bg` fill.
+    `shell/conversation/__tests__/pane-surfaces.test.ts`,
     `shell/conversation/__tests__/pane-sizing.test.ts`,
-    `shell/workbench/__tests__/workbench-island.test.ts`,
+    `shell/workbench/__tests__/workbench-column.test.ts`,
     `features/agent/__tests__/composer-ask-pill.test.ts`,
     `features/agent/__tests__/composer-ask-dock.test.ts`
     and `scripts/ui-smoke-chat-surfaces.mjs` hold it.
@@ -247,6 +263,53 @@ exported page by page to [design-implementation/](design-implementation/README.m
     `scripts/ui-smoke-composer-prompt-fold.mjs`,
     `scripts/ui-smoke-file-pill-navigation.mjs` and
     `scripts/ui-smoke-tool-presentation.mjs` hold it.
+15. **One scrollbar** (2026-11-09). Every scrollbar in the app, portaled
+    menus and dialogs, Home and the sidebar included, is one thumb in
+    `--scrollbar-thumb`, #222 in Dark and #EAEAEA in Light, inside a
+    `--scrollbar-size` slot of 6px that never changes width. It is 4px wide
+    at rest (a 1px `--scrollbar-thumb-inset` each side), takes the full 6px
+    under the pointer or while dragged, and never changes color. It shows
+    while its scroller is hovered, except in the chat transcript, where it
+    shows only while the reader scrolls (wheel, touch, a scroll key, or a
+    scroll while the pointer is held) and for 700ms after, never for a plain
+    click or the agent's own streaming scrolls
+    (`features/agent/chat-scrollbar-reveal.ts`). No fade covers a
+    scrollbar: the transcript's top and dock fades and an unfolded prompt's
+    edges stop at its slot. With the side column hidden and one pane, the
+    docked Summary island, `sidebar-bg` on a `border1` edge with 12px
+    corners (its popover, with the side column open, matches), floats over
+    the chat's top-right corner: the
+    transcript's scrollbar stays at the pane's edge beside it, while the
+    transcript, composer, Jump to latest, terminals, the empty pane and the
+    chat's dead-end panels stay clear of it (`CHAT_ASIDE_INSET_HOST_CLS`
+    publishes `--chat-aside-inset`).
+    `styles/global/scrollbars.css` reaches every scroller in the document;
+    the ScrollArea primitive, xterm and the diff viewer's shadow root take
+    the same tokens where they draw their own. The thumb is a reviewed
+    contrast exemption, faint by the owner's choice. Jump to latest is the
+    chat's one jump control; Jump to your prompt is retired.
+    `shared/theme/__tests__/scrollbar-contract.test.ts`,
+    `features/agent/__tests__/chat-scrollbar-reveal.test.ts`,
+    `shell/conversation/__tests__/summary-island-scrollbar.test.ts`,
+    `features/agent/__tests__/jump-pills.test.ts`,
+    `scripts/ui-smoke-chat-surfaces.mjs` and
+    `scripts/ui-smoke-conversation-summary.mjs` hold it.
+16. **The reader picks the chat's width** (2026-11-09). Settings →
+    Appearance → Chat width sets the chat's text column, `--chat-lane`:
+    Narrow 625px, Normal 800px (the default) and Wide 1200px. The
+    conversation's column, `--chat-column`, adds the lane's 28px gutters on
+    each side. The transcript, every answer and tool row, sent messages, the
+    composer and what docks above it, the read-only history bar and the
+    chat's error row all take it, never a fixed width. Each is a maximum, so
+    a narrower pane still shrinks the chat and a docked Summary island keeps
+    its inset. The pick is an appearance preference beside the theme: kept
+    in `zeros.appearance.v2`, synced to the user's settings.toml as
+    `preferences.appearance.chatWidth` (absent reads as Normal) and stamped
+    on `<html>` as `data-chat-width` before the first paint, for Local and
+    cloud chats alike. `features/agent/__tests__/chat-width.test.ts`,
+    `shared/theme/__tests__/store.test.ts`,
+    `engine/settings/__tests__/preferences.test.ts` and
+    `scripts/ui-smoke-chat-width.mjs` hold it.
 
 ### How the direction changes
 
@@ -325,14 +388,17 @@ imports, following property paths such as `chip.cls`). The ledger counts
 | Surface | Fill | Hover / selected | Border | Notes |
 | --- | --- | --- | --- | --- |
 | Canvas, active chat, dialogs, sheets | `bg-bg1` | `bg-bg1-hover` | `border-border1` | Dialogs sit on `bg-scrim` |
-| Inactive chat pane | `bg-(--pane-bg)` (= `sidebar-bg`) | — | — | Sets the fill apart only; text keeps full contrast. Split panes stand 12px apart on the `bg1` chrome with 12px corners, no seam and no fade |
+| Split chat pane | `bg-(--pane-bg)` (= `bg1`) | — | none | Edge to edge like a lone pane, square, with no gutter or fade; the 8px resize strip between two panes draws one 1px `border1` line; an unfocused pane's strip and body dim to 80% and its composer is its Ask pill (§0 item 13) |
 | Raised: tiles | `bg-bg2` | `bg-bg2-hover` | `border-border2` | `bg-bg1-bright` for cards and settings groups |
-| Chat composer, user messages and what docks above the composer | `bg-sidebar-bg` | `bg-sidebar-bg-hover` | `border-(--composer-border)` | No shadow; 18px corners on the Create, workspace and edit composers, 12px elsewhere. Dock cards use `DOCK_CARD_CLS`; the docked pickers use `PopoverContent surface="composer"`; review drafts take `COMPOSER_SURFACE_CLS`. The top of the stack carries `COMPOSER_DOCK_FADE`. Sent messages span the lane and fold long text with `PromptFold` |
+| Chat composer and what docks above it | `bg-sidebar-bg` | `bg-sidebar-bg-hover` | `border-(--composer-border)` | No shadow; 18px corners on the Create, workspace and edit composers, 12px elsewhere. Dock cards use `DOCK_CARD_CLS`; the docked pickers use `PopoverContent surface="composer"`; review drafts take `COMPOSER_SURFACE_CLS`. The top of the stack carries `COMPOSER_DOCK_FADE` |
+| Sent user message | `bg-bg2` | — | none | At the lane's right edge, as wide as its text up to 7/8 of the lane (`max-w-7/8`), 12px corners; its pills take `--prompt-pill-bg`, a step lighter; folds long text with `PromptFold` (§0 item 4) |
 | Floating: menus, selects, command, popovers, tooltips, hover cards, toasts | `bg-bg3` | `bg-bg3-hover` | `border-border2` | 12px corners, 4px inset, lift = `shadow-[var(--shadow-dropdown)]`; feature panels take the fill from `FLOATING_SURFACE` |
 | Repository sidebar | `bg-sidebar-bg` | `bg-sidebar-bg-hover` | `border-border2` | Settings navigation uses the default surfaces |
+| Summary island and popover | `bg-sidebar-bg` | rows take the Ghost hover | `border-border1` | 12px corners. Docked, it floats over the chat's top-right corner with the side column hidden (§0 item 15); with the side column open it opens from the header as a popover on the same surface, with the dropdown lift |
 | Grouped content on canvas | `bg-bg1-highlight` | — | — | A wash, never the only boundary |
 | Primary action | `bg-primary-button-bg` | `bg-primary-button-hover` | — | Text `text-primary-button-fg`; one per view |
 | Selected control: pressed toggle, active tab or segment, chosen chip or option | `bg-selected-bg` | holds `bg-selected-bg` | never an edge; a resting edge is unchanged | One step above hover in Dark; equal to `bg2-highlight` in Light, where status text needs AA |
+| Scrollbar thumb, everywhere | `--scrollbar-thumb` (#222 Dark, #EAEAEA Light) | no color change; 4px grows to 6px under the pointer | — | A 6px `--scrollbar-size` slot; shown while its scroller is hovered, the chat's only while the reader scrolls (§0 item 15) |
 
 - Hover is **surface-scoped**: use the hover of the surface the element sits on.
 - **Selected is a step above hover** for navigation: sidebar, tree and layer

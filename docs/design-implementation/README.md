@@ -1135,3 +1135,147 @@ Each landed step appends one line: date, workstream, what landed, evidence.
   contrast tests failed red first; the chat-surfaces smoke measures the
   pill, watches the morph pass through intermediate widths frame by frame,
   and checks the caret, the keyboard path and reduced motion.
+- 2026-11-08 · 5, 6 · Split chat panes sit 8px apart both ways (canvas
+  version 403, the Solid split boards): the divider, still the resize handle,
+  is 8px (`PANE_SPLITTER_PX`, `w-2` and `h-2`), while the column's gutters
+  beside the sidebar, along the bottom and beside the side column stay 12px
+  (`PANE_SPLIT_GUTTER_PX`). Two panes side by side need 728px (was 732) and
+  752px with the gutters (was 756); a stack needs 488px (was 492) and three
+  across 1096px (was 1104). The canvas's solid split rule draws 8px, and the
+  Split boards' copy says so. Evidence: the pane-sizing and pane-surfaces
+  tests failed red first; the chat-surfaces smoke measures the 8px gap side by
+  side in Dark and Light, and at the T-junction both handles, both gaps and
+  the 12px gutters.
+- 2026-11-09 · 5, 6 · The side column's fixed tabs are text only
+  (`docs/design-system.md` §0 item 9; canvas version 404). Files, Design,
+  Changes and Review drop their glyphs, and the first tab always reads Files,
+  with no file name, glyph, status letter or ✕, whatever it shows
+  (`isFixedWorkbenchTab`, `workbenchTabStripLabel`). Its stored title is
+  unchanged, so saved workspaces need no migration; the file's name still
+  heads the viewer, and its unsaved dot stays, like the Changes count. Extra
+  File, Browser, terminal and simulator tabs keep their glyphs. The canvas's
+  fifteen strip boards follow, and the Tab strip and No file open boards say
+  so. Evidence: the tab-model and fixed-tab-pills tests failed red first; the
+  chat-surfaces smoke checks the four text-only tabs and Setup's glyph, and
+  the file editor's checks Files with no M, glyph or ✕ beside a notes.md tab
+  that keeps its glyph.
+- 2026-11-09 · 2, 3, 5, 6 · One scrollbar (`docs/design-system.md` §0 item
+  15; canvas version 405). Every scrollbar takes one thumb in
+  `--scrollbar-thumb`, #222 in Dark and #EAEAEA in Light: 4px inside a 6px
+  `--scrollbar-size` slot that never changes width, the full 6px under the
+  pointer or while dragged, and no color change. The global rules are
+  unscoped, so portaled menus and dialogs, Home, Customize and the sidebar
+  match the chat and Workbench; the ScrollArea primitive, xterm (its slider,
+  at the right edge of xterm's own 14px track) and the diff viewer's shadow
+  root take the same tokens, and the composer and unfolded prompts drop their
+  browser-drawn thin bars. The transcript's bar shows only for the reader's own scrolling
+  (`features/agent/chat-scrollbar-reveal.ts`), so streaming no longer flashes
+  it on every new row. No fade covers a scrollbar: the top and dock fades stop
+  at its slot, and an unfolded prompt's mask keeps an opaque strip for it.
+  The docked Summary island now floats over the chat's top-right corner, so
+  the transcript's scrollbar sits at the pane's edge beside it while the
+  transcript, composer, Jump to latest, terminals, the empty pane and the
+  removed-agent and no-folder panels stay clear of it
+  (`CHAT_ASIDE_INSET_HOST_CLS`). Jump to your prompt is removed.
+  On the canvas, the Separator and Borders boards draw the thumb at rest and
+  under the pointer, the Conversation window and Summary boards show the bar
+  beside the island, and the Jump and both Tooltips boards drop the prompt
+  pill. Evidence: the scrollbar-contract, chat-scrollbar-reveal,
+  summary-island-scrollbar and jump-pills tests pin it; the chat-surfaces
+  smoke measures the docked island, the bar at the pane's edge and the clear
+  transcript, composer and fades, and checks that programmatic scrolls never
+  reveal the thumb while the reader's wheel shows it in #222 and #EAEAEA;
+  the summary smoke checks the island beside the edge-to-edge scroller and
+  that it takes its own clicks.
+- 2026-11-09 · 5, 6 · Sent messages sit at the lane's right edge again
+  (`docs/design-system.md` §0 item 4; canvas version 406): a `bg2` bubble
+  with no edge, as wide as its text up to 7/8 of the lane (`max-w-7/8`),
+  instead of spanning the lane on the composer's `sidebar-bg` and edge, so
+  even a long one reads as the reader's own. Zeros' own brown messages take
+  the same shape; the sender line, the fold and the hover row follow the
+  right edge, and editing still opens the full-width composer. Pills keep
+  their `border2` edge on the `bg2` fill. On the canvas, the proposed skin
+  draws every board's bubble that way, and the brown fill of Zeros' own
+  messages, which that skin had been overriding, returns. Evidence: the
+  prompt-fold, overflow, local-links and composer-chrome tests failed red
+  first; the prompt-fold smoke measures the right edge, the text-width and
+  7/8 caps and the `bg2` fill with no edge for cloud, Local and
+  organization-local chats in both themes, and the local-links smoke the
+  sender line above the right-aligned bubble.
+- 2026-11-09 · 2, 5, 6 · A pill inside a sent message sits a step lighter
+  than its `bg2` bubble (`docs/design-system.md` §0 item 4; canvas version
+  407): the new semantic `--prompt-pill-bg` is `bg2-hover` in Dark and
+  `sidebar-bg` in Light, since Light's next step lighter is too faint to see.
+  The bubble hands it to its pills as `--pill-bg`, which `PILL_SHELL` reads
+  with a `bg2` fallback, so the composer's pills, the muted and selected
+  tints and the hovers are unchanged. On the canvas, mentions, attachments
+  and chips inside a bubble take the same fill. Evidence: the
+  sent-message-pills tests failed red first; the local-links smoke checks a
+  chat pill in a sent message against `--prompt-pill-bg` and lighter than
+  its bubble, beside the composer's `bg2` pill, in Dark and Light.
+- 2026-11-09 · 2, 5, 6 · Settings → Appearance → Chat width
+  (`docs/design-system.md` §0 item 16; canvas version 408): Narrow, Normal
+  and Wide set the chat's text column, `--chat-lane`, to 625, 800 (the
+  default) or 1200px, and `--chat-column` adds the lane's 28px gutters. The
+  transcript, answers, sent messages, the composer and its dock, the
+  read-only history bar and the chat's error row all read it in place of
+  the fixed 800 and 856px. The pick is an appearance preference beside the
+  theme (`chatWidth` in `zeros.appearance.v2`), synced to settings.toml as
+  `preferences.appearance.chatWidth`, optional so older docs read as Normal,
+  with the published settings schema regenerated, and stamped on `<html>`
+  as `data-chat-width` before the first paint. On the canvas, the
+  Appearance board gains the row and its menu, the new Chat window · Chat
+  width board shows all three at full size, and the chat kit's columns
+  read the same variables. Evidence: the chat-width, store and engine
+  preference tests failed red first; the chat-width smoke picks each width
+  in the real Settings page and measures the transcript and composer at
+  625, 800 and 1200px, then reloads with Wide kept.
+- 2026-11-09 · 5, 6 · The docked Summary island fills `sidebar-bg` on a
+  `border1` edge (`docs/design-system.md` §0 item 15; canvas version 409),
+  in place of `bg1-bright` with no edge; its 12px corners, width and inset
+  are unchanged, and the Summary popover keeps its own surface. On the
+  canvas, the proposed skin draws every docked island that way. Evidence:
+  the summary-island test failed red first; the summary smoke measures the
+  island's fill against `sidebar-bg` and all four edges against `border1`.
+- 2026-11-09 · 5, 6 · The Summary popover, opened from the header while the
+  side column is open, matches the docked island: `sidebar-bg` on
+  `PopoverContent`'s own 1px edge in `border1`, keeping the dropdown lift
+  (canvas version 410, where the Workspace summary board gains a Popover
+  presentation). Evidence: the summary-island test failed red first; the
+  summary smoke measures the open popover's fill and all four edges.
+- 2026-11-09 · 5, 6 · The workspace header leads with the workspace's name,
+  then where it lives (`docs/design-system.md` §0 item 13; canvas version
+  411): a laptop for every Local workspace, branch, folder or unpublished,
+  and a cloud for cloud, as one 28px Ghost control with no fill at rest and
+  `bg2-highlight` on hover and while open (`workspace-identity.tsx`).
+  Clicking it opens the Local details (its branch, its folder with `~` for
+  the home folder, and Local in `fg3`) or the unchanged cloud details;
+  details close on a workspace switch and when the workspace page is hidden,
+  and stay closed when it returns. A Tooltip around a popover trigger stamps
+  its own `data-state` on the trigger, so the open fill keys off
+  `aria-expanded`. On the canvas, the Local board gains hover and details
+  states (details by default) and every chat window header reads name, then
+  laptop. Evidence: the header and details-open tests failed red first; the
+  workspace-header smoke checks both placements' order, rest and hover fills
+  in both themes and their popups, and the summary smoke closes the Local
+  details on A → B → A for personal and organization owners.
+- 2026-11-09 · 5, 6 · Split panes and the side column run flush
+  (`docs/design-system.md` §0 item 13; canvas versions 414 and 415, where
+  the split boards drop their islands, the Side column boards turn flush and
+  Chat window · Split with the side column shows both together), replacing
+  the solid islands of 2026-11-06 to 2026-11-08. Every chat pane runs edge to
+  edge with square corners, no gutters and no edge of its own; the 8px
+  resize strip between two panes draws one 1px `border1` line; an unfocused
+  pane keeps its 80% dim and Ask pill. The side column fills to the window's
+  right and bottom edges on its 1px `border1` seam, which the chat's resize
+  handle meets, with the first tab 8px in. The split gutters leave the split
+  math, so two panes side by side need 728px. Evidence: the pane-surfaces
+  and workbench-column tests failed red first; the chat-surfaces smoke
+  measures the seam, the divider lines, zero gutters, square edgeless panes
+  and the dims in both themes, with the side column shown and hidden.
+- 2026-11-09 · 5, 6 · The side column's tab row ends on a 1px `border1`
+  separator above the open tab, inside its 40px, from the seam to the
+  window's right edge (`docs/design-system.md` §0 item 13; canvas version
+  416). The chat's workspace header keeps no divider. Evidence: the
+  workbench-column test failed red first; the chat-surfaces smoke measures
+  the separator and the row's 40px in both themes.

@@ -22,7 +22,9 @@ import { Tooltip } from "@/renderer/shared/ui/primitives";
 // label then absorbs the squeeze while attachment remove buttons remain usable.
 export const PILL_METRICS =
   "inline-flex h-5 max-w-[calc(100%-3px)] mx-[1.5px] items-center rounded-sm align-middle text-xs leading-4 select-none";
-export const PILL_SHELL = `${PILL_METRICS} gap-1 border border-border2 bg-bg2 text-fg1`;
+/** The fill comes from the surface holding the pill: bg2, unless it sets
+ * --pill-bg (a sent message's bubble does, styles/semantic-tokens.css). */
+export const PILL_SHELL = `${PILL_METRICS} gap-1 border border-border2 bg-[var(--pill-bg,var(--bg2))] text-fg1`;
 export const COMPOSER_PILL_SPACING = "gap-1 px-1.5";
 /** An interactive pill's hover, on the whole pill (its inner buttons paint no
  * fill of their own): bg2-highlight on border3, also while its menu is open. */

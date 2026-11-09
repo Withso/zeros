@@ -394,8 +394,8 @@ describe("Local link identity and presentation", () => {
     expect(from).toContain("The actual body");
     expect(from).not.toContain("[Zeros]");
     expect(render(body)).not.toContain("Sent from");
-    // A sender line, as in a chat app: right-aligned 8px above the
-    // full-width bubble, the chat's name and logo with no pill. "Sent from"
+    // A sender line, as in a chat app: 8px above the bubble, both at the
+    // lane's right edge, the chat's name and logo with no pill. "Sent from"
     // is for screen readers only.
     expect(from).toContain('<span class="sr-only">Sent from</span>');
     expect(from).toContain('data-local-link-appearance="sender"');
@@ -404,9 +404,9 @@ describe("Local link identity and presentation", () => {
     expect(from).not.toMatch(/data-local-from=""[^>]*class="[^"]*\btext-fg3\b/);
     expect(from).toMatch(/data-local-from=""[^>]*class="[^"]*\bmb-2\b/);
     expect(from).toMatch(/data-local-from-group=""[^>]*class="[^"]*\bw-full\b/);
-    expect(from).not.toMatch(/data-local-from-group=""[^>]*class="[^"]*\bitems-end\b/);
-    expect(from).toMatch(/data-user-bubble=""[^>]*class="[^"]*\bw-full\b/);
-    expect(from).not.toMatch(/data-user-bubble=""[^>]*class="[^"]*\bw-fit\b/);
+    expect(from).toMatch(/data-local-from-group=""[^>]*class="[^"]*\bitems-end\b/);
+    expect(from).toMatch(/data-user-bubble=""[^>]*class="[^"]*\bw-fit\b/);
+    expect(from).not.toMatch(/data-user-bubble=""[^>]*class="[^"]*\bw-full\b/);
     expect(from.indexOf("data-local-from")).toBeLessThan(from.indexOf('data-user-bubble=""'));
     expect(from).not.toContain('aria-label="Edit message"');
     const note = render(

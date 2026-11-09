@@ -23,99 +23,132 @@
   outline-offset: 2px;
 }
 
-/* Global scrollbar — auto-hiding by default. The 6px track is
- * reserved so nothing reflows, but the thumb is INVISIBLE at rest and reveals
- * only while its scroll container is hovered (≈ "visible only while scrolling"
- * — you mouse over a pane to scroll it). Pure CSS, so it behaves identically
- * across the desktop renderer, independent of the macOS "Show
- * scroll bars" system setting.
+/* Every scrollbar in the app is one thumb (2026-11-09): --scrollbar-thumb
+ * (#222 Dark, #EAEAEA Light) in a --scrollbar-size (6px) slot that is reserved
+ * so nothing reflows. The thumb is invisible at rest and shows only while its
+ * scroll container is hovered, 4px wide: a --scrollbar-thumb-inset of 1px
+ * stays clear on each side. Under the pointer or while dragged it takes the
+ * full 6px, never changing color. Pure CSS, so it behaves identically across
+ * the renderer, independent of the macOS "Show scroll bars" setting.
  *
- * To opt OUT (no bar at all): use the inline
- * `[scrollbar-width:none] [&::-webkit-scrollbar]:hidden` pair (repository sidebar,
- * the tab strips, composer attachments, …). The chat viewport uses this
- * default too (see the "Chat viewport scrollbar" note earlier in this file).
+ * Unscoped, so portaled menus and dialogs, Home, Customize and the sidebar
+ * match the chat and Workbench. To opt OUT (no bar at all): use the inline
+ * `[scrollbar-width:none] [&::-webkit-scrollbar]:hidden` pair (the tab strips,
+ * composer attachments, …). Scrollbars this cannot reach take the same tokens
+ * where they are drawn: the ScrollArea primitive, xterm below and the diff
+ * viewer's shadow root (shared/theme/diff-theme.ts).
  *
  * Webkit-ONLY by design: do NOT add the standard `scrollbar-width` /
  * `scrollbar-color` here — since Chrome 121 those props disable
  * `::-webkit-scrollbar` styling, which would swap this auto-hide for the
- * native (now non-overlay, persistent) macOS bar. */
-[data-Zeros-root] ::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+ * native (now non-overlay, persistent) macOS bar. Thumb rules set
+ * `background-color`, never the `background` shorthand, which would reset the
+ * padding-box clip and paint the thumb under its inset. */
+::-webkit-scrollbar {
+  width: var(--scrollbar-size);
+  height: var(--scrollbar-size);
 }
-[data-Zeros-root] ::-webkit-scrollbar-track {
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-corner {
   background: transparent;
 }
-[data-Zeros-root] ::-webkit-scrollbar-thumb {
-  background: transparent;
-  border-radius: 0.25rem;
+::-webkit-scrollbar-thumb {
+  border: var(--scrollbar-thumb-inset) solid transparent;
+  border-radius: 9999px;
+  background-color: transparent;
+  background-clip: padding-box;
 }
-/* Thumb colors are the border tiers (matching .zeros-hscroll below) — the
- * previous --bg3 thumb turns pure white in the light theme and vanishes
- * against white panes; border3/border4 read on both themes and give the
- * thumb a proper intensify-on-hover. */
-[data-Zeros-root] :hover::-webkit-scrollbar-thumb {
-  background: var(--border3);
+:hover::-webkit-scrollbar-thumb {
+  background-color: var(--scrollbar-thumb);
 }
-[data-Zeros-root] :hover::-webkit-scrollbar-thumb:hover {
-  background: var(--border4);
+::-webkit-scrollbar-thumb:hover,
+::-webkit-scrollbar-thumb:active {
+  border-width: 0;
 }
 
 /* ALWAYS-VISIBLE horizontal scrollbar — the Dashboard board scrolls sideways
  * through its status columns and the bottom bar must stay visible (not the
- * macOS overlay/auto-hide bar). Explicitly styling ::-webkit-scrollbar opts out
- * of the overlay bar so the thumb is persistent. Unscoped by design: the
- * Dashboard renders OUTSIDE the [data-Zeros-root] subtree. */
+ * macOS overlay/auto-hide bar). Its 10px track keeps the larger target; the
+ * thumb is the app's: 4px at rest, 6px under the pointer, one color. */
 .zeros-hscroll::-webkit-scrollbar {
   height: 10px;
 }
-.zeros-hscroll::-webkit-scrollbar-track {
-  background: transparent;
-}
 .zeros-hscroll::-webkit-scrollbar-thumb {
-  background: var(--border3);
+  border: calc((10px - var(--scrollbar-size)) / 2 + var(--scrollbar-thumb-inset)) solid transparent;
   border-radius: 9999px;
-  border: 2px solid transparent;
+  background-color: var(--scrollbar-thumb);
   background-clip: padding-box;
 }
-.zeros-hscroll::-webkit-scrollbar-thumb:hover {
-  background: var(--border4);
-  background-clip: padding-box;
+.zeros-hscroll::-webkit-scrollbar-thumb:hover,
+.zeros-hscroll::-webkit-scrollbar-thumb:active {
+  border-width: calc((10px - var(--scrollbar-size)) / 2);
 }
 
-/* Chat transcript scrollbar — reveal ONLY while actively scrolling, not on mere
- * hover. agent-chat.tsx flags the scroll element with `data-scrolling` during
- * scroll (cleared ~700ms after). The double class `.zeros-agent-body
- * .zeros-agent-scrollbar` lifts specificity to (0,3,1) so it beats the global
- * `:hover` reveal above (0,2,1) — i.e. hover alone keeps the thumb invisible;
- * only the scrolling state paints it. */
+/* Chat transcript scrollbar — shown only while the reader scrolls it, never
+ * on mere hover and never for the agent's own streaming scrolls:
+ * features/agent/chat-scrollbar-reveal.ts flags the scroller with
+ * `data-scrolling` for wheel, touch, scroll keys and bar drags (cleared 700ms
+ * after). The double class lifts specificity to (0,3,1) so it beats the global
+ * `:hover` reveal above (0,1,1); only the scrolling state paints the thumb. */
 [data-Zeros-root]
   .zeros-agent-body.zeros-agent-scrollbar::-webkit-scrollbar-thumb {
-  background: transparent;
+  background-color: transparent;
 }
 [data-Zeros-root]
   .zeros-agent-body.zeros-agent-scrollbar[data-scrolling]::-webkit-scrollbar-thumb {
-  background: var(--border3);
+  background-color: var(--scrollbar-thumb);
+}
+
+/* An unfolded sent message scrolls inside the transcript and dissolves the
+ * edges its text runs past (features/agent/prompt-fold.tsx sets
+ * data-more-above / data-more-below), but never its scrollbar: the fade is one
+ * gradient unioned with an opaque strip the width of the scrollbar slot. */
+.zeros-prompt-fold-scroll {
+  --prompt-fold-fade-top: 0px;
+  --prompt-fold-fade-bottom: 0px;
+  mask-image:
+    linear-gradient(
+      to bottom,
+      transparent,
+      black var(--prompt-fold-fade-top),
+      black calc(100% - var(--prompt-fold-fade-bottom)),
+      transparent
+    ),
+    linear-gradient(to left, black var(--scrollbar-size), transparent var(--scrollbar-size));
+  mask-composite: add;
+}
+.zeros-prompt-fold-scroll[data-more-above] {
+  --prompt-fold-fade-top: 2rem;
+}
+.zeros-prompt-fold-scroll[data-more-below] {
+  --prompt-fold-fade-bottom: 2rem;
 }
 
 /* xterm.js (terminal) renders its OWN scrollbar as real DOM nodes
  * (`.xterm-scrollable-element > .scrollbar > .slider`), NOT a
  * `::-webkit-scrollbar` pseudo — so every rule above is powerless against it.
- * Its default slider is a light translucent fill that shows up as a heavy,
- * always-on, near-full-height bar at the terminal's right edge (and bleeds
- * over the chat when a terminal layer sits mounted behind the conversation).
- * Force it to AUTO-HIDE like the rest of the app: invisible at rest, a thin
- * token thumb only while the terminal is hovered. The matching xterm
- * `scrollbarSlider*` theme in terminal-session-view.tsx covers freshly created
- * terminals; this CSS also overrides any already-mounted xterm instance
- * (no reopen needed). `!important` to beat xterm's own injected slider style. */
-[data-Zeros-root] .xterm .xterm-scrollable-element > .scrollbar > .slider {
-  background: transparent !important;
+ * Force it to the app's thumb: invisible at rest, --scrollbar-thumb while the
+ * terminal is hovered, 4px a 1px inset from the right edge of xterm's own 14px
+ * track, and the right 6px under the pointer or while dragged. The track keeps
+ * its width, which the terminal's fit already reserves: sizing it through
+ * overviewRuler.width would also draw that ruler, whose outline defaults to
+ * white. terminal-session-view.tsx gives the `scrollbarSlider*` theme the same
+ * color; this CSS also overrides any already-mounted xterm instance.
+ * `!important` beats xterm's inline slider style. */
+.xterm .xterm-scrollable-element > .scrollbar > .slider {
+  background-color: transparent !important;
 }
-[data-Zeros-root]
-  .xterm
-  .xterm-scrollable-element:hover
-  > .scrollbar
-  > .slider {
-  background: var(--border3) !important;
+.xterm .xterm-scrollable-element:hover > .scrollbar > .slider {
+  background-color: var(--scrollbar-thumb) !important;
+}
+.xterm .xterm-scrollable-element > .scrollbar.vertical > .slider {
+  left: auto !important;
+  right: var(--scrollbar-thumb-inset) !important;
+  width: calc(var(--scrollbar-size) - 2 * var(--scrollbar-thumb-inset)) !important;
+  border-radius: 9999px;
+}
+.xterm .xterm-scrollable-element > .scrollbar.vertical > .slider:hover,
+.xterm .xterm-scrollable-element > .scrollbar.vertical > .slider.active {
+  right: 0 !important;
+  width: var(--scrollbar-size) !important;
 }

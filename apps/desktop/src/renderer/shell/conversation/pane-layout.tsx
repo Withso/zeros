@@ -101,9 +101,7 @@ import {
   clampPaneSplitRatio,
   clearTabDrag,
   growablePaneSurfaceWidth,
-  paneSurfaceMinimumSize,
   paneTreeMinimumSize,
-  splitPaneGutters,
   type PaneTreeMinimumSize,
   usePanePortalsStore,
   useTabDragStore,
@@ -113,6 +111,7 @@ import {
   WORKBENCH_COLUMN_ATTR,
   WORKBENCH_MIN_PX,
 } from "./pane-sizing";
+import { CHAT_ASIDE_INSET_HOST_CLS } from "./conversation-summary";
 
 /** Workbench's live element, reached from any node inside the pane tree. It is
  * the conversation column's sibling in the two-column row. */
@@ -144,15 +143,11 @@ function measureSplitCapacity(surface: HTMLElement | null): {
   const rect = surface.getBoundingClientRect();
   const workbenchWidth =
     workbenchPaneFor(surface)?.getBoundingClientRect().width ?? 0;
-  // Every split tree sits inside the split gutters, so they come out of the
-  // budget before the first split as well as after it.
-  const gutters = splitPaneGutters();
-  const width = rect.width - gutters.width;
   return {
-    containerWidth: width,
-    containerHeight: rect.height - gutters.height,
+    containerWidth: rect.width,
+    containerHeight: rect.height,
     growableWidth: growablePaneSurfaceWidth(
-      width,
+      rect.width,
       workbenchWidth,
       WORKBENCH_MIN_PX,
     ),
@@ -368,7 +363,7 @@ export function ConversationPaneLayout({
 
   const layout = usePaneLayout(layoutFolder);
   const minimumSize = useMemo(
-    () => paneSurfaceMinimumSize(layout.root),
+    () => paneTreeMinimumSize(layout.root),
     [layout.root],
   );
   useLayoutEffect(() => {
@@ -751,7 +746,6 @@ export function ConversationPaneLayout({
   );
 
   const paneCountValue = leafIds(layout.root).length;
-  const split = paneCountValue > 1;
 
   const ctx = useMemo<PaneCtx>(
     () => ({
@@ -847,12 +841,9 @@ export function ConversationPaneLayout({
       <div
         ref={paneSurfaceRef}
         data-pane-layout-surface=""
-        // The chrome: bg1, which shows in a split's gaps and gutters. The side
-        // island sits on the column's edge, so the right gutter is the split's.
-        className={cn(
-          "flex min-h-0 min-w-0 flex-1 bg-bg1",
-          split && "px-3 pb-3",
-        )}
+        // Split or not, the panes run edge to edge; only the divider's line
+        // separates them.
+        className="flex min-h-0 min-w-0 flex-1 bg-bg1"
       >
         <PaneNodeView node={layout.root} ctx={ctx} />
       </div>
@@ -1066,7 +1057,7 @@ function PaneSplitter({
       };
 
       // Lock the cursor + suppress text selection for the gesture, like the
-      // other seams. Without it a fast drag that outruns the 6px strip put an
+      // other seams. Without it a fast drag that outruns the 8px strip put an
       // I-beam over the transcript and started selecting message text.
       document.body.style.cursor = isRow ? "ew-resize" : "ns-resize";
       document.body.style.userSelect = "none";
@@ -1095,15 +1086,25 @@ function PaneSplitter({
       role="separator"
       aria-orientation={isRow ? "vertical" : "horizontal"}
       aria-label="Resize panes"
-      // The 12px gap between the panes is the handle; it draws nothing.
+      // The strip is the handle; w-2 and h-2 are the PANE_SPLITTER_PX the
+      // split math charges for it.
       className={cn(
         "relative z-10 flex shrink-0",
-        isRow ? "w-3 cursor-ew-resize" : "h-3 cursor-ns-resize",
+        isRow ? "w-2 cursor-ew-resize" : "h-2 cursor-ns-resize",
       )}
       onPointerDown={onPointerDown}
       onDoubleClick={resetToBalanced}
       {...hintHandlers}
     >
+      {/* The panes' one seam. The rest of the strip is bg1 like the panes,
+          so they meet at this line; no transform keeps it on whole pixels. */}
+      <div
+        aria-hidden="true"
+        className={cn(
+          "bg-border1 pointer-events-none absolute",
+          isRow ? "inset-y-0 left-1/2 w-px" : "inset-x-0 top-1/2 h-px",
+        )}
+      />
       {hint}
     </div>
   );
@@ -1131,7 +1132,7 @@ function ChatPane({ paneId, ctx }: { paneId: string; ctx: PaneCtx }) {
     setSlot(paneId, { activeChatId: paneActiveChatId });
   }, [paneId, paneActiveChatId, setSlot]);
   // And its focus, so an unfocused split pane's composer folds into its Ask
-  // pill in the same frame the edge and dim change.
+  // pill in the same frame the dim changes.
   const setPaneFocus = usePanePortalsStore((s) => s.setPaneFocus);
   useLayoutEffect(() => {
     setPaneFocus(paneId, { focused: isFocused, split });
@@ -1339,17 +1340,15 @@ function ChatPane({ paneId, ctx }: { paneId: string; ctx: PaneCtx }) {
       ref={rootRef}
       data-pane-root=""
       data-pane-focused={isFocused ? "true" : "false"}
-      // --pane-bg is the window surface, bg1 on every pane. Split panes are
-      // solid shapes on the chrome with every corner rounded, told apart by
-      // their edge rather than their fill: border2 on the focused pane,
-      // border1 elsewhere. An unfocused pane's strip and body (not its edge)
-      // dim to 80%, the owner's choice: fg1 and fg2 stay at WCAG AA, while fg3
-      // in Light and muted-fg in Dark dip below their floors there.
+      // --pane-bg is the window surface, bg1 on every pane, and no pane draws
+      // an edge: split panes run edge to edge, and the divider's line
+      // separates them. An unfocused pane's strip and body dim to 80%, the
+      // owner's choice: fg1 and fg2 stay at WCAG AA, while fg3 in Light and
+      // muted-fg in Dark dip below their floors there.
       className={cn(
         "relative flex min-h-0 min-w-0 flex-1 flex-col bg-(--pane-bg)",
-        split &&
-          "overflow-hidden rounded-[calc(var(--radius-lg)*1.5)] border *:transition-opacity *:duration-120 *:ease-out motion-reduce:*:transition-none",
-        split && (isFocused ? "border-border2" : "border-border1 *:opacity-80"),
+        split && "*:transition-opacity *:duration-120 *:ease-out motion-reduce:*:transition-none",
+        split && !isFocused && "*:opacity-80",
       )}
     >
       <ChatTabs
@@ -1371,10 +1370,10 @@ function ChatPane({ paneId, ctx }: { paneId: string; ctx: PaneCtx }) {
         leading={stripLeading}
         trailing={stripTrailing}
       />
-      <div className="flex min-h-0 min-w-0 flex-1">
+      <div className={cn("relative flex min-h-0 min-w-0 flex-1", CHAT_ASIDE_INSET_HOST_CLS)}>
         <div className="relative min-h-0 min-w-0 flex-1">
           {!paneActiveChatId && ctx.emptyContent && (
-            <div className="absolute inset-0 flex min-h-0 flex-col">
+            <div className="absolute inset-y-0 left-0 right-[var(--chat-aside-inset,0px)] flex min-h-0 flex-col">
               {ctx.emptyContent}
             </div>
           )}

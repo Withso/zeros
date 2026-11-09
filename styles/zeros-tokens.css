@@ -551,6 +551,14 @@
   --border4: hsl(0 0% 34.118%); /* #575757 — highlighted state of border3 */
   /* @generated tokens:base-border1:end */
 
+  /* ── SCROLLBARS ── one thumb for every scroller: 4px at rest inside its
+   * 6px slot, the full 6px under the pointer, and never a color change. */
+  /* @generated tokens:base-scrollbar-thumb:start */
+  --scrollbar-thumb: hsl(0 0% 13.333%); /* #222222 — every scrollbar's thumb, shown while its scroller is hovered or scrolled */
+  --scrollbar-size: 6px; /* 6px — scrollbar slot, and the thumb under the pointer */
+  --scrollbar-thumb-inset: 1px; /* 1px — each side of the resting 4px thumb inside its slot */
+  /* @generated tokens:base-scrollbar-thumb:end */
+
   /* ── ELEVATION ──
    * Lift for floating surfaces (popover / dropdown / context menu).
    * Defined here once so component files reference the token instead of
@@ -851,6 +859,9 @@
   --border3: hsl(33.33 8.108% 78.235%); /* #CCC8C3 — control outline at rest */
   --border4: hsl(36 7.042% 72.157%); /* #BDB9B3 — control outline on hover/open */
   /* @generated tokens:light-border3:end */
+  /* @generated tokens:light-scrollbar-thumb:start */
+  --scrollbar-thumb: hsl(0 0% 91.765%); /* #EAEAEA — every scrollbar's thumb, shown while its scroller is hovered or scrolled */
+  /* @generated tokens:light-scrollbar-thumb:end */
 
   /* ── ELEVATION ── softer, wider wash — a light UI reads shadow
    * against white, so lower alpha than the dark theme's 0.35. */

@@ -38,8 +38,10 @@ export function AgentRemovedPanel({
 }: AgentRemovedPanelProps) {
   const label = agentName?.trim() || agentId;
 
+  // A docked summary island floats over the chat pane's right side; the
+  // padding centres the card beside it (--chat-aside-inset, ChatPane).
   return (
-    <div className="flex h-full w-full items-center justify-center bg-bg1 p-6">
+    <div className="flex h-full w-full items-center justify-center bg-bg1 p-6 pr-[calc(var(--spacing)*6+var(--chat-aside-inset,0px))]">
       <div className="flex w-full max-w-md flex-col items-center gap-5 text-center">
         <div className="flex size-12 items-center justify-center rounded-sm border border-border1 bg-bg2">
           <Bot className="size-6 text-muted-fg" aria-hidden="true" />

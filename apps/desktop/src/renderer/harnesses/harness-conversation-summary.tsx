@@ -27,10 +27,12 @@ import { useChatPanesStore } from "../state/chat-panes-store";
 import { DEFAULT_PANE_LAYOUT, splitLeaf } from "../state/chat-panes";
 import { triggerGitRefresh } from "../shell/use-git-refresh-key";
 import {
+  CHAT_ASIDE_INSET_HOST_CLS,
   ConversationSummaryProvider,
   ConversationSummaryTrigger,
   ConversationSummaryIsland,
 } from "../shell/conversation/conversation-summary";
+import { cn } from "../shared/ui/cn";
 import { WorkspaceHeader } from "../shell/conversation/workspace-header";
 import { isGithubDotComRemote } from "../shell/pr/github-url";
 
@@ -422,7 +424,7 @@ function Harness() {
             workbenchCollapsed={collapsed}
             onRevealWorkbench={reveal}
           >
-            <WorkspaceHeader folder={folder} name={folder === folderB ? "Summary B" : "Summary A"} branch trailing={<>
+            <WorkspaceHeader folder={folder} name={folder === folderB ? "Summary B" : "Summary A"} branch={folder === folderB ? "summary/b" : "summary/a"} trailing={<>
               <ConversationSummaryTrigger />
               {collapsed && (
                 <IconButton
@@ -434,20 +436,28 @@ function Harness() {
                 </IconButton>
               )}
             </>} />
-            <div className="flex min-h-0 min-w-0 flex-1">
-              <div
-                className="flex min-w-0 flex-1 flex-col justify-between p-4"
-                data-testid="chat-body"
-              >
-                <p className="text-fg2 text-xs">
-                  Conversation stays visible beside the Summary.
-                </p>
-                <textarea
-                  ref={composerRef}
-                  aria-label="Message"
-                  placeholder="Send follow up"
-                  className="bg-bg1-highlight border-border1 w-full rounded-lg border p-3"
-                />
+            <div className={cn("relative flex min-h-0 min-w-0 flex-1", CHAT_ASIDE_INSET_HOST_CLS)}>
+              {/* As in the chat pane, the island floats over the transcript's
+                  top-right corner: the scroller runs to the pane's edge, so
+                  its scrollbar sits beside the island, while its padding and
+                  the composer's keep the conversation clear of it. */}
+              <div className="flex min-w-0 flex-1 flex-col">
+                <div
+                  data-testid="chat-scroller"
+                  className="min-h-0 flex-1 overflow-y-auto pr-(--chat-aside-inset)"
+                >
+                  <p data-testid="chat-body" className="text-fg2 p-4 text-xs">
+                    Conversation stays visible beside the Summary.
+                  </p>
+                </div>
+                <div className="p-4 pr-[calc(var(--chat-aside-inset,0px)+var(--spacing)*4)]">
+                  <textarea
+                    ref={composerRef}
+                    aria-label="Message"
+                    placeholder="Send follow up"
+                    className="bg-bg1-highlight border-border1 w-full rounded-lg border p-3"
+                  />
+                </div>
               </div>
               <ConversationSummaryIsland />
             </div>

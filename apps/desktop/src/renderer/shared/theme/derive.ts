@@ -43,6 +43,8 @@ export function applyTheme(
   }
 
   root.setAttribute("data-theme", variant);
+  // styles/semantic-tokens.css sizes the chat's column from this.
+  root.setAttribute("data-chat-width", prefs.chatWidth);
 
   if (themeChanged && typeof window !== "undefined") {
     window.requestAnimationFrame(() => {

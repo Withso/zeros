@@ -25,30 +25,14 @@ export const MIN_PANE_WIDTH = 360;
 /** 40px strip + the 118px resting dock + about three transcript lines; at
  *  160 a split-down pane collapsed the transcript and clipped Send. */
 export const MIN_PANE_HEIGHT = 240;
-/** The divider is the gap between two split panes: 12px of the bg1 chrome that
- *  draws nothing and takes the resize drag. */
-export const PANE_SPLITTER_PX = 12;
-/** While split, the panes sit this far in from the column's left, right and
- *  bottom edges. Workbench's island sits on the column's edge, so the right
- *  gutter is the split's own. A lone pane runs edge to edge. */
-export const PANE_SPLIT_GUTTER_PX = 12;
+/** The divider between two split panes, side by side or stacked: an 8px
+ *  resize strip that draws one 1px border1 line. It is bg1 like the panes, so
+ *  they meet at that line, edge to edge like a lone pane. */
+export const PANE_SPLITTER_PX = 8;
 
 export interface PaneTreeMinimumSize {
   width: number;
   height: number;
-}
-
-/** The space a split tree's gutters take from the pane surface. */
-export function splitPaneGutters(): PaneTreeMinimumSize {
-  return { width: PANE_SPLIT_GUTTER_PX * 2, height: PANE_SPLIT_GUTTER_PX };
-}
-
-/** The pane surface's floor: the tree's own, plus its gutters once split. */
-export function paneSurfaceMinimumSize(root: PaneNode): PaneTreeMinimumSize {
-  const tree = paneTreeMinimumSize(root);
-  if (root.type === "leaf") return tree;
-  const gutters = splitPaneGutters();
-  return { width: tree.width + gutters.width, height: tree.height + gutters.height };
 }
 
 function combinePaneMinimumSizes(
@@ -71,7 +55,7 @@ function combinePaneMinimumSizes(
 /** The physical box required by a persisted split tree. A row adds both
  * child widths; a column only needs the wider child. Keeping this recursive
  * (instead of multiplying the total leaf count) matters for mixed layouts:
- * two vertically stacked chats beside one chat need 732px, not 1104px. */
+ * two vertically stacked chats beside one chat need 728px, not 1096px. */
 export function paneTreeMinimumSize(node: PaneNode): PaneTreeMinimumSize {
   if (node.type === "leaf") {
     return { width: MIN_PANE_WIDTH, height: MIN_PANE_HEIGHT };
@@ -218,7 +202,7 @@ export interface PaneTreeSplitRequest {
  * Workbench's own 200px floor (repository navigation is a fixed 248px and the
  * window itself floors at 840px), so an unconditional "the first right split
  * always fits" offered a split that no layout can honor: two 360px leaves
- * and their gap need 732px, and a minimum-width window can only ever hand the
+ * and their gap need 728px, and a minimum-width window can only ever hand the
  * conversation column 392px. Accepting it produced a clipped row that
  * `clampConversationRatio` then refused to drag back. */
 export function canSplitPaneTree({

@@ -270,24 +270,23 @@ export const TurnPromptHeader = memo(function TurnPromptHeader({
     );
   }
 
-  // Every sent message spans the lane, as the composer does, however short:
-  // the row caps at 800px like the answer lane (turn-event-list.tsx), so it
-  // also holds the hover row's right edge. The text is selectable; editing
-  // uses the hover row's button. A long message folds (prompt-fold.tsx), and
-  // oversized clipboard text still becomes a .txt attachment before send.
+  // A sent message sits at the lane's right edge, as wide as its text up to
+  // 7/8 of the lane, so even a long one reads as the reader's own. The row
+  // caps at the lane like the answers (turn-event-list.tsx) and holds the
+  // hover row's right edge. bg2 with no edge sets it apart from the composer.
+  // The text is selectable; editing uses the hover row's button. A long
+  // message folds (prompt-fold.tsx), and oversized clipboard text still
+  // becomes a .txt attachment before send.
   const AutoIcon = autoAction ? autoActionIcon(autoAction) : null;
   const bubble = (
     <div
       data-user-bubble=""
       className={cn(
-        "w-full min-w-0 cursor-text border px-3 py-2 select-text",
+        "w-fit max-w-7/8 min-w-0 cursor-text px-3 py-2 select-text",
+        // Its pills sit a step lighter than the bubble (semantic-tokens.css).
+        "[--pill-bg:var(--prompt-pill-bg)]",
         PROMPT_SURFACE_RADIUS,
-        autoAction
-          ?
-            "bg-brown-bg text-brown-fg border-transparent font-medium"
-          // The composer's own surface: a sent message reads as the prompt
-          // it was.
-          : COMPOSER_SURFACE_CLS,
+        autoAction ? "bg-brown-bg text-brown-fg font-medium" : "bg-bg2",
       )}
     >
       <PromptFold surfaceActive={surfaceActive}>
@@ -306,11 +305,11 @@ export const TurnPromptHeader = memo(function TurnPromptHeader({
     </div>
   );
   return (
-    <div className="zeros-agent-turn-prompt group/usermsg relative flex w-full max-w-[800px] min-w-0 flex-col">
+    <div className="zeros-agent-turn-prompt group/usermsg relative flex w-full max-w-(--chat-lane) min-w-0 flex-col items-end">
       {localFrom ? (
         // A sender line, as in a chat app: the sending chat's name and logo,
         // right-aligned above its bubble. "Sent from" is for screen readers.
-        <div data-local-from-group="" className="flex w-full min-w-0 flex-col">
+        <div data-local-from-group="" className="flex w-full min-w-0 flex-col items-end">
           <div data-local-from="" className="mb-2 flex max-w-full min-w-0 items-center self-end text-xs">
             <span className="sr-only">Sent from</span>
             <LocalLinkPill href={localFrom.link} fallback={localFrom} appearance="sender" className="shrink" />

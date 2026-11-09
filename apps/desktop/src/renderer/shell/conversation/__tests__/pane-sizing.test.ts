@@ -16,24 +16,20 @@ import {
 import {
   MIN_PANE_WIDTH,
   PANE_SPLITTER_PX,
-  PANE_SPLIT_GUTTER_PX,
   canSplitPaneTree,
   canSplitPaneDimension,
   clampPaneSplitRatio,
   growablePaneSurfaceWidth,
-  paneSurfaceMinimumSize,
   paneTreeHasDirection,
   paneTreeMinimumSize,
   paneTreeMinimumSizeAfterSplit,
-  splitPaneGutters,
 } from "../pane-portal-store";
 import { WORKBENCH_MIN_PX } from "../pane-sizing";
 
-// 2026-11-06 (Zeros Design v391, "Solid split"): split panes stand 12px apart,
-// the divider being that gap, and 12px in from the column's left and bottom
-// edges, and from its right edge when Workbench is not beside it to keep the
-// same 12px with its island. A lone pane runs edge to edge.
-describe("split pane gaps and gutters", () => {
+// 2026-11-09 (Zeros Design v414, "Flush"): split panes run edge to edge like
+// a lone pane. The divider is an 8px resize strip drawing one 1px border1 line,
+// and nothing else takes room from the panes: no gutters.
+describe("split pane divider, without gutters", () => {
   const leaf = (id: string) => ({ type: "leaf" as const, id });
   const pair = (direction: "row" | "column") => ({
     type: "split" as const,
@@ -44,21 +40,15 @@ describe("split pane gaps and gutters", () => {
     second: leaf("b"),
   });
 
-  it("makes the divider the 12px gap between split panes", () => {
-    expect(PANE_SPLITTER_PX).toBe(12);
-    expect(PANE_SPLIT_GUTTER_PX).toBe(12);
+  it("charges the 8px divider and nothing else", () => {
+    expect(PANE_SPLITTER_PX).toBe(8);
+    expect(paneTreeMinimumSize(leaf("only"))).toEqual({ width: 360, height: 240 });
+    expect(paneTreeMinimumSize(pair("row"))).toEqual({ width: 728, height: 240 });
+    expect(paneTreeMinimumSize(pair("column"))).toEqual({ width: 360, height: 488 });
   });
 
-  // The side island sits on the column's edge, so the split keeps its own
-  // right gutter whether or not Workbench is beside it.
-  it("insets a split from the left, right and bottom", () => {
-    expect(splitPaneGutters()).toEqual({ width: 24, height: 12 });
-  });
-
-  // A lone pane runs edge to edge, so the first split down adds the gutters'
-  // width. Zoomed in at the window's minimum width, a surface under 384 CSS px
-  // with Workbench hidden would leave both panes below their 360px floor.
-  it("refuses a down split whose gutters would take its panes below the width floor", () => {
+  // Stacking takes no width, so a lone pane at the width floor can split down.
+  it("offers a down split at the 360px width floor, with or without Workbench beside it", () => {
     const only = leaf("only");
     const downSplit = (width: number, workbenchWidth: number) =>
       canSplitPaneTree({
@@ -69,18 +59,9 @@ describe("split pane gaps and gutters", () => {
         containerHeight: 800,
         growableWidth: growablePaneSurfaceWidth(width, workbenchWidth, WORKBENCH_MIN_PX),
       });
-    // Budgets as measured: the surface less its split gutters.
-    expect(downSplit(370 - 24, 0)).toBe(false);
-    expect(downSplit(384 - 24, 0)).toBe(true);
-    // Beside Workbench the column borrows the 24px from Workbench's slack.
-    expect(downSplit(360 - 24, 400)).toBe(true);
-    expect(downSplit(360 - 24, WORKBENCH_MIN_PX)).toBe(false);
-  });
-
-  it("charges the gutters to the surface's floor only while split", () => {
-    expect(paneSurfaceMinimumSize(leaf("only"))).toEqual({ width: 360, height: 240 });
-    expect(paneSurfaceMinimumSize(pair("row"))).toEqual({ width: 756, height: 252 });
-    expect(paneSurfaceMinimumSize(pair("column"))).toEqual({ width: 384, height: 504 });
+    expect(downSplit(360, 0)).toBe(true);
+    expect(downSplit(360, WORKBENCH_MIN_PX)).toBe(true);
+    expect(downSplit(359, 0)).toBe(false);
   });
 });
 
@@ -156,13 +137,13 @@ describe("chat pane width floors", () => {
     });
     expect(paneTreeMinimumSize(stacked)).toEqual({
       width: 360,
-      height: 492,
+      height: 488,
     });
     expect(paneTreeMinimumSize(mixed)).toEqual({
-      width: 732,
-      height: 492,
+      width: 728,
+      height: 488,
     });
-    expect(paneTreeMinimumSize(threeAcross).width).toBe(1_104);
+    expect(paneTreeMinimumSize(threeAcross).width).toBe(1_096);
   });
 
   it("clamps asymmetric nested children against each subtree's own floor", () => {
@@ -180,11 +161,11 @@ describe("chat pane width floors", () => {
     const root = { type: "leaf" as const, id: "only" };
     expect(paneTreeHasDirection(root, "row")).toBe(false);
     expect(paneTreeMinimumSizeAfterSplit(root, "only", "row")).toEqual({
-      width: 732,
+      width: 728,
       height: 240,
     });
     // 500px surface today, workbench sitting at 500 of which 300 is surrenderable
-    // above its 200px floor → 800px reachable, so the 732px tree fits.
+    // above its 200px floor → 800px reachable, so the 728px tree fits.
     expect(
       canSplitPaneTree({
         root,
@@ -199,7 +180,7 @@ describe("chat pane width floors", () => {
 
   // The bootstrap exception is bounded by REACHABLE space. On a minimum-width
   // window (840 − 248px repository nav = 592px row) workbench is already at its
-  // 200px floor, so the conversation column can never reach 732px: offering the
+  // 200px floor, so the conversation column can never reach 728px: offering the
   // split there produced a clipped row that the seam then refused to drag back.
   it("refuses the first right split when the row can never fit the result", () => {
     const root = { type: "leaf" as const, id: "only" };
@@ -266,7 +247,7 @@ describe("chat pane width floors", () => {
         direction: "row",
         containerWidth: 360,
         containerHeight: 326,
-        growableWidth: growablePaneSurfaceWidth(360, 572, WORKBENCH_MIN_PX),
+        growableWidth: growablePaneSurfaceWidth(360, 568, WORKBENCH_MIN_PX),
       }),
     ).toBe(true);
   });
@@ -282,14 +263,14 @@ describe("chat pane width floors", () => {
     };
     expect(paneTreeHasDirection(root, "row")).toBe(true);
     expect(paneTreeMinimumSizeAfterSplit(root, "left", "row")?.width).toBe(
-      1_104,
+      1_096,
     );
     expect(
       canSplitPaneTree({
         root,
         targetPaneId: "left",
         direction: "row",
-        containerWidth: 1_103.99,
+        containerWidth: 1_095.99,
         containerHeight: 800,
       }),
     ).toBe(false);
@@ -298,7 +279,7 @@ describe("chat pane width floors", () => {
         root,
         targetPaneId: "left",
         direction: "row",
-        containerWidth: 1_104,
+        containerWidth: 1_096,
         containerHeight: 800,
       }),
     ).toBe(true);
@@ -312,7 +293,7 @@ describe("chat pane width floors", () => {
         targetPaneId: "only",
         direction: "column",
         containerWidth: 800,
-        containerHeight: 491.99,
+        containerHeight: 487.99,
       }),
     ).toBe(false);
     expect(
@@ -321,7 +302,7 @@ describe("chat pane width floors", () => {
         targetPaneId: "only",
         direction: "column",
         containerWidth: 800,
-        containerHeight: 492,
+        containerHeight: 488,
       }),
     ).toBe(true);
     expect(
@@ -349,7 +330,7 @@ describe("chat pane width floors", () => {
         root,
         targetPaneId: "target",
         direction: "row",
-        containerWidth: 732,
+        containerWidth: 728,
         containerHeight: 800,
       }),
     ).toBe(false);
@@ -358,7 +339,7 @@ describe("chat pane width floors", () => {
         root,
         targetPaneId: "target",
         direction: "row",
-        containerWidth: 732,
+        containerWidth: 728,
         containerHeight: 800,
         collapsedPaneId: "source",
       }),
@@ -413,8 +394,8 @@ describe("clampConversationRatio", () => {
   });
 
   it("uses the active split tree's wider physical floor", () => {
-    // Two 360px panes side by side, their 12px gap and the 12px left gutter.
-    expect(clampConversationRatio(0.05, 1600, 744)).toBeCloseTo(744 / 1600);
+    // Two 360px panes side by side and the 8px divider between them.
+    expect(clampConversationRatio(0.05, 1600, 728)).toBeCloseTo(728 / 1600);
   });
 
   it("reserves workbench's 200px floor when tighter than the 70% cap", () => {
