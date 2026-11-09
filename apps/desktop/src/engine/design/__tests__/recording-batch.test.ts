@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { designBatchRecordRequestSchema, type DesignBatchRecordReply, type DesignBatchRecordRequest } from "@zeros/protocol/design-capture";
 import { DESIGN_DIRECTORY_NAME, initializeDesignDocument, prepareDesignNavigationFrames, readDesignNavigationSnapshot } from "../document";
 import { designDirectoryNameFor } from "../directory-registry";
@@ -180,6 +180,21 @@ describe("Design recordings", () => {
     const reply = await renderDesignRecordings(root, { workspaceId: "w", directoryId, theme: null, frames }, { record: host.record, recorder: RECORDER });
     expect(host.calls.map((call) => call.items.length)).toEqual([16, 4]);
     expect(reply.recordings.map((recording) => recording.file)).toEqual(files);
+  });
+
+  it("writes each render request's time by phase when asked to", async () => {
+    const file = path.join(root, "timings.jsonl");
+    process.env.ZEROS_DESIGN_RECORDINGS_TIMINGS = file;
+    try {
+      const frames = await versions(["page-1/a.html", "page-1/b.html"]);
+      await renderDesignRecordings(root, { workspaceId: "w", directoryId, theme: null, frames }, { record: recorder().record, recorder: RECORDER });
+      await vi.waitFor(async () => expect((await readFile(file, "utf8")).trim().split("\n")).toHaveLength(1));
+      const line = JSON.parse(await readFile(file, "utf8")) as Record<string, number>;
+      expect(line).toMatchObject({ frames: 2, misses: 2, batches: 1 });
+      for (const phase of ["lookups", "compose", "composeWait", "recordWait", "record", "store", "total"]) expect(line[phase]).toBeGreaterThanOrEqual(0);
+    } finally {
+      delete process.env.ZEROS_DESIGN_RECORDINGS_TIMINGS;
+    }
   });
 
   it("records a frame again after a failure that wasn't permanent", async () => {
