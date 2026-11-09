@@ -162,10 +162,12 @@ export class DesignGpuScene {
     // A theme is part of the owner: the frames this canvas no longer shows
     // stop being recorded for it.
     if (ownerChanged && previous) this.deps.recordings.demand(previous, []);
+    const first = this.input.openKey === "";
     this.input = input;
     this.rows = null;
     if (ownerChanged) this.queue = [];
-    this.deps.stats.open(input.openKey);
+    if (first) this.deps.stats.restart(input.openKey);
+    else this.deps.stats.open(input.openKey);
     this.scheduleDemand(0);
     this.requestPaint();
   }

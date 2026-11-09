@@ -14,7 +14,8 @@ import type { DesignViewport } from "../features/design-workspace/design-canvas-
 import CanvasKitInit from "../features/design-workspace/gpu/canvaskit/canvaskit.js";
 import wasmUrl from "../features/design-workspace/gpu/canvaskit/canvaskit.wasm?url";
 import geistUrl from "@fontsource-variable/geist/files/geist-latin-wght-normal.woff2?url";
-import { createDesignGpuRuntime, useDesignGpuCanvas } from "../features/design-workspace/gpu/design-gpu-canvas";
+import { useDesignGpuCanvas } from "../features/design-workspace/gpu/design-gpu-canvas";
+import { createDesignGpuRuntime } from "../features/design-workspace/gpu/design-gpu-runtime";
 import type { DesignGpuSceneFrame } from "../features/design-workspace/gpu/design-gpu-scene";
 import type { DesignRecordingsSource } from "../features/design-workspace/gpu/design-recordings";
 import type { DesignRecording, DesignRecordingTypeface, DesignRecordingsReadReply,
@@ -137,7 +138,8 @@ const source: DesignRecordingsSource = {
     return { pipeline: "harness-1", recordings, typefaces, chunks, stale: [], failed: [], deferred: [] } satisfies DesignRecordingsReply;
   },
 };
-const runtime = createDesignGpuRuntime(source);
+const runtime = createDesignGpuRuntime(source, () => new Worker(
+  new URL("../features/design-workspace/gpu/design-gpu-raster.worker.ts", import.meta.url), { type: "module" }));
 
 declare global {
   interface Window {

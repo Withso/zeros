@@ -64,6 +64,13 @@ export class DesignGpuStats {
     for (const series of Object.values(this.samples)) series.length = 0;
   }
 
+  /** A newly mounted canvas: even the same page is a new open (a tab return
+   * is a reopen to the person looking at it). */
+  restart(key: string): void {
+    this.reset();
+    this.open(key);
+  }
+
   /** Restarts timing at the next open, for a bench repetition. */
   reset(): void {
     this.openKey = null;

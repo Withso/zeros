@@ -5,53 +5,10 @@ import { isCloudWorkspace } from "../../../platform/bridge/cloud-workspace-key";
 import { bridgeDesignRecordingsRead, bridgeDesignRecordingsRender } from "../../../platform/bridge/design-bridge";
 import { useInternalFeatureActive } from "../../settings/internal-features";
 import { DesignGpuScene, type DesignGpuSceneFrame } from "./design-gpu-scene";
-import { DesignGpuStats, type DesignGpuSnapshot } from "./design-gpu-stats";
-import { DesignGpuWorkerClient } from "./design-gpu-worker-client";
-import { DesignRecordingChunks } from "./design-recording-chunks";
-import { DesignRecordings, type DesignRecordingsOwner, type DesignRecordingsSource } from "./design-recordings";
+import { createDesignGpuRuntime, type DesignGpuRuntime } from "./design-gpu-runtime";
+import type { DesignGpuSnapshot } from "./design-gpu-stats";
+import type { DesignRecordingsOwner, DesignRecordingsSource } from "./design-recordings";
 import { DESIGN_RECORDINGS_CAPABILITY } from "./design-recordings-wire";
-
-/** The raster worker retires this long after the last recorded canvas closes,
- * releasing its WebAssembly heap (which never shrinks while it lives). */
-const WORKER_IDLE_MS = 60_000;
-
-export interface DesignGpuRuntime {
-  readonly recordings: DesignRecordings;
-  readonly chunks: DesignRecordingChunks;
-  readonly stats: DesignGpuStats;
-  acquireClient(): DesignGpuWorkerClient;
-  releaseClient(): void;
-  readonly client: DesignGpuWorkerClient | null;
-}
-
-export function createDesignGpuRuntime(source: DesignRecordingsSource,
-  createWorker: () => Worker = () => new Worker(new URL("./design-gpu-raster.worker.ts", import.meta.url), { type: "module" })): DesignGpuRuntime {
-  const chunks = new DesignRecordingChunks();
-  const recordings = new DesignRecordings({ source, chunks, setTimer: (callback, ms) => setTimeout(callback, ms),
-    clearTimer: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>) });
-  let client: DesignGpuWorkerClient | null = null, holders = 0;
-  let idle: ReturnType<typeof setTimeout> | null = null;
-  return {
-    recordings, chunks, stats: new DesignGpuStats(),
-    get client() { return client; },
-    acquireClient() {
-      if (idle !== null) { clearTimeout(idle); idle = null; }
-      if (!client || client.error) client = new DesignGpuWorkerClient(createWorker);
-      holders++;
-      return client;
-    },
-    releaseClient() {
-      holders = Math.max(0, holders - 1);
-      if (holders || idle !== null) return;
-      idle = setTimeout(() => {
-        idle = null;
-        if (holders) return;
-        client?.dispose();
-        client = null;
-      }, WORKER_IDLE_MS);
-    },
-  };
-}
 
 const bridgeSource: DesignRecordingsSource = {
   read: (owner, frames, knownChunks, signal) => {
@@ -70,7 +27,8 @@ const bridgeSource: DesignRecordingsSource = {
 
 let appRuntime: DesignGpuRuntime | null = null;
 export function designGpuRuntime(): DesignGpuRuntime {
-  return appRuntime ??= createDesignGpuRuntime(bridgeSource);
+  return appRuntime ??= createDesignGpuRuntime(bridgeSource,
+    () => new Worker(new URL("./design-gpu-raster.worker.ts", import.meta.url), { type: "module" }));
 }
 
 /** A removed workspace's recordings leave memory with it. */
