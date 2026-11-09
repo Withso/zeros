@@ -245,8 +245,9 @@ async function main() {
             ops.counts[key] = (ops.counts[key] ?? 0) + 1; ops.bytes[key] = (ops.bytes[key] ?? 0) + data.length;
             // Who sends Design selection writes (stacks map back through the build's source maps).
             if (key.endsWith("design.selection.set")) {
+              Error.stackTraceLimit = 80;
               const stacks = globalThis.__benchSelectionStacks ??= [];
-              if (stacks.length < 12) stacks.push(String(new Error().stack).split("\n").slice(2, 14).join("\n"));
+              if (stacks.length < 12) stacks.push(String(new Error().stack).split("\n").slice(2, 70).join("\n"));
             }
           }
         } catch {}
