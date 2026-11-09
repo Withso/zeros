@@ -575,6 +575,27 @@ async function main() {
         // but keeps the stored ones: the canvas's view right after a restart.
         await phase(`${fixture.name}:reload`);
         await pause(5000);
+        // Bench only: every bridge WebSocket message after the reload: when its
+        // handler ran, when the event was made, its size, the handler's ms, and
+        // whether its text is all ASCII.
+        if (args.includes("--ws-log")) await rawPage.addInitScript(() => {
+          const rows = globalThis.__benchWsRows = [];
+          const proto = WebSocket.prototype, desc = Object.getOwnPropertyDescriptor(proto, "onmessage");
+          Object.defineProperty(proto, "onmessage", { configurable: true, enumerable: desc.enumerable,
+            get() { return desc.get.call(this); },
+            set(fn) {
+              desc.set.call(this, typeof fn !== "function" ? fn : function (event) {
+                const t = performance.now(), data = event.data;
+                const result = fn.call(this, event);
+                const ms = performance.now() - t;
+                const size = typeof data === "string" ? data.length : (data?.byteLength ?? data?.size ?? -1);
+                const ascii = typeof data === "string" ? (size < 64 || !/[^\x00-\x7f]/.test(data) ? 1 : 0) : -1;
+                const head = typeof data === "string" ? data.slice(0, 80).replace(/[^\x20-\x7e]/g, "?") : "";
+                if (rows.length < 20000) rows.push([Math.round(t), Math.round(event.timeStamp), size, Math.round(ms), ascii, size > 100000 ? head : ""]);
+                return result;
+              });
+            } });
+        });
         await rawPage.reload({ waitUntil: "domcontentloaded" });
         // Bench only: every change to the Design viewport's box and the world's
         // camera transform, one sample per display frame, from the reload on.
@@ -701,6 +722,7 @@ async function main() {
           const stopped = await cdp.send("Profiler.stop").catch(() => null);
           if (stopped?.profile) await fs.writeFile(path.join(evidence, `${fixture.name}-reload-profile.cpuprofile`), JSON.stringify(stopped.profile));
         }
+        if (args.includes("--ws-log")) result.reloadWs = await page.evaluate(() => globalThis.__benchWsRows ?? null).catch(error => String(error).slice(0, 200));
         result.reloadOpsTimeline = await page.evaluate(() => (globalThis.__benchReloadOps?.done ?? [])
           .filter(([op]) => op.startsWith("design.")).slice(0, 200)).catch(() => null);
         if (gpu) { result.gpuReloadMs = reopened.coverage.gpuReadyMs ?? null; result.gpuReload = reopened.coverage.gpu ?? null; }
