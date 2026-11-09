@@ -21,6 +21,10 @@ the tool-spacing fixture past the 900px fold, and its hover check,
 `page.mouse.move` at the row's `boundingBox`, hovered nothing: the mouse never
 scrolls. Scroll the row into view first (`scrollIntoViewIfNeeded`).
 
+**A renamed label hides behind data.** The Files tab's new name passed the
+smokes that named it, but the terminal one clicked `tab.title`, still "Open
+file". Grep for the data field too.
+
 **Encoded in.** `core-inline`'s check now compares the indented line with the
 unindented one; it fails with the old hack restored. `expectRowShape` in
 `ui-smoke-tool-presentation.mjs` scrolls each row into view before hovering.

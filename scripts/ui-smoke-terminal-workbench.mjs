@@ -984,7 +984,8 @@ export async function runTerminalWorkbenchSmoke({ page, check }) {
   ).toHaveCount(1);
 
   const fileTab = (await state()).tabs.find((tab) => tab.type === "files");
-  await tabs.getByRole("tab", { name: fileTab.title, exact: true }).click();
+  // The fixed Files tab always reads Files, whatever its stored title.
+  await tabs.getByRole("tab", { name: "Files", exact: true }).click();
   await panel.getByRole("button", { name: "Collapse panel" }).click();
   const startsBeforeShortcut = await page.evaluate(
     () =>
