@@ -5,7 +5,9 @@ import { pathToFileURL } from "node:url";
 import { build } from "esbuild";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { DESIGN_DIRECTORY_NAME, initializeDesignDocument, prepareDesignNavigationFrames, readDesignNavigationSnapshot } from "../document";
+import { designDirectoryNameFor } from "../directory-registry";
 import { designIdentityCacheStatsForTests, resetDesignIdentityCacheForTests } from "../identity-cache";
+import { designDirectoryEntry } from "../metadata";
 import {
   configureDesignPreparationWorkersForTests,
   designPreparationWorkerCount,
@@ -13,6 +15,7 @@ import {
   prepareFrameIdentitiesInWorkers,
   stopDesignPreparationWorkers,
 } from "../preparation-pool";
+import { composeDesignThumbnailBatches } from "../thumbnail-batch";
 
 const PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
 
@@ -93,6 +96,25 @@ describe("Design preparation workers", () => {
     const hits = designIdentityCacheStatsForTests().hits;
     expect(await prepareDesignNavigationFrames(root, navigation.catalogRevision, files)).toEqual(single);
     expect(designIdentityCacheStatsForTests().hits - hits).toBe(files.length);
+  }, 60_000);
+
+  it("composes capture batches on workers byte for byte as the engine's own thread does", async () => {
+    const navigation = await readDesignNavigationSnapshot(root);
+    const prepared = await prepareDesignNavigationFrames(root, navigation.catalogRevision, files);
+    const frames = prepared.frames.map(({ file, sourceVersion }) => ({ file, sourceVersion: sourceVersion! }));
+    const input = { workspaceId: "w", directoryId: designDirectoryEntry(root, designDirectoryNameFor(root))!.id, theme: null,
+      colorScheme: "light" as const, maxDimension: 256, frames };
+    // Each request carries a fresh random revision; everything else must match.
+    const comparable = (result: Awaited<ReturnType<typeof composeDesignThumbnailBatches>>) => ({ ...result,
+      batches: result.batches.map(({ request, frames: items }) => ({ request: { ...request, revision: "" }, frames: [...items] })) });
+    const single = comparable(await composeDesignThumbnailBatches(root, input));
+    expect(single.failed).toEqual([]);
+    expect(single.batches.flatMap((batch) => batch.request.items)).toHaveLength(files.length);
+    configureDesignPreparationWorkersForTests(2, { workerUrl: bundle.url });
+    const before = designPreparationWorkerStatsForTests().composed;
+    const pooled = comparable(await composeDesignThumbnailBatches(root, input));
+    expect(designPreparationWorkerStatsForTests().composed - before).toBe(files.length);
+    expect(pooled).toEqual(single);
   }, 60_000);
 
   it("keeps the workers of a batch in flight when the previous batch's idle deadline passes", async () => {
