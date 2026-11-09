@@ -4,7 +4,7 @@ import {
   nativeDesignIdentityBase,
 } from "@zeros/design-web";
 import type { DefaultTreeAdapterTypes } from "parse5";
-import { parseDesignSource, sharedDesignDerivation } from "./shared-parse";
+import { claimDesignParse, parseDesignSource, shareDesignParse, sharedDesignDerivation } from "./shared-parse";
 import { elementRecords, type ElementRecord } from "./source";
 
 const NON_DESIGN_NODE_TAGS = new Set([
@@ -154,7 +154,8 @@ export interface DesignOidHealing {
   html: string;
   changed: boolean;
   fixed: Array<{ kind: "missing" | "duplicate"; line: number; oid: string }>;
-  /** The parse of an unchanged source, so a caller need not parse it again. */
+  /** The parse of `html`, exactly as parsing it would build it, so a caller
+   * need not parse it again. */
   document?: DefaultTreeAdapterTypes.Document;
 }
 
@@ -169,7 +170,7 @@ function healUnshared(source: string): DesignOidHealing {
   const document = parseDesignSource(source);
   const records = designNodeRecords(document);
   const used = new Set<string>();
-  const edits: Array<{ start: number; end: number; text: string }> = [];
+  const edits: HealEdit[] = [];
   const fixed: Array<{
     kind: "missing" | "duplicate";
     line: number;
@@ -204,6 +205,8 @@ function healUnshared(source: string): DesignOidHealing {
           start: attrLocation.startOffset,
           end: attrLocation.endOffset,
           text: `${original}="${oid}"`,
+          element: record.element,
+          oid,
         });
         fixed.push({
           kind: duplicate ? "duplicate" : "missing",
@@ -233,6 +236,8 @@ function healUnshared(source: string): DesignOidHealing {
         start: attrLocation.startOffset,
         end: attrLocation.endOffset,
         text: replacement,
+        element: record.element,
+        oid,
       });
       fixed.push({
         kind: duplicate ? "duplicate" : "missing",
@@ -252,6 +257,8 @@ function healUnshared(source: string): DesignOidHealing {
         start: offset,
         end: offset,
         text: ` data-oid="${oid}"`,
+        element: record.element,
+        oid,
       });
       fixed.push({ kind: "missing", line: startTag.startLine, oid });
     }
@@ -264,5 +271,122 @@ function healUnshared(source: string): DesignOidHealing {
   }
   parts.push(source.slice(offset));
   const html = parts.join("");
-  return { html, changed: edits.length > 0, fixed, ...(edits.length > 0 ? {} : { document }) };
+  if (edits.length === 0) return { html, changed: false, fixed, document };
+  // The healed text parses to this tree with the ids set: patch it instead
+  // of parsing the healed text again, when no edit can change how anything
+  // else in the document tokenizes.
+  const patch = healedTreePatch(source, edits);
+  if (patch && claimDesignParse(source, document)) {
+    applyHealedTreePatch(document, html, edits, patch);
+    shareDesignParse(html, document);
+    return { html, changed: true, fixed, document };
+  }
+  return { html, changed: true, fixed };
+}
+
+interface HealEdit {
+  start: number;
+  end: number;
+  text: string;
+  element: DefaultTreeAdapterTypes.Element;
+  oid: string;
+}
+
+type LocationPoint = { startLine: number; startCol: number; startOffset: number; endLine: number; endCol: number; endOffset: number };
+
+/** Whether the healed text tokenizes like the source but for the ids. An
+ * insertion goes before a start tag's ">" or "/" and must not split an
+ * attribute (an unquoted value may end in "/"); no edit may add or remove a
+ * line, so lines and earlier columns hold. Returns each edit's shift. */
+function healedTreePatch(source: string, edits: readonly HealEdit[]): number[] | null {
+  if (source.includes("\r")) return null;
+  const deltas: number[] = [];
+  for (const edit of edits) {
+    if (!/^[A-Za-z0-9_-]+$/.test(edit.oid) || edit.text.includes("\n") || source.slice(edit.start, edit.end).includes("\n")) return null;
+    const location = edit.element.sourceCodeLocation;
+    if (!location?.startTag) return null;
+    if (edit.start === edit.end) {
+      if (source[edit.start] !== ">" && source[edit.start] !== "/") return null;
+      if (edit.element.attrs.some((attribute) => attribute.name === "data-oid")) return null;
+      for (const range of Object.values(location.attrs ?? {}))
+        if (range.startOffset < edit.start && edit.start < range.endOffset) return null;
+    } else if (location.attrs?.["data-oid"]?.startOffset !== edit.start || location.attrs["data-oid"].endOffset !== edit.end ||
+      !edit.element.attrs.some((attribute) => attribute.name === "data-oid")) {
+      return null;
+    }
+    deltas.push(edit.text.length - (edit.end - edit.start));
+  }
+  return deltas;
+}
+
+function applyHealedTreePatch(document: DefaultTreeAdapterTypes.Document, html: string, edits: readonly HealEdit[], deltas: readonly number[]): void {
+  // A position past an insertion point, or at or past a replaced range's
+  // end, moves. Edits are sorted and disjoint, so those form a prefix.
+  const thresholds = edits.map((edit) => edit.start === edit.end ? edit.start : edit.end - 1);
+  const moved = [0];
+  for (const delta of deltas) moved.push(moved.at(-1)! + delta);
+  const offset = (position: number) => {
+    let low = 0, high = thresholds.length;
+    while (low < high) {
+      const middle = (low + high) >> 1;
+      if (thresholds[middle]! < position) low = middle + 1;
+      else high = middle;
+    }
+    return position + moved[low]!;
+  };
+  const lineStarts = [0];
+  for (let at = html.indexOf("\n"); at >= 0; at = html.indexOf("\n", at + 1)) lineStarts.push(at + 1);
+  const shift = (point: LocationPoint) => {
+    point.startOffset = offset(point.startOffset);
+    point.startCol = point.startOffset - lineStarts[point.startLine - 1]! + 1;
+    point.endOffset = offset(point.endOffset);
+    point.endCol = point.endOffset - lineStarts[point.endLine - 1]! + 1;
+  };
+  const seen = new Set<object>();
+  const visit = (node: DefaultTreeAdapterTypes.ChildNode | DefaultTreeAdapterTypes.Document | DefaultTreeAdapterTypes.DocumentFragment) => {
+    const location = (node as { sourceCodeLocation?: (LocationPoint & {
+      startTag?: LocationPoint & { attrs?: Record<string, LocationPoint> }; endTag?: LocationPoint; attrs?: Record<string, LocationPoint>;
+    }) | null }).sourceCodeLocation;
+    if (location) {
+      for (const point of [location, location.startTag, location.endTag, ...Object.values(location.attrs ?? {}),
+        ...Object.values(location.startTag?.attrs ?? {})]) {
+        if (!point || seen.has(point)) continue;
+        seen.add(point);
+        shift(point);
+      }
+    }
+    if ("content" in node && node.content) visit(node.content);
+    if ("childNodes" in node) for (const child of node.childNodes) visit(child);
+  };
+  visit(document);
+  for (const edit of edits) {
+    const location = edit.element.sourceCodeLocation!;
+    const existing = edit.element.attrs.find((attribute) => attribute.name === "data-oid");
+    if (existing) {
+      existing.value = edit.oid;
+      continue;
+    }
+    // ` data-oid="…"` starts where its insertion point moved to, on the
+    // line that point was on.
+    const at = offset(edit.start);
+    const startOffset = at + 1, endOffset = at + edit.text.length;
+    let low = 0, high = lineStarts.length - 1;
+    while (low < high) {
+      const middle = (low + high + 1) >> 1;
+      if (lineStarts[middle]! <= startOffset) low = middle;
+      else high = middle - 1;
+    }
+    const line = low + 1;
+    const range: LocationPoint = { startLine: line, startCol: startOffset - lineStarts[line - 1]! + 1, startOffset,
+      endLine: line, endCol: endOffset - lineStarts[line - 1]! + 1, endOffset };
+    edit.element.attrs.push({ name: "data-oid", value: edit.oid });
+    // parse5 shares one attribute range map between the element and its
+    // start tag, made on the tag's first attribute.
+    const startTag = location.startTag as LocationPoint & { attrs?: Record<string, LocationPoint> };
+    const element = location as unknown as { attrs?: Record<string, LocationPoint> };
+    const attrs = element.attrs ?? startTag.attrs ?? (Object.create(null) as Record<string, LocationPoint>);
+    element.attrs = attrs;
+    startTag.attrs = attrs;
+    attrs["data-oid"] = range;
+  }
 }

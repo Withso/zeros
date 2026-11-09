@@ -449,9 +449,10 @@ describe("design document", () => {
     expect(first.html.match(/\bdata-oid\b/g)).toHaveLength(2);
     expect(first.html).not.toMatch(/data-oid(?:\s|>)/);
     expect(second).toMatchObject({ html: first.html, changed: false, fixed: [] });
-    // Only an unchanged source hands back its parse for reuse.
+    // Healing hands back the parse of the text it returns: here the source's
+    // own tree with the ids and locations moved, exactly as parsing builds it.
     expect(second.document).toBeDefined();
-    expect(first.document).toBeUndefined();
+    expect(first.document).toEqual(parse(first.html, { sourceCodeLocationInfo: true }));
   });
 
   it("reports a blank data-oid exactly once before healing", async () => {
