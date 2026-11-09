@@ -576,6 +576,24 @@ async function main() {
         await phase(`${fixture.name}:reload`);
         await pause(5000);
         await rawPage.reload({ waitUntil: "domcontentloaded" });
+        // Bench only: every change to the Design viewport's box and the world's
+        // camera transform, one sample per display frame, from the reload on.
+        await page.evaluate(() => {
+          const log = globalThis.__benchLayoutLog = [];
+          const start = performance.now();
+          let last = "";
+          const tick = () => {
+            const viewports = [...document.querySelectorAll("[data-design-canvas-viewport]")].map((element) => {
+              const box = element.getBoundingClientRect();
+              return `${Math.round(box.width)}x${Math.round(box.height)}@${Math.round(box.left)},${Math.round(box.top)}`;
+            }).join("|");
+            const worlds = [...document.querySelectorAll("[data-design-canvas-world]")].map((element) => element.style.transform).join("|");
+            const key = `${viewports} ${worlds}`;
+            if (key !== last) { last = key; log.push([Math.round(performance.now() - start), viewports, worlds]); }
+            if (log.length < 400 && performance.now() - start < 10_000) requestAnimationFrame(tick);
+          };
+          requestAnimationFrame(tick);
+        }).catch(() => {});
         await waitForNativeRenderer(page, async () =>
           (await import("/apps/desktop/src/renderer/platform/bridge/active-bridge.ts")).getActiveBridge()?.status === "connected", undefined, 60_000);
         // Name every bridge request (op, duration, outcome) after the reload: the
@@ -650,6 +668,9 @@ async function main() {
           reopened = await open(fixture);
         }
         result.reloadReadyMs = reopened.ms; result.reloadCoverage = reopened.coverage; result.reloadOps = await opsSummary();
+        result.reloadLayout = await page.evaluate(() => globalThis.__benchLayoutLog ?? null).catch(() => null);
+        result.reloadOpsTimeline = await page.evaluate(() => (globalThis.__benchReloadOps?.done ?? [])
+          .filter(([op]) => op.startsWith("design.")).slice(0, 200)).catch(() => null);
         if (gpu) { result.gpuReloadMs = reopened.coverage.gpuReadyMs ?? null; result.gpuReload = reopened.coverage.gpu ?? null; }
         result.enginePidsAfterReload = (await run("ps", ["-axo", "pid=,ppid=,comm="])).split("\n").map(row => row.trim().match(/^(\d+)\s+(\d+)\s+(.*)$/))
           .filter(row => row && Number(row[2]) === mainPid && row[3].includes("zeros-engine-")).map(row => Number(row[1]));
