@@ -117,6 +117,11 @@ export function designLayerCount(
  * broad `[data-oid]` reset can no longer reveal head content or expose
  * document plumbing as selectable layers. */
 export function stripNonDesignOidsForRender(source: string): string {
+  return stripNonDesignOids(source).html;
+}
+
+/** The stripped render and the exact text each removal took out. */
+export function stripNonDesignOids(source: string): { html: string; removed: string[] } {
   const document = parseDesignSource(source);
   const edits: Array<{ start: number; end: number }> = [];
   for (const { element } of elementRecords(document)) {
@@ -134,7 +139,7 @@ export function stripNonDesignOidsForRender(source: string): string {
   for (const edit of edits.sort((left, right) => right.start - left.start)) {
     rendered = `${rendered.slice(0, edit.start)}${rendered.slice(edit.end)}`;
   }
-  return rendered;
+  return { html: rendered, removed: edits.map(({ start, end }) => source.slice(start, end)) };
 }
 
 function oidForElement(
