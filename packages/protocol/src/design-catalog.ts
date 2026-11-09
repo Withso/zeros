@@ -12,8 +12,8 @@ import {
 
 export const DESIGN_CATALOG_READ_CAPABILITY = "design.catalog.read.v1";
 export const DESIGN_CATALOG_READ_OPERATION = "design.catalog.read";
-export const DESIGN_CATALOG_BATCH_ENTRIES = 256;
-export const DESIGN_CATALOG_BATCH_BYTES = 256 * 1024;
+export const DESIGN_CATALOG_BATCH_ENTRIES = 4096;
+export const DESIGN_CATALOG_BATCH_BYTES = 1024 * 1024;
 /** Every admissible directory fits; byte budgets bound what a read retains. */
 export const DESIGN_CATALOG_DESCRIPTOR_LIMIT =
   DESIGN_MAX_PAGES * DESIGN_MAX_FRAMES_PER_PAGE;
