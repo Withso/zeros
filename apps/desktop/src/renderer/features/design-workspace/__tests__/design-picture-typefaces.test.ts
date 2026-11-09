@@ -96,6 +96,20 @@ describe("Externalized typefaces in recorded pictures", () => {
     expect(internalizeDesignPictureTypefaces(external, () => null)).toBeNull();
   });
 
+  it("uses a caller's content ids, so a recorder can skip hashing fonts it has seen", async () => {
+    const skp = textPicture({ nested: true });
+    const expected = createHash("sha256").update(geist).digest("hex").slice(0, 32);
+    const seen: number[] = [];
+    const cached = await externalizeDesignPictureTypefaces(skp, {
+      contentId: async (bytes) => { seen.push(bytes.length); return expected; },
+    });
+    // Both records of the font asked once each; the default hashes the same.
+    expect(seen).toEqual([geist.byteLength, geist.byteLength]);
+    expect(cached.typefaces.map((typeface) => typeface.id)).toEqual([expected]);
+    const hashed = await externalizeDesignPictureTypefaces(skp);
+    expect(Buffer.from(cached.skp).equals(Buffer.from(hashed.skp))).toBe(true);
+  });
+
   it("names every record of one font file by the same id, nested pictures included", async () => {
     const nested = textPicture({ nested: true });
     const records = inspectDesignPictureTypefaces(nested);
