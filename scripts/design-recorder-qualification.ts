@@ -32,6 +32,7 @@ import { designDirectoryEntry } from "../apps/desktop/src/engine/design/metadata
 import { designBatchRecordRequestFrom, renderDesignRecordings } from "../apps/desktop/src/engine/design/recording-batch";
 import { insertDesignHeadMarkup, sanitizeDesignFrameMarkup } from "../apps/desktop/src/engine/design/source";
 import { composeDesignThumbnailBatches } from "../apps/desktop/src/engine/design/thumbnail-batch";
+import { internalizeDesignPictureTypefaces } from "../apps/desktop/shared/design-picture-typefaces";
 
 const env = process.env;
 const WORKSPACE = env.ZEROS_QUALIFY_WORKSPACE!, RECORDER = env.ZEROS_QUALIFY_RECORDER!, CANVASKIT = env.ZEROS_QUALIFY_CANVASKIT!, OUT = env.ZEROS_QUALIFY_OUT!;
@@ -124,7 +125,13 @@ void app.whenReady().then(async () => {
           const frame = batch.frames.get(item.id)!;
           const source = request.items.find((entry) => entry.id === item.id)!;
           if ("error" in item) { (report.frames as unknown[]).push({ file: frame.file, error: item.error }); console.log(`${frame.file} ERROR ${item.error}`); continue; }
-          const bytes = await readFile(item.layers[0]!.path);
+          const layer = item.layers[0]!;
+          const recorded = new Uint8Array(await readFile(layer.path));
+          // Stock CanvasKit reads embedded fonts only: put the fonts back.
+          const fonts = new Map<string, Uint8Array>();
+          for (const typeface of layer.typefaces) fonts.set(typeface.id, new Uint8Array(await readFile(typeface.path)));
+          const bytes = layer.typefaces.length ? internalizeDesignPictureTypefaces(recorded, (id) => fonts.get(id)) : recorded;
+          if (!bytes) { failed = true; (report.frames as unknown[]).push({ file: frame.file, error: "A referenced font is missing." }); continue; }
           const picture = CK.MakePicture(bytes);
           if (!picture) { failed = true; (report.frames as unknown[]).push({ file: frame.file, error: "CanvasKit could not read the recording." }); continue; }
           const { png, ratio } = await reference(source.html, request.stylesheets, source.viewport);
@@ -140,10 +147,10 @@ void app.whenReady().then(async () => {
           const expected = pixels((c) => c.drawImage(decoded, 0, 0));
           const actual = pixels((c) => c.drawPicture(picture));
           const diff = compare(expected, actual, width, height);
-          const row = { file: frame.file, bytes: bytes.length, share: diff.share, flatPixels: diff.flat, scale: item.scale };
+          const row = { file: frame.file, bytes: bytes.length, recordedBytes: recorded.length, typefaces: layer.typefaces.length, share: diff.share, flatPixels: diff.flat, scale: item.scale };
           (report.frames as unknown[]).push(row);
           if (diff.share > MAX_DIFF) failed = true;
-          console.log(`${frame.file} ${(bytes.length / 1024).toFixed(0)} KB diff=${(diff.share * 100).toFixed(3)}% flat=${diff.flat}${diff.share > MAX_DIFF ? "  <-- OVER" : ""}`);
+          console.log(`${frame.file} ${(bytes.length / 1024).toFixed(0)} KB -> ${(recorded.length / 1024).toFixed(0)} KB (${layer.typefaces.length} fonts) diff=${(diff.share * 100).toFixed(3)}% flat=${diff.flat}${diff.share > MAX_DIFF ? "  <-- OVER" : ""}`);
           decoded.delete(); surface.delete(); picture.delete();
         }
       }
