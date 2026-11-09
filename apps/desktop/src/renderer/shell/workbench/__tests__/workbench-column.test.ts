@@ -24,6 +24,13 @@ describe("side column", () => {
     expect(pane).toEqual(expect.arrayContaining(["border-l", "border-border1", "bg-bg1"]));
   });
 
+  // 2026-11-09: a 1px border1 separator runs under the tab row, inside its
+  // 40px, from the seam to the window's right edge.
+  it("separates the tab row from the open tab with a 1px border1 line, keeping the row 40px", () => {
+    const header = classConstant(read("workbench-pane.tsx"), "WORKBENCH_HEADER_CLS");
+    expect(header).toEqual(expect.arrayContaining(["h-10", "border-b", "border-border1"]));
+  });
+
   it("holds the open tab flush under the tab row: no inset, corner or edge of its own", () => {
     const body = classConstant(read("workbench-pane.tsx"), "WORKBENCH_BODY_CLS");
     expect(body).toEqual(["flex", "min-h-0", "flex-1", "flex-col", "overflow-hidden"]);

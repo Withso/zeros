@@ -198,7 +198,8 @@ const RetainedBrowserView = React.memo(function RetainedBrowserView({
 // chat strip's trailing slot while it is collapsed, and it must not shift as
 // ownership changes hands. It stays borderless: second-row chrome owns any
 // separator it needs (Files' viewer toolbar or a created PR's framed status row).
-const WORKBENCH_HEADER_CLS = "flex h-10 shrink-0 items-center gap-1 pr-2";
+// The tab row ends on a 1px border1 separator above the open tab.
+const WORKBENCH_HEADER_CLS = "border-border1 flex h-10 shrink-0 items-center gap-1 border-b pr-2";
 
 // Workbench fills the height terminal panel leaves. The seam resizer enforces a usable
 // pixel floor while dragging; min-h-0 lets flex resize it without overflow.

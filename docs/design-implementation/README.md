@@ -1273,3 +1273,9 @@ Each landed step appends one line: date, workstream, what landed, evidence.
   and workbench-column tests failed red first; the chat-surfaces smoke
   measures the seam, the divider lines, zero gutters, square edgeless panes
   and the dims in both themes, with the side column shown and hidden.
+- 2026-11-09 · 5, 6 · The side column's tab row ends on a 1px `border1`
+  separator above the open tab, inside its 40px, from the seam to the
+  window's right edge (`docs/design-system.md` §0 item 13; canvas version
+  416). The chat's workspace header keeps no divider. Evidence: the
+  workbench-column test failed red first; the chat-surfaces smoke measures
+  the separator and the row's 40px in both themes.

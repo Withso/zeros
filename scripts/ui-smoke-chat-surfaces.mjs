@@ -22,7 +22,8 @@ export async function runChatSurfacesSmoke({ page, check, harnessBase }) {
 
   // Side column (2026-11-09, flush): its tab row and the open tab fill the
   // column to the window's right and bottom edges, and its 1px border1 left
-  // edge is the seam the chat's resize handle meets.
+  // edge is the seam the chat's resize handle meets. A 1px border1 separator
+  // ends the 40px tab row.
   await expect(page.locator("[data-workbench-body]")).toBeVisible();
   // Each pass's resolved bg1 must differ, or the theme never switched.
   const columnBg1 = [];
@@ -41,7 +42,9 @@ export async function runChatSurfacesSmoke({ page, check, harnessBase }) {
       };
       const node = document.querySelector("[data-zeros-column-3]");
       const body = node.querySelector("[data-workbench-body]");
-      const header = node.querySelector('[data-testid="workbench-header"]').getBoundingClientRect();
+      const headerNode = node.querySelector('[data-testid="workbench-header"]');
+      const header = headerNode.getBoundingClientRect();
+      const headerStyle = getComputedStyle(headerNode);
       const firstTab = node.querySelector('[role="tablist"][aria-label="Workspace panels"] [role="tab"]').getBoundingClientRect();
       const outer = node.getBoundingClientRect();
       const columnStyle = getComputedStyle(node);
@@ -51,6 +54,8 @@ export async function runChatSurfacesSmoke({ page, check, harnessBase }) {
         bg1: rgb("var(--bg1)"),
         border1: rgb("var(--border1)"),
         seam: [columnStyle.borderLeftWidth, columnStyle.borderLeftColor],
+        separator: [headerStyle.borderBottomWidth, headerStyle.borderBottomColor],
+        headerHeight: header.height,
         handleRight: document.querySelector('[role="separator"][aria-label="Resize chat panel"]').getBoundingClientRect().right,
         columnLeft: outer.left,
         insets: [rect.left - outer.left, outer.right - rect.right, outer.bottom - rect.bottom, rect.top - header.bottom],
@@ -61,6 +66,8 @@ export async function runChatSurfacesSmoke({ page, check, harnessBase }) {
       };
     });
     expect(column.seam).toEqual(["1px", column.border1]);
+    expect(column.separator).toEqual(["1px", column.border1]);
+    expect(column.headerHeight).toBe(40);
     // Inside the seam the body touches every edge of the column and the header.
     expect(column.insets.map(Math.round)).toEqual([1, 0, 0, 0]);
     // The chat's resize handle ends on the seam.
@@ -72,7 +79,7 @@ export async function runChatSurfacesSmoke({ page, check, harnessBase }) {
     columnBg1.push(column.bg1);
   }
   expect(new Set(columnBg1).size).toBe(2);
-  check("Side column: flush to the window's right and bottom edges on a 1px border1 seam the chat's resize handle meets, the open tab with no inset, corner or edge, the first tab 8px in, in Dark and Light", true);
+  check("Side column: flush to the window's right and bottom edges on a 1px border1 seam the chat's resize handle meets, a 1px border1 separator under its 40px tab row, the open tab with no inset, corner or edge, the first tab 8px in, in Dark and Light", true);
 
   // 2026-11-09: the fixed tabs are text only and the Files home reads Files;
   // a closable tab such as Setup keeps its glyph (its hover ✕ is a button).

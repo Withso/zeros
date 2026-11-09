@@ -220,7 +220,8 @@ exported page by page to [design-implementation/](design-implementation/README.m
     70px to 176px. The side column runs flush too, as it did from 2026-07-11:
     its tab row and the open tab fill the column to the window's right and
     bottom edges, with no inset, corner or edge of their own (a canvas
-    `Surface`, whose contents keep `border1`); its 1px `border1` left edge is
+    `Surface`, whose contents keep `border1`) apart from the 1px `border1`
+    separator that ends the 40px tab row; its 1px `border1` left edge is
     the one seam against the chat and the line the chat's resize handle meets;
     and the first tab starts 8px in. This replaces the side island, the soft
     valleys tried on 2026-11-06 and the unfocused pane's `sidebar-bg` fill.
