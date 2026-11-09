@@ -96,8 +96,8 @@ describe("Design recordings", () => {
       expect(bytes.length).toBe(recording.layers[0]!.bytes);
       expect(bytes.subarray(0, 8).toString()).toBe("skiapict");
     }
-    // The host's single-use files are gone once stored.
-    for (const dir of recorderFolders) await expect(stat(path.join(dir, "f0"))).rejects.toThrow();
+    // The host's single-use files are gone once stored, batch folder included.
+    for (const dir of recorderFolders) await expect(stat(dir)).rejects.toThrow();
 
     const second = await renderDesignRecordings(root, { workspaceId: "w", directoryId, theme: null, frames, knownChunks: [...sent.keys()] }, { record: host.record, recorder: RECORDER });
     expect(host.calls).toHaveLength(1);

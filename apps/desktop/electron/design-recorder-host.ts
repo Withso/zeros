@@ -13,6 +13,7 @@
 import { app, BrowserWindow, protocol, session, type Session } from "electron";
 import { createServer } from "node:http";
 import { randomUUID, timingSafeEqual } from "node:crypto";
+import { rmSync } from "node:fs";
 import { appendFile, mkdir, mkdtemp, open, readdir, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -25,7 +26,7 @@ import {
   type DesignBatchRecordReply,
   type DesignBatchRecordRequest,
 } from "@zeros/protocol/design-capture";
-import { designCaptureFramePolicy } from "../src/engine/design/capture-sheet";
+import { DESIGN_CAPTURE_FRAME_CSP, designCaptureFramePolicy } from "../src/engine/design/capture-sheet";
 import { insertDesignHeadMarkup, sanitizeDesignFrameMarkup } from "../src/engine/design/source";
 import { designRecorderFrameGuard } from "./design-recorder-frame";
 import { DESIGN_RECORDER_PREPARE_SCRIPT } from "./design-recorder-scripts";
@@ -57,9 +58,16 @@ protocol.registerSchemesAsPrivileged([{
   privileges: { standard: true, secure: true, supportFetchAPI: false, stream: false, corsEnabled: false },
 }]);
 app.on("window-all-closed", () => {});
-// The parent holds this pipe open for this process's whole life.
-process.stdin.on("end", () => app.exit(0));
-process.stdin.on("error", () => app.exit(0));
+/** This session's pictures and fonts; nothing in it outlives the process. */
+let sessionRoot: string | null = null;
+// The parent holds this pipe open for this process's whole life. app.exit
+// skips will-quit, so the session's folder is removed here, synchronously.
+const exit = () => {
+  if (sessionRoot) try { rmSync(sessionRoot, { recursive: true, force: true }); } catch { /* the parent removes it on exit */ }
+  app.exit(0);
+};
+process.stdin.on("end", exit);
+process.stdin.on("error", exit);
 process.stdin.resume();
 
 function isolatedPartition(): { partition: Session; documents: Map<string, string>; stylesheets: Map<string, string> } {
@@ -78,7 +86,9 @@ function isolatedPartition(): { partition: Session; documents: Map<string, strin
     const css = url.hostname === "css" ? stylesheets.get(key) : undefined;
     if (css !== undefined) return new Response(css, { headers: { "Content-Type": "text/css; charset=utf-8", "Cache-Control": "max-age=31536000, immutable" } });
     const html = url.hostname === "sheet" ? documents.get(key) : undefined;
-    if (html !== undefined) return new Response(html, { headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" } });
+    // The header holds whatever the document's own markup does before its policy meta tag.
+    if (html !== undefined) return new Response(html, { headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store",
+      "Content-Security-Policy": DESIGN_CAPTURE_FRAME_CSP } });
     return new Response("", { status: 404 });
   });
   return { partition, documents, stylesheets };
@@ -169,11 +179,13 @@ async function recordItem(slot: Slot, documents: Map<string, string>, item: Desi
     await whileAlive(contents.executeJavaScript(`chrome.gpuBenchmarking.printToSkPicture(${JSON.stringify(directory)})`));
     step("print");
     const layers = (await whileAlive(readdir(directory))).filter((name) => /^layer_\d+\.skp$/.test(name));
-    if (layers.length === 0) return { id: item.id, error: "The recorder produced no picture for this frame." };
+    // Only a recorded frame's folder is handed to the engine, which removes it.
+    if (layers.length === 0) { await rm(directory, { recursive: true, force: true }); return { id: item.id, error: "The recorder produced no picture for this frame." }; }
     // Without positions for extra layers the picture would be incomplete;
     // such a frame keeps its bitmap preview instead.
     if (layers.length > 1) {
       const sizes = await Promise.all(layers.map(async (name) => pictureSize(path.join(directory, name))));
+      await rm(directory, { recursive: true, force: true });
       return { id: item.id, error: `This frame paints on ${layers.length} composited layers (${sizes.join(", ")}), so it is shown as a picture.`.slice(0, 500) };
     }
     const picture = path.join(directory, layers[0]!);
@@ -191,6 +203,7 @@ async function recordItem(slot: Slot, documents: Map<string, string>, item: Desi
 void app.whenReady().then(async () => {
   app.dock?.hide();
   const root = await mkdtemp(path.join(os.tmpdir(), DESIGN_RECORDER_FOLDER_PREFIX));
+  sessionRoot = root;
   const typefaceFolder = path.join(root, "typefaces");
   await mkdir(typefaceFolder, { mode: 0o700 });
   const { partition, documents, stylesheets } = isolatedPartition();
@@ -244,9 +257,10 @@ void app.whenReady().then(async () => {
               working.add(slot);
               results.set(item.id, await recordItem(slot, documents, item, input!.colorScheme, folder, typefaceFolder, controller.signal));
             } catch (error) {
-              // A failed frame keeps no window: the next one starts clean.
+              // A failed frame keeps no window or files: the next one starts clean.
               if (slot && !slot.window.isDestroyed()) slot.window.destroy();
               slot = null;
+              await rm(path.join(folder, item.id), { recursive: true, force: true }).catch(() => {});
               results.set(item.id, { id: item.id, error: (error instanceof Error ? error.message : String(error)).slice(0, 500) || "Design recording failed." });
             } finally {
               if (slot) { working.delete(slot); idle.push(slot); }

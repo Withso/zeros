@@ -8,7 +8,7 @@
 // approved. A packaged app also needs a role switch in main to start it.
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { realpath, rm } from "node:fs/promises";
+import { lstat, realpath, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import {
@@ -54,6 +54,20 @@ export interface DesignRecorder {
   stop(): Promise<void>;
 }
 
+const DESIGN_RECORDER_PROFILE_PREFIX = "zeros-design-recorder-profile-";
+
+/** Removes a recorder's session folder, only when it is one: directly in the
+ * temporary directory, with the recorder's prefix, and not a link. */
+async function removeRecorderRoot(root: string): Promise<void> {
+  try {
+    const base = await realpath(os.tmpdir());
+    const resolved = await realpath(root);
+    if (path.dirname(resolved) !== base || !path.basename(resolved).startsWith(DESIGN_RECORDER_FOLDER_PREFIX) ||
+      !(await lstat(resolved)).isDirectory()) return;
+    await rm(resolved, { recursive: true, force: true });
+  } catch { /* already gone */ }
+}
+
 export function createDesignRecorder(options: {
   identity: string;
   /** The recorder host bundle. */
@@ -70,9 +84,10 @@ export function createDesignRecorder(options: {
   let child: ChildProcess | null = null;
   let ready: Promise<{ url: string; root: string; token: string }> | null = null;
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
-  let profile: string | null = null;
+  /** Settles once the current child has exited and its folders are removed. */
+  let finished: Promise<void> = Promise.resolve();
 
-  const retire = () => {
+  const retire = (): Promise<void> => {
     if (idleTimer) clearTimeout(idleTimer);
     idleTimer = null;
     const current = child;
@@ -84,11 +99,21 @@ export function createDesignRecorder(options: {
       kill.unref?.();
       current.once("exit", () => clearTimeout(kill));
     }
-    if (profile) { void rm(profile, { recursive: true, force: true }); profile = null; }
+    // Bounded: a child that ignores even SIGKILL never holds a quit.
+    return Promise.race([finished, new Promise<void>((resolve) => { setTimeout(resolve, 6_000).unref?.(); })]);
   };
   const start = () => {
     const token = randomBytes(32).toString("hex");
-    profile = path.join(os.tmpdir(), `zeros-design-recorder-profile-${randomBytes(8).toString("hex")}`);
+    const profile = path.join(os.tmpdir(), `${DESIGN_RECORDER_PROFILE_PREFIX}${randomBytes(8).toString("hex")}`);
+    // Removed once the child is gone, however it ended: Chromium writes its
+    // profile while shutting down, and a killed host never cleans up itself.
+    const folders: { root: string | null } = { root: null };
+    let markFinished!: () => void;
+    finished = new Promise<void>((resolve) => { markFinished = resolve; });
+    const removeFolders = () => {
+      void Promise.all([rm(profile, { recursive: true, force: true }).catch(() => {}), folders.root ? removeRecorderRoot(folders.root) : undefined])
+        .then(() => markFinished());
+    };
     const spawned = run(options.execPath ?? process.execPath, [options.entry, `--user-data-dir=${profile}`], {
       env: designRecorderEnvironment(options.env ?? process.env, token, options.identity, process.env.ZEROS_DESIGN_RECORDER_WINDOWS),
       stdio: ["pipe", "pipe", "ignore"],
@@ -109,14 +134,19 @@ export function createDesignRecorder(options: {
           if (!url || url.protocol !== "http:" || url.hostname !== "127.0.0.1" || typeof value.root !== "string" ||
             !path.basename(value.root).startsWith(DESIGN_RECORDER_FOLDER_PREFIX))
             throw new Error("The Design recorder announced an invalid address.");
+          folders.root = value.root;
           resolve({ url: url.origin, root: value.root, token });
         } catch (error) {
           reject(error);
           retire();
         }
       });
-      spawned.once("error", (error) => { clearTimeout(timer); reject(error); if (child === spawned) retire(); });
-      spawned.once("exit", () => { clearTimeout(timer); reject(new Error("The Design recorder exited.")); if (child === spawned) { child = null; ready = null; } });
+      spawned.once("error", (error) => { clearTimeout(timer); reject(error); if (child === spawned) retire(); removeFolders(); });
+      spawned.once("exit", () => {
+        clearTimeout(timer); reject(new Error("The Design recorder exited."));
+        if (child === spawned) { child = null; ready = null; }
+        removeFolders();
+      });
     });
   };
   const record: DesignBatchRecordHost = async (input: DesignBatchRecordRequest, signal: AbortSignal) => {
@@ -158,7 +188,8 @@ export function createDesignRecorder(options: {
       if (child) { idleTimer = setTimeout(retire, idleMs); idleTimer.unref?.(); }
     }
   };
-  return { identity: options.identity, record, async stop() { retire(); } };
+  // Stopping waits for the child to exit (killed after 5 s) and its folders to go.
+  return { identity: options.identity, record, stop: () => retire() };
 }
 
 /** Whether this launch may start the recorder: explicitly enabled, and an

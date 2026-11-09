@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
@@ -81,9 +81,56 @@ describe("Design recorder client", () => {
     }
   });
 
-  it("fails a batch when the recorder announces an address it shouldn't", async () => {
+  it("removes the recorder's profile and session folder once it exits, however it ended", async () => {
     const stdout = new PassThrough();
     const child = Object.assign(new EventEmitter(), { stdin: new PassThrough(), stdout, exitCode: null as number | null, kill: vi.fn() });
+    let profile = "";
+    const spawnImpl = vi.fn((_command: string, args: string[]) => {
+      profile = args[1]!.slice("--user-data-dir=".length);
+      setImmediate(() => stdout.write(`ZEROS_DESIGN_RECORDER ${JSON.stringify({ url: "http://127.0.0.1:4321", root })}\n`));
+      return child;
+    });
+    await mkdir(path.join(root, "typefaces"), { recursive: true });
+    await writeFile(path.join(root, "typefaces", `${"a".repeat(32)}.font`), "font");
+    const recorder = createDesignRecorder({ identity: "x/skp", entry: "/app/design-recorder.cjs", spawnImpl: spawnImpl as never,
+      fetchImpl: vi.fn(async () => new Response(JSON.stringify({ items: [] }))) as never });
+    await recorder.record({ version: 1, revision: "r", colorScheme: "light", stylesheets: {}, items: [{ id: "f0", html: "<p>x</p>", viewport: { width: 1, height: 1 } }] },
+      new AbortController().signal);
+    await mkdir(profile, { recursive: true });
+    const stopping = recorder.stop();
+    await new Promise((resolve) => setImmediate(resolve));
+    // Chromium still writes its profile while shutting down; only the exit counts.
+    await expect(stat(profile)).resolves.toBeTruthy();
+    child.exitCode = 0;
+    child.emit("exit", 0, null);
+    // Stopping settles once both are gone.
+    await stopping;
+    await expect(stat(profile)).rejects.toThrow();
+    await expect(stat(root)).rejects.toThrow();
+  });
+
+  it("removes only a session folder directly in the temporary directory", async () => {
+    const nested = path.join(outside, `${DESIGN_RECORDER_FOLDER_PREFIX}nested`);
+    await mkdir(nested);
+    const stdout = new PassThrough();
+    const child = Object.assign(new EventEmitter(), { stdin: new PassThrough(), stdout, exitCode: null as number | null, kill: vi.fn() });
+    const spawnImpl = vi.fn(() => { setImmediate(() => stdout.write(`ZEROS_DESIGN_RECORDER ${JSON.stringify({ url: "http://127.0.0.1:4321", root: nested })}\n`)); return child; });
+    const recorder = createDesignRecorder({ identity: "x/skp", entry: "/app/design-recorder.cjs", spawnImpl: spawnImpl as never,
+      fetchImpl: vi.fn(async () => new Response(JSON.stringify({ items: [] }))) as never });
+    await recorder.record({ version: 1, revision: "r", colorScheme: "light", stylesheets: {}, items: [{ id: "f0", html: "<p>x</p>", viewport: { width: 1, height: 1 } }] },
+      new AbortController().signal);
+    const stopping = recorder.stop();
+    child.exitCode = 0;
+    child.emit("exit", 0, null);
+    await stopping;
+    await expect(stat(nested)).resolves.toBeTruthy();
+  });
+
+  it("fails a batch when the recorder announces an address it shouldn't", async () => {
+    const stdout = new PassThrough(), stdin = new PassThrough();
+    const child = Object.assign(new EventEmitter(), { stdin, stdout, exitCode: null as number | null, kill: vi.fn() });
+    // Like the host: its stdin closing ends it.
+    stdin.on("finish", () => { child.exitCode = 0; child.emit("exit", 0, null); });
     const spawnImpl = vi.fn(() => { setImmediate(() => stdout.write(`ZEROS_DESIGN_RECORDER ${JSON.stringify({ url: "http://example.com:80", root })}\n`)); return child; });
     const recorder = createDesignRecorder({ identity: "x/skp", entry: "/app/design-recorder.cjs", spawnImpl: spawnImpl as never, fetchImpl: vi.fn() as never });
     await expect(recorder.record({ version: 1, revision: "r", colorScheme: "light", stylesheets: {}, items: [{ id: "f0", html: "<p>x</p>", viewport: { width: 1, height: 1 } }] },
