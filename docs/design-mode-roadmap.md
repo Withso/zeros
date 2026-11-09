@@ -2281,6 +2281,55 @@ checks cover sharp CSS/SVG edges at 200–400× capture scale as well as viewpor
 units, media queries and root/body alpha; output dimensions alone are not a
 fidelity check. CSS boxes retain Chromium's normal pixel-snapping semantics.
 
+#### Recorded GPU canvas (internal)
+
+The internal `designGpuCanvas` flag draws every passive frame from its Skia
+recording (see *Recorded frames* under the performance ceilings) instead of
+bitmap previews, covers and source surfaces. The flag is off by default and
+staff-only. It applies to Local workspaces whose engine advertises
+`design.recordings.v1`. Live editor documents (selection, editing, playback,
+open layer trees, intent) keep their DOM pixels; a frame whose recording
+failed keeps the live-document fallback. Cloud workspaces never request
+recordings.
+
+- **Two threads.** A dedicated worker owns CanvasKit: pictures, a byte-budgeted
+  LRU with explicit deletes, and WebGL2 rasterization of bursts into
+  `ImageBitmap`s. The main thread composites immutable atlas pages on one plane
+  under the world, inside the camera's own paint
+  (`gpu/design-gpu-scene.ts`). A worker-presented canvas would reach the
+  display compositor independently of the DOM frame, and chrome would trail
+  the pixels during pans. Frames the plane draws carry
+  `data-design-frame-tiled`, exactly like tiled source frames.
+- **Crisp at every zoom.** Rasters use the source tiles' power-of-two density
+  (at least screen resolution, minified by less than two). A frame that fits
+  512 device pixels is one sprite; a larger one splits into gutter tiles
+  rastered only near the viewport. While a new density is rastered, a frame
+  shows the nearest finer, then coarser, density it already has. Bursts are
+  center-first, one at a time, bounded to 6 ms of worker time at rest (3 ms
+  while the camera moves). `allVisibleCrispAt` records when every visible
+  frame is drawn at its exact density.
+- **Recordings and fonts.** Chunks are content-addressed and SHA-256-verified.
+  Requests claim held chunks in `knownChunks`, and a layer is reassembled only
+  when the worker needs its picture. Externalized fonts
+  (`apps/desktop/shared/design-picture-typefaces.ts`) are verified against
+  their id, registered once with the vendored CanvasKit
+  (`gpu/canvaskit/README.md`: CanvasKit 0.42.0 plus shared and externalized
+  typefaces, reproducible from source) and shared by every picture.
+- **Budgets and loss.** Pictures 160 MiB (serialized bytes), worker GPU
+  resource cache 64 MiB, compositor pages 192 MiB, chunks 128 MiB. The worker
+  retires 60 s after the last recorded canvas closes, releasing its
+  WebAssembly heap. Either context can be lost: the compositor drops its pages
+  and the worker its surfaces, and both re-raster from the worker's pictures;
+  no burst is sent while the worker's context is lost.
+- **Inert when hidden.** An inactive canvas owns no scene, plane, observer,
+  painter or recording request.
+- **CSP.** WebAssembly compiles only in the worker, under the renderer's
+  existing `'wasm-unsafe-eval'`. No policy changed.
+- **Bench instrumentation.** `window.__zerosDesignGpu` exists only while a
+  gated canvas is mounted. It reports open, first-frame and all-crisp times,
+  composite and burst percentiles, raster and deserialize timings, memory
+  and context losses.
+
 #### Layout interaction and visual history
 
 The Layout inspector offers content-aware sizing: Hug requires child layers;

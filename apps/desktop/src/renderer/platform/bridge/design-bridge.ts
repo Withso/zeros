@@ -31,6 +31,12 @@ import {
 import { designPageCatalogSchema, designPageIdSchema, normalizeDesignPagesSnapshot, type DesignPageSummary } from "@zeros/protocol/design-pages";
 import { DESIGN_LAZY_PREPARATION_CAPABILITY, DESIGN_MUTATION_SNAPSHOTS_CAPABILITY, DESIGN_PAGE_SCOPED_MUTATIONS_CAPABILITY, designMutationCatalogSchema, designPageScopedCatalogSchema, designPreparedFrameSchema, designFramesPrepareSchema, designFramesPrepareReplySchema, type DesignMutationCatalog, type DesignPageHashes, type DesignPageScopedCatalog } from "@zeros/protocol/design-catalog";
 import { DESIGN_SOURCE_SURFACES_CAPABILITY } from "@zeros/protocol/design-surface";
+import {
+  designRecordingsReadReplySchema,
+  designRecordingsReplySchema,
+  type DesignRecordingsReadReply,
+  type DesignRecordingsReply,
+} from "../../features/design-workspace/gpu/design-recordings-wire";
 import { isCloudWorkspace } from "./cloud-workspace-key";
 
 import type { RuntimeClient } from "./ws-client";
@@ -701,7 +707,7 @@ async function runDesignPreviewJob<T>(
   bridge: RuntimeClient,
   workspaceId: string,
   directoryId: string,
-  op: "design.preview" | "design.thumbnails.render",
+  op: "design.preview" | "design.thumbnails.render" | "design.recordings.render",
   params: Record<string, unknown>,
   jobTimeoutMs: number,
   requestTimeoutMs: number,
@@ -782,6 +788,64 @@ export async function bridgeDesignThumbnailsRender(
       if (!reply.success) throw new Error("design.thumbnails.render: malformed engine response");
       return reply.data;
     });
+}
+
+const LOCAL_RECORDINGS_ONLY = "Design recordings are available in Local workspaces only.";
+const DESIGN_RECORDINGS_READ_TIMEOUT_MS = 30_000;
+
+/** Recordings (Skia pictures) of saved frames in one theme, recorded where
+ * missing, from Local engines that advertise design.recordings.v1. Chunks
+ * named in `knownChunks` are not sent again. A preview job: cancellation is
+ * confirmed on the same connection, like thumbnails. */
+export async function bridgeDesignRecordingsRender(
+  bridge: RuntimeClient,
+  workspaceId: string,
+  input: {
+    directoryId: string;
+    theme: string | null;
+    frames: ReadonlyArray<{ file: string; sourceVersion: string }>;
+    knownChunks: readonly string[];
+  },
+  options: { signal?: AbortSignal } = {},
+): Promise<DesignRecordingsReply> {
+  if (isCloudWorkspace(workspaceId)) throw new Error(LOCAL_RECORDINGS_ONLY);
+  return runDesignPreviewJob(bridge, workspaceId, input.directoryId, "design.recordings.render",
+    { directoryId: input.directoryId, theme: input.theme,
+      frames: input.frames.map(({ file, sourceVersion }) => ({ file, sourceVersion })),
+      ...(input.knownChunks.length ? { knownChunks: [...input.knownChunks] } : {}) },
+    DESIGN_PREVIEW_JOB_TIMEOUT_MS, DESIGN_PREVIEW_JOB_TIMEOUT_MS + 15_000,
+    options.signal ?? new AbortController().signal, (result) => {
+      const reply = designRecordingsReplySchema.safeParse(result);
+      if (!reply.success) throw new Error("design.recordings.render: malformed engine response");
+      return reply.data;
+    });
+}
+
+/** Each frame's newest stored recording; a frame sent without a version is
+ * answered by any generation. Nothing is recorded. */
+export async function bridgeDesignRecordingsRead(
+  bridge: RuntimeClient,
+  workspaceId: string,
+  input: {
+    directoryId: string;
+    theme: string | null;
+    frames: ReadonlyArray<{ file: string; sourceVersion?: string }>;
+    knownChunks: readonly string[];
+  },
+  options: { signal?: AbortSignal } = {},
+): Promise<DesignRecordingsReadReply> {
+  if (isCloudWorkspace(workspaceId)) throw new Error(LOCAL_RECORDINGS_ONLY);
+  options.signal?.throwIfAborted();
+  const result = await rawWorkspaceOp(bridge, "design.recordings.read", {
+    workspaceId, directoryId: input.directoryId, theme: input.theme,
+    frames: input.frames.map(({ file, sourceVersion }) => (sourceVersion ? { file, sourceVersion } : { file })),
+    ...(input.knownChunks.length ? { knownChunks: [...input.knownChunks] } : {}),
+  }, DESIGN_RECORDINGS_READ_TIMEOUT_MS);
+  // A stored lookup cannot be cancelled; a reply nobody waits for is dropped.
+  options.signal?.throwIfAborted();
+  const reply = designRecordingsReadReplySchema.safeParse(result);
+  if (!reply.success) throw new Error("design.recordings.read: malformed engine response");
+  return reply.data;
 }
 
 export async function bridgeDesignTokens(

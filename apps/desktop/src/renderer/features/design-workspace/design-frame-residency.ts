@@ -43,6 +43,9 @@ export interface DesignFrameResidencyInput<T extends DesignSpatialFrame> {
   readonly covered?: ReadonlySet<string>;
   readonly devicePixelRatio: number;
   readonly sourceSurfacesEnabled?: boolean;
+  /** Frames a vector backend (the recorded GPU canvas) paints crisply at
+   * every zoom: like source surfaces, they never need an editor to be seen. */
+  readonly vectorCovered?: ReadonlySet<string>;
   readonly sourceReady?: ReadonlyMap<string, string>;
   readonly sourceUnavailable?: ReadonlyMap<string, string>;
   /** Small overlay for direct manipulation; the immutable index is unchanged. */
@@ -170,7 +173,7 @@ export function createDesignFrameResidencyReader<T extends DesignSpatialFrame>()
           !(sources.has(file) && input.sourceReady?.get(file) === (available.get(file) as T & { sourceVersion?: string })?.sourceVersion)),
       ],
       pictured: input.pictured, devicePixelRatio: input.devicePixelRatio,
-      sourceSurfaces: sources,
+      sourceSurfaces: input.vectorCovered ? new Set([...sources, ...input.vectorCovered]) : sources,
       maxLive: DESIGN_MAX_LIVE_FRAMES,
     }) : new Set<string>();
     const hidden = input.hiddenLive && [...input.hiddenLive].every((file) => available.has(file)) ? input.hiddenLive :

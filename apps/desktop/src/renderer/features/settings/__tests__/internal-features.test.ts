@@ -95,6 +95,19 @@ describe("isInternalUser — the staff gate", () => {
     signedOut();
     expect(store.isInternalFeatureActive("copyLogs")).toBe(false);
   });
+  it("keeps the recorded Design canvas off until staff turn it on, and never for others", async () => {
+    const backing = installLocalStorageStub();
+    const store = await freshStore();
+    signedInAs("developer");
+    expect(store.isInternalFeatureEnabled("designGpuCanvas")).toBe(false);
+    expect(store.isInternalFeatureActive("designGpuCanvas")).toBe(false);
+    store.setInternalFeatureEnabled("designGpuCanvas", true);
+    expect(store.isInternalFeatureActive("designGpuCanvas")).toBe(true);
+    expect(JSON.parse(backing.get("zeros.internalFeatures")!)).toEqual({ designGpuCanvas: true });
+    // A flag forged into storage does nothing for an ordinary account.
+    signedInAs(null);
+    expect(store.isInternalFeatureActive("designGpuCanvas")).toBe(false);
+  });
   it("is true for owners and developers, not a legacy support capability", async () => {
     const store = await freshStore();
 

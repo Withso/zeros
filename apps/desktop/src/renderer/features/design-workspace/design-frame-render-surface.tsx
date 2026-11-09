@@ -133,6 +133,7 @@ export const DesignFrameRenderSurface = React.memo(function DesignFrameRenderSur
   sourceSurface = false,
   sourceReadOnly = false,
   sourceVisible = true,
+  recorded = false,
   onSourceReady,
   onSourceUnavailable,
   onSourceRetired,
@@ -160,6 +161,10 @@ export const DesignFrameRenderSurface = React.memo(function DesignFrameRenderSur
   /** Last-confirmed pixels can paint while source authority revalidates. */
   sourceReadOnly?: boolean;
   sourceVisible?: boolean;
+  /** The recorded GPU canvas paints this frame's passive pixels beneath the
+   * DOM: no bitmap, screenshot or placeholder covers them, and it is the
+   * underlay of a live document that is still loading. */
+  recorded?: boolean;
   onSourceReady?(file: string, version: string): void;
   onSourceUnavailable?(file: string, version: string): void;
   onSourceRetired?(file: string, version: string): void;
@@ -207,7 +212,7 @@ export const DesignFrameRenderSurface = React.memo(function DesignFrameRenderSur
   // A confirmed exact-generation preview already supplies the cover. Do not
   // also reserve a full runtime screenshot that this surface will not paint;
   // those duplicate rasters can evict an entire overview's warm thumbnails.
-  const screenshot = useDesignImageDisplay(storedScreenshot, active && !sourcePainted && !picture?.current);
+  const screenshot = useDesignImageDisplay(storedScreenshot, active && !sourcePainted && !picture?.current && !recorded);
   const runtimePaintVersion = useDesignRuntimeStore(
     (state) =>
       state.byWorkspace[workspaceId]?.frames[frame.file]?.updatedAt ?? -1,
@@ -358,7 +363,7 @@ export const DesignFrameRenderSurface = React.memo(function DesignFrameRenderSur
     () => (picture ? { sourceVersion: picture.sourceVersion, dataUrl: picture.url } : null),
     [picture],
   );
-  const still = picture?.current
+  const still = recorded ? null : picture?.current
     ? picture.url
     : currentScreenshot?.dataUrl ?? picture?.url ?? null;
   let surface: React.ReactNode;
@@ -374,8 +379,8 @@ export const DesignFrameRenderSurface = React.memo(function DesignFrameRenderSur
         onPlaybackStopped={onPlaybackStopped}
         selected={selected}
         selectedNodeIds={selectedNodeIds}
-        autoCapture={!playbackSessionId && designFrameAutoCapture(selected, picture)}
-        underlayReady={sourcePainted || !!still}
+        autoCapture={!playbackSessionId && (recorded ? selected : designFrameAutoCapture(selected, picture))}
+        underlayReady={sourcePainted || !!still || recorded}
         theme={theme}
         transitionCover={
           currentScreenshot ??
@@ -386,7 +391,7 @@ export const DesignFrameRenderSurface = React.memo(function DesignFrameRenderSur
         designDirectory={designDirectory}
       />
     );
-  } else if (!sourcePainted && !still && !sourceEnabled) {
+  } else if (!sourcePainted && !still && !sourceEnabled && !recorded) {
     surface = (
       <div className="bg-bg2 text-muted-fg pointer-events-none flex size-full items-center justify-center gap-2 text-xs">
         <FileCode2 />

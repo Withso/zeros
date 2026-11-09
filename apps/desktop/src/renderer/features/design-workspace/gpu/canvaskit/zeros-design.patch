@@ -1,0 +1,221 @@
+diff --git a/modules/canvaskit/canvaskit_bindings.cpp b/modules/canvaskit/canvaskit_bindings.cpp
+index 279ebb8..4ae3b84 100644
+--- a/modules/canvaskit/canvaskit_bindings.cpp
++++ b/modules/canvaskit/canvaskit_bindings.cpp
+@@ -1119,6 +1119,156 @@ private:
+     const SkMatrix*        fLM;
+ };
+ 
++
++#if defined(CK_SERIALIZE_SKP) && !defined(CK_NO_FONTS)
++#include "src/core/SkChecksum.h"
++#include "src/core/SkFontDescriptor.h"
++
++#include <unordered_map>
++
++// Zeros: every recorded SkPicture embeds full copies of each font it draws
++// with (one Geist instance is about 63 KB; a system-ui fallback is about
++// 8 MB). Deserializing them per picture keeps one FreeType face per picture
++// alive. Pictures of one page reuse the same few fonts, so share one SkTypeface
++// per distinct serialized typeface (descriptor plus data, compared by length
++// and two independent 64-bit hashes). Anything unexpected keeps Skia's own
++// MakeDeserialize behavior.
++namespace zeros {
++struct SharedTypeface {
++    size_t length;
++    uint64_t check;
++    sk_sp<SkTypeface> typeface;
++};
++static std::unordered_multimap<uint64_t, SharedTypeface> gSharedTypefaces;
++static size_t gSharedTypefaceBytes = 0;
++static double gSharedTypefaceHits = 0;
++static double gSharedTypefaceMisses = 0;
++
++// Externalized typefaces (apps/desktop/shared/design-picture-typefaces.ts):
++// a record whose font data is `ZRTF` 0x01 plus a 32-hex content id names a
++// font file the renderer registered after verifying its hash. A picture with
++// an unresolved reference fails as a whole instead of drawing empty glyphs.
++static constexpr uint8_t kReferenceMagic[5] = {0x5A, 0x52, 0x54, 0x46, 0x01};
++static constexpr size_t kReferenceBytes = sizeof(kReferenceMagic) + 32;
++static std::unordered_map<std::string, sk_sp<SkData>> gRegisteredFonts;
++static size_t gRegisteredFontBytes = 0;
++static std::unordered_map<std::string, sk_sp<SkTypeface>> gReferencedTypefaces;
++static bool gUnresolvedReference = false;
++
++static sk_sp<SkTypeface> ResolveReferencedTypeface(const std::string& id, const SkFontDescriptor& descriptor,
++                                                   const uint8_t* descriptorBytes, size_t descriptorLength) {
++    auto font = gRegisteredFonts.find(id);
++    if (font == gRegisteredFonts.end()) {
++        gUnresolvedReference = true;
++        return nullptr;
++    }
++    char instance[17];
++    snprintf(instance, sizeof(instance), "%016llx",
++             static_cast<unsigned long long>(SkChecksum::Hash64(descriptorBytes, descriptorLength)));
++    const std::string key = id + ":" + instance;
++    auto cached = gReferencedTypefaces.find(key);
++    if (cached != gReferencedTypefaces.end()) {
++        gSharedTypefaceHits += 1;
++        return cached->second;
++    }
++    // The same factory stock deserialization reaches for embedded data.
++    sk_sp<SkTypeface> typeface = SkTypeface_FreeType::MakeFromStream(
++            std::make_unique<SkMemoryStream>(font->second), descriptor.getFontArguments());
++    if (!typeface) {
++        gUnresolvedReference = true;
++        return nullptr;
++    }
++    gSharedTypefaceMisses += 1;
++    gReferencedTypefaces.emplace(key, typeface);
++    return typeface;
++}
++
++static bool RegisterFont(const std::string& id, sk_sp<SkData> data) {
++    if (id.size() != 32 || !data) {
++        return false;
++    }
++    if (gRegisteredFonts.count(id)) {
++        return true;
++    }
++    gRegisteredFontBytes += data->size();
++    gRegisteredFonts.emplace(id, std::move(data));
++    return true;
++}
++
++static void UnregisterFont(const std::string& id) {
++    auto font = gRegisteredFonts.find(id);
++    if (font == gRegisteredFonts.end()) {
++        return;
++    }
++    gRegisteredFontBytes -= font->second->size();
++    gRegisteredFonts.erase(font);
++    for (auto it = gReferencedTypefaces.begin(); it != gReferencedTypefaces.end();) {
++        it = it->first.compare(0, id.size(), id) == 0 ? gReferencedTypefaces.erase(it) : std::next(it);
++    }
++}
++
++static sk_sp<SkTypeface> DeserializeSharedTypeface(SkStream& stream, sk_sp<SkFontMgr> fallback) {
++    const void* base = stream.getMemoryBase();
++    if (!base || !stream.hasPosition()) {
++        return SkTypeface::MakeDeserialize(&stream, std::move(fallback));
++    }
++    const size_t start = stream.getPosition();
++    SkFontDescriptor descriptor;
++    if (!SkFontDescriptor::Deserialize(&stream, &descriptor, nullptr)) {
++        // Let Skia report the same failure it always has.
++        if (!stream.seek(start)) {
++            return nullptr;
++        }
++        return SkTypeface::MakeDeserialize(&stream, std::move(fallback));
++    }
++    const size_t end = stream.getPosition();
++    const size_t length = end - start;
++    const uint8_t* bytes = static_cast<const uint8_t*>(base) + start;
++    if (descriptor.hasStream()) {
++        std::unique_ptr<SkStreamAsset> data = descriptor.dupStream();
++        uint8_t reference[kReferenceBytes];
++        if (data && data->getLength() == kReferenceBytes &&
++            data->read(reference, kReferenceBytes) == kReferenceBytes &&
++            memcmp(reference, kReferenceMagic, sizeof(kReferenceMagic)) == 0) {
++            // The descriptor's own bytes (names, style, axes) end where the
++            // one-byte packed length of the 37-byte reference begins.
++            return ResolveReferencedTypeface(
++                    std::string(reinterpret_cast<const char*>(reference) + sizeof(kReferenceMagic), 32),
++                    descriptor, bytes, length - kReferenceBytes - 1);
++        }
++    }
++    const uint64_t key = SkChecksum::Hash64(bytes, length);
++    const uint64_t check = SkChecksum::Hash64(bytes, length, 0x9E3779B97F4A7C15ull);
++    auto range = gSharedTypefaces.equal_range(key);
++    for (auto it = range.first; it != range.second; ++it) {
++        if (it->second.length == length && it->second.check == check) {
++            gSharedTypefaceHits += 1;
++            return it->second.typeface;
++        }
++    }
++    if (!stream.seek(start)) {
++        return nullptr;
++    }
++    sk_sp<SkTypeface> typeface = SkTypeface::MakeDeserialize(&stream, std::move(fallback));
++    if (stream.getPosition() != end && !stream.seek(end)) {
++        return nullptr;
++    }
++    if (typeface) {
++        gSharedTypefaceMisses += 1;
++        gSharedTypefaceBytes += length;
++        gSharedTypefaces.emplace(key, SharedTypeface{length, check, typeface});
++    }
++    return typeface;
++}
++
++static void ClearSharedTypefaces() {
++    gSharedTypefaces.clear();
++    gSharedTypefaceBytes = 0;
++    gReferencedTypefaces.clear();
++}
++}  // namespace zeros
++#endif
++
+ EMSCRIPTEN_BINDINGS(Skia) {
+ #ifdef ENABLE_GPU
+     constant("gpu", true);
+@@ -1212,6 +1362,35 @@ EMSCRIPTEN_BINDINGS(Skia) {
+              }));
+ 
+ #ifdef CK_SERIALIZE_SKP
++#if !defined(CK_NO_FONTS)
++    function("TypefaceCacheCount", optional_override([]() -> double {
++        return static_cast<double>(zeros::gSharedTypefaces.size());
++    }));
++    function("TypefaceCacheBytes", optional_override([]() -> double {
++        return static_cast<double>(zeros::gSharedTypefaceBytes);
++    }));
++    function("TypefaceCacheHits", optional_override([]() -> double {
++        return zeros::gSharedTypefaceHits;
++    }));
++    function("TypefaceCacheMisses", optional_override([]() -> double {
++        return zeros::gSharedTypefaceMisses;
++    }));
++    function("ClearTypefaceCache", optional_override([]() { zeros::ClearSharedTypefaces(); }));
++    function("_RegisterDesignTypeface", optional_override([](std::string id, WASMPointerU8 dPtr,
++                                                             size_t bytes) -> bool {
++        return zeros::RegisterFont(id, SkData::MakeFromMalloc(reinterpret_cast<uint8_t*>(dPtr), bytes));
++    }), allow_raw_pointers());
++    function("HasDesignTypeface", optional_override([](std::string id) -> bool {
++        return zeros::gRegisteredFonts.count(id) > 0;
++    }));
++    function("UnregisterDesignTypeface", optional_override([](std::string id) { zeros::UnregisterFont(id); }));
++    function("DesignTypefaceRegistryCount", optional_override([]() -> double {
++        return static_cast<double>(zeros::gRegisteredFonts.size());
++    }));
++    function("DesignTypefaceRegistryBytes", optional_override([]() -> double {
++        return static_cast<double>(zeros::gRegisteredFontBytes);
++    }));
++#endif
+     function("_MakePicture",
+              optional_override([](WASMPointerU8 dPtr, size_t bytes) -> sk_sp<SkPicture> {
+                  uint8_t* d = reinterpret_cast<uint8_t*>(dPtr);
+@@ -1242,12 +1421,21 @@ EMSCRIPTEN_BINDINGS(Skia) {
+                  sk_sp<SkFontMgr> fallback = SkFontMgr_New_Custom_Empty();
+                  dProcs.fTypefaceCtx = &fallback;
+                  dProcs.fTypefaceStreamProc = [](SkStream& stream, void* ctx) -> sk_sp<SkTypeface> {
+-                    return SkTypeface::MakeDeserialize(&stream,
+-                                                       *static_cast<sk_sp<SkFontMgr>*>(ctx));
++                    return zeros::DeserializeSharedTypeface(stream,
++                                                            *static_cast<sk_sp<SkFontMgr>*>(ctx));
+                  };
+ #endif
+ 
++#ifndef CK_NO_FONTS
++                 zeros::gUnresolvedReference = false;
++                 sk_sp<SkPicture> picture = SkPicture::MakeFromData(data.get(), &dProcs);
++                 if (zeros::gUnresolvedReference) {
++                     return nullptr;
++                 }
++                 return picture;
++#else
+                  return SkPicture::MakeFromData(data.get(), &dProcs);
++#endif
+              }),
+              allow_raw_pointers());
+ #endif

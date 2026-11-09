@@ -56,6 +56,9 @@ const ALLOWLIST = new Set([
   // Tailwind's own stylesheets, embedded verbatim (scripts/codegen-design-tailwind.mjs)
   // so the Design engine can compile Tailwind style sources without node_modules.
   "apps/desktop/src/engine/design/generated/tailwind-stylesheets.ts",
+  // CanvasKit's generated Emscripten glue, committed byte-identical to its
+  // pinned build (gpu/canvaskit/README.md); its HTML-canvas emulation parses CSS colors.
+  "apps/desktop/src/renderer/features/design-workspace/gpu/canvaskit/canvaskit.js",
 ]);
 
 // Skip entire directories

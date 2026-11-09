@@ -275,6 +275,8 @@ import {
 import { useDesignFoundation } from "./state/use-design-foundation";
 
 import { DesignFrameCover, DesignFrameRenderSurface } from "./design-frame-render-surface";
+import { designGpuRuntime, useDesignGpuCanvas, useDesignGpuCanvasEnabled, useDesignGpuFailedFrames,
+  useDesignGpuSceneFrames } from "./gpu/design-gpu-canvas";
 import { hasAsyncCanvasWheel } from "../../platform/runtime";
 import { createDesignGestureFrameClock } from "./design-gesture-frame-clock";
 import { useDesignSavedEditing } from "./design-saved-editing";
@@ -1294,13 +1296,24 @@ export const DesignCanvas = React.memo(function DesignCanvas({
     ],
     [agentDraftFiles, currentPlayback, intentFile, layerDisclosures, nestLiveFile, view.layersVisible],
   );
+  // The internal recorded canvas draws every passive frame from its Skia
+  // recording on the GPU; bitmap pictures, covers and source surfaces stay off.
+  const gpuCanvas = useDesignGpuCanvasEnabled(workspaceId) && !!canvasDirectoryId;
+  const gpuOwner = useMemo(() => gpuCanvas && workspaceId && canvasDirectoryId
+    ? { workspaceId, directoryId: canvasDirectoryId, theme: frameTheme } : null,
+  [canvasDirectoryId, frameTheme, gpuCanvas, workspaceId]);
+  const gpuFailed = useDesignGpuFailedFrames(designGpuRuntime(), gpuOwner);
+  // A frame whose recording failed keeps today's live-document fallback.
+  const gpuCovered = useMemo(() => gpuCanvas ? new Set(frameViews.map((frame) => frame.file).filter((file) => !gpuFailed.has(file))) : undefined,
+    [frameViews, gpuCanvas, gpuFailed]);
   // Saved pictures of this directory's frames. A frame painted no larger
   // than its picture shows the picture instead of running its document.
   const previewOwner = useDesignPreviewOwner(workspaceId, snapshot?.directoryId);
+  const bitmapOwner = gpuCanvas ? null : previewOwner;
   const devicePixelRatio =
     typeof window === "undefined" ? 1 : window.devicePixelRatio || 1;
-  const pictured = useDesignFramePictured(
-    previewOwner,
+  const bitmapPictured = useDesignFramePictured(
+    bitmapOwner,
     frameTheme,
     preparedFrames,
     active,
@@ -1308,7 +1321,9 @@ export const DesignCanvas = React.memo(function DesignCanvas({
   );
   // A lower-resolution decoded cover is enough to hand off a live slot while
   // finer pixels arrive. Without any cover, keep the visible document painted.
-  const covered = useDesignFramePictured(previewOwner, frameTheme, preparedFrames, active);
+  const bitmapCovered = useDesignFramePictured(bitmapOwner, frameTheme, preparedFrames, active);
+  const pictured = gpuCovered ?? bitmapPictured;
+  const covered = gpuCovered ?? bitmapCovered;
   const sourceSurfaceState = useMemo(() => ({ owner: `${liveFrameOwner}\0${snapshot?.protocolCapability}\0${frameTheme}`,
     ready: new Map<string, string>(), unavailable: new Map<string, string>() }),
     [liveFrameOwner, snapshot?.protocolCapability, frameTheme]);
@@ -1323,7 +1338,8 @@ export const DesignCanvas = React.memo(function DesignCanvas({
       view.inspectorVisible || activeTool === "text" || motionTimelineOpen || pendingEdits
       ? selectedDescription?.file ?? null : null,
     requiredFiles: layersOpenFiles, pictured, covered, devicePixelRatio,
-    sourceSurfacesEnabled: !!snapshot?.protocolCapability,
+    sourceSurfacesEnabled: !!snapshot?.protocolCapability && !gpuCanvas,
+    vectorCovered: gpuCovered,
     sourceReady: sourceSurfaceState.ready,
     sourceUnavailable: sourceSurfaceState.unavailable,
     protectedFiles: [inlineTextEdit?.frame, renamingFrame, nestLiveFile].filter((file): file is string => !!file),
@@ -1337,6 +1353,9 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         x: preview.geometry.x, y: preview.geometry.y, width: preview.geometry.w, height: preview.geometry.h,
       }])),
   });
+  const gpuFrames = useDesignGpuSceneFrames(frameViews, gpuCanvas);
+  useDesignGpuCanvas({ enabled: gpuCanvas, active, worldRef, documentOwner: canvasDocumentOwner, owner: gpuOwner,
+    openKey: `${canvasDocumentOwner}\0${frameTheme}`, frames: gpuFrames, live: liveFrameFiles });
   const paintPendingWheelGesture = useCallback(() => {
     if (wheelPaintFrameRef.current !== null) {
       window.cancelAnimationFrame(wheelPaintFrameRef.current);
@@ -1417,13 +1436,13 @@ export const DesignCanvas = React.memo(function DesignCanvas({
   );
   const coverLevels = useMemo(() => new Map(previewCovers.map(cover => [cover.file, cover.level])), [previewCovers]);
   const previewDemand = useMemo(
-    () => activeDesignPreviewDemand(active, previewOwner, frameTheme, previewItems, previewCovers),
-    [active, frameTheme, previewCovers, previewItems, previewOwner],
+    () => activeDesignPreviewDemand(active && !gpuCanvas, previewOwner, frameTheme, previewItems, previewCovers),
+    [active, frameTheme, gpuCanvas, previewCovers, previewItems, previewOwner],
   );
   useDesignFramePreviewDemand(previewDemand);
   // A zoom-in's first source paint would otherwise create the shared GPU
   // context inside that frame; create it in a quiet moment after opening.
-  const sourceSurfacesAvailable = active && !!snapshot?.protocolCapability;
+  const sourceSurfacesAvailable = active && !!snapshot?.protocolCapability && !gpuCanvas;
   useEffect(() => {
     if (sourceSurfacesAvailable)
       void designBackgroundWork.schedule("design-source-tiles-warm", async () => designSourceTiles.warm(), { latest: true });
@@ -7719,7 +7738,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                 style={{ left: description.x, top: description.y, width: description.width, height: description.height,
                   zIndex: description.z }}
               >
-                {previewOwner && active ? <DesignFrameCover owner={previewOwner} file={description.file} theme={frameTheme}
+                {previewOwner && active && !gpuCanvas ? <DesignFrameCover owner={previewOwner} file={description.file} theme={frameTheme}
                   level={coverLevels.get(description.file) ?? "thumbnail"} /> : null}
               </DesignPreparingFrame>
             );
@@ -8083,8 +8102,9 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                       sourceFrameFiles.has(frame.file) || framePlaying || inlineTextEdit?.frame === frame.file || savedEditingState > 0 && nativePixels
                     }
                     designDirectory={snapshot.directory}
-                    previewOwner={previewOwner}
+                    previewOwner={gpuCanvas ? null : previewOwner}
                     previewLevel={previewLevels.get(frame.file) ?? "overview"}
+                    recorded={gpuCanvas}
                   />
                 ) : (
                   <div className="bg-bg2 text-muted-fg flex size-full items-center justify-center text-xs">

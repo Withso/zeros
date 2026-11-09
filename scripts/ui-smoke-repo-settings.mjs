@@ -193,7 +193,9 @@ export async function runRepoSettingsSmoke({ page, check }) {
   await internal.click();
   const resourceSummary = page.getByRole("switch", { name: "Show resource summary", exact: true });
   await expect(resourceSummary).toBeChecked();
-  await expect(page.getByRole("switch")).toHaveCount(2);
+  // The recorded Design canvas is an experiment staff opt into.
+  await expect(page.getByRole("switch", { name: "Draw Design frames from recordings", exact: true })).not.toBeChecked();
+  await expect(page.getByRole("switch")).toHaveCount(3);
   await resourceSummary.click();
   await expect(resourceSummary).not.toBeChecked();
   await page.getByRole("tab", { name: "General", exact: true }).click();
@@ -202,6 +204,6 @@ export async function runRepoSettingsSmoke({ page, check }) {
   await page.evaluate(() => window.repoSettingsSetInternal(false));
   await expect(internal).toHaveCount(0);
   await expect(resourceSummary).toHaveCount(0);
-  check("Internal offers only Copy logs and default-on Resource summary, preserves the toggle and closes on staff revocation", true);
+  check("Internal offers Copy logs, default-on Resource summary and default-off Recorded Design canvas, preserves the toggle and closes on staff revocation", true);
   await runCloudEnvironmentSmoke({ page, check });
 }
