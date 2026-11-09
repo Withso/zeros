@@ -269,11 +269,11 @@ export async function runFileEditorSmoke({ page, check = () => {} }) {
       await expect(source()).toContainText("Draft notes");
       await toggle("Diff view");
       await expect(diff()).toContainText("Draft notes");
-      // An extra File tab keeps its name and file glyph.
+      // An extra File tab keeps its name and file glyph (its ✕ is a button).
       await expect(
         fixture
           .getByRole("tab", { name: "notes.md", exact: true })
-          .locator("svg"),
+          .locator("svg:not(button svg)"),
       ).toHaveCount(1);
       await fixture.getByRole("tab", { name: "Files", exact: true }).click();
       await expect(diff()).not.toContainText("Draft notes");

@@ -76,7 +76,7 @@ export async function runChatSurfacesSmoke({ page, check, harnessBase }) {
   check("Side column: the open tab sits in a bg1 island on the chat's resize line, 12px in from the right and bottom, with a border2 edge and the first tab 12px in, in Dark and Light", true);
 
   // 2026-11-09: the fixed tabs are text only and the Files home reads Files;
-  // a closable tab such as Setup keeps its glyph.
+  // a closable tab such as Setup keeps its glyph (its hover ✕ is a button).
   const sidePanels = page
     .locator("[data-zeros-column-3]")
     .getByRole("tablist", { name: "Workspace panels" });
@@ -87,7 +87,7 @@ export async function runChatSurfacesSmoke({ page, check, harnessBase }) {
   }
   await expect(sidePanels.getByRole("tab", { name: "Files", exact: true })).toHaveText("Files");
   await expect(sidePanels.getByRole("tab", { name: "Open file", exact: true })).toHaveCount(0);
-  await expect(sidePanels.getByRole("tab", { name: "Setup", exact: true }).locator("svg")).toHaveCount(1);
+  await expect(sidePanels.getByRole("tab", { name: "Setup", exact: true }).locator("svg:not(button svg)")).toHaveCount(1);
   check("Side column: Files, Design, Changes and Review are text only, Files reads Files, and Setup keeps its glyph", true);
 
   const read = () => page.evaluate(() => {
