@@ -13,7 +13,7 @@
 import { app, BrowserWindow, protocol, session, type Session } from "electron";
 import { createServer } from "node:http";
 import { randomUUID, timingSafeEqual } from "node:crypto";
-import { mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, open, readdir, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import {
@@ -98,6 +98,21 @@ async function createSlot(partition: Session): Promise<Slot> {
   return { window, retired, ratio: Number.isFinite(ratio) && ratio > 0 ? ratio : 1 };
 }
 
+/** A picture's size from its header (SkPictInfo: magic, version, cull rect). */
+async function pictureSize(file: string): Promise<string> {
+  const handle = await open(file, "r");
+  try {
+    const header = Buffer.alloc(28);
+    await handle.read(header, 0, 28, 0);
+    const width = header.readFloatLE(20) - header.readFloatLE(12), height = header.readFloatLE(24) - header.readFloatLE(16);
+    return `${Math.round(width)}×${Math.round(height)}`;
+  } catch {
+    return "?";
+  } finally {
+    await handle.close();
+  }
+}
+
 /** Font data written this session, by content id: one file each. */
 const typefacesWritten = new Set<string>();
 
@@ -129,7 +144,10 @@ async function recordItem(slot: Slot, documents: Map<string, string>, item: Desi
     if (layers.length === 0) return { id: item.id, error: "The recorder produced no picture for this frame." };
     // Without positions for extra layers the picture would be incomplete;
     // such a frame keeps its bitmap preview instead.
-    if (layers.length > 1) return { id: item.id, error: "This frame paints on separate composited layers, so it is shown as a picture." };
+    if (layers.length > 1) {
+      const sizes = await Promise.all(layers.map(async (name) => pictureSize(path.join(directory, name))));
+      return { id: item.id, error: `This frame paints on ${layers.length} composited layers (${sizes.join(", ")}), so it is shown as a picture.`.slice(0, 500) };
+    }
     const picture = path.join(directory, layers[0]!);
     const { typefaces } = await externalizeRecordedLayer(picture, typefaceFolder, typefacesWritten);
     return { id: item.id, scale: slot.ratio, layers: [{ x: 0, y: 0, width: Math.round(item.viewport.width * slot.ratio),
