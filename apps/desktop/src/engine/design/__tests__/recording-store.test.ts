@@ -4,7 +4,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { chunkDesignRecording } from "../recording-chunks";
 import { designRecordingChunkId } from "../recording-chunks";
-import { readDesignRecordingChunk, readDesignRecordingFailure, readDesignRecordingTypeface, readStoredDesignRecording,
+import { designRecordingVariant, readDesignRecordingChunk, readDesignRecordingFailure, readDesignRecordingTypeface, readStoredDesignRecording,
   resetDesignRecordingStoreCachesForTests, storeDesignRecording, storeDesignRecordingFailure, storeDesignRecordingTypeface } from "../recording-store";
 
 const version = (c: string) => c.repeat(24);
@@ -79,6 +79,19 @@ describe("recording store", () => {
     expect(await readDesignRecordingChunk(id)).not.toBeNull();
     expect(await readDesignRecordingChunk("0".repeat(32))).toBeNull();
     expect(await readDesignRecordingChunk("../../etc/passwd")).toBeNull();
+  });
+
+  it("keeps a frame's light and dark recordings apart", async () => {
+    await storeDesignRecording(workspace, "design_1", "frame_1", designRecordingVariant(null, "light"), recording(version("a"), bytesFrom(50, 5_000)));
+    await storeDesignRecording(workspace, "design_1", "frame_1", designRecordingVariant(null, "dark"), recording(version("a"), bytesFrom(51, 5_000)));
+    await storeDesignRecording(workspace, "design_1", "frame_1", designRecordingVariant("ocean", "dark"), recording(version("b"), bytesFrom(52, 5_000)));
+    const light = await readStoredDesignRecording(workspace, "design_1", "frame_1", designRecordingVariant(null, "light"));
+    const dark = await readStoredDesignRecording(workspace, "design_1", "frame_1", designRecordingVariant(null, "dark"));
+    expect(light?.layers[0]?.chunks).not.toEqual(dark?.layers[0]?.chunks);
+    expect((await readStoredDesignRecording(workspace, "design_1", "frame_1", "ocean@dark"))?.sourceVersion).toBe(version("b"));
+    expect(await readStoredDesignRecording(workspace, "design_1", "frame_1", "ocean")).toBeNull();
+    expect(designRecordingVariant("ocean", "light")).toBe("ocean");
+    expect(designRecordingVariant(null, "dark")).toBe("_@dark");
   });
 
   it("answers a reopen from memory, and forgets a folder's answers when it is written", async () => {

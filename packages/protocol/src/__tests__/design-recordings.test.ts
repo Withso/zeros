@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  DESIGN_RECORDINGS_COLOR_SCHEME_CAPABILITY,
   DESIGN_RECORDINGS_READ_FAILURES_CAPABILITY,
   DESIGN_RECORDINGS_REPLY_DATA_BYTES,
   designBatchRecordReplySchema,
@@ -20,7 +21,9 @@ const recording = {
 describe("design recordings protocol", () => {
   it("renders distinct versioned frames, optionally naming known chunks", () => {
     const input = { workspaceId: "ws", directoryId: "design_1", theme: null, frames: [{ file: "page-1/home.html", sourceVersion: version }], knownChunks: [chunk] };
-    expect(designRecordingsRenderSchema.parse(input)).toEqual(input);
+    expect(designRecordingsRenderSchema.parse(input)).toEqual({ ...input, colorScheme: "light" });
+    expect(designRecordingsRenderSchema.parse({ ...input, colorScheme: "dark" }).colorScheme).toBe("dark");
+    expect(() => designRecordingsRenderSchema.parse({ ...input, colorScheme: "sepia" })).toThrow();
     expect(() => designRecordingsRenderSchema.parse({ ...input, frames: [input.frames[0], input.frames[0]] })).toThrow(/distinct/);
     expect(() => designRecordingsRenderSchema.parse({ ...input, frames: [{ file: "page-1/home.html" }] })).toThrow();
     expect(() => designRecordingsRenderSchema.parse({ ...input, knownChunks: ["not-a-chunk"] })).toThrow();
@@ -29,11 +32,12 @@ describe("design recordings protocol", () => {
 
   it("names the capability for reads that report known failures", () => {
     expect(DESIGN_RECORDINGS_READ_FAILURES_CAPABILITY).toBe("design.recordings.read-failures.v1");
+    expect(DESIGN_RECORDINGS_COLOR_SCHEME_CAPABILITY).toBe("design.recordings.color-scheme.v1");
   });
 
   it("reads stored recordings for frames sent without a version", () => {
     const input = { workspaceId: "ws", directoryId: "design_1", theme: "dark", frames: [{ file: "page-1/home.html" }] };
-    expect(designRecordingsReadSchema.parse(input)).toEqual(input);
+    expect(designRecordingsReadSchema.parse(input)).toEqual({ ...input, colorScheme: "light" });
     expect(designRecordingsReadSchema.parse({ ...input, withFailures: true }).withFailures).toBe(true);
     expect(() => designRecordingsReadSchema.parse({ ...input, withFailures: false })).toThrow();
   });

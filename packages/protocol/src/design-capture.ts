@@ -299,6 +299,8 @@ export type DesignThumbnailsReadReply = z.infer<typeof designThumbnailsReadReply
 export const DESIGN_RECORDINGS_CAPABILITY = "design.recordings.v1";
 /** design.recordings.read accepts `withFailures`. */
 export const DESIGN_RECORDINGS_READ_FAILURES_CAPABILITY = "design.recordings.read-failures.v1";
+/** design.recordings.render and .read accept `colorScheme`. */
+export const DESIGN_RECORDINGS_COLOR_SCHEME_CAPABILITY = "design.recordings.color-scheme.v1";
 /** A recording is stored and sent as content-defined chunks. An id is the
  * first 32 hex characters of the chunk's SHA-256, so identical bytes, such
  * as the font data every recording of a page embeds, travel and persist once. */
@@ -362,6 +364,8 @@ export const designRecordingsRenderSchema = z.object({
   workspaceId: z.string().min(1).max(128),
   directoryId: z.string().min(1).max(128),
   theme: recordingTheme,
+  /** The color scheme frames are drawn in: recordings of each are kept apart. */
+  colorScheme: z.enum(["light", "dark"]).default("light"),
   frames: z.array(recordingFrame).min(1).max(DESIGN_BATCH_CAPTURE_MAX_ITEMS),
   knownChunks: z.array(recordingChunkId).max(DESIGN_RECORDINGS_KNOWN_CHUNKS).optional(),
   /** Accepted for the future; the recorder reports its own `scale`. */
@@ -397,6 +401,7 @@ export const designRecordingsReadSchema = z.object({
   workspaceId: z.string().min(1).max(128),
   directoryId: z.string().min(1).max(128),
   theme: recordingTheme,
+  colorScheme: z.enum(["light", "dark"]).default("light"),
   frames: z.array(recordingFrame.partial({ sourceVersion: true })).min(1).max(DESIGN_MAX_FRAMES_PER_PAGE),
   knownChunks: z.array(recordingChunkId).max(DESIGN_RECORDINGS_KNOWN_CHUNKS).optional(),
   /** Also answer `failed` for frames the current recorder can't record. */
