@@ -439,48 +439,6 @@
         }
       }
     },
-    "scrollbar-thumb": {
-      "$type": "color",
-      "$value": {
-        "colorSpace": "hsl",
-        "components": [0.0, 0.0, 13.333]
-      },
-      "$description": "every scrollbar's thumb, shown while its scroller is hovered or scrolled",
-      "$extensions": {
-        "org.zeros": {
-          "cssName": "--scrollbar-thumb",
-          "section": "base-scrollbar-thumb"
-        }
-      }
-    },
-    "scrollbar-size": {
-      "$type": "dimension",
-      "$value": {
-        "value": 6,
-        "unit": "px"
-      },
-      "$description": "scrollbar slot, and the thumb under the pointer",
-      "$extensions": {
-        "org.zeros": {
-          "cssName": "--scrollbar-size",
-          "section": "base-scrollbar-thumb"
-        }
-      }
-    },
-    "scrollbar-thumb-inset": {
-      "$type": "dimension",
-      "$value": {
-        "value": 1,
-        "unit": "px"
-      },
-      "$description": "each side of the resting 4px thumb inside its slot",
-      "$extensions": {
-        "org.zeros": {
-          "cssName": "--scrollbar-thumb-inset",
-          "section": "base-scrollbar-thumb"
-        }
-      }
-    },
     "shadow-dropdown": {
       "$type": "shadow",
       "$value": {

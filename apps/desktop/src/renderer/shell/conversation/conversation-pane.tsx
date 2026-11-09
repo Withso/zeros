@@ -129,7 +129,7 @@ export function ConversationPane({
     readOnly && workspace ? (
       <>
         {/* The transcript column's own status row, as in a read-only chat. */}
-        <div className="mx-auto w-full max-w-(--chat-column) flex-1 px-7 pt-8">
+        <div className="mx-auto w-full max-w-[856px] flex-1 px-7 pt-8">
           <p className={TRANSCRIPT_STATUS_ROW_CLS}>No chat history.</p>
         </div>
         <WorkspaceHistoryBar

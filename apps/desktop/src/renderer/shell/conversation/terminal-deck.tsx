@@ -124,10 +124,8 @@ export function TerminalDeck() {
             className={cn(
               // `p-4` matches the workbench terminal panel's padding; the
               // padding area inherits bg-bg1 (= the xterm background)
-              // so it reads as one continuous terminal surface. A docked
-              // summary island floats over the body's right side; the
-              // terminal stays beside it (--chat-aside-inset, ChatPane).
-              "bg-bg1 absolute inset-y-0 left-0 right-[var(--chat-aside-inset,0px)] flex min-h-0 min-w-0 flex-col p-4",
+              // so it reads as one continuous terminal surface.
+              "bg-bg1 absolute inset-0 flex min-h-0 min-w-0 flex-col p-4",
               isActive
                 ? "pointer-events-auto visible"
                 : "pointer-events-none invisible",

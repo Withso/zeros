@@ -73,6 +73,7 @@ export interface TranscriptTurnShared {
   designRole: boolean;
   /** Codex in a cloud workspace whose runtime can fork natively. */
   setEditingMessageId: (id: string | null) => void;
+  setActivePromptEl: (element: HTMLDivElement | null) => void;
   /** Renderer context without per-message streaming fields; TurnEventList
    *  derives isStreaming/lastMessageId for its own turn. */
   ctx: RendererContext;
@@ -230,11 +231,13 @@ export const TranscriptTurn = memo(function TranscriptTurn({
               editToolbarPills={editToolbarPills}
               editAgentContext={editAgentContext}
             >
-              {/* The user prompt renders as a full-width bubble that folds
-                  when long. TurnPromptHeader paints the bubble chrome, the
-                  fold and the hover edit/copy/age row; the inner
-                  TextMessage contributes just the text. */}
-              <MessageView message={prompt} ctx={ctx} />
+              <div ref={isVisualTail ? shared.setActivePromptEl : null}>
+                {/* The user prompt renders as a full-width bubble that folds
+                    when long. TurnPromptHeader paints the bubble chrome, the
+                    fold and the hover edit/copy/age row; the inner
+                    TextMessage contributes just the text. */}
+                <MessageView message={prompt} ctx={ctx} />
+              </div>
             </TurnPromptHeader>
           )}
           {/* Per-turn footer (run time, copy output, "…" Reset to this point,

@@ -36,7 +36,6 @@ import { applyTheme } from "./derive";
 import {
   DEFAULT_STORED_PREFS,
   STORAGE_KEY,
-  isChatWidth,
   resolveThemeId,
   resolveVariant,
   themeVariantForId,
@@ -70,7 +69,6 @@ function normalizeStored(parsed: unknown): StoredAppearancePrefs {
     mode?: unknown;
     codeTheme?: unknown;
     codeThemes?: unknown;
-    chatWidth?: unknown;
   };
   // "high-contrast" was removed in 2026-05-15 — any saved value of
   // that mode migrates to "system" silently. The retired variant
@@ -101,11 +99,7 @@ function normalizeStored(parsed: unknown): StoredAppearancePrefs {
       : typeof raw.codeTheme === "string"
         ? migrateLegacyCodeTheme(raw.codeTheme)
         : {};
-  // Absent before the setting existed, so a missing or unknown width is Normal.
-  const chatWidth = isChatWidth(raw.chatWidth)
-    ? raw.chatWidth
-    : DEFAULT_STORED_PREFS.chatWidth;
-  return { mode, codeThemes, chatWidth };
+  return { mode, codeThemes };
 }
 
 /** The userData-persisted theme mode, exposed by the Electron preload
@@ -156,7 +150,6 @@ function derivePrefs(
 ): AppearancePrefs {
   return {
     mode: s.mode,
-    chatWidth: s.chatWidth,
     codeTheme: resolveCodeThemeForVariant(s.codeThemes[v], v).id,
   };
 }
@@ -207,9 +200,6 @@ export function getThemeId(): ThemeId {
 export function setPrefs(patch: Partial<AppearancePrefs>): void {
   if (patch.mode !== undefined) {
     stored = { ...stored, mode: patch.mode };
-  }
-  if (patch.chatWidth !== undefined) {
-    stored = { ...stored, chatWidth: patch.chatWidth };
   }
   if (patch.codeTheme !== undefined) {
     // An explicit pick lands in the slot of the variant the user is looking

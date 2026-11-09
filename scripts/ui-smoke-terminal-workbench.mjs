@@ -90,33 +90,6 @@ export async function runTerminalWorkbenchSmoke({ page, check }) {
     .click();
   await page.getByRole("option", { name: "Terminal", exact: true }).click();
   await expect(main.locator(".xterm-helper-textarea")).toBeVisible();
-  // 2026-11-09: the terminal's scrollbar is the app's one thumb, 4px at rest
-  // at its track's right edge and --scrollbar-thumb while the terminal is
-  // hovered. The track is xterm's own: its overview ruler stays off, since
-  // that ruler's outline defaults to white.
-  const xterm = main.locator(".xterm").first();
-  await xterm.hover();
-  const terminalThumb = await xterm.evaluate((node) => {
-    const slider = node.querySelector(".xterm-scrollable-element > .scrollbar.vertical > .slider");
-    const style = slider && getComputedStyle(slider);
-    const probe = document.createElement("span");
-    probe.style.backgroundColor = "var(--scrollbar-thumb)";
-    node.append(probe);
-    const thumb = getComputedStyle(probe).backgroundColor;
-    probe.remove();
-    return {
-      ruler: node.querySelectorAll(".xterm-decoration-overview-ruler").length,
-      width: style?.width,
-      right: style?.right,
-      fill: style?.backgroundColor === thumb,
-    };
-  });
-  await page.mouse.move(0, 0);
-  expect(terminalThumb).toEqual({ ruler: 0, width: "4px", right: "1px", fill: true });
-  check(
-    "The terminal's scrollbar is the app's 4px thumb at its track's edge, with no overview ruler",
-    true,
-  );
   const openedFirst = await state();
   const first = openedFirst.tabs.find((tab) => tab.id === openedFirst.activeId);
   const runTest = sidebar().getByRole("button", {
@@ -1011,8 +984,7 @@ export async function runTerminalWorkbenchSmoke({ page, check }) {
   ).toHaveCount(1);
 
   const fileTab = (await state()).tabs.find((tab) => tab.type === "files");
-  // The fixed Files tab always reads Files, whatever its stored title.
-  await tabs.getByRole("tab", { name: "Files", exact: true }).click();
+  await tabs.getByRole("tab", { name: fileTab.title, exact: true }).click();
   await panel.getByRole("button", { name: "Collapse panel" }).click();
   const startsBeforeShortcut = await page.evaluate(
     () =>

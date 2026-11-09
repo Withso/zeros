@@ -379,20 +379,6 @@
         }
       }
     },
-    "scrollbar-thumb": {
-      "$type": "color",
-      "$value": {
-        "colorSpace": "hsl",
-        "components": [0.0, 0.0, 91.765]
-      },
-      "$description": "every scrollbar's thumb, shown while its scroller is hovered or scrolled",
-      "$extensions": {
-        "org.zeros": {
-          "cssName": "--scrollbar-thumb",
-          "section": "light-scrollbar-thumb"
-        }
-      }
-    },
     "shadow-dropdown": {
       "$type": "shadow",
       "$value": {

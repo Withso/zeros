@@ -31,23 +31,10 @@
      lightness by ten percentage points from the active theme's foreground. */
   --composer-tool-action-hover: hsl(from var(--blue-fg) h s calc(l + 10));
 
-  /* The composer family's edge (composer, Create, the edit composer, dock
-     cards and docked pickers): a step past border2 in Dark, between two
-     primitives; Light keeps border2 (override below). */
+  /* The composer family's edge (composer, Create, sent prompts, dock cards and
+     docked pickers): a step past border2 in Dark, between two primitives;
+     Light keeps border2 (override below). */
   --composer-border: #323232;
-
-  /* A pill inside a sent message: one step lighter than the bg2 bubble, so it
-     still reads as a chip. bg2-hover in Dark; Light's next step lighter is too
-     faint to see, so it takes sidebar-bg, an equal step by eye (override
-     below). The bubble hands it to its pills as --pill-bg. */
-  --prompt-pill-bg: var(--bg2-hover);
-
-  /* The chat's text column, Settings → Appearance → Chat width: 800px is
-     Normal, with Narrow and Wide below. --chat-column adds the lane's px-7
-     gutters on each side. Both are maximums: a narrower pane still shrinks
-     the chat. */
-  --chat-lane: 800px;
-  --chat-column: calc(var(--chat-lane) + var(--spacing) * 14);
 
   /* Chat notice text actions (Retry, Sign in) have no hover fill: the brown
      label and icon pop instead — ten lightness points lighter on dark,
@@ -151,18 +138,9 @@
   );
 }
 
-/* Chat width (data-chat-width, shared/theme/derive.ts). */
-:root[data-chat-width="narrow"] {
-  --chat-lane: 625px;
-}
-:root[data-chat-width="wide"] {
-  --chat-lane: 1200px;
-}
-
 /* ── Light theme ── */
 [data-theme="light"] {
   --composer-border: var(--border2); /* #E4E0DC, the composer's existing Light edge */
-  --prompt-pill-bg: var(--sidebar-bg); /* #FBFAF8, a step lighter than the #F5F3F0 bubble */
   --agent-notice-action-hover: hsl(
     from var(--brown-fg) h s calc(l - 10)
   ); /* deeper mauve on the pink notice */

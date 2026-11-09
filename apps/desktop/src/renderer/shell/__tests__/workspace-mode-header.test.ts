@@ -357,10 +357,9 @@ describe("Code seats its column controls above the chat strips", () => {
     );
   });
 
-  it("sets an unfocused pane apart by the owner's 80% dim alone, which keeps the text people read at AA", () => {
-    // 2026-11-09: split panes share bg1 and run flush with no edge of their
-    // own, so an unfocused pane's dimmed strip and body tell them apart (its
-    // edge did from 2026-11-07). The former bg0/30 veil, a wash
+  it("sets an unfocused pane apart by its edge and the owner's 80% dim, which keeps the text people read at AA", () => {
+    // 2026-11-07: split panes share bg1 and are told apart by their edge, and
+    // an unfocused pane's strip and body dim. The former bg0/30 veil, a wash
     // laid OVER the content, pushed every tier below WCAG AA. The owner chose
     // 80%, the look of Cursor's unfocused panes, accepting that the two
     // quietest tiers dip below their floors there: fg3 in Light and muted-fg
@@ -368,7 +367,7 @@ describe("Code seats its column controls above the chat strips", () => {
     // floors). fg1 and fg2 stay at AA in both themes; any further dip fails.
     expect(paneLayoutSource).not.toContain("[--pane-bg:");
     expect(paneLayoutSource).not.toMatch(/bg-bg0\/\d+ pointer-events-none absolute inset-0/);
-    const dim = /split && !isFocused && "\*:opacity-(\d+)"/.exec(paneLayoutSource);
+    const dim = /isFocused \? "border-border2" : "border-border1 \*:opacity-(\d+)"/.exec(paneLayoutSource);
     expect(dim).not.toBeNull();
     const alpha = Number(dim?.[1]) / 100;
     expect(alpha).toBe(0.8);

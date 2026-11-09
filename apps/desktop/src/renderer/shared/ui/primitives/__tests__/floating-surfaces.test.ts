@@ -204,13 +204,10 @@ describe("Popover", () => {
 describe("the composer dock fade", () => {
   it("dissolves the transcript into its pane over 32px, above the edge it sits on", async () => {
     const { COMPOSER_DOCK_FADE } = await import("../../composer-surface");
-    // It stops a scrollbar slot short of its right edge, so the transcript's
-    // scrollbar never fades (2026-11-09).
     for (const cls of [
       "pointer-events-none",
       "absolute",
-      "left-0",
-      "right-(--scrollbar-size)",
+      "inset-x-0",
       "bottom-full",
       "h-8",
       "bg-gradient-to-t",

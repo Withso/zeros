@@ -1,22 +1,14 @@
 import { useCallback, useSyncExternalStore, type ReactNode } from "react";
+import { Folder, GitBranch } from "lucide-react";
 import type { Workspace } from "../../platform/git";
 import { parseCloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
 import { getOrganizationStoreGeneration } from "../../features/team/team-store";
 import { cloudCatalogGeneration, cloudWorkspaceDocument, subscribeCloudWorkspaces } from "../../state/cloud-workspace-catalog";
-import { isLocalMainWorkspace } from "../../state/local-main-workspace";
 import { useActiveWorkspace } from "../../state/use-active-workspace";
 import { useWorkspaceStore } from "../../state/workspace-store";
-import { PanelHeader } from "../../shared/ui/primitives";
+import { PanelHeader, Tooltip } from "../../shared/ui/primitives";
 import { workspaceLabel } from "../workspace-tabs";
 import { CloudWorkspaceDetails } from "./cloud-workspace-details";
-import { LocalWorkspaceDetails } from "./local-workspace-details";
-import { WorkspaceIdentityLabel } from "./workspace-identity";
-
-/** The branch the Local details show. A synthetic folder row keeps its
- * display name in `branch`, which is not a branch. */
-export function workspaceHeaderBranch(workspace: Workspace | null): string | undefined {
-  return workspace && !isLocalMainWorkspace(workspace) ? workspace.branch : undefined;
-}
 
 export function ConversationWorkspaceHeader({ workspace, ...props }: {
   workspace: Workspace | null;
@@ -29,7 +21,7 @@ export function ConversationWorkspaceHeader({ workspace, ...props }: {
   const current = workspace ?? resolved.workspace;
   const folder = current?.path ?? resolved.folder;
   const name = current ? workspaceLabel(current) : folder?.split(/[\\/]/).pop() || "Workspace";
-  return <WorkspaceHeader {...props} folder={folder} name={name} branch={workspaceHeaderBranch(current)} />;
+  return <WorkspaceHeader {...props} folder={folder} name={name} branch={!!current} />;
 }
 
 /** Column chrome is mounted once above the split tree. Only the cloud branch
@@ -37,8 +29,7 @@ export function ConversationWorkspaceHeader({ workspace, ...props }: {
 export function WorkspaceHeader({ folder, ...props }: {
   folder: string | null;
   name: string;
-  /** A Local workspace's branch, for its details. */
-  branch?: string;
+  branch?: boolean;
   readOnly?: boolean;
   windowControlsInset?: boolean;
   trailing?: ReactNode;
@@ -46,9 +37,18 @@ export function WorkspaceHeader({ folder, ...props }: {
 }) {
   return folder && parseCloudWorkspaceKey(folder)
     ? <CloudHeader key={`${getOrganizationStoreGeneration()}:${cloudCatalogGeneration()}:${folder}`} {...props} folder={folder} />
-    : <WorkspaceHeaderView {...props} identity={folder
-      ? <LocalWorkspaceDetails key={folder} folder={folder} name={props.name} branch={props.branch} />
-      : <WorkspaceIdentityLabel name={props.name} placement="local" />} />;
+    : <LocalHeader {...props} />;
+}
+
+function LocalHeader(props: Omit<Parameters<typeof WorkspaceHeader>[0], "folder">) {
+  // The 28px box the Cloud details button takes, so the name starts at one
+  // column for branch, folder and cloud workspaces, published or not.
+  const icon = (
+    <span className="-ml-1.5 inline-flex size-7 items-center justify-center">
+      {props.branch ? <GitBranch className="size-4" /> : <Folder className="size-4" />}
+    </span>
+  );
+  return <WorkspaceHeaderView {...props} icon={icon} />;
 }
 
 function CloudHeader({ folder, ...props }: Parameters<typeof WorkspaceHeader>[0] & { folder: string }) {
@@ -57,14 +57,12 @@ function CloudHeader({ folder, ...props }: Parameters<typeof WorkspaceHeader>[0]
   const subscribe = useCallback((listener: () => void) => active ? subscribeCloudWorkspaces(listener) : () => {}, [active]);
   const read = () => cloudWorkspaceDocument(target);
   const workspace = useSyncExternalStore(subscribe, read, read);
-  return <WorkspaceHeaderView {...props} identity={
-    <CloudWorkspaceDetails folder={folder} name={workspace?.name ?? props.name} workspace={workspace} />
-  } />;
+  return <WorkspaceHeaderView {...props} name={workspace?.name ?? props.name} icon={<CloudWorkspaceDetails folder={folder} />} />;
 }
 
-export function WorkspaceHeaderView({ identity, actions, readOnly, windowControlsInset, trailing }: {
-  /** The name, then where the workspace lives. */
-  identity: ReactNode;
+export function WorkspaceHeaderView({ name, icon, actions, readOnly, windowControlsInset, trailing }: {
+  name: string;
+  icon: ReactNode;
   actions?: ReactNode;
   readOnly?: boolean;
   windowControlsInset?: boolean;
@@ -74,7 +72,10 @@ export function WorkspaceHeaderView({ identity, actions, readOnly, windowControl
   // pane's own fill and corners set it apart.
   return <PanelHeader size="window" divider={false} aria-label="Workspace header" data-workspace-header="" data-tauri-drag-region="">
     {windowControlsInset && <span className="block h-full w-[108px] shrink-0" aria-hidden="true" data-window-controls-reserve="" />}
-    <div className="flex min-w-0 flex-1 items-center">{identity}</div>
+    <div className="text-fg2 inline-flex shrink-0 items-center" data-workspace-placement="">{icon}</div>
+    <Tooltip label={name}>
+      <span className="text-fg1 min-w-0 flex-1 truncate text-xs font-medium" data-workspace-name="">{name}</span>
+    </Tooltip>
     {!readOnly && <div className="flex shrink-0 items-center gap-1" data-workspace-header-actions="">{actions}{trailing}</div>}
   </PanelHeader>;
 }

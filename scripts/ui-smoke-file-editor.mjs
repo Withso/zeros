@@ -155,19 +155,11 @@ export async function runFileEditorSmoke({ page, check = () => {} }) {
       await expect(row.locator('[data-item-section="decoration"]')).toHaveText(
         "M",
       );
-      // sample.ts sits in the fixed Files home, which reads Files whatever it
-      // shows: no file name, glyph, status letter or close button. The tree
-      // row keeps the M.
-      const home = fixture.getByRole("tab", { name: "Files", exact: true });
-      await expect(home).toHaveText("Files");
-      await expect(home.getByTitle("Modified")).toHaveCount(0);
-      await expect(home.locator("svg, img")).toHaveCount(0);
       await expect(
-        fixture.getByRole("button", { name: "Close sample.ts", exact: true }),
-      ).toHaveCount(0);
-      await expect(
-        fixture.getByRole("tab", { name: "sample.ts", exact: true }),
-      ).toHaveCount(0);
+        fixture
+          .getByRole("tab", { name: "sample.ts", exact: true })
+          .getByTitle("Modified"),
+      ).toHaveText("M");
       for (const theme of ["dark", "light"]) {
         await fixture.evaluate(
           (value) => window.__fileEditor.theme(value),
@@ -269,13 +261,9 @@ export async function runFileEditorSmoke({ page, check = () => {} }) {
       await expect(source()).toContainText("Draft notes");
       await toggle("Diff view");
       await expect(diff()).toContainText("Draft notes");
-      // An extra File tab keeps its name and file glyph (its ✕ is a button).
-      await expect(
-        fixture
-          .getByRole("tab", { name: "notes.md", exact: true })
-          .locator("svg:not(button svg)"),
-      ).toHaveCount(1);
-      await fixture.getByRole("tab", { name: "Files", exact: true }).click();
+      await fixture
+        .getByRole("tab", { name: "sample.ts", exact: true })
+        .click();
       await expect(diff()).not.toContainText("Draft notes");
       await expect(dirty()).toHaveCount(1);
       await fixture.getByRole("tab", { name: "notes.md", exact: true }).click();
@@ -292,7 +280,7 @@ export async function runFileEditorSmoke({ page, check = () => {} }) {
       await fixture.evaluate(() => window.__fileEditor.switchOwner());
       await expect(diff()).not.toContainText("External update");
       await expect(
-        fixture.getByRole("tab", { name: "Files", exact: true }),
+        fixture.getByRole("tab", { name: "sample.ts", exact: true }),
       ).toHaveAttribute("aria-selected", "true");
       await fixture.evaluate(() => window.__fileEditor.switchOwner());
       await expect(diff()).toContainText("External update");

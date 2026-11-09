@@ -18,7 +18,7 @@ export async function runFolderReviewSmoke({ page, check }) {
   const panels = page.getByRole("tablist", { name: "Workspace panels" });
   await expect(panels).toBeVisible();
   const review = panels.getByRole("tab", { name: "Review", exact: true });
-  const files = panels.getByRole("tab", { name: "Files", exact: true });
+  const files = panels.getByRole("tab", { name: "Open file", exact: true });
   const rootTab = page.locator('[data-workspace-id="local:to-do-app"]');
   const resumeWith = async (isRepo, originUrl = null, fails = false) => {
     await page.evaluate(

@@ -16,9 +16,6 @@ export const personalPreferencesSchema = z
       codeThemes: z
         .object({ dark: z.string().optional(), light: z.string().optional() })
         .default({}),
-      // Settings → Appearance → Chat width. Optional, so a doc written before
-      // it existed stays as it is and reads as Normal.
-      chatWidth: z.enum(["narrow", "normal", "wide"]).optional(),
     }),
     experimental: z.record(z.string(), z.boolean()),
     show_hidden_workspaces: z.boolean(),

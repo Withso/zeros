@@ -7,7 +7,7 @@ export async function runFolderFilesSmoke({ page, check }) {
   await page
     .getByRole("button", { name: "Restore saved folder", exact: true })
     .click();
-  const filesTab = page.getByRole("tab", { name: "Files", exact: true });
+  const filesTab = page.getByRole("tab", { name: "Open file", exact: true });
   await filesTab.click();
   const empty = page.getByText("No files in this workspace", { exact: true });
   await expect(page.getByTestId("files-tab")).toBeVisible();

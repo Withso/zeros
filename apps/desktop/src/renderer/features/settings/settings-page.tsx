@@ -80,7 +80,7 @@ import {
   SelectValue,
 } from "../../shared/ui/primitives/select";
 import { useAppearance } from "../../shared/theme/provider";
-import { CHAT_WIDTH_OPTIONS, type ChatWidth, type ThemeMode } from "../../shared/theme/prefs";
+import { type ThemeMode } from "../../shared/theme/prefs";
 import { codeThemesForVariant } from "../../shared/theme/code-themes";
 import { useThemeVariant } from "../../shared/theme/use-theme-variant";
 import { CodeThemePreview } from "./code-theme-preview";
@@ -1686,26 +1686,6 @@ function AppearancePanel() {
             </SelectTrigger>
             <SelectContent>
               {THEME_OPTIONS.map((opt) => (
-                <SelectItem key={opt.value} value={opt.value}>
-                  {opt.label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </SettingsRow>
-        <SettingsRow
-          label="Chat width"
-          hint="How wide conversations grow in a wide pane."
-        >
-          <Select
-            value={prefs.chatWidth}
-            onValueChange={(v) => setPrefs({ chatWidth: v as ChatWidth })}
-          >
-            <SelectTrigger width="fixed" aria-label="Chat width">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {CHAT_WIDTH_OPTIONS.map((opt) => (
                 <SelectItem key={opt.value} value={opt.value}>
                   {opt.label}
                 </SelectItem>

@@ -60,24 +60,8 @@ export type ThemeVariant = "dark" | "light";
  *  theme is painted" read as intended. */
 export type ThemeId = ThemeVariant;
 
-/** The chat's text column (Settings → Appearance → Chat width): Narrow
- *  625px, Normal 800px, Wide 1200px, set by `--chat-lane` in
- *  styles/semantic-tokens.css from the document's data-chat-width. */
-export type ChatWidth = "narrow" | "normal" | "wide";
-
-export const CHAT_WIDTH_OPTIONS: ReadonlyArray<{ value: ChatWidth; label: string }> = [
-  { value: "narrow", label: "Narrow" },
-  { value: "normal", label: "Normal" },
-  { value: "wide", label: "Wide" },
-];
-
-export function isChatWidth(value: unknown): value is ChatWidth {
-  return value === "narrow" || value === "normal" || value === "wide";
-}
-
 export interface AppearancePrefs {
   mode: ThemeMode;
-  chatWidth: ChatWidth;
   /** Syntax-highlighting theme id (see code-themes.ts) shared by code blocks,
    *  diffs, the editor, and the terminal. This is the RESOLVED id for the
    *  CURRENT variant — the store re-derives it whenever the variant flips
@@ -95,13 +79,11 @@ export interface AppearancePrefs {
 export interface StoredAppearancePrefs {
   mode: ThemeMode;
   codeThemes: { dark?: string; light?: string };
-  chatWidth: ChatWidth;
 }
 
 export const DEFAULT_STORED_PREFS: StoredAppearancePrefs = {
   mode: "dark",
   codeThemes: {},
-  chatWidth: "normal",
 };
 
 export const STORAGE_KEY = "zeros.appearance.v2";

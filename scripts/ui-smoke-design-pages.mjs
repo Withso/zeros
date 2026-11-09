@@ -608,7 +608,7 @@ async function exercisePages({ page, check }) {
     `${origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html?pages=1&workbench`,
     { waitUntil: "networkidle" },
   );
-  await page.getByRole("tab", { name: "Files", exact: true }).click();
+  await page.getByRole("tab", { name: "Open file", exact: true }).click();
   const files = page.getByTestId("design-files-section");
   await expect(files).toBeVisible();
   const designFolder = files.locator('[data-item-path="North One - Design/"]');

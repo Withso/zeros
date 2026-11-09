@@ -192,7 +192,7 @@ export async function runDesignPanelResizeRetentionSmoke({ page, check }) {
       .toBeGreaterThan(baseline);
     // Keyboard navigation can change tabs while the pointer is still captured.
     await page
-      .getByRole("tab", { name: "Files", exact: true })
+      .getByRole("tab", { name: "Open file", exact: true })
       .press("Enter");
     await expect(canvas).toHaveAttribute("inert", "");
     await expect(

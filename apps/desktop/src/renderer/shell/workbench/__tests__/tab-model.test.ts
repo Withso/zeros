@@ -7,13 +7,10 @@ import {
   createChangesTab,
   createEmptyFilesTab,
   createFilesTab,
-  createReviewTab,
   createSimulatorTab,
-  createTerminalWorkbenchTab,
   defaultScopeFor,
   defaultTabs,
   findBlankFilesTab,
-  isFixedWorkbenchTab,
   MAX_PERSISTED_WORKBENCH_SCOPES,
   loadScopes,
   migrateScopes,
@@ -24,7 +21,6 @@ import {
   recordRecentBrowser,
   saveScopes,
   workbenchTabIconPath,
-  workbenchTabStripLabel,
   shouldMountWorkbenchTab,
   type WorkbenchScopeMap,
   type WorkbenchScopeState,
@@ -337,48 +333,6 @@ describe("workbenchTabIconPath", () => {
     expect(
       workbenchTabIconPath({ ...createEmptyFilesTab(), filePath: "   " }),
     ).toBeNull();
-  });
-});
-
-// 2026-11-09: the four tabs every workspace keeps are text only, and the
-// fixed Files home always reads Files, whatever it shows.
-describe("fixed workbench tabs", () => {
-  it("treats the Files home, Design, Changes and Review as the fixed tabs", () => {
-    const { tabs } = defaultTabs();
-    expect(tabs.filter(isFixedWorkbenchTab).map((tab) => tab.type)).toEqual([
-      "files",
-      "design",
-      "changes",
-      "review",
-    ]);
-    expect(isFixedWorkbenchTab(createChangesTab())).toBe(true);
-    expect(isFixedWorkbenchTab(createReviewTab())).toBe(true);
-    // Extra File tabs and every closable tab keep their glyphs.
-    expect(isFixedWorkbenchTab(createEmptyFilesTab())).toBe(false);
-    expect(isFixedWorkbenchTab(createFilesTab("src/session.ts"))).toBe(false);
-    expect(isFixedWorkbenchTab(createBrowserTab())).toBe(false);
-    expect(isFixedWorkbenchTab(createTerminalWorkbenchTab("setup", "Setup"))).toBe(false);
-    expect(isFixedWorkbenchTab(createSimulatorTab("ios"))).toBe(false);
-  });
-
-  it("labels the fixed Files home Files, blank or showing a file", () => {
-    const home = defaultTabs().tabs.find((tab) => tab.type === "files")!;
-    expect(home.fixed).toBe(true);
-    expect(workbenchTabStripLabel(home)).toBe("Files");
-    const showing = { ...home, filePath: "src/session.ts", title: "session.ts" };
-    expect(workbenchTabStripLabel(showing)).toBe("Files");
-    expect(workbenchTabStripLabel(blankFixedFilesTab(showing))).toBe("Files");
-    // Only the strip relabels it: the stored title stays as it was.
-    expect(home.title).toBe("Open file");
-    expect(blankFixedFilesTab(showing).title).toBe("Open file");
-  });
-
-  it("keeps every other tab's own title", () => {
-    expect(workbenchTabStripLabel(createFilesTab("src/session.ts"))).toBe("session.ts");
-    expect(workbenchTabStripLabel(createEmptyFilesTab())).toBe("Open file");
-    expect(workbenchTabStripLabel(createChangesTab())).toBe("Changes");
-    expect(workbenchTabStripLabel(createReviewTab())).toBe("Review");
-    expect(workbenchTabStripLabel(createTerminalWorkbenchTab("setup", "Setup"))).toBe("Setup");
   });
 });
 

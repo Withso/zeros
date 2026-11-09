@@ -862,9 +862,9 @@ export function PrStatusIsland({
     <div
       data-pr-island=""
       className={cn(
-        // The tab row's separator frames the tinted flush row above; its own
-        // one-pixel hairline frames it against the Changes surface below.
-        "flex h-10 shrink-0 items-center gap-2.5 border-b pr-1.5 pl-3",
+        // One-pixel hairlines above and below the tinted flush row frame it
+        // against the tab bar and the Changes surface.
+        "flex h-10 shrink-0 items-center gap-2.5 border-y pr-1.5 pl-3",
         CARD_TONE[tone],
       )}
       aria-busy={!island || undefined}

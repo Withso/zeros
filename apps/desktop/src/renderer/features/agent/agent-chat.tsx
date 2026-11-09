@@ -290,8 +290,7 @@ import { cloudPresentationRunning } from "./cloud-turn-presentation";
 import { pickActiveWorkflow } from "./workflow-activity";
 import { stabilizeTurns } from "./stable-turns";
 import { turnFailureForCard } from "./turn-failure";
-import { watchChatScrollbarReveal } from "./chat-scrollbar-reveal";
-import { JumpToLatestButton } from "./jump-pills";
+import { JumpToLatestButton, JumpToPromptPill } from "./jump-pills";
 import {
   CheckpointRail,
   sameCheckpoints,
@@ -846,6 +845,9 @@ function AgentChatBody({
 
   // State, not refs, so the hooks that need these elements re-run when they mount.
   const [scrollEl, setScrollEl] = useState<HTMLDivElement | null>(null);
+  const [activePromptEl, setActivePromptEl] = useState<HTMLDivElement | null>(
+    null,
+  );
   // Mirrors scrollEl for imperative readers.
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const agentsList = useWorkspaceAgents(chatThread?.folder, interactive);
@@ -2421,14 +2423,26 @@ function AgentChatBody({
     return () => scrollEl.removeEventListener("scroll", onScroll);
   }, [scrollEl, surfaceActive]);
 
-  // The scrollbar shows only while the reader scrolls; streaming's own scrolls
-  // to the tail never reveal it.
+  // Reveal the scrollbar only while scrolling, by flagging data-scrolling on the
+  // element directly so the scroll stream never re-renders the transcript
+  // (runtime-content.css keys the thumb off it).
   useEffect(() => {
     if (!scrollEl) return;
-    return watchChatScrollbarReveal(
-      scrollEl,
-      () => surfaceActiveRef.current && !restoreInProgressRef.current,
-    );
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const onScroll = () => {
+      if (!surfaceActiveRef.current || restoreInProgressRef.current) return;
+      scrollEl.dataset.scrolling = "true";
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => {
+        delete scrollEl.dataset.scrolling;
+      }, 700);
+    };
+    scrollEl.addEventListener("scroll", onScroll, { passive: true });
+    return () => {
+      scrollEl.removeEventListener("scroll", onScroll);
+      if (timer) clearTimeout(timer);
+      delete scrollEl.dataset.scrolling;
+    };
   }, [scrollEl]);
 
   // Re-probe when the oldest message id changes too: a rebuild can insert a
@@ -4209,6 +4223,7 @@ function AgentChatBody({
       hasChatThread: transcriptHasChatThread,
       designRole: transcriptDesignRole,
       setEditingMessageId,
+      setActivePromptEl,
       ctx: transcriptCtx,
       actions: transcriptActions,
     }),
@@ -4226,6 +4241,7 @@ function AgentChatBody({
       transcriptHasChatThread,
       transcriptDesignRole,
       setEditingMessageId,
+      setActivePromptEl,
       transcriptCtx,
       transcriptActions,
     ],
@@ -4296,10 +4312,9 @@ function AgentChatBody({
         </header>
       )}
 
-      {/* --chat-column is the chat's single width: the --chat-lane text column
-          (Settings → Appearance → Chat width) inside px-7 gutters, shared with the
-          composer and the read-only history bar. It is a maximum, so narrower panes
-          shrink without fixed gutters. */}
+      {/* max-w-[856px] is the chat's single width: an 800px column inside px-7
+          gutters, shared with the composer and the read-only history bar. It is a
+          maximum, so narrower panes shrink without fixed gutters. */}
       {/* Keeps the top mask outside the scroller, pinned to the viewport top. */}
       <div className="relative flex min-h-0 flex-1 flex-col">
         {/* `zeros-agent-body` and `zeros-agent-messages` are hooks for
@@ -4308,12 +4323,8 @@ function AgentChatBody({
           ref={setScrollContainer}
           data-agent-diff-collision-boundary=""
           // `isolate` keeps everything layered inside the transcript (code
-          // gutters, copy buttons) under the top fade and the rail. A docked
-          // summary island floats over the pane's right side: the padding keeps
-          // the content clear of it, with or without a scrollbar, while the bar
-          // stays at this scroller's own edge, the pane's (--chat-aside-inset,
-          // ChatPane).
-          className="zeros-agent-body zeros-agent-scrollbar isolate min-h-0 flex-1 overflow-x-hidden overflow-y-auto bg-transparent pr-(--chat-aside-inset)"
+          // gutters, copy buttons) under the top fade, the rail and the pill.
+          className="zeros-agent-body zeros-agent-scrollbar isolate min-h-0 flex-1 overflow-x-hidden overflow-y-auto bg-transparent"
           style={{ position: "relative" }}
         >
           <ConversationContent
@@ -4321,7 +4332,7 @@ function AgentChatBody({
             // scroller's height, so pb-8 would never reach the real bottom. pt-8 starts the
             // first message below the 32px top fade; px-7 clears the checkpoint rail.
             // Mirror any change on the composer column.
-            className="zeros-agent-messages mx-auto flex w-full max-w-(--chat-column) min-w-0 flex-none flex-col gap-5 overflow-visible px-7 pt-8 pb-8"
+            className="zeros-agent-messages mx-auto flex w-full max-w-[856px] min-w-0 flex-none flex-col gap-5 overflow-visible px-7 pt-8 pb-8"
           >
             {/* Older history auto-pages in via the nearTop effect above, with
               no visible affordance: scrolling back should show everything. */}
@@ -4471,16 +4482,19 @@ function AgentChatBody({
             )}
           </ConversationContent>
         </Conversation>
+        {/* Outside the scroller, so it stays put while the transcript scrolls,
+            and on the 856px column's right edge rather than the pane's. */}
+        <div className="pointer-events-none absolute inset-x-0 top-3 z-2 mx-auto flex w-full max-w-[856px] justify-end px-7">
+          <JumpToPromptPill scrollEl={scrollEl} promptEl={activePromptEl} />
+        </div>
         {/* Stable top fade under the chat strip, present from the first paint so a
             restore never pops it in; it never takes clicks. */}
         <div
           aria-hidden="true"
-          data-chat-top-fade=""
           // It ends where the transcript column starts (pt-8), so the first
           // message never sits under it while scrolled content still dissolves
-          // under the strip. It stops short of the scrollbar, or of a docked
-          // summary island, so neither fades.
-          className="pointer-events-none absolute top-0 left-0 right-[max(var(--scrollbar-size),var(--chat-aside-inset,0px))] z-1 h-8 bg-gradient-to-b from-(--pane-bg) to-transparent"
+          // under the strip.
+          className="pointer-events-none absolute inset-x-0 top-0 z-1 h-8 bg-gradient-to-b from-(--pane-bg) to-transparent"
         />
         {/* A sibling of the scroller so the rail stays pinned; z-2 paints above
             the top mask. */}
@@ -4495,17 +4509,16 @@ function AgentChatBody({
         />
       </div>
 
-      {/* relative so Jump to latest anchors to the composer's top edge, outside
-          the scroll container; the padding keeps the composer clear of a
-          docked summary island. */}
-      <div className="relative shrink-0 pr-(--chat-aside-inset)">
+      {/* relative so JumpPills anchors to the composer's top edge, outside the
+          scroll container. */}
+      <div className="relative shrink-0">
         <JumpToLatestButton
           isAtBottom={isAtBottom}
           jumpToBottom={jumpToBottom}
         />
-        {/* The same column as the transcript band above, so they stay in lock-step. */}
+        {/* max-w-[856px] stays in lock-step with the transcript band above. */}
         {readOnly ? composerReplacement : (
-        <div ref={composerDockRef} className="relative mx-auto box-border flex w-full max-w-(--chat-column) min-w-0 shrink-0 flex-col gap-2 border-t-0 bg-transparent px-7 pt-0 pb-4">
+        <div ref={composerDockRef} className="relative mx-auto box-border flex w-full max-w-[856px] min-w-0 shrink-0 flex-col gap-2 border-t-0 bg-transparent px-7 pt-0 pb-4">
           {/* pt-0 puts the column's top on its topmost card, so this one fade
               sits on the composer alone or on the highest docked card.
               Portaled pickers carry their own. */}

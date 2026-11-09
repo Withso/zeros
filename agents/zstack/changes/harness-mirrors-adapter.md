@@ -14,14 +14,6 @@ harness disagrees with the product, read the fake before changing the
 feature, and pin the operation's real effect in a unit test through the real
 adapter or mutation helper.
 
-Mount lifecycle is semantics too. `harness-app-sidebar.tsx` unmounts the
-chat on Settings while `app-shell.tsx` keeps it mounted, inert and invisible,
-so the workspace-header smoke still passed with the header popup's page-hide
-reset removed. Pin retained-surface state in a unit test that keeps the
-component mounted while its page flag toggles
-(`shell/__tests__/workspace-details-open.test.ts`), and mutation-check a new
-smoke assertion before relying on it.
-
 **Encoded in.** The `token.set` fake in
 `harnesses/harness-design-workspace.tsx`, and
 `features/design-workspace/__tests__/design-theme-css.test.ts`, which applies

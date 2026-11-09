@@ -4,8 +4,6 @@ import { appSidebarRegressionChecks } from "./ui-smoke-app-sidebar-regressions.m
 import { runWorkspaceHoverCards } from "./ui-smoke-workspace-hover-card.mjs";
 import { runWorkspaceShortcutsSmoke } from "./ui-smoke-workspace-shortcuts.mjs";
 import { runChatSurfacesSmoke } from "./ui-smoke-chat-surfaces.mjs";
-import { runChatWidthSmoke } from "./ui-smoke-chat-width.mjs";
-import { runWorkspaceHeaderSmoke } from "./ui-smoke-workspace-header.mjs";
 
 // App sidebar contract: Repository grouping by default with every workspace under
 // its repository; Status and None are also available; repository headers
@@ -475,13 +473,13 @@ export async function runAppSidebarSmoke({ page, check, harnessBase }) {
   await expect(workspaceHeader).toHaveCount(1);
   const reserve = page.locator("[data-window-controls-reserve]");
   await expect(reserve).toHaveCount(1);
-  const [headerBox, identityBox, reserveBox] = await Promise.all([
+  const [headerBox, placementBox, reserveBox] = await Promise.all([
     workspaceHeader.boundingBox(),
-    workspaceHeader.locator("[data-workspace-identity]").boundingBox(),
+    workspaceHeader.locator("[data-workspace-placement]").boundingBox(),
     reserve.boundingBox(),
   ]);
   expect(reserveBox.width).toBe(108);
-  expect(identityBox.x).toBeGreaterThanOrEqual(toggleBox.x + toggleBox.width);
+  expect(placementBox.x).toBeGreaterThanOrEqual(toggleBox.x + toggleBox.width);
   expect(firstTab.y).toBeGreaterThanOrEqual(headerBox.y + headerBox.height);
   expect(firstTab.y).toBeGreaterThanOrEqual(toggleBox.y + toggleBox.height);
   const composer = page.locator(".zeros-agent-surface .composer-pm").first();
@@ -515,8 +513,6 @@ export async function runAppSidebarSmoke({ page, check, harnessBase }) {
   await runWorkspaceHoverCards({ page, check, harnessBase });
   await runWorkspaceShortcutsSmoke({ page, check, harnessBase });
   await runChatSurfacesSmoke({ page, check, harnessBase });
-  await runChatWidthSmoke({ page, check, harnessBase });
-  await runWorkspaceHeaderSmoke({ page, check, harnessBase });
 
   expect(errors).toEqual([]);
   check("app sidebar interactions have no browser exceptions", true);

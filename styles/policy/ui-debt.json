@@ -60,6 +60,9 @@
         "mr-[-0.35rem]": 1,
         "mr-[-0.45rem]": 1
       },
+      "apps/desktop/src/renderer/shared/ui/primitives/scroll-area.tsx": {
+        "p-[1px]": 2
+      },
       "apps/desktop/src/renderer/shell/dispatcher/dispatcher-composer.tsx": {
         "z-[5]": 1
       },
@@ -257,7 +260,7 @@
         "button": 1
       },
       "apps/desktop/src/renderer/features/agent/jump-pills.tsx": {
-        "button": 1
+        "button": 2
       },
       "apps/desktop/src/renderer/features/agent/permission-card.tsx": {
         "button": 1

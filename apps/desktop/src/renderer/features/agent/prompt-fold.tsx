@@ -23,10 +23,8 @@ export const PROMPT_FOLD_TOGGLE_ROW_PX = 28;
 // transcript at the message's end.
 export const PROMPT_FOLD_COLLAPSED_CLS =
   "max-h-[118px] overflow-clip mask-b-from-[calc(100%-2rem)]";
-// Unfolded, its edge fades come from .zeros-prompt-fold-scroll
-// (styles/global/scrollbars.css), which spares the app's scrollbar.
 export const PROMPT_FOLD_EXPANDED_CLS =
-  "max-h-[338px] overflow-y-auto zeros-prompt-fold-scroll";
+  "max-h-[338px] overflow-y-auto [scrollbar-width:thin] data-more-above:mask-t-from-[calc(100%-2rem)] data-more-below:mask-b-from-[calc(100%-2rem)]";
 /** The folded view's last 32px dissolve: a control there is not plainly in view. */
 const PROMPT_FOLD_FADE_PX = 32;
 

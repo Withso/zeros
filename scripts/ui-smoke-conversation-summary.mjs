@@ -57,15 +57,15 @@ export async function runConversationSummarySmoke({
     );
   };
 
-  await verify("unpublished Git keeps the header's laptop and hides PR creation through owner switches and publication", async () => {
-    // 2026-11-09: every Local workspace shows its name, then a laptop, whether
-    // or not its branch is published; there is no "Local" badge.
+  await verify("unpublished Git keeps the header's branch glyph and hides PR creation through owner switches and publication", async () => {
+    // 2026-11-06: the header no longer swaps its glyph for a "Local" badge, so
+    // every state below shows the branch glyph in the shared slot.
     const header = page.getByLabel("Workspace header", { exact: true });
     const createPr = () => island.getByRole("button", { name: "Create PR", exact: true });
     const expectBranchGlyph = async () => {
-      await expect(header.locator('[data-workspace-identity] [data-workspace-placement="local"].lucide-laptop')).toBeVisible();
+      await expect(header.locator("[data-workspace-placement] .lucide-git-branch")).toBeVisible();
       await expect(header.getByText("Local", { exact: true })).toHaveCount(0);
-      await expect(header.locator(".lucide-hard-drive, .lucide-git-branch, .lucide-cloud")).toHaveCount(0);
+      await expect(header.locator(".lucide-hard-drive")).toHaveCount(0);
     };
     // As in ui-smoke-workspace-shortcuts.mjs: CI saw this evaluate fail as a
     // destroyed context without any navigation, so the imports stay reachable.
@@ -108,30 +108,6 @@ export async function runConversationSummarySmoke({
     await page.evaluate(() => window.__summaryHarness.setAlternateRemote(null));
     await expectBranchGlyph();
     await expect(createPr()).toHaveCount(0);
-  });
-
-  await verify("the header's name opens its Local details, and a workspace switch closes them, A → B → A, personal and organization", async () => {
-    const identity = page.getByLabel("Workspace header", { exact: true }).locator("[data-workspace-identity]");
-    const details = page.getByRole("dialog", { name: "Local workspace details", exact: true });
-    for (const organizationId of [null, "summary-org"]) {
-      await page.evaluate(id => window.__summaryHarness.setOrganization(id), organizationId);
-      await expect(identity).toHaveAccessibleName("Summary A, Local workspace");
-      await identity.click();
-      await expect(details.getByText("summary/a", { exact: true })).toBeVisible();
-      await expect(details.getByText("/summary-fixture/a/worktree", { exact: true })).toBeVisible();
-      await expect(details.getByText("Local", { exact: true })).toBeVisible();
-      await page.evaluate(() => window.__summaryHarness.switchFolder("b"));
-      await expect(details).toHaveCount(0);
-      await expect(identity).toHaveAccessibleName("Summary B, Local workspace");
-      await expect(identity).toHaveAttribute("aria-expanded", "false");
-      await identity.click();
-      await expect(details.getByText("summary/b", { exact: true })).toBeVisible();
-      await expect(details.getByText("summary/a", { exact: true })).toHaveCount(0);
-      await page.evaluate(() => window.__summaryHarness.switchFolder("a"));
-      await expect(details).toHaveCount(0);
-      await expect(identity).toHaveAccessibleName("Summary A, Local workspace");
-      await expect(identity).toHaveAttribute("aria-expanded", "false");
-    }
   });
 
   await verify("catalog GitHub flags use the remote host", async () => {
@@ -190,58 +166,37 @@ export async function runConversationSummarySmoke({
   });
 
   await verify(
-    "island floats beside the chat's scrollbar, keeps the chat clear and uses the requested surface",
+    "island reserves chat space and uses the requested surface",
     async () => {
       await expect(trigger).toBeVisible();
       await expect(trigger).toHaveAttribute("aria-expanded", "true");
-      // 2026-11-09: sidebar-bg on a border1 edge.
       const appearance = await island.evaluate((node) => {
         const style = getComputedStyle(node);
         const probe = document.createElement("div");
-        probe.style.background = "var(--sidebar-bg)";
-        probe.style.borderColor = "var(--border1)";
+        probe.style.background = "var(--bg1-bright)";
         node.append(probe);
-        const expected = getComputedStyle(probe);
-        const result = {
+        const background = getComputedStyle(probe).backgroundColor;
+        probe.remove();
+        return {
           radius: style.borderRadius,
           border: style.borderRightWidth,
-          matchesBackground: style.backgroundColor === expected.backgroundColor,
-          matchesEdge: [style.borderTopColor, style.borderRightColor, style.borderBottomColor, style.borderLeftColor]
-            .every((color) => color === expected.borderTopColor),
+          matchesBackground: style.backgroundColor === background,
           overflow: node.scrollWidth > node.clientWidth,
         };
-        probe.remove();
-        return result;
       });
       expect(appearance).toEqual({
         radius: "12px",
-        border: "1px",
+        border: "0px",
         matchesBackground: true,
-        matchesEdge: true,
         overflow: false,
       });
-      // 2026-11-09: the island floats over the chat's top-right corner. The
-      // conversation and composer end at its left edge, while the chat's
-      // scroller, and so its scrollbar, runs on to the pane's edge.
-      await island.evaluate((node) => Promise.all(node.getAnimations().map((animation) => animation.finished)));
       const chatBox = await page.getByTestId("chat-body").boundingBox();
       const cardBox = await island.boundingBox();
-      expect(chatBox.x + chatBox.width).toBeLessThanOrEqual(cardBox.x + 0.5);
-      const composerBox = await page.getByRole("textbox", { name: "Message" }).boundingBox();
-      expect(composerBox.x + composerBox.width).toBeLessThanOrEqual(cardBox.x);
+      expect(chatBox.x + chatBox.width).toBeLessThanOrEqual(cardBox.x);
       const column = await page.locator("[data-zeros-column-2]").boundingBox();
-      const scrollerBox = await page.getByTestId("chat-scroller").boundingBox();
       expect(
-        Math.abs(scrollerBox.x + scrollerBox.width - column.x - column.width),
-      ).toBeLessThan(0.5);
-      expect(
-        Math.abs(column.x + column.width - cardBox.x - cardBox.width - 16),
-      ).toBeLessThan(0.5);
-      const hit = await island.evaluate((node) => {
-        const box = node.getBoundingClientRect();
-        return node.contains(document.elementFromPoint(box.left + box.width / 2, box.top + 12));
-      });
-      expect(hit).toBe(true);
+        column.x + column.width - cardBox.x - cardBox.width,
+      ).toBeGreaterThanOrEqual(16);
       await expect(
         island.getByRole("button", { name: "Files", exact: true }),
       ).toBeVisible();
@@ -359,26 +314,6 @@ export async function runConversationSummarySmoke({
       await page.keyboard.press("Enter");
       await expect(popup).toBeVisible();
       await expect.poll(fitsColumn).toBe(true);
-      // 2026-11-09: the popover matches the docked island, sidebar-bg on a
-      // border1 edge.
-      expect(
-        await popup.evaluate((node) => {
-          const style = getComputedStyle(node);
-          const probe = document.createElement("div");
-          probe.style.background = "var(--sidebar-bg)";
-          probe.style.borderColor = "var(--border1)";
-          node.append(probe);
-          const expected = getComputedStyle(probe);
-          const result = {
-            border: style.borderTopWidth,
-            matchesBackground: style.backgroundColor === expected.backgroundColor,
-            matchesEdge: [style.borderTopColor, style.borderRightColor, style.borderBottomColor, style.borderLeftColor]
-              .every((color) => color === expected.borderTopColor),
-          };
-          probe.remove();
-          return result;
-        }),
-      ).toEqual({ border: "1px", matchesBackground: true, matchesEdge: true });
       await page.keyboard.press("Escape");
       await expect(popup).toHaveCount(0);
       await expect(trigger).toBeFocused();

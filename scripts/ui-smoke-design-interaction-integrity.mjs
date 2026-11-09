@@ -706,7 +706,7 @@ export async function runDesignMotionRetainedSizeSmoke({ page, check }) {
       name: "Resize motion timeline",
     });
     await expect(handle).toBeVisible();
-    await page.getByRole("tab", { name: "Files", exact: true }).click();
+    await page.getByRole("tab", { name: "Open file", exact: true }).click();
     await expect(canvas).toHaveAttribute("inert", "");
     await page.evaluate(() => {
       localStorage.setItem("zeros.design.motion-timeline-height", "320");

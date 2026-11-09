@@ -16,13 +16,6 @@ the choice in `onSelect` and start the edit in the menu content's
 `onCloseAutoFocus`: call `event.preventDefault()`, then mount the field. Test
 the keyboard path, not only the click, and assert the field is focused.
 
-A composed trigger also takes the outer primitive's state attribute. In
-`<Tooltip><PopoverTrigger asChild>`, PopoverTrigger spreads the Tooltip's
-`data-state` over its own, so the trigger reads `closed` while its popover is
-open and a `data-[state=open]:` fill never shows. Key an open fill off
-`aria-expanded`, which only the popover sets (`workspace-identity.tsx`; the
-workspace-header smoke measures the open fill).
-
 **Encoded in.** `VariableActions` in
 `features/design-workspace/design-theme-editor.tsx`;
 `scripts/ui-smoke-design-theme-variables.mjs` asserts the rename field is

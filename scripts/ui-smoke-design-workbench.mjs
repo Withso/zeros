@@ -27,7 +27,7 @@ async function exerciseDesignWorkbench({ page, check }) {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto(url, { waitUntil: "networkidle" });
   const designTab = page.getByRole("tab", { name: "Design", exact: true });
-  const filesTab = page.getByRole("tab", { name: "Files", exact: true });
+  const filesTab = page.getByRole("tab", { name: "Open file", exact: true });
   const canvas = page.locator(
     '[data-design-retained-workspace="ws_design_harness"]',
   );

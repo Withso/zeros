@@ -249,14 +249,6 @@
                   "type": "string"
                 }
               }
-            },
-            "chatWidth": {
-              "type": "string",
-              "enum": [
-                "narrow",
-                "normal",
-                "wide"
-              ]
             }
           },
           "required": [

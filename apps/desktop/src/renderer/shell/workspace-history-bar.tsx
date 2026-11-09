@@ -124,7 +124,7 @@ export function WorkspaceHistoryBar({
   };
   const Icon = workspace.archivedAt == null ? FolderX : Archive;
   return (
-    <div className="mx-auto w-full max-w-(--chat-column) shrink-0 px-7 pt-2 pb-4">
+    <div className="mx-auto w-full max-w-[856px] shrink-0 px-7 pt-2 pb-4">
       {/* It takes the composer's place, so it is a dock card like the ones
           above a live composer. */}
       <div

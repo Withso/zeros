@@ -152,11 +152,9 @@ export async function runLocalLinksSmoke({ page, harnessBase, check }) {
         outside: !bubble.contains(header),
         // A sender line: flush with the bubble's right edge, its own width.
         rightAligned: Math.abs(h.right - b.right) <= 1,
-        ownWidth: h.width < t.width,
-        // The bubble sits at the 800px lane's right edge, as wide as its text
-        // up to 7/8 of the lane (2026-11-09).
-        atRight: Math.abs(b.right - t.right) <= 1,
-        capped: b.width <= t.width * 7 / 8 + 1,
+        ownWidth: h.width < b.width,
+        // Every sent message spans the 800px lane, however short.
+        fills: Math.abs(b.left - t.left) <= 1 && Math.abs(b.right - t.right) <= 1,
         lane: Math.round(t.width),
         gap: b.top - h.bottom,
         bubbleText: bubble.textContent,
@@ -171,7 +169,7 @@ export async function runLocalLinksSmoke({ page, harnessBase, check }) {
       };
     });
     expect(geometry).toMatchObject({
-      siblings: true, outside: true, rightAligned: true, ownWidth: true, gap: 8, atRight: true, capped: true, lane: 800,
+      siblings: true, outside: true, rightAligned: true, ownWidth: true, gap: 8, fills: true, lane: 800,
       nameFirst: true, logo: 16, centred: true, unseen: [["Sent from", true]],
     });
     expect(geometry.bubbleText).not.toContain("Sent from");
@@ -184,7 +182,7 @@ export async function runLocalLinksSmoke({ page, harnessBase, check }) {
     "The implementation is ready. Review zeros-dev://workspace/ws_child when you have time.",
   );
   check(
-    "Normal, steered and saved senders sit right-aligned above the copy-only bubble at the lane's right edge as the chat's name and logo; notes and code retain their roles",
+    "Normal, steered and saved senders sit right-aligned above the full-width copy-only bubble as the chat's name and logo; notes and code retain their roles",
     true,
   );
 
@@ -408,51 +406,6 @@ export async function runLocalLinksSmoke({ page, harnessBase, check }) {
     await expect(target).toHaveAttribute("data-local-link-available", "true");
     await expect(target).toHaveAttribute("data-local-link-agent", "cursor");
   }
-  // 2026-11-09: inside a sent message a pill sits a step lighter than the bg2
-  // bubble (--prompt-pill-bg: bg2-hover in Dark, sidebar-bg in Light), while
-  // the composer's pills keep bg2.
-  const pillFills = () => page.evaluate(() => {
-    const resolve = (element, value) => {
-      const probe = document.createElement("span");
-      probe.style.backgroundColor = value;
-      element.parentElement.append(probe);
-      const color = getComputedStyle(probe).backgroundColor;
-      probe.remove();
-      return color;
-    };
-    const luminance = (color) => {
-      const [r, g, b] = color.match(/[\d.]+/g).slice(0, 3).map((channel) => {
-        const value = Number(channel) / 255;
-        return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
-      });
-      return 0.2126 * r + 0.7152 * g + 0.0722 * b;
-    };
-    const sent = document.querySelector('[data-testid="live-chat"] [data-local-link-pill]');
-    const composed = document.querySelector('[data-testid="local-link-composer"] [data-local-link-pill]');
-    const fill = getComputedStyle(sent).backgroundColor;
-    const bubble = getComputedStyle(sent.closest("[data-user-bubble]")).backgroundColor;
-    return {
-      theme: document.documentElement.dataset.theme,
-      sent: fill === resolve(sent, "var(--prompt-pill-bg)"),
-      lighter: luminance(fill) > luminance(bubble),
-      composer: getComputedStyle(composed).backgroundColor === resolve(composed, "var(--bg2)"),
-    };
-  });
-  const themeToggle = page.getByRole("button", { name: "Toggle theme", exact: true });
-  const themes = [];
-  for (let pass = 0; pass < 2; pass += 1) {
-    if (pass) await themeToggle.click();
-    await page.mouse.move(0, 0);
-    // Pills ease their fill (transition-colors), as they just did on turning
-    // available, so poll until it settles.
-    await expect
-      .poll(pillFills, { message: `pass ${pass}: pill fills` })
-      .toMatchObject({ sent: true, lighter: true, composer: true });
-    themes.push((await pillFills()).theme);
-  }
-  await themeToggle.click();
-  expect(new Set(themes)).toEqual(new Set(["dark", "light"]));
-  check("Pills inside a sent message sit a step lighter than its bg2 bubble in Dark and Light; the composer's keep bg2", true);
   await liveChat.getByRole("button", { name: "Rename pristine chat", exact: true }).click();
   for (const target of [livePill, composerPill])
     await expect(target).toHaveAttribute("aria-label", "Open chat: Live review");

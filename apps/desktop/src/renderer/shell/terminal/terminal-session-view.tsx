@@ -1027,11 +1027,11 @@ function resolveTerminalTheme(
       : {}),
     // xterm 6 ships its own DOM scrollbar, which the global scrollbar CSS can't
     // reach, and its default is a heavy always-on bar. Drive it through the theme
-    // so it auto-hides: invisible at rest, the app's one thumb color on hover and
-    // while dragged. `rgba(0,0,0,0)`, not "transparent", for xterm's color parser.
+    // so it auto-hides: invisible at rest, a subtle thumb on hover. `rgba(0,0,0,0)`,
+    // not "transparent", for xterm's color parser.
     scrollbarSliderBackground: "rgba(0,0,0,0)",
-    scrollbarSliderHoverBackground: resolveTokenValue("--scrollbar-thumb") ?? undefined,
-    scrollbarSliderActiveBackground: resolveTokenValue("--scrollbar-thumb") ?? undefined,
+    scrollbarSliderHoverBackground: resolveTokenValue("--border3") ?? undefined,
+    scrollbarSliderActiveBackground: resolveTokenValue("--border4") ?? undefined,
   };
 }
 

@@ -121,18 +121,17 @@ export const TurnEventList = memo(function TurnEventList({
       : null;
 
   // The agent's output + tool calls render in a LEFT-aligned lane capped at
-  // the chat's text column (`w-full max-w-(--chat-lane) self-start`) — the
-  // reading measure for the answer + tool feed, 800px unless Settings →
-  // Appearance → Chat width picks another. It matches the conversation's
-  // content column (agent-chat.tsx `.zeros-agent-messages` and the composer
-  // are max-w-(--chat-column), the lane plus 28px gutters), so prose and the
-  // composer share one column. `self-start` left-anchors the lane to the
-  // band's left edge (which lines up with the composer's left edge); the user
-  // prompt's row spans the same lane (turn-container.tsx). RESPONSIVE: the cap
-  // is ABSOLUTE, so `w-full` fills the band whenever it is narrower than the
-  // lane (a shrunk conversation pane → content fits the window) and only caps
-  // once it would exceed it. A proportional cap (max-w-[80%]) was tried and
-  // reverted — it reserved
+  // max-w-[800px] (`w-full max-w-[800px] self-start`) — the reading measure
+  // for the answer + tool feed. 2026-09-27: it matches the conversation's
+  // 800px content column (agent-chat.tsx `.zeros-agent-messages` and the
+  // composer are max-w-[856px] with 28px gutters), so prose and the composer
+  // share one column. `self-start` left-anchors the lane to the band's left
+  // edge (which lines up with the composer's left edge); the user prompt
+  // spans the same lane (turn-container.tsx: `w-full max-w-[800px]`), as wide
+  // as the composer. RESPONSIVE: the cap is ABSOLUTE, so `w-full` fills the band
+  // whenever it is narrower than 800 (a shrunk conversation pane → content
+  // fits the window) and only caps once it would exceed 800. A proportional
+  // cap (max-w-[80%]) was tried and reverted — it reserved
   // a fixed % gutter at *every* width, so content never filled a narrow window
   // ("only [cap] when it hits the width, not every time"). `min-w-0` keeps the
   // per-row `truncate` (event-row.tsx) working so long tool commands/paths
@@ -157,7 +156,7 @@ export const TurnEventList = memo(function TurnEventList({
       events={events}
       subagentChildren={ctx.subagentChildren}
     >
-      <div className="flex w-full max-w-(--chat-lane) min-w-0 flex-col self-start">
+      <div className="flex w-full max-w-[800px] min-w-0 flex-col self-start">
         {sequence.map((segment, index) => segment.kind === "working" ? (
           <EventStripe key={JSON.stringify([ctx.chatId, segment.kind, segment.key])} events={segment.events} ctx={turnCtx} live={live}
             browserTailClosed={index < sequence.length - 1} />

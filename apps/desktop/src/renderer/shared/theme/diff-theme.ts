@@ -112,15 +112,6 @@ function diffShadowCss(surface: "bg1" | "bg2" | "sidebar-bg"): string {
       grid-template-columns: ${HUNK_CARD_HEIGHT}px ${HUNK_CARD_HEIGHT}px auto;
     }
   }
-  /* Code rows scroll sideways with the app's one thumb: @pierre already keeps
-     it 4px inside its 6px gutter and shows it on hover; it takes the
-     --scrollbar-thumb color and the full gutter under the pointer. */
-  [data-diff]:hover [data-code]::-webkit-scrollbar-thumb,
-  [data-file]:hover [data-code]::-webkit-scrollbar-thumb {
-    background-color: var(--scrollbar-thumb);
-  }
-  [data-code]::-webkit-scrollbar-thumb:hover,
-  [data-code]::-webkit-scrollbar-thumb:active { border-width: 0; }
 `;
 }
 

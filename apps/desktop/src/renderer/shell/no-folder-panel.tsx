@@ -55,10 +55,8 @@ function NativeNoFolderPanel({ chatId }: { chatId: string }) {
     }
   };
 
-  // A docked summary island floats over the chat pane's right side; the
-  // padding centres the card beside it (--chat-aside-inset, ChatPane).
   return (
-    <div className="bg-bg1 flex h-full w-full items-center justify-center p-6 pr-[calc(var(--spacing)*6+var(--chat-aside-inset,0px))]">
+    <div className="bg-bg1 flex h-full w-full items-center justify-center p-6">
       <div className="flex w-full max-w-md flex-col items-center gap-5 text-center">
         <div className="border-border1 bg-bg2 flex size-12 items-center justify-center rounded-sm border">
           <FolderOpen className="text-muted-fg size-6" aria-hidden="true" />

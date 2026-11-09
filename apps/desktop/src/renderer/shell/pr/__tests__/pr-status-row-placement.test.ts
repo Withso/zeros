@@ -33,13 +33,11 @@ describe("shared PR status row placement", () => {
       "apps/desktop/src/renderer/shell/pr/pr-status-island.tsx",
     );
 
-    // 2026-11-09: the tab row ends on a 1px separator, so the rows under it
-    // draw only their bottom line and no line doubles under the tab row.
     const headerClasses = column.match(
       /const WORKBENCH_HEADER_CLS\s*=\s*\n?\s*"([^"]+)"/,
     )?.[1];
     expect(headerClasses).toBeDefined();
-    expect(headerClasses?.split(/\s+/)).toEqual(expect.arrayContaining(["border-b", "border-border1"]));
+    expect(headerClasses?.split(/\s+/)).not.toContain("border-b");
 
     expect(row).toMatch(
       /return \(\s*<PanelHeader size="window" className="gap-2"/,
@@ -60,9 +58,8 @@ describe("shared PR status row placement", () => {
     );
 
     expect(island).toMatch(
-      /data-pr-island=""[\s\S]*?"flex h-10 shrink-0 items-center gap-2\.5 border-b pr-1\.5 pl-3"/,
+      /data-pr-island=""[\s\S]*?"flex h-10 shrink-0 items-center gap-2\.5 border-y pr-1\.5 pl-3"/,
     );
-    expect(island).not.toMatch(/\bborder-y\b/);
   });
 });
 
