@@ -75,6 +75,21 @@ export async function runChatSurfacesSmoke({ page, check, harnessBase }) {
   expect(new Set(islandBg1).size).toBe(2);
   check("Side column: the open tab sits in a bg1 island on the chat's resize line, 12px in from the right and bottom, with a border2 edge and the first tab 12px in, in Dark and Light", true);
 
+  // 2026-11-09: the fixed tabs are text only and the Files home reads Files;
+  // a closable tab such as Setup keeps its glyph.
+  const sidePanels = page
+    .locator("[data-zeros-column-3]")
+    .getByRole("tablist", { name: "Workspace panels" });
+  for (const name of ["Files", "Design", "Changes", "Review"]) {
+    const tab = sidePanels.getByRole("tab", { name, exact: true });
+    await expect(tab).toHaveCount(1);
+    await expect(tab.locator("svg, img")).toHaveCount(0);
+  }
+  await expect(sidePanels.getByRole("tab", { name: "Files", exact: true })).toHaveText("Files");
+  await expect(sidePanels.getByRole("tab", { name: "Open file", exact: true })).toHaveCount(0);
+  await expect(sidePanels.getByRole("tab", { name: "Setup", exact: true }).locator("svg")).toHaveCount(1);
+  check("Side column: Files, Design, Changes and Review are text only, Files reads Files, and Setup keeps its glyph", true);
+
   const read = () => page.evaluate(() => {
     const rgb = (value) => {
       const probe = document.createElement("div");

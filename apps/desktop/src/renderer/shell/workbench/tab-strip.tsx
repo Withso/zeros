@@ -7,14 +7,15 @@ import { warmSimulatorTab } from "../../features/simulators/simulator-tab";
 // The tab strip is rendered INSIDE Workbench's own borderless 40px header
 // band. Any separator belongs to the active surface's second-row chrome.
 //
-// Layout: [Open file] [Changes] [Review] [...File/Browser tabs] [+]
-// - Changes + Review are pinned homes, and the leading File tab is the FIXED
-//   Files home: permanent like them, but its ✕ closes the open FILE (the tab
-//   reverts to the blank "Open file" tree) and hides entirely while blank.
-//   Extra File and Browser tabs are all closable, including blanks. The Changes
-//   pill carries the live All Changes count (committed + uncommitted net diff).
+// Layout: [Files] [Design] [Changes] [Review] [...File/Browser tabs] [+]
+// - The fixed tabs are the leading FIXED Files home and the pinned Design,
+//   Changes and Review homes. They are text only and never close; the Files
+//   home always reads Files, with no file name, glyph or Git status letter,
+//   whatever it shows. Extra File and Browser tabs are all closable, including
+//   blanks. The Changes pill carries the live All Changes count (committed +
+//   uncommitted net diff).
 // - The ✕ on an extra File or Browser tab removes the whole tab.
-// - Tab pill: icon + truncated title + absolute-positioned close button
+// - Other tab pills: icon + truncated title + absolute-positioned close button
 //   (no width-on-hover layout shift) + fade gradient mask. Blank tabs keep the
 //   explicit Open file / Browser labels.
 // - Sticky strip (use-sticky-tab-strip.tsx): when the tabs overflow, only the
@@ -44,7 +45,9 @@ import {
 } from "../../state/workspace-store";
 import {
   TAB_TYPE_META,
+  isFixedWorkbenchTab,
   workbenchTabIconPath,
+  workbenchTabStripLabel,
   type WorkbenchTab,
 } from "./tab-model";
 import {
@@ -113,7 +116,7 @@ export function WorkbenchTabStrip({
   const dirtyEditors = useWorkbenchDirtyEditorIds();
   const { workspace } = useActiveWorkspace();
   const gitRoot = workspace && isLocalMainWorkspace(workspace) ? workspace.repoRoot : workspace?.path;
-  const gitStatus = useWorkspaceReviewStatus({ cwd: folderKey, workspaceId, active: tabs.some(tab => tab.type === "files" && !!tab.filePath && !tab.skillSource), refreshKey, read: statusForGeneration });
+  const gitStatus = useWorkspaceReviewStatus({ cwd: folderKey, workspaceId, active: tabs.some(tab => tab.type === "files" && !tab.fixed && !!tab.filePath && !tab.skillSource), refreshKey, read: statusForGeneration });
   const fileStatuses = React.useMemo(() => fileStatusesForFolder(gitStatus.data, folderKey, gitRoot), [gitStatus.data, folderKey, gitRoot]);
 
   const strip = useStickyTabStrip({
@@ -186,12 +189,12 @@ export function WorkbenchTabStrip({
                   // Closing leaves the device running; idle shutdown stops
                   // one Zeros booted.
                   tab.type === "simulator" ||
-                  // The fixed Files home only offers ✕ while a file is open
-                  // (✕ = close the file); blank, there is nothing to close.
-                  (tab.type === "files" && (!tab.fixed || !!tab.filePath))
+                  // The fixed Files home never closes: it reads Files whatever
+                  // it shows, so a ✕ there would only clear its file.
+                  (tab.type === "files" && !tab.fixed)
                 }
                 badge={tab.type === "changes" ? changeCount : 0}
-                fileStatus={tab.type === "files" && tab.filePath && !tab.skillSource ? fileStatuses.get(tab.filePath) : undefined}
+                fileStatus={tab.type === "files" && !tab.fixed && tab.filePath && !tab.skillSource ? fileStatuses.get(tab.filePath) : undefined}
                 dirty={tab.type === "files" && dirtyEditors.has(tab.id)}
                 terminalIndicator={
                   tab.terminalId
@@ -246,12 +249,6 @@ interface TabPillProps {
   registerRef: (node: HTMLDivElement | null) => void;
 }
 
-/** Every current tab has an explicit label, including the blank "Open file"
- *  and "Browser" states. */
-function tabShowsLabel(tab: WorkbenchTab): boolean {
-  return Boolean(tab.title);
-}
-
 function TabPill({
   tab,
   folderKey,
@@ -268,7 +265,11 @@ function TabPill({
 }: TabPillProps) {
   const meta = TAB_TYPE_META[tab.type];
   const Icon = meta.icon;
-  const showLabel = tabShowsLabel(tab);
+  const fixedTab = isFixedWorkbenchTab(tab);
+  const label = workbenchTabStripLabel(tab);
+  // Every tab has an explicit label, including the blank "Open file" and
+  // "Browser" states.
+  const showLabel = Boolean(label);
   // A File tab wears its file's own colored type glyph (same sprite as the tree
   // and the viewer breadcrumb); everything else keeps its type's lucide glyph.
   const iconPath = workbenchTabIconPath(tab);
@@ -308,7 +309,7 @@ function TabPill({
       ref={registerRef}
       role="tab"
       aria-selected={active}
-      aria-label={tab.title}
+      aria-label={label}
       tabIndex={0}
       onPointerEnter={onIntent}
       onFocus={onIntent}
@@ -340,38 +341,40 @@ function TabPill({
     >
       {tab.type === "terminal" && <CloudTerminalIndicator folder={folderKey} />}
       {/* One 14px glyph slot, so a running terminal's stream never shifts
-          the label. */}
-      <span className="inline-flex size-3.5 shrink-0 items-center justify-center">
-      {tab.type === "terminal" ? (
-        terminalIndicator?.running ? (
-          <RunStream
-            size={12}
-            className={cn("shrink-0", active ? "text-fg1" : "text-fg2")}
+          the label. The fixed tabs are text only. */}
+      {!fixedTab && (
+        <span className="inline-flex size-3.5 shrink-0 items-center justify-center">
+        {tab.type === "terminal" ? (
+          terminalIndicator?.running ? (
+            <RunStream
+              size={12}
+              className={cn("shrink-0", active ? "text-fg1" : "text-fg2")}
+            />
+          ) : (
+            <DynamicIcon
+              name={terminalTabIconName(tab.terminalId, terminalIndicator?.icon)}
+              className={cn(
+                "size-3.5 shrink-0",
+                active ? "text-fg1" : "text-fg2",
+              )}
+            />
+          )
+        ) : browserWorking ? (
+          <MousePointer2
+            className="text-blue-fg size-3.5 shrink-0 fill-current drop-shadow-[0_0_5px_rgba(47,190,235,.45)]"
+            aria-hidden="true"
           />
+        ) : favicon ? (
+          <img src={favicon} alt="" className="size-3.5 shrink-0 rounded-[2px]" />
+        ) : iconPath ? (
+          // size 14 === the size-3.5 the lucide glyphs use, so swapping the glyph
+          // never shifts the pill's label.
+          <FileTypeIcon name={iconPath} size={14} className="shrink-0" />
         ) : (
-          <DynamicIcon
-            name={terminalTabIconName(tab.terminalId, terminalIndicator?.icon)}
-            className={cn(
-              "size-3.5 shrink-0",
-              active ? "text-fg1" : "text-fg2",
-            )}
-          />
-        )
-      ) : browserWorking ? (
-        <MousePointer2
-          className="text-blue-fg size-3.5 shrink-0 fill-current drop-shadow-[0_0_5px_rgba(47,190,235,.45)]"
-          aria-hidden="true"
-        />
-      ) : favicon ? (
-        <img src={favicon} alt="" className="size-3.5 shrink-0 rounded-[2px]" />
-      ) : iconPath ? (
-        // size 14 === the size-3.5 the lucide glyphs use, so swapping the glyph
-        // never shifts the pill's label.
-        <FileTypeIcon name={iconPath} size={14} className="shrink-0" />
-      ) : (
-        <Icon className="size-3.5 shrink-0" />
+          <Icon className="size-3.5 shrink-0" />
+        )}
+        </span>
       )}
-      </span>
       {showLabel && (
         // The name keeps the tab colour; only the status letter is tinted.
         <span
@@ -380,7 +383,7 @@ function TabPill({
             browserWorking ? "zeros-browser-tab-working" : "",
           ].join(" ")}
         >
-          {tab.title}
+          {label}
           {terminalIndicator?.exited && (
             <span className="ml-1 opacity-70">(exited)</span>
           )}

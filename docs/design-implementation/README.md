@@ -1146,3 +1146,16 @@ Each landed step appends one line: date, workstream, what landed, evidence.
   tests failed red first; the chat-surfaces smoke measures the 8px gap side by
   side in Dark and Light, and at the T-junction both handles, both gaps and
   the 12px gutters.
+- 2026-11-09 · 5, 6 · The side column's fixed tabs are text only
+  (`docs/design-system.md` §0 item 9; canvas version 404). Files, Design,
+  Changes and Review drop their glyphs, and the first tab always reads Files,
+  with no file name, glyph, status letter or ✕, whatever it shows
+  (`isFixedWorkbenchTab`, `workbenchTabStripLabel`). Its stored title is
+  unchanged, so saved workspaces need no migration; the file's name still
+  heads the viewer, and its unsaved dot stays, like the Changes count. Extra
+  File, Browser, terminal and simulator tabs keep their glyphs. The canvas's
+  fifteen strip boards follow, and the Tab strip and No file open boards say
+  so. Evidence: the tab-model and fixed-tab-pills tests failed red first; the
+  chat-surfaces smoke checks the four text-only tabs and Setup's glyph, and
+  the file editor's checks Files with no M, glyph or ✕ beside a notes.md tab
+  that keeps its glyph.

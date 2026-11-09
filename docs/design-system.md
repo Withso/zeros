@@ -165,7 +165,12 @@ exported page by page to [design-implementation/](design-implementation/README.m
    stylesheets.
 9. **Two tab styles.** A segmented control switches a view; one strip tab
    serves chrome, workbench and chat. A closable tab shows ✕ on hover or focus
-   over a fade in its own fill, so it never changes width.
+   over a fade in its own fill, so it never changes width. The side column's
+   fixed tabs, Files, Design, Changes and Review, are text only (2026-11-09):
+   the first always reads Files, with no file name, glyph, status letter or
+   ✕, whatever it shows; extra File, Browser and terminal tabs keep their
+   glyphs. `shell/workbench/__tests__/fixed-tab-pills.test.ts` and
+   `scripts/ui-smoke-chat-surfaces.mjs` hold it.
 10. **Menus say what kind of choice they are.** One choice: a check at the end
     of the chosen row. Several: a check column on the left. Destructive items
     last, in `red-primary`. Shortcuts are Kbd chips, one per key.

@@ -514,6 +514,23 @@ export function workbenchTabIconPath(tab: WorkbenchTab): string | null {
   return path ? path : null;
 }
 
+/** The tabs every workspace keeps: the fixed Files home, Design, Changes and
+ *  Review. The strip draws them as text only. */
+export function isFixedWorkbenchTab(tab: WorkbenchTab): boolean {
+  return (
+    tab.type === "design" ||
+    tab.type === "changes" ||
+    tab.type === "review" ||
+    (tab.type === "files" && tab.fixed === true)
+  );
+}
+
+/** A tab's name in the strip. The fixed Files home always reads Files, not
+ *  its file or blank title; the stored title is left as it is. */
+export function workbenchTabStripLabel(tab: WorkbenchTab): string {
+  return tab.type === "files" && tab.fixed === true ? "Files" : tab.title;
+}
+
 export const TAB_TYPE_META: Record<WorkbenchTabType, TabTypeMeta> = {
   design: { label: "Design", icon: PenTool },
   terminal: { label: "Terminal", icon: Terminal },
