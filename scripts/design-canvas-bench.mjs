@@ -981,15 +981,68 @@ async function main() {
       if (gpu) await gpuReset();
       await activateNativeWorkbenchTab(page, fixture.path, "files");
       await pause(3000);
+      // Bench only: edits made while Design is hidden (an agent at work), then
+      // the tab return below measures what work ahead of the open saved.
+      const hiddenEdits = Number(option(args, "--hidden-edits", "0"));
+      const hiddenOriginals = new Map();
+      if (hiddenEdits > 0) {
+        const chosen = await page.evaluate(async ({ id, n }) => {
+          const { designWorkspaceSnapshotCache } = await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-cache.ts");
+          const { useDesignWorkspaceUiStore } = await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-ui.ts");
+          const snapshot = designWorkspaceSnapshotCache.peekSnapshot(id).data;
+          const pageId = useDesignWorkspaceUiStore.getState().byWorkspace[id]?.activePageId;
+          const files = snapshot.frames.filter(frame => frame.sourceVersion && (!pageId || frame.pageId === pageId)).map(frame => frame.file);
+          const step = Math.max(1, Math.floor(files.length / n));
+          const picked = files.filter((_, index) => index % step === 0).slice(0, n);
+          const versions = new Map(snapshot.frames.map(frame => [frame.file, frame.sourceVersion]));
+          return { directory: snapshot.directory, files: picked, versions: picked.map(file => versions.get(file) ?? null) };
+        }, { id: fixture.id, n: hiddenEdits });
+        hiddenOriginals.chosen = chosen;
+        for (const [index, relative] of chosen.files.entries()) {
+          const file = path.join(fixture.path, chosen.directory, relative);
+          const bytes = await fs.readFile(file, "utf8");
+          hiddenOriginals.set(file, bytes);
+          const at = bytes.lastIndexOf("</body>");
+          await fs.writeFile(file, at >= 0 ? `${bytes.slice(0, at)}<!-- bench hidden edit ${index} -->${bytes.slice(at)}` : `${bytes}<!-- bench hidden edit ${index} -->`);
+        }
+        const waitSeconds = Number(option(args, "--hidden-wait", "20"));
+        result.hiddenEdits = { files: chosen.files.length, waitSeconds };
+        await pause(waitSeconds * 1000);
+      }
       result.idleHidden = await cpuWindow("idle-hidden", idleSeconds);
       result.afterHidden = { renderer: await renderer(), memory: summarize(await sample()) };
       await save();
       // Warm reopen.
       await phase(`${fixture.name}:warm`);
       if (profileOpen) { await cdp.send("Profiler.enable"); await cdp.send("Profiler.setSamplingInterval", { interval: 250 }); await cdp.send("Profiler.start"); }
+      const warmBegin = performance.now();
       const warm = await open(fixture); result.warmReadyMs = warm.ms;
       if (gpu) { result.gpuWarmMs = warm.coverage.gpuReadyMs ?? null; result.gpuWarm = warm.coverage.gpu ?? null; }
+      if (hiddenOriginals.chosen && gpu) {
+        // Covers count as crisp: wait for the edited frames' new versions, then
+        // for the canvas to draw every visible frame current.
+        const chosen = hiddenOriginals.chosen;
+        let updatedMs = null, currentMs = null, last = null;
+        while (performance.now() - warmBegin < 90_000) {
+          last = await page.evaluate(async ({ id, files }) => {
+            const { designWorkspaceSnapshotCache } = await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-cache.ts");
+            const snapshot = designWorkspaceSnapshotCache.peekSnapshot(id).data;
+            const versions = new Map((snapshot?.frames ?? []).map(frame => [frame.file, frame.sourceVersion]));
+            const stats = await globalThis.__zerosDesignGpu?.snapshot?.();
+            return { versions: files.map(file => versions.get(file) ?? null), visible: stats?.visible ?? null };
+          }, { id: fixture.id, files: chosen.files }).catch(() => null);
+          if (last) {
+            const updated = last.versions.every((version, index) => version && version !== chosen.versions[index]);
+            if (updated) updatedMs ??= Math.round(performance.now() - warmBegin);
+            const v = last.visible;
+            if (updated && v && v.stale === 0 && v.missing === 0 && v.crisp === v.frames - v.failed - v.live) { currentMs = Math.round(performance.now() - warmBegin); break; }
+          }
+          await pause(100);
+        }
+        result.hiddenEdits.updatedMs = updatedMs; result.hiddenEdits.currentMs = currentMs; result.hiddenEdits.last = last?.visible ?? null;
+      }
       if (profileOpen) { const { profile: cpu } = await cdp.send("Profiler.stop"); await fs.writeFile(path.join(evidence, `${fixture.name}-warm-profile.cpuprofile`), JSON.stringify(cpu)); }
+      for (const [file, bytes] of hiddenOriginals) await fs.writeFile(file, bytes);
       await pause(2000);
       await activateNativeWorkbenchTab(page, fixture.path, "files");
       await save();
