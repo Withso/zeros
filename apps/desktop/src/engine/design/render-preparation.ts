@@ -506,6 +506,7 @@ async function importedStylesheets(
   linked: readonly LinkedStylesheet[],
   identityOnly: boolean,
   compileTailwind = true,
+  tailwind?: { candidates?: readonly string[] },
 ): Promise<{ markup: string; sheets: LinkedStylesheet[] }> {
   const document = canvas ?? (await readCanvas(workspacePath).catch(() => null));
   if (!document) return { markup: "", sheets: [] };
@@ -519,6 +520,7 @@ async function importedStylesheets(
     stylesheets: linked.map((sheet) => sheet.css),
     build: !identityOnly,
     compileTailwind,
+    tailwind,
   });
   for (const [index, source] of sources.entries()) {
     const token = `s${index}-${source.revision}`;
@@ -566,6 +568,8 @@ export interface RetainedFrameRender {
   linked: readonly LinkedStylesheet[];
   /** The imported sources' placeholder tokens, in order. */
   imported: readonly string[];
+  /** The frame's Tailwind candidates, when a Tailwind source is declared. */
+  tailwindCandidates?: readonly string[];
 }
 
 type FrameRenderParts = { sanitized: string; sourceVersion: string; surfaceCost: null; sheets: DesignFrameRenderSheet[] };
@@ -587,7 +591,7 @@ function frameRenderParts(skeleton: string, sourceVersion: string, sheets: reado
 export async function composeRetainedFrameRender(workspacePath: string, entryFile: string, canvas: CanvasDocument,
   retained: RetainedFrameRender, options: { deferTailwind?: boolean } = {}): Promise<FrameRenderParts | null> {
   const imported = await importedStylesheets(workspacePath, entryFile, canvas, retained.expanded, retained.linked, false,
-    !options.deferTailwind);
+    !options.deferTailwind, { candidates: retained.tailwindCandidates });
   if (imported.sheets.length !== retained.imported.length ||
     imported.sheets.some((sheet, index) => sheet.token !== retained.imported[index])) return null;
   return frameRenderParts(retained.skeleton, retained.sourceVersion, [...imported.sheets, ...retained.linked]);
@@ -651,8 +655,9 @@ async function prepareSharedFrameRenderSource(
   );
   // Tailwind needs classes from the expanded frame and variables read by its
   // linked sheets. The latter are extracted once per prepared stylesheet.
+  const tailwind: { candidates?: readonly string[] } = {};
   const imported = await importedStylesheets(workspacePath, entryFile, canvas, expanded,
-    linked.sheets, options.identityOnly === true, !(options.parts && options.deferTailwind));
+    linked.sheets, options.identityOnly === true, !(options.parts && options.deferTailwind), tailwind);
   const withImported = !imported.markup
     ? linked.html
     : linked.headEnd === undefined
@@ -692,7 +697,7 @@ async function prepareSharedFrameRenderSource(
     const tree = stripped.removed.every((text) => !/data:image|[\\&]/i.test(text)) ? sharedDesignParse(safe) : undefined;
     return { sanitized: skeleton, sourceVersion, surfaceCost: designSurfaceCost(skeleton, sheets, tree),
       ...(options.retain ? { retained: { skeleton, sourceVersion, expanded, linked: linked.sheets,
-        imported: imported.sheets.map((sheet) => sheet.token) } } : {}) };
+        imported: imported.sheets.map((sheet) => sheet.token), ...(tailwind.candidates ? { tailwindCandidates: tailwind.candidates } : {}) } } : {}) };
   }
   if (options.parts) return frameRenderParts(skeleton, sourceVersion, sheets);
   const sanitized = spliceStylesheets(skeleton, sheets);

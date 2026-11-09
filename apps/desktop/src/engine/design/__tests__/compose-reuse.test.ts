@@ -1,12 +1,13 @@
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, expect, it } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { DESIGN_DIRECTORY_NAME, initializeDesignDocument, prepareDesignNavigationFrames, readDesignNavigationSnapshot } from "../document";
 import { designDirectoryNameFor } from "../directory-registry";
 import { resetDesignIdentityCacheForTests } from "../identity-cache";
 import { designDirectoryEntry } from "../metadata";
 import { configureRetainedDesignFramesForTests, noteDesignRecordedCanvas, retainedDesignFrameStatsForTests } from "../retained-frames";
+import * as tailwind from "../style-tailwind";
 import { composeDesignThumbnailBatches } from "../thumbnail-batch";
 
 let root: string;
@@ -53,6 +54,7 @@ beforeEach(async () => {
   noteDesignRecordedCanvas(root);
 });
 afterEach(async () => {
+  vi.restoreAllMocks();
   configureRetainedDesignFramesForTests();
   delete process.env.ZEROS_DATA_DIR;
   await rm(root, { recursive: true, force: true });
@@ -109,3 +111,28 @@ it("keeps no reads for a checkout whose canvas hasn't asked for recordings", asy
   expect((await compose(frames)).failed).toEqual([]);
   expect(reused() - before).toBe(0);
 });
+
+it("keeps a frame's Tailwind candidates from its identity read, composing byte for byte", async () => {
+  const canvasFile = path.join(folder, "meta/canvas.json");
+  const canvas = JSON.parse(await readFile(canvasFile, "utf8"));
+  canvas.styles.push({ id: "tw", title: "Tailwind", kind: "tailwind", path: "styles/tw.css" });
+  await writeFile(canvasFile, JSON.stringify(canvas, null, 2));
+  await writeFile(path.join(root, "styles/tw.css"), '@import "tailwindcss";');
+  for (const file of files) await writeFile(path.join(folder, file), (await readFile(path.join(folder, file), "utf8"))
+    .replace('class="hero card"', 'class="hero card p-2 underline"'));
+  const frames = await prepare();
+  const candidates = vi.spyOn(tailwind, "designTailwindCandidates");
+  const before = reused();
+  const fromRead = await compose(frames);
+  expect(reused() - before).toBe(files.length);
+  // The kept candidates stand in for reading each frame's HTML again (a
+  // batch's whole sources read none).
+  const framesRead = () => candidates.mock.calls.filter(([html]) => html !== "").length;
+  expect(framesRead()).toBe(0);
+  const fromSource = await compose(frames);
+  expect(framesRead()).toBe(files.length);
+  expect(fromRead.failed).toEqual([]);
+  expect(fromRead).toEqual(fromSource);
+  expect(JSON.stringify(fromRead.batches[0]!.request.stylesheets)).toContain("text-decoration-line: underline");
+});
+

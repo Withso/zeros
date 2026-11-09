@@ -46,7 +46,8 @@ export function retainDesignFrame(root: string, directory: string, file: string,
   const budget = testing.budget ?? BUDGET_BYTES;
   // Frame HTML is almost all one byte a character. Linked sheets are the
   // prepared stylesheet cache's own strings, shared rather than copied.
-  const size = frame.render.skeleton.length + frame.render.expanded.length + 256 * frame.durable.length;
+  const size = frame.render.skeleton.length + frame.render.expanded.length + 256 * frame.durable.length +
+    32 * (frame.render.tailwindCandidates?.length ?? 0);
   if (size > budget / 8) return;
   frames.set(key, { ...frame, bytes: size, at: Date.now() });
   bytes += size;

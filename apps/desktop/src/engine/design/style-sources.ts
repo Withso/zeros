@@ -1508,6 +1508,10 @@ export interface FrameStyleSourceOptions {
    * revision and candidates with empty CSS: a capture batch compiles it once
    * for all its frames. */
   compileTailwind?: boolean;
+  /** The frame's Tailwind candidates. Given, they stand in for reading
+   * them from `html` (a kept identity read of the same html); otherwise
+   * they are left here for the caller to keep. */
+  tailwind?: { candidates?: readonly string[] };
 }
 
 export interface FrameStyleSource {
@@ -1545,9 +1549,12 @@ export async function frameStyleSources(
   const declaresFonts = readDesignFontCatalog(canvas).fonts.length > 0;
   if (catalog.declarations.length === 0 && !declaresFonts) return [];
   const byId = new Map(catalog.declarations.map((declaration) => [declaration.id, declaration]));
-  const candidates = catalog.declarations.some((declaration) => declaration.kind === "tailwind")
-    ? designTailwindCandidates(options.html ?? "", options.stylesheetVariables)
-    : [];
+  let candidates: string[] = [];
+  if (catalog.declarations.some((declaration) => declaration.kind === "tailwind")) {
+    candidates = options.tailwind?.candidates ? [...options.tailwind.candidates]
+      : designTailwindCandidates(options.html ?? "", options.stylesheetVariables);
+    if (options.tailwind) options.tailwind.candidates ??= candidates;
+  }
   const chosen = frameStyleSourceIds(canvas, catalog, frameFile);
   // A frame that lists `styles: []` opts out of every source, fonts included.
   if (chosen.length === 0 && Array.isArray((canvas.frame_info[frameFile] as Record<string, unknown> | undefined)?.styles)) return [];
