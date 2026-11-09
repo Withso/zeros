@@ -186,6 +186,69 @@ it("keeps the original observation deadline through the final durable identity r
     .rejects.toMatchObject({ code: "github_verification_expired" });
 });
 
+// Withso/zeros and Withso/zeros-dev-fixture share one connection: each hello
+// read its fingerprint once per repository before and after (4 round trips).
+it("reads one connection fingerprint per owner before and after a multi-repository check", async () => {
+  const github = { fingerprintFor: vi.fn(async () => "epoch"), check: vi.fn(async () => "epoch") };
+  const pool = { query: async () => ({ rows: [{ source_repositories: ["example/selected", "example/additional", "other/dependency"] }] }) };
+  const source = new CloudV2SourceAuthority(pool as unknown as pg.Pool, github);
+  const workspace = { id: "workspace", organizationId: "org", creatorUserId: "member", repository: "example/selected" } as CloudV2Workspace;
+  await source.workspace(workspace);
+  github.fingerprintFor.mockClear();
+  await source.workspace(workspace);
+  expect(github.fingerprintFor.mock.calls.map(([input]) => (input as { owner: string }).owner)).toEqual(["example", "other", "example", "other"]);
+});
+
+// The per-owner fingerprint memo still fails closed on every mid-check change.
+it("fails closed when the connection changes after the first repository of one owner (second uncached)", async () => {
+  // Reads: obs1 memo "one", obs1 refresh fence "one"; the connection then changes.
+  const github = { fingerprintFor: vi.fn().mockResolvedValueOnce("one").mockResolvedValueOnce("one").mockResolvedValue("two"),
+    check: vi.fn().mockResolvedValueOnce("one").mockResolvedValue("two") };
+  const source = new CloudV2SourceAuthority({} as pg.Pool, github);
+  await expect(source.repositories("org", "user", ["o/first", "o/second"])).rejects.toMatchObject({ code: "github_authorization_changed" });
+});
+
+it("fails closed when the connection changes mid-check and the second repository holds a fresh positive under the old connection", async () => {
+  const github = { fingerprintFor: vi.fn(async () => "one"), check: vi.fn(async () => "one") };
+  const source = new CloudV2SourceAuthority({} as pg.Pool, github);
+  await source.repository("org", "user", "o/second"); // fresh positive under "one"
+  github.fingerprintFor.mockReset().mockResolvedValueOnce("one").mockResolvedValueOnce("one").mockResolvedValue("two");
+  await expect(source.repositories("org", "user", ["o/first", "o/second"])).rejects.toMatchObject({ code: "github_authorization_changed" });
+  expect(github.check).toHaveBeenCalledTimes(2); // o/second reused its positive; only the final re-read caught the change
+});
+
+it("fails closed when an invalidation lands during the final fingerprint re-read", async () => {
+  const github = { fingerprintFor: vi.fn(async () => "one"), check: vi.fn(async () => "one") };
+  const source = new CloudV2SourceAuthority({} as pg.Pool, github);
+  await source.repositories("org", "user", ["o/first", "o/second"]);
+  github.fingerprintFor.mockReset().mockResolvedValueOnce("one").mockImplementationOnce(async () => {
+    source.invalidate({ organizationId: "org", userId: "user" }, new HttpError(403, "github_cloud_access_denied", "revoked")); return "one"; });
+  await expect(source.repositories("org", "user", ["o/first", "o/second"])).rejects.toMatchObject({ code: "github_cloud_access_denied" });
+});
+
+it("handles a shared fingerprint read that outlives the deadline and then rejects", async () => {
+  vi.useFakeTimers(); vi.setSystemTime(1000);
+  const unhandled: unknown[] = [];
+  const listener = (reason: unknown) => { unhandled.push(reason); };
+  process.on("unhandledRejection", listener);
+  try {
+    let reject!: (error: Error) => void;
+    const github = {
+      fingerprintFor: vi.fn().mockImplementationOnce(() => new Promise<string>((_resolve, fail) => { reject = fail; })).mockResolvedValue("one"),
+      check: vi.fn(async () => "one"),
+    };
+    const source = new CloudV2SourceAuthority({} as pg.Pool, github);
+    const pending = source.repositories("org", "user", ["o/first", "o/second"]).catch(error => error);
+    await vi.advanceTimersByTimeAsync(5_001);
+    expect(await pending).toMatchObject({ code: "github_verification_busy" });
+    reject(new Error("late shared fingerprint read failed"));
+    await vi.advanceTimersByTimeAsync(0);
+    vi.useRealTimers();
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(unhandled).toEqual([]);
+  } finally { process.off("unhandledRejection", listener); vi.useRealTimers(); }
+});
+
 it("coalesces checks, expires positive observations, and never reuses them across reconnects", async () => {
   let now = 0, generation = "one";
   const github = { fingerprintFor: vi.fn(async () => generation), check: vi.fn(async () => generation) };

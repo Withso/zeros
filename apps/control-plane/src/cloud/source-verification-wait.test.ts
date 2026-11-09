@@ -146,7 +146,8 @@ it("handles a fingerprint rejection when an earlier source exhausted the shared 
   f.github.check.mockImplementationOnce(async () => { await f.release.promise; vi.setSystemTime(6_000); return "original"; });
   f.github.fingerprintFor.mockResolvedValueOnce("original").mockResolvedValueOnce("original")
     .mockRejectedValueOnce(new Error("late fingerprint read failed"));
-  const pending = f.source.repositories("org", "user", ["o/first", "o/second"]).catch(error => error);
+  // Another owner: one owner's repositories share a single fingerprint read.
+  const pending = f.source.repositories("org", "user", ["o/first", "p/second"]).catch(error => error);
   await vi.advanceTimersByTimeAsync(0); f.release.resolve("original");
   expect(await pending).toMatchObject({ code: "github_verification_busy" });
   await vi.advanceTimersByTimeAsync(0);

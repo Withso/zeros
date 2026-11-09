@@ -78,7 +78,32 @@ export type CloudGithubConnectionHealth =
 /** Direct user-token requests let GitHub enforce the intersection of the human,
  * App/PAT permissions, SSO, and repository selection. Installation tokens are
  * used separately for shared Computer builds; they never author a user's PR action. */
+/** How long a worker profile reuses the last /user answer for its token. */
+export const GITHUB_PROFILE_REUSE_MS = 30_000;
+type GithubProfile = CloudGithubAccount & { avatarUrl?: string };
+
+/** The last /user answer per token hash. Only the worker profile reads it;
+ * repository access stays with the source authority. */
+export class RecentGithubProfiles {
+  private readonly entries = new Map<string, { at: number; value: GithubProfile }>();
+  constructor(private readonly now: () => number = Date.now, private readonly max = 1_000) {}
+  private key(token: string) { return createHash("sha256").update(token).digest("hex"); }
+  remember(token: string, value: GithubProfile): void {
+    const key = this.key(token);
+    this.entries.delete(key); this.entries.set(key, { at: this.now(), value });
+    while (this.entries.size > this.max) this.entries.delete(this.entries.keys().next().value!);
+  }
+  recent(token: string): GithubProfile | undefined {
+    const entry = this.entries.get(this.key(token));
+    return entry && this.now() - entry.at < GITHUB_PROFILE_REUSE_MS ? entry.value : undefined;
+  }
+  clear(): void { this.entries.clear(); }
+}
+
 export class CloudGithubConnections {
+  private readonly profiles = new RecentGithubProfiles();
+  /** The next worker profile reads GitHub again. */
+  forgetRecentProfiles(): void { this.profiles.clear(); }
   constructor(
     readonly store: CloudGithubConnectionStore,
     readonly config: GithubBackendConfig | null,
@@ -106,9 +131,11 @@ export class CloudGithubConnections {
     const user = await this.http(token, assertCurrent).json("/user", profile);
     const name = typeof user.name === "string" ? user.name.trim() : "";
     const avatarUrl = avatarUrlOf(user.avatar_url);
-    return { id: String(user.id), login: user.login,
+    const value = { id: String(user.id), login: user.login,
       ...(name && name.length <= 256 && !/[<>\p{Cc}]/u.test(name) ? { name } : {}),
       ...(avatarUrl ? { avatarUrl } : {}) };
+    this.profiles.remember(token, value);
+    return value;
   }
   private async refresh(
     credential: AppCredential,
@@ -189,7 +216,11 @@ export class CloudGithubConnections {
     }
   }
   async workerProfile(credential: CloudGithubCredentialSnapshot, assertCurrent: () => Promise<void>) {
-    const identity = await this.identity(credential.material.accessToken, assertCurrent);
+    // A hello's Git identity follows the create's or a verification's /user
+    // read of this token by seconds. Its fence still runs, as before a request.
+    const recent = this.profiles.recent(credential.material.accessToken);
+    if (recent) await assertCurrent();
+    const identity = recent ?? await this.identity(credential.material.accessToken, assertCurrent);
     if (identity.id !== credential.identity.id) throw changed();
     return identity;
   }
