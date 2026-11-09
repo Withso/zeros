@@ -20,10 +20,13 @@ import type { DesignRecordingsSource } from "../features/design-workspace/gpu/de
 import type { DesignRecording, DesignRecordingTypeface, DesignRecordingsReadReply,
   DesignRecordingsReply } from "../features/design-workspace/gpu/design-recordings-wire";
 
-const COLUMNS = 6, ROWS = 4, WIDTH = 320, HEIGHT = 200, GAP = 40, SCALE = 2;
-const CHUNK_BYTES = 16 * 1024;
 const params = new URLSearchParams(location.search);
 const enabled = params.get("enabled") !== "0";
+// The smoke page is 6 × 4 frames; `?frames=1000&columns=40` is a bench-sized page.
+const COUNT = Math.min(2_000, Math.max(1, Number(params.get("frames")) || 24));
+const COLUMNS = Math.max(1, Number(params.get("columns")) || 6);
+const WIDTH = 320, HEIGHT = 200, GAP = 40, SCALE = 2;
+const CHUNK_BYTES = 16 * 1024;
 
 /** Each frame's fill is distinct; the smoke reads it back from screen pixels. */
 export const designGpuHarnessFill = (index: number): [number, number, number] =>
@@ -98,7 +101,7 @@ async function recordPage(frames: readonly DesignGpuSceneFrame[]): Promise<Store
   return store;
 }
 
-const frames: DesignGpuSceneFrame[] = Array.from({ length: COLUMNS * ROWS }, (_, index) => ({
+const frames: DesignGpuSceneFrame[] = Array.from({ length: COUNT }, (_, index) => ({
   file: `page-1/frame-${index + 1}.html`, sourceVersion: (index + 1).toString(16).padStart(24, "0"),
   x: (index % COLUMNS) * (WIDTH + GAP), y: Math.floor(index / COLUMNS) * (HEIGHT + GAP), width: WIDTH, height: HEIGHT,
 }));

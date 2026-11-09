@@ -361,7 +361,9 @@ export class DesignRecordings {
     const asked = new Set(request.files);
     const changed: string[] = [];
     const render = "pipeline" in reply;
-    if (render && state.pipeline !== reply.pipeline) state.pipeline = reply.pipeline;
+    // Only recordings show which pipeline draws now; a reply that recorded
+    // nothing (every frame stale or failed) is no evidence of a change.
+    if (render && reply.recordings.length && state.pipeline !== reply.pipeline) state.pipeline = reply.pipeline;
     state.replied = true;
     for (const typeface of reply.typefaces) if (!state.typefaces.has(typeface.id) &&
       !typeface.chunks.some((id) => rejected.has(id)) && typeface.chunks.every((id) => this.deps.chunks.has(id))) {

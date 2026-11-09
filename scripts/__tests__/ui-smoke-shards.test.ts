@@ -63,6 +63,7 @@ const originalOrder = [
   "design-inline-tools",
   "design-camera",
   "design-preview",
+  "design-gpu-canvas",
   "design-interaction-integrity",
   "design-panel-integrity",
   "design-canvas-refinements",

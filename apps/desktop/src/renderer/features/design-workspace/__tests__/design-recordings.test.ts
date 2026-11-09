@@ -281,6 +281,27 @@ describe("Design recordings", () => {
     expect(calls[2]).toMatchObject({ op: "render", frames: [{ file: "a.html", sourceVersion: version(1) }] });
   });
 
+  it("keeps its recordings current when a render reply records nothing", async () => {
+    const { calls, recordings } = harness();
+    recordings.demand(owner, [{ file: "a.html", sourceVersion: version(1) }, { file: "b.html", sourceVersion: version(2) }]);
+    calls[0]!.resolve(readReply(calls[0]!.frames, ["b.html"]));
+    await recordings.settled();
+    calls[1]!.resolve(renderReply(calls[1]!.frames, calls[1]!.known));
+    await recordings.settled();
+    recordings.demand(owner, [{ file: "a.html", sourceVersion: version(1) }, { file: "b.html", sourceVersion: version(2) },
+      { file: "c.html", sourceVersion: version(3) }]);
+    calls.at(-1)!.resolve(readReply(calls.at(-1)!.frames, ["c.html"], calls.at(-1)!.known));
+    await recordings.settled();
+    // Every frame failed: the reply names the composer's bare pipeline.
+    calls.at(-1)!.resolve({ ...renderReply([], calls.at(-1)!.known, { pipeline: "recordings-1" }),
+      failed: [{ file: "c.html", error: "layout failed" }] });
+    await recordings.settled();
+    const count = calls.length;
+    expect(recordings.recording(owner, "a.html")).toMatchObject({ current: true });
+    expect(recordings.recording(owner, "b.html")).toMatchObject({ current: true });
+    expect(calls).toHaveLength(count);
+  });
+
   it("cancels a request whose frames are no longer demanded", async () => {
     const { calls, recordings } = harness();
     recordings.demand(owner, [{ file: "a.html", sourceVersion: version(1) }]);
