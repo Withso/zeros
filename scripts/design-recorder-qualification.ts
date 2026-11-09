@@ -31,6 +31,7 @@ import { designDirectoryNameFor } from "../apps/desktop/src/engine/design/direct
 import { designDirectoryEntry } from "../apps/desktop/src/engine/design/metadata";
 import { designBatchRecordRequestFrom, renderDesignRecordings } from "../apps/desktop/src/engine/design/recording-batch";
 import { insertDesignHeadMarkup, sanitizeDesignFrameMarkup } from "../apps/desktop/src/engine/design/source";
+import { DESIGN_RECORDER_FLATTEN_SOURCE } from "../apps/desktop/electron/design-recorder-scripts";
 import { composeDesignThumbnailBatches } from "../apps/desktop/src/engine/design/thumbnail-batch";
 import { internalizeDesignPictureTypefaces } from "../apps/desktop/shared/design-picture-typefaces";
 
@@ -40,12 +41,32 @@ const PAGES = (env.ZEROS_QUALIFY_PAGES ?? "").split(",").filter(Boolean);
 const LIMIT = Number(env.ZEROS_QUALIFY_LIMIT ?? "40");
 const MAX_DIFF = Number(env.ZEROS_QUALIFY_MAX_DIFF ?? "0.005");
 const FIXTURES = Number(env.ZEROS_QUALIFY_FIXTURES ?? "0");
+/** For a frame that keeps several layers: what in it can still composite,
+ * after the recorder's flattening, counted by style (open shadow roots too). */
+const COMPOSITING_PROBE = `(() => {
+  ${DESIGN_RECORDER_FLATTEN_SOURCE}
+  flattenDesignScrollers();
+  const counts = {}; const bump = (key) => { counts[key] = (counts[key] || 0) + 1; };
+  const elements = []; const collect = (root) => { for (const el of root.querySelectorAll("*")) { elements.push(el); if (el.shadowRoot) collect(el.shadowRoot); } }; collect(document);
+  for (const el of elements) { const s = getComputedStyle(el);
+    if (/(auto|scroll|hidden|overlay)/.test(s.overflowX + " " + s.overflowY)) bump("overflow:" + s.overflowX + "/" + s.overflowY + (el.scrollHeight > el.clientHeight + 1 || el.scrollWidth > el.clientWidth + 1 ? " (overflowing)" : ""));
+    if (s.willChange !== "auto") bump("will-change:" + s.willChange);
+    if (s.transform !== "none") bump(s.transform.startsWith("matrix3d") ? "transform:3d" : "transform:2d");
+    if (s.position === "fixed" || s.position === "sticky") bump("position:" + s.position);
+    if (s.backdropFilter && s.backdropFilter !== "none") bump("backdrop-filter");
+    if (s.filter !== "none") bump("filter");
+    if (s.animationName !== "none") bump("animation:" + s.animationName);
+    if (s.mixBlendMode !== "normal") bump("blend");
+    if (s.backfaceVisibility === "hidden") bump("backface-hidden");
+    if (el.tagName === "VIDEO" || el.tagName === "CANVAS" || el.tagName === "IFRAME") bump("element:" + el.tagName.toLowerCase());
+  }
+  return counts; })()`;
 
 protocol.registerSchemesAsPrivileged([{ scheme: DESIGN_CAPTURE_SHEET_SCHEME, privileges: { standard: true, secure: true, supportFetchAPI: false, stream: false, corsEnabled: false } }]);
 app.on("window-all-closed", () => {});
 
 /** Chromium's own picture of an unmodified frame, as a sandboxed window paints it. */
-async function reference(html: string, stylesheets: Record<string, string>, viewport: { width: number; height: number }) {
+async function reference(html: string, stylesheets: Record<string, string>, viewport: { width: number; height: number }, probe?: string) {
   const partition = session.fromPartition(`zeros-qualify-${randomUUID()}`, { cache: false });
   const documents = new Map<string, string>();
   partition.protocol.handle(DESIGN_CAPTURE_SHEET_SCHEME, (request) => {
@@ -68,8 +89,9 @@ async function reference(html: string, stylesheets: Record<string, string>, view
     await window.loadURL(`${DESIGN_CAPTURE_SHEET_SCHEME}://sheet/${key}`);
     await window.webContents.executeJavaScript(DESIGN_STATIC_RENDER_SCRIPT);
     await window.webContents.executeJavaScript(`Promise.all([document.fonts.ready, ...Array.from(document.images, i => i.decode().catch(() => {}))]).then(() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))))`);
+    const probed = probe ? await window.webContents.executeJavaScript(probe) : undefined;
     const shot = await window.webContents.debugger.sendCommand("Page.captureScreenshot", { format: "png", captureBeyondViewport: false });
-    return { png: Buffer.from(shot.data as string, "base64"), ratio };
+    return { png: Buffer.from(shot.data as string, "base64"), ratio, probed };
   } finally {
     window.destroy();
   }
@@ -124,7 +146,12 @@ void app.whenReady().then(async () => {
         for (const item of reply.items) {
           const frame = batch.frames.get(item.id)!;
           const source = request.items.find((entry) => entry.id === item.id)!;
-          if ("error" in item) { (report.frames as unknown[]).push({ file: frame.file, error: item.error }); console.log(`${frame.file} ERROR ${item.error}`); continue; }
+          if ("error" in item) {
+            const probed = /composited layers/.test(item.error) ? (await reference(source.html, request.stylesheets, source.viewport, COMPOSITING_PROBE)).probed : undefined;
+            (report.frames as unknown[]).push({ file: frame.file, error: item.error, ...(probed ? { compositing: probed } : {}) });
+            console.log(`${frame.file} ERROR ${item.error}${probed ? " " + JSON.stringify(probed) : ""}`);
+            continue;
+          }
           const layer = item.layers[0]!;
           const recorded = new Uint8Array(await readFile(layer.path));
           // Stock CanvasKit reads embedded fonts only: put the fonts back.
