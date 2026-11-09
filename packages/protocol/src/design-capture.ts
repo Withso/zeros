@@ -379,7 +379,10 @@ export const designRecordingsReplySchema = z.object({
   typefaces: recordingTypefaces,
   chunks: recordingChunks,
   stale: z.array(recordingFrame).max(DESIGN_BATCH_CAPTURE_MAX_ITEMS),
-  failed: z.array(z.object({ file: z.string().min(1).max(255), error: z.string().min(1).max(500) }).strict())
+  /** `retryable`: the attempt failed, not the frame (a recorder page that
+   * crashed or stalled, a recorder restart, storage); asking again later can
+   * succeed. Without it the same source and recorder fail the same way. */
+  failed: z.array(z.object({ file: z.string().min(1).max(255), error: z.string().min(1).max(500), retryable: z.literal(true).optional() }).strict())
     .max(DESIGN_BATCH_CAPTURE_MAX_ITEMS),
   /** Not answered in this reply, to keep it within one frame: ask again. */
   deferred: z.array(recordingFrame).max(DESIGN_BATCH_CAPTURE_MAX_ITEMS),
@@ -394,6 +397,8 @@ export const designRecordingsReadSchema = z.object({
   theme: recordingTheme,
   frames: z.array(recordingFrame.partial({ sourceVersion: true })).min(1).max(DESIGN_MAX_FRAMES_PER_PAGE),
   knownChunks: z.array(recordingChunkId).max(DESIGN_RECORDINGS_KNOWN_CHUNKS).optional(),
+  /** Also answer `failed` for frames the current recorder can't record. */
+  withFailures: z.literal(true).optional(),
 }).strict()
   .refine((input) => new Set(input.frames.map((frame) => frame.file)).size === input.frames.length, "Recording frames must be distinct.");
 export type DesignRecordingsRead = z.infer<typeof designRecordingsReadSchema>;
@@ -405,6 +410,10 @@ export const designRecordingsReadReplySchema = z.object({
   missing: z.array(z.string().min(1).max(255)).max(DESIGN_MAX_FRAMES_PER_PAGE),
   /** Not looked up, to keep the reply within one frame: ask again. */
   deferred: z.array(z.string().min(1).max(255)).max(DESIGN_MAX_FRAMES_PER_PAGE),
+  /** With `withFailures`: missing frames whose newest generation (or the
+   * named one) the current recorder can't record. Also listed in `missing`. */
+  failed: z.array(z.object({ file: z.string().min(1).max(255), sourceVersion: recordingFrame.shape.sourceVersion,
+    error: z.string().min(1).max(500) }).strict()).max(DESIGN_MAX_FRAMES_PER_PAGE).optional(),
 }).strict().refine(withinReply, "Recording chunks exceed one reply.");
 export type DesignRecordingsReadReply = z.infer<typeof designRecordingsReadReplySchema>;
 

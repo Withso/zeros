@@ -330,6 +330,36 @@ export async function readDesignRecordingFailure(
   return error;
 }
 
+const FAILURE = /^(_|[a-z][a-z0-9_-]{0,63})~([a-f0-9]{24})~([a-f0-9]{16})\.failed$/;
+
+/** The generation of this frame (in this theme) that this recorder is known
+ * not to record, if any: at most one is kept per theme. */
+export async function readNewestDesignRecordingFailure(
+  workspace: string,
+  directoryId: string,
+  frameId: string,
+  theme: string | null,
+  pipeline: string,
+): Promise<{ sourceVersion: string; error: string } | null> {
+  const folder = frameFolder(workspace, directoryId, frameId);
+  const name = themeName(theme);
+  if (!folder || !THEME.test(name)) return null;
+  const key = `failure-newest\0${name}\0${pipeline}`;
+  const cached = answered<{ sourceVersion: string; error: string } | null>(folder, key);
+  if (cached) return cached.value;
+  const writes = folderWrites.get(folder) ?? 0;
+  if (!(await contained(folder))) return null;
+  let found: { sourceVersion: string; error: string } | null = null;
+  for (const entry of await entries(folder)) {
+    const match = FAILURE.exec(entry);
+    if (!match || match[1] !== name || match[3] !== pipelineKey(pipeline)) continue;
+    const error = await readDesignRecordingFailure(workspace, directoryId, frameId, theme, { sourceVersion: match[2]!, pipeline });
+    if (error) { found = { sourceVersion: match[2]!, error }; break; }
+  }
+  answer(folder, key, found, writes);
+  return found;
+}
+
 /** The frame's newest stored recording in this theme, of any generation
  * unless `sourceVersion` names one, and of any pipeline unless one is named. */
 export async function readStoredDesignRecording(

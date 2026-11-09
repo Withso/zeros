@@ -29,6 +29,7 @@ import {
   readDesignRecordingChunk,
   readDesignRecordingFailure,
   readDesignRecordingTypeface,
+  readNewestDesignRecordingFailure,
   readStoredDesignRecording,
   storeDesignRecording,
   storeDesignRecordingFailure,
@@ -254,7 +255,8 @@ export async function renderDesignRecordings(
   let pipeline = known === null ? null : designRecordingPipeline(known);
   const reply = new ReplyBuilder(input.knownChunks);
   const stale: Frame[] = [];
-  const failed: Array<{ file: string; error: string }> = [];
+  /** `retryable`: this attempt failed, not the frame. */
+  const failed: Array<{ file: string; error: string; retryable?: true }> = [];
   const deferred: Frame[] = [];
   const misses: Frame[] = [];
   const lookups = await mapLimit(input.frames, LOOKUPS, async (frame) => {
@@ -290,27 +292,27 @@ export async function renderDesignRecordings(
           const item = items.get(itemId);
           const viewport = viewports.get(itemId)!;
           const id = frameId(canvas, frame.file);
-          if (!item) { failed.push({ file: frame.file, error: "The recorder returned no recording for this frame." }); continue; }
+          if (!item) { failed.push({ file: frame.file, error: "The recorder returned no recording for this frame.", retryable: true }); continue; }
           if ("error" in item) {
             const error = failure(new Error(item.error), root);
             if (item.permanent && id && drawn === pipeline)
               await storeDesignRecordingFailure(root, input.directoryId, id, input.theme, { sourceVersion: frame.sourceVersion, pipeline: drawn, error });
-            failed.push({ file: frame.file, error });
+            failed.push(item.permanent ? { file: frame.file, error } : { file: frame.file, error, retryable: true });
             continue;
           }
-          if (drawn !== pipeline) { failed.push({ file: frame.file, error: "The recorder changed; try again." }); continue; }
+          if (drawn !== pipeline) { failed.push({ file: frame.file, error: "The recorder changed; try again.", retryable: true }); continue; }
           try {
             const layers = [];
             for (const layer of item.layers) layers.push({ x: layer.x, y: layer.y, width: layer.width, height: layer.height,
               bytes: await readRecorderFile(layer.path, LAYER_FILE, DESIGN_RECORDING_MAX_BYTES), typefaces: await storeLayerTypefaces(layer.typefaces) });
             const stored = id ? await storeDesignRecording(root, input.directoryId, id, input.theme,
               { sourceVersion: frame.sourceVersion, pipeline: drawn, width: viewport.width, height: viewport.height, scale: item.scale, layers }) : null;
-            if (!stored) { failed.push({ file: frame.file, error: "This frame's recording could not be stored." }); continue; }
+            if (!stored) { failed.push({ file: frame.file, error: "This frame's recording could not be stored.", retryable: true }); continue; }
             const outcome = await reply.add(frame, stored);
             if (outcome === "deferred") deferred.push(frame);
-            else if (outcome === "missing") failed.push({ file: frame.file, error: "This frame's recording could not be stored." });
+            else if (outcome === "missing") failed.push({ file: frame.file, error: "This frame's recording could not be stored.", retryable: true });
           } catch (error) {
-            failed.push({ file: frame.file, error: failure(error, root) });
+            failed.push({ file: frame.file, error: failure(error, root), retryable: true });
           }
         }
       } finally {
@@ -328,23 +330,39 @@ export async function renderDesignRecordings(
 
 /** design.recordings.read on one Local workspace: each frame's newest stored
  * recording in this theme, of any generation and pipeline. Nothing is recorded. */
-export async function readDesignRecordings(root: string, raw: unknown): Promise<DesignRecordingsReadReply> {
+export async function readDesignRecordings(root: string, raw: unknown,
+  deps: { recorder?: string | null } = {}): Promise<DesignRecordingsReadReply> {
   const input = designRecordingsReadSchema.parse(raw);
   await assertRecordingTarget(root, input);
   const { canvas } = await readSharedCanvasContext(root);
   const reply = new ReplyBuilder(input.knownChunks);
   const missing: string[] = [];
   const deferred: string[] = [];
+  const failed: Array<{ file: string; sourceVersion: string; error: string }> = [];
+  // Failures belong to the recorder that would record the frame now.
+  const recorder = !input.withFailures ? null : deps.recorder !== undefined ? deps.recorder : resolveDesignCaptureConfig()?.recorder ?? null;
+  const pipeline = recorder ? designRecordingPipeline(recorder) : null;
   const lookups = await mapLimit(input.frames, LOOKUPS, async (frame) => {
     const id = frameId(canvas, frame.file);
-    return { frame, stored: id ? await readStoredDesignRecording(root, input.directoryId, id, input.theme,
-      frame.sourceVersion ? { sourceVersion: frame.sourceVersion } : {}) : null };
+    const stored = id ? await readStoredDesignRecording(root, input.directoryId, id, input.theme,
+      frame.sourceVersion ? { sourceVersion: frame.sourceVersion } : {}) : null;
+    if (stored || !id || !pipeline) return { frame, stored, known: null };
+    const known = frame.sourceVersion
+      ? await readDesignRecordingFailure(root, input.directoryId, id, input.theme, { sourceVersion: frame.sourceVersion, pipeline })
+        .then((error) => (error ? { sourceVersion: frame.sourceVersion!, error } : null))
+      : await readNewestDesignRecordingFailure(root, input.directoryId, id, input.theme, pipeline);
+    return { frame, stored, known };
   });
-  for (const { frame, stored } of lookups) {
-    if (!stored) { missing.push(frame.file); continue; }
+  for (const { frame, stored, known } of lookups) {
+    if (!stored) {
+      missing.push(frame.file);
+      if (known) failed.push({ file: frame.file, ...known });
+      continue;
+    }
     const outcome = await reply.add({ file: frame.file, sourceVersion: stored.sourceVersion }, stored, true);
     if (outcome === "deferred") deferred.push(frame.file);
     else if (outcome === "missing") missing.push(frame.file);
   }
-  return designRecordingsReadReplySchema.parse({ recordings: reply.recordings, typefaces: reply.typefaces, chunks: reply.chunks, missing, deferred });
+  return designRecordingsReadReplySchema.parse({ recordings: reply.recordings, typefaces: reply.typefaces, chunks: reply.chunks, missing, deferred,
+    ...(input.withFailures ? { failed } : {}) });
 }

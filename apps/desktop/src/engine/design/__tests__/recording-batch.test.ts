@@ -112,7 +112,8 @@ describe("Design recordings", () => {
     const host = recorder({ error: (id) => (id === "f1" ? "This frame has content on separate composited layers." : null) });
     const reply = await renderDesignRecordings(root, { workspaceId: "w", directoryId, theme: null, frames }, { record: host.record, recorder: RECORDER });
     expect(reply.recordings.map((r) => r.file)).toEqual(["page-1/a.html"]);
-    expect(reply.failed).toEqual([{ file: "page-1/b.html", error: "This frame has content on separate composited layers." }]);
+    // Not marked permanent by the recorder: this attempt failed, not the frame.
+    expect(reply.failed).toEqual([{ file: "page-1/b.html", error: "This frame has content on separate composited layers.", retryable: true }]);
     const updated = recorder();
     await renderDesignRecordings(root, { workspaceId: "w", directoryId, theme: null, frames: [frames[0]!] }, { record: updated.record, recorder: "electron-44/chromium-151/skp" });
     expect(updated.calls).toHaveLength(1);
@@ -123,10 +124,23 @@ describe("Design recordings", () => {
     const error = (id: string) => (id === "f1" ? "This frame paints on 2 composited layers (640×400, 10×10), so it is shown as a picture." : null);
     const host = recorder({ error, permanent: true });
     const first = await renderDesignRecordings(root, { workspaceId: "w", directoryId, theme: null, frames }, { record: host.record, recorder: RECORDER });
-    expect(first.failed.map((entry) => entry.file)).toEqual(["page-1/b.html"]);
+    expect(first.failed.map((entry) => [entry.file, entry.retryable])).toEqual([["page-1/b.html", undefined]]);
     const again = await renderDesignRecordings(root, { workspaceId: "w", directoryId, theme: null, frames: [frames[1]!] }, { record: host.record, recorder: RECORDER });
     expect(host.calls).toHaveLength(1);
     expect(again.failed).toEqual(first.failed);
+    // A reopen learns it at once, before the frame is prepared, when it asks.
+    const reopened = await readDesignRecordings(root, { workspaceId: "w", directoryId, theme: null, withFailures: true,
+      frames: [{ file: "page-1/a.html" }, { file: "page-1/b.html" }] }, { recorder: RECORDER });
+    expect(reopened.recordings.map((recording) => recording.file)).toEqual(["page-1/a.html"]);
+    expect(reopened.missing).toEqual(["page-1/b.html"]);
+    expect(reopened.failed).toEqual([{ file: "page-1/b.html", sourceVersion: frames[1]!.sourceVersion, error: first.failed[0]!.error }]);
+    const named = await readDesignRecordings(root, { workspaceId: "w", directoryId, theme: null, withFailures: true,
+      frames: [{ file: "page-1/b.html", sourceVersion: frames[1]!.sourceVersion }] }, { recorder: RECORDER });
+    expect(named.failed).toEqual(reopened.failed);
+    expect("failed" in await readDesignRecordings(root, { workspaceId: "w", directoryId, theme: null, frames: [{ file: "page-1/b.html" }] },
+      { recorder: RECORDER })).toBe(false);
+    expect((await readDesignRecordings(root, { workspaceId: "w", directoryId, theme: null, withFailures: true, frames: [{ file: "page-1/b.html" }] },
+      { recorder: "electron-44/chromium-151/skp" })).failed).toEqual([]);
     // Another recorder tries again.
     const other = recorder({ error, permanent: true });
     await renderDesignRecordings(root, { workspaceId: "w", directoryId, theme: null, frames: [frames[1]!] }, { record: other.record, recorder: "electron-44/chromium-151/skp" });
@@ -148,7 +162,7 @@ describe("Design recordings", () => {
     const host = recorder({ pathFor: () => outside });
     const reply = await renderDesignRecordings(root, { workspaceId: "w", directoryId, theme: null, frames }, { record: host.record, recorder: RECORDER });
     expect(reply.recordings).toEqual([]);
-    expect(reply.failed).toEqual([{ file: "page-1/a.html", error: "The recorder named a recording outside its folder." }]);
+    expect(reply.failed).toEqual([{ file: "page-1/a.html", error: "The recorder named a recording outside its folder.", retryable: true }]);
   });
 
   it("defers recordings whose chunks don't fit one reply, and sends shared chunks once", async () => {
@@ -197,6 +211,6 @@ describe("Design recordings", () => {
     const host = recorder({ fonts: () => [{ id: "0".repeat(32), bytes: randomBytes(1_000) }] });
     const reply = await renderDesignRecordings(root, { workspaceId: "w", directoryId, theme: null, frames }, { record: host.record, recorder: RECORDER });
     expect(reply.recordings).toEqual([]);
-    expect(reply.failed).toEqual([{ file: "page-1/a.html", error: "A font this frame uses could not be stored." }]);
+    expect(reply.failed).toEqual([{ file: "page-1/a.html", error: "A font this frame uses could not be stored.", retryable: true }]);
   });
 });
