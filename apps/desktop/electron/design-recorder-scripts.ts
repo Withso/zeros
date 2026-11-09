@@ -4,10 +4,11 @@
 /** Content Chromium would composite onto a layer of its own, which a
  * picture of the page's layer doesn't include, made to paint into it while
  * looking the same at scroll position 0:
- * - a scroll container that overflows, the page itself included, is clipped
- *   (overflow: clip), keeping the formatting context its scrolling gave a
- *   block (flow-root); with the page unscrollable, fixed and sticky elements
- *   need no layer either;
+ * - a scroll container is clipped (overflow: clip) on every axis: any that
+ *   scrolls by the user, any whose hidden overflow outgrows it, and the page
+ *   itself when its content outgrows the frame. A block keeps the formatting
+ *   context its scrolling gave it (flow-root). With the page unscrollable,
+ *   fixed and sticky elements need no layer either;
  * - a will-change hint is dropped, keeping the stacking context it made
  *   (isolation: isolate), unless the element contains fixed-position
  *   elements it would stop containing.
@@ -33,11 +34,15 @@ export const DESIGN_RECORDER_FLATTEN_SOURCE = `function flattenDesignScrollers()
       element.style.setProperty("isolation", "isolate", "important");
       changed++;
     }
-    if (!scrolls(style.overflowX) && !scrolls(style.overflowY)) continue;
-    if (element.scrollHeight <= element.clientHeight + 1 && element.scrollWidth <= element.clientWidth + 1) continue;
+    // A scroll container can scroll (and so composite) when it scrolls by the
+    // user, or when hidden overflow outgrows it. Every axis is clipped: clip
+    // next to a scrolling or hidden axis would compute back to hidden.
+    const clips = (value) => scrolls(value) || value === "hidden";
+    const overflows = element.scrollHeight > element.clientHeight || element.scrollWidth > element.clientWidth;
+    if (!scrolls(style.overflowX) && !scrolls(style.overflowY) && !(overflows && (clips(style.overflowX) || clips(style.overflowY)))) continue;
     if (style.display === "block") element.style.setProperty("display", "flow-root", "important");
-    if (scrolls(style.overflowX)) element.style.setProperty("overflow-x", "clip", "important");
-    if (scrolls(style.overflowY)) element.style.setProperty("overflow-y", "clip", "important");
+    if (clips(style.overflowX)) element.style.setProperty("overflow-x", "clip", "important");
+    if (clips(style.overflowY)) element.style.setProperty("overflow-y", "clip", "important");
     changed++;
   }
   return changed;

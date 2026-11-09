@@ -20,22 +20,29 @@ describe("Design recorder scripts", () => {
     const listed = element({ overflowY: "auto", scrollHeight: 900, clientHeight: 300 });
     const fits = element({ overflowY: "auto" });
     const hidden = element({ overflowY: "hidden", scrollHeight: 900, clientHeight: 300 });
+    const quiet = element({ overflowX: "hidden", overflowY: "hidden" });
+    const pane = element({ overflowX: "hidden", overflowY: "auto", scrollHeight: 1432, clientHeight: 884 });
     const flex = element({ overflowX: "scroll", overflowY: "visible", display: "flex", scrollWidth: 2000, clientWidth: 400 });
     const shadowed = element({ overflowY: "scroll", scrollHeight: 500, clientHeight: 100 });
     const host = element({}, [], [shadowed]);
     const html = element({ overflowY: "auto", scrollHeight: 5000, clientHeight: 900 });
     const body = element({ overflowY: "auto", scrollHeight: 5000, clientHeight: 900 });
-    const all = [listed, fits, hidden, flex, host];
+    const all = [listed, fits, hidden, quiet, pane, flex, host];
     const document = { documentElement: html, body, querySelectorAll: () => [html, body, ...flat(all)] };
     const converted = runInNewContext(`${DESIGN_RECORDER_FLATTEN_SOURCE}; flattenDesignScrollers()`, {
       document, getComputedStyle: (el: { computed: Box }) => el.computed, innerHeight: 900, innerWidth: 1440,
     });
-    expect(converted).toBe(4);
+    expect(converted).toBe(7);
     const styles = (el: Record<string, unknown>) => ["display", "overflow-x", "overflow-y"].map((name) => (el.style as { get(n: string): string | undefined }).get(name) ?? "-");
     expect(styles(listed)).toEqual(["flow-root", "-", "clip"]);
     expect(styles(flex)).toEqual(["-", "clip", "-"]);
     expect(styles(shadowed)).toEqual(["flow-root", "-", "clip"]);
-    for (const untouched of [fits, hidden]) expect(styles(untouched)).toEqual(["-", "-", "-"]);
+    // A user-scrollable container is clipped even when its content fits; hidden
+    // overflow only when it outgrows the box. Every non-visible axis is clipped.
+    expect(styles(fits)).toEqual(["flow-root", "-", "clip"]);
+    expect(styles(hidden)).toEqual(["flow-root", "-", "clip"]);
+    expect(styles(pane)).toEqual(["flow-root", "clip", "clip"]);
+    expect(styles(quiet)).toEqual(["-", "-", "-"]);
     // The page overflows its viewport, so the page itself is clipped.
     expect((html.style as { get(n: string): string | undefined }).get("overflow")).toBe("clip");
     expect((body.style as { get(n: string): string | undefined }).get("overflow")).toBe("clip");
