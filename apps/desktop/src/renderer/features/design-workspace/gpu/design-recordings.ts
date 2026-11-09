@@ -468,6 +468,14 @@ export class DesignRecordings {
       const entry = state.frames.get(file);
       if (entry && asked.has(file)) entry.storedMissing = entry.wanted ?? null;
     }
+    // A reopen's known failures fail at once for their version, or for a
+    // frame that has none yet; another version is recorded as usual.
+    if ("missing" in reply) for (const { file, sourceVersion, error } of reply.failed ?? []) {
+      const entry = state.frames.get(file);
+      if (!entry || !asked.has(file) || entry.wanted !== undefined && entry.wanted !== sourceVersion) continue;
+      entry.failed = { version: entry.wanted ?? null, error };
+      this.counts.failed++;
+    }
     this.publish(state, changed);
   }
 
