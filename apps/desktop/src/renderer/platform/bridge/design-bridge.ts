@@ -32,6 +32,8 @@ import { designPageCatalogSchema, designPageIdSchema, normalizeDesignPagesSnapsh
 import { DESIGN_LAZY_PREPARATION_CAPABILITY, DESIGN_MUTATION_SNAPSHOTS_CAPABILITY, DESIGN_PAGE_SCOPED_MUTATIONS_CAPABILITY, designMutationCatalogSchema, designPageScopedCatalogSchema, designPreparedFrameSchema, designFramesPrepareSchema, designFramesPrepareReplySchema, type DesignMutationCatalog, type DesignPageHashes, type DesignPageScopedCatalog } from "@zeros/protocol/design-catalog";
 import { DESIGN_SOURCE_SURFACES_CAPABILITY } from "@zeros/protocol/design-surface";
 import {
+  DESIGN_RECORDINGS_COLOR_SCHEME_CAPABILITY,
+  DESIGN_RECORDINGS_READ_FAILURES_CAPABILITY,
   designRecordingsReadReplySchema,
   designRecordingsReplySchema,
   type DesignRecordingsReadReply,
@@ -803,6 +805,7 @@ export async function bridgeDesignRecordingsRender(
   input: {
     directoryId: string;
     theme: string | null;
+    colorScheme?: "light" | "dark";
     frames: ReadonlyArray<{ file: string; sourceVersion: string }>;
     knownChunks: readonly string[];
   },
@@ -810,7 +813,7 @@ export async function bridgeDesignRecordingsRender(
 ): Promise<DesignRecordingsReply> {
   if (isCloudWorkspace(workspaceId)) throw new Error(LOCAL_RECORDINGS_ONLY);
   return runDesignPreviewJob(bridge, workspaceId, input.directoryId, "design.recordings.render",
-    { directoryId: input.directoryId, theme: input.theme,
+    { directoryId: input.directoryId, theme: input.theme, ...recordingsColorScheme(bridge, workspaceId, input.colorScheme),
       frames: input.frames.map(({ file, sourceVersion }) => ({ file, sourceVersion })),
       ...(input.knownChunks.length ? { knownChunks: [...input.knownChunks] } : {}) },
     DESIGN_PREVIEW_JOB_TIMEOUT_MS, DESIGN_PREVIEW_JOB_TIMEOUT_MS + 15_000,
@@ -821,6 +824,12 @@ export async function bridgeDesignRecordingsRender(
     });
 }
 
+/** An engine without the capability rejects the field (its request schema is
+ * strict) and records light, as before. */
+function recordingsColorScheme(bridge: RuntimeClient, workspaceId: string, colorScheme: "light" | "dark" | undefined) {
+  return colorScheme && bridge.supportsEngineCapability?.(DESIGN_RECORDINGS_COLOR_SCHEME_CAPABILITY, workspaceId) ? { colorScheme } : {};
+}
+
 /** Each frame's newest stored recording; a frame sent without a version is
  * answered by any generation. Nothing is recorded. */
 export async function bridgeDesignRecordingsRead(
@@ -829,6 +838,7 @@ export async function bridgeDesignRecordingsRead(
   input: {
     directoryId: string;
     theme: string | null;
+    colorScheme?: "light" | "dark";
     frames: ReadonlyArray<{ file: string; sourceVersion?: string }>;
     knownChunks: readonly string[];
   },
@@ -837,9 +847,11 @@ export async function bridgeDesignRecordingsRead(
   if (isCloudWorkspace(workspaceId)) throw new Error(LOCAL_RECORDINGS_ONLY);
   options.signal?.throwIfAborted();
   const result = await rawWorkspaceOp(bridge, "design.recordings.read", {
-    workspaceId, directoryId: input.directoryId, theme: input.theme,
+    workspaceId, directoryId: input.directoryId, theme: input.theme, ...recordingsColorScheme(bridge, workspaceId, input.colorScheme),
     frames: input.frames.map(({ file, sourceVersion }) => (sourceVersion ? { file, sourceVersion } : { file })),
     ...(input.knownChunks.length ? { knownChunks: [...input.knownChunks] } : {}),
+    // An engine without it rejects the field: its request schema is strict.
+    ...(bridge.supportsEngineCapability?.(DESIGN_RECORDINGS_READ_FAILURES_CAPABILITY, workspaceId) ? { withFailures: true } : {}),
   }, DESIGN_RECORDINGS_READ_TIMEOUT_MS);
   // A stored lookup cannot be cancelled; a reply nobody waits for is dropped.
   options.signal?.throwIfAborted();

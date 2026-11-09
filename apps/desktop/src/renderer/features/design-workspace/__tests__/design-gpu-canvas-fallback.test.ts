@@ -16,7 +16,7 @@ function Canvas({ runtime, renders }: { runtime: DesignGpuRuntime; renders: bool
   const enabled = useDesignGpuAvailable(runtime);
   renders.push(enabled);
   useDesignGpuCanvas({ enabled, active: true, worldRef, documentOwner: "page-1", runtime,
-    owner: { workspaceId: "/work/a", directoryId: "design_a", theme: null }, openKey: "page-1\0", frames: [], live: new Set() });
+    owner: { workspaceId: "/work/a", directoryId: "design_a", theme: null, colorScheme: "light" }, openKey: "page-1\0", frames: [], live: new Set() });
   return createElement("div", null, createElement("div", { ref: worldRef }));
 }
 

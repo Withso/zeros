@@ -17,8 +17,8 @@ import {
 } from "../gpu/design-recordings-wire";
 
 const version = (n: number) => n.toString(16).padStart(24, "0");
-const owner: DesignRecordingsOwner = { workspaceId: "/work/a", directoryId: "design_a", theme: null };
-const other: DesignRecordingsOwner = { workspaceId: "/work/b", directoryId: "design_b", theme: "dark" };
+const owner: DesignRecordingsOwner = { workspaceId: "/work/a", directoryId: "design_a", theme: null, colorScheme: "light" };
+const other: DesignRecordingsOwner = { workspaceId: "/work/b", directoryId: "design_b", theme: "dark", colorScheme: "light" };
 const chunk = (text: string) => ({
   id: createHash("sha256").update(text).digest("hex").slice(0, 32),
   data: Buffer.from(text).toString("base64"),
@@ -210,6 +210,24 @@ describe("Design recordings", () => {
     expect(calls).toHaveLength(2);
   });
 
+  it("keeps a frame's light and dark recordings apart: a scheme switch is an owner change", async () => {
+    const { calls, recordings } = harness();
+    const dark: DesignRecordingsOwner = { ...owner, colorScheme: "dark" };
+    expect(designRecordingsOwnerKey(dark)).not.toBe(designRecordingsOwnerKey(owner));
+    const frames = [{ file: "a.html", sourceVersion: version(1) }];
+    recordings.demand(owner, frames);
+    // The canvas switches to dark before the light reply lands.
+    recordings.demand(owner, []);
+    recordings.demand(dark, frames);
+    expect(calls.map((call) => call.owner.colorScheme)).toEqual(["light", "dark"]);
+    calls[0]!.resolve(readReply(frames, []));
+    await recordings.settled();
+    expect(recordings.recording(dark, "a.html")).toBeNull();
+    calls[1]!.resolve(readReply(frames, [], calls[1]!.known, { versions: { "a.html": version(1) } }));
+    await recordings.settled();
+    expect(recordings.recording(dark, "a.html")).toMatchObject({ sourceVersion: version(1), current: true });
+  });
+
   it("fences replies by exact owner and drops a forgotten owner's late reply", async () => {
     const { calls, recordings } = harness();
     recordings.demand(owner, [{ file: "a.html", sourceVersion: version(1) }]);
@@ -324,6 +342,71 @@ describe("Design recordings", () => {
     await recordings.settled();
     expect(recordings.recording(owner, "a.html")).toBeNull();
     expect(recordings.usage().inFlight).toBe(0);
+  });
+
+  it("covers a retryable failure at once, asks again after 2, 4 and 8 s, then keeps it; a recorded retry replaces it", async () => {
+    let now = 0;
+    const timers: Array<{ at: number; callback: () => void; cleared: boolean }> = [];
+    const { calls, source } = heldSource();
+    const recordings = new DesignRecordings({ source, chunks: new DesignRecordingChunks(), now: () => now,
+      setTimer: (callback, ms) => { const timer = { at: now + ms, callback, cleared: false }; timers.push(timer); return timer; },
+      clearTimer: (handle) => { (handle as { cleared: boolean }).cleared = true; } });
+    const advance = async (ms: number) => {
+      now += ms;
+      for (const timer of timers) if (!timer.cleared && timer.at <= now) { timer.cleared = true; timer.callback(); }
+      await recordings.settled();
+    };
+    const frames = [{ file: "a.html", sourceVersion: version(1) }, { file: "b.html", sourceVersion: version(1) }];
+    recordings.demand(owner, frames);
+    calls[0]!.resolve(readReply(frames, ["a.html", "b.html"]));
+    await recordings.settled();
+    const crashed = (call: Call, retryable = true) => call.resolve({ ...renderReply([], call.known),
+      failed: call.frames.map((frame) => ({ file: frame.file, error: "The recorder page crashed.", ...(retryable ? { retryable } : {}) })) });
+    // b fails for good; a's attempt failed, not the frame.
+    calls[1]!.resolve({ ...renderReply([], calls[1]!.known), failed: [
+      { file: "a.html", error: "The recorder page crashed.", retryable: true }, { file: "b.html", error: "This frame paints on 2 layers." }] });
+    await recordings.settled();
+    expect([...recordings.failedFiles(owner)].sort()).toEqual(["a.html", "b.html"]);
+    for (const [wait, index] of [[2_000, 2], [4_000, 3], [8_000, 4]] as const) {
+      await advance(wait - 1);
+      expect(calls).toHaveLength(index);
+      await advance(1);
+      expect(calls[index]).toMatchObject({ op: "render", frames: [{ file: "a.html", sourceVersion: version(1) }] });
+      crashed(calls[index]!);
+      await recordings.settled();
+    }
+    // Three retries spent: the failure stays until the frame's version changes.
+    await advance(60_000);
+    expect(calls).toHaveLength(5);
+    expect(recordings.failedFiles(owner).has("a.html")).toBe(true);
+    // A new version asks again; its retry that records replaces the failure.
+    recordings.demand(owner, [{ file: "a.html", sourceVersion: version(2) }, frames[1]!]);
+    calls[5]!.resolve(readReply(calls[5]!.frames, ["a.html"], calls[5]!.known));
+    await recordings.settled();
+    crashed(calls[6]!);
+    await recordings.settled();
+    expect(recordings.failedFiles(owner).has("a.html")).toBe(true);
+    await advance(2_000);
+    calls[7]!.resolve(renderReply(calls[7]!.frames, calls[7]!.known));
+    await recordings.settled();
+    expect(recordings.recording(owner, "a.html")).toMatchObject({ sourceVersion: version(2), current: true });
+    expect([...recordings.failedFiles(owner)]).toEqual(["b.html"]);
+  });
+
+  it("takes a reopen's known failures as failed at once, for that version or a frame without one", async () => {
+    const { calls, recordings } = harness();
+    recordings.demand(owner, [{ file: "a.html" }, { file: "b.html", sourceVersion: version(1) }, { file: "c.html", sourceVersion: version(2) }]);
+    const layers = "This frame paints on 2 composited layers.";
+    calls[0]!.resolve({ ...readReply(calls[0]!.frames, ["a.html", "b.html", "c.html"]), failed: [
+      { file: "a.html", sourceVersion: version(5), error: layers },
+      { file: "b.html", sourceVersion: version(1), error: layers },
+      { file: "c.html", sourceVersion: version(1), error: layers }] });
+    await recordings.settled();
+    // a (still unprepared) and b are covered by their live documents now;
+    // c's failure was another version's, so c is recorded as usual.
+    expect([...recordings.failedFiles(owner)].sort()).toEqual(["a.html", "b.html"]);
+    expect(calls).toHaveLength(2);
+    expect(calls[1]).toMatchObject({ op: "render", frames: [{ file: "c.html", sourceVersion: version(2) }] });
   });
 
   it("fails a frame whose recording this renderer can't draw, and only drops an older cover it can't draw", async () => {
