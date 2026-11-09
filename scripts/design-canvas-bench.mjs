@@ -540,7 +540,15 @@ async function main() {
         await save();
       }
       await pause(3000);
-      result.afterOpen = { renderer: await renderer(), memory: summarize(await sample()) };
+      { const rows = await sample();
+        // Name the processes outside Electron's own metrics (recorder, engine children) and their footprints.
+        const others = rows.filter(row => !["Tab", "Browser", "GPU", "Utility", "local-engine"].includes(row.role));
+        const names = others.length ? (await run("ps", ["-o", "pid=,comm=", "-p", others.map(row => row.pid).join(",")]).catch(() => ""))
+          .split("\n").map(line => line.trim().match(/^(\d+)\s+(.*)$/)).filter(Boolean) : [];
+        const byPid = new Map(names.map(match => [Number(match[1]), match[2].split("/").slice(-2).join("/")]));
+        result.afterOpen = { renderer: await renderer(), memory: summarize(rows),
+          others: others.map(row => ({ pid: row.pid, role: row.role, name: byPid.get(row.pid) ?? "?", mb: Math.round((row.physicalFootprintBytes ?? 0) / 2 ** 20) }))
+            .sort((a, b) => b.mb - a.mb).slice(0, 20) }; }
       // Does memory settle once pictures stop arriving? Renderer JS heap vs native, over 30 s idle.
       const heap = async () => { const h = await cdp.send("Runtime.getHeapUsage").catch(() => null);
         return h && { usedMB: Math.round(h.usedSize / 2 ** 20), totalMB: Math.round(h.totalSize / 2 ** 20),
