@@ -1195,6 +1195,10 @@ Records contain a shortened workspace ID, closed phase name and duration,
 without commands, paths, URLs or credentials. Optional worker timings use a
 separate HTTPS endpoint with no retries; the control plane caps reports per
 boot and phase in bounded memory. Diagnostics never determine startup success.
+Some phases overlap or nest. `runtime_install` includes the wait for a new VM's
+first command: Boat holds that command until the VM is up, about 2 s from a
+snapshot. `worker_hello` runs from the workspace row's last update, so for a
+create it also covers the lifecycle steps before it.
 
 Archive sets `archivedAt` and requests the same stop lifecycle. The UI treats
 a stopped or failed workspace with that flag as archived; idle stop leaves it
