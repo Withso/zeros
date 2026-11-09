@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  DESIGN_RECORDINGS_READ_FAILURES_CAPABILITY,
   DESIGN_RECORDINGS_REPLY_DATA_BYTES,
   designBatchRecordReplySchema,
   designBatchRecordRequestSchema,
@@ -24,6 +25,10 @@ describe("design recordings protocol", () => {
     expect(() => designRecordingsRenderSchema.parse({ ...input, frames: [{ file: "page-1/home.html" }] })).toThrow();
     expect(() => designRecordingsRenderSchema.parse({ ...input, knownChunks: ["not-a-chunk"] })).toThrow();
     expect(() => designRecordingsRenderSchema.parse({ ...input, jobId: "00000000-0000-4000-8000-000000000000" })).toThrow(/together/);
+  });
+
+  it("names the capability for reads that report known failures", () => {
+    expect(DESIGN_RECORDINGS_READ_FAILURES_CAPABILITY).toBe("design.recordings.read-failures.v1");
   });
 
   it("reads stored recordings for frames sent without a version", () => {
