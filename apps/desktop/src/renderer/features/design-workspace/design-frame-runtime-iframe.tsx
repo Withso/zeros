@@ -162,6 +162,10 @@ function DesignFrameDocumentBuffer({
   const { session: savedEditingSession, state: savedEditingState } = useDesignSavedEditing();
   const connectionRef = useRef<DesignFrameRuntimeConnection | null>(null);
   const [connectedRuntime, setConnectedRuntime] = useState<DesignFrameRuntimeConnection | null>(null);
+  // Ready is layout, not composited pixels: a document revealed at ready can
+  // show nothing for a frame. The pixels beneath it stop painting only once
+  // this connection's document reports a produced frame.
+  const [presentedRuntime, setPresentedRuntime] = useState<DesignFrameRuntimeConnection | null>(null);
   const [playingSessionId, setPlayingSessionId] = useState<string | null>(null);
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   useLayoutEffect(() => retainDesignResource("documentBuffers"), []);
@@ -450,7 +454,12 @@ function DesignFrameDocumentBuffer({
       node,
       {
         isActive: () => latestRef.current.runtimeActive && !latestRef.current.playbackSessionId,
-        onReady: clearHandshakeTimer,
+        onReady: (capabilities) => {
+          clearHandshakeTimer();
+          // An older runtime cannot report its first frame; ready is all it has.
+          if (capabilities.painted !== true) setPresentedRuntime(connection);
+        },
+        onPainted: () => setPresentedRuntime(connection),
         onPlaybackStopped: ({ sessionId }) => latestRef.current.onPlaybackStopped?.(sessionId),
         onSnapshot: (snapshot, event) => {
           if (event !== "ready") {
@@ -658,6 +667,7 @@ function DesignFrameDocumentBuffer({
       data-design-source-version={frame.sourceVersion}
       data-design-document-buffer={buffer}
       data-design-document-ready={ready ? "" : undefined}
+      data-design-document-presented={ready && presentedRuntime !== null && presentedRuntime === connectedRuntime ? "" : undefined}
       data-design-frame-live={interactive ? "" : undefined}
       tabIndex={interactive ? 0 : -1}
       {...(!interactive ? { inert: "" } : {})}

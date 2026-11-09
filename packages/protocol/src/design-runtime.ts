@@ -564,6 +564,11 @@ export interface DesignRuntimePlaybackStopped {
   reason: "escape" | "hidden";
 }
 
+/** The document has produced a frame since it reported ready. */
+export interface DesignRuntimePainted {
+  sourceVersion: string;
+}
+
 /** Largest in-flight stylesheet text `previewStylesheet` applies. */
 export const MAX_DESIGN_RUNTIME_PREVIEW_STYLESHEET_CHARS = 4 * 1024 * 1024;
 
@@ -580,6 +585,8 @@ export interface DesignRuntimeCapabilities {
   cancellation: true;
   /** Capture cancellation responds only after decode/encoding cleanup. */
   captureCompletion?: true;
+  /** A "painted" event follows "ready" once a frame has been produced. */
+  painted?: true;
   typedErrors: true;
   sourcePinned: true;
   maxStyleProperties: number;
@@ -708,6 +715,13 @@ export type DesignRuntimeFrameMessage =
       /** Sent only after an opted-in host starts a playback session. */
       event: "playbackStopped";
       payload: DesignRuntimePlaybackStopped;
+    }
+  | {
+      protocol: typeof DESIGN_RUNTIME_PROTOCOL;
+      version: typeof DESIGN_RUNTIME_VERSION;
+      type: "event";
+      event: "painted";
+      payload: DesignRuntimePainted;
     };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -1011,13 +1025,15 @@ export function isDesignRuntimeFrameMessage(
   }
   if (
     message.type !== "event" ||
-    (message.event !== "ready" && message.event !== "mutation" && message.event !== "playbackStopped") ||
+    (message.event !== "ready" && message.event !== "mutation" && message.event !== "playbackStopped" &&
+      message.event !== "painted") ||
     !isRecord(message.payload)
   ) {
     return false;
   }
   if (message.event === "mutation") return isRuntimeSnapshot(message.payload);
   const payload = message.payload;
+  if (message.event === "painted") return isSourceVersion(payload.sourceVersion);
   if (message.event === "playbackStopped") {
     return isSourceVersion(payload.sourceVersion) &&
       typeof payload.sessionId === "string" && payload.sessionId.length > 0 && payload.sessionId.length <= 128 &&
@@ -1321,6 +1337,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       methods: METHODS.concat(enabledOptInMethods),
       cancellation: true,
       captureCompletion: true,
+      painted: true,
       typedErrors: true,
       sourcePinned: true,
       maxStyleProperties: 64,
@@ -5272,6 +5289,16 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
         sourceVersion: SOURCE_VERSION,
         capabilities: capabilities(),
         snapshot: snapshot()
+      });
+      // Ready is layout, not pixels. A document revealed at ready may not
+      // have reached the compositor yet, so its host keeps the frame's last
+      // pixels beneath it. The second animation frame runs after the first
+      // frame since ready was produced; a hidden document waits until shown.
+      var readyVersion = SOURCE_VERSION;
+      window.requestAnimationFrame(function () {
+        window.requestAnimationFrame(function () {
+          if (!disposed && parentPort) event("painted", { sourceVersion: readyVersion });
+        });
       });
     };
     // The iframe load event can precede web-font layout. Do not hand fallback

@@ -72,6 +72,9 @@ export interface DesignFrameRuntimeCallbacks {
     event: "ready" | "mutation",
   ) => void;
   onReady?: (capabilities: DesignRuntimeCapabilities) => void;
+  /** The ready document has produced a frame; only then may the pixels
+   * beneath it stop painting. Sent when capabilities include `painted`. */
+  onPainted?: () => void;
   onGenerationChanged?: () => void;
   onPlaybackStopped?: (event: DesignRuntimePlaybackStopped) => void;
 }
@@ -462,6 +465,10 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
         this.captureCompletion = message.payload.capabilities.captureCompletion === true;
         this.callbacks.onReady?.(message.payload.capabilities);
         this.callbacks.onSnapshot?.(message.payload.snapshot, "ready");
+      } else if (message.event === "painted") {
+        // This port is the document's identity; a same-document generation
+        // adoption between ready and its next frame still presented it.
+        if (this.methods !== null) this.callbacks.onPainted?.();
       } else if (message.event === "playbackStopped") {
         if (this.supports("setPlayback") && message.payload.sourceVersion === this.expectedSourceVersion) {
           this.callbacks.onPlaybackStopped?.(message.payload);

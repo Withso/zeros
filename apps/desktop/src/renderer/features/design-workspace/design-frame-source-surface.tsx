@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { DESIGN_SURFACE_LAYOUT, DESIGN_SURFACE_LAYOUT_REQUEST, DESIGN_SURFACE_READY, type DesignSurfaceCost } from "@zeros/protocol/design-surface";
+import { DESIGN_SURFACE_LAYOUT, DESIGN_SURFACE_LAYOUT_REQUEST, DESIGN_SURFACE_PAINTED, DESIGN_SURFACE_READY, type DesignSurfaceCost } from "@zeros/protocol/design-surface";
 import { designProtocolFrameUrl } from "../../platform/bridge/design-protocol-url";
 import { designSourceSurfaceBudget } from "./design-source-surfaces";
 import { acquireDesignSourceVectorImage, designSourceLoadSlots, designSourceVectorCache, designSourceVectorKey, type DesignSourceLoadTicket, type DesignCachedSourceVector, type DesignSourceVectorRequest, type DesignSourceVectorTarget } from "./design-source-vector";
@@ -17,16 +17,17 @@ interface SurfaceDocument {
   cost: DesignSurfaceCost;
 }
 
-function SourceHtmlDocument({ entry, title, incoming, visible, holdSlot, onReady, onFailure, onRetired }: {
+function SourceHtmlDocument({ entry, title, incoming, visible, holdSlot, onReady, onPainted, onFailure, onRetired }: {
   entry: SurfaceDocument; title: string; incoming: boolean; visible: boolean; holdSlot: boolean;
-  onReady(svg: unknown): void; onFailure(): void; onRetired(): void;
+  /** `painted` says a separate painted message will follow readiness. */
+  onReady(svg: unknown, painted: boolean): void; onPainted(): void; onFailure(): void; onRetired(): void;
 }) {
   const iframe = useRef<HTMLIFrameElement>(null);
   const ticket = useRef<DesignSourceLoadTicket | null>(null);
   const [started, setStarted] = useState(false);
   const [ready, setReady] = useState(false);
-  const callbacks = useRef({ onReady, onFailure, onRetired });
-  callbacks.current = { onReady, onFailure, onRetired };
+  const callbacks = useRef({ onReady, onPainted, onFailure, onRetired });
+  callbacks.current = { onReady, onPainted, onFailure, onRetired };
   useLayoutEffect(() => {
     const requested = designSourceLoadSlots.request(() => setStarted(true));
     ticket.current = requested;
@@ -65,8 +66,13 @@ function SourceHtmlDocument({ entry, title, incoming, visible, holdSlot, onReady
     };
     let layoutRequested = false;
     const message = (event: MessageEvent) => {
-      if (!waiting || event.source !== iframe.current?.contentWindow || !event.data ||
+      if (event.source !== iframe.current?.contentWindow || !event.data ||
           event.data.sourceVersion !== entry.sourceVersion || event.data.theme !== entry.theme) return;
+      if (event.data.kind === DESIGN_SURFACE_PAINTED) {
+        if (!waiting) callbacks.current.onPainted();
+        return;
+      }
+      if (!waiting) return;
       if (event.data.kind === DESIGN_SURFACE_LAYOUT_REQUEST) {
         if (!layoutRequested) { layoutRequested = true; paintLayout(); }
         return;
@@ -74,7 +80,7 @@ function SourceHtmlDocument({ entry, title, incoming, visible, holdSlot, onReady
       if (event.data.kind !== DESIGN_SURFACE_READY) return;
       waiting = false; window.clearTimeout(timer); setReady(true);
       window.cancelAnimationFrame(layoutFrame);
-      callbacks.current.onReady(event.data.svg);
+      callbacks.current.onReady(event.data.svg, event.data.painted === true);
     };
     node?.addEventListener("load", loaded);
     window.addEventListener("message", message);
@@ -161,6 +167,9 @@ function SourceDocument({ entry, title, incoming, visible, retainHtml, allowLoad
   const [vectorReady, setVectorReady] = useState(false);
   const [vectorUnavailable, setVectorUnavailable] = useState(false);
   const [htmlReady, setHtmlReady] = useState(false);
+  // The vector keeps painting beneath newly revealed HTML until that native
+  // document reports a produced frame; until then it can composite nothing.
+  const [htmlPresented, setHtmlPresented] = useState(false);
   const callbacks = useRef({ onReady, onFailure });
   callbacks.current = { onReady, onFailure };
   const vectorRef = useRef<DesignCachedSourceVector | null>(null);
@@ -193,8 +202,10 @@ function SourceDocument({ entry, title, incoming, visible, retainHtml, allowLoad
     const release = retainDesignResource("sourceVectorBuffers");
     return () => { release(); vector.release(); };
   }, [vector]);
-  const ready = useCallback((svg: unknown) => {
+  const ready = useCallback((svg: unknown, painted: boolean) => {
     setHtmlReady(true);
+    // An older surface script cannot report its first frame.
+    if (!painted) setHtmlPresented(true);
     if (!vectorRef.current) {
       let next: DesignCachedSourceVector | null = null;
       try { next = requestRef.current?.publish(svg) ?? null; } catch { /* Fall back through the existing bounded preview path. */ }
@@ -214,18 +225,19 @@ function SourceDocument({ entry, title, incoming, visible, retainHtml, allowLoad
     }
     callbacks.current.onReady(entry);
   }, [entry, incoming]);
-  const retired = useCallback(() => setHtmlReady(false), []);
+  const presented = useCallback(() => setHtmlPresented(true), []);
+  const retired = useCallback(() => { setHtmlReady(false); setHtmlPresented(false); }, []);
   const failed = useCallback(() => { if (!vectorRef.current) callbacks.current.onFailure(); }, []);
   if (!admitted || !cacheChecked) return null;
   return <>
     {vector ? <SourceVectorImage vector={vector} entry={entry} incoming={incoming} visible={visible} ready={vectorReady}
-      covered={retainHtml && htmlReady} passive={!retainHtml} onReady={() => { setVectorReady(true); callbacks.current.onReady(entry); }}
+      covered={retainHtml && htmlReady && htmlPresented} passive={!retainHtml} onReady={() => { setVectorReady(true); callbacks.current.onReady(entry); }}
       onFailure={() => {
         setVectorUnavailable(true); setVectorReady(false); setVector(null); vectorRef.current = null;
         callbacks.current.onFailure();
       }} /> : null}
     {allowLoad && (retainHtml || (!vectorReady && !fromCache)) ? <SourceHtmlDocument entry={entry} title={title} incoming={incoming}
-      visible={visible} holdSlot={!retainHtml && !vectorUnavailable} onReady={ready} onFailure={failed} onRetired={retired} /> : null}
+      visible={visible} holdSlot={!retainHtml && !vectorUnavailable} onReady={ready} onPainted={presented} onFailure={failed} onRetired={retired} /> : null}
   </>;
 }
 

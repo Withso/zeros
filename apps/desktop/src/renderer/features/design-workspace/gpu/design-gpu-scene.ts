@@ -137,7 +137,7 @@ export class DesignGpuScene {
     this.started = true;
     this.world.parentElement?.insertBefore(this.plane, this.world);
     this.observer.observe(this.world, { subtree: true, childList: true, attributes: true, attributeOldValue: true,
-      attributeFilter: ["style", "class", "hidden", "data-design-document-ready"] });
+      attributeFilter: ["style", "class", "hidden", "data-design-document-ready", "data-design-document-presented"] });
     const theme = new MutationObserver(() => { this.refreshColors(); this.requestPaint(); });
     theme.observe(this.world.ownerDocument.documentElement, { attributes: true, attributeFilter: ["class", "style", "data-theme", "data-color-scheme"] });
     this.cleanups.push(() => theme.disconnect());
@@ -232,7 +232,7 @@ export class DesignGpuScene {
       const target = record.target;
       if (record.type === "childList") { if (target === this.world) changed = true; continue; }
       if (!(target instanceof Element)) continue;
-      if (record.attributeName === "data-design-document-ready") { changed = true; continue; }
+      if (record.attributeName === "data-design-document-ready" || record.attributeName === "data-design-document-presented") { changed = true; continue; }
       if (target.parentElement !== this.world) continue;
       if (record.attributeName === "class") { this.colors.delete(target as HTMLElement); changed = true; }
       else if (record.attributeName !== "style" ||
@@ -272,7 +272,8 @@ export class DesignGpuScene {
       const file = element.dataset.designFrame ?? "";
       const presented = owner ? this.deps.recordings.recording(owner, file) : null;
       const live = this.input.live.has(file) &&
-        !!element.querySelector('iframe[data-design-document-buffer="displayed"][data-design-document-ready]');
+        // The recording stays beneath a live document until it has painted.
+        !!element.querySelector('iframe[data-design-document-buffer="displayed"][data-design-document-ready][data-design-document-presented]');
       rows.push({ element, file, x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height, z: bounds.z,
         recording: presented, current: !!presented?.current, content: presented ? this.contentId(presented.key) : 0, live, isolated: true });
     }
