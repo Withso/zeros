@@ -299,6 +299,8 @@ export type DesignThumbnailsReadReply = z.infer<typeof designThumbnailsReadReply
 export const DESIGN_RECORDINGS_CAPABILITY = "design.recordings.v1";
 /** design.recordings.read accepts `withFailures`. */
 export const DESIGN_RECORDINGS_READ_FAILURES_CAPABILITY = "design.recordings.read-failures.v1";
+/** Bench only until #937 names it: render and read take `colorScheme`, kept apart in the store. */
+export const DESIGN_RECORDINGS_COLOR_SCHEME_CAPABILITY = "design.recordings.color-scheme.v1";
 /** A recording is stored and sent as content-defined chunks. An id is the
  * first 32 hex characters of the chunk's SHA-256, so identical bytes, such
  * as the font data every recording of a page embeds, travel and persist once. */
