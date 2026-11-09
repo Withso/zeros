@@ -28,6 +28,7 @@ import {
 import { designCaptureFramePolicy } from "../src/engine/design/capture-sheet";
 import { insertDesignHeadMarkup, sanitizeDesignFrameMarkup } from "../src/engine/design/source";
 import { DESIGN_RECORDER_PREPARE_SCRIPT } from "./design-recorder-scripts";
+import { externalizeRecordedLayer } from "./design-recorder-typefaces";
 
 const token = process.env.ZEROS_DESIGN_RECORDER_TOKEN ?? "";
 delete process.env.ZEROS_DESIGN_RECORDER_TOKEN;
@@ -97,8 +98,11 @@ async function createSlot(partition: Session): Promise<Slot> {
   return { window, retired, ratio: Number.isFinite(ratio) && ratio > 0 ? ratio : 1 };
 }
 
+/** Font data written this session, by content id: one file each. */
+const typefacesWritten = new Set<string>();
+
 async function recordItem(slot: Slot, documents: Map<string, string>, item: DesignBatchRecordRequest["items"][number],
-  colorScheme: "light" | "dark", folder: string, signal: AbortSignal): Promise<DesignBatchRecordReply["items"][number]> {
+  colorScheme: "light" | "dark", folder: string, typefaceFolder: string, signal: AbortSignal): Promise<DesignBatchRecordReply["items"][number]> {
   const whileAlive = <T>(operation: Promise<T>): Promise<T> => Promise.race([
     operation,
     slot.retired.then(() => { throw signal.reason ?? new Error("Design recorder document was destroyed."); }),
@@ -126,8 +130,10 @@ async function recordItem(slot: Slot, documents: Map<string, string>, item: Desi
     // Without positions for extra layers the picture would be incomplete;
     // such a frame keeps its bitmap preview instead.
     if (layers.length > 1) return { id: item.id, error: "This frame paints on separate composited layers, so it is shown as a picture." };
+    const picture = path.join(directory, layers[0]!);
+    const { typefaces } = await externalizeRecordedLayer(picture, typefaceFolder, typefacesWritten);
     return { id: item.id, scale: slot.ratio, layers: [{ x: 0, y: 0, width: Math.round(item.viewport.width * slot.ratio),
-      height: Math.round(item.viewport.height * slot.ratio), path: path.join(directory, layers[0]!), typefaces: [] }] };
+      height: Math.round(item.viewport.height * slot.ratio), path: picture, typefaces }] };
   } finally {
     documents.delete(key);
   }
@@ -136,6 +142,8 @@ async function recordItem(slot: Slot, documents: Map<string, string>, item: Desi
 void app.whenReady().then(async () => {
   app.dock?.hide();
   const root = await mkdtemp(path.join(os.tmpdir(), DESIGN_RECORDER_FOLDER_PREFIX));
+  const typefaceFolder = path.join(root, "typefaces");
+  await mkdir(typefaceFolder, { mode: 0o700 });
   const { partition, documents, stylesheets } = isolatedPartition();
   const idle: Slot[] = [];
   const acquire = async () => {
@@ -182,7 +190,7 @@ void app.whenReady().then(async () => {
             try {
               slot = await acquire();
               working.add(slot);
-              results.set(item.id, await recordItem(slot, documents, item, input!.colorScheme, folder, controller.signal));
+              results.set(item.id, await recordItem(slot, documents, item, input!.colorScheme, folder, typefaceFolder, controller.signal));
             } catch (error) {
               // A failed frame keeps no window: the next one starts clean.
               if (slot && !slot.window.isDestroyed()) slot.window.destroy();
