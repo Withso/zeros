@@ -1606,6 +1606,7 @@ function InternalAgentControlRow({ feature }: { feature: AgentControlFeature }) 
 function InternalPanel() {
   const [copyLogs, setCopyLogs] = useInternalFeature("copyLogs");
   const [resourceSummary, setResourceSummary] = useInternalFeature("resourceSummary");
+  const [designGpuCanvas, setDesignGpuCanvas] = useInternalFeature("designGpuCanvas");
   const agentControlFeatures = agentControlFeaturesAt("internal");
   return (
     <div className="flex flex-col gap-8">
@@ -1628,6 +1629,16 @@ function InternalPanel() {
             checked={resourceSummary}
             onCheckedChange={setResourceSummary}
             aria-label="Show resource summary"
+          />
+        </SettingsRow>
+        <SettingsRow
+          label="Recorded Design canvas"
+          hint="Draw Local Design frames from recorded pictures on the GPU."
+        >
+          <Switch
+            checked={designGpuCanvas}
+            onCheckedChange={setDesignGpuCanvas}
+            aria-label="Draw Design frames from recordings"
           />
         </SettingsRow>
       </SettingsGroup>

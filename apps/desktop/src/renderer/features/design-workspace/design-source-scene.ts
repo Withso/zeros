@@ -117,7 +117,9 @@ function color(value: string): DesignTileFrame["background"] {
   return result;
 }
 
-function frameColors(frame: HTMLElement) {
+/** A frame's background and one-screen-pixel stroke, resolved from its own
+ * computed style (read before a GPU plane takes over its pixels). */
+export function designFrameColors(frame: HTMLElement) {
   const style = getComputedStyle(frame);
   // Canvas frames stroke their edge with a box-shadow (`.zd-design-stroke`),
   // which a rounded outline width cannot thicken under zoom; the plane paints
@@ -128,7 +130,9 @@ function frameColors(frame: HTMLElement) {
   } };
 }
 
-function withoutCameraScale(style: string | null): string {
+/** Inline style without the camera's own scale variables, which every camera
+ * paint rewrites on visible frames: a change here is real geometry or paint. */
+export function designStyleWithoutCameraScale(style: string | null): string {
   return (style ?? "").split(";").map(value => value.trim())
     .filter(value => value && !/^--design-canvas-(?:inverse-)?zoom\s*:/.test(value)).join(";");
 }
@@ -193,7 +197,7 @@ class DesignSourceScene {
   private refreshBackgrounds() {
     this.layoutRows = null;
     this.restore();
-    for (const row of this.registrations) { Object.assign(row, frameColors(row.frame)); row.colorsPending = false; }
+    for (const row of this.registrations) { Object.assign(row, designFrameColors(row.frame)); row.colorsPending = false; }
   }
 
   private readGeometryChanges(records: MutationRecord[]): boolean {
@@ -202,7 +206,7 @@ class DesignSourceScene {
     const changed = records.some(record => record.type === "childList" && record.target === this.world &&
       [...record.addedNodes, ...record.removedNodes].some(node => node instanceof HTMLElement && !node.hasAttribute("data-design-source-plane")) ||
       record.target instanceof HTMLElement && record.target.parentElement === this.world && record.type === "attributes" &&
-      (record.attributeName !== "style" || withoutCameraScale(record.oldValue) !== withoutCameraScale(record.target.getAttribute("style"))));
+      (record.attributeName !== "style" || designStyleWithoutCameraScale(record.oldValue) !== designStyleWithoutCameraScale(record.target.getAttribute("style"))));
     if (changed) this.layoutRows = null;
     return changed;
   }
@@ -249,7 +253,7 @@ class DesignSourceScene {
     // One pass of reads after the commit's writes: the first computed-style
     // read recalculates once and every later frame reuses that result.
     for (const row of this.registrations) if (row.colorsPending) {
-      Object.assign(row, frameColors(row.frame));
+      Object.assign(row, designFrameColors(row.frame));
       row.colorsPending = false;
       this.layoutRows = null;
     }

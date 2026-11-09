@@ -1,5 +1,5 @@
-import { DESIGN_RECORDINGS_MAX_FRAMES, DESIGN_RECORDINGS_MAX_KNOWN_CHUNKS, type DesignRecording,
-  type DesignRecordingLayer, type DesignRecordingsReadReply, type DesignRecordingsReply } from "./design-recordings-wire";
+import { DESIGN_RECORDINGS_KNOWN_CHUNKS, DESIGN_RECORDINGS_RENDER_FRAMES, type DesignRecording, type DesignRecordingLayer,
+  type DesignRecordingTypeface, type DesignRecordingsReadReply, type DesignRecordingsReply } from "./design-recordings-wire";
 import type { DesignRecordingChunks } from "./design-recording-chunks";
 
 export interface DesignRecordingsOwner {
@@ -34,6 +34,8 @@ export interface DesignAdoptedRecording {
   readonly scale: number;
   readonly pipeline: string;
   readonly layers: readonly DesignRecordingLayer[];
+  /** Externalized fonts the layers reference, in first-use order. */
+  readonly typefaces: readonly string[];
   /** Content identity: equal recordings share one picture and one raster. */
   readonly key: string;
 }
@@ -46,7 +48,10 @@ const MAX_DEFERRALS = 4;
 /** A transport or engine error is not a verdict on the frame. */
 const RETRY_AFTER_ERROR_MS = 2_000;
 const MAX_FRAMES_PER_OWNER = 8_192;
+/** A stored-recording lookup is cheap; ask for more frames at once. */
+const READ_FRAMES = 256;
 const MAX_OWNERS = 4;
+const EMPTY: ReadonlySet<string> = new Set();
 
 interface FrameState {
   wanted: string | undefined;
@@ -55,6 +60,8 @@ interface FrameState {
    * frame, none at all): record it, or wait for a version. */
   storedMissing: string | null | undefined;
   failed: { version: string | null; error: string } | null;
+  /** The engine reported this version's source moved on: wait for the new one. */
+  superseded: string | null;
   retryAt: number;
   deferrals: number;
   pending: Request | null;
@@ -73,14 +80,18 @@ interface OwnerState {
   readonly key: string;
   readonly owner: DesignRecordingsOwner;
   readonly frames: Map<string, FrameState>;
+  /** Font manifests adopted for this owner's recordings. */
+  readonly typefaces: Map<string, DesignRecordingTypeface>;
   order: readonly string[];
   replied: boolean;
   pipeline: string | null;
   readonly inFlight: Set<Request>;
   retryTimer: unknown;
+  /** Frames whose current version failed, stable until it changes. */
+  failed: ReadonlySet<string>;
 }
 
-function contentKey(recording: DesignRecording): string {
+function contentKey(recording: Pick<DesignRecording, "width" | "height" | "scale" | "layers">): string {
   return `${recording.width}x${recording.height}@${recording.scale}|${recording.layers
     .map((layer) => `${layer.x},${layer.y},${layer.width},${layer.height}:${layer.chunks.join(".")}`).join("|")}`;
 }
@@ -119,8 +130,8 @@ export class DesignRecordings {
     for (const frame of frames) {
       let entry = state.frames.get(frame.file);
       if (!entry) {
-        entry = { wanted: frame.sourceVersion, confirmed: null, storedMissing: undefined, failed: null, retryAt: 0,
-          deferrals: 0, pending: null, stale: false };
+        entry = { wanted: frame.sourceVersion, confirmed: null, storedMissing: undefined, failed: null, superseded: null,
+          retryAt: 0, deferrals: 0, pending: null, stale: false };
         state.frames.set(frame.file, entry);
       } else if (entry.wanted !== frame.sourceVersion) {
         entry.wanted = frame.sourceVersion;
@@ -147,6 +158,11 @@ export class DesignRecordings {
     return this.owners.get(designRecordingsOwnerKey(owner))?.frames.get(file)?.failed?.error ?? null;
   }
 
+  /** Demanded frames whose wanted version failed to record. */
+  failedFiles(owner: DesignRecordingsOwner): ReadonlySet<string> {
+    return this.owners.get(designRecordingsOwnerKey(owner))?.failed ?? EMPTY;
+  }
+
   /** A layer's picture bytes, or null when its chunks left the cache; the
    * recording is then read again (claiming what is still held). */
   layerBytes(owner: DesignRecordingsOwner, file: string, layer: number): Uint8Array | null {
@@ -155,11 +171,28 @@ export class DesignRecordings {
     const chunks = entry?.confirmed?.layers[layer]?.chunks;
     if (!state || !entry || !chunks) return null;
     const bytes = this.deps.chunks.assemble(chunks);
-    if (!bytes && !entry.stale) {
-      entry.stale = true;
-      this.pump(state);
-    }
-    return bytes;
+    if (bytes && bytes.length === entry.confirmed!.layers[layer]!.bytes) return bytes;
+    this.markStale(state, (other) => other === entry);
+    return null;
+  }
+
+  /** An externalized font's bytes for this owner, or null when its chunks left
+   * the cache (the recordings using it are then read again). Callers verify
+   * the content id before handing the bytes to CanvasKit. */
+  typefaceBytes(owner: DesignRecordingsOwner, id: string): Uint8Array | null {
+    const state = this.owners.get(designRecordingsOwnerKey(owner));
+    const typeface = state?.typefaces.get(id);
+    if (!state || !typeface) return null;
+    const bytes = this.deps.chunks.assemble(typeface.chunks);
+    if (bytes && bytes.length === typeface.bytes) return bytes;
+    this.markStale(state, (entry) => !!entry.confirmed?.typefaces.includes(id));
+    return null;
+  }
+
+  private markStale(state: OwnerState, matches: (entry: FrameState) => boolean): void {
+    let changed = false;
+    for (const entry of state.frames.values()) if (entry.confirmed && !entry.stale && matches(entry)) { entry.stale = true; changed = true; }
+    if (changed) this.pump(state);
   }
 
   forgetWorkspaces(workspaceIds: readonly string[]): void {
@@ -181,7 +214,8 @@ export class DesignRecordings {
       this.owners.set(key, state);
       return state;
     }
-    state = { key, owner, frames: new Map(), order: [], replied: false, pipeline: null, inFlight: new Set(), retryTimer: null };
+    state = { key, owner, frames: new Map(), typefaces: new Map(), order: [], replied: false, pipeline: null, inFlight: new Set(),
+      retryTimer: null, failed: new Set() };
     this.owners.set(key, state);
     for (const other of this.owners.values()) {
       if (this.owners.size <= MAX_OWNERS) break;
@@ -198,7 +232,9 @@ export class DesignRecordings {
     if (state.retryTimer !== null) this.deps.clearTimer?.(state.retryTimer);
     for (const entry of state.frames.values())
       if (entry.confirmed) this.deps.chunks.unreference(entry.confirmed.layers.flatMap((layer) => layer.chunks));
+    for (const typeface of state.typefaces.values()) this.deps.chunks.unreference(typeface.chunks);
     state.frames.clear();
+    state.typefaces.clear();
   }
 
   private prune(state: OwnerState, demanded: ReadonlySet<string>): void {
@@ -222,6 +258,7 @@ export class DesignRecordings {
     if (entry.pending || entry.retryAt > now) return null;
     const version = entry.wanted ?? null;
     if (entry.failed && entry.failed.version === version) return null;
+    if (version !== null && entry.superseded === version) return null;
     if (version === null) return entry.stale || !entry.confirmed && entry.storedMissing !== null ? "read" : null;
     if (this.current(state, entry) && !entry.stale) return null;
     // A recording of another pipeline is still stored; only a new render replaces it.
@@ -247,7 +284,7 @@ export class DesignRecordings {
         op ??= need;
         if (need !== op) continue;
         files.push(file);
-        if (files.length >= DESIGN_RECORDINGS_MAX_FRAMES) break;
+        if (files.length >= (op === "read" ? READ_FRAMES : DESIGN_RECORDINGS_RENDER_FRAMES)) break;
       }
       if (!op || !files.length) break;
       this.send(state, op, files);
@@ -266,8 +303,9 @@ export class DesignRecordings {
     });
     // Chunks of the frames' previous recordings first: a re-recorded frame
     // usually repeats most of its bytes; then the most shared (fonts).
-    const preferred = entries.flatMap((entry) => entry.confirmed?.layers.flatMap((layer) => layer.chunks) ?? []);
-    const known = this.deps.chunks.known(preferred, DESIGN_RECORDINGS_MAX_KNOWN_CHUNKS);
+    const preferred = [...entries.flatMap((entry) => entry.confirmed?.layers.flatMap((layer) => layer.chunks) ?? []),
+      ...[...state.typefaces.values()].flatMap((typeface) => typeface.chunks)];
+    const known = this.deps.chunks.known(preferred, DESIGN_RECORDINGS_KNOWN_CHUNKS);
     const releaseKnown = this.deps.chunks.lease(known);
     const controller = new AbortController();
     const request: Request = { op, files, controller, release: releaseKnown };
@@ -323,8 +361,14 @@ export class DesignRecordings {
     rejected: ReadonlySet<string>): void {
     const asked = new Set(request.files);
     const changed: string[] = [];
-    if (state.pipeline !== reply.pipeline && (request.op === "render" || state.pipeline === null)) state.pipeline = reply.pipeline;
+    const render = "pipeline" in reply;
+    if (render && state.pipeline !== reply.pipeline) state.pipeline = reply.pipeline;
     state.replied = true;
+    for (const typeface of reply.typefaces) if (!state.typefaces.has(typeface.id) &&
+      !typeface.chunks.some((id) => rejected.has(id)) && typeface.chunks.every((id) => this.deps.chunks.has(id))) {
+      state.typefaces.set(typeface.id, typeface);
+      this.deps.chunks.reference(typeface.chunks);
+    }
     for (const recording of reply.recordings) {
       const entry = state.frames.get(recording.file);
       if (!entry || !asked.has(recording.file)) continue;
@@ -334,16 +378,22 @@ export class DesignRecordings {
       const wanted = version === undefined || recording.sourceVersion === version;
       if (!wanted && entry.confirmed) continue;
       const chunks = recording.layers.flatMap((layer) => layer.chunks);
-      if (chunks.some((id) => rejected.has(id) || !this.deps.chunks.has(id))) {
-        if (chunks.some((id) => rejected.has(id))) {
-          entry.failed = { version: version ?? null, error: "A recording chunk did not match its content hash." };
-          this.counts.failed++;
-        } else entry.stale = true;
+      const typefaces = [...new Set(recording.layers.flatMap((layer) => layer.typefaces))];
+      const corrupt = chunks.some((id) => rejected.has(id)) ||
+        typefaces.some((id) => reply.typefaces.some((typeface) => typeface.id === id && typeface.chunks.some((chunk) => rejected.has(chunk))));
+      if (corrupt) {
+        entry.failed = { version: version ?? null, error: "A recording chunk did not match its content hash." };
+        this.counts.failed++;
         continue;
       }
+      if (chunks.some((id) => !this.deps.chunks.has(id)) || typefaces.some((id) => !state.typefaces.has(id))) {
+        entry.stale = true;
+        continue;
+      }
+      const pipeline = render ? (reply as DesignRecordingsReply).pipeline : (recording as typeof recording & { pipeline: string }).pipeline;
       const adopted: DesignAdoptedRecording = { file: recording.file, sourceVersion: recording.sourceVersion,
-        width: recording.width, height: recording.height, scale: recording.scale, pipeline: reply.pipeline,
-        layers: recording.layers, key: contentKey(recording) };
+        width: recording.width, height: recording.height, scale: recording.scale, pipeline,
+        layers: recording.layers, typefaces, key: contentKey(recording) };
       this.deps.chunks.reference(chunks);
       if (entry.confirmed) this.deps.chunks.unreference(entry.confirmed.layers.flatMap((layer) => layer.chunks));
       entry.confirmed = adopted;
@@ -352,13 +402,21 @@ export class DesignRecordings {
       this.counts.recordingsAdopted++;
       changed.push(recording.file);
     }
-    for (const { file, error } of reply.failed) {
-      const entry = state.frames.get(file);
-      if (!entry || !asked.has(file)) continue;
-      entry.failed = { version: entry.wanted ?? null, error };
-      this.counts.failed++;
+    if (render) {
+      const renderReply = reply as DesignRecordingsReply;
+      for (const { file, error } of renderReply.failed) {
+        const entry = state.frames.get(file);
+        if (!entry || !asked.has(file)) continue;
+        entry.failed = { version: entry.wanted ?? null, error };
+        this.counts.failed++;
+      }
+      for (const { file, sourceVersion } of renderReply.stale) {
+        const entry = state.frames.get(file);
+        if (entry && asked.has(file) && entry.wanted && entry.wanted !== sourceVersion) entry.superseded = entry.wanted;
+      }
     }
-    for (const file of reply.deferred) {
+    for (const deferred of reply.deferred) {
+      const file = typeof deferred === "string" ? deferred : deferred.file;
       const entry = state.frames.get(file);
       if (!entry || !asked.has(file)) continue;
       this.counts.deferred++;
@@ -369,7 +427,11 @@ export class DesignRecordings {
       const entry = state.frames.get(file);
       if (entry && asked.has(file)) entry.storedMissing = entry.wanted ?? null;
     }
-    if (changed.length) for (const listener of [...this.listeners]) listener(state.key, changed);
+    const failed = new Set([...state.frames].filter(([, entry]) => entry.failed && entry.failed.version === (entry.wanted ?? null))
+      .map(([file]) => file));
+    const failedChanged = failed.size !== state.failed.size || [...failed].some((file) => !state.failed.has(file));
+    if (failedChanged) state.failed = failed;
+    if (changed.length || failedChanged) for (const listener of [...this.listeners]) listener(state.key, changed);
   }
 
   private settleError(state: OwnerState, request: Request, error: unknown): void {

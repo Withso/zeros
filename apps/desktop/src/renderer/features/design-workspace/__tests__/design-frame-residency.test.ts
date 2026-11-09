@@ -10,6 +10,18 @@ const setup = (frames: DesignSpatialFrame[]): DesignFrameResidencyInput<DesignSp
 });
 
 describe("Design frame surface residency", () => {
+  it("boots no editor for a zoomed-in frame the recorded canvas covers, only for explicit demand", () => {
+    const frames = [{ ...frame("home.html", 0), sourceVersion: "a".repeat(24) }, { ...frame("about.html", 240), sourceVersion: "b".repeat(24) }];
+    const read = createDesignFrameResidencyReader();
+    // Painted at 4× a bitmap picture is too small, so today's canvas gives the
+    // visible frame and its near neighbour live documents.
+    const zoomed = { ...setup(frames), view: { zoom: 4, panX: 0, panY: 0 } };
+    expect(read(zoomed).live).toEqual(new Set(["home.html", "about.html"]));
+    const covered = new Set(frames.map((entry) => entry.file));
+    const recorded = { ...zoomed, owner: "recorded", pictured: covered, covered, vectorCovered: covered };
+    expect(read(recorded).live.size).toBe(0);
+    expect(read({ ...recorded, selectedFrame: "home.html" }).live).toEqual(new Set(["home.html"]));
+  });
   it("keeps last-confirmed source presentation while revalidation fences editing authority", () => {
     const confirmed = { ...frame("home.html", 0), sourceVersion: "a".repeat(24),
       surfaceCost: { nodes: 10, sourceBytes: 2000, imageBytes: 0 } };

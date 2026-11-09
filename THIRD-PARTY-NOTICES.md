@@ -51,6 +51,24 @@ regression test covers that dependency change.
 
 ## Generated and vendored code
 
+### Recorded Design canvas (CanvasKit)
+
+- **Component:** [CanvasKit](https://skia.org/docs/user/modules/canvaskit/)
+  0.42.0, Skia's WebAssembly build (BSD-3-Clause). The internal recorded
+  Design canvas replays recorded frames with it.
+- **Build:** `apps/desktop/src/renderer/features/design-workspace/gpu/canvaskit/`
+  holds a build from Skia `canvaskit/0.42.0` with one Zeros patch
+  (`zeros-design.patch`): shared and externalized typefaces. The directory has
+  its reproducible `build.sh`, provenance README and SHA-256 pins. The
+  unpatched build is byte-identical to the published npm `canvaskit-wasm@0.42.0`.
+  That npm package is also a dependency; its own license is in the generated
+  bundle.
+- **Linked libraries:** the module statically links FreeType (FTL), HarfBuzz,
+  ICU, libjpeg-turbo, libpng, libwebp, Wuffs, brotli, zlib, PartitionAlloc and
+  the Emscripten runtime. Their unmodified upstream terms, at the revisions
+  Skia pins, are in [`third_party/canvaskit/`](third_party/canvaskit) and
+  reproduced in `THIRD-PARTY-LICENSES.txt`.
+
 ### File document previews
 
 - **PDF:** [`pdfjs-dist` 6.4.299](https://github.com/mozilla/pdf.js), Apache-2.0,

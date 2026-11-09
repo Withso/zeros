@@ -1,70 +1,103 @@
 import { z } from "zod";
 
-// Contract v0 of design.recordings.render / design.recordings.read, mirrored
-// strictly until the protocol package exports the engine's own schemas. Every
-// bound is the renderer's admission limit, not a promise about the engine.
+import { DESIGN_MAX_FRAMES_PER_PAGE } from "@zeros/protocol/design-pages";
+
+// Contract v0.2 of design.recordings.render / .read, mirrored exactly from the
+// engine's protocol schemas until that module lands on this branch; then
+// these definitions are replaced by imports from @zeros/protocol/design-capture.
 
 /** Local engines that record frames as Skia pictures. Cloud never offers it. */
 export const DESIGN_RECORDINGS_CAPABILITY = "design.recordings.v1";
-export const DESIGN_RECORDINGS_MAX_FRAMES = 64;
-export const DESIGN_RECORDINGS_MAX_KNOWN_CHUNKS = 4_096;
-export const DESIGN_RECORDINGS_MAX_LAYERS = 64;
-export const DESIGN_RECORDINGS_MAX_LAYER_CHUNKS = 4_096;
-/** The whole reply has to fit one 16 MiB bridge frame. */
-export const DESIGN_RECORDINGS_REPLY_DATA_BYTES = 15 * 1024 * 1024;
+export const DESIGN_RECORDING_CHUNK_ID_PATTERN = /^[a-f0-9]{32}$/;
+export const DESIGN_RECORDING_CHUNK_MAX_BYTES = 64 * 1024;
+export const DESIGN_RECORDING_MAX_BYTES = 64 * 1024 * 1024;
+export const DESIGN_RECORDING_MAX_LAYERS = 16;
+export const DESIGN_RECORDINGS_REPLY_DATA_BYTES = 12 * 1024 * 1024;
+export const DESIGN_RECORDINGS_KNOWN_CHUNKS = 4096;
+export const DESIGN_RECORDING_MAX_TYPEFACES = 64;
+export const DESIGN_RECORDING_TYPEFACE_MAX_BYTES = 64 * 1024 * 1024;
+/** Frames per render request: one engine batch capture. */
+export const DESIGN_RECORDINGS_RENDER_FRAMES = 64;
 
-const file = z.string().min(1).max(255);
-const sourceVersion = z.string().regex(/^[a-f0-9]{24}$/);
-export const designRecordingChunkId = z.string().regex(/^[a-f0-9]{32}$/);
-const theme = z.string().regex(/^[a-z][a-z0-9_-]{0,63}$/).nullable();
-const deviceLength = z.number().int().min(1).max(65_536);
-const cssLength = z.number().positive().max(16_384);
-
-export const designRecordingsRequestSchema = z.object({
-  workspaceId: z.string().min(1).max(128),
-  directoryId: z.string().min(1).max(128),
-  theme,
-  frames: z.array(z.object({ file, sourceVersion }).strict()).min(1).max(DESIGN_RECORDINGS_MAX_FRAMES),
-  deviceScaleFactor: z.number().int().min(1).max(4),
-  knownChunks: z.array(designRecordingChunkId).max(DESIGN_RECORDINGS_MAX_KNOWN_CHUNKS).optional(),
-}).strict()
-  .refine((input) => new Set(input.frames.map((frame) => frame.file)).size === input.frames.length, "Recorded frames must be distinct.");
-export type DesignRecordingsRequest = z.infer<typeof designRecordingsRequestSchema>;
-
-export const designRecordingLayerSchema = z.object({
-  x: z.number().int().min(-65_536).max(65_536),
-  y: z.number().int().min(-65_536).max(65_536),
-  width: deviceLength,
-  height: deviceLength,
-  chunks: z.array(designRecordingChunkId).min(1).max(DESIGN_RECORDINGS_MAX_LAYER_CHUNKS),
+const recordingChunkId = z.string().regex(DESIGN_RECORDING_CHUNK_ID_PATTERN);
+const recordingFrame = z.object({
+  file: z.string().min(1).max(255),
+  sourceVersion: z.string().regex(/^[a-f0-9]{24}$/),
 }).strict();
-export type DesignRecordingLayer = z.infer<typeof designRecordingLayerSchema>;
-
-export const designRecordingSchema = z.object({
-  file,
-  sourceVersion,
-  width: cssLength,
-  height: cssLength,
-  scale: z.number().positive().max(8),
-  layers: z.array(designRecordingLayerSchema).min(1).max(DESIGN_RECORDINGS_MAX_LAYERS),
+const recordingTheme = z.string().regex(/^[a-z][a-z0-9_-]{0,63}$/).nullable();
+const recordingLayer = z.object({
+  x: z.number().finite(),
+  y: z.number().finite(),
+  width: z.number().int().min(1).max(65_536),
+  height: z.number().int().min(1).max(65_536),
+  bytes: z.number().int().min(1).max(DESIGN_RECORDING_MAX_BYTES),
+  chunks: z.array(recordingChunkId).min(1).max(Math.ceil(DESIGN_RECORDING_MAX_BYTES / 2048)),
+  typefaces: z.array(recordingChunkId).max(DESIGN_RECORDING_MAX_TYPEFACES),
+}).strict();
+export type DesignRecordingLayer = z.infer<typeof recordingLayer>;
+const designRecordingSchema = recordingFrame.extend({
+  width: z.number().int().min(1).max(16_384),
+  height: z.number().int().min(1).max(16_384),
+  scale: z.number().min(0.25).max(8),
+  layers: z.array(recordingLayer).min(1).max(DESIGN_RECORDING_MAX_LAYERS),
 }).strict();
 export type DesignRecording = z.infer<typeof designRecordingSchema>;
+const recordingChunk = z.object({
+  id: recordingChunkId,
+  data: z.string().min(1).max(Math.ceil((DESIGN_RECORDING_CHUNK_MAX_BYTES * 4) / 3) + 4),
+}).strict();
+const recordingChunks = z.array(recordingChunk).max(Math.ceil(DESIGN_RECORDINGS_REPLY_DATA_BYTES / 4));
+const recordingTypeface = z.object({
+  id: recordingChunkId,
+  bytes: z.number().int().min(1).max(DESIGN_RECORDING_TYPEFACE_MAX_BYTES),
+  chunks: z.array(recordingChunkId).min(1).max(Math.ceil(DESIGN_RECORDING_TYPEFACE_MAX_BYTES / 2048)),
+}).strict();
+export type DesignRecordingTypeface = z.infer<typeof recordingTypeface>;
+const recordingTypefaces = z.array(recordingTypeface).max(DESIGN_RECORDING_MAX_TYPEFACES * DESIGN_RECORDINGS_RENDER_FRAMES);
+const withinReply = (reply: { chunks: Array<{ data: string }> }) =>
+  reply.chunks.reduce((total, chunk) => total + chunk.data.length, 0) <= DESIGN_RECORDINGS_REPLY_DATA_BYTES;
 
-const chunk = z.object({ id: designRecordingChunkId, data: z.string().min(1) }).strict();
-const replyShape = {
+export const designRecordingsRenderSchema = z.object({
+  workspaceId: z.string().min(1).max(128),
+  directoryId: z.string().min(1).max(128),
+  theme: recordingTheme,
+  frames: z.array(recordingFrame).min(1).max(DESIGN_RECORDINGS_RENDER_FRAMES),
+  knownChunks: z.array(recordingChunkId).max(DESIGN_RECORDINGS_KNOWN_CHUNKS).optional(),
+  deviceScaleFactor: z.number().min(1).max(4).optional(),
+  jobId: z.string().uuid().optional(),
+  deadline: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
+}).strict()
+  .refine((input) => new Set(input.frames.map((frame) => frame.file)).size === input.frames.length, "Recording frames must be distinct.")
+  .refine((input) => (input.jobId === undefined) === (input.deadline === undefined), "Recording job and deadline must be supplied together.");
+export type DesignRecordingsRender = z.infer<typeof designRecordingsRenderSchema>;
+
+export const designRecordingsReplySchema = z.object({
   pipeline: z.string().min(1).max(256),
-  recordings: z.array(designRecordingSchema).max(DESIGN_RECORDINGS_MAX_FRAMES),
-  chunks: z.array(chunk).max(DESIGN_RECORDINGS_MAX_FRAMES * DESIGN_RECORDINGS_MAX_LAYER_CHUNKS),
-  failed: z.array(z.object({ file, error: z.string().min(1).max(500) }).strict()).max(DESIGN_RECORDINGS_MAX_FRAMES),
-  deferred: z.array(file).max(DESIGN_RECORDINGS_MAX_FRAMES),
-};
-const withinOneFrame = (reply: { chunks: ReadonlyArray<{ data: string }> }) =>
-  reply.chunks.reduce((total, entry) => total + entry.data.length, 0) <= DESIGN_RECORDINGS_REPLY_DATA_BYTES;
-
-export const designRecordingsReplySchema = z.object(replyShape).strict()
-  .refine(withinOneFrame, "Recording chunks exceed one reply.");
+  recordings: z.array(designRecordingSchema).max(DESIGN_RECORDINGS_RENDER_FRAMES),
+  typefaces: recordingTypefaces,
+  chunks: recordingChunks,
+  stale: z.array(recordingFrame).max(DESIGN_RECORDINGS_RENDER_FRAMES),
+  failed: z.array(z.object({ file: z.string().min(1).max(255), error: z.string().min(1).max(500) }).strict())
+    .max(DESIGN_RECORDINGS_RENDER_FRAMES),
+  deferred: z.array(recordingFrame).max(DESIGN_RECORDINGS_RENDER_FRAMES),
+}).strict().refine(withinReply, "Recording chunks exceed one reply.");
 export type DesignRecordingsReply = z.infer<typeof designRecordingsReplySchema>;
 
-export const designRecordingsReadReplySchema = z.object({ ...replyShape, missing: z.array(file).max(DESIGN_RECORDINGS_MAX_FRAMES) }).strict()
-  .refine(withinOneFrame, "Recording chunks exceed one reply.");
+export const designRecordingsReadSchema = z.object({
+  workspaceId: z.string().min(1).max(128),
+  directoryId: z.string().min(1).max(128),
+  theme: recordingTheme,
+  frames: z.array(recordingFrame.partial({ sourceVersion: true })).min(1).max(DESIGN_MAX_FRAMES_PER_PAGE),
+  knownChunks: z.array(recordingChunkId).max(DESIGN_RECORDINGS_KNOWN_CHUNKS).optional(),
+}).strict()
+  .refine((input) => new Set(input.frames.map((frame) => frame.file)).size === input.frames.length, "Recording frames must be distinct.");
+export type DesignRecordingsRead = z.infer<typeof designRecordingsReadSchema>;
+
+export const designRecordingsReadReplySchema = z.object({
+  recordings: z.array(designRecordingSchema.extend({ pipeline: z.string().min(1).max(256) }).strict()).max(DESIGN_MAX_FRAMES_PER_PAGE),
+  typefaces: recordingTypefaces,
+  chunks: recordingChunks,
+  missing: z.array(z.string().min(1).max(255)).max(DESIGN_MAX_FRAMES_PER_PAGE),
+  deferred: z.array(z.string().min(1).max(255)).max(DESIGN_MAX_FRAMES_PER_PAGE),
+}).strict().refine(withinReply, "Recording chunks exceed one reply.");
 export type DesignRecordingsReadReply = z.infer<typeof designRecordingsReadReplySchema>;
