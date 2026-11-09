@@ -15,7 +15,9 @@ import {
   designCatalogReplySchema,
   designFramesPrepareReplySchema,
   designPageScopedCatalogSchema,
+  DESIGN_CATALOG_BATCH_ENTRIES,
   DESIGN_CATALOG_READ_OPERATION,
+  DESIGN_CATALOG_WIDE_BATCH_ENTRIES,
 } from "@zeros/protocol/design-catalog";
 
 const directory = "Product - Design";
@@ -193,6 +195,26 @@ describe("Design catalog service authority", () => {
       }),
     ).rejects.toThrow();
   });
+  it("answers wide batches to a Local connection only", async () => {
+    const ids = Array.from({ length: 600 }, (_, index) => `f${index}`);
+    await writeFile(path.join(root, directory, "meta/canvas.json"), JSON.stringify({
+      version: 2,
+      pages: [{ id: "p", title: "Page", folder: "page-1", frames: ids }],
+      frames: Object.fromEntries(ids.map((id, index) => [id, { kind: "html", source: `page-1/${id}.html`, title: id,
+        x: index * 120, y: 0, width: 100, height: 100 }])),
+    }));
+    insert(root);
+    const wide = { ...params, limit: DESIGN_CATALOG_WIDE_BATCH_ENTRIES };
+    const local = designCatalogReplySchema.parse(await service.handle(DESIGN_CATALOG_READ_OPERATION, wide, {
+      hostLocalResources: true, catalogAdmission: admission }));
+    // A cloud connection: the engine passes hostLocalResources for Local ones only.
+    const other = designCatalogReplySchema.parse(await service.handle(DESIGN_CATALOG_READ_OPERATION, { ...wide, intent: 2 }, {
+      hostLocalResources: false, catalogAdmission: admission }));
+    if (local.status !== "ready" || other.status !== "ready") throw new Error("expected batches");
+    expect(local.frames.length).toBeGreaterThan(DESIGN_CATALOG_BATCH_ENTRIES);
+    expect(other.frames).toHaveLength(DESIGN_CATALOG_BATCH_ENTRIES);
+  });
+
   it("revalidates root replacement and catalog revision on continuation", async () => {
     insert(root);
     const first = designCatalogReplySchema.parse(
