@@ -5,6 +5,7 @@ import path from "node:path";
 import * as safeFiles from "../safe-files";
 import { primeDesignDirectoryName, forgetDesignDirectoryName } from "../directory-registry";
 import {
+  designPreparingBatchesForTests,
   prepareDesignNavigationFrames,
   readDesignElementOffsetMap,
   readDesignFrame,
@@ -17,6 +18,7 @@ import { designSharedCanvasReadsForTests, readCanvas } from "../document-storage
 import { designSharedCatalogProjectionsForTests } from "../catalog-storage";
 import { designCanvasMaterializationsForTests } from "../canvas-file";
 import { readDesignProtocolResource } from "../protocol-resource";
+import { withDesignDocumentWrite } from "../document-write-lock";
 
 let root: string;
 const directory = "Product - Design";
@@ -204,4 +206,76 @@ it("prepares from the shared decoded canvas, so navigation and preparation keep 
   const before = designCanvasMaterializationsForTests();
   expect((await prepareDesignNavigationFrames(root, moved.catalogRevision, ["page-1/f3.html"])).frames[0]!.x).toBe(1_001);
   expect(designCanvasMaterializationsForTests() - before).toBe(0);
+});
+
+/** Holds the first read of each named frame file until it is released. */
+function holdFrameReads(...names: string[]) {
+  const read = safeFiles.readSafeRegularFile;
+  const holds = new Map(names.map((name) => {
+    let release!: () => void, reach!: () => void;
+    const released = new Promise<void>((resolve) => { release = resolve; });
+    const reached = new Promise<void>((resolve) => { reach = resolve; });
+    return [name, { released, reached, release, reach, held: false }];
+  }));
+  vi.spyOn(safeFiles, "readSafeRegularFile").mockImplementation(async (...args) => {
+    const hold = holds.get(path.basename(args[1]));
+    if (hold && !hold.held) {
+      hold.held = true;
+      hold.reach();
+      await hold.released;
+    }
+    return read(...args);
+  });
+  return (name: string) => holds.get(name)!;
+}
+
+it("prepares a batch's frames outside the mutation lane: a write and another batch don't wait for it", async () => {
+  const navigation = await readDesignNavigationSnapshot(root);
+  const hold = holdFrameReads("f0.html");
+  const first = prepareDesignNavigationFrames(root, navigation.catalogRevision, ["page-1/f0.html"]);
+  await hold("f0.html").reached;
+  await expect(withDesignDocumentWrite(root, async () => "written")).resolves.toBe("written");
+  expect((await prepareDesignNavigationFrames(root, navigation.catalogRevision, ["page-1/f1.html"])).frames.map((frame) => frame.file))
+    .toEqual(["page-1/f1.html"]);
+  hold("f0.html").release();
+  expect((await first).frames.map((frame) => frame.file)).toEqual(["page-1/f0.html"]);
+});
+
+it("refuses a batch whose catalog or active directory moved while its frames were prepared", async () => {
+  const navigation = await readDesignNavigationSnapshot(root);
+  const hold = holdFrameReads("f0.html", "f1.html");
+  const moved = prepareDesignNavigationFrames(root, navigation.catalogRevision, ["page-1/f0.html"]);
+  await hold("f0.html").reached;
+  const canvasFile = path.join(root, directory, "meta/canvas.json");
+  const canvas = JSON.parse(await readFile(canvasFile, "utf8"));
+  canvas.frames.f5.width = 640;
+  await writeFile(canvasFile, JSON.stringify(canvas));
+  hold("f0.html").release();
+  await expect(moved).rejects.toThrow(/stale/);
+
+  const current = await readDesignNavigationSnapshot(root);
+  const switched = prepareDesignNavigationFrames(root, current.catalogRevision, ["page-1/f1.html"]);
+  await hold("f1.html").reached;
+  primeDesignDirectoryName(root, "Another Design");
+  hold("f1.html").release();
+  await expect(switched).rejects.toThrow(/stale/);
+  primeDesignDirectoryName(root, directory);
+});
+
+it("prepares at most four batches at once; the next waits for a slot", async () => {
+  const navigation = await readDesignNavigationSnapshot(root);
+  const names = ["f0.html", "f1.html", "f2.html", "f3.html", "f4.html"];
+  const hold = holdFrameReads(...names);
+  const batches = names.map((name) => prepareDesignNavigationFrames(root, navigation.catalogRevision, [`page-1/${name}`]));
+  // Batches leave the lane in no promised order: any four prepare, one waits.
+  const held = () => names.filter((name) => hold(name).held);
+  await vi.waitFor(() => {
+    expect(held()).toHaveLength(4);
+    expect(designPreparingBatchesForTests()).toEqual({ preparing: 4, waiting: 1 });
+  }, { timeout: 10_000 });
+  hold(held()[0]!).release();
+  await vi.waitFor(() => expect(held()).toHaveLength(5), { timeout: 10_000 });
+  for (const name of names) hold(name).release();
+  expect((await Promise.all(batches)).map((batch) => batch.frames.length)).toEqual([1, 1, 1, 1, 1]);
+  expect(designPreparingBatchesForTests()).toEqual({ preparing: 0, waiting: 0 });
 });
