@@ -1,5 +1,5 @@
 import { nextFrameGeometry, readFrameMeta } from "./frame-metadata";
-export { nextFrameGeometry, readFrameMeta } from "./frame-metadata";
+export { duplicateFrameGeometry, nextFrameGeometry, readFrameMeta } from "./frame-metadata";
 import { DESIGN_MANIFEST_FILE, parseDesignManifest } from "./manifest";
 import { DESIGN_CANVAS_FILE, decodeCanvasFile, encodeCanvasFile } from "./canvas-file";
 import { isDesignFrameFile } from "@zeros/protocol/design-path";
