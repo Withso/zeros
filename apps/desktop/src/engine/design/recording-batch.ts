@@ -57,6 +57,11 @@ const failure = (error: unknown, root: string) => {
   return !message || message.includes(path.resolve(root)) || message.includes(homedir()) ? UNRECORDED : message;
 };
 
+/** Frames composed at a time: as cheap per frame as larger calls, and the
+ * recorder starts sooner. */
+const COMPOSE_SLICE = 16;
+type ComposedRecordingBatch = Awaited<ReturnType<typeof composeDesignThumbnailBatches>>["batches"][number];
+
 /** Stored-recording lookups are small independent reads: a few at a time. */
 const LOOKUPS = 16;
 
@@ -273,55 +278,68 @@ export async function renderDesignRecordings(
     if (outcome === "deferred") deferred.push(frame);
     else if (outcome === "missing") misses.push(frame);
   }
-  if (misses.length) {
-    const composed = await composeDesignThumbnailBatches(root, { workspaceId: input.workspaceId, directoryId: input.directoryId,
-      theme: input.theme, colorScheme: input.colorScheme, maxDimension: COMPOSE_DIMENSION, frames: misses }, deps.signal);
-    stale.push(...composed.stale);
-    failed.push(...composed.failed);
-    for (const batch of composed.batches) {
-      const request = designBatchRecordRequestFrom(batch.request);
-      const answer = await inRecordTurn(deps.signal, () => record(request, deps.signal));
-      const drawn = designRecordingPipeline(answer.recorder);
-      // One reply names one pipeline: a recorder restarted under another
-      // build between batches can't join it.
-      pipeline ??= drawn;
-      const items = new Map(answer.items.map((item) => [item.id, item]));
-      const viewports = new Map(request.items.map((item) => [item.id, item.viewport]));
-      try {
-        for (const [itemId, frame] of batch.frames) {
-          const item = items.get(itemId);
-          const viewport = viewports.get(itemId)!;
-          const id = frameId(canvas, frame.file);
-          if (!item) { failed.push({ file: frame.file, error: "The recorder returned no recording for this frame.", retryable: true }); continue; }
-          if ("error" in item) {
-            const error = failure(new Error(item.error), root);
-            if (item.permanent && id && drawn === pipeline)
-              await storeDesignRecordingFailure(root, input.directoryId, id, variant, { sourceVersion: frame.sourceVersion, pipeline: drawn, error });
-            failed.push(item.permanent ? { file: frame.file, error } : { file: frame.file, error, retryable: true });
-            continue;
-          }
-          if (drawn !== pipeline) { failed.push({ file: frame.file, error: "The recorder changed; try again.", retryable: true }); continue; }
-          try {
-            const layers = [];
-            for (const layer of item.layers) layers.push({ x: layer.x, y: layer.y, width: layer.width, height: layer.height,
-              bytes: await readRecorderFile(layer.path, LAYER_FILE, DESIGN_RECORDING_MAX_BYTES), typefaces: await storeLayerTypefaces(layer.typefaces) });
-            const stored = id ? await storeDesignRecording(root, input.directoryId, id, variant,
-              { sourceVersion: frame.sourceVersion, pipeline: drawn, width: viewport.width, height: viewport.height, scale: item.scale, layers }) : null;
-            if (!stored) { failed.push({ file: frame.file, error: "This frame's recording could not be stored.", retryable: true }); continue; }
-            const outcome = await reply.add(frame, stored);
-            if (outcome === "deferred") deferred.push(frame);
-            else if (outcome === "missing") failed.push({ file: frame.file, error: "This frame's recording could not be stored.", retryable: true });
-          } catch (error) {
-            failed.push({ file: frame.file, error: failure(error, root), retryable: true });
-          }
+  // Composition runs on this thread, recording in the host's processes: each
+  // slice composes while the previous one records, so recording starts after
+  // the first slice rather than after the whole request.
+  const recordBatch = async (batch: ComposedRecordingBatch) => {
+    const request = designBatchRecordRequestFrom(batch.request);
+    const answer = await inRecordTurn(deps.signal, () => record(request, deps.signal));
+    const drawn = designRecordingPipeline(answer.recorder);
+    // One reply names one pipeline: a recorder restarted under another
+    // build between batches can't join it.
+    pipeline ??= drawn;
+    const items = new Map(answer.items.map((item) => [item.id, item]));
+    const viewports = new Map(request.items.map((item) => [item.id, item.viewport]));
+    try {
+      for (const [itemId, frame] of batch.frames) {
+        const item = items.get(itemId);
+        const viewport = viewports.get(itemId)!;
+        const id = frameId(canvas, frame.file);
+        if (!item) { failed.push({ file: frame.file, error: "The recorder returned no recording for this frame.", retryable: true }); continue; }
+        if ("error" in item) {
+          const error = failure(new Error(item.error), root);
+          if (item.permanent && id && drawn === pipeline)
+            await storeDesignRecordingFailure(root, input.directoryId, id, variant, { sourceVersion: frame.sourceVersion, pipeline: drawn, error });
+          failed.push(item.permanent ? { file: frame.file, error } : { file: frame.file, error, retryable: true });
+          continue;
         }
-      } finally {
-        // The host's files are single-use: stored chunks are the only copy kept.
-        const folders = answer.items.flatMap((item) => "layers" in item ? [path.dirname(item.layers[0]!.path)] : []);
-        await Promise.all(folders.map((folder) => rm(folder, { recursive: true, force: true }).catch(() => {})));
-        // The batch's own folder, once empty (rmdir removes nothing else).
-        for (const batchFolder of new Set(folders.map((folder) => path.dirname(folder)))) await rmdir(batchFolder).catch(() => {});
+        if (drawn !== pipeline) { failed.push({ file: frame.file, error: "The recorder changed; try again.", retryable: true }); continue; }
+        try {
+          const layers = [];
+          for (const layer of item.layers) layers.push({ x: layer.x, y: layer.y, width: layer.width, height: layer.height,
+            bytes: await readRecorderFile(layer.path, LAYER_FILE, DESIGN_RECORDING_MAX_BYTES), typefaces: await storeLayerTypefaces(layer.typefaces) });
+          const stored = id ? await storeDesignRecording(root, input.directoryId, id, variant,
+            { sourceVersion: frame.sourceVersion, pipeline: drawn, width: viewport.width, height: viewport.height, scale: item.scale, layers }) : null;
+          if (!stored) { failed.push({ file: frame.file, error: "This frame's recording could not be stored.", retryable: true }); continue; }
+          const outcome = await reply.add(frame, stored);
+          if (outcome === "deferred") deferred.push(frame);
+          else if (outcome === "missing") failed.push({ file: frame.file, error: "This frame's recording could not be stored.", retryable: true });
+        } catch (error) {
+          failed.push({ file: frame.file, error: failure(error, root), retryable: true });
+        }
       }
+    } finally {
+      // The host's files are single-use: stored chunks are the only copy kept.
+      const folders = answer.items.flatMap((item) => "layers" in item ? [path.dirname(item.layers[0]!.path)] : []);
+      await Promise.all(folders.map((folder) => rm(folder, { recursive: true, force: true }).catch(() => {})));
+      // The batch's own folder, once empty (rmdir removes nothing else).
+      for (const batchFolder of new Set(folders.map((folder) => path.dirname(folder)))) await rmdir(batchFolder).catch(() => {});
+    }
+  };
+  if (misses.length) {
+    const compose = (frames: Frame[]) => composeDesignThumbnailBatches(root, { workspaceId: input.workspaceId, directoryId: input.directoryId,
+      theme: input.theme, colorScheme: input.colorScheme, maxDimension: COMPOSE_DIMENSION, frames }, deps.signal);
+    const slices: Frame[][] = [];
+    for (let at = 0; at < misses.length; at += COMPOSE_SLICE) slices.push(misses.slice(at, at + COMPOSE_SLICE));
+    let next: ReturnType<typeof compose> | null = compose(slices[0]!);
+    for (let index = 0; index < slices.length; index++) {
+      const composed = await next!;
+      next = index + 1 < slices.length ? compose(slices[index + 1]!) : null;
+      // Observed when awaited; an abort or error must not go unhandled meanwhile.
+      next?.catch(() => {});
+      stale.push(...composed.stale);
+      failed.push(...composed.failed);
+      for (const batch of composed.batches) await recordBatch(batch);
     }
   }
   return designRecordingsReplySchema.parse({ pipeline: pipeline ?? DESIGN_RECORDING_COMPOSER, recordings: reply.recordings,
