@@ -70,6 +70,29 @@ type ComposedRecordingBatch = Awaited<ReturnType<typeof composeDesignThumbnailBa
 /** Stored-recording lookups are small independent reads: a few at a time. */
 const LOOKUPS = 16;
 
+/** What a canvas's recordings request draws: work ahead of an open
+ * (recording-ahead.ts) records in the same theme and color scheme. */
+export interface DesignRecordingTarget {
+  readonly workspaceId: string;
+  readonly root: string;
+  readonly directoryId: string;
+  readonly theme: string | null;
+  readonly colorScheme: "light" | "dark";
+}
+let renderingForCanvas = 0;
+const targetListeners = new Set<(target: DesignRecordingTarget) => void>();
+
+/** Whether a canvas's recordings request is in flight. */
+export function designRecordingsRendering(): boolean {
+  return renderingForCanvas > 0;
+}
+
+/** Told the target of every canvas request that passed its checks, until the returned function is called. */
+export function onDesignRecordingTarget(listener: (target: DesignRecordingTarget) => void): () => void {
+  targetListeners.add(listener);
+  return () => { targetListeners.delete(listener); };
+}
+
 async function mapLimit<T, R>(items: readonly T[], limit: number, run: (item: T) => Promise<R>): Promise<R[]> {
   const results = new Array<R>(items.length);
   let next = 0;
@@ -251,24 +274,39 @@ async function storeLayerTypefaces(typefaces: ReadonlyArray<{ id: string; path: 
   return ids;
 }
 
+export interface DesignRecordingDeps {
+  signal?: AbortSignal;
+  record?: (request: DesignBatchRecordRequest, signal?: AbortSignal) => Promise<DesignBatchRecordReply>;
+  /** The recorder identity when known before any batch (normally from the capture config). */
+  recorder?: string | null;
+}
+
 /** design.recordings.render on one Local workspace. */
-export async function renderDesignRecordings(
-  root: string,
-  raw: unknown,
-  deps: {
-    signal?: AbortSignal;
-    record?: (request: DesignBatchRecordRequest, signal?: AbortSignal) => Promise<DesignBatchRecordReply>;
-    /** The recorder identity when known before any batch (normally from the capture config). */
-    recorder?: string | null;
-  } = {},
-): Promise<DesignRecordingsReply> {
+export async function renderDesignRecordings(root: string, raw: unknown, deps: DesignRecordingDeps = {}): Promise<DesignRecordingsReply> {
+  renderingForCanvas++;
+  try {
+    return await recordFrames(root, designRecordingsRenderSchema.parse(raw), deps, true);
+  } finally {
+    renderingForCanvas--;
+  }
+}
+
+/** Records and stores frames that aren't stored yet, answering no one: the
+ * reply carries no recordings or chunks. */
+export async function recordDesignFramesAhead(root: string, raw: unknown, deps: DesignRecordingDeps = {}): Promise<DesignRecordingsReply> {
+  return recordFrames(root, designRecordingsRenderSchema.parse(raw), deps, false);
+}
+
+async function recordFrames(root: string, input: ReturnType<typeof designRecordingsRenderSchema.parse>, deps: DesignRecordingDeps,
+  forCanvas: boolean): Promise<DesignRecordingsReply> {
   const started = performance.now();
   const spent = { lookups: 0, compose: 0, composeWait: 0, recordWait: 0, record: 0, store: 0, frames: 0, misses: 0, batches: 0 };
-  const input = designRecordingsRenderSchema.parse(raw);
   const config = deps.record ? null : resolveDesignCaptureConfig();
   if (!deps.record && !config) throw new Error("No qualified Design capture host is available.");
   const record = deps.record ?? ((request, signal) => requestDesignBatchRecord(config!, request, signal));
   await assertRecordingTarget(root, input);
+  if (forCanvas) for (const listener of targetListeners) listener({ workspaceId: input.workspaceId, root,
+    directoryId: input.directoryId, theme: input.theme, colorScheme: input.colorScheme });
   const { canvas } = await readSharedCanvasContext(root);
   const variant = designRecordingVariant(input.theme, input.colorScheme);
   const known = deps.recorder !== undefined ? deps.recorder : config?.recorder ?? null;
@@ -290,7 +328,9 @@ export async function renderDesignRecordings(
   spent.lookups = performance.now() - started;
   for (const { frame, stored, known } of lookups) {
     if (known) { failed.push({ file: frame.file, error: known }); continue; }
-    const outcome = stored ? await reply.add(frame, stored) : "missing";
+    if (!stored) { misses.push(frame); continue; }
+    if (!forCanvas) continue;
+    const outcome = await reply.add(frame, stored);
     if (outcome === "deferred") deferred.push(frame);
     else if (outcome === "missing") misses.push(frame);
   }
@@ -333,6 +373,7 @@ export async function renderDesignRecordings(
           const stored = id ? await storeDesignRecording(root, input.directoryId, id, variant,
             { sourceVersion: frame.sourceVersion, pipeline: drawn, width: viewport.width, height: viewport.height, scale: item.scale, layers }) : null;
           if (!stored) { failed.push({ file: frame.file, error: "This frame's recording could not be stored.", retryable: true }); continue; }
+          if (!forCanvas) continue;
           const outcome = await reply.add(frame, stored);
           if (outcome === "deferred") deferred.push(frame);
           else if (outcome === "missing") failed.push({ file: frame.file, error: "This frame's recording could not be stored.", retryable: true });
@@ -375,7 +416,7 @@ export async function renderDesignRecordings(
   spent.frames = input.frames.length;
   spent.misses = misses.length;
   const timings = recordingsTimings();
-  if (timings) void appendFile(timings, `${JSON.stringify({ at: Date.now(), ...Object.fromEntries(Object.entries(spent)
+  if (timings) void appendFile(timings, `${JSON.stringify({ at: Date.now(), ...(forCanvas ? {} : { ahead: 1 }), ...Object.fromEntries(Object.entries(spent)
     .map(([name, value]) => [name, Math.round(value)])), total: Math.round(performance.now() - started) })}\n`).catch(() => {});
   return designRecordingsReplySchema.parse({ pipeline: pipeline ?? DESIGN_RECORDING_COMPOSER, recordings: reply.recordings,
     typefaces: reply.typefaces, chunks: reply.chunks, stale, failed, deferred });
