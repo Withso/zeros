@@ -25,7 +25,8 @@
     "native-tools",
     "workbench-status",
     "file-prefetch",
-    "design-shadow-layers"
+    "design-shadow-layers",
+    "design-gpu-canvas"
   ],
   [
     "design-motion-refinements",

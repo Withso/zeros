@@ -5,7 +5,7 @@
 // sandbox definition, so it can be rotated on any retry.
 import { randomBytes, randomUUID } from "node:crypto";
 import { CLOUD_V2_LEASE_SECONDS, type CloudV2Compute, type CloudV2CommandResult } from "./boat.js";
-import { BoatCreateRejectedError, BoatForkRefusedError, BoatSnapshotExpiredError } from "./boat-client.js";
+import { BoatBootPendingError, BoatCreateRejectedError, BoatForkRefusedError, BoatSnapshotExpiredError } from "./boat-client.js";
 import { CloudProviderError } from "./provider-error.js";
 import { installRuntimeCommand, type CloudV2Runtime } from "./runtime.js";
 import { GIT_LFS_INSTALL_COMMAND } from "./computer.js";
@@ -152,6 +152,28 @@ function errorCode(error: unknown): string {
   const code = (error as { code?: unknown } | null)?.code;
   return typeof code === "string" && /^[a-z0-9_]{1,64}$/.test(code) ? code : "provider_request_failed";
 }
+
+/** `/home/user/<owner>/<name>`, with no `.` or `..` segment. */
+const CHECKOUT_PATH = /^\/home\/user(?:\/(?!\.\.?(?:\/|$))[A-Za-z0-9._-]{1,100}){2}$/;
+const READ_ONLY_GIT = "GIT_OPTIONAL_LOCKS=0 timeout 60 git -c core.fsmonitor=false -c core.hooksPath=/dev/null";
+/** A create's VM restores its disk lazily from the Cloud Computer snapshot, and
+ * the restore gives every file a new inode. On fresh VMs with Withso/zeros,
+ * the first pack read took ~3 s and `git switch` 3.3–3.7 s cold, versus 0.55 s
+ * once the trees and every file's stat were read. Started detached when the VM
+ * is ready, as the VM user, so it overlaps the rest of the create and the
+ * worker's boot. Read-only: no index lock, submodule, fsmonitor or hook, so it
+ * cannot collide with the worker's own checkout. Null for an unusual path. */
+export function checkoutWarmupCommand(checkoutPath: string): string | null {
+  if (!CHECKOUT_PATH.test(checkoutPath)) return null;
+  return `cd -- '${checkoutPath}' && setsid nohup sh -c '${CHECKOUT_WARMUP_SCRIPT}' >/dev/null 2>&1 </dev/null &`;
+}
+/** Run in the checkout. Compared by mtime and size alone, restored files stay
+ * clean, so `diff-files --quiet` visits every file instead of the first; on
+ * Zeros Dev only this variant brought the switch down to ~0.6 s. A racily
+ * clean entry gets a content comparison, which for LFS starts git-lfs's clean
+ * filter. That writes nothing persistent (checkout-warmup.test.ts). */
+export const CHECKOUT_WARMUP_SCRIPT = `${READ_ONLY_GIT} ls-tree -r -z HEAD >/dev/null 2>&1 & ` +
+  `${READ_ONLY_GIT} -c core.checkStat=minimal -c core.trustctime=false diff-files --quiet --ignore-submodules >/dev/null 2>&1; wait`;
 
 /** Writes the worker credential and its boot settings owner-only, re-enables
  * the unit a stop disabled so a reboot keeps it, then restarts the worker.
@@ -392,13 +414,22 @@ export class CloudV2Lifecycle {
             return;
           }
         }
+        // Nothing listens on the route until the worker starts, and only token
+        // delivery below starts it, after the image is prepared. Creating the
+        // route while the VM boots overlaps the two.
+        const routed = this.measure(workspace, "protected_route", () => this.host(workspace, sandboxId));
+        routed.catch(() => {});
         await this.measure(workspace, "runtime_install", () => this.ensureRuntime(sandboxId, boot.runtime), runtimeChanged => ({ runtimeChanged }));
+        // Never awaited: Boat's exec returns only when the warm-up finishes, and
+        // the worker must not wait for it. Its failure never fails the create.
+        const warmup = image.checkout ? checkoutWarmupCommand(`${CLOUD_V2_HOME}/${workspace.repository}`) : null;
+        if (warmup) void this.deps.compute.exec(sandboxId, warmup, 30).catch(() => undefined);
         if (image.prune.length || !image.from) await this.measure(workspace, "image_prepare", () => this.prepareImage(sandboxId, image));
         if (this.deps.prepareRepository && !image.checkout) {
           await store.defer(workspace.id, "creating", 17 * 60_000);
           await this.measure(workspace, "repository_prepare", () => this.deps.prepareRepository!(workspace, sandboxId));
         }
-        if (!await this.measure(workspace, "protected_route", () => this.host(workspace, sandboxId))) return;
+        if (!await routed) return;
         // The worker reads it with its configuration, after the token arrives.
         const commit = await baseCommit;
         if (commit) await store.setBaseCommit(workspace.id, commit);
@@ -439,6 +470,11 @@ export class CloudV2Lifecycle {
             restoring = true;
           }
         }
+        // As on create, the route is inert until token delivery starts the worker.
+        // A rare restore keeps it after the checkpoint is applied.
+        const route = () => this.measure(workspace, "protected_route", () => this.host(workspace, sandboxId!));
+        const routed = restoring ? undefined : route();
+        routed?.catch(() => {});
         // A runtime shipped while the VM slept is installed now.
         await this.measure(workspace, "runtime_install", () => this.ensureRuntime(sandboxId, boot.runtime), runtimeChanged => ({ runtimeChanged }));
         if (restoring) {
@@ -450,7 +486,7 @@ export class CloudV2Lifecycle {
           await this.measure(workspace, "checkpoint_restore", () => this.applyCheckpoint(workspace, sandboxId));
           if (!await store.finishRestore(workspace.id, sandboxId)) return;
         }
-        if (!await this.measure(workspace, "protected_route", () => this.host(workspace, sandboxId))) return;
+        if (!await (routed ?? route())) return;
         await this.measure(workspace, "token_delivery", () => this.deliverToken(workspace, sandboxId, boot.env));
         await store.defer(workspace.id, "starting", HELLO_POLL_MS);
         return;
@@ -764,7 +800,16 @@ export class CloudV2Lifecycle {
   }
 
   private async host(workspace: CloudV2Workspace, sandboxId: string): Promise<boolean> {
-    const route = await this.deps.compute.hostPort(sandboxId, { port: CLOUD_V2_WORKER_PORT, localhost: true, title: "Zeros worker" });
+    // The route starts beside the VM's first command, so Boat can still be
+    // booting it; retry only that reply, as commands do.
+    let route: Awaited<ReturnType<CloudV2Compute["hostPort"]>>;
+    for (let attempt = 1; ; attempt++) {
+      try { route = await this.deps.compute.hostPort(sandboxId, { port: CLOUD_V2_WORKER_PORT, localhost: true, title: "Zeros worker" }); break; }
+      catch (error) {
+        if (!(error instanceof BoatBootPendingError) || attempt >= 6) throw error;
+        await (this.deps.sleep ?? (ms => new Promise(resolve => setTimeout(resolve, ms))))(2_000);
+      }
+    }
     return this.deps.store.setWorkerRoute(workspace.id, sandboxId, route.url, this.deps.sealPortToken(route.token, workspace.id));
   }
 

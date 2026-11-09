@@ -261,6 +261,11 @@
       ]
     },
     {
+      "id": "shared-design-picture-format",
+      "include": ["apps/desktop/shared/design-picture-typefaces.ts"],
+      "lanes": ["design-containment", "desktop-renderer", "electron"]
+    },
+    {
       "id": "design-engine-and-containment",
       "include": [
         "apps/desktop/src/engine/design/**",

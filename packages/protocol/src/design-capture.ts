@@ -292,3 +292,182 @@ export const designThumbnailsReadReplySchema = z.object({
   .refine((reply) => reply.pictures.reduce((total, picture) => total + picture.data.length, 0) <= DESIGN_THUMBNAILS_REPLY_DATA_BYTES,
     "Thumbnail pictures exceed one reply.");
 export type DesignThumbnailsReadReply = z.infer<typeof designThumbnailsReadReplySchema>;
+
+/** Local engines that answer with Skia picture recordings of saved frames:
+ * vector drawing commands a GPU canvas replays crisply at any zoom. Internal
+ * while the recorded canvas is behind its internal feature flag. */
+export const DESIGN_RECORDINGS_CAPABILITY = "design.recordings.v1";
+/** design.recordings.read accepts `withFailures`. */
+export const DESIGN_RECORDINGS_READ_FAILURES_CAPABILITY = "design.recordings.read-failures.v1";
+/** design.recordings.render and .read accept `colorScheme`. */
+export const DESIGN_RECORDINGS_COLOR_SCHEME_CAPABILITY = "design.recordings.color-scheme.v1";
+/** A recording is stored and sent as content-defined chunks. An id is the
+ * first 32 hex characters of the chunk's SHA-256, so identical bytes, such
+ * as the font data every recording of a page embeds, travel and persist once. */
+export const DESIGN_RECORDING_CHUNK_ID_PATTERN = /^[a-f0-9]{32}$/;
+export const DESIGN_RECORDING_CHUNK_MAX_BYTES = 64 * 1024;
+/** One reassembled recording layer at most. Recordings embed the full data of
+ * every font they draw with, so a frame using a system font reaches megabytes. */
+export const DESIGN_RECORDING_MAX_BYTES = 64 * 1024 * 1024;
+export const DESIGN_RECORDING_MAX_LAYERS = 16;
+/** Base64 chunk data in one reply, within one bridge frame like thumbnails. */
+export const DESIGN_RECORDINGS_REPLY_DATA_BYTES = 12 * 1024 * 1024;
+export const DESIGN_RECORDINGS_KNOWN_CHUNKS = 4096;
+export const DESIGN_RECORDING_MAX_TYPEFACES = 64;
+/** One font's data at most (an externalized typeface). */
+export const DESIGN_RECORDING_TYPEFACE_MAX_BYTES = 64 * 1024 * 1024;
+const recordingChunkId = z.string().regex(DESIGN_RECORDING_CHUNK_ID_PATTERN);
+const recordingFrame = thumbnailFrame;
+const recordingTheme = z.string().regex(/^[a-z][a-z0-9_-]{0,63}$/).nullable();
+const recordingLayer = z.object({
+  /** Placement and size in recording pixels: CSS pixels times `scale`. */
+  x: z.number().finite(),
+  y: z.number().finite(),
+  width: z.number().int().min(1).max(65_536),
+  height: z.number().int().min(1).max(65_536),
+  bytes: z.number().int().min(1).max(DESIGN_RECORDING_MAX_BYTES),
+  /** The layer's picture is these chunks' bytes, concatenated in order. */
+  chunks: z.array(recordingChunkId).min(1).max(Math.ceil(DESIGN_RECORDING_MAX_BYTES / 2048)),
+  /** Fonts the picture references instead of embedding (externalized
+   * typefaces); each is described once per reply in `typefaces`. */
+  typefaces: z.array(recordingChunkId).max(DESIGN_RECORDING_MAX_TYPEFACES),
+}).strict();
+const designRecordingSchema = recordingFrame.extend({
+  /** CSS pixels of the frame. */
+  width: z.number().int().min(1).max(16_384),
+  height: z.number().int().min(1).max(16_384),
+  /** Recording pixels per CSS pixel. */
+  scale: z.number().min(0.25).max(8),
+  /** The first layer is the frame's root; recordings are normally one layer. */
+  layers: z.array(recordingLayer).min(1).max(DESIGN_RECORDING_MAX_LAYERS),
+}).strict();
+export type DesignRecording = z.infer<typeof designRecordingSchema>;
+const recordingChunk = z.object({
+  id: recordingChunkId,
+  data: z.string().min(1).max(Math.ceil((DESIGN_RECORDING_CHUNK_MAX_BYTES * 4) / 3) + 4),
+}).strict();
+const recordingChunks = z.array(recordingChunk).max(Math.ceil(DESIGN_RECORDINGS_REPLY_DATA_BYTES / 4));
+/** An externalized typeface: font data a recording references by its content
+ * id (the chunk-id rule over the font data), carried as ordinary chunks. */
+const recordingTypeface = z.object({
+  id: recordingChunkId,
+  bytes: z.number().int().min(1).max(DESIGN_RECORDING_TYPEFACE_MAX_BYTES),
+  chunks: z.array(recordingChunkId).min(1).max(Math.ceil(DESIGN_RECORDING_TYPEFACE_MAX_BYTES / 2048)),
+}).strict();
+const recordingTypefaces = z.array(recordingTypeface).max(DESIGN_RECORDING_MAX_TYPEFACES * DESIGN_BATCH_CAPTURE_MAX_ITEMS);
+const withinReply = (reply: { chunks: Array<{ data: string }> }) =>
+  reply.chunks.reduce((total, chunk) => total + chunk.data.length, 0) <= DESIGN_RECORDINGS_REPLY_DATA_BYTES;
+/** design.recordings.render: recordings of saved frames in one theme, light
+ * color scheme, recorded where missing. Chunks the caller names as known are
+ * not sent again. Cancelled like thumbnails, through design.preview.cancel. */
+export const designRecordingsRenderSchema = z.object({
+  workspaceId: z.string().min(1).max(128),
+  directoryId: z.string().min(1).max(128),
+  theme: recordingTheme,
+  /** The color scheme frames are drawn in: recordings of each are kept apart. */
+  colorScheme: z.enum(["light", "dark"]).default("light"),
+  frames: z.array(recordingFrame).min(1).max(DESIGN_BATCH_CAPTURE_MAX_ITEMS),
+  knownChunks: z.array(recordingChunkId).max(DESIGN_RECORDINGS_KNOWN_CHUNKS).optional(),
+  /** Accepted for the future; the recorder reports its own `scale`. */
+  deviceScaleFactor: z.number().min(1).max(4).optional(),
+  jobId: previewJobId.optional(),
+  deadline: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
+}).strict()
+  .refine((input) => new Set(input.frames.map((frame) => frame.file)).size === input.frames.length, "Recording frames must be distinct.")
+  .refine((input) => (input.jobId === undefined) === (input.deadline === undefined), "Recording job and deadline must be supplied together.");
+export type DesignRecordingsRender = z.infer<typeof designRecordingsRenderSchema>;
+export const designRecordingsReplySchema = z.object({
+  /** How recordings were made (composer and recorder): another pipeline's
+   * recordings are not reused, and a change re-requests. */
+  pipeline: z.string().min(1).max(256),
+  recordings: z.array(designRecordingSchema).max(DESIGN_BATCH_CAPTURE_MAX_ITEMS),
+  /** Every typeface the reply's recordings reference, once. */
+  typefaces: recordingTypefaces,
+  chunks: recordingChunks,
+  stale: z.array(recordingFrame).max(DESIGN_BATCH_CAPTURE_MAX_ITEMS),
+  /** `retryable`: the attempt failed, not the frame (a recorder page that
+   * crashed or stalled, a recorder restart, storage); asking again later can
+   * succeed. Without it the same source and recorder fail the same way. */
+  failed: z.array(z.object({ file: z.string().min(1).max(255), error: z.string().min(1).max(500), retryable: z.literal(true).optional() }).strict())
+    .max(DESIGN_BATCH_CAPTURE_MAX_ITEMS),
+  /** Not answered in this reply, to keep it within one frame: ask again. */
+  deferred: z.array(recordingFrame).max(DESIGN_BATCH_CAPTURE_MAX_ITEMS),
+}).strict().refine(withinReply, "Recording chunks exceed one reply.");
+export type DesignRecordingsReply = z.infer<typeof designRecordingsReplySchema>;
+/** design.recordings.read: each frame's newest stored recording of any
+ * generation, for drawing at open before frames are prepared. Nothing is
+ * recorded. A frame sent with a version is answered only by that version. */
+export const designRecordingsReadSchema = z.object({
+  workspaceId: z.string().min(1).max(128),
+  directoryId: z.string().min(1).max(128),
+  theme: recordingTheme,
+  colorScheme: z.enum(["light", "dark"]).default("light"),
+  frames: z.array(recordingFrame.partial({ sourceVersion: true })).min(1).max(DESIGN_MAX_FRAMES_PER_PAGE),
+  knownChunks: z.array(recordingChunkId).max(DESIGN_RECORDINGS_KNOWN_CHUNKS).optional(),
+  /** Also answer `failed` for frames the current recorder can't record. */
+  withFailures: z.literal(true).optional(),
+}).strict()
+  .refine((input) => new Set(input.frames.map((frame) => frame.file)).size === input.frames.length, "Recording frames must be distinct.");
+export type DesignRecordingsRead = z.infer<typeof designRecordingsReadSchema>;
+export const designRecordingsReadReplySchema = z.object({
+  recordings: z.array(designRecordingSchema.extend({ pipeline: z.string().min(1).max(256) }).strict()).max(DESIGN_MAX_FRAMES_PER_PAGE),
+  typefaces: recordingTypefaces,
+  chunks: recordingChunks,
+  /** No stored recording in this theme. */
+  missing: z.array(z.string().min(1).max(255)).max(DESIGN_MAX_FRAMES_PER_PAGE),
+  /** Not looked up, to keep the reply within one frame: ask again. */
+  deferred: z.array(z.string().min(1).max(255)).max(DESIGN_MAX_FRAMES_PER_PAGE),
+  /** With `withFailures`: missing frames whose newest generation (or the
+   * named one) the current recorder can't record. Also listed in `missing`. */
+  failed: z.array(z.object({ file: z.string().min(1).max(255), sourceVersion: recordingFrame.shape.sourceVersion,
+    error: z.string().min(1).max(500) }).strict()).max(DESIGN_MAX_FRAMES_PER_PAGE).optional(),
+}).strict().refine(withinReply, "Recording chunks exceed one reply.");
+export type DesignRecordingsReadReply = z.infer<typeof designRecordingsReadReplySchema>;
+
+/** Engine to capture host: record frames as Skia pictures. Same documents
+ * and content-addressed stylesheets as batch capture, at each frame's own
+ * layout viewport; nothing is rasterized. */
+export const designBatchRecordRequestSchema = z.object({
+  version: z.literal(1),
+  revision: z.string().min(1).max(128),
+  colorScheme: z.enum(["light", "dark"]).default("light"),
+  stylesheets: z.record(sheetHash, z.string().max(DESIGN_BATCH_CAPTURE_STYLESHEET_BYTES)),
+  items: z.array(z.object({
+    id: z.string().regex(/^[A-Za-z0-9._:-]{1,128}$/),
+    html: z.string().min(1).max(DESIGN_CAPTURE_HTML_BYTES),
+    viewport: z.object({ width: z.number().int().min(1).max(16_384), height: z.number().int().min(1).max(16_384) }).strict(),
+  }).strict()).min(1).max(DESIGN_BATCH_CAPTURE_MAX_ITEMS),
+}).strict()
+  .refine((input) => new Set(input.items.map((item) => item.id)).size === input.items.length, { message: "Record item ids must be unique." })
+  .refine((input) => Object.values(input.stylesheets).reduce((sum, css) => sum + css.length, 0) <= DESIGN_BATCH_CAPTURE_STYLESHEET_BYTES &&
+    input.items.reduce((sum, item) => sum + item.html.length, 0) <= DESIGN_BATCH_CAPTURE_HTML_BYTES,
+    { message: "Batch record exceeds its byte budget." });
+export type DesignBatchRecordRequest = z.infer<typeof designBatchRecordRequestSchema>;
+/** Recording folders the capture host writes into, in the OS temporary
+ * directory, start with this; the engine reads layer files only from them. */
+export const DESIGN_RECORDER_FOLDER_PREFIX = "zeros-design-recorder-";
+/** Capture host to engine. A layer's picture is a file the host wrote inside
+ * its private recording folder; the engine stores its bytes, then removes it. */
+export const designBatchRecordReplySchema = z.object({
+  version: z.literal(1),
+  revision: z.string().min(1).max(128),
+  recorder: z.string().min(1).max(128),
+  items: z.array(z.union([
+    z.object({
+      id: z.string().min(1).max(128),
+      scale: z.number().min(0.25).max(8),
+      layers: z.array(z.object({
+        x: z.number().finite(), y: z.number().finite(),
+        width: z.number().int().min(1).max(65_536), height: z.number().int().min(1).max(65_536),
+        path: z.string().min(1).max(4096),
+        /** Font data files, by content id, this layer's picture references. */
+        typefaces: z.array(z.object({ id: recordingChunkId, path: z.string().min(1).max(4096) }).strict()).max(DESIGN_RECORDING_MAX_TYPEFACES),
+      }).strict()).min(1).max(DESIGN_RECORDING_MAX_LAYERS),
+    }).strict(),
+    /** `permanent`: the frame itself can't be recorded by this recorder (for
+     * example it paints on several composited layers), so asking again for
+     * the same source and recorder gives the same answer. */
+    z.object({ id: z.string().min(1).max(128), error: z.string().min(1).max(500), permanent: z.literal(true).optional() }).strict(),
+  ])).max(DESIGN_BATCH_CAPTURE_MAX_ITEMS),
+}).strict();
+export type DesignBatchRecordReply = z.infer<typeof designBatchRecordReplySchema>;

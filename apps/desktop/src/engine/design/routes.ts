@@ -10,8 +10,10 @@ import type { DesignCatalogAdmission } from "./catalog";
 import { encodeDesignFramePath } from "@zeros/protocol/design-path";
 import { DESIGN_MAX_FRAMES_PER_PAGE, designPageCreateInputSchema, designPageDeleteInputSchema, designPageIdSchema, designPageRenameInputSchema } from "@zeros/protocol/design-pages";
 import { selectDesignPageHint } from "./page-selection";
-import { DESIGN_CAPTURE_TIMEOUT_MS, designPreviewCancelSchema, designPreviewRequestSchema, designThumbnailsReadSchema, designThumbnailsRenderSchema, designWorkspaceCaptureSchema } from "@zeros/protocol/design-capture";
+import { DESIGN_CAPTURE_TIMEOUT_MS, designPreviewCancelSchema, designPreviewRequestSchema, designRecordingsReadSchema, designRecordingsRenderSchema, designThumbnailsReadSchema, designThumbnailsRenderSchema, designWorkspaceCaptureSchema } from "@zeros/protocol/design-capture";
 import { readDesignThumbnails, renderDesignThumbnails } from "./thumbnail-batch";
+import { readDesignRecordings, renderDesignRecordings } from "./recording-batch";
+import { noteDesignRecordedCanvas } from "./retained-frames";
 import type { DesignPreviewJobs } from "./preview-jobs";
 import { captureWorkspaceDesign, previewWorkspaceDesign } from "./workspace-capture";
 import { openDesignVerification, designFramePreviewUrl } from "./verification-service";
@@ -257,6 +259,8 @@ const DESIGN_WORKSPACE_ROUTES = new Set([
   "design.preview.cancel",
   "design.thumbnails.render",
   "design.thumbnails.read",
+  "design.recordings.render",
+  "design.recordings.read",
   "design.styleBuilds.presence",
   "design.styles.refresh",
   "design.context.create",
@@ -398,6 +402,41 @@ export async function handleDesignWorkspaceRoute(
       }
       const input = designThumbnailsReadSchema.parse(params);
       return host.withDesignReadWorkspace(input.workspaceId, false, ({ root }) => readDesignThumbnails(root, input));
+    }
+    case "design.recordings.render": {
+      // Skia picture recordings of saved frames for the recorded canvas; never changes the checkout.
+      if (remote) {
+        throw new GitError({
+          code: "REMOTE_RESTRICTED",
+          message: "Design recordings are available only in the desktop app.",
+        });
+      }
+      const input = designRecordingsRenderSchema.parse(params);
+      const run = (signal?: AbortSignal) =>
+        host.withDesignReadWorkspace(input.workspaceId, false, ({ root }) => {
+          noteDesignRecordedCanvas(root);
+          return renderDesignRecordings(root, input, { signal });
+        });
+      if (!input.jobId) return run();
+      if (!options.previewAdmission)
+        throw new Error("Design recording cancellation requires a live Local connection.");
+      return host.previewJobs.run({ workspaceId: input.workspaceId, directoryId: input.directoryId, jobId: input.jobId,
+        deadline: input.deadline! }, options.previewAdmission, run, "thumbnails");
+    }
+    case "design.recordings.read": {
+      // Stored recordings only, from private engine storage.
+      if (remote) {
+        throw new GitError({
+          code: "REMOTE_RESTRICTED",
+          message: "Design recordings are available only in the desktop app.",
+        });
+      }
+      const input = designRecordingsReadSchema.parse(params);
+      return host.withDesignReadWorkspace(input.workspaceId, false, ({ root }) => {
+        // Its frames are captured after they are prepared: preparation keeps their reads.
+        noteDesignRecordedCanvas(root);
+        return readDesignRecordings(root, input);
+      });
     }
     case "design.preview.cancel": {
       const input = designPreviewCancelSchema.parse(params);

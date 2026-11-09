@@ -35,6 +35,13 @@ export function isDesignDependencyCaptureActive(): boolean {
   return currentReadSet.getStore() !== undefined;
 }
 
+/** A capture that fails its operation when a dependency changed (a movement
+ * guard), rather than a durable capture that only records. */
+export function isDesignDependencyGuardActive(): boolean {
+  const reads = currentReadSet.getStore();
+  return reads !== undefined && !reads.lenient;
+}
+
 export function observeDesignFileDependency(root: string, dependency: DesignFileDependency): void {
   const reads = currentReadSet.getStore();
   if (!reads) return;

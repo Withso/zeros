@@ -35,17 +35,18 @@ native prerequisites. Run one launcher per checkout: Local and Dev share build
 outputs. Keep the launch in its own foreground terminal so its Stop signal owns
 cleanup.
 
-Run `pnpm doctor` before and after. It is a read-only process/memory census,
-not a readiness or health test. Confirm the intended app/fixture actually loads
-and performs one observable action. Use `pnpm electron:cloud --doctor` only for
-an authorized cloud stack; keep private profile contents out of evidence.
+Run `pnpm run doctor` before and after (without `run`, pnpm runs its own
+doctor command). It is a read-only process/memory census, not a readiness or
+health test. Confirm the intended app/fixture actually loads and performs one
+observable action. Use `pnpm electron:cloud --doctor` only for an authorized
+cloud stack; keep private profile contents out of evidence.
 
 For Linux browser verification (also available on a Mac):
 
 ```sh
 pnpm install --frozen-lockfile
 pnpm exec playwright install chromium
-pnpm doctor
+pnpm run doctor
 pnpm test:ui-smoke --list --format=json
 VITE_CONTROL_PLANE_URL=https://api.example.test pnpm exec vite --mode ui-smoke --host 127.0.0.1 --port 6217 --strictPort
 ```

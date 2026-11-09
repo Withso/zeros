@@ -93,7 +93,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   const environments = new CloudEnvironments(pool, keys, github.connections.authorizeRepositoryConfiguration.bind(github.connections));
   const githubToken = (workspace: CloudV2Workspace, purpose: "git" | "gh" = "git", failedTokenSha256?: string) => github.workspaceToken(workspace, "user", purpose, failedTokenSha256);
   const proxyBase = `${v2.apiUrl}${CLOUD_V2_PROXY_PREFIX}`;
-  const computers = new CloudV2Computers(pool, lockPool, github.resolveRepository);
+  const computers = new CloudV2Computers(pool, lockPool, github.resolveRepository, github.resolveRecentRepository);
   const source = github.source;
   const authorizeRepository = async (org: string, user: string, repository: string) => {
     await source.repository(org, user, repository);
@@ -104,8 +104,8 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   const authorizeSourceTargets = async (org: string, user: string, targets: readonly CloudSourceTarget[]) => {
     await source.targets(org, user, targets);
   };
-  const authorizeBuildRepository = async (org: string, user: string, buildId: string, repository: string) => {
-    const target = await computers.resolveBuildRepository(org, user, buildId, repository);
+  const authorizeBuildRepository = async (org: string, user: string, buildId: string, repository: string, options?: { fresh?: boolean }) => {
+    const target = await computers.resolveBuildRepository(org, user, buildId, repository, options);
     await authorizeSourceTargets(org, user, [target]);
     return target;
   };
@@ -123,8 +123,11 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
       const issued = await store.issueToken({ workspaceId: workspace.id, kind: "proxy", userId: null, ttlMs: PROXY_TOKEN_TTL_MS });
       return { token: issued.token, expiresAt: issued.expiresAt.getTime() };
     };
-    const access = await github.workerConfiguration(workspace, mode, proof), { repositoryBinding } = access;
-    const setup = await github.workspaceSetup(workspace, computers);
+    // Every worker hello waits on this. The build's setup is read beside
+    // GitHub access. The Git identity stays last: its fence covers every
+    // read before it.
+    const [access, setup] = await Promise.all([github.workerConfiguration(workspace, mode, proof), github.workspaceSetup(workspace, computers)]);
+    const { repositoryBinding } = access;
     const { selectedLogins, baseCommit, environment, mcpServers } = await withSystemTx(pool, async tx => ({
       selectedLogins: await logins.all(workspace.creatorUserId, workspace.organizationId, tx),
       baseCommit: await store.baseCommit(workspace.id, tx),
@@ -240,7 +243,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   void loginChanges?.start().catch(() => {}); // The shared listener retries and re-reads onReady.
   const remoteHeads = github.remoteHead;
   const builder = roles.lifecycle ? new CloudV2ComputerBuilder({
-    computers, compute, channel: config.deploymentChannel, localOwner, runtime,
+    computers, compute, channel: config.deploymentChannel, localOwner, runtime, publicKeys: signer.publicKeys,
     cloneToken: async (organizationId, userId, target) => {
       return (await github.token({ organizationId, userId }, target, "read", "computer",
         () => authorizeSourceTargets(organizationId, userId, [target]))).token;

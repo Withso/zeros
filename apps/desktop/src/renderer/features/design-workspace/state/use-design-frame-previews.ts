@@ -17,6 +17,7 @@ import { DesignPreviewDecodes, type DesignDecodedPreviewLease } from "./design-p
 import { useDesignImageState } from "./use-design-image-display";
 import { designCaptureScheduler } from "../../../platform/bridge/design-capture-scheduler";
 import { designSourceVectorCache, type DesignSourceVectorTarget } from "../design-source-vector";
+import { forgetDesignGpuWorkspaces } from "../gpu/design-gpu-canvas";
 import { loadDesignSurfaceVector, rasterizeDesignVector, renderDesignSourcePreview, type DesignSourcePreviewDeps } from "../design-source-preview";
 import { designWorkspaceSnapshotCache } from "./design-workspace-cache";
 import { DesignThumbnailBatches } from "./design-thumbnail-batches";
@@ -257,6 +258,7 @@ export function setDesignFramePreviewAccount(account: string | null): void {
 
 /** A workspace was removed; its pictures go from memory and disk. */
 export function forgetDesignFramePreviews(workspaceIds: readonly string[]): void {
+  forgetDesignGpuWorkspaces(workspaceIds);
   designSourceVectorCache.forgetWorkspaces(workspaceIds);
   designPreviewDecodes.forgetWorkspaces(workspaceIds);
   designFramePreviews.forgetWorkspaces(workspaceIds);

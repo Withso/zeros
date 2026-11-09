@@ -177,7 +177,9 @@ instead of sending again. A working chat is steered with `AGENT_STEER`
 (`delivered`, `pending`, `unknown`, or `BUSY` when known not delivered),
 never queued.
 Agent messages are labelled `[Zeros] From agent "<title>" (<link>):` before
-the text for the provider; provenance is also stored per message. The
+the text for the provider, or `[Zeros] From agent (<link>):` while the sender
+has no name yet (Untitled, New chat or blank); provenance is also stored per
+message. The
 recipient's transcript stores something else: the facade stages a
 presentation under the message id (`stagePresentation`), and the engine
 records the input as one whole user row (`recordLocalUserMessage`) — the

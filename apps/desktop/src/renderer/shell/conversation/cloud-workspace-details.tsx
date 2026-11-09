@@ -6,17 +6,19 @@ import { Popover, PopoverContent } from "../../shared/ui/primitives/popover";
 import { toast } from "../../shared/ui/primitives/elements";
 import { shellOpenUrl } from "../../platform/app";
 import type { CloudWorkspaceDocument } from "../../platform/cloud-workspaces";
-import { describeWorkspaceRuntimeStatus } from "../workbench/tab-status-model";
+import { describeWorkspaceRuntimeStatus, type WorkspaceAvailability } from "../workbench/tab-status-model";
 import { formatCompactAge } from "../../features/agent/format-age";
 import { useCloudWorkspaceSurfaceActive } from "./use-cloud-workspace-surface";
 import { manageCloudWorkspace } from "../../state/cloud-workspace-catalog";
 import { parseCloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
 import { useWorkspaceStore } from "../../state/workspace-store";
 import { useCloudWorkspaceAccountAccess } from "../../features/team/cloud-workspace-account-access";
+import { useWorkbenchAvailability } from "../../state/workbench-availability";
 import { WorkspaceIdentityLabel, WorkspaceIdentityTrigger, useWorkspaceDetailsOpen } from "./workspace-identity";
 
-export function cloudStatusLabel(status: string): string {
-  return describeWorkspaceRuntimeStatus({ cloud: true, state: status, connection: "connected", since: 0 }, Date.now());
+/** With this desktop's engine connection, Running waits until agents can run. */
+export function cloudStatusLabel(status: string, availability?: WorkspaceAvailability): string {
+  return describeWorkspaceRuntimeStatus({ connection: "connected", since: 0, ...availability, cloud: true, state: status }, Date.now());
 }
 
 /** A cloud workspace's name and cloud in its header, opening what it is and
@@ -31,6 +33,7 @@ export function CloudWorkspaceDetails({ folder, name, workspace }: {
   const allowed = useCloudWorkspaceAccountAccess(target?.organizationId);
   const pageActive = useWorkspaceStore(state => state.activePage === "workspace");
   const surfaceActive = useCloudWorkspaceSurfaceActive(pageActive);
+  const { availability } = useWorkbenchAvailability(folder, surfaceActive);
   const [open, setOpen] = useWorkspaceDetailsOpen(pageActive);
   const shown = open && surfaceActive;
   const [changing, setChanging] = useState(false);
@@ -53,7 +56,7 @@ export function CloudWorkspaceDetails({ folder, name, workspace }: {
     </span> },
     { Icon: Clock, label: "Created", value: <Tooltip label={new Date(workspace.createdAt).toLocaleString()}>
       <span>{createdAge === "now" ? "Just now" : `${createdAge} ago`}</span></Tooltip> },
-    { Icon: Activity, label: "Status", value: <span role="status">{cloudStatusLabel(workspace.status)}</span> },
+    { Icon: Activity, label: "Status", value: <span role="status">{cloudStatusLabel(workspace.status, availability)}</span> },
   ] : [];
   return (
     <Popover open={shown} onOpenChange={setOpen}>

@@ -101,11 +101,15 @@ export function useIsInternalUser(): boolean {
  *  - `copyLogs` — ⇧⌘L copies the scrubbed recent-log tail (the exact
  *    bytes a feedback submission shares) to the clipboard.
  *  - `resourceSummary` — live app memory and the resource inspector.
+ *  - `designGpuCanvas` — the recorded GPU Design canvas: Local engines that
+ *    record frames as Skia pictures draw them with CanvasKit. Off until a
+ *    staff member turns it on.
  *  - Agent control features while their rollout stage is `internal`
  *    (agent-control-rollout.ts). */
 export type InternalFeature =
   | "copyLogs"
   | "resourceSummary"
+  | "designGpuCanvas"
   | AgentControlFeature;
 
 const STORAGE_KEY = "zeros.internalFeatures";
@@ -114,6 +118,7 @@ const STORAGE_KEY = "zeros.internalFeatures";
 const KNOWN: ReadonlySet<string> = new Set<InternalFeature>([
   "copyLogs",
   "resourceSummary",
+  "designGpuCanvas",
   ...AGENT_CONTROL_FEATURES,
 ]);
 // Staff dogfood these unless they turn them off.

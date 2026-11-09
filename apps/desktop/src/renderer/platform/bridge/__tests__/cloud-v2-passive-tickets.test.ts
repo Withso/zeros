@@ -16,6 +16,8 @@ vi.mock("../../../state/cloud-workspace-catalog", () => ({
   cloudWorkspaceDocument: () => ({ status: mocks.status, capabilities: { canWrite: true }, deletedAt: null }),
   canReadCloudWorkspace: () => true,
   cloudWorkspaceLifecycleTask: () => undefined,
+  isCloudWorkspaceLifecyclePending: () => false,
+  refreshCloudWorkspace: async () => ({}),
 }));
 vi.mock("../ws-client", () => ({
   RuntimeClient: class {

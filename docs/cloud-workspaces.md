@@ -137,7 +137,12 @@ worker also writes it once connected and after loading the SDK. Install and
 activation clear it before restarting onto another runtime, so it holds only
 the current runtime's code.
 The same step writes the control plane's public verification keys to
-root-owned `/opt/zeros/worker-auth.json`. Every wake rotates the worker
+root-owned `/opt/zeros/worker-auth.json`. Cloud Computer builds install the
+same keys, so a VM created from the org snapshot passes the fast path instead
+of reinstalling (1.3–2.9 s per Alpha create before). The protected route is
+created while the VM runs its runtime check and prune. It is inert until token
+delivery, which follows them, starts the worker. A restore after a lost disk
+still creates the route after its checkpoint is applied. Every wake rotates the worker
 credential in `/home/user/.config/zeros/worker-token` (mode `0600`) and
 restarts the worker, which registers a new boot identity in `hello` before the
 control plane dials it. The worker rereads the credential on every HTTPS request.
@@ -531,7 +536,11 @@ worker installs the creator's Git identity from the selected organization
 connection. The name is the GitHub profile name, falling back to the verified
 login; the email is `<github_user_id>+<github_login>@users.noreply.github.com`.
 During a temporary profile lookup outage, the selected connection's stored
-login is used after rechecking its authorization generation.
+login is used after rechecking its authorization generation. A profile that
+the same control-plane process read for the same token within the last 30 s
+(for example, during that hello's source check or the create's branch lookup)
+is reused instead of calling GitHub again. The authorization generation is
+still rechecked.
 The VM user's global Git config includes the worker-owned
 `~/.config/zeros/git-identity`, which also sets `user.useConfigOnly=true`.
 Confirmed configuration changes atomically replace that file, so existing
@@ -1190,6 +1199,10 @@ Records contain a shortened workspace ID, closed phase name and duration,
 without commands, paths, URLs or credentials. Optional worker timings use a
 separate HTTPS endpoint with no retries; the control plane caps reports per
 boot and phase in bounded memory. Diagnostics never determine startup success.
+Some phases overlap or nest. `runtime_install` includes the wait for a new VM's
+first command: Boat holds that command until the VM is up, about 2 s from a
+snapshot. `worker_hello` runs from the workspace row's last update, so for a
+create it also covers the lifecycle steps before it.
 
 Archive sets `archivedAt` and requests the same stop lifecycle. The UI treats
 a stopped or failed workspace with that flag as archived; idle stop leaves it
@@ -1423,7 +1436,19 @@ available to decrypt existing records.
 
 The worker receives only the non-secret boot settings `CLOUD_V2_API_URL`,
 `CLOUD_V2_RUNTIME_SHA256` and `ZEROS_WORKSPACE_ID` in its `worker.env`; its
-credential comes from the token file. The Dev hosted-profile launcher takes
+credential comes from the token file.
+
+A create's VM restores its disk lazily from the Cloud Computer snapshot,
+and the restore gives every file a new inode and ctime. When the image holds
+the workspace's checkout, the lifecycle therefore starts a detached,
+read-only warm-up as the VM user as soon as the VM accepts commands: `git
+ls-tree -r HEAD` reads the pack, and `git diff-files --quiet
+--ignore-submodules` with `core.checkStat=minimal` stats every file. It runs
+with `GIT_OPTIONAL_LOCKS=0`, fsmonitor and hooks disabled and a 60 s
+timeout. A racily clean file can still get a content comparison, which for
+LFS files starts git-lfs's clean filter. The warm-up still writes nothing
+and downloads nothing, so it may overlap the worker's own checkout. Its failure never fails the create, and wakes skip
+it. The Dev hosted-profile launcher takes
 `ZEROS_CLOUD_V2_RUNTIME_SHA256` and maps it to the control-plane runtime pin,
 and derives each Dev generation's worker signing key.
 

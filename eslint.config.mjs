@@ -52,6 +52,8 @@ export default [
       "dist-engine/**",
       "node_modules/**",
       "binaries/**",
+      // Generated CanvasKit glue, pinned by SHA-256 (gpu/canvaskit/README.md).
+      "apps/desktop/src/renderer/features/design-workspace/gpu/canvaskit/canvaskit.js",
     ],
   },
   js.configs.recommended,

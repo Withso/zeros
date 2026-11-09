@@ -202,8 +202,9 @@ function entryFor(folder: string): AvailabilityEntry {
       state: doc?.status,
       stopError: doc?.error,
       canWake: doc?.capabilities.canWrite,
+      // A start's first connection is not a reconnect to the stopped VM.
       ...(becameReady && entry.value.connection !== "connected"
-        ? { since: Date.now() }
+        ? { since: Date.now(), previouslyConnected: false }
         : {}),
     });
   };

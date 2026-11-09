@@ -26,15 +26,18 @@ import {
 import { resolveDesignCaptureConfig, type DesignCaptureConfig } from "./capture-client";
 import { designDirectoryNameFor } from "./directory-registry";
 import { designCatalogRevision, inspectDesignCatalog } from "./catalog-storage";
-import { assertDesignThemeName, prepareRegisteredDesignFrameParts } from "./document";
+import { durableDesignDependenciesCurrent, isDesignDependencyCaptureActive } from "./dependency-read-set";
+import { assertDesignThemeName, designFrameIdentityContextOf, prepareRegisteredDesignFrameParts } from "./document";
 import { assertFrameFile, designDirectory, readSharedCanvasContext } from "./document-storage";
 import { designDirectoryEntry } from "./metadata";
 import { MAX_DESIGN_TEXT_BYTES } from "./render-budget";
-import { prepareFrameRenderSource } from "./render-preparation";
-import { readSafeRegularFile } from "./safe-files";
+import { composeFrameSourcesInWorkers, designPreparationWorkerCount } from "./preparation-pool";
+import { composeRetainedFrameRender, prepareFrameRenderSource } from "./render-preparation";
+import { noteDesignFrameReused, takeDesignFrame } from "./retained-frames";
+import { designReadScopeValue, readSafeRegularFile, withDesignReadScope } from "./safe-files";
 import { parseDesignSource } from "./shared-parse";
 import { elementRecords } from "./source";
-import { designTailwindBatchCss, frameStyleSourceIds, frameStyleSources, readDesignStyleSourceCatalog } from "./style-sources";
+import { designStyleSourcesUseFonts, designTailwindBatchCss, frameStyleSourceIds, frameStyleSources, readDesignStyleSourceCatalog } from "./style-sources";
 import { applyDesignSurfaceTheme } from "./surface-document";
 import {
   DESIGN_THUMBNAIL_COMPOSER,
@@ -160,11 +163,94 @@ function frameId(canvas: { frame_info: Record<string, unknown> }, file: string):
 }
 
 
+type ComposedRender = Pick<Awaited<ReturnType<typeof prepareFrameRenderSource>>, "sanitized" | "sourceVersion" | "sheets">;
+
+/** A saved frame's render source and sheets for capture, read from disk:
+ * exactly what the engine's thread composes for a frame sent with a version.
+ * The frame's identity read, kept on this thread, stands in for the source
+ * pipeline when it is of that version and nothing it read has changed. */
+async function composeFrameSource(root: string, file: string, size: { width: number; height: number },
+  canvas: Awaited<ReturnType<typeof readSharedCanvasContext>>["canvas"], deferTailwind: boolean,
+  sourceVersion?: string): Promise<ComposedRender & { reused?: true }> {
+  const kept = sourceVersion === undefined ? undefined : takeDesignFrame(root, designDirectoryNameFor(root), file);
+  if (kept && kept.render.sourceVersion === sourceVersion && kept.context === designFrameIdentityContextOf(canvas, file)) {
+    // One fingerprint per file per call: frames share most of their files.
+    const fingerprints = await designReadScopeValue("design-dependency-fingerprints", async () => new Map<string, string | null>());
+    const render = durableDesignDependenciesCurrent(kept.durable, fingerprints)
+      ? await composeRetainedFrameRender(root, file, canvas, kept.render, { deferTailwind }) : null;
+    if (render) {
+      noteDesignFrameReused();
+      return { ...render, reused: true };
+    }
+  }
+  const design = designDirectory(root);
+  const safe = await readSafeRegularFile(design, path.join(design, file), MAX_DESIGN_TEXT_BYTES);
+  if (!safe) throw new Error("The frame source is unavailable or exceeds its limit.");
+  return prepareFrameRenderSource(root, safe.body.toString("utf8"), size, undefined, undefined, file, canvas,
+    { parts: true, deferTailwind });
+}
+
+/** A preparation worker's share of a compose: per frame and read-only. A
+ * frame it can't compose is left to the engine's thread, which reports it. */
+export async function composeDesignFrameSourcesInWorker(workspacePath: string,
+  frames: ReadonlyArray<{ file: string; width: number; height: number; sourceVersion?: string }>, options: { deferTailwind: boolean }) {
+  // An engine call's frames reach a worker one message at a time: they share one canvas read.
+  const { canvas } = await designReadScopeValue(`canvas\0${path.resolve(workspacePath)}`, () => readSharedCanvasContext(workspacePath));
+  const results: Array<{ file: string; sourceVersion: string; sanitized: string; sheets?: ComposedRender["sheets"]; reused?: true } |
+    { file: string; error: string }> = [];
+  for (const frame of frames) {
+    try {
+      const { sourceVersion, sanitized, sheets, reused } = await composeFrameSource(workspacePath, assertFrameFile(frame.file),
+        { width: frame.width, height: frame.height }, canvas, options.deferTailwind, frame.sourceVersion);
+      results.push({ file: frame.file, sourceVersion, sanitized, ...(sheets ? { sheets } : {}), ...(reused ? { reused } : {}) });
+    } catch (error) {
+      results.push({ file: frame.file, error: error instanceof Error ? error.message : "Could not compose this frame." });
+    }
+  }
+  return results;
+}
+
+/** Frames sent with a version, composed on the preparation workers when they
+ * are on. Not with App fonts (download state is per process) or during a
+ * dependency capture, which must record its own reads. A worker's canvas may
+ * be newer than this thread's; the version check below then reports the
+ * frame stale, exactly as a source change would. */
+async function composeInWorkers(root: string, canvas: Awaited<ReturnType<typeof readSharedCanvasContext>>["canvas"],
+  frames: readonly Requested[], deferTailwind: boolean): Promise<Map<string, ComposedRender>> {
+  const composed = new Map<string, ComposedRender>();
+  const versioned = frames.filter((frame) => frame.sourceVersion !== undefined && canvas.frames[frame.file] && canvas.frame_info[frame.file]);
+  if (designPreparationWorkerCount() === 0 || versioned.length < 2 || isDesignDependencyCaptureActive()) return composed;
+  if (await designStyleSourcesUseFonts(root, canvas)) return composed;
+  const sized = versioned.map(({ file, sourceVersion }) => ({ file, width: canvas.frames[file]!.w, height: canvas.frames[file]!.h, sourceVersion }));
+  const results = await composeFrameSourcesInWorkers(root, sized, { deferTailwind });
+  for (const result of results) if ("sanitized" in result) composed.set(result.file, result);
+  // The fallback is silent per frame, so a worker build that can't compose
+  // would hide behind it: say so once, path-free.
+  const left = sized.length - composed.size;
+  if (left > 0 && !composeFallbackNoticed) {
+    composeFallbackNoticed = true;
+    const first = results.find((result) => "error" in result);
+    console.warn(`[Zeros] Design compose workers left ${left} of ${sized.length} frames to the engine thread; first: ${
+      first && "error" in first ? failure(new Error(first.error), root) : "a worker stopped"}`);
+  }
+  return composed;
+}
+let composeFallbackNoticed = false;
+
 /** Compose saved frames for batch capture: every frame of a page folder links
  * the same bytes for its linked stylesheets and for each imported source
  * (whole, not pruned per frame), so the capture host parses them once. A
  * Tailwind source compiles utilities per frame and stays per frame. */
-export async function composeDesignThumbnailBatches(
+export function composeDesignThumbnailBatches(
+  root: string,
+  input: DesignThumbnailsRender,
+  signal?: AbortSignal,
+): Promise<{ batches: DesignThumbnailBatch[]; stale: Frame[]; failed: Array<{ file: string; error: string }>; prepared: PreparedFrame[] }> {
+  // One read scope per call: its frames share stylesheet, font and package reads.
+  return withDesignReadScope(() => composeThumbnailBatchesInScope(root, input, signal));
+}
+
+async function composeThumbnailBatchesInScope(
   root: string,
   input: DesignThumbnailsRender,
   signal?: AbortSignal,
@@ -189,27 +275,26 @@ export async function composeDesignThumbnailBatches(
     }
     return sources;
   };
-  const design = designDirectory(root);
   const stale: Frame[] = [];
   const failed: Array<{ file: string; error: string }> = [];
   const built: Array<{ index: number; frame: Frame; geometry: { w: number; h: number }; skeleton: string;
     parts: Part[]; tailwind: Array<{ part: number; source: string; candidates: readonly string[] }> }> = [];
+  const pooled = await composeInWorkers(root, canvas, input.frames, batchTailwind());
+  signal?.throwIfAborted();
   for (const [index, requested] of input.frames.entries()) {
     signal?.throwIfAborted();
     try {
       const file = assertFrameFile(requested.file);
       const geometry = canvas.frames[file];
       if (!geometry || !canvas.frame_info[file]) throw new Error("This frame is not on the canvas.");
-      let render: Awaited<ReturnType<typeof prepareFrameRenderSource>>;
+      let render: ComposedRender;
       if (requested.sourceVersion === undefined) {
         const parts = await prepareRegisteredDesignFrameParts(root, file, canvas, { deferTailwind: batchTailwind() });
         prepared?.push(parts.frame as PreparedFrame);
         render = parts.render;
       } else {
-        const safe = await readSafeRegularFile(design, path.join(design, file), MAX_DESIGN_TEXT_BYTES);
-        if (!safe) throw new Error("The frame source is unavailable or exceeds its limit.");
-        render = await prepareFrameRenderSource(root, safe.body.toString("utf8"), { width: geometry.w, height: geometry.h },
-          undefined, undefined, file, canvas, { parts: true, deferTailwind: batchTailwind() });
+        render = pooled.get(file) ?? await composeFrameSource(root, file, { width: geometry.w, height: geometry.h }, canvas, batchTailwind(),
+          requested.sourceVersion);
         if (render.sourceVersion !== requested.sourceVersion) {
           stale.push({ file, sourceVersion: render.sourceVersion });
           continue;

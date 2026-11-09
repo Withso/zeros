@@ -10,10 +10,13 @@ import {
   DESIGN_CAPTURE_SHEET_SCHEME,
   DESIGN_CAPTURE_TIMEOUT_MS,
   designBatchCaptureRequestSchema,
+  designBatchRecordRequestSchema,
   designCaptureRasterSize,
   designCaptureRequestSchema,
   type DesignBatchCaptureReply,
   type DesignBatchCaptureRequest,
+  type DesignBatchRecordReply,
+  type DesignBatchRecordRequest,
   type DesignCaptureReply,
   type DesignCaptureRequest,
 } from "@zeros/protocol/design-capture";
@@ -32,6 +35,12 @@ export type DesignBatchCaptureHost = (
   input: DesignBatchCaptureRequest,
   signal: AbortSignal,
 ) => Promise<{ items: Array<{ id: string; bytes: Uint8Array } | { id: string; error: string }>; renderer: string }>;
+/** Records a batch of frames as Skia pictures; layer files stay in the
+ * recorder's own folder until the engine stores them. */
+export type DesignBatchRecordHost = (
+  input: DesignBatchRecordRequest,
+  signal: AbortSignal,
+) => Promise<{ items: DesignBatchRecordReply["items"]; recorder: string }>;
 
 /** JSON escapes can expand the bounded HTML and CSS strings. */
 const DESIGN_BATCH_CAPTURE_TRANSPORT_BYTES =
@@ -41,7 +50,7 @@ const SHEET_LINK = new RegExp(`${DESIGN_CAPTURE_SHEET_SCHEME}://css/([a-f0-9]{64
 /** A batch's sheets are content-addressed: each key is its sheet's SHA-256,
  * and every sheet an item links is present, so a host serves only verified
  * bytes and a frame never renders against the wrong stylesheet. */
-export function assertDesignBatchStylesheets(input: DesignBatchCaptureRequest): void {
+export function assertDesignBatchStylesheets(input: Pick<DesignBatchCaptureRequest, "stylesheets"> & { items: ReadonlyArray<{ html: string }> }): void {
   for (const [hash, css] of Object.entries(input.stylesheets))
     if (createHash("sha256").update(css).digest("hex") !== hash) throw new Error("Design batch stylesheet hash mismatch.");
   for (const item of input.items)
@@ -73,10 +82,14 @@ export function assertDesignCapturePng(
  * authority cross this boundary; it receives already composed authored HTML.
  * One admitted request includes upload, render and cleanup. Saturation fails
  * immediately instead of retaining queued HTML or allocating more browsers. */
+/** Record batches the capture service passes to the recorder at once. */
+export const DESIGN_RECORD_BATCHES = 2;
+
 export async function startDesignCaptureService(
   render: DesignCaptureHost,
   admission = new DesignCaptureAdmission(),
   renderBatch?: DesignBatchCaptureHost,
+  recordBatch?: DesignBatchRecordHost,
 ): Promise<DesignCaptureService> {
   const nativeOwner = {};
   const token = randomBytes(32).toString("hex");
@@ -153,6 +166,55 @@ export async function startDesignCaptureService(
       }
     })();
   };
+  /** Recordings of many frames. The recorder is its own process with its own
+   * windows, so recordings don't take the capture reservation; a couple of
+   * batches at once keep its windows busy between batches. The reply names
+   * layer files, never their bytes. */
+  let recordsActive = 0;
+  const record = (request: import("node:http").IncomingMessage, response: import("node:http").ServerResponse) => {
+    if (!recordBatch) { failResponse(response, 404, "Unknown capture operation."); return; }
+    if (stopped || recordsActive >= DESIGN_RECORD_BATCHES) {
+      failResponse(response, 429, "Design capture capacity reached. Wait for the active capture.");
+      return;
+    }
+    recordsActive++;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(new Error("Design batch record timed out.")), DESIGN_BATCH_CAPTURE_TIMEOUT_MS);
+    const disconnect = () => { if (!response.writableEnded) controller.abort(new Error("Design batch record disconnected.")); };
+    response.once("close", disconnect);
+    const abort = () => { if (!request.complete) request.destroy(); };
+    controller.signal.addEventListener("abort", abort, { once: true });
+    void (async () => {
+      try {
+        let size = 0;
+        const chunks: Buffer[] = [];
+        for await (const chunk of request) {
+          size += chunk.length;
+          if (size > DESIGN_BATCH_CAPTURE_TRANSPORT_BYTES) { failResponse(response, 413, "Batch record input is too large."); return; }
+          chunks.push(Buffer.from(chunk));
+        }
+        controller.signal.throwIfAborted();
+        const input = designBatchRecordRequestSchema.parse(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+        assertDesignBatchStylesheets(input);
+        const result = await recordBatch(input, controller.signal);
+        controller.signal.throwIfAborted();
+        const recorded = new Map(result.items.map((item) => [item.id, item]));
+        const value: DesignBatchRecordReply = {
+          version: 1, revision: input.revision, recorder: result.recorder,
+          items: input.items.map((item) => recorded.get(item.id) ?? { id: item.id, error: "Design batch record produced no recording." }),
+        };
+        response.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+        response.end(JSON.stringify(value));
+      } catch {
+        if (!response.destroyed && !response.headersSent) failResponse(response, 422, "Design batch record failed. The source was not changed.");
+      } finally {
+        clearTimeout(timeout);
+        response.removeListener("close", disconnect);
+        controller.signal.removeEventListener("abort", abort);
+        recordsActive--;
+      }
+    })();
+  };
   const server: Server = createServer(
     { maxHeaderSize: 16 * 1024 },
     (request, response) => {
@@ -200,6 +262,10 @@ export async function startDesignCaptureService(
       }
       if (request.method === "POST" && request.url === "/batch") {
         batch(request, response);
+        return;
+      }
+      if (request.method === "POST" && request.url === "/record") {
+        record(request, response);
         return;
       }
       if (request.method !== "POST" || request.url !== "/capture") {

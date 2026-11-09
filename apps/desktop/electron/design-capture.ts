@@ -4,6 +4,7 @@ import { rendererProcessOwners } from "./renderer-process-owners";
 import { electronDesignCaptureAdmission } from "./design-capture-admission";
 import { DESIGN_CAPTURE_SHEET_SCHEME, DESIGN_STATIC_RENDER_CSS, DESIGN_STATIC_RENDER_SCRIPT } from "@zeros/protocol/design-capture";
 import { createElectronDesignBatchCapture, DESIGN_CAPTURE_RENDERER } from "./design-capture-batch";
+import type { DesignRecorder } from "./design-recorder";
 import { prepareDesignCaptureViewport, captureScaledDesignPng } from "../src/engine/design/capture-viewport";
 import {
   startDesignCaptureService,
@@ -17,7 +18,11 @@ import {
 /** An on-demand invisible authored renderer. This partition is never shared
  * with browser-use sessions, the app renderer, or user cookies. Each capture
  * owns and destroys its window; a closed Design canvas is not required. */
-export async function startElectronDesignCapture(): Promise<DesignCaptureService & { renderer: string }> {
+export async function startElectronDesignCapture(options: {
+  /** Records frames for the recorded canvas in its own process; main decides. */
+  recorder?: DesignRecorder | null;
+} = {}): Promise<DesignCaptureService & { renderer: string; recorder?: string }> {
+  const recorder = options.recorder ?? null;
   const partition = session.fromPartition(
     `zeros-design-capture-${randomUUID()}`,
     { cache: false },
@@ -152,8 +157,9 @@ export async function startElectronDesignCapture(): Promise<DesignCaptureService
       await retired;
       await partition.clearStorageData();
     }
-  }, electronDesignCaptureAdmission, batch);
-  return { ...service, renderer: DESIGN_CAPTURE_RENDERER, async stop() { await service.stop(); batch.retire(); } };
+  }, electronDesignCaptureAdmission, batch, recorder?.record);
+  return { ...service, renderer: DESIGN_CAPTURE_RENDERER, ...(recorder ? { recorder: recorder.identity } : {}),
+    async stop() { await service.stop(); batch.retire(); await recorder?.stop(); } };
 }
 
 /** The batch capture scheme must be standard and secure before app ready, so

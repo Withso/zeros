@@ -110,6 +110,21 @@ function electronRendererCsp(command: string, mode: string) {
   };
 }
 
+// The vendored CanvasKit glue is Emscripten's UMD output, pinned by SHA-256
+// (renderer/features/design-workspace/gpu/canvaskit/README.md). Vite converts
+// CommonJS only inside node_modules, so the committed file stays byte-identical
+// and its global becomes the module's default export here.
+const DESIGN_CANVASKIT_GLUE = "/apps/desktop/src/renderer/features/design-workspace/gpu/canvaskit/canvaskit.js";
+function designCanvasKitModulePlugin() {
+  return {
+    name: "zeros-design-canvaskit-module",
+    transform(code: string, id: string) {
+      if (!id.split("?", 1)[0]!.replaceAll("\\", "/").endsWith(DESIGN_CANVASKIT_GLUE)) return null;
+      return { code: `${code}\nexport default CanvasKitInit;\n`, map: null };
+    },
+  };
+}
+
 function loadersShowcasePlugin() {
   // Showcase HTML lives in styles/Artifacts/ (moved out of the old Loaders/
   // dir). Still served under /loaders and /Loaders for back-compat, e.g.
@@ -228,6 +243,7 @@ export default defineConfig(({ command, mode }) => ({
     tailwindcss(),
     electronRendererCsp(command, mode),
     loadersShowcasePlugin(),
+    designCanvasKitModulePlugin(),
   ],
   resolve: {
     alias: {
@@ -264,6 +280,8 @@ export default defineConfig(({ command, mode }) => ({
   // for code-splitting builds".
   worker: {
     format: "es",
+    // Worker bundles get only these plugins (the GPU raster worker loads CanvasKit).
+    plugins: () => [designCanvasKitModulePlugin()],
   },
   // Pre-bundle the statically-imported xterm.js stack so a freshly-
   // installed dev server doesn't have to optimize them on first

@@ -147,6 +147,8 @@ suite("runtime hello through the production composition", () => {
     let entered!: () => void, release!: () => void;
     const waiting = new Promise<void>(resolve => { entered = resolve; }), held = new Promise<void>(resolve => { release = resolve; });
     const original = f.fetcher.getMockImplementation()!;
+    // Hold the profile read itself, not a reused answer from the hello before.
+    f.cp.routes.githubConnections!.forgetRecentProfiles();
     f.fetcher.mockImplementationOnce(async (...args) => {
       expect(new URL(String(args[0])).pathname).toBe("/user");
       const response = await original(...args); entered(); await held; return response;
@@ -184,6 +186,18 @@ suite("runtime hello through the production composition", () => {
     expect(response.status, change).not.toBe(200);
     expect(await response.json(), change).not.toHaveProperty("config");
     if (change === "denial") expect((await f.cp.store.get(f.workspace.id, f.creator)).state).toBe("stopping");
+  });
+
+  // The lifecycle verifies the source (reading /user) seconds before the
+  // worker's hello, whose Git identity read /user again on the critical path.
+  it("reuses the creator's /user answer from the lifecycle's check at hello, still fencing the credential", async () => {
+    const f = await fixture(false);
+    await f.cp.routes.authorizeSource!(f.workspace);
+    f.fetcher.mockClear();
+    const response = await f.ordinary("hello");
+    expect(response.status).toBe(200);
+    expect((await response.json()).config.gitIdentity).toMatchObject({ name: "Fixture" });
+    expect(f.fetcher.mock.calls.filter(([value]) => new URL(String(value)).pathname === "/user")).toHaveLength(0);
   });
 
   it("rechecks a secondary original source after held configuration I/O", async () => {
@@ -254,6 +268,7 @@ suite("runtime hello through the production composition", () => {
   it("retains the selected author and confirmed binding during a temporary profile outage", async () => {
     const f = await fixture(false);
     expect((await f.ordinary("hello")).status).toBe(200);
+    f.cp.routes.githubConnections!.forgetRecentProfiles();
     f.fetcher.mockImplementation(async () => Response.json({}, { status: 503 }));
     const response = await f.ordinary("config");
     expect(response.status).toBe(200);

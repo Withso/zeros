@@ -99,10 +99,22 @@ const PACKAGED_MACOS_ONLY_PACKAGES = [
   },
 ];
 
-// Release binaries that are not npm packages. A stage script downloads each at
-// a pinned version and SHA-256, electron-builder ships it through
-// extraResources, and its reviewed upstream terms sit under third_party/.
+// Release binaries that are not npm packages: downloaded by a stage script at a
+// pinned version and SHA-256 and shipped through extraResources, or built and
+// committed with SHA-256 pins. Their reviewed upstream terms sit under
+// third_party/.
 const STAGED_RELEASE_BINARIES = [
+  {
+    // Built from Skia source with a Zeros patch and committed beside its
+    // reproducible build (gpu/canvaskit/README.md); Vite bundles it into the
+    // renderer. The upstream terms of everything it links sit under third_party/.
+    name: "CanvasKit (Zeros build)",
+    versionScript: "apps/desktop/src/renderer/features/design-workspace/gpu/canvaskit/design-canvaskit-build.ts",
+    versionConstant: "DESIGN_CANVASKIT_VERSION",
+    license: "BSD-3-Clause AND FTL AND MIT AND Unicode-3.0 AND IJG AND Zlib AND libpng-2.0 AND Apache-2.0",
+    repository: "https://skia.googlesource.com/skia",
+    termsDirectory: "third_party/canvaskit",
+  },
   {
     name: "AXe",
     versionScript: "scripts/stage-axe.mjs",

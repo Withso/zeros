@@ -8,21 +8,34 @@ repository instructions, file contents, or conversation history are included.
 The system instruction is fixed on the server; clients cannot select a model,
 endpoint, credentials, or generation parameters.
 
-Only the first admitted user message's display text is eligible, after the turn
-settles and the chat is visible. Inputs up to 500 Unicode code points are kept
-whole (after trimming outer whitespace). Longer inputs use exactly the first
-400 and last 100 code points, without an extra separator. The server rejects
-inputs exceeding 500 rather than accepting an unbounded payload. Attachment-only
-or blank first messages do not use a later message as a substitute.
+Only the first admitted user message's display text is eligible, once the agent
+has answered it or its turn has settled. A visible chat asks for itself. For
+Local chats that are not on screen, an app-level backfill reads each Untitled or
+New chat chat's first prompt from the engine (`chats.titleSeeds`), for chats
+updated in the last 14 days and at most six requests per pass. Inputs up to 500
+Unicode code points are kept whole (after trimming outer whitespace). Longer
+inputs use exactly the first 400 and last 100 code points, without an extra
+separator. The server rejects inputs exceeding 500 rather than accepting an
+unbounded payload. Attachment-only or blank first messages do not use a later
+message as a substitute.
 
-Valid titles contain 3–5 whitespace-separated words, at most 80 code points.
-Wrapping quotes, simple markdown and emoji are removed; extra words are clamped
-to five. Refusals, diagnostics, malformed or incomplete responses are rejected.
-On missing configuration/authentication, timeout, rate limit, network failure,
-or invalid output, the chat retains its seeded title. There is no automatic
-retry, paid provider fallback, or prompt-snippet fallback. Manual renames and
-deleted/replaced chat owners win over delayed responses; account changes are
-checked again before applying the compare-and-swap rename.
+Valid service titles contain 3–5 whitespace-separated words, at most 80 code
+points. Wrapping quotes, simple markdown and emoji are removed; extra words are
+clamped to five. Refusals, diagnostics, malformed or incomplete responses are
+rejected.
+
+A missing sign-in or a refused session (HTTP 401) keeps the seeded title and
+waits for the next sign-in. A busy or failing service (HTTP 429 or 5xx), a
+network error or timeout, or an unusable reply is asked twice more, 10 and 60
+seconds later, each time under a new message ID (`<id>#2`, `<id>#3`) so the
+server's cached failure is not reused. Any other refusal, or the third failure,
+names the chat from its prompt instead: up to six words of the first line that
+has any, without Zeros links or Markdown markers, at most 60 characters. Zeros
+Local and builds without a control-plane URL send no request; they name a chat
+from its prompt the same way as soon as it qualifies. There is no paid provider
+fallback. Manual renames and deleted/replaced chat owners win over delayed
+responses; account changes are checked again before applying the
+compare-and-swap rename.
 
 An unavailable sign-in session does not consume the chat's HTTP attempt. While
 the chat is active and eligible, a later authentication event starts naming;
@@ -47,7 +60,10 @@ service's secret environment**, separately for each deployment environment.
 Deploy the backend and desktop changes. All signed-in users of that backend
 then get naming regardless of which coding provider they use; they do not need
 an OpenAI API key or Codex subscription. The key is never distributed to users,
-their cloud workers, the renderer bundle, or `VITE_*` variables.
+their cloud workers, the renderer bundle, or `VITE_*` variables. Without the
+key the route answers 503 `titles_unavailable`, and an OpenAI refusal (such as
+a disabled key) answers `{ "title": null }`; desktops then name chats from their
+prompts after the two retries.
 
 For local testing, put that variable in **`apps/control-plane/.env`** (ignored by
 Git), or inject it into the test process environment. Do not paste a key into
@@ -79,11 +95,12 @@ workspace state update, and visible chat tab, including delayed sign-in and the
 input/output limits. Authentication and OpenAI output are fixtures,
 so this test makes no paid requests. It does not replace a deployed-app check.
 
-The title limit is **3–5 words per title**, not 3–5 output tokens. The dashboard
-aggregates usage across requests, and tokenization plus response formatting can
-make token counts larger than word counts. `max_output_tokens: 32` is a ceiling,
-not a fixed charge; successful output is still sanitized to at most five words.
-See OpenAI's [output-token accounting](https://developers.openai.com/api/docs/guides/token-counting).
+The service title limit is **3–5 words per title**, not 3–5 output tokens. The
+dashboard aggregates usage across requests, and tokenization plus response
+formatting can make token counts larger than word counts.
+`max_output_tokens: 32` is a ceiling, not a fixed charge; successful output is
+still sanitized to at most five words. See OpenAI's [output-token
+accounting](https://developers.openai.com/api/docs/guides/token-counting).
 
 OpenAI documents the exact [Luna model and supported reasoning settings](https://developers.openai.com/api/docs/models/gpt-6-luna).
 Character limits bound input size but are not token counts; actual cost depends

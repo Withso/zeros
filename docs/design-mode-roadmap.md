@@ -2281,6 +2281,55 @@ checks cover sharp CSS/SVG edges at 200–400× capture scale as well as viewpor
 units, media queries and root/body alpha; output dimensions alone are not a
 fidelity check. CSS boxes retain Chromium's normal pixel-snapping semantics.
 
+#### Recorded GPU canvas (internal)
+
+The internal `designGpuCanvas` flag draws every passive frame from its Skia
+recording (see *Recorded frames* under the performance ceilings) instead of
+bitmap previews, covers and source surfaces. The flag is off by default and
+staff-only. It applies to Local workspaces whose engine advertises
+`design.recordings.v1`. Live editor documents (selection, editing, playback,
+open layer trees, intent) keep their DOM pixels; a frame whose recording
+failed keeps the live-document fallback. Cloud workspaces never request
+recordings.
+
+- **Two threads.** A dedicated worker owns CanvasKit: pictures, a byte-budgeted
+  LRU with explicit deletes, and WebGL2 rasterization of bursts into
+  `ImageBitmap`s. The main thread composites immutable atlas pages on one plane
+  under the world, inside the camera's own paint
+  (`gpu/design-gpu-scene.ts`). A worker-presented canvas would reach the
+  display compositor independently of the DOM frame, and chrome would trail
+  the pixels during pans. Frames the plane draws carry
+  `data-design-frame-tiled`, exactly like tiled source frames.
+- **Crisp at every zoom.** Rasters use the source tiles' power-of-two density
+  (at least screen resolution, minified by less than two). A frame that fits
+  512 device pixels is one sprite; a larger one splits into gutter tiles
+  rastered only near the viewport. While a new density is rastered, a frame
+  shows the nearest finer, then coarser, density it already has. Bursts are
+  center-first, one at a time, bounded to 6 ms of worker time at rest (3 ms
+  while the camera moves). `allVisibleCrispAt` records when every visible
+  frame is drawn at its exact density.
+- **Recordings and fonts.** Chunks are content-addressed and SHA-256-verified.
+  Requests claim held chunks in `knownChunks`, and a layer is reassembled only
+  when the worker needs its picture. Externalized fonts
+  (`apps/desktop/shared/design-picture-typefaces.ts`) are verified against
+  their id, registered once with the vendored CanvasKit
+  (`gpu/canvaskit/README.md`: CanvasKit 0.42.0 plus shared and externalized
+  typefaces, reproducible from source) and shared by every picture.
+- **Budgets and loss.** Pictures 160 MiB (serialized bytes), worker GPU
+  resource cache 64 MiB, compositor pages 192 MiB, chunks 128 MiB. The worker
+  retires 60 s after the last recorded canvas closes, releasing its
+  WebAssembly heap. Either context can be lost: the compositor drops its pages
+  and the worker its surfaces, and both re-raster from the worker's pictures;
+  no burst is sent while the worker's context is lost.
+- **Inert when hidden.** An inactive canvas owns no scene, plane, observer,
+  painter or recording request.
+- **CSP.** WebAssembly compiles only in the worker, under the renderer's
+  existing `'wasm-unsafe-eval'`. No policy changed.
+- **Bench instrumentation.** `window.__zerosDesignGpu` exists only while a
+  gated canvas is mounted. It reports open, first-frame and all-crisp times,
+  composite and burst percentiles, raster and deserialize timings, memory
+  and context losses.
+
 #### Layout interaction and visual history
 
 The Layout inspector offers content-aware sizing: Hug requires child layers;
@@ -2649,6 +2698,86 @@ These are local durable artifacts. They do not create a replicated job database,
 a process-wide disk quota across all workspaces, or a guarantee that a deleted
 cloud workspace can be recovered. Source parsing remains engine work; the
 admission limits are not OS CPU/RSS/GPU quotas.
+
+#### Recorded frames (internal experiment)
+
+The recorded canvas draws frames from Skia picture recordings, the vector
+drawing commands Chromium itself painted, instead of bitmap previews. Replay
+is crisp at any zoom, and redrawing at working zoom costs about a millisecond
+on the GPU. It is behind an internal renderer flag. The engine advertises
+`design.recordings.v1` only when the capture host names a recorder at launch.
+
+- **Recorder process.** `apps/desktop/electron/design-recorder-host.ts` is its
+  own Electron instance, started by main on first use and stopped after 30 s
+  idle (`design-recorder.ts`). It records with
+  `chrome.gpuBenchmarking.printToSkPicture`, which needs
+  `--enable-gpu-benchmarking` and a renderer allowed to write pictures to
+  disk. So recorder windows are unsandboxed. Neither applies to any app
+  renderer.
+  - Recorder windows load only sanitized frame documents from a private
+    scheme. The frame policy (`script-src 'none'`) leads the document and is
+    also its response header. The partition has no network, permissions or
+    storage.
+  - The process inherits an allow-listed environment with no credentials,
+    and a one-time token for its loopback HTTP endpoint.
+  - It starts only with `ZEROS_DESIGN_RECORDER=1` in an unpackaged build. A
+    packaged build also needs a role switch in main, and the recorder ships
+    only after its sandbox exception is approved.
+  - Each frame runs under a guard: its page crashing or being destroyed, a
+    10 s deadline, or the batch's abort fails that frame alone and replaces
+    its window. At the batch deadline, frames already recorded are answered.
+  - Windows run without the back-forward cache and are replaced every 64
+    frames: a page process otherwise grew past 1.2 GB in the app on a Mac.
+  - The session's folder is removed on exit (by the host, and by main once
+    the child has exited however it ended), with its Chromium profile.
+- **One layer per frame.** A picture of the page's root layer misses content
+  that Chromium composites separately, chiefly overflowing scroll containers.
+  - Before recording, the recorder clips each overflowing `auto`/`scroll`
+    container (including those in open shadow roots) on every non-visible
+    axis, with `display: flow-root` for blocks, and the page itself when its
+    content outgrows the frame. `will-change` gives way to `isolation`
+    unless the element holds fixed elements. At scroll position 0 this looks
+    the same.
+  - A frame that still paints on several layers is reported as failed, so the
+    canvas keeps another picture of it: never an incomplete recording. The
+    recorder marks that outcome permanent; the engine remembers it per frame,
+    theme, generation and recorder and answers it without recording again.
+  - Native qualification (M4, Chromium 150, the 46 distinct designs of the
+    1,000-frame replica, `scripts/design-recorder-qualification.ts`): 43
+    recorded as one layer, at p50 0.29% and at most 1.27% pixel difference
+    from Chromium's own capture, almost entirely glyph anti-aliasing. The
+    three others use `backdrop-filter` or keep a second full-size layer.
+- **Typefaces.** Chromium embeds the full data of every font a picture draws
+  with: Geist instances of about 63 KB, and about 8.3 MB of SF Pro when
+  `system-ui` glyphs appear. The recorder replaces each with a reference to
+  its content id (`apps/desktop/shared/design-picture-typefaces.ts`) and
+  writes its data once per session; the engine stores fonts once and sends
+  each once per reply, and the renderer verifies every font against its id.
+  This made 46 recordings 120 times smaller (76.7 MB to 0.64 MB).
+- **Storage and transfer.** The engine splits each layer into content-defined
+  chunks: FastCDC, 2/8/64 KiB, id = 32 hex characters of SHA-256
+  (`recording-chunks.ts`). Those bytes are stored once, in shared
+  `design-storage/recording-chunks/`.
+  - Each frame keeps one manifest per theme in private workspace storage
+    (`recording-store.ts`). The engine keeps recently stored or read chunks
+    (96 MiB) and each frame folder's answers in memory until it writes that
+    folder, so a reopen reads from memory: 26 ms for a 1,000-frame page,
+    unaffected by a busy engine thread.
+  - Replies stay within one bridge frame (12 MiB of chunk data). A caller's
+    `knownChunks` are never resent; a frame whose chunks don't fit is deferred.
+- **Ops.** `design.recordings.render` records missing frames through the
+  capture host's `/record`. It reuses the thumbnail batch composition and
+  cancels through `design.preview.cancel`. A failure is `retryable` when the
+  attempt failed rather than the frame. `design.recordings.read` answers from
+  storage only, including frames sent without a version; with
+  `withFailures` it also names frames the current recorder can't record.
+- **Measured** (owner's M4, 1,000-frame replica page, with the renderer's
+  recorded canvas): draw p50 0.1–0.6 ms and p95 under 1.6 ms at fit and at
+  100%; a tab return all-crisp in about 0.4–0.5 s. A first open is bound by
+  frame preparation on the engine thread (about 40 ms a frame), not by the
+  recorder.
+- **Not yet.** Packaged-app start-up. Layer composition for frames that keep
+  several layers. Fonts larger than one reply's data budget.
 
 ### Negotiated metadata-only catalog reads
 

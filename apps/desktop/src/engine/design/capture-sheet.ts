@@ -62,8 +62,12 @@ export function layoutDesignCaptureSheets(
 /** The capture-only head of a frame document: no authored script can run,
  * only this batch's stylesheets and data: images/fonts can load, and
  * timelines hold their opening state. */
+/** What a captured or recorded frame document may load: inline styles, the
+ * host's own sheets, and data: images and fonts. Nothing runs. */
+export const DESIGN_CAPTURE_FRAME_CSP = `default-src 'none'; script-src 'none'; style-src 'unsafe-inline' ${DESIGN_CAPTURE_SHEET_SCHEME}:; img-src data:; font-src data:; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none';`;
+
 export function designCaptureFramePolicy(colorScheme: "light" | "dark"): string {
-  return `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'none'; style-src 'unsafe-inline' ${DESIGN_CAPTURE_SHEET_SCHEME}:; img-src data:; font-src data:; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none';"><style>${DESIGN_STATIC_RENDER_CSS}html{color-scheme:${colorScheme}}</style>`;
+  return `<meta http-equiv="Content-Security-Policy" content="${DESIGN_CAPTURE_FRAME_CSP}"><style>${DESIGN_STATIC_RENDER_CSS}html{color-scheme:${colorScheme}}</style>`;
 }
 
 const attribute = (value: string) => value.replace(/&/g, "&amp;").replace(/"/g, "&quot;");

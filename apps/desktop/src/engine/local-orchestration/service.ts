@@ -102,6 +102,9 @@ import {
 } from "./types";
 import { chatVisibleAs, computeVisibility, workspaceVisibleAs, type LocalVisibility } from "./visibility";
 
+/** Titles a chat carries until Zeros names it (see the renderer's chat titles). */
+const UNNAMED_CHAT_TITLES = new Set(["Untitled", "New chat"]);
+
 const PROVISIONING_STATES = new Set(["accepted", "provisioning", "ready", "dispatching"]);
 const CURSOR_TOOL_WAIT_MAX_MS = 50_000;
 const WAIT_RECHECK_MS = 1_000;
@@ -1385,9 +1388,11 @@ export class LocalOrchestrationService {
    * named before the message, so another agent's words are never mistaken
    * for the user's. Provenance is also recorded for transcripts. */
   private fromAgent(senderChatId: string, text: string): string {
-    const sender = this.ports.getChat(senderChatId);
-    const title = (sender?.title || "Untitled").replace(/\s+/g, " ").slice(0, 80);
-    return `${LOCAL_NOTE_PREFIX} From agent "${title}" (${this.chatLink(senderChatId)}):\n\n${text}`;
+    const title = (this.ports.getChat(senderChatId)?.title ?? "").replace(/\s+/g, " ").trim().slice(0, 80);
+    // The provider keeps this text verbatim, so a sender that Zeros has not
+    // named yet goes by its link rather than a permanent "Untitled".
+    const name = title && !UNNAMED_CHAT_TITLES.has(title) ? ` "${title}"` : "";
+    return `${LOCAL_NOTE_PREFIX} From agent${name} (${this.chatLink(senderChatId)}):\n\n${text}`;
   }
 
   /** The recipient's transcript shows the sender's own text under a "Sent

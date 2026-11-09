@@ -94,7 +94,8 @@ function intersects(a: Pick<Row, "x" | "y" | "width" | "height" | "chrome">,
 const colors = new Map<string, DesignTileFrame["background"]>();
 let colorContext: CanvasRenderingContext2D | null = null;
 
-function color(value: string): DesignTileFrame["background"] {
+/** A CSS color as premultiplied RGBA in 0–1, resolved through a 1×1 canvas and cached. */
+export function designCanvasColor(value: string): DesignTileFrame["background"] {
   const cached = colors.get(value);
   if (cached) { colors.delete(value); colors.set(value, cached); return cached; }
   // CSS colors are resolved at admission, never during a camera paint. One
@@ -117,18 +118,22 @@ function color(value: string): DesignTileFrame["background"] {
   return result;
 }
 
-function frameColors(frame: HTMLElement) {
+/** A frame's background and one-screen-pixel stroke, resolved from its own
+ * computed style (read before a GPU plane takes over its pixels). */
+export function designFrameColors(frame: HTMLElement) {
   const style = getComputedStyle(frame);
   // Canvas frames stroke their edge with a box-shadow (`.zd-design-stroke`),
   // which a rounded outline width cannot thicken under zoom; the plane paints
   // that same one-screen-pixel edge for the frames it owns.
   const edge = style.getPropertyValue("--design-frame-stroke").trim();
-  return { background: color(style.backgroundColor), outline: edge ? { color: color(edge), width: 1 } : {
-    color: color(style.outlineColor), width: style.outlineStyle !== "none" && Number.parseFloat(style.outlineWidth) > 0 ? 1 : 0,
+  return { background: designCanvasColor(style.backgroundColor), outline: edge ? { color: designCanvasColor(edge), width: 1 } : {
+    color: designCanvasColor(style.outlineColor), width: style.outlineStyle !== "none" && Number.parseFloat(style.outlineWidth) > 0 ? 1 : 0,
   } };
 }
 
-function withoutCameraScale(style: string | null): string {
+/** Inline style without the camera's own scale variables, which every camera
+ * paint rewrites on visible frames: a change here is real geometry or paint. */
+export function designStyleWithoutCameraScale(style: string | null): string {
   return (style ?? "").split(";").map(value => value.trim())
     .filter(value => value && !/^--design-canvas-(?:inverse-)?zoom\s*:/.test(value)).join(";");
 }
@@ -193,7 +198,7 @@ class DesignSourceScene {
   private refreshBackgrounds() {
     this.layoutRows = null;
     this.restore();
-    for (const row of this.registrations) { Object.assign(row, frameColors(row.frame)); row.colorsPending = false; }
+    for (const row of this.registrations) { Object.assign(row, designFrameColors(row.frame)); row.colorsPending = false; }
   }
 
   private readGeometryChanges(records: MutationRecord[]): boolean {
@@ -202,7 +207,7 @@ class DesignSourceScene {
     const changed = records.some(record => record.type === "childList" && record.target === this.world &&
       [...record.addedNodes, ...record.removedNodes].some(node => node instanceof HTMLElement && !node.hasAttribute("data-design-source-plane")) ||
       record.target instanceof HTMLElement && record.target.parentElement === this.world && record.type === "attributes" &&
-      (record.attributeName !== "style" || withoutCameraScale(record.oldValue) !== withoutCameraScale(record.target.getAttribute("style"))));
+      (record.attributeName !== "style" || designStyleWithoutCameraScale(record.oldValue) !== designStyleWithoutCameraScale(record.target.getAttribute("style"))));
     if (changed) this.layoutRows = null;
     return changed;
   }
@@ -249,7 +254,7 @@ class DesignSourceScene {
     // One pass of reads after the commit's writes: the first computed-style
     // read recalculates once and every later frame reuses that result.
     for (const row of this.registrations) if (row.colorsPending) {
-      Object.assign(row, frameColors(row.frame));
+      Object.assign(row, designFrameColors(row.frame));
       row.colorsPending = false;
       this.layoutRows = null;
     }

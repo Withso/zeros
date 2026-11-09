@@ -7,7 +7,8 @@ import { connectCloudV2Workspace } from "../cloud-v2";
 import { ControlPlaneError } from "../../features/team/control-plane";
 import {
   acceptCloudEngineWorkspace, cloudCatalogGeneration, cloudWorkspaceDocument,
-  cloudWorkspaceOwnerGeneration, cloudWorkspaceStopVersion, subscribeCloudWorkspaces,
+  cloudWorkspaceOwnerGeneration, cloudWorkspaceStopVersion, isCloudWorkspaceLifecyclePending,
+  refreshCloudWorkspace, subscribeCloudWorkspaces,
 } from "../../state/cloud-workspace-catalog";
 import { canOpenCloudWorkspace } from "../../state/cloud-workspace-wake";
 import type { CloudWorkspaceTarget } from "./cloud-workspace-key";
@@ -162,6 +163,10 @@ export async function openCloudV2Runtime(
     if (!workspace?.path || !workspace.path.startsWith("/"))
       throw new Error("Cloud workspace did not confirm its checkout");
     acceptCloudEngineWorkspace(target, workspace, account);
+    // The worker answered, so the control plane already has it running. Read
+    // that now rather than at the catalog's next poll (every 2 s, and paused
+    // while the window is hidden), which left Running ~25 s late on Alpha.
+    if (isCloudWorkspaceLifecyclePending(cloudWorkspaceDocument(target))) void refreshCloudWorkspace(target).catch(() => {});
     opened = true;
     return {
       client,

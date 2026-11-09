@@ -24,6 +24,13 @@ describe("calm workbench status", () => {
     expect(describeWorkspaceAvailability({ ...current, cloud: false }, 10_100)).toBeNull();
   });
 
+  it("describes cloud compute as Starting until its engine connection is first ready", () => {
+    const current = { cloud: true, state: "ready", connection: "connecting" as const, since: 100 };
+    expect(describeWorkspaceRuntimeStatus(current, 5_000)).toBe("Starting");
+    expect(describeWorkspaceRuntimeStatus({ ...current, connection: "connected" }, 5_000)).toBe("Running");
+    expect(describeWorkspaceRuntimeStatus({ ...current, cloud: false }, 5_000)).toBe("Running");
+  });
+
   it.each([true, false])(
     "keeps Local reconnect quiet and retains cloud gap thresholds (cloud=%s)",
     async (cloud) => {
