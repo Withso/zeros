@@ -140,6 +140,8 @@ import {
 } from "./design-gesture-loop";
 import {
   beginInlineTextCommit,
+  inlineTextKeepsSelection,
+  inlineTextSettleFrame,
   cancelInlineTextCommit,
   createInlineTextCommitGuard,
   finishInlineTextCommit,
@@ -2281,20 +2283,12 @@ export const DesignCanvas = React.memo(function DesignCanvas({
   // the same microtask, then unmount and persist selection independently.
   useLayoutEffect(() => {
     const edit = inlineTextEdit;
-    if (
-      !workspaceId ||
-      !folder ||
-      !edit ||
-      edit.status !== "settling" ||
-      !selectedFrame ||
-      selectedFrame.file !== edit.frame ||
-      selectedFrame.sourceVersion !== edit.sourceVersion
-    ) {
-      return;
-    }
+    if (!workspaceId || !folder || !edit || edit.status !== "settling") return;
+    const editedFrame = inlineTextSettleFrame(frameViews.filter(isPreparedDesignFrame), edit);
+    if (!editedFrame) return;
     const viewport = viewportRef.current;
     const frameElement = viewport?.querySelector<HTMLElement>(
-      `[data-design-frame="${CSS.escape(edit.frame)}"]`,
+      `[data-design-frame="${CSS.escape(editedFrame.file)}"]`,
     );
     if (!frameElement) return;
     let settled = false;
@@ -2319,6 +2313,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
       setInlineTextEdit((current) =>
         current?.id === edit.id ? null : current,
       );
+      if (!inlineTextKeepsSelection(designWorkspaceView(workspaceId), edit)) return true;
       const exactDetails =
         selectedNodeDetails?.oid === edit.nodeId &&
         selectedNodeDetails.sourceVersion === edit.sourceVersion
@@ -2327,7 +2322,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
       void selectDesignNode({
         workspaceId,
         folder,
-        frame: selectedFrame,
+        frame: editedFrame,
         nodeId: edit.nodeId,
         ...(exactDetails
           ? { details: exactDetails }
@@ -2352,7 +2347,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
     return () => {
       observer.disconnect();
     };
-  }, [folder, inlineTextEdit, selectedFrame, selectedNodeDetails, workspaceId]);
+  }, [folder, frameViews, inlineTextEdit, selectedNodeDetails, workspaceId]);
 
   const insertAsset = useCallback(
     async (
