@@ -51,6 +51,48 @@ it("waits for the requested generation across an outgoing and incoming document"
   }
 });
 
+it("keeps an outgoing document painting what it shows until its owner lets it go", async () => {
+  // A text or structural commit shows its new document only once it has laid
+  // out. Tearing the outgoing runtime down at the new one's handshake made it
+  // restore its saved text and styles under the editor until that swap.
+  const workspace = "replacement-paint";
+  const host = { setTimeout: (work: () => void, ms: number) => setTimeout(work, ms) as unknown as number,
+    clearTimeout: (id: number) => clearTimeout(id) };
+  const connect = (version: string) => {
+    const source = { postMessage: vi.fn() };
+    const connection = connectDesignFrameRuntime(workspace, "home.html", version,
+      { contentWindow: source } as unknown as HTMLIFrameElement, {}, host);
+    const port = source.postMessage.mock.calls[0]![1].transfer[0] as MessagePort;
+    const received: Array<{ type?: string }> = [];
+    port.onmessage = (event) => received.push(event.data);
+    const ready = () => port.postMessage({ protocol: DESIGN_RUNTIME_PROTOCOL, version: DESIGN_RUNTIME_VERSION,
+      type: "event", event: "ready", payload: { sourceVersion: version, capabilities,
+        snapshot: { ...snapshot(1), sourceVersion: version, frame: { ...snapshot(1).frame, sourceVersion: version } } } });
+    return { connection, port, ready, teardowns: () => received.filter((message) => message.type === "teardown").length };
+  };
+  const outgoing = connect(SOURCE_VERSION);
+  let incoming: ReturnType<typeof connect> | undefined;
+  try {
+    outgoing.ready();
+    await vi.waitFor(() => expect(designFrameRuntime(workspace, "home.html")).toBe(outgoing.connection));
+    incoming = connect(NEXT_SOURCE_VERSION);
+    incoming.ready();
+    await vi.waitFor(() => expect(designFrameRuntime(workspace, "home.html")).toBe(incoming!.connection));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(outgoing.teardowns()).toBe(0);
+    // Retired all the same: it takes no further work.
+    await expect(outgoing.connection.getSnapshot()).rejects.toBeInstanceOf(DesignFrameRuntimeError);
+    // Its buffer unmounts with the swap, and only then is it torn down.
+    outgoing.connection.destroy();
+    await vi.waitFor(() => expect(outgoing.teardowns()).toBe(1));
+  } finally {
+    outgoing.connection.destroy(true);
+    outgoing.port.close();
+    incoming?.connection.destroy(true);
+    incoming?.port.close();
+  }
+});
+
 it("shares capture admission across frame ports and retains it through cancellation cleanup", async () => {
   const peers = ["one", "two"].map((name) => {
     const source = { postMessage: vi.fn() };
