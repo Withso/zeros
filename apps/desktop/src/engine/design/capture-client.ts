@@ -18,17 +18,22 @@ const inherited = {
   url: process.env.ZEROS_DESIGN_CAPTURE_URL,
   token: process.env.ZEROS_DESIGN_CAPTURE_TOKEN,
   renderer: process.env.ZEROS_DESIGN_CAPTURE_RENDERER,
+  recorder: process.env.ZEROS_DESIGN_CAPTURE_RECORDER,
 };
 // Main/worker authority is never ambient authority in an agent subprocess.
 // This module is loaded before the native gateway can admit an execution.
 delete process.env.ZEROS_DESIGN_CAPTURE_URL;
 delete process.env.ZEROS_DESIGN_CAPTURE_TOKEN;
 delete process.env.ZEROS_DESIGN_CAPTURE_RENDERER;
+delete process.env.ZEROS_DESIGN_CAPTURE_RECORDER;
 export interface DesignCaptureConfig {
   url: string;
   token: string;
   /** The renderer the host's batch replies name, when the app supplies it at launch. */
   renderer?: string;
+  /** Set when the host can also record frames as Skia pictures (/record):
+   * the recorder identity its replies name. */
+  recorder?: string;
 }
 let configuredHost: DesignCaptureConfig | undefined;
 /** Engine/main ownership only; this setter is never a bridge or tool method. */
@@ -38,11 +43,12 @@ export function setDesignCaptureConfig(
   configuredHost = value;
 }
 export function resolveDesignCaptureConfig(
-  input: { url?: string; token?: string; renderer?: string } = configuredHost ?? inherited,
+  input: { url?: string; token?: string; renderer?: string; recorder?: string } = configuredHost ?? inherited,
 ): DesignCaptureConfig | null {
   if (!input.url || !input.token || !/^[a-f0-9]{64}$/.test(input.token))
     return null;
   const renderer = input.renderer !== undefined && /^[A-Za-z0-9._/-]{1,128}$/.test(input.renderer) ? input.renderer : undefined;
+  const recorder = input.recorder !== undefined && /^[A-Za-z0-9._/-]{1,128}$/.test(input.recorder) ? input.recorder : undefined;
   try {
     const url = new URL(input.url);
     if (
@@ -55,7 +61,7 @@ export function resolveDesignCaptureConfig(
       url.pathname !== "/"
     )
       return null;
-    return { url: url.origin, token: input.token, ...(renderer === undefined ? {} : { renderer }) };
+    return { url: url.origin, token: input.token, ...(renderer === undefined ? {} : { renderer }), ...(recorder === undefined ? {} : { recorder }) };
   } catch {
     return null;
   }

@@ -1,0 +1,146 @@
+import { randomBytes } from "node:crypto";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { designBatchRecordRequestSchema, type DesignBatchRecordReply, type DesignBatchRecordRequest } from "@zeros/protocol/design-capture";
+import { DESIGN_DIRECTORY_NAME, initializeDesignDocument, prepareDesignNavigationFrames, readDesignNavigationSnapshot } from "../document";
+import { designDirectoryNameFor } from "../directory-registry";
+import { designDirectoryEntry } from "../metadata";
+import { DESIGN_RECORDER_FOLDER_PREFIX, designRecordingPipeline, readDesignRecordings, renderDesignRecordings } from "../recording-batch";
+import { settleDesignFontDownloadsForTests, resetDesignFontsForTests } from "../style-fonts";
+
+const RECORDER = "electron-43.8.3/chromium-150.0.7871.250/skp";
+
+describe("Design recordings", () => {
+  let root: string;
+  let folder: string;
+  let directoryId: string;
+  const recorderFolders: string[] = [];
+  const frame = (text: string) => `<!doctype html><html><head><link rel="stylesheet" href="../tokens.css"></head><body><main data-oid="m" class="hero">${text}</main></body></html>`;
+  const versions = async (files: string[]) => {
+    const navigation = await readDesignNavigationSnapshot(root);
+    const out = new Map<string, string>();
+    for (const entry of (await prepareDesignNavigationFrames(root, navigation.catalogRevision, files)).frames) out.set(entry.file, entry.sourceVersion!);
+    return [...out].map(([file, sourceVersion]) => ({ file, sourceVersion }));
+  };
+  /** A capture host stand-in: writes each frame's "picture" where a recorder would. */
+  const recorder = (options: { bytes?: (id: string) => Uint8Array; error?: (id: string) => string | null; pathFor?: (id: string, real: string) => string } = {}) => {
+    const calls: DesignBatchRecordRequest[] = [];
+    const record = async (request: DesignBatchRecordRequest): Promise<DesignBatchRecordReply> => {
+      calls.push(designBatchRecordRequestSchema.parse(request));
+      const base = await mkdtemp(path.join(tmpdir(), DESIGN_RECORDER_FOLDER_PREFIX));
+      recorderFolders.push(base);
+      const items = [];
+      for (const item of request.items) {
+        const error = options.error?.(item.id) ?? null;
+        if (error) { items.push({ id: item.id, error }); continue; }
+        const dir = path.join(base, item.id);
+        await mkdir(dir);
+        const file = path.join(dir, "layer_0.skp");
+        await writeFile(file, options.bytes?.(item.id) ?? Buffer.concat([Buffer.from("skiapict"), randomBytes(40_000)]));
+        items.push({ id: item.id, scale: 2, layers: [{ x: 0, y: 0, width: item.viewport.width * 2, height: item.viewport.height * 2, path: options.pathFor?.(item.id, file) ?? file }] });
+      }
+      return { version: 1, revision: request.revision, recorder: RECORDER, items };
+    };
+    return { calls, record };
+  };
+
+  beforeEach(async () => {
+    root = await mkdtemp(path.join(tmpdir(), "zeros-recordings-"));
+    process.env.ZEROS_DATA_DIR = path.join(root, "private");
+    folder = path.join(root, DESIGN_DIRECTORY_NAME);
+    await initializeDesignDocument(root);
+    directoryId = designDirectoryEntry(root, designDirectoryNameFor(root))!.id;
+    await mkdir(path.join(folder, "page-1"), { recursive: true });
+    await writeFile(path.join(folder, "tokens.css"), ".hero { color: red; }");
+    const canvasFile = path.join(folder, "meta/canvas.json");
+    const canvas = JSON.parse(await readFile(canvasFile, "utf8"));
+    for (const [index, name] of ["a", "b", "c"].entries()) {
+      await writeFile(path.join(folder, `page-1/${name}.html`), frame(name));
+      canvas.frames[`frame_${index}`] = { kind: "html", source: `page-1/${name}.html`, title: name, x: index * 400, y: 0, width: 320, height: 200 };
+      canvas.pages[0].frames.push(`frame_${index}`);
+    }
+    await writeFile(canvasFile, JSON.stringify(canvas, null, 2));
+  });
+  afterEach(async () => {
+    await settleDesignFontDownloadsForTests();
+    resetDesignFontsForTests();
+    delete process.env.ZEROS_DATA_DIR;
+    await Promise.all(recorderFolders.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it("records missing frames, stores them as chunks, and answers later requests from the store", async () => {
+    const frames = await versions(["page-1/a.html", "page-1/b.html"]);
+    const host = recorder();
+    const first = await renderDesignRecordings(root, { workspaceId: "w", directoryId, theme: null, frames }, { record: host.record, recorder: RECORDER });
+    expect(host.calls).toHaveLength(1);
+    expect(host.calls[0]!.items.map((item) => item.viewport)).toEqual([{ width: 320, height: 200 }, { width: 320, height: 200 }]);
+    expect(first.pipeline).toBe(designRecordingPipeline(RECORDER));
+    expect(first.failed).toEqual([]);
+    expect(first.recordings.map((r) => [r.file, r.width, r.height, r.scale, r.layers.length])).toEqual([["page-1/a.html", 320, 200, 2, 1], ["page-1/b.html", 320, 200, 2, 1]]);
+    // Each layer's bytes are its chunks, all sent once in this reply.
+    const sent = new Map(first.chunks.map((chunk) => [chunk.id, Buffer.from(chunk.data, "base64")]));
+    for (const recording of first.recordings) {
+      const bytes = Buffer.concat(recording.layers[0]!.chunks.map((id) => sent.get(id)!));
+      expect(bytes.length).toBe(recording.layers[0]!.bytes);
+      expect(bytes.subarray(0, 8).toString()).toBe("skiapict");
+    }
+    // The host's single-use files are gone once stored.
+    for (const dir of recorderFolders) await expect(stat(path.join(dir, "f0"))).rejects.toThrow();
+
+    const second = await renderDesignRecordings(root, { workspaceId: "w", directoryId, theme: null, frames, knownChunks: [...sent.keys()] }, { record: host.record, recorder: RECORDER });
+    expect(host.calls).toHaveLength(1);
+    expect(second.recordings.map((r) => r.file)).toEqual(["page-1/a.html", "page-1/b.html"]);
+    expect(second.chunks).toEqual([]);
+  });
+
+  it("reports a frame the recorder could not record, and records again after the recorder changes", async () => {
+    const frames = await versions(["page-1/a.html", "page-1/b.html"]);
+    const host = recorder({ error: (id) => (id === "f1" ? "This frame has content on separate composited layers." : null) });
+    const reply = await renderDesignRecordings(root, { workspaceId: "w", directoryId, theme: null, frames }, { record: host.record, recorder: RECORDER });
+    expect(reply.recordings.map((r) => r.file)).toEqual(["page-1/a.html"]);
+    expect(reply.failed).toEqual([{ file: "page-1/b.html", error: "This frame has content on separate composited layers." }]);
+    const updated = recorder();
+    await renderDesignRecordings(root, { workspaceId: "w", directoryId, theme: null, frames: [frames[0]!] }, { record: updated.record, recorder: "electron-44/chromium-151/skp" });
+    expect(updated.calls).toHaveLength(1);
+  });
+
+  it("never reads a layer file outside the recorder's folder", async () => {
+    const outside = path.join(root, "secret.skp");
+    await writeFile(outside, "skiapict-not-yours");
+    const frames = await versions(["page-1/a.html"]);
+    const host = recorder({ pathFor: () => outside });
+    const reply = await renderDesignRecordings(root, { workspaceId: "w", directoryId, theme: null, frames }, { record: host.record, recorder: RECORDER });
+    expect(reply.recordings).toEqual([]);
+    expect(reply.failed).toEqual([{ file: "page-1/a.html", error: "The recorder named a recording outside its folder." }]);
+  });
+
+  it("defers recordings whose chunks don't fit one reply, and sends shared chunks once", async () => {
+    const frames = await versions(["page-1/a.html", "page-1/b.html", "page-1/c.html"]);
+    const shared = randomBytes(1_000_000);
+    const unique = new Map([["f0", randomBytes(5_500_000)], ["f1", randomBytes(5_500_000)], ["f2", randomBytes(100)]]);
+    const host = recorder({ bytes: (id) => Buffer.concat([Buffer.from("skiapict"), shared, unique.get(id)!]) });
+    const reply = await renderDesignRecordings(root, { workspaceId: "w", directoryId, theme: null, frames }, { record: host.record, recorder: RECORDER });
+    expect(reply.recordings.map((r) => r.file)).toEqual(["page-1/a.html", "page-1/c.html"]);
+    expect(reply.deferred).toEqual([frames[1]]);
+    const ids = reply.chunks.map((chunk) => chunk.id);
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  it("reads each frame's newest stored recording without a version, naming its pipeline", async () => {
+    const frames = await versions(["page-1/a.html"]);
+    await renderDesignRecordings(root, { workspaceId: "w", directoryId, theme: null, frames }, { record: recorder().record, recorder: RECORDER });
+    const read = await readDesignRecordings(root, { workspaceId: "w", directoryId, theme: null, frames: [{ file: "page-1/a.html" }, { file: "page-1/b.html" }] });
+    expect(read.recordings.map((r) => [r.file, r.sourceVersion, r.pipeline])).toEqual([["page-1/a.html", frames[0]!.sourceVersion, designRecordingPipeline(RECORDER)]]);
+    expect(read.missing).toEqual(["page-1/b.html"]);
+    expect(read.chunks.length).toBeGreaterThan(0);
+  });
+
+  it("refuses a directory that is no longer active", async () => {
+    const frames = await versions(["page-1/a.html"]);
+    await expect(renderDesignRecordings(root, { workspaceId: "w", directoryId: "design_other", theme: null, frames }, { record: recorder().record, recorder: RECORDER }))
+      .rejects.toThrow(/directory changed/);
+  });
+});

@@ -345,3 +345,50 @@ it("gives an explicit capture the slot over a background batch and refuses a bat
   services.push(single);
   expect((await batchRequest(single, batchInput())).status).toBe(404);
 });
+
+function recordRequest(service: DesignCaptureService, body: unknown, token = service.token) {
+  return fetch(`${service.url}/record`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+const recordInput = (items = [{ id: "a", html: `<html><head><link rel="stylesheet" href="zeros-capture://css/${cssHash}"></head><body>A</body></html>`,
+  viewport: { width: 320, height: 200 } }]) => ({ version: 1, revision: "record-a", colorScheme: "light", stylesheets: { [cssHash]: css }, items });
+
+it("records a batch of frames in one admitted reservation, answering every item in request order", async () => {
+  const recordBatch = vi.fn(async (input: { items: Array<{ id: string }> }) => ({ recorder: "fixture/skp",
+    items: input.items.filter(item => item.id !== "lost").map(item => item.id === "failed" ? { id: item.id, error: "Multiple layers." }
+      : { id: item.id, scale: 2, layers: [{ x: 0, y: 0, width: 640, height: 400, path: `/tmp/zeros-design-recorder-x/${item.id}/layer_0.skp` }] }) }));
+  const service = await startDesignCaptureService(vi.fn(), new DesignCaptureAdmission(), undefined, recordBatch);
+  try {
+    expect((await recordRequest(service, recordInput(), "0".repeat(64))).status).toBe(401);
+    const html = recordInput().items[0]!.html;
+    const response = await recordRequest(service, recordInput([
+      { id: "a", html, viewport: { width: 320, height: 200 } },
+      { id: "failed", html, viewport: { width: 320, height: 200 } },
+      { id: "lost", html, viewport: { width: 320, height: 200 } },
+    ]));
+    expect(response.status).toBe(200);
+    const reply = await response.json();
+    expect(reply.recorder).toBe("fixture/skp");
+    expect(reply.items.map((item: { id: string; error?: string }) => [item.id, item.error ?? "ok"]))
+      .toEqual([["a", "ok"], ["failed", "Multiple layers."], ["lost", "Design batch record produced no recording."]]);
+    expect(recordBatch).toHaveBeenCalledTimes(1);
+  } finally { await service.stop(); }
+});
+
+it("refuses a record batch whose stylesheets don't match their content address, and has no /record without a recorder", async () => {
+  const recordBatch = vi.fn();
+  const service = await startDesignCaptureService(vi.fn(), new DesignCaptureAdmission(), undefined, recordBatch);
+  const plain = await startDesignCaptureService(vi.fn());
+  try {
+    const response = await recordRequest(service, { ...recordInput(), stylesheets: { [cssHash]: "body{color:blue}" } });
+    expect(response.status).toBe(422);
+    await response.arrayBuffer();
+    expect(recordBatch).not.toHaveBeenCalled();
+    const missing = await recordRequest(plain, recordInput());
+    expect(missing.status).toBe(404);
+    await missing.arrayBuffer();
+  } finally { await Promise.all([service.stop(), plain.stop()]); }
+});
