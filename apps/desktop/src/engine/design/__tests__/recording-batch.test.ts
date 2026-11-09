@@ -147,6 +147,21 @@ describe("Design recordings", () => {
     expect(other.calls).toHaveLength(1);
   });
 
+  it("records each color scheme on its own, the way live frames draw in it", async () => {
+    const frames = await versions(["page-1/a.html"]);
+    const host = recorder();
+    await renderDesignRecordings(root, { workspaceId: "w", directoryId, theme: null, frames }, { record: host.record, recorder: RECORDER });
+    const dark = await renderDesignRecordings(root, { workspaceId: "w", directoryId, theme: null, colorScheme: "dark", frames }, { record: host.record, recorder: RECORDER });
+    expect(host.calls.map((call) => call.colorScheme)).toEqual(["light", "dark"]);
+    expect(dark.recordings.map((recording) => recording.file)).toEqual(["page-1/a.html"]);
+    // Both are stored: neither scheme records again.
+    await renderDesignRecordings(root, { workspaceId: "w", directoryId, theme: null, colorScheme: "light", frames }, { record: host.record, recorder: RECORDER });
+    await renderDesignRecordings(root, { workspaceId: "w", directoryId, theme: null, colorScheme: "dark", frames }, { record: host.record, recorder: RECORDER });
+    expect(host.calls).toHaveLength(2);
+    const read = await readDesignRecordings(root, { workspaceId: "w", directoryId, theme: null, colorScheme: "dark", frames: [{ file: "page-1/a.html" }] });
+    expect(read.recordings[0]?.layers[0]?.chunks).toEqual(dark.recordings[0]?.layers[0]?.chunks);
+  });
+
   it("records a frame again after a failure that wasn't permanent", async () => {
     const frames = await versions(["page-1/a.html"]);
     const host = recorder({ error: () => "The recorder's page stopped (crashed) while recording this frame." });

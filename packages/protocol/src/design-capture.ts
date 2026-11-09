@@ -362,6 +362,8 @@ export const designRecordingsRenderSchema = z.object({
   workspaceId: z.string().min(1).max(128),
   directoryId: z.string().min(1).max(128),
   theme: recordingTheme,
+  /** The color scheme frames are drawn in: recordings of each are kept apart. */
+  colorScheme: z.enum(["light", "dark"]).default("light"),
   frames: z.array(recordingFrame).min(1).max(DESIGN_BATCH_CAPTURE_MAX_ITEMS),
   knownChunks: z.array(recordingChunkId).max(DESIGN_RECORDINGS_KNOWN_CHUNKS).optional(),
   /** Accepted for the future; the recorder reports its own `scale`. */
@@ -397,6 +399,7 @@ export const designRecordingsReadSchema = z.object({
   workspaceId: z.string().min(1).max(128),
   directoryId: z.string().min(1).max(128),
   theme: recordingTheme,
+  colorScheme: z.enum(["light", "dark"]).default("light"),
   frames: z.array(recordingFrame.partial({ sourceVersion: true })).min(1).max(DESIGN_MAX_FRAMES_PER_PAGE),
   knownChunks: z.array(recordingChunkId).max(DESIGN_RECORDINGS_KNOWN_CHUNKS).optional(),
   /** Also answer `failed` for frames the current recorder can't record. */
