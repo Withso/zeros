@@ -54,7 +54,8 @@ const vmCommand = (f: { compute: CloudV2Compute }, marker: string) => vi.mocked(
 function setup(claimed: (CloudV2LifecycleWorkspace & { attempts: number })[], options: { snapshot?: string | null; prune?: string[]; stock?: true; checkout?: true; idle?: CloudV2Workspace[]; stopIdle?: CloudV2LifecycleDeps["stopIdle"]; timing?: CloudV2LifecycleDeps["timing"]; now?: () => number;
   checkpoints?: ReturnType<typeof checkpointsFake>; remoteHead?: CloudV2LifecycleDeps["remoteHead"]; githubToken?: CloudV2LifecycleDeps["githubToken"]; uploadHorizon?: string;
   checkpointRetry?: boolean; retries?: RetryRow[]; prepareRepository?: CloudV2LifecycleDeps["prepareRepository"]; pruneEnvironments?: () => Promise<void>;
-  runtimeForWorkspace?: CloudV2LifecycleDeps["runtimeForWorkspace"]; bootEnv?: CloudV2LifecycleDeps["bootEnv"]; builds?: CloudV2LifecycleDeps["builds"] } = {}) {
+  runtimeForWorkspace?: CloudV2LifecycleDeps["runtimeForWorkspace"]; bootEnv?: CloudV2LifecycleDeps["bootEnv"]; builds?: CloudV2LifecycleDeps["builds"];
+  authorizeSource?: CloudV2LifecycleDeps["authorizeSource"] } = {}) {
   const retries = [...options.retries ?? []];
   const compute: CloudV2Compute = {
     create: vi.fn(async () => ({ sandboxId: "bx_new1" })),
@@ -128,9 +129,25 @@ function setup(claimed: (CloudV2LifecycleWorkspace & { attempts: number })[], op
     ...(options.githubToken ? { githubToken: options.githubToken } : {}),
     ...(options.pruneEnvironments ? { pruneEnvironments: options.pruneEnvironments } : {}),
     ...(options.builds ? { builds: options.builds } : {}),
+    ...(options.authorizeSource ? { authorizeSource: options.authorizeSource } : {}),
   });
   return { lifecycle, compute, store, stopWorker, logs };
 }
+
+// The worker's hello follows these checks within seconds; a positive about
+// to expire is renewed so that hello needn't verify GitHub itself.
+it.each(["creating", "starting"] as const)("asks the %s step's source checks to renew, through token delivery", async state => {
+  const row = workspace(state, state === "starting" ? { boatSandboxId: "bx_existing" } : {});
+  const authorizeSource = vi.fn<NonNullable<CloudV2LifecycleDeps["authorizeSource"]>>(async () => {});
+  const f = setup([row], { authorizeSource });
+  await f.lifecycle.tick();
+  expect(vmCommand(f, CLOUD_V2_WORKER_TOKEN_PATH)).toBeDefined();
+  expect(authorizeSource.mock.calls.length).toBeGreaterThanOrEqual(2);
+  for (const [checked, options] of authorizeSource.mock.calls) {
+    expect(checked.id).toBe(row.id);
+    expect(options).toEqual({ renew: true });
+  }
+});
 
 it.each(["creating", "starting"] as const)("uses one captured workspace runtime for %s installation and token delivery", async state => {
   const row = workspace(state, state === "starting" ? { boatSandboxId: "bx_existing" } : {});

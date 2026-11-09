@@ -34,6 +34,7 @@ function fixture(claimed = true) {
         failure: result.allowed ? null : result.error, claimId: null, claimUntil: 0 };
       return { ...record };
     }),
+    release: vi.fn(async () => {}),
   };
   const github = { fingerprintFor: vi.fn(async () => fingerprint), check: vi.fn(async () => {
     verifying.resolve(); return release.promise;

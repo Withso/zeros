@@ -28,8 +28,12 @@ export type GithubVerificationResult =
 export interface GithubVerificationStore {
   read(scope: GithubVerificationScope): Promise<GithubVerification | null>;
   backoff(scope: GithubVerificationScope): Promise<GithubVerification | null>;
-  claim(scope: GithubVerificationScope): Promise<GithubVerification | null>;
+  /** renewAfterMs below the admission window lets a renewal claim a positive
+   * that is still in force; the positive stays readable during the claim. */
+  claim(scope: GithubVerificationScope, renewAfterMs?: number): Promise<GithubVerification | null>;
   finish(scope: GithubVerificationScope, claimId: string, result: GithubVerificationResult): Promise<GithubVerification | null>;
+  /** Ends a claim without recording an outcome. */
+  release(scope: GithubVerificationScope, claimId: string): Promise<void>;
 }
 
 type Row = {
@@ -160,7 +164,7 @@ export class PostgresGithubVerificationStore implements GithubVerificationStore 
     return this.observation(result.rows[0], started);
   }
 
-  async claim(scope: GithubVerificationScope): Promise<GithubVerification | null> {
+  async claim(scope: GithubVerificationScope, renewAfterMs = CLOUD_SOURCE_ADMISSION_MS): Promise<GithubVerification | null> {
     const started = this.now();
     const result = await withSystemTx(this.pool, tx => tx.query<Row>(
       `INSERT INTO cloud_github_source_verifications AS v
@@ -177,9 +181,15 @@ export class PostgresGithubVerificationStore implements GithubVerificationStore 
          claim_started_at=EXCLUDED.claim_started_at,claim_until=EXCLUDED.claim_until
        WHERE v.fingerprint<>EXCLUDED.fingerprint OR
          ((v.claim_until IS NULL OR v.claim_until<=clock_timestamp()) AND (v.retry_at IS NULL OR v.retry_at<=clock_timestamp())
-           AND (v.verified_at IS NULL OR v.failure_code IS NOT NULL OR v.verified_at<=clock_timestamp()-interval '30 seconds'))
-       RETURNING ${columns}`, [...params(scope), randomUUID()]));
+           AND (v.verified_at IS NULL OR v.failure_code IS NOT NULL OR v.verified_at<=clock_timestamp()-make_interval(secs=>$6::double precision/1000)))
+       RETURNING ${columns}`, [...params(scope), randomUUID(), Math.min(renewAfterMs, CLOUD_SOURCE_ADMISSION_MS)]));
     return this.observation(result.rows[0], started);
+  }
+
+  async release(scope: GithubVerificationScope, claimId: string): Promise<void> {
+    await withSystemTx(this.pool, tx => tx.query(
+      `UPDATE cloud_github_source_verifications SET claim_id=NULL,claim_started_at=NULL,claim_until=NULL
+       WHERE org_id=$1 AND owner_user_id=$2 AND repository_id=$3 AND fingerprint=$4 AND claim_id=$5`, [...params(scope), claimId]));
   }
 
   async backoff(scope: GithubVerificationScope): Promise<GithubVerification | null> {

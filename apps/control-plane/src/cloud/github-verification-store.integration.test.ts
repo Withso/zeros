@@ -42,6 +42,30 @@ database("durable cloud GitHub permission observations", () => {
     expect(await store.claim(scope)).toBeNull();
   });
 
+  it("claims a positive for renewal only in its final window, keeping it in force through the claim and a release", async () => {
+    const renewAfter = 15_000, original = await allow();
+    expect(await store.claim(scope, renewAfter)).toBeNull();
+    await pool.query("UPDATE cloud_github_source_verifications SET verified_at=clock_timestamp()-interval '20 seconds' WHERE org_id=$1", [scope.organizationId]);
+    expect(await store.claim(scope)).toBeNull();
+    const renewal = await store.claim(scope, renewAfter);
+    expect(renewal?.claimId).toBeTruthy();
+    const held = await store.read(scope);
+    expect(held).toMatchObject({ failure: null, claimId: renewal!.claimId });
+    expect(Date.now() - held!.verifiedAt!).toBeGreaterThanOrEqual(19_000);
+    expect(await new PostgresGithubVerificationStore(pool).claim(scope, renewAfter)).toBeNull();
+    await store.release(scope, randomUUID());
+    expect((await store.read(scope))?.claimId).toBe(renewal!.claimId);
+    await store.release(scope, renewal!.claimId!);
+    const released = await store.read(scope);
+    expect(released).toMatchObject({ failure: null, failures: 0, claimId: null, canonicalRepository: original.canonicalRepository ?? null });
+    expect(Math.abs(released!.verifiedAt! - held!.verifiedAt!)).toBeLessThan(1000);
+    expect(released!.retryAt).toBeLessThanOrEqual(Date.now());
+    // A late finish for the released claim cannot record anything.
+    expect(await store.finish(scope, renewal!.claimId!, { allowed: true })).toBeNull();
+    const again = await store.claim(scope, renewAfter);
+    expect((await store.finish(scope, again!.claimId!, { allowed: true }))!.verifiedAt).toBeGreaterThan(held!.verifiedAt! + 15_000);
+  });
+
   it("retains a positive observation during throttling and shares cooldown across repositories", async () => {
     await allow(); await age();
     const claim = await store.claim(scope);

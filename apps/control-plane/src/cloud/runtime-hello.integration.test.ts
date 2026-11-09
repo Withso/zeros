@@ -10,6 +10,7 @@ import { resetMigratedTestDatabase } from "../test-database.js";
 import { grantTestPro } from "../test-pro.js";
 import { createCloudV2 } from "./composition.js";
 import { createCloudV2WorkerRoutes } from "./worker-routes.js";
+import type { CloudV2LifecycleDeps } from "./lifecycle.js";
 import { CLOUD_SOURCE_ADMISSION_MS, CLOUD_SOURCE_GRACE_MS, CLOUD_SOURCE_REFRESH_MS } from "./source-authority.js";
 import { DatabaseCloudAgentCredentialService } from "../agent-credentials/agent-credentials.js";
 import { cloudAgentModels } from "../agent-credentials/agent-models.js";
@@ -198,6 +199,34 @@ suite("runtime hello through the production composition", () => {
     expect(response.status).toBe(200);
     expect((await response.json()).config.gitIdentity).toMatchObject({ name: "Fixture" });
     expect(f.fetcher.mock.calls.filter(([value]) => new URL(String(value)).pathname === "/user")).toHaveLength(0);
+  });
+
+  // Alpha, 2026-11-09: a create reused a 26 s old positive, so the hello four
+  // seconds later verified GitHub itself and its configuration took 3.6 s.
+  it("renews a booting workspace's aging verification at the lifecycle's check, so its hello makes no GitHub request", async () => {
+    const f = await fixture(false);
+    await f.cp.routes.authorizeSource!(f.workspace);
+    const age = async () => Number((await pool.query<{ age: string }>(`SELECT (extract(epoch FROM clock_timestamp()-verified_at)*1000)::bigint AS age
+      FROM cloud_github_source_verifications WHERE org_id=$1`, [f.org])).rows[0]!.age);
+    // A wake in progress, whose last positive has 10 s left.
+    await pool.query("UPDATE cloud_v2_workspaces SET state='starting' WHERE id=$1", [f.workspace.id]);
+    await pool.query("UPDATE cloud_github_source_verifications SET verified_at=clock_timestamp()-interval '20 seconds' WHERE org_id=$1", [f.org]);
+    f.cp.routes.githubConnections!.forgetRecentProfiles();
+    f.fetcher.mockClear();
+    // The composition gives the lifecycle this same check, which asks to renew.
+    const lifecycleCheck: NonNullable<CloudV2LifecycleDeps["authorizeSource"]> = f.cp.routes.authorizeSource!;
+    const started = performance.now();
+    await lifecycleCheck(await f.cp.store.get(f.workspace.id, f.creator), { renew: true });
+    expect(performance.now() - started).toBeLessThan(5000);
+    await vi.waitFor(async () => expect(await age(), "renewed in the background").toBeLessThan(10_000), { timeout: 2500 });
+    // The worker's hello, 12 s later: past the original positive's expiry.
+    await pool.query("UPDATE cloud_github_source_verifications SET verified_at=verified_at-interval '12 seconds' WHERE org_id=$1", [f.org]);
+    f.fetcher.mockClear();
+    const response = await f.ordinary("hello");
+    expect(response.status).toBe(200);
+    expect((await response.json()).config.gitIdentity).toMatchObject({ name: "Fixture" });
+    expect(f.fetcher).not.toHaveBeenCalled();
+    expect((await f.cp.store.get(f.workspace.id, f.creator)).state).toBe("running");
   });
 
   it("rechecks a secondary original source after held configuration I/O", async () => {
