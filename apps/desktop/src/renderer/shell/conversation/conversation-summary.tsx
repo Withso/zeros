@@ -210,7 +210,9 @@ export function ConversationSummaryTrigger() {
             collisionBoundary={state.boundary}
             collisionPadding={{ top: 8, right: 16, bottom: 8, left: 8 }}
             padding="none"
-            className="conversation-summary-popover bg-bg1-bright w-72 border-0 p-3 motion-reduce:animate-none"
+            // The docked island's surface: sidebar-bg on the primitive's own
+            // 1px edge in border1.
+            className="conversation-summary-popover bg-sidebar-bg border-border1 w-72 p-3 motion-reduce:animate-none"
             {...(!state.open ? { inert: "", "aria-hidden": true } : {})}
           >
             <SummaryCard state={state} />

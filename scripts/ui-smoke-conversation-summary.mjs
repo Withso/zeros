@@ -332,6 +332,26 @@ export async function runConversationSummarySmoke({
       await page.keyboard.press("Enter");
       await expect(popup).toBeVisible();
       await expect.poll(fitsColumn).toBe(true);
+      // 2026-11-09: the popover matches the docked island, sidebar-bg on a
+      // border1 edge.
+      expect(
+        await popup.evaluate((node) => {
+          const style = getComputedStyle(node);
+          const probe = document.createElement("div");
+          probe.style.background = "var(--sidebar-bg)";
+          probe.style.borderColor = "var(--border1)";
+          node.append(probe);
+          const expected = getComputedStyle(probe);
+          const result = {
+            border: style.borderTopWidth,
+            matchesBackground: style.backgroundColor === expected.backgroundColor,
+            matchesEdge: [style.borderTopColor, style.borderRightColor, style.borderBottomColor, style.borderLeftColor]
+              .every((color) => color === expected.borderTopColor),
+          };
+          probe.remove();
+          return result;
+        }),
+      ).toEqual({ border: "1px", matchesBackground: true, matchesEdge: true });
       await page.keyboard.press("Escape");
       await expect(popup).toHaveCount(0);
       await expect(trigger).toBeFocused();

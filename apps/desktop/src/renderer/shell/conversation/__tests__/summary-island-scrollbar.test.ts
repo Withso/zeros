@@ -35,6 +35,16 @@ describe("the docked summary island and the chat's scrollbar", () => {
     );
   });
 
+  it("draws the Summary popover on the island's surface", () => {
+    // Opened from the header while the side column is open: sidebar-bg on
+    // PopoverContent's own 1px edge in border1, like the docked island.
+    const summary = read("shell/conversation/conversation-summary.tsx");
+    const popover = /className="conversation-summary-popover ([^"]*)"/.exec(summary)?.[1]?.split(" ");
+    expect(popover).toEqual(expect.arrayContaining(["bg-sidebar-bg", "border-border1", "w-72", "p-3"]));
+    expect(popover).not.toContain("border-0");
+    expect(popover).not.toContain("bg-bg1-bright");
+  });
+
   it("lets the pane body carry the inset to every layer portaled into it", () => {
     const pane = component(read("shell/conversation/pane-layout.tsx"), "ChatPane");
     expect(pane).toContain('cn("relative flex min-h-0 min-w-0 flex-1", CHAT_ASIDE_INSET_HOST_CLS)');

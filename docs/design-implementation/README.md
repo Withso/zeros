@@ -1237,3 +1237,9 @@ Each landed step appends one line: date, workstream, what landed, evidence.
   canvas, the proposed skin draws every docked island that way. Evidence:
   the summary-island test failed red first; the summary smoke measures the
   island's fill against `sidebar-bg` and all four edges against `border1`.
+- 2026-11-09 · 5, 6 · The Summary popover, opened from the header while the
+  side column is open, matches the docked island: `sidebar-bg` on
+  `PopoverContent`'s own 1px edge in `border1`, keeping the dropdown lift
+  (canvas version 410, where the Workspace summary board gains a Popover
+  presentation). Evidence: the summary-island test failed red first; the
+  summary smoke measures the open popover's fill and all four edges.
