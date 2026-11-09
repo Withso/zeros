@@ -8105,7 +8105,9 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                     selectedNodeIds={
                       selected ? view.selectedNodeIds : EMPTY_NODE_IDS
                     }
-                    live={prepared && liveFrameFiles.has(frame.file)}
+                    // Residency keeps a revalidating frame live only if it
+                    // already was: it presents its last confirmed generation.
+                    live={liveFrameFiles.has(frame.file)}
                     sourceSurface={sourceFrameFiles.has(frame.file)}
                     sourceReadOnly={!prepared}
                     onSourceReady={sourceSurfaceReady}
