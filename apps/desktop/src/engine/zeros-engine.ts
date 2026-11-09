@@ -730,6 +730,7 @@ export class ZerosEngine {
    * until a recorded canvas asks for recordings. */
   private designRecordingAhead: DesignRecordingAhead | null = null;
   private stopDesignRecordingTargets: (() => void) | null = null;
+  private stopDesignRecordingFiles: (() => void) | null = null;
   /** Live canvas feedback for Local agents' native Design edits. Never
    * constructed for a cloud worker. */
   private designAgentActivity: DesignAgentActivity | null = null;
@@ -2805,6 +2806,7 @@ export class ZerosEngine {
     const recordingAhead = new DesignRecordingAhead(designRecordingAheadDeps());
     this.designRecordingAhead = recordingAhead;
     this.stopDesignRecordingTargets = onDesignRecordingTarget((target) => void recordingAhead.noteTarget(target));
+    this.stopDesignRecordingFiles = onWorktreeContentChange((root, file) => recordingAhead.noteFile(root, file));
     this.designFrameChanges = new DesignFrameChanges({
       directory: (root) => {
         const name = designSnapshotDirectory(root) ?? activeDesignDirectoryNameFor(root);
@@ -3053,6 +3055,8 @@ export class ZerosEngine {
     this.designFrameChanges = null;
     this.stopDesignRecordingTargets?.();
     this.stopDesignRecordingTargets = null;
+    this.stopDesignRecordingFiles?.();
+    this.stopDesignRecordingFiles = null;
     this.designRecordingAhead?.stop();
     this.designRecordingAhead = null;
     // Release the watch host before the Design poller, so a host that gives

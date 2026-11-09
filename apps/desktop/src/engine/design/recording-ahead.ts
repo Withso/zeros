@@ -11,6 +11,7 @@ import { designCatalogRevision, inspectDesignCatalog } from "./catalog-storage";
 import { designDirectoryNameFor } from "./directory-registry";
 import { prepareDesignNavigationFrames } from "./document";
 import { readSharedCanvasContext } from "./document-storage";
+import { designDirectoryEntry } from "./metadata";
 import { designRecordingsRendering, recordDesignFramesAhead, type DesignRecordingDeps } from "./recording-batch";
 
 /** How long a checkout's changes must rest first: an agent writes in bursts. */
@@ -42,6 +43,8 @@ export interface DesignRecordingAheadDeps {
   record(target: DesignRecordingAheadTarget, frames: ReadonlyArray<{ file: string; sourceVersion: string }>): Promise<void>;
   /** Whether a canvas is recording what it shows: work ahead waits for it. */
   busy(): boolean;
+  /** The directory's folder, absolute, or null once it isn't the checkout's active one. */
+  folder(target: DesignRecordingAheadTarget): string | null;
 }
 
 const keyOf = (root: string, directoryId: string) => `${path.resolve(root)}\0${directoryId}`;
@@ -76,11 +79,29 @@ export class DesignRecordingAhead {
   noteChange(root: string, change: DesignFramesChange): void {
     if (this.stopped || change.all) return;
     const key = keyOf(root, change.directoryId);
-    if (!this.targets.has(key)) return;
+    if (this.targets.has(key)) this.queue(key, change.frames, change.catalog);
+  }
+
+  /** A file changed in a checkout's worktree. Change events name only frames
+   * this engine has prepared, so a frame's own source file is matched here:
+   * after a restart, edits on pages no canvas has opened still count. */
+  noteFile(root: string, file: string): void {
+    if (this.stopped) return;
+    const resolved = path.resolve(file);
+    for (const [key, { target, known }] of this.targets) {
+      if (!known || path.resolve(target.root) !== path.resolve(root)) continue;
+      const folder = this.deps.folder(target);
+      if (!folder || !resolved.startsWith(`${path.resolve(folder)}${path.sep}`)) continue;
+      const frame = path.relative(folder, resolved).split(path.sep).join("/");
+      if (known.has(frame)) this.queue(key, [frame], false);
+    }
+  }
+
+  private queue(key: string, files: readonly string[], catalog: boolean): void {
     let entry = this.pending.get(key);
     if (!entry) { entry = { files: new Set(), catalog: false, timer: null }; this.pending.set(key, entry); }
-    for (const file of change.frames) if (entry.files.size < DESIGN_MAX_FRAMES_PER_PAGE) entry.files.add(file);
-    entry.catalog ||= change.catalog;
+    for (const file of files) if (entry.files.size < DESIGN_MAX_FRAMES_PER_PAGE) entry.files.add(file);
+    entry.catalog ||= catalog;
     if (entry.timer) clearTimeout(entry.timer);
     const ready = entry;
     ready.timer = setTimeout(() => { ready.timer = null; this.drain(); }, DESIGN_RECORDING_AHEAD_QUIET_MS);
@@ -174,5 +195,10 @@ export function designRecordingAheadDeps(recording: DesignRecordingDeps = {}): D
         theme: target.theme, colorScheme: target.colorScheme, frames: [...frames] }, recording);
     },
     busy: designRecordingsRendering,
+    folder: (target) => {
+      const directory = designDirectoryNameFor(target.root);
+      return designDirectoryEntry(target.root, directory)?.id === target.directoryId
+        ? path.join(target.root, ...directory.split("/")) : null;
+    },
   };
 }
