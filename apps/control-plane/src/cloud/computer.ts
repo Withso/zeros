@@ -140,9 +140,9 @@ export class CloudV2Computers {
    * queries stay on `pool`. */
   constructor(private readonly pool: pg.Pool, private readonly lockPool: pg.Pool = pool,
     private readonly resolveRepository?: CloudV2ComputerSourceResolver,
-    /** Used only by resolveBuildRepository, whose caller verifies access
-     * through the source authority right afterwards. It may reuse a recent
-     * resolution; recipe saves and builds always resolve afresh. */
+    /** Used only by resolveBuildRepository without `fresh`, whose caller
+     * verifies access through the source authority right afterwards. It may
+     * reuse a recent resolution; recipe saves and builds always resolve afresh. */
     private readonly resolveBuildIdentity: CloudV2ComputerSourceResolver | undefined = resolveRepository) {}
 
   private async memberRole(organizationId: string, userId: string): Promise<string> {
@@ -544,11 +544,12 @@ export class CloudV2Computers {
 
   /** Internal creation/hydration guard. Paths select the recorded recipe, then
    * the immutable ID selects the remote; a reused name cannot replace it. */
-  async resolveBuildRepository(organizationId: string, userId: string, buildId: string, repository: string): Promise<CloudSourceTarget> {
+  async resolveBuildRepository(organizationId: string, userId: string, buildId: string, repository: string,
+    options?: { fresh?: boolean }): Promise<CloudSourceTarget> {
     const sources = await this.buildSourceTargets(organizationId, buildId);
     const target = sources.find(source => source.repository.toLowerCase() === repository.toLowerCase());
     if (!target) throw computerSourceReviewRequired();
-    return this.resolveSource(organizationId, userId, target, this.resolveBuildIdentity);
+    return this.resolveSource(organizationId, userId, target, options?.fresh ? this.resolveRepository : this.resolveBuildIdentity);
   }
 
   /** Integration seam for a workspace ledger that already knows the ID. The

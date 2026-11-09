@@ -104,8 +104,8 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   const authorizeSourceTargets = async (org: string, user: string, targets: readonly CloudSourceTarget[]) => {
     await source.targets(org, user, targets);
   };
-  const authorizeBuildRepository = async (org: string, user: string, buildId: string, repository: string) => {
-    const target = await computers.resolveBuildRepository(org, user, buildId, repository);
+  const authorizeBuildRepository = async (org: string, user: string, buildId: string, repository: string, options?: { fresh?: boolean }) => {
+    const target = await computers.resolveBuildRepository(org, user, buildId, repository, options);
     await authorizeSourceTargets(org, user, [target]);
     return target;
   };
