@@ -1,4 +1,5 @@
-/** Native qualification of the Design recorder (macOS). Bundle with esbuild
+/** Native qualification of the Design recorder (macOS; Linux with
+ * --ozone-platform=headless). Bundle with esbuild
  * (electron external) and run with the development Electron runtime, after
  * `tsup` has built dist-electron/design-recorder.cjs:
  *
@@ -17,6 +18,7 @@
  * ZEROS_QUALIFY_MAX_FLAT (0.05%) or in all by more than ZEROS_QUALIFY_MAX_DIFF (2%,
  * which glyph anti-aliasing alone stays under). */
 import { app, BrowserWindow, protocol, session } from "electron";
+import { spawn, type SpawnOptions } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -121,7 +123,13 @@ function compare(a: Uint8Array, b: Uint8Array, width: number, height: number, to
 void app.whenReady().then(async () => {
   let failed = false;
   const report: Record<string, unknown> = { renderer: DESIGN_CAPTURE_RENDERER, frames: [] as unknown[] };
-  const recorder = createDesignRecorder({ identity: `${DESIGN_CAPTURE_RENDERER}/skp`, entry: RECORDER });
+  // Headless Linux (CI, agent sandboxes) has no display or GPU, so the
+  // recorder process gets the same headless platform and switches as this one.
+  const headless = process.platform === "linux" && app.commandLine.getSwitchValue("ozone-platform") === "headless";
+  const forwarded = ["--ozone-platform=headless", ...["disable-gpu", "no-sandbox", "disable-dev-shm-usage"].filter((name) => app.commandLine.hasSwitch(name)).map((name) => `--${name}`)];
+  const recorder = createDesignRecorder({ identity: `${DESIGN_CAPTURE_RENDERER}/skp`, entry: RECORDER,
+    ...(headless ? { spawnImpl: ((command: string, args: readonly string[], options: SpawnOptions) =>
+      spawn(command, [...args, ...forwarded], options)) as typeof spawn } : {}) });
   try {
     await mkdir(OUT, { recursive: true });
     const CanvasKitInit = require(path.join(CANVASKIT, "canvaskit.js"));
@@ -154,7 +162,7 @@ void app.whenReady().then(async () => {
           const frame = batch.frames.get(item.id)!;
           const source = request.items.find((entry) => entry.id === item.id)!;
           if ("error" in item) {
-            const probed = /composited layers/.test(item.error) ? (await reference(source.html, request.stylesheets, source.viewport, COMPOSITING_PROBE)).probed : undefined;
+            const probed = COMPARE && /composited layers/.test(item.error) ? (await reference(source.html, request.stylesheets, source.viewport, COMPOSITING_PROBE)).probed : undefined;
             (report.frames as unknown[]).push({ file: frame.file, error: item.error, ...(probed ? { compositing: probed } : {}) });
             console.log(`${frame.file} ERROR ${item.error}${probed ? " " + JSON.stringify(probed) : ""}`);
             continue;
@@ -200,7 +208,7 @@ void app.whenReady().then(async () => {
       for (let at = 0, index = 0; at < all.length; at += 16, index++) {
         const batch: Array<{ file: string; sourceVersion: string }> = [];
         for (const entry of (await prepareDesignNavigationFrames(WORKSPACE, navigation.catalogRevision, all.slice(at, at + 16))).frames)
-          if (entry.sourceVersion) batch.push(entry as { file: string; sourceVersion: string });
+          if (entry.sourceVersion) batch.push({ file: entry.file, sourceVersion: entry.sourceVersion });
         const reply = await renderDesignRecordings(WORKSPACE, { workspaceId: "qualify", directoryId, theme: null, frames: batch, knownChunks: known.slice(-4096) },
           { record: (request, signal) => recorder.record(request, signal ?? new AbortController().signal).then((r) => ({ version: 1 as const, revision: request.revision, ...r })), recorder: `${DESIGN_CAPTURE_RENDERER}/skp` });
         known.push(...reply.chunks.map((chunk) => chunk.id));

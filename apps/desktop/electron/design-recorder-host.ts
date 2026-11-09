@@ -27,6 +27,7 @@ import {
 } from "@zeros/protocol/design-capture";
 import { designCaptureFramePolicy } from "../src/engine/design/capture-sheet";
 import { insertDesignHeadMarkup, sanitizeDesignFrameMarkup } from "../src/engine/design/source";
+import { designRecorderFrameGuard } from "./design-recorder-frame";
 import { DESIGN_RECORDER_PREPARE_SCRIPT } from "./design-recorder-scripts";
 import { externalizeRecordedLayer, RecordedTypefaceIds } from "./design-recorder-typefaces";
 
@@ -42,7 +43,8 @@ delete process.env.ZEROS_DESIGN_RECORDER_TIMINGS;
 
 interface Slot {
   readonly window: BrowserWindow;
-  readonly retired: Promise<void>;
+  /** Resolves with a reason once the page crashes or the window is destroyed. */
+  readonly gone: Promise<string>;
   ratio: number;
   /** Emulation already applied, so an unchanged frame skips the round trip. */
   viewport?: string;
@@ -93,7 +95,13 @@ async function createSlot(partition: Session): Promise<Slot> {
       javascript: true, webSecurity: true, webviewTag: false, backgroundThrottling: false, safeDialogs: true, devTools: false, spellcheck: false,
     },
   });
-  const retired = new Promise<void>((resolve) => { window.webContents.once("destroyed", () => resolve()); });
+  // A crashed page leaves its window and contents in place, so a step waiting
+  // on it would never settle: both ends count.
+  const gone = new Promise<string>((resolve) => {
+    window.webContents.once("render-process-gone", (_event, details) =>
+      resolve(`The recorder's page stopped (${details.reason}) while recording this frame.`));
+    window.webContents.once("destroyed", () => resolve("Design recorder document was destroyed."));
+  });
   window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
   window.webContents.on("will-navigate", (event) => event.preventDefault());
   window.webContents.on("will-attach-webview", (event) => event.preventDefault());
@@ -101,7 +109,7 @@ async function createSlot(partition: Session): Promise<Slot> {
   window.webContents.debugger.attach("1.3");
   await window.webContents.debugger.sendCommand("Emulation.setDefaultBackgroundColorOverride", { color: { r: 0, g: 0, b: 0, a: 0 } });
   const ratio = Number(await window.webContents.executeJavaScript("devicePixelRatio"));
-  return { window, retired, ratio: Number.isFinite(ratio) && ratio > 0 ? ratio : 1 };
+  return { window, gone, ratio: Number.isFinite(ratio) && ratio > 0 ? ratio : 1 };
 }
 
 /** A picture's size from its header (SkPictInfo: magic, version, cull rect). */
@@ -125,10 +133,8 @@ const typefaceIds = new RecordedTypefaceIds();
 
 async function recordItem(slot: Slot, documents: Map<string, string>, item: DesignBatchRecordRequest["items"][number],
   colorScheme: "light" | "dark", folder: string, typefaceFolder: string, signal: AbortSignal): Promise<DesignBatchRecordReply["items"][number]> {
-  const whileAlive = <T>(operation: Promise<T>): Promise<T> => Promise.race([
-    operation,
-    slot.retired.then(() => { throw signal.reason ?? new Error("Design recorder document was destroyed."); }),
-  ]);
+  const guard = designRecorderFrameGuard({ gone: slot.gone, signal });
+  const whileAlive = guard.run;
   const key = randomUUID();
   documents.set(key, insertDesignHeadMarkup(sanitizeDesignFrameMarkup(item.html), designCaptureFramePolicy(colorScheme)));
   const contents = slot.window.webContents;
@@ -152,17 +158,17 @@ async function recordItem(slot: Slot, documents: Map<string, string>, item: Desi
     step("emulate");
     await whileAlive(slot.window.loadURL(`${DESIGN_CAPTURE_SHEET_SCHEME}://sheet/${key}`));
     step("load");
-    signal.throwIfAborted();
+    guard.signal.throwIfAborted();
     await whileAlive(contents.executeJavaScript(DESIGN_STATIC_RENDER_SCRIPT));
     step("still");
     await whileAlive(contents.executeJavaScript(DESIGN_RECORDER_PREPARE_SCRIPT));
     step("prepare");
-    signal.throwIfAborted();
+    guard.signal.throwIfAborted();
     const directory = path.join(folder, item.id);
     await mkdir(directory, { mode: 0o700 });
     await whileAlive(contents.executeJavaScript(`chrome.gpuBenchmarking.printToSkPicture(${JSON.stringify(directory)})`));
     step("print");
-    const layers = (await readdir(directory)).filter((name) => /^layer_\d+\.skp$/.test(name));
+    const layers = (await whileAlive(readdir(directory))).filter((name) => /^layer_\d+\.skp$/.test(name));
     if (layers.length === 0) return { id: item.id, error: "The recorder produced no picture for this frame." };
     // Without positions for extra layers the picture would be incomplete;
     // such a frame keeps its bitmap preview instead.
@@ -171,12 +177,13 @@ async function recordItem(slot: Slot, documents: Map<string, string>, item: Desi
       return { id: item.id, error: `This frame paints on ${layers.length} composited layers (${sizes.join(", ")}), so it is shown as a picture.`.slice(0, 500) };
     }
     const picture = path.join(directory, layers[0]!);
-    const { typefaces } = await externalizeRecordedLayer(picture, typefaceFolder, typefacesWritten, typefaceIds);
+    const { typefaces } = await whileAlive(externalizeRecordedLayer(picture, typefaceFolder, typefacesWritten, typefaceIds));
     step("externalize");
     if (TIMINGS) void appendFile(TIMINGS, `${JSON.stringify({ id: item.id, ...steps })}\n`).catch(() => {});
     return { id: item.id, scale: slot.ratio, layers: [{ x: 0, y: 0, width: Math.round(item.viewport.width * slot.ratio),
       height: Math.round(item.viewport.height * slot.ratio), path: picture, typefaces }] };
   } finally {
+    guard.dispose();
     documents.delete(key);
   }
 }
@@ -207,7 +214,10 @@ void app.whenReady().then(async () => {
     if (busy) { fail(429, "The recorder is busy."); return; }
     busy = true;
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(new Error("Design recording timed out.")), DESIGN_BATCH_CAPTURE_TIMEOUT_MS);
+    // At the deadline the frames already recorded are still answered; the
+    // rest fail. A disconnected caller gets nothing.
+    const timedOut = new Error("Design recording timed out.");
+    const timeout = setTimeout(() => controller.abort(timedOut), DESIGN_BATCH_CAPTURE_TIMEOUT_MS);
     response.once("close", () => { if (!response.writableEnded) controller.abort(new Error("Design recording disconnected.")); });
     void (async () => {
       const working = new Set<Slot>();
@@ -243,9 +253,10 @@ void app.whenReady().then(async () => {
             }
           }
         }));
-        controller.signal.throwIfAborted();
+        if (controller.signal.aborted && controller.signal.reason !== timedOut) throw controller.signal.reason;
+        const unfinished = controller.signal.aborted ? timedOut.message : "Design recording was cancelled.";
         response.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
-        response.end(JSON.stringify({ recorder, items: input.items.map((item) => results.get(item.id) ?? { id: item.id, error: "Design recording was cancelled." }) }));
+        response.end(JSON.stringify({ recorder, items: input.items.map((item) => results.get(item.id) ?? { id: item.id, error: unfinished }) }));
       } catch {
         if (!response.destroyed && !response.headersSent) fail(422, "Design recording failed.");
       } finally {
