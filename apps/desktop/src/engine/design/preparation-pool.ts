@@ -99,23 +99,35 @@ export async function prepareFrameIdentitiesInWorkers(workspacePath: string, cat
     if (inFlight === 0) scheduleIdleStop();
     return [];
   }
-  const shares = Array.from({ length: count }, (_, index) => files.filter((_, at) => at % count === index));
+  // Each worker takes the next frame as it finishes one, so a batch's heavy
+  // frames never wait behind a fixed share. A failed worker stops taking
+  // frames; whatever is left is prepared on the engine's thread.
+  const queue = [...files];
+  const results: DesignWorkerFrameIdentity[] = [];
+  const take = async (entry: PoolWorker) => {
+    for (let file = queue.shift(); file !== undefined; file = queue.shift()) {
+      try { results.push(...await ask(entry, { workspacePath, catalogRevision, files: [file] })); }
+      catch { return; }
+    }
+  };
   inFlight++;
-  let settled: PromiseSettledResult<DesignWorkerFrameIdentity[]>[];
   try {
-    settled = await Promise.allSettled(shares.map((share, index) => new Promise<DesignWorkerFrameIdentity[]>((resolve, reject) => {
-      const entry = pool[index]!;
-      const id = ++next;
-      entry.pending.set(id, { resolve, reject });
-      entry.worker.ref();
-      entry.worker.postMessage({ id, workspacePath, catalogRevision, files: share });
-    })));
+    await Promise.all(pool.slice(0, count).map(take));
   } finally {
     if (--inFlight === 0) scheduleIdleStop();
   }
-  const results = settled.flatMap((result) => result.status === "fulfilled" ? result.value : []);
   testing.frames += results.filter((result) => "identity" in result).length;
   return results;
+}
+
+function ask(entry: PoolWorker, request: { workspacePath: string; catalogRevision: string; files: readonly string[] }):
+  Promise<DesignWorkerFrameIdentity[]> {
+  return new Promise((resolve, reject) => {
+    const id = ++next;
+    entry.pending.set(id, { resolve, reject });
+    entry.worker.ref();
+    entry.worker.postMessage({ id, ...request });
+  });
 }
 
 export async function stopDesignPreparationWorkers(): Promise<void> {
