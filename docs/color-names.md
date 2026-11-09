@@ -1,9 +1,12 @@
 # 350 Colour Names
 
 A dictionary of 350 distinct colour names, each with a hue family and a hex
-value. This is the live dictionary that names workspaces and branches — it
-replaced the `FLOWERS` list in `apps/desktop/src/engine/git/naming.ts` on 2026-07-29, so
-every entry here is a branch the app can actually produce (`zeros/Coquelicot`).
+value. Workspaces are now numbered (`w-310`, docs/local-cli.md "Links"), and a
+new workspace's branch and folder are its number (`zeros/w-310`). This
+dictionary remains for the random tail of internal workspace ids, for a row
+without a number, and to recognize the colour branches older workspaces keep.
+It replaced the `FLOWERS` list in `apps/desktop/src/engine/git/naming.ts` on
+2026-07-29 (`zeros/Coquelicot`).
 The names in this file and the `COLOURS` array in `naming.ts` must stay in
 step; `naming.test.ts` asserts the invariants below.
 

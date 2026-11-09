@@ -77,10 +77,16 @@ describe("state", () => {
   });
 
   it("insert + get round-trips a workspace", () => {
-    const ws = sampleWorkspace();
+    const ws = sampleWorkspace({ number: 7, title: "Fix login" });
     insertWorkspace(ws);
     const got = getWorkspaceById(ws.id);
     expect(got).toEqual(ws);
+  });
+
+  it("numbers a workspace inserted without a number, and it starts Untitled", () => {
+    const ws = sampleWorkspace();
+    insertWorkspace(ws);
+    expect(getWorkspaceById(ws.id)).toEqual({ ...ws, number: 1, title: null });
   });
 
   it("round-trips organization ownership and cloud placement metadata", () => {
@@ -175,12 +181,16 @@ describe("state", () => {
       changes: 1,
       repoSlugs: ["test-repo"],
     });
+    // The moved workspace takes the next number in Local's own sequence.
     expect(getWorkspaceById(local.id)).toEqual({
       ...local,
       organizationId: null,
+      number: 1,
+      title: null,
     });
-    expect(getWorkspaceById(cloud.id)).toEqual(cloud);
-    expect(getWorkspaceById(organizationLocal.id)).toEqual(organizationLocal);
+    // Cloud rows are numbered by the control plane, never by this database.
+    expect(getWorkspaceById(cloud.id)).toEqual({ ...cloud, number: null, title: null });
+    expect(getWorkspaceById(organizationLocal.id)).toEqual({ ...organizationLocal, number: 1, title: null });
     const seed = JSON.parse(
       await readFile(worktreeSeedPath(workspacePath), "utf8"),
     );

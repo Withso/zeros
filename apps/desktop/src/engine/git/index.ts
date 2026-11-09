@@ -73,6 +73,7 @@ export {
   listRemoteRestrictedWorkspaceIds,
   getWorkspaceById,
   reassignLocalWorkspaceOrganization,
+  refreshWorktreeSeed,
   updateWorkspace,
 } from "./state";
 

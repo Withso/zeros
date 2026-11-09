@@ -25,7 +25,7 @@ vi.mock("../../state/use-projects", () => ({ useProjectForFolder: (folder: strin
 vi.mock("../../state/workspace-store", () => ({ useWorkspaceStore: (select: (value: typeof state) => unknown) => select(state) }));
 vi.mock("../workspace-tabs", () => ({ workspaceLabel: () => "Local branch" }));
 import { TooltipProvider } from "../../shared/ui/primitives";
-import { WorkspaceHeader, workspaceHeaderBranch } from "../conversation/workspace-header";
+import { ConversationWorkspaceHeader, WorkspaceHeader, workspaceHeaderBranch } from "../conversation/workspace-header";
 import { LocalWorkspaceDetailsCard, displayFolderPath } from "../conversation/local-workspace-details";
 
 const first = "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222";
@@ -107,6 +107,19 @@ describe("workspace column header", () => {
       expect(classes).toEqual(expect.arrayContaining(["hover:bg-bg2-highlight", "aria-expanded:bg-bg2-highlight"]));
     },
   );
+  it("names a numbered workspace w-<n>, with its title as the tooltip and in its name", () => {
+    const local = { id: "ws_a1b2c3-w-12", number: 12, path: "/local/personal", repoRoot: "/local/repo", branch: "alex/w-12" } as Workspace;
+    const control = identity(provided(createElement(ConversationWorkspaceHeader, { workspace: local, readOnly: false, windowControlsInset: false })));
+    expect(control.html).toContain(">w-12<");
+    expect(control.opening).toContain('aria-label="w-12, Local branch, Local workspace"');
+    state.documents[first] = { ...state.documents[first]!, number: 3, title: "Add canvas zoom" };
+    const cloud = identity(render());
+    expect(cloud.html).toContain(">w-3<");
+    expect(cloud.opening).toContain('aria-label="w-3, Add canvas zoom, Cloud workspace"');
+    state.documents[first] = { ...state.documents[first]!, title: null };
+    expect(identity(render()).opening).toContain('aria-label="w-3, Untitled, Cloud workspace"');
+  });
+
   it("names the control by its visible name and placement", () => {
     expect(identity(render({ folder: local, name: "alex/fix-login" })).opening).toContain('aria-label="alex/fix-login, Local workspace"');
     expect(identity(render()).opening).toContain('aria-label="Cloud feature, Cloud workspace"');

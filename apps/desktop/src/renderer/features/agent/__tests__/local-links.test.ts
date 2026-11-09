@@ -347,6 +347,22 @@ describe("Local link identity and presentation", () => {
     );
   });
 
+  it("recognizes numbered workspace and chat links whole and labels them", () => {
+    const text =
+      "Open zeros-dev://local/w/7, zeros-dev://local/w/7?session=codex. zeros-dev://local/w/7?session=codex&x=1 zeros-dev://local/w/7/files";
+    const spans = localLinkSpans(text, "zeros-dev");
+    expect(spans.map((span) => text.slice(span.start, span.end))).toEqual([
+      "zeros-dev://local/w/7",
+      "zeros-dev://local/w/7?session=codex",
+    ]);
+    const numbered = localLinkIndex(
+      { ...snapshot, workspaces: [workspace("ws_child", { number: 7, title: "Fix login" })] },
+      [],
+    );
+    expect(numbered.workspaces.get("local/w/7")).toMatchObject({ available: true, label: "Fix login" });
+    expect(numbered.workspaces.get("ws_child")).toBe(numbered.workspaces.get("local/w/7"));
+  });
+
   it("linkifies sanitized markdown text/anchors while keeping pre and foreign anchors verbatim", () => {
     const html = render(
       h(LocalLinkHtml, {

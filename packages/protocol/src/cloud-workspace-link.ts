@@ -13,7 +13,14 @@
 // control plane answers only its creator.
 // ──────────────────────────────────────────────────────────
 
-import { LOCAL_LINK_SCHEMES, type LocalLinkScheme } from "./local-orchestration";
+import {
+  LOCAL_LINK_SCHEMES,
+  formatWorkspaceAddress,
+  isWorkspaceLinkOwner,
+  isWorkspaceNumber,
+  type LocalLinkScheme,
+  type WorkspaceAddress,
+} from "./local-orchestration";
 
 export const CLOUD_WORKSPACE_LINK_ACTION = "cloud-workspace" as const;
 
@@ -50,4 +57,37 @@ export function parseCloudWorkspaceLink(text: string): CloudWorkspaceLink | null
     organizationId: match[2]!.toLowerCase(),
     workspaceId: match[3]!.toLowerCase(),
   };
+}
+
+// A cloud workspace's shareable web page is addressed by its organization's
+// slug and the workspace's permanent number: `app.zeros.build/<slug>/w/<n>`.
+// The older `/workspace/<id>` page stays served. apps/web parses this path
+// without importing this package; scripts/__tests__ keep the two equal.
+
+/** Owner segments no organization's page uses: web routes, Local's own owner
+ * and link actions. The control plane never gives a new organization one of
+ * these slugs (its RESERVED_ORGANIZATION_SLUGS); an older organization that
+ * has one keeps its `/workspace/<id>` page. */
+export const RESERVED_WORKSPACE_LINK_OWNERS: readonly string[] = Object.freeze([
+  "agents", "api", "assets", "auth", "chat", "cloud-workspace", "github",
+  "invite", "local", "open", "personal", "schemas", "w", "workspace",
+]);
+
+/** Can this organization slug address a numbered workspace page? */
+export function isCloudWorkspacePageOwner(owner: unknown): owner is string {
+  return isWorkspaceLinkOwner(owner) && !RESERVED_WORKSPACE_LINK_OWNERS.includes(owner);
+}
+
+/** `/<organization slug>/w/<n>`. */
+export function formatCloudWorkspacePagePath(address: WorkspaceAddress): string {
+  return `/${formatWorkspaceAddress(address)}`;
+}
+
+/** The address a page path names, or null. Exactly `/<slug>/w/<n>`. */
+export function parseCloudWorkspacePagePath(pathname: string): WorkspaceAddress | null {
+  const match = /^\/([A-Za-z0-9-]{1,100})\/w\/([1-9][0-9]{0,9})$/.exec(pathname);
+  if (!match) return null;
+  const owner = match[1]!.toLowerCase();
+  const number = Number(match[2]);
+  return isCloudWorkspacePageOwner(owner) && isWorkspaceNumber(number) ? { owner, number } : null;
 }

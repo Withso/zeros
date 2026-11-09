@@ -1,8 +1,13 @@
 import type { ChangeLineCounts, Workspace } from "../platform/git";
 import { branchDisplayName } from "../shared/lib/branch-name";
 import {
+  UNTITLED_WORKSPACE_TITLE,
+  workspaceNumberName,
+} from "../shared/lib/workspace-name";
+import {
   buildLocalMainWorkspace,
   canRestoreFolderWorkspace,
+  isLocalMainWorkspace,
 } from "../state/local-main-workspace";
 import { normalizeProjectRoot, type Project } from "../state/projects-store";
 import {
@@ -153,9 +158,17 @@ export function workspaceTabDescription(args: {
 
 const SCROLL_TOLERANCE_PX = 1;
 
+/** What the sidebar and lists call a workspace: the first title one of its
+ * chats received, else "Untitled". A repository folder row keeps the folder's
+ * name, and a row from an engine or control plane without titles (`title`
+ * absent, not null) keeps its branch name. */
 export function workspaceLabel(workspace: Workspace): string {
-  return branchDisplayName(workspace.branch);
+  if (workspace.title === undefined || isLocalMainWorkspace(workspace))
+    return branchDisplayName(workspace.branch);
+  return workspace.title?.trim() || UNTITLED_WORKSPACE_TITLE;
 }
+
+
 
 /** Workspace tabs follow creation order: established workspaces remain on the
  * left and every newly-created workspace appends on the right. The engine list
@@ -326,7 +339,12 @@ export function filterArchivedWorkspaces(
         return false;
       if (terms.length === 0) return true;
       const haystack = normalizeSearchValue(
-        [workspaceLabel(workspace), workspace.branch, workspace.baseBranch]
+        [
+          workspaceLabel(workspace),
+          workspaceNumberName(workspace),
+          workspace.branch,
+          workspace.baseBranch,
+        ]
           .filter(Boolean)
           .join(" "),
       );

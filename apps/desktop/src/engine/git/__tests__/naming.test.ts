@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+  allocatedNameSuffix,
   branchDisplayName,
   colourDictionary,
   DEFAULT_BRANCH_PREFIX,
@@ -8,6 +9,8 @@ import {
   joinBranchPrefix,
   normalizeBranchPrefix,
   pickFreeColourName,
+  pickFreeWorkspaceNumberName,
+  workspaceNumberName,
 } from "../naming";
 
 describe("naming", () => {
@@ -323,6 +326,38 @@ describe("naming", () => {
       // case-insensitive filesystem.
       expect(isValidBranchName("Main")).toBe(false);
       expect(isValidBranchName("MASTER")).toBe(false);
+    });
+  });
+
+  describe("numbered workspace names", () => {
+    it("names a workspace's branch after its number", () => {
+      expect(workspaceNumberName(310)).toBe("w-310");
+      expect(pickFreeWorkspaceNumberName(310, [])).toBe("w-310");
+      expect(isValidBranchName("w-1")).toBe(true);
+    });
+
+    it("takes the next variant when the name is already used here", () => {
+      expect(pickFreeWorkspaceNumberName(3, ["W-3"])).toBe("w-3-2");
+      expect(pickFreeWorkspaceNumberName(3, ["w-3", "w-3-2"])).toBe("w-3-3");
+      const all = ["w-3", ...Array.from({ length: 98 }, (_, i) => `w-3-${i + 2}`)];
+      expect(pickFreeWorkspaceNumberName(3, all)).toBeNull();
+    });
+
+    it("labels a numbered branch under any prefix as w-<n>", () => {
+      expect(branchDisplayName("zeros/w-310")).toBe("w-310");
+      expect(branchDisplayName("jordan/w-310")).toBe("w-310");
+      expect(branchDisplayName("team/squad/w-12-2")).toBe("w-12-2");
+      expect(branchDisplayName("w-7")).toBe("w-7");
+      // Not allocator-shaped: the namespace is identity.
+      expect(branchDisplayName("feature/raw-12")).toBe("feature/raw-12");
+      expect(branchDisplayName("feature/w-0")).toBe("feature/w-0");
+    });
+
+    it("reserves a number name only at a separator", () => {
+      expect(allocatedNameSuffix("w-12")).toBe("w-12");
+      expect(allocatedNameSuffix("x-w-12")).toBe("w-12");
+      expect(allocatedNameSuffix("raw-12")).toBeNull();
+      expect(allocatedNameSuffix("myname-Cream")).toBe("Cream");
     });
   });
 });

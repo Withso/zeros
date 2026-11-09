@@ -50,9 +50,10 @@ export interface PendingWorkspaceCreate {
   /** The announced final path (workspace.prepareCreate) — known before
    *  checkout, but not created until workspace.create owns the operation. */
   path?: string;
-  /** The reserved branch name — the workspace's display name, shown in the
-   *  pending tab from the first frame (no shimmer). */
+  /** The reserved branch name, which also names the workspace's folder. */
   branch?: string;
+  /** The number prepare reserved (`w-<n>`), known from the first frame. */
+  number?: number;
   startedAt: number;
 }
 
@@ -102,6 +103,7 @@ export function beginPendingCreate(args: {
   repository?: { name: string; originUrl: string };
   path?: string;
   branch?: string;
+  number?: number;
 }): string {
   const { token = `pwc-${Date.now().toString(36)}-${++tokenCounter}`, ...row } = args;
   usePendingWorkspacesStore.setState((s) => s.creates.some(create => create.token === token) ? s : ({

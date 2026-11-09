@@ -878,11 +878,32 @@ historical source provenance. Withheld PR data is not replaced by a stale
 cached discussion. A denied repository is never made accessible merely by
 belonging to its Zeros organization.
 
+## Numbers and titles
+
+Every cloud workspace is `w-<n>` within its organization (migration 0224). A
+`BEFORE INSERT` trigger takes the next number from the organization's
+`cloud_v2_workspace_number_sequences` row, under that row's lock, so concurrent
+creates get distinct numbers and a release that predates numbers is numbered
+too. Numbers are never reused: the sequence outlives deleted and purged rows.
+A workspace is "Untitled" (`title` NULL) until one of its chats is first named;
+the history mirror then copies that chat's title onto the workspace once and
+advances `updated_at`, so clients replace their document. The desktop re-reads
+the document a few bounded times after it names a cloud chat instead of waiting
+for the catalog's 30-second refresh. The sidebar shows the title; the column
+header shows `w-<n>` with the cloud.
+
+Organization slugs are immutable. A new organization never receives a slug
+that a workspace page cannot use (`organization-slugs.ts`, mirrored by
+`RESERVED_WORKSPACE_LINK_OWNERS`): web routes, Local's own `local` owner and
+link actions get a random suffix.
+
 ## Web page and desktop link
 
-`app.zeros.build/workspace/<id>` shows one cloud workspace to its creator. The
-page reads `GET /v1/cloud-v2/workspaces/<id>` through the web's control-plane
-proxy, which admits only that exact read, and offers Open in Zeros:
+`app.zeros.build/<organization slug>/w/<n>` shows one cloud workspace to its
+creator; the older `app.zeros.build/workspace/<id>` page is still served. The
+page reads `GET /v1/cloud-v2/workspaces/by-number/<slug>/<n>` (or
+`GET /v1/cloud-v2/workspaces/<id>`) through the web's control-plane proxy,
+which admits only those exact reads, and offers Open in Zeros:
 `zeros[-alpha|-beta|-dev]://cloud-workspace/<organizationId>/<workspaceId>`,
 with the deployment's scheme
 ([`cloud-workspace-link.ts`](../packages/protocol/src/cloud-workspace-link.ts)).
@@ -894,7 +915,9 @@ account, switches to its organization and opens it as the sidebar does: a
 stopped workspace wakes and an archived one opens read-only. An organization
 the account is not in, a 404, or a deleting workspace says the workspace
 couldn't be found, and nothing switches. A cloud workspace's context menu has
-Copy link, which copies the page for the build's web app (`VITE_APP_BASE_URL`).
+Copy link, which copies the `/<slug>/w/<n>` page for the build's web app
+(`VITE_APP_BASE_URL`), or the id page while the number or the organization's
+slug is not known.
 There is no invite route: cloud workspaces are creator-only.
 
 ## Lifecycle

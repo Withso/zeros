@@ -23,6 +23,11 @@ export const CloudV2WorkspaceSchema = z.object({
   organizationId: uuid,
   creatorUserId: uuid,
   name: z.string().min(1).max(200),
+  /** Permanent number within the organization (`w-<n>`); absent from an
+   * older control plane. */
+  number: z.number().int().positive().max(2_147_483_647).nullable().optional(),
+  /** The first title one of its chats received; null is "Untitled". */
+  title: z.string().min(1).max(200).nullable().optional(),
   repository: z.string().regex(/^[^/]+\/[^/]+$/),
   branch: z.string().min(1).max(255),
   baseBranch: z.string().min(1).max(255),
@@ -77,6 +82,9 @@ export function cloudV2Document(workspace: CloudV2Workspace): CloudWorkspaceDocu
     // v2 has no team scoping; the organization is its own owner here.
     teamId: workspace.organizationId,
     name: workspace.name,
+    // Undefined (an older control plane) keeps the legacy name in every label.
+    ...(workspace.number !== undefined ? { number: workspace.number } : {}),
+    ...(workspace.title !== undefined ? { title: workspace.title } : {}),
     createdBy: workspace.creatorUserId,
     ownerUserId: workspace.creatorUserId,
     placement: "cloud",

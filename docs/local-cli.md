@@ -246,10 +246,35 @@ the turn) rather than expecting later pages to carry edits.
 
 ## Links
 
-`zeros://chat/<id>` and `zeros://workspace/<id>`, with the channel's scheme
-(`zeros`, `zeros-alpha`, `zeros-beta`, `zeros-dev`). Chat and workspace menus
-offer **Copy link** for Local (Personal) owners while the feature is open;
-folder workspaces use `folder:<projectId>`.
+Every Local workspace is `w-<n>`: a number that belongs to it permanently
+within its owner (migration 46, `db/workspace-numbers.ts`). Its link is
+`<scheme>://local/w/<n>` and a chat in it is `<scheme>://local/w/<n>?session=<chatId>`,
+with the channel's scheme (`zeros`, `zeros-alpha`, `zeros-beta`, `zeros-dev`)
+([`local-orchestration.ts`](../packages/protocol/src/local-orchestration.ts)
+`formatWorkspaceLink`). `local` is the owner segment of the Local collection;
+an organization's slug in that place names one of its cloud workspaces, which
+these links never open. A repository folder has no number and keeps
+`<scheme>://workspace/folder:<projectId>` and `<scheme>://chat/<id>`. The older
+`chat/<id>` and `workspace/<id>` links still parse everywhere a link is read.
+Chat and workspace menus offer **Copy link** for Local (Personal) owners while
+the feature is open.
+
+A number is never handed out twice. Prepare reserves it (the branch and folder
+are named `w-<n>`, and the sidebar shows the new workspace as "Untitled"), and
+create's row consumes the reservation. Deleting, archiving or failing to create
+a workspace leaves its number spent. Rows written without a number (adoption,
+seed recovery, an older writer) are numbered by the database, and a recovered
+seed keeps its own number unless another row already has it. Each owner's
+highest number is also kept in `workspace-number-floor.json` beside `zeros.db`,
+so a database recreated next to it continues the sequence; only losing both
+starts numbering at 1 again. Moving workspaces to another owner (ownership
+repair) numbers them after that owner's own.
+
+A workspace is "Untitled" until one of its chats first gets a name (the title
+of its first prompt, or the user's rename): the engine copies that title onto
+the workspace when it saves the chat and broadcasts a `workspaces` change. The
+title never follows later renames. The sidebar shows the title; the column
+header shows `w-<n>` with the laptop.
 
 Opening a link only navigates (`electron/deep-link.ts` → `local-navigation`
 event → `shell/local-link-navigation.tsx`). Electron keeps the latest intent

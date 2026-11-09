@@ -16,8 +16,10 @@ export function allowedControlPlaneRoute(method, pathname) {
     return true;
   }
   if (method === "POST" && pathname === "/v1/invitations/accept") return true;
-  // The workspace page's one read: creator-only on the control plane.
+  // The workspace page's one read: creator-only on the control plane, by id
+  // or by its shareable `<organization slug>/w/<n>` address.
   if (method === "GET" && new RegExp(`^/v1/cloud-v2/workspaces/${UUID}$`).test(pathname)) return true;
+  if (method === "GET" && /^\/v1\/cloud-v2\/workspaces\/by-number\/[a-z0-9](?:[a-z0-9-]{0,98}[a-z0-9])?\/[1-9][0-9]{0,9}$/.test(pathname)) return true;
   if (method === "POST" && pathname === "/v1/organizations") return true;
   const root = new RegExp(`^/v1/organizations/${UUID}$`);
   if (root.test(pathname)) return ["GET", "PATCH", "DELETE"].includes(method);

@@ -27,6 +27,7 @@ import {
   finishPendingCreate,
   markWorkspaceSettling,
 } from "../../state/pending-workspaces";
+import { pendingWorkspaceIdentity } from "../../shared/lib/workspace-name";
 import type { Project } from "../../state/projects-store";
 import { findProjectForFolder } from "../../state/workspace-resolution";
 import {
@@ -425,6 +426,7 @@ function ActiveDispatcherPage({
       ...owner,
       path: prepared.path,
       branch: prepared.branch,
+      ...pendingWorkspaceIdentity(prepared),
     });
     // Workbench shows its loading rows from the very first frame; the flag
     // clears once the workspace row lands AND its surface data is in.

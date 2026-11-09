@@ -2,14 +2,14 @@ import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
-import {renderWorkspacePage} from "./workspace-page.mjs";
+import {parseWorkspacePagePath,renderWorkspacePage} from "./workspace-page.mjs";
 import {allowedControlPlaneRoute} from "./control-plane-policy.mjs";
 const workspaceId="11111111-1111-4111-8111-111111111111",organizationId="5d2f8c1a-3b7e-4f90-a6d4-9c1e2b7f8a35";
 const IDS=["title","sub","spin","open","proceed","another","meta"];
 const ok=(workspace)=>({status:200,ok:true,json:async()=>({workspace})});
 const ready={id:workspaceId,organizationId,name:"Acme API",state:"stopped",placement:"cloud",version:2};
-function fixture({storage=new Map(),response={status:401},appLink="zeros-alpha://"}={}) {
-  const page=renderWorkspacePage({workspaceId,appLink,nonce:"testnonce"}),elements=new Map(),replacements=[],requests=[];
+function fixture({storage=new Map(),response={status:401},appLink="zeros-alpha://",address}={}) {
+  const page=renderWorkspacePage(address?{address,appLink,nonce:"testnonce"}:{workspaceId,appLink,nonce:"testnonce"}),elements=new Map(),replacements=[],requests=[];
   for(const id of IDS){const hidden=new Set(["hidden"]);elements.set(id,{textContent:"",className:"",href:"",disabled:false,events:{},hidden,classList:{add(name){hidden.add(name);},remove(name){hidden.delete(name);},contains(name){return hidden.has(name);}},removeAttribute(name){if(name==="href")this.href="";},addEventListener(name,fn){this.events[name]=fn;}});}
   const script=page.html.match(/<script nonce="testnonce">([\s\S]*?)<\/script>/)[1];
   vm.runInNewContext(script,{Date,document:{getElementById:id=>elements.get(id)},
@@ -112,4 +112,35 @@ test("the browser proxy admits only the exact v2 workspace read",()=>{
   assert.equal(allowedControlPlaneRoute("DELETE",`/v1/cloud-v2/workspaces/${workspaceId}`),false);
   assert.equal(allowedControlPlaneRoute("GET",`/v1/cloud-workspaces/${workspaceId}`),false);
   assert.equal(allowedControlPlaneRoute("POST","/v1/cloud-workspace-invitations/accept"),false);
+});
+
+test("a numbered page reads its workspace by address and shows its title and number",async()=>{
+  const address={owner:"acme",number:310};
+  const f=fixture({address,response:ok({...ready,number:310,title:"Add canvas zoom"})});await f.settle();
+  assert.equal(f.requests[0].url,"/api/v1/cloud-v2/workspaces/by-number/acme/310");
+  assert.equal(f.elements.get("title").textContent,"Add canvas zoom");
+  assert.equal(f.elements.get("meta").textContent,"w-310 · Cloud workspace · same identity on every device");
+  // Every desktop release opens the id link, whichever page the creator shared.
+  assert.equal(f.elements.get("open").href,`zeros-alpha://cloud-workspace/${organizationId}/${workspaceId}`);
+  const untitled=fixture({address,response:ok({...ready,number:310,title:null})});await untitled.settle();
+  assert.equal(untitled.elements.get("title").textContent,"Untitled");
+  const other=fixture({address,response:ok({...ready,number:311,title:"Other"})});await other.settle();
+  assert.equal(other.elements.get("title").textContent,"Workspace unavailable");
+  const signIn=fixture({address});await signIn.settle();
+  assert.deepEqual(signIn.replacements,[`/auth/start?return=${encodeURIComponent("/acme/w/310")}`]);
+});
+
+test("a numbered path names one organization's workspace, never a product route",()=>{
+  assert.deepEqual(parseWorkspacePagePath("/Acme-Labs/w/7"),{owner:"acme-labs",number:7});
+  for(const path of ["/acme/w/0","/acme/w/01","/acme/w/3/","/api/w/3","/workspace/w/3","/local/w/3","/-acme/w/3","/acme/w/2147483648"])
+    assert.equal(parseWorkspacePagePath(path),null,path);
+  for(const address of [{owner:"api",number:3},{owner:"acme",number:0},{owner:"Acme",number:3},{owner:"acme",number:1.5}])
+    assert.throws(()=>renderWorkspacePage({address,appLink:"zeros://",nonce:"testnonce"}));
+});
+
+test("the browser proxy admits the numbered read and nothing near it",()=>{
+  assert.equal(allowedControlPlaneRoute("GET","/v1/cloud-v2/workspaces/by-number/acme/310"),true);
+  for(const path of ["/v1/cloud-v2/workspaces/by-number/acme/0","/v1/cloud-v2/workspaces/by-number/Acme/3","/v1/cloud-v2/workspaces/by-number/acme/3/history","/v1/cloud-v2/workspaces/by-number/acme"])
+    assert.equal(allowedControlPlaneRoute("GET",path),false,path);
+  assert.equal(allowedControlPlaneRoute("POST","/v1/cloud-v2/workspaces/by-number/acme/3"),false);
 });

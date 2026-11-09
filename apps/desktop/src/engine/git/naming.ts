@@ -6,7 +6,10 @@
 //      collide. When no prompt hint is supplied, we fall back to a colour
 //      name (`ws_8f3a2c-cream`) — see COLOURS dictionary below.
 //
-//   2. branch name — a colour, no random tail (`zeros/Cream`). Adopted
+//   2. branch name — the workspace's number (`zeros/w-310`) since
+//      workspaces are numbered (migration 46); pickFreeWorkspaceNumberName.
+//      Before that, and still for a row without a number, a colour with no
+//      random tail (`zeros/Cream`). Adopted
 //      2026-07-29, replacing `zeros/<flower>-<4 hex>`. The hex tail existed
 //      only to make collisions improbable; it made every workspace read as
 //      `digitalis-02d3`. Uniqueness is now *allocated* rather than gambled
@@ -22,6 +25,7 @@
 //      `workspace_propose_branch_name` (see rename-hook.ts).
 
 import { randomBytes } from "node:crypto";
+import { workspaceNumberLabel } from "@zeros/protocol/local-orchestration";
 
 /** 350 single-word colour names, drawn from historic pigments and dyes,
  *  heraldic tinctures, traditional Japanese/Chinese colours, minerals, and a
@@ -161,6 +165,39 @@ export {
   joinBranchPrefix,
   normalizeBranchPrefix,
 } from "./branch-naming";
+
+/** A numbered workspace's own branch and folder name: `w-310`. */
+export function workspaceNumberName(number: number): string {
+  return workspaceNumberLabel(number);
+}
+
+/** How many `w-<n>-<k>` variants to try before giving up on a number. */
+const MAX_NUMBER_NAME_VARIANTS = 99;
+
+/** The name a numbered workspace's branch takes in this repo: `w-<n>`, or
+ *  `w-<n>-2`, `w-<n>-3`… when that name is already a branch, a folder or a
+ *  row here (another owner's `w-<n>`, a user's own branch, a leftover folder,
+ *  or this workspace's earlier branch after Continue on a new branch).
+ *
+ *  `usedNames` is the same lowercased used-set the colour allocator reads
+ *  (collectUsedWorkspaceNames). Returns null only when every variant is taken;
+ *  callers surface that as a retryable error. Like pickFreeColourName this is
+ *  a pure snapshot: the UNIQUE (repo_slug, lower(branch)) index still decides
+ *  a race. */
+export function pickFreeWorkspaceNumberName(
+  number: number,
+  usedNames: Iterable<string>,
+): string | null {
+  const used = new Set<string>();
+  for (const n of usedNames) used.add(n.toLowerCase());
+  const base = workspaceNumberName(number);
+  if (!used.has(base.toLowerCase())) return base;
+  for (let variant = 2; variant <= MAX_NUMBER_NAME_VARIANTS; variant++) {
+    const candidate = `${base}-${variant}`;
+    if (!used.has(candidate.toLowerCase())) return candidate;
+  }
+  return null;
+}
 
 /** How many `-vN` rounds to try once all 350 base colours are taken. Each
  *  round is another full 350 names, so this ceiling is 35,350 workspaces in

@@ -211,6 +211,9 @@ function rebuild(documentsChanged = false, { pruneRepositoryFilters = true } = {
         repoRoot: key,
         organizationId: doc.organizationId,
         placement: "cloud",
+        // The control plane numbers and titles cloud workspaces, not the worker.
+        number: doc.number ?? null,
+        title: doc.title,
         kind: engine?.kind ?? "code",
         branch,
         baseBranch: engine?.baseBranch || github?.baseBranch || doc.repository.revision,
@@ -474,7 +477,39 @@ export async function refreshCloudWorkspace(
   return flight;
 }
 
+const titleReads = new Map<string, { epoch: number; timer: ReturnType<typeof setTimeout> }>();
+/** After the first mirror push, the control plane names the workspace. */
+const TITLE_READ_DELAYS_MS = [2_000, 8_000, 20_000] as const;
+
+/** A chat in this cloud workspace was just named. The control plane gives the
+ * workspace that name when the worker mirrors the chat, so re-read its
+ * document a few bounded times instead of waiting for the next catalog pass.
+ * Stops once the document is titled, on an account change, or when the
+ * control plane predates titles (`title` absent). */
+export function refreshCloudWorkspaceTitleSoon(target: CloudWorkspaceTarget): void {
+  const key = cloudWorkspaceKey(target);
+  if (titleReads.get(key)?.epoch === epoch) return;
+  const started = epoch;
+  const attempt = (index: number) => {
+    const doc = cloudWorkspaceDocument(target);
+    if (epoch !== started || !doc || doc.title !== null || !canReadCloudWorkspace(doc) ||
+        index >= TITLE_READ_DELAYS_MS.length) {
+      if (titleReads.get(key)?.epoch === started) titleReads.delete(key);
+      return;
+    }
+    titleReads.set(key, {
+      epoch: started,
+      timer: setTimeout(() => {
+        void refreshCloudWorkspace(target).catch(() => {}).finally(() => attempt(index + 1));
+      }, TITLE_READ_DELAYS_MS[index]),
+    });
+  };
+  attempt(0);
+}
+
 export function clearCloudWorkspaceCatalog(): void {
+  for (const { timer } of titleReads.values()) clearTimeout(timer);
+  titleReads.clear();
   clearCloudComposerPrs();
   epoch++;
   catalogConfirmed = false;

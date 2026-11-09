@@ -1275,6 +1275,89 @@ CREATE TABLE cloud_workspace_fork_job_records (
 );
 `;
 
+/** v46 — every Local workspace is `w-<number>` within its owner, and shows the
+ * first title one of its chats received. A number is never reused: the
+ * sequence survives deleted rows, so only losing this database (and the floor
+ * file beside it, db/workspace-number-floor.ts) starts an owner at 1 again. The
+ * owner key is the organization id, '' for Local (Personal, NULL).
+ *
+ * Existing rows are numbered by creation order. Any writer that leaves the
+ * number NULL (older code, seed recovery, adoption) is numbered by the
+ * trigger; an explicit number (a reservation or a recovered seed) raises the
+ * sequence to at least itself. A reservation holds a number from prepare
+ * until create inserts the row, so an announced `w-<n>` never changes. */
+const MIGRATION_46_WORKSPACE_NUMBERS = `
+ALTER TABLE workspaces ADD COLUMN number INTEGER
+  CHECK (number IS NULL OR (number > 0 AND number <= 2147483647));
+ALTER TABLE workspaces ADD COLUMN title TEXT
+  CHECK (title IS NULL OR length(title) BETWEEN 1 AND 200);
+
+CREATE TABLE workspace_number_sequences (
+  owner       TEXT PRIMARY KEY,
+  last_number INTEGER NOT NULL CHECK (last_number >= 0 AND last_number <= 2147483647)
+);
+
+CREATE TABLE workspace_number_reservations (
+  workspace_id TEXT PRIMARY KEY,
+  owner        TEXT NOT NULL,
+  number       INTEGER NOT NULL CHECK (number > 0 AND number <= 2147483647),
+  reserved_at  INTEGER NOT NULL,
+  UNIQUE (owner, number)
+);
+
+UPDATE workspaces SET number = (
+  SELECT COUNT(*) FROM workspaces AS earlier
+  WHERE earlier.placement = 'local'
+    AND coalesce(earlier.organization_id, '') = coalesce(workspaces.organization_id, '')
+    AND (earlier.created_at < workspaces.created_at
+      OR (earlier.created_at = workspaces.created_at AND earlier.rowid <= workspaces.rowid))
+)
+WHERE placement = 'local';
+
+INSERT INTO workspace_number_sequences (owner, last_number)
+SELECT coalesce(organization_id, ''), MAX(number) FROM workspaces
+WHERE number IS NOT NULL
+GROUP BY coalesce(organization_id, '');
+
+CREATE UNIQUE INDEX workspaces_owner_number_unique
+  ON workspaces(coalesce(organization_id, ''), number)
+  WHERE number IS NOT NULL;
+
+CREATE TRIGGER workspaces_number_fill_insert
+AFTER INSERT ON workspaces
+WHEN NEW.number IS NULL AND NEW.placement = 'local'
+BEGIN
+  INSERT OR IGNORE INTO workspace_number_sequences (owner, last_number)
+    VALUES (coalesce(NEW.organization_id, ''), 0);
+  UPDATE workspace_number_sequences SET last_number = last_number + 1
+    WHERE owner = coalesce(NEW.organization_id, '');
+  UPDATE workspaces SET number = (
+    SELECT last_number FROM workspace_number_sequences
+    WHERE owner = coalesce(NEW.organization_id, '')
+  ) WHERE rowid = NEW.rowid;
+END;
+
+CREATE TRIGGER workspaces_number_floor_insert
+AFTER INSERT ON workspaces
+WHEN NEW.number IS NOT NULL
+BEGIN
+  INSERT OR IGNORE INTO workspace_number_sequences (owner, last_number)
+    VALUES (coalesce(NEW.organization_id, ''), 0);
+  UPDATE workspace_number_sequences SET last_number = NEW.number
+    WHERE owner = coalesce(NEW.organization_id, '') AND last_number < NEW.number;
+END;
+
+CREATE TRIGGER workspaces_number_floor_update
+AFTER UPDATE OF number, organization_id ON workspaces
+WHEN NEW.number IS NOT NULL
+BEGIN
+  INSERT OR IGNORE INTO workspace_number_sequences (owner, last_number)
+    VALUES (coalesce(NEW.organization_id, ''), 0);
+  UPDATE workspace_number_sequences SET last_number = NEW.number
+    WHERE owner = coalesce(NEW.organization_id, '') AND last_number < NEW.number;
+END;
+`;
+
 /** The ordered migration list. Append only — NEVER edit or reorder a shipped
  *  entry; add a new one. */
 export const MIGRATIONS: Migration[] = [
@@ -1658,6 +1741,11 @@ export const MIGRATIONS: Migration[] = [
       -- the repository when it settled. Null on older rows and commit-free turns.
       ALTER TABLE turns ADD COLUMN commits TEXT;
     `,
+  },
+  {
+    version: 46,
+    name: "permanent per-owner workspace numbers and adopted titles",
+    up: MIGRATION_46_WORKSPACE_NUMBERS,
   },
 ];
 

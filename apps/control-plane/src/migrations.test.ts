@@ -257,6 +257,40 @@ d("migration ladder", { timeout: 30_000 }, () => {
     }
   };
 
+  it("numbers existing cloud workspaces per organization in creation order and titles them from named chats", async () => {
+    await reset();
+    const boundary = LADDER.indexOf("0224_cloud_workspace_numbers.sql");
+    expect(boundary).toBeGreaterThan(0);
+    await applyThrough(boundary);
+    const owner = await seedCredentialOwner(pool);
+    const [older, newer, tied] = [randomUUID(), randomUUID(), randomUUID()].sort();
+    const insert = (id: string, createdAt: string) => pool.query(
+      `INSERT INTO cloud_v2_workspaces(id,org_id,creator_user_id,name,repository,branch,base_branch,state,created_at)
+       VALUES($1,$2,$3,'repo','o/r',$4,'main','stopped',$5)`, [id, owner.organizationId, owner.userId, `b-${id}`, createdAt]);
+    await insert(newer!, "2026-02-01T00:00:00Z");
+    await insert(older!, "2026-01-01T00:00:00Z");
+    await insert(tied!, "2026-02-01T00:00:00Z");
+    const chat = (id: string, row: Record<string, unknown>, deleted = false) => pool.query(
+      `INSERT INTO cloud_v2_chats(workspace_id,chat_id,row,deleted_at) VALUES($1,$2,$3,$4)`,
+      [older, id, { id, ...row }, deleted ? new Date() : null]);
+    await chat("untitled", { title: "Untitled", createdAt: 1 });
+    await chat("terminal", { title: "zsh", kind: "terminal", createdAt: 2 });
+    await chat("deleted", { title: "Removed chat", createdAt: 3 }, true);
+    await chat("later", { title: "Second  idea", createdAt: 9 });
+    await chat("first", { title: " First idea ", createdAt: 5 });
+    await applyAndRecord(LADDER[boundary]!);
+    const rows = (await pool.query("SELECT id, number, title FROM cloud_v2_workspaces ORDER BY number")).rows;
+    // Same timestamp: the id breaks the tie, as the migration orders it.
+    const tiedOrder = [newer!, tied!].sort();
+    expect(rows).toEqual([
+      { id: older, number: 1, title: "First idea" },
+      { id: tiedOrder[0], number: 2, title: null },
+      { id: tiedOrder[1], number: 3, title: null },
+    ]);
+    expect((await pool.query("SELECT last_number FROM cloud_v2_workspace_number_sequences WHERE org_id=$1", [owner.organizationId])).rows)
+      .toEqual([{ last_number: 3 }]);
+  });
+
   it("retains canonical repository metadata without inventing permission evidence during the availability upgrade", async () => {
     await reset();
     const boundary = LADDER.indexOf("0214_cloud_github_source_verifications.sql");

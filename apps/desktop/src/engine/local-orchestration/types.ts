@@ -35,6 +35,8 @@ export interface LocalWorkspaceOwner {
   path: string;
   repoRoot: string;
   name: string;
+  /** A managed workspace's permanent Local number (`w-<n>`); null for a folder. */
+  number: number | null;
   branch: string | null;
   projectId: string | null;
   archived: boolean;

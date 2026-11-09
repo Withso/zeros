@@ -35,6 +35,9 @@ export const CLOUD_V2_CAPABILITIES: CloudV2Capabilities = {
 };
 
 const uuid = z.string().uuid();
+const ORGANIZATION_SLUG = /^[a-z0-9](?:[a-z0-9-]{0,98}[a-z0-9])?$/;
+const WORKSPACE_NUMBER = /^[1-9][0-9]{0,9}$/;
+const MAX_WORKSPACE_NUMBER = 2_147_483_647;
 const branchName = z.string().min(1).max(255).regex(/^(?!-)(?!.*\.\.)(?!.*\/\/)(?!.*\.lock$)[A-Za-z0-9._/-]+$/);
 const CreateSchema = z.object({
   organizationId: uuid,
@@ -46,7 +49,7 @@ const CreateSchema = z.object({
 const ConnectSchema = z.object({ wake: z.boolean().default(true) }).strict();
 
 export type CloudV2RouteDeps = {
-  store: Pick<CloudV2Store, "activeComputer" | "createWorkspace" | "createWorkspaceOnce" | "readCreateReceipt" | "get" | "promptContext" | "list" | "requestLifecycle" | "transition" | "issueToken" | "listChats" | "messageWindow" | "searchMessages" | "markActive"> & Partial<Pick<CloudV2Store, "prompts">>;
+  store: Pick<CloudV2Store, "activeComputer" | "createWorkspace" | "createWorkspaceOnce" | "readCreateReceipt" | "get" | "promptContext" | "list" | "requestLifecycle" | "transition" | "issueToken" | "listChats" | "messageWindow" | "searchMessages" | "markActive"> & Partial<Pick<CloudV2Store, "prompts" | "getByNumber">>;
   /** Roll out only with a runtime that advertises durable prompt delivery. */
   promptOutbox?: boolean;
   computers: Pick<CloudV2Computers, "requireMember" | "requireAdmin" | "overview" | "enqueue" | "buildConfigured" | "saveRecipe" | "discardRecipe" | "reactivate" | "log" | "logRepositories">;
@@ -228,6 +231,14 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
     if (!organizationId.success) throw new HttpError(400, "invalid_request", "organizationId is required");
     const workspaces = await deps.store.list(organizationId.data, c.get("user").id);
     return c.json({ workspaces: await documents(workspaces) });
+  });
+
+  /** The workspace page's read by its shareable address, `<slug>/w/<n>`. */
+  app.get("/v1/cloud-v2/workspaces/by-number/:organization/:number", async c => {
+    const organization = c.req.param("organization").toLowerCase(), number = c.req.param("number");
+    if (!deps.store.getByNumber || !ORGANIZATION_SLUG.test(organization) || !WORKSPACE_NUMBER.test(number) || Number(number) > MAX_WORKSPACE_NUMBER)
+      throw new HttpError(404, "not_found", "Cloud workspace not found");
+    return c.json({ workspace: await document(await deps.store.getByNumber(organization, Number(number), c.get("user").id)) });
   });
 
   app.get("/v1/cloud-v2/workspaces/:id", async c => {

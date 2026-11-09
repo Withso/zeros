@@ -151,6 +151,7 @@ import {
   reconcileDesignDirAfterExternalGit,
 } from "./git/design-mode";
 import {
+  chatMutationTitledWorkspaces,
   dbChangedIncludesOriginator,
   dbChangedKinds,
 } from "./workspace/change-events";
@@ -642,6 +643,7 @@ function dbChangedWorkspaceIds(
   if (result && typeof result === "object") {
     const workspaceId = (result as { workspaceId?: unknown }).workspaceId;
     if (typeof workspaceId === "string") candidates.add(workspaceId);
+    for (const id of chatMutationTitledWorkspaces(result)) candidates.add(id);
   }
   const ids = Array.from(candidates).filter((id) => !!getWorkspaceById(id));
   return ids.length > 0 ? ids : undefined;
@@ -2725,10 +2727,18 @@ export class ZerosEngine {
     // and after seedFromDisk (1b) so the workspace registry is populated. Cheap
     // + idempotent (only touches workspace_id IS NULL rows); never bumps rev.
     try {
-      const { backfillChatWorkspaceIds } = await import("./db/chats");
+      const { adoptWorkspaceTitlesFromChats, backfillChatWorkspaceIds } =
+        await import("./db/chats");
       const filled = backfillChatWorkspaceIds();
       if (filled > 0)
         console.log(`[Zeros] backfilled workspace_id for ${filled} chat(s)`);
+      // Workspaces named before they had titles take their first chat's name.
+      const titled = adoptWorkspaceTitlesFromChats();
+      if (titled.length > 0) {
+        const { refreshWorktreeSeed } = await import("./git/state");
+        for (const workspaceId of titled) refreshWorktreeSeed(workspaceId);
+        console.log(`[Zeros] titled ${titled.length} workspace(s) from their chats`);
+      }
       // Stamp a global rev onto pre-existing messages (rev=0 default) so the
       // message half of delta sync covers transcripts that predate rev stamping.
       const { backfillChatMessageRevs } = await import("./db/messages");
@@ -7878,7 +7888,7 @@ export class ZerosEngine {
           kinds: changed,
           ...(workspaceIds ? { workspaceIds } : {}),
         });
-        if (dbChangedIncludesOriginator(op)) {
+        if (dbChangedIncludesOriginator(op, result)) {
           this.router.broadcast(dbChangedMsg);
         } else {
           this.router.broadcastExcept(client.id, dbChangedMsg);

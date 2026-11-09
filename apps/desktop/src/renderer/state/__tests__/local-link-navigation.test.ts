@@ -45,6 +45,56 @@ const link = (kind: LocalLink["kind"], id: string): LocalLink => ({
   id,
 });
 
+describe("numbered Local link destinations", () => {
+  const numbered = { ...workspace, number: 310 } as Workspace;
+  const address = { owner: "local", number: 310 };
+
+  it("opens the Local workspace a number names", () => {
+    expect(
+      resolveLocalLinkDestination(
+        { scheme: "zeros", kind: "workspace", id: "local/w/310", address },
+        snapshot({ workspaces: [numbered] }),
+        registered,
+      ),
+    ).toEqual({ ok: true, workspace: numbered, folder: chat.folder, chat });
+  });
+
+  it("opens a chat by its session, wherever it lives now", () => {
+    expect(
+      resolveLocalLinkDestination(
+        { scheme: "zeros", kind: "chat", id: chat.id, address: { owner: "local", number: 9 } },
+        snapshot({ workspaces: [numbered] }),
+        registered,
+      ),
+    ).toEqual({ ok: true, workspace: numbered, folder: chat.folder, chat });
+  });
+
+  it("refuses an organization's number and a number nobody has", () => {
+    expect(
+      resolveLocalLinkDestination(
+        { scheme: "zeros", kind: "workspace", id: "acme/w/310", address: { owner: "acme", number: 310 } },
+        snapshot({ workspaces: [numbered] }),
+        registered,
+      ),
+    ).toEqual({ ok: false, reason: "local-only" });
+    expect(
+      resolveLocalLinkDestination(
+        { scheme: "zeros", kind: "workspace", id: "local/w/311", address: { owner: "local", number: 311 } },
+        snapshot({ workspaces: [numbered] }),
+        registered,
+      ),
+    ).toEqual({ ok: false, reason: "not-found" });
+    // An organization-owned Local row with the same number is not Local's.
+    expect(
+      resolveLocalLinkDestination(
+        { scheme: "zeros", kind: "workspace", id: "local/w/310", address },
+        snapshot({ workspaces: [{ ...numbered, organizationId: "org-1" }] }),
+        registered,
+      ),
+    ).toEqual({ ok: false, reason: "not-found" });
+  });
+});
+
 describe("Local navigation destinations", () => {
   it("resolves an existing managed chat and its exact cwd", () => {
     const nested = { ...chat, folder: "/worktree/src" };

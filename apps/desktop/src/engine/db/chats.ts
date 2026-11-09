@@ -418,16 +418,54 @@ export function getChatLocation(
   return row ? { folder: row.folder, workspaceId: row.workspace_id } : null;
 }
 
-export function upsertChat(c: ChatRow): void {
-  if (!c?.id) return;
+/** Titles a chat carries before it is named; they never name a workspace. */
+const UNNAMED_CHAT_TITLES = new Set(["", "Untitled", "New chat"]);
+const MAX_WORKSPACE_TITLE_CHARS = 200;
+
+/** The title a workspace takes from this chat: its first real name. Terminal
+ *  tabs and archived chats never name a workspace. */
+export function workspaceTitleFromChat(
+  chat: Pick<ChatRow, "title" | "kind" | "archived">,
+): string | null {
+  if (chat.kind === "terminal" || chat.archived) return null;
+  const title = (chat.title ?? "").replace(/\s+/g, " ").trim();
+  if (UNNAMED_CHAT_TITLES.has(title)) return null;
+  return Array.from(title).slice(0, MAX_WORKSPACE_TITLE_CHARS).join("");
+}
+
+function chatWorkspaceId(params: ReturnType<typeof toDbParams>): string | null {
+  return typeof params.workspace_id === "string" ? params.workspace_id : null;
+}
+
+/** A new workspace is "Untitled" until one of its chats is first named (the
+ *  first prompt's title, or the user's rename); it keeps that name after.
+ *  Returns the workspace that adopted a title, if one did. */
+function adoptWorkspaceTitle(
+  db: ReturnType<typeof openZerosDb>,
+  workspaceId: string | null,
+  chat: ChatRow,
+): string | null {
+  const title = workspaceId ? workspaceTitleFromChat(chat) : null;
+  if (!workspaceId || !title) return null;
+  const adopted = db
+    .prepare("UPDATE workspaces SET title = ? WHERE id = ? AND title IS NULL")
+    .run(title, workspaceId);
+  return adopted.changes > 0 ? workspaceId : null;
+}
+
+/** Persist a chat. Returns the workspace whose title it just set, if any. */
+export function upsertChat(c: ChatRow): string | null {
+  if (!c?.id) return null;
   const db = openZerosDb();
   const tx = db.transaction(() => {
-    db.prepare(UPSERT_SQL).run({ ...toDbParams(c), rev: nextRev() });
+    const params = toDbParams(c);
+    db.prepare(UPSERT_SQL).run({ ...params, rev: nextRev() });
     // A (re)created chat is alive again — drop any stale tombstone so a later pull
     // doesn't delete it.
     clearTombstone("chat", c.id);
+    return adoptWorkspaceTitle(db, chatWorkspaceId(params), c);
   });
-  tx();
+  return tx();
 }
 
 /** Engine-owned permission posture change (an approved plan returns a chat to
@@ -650,17 +688,48 @@ export function deleteChat(id: string): void {
 
 /** Merge a batch (the desktop's dbReplaceAllChats write-through). Non-destructive
  *  — never deletes chats it doesn't see (those may belong to another client). */
-export function bulkUpsertChats(chats: ChatRow[]): void {
+export function bulkUpsertChats(chats: ChatRow[]): string[] {
   const db = openZerosDb();
   const stmt = db.prepare(UPSERT_SQL);
   const tx = db.transaction((rows: ChatRow[]) => {
+    const titled: string[] = [];
     for (const c of rows) {
       if (!c?.id) continue;
-      stmt.run({ ...toDbParams(c), rev: nextRev() });
+      const params = toDbParams(c);
+      stmt.run({ ...params, rev: nextRev() });
       clearTombstone("chat", c.id);
+      const adopted = adoptWorkspaceTitle(db, chatWorkspaceId(params), c);
+      if (adopted) titled.push(adopted);
     }
+    return titled;
   });
-  tx(chats);
+  return tx(chats);
+}
+
+/** Name every still-Untitled workspace from its earliest named chat. Covers
+ *  workspaces whose chats were named before workspaces had titles, and chats
+ *  whose owning workspace was resolved after they were saved. Idempotent. */
+export function adoptWorkspaceTitlesFromChats(): string[] {
+  const db = openZerosDb();
+  const rows = db
+    .prepare(
+      `SELECT c.workspace_id AS workspaceId, c.title AS title, c.kind AS kind, c.archived AS archived
+         FROM chats c JOIN workspaces w ON w.id = c.workspace_id
+        WHERE w.title IS NULL
+        ORDER BY c.workspace_id, c.created_at, c.rowid`,
+    )
+    .all() as { workspaceId: string; title: string | null; kind: string | null; archived: number }[];
+  const titles = new Map<string, string>();
+  for (const row of rows) {
+    if (titles.has(row.workspaceId)) continue;
+    const title = workspaceTitleFromChat({ title: row.title ?? "", kind: row.kind, archived: row.archived === 1 });
+    if (title) titles.set(row.workspaceId, title);
+  }
+  if (titles.size === 0) return [];
+  const adopt = db.prepare("UPDATE workspaces SET title = ? WHERE id = ? AND title IS NULL");
+  return db.transaction(() =>
+    [...titles].flatMap(([workspaceId, title]) => (adopt.run(title, workspaceId).changes > 0 ? [workspaceId] : [])),
+  )();
 }
 
 /** One-time backfill of `workspace_id` for chats that predate v11 (the column

@@ -1,4 +1,10 @@
-import { formatLocalLink } from "@zeros/protocol/local-orchestration";
+import {
+  LOCAL_WORKSPACE_LINK_OWNER,
+  formatLocalLink,
+  formatWorkspaceLink,
+  isWorkspaceNumber,
+  type LocalLinkScheme,
+} from "@zeros/protocol/local-orchestration";
 import {
   useAgentControlFeatureActive,
   isAgentControlFeatureActive,
@@ -31,6 +37,24 @@ export function useCanCopyLocalLink(workspace: Workspace | null): boolean {
   );
 }
 
+/** A numbered workspace's link is `<scheme>://local/w/<n>`, and a chat in it
+ * adds `?session=<chat id>`. A repository folder has no number and keeps its
+ * `workspace/folder:<project>` and `chat/<id>` links. */
+export function localLinkFor(
+  scheme: LocalLinkScheme,
+  workspace: Workspace,
+  workspaceOrChatId: string,
+  chatId?: string,
+): string {
+  if (workspace.id.startsWith("ws_") && isWorkspaceNumber(workspace.number))
+    return formatWorkspaceLink(
+      scheme,
+      { owner: LOCAL_WORKSPACE_LINK_OWNER, number: workspace.number },
+      chatId ?? null,
+    );
+  return formatLocalLink(scheme, chatId ? "chat" : "workspace", workspaceOrChatId);
+}
+
 export async function copyLocalLink(
   workspace: Workspace,
   chatId?: string,
@@ -56,7 +80,7 @@ export async function copyLocalLink(
       return;
     }
     const copied = await copyToClipboardWithFallback(
-      formatLocalLink(scheme, chatId ? "chat" : "workspace", id),
+      localLinkFor(scheme, workspace, id, chatId),
     );
     if (copied) toast.success("Link copied.");
     else

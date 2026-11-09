@@ -35,12 +35,12 @@ function DetailRow({ Icon, label, value, tooltip, note }: {
   );
 }
 
-/** What a Local workspace is: its name, its branch when it has one, and the
- * folder it lives in on this computer. */
-export function LocalWorkspaceDetailsCard({ name, branch, folder }: { name: string; branch?: string; folder: string }) {
+/** What a Local workspace is: its title (else its name), its branch when it
+ * has one, and the folder it lives in on this computer. */
+export function LocalWorkspaceDetailsCard({ name, title, branch, folder }: { name: string; title?: string; branch?: string; folder: string }) {
   return (
     <>
-      <p className="text-fg1 mb-3 truncate text-xs leading-4.5 font-medium">{name}</p>
+      <p className="text-fg1 mb-3 truncate text-xs leading-4.5 font-medium">{title?.trim() || name}</p>
       <dl className="space-y-2">
         {branch && <DetailRow Icon={GitBranch} label="Branch" value={branch} />}
         <DetailRow Icon={Folder} label="Folder" value={displayFolderPath(folder)} tooltip={folder} note="Local" />
@@ -51,13 +51,13 @@ export function LocalWorkspaceDetailsCard({ name, branch, folder }: { name: stri
 
 /** The header's name and laptop, opening the Local details. Mount it keyed by
  * folder so a switch closes the popup. */
-export function LocalWorkspaceDetails({ folder, name, branch }: { folder: string; name: string; branch?: string }) {
+export function LocalWorkspaceDetails({ folder, name, title, branch }: { folder: string; name: string; title?: string; branch?: string }) {
   const [shown, setOpen] = useWorkspaceDetailsOpen(useWorkspaceStore(state => state.activePage === "workspace"));
   return (
     <Popover open={shown} onOpenChange={setOpen}>
-      <WorkspaceIdentityTrigger name={name} placement="local" open={shown} />
+      <WorkspaceIdentityTrigger name={name} title={title} placement="local" open={shown} />
       <PopoverContent align="start" sideOffset={6} aria-label="Local workspace details">
-        <LocalWorkspaceDetailsCard name={name} branch={branch} folder={folder} />
+        <LocalWorkspaceDetailsCard name={name} title={title} branch={branch} folder={folder} />
       </PopoverContent>
     </Popover>
   );

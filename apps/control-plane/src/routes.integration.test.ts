@@ -196,6 +196,17 @@ d("organization routes", () => {
     } finally { actor = previous; }
   });
 
+  it("never gives a new organization a slug its workspace pages cannot use", async () => {
+    for (const name of ["Local", "API", "Workspace"]) {
+      const response = await request("/v1/organizations", { method: "POST", body: { name } });
+      expect(response.status).toBe(201);
+      const { organization } = (await response.json()) as { organization: { slug: string } };
+      expect(organization.slug).toMatch(new RegExp(`^${name.toLowerCase()}-[0-9a-f]{8}$`));
+    }
+    const ordinary = await request("/v1/organizations", { method: "POST", body: { name: "Acme Labs" } });
+    expect(((await ordinary.json()) as { organization: { slug: string } }).organization.slug).toBe("acme-labs");
+  });
+
   it("creates an organization and its one default team atomically", async () => {
     const response = await request("/v1/organizations", {
       method: "POST",

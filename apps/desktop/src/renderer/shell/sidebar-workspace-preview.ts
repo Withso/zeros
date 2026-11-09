@@ -5,6 +5,7 @@ import { parseCloudWorkspaceKey } from "../platform/bridge/cloud-workspace-key";
 import type { Workspace } from "../platform/git";
 import type { ChatThread } from "../state/store";
 import { folderIsWithinRoot } from "../state/workspace-resolution";
+import { workspaceNumberName } from "../shared/lib/workspace-name";
 
 /** The sidebar already assigns nested chats to their most-specific workspace.
  * Keep that membership and recheck the folder before displaying a preview. */
@@ -44,6 +45,8 @@ export function sidebarPreviewText(messages: readonly AgentMessage[]): string {
 }
 
 export function sidebarWorkspaceDisplayId(workspace: Workspace): string {
+  const number = workspaceNumberName(workspace);
+  if (number) return number;
   const id = parseCloudWorkspaceKey(workspace.path)?.workspaceId ?? workspace.id;
   return id.length > 12 ? id.slice(0, 8) : id;
 }

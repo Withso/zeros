@@ -8,6 +8,10 @@ import { useActiveWorkspace } from "../../state/use-active-workspace";
 import { useWorkspaceStore } from "../../state/workspace-store";
 import { PanelHeader } from "../../shared/ui/primitives";
 import { workspaceLabel } from "../workspace-tabs";
+import {
+  cloudWorkspaceDocumentTitle,
+  workspaceNumberName,
+} from "../../shared/lib/workspace-name";
 import { CloudWorkspaceDetails } from "./cloud-workspace-details";
 import { LocalWorkspaceDetails } from "./local-workspace-details";
 import { WorkspaceIdentityLabel } from "./workspace-identity";
@@ -28,15 +32,20 @@ export function ConversationWorkspaceHeader({ workspace, ...props }: {
   const resolved = useActiveWorkspace();
   const current = workspace ?? resolved.workspace;
   const folder = current?.path ?? resolved.folder;
-  const name = current ? workspaceLabel(current) : folder?.split(/[\\/]/).pop() || "Workspace";
-  return <WorkspaceHeader {...props} folder={folder} name={name} branch={workspaceHeaderBranch(current)} />;
+  const title = current ? workspaceLabel(current) : undefined;
+  // The column names a workspace by its number (`w-310`); the sidebar by its title.
+  const name = workspaceNumberName(current) ?? title ?? (folder?.split(/[\\/]/).pop() || "Workspace");
+  return <WorkspaceHeader {...props} folder={folder} name={name} title={title} branch={workspaceHeaderBranch(current)} />;
 }
 
 /** Column chrome is mounted once above the split tree. Only the cloud branch
  * subscribes to cloud catalog state; organization-owned Local stays Local. */
 export function WorkspaceHeader({ folder, ...props }: {
   folder: string | null;
+  /** What the header shows: `w-<n>` when the workspace has a number. */
   name: string;
+  /** The workspace's title (its first chat's name, or "Untitled"). */
+  title?: string;
   /** A Local workspace's branch, for its details. */
   branch?: string;
   readOnly?: boolean;
@@ -47,8 +56,8 @@ export function WorkspaceHeader({ folder, ...props }: {
   return folder && parseCloudWorkspaceKey(folder)
     ? <CloudHeader key={`${getOrganizationStoreGeneration()}:${cloudCatalogGeneration()}:${folder}`} {...props} folder={folder} />
     : <WorkspaceHeaderView {...props} identity={folder
-      ? <LocalWorkspaceDetails key={folder} folder={folder} name={props.name} branch={props.branch} />
-      : <WorkspaceIdentityLabel name={props.name} placement="local" />} />;
+      ? <LocalWorkspaceDetails key={folder} folder={folder} name={props.name} title={props.title} branch={props.branch} />
+      : <WorkspaceIdentityLabel name={props.name} title={props.title} placement="local" />} />;
 }
 
 function CloudHeader({ folder, ...props }: Parameters<typeof WorkspaceHeader>[0] & { folder: string }) {
@@ -57,8 +66,10 @@ function CloudHeader({ folder, ...props }: Parameters<typeof WorkspaceHeader>[0]
   const subscribe = useCallback((listener: () => void) => active ? subscribeCloudWorkspaces(listener) : () => {}, [active]);
   const read = () => cloudWorkspaceDocument(target);
   const workspace = useSyncExternalStore(subscribe, read, read);
+  const number = workspaceNumberName(workspace);
+  const title = workspace ? cloudWorkspaceDocumentTitle(workspace) : props.title;
   return <WorkspaceHeaderView {...props} identity={
-    <CloudWorkspaceDetails folder={folder} name={workspace?.name ?? props.name} workspace={workspace} />
+    <CloudWorkspaceDetails folder={folder} name={number ?? workspace?.name ?? props.name} title={title} workspace={workspace} />
   } />;
 }
 

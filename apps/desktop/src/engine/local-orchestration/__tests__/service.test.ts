@@ -292,6 +292,32 @@ describe("Local CLI visibility", () => {
     const ws = ok<{ link: string }>(await call(parent, "link", { target: "current" }));
     expect(ws.link).toBe("zeros-dev://workspace/ws_a");
   });
+
+  it("links a numbered workspace as local/w/<n> and its chats by session", async () => {
+    ports.managed = ports.managed.map((w) =>
+      w.id === "ws_a" ? { ...w, number: 12, title: "Add canvas zoom" } : w.id === "ws_b" ? { ...w, number: 13 } : w,
+    );
+    const chatLink = ok<{ link: string }>(await call(parent, "link", { target: "s" }));
+    expect(chatLink.link).toBe("zeros-dev://local/w/12?session=s");
+    const workspaceLink = ok<{ link: string }>(await call(parent, "link", { target: "current" }));
+    expect(workspaceLink.link).toBe("zeros-dev://local/w/12");
+    const { workspace } = ok<{ workspace: { name: string; number: number; link: string } }>(await call(parent, "whoami"));
+    expect(workspace).toMatchObject({ name: "Add canvas zoom", number: 12, link: "zeros-dev://local/w/12" });
+    const own = ok<{ chat: { link: string; workspaceLink: string } }>(await call(parent, "whoami"));
+    expect(own.chat).toMatchObject({ link: "zeros-dev://local/w/12?session=p", workspaceLink: "zeros-dev://local/w/12" });
+
+    // Numbered links resolve as references, and a pasted one shares its target.
+    expect(ok<{ id: string }>(await call(parent, "link", { target: "zeros-dev://local/w/12?session=s" })).id).toBe("s");
+    expect(code(await call(parent, "workspace.status", { workspace: "zeros-dev://local/w/13" }))).toBe("NOT_FOUND");
+    service.onUserMessagePersisted({ chatId: "p", messageId: "m-num", text: "Look at zeros-dev://local/w/13.", human: true });
+    expect(ok<{ workspace: { workspaceId: string } }>(
+      await call(parent, "workspace.status", { workspace: "zeros-dev://local/w/13" }),
+    ).workspace.workspaceId).toBe("ws_b");
+
+    // An organization's number is not a Local workspace, and another channel's link is foreign.
+    expect(code(await call(parent, "workspace.status", { workspace: "zeros-dev://acme/w/12" }))).toBe("NOT_FOUND");
+    expect(code(await call(parent, "workspace.status", { workspace: "zeros://local/w/12" }))).toBe("NOT_FOUND");
+  });
 });
 
 describe("Local CLI chat creation", () => {

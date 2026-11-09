@@ -10,6 +10,7 @@ import type {
 import type { RuntimeClient } from "./ws-client";
 import { cloudTargetForValue, cloudWorkspaceKey, parseCloudScopedId } from "./cloud-workspace-key";
 import { CLOUD_GITHUB_PR_OPERATIONS } from "@zeros/protocol/cloud-github-pr";
+import { isWorkspaceNumber } from "@zeros/protocol/local-orchestration";
 import { requestCloudGithubPr, cloudGithubPrAuthority } from "../cloud-github-pr";
 import { prepareCloudPromptErasure } from "../cloud-prompt-erasure";
 import { WorkspaceRuntimeClient, type ChatSnapshotRefresh } from "./workspace-runtime-client";
@@ -562,6 +563,8 @@ export interface PreparedWorkspaceCreateWire {
   path: string;
   repoSlug: string;
   branch: string;
+  /** Absent from an engine that predates workspace numbers. */
+  number?: number;
 }
 
 /** Reserve a workspace identity + final path BEFORE the heavy create runs, so
@@ -595,6 +598,7 @@ export async function bridgeWorkspacePrepareCreate(
     path: r.path,
     repoSlug: r.repoSlug,
     branch: r.branch,
+    ...(isWorkspaceNumber(r.number) ? { number: r.number } : {}),
   };
 }
 

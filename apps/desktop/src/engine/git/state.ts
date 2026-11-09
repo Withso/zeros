@@ -39,6 +39,12 @@ import {
   worktreeSeedsRoot,
   zerosStateRoot as databaseStateRoot,
 } from "../db/paths";
+import {
+  heldWorkspaceNumber,
+  renumberWorkspaces,
+  saveWorkspaceNumberFloor,
+  workspaceNumberTaken,
+} from "../db/workspace-numbers";
 import type {
   Workspace,
   WorkspaceKind,
@@ -170,6 +176,8 @@ interface WorkspaceRow {
   view_mode: string;
   organization_id: string | null;
   placement: string;
+  number: number | null;
+  title: string | null;
   repo_slug: string;
   repo_root: string;
   branch: string;
@@ -197,6 +205,8 @@ function rowToWorkspace(r: WorkspaceRow): Workspace {
     kind: r.view_mode === "design" ? "design" : "code",
     organizationId: r.organization_id,
     placement: r.placement === "cloud" ? "cloud" : "local",
+    number: r.number ?? null,
+    title: r.title ?? null,
     repoSlug: r.repo_slug,
     repoRoot: r.repo_root,
     branch: r.branch,
@@ -217,43 +227,57 @@ function rowToWorkspace(r: WorkspaceRow): Workspace {
   };
 }
 
+/** Insert a row. Without an explicit number it takes the one reserved for its
+ * id (prepare announced it), else the database numbers it; either way the
+ * reservation is consumed in the same transaction. */
 export function insertWorkspace(w: Workspace): void {
   const handle = open();
-  handle
-    .prepare(
-      `INSERT INTO workspaces
-        (id, canonical_id, kind, view_mode, organization_id, placement,
-         repo_slug, repo_root, branch, base_branch, path, status,
-         created_at, archived_at, stash_ref, archived_head, archive_snapshot,
-         pr_number, pr_state, pr_url,
-         agent_id, last_active_at, setup_state)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    )
-    .run(
-      w.id,
-      w.canonicalId ?? randomUUID(),
-      workspaceViewMode(w),
-      workspaceViewMode(w),
-      w.organizationId ?? null,
-      w.placement === "cloud" ? "cloud" : "local",
-      w.repoSlug,
-      w.repoRoot,
-      w.branch,
-      w.baseBranch,
-      w.path,
-      w.status,
-      w.createdAt,
-      w.archivedAt,
-      w.stashRef,
-      w.archivedHead ?? null,
-      w.archiveSnapshot ?? null,
-      w.prNumber,
-      w.prState,
-      w.prUrl,
-      w.agentId,
-      w.lastActiveAt,
-      w.setupState ?? null,
-    );
+  handle.transaction(() => {
+    const number =
+      w.number ?? heldWorkspaceNumber(handle, w.id, w.organizationId);
+    handle
+      .prepare(
+        `INSERT INTO workspaces
+          (id, canonical_id, kind, view_mode, organization_id, placement,
+           number, title,
+           repo_slug, repo_root, branch, base_branch, path, status,
+           created_at, archived_at, stash_ref, archived_head, archive_snapshot,
+           pr_number, pr_state, pr_url,
+           agent_id, last_active_at, setup_state)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        w.id,
+        w.canonicalId ?? randomUUID(),
+        workspaceViewMode(w),
+        workspaceViewMode(w),
+        w.organizationId ?? null,
+        w.placement === "cloud" ? "cloud" : "local",
+        number,
+        w.title ?? null,
+        w.repoSlug,
+        w.repoRoot,
+        w.branch,
+        w.baseBranch,
+        w.path,
+        w.status,
+        w.createdAt,
+        w.archivedAt,
+        w.stashRef,
+        w.archivedHead ?? null,
+        w.archiveSnapshot ?? null,
+        w.prNumber,
+        w.prState,
+        w.prUrl,
+        w.agentId,
+        w.lastActiveAt,
+        w.setupState ?? null,
+      );
+    handle
+      .prepare(`DELETE FROM workspace_number_reservations WHERE workspace_id = ?`)
+      .run(w.id);
+  })();
+  saveWorkspaceNumberFloor();
 }
 
 /** Publish a workspace row and ownership/provenance metadata atomically. This
@@ -466,14 +490,41 @@ export function reassignLocalWorkspaceOrganization(
       )
       .all(fromOrganizationId);
     const repoSlugs = Array.from(new Set(affected.map((row) => row.repo_slug)));
+    // A number belongs to one owner's sequence. Release the old numbers before
+    // the move (the target may already use them), then number the moved rows
+    // after the target's own, keeping their relative order.
+    handle
+      .prepare(
+        `UPDATE workspaces SET number = NULL
+         WHERE organization_id = ? AND placement = 'local'`,
+      )
+      .run(fromOrganizationId);
     const result = handle
       .prepare(
         `UPDATE workspaces SET organization_id = ?
          WHERE organization_id = ? AND placement = 'local'`,
       )
       .run(toOrganizationId, fromOrganizationId);
-    return { changes: result.changes, repoSlugs, affected };
+    renumberWorkspaces(
+      handle,
+      [...affected]
+        .sort(
+          (a, b) =>
+            (a.number ?? Number.MAX_SAFE_INTEGER) -
+              (b.number ?? Number.MAX_SAFE_INTEGER) ||
+            a.created_at - b.created_at ||
+            a.id.localeCompare(b.id),
+        )
+        .map((row) => row.id),
+      toOrganizationId,
+    );
+    const read = handle.prepare<[string], WorkspaceRow>(
+      `SELECT * FROM workspaces WHERE id = ?`,
+    );
+    const moved = affected.flatMap((row) => read.get(row.id) ?? []);
+    return { changes: result.changes, repoSlugs, affected: moved };
   })();
+  saveWorkspaceNumberFloor();
 
   // Keep the best-effort database-loss recovery copy semantically aligned.
   // Do not create seeds that lifecycle operations deliberately removed (for
@@ -481,7 +532,7 @@ export function reassignLocalWorkspaceOrganization(
   for (const row of result.affected) {
     const workspace = rowToWorkspace(row);
     if (!existsSync(worktreeSeedPath(workspace.path))) continue;
-    writeWorktreeSeed({ ...workspace, organizationId: toOrganizationId });
+    writeWorktreeSeed(workspace);
   }
   return { changes: result.changes, repoSlugs: result.repoSlugs };
 }
@@ -989,12 +1040,26 @@ export function clearDetachState(): void {
  *  zeros.db is the primary registry, this is the disk recovery net. */
 export function writeWorktreeSeed(ws: Workspace): void {
   try {
+    // A row the database numbered (adoption, a trigger-filled insert) was
+    // built without its number; the seed must carry the stored one.
+    const stored = ws.number == null ? getWorkspaceById(ws.id) : null;
+    const seed = stored
+      ? { ...ws, number: stored.number ?? null, title: ws.title ?? stored.title ?? null }
+      : ws;
     const seedPath = worktreeSeedPath(ws.path);
     mkdirSync(path.dirname(seedPath), { recursive: true });
-    writeFileSync(seedPath, JSON.stringify(ws, null, 2), "utf8");
+    writeFileSync(seedPath, JSON.stringify(seed, null, 2), "utf8");
   } catch {
     /* best-effort recovery net */
   }
+}
+
+/** Rewrite an existing seed from its row, so a later recovery keeps what the
+ * row learned (its adopted title). Never creates a seed lifecycle removed. */
+export function refreshWorktreeSeed(workspaceId: string): void {
+  const workspace = getWorkspaceById(workspaceId);
+  if (!workspace || !existsSync(worktreeSeedPath(workspace.path))) return;
+  writeWorktreeSeed(workspace);
 }
 
 /** Remove a workspace's app-data crash-recovery seed (on delete/archive), so
@@ -1033,6 +1098,27 @@ function recoveredRepositorySlug(value: unknown): string | null {
   return typeof value === "string" && value.length <= 255 && /^[a-z0-9][a-z0-9-]*$/.test(value) ? value : null;
 }
 
+/** A seed keeps its number unless another row of its owner already has it;
+ * the database then numbers the recovered row. */
+function recoveredNumbering(
+  seed: Partial<Workspace>,
+  organizationId: string | null,
+): Pick<Workspace, "number" | "title"> {
+  const number =
+    typeof seed.number === "number" &&
+    Number.isSafeInteger(seed.number) &&
+    seed.number > 0 &&
+    seed.number <= 2_147_483_647 &&
+    !workspaceNumberTaken(open(), organizationId, seed.number)
+      ? seed.number
+      : null;
+  const title =
+    typeof seed.title === "string" && seed.title.trim()
+      ? Array.from(seed.title.trim()).slice(0, 200).join("")
+      : null;
+  return { number, title };
+}
+
 function seedFromAppData(): { inserted: number; skipped: number } {
   let inserted = 0;
   let skipped = 0;
@@ -1068,10 +1154,12 @@ function seedFromAppData(): { inserted: number; skipped: number } {
     }
     const repoSlug = recoveredRepositorySlug(seed.repoSlug ?? path.basename(path.dirname(seed.path)));
     if (!repoSlug) { skipped++; continue; }
+    const ownership = recoveredWorkspaceOwnership(seed);
     insertWorkspace({
       id: seed.id,
       kind: seed.kind === "design" ? "design" : "code",
-      ...recoveredWorkspaceOwnership(seed),
+      ...ownership,
+      ...recoveredNumbering(seed, ownership.organizationId),
       repoSlug,
       repoRoot: seed.repoRoot,
       branch: seed.branch,
@@ -1141,10 +1229,12 @@ function seedFromRoot(root: string): { inserted: number; skipped: number } {
       }
       const recoveredSlug = recoveredRepositorySlug(seed.repoSlug ?? repoSlug);
       if (!recoveredSlug) { skipped++; continue; }
+      const ownership = recoveredWorkspaceOwnership(seed);
       const ws: Workspace = {
         id: seed.id,
         kind: seed.kind === "design" ? "design" : "code",
-        ...recoveredWorkspaceOwnership(seed),
+        ...ownership,
+        ...recoveredNumbering(seed, ownership.organizationId),
         repoSlug: recoveredSlug,
         repoRoot: seed.repoRoot,
         branch: seed.branch,

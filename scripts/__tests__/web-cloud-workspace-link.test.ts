@@ -1,12 +1,19 @@
 import vm from "node:vm";
 import { describe, expect, it } from "vitest";
 import {
+  RESERVED_WORKSPACE_LINK_OWNERS,
   formatCloudWorkspaceLink,
+  formatCloudWorkspacePagePath,
   parseCloudWorkspaceLink,
+  parseCloudWorkspacePagePath,
 } from "@zeros/protocol/cloud-workspace-link";
 import { LOCAL_LINK_SCHEMES } from "@zeros/protocol/local-orchestration";
 import { deploymentAppLink, SCHEMES } from "../../apps/web/lib/schemes.mjs";
-import { renderWorkspacePage } from "../../apps/web/lib/workspace-page.mjs";
+import {
+  RESERVED_WORKSPACE_PAGE_OWNERS,
+  parseWorkspacePagePath,
+  renderWorkspacePage,
+} from "../../apps/web/lib/workspace-page.mjs";
 
 // apps/web is a standalone package that cannot import @zeros/protocol, so its
 // workspace page builds Open in Zeros by hand. This keeps that string equal to
@@ -59,4 +66,22 @@ describe("the web workspace page's Open in Zeros link", () => {
       });
     },
   );
+});
+
+describe("the web's numbered workspace page path", () => {
+  it("reserves the same owners as desktop links", () => {
+    expect([...RESERVED_WORKSPACE_PAGE_OWNERS].sort()).toEqual([...RESERVED_WORKSPACE_LINK_OWNERS].sort());
+  });
+
+  it.each([
+    "/acme/w/310", "/Acme-Labs/w/7", "/acme/w/0", "/acme/w/01", "/acme/w/3/", "/acme/w", "/api/w/3",
+    "/local/w/3", "/-acme/w/3", "/acme-/w/3", "/a/b/w/3", "/acme/w/2147483647", "/acme/w/2147483648",
+  ])("parses %s exactly as the protocol does", (path) => {
+    expect(parseWorkspacePagePath(path)).toEqual(parseCloudWorkspacePagePath(path));
+  });
+
+  it("round-trips the protocol's formatted path", () => {
+    const address = { owner: "acme-labs", number: 310 };
+    expect(parseWorkspacePagePath(formatCloudWorkspacePagePath(address))).toEqual(address);
+  });
 });

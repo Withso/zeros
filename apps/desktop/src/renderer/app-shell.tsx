@@ -3,7 +3,12 @@ import { subscribeChatSnapshots } from "./state/chat-snapshot-subscription";
 
 import React, { useEffect, useRef } from "react";
 import { CloudWorkspaceLifecycle } from "./state/cloud-workspace-lifecycle";
-import { canBackgroundSyncCloudWorkspace } from "./state/cloud-workspace-catalog";
+import {
+  canBackgroundSyncCloudWorkspace,
+  refreshCloudWorkspaceTitleSoon,
+} from "./state/cloud-workspace-catalog";
+import { parseCloudWorkspaceKey } from "./platform/bridge/cloud-workspace-key";
+import { isNamedChatTitle } from "./shared/lib/workspace-name";
 import { isCloudWorkspace } from "./platform/bridge/cloud-workspace-key";
 import {
   useChats,
@@ -453,6 +458,15 @@ function ChatsPersistence() {
       );
       return clear ? [clear] : [];
     });
+    // A cloud chat that was just named names its workspace on the control
+    // plane once the worker mirrors it; Local's engine does so on this write.
+    const namedCloudWorkspaces = rows.flatMap((row) => {
+      const target = parseCloudWorkspaceKey(row.folder);
+      return target && row.kind !== "terminal" && !row.archived &&
+        isNamedChatTitle(row.title) && !isNamedChatTitle(previous.get(row.id)?.title)
+        ? [target]
+        : [];
+    });
     void (async () => {
       // Same-agent NULL upserts ordinarily preserve an engine-learned binding,
       // which protects against stale renderer/remote snapshots. An intentional
@@ -466,6 +480,7 @@ function ChatsPersistence() {
           dbClearChatProviderIdentity,
           dbReplaceAllChats,
         );
+      for (const target of namedCloudWorkspaces) refreshCloudWorkspaceTitleSoon(target);
       if (failedIdentityClears.length === 0) return;
       console.warn(
         `[Zeros] ${failedIdentityClears.length} provider identity clear${

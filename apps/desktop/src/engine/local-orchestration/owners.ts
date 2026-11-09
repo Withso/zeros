@@ -14,7 +14,12 @@
 
 import { realpathSync } from "node:fs";
 import * as path from "node:path";
-import { LocalOrchestrationError } from "@zeros/protocol/local-orchestration";
+import {
+  LOCAL_WORKSPACE_LINK_OWNER,
+  LocalOrchestrationError,
+  workspaceNumberLabel,
+  type WorkspaceAddress,
+} from "@zeros/protocol/local-orchestration";
 import type { Workspace } from "../git/types";
 import type { EngineProject } from "../db/projects";
 import type { LocalOrchestrationPorts, LocalWorkspaceOwner } from "./types";
@@ -48,12 +53,15 @@ function isLocalPersonal(ws: Workspace): boolean {
 }
 
 function managedOwner(ws: Workspace): LocalWorkspaceOwner {
+  const number = typeof ws.number === "number" ? ws.number : null;
   return {
     id: ws.id,
     kind: "worktree",
     path: ws.path,
     repoRoot: ws.repoRoot,
-    name: ws.branch || path.basename(ws.path),
+    // The name the sidebar shows: its first chat's title, else its number.
+    name: ws.title?.trim() || (number !== null ? workspaceNumberLabel(number) : ws.branch || path.basename(ws.path)),
+    number,
     branch: ws.branch || null,
     projectId: null,
     archived: ws.archivedAt != null,
@@ -69,6 +77,7 @@ function folderOwner(project: EngineProject): LocalWorkspaceOwner {
     path: project.repoRoot,
     repoRoot: project.repoRoot,
     name: project.name,
+    number: null,
     branch: null,
     projectId: project.id,
     archived: false,
@@ -136,6 +145,14 @@ export class LocalOwnerIndex {
     const ws = this.managed.find((w) => w.id === id);
     if (!ws) return null;
     return isLocalPersonal(ws) ? managedOwner(ws) : "foreign";
+  }
+
+  /** Resolve a numbered Local link's workspace (`local/w/<n>`). An
+   * organization's address names no Local workspace. */
+  ownerByAddress(address: WorkspaceAddress): LocalWorkspaceOwner | "foreign" | null {
+    if (address.owner !== LOCAL_WORKSPACE_LINK_OWNER) return "foreign";
+    const ws = this.managed.find((w) => w.number === address.number && isLocalPersonal(w));
+    return ws ? managedOwner(ws) : null;
   }
 
   projectsList(): EngineProject[] {

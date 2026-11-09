@@ -32,6 +32,7 @@ import {
 } from "./organization-seats.js";
 import { generateInviteToken, hashInviteToken } from "./invites.js";
 import { randomSuffix, slugify } from "./auth.js";
+import { RESERVED_ORGANIZATION_SLUGS } from "./organization-slugs.js";
 import type { EmailConfig } from "./email.js";
 import { deliverInvitationEmail } from "./invitation-delivery.js";
 import { rateLimit } from "./ratelimit.js";
@@ -728,7 +729,9 @@ function createOrganizationRouter(
     const organization = await withSystemTx(pool, async (tx) => {
       requireOrganizationCreationCapability(await accountProActive(tx, user.id));
       let created: { rows: OrganizationRow[] } | null = null;
-      let slug = slugify(name);
+      let slug = RESERVED_ORGANIZATION_SLUGS.has(slugify(name))
+        ? `${slugify(name)}-${randomSuffix()}`
+        : slugify(name);
       for (let attempt = 0; attempt < 5 && !created?.rows[0]; attempt++) {
         const result = await tx.query<OrganizationRow>(
           `INSERT INTO organizations (

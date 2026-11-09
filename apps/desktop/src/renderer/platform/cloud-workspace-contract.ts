@@ -8,6 +8,10 @@ export const CloudWorkspaceDocumentSchema = z.object({
   organizationId: z.string().uuid(),
   teamId: z.string().uuid(),
   name: z.string().min(1).max(120),
+  /** Permanent number within the organization (`w-<n>`). */
+  number: z.number().int().positive().max(2_147_483_647).nullable().optional(),
+  /** The first title one of its chats received; null is "Untitled". */
+  title: z.string().min(1).max(200).nullable().optional(),
   createdBy: z.string().uuid(),
   ownerUserId: z.string().uuid().optional(),
   placement: z.literal("cloud"),

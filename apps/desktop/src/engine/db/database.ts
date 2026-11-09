@@ -16,6 +16,7 @@ import path from "node:path";
 import { openSqlite } from "./sqlite";
 import { zerosDbPath } from "./paths";
 import { runMigrations } from "./migrations";
+import { restoreWorkspaceNumberFloor } from "./workspace-number-floor";
 
 let db: Database.Database | null = null;
 let pathOverride: string | null = null;
@@ -54,8 +55,15 @@ export function openZerosDb(): Database.Database {
   handle.pragma("foreign_keys = ON");
   handle.pragma("busy_timeout = 5000");
   runMigrations(handle);
+  // A database recreated beside a surviving floor resumes its numbering.
+  restoreWorkspaceNumberFloor(handle, file);
   db = handle;
   return handle;
+}
+
+/** The file the unified DB opens (":memory:" under some tests). */
+export function zerosDbFile(): string {
+  return pathOverride ?? zerosDbPath();
 }
 
 /** Close on engine shutdown. Best-effort. */

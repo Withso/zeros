@@ -1520,9 +1520,10 @@ printf ran > '${sentinel}'
   it("prepareWorkspaceCreate reserves identity without leaking a folder; create completes at the same path", async () => {
     const prepared = await prepareWorkspaceCreate({ repoRoot });
     expect(prepared.workspaceId).toMatch(/^ws_[0-9a-f]{6}-/);
-    expect(prepared.branch).toMatch(
-      /^zeros\/[A-Z][a-z]{2,15}(?:-v[1-9][0-9]{0,2})?$/,
-    );
+    // The workspace's number names its branch and folder from the first frame.
+    expect(prepared.number).toBe(1);
+    expect(prepared.branch).toBe("zeros/w-1");
+    expect(path.basename(prepared.path)).toBe("w-1");
     expect(prepared.path.startsWith(worktreesRoot())).toBe(true);
     // Prepare is metadata-only. A timed-out/disconnected caller cannot leak an
     // empty directory; the renderer may still use this final path while settling.
@@ -1615,17 +1616,35 @@ printf ran > '${sentinel}'
     expect(getWorkspaceLifecycle(prepared.workspaceId)).toBeNull();
   });
 
-  // Workspace names are allocated colours with no random tail (2026-07-29).
-  // prepare writes no row, so nothing in the DB/git/filesystem records that a
-  // prepared name is spoken for — an in-process reservation covers the gap.
+  // Workspace names are their numbers (w-<n>), reserved durably at prepare.
+  // prepare writes no workspace row, so the reservation is what keeps a
+  // prepared number and name spoken for.
   it("two prepares before either create pick DIFFERENT names", async () => {
     const a = await prepareWorkspaceCreate({ repoRoot });
     const b = await prepareWorkspaceCreate({ repoRoot });
     expect(a.branch).not.toBe(b.branch);
     expect(a.path).not.toBe(b.path);
-    // Both are still usable: the second is not a degraded "-v1" fallback,
-    // because 348 base colours are still free.
-    expect(b.branch).toMatch(/^zeros\/[A-Z][a-z]{2,15}$/);
+    expect([a.number, b.number]).toEqual([1, 2]);
+    expect([a.branch, b.branch]).toEqual(["zeros/w-1", "zeros/w-2"]);
+  });
+
+  it("numbers workspaces permanently: a deleted workspace's number is never reused", async () => {
+    const first = await createWorkspace({ repoRoot });
+    const second = await createWorkspace({ repoRoot });
+    expect([first.number, second.number]).toEqual([1, 2]);
+    expect(getWorkspace(second.workspaceId)).toMatchObject({ number: 2, title: null, branch: "zeros/w-2" });
+    await deleteWorkspace({ workspaceId: second.workspaceId, includeBranch: true });
+    await deleteWorkspace({ workspaceId: first.workspaceId, includeBranch: true });
+    const third = await createWorkspace({ repoRoot });
+    expect(third.number).toBe(3);
+    expect(third.branch).toBe("zeros/w-3");
+  });
+
+  it("names a branch w-<n>-2 when w-<n> already exists in the repository", async () => {
+    await execFileAsync("git", ["-C", repoRoot, "branch", "zeros/w-1"]);
+    const created = await createWorkspace({ repoRoot });
+    expect(created.number).toBe(1);
+    expect(created.branch).toBe("zeros/w-1-2");
   });
 
   it("never re-uses a name across many prepares in one repo", async () => {
@@ -2211,10 +2230,8 @@ printf ran > '${sentinel}'
   it("creates a workspace from main", async () => {
     const result = await createWorkspace({ repoRoot });
     expect(result.workspaceId).toMatch(/^ws_[0-9a-f]{6}-/);
-    // Follow-up D: branch is zeros/<flower>-<hex> (e.g. zeros/orchid-9a2f).
-    expect(result.branch).toMatch(
-      /^zeros\/[A-Z][a-z]{2,15}(?:-v[1-9][0-9]{0,2})?$/,
-    );
+    // The branch is the workspace's number under the configured prefix.
+    expect(result.branch).toBe("zeros/w-1");
     expect(result.status).toBe("in-progress");
 
     // Folder should exist and be a git worktree.
@@ -5128,7 +5145,7 @@ printf ran > '${sentinel}'
       const ws = await createWorkspace({ repoRoot });
       // The bug this pins: a bare `hello` used to be spliced in verbatim and
       // produced the flat `helloCream`, which nobody reads as a namespace.
-      expect(ws.branch).toMatch(/^hello\/[A-Z][a-z]+/);
+      expect(ws.branch).toMatch(/^hello\/w-[1-9][0-9]*$/);
     });
 
     it("treats `hello`, `hello/` and `/hello/` as the same setting", async () => {
@@ -5137,7 +5154,7 @@ printf ran > '${sentinel}'
           `branch_prefix_type = "custom"\nbranch_prefix = "${typed}"`,
         );
         const ws = await createWorkspace({ repoRoot });
-        expect(ws.branch, `for ${typed}`).toMatch(/^hello\/[A-Z][a-z]+/);
+        expect(ws.branch, `for ${typed}`).toMatch(/^hello\/w-[1-9][0-9]*$/);
       }
     });
 
@@ -5146,13 +5163,13 @@ printf ran > '${sentinel}'
         'branch_prefix_type = "custom"\nbranch_prefix = "team/squad"',
       );
       const ws = await createWorkspace({ repoRoot });
-      expect(ws.branch).toMatch(/^team\/squad\/[A-Z][a-z]+/);
+      expect(ws.branch).toMatch(/^team\/squad\/w-[1-9][0-9]*$/);
     });
 
     it("creates a bare branch for `none`, with no dangling separator", async () => {
       await setPrefix('branch_prefix_type = "none"');
       const ws = await createWorkspace({ repoRoot });
-      expect(ws.branch).toMatch(/^[A-Z][a-z]+/);
+      expect(ws.branch).toMatch(/^w-[1-9][0-9]*$/);
       expect(ws.branch).not.toContain("/");
     });
 
@@ -5192,35 +5209,32 @@ printf ran > '${sentinel}'
       await execFileAsync("git", ["branch", "zeros"], { cwd: repoRoot });
       await setPrefix('branch_prefix_type = "custom"\nbranch_prefix = "hello"');
       const ws = await createWorkspace({ repoRoot });
-      expect(ws.branch).toMatch(/^[A-Z][a-z]+/);
+      expect(ws.branch).toMatch(/^w-[1-9][0-9]*$/);
       expect(ws.branch).not.toContain("/");
     });
 
-    it("does not hand out a colour buried in someone else's ref path", async () => {
-      // `refs/heads/<X>/Cream/wip` makes `refs/heads/<X>/Cream` a DIRECTORY, so
-      // reusing `Cream` cannot create the ref — git fails with "cannot lock
+    it("does not hand out a name buried in someone else's ref path", async () => {
+      // `refs/heads/<X>/w-1/wip` makes `refs/heads/<X>/w-1` a DIRECTORY, so
+      // handing out `w-1` cannot create the ref — git fails with "cannot lock
       // ref". branchDisplayName can't see it (a `wip` tail isn't allocator-
       // shaped, so it returns the whole ref), which is why the used-name scan
       // reserves an allocator name found in ANY path component.
-      await execFileAsync("git", ["branch", "hello/Cream/wip"], {
+      await execFileAsync("git", ["branch", "hello/w-1/wip"], {
         cwd: repoRoot,
       });
       await setPrefix('branch_prefix_type = "custom"\nbranch_prefix = "hello"');
-      for (let i = 0; i < 6; i += 1) {
-        const ws = await createWorkspace({ repoRoot });
-        expect(ws.branch).not.toBe("hello/Cream");
-      }
+      const ws = await createWorkspace({ repoRoot });
+      expect(ws.number).toBe(1);
+      expect(ws.branch).toBe("hello/w-1-2");
     });
 
-    it("does not hand out a bare colour that already has children", async () => {
+    it("does not hand out a bare name that already has children", async () => {
       // Same conflict from the other direction: with no prefix the branch IS
-      // the bare name, so an unrelated `refs/heads/Bone/wip` blocks `Bone`.
-      await execFileAsync("git", ["branch", "Bone/wip"], { cwd: repoRoot });
+      // the bare name, so an unrelated `refs/heads/w-1/wip` blocks `w-1`.
+      await execFileAsync("git", ["branch", "w-1/wip"], { cwd: repoRoot });
       await setPrefix('branch_prefix_type = "none"');
-      for (let i = 0; i < 6; i += 1) {
-        const ws = await createWorkspace({ repoRoot });
-        expect(ws.branch).not.toBe("Bone");
-      }
+      const ws = await createWorkspace({ repoRoot });
+      expect(ws.branch).toBe("w-1-2");
     });
 
     it("names the checkout folder after the workspace, not the namespace", async () => {

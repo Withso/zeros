@@ -104,6 +104,16 @@ describe("Copy Local link scope", () => {
     expect(state.projects).not.toHaveBeenCalled();
   });
 
+  it("copies a numbered workspace as local/w/<n> and its chats by session", async () => {
+    const numbered = { ...workspace, number: 310 } as Workspace;
+    await copyLocalLink(numbered);
+    expect(state.copy).toHaveBeenLastCalledWith("zeros-alpha://local/w/310");
+    await copyLocalLink(numbered, "7e2b720c-ab56-441d-b189-6e7d1eb7a628");
+    expect(state.copy).toHaveBeenLastCalledWith(
+      "zeros-alpha://local/w/310?session=7e2b720c-ab56-441d-b189-6e7d1eb7a628",
+    );
+  });
+
   it.each(["local:repo", "local-main"])(
     "maps %s through the engine project registry",
     async (id) => {
