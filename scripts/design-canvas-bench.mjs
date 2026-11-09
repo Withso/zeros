@@ -614,7 +614,7 @@ async function main() {
             }).join("|");
             const worlds = [...document.querySelectorAll("[data-design-canvas-world]")].map((element) => element.style.transform).join("|");
             const key = `${viewports} ${worlds} ${readState()}`;
-            if (key !== last) { last = key; log.push([Math.round(performance.now() - start), viewports, worlds]); }
+            if (key !== last) { last = key; log.push([Math.round(performance.now() - start), viewports, worlds, readState()]); }
             if (log.length < 400 && performance.now() - start < 10_000) requestAnimationFrame(tick);
           };
           requestAnimationFrame(tick);
