@@ -1,7 +1,7 @@
 import { BoatBootPendingError } from "./boat-client.js";
 import { describe, expect, it, vi } from "vitest";
 import type { CloudV2Compute } from "./boat.js";
-import { CLOUD_V2_IDLE_STOP_MS, CLOUD_V2_WORKER_TOKEN_PATH, CloudV2Lifecycle, deliverWorkerTokenCommand, type CloudV2LifecycleDeps } from "./lifecycle.js";
+import { CLOUD_V2_IDLE_STOP_MS, CLOUD_V2_WORKER_TOKEN_PATH, CloudV2Lifecycle, checkoutWarmupCommand, deliverWorkerTokenCommand, type CloudV2LifecycleDeps } from "./lifecycle.js";
 import type { CloudV2CheckpointFork, CloudV2CheckpointRetry, CloudV2Workspace, CloudV2LifecycleWorkspace } from "./store.js";
 import { generateKeyPairSync } from "node:crypto";
 
@@ -143,8 +143,7 @@ it.each(["creating", "starting"] as const)("uses one captured workspace runtime 
   expect(bootEnv).toHaveBeenCalledExactlyOnceWith(row, candidate);
   const installation = vmCommand(f, "candidate.tar.gz");
   expect(installation?.[1]).toContain(`/opt/zeros/runtime/${candidate.sha256}`);
-  const environment = Buffer.from(`CLOUD_V2_RUNTIME_SHA256=${candidate.sha256}\nZEROS_WORKSPACE_ID=${row.id}\n${
-    state === "creating" ? "ZEROS_CHECKOUT_PATH=/home/user/o/r\n" : ""}`).toString("base64");
+  const environment = Buffer.from(`CLOUD_V2_RUNTIME_SHA256=${candidate.sha256}\nZEROS_WORKSPACE_ID=${row.id}\n`).toString("base64");
   expect(vmCommand(f, CLOUD_V2_WORKER_TOKEN_PATH)?.[1]).toContain(environment);
 });
 
@@ -849,18 +848,43 @@ describe("cloud v2 lifecycle", () => {
   });
 
   // A create's VM restores its disk lazily from the Cloud Computer snapshot,
-  // so its worker warms the checkout while hello runs (0.8–1.9 s on Alpha).
-  it("sends a create's checkout path with the token, and no wake's", async () => {
-    const env = (calls: [string, string, ...unknown[]][]) => {
-      const command = calls.find(([, value]) => value.includes("worker-token"))![1];
-      return Buffer.from(/printf %s '([A-Za-z0-9+/=]*)' \| base64 -d > \S*worker\.env\.tmp/.exec(command)![1]!, "base64").toString("utf8");
-    };
-    const created = setup([workspace("creating")]);
-    await created.lifecycle.tick();
-    expect(env(vi.mocked(created.compute.exec).mock.calls)).toContain("ZEROS_CHECKOUT_PATH=/home/user/o/r\n");
-    const woken = setup([workspace("starting", { boatSandboxId: "bx_abc1" })]);
+  // and the restore gives every file a new inode. On fresh VMs with
+  // Withso/zeros the first pack read took ~3 s and `git switch` 3.3–3.7 s,
+  // versus 0.55 s once warm. Warming from the worker began too late.
+  it("warms the checkout an image holds as soon as its VM is ready, before token delivery", async () => {
+    const f = setup([workspace("creating")], { checkout: true });
+    await f.lifecycle.tick();
+    const calls = vi.mocked(f.compute.exec).mock.calls, order = vi.mocked(f.compute.exec).mock.invocationCallOrder;
+    const runtime = calls.findIndex(([, command]) => command.includes("runtime-changed"));
+    const warm = calls.findIndex(([, command]) => command.includes("ls-tree -r -z HEAD"));
+    const token = calls.findIndex(([, command]) => command.includes("worker-token"));
+    expect(warm).toBeGreaterThan(-1);
+    expect(order[warm]!).toBeGreaterThan(order[runtime]!);
+    expect(order[warm]!).toBeLessThan(order[token]!);
+    expect(calls[warm]![1]).toContain("'/home/user/o/r'");
+    // A warm-up still running never holds the worker back.
+    const held = setup([workspace("creating")], { checkout: true });
+    vi.mocked(held.compute.exec).mockImplementation(async (_id: string, command: string) =>
+      command.includes("ls-tree") ? new Promise(() => {}) : { exitCode: 0, stdout: command.includes("runtime-changed") ? "" : "", timedOut: false });
+    await held.lifecycle.tick();
+    expect(vi.mocked(held.compute.exec).mock.calls.some(([, command]) => command.includes("worker-token"))).toBe(true);
+    for (const [name, options] of [["stock", { stock: true }], ["hydrated", {}]] as const) {
+      const other = setup([workspace("creating")], options);
+      await other.lifecycle.tick();
+      expect(vi.mocked(other.compute.exec).mock.calls.some(([, command]) => command.includes("ls-tree")), name).toBe(false);
+    }
+    const woken = setup([workspace("starting", { boatSandboxId: "bx_abc1" })], { checkout: true });
     await woken.lifecycle.tick();
-    expect(env(vi.mocked(woken.compute.exec).mock.calls)).not.toContain("ZEROS_CHECKOUT_PATH");
+    expect(vi.mocked(woken.compute.exec).mock.calls.some(([, command]) => command.includes("ls-tree"))).toBe(false);
+  });
+
+  it("warms read-only and detached, and never for an unusual checkout path", () => {
+    const command = checkoutWarmupCommand("/home/user/Withso/.github")!;
+    for (const part of ["GIT_OPTIONAL_LOCKS=0", "core.fsmonitor=false", "core.hooksPath=/dev/null", "--ignore-submodules",
+      "core.checkStat=minimal", "core.trustctime=false", "setsid", "nohup", "timeout 60"]) expect(command, part).toContain(part);
+    expect(command).toMatch(/&\s*$/);
+    for (const path of ["/etc/passwd", "/home/user/../root", "/home/user/o/..", "/home/user/a b/c", "/home/user/o", "/home/user/o/r/s"])
+      expect(checkoutWarmupCommand(path), path).toBeNull();
   });
 
   it("hydrates only an image that lacks the workspace's checkout", async () => {
@@ -1032,12 +1056,6 @@ describe("cloud v2 lifecycle", () => {
     expect(command).toContain(Buffer.from(token).toString("base64"));
     expect(command).toContain(CLOUD_V2_WORKER_TOKEN_PATH);
     expect(() => deliverWorkerTokenCommand("zw2w_'; rm -rf / #")).toThrow();
-  });
-
-  it("accepts only a checkout path under the user's home as the warm-up setting", () => {
-    expect(deliverWorkerTokenCommand(token, { ZEROS_CHECKOUT_PATH: "/home/user/Withso/.github" })).toContain("worker-token");
-    for (const path of ["/etc/passwd", "/home/user/../root", "/home/user/o/..", "/home/user/a b/c", "/home/user/o", "home/user/o/r", "/home/user/o/r/s"])
-      expect(() => deliverWorkerTokenCommand(token, { ZEROS_CHECKOUT_PATH: path }), path).toThrow();
   });
 
   it("re-enables the worker that stop disabled before restarting it with the delivered token", () => {
