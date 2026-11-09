@@ -597,6 +597,80 @@ function scheduleCurrentSelectionDetailDemand(
   });
 }
 
+/** Frame generations are content-addressed: undo and redo return a frame to
+ * bytes it had before, and, as in Figma, the selection that state had comes
+ * back with it. The last node selection seen in each recent generation. */
+const HISTORY_SELECTION_MS = 5_000;
+const SELECTION_GENERATIONS_PER_FRAME = 32;
+const SELECTION_GENERATION_FRAMES = 256;
+const selectionByGeneration = new Map<string, Map<string, readonly DesignSelectionTarget[]>>();
+const historySelectionByWorkspace = new Map<string, { until: number; frame?: string }>();
+
+function rememberSelectionGeneration(workspaceId: string, frame: string, sourceVersion: string,
+  targets: readonly DesignSelectionTarget[]): void {
+  if (!targets.length) return;
+  const key = `${workspaceId}\u0000${frame}`;
+  const generations = selectionByGeneration.get(key) ?? new Map<string, readonly DesignSelectionTarget[]>();
+  selectionByGeneration.delete(key);
+  selectionByGeneration.set(key, generations);
+  generations.delete(sourceVersion);
+  generations.set(sourceVersion, targets);
+  while (generations.size > SELECTION_GENERATIONS_PER_FRAME) generations.delete(generations.keys().next().value!);
+  while (selectionByGeneration.size > SELECTION_GENERATION_FRAMES) selectionByGeneration.delete(selectionByGeneration.keys().next().value!);
+}
+
+function rememberCurrentSelection(workspaceId: string, frame: string, snapshot: DesignRuntimeSnapshot,
+  targets: readonly DesignSelectionTarget[]): void {
+  const selected = targets.filter(target => target.frame === frame && target.nodeId && target.nodeId !== snapshot.frame.oid);
+  if (selected.every(target => treeContainsOid(snapshot.tree, target.nodeId!)))
+    rememberSelectionGeneration(workspaceId, frame, snapshot.sourceVersion, selected);
+}
+
+/** An undo or redo is being applied; its reply names the frame it changed. */
+export function beginDesignHistorySelection(workspaceId: string): void {
+  historySelectionByWorkspace.set(workspaceId, { until: performance.now() + HISTORY_SELECTION_MS });
+}
+
+/** The engine named the frame a history step changed, or none for a step
+ * that restores its own frame selection. Until a bounded deadline, the first
+ * runtime snapshot of that frame at a remembered generation whose selection
+ * differs restores it, whether that snapshot came before or after the reply. */
+export function settleDesignHistorySelection(workspaceId: string, frame: string | null): void {
+  if (!historySelectionByWorkspace.has(workspaceId)) return;
+  if (frame === null) {
+    historySelectionByWorkspace.delete(workspaceId);
+    return;
+  }
+  historySelectionByWorkspace.set(workspaceId, { until: performance.now() + HISTORY_SELECTION_MS, frame });
+  const snapshot = designRuntimeFrameState(workspaceId, frame)?.snapshot;
+  const restored = snapshot ? historySelectionFor(workspaceId, frame, snapshot, designWorkspaceView(workspaceId).selectedTargets) : null;
+  if (restored) void selectDesignTargets({ workspaceId, folder: useDesignRuntimeStore.getState().byWorkspace[workspaceId]?.folder ?? "",
+    targets: restored, explicit: false }).catch(() => {});
+}
+
+function historySelectionFor(workspaceId: string, frame: string, snapshot: DesignRuntimeSnapshot,
+  current: readonly DesignSelectionTarget[]): readonly DesignSelectionTarget[] | null {
+  const pending = historySelectionByWorkspace.get(workspaceId);
+  if (!pending || pending.frame !== frame || pending.until < performance.now()) return null;
+  const remembered = selectionByGeneration.get(`${workspaceId}\u0000${frame}`)?.get(snapshot.sourceVersion);
+  if (!remembered?.every(target => treeContainsOid(snapshot.tree, target.nodeId!))) return null;
+  const same = remembered.length === current.length &&
+    remembered.every((target, index) => designSelectionTargetKey(target) === designSelectionTargetKey(current[index]!));
+  if (same) return null;
+  historySelectionByWorkspace.delete(workspaceId);
+  return remembered;
+}
+
+useDesignWorkspaceUiStore.subscribe((state, previous) => {
+  for (const [workspaceId, view] of Object.entries(state.byWorkspace)) {
+    if (!view || view.selectedTargets === previous.byWorkspace[workspaceId]?.selectedTargets) continue;
+    for (const file of new Set(view.selectedTargets.filter(target => target.nodeId).map(target => target.frame))) {
+      const snapshot = designRuntimeFrameState(workspaceId, file)?.snapshot;
+      if (snapshot) rememberCurrentSelection(workspaceId, file, snapshot, view.selectedTargets);
+    }
+  }
+});
+
 useDesignRuntimeStore.subscribe((state, previous) => {
   for (const demand of selectionDetailDemandByWorkspace.values()) {
     const frame =
@@ -2229,8 +2303,15 @@ export function reconcileDesignRuntimeSnapshot(input: {
     }
     for (const child of node.children) pending.push({ node: child, depth: depth + 1 });
   }
+  const restored = completeTree ? historySelectionFor(workspaceId, frame.file, snapshot, view.selectedTargets) : null;
+  if (restored) {
+    void selectDesignTargets({ workspaceId, folder, targets: restored, frames: [frame, ...designFrameViews(readSelectionSnapshot(workspaceId))], explicit: false }).catch(() => {});
+    return;
+  }
   const survivingTargets = view.selectedTargets.filter(target => !completeTree || target.frame !== frame.file || !target.nodeId ||
     target.nodeId === snapshot.frame.oid || treeContainsOid(snapshot.tree, target.nodeId));
+  if (completeTree && survivingTargets.length === view.selectedTargets.length)
+    rememberCurrentSelection(workspaceId, frame.file, snapshot, view.selectedTargets);
   if (survivingTargets.length !== view.selectedTargets.length) {
     void selectDesignTargets({ workspaceId, folder, targets: survivingTargets, frames: [frame, ...designFrameViews(readSelectionSnapshot(workspaceId))], explicit: false }).catch(() => {});
     return;
@@ -2308,5 +2389,7 @@ export function resetDesignSelectionWorkflowsForTests(): void {
   for (const queue of warmReadByWorkspace.values()) retireDesignWarmQueue(queue);
   warmReadByWorkspace.clear();
   runtimeAuditPublicationByFrame.clear();
+  selectionByGeneration.clear();
+  historySelectionByWorkspace.clear();
   selectionVersion = 0;
 }

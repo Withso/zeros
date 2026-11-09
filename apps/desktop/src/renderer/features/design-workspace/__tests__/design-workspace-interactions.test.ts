@@ -93,6 +93,15 @@ const DESIGN_GAP_PINK = `#${"F531B3"}`;
 const DESIGN_WHITE = `#${"FFFFFF"}`;
 
 describe("design workspace interaction wiring", () => {
+  it("brings back the node selection of the state an undo or redo returns to", () => {
+    const inspector = readSection("design-inspector.tsx");
+    // Opened with the request, so the runtime snapshot that follows the
+    // engine's reply can restore the selection remembered for its generation.
+    expect(inspector).toContain(`beginDesignHistorySelection(workspaceId);
+        return applyDesignHistoryCached(workspaceId, frame?.file ?? null, direction);`);
+    expect(inspector).toContain("settleDesignHistorySelection(workspaceId, result.historySelection === undefined ? result.historyFrame ?? null : null);");
+  });
+
   it("keeps the selected frame and engine selection aligned on canvas clicks", () => {
     // An empty-canvas click keeps the frame active for the Layers panel but
     // deselects — activation, not frame selection.
