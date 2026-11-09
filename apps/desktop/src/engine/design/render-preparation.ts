@@ -551,6 +551,46 @@ export interface FrameRenderOptions {
   /** Parts only: leave Tailwind sources uncompiled (empty CSS, with their
    * candidates), for a caller that compiles them once for many frames. */
   deferTailwind?: boolean;
+  /** Identity only: also return what a capture of this version needs again
+   * (composeRetainedFrameRender). */
+  retain?: boolean;
+}
+
+/** What an identity-only preparation built that a capture of the same
+ * version needs again: all but the imported sources' CSS, which a capture
+ * builds for itself. */
+export interface RetainedFrameRender {
+  skeleton: string;
+  sourceVersion: string;
+  expanded: string;
+  linked: readonly LinkedStylesheet[];
+  /** The imported sources' placeholder tokens, in order. */
+  imported: readonly string[];
+}
+
+type FrameRenderParts = { sanitized: string; sourceVersion: string; surfaceCost: null; sheets: DesignFrameRenderSheet[] };
+
+function frameRenderParts(skeleton: string, sourceVersion: string, sheets: readonly LinkedStylesheet[]): FrameRenderParts {
+  // The same size bound a document has, so parts fail where documents fail.
+  const bytes = sheets.reduce((total, sheet) => total + utf8Bytes(sheet.css), utf8Bytes(skeleton));
+  if (bytes > MAX_SANITIZED_RENDER_BYTES)
+    throw new DesignRenderBudgetError("Sanitized frame HTML exceeded the 15 MiB per-frame render limit.");
+  return { sanitized: skeleton, sourceVersion, surfaceCost: null,
+    sheets: sheets.map(({ token, css, source, foreign, tailwindCandidates }) => ({ token, css, ...(source === undefined ? {} : { source }),
+      ...(foreign ? { foreign } : {}), ...(tailwindCandidates ? { tailwindCandidates } : {}) })) };
+}
+
+/** A capture's parts from a retained identity read: its skeleton and linked
+ * sheets, with the imported sources built for this frame now. The caller
+ * has checked that every file the read saw is unchanged; null when the
+ * imported sources no longer match the skeleton's placeholders. */
+export async function composeRetainedFrameRender(workspacePath: string, entryFile: string, canvas: CanvasDocument,
+  retained: RetainedFrameRender, options: { deferTailwind?: boolean } = {}): Promise<FrameRenderParts | null> {
+  const imported = await importedStylesheets(workspacePath, entryFile, canvas, retained.expanded, retained.linked, false,
+    !options.deferTailwind);
+  if (imported.sheets.length !== retained.imported.length ||
+    imported.sheets.some((sheet, index) => sheet.token !== retained.imported[index])) return null;
+  return frameRenderParts(retained.skeleton, retained.sourceVersion, [...imported.sheets, ...retained.linked]);
 }
 
 /** One stylesheet a skeleton placeholder (`data-zeros-sheet="token"`) stands for. */
@@ -574,7 +614,8 @@ export function prepareFrameRenderSource(
   entryFile = "",
   canvas?: CanvasDocument,
   options: FrameRenderOptions = {},
-): Promise<{ sanitized: string; sourceVersion: string; surfaceCost: DesignSurfaceCost | null; sheets?: DesignFrameRenderSheet[] }> {
+): Promise<{ sanitized: string; sourceVersion: string; surfaceCost: DesignSurfaceCost | null; sheets?: DesignFrameRenderSheet[];
+  retained?: RetainedFrameRender }> {
   return withSharedDesignParses(() =>
     prepareSharedFrameRenderSource(workspacePath, source, viewport, sources, readAsset, entryFile, canvas, options));
 }
@@ -588,7 +629,8 @@ async function prepareSharedFrameRenderSource(
   entryFile: string,
   canvas: CanvasDocument | undefined,
   options: FrameRenderOptions,
-): Promise<{ sanitized: string; sourceVersion: string; surfaceCost: DesignSurfaceCost | null; sheets?: DesignFrameRenderSheet[] }> {
+): Promise<{ sanitized: string; sourceVersion: string; surfaceCost: DesignSurfaceCost | null; sheets?: DesignFrameRenderSheet[];
+  retained?: RetainedFrameRender }> {
   assertRenderByteLimit(
     source,
     MAX_DESIGN_TEXT_BYTES,
@@ -642,17 +684,11 @@ async function prepareSharedFrameRenderSource(
     if (bytes > MAX_SANITIZED_RENDER_BYTES) {
       throw new DesignRenderBudgetError("Sanitized frame HTML exceeded the 15 MiB per-frame render limit.");
     }
-    return { sanitized: skeleton, sourceVersion, surfaceCost: designSurfaceCost(skeleton, sheets) };
+    return { sanitized: skeleton, sourceVersion, surfaceCost: designSurfaceCost(skeleton, sheets),
+      ...(options.retain ? { retained: { skeleton, sourceVersion, expanded, linked: linked.sheets,
+        imported: imported.sheets.map((sheet) => sheet.token) } } : {}) };
   }
-  if (options.parts) {
-    // The same size bound a document has, so parts fail where documents fail.
-    const bytes = sheets.reduce((total, sheet) => total + utf8Bytes(sheet.css), utf8Bytes(skeleton));
-    if (bytes > MAX_SANITIZED_RENDER_BYTES)
-      throw new DesignRenderBudgetError("Sanitized frame HTML exceeded the 15 MiB per-frame render limit.");
-    return { sanitized: skeleton, sourceVersion, surfaceCost: null,
-      sheets: sheets.map(({ token, css, source, foreign, tailwindCandidates }) => ({ token, css, ...(source === undefined ? {} : { source }),
-        ...(foreign ? { foreign } : {}), ...(tailwindCandidates ? { tailwindCandidates } : {}) })) };
-  }
+  if (options.parts) return frameRenderParts(skeleton, sourceVersion, sheets);
   const sanitized = spliceStylesheets(skeleton, sheets);
   assertRenderByteLimit(
     sanitized,

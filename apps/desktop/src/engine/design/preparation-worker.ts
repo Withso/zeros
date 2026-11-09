@@ -12,7 +12,7 @@ configureDesignFonts({ fetch: (async () => { throw new Error("Design preparation
 /** `directory` is the engine's active Design folder: a worker has its own
  * empty directory registry, so it would otherwise read the default one. */
 type Request = { id: number; workspacePath: string; directory: string; scope?: number } & (
-  | { kind?: undefined; catalogRevision: string; files: string[] }
+  | { kind?: undefined; catalogRevision: string; files: string[]; retain?: boolean }
   | { kind: "compose"; frames: Array<{ file: string; width: number; height: number }>; deferTailwind: boolean });
 
 /** An engine call's frames arrive one message at a time; they share that
@@ -38,7 +38,8 @@ parentPort?.on("message", async (message: Request | { kind: "release"; scope: nu
     const results = await withDesignDirectoryNameLease<unknown[]>(message.workspacePath, message.directory, () =>
       withDesignReadScope<unknown[]>(() => message.kind === "compose"
         ? composeDesignFrameSourcesInWorker(message.workspacePath, message.frames, { deferTailwind: message.deferTailwind })
-        : prepareDesignFrameIdentitiesInWorker(message.workspacePath, message.catalogRevision, message.files), scopeFor(message.scope)));
+        : prepareDesignFrameIdentitiesInWorker(message.workspacePath, message.catalogRevision, message.files, { retain: message.retain }),
+      scopeFor(message.scope)));
     parentPort!.postMessage({ id: message.id, results });
   } catch (error) {
     parentPort!.postMessage({ id: message.id, error: error instanceof Error ? error.message : "Design preparation worker failed." });
