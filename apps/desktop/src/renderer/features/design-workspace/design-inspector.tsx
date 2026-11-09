@@ -145,10 +145,12 @@ import {
 import { useShallow } from "zustand/react/shallow";
 import { useDesignRuntimeStore } from "./state/design-runtime-store";
 import {
+  beginDesignHistorySelection,
   captureDesignRuntimeScreenshot,
   clearDesignNodeStylePreviewTransient,
   inspectDesignNodeStyleProvenance,
   previewDesignNodeGeometry,
+  settleDesignHistorySelection,
 } from "./state/design-selection";
 import {
   applyDesignEditCached,
@@ -1236,10 +1238,15 @@ export const DesignInspector = React.memo(function DesignInspector({
       // fast keypresses become two ordered history steps rather than one being
       // discarded while the first bridge round trip is in flight.
       setPendingHistoryActions((current) => current + 1);
-      void queueInspectorAction(() =>
-        applyDesignHistoryCached(workspaceId, frame?.file ?? null, direction),
-      )
+      void queueInspectorAction(() => {
+        beginDesignHistorySelection(workspaceId);
+        return applyDesignHistoryCached(workspaceId, frame?.file ?? null, direction);
+      })
         .then((result) => {
+          // A frame-level step restores its own frame selection below; an
+          // in-document step brings back the node selection of the state it
+          // returns to.
+          settleDesignHistorySelection(workspaceId, result.historySelection === undefined ? result.historyFrame ?? null : null);
           void restoreDesignPageHistorySelection(workspaceId, owner, result, direction).catch((selectionError: unknown) => {
             toast.error("Couldn't save the restored frame selection", {
               description: errorMessage(selectionError),
