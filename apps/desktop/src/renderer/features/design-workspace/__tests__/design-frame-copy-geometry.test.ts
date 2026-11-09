@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { nextFrameGeometry } from "../../../../engine/design/frame-metadata";
+import { duplicateFrameGeometry, nextFrameGeometry } from "../../../../engine/design/frame-metadata";
 import { designFrameCopyGeometry } from "../design-frame-copy-gesture";
 
 // A keyboard copy paints in its predicted slot before the engine places it;
@@ -20,6 +20,30 @@ describe("designFrameCopyGeometry", () => {
       frames.map(({ x, y, width, height }, z) => ({ x, y, w: width, h: height, z })),
       source,
     );
-    expect(designFrameCopyGeometry(frames, source)).toEqual(engine);
+    // A source not on the page (no file here) keeps the grid cell.
+    expect(designFrameCopyGeometry(frames, { x: 0, y: 0, ...source })).toEqual(engine);
+  });
+
+  const placed = (frames: readonly [number, number, number, number][]) =>
+    frames.map(([x, y, width, height], index) => ({ file: `page-1/frame-${index}.html`, x, y, width, height }));
+  it.each([
+    { name: "free space beside the source", frames: placed([[0, 0, 480, 640], [0, 800, 720, 420]]), source: 0 },
+    { name: "a frame in the slot beside it", frames: placed([[560, 1000, 720, 420], [560, 500, 560, 360], [1400, 900, 300, 300]]), source: 0 },
+    { name: "a chain of frames in the way", frames: placed([[0, 0, 400, 300], [520, 100, 200, 100], [840, 0, 100, 900], [1060, 250, 50, 50]]), source: 0 },
+    { name: "a frame that only touches the row", frames: placed([[0, 0, 400, 300], [520, 300, 400, 300]]), source: 0 },
+  ])("matches the engine's beside slot for $name", ({ frames, source }) => {
+    const original = frames[source]!;
+    const engine = duplicateFrameGeometry(
+      { x: original.x, y: original.y, w: original.width, h: original.height, z: source },
+      frames.map(({ x, y, width, height }, z) => ({ x, y, w: width, h: height, z })),
+      original,
+    );
+    const predicted = designFrameCopyGeometry(frames, original);
+    expect(predicted).toEqual(engine);
+    for (const frame of frames) {
+      expect(predicted.x < frame.x + frame.width && frame.x < predicted.x + predicted.w &&
+        predicted.y < frame.y + frame.height && frame.y < predicted.y + predicted.h, frame.file).toBe(false);
+    }
   });
 });
+

@@ -20,9 +20,34 @@ const FRAME_COPY_HANDOFF_MS = 2_000;
 const PAINTED_FRAME_SELECTOR =
   'iframe[data-design-document-buffer="displayed"][data-design-document-ready], [data-design-source-ready], [data-design-frame-pixels-ready]';
 
-/** The slot the engine gives a copy saved without a position
- * (`nextFrameGeometry`): the next cell of its page's three-column grid. */
+/** The slot the engine gives a copy saved without a position: beside its
+ * source when the source is on the page (`duplicateFrameGeometry`), past every
+ * frame in the way; otherwise the next cell of the page's three-column grid
+ * (`nextFrameGeometry`). */
 export function designFrameCopyGeometry(
+  page: readonly { file?: string; x: number; y: number; width: number; height: number }[],
+  source: { file?: string; x: number; y: number; width: number; height: number },
+): DesignFrameGeometryWire {
+  if (source.file === undefined || !page.some((frame) => frame.file === source.file)) return designFrameGridGeometry(page, source);
+  const y = source.y;
+  let x = source.x + source.width + FRAME_GRID_GAP;
+  for (let pass = 0; pass <= page.length; pass += 1) {
+    const blocking = page.filter((frame) =>
+      x < frame.x + frame.width && frame.x < x + source.width &&
+      y < frame.y + frame.height && frame.y < y + source.height);
+    if (!blocking.length) break;
+    x = Math.max(...blocking.map((frame) => frame.x + frame.width)) + FRAME_GRID_GAP;
+  }
+  return {
+    x: Math.min(DESIGN_FRAME_COORDINATE_LIMIT, x),
+    y: Math.min(DESIGN_FRAME_COORDINATE_LIMIT, y),
+    w: source.width,
+    h: source.height,
+    z: page.length,
+  };
+}
+
+function designFrameGridGeometry(
   page: readonly { width: number; height: number }[],
   source: { width: number; height: number },
 ): DesignFrameGeometryWire {

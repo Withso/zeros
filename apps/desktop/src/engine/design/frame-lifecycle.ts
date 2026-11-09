@@ -72,6 +72,7 @@ import {
   DEFAULT_FRAME_WIDTH,
   designDirectory,
   discoverFrameFiles,
+  duplicateFrameGeometry,
   nextFrameGeometry,
   normalizeGeometry,
   readBoundedDesignFrameSource,
@@ -574,10 +575,11 @@ export async function duplicateDesignFrame(
       rewriteFrameTitleSource(original, title),
       `${file}:${randomUUID()}`,
     ), originalFile, file, { strict: true });
-    const automatic = nextFrameGeometry(
-      designPageFrameFiles(canvas, page).map(file => canvas.frames[file]!),
-      originalMeta,
-    );
+    const existing = designPageFrameFiles(canvas, page).map(file => canvas.frames[file]!);
+    const originalGeometry = canvas.frames[originalFile];
+    const automatic = originalGeometry && designPageFrameFiles(canvas, page).includes(originalFile)
+      ? duplicateFrameGeometry(originalGeometry, existing, originalMeta)
+      : nextFrameGeometry(existing, originalMeta);
     const geometry = input.geometry ? normalizeGeometry(input.geometry, automatic) : automatic;
     canvas.frames[file] = geometry;
     canvas.frame_info[file] = { id: `frame_${randomUUID().replace(/-/g, "")}`, title, kind: originalMeta.kind };

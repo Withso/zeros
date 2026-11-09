@@ -1060,7 +1060,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
     result: Promise<DesignCanvasFrameWire | null>;
   } | null>(null);
   /** Unsaved keyboard copies take the next grid slots in submission order. */
-  const pendingFrameCopySlotsRef = useRef(new Map<number, { pageId: string | undefined; width: number; height: number }>());
+  const pendingFrameCopySlotsRef = useRef(new Map<number, { pageId: string | undefined; x: number; y: number; width: number; height: number }>());
   const [selectionOverlaySuppressed, setSelectionOverlaySuppressed] =
     useState(false);
   const nudgeGestureRef = useRef<
@@ -2408,7 +2408,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
       const page = designFrameViews(catalog).filter((candidate) => candidate.pageId === pageId);
       const geometry = designFrameCopyGeometry([...page, ...[...pendingFrameCopySlotsRef.current.values()]
         .filter((slot) => slot.pageId === pageId)], frame);
-      pendingFrameCopySlotsRef.current.set(intent, { pageId, width: frame.width, height: frame.height });
+      pendingFrameCopySlotsRef.current.set(intent, { pageId, x: geometry.x, y: geometry.y, width: geometry.w, height: geometry.h });
       const article = frameElementsRef.current.get(frame.file);
       const provisional = article && isPreparedDesignFrame(frame) ? presentDesignFrameCopy({
         workspaceId, frame, article, geometry,
