@@ -318,7 +318,8 @@ export class DesignGpuScene {
     for (const quads of pages.values()) quads.count = 0;
     // Frames that touch others keep their own order after the batched passes.
     const ordered: Quads[] = [];
-    const visible: DesignGpuVisible = { frames: 0, crisp: 0, finer: 0, stretched: 0, missing: 0, live: 0, stale: 0 };
+    const visible: DesignGpuVisible = { frames: 0, crisp: 0, finer: 0, stretched: 0, missing: 0, failed: 0, live: 0, stale: 0 };
+    const failed = this.input.owner ? this.deps.recordings.failedFiles(this.input.owner) : null;
     const queued: Array<QueueItem & { distance: number; visible: boolean }> = [];
     const cx = size.width / 2, cy = size.height / 2;
     let drew = false;
@@ -333,7 +334,7 @@ export class DesignGpuScene {
       if (onScreen) visible.frames++;
       if (row.live) { if (onScreen) visible.live++; continue; }
       const recording = row.recording;
-      if (!recording) { if (onScreen) visible.missing++; continue; }
+      if (!recording) { if (onScreen) { if (failed?.has(row.file)) visible.failed++; else visible.missing++; } continue; }
       if (onScreen && !row.current) visible.stale++;
       // The recording keeps its own size: a pending resize clips it instead
       // of stretching it to the frame's new bounds.

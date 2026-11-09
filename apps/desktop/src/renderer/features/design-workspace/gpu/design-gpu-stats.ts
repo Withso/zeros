@@ -16,9 +16,11 @@ export const designGpuEpoch = () => performance.timeOrigin + performance.now();
 
 /** Frames on screen at the last composite: drawn at exactly the camera's
  * density (crisp), from a finer or a coarser (stretched) raster while theirs
- * is made, not yet drawn (missing), painted by a live document, or drawn from
- * a recording of an older version (stale, counted with the others). */
-export interface DesignGpuVisible { frames: number; crisp: number; finer: number; stretched: number; missing: number; live: number; stale: number }
+ * is made, not yet drawn (missing), whose recording failed (failed), painted
+ * by a live document, or drawn from a recording of an older version (stale,
+ * counted with the others). */
+export interface DesignGpuVisible { frames: number; crisp: number; finer: number; stretched: number; missing: number;
+  failed: number; live: number; stale: number }
 
 export interface DesignGpuSnapshot {
   version: 1;
@@ -49,7 +51,7 @@ export class DesignGpuStats {
   private firstFrameDrawnAt: number | null = null;
   private allVisibleCrispAt: number | null = null;
   private readonly samples = { draw: [] as number[], bursts: [] as number[], upload: [] as number[] };
-  private visible: DesignGpuVisible = { frames: 0, crisp: 0, finer: 0, stretched: 0, missing: 0, live: 0, stale: 0 };
+  private visible: DesignGpuVisible = { frames: 0, crisp: 0, finer: 0, stretched: 0, missing: 0, failed: 0, live: 0, stale: 0 };
   private compositorLosses = 0;
   error: string | null = null;
 
@@ -82,8 +84,10 @@ export class DesignGpuStats {
     if (this.openedAt === null) return;
     const now = designGpuEpoch();
     if (drewRecording && this.firstFrameDrawnAt === null) this.firstFrameDrawnAt = now;
-    if (this.allVisibleCrispAt === null && atRest && visible.frames > 0 && visible.crisp === visible.frames - visible.live)
-      this.allVisibleCrispAt = now;
+    // A frame that cannot be recorded is reported, not waited for: its live
+    // document or bare surface is the most it will ever show.
+    if (this.allVisibleCrispAt === null && atRest && visible.frames > visible.live + visible.failed &&
+      visible.crisp === visible.frames - visible.live - visible.failed) this.allVisibleCrispAt = now;
   }
 
   compositorLost(): void {
