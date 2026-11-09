@@ -143,7 +143,8 @@ it.each(["creating", "starting"] as const)("uses one captured workspace runtime 
   expect(bootEnv).toHaveBeenCalledExactlyOnceWith(row, candidate);
   const installation = vmCommand(f, "candidate.tar.gz");
   expect(installation?.[1]).toContain(`/opt/zeros/runtime/${candidate.sha256}`);
-  const environment = Buffer.from(`CLOUD_V2_RUNTIME_SHA256=${candidate.sha256}\nZEROS_WORKSPACE_ID=${row.id}\n`).toString("base64");
+  const environment = Buffer.from(`CLOUD_V2_RUNTIME_SHA256=${candidate.sha256}\nZEROS_WORKSPACE_ID=${row.id}\n${
+    state === "creating" ? "ZEROS_CHECKOUT_PATH=/home/user/o/r\n" : ""}`).toString("base64");
   expect(vmCommand(f, CLOUD_V2_WORKER_TOKEN_PATH)?.[1]).toContain(environment);
 });
 
@@ -847,6 +848,21 @@ describe("cloud v2 lifecycle", () => {
     expect(f.compute.create).toHaveBeenCalledWith(expect.objectContaining({ from: "cv2-alpha-org-1" }));
   });
 
+  // A create's VM restores its disk lazily from the Cloud Computer snapshot,
+  // so its worker warms the checkout while hello runs (0.8–1.9 s on Alpha).
+  it("sends a create's checkout path with the token, and no wake's", async () => {
+    const env = (calls: [string, string, ...unknown[]][]) => {
+      const command = calls.find(([, value]) => value.includes("worker-token"))![1];
+      return Buffer.from(/printf %s '([A-Za-z0-9+/=]*)' \| base64 -d > \S*worker\.env\.tmp/.exec(command)![1]!, "base64").toString("utf8");
+    };
+    const created = setup([workspace("creating")]);
+    await created.lifecycle.tick();
+    expect(env(vi.mocked(created.compute.exec).mock.calls)).toContain("ZEROS_CHECKOUT_PATH=/home/user/o/r\n");
+    const woken = setup([workspace("starting", { boatSandboxId: "bx_abc1" })]);
+    await woken.lifecycle.tick();
+    expect(env(vi.mocked(woken.compute.exec).mock.calls)).not.toContain("ZEROS_CHECKOUT_PATH");
+  });
+
   it("hydrates only an image that lacks the workspace's checkout", async () => {
     // Hydration is a detached command plus GitHub token and binding reads,
     // seconds of work that a source-holding image makes pointless.
@@ -1016,6 +1032,12 @@ describe("cloud v2 lifecycle", () => {
     expect(command).toContain(Buffer.from(token).toString("base64"));
     expect(command).toContain(CLOUD_V2_WORKER_TOKEN_PATH);
     expect(() => deliverWorkerTokenCommand("zw2w_'; rm -rf / #")).toThrow();
+  });
+
+  it("accepts only a checkout path under the user's home as the warm-up setting", () => {
+    expect(deliverWorkerTokenCommand(token, { ZEROS_CHECKOUT_PATH: "/home/user/Withso/.github" })).toContain("worker-token");
+    for (const path of ["/etc/passwd", "/home/user/../root", "/home/user/o/..", "/home/user/a b/c", "/home/user/o", "home/user/o/r", "/home/user/o/r/s"])
+      expect(() => deliverWorkerTokenCommand(token, { ZEROS_CHECKOUT_PATH: path }), path).toThrow();
   });
 
   it("re-enables the worker that stop disabled before restarting it with the delivered token", () => {

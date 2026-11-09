@@ -104,6 +104,14 @@ class BackgroundRefresh implements CheckoutRefresh {
 
 /** Run only for the first config in a worker process. Existing branches and
  * dirty files remain owned by the user; Git refuses an unsafe switch itself. */
+/** A create's VM restores its disk lazily from the Cloud Computer snapshot, so
+ * the checkout's first Git commands wait on cold reads (1.9 s on Alpha). Stat
+ * every tracked file while hello runs. Read-only: no branch change, hook or LFS
+ * download; the checkout itself still waits for the configuration. */
+export async function warmCheckout(checkoutPath: string, signal: AbortSignal): Promise<void> {
+  await git(checkoutPath, {})(["diff-files", "--quiet"], signal).catch(() => {});
+}
+
 export async function prepareCheckout(workspace: WorkerConfig["workspace"], gitEnvironment: NodeJS.ProcessEnv = {}, timing?: StartupTimingObserver): Promise<CheckoutResult> {
   const run = git(workspace.checkoutPath, gitEnvironment), { branch, baseBranch, baseCommit } = workspace;
   for (const name of [branch, baseBranch]) {

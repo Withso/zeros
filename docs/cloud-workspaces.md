@@ -1432,7 +1432,15 @@ available to decrypt existing records.
 
 The worker receives only the non-secret boot settings `CLOUD_V2_API_URL`,
 `CLOUD_V2_RUNTIME_SHA256` and `ZEROS_WORKSPACE_ID` in its `worker.env`; its
-credential comes from the token file. The Dev hosted-profile launcher takes
+credential comes from the token file.
+
+A create also writes `ZEROS_CHECKOUT_PATH` (`/home/user/<owner>/<name>`).
+The VM restores its disk lazily from the Cloud Computer snapshot, so while
+hello runs, the worker warms that checkout with a read-only
+`git diff-files --quiet`. The warm-up changes no branch, runs no hook and
+downloads nothing. The checkout itself still waits for hello's
+configuration, and the warm-up stops when the checkout starts. Wakes and
+runtime resumes skip it. The Dev hosted-profile launcher takes
 `ZEROS_CLOUD_V2_RUNTIME_SHA256` and maps it to the control-plane runtime pin,
 and derives each Dev generation's worker signing key.
 
