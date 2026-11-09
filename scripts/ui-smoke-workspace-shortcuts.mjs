@@ -95,8 +95,14 @@ export async function runWorkspaceShortcutsSmoke({ page, check, harnessBase, scr
   check("Command+Left/Right preserves composer focus across consecutive chat switches and wrapping", true);
 
   const chatIds = await chatTabs.evaluateAll(nodes => nodes.map(node => node.dataset.chatId));
-  const rapidSelections = await page.evaluate(async () => {
-    const { useWorkspaceStore } = await import("/apps/desktop/src/renderer/state/workspace-store.ts");
+  // CI saw "Execution context was destroyed" here with no reload or navigation
+  // in the incident log. Playwright also reports a page promise collected
+  // before it settles that way, so the import's promise stays reachable from
+  // window and the key delivery below is synchronous.
+  await page.evaluate(() => window.__shortcutWorkspaceStore ??= import("/apps/desktop/src/renderer/state/workspace-store.ts")
+    .then(module => { window.__shortcutUseWorkspaceStore = module.useWorkspaceStore; }));
+  const rapidSelections = await page.evaluate(() => {
+    const useWorkspaceStore = window.__shortcutUseWorkspaceStore;
     const selections = [];
     const unsubscribe = useWorkspaceStore.subscribe((state, previous) => {
       if (state.activeChatId !== previous.activeChatId) selections.push(state.activeChatId);
