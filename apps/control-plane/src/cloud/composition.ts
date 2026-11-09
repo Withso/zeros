@@ -240,7 +240,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   void loginChanges?.start().catch(() => {}); // The shared listener retries and re-reads onReady.
   const remoteHeads = github.remoteHead;
   const builder = roles.lifecycle ? new CloudV2ComputerBuilder({
-    computers, compute, channel: config.deploymentChannel, localOwner, runtime,
+    computers, compute, channel: config.deploymentChannel, localOwner, runtime, publicKeys: signer.publicKeys,
     cloneToken: async (organizationId, userId, target) => {
       return (await github.token({ organizationId, userId }, target, "read", "computer",
         () => authorizeSourceTargets(organizationId, userId, [target]))).token;

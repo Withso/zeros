@@ -137,7 +137,12 @@ worker also writes it once connected and after loading the SDK. Install and
 activation clear it before restarting onto another runtime, so it holds only
 the current runtime's code.
 The same step writes the control plane's public verification keys to
-root-owned `/opt/zeros/worker-auth.json`. Every wake rotates the worker
+root-owned `/opt/zeros/worker-auth.json`. Cloud Computer builds install the
+same keys, so a VM created from the org snapshot passes the fast path instead
+of reinstalling (1.3–2.9 s per Alpha create before). The protected route is
+created while the VM runs its runtime check and prune. It is inert until token
+delivery, which follows them, starts the worker. A restore after a lost disk
+still creates the route after its checkpoint is applied. Every wake rotates the worker
 credential in `/home/user/.config/zeros/worker-token` (mode `0600`) and
 restarts the worker, which registers a new boot identity in `hello` before the
 control plane dials it. The worker rereads the credential on every HTTPS request.

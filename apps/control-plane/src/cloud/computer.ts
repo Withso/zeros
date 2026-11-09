@@ -860,6 +860,9 @@ export class CloudV2ComputerBuilder {
     localOwner?: string | undefined;
     /** The worker runtime cached into every build. */
     runtime: CloudV2Runtime;
+    /** The worker's grant verification keys, installed as workspace creation
+     * installs them, so a VM from this image passes the runtime fast path. */
+    publicKeys?: readonly string[];
     /** A short-lived GitHub token able to clone one repository. */
     cloneToken(organizationId: string, userId: string, target: CloudSourceTarget): Promise<string>;
     /** The commit at the tip of a remote branch, or null when it cannot be read
@@ -1051,7 +1054,8 @@ export class CloudV2ComputerBuilder {
     // A refresh installs the runtime it was queued for, even when a process
     // still on another pin picks it up during a deploy.
     const sha256 = job.runtimeSha256 ?? this.deps.runtime.sha256;
-    const installed = await compute.exec(sandboxId, installRuntimeCommand({ sha256, url: await this.deps.runtime.url(sha256) }), 300);
+    const installed = await compute.exec(sandboxId, installRuntimeCommand({ sha256, url: await this.deps.runtime.url(sha256),
+      ...(this.deps.publicKeys ? { publicKeys: this.deps.publicKeys } : {}) }), 300);
     if (installed.exitCode !== 0 || installed.timedOut) throw Object.assign(new Error("runtime install failed"), { code: "worker_runtime_install_failed" });
     await computers.setRuntime(job.id, sha256);
     await log(`[zeros] runtime ${sha256.slice(0, 12)} installed\n`);
