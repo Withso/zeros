@@ -28,6 +28,7 @@ import {
 } from "@zeros/protocol/design-capture";
 import { DESIGN_CAPTURE_FRAME_CSP, designCaptureFramePolicy } from "../src/engine/design/capture-sheet";
 import { insertDesignHeadMarkup, sanitizeDesignFrameMarkup } from "../src/engine/design/source";
+import { withSharedDesignParses } from "../src/engine/design/shared-parse";
 import { designRecorderFrameGuard } from "./design-recorder-frame";
 import { DESIGN_RECORDER_PREPARE_SCRIPT } from "./design-recorder-scripts";
 import { externalizeRecordedLayer, RecordedTypefaceIds } from "./design-recorder-typefaces";
@@ -158,7 +159,10 @@ async function recordItem(slot: Slot, documents: Map<string, string>, item: Desi
   const guard = designRecorderFrameGuard({ gone: slot.gone, signal });
   const whileAlive = guard.run;
   const key = randomUUID();
-  documents.set(key, insertDesignHeadMarkup(sanitizeDesignFrameMarkup(item.html), designCaptureFramePolicy(colorScheme)));
+  // The engine composed this markup already sanitized, so the sanitizer
+  // usually returns it unchanged and the head insertion reuses its parse.
+  documents.set(key, await withSharedDesignParses(async () =>
+    insertDesignHeadMarkup(sanitizeDesignFrameMarkup(item.html), designCaptureFramePolicy(colorScheme))));
   const contents = slot.window.webContents;
   const steps: Record<string, number> = {};
   let mark = performance.now();
