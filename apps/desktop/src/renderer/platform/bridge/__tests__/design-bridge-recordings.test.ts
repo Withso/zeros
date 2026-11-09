@@ -38,6 +38,25 @@ describe("Design recordings bridge", () => {
       frames: [{ file: recording.file, sourceVersion: version }], knownChunks: [] })).rejects.toThrow(/malformed/);
   });
 
+  it("decodes a newer engine's optional failure fields, and still rejects anything else unknown", async () => {
+    const frames = [{ file: recording.file, sourceVersion: version }];
+    const retryable = { file: "page-1/about.html", error: "The recorder page crashed.", retryable: true };
+    const render = bridgeReturning(() => ({ ...renderReply, failed: [retryable] }), [DESIGN_PREVIEW_JOBS_CAPABILITY]);
+    const reply = await bridgeDesignRecordingsRender(render.bridge, "/work/local", { directoryId: "design_a", theme: null,
+      frames, knownChunks: [] });
+    // A retryable failure must not cost the reply's recordings.
+    expect(reply.recordings).toHaveLength(1);
+    expect(reply.failed).toEqual([retryable]);
+    const read = bridgeReturning(() => ({ recordings: [], typefaces: [], chunks: [], missing: [recording.file], deferred: [],
+      failed: [{ file: "page-1/about.html", sourceVersion: version, error: "This frame paints on 2 composited layers." }] }));
+    const stored = await bridgeDesignRecordingsRead(read.bridge, "/work/local", { directoryId: "design_a", theme: null,
+      frames: [{ file: recording.file }], knownChunks: [] });
+    expect(stored.failed).toHaveLength(1);
+    const unknown = bridgeReturning(() => ({ ...renderReply, failed: [{ ...retryable, severity: 2 }] }), [DESIGN_PREVIEW_JOBS_CAPABILITY]);
+    await expect(bridgeDesignRecordingsRender(unknown.bridge, "/work/local", { directoryId: "design_a", theme: null,
+      frames, knownChunks: [] })).rejects.toThrow(/malformed/);
+  });
+
   it("reads stored recordings, with or without a known version", async () => {
     const { bridge, request } = bridgeReturning(() => ({ recordings: [{ ...recording, pipeline: "p1" }], typefaces: [],
       chunks: [], missing: ["page-1/about.html"], deferred: [] }));
