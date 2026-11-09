@@ -50,6 +50,9 @@ export interface DesignRecordingsTiming { readonly at: number; readonly ms: numb
 const MAX_DEFERRALS = 4;
 /** A transport or engine error is not a verdict on the frame. */
 const RETRY_AFTER_ERROR_MS = 2_000;
+/** A retryable failure is the attempt's, not the frame's: asked again after
+ * each of these, then kept until the frame's version changes. */
+const RETRY_FAILED_MS = [2_000, 4_000, 8_000];
 const MAX_FRAMES_PER_OWNER = 8_192;
 /** A stored-recording lookup is cheap; ask for more frames at once. */
 const READ_FRAMES = 256;
@@ -63,7 +66,9 @@ interface FrameState {
   /** The engine stores no recording of this version (or, for an unprepared
    * frame, none at all): record it, or wait for a version. */
   storedMissing: string | null | undefined;
-  failed: { version: string | null; error: string } | null;
+  failed: { version: string | null; error: string; retryable?: true } | null;
+  /** Retryable failures of the wanted version so far. */
+  retries: number;
   /** The engine reported this version's source moved on: wait for the new one. */
   superseded: string | null;
   retryAt: number;
@@ -136,12 +141,15 @@ export class DesignRecordings {
     for (const frame of frames) {
       let entry = state.frames.get(frame.file);
       if (!entry) {
-        entry = { wanted: frame.sourceVersion, confirmed: null, storedMissing: undefined, failed: null, superseded: null,
+        entry = { wanted: frame.sourceVersion, confirmed: null, storedMissing: undefined, failed: null, retries: 0, superseded: null,
           retryAt: 0, deferrals: 0, pending: null, stale: false };
         state.frames.set(frame.file, entry);
       } else if (entry.wanted !== frame.sourceVersion) {
         entry.wanted = frame.sourceVersion;
         entry.deferrals = 0;
+        entry.retries = 0;
+        // The old version's retry wait doesn't hold back the new version.
+        if (entry.failed?.retryable) entry.retryAt = 0;
       }
       order.push(frame.file);
     }
@@ -268,7 +276,8 @@ export class DesignRecordings {
   private need(state: OwnerState, entry: FrameState, now: number): "read" | "render" | null {
     if (entry.pending || entry.retryAt > now) return null;
     const version = entry.wanted ?? null;
-    if (entry.failed && entry.failed.version === version) return null;
+    // A retryable failure is asked again once its wait (retryAt) is over.
+    if (entry.failed && entry.failed.version === version && !entry.failed.retryable) return null;
     if (version !== null && entry.superseded === version) return null;
     if (version === null) return entry.stale || !entry.confirmed && entry.storedMissing !== null ? "read" : null;
     if (this.current(state, entry) && !entry.stale) return null;
@@ -423,15 +432,20 @@ export class DesignRecordings {
       entry.confirmed = adopted;
       entry.stale = false;
       entry.storedMissing = undefined;
+      if (wanted) { entry.failed = null; entry.retries = 0; }
       this.counts.recordingsAdopted++;
       changed.push(recording.file);
     }
     if (render) {
       const renderReply = reply as DesignRecordingsReply;
-      for (const { file, error } of renderReply.failed) {
+      const now = this.deps.now?.() ?? Date.now();
+      for (const { file, error, retryable } of renderReply.failed) {
         const entry = state.frames.get(file);
         if (!entry || !asked.has(file)) continue;
-        entry.failed = { version: entry.wanted ?? null, error };
+        // Failed at once, so the canvas covers the frame meanwhile.
+        const retry = retryable === true && entry.retries < RETRY_FAILED_MS.length;
+        entry.failed = retry ? { version: entry.wanted ?? null, error, retryable: true } : { version: entry.wanted ?? null, error };
+        if (retry) entry.retryAt = now + RETRY_FAILED_MS[entry.retries++]!;
         this.counts.failed++;
       }
       for (const { file, sourceVersion } of renderReply.stale) {
