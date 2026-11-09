@@ -142,8 +142,9 @@ void app.whenReady().then(async () => {
       for (const entry of (await prepareDesignNavigationFrames(WORKSPACE, navigation.catalogRevision, files.slice(at, at + 16))).frames)
         if (entry.sourceVersion) frames.push({ file: entry.file, sourceVersion: entry.sourceVersion });
     let recordedMs = 0, recorded = 0;
-    for (let at = 0; at < frames.length; at += 16) {
-      const composed = await composeDesignThumbnailBatches(WORKSPACE, { workspaceId: "qualify", directoryId, theme: null, colorScheme: "light", maxDimension: 256, frames: frames.slice(at, at + 16) });
+    const BATCH = Number(env.ZEROS_QUALIFY_BATCH ?? "64");
+    for (let at = 0; at < frames.length; at += BATCH) {
+      const composed = await composeDesignThumbnailBatches(WORKSPACE, { workspaceId: "qualify", directoryId, theme: null, colorScheme: "light", maxDimension: 256, frames: frames.slice(at, at + BATCH) });
       for (const batch of composed.batches) {
         const request = designBatchRecordRequestFrom(batch.request);
         const started = performance.now();

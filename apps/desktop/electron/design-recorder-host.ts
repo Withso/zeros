@@ -41,6 +41,9 @@ interface Slot {
   readonly window: BrowserWindow;
   readonly retired: Promise<void>;
   ratio: number;
+  /** Emulation already applied, so an unchanged frame skips the round trip. */
+  viewport?: string;
+  colorScheme?: string;
 }
 
 app.commandLine.appendSwitch("enable-gpu-benchmarking");
@@ -127,11 +130,18 @@ async function recordItem(slot: Slot, documents: Map<string, string>, item: Desi
   const contents = slot.window.webContents;
   try {
     // The frame lays out at its own viewport whatever the window's size.
-    await whileAlive(contents.debugger.sendCommand("Emulation.setDeviceMetricsOverride",
-      { width: item.viewport.width, height: item.viewport.height, deviceScaleFactor: slot.ratio, mobile: false }));
-    await whileAlive(contents.debugger.sendCommand("Emulation.setEmulatedMedia", {
-      media: "screen", features: [{ name: "prefers-color-scheme", value: colorScheme }, { name: "prefers-reduced-motion", value: "reduce" }],
-    }));
+    const viewport = `${item.viewport.width}x${item.viewport.height}`;
+    if (slot.viewport !== viewport) {
+      await whileAlive(contents.debugger.sendCommand("Emulation.setDeviceMetricsOverride",
+        { width: item.viewport.width, height: item.viewport.height, deviceScaleFactor: slot.ratio, mobile: false }));
+      slot.viewport = viewport;
+    }
+    if (slot.colorScheme !== colorScheme) {
+      await whileAlive(contents.debugger.sendCommand("Emulation.setEmulatedMedia", {
+        media: "screen", features: [{ name: "prefers-color-scheme", value: colorScheme }, { name: "prefers-reduced-motion", value: "reduce" }],
+      }));
+      slot.colorScheme = colorScheme;
+    }
     await whileAlive(slot.window.loadURL(`${DESIGN_CAPTURE_SHEET_SCHEME}://sheet/${key}`));
     signal.throwIfAborted();
     await whileAlive(contents.executeJavaScript(DESIGN_STATIC_RENDER_SCRIPT));

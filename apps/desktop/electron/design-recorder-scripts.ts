@@ -18,18 +18,27 @@ export const DESIGN_RECORDER_FLATTEN_SOURCE = `function flattenDesignScrollers()
   const collect = (root) => { for (const element of root.querySelectorAll("*")) { elements.push(element); if (element.shadowRoot) collect(element.shadowRoot); } };
   collect(document);
   const scrolls = (value) => value === "auto" || value === "scroll";
+  const clips = (value) => scrolls(value) || value === "hidden";
   const root = document.documentElement;
+  // Read everything first, then write: interleaving style writes with
+  // layout reads would lay the page out once per element.
+  const pageOverflows = !!root && (root.scrollHeight > innerHeight + 1 || root.scrollWidth > innerWidth + 1);
+  const read = elements.map((element) => {
+    const style = getComputedStyle(element);
+    return { element, willChange: style.willChange, position: style.position, display: style.display, overflowX: style.overflowX, overflowY: style.overflowY,
+      overflows: element.scrollHeight > element.clientHeight || element.scrollWidth > element.clientWidth };
+  });
+  const fixed = read.filter((entry) => entry.position === "fixed").map((entry) => entry.element);
   let changed = 0;
-  if (root && (root.scrollHeight > innerHeight + 1 || root.scrollWidth > innerWidth + 1)) {
+  if (pageOverflows) {
     root.style.setProperty("overflow", "clip", "important");
     if (document.body) document.body.style.setProperty("overflow", "clip", "important");
     changed++;
   }
-  const fixed = elements.filter((element) => getComputedStyle(element).position === "fixed");
-  for (const element of elements) {
+  for (const entry of read) {
+    const element = entry.element;
     if (element === root || element === document.body) continue;
-    const style = getComputedStyle(element);
-    if (style.willChange !== "auto" && !fixed.some((inner) => inner !== element && element.contains(inner))) {
+    if (entry.willChange !== "auto" && !fixed.some((inner) => inner !== element && element.contains(inner))) {
       element.style.setProperty("will-change", "auto", "important");
       element.style.setProperty("isolation", "isolate", "important");
       changed++;
@@ -37,21 +46,20 @@ export const DESIGN_RECORDER_FLATTEN_SOURCE = `function flattenDesignScrollers()
     // A scroll container can scroll (and so composite) when it scrolls by the
     // user, or when hidden overflow outgrows it. Every axis is clipped: clip
     // next to a scrolling or hidden axis would compute back to hidden.
-    const clips = (value) => scrolls(value) || value === "hidden";
-    const overflows = element.scrollHeight > element.clientHeight || element.scrollWidth > element.clientWidth;
-    if (!scrolls(style.overflowX) && !scrolls(style.overflowY) && !(overflows && (clips(style.overflowX) || clips(style.overflowY)))) continue;
-    if (style.display === "block") element.style.setProperty("display", "flow-root", "important");
-    if (clips(style.overflowX)) element.style.setProperty("overflow-x", "clip", "important");
-    if (clips(style.overflowY)) element.style.setProperty("overflow-y", "clip", "important");
+    if (!scrolls(entry.overflowX) && !scrolls(entry.overflowY) && !(entry.overflows && (clips(entry.overflowX) || clips(entry.overflowY)))) continue;
+    if (entry.display === "block") element.style.setProperty("display", "flow-root", "important");
+    if (clips(entry.overflowX)) element.style.setProperty("overflow-x", "clip", "important");
+    if (clips(entry.overflowY)) element.style.setProperty("overflow-y", "clip", "important");
     changed++;
   }
   return changed;
 }`;
-/** Fonts and images decoded, scroll containers flattened, then two frames
- * painted, so the recorded layer holds the finished frame. One wait. */
+/** Fonts and images decoded, scroll containers flattened, then one frame
+ * painted: a task queued from an animation frame callback runs after that
+ * frame's paint, so the recorded layer holds the finished frame. */
 export const DESIGN_RECORDER_PREPARE_SCRIPT = `(() => {
   ${DESIGN_RECORDER_FLATTEN_SOURCE}
   return Promise.all([document.fonts.ready, ...Array.from(document.images, image => image.decode().catch(() => {}))])
     .then(() => { const converted = flattenDesignScrollers();
-      return new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve(converted)))); });
+      return new Promise(resolve => requestAnimationFrame(() => setTimeout(() => resolve(converted), 0))); });
 })()`;
