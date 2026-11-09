@@ -1,6 +1,7 @@
 import { runInNewContext } from "node:vm";
 import { describe, expect, it } from "vitest";
-import { DESIGN_RECORDER_FLATTEN_SOURCE, DESIGN_RECORDER_PREPARE_SCRIPT } from "../design-recorder-scripts";
+import { DESIGN_STATIC_RENDER_SCRIPT } from "@zeros/protocol/design-capture";
+import { DESIGN_RECORDER_FLATTEN_SOURCE, DESIGN_RECORDER_PREPARE_SCRIPT, designRecorderRecordScript } from "../design-recorder-scripts";
 
 type Box = { overflowX: string; overflowY: string; display: string; scrollHeight: number; clientHeight: number; scrollWidth: number; clientWidth: number; willChange: string; position: string };
 function element(box: Partial<Box>, children: unknown[] = [], shadow?: unknown[]) {
@@ -16,6 +17,25 @@ function element(box: Partial<Box>, children: unknown[] = [], shadow?: unknown[]
 const flat = (nodes: unknown[]): unknown[] => nodes.flatMap((node) => [node, ...flat((node as { children: unknown[] }).children)]);
 
 describe("Design recorder scripts", () => {
+  it("stills, prepares and prints a frame in one evaluation, in that order", async () => {
+    // Each evaluation was a round trip through the recorder's main process,
+    // which drives every window.
+    const log: string[] = [];
+    let release!: () => void;
+    const prepared = new Promise<void>((resolve) => { release = resolve; });
+    const script = designRecorderRecordScript("/tmp/frame \"1\"", { still: "(log.push('still'), 'stilled')", prepare: "(log.push('prepare'), prepared)" });
+    const done = runInNewContext(script, { log, prepared, chrome: { gpuBenchmarking: { printToSkPicture: (dir: string) => log.push(`print ${dir}`) } } }) as Promise<unknown>;
+    await Promise.resolve();
+    expect(log).toEqual(["still", "prepare"]);
+    release();
+    await done;
+    expect(log).toEqual(["still", "prepare", "print /tmp/frame \"1\""]);
+    // By default, exactly the scripts the recorder identity names.
+    const real = designRecorderRecordScript("/tmp/f");
+    expect(real.indexOf(DESIGN_STATIC_RENDER_SCRIPT)).toBeGreaterThan(-1);
+    expect(real.indexOf(DESIGN_RECORDER_PREPARE_SCRIPT)).toBeGreaterThan(real.indexOf(DESIGN_STATIC_RENDER_SCRIPT));
+  });
+
   it("clips only overflowing scroll containers, keeps their formatting context, and reaches open shadow roots", () => {
     const listed = element({ overflowY: "auto", scrollHeight: 900, clientHeight: 300 });
     const fits = element({ overflowY: "auto" });
