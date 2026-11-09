@@ -4,7 +4,13 @@ import fs from "node:fs";
 import path from "node:path";
 import { createRequire } from "node:module";
 const require = createRequire(import.meta.url);
-const { SourceMapConsumer } = require("source-map-js");
+const loadConsumer = () => {
+  try { return require("source-map-js").SourceMapConsumer; } catch {}
+  const store = path.join(path.dirname(new URL(import.meta.url).pathname), "..", "node_modules", ".pnpm");
+  const entry = fs.readdirSync(store).find((name) => name.startsWith("source-map-js@"));
+  return require(path.join(store, entry, "node_modules", "source-map-js")).SourceMapConsumer;
+};
+const SourceMapConsumer = loadConsumer();
 const folder = process.argv[2];
 const report = JSON.parse(fs.readFileSync(path.join(folder, "report.json"), "utf8"));
 const assets = path.join(folder, "app", "dist", "assets");
