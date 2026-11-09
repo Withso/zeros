@@ -153,6 +153,14 @@ function healthNonceMatches(
   });
 }
 
+/** Bench only: large mostly-ASCII messages sent escaped, all ASCII. */
+function asciiMessage(text: string): string {
+  if (text.length < 65_536) return text;
+  const extra = Buffer.byteLength(text, "utf8") - text.length;
+  if (extra === 0 || extra > text.length / 64) return text;
+  return text.replace(/[\u0080-\uffff]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
+}
+
 class LocalClient implements TransportClient {
   readonly kind = "local" as const;
   /** Under Bun, a socket's native side can be released while readyState still
@@ -166,7 +174,7 @@ class LocalClient implements TransportClient {
   send(msg: EngineMessage): void {
     if (this.retired || this.ws.readyState !== WebSocket.OPEN) return;
     try {
-      this.ws.send(JSON.stringify(msg));
+      this.ws.send(asciiMessage(JSON.stringify(msg)));
     } catch {
       this.retired = true;
     }
