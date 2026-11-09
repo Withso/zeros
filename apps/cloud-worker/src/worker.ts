@@ -400,17 +400,32 @@ export class CloudWorker {
     let refresh: CheckoutRefresh | undefined, store: SessionStore | undefined, workspace: WorkspaceService | undefined;
     let mcp: McpGateway | undefined, agents: Agents | undefined, terminals: Terminals | undefined, history: HistoryMirror | undefined, setup: WorkspaceSetup | undefined;
     let reviews: WorkerCodeReview | undefined;
+    // Opened beside the checkout; cleanup below waits for them on any failure.
+    let storeOpening: Promise<SessionStore> | undefined, reviewConfiguring: Promise<void> | undefined;
     const unsubscribers: Array<() => void> = [];
     let published = false;
     try {
       await this.github.start();
       if (this.disposed || this.stopping) return false;
-      const checkout = await measureStartup("worker_checkout", () => this.options.runtimeResume ? Promise.resolve(undefined)
+      const checking = measureStartup("worker_checkout", () => this.options.runtimeResume ? Promise.resolve(undefined)
         : (this.options.prepareCheckout ?? prepareCheckout)(config.workspace, this.gitEnvironment, timing), timing)
         .catch(async error => {
           await this.options.transport.reportCheckoutFailure?.().catch(() => {});
           throw error;
         });
+      // The session store and review database live in the worker's state
+      // directory, not the checkout. Git switches branches in a child process,
+      // so they open meanwhile (0.97 s and 0.63 s one after another on Alpha).
+      storeOpening = measureStartup("worker_session_store", () => SessionStore.open(join(this.options.directory, "sessions"), scope.key), timing);
+      storeOpening.catch(() => {});
+      reviews = new WorkerCodeReview(scope, this.options.directory, () => {
+        if (this.reviews !== reviews) return;
+        this.lastMutationAt = Date.now(); void this.reportIdle();
+        void this.broadcast(createMessage({ type: "DB_CHANGED", source: "engine", kinds: ["codeReview"], workspaceIds: [scope.workspace.id] }));
+      });
+      reviewConfiguring = measureStartup("worker_services_review", () => reviews!.configure(config.codeReview), timing);
+      reviewConfiguring.catch(() => {});
+      const checkout = await checking;
       refresh = checkout?.refresh;
       this.initialSetupNeeded ||= checkout?.createdBranch === true;
       if (this.disposed || this.stopping) return false;
@@ -428,19 +443,14 @@ export class CloudWorker {
         if (error.code !== "ENOENT") throw error;
         return false;
       });
-      store = await measureStartup("worker_session_store", () => SessionStore.open(join(this.options.directory, "sessions"), scope.key), timing);
+      store = await storeOpening;
       const servicesStarted = performance.now();
       // Earlier worker snapshots stored a cloud key in chat metadata. Native
       // bridge rows must round-trip through the renderer's existing mapper.
       for (const chat of store.list().chats) if (chat.folder !== scope.folder(chat.folder)) await store.upsert({ ...chat, folder: scope.root });
       if (this.disposed || this.stopping) return false;
       const run = this.options.workspaceServices?.run ?? commandRunner(scope.root, this.gitEnvironment);
-      reviews = new WorkerCodeReview(scope, this.options.directory, () => {
-        if (this.reviews !== reviews) return;
-        this.lastMutationAt = Date.now(); void this.reportIdle();
-        void this.broadcast(createMessage({ type: "DB_CHANGED", source: "engine", kinds: ["codeReview"], workspaceIds: [scope.workspace.id] }));
-      });
-      await measureStartup("worker_services_review", () => reviews!.configure(config.codeReview), timing);
+      await reviewConfiguring;
       if (this.disposed || this.stopping) return false;
       workspace = await measureStartup("worker_services_workspace", () => WorkspaceService.open(scope, this.options.directory, {
         historyDiff: params => agents!.turns.historyDiff(params),
@@ -508,6 +518,9 @@ export class CloudWorker {
     } finally {
       if (!published) {
         for (const unsubscribe of unsubscribers) unsubscribe();
+        // A failure before they were awaited still owns what they opened.
+        store ??= await storeOpening?.catch(() => undefined);
+        await reviewConfiguring?.catch(() => undefined);
         const closed = await Promise.allSettled([setup?.dispose(), refresh?.dispose(), terminals?.dispose(), workspace?.dispose(),
           agents?.dispose(), mcp?.dispose(), store?.flush(), history?.dispose(), Promise.resolve().then(() => reviews?.close())]);
         if (closed.some(result => result.status === "rejected")) this.options.onError?.("storage");

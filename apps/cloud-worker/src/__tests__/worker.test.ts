@@ -138,8 +138,10 @@ describe("worker bridge routing through a fake relay", () => {
     const worker = new CloudWorker({ directory, transport: relay, prepareCheckout: async () => {}, drivers: {} });
     cleanups.push(async () => { await worker.dispose(); await rm(directory, { recursive: true, force: true }); });
     worker.start(); await relay.receive(config); await relay.receive({ t: "open", clientId: CLIENT_A });
-    expect(reportTiming.mock.calls.map(([record]) => record.phase)).toEqual(["worker_checkout", "worker_session_store",
-      "worker_services_review", "worker_workspace_state", "worker_workspace_metadata", "worker_workspace_remote", "worker_workspace_poll", "worker_workspace_watch",
+    const phases = reportTiming.mock.calls.map(([record]) => record.phase);
+    // The session store and review database open while Git switches branches.
+    expect(phases.slice(0, 3).sort()).toEqual(["worker_checkout", "worker_services_review", "worker_session_store"]);
+    expect(phases.slice(3)).toEqual(["worker_workspace_state", "worker_workspace_metadata", "worker_workspace_remote", "worker_workspace_poll", "worker_workspace_watch",
       "worker_services_workspace", "worker_services_mcp", "worker_services", "worker_configure"]);
     for (const [record] of reportTiming.mock.calls) {
       expect(Object.keys(record).sort()).toEqual(["durationMs", "phase"]);

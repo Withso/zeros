@@ -71,10 +71,15 @@ async function session(c: Context, deps: CloudV2WorkerRouteDeps, source = true, 
   return { token, bootId, workspace };
 }
 async function configuration(deps: CloudV2WorkerRouteDeps, workspace: CloudV2WorkerSession, token: string, bootId: string, features: ReadonlySet<string>, mode: "admission" | "continuation" = "admission", handoff?: string): Promise<ConfigFrame> {
-  if (mode === "continuation" && deps.continueSource) await deps.continueSource(workspace, workspace);
-  else await deps.authorizeSource?.(workspace);
+  const authorized = mode === "continuation" && deps.continueSource ? deps.continueSource(workspace, workspace) : deps.authorizeSource?.(workspace);
+  // The first fence read doesn't depend on the source check, so they overlap.
+  // Reading it earlier only widens the window the fence below compares.
+  let fence: Promise<CloudV2WorkerSession | null> | undefined = currentSession(deps, token, bootId, handoff);
+  fence.catch(() => {});
+  await authorized;
   for (let attempt = 0; attempt < 8; attempt++) {
-    const before = await currentSession(deps, token, bootId, handoff);
+    const before = await (fence ?? currentSession(deps, token, bootId, handoff));
+    fence = undefined;
     if (!before) throw unauthorized();
     let config: ConfigFrame;
     try { config = await deps.config(before, mode, before); }
