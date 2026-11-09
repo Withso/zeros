@@ -42,9 +42,9 @@ const MAX_BODY_BYTES = 64 * 1024 * 1024;
 const TIMINGS = process.env.ZEROS_DESIGN_RECORDER_TIMINGS ?? "";
 delete process.env.ZEROS_DESIGN_RECORDER_TIMINGS;
 
-/** A window's page process grows with every document it lays out (about
- * 5 MB a frame on 1,440 × 900 designs). After this many frames the window is
- * replaced, which returns its process's memory. */
+/** A window's page process keeps growing with the documents it lays out
+ * (past 1.2 GB after ~250 frames in the app on a Mac); after this many frames
+ * the window is replaced, which returns its process's memory. */
 const FRAMES_PER_WINDOW = Math.max(1, Number(process.env.ZEROS_DESIGN_RECORDER_FRAMES_PER_WINDOW) || 64);
 
 interface Slot {

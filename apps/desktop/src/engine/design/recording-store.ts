@@ -131,21 +131,93 @@ async function writeAtomically(folder: string, name: string, bytes: Uint8Array):
   }
 }
 
-/** Chunk bytes, verified against their content address. */
-export async function readDesignRecordingChunk(id: string): Promise<Buffer | null> {
-  if (!DESIGN_RECORDING_CHUNK_ID_PATTERN.test(id)) return null;
-  const file = chunkFile(id);
+/** Verified chunks this engine stored or read recently, by file. A reopen
+ * then answers from memory: a file round trip per chunk waits behind every
+ * other request the engine is busy with. Callers never modify the bytes. */
+const CHUNK_CACHE_BYTES = 96 * 1024 * 1024;
+const chunkCache = new Map<string, Buffer>();
+let chunkCacheBytes = 0;
+
+function rememberChunk(file: string, bytes: Buffer): void {
+  const held = chunkCache.get(file);
+  chunkCache.delete(file);
+  if (held) { chunkCache.set(file, held); return; }
+  chunkCache.set(file, bytes);
+  chunkCacheBytes += bytes.length;
+  for (const [key, value] of chunkCache) {
+    if (chunkCacheBytes <= CHUNK_CACHE_BYTES) break;
+    chunkCache.delete(key);
+    chunkCacheBytes -= value.length;
+  }
+}
+
+async function readChunkFile(id: string, file: string): Promise<Buffer | null> {
   if (!(await contained(path.dirname(file)))) return null;
   const bytes = await readBounded(file, RECORDING_CHUNK_MAX);
   return bytes && designRecordingChunkId(bytes) === id ? bytes : null;
 }
 
-async function storeChunk(id: string, bytes: Uint8Array): Promise<boolean> {
-  // A stored chunk counts only if it still hashes to its id; a damaged one
-  // is replaced (content-addressed, so rewriting it is idempotent).
-  if (await readDesignRecordingChunk(id)) return true;
+/** Chunk bytes, verified against their content address. */
+export async function readDesignRecordingChunk(id: string): Promise<Buffer | null> {
+  if (!DESIGN_RECORDING_CHUNK_ID_PATTERN.test(id)) return null;
   const file = chunkFile(id);
-  return writeAtomically(path.dirname(file), id, bytes);
+  const held = chunkCache.get(file);
+  if (held) { rememberChunk(file, held); return held; }
+  const bytes = await readChunkFile(id, file);
+  if (bytes) rememberChunk(file, bytes);
+  return bytes;
+}
+
+async function storeChunk(id: string, bytes: Uint8Array): Promise<boolean> {
+  // A stored chunk counts only if its file still hashes to its id; a damaged
+  // one is replaced (content-addressed, so rewriting it is idempotent).
+  const file = chunkFile(id);
+  const existing = await readChunkFile(id, file);
+  if (existing) { rememberChunk(file, existing); return true; }
+  if (!(await writeAtomically(path.dirname(file), id, bytes))) return false;
+  rememberChunk(file, Buffer.from(bytes));
+  return true;
+}
+
+/** Answers about each frame folder (stored recordings and failures, by
+ * query), forgotten whenever this module writes to that folder. Only this
+ * module writes recordings, so a cached answer is the folder's answer. */
+const folderAnswers = new Map<string, Map<string, unknown>>();
+/** Bumped by every write to a folder: a read that began before a write must
+ * not remember what it found. */
+const folderWrites = new Map<string, number>();
+const MAX_ANSWERED_FOLDERS = 16_384;
+
+function forgetFolder(folder: string): void {
+  folderAnswers.delete(folder);
+  folderWrites.set(folder, (folderWrites.get(folder) ?? 0) + 1);
+}
+
+function answered<T>(folder: string, key: string): { value: T } | null {
+  const answers = folderAnswers.get(folder);
+  return answers?.has(key) ? { value: answers.get(key) as T } : null;
+}
+
+function answer(folder: string, key: string, value: unknown, writes: number): void {
+  if ((folderWrites.get(folder) ?? 0) !== writes) return;
+  let answers = folderAnswers.get(folder);
+  if (!answers) {
+    answers = new Map();
+    folderAnswers.set(folder, answers);
+    if (folderAnswers.size > MAX_ANSWERED_FOLDERS) folderAnswers.delete(folderAnswers.keys().next().value!);
+  }
+  answers.set(key, value);
+}
+
+const typefaceCache = new Map<string, StoredDesignRecordingTypeface>();
+
+/** Test seam: the next reads go to disk. */
+export function resetDesignRecordingStoreCachesForTests(): void {
+  chunkCache.clear();
+  chunkCacheBytes = 0;
+  folderAnswers.clear();
+  folderWrites.clear();
+  typefaceCache.clear();
 }
 
 function validManifest(value: unknown, sourceVersion: string): StoredDesignRecording | null {
@@ -190,9 +262,14 @@ export async function storeDesignRecording(
   const stored: StoredDesignRecording = { sourceVersion: recording.sourceVersion, pipeline: recording.pipeline,
     width: recording.width, height: recording.height, scale: recording.scale, layers };
   const file = `${name}~${recording.sourceVersion}~${pipelineKey(recording.pipeline)}.json`;
-  if (!(await writeAtomically(folder, file, Buffer.from(JSON.stringify(stored))))) return null;
-  for (const other of await entries(folder))
-    if (other !== file && other.startsWith(`${name}~`)) await unlink(path.join(folder, other)).catch(() => {});
+  forgetFolder(folder);
+  try {
+    if (!(await writeAtomically(folder, file, Buffer.from(JSON.stringify(stored))))) return null;
+    for (const other of await entries(folder))
+      if (other !== file && other.startsWith(`${name}~`)) await unlink(path.join(folder, other)).catch(() => {});
+  } finally {
+    forgetFolder(folder);
+  }
   return stored;
 }
 
@@ -216,9 +293,14 @@ export async function storeDesignRecordingFailure(
   const name = themeName(theme);
   if (!folder || !THEME.test(name) || !SOURCE_VERSION.test(failure.sourceVersion) || !failure.error) return false;
   const file = failureFile(name, failure.sourceVersion, failure.pipeline);
-  if (!(await writeAtomically(folder, file, Buffer.from(JSON.stringify({ error: failure.error.slice(0, 500) }))))) return false;
-  for (const other of await entries(folder))
-    if (other !== file && other.startsWith(`${name}~`) && other.endsWith(".failed")) await unlink(path.join(folder, other)).catch(() => {});
+  forgetFolder(folder);
+  try {
+    if (!(await writeAtomically(folder, file, Buffer.from(JSON.stringify({ error: failure.error.slice(0, 500) }))))) return false;
+    for (const other of await entries(folder))
+      if (other !== file && other.startsWith(`${name}~`) && other.endsWith(".failed")) await unlink(path.join(folder, other)).catch(() => {});
+  } finally {
+    forgetFolder(folder);
+  }
   return true;
 }
 
@@ -232,13 +314,20 @@ export async function readDesignRecordingFailure(
 ): Promise<string | null> {
   const folder = frameFolder(workspace, directoryId, frameId);
   const name = themeName(theme);
-  if (!folder || !THEME.test(name) || !SOURCE_VERSION.test(wanted.sourceVersion) || !(await contained(folder))) return null;
+  if (!folder || !THEME.test(name) || !SOURCE_VERSION.test(wanted.sourceVersion)) return null;
+  const key = `failure\0${name}\0${wanted.sourceVersion}\0${wanted.pipeline}`;
+  const cached = answered<string | null>(folder, key);
+  if (cached) return cached.value;
+  const writes = folderWrites.get(folder) ?? 0;
+  if (!(await contained(folder))) return null;
   const bytes = await readBounded(path.join(folder, failureFile(name, wanted.sourceVersion, wanted.pipeline)), FAILURE_BYTES);
-  if (!bytes) return null;
-  try {
+  let error: string | null = null;
+  if (bytes) try {
     const parsed = JSON.parse(bytes.toString("utf8")) as { error?: unknown };
-    return typeof parsed.error === "string" && parsed.error ? parsed.error : null;
-  } catch { return null; }
+    error = typeof parsed.error === "string" && parsed.error ? parsed.error : null;
+  } catch { error = null; }
+  answer(folder, key, error, writes);
+  return error;
 }
 
 /** The frame's newest stored recording in this theme, of any generation
@@ -252,7 +341,27 @@ export async function readStoredDesignRecording(
 ): Promise<StoredDesignRecording | null> {
   const folder = frameFolder(workspace, directoryId, frameId);
   const name = themeName(theme);
-  if (!folder || !THEME.test(name) || !(await contained(folder))) return null;
+  if (!folder || !THEME.test(name)) return null;
+  const key = `stored\0${name}\0${wanted.sourceVersion ?? ""}\0${wanted.pipeline ?? ""}`;
+  const cached = answered<{ manifest: StoredDesignRecording; file: string; touched: number } | null>(folder, key);
+  if (cached) {
+    const hit = cached.value;
+    if (hit && Date.now() - hit.touched > TOUCH_MS) {
+      hit.touched = Date.now();
+      const now = new Date();
+      void utimes(hit.file, now, now).catch(() => {});
+    }
+    return hit?.manifest ?? null;
+  }
+  const writes = folderWrites.get(folder) ?? 0;
+  const found = await readNewestManifest(folder, name, wanted);
+  answer(folder, key, found, writes);
+  return found?.manifest ?? null;
+}
+
+async function readNewestManifest(folder: string, name: string, wanted: { sourceVersion?: string; pipeline?: string }):
+  Promise<{ manifest: StoredDesignRecording; file: string; touched: number } | null> {
+  if (!(await contained(folder))) return null;
   let best: { file: string; modified: number; version: string } | null = null;
   for (const entry of await entries(folder)) {
     const match = MANIFEST.exec(entry);
@@ -270,11 +379,13 @@ export async function readStoredDesignRecording(
   try { parsed = JSON.parse(bytes.toString("utf8")); } catch { return null; }
   const manifest = validManifest(parsed, best.version);
   if (!manifest || (wanted.pipeline !== undefined && manifest.pipeline !== wanted.pipeline)) return null;
+  let touched = best.modified;
   if (Date.now() - best.modified > TOUCH_MS) {
     const now = new Date();
     await utimes(file, now, now).catch(() => {});
+    touched = now.getTime();
   }
-  return manifest;
+  return { manifest, file, touched };
 }
 
 /** Stores an externalized typeface's font data as chunks, under its content
@@ -294,6 +405,9 @@ export async function storeDesignRecordingTypeface(id: string, bytes: Uint8Array
 export async function readDesignRecordingTypeface(id: string): Promise<StoredDesignRecordingTypeface | null> {
   if (!DESIGN_RECORDING_CHUNK_ID_PATTERN.test(id)) return null;
   const file = typefaceFile(id);
+  // A typeface's description never changes for its content id.
+  const held = typefaceCache.get(file);
+  if (held) return { ...held, chunks: [...held.chunks] };
   if (!(await contained(path.dirname(file)))) return null;
   const bytes = await readBounded(file, MANIFEST_BYTES);
   if (!bytes) return null;
@@ -303,5 +417,8 @@ export async function readDesignRecordingTypeface(id: string): Promise<StoredDes
   if (typeface?.id !== id || typeof typeface.bytes !== "number" || !Number.isInteger(typeface.bytes) || typeface.bytes < 1 ||
     typeface.bytes > DESIGN_RECORDING_TYPEFACE_MAX_BYTES || !Array.isArray(typeface.chunks) || typeface.chunks.length < 1 ||
     !typeface.chunks.every((chunk) => typeof chunk === "string" && DESIGN_RECORDING_CHUNK_ID_PATTERN.test(chunk))) return null;
-  return { id, bytes: typeface.bytes, chunks: [...typeface.chunks] };
+  const stored = { id, bytes: typeface.bytes, chunks: [...typeface.chunks] };
+  if (typefaceCache.size >= 1_024) typefaceCache.delete(typefaceCache.keys().next().value!);
+  typefaceCache.set(file, stored);
+  return { ...stored, chunks: [...stored.chunks] };
 }
