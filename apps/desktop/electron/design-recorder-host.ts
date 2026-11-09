@@ -35,7 +35,7 @@ const token = process.env.ZEROS_DESIGN_RECORDER_TOKEN ?? "";
 delete process.env.ZEROS_DESIGN_RECORDER_TOKEN;
 const recorder = process.env.ZEROS_DESIGN_RECORDER_IDENTITY ?? "";
 delete process.env.ZEROS_DESIGN_RECORDER_IDENTITY;
-const WINDOWS = Math.max(1, Math.min(4, Number(process.env.ZEROS_DESIGN_RECORDER_WINDOWS) || Math.floor((os.availableParallelism?.() ?? os.cpus().length) / 2)));
+const WINDOWS = Math.max(1, Math.min(8, Number(process.env.ZEROS_DESIGN_RECORDER_WINDOWS) || Math.floor((os.availableParallelism?.() ?? os.cpus().length) / 2)));
 const MAX_BODY_BYTES = 64 * 1024 * 1024;
 /** Batches the recorder takes at once; their frames share the windows. */
 const MAX_BATCHES = 3;
