@@ -2,6 +2,7 @@ import { availableParallelism } from "node:os";
 import { Worker } from "node:worker_threads";
 import type { DurableDesignDependency } from "./dependency-read-set";
 import type { DesignFrameIdentity } from "./identity-cache";
+import type { DesignFrameRenderSheet } from "./render-preparation";
 
 /** Workers stop after this long without a batch; they hold a parsed canvas
  * and style caches each. */
@@ -12,7 +13,12 @@ export type DesignWorkerFrameIdentity =
   | { file: string; identity: DesignFrameIdentity; modifiedAt: number; complete: boolean; durable: DurableDesignDependency[] | null }
   | { file: string; error: string };
 
-const testing: { workers: number | null; frames: number; workerUrl: URL | null } = { workers: null, frames: 0, workerUrl: null };
+export type DesignWorkerComposedFrame =
+  | { file: string; sourceVersion: string; sanitized: string; sheets?: DesignFrameRenderSheet[] }
+  | { file: string; error: string };
+
+const testing: { workers: number | null; frames: number; composed: number; workerUrl: URL | null } =
+  { workers: null, frames: 0, composed: 0, workerUrl: null };
 
 /** Experimental, off by default: ZEROS_DESIGN_PREPARATION_WORKERS=<n>
  * prepares cold frame identities on up to n workers, leaving two cores. */
@@ -25,7 +31,7 @@ export function designPreparationWorkerCount(env: NodeJS.ProcessEnv = process.en
 
 interface PoolWorker {
   worker: Worker;
-  pending: Map<number, { resolve: (results: DesignWorkerFrameIdentity[]) => void; reject: (error: Error) => void }>;
+  pending: Map<number, { resolve: (results: unknown[]) => void; reject: (error: Error) => void }>;
 }
 
 let pool: PoolWorker[] = [];
@@ -62,7 +68,7 @@ function spawn(): PoolWorker {
     for (const { reject } of entry.pending.values()) reject(error);
     entry.pending.clear();
   };
-  worker.on("message", (message: { id: number; results?: DesignWorkerFrameIdentity[]; error?: string }) => {
+  worker.on("message", (message: { id: number; results?: unknown[]; error?: string }) => {
     const request = entry.pending.get(message.id);
     if (!request) return;
     entry.answered = true;
@@ -88,7 +94,25 @@ function scheduleIdleStop(): void {
  * whose worker failed, are left out: the caller prepares those itself. */
 export async function prepareFrameIdentitiesInWorkers(workspacePath: string, catalogRevision: string,
   files: readonly string[]): Promise<DesignWorkerFrameIdentity[]> {
-  const count = unavailable ? 0 : Math.min(designPreparationWorkerCount(), files.length);
+  const results = await inWorkers<string, DesignWorkerFrameIdentity>(files,
+    (file) => ({ workspacePath, catalogRevision, files: [file] }));
+  testing.frames += results.filter((result) => "identity" in result).length;
+  return results;
+}
+
+/** Compose frames' render sources across the pool, for capture batches. As
+ * with preparation, whatever a worker did not compose the caller composes. */
+export async function composeFrameSourcesInWorkers(workspacePath: string,
+  frames: ReadonlyArray<{ file: string; width: number; height: number }>, options: { deferTailwind: boolean }):
+  Promise<DesignWorkerComposedFrame[]> {
+  const results = await inWorkers<{ file: string; width: number; height: number }, DesignWorkerComposedFrame>(frames,
+    (frame) => ({ kind: "compose", workspacePath, frames: [frame], deferTailwind: options.deferTailwind }));
+  testing.composed += results.filter((result) => "sanitized" in result).length;
+  return results;
+}
+
+async function inWorkers<T, R>(items: readonly T[], message: (item: T) => Record<string, unknown>): Promise<R[]> {
+  const count = unavailable ? 0 : Math.min(designPreparationWorkerCount(), items.length);
   if (count === 0) return [];
   // An idle stop armed by an earlier batch must not end this one's workers.
   if (idle) clearTimeout(idle);
@@ -99,14 +123,14 @@ export async function prepareFrameIdentitiesInWorkers(workspacePath: string, cat
     if (inFlight === 0) scheduleIdleStop();
     return [];
   }
-  // Each worker takes the next frame as it finishes one, so a batch's heavy
-  // frames never wait behind a fixed share. A failed worker stops taking
-  // frames; whatever is left is prepared on the engine's thread.
-  const queue = [...files];
-  const results: DesignWorkerFrameIdentity[] = [];
+  // Each worker takes the next item as it finishes one, so heavy frames
+  // never wait behind a fixed share. A failed worker stops taking items;
+  // whatever is left is done on the engine's thread.
+  const queue = [...items];
+  const results: R[] = [];
   const take = async (entry: PoolWorker) => {
-    for (let file = queue.shift(); file !== undefined; file = queue.shift()) {
-      try { results.push(...await ask(entry, { workspacePath, catalogRevision, files: [file] })); }
+    for (let item = queue.shift(); item !== undefined; item = queue.shift()) {
+      try { results.push(...await ask(entry, message(item)) as R[]); }
       catch { return; }
     }
   };
@@ -116,12 +140,10 @@ export async function prepareFrameIdentitiesInWorkers(workspacePath: string, cat
   } finally {
     if (--inFlight === 0) scheduleIdleStop();
   }
-  testing.frames += results.filter((result) => "identity" in result).length;
   return results;
 }
 
-function ask(entry: PoolWorker, request: { workspacePath: string; catalogRevision: string; files: readonly string[] }):
-  Promise<DesignWorkerFrameIdentity[]> {
+function ask(entry: PoolWorker, request: Record<string, unknown>): Promise<unknown[]> {
   return new Promise((resolve, reject) => {
     const id = ++next;
     entry.pending.set(id, { resolve, reject });
@@ -144,6 +166,6 @@ export function configureDesignPreparationWorkersForTests(workers: number | null
   unavailable = false;
 }
 
-export function designPreparationWorkerStatsForTests(): { frames: number } {
-  return { frames: testing.frames };
+export function designPreparationWorkerStatsForTests(): { frames: number; composed: number } {
+  return { frames: testing.frames, composed: testing.composed };
 }
