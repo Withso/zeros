@@ -11,6 +11,8 @@ export const DESIGN_RECORDINGS_CAPABILITY = "design.recordings.v1";
 /** Engines that answer a read's `withFailures`: stored failures the current
  * recorder can't record, so a reopen covers those frames without waiting. */
 export const DESIGN_RECORDINGS_READ_FAILURES_CAPABILITY = "design.recordings.read-failures.v1";
+/** Engines that take a request's `colorScheme` and keep each scheme's recordings apart. */
+export const DESIGN_RECORDINGS_COLOR_SCHEME_CAPABILITY = "design.recordings.color-scheme.v1";
 export const DESIGN_RECORDING_CHUNK_ID_PATTERN = /^[a-f0-9]{32}$/;
 export const DESIGN_RECORDING_CHUNK_MAX_BYTES = 64 * 1024;
 export const DESIGN_RECORDING_MAX_BYTES = 64 * 1024 * 1024;
@@ -67,6 +69,7 @@ export const designRecordingsRenderSchema = z.object({
   frames: z.array(recordingFrame).min(1).max(DESIGN_RECORDINGS_RENDER_FRAMES),
   knownChunks: z.array(recordingChunkId).max(DESIGN_RECORDINGS_KNOWN_CHUNKS).optional(),
   deviceScaleFactor: z.number().min(1).max(4).optional(),
+  colorScheme: z.enum(["light", "dark"]).default("light"),
   jobId: z.string().uuid().optional(),
   deadline: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
 }).strict()
@@ -93,6 +96,7 @@ export const designRecordingsReadSchema = z.object({
   theme: recordingTheme,
   frames: z.array(recordingFrame.partial({ sourceVersion: true })).min(1).max(DESIGN_MAX_FRAMES_PER_PAGE),
   knownChunks: z.array(recordingChunkId).max(DESIGN_RECORDINGS_KNOWN_CHUNKS).optional(),
+  colorScheme: z.enum(["light", "dark"]).default("light"),
   withFailures: z.literal(true).optional(),
 }).strict()
   .refine((input) => new Set(input.frames.map((frame) => frame.file)).size === input.frames.length, "Recording frames must be distinct.");

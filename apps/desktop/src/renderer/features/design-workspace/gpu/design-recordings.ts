@@ -6,10 +6,12 @@ export interface DesignRecordingsOwner {
   readonly workspaceId: string;
   readonly directoryId: string;
   readonly theme: string | null;
+  /** The scheme frames are drawn in: a frame's light and dark recordings differ. */
+  readonly colorScheme: "light" | "dark";
 }
 
 export function designRecordingsOwnerKey(owner: DesignRecordingsOwner): string {
-  return JSON.stringify([owner.workspaceId, owner.directoryId, owner.theme]);
+  return JSON.stringify([owner.workspaceId, owner.directoryId, owner.theme, owner.colorScheme]);
 }
 
 /** A frame the canvas shows. Without a version the frame is still being
