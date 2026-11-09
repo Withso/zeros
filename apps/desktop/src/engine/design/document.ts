@@ -22,10 +22,12 @@ import {
 import {
   composeFrameSrcDoc,
   prepareFrameRenderSource,
+  type RetainedFrameRender,
 } from "./render-preparation";
 import { parseDesignSource, sharedDesignParse, withSharedDesignParses } from "./shared-parse";
 import { designFrameIdentities, designFrameIdentityContext, type DesignFrameIdentity } from "./identity-cache";
-import { captureDurableDesignDependencies, isDesignDependencyCaptureActive } from "./dependency-read-set";
+import { captureDurableDesignDependencies, isDesignDependencyCaptureActive, type DurableDesignDependency } from "./dependency-read-set";
+import { designRecordedCanvasActive, retainDesignFrame } from "./retained-frames";
 import { designPreparationWorkerCount, prepareFrameIdentitiesInWorkers, type DesignWorkerFrameIdentity } from "./preparation-pool";
 import { elementRecords } from "./source";
 // ──────────────────────────────────────────────────────────
@@ -1243,10 +1245,24 @@ async function computeRegisteredFrameIdentity(workspacePath: string, file: strin
   const healed = healDesignOids(source);
   const document = healed.document ?? parseDesignSource(healed.html);
   const render = await prepareFrameRenderSource(workspacePath, source, { width: geometry.w, height: geometry.h },
-    undefined, undefined, file, canvas, { identityOnly: true });
+    undefined, undefined, file, canvas, { identityOnly: true, retain: true });
   const identity: DesignFrameIdentity = { sourceVersion: render.sourceVersion, surfaceCost: render.surfaceCost,
     nodeCount: designNodeRecords(document).length, layerCount: designLayerCount(document) };
-  return { identity, modifiedAt: safe.modifiedAt };
+  return { identity, modifiedAt: safe.modifiedAt, retained: render.retained };
+}
+
+/** A frame's identity context on a canvas, as preparation records it. */
+export function designFrameIdentityContextOf(canvas: CanvasDocument, file: string): string | null {
+  const id = canvas.frame_info[file]?.id;
+  return designFrameIdentityContext(canvas, file, id === undefined ? undefined : designFramePageIds(canvas).get(id));
+}
+
+/** Keep a captured identity read for this frame's capture, when its read
+ * set is complete and storable: the capture checks the same set. */
+function retainCapturedFrame(workspacePath: string, file: string, context: string | null,
+  read: { complete: boolean; durable: DurableDesignDependency[] | null; value: { retained?: RetainedFrameRender } }, retain: boolean): void {
+  if (!retain || context === null || !read.complete || !read.durable || !read.value.retained) return;
+  retainDesignFrame(workspacePath, designDirectoryNameFor(workspacePath), file, { context, render: read.value.retained, durable: read.durable });
 }
 
 async function prepareSharedRegisteredDesignFrame(workspacePath: string, file: string, canvas: CanvasDocument,
@@ -1272,6 +1288,7 @@ async function prepareSharedRegisteredDesignFrame(workspacePath: string, file: s
   }
   const read = await captureDurableDesignDependencies(compute);
   identities.remember(file, context, read.value.identity, read);
+  retainCapturedFrame(workspacePath, file, context, read, designRecordedCanvasActive(workspacePath));
   return frame(read.value.identity, read.value.modifiedAt);
 }
 
@@ -1304,7 +1321,8 @@ let workerCanvas: { root: string; directory: string; revision: string; canvas: C
  * reads behind them, for the engine to remember. It only reads: the engine
  * recovered, checked the catalog and holds the document lock meanwhile, and
  * its own check after the batch refuses it if the catalog moved. */
-export async function prepareDesignFrameIdentitiesInWorker(workspacePath: string, catalogRevision: string, files: readonly string[]) {
+export async function prepareDesignFrameIdentitiesInWorker(workspacePath: string, catalogRevision: string, files: readonly string[],
+  options: { retain?: boolean } = {}) {
   const root = path.resolve(workspacePath);
   const directory = designDirectoryNameFor(workspacePath);
   if (workerCanvas?.root !== root || workerCanvas.directory !== directory || workerCanvas.revision !== catalogRevision)
@@ -1314,6 +1332,8 @@ export async function prepareDesignFrameIdentitiesInWorker(workspacePath: string
   for (const file of files) {
     try {
       const read = await withSharedDesignParses(() => captureDurableDesignDependencies(() => computeRegisteredFrameIdentity(workspacePath, file, canvas)));
+      // Kept here: this worker composes the frame's capture too.
+      retainCapturedFrame(workspacePath, file, designFrameIdentityContextOf(canvas, file), read, options.retain === true);
       results.push({ file, identity: read.value.identity, modifiedAt: read.value.modifiedAt, complete: read.complete, durable: read.durable });
     } catch (error) {
       results.push({ file, error: error instanceof Error ? error.message : "Could not prepare this frame." });

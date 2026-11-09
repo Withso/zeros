@@ -7,6 +7,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { DESIGN_DIRECTORY_NAME, initializeDesignDocument, prepareDesignNavigationFrames, readDesignNavigationSnapshot } from "../document";
 import { designDirectoryNameFor, forgetDesignDirectoryName, primeDesignDirectoryName } from "../directory-registry";
 import { designIdentityCacheStatsForTests, resetDesignIdentityCacheForTests } from "../identity-cache";
+import { configureRetainedDesignFramesForTests, noteDesignRecordedCanvas } from "../retained-frames";
 import { designDirectoryEntry } from "../metadata";
 import {
   configureDesignPreparationWorkersForTests,
@@ -115,6 +116,32 @@ describe("Design preparation workers", () => {
     const pooled = comparable(await composeDesignThumbnailBatches(root, input));
     expect(designPreparationWorkerStatsForTests().composed - before).toBe(files.length);
     expect(pooled).toEqual(single);
+  }, 60_000);
+
+  it("composes a frame's capture on the worker that prepared it, from the read it kept", async () => {
+    const navigation = await readDesignNavigationSnapshot(root);
+    const prepared = await prepareDesignNavigationFrames(root, navigation.catalogRevision, files);
+    const frames = prepared.frames.map(({ file, sourceVersion }) => ({ file, sourceVersion: sourceVersion! }));
+    const input = { workspaceId: "w", directoryId: designDirectoryEntry(root, designDirectoryNameFor(root))!.id, theme: null,
+      colorScheme: "light" as const, maxDimension: 256, frames };
+    const comparable = (result: Awaited<ReturnType<typeof composeDesignThumbnailBatches>>) => ({ ...result,
+      batches: result.batches.map(({ request, frames: items }) => ({ request: { ...request, revision: "" }, frames: [...items] })) });
+    configureRetainedDesignFramesForTests();
+    const fromSource = comparable(await composeDesignThumbnailBatches(root, input));
+    noteDesignRecordedCanvas(root);
+    for (const workers of [1, 2]) {
+      resetDesignIdentityCacheForTests();
+      configureDesignPreparationWorkersForTests(workers, { workerUrl: bundle.url });
+      await prepareDesignNavigationFrames(root, navigation.catalogRevision, files);
+      const before = designPreparationWorkerStatsForTests().reused;
+      expect(comparable(await composeDesignThumbnailBatches(root, input))).toEqual(fromSource);
+      const reused = designPreparationWorkerStatsForTests().reused - before;
+      // One worker composes every frame it prepared; with two, a worker that
+      // runs out of its own frames takes the other's, from the source.
+      if (workers === 1) expect(reused).toBe(files.length);
+      else expect(reused).toBeGreaterThan(0);
+      await stopDesignPreparationWorkers();
+    }
   }, 60_000);
 
   it("composes a frame its worker couldn't compose on the engine's thread, and says so once", async () => {
