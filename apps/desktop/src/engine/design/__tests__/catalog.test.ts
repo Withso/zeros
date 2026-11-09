@@ -9,6 +9,9 @@ import {
   DESIGN_CATALOG_BATCH_BYTES,
   designCatalogFrameSchema,
   type DesignCatalogRead,
+  DESIGN_CATALOG_WIDE_BATCH_BYTES,
+  DESIGN_CATALOG_WIDE_BATCH_ENTRIES,
+  designCatalogBatchSchema,
 } from "@zeros/protocol/design-catalog";
 import { DESIGN_MAX_FRAMES_PER_PAGE } from "@zeros/protocol/design-pages";
 import { decodeCanvasFile } from "../canvas-file";
@@ -351,6 +354,28 @@ describe("bounded revisioned metadata catalog", () => {
     expect(total).toBe(26_000);
     expect(read.open).toHaveBeenCalledOnce();
   });
+  it("reads 26 full pages in a few wide batches, each within the wide byte bound", async () => {
+    // Every batch revalidates the whole catalog file: 102 batches of 256
+    // took a reloaded 26,000-frame directory ~1 s before its canvas could open.
+    const canvas = decodeCanvasFile(JSON.stringify(pagedCanvasFixture(26, DESIGN_MAX_FRAMES_PER_PAGE)), { version: 2 });
+    const snapshot = { ...metadata(0), ...projectDesignCatalog(canvas as unknown as CanvasDocument) };
+    const reader = new DesignCatalogReader();
+    const read = source(snapshot);
+    let total = 0, trips = 0;
+    let cursor: string | undefined;
+    do {
+      const batch = await reader.read({ ...input, limit: DESIGN_CATALOG_WIDE_BATCH_ENTRIES, ...(cursor ? { cursor } : {}) }, admission, read);
+      if (batch.status !== "ready") throw new Error(`expected batch, got ${batch.reason}`);
+      expect(Buffer.byteLength(JSON.stringify(batch))).toBeLessThanOrEqual(DESIGN_CATALOG_WIDE_BATCH_BYTES);
+      expect(designCatalogBatchSchema.safeParse(batch).success).toBe(true);
+      total += batch.frames.length;
+      trips++;
+      cursor = batch.nextCursor ?? undefined;
+    } while (cursor);
+    expect(total).toBe(26_000);
+    expect(trips).toBeLessThanOrEqual(8);
+  });
+
   it("stops at the byte bound before the entry bound and completes small/empty catalogs", async () => {
     const reader = new DesignCatalogReader();
     const data = metadata(256);

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  DESIGN_CATALOG_WIDE_BATCH_ENTRIES,
   designCatalogBatchSchema,
   designCatalogReadSchema,
   designCatalogReplySchema,
@@ -84,7 +85,7 @@ describe("metadata-only Design catalog wire", () => {
     expect(designCatalogReadSchema.parse(input)).toEqual(input);
     for (const value of [
       { ...input, version: 2 },
-      { ...input, limit: 257 },
+      { ...input, limit: DESIGN_CATALOG_WIDE_BATCH_ENTRIES + 1 },
       { ...input, root: "/other" },
       { ...input, intent: -1 },
     ])
@@ -99,11 +100,18 @@ describe("metadata-only Design catalog wire", () => {
     ])
       expect(designCatalogReplySchema.safeParse(value).success).toBe(false);
   });
+  it("lets a request ask for a wide batch, and no wider", () => {
+    const request = { version: 1, workspaceId: "local", directoryId: "design_test", intent: 1 };
+    expect(DESIGN_CATALOG_WIDE_BATCH_ENTRIES).toBe(4096);
+    expect(designCatalogReadSchema.safeParse({ ...request, limit: DESIGN_CATALOG_WIDE_BATCH_ENTRIES }).success).toBe(true);
+    expect(designCatalogReadSchema.safeParse({ ...request, limit: DESIGN_CATALOG_WIDE_BATCH_ENTRIES + 1 }).success).toBe(false);
+  });
   it("bounds encoded UTF-8 bytes independently of descriptor count", () => {
+    // Past the wide batch's 1 MB: a wide batch may hold more than 256 KB.
     const frames = Array.from({ length: 256 }, (_, i) => ({
       ...batch.frames[0],
       id: `f${i}`,
-      source: `${i}${"x".repeat(1500)}.html`,
+      source: `${i}${"x".repeat(4000)}.html`,
       order: i,
     }));
     expect(

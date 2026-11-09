@@ -1,8 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  DESIGN_CATALOG_BATCH_ENTRIES,
   DESIGN_CATALOG_DESCRIPTOR_LIMIT,
   DESIGN_CATALOG_READ_CAPABILITY,
   DESIGN_CATALOG_READ_OPERATION,
+  DESIGN_CATALOG_WIDE_BATCH_ENTRIES,
+  DESIGN_CATALOG_WIDE_BATCHES_CAPABILITY,
   designCatalogBatchSchema,
   type DesignCatalogBatch,
   type DesignCatalogOwner,
@@ -155,6 +158,7 @@ async function fixture(
   placement: "personal" | "organization-local" | "cloud" = "organization-local",
   admitted = true,
   connected = true,
+  capabilities: readonly string[] = [DESIGN_CATALOG_READ_CAPABILITY],
 ) {
   vi.stubGlobal("window", globalThis);
   vi.stubGlobal("WebSocket", { OPEN: 1 });
@@ -260,7 +264,7 @@ async function fixture(
     });
     state.handleIncoming({
       type: "ENGINE_READY",
-      capabilities: [DESIGN_CATALOG_READ_CAPABILITY],
+      capabilities: [...capabilities],
     });
   }
   if (placement === "cloud" && admitted) await client.warmWorkspace(scope);
@@ -318,6 +322,22 @@ describe("coherent Design catalog read adapter", () => {
       expect(adapter.isAuthoritative(a.authority, result.catalog)).toBe(true);
     },
   );
+
+  it.each([
+    ["offers", true, DESIGN_CATALOG_WIDE_BATCH_ENTRIES],
+    ["doesn't offer", false, DESIGN_CATALOG_BATCH_ENTRIES],
+  ] as const)("asks for wide batches when the Local engine %s them", async (_, wide, limit) => {
+    // Each batch makes the engine revalidate the whole catalog file.
+    const f = await fixture("organization-local", true, true,
+      [DESIGN_CATALOG_READ_CAPABILITY, ...(wide ? [DESIGN_CATALOG_WIDE_BATCHES_CAPABILITY] : [])]);
+    const a = lifetime(f.owner);
+    f.setHandler(async (input) =>
+      input.cursor ? packet(f.owner, 2, 1, 1) : packet(f.owner, 2, 0, 1),
+    );
+    const adapter = new DesignCatalogReadAdapter(f.client);
+    expect((await adapter.read(a.authority, 1)).status).toBe("coherent");
+    expect(f.calls.map((input) => input.limit)).toEqual([limit, limit]);
+  });
 
   it("does not publish a raw terminal partial packet without coverage from zero", async () => {
     const f = await fixture();
