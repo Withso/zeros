@@ -20,6 +20,8 @@ vi.mock("../../../state/cloud-workspace-catalog", () => ({
   cloudWorkspaceDocument: () => ({ status: mocks.status, capabilities: { canWrite: true }, deletedAt: null }),
   canReadCloudWorkspace: () => true,
   cloudWorkspaceLifecycleTask: () => undefined,
+  isCloudWorkspaceLifecyclePending: () => false,
+  refreshCloudWorkspace: async () => ({}),
   subscribeCloudWorkspaces: (listener: () => void) => {
     mocks.listeners.add(listener); return () => mocks.listeners.delete(listener);
   },
