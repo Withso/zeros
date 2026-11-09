@@ -147,6 +147,41 @@ describe("Design recordings", () => {
     expect(other.calls).toHaveLength(1);
   });
 
+  it("records each color scheme on its own, the way live frames draw in it", async () => {
+    const frames = await versions(["page-1/a.html"]);
+    const host = recorder();
+    await renderDesignRecordings(root, { workspaceId: "w", directoryId, theme: null, frames }, { record: host.record, recorder: RECORDER });
+    const dark = await renderDesignRecordings(root, { workspaceId: "w", directoryId, theme: null, colorScheme: "dark", frames }, { record: host.record, recorder: RECORDER });
+    expect(host.calls.map((call) => call.colorScheme)).toEqual(["light", "dark"]);
+    expect(dark.recordings.map((recording) => recording.file)).toEqual(["page-1/a.html"]);
+    // Both are stored: neither scheme records again.
+    await renderDesignRecordings(root, { workspaceId: "w", directoryId, theme: null, colorScheme: "light", frames }, { record: host.record, recorder: RECORDER });
+    await renderDesignRecordings(root, { workspaceId: "w", directoryId, theme: null, colorScheme: "dark", frames }, { record: host.record, recorder: RECORDER });
+    expect(host.calls).toHaveLength(2);
+    const read = await readDesignRecordings(root, { workspaceId: "w", directoryId, theme: null, colorScheme: "dark", frames: [{ file: "page-1/a.html" }] });
+    expect(read.recordings[0]?.layers[0]?.chunks).toEqual(dark.recordings[0]?.layers[0]?.chunks);
+  });
+
+  it("records a request's frames in slices, the next composing while one records", async () => {
+    const canvasFile = path.join(folder, "meta/canvas.json");
+    const canvas = JSON.parse(await readFile(canvasFile, "utf8"));
+    const files: string[] = [];
+    for (let index = 3; index < 23; index++) {
+      const file = `page-1/s${index}.html`;
+      await writeFile(path.join(folder, file), frame(`s${index}`));
+      canvas.frames[`frame_${index}`] = { kind: "html", source: file, title: `s${index}`, x: index * 400, y: 0, width: 320, height: 200 };
+      canvas.pages[0].frames.push(`frame_${index}`);
+      files.push(file);
+    }
+    await writeFile(canvasFile, JSON.stringify(canvas, null, 2));
+    // Preparation takes at most 16 frames a call.
+    const frames = [...await versions(files.slice(0, 16)), ...await versions(files.slice(16))];
+    const host = recorder();
+    const reply = await renderDesignRecordings(root, { workspaceId: "w", directoryId, theme: null, frames }, { record: host.record, recorder: RECORDER });
+    expect(host.calls.map((call) => call.items.length)).toEqual([16, 4]);
+    expect(reply.recordings.map((recording) => recording.file)).toEqual(files);
+  });
+
   it("records a frame again after a failure that wasn't permanent", async () => {
     const frames = await versions(["page-1/a.html"]);
     const host = recorder({ error: () => "The recorder's page stopped (crashed) while recording this frame." });
