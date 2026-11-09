@@ -125,17 +125,19 @@ exported page by page to [design-implementation/](design-implementation/README.m
    floating menus, popovers, tooltips, hover cards and toasts share `bg3` with
    `border2`, 12px corners, the dropdown shadow, a 4px inset and 28px rows with
    8px corners (`shared/ui/menu-surface.ts`, `Surface kind="floating"`). The
-   chat composer, user messages and everything docked above the composer
-   (dock cards and the @, / and # pickers) share `sidebar-bg` with the
-   `--composer-border` edge (#323232 in Dark, `border2` in Light) and no
-   shadow, 8px apart. The transcript dissolves into the pane over the 32px
+   chat composer and everything docked above it (dock cards and the @, / and
+   # pickers) share `sidebar-bg` with the `--composer-border` edge (#323232
+   in Dark, `border2` in Light) and no shadow, 8px apart. The transcript dissolves into the pane over the 32px
    above the top of that stack (`COMPOSER_DOCK_FADE`,
    `shared/ui/composer-surface.ts`): above the composer alone, above the
    highest card once cards dock, and on a docked picker's own top edge while
    it opens above. Editing a sent message happens in the composer itself:
    the same card, surface, 18px corners, drag edge and 28px controls around
-   the same editor and pills. A sent message spans the lane like the
-   composer, however short. Taller than six lines, it folds to five that
+   the same editor and pills. A sent message is a `bg2` bubble with no edge
+   at the lane's right edge (2026-11-09), as wide as its text up to 7/8 of
+   the lane, so even a long one reads as the reader's own; Zeros' own
+   messages keep their brown fill. Its pills keep their `border2` edge on
+   the `bg2` fill. Taller than six lines, it folds to five that
    dissolve over their last 32px above a Ghost **Show more**; unfolded it shows up to
    fifteen and scrolls inside, fading only the edges its text runs past,
    above **Show less** (`features/agent/prompt-fold.tsx`).
@@ -361,7 +363,8 @@ imports, following property paths such as `chip.cls`). The ledger counts
 | Canvas, active chat, dialogs, sheets | `bg-bg1` | `bg-bg1-hover` | `border-border1` | Dialogs sit on `bg-scrim` |
 | Split chat pane | `bg-(--pane-bg)` (= `bg1`) | — | `border-border2` focused, `border-border1` otherwise | Only while the column is split: 8px apart both ways on the `bg1` chrome and 12px in from its edges, with 12px corners, no seam and no fade; an unfocused pane's strip and body dim to 80% (§0 item 13) |
 | Raised: tiles | `bg-bg2` | `bg-bg2-hover` | `border-border2` | `bg-bg1-bright` for cards and settings groups |
-| Chat composer, user messages and what docks above the composer | `bg-sidebar-bg` | `bg-sidebar-bg-hover` | `border-(--composer-border)` | No shadow; 18px corners on the Create, workspace and edit composers, 12px elsewhere. Dock cards use `DOCK_CARD_CLS`; the docked pickers use `PopoverContent surface="composer"`; review drafts take `COMPOSER_SURFACE_CLS`. The top of the stack carries `COMPOSER_DOCK_FADE`. Sent messages span the lane and fold long text with `PromptFold` |
+| Chat composer and what docks above it | `bg-sidebar-bg` | `bg-sidebar-bg-hover` | `border-(--composer-border)` | No shadow; 18px corners on the Create, workspace and edit composers, 12px elsewhere. Dock cards use `DOCK_CARD_CLS`; the docked pickers use `PopoverContent surface="composer"`; review drafts take `COMPOSER_SURFACE_CLS`. The top of the stack carries `COMPOSER_DOCK_FADE` |
+| Sent user message | `bg-bg2` | — | none | At the lane's right edge, as wide as its text up to 7/8 of the lane (`max-w-7/8`), 12px corners; folds long text with `PromptFold` (§0 item 4) |
 | Floating: menus, selects, command, popovers, tooltips, hover cards, toasts | `bg-bg3` | `bg-bg3-hover` | `border-border2` | 12px corners, 4px inset, lift = `shadow-[var(--shadow-dropdown)]`; feature panels take the fill from `FLOATING_SURFACE` |
 | Repository sidebar | `bg-sidebar-bg` | `bg-sidebar-bg-hover` | `border-border2` | Settings navigation uses the default surfaces |
 | Grouped content on canvas | `bg-bg1-highlight` | — | — | A wash, never the only boundary |

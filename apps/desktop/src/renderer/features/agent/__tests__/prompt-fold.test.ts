@@ -25,18 +25,34 @@ function classesOf(markup: string, marker: string): Set<string> {
   return new Set(value.replaceAll("&amp;", "&").split(/\s+/));
 }
 
+// 2026-11-09: a sent message sits at the lane's right edge again, as wide as
+// its text up to 7/8 of the lane, so even a long one reads as the reader's own.
+// It fills bg2 with no edge, apart from the composer's surface.
 describe("sent message width", () => {
-  it("spans the lane at any length, like the composer", () => {
+  const render = (props: Record<string, unknown> = {}) =>
+    renderToStaticMarkup(h(TurnPromptHeader, { originalText: "hi", ...props, children: "hi" }));
+
+  it("sits at the lane's right edge, as wide as its text up to 7/8 of the lane", () => {
     for (const props of [{}, { autoAction: "create-pr" }]) {
-      const markup = renderToStaticMarkup(h(TurnPromptHeader, { originalText: "hi", ...props, children: "hi" }));
+      const markup = render(props);
       const prompt = classesOf(markup, "zeros-agent-turn-prompt group/usermsg");
       expect(prompt).toContain("w-full");
       expect(prompt).toContain("max-w-[800px]");
-      expect(prompt).not.toContain("items-end");
+      expect(prompt).toContain("items-end");
       const bubble = classesOf(markup, 'data-user-bubble=""');
-      expect(bubble).toContain("w-full");
-      expect(bubble).not.toContain("w-fit");
+      expect(bubble).toContain("w-fit");
+      expect(bubble).toContain("max-w-7/8");
+      expect(bubble).not.toContain("w-full");
     }
+  });
+
+  it("fills bg2 with no edge, while Zeros' own messages keep their brown fill", () => {
+    const own = [...classesOf(render(), 'data-user-bubble=""')];
+    expect(own).toContain("bg-bg2");
+    expect(own.filter((cls) => /^border|^bg-sidebar-bg$/.test(cls))).toEqual([]);
+    const auto = [...classesOf(render({ autoAction: "create-pr" }), 'data-user-bubble=""')];
+    expect(auto).toContain("bg-brown-bg");
+    expect(auto.filter((cls) => cls.startsWith("border"))).toEqual([]);
   });
 
   it("renders a short message without a fold toggle", () => {

@@ -152,9 +152,11 @@ export async function runLocalLinksSmoke({ page, harnessBase, check }) {
         outside: !bubble.contains(header),
         // A sender line: flush with the bubble's right edge, its own width.
         rightAligned: Math.abs(h.right - b.right) <= 1,
-        ownWidth: h.width < b.width,
-        // Every sent message spans the 800px lane, however short.
-        fills: Math.abs(b.left - t.left) <= 1 && Math.abs(b.right - t.right) <= 1,
+        ownWidth: h.width < t.width,
+        // The bubble sits at the 800px lane's right edge, as wide as its text
+        // up to 7/8 of the lane (2026-11-09).
+        atRight: Math.abs(b.right - t.right) <= 1,
+        capped: b.width <= t.width * 7 / 8 + 1,
         lane: Math.round(t.width),
         gap: b.top - h.bottom,
         bubbleText: bubble.textContent,
@@ -169,7 +171,7 @@ export async function runLocalLinksSmoke({ page, harnessBase, check }) {
       };
     });
     expect(geometry).toMatchObject({
-      siblings: true, outside: true, rightAligned: true, ownWidth: true, gap: 8, fills: true, lane: 800,
+      siblings: true, outside: true, rightAligned: true, ownWidth: true, gap: 8, atRight: true, capped: true, lane: 800,
       nameFirst: true, logo: 16, centred: true, unseen: [["Sent from", true]],
     });
     expect(geometry.bubbleText).not.toContain("Sent from");
@@ -182,7 +184,7 @@ export async function runLocalLinksSmoke({ page, harnessBase, check }) {
     "The implementation is ready. Review zeros-dev://workspace/ws_child when you have time.",
   );
   check(
-    "Normal, steered and saved senders sit right-aligned above the full-width copy-only bubble as the chat's name and logo; notes and code retain their roles",
+    "Normal, steered and saved senders sit right-aligned above the copy-only bubble at the lane's right edge as the chat's name and logo; notes and code retain their roles",
     true,
   );
 

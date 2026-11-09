@@ -1187,3 +1187,18 @@ Each landed step appends one line: date, workstream, what landed, evidence.
   reveal the thumb while the reader's wheel shows it in #222 and #EAEAEA;
   the summary smoke checks the island beside the edge-to-edge scroller and
   that it takes its own clicks.
+- 2026-11-09 · 5, 6 · Sent messages sit at the lane's right edge again
+  (`docs/design-system.md` §0 item 4; canvas version 406): a `bg2` bubble
+  with no edge, as wide as its text up to 7/8 of the lane (`max-w-7/8`),
+  instead of spanning the lane on the composer's `sidebar-bg` and edge, so
+  even a long one reads as the reader's own. Zeros' own brown messages take
+  the same shape; the sender line, the fold and the hover row follow the
+  right edge, and editing still opens the full-width composer. Pills keep
+  their `border2` edge on the `bg2` fill. On the canvas, the proposed skin
+  draws every board's bubble that way, and the brown fill of Zeros' own
+  messages, which that skin had been overriding, returns. Evidence: the
+  prompt-fold, overflow, local-links and composer-chrome tests failed red
+  first; the prompt-fold smoke measures the right edge, the text-width and
+  7/8 caps and the `bg2` fill with no edge for cloud, Local and
+  organization-local chats in both themes, and the local-links smoke the
+  sender line above the right-aligned bubble.

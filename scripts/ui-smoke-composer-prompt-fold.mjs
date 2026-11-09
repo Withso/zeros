@@ -59,9 +59,20 @@ async function promptGeometry(page, needle) {
     }
     const textLeft = box(content.querySelector('[data-role="user"]') ?? content).left;
     const body = content.querySelector(".whitespace-pre-wrap");
-    const [r, g, bl] = getComputedStyle(bubble).backgroundColor.match(/\d+/g).map(Number);
+    const style = getComputedStyle(bubble);
+    const [r, g, bl] = style.backgroundColor.match(/\d+/g).map(Number);
+    const probe = document.createElement("div");
+    probe.style.backgroundColor = "var(--bg2)";
+    bubble.parentElement.append(probe);
+    const bg2 = getComputedStyle(probe).backgroundColor;
+    probe.remove();
+    const cap = (laneRight - laneLeft) * 7 / 8;
     return {
-      spansLane: Math.abs(b.left - laneLeft) <= 1 && Math.abs(b.right - laneRight) <= 1,
+      // At the lane's right edge, as wide as its text up to 7/8 of the lane,
+      // on bg2 with no edge (2026-11-09).
+      atRight: Math.abs(b.right - laneRight) <= 1,
+      width: b.width <= cap + 1 ? (Math.abs(b.width - cap) <= 1 ? "cap" : "text") : "past cap",
+      surface: style.backgroundColor === bg2 && style.borderTopWidth === "0px" && style.borderLeftWidth === "0px",
       type: body ? `${getComputedStyle(body).fontSize}/${getComputedStyle(body).lineHeight}` : null,
       // The box reaches 4px past the text on every side.
       footprint: Math.round(v.height - 8),
@@ -78,7 +89,7 @@ async function promptGeometry(page, needle) {
       expanded: toggle?.getAttribute("aria-expanded") ?? null,
       controls: toggle ? toggle.getAttribute("aria-controls") === viewport.id : null,
       toggleGap: toggle ? Math.round(box(toggle).top - (v.bottom - 4)) : null,
-      bottomPad: toggle ? Math.round(b.bottom - 1 - box(toggle).bottom) : null,
+      bottomPad: toggle ? Math.round(b.bottom - box(toggle).bottom) : null,
       toggleAligned: toggleTextLeft === null ? null : Math.abs(toggleTextLeft - textLeft) <= 1.5,
       fill: [r, g, bl],
       clip: { x: Math.round(v.left), y: Math.round(v.top), width: Math.round(v.width), height: Math.round(v.height) },
@@ -99,7 +110,8 @@ async function scrollFold(page, needle, top) {
 const toggleIn = (page, needle) =>
   page.locator("[data-user-bubble]:visible", { hasText: needle }).locator("[data-prompt-fold-toggle]");
 
-// Every sent message spans the lane like the composer. A long one folds to
+// Every sent message sits at the lane's right edge on bg2, as wide as its
+// text up to 7/8 of the lane. A long one folds to
 // five lines that dissolve above Show more; unfolded it shows fifteen and
 // scrolls inside, fading only the edges text runs past, with Show less.
 // Folding never applies to a message it would not shorten, and a chat that is
@@ -114,17 +126,22 @@ export async function checkPromptFold({ page, check, harnessBase }) {
     const at = (needle) => expect.poll(() => promptGeometry(page, needle), { message: `${placement}: ${needle}` });
 
     await post(index, `hi ${tag}`);
-    await at(`hi ${tag}`).toMatchObject({ spansLane: true, type: "15px/22px", footprint: LINE, fold: null, toggle: null });
+    await at(`hi ${tag}`).toMatchObject({
+      atRight: true, width: "text", surface: true, type: "15px/22px", footprint: LINE, fold: null, toggle: null,
+    });
+    // A line longer than the cap wraps at 7/8 of the lane.
+    await post(index, `${tag} wide ${"word ".repeat(80)}`);
+    await at(`${tag} wide`).toMatchObject({ atRight: true, width: "cap", surface: true });
     // The composer writes in the same reading size the message is sent in.
     await expect(page.locator(".composer-pm:visible").first()).toHaveCSS("font-size", "15px");
     await expect(page.locator(".composer-pm:visible").first()).toHaveCSS("line-height", "22px");
 
     await post(index, lines(6, `${tag} six`));
-    await at(`${tag} six line 1`).toMatchObject({ spansLane: true, footprint: 6 * LINE, natural: 6 * LINE, fold: null, toggle: null, overflowY: "visible" });
+    await at(`${tag} six line 1`).toMatchObject({ atRight: true, width: "text", footprint: 6 * LINE, natural: 6 * LINE, fold: null, toggle: null, overflowY: "visible" });
 
     await post(index, lines(7, `${tag} seven`));
     await at(`${tag} seven line 1`).toMatchObject({
-      spansLane: true, footprint: 5 * LINE, natural: 7 * LINE, fold: "collapsed", toggle: "Show more", expanded: "false",
+      atRight: true, width: "text", footprint: 5 * LINE, natural: 7 * LINE, fold: "collapsed", toggle: "Show more", expanded: "false",
       controls: true, toggleGap: 4, bottomPad: 8, toggleAligned: true,
     });
 
@@ -193,5 +210,5 @@ export async function checkPromptFold({ page, check, harnessBase }) {
     const { setPrefs } = await import("/apps/desktop/src/renderer/shared/theme/store.ts");
     setPrefs({ mode: "dark" });
   });
-  check("Sent messages span the lane; a long one folds to five dissolving lines above Show more, unfolds to fifteen that scroll with edge fades above Show less, and folds back when its chat is switched away, for cloud, Local and organization-local chats in both themes", true);
+  check("Sent messages sit at the lane's right edge on bg2 with no edge, as wide as their text up to 7/8 of the lane; a long one folds to five dissolving lines above Show more, unfolds to fifteen that scroll with edge fades above Show less, and folds back when its chat is switched away, for cloud, Local and organization-local chats in both themes", true);
 }
