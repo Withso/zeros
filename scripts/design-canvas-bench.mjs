@@ -599,22 +599,26 @@ async function main() {
         await rawPage.reload({ waitUntil: "domcontentloaded" });
         // Bench only: every change to the Design viewport's box and the world's
         // camera transform, one sample per display frame, from the reload on.
-        await page.evaluate(() => {
+        await page.evaluate(async (id) => {
           const log = globalThis.__benchLayoutLog = [];
           const start = performance.now();
           let last = "";
+          // Bench only: the fixture's Design snapshot state, logged on change.
+          const cache = await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-cache.ts").catch(() => null);
+          const readState = () => { try { const read = cache?.designWorkspaceSnapshotCache.peekSnapshot(id);
+            return read ? `${read.status}/${read.loading ? "L" : "-"}${read.refreshing ? "R" : "-"}/${read.data?.preparation?.descriptions?.length ?? "?"}` : "none"; } catch (error) { return "err"; } };
           const tick = () => {
             const viewports = [...document.querySelectorAll("[data-design-canvas-viewport]")].map((element) => {
               const box = element.getBoundingClientRect();
               return `${Math.round(box.width)}x${Math.round(box.height)}@${Math.round(box.left)},${Math.round(box.top)}`;
             }).join("|");
             const worlds = [...document.querySelectorAll("[data-design-canvas-world]")].map((element) => element.style.transform).join("|");
-            const key = `${viewports} ${worlds}`;
+            const key = `${viewports} ${worlds} ${readState()}`;
             if (key !== last) { last = key; log.push([Math.round(performance.now() - start), viewports, worlds]); }
             if (log.length < 400 && performance.now() - start < 10_000) requestAnimationFrame(tick);
           };
           requestAnimationFrame(tick);
-        }).catch(() => {});
+        }, fixture.id).catch(() => {});
         // Bench only: a Chrome trace of the reload, with style and layout
         // invalidation tracking, to name what the renderer's main thread does.
         if (args.includes("--trace-reload")) {
@@ -722,6 +726,8 @@ async function main() {
           const stopped = await cdp.send("Profiler.stop").catch(() => null);
           if (stopped?.profile) await fs.writeFile(path.join(evidence, `${fixture.name}-reload-profile.cpuprofile`), JSON.stringify(stopped.profile));
         }
+        result.reloadOpsAll = await page.evaluate(() => (globalThis.__benchReloadOps?.done ?? [])
+          .filter(([, start]) => start < 16_000).slice(0, 600)).catch(() => null);
         if (args.includes("--ws-log")) result.reloadWs = await page.evaluate(() => globalThis.__benchWsRows ?? null).catch(error => String(error).slice(0, 200));
         result.reloadOpsTimeline = await page.evaluate(() => (globalThis.__benchReloadOps?.done ?? [])
           .filter(([op]) => op.startsWith("design.")).slice(0, 200)).catch(() => null);
