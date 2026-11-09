@@ -13,7 +13,7 @@
 import { app, BrowserWindow, protocol, session, type Session } from "electron";
 import { createServer } from "node:http";
 import { randomUUID, timingSafeEqual } from "node:crypto";
-import { mkdir, mkdtemp, open, readdir, rm } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, open, readdir, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import {
@@ -36,6 +36,9 @@ const recorder = process.env.ZEROS_DESIGN_RECORDER_IDENTITY ?? "";
 delete process.env.ZEROS_DESIGN_RECORDER_IDENTITY;
 const WINDOWS = Math.max(1, Math.min(4, Number(process.env.ZEROS_DESIGN_RECORDER_WINDOWS) || Math.floor((os.availableParallelism?.() ?? os.cpus().length) / 2)));
 const MAX_BODY_BYTES = 64 * 1024 * 1024;
+/** Diagnostics: a JSON-lines file of each frame's step durations. */
+const TIMINGS = process.env.ZEROS_DESIGN_RECORDER_TIMINGS ?? "";
+delete process.env.ZEROS_DESIGN_RECORDER_TIMINGS;
 
 interface Slot {
   readonly window: BrowserWindow;
@@ -128,6 +131,9 @@ async function recordItem(slot: Slot, documents: Map<string, string>, item: Desi
   const key = randomUUID();
   documents.set(key, insertDesignHeadMarkup(sanitizeDesignFrameMarkup(item.html), designCaptureFramePolicy(colorScheme)));
   const contents = slot.window.webContents;
+  const steps: Record<string, number> = {};
+  let mark = performance.now();
+  const step = (name: string) => { const now = performance.now(); steps[name] = Math.round((now - mark) * 10) / 10; mark = now; };
   try {
     // The frame lays out at its own viewport whatever the window's size.
     const viewport = `${item.viewport.width}x${item.viewport.height}`;
@@ -142,14 +148,19 @@ async function recordItem(slot: Slot, documents: Map<string, string>, item: Desi
       }));
       slot.colorScheme = colorScheme;
     }
+    step("emulate");
     await whileAlive(slot.window.loadURL(`${DESIGN_CAPTURE_SHEET_SCHEME}://sheet/${key}`));
+    step("load");
     signal.throwIfAborted();
     await whileAlive(contents.executeJavaScript(DESIGN_STATIC_RENDER_SCRIPT));
+    step("still");
     await whileAlive(contents.executeJavaScript(DESIGN_RECORDER_PREPARE_SCRIPT));
+    step("prepare");
     signal.throwIfAborted();
     const directory = path.join(folder, item.id);
     await mkdir(directory, { mode: 0o700 });
     await whileAlive(contents.executeJavaScript(`chrome.gpuBenchmarking.printToSkPicture(${JSON.stringify(directory)})`));
+    step("print");
     const layers = (await readdir(directory)).filter((name) => /^layer_\d+\.skp$/.test(name));
     if (layers.length === 0) return { id: item.id, error: "The recorder produced no picture for this frame." };
     // Without positions for extra layers the picture would be incomplete;
@@ -160,6 +171,8 @@ async function recordItem(slot: Slot, documents: Map<string, string>, item: Desi
     }
     const picture = path.join(directory, layers[0]!);
     const { typefaces } = await externalizeRecordedLayer(picture, typefaceFolder, typefacesWritten);
+    step("externalize");
+    if (TIMINGS) void appendFile(TIMINGS, `${JSON.stringify({ id: item.id, ...steps })}\n`).catch(() => {});
     return { id: item.id, scale: slot.ratio, layers: [{ x: 0, y: 0, width: Math.round(item.viewport.width * slot.ratio),
       height: Math.round(item.viewport.height * slot.ratio), path: picture, typefaces }] };
   } finally {
