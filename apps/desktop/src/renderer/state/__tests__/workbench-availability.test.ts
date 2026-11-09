@@ -5,7 +5,7 @@ import {
   describeConnectionRejection,
   type ConnectionRejection,
 } from "../../platform/bridge/ws-client";
-import { describeWorkspaceAvailability } from "../../shell/workbench/tab-status-model";
+import { describeWorkspaceAvailability, describeWorkspaceRuntimeStatus } from "../../shell/workbench/tab-status-model";
 import {
   reconnectWorkbenchWorkspace,
   recordWorkbenchConnectionFailure,
@@ -276,6 +276,26 @@ describe("workbench availability observers", () => {
         Date.now(),
       )?.message,
     ).toBe("Connecting…");
+  });
+  // Running means agents can run. The server reports running at the worker's
+  // hello; the engine connection is ready only after the worker's setup.
+  it("reports Running only once the engine connection is ready, after every start", () => {
+    const catalog = (status: string) => {
+      fixture.docs.set(folder, { status });
+      for (const listener of fixture.catalog) listener();
+    };
+    const label = () => describeWorkspaceRuntimeStatus(workbenchAvailabilitySnapshot(folder), Date.now());
+    fixture.docs.set(folder, { status: "waking" });
+    workbenchAvailabilitySnapshot(folder);
+    catalog("ready");
+    expect(label()).toBe("Starting");
+    connection("connected");
+    expect(label()).toBe("Running");
+    connection("disconnected");
+    for (const status of ["stopping", "stopped", "waking", "ready"]) catalog(status);
+    expect(label()).toBe("Starting");
+    connection("connected");
+    expect(label()).toBe("Running");
   });
   it("isolates admission rejection by workspace and clears it on connection recovery", () => {
     recordWorkbenchConnectionFailure(

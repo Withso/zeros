@@ -5,16 +5,18 @@ import { Button, Tooltip } from "../../shared/ui/primitives";
 import { Popover, PopoverContent, PopoverTrigger } from "../../shared/ui/primitives/popover";
 import { toast } from "../../shared/ui/primitives/elements";
 import { shellOpenUrl } from "../../platform/app";
-import { describeWorkspaceRuntimeStatus } from "../workbench/tab-status-model";
+import { describeWorkspaceRuntimeStatus, type WorkspaceAvailability } from "../workbench/tab-status-model";
 import { formatCompactAge } from "../../features/agent/format-age";
 import { useCloudWorkspaceSurfaceActive } from "./use-cloud-workspace-surface";
 import { cloudWorkspaceDocument, manageCloudWorkspace, subscribeCloudWorkspaces } from "../../state/cloud-workspace-catalog";
 import { parseCloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
 import { useWorkspaceStore } from "../../state/workspace-store";
 import { useCloudWorkspaceAccountAccess } from "../../features/team/cloud-workspace-account-access";
+import { useWorkbenchAvailability } from "../../state/workbench-availability";
 
-export function cloudStatusLabel(status: string): string {
-  return describeWorkspaceRuntimeStatus({ cloud: true, state: status, connection: "connected", since: 0 }, Date.now());
+/** With this desktop's engine connection, Running waits until agents can run. */
+export function cloudStatusLabel(status: string, availability?: WorkspaceAvailability): string {
+  return describeWorkspaceRuntimeStatus({ connection: "connected", since: 0, ...availability, cloud: true, state: status }, Date.now());
 }
 
 /** The cloud icon in a cloud workspace's header: what it is and whether it
@@ -23,6 +25,7 @@ export function CloudWorkspaceDetails({ folder }: { folder: string }) {
   const target = parseCloudWorkspaceKey(folder);
   const allowed = useCloudWorkspaceAccountAccess(target?.organizationId);
   const surfaceActive = useCloudWorkspaceSurfaceActive(useWorkspaceStore(state => state.activePage === "workspace"));
+  const { availability } = useWorkbenchAvailability(folder, surfaceActive);
   const [open, setOpen] = useState(false);
   const [changing, setChanging] = useState(false);
   const subscribe = useCallback((listener: () => void) => subscribeCloudWorkspaces(listener), []);
@@ -47,7 +50,7 @@ export function CloudWorkspaceDetails({ folder }: { folder: string }) {
     </span> },
     { Icon: Clock, label: "Created", value: <Tooltip label={new Date(workspace.createdAt).toLocaleString()}>
       <span>{createdAge === "now" ? "Just now" : `${createdAge} ago`}</span></Tooltip> },
-    { Icon: Activity, label: "Status", value: <span role="status">{cloudStatusLabel(workspace.status)}</span> },
+    { Icon: Activity, label: "Status", value: <span role="status">{cloudStatusLabel(workspace.status, availability)}</span> },
   ] : [];
   return (
     <Popover open={open && surfaceActive} onOpenChange={setOpen}>

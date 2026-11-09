@@ -247,6 +247,9 @@ export function describeWorkspaceRuntimeStatus(input: WorkspaceAvailability, now
     return status.connectionPhase === "reconnecting" ? "Reconnecting…" : "Connecting…";
   if (status?.tone === "pending") return "Starting";
   if (input.state === "archived") return "Archived";
+  // Running means agents can run. The server reports a VM running at the
+  // worker's hello; its engine connection is ready only after worker setup.
+  if (input.cloud && input.connection !== "connected" && !input.previouslyConnected) return "Starting";
   return "Running";
 }
 
