@@ -115,6 +115,19 @@ describe("Design recordings", () => {
       .toBe(`shared-drawing-prefixdrawing:b.html:${version(2)}`);
   });
 
+  it("times each reply's round trip by operation, and its adoption, for the bench", async () => {
+    const { calls, recordings } = harness();
+    const frames = [{ file: "a.html", sourceVersion: version(1) }];
+    recordings.demand(owner, frames);
+    calls[0]!.resolve(readReply(frames, ["a.html"]));
+    await recordings.settled();
+    calls[1]!.resolve(renderReply(frames, calls[1]!.known));
+    await recordings.settled();
+    const timings = recordings.timings();
+    expect([timings.read.length, timings.render.length, timings.adopt.length]).toEqual([1, 1, 2]);
+    expect([...timings.read, ...timings.render, ...timings.adopt].every((step) => step.ms >= 0 && step.at > 0)).toBe(true);
+  });
+
   it("delivers an externalized font once and verifies its length", async () => {
     const { calls, recordings } = harness();
     const frames = [{ file: "a.html", sourceVersion: version(1) }, { file: "b.html", sourceVersion: version(2) }];

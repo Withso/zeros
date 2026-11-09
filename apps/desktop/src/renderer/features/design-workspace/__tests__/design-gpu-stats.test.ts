@@ -84,6 +84,22 @@ describe("Design GPU bench stats", () => {
     } finally { performance.now = clock; }
   });
 
+  it("summarizes only the request replies that ended in the current open", () => {
+    const clock = performance.now;
+    performance.now = () => 1_000;
+    try {
+      const stats = new DesignGpuStats();
+      const at = (ms: number) => performance.timeOrigin + ms;
+      stats.open("page-6");
+      const snapshot = stats.snapshot({ gpu: { pages: 0, units: 0, bytes: 0, budget: 0, evictedPages: 0 },
+        chunks: { count: 0, bytes: 0, budget: 0, received: 0, receivedBytes: 0, rejected: 0, evicted: 0 }, requests: {}, worker: null,
+        replies: { read: [{ at: at(900), ms: 50 }, { at: at(1_200), ms: 30 }], render: [], adopt: [{ at: at(1_210), ms: 4 }] } });
+      expect(snapshot.replies.read).toMatchObject({ count: 1, p50: 30 });
+      expect(snapshot.replies.adopt).toMatchObject({ count: 1, max: 4 });
+      expect(snapshot.replies.render.count).toBe(0);
+    } finally { performance.now = clock; }
+  });
+
   it("summarizes a series by its nearest-rank percentiles", () => {
     expect(designGpuSeries([])).toEqual({ count: 0, p50: 0, p95: 0, max: 0, totalMs: 0 });
     expect(designGpuSeries([5, 1, 3, 2, 4])).toEqual({ count: 5, p50: 3, p95: 5, max: 5, totalMs: 15 });

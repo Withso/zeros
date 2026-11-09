@@ -37,6 +37,8 @@ export interface DesignGpuSnapshot {
   gpu: { pages: number; units: number; bytes: number; budget: number; evictedPages: number };
   chunks: { count: number; bytes: number; budget: number; received: number; receivedBytes: number; rejected: number; evicted: number };
   requests: Record<string, number>;
+  /** Answered requests' round trips by operation, and adopting their replies. */
+  replies: { read: DesignGpuSeries; render: DesignGpuSeries; adopt: DesignGpuSeries };
   contextLosses: { compositor: number; rasterizer: number };
   worker: (Omit<DesignGpuWorkerStats, "deserialize" | "raster"> & { deserialize: DesignGpuSeries;
     raster: { lod: DesignGpuSeries; tile: DesignGpuSeries } }) | null;
@@ -74,6 +76,12 @@ export class DesignGpuStats {
     this.begin(this.openKey === null ? null : designGpuEpoch());
   }
 
+  /** Steps that ended in the current open. */
+  private sinceOpen(steps: ReadonlyArray<{ readonly at: number; readonly ms: number }> = []): DesignGpuSeries {
+    const openedAt = this.openedAt;
+    return designGpuSeries(steps.filter((step) => openedAt === null || step.at >= openedAt).map((step) => step.ms));
+  }
+
   private begin(at: number | null = designGpuEpoch()): void {
     this.openedAt = at;
     this.firstFrameDrawnAt = null;
@@ -103,6 +111,7 @@ export class DesignGpuStats {
   }
 
   snapshot(parts: { gpu: DesignGpuSnapshot["gpu"]; chunks: DesignGpuSnapshot["chunks"]; requests: Record<string, number>;
+    replies?: Readonly<Record<"read" | "render" | "adopt", ReadonlyArray<{ readonly at: number; readonly ms: number }>>>;
     worker: DesignGpuWorkerStats | null }): DesignGpuSnapshot {
     const since = (at: number | null) => at !== null && this.openedAt !== null ? at - this.openedAt : null;
     const worker = parts.worker;
@@ -112,6 +121,8 @@ export class DesignGpuStats {
       allVisibleCrispMs: since(this.allVisibleCrispAt),
       draw: designGpuSeries(this.samples.draw), bursts: designGpuSeries(this.samples.bursts), upload: designGpuSeries(this.samples.upload),
       visible: { ...this.visible }, gpu: parts.gpu, chunks: parts.chunks, requests: parts.requests,
+      replies: { read: this.sinceOpen(parts.replies?.read), render: this.sinceOpen(parts.replies?.render),
+        adopt: this.sinceOpen(parts.replies?.adopt) },
       contextLosses: { compositor: this.compositorLosses, rasterizer: worker?.contextLosses ?? 0 },
       worker: worker ? { ...worker, deserialize: designGpuSeries(worker.deserialize),
         raster: { lod: designGpuSeries(worker.raster.sprite), tile: designGpuSeries(worker.raster.tile) } } : null,

@@ -42,6 +42,9 @@ export interface DesignAdoptedRecording {
 
 export type DesignPresentedRecording = DesignAdoptedRecording & { readonly current: boolean };
 
+/** One timed step: its duration in ms, ending at epoch ms `at`. */
+export interface DesignRecordingsTiming { readonly at: number; readonly ms: number }
+
 /** One deferral per ask keeps a reply within one bridge frame; a frame that
  * never fits fails instead of being asked forever. */
 const MAX_DEFERRALS = 4;
@@ -51,6 +54,7 @@ const MAX_FRAMES_PER_OWNER = 8_192;
 /** A stored-recording lookup is cheap; ask for more frames at once. */
 const READ_FRAMES = 256;
 const MAX_OWNERS = 4;
+const MAX_TIMING_SAMPLES = 1_024;
 const EMPTY: ReadonlySet<string> = new Set();
 
 interface FrameState {
@@ -104,6 +108,8 @@ export class DesignRecordings {
   private readonly owners = new Map<string, OwnerState>();
   private readonly listeners = new Set<(key: string, files: readonly string[]) => void>();
   private readonly counts = { read: 0, render: 0, framesRequested: 0, recordingsAdopted: 0, failed: 0, deferred: 0, errors: 0 };
+  private readonly samples = { read: [] as DesignRecordingsTiming[], render: [] as DesignRecordingsTiming[],
+    adopt: [] as DesignRecordingsTiming[] };
   private readonly settling = new Set<Promise<void>>();
 
   constructor(private readonly deps: {
@@ -198,6 +204,12 @@ export class DesignRecordings {
   forgetWorkspaces(workspaceIds: readonly string[]): void {
     const removed = new Set(workspaceIds);
     for (const state of [...this.owners.values()]) if (removed.has(state.owner.workspaceId)) this.drop(state);
+  }
+
+  /** Bench timings: each answered request's round trip by operation, and
+   * adopting its reply (chunk admission, hash checks, adoption). */
+  timings(): Readonly<Record<"read" | "render" | "adopt", readonly DesignRecordingsTiming[]>> {
+    return this.samples;
   }
 
   usage() {
@@ -312,6 +324,7 @@ export class DesignRecordings {
     state.inFlight.add(request);
     this.counts[op]++;
     this.counts.framesRequested += files.length;
+    const sent = performance.now();
     const reply = op === "read"
       ? this.deps.source.read(state.owner, frames, known, controller.signal)
       : this.deps.source.render(state.owner, frames as Array<{ file: string; sourceVersion: string }>, known, controller.signal);
@@ -327,9 +340,19 @@ export class DesignRecordings {
     // Only a received reply joins `settled`: a request still at the engine
     // is not work this renderer can finish.
     void reply.then(
-      (result) => this.track(this.adopt(state, request, result).finally(finish)),
+      (result) => {
+        const received = performance.now();
+        this.sample(op, received - sent);
+        return this.track(this.adopt(state, request, result).finally(() => { this.sample("adopt", performance.now() - received); finish(); }));
+      },
       (error: unknown) => this.track(Promise.resolve().then(() => this.settleError(state, request, error)).finally(finish)),
     );
+  }
+
+  private sample(series: keyof DesignRecordings["samples"], ms: number): void {
+    const samples = this.samples[series];
+    samples.push({ at: performance.timeOrigin + performance.now(), ms });
+    if (samples.length > MAX_TIMING_SAMPLES) samples.splice(0, samples.length - MAX_TIMING_SAMPLES);
   }
 
   private track(work: Promise<void>): Promise<void> {

@@ -86,7 +86,7 @@ function installInstrumentation(runtime: DesignGpuRuntime): void {
       const runtime = entry?.[1] ?? instrumented ?? designGpuRuntime();
       const worker = await runtime.client?.requestStats() ?? null;
       lastSnapshot = runtime.stats.snapshot({ gpu: entry?.[0].usage() ?? { pages: 0, units: 0, bytes: 0, budget: 0, evictedPages: 0 },
-        chunks: runtime.chunks.usage(), requests: runtime.recordings.usage(), worker });
+        chunks: runtime.chunks.usage(), requests: runtime.recordings.usage(), replies: runtime.recordings.timings(), worker });
       return lastSnapshot;
     },
     reset() { for (const [, runtime] of activeScenes) runtime.stats.reset(); },
