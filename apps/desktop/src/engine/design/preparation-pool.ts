@@ -37,6 +37,8 @@ interface PoolWorker {
 
 let pool: PoolWorker[] = [];
 let idle: NodeJS.Timeout | null = null;
+/** Each call's messages share one read scope on each worker they reach. */
+let scopes = 0;
 /** Batches with work on the pool: the idle stop waits for all of them. */
 let inFlight = 0;
 let next = 0;
@@ -131,16 +133,21 @@ async function inWorkers<T, R>(items: readonly T[], message: (item: T) => Record
   // whatever is left is done on the engine's thread.
   const queue = [...items];
   const results: R[] = [];
+  const scope = ++scopes;
+  const workers = pool.slice(0, count);
   const take = async (entry: PoolWorker) => {
     for (let item = queue.shift(); item !== undefined; item = queue.shift()) {
-      try { results.push(...await ask(entry, message(item)) as R[]); }
+      try { results.push(...await ask(entry, { ...message(item), scope }) as R[]); }
       catch { return; }
     }
   };
   inFlight++;
   try {
-    await Promise.all(pool.slice(0, count).map(take));
+    await Promise.all(workers.map(take));
   } finally {
+    for (const { worker } of workers) {
+      try { worker.postMessage({ kind: "release", scope }); } catch { /* the worker already stopped */ }
+    }
     if (--inFlight === 0) scheduleIdleStop();
   }
   return results;
