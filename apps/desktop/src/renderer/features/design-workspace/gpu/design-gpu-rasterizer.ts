@@ -95,7 +95,6 @@ export class DesignGpuPictures {
     return removed;
   }
 
-  /** Evicts least recently used pictures beyond the budget. */
   trim(budget = this.budget): string[] {
     this.budget = budget;
     const evicted: string[] = [];

@@ -245,6 +245,7 @@ export const scenarioRegistry = [
   ),
   shared("design-camera", "design-camera", "runDesignCameraSmoke"),
   shared("design-preview", "design-preview", "runDesignPreviewSmoke"),
+  fresh("design-gpu-canvas", "design-gpu-canvas", "runDesignGpuCanvasSmoke", 1280, 720),
   shared(
     "design-interaction-integrity",
     "design-interaction-integrity",

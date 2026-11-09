@@ -80,7 +80,6 @@ interface OwnerState {
   readonly key: string;
   readonly owner: DesignRecordingsOwner;
   readonly frames: Map<string, FrameState>;
-  /** Font manifests adopted for this owner's recordings. */
   readonly typefaces: Map<string, DesignRecordingTypeface>;
   order: readonly string[];
   replied: boolean;
@@ -123,7 +122,8 @@ export class DesignRecordings {
   }
 
   /** Replaces the owner's demand. Frames left out keep their confirmed
-   * recordings but stop being requested; requests nothing waits for end. */
+   * recordings but are no longer requested; a request none of whose frames
+   * is still demanded is cancelled. */
   demand(owner: DesignRecordingsOwner, frames: readonly DesignRecordingDemand[]): void {
     const state = this.state(owner);
     const order: string[] = [];
@@ -253,7 +253,6 @@ export class DesignRecordings {
       (state.pipeline === null || confirmed.pipeline === state.pipeline);
   }
 
-  /** What one frame still needs, if anything. */
   private need(state: OwnerState, entry: FrameState, now: number): "read" | "render" | null {
     if (entry.pending || entry.retryAt > now) return null;
     const version = entry.wanted ?? null;
@@ -420,6 +419,9 @@ export class DesignRecordings {
       const entry = state.frames.get(file);
       if (!entry || !asked.has(file)) continue;
       this.counts.deferred++;
+      // The engine always answers a request's first frame when it fits, so a
+      // later frame was merely left for the next request: it moves up.
+      if (file !== request.files[0]) continue;
       if (++entry.deferrals >= MAX_DEFERRALS)
         entry.failed = { version: entry.wanted ?? null, error: "The engine kept deferring this frame's recording." };
     }

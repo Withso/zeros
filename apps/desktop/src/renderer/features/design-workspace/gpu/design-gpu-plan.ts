@@ -60,7 +60,6 @@ export interface DesignGpuWorldRect { readonly x: number; readonly y: number; re
 export function designGpuVisibleUnits(frame: DesignGpuWorldRect, grid: DesignGpuGrid, density: number,
   view: DesignViewport, size: DesignViewportSize, margin: number): DesignGpuTileAddress[] {
   if (!(view.zoom > 0) || !(density > 0) || !(size.width > 0) || !(size.height > 0)) return [];
-  // Frame-local CSS pixels of the grown viewport, then frame device pixels.
   const left = ((-margin - view.panX) / view.zoom - frame.x) * density;
   const top = ((-margin - view.panY) / view.zoom - frame.y) * density;
   const right = ((size.width + margin - view.panX) / view.zoom - frame.x) * density;

@@ -5,7 +5,7 @@ import "../../../../../styles/zeros-tokens.css";
 import "../../../../../styles/semantic-tokens.css";
 import "../../../../../styles/globals.css";
 import "../features/design-workspace/design-workspace-ui.css";
-import { useLayoutEffect, useMemo, useRef, useState } from "react";
+import React, { useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 
 import { externalizeDesignPictureTypefaces } from "../../../shared/design-picture-typefaces";
@@ -13,6 +13,7 @@ import { paintDesignCanvasCamera } from "../features/design-workspace/design-can
 import type { DesignViewport } from "../features/design-workspace/design-canvas-math";
 import CanvasKitInit from "../features/design-workspace/gpu/canvaskit/canvaskit.js";
 import wasmUrl from "../features/design-workspace/gpu/canvaskit/canvaskit.wasm?url";
+import geistUrl from "@fontsource-variable/geist/files/geist-latin-wght-normal.woff2?url";
 import { createDesignGpuRuntime, useDesignGpuCanvas } from "../features/design-workspace/gpu/design-gpu-canvas";
 import type { DesignGpuSceneFrame } from "../features/design-workspace/gpu/design-gpu-scene";
 import type { DesignRecordingsSource } from "../features/design-workspace/gpu/design-recordings";
@@ -27,6 +28,18 @@ const enabled = params.get("enabled") !== "0";
 /** Each frame's fill is distinct; the smoke reads it back from screen pixels. */
 export const designGpuHarnessFill = (index: number): [number, number, number] =>
   [40 + (index * 37) % 180, 60 + (index * 53) % 160, 90 + (index * 71) % 150];
+
+/** XMLHttpRequest, unlike fetch, also reads file:// in a packaged build. */
+function load(url: string): Promise<Uint8Array> {
+  return new Promise((resolve, reject) => {
+    const request = new XMLHttpRequest();
+    request.open("GET", url);
+    request.responseType = "arraybuffer";
+    request.onload = () => request.response ? resolve(new Uint8Array(request.response as ArrayBuffer)) : reject(new Error(url));
+    request.onerror = () => reject(new Error(url));
+    request.send();
+  });
+}
 
 async function sha(bytes: Uint8Array): Promise<string> {
   const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes as Uint8Array<ArrayBuffer>));
@@ -54,8 +67,8 @@ async function chunked(bytes: Uint8Array, store: Store): Promise<string[]> {
 
 async function recordPage(frames: readonly DesignGpuSceneFrame[]): Promise<Store> {
   const ck = await CanvasKitInit({ locateFile: () => wasmUrl });
-  const font = new Uint8Array(await (await fetch("/node_modules/@fontsource-variable/geist/files/geist-latin-wght-normal.woff2")).arrayBuffer());
-  const manager = ck.FontMgr.FromData(font.buffer)!;
+  const font = await load(geistUrl);
+  const manager = ck.FontMgr.FromData(font.slice().buffer)!;
   const typeface = manager.matchFamilyStyle(manager.getFamilyName(0), {})!;
   const store: Store = { recordings: new Map(), typefaces: new Map(), chunks: new Map() };
   for (const [index, frame] of frames.entries()) {
@@ -90,7 +103,7 @@ const frames: DesignGpuSceneFrame[] = Array.from({ length: COLUMNS * ROWS }, (_,
   x: (index % COLUMNS) * (WIDTH + GAP), y: Math.floor(index / COLUMNS) * (HEIGHT + GAP), width: WIDTH, height: HEIGHT,
 }));
 
-const requests: Array<{ op: string; frames: number; known: number; chunks: number }> = [];
+const requests: Array<{ op: string; theme: string | null; frames: number; known: number; chunks: number; aborted: boolean }> = [];
 let store: Promise<Store> | null = null;
 function reply(frames: ReadonlyArray<{ file: string }>, known: readonly string[]) {
   return store!.then((recorded) => {
@@ -102,15 +115,22 @@ function reply(frames: ReadonlyArray<{ file: string }>, known: readonly string[]
     return { recordings, typefaces, chunks: ids.map((id) => ({ id, data: recorded.chunks.get(id)! })) };
   });
 }
+/** The "held" theme's renders never answer: only an abort ends them. */
+const HELD_THEME = "held";
 const source: DesignRecordingsSource = {
-  async read(_owner, asked, known) {
-    requests.push({ op: "read", frames: asked.length, known: known.length, chunks: 0 });
+  async read(owner, asked, known) {
+    requests.push({ op: "read", theme: owner.theme, frames: asked.length, known: known.length, chunks: 0, aborted: false });
     // A first open: nothing is stored yet.
     return { recordings: [], typefaces: [], chunks: [], missing: asked.map((frame) => frame.file), deferred: [] } satisfies DesignRecordingsReadReply;
   },
-  async render(_owner, asked, known) {
+  async render(owner, asked, known, signal) {
+    const entry = { op: "render", theme: owner.theme, frames: asked.length, known: known.length, chunks: 0, aborted: false };
+    requests.push(entry);
+    if (owner.theme === HELD_THEME) {
+      await new Promise((_resolve, reject) => signal.addEventListener("abort", () => { entry.aborted = true; reject(signal.reason); }, { once: true }));
+    }
     const { recordings, typefaces, chunks } = await reply(asked, known);
-    requests.push({ op: "render", frames: asked.length, known: known.length, chunks: chunks.length });
+    entry.chunks = chunks.length;
     return { pipeline: "harness-1", recordings, typefaces, chunks, stale: [], failed: [], deferred: [] } satisfies DesignRecordingsReply;
   },
 };
@@ -122,6 +142,9 @@ declare global {
       frames: readonly DesignGpuSceneFrame[];
       requests: typeof requests;
       setView(view: DesignViewport): void;
+      /** Shows a frame with the canvas's selection stroke, or none. */
+      select(index: number | null): void;
+      setTheme(theme: string | null): void;
       fill: typeof designGpuHarnessFill;
     };
   }
@@ -130,20 +153,23 @@ declare global {
 function Harness() {
   const worldRef = useRef<HTMLDivElement | null>(null);
   const [view, setView] = useState<DesignViewport>({ zoom: 0.5, panX: 20, panY: 20 });
+  const [selected, select] = useState<number | null>(null);
+  const [theme, setTheme] = useState<string | null>(null);
   const size = useMemo(() => ({ width: 1040, height: 520 }), []);
-  window.designGpuHarness = { frames, requests, setView, fill: designGpuHarnessFill };
-  useLayoutEffect(() => { paintDesignCanvasCamera(worldRef.current, view, false, size); }, [size, view]);
-  const owner = useMemo(() => ({ workspaceId: "/harness/workspace", directoryId: "design_harness", theme: null }), []);
+  window.designGpuHarness = { frames, requests, setView, select, setTheme, fill: designGpuHarnessFill };
+  useLayoutEffect(() => { paintDesignCanvasCamera(worldRef.current, view, false, size); }, [size, view, selected]);
+  const owner = useMemo(() => ({ workspaceId: "/harness/workspace", directoryId: "design_harness", theme }), [theme]);
   const live = useMemo(() => new Set<string>(), []);
   useDesignGpuCanvas({ enabled, active: true, worldRef, documentOwner: "harness", owner, openKey: "harness:page-1", frames, live, runtime });
   return (
     <div data-design-canvas-viewport="" className="bg-bg2 relative overflow-clip" style={{ width: size.width, height: size.height }}>
       <div className="pointer-events-none absolute inset-0 isolate">
         <div ref={worldRef} data-design-canvas-world="" className="pointer-events-none absolute inset-0 origin-top-left">
-          {frames.map((frame) => (
+          {frames.map((frame, index) => (
             <article key={frame.file} data-design-frame={frame.file} data-design-frame-controls="automatic"
-              className="zd-design-frame zd-design-stroke zd-design-frame-edge bg-bg1 pointer-events-auto absolute"
-              style={{ left: frame.x, top: frame.y, width: frame.width, height: frame.height, zIndex: 0 }} />
+              className={`zd-design-frame zd-design-stroke ${index === selected ? "zd-design-selection-outline" : "zd-design-frame-edge"} bg-bg1 pointer-events-auto absolute`}
+              style={{ left: frame.x, top: frame.y, width: frame.width, height: frame.height, zIndex: 0,
+                ...(index === selected ? { "--design-stroke-width": 2 } : {}) } as React.CSSProperties} />
           ))}
         </div>
       </div>

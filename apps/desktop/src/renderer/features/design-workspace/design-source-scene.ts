@@ -94,7 +94,8 @@ function intersects(a: Pick<Row, "x" | "y" | "width" | "height" | "chrome">,
 const colors = new Map<string, DesignTileFrame["background"]>();
 let colorContext: CanvasRenderingContext2D | null = null;
 
-function color(value: string): DesignTileFrame["background"] {
+/** A CSS color as premultiplied RGBA in 0–1, resolved through a 1×1 canvas and cached. */
+export function designCanvasColor(value: string): DesignTileFrame["background"] {
   const cached = colors.get(value);
   if (cached) { colors.delete(value); colors.set(value, cached); return cached; }
   // CSS colors are resolved at admission, never during a camera paint. One
@@ -125,8 +126,8 @@ export function designFrameColors(frame: HTMLElement) {
   // which a rounded outline width cannot thicken under zoom; the plane paints
   // that same one-screen-pixel edge for the frames it owns.
   const edge = style.getPropertyValue("--design-frame-stroke").trim();
-  return { background: color(style.backgroundColor), outline: edge ? { color: color(edge), width: 1 } : {
-    color: color(style.outlineColor), width: style.outlineStyle !== "none" && Number.parseFloat(style.outlineWidth) > 0 ? 1 : 0,
+  return { background: designCanvasColor(style.backgroundColor), outline: edge ? { color: designCanvasColor(edge), width: 1 } : {
+    color: designCanvasColor(style.outlineColor), width: style.outlineStyle !== "none" && Number.parseFloat(style.outlineWidth) > 0 ? 1 : 0,
   } };
 }
 

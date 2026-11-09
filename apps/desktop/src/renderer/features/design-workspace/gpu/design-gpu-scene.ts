@@ -1,9 +1,10 @@
 import { designTypefaceContentId } from "../../../../../shared/design-picture-typefaces";
 import { observeDesignCanvasPaint, readDesignCanvasFrameBounds, repaintDesignCanvasPixels } from "../design-canvas-camera";
 import type { DesignViewport, DesignViewportSize } from "../design-canvas-math";
-import { designFrameColors, designStyleWithoutCameraScale } from "../design-source-scene";
+import { designCanvasColor, designStyleWithoutCameraScale } from "../design-source-scene";
 import { DesignGpuCompositor, type DesignGpuBatch } from "./design-gpu-compositor";
 import { DesignGpuPages, designGpuUnitKey, type DesignGpuAdoptedUnit } from "./design-gpu-pages";
+import { DesignGpuRasterGate } from "./design-gpu-raster-gate";
 import { DESIGN_GPU_PAGE_PIXELS, designGpuChooseDensity, designGpuDensity, designGpuGrid, designGpuScreenRect,
   designGpuUnitRaster, designGpuVisibleUnits, packDesignGpuBurst, type DesignGpuGrid, type DesignGpuUnitRaster } from "./design-gpu-plan";
 import type { DesignGpuRasterPicture, DesignGpuRasterUnit } from "./design-gpu-protocol";
@@ -65,9 +66,10 @@ interface QueueItem extends DesignGpuRasterUnit {
   readonly unitRaster: DesignGpuUnitRaster;
 }
 
-class Quads {
+class Quads implements DesignGpuBatch {
   data = new Float32Array(8 * 64);
   count = 0;
+  constructor(readonly texture: WebGLTexture | null = null) {}
   push(x: number, y: number, width: number, height: number, a: number, b: number, c: number, d: number): void {
     if ((this.count + 1) * 8 > this.data.length) {
       const grown = new Float32Array(this.data.length * 2);
@@ -94,10 +96,11 @@ export class DesignGpuScene {
   private rows: Row[] | null = null;
   private readonly contentIds = new Map<string, number>();
   private readonly colors = new WeakMap<HTMLElement, Colors>();
-  private readonly tiled = new Set<HTMLElement>();
+  private tiled = new Set<HTMLElement>();
   private camera: { view: DesignViewport; size: DesignViewportSize } | null = null;
   private queue: QueueItem[] = [];
   private burst = false;
+  private readonly gate = new DesignGpuRasterGate();
   private readonly verifiedFonts = new Set<string>();
   private readonly verifyingFonts = new Set<string>();
   private readonly badFonts = new Set<string>();
@@ -107,7 +110,7 @@ export class DesignGpuScene {
   private started = false;
   private readonly cleanups: Array<() => void> = [];
   private readonly observer: MutationObserver;
-  private readonly batches = { backgrounds: new Quads(), edges: new Quads(), pages: new Map<WebGLTexture, Quads>(), ordered: [] as Quads[] };
+  private readonly batches = { backgrounds: new Quads(), edges: new Quads(), pages: new Map<WebGLTexture, Quads>() };
 
   constructor(private readonly world: HTMLDivElement, private readonly deps: {
     recordings: DesignRecordings;
@@ -140,7 +143,10 @@ export class DesignGpuScene {
     this.cleanups.push(this.deps.recordings.subscribe((key) => {
       if (this.input.owner && key === designRecordingsOwnerKey(this.input.owner)) { this.rows = null; this.requestPaint(); }
     }));
-    this.cleanups.push(this.deps.client.onContext((lost) => { if (!lost) this.requestPaint(); }));
+    this.cleanups.push(this.deps.client.onContext((lost) => {
+      this.gate.context(lost);
+      if (!lost) this.requestPaint();
+    }));
     this.cleanups.push(observeDesignCanvasPaint(this.world, (view, size) => this.paint(view, size)));
     void this.deps.client.start().then((ok) => {
       if (!ok) this.deps.stats.error = this.deps.client.error;
@@ -150,8 +156,12 @@ export class DesignGpuScene {
   }
 
   update(input: DesignGpuSceneInput): void {
-    const ownerChanged = this.input.owner === null || input.owner === null ||
-      designRecordingsOwnerKey(this.input.owner) !== designRecordingsOwnerKey(input.owner);
+    const previous = this.input.owner;
+    const ownerChanged = previous === null || input.owner === null ||
+      designRecordingsOwnerKey(previous) !== designRecordingsOwnerKey(input.owner);
+    // A theme is part of the owner: the frames this canvas no longer shows
+    // stop being recorded for it.
+    if (ownerChanged && previous) this.deps.recordings.demand(previous, []);
     this.input = input;
     this.rows = null;
     if (ownerChanged) this.queue = [];
@@ -218,18 +228,16 @@ export class DesignGpuScene {
     this.rows = null;
   }
 
-  private colorsOf(element: HTMLElement): Colors {
-    let colors = this.colors.get(element);
-    if (colors) return colors;
-    // The tiled attribute makes the frame's own background transparent; read
-    // its real colors without it.
-    const tiled = element.hasAttribute("data-design-frame-tiled");
-    if (tiled) element.removeAttribute("data-design-frame-tiled");
-    const read = designFrameColors(element);
-    colors = { background: read.background, outline: read.outline.width > 0 ? read.outline : undefined };
-    if (tiled) element.setAttribute("data-design-frame-tiled", "");
-    this.colors.set(element, colors);
-    return colors;
+  /** Frames this plane paints carry the tiled attribute; it makes their own
+   * background transparent, so colors are read while it is absent. Writes,
+   * then every read, then writes: one style recalculation for the batch. */
+  private own(next: ReadonlySet<HTMLElement>): void {
+    for (const element of this.tiled)
+      if (!next.has(element) || !this.colors.has(element)) element.removeAttribute("data-design-frame-tiled");
+    for (const element of next) if (!this.colors.has(element)) this.colors.set(element, frameColors(element));
+    for (const element of next)
+      if (!this.tiled.has(element) || !element.hasAttribute("data-design-frame-tiled")) element.setAttribute("data-design-frame-tiled", "");
+    this.tiled = new Set(next);
   }
 
   private layout(): Row[] {
@@ -305,96 +313,95 @@ export class DesignGpuScene {
     const density = designGpuDensity(view.zoom, dpr);
     this.pages.beginFrame();
     const { backgrounds, edges, pages } = this.batches;
-    backgrounds.count = 0; edges.count = 0;
+    backgrounds.count = 0;
+    edges.count = 0;
     for (const quads of pages.values()) quads.count = 0;
+    // Frames that touch others keep their own order after the batched passes.
     const ordered: Quads[] = [];
-    const visibleStats: DesignGpuVisible & { stale: number } = { frames: 0, crisp: 0, stretched: 0, missing: 0, live: 0, stale: 0 };
+    const visible: DesignGpuVisible = { frames: 0, crisp: 0, finer: 0, stretched: 0, missing: 0, live: 0, stale: 0 };
     const queued: Array<QueueItem & { distance: number; visible: boolean }> = [];
     const cx = size.width / 2, cy = size.height / 2;
     let drew = false;
-    const tiledNow = new Set<HTMLElement>();
+    this.own(new Set(rows.filter((row) => row.recording && !row.live).map((row) => row.element)));
     for (const row of rows) {
       const screenX = row.x * view.zoom + view.panX, screenY = row.y * view.zoom + view.panY;
       const screenW = row.width * view.zoom, screenH = row.height * view.zoom;
-      const margin = PREFETCH_MARGIN;
-      const near = screenX + screenW >= -margin && screenY + screenH >= -margin && screenX <= size.width + margin && screenY <= size.height + margin;
-      const visible = screenX + screenW >= 0 && screenY + screenH >= 0 && screenX <= size.width && screenY <= size.height;
-      if (row.recording && !row.live) tiledNow.add(row.element);
+      const near = screenX + screenW >= -PREFETCH_MARGIN && screenY + screenH >= -PREFETCH_MARGIN &&
+        screenX <= size.width + PREFETCH_MARGIN && screenY <= size.height + PREFETCH_MARGIN;
       if (!near) continue;
-      if (visible) visibleStats.frames++;
-      if (row.live) { if (visible) visibleStats.live++; continue; }
+      const onScreen = screenX + screenW >= 0 && screenY + screenH >= 0 && screenX <= size.width && screenY <= size.height;
+      if (onScreen) visible.frames++;
+      if (row.live) { if (onScreen) visible.live++; continue; }
       const recording = row.recording;
-      if (!recording) { if (visible) visibleStats.missing++; continue; }
-      if (visible && !row.current) visibleStats.stale++;
+      if (!recording) { if (onScreen) visible.missing++; continue; }
+      if (onScreen && !row.current) visible.stale++;
+      // The recording keeps its own size: a pending resize clips it instead
+      // of stretching it to the frame's new bounds.
       const content = { x: row.x, y: row.y, width: recording.width, height: recording.height };
       const grid = designGpuGrid(recording, density);
       const distance = Math.hypot(screenX + screenW / 2 - cx, screenY + screenH / 2 - cy);
-      // Exact-density units this frame still lacks go to the raster queue.
-      const needed = designGpuVisibleUnits(content, grid, density, view, size, visible ? 0 : margin);
+      const drawn = onScreen ? designGpuVisibleUnits(content, grid, density, view, size, 0) : [];
       let complete = true;
-      for (const address of needed) {
+      for (const address of drawn) if (!this.pages.unit(designGpuUnitKey(row.content, density, address.col, address.row))) complete = false;
+      for (const address of designGpuVisibleUnits(content, grid, density, view, size, PREFETCH_MARGIN)) {
         const key = designGpuUnitKey(row.content, density, address.col, address.row);
         if (this.pages.unit(key)) continue;
-        complete = false;
         const unitRaster = designGpuUnitRaster(grid, address.col, address.row);
-        queued.push({ key, picture: recording.key, kind: grid.kind === "sprite" ? "sprite" : "tile", density,
-          raster: unitRaster, at: { x: 0, y: 0 }, recording, file: row.file, content: row.content, unitRaster, distance, visible });
+        const ahead = drawn.some((unit) => unit.col === address.col && unit.row === address.row);
+        queued.push({ key, picture: recording.key, kind: grid.kind === "sprite" ? "sprite" : "tile", density, raster: unitRaster,
+          at: { x: 0, y: 0 }, recording, file: row.file, content: row.content, unitRaster, distance, visible: ahead });
       }
-      if (!visible) continue;
-      const colors = this.colorsOf(row.element);
-      const target = row.isolated ? null : new Quads();
-      const backgroundQuads = target ?? backgrounds;
-      const rectX = screenX * dpr, rectY = screenY * dpr, rectW = screenW * dpr, rectH = screenH * dpr;
-      if (colors.background[3] > 0)
-        backgroundQuads.push(rectX, rectY, rectW, rectH, ...colors.background);
-      if (target) { ordered.push(target); }
+      if (!onScreen) continue;
+      const colors = this.colors.get(row.element)!;
+      const rect = { x: screenX * dpr, y: screenY * dpr, width: screenW * dpr, height: screenH * dpr };
+      const background = row.isolated ? backgrounds : new Quads();
+      if (!row.isolated) ordered.push(background);
+      if (colors.background[3] > 0) background.push(rect.x, rect.y, rect.width, rect.height, ...colors.background);
       const chosen = complete ? { density, crisp: true } : this.coverage(row, recording, density, view, size);
-      if (chosen) {
-        const units = chosen.density === density ? needed : designGpuVisibleUnits(content, designGpuGrid(recording, chosen.density),
-          chosen.density, view, size, 0);
+      if (!chosen) visible.missing++;
+      else {
+        if (chosen.density === density) visible.crisp++;
+        else if (chosen.crisp) visible.finer++;
+        else visible.stretched++;
         const chosenGrid = chosen.density === density ? grid : designGpuGrid(recording, chosen.density);
-        let pageTarget: Quads | null = null, pageTexture: WebGLTexture | null = null;
+        const units = chosen.density === density ? drawn : designGpuVisibleUnits(content, chosenGrid, chosen.density, view, size, 0);
+        let current: Quads | null = null;
         for (const address of units) {
           const unit = this.pages.unit(designGpuUnitKey(row.content, chosen.density, address.col, address.row));
           if (!unit) continue;
           this.pages.touch(unit.page);
-          const rect = designGpuScreenRect(content, chosenGrid, chosen.density, address, view, dpr);
           let quads: Quads;
-          if (target) {
-            if (pageTexture !== unit.page.texture) { pageTarget = new Quads(); pageTexture = unit.page.texture; ordered.push(pageTarget); (pageTarget as Quads & { texture?: WebGLTexture }).texture = pageTexture; }
-            quads = pageTarget!;
-          } else {
-            quads = pages.get(unit.page.texture) ?? new Quads();
+          if (row.isolated) {
+            quads = pages.get(unit.page.texture) ?? new Quads(unit.page.texture);
             pages.set(unit.page.texture, quads);
+          } else {
+            if (current?.texture !== unit.page.texture) { current = new Quads(unit.page.texture); ordered.push(current); }
+            quads = current;
           }
-          pushClipped(quads, rect, unit.src, unit.page.width, unit.page.height, { x: rectX, y: rectY, width: rectW, height: rectH });
+          pushClipped(quads, designGpuScreenRect(content, chosenGrid, chosen.density, address, view, dpr), unit.src,
+            unit.page.width, unit.page.height, rect);
           drew = true;
         }
-        if (chosen.density === density && complete) visibleStats.crisp++;
-        else if (!chosen.crisp) visibleStats.stretched++;
-        else visibleStats.missing++;
-      } else visibleStats.missing++;
+      }
       if (colors.outline) {
-        const edgeQuads = target ? new Quads() : edges;
-        if (target) ordered.push(edgeQuads);
+        const edge = row.isolated ? edges : new Quads();
+        if (!row.isolated) ordered.push(edge);
         const t = colors.outline.width * dpr, color = colors.outline.color;
-        edgeQuads.push(rectX - t, rectY - t, rectW + t * 2, t, ...color);
-        edgeQuads.push(rectX - t, rectY + rectH, rectW + t * 2, t, ...color);
-        edgeQuads.push(rectX - t, rectY, t, rectH, ...color);
-        edgeQuads.push(rectX + rectW, rectY, t, rectH, ...color);
+        edge.push(rect.x - t, rect.y - t, rect.width + t * 2, t, ...color);
+        edge.push(rect.x - t, rect.y + rect.height, rect.width + t * 2, t, ...color);
+        edge.push(rect.x - t, rect.y, t, rect.height, ...color);
+        edge.push(rect.x + rect.width, rect.y, t, rect.height, ...color);
       }
     }
-    this.applyTiled(tiledNow);
-    const list: DesignGpuBatch[] = [{ texture: null, data: backgrounds.data, count: backgrounds.count }];
-    for (const [texture, quads] of pages) if (quads.count) list.push({ texture, data: quads.data, count: quads.count });
-    list.push({ texture: null, data: edges.data, count: edges.count });
-    for (const quads of ordered) list.push({ texture: (quads as Quads & { texture?: WebGLTexture }).texture ?? null, data: quads.data, count: quads.count });
+    const list: DesignGpuBatch[] = [backgrounds];
+    for (const quads of pages.values()) if (quads.count) list.push(quads);
+    list.push(edges);
+    list.push(...ordered);
     this.compositor.draw(list);
     for (const [texture, quads] of pages) if (!quads.count) pages.delete(texture);
     this.pages.trim();
-    const atRest = !this.world.hasAttribute("data-design-camera-gesture");
     this.deps.stats.record("draw", performance.now() - started);
-    this.deps.stats.composite(visibleStats, drew, atRest);
+    this.deps.stats.composite(visible, drew, !this.world.hasAttribute("data-design-camera-gesture"));
     queued.sort((a, b) => Number(b.visible) - Number(a.visible) || a.distance - b.distance);
     this.queue = queued;
     this.pump();
@@ -414,18 +421,9 @@ export class DesignGpuScene {
     return designGpuChooseDensity(density, candidates);
   }
 
-  private applyTiled(next: Set<HTMLElement>): void {
-    for (const element of this.tiled) if (!next.has(element)) element.removeAttribute("data-design-frame-tiled");
-    // Resolve every newly owned frame's colors before any of them turns transparent.
-    for (const element of next) if (!this.tiled.has(element)) this.colorsOf(element);
-    for (const element of next) if (!this.tiled.has(element)) element.setAttribute("data-design-frame-tiled", "");
-    this.tiled.clear();
-    for (const element of next) this.tiled.add(element);
-  }
-
   private pump(): void {
     if (this.burst || this.disposed || !this.queue.length || this.compositor.lost || this.deps.client.error ||
-      (typeof document !== "undefined" && document.hidden)) return;
+      !this.gate.open(performance.now()) || (typeof document !== "undefined" && document.hidden)) return;
     const owner = this.input.owner;
     if (!owner) return;
     const client = this.deps.client, recordings = this.deps.recordings;
@@ -460,6 +458,8 @@ export class DesignGpuScene {
     void client.raster(width, height, wire, gesture ? GESTURE_BURST_MS : BURST_MS).then((reply) => {
       if (this.disposed) { reply.bitmap?.close(); return; }
       this.deps.stats.record("bursts", reply.ms);
+      if (reply.error) this.backOff();
+      else this.gate.succeeded();
       if (reply.bitmap) {
         const done = new Set(reply.done);
         const adopted: DesignGpuAdoptedUnit[] = units.filter((unit) => done.has(unit.key)).map((unit) => ({
@@ -471,10 +471,15 @@ export class DesignGpuScene {
         this.deps.stats.record("upload", performance.now() - uploadStarted);
         reply.bitmap.close();
       }
-    }, () => {}).finally(() => {
+    }, () => this.backOff()).finally(() => {
       this.burst = false;
       this.requestPaint();
     });
+  }
+
+  private backOff(): void {
+    const delay = this.gate.failed(performance.now());
+    setTimeout(() => { if (!this.disposed) this.requestPaint(); }, delay);
   }
 
   private verifyFont(owner: DesignRecordingsOwner, id: string): void {
@@ -492,8 +497,18 @@ export class DesignGpuScene {
   }
 }
 
-/** Pushes a textured quad clipped to the frame's screen rectangle: a pending
- * resize clips the recorded content instead of stretching it. */
+/** A frame's background and screen-pixel stroke. The stroke is the one its
+ * `.zd-design-stroke` box-shadow draws (resting edge or selection), which the
+ * tiled attribute hides, at its `--design-stroke-width`. */
+function frameColors(element: HTMLElement): Colors {
+  const style = getComputedStyle(element);
+  const stroke = style.getPropertyValue("--design-stroke-color").trim();
+  const width = Number.parseFloat(style.getPropertyValue("--design-stroke-width")) || 1;
+  return { background: designCanvasColor(style.backgroundColor),
+    outline: stroke && element.classList.contains("zd-design-stroke") ? { color: designCanvasColor(stroke), width } : undefined };
+}
+
+/** Pushes a textured quad clipped to `clip`, with its source rectangle cut to match. */
 function pushClipped(quads: Quads, rect: { x: number; y: number; width: number; height: number },
   src: { x: number; y: number; width: number; height: number }, pageWidth: number, pageHeight: number,
   clip: { x: number; y: number; width: number; height: number }): void {

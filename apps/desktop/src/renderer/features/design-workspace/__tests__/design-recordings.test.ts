@@ -235,7 +235,10 @@ describe("Design recordings", () => {
     // A source that moved on is not a failure; the canvas's next demand
     // names the new version.
     expect(recordings.failure(owner, "d.html")).toBeNull();
-    for (let attempt = 0; attempt < 3; attempt++) {
+    // Deferred behind other frames it was not tried; asked first, it fails
+    // after four deferrals.
+    for (let attempt = 0; attempt < 4; attempt++) {
+      expect(recordings.failure(owner, "b.html")).toBeNull();
       const call = calls.at(-1)!;
       expect(call.frames).toEqual([frames[1]]);
       call.resolve({ ...renderReply([]), deferred: [frames[1]!] });
@@ -247,6 +250,24 @@ describe("Design recordings", () => {
     expect(calls).toHaveLength(count);
     recordings.demand(owner, [{ file: "d.html", sourceVersion: version(40) }]);
     expect(calls.at(-1)).toMatchObject({ frames: [{ file: "d.html", sourceVersion: version(40) }] });
+  });
+
+  it("never fails a frame the engine left for a later request, however often", async () => {
+    const { calls, recordings } = harness();
+    const frames = Array.from({ length: 6 }, (_, index) => ({ file: `f${index}.html`, sourceVersion: version(index + 1) }));
+    recordings.demand(owner, frames);
+    // Each reply answers only its first frame and defers the rest, as an
+    // engine filling one bridge frame with large recordings does.
+    for (let round = 0; round < 6; round++) {
+      const call = calls.at(-1)!;
+      const [first, ...rest] = call.frames;
+      call.resolve({ ...readReply([first!], [], call.known), deferred: rest.map((frame) => frame.file) });
+      await recordings.settled();
+    }
+    for (const frame of frames) {
+      expect(recordings.failure(owner, frame.file)).toBeNull();
+      expect(recordings.recording(owner, frame.file)).toMatchObject({ current: true });
+    }
   });
 
   it("re-records frames drawn by another pipeline but keeps them painted meanwhile", async () => {
