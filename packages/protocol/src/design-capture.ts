@@ -309,6 +309,9 @@ export const DESIGN_RECORDING_MAX_LAYERS = 16;
 /** Base64 chunk data in one reply, within one bridge frame like thumbnails. */
 export const DESIGN_RECORDINGS_REPLY_DATA_BYTES = 12 * 1024 * 1024;
 export const DESIGN_RECORDINGS_KNOWN_CHUNKS = 4096;
+export const DESIGN_RECORDING_MAX_TYPEFACES = 64;
+/** One font's data at most (an externalized typeface). */
+export const DESIGN_RECORDING_TYPEFACE_MAX_BYTES = 64 * 1024 * 1024;
 const recordingChunkId = z.string().regex(DESIGN_RECORDING_CHUNK_ID_PATTERN);
 const recordingFrame = thumbnailFrame;
 const recordingTheme = z.string().regex(/^[a-z][a-z0-9_-]{0,63}$/).nullable();
@@ -321,6 +324,9 @@ const recordingLayer = z.object({
   bytes: z.number().int().min(1).max(DESIGN_RECORDING_MAX_BYTES),
   /** The layer's picture is these chunks' bytes, concatenated in order. */
   chunks: z.array(recordingChunkId).min(1).max(Math.ceil(DESIGN_RECORDING_MAX_BYTES / 2048)),
+  /** Fonts the picture references instead of embedding (externalized
+   * typefaces); each is described once per reply in `typefaces`. */
+  typefaces: z.array(recordingChunkId).max(DESIGN_RECORDING_MAX_TYPEFACES),
 }).strict();
 const designRecordingSchema = recordingFrame.extend({
   /** CSS pixels of the frame. */
@@ -337,6 +343,14 @@ const recordingChunk = z.object({
   data: z.string().min(1).max(Math.ceil((DESIGN_RECORDING_CHUNK_MAX_BYTES * 4) / 3) + 4),
 }).strict();
 const recordingChunks = z.array(recordingChunk).max(Math.ceil(DESIGN_RECORDINGS_REPLY_DATA_BYTES / 4));
+/** An externalized typeface: font data a recording references by its content
+ * id (the chunk-id rule over the font data), carried as ordinary chunks. */
+const recordingTypeface = z.object({
+  id: recordingChunkId,
+  bytes: z.number().int().min(1).max(DESIGN_RECORDING_TYPEFACE_MAX_BYTES),
+  chunks: z.array(recordingChunkId).min(1).max(Math.ceil(DESIGN_RECORDING_TYPEFACE_MAX_BYTES / 2048)),
+}).strict();
+const recordingTypefaces = z.array(recordingTypeface).max(DESIGN_RECORDING_MAX_TYPEFACES * DESIGN_BATCH_CAPTURE_MAX_ITEMS);
 const withinReply = (reply: { chunks: Array<{ data: string }> }) =>
   reply.chunks.reduce((total, chunk) => total + chunk.data.length, 0) <= DESIGN_RECORDINGS_REPLY_DATA_BYTES;
 /** design.recordings.render: recordings of saved frames in one theme, light
@@ -361,6 +375,8 @@ export const designRecordingsReplySchema = z.object({
    * recordings are not reused, and a change re-requests. */
   pipeline: z.string().min(1).max(256),
   recordings: z.array(designRecordingSchema).max(DESIGN_BATCH_CAPTURE_MAX_ITEMS),
+  /** Every typeface the reply's recordings reference, once. */
+  typefaces: recordingTypefaces,
   chunks: recordingChunks,
   stale: z.array(recordingFrame).max(DESIGN_BATCH_CAPTURE_MAX_ITEMS),
   failed: z.array(z.object({ file: z.string().min(1).max(255), error: z.string().min(1).max(500) }).strict())
@@ -383,6 +399,7 @@ export const designRecordingsReadSchema = z.object({
 export type DesignRecordingsRead = z.infer<typeof designRecordingsReadSchema>;
 export const designRecordingsReadReplySchema = z.object({
   recordings: z.array(designRecordingSchema.extend({ pipeline: z.string().min(1).max(256) }).strict()).max(DESIGN_MAX_FRAMES_PER_PAGE),
+  typefaces: recordingTypefaces,
   chunks: recordingChunks,
   /** No stored recording in this theme. */
   missing: z.array(z.string().min(1).max(255)).max(DESIGN_MAX_FRAMES_PER_PAGE),
@@ -427,6 +444,8 @@ export const designBatchRecordReplySchema = z.object({
         x: z.number().finite(), y: z.number().finite(),
         width: z.number().int().min(1).max(65_536), height: z.number().int().min(1).max(65_536),
         path: z.string().min(1).max(4096),
+        /** Font data files, by content id, this layer's picture references. */
+        typefaces: z.array(z.object({ id: recordingChunkId, path: z.string().min(1).max(4096) }).strict()).max(DESIGN_RECORDING_MAX_TYPEFACES),
       }).strict()).min(1).max(DESIGN_RECORDING_MAX_LAYERS),
     }).strict(),
     z.object({ id: z.string().min(1).max(128), error: z.string().min(1).max(500) }).strict(),

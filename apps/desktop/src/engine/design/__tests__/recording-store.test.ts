@@ -3,7 +3,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { chunkDesignRecording } from "../recording-chunks";
-import { readDesignRecordingChunk, readStoredDesignRecording, storeDesignRecording } from "../recording-store";
+import { designRecordingChunkId } from "../recording-chunks";
+import { readDesignRecordingChunk, readDesignRecordingTypeface, readStoredDesignRecording, storeDesignRecording, storeDesignRecordingTypeface } from "../recording-store";
 
 const version = (c: string) => c.repeat(24);
 function bytesFrom(seed: number, length: number): Uint8Array {
@@ -88,5 +89,22 @@ describe("recording store", () => {
     } finally {
       await rm(outside, { recursive: true, force: true });
     }
+  });
+
+  it("stores an externalized typeface once under its content id, and only under it", async () => {
+    const font = bytesFrom(21, 150_000);
+    const id = designRecordingChunkId(font);
+    const stored = await storeDesignRecordingTypeface(id, font);
+    expect(stored).toEqual({ id, bytes: font.length, chunks: expect.any(Array) });
+    expect(await storeDesignRecordingTypeface(id, font)).toEqual(stored);
+    expect(await readDesignRecordingTypeface(id)).toEqual(stored);
+    const parts = await Promise.all(stored!.chunks.map((chunk) => readDesignRecordingChunk(chunk)));
+    expect(Buffer.concat(parts.map((part) => part!))).toEqual(Buffer.from(font));
+    expect(await storeDesignRecordingTypeface("0".repeat(32), font)).toBeNull();
+    expect(await readDesignRecordingTypeface("0".repeat(32))).toBeNull();
+    const recorded = await storeDesignRecording(workspace, "design_1", "frame_t", null, { ...recording(version("a"), bytesFrom(22, 5_000)),
+      layers: [{ x: 0, y: 0, width: 10, height: 10, bytes: bytesFrom(22, 5_000), typefaces: [id, id] }] });
+    expect(recorded?.layers[0]?.typefaces).toEqual([id]);
+    expect((await readStoredDesignRecording(workspace, "design_1", "frame_t", null))?.layers[0]?.typefaces).toEqual([id]);
   });
 });

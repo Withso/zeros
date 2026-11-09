@@ -35,13 +35,14 @@ export function designRecorderEnvironment(source: NodeJS.ProcessEnv, token: stri
   return env;
 }
 
-/** A layer file the recorder named must sit inside its own folder. */
-export async function assertRecorderLayerPath(root: string, file: string): Promise<void> {
+/** A file the recorder named, a layer picture or a typeface's font data,
+ * must sit inside its own folder. */
+export async function assertRecorderLayerPath(root: string, file: string, name: RegExp = /^layer_\d+\.skp$/): Promise<void> {
   const outside = new Error("The recorder named a recording outside its folder.");
   const [base, resolved] = await Promise.all([realpath(root), realpath(file)]).catch(() => { throw outside; });
   const relative = path.relative(base, resolved);
   if (!path.basename(base).startsWith(DESIGN_RECORDER_FOLDER_PREFIX) || relative.startsWith("..") || path.isAbsolute(relative) ||
-    !/^layer_\d+\.skp$/.test(path.basename(resolved)))
+    !name.test(path.basename(resolved)))
     throw outside;
 }
 
@@ -140,7 +141,10 @@ export function createDesignRecorder(options: {
       for (const item of Array.isArray(reply.items) ? reply.items : []) {
         if (item && "layers" in item && Array.isArray(item.layers)) {
           try {
-            for (const layer of item.layers) await assertRecorderLayerPath(host.root, layer.path);
+            for (const layer of item.layers) {
+              await assertRecorderLayerPath(host.root, layer.path);
+              for (const typeface of layer.typefaces ?? []) await assertRecorderLayerPath(host.root, typeface.path, /^[a-f0-9]{32}\.font$/);
+            }
             items.push(item);
           } catch (error) {
             items.push({ id: item.id, error: (error as Error).message });

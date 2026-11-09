@@ -127,7 +127,7 @@ async function recordItem(slot: Slot, documents: Map<string, string>, item: Desi
     // such a frame keeps its bitmap preview instead.
     if (layers.length > 1) return { id: item.id, error: "This frame paints on separate composited layers, so it is shown as a picture." };
     return { id: item.id, scale: slot.ratio, layers: [{ x: 0, y: 0, width: Math.round(item.viewport.width * slot.ratio),
-      height: Math.round(item.viewport.height * slot.ratio), path: path.join(directory, layers[0]!) }] };
+      height: Math.round(item.viewport.height * slot.ratio), path: path.join(directory, layers[0]!), typefaces: [] }] };
   } finally {
     documents.delete(key);
   }

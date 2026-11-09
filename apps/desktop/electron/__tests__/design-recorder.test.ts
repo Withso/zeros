@@ -56,8 +56,8 @@ describe("Design recorder client", () => {
       const fetchImpl = vi.fn(async (_url: string, init: RequestInit) => {
         expect(String((init.headers as Record<string, string>).Authorization)).toMatch(/^Bearer [a-f0-9]{64}$/);
         return new Response(JSON.stringify({ items: [
-          { id: "f0", scale: 2, layers: [{ x: 0, y: 0, width: 640, height: 400, path: good }] },
-          { id: "f1", scale: 2, layers: [{ x: 0, y: 0, width: 640, height: 400, path: path.join(outside, "layer_0.skp") }] },
+          { id: "f0", scale: 2, layers: [{ x: 0, y: 0, width: 640, height: 400, path: good, typefaces: [] }] },
+          { id: "f1", scale: 2, layers: [{ x: 0, y: 0, width: 640, height: 400, path: path.join(outside, "layer_0.skp"), typefaces: [] }] },
           { id: "f2", error: "Multiple layers." },
         ] }));
       });

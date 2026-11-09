@@ -8,6 +8,7 @@ import { DESIGN_DIRECTORY_NAME, initializeDesignDocument, prepareDesignNavigatio
 import { designDirectoryNameFor } from "../directory-registry";
 import { designDirectoryEntry } from "../metadata";
 import { DESIGN_RECORDER_FOLDER_PREFIX, designRecordingPipeline, readDesignRecordings, renderDesignRecordings } from "../recording-batch";
+import { designRecordingChunkId } from "../recording-chunks";
 import { settleDesignFontDownloadsForTests, resetDesignFontsForTests } from "../style-fonts";
 
 const RECORDER = "electron-43.8.3/chromium-150.0.7871.250/skp";
@@ -25,7 +26,8 @@ describe("Design recordings", () => {
     return [...out].map(([file, sourceVersion]) => ({ file, sourceVersion }));
   };
   /** A capture host stand-in: writes each frame's "picture" where a recorder would. */
-  const recorder = (options: { bytes?: (id: string) => Uint8Array; error?: (id: string) => string | null; pathFor?: (id: string, real: string) => string } = {}) => {
+  const recorder = (options: { bytes?: (id: string) => Uint8Array; error?: (id: string) => string | null; pathFor?: (id: string, real: string) => string;
+    fonts?: (id: string) => Array<{ id: string; bytes: Uint8Array }> } = {}) => {
     const calls: DesignBatchRecordRequest[] = [];
     const record = async (request: DesignBatchRecordRequest): Promise<DesignBatchRecordReply> => {
       calls.push(designBatchRecordRequestSchema.parse(request));
@@ -39,7 +41,14 @@ describe("Design recordings", () => {
         await mkdir(dir);
         const file = path.join(dir, "layer_0.skp");
         await writeFile(file, options.bytes?.(item.id) ?? Buffer.concat([Buffer.from("skiapict"), randomBytes(40_000)]));
-        items.push({ id: item.id, scale: 2, layers: [{ x: 0, y: 0, width: item.viewport.width * 2, height: item.viewport.height * 2, path: options.pathFor?.(item.id, file) ?? file }] });
+        const typefaces = [];
+        for (const font of options.fonts?.(item.id) ?? []) {
+          await mkdir(path.join(base, "typefaces"), { recursive: true });
+          const fontFile = path.join(base, "typefaces", `${font.id}.font`);
+          await writeFile(fontFile, font.bytes);
+          typefaces.push({ id: font.id, path: fontFile });
+        }
+        items.push({ id: item.id, scale: 2, layers: [{ x: 0, y: 0, width: item.viewport.width * 2, height: item.viewport.height * 2, path: options.pathFor?.(item.id, file) ?? file, typefaces }] });
       }
       return { version: 1, revision: request.revision, recorder: RECORDER, items };
     };
@@ -142,5 +151,27 @@ describe("Design recordings", () => {
     const frames = await versions(["page-1/a.html"]);
     await expect(renderDesignRecordings(root, { workspaceId: "w", directoryId: "design_other", theme: null, frames }, { record: recorder().record, recorder: RECORDER }))
       .rejects.toThrow(/directory changed/);
+  });
+
+  it("describes a typeface the reply's recordings share once, and sends its data once", async () => {
+    const frames = await versions(["page-1/a.html", "page-1/b.html"]);
+    const font = randomBytes(300_000), id = designRecordingChunkId(font);
+    const host = recorder({ fonts: () => [{ id, bytes: font }] });
+    const reply = await renderDesignRecordings(root, { workspaceId: "w", directoryId, theme: null, frames }, { record: host.record, recorder: RECORDER });
+    expect(reply.recordings.map((r) => r.layers[0]!.typefaces)).toEqual([[id], [id]]);
+    expect(reply.typefaces.map((t) => [t.id, t.bytes])).toEqual([[id, font.length]]);
+    const sent = new Map(reply.chunks.map((chunk) => [chunk.id, Buffer.from(chunk.data, "base64")]));
+    expect(Buffer.concat(reply.typefaces[0]!.chunks.map((chunk) => sent.get(chunk)!))).toEqual(font);
+    const again = await renderDesignRecordings(root, { workspaceId: "w", directoryId, theme: null, frames, knownChunks: [...sent.keys()] }, { record: host.record, recorder: RECORDER });
+    expect(again.typefaces.map((t) => t.id)).toEqual([id]);
+    expect(again.chunks).toEqual([]);
+  });
+
+  it("fails a frame whose font data doesn't match the id the recorder gave it", async () => {
+    const frames = await versions(["page-1/a.html"]);
+    const host = recorder({ fonts: () => [{ id: "0".repeat(32), bytes: randomBytes(1_000) }] });
+    const reply = await renderDesignRecordings(root, { workspaceId: "w", directoryId, theme: null, frames }, { record: host.record, recorder: RECORDER });
+    expect(reply.recordings).toEqual([]);
+    expect(reply.failed).toEqual([{ file: "page-1/a.html", error: "A font this frame uses could not be stored." }]);
   });
 });

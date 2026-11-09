@@ -7,6 +7,7 @@ import {
   DESIGN_BATCH_CAPTURE_TIMEOUT_MS,
   DESIGN_RECORDER_FOLDER_PREFIX,
   DESIGN_RECORDING_MAX_BYTES,
+  DESIGN_RECORDING_TYPEFACE_MAX_BYTES,
   DESIGN_RECORDINGS_REPLY_DATA_BYTES,
   designBatchRecordReplySchema,
   designRecordingsReadReplySchema,
@@ -24,7 +25,15 @@ import { designDirectoryNameFor } from "./directory-registry";
 import { assertDesignThemeName } from "./document";
 import { readSharedCanvasContext } from "./document-storage";
 import { designDirectoryEntry } from "./metadata";
-import { readDesignRecordingChunk, readStoredDesignRecording, storeDesignRecording, type StoredDesignRecording } from "./recording-store";
+import {
+  readDesignRecordingChunk,
+  readDesignRecordingTypeface,
+  readStoredDesignRecording,
+  storeDesignRecording,
+  storeDesignRecordingTypeface,
+  type StoredDesignRecording,
+  type StoredDesignRecordingTypeface,
+} from "./recording-store";
 import { composeDesignThumbnailBatches } from "./thumbnail-batch";
 
 /** Bump whenever composing a recording changes what it draws for the same frame. */
@@ -59,13 +68,24 @@ async function assertRecordingTarget(root: string, input: { directoryId: string;
  * fits its data budget; a recording whose chunks don't fit is deferred. */
 class ReplyBuilder {
   readonly recordings: Array<Recording & { pipeline?: string }> = [];
+  readonly typefaces: StoredDesignRecordingTypeface[] = [];
   readonly chunks: Array<{ id: string; data: string }> = [];
+  private readonly described = new Set<string>();
   private readonly sent: Set<string>;
   private budget = DESIGN_RECORDINGS_REPLY_DATA_BYTES;
   constructor(known: readonly string[] | undefined) { this.sent = new Set(known); }
   /** "added", "deferred", or "missing" when a stored chunk is unreadable. */
   async add(frame: Frame, stored: StoredDesignRecording, withPipeline = false): Promise<"added" | "deferred" | "missing"> {
-    const wanted = [...new Set(stored.layers.flatMap((layer) => layer.chunks))].filter((id) => !this.sent.has(id));
+    // Typefaces first described in this reply travel with the recording.
+    const typefaces: StoredDesignRecordingTypeface[] = [];
+    for (const id of new Set(stored.layers.flatMap((layer) => layer.typefaces))) {
+      if (this.described.has(id)) continue;
+      const typeface = await readDesignRecordingTypeface(id);
+      if (!typeface) return "missing";
+      typefaces.push(typeface);
+    }
+    const wanted = [...new Set([...stored.layers.flatMap((layer) => layer.chunks), ...typefaces.flatMap((typeface) => typeface.chunks)])]
+      .filter((id) => !this.sent.has(id));
     const data: Array<{ id: string; data: string }> = [];
     let size = 0;
     for (const id of wanted) {
@@ -78,8 +98,9 @@ class ReplyBuilder {
     }
     this.budget -= size;
     for (const chunk of data) { this.sent.add(chunk.id); this.chunks.push(chunk); }
+    for (const typeface of typefaces) { this.described.add(typeface.id); this.typefaces.push(typeface); }
     this.recordings.push({ file: frame.file, sourceVersion: frame.sourceVersion, width: stored.width, height: stored.height,
-      scale: stored.scale, layers: stored.layers.map((layer) => ({ ...layer, chunks: [...layer.chunks] })),
+      scale: stored.scale, layers: stored.layers.map((layer) => ({ ...layer, chunks: [...layer.chunks], typefaces: [...layer.typefaces] })),
       ...(withPipeline ? { pipeline: stored.pipeline } : {}) });
     return "added";
   }
@@ -158,23 +179,39 @@ export function designBatchRecordRequestFrom(capture: DesignBatchCaptureRequest)
 }
 
 let realTemporary: string | null = null;
-/** A layer file named by the host must be one it wrote in its own recording
+/** A file named by the host must be one it wrote in its own recording
  * folder: never a path elsewhere, and never followed through a link. */
-async function readRecordedLayer(file: string): Promise<Buffer> {
+async function readRecorderFile(file: string, name: RegExp, limit: number): Promise<Buffer> {
+  const outside = new Error("The recorder named a recording outside its folder.");
   realTemporary ??= await realpath(tmpdir());
-  const resolved = await realpath(file);
+  const resolved = await realpath(file).catch(() => { throw outside; });
   const relative = path.relative(realTemporary, resolved);
   if (!path.isAbsolute(file) || relative.startsWith("..") || path.isAbsolute(relative) ||
-    !relative.split(path.sep)[0]!.startsWith(DESIGN_RECORDER_FOLDER_PREFIX) || !/^layer_\d+\.skp$/.test(path.basename(resolved)))
-    throw new Error("The recorder named a recording outside its folder.");
+    !relative.split(path.sep)[0]!.startsWith(DESIGN_RECORDER_FOLDER_PREFIX) || !name.test(path.basename(resolved)))
+    throw outside;
   const handle = await open(resolved, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
     const info = await handle.stat();
-    if (!info.isFile() || info.size < 1 || info.size > DESIGN_RECORDING_MAX_BYTES) throw new Error("This frame's recording is too large.");
+    if (!info.isFile() || info.size < 1 || info.size > limit) throw new Error("This frame's recording is too large.");
     return await handle.readFile();
   } finally {
     await handle.close();
   }
+}
+const LAYER_FILE = /^layer_\d+\.skp$/;
+const TYPEFACE_FILE = /^[a-f0-9]{32}\.font$/;
+
+/** Stores the fonts a recorded layer references, verified by content id. */
+async function storeLayerTypefaces(typefaces: ReadonlyArray<{ id: string; path: string }>): Promise<string[]> {
+  const ids: string[] = [];
+  for (const typeface of typefaces) {
+    if (!(await readDesignRecordingTypeface(typeface.id))) {
+      const bytes = await readRecorderFile(typeface.path, TYPEFACE_FILE, DESIGN_RECORDING_TYPEFACE_MAX_BYTES);
+      if (!(await storeDesignRecordingTypeface(typeface.id, bytes))) throw new Error("A font this frame uses could not be stored.");
+    }
+    ids.push(typeface.id);
+  }
+  return ids;
 }
 
 /** design.recordings.render on one Local workspace. */
@@ -232,7 +269,8 @@ export async function renderDesignRecordings(
           const id = frameId(canvas, frame.file);
           try {
             const layers = [];
-            for (const layer of item.layers) layers.push({ x: layer.x, y: layer.y, width: layer.width, height: layer.height, bytes: await readRecordedLayer(layer.path) });
+            for (const layer of item.layers) layers.push({ x: layer.x, y: layer.y, width: layer.width, height: layer.height,
+              bytes: await readRecorderFile(layer.path, LAYER_FILE, DESIGN_RECORDING_MAX_BYTES), typefaces: await storeLayerTypefaces(layer.typefaces) });
             const stored = id ? await storeDesignRecording(root, input.directoryId, id, input.theme,
               { sourceVersion: frame.sourceVersion, pipeline: drawn, width: viewport.width, height: viewport.height, scale: item.scale, layers }) : null;
             if (!stored) { failed.push({ file: frame.file, error: "This frame's recording could not be stored." }); continue; }
@@ -251,7 +289,7 @@ export async function renderDesignRecordings(
     }
   }
   return designRecordingsReplySchema.parse({ pipeline: pipeline ?? DESIGN_RECORDING_COMPOSER, recordings: reply.recordings,
-    chunks: reply.chunks, stale, failed, deferred });
+    typefaces: reply.typefaces, chunks: reply.chunks, stale, failed, deferred });
 }
 
 /** design.recordings.read on one Local workspace: each frame's newest stored
@@ -272,5 +310,5 @@ export async function readDesignRecordings(root: string, raw: unknown): Promise<
     if (outcome === "deferred") deferred.push(frame.file);
     else if (outcome === "missing") missing.push(frame.file);
   }
-  return designRecordingsReadReplySchema.parse({ recordings: reply.recordings, chunks: reply.chunks, missing, deferred });
+  return designRecordingsReadReplySchema.parse({ recordings: reply.recordings, typefaces: reply.typefaces, chunks: reply.chunks, missing, deferred });
 }

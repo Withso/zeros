@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { lstat, mkdir, open, readdir, realpath, rename, unlink, utimes, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { DESIGN_RECORDING_CHUNK_ID_PATTERN, DESIGN_RECORDING_MAX_BYTES, DESIGN_RECORDING_MAX_LAYERS } from "@zeros/protocol/design-capture";
+import { DESIGN_RECORDING_CHUNK_ID_PATTERN, DESIGN_RECORDING_MAX_BYTES, DESIGN_RECORDING_MAX_LAYERS, DESIGN_RECORDING_MAX_TYPEFACES, DESIGN_RECORDING_TYPEFACE_MAX_BYTES } from "@zeros/protocol/design-capture";
 import { zerosDataDir } from "../db/paths";
 import { DESIGN_DIRECTORY_ID_PATTERN } from "./directory-path";
 import { designPrivateStorageDirectory } from "./metadata-storage";
@@ -12,6 +12,7 @@ import { chunkDesignRecording, designRecordingChunkId, DESIGN_RECORDING_CHUNKER,
 //   design-storage/<workspace>/recordings/<directory id>/<frame id>/
 //     <theme or _>~<sourceVersion>~<pipeline key>.json   (a manifest)
 //   design-storage/recording-chunks/<id[0,2]>/<id>          (shared chunks)
+//   design-storage/recording-typefaces/<id[0,2]>/<id>.json  (shared fonts)
 // One manifest per frame and theme; a newer generation replaces the older.
 // Chunks are content-addressed and shared by every workspace, so the font
 // data recordings embed is stored once. Everything here is disposable:
@@ -31,6 +32,8 @@ export interface DesignRecordingLayerInput {
   readonly width: number;
   readonly height: number;
   readonly bytes: Uint8Array;
+  /** Externalized typefaces the picture references, already stored. */
+  readonly typefaces?: readonly string[];
 }
 
 export interface StoredDesignRecordingLayer {
@@ -38,6 +41,14 @@ export interface StoredDesignRecordingLayer {
   readonly y: number;
   readonly width: number;
   readonly height: number;
+  readonly bytes: number;
+  readonly chunks: readonly string[];
+  readonly typefaces: readonly string[];
+}
+
+/** Font data a recording references by content id, stored as chunks. */
+export interface StoredDesignRecordingTypeface {
+  readonly id: string;
   readonly bytes: number;
   readonly chunks: readonly string[];
 }
@@ -57,6 +68,10 @@ function storageRoot(): string {
 
 function chunkFile(id: string): string {
   return path.join(storageRoot(), "recording-chunks", id.slice(0, 2), id);
+}
+
+function typefaceFile(id: string): string {
+  return path.join(storageRoot(), "recording-typefaces", id.slice(0, 2), `${id}.json`);
 }
 
 function frameFolder(workspace: string, directoryId: string, frameId: string): string | null {
@@ -143,6 +158,8 @@ function validManifest(value: unknown, sourceVersion: string): StoredDesignRecor
     if (!layer || !finite(layer.x, -1e9, 1e9) || !finite(layer.y, -1e9, 1e9) || !finite(layer.width, 1, 65_536) || !finite(layer.height, 1, 65_536)) return null;
     if (!finite(layer.bytes, 1, DESIGN_RECORDING_MAX_BYTES) || !Array.isArray(layer.chunks) || layer.chunks.length < 1) return null;
     if (!layer.chunks.every((id) => typeof id === "string" && DESIGN_RECORDING_CHUNK_ID_PATTERN.test(id))) return null;
+    if (!Array.isArray(layer.typefaces) || layer.typefaces.length > DESIGN_RECORDING_MAX_TYPEFACES ||
+      !layer.typefaces.every((id) => typeof id === "string" && DESIGN_RECORDING_CHUNK_ID_PATTERN.test(id))) return null;
   }
   return manifest as unknown as StoredDesignRecording;
 }
@@ -165,7 +182,9 @@ export async function storeDesignRecording(
     if (layer.bytes.length < 1 || layer.bytes.length > DESIGN_RECORDING_MAX_BYTES) return null;
     const chunks = chunkDesignRecording(layer.bytes);
     for (const chunk of chunks) if (!(await storeChunk(chunk.id, chunk.bytes))) return null;
-    layers.push({ x: layer.x, y: layer.y, width: layer.width, height: layer.height, bytes: layer.bytes.length, chunks: chunks.map((chunk) => chunk.id) });
+    const typefaces = [...new Set(layer.typefaces ?? [])];
+    if (typefaces.length > DESIGN_RECORDING_MAX_TYPEFACES || !typefaces.every((id) => DESIGN_RECORDING_CHUNK_ID_PATTERN.test(id))) return null;
+    layers.push({ x: layer.x, y: layer.y, width: layer.width, height: layer.height, bytes: layer.bytes.length, chunks: chunks.map((chunk) => chunk.id), typefaces });
   }
   const stored: StoredDesignRecording = { sourceVersion: recording.sourceVersion, pipeline: recording.pipeline,
     width: recording.width, height: recording.height, scale: recording.scale, layers };
@@ -210,4 +229,33 @@ export async function readStoredDesignRecording(
     await utimes(file, now, now).catch(() => {});
   }
   return manifest;
+}
+
+/** Stores an externalized typeface's font data as chunks, under its content
+ * id (the chunk-id rule over the whole font data), once for every workspace. */
+export async function storeDesignRecordingTypeface(id: string, bytes: Uint8Array): Promise<StoredDesignRecordingTypeface | null> {
+  if (!DESIGN_RECORDING_CHUNK_ID_PATTERN.test(id) || bytes.length < 1 || bytes.length > DESIGN_RECORDING_TYPEFACE_MAX_BYTES) return null;
+  if (designRecordingChunkId(bytes) !== id) return null;
+  const existing = await readDesignRecordingTypeface(id);
+  if (existing) return existing;
+  const chunks = chunkDesignRecording(bytes);
+  for (const chunk of chunks) if (!(await storeChunk(chunk.id, chunk.bytes))) return null;
+  const stored: StoredDesignRecordingTypeface = { id, bytes: bytes.length, chunks: chunks.map((chunk) => chunk.id) };
+  const file = typefaceFile(id);
+  return (await writeAtomically(path.dirname(file), path.basename(file), Buffer.from(JSON.stringify(stored)))) ? stored : null;
+}
+
+export async function readDesignRecordingTypeface(id: string): Promise<StoredDesignRecordingTypeface | null> {
+  if (!DESIGN_RECORDING_CHUNK_ID_PATTERN.test(id)) return null;
+  const file = typefaceFile(id);
+  if (!(await contained(path.dirname(file)))) return null;
+  const bytes = await readBounded(file, MANIFEST_BYTES);
+  if (!bytes) return null;
+  let value: unknown;
+  try { value = JSON.parse(bytes.toString("utf8")); } catch { return null; }
+  const typeface = value as Partial<StoredDesignRecordingTypeface>;
+  if (typeface?.id !== id || typeof typeface.bytes !== "number" || !Number.isInteger(typeface.bytes) || typeface.bytes < 1 ||
+    typeface.bytes > DESIGN_RECORDING_TYPEFACE_MAX_BYTES || !Array.isArray(typeface.chunks) || typeface.chunks.length < 1 ||
+    !typeface.chunks.every((chunk) => typeof chunk === "string" && DESIGN_RECORDING_CHUNK_ID_PATTERN.test(chunk))) return null;
+  return { id, bytes: typeface.bytes, chunks: [...typeface.chunks] };
 }

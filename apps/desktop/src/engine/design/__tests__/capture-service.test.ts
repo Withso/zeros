@@ -359,7 +359,7 @@ const recordInput = (items = [{ id: "a", html: `<html><head><link rel="styleshee
 it("records a batch of frames in one admitted reservation, answering every item in request order", async () => {
   const recordBatch = vi.fn(async (input: { items: Array<{ id: string }> }) => ({ recorder: "fixture/skp",
     items: input.items.filter(item => item.id !== "lost").map(item => item.id === "failed" ? { id: item.id, error: "Multiple layers." }
-      : { id: item.id, scale: 2, layers: [{ x: 0, y: 0, width: 640, height: 400, path: `/tmp/zeros-design-recorder-x/${item.id}/layer_0.skp` }] }) }));
+      : { id: item.id, scale: 2, layers: [{ x: 0, y: 0, width: 640, height: 400, path: `/tmp/zeros-design-recorder-x/${item.id}/layer_0.skp`, typefaces: [] }] }) }));
   const service = await startDesignCaptureService(vi.fn(), new DesignCaptureAdmission(), undefined, recordBatch);
   try {
     expect((await recordRequest(service, recordInput(), "0".repeat(64))).status).toBe(401);
