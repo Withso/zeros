@@ -44,6 +44,7 @@ const CreateSchema = z.object({
   name: z.string().trim().min(1).max(200).optional(),
 }).strict();
 const ConnectSchema = z.object({ wake: z.boolean().default(true) }).strict();
+const WarmSchema = z.object({ repository: CreateSchema.shape.repository }).strict();
 
 export type CloudV2RouteDeps = {
   store: Pick<CloudV2Store, "activeComputer" | "createWorkspace" | "createWorkspaceOnce" | "readCreateReceipt" | "get" | "promptContext" | "list" | "requestLifecycle" | "transition" | "issueToken" | "listChats" | "messageWindow" | "searchMessages" | "markActive"> & Partial<Pick<CloudV2Store, "prompts">>;
@@ -56,7 +57,8 @@ export type CloudV2RouteDeps = {
   authorizeRepositories?(organizationId: string, userId: string, repositories: readonly string[]): Promise<void>;
   authorizeSourceTargets?(organizationId: string, userId: string, targets: readonly CloudSourceTarget[]): Promise<void>;
   /** `fresh` skips the reuse of a recently resolved identity. */
-  authorizeBuildRepository?(organizationId: string, userId: string, buildId: string, repository: string, options?: { fresh?: boolean }): Promise<CloudSourceTarget>;
+  /** fresh reads the identity live; renew renews a verification near expiry. */
+  authorizeBuildRepository?(organizationId: string, userId: string, buildId: string, repository: string, options?: { fresh?: boolean; renew?: boolean }): Promise<CloudSourceTarget>;
   remoteHead(organizationId: string, userId: string, target: CloudSourceTarget, branch: string): Promise<string | null>;
   authorizeSource?(workspace: CloudV2Workspace): Promise<void>;
   continueSource?(workspace: CloudV2Workspace, proof?: CloudSourceProof): Promise<CloudSourceContinuation>;
@@ -105,10 +107,11 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
   }
   const prefix = deps.branchPrefix ?? "zeros/";
   const json = bodyLimit({ maxSize: 16 * 1024, onError: c => c.json({ error: { code: "payload_too_large", message: "Request is too large" } }, 413) });
-  const buildRepository = async (organizationId: string, userId: string, buildId: string, entry: CloudV2InstalledRepository, fresh = false) => {
+  const buildRepository = async (organizationId: string, userId: string, buildId: string, entry: CloudV2InstalledRepository,
+    options: { fresh?: true; renew?: true } = {}) => {
     if (!deps.authorizeBuildRepository) throw new HttpError(503, "github_unavailable", "Original source access could not be verified.");
     const target = CloudSourceTargetSchema.safeParse(await deps.authorizeBuildRepository(organizationId, userId, buildId, entry.repository,
-      ...(fresh ? [{ fresh }] : [])));
+      ...(options.fresh || options.renew ? [options] : [])));
     if (!target.success) throw new HttpError(409, "cloud_source_review_required", "The original repository identity needs verification.");
     return { entry, target: target.data };
   };
@@ -176,8 +179,9 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
       const entry = computer.repositories[index]!;
       // The other repositories decide whether the creator may take a v3 image
       // holding their source, so read them live. The requested repository's
-      // branch read below is live anyway.
-      try { resolved[index] = await buildRepository(input.organizationId, userId, computer.buildId, entry, !requested(entry)); }
+      // branch read below is live anyway; its check renews a verification near
+      // expiry, which the lifecycle and the worker's hello reuse seconds later.
+      try { resolved[index] = await buildRepository(input.organizationId, userId, computer.buildId, entry, requested(entry) ? { renew: true } : { fresh: true }); }
       catch (error) {
         if (!(error instanceof HttpError) || ![403, 404].includes(error.status)) throw error;
         if (requested(entry)) originalError = error;
@@ -340,6 +344,21 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
       catch (error) { if (!(error instanceof HttpError) || ![403,404].includes(error.status)) throw error; }
     }
     return c.json({ repositories: repositories === null ? null : allowed });
+  });
+
+  // The Create page calls this on intent for its selected repository, so the
+  // create request seconds later reuses a fresh GitHub verification.
+  app.post("/v1/cloud-v2/organizations/:org/computer/repositories/warm", json, async c => {
+    const organizationId = org(c.req.param("org")), userId = c.get("user").id;
+    const parsed = WarmSchema.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) throw new HttpError(400, "invalid_request", "Invalid repository");
+    await deps.computers.requireMember(organizationId, userId);
+    const computer = await deps.store.activeComputer(organizationId);
+    const entry = computer?.repositories.find(value => value.repository.toLowerCase() === parsed.data.repository.toLowerCase());
+    if (!computer || !entry) throw new HttpError(404, "repository_not_installed", "Add this repository to the Cloud Computer first");
+    await buildRepository(organizationId, userId, computer.buildId, entry, { renew: true });
+    c.header("Cache-Control", "no-store");
+    return c.json({ ok: true });
   });
 
   app.get("/v1/cloud-v2/organizations/:org/computer", async c => {

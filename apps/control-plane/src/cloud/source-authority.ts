@@ -73,10 +73,12 @@ export class CloudV2SourceAuthority {
   async repositories(organizationId: string, userId: string, repositories: readonly string[]): Promise<void> {
     await this.observeSources(organizationId, userId, repositories);
   }
-  async targets(organizationId: string, userId: string, targets: readonly CloudSourceTarget[]): Promise<void> {
+  /** renew is for a create's requested repository, whose lifecycle and hello
+   * follow within seconds, and for the Create page's intent to create. */
+  async targets(organizationId: string, userId: string, targets: readonly CloudSourceTarget[], renew = false): Promise<void> {
     const parsed = z.array(CloudSourceTargetSchema).min(1).max(100).safeParse(targets);
     if (!parsed.success) throw new HttpError(409, "cloud_source_review_required", "The original source identities could not be verified. Existing data has been retained.");
-    await this.observeSources(organizationId, userId, parsed.data.map(target => target.repository), parsed.data.map(target => target.repositoryId));
+    await this.observeSources(organizationId, userId, parsed.data.map(target => target.repository), parsed.data.map(target => target.repositoryId), false, renew);
   }
 
   private fingerprint(scope: RepositoryRequest): Promise<string> {

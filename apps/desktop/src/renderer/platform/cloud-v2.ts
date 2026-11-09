@@ -242,6 +242,14 @@ export async function getCloudV2InstalledRepositories(organizationId: string): P
   }) ?? null;
 }
 
+const WarmedSchema = z.object({ ok: z.literal(true) });
+/** Asks the control plane to check (or renew) the creator's GitHub access to
+ * one Cloud Computer repository ahead of a create. The result is advisory. */
+export async function warmCloudV2RepositoryAccess(organizationId: string, repository: string): Promise<void> {
+  await cloudAccountRequest(`/v1/cloud-v2/organizations/${uuid.parse(organizationId)}/computer/repositories/warm`, WarmedSchema,
+    { body: { repository }, idempotencyKey: crypto.randomUUID() });
+}
+
 export async function getCloudV2Computer(organizationId: string) {
   return cloudAccountRequest(`/v1/cloud-v2/organizations/${uuid.parse(organizationId)}/computer`, ComputerSchema);
 }

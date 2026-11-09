@@ -375,6 +375,13 @@ later doesn't wait for GitHub. Other checks, including that hello and status
 polls, never renew, so a boot costs at most about one extra verification. A
 renewal's outage response records nothing and leaves the positive to expire; a
 confirmed refusal withdraws it at once.
+The create request's check of its requested repository renews the same way.
+Before that, the Create page warms the selected repository on intent: picking
+or hovering it, or pointing at, focusing or typing in the prompt sends
+`POST /v1/cloud-v2/organizations/:org/computer/repositories/warm`, at most
+once per 10 seconds per repository. The route runs the create's member and
+repository check with renewal and returns `{ ok: true }`; the desktop ignores
+its result.
 Transient failures back off from one to fifteen minutes, with bounded jitter, and respect
 GitHub's longer retry delay. An idle workspace does not refresh GitHub access.
 
