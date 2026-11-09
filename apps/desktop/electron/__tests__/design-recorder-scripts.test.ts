@@ -2,13 +2,14 @@ import { runInNewContext } from "node:vm";
 import { describe, expect, it } from "vitest";
 import { DESIGN_RECORDER_FLATTEN_SOURCE, DESIGN_RECORDER_PREPARE_SCRIPT } from "../design-recorder-scripts";
 
-type Box = { overflowX: string; overflowY: string; display: string; scrollHeight: number; clientHeight: number; scrollWidth: number; clientWidth: number };
+type Box = { overflowX: string; overflowY: string; display: string; scrollHeight: number; clientHeight: number; scrollWidth: number; clientWidth: number; willChange: string; position: string };
 function element(box: Partial<Box>, children: unknown[] = [], shadow?: unknown[]) {
   const style = new Map<string, string>();
-  const value = { overflowX: "visible", overflowY: "visible", display: "block", scrollHeight: 10, clientHeight: 10, scrollWidth: 10, clientWidth: 10, ...box };
+  const value = { overflowX: "visible", overflowY: "visible", display: "block", scrollHeight: 10, clientHeight: 10, scrollWidth: 10, clientWidth: 10, willChange: "auto", position: "static", ...box };
   const self: Record<string, unknown> = {
     ...value, computed: value, children, style: { setProperty: (name: string, v: string) => style.set(name, v), get: (name: string) => style.get(name) },
     shadowRoot: shadow ? { querySelectorAll: () => flat(shadow) } : null,
+    contains: (other: unknown) => flat(children).includes(other),
   };
   return self;
 }
@@ -27,19 +28,35 @@ describe("Design recorder scripts", () => {
     const all = [listed, fits, hidden, flex, host];
     const document = { documentElement: html, body, querySelectorAll: () => [html, body, ...flat(all)] };
     const converted = runInNewContext(`${DESIGN_RECORDER_FLATTEN_SOURCE}; flattenDesignScrollers()`, {
-      document, getComputedStyle: (el: { computed: Box }) => el.computed,
+      document, getComputedStyle: (el: { computed: Box }) => el.computed, innerHeight: 900, innerWidth: 1440,
     });
-    expect(converted).toBe(3);
+    expect(converted).toBe(4);
     const styles = (el: Record<string, unknown>) => ["display", "overflow-x", "overflow-y"].map((name) => (el.style as { get(n: string): string | undefined }).get(name) ?? "-");
     expect(styles(listed)).toEqual(["flow-root", "-", "clip"]);
     expect(styles(flex)).toEqual(["-", "clip", "-"]);
     expect(styles(shadowed)).toEqual(["flow-root", "-", "clip"]);
-    for (const untouched of [fits, hidden, html, body]) expect(styles(untouched)).toEqual(["-", "-", "-"]);
+    for (const untouched of [fits, hidden]) expect(styles(untouched)).toEqual(["-", "-", "-"]);
+    // The page overflows its viewport, so the page itself is clipped.
+    expect((html.style as { get(n: string): string | undefined }).get("overflow")).toBe("clip");
+    expect((body.style as { get(n: string): string | undefined }).get("overflow")).toBe("clip");
   });
 
   it("is one expression that embeds the flatten function", () => {
     expect(DESIGN_RECORDER_PREPARE_SCRIPT).toContain("function flattenDesignScrollers()");
     expect(DESIGN_RECORDER_PREPARE_SCRIPT).not.toContain("${");
     expect(() => new Function(`return ${DESIGN_RECORDER_PREPARE_SCRIPT}`)).not.toThrow();
+  });
+
+  it("drops a will-change hint but keeps its stacking context, unless it contains fixed elements", () => {
+    const pinned = element({ position: "fixed" });
+    const hinted = element({ willChange: "transform" });
+    const container = element({ willChange: "transform" }, [pinned]);
+    const html = element({}), body = element({});
+    const document = { documentElement: html, body, querySelectorAll: () => [html, body, ...flat([hinted, container])] };
+    runInNewContext(`${DESIGN_RECORDER_FLATTEN_SOURCE}; flattenDesignScrollers()`, { document, getComputedStyle: (el: { computed: Box }) => el.computed, innerHeight: 900, innerWidth: 1440 });
+    const get = (el: Record<string, unknown>, name: string) => (el.style as { get(n: string): string | undefined }).get(name);
+    expect([get(hinted, "will-change"), get(hinted, "isolation")]).toEqual(["auto", "isolate"]);
+    expect([get(container, "will-change"), get(container, "isolation")]).toEqual([undefined, undefined]);
+    expect(get(html, "overflow")).toBeUndefined();
   });
 });
