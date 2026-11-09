@@ -369,11 +369,12 @@ five-second verification budget leaves room for other configuration work, but
 slow credential/configuration I/O can still exceed the hello timeout; the worker
 retries that hello automatically. Waiters neither steal a live claim nor extend
 source grace.
-While a workspace is creating or starting, a check that finds its positive
-within 15 seconds of expiry renews it in the background. The worker's hello,
-seconds later, then never waits for GitHub. A renewal's outage response records
-nothing and leaves the positive to expire; a confirmed refusal withdraws it at
-once.
+The lifecycle's checks of a creating or starting workspace renew a positive
+within 15 seconds of expiry in the background, so the worker's hello seconds
+later doesn't wait for GitHub. Other checks, including that hello and status
+polls, never renew, so a boot costs at most about one extra verification. A
+renewal's outage response records nothing and leaves the positive to expire; a
+confirmed refusal withdraws it at once.
 Transient failures back off from one to fifteen minutes, with bounded jitter, and respect
 GitHub's longer retry delay. An idle workspace does not refresh GitHub access.
 

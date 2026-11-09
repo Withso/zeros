@@ -45,12 +45,12 @@ function fixture(age: number) {
 
 // The lifecycle checks a booting workspace's sources seconds before its
 // worker's hello. A positive that expires in between left that hello to
-// verify GitHub on the critical path.
+// verify GitHub on the critical path. Only the lifecycle asks to renew.
 it.each(["creating", "starting"] as const)("renews a %s workspace's positive in its final seconds without waiting for GitHub", async state => {
   const f = fixture(AGING);
   let verified!: (fingerprint: string) => void;
   f.github.check.mockImplementationOnce(() => new Promise(resolve => { verified = resolve; }));
-  await f.source.workspace(f.workspace(state));
+  await f.source.workspace(f.workspace(state), true);
   await vi.advanceTimersByTimeAsync(0);
   expect(f.github.check).toHaveBeenCalledTimes(1);
   verified("fingerprint");
@@ -61,7 +61,7 @@ it.each(["creating", "starting"] as const)("renews a %s workspace's positive in 
   // The hello arrives after the original positive would have expired.
   await vi.advanceTimersByTimeAsync(CLOUD_SOURCE_RENEWAL_MS - 500);
   expect(Date.now() - (100_000 - AGING)).toBeGreaterThan(CLOUD_SOURCE_ADMISSION_MS);
-  await f.source.workspace(f.workspace(state));
+  await f.source.workspace(f.workspace(state), true);
   await vi.advanceTimersByTimeAsync(0);
   expect(f.github.check).toHaveBeenCalledTimes(1);
 });
@@ -70,7 +70,7 @@ it.each([
   ["creating", AGING - 2000], ["running", CLOUD_SOURCE_ADMISSION_MS - 1000], ["stopped", CLOUD_SOURCE_ADMISSION_MS - 1000],
 ] as const)("keeps a %s workspace's %i ms old positive without a renewal", async (state, age) => {
   const f = fixture(age);
-  await f.source.workspace(f.workspace(state));
+  await f.source.workspace(f.workspace(state), true);
   await vi.advanceTimersByTimeAsync(1000);
   expect(f.store.claim).not.toHaveBeenCalled();
   expect(f.github.check).not.toHaveBeenCalled();
@@ -80,19 +80,19 @@ it.each([new GithubTemporaryError("github_unavailable"), new GithubTemporaryErro
   "keeps the positive in force after a temporary renewal failure (%s), retrying only once it expires", async failure => {
   const f = fixture(AGING);
   f.github.check.mockRejectedValueOnce(failure);
-  await f.source.workspace(f.workspace("creating"));
+  await f.source.workspace(f.workspace("creating"), true);
   await vi.advanceTimersByTimeAsync(0);
   expect(f.store.release).toHaveBeenCalledWith(expect.objectContaining({ repositoryId: "42" }), "renewal");
   expect(f.store.finish).not.toHaveBeenCalled();
   expect(f.record()).toMatchObject({ verifiedAt: 100_000 - AGING, failure: null, claimId: null, retryAt: 0 });
   // Later booting checks inside the original positive pass without a retry.
   await vi.advanceTimersByTimeAsync(5000);
-  await f.source.workspace(f.workspace("creating"));
+  await f.source.workspace(f.workspace("creating"), true);
   await vi.advanceTimersByTimeAsync(0);
   expect(f.github.check).toHaveBeenCalledTimes(1);
   // Once it expires, admission verifies as before.
   await vi.advanceTimersByTimeAsync(CLOUD_SOURCE_RENEWAL_MS);
-  await f.source.workspace(f.workspace("creating"));
+  await f.source.workspace(f.workspace("creating"), true);
   expect(f.github.check).toHaveBeenCalledTimes(2);
 });
 
@@ -100,18 +100,18 @@ it("withdraws the positive as soon as a renewal confirms the creator lost access
   const f = fixture(AGING);
   const denied = new HttpError(404, "github_repository_not_found", "Repository access could not be verified.");
   f.github.check.mockRejectedValueOnce(denied);
-  await f.source.workspace(f.workspace("creating"));
+  await f.source.workspace(f.workspace("creating"), true);
   await vi.advanceTimersByTimeAsync(0);
   expect(f.store.finish).toHaveBeenCalledWith(expect.anything(), "renewal", expect.objectContaining({ allowed: false, temporary: false, error: denied }));
   expect(f.store.release).not.toHaveBeenCalled();
-  await expect(f.source.workspace(f.workspace("creating"))).rejects.toBe(denied);
+  await expect(f.source.workspace(f.workspace("creating"), true)).rejects.toBe(denied);
   expect(f.github.check).toHaveBeenCalledTimes(1);
 });
 
 it("leaves a renewal another replica already claimed to that replica", async () => {
   const f = fixture(AGING);
   f.update({ claimId: "peer", claimUntil: Date.now() + 60_000, claimStartedAt: Date.now() });
-  await f.source.workspace(f.workspace("creating"));
+  await f.source.workspace(f.workspace("creating"), true);
   await vi.advanceTimersByTimeAsync(10_000);
   expect(f.github.check).not.toHaveBeenCalled();
   expect(f.store.release).not.toHaveBeenCalled();
@@ -121,9 +121,9 @@ it("starts one renewal for concurrent booting checks", async () => {
   const f = fixture(AGING);
   let verified!: (fingerprint: string) => void;
   f.github.check.mockImplementationOnce(() => new Promise(resolve => { verified = resolve; }));
-  await Promise.all([f.source.workspace(f.workspace("creating")), f.source.workspace(f.workspace("creating"))]);
+  await Promise.all([f.source.workspace(f.workspace("creating"), true), f.source.workspace(f.workspace("creating"), true)]);
   await vi.advanceTimersByTimeAsync(0);
-  await f.source.workspace(f.workspace("starting"));
+  await f.source.workspace(f.workspace("starting"), true);
   await vi.advanceTimersByTimeAsync(0);
   expect(f.github.check).toHaveBeenCalledTimes(1);
   verified("fingerprint");
@@ -135,11 +135,37 @@ it("never queues the creator's other verifications behind a held renewal", async
   const f = fixture(AGING);
   let verified!: (fingerprint: string) => void;
   f.github.check.mockImplementationOnce(() => new Promise(resolve => { verified = resolve; }));
-  await f.source.workspace(f.workspace("creating"));
+  await f.source.workspace(f.workspace("creating"), true);
   await vi.advanceTimersByTimeAsync(0);
   const other = f.source.repository("org", "user", "o/other");
   await vi.advanceTimersByTimeAsync(0);
   expect(f.github.check).toHaveBeenCalledTimes(2);
   await other;
   verified("fingerprint");
+});
+
+it("keeps a booting workspace's other checks, such as its hello and status polls, from renewing", async () => {
+  const f = fixture(AGING);
+  await f.source.workspace(f.workspace("creating"));
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(f.store.claim).not.toHaveBeenCalled();
+  expect(f.github.check).not.toHaveBeenCalled();
+});
+
+// Co-master review 7: when every booting check could renew, a workspace polled
+// every 2 s renewed every ~15 s, doubling GitHub verifications on long boots.
+it("adds at most one verification to a booting workspace polled every 2 s for two minutes", async () => {
+  const verifications = async (lifecycleRenews: boolean) => {
+    const f = fixture(AGING);
+    await f.source.workspace(f.workspace("starting"), lifecycleRenews);
+    for (let elapsed = 0; elapsed < 120_000; elapsed += 2000) {
+      await vi.advanceTimersByTimeAsync(2000);
+      await f.source.workspace(f.workspace("starting"));
+    }
+    return f.github.check.mock.calls.length;
+  };
+  // Without renewal, polling verifies once per expired 30 s window.
+  const windows = Math.ceil(120_000 / CLOUD_SOURCE_ADMISSION_MS);
+  expect(await verifications(false)).toBe(windows);
+  expect(await verifications(true)).toBeLessThanOrEqual(windows + 1);
 });

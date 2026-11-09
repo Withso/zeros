@@ -10,6 +10,7 @@ import { resetMigratedTestDatabase } from "../test-database.js";
 import { grantTestPro } from "../test-pro.js";
 import { createCloudV2 } from "./composition.js";
 import { createCloudV2WorkerRoutes } from "./worker-routes.js";
+import type { CloudV2LifecycleDeps } from "./lifecycle.js";
 import { CLOUD_SOURCE_ADMISSION_MS, CLOUD_SOURCE_GRACE_MS, CLOUD_SOURCE_REFRESH_MS } from "./source-authority.js";
 import { DatabaseCloudAgentCredentialService } from "../agent-credentials/agent-credentials.js";
 import { cloudAgentModels } from "../agent-credentials/agent-models.js";
@@ -212,8 +213,10 @@ suite("runtime hello through the production composition", () => {
     await pool.query("UPDATE cloud_github_source_verifications SET verified_at=clock_timestamp()-interval '20 seconds' WHERE org_id=$1", [f.org]);
     f.cp.routes.githubConnections!.forgetRecentProfiles();
     f.fetcher.mockClear();
+    // The composition gives the lifecycle this same check, which asks to renew.
+    const lifecycleCheck: NonNullable<CloudV2LifecycleDeps["authorizeSource"]> = f.cp.routes.authorizeSource!;
     const started = performance.now();
-    await f.cp.routes.authorizeSource!(await f.cp.store.get(f.workspace.id, f.creator));
+    await lifecycleCheck(await f.cp.store.get(f.workspace.id, f.creator), { renew: true });
     expect(performance.now() - started).toBeLessThan(5000);
     await vi.waitFor(async () => expect(await age(), "renewed in the background").toBeLessThan(10_000), { timeout: 2500 });
     // The worker's hello, 12 s later: past the original positive's expiry.

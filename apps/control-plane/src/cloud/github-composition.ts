@@ -97,9 +97,9 @@ export function createCloudGithubServices(
   const retireRevoked = async (workspace: CloudV2Workspace, error: unknown) => {
     if (isGithubAccessRevoked(error)) await workspaces.transition(workspace.id, ["running"], "stopping");
   };
-  const authorizeSource = async (workspace: CloudV2Workspace) => {
+  const authorizeSource = async (workspace: CloudV2Workspace, options?: { renew?: boolean }) => {
     try {
-      await source.workspace(workspace);
+      await source.workspace(workspace, options?.renew);
     } catch (error) {
       await retireRevoked(workspace, error);
       throw error;

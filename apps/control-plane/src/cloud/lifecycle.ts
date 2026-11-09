@@ -119,7 +119,9 @@ export type CloudV2LifecycleDeps = {
   remoteHead?(workspace: CloudV2Workspace): Promise<string | null>;
   /** A repository token, for a restore that must fetch or clone from GitHub. */
   githubToken?(workspace: CloudV2Workspace): Promise<{ token: string }>;
-  authorizeSource?(workspace: CloudV2Workspace): Promise<void>;
+  /** renew: the worker's hello follows within seconds, so a positive near
+   * expiry is renewed in the background. */
+  authorizeSource?(workspace: CloudV2Workspace, options?: { renew?: boolean }): Promise<void>;
   prepareRepository?(workspace: CloudV2Workspace, sandboxId: string): Promise<void>;
   /** Cloud Computer builds share this loop; one runs at a time. */
   builds?: { tick(): Promise<void>; cleanup?(): Promise<void>; close?(): void };
@@ -388,7 +390,7 @@ export class CloudV2Lifecycle {
   private async step(workspace: CloudV2LifecycleWorkspace & { attempts: number }, now: number): Promise<void> {
     const { store, compute } = this.deps;
     if ((workspace.state === "creating" || workspace.state === "starting") && this.deps.authorizeSource)
-      await this.measure(workspace, "source_authorize", () => this.deps.authorizeSource!(workspace));
+      await this.measure(workspace, "source_authorize", () => this.deps.authorizeSource!(workspace, { renew: true }));
     switch (workspace.state) {
       case "creating": {
         if (now - Date.parse(workspace.createdAt) > BOOT_DEADLINE_MS) {
@@ -767,7 +769,7 @@ export class CloudV2Lifecycle {
   private async applyCheckpoint(workspace: CloudV2LifecycleWorkspace, sandboxId: string): Promise<void> {
     const checkpoints = this.deps.checkpoints, checkpoint = workspace.checkpoint;
     if (!checkpoints || !checkpoint) throw checkpointError("checkpoint_restore_failed");
-    await this.deps.authorizeSource?.(workspace);
+    await this.deps.authorizeSource?.(workspace, { renew: true });
     const github = await this.deps.githubToken?.(workspace) ?? null;
     const key = checkpoints.open(checkpoint.key, workspace.id, checkpoint.object);
     try {
@@ -792,7 +794,7 @@ export class CloudV2Lifecycle {
   }
 
   private async deliverToken(workspace: CloudV2LifecycleWorkspace, sandboxId: string, bootEnv: Record<string, string>): Promise<void> {
-    await this.deps.authorizeSource?.(workspace);
+    await this.deps.authorizeSource?.(workspace, { renew: true });
     const token = await this.deps.store.rotateWorkerToken(workspace.id, { state: workspace.state, sandboxId, stopGeneration: workspace.stopGeneration });
     if (!token) return;
     const result = await this.execWhenReady(sandboxId, deliverWorkerTokenCommand(token, bootEnv), 30);

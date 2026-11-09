@@ -13,8 +13,8 @@ const repositoryIdSchema = z.string().regex(/^[1-9][0-9]{0,15}$/).refine(value =
 export const CloudSourceTargetSchema = z.object({ repository: repositorySchema, repositoryId: repositoryIdSchema }).strict();
 export type CloudSourceTarget = z.infer<typeof CloudSourceTargetSchema>;
 export const CLOUD_SOURCE_ADMISSION_MS = 30_000;
-/** A booting workspace's worker says hello seconds after its lifecycle check.
- * Checks while it boots renew a positive this close to expiry in the background. */
+/** A booting workspace's worker says hello seconds after the lifecycle's
+ * checks, which renew a positive this close to expiry in the background. */
 export const CLOUD_SOURCE_RENEWAL_MS = 15_000;
 // Worker HTTP requests allow ten seconds, including configuration after admission.
 const VERIFICATION_WAIT_MS = 5_000;
@@ -345,10 +345,12 @@ export class CloudV2SourceAuthority {
     return { names: sources.data, ids: targets.map(target => target.repositoryId) };
   }
 
-  async workspace(workspace: CloudV2Workspace): Promise<void> {
+  /** renew is for the lifecycle's checks of a booting workspace, whose hello
+   * follows within seconds. Other checks would renew every 15 s while polled. */
+  async workspace(workspace: CloudV2Workspace, renew = false): Promise<void> {
     const sources = await this.sources(workspace);
     await this.observeSources(workspace.organizationId, workspace.creatorUserId, sources.names, sources.ids, false,
-      workspace.state === "creating" || workspace.state === "starting");
+      renew && (workspace.state === "creating" || workspace.state === "starting"));
   }
 
   /** proof comes only from a live creator, worker token or room/session database
