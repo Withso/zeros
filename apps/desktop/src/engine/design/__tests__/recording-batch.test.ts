@@ -9,6 +9,7 @@ import { designDirectoryNameFor } from "../directory-registry";
 import { designDirectoryEntry } from "../metadata";
 import { DESIGN_RECORDER_FOLDER_PREFIX, designRecordingPipeline, readDesignRecordings, renderDesignRecordings } from "../recording-batch";
 import { designRecordingChunkId } from "../recording-chunks";
+import { resetDesignRecordingStoreCachesForTests } from "../recording-store";
 import { settleDesignFontDownloadsForTests, resetDesignFontsForTests } from "../style-fonts";
 
 const RECORDER = "electron-43.8.3/chromium-150.0.7871.250/skp";
@@ -75,6 +76,7 @@ describe("Design recordings", () => {
   afterEach(async () => {
     await settleDesignFontDownloadsForTests();
     resetDesignFontsForTests();
+    resetDesignRecordingStoreCachesForTests();
     delete process.env.ZEROS_DATA_DIR;
     await Promise.all(recorderFolders.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
     await rm(root, { recursive: true, force: true });

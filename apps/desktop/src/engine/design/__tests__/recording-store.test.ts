@@ -4,8 +4,8 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { chunkDesignRecording } from "../recording-chunks";
 import { designRecordingChunkId } from "../recording-chunks";
-import { readDesignRecordingChunk, readDesignRecordingFailure, readDesignRecordingTypeface, readStoredDesignRecording, storeDesignRecording,
-  storeDesignRecordingFailure, storeDesignRecordingTypeface } from "../recording-store";
+import { readDesignRecordingChunk, readDesignRecordingFailure, readDesignRecordingTypeface, readStoredDesignRecording,
+  resetDesignRecordingStoreCachesForTests, storeDesignRecording, storeDesignRecordingFailure, storeDesignRecordingTypeface } from "../recording-store";
 
 const version = (c: string) => c.repeat(24);
 function bytesFrom(seed: number, length: number): Uint8Array {
@@ -22,6 +22,7 @@ describe("recording store", () => {
     data = await mkdtemp(path.join(tmpdir(), "zeros-recording-store-"));
     workspace = path.join(data, "workspace");
     process.env.ZEROS_DATA_DIR = path.join(data, "engine");
+    resetDesignRecordingStoreCachesForTests();
   });
   afterEach(async () => {
     delete process.env.ZEROS_DATA_DIR;
@@ -69,12 +70,35 @@ describe("recording store", () => {
     const id = stored!.layers[0]!.chunks[0]!;
     const file = path.join(process.env.ZEROS_DATA_DIR!, "design-storage", "recording-chunks", id.slice(0, 2), id);
     await writeFile(file, "tampered");
+    // The engine still holds the verified bytes; from disk the chunk is missing.
+    expect(await readDesignRecordingChunk(id)).not.toBeNull();
+    resetDesignRecordingStoreCachesForTests();
     expect(await readDesignRecordingChunk(id)).toBeNull();
     // Recording the same bytes again repairs the damaged chunk.
     await storeDesignRecording(workspace, "design_1", "frame_2", null, recording(version("b"), bytesFrom(8, 20_000)));
     expect(await readDesignRecordingChunk(id)).not.toBeNull();
     expect(await readDesignRecordingChunk("0".repeat(32))).toBeNull();
     expect(await readDesignRecordingChunk("../../etc/passwd")).toBeNull();
+  });
+
+  it("answers a reopen from memory, and forgets a folder's answers when it is written", async () => {
+    const bytes = bytesFrom(40, 60_000);
+    expect(await readStoredDesignRecording(workspace, "design_1", "frame_1", null)).toBeNull();
+    const stored = await storeDesignRecording(workspace, "design_1", "frame_1", null, recording(version("a"), bytes));
+    // The earlier "none" answer is gone with the write.
+    expect((await readStoredDesignRecording(workspace, "design_1", "frame_1", null))?.sourceVersion).toBe(version("a"));
+    // With the store's files gone, the remembered answers and chunks still serve the reopen.
+    const storage = path.join(process.env.ZEROS_DATA_DIR!, "design-storage");
+    await rm(path.join(storage, "recording-chunks"), { recursive: true, force: true });
+    const workspaceKey = (await readdir(storage)).find((name) => name !== "recording-chunks")!;
+    await rm(path.join(storage, workspaceKey, "recordings"), { recursive: true, force: true });
+    expect(await readStoredDesignRecording(workspace, "design_1", "frame_1", null)).toEqual(stored);
+    const parts = await Promise.all(stored!.layers[0]!.chunks.map((id) => readDesignRecordingChunk(id)));
+    expect(Buffer.concat(parts.map((part) => part!))).toEqual(Buffer.from(bytes));
+    // A newer generation replaces the remembered one.
+    await storeDesignRecording(workspace, "design_1", "frame_1", null, recording(version("b"), bytesFrom(41, 5_000)));
+    expect((await readStoredDesignRecording(workspace, "design_1", "frame_1", null))?.sourceVersion).toBe(version("b"));
+    expect(await readStoredDesignRecording(workspace, "design_1", "frame_1", null, { sourceVersion: version("a") })).toBeNull();
   });
 
   it("refuses malformed identities and reads nothing through a planted link", async () => {
