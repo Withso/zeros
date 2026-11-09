@@ -5,7 +5,7 @@ import path from "node:path";
 import { PassThrough } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DESIGN_RECORDER_FOLDER_PREFIX } from "@zeros/protocol/design-capture";
-import { assertRecorderLayerPath, createDesignRecorder, designRecorderEnabled, designRecorderEnvironment, designRecorderIdentity } from "../design-recorder";
+import { assertRecorderLayerPath, createDesignRecorder, designRecorderEnabled, designRecorderEnvironment, designRecorderIdentity, designRecorderProcesses } from "../design-recorder";
 
 describe("Design recorder client", () => {
   let root: string;
@@ -88,6 +88,49 @@ describe("Design recorder client", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("splits concurrent batches between two recorder processes when asked", async () => {
+    expect(designRecorderProcesses({}, 10)).toEqual([undefined]);
+    expect(designRecorderProcesses({ ZEROS_DESIGN_RECORDER_WINDOWS: "3" }, 10)).toEqual(["3"]);
+    expect(designRecorderProcesses({ ZEROS_DESIGN_RECORDER_PROCESSES: "2" }, 10)).toEqual(["2", "2"]);
+    expect(designRecorderProcesses({ ZEROS_DESIGN_RECORDER_PROCESSES: "2" }, 2)).toEqual(["1", "1"]);
+    const children: Array<EventEmitter & { stdin: PassThrough; exitCode: number | null }> = [];
+    const spawnImpl = vi.fn((_command: string, _args: string[], init: { env: NodeJS.ProcessEnv }) => {
+      const stdout = new PassThrough();
+      const child = Object.assign(new EventEmitter(), { stdin: new PassThrough(), stdout, exitCode: null as number | null, kill: vi.fn(),
+        windows: init.env.ZEROS_DESIGN_RECORDER_WINDOWS });
+      const port = 4321 + children.length;
+      children.push(child);
+      setImmediate(() => stdout.write(`ZEROS_DESIGN_RECORDER ${JSON.stringify({ url: `http://127.0.0.1:${port}`, root })}\n`));
+      return child;
+    });
+    const asked: string[] = [];
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const fetchImpl = vi.fn(async (url: string) => {
+      asked.push(new URL(url).port);
+      if (asked.length === 1) await held;
+      return new Response(JSON.stringify({ items: [] }));
+    });
+    const recorder = createDesignRecorder({ identity: "x/skp", entry: "/app/design-recorder.cjs",
+      env: { HOME: "/h", ZEROS_DESIGN_RECORDER_PROCESSES: "2" }, spawnImpl: spawnImpl as never, fetchImpl: fetchImpl as never });
+    const request = { version: 1 as const, revision: "r", colorScheme: "light" as const, stylesheets: {}, items: [{ id: "f0", html: "<p>x</p>", viewport: { width: 1, height: 1 } }] };
+    // A lone batch keeps to the first process.
+    const first = recorder.record(request, new AbortController().signal);
+    await vi.waitFor(() => expect(asked).toEqual(["4321"]));
+    expect(spawnImpl).toHaveBeenCalledTimes(1);
+    // While it records, the next batch starts the second process.
+    await recorder.record(request, new AbortController().signal);
+    expect(asked).toEqual(["4321", "4322"]);
+    release();
+    await first;
+    await recorder.record(request, new AbortController().signal);
+    expect(asked).toEqual(["4321", "4322", "4321"]);
+    expect(spawnImpl.mock.calls.map((call) => (call as unknown as [string, string[], { env: NodeJS.ProcessEnv }])[2].env.ZEROS_DESIGN_RECORDER_WINDOWS)).toEqual(["2", "2"]);
+    const stopping = recorder.stop();
+    for (const child of children) { child.exitCode = 0; child.emit("exit", 0, null); }
+    await stopping;
   });
 
   it("removes the recorder's profile and session folder once it exits, however it ended", async () => {

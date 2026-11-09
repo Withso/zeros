@@ -81,7 +81,7 @@ export function designRecorderIdentity(renderer: string): string {
   return `${renderer}/skp-${scripts.slice(0, 8)}`;
 }
 
-export function createDesignRecorder(options: {
+interface DesignRecorderOptions {
   identity: string;
   /** The recorder host bundle. */
   entry: string;
@@ -90,7 +90,38 @@ export function createDesignRecorder(options: {
   env?: NodeJS.ProcessEnv;
   spawnImpl?: typeof spawn;
   fetchImpl?: typeof fetch;
-}): DesignRecorder {
+}
+
+/** Each recorder process's window count (undefined: the host's default), one
+ * entry per process. A process's main thread drives every one of its windows
+ * (navigation, evaluation, layer files: about 24 ms a frame on a Mac), so one
+ * process paced a 1,000-frame open; two split that work. Opt-in while measured. */
+export function designRecorderProcesses(env: NodeJS.ProcessEnv,
+  parallelism = os.availableParallelism?.() ?? os.cpus().length): Array<string | undefined> {
+  if (env.ZEROS_DESIGN_RECORDER_PROCESSES !== "2") return [env.ZEROS_DESIGN_RECORDER_WINDOWS];
+  // The host's own default and cap, shared between the processes.
+  const total = Math.max(1, Math.min(4, Number(env.ZEROS_DESIGN_RECORDER_WINDOWS) || Math.floor(parallelism / 2)));
+  const each = String(Math.max(1, Math.ceil(total / 2)));
+  return [each, each];
+}
+
+export function createDesignRecorder(options: DesignRecorderOptions): DesignRecorder {
+  const processes = designRecorderProcesses(options.env ?? process.env)
+    .map((windows) => ({ recorder: createRecorderProcess(options, windows), batches: 0 }));
+  if (processes.length === 1) return processes[0]!.recorder;
+  // The least busy process takes a batch; a tie goes to the first, so a lone
+  // batch at a time keeps only one process running.
+  const record: DesignBatchRecordHost = async (input, signal) => {
+    const target = processes.reduce((best, next) => (next.batches < best.batches ? next : best));
+    target.batches++;
+    try { return await target.recorder.record(input, signal); }
+    finally { target.batches--; }
+  };
+  return { identity: options.identity, record,
+    stop: async () => { await Promise.all(processes.map((entry) => entry.recorder.stop())); } };
+}
+
+function createRecorderProcess(options: DesignRecorderOptions, windows: string | undefined): DesignRecorder {
   const idleMs = options.idleMs ?? DESIGN_RECORDER_IDLE_MS;
   const run = options.spawnImpl ?? spawn;
   const fetchImpl = options.fetchImpl ?? fetch;
@@ -128,7 +159,7 @@ export function createDesignRecorder(options: {
         .then(() => markFinished());
     };
     const spawned = run(options.execPath ?? process.execPath, [options.entry, `--user-data-dir=${profile}`], {
-      env: designRecorderEnvironment(options.env ?? process.env, token, options.identity, process.env.ZEROS_DESIGN_RECORDER_WINDOWS),
+      env: designRecorderEnvironment(options.env ?? process.env, token, options.identity, windows),
       stdio: ["pipe", "pipe", "ignore"],
     });
     child = spawned;
