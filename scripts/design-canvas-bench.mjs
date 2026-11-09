@@ -594,6 +594,14 @@ async function main() {
           };
           requestAnimationFrame(tick);
         }).catch(() => {});
+        // Bench only: a Chrome trace of the reload, with style and layout
+        // invalidation tracking, to name what the renderer's main thread does.
+        if (args.includes("--trace-reload")) {
+          await cdp.send("Tracing.start", { transferMode: "ReturnAsStream", traceConfig: { recordMode: "recordAsMuchAsPossible",
+            includedCategories: ["toplevel", "devtools.timeline", "disabled-by-default-devtools.timeline",
+              "disabled-by-default-devtools.timeline.invalidationTracking", "disabled-by-default-devtools.timeline.stack",
+              "v8.execute", "blink.user_timing"] } }).catch(error => { result.traceError = String(error).slice(0, 200); });
+        }
         if (args.includes("--profile-reload")) {
           await cdp.send("Profiler.enable").catch(() => {});
           await cdp.send("Profiler.setSamplingInterval", { interval: 250 }).catch(() => {});
@@ -674,6 +682,21 @@ async function main() {
         }
         result.reloadReadyMs = reopened.ms; result.reloadCoverage = reopened.coverage; result.reloadOps = await opsSummary();
         result.reloadLayout = await page.evaluate(() => globalThis.__benchLayoutLog ?? null).catch(() => null);
+        if (args.includes("--trace-reload") && !result.traceError) {
+          const complete = new Promise(resolve => cdp.once("Tracing.tracingComplete", resolve));
+          await cdp.send("Tracing.end").catch(error => { result.traceError = String(error).slice(0, 200); });
+          const { stream } = await Promise.race([complete, pause(120_000).then(() => ({}))]);
+          if (stream) {
+            const chunks = [];
+            for (;;) {
+              const { data, eof, base64Encoded } = await cdp.send("IO.read", { handle: stream, size: 4 << 20 });
+              chunks.push(Buffer.from(data, base64Encoded ? "base64" : "utf8"));
+              if (eof) break;
+            }
+            await cdp.send("IO.close", { handle: stream }).catch(() => {});
+            await fs.writeFile(path.join(evidence, `${fixture.name}-reload-trace.json`), Buffer.concat(chunks));
+          } else result.traceError ??= "no trace stream";
+        }
         if (args.includes("--profile-reload")) {
           const stopped = await cdp.send("Profiler.stop").catch(() => null);
           if (stopped?.profile) await fs.writeFile(path.join(evidence, `${fixture.name}-reload-profile.cpuprofile`), JSON.stringify(stopped.profile));
