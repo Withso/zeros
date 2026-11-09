@@ -292,6 +292,12 @@ export class DesignRecordings {
     if (this.owners.get(state.key) !== state) return;
     const now = this.deps.now?.() ?? Date.now();
     const limit = state.replied ? Math.max(1, this.deps.inFlight ?? 2) : 1;
+    // One read at a time. A reply carries every chunk its frames use that the
+    // request didn't claim, so two reads in flight over frames that share
+    // drawing (a page's repeated components or copies) both carried the same
+    // new chunks: 11 of 42 MB on a 1,000-frame reload, which the renderer's
+    // main thread decoded, parsed and hashed twice. Recording still overlaps.
+    let reading = [...state.inFlight].some((request) => request.op === "read");
     let nextRetry = Infinity;
     while (state.inFlight.size < limit) {
       let op: "read" | "render" | null = null;
@@ -303,12 +309,14 @@ export class DesignRecordings {
           if (entry.retryAt > now) nextRetry = Math.min(nextRetry, entry.retryAt);
           continue;
         }
+        if (need === "read" && reading) continue;
         op ??= need;
         if (need !== op) continue;
         files.push(file);
         if (files.length >= (op === "read" ? READ_FRAMES : DESIGN_RECORDINGS_RENDER_FRAMES)) break;
       }
       if (!op || !files.length) break;
+      if (op === "read") reading = true;
       this.send(state, op, files);
     }
     if (nextRetry !== Infinity && state.retryTimer === null && this.deps.setTimer) {
