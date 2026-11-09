@@ -249,6 +249,35 @@ describe("design frame runtime client", () => {
     }
   });
 
+  it("reports a document's first presented frame from its own port only after ready, never after it retires", async () => {
+    const source = { postMessage: vi.fn() };
+    const onPainted = vi.fn();
+    const connection = connectDesignFrameRuntime("painted-workspace", "home.html", SOURCE_VERSION,
+      { contentWindow: source } as unknown as HTMLIFrameElement, { onPainted },
+      { setTimeout: vi.fn(() => 7), clearTimeout: vi.fn() });
+    const port = source.postMessage.mock.calls[0][1].transfer[0] as MessagePort;
+    port.start();
+    const painted = () => port.postMessage({ protocol: DESIGN_RUNTIME_PROTOCOL, version: DESIGN_RUNTIME_VERSION,
+      type: "event", event: "painted", payload: { sourceVersion: SOURCE_VERSION } });
+    try {
+      // Pixels before readiness belong to no revealable generation.
+      painted();
+      port.postMessage({ protocol: DESIGN_RUNTIME_PROTOCOL, version: DESIGN_RUNTIME_VERSION, type: "event", event: "ready",
+        payload: { sourceVersion: SOURCE_VERSION, capabilities: { ...capabilities, painted: true }, snapshot: snapshot(1) } });
+      await vi.waitFor(() => expect(designFrameRuntime("painted-workspace", "home.html")).toBe(connection));
+      expect(onPainted).not.toHaveBeenCalled();
+      painted();
+      await vi.waitFor(() => expect(onPainted).toHaveBeenCalledTimes(1));
+      connection.destroy();
+      painted();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(onPainted).toHaveBeenCalledTimes(1);
+    } finally {
+      connection.destroy();
+      port.close();
+    }
+  });
+
   it("publishes only ready connections and keeps the painted runtime during replacement", async () => {
     const host = { setTimeout: vi.fn(() => 7), clearTimeout: vi.fn() };
     const source = { postMessage: vi.fn() };

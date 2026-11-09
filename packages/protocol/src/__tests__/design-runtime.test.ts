@@ -290,6 +290,75 @@ describe("design runtime protocol", () => {
     expect(isDesignRuntimeFrameMessage({ type: "response" })).toBe(false);
   });
 
+  it("accepts a painted event only with an exact generation", () => {
+    const painted = {
+      protocol: DESIGN_RUNTIME_PROTOCOL,
+      version: DESIGN_RUNTIME_VERSION,
+      type: "event",
+      event: "painted",
+      payload: { sourceVersion: "a".repeat(24) },
+    };
+    expect(isDesignRuntimeFrameMessage(painted)).toBe(true);
+    expect(isDesignRuntimeFrameMessage({ ...painted, payload: {} })).toBe(false);
+    expect(isDesignRuntimeFrameMessage({ ...painted, payload: { sourceVersion: "draft" } })).toBe(false);
+  });
+
+  it("announces its first presented frame after ready, never while frames are suspended", async () => {
+    const browser = await chromium.launch({ headless: true });
+    try {
+      const run = async (suspended: boolean) => {
+        const page = await browser.newPage();
+        try {
+          return await page.evaluate(
+            ({ source, suspended }) =>
+              new Promise<{ events: string[]; painted: unknown; capability: unknown; framesAfterReady: number }>((resolve) => {
+                document.body.innerHTML = '<main data-oid="target">Presented</main>';
+                (window as Window & { __zerosDesignSourceVersion?: string }).__zerosDesignSourceVersion = "a".repeat(24);
+                const frame = window.requestAnimationFrame.bind(window);
+                // A hidden native document receives layout but no animation frames.
+                if (suspended) window.requestAnimationFrame = () => 1;
+                const events: string[] = [];
+                let painted: unknown = null;
+                let capability: unknown = null;
+                let framesAfterReady = 0;
+                const finish = () => resolve({ events, painted, capability, framesAfterReady });
+                const channel = new MessageChannel();
+                channel.port1.onmessage = (event) => {
+                  const message = event.data as { type?: string; event?: string; payload?: { capabilities?: { painted?: unknown } } };
+                  if (message.type !== "event") return;
+                  events.push(message.event ?? "");
+                  if (message.event === "ready") {
+                    capability = message.payload?.capabilities?.painted ?? null;
+                    const count = () => { framesAfterReady++; frame(count); };
+                    frame(count);
+                    window.setTimeout(finish, 400);
+                  }
+                  if (message.event === "painted") { painted = message.payload; finish(); }
+                };
+                channel.port1.start();
+                new Function(source)();
+                window.postMessage(
+                  { protocol: "zeros-design-runtime", version: 2, type: "handshake", sourceVersion: "a".repeat(24) },
+                  "*",
+                  [channel.port2],
+                );
+              }),
+            { source: DESIGN_RUNTIME_SOURCE, suspended },
+          );
+        } finally {
+          await page.close();
+        }
+      };
+      const shown = await run(false);
+      expect(shown).toMatchObject({ events: ["ready", "painted"], capability: true, painted: { sourceVersion: "a".repeat(24) } });
+      // Readiness is layout; the painted event waits for a produced frame.
+      expect(shown.framesAfterReady).toBeGreaterThanOrEqual(1);
+      expect(await run(true)).toMatchObject({ events: ["ready"], capability: true, painted: null });
+    } finally {
+      await browser.close();
+    }
+  }, 20_000);
+
   it("republishes the layer tree so a hidden node can be shown again", async () => {
     const browser = await chromium.launch({ headless: true });
     try {
@@ -357,7 +426,7 @@ describe("design runtime protocol", () => {
                 toggle("hide", false);
                 return;
               }
-              if (message.type === "event") {
+              if (message.type === "event" && message.event === "mutation") {
                 // The Layers tree only ever learns a node is hidden from a
                 // republished generation; a details response cannot carry it.
                 timeline.push(

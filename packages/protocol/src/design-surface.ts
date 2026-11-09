@@ -10,6 +10,9 @@ export interface DesignSurfaceCost {
 }
 
 export const DESIGN_SURFACE_READY = "zeros-design-surface-ready";
+/** Follows a ready message that carries `painted: true`, once the document has
+ * produced a frame since then. Ready alone is layout, not composited pixels. */
+export const DESIGN_SURFACE_PAINTED = "zeros-design-surface-painted";
 export const DESIGN_SURFACE_LAYOUT = "zeros-design-surface-layout";
 export const DESIGN_SURFACE_LAYOUT_REQUEST = "zeros-design-surface-layout-request";
 export const DESIGN_SOURCE_SURFACES_CAPABILITY = "design.source-surfaces.v1";
@@ -78,9 +81,14 @@ export function designSurfaceReadyScript(sourceVersion: string, theme: string | 
           // A hidden sandbox may not receive animation frames. Resolve layout
           // once after decoding; its host reveals it in the next paint.
           document.documentElement.getBoundingClientRect();
-          var message={kind:${JSON.stringify(DESIGN_SURFACE_READY)},sourceVersion:${JSON.stringify(sourceVersion)},theme:${JSON.stringify(theme)}};
+          var message={kind:${JSON.stringify(DESIGN_SURFACE_READY)},sourceVersion:${JSON.stringify(sourceVersion)},theme:${JSON.stringify(theme)},painted:true};
           ${vector ? "try { message.svg=designSurfaceVector(); } catch (_error) { message.svg=null; }" : ""}
           parent.postMessage(message,"*");
+          // The second animation frame runs after the first frame since ready
+          // was produced. A hidden document sends nothing until it is shown.
+          requestAnimationFrame(function(){requestAnimationFrame(function(){
+            parent.postMessage({kind:${JSON.stringify(DESIGN_SURFACE_PAINTED)},sourceVersion:${JSON.stringify(sourceVersion)},theme:${JSON.stringify(theme)}},"*");
+          });});
         });
     }
     if(document.readyState==="loading")document.addEventListener("DOMContentLoaded",ready,{once:true});else ready();
