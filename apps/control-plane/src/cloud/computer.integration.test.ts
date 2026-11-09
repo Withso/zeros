@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, generateKeyPairSync, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -10,6 +10,7 @@ import { resetMigratedTestDatabase } from "../test-database.js";
 import { grantTestPro } from "../test-pro.js";
 import type { CloudV2Compute } from "./boat.js";
 import { CloudV2ComputerBuilder, CloudV2Computers, cloudV2SnapshotName } from "./computer.js";
+import { installRuntimeCommand } from "./runtime.js";
 import { HttpError } from "../authz.js";
 import { CloudProviderError } from "./provider-error.js";
 import { CloudV2Store } from "./store.js";
@@ -562,6 +563,16 @@ d("cloud v2 Cloud Computer builds", () => {
     expect(boat.execLong).toHaveBeenCalledTimes(2);
     // Recorded now, so the same pin is not refreshed again.
     expect(await computers.refreshCandidates(runtime.sha256)).toEqual([]);
+  });
+
+  it("installs the runtime with the worker verification keys, so workspaces from its image skip the install", async () => {
+    // Without them, every create from the snapshot failed the runtime fast
+    // path's key comparison and reinstalled: 1.3-2.9 s per Alpha create.
+    const boat = compute(), publicKeys = [generateKeyPairSync("ed25519").publicKey.export({ type: "spki", format: "pem" }).toString()];
+    await computers.enqueue(org, admin, recipe);
+    await new CloudV2ComputerBuilder({ computers, compute: boat, channel: "alpha", runtime, publicKeys, cloneToken: async () => "ghs_token" }).tick();
+    const install = vi.mocked(boat.exec).mock.calls.map(([, command]) => command).find(command => command.includes("zeros-worker.service"));
+    expect(install).toBe(installRuntimeCommand({ sha256: runtime.sha256, url: await runtime.url(runtime.sha256), publicKeys }));
   });
 
   it("installs the runtime a refresh was queued for, even when a process on another pin runs it", async () => {
