@@ -1,3 +1,4 @@
+import { BoatBootPendingError } from "./boat-client.js";
 import { describe, expect, it, vi } from "vitest";
 import type { CloudV2Compute } from "./boat.js";
 import { CLOUD_V2_IDLE_STOP_MS, CLOUD_V2_WORKER_TOKEN_PATH, CloudV2Lifecycle, deliverWorkerTokenCommand, type CloudV2LifecycleDeps } from "./lifecycle.js";
@@ -818,6 +819,17 @@ describe("cloud v2 lifecycle", () => {
     expect(f.store.rotateWorkerToken).not.toHaveBeenCalled();
     release(); await step;
     expect(f.store.rotateWorkerToken).toHaveBeenCalledOnce();
+  });
+
+  it.each(["creating", "starting"] as const)("retries a %s route that Boat refuses while the VM is still booting", async state => {
+    // The route now starts beside the VM's first command, before Boat has
+    // reported the VM ready to it (co-master review of #931).
+    const f = setup([workspace(state, { boatSandboxId: state === "starting" ? "bx_test" : null })], { sleep: async () => {} });
+    vi.mocked(f.compute.hostPort).mockRejectedValueOnce(new BoatBootPendingError({ httpStatus: 409 }));
+    await f.lifecycle.tick();
+    expect(f.compute.hostPort).toHaveBeenCalledTimes(2);
+    expect(f.store.rotateWorkerToken).toHaveBeenCalledOnce();
+    expect(f.store.defer).not.toHaveBeenCalledWith(expect.any(String), state, expect.any(Number), expect.objectContaining({ failure: true }));
   });
 
   it("removes the other recipe checkouts a kept image starts with before the worker can be reached", async () => {

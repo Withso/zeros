@@ -5,7 +5,7 @@
 // sandbox definition, so it can be rotated on any retry.
 import { randomBytes, randomUUID } from "node:crypto";
 import { CLOUD_V2_LEASE_SECONDS, type CloudV2Compute, type CloudV2CommandResult } from "./boat.js";
-import { BoatCreateRejectedError, BoatForkRefusedError, BoatSnapshotExpiredError } from "./boat-client.js";
+import { BoatBootPendingError, BoatCreateRejectedError, BoatForkRefusedError, BoatSnapshotExpiredError } from "./boat-client.js";
 import { CloudProviderError } from "./provider-error.js";
 import { installRuntimeCommand, type CloudV2Runtime } from "./runtime.js";
 import { GIT_LFS_INSTALL_COMMAND } from "./computer.js";
@@ -774,7 +774,16 @@ export class CloudV2Lifecycle {
   }
 
   private async host(workspace: CloudV2Workspace, sandboxId: string): Promise<boolean> {
-    const route = await this.deps.compute.hostPort(sandboxId, { port: CLOUD_V2_WORKER_PORT, localhost: true, title: "Zeros worker" });
+    // The route starts beside the VM's first command, so Boat can still be
+    // booting it; retry only that reply, as commands do.
+    let route: Awaited<ReturnType<CloudV2Compute["hostPort"]>>;
+    for (let attempt = 1; ; attempt++) {
+      try { route = await this.deps.compute.hostPort(sandboxId, { port: CLOUD_V2_WORKER_PORT, localhost: true, title: "Zeros worker" }); break; }
+      catch (error) {
+        if (!(error instanceof BoatBootPendingError) || attempt >= 6) throw error;
+        await (this.deps.sleep ?? (ms => new Promise(resolve => setTimeout(resolve, ms))))(2_000);
+      }
+    }
     return this.deps.store.setWorkerRoute(workspace.id, sandboxId, route.url, this.deps.sealPortToken(route.token, workspace.id));
   }
 
