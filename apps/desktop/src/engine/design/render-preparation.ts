@@ -5,7 +5,7 @@ import path from "node:path";
 import postcss from "postcss";
 import { designCssUrlReferences, designSrcsetReferences, rebaseDesignCssReferences } from "@zeros/design-web";
 import { expandDesignComponentsHtml } from "./components";
-import { parseDesignSource, withSharedDesignParses } from "./shared-parse";
+import { parseDesignSource, sharedDesignParse, withSharedDesignParses } from "./shared-parse";
 import { designDirectoryNameFor } from "./directory-registry";
 import {
   applyDesignSourceEdits,
@@ -17,7 +17,7 @@ import {
   sanitizeDesignFrameMarkup,
   type DesignSourceEdit,
 } from "./source";
-import { stripNonDesignOidsForRender, healDesignOids } from "./node-identities";
+import { stripNonDesignOids, healDesignOids } from "./node-identities";
 import type { CanvasDocument } from "./document-model";
 import { readCanvas } from "./document-storage";
 import { frameStyleSources } from "./style-sources";
@@ -665,7 +665,9 @@ async function prepareSharedFrameRenderSource(
     entryFile,
     linked.assetBytes,
   );
-  const skeleton = stripNonDesignOidsForRender(sanitizeDesignFrameMarkup(inlined));
+  const safe = sanitizeDesignFrameMarkup(inlined);
+  const stripped = stripNonDesignOids(safe);
+  const skeleton = stripped.html;
   // Placeholders carry each stylesheet's content hash, so the generation
   // still changes with any stylesheet or asset it depends on.
   const sourceVersion = createHash("sha256")
@@ -684,7 +686,11 @@ async function prepareSharedFrameRenderSource(
     if (bytes > MAX_SANITIZED_RENDER_BYTES) {
       throw new DesignRenderBudgetError("Sanitized frame HTML exceeded the 15 MiB per-frame render limit.");
     }
-    return { sanitized: skeleton, sourceVersion, surfaceCost: designSurfaceCost(skeleton, sheets),
+    // Removing data-oid attributes changes no element, and no image data
+    // unless a removed value could spell some: the sanitized tree, already
+    // parsed, then counts for the skeleton's.
+    const tree = stripped.removed.every((text) => !/data:image|[\\&]/i.test(text)) ? sharedDesignParse(safe) : undefined;
+    return { sanitized: skeleton, sourceVersion, surfaceCost: designSurfaceCost(skeleton, sheets, tree),
       ...(options.retain ? { retained: { skeleton, sourceVersion, expanded, linked: linked.sheets,
         imported: imported.sheets.map((sheet) => sheet.token) } } : {}) };
   }

@@ -1,6 +1,7 @@
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { parse } from "parse5";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { DESIGN_DIRECTORY_NAME, initializeDesignDocument, prepareDesignNavigationFrames, readDesignNavigationSnapshot } from "../document";
 import { readCanvas } from "../document-storage";
@@ -89,6 +90,26 @@ describe("surface cost", () => {
       const navigation = await readDesignNavigationSnapshot(root);
       const prepared = await prepareDesignNavigationFrames(root, navigation.catalogRevision, [frame]);
       expect(prepared.frames[0]!.surfaceCost).toEqual(composed.surfaceCost);
+    });
+
+    it("measures a skeleton that lost non-design ids as the composed document costs", async () => {
+      // Ids on a style element and in a template's content are stripped from the render.
+      const stripped = (oid: string) => html.replace('<select data-oid="pick" class="picker"></select>',
+        `<select data-oid="pick" class="picker"></select><style data-oid="${oid}">.x{color:red}</style>` +
+        `<template data-oid="t"><b data-oid="b">x</b></template><img data-oid="i" src="data:image/png;base64,${PNG}">`);
+      const canvas = await readCanvas(root);
+      for (const oid of ["s", `data:image/png;base64,${PNG}`]) {
+        const source = stripped(oid);
+        const identity = await prepareFrameRenderSource(root, source, viewport, undefined, undefined, frame, canvas, { identityOnly: true });
+        expect(identity.sanitized).not.toContain('data-oid="t"');
+        const composed = await prepareFrameRenderSource(root, source, viewport, undefined, undefined, frame, canvas);
+        expect(identity.surfaceCost, oid).toEqual(composed.surfaceCost);
+        expect(identity.surfaceCost?.imageBytes, oid).toBe(8 + 8 + 20 * 20 * 8);
+      }
+      // Why a removed id that spells an image is never counted from the unstripped tree.
+      const hidden = `<html><body><style data-oid="data:image/png;base64,${PNG}"></style></body></html>`;
+      expect(designSurfaceCost(hidden.replace(/ data-oid="[^"]*"/, ""), [], parse(hidden))?.imageBytes).toBe(8);
+      expect(designSurfaceCost(hidden.replace(/ data-oid="[^"]*"/, ""))?.imageBytes).toBe(0);
     });
 
     it("stays unknown when the CSS a frame keeps carries an image it cannot size", async () => {

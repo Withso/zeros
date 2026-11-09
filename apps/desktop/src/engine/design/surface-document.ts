@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { parse, serialize } from "parse5";
+import { parse, serialize, type DefaultTreeAdapterTypes } from "parse5";
 import { DESIGN_SURFACE_STATIC_CSS, designSurfaceReadyScript, type DesignSurfaceCost } from "@zeros/protocol/design-surface";
 import { elementRecords, insertDesignHeadMarkup, sanitizeDesignFrameMarkup, withDesignTheme } from "./source";
 import { sharedDesignParse } from "./shared-parse";
@@ -120,14 +120,16 @@ export interface DesignSurfaceSheet { css: string; bytes?: number; imageBytes?: 
 /** Metadata preparation can use stylesheet fragments without composing a
  * second full document. Source/DOM bounds are conservative estimates; native
  * RSS/CPU acceptance still qualifies the browser's real resource costs. */
-export function designSurfaceCost(source: string, sheets: readonly DesignSurfaceSheet[] = []): DesignSurfaceCost | null {
+export function designSurfaceCost(source: string, sheets: readonly DesignSurfaceSheet[] = [],
+  /** A tree whose elements, and image data when serialized, are `source`'s. */
+  tree?: DefaultTreeAdapterTypes.Document): DesignSurfaceCost | null {
   // An empty placeholder is never proof that a document has no images: its
   // image bytes are known only when measured from the CSS it stands for.
   const placeholder = (sheet: DesignSurfaceSheet) => sheet.bytes !== undefined && sheet.bytes !== Buffer.byteLength(sheet.css);
   if (sheets.some(sheet => placeholder(sheet) && sheet.imageBytes === undefined)) return null;
   const sourceBytes = Buffer.byteLength(source) + sheets.reduce((sum, sheet) => sum + (sheet.bytes ?? Buffer.byteLength(sheet.css)), 0);
   if (sourceBytes > 1024 * 1024) return null;
-  const document = sharedDesignParse(source) ?? parse(source);
+  const document = tree ?? sharedDesignParse(source) ?? parse(source);
   const records = elementRecords(document);
   if (records.some(({ element }) => ["video", "audio", "canvas"].includes(element.tagName))) return null;
   let imageBytes = 0;
