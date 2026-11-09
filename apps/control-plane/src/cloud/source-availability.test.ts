@@ -222,6 +222,7 @@ it("keeps a multi-repository workspace hot during an actor-wide cooldown", async
       const value = { ...positive, failure: result.error, failures: 1, retryAt: now + result.retryAfterMs };
       records.set(scope.repositoryId, value); return value;
     }),
+    release: vi.fn(async () => {}),
   };
   const f = fixture(store);
   f.pool.query.mockResolvedValue({ rows: [{ source_repositories: ["former/project", "former/another"] }] });
