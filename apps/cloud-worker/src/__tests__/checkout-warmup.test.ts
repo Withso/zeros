@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, open, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
@@ -48,9 +48,15 @@ it("reads a repository without changing its branch, index or files", async () =>
   await writeFile(join(repository, "a.txt"), "a\n");
   git("add", "."); git("commit", "-q", "-m", "fixture");
   await writeFile(join(repository, "a.txt"), "changed\n");
-  const index = join(repository, ".git", "index"), before = { head: git("rev-parse", "HEAD"), index: await readFile(index), mtime: (await stat(index)).mtimeMs };
+  // One handle reads the index bytes and its mtime together.
+  const snapshot = async () => {
+    const index = await open(join(repository, ".git", "index"));
+    try { return { head: git("rev-parse", "HEAD"), index: await index.readFile(), mtime: (await index.stat()).mtimeMs }; }
+    finally { await index.close(); }
+  };
+  const before = await snapshot();
   await warmCheckout(repository, new AbortController().signal);
-  expect({ head: git("rev-parse", "HEAD"), index: await readFile(index), mtime: (await stat(index)).mtimeMs }).toEqual(before);
+  expect(await snapshot()).toEqual(before);
   expect(await readFile(join(repository, "a.txt"), "utf8")).toBe("changed\n");
   await expect(warmCheckout(join(repository, "missing"), new AbortController().signal)).resolves.toBeUndefined();
 });
