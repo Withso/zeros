@@ -153,6 +153,15 @@ function errorCode(error: unknown): string {
   return typeof code === "string" && /^[a-z0-9_]{1,64}$/.test(code) ? code : "provider_request_failed";
 }
 
+/** `/home/user/<owner>/<name>`, as apps/cloud-worker/src/main.ts reads it. */
+const CHECKOUT_PATH = /^\/home\/user(?:\/(?!\.\.?(?:\/|$))[A-Za-z0-9._-]{1,100}){2}$/;
+/** A create's VM restores its disk lazily from the Cloud Computer snapshot, so
+ * the worker warms its checkout while hello runs. Omitted when the path is unusual. */
+function checkoutWarmup(workspace: CloudV2Workspace): Record<string, string> {
+  const path = `${CLOUD_V2_HOME}/${workspace.repository}`;
+  return CHECKOUT_PATH.test(path) ? { ZEROS_CHECKOUT_PATH: path } : {};
+}
+
 /** Writes the worker credential and its boot settings owner-only, re-enables
  * the unit a stop disabled so a reboot keeps it, then restarts the worker.
  * Values are single-quoted base64 literals the shell never expands. Boat's
@@ -161,7 +170,8 @@ function errorCode(error: unknown): string {
 export function deliverWorkerTokenCommand(token: string, bootEnv: Readonly<Record<string, string>> = {}): string {
   if (!/^zw2w_[A-Za-z0-9_-]{43}$/.test(token)) throw new Error("Invalid worker token");
   for (const [name, value] of Object.entries(bootEnv))
-    if (!["CLOUD_V2_API_URL", "CLOUD_V2_RUNTIME_SHA256", "ZEROS_WORKSPACE_ID"].includes(name) || !/^[\x21-\x7e]{1,2048}$/.test(value)) throw new Error("Invalid worker boot setting");
+    if (name === "ZEROS_CHECKOUT_PATH" ? !CHECKOUT_PATH.test(value)
+      : !["CLOUD_V2_API_URL", "CLOUD_V2_RUNTIME_SHA256", "ZEROS_WORKSPACE_ID"].includes(name) || !/^[\x21-\x7e]{1,2048}$/.test(value)) throw new Error("Invalid worker boot setting");
   const b64 = (value: string) => Buffer.from(value, "utf8").toString("base64");
   const dir = CLOUD_V2_WORKER_TOKEN_PATH.slice(0, CLOUD_V2_WORKER_TOKEN_PATH.lastIndexOf("/"));
   const envFile = Object.entries(bootEnv).map(([name, value]) => `${name}=${value}\n`).join("");
@@ -407,7 +417,7 @@ export class CloudV2Lifecycle {
         // The worker reads it with its configuration, after the token arrives.
         const commit = await baseCommit;
         if (commit) await store.setBaseCommit(workspace.id, commit);
-        await this.measure(workspace, "token_delivery", () => this.deliverToken(workspace, sandboxId, boot.env));
+        await this.measure(workspace, "token_delivery", () => this.deliverToken(workspace, sandboxId, { ...boot.env, ...checkoutWarmup(workspace) }));
         await store.defer(workspace.id, "creating", HELLO_POLL_MS);
         return;
       }
