@@ -29,16 +29,22 @@ describe("design recordings protocol", () => {
   it("reads stored recordings for frames sent without a version", () => {
     const input = { workspaceId: "ws", directoryId: "design_1", theme: "dark", frames: [{ file: "page-1/home.html" }] };
     expect(designRecordingsReadSchema.parse(input)).toEqual(input);
+    expect(designRecordingsReadSchema.parse({ ...input, withFailures: true }).withFailures).toBe(true);
+    expect(() => designRecordingsReadSchema.parse({ ...input, withFailures: false })).toThrow();
   });
 
   it("keeps a reply's chunk data within one bridge frame", () => {
     const reply = { pipeline: "recordings-1:electron/chromium", recordings: [recording], typefaces: [{ id: "c".repeat(32), bytes: 3, chunks: [chunk] }],
       chunks: [{ id: chunk, data: "AAAA" }], stale: [], failed: [], deferred: [] };
     expect(designRecordingsReplySchema.parse(reply)).toEqual(reply);
+    expect(designRecordingsReplySchema.parse({ ...reply, failed: [{ file: "page-1/a.html", error: "x", retryable: true }] }).failed[0]!.retryable).toBe(true);
+    expect(() => designRecordingsReplySchema.parse({ ...reply, failed: [{ file: "page-1/a.html", error: "x", retryable: false }] })).toThrow();
     const full = "A".repeat(87_384);
     const many = Array.from({ length: Math.ceil(DESIGN_RECORDINGS_REPLY_DATA_BYTES / full.length) + 1 }, (_, i) => ({ id: i.toString(16).padStart(32, "0"), data: full }));
     expect(() => designRecordingsReplySchema.parse({ ...reply, chunks: many })).toThrow(/exceed one reply/);
     expect(designRecordingsReadReplySchema.parse({ recordings: [{ ...recording, pipeline: "p" }], typefaces: [], chunks: [], missing: [], deferred: [] }).recordings).toHaveLength(1);
+    expect(designRecordingsReadReplySchema.parse({ recordings: [], typefaces: [], chunks: [], missing: ["page-1/b.html"], deferred: [],
+      failed: [{ file: "page-1/b.html", sourceVersion: version, error: "This frame paints on 2 composited layers." }] }).failed).toHaveLength(1);
   });
 
   it("rejects a recording without layers or with a malformed chunk", () => {
