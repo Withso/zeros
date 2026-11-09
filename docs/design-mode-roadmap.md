@@ -2699,6 +2699,59 @@ a process-wide disk quota across all workspaces, or a guarantee that a deleted
 cloud workspace can be recovered. Source parsing remains engine work; the
 admission limits are not OS CPU/RSS/GPU quotas.
 
+#### Recorded frames (internal experiment)
+
+The recorded canvas draws frames from Skia picture recordings, the vector
+drawing commands Chromium itself painted, instead of bitmap previews. Replay
+is crisp at any zoom, and redrawing at working zoom costs about a millisecond
+on the GPU. It is behind an internal renderer flag. The engine advertises
+`design.recordings.v1` only when the capture host names a recorder at launch.
+
+- **Recorder process.** `apps/desktop/electron/design-recorder-host.ts` is its
+  own Electron instance, started by main on first use and stopped after 30 s
+  idle (`design-recorder.ts`). It records with
+  `chrome.gpuBenchmarking.printToSkPicture`, which needs
+  `--enable-gpu-benchmarking` and a renderer allowed to write pictures to
+  disk. So recorder windows are unsandboxed. Neither applies to any app
+  renderer.
+  - Recorder windows load only sanitized frame documents from a private
+    scheme, behind a leading `script-src 'none'` policy, in a partition with
+    no network, permissions or storage.
+  - The process inherits an allow-listed environment with no credentials,
+    and a one-time token for its loopback HTTP endpoint.
+  - It starts only with `ZEROS_DESIGN_RECORDER=1` in an unpackaged build. A
+    packaged build also needs a role switch in main, and the recorder ships
+    only after its sandbox exception is approved.
+- **One layer per frame.** A picture of the page's root layer misses content
+  that Chromium composites separately, chiefly overflowing scroll containers.
+  - Before recording, the recorder makes each overflowing `auto`/`scroll`
+    container (including those in open shadow roots) `overflow: clip`, and
+    `display: flow-root` for blocks. At scroll position 0 this looks the same.
+  - A frame that still paints on several layers is reported as failed, so the
+    canvas keeps its bitmap preview: never an incomplete recording.
+  - The Phase 0 spike (M4, Chromium 150), with an earlier variant of these
+    rules: all 10 distinct replica designs recorded as one layer, at
+    0.003–0.5% pixel difference from Chromium's own capture, almost entirely
+    glyph anti-aliasing. The shipped rules must pass native qualification on
+    the Mac before the flag is enabled.
+- **Storage and transfer.** Recordings embed the full data of every font they
+  draw with: Geist instances of about 63 KB, and about 8.3 MB of SF Pro when
+  `system-ui` fallback glyphs appear.
+  - The engine splits each layer into content-defined chunks: FastCDC, 2/8/64
+    KiB, id = 32 hex characters of SHA-256 (`recording-chunks.ts`). Those
+    bytes are stored once, in shared `design-storage/recording-chunks/`.
+  - Each frame keeps one manifest per theme in private workspace storage
+    (`recording-store.ts`).
+  - Replies stay within one bridge frame (12 MiB of chunk data). A caller's
+    `knownChunks` are never resent; a frame whose chunks don't fit is deferred.
+- **Ops.** `design.recordings.render` records missing frames through the
+  capture host's `/record`. It reuses the thumbnail batch composition and
+  cancels through `design.preview.cancel`. `design.recordings.read` answers
+  from storage only, including frames sent without a version.
+- **Not yet.** Typeface externalization, which keeps font data out of each
+  recording. Packaged-app start-up. Layer composition for frames that keep
+  several layers.
+
 ### Negotiated metadata-only catalog reads
 
 `design.catalog.read.v1` is an additive engine capability for the distinct

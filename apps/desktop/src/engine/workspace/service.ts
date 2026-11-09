@@ -644,6 +644,7 @@ const LIFECYCLE_GATED_WORKSPACE_OPS = new Set<string>([
   // Starts a capture render like design.capture; archive drains it first.
   "design.preview",
   "design.thumbnails.render",
+  "design.recordings.render",
   "design.initialize",
   "file.write",
   "attachment.write",

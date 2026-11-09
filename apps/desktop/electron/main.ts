@@ -18,6 +18,8 @@ import { pathToFileURL } from "node:url";
 import { appDocumentPolicy } from "./app-document-security";
 import { rendererProcessOwners } from "./renderer-process-owners";
 import { registerDesignCaptureSheetPrivileges, startElectronDesignCapture } from "./design-capture";
+import { DESIGN_CAPTURE_RENDERER } from "./design-capture-batch";
+import { createDesignRecorder, designRecorderEnabled } from "./design-recorder";
 import { setDesignCaptureEnvironment } from "./sidecar";
 import type { DesignCaptureService } from "../src/engine/design/capture-service";
 
@@ -1134,9 +1136,13 @@ app.whenReady().then(async () => {
   // couriered into provider subprocesses.
   setBrowserServiceEnvironment(null);
   let browserRendererEpoch = 0;
-  const designCaptureReady = startElectronDesignCapture().then(service => {
+  // The recorded canvas's recorder runs in its own process (design-recorder.ts).
+  const designRecorder = designRecorderEnabled(process.env, app.isPackaged)
+    ? createDesignRecorder({ identity: `${DESIGN_CAPTURE_RENDERER}/skp`, entry: path.join(__dirname, "design-recorder.cjs") })
+    : null;
+  const designCaptureReady = startElectronDesignCapture({ recorder: designRecorder }).then(service => {
     designCaptureService = service;
-    setDesignCaptureEnvironment({ url: service.url, token: service.token, renderer: service.renderer });
+    setDesignCaptureEnvironment({ url: service.url, token: service.token, renderer: service.renderer, ...(service.recorder ? { recorder: service.recorder } : {}) });
   }).catch(() => { console.warn("[Zeros] Design capture service unavailable."); });
   // The bar that names the agent controlling a Browser tab page and lets the
   // user stop it. Its page is a second entry of the renderer build.
