@@ -594,6 +594,11 @@ async function main() {
           };
           requestAnimationFrame(tick);
         }).catch(() => {});
+        if (args.includes("--profile-reload")) {
+          await cdp.send("Profiler.enable").catch(() => {});
+          await cdp.send("Profiler.setSamplingInterval", { interval: 250 }).catch(() => {});
+          await cdp.send("Profiler.start").catch(() => {});
+        }
         await waitForNativeRenderer(page, async () =>
           (await import("/apps/desktop/src/renderer/platform/bridge/active-bridge.ts")).getActiveBridge()?.status === "connected", undefined, 60_000);
         // Name every bridge request (op, duration, outcome) after the reload: the
@@ -669,6 +674,10 @@ async function main() {
         }
         result.reloadReadyMs = reopened.ms; result.reloadCoverage = reopened.coverage; result.reloadOps = await opsSummary();
         result.reloadLayout = await page.evaluate(() => globalThis.__benchLayoutLog ?? null).catch(() => null);
+        if (args.includes("--profile-reload")) {
+          const stopped = await cdp.send("Profiler.stop").catch(() => null);
+          if (stopped?.profile) await fs.writeFile(path.join(evidence, `${fixture.name}-reload-profile.cpuprofile`), JSON.stringify(stopped.profile));
+        }
         result.reloadOpsTimeline = await page.evaluate(() => (globalThis.__benchReloadOps?.done ?? [])
           .filter(([op]) => op.startsWith("design.")).slice(0, 200)).catch(() => null);
         if (gpu) { result.gpuReloadMs = reopened.coverage.gpuReadyMs ?? null; result.gpuReload = reopened.coverage.gpu ?? null; }
