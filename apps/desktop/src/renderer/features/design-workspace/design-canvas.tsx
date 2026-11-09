@@ -215,6 +215,8 @@ import { useDesignRuntimeStore, waitForDesignRuntimeFrame } from "./state/design
 import { clearDesignFrameIntent, noteDesignFrameIntent, primeDesignFrameIntent, useDesignFrameIntent } from "./state/design-frame-intent";
 import { useDesignFrameResidency } from "./state/use-design-frame-residency";
 import { designFrameViews, designFramesAtPresentedGeometry, isPreparedDesignFrame, type DesignFrameView } from "./state/design-frame-view";
+import { DesignPassiveSelectionPublisher } from "./state/design-passive-selection";
+import { onActiveBridgeConnected } from "../../platform/bridge/active-bridge";
 import { useDesignHistoryGeometryPreview, useDesignHistorySelection } from "./state/design-history-presentation";
 import { useDesignFramePreparation } from "./state/use-design-frame-preparation";
 import { designBackgroundWork } from "./state/design-background-work";
@@ -1527,6 +1529,16 @@ export const DesignCanvas = React.memo(function DesignCanvas({
   // The first authoritative fallback is a real activation too: publish it so
   // get_selection agrees with the inspector before the user clicks anything.
   // The user's frame-selected state survives snapshot republication verbatim.
+  // Only a selection that changed is published again, and every selection
+  // after a reconnect (the engine keeps selection in memory only).
+  const passiveSelection = useRef<DesignPassiveSelectionPublisher | null>(null);
+  passiveSelection.current ??= new DesignPassiveSelectionPublisher();
+  const [selectionConnection, setSelectionConnection] = useState(0);
+  useEffect(() => onActiveBridgeConnected((_client, { initial }) => {
+    if (initial) return;
+    passiveSelection.current?.forget();
+    setSelectionConnection((value) => value + 1);
+  }), []);
   useEffect(() => {
     if (!active || !snapshot || !workspaceId) return;
     // Page membership can prune a deleted primary in a parent layout effect.
@@ -1536,11 +1548,15 @@ export const DesignCanvas = React.memo(function DesignCanvas({
     if (current.selectedFrame !== view.selectedFrame || current.selectedNodeId !== view.selectedNodeId ||
       current.frameSelected !== view.frameSelected || current.selectionEvent !== view.selectionEvent) return;
     if (view.selectedNodeId) return;
+    if (!passiveSelection.current!.offer({ workspaceId, owner: canvasPageOwner, frame: selectedDescription ?? null,
+      selected: view.frameSelected, event: view.selectionEvent })) return;
     publishSelection(selectedDescription ?? null, { selected: view.frameSelected, explicit: false });
   }, [
     active,
+    canvasPageOwner,
     publishSelection,
     selectedDescription,
+    selectionConnection,
     snapshot,
     view.frameSelected,
     view.selectedFrame,
