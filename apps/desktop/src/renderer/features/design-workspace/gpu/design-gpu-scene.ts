@@ -5,6 +5,7 @@ import { designCanvasColor, designStyleWithoutCameraScale } from "../design-sour
 import { DesignGpuCompositor, type DesignGpuBatch } from "./design-gpu-compositor";
 import { DesignGpuPages, designGpuUnitKey, type DesignGpuAdoptedUnit } from "./design-gpu-pages";
 import { DesignGpuRasterGate } from "./design-gpu-raster-gate";
+import { DesignGpuDemandClock } from "./design-gpu-demand-clock";
 import { DESIGN_GPU_PAGE_PIXELS, designGpuChooseDensity, designGpuDensity, designGpuGrid, designGpuScreenRect,
   designGpuUnitRaster, designGpuVisibleUnits, packDesignGpuBurst, type DesignGpuGrid, type DesignGpuUnitRaster } from "./design-gpu-plan";
 import type { DesignGpuRasterPicture, DesignGpuRasterUnit } from "./design-gpu-protocol";
@@ -104,7 +105,7 @@ export class DesignGpuScene {
   private readonly verifiedFonts = new Set<string>();
   private readonly verifyingFonts = new Set<string>();
   private readonly badFonts = new Set<string>();
-  private demandTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly demandClock = new DesignGpuDemandClock(() => this.demand(), DEMAND_SETTLE_MS);
   private paintPending = false;
   private disposed = false;
   private started = false;
@@ -174,7 +175,7 @@ export class DesignGpuScene {
     if (first) this.deps.stats.restart(input.openKey);
     else this.deps.stats.open(input.openKey);
     if (ownerChanged) this.failUndrawable();
-    this.scheduleDemand(0);
+    this.demandClock.input(this.cameraReady());
     this.requestPaint();
   }
 
@@ -191,7 +192,7 @@ export class DesignGpuScene {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
-    if (this.demandTimer !== null) clearTimeout(this.demandTimer);
+    this.demandClock.dispose();
     this.observer.disconnect();
     for (const cleanup of this.cleanups.splice(0)) cleanup();
     for (const element of this.tiled) element.removeAttribute("data-design-frame-tiled");
@@ -291,9 +292,9 @@ export class DesignGpuScene {
     return rows;
   }
 
-  private scheduleDemand(delay = DEMAND_SETTLE_MS): void {
-    if (this.demandTimer !== null) clearTimeout(this.demandTimer);
-    this.demandTimer = setTimeout(() => { this.demandTimer = null; this.demand(); }, delay);
+  private cameraReady(): boolean {
+    const camera = this.camera;
+    return !!camera && camera.view.zoom > 0 && camera.size.width > 0 && camera.size.height > 0;
   }
 
   /** Recordings for frames near the camera, nearest first. */
@@ -322,7 +323,7 @@ export class DesignGpuScene {
     const moved = !this.camera || this.camera.view.zoom !== view.zoom || this.camera.view.panX !== view.panX ||
       this.camera.view.panY !== view.panY || this.camera.size.width !== size.width || this.camera.size.height !== size.height;
     this.camera = { view, size };
-    if (moved) this.scheduleDemand();
+    if (moved) this.demandClock.camera(this.cameraReady());
     if (this.disposed || this.compositor.lost || !(size.width > 0 && size.height > 0) || !(view.zoom > 0)) return;
     const started = performance.now();
     const dpr = window.devicePixelRatio || 1;

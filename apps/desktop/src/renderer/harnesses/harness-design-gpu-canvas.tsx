@@ -30,6 +30,7 @@ const COLUMNS = Math.max(1, Number(params.get("columns")) || 6);
 const UNREADABLE = params.has("unreadable") ? Number(params.get("unreadable")) : -1;
 const WIDTH = 320, HEIGHT = 200, GAP = 40, SCALE = 2;
 const CHUNK_BYTES = 16 * 1024;
+const VIEWPORT = { width: 1040, height: 520 };
 
 /** Each frame's fill is distinct; the smoke reads it back from screen pixels. */
 export const designGpuHarnessFill = (index: number): [number, number, number] =>
@@ -110,7 +111,9 @@ const frames: DesignGpuSceneFrame[] = Array.from({ length: COUNT }, (_, index) =
   x: (index % COLUMNS) * (WIDTH + GAP), y: Math.floor(index / COLUMNS) * (HEIGHT + GAP), width: WIDTH, height: HEIGHT,
 }));
 
-const requests: Array<{ op: string; theme: string | null; frames: number; known: number; chunks: number; aborted: boolean }> = [];
+/** `at` is epoch ms, comparable with the bench snapshot's `openedAt`. */
+const requests: Array<{ op: string; theme: string | null; frames: number; known: number; chunks: number; aborted: boolean; at: number }> = [];
+const epoch = () => performance.timeOrigin + performance.now();
 let store: Promise<Store> | null = null;
 function reply(frames: ReadonlyArray<{ file: string }>, known: readonly string[]) {
   return store!.then((recorded) => {
@@ -126,12 +129,12 @@ function reply(frames: ReadonlyArray<{ file: string }>, known: readonly string[]
 const HELD_THEME = "held";
 const source: DesignRecordingsSource = {
   async read(owner, asked, known) {
-    requests.push({ op: "read", theme: owner.theme, frames: asked.length, known: known.length, chunks: 0, aborted: false });
+    requests.push({ op: "read", theme: owner.theme, frames: asked.length, known: known.length, chunks: 0, aborted: false, at: epoch() });
     // A first open: nothing is stored yet.
     return { recordings: [], typefaces: [], chunks: [], missing: asked.map((frame) => frame.file), deferred: [] } satisfies DesignRecordingsReadReply;
   },
   async render(owner, asked, known, signal) {
-    const entry = { op: "render", theme: owner.theme, frames: asked.length, known: known.length, chunks: 0, aborted: false };
+    const entry = { op: "render", theme: owner.theme, frames: asked.length, known: known.length, chunks: 0, aborted: false, at: epoch() };
     requests.push(entry);
     if (owner.theme === HELD_THEME) {
       await new Promise((_resolve, reject) => signal.addEventListener("abort", () => { entry.aborted = true; reject(signal.reason); }, { once: true }));
@@ -165,17 +168,20 @@ function Harness() {
   const [view, setView] = useState<DesignViewport>({ zoom: 0.5, panX: 20, panY: 20 });
   const [selected, select] = useState<number | null>(null);
   const [theme, setTheme] = useState<string | null>(null);
-  const size = useMemo(() => ({ width: 1040, height: 520 }), []);
+  // The canvas's mount order: the recorded canvas mounts first, the camera
+  // paints next, and the viewport size is measured last (it starts at 0 × 0).
+  const [size, setSize] = useState({ width: 0, height: 0 });
   const owner = useMemo(() => ({ workspaceId: "/harness/workspace", directoryId: "design_harness", theme }), [theme]);
   window.designGpuHarness = { frames, requests, setView, select, setTheme, fill: designGpuHarnessFill,
     failed: () => [...runtime.recordings.failedFiles(owner)].sort() };
-  useLayoutEffect(() => { paintDesignCanvasCamera(worldRef.current, view, false, size); }, [size, view, selected]);
   const live = useMemo(() => new Set<string>(), []);
   const available = useDesignGpuAvailable(runtime);
   useDesignGpuCanvas({ enabled: enabled && available, active: true, worldRef, documentOwner: "harness", owner,
     openKey: "harness:page-1", frames, live, runtime });
+  useLayoutEffect(() => { paintDesignCanvasCamera(worldRef.current, view, false, size); }, [size, view, selected]);
+  useLayoutEffect(() => { setSize(VIEWPORT); }, []);
   return (
-    <div data-design-canvas-viewport="" className="bg-bg2 relative overflow-clip" style={{ width: size.width, height: size.height }}>
+    <div data-design-canvas-viewport="" className="bg-bg2 relative overflow-clip" style={{ width: VIEWPORT.width, height: VIEWPORT.height }}>
       <div className="pointer-events-none absolute inset-0 isolate">
         <div ref={worldRef} data-design-canvas-world="" className="pointer-events-none absolute inset-0 origin-top-left">
           {frames.map((frame, index) => (
