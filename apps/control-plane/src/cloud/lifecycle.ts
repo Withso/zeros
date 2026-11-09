@@ -392,13 +392,18 @@ export class CloudV2Lifecycle {
             return;
           }
         }
+        // Nothing listens on the route until the worker starts, and only token
+        // delivery below starts it, after the image is prepared. Creating the
+        // route while the VM boots overlaps the two.
+        const routed = this.measure(workspace, "protected_route", () => this.host(workspace, sandboxId));
+        routed.catch(() => {});
         await this.measure(workspace, "runtime_install", () => this.ensureRuntime(sandboxId, boot.runtime), runtimeChanged => ({ runtimeChanged }));
         if (image.prune.length || !image.from) await this.measure(workspace, "image_prepare", () => this.prepareImage(sandboxId, image));
         if (this.deps.prepareRepository && !image.checkout) {
           await store.defer(workspace.id, "creating", 17 * 60_000);
           await this.measure(workspace, "repository_prepare", () => this.deps.prepareRepository!(workspace, sandboxId));
         }
-        if (!await this.measure(workspace, "protected_route", () => this.host(workspace, sandboxId))) return;
+        if (!await routed) return;
         // The worker reads it with its configuration, after the token arrives.
         const commit = await baseCommit;
         if (commit) await store.setBaseCommit(workspace.id, commit);
@@ -439,6 +444,11 @@ export class CloudV2Lifecycle {
             restoring = true;
           }
         }
+        // As on create, the route is inert until token delivery starts the worker.
+        // A rare restore keeps it after the checkpoint is applied.
+        const route = () => this.measure(workspace, "protected_route", () => this.host(workspace, sandboxId!));
+        const routed = restoring ? undefined : route();
+        routed?.catch(() => {});
         // A runtime shipped while the VM slept is installed now.
         await this.measure(workspace, "runtime_install", () => this.ensureRuntime(sandboxId, boot.runtime), runtimeChanged => ({ runtimeChanged }));
         if (restoring) {
@@ -450,7 +460,7 @@ export class CloudV2Lifecycle {
           await this.measure(workspace, "checkpoint_restore", () => this.applyCheckpoint(workspace, sandboxId));
           if (!await store.finishRestore(workspace.id, sandboxId)) return;
         }
-        if (!await this.measure(workspace, "protected_route", () => this.host(workspace, sandboxId))) return;
+        if (!await (routed ?? route())) return;
         await this.measure(workspace, "token_delivery", () => this.deliverToken(workspace, sandboxId, boot.env));
         await store.defer(workspace.id, "starting", HELLO_POLL_MS);
         return;

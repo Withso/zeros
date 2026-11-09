@@ -564,15 +564,19 @@ describe("cloud v2 lifecycle", () => {
     vi.mocked(f.compute.resume).mockImplementationOnce(async () => { now += 10; });
     vi.mocked(f.compute.exec).mockImplementationOnce(async () => { now += 20; return { exitCode: 0, stdout: "runtime-changed\n", timedOut: false }; })
       .mockImplementationOnce(async () => { now += 40; return { exitCode: 0, stdout: "credential never logged", timedOut: false }; });
-    vi.mocked(f.compute.hostPort).mockImplementationOnce(async () => { now += 30; return { url: "https://private.example.test", token: "never-log" }; });
+    vi.mocked(f.compute.hostPort).mockImplementationOnce(async () => ({ url: "https://private.example.test", token: "never-log" }));
     await f.lifecycle.tick();
-    expect(timing.mock.calls.map(([record]) => record)).toEqual([
+    const records = timing.mock.calls.map(([record]) => record);
+    // The route overlaps the VM's runtime check, so it adds nothing to the total.
+    expect(records).toHaveLength(5);
+    expect(records).toEqual(expect.arrayContaining([
       { workspaceId: "6f2b7c1e", state, phase: state === "creating" ? "boat_create" : "boat_resume", durationMs: 10 },
       { workspaceId: "6f2b7c1e", state, phase: "runtime_install", durationMs: 20, runtimeChanged: true },
-      { workspaceId: "6f2b7c1e", state, phase: "protected_route", durationMs: 30 },
+      { workspaceId: "6f2b7c1e", state, phase: "protected_route", durationMs: expect.any(Number) },
       { workspaceId: "6f2b7c1e", state, phase: "token_delivery", durationMs: 40 },
-      { workspaceId: "6f2b7c1e", state, phase: "total", durationMs: 100 },
-    ]);
+      { workspaceId: "6f2b7c1e", state, phase: "total", durationMs: 70 },
+    ]));
+    expect(JSON.stringify(records)).not.toMatch(/never-log|credential never logged|private\.example/);
   });
 
   it("never lets a timing observer prevent a workspace from starting", async () => {
@@ -802,13 +806,32 @@ describe("cloud v2 lifecycle", () => {
     release(true); await step;
     expect(f.compute.stop).toHaveBeenCalledWith("bx_test");
   });
+  it.each(["creating", "starting"] as const)("creates the worker route while the %s VM is still busy with its runtime check", async state => {
+    const f = setup([workspace(state, { boatSandboxId: state === "starting" ? "bx_test" : null })]);
+    let release!: () => void;
+    vi.mocked(f.compute.exec).mockImplementationOnce(() => new Promise(resolve => {
+      release = () => resolve({ exitCode: 0, stdout: "", timedOut: false });
+    }));
+    const step = f.lifecycle.tick();
+    await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+    await vi.waitFor(() => expect(f.compute.hostPort).toHaveBeenCalledOnce());
+    expect(f.store.rotateWorkerToken).not.toHaveBeenCalled();
+    release(); await step;
+    expect(f.store.rotateWorkerToken).toHaveBeenCalledOnce();
+  });
+
   it("removes the other recipe checkouts a kept image starts with before the worker can be reached", async () => {
+    // The worker is reachable only once token delivery starts it. Its route
+    // may exist earlier: nothing listens on it until then.
     const f = setup([workspace("creating")], { prune: ["Example/Docs"] });
     await f.lifecycle.tick();
-    const prune = vi.mocked(f.compute.exec).mock.calls.findIndex(([, command]) => command.includes("/home/user/Example/Docs") && command.includes("rmdir --"));
+    const execs = vi.mocked(f.compute.exec).mock;
+    const prune = execs.calls.findIndex(([, command]) => command.includes("/home/user/Example/Docs") && command.includes("rmdir --"));
     expect(prune).toBeGreaterThan(-1);
-    expect(vi.mocked(f.compute.exec).mock.calls[prune]![1]).not.toContain("/home/user/o/r");
-    expect(vi.mocked(f.compute.exec).mock.invocationCallOrder[prune]).toBeLessThan(vi.mocked(f.compute.hostPort).mock.invocationCallOrder[0]!);
+    expect(execs.calls[prune]![1]).not.toContain("/home/user/o/r");
+    const delivery = execs.calls.findIndex(([, command]) => command.includes("worker-token"));
+    expect(delivery).toBeGreaterThan(prune);
+    expect(execs.invocationCallOrder[prune]).toBeLessThan(vi.mocked(f.store.rotateWorkerToken).mock.invocationCallOrder[0]!);
     expect(f.compute.create).toHaveBeenCalledWith(expect.objectContaining({ from: "cv2-alpha-org-1" }));
   });
 
@@ -832,13 +855,13 @@ describe("cloud v2 lifecycle", () => {
     expect(vi.mocked(f.compute.exec).mock.calls.some(([, command]) => command.includes("rmdir --"))).toBe(false);
   });
 
-  it("stops a create whose prune failed before the worker gets a route or token", async () => {
+  it("stops a create whose prune failed before the worker gets a token", async () => {
     const f = setup([workspace("creating")], { prune: ["Example/Docs"] });
     vi.mocked(f.compute.exec).mockImplementation(async (_id: string, command: string) =>
       ({ exitCode: command.includes("rm -rf") ? 1 : 0, stdout: "", timedOut: false }));
     await f.lifecycle.tick();
-    expect(f.compute.hostPort).not.toHaveBeenCalled();
     expect(f.store.rotateWorkerToken).not.toHaveBeenCalled();
+    expect(vi.mocked(f.compute.exec).mock.calls.some(([, command]) => command.includes("worker-token"))).toBe(false);
   });
 
   it("prunes a begun restore's recorded checkouts before applying its checkpoint", async () => {
