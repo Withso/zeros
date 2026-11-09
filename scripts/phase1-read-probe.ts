@@ -11,6 +11,8 @@ const [workspace, page, repeat] = [process.argv[2]!, process.argv[3]!, Number(pr
 const directoryId = designDirectoryEntry(workspace, designDirectoryNameFor(workspace))!.id;
 const { canvas } = await readSharedCanvasContext(workspace);
 const files = Object.keys(canvas.frame_info).filter((file) => file.startsWith(`${page}/`)).sort();
+// PROBE_BUSY=1: keep the event loop ~80% busy, like an engine preparing frames.
+if (process.env.PROBE_BUSY) setInterval(() => { const until = performance.now() + 40; while (performance.now() < until) { /* busy */ } }, 50).unref();
 for (let pass = 0; pass < repeat; pass++) {
   const known: string[] = [];
   const times: number[] = [];
