@@ -275,7 +275,7 @@ import {
 import { useDesignFoundation } from "./state/use-design-foundation";
 
 import { DesignFrameCover, DesignFrameRenderSurface } from "./design-frame-render-surface";
-import { designGpuRuntime, useDesignGpuCanvas, useDesignGpuCanvasEnabled, useDesignGpuFailedFrames,
+import { designGpuRuntime, useDesignFrameColorScheme, useDesignGpuCanvas, useDesignGpuCanvasEnabled, useDesignGpuFailedFrames,
   useDesignGpuSceneFrames } from "./gpu/design-gpu-canvas";
 import { hasAsyncCanvasWheel } from "../../platform/runtime";
 import { createDesignGestureFrameClock } from "./design-gesture-frame-clock";
@@ -1299,9 +1299,10 @@ export const DesignCanvas = React.memo(function DesignCanvas({
   // The internal recorded canvas draws every passive frame from its Skia
   // recording on the GPU; bitmap pictures, covers and source surfaces stay off.
   const gpuCanvas = useDesignGpuCanvasEnabled(workspaceId) && !!canvasDirectoryId;
+  const frameColorScheme = useDesignFrameColorScheme();
   const gpuOwner = useMemo(() => gpuCanvas && workspaceId && canvasDirectoryId
-    ? { workspaceId, directoryId: canvasDirectoryId, theme: frameTheme } : null,
-  [canvasDirectoryId, frameTheme, gpuCanvas, workspaceId]);
+    ? { workspaceId, directoryId: canvasDirectoryId, theme: frameTheme, colorScheme: frameColorScheme } : null,
+  [canvasDirectoryId, frameColorScheme, frameTheme, gpuCanvas, workspaceId]);
   const gpuFailed = useDesignGpuFailedFrames(designGpuRuntime(), gpuOwner);
   // A frame whose recording failed keeps today's live-document fallback.
   const gpuCovered = useMemo(() => gpuCanvas ? new Set(frameViews.map((frame) => frame.file).filter((file) => !gpuFailed.has(file))) : undefined,
@@ -1355,7 +1356,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
   });
   const gpuFrames = useDesignGpuSceneFrames(frameViews, gpuCanvas);
   useDesignGpuCanvas({ enabled: gpuCanvas, active, worldRef, documentOwner: canvasDocumentOwner, owner: gpuOwner,
-    openKey: `${canvasDocumentOwner}\0${frameTheme}`, frames: gpuFrames, live: liveFrameFiles });
+    openKey: `${canvasDocumentOwner}\0${frameTheme}\0${frameColorScheme}`, frames: gpuFrames, live: liveFrameFiles });
   const paintPendingWheelGesture = useCallback(() => {
     if (wheelPaintFrameRef.current !== null) {
       window.cancelAnimationFrame(wheelPaintFrameRef.current);

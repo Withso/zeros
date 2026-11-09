@@ -14,14 +14,14 @@ const bridgeSource: DesignRecordingsSource = {
   read: (owner, frames, knownChunks, signal) => {
     const bridge = getActiveBridge();
     if (!bridge) return Promise.reject(new Error("Design recordings need a connected engine."));
-    return bridgeDesignRecordingsRead(bridge, owner.workspaceId, { directoryId: owner.directoryId, theme: owner.theme, frames,
-      knownChunks }, { signal });
+    return bridgeDesignRecordingsRead(bridge, owner.workspaceId, { directoryId: owner.directoryId, theme: owner.theme,
+      colorScheme: owner.colorScheme, frames, knownChunks }, { signal });
   },
   render: (owner, frames, knownChunks, signal) => {
     const bridge = getActiveBridge();
     if (!bridge) return Promise.reject(new Error("Design recordings need a connected engine."));
-    return bridgeDesignRecordingsRender(bridge, owner.workspaceId, { directoryId: owner.directoryId, theme: owner.theme, frames,
-      knownChunks }, { signal });
+    return bridgeDesignRecordingsRender(bridge, owner.workspaceId, { directoryId: owner.directoryId, theme: owner.theme,
+      colorScheme: owner.colorScheme, frames, knownChunks }, { signal });
   },
 };
 
@@ -44,6 +44,21 @@ export function useDesignGpuCanvasEnabled(workspaceId: string | null | undefined
   const available = useDesignGpuAvailable(runtime);
   return flag && available && !!workspaceId && !isCloudWorkspace(workspaceId) &&
     getActiveBridge()?.supportsEngineCapability?.(DESIGN_RECORDINGS_CAPABILITY, workspaceId) === true;
+}
+
+/** The scheme live frames are drawn in. The app's appearance sets Electron's
+ * native theme, which every frame document sees as `prefers-color-scheme`. */
+export function useDesignFrameColorScheme(): "light" | "dark" {
+  return useSyncExternalStore(subscribeColorScheme, readColorScheme, () => "light");
+}
+const DARK_QUERY = "(prefers-color-scheme: dark)";
+function subscribeColorScheme(listener: () => void): () => void {
+  const query = typeof window.matchMedia === "function" ? window.matchMedia(DARK_QUERY) : null;
+  query?.addEventListener("change", listener);
+  return () => query?.removeEventListener("change", listener);
+}
+function readColorScheme(): "light" | "dark" {
+  return typeof window.matchMedia === "function" && window.matchMedia(DARK_QUERY).matches ? "dark" : "light";
 }
 
 /** False once WebGL2 or the raster worker failed this session. */
