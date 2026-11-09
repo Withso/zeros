@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  DESIGN_RECORDINGS_COLOR_SCHEME_CAPABILITY,
   DESIGN_RECORDINGS_READ_FAILURES_CAPABILITY,
   DESIGN_RECORDINGS_REPLY_DATA_BYTES,
   designBatchRecordReplySchema,
@@ -31,6 +32,7 @@ describe("design recordings protocol", () => {
 
   it("names the capability for reads that report known failures", () => {
     expect(DESIGN_RECORDINGS_READ_FAILURES_CAPABILITY).toBe("design.recordings.read-failures.v1");
+    expect(DESIGN_RECORDINGS_COLOR_SCHEME_CAPABILITY).toBe("design.recordings.color-scheme.v1");
   });
 
   it("reads stored recordings for frames sent without a version", () => {

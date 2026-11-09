@@ -28,7 +28,7 @@ import { randomBytes } from "node:crypto";
 import { openBoundedDirectorySync } from "./files/bounded-read-sync";
 
 import { DESIGN_CATALOG_READ_CAPABILITY, DESIGN_CATALOG_READ_OPERATION, DESIGN_FRAMES_CHANGES_CAPABILITY, DESIGN_LAZY_PREPARATION_CAPABILITY, DESIGN_MUTATION_SNAPSHOTS_CAPABILITY, DESIGN_PAGE_SCOPED_MUTATIONS_CAPABILITY } from "@zeros/protocol/design-catalog";
-import { DESIGN_PREVIEW_JOBS_CAPABILITY, DESIGN_RECORDINGS_CAPABILITY, DESIGN_RECORDINGS_READ_FAILURES_CAPABILITY, DESIGN_THUMBNAILS_CAPABILITY, DESIGN_THUMBNAILS_PREPARE_CAPABILITY, DESIGN_THUMBNAILS_STORE_CAPABILITY } from "@zeros/protocol/design-capture";
+import { DESIGN_PREVIEW_JOBS_CAPABILITY, DESIGN_RECORDINGS_CAPABILITY, DESIGN_RECORDINGS_COLOR_SCHEME_CAPABILITY, DESIGN_RECORDINGS_READ_FAILURES_CAPABILITY, DESIGN_THUMBNAILS_CAPABILITY, DESIGN_THUMBNAILS_PREPARE_CAPABILITY, DESIGN_THUMBNAILS_STORE_CAPABILITY } from "@zeros/protocol/design-capture";
 import { DESIGN_SOURCE_SURFACES_CAPABILITY } from "@zeros/protocol/design-surface";
 import { DESIGN_COPY_PLACEMENT_CAPABILITY } from "@zeros/protocol/design-relocation";
 import {
@@ -9150,7 +9150,8 @@ export class ZerosEngine {
           // Batch thumbnails need a capture host to draw them.
           ...(resolveDesignCaptureConfig() ? [DESIGN_THUMBNAILS_CAPABILITY, DESIGN_THUMBNAILS_PREPARE_CAPABILITY] : []),
           // Recordings need a host that can record, which it names at launch.
-          ...(resolveDesignCaptureConfig()?.recorder ? [DESIGN_RECORDINGS_CAPABILITY, DESIGN_RECORDINGS_READ_FAILURES_CAPABILITY] : [])] : [])],
+          ...(resolveDesignCaptureConfig()?.recorder ? [DESIGN_RECORDINGS_CAPABILITY,
+            DESIGN_RECORDINGS_READ_FAILURES_CAPABILITY, DESIGN_RECORDINGS_COLOR_SCHEME_CAPABILITY] : [])] : [])],
       }),
     );
   }
