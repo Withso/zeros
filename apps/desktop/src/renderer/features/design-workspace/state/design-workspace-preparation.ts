@@ -192,6 +192,10 @@ export interface DesignPreparationDeps {
 type PreparationReply = Awaited<ReturnType<DesignPreparationDeps["prepare"]>>;
 type Demand = { token: object; input: DesignPreparationDemand; activation: number };
 const BATCH_SIZE = 16;
+/** Batches in flight at once. A cold 1,000-frame page prepares in 64 batches
+ * on the engine's workers; with one in flight they idled at every batch
+ * boundary and while each reply republished the page. */
+const PREPARATION_LANES = 2;
 const MAX_REVALIDATED_FRAMES = 256;
 
 /** Only engine results for this exact catalog become prepared generations. */
@@ -225,17 +229,20 @@ function pendingFiles(snapshot: DesignWorkspaceSnapshotWire, demand: Demand): st
   return [...new Set(demand.input.files)].filter(file => available.has(file) && !current.has(file) && !Object.hasOwn(preparation.errors, file));
 }
 
-/** One bounded preparation lane, latest demand only. A retired reply cannot
+/** Bounded preparation lanes, latest demand only. A retired reply cannot
  * publish over a watcher, mutation response, page or directory replacement. */
 export class DesignFramePreparation {
   private demand: Demand | null = null;
   private activation = 0;
-  private running: Promise<PreparationReply> | null = null;
+  /** Settles with each batch in flight, never rejecting. */
+  private readonly lanes = new Set<Promise<void>>();
+  /** Files of the batches in flight: a new batch takes only others. */
+  private readonly preparing = new Set<string>();
   private revalidating = 0;
   private preparations = 0;
   private resumeTimer: ReturnType<typeof setTimeout> | null = null;
   constructor(private readonly deps: DesignPreparationDeps) {}
-  usage() { return { running: this.running ? 1 : 0, prepared: this.preparations, demanded: this.demand?.input.files.length ?? 0 }; }
+  usage() { return { running: this.lanes.size, prepared: this.preparations, demanded: this.demand?.input.files.length ?? 0 }; }
   setDemand(token: object, input: DesignPreparationDemand | null): void {
     if (!input) { if (this.demand?.token === token) this.demand = null; return; }
     const activation = this.demand?.token === token && this.demand.input.workspaceId === input.workspaceId
@@ -261,7 +268,7 @@ export class DesignFramePreparation {
         if (!files.length) break;
         let result: PreparationReply | null;
         try {
-          result = await this.prepare(workspaceId, next, files, () => isCurrent() && this.owns(demand));
+          result = await this.prepare(workspaceId, next, files, () => isCurrent() && this.owns(demand), true);
         } catch (error) {
           // A failed retired read has no more authority than a successful one.
           // Keep current failures actionable, but let a new visit/selection
@@ -290,20 +297,27 @@ export class DesignFramePreparation {
     return this.demand?.token === demand.token && this.demand.activation === demand.activation;
   }
 
-  private async prepare(workspaceId: string, snapshot: DesignWorkspaceSnapshotWire, files: readonly string[], current: () => boolean): Promise<PreparationReply | null> {
-    // Revalidation shares the cold-preparation lane. A retired waiter cannot
-    // begin another engine read, including after an A → B → A round trip.
-    while (this.running) await this.running.catch(() => {});
+  private async prepare(workspaceId: string, snapshot: DesignWorkspaceSnapshotWire, files: readonly string[], current: () => boolean,
+    exclusive = false): Promise<PreparationReply | null> {
+    // Revalidation waits for every cold batch, as it did for the single lane,
+    // so it never re-requests a file one of them holds. A retired waiter
+    // cannot begin another engine read, including after an A → B → A round trip.
+    while (this.lanes.size >= (exclusive ? 1 : PREPARATION_LANES)) await Promise.race(this.lanes);
     if (!current()) return null;
     const running = this.deps.prepare(workspaceId, snapshot.directoryId!, snapshot.preparation!.revision, files);
-    this.running = running;
+    const lane = running.then(() => {}, () => {});
+    this.lanes.add(lane);
+    for (const file of files) this.preparing.add(file);
     try { return await running; }
-    finally { if (this.running === running) this.running = null; }
+    finally {
+      this.lanes.delete(lane);
+      for (const file of files) this.preparing.delete(file);
+    }
   }
 
   private pump(): void {
     const demand = this.demand;
-    if (this.running || this.revalidating || !demand || !this.deps.canPrepare(demand.input.workspaceId)) return;
+    if (this.lanes.size >= PREPARATION_LANES || this.revalidating || !demand || !this.deps.canPrepare(demand.input.workspaceId)) return;
     // On a 1,000-frame page every publication re-renders the whole canvas;
     // starting batches mid-pan turned each into a dropped display frame.
     const quiet = this.deps.quietMs?.() ?? designBackgroundWork.quietRemainingMs();
@@ -315,7 +329,7 @@ export class DesignFramePreparation {
     const snapshot = this.deps.snapshot(workspaceId);
     const preparation = snapshot?.preparation;
     if (!snapshot?.directoryId || !preparation) return;
-    const files = pendingFiles(snapshot, demand).slice(0, BATCH_SIZE);
+    const files = pendingFiles(snapshot, demand).filter(file => !this.preparing.has(file)).slice(0, BATCH_SIZE);
     if (!files.length) return;
     void this.prepare(workspaceId, snapshot, files, () => this.owns(demand) && this.deps.canPrepare(workspaceId)).then(result => {
       const current = this.deps.snapshot(workspaceId);
@@ -332,5 +346,7 @@ export class DesignFramePreparation {
         errors: { ...current.preparation.errors, ...Object.fromEntries(files.map(file => [file, error instanceof Error ? error.message : "Could not prepare this frame."])) },
       } });
     }).finally(() => { this.pump(); });
+    // prepare() took its lane synchronously; fill the next one.
+    this.pump();
   }
 }

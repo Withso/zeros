@@ -74,6 +74,34 @@ it("prepares only view demand, one bounded batch, while distant descriptors stay
   expect(coordinator.usage().running).toBe(0);
 });
 
+it("keeps two disjoint batches in flight, so the engine's workers don't idle between batches", async () => {
+  // A cold 1,000-frame page prepares in 64 batches. With one batch in flight
+  // the workers idled at every batch boundary and while each reply
+  // republished the page.
+  let current = snapshot(1, 40);
+  const held = Array.from({ length: 3 }, () => deferred<ReturnType<typeof reply>>());
+  const prepare = vi.fn().mockImplementationOnce(() => held[0]!.promise).mockImplementationOnce(() => held[1]!.promise)
+    .mockImplementationOnce(() => held[2]!.promise);
+  const coordinator = new DesignFramePreparation({ snapshot: () => current, publish: (_, value) => { current = value; }, canPrepare: () => true, prepare });
+  const files = Array.from({ length: 40 }, (_, i) => `f${i}.html`);
+  coordinator.setDemand({}, { workspaceId: "personal", files });
+  expect(prepare).toHaveBeenCalledTimes(2);
+  expect(prepare.mock.calls[0]![3]).toEqual(files.slice(0, 16));
+  expect(prepare.mock.calls[1]![3]).toEqual(files.slice(16, 32));
+  expect(coordinator.usage().running).toBe(2);
+  // The second reply lands first: it publishes, and the freed lane takes the rest.
+  held[1]!.resolve(reply(files.slice(16, 32)));
+  await vi.waitFor(() => expect(prepare).toHaveBeenCalledTimes(3));
+  expect(prepare.mock.calls[2]![3]).toEqual(files.slice(32));
+  expect(current.preparation!.current).toEqual(files.slice(16, 32));
+  held[0]!.resolve(reply(files.slice(0, 16)));
+  held[2]!.resolve(reply(files.slice(32)));
+  await vi.waitFor(() => expect(current.preparation!.current).toHaveLength(40));
+  expect(new Set(current.preparation!.current).size).toBe(40);
+  expect(prepare).toHaveBeenCalledTimes(3);
+  await vi.waitFor(() => expect(coordinator.usage().running).toBe(0));
+});
+
 it("starts no new preparation batch while a camera gesture is live, then resumes once it rests", async () => {
   // Each batch republishes the page; on a 1,000-frame page a batch completing
   // mid-pan re-rendered the whole canvas inside the gesture.
