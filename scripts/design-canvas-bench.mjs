@@ -243,6 +243,11 @@ async function main() {
             const message = JSON.parse(data);
             const key = [message.type, message.op ?? message.operation ?? message.payload?.op ?? message.method].filter(Boolean).join(":") || "unknown";
             ops.counts[key] = (ops.counts[key] ?? 0) + 1; ops.bytes[key] = (ops.bytes[key] ?? 0) + data.length;
+            // Who sends Design selection writes (stacks map back through the build's source maps).
+            if (key.endsWith("design.selection.set")) {
+              const stacks = globalThis.__benchSelectionStacks ??= [];
+              if (stacks.length < 12) stacks.push(String(new Error().stack).split("\n").slice(2, 14).join("\n"));
+            }
           }
         } catch {}
         return send.call(this, data);
@@ -511,6 +516,7 @@ async function main() {
       if (profileCold) { const { profile: cpu } = await cdp.send("Profiler.stop"); await fs.writeFile(path.join(evidence, `${fixture.name}-cold-profile.cpuprofile`), JSON.stringify(cpu)); }
       result.coldReadyMs = cold.ms; result.coverage = cold.coverage; result.opsOpen = await takeOps();
       if (gpu) { result.gpuColdMs = cold.coverage.gpuReadyMs ?? null; result.gpuCold = cold.coverage.gpu ?? null; }
+      result.selectionStacks = await page.evaluate(() => globalThis.__benchSelectionStacks ?? []).catch(() => null);
       if (captureDump > 0) {
         // Native captures of real composed frames, one at a time, for the batch-renderer experiment.
         result.captureDump = await page.evaluate(async ({ id, n }) => {
