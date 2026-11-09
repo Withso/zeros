@@ -55,7 +55,8 @@ describe("design recordings protocol", () => {
     const reply = { version: 1, revision: "r1", recorder: "electron-43/chromium-150/skp",
       items: [{ id: "f0", scale: 2, layers: [{ x: 0, y: 0, width: 2880, height: 1800, path: "/tmp/zeros-design-recorder-x/f0/layer_0.skp",
         typefaces: [{ id: "c".repeat(32), path: "/tmp/zeros-design-recorder-x/typefaces/" + "c".repeat(32) + ".font" }] }] },
-        { id: "f1", error: "This frame has content on separate layers." }] };
+        { id: "f1", error: "This frame has content on separate layers.", permanent: true }] };
     expect(designBatchRecordReplySchema.parse(reply)).toEqual(reply);
+    expect(() => designBatchRecordReplySchema.parse({ ...reply, items: [{ id: "f1", error: "x", permanent: false }] })).toThrow();
   });
 });

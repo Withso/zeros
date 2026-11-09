@@ -196,6 +196,51 @@ export async function storeDesignRecording(
   return stored;
 }
 
+const FAILURE_BYTES = 4 * 1024;
+
+function failureFile(name: string, sourceVersion: string, pipeline: string): string {
+  return `${name}~${sourceVersion}~${pipelineKey(pipeline)}.failed`;
+}
+
+/** Remembers that this recorder can't record this generation of the frame in
+ * this theme, so later requests answer at once instead of recording again.
+ * The frame's stored recordings stay; a recording stored later replaces it. */
+export async function storeDesignRecordingFailure(
+  workspace: string,
+  directoryId: string,
+  frameId: string,
+  theme: string | null,
+  failure: { sourceVersion: string; pipeline: string; error: string },
+): Promise<boolean> {
+  const folder = frameFolder(workspace, directoryId, frameId);
+  const name = themeName(theme);
+  if (!folder || !THEME.test(name) || !SOURCE_VERSION.test(failure.sourceVersion) || !failure.error) return false;
+  const file = failureFile(name, failure.sourceVersion, failure.pipeline);
+  if (!(await writeAtomically(folder, file, Buffer.from(JSON.stringify({ error: failure.error.slice(0, 500) }))))) return false;
+  for (const other of await entries(folder))
+    if (other !== file && other.startsWith(`${name}~`) && other.endsWith(".failed")) await unlink(path.join(folder, other)).catch(() => {});
+  return true;
+}
+
+/** Why this recorder can't record this generation of the frame, if it is known. */
+export async function readDesignRecordingFailure(
+  workspace: string,
+  directoryId: string,
+  frameId: string,
+  theme: string | null,
+  wanted: { sourceVersion: string; pipeline: string },
+): Promise<string | null> {
+  const folder = frameFolder(workspace, directoryId, frameId);
+  const name = themeName(theme);
+  if (!folder || !THEME.test(name) || !SOURCE_VERSION.test(wanted.sourceVersion) || !(await contained(folder))) return null;
+  const bytes = await readBounded(path.join(folder, failureFile(name, wanted.sourceVersion, wanted.pipeline)), FAILURE_BYTES);
+  if (!bytes) return null;
+  try {
+    const parsed = JSON.parse(bytes.toString("utf8")) as { error?: unknown };
+    return typeof parsed.error === "string" && parsed.error ? parsed.error : null;
+  } catch { return null; }
+}
+
 /** The frame's newest stored recording in this theme, of any generation
  * unless `sourceVersion` names one, and of any pipeline unless one is named. */
 export async function readStoredDesignRecording(

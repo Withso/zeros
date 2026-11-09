@@ -4,7 +4,8 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { chunkDesignRecording } from "../recording-chunks";
 import { designRecordingChunkId } from "../recording-chunks";
-import { readDesignRecordingChunk, readDesignRecordingTypeface, readStoredDesignRecording, storeDesignRecording, storeDesignRecordingTypeface } from "../recording-store";
+import { readDesignRecordingChunk, readDesignRecordingFailure, readDesignRecordingTypeface, readStoredDesignRecording, storeDesignRecording,
+  storeDesignRecordingFailure, storeDesignRecordingTypeface } from "../recording-store";
 
 const version = (c: string) => c.repeat(24);
 function bytesFrom(seed: number, length: number): Uint8Array {
@@ -92,6 +93,26 @@ describe("recording store", () => {
     } finally {
       await rm(outside, { recursive: true, force: true });
     }
+  });
+
+  it("remembers a generation the recorder can't record until a recording or a newer failure replaces it", async () => {
+    const pipeline = "recordings-1:electron-43/chromium-150/skp";
+    const wanted = { sourceVersion: version("a"), pipeline };
+    await storeDesignRecording(workspace, "design_1", "frame_1", null, recording(version("0"), bytesFrom(30, 5_000)));
+    expect(await storeDesignRecordingFailure(workspace, "design_1", "frame_1", null, { ...wanted, error: "This frame paints on 2 composited layers." })).toBe(true);
+    expect(await readDesignRecordingFailure(workspace, "design_1", "frame_1", null, wanted)).toBe("This frame paints on 2 composited layers.");
+    // Only that generation, theme and recorder.
+    expect(await readDesignRecordingFailure(workspace, "design_1", "frame_1", null, { ...wanted, sourceVersion: version("b") })).toBeNull();
+    expect(await readDesignRecordingFailure(workspace, "design_1", "frame_1", "dark", wanted)).toBeNull();
+    expect(await readDesignRecordingFailure(workspace, "design_1", "frame_1", null, { ...wanted, pipeline: "recordings-1:electron-44/chromium-151/skp" })).toBeNull();
+    // The older generation's recording still covers the frame.
+    expect((await readStoredDesignRecording(workspace, "design_1", "frame_1", null))?.sourceVersion).toBe(version("0"));
+    // A newer failure replaces the older one; a recording replaces both.
+    await storeDesignRecordingFailure(workspace, "design_1", "frame_1", null, { ...wanted, sourceVersion: version("b"), error: "Later." });
+    expect(await readDesignRecordingFailure(workspace, "design_1", "frame_1", null, wanted)).toBeNull();
+    await storeDesignRecording(workspace, "design_1", "frame_1", null, recording(version("b"), bytesFrom(31, 5_000)));
+    expect(await readDesignRecordingFailure(workspace, "design_1", "frame_1", null, { ...wanted, sourceVersion: version("b") })).toBeNull();
+    expect(await storeDesignRecordingFailure(workspace, "../x", "frame_1", null, { ...wanted, error: "x" })).toBe(false);
   });
 
   it("stores an externalized typeface once under its content id, and only under it", async () => {

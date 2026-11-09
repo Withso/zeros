@@ -448,7 +448,10 @@ export const designBatchRecordReplySchema = z.object({
         typefaces: z.array(z.object({ id: recordingChunkId, path: z.string().min(1).max(4096) }).strict()).max(DESIGN_RECORDING_MAX_TYPEFACES),
       }).strict()).min(1).max(DESIGN_RECORDING_MAX_LAYERS),
     }).strict(),
-    z.object({ id: z.string().min(1).max(128), error: z.string().min(1).max(500) }).strict(),
+    /** `permanent`: the frame itself can't be recorded by this recorder (for
+     * example it paints on several composited layers), so asking again for
+     * the same source and recorder gives the same answer. */
+    z.object({ id: z.string().min(1).max(128), error: z.string().min(1).max(500), permanent: z.literal(true).optional() }).strict(),
   ])).max(DESIGN_BATCH_CAPTURE_MAX_ITEMS),
 }).strict();
 export type DesignBatchRecordReply = z.infer<typeof designBatchRecordReplySchema>;

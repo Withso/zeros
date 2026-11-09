@@ -26,7 +26,7 @@ describe("Design recordings", () => {
     return [...out].map(([file, sourceVersion]) => ({ file, sourceVersion }));
   };
   /** A capture host stand-in: writes each frame's "picture" where a recorder would. */
-  const recorder = (options: { bytes?: (id: string) => Uint8Array; error?: (id: string) => string | null; pathFor?: (id: string, real: string) => string;
+  const recorder = (options: { bytes?: (id: string) => Uint8Array; error?: (id: string) => string | null; permanent?: boolean; pathFor?: (id: string, real: string) => string;
     fonts?: (id: string) => Array<{ id: string; bytes: Uint8Array }> } = {}) => {
     const calls: DesignBatchRecordRequest[] = [];
     const record = async (request: DesignBatchRecordRequest): Promise<DesignBatchRecordReply> => {
@@ -36,7 +36,7 @@ describe("Design recordings", () => {
       const items = [];
       for (const item of request.items) {
         const error = options.error?.(item.id) ?? null;
-        if (error) { items.push({ id: item.id, error }); continue; }
+        if (error) { items.push({ id: item.id, error, ...(options.permanent ? { permanent: true as const } : {}) }); continue; }
         const dir = path.join(base, item.id);
         await mkdir(dir);
         const file = path.join(dir, "layer_0.skp");
@@ -114,6 +114,29 @@ describe("Design recordings", () => {
     const updated = recorder();
     await renderDesignRecordings(root, { workspaceId: "w", directoryId, theme: null, frames: [frames[0]!] }, { record: updated.record, recorder: "electron-44/chromium-151/skp" });
     expect(updated.calls).toHaveLength(1);
+  });
+
+  it("answers a frame the recorder can't record without recording it again, until the frame or recorder changes", async () => {
+    const frames = await versions(["page-1/a.html", "page-1/b.html"]);
+    const error = (id: string) => (id === "f1" ? "This frame paints on 2 composited layers (640×400, 10×10), so it is shown as a picture." : null);
+    const host = recorder({ error, permanent: true });
+    const first = await renderDesignRecordings(root, { workspaceId: "w", directoryId, theme: null, frames }, { record: host.record, recorder: RECORDER });
+    expect(first.failed.map((entry) => entry.file)).toEqual(["page-1/b.html"]);
+    const again = await renderDesignRecordings(root, { workspaceId: "w", directoryId, theme: null, frames: [frames[1]!] }, { record: host.record, recorder: RECORDER });
+    expect(host.calls).toHaveLength(1);
+    expect(again.failed).toEqual(first.failed);
+    // Another recorder tries again.
+    const other = recorder({ error, permanent: true });
+    await renderDesignRecordings(root, { workspaceId: "w", directoryId, theme: null, frames: [frames[1]!] }, { record: other.record, recorder: "electron-44/chromium-151/skp" });
+    expect(other.calls).toHaveLength(1);
+  });
+
+  it("records a frame again after a failure that wasn't permanent", async () => {
+    const frames = await versions(["page-1/a.html"]);
+    const host = recorder({ error: () => "The recorder's page stopped (crashed) while recording this frame." });
+    await renderDesignRecordings(root, { workspaceId: "w", directoryId, theme: null, frames }, { record: host.record, recorder: RECORDER });
+    await renderDesignRecordings(root, { workspaceId: "w", directoryId, theme: null, frames }, { record: host.record, recorder: RECORDER });
+    expect(host.calls).toHaveLength(2);
   });
 
   it("never reads a layer file outside the recorder's folder", async () => {

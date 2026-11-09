@@ -27,9 +27,11 @@ import { readSharedCanvasContext } from "./document-storage";
 import { designDirectoryEntry } from "./metadata";
 import {
   readDesignRecordingChunk,
+  readDesignRecordingFailure,
   readDesignRecordingTypeface,
   readStoredDesignRecording,
   storeDesignRecording,
+  storeDesignRecordingFailure,
   storeDesignRecordingTypeface,
   type StoredDesignRecording,
   type StoredDesignRecordingTypeface,
@@ -52,6 +54,18 @@ const failure = (error: unknown, root: string) => {
   const message = error instanceof Error && !("syscall" in error) ? error.message.slice(0, 500) : "";
   return !message || message.includes(path.resolve(root)) || message.includes(homedir()) ? UNRECORDED : message;
 };
+
+/** Stored-recording lookups are small independent reads: a few at a time. */
+const LOOKUPS = 16;
+
+async function mapLimit<T, R>(items: readonly T[], limit: number, run: (item: T) => Promise<R>): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, async () => {
+    for (let index = next++; index < items.length; index = next++) results[index] = await run(items[index]!);
+  }));
+  return results;
+}
 
 function frameId(canvas: { frame_info: Record<string, unknown> }, file: string): string | null {
   const id = (canvas.frame_info[file] as { id?: unknown } | undefined)?.id;
@@ -243,9 +257,16 @@ export async function renderDesignRecordings(
   const failed: Array<{ file: string; error: string }> = [];
   const deferred: Frame[] = [];
   const misses: Frame[] = [];
-  for (const frame of input.frames) {
+  const lookups = await mapLimit(input.frames, LOOKUPS, async (frame) => {
     const id = frameId(canvas, frame.file);
-    const stored = pipeline && id ? await readStoredDesignRecording(root, input.directoryId, id, input.theme, { sourceVersion: frame.sourceVersion, pipeline }) : null;
+    if (!pipeline || !id) return { frame, stored: null, known: null };
+    const wanted = { sourceVersion: frame.sourceVersion, pipeline };
+    const stored = await readStoredDesignRecording(root, input.directoryId, id, input.theme, wanted);
+    // A frame this recorder can't record is answered without recording again.
+    return { frame, stored, known: stored ? null : await readDesignRecordingFailure(root, input.directoryId, id, input.theme, wanted) };
+  });
+  for (const { frame, stored, known } of lookups) {
+    if (known) { failed.push({ file: frame.file, error: known }); continue; }
     const outcome = stored ? await reply.add(frame, stored) : "missing";
     if (outcome === "deferred") deferred.push(frame);
     else if (outcome === "missing") misses.push(frame);
@@ -268,10 +289,16 @@ export async function renderDesignRecordings(
         for (const [itemId, frame] of batch.frames) {
           const item = items.get(itemId);
           const viewport = viewports.get(itemId)!;
-          if (!item) { failed.push({ file: frame.file, error: "The recorder returned no recording for this frame." }); continue; }
-          if ("error" in item) { failed.push({ file: frame.file, error: failure(new Error(item.error), root) }); continue; }
-          if (drawn !== pipeline) { failed.push({ file: frame.file, error: "The recorder changed; try again." }); continue; }
           const id = frameId(canvas, frame.file);
+          if (!item) { failed.push({ file: frame.file, error: "The recorder returned no recording for this frame." }); continue; }
+          if ("error" in item) {
+            const error = failure(new Error(item.error), root);
+            if (item.permanent && id && drawn === pipeline)
+              await storeDesignRecordingFailure(root, input.directoryId, id, input.theme, { sourceVersion: frame.sourceVersion, pipeline: drawn, error });
+            failed.push({ file: frame.file, error });
+            continue;
+          }
+          if (drawn !== pipeline) { failed.push({ file: frame.file, error: "The recorder changed; try again." }); continue; }
           try {
             const layers = [];
             for (const layer of item.layers) layers.push({ x: layer.x, y: layer.y, width: layer.width, height: layer.height,
@@ -308,10 +335,12 @@ export async function readDesignRecordings(root: string, raw: unknown): Promise<
   const reply = new ReplyBuilder(input.knownChunks);
   const missing: string[] = [];
   const deferred: string[] = [];
-  for (const frame of input.frames) {
+  const lookups = await mapLimit(input.frames, LOOKUPS, async (frame) => {
     const id = frameId(canvas, frame.file);
-    const stored = id ? await readStoredDesignRecording(root, input.directoryId, id, input.theme,
-      frame.sourceVersion ? { sourceVersion: frame.sourceVersion } : {}) : null;
+    return { frame, stored: id ? await readStoredDesignRecording(root, input.directoryId, id, input.theme,
+      frame.sourceVersion ? { sourceVersion: frame.sourceVersion } : {}) : null };
+  });
+  for (const { frame, stored } of lookups) {
     if (!stored) { missing.push(frame.file); continue; }
     const outcome = await reply.add({ file: frame.file, sourceVersion: stored.sourceVersion }, stored, true);
     if (outcome === "deferred") deferred.push(frame.file);
