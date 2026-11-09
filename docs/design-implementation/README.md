@@ -1230,3 +1230,10 @@ Each landed step appends one line: date, workstream, what landed, evidence.
   preference tests failed red first; the chat-width smoke picks each width
   in the real Settings page and measures the transcript and composer at
   625, 800 and 1200px, then reloads with Wide kept.
+- 2026-11-09 · 5, 6 · The docked Summary island fills `sidebar-bg` on a
+  `border1` edge (`docs/design-system.md` §0 item 15; canvas version 409),
+  in place of `bg1-bright` with no edge; its 12px corners, width and inset
+  are unchanged, and the Summary popover keeps its own surface. On the
+  canvas, the proposed skin draws every docked island that way. Evidence:
+  the summary-island test failed red first; the summary smoke measures the
+  island's fill against `sidebar-bg` and all four edges against `border1`.

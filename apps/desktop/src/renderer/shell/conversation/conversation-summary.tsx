@@ -230,7 +230,7 @@ export function ConversationSummaryIsland() {
       aria-label="Workspace summary"
       data-summary-island=""
       className={cn(
-        "conversation-summary-island bg-bg1-bright absolute top-3 right-4 z-2 max-h-[calc(100%-24px)] w-72 overflow-y-auto overscroll-contain p-3",
+        "conversation-summary-island bg-sidebar-bg border-border1 absolute top-3 right-4 z-2 max-h-[calc(100%-24px)] w-72 overflow-y-auto overscroll-contain border p-3",
         MENU_SURFACE_RADIUS,
       )}
     >

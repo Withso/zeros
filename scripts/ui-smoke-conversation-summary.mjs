@@ -167,24 +167,30 @@ export async function runConversationSummarySmoke({
     async () => {
       await expect(trigger).toBeVisible();
       await expect(trigger).toHaveAttribute("aria-expanded", "true");
+      // 2026-11-09: sidebar-bg on a border1 edge.
       const appearance = await island.evaluate((node) => {
         const style = getComputedStyle(node);
         const probe = document.createElement("div");
-        probe.style.background = "var(--bg1-bright)";
+        probe.style.background = "var(--sidebar-bg)";
+        probe.style.borderColor = "var(--border1)";
         node.append(probe);
-        const background = getComputedStyle(probe).backgroundColor;
-        probe.remove();
-        return {
+        const expected = getComputedStyle(probe);
+        const result = {
           radius: style.borderRadius,
           border: style.borderRightWidth,
-          matchesBackground: style.backgroundColor === background,
+          matchesBackground: style.backgroundColor === expected.backgroundColor,
+          matchesEdge: [style.borderTopColor, style.borderRightColor, style.borderBottomColor, style.borderLeftColor]
+            .every((color) => color === expected.borderTopColor),
           overflow: node.scrollWidth > node.clientWidth,
         };
+        probe.remove();
+        return result;
       });
       expect(appearance).toEqual({
         radius: "12px",
-        border: "0px",
+        border: "1px",
         matchesBackground: true,
+        matchesEdge: true,
         overflow: false,
       });
       // 2026-11-09: the island floats over the chat's top-right corner. The

@@ -270,7 +270,8 @@ exported page by page to [design-implementation/](design-implementation/README.m
     (`features/agent/chat-scrollbar-reveal.ts`). No fade covers a
     scrollbar: the transcript's top and dock fades and an unfolded prompt's
     edges stop at its slot. With the side column hidden and one pane, the
-    docked Summary island floats over the chat's top-right corner: the
+    docked Summary island, `sidebar-bg` on a `border1` edge with 12px
+    corners, floats over the chat's top-right corner: the
     transcript's scrollbar stays at the pane's edge beside it, while the
     transcript, composer, Jump to latest, terminals, the empty pane and the
     chat's dead-end panels stay clear of it (`CHAT_ASIDE_INSET_HOST_CLS`
@@ -386,6 +387,7 @@ imports, following property paths such as `chip.cls`). The ledger counts
 | Sent user message | `bg-bg2` | — | none | At the lane's right edge, as wide as its text up to 7/8 of the lane (`max-w-7/8`), 12px corners; its pills take `--prompt-pill-bg`, a step lighter; folds long text with `PromptFold` (§0 item 4) |
 | Floating: menus, selects, command, popovers, tooltips, hover cards, toasts | `bg-bg3` | `bg-bg3-hover` | `border-border2` | 12px corners, 4px inset, lift = `shadow-[var(--shadow-dropdown)]`; feature panels take the fill from `FLOATING_SURFACE` |
 | Repository sidebar | `bg-sidebar-bg` | `bg-sidebar-bg-hover` | `border-border2` | Settings navigation uses the default surfaces |
+| Docked Summary island | `bg-sidebar-bg` | rows take the Ghost hover | `border-border1` | 12px corners; floats over the chat's top-right corner with the side column hidden (§0 item 15) |
 | Grouped content on canvas | `bg-bg1-highlight` | — | — | A wash, never the only boundary |
 | Primary action | `bg-primary-button-bg` | `bg-primary-button-hover` | — | Text `text-primary-button-fg`; one per view |
 | Selected control: pressed toggle, active tab or segment, chosen chip or option | `bg-selected-bg` | holds `bg-selected-bg` | never an edge; a resting edge is unchanged | One step above hover in Dark; equal to `bg2-highlight` in Light, where status text needs AA |
