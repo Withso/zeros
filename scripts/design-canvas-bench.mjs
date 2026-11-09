@@ -738,6 +738,82 @@ async function main() {
       }
       await prepareNativeDesignView(page, fixture.id, fixture.camera); await pause(2000);
       result.afterGestures = { renderer: await renderer(), memory: summarize(await sample()) };
+
+      // Recorded vs live: each sampled frame at 100%, first drawn from its
+      // recording, then by its own live document (selected), diffed inside
+      // its edges so the selection stroke doesn't count.
+      const fidelityCount = Number(option(args, "--fidelity", "0"));
+      if (gpu && fidelityCount > 0) {
+        await phase(`${fixture.name}:fidelity`);
+        const targets = await page.evaluate(async ({ id, pageId, n }) => {
+          const { designWorkspaceSnapshotCache } = await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-cache.ts");
+          const snapshot = designWorkspaceSnapshotCache.peekSnapshot(id).data;
+          let frames = snapshot.preparation?.descriptions ?? snapshot.frames;
+          if (pageId) frames = frames.filter(f => f.pageId === pageId);
+          // One frame per distinct size: the replica repeats designs.
+          const seen = new Set(), out = [];
+          for (const f of [...frames].sort((a, b) => a.y - b.y || a.x - b.x)) {
+            const key = `${f.width}x${f.height}`;
+            if (seen.has(key) && out.length >= n / 2) continue;
+            seen.add(key); out.push({ file: f.file, x: f.x, y: f.y, width: f.width, height: f.height });
+            if (out.length >= n) break;
+          }
+          return out;
+        }, { id: fixture.id, pageId: fixture.pageId, n: fidelityCount });
+        const box = await page.locator(viewportSelector).boundingBox();
+        const diffs = [];
+        for (const target of targets) {
+          const camera = { zoom: 1, panX: 32 - target.x, panY: 96 - target.y };
+          await prepareNativeDesignView(page, fixture.id, camera);
+          const settleBegin = Date.now();
+          while (Date.now() - settleBegin < 8_000) {
+            const v = (await gpuSnapshot())?.visible;
+            if (v && v.frames > 0 && v.stretched === 0 && v.finer === 0 && v.missing === 0) break;
+            await pause(50);
+          }
+          await pause(300);
+          const inset = 12;
+          const clip = { x: box.x + 32 + inset, y: box.y + 96 + inset,
+            width: Math.max(1, Math.min(target.width, box.width - 32) - inset * 2), height: Math.max(1, Math.min(target.height, box.height - 96) - inset * 2) };
+          const recorded = await rawPage.screenshot({ clip, scale: "device" });
+          await page.evaluate(async ({ id, file }) => {
+            const { useDesignWorkspaceUiStore } = await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-ui.ts");
+            useDesignWorkspaceUiStore.getState().setSelectedTargets(id, [{ frame: file }], { activeFrame: file, explicit: true });
+          }, { id: fixture.id, file: target.file });
+          let live = null, liveError = null;
+          try {
+            await page.locator(`[data-design-retained-workspace="${fixture.id}"][aria-hidden="false"] [data-design-frame=${JSON.stringify(target.file)}] iframe[data-design-document-buffer="displayed"][data-design-document-ready]`).waitFor({ timeout: 20_000 });
+            await pause(600);
+            live = await rawPage.screenshot({ clip, scale: "device" });
+          } catch (error) { liveError = String(error?.message ?? error).slice(0, 160); }
+          await page.evaluate(async id => {
+            const { useDesignWorkspaceUiStore } = await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-ui.ts");
+            useDesignWorkspaceUiStore.getState().setSelectedTargets(id, [], { activeFrame: null, explicit: true });
+          }, fixture.id);
+          if (!live) { diffs.push({ file: target.file, error: liveError }); continue; }
+          const name = target.file.replace(/[^a-z0-9]+/gi, "_").slice(-60);
+          await fs.writeFile(path.join(evidence, `fidelity-${name}-recorded.png`), recorded);
+          await fs.writeFile(path.join(evidence, `fidelity-${name}-live.png`), live);
+          diffs.push({ file: target.file, ...(await page.evaluate(async ({ a, b }) => {
+            const decode = async (base64) => { const image = new Image(); image.src = `data:image/png;base64,${base64}`; await image.decode();
+              const canvas = document.createElement("canvas"); canvas.width = image.width; canvas.height = image.height;
+              const context = canvas.getContext("2d"); context.drawImage(image, 0, 0); return context.getImageData(0, 0, image.width, image.height); };
+            const [x, y] = await Promise.all([decode(a), decode(b)]);
+            if (x.width !== y.width || x.height !== y.height) return { error: "size" };
+            let differing = 0, strong = 0;
+            for (let i = 0; i < x.data.length; i += 4) {
+              const d = Math.max(Math.abs(x.data[i] - y.data[i]), Math.abs(x.data[i + 1] - y.data[i + 1]), Math.abs(x.data[i + 2] - y.data[i + 2]));
+              if (d > 16) differing++;
+              if (d > 96) strong++;
+            }
+            const pixels = x.width * x.height;
+            return { width: x.width, height: x.height, differing: differing / pixels, strong: strong / pixels };
+          }, { a: recorded.toString("base64"), b: live.toString("base64") })) });
+          await save();
+        }
+        result.fidelity = diffs;
+        await prepareNativeDesignView(page, fixture.id, fixture.camera); await pause(1000);
+      }
       await save();
 
       // Inspecting: panels open, select frames in turn, sweep the pointer over
