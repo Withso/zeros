@@ -139,7 +139,11 @@ export class CloudV2Computers {
   /** `lockPool` holds the build locks, each for a whole build or cleanup;
    * queries stay on `pool`. */
   constructor(private readonly pool: pg.Pool, private readonly lockPool: pg.Pool = pool,
-    private readonly resolveRepository?: CloudV2ComputerSourceResolver) {}
+    private readonly resolveRepository?: CloudV2ComputerSourceResolver,
+    /** Used only by resolveBuildRepository without `fresh`, whose caller
+     * verifies access through the source authority right afterwards. It may
+     * reuse a recent resolution; recipe saves and builds always resolve afresh. */
+    private readonly resolveBuildIdentity: CloudV2ComputerSourceResolver | undefined = resolveRepository) {}
 
   private async memberRole(organizationId: string, userId: string): Promise<string> {
     const { rows } = await withSystemTx(this.pool, tx => tx.query<{ role: string }>(
@@ -210,9 +214,10 @@ export class CloudV2Computers {
     return readComputerSourceTargets(repositories, targets);
   }
 
-  private async resolveSource(organizationId: string, userId: string, target: { repository: string; repositoryId?: string }): Promise<CloudSourceTarget> {
-    if (!this.resolveRepository) throw new HttpError(503, "github_unavailable", "Repository identity could not be verified.");
-    const parsed = CloudSourceTargetSchema.safeParse(await this.resolveRepository(organizationId, userId, target));
+  private async resolveSource(organizationId: string, userId: string, target: { repository: string; repositoryId?: string },
+    resolve = this.resolveRepository): Promise<CloudSourceTarget> {
+    if (!resolve) throw new HttpError(503, "github_unavailable", "Repository identity could not be verified.");
+    const parsed = CloudSourceTargetSchema.safeParse(await resolve(organizationId, userId, target));
     if (!parsed.success || target.repositoryId && parsed.data.repositoryId !== target.repositoryId) throw computerSourceReviewRequired();
     return parsed.data;
   }
@@ -539,11 +544,12 @@ export class CloudV2Computers {
 
   /** Internal creation/hydration guard. Paths select the recorded recipe, then
    * the immutable ID selects the remote; a reused name cannot replace it. */
-  async resolveBuildRepository(organizationId: string, userId: string, buildId: string, repository: string): Promise<CloudSourceTarget> {
+  async resolveBuildRepository(organizationId: string, userId: string, buildId: string, repository: string,
+    options?: { fresh?: boolean }): Promise<CloudSourceTarget> {
     const sources = await this.buildSourceTargets(organizationId, buildId);
     const target = sources.find(source => source.repository.toLowerCase() === repository.toLowerCase());
     if (!target) throw computerSourceReviewRequired();
-    return this.resolveSource(organizationId, userId, target);
+    return this.resolveSource(organizationId, userId, target, options?.fresh ? this.resolveRepository : this.resolveBuildIdentity);
   }
 
   /** Integration seam for a workspace ledger that already knows the ID. The

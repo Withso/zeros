@@ -55,7 +55,8 @@ export type CloudV2RouteDeps = {
   authorizeRepository?(organizationId: string, userId: string, repository: string): Promise<void>;
   authorizeRepositories?(organizationId: string, userId: string, repositories: readonly string[]): Promise<void>;
   authorizeSourceTargets?(organizationId: string, userId: string, targets: readonly CloudSourceTarget[]): Promise<void>;
-  authorizeBuildRepository?(organizationId: string, userId: string, buildId: string, repository: string): Promise<CloudSourceTarget>;
+  /** `fresh` skips the reuse of a recently resolved identity. */
+  authorizeBuildRepository?(organizationId: string, userId: string, buildId: string, repository: string, options?: { fresh?: boolean }): Promise<CloudSourceTarget>;
   remoteHead(organizationId: string, userId: string, target: CloudSourceTarget, branch: string): Promise<string | null>;
   authorizeSource?(workspace: CloudV2Workspace): Promise<void>;
   continueSource?(workspace: CloudV2Workspace, proof?: CloudSourceProof): Promise<CloudSourceContinuation>;
@@ -104,9 +105,10 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
   }
   const prefix = deps.branchPrefix ?? "zeros/";
   const json = bodyLimit({ maxSize: 16 * 1024, onError: c => c.json({ error: { code: "payload_too_large", message: "Request is too large" } }, 413) });
-  const buildRepository = async (organizationId: string, userId: string, buildId: string, entry: CloudV2InstalledRepository) => {
+  const buildRepository = async (organizationId: string, userId: string, buildId: string, entry: CloudV2InstalledRepository, fresh = false) => {
     if (!deps.authorizeBuildRepository) throw new HttpError(503, "github_unavailable", "Original source access could not be verified.");
-    const target = CloudSourceTargetSchema.safeParse(await deps.authorizeBuildRepository(organizationId, userId, buildId, entry.repository));
+    const target = CloudSourceTargetSchema.safeParse(await deps.authorizeBuildRepository(organizationId, userId, buildId, entry.repository,
+      ...(fresh ? [{ fresh }] : [])));
     if (!target.success) throw new HttpError(409, "cloud_source_review_required", "The original repository identity needs verification.");
     return { entry, target: target.data };
   };
@@ -172,7 +174,10 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
     let originalError: HttpError | undefined, early: Promise<string | null> | undefined;
     for (const index of named < 0 ? indices : [named, ...indices.filter(other => other !== named)]) {
       const entry = computer.repositories[index]!;
-      try { resolved[index] = await buildRepository(input.organizationId, userId, computer.buildId, entry); }
+      // The other repositories decide whether the creator may take a v3 image
+      // holding their source, so read them live. The requested repository's
+      // branch read below is live anyway.
+      try { resolved[index] = await buildRepository(input.organizationId, userId, computer.buildId, entry, !requested(entry)); }
       catch (error) {
         if (!(error instanceof HttpError) || ![403, 404].includes(error.status)) throw error;
         if (requested(entry)) originalError = error;

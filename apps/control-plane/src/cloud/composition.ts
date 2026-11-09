@@ -93,7 +93,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   const environments = new CloudEnvironments(pool, keys, github.connections.authorizeRepositoryConfiguration.bind(github.connections));
   const githubToken = (workspace: CloudV2Workspace, purpose: "git" | "gh" = "git", failedTokenSha256?: string) => github.workspaceToken(workspace, "user", purpose, failedTokenSha256);
   const proxyBase = `${v2.apiUrl}${CLOUD_V2_PROXY_PREFIX}`;
-  const computers = new CloudV2Computers(pool, lockPool, github.resolveRepository);
+  const computers = new CloudV2Computers(pool, lockPool, github.resolveRepository, github.resolveRecentRepository);
   const source = github.source;
   const authorizeRepository = async (org: string, user: string, repository: string) => {
     await source.repository(org, user, repository);
@@ -104,8 +104,8 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   const authorizeSourceTargets = async (org: string, user: string, targets: readonly CloudSourceTarget[]) => {
     await source.targets(org, user, targets);
   };
-  const authorizeBuildRepository = async (org: string, user: string, buildId: string, repository: string) => {
-    const target = await computers.resolveBuildRepository(org, user, buildId, repository);
+  const authorizeBuildRepository = async (org: string, user: string, buildId: string, repository: string, options?: { fresh?: boolean }) => {
+    const target = await computers.resolveBuildRepository(org, user, buildId, repository, options);
     await authorizeSourceTargets(org, user, [target]);
     return target;
   };
