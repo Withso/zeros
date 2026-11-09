@@ -66,4 +66,26 @@ describe("canvas frame Option copy", () => {
       expect(input.failed).not.toHaveBeenCalled();
     } finally { release?.(); }
   });
+
+  it("lands the copy on whole canvas pixels and selects it, like a moved frame", async () => {
+    const copy = { ...frame, file: "page/home-copy.html", frameId: "copy" };
+    mocks.duplicate.mockResolvedValue({ frame: { file: copy.file }, snapshot: { frames: [copy] } });
+    mocks.select.mockResolvedValue(undefined);
+    const article = {} as HTMLElement;
+    const event = { currentTarget: { closest: () => article }, clientX: 15, clientY: 25, pointerId: 1,
+      preventDefault() {}, stopPropagation() {} } as unknown as React.PointerEvent<HTMLElement>;
+    // A zoomed camera maps screen pixels to fractional canvas positions.
+    const input = { event, workspaceId: "local", folder: "/local", frame,
+      point: ({ clientX, clientY }: { clientX: number; clientY: number }) => ({ x: clientX / 0.48, y: clientY / 0.48 }),
+      current: () => true, nest: vi.fn(), finished: vi.fn(), saving: vi.fn(), failed: vi.fn() };
+    startDesignFrameCopy(input);
+    mocks.gesture!.onMove({ clientX: 65.3, clientY: 275.6 } as PointerEvent);
+    mocks.gesture!.onFinish();
+    await vi.waitFor(() => expect(mocks.duplicate).toHaveBeenCalledOnce());
+    const geometry = mocks.duplicate.mock.calls[0]![3].geometry;
+    expect(geometry).toEqual({ x: Math.round(10 + 50.3 / 0.48), y: Math.round(20 + 250.6 / 0.48), w: 100, h: 80, z: 1 });
+    await input.saving.mock.calls[0]?.[0];
+    expect(mocks.select).toHaveBeenCalledWith("local", copy, expect.objectContaining({ selected: true }));
+  });
 });
+

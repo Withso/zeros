@@ -186,7 +186,8 @@ export function startDesignFrameCopy(input: {
       if (!moved && Math.hypot(event.clientX - input.event.clientX, event.clientY - input.event.clientY) < 3) return;
       moved = true;
       pointer = input.point(event);
-      origin = { x: pointer.x - grab.x, y: pointer.y - grab.y };
+      // A copy lands on whole canvas pixels, like a moved frame.
+      origin = { x: Math.round(pointer.x - grab.x), y: Math.round(pointer.y - grab.y) };
       presentation ??= createDesignDragPresentation(workspaceId, frame, {
         oid: rootId, rect: { x: 0, y: 0, width: frame.width, height: frame.height },
       }, article);
@@ -226,7 +227,8 @@ export function startDesignFrameCopy(input: {
         });
         const copy = result.snapshot.frames.find(candidate => candidate.file === result.frame.file);
         if (copy && current()) {
-          void selectDesignFrame(workspaceId, copy, { owner }).catch(() => {});
+          // As with Cmd+D, the copy is the selection the person keeps working on.
+          void selectDesignFrame(workspaceId, copy, { selected: true, reveal: true, owner }).catch(() => {});
           await presentation?.handoff(copy);
         }
       })();
