@@ -38,6 +38,8 @@ const recorder = process.env.ZEROS_DESIGN_RECORDER_IDENTITY ?? "";
 delete process.env.ZEROS_DESIGN_RECORDER_IDENTITY;
 const WINDOWS = Math.max(1, Math.min(4, Number(process.env.ZEROS_DESIGN_RECORDER_WINDOWS) || Math.floor((os.availableParallelism?.() ?? os.cpus().length) / 2)));
 const MAX_BODY_BYTES = 64 * 1024 * 1024;
+/** Batches the recorder takes at once; their frames share the windows. */
+const MAX_BATCHES = 3;
 /** Diagnostics: a JSON-lines file of each frame's step durations. */
 const TIMINGS = process.env.ZEROS_DESIGN_RECORDER_TIMINGS ?? "";
 delete process.env.ZEROS_DESIGN_RECORDER_TIMINGS;
@@ -223,7 +225,57 @@ void app.whenReady().then(async () => {
     const slot = idle.pop();
     return slot && !slot.window.isDestroyed() ? slot : createSlot(partition);
   };
-  let busy = false;
+  // Batches share one queue of frames that every window drains, so a batch's
+  // last slow frame no longer idles the other windows, and the next batch's
+  // frames start as soon as a window is free.
+  interface Batch {
+    readonly colorScheme: "light" | "dark";
+    readonly folder: string;
+    readonly signal: AbortSignal;
+    readonly results: Map<string, DesignBatchRecordReply["items"][number]>;
+    readonly pending: Set<string>;
+    answered: boolean;
+    done(): void;
+  }
+  const jobs: Array<{ item: DesignBatchRecordRequest["items"][number]; batch: Batch }> = [];
+  const stylesheetUsers = new Map<string, number>();
+  let windowsWorking = 0;
+  let batches = 0;
+  const finish = (batch: Batch, id: string, result: DesignBatchRecordReply["items"][number] | null) => {
+    // A frame finishing after its batch answered left files nobody will read.
+    if (batch.answered) { void rm(path.join(batch.folder, id), { recursive: true, force: true }).catch(() => {}); return; }
+    if (result) batch.results.set(id, result);
+    batch.pending.delete(id);
+    if (!batch.pending.size) batch.done();
+  };
+  const work = async () => {
+    for (let job = jobs.shift(); job; job = jobs.shift()) {
+      const { item, batch } = job;
+      if (batch.signal.aborted) { finish(batch, item.id, null); continue; }
+      let slot: Slot | null = null;
+      try {
+        slot = await acquire();
+        finish(batch, item.id, await recordItem(slot, documents, item, batch.colorScheme, batch.folder, typefaceFolder, batch.signal));
+      } catch (error) {
+        // A failed frame keeps no window or files: the next one starts clean.
+        if (slot && !slot.window.isDestroyed()) slot.window.destroy();
+        slot = null;
+        await rm(path.join(batch.folder, item.id), { recursive: true, force: true }).catch(() => {});
+        finish(batch, item.id, { id: item.id, error: (error instanceof Error ? error.message : String(error)).slice(0, 500) || "Design recording failed." });
+      } finally {
+        if (slot) {
+          if (++slot.frames >= FRAMES_PER_WINDOW) slot.window.destroy();
+          else idle.push(slot);
+        }
+      }
+    }
+  };
+  const pump = () => {
+    while (windowsWorking < WINDOWS && jobs.length) {
+      windowsWorking++;
+      void work().finally(() => { windowsWorking--; pump(); });
+    }
+  };
   const expected = Buffer.from(`Bearer ${token}`);
   let serviceUrl = "";
   const server = createServer({ maxHeaderSize: 16 * 1024 }, (request, response) => {
@@ -235,8 +287,8 @@ void app.whenReady().then(async () => {
     if (token.length !== 64 || request.headers.origin || request.headers.host !== new URL(serviceUrl).host ||
       supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) { fail(401, "Unauthorized recorder request."); return; }
     if (request.method !== "POST" || request.url !== "/record") { fail(404, "Unknown recorder operation."); return; }
-    if (busy) { fail(429, "The recorder is busy."); return; }
-    busy = true;
+    if (batches >= MAX_BATCHES) { fail(429, "The recorder is busy."); return; }
+    batches++;
     const controller = new AbortController();
     // At the deadline the frames already recorded are still answered; the
     // rest fail. A disconnected caller gets nothing.
@@ -244,7 +296,6 @@ void app.whenReady().then(async () => {
     const timeout = setTimeout(() => controller.abort(timedOut), DESIGN_BATCH_CAPTURE_TIMEOUT_MS);
     response.once("close", () => { if (!response.writableEnded) controller.abort(new Error("Design recording disconnected.")); });
     void (async () => {
-      const working = new Set<Slot>();
       let input: DesignBatchRecordRequest | null = null;
       try {
         let size = 0;
@@ -255,33 +306,27 @@ void app.whenReady().then(async () => {
           chunks.push(Buffer.from(chunk));
         }
         input = designBatchRecordRequestSchema.parse(JSON.parse(Buffer.concat(chunks).toString("utf8")));
-        for (const [hash, css] of Object.entries(input.stylesheets)) stylesheets.set(hash, css);
+        for (const [hash, css] of Object.entries(input.stylesheets)) {
+          stylesheets.set(hash, css);
+          stylesheetUsers.set(hash, (stylesheetUsers.get(hash) ?? 0) + 1);
+        }
         const folder = path.join(root, randomUUID());
         await mkdir(folder, { mode: 0o700 });
-        const queue = [...input.items];
         const results = new Map<string, DesignBatchRecordReply["items"][number]>();
-        await Promise.all(Array.from({ length: Math.min(WINDOWS, queue.length) }, async () => {
-          for (let item = queue.shift(); item && !controller.signal.aborted; item = queue.shift()) {
-            let slot: Slot | null = null;
-            try {
-              slot = await acquire();
-              working.add(slot);
-              results.set(item.id, await recordItem(slot, documents, item, input!.colorScheme, folder, typefaceFolder, controller.signal));
-            } catch (error) {
-              // A failed frame keeps no window or files: the next one starts clean.
-              if (slot && !slot.window.isDestroyed()) slot.window.destroy();
-              slot = null;
-              await rm(path.join(folder, item.id), { recursive: true, force: true }).catch(() => {});
-              results.set(item.id, { id: item.id, error: (error instanceof Error ? error.message : String(error)).slice(0, 500) || "Design recording failed." });
-            } finally {
-              if (slot) {
-                working.delete(slot);
-                if (++slot.frames >= FRAMES_PER_WINDOW) slot.window.destroy();
-                else idle.push(slot);
-              }
-            }
-          }
-        }));
+        let done!: () => void;
+        const finished = new Promise<void>((resolve) => { done = resolve; });
+        const batch: Batch = { colorScheme: input.colorScheme, folder, signal: controller.signal, results,
+          pending: new Set(input.items.map((item) => item.id)), answered: false, done };
+        for (const item of input.items) jobs.push({ item, batch });
+        pump();
+        const stopped = new Promise<void>((resolve) => {
+          if (controller.signal.aborted) resolve();
+          else controller.signal.addEventListener("abort", () => resolve(), { once: true });
+        });
+        await Promise.race([finished, stopped]);
+        batch.answered = true;
+        // Frames of this batch still queued are dropped; frames in flight stop at their guard.
+        for (let index = jobs.length - 1; index >= 0; index--) if (jobs[index]!.batch === batch) jobs.splice(index, 1);
         if (controller.signal.aborted && controller.signal.reason !== timedOut) throw controller.signal.reason;
         const unfinished = controller.signal.aborted ? timedOut.message : "Design recording was cancelled.";
         response.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
@@ -290,9 +335,13 @@ void app.whenReady().then(async () => {
         if (!response.destroyed && !response.headersSent) fail(422, "Design recording failed.");
       } finally {
         clearTimeout(timeout);
-        for (const slot of working) if (!slot.window.isDestroyed()) slot.window.destroy();
-        if (input) for (const hash of Object.keys(input.stylesheets)) stylesheets.delete(hash);
-        busy = false;
+        // A stylesheet stays while another batch's frames still use it.
+        if (input) for (const hash of Object.keys(input.stylesheets)) {
+          const users = (stylesheetUsers.get(hash) ?? 1) - 1;
+          if (users > 0) stylesheetUsers.set(hash, users);
+          else { stylesheetUsers.delete(hash); stylesheets.delete(hash); }
+        }
+        batches--;
       }
     })();
   });

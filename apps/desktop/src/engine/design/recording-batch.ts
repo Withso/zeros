@@ -1,4 +1,4 @@
-import { realpath, rm, rmdir } from "node:fs/promises";
+import { appendFile, realpath, rm, rmdir } from "node:fs/promises";
 import { constants } from "node:fs";
 import { open } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
@@ -56,6 +56,11 @@ const failure = (error: unknown, root: string) => {
   const message = error instanceof Error && !("syscall" in error) ? error.message.slice(0, 500) : "";
   return !message || message.includes(path.resolve(root)) || message.includes(homedir()) ? UNRECORDED : message;
 };
+
+/** Diagnostics: a JSON-lines file of each render request's time by phase
+ * (lookups, compose, waiting on compose, waiting for the recorder, recording,
+ * storing), in milliseconds. */
+const recordingsTimings = () => process.env.ZEROS_DESIGN_RECORDINGS_TIMINGS ?? "";
 
 /** Frames composed at a time: as cheap per frame as larger calls, and the
  * recorder starts sooner. */
@@ -127,22 +132,30 @@ class ReplyBuilder {
   }
 }
 
-let recordTail: Promise<void> = Promise.resolve();
-/** The capture host records one batch at a time; batches take turns here. */
+/** Batches at the recorder at once: its windows share their frames, so the
+ * next batch's frames start while the last ones of another finish. */
+const RECORD_TURNS = 2;
+let turnsRunning = 0;
+const turnsWaiting: Array<() => void> = [];
+/** Batches take turns here, a few at a time, in arrival order. */
 async function inRecordTurn<T>(signal: AbortSignal | undefined, run: () => Promise<T>): Promise<T> {
-  const previous = recordTail;
-  let release!: () => void;
-  recordTail = new Promise<void>((resolve) => { release = resolve; });
-  try {
+  if (turnsRunning < RECORD_TURNS) turnsRunning++;
+  else {
+    // A finishing batch hands its turn to the first waiter directly.
     await new Promise<void>((resolve, reject) => {
       if (signal?.aborted) return reject(signal.reason);
-      const abort = () => reject(signal!.reason);
+      const go = () => { signal?.removeEventListener("abort", abort); resolve(); };
+      const abort = () => { turnsWaiting.splice(turnsWaiting.indexOf(go), 1); reject(signal!.reason); };
       signal?.addEventListener("abort", abort, { once: true });
-      void previous.then(() => { signal?.removeEventListener("abort", abort); resolve(); });
+      turnsWaiting.push(go);
     });
+  }
+  try {
     return await run();
   } finally {
-    release();
+    const next = turnsWaiting.shift();
+    if (next) next();
+    else turnsRunning--;
   }
 }
 
@@ -249,6 +262,8 @@ export async function renderDesignRecordings(
     recorder?: string | null;
   } = {},
 ): Promise<DesignRecordingsReply> {
+  const started = performance.now();
+  const spent = { lookups: 0, compose: 0, composeWait: 0, recordWait: 0, record: 0, store: 0, frames: 0, misses: 0, batches: 0 };
   const input = designRecordingsRenderSchema.parse(raw);
   const config = deps.record ? null : resolveDesignCaptureConfig();
   if (!deps.record && !config) throw new Error("No qualified Design capture host is available.");
@@ -272,6 +287,7 @@ export async function renderDesignRecordings(
     // A frame this recorder can't record is answered without recording again.
     return { frame, stored, known: stored ? null : await readDesignRecordingFailure(root, input.directoryId, id, variant, wanted) };
   });
+  spent.lookups = performance.now() - started;
   for (const { frame, stored, known } of lookups) {
     if (known) { failed.push({ file: frame.file, error: known }); continue; }
     const outcome = stored ? await reply.add(frame, stored) : "missing";
@@ -283,7 +299,13 @@ export async function renderDesignRecordings(
   // the first slice rather than after the whole request.
   const recordBatch = async (batch: ComposedRecordingBatch) => {
     const request = designBatchRecordRequestFrom(batch.request);
-    const answer = await inRecordTurn(deps.signal, () => record(request, deps.signal));
+    const queued = performance.now();
+    let recording = queued;
+    const answer = await inRecordTurn(deps.signal, () => { recording = performance.now(); return record(request, deps.signal); });
+    spent.recordWait += recording - queued;
+    spent.record += performance.now() - recording;
+    spent.batches++;
+    const storing = performance.now();
     const drawn = designRecordingPipeline(answer.recorder);
     // One reply names one pipeline: a recorder restarted under another
     // build between batches can't join it.
@@ -324,16 +346,24 @@ export async function renderDesignRecordings(
       await Promise.all(folders.map((folder) => rm(folder, { recursive: true, force: true }).catch(() => {})));
       // The batch's own folder, once empty (rmdir removes nothing else).
       for (const batchFolder of new Set(folders.map((folder) => path.dirname(folder)))) await rmdir(batchFolder).catch(() => {});
+      spent.store += performance.now() - storing;
     }
   };
   if (misses.length) {
-    const compose = (frames: Frame[]) => composeDesignThumbnailBatches(root, { workspaceId: input.workspaceId, directoryId: input.directoryId,
-      theme: input.theme, colorScheme: input.colorScheme, maxDimension: COMPOSE_DIMENSION, frames }, deps.signal);
+    const compose = async (frames: Frame[]) => {
+      const composing = performance.now();
+      try {
+        return await composeDesignThumbnailBatches(root, { workspaceId: input.workspaceId, directoryId: input.directoryId,
+          theme: input.theme, colorScheme: input.colorScheme, maxDimension: COMPOSE_DIMENSION, frames }, deps.signal);
+      } finally { spent.compose += performance.now() - composing; }
+    };
     const slices: Frame[][] = [];
     for (let at = 0; at < misses.length; at += COMPOSE_SLICE) slices.push(misses.slice(at, at + COMPOSE_SLICE));
     let next: ReturnType<typeof compose> | null = compose(slices[0]!);
     for (let index = 0; index < slices.length; index++) {
+      const waiting = performance.now();
       const composed = await next!;
+      spent.composeWait += performance.now() - waiting;
       next = index + 1 < slices.length ? compose(slices[index + 1]!) : null;
       // Observed when awaited; an abort or error must not go unhandled meanwhile.
       next?.catch(() => {});
@@ -342,6 +372,11 @@ export async function renderDesignRecordings(
       for (const batch of composed.batches) await recordBatch(batch);
     }
   }
+  spent.frames = input.frames.length;
+  spent.misses = misses.length;
+  const timings = recordingsTimings();
+  if (timings) void appendFile(timings, `${JSON.stringify({ at: Date.now(), ...Object.fromEntries(Object.entries(spent)
+    .map(([name, value]) => [name, Math.round(value)])), total: Math.round(performance.now() - started) })}\n`).catch(() => {});
   return designRecordingsReplySchema.parse({ pipeline: pipeline ?? DESIGN_RECORDING_COMPOSER, recordings: reply.recordings,
     typefaces: reply.typefaces, chunks: reply.chunks, stale, failed, deferred });
 }
