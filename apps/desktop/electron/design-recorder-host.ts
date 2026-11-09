@@ -42,17 +42,27 @@ const MAX_BODY_BYTES = 64 * 1024 * 1024;
 const TIMINGS = process.env.ZEROS_DESIGN_RECORDER_TIMINGS ?? "";
 delete process.env.ZEROS_DESIGN_RECORDER_TIMINGS;
 
+/** A window's page process keeps growing with the documents it lays out
+ * (past 1.2 GB after ~250 frames in the app on a Mac); after this many frames
+ * the window is replaced, which returns its process's memory. */
+const FRAMES_PER_WINDOW = Math.max(1, Number(process.env.ZEROS_DESIGN_RECORDER_FRAMES_PER_WINDOW) || 64);
+
 interface Slot {
   readonly window: BrowserWindow;
   /** Resolves with a reason once the page crashes or the window is destroyed. */
   readonly gone: Promise<string>;
   ratio: number;
+  /** Frames this window has recorded. */
+  frames: number;
   /** Emulation already applied, so an unchanged frame skips the round trip. */
   viewport?: string;
   colorScheme?: string;
 }
 
 app.commandLine.appendSwitch("enable-gpu-benchmarking");
+// Each frame is its own navigation; a page kept for back/forward would only
+// hold memory, since nothing here ever goes back.
+app.commandLine.appendSwitch("disable-features", "BackForwardCache");
 protocol.registerSchemesAsPrivileged([{
   scheme: DESIGN_CAPTURE_SHEET_SCHEME,
   privileges: { standard: true, secure: true, supportFetchAPI: false, stream: false, corsEnabled: false },
@@ -119,7 +129,7 @@ async function createSlot(partition: Session): Promise<Slot> {
   window.webContents.debugger.attach("1.3");
   await window.webContents.debugger.sendCommand("Emulation.setDefaultBackgroundColorOverride", { color: { r: 0, g: 0, b: 0, a: 0 } });
   const ratio = Number(await window.webContents.executeJavaScript("devicePixelRatio"));
-  return { window, gone, ratio: Number.isFinite(ratio) && ratio > 0 ? ratio : 1 };
+  return { window, gone, ratio: Number.isFinite(ratio) && ratio > 0 ? ratio : 1, frames: 0 };
 }
 
 /** A picture's size from its header (SkPictInfo: magic, version, cull rect). */
@@ -264,7 +274,11 @@ void app.whenReady().then(async () => {
               await rm(path.join(folder, item.id), { recursive: true, force: true }).catch(() => {});
               results.set(item.id, { id: item.id, error: (error instanceof Error ? error.message : String(error)).slice(0, 500) || "Design recording failed." });
             } finally {
-              if (slot) { working.delete(slot); idle.push(slot); }
+              if (slot) {
+                working.delete(slot);
+                if (++slot.frames >= FRAMES_PER_WINDOW) slot.window.destroy();
+                else idle.push(slot);
+              }
             }
           }
         }));

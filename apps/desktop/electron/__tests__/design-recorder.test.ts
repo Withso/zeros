@@ -28,6 +28,8 @@ describe("Design recorder client", () => {
   it("gives the recorder no credentials or service bearers", () => {
     const env = designRecorderEnvironment({ HOME: "/h", PATH: "/bin", ZEROS_DESIGN_CAPTURE_TOKEN: "t", ANTHROPIC_API_KEY: "k", GITHUB_TOKEN: "g" }, "a".repeat(64), "id/skp");
     expect(env).toEqual({ HOME: "/h", PATH: "/bin", ZEROS_DESIGN_RECORDER_TOKEN: "a".repeat(64), ZEROS_DESIGN_RECORDER_IDENTITY: "id/skp" });
+    expect(designRecorderEnvironment({ ZEROS_DESIGN_RECORDER_FRAMES_PER_WINDOW: "32" }, "a".repeat(64), "id/skp").ZEROS_DESIGN_RECORDER_FRAMES_PER_WINDOW).toBe("32");
+    expect(designRecorderEnvironment({ ZEROS_DESIGN_RECORDER_FRAMES_PER_WINDOW: "32; rm" }, "a".repeat(64), "id/skp").ZEROS_DESIGN_RECORDER_FRAMES_PER_WINDOW).toBeUndefined();
   });
 
   it("accepts only layer files inside the recorder's folder, never through a link", async () => {
