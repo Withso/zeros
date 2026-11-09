@@ -73,7 +73,10 @@ export async function buildNativeProduction({ repo, root, env, run }) {
  * dev transform, HMR socket, credentials or runtime control endpoint. */
 export async function serveNativeProductionAssets(root, port = 0) {
   const base = await fs.realpath(root);
-  const types = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml", ".png": "image/png", ".woff2": "font/woff2", ".json": "application/json" };
+  const types = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml", ".png": "image/png", ".woff2": "font/woff2", ".json": "application/json",
+    // WebAssembly compiles while it streams only as application/wasm; with
+    // nosniff, anything else falls back to a full download first.
+    ".wasm": "application/wasm" };
   const server = createServer(async (request, response) => {
     let fd;
     try {
