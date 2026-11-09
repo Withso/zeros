@@ -205,10 +205,20 @@ async function composeInWorkers(root: string, canvas: Awaited<ReturnType<typeof 
   if (designPreparationWorkerCount() === 0 || versioned.length < 2 || isDesignDependencyCaptureActive()) return composed;
   if (await designStyleSourcesUseFonts(root, canvas)) return composed;
   const sized = versioned.map(({ file }) => ({ file, width: canvas.frames[file]!.w, height: canvas.frames[file]!.h }));
-  for (const result of await composeFrameSourcesInWorkers(root, sized, { deferTailwind }))
-    if ("sanitized" in result) composed.set(result.file, result);
+  const results = await composeFrameSourcesInWorkers(root, sized, { deferTailwind });
+  for (const result of results) if ("sanitized" in result) composed.set(result.file, result);
+  // The fallback is silent per frame, so a worker build that can't compose
+  // would hide behind it: say so once, path-free.
+  const left = sized.length - composed.size;
+  if (left > 0 && !composeFallbackNoticed) {
+    composeFallbackNoticed = true;
+    const first = results.find((result) => "error" in result);
+    console.warn(`[Zeros] Design compose workers left ${left} of ${sized.length} frames to the engine thread; first: ${
+      first && "error" in first ? failure(new Error(first.error), root) : "a worker stopped"}`);
+  }
   return composed;
 }
+let composeFallbackNoticed = false;
 
 /** Compose saved frames for batch capture: every frame of a page folder links
  * the same bytes for its linked stylesheets and for each imported source
