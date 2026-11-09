@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { DESIGN_PREVIEW_JOBS_CAPABILITY } from "@zeros/protocol/design-capture";
 import { bridgeDesignRecordingsRead, bridgeDesignRecordingsRender } from "../design-bridge";
+import { DESIGN_RECORDINGS_READ_FAILURES_CAPABILITY } from "../../../features/design-workspace/gpu/design-recordings-wire";
 import type { RuntimeClient } from "../ws-client";
 
 const version = "a".repeat(24);
@@ -55,6 +56,17 @@ describe("Design recordings bridge", () => {
     const unknown = bridgeReturning(() => ({ ...renderReply, failed: [{ ...retryable, severity: 2 }] }), [DESIGN_PREVIEW_JOBS_CAPABILITY]);
     await expect(bridgeDesignRecordingsRender(unknown.bridge, "/work/local", { directoryId: "design_a", theme: null,
       frames, knownChunks: [] })).rejects.toThrow(/malformed/);
+  });
+
+  it("asks a read for known failures only from an engine that advertises them", async () => {
+    const reply = () => ({ recordings: [], typefaces: [], chunks: [], missing: [recording.file], deferred: [], failed: [] });
+    const input = { directoryId: "design_a", theme: null, frames: [{ file: recording.file }], knownChunks: [] };
+    const older = bridgeReturning(reply);
+    await bridgeDesignRecordingsRead(older.bridge, "/work/local", input);
+    expect(older.request.mock.calls[0]![0].params).not.toHaveProperty("withFailures");
+    const newer = bridgeReturning(reply, [DESIGN_RECORDINGS_READ_FAILURES_CAPABILITY]);
+    await bridgeDesignRecordingsRead(newer.bridge, "/work/local", input);
+    expect(newer.request.mock.calls[0]![0].params).toMatchObject({ withFailures: true });
   });
 
   it("reads stored recordings, with or without a known version", async () => {

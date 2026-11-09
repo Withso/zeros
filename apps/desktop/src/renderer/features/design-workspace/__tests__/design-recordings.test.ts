@@ -375,6 +375,22 @@ describe("Design recordings", () => {
     expect([...recordings.failedFiles(owner)]).toEqual(["b.html"]);
   });
 
+  it("takes a reopen's known failures as failed at once, for that version or a frame without one", async () => {
+    const { calls, recordings } = harness();
+    recordings.demand(owner, [{ file: "a.html" }, { file: "b.html", sourceVersion: version(1) }, { file: "c.html", sourceVersion: version(2) }]);
+    const layers = "This frame paints on 2 composited layers.";
+    calls[0]!.resolve({ ...readReply(calls[0]!.frames, ["a.html", "b.html", "c.html"]), failed: [
+      { file: "a.html", sourceVersion: version(5), error: layers },
+      { file: "b.html", sourceVersion: version(1), error: layers },
+      { file: "c.html", sourceVersion: version(1), error: layers }] });
+    await recordings.settled();
+    // a (still unprepared) and b are covered by their live documents now;
+    // c's failure was another version's, so c is recorded as usual.
+    expect([...recordings.failedFiles(owner)].sort()).toEqual(["a.html", "b.html"]);
+    expect(calls).toHaveLength(2);
+    expect(calls[1]).toMatchObject({ op: "render", frames: [{ file: "c.html", sourceVersion: version(2) }] });
+  });
+
   it("fails a frame whose recording this renderer can't draw, and only drops an older cover it can't draw", async () => {
     const { calls, chunks, recordings, changes } = harness();
     const both = (a: number, b: number) => [{ file: "a.html", sourceVersion: version(a) }, { file: "b.html", sourceVersion: version(b) }];
