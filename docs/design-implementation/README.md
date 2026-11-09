@@ -1243,3 +1243,19 @@ Each landed step appends one line: date, workstream, what landed, evidence.
   (canvas version 410, where the Workspace summary board gains a Popover
   presentation). Evidence: the summary-island test failed red first; the
   summary smoke measures the open popover's fill and all four edges.
+- 2026-11-09 · 5, 6 · The workspace header leads with the workspace's name,
+  then where it lives (`docs/design-system.md` §0 item 13; canvas version
+  411): a laptop for every Local workspace, branch, folder or unpublished,
+  and a cloud for cloud, as one 28px Ghost control with no fill at rest and
+  `bg2-highlight` on hover and while open (`workspace-identity.tsx`).
+  Clicking it opens the Local details (its branch, its folder with `~` for
+  the home folder, and Local in `fg3`) or the unchanged cloud details;
+  details close on a workspace switch and when the workspace page is hidden,
+  and stay closed when it returns. A Tooltip around a popover trigger stamps
+  its own `data-state` on the trigger, so the open fill keys off
+  `aria-expanded`. On the canvas, the Local board gains hover and details
+  states (details by default) and every chat window header reads name, then
+  laptop. Evidence: the header and details-open tests failed red first; the
+  workspace-header smoke checks both placements' order, rest and hover fills
+  in both themes and their popups, and the summary smoke closes the Local
+  details on A → B → A for personal and organization owners.

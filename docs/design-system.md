@@ -188,9 +188,15 @@ exported page by page to [design-implementation/](design-implementation/README.m
     and cloud behavior; cloud lifecycle never enters a tab banner.
 13. **Split panes are solid islands on the chrome** (2026-11-06; edges
     2026-11-07; 8px gaps 2026-11-08). The workspace header row draws no divider
-    (`PanelHeader divider={false}`) and keeps one 28px glyph slot for branch,
-    folder and cloud, so the name always starts at one column; whether a
-    branch is published never changes the glyph. A lone chat pane runs edge to
+    (`PanelHeader divider={false}`) and starts with the workspace's name, then
+    where it lives, 6px after it (2026-11-09): a 16px laptop for every Local
+    workspace (branch, folder or unpublished, personal or organization) and a
+    cloud for cloud; whether a branch is published never changes the icon.
+    Name and icon are one 28px Ghost control with no fill at rest and
+    `bg2-highlight` on hover and while open. It opens the workspace's details:
+    for Local, its branch, its folder (`~` for the home folder) and Local in
+    `fg3`; for cloud, the cloud details (repository, created and status, with
+    Start and Stop). A lone chat pane runs edge to
     edge. Only while the column is split, panes stand apart as solid surfaces
     on the `bg1` chrome: 8px apart both ways (the divider is that gap and the
     resize handle), 12px in from the column's left, right and bottom edges,

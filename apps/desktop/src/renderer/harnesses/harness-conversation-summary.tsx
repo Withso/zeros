@@ -424,7 +424,7 @@ function Harness() {
             workbenchCollapsed={collapsed}
             onRevealWorkbench={reveal}
           >
-            <WorkspaceHeader folder={folder} name={folder === folderB ? "Summary B" : "Summary A"} branch trailing={<>
+            <WorkspaceHeader folder={folder} name={folder === folderB ? "Summary B" : "Summary A"} branch={folder === folderB ? "summary/b" : "summary/a"} trailing={<>
               <ConversationSummaryTrigger />
               {collapsed && (
                 <IconButton

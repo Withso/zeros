@@ -1,34 +1,40 @@
-import { useCallback, useState, useSyncExternalStore } from "react";
+import { useState } from "react";
 import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
-import { Activity, ArrowUpRight, Clock, Cloud, FolderGit2 } from "lucide-react";
+import { Activity, ArrowUpRight, Clock, FolderGit2 } from "lucide-react";
 import { Button, Tooltip } from "../../shared/ui/primitives";
-import { Popover, PopoverContent, PopoverTrigger } from "../../shared/ui/primitives/popover";
+import { Popover, PopoverContent } from "../../shared/ui/primitives/popover";
 import { toast } from "../../shared/ui/primitives/elements";
 import { shellOpenUrl } from "../../platform/app";
+import type { CloudWorkspaceDocument } from "../../platform/cloud-workspaces";
 import { describeWorkspaceRuntimeStatus } from "../workbench/tab-status-model";
 import { formatCompactAge } from "../../features/agent/format-age";
 import { useCloudWorkspaceSurfaceActive } from "./use-cloud-workspace-surface";
-import { cloudWorkspaceDocument, manageCloudWorkspace, subscribeCloudWorkspaces } from "../../state/cloud-workspace-catalog";
+import { manageCloudWorkspace } from "../../state/cloud-workspace-catalog";
 import { parseCloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
 import { useWorkspaceStore } from "../../state/workspace-store";
 import { useCloudWorkspaceAccountAccess } from "../../features/team/cloud-workspace-account-access";
+import { WorkspaceIdentityLabel, WorkspaceIdentityTrigger, useWorkspaceDetailsOpen } from "./workspace-identity";
 
 export function cloudStatusLabel(status: string): string {
   return describeWorkspaceRuntimeStatus({ cloud: true, state: status, connection: "connected", since: 0 }, Date.now());
 }
 
-/** The cloud icon in a cloud workspace's header: what it is and whether it
- * is running, with Start and Stop. Everything else is the Local workspace UI. */
-export function CloudWorkspaceDetails({ folder }: { folder: string }) {
+/** A cloud workspace's name and cloud in its header, opening what it is and
+ * whether it is running, with Start and Stop. Everything else is the Local
+ * workspace UI. The header owns the document's subscription. */
+export function CloudWorkspaceDetails({ folder, name, workspace }: {
+  folder: string;
+  name: string;
+  workspace: CloudWorkspaceDocument | undefined;
+}) {
   const target = parseCloudWorkspaceKey(folder);
   const allowed = useCloudWorkspaceAccountAccess(target?.organizationId);
-  const surfaceActive = useCloudWorkspaceSurfaceActive(useWorkspaceStore(state => state.activePage === "workspace"));
-  const [open, setOpen] = useState(false);
+  const pageActive = useWorkspaceStore(state => state.activePage === "workspace");
+  const surfaceActive = useCloudWorkspaceSurfaceActive(pageActive);
+  const [open, setOpen] = useWorkspaceDetailsOpen(pageActive);
+  const shown = open && surfaceActive;
   const [changing, setChanging] = useState(false);
-  const subscribe = useCallback((listener: () => void) => subscribeCloudWorkspaces(listener), []);
-  const read = useCallback(() => target ? cloudWorkspaceDocument(target) : undefined, [target]);
-  const workspace = useSyncExternalStore(subscribe, read, read);
-  if (!target || !allowed) return null;
+  if (!target || !allowed) return <WorkspaceIdentityLabel name={name} placement="cloud" />;
   const change = (operation: "wake" | "stop", failure: string) => {
     setChanging(true);
     void manageCloudWorkspace(target, operation)
@@ -50,14 +56,8 @@ export function CloudWorkspaceDetails({ folder }: { folder: string }) {
     { Icon: Activity, label: "Status", value: <span role="status">{cloudStatusLabel(workspace.status)}</span> },
   ] : [];
   return (
-    <Popover open={open && surfaceActive} onOpenChange={setOpen}>
-      <Tooltip label="Workspace details" delayDuration={1500} disabled={open}>
-        <PopoverTrigger asChild>
-          <IconButton type="button" size="standard" label="Cloud workspace details" className="text-fg2 -ml-1.5 shrink-0">
-            <Cloud size={16} strokeWidth={1.5} />
-          </IconButton>
-        </PopoverTrigger>
-      </Tooltip>
+    <Popover open={shown} onOpenChange={setOpen}>
+      <WorkspaceIdentityTrigger name={name} placement="cloud" open={shown} />
       <PopoverContent align="start" sideOffset={6} className="w-[320px]" aria-label="Cloud workspace details">
         {workspace ? (
           <>
