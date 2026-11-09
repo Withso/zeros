@@ -10,7 +10,7 @@
 // The host evaluates readiness and flattening itself. The parent (the app's
 // main process) owns this process: it starts it with a one-time token, talks
 // to it over loopback HTTP, and its exit (stdin closing) ends this one.
-import { app, BrowserWindow, protocol, session, type Session } from "electron";
+import { app, BrowserWindow, contentTracing, protocol, session, type Session } from "electron";
 import { createServer } from "node:http";
 import { randomUUID, timingSafeEqual } from "node:crypto";
 import { rmSync } from "node:fs";
@@ -207,8 +207,18 @@ async function recordItem(slot: Slot, documents: Map<string, string>, item: Desi
   }
 }
 
+const TRACE = process.env.ZEROS_DESIGN_RECORDER_TRACE ?? "";
+delete process.env.ZEROS_DESIGN_RECORDER_TRACE;
+
 void app.whenReady().then(async () => {
   app.dock?.hide();
+  if (TRACE) {
+    // EXPERIMENT (bench only): a Chromium trace of the recorder's first 40 s.
+    await contentTracing.startRecording({ included_categories: ["toplevel", "ipc", "mojom", "navigation", "loading", "v8", "devtools",
+      "renderer_host", "browser", "electron", "blink", "cc", "gpu", "viz", "disabled-by-default-devtools.timeline"],
+      recording_mode: "record-as-much-as-possible", trace_buffer_size_in_kb: 400_000 }).catch(() => {});
+    setTimeout(() => { void contentTracing.stopRecording(TRACE).catch(() => {}); }, 40_000);
+  }
   const root = await mkdtemp(path.join(os.tmpdir(), DESIGN_RECORDER_FOLDER_PREFIX));
   sessionRoot = root;
   const typefaceFolder = path.join(root, "typefaces");

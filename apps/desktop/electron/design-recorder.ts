@@ -36,6 +36,7 @@ export function designRecorderEnvironment(source: NodeJS.ProcessEnv, token: stri
   if (windows) env.ZEROS_DESIGN_RECORDER_WINDOWS = windows;
   // Diagnostics only: where the recorder logs per-frame step durations.
   if (source.ZEROS_DESIGN_RECORDER_TIMINGS) env.ZEROS_DESIGN_RECORDER_TIMINGS = source.ZEROS_DESIGN_RECORDER_TIMINGS;
+  if (source.ZEROS_DESIGN_RECORDER_TRACE) env.ZEROS_DESIGN_RECORDER_TRACE = source.ZEROS_DESIGN_RECORDER_TRACE;
   // Tuning: frames a window records before it is replaced.
   if (/^\d{1,5}$/.test(source.ZEROS_DESIGN_RECORDER_FRAMES_PER_WINDOW ?? "")) env.ZEROS_DESIGN_RECORDER_FRAMES_PER_WINDOW = source.ZEROS_DESIGN_RECORDER_FRAMES_PER_WINDOW;
   return env;
