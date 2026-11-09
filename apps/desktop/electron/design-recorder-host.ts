@@ -197,7 +197,7 @@ async function recordItem(slot: Slot, documents: Map<string, string>, item: Desi
       const sizes = await Promise.all(layers.map(async (name) => pictureSize(path.join(directory, name))));
       await rm(directory, { recursive: true, force: true });
       return { id: item.id, permanent: true,
-        error: `This frame paints on ${layers.length} composited layers (${sizes.join(", ")}), so it is shown as a picture.`.slice(0, 500) };
+        error: `This frame paints on ${layers.length} composited layers (${sizes.join(", ")}), so it isn't recorded.`.slice(0, 500) };
     }
     const picture = path.join(directory, layers[0]!);
     const { typefaces } = await whileAlive(externalizeRecordedLayer(picture, typefaceFolder, typefacesWritten, typefaceIds));

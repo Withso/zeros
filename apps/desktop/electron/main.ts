@@ -19,7 +19,7 @@ import { appDocumentPolicy } from "./app-document-security";
 import { rendererProcessOwners } from "./renderer-process-owners";
 import { registerDesignCaptureSheetPrivileges, startElectronDesignCapture } from "./design-capture";
 import { DESIGN_CAPTURE_RENDERER } from "./design-capture-batch";
-import { createDesignRecorder, designRecorderEnabled } from "./design-recorder";
+import { createDesignRecorder, designRecorderEnabled, designRecorderIdentity } from "./design-recorder";
 import { setDesignCaptureEnvironment } from "./sidecar";
 import type { DesignCaptureService } from "../src/engine/design/capture-service";
 
@@ -1138,7 +1138,7 @@ app.whenReady().then(async () => {
   let browserRendererEpoch = 0;
   // The recorded canvas's recorder runs in its own process (design-recorder.ts).
   const designRecorder = designRecorderEnabled(process.env, app.isPackaged)
-    ? createDesignRecorder({ identity: `${DESIGN_CAPTURE_RENDERER}/skp`, entry: path.join(__dirname, "design-recorder.cjs") })
+    ? createDesignRecorder({ identity: designRecorderIdentity(DESIGN_CAPTURE_RENDERER), entry: path.join(__dirname, "design-recorder.cjs") })
     : null;
   const designCaptureReady = startElectronDesignCapture({ recorder: designRecorder }).then(service => {
     designCaptureService = service;

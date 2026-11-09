@@ -7,17 +7,19 @@
 // recorder runs unsandboxed renderers (see the host), which ships only once
 // approved. A packaged app also needs a role switch in main to start it.
 import { spawn, type ChildProcess } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { lstat, realpath, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import {
   DESIGN_BATCH_CAPTURE_TIMEOUT_MS,
   DESIGN_RECORDER_FOLDER_PREFIX,
+  DESIGN_STATIC_RENDER_SCRIPT,
   type DesignBatchRecordReply,
   type DesignBatchRecordRequest,
 } from "@zeros/protocol/design-capture";
 import type { DesignBatchRecordHost } from "../src/engine/design/capture-service";
+import { DESIGN_RECORDER_PREPARE_SCRIPT } from "./design-recorder-scripts";
 
 export const DESIGN_RECORDER_IDLE_MS = 30_000;
 const HANDSHAKE_MS = 20_000;
@@ -68,6 +70,15 @@ async function removeRecorderRoot(root: string): Promise<void> {
       !(await lstat(resolved)).isDirectory()) return;
     await rm(resolved, { recursive: true, force: true });
   } catch { /* already gone */ }
+}
+
+/** The recorder's identity names what it draws with: the renderer build and
+ * the scripts that prepare and flatten each frame. A change to either is a
+ * new pipeline, so stored recordings and remembered failures of the old one
+ * are recorded again instead of reused. */
+export function designRecorderIdentity(renderer: string): string {
+  const scripts = createHash("sha256").update(DESIGN_STATIC_RENDER_SCRIPT).update("\0").update(DESIGN_RECORDER_PREPARE_SCRIPT).digest("hex");
+  return `${renderer}/skp-${scripts.slice(0, 8)}`;
 }
 
 export function createDesignRecorder(options: {

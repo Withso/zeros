@@ -121,7 +121,7 @@ describe("Design recordings", () => {
 
   it("answers a frame the recorder can't record without recording it again, until the frame or recorder changes", async () => {
     const frames = await versions(["page-1/a.html", "page-1/b.html"]);
-    const error = (id: string) => (id === "f1" ? "This frame paints on 2 composited layers (640×400, 10×10), so it is shown as a picture." : null);
+    const error = (id: string) => (id === "f1" ? "This frame paints on 2 composited layers (640×400, 10×10), so it isn't recorded." : null);
     const host = recorder({ error, permanent: true });
     const first = await renderDesignRecordings(root, { workspaceId: "w", directoryId, theme: null, frames }, { record: host.record, recorder: RECORDER });
     expect(first.failed.map((entry) => [entry.file, entry.retryable])).toEqual([["page-1/b.html", undefined]]);

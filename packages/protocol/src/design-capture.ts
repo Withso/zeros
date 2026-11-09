@@ -297,6 +297,8 @@ export type DesignThumbnailsReadReply = z.infer<typeof designThumbnailsReadReply
  * vector drawing commands a GPU canvas replays crisply at any zoom. Internal
  * while the recorded canvas is behind its internal feature flag. */
 export const DESIGN_RECORDINGS_CAPABILITY = "design.recordings.v1";
+/** design.recordings.read accepts `withFailures`. */
+export const DESIGN_RECORDINGS_READ_FAILURES_CAPABILITY = "design.recordings.read-failures.v1";
 /** A recording is stored and sent as content-defined chunks. An id is the
  * first 32 hex characters of the chunk's SHA-256, so identical bytes, such
  * as the font data every recording of a page embeds, travel and persist once. */

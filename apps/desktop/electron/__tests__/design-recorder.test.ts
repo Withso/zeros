@@ -5,7 +5,7 @@ import path from "node:path";
 import { PassThrough } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DESIGN_RECORDER_FOLDER_PREFIX } from "@zeros/protocol/design-capture";
-import { assertRecorderLayerPath, createDesignRecorder, designRecorderEnabled, designRecorderEnvironment } from "../design-recorder";
+import { assertRecorderLayerPath, createDesignRecorder, designRecorderEnabled, designRecorderEnvironment, designRecorderIdentity } from "../design-recorder";
 
 describe("Design recorder client", () => {
   let root: string;
@@ -23,6 +23,13 @@ describe("Design recorder client", () => {
     expect(designRecorderEnabled({ ZEROS_DESIGN_RECORDER: "1" }, false)).toBe(true);
     expect(designRecorderEnabled({ ZEROS_DESIGN_RECORDER: "1" }, true)).toBe(false);
     expect(designRecorderEnabled({}, false)).toBe(false);
+  });
+
+  it("names the renderer build and its own scripts in its identity", () => {
+    const identity = designRecorderIdentity("electron-43.8.3/chromium-150.0.7871.250");
+    expect(identity).toMatch(/^electron-43\.8\.3\/chromium-150\.0\.7871\.250\/skp-[a-f0-9]{8}$/);
+    expect(designRecorderIdentity("electron-43.8.3/chromium-150.0.7871.250")).toBe(identity);
+    expect(identity.length).toBeLessThanOrEqual(128);
   });
 
   it("gives the recorder no credentials or service bearers", () => {

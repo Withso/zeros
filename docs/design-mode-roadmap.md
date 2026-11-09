@@ -2715,42 +2715,69 @@ on the GPU. It is behind an internal renderer flag. The engine advertises
   disk. So recorder windows are unsandboxed. Neither applies to any app
   renderer.
   - Recorder windows load only sanitized frame documents from a private
-    scheme, behind a leading `script-src 'none'` policy, in a partition with
-    no network, permissions or storage.
+    scheme. The frame policy (`script-src 'none'`) leads the document and is
+    also its response header. The partition has no network, permissions or
+    storage.
   - The process inherits an allow-listed environment with no credentials,
     and a one-time token for its loopback HTTP endpoint.
   - It starts only with `ZEROS_DESIGN_RECORDER=1` in an unpackaged build. A
     packaged build also needs a role switch in main, and the recorder ships
     only after its sandbox exception is approved.
+  - Each frame runs under a guard: its page crashing or being destroyed, a
+    10 s deadline, or the batch's abort fails that frame alone and replaces
+    its window. At the batch deadline, frames already recorded are answered.
+  - Windows run without the back-forward cache and are replaced every 64
+    frames: a page process otherwise grew past 1.2 GB in the app on a Mac.
+  - The session's folder is removed on exit (by the host, and by main once
+    the child has exited however it ended), with its Chromium profile.
 - **One layer per frame.** A picture of the page's root layer misses content
   that Chromium composites separately, chiefly overflowing scroll containers.
-  - Before recording, the recorder makes each overflowing `auto`/`scroll`
-    container (including those in open shadow roots) `overflow: clip`, and
-    `display: flow-root` for blocks. At scroll position 0 this looks the same.
+  - Before recording, the recorder clips each overflowing `auto`/`scroll`
+    container (including those in open shadow roots) on every non-visible
+    axis, with `display: flow-root` for blocks, and the page itself when its
+    content outgrows the frame. `will-change` gives way to `isolation`
+    unless the element holds fixed elements. At scroll position 0 this looks
+    the same.
   - A frame that still paints on several layers is reported as failed, so the
-    canvas keeps its bitmap preview: never an incomplete recording.
-  - The Phase 0 spike (M4, Chromium 150), with an earlier variant of these
-    rules: all 10 distinct replica designs recorded as one layer, at
-    0.003–0.5% pixel difference from Chromium's own capture, almost entirely
-    glyph anti-aliasing. The shipped rules must pass native qualification on
-    the Mac before the flag is enabled.
-- **Storage and transfer.** Recordings embed the full data of every font they
-  draw with: Geist instances of about 63 KB, and about 8.3 MB of SF Pro when
-  `system-ui` fallback glyphs appear.
-  - The engine splits each layer into content-defined chunks: FastCDC, 2/8/64
-    KiB, id = 32 hex characters of SHA-256 (`recording-chunks.ts`). Those
-    bytes are stored once, in shared `design-storage/recording-chunks/`.
+    canvas keeps another picture of it: never an incomplete recording. The
+    recorder marks that outcome permanent; the engine remembers it per frame,
+    theme, generation and recorder and answers it without recording again.
+  - Native qualification (M4, Chromium 150, the 46 distinct designs of the
+    1,000-frame replica, `scripts/design-recorder-qualification.ts`): 43
+    recorded as one layer, at p50 0.29% and at most 1.27% pixel difference
+    from Chromium's own capture, almost entirely glyph anti-aliasing. The
+    three others use `backdrop-filter` or keep a second full-size layer.
+- **Typefaces.** Chromium embeds the full data of every font a picture draws
+  with: Geist instances of about 63 KB, and about 8.3 MB of SF Pro when
+  `system-ui` glyphs appear. The recorder replaces each with a reference to
+  its content id (`apps/desktop/shared/design-picture-typefaces.ts`) and
+  writes its data once per session; the engine stores fonts once and sends
+  each once per reply, and the renderer verifies every font against its id.
+  This made 46 recordings 120 times smaller (76.7 MB to 0.64 MB).
+- **Storage and transfer.** The engine splits each layer into content-defined
+  chunks: FastCDC, 2/8/64 KiB, id = 32 hex characters of SHA-256
+  (`recording-chunks.ts`). Those bytes are stored once, in shared
+  `design-storage/recording-chunks/`.
   - Each frame keeps one manifest per theme in private workspace storage
-    (`recording-store.ts`).
+    (`recording-store.ts`). The engine keeps recently stored or read chunks
+    (96 MiB) and each frame folder's answers in memory until it writes that
+    folder, so a reopen reads from memory: 26 ms for a 1,000-frame page,
+    unaffected by a busy engine thread.
   - Replies stay within one bridge frame (12 MiB of chunk data). A caller's
     `knownChunks` are never resent; a frame whose chunks don't fit is deferred.
 - **Ops.** `design.recordings.render` records missing frames through the
   capture host's `/record`. It reuses the thumbnail batch composition and
-  cancels through `design.preview.cancel`. `design.recordings.read` answers
-  from storage only, including frames sent without a version.
-- **Not yet.** Typeface externalization, which keeps font data out of each
-  recording. Packaged-app start-up. Layer composition for frames that keep
-  several layers.
+  cancels through `design.preview.cancel`. A failure is `retryable` when the
+  attempt failed rather than the frame. `design.recordings.read` answers from
+  storage only, including frames sent without a version; with
+  `withFailures` it also names frames the current recorder can't record.
+- **Measured** (owner's M4, 1,000-frame replica page, with the renderer's
+  recorded canvas): draw p50 0.1–0.6 ms and p95 under 1.6 ms at fit and at
+  100%; a tab return all-crisp in about 0.4–0.5 s. A first open is bound by
+  frame preparation on the engine thread (about 40 ms a frame), not by the
+  recorder.
+- **Not yet.** Packaged-app start-up. Layer composition for frames that keep
+  several layers. Fonts larger than one reply's data budget.
 
 ### Negotiated metadata-only catalog reads
 

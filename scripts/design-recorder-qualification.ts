@@ -27,7 +27,7 @@ import {
   DESIGN_STATIC_RENDER_SCRIPT,
 } from "@zeros/protocol/design-capture";
 import { DESIGN_CAPTURE_RENDERER } from "../apps/desktop/electron/design-capture-batch";
-import { createDesignRecorder } from "../apps/desktop/electron/design-recorder";
+import { createDesignRecorder, designRecorderIdentity } from "../apps/desktop/electron/design-recorder";
 import { designCaptureFramePolicy } from "../apps/desktop/src/engine/design/capture-sheet";
 import { prepareDesignNavigationFrames, readDesignNavigationSnapshot } from "../apps/desktop/src/engine/design/document";
 import { readSharedCanvasContext } from "../apps/desktop/src/engine/design/document-storage";
@@ -127,7 +127,7 @@ void app.whenReady().then(async () => {
   // recorder process gets the same headless platform and switches as this one.
   const headless = process.platform === "linux" && app.commandLine.getSwitchValue("ozone-platform") === "headless";
   const forwarded = ["--ozone-platform=headless", ...["disable-gpu", "no-sandbox", "disable-dev-shm-usage"].filter((name) => app.commandLine.hasSwitch(name)).map((name) => `--${name}`)];
-  const recorder = createDesignRecorder({ identity: `${DESIGN_CAPTURE_RENDERER}/skp`, entry: RECORDER,
+  const recorder = createDesignRecorder({ identity: designRecorderIdentity(DESIGN_CAPTURE_RENDERER), entry: RECORDER,
     ...(headless ? { spawnImpl: ((command: string, args: readonly string[], options: SpawnOptions) =>
       spawn(command, [...args, ...forwarded], options)) as typeof spawn } : {}) });
   try {
@@ -210,7 +210,7 @@ void app.whenReady().then(async () => {
         for (const entry of (await prepareDesignNavigationFrames(WORKSPACE, navigation.catalogRevision, all.slice(at, at + 16))).frames)
           if (entry.sourceVersion) batch.push({ file: entry.file, sourceVersion: entry.sourceVersion });
         const reply = await renderDesignRecordings(WORKSPACE, { workspaceId: "qualify", directoryId, theme: null, frames: batch, knownChunks: known.slice(-4096) },
-          { record: (request, signal) => recorder.record(request, signal ?? new AbortController().signal).then((r) => ({ version: 1 as const, revision: request.revision, ...r })), recorder: `${DESIGN_CAPTURE_RENDERER}/skp` });
+          { record: (request, signal) => recorder.record(request, signal ?? new AbortController().signal).then((r) => ({ version: 1 as const, revision: request.revision, ...r })), recorder: designRecorderIdentity(DESIGN_CAPTURE_RENDERER) });
         known.push(...reply.chunks.map((chunk) => chunk.id));
         await writeFile(path.join(fixtures, `reply-${String(index).padStart(3, "0")}.json`), JSON.stringify(reply));
       }
