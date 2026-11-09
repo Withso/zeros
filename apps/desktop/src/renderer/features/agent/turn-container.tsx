@@ -283,6 +283,8 @@ export const TurnPromptHeader = memo(function TurnPromptHeader({
       data-user-bubble=""
       className={cn(
         "w-fit max-w-7/8 min-w-0 cursor-text px-3 py-2 select-text",
+        // Its pills sit a step lighter than the bubble (semantic-tokens.css).
+        "[--pill-bg:var(--prompt-pill-bg)]",
         PROMPT_SURFACE_RADIUS,
         autoAction ? "bg-brown-bg text-brown-fg font-medium" : "bg-bg2",
       )}

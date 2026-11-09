@@ -1202,3 +1202,14 @@ Each landed step appends one line: date, workstream, what landed, evidence.
   7/8 caps and the `bg2` fill with no edge for cloud, Local and
   organization-local chats in both themes, and the local-links smoke the
   sender line above the right-aligned bubble.
+- 2026-11-09 · 2, 5, 6 · A pill inside a sent message sits a step lighter
+  than its `bg2` bubble (`docs/design-system.md` §0 item 4; canvas version
+  407): the new semantic `--prompt-pill-bg` is `bg2-hover` in Dark and
+  `sidebar-bg` in Light, since Light's next step lighter is too faint to see.
+  The bubble hands it to its pills as `--pill-bg`, which `PILL_SHELL` reads
+  with a `bg2` fallback, so the composer's pills, the muted and selected
+  tints and the hovers are unchanged. On the canvas, mentions, attachments
+  and chips inside a bubble take the same fill. Evidence: the
+  sent-message-pills tests failed red first; the local-links smoke checks a
+  chat pill in a sent message against `--prompt-pill-bg` and lighter than
+  its bubble, beside the composer's `bg2` pill, in Dark and Light.
