@@ -25,6 +25,7 @@
 *.woff binary
 *.woff2 binary
 *.ttf binary
+*.skp binary
 *.otf binary
 *.pdf binary
 *.zip binary

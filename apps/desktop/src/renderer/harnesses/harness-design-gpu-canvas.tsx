@@ -14,7 +14,7 @@ import type { DesignViewport } from "../features/design-workspace/design-canvas-
 import CanvasKitInit from "../features/design-workspace/gpu/canvaskit/canvaskit.js";
 import wasmUrl from "../features/design-workspace/gpu/canvaskit/canvaskit.wasm?url";
 import geistUrl from "@fontsource-variable/geist/files/geist-latin-wght-normal.woff2?url";
-import { useDesignGpuCanvas } from "../features/design-workspace/gpu/design-gpu-canvas";
+import { useDesignGpuAvailable, useDesignGpuCanvas } from "../features/design-workspace/gpu/design-gpu-canvas";
 import { createDesignGpuRuntime } from "../features/design-workspace/gpu/design-gpu-runtime";
 import type { DesignGpuSceneFrame } from "../features/design-workspace/gpu/design-gpu-scene";
 import type { DesignRecordingsSource } from "../features/design-workspace/gpu/design-recordings";
@@ -26,8 +26,11 @@ const enabled = params.get("enabled") !== "0";
 // The smoke page is 6 × 4 frames; `?frames=1000&columns=40` is a bench-sized page.
 const COUNT = Math.min(2_000, Math.max(1, Number(params.get("frames")) || 24));
 const COLUMNS = Math.max(1, Number(params.get("columns")) || 6);
+/** `?unreadable=<index>`: that frame's recording is bytes CanvasKit can't read. */
+const UNREADABLE = params.has("unreadable") ? Number(params.get("unreadable")) : -1;
 const WIDTH = 320, HEIGHT = 200, GAP = 40, SCALE = 2;
 const CHUNK_BYTES = 16 * 1024;
+const VIEWPORT = { width: 1040, height: 520 };
 
 /** Each frame's fill is distinct; the smoke reads it back from screen pixels. */
 export const designGpuHarnessFill = (index: number): [number, number, number] =>
@@ -92,11 +95,12 @@ async function recordPage(frames: readonly DesignGpuSceneFrame[]): Promise<Store
     const skp = picture.serialize()!;
     picture.delete(); label.delete(); paint.delete(); recorder.delete();
     const external = await externalizeDesignPictureTypefaces(skp);
+    const layer = index === UNREADABLE ? new TextEncoder().encode(`not a Skia picture: frame ${index + 1} `.repeat(32)) : external.skp;
     for (const { id, bytes } of external.typefaces)
       if (!store.typefaces.has(id)) store.typefaces.set(id, { id, bytes: bytes.length, chunks: await chunked(bytes, store) });
     store.recordings.set(frame.file, { file: frame.file, sourceVersion: frame.sourceVersion!, width: frame.width, height: frame.height,
-      scale: SCALE, layers: [{ x: 0, y: 0, width: frame.width * SCALE, height: frame.height * SCALE, bytes: external.skp.length,
-        chunks: await chunked(external.skp, store), typefaces: external.typefaces.map((entry) => entry.id) }] });
+      scale: SCALE, layers: [{ x: 0, y: 0, width: frame.width * SCALE, height: frame.height * SCALE, bytes: layer.length,
+        chunks: await chunked(layer, store), typefaces: external.typefaces.map((entry) => entry.id) }] });
   }
   manager.delete();
   return store;
@@ -107,7 +111,9 @@ const frames: DesignGpuSceneFrame[] = Array.from({ length: COUNT }, (_, index) =
   x: (index % COLUMNS) * (WIDTH + GAP), y: Math.floor(index / COLUMNS) * (HEIGHT + GAP), width: WIDTH, height: HEIGHT,
 }));
 
-const requests: Array<{ op: string; theme: string | null; frames: number; known: number; chunks: number; aborted: boolean }> = [];
+/** `at` is epoch ms, comparable with the bench snapshot's `openedAt`. */
+const requests: Array<{ op: string; theme: string | null; frames: number; known: number; chunks: number; aborted: boolean; at: number }> = [];
+const epoch = () => performance.timeOrigin + performance.now();
 let store: Promise<Store> | null = null;
 function reply(frames: ReadonlyArray<{ file: string }>, known: readonly string[]) {
   return store!.then((recorded) => {
@@ -123,12 +129,12 @@ function reply(frames: ReadonlyArray<{ file: string }>, known: readonly string[]
 const HELD_THEME = "held";
 const source: DesignRecordingsSource = {
   async read(owner, asked, known) {
-    requests.push({ op: "read", theme: owner.theme, frames: asked.length, known: known.length, chunks: 0, aborted: false });
+    requests.push({ op: "read", theme: owner.theme, frames: asked.length, known: known.length, chunks: 0, aborted: false, at: epoch() });
     // A first open: nothing is stored yet.
     return { recordings: [], typefaces: [], chunks: [], missing: asked.map((frame) => frame.file), deferred: [] } satisfies DesignRecordingsReadReply;
   },
   async render(owner, asked, known, signal) {
-    const entry = { op: "render", theme: owner.theme, frames: asked.length, known: known.length, chunks: 0, aborted: false };
+    const entry = { op: "render", theme: owner.theme, frames: asked.length, known: known.length, chunks: 0, aborted: false, at: epoch() };
     requests.push(entry);
     if (owner.theme === HELD_THEME) {
       await new Promise((_resolve, reject) => signal.addEventListener("abort", () => { entry.aborted = true; reject(signal.reason); }, { once: true }));
@@ -151,6 +157,8 @@ declare global {
       select(index: number | null): void;
       setTheme(theme: string | null): void;
       fill: typeof designGpuHarnessFill;
+      /** Files of the shown theme whose recordings failed, here or in the engine. */
+      failed(): string[];
     };
   }
 }
@@ -160,14 +168,20 @@ function Harness() {
   const [view, setView] = useState<DesignViewport>({ zoom: 0.5, panX: 20, panY: 20 });
   const [selected, select] = useState<number | null>(null);
   const [theme, setTheme] = useState<string | null>(null);
-  const size = useMemo(() => ({ width: 1040, height: 520 }), []);
-  window.designGpuHarness = { frames, requests, setView, select, setTheme, fill: designGpuHarnessFill };
-  useLayoutEffect(() => { paintDesignCanvasCamera(worldRef.current, view, false, size); }, [size, view, selected]);
+  // The canvas's mount order: the recorded canvas mounts first, the camera
+  // paints next, and the viewport size is measured last (it starts at 0 × 0).
+  const [size, setSize] = useState({ width: 0, height: 0 });
   const owner = useMemo(() => ({ workspaceId: "/harness/workspace", directoryId: "design_harness", theme }), [theme]);
+  window.designGpuHarness = { frames, requests, setView, select, setTheme, fill: designGpuHarnessFill,
+    failed: () => [...runtime.recordings.failedFiles(owner)].sort() };
   const live = useMemo(() => new Set<string>(), []);
-  useDesignGpuCanvas({ enabled, active: true, worldRef, documentOwner: "harness", owner, openKey: "harness:page-1", frames, live, runtime });
+  const available = useDesignGpuAvailable(runtime);
+  useDesignGpuCanvas({ enabled: enabled && available, active: true, worldRef, documentOwner: "harness", owner,
+    openKey: "harness:page-1", frames, live, runtime });
+  useLayoutEffect(() => { paintDesignCanvasCamera(worldRef.current, view, false, size); }, [size, view, selected]);
+  useLayoutEffect(() => { setSize(VIEWPORT); }, []);
   return (
-    <div data-design-canvas-viewport="" className="bg-bg2 relative overflow-clip" style={{ width: size.width, height: size.height }}>
+    <div data-design-canvas-viewport="" className="bg-bg2 relative overflow-clip" style={{ width: VIEWPORT.width, height: VIEWPORT.height }}>
       <div className="pointer-events-none absolute inset-0 isolate">
         <div ref={worldRef} data-design-canvas-world="" className="pointer-events-none absolute inset-0 origin-top-left">
           {frames.map((frame, index) => (

@@ -105,6 +105,17 @@ export async function runDesignGpuCanvasSmoke({ page, harnessBase }) {
   expect(near(restored, frames[0].fill)).toBe(true);
   expect(errors).toEqual([]);
 
+  // A recording CanvasKit can't read fails like an engine failure: the canvas
+  // covers that frame another way instead of leaving it tiled and blank.
+  await page.goto(`${harnessBase}/${HARNESS}?frames=4&columns=4&unreadable=2`);
+  const unreadable = await snapshotUntil(page, (snapshot) => snapshot.allVisibleCrispAt !== null,
+    "every drawable frame crisp beside an unreadable one");
+  expect(unreadable.visible).toMatchObject({ frames: 4, crisp: 3, failed: 1, missing: 0 });
+  expect(await page.evaluate(() => window.designGpuHarness.failed())).toEqual(["page-1/frame-3.html"]);
+  expect(await page.locator("[data-design-frame-tiled]").count()).toBe(3);
+  expect(await page.locator('[data-design-frame="page-1/frame-3.html"][data-design-frame-tiled]').count()).toBe(0);
+  expect(errors).toEqual([]);
+
   // Flag off: no plane, no instrumentation, and frames keep their DOM surface.
   await page.goto(`${harnessBase}/${HARNESS}?enabled=0`);
   await page.waitForSelector("[data-design-frame]");

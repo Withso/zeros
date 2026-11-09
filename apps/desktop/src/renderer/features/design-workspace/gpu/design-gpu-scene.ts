@@ -5,6 +5,7 @@ import { designCanvasColor, designStyleWithoutCameraScale } from "../design-sour
 import { DesignGpuCompositor, type DesignGpuBatch } from "./design-gpu-compositor";
 import { DesignGpuPages, designGpuUnitKey, type DesignGpuAdoptedUnit } from "./design-gpu-pages";
 import { DesignGpuRasterGate } from "./design-gpu-raster-gate";
+import { DesignGpuDemandClock } from "./design-gpu-demand-clock";
 import { DESIGN_GPU_PAGE_PIXELS, designGpuChooseDensity, designGpuDensity, designGpuGrid, designGpuScreenRect,
   designGpuUnitRaster, designGpuVisibleUnits, packDesignGpuBurst, type DesignGpuGrid, type DesignGpuUnitRaster } from "./design-gpu-plan";
 import type { DesignGpuRasterPicture, DesignGpuRasterUnit } from "./design-gpu-protocol";
@@ -104,7 +105,7 @@ export class DesignGpuScene {
   private readonly verifiedFonts = new Set<string>();
   private readonly verifyingFonts = new Set<string>();
   private readonly badFonts = new Set<string>();
-  private demandTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly demandClock = new DesignGpuDemandClock(() => this.demand(), DEMAND_SETTLE_MS);
   private paintPending = false;
   private disposed = false;
   private started = false;
@@ -141,8 +142,13 @@ export class DesignGpuScene {
     theme.observe(this.world.ownerDocument.documentElement, { attributes: true, attributeFilter: ["class", "style", "data-theme", "data-color-scheme"] });
     this.cleanups.push(() => theme.disconnect());
     this.cleanups.push(this.deps.recordings.subscribe((key) => {
-      if (this.input.owner && key === designRecordingsOwnerKey(this.input.owner)) { this.rows = null; this.requestPaint(); }
+      if (!this.input.owner || key !== designRecordingsOwnerKey(this.input.owner)) return;
+      this.rows = null;
+      this.requestPaint();
+      // A newly adopted recording may be one this canvas already failed to draw.
+      queueMicrotask(() => this.failUndrawable());
     }));
+    this.cleanups.push(this.deps.client.onUnreadable(() => this.failUndrawable()));
     this.cleanups.push(this.deps.client.onContext((lost) => {
       this.gate.context(lost);
       if (!lost) this.requestPaint();
@@ -168,14 +174,25 @@ export class DesignGpuScene {
     if (ownerChanged) this.queue = [];
     if (first) this.deps.stats.restart(input.openKey);
     else this.deps.stats.open(input.openKey);
-    this.scheduleDemand(0);
+    if (ownerChanged) this.failUndrawable();
+    this.demandClock.input(this.cameraReady());
     this.requestPaint();
+  }
+
+  /** Recordings this canvas can't draw fail like engine failures: a frame is
+   * never left covered by a plane that will not paint it. */
+  private failUndrawable(): void {
+    const owner = this.input.owner;
+    const { unreadable } = this.deps.client;
+    if (!owner || this.disposed || !unreadable.size && !this.badFonts.size) return;
+    this.deps.recordings.failUndrawable(owner, (recording) => unreadable.get(recording.key) ??
+      (recording.typefaces.some((id) => this.badFonts.has(id)) ? "A font this frame uses failed its content check." : null));
   }
 
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
-    if (this.demandTimer !== null) clearTimeout(this.demandTimer);
+    this.demandClock.dispose();
     this.observer.disconnect();
     for (const cleanup of this.cleanups.splice(0)) cleanup();
     for (const element of this.tiled) element.removeAttribute("data-design-frame-tiled");
@@ -275,9 +292,9 @@ export class DesignGpuScene {
     return rows;
   }
 
-  private scheduleDemand(delay = DEMAND_SETTLE_MS): void {
-    if (this.demandTimer !== null) clearTimeout(this.demandTimer);
-    this.demandTimer = setTimeout(() => { this.demandTimer = null; this.demand(); }, delay);
+  private cameraReady(): boolean {
+    const camera = this.camera;
+    return !!camera && camera.view.zoom > 0 && camera.size.width > 0 && camera.size.height > 0;
   }
 
   /** Recordings for frames near the camera, nearest first. */
@@ -306,7 +323,7 @@ export class DesignGpuScene {
     const moved = !this.camera || this.camera.view.zoom !== view.zoom || this.camera.view.panX !== view.panX ||
       this.camera.view.panY !== view.panY || this.camera.size.width !== size.width || this.camera.size.height !== size.height;
     this.camera = { view, size };
-    if (moved) this.scheduleDemand();
+    if (moved) this.demandClock.camera(this.cameraReady());
     if (this.disposed || this.compositor.lost || !(size.width > 0 && size.height > 0) || !(view.zoom > 0)) return;
     const started = performance.now();
     const dpr = window.devicePixelRatio || 1;
@@ -492,7 +509,7 @@ export class DesignGpuScene {
     this.verifyingFonts.add(id);
     void designTypefaceContentId(bytes).then((actual) => {
       this.verifyingFonts.delete(id);
-      if (actual !== id) { this.badFonts.add(id); return; }
+      if (actual !== id) { this.badFonts.add(id); this.failUndrawable(); return; }
       this.deps.client.registerFonts([{ id, bytes }]);
       this.verifiedFonts.add(id);
       this.requestPaint();

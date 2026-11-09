@@ -107,4 +107,27 @@ describe("Design GPU worker client", () => {
     client.dispose();
     expect(worker.terminated).toBe(true);
   });
+
+  it("tells listeners about unreadable pictures and a failure, but a disposed worker has not failed", async () => {
+    const worker = new FakeWorker();
+    const client = new DesignGpuWorkerClient(() => worker as unknown as Worker);
+    const unreadable: string[][] = [], failures: string[] = [];
+    client.onUnreadable(() => unreadable.push([...client.unreadable.keys()]));
+    client.onFailure((error) => failures.push(error));
+    const started = client.start();
+    worker.reply({ type: "ready", gpu: true, wasmHeapBytes: 1 });
+    await started;
+    worker.reply({ type: "pictures", added: [], failed: [{ key: "a", error: "unsupported" }], evicted: [] });
+    worker.reply({ type: "pictures", added: ["b"], failed: [], evicted: [] });
+    expect(unreadable).toEqual([["a"]]);
+    client.dispose();
+    expect(failures).toEqual([]);
+    const crashing = new FakeWorker();
+    const other = new DesignGpuWorkerClient(() => crashing as unknown as Worker);
+    other.onFailure((error) => failures.push(error));
+    void other.start();
+    crashing.crash();
+    crashing.crash();
+    expect(failures).toEqual(["worker crashed"]);
+  });
 });

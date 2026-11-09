@@ -21,7 +21,10 @@ export class DesignGpuWorkerClient {
   private readonly jobs = new Map<number, { resolve(reply: Rastered): void; reject(error: Error): void }>();
   private readonly stats = new Map<number, (stats: DesignGpuWorkerStats | null) => void>();
   private readonly contextListeners = new Set<(lost: boolean) => void>();
+  private readonly unreadableListeners = new Set<() => void>();
+  private readonly failureListeners = new Set<(error: string) => void>();
   private failure: string | null = null;
+  private disposed = false;
 
   constructor(private readonly create: () => Worker, private readonly budgets = {
     pictureBudget: DESIGN_GPU_PICTURE_BYTES, gpuCacheBudget: DESIGN_GPU_WORKER_CACHE_BYTES }) {}
@@ -52,6 +55,18 @@ export class DesignGpuWorkerClient {
   onContext(listener: (lost: boolean) => void): () => void {
     this.contextListeners.add(listener);
     return () => { this.contextListeners.delete(listener); };
+  }
+
+  /** The worker reported pictures it could not read (now in `unreadable`). */
+  onUnreadable(listener: () => void): () => void {
+    this.unreadableListeners.add(listener);
+    return () => { this.unreadableListeners.delete(listener); };
+  }
+
+  /** The worker failed to start or died; `dispose()` is not a failure. */
+  onFailure(listener: (error: string) => void): () => void {
+    this.failureListeners.add(listener);
+    return () => { this.failureListeners.delete(listener); };
   }
 
   registerFonts(fonts: ReadonlyArray<{ id: string; bytes: Uint8Array }>): void {
@@ -94,6 +109,7 @@ export class DesignGpuWorkerClient {
   }
 
   dispose(): void {
+    this.disposed = true;
     if (this.worker) {
       this.send({ type: "dispose" });
       this.worker.terminate();
@@ -107,6 +123,7 @@ export class DesignGpuWorkerClient {
       case "pictures":
         for (const key of reply.evicted) this.resident.delete(key);
         for (const { key, error } of reply.failed) { this.resident.delete(key); this.unreadable.set(key, error); }
+        if (reply.failed.length) for (const listener of [...this.unreadableListeners]) listener();
         return;
       case "rastered": {
         for (const key of [...reply.missing, ...reply.evicted]) this.resident.delete(key);
@@ -131,11 +148,13 @@ export class DesignGpuWorkerClient {
   }
 
   private fail(error: string): void {
+    const first = this.failure === null;
     this.failure ??= error;
     this.resident.clear();
     for (const job of this.jobs.values()) job.reject(new Error(this.failure));
     this.jobs.clear();
     for (const resolve of this.stats.values()) resolve(null);
     this.stats.clear();
+    if (first && !this.disposed) for (const listener of [...this.failureListeners]) listener(this.failure);
   }
 }

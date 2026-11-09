@@ -77,8 +77,9 @@ export const designRecordingsReplySchema = z.object({
   typefaces: recordingTypefaces,
   chunks: recordingChunks,
   stale: z.array(recordingFrame).max(DESIGN_RECORDINGS_RENDER_FRAMES),
-  failed: z.array(z.object({ file: z.string().min(1).max(255), error: z.string().min(1).max(500) }).strict())
-    .max(DESIGN_RECORDINGS_RENDER_FRAMES),
+  /** `retryable` (engine N+1, optional): a transient outcome worth asking again. */
+  failed: z.array(z.object({ file: z.string().min(1).max(255), error: z.string().min(1).max(500), retryable: z.boolean().optional() })
+    .strict()).max(DESIGN_RECORDINGS_RENDER_FRAMES),
   deferred: z.array(recordingFrame).max(DESIGN_RECORDINGS_RENDER_FRAMES),
 }).strict().refine(withinReply, "Recording chunks exceed one reply.");
 export type DesignRecordingsReply = z.infer<typeof designRecordingsReplySchema>;
@@ -99,5 +100,7 @@ export const designRecordingsReadReplySchema = z.object({
   chunks: recordingChunks,
   missing: z.array(z.string().min(1).max(255)).max(DESIGN_MAX_FRAMES_PER_PAGE),
   deferred: z.array(z.string().min(1).max(255)).max(DESIGN_MAX_FRAMES_PER_PAGE),
+  /** Engine N+1, answering a read that opted in: stored permanent failures. */
+  failed: z.array(recordingFrame.extend({ error: z.string().min(1).max(500) }).strict()).max(DESIGN_MAX_FRAMES_PER_PAGE).optional(),
 }).strict().refine(withinReply, "Recording chunks exceed one reply.");
 export type DesignRecordingsReadReply = z.infer<typeof designRecordingsReadReplySchema>;

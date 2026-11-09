@@ -115,6 +115,19 @@ describe("Design recordings", () => {
       .toBe(`shared-drawing-prefixdrawing:b.html:${version(2)}`);
   });
 
+  it("times each reply's round trip by operation, and its adoption, for the bench", async () => {
+    const { calls, recordings } = harness();
+    const frames = [{ file: "a.html", sourceVersion: version(1) }];
+    recordings.demand(owner, frames);
+    calls[0]!.resolve(readReply(frames, ["a.html"]));
+    await recordings.settled();
+    calls[1]!.resolve(renderReply(frames, calls[1]!.known));
+    await recordings.settled();
+    const timings = recordings.timings();
+    expect([timings.read.length, timings.render.length, timings.adopt.length]).toEqual([1, 1, 2]);
+    expect([...timings.read, ...timings.render, ...timings.adopt].every((step) => step.ms >= 0 && step.at > 0)).toBe(true);
+  });
+
   it("delivers an externalized font once and verifies its length", async () => {
     const { calls, recordings } = harness();
     const frames = [{ file: "a.html", sourceVersion: version(1) }, { file: "b.html", sourceVersion: version(2) }];
@@ -311,5 +324,46 @@ describe("Design recordings", () => {
     await recordings.settled();
     expect(recordings.recording(owner, "a.html")).toBeNull();
     expect(recordings.usage().inFlight).toBe(0);
+  });
+
+  it("fails a frame whose recording this renderer can't draw, and only drops an older cover it can't draw", async () => {
+    const { calls, chunks, recordings, changes } = harness();
+    const both = (a: number, b: number) => [{ file: "a.html", sourceVersion: version(a) }, { file: "b.html", sourceVersion: version(b) }];
+    recordings.demand(owner, both(1, 1));
+    calls[0]!.resolve(readReply(calls[0]!.frames, []));
+    await recordings.settled();
+    const a = recordings.recording(owner, "a.html")!;
+    const aDrawing = a.layers[0]!.chunks[1]!;
+    expect(chunks.known([], 10)).toContain(aDrawing);
+    changes.length = 0;
+    // CanvasKit rejected a's picture: the frame fails this version, so the
+    // canvas covers it another way, and nothing asks for it again.
+    recordings.failUndrawable(owner, (recording) => recording.key === a.key ? "The recording could not be read." : null);
+    expect(recordings.recording(owner, "a.html")).toBeNull();
+    expect([...recordings.failedFiles(owner)]).toEqual(["a.html"]);
+    expect(recordings.failure(owner, "a.html")).toBe("The recording could not be read.");
+    expect(chunks.known([], 10)).not.toContain(aDrawing);
+    expect(changes).toEqual([[designRecordingsOwnerKey(owner), "a.html"]]);
+    expect(calls).toHaveLength(1);
+    // b's version-1 recording is only a cover while version 2 is asked for.
+    recordings.demand(owner, both(1, 2));
+    const b = recordings.recording(owner, "b.html")!;
+    expect(b).toMatchObject({ sourceVersion: version(1), current: false });
+    expect(calls[1]).toMatchObject({ op: "read", frames: [{ file: "b.html", sourceVersion: version(2) }] });
+    recordings.failUndrawable(owner, (recording) => recording.key === b.key ? "A font this frame uses failed its check." : null);
+    expect(recordings.recording(owner, "b.html")).toBeNull();
+    expect(recordings.failedFiles(owner).has("b.html")).toBe(false);
+    calls[1]!.resolve(readReply(calls[1]!.frames, ["b.html"], calls[1]!.known));
+    await recordings.settled();
+    calls[2]!.resolve(renderReply(calls[2]!.frames, calls[2]!.known));
+    await recordings.settled();
+    expect(recordings.recording(owner, "b.html")).toMatchObject({ sourceVersion: version(2), current: true });
+    // A new version of a is asked for again, and replaces the failure.
+    recordings.demand(owner, both(2, 2));
+    expect(calls[3]).toMatchObject({ op: "read", frames: [{ file: "a.html", sourceVersion: version(2) }] });
+    calls[3]!.resolve(readReply(calls[3]!.frames, [], calls[3]!.known));
+    await recordings.settled();
+    expect(recordings.recording(owner, "a.html")).toMatchObject({ sourceVersion: version(2), current: true });
+    expect(recordings.failedFiles(owner).size).toBe(0);
   });
 });
