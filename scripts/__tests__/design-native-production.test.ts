@@ -29,6 +29,22 @@ it("resolves the real native driver's module imports in the production probe", a
     expect((await fs.stat(path.join(repo, module.slice(1)))).isFile(), module).toBe(true);
 });
 
+it("serves WebAssembly as application/wasm, so the browser compiles it while it streams", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "design-production-wasm-"));
+  let server: Awaited<ReturnType<typeof serveNativeProductionAssets>> | undefined;
+  try {
+    // The smallest valid module: magic and version.
+    await fs.writeFile(path.join(root, "canvaskit.wasm"), Uint8Array.from([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]));
+    server = await serveNativeProductionAssets(root);
+    const response = await fetch(`${server.url}/canvaskit.wasm`);
+    expect(response.headers.get("content-type")).toBe("application/wasm");
+    await expect(WebAssembly.compileStreaming(response)).resolves.toBeInstanceOf(WebAssembly.Module);
+  } finally {
+    await server?.close();
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
 it("keeps the app's singleton and deferred circular bindings in an actual optimized build", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "design-production-build-"));
   let server: Awaited<ReturnType<typeof serveNativeProductionAssets>> | undefined;
