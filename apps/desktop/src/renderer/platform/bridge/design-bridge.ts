@@ -32,6 +32,7 @@ import { designPageCatalogSchema, designPageIdSchema, normalizeDesignPagesSnapsh
 import { DESIGN_LAZY_PREPARATION_CAPABILITY, DESIGN_MUTATION_SNAPSHOTS_CAPABILITY, DESIGN_PAGE_SCOPED_MUTATIONS_CAPABILITY, designMutationCatalogSchema, designPageScopedCatalogSchema, designPreparedFrameSchema, designFramesPrepareSchema, designFramesPrepareReplySchema, type DesignMutationCatalog, type DesignPageHashes, type DesignPageScopedCatalog } from "@zeros/protocol/design-catalog";
 import { DESIGN_SOURCE_SURFACES_CAPABILITY } from "@zeros/protocol/design-surface";
 import {
+  DESIGN_RECORDINGS_READ_FAILURES_CAPABILITY,
   designRecordingsReadReplySchema,
   designRecordingsReplySchema,
   type DesignRecordingsReadReply,
@@ -840,6 +841,8 @@ export async function bridgeDesignRecordingsRead(
     workspaceId, directoryId: input.directoryId, theme: input.theme,
     frames: input.frames.map(({ file, sourceVersion }) => (sourceVersion ? { file, sourceVersion } : { file })),
     ...(input.knownChunks.length ? { knownChunks: [...input.knownChunks] } : {}),
+    // An engine without it rejects the field: its request schema is strict.
+    ...(bridge.supportsEngineCapability?.(DESIGN_RECORDINGS_READ_FAILURES_CAPABILITY, workspaceId) ? { withFailures: true } : {}),
   }, DESIGN_RECORDINGS_READ_TIMEOUT_MS);
   // A stored lookup cannot be cancelled; a reply nobody waits for is dropped.
   options.signal?.throwIfAborted();

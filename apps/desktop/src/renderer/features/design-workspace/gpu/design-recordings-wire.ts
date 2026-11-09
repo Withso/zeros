@@ -8,6 +8,9 @@ import { DESIGN_MAX_FRAMES_PER_PAGE } from "@zeros/protocol/design-pages";
 
 /** Local engines that record frames as Skia pictures. Cloud never offers it. */
 export const DESIGN_RECORDINGS_CAPABILITY = "design.recordings.v1";
+/** Engines that answer a read's `withFailures`: stored failures the current
+ * recorder can't record, so a reopen covers those frames without waiting. */
+export const DESIGN_RECORDINGS_READ_FAILURES_CAPABILITY = "design.recordings.read-failures.v1";
 export const DESIGN_RECORDING_CHUNK_ID_PATTERN = /^[a-f0-9]{32}$/;
 export const DESIGN_RECORDING_CHUNK_MAX_BYTES = 64 * 1024;
 export const DESIGN_RECORDING_MAX_BYTES = 64 * 1024 * 1024;
@@ -90,6 +93,7 @@ export const designRecordingsReadSchema = z.object({
   theme: recordingTheme,
   frames: z.array(recordingFrame.partial({ sourceVersion: true })).min(1).max(DESIGN_MAX_FRAMES_PER_PAGE),
   knownChunks: z.array(recordingChunkId).max(DESIGN_RECORDINGS_KNOWN_CHUNKS).optional(),
+  withFailures: z.literal(true).optional(),
 }).strict()
   .refine((input) => new Set(input.frames.map((frame) => frame.file)).size === input.frames.length, "Recording frames must be distinct.");
 export type DesignRecordingsRead = z.infer<typeof designRecordingsReadSchema>;
