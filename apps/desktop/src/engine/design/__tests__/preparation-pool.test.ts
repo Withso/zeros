@@ -5,7 +5,7 @@ import { pathToFileURL } from "node:url";
 import { build } from "esbuild";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { DESIGN_DIRECTORY_NAME, initializeDesignDocument, prepareDesignNavigationFrames, readDesignNavigationSnapshot } from "../document";
-import { designDirectoryNameFor } from "../directory-registry";
+import { designDirectoryNameFor, forgetDesignDirectoryName, primeDesignDirectoryName } from "../directory-registry";
 import { designIdentityCacheStatsForTests, resetDesignIdentityCacheForTests } from "../identity-cache";
 import { designDirectoryEntry } from "../metadata";
 import {
@@ -175,6 +175,47 @@ parentPort.on("message", (m) => parentPort.postMessage({ id: m.id, results: (m.f
       expect(warn.mock.calls.filter(([message]) => String(message).includes("preparation workers unavailable"))).toHaveLength(1);
     } finally {
       warn.mockRestore();
+    }
+  }, 60_000);
+
+  it("prepares and composes on workers from the active Design directory, not the default one", async () => {
+    // Workers have their own directory registry: only what the engine sends tells them the active folder.
+    const other = await mkdtemp(path.join(tmpdir(), "zeros-preparation-pool-directory-"));
+    const ids = files.map((_, index) => `f${index}`);
+    const document = async (directory: string, id: string, text: string) => {
+      await mkdir(path.join(other, directory, "meta"), { recursive: true });
+      await mkdir(path.join(other, directory, "page-1"), { recursive: true });
+      await writeFile(path.join(other, directory, "meta/design.toml"), `format = "zeros-design"\nversion = 3\nid = "${id}"\ncanvas = "canvas.json"\n`);
+      await writeFile(path.join(other, directory, "meta/canvas.json"), JSON.stringify({ version: 2,
+        pages: [{ id: "page", title: "Page", folder: "page-1", frames: ids }],
+        frames: Object.fromEntries(ids.map((frameId, index) => [frameId, { source: files[index], title: frameId, kind: "html",
+          x: index * 500, y: 0, width: 400, height: 300, z: 0 }])) }));
+      for (const file of files) await writeFile(path.join(other, directory, file), `<html><body data-oid="root">${text} ${file}</body></html>`);
+    };
+    try {
+      await document("Product Design", "design_active", "active");
+      await document(DESIGN_DIRECTORY_NAME, "design_decoy", "decoy");
+      primeDesignDirectoryName(other, "Product Design");
+      const navigation = await readDesignNavigationSnapshot(other);
+      const single = await prepareDesignNavigationFrames(other, navigation.catalogRevision, files);
+      expect(single.errors).toEqual([]);
+      const frames = single.frames.map(({ file, sourceVersion }) => ({ file, sourceVersion: sourceVersion! }));
+      const input = { workspaceId: "w", directoryId: "design_active", theme: null, colorScheme: "light" as const, maxDimension: 256, frames };
+      const comparable = (result: Awaited<ReturnType<typeof composeDesignThumbnailBatches>>) => ({ ...result,
+        batches: result.batches.map(({ request, frames: items }) => ({ request: { ...request, revision: "" }, frames: [...items] })) });
+      const alone = comparable(await composeDesignThumbnailBatches(other, input));
+      expect(alone.failed).toEqual([]);
+      resetDesignIdentityCacheForTests();
+      configureDesignPreparationWorkersForTests(2, { workerUrl: bundle.url });
+      const before = designPreparationWorkerStatsForTests();
+      expect(await prepareDesignNavigationFrames(other, navigation.catalogRevision, files)).toEqual(single);
+      expect(comparable(await composeDesignThumbnailBatches(other, input))).toEqual(alone);
+      const after = designPreparationWorkerStatsForTests();
+      expect({ frames: after.frames - before.frames, composed: after.composed - before.composed })
+        .toEqual({ frames: files.length, composed: files.length });
+    } finally {
+      forgetDesignDirectoryName(other);
+      await rm(other, { recursive: true, force: true });
     }
   }, 60_000);
 

@@ -1,6 +1,7 @@
 import { availableParallelism } from "node:os";
 import { Worker } from "node:worker_threads";
 import type { DurableDesignDependency } from "./dependency-read-set";
+import { designDirectoryNameFor } from "./directory-registry";
 import type { DesignFrameIdentity } from "./identity-cache";
 import type { DesignFrameRenderSheet } from "./render-preparation";
 
@@ -94,8 +95,9 @@ function scheduleIdleStop(): void {
  * whose worker failed, are left out: the caller prepares those itself. */
 export async function prepareFrameIdentitiesInWorkers(workspacePath: string, catalogRevision: string,
   files: readonly string[]): Promise<DesignWorkerFrameIdentity[]> {
+  const directory = designDirectoryNameFor(workspacePath);
   const results = await inWorkers<string, DesignWorkerFrameIdentity>(files,
-    (file) => ({ workspacePath, catalogRevision, files: [file] }));
+    (file) => ({ workspacePath, directory, catalogRevision, files: [file] }));
   testing.frames += results.filter((result) => "identity" in result).length;
   return results;
 }
@@ -105,8 +107,9 @@ export async function prepareFrameIdentitiesInWorkers(workspacePath: string, cat
 export async function composeFrameSourcesInWorkers(workspacePath: string,
   frames: ReadonlyArray<{ file: string; width: number; height: number }>, options: { deferTailwind: boolean }):
   Promise<DesignWorkerComposedFrame[]> {
+  const directory = designDirectoryNameFor(workspacePath);
   const results = await inWorkers<{ file: string; width: number; height: number }, DesignWorkerComposedFrame>(frames,
-    (frame) => ({ kind: "compose", workspacePath, frames: [frame], deferTailwind: options.deferTailwind }));
+    (frame) => ({ kind: "compose", workspacePath, directory, frames: [frame], deferTailwind: options.deferTailwind }));
   testing.composed += results.filter((result) => "sanitized" in result).length;
   return results;
 }
