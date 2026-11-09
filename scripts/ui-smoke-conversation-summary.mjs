@@ -67,9 +67,12 @@ export async function runConversationSummarySmoke({
       await expect(header.getByText("Local", { exact: true })).toHaveCount(0);
       await expect(header.locator(".lucide-hard-drive")).toHaveCount(0);
     };
+    // As in ui-smoke-workspace-shortcuts.mjs: CI saw this evaluate fail as a
+    // destroyed context without any navigation, so the imports stay reachable.
     const setOrigin = (originUrl) => page.evaluate(async originUrl => {
-      const { loadProjects, applyProjectGitInspection, projectGitRevision } = await import("/apps/desktop/src/renderer/state/projects-store.ts");
-      const { notifyProjectsChanged } = await import("/apps/desktop/src/renderer/state/use-projects.ts");
+      window.__summaryProjectModules ??= Promise.all([import("/apps/desktop/src/renderer/state/projects-store.ts"),
+        import("/apps/desktop/src/renderer/state/use-projects.ts")]);
+      const [{ loadProjects, applyProjectGitInspection, projectGitRevision }, { notifyProjectsChanged }] = await window.__summaryProjectModules;
       const project = loadProjects().find(project => project.repoRoot === "/summary-fixture/a");
       applyProjectGitInspection(project, projectGitRevision(project.id), { isRepo: true, originUrl });
       notifyProjectsChanged();

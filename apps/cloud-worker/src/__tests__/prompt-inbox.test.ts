@@ -411,7 +411,9 @@ it.each(["outbox revocation", "HTTP Stop batch"])("interrupts all affected chats
   const relay = new PullRelay(), drivers: FakeDriver[] = [], held = defer(), entered = defer();
   const f = await setup({ relay, createDriver: () => { const driver = new FakeDriver(); drivers.push(driver); return driver; } });
   relay.enqueue({ prompts: [delivery(randomUUID(), "first"), delivery(randomUUID(), "first", "0", "2"), delivery(randomUUID(), "second")], stops: [] });
-  await until(() => drivers.map(driver => driver.prompts.length)).toEqual([1, 1]);
+  // A precondition, not the behavior under test. Under a loaded CI runner the
+  // second chat's first prompt arrived after the 1.5 s default (#933, #936).
+  await expect.poll(() => drivers.map(driver => driver.prompts.length), { timeout: 15_000, interval: 5 }).toEqual([1, 1]);
   const stop = SessionStore.prototype.stopOutbox;
   vi.spyOn(SessionStore.prototype, "stopOutbox").mockImplementation(async function (this: SessionStore, chatId, epoch) {
     if (chatId === "first") { entered.resolve(); await held.promise; }
