@@ -69,6 +69,9 @@ describe("recording store", () => {
     const file = path.join(process.env.ZEROS_DATA_DIR!, "design-storage", "recording-chunks", id.slice(0, 2), id);
     await writeFile(file, "tampered");
     expect(await readDesignRecordingChunk(id)).toBeNull();
+    // Recording the same bytes again repairs the damaged chunk.
+    await storeDesignRecording(workspace, "design_1", "frame_2", null, recording(version("b"), bytesFrom(8, 20_000)));
+    expect(await readDesignRecordingChunk(id)).not.toBeNull();
     expect(await readDesignRecordingChunk("0".repeat(32))).toBeNull();
     expect(await readDesignRecordingChunk("../../etc/passwd")).toBeNull();
   });

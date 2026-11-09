@@ -141,9 +141,10 @@ export async function readDesignRecordingChunk(id: string): Promise<Buffer | nul
 }
 
 async function storeChunk(id: string, bytes: Uint8Array): Promise<boolean> {
+  // A stored chunk counts only if it still hashes to its id; a damaged one
+  // is replaced (content-addressed, so rewriting it is idempotent).
+  if (await readDesignRecordingChunk(id)) return true;
   const file = chunkFile(id);
-  const existing = await lstat(file).catch(() => null);
-  if (existing?.isFile() && existing.size === bytes.length) return true;
   return writeAtomically(path.dirname(file), id, bytes);
 }
 

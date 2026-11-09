@@ -1,4 +1,4 @@
-import { realpath, rm } from "node:fs/promises";
+import { lstat, realpath, rm } from "node:fs/promises";
 import { constants } from "node:fs";
 import { open } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
@@ -191,7 +191,10 @@ async function readRecorderFile(file: string, name: RegExp, limit: number): Prom
     throw outside;
   const handle = await open(resolved, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
-    const info = await handle.stat();
+    // The file held open must be the one checked: an intermediate directory
+    // swapped between the check and the open would point elsewhere.
+    const [info, checked] = await Promise.all([handle.stat(), lstat(resolved)]);
+    if (info.dev !== checked.dev || info.ino !== checked.ino) throw outside;
     if (!info.isFile() || info.size < 1 || info.size > limit) throw new Error("This frame's recording is too large.");
     return await handle.readFile();
   } finally {
