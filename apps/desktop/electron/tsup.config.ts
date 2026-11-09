@@ -23,6 +23,8 @@ export default defineConfig({
     "agent-control-preload": "apps/desktop/electron/agent-control-preload.ts",
     // The Design recorder runs as its own Electron instance (design-recorder.ts).
     "design-recorder": "apps/desktop/electron/design-recorder-host.ts",
+    // Its worker thread, which prepares frame documents off the main thread.
+    "design-recorder-document-worker": "apps/desktop/electron/design-recorder-document-worker.ts",
     // (preload-webview.ts deleted with the iframe migration —
     // workbench browser tabs are <iframe> elements, no separate
     // preload context to inject into.)
