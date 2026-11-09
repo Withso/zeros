@@ -685,7 +685,7 @@ async function main() {
         if (args.includes("--trace-reload") && !result.traceError) {
           const complete = new Promise(resolve => cdp.once("Tracing.tracingComplete", resolve));
           await cdp.send("Tracing.end").catch(error => { result.traceError = String(error).slice(0, 200); });
-          const { stream } = await Promise.race([complete, pause(120_000).then(() => ({}))]);
+          const { stream } = await Promise.race([complete, new Promise(resolve => setTimeout(() => resolve({}), 120_000).unref())]);
           if (stream) {
             const chunks = [];
             for (;;) {
@@ -694,7 +694,7 @@ async function main() {
               if (eof) break;
             }
             await cdp.send("IO.close", { handle: stream }).catch(() => {});
-            await fs.writeFile(path.join(evidence, `${fixture.name}-reload-trace.json`), Buffer.concat(chunks));
+            await fs.writeFile(path.join(evidence, `${fixture.name}-reload-timeline.json`), Buffer.concat(chunks));
           } else result.traceError ??= "no trace stream";
         }
         if (args.includes("--profile-reload")) {
