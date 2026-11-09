@@ -21,6 +21,7 @@ import { withSystemTx } from "../db.js";
 import { cloudGithubRequestContext } from "./github-request-context.js";
 import { createCloudGithubWorkerConfig } from "./github-worker-config.js";
 import { createCloudGithubCatalog } from "./github-catalog.js";
+import { cacheRepositoryIdentities } from "./repository-identity-cache.js";
 
 export function createCloudGithubServices(
   pool: pg.Pool,
@@ -63,6 +64,8 @@ export function createCloudGithubServices(
       repositoryId: repository.repositoryId,
     };
   };
+  // Only for checks that verify access through `source` right afterwards.
+  const resolveRecentRepository = cacheRepositoryIdentities(resolveRepository);
   const workspaceSetup = async (
     workspace: CloudV2Workspace,
     computers: Pick<
@@ -275,6 +278,7 @@ export function createCloudGithubServices(
     token,
     workspaceToken,
     resolveRepository,
+    resolveRecentRepository,
     workspaceSetup,
     remoteHead,
   };

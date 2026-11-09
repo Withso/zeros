@@ -34,24 +34,9 @@ function persistRepositories(key: string) {
 export function cloudComputerRepositoriesKey(userId: string, organizationId: string): string {
   return JSON.stringify([userId, organizationId]);
 }
-export function readCloudComputerRepositories(key: string): Promise<Installed> {
+function readInstalled(key: string): Promise<Installed> {
   const [, organizationId] = JSON.parse(key) as [string, string];
-  return getCloudV2InstalledRepositories(organizationId).then(next => {
-    // A keep-warm refresh that found nothing new keeps the rendered list.
-    const previous = cloudComputerRepositoriesCache.peekSnapshot(key).data;
-    return previous !== undefined && JSON.stringify(previous) === JSON.stringify(next) ? previous : next;
-  });
-}
-const readInstalled = readCloudComputerRepositories;
-
-/** The control plane checks the creator's access to every Computer repository
- * on create, reusing a check for 30 s. Refreshing this list (the same checks)
- * every 10 s while a Create surface is shown keeps them fresh. Then neither
- * intent warming nor the create itself waits on GitHub at click time. */
-export const CLOUD_COMPUTER_REPOSITORIES_WARM_MS = 10_000;
-export function keepCloudComputerRepositoriesWarm(refresh: () => void): () => void {
-  const timer = setInterval(refresh, CLOUD_COMPUTER_REPOSITORIES_WARM_MS);
-  return () => clearInterval(timer);
+  return getCloudV2InstalledRepositories(organizationId);
 }
 export function prefetchCloudComputerRepositories(userId: string, organizationId: string): Promise<void> {
   const key = cloudComputerRepositoriesKey(userId, organizationId);
@@ -98,10 +83,12 @@ export function useCloudComputerV2CreateGate(active: boolean) {
   const required = enabled && (reason === cloudComputerV2BuildRequired || rebuildRequired(error));
   const refresh = read.refresh;
   useEffect(() => {
-    // Also observes an admin finishing the first build elsewhere.
-    if (!enabled || !active || !shown) return;
-    return keepCloudComputerRepositoriesWarm(refresh);
-  }, [enabled, active, shown, refresh]);
+    // An admin can finish the first build elsewhere; observe slowly while the
+    // visible gate is blocked on it.
+    if (!enabled || !active || !shown || !required) return;
+    const timer = setInterval(refresh, MAX_AGE_MS);
+    return () => clearInterval(timer);
+  }, [enabled, active, shown, required, refresh]);
   return {
     reason,
     checking: enabled && read.data === undefined && !error,
