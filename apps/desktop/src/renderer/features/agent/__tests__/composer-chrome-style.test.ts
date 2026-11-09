@@ -111,7 +111,7 @@ describe("composer chrome", () => {
     // alone and moves above the highest card once cards dock over it.
     const agentChat = code("../agent-chat.tsx");
     const column = agentChat.indexOf(
-      '"relative mx-auto box-border flex w-full max-w-[856px] min-w-0 shrink-0 flex-col gap-2 border-t-0 bg-transparent px-7 pt-0 pb-4"',
+      '"relative mx-auto box-border flex w-full max-w-(--chat-column) min-w-0 shrink-0 flex-col gap-2 border-t-0 bg-transparent px-7 pt-0 pb-4"',
     );
     expect(column, "dock column").toBeGreaterThanOrEqual(0);
     const fade = agentChat.indexOf(

@@ -42,6 +42,13 @@
      below). The bubble hands it to its pills as --pill-bg. */
   --prompt-pill-bg: var(--bg2-hover);
 
+  /* The chat's text column, Settings → Appearance → Chat width: 800px is
+     Normal, with Narrow and Wide below. --chat-column adds the lane's px-7
+     gutters on each side. Both are maximums: a narrower pane still shrinks
+     the chat. */
+  --chat-lane: 800px;
+  --chat-column: calc(var(--chat-lane) + var(--spacing) * 14);
+
   /* Chat notice text actions (Retry, Sign in) have no hover fill: the brown
      label and icon pop instead — ten lightness points lighter on dark,
      ten deeper in Light (override below), so hover always adds contrast. */
@@ -142,6 +149,14 @@
     var(--design-selection-stroke) 12%,
     transparent
   );
+}
+
+/* Chat width (data-chat-width, shared/theme/derive.ts). */
+:root[data-chat-width="narrow"] {
+  --chat-lane: 625px;
+}
+:root[data-chat-width="wide"] {
+  --chat-lane: 1200px;
 }
 
 /* ── Light theme ── */

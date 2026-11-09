@@ -18,11 +18,12 @@ function code(relativePath: string): string {
 
 describe("narrow transcript message overflow", () => {
   it("bounds user bubbles to their lane and wraps unbroken text", () => {
-    // The row caps at the 800px lane; the bubble sits at its right edge and
-    // caps at 7/8 of it, so unbroken text wraps inside that.
+    // The row caps at the lane (--chat-lane, 800px unless Settings picks
+    // another width); the bubble sits at its right edge and caps at 7/8 of
+    // it, so unbroken text wraps inside that.
     const turnContainer = code("../turn-container.tsx");
     expect(turnContainer).toContain(
-      '"zeros-agent-turn-prompt group/usermsg relative flex w-full max-w-[800px] min-w-0 flex-col items-end"',
+      '"zeros-agent-turn-prompt group/usermsg relative flex w-full max-w-(--chat-lane) min-w-0 flex-col items-end"',
     );
     expect(turnContainer).toContain('"w-fit max-w-7/8 min-w-0 cursor-text px-3 py-2 select-text"');
 

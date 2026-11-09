@@ -38,7 +38,7 @@ describe("transcript top edge", () => {
     expect(column).not.toContain("pt-3");
     // Read-only history's "No chat history." row is the same column.
     expect(read("apps/desktop/src/renderer/shell/conversation/conversation-pane.tsx")).toContain(
-      'className="mx-auto w-full max-w-[856px] flex-1 px-7 pt-8"',
+      'className="mx-auto w-full max-w-(--chat-column) flex-1 px-7 pt-8"',
     );
   });
 });

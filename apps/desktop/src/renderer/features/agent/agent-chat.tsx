@@ -4296,9 +4296,10 @@ function AgentChatBody({
         </header>
       )}
 
-      {/* max-w-[856px] is the chat's single width: an 800px column inside px-7
-          gutters, shared with the composer and the read-only history bar. It is a
-          maximum, so narrower panes shrink without fixed gutters. */}
+      {/* --chat-column is the chat's single width: the --chat-lane text column
+          (Settings → Appearance → Chat width) inside px-7 gutters, shared with the
+          composer and the read-only history bar. It is a maximum, so narrower panes
+          shrink without fixed gutters. */}
       {/* Keeps the top mask outside the scroller, pinned to the viewport top. */}
       <div className="relative flex min-h-0 flex-1 flex-col">
         {/* `zeros-agent-body` and `zeros-agent-messages` are hooks for
@@ -4320,7 +4321,7 @@ function AgentChatBody({
             // scroller's height, so pb-8 would never reach the real bottom. pt-8 starts the
             // first message below the 32px top fade; px-7 clears the checkpoint rail.
             // Mirror any change on the composer column.
-            className="zeros-agent-messages mx-auto flex w-full max-w-[856px] min-w-0 flex-none flex-col gap-5 overflow-visible px-7 pt-8 pb-8"
+            className="zeros-agent-messages mx-auto flex w-full max-w-(--chat-column) min-w-0 flex-none flex-col gap-5 overflow-visible px-7 pt-8 pb-8"
           >
             {/* Older history auto-pages in via the nearTop effect above, with
               no visible affordance: scrolling back should show everything. */}
@@ -4502,9 +4503,9 @@ function AgentChatBody({
           isAtBottom={isAtBottom}
           jumpToBottom={jumpToBottom}
         />
-        {/* max-w-[856px] stays in lock-step with the transcript band above. */}
+        {/* The same column as the transcript band above, so they stay in lock-step. */}
         {readOnly ? composerReplacement : (
-        <div ref={composerDockRef} className="relative mx-auto box-border flex w-full max-w-[856px] min-w-0 shrink-0 flex-col gap-2 border-t-0 bg-transparent px-7 pt-0 pb-4">
+        <div ref={composerDockRef} className="relative mx-auto box-border flex w-full max-w-(--chat-column) min-w-0 shrink-0 flex-col gap-2 border-t-0 bg-transparent px-7 pt-0 pb-4">
           {/* pt-0 puts the column's top on its topmost card, so this one fade
               sits on the composer alone or on the highest docked card.
               Portaled pickers carry their own. */}

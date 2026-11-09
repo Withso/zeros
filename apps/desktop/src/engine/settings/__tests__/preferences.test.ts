@@ -64,6 +64,18 @@ describe("personal app preference ownership", () => {
       syncPersonalPreferences({}, { restart_automatically_on_update: false }),
     ).toEqual({ restart_automatically_on_update: false });
   });
+  it("keeps the chat width through settings.toml, while older appearance docs stay without one", () => {
+    const wide = { appearance: { mode: "dark", codeThemes: {}, chatWidth: "wide" } };
+    expect(syncPersonalPreferences({}, wide)).toEqual(wide);
+    expect(syncPersonalPreferences({})).toEqual(wide);
+    expect(readFileSync(path.join(root, "settings.toml"), "utf8")).toContain('chatWidth = "wide"');
+    expect(() =>
+      syncPersonalPreferences({}, { appearance: { mode: "dark", codeThemes: {}, chatWidth: "huge" } }),
+    ).toThrow();
+    // Back to a doc written before the setting existed: no width is invented.
+    const plain = { appearance: { mode: "light", codeThemes: {} } };
+    expect(syncPersonalPreferences({}, plain)).toEqual(plain);
+  });
   it("replaces one preference object without losing another window's unrelated preference", () => {
     syncPersonalPreferences({
       appearance: { mode: "dark", codeThemes: { dark: "old" } },

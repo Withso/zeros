@@ -149,6 +149,43 @@ describe("explicit picks", () => {
   });
 });
 
+// 2026-11-09: Settings → Appearance → Chat width. The pick rides the same
+// stored prefs as the theme and stamps <html> before first paint, so the
+// chat never opens at one width and jumps to another.
+describe("chat width", () => {
+  it("defaults to normal and stamps the document before first paint", async () => {
+    const dom = installDom({ stored: { mode: "dark" } });
+    const store = await freshStore();
+    expect(store.getPrefs().chatWidth).toBe("normal");
+    expect(dom.attributes.get("data-chat-width")).toBe("normal");
+  });
+
+  it("applies and persists a pick, keeps it across a theme change and reads it back", async () => {
+    const dom = installDom({ stored: { mode: "dark" } });
+    let store = await freshStore();
+    store.setPrefs({ chatWidth: "wide" });
+    expect(store.getPrefs().chatWidth).toBe("wide");
+    expect(dom.attributes.get("data-chat-width")).toBe("wide");
+    store.setPrefs({ mode: "light" });
+    expect(store.getPrefs().chatWidth).toBe("wide");
+    const onDisk = JSON.parse(dom.storage.get(KEY)!);
+    expect(onDisk).toMatchObject({ mode: "light", chatWidth: "wide" });
+
+    const relaunched = installDom({ stored: onDisk });
+    store = await freshStore();
+    expect(store.getPrefs().chatWidth).toBe("wide");
+    expect(relaunched.attributes.get("data-chat-width")).toBe("wide");
+  });
+
+  it("reads a missing or unknown width as normal", async () => {
+    for (const chatWidth of [undefined, "huge", 3]) {
+      installDom({ stored: { mode: "dark", chatWidth } });
+      const store = await freshStore();
+      expect(store.getPrefs().chatWidth).toBe("normal");
+    }
+  });
+});
+
 describe("durable-mode fallback (localStorage purged)", () => {
   it("adopts the preload-exposed userData mode when localStorage is empty", async () => {
     installDom(); // no stored prefs — simulates an OS purge of Caches

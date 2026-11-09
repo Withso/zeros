@@ -4,6 +4,7 @@ import { appSidebarRegressionChecks } from "./ui-smoke-app-sidebar-regressions.m
 import { runWorkspaceHoverCards } from "./ui-smoke-workspace-hover-card.mjs";
 import { runWorkspaceShortcutsSmoke } from "./ui-smoke-workspace-shortcuts.mjs";
 import { runChatSurfacesSmoke } from "./ui-smoke-chat-surfaces.mjs";
+import { runChatWidthSmoke } from "./ui-smoke-chat-width.mjs";
 
 // App sidebar contract: Repository grouping by default with every workspace under
 // its repository; Status and None are also available; repository headers
@@ -513,6 +514,7 @@ export async function runAppSidebarSmoke({ page, check, harnessBase }) {
   await runWorkspaceHoverCards({ page, check, harnessBase });
   await runWorkspaceShortcutsSmoke({ page, check, harnessBase });
   await runChatSurfacesSmoke({ page, check, harnessBase });
+  await runChatWidthSmoke({ page, check, harnessBase });
 
   expect(errors).toEqual([]);
   check("app sidebar interactions have no browser exceptions", true);

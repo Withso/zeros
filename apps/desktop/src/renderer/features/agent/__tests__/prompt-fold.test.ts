@@ -37,7 +37,7 @@ describe("sent message width", () => {
       const markup = render(props);
       const prompt = classesOf(markup, "zeros-agent-turn-prompt group/usermsg");
       expect(prompt).toContain("w-full");
-      expect(prompt).toContain("max-w-[800px]");
+      expect(prompt).toContain("max-w-(--chat-lane)");
       expect(prompt).toContain("items-end");
       const bubble = classesOf(markup, 'data-user-bubble=""');
       expect(bubble).toContain("w-fit");

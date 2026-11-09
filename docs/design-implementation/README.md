@@ -1213,3 +1213,20 @@ Each landed step appends one line: date, workstream, what landed, evidence.
   sent-message-pills tests failed red first; the local-links smoke checks a
   chat pill in a sent message against `--prompt-pill-bg` and lighter than
   its bubble, beside the composer's `bg2` pill, in Dark and Light.
+- 2026-11-09 · 2, 5, 6 · Settings → Appearance → Chat width
+  (`docs/design-system.md` §0 item 16; canvas version 408): Narrow, Normal
+  and Wide set the chat's text column, `--chat-lane`, to 625, 800 (the
+  default) or 1200px, and `--chat-column` adds the lane's 28px gutters. The
+  transcript, answers, sent messages, the composer and its dock, the
+  read-only history bar and the chat's error row all read it in place of
+  the fixed 800 and 856px. The pick is an appearance preference beside the
+  theme (`chatWidth` in `zeros.appearance.v2`), synced to settings.toml as
+  `preferences.appearance.chatWidth`, optional so older docs read as Normal,
+  with the published settings schema regenerated, and stamped on `<html>`
+  as `data-chat-width` before the first paint. On the canvas, the
+  Appearance board gains the row and its menu, the new Chat window · Chat
+  width board shows all three at full size, and the chat kit's columns
+  read the same variables. Evidence: the chat-width, store and engine
+  preference tests failed red first; the chat-width smoke picks each width
+  in the real Settings page and measures the transcript and composer at
+  625, 800 and 1200px, then reloads with Wide kept.

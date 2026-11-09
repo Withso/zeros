@@ -272,7 +272,7 @@ export const TurnPromptHeader = memo(function TurnPromptHeader({
 
   // A sent message sits at the lane's right edge, as wide as its text up to
   // 7/8 of the lane, so even a long one reads as the reader's own. The row
-  // caps at 800px like the answer lane (turn-event-list.tsx) and holds the
+  // caps at the lane like the answers (turn-event-list.tsx) and holds the
   // hover row's right edge. bg2 with no edge sets it apart from the composer.
   // The text is selectable; editing uses the hover row's button. A long
   // message folds (prompt-fold.tsx), and oversized clipboard text still
@@ -305,7 +305,7 @@ export const TurnPromptHeader = memo(function TurnPromptHeader({
     </div>
   );
   return (
-    <div className="zeros-agent-turn-prompt group/usermsg relative flex w-full max-w-[800px] min-w-0 flex-col items-end">
+    <div className="zeros-agent-turn-prompt group/usermsg relative flex w-full max-w-(--chat-lane) min-w-0 flex-col items-end">
       {localFrom ? (
         // A sender line, as in a chat app: the sending chat's name and logo,
         // right-aligned above its bubble. "Sent from" is for screen readers.

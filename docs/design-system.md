@@ -286,6 +286,22 @@ exported page by page to [design-implementation/](design-implementation/README.m
     `features/agent/__tests__/jump-pills.test.ts`,
     `scripts/ui-smoke-chat-surfaces.mjs` and
     `scripts/ui-smoke-conversation-summary.mjs` hold it.
+16. **The reader picks the chat's width** (2026-11-09). Settings →
+    Appearance → Chat width sets the chat's text column, `--chat-lane`:
+    Narrow 625px, Normal 800px (the default) and Wide 1200px. The
+    conversation's column, `--chat-column`, adds the lane's 28px gutters on
+    each side. The transcript, every answer and tool row, sent messages, the
+    composer and what docks above it, the read-only history bar and the
+    chat's error row all take it, never a fixed width. Each is a maximum, so
+    a narrower pane still shrinks the chat and a docked Summary island keeps
+    its inset. The pick is an appearance preference beside the theme: kept
+    in `zeros.appearance.v2`, synced to the user's settings.toml as
+    `preferences.appearance.chatWidth` (absent reads as Normal) and stamped
+    on `<html>` as `data-chat-width` before the first paint, for Local and
+    cloud chats alike. `features/agent/__tests__/chat-width.test.ts`,
+    `shared/theme/__tests__/store.test.ts`,
+    `engine/settings/__tests__/preferences.test.ts` and
+    `scripts/ui-smoke-chat-width.mjs` hold it.
 
 ### How the direction changes
 
