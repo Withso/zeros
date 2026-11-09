@@ -1159,3 +1159,31 @@ Each landed step appends one line: date, workstream, what landed, evidence.
   chat-surfaces smoke checks the four text-only tabs and Setup's glyph, and
   the file editor's checks Files with no M, glyph or ✕ beside a notes.md tab
   that keeps its glyph.
+- 2026-11-09 · 2, 3, 5, 6 · One scrollbar (`docs/design-system.md` §0 item
+  15; canvas version 405). Every scrollbar takes one thumb in
+  `--scrollbar-thumb`, #222 in Dark and #EAEAEA in Light: 4px inside a 6px
+  `--scrollbar-size` slot that never changes width, the full 6px under the
+  pointer or while dragged, and no color change. The global rules are
+  unscoped, so portaled menus and dialogs, Home, Customize and the sidebar
+  match the chat and Workbench; the ScrollArea primitive, xterm (its slider,
+  at the right edge of xterm's own 14px track) and the diff viewer's shadow
+  root take the same tokens, and the composer and unfolded prompts drop their
+  browser-drawn thin bars. The transcript's bar shows only for the reader's own scrolling
+  (`features/agent/chat-scrollbar-reveal.ts`), so streaming no longer flashes
+  it on every new row. No fade covers a scrollbar: the top and dock fades stop
+  at its slot, and an unfolded prompt's mask keeps an opaque strip for it.
+  The docked Summary island now floats over the chat's top-right corner, so
+  the transcript's scrollbar sits at the pane's edge beside it while the
+  transcript, composer, Jump to latest, terminals, the empty pane and the
+  removed-agent and no-folder panels stay clear of it
+  (`CHAT_ASIDE_INSET_HOST_CLS`). Jump to your prompt is removed.
+  On the canvas, the Separator and Borders boards draw the thumb at rest and
+  under the pointer, the Conversation window and Summary boards show the bar
+  beside the island, and the Jump and both Tooltips boards drop the prompt
+  pill. Evidence: the scrollbar-contract, chat-scrollbar-reveal,
+  summary-island-scrollbar and jump-pills tests pin it; the chat-surfaces
+  smoke measures the docked island, the bar at the pane's edge and the clear
+  transcript, composer and fades, and checks that programmatic scrolls never
+  reveal the thumb while the reader's wheel shows it in #222 and #EAEAEA;
+  the summary smoke checks the island beside the edge-to-edge scroller and
+  that it takes its own clicks.

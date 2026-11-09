@@ -66,6 +66,7 @@ async function dockGeometry(page) {
     const composer = items.at(-1);
     const box = (element) => element.getBoundingClientRect();
     const f = box(fade), c = box(column), t = box(topmost), k = box(composer);
+    const slot = Number.parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--scrollbar-size"));
     // Above the transcript in paint order: it wins the hit test once it takes
     // pointer events (at rest it never does).
     const restingPointer = getComputedStyle(fade).pointerEvents;
@@ -76,7 +77,9 @@ async function dockGeometry(page) {
       fades: fades.length,
       height: Math.round(f.height),
       flushOnTopmost: Math.abs(f.bottom - t.top) < 0.5,
-      spansColumn: Math.abs(f.left - c.left) < 0.5 && Math.abs(f.right - c.right) < 0.5,
+      // The column's width, less a scrollbar slot at its right edge, so the
+      // transcript's scrollbar never fades (2026-11-09).
+      spansColumn: Math.abs(f.left - c.left) < 0.5 && Math.abs(c.right - slot - f.right) < 0.5,
       topmost: topmost.hasAttribute("data-queued-messages") ? "queued" : topmost === composer ? "composer" : topmost.tagName,
       composerClear: f.bottom <= k.top - 8,
       restingPointer,

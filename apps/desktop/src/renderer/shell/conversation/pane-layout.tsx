@@ -113,6 +113,7 @@ import {
   WORKBENCH_COLUMN_ATTR,
   WORKBENCH_MIN_PX,
 } from "./pane-sizing";
+import { CHAT_ASIDE_INSET_HOST_CLS } from "./conversation-summary";
 
 /** Workbench's live element, reached from any node inside the pane tree. It is
  * the conversation column's sibling in the two-column row. */
@@ -1372,10 +1373,10 @@ function ChatPane({ paneId, ctx }: { paneId: string; ctx: PaneCtx }) {
         leading={stripLeading}
         trailing={stripTrailing}
       />
-      <div className="flex min-h-0 min-w-0 flex-1">
+      <div className={cn("relative flex min-h-0 min-w-0 flex-1", CHAT_ASIDE_INSET_HOST_CLS)}>
         <div className="relative min-h-0 min-w-0 flex-1">
           {!paneActiveChatId && ctx.emptyContent && (
-            <div className="absolute inset-0 flex min-h-0 flex-col">
+            <div className="absolute inset-y-0 left-0 right-[var(--chat-aside-inset,0px)] flex min-h-0 flex-col">
               {ctx.emptyContent}
             </div>
           )}

@@ -8,14 +8,9 @@
 
 .composer-pm {
   outline: none;
-  /* Thin scrollbar with a --border3 thumb + transparent track — the codebase
-     standard (matches .zeros-agent-scrollbar in styles/global/scrollbars.css; scrollbar-width
-     itself is set via the EDITOR_CLASS utility). scrollbar-color (the STANDARD
-     property) is required here: once scrollbar-width is set on an element,
-     Chromium ignores ::-webkit-scrollbar pseudo-element rules — so the native
-     thin scrollbar was showing its own light, wider-on-hover chrome instead of
-     our color. */
-  scrollbar-color: var(--border3) transparent;
+  /* No scrollbar-width / scrollbar-color here: either standard property makes
+     Chromium ignore ::-webkit-scrollbar, so the editor keeps the app's one
+     thumb from styles/global/scrollbars.css. */
 }
 .composer-pm:focus,
 .composer-pm:focus-visible:where(:not([data-zeros-focus-visible="false"])) {

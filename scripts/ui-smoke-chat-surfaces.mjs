@@ -152,6 +152,97 @@ export async function runChatSurfacesSmoke({ page, check, harnessBase }) {
   expect(lone.panes[0].radii).toEqual(["0px", "0px", "0px", "0px"]);
   check("A lone chat pane runs edge to edge with square corners", true);
 
+  // 2026-11-09: with the side column hidden and one pane, the Summary docks as
+  // an island over the chat's top-right corner. The transcript's scrollbar
+  // stays at the pane's edge beside it; the transcript, composer and both
+  // fades stay clear of the island, and neither fade covers the bar.
+  await page.getByRole("button", { name: "Hide design panel", exact: true }).click();
+  const summaryIsland = page.locator("[data-summary-island]");
+  await expect(summaryIsland).toBeVisible();
+  // Measure once the island's 4px entrance settles.
+  await summaryIsland.evaluate((node) => Promise.all(node.getAnimations().map((animation) => animation.finished)));
+  const chatLayout = () => page.evaluate(() => {
+    const visible = (node) => node.getClientRects().length > 0;
+    const pane = document.querySelector("[data-pane-root]");
+    const scroller = [...pane.querySelectorAll(".zeros-agent-body")].find(visible);
+    const surface = scroller.closest(".zeros-agent-surface") ?? pane;
+    const dockFade = [...surface.querySelectorAll("[data-composer-dock-fade]")].find(visible);
+    const island = document.querySelector("[data-summary-island]");
+    const right = (node) => node.getBoundingClientRect().right;
+    const box = island?.getBoundingClientRect();
+    const hit = box && document.elementFromPoint(box.left + box.width / 2, box.top + 12);
+    return {
+      pane: right(pane),
+      scroller: right(scroller),
+      size: Number.parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--scrollbar-size")),
+      paddingRight: getComputedStyle(scroller).paddingRight,
+      messages: right(scroller.querySelector(".zeros-agent-messages")),
+      topFade: right(surface.querySelector("[data-chat-top-fade]")),
+      dock: right(dockFade.parentElement),
+      dockFade: right(dockFade),
+      island: box ? { left: box.left, right: box.right } : null,
+      hitIsland: !!hit && island.contains(hit),
+    };
+  });
+  const docked = await chatLayout();
+  expect(docked.size).toBe(6);
+  near(docked.scroller, docked.pane);
+  near(docked.pane - docked.island.right, 16);
+  // w-72 and the island's 16px offset.
+  expect(docked.paddingRight).toBe("304px");
+  expect(docked.island.right).toBeLessThanOrEqual(docked.scroller - docked.size);
+  for (const edge of [docked.messages, docked.dock, docked.topFade, docked.dockFade]) {
+    expect(edge).toBeLessThanOrEqual(docked.island.left + 0.5);
+  }
+  expect(docked.hitIsland).toBe(true);
+  check("Docked Summary island: the chat's scrollbar stays at the pane's edge beside the island, which takes its own clicks, while the transcript, composer and fades end at the island", true);
+
+  // The chat's bar shows only for the reader's own scrolling. Following the
+  // tail as content grows, or any other programmatic scroll, never reveals it.
+  const transcript = page.locator("[data-pane-root] .zeros-agent-body").filter({ visible: true });
+  const settle = () => transcript.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  await transcript.evaluate((node) => {
+    node.querySelector(".zeros-agent-messages").style.minHeight = "4000px";
+  });
+  await settle();
+  expect(await transcript.evaluate((node) => node.scrollHeight > node.clientHeight)).toBe(true);
+  await transcript.evaluate((node) => { node.scrollTop = 900; });
+  await settle();
+  await transcript.evaluate((node) => { node.scrollTop = 200; });
+  await settle();
+  expect(await transcript.getAttribute("data-scrolling")).toBeNull();
+  // Only the thumb's color is read here: Chromium misreports a scrollbar
+  // part's border once an attribute restyles it, though it paints the 4px
+  // thumb correctly. scrollbar-contract.test.ts pins that geometry.
+  const thumb = () => transcript.evaluate((node) => getComputedStyle(node, "::-webkit-scrollbar-thumb").backgroundColor);
+  expect(await thumb()).toBe("rgba(0, 0, 0, 0)");
+  const scrollerBox = await transcript.boundingBox();
+  await page.mouse.move(scrollerBox.x + scrollerBox.width / 3, scrollerBox.y + scrollerBox.height / 2);
+  for (const [theme, fill] of [["dark", "rgb(34, 34, 34)"], ["light", "rgb(234, 234, 234)"]]) {
+    await page.evaluate((value) => {
+      document.documentElement.dataset.theme = value;
+    }, theme);
+    await page.mouse.wheel(0, 120);
+    await expect(transcript).toHaveAttribute("data-scrolling", "true");
+    expect(await thumb()).toBe(fill);
+  }
+  await expect(transcript).not.toHaveAttribute("data-scrolling", { timeout: 3000 });
+  await page.evaluate(() => {
+    document.documentElement.dataset.theme = "dark";
+  });
+  await transcript.evaluate((node) => {
+    node.querySelector(".zeros-agent-messages").style.minHeight = "";
+  });
+  check("Chat scrollbar: programmatic scrolls never reveal it; the reader's wheel shows the thumb in #222 (Dark) or #EAEAEA (Light), and it hides again once they stop", true);
+
+  await page.getByRole("button", { name: "Show design panel", exact: true }).click();
+  await expect(page.locator("[data-workbench-island]")).toBeVisible();
+  await expect(summaryIsland).toHaveCount(0);
+  const undocked = await chatLayout();
+  expect(undocked.island).toBeNull();
+  expect(undocked.paddingRight).toBe("0px");
+  near(undocked.scroller, undocked.pane);
+
   const panes = page.locator("[data-pane-root]");
   await page.getByRole("button", { name: "Pane options", exact: true }).click();
   await page.getByRole("menuitem", { name: "Split Right", exact: true }).click();

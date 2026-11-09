@@ -163,7 +163,7 @@ export async function runConversationSummarySmoke({
   });
 
   await verify(
-    "island reserves chat space and uses the requested surface",
+    "island floats beside the chat's scrollbar, keeps the chat clear and uses the requested surface",
     async () => {
       await expect(trigger).toBeVisible();
       await expect(trigger).toHaveAttribute("aria-expanded", "true");
@@ -187,13 +187,28 @@ export async function runConversationSummarySmoke({
         matchesBackground: true,
         overflow: false,
       });
+      // 2026-11-09: the island floats over the chat's top-right corner. The
+      // conversation and composer end at its left edge, while the chat's
+      // scroller, and so its scrollbar, runs on to the pane's edge.
+      await island.evaluate((node) => Promise.all(node.getAnimations().map((animation) => animation.finished)));
       const chatBox = await page.getByTestId("chat-body").boundingBox();
       const cardBox = await island.boundingBox();
-      expect(chatBox.x + chatBox.width).toBeLessThanOrEqual(cardBox.x);
+      expect(chatBox.x + chatBox.width).toBeLessThanOrEqual(cardBox.x + 0.5);
+      const composerBox = await page.getByRole("textbox", { name: "Message" }).boundingBox();
+      expect(composerBox.x + composerBox.width).toBeLessThanOrEqual(cardBox.x);
       const column = await page.locator("[data-zeros-column-2]").boundingBox();
+      const scrollerBox = await page.getByTestId("chat-scroller").boundingBox();
       expect(
-        column.x + column.width - cardBox.x - cardBox.width,
-      ).toBeGreaterThanOrEqual(16);
+        Math.abs(scrollerBox.x + scrollerBox.width - column.x - column.width),
+      ).toBeLessThan(0.5);
+      expect(
+        Math.abs(column.x + column.width - cardBox.x - cardBox.width - 16),
+      ).toBeLessThan(0.5);
+      const hit = await island.evaluate((node) => {
+        const box = node.getBoundingClientRect();
+        return node.contains(document.elementFromPoint(box.left + box.width / 2, box.top + 12));
+      });
+      expect(hit).toBe(true);
       await expect(
         island.getByRole("button", { name: "Files", exact: true }),
       ).toBeVisible();

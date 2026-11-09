@@ -4,6 +4,8 @@
  *  picker is portaled, so PopoverContent surface="composer" carries its own.
  *  Inside that portal --pane-bg is :root's bg1, which matches because a picker
  *  only opens in the focused pane. 32px equals the transcript's pb-8, so the
- *  last line at rest stays clear. */
+ *  last line at rest stays clear. It stops a scrollbar slot short of the
+ *  column's right edge: in a narrow pane that edge is the transcript's, and
+ *  the scrollbar never fades; in a wide one only the column's gutter is left. */
 export const COMPOSER_DOCK_FADE =
-  "pointer-events-none absolute inset-x-0 bottom-full h-8 bg-gradient-to-t from-(--pane-bg) to-transparent";
+  "pointer-events-none absolute bottom-full left-0 right-(--scrollbar-size) h-8 bg-gradient-to-t from-(--pane-bg) to-transparent";

@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import { createElement as h } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -67,13 +68,22 @@ describe("sent message fold", () => {
       `max-h-[${PROMPT_FOLD_COLLAPSED_PX + 8}px]`, "overflow-clip", "mask-b-from-[calc(100%-2rem)]",
     ]));
     const expanded = PROMPT_FOLD_EXPANDED_CLS.split(" ");
-    expect(expanded).toEqual(expect.arrayContaining([
-      `max-h-[${PROMPT_FOLD_EXPANDED_PX + 8}px]`, "overflow-y-auto",
-      "data-more-above:mask-t-from-[calc(100%-2rem)]", "data-more-below:mask-b-from-[calc(100%-2rem)]",
-    ]));
+    expect(expanded).toEqual([
+      `max-h-[${PROMPT_FOLD_EXPANDED_PX + 8}px]`, "overflow-y-auto", "zeros-prompt-fold-scroll",
+    ]);
     // Reaching its end hands the wheel back to the transcript.
     expect(expanded).not.toContain("overscroll-contain");
-    expect(expanded.some((cls) => cls.startsWith("mask-"))).toBe(false);
+    // 2026-11-09: the edge fades leave its scrollbar alone. The fade is one
+    // gradient unioned with an opaque strip the width of the scrollbar slot,
+    // so the app's thumb stays solid at both ends.
+    const css = readFileSync(path.resolve(process.cwd(), "styles/global/scrollbars.css"), "utf8");
+    expect(css).toContain(".zeros-prompt-fold-scroll {");
+    expect(css).toContain(
+      "linear-gradient(to left, black var(--scrollbar-size), transparent var(--scrollbar-size))",
+    );
+    expect(css).toContain("mask-composite: add;");
+    expect(css).toContain(".zeros-prompt-fold-scroll[data-more-above] {\n  --prompt-fold-fade-top: 2rem;");
+    expect(css).toContain(".zeros-prompt-fold-scroll[data-more-below] {\n  --prompt-fold-fade-bottom: 2rem;");
   });
 });
 

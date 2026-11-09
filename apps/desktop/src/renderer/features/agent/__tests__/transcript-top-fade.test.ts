@@ -19,9 +19,13 @@ describe("transcript top edge", () => {
   // 2026-11-06 direction (Zeros Design v378): in every pane the conversation
   // fades out over 32px right under its tab strip, starting at the strip's
   // edge like the fade above the composer, and the first message starts below
-  // that fade so nothing sits under it until the transcript scrolls.
+  // that fade so nothing sits under it until the transcript scrolls. Since
+  // 2026-11-09 it stops short of the scrollbar, or of a docked summary island.
   it("fades the transcript out over 32px from the strip's edge", () => {
-    const fade = classLiteral(agentChat(), "pointer-events-none absolute inset-x-0 top-0 z-1");
+    const fade = classLiteral(
+      agentChat(),
+      "pointer-events-none absolute top-0 left-0 right-[max(var(--scrollbar-size),var(--chat-aside-inset,0px))] z-1",
+    );
     expect(fade).toEqual(
       expect.arrayContaining(["h-8", "bg-gradient-to-b", "from-(--pane-bg)", "to-transparent"]),
     );

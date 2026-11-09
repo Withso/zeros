@@ -19,7 +19,7 @@ const store = useSessionsStore.getState;
 const shared: TranscriptTurnShared = {
   chatId, folder: cwd, agentDisplayName: "Codex", signInAgentId: null, surfaceActive: true, deferContent: false,
   scrollRoot: null, readOnly: false, transcriptReadOnly: false, interactive: true, hasChatThread: true, designRole: false,
-  setEditingMessageId: vi.fn(), setActivePromptEl: vi.fn(),
+  setEditingMessageId: vi.fn(),
   ctx: { isStreaming: false, activeTurnStartedAt: 10_000, lastMessageId: null, editBaselines: new Map(), pendingPermission: null,
     pendingQuestionToolCallIds: new Set(), respondToQuestion: vi.fn(), respondToPermission: vi.fn(),
     retrySafetyReview: async () => {}, recordPolicy: vi.fn(), chatId, setMode: null, subagentChildren: new Map(), editAndResubmit: vi.fn() },

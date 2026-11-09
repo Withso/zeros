@@ -352,6 +352,12 @@
         "bg1-hover"
       ],
       "why": "Tinted/grouping washes; meaning is carried by their text and icons."
+    },
+    {
+      "tokens": [
+        "scrollbar-thumb"
+      ],
+      "why": "A scroll-position hint, shown only while its scroller is hovered or scrolled and never the only way to scroll. Faint by the owner's choice (2026-11-09): #222 in Dark, #EAEAEA in Light."
     }
   ]
 }

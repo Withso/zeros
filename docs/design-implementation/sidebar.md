@@ -27,7 +27,7 @@ Code notes:
 Owner today: `shell/app-sidebar.tsx · shared/lib/workspace-status.ts`
 
 Code notes:
-- The list scroller sits outside the auto-hide scrollbar scope, so a classic macOS track appears on overflow and every trailing cluster reflows. (`shell/app-sidebar.tsx:850 · styles/global/scrollbars.css:33-34,42`)
+- The list scroller takes the app's scrollbar since its rules went unscoped (2026-11-09): no classic macOS track, but its 6px slot appears on overflow, so the trailing clusters shift 6px then. (`shell/app-sidebar.tsx:843 · styles/global/scrollbars.css`)
 - The grouped-row status gutter centres its mark 20px from the rail, while the header icon column is centred at 24px. (`shell/sidebar-workspace-row.tsx:107-108 · shell/sidebar-repository-header.tsx:68`)
 
 ## Sidebar · No grouping (`SideUngrouped`)

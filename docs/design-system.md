@@ -252,6 +252,35 @@ exported page by page to [design-implementation/](design-implementation/README.m
     `scripts/ui-smoke-composer-prompt-fold.mjs`,
     `scripts/ui-smoke-file-pill-navigation.mjs` and
     `scripts/ui-smoke-tool-presentation.mjs` hold it.
+15. **One scrollbar** (2026-11-09). Every scrollbar in the app, portaled
+    menus and dialogs, Home and the sidebar included, is one thumb in
+    `--scrollbar-thumb`, #222 in Dark and #EAEAEA in Light, inside a
+    `--scrollbar-size` slot of 6px that never changes width. It is 4px wide
+    at rest (a 1px `--scrollbar-thumb-inset` each side), takes the full 6px
+    under the pointer or while dragged, and never changes color. It shows
+    while its scroller is hovered, except in the chat transcript, where it
+    shows only while the reader scrolls (wheel, touch, a scroll key, or a
+    scroll while the pointer is held) and for 700ms after, never for a plain
+    click or the agent's own streaming scrolls
+    (`features/agent/chat-scrollbar-reveal.ts`). No fade covers a
+    scrollbar: the transcript's top and dock fades and an unfolded prompt's
+    edges stop at its slot. With the side column hidden and one pane, the
+    docked Summary island floats over the chat's top-right corner: the
+    transcript's scrollbar stays at the pane's edge beside it, while the
+    transcript, composer, Jump to latest, terminals, the empty pane and the
+    chat's dead-end panels stay clear of it (`CHAT_ASIDE_INSET_HOST_CLS`
+    publishes `--chat-aside-inset`).
+    `styles/global/scrollbars.css` reaches every scroller in the document;
+    the ScrollArea primitive, xterm and the diff viewer's shadow root take
+    the same tokens where they draw their own. The thumb is a reviewed
+    contrast exemption, faint by the owner's choice. Jump to latest is the
+    chat's one jump control; Jump to your prompt is retired.
+    `shared/theme/__tests__/scrollbar-contract.test.ts`,
+    `features/agent/__tests__/chat-scrollbar-reveal.test.ts`,
+    `shell/conversation/__tests__/summary-island-scrollbar.test.ts`,
+    `features/agent/__tests__/jump-pills.test.ts`,
+    `scripts/ui-smoke-chat-surfaces.mjs` and
+    `scripts/ui-smoke-conversation-summary.mjs` hold it.
 
 ### How the direction changes
 
@@ -338,6 +367,7 @@ imports, following property paths such as `chip.cls`). The ledger counts
 | Grouped content on canvas | `bg-bg1-highlight` | — | — | A wash, never the only boundary |
 | Primary action | `bg-primary-button-bg` | `bg-primary-button-hover` | — | Text `text-primary-button-fg`; one per view |
 | Selected control: pressed toggle, active tab or segment, chosen chip or option | `bg-selected-bg` | holds `bg-selected-bg` | never an edge; a resting edge is unchanged | One step above hover in Dark; equal to `bg2-highlight` in Light, where status text needs AA |
+| Scrollbar thumb, everywhere | `--scrollbar-thumb` (#222 Dark, #EAEAEA Light) | no color change; 4px grows to 6px under the pointer | — | A 6px `--scrollbar-size` slot; shown while its scroller is hovered, the chat's only while the reader scrolls (§0 item 15) |
 
 - Hover is **surface-scoped**: use the hover of the surface the element sits on.
 - **Selected is a step above hover** for navigation: sidebar, tree and layer

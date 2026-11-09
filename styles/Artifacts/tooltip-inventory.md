@@ -107,8 +107,7 @@ tabs, settings sidebar tabs, workspace rows (earlier).
 - `Copy output` / `Copied` — `turn-footer.tsx:447`
 - `Turn actions` — `turn-footer.tsx:463`
 - ⚠ `{changed file path}` — `turn-footer.tsx:491` — path reveal
-- `Jump to your prompt` — `jump-pills.tsx:70`
-- `Jump to latest` — `jump-pills.tsx:98`
+- `Latest message` — `jump-pills.tsx:31` — Jump to latest
 - ⚠ `{directory path}` — `added-directories.tsx:46` · `Remove` — `:54`
 - `Close` — `use-composer-editor.tsx:777` — image-preview close
 - ⚠ `{mention/file path or name}` — `composer-editor/pills.tsx:36`, `pill-views.tsx:32/73/90` · `Remove` — `pills.tsx:53/124`

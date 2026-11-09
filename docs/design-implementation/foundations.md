@@ -38,7 +38,7 @@ Changes:
 - Dark border3 #444444 and border4 #575757: control outlines read better (1.65 and 2.23:1 on bg2).
 - Focus is brighter: highlighted-bright #CACACA in dark (8.3:1), #4C4741 in light (7.0:1).
 - Tiles take the standard focus ring instead of a 1px border2 ring.
-- The always-visible scrollbar thumb is border2 at rest and border3 on hover or drag (was border1).
+- Every scrollbar thumb is `--scrollbar-thumb`, #222 in Dark and #EAEAEA in Light: 4px at rest in its 6px slot and 6px under the pointer or while dragged, with no color change (2026-11-09; the board's border2 at rest and border3 on hover retire).
 - The Design tab uses the same keyboard ring: fields, segments, tools, keyframes and pads (a 1px inset or outline today, shown on a click too).
 
 ## Status color (`FndColor`)

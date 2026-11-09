@@ -290,7 +290,8 @@ import { cloudPresentationRunning } from "./cloud-turn-presentation";
 import { pickActiveWorkflow } from "./workflow-activity";
 import { stabilizeTurns } from "./stable-turns";
 import { turnFailureForCard } from "./turn-failure";
-import { JumpToLatestButton, JumpToPromptPill } from "./jump-pills";
+import { watchChatScrollbarReveal } from "./chat-scrollbar-reveal";
+import { JumpToLatestButton } from "./jump-pills";
 import {
   CheckpointRail,
   sameCheckpoints,
@@ -845,9 +846,6 @@ function AgentChatBody({
 
   // State, not refs, so the hooks that need these elements re-run when they mount.
   const [scrollEl, setScrollEl] = useState<HTMLDivElement | null>(null);
-  const [activePromptEl, setActivePromptEl] = useState<HTMLDivElement | null>(
-    null,
-  );
   // Mirrors scrollEl for imperative readers.
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const agentsList = useWorkspaceAgents(chatThread?.folder, interactive);
@@ -2423,26 +2421,14 @@ function AgentChatBody({
     return () => scrollEl.removeEventListener("scroll", onScroll);
   }, [scrollEl, surfaceActive]);
 
-  // Reveal the scrollbar only while scrolling, by flagging data-scrolling on the
-  // element directly so the scroll stream never re-renders the transcript
-  // (runtime-content.css keys the thumb off it).
+  // The scrollbar shows only while the reader scrolls; streaming's own scrolls
+  // to the tail never reveal it.
   useEffect(() => {
     if (!scrollEl) return;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const onScroll = () => {
-      if (!surfaceActiveRef.current || restoreInProgressRef.current) return;
-      scrollEl.dataset.scrolling = "true";
-      if (timer) clearTimeout(timer);
-      timer = setTimeout(() => {
-        delete scrollEl.dataset.scrolling;
-      }, 700);
-    };
-    scrollEl.addEventListener("scroll", onScroll, { passive: true });
-    return () => {
-      scrollEl.removeEventListener("scroll", onScroll);
-      if (timer) clearTimeout(timer);
-      delete scrollEl.dataset.scrolling;
-    };
+    return watchChatScrollbarReveal(
+      scrollEl,
+      () => surfaceActiveRef.current && !restoreInProgressRef.current,
+    );
   }, [scrollEl]);
 
   // Re-probe when the oldest message id changes too: a rebuild can insert a
@@ -4223,7 +4209,6 @@ function AgentChatBody({
       hasChatThread: transcriptHasChatThread,
       designRole: transcriptDesignRole,
       setEditingMessageId,
-      setActivePromptEl,
       ctx: transcriptCtx,
       actions: transcriptActions,
     }),
@@ -4241,7 +4226,6 @@ function AgentChatBody({
       transcriptHasChatThread,
       transcriptDesignRole,
       setEditingMessageId,
-      setActivePromptEl,
       transcriptCtx,
       transcriptActions,
     ],
@@ -4323,8 +4307,12 @@ function AgentChatBody({
           ref={setScrollContainer}
           data-agent-diff-collision-boundary=""
           // `isolate` keeps everything layered inside the transcript (code
-          // gutters, copy buttons) under the top fade, the rail and the pill.
-          className="zeros-agent-body zeros-agent-scrollbar isolate min-h-0 flex-1 overflow-x-hidden overflow-y-auto bg-transparent"
+          // gutters, copy buttons) under the top fade and the rail. A docked
+          // summary island floats over the pane's right side: the padding keeps
+          // the content clear of it, with or without a scrollbar, while the bar
+          // stays at this scroller's own edge, the pane's (--chat-aside-inset,
+          // ChatPane).
+          className="zeros-agent-body zeros-agent-scrollbar isolate min-h-0 flex-1 overflow-x-hidden overflow-y-auto bg-transparent pr-(--chat-aside-inset)"
           style={{ position: "relative" }}
         >
           <ConversationContent
@@ -4482,19 +4470,16 @@ function AgentChatBody({
             )}
           </ConversationContent>
         </Conversation>
-        {/* Outside the scroller, so it stays put while the transcript scrolls,
-            and on the 856px column's right edge rather than the pane's. */}
-        <div className="pointer-events-none absolute inset-x-0 top-3 z-2 mx-auto flex w-full max-w-[856px] justify-end px-7">
-          <JumpToPromptPill scrollEl={scrollEl} promptEl={activePromptEl} />
-        </div>
         {/* Stable top fade under the chat strip, present from the first paint so a
             restore never pops it in; it never takes clicks. */}
         <div
           aria-hidden="true"
+          data-chat-top-fade=""
           // It ends where the transcript column starts (pt-8), so the first
           // message never sits under it while scrolled content still dissolves
-          // under the strip.
-          className="pointer-events-none absolute inset-x-0 top-0 z-1 h-8 bg-gradient-to-b from-(--pane-bg) to-transparent"
+          // under the strip. It stops short of the scrollbar, or of a docked
+          // summary island, so neither fades.
+          className="pointer-events-none absolute top-0 left-0 right-[max(var(--scrollbar-size),var(--chat-aside-inset,0px))] z-1 h-8 bg-gradient-to-b from-(--pane-bg) to-transparent"
         />
         {/* A sibling of the scroller so the rail stays pinned; z-2 paints above
             the top mask. */}
@@ -4509,9 +4494,10 @@ function AgentChatBody({
         />
       </div>
 
-      {/* relative so JumpPills anchors to the composer's top edge, outside the
-          scroll container. */}
-      <div className="relative shrink-0">
+      {/* relative so Jump to latest anchors to the composer's top edge, outside
+          the scroll container; the padding keeps the composer clear of a
+          docked summary island. */}
+      <div className="relative shrink-0 pr-(--chat-aside-inset)">
         <JumpToLatestButton
           isAtBottom={isAtBottom}
           jumpToBottom={jumpToBottom}

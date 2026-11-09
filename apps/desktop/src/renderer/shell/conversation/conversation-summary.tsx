@@ -39,6 +39,13 @@ type SummaryState = {
 };
 const SummaryContext = createContext<SummaryState | null>(null);
 
+/** On the chat pane's body: while the docked island is open, publish the width
+ *  it covers at the body's right edge, w-72 plus its right-4 offset. The island
+ *  floats over the chat so the transcript's scrollbar stays at the pane's edge;
+ *  everything portaled into the body reads the inset to stay clear of it. */
+export const CHAT_ASIDE_INSET_HOST_CLS =
+  "has-[[data-summary-island]]:[--chat-aside-inset:calc(var(--spacing)*76)]";
+
 /** Only the small summary consumers subscribe to presentation changes. The
  * pane tree and its portaled transcript keep their identity on every toggle. */
 export function ConversationSummaryProvider({
@@ -223,7 +230,7 @@ export function ConversationSummaryIsland() {
       aria-label="Workspace summary"
       data-summary-island=""
       className={cn(
-        "conversation-summary-island bg-bg1-bright my-3 mr-4 max-h-[calc(100%-24px)] w-72 shrink-0 self-start overflow-y-auto overscroll-contain p-3",
+        "conversation-summary-island bg-bg1-bright absolute top-3 right-4 z-2 max-h-[calc(100%-24px)] w-72 overflow-y-auto overscroll-contain p-3",
         MENU_SURFACE_RADIUS,
       )}
     >
