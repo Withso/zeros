@@ -58,23 +58,24 @@ export class DesignGpuStats {
   open(key: string): void {
     if (this.openKey === key) return;
     this.openKey = key;
-    this.openedAt = designGpuEpoch();
-    this.firstFrameDrawnAt = null;
-    this.allVisibleCrispAt = null;
-    for (const series of Object.values(this.samples)) series.length = 0;
+    this.begin();
   }
 
   /** A newly mounted canvas: even the same page is a new open (a tab return
    * is a reopen to the person looking at it). */
   restart(key: string): void {
-    this.reset();
-    this.open(key);
+    this.openKey = key;
+    this.begin();
   }
 
-  /** Restarts timing at the next open, for a bench repetition. */
+  /** Restarts the current open now, for a bench repetition: the next settled
+   * composite with every drawable frame crisp completes it. */
   reset(): void {
-    this.openKey = null;
-    this.openedAt = null;
+    this.begin(this.openKey === null ? null : designGpuEpoch());
+  }
+
+  private begin(at: number | null = designGpuEpoch()): void {
+    this.openedAt = at;
     this.firstFrameDrawnAt = null;
     this.allVisibleCrispAt = null;
     for (const series of Object.values(this.samples)) series.length = 0;

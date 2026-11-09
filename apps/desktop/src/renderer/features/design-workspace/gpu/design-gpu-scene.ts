@@ -141,8 +141,13 @@ export class DesignGpuScene {
     theme.observe(this.world.ownerDocument.documentElement, { attributes: true, attributeFilter: ["class", "style", "data-theme", "data-color-scheme"] });
     this.cleanups.push(() => theme.disconnect());
     this.cleanups.push(this.deps.recordings.subscribe((key) => {
-      if (this.input.owner && key === designRecordingsOwnerKey(this.input.owner)) { this.rows = null; this.requestPaint(); }
+      if (!this.input.owner || key !== designRecordingsOwnerKey(this.input.owner)) return;
+      this.rows = null;
+      this.requestPaint();
+      // A newly adopted recording may be one this canvas already failed to draw.
+      queueMicrotask(() => this.failUndrawable());
     }));
+    this.cleanups.push(this.deps.client.onUnreadable(() => this.failUndrawable()));
     this.cleanups.push(this.deps.client.onContext((lost) => {
       this.gate.context(lost);
       if (!lost) this.requestPaint();
@@ -168,8 +173,19 @@ export class DesignGpuScene {
     if (ownerChanged) this.queue = [];
     if (first) this.deps.stats.restart(input.openKey);
     else this.deps.stats.open(input.openKey);
+    if (ownerChanged) this.failUndrawable();
     this.scheduleDemand(0);
     this.requestPaint();
+  }
+
+  /** Recordings this canvas can't draw fail like engine failures: a frame is
+   * never left covered by a plane that will not paint it. */
+  private failUndrawable(): void {
+    const owner = this.input.owner;
+    const { unreadable } = this.deps.client;
+    if (!owner || this.disposed || !unreadable.size && !this.badFonts.size) return;
+    this.deps.recordings.failUndrawable(owner, (recording) => unreadable.get(recording.key) ??
+      (recording.typefaces.some((id) => this.badFonts.has(id)) ? "A font this frame uses failed its content check." : null));
   }
 
   dispose(): void {
@@ -492,7 +508,7 @@ export class DesignGpuScene {
     this.verifyingFonts.add(id);
     void designTypefaceContentId(bytes).then((actual) => {
       this.verifyingFonts.delete(id);
-      if (actual !== id) { this.badFonts.add(id); return; }
+      if (actual !== id) { this.badFonts.add(id); this.failUndrawable(); return; }
       this.deps.client.registerFonts([{ id, bytes }]);
       this.verifiedFonts.add(id);
       this.requestPaint();

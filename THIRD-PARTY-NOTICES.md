@@ -69,6 +69,17 @@ regression test covers that dependency change.
   Skia pins, are in [`third_party/canvaskit/`](third_party/canvaskit) and
   reproduced in `THIRD-PARTY-LICENSES.txt`.
 
+### Recorded Design canvas test fixture (Liberation Serif)
+
+- **Component:** Liberation Serif Regular 2.1.5, unmodified. Licensed under the
+  SIL Open Font License 1.1, with the Reserved Font Name "Liberation".
+- **Use:** a test fixture only; it never ships.
+  `apps/desktop/src/renderer/features/design-workspace/__tests__/fixtures/chromium-150-recording/`
+  holds a real Chromium 150 recording whose text uses this font. The README
+  there records the provenance of both files.
+- **Terms:** [`third_party/liberation-fonts/LICENSE`](third_party/liberation-fonts/LICENSE),
+  with the Google Corporation and Red Hat, Inc. copyright notices.
+
 ### File document previews
 
 - **PDF:** [`pdfjs-dist` 6.4.299](https://github.com/mozilla/pdf.js), Apache-2.0,

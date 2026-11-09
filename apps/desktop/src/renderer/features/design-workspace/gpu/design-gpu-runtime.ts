@@ -16,6 +16,12 @@ export interface DesignGpuRuntime {
   acquireClient(): DesignGpuWorkerClient;
   releaseClient(): void;
   readonly client: DesignGpuWorkerClient | null;
+  /** Why the recorded canvas can't draw this session (no WebGL2, or its raster
+   * worker failed), or null. Canvases then show pictures as with the flag off,
+   * never blank frames; a relaunch tries again. */
+  readonly unavailable: string | null;
+  markUnavailable(reason: string): void;
+  subscribe(listener: () => void): () => void;
 }
 
 /** Recordings, chunks and bench stats for the recorded canvas, and the one
@@ -27,8 +33,17 @@ export function createDesignGpuRuntime(source: DesignRecordingsSource, createWor
   DesignGpuRuntime {
   const chunks = new DesignRecordingChunks();
   const recordings = new DesignRecordings({ source, chunks, setTimer: timers.setTimer, clearTimer: timers.clearTimer });
+  const stats = new DesignGpuStats();
   let client: DesignGpuWorkerClient | null = null, holders = 0;
   let idle: unknown = null;
+  let unavailable: string | null = null;
+  const listeners = new Set<() => void>();
+  const markUnavailable = (reason: string) => {
+    if (unavailable !== null) return;
+    unavailable = reason;
+    stats.error = reason;
+    for (const listener of [...listeners]) listener();
+  };
   const retire = (retiring: DesignGpuWorkerClient) => {
     if (idle !== null) { timers.clearTimer(idle); idle = null; }
     if (holders || client !== retiring) return;
@@ -36,11 +51,20 @@ export function createDesignGpuRuntime(source: DesignRecordingsSource, createWor
     client = null;
   };
   return {
-    recordings, chunks, stats: new DesignGpuStats(),
+    recordings, chunks, stats,
     get client() { return client; },
+    get unavailable() { return unavailable; },
+    markUnavailable,
+    subscribe(listener) {
+      listeners.add(listener);
+      return () => { listeners.delete(listener); };
+    },
     acquireClient() {
       if (idle !== null) { timers.clearTimer(idle); idle = null; }
-      if (!client || client.error) client = new DesignGpuWorkerClient(createWorker);
+      if (!client || client.error) {
+        client = new DesignGpuWorkerClient(createWorker);
+        client.onFailure(markUnavailable);
+      }
       holders++;
       return client;
     },

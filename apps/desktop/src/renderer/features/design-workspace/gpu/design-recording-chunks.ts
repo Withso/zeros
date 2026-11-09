@@ -165,14 +165,17 @@ export class DesignRecordingChunks {
     return bytes;
   }
 
+  /** Chunks no adopted recording references go first: evicting a referenced
+   * one forces its recording to be read again. Leased chunks always stay. */
   trim(): void {
-    if (this.bytes <= this.budget) return;
-    for (const [id, bytes] of this.entries) {
-      if (this.bytes <= this.budget) break;
-      if (this.leases.has(id)) continue;
-      this.entries.delete(id);
-      this.bytes -= bytes.byteLength;
-      this.counts.evicted++;
+    for (const referenced of [false, true]) {
+      for (const [id, bytes] of this.entries) {
+        if (this.bytes <= this.budget) return;
+        if (this.leases.has(id) || this.refs.has(id) !== referenced) continue;
+        this.entries.delete(id);
+        this.bytes -= bytes.byteLength;
+        this.counts.evicted++;
+      }
     }
   }
 }

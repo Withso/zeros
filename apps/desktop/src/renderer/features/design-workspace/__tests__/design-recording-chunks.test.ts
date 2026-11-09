@@ -63,6 +63,25 @@ describe("Design recording chunks", () => {
     expect(chunks.usage().bytes).toBeLessThanOrEqual(10);
   });
 
+  it("evicts chunks no adopted recording references before referenced ones", async () => {
+    const chunks = new DesignRecordingChunks({ budgetBytes: 8 });
+    const [kept, orphan, fresh, later] = [wire("kkkk"), wire("oooo"), wire("ffff"), wire("gggg")];
+    await chunks.admit([kept]);
+    chunks.reference([kept.id]);
+    // The orphan (a superseded or failed reply's chunk) is newer, so least
+    // recently used order alone would evict the referenced chunk first.
+    await chunks.admit([orphan, fresh]);
+    chunks.reference([fresh.id]);
+    chunks.trim();
+    expect([chunks.has(kept.id), chunks.has(orphan.id), chunks.has(fresh.id)]).toEqual([true, false, true]);
+    // With only referenced chunks left, the least recently used goes.
+    await chunks.admit([later]);
+    chunks.reference([later.id]);
+    chunks.trim();
+    expect([chunks.has(kept.id), chunks.has(fresh.id), chunks.has(later.id)]).toEqual([false, true, true]);
+    expect(chunks.usage().bytes).toBe(8);
+  });
+
   it("claims preferred chunks first, then the most shared, within the request limit and only chunks it holds", async () => {
     const chunks = new DesignRecordingChunks();
     const [font, logo, page, own] = [wire("font"), wire("logo"), wire("page"), wire("own")];

@@ -66,4 +66,25 @@ describe("Design GPU runtime", () => {
     expect(workers[0]!.terminated).toBe(true);
     expect(runtime.client).toBeNull();
   });
+
+  it("reports the recorded canvas unavailable once its raster worker fails, but not when one retires", async () => {
+    const { runtime, workers, timers } = harness();
+    const changes: Array<string | null> = [];
+    runtime.subscribe(() => changes.push(runtime.unavailable));
+    await started(runtime, workers);
+    runtime.releaseClient();
+    timers.at(-1)!.callback();
+    expect(workers[0]!.terminated).toBe(true);
+    expect(runtime.unavailable).toBeNull();
+    // A worker whose CanvasKit fails to load can't draw anything: canvases
+    // show pictures for the rest of the session instead of blank frames.
+    const ready = runtime.acquireClient().start();
+    workers[1]!.reply({ type: "failed", error: "CanvasKit failed to load." });
+    await expect(ready).resolves.toBe(false);
+    expect(runtime.unavailable).toBe("CanvasKit failed to load.");
+    expect(runtime.stats.error).toBe("CanvasKit failed to load.");
+    runtime.markUnavailable("WebGL2 is unavailable to the recorded Design canvas.");
+    expect(runtime.unavailable).toBe("CanvasKit failed to load.");
+    expect(changes).toEqual(["CanvasKit failed to load."]);
+  });
 });

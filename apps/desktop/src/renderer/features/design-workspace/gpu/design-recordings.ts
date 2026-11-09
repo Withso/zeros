@@ -431,6 +431,37 @@ export class DesignRecordings {
       const entry = state.frames.get(file);
       if (entry && asked.has(file)) entry.storedMissing = entry.wanted ?? null;
     }
+    this.publish(state, changed);
+  }
+
+  /** Confirmed recordings this renderer can't draw: CanvasKit rejected the
+   * picture, or a font it uses failed its content check. One of the wanted
+   * version fails that version like an engine failure, so the canvas covers
+   * the frame another way; an older cover is only dropped, and the wanted
+   * version is still asked for. */
+  failUndrawable(owner: DesignRecordingsOwner, reason: (recording: DesignAdoptedRecording) => string | null): void {
+    const state = this.owners.get(designRecordingsOwnerKey(owner));
+    if (!state) return;
+    const changed: string[] = [];
+    for (const [file, entry] of state.frames) {
+      const confirmed = entry.confirmed;
+      const error = confirmed ? reason(confirmed) : null;
+      if (!confirmed || error === null) continue;
+      this.deps.chunks.unreference(confirmed.layers.flatMap((layer) => layer.chunks));
+      entry.confirmed = null;
+      entry.stale = false;
+      if (entry.wanted === undefined || entry.wanted === confirmed.sourceVersion) {
+        entry.failed = { version: entry.wanted ?? null, error };
+        this.counts.failed++;
+      }
+      changed.push(file);
+    }
+    if (!changed.length) return;
+    this.publish(state, changed);
+    this.pump(state);
+  }
+
+  private publish(state: OwnerState, changed: readonly string[]): void {
     const failed = new Set([...state.frames].filter(([, entry]) => entry.failed && entry.failed.version === (entry.wanted ?? null))
       .map(([file]) => file));
     const failedChanged = failed.size !== state.failed.size || [...failed].some((file) => !state.failed.has(file));

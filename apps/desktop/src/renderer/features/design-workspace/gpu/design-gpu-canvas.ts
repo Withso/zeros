@@ -36,12 +36,20 @@ export function forgetDesignGpuWorkspaces(workspaceIds: readonly string[]): void
   appRuntime?.recordings.forgetWorkspaces(workspaceIds);
 }
 
-/** Staff with the internal flag, a Local workspace, and an engine that
- * records frames. Cloud workspaces never offer Design recordings. */
-export function useDesignGpuCanvasEnabled(workspaceId: string | null | undefined): boolean {
+/** Staff with the internal flag, a Local workspace, an engine that records
+ * frames, and a session where the recorded canvas can draw. Cloud workspaces
+ * never offer Design recordings. */
+export function useDesignGpuCanvasEnabled(workspaceId: string | null | undefined, runtime = designGpuRuntime()): boolean {
   const flag = useInternalFeatureActive("designGpuCanvas");
-  return flag && !!workspaceId && !isCloudWorkspace(workspaceId) &&
+  const available = useDesignGpuAvailable(runtime);
+  return flag && available && !!workspaceId && !isCloudWorkspace(workspaceId) &&
     getActiveBridge()?.supportsEngineCapability?.(DESIGN_RECORDINGS_CAPABILITY, workspaceId) === true;
+}
+
+/** False once WebGL2 or the raster worker failed this session. */
+export function useDesignGpuAvailable(runtime: DesignGpuRuntime): boolean {
+  const read = () => runtime.unavailable === null;
+  return useSyncExternalStore(runtime.subscribe, read, read);
 }
 
 /** Frames whose recordings failed: the canvas lets their live document cover them. */
@@ -63,8 +71,10 @@ type InstrumentedWindow = Window & { __zerosDesignGpu?: DesignGpuInstrumentation
 
 const activeScenes = new Map<DesignGpuScene, DesignGpuRuntime>();
 let lastSnapshot: DesignGpuSnapshot | null = null;
+let instrumented: DesignGpuRuntime | null = null;
 
-function installInstrumentation(): void {
+function installInstrumentation(runtime: DesignGpuRuntime): void {
+  instrumented = runtime;
   const target = window as InstrumentedWindow;
   if (target.__zerosDesignGpu) return;
   const current = () => [...activeScenes].at(-1);
@@ -73,7 +83,7 @@ function installInstrumentation(): void {
     get last() { return lastSnapshot; },
     async snapshot() {
       const entry = current();
-      const runtime = entry?.[1] ?? designGpuRuntime();
+      const runtime = entry?.[1] ?? instrumented ?? designGpuRuntime();
       const worker = await runtime.client?.requestStats() ?? null;
       lastSnapshot = runtime.stats.snapshot({ gpu: entry?.[0].usage() ?? { pages: 0, units: 0, bytes: 0, budget: 0, evictedPages: 0 },
         chunks: runtime.chunks.usage(), requests: runtime.recordings.usage(), worker });
@@ -88,8 +98,9 @@ function installInstrumentation(): void {
   };
 }
 
-function uninstallInstrumentation(): void {
-  if (!activeScenes.size) delete (window as InstrumentedWindow).__zerosDesignGpu;
+/** An unavailable canvas keeps it, so its snapshot still says why. */
+function uninstallInstrumentation(runtime: DesignGpuRuntime): void {
+  if (!activeScenes.size && runtime.unavailable === null) delete (window as InstrumentedWindow).__zerosDesignGpu;
 }
 
 /** Mounts the recorded canvas under a world while it is active and enabled.
@@ -118,18 +129,19 @@ export function useDesignGpuCanvas(input: {
     if (!scene.start()) {
       scene.dispose();
       runtime.releaseClient();
-      runtime.stats.error = "WebGL2 is unavailable to the recorded Design canvas.";
+      runtime.markUnavailable("WebGL2 is unavailable to the recorded Design canvas.");
+      installInstrumentation(runtime);
       return undefined;
     }
     sceneRef.current = scene;
     activeScenes.set(scene, runtime);
-    installInstrumentation();
+    installInstrumentation(runtime);
     const { owner, openKey, frames, live } = latest.current;
     scene.update({ owner, openKey, frames, live });
     return () => {
       sceneRef.current = null;
       activeScenes.delete(scene);
-      uninstallInstrumentation();
+      uninstallInstrumentation(runtime);
       scene.dispose();
       runtime.releaseClient();
     };
