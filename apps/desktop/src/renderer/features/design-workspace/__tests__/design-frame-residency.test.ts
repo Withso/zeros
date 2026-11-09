@@ -34,6 +34,22 @@ describe("Design frame surface residency", () => {
     expect(pending.sources.has(confirmed.file)).toBe(true);
     expect(pending.live.size).toBe(0);
   });
+  it("keeps a live frame's document while it revalidates, instead of reloading it", () => {
+    // An engine change event after the frame's own undo marks it unprepared
+    // for a moment. Unmounting its document then reloaded the same generation
+    // in a fresh, hidden iframe: the frame went blank.
+    const confirmed = { ...frame("home.html", 0), sourceVersion: "a".repeat(24),
+      surfaceCost: { nodes: 10, sourceBytes: 2000, imageBytes: 0 } };
+    const input = { ...setup([confirmed]), sourceSurfacesEnabled: true, pictured: new Set<string>(),
+      sourceReady: new Map([[confirmed.file, confirmed.sourceVersion]]), selectedFrame: "home.html" };
+    const read = createDesignFrameResidencyReader();
+    expect(read(input).live).toEqual(new Set(["home.html"]));
+    const descriptions = [{ ...frame("home.html", 0), preparation: "unprepared" as const, previous: confirmed }];
+    const revalidating = read({ ...input, frames: descriptions, index: new DesignFrameSpatialIndex(descriptions) });
+    expect(revalidating.live).toEqual(new Set(["home.html"]));
+    // Confirmed again, it is the same live document.
+    expect(read(input).live).toEqual(new Set(["home.html"]));
+  });
   it("does not turn unprepared descriptors into protected editing documents during passive loading", () => {
     const descriptions = Array.from({ length: 32 }, (_, index) => ({ ...frame(String(index), index % 8 * 240, Math.floor(index / 8) * 120),
       preparation: "unprepared" as const }));
