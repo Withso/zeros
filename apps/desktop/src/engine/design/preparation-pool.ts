@@ -23,11 +23,17 @@ export type DesignWorkerComposedFrame =
 const testing: { workers: number | null; frames: number; composed: number; reused: number; workerUrl: URL | null } =
   { workers: null, frames: 0, composed: 0, reused: 0, workerUrl: null };
 
-/** Experimental, off by default: ZEROS_DESIGN_PREPARATION_WORKERS=<n>
- * prepares cold frame identities on up to n workers, leaving two cores. */
-export function designPreparationWorkerCount(env: NodeJS.ProcessEnv = process.env, cores = availableParallelism()): number {
+/** Workers a Bun engine starts unless told otherwise. Node cannot load the
+ * TypeScript worker, so a Node engine (the tests) starts none by default. */
+const DEFAULT_WORKERS = 3;
+
+/** ZEROS_DESIGN_PREPARATION_WORKERS=<n> prepares cold frames on up to n
+ * workers, and 0 turns the pool off. Two cores are always left over. */
+export function designPreparationWorkerCount(env: NodeJS.ProcessEnv = process.env, cores = availableParallelism(),
+  runtimeDefault = process.versions.bun ? DEFAULT_WORKERS : 0): number {
   if (testing.workers !== null) return Math.min(testing.workers, MAX_WORKERS);
-  const requested = Number.parseInt(env.ZEROS_DESIGN_PREPARATION_WORKERS ?? "0", 10);
+  const configured = env.ZEROS_DESIGN_PREPARATION_WORKERS?.trim();
+  const requested = configured ? Number.parseInt(configured, 10) : runtimeDefault;
   if (!Number.isSafeInteger(requested) || requested <= 0) return 0;
   return Math.max(0, Math.min(requested, cores - 2, MAX_WORKERS));
 }
