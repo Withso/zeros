@@ -26,8 +26,8 @@ import {
   type DesignBatchRecordReply,
   type DesignBatchRecordRequest,
 } from "@zeros/protocol/design-capture";
-import { DESIGN_CAPTURE_FRAME_CSP, designCaptureFramePolicy } from "../src/engine/design/capture-sheet";
-import { insertDesignHeadMarkup, sanitizeDesignFrameMarkup } from "../src/engine/design/source";
+import { DESIGN_CAPTURE_FRAME_CSP } from "../src/engine/design/capture-sheet";
+import { designRecorderDocument, designRecorderMetrics } from "./design-recorder-document";
 import { designRecorderFrameGuard } from "./design-recorder-frame";
 import { DESIGN_RECORDER_PREPARE_SCRIPT } from "./design-recorder-scripts";
 import { externalizeRecordedLayer, RecordedTypefaceIds } from "./design-recorder-typefaces";
@@ -158,17 +158,17 @@ async function recordItem(slot: Slot, documents: Map<string, string>, item: Desi
   const guard = designRecorderFrameGuard({ gone: slot.gone, signal });
   const whileAlive = guard.run;
   const key = randomUUID();
-  documents.set(key, insertDesignHeadMarkup(sanitizeDesignFrameMarkup(item.html), designCaptureFramePolicy(colorScheme)));
   const contents = slot.window.webContents;
   const steps: Record<string, number> = {};
   let mark = performance.now();
   const step = (name: string) => { const now = performance.now(); steps[name] = Math.round((now - mark) * 10) / 10; mark = now; };
   try {
+    documents.set(key, await whileAlive(designRecorderDocument(item.html, colorScheme)));
+    step("document");
     // The frame lays out at its own viewport whatever the window's size.
     const viewport = `${item.viewport.width}x${item.viewport.height}`;
     if (slot.viewport !== viewport) {
-      await whileAlive(contents.debugger.sendCommand("Emulation.setDeviceMetricsOverride",
-        { width: item.viewport.width, height: item.viewport.height, deviceScaleFactor: slot.ratio, mobile: false }));
+      await whileAlive(contents.debugger.sendCommand("Emulation.setDeviceMetricsOverride", designRecorderMetrics(item.viewport, slot.ratio)));
       slot.viewport = viewport;
     }
     if (slot.colorScheme !== colorScheme) {
