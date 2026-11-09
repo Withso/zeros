@@ -186,6 +186,19 @@ it("keeps the original observation deadline through the final durable identity r
     .rejects.toMatchObject({ code: "github_verification_expired" });
 });
 
+// Withso/zeros and Withso/zeros-dev-fixture share one connection: each hello
+// read its fingerprint once per repository before and after (4 round trips).
+it("reads one connection fingerprint per owner before and after a multi-repository check", async () => {
+  const github = { fingerprintFor: vi.fn(async () => "epoch"), check: vi.fn(async () => "epoch") };
+  const pool = { query: async () => ({ rows: [{ source_repositories: ["example/selected", "example/additional", "other/dependency"] }] }) };
+  const source = new CloudV2SourceAuthority(pool as unknown as pg.Pool, github);
+  const workspace = { id: "workspace", organizationId: "org", creatorUserId: "member", repository: "example/selected" } as CloudV2Workspace;
+  await source.workspace(workspace);
+  github.fingerprintFor.mockClear();
+  await source.workspace(workspace);
+  expect(github.fingerprintFor.mock.calls.map(([input]) => (input as { owner: string }).owner)).toEqual(["example", "other", "example", "other"]);
+});
+
 it("coalesces checks, expires positive observations, and never reuses them across reconnects", async () => {
   let now = 0, generation = "one";
   const github = { fingerprintFor: vi.fn(async () => generation), check: vi.fn(async () => generation) };

@@ -536,7 +536,11 @@ worker installs the creator's Git identity from the selected organization
 connection. The name is the GitHub profile name, falling back to the verified
 login; the email is `<github_user_id>+<github_login>@users.noreply.github.com`.
 During a temporary profile lookup outage, the selected connection's stored
-login is used after rechecking its authorization generation.
+login is used after rechecking its authorization generation. A profile that
+the same control-plane process read for the same token within the last 30 s
+(for example, during that hello's source check or the create's branch lookup)
+is reused instead of calling GitHub again. The authorization generation is
+still rechecked.
 The VM user's global Git config includes the worker-owned
 `~/.config/zeros/git-identity`, which also sets `user.useConfigOnly=true`.
 Confirmed configuration changes atomically replace that file, so existing
