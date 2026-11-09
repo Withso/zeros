@@ -117,6 +117,31 @@ describe("Design preparation workers", () => {
     expect(pooled).toEqual(single);
   }, 60_000);
 
+  it("composes a frame its worker couldn't compose on the engine's thread, and says so once", async () => {
+    const navigation = await readDesignNavigationSnapshot(root);
+    const prepared = await prepareDesignNavigationFrames(root, navigation.catalogRevision, files);
+    const frames = prepared.frames.map(({ file, sourceVersion }) => ({ file, sourceVersion: sourceVersion! }));
+    const input = { workspaceId: "w", directoryId: designDirectoryEntry(root, designDirectoryNameFor(root))!.id, theme: null,
+      colorScheme: "light" as const, maxDimension: 256, frames };
+    const comparable = (result: Awaited<ReturnType<typeof composeDesignThumbnailBatches>>) => ({ ...result,
+      batches: result.batches.map(({ request, frames: items }) => ({ request: { ...request, revision: "" }, frames: [...items] })) });
+    const single = comparable(await composeDesignThumbnailBatches(root, input));
+    // A worker that answers every frame with an error, as a broken worker build would.
+    const refusing = path.join(bundle.directory, "refusing-worker.mjs");
+    await writeFile(refusing, `import { parentPort } from "node:worker_threads";
+parentPort.on("message", (m) => parentPort.postMessage({ id: m.id, results: (m.frames ?? []).map((f) => ({ file: f.file, error: "unavailable" })) }));`);
+    configureDesignPreparationWorkersForTests(2, { workerUrl: pathToFileURL(refusing) });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect(comparable(await composeDesignThumbnailBatches(root, input))).toEqual(single);
+      expect(comparable(await composeDesignThumbnailBatches(root, input))).toEqual(single);
+      const notices = warn.mock.calls.map(([message]) => String(message)).filter((message) => message.includes("compose workers"));
+      expect(notices).toEqual([`[Zeros] Design compose workers left ${files.length} of ${files.length} frames to the engine thread; first: unavailable`]);
+    } finally {
+      warn.mockRestore();
+    }
+  }, 60_000);
+
   it("keeps the workers of a batch in flight when the previous batch's idle deadline passes", async () => {
     const navigation = await readDesignNavigationSnapshot(root);
     configureDesignPreparationWorkersForTests(2, { workerUrl: bundle.url });
