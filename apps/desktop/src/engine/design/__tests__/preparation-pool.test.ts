@@ -74,12 +74,18 @@ describe("Design preparation workers", () => {
     await rm(root, { recursive: true, force: true });
   });
 
-  it("stays off unless asked, leaving two cores", () => {
-    expect(designPreparationWorkerCount({}, 8)).toBe(0);
-    expect(designPreparationWorkerCount({ ZEROS_DESIGN_PREPARATION_WORKERS: "4" }, 8)).toBe(4);
+  it("uses three workers on Bun and none on Node unless told, always leaving two cores", () => {
+    expect(designPreparationWorkerCount({}, 8, 3)).toBe(3);
+    expect(designPreparationWorkerCount({}, 8, 0)).toBe(0);
+    expect(designPreparationWorkerCount({}, 4, 3)).toBe(2);
+    expect(designPreparationWorkerCount({ ZEROS_DESIGN_PREPARATION_WORKERS: "0" }, 8, 3)).toBe(0);
+    expect(designPreparationWorkerCount({ ZEROS_DESIGN_PREPARATION_WORKERS: " " }, 8, 3)).toBe(3);
+    expect(designPreparationWorkerCount({ ZEROS_DESIGN_PREPARATION_WORKERS: "4" }, 8, 0)).toBe(4);
     expect(designPreparationWorkerCount({ ZEROS_DESIGN_PREPARATION_WORKERS: "4" }, 4)).toBe(2);
     expect(designPreparationWorkerCount({ ZEROS_DESIGN_PREPARATION_WORKERS: "4" }, 2)).toBe(0);
-    expect(designPreparationWorkerCount({ ZEROS_DESIGN_PREPARATION_WORKERS: "x" }, 8)).toBe(0);
+    expect(designPreparationWorkerCount({ ZEROS_DESIGN_PREPARATION_WORKERS: "x" }, 8, 3)).toBe(0);
+    // Under Node (vitest) the runtime default is none.
+    expect(designPreparationWorkerCount({}, 8)).toBe(0);
   });
 
   it("prepares cold frames on workers exactly as the engine's own thread does, and remembers them", async () => {
