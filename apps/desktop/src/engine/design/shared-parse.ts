@@ -21,6 +21,9 @@ const MAX_SHARED_DERIVATIONS = 2;
 const MAX_SHARED_SOURCE_CHARS = 512 * 1024;
 
 const testing = { disabled: false, freeze: false, parses: 0, shared: 0 };
+/** How many readers received each tree: only a tree its one reader holds
+ * may change under it. */
+const readers = new WeakMap<Document, number>();
 
 export function withSharedDesignParses<T>(work: () => Promise<T>): Promise<T> {
   if (testing.disabled || scope.getStore()) return work();
@@ -35,10 +38,12 @@ export function parseDesignSource(source: string): Document {
   const cached = shared?.documents.get(source);
   if (cached) {
     testing.shared++;
+    readers.set(cached, (readers.get(cached) ?? 1) + 1);
     return cached;
   }
   testing.parses++;
   const document = parse(source, { sourceCodeLocationInfo: true });
+  readers.set(document, 1);
   if (shared && source.length <= MAX_SHARED_SOURCE_CHARS) {
     if (testing.freeze) freezeTree(document);
     remember(shared.documents, source, document, MAX_SHARED_DOCUMENTS);
@@ -46,11 +51,33 @@ export function parseDesignSource(source: string): Document {
   return document;
 }
 
+/** Take over the tree `parseDesignSource(source)` returned, to change it:
+ * no later reader in the scope receives it as `source`'s. False when an
+ * earlier reader holds it too, or it is frozen for tests. */
+export function claimDesignParse(source: string, document: Document): boolean {
+  if (Object.isFrozen(document) || (readers.get(document) ?? 1) > 1) return false;
+  const shared = scope.getStore();
+  if (shared?.documents.get(source) === document) shared.documents.delete(source);
+  return true;
+}
+
+/** Offer a tree, exactly as `parseDesignSource(source)` would build it, to
+ * the rest of the scope. */
+export function shareDesignParse(source: string, document: Document): void {
+  const shared = scope.getStore();
+  if (!shared || source.length > MAX_SHARED_SOURCE_CHARS) return;
+  if (testing.freeze) freezeTree(document);
+  remember(shared.documents, source, document, MAX_SHARED_DOCUMENTS);
+}
+
 /** A tree a stage already parsed in this scope, for readers that need no
  * source locations; the caller parses itself when there is none. */
 export function sharedDesignParse(source: string): Document | undefined {
   const document = scope.getStore()?.documents.get(source);
-  if (document) testing.shared++;
+  if (document) {
+    testing.shared++;
+    readers.set(document, (readers.get(document) ?? 1) + 1);
+  }
   return document;
 }
 
