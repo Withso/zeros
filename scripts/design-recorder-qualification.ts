@@ -13,7 +13,9 @@
  * For each frame it renders Chromium's own picture of the unmodified frame in
  * a sandboxed window, records the frame through the real recorder process and
  * client, replays the recording with CanvasKit, and compares pixels. It exits
- * non-zero when a frame differs by more than ZEROS_QUALIFY_MAX_DIFF (0.5%). */
+ * non-zero when a frame differs structurally (flat areas) by more than
+ * ZEROS_QUALIFY_MAX_FLAT (0.05%) or in all by more than ZEROS_QUALIFY_MAX_DIFF (2%,
+ * which glyph anti-aliasing alone stays under). */
 import { app, BrowserWindow, protocol, session } from "electron";
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
@@ -39,8 +41,12 @@ const env = process.env;
 const WORKSPACE = env.ZEROS_QUALIFY_WORKSPACE!, RECORDER = env.ZEROS_QUALIFY_RECORDER!, CANVASKIT = env.ZEROS_QUALIFY_CANVASKIT!, OUT = env.ZEROS_QUALIFY_OUT!;
 const PAGES = (env.ZEROS_QUALIFY_PAGES ?? "").split(",").filter(Boolean);
 const LIMIT = Number(env.ZEROS_QUALIFY_LIMIT ?? "40");
-const MAX_DIFF = Number(env.ZEROS_QUALIFY_MAX_DIFF ?? "0.005");
+const MAX_DIFF = Number(env.ZEROS_QUALIFY_MAX_DIFF ?? "0.02");
 const FIXTURES = Number(env.ZEROS_QUALIFY_FIXTURES ?? "0");
+/** 0: record only, for throughput; nothing is compared. */
+const COMPARE = env.ZEROS_QUALIFY_COMPARE !== "0";
+/** Gate on structural differences (flat areas), not glyph anti-aliasing. */
+const MAX_FLAT = Number(env.ZEROS_QUALIFY_MAX_FLAT ?? "0.0005");
 /** For a frame that keeps several layers: what in it can still composite,
  * after the recorder's flattening, counted by style (open shadow roots too). */
 const COMPOSITING_PROBE = `(() => {
@@ -153,6 +159,7 @@ void app.whenReady().then(async () => {
             continue;
           }
           const layer = item.layers[0]!;
+          if (!COMPARE) { (report.frames as unknown[]).push({ file: frame.file, recordedBytes: (await stat(layer.path)).size, typefaces: layer.typefaces.length }); continue; }
           const recorded = new Uint8Array(await readFile(layer.path));
           // Stock CanvasKit reads embedded fonts only: put the fonts back.
           const fonts = new Map<string, Uint8Array>();
@@ -176,8 +183,9 @@ void app.whenReady().then(async () => {
           const diff = compare(expected, actual, width, height);
           const row = { file: frame.file, bytes: bytes.length, recordedBytes: recorded.length, typefaces: layer.typefaces.length, share: diff.share, flatPixels: diff.flat, scale: item.scale };
           (report.frames as unknown[]).push(row);
-          if (diff.share > MAX_DIFF) failed = true;
-          console.log(`${frame.file} ${(bytes.length / 1024).toFixed(0)} KB -> ${(recorded.length / 1024).toFixed(0)} KB (${layer.typefaces.length} fonts) diff=${(diff.share * 100).toFixed(3)}% flat=${diff.flat}${diff.share > MAX_DIFF ? "  <-- OVER" : ""}`);
+          const over = diff.share > MAX_DIFF || diff.flat / (width * height) > MAX_FLAT;
+          if (over) failed = true;
+          console.log(`${frame.file} ${(bytes.length / 1024).toFixed(0)} KB -> ${(recorded.length / 1024).toFixed(0)} KB (${layer.typefaces.length} fonts) diff=${(diff.share * 100).toFixed(3)}% flat=${diff.flat}${over ? "  <-- OVER" : ""}`);
           decoded.delete(); surface.delete(); picture.delete();
         }
       }
