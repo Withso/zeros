@@ -14,6 +14,12 @@ export const DESIGN_CATALOG_READ_CAPABILITY = "design.catalog.read.v1";
 export const DESIGN_CATALOG_READ_OPERATION = "design.catalog.read";
 export const DESIGN_CATALOG_BATCH_ENTRIES = 256;
 export const DESIGN_CATALOG_BATCH_BYTES = 256 * 1024;
+/** A Local engine with this capability answers wide batches. Every batch
+ * revalidates the whole catalog file, so a 26,000-frame directory read 256 at
+ * a time spent ~1 s on 102 round trips before its canvas could open. */
+export const DESIGN_CATALOG_WIDE_BATCHES_CAPABILITY = "design.catalog.read.wide.v1";
+export const DESIGN_CATALOG_WIDE_BATCH_ENTRIES = 4096;
+export const DESIGN_CATALOG_WIDE_BATCH_BYTES = 1024 * 1024;
 /** Every admissible directory fits; byte budgets bound what a read retains. */
 export const DESIGN_CATALOG_DESCRIPTOR_LIMIT =
   DESIGN_MAX_PAGES * DESIGN_MAX_FRAMES_PER_PAGE;
@@ -33,7 +39,7 @@ export const designCatalogReadSchema = z
     directoryId,
     intent,
     cursor: cursor.optional(),
-    limit: z.number().int().min(1).max(DESIGN_CATALOG_BATCH_ENTRIES).optional(),
+    limit: z.number().int().min(1).max(DESIGN_CATALOG_WIDE_BATCH_ENTRIES).optional(),
   })
   .strict();
 
@@ -107,7 +113,7 @@ export const designCatalogBatchSchema = z
     pages: z.array(designCatalogPageSchema).min(1).max(DESIGN_MAX_PAGES),
     total: count,
     offset: count,
-    frames: z.array(designCatalogFrameSchema).max(DESIGN_CATALOG_BATCH_ENTRIES),
+    frames: z.array(designCatalogFrameSchema).max(DESIGN_CATALOG_WIDE_BATCH_ENTRIES),
     coverage: z.enum(["complete", "partial"]),
     nextCursor: cursor.nullable(),
   })
@@ -157,7 +163,7 @@ export const designCatalogBatchSchema = z
       });
     if (
       new TextEncoder().encode(JSON.stringify(batch)).byteLength >
-      DESIGN_CATALOG_BATCH_BYTES
+      DESIGN_CATALOG_WIDE_BATCH_BYTES
     )
       ctx.addIssue({
         code: "custom",

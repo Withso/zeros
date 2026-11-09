@@ -2,6 +2,9 @@ import {
   DESIGN_CATALOG_BATCH_BYTES,
   DESIGN_CATALOG_BATCH_ENTRIES,
   DESIGN_CATALOG_DESCRIPTOR_LIMIT,
+  DESIGN_CATALOG_WIDE_BATCH_BYTES,
+  DESIGN_CATALOG_WIDE_BATCH_ENTRIES,
+  DESIGN_CATALOG_WIDE_BATCHES_CAPABILITY,
   designCatalogOwnerSchema,
   type DesignCatalogBatch,
   type DesignCatalogFailure,
@@ -62,7 +65,9 @@ const LIMITS: DesignCatalogReadLimits = {
   maxTransferBytes: 48 * 1024 * 1024,
   maxDurationMs: 60_000,
 };
+/** Held for one response in flight: its decoded form outweighs its bytes. */
 const RESPONSE_RESERVE = DESIGN_CATALOG_BATCH_BYTES * 8;
+const WIDE_RESPONSE_RESERVE = DESIGN_CATALOG_WIDE_BATCH_BYTES * 8;
 const unavailable = (reason: FailureReason): DesignCatalogAssemblyResult => ({
   status: "unavailable",
   reason,
@@ -110,6 +115,9 @@ interface ReadTask {
   sourceKeyBytes: number;
   dataBytes: number;
   reserved: boolean;
+  /** Entries a batch may hold, and the bytes reserved for its response. */
+  limit: number;
+  reserve: number;
 }
 
 export class DesignCatalogReadAdapter {
@@ -201,7 +209,7 @@ export class DesignCatalogReadAdapter {
         task.dataBytes +
         task.cursorBytes +
         task.sourceKeyBytes +
-        (task.reserved ? RESPONSE_RESERVE : 0);
+        (task.reserved ? task.reserve : 0);
     }
     return {
       owners: owners.size,
@@ -304,9 +312,11 @@ export class DesignCatalogReadAdapter {
     entry.intent = intent;
     entry.authoritative = false;
     if (entry.active) this.cancel(entry.active, "superseded");
+    const wide = this.bridge.supportsEngineCapability(DESIGN_CATALOG_WIDE_BATCHES_CAPABILITY, entry.owner.workspaceId);
+    const reserve = wide ? WIDE_RESPONSE_RESERVE : RESPONSE_RESERVE;
     if (
       this.work.size >= this.limits.maxReads ||
-      !this.fits(RESPONSE_RESERVE, 0, 0, entry)
+      !this.fits(reserve, 0, 0, entry)
     )
       return Promise.resolve(unavailable("busy"));
     let resolve!: ReadTask["resolve"];
@@ -332,6 +342,8 @@ export class DesignCatalogReadAdapter {
       sourceKeyBytes: 0,
       dataBytes: 0,
       reserved: true,
+      limit: wide ? DESIGN_CATALOG_WIDE_BATCH_ENTRIES : DESIGN_CATALOG_BATCH_ENTRIES,
+      reserve,
     };
     const abort = () => this.cancel(task, "cancelled");
     signal?.addEventListener("abort", abort, { once: true });
@@ -365,7 +377,7 @@ export class DesignCatalogReadAdapter {
           this.cancel(task, "expired");
           return;
         }
-        if (!task.reserved && !this.fits(RESPONSE_RESERVE, 0, 0, entry)) {
+        if (!task.reserved && !this.fits(task.reserve, 0, 0, entry)) {
           this.cancel(task, "too-large");
           return;
         }
@@ -378,7 +390,7 @@ export class DesignCatalogReadAdapter {
             directoryId: entry.owner.directoryId,
             intent: task.intent,
             ...(cursor !== undefined ? { cursor } : {}),
-            limit: DESIGN_CATALOG_BATCH_ENTRIES,
+            limit: task.limit,
           },
           entry.owner,
         );

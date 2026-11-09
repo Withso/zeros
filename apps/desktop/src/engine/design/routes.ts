@@ -4,7 +4,7 @@ import {
   designMovementGuardSchema,
   designRelocationSchema,
 } from "@zeros/protocol/design-relocation";
-import { designCatalogReadSchema, designNavigationReadSchema, designFramesPrepareSchema, designPageHashesSchema, type DesignCatalogRead, type DesignCatalogReply, type DesignPageHashes } from "@zeros/protocol/design-catalog";
+import { DESIGN_CATALOG_BATCH_ENTRIES, designCatalogReadSchema, designNavigationReadSchema, designFramesPrepareSchema, designPageHashesSchema, type DesignCatalogRead, type DesignCatalogReply, type DesignPageHashes } from "@zeros/protocol/design-catalog";
 import { prepareDesignNavigationFrames } from "./document";
 import type { DesignCatalogAdmission } from "./catalog";
 import { encodeDesignFramePath } from "@zeros/protocol/design-path";
@@ -360,7 +360,10 @@ export async function handleDesignWorkspaceRoute(
     }
     case "design.catalog.read": {
       if (!options.catalogAdmission) throw new GitError({ code: "REMOTE_RESTRICTED", message: "Design catalog requires a live connection." });
-      return host.readDesignCatalog(designCatalogReadSchema.parse(params), remote, options.catalogAdmission);
+      const input = designCatalogReadSchema.parse(params);
+      // Wide batches are a Local capability; any other connection keeps the original bound.
+      const limit = hostLocalResources ? input.limit : Math.min(input.limit ?? DESIGN_CATALOG_BATCH_ENTRIES, DESIGN_CATALOG_BATCH_ENTRIES);
+      return host.readDesignCatalog(limit === input.limit ? input : { ...input, limit }, remote, options.catalogAdmission);
     }
     case "design.capture": {
       const input = designWorkspaceCaptureSchema.parse(params);
