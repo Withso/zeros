@@ -33,6 +33,7 @@ import {
 } from "../state/use-projects";
 import { syncProjectsToEngine } from "../state/projects-store";
 import { useWorkspaceStore, type ChatThread } from "../state/store";
+import { cancelCloudChatLinkSelection } from "../state/cloud-chat-link-selection";
 import { useOpenWorkspace } from "../state/use-open-workspace";
 import { useLatestCallback } from "../shared/lib/use-latest-callback";
 import { navigateCloudWorkspaceLink } from "./cloud-workspace-link-navigation";
@@ -188,12 +189,13 @@ export function LocalLinkNavigation({ readChat }: { readChat: ReadChat }) {
     let mounted = true;
     let stop: (() => void) | undefined;
     void onLocalNavigation((link) => {
-      if (mounted)
-        setPending({
-          link,
-          navigationVersion:
-            useWorkspaceStore.getState().navigationVersion ?? 0,
-        });
+      if (!mounted) return;
+      // A chat link still waiting for its chats never selects over this one.
+      cancelCloudChatLinkSelection();
+      setPending({
+        link,
+        navigationVersion: useWorkspaceStore.getState().navigationVersion ?? 0,
+      });
     })
       .then((off) => {
         if (mounted) stop = off;

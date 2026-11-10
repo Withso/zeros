@@ -910,10 +910,13 @@ can choose.
 
 The web dashboard's create form shows the generated ID under the name as it is
 typed (`GET /v1/organizations/id-availability?name=`, Pro only, rate-limited)
-and lets the creator edit it (`?id=` checks an edited ID). It sends the ID it
-showed for that exact name, or none when the name changed after the last
-answer, so the control plane generates it the same way. General shows the ID
-read-only, beside the organization's internal UUID.
+and lets the creator edit it (`?id=` checks an edited ID). Creating waits for
+the answer for exactly the current name and sends the ID the field then shows;
+when every candidate is taken it asks for an ID instead of creating, and when
+the check fails it sends none, so the control plane generates it the same way.
+A control plane that predates chosen IDs ignores one; the dashboard then names
+the ID it created. General shows the ID read-only, beside the organization's
+internal UUID.
 
 ## Web page and desktop link
 
@@ -934,19 +937,26 @@ the link every desktop release opens.
 
 Neither link carries a secret or grants anything. Electron main accepts only its
 channel's scheme and passes the link on the navigation intent Local links use,
-so it opens a window and waits for the signed-in app; a local development build
-ignores it. A numbered link whose owner is not `local` is a cloud link
-(`isCloudNavigationLink`). The desktop finds the organization by its ID among
-the account's organizations, finds the workspace by number in the loaded
-catalog or with `GET /v1/cloud-v2/workspaces/by-number/<organization ID>/<n>`
-(creator-only, like the read by id), reads it by id, switches to its
-organization and opens it as the sidebar does: a stopped workspace wakes and an
-archived one opens read-only. A chat link then selects its chat once the
-workspace's chats load, waiting at most 30 seconds and stopping quietly if the
-user goes elsewhere. An organization the account is not in, a 404, a deleting
-workspace, or a chat that is missing, archived or a terminal shows an error
-toast, and nothing switches. Desktop releases before numbered links ignore a
-numbered cloud link.
+so it opens a window and waits for the signed-in app. A local development build
+ignores a `cloud-workspace/` link; a numbered link reaches its renderer, which
+says when cloud workspaces aren't available. A numbered link whose owner is not
+`local` is a cloud link (`isCloudNavigationLink`). The desktop finds the
+organization by its ID among the account's organizations, finds the workspace
+by number in the loaded catalog or with
+`GET /v1/cloud-v2/workspaces/by-number/<organization ID>/<n>` (creator-only,
+like the read by id), reads it by id, switches to its organization and opens it
+as the sidebar does, except that a link never starts it: anyone can send a link,
+and numbers are easy to guess. A stopped workspace shows its history and starts
+on the first click or key inside it, as a restored tab does; an archived one
+opens read-only. An organization the account is not in, a 404 or a deleting
+workspace shows an error toast, and nothing switches.
+
+A chat link then selects its chat in the same store update that loads the
+workspace's chats, before the pane picks one, and waits at most 30 seconds. A
+chat the loaded list lacks, or one that is archived or a terminal, shows an
+error toast in the workspace that opened. Leaving that workspace, or any newer
+link, ends the wait quietly, so a chat link can never select over a later
+navigation. Desktop releases before numbered links ignore a numbered cloud link.
 
 A cloud workspace's context menu has Copy link, which copies the
 `/<organization ID>/w/<n>` page for the build's web app (`VITE_APP_BASE_URL`),

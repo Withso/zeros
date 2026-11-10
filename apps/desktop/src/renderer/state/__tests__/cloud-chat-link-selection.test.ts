@@ -7,8 +7,8 @@ vi.mock("../../shared/ui/primitives/elements", () => ({ toast }));
 
 import { useWorkspaceStore } from "../workspace-store";
 import {
-  CLOUD_CHAT_LINK_ABSENT_GRACE_MS,
   CLOUD_CHAT_LINK_WAIT_MS,
+  cancelCloudChatLinkSelection,
   selectCloudChatWhenLoaded,
 } from "../cloud-chat-link-selection";
 
@@ -44,6 +44,7 @@ beforeEach(() => {
   });
 });
 afterEach(() => {
+  cancelCloudChatLinkSelection();
   vi.useRealTimers();
   useWorkspaceStore.setState(useWorkspaceStore.getInitialState());
 });
@@ -69,6 +70,7 @@ describe("landing a cloud chat link on its chat", () => {
   });
 
   it.each([
+    ["missing from the loaded list", [chat("other")]],
     ["archived", [chat(CHAT, { archived: true })]],
     ["a terminal", [chat(CHAT, { kind: "terminal" })]],
   ])("says the chat is unavailable when it is %s", (_label, chats) => {
@@ -78,27 +80,36 @@ describe("landing a cloud chat link on its chat", () => {
     expect(useWorkspaceStore.getState().activeChatId).not.toBe(CHAT);
   });
 
-  it("gives a loaded list without the chat a moment, then says it is unavailable", () => {
+  // Review 2026-11-10: a waiting chat link selected its chat after a newer
+  // link had started, and that selection's navigation retired the newer link.
+  it("never selects over a newer link, which retires it", () => {
     selectCloudChatWhenLoaded(KEY, CHAT);
-    useWorkspaceStore.setState({ chats: [chat("other")], pendingChatHydrationFolder: null });
-    vi.advanceTimersByTime(CLOUD_CHAT_LINK_ABSENT_GRACE_MS - 1);
-    expect(toast.error).not.toHaveBeenCalled();
-    vi.advanceTimersByTime(1);
-    expect(toast.error).toHaveBeenCalledExactlyOnceWith("You don't have access to that chat.");
-    vi.advanceTimersByTime(CLOUD_CHAT_LINK_WAIT_MS);
-    expect(toast.error).toHaveBeenCalledOnce();
-    useWorkspaceStore.setState({ chats: [chat("other"), chat(CHAT)] });
+    const version = useWorkspaceStore.getState().navigationVersion ?? 0;
+    cancelCloudChatLinkSelection();
+    useWorkspaceStore.setState({ chats: [chat(CHAT)], pendingChatHydrationFolder: null });
     expect(useWorkspaceStore.getState().activeChatId).toBeNull();
+    expect(useWorkspaceStore.getState().navigationVersion ?? 0).toBe(version);
+    vi.advanceTimersByTime(CLOUD_CHAT_LINK_WAIT_MS);
+    expect(toast.error).not.toHaveBeenCalled();
   });
 
-  it("selects a chat another device made once it arrives within that moment", () => {
-    useWorkspaceStore.setState({ chats: [chat("other")], pendingChatHydrationFolder: null });
+  it("keeps only the newest chat link waiting", () => {
+    const second = `cloud:${ORG}:${WS}:chat-2`;
     selectCloudChatWhenLoaded(KEY, CHAT);
-    vi.advanceTimersByTime(CLOUD_CHAT_LINK_ABSENT_GRACE_MS / 2);
-    useWorkspaceStore.setState({ chats: [chat("other"), chat(CHAT)] });
-    expect(useWorkspaceStore.getState().activeChatId).toBe(CHAT);
+    selectCloudChatWhenLoaded(KEY, second);
+    useWorkspaceStore.setState({ chats: [chat(CHAT), chat(second)], pendingChatHydrationFolder: null });
+    expect(useWorkspaceStore.getState().activeChatId).toBe(second);
     vi.advanceTimersByTime(CLOUD_CHAT_LINK_WAIT_MS);
     expect(toast.error).not.toHaveBeenCalled();
+  });
+
+  it("settles when the chats load, so a later choice in that workspace stays the user's", () => {
+    selectCloudChatWhenLoaded(KEY, CHAT);
+    useWorkspaceStore.setState({ chats: [chat("other")], pendingChatHydrationFolder: null });
+    expect(toast.error).toHaveBeenCalledExactlyOnceWith("You don't have access to that chat.");
+    useWorkspaceStore.getState().dispatch({ type: "SET_ACTIVE_CHAT", id: "other" });
+    useWorkspaceStore.setState({ chats: [chat("other"), chat(CHAT)] });
+    expect(useWorkspaceStore.getState().activeChatId).toBe("other");
   });
 
   it.each([

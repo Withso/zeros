@@ -582,6 +582,7 @@ test("the Organization ID field keeps typing link-safe and says what the check f
     text: "Used in workspace and chat links. You can’t change it later.",
     error: false,
   });
+  assert.deepEqual(organizationIdHint({ kind: "checking" }, host), { text: "Checking…", error: false });
   assert.deepEqual(organizationIdHint({ kind: "available", id: "acme-org" }, host), {
     text: "Links use app.zeros.build/acme-org/w/1. You can’t change it later.",
     error: false,

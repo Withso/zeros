@@ -34,12 +34,12 @@ const FAILED = "Couldn't open that cloud workspace. Try again in a moment.";
 /** Opens a cloud workspace link (or a chat in one) from the web workspace page
  * or a copied link: an exact read as the signed-in account (the control plane
  * answers only the creator), then the switcher's organization change and the
- * sidebar's open. A stopped workspace wakes and an archived one opens
- * read-only, as from the sidebar. An account without access sees an error. */
+ * sidebar's open, without starting it. An archived workspace opens read-only.
+ * An account without access sees an error. */
 export async function navigateCloudWorkspaceLink(
   link: CloudNavigationLink,
   options: {
-    openWorkspace: (workspace: WorkspaceNavigationTarget) => void;
+    openWorkspace: (workspace: WorkspaceNavigationTarget, open: { wake: false }) => void;
     current: () => boolean;
     beforeCommit: () => void;
   },
@@ -109,8 +109,11 @@ export async function navigateCloudWorkspaceLink(
       return;
     }
     const key = cloudWorkspaceKey(target);
+    // A link opens without starting the workspace (anyone can send one); the
+    // first click or key inside it starts it, as for a restored tab.
     options.openWorkspace(
       getCloudWorkspaceRows().find((row) => row.path === key) ?? { path: key, repoRoot: key },
+      { wake: false },
     );
     if (session) selectCloudChatWhenLoaded(key, cloudScopedId(target, session));
   } catch {

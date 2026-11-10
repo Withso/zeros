@@ -732,6 +732,7 @@ export function organizationIdInput(value) {
 
 /** The line under the Organization ID field for the latest check. */
 export function organizationIdHint(check, host) {
+  if (check?.kind === "checking") return { text: "Checking…", error: false };
   if (check?.kind === "available") {
     return { text: `Links use ${host}/${check.id}/w/1. You can’t change it later.`, error: false };
   }
@@ -1558,10 +1559,47 @@ function bootDashboard() {
       else delete hint.dataset.tone;
       id?.setAttribute("aria-invalid", String(line.error));
     };
-    const check = () => {
+    /** Ask about exactly what the fields hold now and show the answer.
+     * Resolves with it, or null when the check failed or newer typing or a
+     * newer check replaced it. A failed name check clears the ID it held. */
+    const ask = async () => {
       const { name, id } = nodes();
       window.clearTimeout(timer);
       const asked = ++generation;
+      const typed = id?.value.trim() ?? "";
+      const named = name?.value.trim() ?? "";
+      const query = edited ? `id=${encodeURIComponent(typed)}` : `name=${encodeURIComponent(named)}`;
+      let answer;
+      try {
+        answer = await api(`/v1/organizations/id-availability?${query}`);
+      } catch {
+        if (asked === generation) {
+          if (!edited && id) id.value = "";
+          show(null);
+        }
+        return null;
+      }
+      if (asked !== generation) return null;
+      const current = nodes();
+      if (edited) {
+        if (current.id?.value.trim() !== typed) return null;
+        show(answer.available ? { kind: "available", id: answer.id } : { kind: answer.reason, id: answer.id });
+        return answer;
+      }
+      if (current.name?.value.trim() !== named || !current.id) return null;
+      current.id.value = answer.suggestion ?? "";
+      answeredFor = named;
+      show(
+        answer.suggestion
+          ? { kind: "available", id: answer.suggestion }
+          : { kind: "required", candidates: answer.candidates ?? [] },
+      );
+      return answer;
+    };
+    const check = () => {
+      const { name, id } = nodes();
+      window.clearTimeout(timer);
+      generation += 1;
       const typed = id?.value.trim() ?? "";
       const named = name?.value.trim() ?? "";
       if (!edited && answeredFor !== named) answeredFor = null;
@@ -1570,33 +1608,8 @@ function bootDashboard() {
         show(null);
         return;
       }
-      timer = window.setTimeout(async () => {
-        const query = edited
-          ? `id=${encodeURIComponent(typed)}`
-          : `name=${encodeURIComponent(named)}`;
-        let answer;
-        try {
-          answer = await api(`/v1/organizations/id-availability?${query}`);
-        } catch {
-          if (asked === generation) show(null);
-          return;
-        }
-        if (asked !== generation) return;
-        const current = nodes();
-        if (edited) {
-          if (current.id?.value.trim() !== typed) return;
-          show(answer.available ? { kind: "available", id: answer.id } : { kind: answer.reason, id: answer.id });
-          return;
-        }
-        if (current.name?.value.trim() !== named || !current.id) return;
-        current.id.value = answer.suggestion ?? "";
-        answeredFor = named;
-        show(
-          answer.suggestion
-            ? { kind: "available", id: answer.suggestion }
-            : { kind: "required", candidates: answer.candidates ?? [] },
-        );
-      }, 200);
+      show({ kind: "checking" });
+      timer = window.setTimeout(() => void ask(), 200);
     };
     return {
       nameInput() {
@@ -1619,14 +1632,21 @@ function bootDashboard() {
       sync() {
         check();
       },
-      /** The ID to create with: an edited one, or the generated one the
-       * creator saw for this exact name. Otherwise the control plane
-       * generates it from the name the same way. */
-      chosen() {
+      /** The ID to create with, once the field shows the answer for exactly
+       * this name: `{ slug }` (undefined lets the control plane derive it the
+       * same way, when the check failed), or `{ required: true }` when the
+       * name's IDs are taken and the creator must choose one. */
+      async chosen() {
         const { name, id } = nodes();
-        const value = id?.value.trim().toLowerCase() ?? "";
-        if (edited) return value || undefined;
-        return value && answeredFor !== null && answeredFor === (name?.value.trim() ?? "") ? value : undefined;
+        if (edited) return { slug: id?.value.trim().toLowerCase() || undefined };
+        if (answeredFor !== (name?.value.trim() ?? "") && !(await ask())) return { slug: undefined };
+        const value = nodes().id?.value.trim().toLowerCase() ?? "";
+        return value ? { slug: value } : { required: true };
+      },
+      focusId() {
+        const { id } = nodes();
+        id?.focus();
+        id?.select();
       },
       reset() {
         edited = false;
@@ -1730,10 +1750,16 @@ function bootDashboard() {
       if (form.id === "create-organization-form") {
         if (!organizationCreationAllowed(state.capabilities)) return;
         const name = new FormData(form).get("name")?.toString().trim();
-        const slug = organizationId.chosen();
         const errorNode = document.getElementById("create-organization-error");
         if (!name) return;
         if (errorNode) errorNode.textContent = "";
+        // Create with the ID the field shows for exactly this name.
+        const choice = await organizationId.chosen();
+        if (choice.required) {
+          organizationId.focusId();
+          return;
+        }
+        const { slug } = choice;
         const result = await api("/v1/organizations", {
           method: "POST",
           body: slug ? { name, slug } : { name },
@@ -1747,7 +1773,12 @@ function bootDashboard() {
         form.reset();
         organizationId.reset();
         document.getElementById("create-organization-dialog")?.close();
-        toast("Organization created");
+        // A control plane that predates chosen IDs keeps its own.
+        toast(
+          slug && created?.slug && created.slug !== slug
+            ? `Organization created with the ID ${created.slug}`
+            : "Organization created",
+        );
         await render();
       } else if (form.id === "delete-organization-form" && organization) {
         const confirmation = new FormData(form)

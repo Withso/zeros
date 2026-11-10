@@ -127,7 +127,7 @@ describe("opening a cloud workspace link", () => {
     await run();
     expect(state.read).toHaveBeenCalledExactlyOnceWith({ organizationId: ACME, workspaceId: WS });
     expect(state.calls).toEqual(["beforeCommit", `switch:${ACME}:false`, `open:${KEY}`]);
-    expect(openWorkspace).toHaveBeenCalledWith(row);
+    expect(openWorkspace).toHaveBeenCalledWith(row, { wake: false });
     expect(state.toast.info).not.toHaveBeenCalled();
     expect(state.toast.error).not.toHaveBeenCalled();
     expect(state.active).toBe(ACME);
@@ -137,13 +137,13 @@ describe("opening a cloud workspace link", () => {
     const archived = { ...row, archivedAt: "2026-11-01T00:00:00.000Z" };
     state.rows = [archived];
     await run();
-    expect(openWorkspace).toHaveBeenCalledWith(archived);
+    expect(openWorkspace).toHaveBeenCalledWith(archived, { wake: false });
   });
 
   it("opens the exact key when the catalog has not built its row", async () => {
     state.rows = [];
     await run();
-    expect(openWorkspace).toHaveBeenCalledWith({ path: KEY, repoRoot: KEY });
+    expect(openWorkspace).toHaveBeenCalledWith({ path: KEY, repoRoot: KEY }, { wake: false });
   });
 
   it.each([

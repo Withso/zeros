@@ -15,7 +15,9 @@ const fixture = vi.hoisted(() => ({
   open: vi.fn(),
   owners: new Set<() => void>(),
   generation: 0,
+  cancelChat: vi.fn(),
 }));
+vi.mock("../../state/cloud-chat-link-selection", () => ({ cancelCloudChatLinkSelection: fixture.cancelChat }));
 vi.mock("../../platform/local-links", () => ({
   onLocalNavigation: async (handler: (link: unknown) => void) => {
     fixture.deliver = handler;
@@ -149,4 +151,18 @@ it("sends an organization's numbered workspace or chat link to the cloud, never 
   fixture.readLocal.mockReturnValue(new Promise(() => {}));
   await act(async () => fixture.deliver!(parseLocalLink("zeros://local/w/3")!));
   expect(fixture.navigate).toHaveBeenCalledOnce();
+});
+
+it("retires a chat link still waiting for its chats as soon as any newer link arrives", async () => {
+  fixture.teams = { me: { user: { id: "u" }, organizations: [] }, status: "ready" };
+  await render();
+  fixture.navigate.mockResolvedValue(undefined);
+  await act(async () => fixture.deliver!(parseLocalLink("zeros://acme/w/310?session=chat-1")!));
+  expect(fixture.cancelChat).toHaveBeenCalledOnce();
+  fixture.readLocal.mockReturnValue(new Promise(() => {}));
+  await act(async () => fixture.deliver!(parseLocalLink("zeros://local/w/3")!));
+  expect(fixture.cancelChat).toHaveBeenCalledTimes(2);
+  expect(fixture.cancelChat.mock.invocationCallOrder[1]).toBeLessThan(
+    fixture.readLocal.mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,
+  );
 });
