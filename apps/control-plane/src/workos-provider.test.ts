@@ -1,7 +1,10 @@
-import type { WorkOS } from "@workos-inc/node";
+import { WorkOS } from "@workos-inc/node";
 import { describe, expect, it } from "vitest";
 
-import { RailwayWorkOSProvider } from "./workos-provider.js";
+import {
+  RailwayWorkOSProvider,
+  WorkOSAuthenticationRequiredError,
+} from "./workos-provider.js";
 
 const APP_ORIGIN = "https://app-alpha.zeros.build";
 const STATE = "s".repeat(43);
@@ -127,6 +130,59 @@ describe("WorkOS Hosted AuthKit authorization", () => {
     expect(url.searchParams.get("prompt")).toBe("login");
     expect(url.searchParams.has("max_age")).toBe(false);
     expect(url.searchParams.get("client_id")).toBe("client_desktop_example");
+  });
+});
+
+describe("WorkOS web code exchange", () => {
+  function replying(status: number, body: Record<string, unknown>): WorkOS {
+    return new WorkOS({
+      apiKey: "workos-key-for-tests",
+      clientId: "client_web_example",
+      maxRetries: 0,
+      fetchFn: async () =>
+        Response.json(body, {
+          status,
+          headers: { "x-request-id": "req_exchange_example" },
+        }),
+    });
+  }
+
+  it("reports a ceremony Hosted AuthKit must finish by code, without its pending token", async () => {
+    const pending = "pending-authentication-token-example";
+    const client = replying(403, {
+      code: "organization_selection_required",
+      message: "The user must choose an organization.",
+      pending_authentication_token: pending,
+      organizations: [{ id: "org_example", name: "Example" }],
+      user: { id: "user_example", email: "person@example.com" },
+    });
+
+    const failure = await provider(client)
+      .exchange({ code: "one-time-code", codeVerifier: "v".repeat(43) })
+      .catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(WorkOSAuthenticationRequiredError);
+    expect(failure).toMatchObject({
+      code: "organization_selection_required",
+      status: 403,
+      requestId: "req_exchange_example",
+    });
+    expect(JSON.stringify(failure)).not.toContain(pending);
+    expect(String(failure)).not.toContain(pending);
+  });
+
+  it("leaves other provider failures as they are", async () => {
+    const client = replying(400, {
+      error: "invalid_grant",
+      error_description: "The code has expired.",
+    });
+
+    const failure = await provider(client)
+      .exchange({ code: "one-time-code", codeVerifier: "v".repeat(43) })
+      .catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(Error);
+    expect(failure).not.toBeInstanceOf(WorkOSAuthenticationRequiredError);
   });
 });
 

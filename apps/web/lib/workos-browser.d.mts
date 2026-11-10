@@ -1,5 +1,6 @@
 export const WORKOS_FLOW_COOKIE: "__Host-zeros_auth_flow";
 export const WORKOS_SESSION_COOKIE: "__Host-zeros_session";
+export const WORKOS_HANDOFF_COOKIE: "__Host-zeros_auth_handoff";
 
 export interface WorkOSSessionData {
   sub: string;

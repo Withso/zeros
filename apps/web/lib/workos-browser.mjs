@@ -4,6 +4,8 @@ import { PROVIDER_LOGOS, shell } from "./page.ts";
 
 export const WORKOS_FLOW_COOKIE = "__Host-zeros_auth_flow";
 export const WORKOS_SESSION_COOKIE = "__Host-zeros_session";
+/** Railway's one-time Hosted AuthKit hand-off marker; its only value is "1". */
+export const WORKOS_HANDOFF_COOKIE = "__Host-zeros_auth_handoff";
 
 const OPAQUE_ID = /^[A-Za-z0-9_-]{43}$/;
 const MAX_RAILWAY_SESSION_BYTES = 256 * 1024;
@@ -133,9 +135,17 @@ async function proxyBrowserGet(request, env, pathname, options = {}) {
         ? WORKOS_SESSION_COOKIE
         : null;
   const cookie = cookieName ? cookies(request).get(cookieName) : null;
+  const forwarded = [];
   if (cookieName && cookie && OPAQUE_ID.test(cookie)) {
-    headers.set("cookie", `${cookieName}=${cookie}`);
+    forwarded.push(`${cookieName}=${cookie}`);
   }
+  if (
+    pathname === "/auth/callback" &&
+    cookies(request).get(WORKOS_HANDOFF_COOKIE) === "1"
+  ) {
+    forwarded.push(`${WORKOS_HANDOFF_COOKIE}=1`);
+  }
+  if (forwarded.length > 0) headers.set("cookie", forwarded.join("; "));
   try {
     const upstream = await fetchWorkOSRailway(
       env,
