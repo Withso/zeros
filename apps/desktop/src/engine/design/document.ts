@@ -136,6 +136,7 @@ import {
 } from "./style-sources";
 import { readDesignFontCatalog } from "./style-fonts";
 import { designKnownClasses, type DesignKnownClasses } from "./style-classes";
+import { designTokenColorIndex, lintDesignAuthoringContract, type DesignTokenColorIndex } from "./authoring-lint";
 import { mergeDesignThemes, readDesignThemeCatalog } from "./themes";
 
 export { listDesignAssets,type DesignAssetSummary } from "./assets";
@@ -429,15 +430,16 @@ async function mutationResultUnlocked(
     width: geometry.w,
     height: geometry.h,
   }, file);
-  const knownTokens = (await designKnownTokens(workspacePath))(file);
+  const knownTokens = await designKnownTokens(workspacePath);
   const knownClasses = await designKnownClasses(workspacePath);
   const linted = await lintFrame(
     workspacePath,
     file,
     { healOids: false },
-    knownTokens,
+    knownTokens.names(file),
     knownClasses,
     source,
+    knownTokens.colors(file),
   );
   const violations = linted.violations.sort(
     (left, right) =>
@@ -525,7 +527,8 @@ async function mutateDesignFrameSource(
     const healed = healDesignOids(updated).html;
     const changed = updated !== source;
     if (changed) {
-      const knownTokens = (await designKnownTokens(workspacePath))(file);
+      // Only errors gate a mutation, so this comparison needs no token colours.
+      const knownTokens = (await designKnownTokens(workspacePath)).names(file);
       const knownClasses = await designKnownClasses(workspacePath);
       const [baseline, linted] = await Promise.all([
         lintFrame(
@@ -1618,14 +1621,11 @@ async function cssSourceFiles(
 async function knownTokenNames(
   workspacePath: string,
   context?: DesignCanvasReadContext,
-): Promise<Set<string>> {
-  // Names only: usage counting reads every frame's HTML, and this runs on
+): Promise<{ names: Set<string>; tokens: DesignTokenSummary[] }> {
+  // No usage counts: counting reads every frame's HTML, and this runs on
   // every single-frame mutation acknowledgement.
-  const names = new Set(
-    (await readDesignTokensDocument(workspacePath, context, { includeUsage: false })).tokens.map(
-      (token) => token.name,
-    ),
-  );
+  const tokens = (await readDesignTokensDocument(workspacePath, context, { includeUsage: false })).tokens;
+  const names = new Set(tokens.map((token) => token.name));
   const directory = designDirectory(workspacePath);
   for (const file of await cssSourceFiles(workspacePath, context)) {
     const source = await readSafeDesignText(
@@ -1634,7 +1634,14 @@ async function knownTokenNames(
     );
     if (source) collectDeclaredCustomProperties(source, names);
   }
-  return names;
+  return { names, tokens };
+}
+
+interface DesignKnownTokens {
+  names(file: string): Set<string>;
+  /** Colours tokens.css and the frame's imported sources hold, for the
+   * literal-token-value advisory. */
+  colors(file: string): DesignTokenColorIndex;
 }
 
 /** Tokens each frame can resolve: tokens.css and Design CSS, plus the tokens
@@ -1645,8 +1652,10 @@ async function knownTokenNames(
 async function designKnownTokens(
   workspacePath: string,
   context?: DesignCanvasReadContext,
-): Promise<(file: string) => Set<string>> {
-  const base = await knownTokenNames(workspacePath, context);
+): Promise<DesignKnownTokens> {
+  const { names: base, tokens: baseTokens } = await knownTokenNames(workspacePath, context);
+  const baseColors = designTokenColorIndex(baseTokens);
+  const fixed: DesignKnownTokens = { names: () => base, colors: () => baseColors };
   let canvas: CanvasDocument;
   let sources: Awaited<ReturnType<typeof readDesignStyleSources>>["sources"];
   try {
@@ -1655,17 +1664,15 @@ async function designKnownTokens(
       readDesignStyleSourceCatalog(canvas).declarations.length === 0 &&
       readDesignFontCatalog(canvas).fonts.length === 0
     )
-      return () => base;
+      return fixed;
     sources = (await readDesignStyleSources(workspacePath, canvas)).sources;
   } catch {
-    return () => base;
+    return fixed;
   }
   const catalog = readDesignStyleSourceCatalog(canvas);
-  const tokensById = new Map(
-    sources.map((source) => [source.id, source.tokens.map((token) => token.name)]),
-  );
-  const byFrame = new Map<string, Set<string>>();
-  return (file) => {
+  const tokensById = new Map(sources.map((source) => [source.id, source.tokens]));
+  const byFrame = new Map<string, { names: Set<string>; colors: DesignTokenColorIndex }>();
+  const forFrame = (file: string) => {
     const ids = frameStyleSourceIds(canvas, catalog, file);
     const optedOut =
       ids.length === 0 &&
@@ -1673,17 +1680,26 @@ async function designKnownTokens(
         (canvas.frame_info[file] as Record<string, unknown> | undefined)?.styles,
       );
     const key = optedOut ? "" : ids.join("\0");
-    let names = byFrame.get(key);
-    if (!names) {
-      names = new Set(base);
+    let known = byFrame.get(key);
+    if (!known) {
+      const names = new Set(base);
+      // tokens.css overrides an imported token of the same name, so it is
+      // indexed last and an imported value it replaces is not suggested.
+      const tokens = new Map<string, { name: string; value: string }>();
       if (!optedOut) {
         for (const id of [DESIGN_FONTS_SOURCE_ID, ...ids])
-          for (const name of tokensById.get(id) ?? []) names.add(name);
+          for (const token of tokensById.get(id) ?? []) {
+            names.add(token.name);
+            tokens.set(token.name, token);
+          }
       }
-      byFrame.set(key, names);
+      for (const token of baseTokens) tokens.set(token.name, token);
+      known = { names, colors: designTokenColorIndex(tokens.values()) };
+      byFrame.set(key, known);
     }
-    return names;
+    return known;
   };
+  return { names: (file) => forFrame(file).names, colors: (file) => forFrame(file).colors };
 }
 
 function collectDeclaredCustomProperties(
@@ -1742,6 +1758,7 @@ async function lintFrame(
   knownTokens: Set<string>,
   knownClasses: DesignKnownClasses,
   sourceOverride?: string,
+  tokenColors?: DesignTokenColorIndex,
 ): Promise<{ violations: DesignLintViolation[]; healedOids: number }> {
   const target = path.join(
     designDirectory(workspacePath),
@@ -1965,6 +1982,13 @@ async function lintFrame(
       if (remainder) break;
     }
   }
+  violations.push(...lintDesignAuthoringContract({
+    file,
+    source,
+    records,
+    tokenColors,
+    lineAt: (offset) => lineAndColumnAt(source, offset),
+  }));
   const usedComponents = new Set(componentExpansion.usedComponents);
   // Components expand in light content only; the expander never enters a
   // shadow root, so a zd-* tag there is not an instance.
@@ -2031,8 +2055,10 @@ async function lintDesignDocumentUnlocked(
         workspacePath,
         file,
         { healOids: options.healOids !== false },
-        knownTokens(file),
+        knownTokens.names(file),
         knownClasses,
+        undefined,
+        knownTokens.colors(file),
       );
     } catch (error) {
       if (!(error instanceof DesignRenderBudgetError)) throw error;

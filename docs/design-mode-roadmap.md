@@ -914,6 +914,39 @@ edit. `meta/design.toml` and generated `rules.md` stay under engine lifecycle
 ownership.
 The source formats and migration rules above apply to all authoring paths.
 
+#### Authoring contract
+
+Every frame in a directory shares one vocabulary. The bundled Design skill
+(`SKILL.md`, Authoring contract) and each directory's generated `rules.md`
+state it; lint warns on rules 3, 4 and 8. It applies to Local workspaces
+only, since cloud v2 has no Design authoring.
+
+1. Reuse the directory's classes; a frame does not reinvent one that exists.
+2. States are attributes or state classes on the same markup
+   (`data-state`, `.is-active`), never a second copy.
+3. Token values are written as `var(--name)`; no literal where a token holds
+   that value.
+4. Inline style is for one-off values and people's Style panel edits;
+   declarations used on several elements belong in a class.
+5. `data-oid` only where it is needed (format rules above); component
+   definitions use `data-zid`.
+6. Meaningful layers carry `data-name`.
+7. Captured or pasted markup carries `data-zd-captured` on its root, its
+   optional value naming the source (`data-zd-captured="zeros renderer"`);
+   its classes are not the directory's vocabulary. A title such as
+   "Settings — captured" tells people. The marker is for markup that really
+   came from elsewhere, not a way to quiet warnings on the directory's own
+   frames.
+8. Markup repeated three or more times becomes a component
+   (`components/<name>.html`, `<slot>`, `data-zd-attr`).
+
+The contract's text is part of the generated `rules.md` for paged
+directories. The text shipped before it is the compatibility contract
+`PREVIOUS_PER_PAGE_DESIGN_RULES` (`design-rules.ts`), so a directory holding
+it upgrades on its next authoring lifecycle refresh and keeps the project text
+appended after it; a hand-edited file is left alone. Unpaged legacy layouts
+keep `ROOT_DESIGN_RULES` until they move to pages.
+
 #### Native edit and refresh behavior
 
 Read rules and canvas metadata once, then relevant source. For a new frame,
@@ -1208,6 +1241,34 @@ records pass unknown fields through:
   using each name, at most 50 per frame; past 50 classes, the 50th warning
   counts the rest. They never change `design validate`'s exit status. No persisted keys
   change; the wire rule ID remains a string, and cloud v2 has no Design path.
+- Three advisory warnings check the authoring contract
+  (`authoring-lint.ts`, run by `lintFrame`). Like `unknown-class` they report
+  a finding once, name its first three lines, cap per frame with a final
+  remaining-count warning, and never change the exit status or block a save.
+  An element carrying `data-zd-captured` (`DESIGN_CAPTURED_ATTRIBUTE`) marks
+  itself and its subtree as captured: the three checks neither count nor
+  report it, a captured element is one opaque leaf in the shape of authored
+  markup around it, and authored markup elsewhere in the frame is still
+  checked. On `<html>` or `<body>` the whole frame is captured and its
+  `<style>` elements are skipped too. No other rule changes for captured
+  markup, and no edit path gives the attribute meaning: semantic mutations,
+  oid healing, duplication, sanitizing and component expansion keep it as an
+  ordinary attribute.
+  - `repeated-inline-style`: the same set of two or more inline declarations
+    (custom properties aside; order and spacing ignored) on three or more of
+    the frame's own elements. At most 10 per frame.
+  - `literal-token-value`: a hex, `rgb()` or `hsl()` colour in the frame's
+    `<style>` elements or `style` attributes equals the default-theme value
+    of a token that `tokens.css` or a style source the frame receives
+    declares with a literal value. Custom property declarations and `url()`
+    are skipped; named colours and lengths are not compared. At most 20 per
+    frame.
+  - `repeated-markup`: the same tree of tags and classes, ignoring text,
+    other attributes and state classes (`is-*`, `has-*`), at least four
+    elements and two levels deep, appears three or more times. Component
+    instances and inline `<svg>` are leaves, shadow content is not compared,
+    and a repeat inside a reported repeat is not reported again. At most 10
+    per frame.
 - The workspace snapshot adds optional `styleSources` (status, messages,
   themes, tokens and an optional `rules` count, without CSS) and
   `styleSourceErrors`. The theme editor lists Manual (`tokens.css`, editable)

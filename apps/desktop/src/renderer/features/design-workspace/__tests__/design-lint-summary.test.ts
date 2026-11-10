@@ -53,6 +53,23 @@ describe("design lint review summary", () => {
     ]);
   });
 
+  it("labels the authoring contract warnings and any rule id it does not know", () => {
+    const at = (ruleId: string, line: number) => ({ ruleId, severity: "warning" as const, message: ruleId, file: "home.html", line, column: 1 });
+    expect(groupDesignLintViolations([
+      at("repeated-inline-style", 1),
+      at("literal-token-value", 2),
+      at("repeated-markup", 3),
+      at("layer-tree-limit", 4),
+      at("future-rule", 5),
+    ]).map(({ ruleId, label }) => [ruleId, label])).toEqual([
+      ["future-rule", "future-rule"],
+      ["layer-tree-limit", "Layer tree limit"],
+      ["literal-token-value", "Literal token values"],
+      ["repeated-inline-style", "Repeated inline styles"],
+      ["repeated-markup", "Repeated markup"],
+    ]);
+  });
+
   it("names the exact first blocking file, line, and rule", () => {
     expect(
       blockingDesignLintReason({

@@ -75,7 +75,7 @@ To create a frame:
 
 ## Components
 
-- Define a reusable component as `components/<name>.html` and use it as `<zd-<name> data-oid="…">`.
+- Markup used three or more times in a frame is a component. Define it as `components/<name>.html` and use it as `<zd-<name> data-oid="…">`.
 - Give every selectable element in the definition a unique, stable `data-zid` (not `data-oid`). `<slot>` receives instance children; `<slot data-zd-attr="label">` receives an escaped attribute value.
 - Keep scripts, event handlers, external URLs and `data-oid` out of definitions. Component references resolve relative to the Design root.
 
