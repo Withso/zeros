@@ -73,6 +73,9 @@ interface DesignFrameRuntimeIframeProps {
   transitionCover: { sourceVersion: string; dataUrl: string } | null;
   /** A retained HTML document or decoded picture already supplies pixels. */
   underlayReady?: boolean;
+  /** The frame is no longer live: this document stays mounted, undrawn and
+   * inert, until the commit that replaced its pixels has been presented. */
+  retiring?: boolean;
   /** The Design directory the canvas shows; an agent's in-flight edits of
    * its linked stylesheets apply to this frame live. */
   designDirectory?: string;
@@ -110,6 +113,7 @@ interface DesignFrameDocumentBufferProps {
   buffer: DesignDocumentBuffer;
   replacement: DesignDocumentReplacement | null;
   ready: boolean;
+  retiring: boolean;
   runtimeActive: boolean;
   playbackSessionId: string | null;
   onPlaybackStopped?: (sessionId: string, error?: Error) => void;
@@ -145,6 +149,7 @@ function DesignFrameDocumentBuffer({
   buffer,
   replacement,
   ready,
+  retiring,
   runtimeActive,
   playbackSessionId,
   onPlaybackStopped,
@@ -666,8 +671,10 @@ function DesignFrameDocumentBuffer({
       data-design-document-source-version={documentSourceVersion}
       data-design-source-version={frame.sourceVersion}
       data-design-document-buffer={buffer}
-      data-design-document-ready={ready ? "" : undefined}
-      data-design-document-presented={ready && presentedRuntime !== null && presentedRuntime === connectedRuntime ? "" : undefined}
+      // A retiring document no longer counts as the frame's painted, editable
+      // document: its passive pixels are showing.
+      data-design-document-ready={ready && !retiring ? "" : undefined}
+      data-design-document-presented={ready && !retiring && presentedRuntime !== null && presentedRuntime === connectedRuntime ? "" : undefined}
       data-design-frame-live={interactive ? "" : undefined}
       tabIndex={interactive ? 0 : -1}
       {...(!interactive ? { inert: "" } : {})}
@@ -704,6 +711,7 @@ export function DesignFrameRuntimeIframe(props: DesignFrameRuntimeIframeProps) {
     <DesignFrameRuntimeSession
       key={`${props.workspaceId}\u0000${props.folder}\u0000${props.frame.file}\u0000${props.protocolCapability ?? "bridge"}\u0000${props.playbackSessionId ?? "editing"}`}
       {...props}
+      active={props.active && !props.retiring}
     />
   );
 }
@@ -722,6 +730,7 @@ function DesignFrameRuntimeSession({
   theme,
   transitionCover,
   underlayReady,
+  retiring = false,
   designDirectory,
 }: DesignFrameRuntimeIframeProps) {
   const stylesheetPreviews = useDesignAgentStylesheetPreviews(
@@ -980,7 +989,14 @@ function DesignFrameRuntimeSession({
   ];
 
   return (
-    <div className="relative size-full overflow-hidden">
+    <div
+      // A retiring document lies over the frame, out of the way of one that follows it.
+      className={retiring ? "absolute inset-0 size-full overflow-hidden" : "relative size-full overflow-hidden"}
+      data-design-frame-retiring-document={retiring ? "" : undefined}
+      // Opacity, not visibility: Chromium frees a hidden frame's tiles while
+      // the canvas frame that still draws them is on screen.
+      style={retiring ? { opacity: 0 } : undefined}
+    >
       {buffers.map((entry) => (
         <DesignFrameDocumentBuffer
           key={`${entry.sourceVersion}:${retryAttempt}`}
@@ -992,6 +1008,7 @@ function DesignFrameRuntimeSession({
           buffer={entry.buffer}
           replacement={entry.buffer === "incoming" ? replacement : null}
           ready={readySourceVersions.includes(entry.sourceVersion)}
+          retiring={retiring}
           runtimeActive={
             active &&
             (entry.buffer === "incoming" || incomingSourceVersion === null)
