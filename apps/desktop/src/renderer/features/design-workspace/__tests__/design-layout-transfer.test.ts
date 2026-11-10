@@ -118,7 +118,7 @@ beforeEach(() => {
 afterEach(() => vi.useRealTimers());
 
 describe("canvas transfer presentation", () => {
-  it("sends the measured affine appearance instead of the legacy flattening request", async () => {
+  it("sends the measured affine appearance, with the new frame on whole pixels, instead of the legacy flattening request", async () => {
     await transferDesignLayerOnCanvas({
       ...input,
       frames: [source],
@@ -126,7 +126,7 @@ describe("canvas transfer presentation", () => {
       details: {
         ...node,
         sourceVersion: source.sourceVersion,
-        rect: { x: 40, y: 80, width: 240, height: 280 },
+        rect: { x: 40, y: 80, width: 240.4, height: 280.004 },
         box: {
           x: 40,
           y: 80,
@@ -147,8 +147,10 @@ describe("canvas transfer presentation", () => {
     });
     expect(mocks.transfer.mock.calls[0]?.[1]).toMatchObject({
       sourceVersion: source.sourceVersion,
-      x: 700.25,
-      y: 400.5,
+      x: 700,
+      y: 401,
+      w: 241,
+      h: 280,
       relocation: {
         width: 100,
         height: 80,
