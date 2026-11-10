@@ -205,6 +205,8 @@ import {
   clearDesignLivePreview,
   designLivePreviewValue,
   publishDesignGestureLivePreview,
+  publishDesignFrameGeometryLive,
+  clearDesignFrameGeometryLive,
 } from "./state/design-live-preview";
 import { publishDesignMotionPlayhead } from "./state/design-motion-playhead";
 import { commitDesignLayoutOwnerStyles } from "./state/design-layout-owner-commit";
@@ -3444,6 +3446,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         preview.geometry = latest;
         frameGeometryPreviewsRef.current.set(previewKey, preview);
         paintFrameGeometry(element, latest);
+        publishDesignFrameGeometryLive(workspaceId, frame.file, latest);
         if (mode !== "move") {
           previewRootSizing(latest);
           paintRootGeometry(latest);
@@ -3606,9 +3609,12 @@ export const DesignCanvas = React.memo(function DesignCanvas({
           if (frameGeometryPreviewsRef.current.get(previewKey) !== preview)
             return;
           frameGeometryPreviewsRef.current.delete(previewKey);
+          clearDesignFrameGeometryLive(workspaceId, frame.file);
           if (ownerIsCurrent() && element.isConnected)
             paintFrameGeometry(element, geometry);
         };
+        // The release position shows at once, ahead of the throttled gesture.
+        publishDesignFrameGeometryLive(workspaceId, frame.file, latest, { settle: true });
         completed = true;
         preview.commit = persist();
         // The destination stays live until the nest that needed it settles.
@@ -3641,6 +3647,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
           if (ownerIsCurrent() && previousPreview && !previousPreview.settled)
             frameGeometryPreviewsRef.current.set(previewKey, previousPreview);
           else frameGeometryPreviewsRef.current.delete(previewKey);
+          clearDesignFrameGeometryLive(workspaceId, frame.file);
           // The label DOM can survive a directory replacement. React has
           // already painted the new owner; the old rollback must not touch it.
           if (ownerIsCurrent()) {

@@ -359,6 +359,48 @@ export function useDesignLivePreviewValue(
   );
 }
 
+/** A frame's own canvas geometry while a drag or resize paints it. It is
+ * presentation only: the inspector's X, Y, W and H follow the gesture, and
+ * the saved snapshot takes over when the gesture settles or is cancelled. */
+const FRAME_GEOMETRY_OWNER = "::zeros-frame-geometry";
+export type DesignFrameGeometryLiveKey = "x" | "y" | "w" | "h";
+
+export function publishDesignFrameGeometryLive(
+  workspaceId: string,
+  frame: string,
+  geometry: Readonly<Record<DesignFrameGeometryLiveKey, number>>,
+  options: { settle?: boolean } = {},
+): void {
+  publishDesignGestureLivePreview(workspaceId, frame, FRAME_GEOMETRY_OWNER, {
+    x: String(geometry.x), y: String(geometry.y), w: String(geometry.w), h: String(geometry.h),
+  }, options);
+}
+
+export function clearDesignFrameGeometryLive(workspaceId: string, frame: string): void {
+  clearDesignLivePreview(workspaceId, frame, FRAME_GEOMETRY_OWNER);
+}
+
+function liveNumber(value: string | null | undefined): number | undefined {
+  const number = typeof value === "string" ? Number(value) : Number.NaN;
+  return Number.isFinite(number) ? number : undefined;
+}
+
+export function designFrameGeometryLiveValue(
+  workspaceId: string,
+  frame: string,
+  key: DesignFrameGeometryLiveKey,
+): number | undefined {
+  return liveNumber(designLivePreviewValue(workspaceId, frame, FRAME_GEOMETRY_OWNER, key));
+}
+
+export function useDesignFrameGeometryLiveValue(
+  workspaceId: string,
+  frame: string,
+  key: DesignFrameGeometryLiveKey,
+): number | undefined {
+  return liveNumber(useDesignLivePreviewValue(workspaceId, frame, FRAME_GEOMETRY_OWNER, key));
+}
+
 export function resetDesignLivePreviewForTests(): void {
   publicationSequence = 0;
   latestPublicationByProperty.clear();

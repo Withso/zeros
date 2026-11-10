@@ -142,7 +142,9 @@ import {
 import { dispatchDesignWorkspaceShortcut } from "./design-workspace-shortcuts";
 import {
   publishDesignLivePreviewStyles,
+  useDesignFrameGeometryLiveValue,
   useDesignLivePreviewValue,
+  type DesignFrameGeometryLiveKey,
 } from "./state/design-live-preview";
 import { useShallow } from "zustand/react/shallow";
 import { useDesignRuntimeStore } from "./state/design-runtime-store";
@@ -829,6 +831,32 @@ function InspectorEditField({
         ) : null}
       </div>
     </div>
+  );
+}
+
+/** A frame's X, Y, W or H: its saved value, or the one a drag or resize on
+ * the canvas is painting right now. Only this field subscribes to the gesture. */
+function InspectorFrameGeometryField({
+  workspaceId,
+  frame,
+  geometryKey,
+  saved,
+  sizing,
+  ...field
+}: Omit<InspectorEditFieldProps, "value" | "numericValue"> & {
+  workspaceId: string;
+  frame: string;
+  geometryKey: DesignFrameGeometryLiveKey;
+  saved: number;
+  sizing?: "hug" | "fill";
+}) {
+  const shown = useDesignFrameGeometryLiveValue(workspaceId, frame, geometryKey) ?? saved;
+  return (
+    <InspectorEditField
+      {...field}
+      value={sizing ? (sizing === "hug" ? "Hug" : "Fill") : shown}
+      numericValue={sizing ? String(shown) : undefined}
+    />
   );
 }
 
@@ -2106,17 +2134,14 @@ export const DesignInspector = React.memo(function DesignInspector({
     if (frameGeometryProperty) {
       const [geometryKey, geometryValue] = frameGeometryProperty;
       return (
-        <InspectorEditField
+        <InspectorFrameGeometryField
           key={`${styleContext.workspaceId}:${styleContext.frame.file}:frame:${geometryKey}`}
+          workspaceId={styleContext.workspaceId}
+          frame={styleContext.frame.file}
+          geometryKey={geometryKey}
+          saved={geometryValue}
+          sizing={options?.sizing}
           label={label}
-          value={
-            options?.sizing
-              ? options.sizing === "hug"
-                ? "Hug"
-                : "Fill"
-              : geometryValue
-          }
-          numericValue={options?.sizing ? String(geometryValue) : undefined}
           whole={options?.whole}
           range={
             geometryKey === "w" || geometryKey === "h"
@@ -2509,10 +2534,13 @@ export const DesignInspector = React.memo(function DesignInspector({
                       ["H", "h", frame.height],
                     ] as const
                   ).map(([label, key, value]) => (
-                    <InspectorEditField
+                    <InspectorFrameGeometryField
                       key={key}
+                      workspaceId={workspaceId}
+                      frame={frame.file}
+                      geometryKey={key}
+                      saved={value}
                       label={label}
-                      value={value}
                       compact
                       whole
                       range={

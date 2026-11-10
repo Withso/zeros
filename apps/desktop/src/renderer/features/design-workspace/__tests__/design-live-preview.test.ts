@@ -262,3 +262,23 @@ describe("design live preview", () => {
     expect(designLivePreviewValue("workspace-a", "home.html", "hero", "border-radius")).toBe("24px");
   });
 });
+
+describe("live frame geometry", () => {
+  it("shows a dragged frame's position at once and lets go of it when the gesture ends", async () => {
+    const { clearDesignFrameGeometryLive, designFrameGeometryLiveValue, publishDesignFrameGeometryLive } =
+      await import("../state/design-live-preview");
+    resetDesignLivePreviewForTests();
+    publishDesignFrameGeometryLive("workspace", "page/home.html", { x: 560, y: 120, w: 720, h: 420 });
+    expect(designFrameGeometryLiveValue("workspace", "page/home.html", "x")).toBe(560);
+    expect(designFrameGeometryLiveValue("workspace", "page/home.html", "y")).toBe(120);
+    // Another frame, or another workspace, never reads this gesture.
+    expect(designFrameGeometryLiveValue("workspace", "page/other.html", "x")).toBeUndefined();
+    expect(designFrameGeometryLiveValue("elsewhere", "page/home.html", "x")).toBeUndefined();
+    // A release publishes the final position without waiting out the throttle.
+    publishDesignFrameGeometryLive("workspace", "page/home.html", { x: 561, y: 300, w: 720, h: 420 }, { settle: true });
+    expect(designFrameGeometryLiveValue("workspace", "page/home.html", "y")).toBe(300);
+    clearDesignFrameGeometryLive("workspace", "page/home.html");
+    expect(designFrameGeometryLiveValue("workspace", "page/home.html", "y")).toBeUndefined();
+  });
+});
+

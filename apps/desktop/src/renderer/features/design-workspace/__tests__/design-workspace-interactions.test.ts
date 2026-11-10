@@ -908,6 +908,17 @@ describe("design workspace interaction wiring", () => {
         motionTargetSelected`);
   });
 
+  it("shows a frame's position and size in the inspector while it is dragged or resized", () => {
+    const inspector = readSection("design-inspector.tsx");
+    // The gesture publishes each painted geometry; the saved snapshot takes
+    // over when the gesture settles or is cancelled.
+    expect(source).toContain("publishDesignFrameGeometryLive(workspaceId, frame.file, latest);");
+    expect(source).toContain("clearDesignFrameGeometryLive(workspaceId, frame.file);");
+    // Both frame field groups read it through one subscribed field.
+    expect(inspector).toContain("useDesignFrameGeometryLiveValue(workspaceId, frame, geometryKey)");
+    expect(inspector.match(/<InspectorFrameGeometryField/g)).toHaveLength(2);
+  });
+
   it("keeps typed text on Escape, as Figma does, instead of discarding it", () => {
     const editor = readSection("design-inline-text-editor.tsx");
     // Escape ends the edit through the same commit as blur and Cmd/Ctrl+Enter.
