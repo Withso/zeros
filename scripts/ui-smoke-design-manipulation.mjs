@@ -9,7 +9,7 @@ import { execFileSync } from "node:child_process";
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { chromium } from "@playwright/test";
-import { designFrameElementBox } from "./ui-smoke-design-helpers.mjs";
+import { designFrameElementBox, openLayersDrawer } from "./ui-smoke-design-helpers.mjs";
 
 const { values } = parseArgs({ options: {
   "base-url": { type: "string", default: "http://127.0.0.1:5299" },
@@ -91,6 +91,7 @@ async function load(node = "home-hero", extra = {}) {
   for (const [key, value] of Object.entries({ layoutGestures: "1", measureManipulation: "1", engineDelayMs: String(report.engineDelayMs),
     ...(values.profile ? { profileContinuity: "1" } : {}), ...extra })) url.searchParams.set(key, value);
   await page.goto(url.href, { waitUntil: "networkidle" });
+  await openLayersDrawer(page);
   await page.waitForFunction(() => window.__zerosHarnessDesignSurface?.measurement);
   await page.locator('[data-design-frame-row="home.html"]').click();
   await page.locator(iframeSelector).waitFor();

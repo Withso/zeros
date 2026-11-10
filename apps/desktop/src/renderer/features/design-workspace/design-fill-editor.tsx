@@ -45,6 +45,9 @@ interface DesignFillEditorProps {
   /** The token a solid fill's winning declaration reads, if any. */
   tokenName?: string;
   tokenDescription?: string;
+  /** The selected layers' fills differ: the row reads "Mixed" behind a
+   * neutral swatch; a fill chosen in the popover or typed sets all of them. */
+  mixed?: boolean;
   onPreview?: (styles: Record<string, string | null>) => void;
   onCancelPreview?: () => void;
   onCommit: (styles: Record<string, string | null>) => void;
@@ -113,15 +116,16 @@ export function DesignFillEditor({
   disabled,
   tokenName,
   tokenDescription,
+  mixed = false,
   onPreview,
   onCancelPreview,
   onCommit,
 }: DesignFillEditorProps) {
-  const fillType = classifyDesignFill(image);
+  const fillType = mixed ? "solid" : classifyDesignFill(image);
   const gradient = parseDesignGradient(image);
   const swatch = (
     <span className="relative block size-4 shrink-0 overflow-hidden rounded-sm">
-      <DesignColorSwatch value={color} className="size-full" />
+      <DesignColorSwatch value={color} mixed={mixed} className="size-full" />
       {fillType !== "solid" ? (
         <span
           className="absolute inset-0 bg-cover bg-center"
@@ -164,6 +168,7 @@ export function DesignFillEditor({
           disabled={disabled}
           tokenName={tokenName}
           tokenDescription={tokenDescription}
+          mixed={mixed}
           onPreview={(next) => onPreview?.({ "background-color": next })}
           onCancelPreview={onCancelPreview}
           onCommit={(next) =>

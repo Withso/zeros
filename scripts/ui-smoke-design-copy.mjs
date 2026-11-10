@@ -1,10 +1,11 @@
 import { expect } from "@playwright/test";
-import { designFrameElementBox } from "./ui-smoke-design-helpers.mjs";
+import { designFrameElementBox, openLayersDrawer } from "./ui-smoke-design-helpers.mjs";
 
 const workspaceId = "ws_design_harness";
 const displayed = '[data-design-frame="home.html"] iframe[data-design-document-buffer="displayed"][data-design-document-ready]';
 async function load(page, node = "home-hero", fixture = "layoutGestures") {
   await page.goto(`${new URL(page.url()).origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html?${fixture}&measureManipulation&scopedMutations&engineDelayMs=400`, { waitUntil: "networkidle" });
+  await openLayersDrawer(page);
   await page.locator('[data-design-frame-row="home.html"]').click();
   await page.locator(displayed).waitFor();
   await page.evaluate(() => window.__zerosHarnessDesignSurface.ui.getState().setViewport("ws_design_harness", { zoom: 0.5, panX: 80, panY: 100 }));

@@ -1,4 +1,5 @@
 import { expect } from "@playwright/test";
+import { openLayersDrawer } from "./ui-smoke-design-helpers.mjs";
 
 export async function runDesignSelectionReferencesSmoke({ page, check }) {
   const previousViewport = page.viewportSize();
@@ -11,6 +12,7 @@ export async function runDesignSelectionReferencesSmoke({ page, check }) {
       `${new URL(page.url()).origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html?selectionReferences`,
       { waitUntil: "networkidle" },
     );
+    await openLayersDrawer(page);
     await page
       .locator(
         '[data-design-frame="home.html"] iframe[data-design-document-ready]',
@@ -185,8 +187,9 @@ export async function runDesignParkedReferenceRemovalSmoke({ page, check }) {
   await page.goto(`${new URL(page.url()).origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html?selectionReferences`, { waitUntil: "networkidle" });
   await page.evaluate(async () => {
     const { useDesignWorkspaceUiStore } = await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-ui.ts");
-    useDesignWorkspaceUiStore.getState().setPanels("ws_design_harness", { inspectorVisible: true, layersVisible: true });
+    useDesignWorkspaceUiStore.getState().setPanels("ws_design_harness", { inspectorVisible: true, layersDrawerOpen: true });
   });
+  await openLayersDrawer(page);
   const pill = page.locator("[data-composer-design-frame]");
   await page.locator('[data-design-frame-row="home.html"]').click();
   await page.getByRole("button", { name: "Save reference draft", exact: true }).click();
@@ -237,8 +240,9 @@ export async function runDesignSelectedFrameDeletionSmoke({ page, check }) {
     await page.goto(`${new URL(page.url()).origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html?selectionReferences${scoped ? "&scopedMutations&measureContinuity&engineDelayMs=0" : ""}`, { waitUntil: "networkidle" });
     await page.evaluate(async () => {
       const { useDesignWorkspaceUiStore } = await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-ui.ts");
-      useDesignWorkspaceUiStore.getState().setPanels("ws_design_harness", { inspectorVisible: true, layersVisible: true });
+      useDesignWorkspaceUiStore.getState().setPanels("ws_design_harness", { inspectorVisible: true, layersDrawerOpen: true });
     });
+    await openLayersDrawer(page);
     await page.locator('[data-design-frame-row="home.html"]').click();
     const pricing = page.locator('[data-design-frame-row="pricing.html"]');
     await pricing.click({ modifiers: ["Shift"] });
@@ -273,7 +277,7 @@ export async function runDesignSelectionLimitSmoke({ page, check }) {
     cache.designWorkspaceSnapshotCache.setData("ws_design_harness", { ...snapshot, frames, pages: undefined });
     const store = useDesignWorkspaceUiStore.getState();
     store.setSelectedTargets("ws_design_harness", []);
-    store.setPanels("ws_design_harness", { inspectorVisible: false, layersVisible: false });
+    store.setPanels("ws_design_harness", { inspectorVisible: false, layersDrawerOpen: false });
     store.setViewport("ws_design_harness", { zoom: 0.7, panX: 100, panY: 130 });
   });
   const first = await page.locator('[data-design-frame="probe-00.html"]').boundingBox();

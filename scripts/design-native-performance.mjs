@@ -189,10 +189,10 @@ try {
       assert(rect && rect.width > 650 && rect.height > 500, "The fixed canvas is too small for the reference view.");
       const view = await page.evaluate(async workspaceId => {
         const { useDesignWorkspaceUiStore } = await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-ui.ts");
-        const { zoom, panX, panY, layersVisible, inspectorVisible } = useDesignWorkspaceUiStore.getState().byWorkspace[workspaceId];
-        return { zoom, panX, panY, layersVisible, inspectorVisible };
+        const { zoom, panX, panY, layersDrawerOpen, inspectorVisible } = useDesignWorkspaceUiStore.getState().byWorkspace[workspaceId];
+        return { zoom, panX, panY, layersDrawerOpen, inspectorVisible };
       }, fixture.workspace.workspaceId);
-      assert.deepEqual(view, { ...cameraOverride, layersVisible: false, inspectorVisible: false }, "Camera or panels changed between samples.");
+      assert.deepEqual(view, { ...cameraOverride, layersDrawerOpen: false, inspectorVisible: false }, "Camera or panels changed between samples.");
       if (!layout) layout = { width: rect.width, height: rect.height };
       assert(Math.abs(rect.width - layout.width) < 1 && Math.abs(rect.height - layout.height) < 1,
         `Canvas size changed between samples: expected ${layout.width}x${layout.height}, observed ${rect.width}x${rect.height}.`);

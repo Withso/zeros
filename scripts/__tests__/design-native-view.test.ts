@@ -204,14 +204,14 @@ it.each(["eager", "lazy"])("applies the benchmark view after a cold %s directory
     // Hold that publication until the driver has actually observed the cold state.
     await page.evaluate(mode => {
       const fixture = (globalThis as any).fixture;
-      fixture.byWorkspace.workspace = { directoryId: "directory", activePageId: "page", zoom: 0.2, panX: 0, panY: 0, layersVisible: true, inspectorVisible: true };
+      fixture.byWorkspace.workspace = { directoryId: "directory", activePageId: "page", zoom: 0.2, panX: 0, panY: 0, layersDrawerOpen: true, inspectorVisible: true };
       fixture.snapshot = mode === "lazy"
         ? { directoryId: "directory", frames: [], preparation: { descriptions: [{ file: "frame.html" }] } }
         : { directoryId: "directory", frames: [{ file: "frame.html" }] };
     }, mode);
     expect(await prepared).toBeNull();
     expect(await page.evaluate(() => (globalThis as any).fixture.byWorkspace.workspace))
-      .toMatchObject({ ...camera, layersVisible: false, inspectorVisible: false });
+      .toMatchObject({ ...camera, layersDrawerOpen: false, inspectorVisible: false });
     expect(await page.evaluate(() => (globalThis as any).fixture.writes)).toBe(2);
   } finally { await page.close(); }
 });
@@ -222,7 +222,7 @@ it("rejects an overview camera changed by input before its durable store catches
     await page.route("http://native-view.test/**", async route => {
       const module = route.request().url().endsWith("design-workspace-ui.ts");
       await route.fulfill({ contentType: module ? "text/javascript" : "text/html", body: module
-        ? `export const useDesignWorkspaceUiStore = { getState: () => ({ byWorkspace: { workspace: { directoryId: "directory", activePageId: "page", zoom: 0.05, panX: 32, panY: 96, layersVisible: false, inspectorVisible: false } } }) };`
+        ? `export const useDesignWorkspaceUiStore = { getState: () => ({ byWorkspace: { workspace: { directoryId: "directory", activePageId: "page", zoom: 0.05, panX: 32, panY: 96, layersDrawerOpen: false, inspectorVisible: false } } }) };`
         : `<main data-design-retained-workspace="workspace" aria-hidden="false"><div data-design-canvas-viewport style="width:1000px;height:800px"><div data-design-canvas-world style="transform:translate(32px,96px) scale(.05)"></div></div></main>` });
     });
     await page.goto("http://native-view.test/");

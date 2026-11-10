@@ -1,5 +1,5 @@
 import { expect } from "@playwright/test";
-import { designFrameElementBox } from "./ui-smoke-design-helpers.mjs";
+import { designFrameElementBox, openLayersDrawer } from "./ui-smoke-design-helpers.mjs";
 import { runDesignSavedEditingSmoke } from "./ui-smoke-design-saved-editing.mjs";
 import { runDesignNestingSmoke } from "./ui-smoke-design-nesting.mjs";
 import { runDesignCopySmoke } from "./ui-smoke-design-copy.mjs";
@@ -14,6 +14,7 @@ async function openCanvasFixture(page, query = "layoutGestures") {
     `${origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html?${query}`,
     { waitUntil: "networkidle" },
   );
+  await openLayersDrawer(page);
   await page.evaluate(async () => {
     const { useDesignWorkspaceUiStore } =
       await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-ui.ts");
@@ -520,6 +521,7 @@ export async function runDesignUnrelatedPreparationRenderSmoke({ page: parent, c
     await page.addInitScript(installDesignRenderCounter);
     await page.goto(`${new URL(parent.url()).origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html?layoutGestures&scopedMutations&measureContinuity&engineDelayMs=0`,
       { waitUntil: "networkidle" });
+    await openLayersDrawer(page);
     await page.locator('[data-design-frame-row="home.html"]').click();
     await page.locator('[data-design-frame="home.html"] iframe[data-design-document-buffer="displayed"][data-design-document-ready]').waitFor();
     const row = page.locator('[data-design-sidebar-panel] [data-design-layer-id="home-hero"]');
@@ -633,8 +635,11 @@ export async function runDesignCompletedCanvasGesturesSmoke({ page, check }) {
 export async function runDesignNoopCanvasResizeSmoke({ page, check }) {
   await openCanvasFixture(page, "");
   await page.locator('[data-design-layer-id="home-heading"]').click();
+  // W shows the measured number live; its sizing word carries Fill.
   const width = page.getByRole("textbox", { name: "W", exact: true });
-  await expect(width).toHaveValue("Fill");
+  const sizing = page.getByRole("button", { name: /^Width sizing: / });
+  await expect(sizing).toHaveAccessibleName("Width sizing: Fill");
+  const restingWidth = await width.inputValue();
   const handle = page.locator(
     '[data-design-element-overlay="home-heading"] [data-design-resize-edge="e"]',
   );
@@ -647,10 +652,11 @@ export async function runDesignNoopCanvasResizeSmoke({ page, check }) {
   await page.mouse.move(start.x, start.y);
   await page.mouse.down();
   await page.mouse.move(start.x + 30, start.y, { steps: 4 });
-  await expect(width).not.toHaveValue("Fill");
+  await expect(width).not.toHaveValue(restingWidth);
   await page.mouse.move(start.x, start.y, { steps: 4 });
   await page.mouse.up();
-  await expect(width).toHaveValue("Fill");
+  await expect(width).toHaveValue(restingWidth);
+  await expect(sizing).toHaveAccessibleName("Width sizing: Fill");
   await page.waitForTimeout(150);
   expect(await styleWrites(page)).toBe(writesBefore);
   check(

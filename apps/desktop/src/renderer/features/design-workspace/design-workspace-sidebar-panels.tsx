@@ -73,6 +73,7 @@ import {
 import {
   designFrameLayerChildren,
   designLayerBlockEdges,
+  designLayerPathNodes,
   designLayerRevealPaths,
   designLayerRevealScrollTop,
   designLayerRovingTabStop,
@@ -103,6 +104,8 @@ import {
   useDesignLayerRevealRequest,
   useDesignWorkspaceDisclosure,
 } from "./state/design-layer-disclosure";
+
+const NO_PANEL_ROWS: readonly DesignPanelRow[] = Object.freeze([]);
 
 // --- TYPES ---
 
@@ -659,10 +662,24 @@ function OwnedDesignWorkspaceSidebarPanels({
     () => designLayerSelectionSubtreeIds(selectedTree, selectedNodeIds),
     [selectedTree, selectedNodeIds],
   );
+  // A closed drawer draws no rows, so it builds none either.
   const panelRows = useMemo(
-    () => designLayerPanelRows({ frames, treesByFile, disclosures }),
-    [disclosures, frames, treesByFile],
+    () => (expanded ? designLayerPanelRows({ frames, treesByFile, disclosures }) : NO_PANEL_ROWS),
+    [disclosures, expanded, frames, treesByFile],
   );
+  /** The closed drawer's path to the selection: its parent and itself. */
+  const selectionPath = useMemo(() => {
+    if (expanded || !selectedFrame) return null;
+    const names = [
+      designFrameDisplayName(selectedFrame),
+      ...(selectedNodeId
+        ? designLayerPathNodes(selectedTree, selectedNodeId).map((node) =>
+            designRuntimeLayerDisplayName(node),
+          )
+        : []),
+    ];
+    return names.slice(-2).join(" › ");
+  }, [expanded, selectedFrame, selectedNodeId, selectedTree]);
   // A retained tree must never revive another directory/page's draft, or
   // commit it when hiding/removing the input happens to produce a blur.
   useLayoutEffect(() => {
@@ -1325,24 +1342,35 @@ function OwnedDesignWorkspaceSidebarPanels({
       aria-labelledby={headingId}
     >
       <div className="flex h-9 shrink-0 items-center gap-2 pr-2 pl-3">
-        <h2 id={headingId} className="text-fg1 min-w-0 text-xs font-medium">
+        <h2 id={headingId} className="text-fg1 flex min-w-0 flex-1 text-xs font-medium">
           {onExpandedChange ? (
-            // The whole tree folds to this header so the inspector below can
-            // take the panel; the selection stays revealed for its return.
+            // The drawer at the foot of the Style panel opens from this
+            // header; closed, it shows where the selection sits, and the
+            // selection stays revealed for its return.
             <button
               type="button"
               data-design-layers-fold=""
-              className="zd-design-layers-fold"
+              className="zd-design-layers-fold min-w-0"
               aria-expanded={expanded}
-              aria-controls={treeScrollId}
+              aria-controls={expanded ? treeScrollId : undefined}
               onClick={() => onExpandedChange(!expanded)}
             >
-              Layers
+              {/* With a selection badge beside it the path truncates first;
+                  the chevron and the word keep their size. */}
               {expanded ? (
-                <ChevronDown aria-hidden="true" className={DISCLOSURE_ICON} />
+                <ChevronDown aria-hidden="true" className={cn(DISCLOSURE_ICON, "shrink-0")} />
               ) : (
-                <ChevronRight aria-hidden="true" className={DISCLOSURE_ICON} />
+                <ChevronRight aria-hidden="true" className={cn(DISCLOSURE_ICON, "shrink-0")} />
               )}
+              <span className="shrink-0">Layers</span>
+              {selectionPath ? (
+                <span
+                  data-design-layers-path=""
+                  className="text-fg3 min-w-0 truncate font-normal"
+                >
+                  {selectionPath}
+                </span>
+              ) : null}
             </button>
           ) : (
             "Layers"
@@ -1372,12 +1400,13 @@ function OwnedDesignWorkspaceSidebarPanels({
       </div>
 
       {/* Rows sit flush: a selection and everything it owns must read as one
-          uninterrupted fill, so no gap may cut through the block. A folded
-          tree stays mounted but out of layout; its effects pause. */}
+          uninterrupted fill, so no gap may cut through the block. A closed
+          drawer does not render or measure the tree at all. */}
+      {expanded ? (
       <ScrollArea
         ref={scrollAreaRef}
         id={treeScrollId}
-        className={cn("min-h-0 min-w-0 flex-1", !expanded && "hidden")}
+        className="min-h-0 min-w-0 flex-1"
       >
         <div className="flex min-w-0 flex-col px-1.5 pb-2">
           <div
@@ -1501,6 +1530,7 @@ function OwnedDesignWorkspaceSidebarPanels({
           ) : null}
         </div>
       </ScrollArea>
+      ) : null}
     </section>
   );
 }

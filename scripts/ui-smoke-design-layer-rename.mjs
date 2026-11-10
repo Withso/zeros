@@ -1,3 +1,4 @@
+import { openLayersDrawer } from "./ui-smoke-design-helpers.mjs";
 // Exercise real inputs and the source transaction/runtime round trip. Names
 // must not change text, accessibility metadata, IDs, or frame filenames.
 export async function runDesignLayerRenameSmoke({ page, waitFor, check }) {
@@ -10,6 +11,7 @@ export async function runDesignLayerRenameSmoke({ page, waitFor, check }) {
     `${origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html?layerNames`,
     { waitUntil: "networkidle" },
   );
+  await openLayersDrawer(page);
   const frame = page.locator('[data-design-frame-row="home.html"]');
   const hero = page.locator('[data-design-layer-id="home-hero"]');
   const heading = page.locator('[data-design-layer-id="home-heading"]');

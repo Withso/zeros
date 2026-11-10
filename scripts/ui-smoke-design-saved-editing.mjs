@@ -1,4 +1,5 @@
 import { expect } from "@playwright/test";
+import { openLayersDrawer } from "./ui-smoke-design-helpers.mjs";
 
 export async function runDesignSavedEditingSmoke({ page, check }) {
   await runDesignSavedEditingOwnerAdmissionSmoke({ page, check });
@@ -7,6 +8,7 @@ export async function runDesignSavedEditingSmoke({ page, check }) {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.mouse.move(-10, -10);
   await page.goto(`${origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html?designTokens`, { waitUntil: "networkidle" });
+  await openLayersDrawer(page);
   const frame = page.locator('[data-design-frame="home.html"]');
   await frame.locator('iframe[data-design-document-buffer="displayed"][data-design-document-ready]').waitFor();
   const heading = () => page.frameLocator('[data-design-frame="home.html"] iframe[data-design-document-buffer="displayed"][data-design-document-ready]').locator('[data-oid="home-heading"]');
@@ -69,6 +71,7 @@ export async function runDesignSavedEditingOwnerAdmissionSmoke({ page, check }) 
       let previous;
       if (entry !== "cold") {
         await control.goto(`${origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html`, { waitUntil: "networkidle" });
+        await openLayersDrawer(control);
         await control.locator('[data-design-frame="home.html"] iframe[data-design-document-ready]').waitFor();
         previous = await control.evaluate(async () => {
           const { captureDesignPageOwner } = await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-ui.ts");
@@ -78,6 +81,7 @@ export async function runDesignSavedEditingOwnerAdmissionSmoke({ page, check }) 
         expect(previous.pageId).toBe("main");
       }
       await control.goto(`${origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html?selectionReferences`, { waitUntil: "networkidle" });
+      await openLayersDrawer(control);
       await control.locator('[data-design-frame="home.html"] iframe[data-design-document-ready]').waitFor();
       const resolved = await control.evaluate(async (entry) => {
         const { captureDesignPageOwner, useDesignWorkspaceUiStore } = await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-ui.ts");
@@ -112,8 +116,10 @@ export async function runDesignSavedEditingStationaryPointerSmoke({ page, check 
   const origin = new URL(page.url()).origin;
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto(`${origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html`, { waitUntil: "networkidle" });
+  await openLayersDrawer(page);
   await page.mouse.move(100, 150);
   await page.goto(`${origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html?designTokens`, { waitUntil: "networkidle" });
+  await openLayersDrawer(page);
   await page.locator('[data-design-frame="home.html"] iframe[data-design-document-ready]').waitFor();
   await expect(page.locator('[data-design-workspace-surface]')).toHaveAttribute("data-design-saved-editing", "viewing");
   check("mounting beneath a stationary pointer does not turn passive viewing into editing", true);
@@ -123,6 +129,7 @@ export async function runDesignSavedEditingPendingSaveSmoke({ page, check }) {
   const origin = new URL(page.url()).origin;
   await page.mouse.move(-10, -10);
   await page.goto(`${origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html?designTokens&layoutGestures&coldFoundation`, { waitUntil: "networkidle" });
+  await openLayersDrawer(page);
   await page.locator('[data-design-frame="home.html"] iframe[data-design-document-buffer="displayed"][data-design-document-ready]').waitFor();
   await page.evaluate(async () => {
     const { receiveDesignAgentDraft } = await import("/apps/desktop/src/renderer/features/design-workspace/state/design-agent-drafts.ts");
@@ -173,6 +180,7 @@ export async function runDesignSavedEditingFreshDetailsSmoke({ page, check }) {
   const origin = new URL(page.url()).origin;
   await page.mouse.move(-10, -10);
   await page.goto(`${origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html?designTokens`, { waitUntil: "networkidle" });
+  await openLayersDrawer(page);
   await page.locator('[data-design-layer-id="home-heading"]').click();
   await page.evaluate(() => {
     const outside = document.createElement("button");
@@ -219,6 +227,7 @@ export async function runDesignSavedEditingTileSmoke({ page, check }) {
   const origin = new URL(page.url()).origin;
   await page.mouse.move(-10, -10);
   await page.goto(`${origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html?designTokens`, { waitUntil: "networkidle" });
+  await openLayersDrawer(page);
   const frame = page.locator('[data-design-frame="home.html"]');
   await frame.locator('iframe[data-design-document-buffer="displayed"][data-design-document-ready]').waitFor();
   await page.evaluate(async () => {
@@ -256,6 +265,7 @@ export async function runDesignSavedEditingRevisionSmoke({ page, check }) {
   const origin = new URL(page.url()).origin;
   await page.mouse.move(-10, -10);
   await page.goto(`${origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html?designTokens`, { waitUntil: "networkidle" });
+  await openLayersDrawer(page);
   const frame = page.locator('[data-design-frame="home.html"]');
   await frame.locator('iframe[data-design-document-buffer="displayed"][data-design-document-ready]').waitFor();
   const x = () => page.frameLocator('[data-design-frame="home.html"] iframe[data-design-document-buffer="displayed"][data-design-document-ready]')
@@ -305,6 +315,7 @@ export async function runDesignSavedEditingRaceSmoke({
   for (const change of changes) {
     await page.mouse.move(-10, -10);
     await page.goto(`${origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html?designTokens`, { waitUntil: "networkidle" });
+    await openLayersDrawer(page);
     const frame = page.locator('[data-design-frame="home.html"]');
     await frame.locator('iframe[data-design-document-buffer="displayed"][data-design-document-ready]').waitFor();
     const heading = () => page.frameLocator('[data-design-frame="home.html"] iframe[data-design-document-buffer="displayed"][data-design-document-ready]').locator('[data-oid="home-heading"]');
@@ -414,6 +425,8 @@ export async function runDesignSavedEditingRaceSmoke({
     }
     await expect.poll(x).toBe(change === "source" ? 170 : savedX);
     expect(await page.evaluate(() => window.__zerosHarnessFoundation.transactions.length)).toBe(0);
+    // A replaced directory restarts from the default view, drawer closed.
+    await openLayersDrawer(page);
     await page.locator('[data-design-layer-id="home-heading"]').click();
     await page.getByLabel("Design canvas", { exact: true }).focus();
     await page.keyboard.press("ArrowRight");

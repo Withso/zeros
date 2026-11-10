@@ -6,7 +6,7 @@ import {
   designAdvancedStyleRows,
 } from "../design-style-advanced";
 
-describe("Advanced style rows", () => {
+describe("More styles rows", () => {
   it("lists authored declarations no dedicated control shows, as written", () => {
     const rows = designAdvancedStyleRows({
       authoredStyleProperties: [
@@ -22,6 +22,8 @@ describe("Advanced style rows", () => {
         "box-sizing-reset-only",
         "--tw-leading",
         "user-select",
+        "clip-path",
+        "-webkit-font-smoothing",
       ],
       baseStyleProperties: ["box-sizing-reset-only"],
       authoredStyles: {
@@ -39,30 +41,42 @@ describe("Advanced style rows", () => {
         zIndex: "40",
         marginTop: "8px",
         pointerEvents: "none",
+        clipPath: "circle(50%)",
+        webkitFontSmoothing: "antialiased",
       },
     });
     expect(rows).toEqual([
+      // Stacking order (z-index) and a non-zero Margin have their own controls.
       { property: "cursor", value: "pointer", authored: { origin: "source", sourceId: "app", value: "pointer" } },
-      {
-        property: "z-index",
-        value: "var(--z-panel)",
-        authored: { origin: "inline", value: "var(--z-panel)", tokens: [{ name: "--z-panel", value: "40" }] },
-      },
       { property: "--card-gap", value: "12px", authored: { origin: "linked", file: "tokens.css", value: "12px" } },
       // Provenance is optional evidence: an unresolved winner shows computed.
-      { property: "margin-top", value: "8px" },
       { property: "pointer-events", value: "none" },
       {
         property: "user-select",
         value: "none",
         authored: { origin: "source", sourceId: "app", selector: ".select-none", scope: "element", value: "none" },
       },
+      // No Style control covers clip-path; font smoothing is in Type settings.
+      { property: "clip-path", value: "circle(50%)" },
     ]);
   });
 
   it("keeps covered shorthands with their sections and runtime markers out", () => {
-    for (const property of ["border", "flex", "font", "background", "transition", "inset"])
+    for (const property of ["border", "flex", "font", "background", "transition", "inset",
+      "z-index", "-webkit-font-smoothing"])
       expect(DESIGN_STYLE_FIELD_PROPERTIES.has(property)).toBe(true);
+    expect(DESIGN_STYLE_FIELD_PROPERTIES.has("clip-path")).toBe(false);
+  });
+
+  it("lists a zero margin, which Layout's Margin group does not show", () => {
+    const zero = designAdvancedStyleRows({
+      authoredStyleProperties: ["margin-top"],
+      authoredStyles: { "margin-top": { origin: "source", sourceId: "app", selector: "[data-oid]", scope: "element", value: "0" } },
+      styles: { marginTop: "0px" },
+    });
+    expect(zero.map((row) => row.property)).toEqual(["margin-top"]);
+    const shown = designAdvancedStyleRows({ authoredStyleProperties: ["margin-top"], styles: { marginTop: "8px" } });
+    expect(shown).toEqual([]);
     expect(designAdvancedStyleRows({ authoredStyleProperties: undefined, styles: {} })).toEqual([]);
   });
 
@@ -78,8 +92,8 @@ describe("Advanced style rows", () => {
   });
 });
 
-describe("Advanced section presentation", () => {
-  it("shows classes, every uncovered declaration, and removal only for inline values", async () => {
+describe("More styles presentation", () => {
+  it("shows every uncovered declaration, removal only for inline values, and never the classes", async () => {
     const React = await import("react");
     const { renderToStaticMarkup } = await import("react-dom/server");
     const { DesignAdvancedStyleSection } = await import("../design-advanced-style-section");
@@ -94,12 +108,12 @@ describe("Advanced section presentation", () => {
       breadcrumb: [],
       rect: { x: 0, y: 0, width: 10, height: 10 },
       classes: "card  card--raised",
-      authoredStyleProperties: ["cursor", "z-index", "padding"],
+      authoredStyleProperties: ["cursor", "user-select", "padding"],
       authoredStyles: {
         cursor: { origin: "source" as const, sourceId: "app", value: "pointer" },
-        "z-index": { origin: "inline" as const, value: "3" },
+        "user-select": { origin: "inline" as const, value: "none" },
       },
-      styles: { cursor: "pointer", zIndex: "3", padding: "8px" },
+      styles: { cursor: "pointer", userSelect: "none", padding: "8px" },
     };
     const markup = renderToStaticMarkup(
       React.createElement(DesignAdvancedStyleSection, {
@@ -109,17 +123,16 @@ describe("Advanced section presentation", () => {
         onCommit: () => {},
       }),
     );
-    // The classes are a read-only field like the other rows: the whole value,
-    // labelled, scrollable rather than truncated, and never editable.
-    const classes = markup.match(/<div[^>]*data-design-advanced-classes=""[^>]*>.*?<\/div>/s)?.[0] ?? "";
-    expect(classes).toContain('data-design-field-readonly=""');
-    expect(classes).toMatch(/<label[^>]*for="([^"]+)"[^>]*>class<\/label>.*<input[^>]*id="\1"/s);
-    expect(classes).toMatch(/<input[^>]*readonly=""[^>]*value="card {2}card--raised"/);
-    expect(classes).not.toContain("truncate");
+    expect(markup).toContain(">More styles</h3>");
+    expect(markup).toContain('aria-label="Add style"');
+    // The markup owns its classes; More styles lists declarations only.
+    expect(markup).not.toContain("data-design-advanced-classes");
+    expect(markup).not.toContain("card--raised");
+    expect(markup).not.toContain("font-mono");
     expect(markup).toContain('<output data-field="cursor">pointer</output>');
-    expect(markup).toContain('<output data-field="z-index">3</output>');
+    expect(markup).toContain('<output data-field="user-select">none</output>');
     expect(markup).not.toContain('data-field="padding"');
-    expect(markup).toContain('aria-label="Remove z-index"');
+    expect(markup).toContain('aria-label="Remove user-select"');
     expect(markup).not.toContain('aria-label="Remove cursor"');
   });
 });

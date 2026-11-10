@@ -135,21 +135,21 @@ describe("design workspace inspector toolbar", () => {
     );
   });
 
-  it("gives the floating panel a width seam and a Layers height seam", () => {
+  it("gives the floating panel a width seam and a Layers drawer height seam", () => {
     // One panel, one width: the Style width preference sizes Layers and the
-    // inspector together; the split between them is its own height.
+    // inspector together; the drawer at the foot resizes from its top edge.
     expect(floatingPanelSource).toContain('edge="left"');
     expect(floatingPanelSource).toContain('ariaLabel="Resize Style panel"');
     expect(floatingPanelSource).toContain("DESIGN_WORKSPACE_STYLE_WIDTH_DEFAULT");
-    expect(floatingPanelSource).toContain('edge="bottom"');
+    expect(floatingPanelSource).toContain('edge="top"');
     expect(floatingPanelSource).toContain('ariaLabel="Resize Layers panel"');
     expect(floatingPanelSource).toContain(
       "DESIGN_WORKSPACE_LAYERS_HEIGHT_DEFAULT",
     );
     // The inspector no longer sizes itself beside the canvas.
     expect(source).not.toContain("readPersistedDesignWorkspaceStyleWidth");
-    expect(floatingPanelSource.indexOf("{layers}")).toBeLessThan(
-      floatingPanelSource.indexOf("{inspector}"),
+    expect(floatingPanelSource.indexOf("{inspector}")).toBeLessThan(
+      floatingPanelSource.indexOf("{layers}"),
     );
   });
 

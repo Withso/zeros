@@ -1,10 +1,9 @@
 // ============================================
 // MODULE: Addable inspector sections
-// PURPOSE: Only the Style sections in use show. An optional section with
-//          nothing authored (Stroke, Effects, Typography, Transform,
-//          Transition, Motion, Advanced) draws nothing; the Add property
-//          menu lists it and, when chosen, reveals it and runs that
-//          section's own add action.
+// PURPOSE: Most empty Style sections are one row with a plus. Typography on
+//          a layer that is not text, and Transform, draw nothing while
+//          unused; the Add property menu lists them and, when chosen,
+//          reveals one and runs that section's own add action.
 // USED IN: DesignStyleEditor (provider and menu) and InspectorSection
 // ============================================
 
@@ -19,25 +18,10 @@ import {
   DropdownMenuTrigger,
 } from "../../shared/ui/primitives";
 
-export type DesignAddableSectionId =
-  | "stroke"
-  | "effects"
-  | "typography"
-  | "transform"
-  | "transition"
-  | "motion"
-  | "advanced";
+export type DesignAddableSectionId = "typography" | "transform";
 
 /** The menu lists hidden sections in the inspector's own order. */
-const ORDER: readonly DesignAddableSectionId[] = [
-  "stroke",
-  "effects",
-  "typography",
-  "transform",
-  "transition",
-  "motion",
-  "advanced",
-];
+const ORDER: readonly DesignAddableSectionId[] = ["typography", "transform"];
 
 export interface DesignAddableSection {
   id: DesignAddableSectionId;
@@ -127,7 +111,7 @@ export function DesignAddableSections({
           ]),
         }));
         // After the menu has closed and returned focus, so an editor the add
-        // opens (Transform's popover, Advanced's name field) keeps it.
+        // opens (Transform's popover, Typography's fields) keeps it.
         window.requestAnimationFrame(() =>
           window.requestAnimationFrame(() => section.add()),
         );

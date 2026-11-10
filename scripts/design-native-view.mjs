@@ -187,7 +187,7 @@ export async function readNativeDesignView(page) {
     return { workspaceId, directoryId: view?.directoryId, pageId: view?.activePageId,
       camera: { zoom: transform.a, panX: transform.e, panY: transform.f },
       storedCamera: view ? { zoom: view.zoom, panX: view.panX, panY: view.panY } : null,
-      panels: { layersVisible: view?.layersVisible, inspectorVisible: view?.inspectorVisible },
+      panels: { layersDrawerOpen: view?.layersDrawerOpen, inspectorVisible: view?.inspectorVisible },
       viewport: { width: bounds.width, height: bounds.height } };
   });
 }
@@ -205,7 +205,7 @@ export function assertNativeDesignView(observed, expected) {
   }
   for (const field of ["width", "height"])
     assert(Math.abs(observed.viewport[field] - expected.viewport[field]) < 1, "The qualified Design viewport changed.");
-  assert(!observed.panels.layersVisible && !observed.panels.inspectorVisible, "The qualified Design panels changed.");
+  assert(!observed.panels.layersDrawerOpen && !observed.panels.inspectorVisible, "The qualified Design panels changed.");
 }
 
 export async function prepareNativeDesignView(page, workspaceId, camera, timeout = 30_000) {
@@ -222,7 +222,7 @@ export async function prepareNativeDesignView(page, workspaceId, camera, timeout
   await page.evaluate(async ({ workspaceId, camera }) => {
     const { useDesignWorkspaceUiStore } = await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-ui.ts");
     const store = useDesignWorkspaceUiStore.getState();
-    store.setPanels(workspaceId, { layersVisible: false, inspectorVisible: false });
+    store.setPanels(workspaceId, { layersDrawerOpen: false, inspectorVisible: false });
     store.setViewport(workspaceId, camera);
   }, { workspaceId, camera });
 }

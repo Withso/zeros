@@ -814,7 +814,9 @@ describe("design workspace interaction wiring", () => {
     expect(styleEditorSource).toContain('title="Appearance"');
     expect(typographySource).toContain('title="Typography"');
     expect(strokeSource).toContain('title="Stroke"');
-    expect(effectSource).toContain('title="Effects"');
+    // Shadows and blurs are two sections over the same effect properties.
+    expect(effectSource).toContain('const title = group === "shadow" ? "Shadow" : "Blur";');
+    expect(styleEditorSource).toContain('for (const group of ["shadow", "blur"] as const)');
     // Independent corners stay one toggle away; the long tail of text and
     // transform properties lives in popovers instead of inline disclosures.
     expect(styleEditorSource).toContain('"border-top-left-radius"');
@@ -844,8 +846,8 @@ describe("design workspace interaction wiring", () => {
     expect(uiSource).toMatch(/\.zd-section-header \{[^}]*height: 36px;/);
     expect(uiSource).not.toContain(".zd-design-field-actions");
     expect(source).toContain("aria-label={`Unit for ${label}`}");
-    expect(styleEditorSource).toContain(
-      '<InspectorSection title="Layout" data-design-layout-section="">',
+    expect(styleEditorSource).toMatch(
+      /<InspectorSection\s+title="Layout"\s+data-design-layout-section=""/,
     );
     expect(styleEditorSource).not.toContain('label="Box sizing"');
     // Sections never collapse; empty ones are a header with its add action.

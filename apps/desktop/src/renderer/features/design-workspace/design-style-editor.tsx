@@ -1,9 +1,9 @@
 // ============================================
 // COMPONENT: DesignStyleEditor
-// PURPOSE: Figma-grade element styling over authored CSS: Layout,
-//          Appearance and Fill, then Stroke, Effects, Typography,
-//          Transform, Transition, Motion and Advanced once they are in use;
-//          Add property adds one of those
+// PURPOSE: Figma-grade element styling over authored CSS, one section per
+//          concern in designStyleSectionOrder. An empty section is one row
+//          with a plus; Typography on a non-text layer and Transform are
+//          added from Add property
 // USED IN: DesignInspector for the exact selected data-oid
 // ============================================
 
@@ -34,9 +34,16 @@ import {
   DesignAddPropertyRow,
 } from "./design-addable-sections";
 import { DesignAutoLayoutControls } from "./design-auto-layout-controls";
+import { designAutoLayoutFlow } from "./design-auto-layout-values";
+import {
+  DesignLayoutArrangeMenu,
+  DesignPositionSection,
+} from "./design-layout-controls";
+import { designLayoutChildrenSummary } from "./design-layout-children";
 import { designFillIsEmpty, DesignFillEditor } from "./design-fill-editor";
 import {
   InspectorGlyph,
+  InspectorGroup,
   InspectorIconButton,
   InspectorSection,
   InspectorSelect,
@@ -55,6 +62,11 @@ import {
 import { DesignTypographySection } from "./design-typography-editor";
 import { useDesignStyleToken } from "./design-style-provenance";
 import { useDesignLivePreviewValue } from "./state/design-live-preview";
+import {
+  designStyleSectionOrder,
+  type DesignStyleSectionId,
+} from "./design-style-sections";
+import { designStyleMixed } from "./design-style-mixed";
 
 interface DesignLivePreviewOwner {
   workspaceId: string;
@@ -73,7 +85,10 @@ interface DesignStyleEditorProps {
   ) => React.ReactNode;
   onLayoutAction: (action: DesignLayoutAction) => Promise<void>;
   frameSelected?: boolean;
+  /** Every selected layer whose details are loaded. */
   layoutParents?: readonly DesignRuntimeNodeDetails[];
+  /** How many layers are selected, loaded or not. */
+  selectionCount?: number;
   onPreviewStyles?: (styles: Record<string, string | null>) => Promise<void>;
   onCancelStylePreview?: () => Promise<void>;
   onCommitStyles: (styles: Record<string, string | null>) => Promise<void>;
@@ -213,6 +228,7 @@ export function DesignStyleEditor({
   onLayoutAction,
   frameSelected,
   layoutParents,
+  selectionCount = 1,
   motionTimelineOpen = false,
   motionProperties = [],
   onOpenMotionTimeline,
@@ -263,10 +279,18 @@ export function DesignStyleEditor({
     textLayer ? "currentColor" : "transparent",
   );
   const fillImage = styleValue(details, "background-image", "none");
+  const selection = layoutParents ?? [details];
+  const fillMixed = designStyleMixed(
+    selection,
+    selectionCount,
+    textLayer ? ["color"] : ["background-color", "background-image"],
+  );
   // A fill the user authored stays a row even at 0% (so a popover editing it
   // stays open); only an unauthored, fully transparent background is empty.
+  // Differing fills are one Mixed row, even when the first layer has none.
   const fillEmpty =
     !textLayer &&
+    !fillMixed &&
     designFillIsEmpty(fillColor, fillImage) &&
     !isAuthored("background-color") &&
     !isAuthored("background-image");
@@ -290,10 +314,46 @@ export function DesignStyleEditor({
       "transition",
     );
 
-  return (
-    <DesignAddableSections selectionKey={details.oid}>
-    <div data-design-style-editor className="flex flex-col">
-      <InspectorSection title="Layout" data-design-layout-section="">
+  const layoutAction = (action: DesignLayoutAction) => {
+    void onLayoutAction(action).catch((error) =>
+      toast.error("Couldn't update layout", {
+        description: errorMessage(error),
+      }),
+    );
+  };
+  const sections: Partial<Record<DesignStyleSectionId, React.ReactNode>> = {};
+  sections.position = (
+    <DesignPositionSection
+      details={details}
+      renderField={renderField}
+      disabled={disabled}
+      frameSelected={frameSelected}
+      layoutParents={layoutParents}
+      onAction={layoutAction}
+    />
+  );
+  sections.layout = (
+      <InspectorSection
+        title="Layout"
+        data-design-layout-section=""
+        actions={
+          <DesignLayoutArrangeMenu
+            details={details}
+            disabled={disabled}
+            frameSelected={frameSelected}
+            autoLayout={designAutoLayoutFlow(details) !== "none"}
+            childrenLayout={
+              layoutParents
+                ? designLayoutChildrenSummary(layoutParents)
+                : details.childrenLayout
+            }
+            canDistribute={layoutParents?.some(
+              (parent) => (parent.childrenLayout?.nodeIds.length ?? 0) >= 3,
+            )}
+            onAction={layoutAction}
+          />
+        }
+      >
         <DesignAutoLayoutControls
           details={details}
           livePreviewOwner={livePreviewOwner}
@@ -301,14 +361,9 @@ export function DesignStyleEditor({
           disabled={disabled}
           frameSelected={frameSelected}
           layoutParents={layoutParents}
+          selectionCount={selectionCount}
           onCommit={(styles) => commit(styles, "layout")}
-          onAction={(action) => {
-            void onLayoutAction(action).catch((error) =>
-              toast.error("Couldn't update layout", {
-                description: errorMessage(error),
-              }),
-            );
-          }}
+          onAction={layoutAction}
         />
         {OBJECT_FIT_TAGS.has(details.tag) ? (
           <div className="grid grid-cols-2 gap-2">
@@ -335,7 +390,8 @@ export function DesignStyleEditor({
           </div>
         ) : null}
       </InspectorSection>
-
+  );
+  sections.appearance = (
       <InspectorSection
         title="Appearance"
         data-design-appearance-section=""
@@ -377,57 +433,54 @@ export function DesignStyleEditor({
           </DropdownMenu>
         }
       >
-        <div
-          className={cn(
-            "grid items-center gap-2",
-            textLayer
-              ? "grid-cols-2"
-              : "grid-cols-[minmax(0,1fr)_minmax(0,1fr)_28px]",
-          )}
-        >
-          {renderField(
-            "Opacity",
-            "opacity",
-            styleValue(details, "opacity", "1"),
-            { percentage: true, compact: true, icon: "opacity" },
-          )}
-          {!textLayer
-            ? renderField(
-                "Radius",
-                "border-radius",
-                cornersDiffer
-                  ? ""
-                  : styleValue(details, "border-radius", "0px"),
-                {
-                  compact: true,
-                  icon: "radius",
-                  whole: true,
-                  placeholder: cornersDiffer ? "Mixed" : undefined,
-                },
-              )
-            : null}
+        <div className="grid grid-cols-2 items-start gap-2">
+          <InspectorGroup label="Opacity">
+            {renderField(
+              "Opacity",
+              "opacity",
+              styleValue(details, "opacity", "1"),
+              { percentage: true, compact: true, icon: "opacity" },
+            )}
+          </InspectorGroup>
           {!textLayer ? (
-            <InspectorIconButton
-              label="Independent corners"
-              tooltip="Independent corners"
-              size="row"
-              pressed={independentCorners}
-              disabled={disabled}
-              onClick={() => {
-                if (cornersDiffer) {
-                  commit({ "border-radius": radii[0] ?? "0px" }, "radius");
-                  setCornersOpen(false);
-                  return;
-                }
-                setCornersOpen((current) => !current);
-              }}
-            >
-              <InspectorGlyph name="corners" />
-            </InspectorIconButton>
+            <InspectorGroup label="Corner radius">
+              <div className="grid grid-cols-[minmax(0,1fr)_28px] gap-1">
+                {renderField(
+                  "Radius",
+                  "border-radius",
+                  cornersDiffer
+                    ? ""
+                    : styleValue(details, "border-radius", "0px"),
+                  {
+                    compact: true,
+                    icon: "radius",
+                    whole: true,
+                    placeholder: cornersDiffer ? "Mixed" : undefined,
+                  },
+                )}
+                <InspectorIconButton
+                  label="Independent corners"
+                  tooltip="Independent corners"
+                  size="row"
+                  pressed={independentCorners}
+                  disabled={disabled}
+                  onClick={() => {
+                    if (cornersDiffer) {
+                      commit({ "border-radius": radii[0] ?? "0px" }, "radius");
+                      setCornersOpen(false);
+                      return;
+                    }
+                    setCornersOpen((current) => !current);
+                  }}
+                >
+                  <InspectorGlyph name="corners" />
+                </InspectorIconButton>
+              </div>
+            </InspectorGroup>
           ) : null}
         </div>
         {!textLayer && independentCorners ? (
-          <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_28px] gap-2">
+          <div className="grid grid-cols-2 gap-2">
             {CORNERS.slice(0, 2).map(([label, property, glyph]) => (
               <React.Fragment key={property}>
                 {renderField(
@@ -442,7 +495,6 @@ export function DesignStyleEditor({
                 )}
               </React.Fragment>
             ))}
-            <span />
             {CORNERS.slice(2).map(([label, property, glyph]) => (
               <React.Fragment key={property}>
                 {renderField(
@@ -460,7 +512,8 @@ export function DesignStyleEditor({
           </div>
         ) : null}
       </InspectorSection>
-
+  );
+  sections.fill = (
       <InspectorSection
         title="Fill"
         empty={fillEmpty}
@@ -511,6 +564,7 @@ export function DesignStyleEditor({
               property="color"
               disabled={disabled}
               {...fillToken}
+              mixed={fillMixed}
               onPreview={(color) => preview({ color })}
               onCancelPreview={cancelPreview}
               onCommit={(color) => commit({ color }, "text fill")}
@@ -524,6 +578,7 @@ export function DesignStyleEditor({
               size={styleValue(details, "background-size", "auto")}
               repeat={styleValue(details, "background-repeat", "repeat")}
               disabled={disabled}
+              mixed={fillMixed}
               onPreview={preview}
               onCancelPreview={cancelPreview}
               onCommit={(styles) => commit(styles, "fill")}
@@ -571,17 +626,23 @@ export function DesignStyleEditor({
           />
         ) : null}
       </InspectorSection>
-
+  );
+  sections.stroke = (
       <DesignStrokeSection
         details={details}
+        selection={selection}
+        selectionCount={selectionCount}
         disabled={disabled}
         renderField={renderField}
         onPreview={preview}
         onCancelPreview={cancelPreview}
         onCommit={commit}
       />
-
+  );
+  for (const group of ["shadow", "blur"] as const)
+    sections[group] = (
       <DesignEffectsSection
+        group={group}
         details={details}
         textLayer={textLayer}
         disabled={disabled}
@@ -592,9 +653,12 @@ export function DesignStyleEditor({
         onCancelPreview={cancelPreview}
         onCommit={commit}
       />
-
+    );
+  sections.typography = (
       <DesignTypographySection
         details={details}
+        selection={layoutParents}
+        selectionCount={selectionCount}
         textLayer={textLayer}
         disabled={disabled}
         isAuthored={isAuthored}
@@ -603,7 +667,8 @@ export function DesignStyleEditor({
         onCancelPreview={cancelPreview}
         onCommit={commit}
       />
-
+  );
+  sections.transform = (
       <LiveTransformSection
         owner={livePreviewOwner}
         confirmed={styleValue(details, "transform", "none")}
@@ -616,11 +681,11 @@ export function DesignStyleEditor({
         onCancelPreview={cancelPreview}
         onCommit={commit}
       />
-
+  );
+  sections.transition = (
       <InspectorSection
         title="Transition"
         empty={!transitionActive}
-        addable={{ id: "transition", onAdd: addTransition }}
         data-design-transition-section=""
         actions={
           transitionActive ? (
@@ -675,23 +740,52 @@ export function DesignStyleEditor({
           }
         />
       </InspectorSection>
-
+  );
+  sections.motion = (
       <InspectorSection
         title="Motion"
         empty={animationName === "none"}
-        addable={{ id: "motion", onAdd: () => onOpenMotionTimeline() }}
         data-design-motion-section=""
         actions={
-          <InspectorIconButton
-            label="Open motion timeline"
-            tooltip="Motion"
-            shortcut="⇧M"
-            pressed={motionTimelineOpen}
-            disabled={disabled}
-            onClick={() => onOpenMotionTimeline()}
-          >
-            <Diamond />
-          </InspectorIconButton>
+          animationName === "none" ? (
+            <InspectorIconButton
+              label="Add motion"
+              tooltip="Motion"
+              shortcut="⇧M"
+              pressed={motionTimelineOpen}
+              disabled={disabled}
+              onClick={() => onOpenMotionTimeline()}
+            >
+              <Plus />
+            </InspectorIconButton>
+          ) : (
+            <>
+              <InspectorIconButton
+                label="Open motion timeline"
+                tooltip="Motion"
+                shortcut="⇧M"
+                pressed={motionTimelineOpen}
+                disabled={disabled}
+                onClick={() => onOpenMotionTimeline()}
+              >
+                <Diamond />
+              </InspectorIconButton>
+              <InspectorIconButton
+                label="Remove motion"
+                disabled={disabled}
+                onClick={() =>
+                  commit(
+                    isAuthored("animation-name") || isAuthored("animation")
+                      ? { animation: null, "animation-name": null }
+                      : { "animation-name": "none" },
+                    "motion",
+                  )
+                }
+              >
+                <Minus />
+              </InspectorIconButton>
+            </>
+          )
         }
       >
         {animationName !== "none" ? (
@@ -712,14 +806,24 @@ export function DesignStyleEditor({
           </button>
         ) : null}
       </InspectorSection>
-
+  );
+  sections["more-styles"] = (
       <DesignAdvancedStyleSection
         details={details}
         renderField={renderField}
         onCommit={commit}
         disabled={disabled}
       />
+  );
 
+  return (
+    <DesignAddableSections selectionKey={details.oid}>
+    <div data-design-style-editor className="flex flex-col">
+      {designStyleSectionOrder(textLayer ? "text" : "other").map((id) =>
+        sections[id] ? (
+          <React.Fragment key={id}>{sections[id]}</React.Fragment>
+        ) : null,
+      )}
       <DesignAddPropertyRow disabled={disabled} />
     </div>
     </DesignAddableSections>

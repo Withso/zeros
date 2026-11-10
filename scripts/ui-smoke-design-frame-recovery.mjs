@@ -1,6 +1,7 @@
 import { runDesignHiddenDocumentsSmoke, runDesignHiddenEditorSmoke } from "./ui-smoke-design-hidden-documents.mjs";
 import { runDesignLazyPreparationSmoke } from "./ui-smoke-design-lazy-preparation.mjs";
 import { runDesignAgentDraftsSmoke } from "./ui-smoke-design-agent-drafts.mjs";
+import { openLayersDrawer } from "./ui-smoke-design-helpers.mjs";
 
 // Chromium exercises the real opaque iframe/MessagePort lifecycle. Only the
 // host protocol is mapped to HTTP here; Electron's proxy has its own tests.
@@ -9,6 +10,7 @@ export async function runDesignFrameRecoverySmoke({ page, check }) {
   // Agent edits reach the same frame documents while they are still streaming.
   await runDesignAgentDraftsSmoke({ page, check });
   await page.goto(`${new URL(page.url()).origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html`, { waitUntil: "networkidle" });
+  await openLayersDrawer(page);
   await runDesignHiddenDocumentsSmoke({ page, check });
   await runDesignHiddenEditorSmoke({ page, check });
   await runDesignHiddenEditorSmoke({ page, check, documentHidden: true });
@@ -94,6 +96,7 @@ async function runDesignFrameReloadRecoverySmoke({ page, check }) {
       `${origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html`,
       { waitUntil: "networkidle" },
     );
+    await openLayersDrawer(page);
     const frameSelector =
       '[data-design-frame="home.html"] iframe[data-design-document-buffer="displayed"]';
     await page

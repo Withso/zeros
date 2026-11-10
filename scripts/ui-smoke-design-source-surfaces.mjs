@@ -156,7 +156,7 @@ export async function runDesignSourceSurfacesSmoke({ page: parent, check, vector
       frames(stabilizeDesignWorkspaceSnapshot(restored, {
         ...restored, frames: restored.frames.map(frame => ({ ...frame, surfaceCost: cost })),
       }).frames);
-      ui.getState().setPanels("ws_design_harness", { layersVisible: false, inspectorVisible: false });
+      ui.getState().setPanels("ws_design_harness", { layersDrawerOpen: false, inspectorVisible: false });
       ui.getState().setSelectedTargets("ws_design_harness", [], { activeFrame: null });
       ui.getState().setViewport("ws_design_harness", { zoom: 0.04, panX: 32, panY: 96 });
       const { resetDesignLayerDisclosureForTests } = await import("/apps/desktop/src/renderer/features/design-workspace/state/design-layer-disclosure.ts");
@@ -467,9 +467,9 @@ async function runOverviewEditorDemandChecks({ page, check, sourceReadySelector 
     useDesignLayerDisclosureStore.getState().updateFrame('ws_design_harness', 'surface-1.html', current => ({ ...current, treeExpanded: true }));
   });
   await expect(editors).toHaveCount(0);
-  await panels({ layersVisible: true });
+  await panels({ layersDrawerOpen: true });
   await expect(page.locator('[data-design-frame="surface-1.html"] iframe[data-design-document-buffer]')).toHaveCount(1);
-  await panels({ layersVisible: false });
+  await panels({ layersDrawerOpen: false });
   await expect(editors).toHaveCount(0);
   await page.evaluate(() => window.__zerosHarnessDesignSurface.ui.getState().setViewport('ws_design_harness', { zoom: .4, panX: 32, panY: 96 }));
   await page.locator('[data-design-frame="home.html"]').click({ position: { x: 130, y: 80 } });

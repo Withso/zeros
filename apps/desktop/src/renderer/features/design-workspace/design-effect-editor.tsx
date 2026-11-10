@@ -27,7 +27,9 @@ import {
   InspectorPopoverAnchor,
 } from "./design-inspector-kit";
 import {
+  designBlurAdd,
   designEffectEntries,
+  designEffectGroup,
   designEffectKindAvailable,
   designEffectLabel,
   designEffectsAdd,
@@ -40,6 +42,7 @@ import {
   parseDesignTransform,
   DESIGN_EFFECT_LIMIT,
   type DesignEffectEntry,
+  type DesignEffectGroup,
   type DesignEffectKind,
   type DesignEffectsState,
   type DesignShadowValue,
@@ -332,6 +335,8 @@ function MotionDiamond({
 }
 
 interface DesignEffectsSectionProps {
+  /** Shadows and blurs are two sections over the same effect properties. */
+  group: DesignEffectGroup;
   details: DesignRuntimeNodeDetails;
   textLayer: boolean;
   disabled?: boolean;
@@ -344,6 +349,7 @@ interface DesignEffectsSectionProps {
 }
 
 export function DesignEffectsSection({
+  group,
   details,
   textLayer,
   disabled,
@@ -362,19 +368,28 @@ export function DesignEffectsSection({
     filter: read("filter"),
     backdropFilter: read("backdrop-filter"),
   };
-  const entries = designEffectEntries(state, textLayer);
-  const raw = designRawEffectFilters(state);
-  const clipPath = read("clip-path");
-  const hasClipPath = clipPath !== "none" && clipPath !== "";
+  const allEntries = designEffectEntries(state, textLayer);
+  const entries = allEntries.filter((entry) => designEffectGroup(entry.kind) === group);
+  const allRaw = designRawEffectFilters(state);
+  const raw = group === "shadow"
+    ? { ...allRaw, filter: false, backdropFilter: false }
+    : { ...allRaw, boxShadow: false, textShadow: false };
   const empty =
     entries.length === 0 &&
     !raw.boxShadow &&
     !raw.textShadow &&
     !raw.filter &&
-    !raw.backdropFilter &&
-    !hasClipPath;
-  // A raw shadow list cannot take a structured shadow without rewriting it.
-  const addBlocked = textLayer ? raw.textShadow : raw.boxShadow;
+    !raw.backdropFilter;
+  const title = group === "shadow" ? "Shadow" : "Blur";
+  const addStyles = () =>
+    group === "shadow" ? designEffectsAdd(state, textLayer) : designBlurAdd(state);
+  // A raw shadow list cannot take a structured shadow without rewriting it;
+  // the effect limit counts shadows and blurs together.
+  const addBlocked =
+    allEntries.length >= DESIGN_EFFECT_LIMIT ||
+    (group === "shadow"
+      ? textLayer ? allRaw.textShadow : allRaw.boxShadow
+      : addStyles() === null);
 
   /** A property the element no longer needs is removed where it was
    * authored instead of being pinned to an explicit `none`. */
@@ -387,21 +402,21 @@ export function DesignEffectsSection({
     );
 
   const add = () => {
-    const styles = designEffectsAdd(state, textLayer);
+    const styles = addStyles();
     if (!styles) return;
     onPreview?.(styles);
-    onCommit(styles, "effect");
+    onCommit(styles, title.toLocaleLowerCase());
   };
 
   return (
     <InspectorSection
-      title="Effects"
+      title={title}
       empty={empty}
-      addable={{ id: "effects", onAdd: add }}
       data-design-effects-section=""
+      data-design-effect-group={group}
       actions={
         <>
-          {entries.some(
+          {group === "blur" || entries.some(
             (entry) =>
               entry.property === (textLayer ? "text-shadow" : "box-shadow"),
           ) ? null : (
@@ -414,10 +429,8 @@ export function DesignEffectsSection({
             />
           )}
           <InspectorIconButton
-            label="Add effect"
-            disabled={
-              disabled || addBlocked || entries.length >= DESIGN_EFFECT_LIMIT
-            }
+            label={`Add ${title.toLocaleLowerCase()}`}
+            disabled={disabled || addBlocked}
             onClick={add}
           >
             <Plus />
@@ -428,6 +441,7 @@ export function DesignEffectsSection({
       {entries.map((entry) => (
         <EffectRow
           key={entry.id}
+          group={group}
           entry={entry}
           state={state}
           textLayer={textLayer}
@@ -482,18 +496,6 @@ export function DesignEffectsSection({
           }
         />
       ) : null}
-      {hasClipPath ? (
-        <RawEffectRow
-          label="Clip path"
-          property="clip-path"
-          value={clipPath}
-          disabled={disabled}
-          renderField={renderField}
-          onRemove={() =>
-            onCommit(settle({ "clip-path": "none" }), "clip path")
-          }
-        />
-      ) : null}
     </InspectorSection>
   );
 }
@@ -528,6 +530,7 @@ function RawEffectRow({
 }
 
 function EffectRow({
+  group,
   entry,
   state,
   textLayer,
@@ -537,6 +540,7 @@ function EffectRow({
   onCancelPreview,
   onCommit,
 }: {
+  group: DesignEffectGroup;
   entry: DesignEffectEntry;
   state: DesignEffectsState;
   textLayer: boolean;
@@ -548,10 +552,11 @@ function EffectRow({
 }) {
   const [open, setOpen] = useState(false);
   const label = designEffectLabel(entry, textLayer);
+  // A row changes kind only within its own section.
   const kinds =
     entry.property === "text-shadow" && !textLayer
       ? [{ value: "drop-shadow" as const, label: "Text shadow" }]
-      : EFFECT_KINDS;
+      : EFFECT_KINDS.filter((kind) => designEffectGroup(kind.value) === group);
   const currentValue =
     entry.property === "box-shadow"
       ? state.boxShadow

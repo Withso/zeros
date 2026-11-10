@@ -1,3 +1,5 @@
+import { openLayersDrawer } from "./ui-smoke-design-helpers.mjs";
+
 /** A held engine batch exercises the production navigation adapter, cache,
  * residency, Layers and editing authority. Native source I/O is covered by
  * navigation-preparation.test.ts with real files. */
@@ -8,6 +10,7 @@ export async function runDesignLazyPreparationSmoke({ page: parent, check, captu
   const page = await parent.context().browser().newPage({ viewport: { width: 1440, height: 900 } });
   try {
   await page.goto(`${origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html?lazyPreparation=1`, { waitUntil: "networkidle" });
+  await openLayersDrawer(page);
   await page.waitForFunction(() => window.__zerosHarnessDesignSurface?.lazy?.calls.length > 0);
   const initial = await page.evaluate(() => {
     const c = window.__zerosHarnessDesignSurface;

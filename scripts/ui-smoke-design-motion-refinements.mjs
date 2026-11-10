@@ -1,5 +1,6 @@
 import { expect } from "@playwright/test";
 import { runDesignFramePlaybackSmoke } from "./ui-smoke-design-playback.mjs";
+import { openLayersDrawer } from "./ui-smoke-design-helpers.mjs";
 
 export async function runDesignFrameMotionSmoke({ page, check }) {
   await page.setViewportSize({ width: 1440, height: 900 });
@@ -7,6 +8,7 @@ export async function runDesignFrameMotionSmoke({ page, check }) {
     `${new URL(page.url()).origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html?frameMotion`,
     { waitUntil: "networkidle" },
   );
+  await openLayersDrawer(page);
   const frame = page.locator('[data-design-frame-row="home.html"]');
   const canvas = page.locator("[data-design-canvas-viewport]");
   const toggle = page.getByRole("button", {
@@ -121,6 +123,7 @@ export async function runDesignDocumentMotionSmoke({ page, check }) {
     `${new URL(page.url()).origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html?authoredFrame`,
     { waitUntil: "networkidle" },
   );
+  await openLayersDrawer(page);
   await page.locator('[data-design-frame-row="home.html"]').click();
   const toggle = page.getByRole("button", { name: "Toggle motion timeline", exact: true });
   await expect(toggle).toBeEnabled();
@@ -156,6 +159,7 @@ async function openMotion(page) {
     `${new URL(page.url()).origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html`,
     { waitUntil: "networkidle" },
   );
+  await openLayersDrawer(page);
   await page.evaluate(async () => {
     const { useDesignWorkspaceUiStore } =
       await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-ui.ts");

@@ -119,6 +119,31 @@ export function designLayerPathIds(
   return [];
 }
 
+/** The tree nodes from a top-level layer down to `nodeId`, for the closed
+ * Layers drawer's path to the selection. */
+export function designLayerPathNodes(
+  nodes: readonly DesignRuntimeTreeNode[],
+  nodeId: string,
+): DesignRuntimeTreeNode[] {
+  const visit = (
+    node: DesignRuntimeTreeNode,
+    ancestors: readonly DesignRuntimeTreeNode[],
+  ): DesignRuntimeTreeNode[] | null => {
+    const path = [...ancestors, node];
+    if (node.oid === nodeId) return path;
+    for (const child of node.children) {
+      const found = visit(child, path);
+      if (found) return found;
+    }
+    return null;
+  };
+  for (const node of nodes) {
+    const found = visit(node, []);
+    if (found) return found;
+  }
+  return [];
+}
+
 /** Convert the deepest browser hit into predictable design-tool selection.
  * A normal click enters the top-level container, a repeated/double click
  * descends one level, and the platform modifier selects the deepest node. */

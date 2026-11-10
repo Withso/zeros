@@ -12,6 +12,9 @@ import {
   AlignJustify,
   AlignLeft,
   AlignRight,
+  AlignVerticalJustifyCenter,
+  AlignVerticalJustifyEnd,
+  AlignVerticalJustifyStart,
   ChevronDown,
   Plus,
   Settings2,
@@ -35,6 +38,7 @@ import {
 } from "../../shared/ui/primitives";
 import { DesignColorField } from "./design-color-picker";
 import {
+  InspectorGroup,
   InspectorIconButton,
   InspectorSection,
   InspectorSegmented,
@@ -45,6 +49,12 @@ import {
 import type { DesignLayoutFieldOptions } from "./design-layout-values";
 import { readDesignComputedStyle } from "./design-style-values";
 import { useDesignStyleToken } from "./design-style-provenance";
+import {
+  DESIGN_MIXED_VALUE,
+  designMixedSegment,
+  designMixedSelect,
+  designStyleMixed,
+} from "./design-style-mixed";
 
 type RenderField = (
   label: string,
@@ -55,6 +65,10 @@ type RenderField = (
 
 interface DesignTypographySectionProps {
   details: DesignRuntimeNodeDetails;
+  /** Every selected layer whose details are loaded, and how many are
+   * selected; together they decide where a field reads Mixed. */
+  selection?: readonly DesignRuntimeNodeDetails[];
+  selectionCount?: number;
   textLayer: boolean;
   disabled?: boolean;
   isAuthored: (property: string) => boolean;
@@ -165,10 +179,12 @@ export function designFontStackWithPrimary(
 
 function FontFamilyField({
   value,
+  placeholder,
   disabled,
   onCommit,
 }: {
   value: string;
+  placeholder?: string;
   disabled?: boolean;
   onCommit: (value: string) => void;
 }) {
@@ -201,6 +217,7 @@ function FontFamilyField({
         spellCheck={false}
         autoComplete="off"
         aria-label="Font"
+        placeholder={placeholder}
         className="pl-2"
         onChange={(event) => setDraft(event.currentTarget.value)}
         onFocus={(event) => event.currentTarget.select()}
@@ -267,8 +284,20 @@ function normalizedAlign(value: string): string {
   return value || "start";
 }
 
+/** A text layer's box places its lines with align-content, which Chromium
+ * honours on block containers; in a flex or grid box it means something else. */
+const BLOCK_TEXT_DISPLAYS = new Set(["block", "flow-root", "inline-block", "list-item"]);
+
+function verticalAlign(value: string): "start" | "center" | "end" {
+  if (value === "center" || value === "safe center") return "center";
+  if (value === "end" || value === "flex-end") return "end";
+  return "start";
+}
+
 export function DesignTypographySection({
   details,
+  selection,
+  selectionCount = 1,
   textLayer,
   disabled,
   isAuthored,
@@ -279,7 +308,10 @@ export function DesignTypographySection({
 }: DesignTypographySectionProps) {
   const read = (property: string, fallback = "") =>
     readDesignComputedStyle(details.styles, property) || fallback;
+  const mixed = (property: string) =>
+    designStyleMixed(selection ?? [details], selectionCount, property);
   const colorToken = useDesignStyleToken(details, "color");
+  const verticalAlignable = textLayer && BLOCK_TEXT_DISPLAYS.has(read("display", "block"));
   const authoredTypography = TYPOGRAPHY_PROPERTIES.some((property) =>
     isAuthored(property),
   );
@@ -328,77 +360,110 @@ export function DesignTypographySection({
             {open ? (
               <>
                 <FontFamilyField
-                  value={read("font-family")}
+                  value={mixed("font-family") ? "" : read("font-family")}
+                  placeholder={mixed("font-family") ? "Mixed" : undefined}
                   disabled={disabled}
                   onCommit={(value) => choose("font-family", "font")(value)}
                 />
                 <div className="grid grid-cols-2 gap-2">
                   <InspectorSelect
                     label="Weight"
-                    value={read("font-weight", "400")}
-                    options={DESIGN_FONT_WEIGHTS}
+                    {...designMixedSelect(
+                      mixed("font-weight"),
+                      read("font-weight", "400"),
+                      DESIGN_FONT_WEIGHTS,
+                    )}
                     disabled={disabled}
-                    onChange={choose("font-weight", "font weight")}
+                    onChange={(next) => {
+                      if (next !== DESIGN_MIXED_VALUE) choose("font-weight", "font weight")(next);
+                    }}
                   />
-                  {renderField("Size", "font-size", read("font-size"), {
+                  {renderField("Size", "font-size", mixed("font-size") ? "" : read("font-size"), {
                     icon: "font-size",
+                    mixed: mixed("font-size"),
                   })}
-                  {renderField(
-                    "Line height",
-                    "line-height",
-                    read("line-height"),
-                    {
-                      icon: "line-height",
-                    },
-                  )}
-                  {renderField(
-                    "Letter spacing",
-                    "letter-spacing",
-                    read("letter-spacing"),
-                    { icon: "letter-spacing" },
-                  )}
                 </div>
-                <InspectorSegmented
-                  label="Text align"
-                  value={normalizedAlign(read("text-align", "start"))}
-                  disabled={disabled}
-                  options={[
-                    {
-                      value: "start",
-                      label: "Align left",
-                      icon: <AlignLeft />,
-                    },
-                    {
-                      value: "center",
-                      label: "Align center",
-                      icon: <AlignCenter />,
-                    },
-                    {
-                      value: "end",
-                      label: "Align right",
-                      icon: <AlignRight />,
-                    },
-                    {
-                      value: "justify",
-                      label: "Justify",
-                      icon: <AlignJustify />,
-                    },
-                  ]}
-                  onChange={choose("text-align", "text align")}
-                />
+                <div className="grid grid-cols-2 gap-2">
+                  <InspectorGroup label="Line height">
+                    {renderField(
+                      "Line height",
+                      "line-height",
+                      mixed("line-height") ? "" : read("line-height"),
+                      { icon: "line-height", mixed: mixed("line-height") },
+                    )}
+                  </InspectorGroup>
+                  <InspectorGroup label="Letter spacing">
+                    {renderField(
+                      "Letter spacing",
+                      "letter-spacing",
+                      mixed("letter-spacing") ? "" : read("letter-spacing"),
+                      { icon: "letter-spacing", mixed: mixed("letter-spacing") },
+                    )}
+                  </InspectorGroup>
+                </div>
+                {/* Position's Align buttons move the layer; these place its
+                    lines inside it, so their names say text. */}
+                <InspectorGroup label="Alignment">
+                  <div className={verticalAlignable ? "grid grid-cols-[minmax(0,4fr)_minmax(0,3fr)] gap-2" : undefined}>
+                    <InspectorSegmented
+                      label="Horizontal alignment"
+                      value={designMixedSegment(mixed("text-align"), normalizedAlign(read("text-align", "start")))}
+                      disabled={disabled}
+                      options={[
+                        {
+                          value: "start",
+                          label: "Align text left",
+                          icon: <AlignLeft />,
+                        },
+                        {
+                          value: "center",
+                          label: "Align text center",
+                          icon: <AlignCenter />,
+                        },
+                        {
+                          value: "end",
+                          label: "Align text right",
+                          icon: <AlignRight />,
+                        },
+                        {
+                          value: "justify",
+                          label: "Justify text",
+                          icon: <AlignJustify />,
+                        },
+                      ]}
+                      onChange={choose("text-align", "text align")}
+                    />
+                    {verticalAlignable ? (
+                      <InspectorSegmented
+                        label="Vertical alignment"
+                        value={designMixedSegment(mixed("align-content"), verticalAlign(read("align-content", "normal")))}
+                        disabled={disabled}
+                        options={[
+                          { value: "start", label: "Align text top", icon: <AlignVerticalJustifyStart /> },
+                          { value: "center", label: "Align text middle", icon: <AlignVerticalJustifyCenter /> },
+                          { value: "end", label: "Align text bottom", icon: <AlignVerticalJustifyEnd /> },
+                        ]}
+                        onChange={choose("align-content", "vertical alignment")}
+                      />
+                    ) : null}
+                  </div>
+                </InspectorGroup>
                 {!textLayer ? (
-                  <DesignColorField
-                    value={read("color", "currentColor")}
-                    label="Text color"
-                    property="color"
-                    disabled={disabled}
-                    {...colorToken}
-                    onPreview={(value) => onPreview?.({ color: value })}
-                    onCancelPreview={onCancelPreview}
-                    onCommit={(value) =>
-                      onCommit({ color: value }, "text color")
-                    }
-                  />
+                  <InspectorGroup label="Color">
+                    <DesignColorField
+                      value={read("color", "currentColor")}
+                      label="Text color"
+                      property="color"
+                      disabled={disabled}
+                      mixed={mixed("color")}
+                      {...colorToken}
+                      onPreview={(value) => onPreview?.({ color: value })}
+                      onCancelPreview={onCancelPreview}
+                      onCommit={(value) =>
+                        onCommit({ color: value }, "text color")
+                      }
+                    />
+                  </InspectorGroup>
                 ) : null}
               </>
             ) : null}
@@ -418,6 +483,7 @@ export function DesignTypographySection({
         >
           <TypeSettings
             read={read}
+            mixed={mixed}
             disabled={disabled}
             renderField={renderField}
             choose={choose}
@@ -445,11 +511,13 @@ function SettingRow({
 
 function TypeSettings({
   read,
+  mixed,
   disabled,
   renderField,
   choose,
 }: {
   read: (property: string, fallback?: string) => string;
+  mixed: (property: string) => boolean;
   disabled?: boolean;
   renderField: RenderField;
   choose: (property: string, label: string) => (value: string) => void;
@@ -458,29 +526,37 @@ function TypeSettings({
     "text-decoration-line",
     read("text-decoration", "none"),
   ).split(/\s+/)[0]!;
+  /** A select over one property; Mixed while the selected layers differ. */
+  const select = (
+    label: string,
+    property: string,
+    fallback: string,
+    options: readonly { value: string; label: string }[],
+    commitLabel: string,
+  ) => {
+    const choice = designMixedSelect(mixed(property), read(property, fallback), options);
+    const commit = choose(property, commitLabel);
+    return (
+      <InspectorSelect
+        label={label}
+        value={choice.value}
+        disabled={disabled}
+        options={choice.options}
+        onChange={(next) => {
+          if (next !== DESIGN_MIXED_VALUE) commit(next);
+        }}
+      />
+    );
+  };
   return (
     <div className="zd-popover">
       <div className="zd-popover-header">
         <span className="zd-popover-title">Type settings</span>
       </div>
-      <SettingRow label="Style">
-        <InspectorSegmented
-          label="Font style"
-          value={
-            read("font-style", "normal") === "normal" ? "normal" : "italic"
-          }
-          disabled={disabled}
-          options={[
-            { value: "normal", label: "Regular" },
-            { value: "italic", label: "Italic" },
-          ]}
-          onChange={choose("font-style", "font style")}
-        />
-      </SettingRow>
       <SettingRow label="Case">
         <InspectorSegmented
           label="Case"
-          value={read("text-transform", "none")}
+          value={designMixedSegment(mixed("text-transform"), read("text-transform", "none"))}
           disabled={disabled}
           options={[
             { value: "none", label: "Original", icon: <span>–</span> },
@@ -491,10 +567,86 @@ function TypeSettings({
           onChange={choose("text-transform", "case")}
         />
       </SettingRow>
+      <SettingRow label="Wrap">
+        {select(
+          "Line wrap",
+          "text-wrap",
+          "wrap",
+          [
+            { value: "wrap", label: "Wrap" },
+            { value: "nowrap", label: "No wrap" },
+            { value: "balance", label: "Balance" },
+            { value: "pretty", label: "Pretty" },
+            { value: "stable", label: "Stable" },
+          ],
+          "line wrap",
+        )}
+      </SettingRow>
+      <SettingRow label="White space">
+        {select(
+          "White space",
+          "white-space",
+          "normal",
+          [
+            { value: "normal", label: "Normal" },
+            { value: "nowrap", label: "No wrap" },
+            { value: "pre-wrap", label: "Preserve" },
+            { value: "break-spaces", label: "Break spaces" },
+          ],
+          "wrap",
+        )}
+      </SettingRow>
+      <SettingRow label="Truncation">
+        <InspectorSegmented
+          label="Text overflow"
+          value={designMixedSegment(mixed("text-overflow"), read("text-overflow", "clip"))}
+          disabled={disabled}
+          options={[
+            { value: "clip", label: "Clip" },
+            { value: "ellipsis", label: "Ellipsis" },
+          ]}
+          onChange={choose("text-overflow", "text overflow")}
+        />
+      </SettingRow>
+      <SettingRow label="Word break">
+        {select(
+          "Word break",
+          "word-break",
+          "normal",
+          [
+            { value: "normal", label: "Normal" },
+            { value: "break-all", label: "Break all" },
+            { value: "keep-all", label: "Keep all" },
+            { value: "break-word", label: "Break word" },
+          ],
+          "word break",
+        )}
+      </SettingRow>
+      <SettingRow label="Indent">
+        {renderField("Indent", "text-indent", read("text-indent", "0px"), {
+          icon: "text-indent",
+        })}
+      </SettingRow>
+      <SettingRow label="Smoothing">
+        {select(
+          "Smoothing",
+          "-webkit-font-smoothing",
+          "auto",
+          [
+            { value: "auto", label: "Auto" },
+            { value: "antialiased", label: "Antialiased" },
+            { value: "subpixel-antialiased", label: "Subpixel" },
+          ],
+          "smoothing",
+        )}
+      </SettingRow>
       <SettingRow label="Decoration">
         <InspectorSegmented
           label="Decoration"
-          value={decoration}
+          value={designMixedSegment(
+            mixed("text-decoration-line") || mixed("text-decoration"),
+            decoration,
+          )}
           disabled={disabled}
           options={[
             { value: "none", label: "None", icon: <span>–</span> },
@@ -508,80 +660,40 @@ function TypeSettings({
           onChange={choose("text-decoration", "decoration")}
         />
       </SettingRow>
-      <SettingRow label="Truncate">
+      <SettingRow label="Style">
         <InspectorSegmented
-          label="Text overflow"
-          value={read("text-overflow", "clip")}
+          label="Font style"
+          value={designMixedSegment(
+            mixed("font-style"),
+            read("font-style", "normal") === "normal" ? "normal" : "italic",
+          )}
           disabled={disabled}
           options={[
-            { value: "clip", label: "Clip" },
-            { value: "ellipsis", label: "Ellipsis" },
+            { value: "normal", label: "Regular" },
+            { value: "italic", label: "Italic" },
           ]}
-          onChange={choose("text-overflow", "text overflow")}
-        />
-      </SettingRow>
-      <SettingRow label="White space">
-        <InspectorSelect
-          label="White space"
-          value={read("white-space", "normal")}
-          disabled={disabled}
-          options={[
-            { value: "normal", label: "Normal" },
-            { value: "nowrap", label: "No wrap" },
-            { value: "pre-wrap", label: "Preserve" },
-            { value: "break-spaces", label: "Break spaces" },
-          ]}
-          onChange={choose("white-space", "wrap")}
-        />
-      </SettingRow>
-      <SettingRow label="Line wrap">
-        <InspectorSelect
-          label="Line wrap"
-          value={read("text-wrap", "wrap")}
-          disabled={disabled}
-          options={[
-            { value: "wrap", label: "Wrap" },
-            { value: "nowrap", label: "No wrap" },
-            { value: "balance", label: "Balance" },
-            { value: "pretty", label: "Pretty" },
-            { value: "stable", label: "Stable" },
-          ]}
-          onChange={choose("text-wrap", "line wrap")}
-        />
-      </SettingRow>
-      <SettingRow label="Word break">
-        <InspectorSelect
-          label="Word break"
-          value={read("word-break", "normal")}
-          disabled={disabled}
-          options={[
-            { value: "normal", label: "Normal" },
-            { value: "break-all", label: "Break all" },
-            { value: "keep-all", label: "Keep all" },
-            { value: "break-word", label: "Break word" },
-          ]}
-          onChange={choose("word-break", "word break")}
+          onChange={choose("font-style", "font style")}
         />
       </SettingRow>
       <SettingRow label="Long words">
-        <InspectorSelect
-          label="Long words"
-          value={read("overflow-wrap", "normal")}
-          disabled={disabled}
-          options={[
+        {select(
+          "Long words",
+          "overflow-wrap",
+          "normal",
+          [
             { value: "normal", label: "Normal" },
             { value: "break-word", label: "Break word" },
             { value: "anywhere", label: "Anywhere" },
-          ]}
-          onChange={choose("overflow-wrap", "long word wrapping")}
-        />
+          ],
+          "long word wrapping",
+        )}
       </SettingRow>
       <SettingRow label="Vertical">
-        <InspectorSelect
-          label="Vertical"
-          value={read("vertical-align", "baseline")}
-          disabled={disabled}
-          options={[
+        {select(
+          "Vertical",
+          "vertical-align",
+          "baseline",
+          [
             { value: "baseline", label: "Baseline" },
             { value: "middle", label: "Middle" },
             { value: "top", label: "Top" },
@@ -590,41 +702,46 @@ function TypeSettings({
             { value: "text-bottom", label: "Text bottom" },
             { value: "sub", label: "Subscript" },
             { value: "super", label: "Superscript" },
-          ]}
-          onChange={choose("vertical-align", "vertical alignment")}
-        />
+          ],
+          "vertical alignment",
+        )}
       </SettingRow>
       <SettingRow label="Writing">
-        <InspectorSelect
-          label="Writing"
-          value={read("writing-mode", "horizontal-tb")}
-          disabled={disabled}
-          options={[
+        {select(
+          "Writing",
+          "writing-mode",
+          "horizontal-tb",
+          [
             { value: "horizontal-tb", label: "Horizontal" },
             { value: "vertical-rl", label: "Vertical right" },
             { value: "vertical-lr", label: "Vertical left" },
-          ]}
-          onChange={choose("writing-mode", "writing mode")}
-        />
+          ],
+          "writing mode",
+        )}
       </SettingRow>
       <SettingRow label="Hyphens">
-        <InspectorSelect
-          label="Hyphens"
-          value={read("hyphens", "manual")}
-          disabled={disabled}
-          options={[
+        {select(
+          "Hyphens",
+          "hyphens",
+          "manual",
+          [
             { value: "none", label: "None" },
             { value: "manual", label: "Manual" },
             { value: "auto", label: "Auto" },
-          ]}
-          onChange={choose("hyphens", "hyphens")}
-        />
+          ],
+          "hyphens",
+        )}
       </SettingRow>
-      <div className="grid grid-cols-2 gap-2">
-        {renderField("Word gap", "word-spacing", read("word-spacing", "0px"))}
-        {renderField("Indent", "text-indent", read("text-indent", "0px"))}
-        {renderField("Stretch", "font-stretch", read("font-stretch", "100%"))}
-      </div>
+      <SettingRow label="Word gap">
+        {renderField("Word gap", "word-spacing", read("word-spacing", "0px"), {
+          icon: "word-spacing",
+        })}
+      </SettingRow>
+      <SettingRow label="Stretch">
+        {renderField("Stretch", "font-stretch", read("font-stretch", "100%"), {
+          icon: "font-stretch",
+        })}
+      </SettingRow>
     </div>
   );
 }

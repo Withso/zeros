@@ -119,6 +119,7 @@ describe("design workspace UI memory", () => {
       }),
     ).toEqual({
       layersVisible: true,
+      layersDrawerOpen: false,
       inspectorVisible: true,
       selectedFrame: null,
       frameSelected: false,
@@ -303,6 +304,24 @@ describe("design workspace UI memory", () => {
     forgetDesignWorkspaceView("workspace-34");
     expect(designWorkspaceView("workspace-34").panel).toBe("layers");
   });
+  it("keeps the Layers drawer closed unless this workspace opened it", () => {
+    // The drawer replaced the Layers panel at the top. Its own flag starts
+    // closed, so an old `layersVisible: true` never opens it.
+    expect(normalizeDesignWorkspaceView({ layersVisible: true }).layersDrawerOpen).toBe(false);
+    expect(normalizeDesignWorkspaceView({ layersDrawerOpen: true }).layersDrawerOpen).toBe(true);
+    expect(normalizeDesignWorkspaceView({ layersDrawerOpen: "yes" }).layersDrawerOpen).toBe(false);
+    expect(designWorkspaceView("workspace-drawer").layersDrawerOpen).toBe(false);
+    const store = useDesignWorkspaceUiStore.getState();
+    store.setPanels("workspace-drawer", { layersDrawerOpen: true });
+    expect(designWorkspaceView("workspace-drawer").layersDrawerOpen).toBe(true);
+    // Owners are separate: another workspace's drawer is unaffected (A → B → A).
+    expect(designWorkspaceView("workspace-other").layersDrawerOpen).toBe(false);
+    store.setPanels("workspace-other", { layersDrawerOpen: false });
+    expect(designWorkspaceView("workspace-drawer").layersDrawerOpen).toBe(true);
+    forgetDesignWorkspaceView("workspace-drawer");
+    expect(designWorkspaceView("workspace-drawer").layersDrawerOpen).toBe(false);
+  });
+
   it("preserves panels and navigation for the same directory and clears replaced document selections", () => {
     const store = useDesignWorkspaceUiStore.getState();
     store.setSelection("workspace-a", "home.html", "hero");

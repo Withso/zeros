@@ -1,3 +1,8 @@
+import {
+  designLayoutMenuRows,
+  designLayoutMenuState,
+  openLayersDrawer,
+} from "./ui-smoke-design-helpers.mjs";
 // Container controls exercise the real inspector and runtime against an
 // in-memory document. No engine-owned Design files are edited by this fixture.
 export async function runDesignLayoutChildrenSmoke({ page, waitFor, check }) {
@@ -6,6 +11,7 @@ export async function runDesignLayoutChildrenSmoke({ page, waitFor, check }) {
     `${origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html`,
     { waitUntil: "networkidle" },
   );
+  await openLayersDrawer(page);
   const layers = page.locator("[data-design-sidebar-panel]");
   const layout = page.locator("[data-design-layout-section]");
   const runtime = page.frameLocator(
@@ -46,15 +52,33 @@ export async function runDesignLayoutChildrenSmoke({ page, waitFor, check }) {
     await selectHero();
   };
   await reset();
+  const position = page.locator("[data-design-position-section]");
   const menu = layout.getByRole("button", { name: "More layout actions" });
-  await menu.click();
+  const menuItem = (name) => page.getByRole("menuitem", { name, exact: true });
+  const menuRows = () => designLayoutMenuRows(page);
+  const menuState = (name) => designLayoutMenuState(page, name);
   check(
-    "the child layout menu exposes distribution and resize commands",
-    (await page.getByRole("menuitem").allTextContents())
-      .map((text) => text.trim())
-      .join("|") ===
-      "Distribute vertically|Distribute horizontally|Resize to fill|Resize to fit",
+    "the layout menu exposes child alignment, distribution and resize commands",
+    await waitFor(
+      async () =>
+        (await menuRows()).map(([text]) => text).join("|") ===
+      [
+        "Align children left",
+        "Align children horizontal centers",
+        "Align children right",
+        "Align children top",
+        "Align children vertical centers",
+        "Align children bottom",
+        "Distribute vertically",
+        "Distribute horizontally",
+        "Resize to fit",
+        "Resize to fill",
+      ].join("|"),
+      "children-menu-rows",
+    ),
   );
+  await menu.click();
+  await page.getByRole("menu").waitFor();
   await page.keyboard.press("Escape");
   // Radix restores trigger focus on the task after the menu unmounts, so an
   // immediate activeElement sample races that handoff.
@@ -72,9 +96,7 @@ export async function runDesignLayoutChildrenSmoke({ page, waitFor, check }) {
   );
   const choose = async (name) => {
     await menu.click();
-    await commit(() =>
-      page.getByRole("menuitem", { name, exact: true }).click(),
-    );
+    await commit(() => menuItem(name).click());
   };
   await choose("Distribute horizontally");
   check(
@@ -103,27 +125,33 @@ export async function runDesignLayoutChildrenSmoke({ page, waitFor, check }) {
       "children-distribute-y",
     ),
   );
+  // Constraints belong to the layers they pin: selecting the children
+  // together sets them all at once.
+  await layers.locator('[data-design-layer-id="home-heading"]').click();
+  for (const id of ["home-copy", "home-action"]) {
+    await layers
+      .locator(`[data-design-layer-id="${id}"]`)
+      .click({ modifiers: ["Shift"] });
+  }
+  const horizontal = position.getByRole("combobox", {
+    name: "Horizontal constraint",
+  });
   await hero.evaluate((element) =>
     element.children[0].style.setProperty("--zeros-layout-x", "end"),
   );
   check(
-    "different child pins appear as Mixed on the selected container",
+    "different pins across the selected children appear as Mixed",
     await waitFor(
-      async () =>
-        (
-          await layout
-            .getByRole("combobox", { name: "Horizontal constraint" })
-            .textContent()
-        ).includes("Mixed"),
+      async () => (await horizontal.textContent()).includes("Mixed"),
       "children-mixed-pins",
     ),
   );
-  await layout.getByRole("combobox", { name: "Horizontal constraint" }).click();
+  await horizontal.click();
   await commit(() =>
     page.getByRole("option", { name: "Right", exact: true }).click(),
   );
   check(
-    "a constraint choice updates every direct child and the aggregate readback",
+    "a constraint choice updates every selected child and the aggregate readback",
     await waitFor(
       async () =>
         (await hero.evaluate((element) =>
@@ -133,19 +161,13 @@ export async function runDesignLayoutChildrenSmoke({ page, waitFor, check }) {
               (child) =>
                 child.style.getPropertyValue("--zeros-layout-x") === "end",
             ),
-        )) &&
-        (
-          await layout
-            .getByRole("combobox", { name: "Horizontal constraint" })
-            .textContent()
-        ).trim() === "Right",
+        )) && (await horizontal.textContent()).trim() === "Right",
       "children-pin-readback",
     ),
   );
+  await horizontal.click();
   await commit(() =>
-    layout
-      .getByRole("button", { name: "Pin left", exact: true })
-      .click({ modifiers: ["Shift"] }),
+    page.getByRole("option", { name: "Left and right", exact: true }).click(),
   );
   await waitFor(
     () =>
@@ -221,23 +243,15 @@ export async function runDesignLayoutChildrenSmoke({ page, waitFor, check }) {
     element.children[1].style.display = "none";
     element.children[2].style.display = "none";
   });
-  await waitFor(async () => {
-    await menu.click();
-    const disabled = await page
-      .getByRole("menuitem", { name: "Distribute horizontally", exact: true })
-      .getAttribute("aria-disabled");
-    await page.keyboard.press("Escape");
-    return disabled === "true";
-  }, "children-distribute-minimum");
+  await waitFor(
+    async () => (await menuState("Distribute horizontally")) === "disabled",
+    "children-distribute-minimum",
+  );
   check(
-    "one visible child retains alignment and constraints but cannot distribute",
-    await layout
-      .getByRole("button", { name: "Align right", exact: true })
-      .isEnabled(),
+    "one visible child retains alignment but cannot distribute",
+    (await menuState("Align children right")) === "enabled",
   );
-  await commit(() =>
-    layout.getByRole("button", { name: "Align right", exact: true }).click(),
-  );
+  await choose("Align children right");
   check(
     "alignment leaves hidden children untouched",
     await waitFor(
@@ -255,15 +269,9 @@ export async function runDesignLayoutChildrenSmoke({ page, waitFor, check }) {
     element.children[0].style.display = "none";
   });
   check(
-    "all-hidden children keep their controls visible with unavailable actions disabled",
+    "all-hidden children keep their actions listed with the unavailable ones disabled",
     await waitFor(
-      async () =>
-        (await layout
-          .getByRole("button", { name: "Pin right", exact: true })
-          .count()) === 1 &&
-        (await layout
-          .getByRole("button", { name: "Align left", exact: true })
-          .isDisabled()),
+      async () => (await menuState("Align children left")) === "disabled",
       "children-hidden-controls",
     ),
   );
@@ -272,14 +280,11 @@ export async function runDesignLayoutChildrenSmoke({ page, waitFor, check }) {
     element.replaceChildren();
   });
   check(
-    "removing the last child hides both groups without reselection",
+    "removing the last child takes the children's actions out of the menu without reselection",
     await waitFor(
       async () =>
-        (await layout
-          .getByRole("group", { name: "Arrange children" })
-          .count()) === 0 &&
-        (await layout.locator("[data-design-layout-constraints]").count()) ===
-          0,
+        (await menuState("Align children left")) === "absent" &&
+        (await menuState("Resize to fit")) === "absent",
       "children-removed",
     ),
   );
@@ -290,15 +295,9 @@ export async function runDesignLayoutChildrenSmoke({ page, waitFor, check }) {
     });
   });
   check(
-    "adding children restores both groups without reselection",
+    "adding children restores their actions without reselection",
     await waitFor(
-      async () =>
-        (await layout
-          .getByRole("button", { name: "Pin right", exact: true })
-          .count()) === 1 &&
-        (await layout
-          .getByRole("button", { name: "Align left", exact: true })
-          .isEnabled()),
+      async () => (await menuState("Align children left")) === "enabled",
       "children-restored",
     ),
   );
@@ -309,13 +308,16 @@ export async function runDesignLayoutChildrenSmoke({ page, waitFor, check }) {
         element.style.setProperty("--zeros-design-style-width", `${width}px`);
       }, width);
     check(
-      `child controls fit a ${width}px inspector`,
-      await layout.evaluate(
+      `Position and Layout fit a ${width}px inspector`,
+      (await layout.evaluate(
         (element, expectedWidth) =>
           element.scrollWidth <= element.clientWidth &&
           Math.abs(element.closest("[data-design-floating-panel]").getBoundingClientRect().width - expectedWidth) < 1,
         width,
-      ),
+      )) &&
+        (await position.evaluate(
+          (element) => element.scrollWidth <= element.clientWidth,
+        )),
     );
   }
   await page

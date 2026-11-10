@@ -117,6 +117,32 @@ export function InspectorSection({
   );
 }
 
+/** A labelled group inside a section (Flow, Size, Alignment, Padding, …).
+ * The label is plain text; each control keeps its own accessible name. */
+export function InspectorGroup({
+  label,
+  actions,
+  className,
+  children,
+  ...rest
+}: Omit<React.HTMLAttributes<HTMLDivElement>, "title"> & {
+  label: string;
+  /** Trailing controls on the label's line, such as a group's ⋯ menu. */
+  actions?: React.ReactNode;
+}) {
+  return (
+    <div {...rest} className={cn("zd-group", className)}>
+      <div className="zd-group-header">
+        <span className="zd-group-label">{label}</span>
+        {actions ? (
+          <div className="flex shrink-0 items-center gap-0.5">{actions}</div>
+        ) : null}
+      </div>
+      {children}
+    </div>
+  );
+}
+
 // --- ACTIONS ---
 
 interface InspectorIconButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
@@ -458,6 +484,15 @@ const GLYPH_PATHS: Record<InspectorGlyphName, React.ReactNode> = {
   ),
   "letter-spacing": (
     <path d="M2.5 2.5v11m11-11v11M5.5 11l2.5-6 2.5 6M6.4 9h3.2" />
+  ),
+  "text-indent": (
+    <path d="M7.5 3.5h6m-6 4h6m-11 4h11M2.5 2.5l2.5 2.5-2.5 2.5" />
+  ),
+  "word-spacing": (
+    <path d="M2.5 4.5v7m11-7v7M5 8h6M6.5 6.5 5 8l1.5 1.5m3-3L11 8l-1.5 1.5" />
+  ),
+  "font-stretch": (
+    <path d="M5 2.5h6M8 2.5v6.5m-5.5 3.5h11M4 11l-1.5 1.5L4 14m8-3 1.5 1.5L12 14" />
   ),
   "stroke-weight": (
     <>

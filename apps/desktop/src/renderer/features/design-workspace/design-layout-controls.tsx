@@ -14,28 +14,40 @@ import {
   AlignVerticalDistributeCenter,
   Maximize,
   Minimize,
+  Shrink,
 } from "lucide-react";
 import type {
   DesignRuntimeChildrenLayout,
   DesignRuntimeNodeDetails,
 } from "@zeros/protocol/design-runtime";
+
+import { cn } from "../../shared/ui/cn";
 import {
+  Button,
   Tooltip,
   DropdownMenu,
   DropdownMenuTrigger,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuLabel,
   DropdownMenuSeparator,
 } from "../../shared/ui/primitives";
-import { cn } from "../../shared/ui/cn";
-import { InspectorIconButton, InspectorSelect } from "./design-inspector-kit";
 import {
+  InspectorIconButton,
+  InspectorSection,
+  InspectorSelect,
+} from "./design-inspector-kit";
+import {
+  designLayoutConstraint,
   designLayoutFieldValue,
+  designLayoutPlacedByParent,
   type DesignLayoutAction,
   type DesignLayoutAxis,
   type DesignLayoutConstraint,
   type DesignLayoutFieldOptions,
 } from "./design-layout-values";
+import { designAutoLayoutFlow } from "./design-auto-layout-values";
+import { readDesignComputedStyle } from "./design-style-values";
 
 type RenderField = (
   label: string,
@@ -44,120 +56,310 @@ type RenderField = (
   options?: DesignLayoutFieldOptions,
 ) => React.ReactNode;
 
-/** These arrange the selected container's direct children, so the tooltip
- * says so; the accessible names stay the familiar align commands. */
 const ALIGNMENTS = [
-  [
-    "x",
-    "start",
-    "Align left",
-    "Align children left",
-    AlignHorizontalJustifyStart,
-  ],
-  [
-    "x",
-    "center",
-    "Align horizontal centers",
-    "Align children to horizontal centers",
-    AlignHorizontalJustifyCenter,
-  ],
-  [
-    "x",
-    "end",
-    "Align right",
-    "Align children right",
-    AlignHorizontalJustifyEnd,
-  ],
-  ["y", "start", "Align top", "Align children top", AlignVerticalJustifyStart],
-  [
-    "y",
-    "center",
-    "Align vertical centers",
-    "Align children to vertical centers",
-    AlignVerticalJustifyCenter,
-  ],
-  [
-    "y",
-    "end",
-    "Align bottom",
-    "Align children bottom",
-    AlignVerticalJustifyEnd,
-  ],
+  ["x", "start", "Align left", AlignHorizontalJustifyStart],
+  ["x", "center", "Align horizontal centers", AlignHorizontalJustifyCenter],
+  ["x", "end", "Align right", AlignHorizontalJustifyEnd],
+  ["y", "start", "Align top", AlignVerticalJustifyStart],
+  ["y", "center", "Align vertical centers", AlignVerticalJustifyCenter],
+  ["y", "end", "Align bottom", AlignVerticalJustifyEnd],
 ] as const;
 
-/** Position, size, rotation and quarter-turn/flip actions. Three columns at
- * normal widths; the container query in design-workspace-ui.css reflows the
- * rotation cells onto a third row in narrow inspectors. */
-export function DesignLayoutGeometry({
+const ROTATE_AND_FLIP = [
+  ["Rotate 90° clockwise", RotateCw, { type: "rotate", delta: 90 }],
+  ["Flip horizontal", FlipHorizontal, { type: "flip", axis: "x" }],
+  ["Flip vertical", FlipVertical, { type: "flip", axis: "y" }],
+] as const;
+
+const CONSTRAINT_LABELS: Record<
+  DesignLayoutAxis,
+  Record<Exclude<DesignLayoutConstraint, "stretch">, string> & { stretch: string }
+> = {
+  x: { start: "Left", end: "Right", center: "Center", stretch: "Left and right", scale: "Scale" },
+  y: { start: "Top", end: "Bottom", center: "Center", stretch: "Top and bottom", scale: "Scale" },
+};
+
+const CONSTRAINT_ORDER: readonly DesignLayoutConstraint[] = [
+  "start",
+  "end",
+  "center",
+  "stretch",
+  "scale",
+];
+
+/** One shared value for a multi-selection, else "mixed". */
+function shared<T>(values: readonly T[]): T | "mixed" {
+  const [first] = values;
+  return values.every((value) => value === first) ? (first as T) : "mixed";
+}
+
+function PinnedEdges({
+  x,
+  y,
+}: {
+  x: DesignLayoutConstraint | "mixed";
+  y: DesignLayoutConstraint | "mixed";
+}) {
+  // Which parent edges the layer keeps its distance from; Scale keeps none
+  // fixed, so its pins show at both ends as shares of the parent.
+  const on = (axis: DesignLayoutAxis, side: "start" | "end" | "center") => {
+    const value = axis === "x" ? x : y;
+    if (value === "mixed") return false;
+    if (side === "center") return value === "center";
+    return value === side || value === "stretch" || value === "scale";
+  };
+  const pinned = [
+    on("x", "start") && "left",
+    on("x", "end") && "right",
+    on("y", "start") && "top",
+    on("y", "end") && "bottom",
+    (on("x", "center") || on("y", "center")) && "center",
+  ].filter(Boolean);
+  return (
+    <div
+      role="img"
+      aria-label={`Pinned edges: ${pinned.length ? pinned.join(", ") : "none"}`}
+      className="zd-constraint-pad relative grid size-16 shrink-0 grid-cols-3 grid-rows-3 rounded-lg"
+    >
+      <span
+        aria-hidden="true"
+        className="zd-constraint-box pointer-events-none absolute inset-5 rounded-sm"
+      />
+      {(
+        [
+          ["x", "start", "col-start-1 row-start-2"],
+          ["x", "end", "col-start-3 row-start-2"],
+          ["y", "start", "col-start-2 row-start-1"],
+          ["y", "end", "col-start-2 row-start-3"],
+        ] as const
+      ).map(([axis, side, position]) => (
+        <span
+          key={`${axis}:${side}`}
+          aria-hidden="true"
+          className={cn(
+            "zd-constraint-pin",
+            position,
+            on(axis, side) && "zd-constraint-pin-on",
+          )}
+        >
+          <span
+            className={cn(
+              "rounded-full bg-current",
+              axis === "x" ? "h-0.5 w-2.5" : "h-2.5 w-0.5",
+            )}
+          />
+        </span>
+      ))}
+      <span
+        aria-hidden="true"
+        className="zd-constraint-pin col-start-2 row-start-2"
+      >
+        <span className="relative flex size-2.5 items-center justify-center">
+          <span
+            className={cn(
+              "absolute h-0.5 w-2.5 rounded-full bg-current",
+              on("x", "center") && "zd-constraint-pin-on",
+            )}
+          />
+          <span
+            className={cn(
+              "absolute h-2.5 w-0.5 rounded-full bg-current",
+              on("y", "center") && "zd-constraint-pin-on",
+            )}
+          />
+        </span>
+      </span>
+    </div>
+  );
+}
+
+/** Position: where the selected layer sits and what it keeps when its parent
+ * resizes. Every action acts on the selected layers themselves; a layer its
+ * parent's auto layout places offers Place freely instead of pins. */
+export function DesignPositionSection({
   details,
   renderField,
   onAction,
   disabled,
-  renderSize,
+  frameSelected,
+  layoutParents,
 }: {
   details: DesignRuntimeNodeDetails;
   renderField: RenderField;
   onAction: (action: DesignLayoutAction) => void;
   disabled: boolean;
-  renderSize?: (
-    axis: DesignLayoutAxis,
-    field: React.ReactNode,
-  ) => React.ReactNode;
+  /** The frame's root: the canvas places it, so it has no pins. */
+  frameSelected?: boolean;
+  layoutParents?: readonly DesignRuntimeNodeDetails[];
 }) {
-  const field = (label: string, property: string) =>
+  const selection = layoutParents?.length ? layoutParents : [details];
+  const placed = !frameSelected && selection.some(designLayoutPlacedByParent);
+  const free = !frameSelected && !placed && selection.every((node) => node.layout?.parentId);
+  const field = (label: string, property: string, extra: DesignLayoutFieldOptions = {}) =>
     renderField(label, property, designLayoutFieldValue(details, property), {
       whole: true,
       compact: true,
       geometry: true,
+      ...extra,
     });
+  const x = shared(selection.map((node) => designLayoutConstraint(node, "x")));
+  const y = shared(selection.map((node) => designLayoutConstraint(node, "y")));
+  // Fit to content sizes a free-layout container to its children; with auto
+  // layout, Hug does that.
+  const fits =
+    (details.childrenLayout?.count ?? 0) > 0 && designAutoLayoutFlow(details) === "none";
   return (
-    <div
-      data-design-layout-geometry
-      className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(72px,1fr)] gap-2"
+    <InspectorSection
+      title="Position"
+      data-design-position-section=""
+      actions={
+        fits ? (
+          <InspectorIconButton
+            label="Fit to content"
+            tooltip="Fit to content"
+            disabled={disabled}
+            onClick={() => onAction({ type: "resize-fit" })}
+          >
+            <Shrink />
+          </InspectorIconButton>
+        ) : null
+      }
     >
-      {field("X", "left")}
-      {field("Y", "top")}
-      {field("Rotation", "rotate")}
-      {renderSize ? renderSize("x", field("W", "width")) : field("W", "width")}
-      {renderSize
-        ? renderSize("y", field("H", "height"))
-        : field("H", "height")}
-      <div
-        className="zd-segmented grid-cols-3"
-        role="group"
-        aria-label="Rotate and flip"
-      >
-        {(
-          [
-            ["Rotate 90° clockwise", RotateCw, { type: "rotate", delta: 90 }],
-            ["Flip horizontal", FlipHorizontal, { type: "flip", axis: "x" }],
-            ["Flip vertical", FlipVertical, { type: "flip", axis: "y" }],
-          ] as const
-        ).map(([label, Icon, action]) => (
-          <Tooltip key={label} label={label}>
-            <button
-              type="button"
-              className="zd-segment"
-              aria-label={label}
-              disabled={disabled}
-              onClick={() => onAction(action)}
+      {placed ? (
+        <p className="zd-section-note" data-design-position-placed="">
+          Placed by its parent’s auto layout.
+        </p>
+      ) : null}
+      {free ? (
+        <div
+          data-design-position-align=""
+          className="grid grid-cols-2 gap-2"
+        >
+          {(["x", "y"] as const).map((axis) => (
+            <div
+              key={axis}
+              role="group"
+              aria-label={axis === "x" ? "Align horizontally" : "Align vertically"}
+              className="zd-segmented grid-cols-3"
             >
-              <Icon />
-            </button>
-          </Tooltip>
-        ))}
+              {ALIGNMENTS.filter(([alignAxis]) => alignAxis === axis).map(
+                ([, value, label, Icon]) => (
+                  <Tooltip key={label} label={label}>
+                    <button
+                      type="button"
+                      className="zd-segment"
+                      aria-label={label}
+                      disabled={disabled}
+                      onClick={() =>
+                        onAction({ type: "align", axis, value, target: "self" })
+                      }
+                    >
+                      <Icon />
+                    </button>
+                  </Tooltip>
+                ),
+              )}
+            </div>
+          ))}
+        </div>
+      ) : null}
+      <div
+        data-design-layout-geometry=""
+        className="grid grid-cols-2 gap-2"
+      >
+        {field("X", "left")}
+        {field("Y", "top")}
+        {field("Rotation", "rotate")}
+        <div
+          className="zd-segmented grid-cols-3"
+          role="group"
+          aria-label="Rotate and flip"
+        >
+          {ROTATE_AND_FLIP.map(([label, Icon, action]) => (
+            <Tooltip key={label} label={label}>
+              <button
+                type="button"
+                className="zd-segment"
+                aria-label={label}
+                disabled={disabled}
+                onClick={() => onAction(action)}
+              >
+                <Icon />
+              </button>
+            </Tooltip>
+          ))}
+        </div>
       </div>
-    </div>
+      {placed ? (
+        <Button
+          type="button"
+          variant="secondary"
+          size="compact"
+          className="self-start"
+          disabled={disabled}
+          onClick={() => onAction({ type: "place-freely" })}
+        >
+          Place freely
+        </Button>
+      ) : null}
+      {free ? (
+        <div
+          data-design-layout-constraints=""
+          className="grid grid-cols-[64px_minmax(0,1fr)] items-center gap-2"
+        >
+          <PinnedEdges x={x} y={y} />
+          <div className="flex min-w-0 flex-col gap-2">
+            {(["x", "y"] as const).map((axis) => {
+              const value = axis === "x" ? x : y;
+              return (
+                <InspectorSelect
+                  key={axis}
+                  label={axis === "x" ? "Horizontal constraint" : "Vertical constraint"}
+                  value={value}
+                  disabled={disabled}
+                  options={[
+                    ...(value === "mixed"
+                      ? [{ value: "mixed", label: "Mixed", disabled: true }]
+                      : []),
+                    ...CONSTRAINT_ORDER.map((constraint) => ({
+                      value: constraint,
+                      label: CONSTRAINT_LABELS[axis][constraint],
+                    })),
+                  ]}
+                  onChange={(next) =>
+                    onAction({
+                      type: "constraint",
+                      axis,
+                      value: next as DesignLayoutConstraint,
+                      target: "self",
+                    })
+                  }
+                />
+              );
+            })}
+          </div>
+        </div>
+      ) : null}
+      {free
+        ? renderField(
+            "Stacking order",
+            "z-index",
+            readDesignComputedStyle(details.styles, "z-index") || "auto",
+            { compact: true, whole: true, shortLabel: "Z" },
+          )
+        : null}
+    </InspectorSection>
   );
 }
 
-/** Free-layout arrangement for a container's direct children: align,
- * distribute, resize to fit/fill, and the shared constraint pins. */
-export function DesignLayoutChildren({
+/** Layout's ⋯ menu: what acts on the selected container's children (align,
+ * distribute, resize to fit) and Resize to fill on the layer itself. */
+export function DesignLayoutArrangeMenu({
   details,
   onAction,
   disabled,
   frameSelected,
+  autoLayout,
   childrenLayout = details.childrenLayout,
   canDistribute = (childrenLayout?.nodeIds.length ?? 0) >= 3,
 }: {
@@ -165,197 +367,80 @@ export function DesignLayoutChildren({
   onAction: (action: DesignLayoutAction) => void;
   disabled: boolean;
   frameSelected?: boolean;
+  autoLayout: boolean;
   childrenLayout?: DesignRuntimeChildrenLayout;
   canDistribute?: boolean;
 }) {
-  const x = childrenLayout?.x ?? "start";
-  const y = childrenLayout?.y ?? "start";
-  if ((childrenLayout?.count ?? 0) === 0) return null;
+  // Auto layout already places the children; aligning them by hand there is
+  // the Alignment pad's job, and Hug sizes the container to them.
+  const showChildren = (childrenLayout?.count ?? 0) > 0 && !autoLayout;
+  const fillable = !frameSelected && !!details.layout?.parentId;
+  // A canvas frame has nothing to fill; beside its children's actions the
+  // item stays, disabled, so the menu reads the same for every container.
+  if (!showChildren && !fillable) return null;
   const unavailable = childrenLayout?.truncated
     ? "Select a smaller frame to arrange its children together"
-    : childrenLayout?.nodeIds.length === 0
+    : showChildren && childrenLayout?.nodeIds.length === 0
       ? "Show a child layer to arrange it"
       : null;
-  const pinDisabled = disabled || Boolean(unavailable);
-  const pin = (
-    axis: DesignLayoutAxis,
-    value: "start" | "end",
-    additive: boolean,
-  ) => {
-    onAction({ type: "constraint", axis, value, pin: additive });
-  };
-  const alignButton = ([
-    axis,
-    value,
-    label,
-    tooltip,
-    Icon,
-  ]: (typeof ALIGNMENTS)[number]) => (
-    <Tooltip key={label} label={unavailable ?? tooltip}>
-      <button
-        type="button"
-        className="zd-segment"
-        aria-label={label}
-        disabled={pinDisabled}
-        onClick={() => onAction({ type: "align", axis, value })}
-      >
-        <Icon />
-      </button>
-    </Tooltip>
-  );
   return (
-    <>
-      <div
-        role="group"
-        aria-label="Arrange children"
-        className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_28px] gap-2"
-      >
-        <div className="zd-segmented grid-cols-3">
-          {ALIGNMENTS.slice(0, 3).map(alignButton)}
-        </div>
-        <div className="zd-segmented grid-cols-3">
-          {ALIGNMENTS.slice(3).map(alignButton)}
-        </div>
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <InspectorIconButton
-              label="More layout actions"
-              tooltip={unavailable}
-              size="row"
-              disabled={pinDisabled}
-            >
-              <Ellipsis />
-            </InspectorIconButton>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end">
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <InspectorIconButton
+          label="More layout actions"
+          tooltip={unavailable ?? "Arrange"}
+          disabled={disabled}
+        >
+          <Ellipsis />
+        </InspectorIconButton>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="min-w-52">
+        {showChildren ? (
+          <>
+            <DropdownMenuLabel>Children</DropdownMenuLabel>
+            {ALIGNMENTS.map(([axis, value, label, Icon]) => (
+              <DropdownMenuItem
+                key={label}
+                disabled={Boolean(unavailable)}
+                onSelect={() => onAction({ type: "align", axis, value })}
+              >
+                <Icon />
+                {label.replace("Align ", "Align children ")}
+              </DropdownMenuItem>
+            ))}
+            <DropdownMenuSeparator />
             <DropdownMenuItem
-              disabled={!canDistribute}
+              disabled={Boolean(unavailable) || !canDistribute}
               onSelect={() => onAction({ type: "distribute", axis: "y" })}
             >
               <AlignVerticalDistributeCenter /> Distribute vertically
             </DropdownMenuItem>
             <DropdownMenuItem
-              disabled={!canDistribute}
+              disabled={Boolean(unavailable) || !canDistribute}
               onSelect={() => onAction({ type: "distribute", axis: "x" })}
             >
               <AlignHorizontalDistributeCenter /> Distribute horizontally
             </DropdownMenuItem>
-            <DropdownMenuSeparator />
             <DropdownMenuItem
-              disabled={frameSelected || !details.layout?.parentId}
+              disabled={Boolean(unavailable)}
+              onSelect={() => onAction({ type: "resize-fit" })}
+            >
+              <Minimize /> Resize to fit
+            </DropdownMenuItem>
+          </>
+        ) : null}
+        {fillable || showChildren ? (
+          <>
+            {showChildren ? <DropdownMenuSeparator /> : null}
+            <DropdownMenuItem
+              disabled={!fillable}
               onSelect={() => onAction({ type: "resize-fill" })}
             >
               <Maximize /> Resize to fill
             </DropdownMenuItem>
-            <DropdownMenuItem onSelect={() => onAction({ type: "resize-fit" })}>
-              <Minimize /> Resize to fit
-            </DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
-      </div>
-      <div
-        data-design-layout-constraints
-        className="grid grid-cols-[64px_minmax(0,1fr)] items-center gap-2"
-      >
-        <div
-          role="group"
-          aria-label="Constraint pins"
-          className="zd-constraint-pad relative grid size-16 grid-cols-3 grid-rows-3 rounded-lg"
-        >
-          <span
-            aria-hidden="true"
-            className="zd-constraint-box pointer-events-none absolute inset-5 rounded-sm"
-          />
-          {(
-            [
-              ["x", "start", "left", "col-start-1 row-start-2", x],
-              ["x", "end", "right", "col-start-3 row-start-2", x],
-              ["y", "start", "top", "col-start-2 row-start-1", y],
-              ["y", "end", "bottom", "col-start-2 row-start-3", y],
-            ] as const
-          ).map(([axis, value, label, position, current]) => {
-            const pinned = current === value || current === "stretch";
-            return (
-              <Tooltip key={label} label={`Pin ${label}`}>
-                <button
-                  type="button"
-                  className={cn("zd-constraint-pin", position)}
-                  aria-label={`Pin ${label}`}
-                  aria-pressed={pinned}
-                  disabled={pinDisabled}
-                  onClick={(event) => pin(axis, value, event.shiftKey)}
-                >
-                  <span
-                    className={cn(
-                      "rounded-full bg-current",
-                      axis === "x" ? "h-0.5 w-2.5" : "h-2.5 w-0.5",
-                    )}
-                  />
-                </button>
-              </Tooltip>
-            );
-          })}
-          <Tooltip label="Pin center">
-            <button
-              type="button"
-              className="zd-constraint-pin col-start-2 row-start-2"
-              aria-label="Pin center"
-              aria-pressed={x === "center" && y === "center"}
-              disabled={pinDisabled}
-              onClick={() => onAction({ type: "center" })}
-            >
-              <span className="relative flex size-2.5 items-center justify-center">
-                <span
-                  className={cn(
-                    "absolute h-0.5 w-2.5 rounded-full bg-current",
-                    x === "center" && "zd-constraint-pin-on",
-                  )}
-                />
-                <span
-                  className={cn(
-                    "absolute h-2.5 w-0.5 rounded-full bg-current",
-                    y === "center" && "zd-constraint-pin-on",
-                  )}
-                />
-              </span>
-            </button>
-          </Tooltip>
-        </div>
-        <div className="flex min-w-0 flex-col gap-2">
-          {(["x", "y"] as const).map((axis) => {
-            const value = axis === "x" ? x : y;
-            return (
-              <InspectorSelect
-                key={axis}
-                label={
-                  axis === "x" ? "Horizontal constraint" : "Vertical constraint"
-                }
-                value={value}
-                disabled={pinDisabled}
-                options={[
-                  ...(value === "mixed"
-                    ? [{ value: "mixed", label: "Mixed", disabled: true }]
-                    : []),
-                  { value: "start", label: axis === "x" ? "Left" : "Top" },
-                  { value: "center", label: "Center" },
-                  { value: "end", label: axis === "x" ? "Right" : "Bottom" },
-                  {
-                    value: "stretch",
-                    label: axis === "x" ? "Left and right" : "Top and bottom",
-                  },
-                ]}
-                onChange={(next) =>
-                  onAction({
-                    type: "constraint",
-                    axis,
-                    value: next as DesignLayoutConstraint,
-                  })
-                }
-              />
-            );
-          })}
-        </div>
-      </div>
-    </>
+          </>
+        ) : null}
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }

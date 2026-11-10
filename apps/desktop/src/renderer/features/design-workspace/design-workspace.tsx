@@ -110,7 +110,8 @@ export function DesignWorkspaceColumn({
   const panelRef = useRef<HTMLElement | null>(null);
   const workspaceId = workspace?.id ?? null;
   // Serialized names predate the floating panel: `inspectorVisible` now puts
-  // the whole Layers + Inspector panel away, `layersVisible` folds its Layers.
+  // the whole Style + Layers panel away, and `layersDrawerOpen` opens the
+  // Layers drawer at its foot (the older `layersVisible` no longer applies).
   const panelVisible = useDesignWorkspaceUiStore((state) =>
     workspaceId
       ? (state.byWorkspace[workspaceId]?.inspectorVisible ?? true)
@@ -118,8 +119,8 @@ export function DesignWorkspaceColumn({
   );
   const layersExpanded = useDesignWorkspaceUiStore((state) =>
     workspaceId
-      ? (state.byWorkspace[workspaceId]?.layersVisible ?? true)
-      : true,
+      ? (state.byWorkspace[workspaceId]?.layersDrawerOpen ?? false)
+      : false,
   );
   const snapshot = useDesignWorkspaceSnapshot(
     workspaceId,
@@ -360,7 +361,7 @@ export function DesignWorkspaceColumn({
       if (!workspaceId) return;
       useDesignWorkspaceUiStore
         .getState()
-        .setPanels(workspaceId, { layersVisible: expanded });
+        .setPanels(workspaceId, { layersDrawerOpen: expanded });
     },
     [workspaceId],
   );

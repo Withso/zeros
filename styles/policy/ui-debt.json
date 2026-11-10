@@ -314,7 +314,7 @@
         "button": 4
       },
       "apps/desktop/src/renderer/features/design-workspace/design-layout-controls.tsx": {
-        "button": 4
+        "button": 2
       },
       "apps/desktop/src/renderer/features/design-workspace/design-layout-tools-overlay.tsx": {
         "button": 2,

@@ -1,5 +1,6 @@
 /* global window, getComputedStyle */
 import { expect } from "@playwright/test";
+import { openLayersDrawer } from "./ui-smoke-design-helpers.mjs";
 
 export async function runDesignInspectorShortcutsSmoke({ page, check }) {
   // Earlier canvas scenarios may still be publishing previews. Start with a
@@ -8,6 +9,7 @@ export async function runDesignInspectorShortcutsSmoke({ page, check }) {
     `${new URL(page.url()).origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html`,
     { waitUntil: "networkidle" },
   );
+  await openLayersDrawer(page);
   await page
     .locator(
       '[data-design-sidebar-panel] [data-design-layer-id="home-heading"]',
@@ -108,6 +110,7 @@ export async function runDesignPendingHistoryInspectorSmoke({ page, check }) {
     `${new URL(page.url()).origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html?layoutGestures=1&measureManipulation=1&engineDelayMs=0`,
     { waitUntil: "networkidle" },
   );
+  await openLayersDrawer(page);
   await page.locator('[data-design-frame-row="home.html"]').click();
   await page.locator('[data-design-sidebar-panel] [data-design-layer-id="home-hero"]').click();
   const radius = page.getByLabel("Radius", { exact: true });

@@ -7,7 +7,11 @@ import {
 } from "./design-style-values";
 
 export type DesignLayoutAxis = "x" | "y";
-export type DesignLayoutConstraint = "start" | "center" | "end" | "stretch";
+/** "scale" keeps a layer's position and size as percentages of its parent. */
+export type DesignLayoutConstraint = "start" | "center" | "end" | "stretch" | "scale";
+/** Position acts on the selected layer itself; Layout's arrange menu on the
+ * selected container's children. Absent means children, as before. */
+export type DesignLayoutActionTarget = "children" | "self";
 export type DesignLayoutAction =
   | {
       type: "auto-layout";
@@ -16,10 +20,16 @@ export type DesignLayoutAction =
        * direction the children already sit; `flow` is the fallback. */
       infer?: boolean;
     }
-  | { type: "sizing"; axis: DesignLayoutAxis; mode: "fixed" | "hug" | "fill" }
+  | {
+      type: "sizing";
+      axis: DesignLayoutAxis;
+      mode: "fixed" | "hug" | "fill" | "relative";
+    }
   | { type: "reset"; property: string }
   | { type: "clip" }
-  | { type: "center" }
+  | { type: "center"; target?: DesignLayoutActionTarget }
+  /** Out of its parent's auto layout, at the box it occupies now. */
+  | { type: "place-freely" }
   | { type: "rotate"; delta: number }
   | { type: "rotation"; value: number }
   | { type: "flip"; axis: DesignLayoutAxis }
@@ -29,8 +39,14 @@ export type DesignLayoutAction =
       value: DesignLayoutConstraint;
       /** Present for a pin-line click; true adds to the current edge pin. */
       pin?: boolean;
+      target?: DesignLayoutActionTarget;
     }
-  | { type: "align"; axis: DesignLayoutAxis; value: "start" | "center" | "end" }
+  | {
+      type: "align";
+      axis: DesignLayoutAxis;
+      value: "start" | "center" | "end";
+      target?: DesignLayoutActionTarget;
+    }
   | { type: "distribute"; axis: DesignLayoutAxis }
   | { type: "resize-fit" }
   | { type: "resize-fill" }
@@ -58,7 +74,10 @@ export type InspectorGlyphName =
   | "radius-tr"
   | "radius-br"
   | "radius-bl"
-  | "font-size";
+  | "font-size"
+  | "text-indent"
+  | "word-spacing"
+  | "font-stretch";
 
 export interface DesignLayoutFieldOptions {
   whole?: boolean;
@@ -72,12 +91,24 @@ export interface DesignLayoutFieldOptions {
   /** Static trailing text for unit-less presentations. */
   suffix?: string;
   placeholder?: string;
-  sizing?: "hug" | "fill";
+  /** Several selected layers differ here: the field reads Mixed and shows no
+   * token until a value is typed for all of them. */
+  mixed?: boolean;
 }
 
 export function roundDesignLayoutValue(value: string): string {
   const numeric = parseDesignStyleNumericParts(value);
   return numeric ? `${Math.round(numeric.number) || 0}${numeric.unit}` : value;
+}
+
+/** A layer in flow inside a flex or grid parent: the parent's auto layout
+ * decides where it sits, so Position offers Place freely instead of pins. */
+export function designLayoutPlacedByParent(
+  details: DesignRuntimeNodeDetails,
+): boolean {
+  if (!details.layout?.parentId) return false;
+  if (["absolute", "fixed"].includes(style(details, "position"))) return false;
+  return designLayoutMode(details.layout.parentDisplay) !== "none";
 }
 
 export function designLayoutMode(display: string): "none" | "flex" | "grid" {
@@ -95,6 +126,10 @@ const style = (details: DesignRuntimeNodeDetails, property: string) =>
 const numeric = (details: DesignRuntimeNodeDetails, property: string) =>
   Number.parseFloat(style(details, property)) || 0;
 const px = (value: number) => `${Math.round(value) || 0}px`;
+/** A length as a percentage of `base`, to two places; a positioned layer's
+ * percentages resolve against its containing block's padding box. */
+const percentOf = (value: number, base: number) =>
+  `${base > 0 ? Math.round((value / base) * 10_000) / 100 || 0 : 0}%`;
 const AXES = {
   x: {
     start: "left",
@@ -327,6 +362,14 @@ export function preserveDesignLayoutPins(
           Number.parseFloat(styles[keys.size]!) -
           numeric(details, keys.size);
     if (!Number.isFinite(start) || !Number.isFinite(size)) continue;
+    if (marker === "scale") {
+      // A scaled layer keeps percentages: the move lands as a share of the
+      // parent so the next parent resize still scales it.
+      result[keys.start] = percentOf(start, parentSize);
+      if (styles[keys.size] !== undefined)
+        result[keys.size] = percentOf(Number.parseFloat(styles[keys.size]!), parentSize);
+      continue;
+    }
     if (marker === "center") {
       const offset = subpixel ? start - parentSize / 2 : Math.round(start - parentSize / 2);
       result[keys.start] =
@@ -358,7 +401,8 @@ export function designLayoutActionUpdates(
     if (
       (action.type === "constraint" ||
         action.type === "align" ||
-        action.type === "center") &&
+        action.type === "center" ||
+        action.type === "place-freely") &&
       node.layout?.parentId &&
       !node.layout.isContainingBlock
     ) {
@@ -401,7 +445,7 @@ export function designLayoutConstraint(
   axis: DesignLayoutAxis,
 ): DesignLayoutConstraint {
   const marker = style(details, `--zeros-layout-${axis}`);
-  if (["start", "end", "center", "stretch"].includes(marker))
+  if (["start", "end", "center", "stretch", "scale"].includes(marker))
     return marker as DesignLayoutConstraint;
   const { start, end } = AXES[axis];
   if (!["absolute", "fixed"].includes(style(details, "position")))
@@ -440,11 +484,33 @@ export function designLayoutActionStyles(
     action.type === "align" ||
     action.type === "constraint" ||
     action.type === "center" ||
-    action.type === "resize-fill"
+    action.type === "resize-fill" ||
+    action.type === "place-freely"
   ) {
     const folded = foldTransformOffset(details);
     if (folded)
       return { ...folded.styles, ...designLayoutActionStyles(folded.details, action) };
+  }
+  if (action.type === "place-freely") {
+    const layout = details.layout;
+    if (!layout?.parentId) throw new Error("Select a layer inside a frame.");
+    // Both dimensions freeze at their used size, or an intrinsic layer would
+    // grow or collapse once its parent stops sizing it. A flow layer drawn at
+    // a translate (an older nesting's relocation) is placed where it is drawn,
+    // keeping only its rotation, scale and skew.
+    const offset = relocationOffset(details);
+    return {
+      position: "absolute",
+      left: px(layout.x - numeric(details, "margin-left") + (offset?.x ?? 0)),
+      top: px(layout.y - numeric(details, "margin-top") + (offset?.y ?? 0)),
+      right: "auto",
+      bottom: "auto",
+      width: cssSize(details, "x", borderSize(details, "x")),
+      height: cssSize(details, "y", borderSize(details, "y")),
+      ...(offset ? { transform: offset.pose } : {}),
+      "--zeros-layout-x": "start",
+      "--zeros-layout-y": "start",
+    };
   }
   if (action.type === "resize-fill") {
     if (!details.layout?.parentId)
@@ -631,6 +697,14 @@ export function designLayoutActionStyles(
     return result;
   }
   result[`--zeros-layout-${axis}`] = action.value;
+  if (action.value === "scale") {
+    result[keys.start] = percentOf(start - marginStart, parentSize);
+    result[keys.size] = percentOf(
+      Number.parseFloat(cssSize(details, axis, size)),
+      parentSize,
+    );
+    return result;
+  }
   if (action.value === "end") result[keys.end] = px(end - marginEnd);
   else if (action.value === "center") {
     const offset = Math.round(start - parentSize / 2 - marginStart);

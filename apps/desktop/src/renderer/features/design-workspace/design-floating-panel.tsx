@@ -1,7 +1,8 @@
 // ============================================
 // COMPONENT: DesignFloatingPanel
-// PURPOSE: The attached right panel of the Design canvas: Layers above the
-//          inspector, with a draggable width and a draggable Layers height
+// PURPOSE: The attached right panel of the Design canvas: the Style
+//          inspector on top and the Layers drawer at its foot, with a
+//          draggable width and a draggable drawer height
 // USED IN: DesignWorkspaceColumn
 // ============================================
 
@@ -224,18 +225,26 @@ export const DesignFloatingPanel = React.forwardRef<
         controlsId={panelId}
       />
       <div
+        data-design-inspector-slot=""
+        className="flex min-h-0 flex-1 flex-col"
+      >
+        {inspector}
+      </div>
+      {/* Layers is a drawer at the foot of the Style panel: closed, its header
+          shows the path to the selection; open, it takes the height the
+          person drags from its top edge. */}
+      <div
         ref={layersRef}
         id={layersSlotId}
         data-design-layers-slot=""
         data-collapsed={layersExpanded ? undefined : ""}
-        className="zd-design-layers-slot relative flex min-h-0 shrink-0 flex-col"
+        className="zd-design-layers-slot border-border1 relative flex min-h-0 shrink-0 flex-col border-t"
       >
-        {layers}
         {layersExpanded ? (
           <DesignPanelResizeHandle
             active={active && visible}
             panelRef={layersRef}
-            edge="bottom"
+            edge="top"
             className="zd-design-layers-split"
             value={layersHeight}
             defaultValue={DESIGN_WORKSPACE_LAYERS_HEIGHT_DEFAULT}
@@ -247,12 +256,7 @@ export const DesignFloatingPanel = React.forwardRef<
             controlsId={layersSlotId}
           />
         ) : null}
-      </div>
-      <div
-        data-design-inspector-slot=""
-        className="border-border1 flex min-h-0 flex-1 flex-col border-t"
-      >
-        {inspector}
+        {layers}
       </div>
     </aside>
   );

@@ -151,13 +151,17 @@ panel attaches to its right edge
 - **Tool rail** (left, vertically centred): Move, Frame, Text, Themes and
   Motion in one vertical toolbar. It centres in the canvas above an open
   Motion timeline, with an 8px edge inset.
-- **Layers + Inspector panel** (right, full content height): attached without
-  outer gaps, corner rounding or shadow. Layers sits on top at a
-  draggable height (`Resize Layers panel`: pointer, arrows, Home/End,
-  double-click resets), the inspector below. The panel's left edge resizes
-  its width. Hovering either border shows the resize cursor without a grip
-  or tooltip; keyboard focus still has an outline. Its title folds the Layers
-  tree down to its header so the inspector can take the panel.
+- **Style panel with the Layers drawer** (right, full content height):
+  attached without outer gaps, corner rounding or shadow. The inspector fills
+  the panel; Layers is a drawer at its foot, closed by default. Closed, the
+  drawer is one header row — a button with `aria-expanded` reading
+  `Layers` and where the selection sits (the last two names on its path,
+  `Parent › Layer`, or the frame's title) — and the tree is neither rendered
+  nor measured.
+  Open, it rises to a draggable height (`Resize Layers panel` on its top edge:
+  pointer, arrows, Home/End, double-click resets). The panel's left edge
+  resizes its width. Hovering either border shows the resize cursor without a
+  grip or tooltip; keyboard focus still has an outline.
 - **Page picker** (inspector, above Background): with no frame/node selected,
   the File-icon header shows the active page title and a chevron. Its shared
   radio menu lists pages, New page, Rename page… and Delete page…. With a
@@ -205,11 +209,14 @@ A stable directory ID survives rename; replacing it resets the old page views,
 selection/camera and runtime foundations. Switching back to an
 older directory starts a fresh document view; it does not restore a second
 per-directory editor history. The serialized view keeps its field names:
-`inspectorVisible` is the properties panel's visibility and `layersVisible`
-whether its Layers tree is unfolded. App-wide sizes stay in their existing
-keys — the panel width is the Style width (`zeros.design.style.width`) and the
-Layers split has its own `zeros.design.layers.height` (96px minimum, leaving
-the inspector at least 200px); both are boot CSS variables. Layers height
+`inspectorVisible` is the properties panel's visibility and `layersDrawerOpen`
+(default `false`) whether its Layers drawer is open. The older `layersVisible`
+flag stays readable in saved records but no longer drives anything, so a
+workspace that had Layers unfolded opens with the drawer closed once. App-wide
+sizes stay in their existing keys — the panel width is the Style width
+(`zeros.design.style.width`) and the open drawer's height is
+`zeros.design.layers.height` (96px minimum, leaving the inspector at least
+200px); both are boot CSS variables. Layers height
 commits synchronize retained canvases and other windows. The retired Layers
 width key stays readable. At most two visited Design canvases are retained.
 Inactive tabs/owners and a collapsed workbench are inert, hidden and inactive,
@@ -1533,13 +1540,15 @@ or renderer owners.
   are `base`. Rules are classified once per generation. Node details list
   `baseStyleProperties`, which reach the layer only through base rules,
   classified across every declaring rule even when the winner is ambiguous.
-  The Style tab's Advanced section lists every other authored declaration that
-  no dedicated control shows as an editable name/value row (value as written,
-  selector and source in its tooltip), shows the layer's classes as a
-  read-only `class` row whose field scrolls to the full value, and adds any
-  property the browser implements by name (`zIndex` is `z-index`); it omits
-  an imported source's own custom properties such as Tailwind's `--tw-*`.
-  Removal is offered only for inline winners.
+  The Style tab's More styles section lists every other authored declaration
+  that no dedicated control shows as an editable name/value row (value as
+  written, selector and source in its tooltip), and adds any property the
+  browser implements by name (`zIndex` is `z-index`); it omits an imported
+  source's own custom properties such as Tailwind's `--tw-*`. It never lists
+  the layer's classes; they belong to the frame's markup. `clip-path` is listed
+  here; `z-index`, `align-content` and `-webkit-font-smoothing` have their own
+  controls, and margins do too whenever the layer has a non-zero one (a zero
+  margin is listed here). Removal is offered only for inline winners.
 - Runtime authored-style provenance is optional evidence. Inline `var()`
   shorthands compete even when CSSOM cannot expand their longhands. Nested
   declarations and element-dependent container queries make affected winners
@@ -1871,19 +1880,34 @@ original unsnapped geometry writes nothing and preserves authored sizing.
   quiet `bg2` fills, 36px section headers, 13px values, 12px in-field labels,
   14px glyphs (`design-workspace-ui.css`, "Design UI standard v1", and
   `design-inspector-kit.tsx`). The header toggles **Style | CSS**; there is no
-  footer. Sections (Layout, Appearance, Fill, Stroke, Effects, Typography,
-  Transform, Transition, Motion, Export) never collapse: one with nothing
-  authored is its header plus an add action. Fill, Stroke and shadow colors
+  footer. One function orders the sections by layer kind
+  (`design-style-sections.ts`): a text layer reads Position, Layout,
+  Appearance, Typography, Fill, Stroke, Shadow, Blur, Transform, Transition,
+  Motion, More styles, Export; any other layer puts Fill before Typography.
+  Sections that do not apply stay hidden. They never collapse: one with
+  nothing authored is a single header row with its add button (Add stroke,
+  Add shadow, Add blur, Add motion, Add style); only Typography (on a
+  non-text layer) and Transform are added from the Add property menu. Inside
+  a section, small grey group labels (Size, Alignment, Padding, Opacity,
+  Corner radius, Line height, …) name each cluster. There is no Hide toggle
+  and one Fill per layer. Fill, Stroke and shadow colors
   are one swatch · hex · opacity row; the picker's value field follows its
   notation (Hex is bare, opacity separate), and typed text is authored only
   when it reads as a color. Stroke maps Figma positions onto CSS —
   **Inside** is the border (per-side widths in Stroke settings), **Outside**
   the outline (offset in settings) — and moving between them rewrites the
-  stroke in one transaction. Effects list every shadow (drop/inner on the
-  box; on a text layer the drop shadow is `text-shadow`), a single-`blur()`
-  filter as Layer blur and backdrop filter as Background blur; shadows or
-  filters the rows cannot round-trip stay raw CSS rows. Long-tail type
-  properties live in the Type settings popover. Property popovers open beside
+  stroke in one transaction. A stroke row is weight, sides (All, Top, Right,
+  Bottom, Left; Custom when the sides differ) and Stroke settings, whose
+  popover holds position (Inside/Outside), style and per-side widths or
+  offset; the color row sits below. Shadow lists every shadow (drop/inner on
+  the box; on a text layer the drop shadow is `text-shadow`); Blur lists a
+  single-`blur()` filter as Layer blur and backdrop filter as Background
+  blur; shadows or filters the rows cannot round-trip stay raw CSS rows in
+  their section. Typography's Alignment group holds horizontal alignment and,
+  on a block-level text layer, vertical alignment (`align-content` start,
+  center or end, which Chromium applies to block containers; a flex or grid
+  text box does not offer it). Long-tail type properties, font smoothing
+  among them, live in the Type settings popover. Property popovers open beside
   the inspector, level with their row, never over it; Escape in a popover
   field reverts that field before a second Escape dismisses the popover.
   Collapsing independent padding changes only the view (unequal sides show
@@ -1937,9 +1961,42 @@ original unsnapped geometry writes nothing and preserves authored sizing.
   Theme state belongs to the workspace, not an element. A mode override resets
   to Base in place; a new variable name that is invalid or already taken keeps
   Create disabled with the reason in its tooltip.
-- **Layout inspector:** the fixed Layout section presents whole-pixel parent-local
-  positions and border-box dimensions, clockwise quarter turns, independent flips,
-  alignment, constraint pins, and Clip content. Viewing or cancelling a rounded
+- **Position and Layout inspector:** Position presents whole-pixel
+  parent-local X and Y, rotation with clockwise quarter turns and independent
+  flips, and what the selected layer keeps when its parent resizes; Layout
+  presents flow, border-box size, alignment, padding, margin and Clip
+  content.
+  Position acts on the selected layer itself. A freely placed layer offers
+  Align horizontally / Align vertically (within its parent), two constraint
+  selects (Left, Right, Center, Left and right, Scale; Top, Bottom, Center,
+  Top and bottom, Scale) beside a pinned-edges diagram, and Stacking order
+  (`z-index`). A layer its parent's auto layout places shows "Placed by its
+  parent's auto layout." and Place freely instead: one undoable update that
+  writes `position: absolute` at the current box (left/top less margins,
+  border-box width/height, start markers) and makes the parent `relative`
+  only when it is static. A canvas frame's root has no constraints. Fit to
+  content (a free-layout container with children) sits in the header. With
+  several layers selected, each aligns or constrains within its own parent,
+  and a constraint that differs reads Mixed. Scale stores left/top and
+  width/height as percentages of the parent and the `scale` marker; canvas
+  moves keep them percentages.
+  The children's actions — align children (six), distribute vertically and
+  horizontally, Resize to fit and Resize to fill (the layer itself) — live in
+  Layout's More layout actions menu; children's constraints are set by
+  selecting the children. W and H each end in a sizing word that opens the
+  axis's sizing menu: `px` Fixed, `%` Relative, Hug, Fill (and Auto, a unit
+  or CSS for a custom value, which the menu shows as disabled Custom), plus
+  min/max. Relative converts the current size to a percentage of the parent's
+  content box (the padding box for a positioned layer, as CSS resolves it);
+  a flex main-axis item also stops growing and shrinking. Margin appears as
+  a group only when the layer has a non-zero margin. In a multi-selection a
+  control reads Mixed only when every selected layer's details are loaded and
+  their values differ (`design-style-mixed.ts`): fields show a Mixed
+  placeholder (geometry compared as measured, whole numbers after rounding),
+  Fill and stroke colour rows read Mixed behind a neutral swatch, selects
+  show a disabled Mixed choice, segmented controls press no segment, and the
+  sizing word shows "–" with nothing checked. Mixed is never written; an edit
+  sets every selected layer. Viewing or cancelling a rounded
   value never rewrites authored CSS. New frames start with normal block flow,
   an opaque white fill, and explicit dimensions. Opacity is displayed as a
   percentage. Text layers keep text semantics: Fill edits `color`, and the
@@ -1958,8 +2015,8 @@ original unsnapped geometry writes nothing and preserves authored sizing.
   The CSS editor continues to accept the full supported CSS vocabulary.
   Layout exposes None, vertical/horizontal flex, and Grid. Padding, gap, and
   the child-alignment pad appear only on automatic layouts. Free-layout
-  containers retain their arrangement and constraint controls. Margins and raw
-  flex factors belong in CSS, not the designer controls.
+  containers keep their children's arrangement in the More layout actions
+  menu. Raw flex factors belong in CSS, not the designer controls.
   Automatic layouts and their in-flow children expose per-axis Fixed, Hug
   contents, and optional min/max fields. Only in-flow children of flex/grid
   parents expose Fill container. Hug uses intrinsic CSS sizing; Fill uses flex
@@ -1987,15 +2044,17 @@ original unsnapped geometry writes nothing and preserves authored sizing.
   and history share the inspector's ordered lane; geometry preparation waits
   for runtime adoption, while immediate previews stay responsive.
   Sizing-menu drafts are scoped to workspace, frame, and selected node IDs.
-  Geometry uses three columns at normal widths and reflows to two columns in
-  narrow inspectors, keeping dimension values and resizing menus readable.
+  Geometry is two equal columns at every width (X | Y, Rotation | rotate and
+  flip; W | H), keeping four-digit values and sizing words readable.
   Pins author standard insets (including `calc()` for center offsets); the directly
   authored `--zeros-layout-x` / `--zeros-layout-y` custom properties retain the
-  start/center/end/stretch intent for the editor and canvas gestures. These names
+  start/center/end/stretch/scale intent for the editor and canvas gestures
+  (a reader that predates `scale` falls back to the authored insets, which
+  read as a start pin). These names
   are serialized compatibility contracts. Optional runtime `layout` context is
   measured with node details and validated at the frame bridge, so the inspector
   does not infer parent coordinates from a transformed screen rectangle.
-  Free-layout alignment and constraints appear only for containers with direct
+  The children's actions appear only for free-layout containers with direct
   authored children, including top-level canvas frames. They arrange visible direct
   children; hidden layers and grandchildren are left alone. The optional,
   validated `childrenLayout` aggregate supplies presence, eligible child IDs,

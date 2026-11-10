@@ -1,4 +1,4 @@
-import { designCanvasSafeRect } from "./ui-smoke-design-helpers.mjs";
+import { designCanvasSafeRect, openLayersDrawer } from "./ui-smoke-design-helpers.mjs";
 // Camera safeguards: a canvas never opens onto empty space while it has
 // frames, and selecting a frame the user cannot see brings it into view.
 // Camera setup uses the UI store only; the document is the harness fixture.
@@ -7,6 +7,7 @@ export async function runDesignCameraSmoke({ page, waitFor, check }) {
   const url = `${origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html`;
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto(url, { waitUntil: "networkidle" });
+  await openLayersDrawer(page);
   const viewport = page.locator("[data-design-canvas-viewport]");
   const world = page.locator("[data-design-canvas-world]");
 

@@ -1,6 +1,6 @@
 import { runDesignFloatingChromeSmoke } from "./ui-smoke-design-floating-chrome.mjs";
 import { runDesignFloatingChromeEdgesSmoke } from "./ui-smoke-design-floating-chrome-edges.mjs";
-import { addDesignSection, designCanvasPoint, designFrameElementBox } from "./ui-smoke-design-helpers.mjs";
+import { addDesignSection, designCanvasPoint, designFrameElementBox, openLayersDrawer } from "./ui-smoke-design-helpers.mjs";
 import { shiftClickDesignGroupMember } from "./ui-smoke-design-group-selection.mjs";
 import { expect } from "@playwright/test";
 import { runDesignWorkbenchSmoke } from "./ui-smoke-design-workbench.mjs";
@@ -62,6 +62,55 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
 
 /** Retained from the retired cloud Design directory smoke: the Local Design
  * menu takes Escape at its first focus and releases the native overlay. */
+/** The Layers drawer starts closed: one header row naming where the selection
+ * sits, with no tree rendered behind it. Leaves the drawer open. */
+export async function checkLayersDrawerDefault({ page, check }) {
+  const fold = page.locator("[data-design-layers-fold]");
+  const tree = page.locator('[data-design-sidebar-panel] [role="tree"]');
+  await fold.waitFor({ state: "visible", timeout: 15_000 });
+  check(
+    "the Layers drawer starts closed as a header button without a rendered tree",
+    (await fold.getAttribute("aria-expanded")) === "false" &&
+      (await fold.getAttribute("aria-controls")) === null &&
+      (await tree.count()) === 0 &&
+      (await page.locator("[data-design-layer-id]").count()) === 0 &&
+      (await page.locator("[data-design-layers-slot]").boundingBox()).height <= 40,
+  );
+  await fold.click();
+  await tree.waitFor({ state: "visible" });
+  const controls = await fold.getAttribute("aria-controls");
+  check(
+    "the drawer header opens the tree it controls",
+    (await fold.getAttribute("aria-expanded")) === "true" &&
+      !!controls &&
+      (await page.locator(`[id="${controls}"] [role="tree"]`).count()) === 1,
+  );
+  await page.locator('[data-design-layer-id="home-heading"]').click();
+  await fold.click();
+  await tree.waitFor({ state: "detached" });
+  const path = (await page.locator("[data-design-layers-path]").textContent())?.trim();
+  check(
+    "closed, the drawer names where the selection sits",
+    !!path && path.endsWith("Make the next move unmistakable.") && path.includes("›"),
+    path,
+  );
+  await fold.click();
+  await tree.waitFor({ state: "visible" });
+  // The drawer's state belongs to the workspace's saved view.
+  check(
+    "the drawer's open state is saved with the workspace view",
+    await page.evaluate(async () => {
+      const { useDesignWorkspaceUiStore } = await import(
+        "/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-ui.ts"
+      );
+      return (
+        useDesignWorkspaceUiStore.getState().byWorkspace?.ws_design_harness
+          ?.layersDrawerOpen === true
+      );
+    }),
+  );
+}
+
 export async function checkLocalDesignMenuFirstFocusEscape({ page, check, directoryHeader }) {
   await page.evaluate(() => {
     window.__designMenuProbe = { overlayActive: false, escapeSent: false };
@@ -98,10 +147,29 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
   // The harness uses a sandboxed runtime and production Radix primitives;
   // bridge-backed writes are covered by the engine suites.
   await page.setViewportSize({ width: 1440, height: 900 });
+  // A saved view without the drawer flag (every view saved before it
+  // existed) opens with the drawer closed. The flag is dropped before the
+  // next document's scripts run, once: the outgoing page may still save its
+  // views while it unloads.
+  await page.addInitScript(() => {
+    // Frames (sandboxed design documents) have no storage of their own.
+    if (window !== window.top) return;
+    try {
+      if (sessionStorage.getItem("zeros-smoke-drawer-default")) return;
+      sessionStorage.setItem("zeros-smoke-drawer-default", "1");
+      const key = "zeros:design-workspace-ui-v1";
+      const views = JSON.parse(localStorage.getItem(key) ?? "{}");
+      for (const view of Object.values(views)) delete view.layersDrawerOpen;
+      localStorage.setItem(key, JSON.stringify(views));
+    } catch {
+      // Storage unavailable: the drawer check below reports it.
+    }
+  });
   await page.goto(
     `${new URL(page.url()).origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html`,
     { waitUntil: "networkidle" },
   );
+  await checkLayersDrawerDefault({ page, check });
 
   const selectAuthoredFrameRoot = async () => {
     await page.evaluate(async () => {
@@ -132,6 +200,7 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
   await floatingPanel.waitFor({ state: "visible", timeout: 10_000 });
   await directoryHeader.waitFor({ state: "visible", timeout: 10_000 });
   const initialLayersBox = await layersPanel.boundingBox();
+  const initialLayersSlotBox = await layersSlot.boundingBox();
   const initialPanelBox = await floatingPanel.boundingBox();
   const initialStylePanelBox = await page
     .locator("[data-design-inspector]")
@@ -140,10 +209,13 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
   const designDirectoryNameBox = await designDirectoryName.boundingBox();
   const initialCanvasBox = await page.locator("[data-design-canvas-area]").boundingBox();
   check(
-    "design Layers occupy the top of the attached panel",
-    !!initialLayersBox && !!initialPanelBox &&
-      Math.abs(initialLayersBox.height - 240) < 1 &&
-      Math.abs(initialLayersBox.y - initialPanelBox.y) < 1 &&
+    "the open Layers drawer sits at the foot of the attached panel at its default height",
+    !!initialLayersSlotBox && !!initialPanelBox &&
+      Math.abs(initialLayersSlotBox.height - 240) < 1 &&
+      Math.abs(
+        initialLayersSlotBox.y + initialLayersSlotBox.height -
+          (initialPanelBox.y + initialPanelBox.height),
+      ) < 1 &&
       initialPanelBox.height > 800,
   );
   check(
@@ -551,12 +623,13 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
     name: "Resize Layers panel",
   });
   await designSplitter.focus();
-  await page.keyboard.press("ArrowDown");
+  // The drawer's top edge: ArrowUp raises it.
+  await page.keyboard.press("ArrowUp");
   const keyboardLayersBox = await layersSlot.boundingBox();
   check(
     "keyboard splitter resizes Layers height",
-    !!initialLayersBox && !!keyboardLayersBox &&
-      Math.abs(keyboardLayersBox.height - initialLayersBox.height - 8) < 1,
+    !!initialLayersSlotBox && !!keyboardLayersBox &&
+      Math.abs(keyboardLayersBox.height - initialLayersSlotBox.height - 8) < 1,
   );
 
   await page.setViewportSize({ width: 700, height: 700 });
@@ -1004,8 +1077,8 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
     .waitFor({ state: "visible", timeout: 10_000 });
   const inspector = page.locator("[data-design-inspector]");
   const inspectorHeader = inspector.locator("[data-design-inspector-header]");
-  // Only the sections in use show: an empty one is added from Add property.
-  // Adding Transform opens its editor, which closes again unless `keepOpen`.
+  // Transform draws nothing while unused and is added from Add property.
+  // Adding it opens its editor, which closes again unless `keepOpen`.
   // Returns whether the section had to be added.
   const expandStyleSection = async (title, { keepOpen = false } = {}) => {
     const heading = inspector.getByRole("heading", { name: title, exact: true });
@@ -1260,7 +1333,14 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
       frameStyleGeometry?.x === "0" &&
       frameStyleGeometry.y === "0" &&
       frameStyleGeometry.width === "1440" &&
-      frameStyleGeometry.height === "Hug" &&
+      // H shows the measured height; its sizing word keeps Hug.
+      frameStyleGeometry.height === "900" &&
+      (await inspector
+        .getByRole("button", { name: "Height sizing: Hug", exact: true })
+        .count()) === 1 &&
+      (await inspector
+        .locator("[data-design-position-section] h3")
+        .textContent()) === "Position" &&
       (await inspector
         .locator("[data-design-layout-section] h3")
         .textContent()) === "Layout" &&
@@ -2712,7 +2792,8 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
 
     // The Design-tab sheets (Layer tree, Inspector, Property field): owned
     // rows on bg2 with quiet fg3 type icons, a 36px selection header, 12px
-    // glyphs on 24px section actions, and a 20px in-field trigger.
+    // glyphs on 24px section actions, and a 20px-high in-field sizing word
+    // at least as wide as it is tall.
     const sheetLook = await page.evaluate(() => {
       const layers = document.querySelector("[data-design-sidebar-panel]");
       const resolve = (property, value) => {
@@ -2738,7 +2819,10 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
         glyphs: [...inspector.querySelectorAll(".zd-section-header .zd-icon-button svg")].map(
           (svg) => svg.getBoundingClientRect().width,
         ),
-        trigger: inspector.querySelector(".zd-size-trigger")?.getBoundingClientRect().width ?? null,
+        trigger: (() => {
+          const box = inspector.querySelector(".zd-size-trigger")?.getBoundingClientRect();
+          return box ? { width: box.width, height: box.height } : null;
+        })(),
       };
     });
     check(
@@ -2748,7 +2832,8 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
         sheetLook.header === 36 &&
         sheetLook.glyphs.length > 0 &&
         sheetLook.glyphs.every((width) => width === 12) &&
-        sheetLook.trigger === 20,
+        sheetLook.trigger?.height === 20 &&
+        sheetLook.trigger.width >= 20,
       JSON.stringify(sheetLook),
     );
     // A row's visibility action is the 20px inline IconButton.
@@ -6056,6 +6141,7 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
     `${origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html?denseLayers=1`,
     { waitUntil: "networkidle" },
   );
+  await openLayersDrawer(page);
   const denseLayersPanel = page.locator("[data-design-sidebar-panel]");
   await denseLayersPanel.waitFor({ state: "visible", timeout: 30_000 });
   const denseTree = denseLayersPanel.getByRole("tree");
@@ -6127,6 +6213,7 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
 export async function runDesignCatalogThemesSmoke({ page, check }) {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto(`${new URL(page.url()).origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html`, { waitUntil: "networkidle" });
+  await openLayersDrawer(page);
   await page.evaluate(async () => {
     const { updateDesignThemeCached } = await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-cache.ts");
     await updateDesignThemeCached("ws_design_harness", { id: "catalog-only", label: "Catalog only" });

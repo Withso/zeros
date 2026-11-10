@@ -10,7 +10,7 @@ import { execFileSync } from "node:child_process";
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { chromium } from "@playwright/test";
-import { designCanvasPoint, designFrameElementBox } from "./ui-smoke-design-helpers.mjs";
+import { designCanvasPoint, designFrameElementBox, openLayersDrawer } from "./ui-smoke-design-helpers.mjs";
 import { installDesignAttributionProbe, mapDesignAttributionSources, summarizeDesignAttribution } from "./ui-smoke-design-attribution.mjs";
 
 const { values } = parseArgs({ options: {
@@ -438,6 +438,7 @@ try {
   if (values.attribute) url.searchParams.set("attributeContinuity", "1");
   if (values.retained) url.searchParams.set("retainedContinuity", "1");
   await page.goto(url.href, { waitUntil: "networkidle" });
+  await openLayersDrawer(page);
   await page.waitForFunction(() => window.__zerosHarnessDesignSurface?.measurement);
   await installSampler();
   await settleFrame("home.html");

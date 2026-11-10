@@ -5,6 +5,7 @@ import {
   designLayerChildId,
   designLayerParentId,
   designLayerPathIds,
+  designLayerPathNodes,
   designLayerPeerIds,
   designLayerBlockEdges,
   designLayerRevealPaths,
@@ -205,6 +206,9 @@ describe("design layer tree", () => {
     ]);
     expect(designLayerRevealPaths(tree, ["missing"]).ancestorIds).toEqual([]);
     expect(designLayerPathIds(tree, "heading")).toEqual(["hero", "heading"]);
+    // The closed Layers drawer names this path to the selection.
+    expect(designLayerPathNodes(tree, "heading").map((node) => node.oid)).toEqual(["hero", "heading"]);
+    expect(designLayerPathNodes(tree, "missing")).toEqual([]);
   });
 
   it("navigates parent, child, and wrapping siblings by stable identity", () => {

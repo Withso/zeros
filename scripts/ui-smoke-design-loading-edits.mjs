@@ -1,3 +1,4 @@
+import { openLayersDrawer } from "./ui-smoke-design-helpers.mjs";
 // A ready canvas can precede its Foundation projection. Hold that exact read
 // while the real inspector/keyboard handlers prepare edits and change selection.
 export async function runDesignLoadingEditsSmoke({ page, waitFor, check }) {
@@ -14,6 +15,7 @@ export async function runDesignLoadingEditsSmoke({ page, waitFor, check }) {
       `${origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html?coldFoundation`,
       { waitUntil: "networkidle" },
     );
+    await openLayersDrawer(page);
     await heading.waitFor();
     await waitFor(
       () =>
@@ -61,8 +63,9 @@ export async function runDesignLoadingEditsSmoke({ page, waitFor, check }) {
     el.style.display = "block";
   });
   await layers.locator('[data-design-layer-id="home-hero"]').click();
-  await layout
-    .getByRole("button", { name: "Align right", exact: true })
+  await layout.getByRole("button", { name: "More layout actions" }).click();
+  await page
+    .getByRole("menuitem", { name: "Align children right", exact: true })
     .click();
   await waitFor(
     async () =>
@@ -74,7 +77,11 @@ export async function runDesignLoadingEditsSmoke({ page, waitFor, check }) {
     "alignment previews while document metadata is loading without an error",
     !(await hasError()),
   );
-  await layout.getByRole("button", { name: "Pin right", exact: true }).click();
+  // A second child edit queued behind the first while metadata still loads.
+  await layout.getByRole("button", { name: "More layout actions" }).click();
+  await page
+    .getByRole("menuitem", { name: "Align children bottom", exact: true })
+    .click();
   await page
     .locator('[data-design-frame="pricing.html"] [data-design-frame-label]')
     .click();
@@ -96,9 +103,11 @@ export async function runDesignLoadingEditsSmoke({ page, waitFor, check }) {
   await waitFor(
     () =>
       heading.evaluate(
-        (el) => el.style.getPropertyValue("--zeros-layout-x") === "end",
+        (el) =>
+          el.style.getPropertyValue("--zeros-layout-y") === "start" &&
+          el.style.top !== "0px",
       ),
-    "cold-foundation-pin-committed",
+    "cold-foundation-second-alignment-committed",
   );
   const layoutTransactions = await transactions();
   await settled(layoutTransactions[1]);

@@ -86,7 +86,7 @@ export async function runDesignRetinaTileHandoffSmoke({ page: parent, check }) {
       const workspaceId = "ws_design_harness";
       const frame = snapshots.peekSnapshot(workspaceId).data.frames.find((frame) => frame.file === "home.html");
       frames([{ ...frame, x: 0, y: 0 }]);
-      ui.getState().setPanels(workspaceId, { layersVisible: false, inspectorVisible: false });
+      ui.getState().setPanels(workspaceId, { layersDrawerOpen: false, inspectorVisible: false });
       ui.getState().setSelectedTargets(workspaceId, [], { activeFrame: frame.file });
       ui.getState().setViewport(workspaceId, { zoom: 8, panX: -800, panY: -400 });
     });
@@ -159,7 +159,7 @@ export async function runDesignOverviewContinuitySmoke({ page: parent, check }) 
         file: `overview-${index}.html`, title: `Frame ${index + 1}`,
         x: index % 16 * 1600, y: Math.floor(index / 16) * 1100, z: index,
       })));
-      ui.getState().setPanels(workspaceId, { layersVisible: false, inspectorVisible: false });
+      ui.getState().setPanels(workspaceId, { layersDrawerOpen: false, inspectorVisible: false });
       ui.getState().setSelectedTargets(workspaceId, [], { activeFrame: null });
       ui.getState().setViewport(workspaceId, { zoom: 0.04, panX: 32, panY: 96 });
       window.__readOverviewCoverage = () => {
@@ -228,7 +228,7 @@ export async function runDesignOverviewChromeSmoke({ page: parent, check }) {
         file: `overview-${index}.html`, title: `Overview ${index}`,
         x: index % 6 * 1600, y: Math.floor(index / 6) * 1100, z: index,
       })));
-      ui.getState().setPanels(workspaceId, { layersVisible: false, inspectorVisible: false });
+      ui.getState().setPanels(workspaceId, { layersDrawerOpen: false, inspectorVisible: false });
       ui.getState().setSelectedTargets(workspaceId, [], { activeFrame: null });
       ui.getState().setViewport(workspaceId, { zoom: 0.05, panX: 80, panY: 100 });
     });
@@ -273,7 +273,7 @@ export async function runDesignTextPicturesSmoke({ page: parent, check }) {
         kind: "text", file: `text-${index}.html`, title: `Text ${index}`,
         x: index % 8 * 1600, y: Math.floor(index / 8) * 1100, z: index,
       })));
-      ui.getState().setPanels(workspaceId, { layersVisible: false, inspectorVisible: false });
+      ui.getState().setPanels(workspaceId, { layersDrawerOpen: false, inspectorVisible: false });
       ui.getState().setSelectedTargets(workspaceId, [], { activeFrame: null });
       ui.getState().setViewport(workspaceId, { zoom: 0.06, panX: 80, panY: 100 });
     });

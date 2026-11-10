@@ -1,4 +1,5 @@
 import { expect } from "@playwright/test";
+import { openLayersDrawer } from "./ui-smoke-design-helpers.mjs";
 
 const panelWidthKey = "zeros.design.style.width";
 const layersHeightKey = "zeros.design.layers.height";
@@ -23,6 +24,7 @@ async function withPanel(page, workbench, run) {
     if (workbench)
       await page.getByRole("tab", { name: "Design", exact: true }).click();
     await page.locator("[data-design-floating-panel]:visible").waitFor();
+    await openLayersDrawer(page);
     await run();
   } finally {
     await page.mouse.up();

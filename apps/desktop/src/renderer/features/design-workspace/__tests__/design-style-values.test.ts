@@ -349,7 +349,8 @@ describe("scrubbing lands on the field's step", () => {
   it("snaps an effect's number the same way, half pixels included", () => {
     // An effect field moves half a step per pointer pixel before snapping.
     expect(snapDesignNumberToStep(4.5, 1)).toBe(5);
-    expect(snapDesignNumberToStep(-0.4, 1)).toBe(-0);
+    expect(snapDesignNumberToStep(-0.4, 1)).toBe(0);
+    expect(Object.is(snapDesignNumberToStep(-0.4, 1), -0)).toBe(false);
     expect(snapDesignNumberToStep(1.02, 0.05)).toBe(1);
     expect(snapDesignNumberToStep(1.03, 0.05)).toBe(1.05);
   });

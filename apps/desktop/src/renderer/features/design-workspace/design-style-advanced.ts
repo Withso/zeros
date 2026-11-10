@@ -8,8 +8,8 @@ import { readDesignComputedStyle } from "./design-style-values";
 
 /** Properties a dedicated Style control already shows, including the
  * shorthands those controls read through their longhands. Everything else an
- * author (person or agent) declares on a layer is listed under Advanced, so
- * no authored CSS is invisible in the Style tab. */
+ * author (person or agent) declares on a layer is listed under More styles,
+ * so no authored CSS is invisible in the Style tab. */
 export const DESIGN_STYLE_FIELD_PROPERTIES: ReadonlySet<string> = new Set([
   // Layout, auto layout, constraints and sizing.
   "display", "position", "inset", "top", "right", "bottom", "left",
@@ -34,7 +34,8 @@ export const DESIGN_STYLE_FIELD_PROPERTIES: ReadonlySet<string> = new Set([
   "outline", "outline-width", "outline-style", "outline-color",
   "outline-offset",
   // Effects and transform.
-  "box-shadow", "text-shadow", "filter", "backdrop-filter", "clip-path",
+  "z-index",
+  "box-shadow", "text-shadow", "filter", "backdrop-filter",
   "transform", "transform-origin", "rotate", "scale", "translate",
   "perspective-origin",
   // Typography.
@@ -42,12 +43,27 @@ export const DESIGN_STYLE_FIELD_PROPERTIES: ReadonlySet<string> = new Set([
   "font-stretch", "line-height", "letter-spacing", "word-spacing",
   "text-align", "text-decoration", "text-decoration-line", "text-transform",
   "text-indent", "text-overflow", "text-wrap", "white-space", "word-break",
-  "overflow-wrap", "vertical-align", "writing-mode",
+  "overflow-wrap", "vertical-align", "writing-mode", "align-content",
+  "-webkit-font-smoothing",
   // Transition and motion.
   "transition", "transition-property", "transition-duration",
   "transition-timing-function", "transition-delay", "animation",
   "animation-name", "animation-duration",
 ]);
+
+const MARGIN_PROPERTIES: ReadonlySet<string> = new Set([
+  "margin", "margin-top", "margin-right", "margin-bottom", "margin-left",
+]);
+
+/** Layout's Margin group shows only for a layer whose margin is not zero;
+ * otherwise an authored margin (a `margin: 0` reset) is listed here. */
+export function designLayerHasMargin(
+  details: Pick<DesignRuntimeNodeDetails, "styles">,
+): boolean {
+  return ["margin-top", "margin-right", "margin-bottom", "margin-left"].some(
+    (property) => (Number.parseFloat(readDesignComputedStyle(details.styles, property)) || 0) !== 0,
+  );
+}
 
 export interface DesignAdvancedStyleRow {
   property: string;
@@ -76,12 +92,14 @@ export function designAdvancedStyleRows(
   const rows: DesignAdvancedStyleRow[] = [];
   const seen = new Set<string>();
   const base = new Set(details.baseStyleProperties ?? []);
+  const marginShown = designLayerHasMargin(details);
   for (const raw of details.authoredStyleProperties ?? []) {
     const property = canonicalDesignCssProperty(raw);
     if (
       seen.has(property) ||
       base.has(property) ||
       DESIGN_STYLE_FIELD_PROPERTIES.has(property) ||
+      (marginShown && MARGIN_PROPERTIES.has(property)) ||
       internalProperty(property)
     )
       continue;

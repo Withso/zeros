@@ -198,20 +198,27 @@ function restoreFailedPreview(
 export function DesignColorSwatch({
   value,
   className,
+  mixed = false,
 }: {
   value: string;
   className?: string;
+  /** Several differing colors: a neutral swatch that shows none of them. */
+  mixed?: boolean;
 }) {
   return (
     <span
       className={cn(
         "relative block shrink-0 overflow-hidden rounded-sm shadow-[inset_0_0_0_1px_var(--border3)]",
+        mixed && "bg-bg2-hover",
         className,
       )}
-      style={checkerboardBackground()}
+      style={mixed ? undefined : checkerboardBackground()}
       aria-hidden="true"
+      data-design-color-mixed={mixed ? "" : undefined}
     >
-      <span className="absolute inset-0" style={{ background: value }} />
+      {mixed ? null : (
+        <span className="absolute inset-0" style={{ background: value }} />
+      )}
       <span className="absolute inset-0 rounded-[inherit] shadow-[inset_0_0_0_1px_var(--border3)]" />
     </span>
   );
@@ -1132,6 +1139,9 @@ interface DesignColorFieldProps extends DesignColorCallbacks {
   tokenDescription?: string;
   /** False keeps only Custom, for a color inside a composed value. */
   tokenPicker?: boolean;
+  /** The selected layers' colors differ: the row reads "Mixed" behind a
+   * neutral swatch until a color is chosen for all of them. */
+  mixed?: boolean;
 }
 
 function colorInputKey(value: string): string {
@@ -1147,6 +1157,7 @@ export function DesignColorValueInputs({
   disabled = false,
   tokenName,
   tokenDescription,
+  mixed = false,
   onPreview,
   onCancelPreview,
   onCommit,
@@ -1157,6 +1168,7 @@ export function DesignColorValueInputs({
   | "disabled"
   | "tokenName"
   | "tokenDescription"
+  | "mixed"
   | "onPreview"
   | "onCancelPreview"
   | "onCommit"
@@ -1184,7 +1196,10 @@ export function DesignColorValueInputs({
     if (pendingRef.current.length === 0) setAcceptedValue(value);
   }, [value]);
   const parsed = useMemo(() => readDesignColor(acceptedValue), [acceptedValue]);
-  const displayHex = parsed ? hexText(parsed) : acceptedValue;
+  // A color this row chose for every layer shows at once, before the
+  // readback that ends Mixed arrives.
+  const showMixed = mixed && acceptedValue === value;
+  const displayHex = showMixed ? "" : parsed ? hexText(parsed) : acceptedValue;
   const displayAlpha = parsed ? String(Math.round(parsed.a * 100)) : "100";
   const [hexDraft, setHexDraft] = useState(displayHex);
   const [alphaDraft, setAlphaDraft] = useState(displayAlpha);
@@ -1293,6 +1308,7 @@ export function DesignColorValueInputs({
   // a picker change that has not been confirmed yet.
   const tokenShown =
     Boolean(tokenName) &&
+    !showMixed &&
     !hexFocused &&
     hexDraft === displayHex &&
     acceptedValue === value;
@@ -1306,10 +1322,11 @@ export function DesignColorValueInputs({
         spellCheck={false}
         autoComplete="off"
         aria-label={label}
+        placeholder={showMixed ? "Mixed" : undefined}
         aria-description={tokenShown ? tokenDescription : undefined}
         title={tokenShown ? tokenDescription : undefined}
         data-design-style-token={tokenShown ? tokenName : undefined}
-        className={cn("pl-1.5", parsed && !tokenShown && "uppercase")}
+        className={cn("pl-1.5", parsed && !tokenShown && !showMixed && "uppercase")}
         onChange={(event) => {
           hexDirtyRef.current = true;
           setHexDraft(event.currentTarget.value);
@@ -1338,7 +1355,7 @@ export function DesignColorValueInputs({
           disabled={disabled}
           onDetach={() => commitColor(value)}
         />
-      ) : parsed ? (
+      ) : parsed && !showMixed ? (
         <>
           <span className="bg-border2 h-4 w-px shrink-0" aria-hidden="true" />
           <input
@@ -1377,6 +1394,7 @@ export function DesignColorField({
   tokenName,
   tokenDescription,
   tokenPicker,
+  mixed = false,
   onPreview,
   onCancelPreview,
   onCommit,
@@ -1395,7 +1413,9 @@ export function DesignColorField({
           disabled={disabled}
           side={side}
           className="size-6 rounded-sm"
-          trigger={<DesignColorSwatch value={value} className="size-4.5" />}
+          trigger={
+            <DesignColorSwatch value={value} mixed={mixed} className="size-4.5" />
+          }
           tokenName={tokenName}
           tokenPicker={tokenPicker}
           onPreview={onPreview}
@@ -1409,6 +1429,7 @@ export function DesignColorField({
         disabled={disabled}
         tokenName={tokenName}
         tokenDescription={tokenDescription}
+        mixed={mixed}
         onPreview={onPreview}
         onCancelPreview={onCancelPreview}
         onCommit={onCommit}

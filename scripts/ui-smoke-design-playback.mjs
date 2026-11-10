@@ -1,5 +1,5 @@
 import { expect } from "@playwright/test";
-import { designFrameElementBox } from "./ui-smoke-design-helpers.mjs";
+import { designFrameElementBox, openLayersDrawer } from "./ui-smoke-design-helpers.mjs";
 import { runDesignSavedEditingRaceSmoke, runDesignSavedEditingRevisionSmoke } from "./ui-smoke-design-saved-editing.mjs";
 
 /* global window, getComputedStyle */
@@ -15,6 +15,7 @@ export async function runDesignFramePlaybackSmoke({ page, check }) {
     `${new URL(page.url()).origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html?frameMotion&framePlayback`,
     { waitUntil: "networkidle" },
   );
+  await openLayersDrawer(page);
   const canvas = page.locator("[data-design-canvas-viewport]");
   const frame = page.locator('[data-design-frame="home.html"]');
   const play = frame.getByRole("button", {
@@ -350,6 +351,7 @@ export async function runDesignFramePlaybackSmoke({ page, check }) {
     `${new URL(page.url()).origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html?pages&frameMotion&framePlayback`,
     { waitUntil: "networkidle" },
   );
+  await openLayersDrawer(page);
   const pageFrame = page.locator('[data-design-frame="page-1/home.html"]');
   const pagePlay = pageFrame.getByRole("button", {
     name: "Play Launch home",

@@ -1,4 +1,4 @@
-import { designCanvasPoint } from "./ui-smoke-design-helpers.mjs";
+import { designCanvasPoint, openLayersDrawer } from "./ui-smoke-design-helpers.mjs";
 
 // Floating-chrome edge cases found in review: wheel ownership inside the
 // viewport, a short canvas with Motion open, live width sharing while a seam
@@ -18,7 +18,7 @@ export async function runDesignFloatingChromeEdgesSmoke({
   const open = async (width, height) => {
     await page.setViewportSize({ width, height });
     await page.goto(url, { waitUntil: "networkidle" });
-    await page.locator("[data-design-sidebar-panel]").waitFor();
+    await openLayersDrawer(page);
     await page
       .locator(
         '[data-design-frame="home.html"] iframe[data-design-document-ready]',
@@ -167,9 +167,10 @@ export async function runDesignFloatingChromeEdgesSmoke({
         max: await split.getAttribute("aria-valuemax"),
       }),
     );
-    await split.press("ArrowUp");
+    // The drawer's top edge: ArrowDown shrinks it.
+    await split.press("ArrowDown");
     check(
-      "the first ArrowUp on a capped split moves it by one step",
+      "the first ArrowDown on a capped split moves it by one step",
       Math.round((await slot.boundingBox()).height) === rendered - 8 &&
         Number(await split.getAttribute("aria-valuenow")) === rendered - 8,
     );

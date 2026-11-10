@@ -12,9 +12,10 @@ import { beginDesignPointerGesture } from "./design-pointer-gesture";
 const DRAG_THRESHOLD_PX = 3;
 const KEYBOARD_STEP_PX = 8;
 
-/** The panel edge that moves. `left`/`right` resize width; `bottom` resizes
- * height (the Layers split inside the floating Design panel). */
-export type DesignPanelResizeEdge = "left" | "right" | "bottom";
+/** The panel edge that moves. `left`/`right` resize width; `top`/`bottom`
+ * resize height (the Layers drawer at the foot of the floating Design panel
+ * moves its top edge). */
+export type DesignPanelResizeEdge = "left" | "right" | "top" | "bottom";
 
 interface DesignPanelResizeHandleProps {
   active: boolean;
@@ -62,7 +63,10 @@ export function DesignPanelResizeHandle({
 }: DesignPanelResizeHandleProps) {
   const handleRef = useRef<HTMLDivElement | null>(null);
   const gestureCancelRef = useRef<(() => void) | null>(null);
-  const vertical = edge === "bottom";
+  const vertical = edge === "bottom" || edge === "top";
+  /** Moving toward the panel's own side shrinks it: left and top edges grow
+   * as the pointer moves away from the panel, up or to the left. */
+  const towardStart = edge === "left" || edge === "top";
 
   useLayoutEffect(() => {
     if (!active) gestureCancelRef.current?.();
@@ -176,7 +180,7 @@ export function DesignPanelResizeHandle({
           // Keep the grab offset: returning to the starting pointer restores
           // the exact size, even when the seam extends beyond the panel edge.
           lastValue = clampValue(
-            measured.current + travel * (edge === "left" ? -1 : 1),
+            measured.current + travel * (towardStart ? -1 : 1),
             containerSize,
           );
           panel.style.setProperty(sizeProperty, `${lastValue}px`);
@@ -191,7 +195,7 @@ export function DesignPanelResizeHandle({
     [
       active,
       clampValue,
-      edge,
+      towardStart,
       measure,
       onCommit,
       onLivePaint,
@@ -212,8 +216,8 @@ export function DesignPanelResizeHandle({
       if (event.key === "Home") next = minimum;
       if (event.key === "End") next = maximum;
       if (vertical) {
-        if (event.key === "ArrowUp") next = current - step;
-        if (event.key === "ArrowDown") next = current + step;
+        if (event.key === "ArrowUp") next = current + (towardStart ? step : -step);
+        if (event.key === "ArrowDown") next = current + (towardStart ? -step : step);
       } else {
         if (event.key === "ArrowLeft") {
           next = current + (edge === "left" ? step : -step);
@@ -230,6 +234,7 @@ export function DesignPanelResizeHandle({
       active,
       clampValue,
       edge,
+      towardStart,
       maximum,
       measure,
       minimum,
@@ -253,7 +258,10 @@ export function DesignPanelResizeHandle({
       tabIndex={0}
       className={cn(
         vertical
-          ? "absolute inset-x-0 -bottom-1 z-2 h-2 cursor-ns-resize"
+          ? cn(
+              "absolute inset-x-0 z-2 h-2 cursor-ns-resize",
+              edge === "top" ? "-top-1" : "-bottom-1",
+            )
           : "absolute inset-y-0 z-2 w-1.5 cursor-ew-resize",
         "focus-visible:outline-highlighted-bright focus-visible:outline-1 focus-visible:-outline-offset-1",
         edge === "right" && "right-0",
