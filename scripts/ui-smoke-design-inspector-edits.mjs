@@ -164,8 +164,136 @@ export async function runDesignColorInputRacesSmoke({ page, check }) {
   );
 }
 
+/** A focused Style field showing its committed value has no text history of
+ * its own: Command-Z there reaches the design, and the field shows what the
+ * undo left behind. */
+export async function runDesignFieldHistorySmoke({ page, check }) {
+  // This harness keeps a source history, so an undo really restores the style.
+  await page.goto(
+    `${new URL(page.url()).origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html?layoutGestures`,
+    { waitUntil: "networkidle" },
+  );
+  await page
+    .locator('[data-design-sidebar-panel] [data-design-layer-id="home-heading"]')
+    .click();
+  const width = page.getByRole("textbox", { name: "W", exact: true });
+  await expect(width).toHaveValue("100");
+  for (const expected of ["101px", "102px"]) {
+    await width.focus();
+    await width.press("ArrowUp");
+    await width.press("Enter");
+    await expect.poll(() => savedStyle(page, "width")).toBe(expected);
+  }
+  await width.focus();
+  await page.keyboard.press("ControlOrMeta+z");
+  await expect.poll(() => savedStyle(page, "width")).toBe("101px");
+  await expect(width).toHaveValue("101");
+  // The step takes focus off the field; the next one still belongs to Design.
+  await page.keyboard.press("ControlOrMeta+z");
+  await expect.poll(() => savedStyle(page, "width")).toBe("100px");
+  await expect(width).toHaveValue("100");
+  await width.focus();
+  await page.keyboard.press("ControlOrMeta+Shift+z");
+  await expect.poll(() => savedStyle(page, "width")).toBe("101px");
+  await expect(width).toHaveValue("101");
+
+  await addDesignSection(page, "Transform");
+  const y = page.getByRole("textbox", { name: "Translate Y", exact: true });
+  for (const expected of ["translate(0px, 1px)", "translate(0px, 2px)"]) {
+    await y.focus();
+    await y.press("ArrowUp");
+    await y.press("Enter");
+    await expect.poll(() => savedStyle(page, "transform")).toBe(expected);
+  }
+  await y.focus();
+  await page.keyboard.press("ControlOrMeta+z");
+  await expect
+    .poll(() => savedStyle(page, "transform"))
+    .toBe("translate(0px, 1px)");
+  // The popover is still open; it shows what the undo left.
+  await expect(y).toHaveValue("1");
+  // Shift+A adds auto layout from the canvas; in a field it is a capital A.
+  await y.focus();
+  await y.press("Shift+A");
+  await expect(y).toHaveValue("1A");
+  await y.press("Escape");
+  await expect(y).toHaveValue("1");
+  await expect
+    .poll(() => savedStyle(page, "transform"))
+    .toBe("translate(0px, 1px)");
+  // The next edit builds on what the undo left; a stale popover draft would
+  // write the undone 2px back.
+  const x = page.getByRole("textbox", { name: "Translate X", exact: true });
+  await x.focus();
+  await x.press("ArrowUp");
+  await x.press("Enter");
+  await expect
+    .poll(() => savedStyle(page, "transform"))
+    .toBe("translate(1px, 1px)");
+  check(
+    "undo and redo work from a focused Style field, which shows the result; typing there stays typing",
+    true,
+  );
+}
+
+/** An open fill popover holds its gradient draft back from outside values;
+ * the person's own undo is not an outside value. */
+export async function runDesignFillHistorySmoke({ page, check }) {
+  await page.goto(
+    `${new URL(page.url()).origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html?layoutGestures`,
+    { waitUntil: "networkidle" },
+  );
+  await page
+    .locator('[data-design-sidebar-panel] [data-design-layer-id="home-heading"]')
+    .click();
+  await page.getByRole("button", { name: "Edit fill", exact: true }).click();
+  const popover = page.locator("[data-design-popover]");
+  await popover.getByRole("button", { name: "Gradient", exact: true }).click();
+  await expect
+    .poll(() => savedStyle(page, "background-image"))
+    .toMatch(/^linear-gradient\(/);
+  const angle = popover.getByRole("textbox", {
+    name: "Gradient angle value",
+    exact: true,
+  });
+  for (const degrees of ["45", "90"]) {
+    await angle.fill(degrees);
+    await angle.press("Enter");
+    await expect
+      .poll(() => savedStyle(page, "background-image"))
+      .toMatch(new RegExp(`^linear-gradient\\(${degrees}deg,`));
+  }
+  await popover.getByRole("button", { name: "Start stop", exact: true }).focus();
+  await page.keyboard.press("ControlOrMeta+z");
+  await expect
+    .poll(() => savedStyle(page, "background-image"))
+    .toMatch(/^linear-gradient\(45deg,/);
+  await expect(popover).toBeVisible();
+  await expect(angle).toHaveValue("45");
+  // The next edit builds on what the undo left, not on the undone 90deg.
+  await popover.getByRole("button", { name: "Start stop", exact: true }).focus();
+  await popover
+    .getByRole("combobox", { name: "Gradient type", exact: true })
+    .click();
+  await page.getByRole("option", { name: "Radial", exact: true }).click();
+  await expect
+    .poll(() => savedStyle(page, "background-image"))
+    .toMatch(/^radial-gradient\(/);
+  await popover.getByRole("combobox", { name: "Gradient type", exact: true }).click();
+  await page.getByRole("option", { name: "Linear", exact: true }).click();
+  await expect
+    .poll(() => savedStyle(page, "background-image"))
+    .toMatch(/^linear-gradient\(45deg,/);
+  check(
+    "undo with the fill popover open shows the undone gradient there, and the next edit builds on it",
+    true,
+  );
+}
+
 export async function runDesignInspectorEditsSmoke(context) {
   await runDesignTransformCommitSmoke(context);
+  await runDesignFieldHistorySmoke(context);
+  await runDesignFillHistorySmoke(context);
   await runDesignScrubLeadingPreviewSmoke(context);
   await runDesignColorInputRacesSmoke(context);
   await runDesignPaintRemovalSmoke(context);

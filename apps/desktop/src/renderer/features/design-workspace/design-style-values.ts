@@ -495,6 +495,49 @@ export function scrubDesignNumericValue(
   return `${formatDesignNumber(parsed.number + delta)}${parsed.unit}`;
 }
 
+export interface DesignScrubStep {
+  /** One pointer pixel or one arrow press, in the value's own unit. */
+  step: number;
+  /** The finer step Alt selects, or null where decimals are not offered. */
+  fine: number | null;
+}
+
+const DESIGN_DECIMAL_SCRUB_PROPERTIES = new Set(["line-height", "letter-spacing"]);
+
+/** Scrubbing and arrow keys land on whole numbers. Only line height and letter
+ * spacing keep decimals: a unitless or em value there lives below one. */
+export function designScrubStep(
+  property: string | undefined,
+  unit: string,
+): DesignScrubStep {
+  if (!property || !DESIGN_DECIMAL_SCRUB_PROPERTIES.has(property)) {
+    return { step: 1, fine: null };
+  }
+  if (unit !== "" && unit !== "em" && unit !== "rem") return { step: 1, fine: 0.1 };
+  return property === "letter-spacing"
+    ? { step: 0.01, fine: 0.001 }
+    : { step: 0.1, fine: 0.01 };
+}
+
+/** The multiple of `step` nearest to `value`. */
+export function snapDesignNumberToStep(value: number, step: number): number {
+  const snapped = Math.round(value / step) * step;
+  // Multiplying back by 0.1 or 0.01 leaves binary noise such as 0.6000000001.
+  return Math.round(snapped * 10_000) / 10_000;
+}
+
+/** A scrubbed or arrow-stepped value. A fractional pointer distance (a zoomed
+ * window) and a fractional start (a computed 19.25px) both snap to the step. */
+export function scrubDesignSteppedValue(
+  value: string,
+  distance: number,
+  step: number,
+): string | null {
+  const parsed = parseDesignNumericValue(value);
+  if (!parsed || !Number.isFinite(distance) || !(step > 0)) return null;
+  return `${formatDesignNumber(snapDesignNumberToStep(parsed.number + distance, step))}${parsed.unit}`;
+}
+
 const DESIGN_PX_DEFAULT_PROPERTIES = new Set([
   "top",
   "right",

@@ -33,6 +33,7 @@ import {
   type DesignFillType,
   type DesignGradientValue,
 } from "./design-fill-values";
+import { useDesignHistoryHandBack } from "./use-design-history-step";
 
 interface DesignFillEditorProps {
   color: string;
@@ -217,6 +218,7 @@ function DesignFillPopover({
   const panelRef = useRef<DesignColorPanelHandle | null>(null);
   const escapedRef = useRef(false);
   const skipBlurCommitRef = useRef(false);
+  const { step: historyStep, revision: historyRevision } = useDesignHistoryHandBack();
 
   const reset = () => {
     const nextType = classifyDesignFill(image);
@@ -231,16 +233,19 @@ function DesignFillPopover({
   };
 
   useEffect(() => {
-    if (!open) reset();
+    if (!open || historyStep.handedBack()) reset();
     // Reset only from confirmed values while closed; an open editor owns its
-    // draft until it closes.
+    // draft until it closes, or until the person's own undo or redo replaces it.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [color, image, open, position, repeat, size]);
+  }, [color, historyRevision, image, open, position, repeat, size]);
+  /** Every draft change below is the person's: it ends an undo's hand-back. */
+  const edited = historyStep.drop;
 
   const imageCss = useMemo(() => formatDesignImageUrl(imageUrl), [imageUrl]);
 
   const selectType = (next: DesignFillType) => {
     if (next === type) return;
+    edited();
     if (next === "gradient" && type !== "gradient") {
       const seeded: DesignGradientValue = {
         ...DEFAULT_DESIGN_GRADIENT,
@@ -276,6 +281,7 @@ function DesignFillPopover({
     commit: boolean,
   ) => {
     const next = { ...gradient, ...patch };
+    edited();
     setGradient(next);
     const css = formatDesignGradient(next);
     onPreview?.({ "background-image": css });
@@ -308,6 +314,7 @@ function DesignFillPopover({
   const setImageMode = (value: string) => {
     const mode = IMAGE_MODES.find((entry) => entry.value === value);
     if (!mode) return;
+    edited();
     setImageSize(mode.size);
     setImageRepeat(mode.repeat);
     const styles = {
@@ -327,6 +334,7 @@ function DesignFillPopover({
         if (next) {
           skipBlurCommitRef.current = false;
           escapedRef.current = false;
+          historyStep.drop();
           reset();
         } else if (!escapedRef.current) {
           panelRef.current?.flush();
@@ -378,14 +386,18 @@ function DesignFillPopover({
               disabled={disabled}
               tokenName={tokenName}
               panelRef={panelRef}
-              onPreview={(next) => onPreview?.({ "background-color": next })}
+              onPreview={(next) => {
+                edited();
+                onPreview?.({ "background-color": next });
+              }}
               onCancelPreview={onCancelPreview}
-              onCommit={(next) =>
+              onCommit={(next) => {
+                edited();
                 onCommit({
                   "background-color": next,
                   "background-image": "none",
-                })
-              }
+                });
+              }}
             />
           ) : null}
 
@@ -416,6 +428,7 @@ function DesignFillPopover({
                       const angle = Number.parseFloat(
                         event.currentTarget.value,
                       );
+                      edited();
                       setGradient({
                         ...gradient,
                         angle: Number.isFinite(angle) ? angle : 0,
@@ -499,7 +512,10 @@ function DesignFillPopover({
                   placeholder="Image URL"
                   aria-label="Image URL"
                   spellCheck={false}
-                  onChange={(event) => setImageUrl(event.currentTarget.value)}
+                  onChange={(event) => {
+                    edited();
+                    setImageUrl(event.currentTarget.value);
+                  }}
                   onBlur={() =>
                     commitOnBlur({
                       "background-image": imageCss,
@@ -533,6 +549,7 @@ function DesignFillPopover({
                       aria-pressed={imagePosition === nextPosition}
                       disabled={disabled || !imageUrl}
                       onClick={() => {
+                        edited();
                         setImagePosition(nextPosition);
                         const styles = { "background-position": nextPosition };
                         onPreview?.(styles);
@@ -557,9 +574,10 @@ function DesignFillPopover({
                       className="pl-2"
                       aria-label="Background position"
                       spellCheck={false}
-                      onChange={(event) =>
-                        setImagePosition(event.currentTarget.value)
-                      }
+                      onChange={(event) => {
+                        edited();
+                        setImagePosition(event.currentTarget.value);
+                      }}
                       onBlur={() =>
                         commitOnBlur({ "background-position": imagePosition })
                       }
@@ -572,9 +590,10 @@ function DesignFillPopover({
                       className="pl-2"
                       aria-label="Background repeat"
                       spellCheck={false}
-                      onChange={(event) =>
-                        setImageRepeat(event.currentTarget.value)
-                      }
+                      onChange={(event) => {
+                        edited();
+                        setImageRepeat(event.currentTarget.value);
+                      }}
                       onBlur={() =>
                         commitOnBlur({ "background-repeat": imageRepeat })
                       }

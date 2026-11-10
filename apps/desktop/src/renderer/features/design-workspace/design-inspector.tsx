@@ -66,9 +66,11 @@ import {
 import {
   dispatchFocusedDesignHistory,
   isDesignHistoryFocusOwner,
+  isDesignTextEntryTarget,
   isNativeHistoryTarget,
   registerDesignHistoryCommand,
 } from "./state/design-history-commands";
+import { useDesignHistoryStep } from "./use-design-history-step";
 import {
   designAutoLayoutFlow,
   designAutoLayoutUpdates,
@@ -136,7 +138,9 @@ import {
   readDesignComputedStyle,
   replaceDesignStyleNumericUnit,
   resolveDesignNumericExpression,
+  designScrubStep,
   scrubDesignNumericValue,
+  scrubDesignSteppedValue,
   withDesignPositionContext,
 } from "./design-style-values";
 import { dispatchDesignWorkspaceShortcut } from "./design-workspace-shortcuts";
@@ -307,6 +311,7 @@ function InspectorEditField({
   /** The value shown when this field took focus. */
   const focusValueRef = useRef(String(value));
   const skipCommitRef = useRef(false);
+  const historyStep = useDesignHistoryStep();
   const unitMenuOpenRef = useRef(false);
   const commitIntentRef = useRef(0);
   const scrubCancelRef = useRef<(() => void) | null>(null);
@@ -361,6 +366,13 @@ function InspectorEditField({
     const bounded = Math.min(range.max, Math.max(range.min, number));
     return bounded === number ? next : String(bounded);
   };
+  /** One pointer pixel or arrow press, in the value's own unit. */
+  const scrubStepFor = (start: string, fine: boolean) => {
+    const scrubStep = whole
+      ? { step: 1, fine: null }
+      : designScrubStep(styleProperty, parseDesignStyleNumericParts(start)?.unit ?? "");
+    return fine && scrubStep.fine !== null ? scrubStep.fine : scrubStep.step;
+  };
   const resolveDraft = (next: string, baseline: string) => {
     const resolved = styleProperty
       ? normalizeDesignStyleFieldInput(styleProperty, next, baseline)
@@ -371,11 +383,19 @@ function InspectorEditField({
   // Finish an unfocused incoming value in this commit. A passive state update
   // can land after the next focus/select-all and overwrite that user's draft.
   useLayoutEffect(() => {
-    if (document.activeElement === inputRef.current || scrubRef.current) return;
+    if (scrubRef.current) return;
+    const focused = document.activeElement === inputRef.current;
+    // The one focused case that adopts at once: this field's own undo or redo,
+    // and only while the field holds no draft the person started.
+    if (
+      focused &&
+      (draftRef.current !== baselineRef.current || !historyStep.handedBack())
+    ) return;
     const next = String(value);
     baselineRef.current = next;
+    if (focused) focusValueRef.current = next;
     setPresentedDraft(next);
-  }, [setPresentedDraft, value]);
+  }, [historyStep, setPresentedDraft, value]);
 
   useEffect(
     () => () => {
@@ -577,21 +597,17 @@ function InspectorEditField({
                   Math.abs(pointerEvent.clientX - scrub.originX) < 3
                 ) return;
                 scrub.moved = true;
-                const multiplier =
-                  !whole && pointerEvent.altKey
-                    ? 0.1
-                    : pointerEvent.shiftKey ? 10 : 1;
+                const unitStep = scrubStepFor(scrub.startValue, pointerEvent.altKey);
                 scrub.distance +=
-                  (pointerEvent.clientX - scrub.startX) * multiplier;
+                  (pointerEvent.clientX - scrub.startX) * unitStep * (pointerEvent.shiftKey ? 10 : 1);
                 scrub.startX = pointerEvent.clientX;
-                const next = scrubDesignNumericValue(
+                const next = scrubDesignSteppedValue(
                   scrub.startValue,
                   scrub.distance,
+                  unitStep,
                 );
                 if (next === null) return;
-                const resolved = withinRange(
-                  whole ? roundDesignLayoutValue(next) : next,
-                );
+                const resolved = withinRange(next);
                 if (resolved === scrub.latestValue) return;
                 scrub.latestValue = resolved;
                 setPresentedDraft(resolved);
@@ -629,6 +645,7 @@ function InspectorEditField({
           aria-description={tokenShown ? tokenDescription : undefined}
           title={tokenShown ? tokenDescription : undefined}
           data-design-style-token={tokenShown ? tokenName : undefined}
+          data-design-draft={draft === String(value) ? "clean" : "dirty"}
           value={tokenShown ? tokenName!.replace(/^--/, "") : presentation.text}
           placeholder={placeholder}
           disabled={disabled}
@@ -641,6 +658,7 @@ function InspectorEditField({
           )}
           onFocus={() => {
             setFocused(true);
+            historyStep.drop();
             baselineRef.current = String(value);
             focusValueRef.current = String(value);
             onInspect?.();
@@ -650,6 +668,7 @@ function InspectorEditField({
             // document on every character — and on a backspace it removed the
             // declaration outright before the next digit put it back.
             const text = event.target.value;
+            historyStep.drop();
             const pastedNumeric = parseDesignStyleNumericParts(text);
             if (
               styleProperty &&
@@ -691,13 +710,14 @@ function InspectorEditField({
             } else if (event.key === "ArrowUp" || event.key === "ArrowDown") {
               const normalized = resolveDraft(draft, baselineRef.current);
               const direction = event.key === "ArrowUp" ? 1 : -1;
-              const multiplier =
-                !whole && event.altKey ? 0.1 : event.shiftKey ? 10 : 1;
-              const next = scrubDesignNumericValue(
-                parseDesignStyleNumericParts(normalized)
-                  ? normalized
-                  : (numericValue ?? normalized),
-                direction * multiplier,
+              const start = parseDesignStyleNumericParts(normalized)
+                ? normalized
+                : (numericValue ?? normalized);
+              const unitStep = scrubStepFor(start, event.altKey);
+              const next = scrubDesignSteppedValue(
+                start,
+                direction * unitStep * (event.shiftKey ? 10 : 1),
+                unitStep,
               );
               if (next !== null) {
                 event.preventDefault();
@@ -1341,7 +1361,7 @@ export const DesignInspector = React.memo(function DesignInspector({
       ) return;
       if (event.defaultPrevented || !isDesignHistoryFocusOwner(workspaceId, true)) return;
       const editableTarget = isNativeHistoryTarget(event.target);
-      if (!editableTarget && event.shiftKey && !event.metaKey && !event.ctrlKey && !event.altKey &&
+      if (!isDesignTextEntryTarget(event.target) && event.shiftKey && !event.metaKey && !event.ctrlKey && !event.altKey &&
         event.key.toLowerCase() === "a") {
         // Figma's Shift+A. The motion timeline is Shift+M.
         event.preventDefault();

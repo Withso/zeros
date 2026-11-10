@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { DesignHistoryCommands } from "../state/design-history-commands";
+import {
+  DesignHistoryCommands,
+  isDesignTextEntryTarget,
+  isNativeHistoryTarget,
+} from "../state/design-history-commands";
 
 // Focus/events are the DOM boundary; the actual owner registry and dispatch
 // run unchanged. The browser smoke additionally exercises real DOM focus.
@@ -99,5 +103,78 @@ describe("Design history command ownership", () => {
     f.focus(f.node(f.body, { "data-design-history-owner": "org" })); f.commands.dispatch("redo");
     f.focus(f.canvas); f.commands.dispatch("undo");
     expect(f.run.mock.calls).toEqual([["undo"], ["undo"]]); expect(org).toHaveBeenCalledExactlyOnceWith("redo");
+  });
+});
+
+describe("which focused field keeps Command-Z for itself", () => {
+  const input = (attributes: Record<string, string> = {}) => ({
+    nodeType: 1,
+    getAttribute: (key: string) => attributes[key] ?? null,
+    closest(selector: string) {
+      return selector.split(",").some((part) => part.trim() === "input") ? this : null;
+    },
+  }) as unknown as Element;
+
+  it("leaves text history to a field holding typing that is not committed yet", () => {
+    expect(isNativeHistoryTarget(input())).toBe(true);
+    expect(isNativeHistoryTarget(input({ "data-design-draft": "dirty" }))).toBe(true);
+  });
+
+  it("hands Command-Z to the design when the focused field shows its committed value", () => {
+    // Tabbing from one Style field to the next commits the first and focuses
+    // the second. Its text has no history of its own, so undo must reach the
+    // design edit that was just made.
+    expect(isNativeHistoryTarget(input({ "data-design-draft": "clean" }))).toBe(false);
+  });
+
+  it("still treats that field as somewhere to type", () => {
+    // Shift+A adds auto layout from the canvas. In a field it is a capital A,
+    // whether or not the field has typing in it yet.
+    expect(isDesignTextEntryTarget(input({ "data-design-draft": "clean" }))).toBe(true);
+    expect(isDesignTextEntryTarget(input())).toBe(true);
+    expect(isDesignTextEntryTarget(null)).toBe(false);
+  });
+});
+
+describe("telling held-back surfaces that a history step ran", () => {
+  // A focused field and an open Transform or Fill editor hold back values
+  // published from elsewhere; they hear about a step before it runs so they
+  // can show what it leaves.
+  it("tells listeners once per step, before the step runs", () => {
+    const f = setup();
+    const order: string[] = [];
+    f.run.mockImplementation((direction: string) => order.push(`run ${direction}`));
+    cleanups.push(f.commands.onStep(() => order.push("step")));
+    f.focus(f.node(f.root, { "data-design-draft": "clean" }, "INPUT"));
+    expect(f.commands.dispatch("undo")).toBe(true);
+    f.focus(f.canvas);
+    expect(f.commands.dispatch("redo")).toBe(true);
+    expect(order).toEqual(["step", "run undo", "step", "run redo"]);
+  });
+
+  it("stays quiet when the command is not the design's", () => {
+    const f = setup();
+    const heard = vi.fn();
+    cleanups.push(f.commands.onStep(heard));
+    // Typing that is not committed yet keeps its own text history.
+    f.focus(f.node(f.root, { "data-design-draft": "dirty" }, "INPUT"));
+    expect(f.commands.dispatch("undo")).toBe(false);
+    // Focus outside every Design surface has no owner.
+    f.focus(f.outside);
+    expect(f.commands.dispatch("undo")).toBe(false);
+    expect(heard).not.toHaveBeenCalled();
+    expect(f.run).not.toHaveBeenCalled();
+  });
+
+  it("stops telling a listener that unsubscribed", () => {
+    const f = setup();
+    const heard = vi.fn();
+    const unsubscribe = f.commands.onStep(heard);
+    f.focus(f.canvas);
+    f.commands.dispatch("undo");
+    unsubscribe();
+    f.commands.dispatch("redo");
+    expect(heard).toHaveBeenCalledTimes(1);
+    expect(f.run.mock.calls).toEqual([["undo"], ["redo"]]);
   });
 });
