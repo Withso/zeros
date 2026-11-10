@@ -49,3 +49,23 @@ export function useDesignLiveDocumentRetirement(live: boolean, active: boolean):
   }, [retiring]);
   return current;
 }
+
+/** The other direction: a document that was just revealed. Its own report
+ * that it painted can precede the canvas frame that shows it, because the
+ * child runs ahead while the canvas main thread is busy. True once the canvas
+ * has produced two frames with the document shown; until then the pixels
+ * beneath it stay. */
+export function useDesignRevealPresented(shown: boolean): boolean {
+  const [presented, setPresented] = useState(false);
+  if (!shown && presented) setPresented(false);
+  useEffect(() => {
+    if (!shown) return;
+    let second = 0;
+    const first = window.requestAnimationFrame(() => { second = window.requestAnimationFrame(() => setPresented(true)); });
+    return () => {
+      window.cancelAnimationFrame(first);
+      window.cancelAnimationFrame(second);
+    };
+  }, [shown]);
+  return shown && presented;
+}

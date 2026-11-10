@@ -564,7 +564,7 @@ export interface DesignRuntimePlaybackStopped {
   reason: "escape" | "hidden";
 }
 
-/** The document has produced a frame since it reported ready. */
+/** The document's pixels have been presented since it reported ready. */
 export interface DesignRuntimePainted {
   sourceVersion: string;
 }
@@ -585,7 +585,7 @@ export interface DesignRuntimeCapabilities {
   cancellation: true;
   /** Capture cancellation responds only after decode/encoding cleanup. */
   captureCompletion?: true;
-  /** A "painted" event follows "ready" once a frame has been produced. */
+  /** A "painted" event follows "ready" once pixels have been presented. */
   painted?: true;
   typedErrors: true;
   sourcePinned: true;
@@ -5290,16 +5290,29 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
         capabilities: capabilities(),
         snapshot: snapshot()
       });
-      // Ready is layout, not pixels. A document revealed at ready may not
-      // have reached the compositor yet, so its host keeps the frame's last
-      // pixels beneath it. The second animation frame runs after the first
-      // frame since ready was produced; a hidden document waits until shown.
+      // Ready is layout, not pixels, and a hidden document still runs animation
+      // frames: counting them said "painted" before the host had shown this
+      // document. The browser's own paint record exists only once pixels were
+      // presented. A document that paints nothing never gets one; the timer
+      // bounds that case.
       var readyVersion = SOURCE_VERSION;
-      window.requestAnimationFrame(function () {
-        window.requestAnimationFrame(function () {
-          if (!disposed && parentPort) event("painted", { sourceVersion: readyVersion });
+      var announced = false;
+      var announce = function () {
+        if (announced) return;
+        announced = true;
+        if (!disposed && parentPort) event("painted", { sourceVersion: readyVersion });
+      };
+      try {
+        var paintRecord = new PerformanceObserver(function (list) {
+          if (!list.getEntries().length) return;
+          paintRecord.disconnect();
+          announce();
         });
-      });
+        paintRecord.observe({ type: "paint", buffered: true });
+        window.setTimeout(function () { paintRecord.disconnect(); announce(); }, 1000);
+      } catch (_error) {
+        window.requestAnimationFrame(function () { window.requestAnimationFrame(announce); });
+      }
     };
     // The iframe load event can precede web-font layout. Do not hand fallback
     // glyph pixels to the parent as a revealable document generation.

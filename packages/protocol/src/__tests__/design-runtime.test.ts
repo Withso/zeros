@@ -303,25 +303,30 @@ describe("design runtime protocol", () => {
     expect(isDesignRuntimeFrameMessage({ ...painted, payload: { sourceVersion: "draft" } })).toBe(false);
   });
 
-  it("announces its first presented frame after ready, never while frames are suspended", async () => {
+  it("announces painted from the browser's paint record, not from counted animation frames", async () => {
+    // A hidden document still runs animation frames. Counting two of them
+    // said "painted" before the host had shown the document, and the host
+    // dropped the frame's last pixels too early.
     const browser = await chromium.launch({ headless: true });
     try {
-      const run = async (suspended: boolean) => {
+      const run = async (paintRecord: boolean) => {
         const page = await browser.newPage();
         try {
           return await page.evaluate(
-            ({ source, suspended }) =>
-              new Promise<{ events: string[]; painted: unknown; capability: unknown; framesAfterReady: number }>((resolve) => {
+            ({ source, paintRecord }) =>
+              new Promise<{ events: string[]; painted: unknown; capability: unknown; framesBeforePainted: number; paintedAfter: number | null }>((resolve) => {
                 document.body.innerHTML = '<main data-oid="target">Presented</main>';
                 (window as Window & { __zerosDesignSourceVersion?: string }).__zerosDesignSourceVersion = "a".repeat(24);
-                const frame = window.requestAnimationFrame.bind(window);
-                // A hidden native document receives layout but no animation frames.
-                if (suspended) window.requestAnimationFrame = () => 1;
+                // No paint record ever arrives, as for a document that is not shown.
+                if (!paintRecord) (window as unknown as { PerformanceObserver: unknown }).PerformanceObserver =
+                  class { observe() {} disconnect() {} };
                 const events: string[] = [];
                 let painted: unknown = null;
                 let capability: unknown = null;
-                let framesAfterReady = 0;
-                const finish = () => resolve({ events, painted, capability, framesAfterReady });
+                let frames = 0;
+                let readyAt = 0;
+                let paintedAfter: number | null = null;
+                const finish = () => resolve({ events, painted, capability, framesBeforePainted: frames, paintedAfter });
                 const channel = new MessageChannel();
                 channel.port1.onmessage = (event) => {
                   const message = event.data as { type?: string; event?: string; payload?: { capabilities?: { painted?: unknown } } };
@@ -329,11 +334,12 @@ describe("design runtime protocol", () => {
                   events.push(message.event ?? "");
                   if (message.event === "ready") {
                     capability = message.payload?.capabilities?.painted ?? null;
-                    const count = () => { framesAfterReady++; frame(count); };
-                    frame(count);
-                    window.setTimeout(finish, 400);
+                    readyAt = performance.now();
+                    const count = () => { if (paintedAfter === null) { frames++; requestAnimationFrame(count); } };
+                    requestAnimationFrame(count);
+                    window.setTimeout(finish, 2_500);
                   }
-                  if (message.event === "painted") { painted = message.payload; finish(); }
+                  if (message.event === "painted") { painted = message.payload; paintedAfter = performance.now() - readyAt; finish(); }
                 };
                 channel.port1.start();
                 new Function(source)();
@@ -343,21 +349,25 @@ describe("design runtime protocol", () => {
                   [channel.port2],
                 );
               }),
-            { source: DESIGN_RUNTIME_SOURCE, suspended },
+            { source: DESIGN_RUNTIME_SOURCE, paintRecord },
           );
         } finally {
           await page.close();
         }
       };
-      const shown = await run(false);
+      const shown = await run(true);
       expect(shown).toMatchObject({ events: ["ready", "painted"], capability: true, painted: { sourceVersion: "a".repeat(24) } });
-      // Readiness is layout; the painted event waits for a produced frame.
-      expect(shown.framesAfterReady).toBeGreaterThanOrEqual(1);
-      expect(await run(true)).toMatchObject({ events: ["ready"], capability: true, painted: null });
+      expect(shown.paintedAfter).toBeLessThan(900);
+      // Without a paint record, many animation frames pass and nothing is
+      // announced until the bound for a document that paints nothing.
+      const unshown = await run(false);
+      expect(unshown.events).toEqual(["ready", "painted"]);
+      expect(unshown.framesBeforePainted).toBeGreaterThan(10);
+      expect(unshown.paintedAfter).toBeGreaterThanOrEqual(950);
     } finally {
       await browser.close();
     }
-  }, 20_000);
+  }, 30_000);
 
   it("republishes the layer tree so a hidden node can be shown again", async () => {
     const browser = await chromium.launch({ headless: true });
