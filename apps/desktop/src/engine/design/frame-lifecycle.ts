@@ -1223,9 +1223,16 @@ export async function transferDesignNode(
       relocationStyles !== null &&
       input.destinationFrame !== undefined &&
       (input.styles?.position === "relative" || input.styles?.position === "static");
+    // A layer that becomes a frame is that frame. Unturned at its corner and
+    // at its size, its root follows the frame like a new frame's root: a
+    // pixel size would leave its fill and children behind on the next resize.
+    const becomesFrame = !flowSlot && !input.destinationFrame && relocationStyles !== null &&
+      relocationStyles.transform === "none" && relocationStyles.left === "0px" && relocationStyles.top === "0px" &&
+      Math.abs(Number.parseFloat(relocationStyles.width!) - after.geometry.w) <= 0.5 &&
+      Math.abs(Number.parseFloat(relocationStyles.height!) - after.geometry.h) <= 0.5;
     const placedStyles = flowSlot
       ? designRelocationFlowRootStyles(input.relocation, input.styles!)
-      : relocationStyles;
+      : becomesFrame ? { ...relocationStyles, width: "100%", height: "100vh" } : relocationStyles;
     const styles = placedStyles
       ? {
           ...(input.frameBackground && wholeFrame

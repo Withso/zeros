@@ -12,6 +12,7 @@ import {
   designAutoLayoutUpdates,
   designInferredAutoLayoutFlow,
   designFrameAlwaysClips,
+  designFrameResizeRootGeometry,
   designFrameResizeRootStyles,
   designFrameRootFixedStyles,
 } from "../design-auto-layout-values";
@@ -331,6 +332,44 @@ describe("auto layout intent", () => {
     });
   });
 
+  it("makes a pixel-sized frame root follow the frame it is resized with", () => {
+    // A layer dragged out to the canvas becomes a frame whose root keeps the
+    // layer's pixel size. Resizing that frame left its fill behind.
+    const root = (widthValue: string, heightValue: string, rect = { x: 0, y: 0, width: 83, height: 48 }) => ({
+      ...node(),
+      rect,
+      layout: { ...node().layout!, widthValue, heightValue },
+    });
+    const start = { w: 83, h: 48 };
+    expect(designFrameResizeRootStyles(root("83px", "48px"), start, { w: 114, h: 176 }))
+      .toEqual({ width: "100%", height: "100vh" });
+    // Only the edited axis changes while the width still marks the root.
+    expect(designFrameResizeRootStyles(root("83px", "48px"), start, { w: 83, h: 176 })).toEqual({ height: "100vh" });
+    // Once the width follows, a pixel height could not be told from 100vh:
+    // it follows in the same write.
+    expect(designFrameResizeRootStyles(root("83px", "48px"), start, { w: 114, h: 48 }))
+      .toEqual({ width: "100%", height: "100vh" });
+    // A root left behind by an earlier resize catches up on the next one.
+    expect(designFrameResizeRootStyles(root("83px", "48px"), { w: 114, h: 176 }, { w: 157, h: 100 }))
+      .toEqual({ width: "100%", height: "100vh" });
+    // A Hug height stays Hug.
+    expect(designFrameResizeRootStyles(root("83px", "max-content"), start, { w: 114, h: 48 })).toEqual({ width: "100%" });
+    // A root that already follows the frame is left alone: 100vh computes to pixels.
+    expect(designFrameResizeRootStyles(root("100%", "48px"), start, { w: 114, h: 176 })).toBeNull();
+    // A root placed away from the frame's corner, or turned, is authored content.
+    expect(designFrameResizeRootStyles(root("83px", "48px", { x: 20, y: 0, width: 83, height: 48 }), start, { w: 114, h: 48 })).toBeNull();
+    expect(designFrameResizeRootStyles({ ...root("83px", "48px"), box: { x: 0, y: 0, width: 83, height: 48, rotation: 15, scaleX: 1, scaleY: 1 } } as never,
+      start, { w: 114, h: 176 })).toBeNull();
+    // The overlay follows on the same samples, ahead of the runtime.
+    expect(designFrameResizeRootGeometry(root("83px", "48px"), { w: 114, h: 176 }, { w: 157, h: 100 })?.rect)
+      .toMatchObject({ width: 157, height: 100 });
+    expect(designFrameResizeRootGeometry(root("83px", "48px"), { w: 114, h: 176 }, { w: 157, h: 176 })?.rect)
+      .toMatchObject({ width: 157, height: 176 });
+    // A height-only drag of a root that is behind brings its width along.
+    expect(designFrameResizeRootStyles(root("83px", "48px"), { w: 114, h: 176 }, { w: 114, h: 200 }))
+      .toEqual({ width: "100%", height: "100vh" });
+  });
+
   it("fixes only the Hug axes a manual frame resize changes", () => {
     const root = (widthValue: string, heightValue: string) => ({
       ...node(),
@@ -345,7 +384,7 @@ describe("auto layout intent", () => {
       }),
     ).toEqual({ height: "100vh" });
     expect(
-      designFrameResizeRootStyles(root("fit-content", "320px"), start, {
+      designFrameResizeRootStyles(root("fit-content", "100vh"), start, {
         w: 1_000,
         h: 700,
       }),
