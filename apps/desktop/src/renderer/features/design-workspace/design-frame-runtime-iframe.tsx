@@ -6,6 +6,7 @@
 
 // --- IMPORTS ---
 
+import { useDesignRevealPresented } from "./design-frame-retirement";
 import React, {
   useCallback,
   useEffect,
@@ -171,6 +172,7 @@ function DesignFrameDocumentBuffer({
   // show nothing for a frame. The pixels beneath it stop painting only once
   // this connection's document reports a produced frame.
   const [presentedRuntime, setPresentedRuntime] = useState<DesignFrameRuntimeConnection | null>(null);
+  const revealed = useDesignRevealPresented(ready && buffer === "displayed" && !retiring);
   const [playingSessionId, setPlayingSessionId] = useState<string | null>(null);
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   useLayoutEffect(() => retainDesignResource("documentBuffers"), []);
@@ -674,7 +676,7 @@ function DesignFrameDocumentBuffer({
       // A retiring document no longer counts as the frame's painted, editable
       // document: its passive pixels are showing.
       data-design-document-ready={ready && !retiring ? "" : undefined}
-      data-design-document-presented={ready && !retiring && presentedRuntime !== null && presentedRuntime === connectedRuntime ? "" : undefined}
+      data-design-document-presented={ready && !retiring && revealed && presentedRuntime !== null && presentedRuntime === connectedRuntime ? "" : undefined}
       data-design-frame-live={interactive ? "" : undefined}
       tabIndex={interactive ? 0 : -1}
       {...(!interactive ? { inert: "" } : {})}

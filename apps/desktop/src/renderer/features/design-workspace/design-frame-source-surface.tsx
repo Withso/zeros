@@ -4,6 +4,7 @@ import { designProtocolFrameUrl } from "../../platform/bridge/design-protocol-ur
 import { designSourceSurfaceBudget } from "./design-source-surfaces";
 import { acquireDesignSourceVectorImage, designSourceLoadSlots, designSourceVectorCache, designSourceVectorKey, type DesignSourceLoadTicket, type DesignCachedSourceVector, type DesignSourceVectorRequest, type DesignSourceVectorTarget } from "./design-source-vector";
 import { retainDesignResource } from "./state/design-resource-counters";
+import { useDesignRevealPresented } from "./design-frame-retirement";
 import { useDesignDocumentReplacement } from "./state/use-design-document-replacement";
 import type { DesignDocumentReplacement } from "./state/design-document-replacements";
 import { attachDesignSourceTiles } from "./design-source-scene";
@@ -19,15 +20,22 @@ interface SurfaceDocument {
 
 function SourceHtmlDocument({ entry, title, incoming, visible, holdSlot, onReady, onPainted, onFailure, onRetired }: {
   entry: SurfaceDocument; title: string; incoming: boolean; visible: boolean; holdSlot: boolean;
-  /** `painted` says a separate painted message will follow readiness. */
-  onReady(svg: unknown, painted: boolean): void; onPainted(): void; onFailure(): void; onRetired(): void;
+  /** The document has painted and the canvas has presented it. */
+  onReady(svg: unknown): void; onPainted(): void; onFailure(): void; onRetired(): void;
 }) {
   const iframe = useRef<HTMLIFrameElement>(null);
   const ticket = useRef<DesignSourceLoadTicket | null>(null);
   const [started, setStarted] = useState(false);
   const [ready, setReady] = useState(false);
+  /** The document reported a painted frame, or cannot report one. */
+  const [childPainted, setChildPainted] = useState(false);
   const callbacks = useRef({ onReady, onPainted, onFailure, onRetired });
   callbacks.current = { onReady, onPainted, onFailure, onRetired };
+  // The document's own report can precede the canvas frame that reveals it.
+  const revealed = useDesignRevealPresented(ready && !incoming && visible);
+  useLayoutEffect(() => {
+    if (revealed && childPainted) callbacks.current.onPainted();
+  }, [revealed, childPainted]);
   useLayoutEffect(() => {
     const requested = designSourceLoadSlots.request(() => setStarted(true));
     ticket.current = requested;
@@ -69,7 +77,7 @@ function SourceHtmlDocument({ entry, title, incoming, visible, holdSlot, onReady
       if (event.source !== iframe.current?.contentWindow || !event.data ||
           event.data.sourceVersion !== entry.sourceVersion || event.data.theme !== entry.theme) return;
       if (event.data.kind === DESIGN_SURFACE_PAINTED) {
-        if (!waiting) callbacks.current.onPainted();
+        if (!waiting) setChildPainted(true);
         return;
       }
       if (!waiting) return;
@@ -80,7 +88,9 @@ function SourceHtmlDocument({ entry, title, incoming, visible, holdSlot, onReady
       if (event.data.kind !== DESIGN_SURFACE_READY) return;
       waiting = false; window.clearTimeout(timer); setReady(true);
       window.cancelAnimationFrame(layoutFrame);
-      callbacks.current.onReady(event.data.svg, event.data.painted === true);
+      // An older surface script cannot report its first frame.
+      if (event.data.painted !== true) setChildPainted(true);
+      callbacks.current.onReady(event.data.svg);
     };
     node?.addEventListener("load", loaded);
     window.addEventListener("message", message);
@@ -202,10 +212,8 @@ function SourceDocument({ entry, title, incoming, visible, retainHtml, allowLoad
     const release = retainDesignResource("sourceVectorBuffers");
     return () => { release(); vector.release(); };
   }, [vector]);
-  const ready = useCallback((svg: unknown, painted: boolean) => {
+  const ready = useCallback((svg: unknown) => {
     setHtmlReady(true);
-    // An older surface script cannot report its first frame.
-    if (!painted) setHtmlPresented(true);
     if (!vectorRef.current) {
       let next: DesignCachedSourceVector | null = null;
       try { next = requestRef.current?.publish(svg) ?? null; } catch { /* Fall back through the existing bounded preview path. */ }

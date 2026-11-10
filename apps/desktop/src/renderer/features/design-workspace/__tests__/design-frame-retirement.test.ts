@@ -44,4 +44,17 @@ describe("retiring a live frame document", () => {
     expect(runtime).toContain('data-design-document-ready={ready && !retiring ? "" : undefined}');
     expect(runtime).toContain("active={props.active && !props.retiring}");
   });
+
+  it("drops the pixels beneath a revealed document only after the canvas itself has presented the reveal", () => {
+    // A child's own report can precede the canvas frame that shows it: the
+    // child runs ahead while the canvas main thread is busy.
+    const runtime = read("design-frame-runtime-iframe.tsx");
+    const source = read("design-frame-source-surface.tsx");
+    expect(runtime).toContain('const revealed = useDesignRevealPresented(ready && buffer === "displayed" && !retiring);');
+    expect(runtime).toContain("data-design-document-presented={ready && !retiring && revealed && presentedRuntime !== null && presentedRuntime === connectedRuntime ? \"\" : undefined}");
+    // The cached vector stays under the source document the same way.
+    expect(source).toContain("const revealed = useDesignRevealPresented(ready && !incoming && visible);");
+    expect(source).toContain("if (revealed && childPainted) callbacks.current.onPainted();");
+  });
 });
+
