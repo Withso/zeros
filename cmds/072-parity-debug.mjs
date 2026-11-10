@@ -1,0 +1,31 @@
+const h = await import(`/Users/arunrajkumar/.zeros-dev/qa/lib/helpers.mjs?${Date.now()}`);
+export default async (ctx) => {
+  const { rawPage } = ctx, out = {};
+  const hero = "page-1/hero.html";
+  const focus = () => rawPage.locator(`${h.VIEW} [data-design-canvas-viewport]`).focus();
+  const header = () => rawPage.evaluate(() => document.querySelector("[data-design-inspector-header]")?.textContent?.trim().slice(0, 40));
+  const toasts = () => rawPage.evaluate(() => [...document.querySelectorAll('[data-sonner-toast]:not([data-removed="true"])')].map((t) => t.textContent?.slice(0, 160)));
+  const fields = () => rawPage.evaluate(() => [...document.querySelectorAll('input[aria-label="X"], input[aria-label="Y"]')].map((el) => `${el.getAttribute("aria-label")}=${el.value}@${Math.round(el.getBoundingClientRect().x)},${Math.round(el.getBoundingClientRect().y)}:${el.getBoundingClientRect().width > 0 ? "vis" : "hid"}`));
+  await rawPage.locator("[data-design-sidebar-panel]").getByText("Hero", { exact: true }).first().click(); await ctx.delay(600);
+  out.header1 = await header(); out.state1 = await h.state(ctx); out.fields1 = await fields();
+  await focus(); await rawPage.keyboard.press("Shift+2"); await ctx.delay(900);
+  await h.waitFor(() => rawPage.locator(h.live(hero)).count(), 4000);
+  const heroRoot = () => rawPage.frameLocator(h.live(hero)).locator('[data-oid="hero-root"]').evaluate((el) => { const s = getComputedStyle(el); return { display: s.display, direction: s.flexDirection, position: s.position, kids: [...el.children].map((c) => `${c.getAttribute("data-oid")}:${getComputedStyle(c).position}`) }; }).catch(String);
+  out.heroBefore = await heroRoot();
+  out.focusBefore = (await h.state(ctx)).focus;
+  await rawPage.evaluate(() => { globalThis.__keys = []; window.addEventListener("keydown", (e) => globalThis.__keys.push(`${e.key}|shift=${e.shiftKey}|prevented=${e.defaultPrevented}|target=${e.target?.tagName}`), { capture: false }); });
+  await rawPage.keyboard.press("Shift+A"); await ctx.delay(1800);
+  out.keys = await rawPage.evaluate(() => globalThis.__keys);
+  out.heroAfter = await heroRoot(); out.toasts = await toasts(); out.header2 = await header();
+  // Click the auto layout button directly for comparison.
+  const vertical = rawPage.getByLabel("Auto layout: Vertical", { exact: true }).first();
+  out.verticalVisible = await vertical.isVisible().catch(() => false);
+  out.pressed = await rawPage.evaluate(() => [...document.querySelectorAll('button[aria-label^="Auto layout:"]')].map((b) => `${b.getAttribute("aria-label")}:${b.getAttribute("aria-pressed")}:${b.disabled}`));
+  await vertical.click(); await ctx.delay(1800);
+  out.heroAfterClick = await heroRoot(); out.toasts2 = await toasts();
+  await focus(); await rawPage.keyboard.press("Meta+z"); await ctx.delay(1500);
+  out.heroAfterUndo = await heroRoot();
+  await rawPage.keyboard.press("Shift+A"); await ctx.delay(1800);
+  out.heroAfterShiftA2 = await heroRoot(); out.header3 = await header();
+  return out;
+};
