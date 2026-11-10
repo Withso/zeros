@@ -298,10 +298,13 @@ export async function runDesignSelectionLimitSmoke({ page, check }) {
   });
   await page.locator('[data-design-frame="probe-39.html"] iframe[data-design-document-ready]').waitFor();
   const ownerBounds = await page.locator('[data-design-frame="probe-39.html"]').boundingBox();
+  // The owner is selected, so a plain drag on its body would move it; Command keeps the marquee.
+  await page.keyboard.down("Meta");
   await page.mouse.move(ownerBounds.x + ownerBounds.width * 0.72, ownerBounds.y + ownerBounds.height * 0.72);
   await page.mouse.down();
   await page.mouse.move(first.x - 10, first.y - 10, { steps: 12 });
   await page.mouse.up();
+  await page.keyboard.up("Meta");
   await expect(pill).toHaveText("32 selected");
   const targets = await page.evaluate(async () => (await import("/apps/desktop/src/renderer/features/design-workspace/state/design-workspace-ui.ts")).designWorkspaceView("ws_design_harness").selectedTargets);
   expect(targets[0]).toEqual({ frame: "probe-39.html", nodeId: "node-39" });
