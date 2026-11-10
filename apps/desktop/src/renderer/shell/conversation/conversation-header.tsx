@@ -4,6 +4,7 @@
 // folder through the shared project list, and conversation-pane.tsx mounts it
 // hidden so its ⌘O / ⌘C shortcuts keep working.
 
+import { handleCopyPathKey } from "./copy-path-shortcut";
 import React, {
   useCallback,
   useEffect,
@@ -397,19 +398,17 @@ function OpenInDropdown({ path }: OpenInDropdownProps) {
     return () => window.removeEventListener("keydown", handler);
   }, [defaultId, openWith, workspacePageActive, menu.canOpenLocally]);
 
-  // ⌘C — copy the worktree path, but ONLY when it can't be a real copy:
-  // no text selection anywhere and focus not on a typing surface.
+  // ⌘C — copy the worktree path, but ONLY when it can't be a real copy.
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if (!workspacePageActive) return;
-      if (e.defaultPrevented) return;
-      if (!e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return;
-      if (e.code !== "KeyC") return;
-      if (isEditableTarget(e.target)) return;
       const selection = window.getSelection();
-      if (selection && !selection.isCollapsed) return;
-      e.preventDefault();
-      handleCopyPath();
+      handleCopyPathKey(e, {
+        active: workspacePageActive,
+        editable: isEditableTarget(e.target),
+        textSelected: !!selection && !selection.isCollapsed,
+        defer: (work) => { window.setTimeout(work, 0); },
+        copy: handleCopyPath,
+      });
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);

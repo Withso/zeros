@@ -45,6 +45,7 @@ import {
   designAuthoredResizeAxis,
   designCanvasPointFromClient,
   designCanvasRectFromPoints,
+  designWholeCanvasRect,
   designConstraintGuides,
   designConstraintSides,
   designCssSizeAfterResize,
@@ -1408,3 +1409,16 @@ describe("designAuthoredResizeAxis", () => {
     expect(axis.size).toBe(1);
   });
 });
+
+describe("designWholeCanvasRect", () => {
+  it("lands a drawn rectangle on whole canvas pixels by rounding its edges, like a moved frame", () => {
+    // A zoomed pointer maps to fractional canvas positions.
+    expect(designWholeCanvasRect({ x: -103.285, y: 1573.52, width: 240.4, height: 99.7 }))
+      .toEqual({ x: -103, y: 1574, width: 240, height: 99 });
+    // Edges round, so the far edge stays within half a pixel of the pointer.
+    expect(designWholeCanvasRect({ x: 10.6, y: 20.4, width: 100.6, height: 50.2 }))
+      .toEqual({ x: 11, y: 20, width: 100, height: 51 });
+    expect(designWholeCanvasRect({ x: 5.2, y: 5.2, width: 0.2, height: 0.2 })).toEqual({ x: 5, y: 5, width: 1, height: 1 });
+  });
+});
+

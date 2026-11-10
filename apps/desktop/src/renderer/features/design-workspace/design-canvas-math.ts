@@ -176,6 +176,19 @@ export function designCanvasPointFromClient(
 /** Normalize either drag direction into one exact positive-size canvas box. */
 /** A drag rectangle from its first corner. `maxSize` stops each axis at that
  * extent from the first corner, so a drawn frame never outgrows storage. */
+/** A drawn rectangle lands on whole canvas pixels, like a moved frame. Its
+ * edges round, so the far edge stays within half a pixel of the pointer. */
+export function designWholeCanvasRect(rect: DesignCanvasRect): DesignCanvasRect {
+  const x = Math.round(rect.x);
+  const y = Math.round(rect.y);
+  return {
+    x,
+    y,
+    width: Math.max(1, Math.round(rect.x + rect.width) - x),
+    height: Math.max(1, Math.round(rect.y + rect.height) - y),
+  };
+}
+
 export function designCanvasRectFromPoints(
   start: { x: number; y: number },
   end: { x: number; y: number },
