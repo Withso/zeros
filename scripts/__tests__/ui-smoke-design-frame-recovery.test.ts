@@ -10,6 +10,15 @@ function immediateNativeFailure(failObservation = false) {
   let nativeFrame = false;
   let response: Promise<void> | undefined;
   let evaluations = 0;
+  // The Layers drawer helper takes the first fold, opens it and waits for
+  // the tree.
+  const locator = {
+    first: () => locator,
+    waitFor: async () => {},
+    getAttribute: async () => null,
+    count: async () => 0,
+    evaluate: async () => {},
+  };
   const page = {
     url: () => "http://127.0.0.1:4100/harness.html",
     route: async (
@@ -24,11 +33,7 @@ function immediateNativeFailure(failObservation = false) {
     },
     setViewportSize: async () => {},
     goto: async () => {},
-    locator: () => ({
-      waitFor: async () => {},
-      getAttribute: async () => null,
-      count: async () => 0,
-    }),
+    locator: () => locator,
     evaluate: async () => {
       const observation = evaluations++;
       if (observation === 1) return { recorded: Number(nativeFrame), native: Number(nativeFrame), fallback: 0 };
