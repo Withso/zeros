@@ -98,6 +98,7 @@ const originalOrder = [
   "scroll-area-cleanup",
   "scroll-area-drag",
   "cloud-chat-edits",
+  "local-commands",
   "cloud-workspace-details",
   "subscription",
 ];
