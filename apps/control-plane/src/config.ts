@@ -237,6 +237,13 @@ export type CloudV2Config = {
   /** Retries a stop's failed checkpoint on a fork of the stopped VM. Enable
    * only once forking a stopped VM is qualified on the deployment's Boat account. */
   checkpointRetry?: boolean;
+  /** Creates return before their GitHub checks, which the lifecycle runs
+   * before any VM exists. CLOUD_V2_ASYNC_CREATE_ENABLED=false keeps every
+   * create synchronous; unset means enabled. */
+  asyncCreate?: boolean;
+  /** How long after start a replica waits before async creates. Defaults to
+   * one lifecycle scan interval, or none on the development channel. */
+  asyncCreateDelayMs?: number;
   boat: { apiKey: string; billingOrg?: string };
   /** https:// origin of the API service; agents reach the model proxy here. */
   apiUrl: string;
@@ -262,6 +269,8 @@ function loadCloudV2Config(env: NodeJS.ProcessEnv, channel: string): CloudV2Conf
   if (promptOutbox && !["true", "false"].includes(promptOutbox)) throw new Error("Invalid environment: CLOUD_V2_PROMPT_OUTBOX_ENABLED must be true or false");
   const checkpointRetry = env.CLOUD_V2_CHECKPOINT_RETRY_ENABLED?.trim().toLowerCase();
   if (checkpointRetry && !["true", "false"].includes(checkpointRetry)) throw new Error("Invalid environment: CLOUD_V2_CHECKPOINT_RETRY_ENABLED must be true or false");
+  const asyncCreate = env.CLOUD_V2_ASYNC_CREATE_ENABLED?.trim().toLowerCase();
+  if (asyncCreate && !["true", "false"].includes(asyncCreate)) throw new Error("Invalid environment: CLOUD_V2_ASYNC_CREATE_ENABLED must be true or false");
   const origin = (name: string, protocol: "https:" | "wss:") => {
     const raw = env[name]?.trim();
     let url: URL;
@@ -292,6 +301,7 @@ function loadCloudV2Config(env: NodeJS.ProcessEnv, channel: string): CloudV2Conf
     boat: { apiKey, ...(billingOrg ? { billingOrg } : {}) },
     promptOutbox: promptOutbox === "true",
     checkpointRetry: checkpointRetry === "true",
+    asyncCreate: asyncCreate !== "false",
     workerSigningKey, ...(previous ? { workerSigningKeyPrevious: previous } : {}),
     apiUrl: origin("CLOUD_V2_API_URL", "https:"),
     realtimeUrl: origin("CLOUD_V2_REALTIME_URL", "wss:"),

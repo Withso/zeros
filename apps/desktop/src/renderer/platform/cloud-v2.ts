@@ -50,6 +50,14 @@ const STATUS: Record<CloudV2Workspace["state"], string> = {
 const ERRORS: Record<string, string> = {
   cloud_computer_build_required: "Build this organization's Cloud Computer first.",
   cloud_computer_changed: "The Cloud Computer was just rebuilt. Create the workspace again.",
+  // A create that returned before its GitHub checks, which then refused it.
+  cloud_source_access_denied: "Your GitHub connection can no longer read this repository. Check repository access in Settings → GitHub, then create a new workspace.",
+  repository_branch_not_found: "The base branch no longer exists on GitHub. Choose another branch and create a new workspace.",
+  repository_not_installed: "This repository was removed from the Cloud Computer. Add it again, then create a new workspace.",
+  cloud_source_review_required: "This repository's identity changed on GitHub. Create a new workspace from it.",
+  github_connection_required: "Connect GitHub in Settings → GitHub, then create a new workspace.",
+  github_authorization_expired: "Your GitHub connection expired. Reconnect it in Settings → GitHub, then create a new workspace.",
+  pro_required: "Creating a cloud workspace requires Pro.",
   cloud_source_checkout_failed: "The repository or base branch could not be checked out. Existing files were retained. Check repository access and the base branch before creating a new workspace.",
   cloud_environment_path_conflict: "An environment file conflicts with an existing file or directory. Choose a different destination in Settings → Environment, then create a new workspace.",
   cloud_environment_path_untracked_required: "Environment file destinations must be untracked. Choose an untracked path in Settings → Environment, then create a new workspace.",

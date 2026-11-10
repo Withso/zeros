@@ -183,3 +183,15 @@ it("renews a create's requested repository by target only when asked", async () 
   expect(f.github.check).toHaveBeenCalledTimes(1);
   expect(f.store.finish).toHaveBeenCalledWith(expect.anything(), "renewal", { allowed: true });
 });
+
+// A create that returned before its GitHub checks has no scope yet. Any check
+// that doesn't skip it on purpose refuses it, without asking GitHub.
+it.each([[false], [true]])("refuses a pending create's sources without a GitHub check (renew %s)", async renew => {
+  const f = fixture(AGING);
+  const pool = { query: vi.fn(async () => ({ rows: [{ source_repositories: null, source_pending: true }] })) } as unknown as pg.Pool;
+  const source = new CloudV2SourceAuthority(pool, f.github, () => Date.now(), async () => [{ repository: "o/r", repositoryId: "42" }], f.store, () => 0);
+  await expect(source.workspace(f.workspace("creating"), renew)).rejects.toMatchObject({ status: 409, code: "cloud_source_pending" });
+  await expect(source.continueWorkspace(f.workspace("creating"))).rejects.toMatchObject({ code: "cloud_source_pending" });
+  expect(f.github.check).not.toHaveBeenCalled();
+  expect(f.store.read).not.toHaveBeenCalled();
+});

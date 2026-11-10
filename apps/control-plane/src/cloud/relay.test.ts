@@ -650,6 +650,27 @@ describe("cloud v2 relay", () => {
     expect(await reply).toEqual({ continued: true });
   });
 
+  // A create that returned before its GitHub checks: the app opens it at once.
+  it("admits an app to a pending create's room and checks its source again within a second", async () => {
+    let now = 1000;
+    deps.now = () => now;
+    const pending = new HttpError(409, "cloud_source_pending", "pending");
+    deps.authorizeSource = vi.fn(async () => { throw pending; });
+    deps.continueSource = vi.fn(async () => { throw pending; });
+    const a = await app(), closed = vi.fn(); a.on("close", closed);
+    await vi.waitFor(() => expect(deps.authorizeSource).toHaveBeenCalled());
+    await new Promise(resolve => setTimeout(resolve, 50));
+    expect(a.readyState).toBe(WebSocket.OPEN);
+    // Once the lifecycle's checks refuse it, the room's next check does too.
+    const refused = new HttpError(404, "github_repository_not_found", "gone");
+    vi.mocked(deps.authorizeSource).mockRejectedValue(refused);
+    vi.mocked(deps.continueSource!).mockRejectedValue(refused);
+    now += 1_001;
+    a.send(JSON.stringify({ type: "PING", id: "after-refusal" }));
+    await vi.waitFor(() => expect(a.readyState).toBe(WebSocket.CLOSED));
+    expect(closed).toHaveBeenCalledWith(4001, expect.anything());
+  });
+
   it("checks session expiry before streaming past an otherwise current GitHub grant", async () => {
     let now = 1000;
     deps.now = () => now;

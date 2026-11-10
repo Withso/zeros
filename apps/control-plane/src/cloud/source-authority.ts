@@ -333,10 +333,13 @@ export class CloudV2SourceAuthority {
   }
 
   private async sources(workspace: CloudV2Workspace): Promise<{ names: string[]; ids?: string[] }> {
-    const { rows } = await withSystemTx(this.pool, tx => tx.query<{ source_repositories: unknown }>(
-      `SELECT source_repositories FROM cloud_v2_workspaces
+    const { rows } = await withSystemTx(this.pool, tx => tx.query<{ source_repositories: unknown; source_pending: boolean }>(
+      `SELECT source_repositories,source_pending FROM cloud_v2_workspaces
        WHERE id=$1 AND org_id=$2 AND creator_user_id=$3 AND state NOT IN ('deleted','deleting')`,
       [workspace.id, workspace.organizationId, workspace.creatorUserId]));
+    // Nothing a source check protects exists before the lifecycle's own
+    // checks end a pending create; callers that may skip it do so first.
+    if (rows[0]?.source_pending) throw new HttpError(409, "cloud_source_pending", "This workspace is still being prepared.");
     const sources = z.array(repositorySchema).min(1).max(100).safeParse(rows[0]?.source_repositories);
     if (!sources.success || !sources.data.some(repo => repo.toLowerCase() === workspace.repository.toLowerCase()))
       throw new HttpError(409, "cloud_source_review_required", "This older workspace needs its source access verified. Its files have been retained.");

@@ -1,6 +1,7 @@
 // Assembles cloud workspace v2 from configuration: one store, Boat, the relay
 // (realtime role), the lifecycle loop (worker role), the HTTP routes and the
 // model proxy (API role). index.ts only starts and stops what this returns.
+import { createPendingSourceResolver } from "./pending-create.js";
 import { postgresNotificationSubscription } from "../postgres-notifications.js";
 import { randomUUID } from "node:crypto";
 import type pg from "pg";
@@ -73,6 +74,9 @@ export async function answerCloudV2Offline(store: Pick<CloudV2Store, "listChats"
     return { ...reply, type: "WORKSPACE_ERROR", code: error.code, message: error.message };
   }
 }
+
+/** How long a new replica waits before returning creates early. */
+export const CLOUD_V2_ASYNC_CREATE_DELAY_MS = 10 * 60_000;
 
 export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boolean; lifecycle: boolean }, securityEvents?: PostgresSecurityEventBroker, listenerPool: pg.Pool = pool, lockPool: pg.Pool = pool) {
   const v2 = config.cloudV2;
@@ -159,9 +163,13 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     };
   };
 
+  // A draining replica would refuse a pending create's row, so a new one waits
+  // a lifecycle scan interval before returning creates early, as for #903.
+  const asyncCreateFrom = Date.now() + (v2.asyncCreateDelayMs ?? (config.deploymentChannel === "development" ? 0 : CLOUD_V2_ASYNC_CREATE_DELAY_MS));
   const routes: CloudV2RouteDeps = {
     store,
     computers,
+    ...(v2.asyncCreate !== false ? { asyncCreate: () => Date.now() >= asyncCreateFrom } : {}),
     installedRepositories: organizationId => store.installedRepositories(organizationId),
     authorizeRepository, authorizeRepositories, authorizeSourceTargets, authorizeBuildRepository, authorizeSource, continueSource,
     remoteHead: (org, user, target, branch) => github.remoteHead(org, user, target.repository, branch, target.repositoryId),
@@ -254,6 +262,13 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   }) : null;
   const lifecycle = roles.lifecycle ? new CloudV2Lifecycle({
     runtimeUpdates,
+    // Always wired: rows created before async creates were disabled still resolve.
+    resolvePendingSource: createPendingSourceResolver({
+      activeComputer: organizationId => store.activeComputer(organizationId),
+      authorizeBuildRepository: (org, user, buildId, repository, options) => authorizeBuildRepository(org, user, buildId, repository, options),
+      remoteHead: (org, user, target, branch) => github.remoteHead(org, user, target.repository, branch, target.repositoryId),
+      resolve: (id, input) => store.resolvePendingSource(id, input),
+    }),
     ...(builder ? { builds: builder } : {}),
     store,
     timing,
