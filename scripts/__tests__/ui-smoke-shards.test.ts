@@ -97,6 +97,7 @@ const originalOrder = [
   "sticky-bottom",
   "scroll-area-cleanup",
   "scroll-area-drag",
+  "cloud-chat-edits",
   "cloud-workspace-details",
   "subscription",
 ];
