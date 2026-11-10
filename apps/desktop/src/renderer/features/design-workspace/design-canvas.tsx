@@ -2225,53 +2225,21 @@ export const DesignCanvas = React.memo(function DesignCanvas({
     [workspaceId],
   );
 
-  const cancelInlineTextEditing = useCallback(
-    (edit: InlineTextEdit) => {
-      // Escape cancels a draft, not a transaction that already started. Keep
-      // its glyph owner through the displayed-buffer handoff. The guard also
-      // covers Escape arriving before React publishes the committing state.
-      const key = `${edit.frame ?? "canvas"}\u0000${edit.nodeId}\u0000${edit.sourceVersion ?? "draft"}`;
-      if (edit.status !== "editing" || textCommitGuardRef.current.activeKey === key) return;
-      cancelInlineTextCommit(textCommitGuardRef.current, edit);
-      if (inlineTextPreviewRef.current.pending?.edit.id === edit.id) {
-        inlineTextPreviewRef.current.pending = null;
-      }
-      if (workspaceId && edit.kind === "existing") {
-        void clearDesignNodeTextPreviewTransient({
-          workspaceId,
-          frame: edit.frame,
-          sourceVersion: edit.sourceVersion,
-          runtime: edit.runtime,
-          nodeId: edit.nodeId,
-        }).catch(() => {});
-      }
-      if (workspaceId && edit.kind === "new") {
-        const store = useDesignWorkspaceUiStore.getState();
-        if (edit.previousFrame) {
-          store.setSelection(
-            workspaceId,
-            edit.previousFrame,
-            edit.previousNodeId,
-            edit.previousNodeIds,
-            { owner: canvasPageOwner },
-          );
-        } else {
-          store.setSelectedFrame(workspaceId, null, canvasPageOwner);
-        }
-      }
-      setInlineTextEdit((current) =>
-        current?.id === edit.id ? null : current,
-      );
+  const finishInlineTextEditing = useCallback(
+    (edit: InlineTextEdit, measured: { width: number; height: number }) => {
+      // Escape keeps what was typed: it ends the edit through the same commit
+      // as blur and Cmd/Ctrl+Enter, then the canvas takes the next shortcut.
+      void commitInlineText(edit, measured);
       activateTool("select");
       window.requestAnimationFrame(() => {
         // A rapid double-click can already have opened a new editor. The
-        // cancelled edit must not steal its focus and trigger an immediate blur.
-        if (!inlineTextEditRef.current) {
+        // finished edit must not steal its focus and trigger an immediate blur.
+        if (!inlineTextEditRef.current || inlineTextEditRef.current.status !== "editing") {
           viewportRef.current?.focus({ preventScroll: true });
         }
       });
     },
-    [activateTool, workspaceId, canvasPageOwner],
+    [activateTool, commitInlineText],
   );
 
   // Created and edited text settles only when the exact committed document is
@@ -8514,7 +8482,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                     onMounted={suppressInlineTextGlyphs}
                     onDraft={previewInlineTextDraft}
                     onCommit={commitInlineText}
-                    onCancel={cancelInlineTextEditing}
+                    onEscape={finishInlineTextEditing}
                   />
                 ) : null}
 
@@ -8646,7 +8614,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
               onMounted={suppressInlineTextGlyphs}
               onDraft={previewInlineTextDraft}
               onCommit={commitInlineText}
-              onCancel={cancelInlineTextEditing}
+              onEscape={finishInlineTextEditing}
             />
           ) : null}
           <div

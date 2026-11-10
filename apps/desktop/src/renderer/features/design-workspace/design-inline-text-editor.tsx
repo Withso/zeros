@@ -89,7 +89,7 @@ export const DesignInlineTextEditor = React.memo(
     onMounted,
     onDraft,
     onCommit,
-    onCancel,
+    onEscape,
   }: {
     edit: InlineTextEdit;
     details: DesignRuntimeNodeDetails | null;
@@ -99,7 +99,11 @@ export const DesignInlineTextEditor = React.memo(
       edit: InlineTextEdit,
       measured: { width: number; height: number },
     ) => void;
-    onCancel: (edit: InlineTextEdit) => void;
+    /** Escape ends the edit and keeps what was typed, like blur. */
+    onEscape: (
+      edit: InlineTextEdit,
+      measured: { width: number; height: number },
+    ) => void;
   }) {
     const editorRef = useRef<HTMLDivElement | null>(null);
     const composingRef = useRef(false);
@@ -257,11 +261,11 @@ export const DesignInlineTextEditor = React.memo(
       }
       publishDraft(editor);
     };
-    const commit = (editor: HTMLDivElement) =>
-      onCommit(edit, {
-        width: Math.max(1, Math.ceil(editor.scrollWidth)),
-        height: Math.max(1, Math.ceil(editor.scrollHeight)),
-      });
+    const measure = (editor: HTMLDivElement) => ({
+      width: Math.max(1, Math.ceil(editor.scrollWidth)),
+      height: Math.max(1, Math.ceil(editor.scrollHeight)),
+    });
+    const commit = (editor: HTMLDivElement) => onCommit(edit, measure(editor));
 
     return (
       <div
@@ -399,7 +403,7 @@ export const DesignInlineTextEditor = React.memo(
           if (composingRef.current) return;
           if (event.key === "Escape") {
             event.preventDefault();
-            onCancel(edit);
+            if (edit.status === "editing") onEscape(edit, measure(event.currentTarget));
           } else if (
             event.key === "Enter" &&
             (event.metaKey || event.ctrlKey) &&

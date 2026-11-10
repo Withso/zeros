@@ -887,10 +887,22 @@ describe("design workspace interaction wiring", () => {
     expect(source).toContain("sessionOwnerKey={motionOverlayOwner}");
   });
 
-  it("returns the one-shot text tool to Select after entering or cancelling inline editing", () => {
+  it("returns the one-shot text tool to Select after entering or finishing inline editing", () => {
     expect(source).toContain("finishInlineTextTool");
-    expect(source).toContain("cancelInlineTextEditing");
+    expect(source).toContain("finishInlineTextEditing");
     expect(source).toContain("event.detail > 1");
+  });
+
+  it("keeps typed text on Escape, as Figma does, instead of discarding it", () => {
+    const editor = readSection("design-inline-text-editor.tsx");
+    // Escape ends the edit through the same commit as blur and Cmd/Ctrl+Enter.
+    expect(editor).toContain(`if (event.key === "Escape") {
+            event.preventDefault();
+            if (edit.status === "editing") onEscape(edit, measure(event.currentTarget));`);
+    expect(editor).not.toContain("onCancel");
+    // The canvas commits, then takes focus back for the next shortcut.
+    expect(source).toContain("void commitInlineText(edit, measured);");
+    expect(source).not.toContain("cancelInlineTextEditing");
   });
 
   it("supports Figma-style frame and text insertion without per-keystroke React state", () => {

@@ -1692,8 +1692,8 @@ original unsnapped geometry writes nothing and preserves authored sizing.
 - **Inline text:** one uncontrolled plaintext editor owns caret, selection,
   composition, and the draft. Latest-wins runtime previews mutate the exact
   text node without broad React publication. Paste strips markup but preserves
-  line breaks; blur or Cmd/Ctrl+Enter commits once; Escape restores the exact
-  text. Blur during IME composition waits for `compositionend`.
+  line breaks; blur, Escape or Cmd/Ctrl+Enter commits once, so Escape keeps
+  what was typed. Blur during IME composition waits for `compositionend`.
 - **Layers:** frames fold independently in one virtualized row list (13px
   names, 14px type glyphs, 16px indent per level). Keyboard, visibility,
   hover, and selection are frame-keyed. Uncached hover reads
