@@ -1,5 +1,5 @@
 import { expect } from "@playwright/test";
-import { designCanvasPoint } from "./ui-smoke-design-helpers.mjs";
+import { designCanvasPoint, openLayersDrawer } from "./ui-smoke-design-helpers.mjs";
 
 async function openDesign(page) {
   await page.setViewportSize({ width: 1440, height: 900 });
@@ -7,6 +7,7 @@ async function openDesign(page) {
     `${new URL(page.url()).origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html`,
     { waitUntil: "networkidle" },
   );
+  await openLayersDrawer(page);
   // Previous workbench scenarios persist their camera. Keep each gesture's
   // hit targets on screen regardless of that caller's viewport and framing.
   await page.evaluate(async () => {
@@ -133,10 +134,14 @@ export async function runDesignCameraHandoffSmoke({ page, check }) {
 
 export async function runDesignInspectorScrubIntegritySmoke({ page, check }) {
   await openDesign(page);
+  // W shows the measured number; its sizing word keeps the mode.
   const width = page.getByRole("textbox", { name: "W", exact: true });
-  await expect(width).toHaveValue("Fill");
+  const widthSizing = page.getByRole("button", { name: /^Width sizing: / });
+  await expect(width).toHaveValue("900");
+  await expect(widthSizing).toHaveAccessibleName("Width sizing: Fill");
   await page.getByRole("button", { name: "Scrub W", exact: true }).click();
-  await expect(width).toHaveValue("Fill");
+  await expect(width).toHaveValue("900");
+  await expect(widthSizing).toHaveAccessibleName("Width sizing: Fill");
   expect(await styleWrites(page)).toBe(0);
 
   const size = page.getByRole("textbox", { name: "Size", exact: true });
@@ -694,6 +699,7 @@ export async function runDesignMotionRetainedSizeSmoke({ page, check }) {
       `${origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html?workbench`,
       { waitUntil: "networkidle" },
     );
+    await openLayersDrawer(page);
     const designTab = page.getByRole("tab", { name: "Design", exact: true });
     await designTab.click();
     const canvas = page.locator(
@@ -729,6 +735,7 @@ export async function runDesignMotionRetainedSizeSmoke({ page, check }) {
       `${origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html`,
       { waitUntil: "networkidle" },
     );
+    await openLayersDrawer(page);
   }
 }
 

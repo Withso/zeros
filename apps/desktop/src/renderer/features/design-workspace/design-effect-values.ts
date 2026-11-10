@@ -569,6 +569,25 @@ export function designEffectsAdd(
   };
 }
 
+/** The Style panel lists shadows and blurs as two sections. */
+export type DesignEffectGroup = "shadow" | "blur";
+
+export function designEffectGroup(kind: DesignEffectKind): DesignEffectGroup {
+  return kind === "layer-blur" || kind === "background-blur" ? "blur" : "shadow";
+}
+
+/** The Blur section's add: a layer blur, else a background blur. A filter the
+ * rows cannot show (`grayscale(1)`) is never replaced. */
+export function designBlurAdd(
+  state: DesignEffectsState,
+): Record<string, string> | null {
+  if (isNone(state.filter))
+    return { filter: formatDesignBlurFilter(DEFAULT_BLUR_RADIUS) };
+  if (isNone(state.backdropFilter))
+    return { "backdrop-filter": formatDesignBlurFilter(DEFAULT_BLUR_RADIUS) };
+  return null;
+}
+
 export function designEffectsRemove(
   state: DesignEffectsState,
   entry: DesignEffectEntry,

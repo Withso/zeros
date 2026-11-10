@@ -2,13 +2,13 @@ import React, { useState } from "react";
 import {
   ArrowDown,
   ArrowRight,
-  ChevronDown,
   Columns3,
   Grid2X2,
   Maximize2,
   Minimize2,
   Minus,
   MoveHorizontal,
+  Percent,
   Rows3,
   Scan,
   SlidersHorizontal,
@@ -33,6 +33,7 @@ import { cn } from "../../shared/ui/cn";
 import {
   InspectorCheckboxRow,
   InspectorGlyph,
+  InspectorGroup,
   InspectorIconButton,
   InspectorSelect,
   type InspectorGlyphName,
@@ -40,11 +41,6 @@ import {
   focusDesignPopoverSurface,
   InspectorPopoverAnchor,
 } from "./design-inspector-kit";
-import {
-  DesignLayoutChildren,
-  DesignLayoutGeometry,
-} from "./design-layout-controls";
-import { designLayoutChildrenSummary } from "./design-layout-children";
 import {
   type DesignLayoutAction,
   type DesignLayoutAxis,
@@ -61,6 +57,8 @@ import {
   designSizingMode,
 } from "./design-auto-layout-values";
 import { readDesignComputedStyle } from "./design-style-values";
+import { designLayerHasMargin } from "./design-style-advanced";
+import { designValuesMixed } from "./design-style-mixed";
 import { useDesignLivePreviewStyles } from "./state/design-live-preview";
 import { designRuntimeLayerLabel } from "./design-layer-label";
 
@@ -77,7 +75,32 @@ interface Props {
   onCommit: (styles: Record<string, string | null>) => void;
   frameSelected?: boolean;
   layoutParents?: readonly DesignRuntimeNodeDetails[];
+  /** How many layers are selected; Mixed needs every one loaded. */
+  selectionCount?: number;
   disabled: boolean;
+}
+
+const SIZING_WORDS = {
+  fixed: "px",
+  relative: "%",
+  hug: "Hug",
+  fill: "Fill",
+} as const;
+
+const SIZING_LABELS = {
+  fixed: "Fixed",
+  relative: "Relative",
+  hug: "Hug",
+  fill: "Fill",
+  custom: "Custom",
+} as const;
+
+/** A size no mode names (auto in normal flow, 12em, calc()) ends in what it
+ * is written as, short enough for the field's end. */
+function customSizingWord(value: string): string {
+  if (value === "auto" || value === "") return "Auto";
+  const unit = /^-?\d*\.?\d+([a-z]+)$/i.exec(value)?.[1];
+  return unit && unit.length <= 3 ? unit : "CSS";
 }
 
 const FLOWS = [
@@ -161,6 +184,7 @@ export function DesignAutoLayoutControls({
   onCommit,
   frameSelected,
   layoutParents,
+  selectionCount = 1,
   disabled,
 }: Props) {
   const liveStyles = useDesignLivePreviewStyles(
@@ -182,6 +206,10 @@ export function DesignAutoLayoutControls({
   const value = (property: string, fallback = "") =>
     readDesignComputedStyle(details.styles, property) || fallback;
   const flow = designAutoLayoutFlow(details);
+  const flowMixed = designValuesMixed(
+    (layoutParents ?? [details]).map(designAutoLayoutFlow),
+    selectionCount,
+  );
   const autoLayout = flow !== "none";
   const textLayer = designRuntimeLayerLabel(details) === "Text";
   const container = !textLayer && designRuntimeLayerLabel(details) === "Frame";
@@ -189,7 +217,9 @@ export function DesignAutoLayoutControls({
     !frameSelected &&
     (layoutParents ?? [details]).every(canFillDesignContainer);
   const hugAllowed = (layoutParents ?? [details]).every(canHugDesignContents);
-  const resizing = autoLayout || fillAllowed;
+  // Relative needs a parent to size against; the canvas sizes a frame root.
+  const relativeAllowed =
+    !frameSelected && (layoutParents ?? [details]).every((node) => !!node.layout?.parentId);
   const [addedLimits, setAddedLimits] = useState<string[]>([]);
   /** null follows the values (unequal sides open independently); a click
    * records the user's choice without rewriting any padding. */
@@ -200,6 +230,14 @@ export function DesignAutoLayoutControls({
     value("padding-left", "0px") !== value("padding-right", "0px") ||
     value("padding-top", "0px") !== value("padding-bottom", "0px");
   const separatePadding = independentPadding ?? paddingDiffers;
+  const [independentMargin, setIndependentMargin] = useState<boolean | null>(null);
+  const margins = ["margin-left", "margin-right", "margin-top", "margin-bottom"].map(
+    (property) => value(property, "0px"),
+  );
+  // Margin shows only when the layer has one; More styles lists a zero one.
+  const hasMargin = designLayerHasMargin(details);
+  const separateMargin =
+    independentMargin ?? (margins[0] !== margins[1] || margins[2] !== margins[3]);
   const horizontalMixed =
     value("padding-left", "0px") !== value("padding-right", "0px");
   const verticalMixed =
@@ -241,92 +279,108 @@ export function DesignAutoLayoutControls({
         placeholder: mixed ? "Mixed" : undefined,
       },
     );
-  const resize = (axis: DesignLayoutAxis, field: React.ReactNode) => {
-    // Keep the field mounted when a reparent changes resizing eligibility;
-    // a late layout snapshot must not discard the next focused numeric draft.
+  const sizingWord = (mode: ReturnType<typeof designSizingMode>, axis: DesignLayoutAxis) =>
+    mode === "custom"
+      ? customSizingWord(value(axis === "x" ? "width" : "height"))
+      : SIZING_WORDS[mode];
+  /** W or H, ending in the word for its sizing (px, %, Hug, Fill), which opens
+   * that axis's sizing menu. The field shows the measured number in every
+   * mode; typing one makes the size fixed. */
+  const resize = (axis: DesignLayoutAxis) => {
     const dimension = axis === "x" ? "width" : "height";
     const measuredMode = designSizingMode(details, axis);
     const mode =
       frameSelected && measuredMode === "custom" ? "fixed" : measuredMode;
+    // Differing modes check nothing in the menu and show no word for one.
+    const modeMixed = designValuesMixed(
+      (layoutParents ?? [details]).map((node) => designSizingMode(node, axis)),
+      selectionCount,
+    );
+    const label = axis === "x" ? "W" : "H";
+    const relativeValue =
+      (axis === "x" ? details.layout?.widthValue : details.layout?.heightValue) ?? "";
     return (
-      <div className="zd-size-control relative min-w-0">
-        {resizing && (mode === "hug" || mode === "fill")
-          ? renderField(axis === "x" ? "W" : "H", dimension, value(dimension), {
+      <div className="zd-size-control relative min-w-0" data-design-size-axis={axis}>
+        {mode === "relative"
+          ? renderField(label, dimension, relativeValue, { whole: true, compact: true })
+          : renderField(label, dimension, value(dimension), {
               whole: true,
               compact: true,
               geometry: true,
-              sizing: mode,
-            })
-          : field}
-        {resizing && (
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <button
-                type="button"
-                className="zd-size-trigger"
-                disabled={disabled}
-                aria-label={`${axis === "x" ? "Width" : "Height"} resizing`}
-              >
-                <ChevronDown />
-              </button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="min-w-48">
-              <DropdownMenuRadioGroup
-                value={mode}
-                onValueChange={(mode) =>
-                  onAction({
-                    type: "sizing",
-                    axis,
-                    mode: mode as "fixed" | "hug" | "fill",
-                  })
-                }
-              >
-                {mode === "custom" && (
-                  <DropdownMenuRadioItem value="custom" disabled>
-                    Custom sizing
-                  </DropdownMenuRadioItem>
-                )}
-                <DropdownMenuRadioItem value="fixed">
-                  <Maximize2 />
-                  Fixed {dimension}
+            })}
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <button
+              type="button"
+              className="zd-size-trigger"
+              disabled={disabled}
+              aria-label={`${axis === "x" ? "Width" : "Height"} sizing: ${modeMixed ? "Mixed" : SIZING_LABELS[mode]}`}
+            >
+              {modeMixed ? "–" : sizingWord(mode, axis)}
+            </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="min-w-48">
+            <DropdownMenuRadioGroup
+              value={modeMixed ? "" : mode}
+              onValueChange={(next) =>
+                onAction({
+                  type: "sizing",
+                  axis,
+                  mode: next as "fixed" | "relative" | "hug" | "fill",
+                })
+              }
+            >
+              {mode === "custom" && !modeMixed && (
+                <DropdownMenuRadioItem value="custom" disabled>
+                  Custom
                 </DropdownMenuRadioItem>
-                {hugAllowed && (
-                  <DropdownMenuRadioItem value="hug">
-                    <Minimize2 />
-                    Hug contents
-                  </DropdownMenuRadioItem>
-                )}
-                {fillAllowed && (
-                  <DropdownMenuRadioItem value="fill">
-                    <Scan />
-                    Fill container
-                  </DropdownMenuRadioItem>
-                )}
-              </DropdownMenuRadioGroup>
-              <DropdownMenuSeparator />
-              {(["min", "max"] as const).map((limit) => {
-                const property = `${limit}-${dimension}`;
-                const shown = hasLimit(property);
-                return (
-                  <DropdownMenuItem
-                    key={limit}
-                    onSelect={() => {
-                      if (shown) {
-                        setAddedLimits((limits) =>
-                          limits.filter((entry) => entry !== property),
-                        );
-                        onCommit({ [property]: null });
-                      } else setAddedLimits((limits) => [...limits, property]);
-                    }}
-                  >
-                    {shown ? "Remove" : "Add"} {limit} {dimension}
-                    {shown ? "" : "…"}
-                  </DropdownMenuItem>
-                );
-              })}
-            </DropdownMenuContent>
-          </DropdownMenu>
-        )}
+              )}
+              <DropdownMenuRadioItem value="fixed">
+                <Maximize2 />
+                Fixed
+              </DropdownMenuRadioItem>
+              {relativeAllowed && (
+                <DropdownMenuRadioItem value="relative">
+                  <Percent />
+                  Relative
+                </DropdownMenuRadioItem>
+              )}
+              {hugAllowed && (
+                <DropdownMenuRadioItem value="hug">
+                  <Minimize2 />
+                  Hug
+                </DropdownMenuRadioItem>
+              )}
+              {fillAllowed && (
+                <DropdownMenuRadioItem value="fill">
+                  <Scan />
+                  Fill
+                </DropdownMenuRadioItem>
+              )}
+            </DropdownMenuRadioGroup>
+            <DropdownMenuSeparator />
+            {(["min", "max"] as const).map((limit) => {
+              const property = `${limit}-${dimension}`;
+              const shown = hasLimit(property);
+              return (
+                <DropdownMenuItem
+                  key={limit}
+                  onSelect={() => {
+                    if (shown) {
+                      setAddedLimits((limits) =>
+                        limits.filter((entry) => entry !== property),
+                      );
+                      onCommit({ [property]: null });
+                    } else setAddedLimits((limits) => [...limits, property]);
+                  }}
+                >
+                  {shown ? "Remove" : "Add"} {limit} {dimension}
+                  {shown ? "" : "…"}
+                </DropdownMenuItem>
+              );
+            })}
+          </DropdownMenuContent>
+        </DropdownMenu>
       </div>
     );
   };
@@ -433,20 +487,96 @@ export function DesignAutoLayoutControls({
   ) : null;
 
   return (
-    <div data-design-auto-layout className="flex flex-col gap-2">
-      <DesignLayoutGeometry
-        details={details}
-        renderField={renderField}
-        disabled={disabled}
-        renderSize={resize}
-        onAction={onAction}
-      />
-      {resizing && limits.length > 0 ? (
-        // Limits sit under the W/H column they constrain, on the geometry's
-        // own three-column track, with their remove action inside the field.
+    <div data-design-auto-layout className="flex flex-col gap-3">
+      {container ? (
+        <InspectorGroup label="Flow">
+        <Popover>
+          <div className="relative flex min-w-0 items-center gap-2">
+            <div
+              role="group"
+              aria-label="Auto layout"
+              className="zd-segmented min-w-0 flex-1"
+            >
+              {FLOWS.map(([key, label, Icon]) => (
+                <Tooltip
+                  key={key}
+                  label={
+                    key === "row" || key === "column"
+                      ? `${label} auto layout`
+                      : key === "none"
+                        ? "No auto layout"
+                        : "Grid"
+                  }
+                >
+                  <button
+                    type="button"
+                    className="zd-segment"
+                    disabled={disabled}
+                    aria-label={`Auto layout: ${label}`}
+                    aria-pressed={!flowMixed && flow === key}
+                    onClick={() => onAction({ type: "auto-layout", flow: key })}
+                  >
+                    <Icon />
+                  </button>
+                </Tooltip>
+              ))}
+            </div>
+            {autoLayout && flow !== "grid" ? (
+              <InspectorIconButton
+                label="Wrap children"
+                tooltip="Wrap"
+                size="row"
+                pressed={wrapped}
+                disabled={disabled}
+                onClick={() =>
+                  onCommit({ "flex-wrap": wrapped ? "nowrap" : "wrap" })
+                }
+              >
+                <WrapText />
+              </InspectorIconButton>
+            ) : null}
+            {layoutSettingsTrigger}
+            <InspectorPopoverAnchor />
+          </div>
+          {layoutSettingsContent}
+        </Popover>
+          {flow === "grid" ? (
+            <div className="grid grid-cols-2 gap-2">
+              <TrackCount
+                label="Columns"
+                icon={<Columns3 className="size-3.5" />}
+                value={designGridTrackCount(value("grid-template-columns"))}
+                disabled={disabled}
+                onCommit={(count) =>
+                  onCommit({
+                    "grid-template-columns": `repeat(${count}, minmax(0, 1fr))`,
+                  })
+                }
+              />
+              <TrackCount
+                label="Rows"
+                icon={<Rows3 className="size-3.5" />}
+                value={designGridTrackCount(value("grid-template-rows"))}
+                disabled={disabled}
+                onCommit={(count) =>
+                  onCommit({
+                    "grid-template-rows": `repeat(${count}, minmax(0, 1fr))`,
+                  })
+                }
+              />
+            </div>
+          ) : null}
+        </InspectorGroup>
+      ) : null}
+      <InspectorGroup label="Size">
+        <div className="grid grid-cols-2 gap-2">
+          {resize("x")}
+          {resize("y")}
+        </div>
+        {limits.length > 0 ? (
         <div
           data-design-layout-limits=""
-          className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(72px,1fr)] gap-2"
+          className="grid grid-cols-2 gap-2"
         >
           {limits.map((property) => (
             <div
@@ -489,88 +619,10 @@ export function DesignAutoLayoutControls({
             </div>
           ))}
         </div>
-      ) : null}
-      {container ? (
-        // The row anchors Layout settings, which opens beside the inspector.
-        <Popover>
-          <div className="relative flex min-w-0 items-center gap-2">
-            <div
-              role="group"
-              aria-label="Auto layout"
-              className="zd-segmented min-w-0 flex-1"
-            >
-              {FLOWS.map(([key, label, Icon]) => (
-                <Tooltip
-                  key={key}
-                  label={
-                    key === "row" || key === "column"
-                      ? `${label} auto layout`
-                      : key === "none"
-                        ? "No auto layout"
-                        : "Grid"
-                  }
-                >
-                  <button
-                    type="button"
-                    className="zd-segment"
-                    disabled={disabled}
-                    aria-label={`Auto layout: ${label}`}
-                    aria-pressed={flow === key}
-                    onClick={() => onAction({ type: "auto-layout", flow: key })}
-                  >
-                    <Icon />
-                  </button>
-                </Tooltip>
-              ))}
-            </div>
-            {autoLayout && flow !== "grid" ? (
-              <InspectorIconButton
-                label="Wrap children"
-                tooltip="Wrap"
-                size="row"
-                pressed={wrapped}
-                disabled={disabled}
-                onClick={() =>
-                  onCommit({ "flex-wrap": wrapped ? "nowrap" : "wrap" })
-                }
-              >
-                <WrapText />
-              </InspectorIconButton>
-            ) : null}
-            {layoutSettingsTrigger}
-            <InspectorPopoverAnchor />
-          </div>
-          {layoutSettingsContent}
-        </Popover>
-      ) : null}
+        ) : null}
+      </InspectorGroup>
       {autoLayout ? (
-        <>
-          {flow === "grid" ? (
-            <div className="grid grid-cols-2 gap-2">
-              <TrackCount
-                label="Columns"
-                icon={<Columns3 className="size-3.5" />}
-                value={designGridTrackCount(value("grid-template-columns"))}
-                disabled={disabled}
-                onCommit={(count) =>
-                  onCommit({
-                    "grid-template-columns": `repeat(${count}, minmax(0, 1fr))`,
-                  })
-                }
-              />
-              <TrackCount
-                label="Rows"
-                icon={<Rows3 className="size-3.5" />}
-                value={designGridTrackCount(value("grid-template-rows"))}
-                disabled={disabled}
-                onCommit={(count) =>
-                  onCommit({
-                    "grid-template-rows": `repeat(${count}, minmax(0, 1fr))`,
-                  })
-                }
-              />
-            </div>
-          ) : null}
+        <InspectorGroup label="Alignment">
           <div className="grid grid-cols-[64px_minmax(0,1fr)] items-start gap-2">
             <div
               role="group"
@@ -684,6 +736,10 @@ export function DesignAutoLayoutControls({
                 : null}
             </div>
           </div>
+        </InspectorGroup>
+      ) : null}
+      {autoLayout ? (
+        <InspectorGroup label="Padding">
           <div
             className={cn(
               "grid min-w-0 gap-2",
@@ -754,23 +810,43 @@ export function DesignAutoLayoutControls({
               </>
             ) : null}
           </div>
-        </>
-      ) : (
-        <DesignLayoutChildren
-          details={details}
-          disabled={disabled}
-          frameSelected={frameSelected}
-          childrenLayout={
-            layoutParents
-              ? designLayoutChildrenSummary(layoutParents)
-              : details.childrenLayout
-          }
-          canDistribute={layoutParents?.some(
-            (parent) => (parent.childrenLayout?.nodeIds.length ?? 0) >= 3,
-          )}
-          onAction={onAction}
-        />
-      )}
+        </InspectorGroup>
+      ) : null}
+      {hasMargin ? (
+        <InspectorGroup label="Margin" data-design-layout-margin="">
+          <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_minmax(0,1fr)_28px] gap-2">
+            {separateMargin ? (
+              <>
+                {field("Left margin", "margin-left", "0px", undefined, "padding-left")}
+                {field("Top margin", "margin-top", "0px", undefined, "padding-top")}
+              </>
+            ) : (
+              <>
+                {field("Horizontal margin", "margin-left", "0px", ["margin-right"], "padding-x",
+                  value("margin-left", "0px") !== value("margin-right", "0px"))}
+                {field("Vertical margin", "margin-top", "0px", ["margin-bottom"], "padding-y",
+                  value("margin-top", "0px") !== value("margin-bottom", "0px"))}
+              </>
+            )}
+            <InspectorIconButton
+              label="Independent margin"
+              tooltip={separateMargin ? "Linked margin" : "Independent margin"}
+              size="row"
+              pressed={separateMargin}
+              disabled={disabled}
+              onClick={() => setIndependentMargin(!separateMargin)}
+            >
+              <InspectorGlyph name="corners" />
+            </InspectorIconButton>
+            {separateMargin ? (
+              <>
+                {field("Right margin", "margin-right", "0px", undefined, "padding-right")}
+                {field("Bottom margin", "margin-bottom", "0px", undefined, "padding-bottom")}
+              </>
+            ) : null}
+          </div>
+        </InspectorGroup>
+      ) : null}
       {container ? (
         <InspectorCheckboxRow
           label="Clip content"

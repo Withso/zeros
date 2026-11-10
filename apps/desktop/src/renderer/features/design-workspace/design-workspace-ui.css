@@ -316,7 +316,44 @@
   padding: 0 12px 12px;
 }
 
-/* Only the sections in use show; one compact Ghost button adds the rest. */
+/* A small label over a group of controls inside a section: Flow, Size,
+ * Alignment, Padding, … It reads as the field labels do, a tier below the
+ * section title. */
+.zd-group {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.zd-group-header {
+  display: flex;
+  height: 16px;
+  min-width: 0;
+  align-items: center;
+  gap: 2px;
+}
+
+.zd-group-label {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  color: var(--fg3);
+  font-size: 12px;
+  line-height: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* A one-line note inside a section, such as where auto layout placed a layer. */
+.zd-section-note {
+  color: var(--fg3);
+  font-size: 12px;
+  line-height: 16px;
+}
+
+/* Typography and Transform on a layer that does not use them are added from
+ * this one compact Ghost button. */
 .zd-add-property-row {
   display: flex;
   min-width: 0;
@@ -396,36 +433,36 @@
   opacity: 0.5;
 }
 
-/* W/H carry their resizing menu inside the field's trailing edge; in Motion
- * mode the keyframe diamond sits just before it. */
+/* W/H end in the word for their sizing (px, %, Hug, Fill), which opens the
+ * sizing menu; the value keeps room for four digits in the 280px panel. In
+ * Motion mode the keyframe diamond sits just before the word. */
 .zd-size-control [data-design-inspector-field] input {
-  padding-right: 24px;
+  padding-right: 36px;
 }
 
 .zd-size-control .zd-field-motion {
-  right: 23px;
+  right: 35px;
 }
 
-/* An in-field trigger is 20px, 3px from the field's end, and changes only its
- * colour: the field's own fill already answers the pointer. */
+/* The word is a 20px in-field button, 3px from the field's end, and changes
+ * only its colour: the field's own fill already answers the pointer. */
 .zd-size-trigger {
   position: absolute;
   top: 4px;
   right: 3px;
   display: inline-flex;
-  width: 20px;
+  min-width: 20px;
   height: 20px;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-end;
+  padding-inline: 4px;
   border: 0;
   border-radius: var(--radius-sm);
   background: transparent;
   color: var(--fg3);
-}
-
-.zd-size-trigger svg {
-  width: 12px;
-  height: 12px;
+  font-size: 12px;
+  line-height: 16px;
+  white-space: nowrap;
 }
 
 .zd-size-trigger:hover:not(:disabled),
@@ -600,25 +637,6 @@
 /* Legacy control recipes still used by editors that have not moved onto
  * .zd-field. Both resolve to the same soft field surface. */
 
-/* The inspector column is a size container: geometry reflows from three
- * columns to two below 256px so values and sizing menus stay readable. */
-[data-design-style-editor] {
-  container: design-style / inline-size;
-}
-
-@container design-style (max-width: 255px) {
-  [data-design-layout-geometry] {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-  [data-design-layout-geometry] > :nth-child(3) {
-    grid-column: 1;
-    grid-row: 3;
-  }
-  [data-design-layout-geometry] > :nth-child(6) {
-    grid-column: 2;
-    grid-row: 3;
-  }
-}
 
 .zd-design-alignment-point[aria-pressed="true"] {
   color: var(--design-selection-stroke);
@@ -889,8 +907,9 @@
   border-left: 1px solid var(--border1);
 }
 
-/* Layers owns the top of the panel at a height the user drags, bounded so
- * the inspector below always keeps its header and a section in view. */
+/* The open Layers drawer takes the height the person drags from its top
+ * edge, bounded so the Style panel above keeps its header and a section in
+ * view. Closed, it is its header row alone. */
 .zd-design-layers-slot {
   height: clamp(
     96px,

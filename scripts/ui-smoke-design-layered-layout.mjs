@@ -1,4 +1,5 @@
 import { expect } from "@playwright/test";
+import { openLayersDrawer } from "./ui-smoke-design-helpers.mjs";
 
 /** A CSS-authored background and flow content must survive actual inspector
  * actions, source transactions, layer rename, history and whole-frame Play. */
@@ -9,6 +10,7 @@ export async function runDesignLayeredLayoutSmoke({ page, check }) {
     `${origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html?layeredLayout&layoutGestures`,
     { waitUntil: "networkidle" },
   );
+  await openLayersDrawer(page);
   const frame = page.locator('[data-design-frame="home.html"]');
   const frameRow = page.locator('[data-design-frame-row="home.html"]');
   const content = page.frameLocator(

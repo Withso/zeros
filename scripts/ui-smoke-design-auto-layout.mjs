@@ -1,5 +1,6 @@
 import { expect } from "@playwright/test";
 import { runDesignLayeredLayoutSmoke } from "./ui-smoke-design-layered-layout.mjs";
+import { openLayersDrawer } from "./ui-smoke-design-helpers.mjs";
 
 // Real runtime measurements prove resizing behavior; no authored Design files
 // are touched. The document and its mutation/history lane are the app harness.
@@ -11,6 +12,7 @@ export async function runDesignAutoLayoutSmoke({ page, check }) {
     `${origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html?autoLayout=1`,
     { waitUntil: "networkidle" },
   );
+  await openLayersDrawer(page);
   const layers = page.locator("[data-design-sidebar-panel]");
   const layout = page.locator("[data-design-layout-section]");
   const editor = page.locator("[data-design-style-editor]");
@@ -23,10 +25,12 @@ export async function runDesignAutoLayoutSmoke({ page, check }) {
     await layers.locator(`[data-design-layer-id="${id}"]`).click();
     await expect(editor).toBeVisible();
   };
+  // W and H end in their sizing word (px, %, Hug, Fill), which opens the
+  // axis's sizing menu; its accessible name carries the current mode.
+  const sizingButton = (dimension) =>
+    layout.getByRole("button", { name: new RegExp(`^${dimension} sizing: `) });
   const sizing = async (dimension, name) => {
-    await layout
-      .getByRole("button", { name: `${dimension} resizing`, exact: true })
-      .click();
+    await sizingButton(dimension).click();
     await page.getByRole("menuitemradio", { name, exact: true }).click();
   };
   // Seed both the saved fixture and iframe from the same source. Patching only
@@ -38,12 +42,11 @@ export async function runDesignAutoLayoutSmoke({ page, check }) {
     layout.getByRole("button", { name: "Auto layout: None", exact: true }),
   ).toHaveAttribute("aria-pressed", "true");
   check(
-    "None keeps geometry visible and hides automatic padding, gap and sizing limits",
+    "None keeps geometry and its fixed sizing word visible and hides automatic padding, gap and sizing limits",
     (await layout.getByLabel("W", { exact: true }).count()) === 1 &&
       (await layout.getByLabel("Gap", { exact: true }).count()) === 0 &&
-      (await layout
-        .getByRole("button", { name: "Width resizing", exact: true })
-        .count()) === 0 &&
+      (await sizingButton("Width").getAttribute("aria-label")) ===
+        "Width sizing: Fixed" &&
       (await layout.getByText("Sizing limits", { exact: true }).count()) === 0,
   );
   await layout
@@ -62,20 +65,20 @@ export async function runDesignAutoLayoutSmoke({ page, check }) {
     "enabling auto layout includes previously drawn children in flow",
     true,
   );
-  await sizing("Width", "Hug contents");
+  await sizing("Width", "Hug");
   await expect
     .poll(() =>
       hero.evaluate((element) => element.getBoundingClientRect().width),
     )
     .toBe(80);
-  await layout
-    .getByRole("button", { name: "Width resizing", exact: true })
-    .click();
+  await sizingButton("Width").click();
   check(
-    "parent resizing exposes Hug and optional limits without Fill container",
-    (await page
-      .getByRole("menuitemradio", { name: "Fill container", exact: true })
-      .count()) === 0,
+    "parent resizing exposes Hug and optional limits without Fill",
+    (await page.getByRole("menuitemradio", { name: "Hug", exact: true }).count()) ===
+      1 &&
+      (await page
+        .getByRole("menuitemradio", { name: "Fill", exact: true })
+        .count()) === 0,
   );
   await page
     .getByRole("menuitem", { name: "Add min width…", exact: true })
@@ -100,7 +103,7 @@ export async function runDesignAutoLayoutSmoke({ page, check }) {
   await layout
     .getByRole("button", { name: "Remove min width", exact: true })
     .click();
-  await sizing("Width", "Fixed width");
+  await sizing("Width", "Fixed");
   await layout.getByLabel("W", { exact: true }).fill("300");
   await layout.getByLabel("W", { exact: true }).press("Enter");
   await layout.getByLabel("Horizontal", { exact: true }).fill("16");
@@ -145,7 +148,7 @@ export async function runDesignAutoLayoutSmoke({ page, check }) {
   await expect
     .poll(() => heading.evaluate((element) => getComputedStyle(element).color))
     .toBe("rgb(17, 34, 51)");
-  await sizing("Width", "Fill container");
+  await sizing("Width", "Fill");
   await expect
     .poll(() =>
       heading.evaluate((element) => element.getBoundingClientRect().width),
@@ -160,13 +163,9 @@ export async function runDesignAutoLayoutSmoke({ page, check }) {
         getComputedStyle(element).backgroundColor === "rgba(0, 0, 0, 0)",
     ),
   );
-  await layout
-    .getByRole("button", { name: "Height resizing", exact: true })
-    .click();
+  await sizingButton("Height").click();
   await page.keyboard.press("Escape");
-  await expect(
-    layout.getByRole("button", { name: "Height resizing", exact: true }),
-  ).toBeFocused();
+  await expect(sizingButton("Height")).toBeFocused();
   await select("home-hero");
   await layout.getByLabel("Gap", { exact: true }).fill("12");
   await layout.getByLabel("Gap", { exact: true }).press("Enter");
@@ -233,7 +232,7 @@ export async function runDesignAutoLayoutSmoke({ page, check }) {
     )
     .toBe("1");
   await select("home-heading");
-  await sizing("Width", "Fixed width");
+  await sizing("Width", "Fixed");
   await expect
     .poll(() =>
       heading.evaluate((element) => getComputedStyle(element).flexGrow),
@@ -249,7 +248,7 @@ export async function runDesignAutoLayoutSmoke({ page, check }) {
     .poll(() => hero.evaluate((element) => getComputedStyle(element).display))
     .toBe("grid");
   await select("home-heading");
-  await sizing("Width", "Fill container");
+  await sizing("Width", "Fill");
   await expect
     .poll(() => heading.evaluate((element) => element.style.justifySelf))
     .toBe("stretch");
@@ -288,6 +287,7 @@ export async function runDesignAutoLayoutSmoke({ page, check }) {
     `${origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html`,
     { waitUntil: "networkidle" },
   );
+  await openLayersDrawer(page);
   const root = runtime.locator('[data-oid="home-main"]');
   await root.evaluate((element) => {
     element.style.cssText =
@@ -298,7 +298,7 @@ export async function runDesignAutoLayoutSmoke({ page, check }) {
     });
   });
   await layers.locator('[data-design-frame-row="home.html"]').click();
-  await sizing("Width", "Hug contents");
+  await sizing("Width", "Hug");
   const canvas = page.locator('[data-design-frame="home.html"]');
   await expect
     .poll(() => canvas.evaluate((el) => parseFloat(el.style.width)))
@@ -367,8 +367,10 @@ export async function runDesignNestedOffsetsSmoke({ page, check }) {
     `${origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html?nestedOffsets=1`,
     { waitUntil: "networkidle" },
   );
+  await openLayersDrawer(page);
   const layers = page.locator("[data-design-sidebar-panel]");
   const layout = page.locator("[data-design-layout-section]");
+  const position = page.locator("[data-design-position-section]");
   const editor = page.locator("[data-design-style-editor]");
   const runtime = page.frameLocator(
     '[data-design-frame="home.html"] iframe[data-design-document-buffer="displayed"][data-design-document-ready]',
@@ -379,8 +381,8 @@ export async function runDesignNestedOffsetsSmoke({ page, check }) {
     await expect(editor).toBeVisible();
   };
   await select("home-heading");
-  await expect(layout.getByLabel("X", { exact: true })).toHaveValue("66");
-  await expect(layout.getByLabel("Y", { exact: true })).toHaveValue("223");
+  await expect(position.getByLabel("X", { exact: true })).toHaveValue("66");
+  await expect(position.getByLabel("Y", { exact: true })).toHaveValue("223");
   check("a layer an older nesting placed by a translate reads the X and Y it is drawn at", true);
 
   await select("home-hero");
@@ -413,8 +415,8 @@ export async function runDesignNestedOffsetsSmoke({ page, check }) {
     })
     .toBe(true);
   await select("home-heading");
-  await expect(layout.getByLabel("X", { exact: true })).toHaveValue("0");
-  await expect(layout.getByLabel("Y", { exact: true })).toHaveValue("0");
+  await expect(position.getByLabel("X", { exact: true })).toHaveValue("0");
+  await expect(position.getByLabel("Y", { exact: true })).toHaveValue("0");
   check("vertical auto layout stacks nested frames from the parent's top-left, without their old offsets", true);
 
   // The frame itself is a document: nothing past its edges is drawn on the

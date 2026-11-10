@@ -1,7 +1,7 @@
 // Inline-tool regressions use the real inspector and the layout/history harness.
 // Only camera setup uses the UI store; document setup never patches the iframe,
 // runtime details, or snapshot caches. Each subscenario starts with a fresh source.
-import { designFrameElementBox } from "./ui-smoke-design-helpers.mjs";
+import { designFrameElementBox, openLayersDrawer } from "./ui-smoke-design-helpers.mjs";
 
 export async function runDesignInlineToolsSmoke({ page, waitFor, check }) {
   const origin = new URL(page.url()).origin;
@@ -201,6 +201,7 @@ export async function runDesignInlineToolsSmoke({ page, waitFor, check }) {
   async function reset() {
     await release();
     await page.goto(url, { waitUntil: "networkidle", timeout: 30_000 });
+    await openLayersDrawer(page);
     await node().waitFor({ timeout: 10_000 });
     await select("home-hero");
     await camera(1);
@@ -1260,10 +1261,10 @@ export async function runDesignInlineToolsSmoke({ page, waitFor, check }) {
           await css({ height: "260px" }, "home-heading");
           await select("home-hero");
           await layout
-            .getByRole("button", { name: "Height resizing", exact: true })
+            .getByRole("button", { name: /^Height sizing: / })
             .click();
           await page
-            .getByRole("menuitemradio", { name: "Hug contents", exact: true })
+            .getByRole("menuitemradio", { name: "Hug", exact: true })
             .click();
           await pixels("width", 600);
           await pixels("height", 300);
@@ -2263,10 +2264,10 @@ export async function runDesignInlineToolsSmoke({ page, waitFor, check }) {
     );
     const hero = await geometry("home-hero");
     await layout
-      .getByRole("button", { name: "Height resizing", exact: true })
+      .getByRole("button", { name: /^Height sizing: / })
       .click();
     await page
-      .getByRole("menuitemradio", { name: "Hug contents", exact: true })
+      .getByRole("menuitemradio", { name: "Hug", exact: true })
       .click();
     const hugged = await verify(
       frameSnapshot,

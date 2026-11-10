@@ -26,6 +26,10 @@ describe("Design layout smoke synchronization", () => {
     };
     const locator = {
       locator: () => locator,
+      first: () => locator,
+      // The Layers drawer helper waits for the fold and reads it as open.
+      waitFor: async () => {},
+      getAttribute: async () => "true",
       getByRole: () => locator,
       getByLabel: () => locator,
       getByText: () => locator,
@@ -44,7 +48,10 @@ describe("Design layout smoke synchronization", () => {
       url: () => "http://127.0.0.1:4100/harness.html",
       goto: async () => {},
       locator: () => locator,
+      // The constraint select's options are portaled to the page.
+      getByRole: () => locator,
       frameLocator: () => locator,
+      keyboard: { press: async () => {} },
       // Authored frame/runtime readback confirms only the completed save.
       evaluate: async () => committed,
     };

@@ -1,3 +1,4 @@
+import { openLayersDrawer } from "./ui-smoke-design-helpers.mjs";
 // Layout-specific browser checks use the real inspector, runtime, and mutation
 // lane. The fixture is reset by the caller before the broader workspace smoke.
 export async function runDesignLayoutSmoke({ page, waitFor, check }) {
@@ -6,8 +7,10 @@ export async function runDesignLayoutSmoke({ page, waitFor, check }) {
     `${origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html`,
     { waitUntil: "networkidle" },
   );
+  await openLayersDrawer(page);
   const layers = page.locator("[data-design-sidebar-panel]");
   const layout = page.locator("[data-design-layout-section]");
+  const position = page.locator("[data-design-position-section]");
   await page
     .locator('[data-design-frame="home.html"] [data-design-frame-label]')
     .click();
@@ -18,12 +21,16 @@ export async function runDesignLayoutSmoke({ page, waitFor, check }) {
       .count()) === 1,
   );
   await layers.locator('[data-design-layer-id="home-heading"]').click();
+  await layout.getByRole("button", { name: "More layout actions" }).click();
+  const childActions = await page
+    .getByRole("menuitem", { name: /^Align children / })
+    .count();
+  await page.keyboard.press("Escape");
   check(
-    "an empty layer hides both child alignment and constraints",
-    (await layout
-      .getByRole("button", { name: "Align left", exact: true })
-      .count()) === 0 &&
-      (await layout.locator("[data-design-layout-constraints]").count()) === 0,
+    "an empty layer its parent's auto layout places offers no child actions and no constraints",
+    childActions === 0 &&
+      (await position.locator("[data-design-position-placed]").count()) === 1 &&
+      (await position.locator("[data-design-layout-constraints]").count()) === 0,
   );
   const runtime = page.frameLocator(
     '[data-design-frame="home.html"] iframe[data-design-document-buffer="displayed"][data-design-document-ready]',
@@ -68,29 +75,33 @@ export async function runDesignLayoutSmoke({ page, waitFor, check }) {
   });
   await waitFor(
     async () =>
-      (await layout.getByLabel("X", { exact: true }).inputValue()) === "40",
+      (await position.getByLabel("X", { exact: true }).inputValue()) === "40",
     "layout-rounded-readback",
   );
   check(
-    "Layout has a fixed plain header and two compact geometry rows",
-    (await layout.locator("h3").textContent()) === "Layout" &&
-      (await layout
-        .getByRole("button", { name: /Collapse Layout|Expand Layout/ })
+    "Position and Layout have fixed plain headers and compact geometry rows",
+    (await position.locator("h3").textContent()) === "Position" &&
+      (await layout.locator("h3").textContent()) === "Layout" &&
+      (await page
+        .getByRole("button", {
+          name: /Collapse (Layout|Position)|Expand (Layout|Position)/,
+        })
         .count()) === 0 &&
       (await layout.getByText("Position & size", { exact: true }).count()) ===
         0 &&
-      (await layout.locator("[data-design-layout-geometry] input").count()) ===
-        5,
+      (await position.locator("[data-design-layout-geometry] input").count()) ===
+        3 &&
+      (await layout.locator("[data-design-size-axis] input").count()) === 2,
   );
   check(
-    "Layout presents integer coordinates, dimensions, and rotation",
-    (await layout.getByLabel("Y", { exact: true }).inputValue()) === "30" &&
+    "Position and Layout present integer coordinates, dimensions, and rotation",
+    (await position.getByLabel("Y", { exact: true }).inputValue()) === "30" &&
       (await layout.getByLabel("W", { exact: true }).inputValue()) === "100" &&
       (await layout.getByLabel("H", { exact: true }).inputValue()) === "60" &&
-      (await layout.getByLabel("Rotation", { exact: true }).inputValue()) ===
+      (await position.getByLabel("Rotation", { exact: true }).inputValue()) ===
         "10",
   );
-  const x = layout.getByLabel("X", { exact: true });
+  const x = position.getByLabel("X", { exact: true });
   await x.focus();
   await x.press("Tab");
   check(
@@ -112,7 +123,7 @@ export async function runDesignLayoutSmoke({ page, waitFor, check }) {
       "layout-integer-commit",
     ),
   );
-  await layout
+  await position
     .getByRole("button", { name: "Rotate 90° clockwise" })
     .evaluate((button) => {
       for (let index = 0; index < 4; index++) button.click();
@@ -129,7 +140,7 @@ export async function runDesignLayoutSmoke({ page, waitFor, check }) {
       "layout-repeat-rotate",
     ),
   );
-  await layout
+  await position
     .getByRole("button", { name: "Flip horizontal", exact: true })
     .click();
   check(
@@ -143,10 +154,10 @@ export async function runDesignLayoutSmoke({ page, waitFor, check }) {
       "layout-flip-x",
     ),
   );
-  await layout
+  await position
     .getByRole("button", { name: "Flip horizontal", exact: true })
     .click();
-  await layout
+  await position
     .getByRole("button", { name: "Flip vertical", exact: true })
     .click();
   check(
@@ -156,14 +167,22 @@ export async function runDesignLayoutSmoke({ page, waitFor, check }) {
       "layout-flip-y",
     ),
   );
-  await layers.locator('[data-design-layer-id="home-hero"]').click();
+  const constraint = (axis) =>
+    position.getByRole("combobox", {
+      name: axis === "x" ? "Horizontal constraint" : "Vertical constraint",
+    });
+  const constrain = async (axis, name) => {
+    await constraint(axis).click();
+    await page.getByRole("option", { name, exact: true }).click();
+  };
   check(
-    "a nested frame with children enables alignment and constraints",
-    await layout
-      .getByRole("button", { name: "Pin right", exact: true })
-      .isEnabled(),
+    "a freely placed layer offers its own alignment and constraints",
+    (await position
+      .getByRole("button", { name: "Align right", exact: true })
+      .isEnabled()) &&
+      (await constraint("x").isEnabled()),
   );
-  await layout.getByRole("button", { name: "Pin right", exact: true }).click();
+  await constrain("x", "Right");
   check(
     "pinning keeps the layer in place",
     await waitFor(
@@ -214,7 +233,9 @@ export async function runDesignLayoutSmoke({ page, waitFor, check }) {
       "layout-parent-resize",
     ),
   );
-  await layout.getByRole("button", { name: "Align left", exact: true }).click();
+  await position
+    .getByRole("button", { name: "Align left", exact: true })
+    .click();
   check(
     "alignment works with no automatic layout",
     await waitFor(
@@ -228,9 +249,10 @@ export async function runDesignLayoutSmoke({ page, waitFor, check }) {
       "layout-align-none",
     ),
   );
-  await layout.getByRole("button", { name: "Pin center", exact: true }).click();
+  await constrain("x", "Center");
+  await constrain("y", "Center");
   check(
-    "the center pin controls both axes",
+    "a Center constraint on each axis centers the layer both ways",
     await waitFor(
       () =>
         heading.evaluate(
@@ -305,7 +327,7 @@ export async function runDesignLayoutSmoke({ page, waitFor, check }) {
   const copyRotation = await copy.evaluate(
     (element) => parseFloat(element.style.rotate) || 0,
   );
-  await layout
+  await position
     .getByRole("button", { name: "Rotate 90° clockwise" })
     .evaluate((button) => {
       button.click();
@@ -329,7 +351,7 @@ export async function runDesignLayoutSmoke({ page, waitFor, check }) {
   await layers
     .locator('[data-design-layer-id="home-heading"]')
     .click({ modifiers: ["Shift"] });
-  await layout.getByRole("button", { name: "Rotate 90° clockwise" }).click();
+  await position.getByRole("button", { name: "Rotate 90° clockwise" }).click();
   check(
     "multi-selection rotates each layer from its own angle",
     await waitFor(
@@ -346,7 +368,7 @@ export async function runDesignLayoutSmoke({ page, waitFor, check }) {
     ),
   );
   await layers.locator('[data-design-layer-id="home-heading"]').click();
-  // Three 24px transform buttons must still fit the narrowest supported panel.
+  // The rotation and flip buttons must still fit the narrowest supported panel.
   const widths = [];
   for (const width of [220, 280, 420]) {
     await page
@@ -355,7 +377,7 @@ export async function runDesignLayoutSmoke({ page, waitFor, check }) {
         element.style.setProperty("--zeros-design-style-width", `${value}px`);
       }, width);
     widths.push(
-      await layout
+      await position
         .locator("[data-design-layout-geometry]")
         .evaluate((element) => {
           const children = [...element.children];
@@ -363,17 +385,20 @@ export async function runDesignLayoutSmoke({ page, waitFor, check }) {
         }),
     );
   }
+  // X | Y over Rotation | rotate and flip: two equal columns at every width.
   check(
-    "geometry reflows at narrow widths and grows with the panel",
-    widths[2][2] > widths[1][2] &&
-      widths.every((row) => Math.abs(row[2] - row[5]) < 1 && row[5] >= 72) &&
-      widths.slice(1).every((row) => Math.abs(row[0] - row[2]) < 1),
+    "geometry keeps two equal columns that grow with the panel",
+    widths[2][0] > widths[1][0] &&
+      widths.every(
+        (row) =>
+          row.every((width) => Math.abs(width - row[0]) < 1) && row[3] >= 72,
+      ),
     JSON.stringify(widths),
   );
   await page.locator("[data-design-canvas-area]").evaluate((element) => {
     element.style.setProperty("--zeros-design-style-width", "220px");
   });
-  const rows = await layout
+  const rows = await position
     .locator("[data-design-layout-geometry]")
     .evaluate((element) => ({
       width: element.clientWidth,
@@ -385,8 +410,10 @@ export async function runDesignLayoutSmoke({ page, waitFor, check }) {
   );
   check(
     "four-digit Layout values remain readable at the narrowest panel width",
-    await layout
-      .locator("[data-design-layout-geometry] input")
+    await page
+      .locator(
+        "[data-design-position-section] [data-design-layout-geometry] input, [data-design-layout-section] [data-design-size-axis] input",
+      )
       .evaluateAll((inputs) => {
         const context = document.createElement("canvas").getContext("2d");
         return inputs.every((input) => {
@@ -425,6 +452,7 @@ export async function runDesignLayoutSmoke({ page, waitFor, check }) {
       `${origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html`,
       { waitUntil: "networkidle" },
     );
+    await openLayersDrawer(page);
     await heading.waitFor();
     await layers.locator('[data-design-layer-id="home-heading"]').click();
     for (const [label, value] of [
@@ -452,7 +480,7 @@ export async function runDesignLayoutSmoke({ page, waitFor, check }) {
         ).length,
     );
     for (const button of buttons)
-      await layout.getByRole("button", { name: button, exact: true }).click();
+      await position.getByRole("button", { name: button, exact: true }).click();
     await waitFor(
       () =>
         page.evaluate(

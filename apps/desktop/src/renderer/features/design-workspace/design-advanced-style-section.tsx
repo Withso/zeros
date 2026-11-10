@@ -3,7 +3,7 @@ import { Minus, Plus } from "lucide-react";
 
 import type { DesignRuntimeNodeDetails } from "@zeros/protocol/design-runtime";
 
-import { Input, Label } from "../../shared/ui/primitives";
+import { Input } from "../../shared/ui/primitives";
 import { designCssPropertySuggestions } from "./design-computed-css";
 import { InspectorIconButton, InspectorSection } from "./design-inspector-kit";
 import type { DesignLayoutFieldOptions } from "./design-layout-values";
@@ -39,9 +39,10 @@ function provenanceTitle(
   return `${row.property}: ${row.value}${where ? ` — from ${where}` : ""}`;
 }
 
-/** Lists the authored declarations no dedicated Style control covers, so CSS
- * an agent writes natively stays visible and editable, and adds any property
- * by name. */
+/** More styles: the authored declarations no Style control above covers, so
+ * CSS an agent or a stylesheet writes stays visible and editable, and any
+ * property can be added by name. Classes belong to the markup and are not
+ * listed here. */
 export function DesignAdvancedStyleSection({
   details,
   renderField,
@@ -53,7 +54,6 @@ export function DesignAdvancedStyleSection({
   const [name, setName] = useState("");
   const [value, setValue] = useState("");
   const nameRef = useRef<HTMLInputElement | null>(null);
-  const classesId = useId();
   const suggestionsId = useId();
   const suggestions = useMemo(
     () => (adding ? designCssPropertySuggestions() : []),
@@ -84,13 +84,12 @@ export function DesignAdvancedStyleSection({
 
   return (
     <InspectorSection
-      title="Advanced"
+      title="More styles"
       data-design-advanced-section=""
-      empty={rows.length === 0 && !adding && !details.classes}
-      addable={{ id: "advanced", onAdd: startAdding }}
+      empty={rows.length === 0 && !adding}
       actions={
         <InspectorIconButton
-          label="Add property"
+          label="Add style"
           disabled={disabled}
           onClick={startAdding}
         >
@@ -98,29 +97,10 @@ export function DesignAdvancedStyleSection({
         </InspectorIconButton>
       }
     >
-      {/* The markup owns a layer's classes, so this row is read-only; its
-          field scrolls rather than truncating them. */}
-      {details.classes ? (
-        <div
-          className="zd-field zd-inspector-field relative overflow-hidden"
-          data-design-advanced-classes=""
-          data-design-field-readonly=""
-        >
-          <span className="zd-field-label pr-1.5 pl-2 whitespace-nowrap">
-            <Label htmlFor={classesId} className="text-inherit">
-              class
-            </Label>
-          </span>
-          <Input
-            id={classesId}
-            readOnly
-            mono
-            value={details.classes}
-            spellCheck={false}
-            autoComplete="off"
-            className="h-full min-w-0 flex-1 rounded-none border-0 bg-transparent py-0 pr-2 pl-0 shadow-none focus-visible:border-transparent"
-          />
-        </div>
+      {rows.length > 0 ? (
+        <p className="zd-section-note">
+          Styles no control above covers, as an agent or the CSS wrote them.
+        </p>
       ) : null}
       {rows.map((row) => (
         <div

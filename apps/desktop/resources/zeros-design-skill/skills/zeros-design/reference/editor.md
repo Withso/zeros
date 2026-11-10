@@ -4,7 +4,7 @@ People edit frames in the Design tab while agents work on the same files. This p
 
 ## Where edits land
 
-- Style tab and canvas edits (position, size, auto layout, fill, stroke, effects, typography, Advanced rows) write each property where only the selected element owns it: its existing `style` declaration, or the one unconditional rule that targets exactly this element (`[data-oid="…"]`, or `body` in the frame's own `<style>`). Otherwise they write the element's `style` attribute. Existing declarations keep their place and formatting; new ones are appended.
+- Style tab and canvas edits (position, size, auto layout, fill, stroke, shadow, blur, typography, More styles rows) write each property where only the selected element owns it: its existing `style` declaration, or the one unconditional rule that targets exactly this element (`[data-oid="…"]`, or `body` in the frame's own `<style>`). Otherwise they write the element's `style` attribute. Existing declarations keep their place and formatting; new ones are appended.
 - These edits do not rewrite class rules, `<style>` blocks, `tokens.css` or imported style sources. A value that comes from a class is overridden by an inline declaration on the edited element, so other elements sharing the class keep theirs.
 - The theme editor writes Manual tokens in `tokens.css`. Imported style sources are read-only there; their repository files own them.
 - Renaming a layer writes `data-name`. Editing text replaces the element's text. Frame titles, geometry and page membership live in `meta/canvas.json`.
@@ -22,15 +22,16 @@ People edit frames in the Design tab while agents work on the same files. This p
 - The color picker has **Theme** and **Custom** tabs. Theme lists the color tokens the frame resolves, grouped by source and family and searchable: every imported style source, then Manual (`tokens.css`, which overrides an imported name), for the theme the canvas shows. Choosing one writes `var(--name)`; the token a field already reads is marked. Custom is the color field: hex, opacity, notation and eyedropper.
 - The CSS tab lists the element's authored declarations as written. After a line it shows the computed value when that differs, and the source when the winner comes from an imported source or a linked stylesheet.
 
-## The Advanced section
+## The More styles section
 
 - Lists every authored declaration that no dedicated control shows, as an editable name/value row with the value as written. A row's tooltip reads "from `<selector>` in `<origin>`".
 - Omits base-only properties and an imported source's own custom properties, such as Tailwind's `--tw-*`.
 - Offers Remove only for inline winners. A value from a class or shared rule is overridden with an inline declaration; a rule that targets only this element is edited in place.
-- Lists the layer's classes read-only, and adds any property the browser implements by name (`zIndex` is written as `z-index`).
+- Adds any property the browser implements by name (`zIndex` is written as `z-index`). It never lists the layer's classes; read those in the frame's HTML.
 
 ## Layers
 
+- Layers is a drawer at the foot of the Style panel, closed by default; its header shows where the selection sits.
 - Rows are the frame's elements, named by `data-name`, then a readable runtime name, then a type label. Frame rows show the frame title from `meta/canvas.json`.
 - Content inside open declarative shadow roots (`<template shadowrootmode="open">`) and assigned slots appears in Layers and can be selected. As in the browser, only the first such template on a valid host attaches, closed roots stay opaque, and a slot shows its fallback only while nothing is assigned to it. Shadow layers accept style, text and attribute edits; delete, duplicate and move refuse them with a reason, so change their structure by editing the HTML.
 - Selection identities come from `data-oid`, which the canvas derives for ordinary HTML and saves when an edit needs one.

@@ -1,5 +1,5 @@
 import { expect } from "@playwright/test";
-import { designFrameElementBox } from "./ui-smoke-design-helpers.mjs";
+import { designFrameElementBox, openLayersDrawer } from "./ui-smoke-design-helpers.mjs";
 
 export async function runDesignDoubleClickSelectionSmoke({ page, check }) {
   const origin = new URL(page.url()).origin;
@@ -8,6 +8,7 @@ export async function runDesignDoubleClickSelectionSmoke({ page, check }) {
       `${origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html${query}`,
       { waitUntil: "networkidle" },
     );
+    await openLayersDrawer(page);
     await page
       .locator(
         '[data-design-frame="home.html"] iframe[data-design-document-ready]',
@@ -117,6 +118,7 @@ export async function runDesignSelectionSmoke({ page, waitFor, check }) {
         waitUntil: "networkidle",
       },
     );
+    await openLayersDrawer(page);
     await page
       .locator(
         '[data-design-frame="home.html"] iframe[data-design-document-ready]',

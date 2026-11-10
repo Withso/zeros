@@ -1,5 +1,5 @@
 import { expect } from "@playwright/test";
-import { designFrameElementBox } from "./ui-smoke-design-helpers.mjs";
+import { designFrameElementBox, openLayersDrawer } from "./ui-smoke-design-helpers.mjs";
 
 // Selection chrome on turned, mirrored and deeply zoomed layers, driven through
 // the production canvas with real pointer input. Each check failed before the
@@ -24,6 +24,7 @@ const START_CAMERA = { zoom: 0.25, panX: 64, panY: 136 };
 async function openFixture(page, query) {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto(harness(page, query), { waitUntil: "networkidle" });
+  await openLayersDrawer(page);
   await setCamera(page, START_CAMERA);
   await expect(
     page.locator('[data-design-frame="home.html"] iframe[data-design-document-buffer="displayed"][data-design-document-ready]'),
@@ -235,7 +236,7 @@ export async function runDesignTurnedLayerDragOutSmoke({ page, check }) {
   await expect(child).toHaveCount(1);
   const childId = await child.getAttribute("data-oid");
   await expect(page.locator(`[data-design-element-overlay="${childId}"]`)).toBeVisible();
-  const rotation = page.locator('[data-design-layout-section] input[aria-label="Rotation"]');
+  const rotation = page.locator('[data-design-position-section] input[aria-label="Rotation"]');
   await rotation.click();
   await rotation.fill("-66");
   await rotation.press("Enter");

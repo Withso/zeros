@@ -1,4 +1,5 @@
 import { expect } from "@playwright/test";
+import { openLayersDrawer } from "./ui-smoke-design-helpers.mjs";
 
 export async function runDesignSpacingSmoke({ page, check }) {
   const origin = new URL(page.url()).origin;
@@ -7,6 +8,7 @@ export async function runDesignSpacingSmoke({ page, check }) {
     `${origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html`,
     { waitUntil: "networkidle" },
   );
+  await openLayersDrawer(page);
   await page.locator("[data-design-sidebar-panel]").waitFor();
   // Fixed child heights make the automatic gaps fractional on every host,
   // independently of the installed fonts and their text metrics.

@@ -523,7 +523,8 @@ export function designScrubStep(
 export function snapDesignNumberToStep(value: number, step: number): number {
   const snapped = Math.round(value / step) * step;
   // Multiplying back by 0.1 or 0.01 leaves binary noise such as 0.6000000001.
-  return Math.round(snapped * 10_000) / 10_000;
+  // `+ 0` turns a rounded -0 into 0, which would otherwise print as "-0".
+  return Math.round(snapped * 10_000) / 10_000 + 0;
 }
 
 /** A scrubbed or arrow-stepped value. A fractional pointer distance (a zoomed

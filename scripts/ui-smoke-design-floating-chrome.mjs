@@ -1,4 +1,4 @@
-import { designCanvasPoint, designFrameElementBox } from "./ui-smoke-design-helpers.mjs";
+import { designCanvasPoint, designFrameElementBox, openLayersDrawer } from "./ui-smoke-design-helpers.mjs";
 import { runDesignLayerRenameSmoke } from "./ui-smoke-design-layer-rename.mjs";
 
 // Floating chrome uses real pointer and wheel events. Selection setup may use
@@ -22,6 +22,7 @@ export async function runDesignFloatingChromeSmoke({ page, waitFor, check }) {
     });
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto(url, { waitUntil: "networkidle" });
+    await openLayersDrawer(page);
     const canvas = page.locator("[data-design-canvas-viewport]");
     const panel = page.locator("[data-design-floating-panel]");
     const layers = page.locator("[data-design-sidebar-panel]");
@@ -89,7 +90,8 @@ export async function runDesignFloatingChromeSmoke({ page, waitFor, check }) {
           near(g.panel.y, g.canvas.y) &&
           near(g.panel.bottom, g.canvas.bottom) &&
           near(g.layers.width, g.inspector.width) &&
-          near(g.layers.bottom + 1, g.inspector.top),
+          near(g.inspector.bottom, g.layers.top) &&
+          near(g.layers.bottom, g.panel.bottom),
       );
       check(
         `${label}: vertical tools sit inside the viewport and center above Motion`,
@@ -181,14 +183,15 @@ export async function runDesignFloatingChromeSmoke({ page, waitFor, check }) {
       near(await height(), 240) &&
         (await split.getAttribute("aria-orientation")) === "horizontal",
     );
-    await split.press("ArrowDown");
-    check("Layers split ArrowDown adds 8px", near(await height(), 248));
-    await split.press("Shift+ArrowDown");
-    check("Layers split Shift+ArrowDown adds 32px", near(await height(), 280));
+    // The drawer's top edge moves: up grows it, down shrinks it.
     await split.press("ArrowUp");
+    check("Layers split ArrowUp adds 8px", near(await height(), 248));
     await split.press("Shift+ArrowUp");
+    check("Layers split Shift+ArrowUp adds 32px", near(await height(), 280));
+    await split.press("ArrowDown");
+    await split.press("Shift+ArrowDown");
     check(
-      "Layers split ArrowUp and Shift+ArrowUp restore the height",
+      "Layers split ArrowDown and Shift+ArrowDown restore the height",
       near(await height(), 240),
     );
     await split.press("Home");
@@ -213,9 +216,12 @@ export async function runDesignFloatingChromeSmoke({ page, waitFor, check }) {
       splitBox.y + splitBox.height / 2,
     );
     await page.mouse.down();
-    await page.mouse.move(splitBox.x + splitBox.width / 2, slotBox.y + 312, {
-      steps: 6,
-    });
+    // Dragging the top edge up by 72px grows the 240px drawer to 312px.
+    await page.mouse.move(
+      splitBox.x + splitBox.width / 2,
+      splitBox.y + splitBox.height / 2 - (312 - slotBox.height),
+      { steps: 6 },
+    );
     check(
       "dragging the Layers split paints the live height",
       await waitFor(
@@ -278,25 +284,18 @@ export async function runDesignFloatingChromeSmoke({ page, waitFor, check }) {
       near(await height(), 240) && near(await width(), 280),
     );
 
-    await layersViewport.evaluate((element) => {
-      window.__smokeLayersViewport = element;
-    });
     await fold.click();
     check(
-      "Layers title folds its tree to a 36px header",
-      near(await height(), 36) &&
+      "closing the drawer leaves its 36px header and renders no tree",
+      near(await layers.evaluate((element) => element.getBoundingClientRect().height), 36) &&
         (await fold.getAttribute("aria-expanded")) === "false" &&
         (await split.count()) === 0 &&
-        !(await layersViewport.isVisible()),
+        (await layersViewport.count()) === 0,
     );
     await fold.click();
     check(
-      "unfolding Layers restores its split height and mounted tree",
-      near(await height(), 240) &&
-        (await layersViewport.isVisible()) &&
-        (await layersViewport.evaluate(
-          (element) => element === window.__smokeLayersViewport,
-        )),
+      "opening the drawer restores its height and renders the tree",
+      near(await height(), 240) && (await layersViewport.isVisible()),
     );
     await inspector.evaluate((element) => {
       window.__smokeInspector = element;

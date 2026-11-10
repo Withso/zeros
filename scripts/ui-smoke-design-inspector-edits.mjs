@@ -1,11 +1,12 @@
 import { expect } from "@playwright/test";
-import { addDesignSection } from "./ui-smoke-design-helpers.mjs";
+import { addDesignSection, openLayersDrawer } from "./ui-smoke-design-helpers.mjs";
 
 async function openHeading(page) {
   await page.goto(
     `${new URL(page.url()).origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html`,
     { waitUntil: "networkidle" },
   );
+  await openLayersDrawer(page);
   await page
     .locator(
       '[data-design-sidebar-panel] [data-design-layer-id="home-heading"]',
@@ -173,6 +174,7 @@ export async function runDesignFieldHistorySmoke({ page, check }) {
     `${new URL(page.url()).origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html?layoutGestures`,
     { waitUntil: "networkidle" },
   );
+  await openLayersDrawer(page);
   await page
     .locator('[data-design-sidebar-panel] [data-design-layer-id="home-heading"]')
     .click();
@@ -243,6 +245,7 @@ export async function runDesignFillHistorySmoke({ page, check }) {
     `${new URL(page.url()).origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html?layoutGestures`,
     { waitUntil: "networkidle" },
   );
+  await openLayersDrawer(page);
   await page
     .locator('[data-design-sidebar-panel] [data-design-layer-id="home-heading"]')
     .click();
@@ -297,6 +300,42 @@ export async function runDesignInspectorEditsSmoke(context) {
   await runDesignScrubLeadingPreviewSmoke(context);
   await runDesignColorInputRacesSmoke(context);
   await runDesignPaintRemovalSmoke(context);
+  await runDesignMixedSelectionSmoke(context);
+}
+
+/** Two text layers that differ read Mixed everywhere they differ, never a
+ * single value; one edit then sets both. */
+export async function runDesignMixedSelectionSmoke({ page, check }) {
+  await openHeading(page);
+  await page
+    .locator('[data-design-sidebar-panel] [data-design-layer-id="home-copy"]')
+    .click({ modifiers: ["Shift"] });
+  const inspector = page.locator("[data-design-inspector]");
+  const width = inspector.getByRole("textbox", { name: "W", exact: true });
+  const fill = inspector
+    .locator("[data-design-fill-section]")
+    .getByRole("textbox", { name: "Fill", exact: true });
+  await expect(width).toHaveValue("");
+  await expect(width).toHaveAttribute("placeholder", "Mixed");
+  await expect(fill).toHaveValue("");
+  await expect(fill).toHaveAttribute("placeholder", "Mixed");
+  await expect(
+    inspector.locator("[data-design-fill-section] [data-design-color-mixed]"),
+  ).toHaveCount(1);
+  check("two differing text layers read Mixed for W and Fill, behind a neutral swatch", true);
+  await fill.fill("112233");
+  await fill.press("Enter");
+  const runtime = page.frameLocator(
+    '[data-design-frame="home.html"] iframe[data-design-document-buffer="displayed"][data-design-document-ready]',
+  );
+  for (const id of ["home-heading", "home-copy"])
+    await expect
+      .poll(() =>
+        runtime.locator(`[data-oid="${id}"]`).evaluate((element) => getComputedStyle(element).color),
+      )
+      .toBe("rgb(17, 34, 51)");
+  await expect(fill).toHaveValue(/^112233$/i);
+  check("a colour typed over Mixed sets every selected layer and ends Mixed", true);
 }
 
 export async function runDesignPaintRemovalSmoke({ page, check }) {
@@ -317,6 +356,10 @@ export async function runDesignPaintRemovalSmoke({ page, check }) {
   });
   await page
     .locator('[data-design-sidebar-panel] [data-design-layer-id="home-hero"]')
+    .click();
+  // Position lives in Stroke settings with the style and per-side widths.
+  await page
+    .getByRole("button", { name: "Stroke settings", exact: true })
     .click();
   await page
     .getByRole("combobox", { name: "Stroke position", exact: true })

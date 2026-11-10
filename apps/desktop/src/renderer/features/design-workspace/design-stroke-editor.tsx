@@ -1,8 +1,8 @@
 // ============================================
 // COMPONENT: DesignStrokeSection
 // PURPOSE: Figma-style strokes over CSS: an Inside stroke is the border, an
-//          Outside stroke is the outline. Each stroke is one color row plus a
-//          position / weight / settings row.
+//          Outside stroke is the outline. Each stroke is a weight / sides row
+//          and a color row; position and style are in Stroke settings.
 // USED IN: DesignStyleEditor
 // ============================================
 
@@ -27,6 +27,13 @@ import {
   focusDesignPopoverSurface,
   InspectorPopoverAnchor,
 } from "./design-inspector-kit";
+import {
+  DESIGN_MIXED_VALUE,
+  designMixedSegment,
+  designMixedSelect,
+  designStyleMixed,
+  designValuesMixed,
+} from "./design-style-mixed";
 import type { DesignLayoutFieldOptions } from "./design-layout-values";
 import {
   designPaintRemovalStyles,
@@ -37,6 +44,9 @@ type StrokeKind = "border" | "outline";
 
 interface DesignStrokeSectionProps {
   details: DesignRuntimeNodeDetails;
+  /** Every selected layer whose details are loaded, for Mixed readings. */
+  selection?: readonly DesignRuntimeNodeDetails[];
+  selectionCount?: number;
   disabled?: boolean;
   renderField: (
     label: string,
@@ -64,6 +74,40 @@ const BORDER_SIDES = [
 ] as const;
 
 const DEFAULT_STROKE_COLOR = "#000000"; // check:ui ignore-line -- authored CSS default for a new stroke.
+
+export type DesignStrokeSides = "all" | "top" | "right" | "bottom" | "left" | "custom";
+
+const SIDE_OPTIONS = [
+  { value: "all", label: "All" },
+  { value: "top", label: "Top" },
+  { value: "right", label: "Right" },
+  { value: "bottom", label: "Bottom" },
+  { value: "left", label: "Left" },
+] as const;
+
+/** Which sides a border draws: all four at one weight, one side alone, or a
+ * custom mix that Stroke settings edits side by side. */
+export function designStrokeSides(details: DesignRuntimeNodeDetails): DesignStrokeSides {
+  const widths = BORDER_SIDES.map(([, property]) => Number.parseFloat(style(details, property)) || 0);
+  if (widths.every((width) => width > 0 && width === widths[0])) return "all";
+  const drawn = widths.flatMap((width, index) => (width > 0 ? [index] : []));
+  if (drawn.length === 1)
+    return (["top", "right", "bottom", "left"] as const)[drawn[0]!]!;
+  return "custom";
+}
+
+export function designStrokeSideStyles(
+  side: Exclude<DesignStrokeSides, "custom">,
+  width: string,
+): Record<string, string> {
+  if (side === "all") return { "border-width": width };
+  return Object.fromEntries(
+    BORDER_SIDES.map(([label, property]) => [
+      property,
+      label.toLocaleLowerCase() === side ? width : "0px",
+    ]),
+  );
+}
 
 function style(details: DesignRuntimeNodeDetails, property: string): string {
   return readDesignComputedStyle(details.styles, property);
@@ -102,6 +146,8 @@ function outlinePresent(details: DesignRuntimeNodeDetails): boolean {
 
 export function DesignStrokeSection({
   details,
+  selection = [details],
+  selectionCount = 1,
   disabled,
   renderField,
   onPreview,
@@ -175,7 +221,6 @@ export function DesignStrokeSection({
     <InspectorSection
       title="Stroke"
       empty={strokes.length === 0}
-      addable={{ id: "stroke", onAdd: add }}
       data-design-stroke-section=""
       actions={
         <InspectorIconButton
@@ -192,6 +237,8 @@ export function DesignStrokeSection({
           key={kind}
           kind={kind}
           details={details}
+          selection={selection}
+          selectionCount={selectionCount}
           disabled={disabled}
           canMove={strokes.length < 2}
           renderField={renderField}
@@ -209,6 +256,8 @@ export function DesignStrokeSection({
 function StrokeRows({
   kind,
   details,
+  selection,
+  selectionCount,
   disabled,
   canMove,
   renderField,
@@ -220,6 +269,8 @@ function StrokeRows({
 }: {
   kind: StrokeKind;
   details: DesignRuntimeNodeDetails;
+  selection: readonly DesignRuntimeNodeDetails[];
+  selectionCount: number;
   disabled?: boolean;
   canMove: boolean;
   renderField: DesignStrokeSectionProps["renderField"];
@@ -234,25 +285,67 @@ function StrokeRows({
   const colorProperty = `${kind}-color`;
   const colorToken = useDesignStyleToken(details, colorProperty);
   const lineStyle = firstToken(style(details, `${kind}-style`)) || "solid";
+  const sides = kind === "border" ? designStrokeSides(details) : "all";
+  const mixed = (property: string) =>
+    designStyleMixed(selection, selectionCount, property);
+  const sidesSelect = designMixedSelect(
+    kind === "border" &&
+      designValuesMixed(selection.map(designStrokeSides), selectionCount),
+    sides,
+    [
+      ...SIDE_OPTIONS,
+      ...(sides === "custom"
+        ? [{ value: "custom" as const, label: "Custom", disabled: true }]
+        : []),
+    ],
+  );
+  const positionMixed = designValuesMixed(
+    selection.map((node) => (borderPresent(node) ? "border" : "outline")),
+    selectionCount,
+  );
   return (
     <Popover open={settingsOpen} onOpenChange={setSettingsOpen}>
       <div
         className="relative flex min-w-0 flex-col gap-2"
         data-design-stroke={kind}
       >
-        <div className="grid grid-cols-[minmax(0,1fr)_24px] items-center gap-1">
-          <DesignColorField
-            value={style(details, colorProperty) || DEFAULT_STROKE_COLOR}
-            label={name}
-            property={colorProperty}
-            disabled={disabled}
-            {...colorToken}
-            onPreview={(value) => onPreview?.({ [colorProperty]: value })}
-            onCancelPreview={onCancelPreview}
-            onCommit={(value) =>
-              onCommit({ [colorProperty]: value }, `${name} color`)
-            }
-          />
+        <div
+          className={
+            kind === "border"
+              ? "grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_24px_24px] items-center gap-1"
+              : "grid grid-cols-[minmax(0,1fr)_24px_24px] items-center gap-1"
+          }
+        >
+          {renderField(
+            `${name} weight`,
+            `${kind}-width`,
+            firstToken(style(details, `${kind}-width`)) || "0px",
+            { icon: "stroke-weight" },
+          )}
+          {kind === "border" ? (
+            <InspectorSelect
+              label={`${name} sides`}
+              value={sidesSelect.value}
+              disabled={disabled}
+              options={sidesSelect.options}
+              onChange={(next) => {
+                if (next === "custom" || next === DESIGN_MIXED_VALUE) return;
+                const weight = BORDER_SIDES.map(([, property]) => Number.parseFloat(style(details, property)) || 0)
+                  .reduce((largest, width) => Math.max(largest, width), 0);
+                const styles = designStrokeSideStyles(
+                  next as Exclude<DesignStrokeSides, "custom">,
+                  `${weight || 1}px`,
+                );
+                onPreview?.(styles);
+                onCommit(styles, `${name} sides`);
+              }}
+            />
+          ) : null}
+          <PopoverTrigger asChild>
+            <InspectorIconButton label={`${name} settings`} disabled={disabled}>
+              <Ellipsis />
+            </InspectorIconButton>
+          </PopoverTrigger>
           <InspectorIconButton
             label={`Remove ${name.toLocaleLowerCase()}`}
             disabled={disabled}
@@ -260,33 +353,21 @@ function StrokeRows({
           >
             <Minus />
           </InspectorIconButton>
-        </div>
-        <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_24px] items-center gap-2">
-          <InspectorSelect
-            label={`${name} position`}
-            value={kind === "border" ? "inside" : "outside"}
-            disabled={disabled || !canMove}
-            options={[
-              { value: "inside", label: "Inside" },
-              { value: "outside", label: "Outside" },
-            ]}
-            onChange={(value) => {
-              if ((value === "outside") === (kind === "border")) onMove();
-            }}
-          />
-          {renderField(
-            `${name} weight`,
-            `${kind}-width`,
-            firstToken(style(details, `${kind}-width`)) || "0px",
-            { icon: "stroke-weight" },
-          )}
-          <PopoverTrigger asChild>
-            <InspectorIconButton label={`${name} settings`} disabled={disabled}>
-              <Ellipsis />
-            </InspectorIconButton>
-          </PopoverTrigger>
           <InspectorPopoverAnchor />
         </div>
+        <DesignColorField
+          value={style(details, colorProperty) || DEFAULT_STROKE_COLOR}
+          label={name}
+          property={colorProperty}
+          disabled={disabled}
+          {...colorToken}
+          mixed={mixed(colorProperty)}
+          onPreview={(value) => onPreview?.({ [colorProperty]: value })}
+          onCancelPreview={onCancelPreview}
+          onCommit={(value) =>
+            onCommit({ [colorProperty]: value }, `${name} color`)
+          }
+        />
       </div>
       <PopoverContent
         data-design-popover=""
@@ -302,9 +383,25 @@ function StrokeRows({
           <div className="zd-popover-header">
             <span className="zd-popover-title">{name} settings</span>
           </div>
+          <InspectorSelect
+            label={`${name} position`}
+            {...designMixedSelect(
+              positionMixed,
+              kind === "border" ? "inside" : "outside",
+              [
+                { value: "inside", label: "Inside" },
+                { value: "outside", label: "Outside" },
+              ],
+            )}
+            disabled={disabled || !canMove}
+            onChange={(value) => {
+              if (value === DESIGN_MIXED_VALUE) return;
+              if ((value === "outside") === (kind === "border")) onMove();
+            }}
+          />
           <InspectorSegmented
             label={`${name} style`}
-            value={lineStyle}
+            value={designMixedSegment(mixed(`${kind}-style`), lineStyle)}
             options={STROKE_STYLES}
             disabled={disabled}
             onChange={(value) => {

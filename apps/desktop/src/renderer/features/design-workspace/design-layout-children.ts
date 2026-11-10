@@ -34,7 +34,7 @@ export const isDesignLayoutChildAction = (
 ): action is DesignLayoutChildAction =>
   ["align", "constraint", "center", "distribute", "resize-fit"].includes(
     action.type,
-  );
+  ) && !("target" in action && action.target === "self");
 
 export function designLayoutChildrenSummary(
   parents: readonly DesignRuntimeNodeDetails[],

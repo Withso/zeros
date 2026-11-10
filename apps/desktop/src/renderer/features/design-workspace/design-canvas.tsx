@@ -1297,14 +1297,14 @@ export const DesignCanvas = React.memo(function DesignCanvas({
   const layersOpenFiles = useMemo(
     () => [
       ...(currentPlayback ? [currentPlayback.file] : []),
-      ...Object.entries(view.layersVisible ? layerDisclosures : {})
+      ...Object.entries(view.layersDrawerOpen ? layerDisclosures : {})
         .filter(([, disclosure]) => disclosure.treeExpanded)
         .map(([file]) => file),
       ...agentDraftFiles,
       ...(nestLiveFile ? [nestLiveFile] : []),
       ...(intentFile && !currentPlayback ? [intentFile] : []),
     ],
-    [agentDraftFiles, currentPlayback, intentFile, layerDisclosures, nestLiveFile, view.layersVisible],
+    [agentDraftFiles, currentPlayback, intentFile, layerDisclosures, nestLiveFile, view.layersDrawerOpen],
   );
   // The internal recorded canvas draws every passive frame from its Skia
   // recording on the GPU; bitmap pictures, covers and source surfaces stay off.
@@ -1345,7 +1345,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
     // The active frame also serves metadata APIs and remembered navigation.
     // It needs an editor only when something consumes its live document.
     // A cached overview with closed panels must not keep a hidden editor busy.
-    selectedFrame: view.frameSelected || view.selectedNodeIds.length > 0 || view.layersVisible ||
+    selectedFrame: view.frameSelected || view.selectedNodeIds.length > 0 || view.layersDrawerOpen ||
       view.inspectorVisible || activeTool === "text" || motionTimelineOpen || pendingEdits
       ? selectedDescription?.file ?? null : null,
     requiredFiles: layersOpenFiles, pictured, covered, devicePixelRatio,

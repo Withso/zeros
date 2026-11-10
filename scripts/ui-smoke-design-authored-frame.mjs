@@ -1,3 +1,7 @@
+import {
+  designLayoutMenuState,
+  openLayersDrawer,
+} from "./ui-smoke-design-helpers.mjs";
 // An unmarked, visibly smaller HTML root must remain a real layer beneath the
 // canvas frame. Exercise both rows through the production inspector and API.
 export async function runDesignAuthoredFrameSmoke({ page, waitFor, check }) {
@@ -5,10 +9,12 @@ export async function runDesignAuthoredFrameSmoke({ page, waitFor, check }) {
     `${new URL(page.url()).origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html?authoredFrame`,
     { waitUntil: "networkidle" },
   );
+  await openLayersDrawer(page);
   const layers = page.locator("[data-design-sidebar-panel]");
   const frame = page.locator('[data-design-frame="home.html"]');
   const label = frame.locator("[data-design-frame-label]");
   const layout = page.locator("[data-design-layout-section]");
+  const position = page.locator("[data-design-position-section]");
   const runtime = page.frameLocator(
     '[data-design-frame="home.html"] iframe[data-design-document-buffer="displayed"][data-design-document-ready]',
   );
@@ -43,13 +49,9 @@ export async function runDesignAuthoredFrameSmoke({ page, waitFor, check }) {
       (await row.getAttribute("aria-selected")) === "false",
   );
   check(
-    "the canvas frame with an authored child exposes alignment and constraints in None",
-    (await layout
-      .getByRole("button", { name: "Align left", exact: true })
-      .isEnabled()) &&
-      (await layout
-        .getByRole("button", { name: "Pin right", exact: true })
-        .isEnabled()),
+    "the canvas frame with an authored child offers its children's actions in None, and no constraints of its own",
+    (await designLayoutMenuState(page, "Align children left")) === "enabled" &&
+      (await position.locator("[data-design-layout-constraints]").count()) === 0,
   );
   await row.click();
   await row.press("ArrowRight");
@@ -61,11 +63,9 @@ export async function runDesignAuthoredFrameSmoke({ page, waitFor, check }) {
   );
   await childRow.click();
   check(
-    "an empty child hides alignment and constraints",
-    (await layout
-      .getByRole("button", { name: "Align left", exact: true })
-      .count()) === 0 &&
-      (await layout.locator("[data-design-layout-constraints]").count()) === 0,
+    "an empty, freely placed child offers no children's actions but its own constraints",
+    (await designLayoutMenuState(page, "Align children left")) === "absent" &&
+      (await position.locator("[data-design-layout-constraints]").count()) === 1,
   );
   for (const [target, other, mode, display] of [
     ["canvas", red, "Vertical", "flex"],
@@ -108,9 +108,12 @@ export async function runDesignAuthoredFrameSmoke({ page, waitFor, check }) {
   const grandchildBefore = await runtime
     .locator('[data-oid="red-child"]')
     .evaluate((el) => el.style.cssText);
-  await committed(() =>
-    layout.getByRole("button", { name: "Align top", exact: true }).click(),
-  );
+  await committed(async () => {
+    await layout.getByRole("button", { name: "More layout actions" }).click();
+    await page
+      .getByRole("menuitem", { name: "Align children top", exact: true })
+      .click();
+  });
   check(
     "canvas alignment moves its direct frame without rewriting the grandchild",
     (await red.evaluate(

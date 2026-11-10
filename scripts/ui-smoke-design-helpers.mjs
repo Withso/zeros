@@ -97,14 +97,69 @@ export async function designCanvasSafeRect(page) {
   });
 }
 
-/** Only the Style sections in use show: an empty optional section (Stroke,
- * Effects, Typography, Transform, Transition, Motion, Advanced) is added from
- * the inspector's Add property menu, which also runs the section's own add
- * (Transform opens its editor, Effects adds a shadow). */
+/** Adds a Style section's first value. An empty section is one row with its
+ * own plus (Stroke, Shadow, Blur, Transition, Motion, More styles), which
+ * runs the section's add: Shadow adds a drop shadow, Blur a layer blur.
+ * Typography on a non-text layer and Transform draw nothing while unused and
+ * are added from the Add property menu (Transform opens its editor). */
 export async function addDesignSection(page, title) {
-  await page
-    .locator("[data-design-add-property]")
-    .getByRole("button", { name: "Add property", exact: true })
+  if (title === "Typography" || title === "Transform") {
+    await page
+      .locator("[data-design-add-property]")
+      .getByRole("button", { name: "Add property", exact: true })
+      .click();
+    await page.getByRole("menuitem", { name: title, exact: true }).click();
+    return;
+  }
+  const section = page
+    .locator("[data-design-inspector] section.zd-section")
+    .filter({ has: page.getByRole("heading", { name: title, exact: true }) });
+  await section
+    .locator(".zd-section-header")
+    .getByRole("button", { name: /^Add / })
     .click();
-  await page.getByRole("menuitem", { name: title, exact: true }).click();
+}
+
+/** The Layers tree is a drawer at the foot of the Style panel, closed by
+ * default. Opens it (when it is not open already) and waits for the tree.
+ * The click is dispatched on the element so neither the pointer nor focus
+ * moves: smokes that open the drawer as setup still assert on both. */
+export async function openLayersDrawer(page) {
+  const fold = page.locator("[data-design-layers-fold]:visible").first();
+  await fold.waitFor({ state: "visible", timeout: 15_000 });
+  if ((await fold.getAttribute("aria-expanded")) !== "true") {
+    await fold.evaluate((element) => element.click());
+  }
+  await page
+    .locator('[data-design-sidebar-panel] [role="tree"]:visible')
+    .first()
+    .waitFor({ state: "visible", timeout: 15_000 });
+}
+
+/** One snapshot of Layout's More layout actions menu as [text, disabled]
+ * rows, or [] when the layer has no such menu. The rows follow fresh runtime
+ * details, so separate reads of one row could straddle a re-render. */
+export async function designLayoutMenuRows(page) {
+  const trigger = page
+    .locator("[data-design-layout-section]")
+    .getByRole("button", { name: "More layout actions" });
+  if ((await trigger.count()) === 0) return [];
+  await trigger.click();
+  const menu = page.getByRole("menu");
+  await menu.waitFor();
+  const rows = await menu.evaluate((element) =>
+    [...element.querySelectorAll('[role="menuitem"]')].map((item) => [
+      item.textContent.trim(),
+      item.getAttribute("aria-disabled") === "true",
+    ]),
+  );
+  await page.keyboard.press("Escape");
+  await menu.waitFor({ state: "detached" });
+  return rows;
+}
+
+/** "enabled", "disabled" or "absent" for one More layout actions row. */
+export async function designLayoutMenuState(page, name) {
+  const row = (await designLayoutMenuRows(page)).find(([text]) => text === name);
+  return !row ? "absent" : row[1] ? "disabled" : "enabled";
 }

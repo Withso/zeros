@@ -1,4 +1,4 @@
-import { designFrameElementBox } from "./ui-smoke-design-helpers.mjs";
+import { designFrameElementBox, designLayoutMenuState, openLayersDrawer } from "./ui-smoke-design-helpers.mjs";
 
 // An empty authored frame exercises the real creation path, unlike the seeded
 // landing page. All source edits go through the harness's in-memory Design API.
@@ -8,6 +8,7 @@ export async function runDesignFrameChildrenSmoke({ page, waitFor, check }) {
     `${origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html?emptyFrame`,
     { waitUntil: "networkidle" },
   );
+  await openLayersDrawer(page);
   const layers = page.locator("[data-design-sidebar-panel]");
   const layout = page.locator("[data-design-layout-section]");
   const frame = page.locator('[data-design-frame="home.html"]');
@@ -40,10 +41,8 @@ export async function runDesignFrameChildrenSmoke({ page, waitFor, check }) {
     "an empty canvas frame has no duplicate root layer or child controls",
     (await layers.locator('[data-design-layer-id="home-main"]').count()) ===
       0 &&
-      (await layout
-        .getByRole("button", { name: "Align left", exact: true })
-        .count()) === 0 &&
-      (await layout.locator("[data-design-layout-constraints]").count()) === 0,
+      (await designLayoutMenuState(page, "Align children left")) === "absent" &&
+      (await page.locator("[data-design-layout-constraints]").count()) === 0,
   );
   const frameCount = await page.locator("[data-design-frame]").count();
   const draw = async () => {
@@ -114,21 +113,17 @@ export async function runDesignFrameChildrenSmoke({ page, waitFor, check }) {
   const childRow = layers.locator(`[data-design-layer-id="${childId}"]`);
   await childRow.click();
   check(
-    "the new empty child starts with None and hides child controls",
+    "the new empty child starts with None and offers no children's actions",
     (await layout
       .getByRole("button", { name: "Auto layout: None", exact: true })
       .getAttribute("aria-pressed")) === "true" &&
-      (await layout.locator("[data-design-layout-constraints]").count()) === 0,
+      (await designLayoutMenuState(page, "Align children left")) === "absent",
   );
   await frame.locator("[data-design-frame-label]").click();
   check(
-    "a frame with a real child exposes enabled alignment and constraints in None",
-    (await layout
-      .getByRole("button", { name: "Align left", exact: true })
-      .isEnabled()) &&
-      (await layout
-        .getByRole("button", { name: "Pin right", exact: true })
-        .isEnabled()),
+    "a frame with a real child offers its children's actions in None",
+    (await designLayoutMenuState(page, "Align children left")) === "enabled" &&
+      (await designLayoutMenuState(page, "Resize to fit")) === "enabled",
   );
   for (const [targetId, otherId, mode, display] of [
     ["home-main", childId, "Vertical", "flex"],
@@ -168,7 +163,7 @@ export async function runDesignFrameChildrenSmoke({ page, waitFor, check }) {
   const rootStyle = await root.evaluate((el) => el.style.cssText);
   await childRow.click();
   await committed(() =>
-    layout.getByRole("button", { name: "Rotate 90° clockwise" }).click(),
+    page.locator("[data-design-position-section]").getByRole("button", { name: "Rotate 90° clockwise" }).click(),
   );
   await committed(() =>
     layout.getByText("Clip content", { exact: true }).click(),
@@ -208,13 +203,13 @@ export async function runDesignFrameChildrenSmoke({ page, waitFor, check }) {
       (await child.evaluate((el) => el.style.display === "grid")),
   );
   await committed(() =>
-    layout.getByRole("button", { name: "Rotate 90° clockwise" }).click(),
+    page.locator("[data-design-position-section]").getByRole("button", { name: "Rotate 90° clockwise" }).click(),
   );
   await committed(() =>
-    layout.getByRole("button", { name: "Rotate 90° clockwise" }).click(),
+    page.locator("[data-design-position-section]").getByRole("button", { name: "Rotate 90° clockwise" }).click(),
   );
   await committed(() =>
-    layout.getByRole("button", { name: "Rotate 90° clockwise" }).click(),
+    page.locator("[data-design-position-section]").getByRole("button", { name: "Rotate 90° clockwise" }).click(),
   );
   // Draw inside the existing child at its current painted position; its Grid
   // layout accepts the new frame in flow while that frame starts with None.

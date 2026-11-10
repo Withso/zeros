@@ -29,7 +29,10 @@ export interface DesignWorkspaceViewState {
   directoryId?: string;
   activePageId?: string;
   byPage?: Record<string, DesignPageViewState>;
+  /** Read for older records only; the Layers drawer has its own flag. */
   layersVisible: boolean;
+  /** The Layers drawer at the foot of the Style panel; closed by default. */
+  layersDrawerOpen: boolean;
   inspectorVisible: boolean;
   selectedFrame: string | null;
   /** True only when the frame itself is the selection target (label, Layers
@@ -104,6 +107,7 @@ function validatePageSelection(view: DesignPageViewState, page: DesignPageSummar
 export const DEFAULT_DESIGN_WORKSPACE_VIEW: Readonly<DesignWorkspaceViewState> =
   Object.freeze({
     layersVisible: true,
+    layersDrawerOpen: false,
     inspectorVisible: true,
     selectedFrame: null,
     frameSelected: false,
@@ -208,6 +212,7 @@ export function normalizeDesignWorkspaceView(
   const normalized: DesignWorkspaceViewState = {
     ...(typeof record.directoryId === "string" && record.directoryId.length <= 128 ? { directoryId: record.directoryId } : {}),
     layersVisible: record.layersVisible !== false,
+    layersDrawerOpen: record.layersDrawerOpen === true,
     inspectorVisible: record.inspectorVisible !== false,
     selectedFrame,
     // A remembered node selection owns the selection; the frame flag only
@@ -349,7 +354,10 @@ interface DesignWorkspaceUiStore {
     options?: { frameSelected?: boolean; owner?: DesignPageOwner; additive?: boolean; toggle?: boolean; explicit?: boolean },
   ): void;
   setSelectedTargets(workspaceId: string, targets: readonly DesignSelectionTarget[], options?: { owner?: DesignPageOwner; activeFrame?: string | null; explicit?: boolean }): void;
-  setPanels(workspaceId: string, panels: Partial<Pick<DesignWorkspaceViewState, "layersVisible" | "inspectorVisible">>): void;
+  setPanels(
+    workspaceId: string,
+    panels: Partial<Pick<DesignWorkspaceViewState, "layersVisible" | "layersDrawerOpen" | "inspectorVisible">>,
+  ): void;
   setPanel(workspaceId: string, panel: DesignBottomPanel): void;
   setActiveTheme(workspaceId: string, activeTheme: string | null): void;
   setCanvasBackground(workspaceId: string, canvasBackground: string, owner?: DesignPageOwner): void;

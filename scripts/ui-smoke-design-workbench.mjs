@@ -1,3 +1,4 @@
+import { openLayersDrawer } from "./ui-smoke-design-helpers.mjs";
 /** Production conversation/workbench composition, with fixture transport. */
 export async function runDesignWorkbenchSmoke({ page, check }) {
   const origin = new URL(page.url()).origin;
@@ -18,6 +19,7 @@ export async function runDesignWorkbenchSmoke({ page, check }) {
       `${origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html`,
       { waitUntil: "networkidle" },
     );
+    await openLayersDrawer(page);
   }
 }
 
@@ -198,13 +200,21 @@ async function exerciseSharedLayersHeight({ page, check, canvas }) {
   const second = page.locator('[data-design-retained-workspace="ws_design_harness_second"]');
   const split = (owner) => owner.getByRole("separator", { name: "Resize Layers panel" });
   const height = async (owner) => Math.round((await owner.locator("[data-design-layers-slot]").boundingBox()).height);
+  // Each workspace keeps its own drawer state; the height is app-wide.
+  const openDrawer = async (owner) => {
+    const fold = owner.locator("[data-design-layers-fold]");
+    if ((await fold.getAttribute("aria-expanded")) !== "true") await fold.click();
+    await split(owner).waitFor();
+  };
+  await openDrawer(canvas);
   await split(canvas).dblclick();
   await switchWorkspace(page, "-second");
+  await openDrawer(second);
   await page.evaluate(() => {
     window.__retainedSecondLayers = document.querySelector('[data-design-retained-workspace="ws_design_harness_second"] [data-design-layers-slot]');
   });
   await switchWorkspace(page, "");
-  await split(canvas).press("Shift+ArrowDown");
+  await split(canvas).press("Shift+ArrowUp");
   const committed = await height(canvas);
   await switchWorkspace(page, "-second");
   check(
@@ -212,7 +222,7 @@ async function exerciseSharedLayersHeight({ page, check, canvas }) {
     committed === 272 && (await height(second)) === committed &&
       await page.evaluate(() => window.__retainedSecondLayers === document.querySelector('[data-design-retained-workspace="ws_design_harness_second"] [data-design-layers-slot]')),
   );
-  await split(second).press("Shift+ArrowDown");
+  await split(second).press("Shift+ArrowUp");
   await switchWorkspace(page, "");
   check(
     "resizing the second workspace also updates the first retained Layers panel",

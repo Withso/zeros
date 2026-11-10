@@ -1,5 +1,5 @@
 import { expect } from "@playwright/test";
-import { addDesignSection } from "./ui-smoke-design-helpers.mjs";
+import { addDesignSection, openLayersDrawer } from "./ui-smoke-design-helpers.mjs";
 import { runDesignStyleTokensSmoke } from "./ui-smoke-design-style-tokens.mjs";
 import { runDesignDeferredFocusSmoke, runDesignCloseFocusSmoke } from "./ui-smoke-design-focus.mjs";
 import { runDesignThemeSourcesSmoke } from "./ui-smoke-design-theme-sources.mjs";
@@ -11,6 +11,7 @@ async function openStyleDesign(page) {
     `${new URL(page.url()).origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html`,
     { waitUntil: "networkidle" },
   );
+  await openLayersDrawer(page);
   await page.locator('[data-design-layer-id="home-heading"]').click();
   await expect(
     page.getByRole("textbox", { name: "Size", exact: true }),
@@ -247,8 +248,8 @@ export async function runDesignColorChannelRefreshSmoke({ page, check }) {
 
 export async function runDesignEffectKeyboardDraftSmoke({ page, check }) {
   await openStyleDesign(page);
-  // The heading has no effect yet, so Effects is added, with its first shadow.
-  await addDesignSection(page, "Effects");
+  // The heading has no shadow yet; Shadow's plus adds its first one.
+  await addDesignSection(page, "Shadow");
   await expect.poll(() => styleWrites(page)).toBe(1);
   await page
     .getByRole("button", { name: "Edit drop shadow", exact: true })
@@ -286,8 +287,8 @@ export async function runDesignEffectScrubCancellationSmoke({
   holdOpeningAnimation = false,
 }) {
   await openStyleDesign(page);
-  // The heading has no effect yet, so Effects is added, with its first shadow.
-  await addDesignSection(page, "Effects");
+  // The heading has no shadow yet; Shadow's plus adds its first one.
+  await addDesignSection(page, "Shadow");
   await expect.poll(() => styleWrites(page)).toBe(1);
   // Hold the entry transform through the first hover, then let it settle
   // before pressing. Coordinates from that earlier hover must not be reused.
@@ -377,7 +378,7 @@ export async function runDesignInspectorPreviewOwnerSmoke({ page, check }) {
       control = page.getByRole("slider", { name: "Fill opacity", exact: true });
     } else {
       property = "textShadow";
-      await addDesignSection(page, "Effects");
+      await addDesignSection(page, "Shadow");
       await expect.poll(() => styleWrites(page)).toBe(1);
       await page
         .getByRole("button", { name: "Edit drop shadow", exact: true })

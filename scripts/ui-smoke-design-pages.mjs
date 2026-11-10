@@ -1,10 +1,8 @@
 /* global window, document, localStorage */
 import { expect } from "@playwright/test";
 import { runDesignPageFocusSmoke } from "./ui-smoke-design-focus.mjs";
-import {
-  designCanvasPoint,
-  designCanvasSafeRect,
-} from "./ui-smoke-design-helpers.mjs";
+import { designCanvasPoint,
+  designCanvasSafeRect, openLayersDrawer } from "./ui-smoke-design-helpers.mjs";
 
 export async function runDesignPagesSmoke({ page, check }) {
   await visitPageStorage(page);
@@ -39,6 +37,7 @@ export async function runDesignPagesHistorySmoke({ page, check }) {
       `${origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html?pages=1&pagesHistory=1`,
       { waitUntil: "networkidle" },
     );
+    await openLayersDrawer(page);
     const picker = page.getByRole("button", { name: /^Page: / });
     const viewport = page.locator("[data-design-canvas-viewport]");
     const persisted = () =>
@@ -229,6 +228,7 @@ async function exerciseFirstPageVisit({ page, check }) {
   const harnessUrl = `${origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html?pages=1`;
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto(harnessUrl, { waitUntil: "networkidle" });
+  await openLayersDrawer(page);
   const picker = () => page.getByRole("button", { name: /^Page: / });
   const switchTo = async (title) => {
     await picker().click();
@@ -282,6 +282,7 @@ async function exerciseFirstPageVisit({ page, check }) {
     localStorage.setItem(viewKey, JSON.stringify(memory));
   });
   await page.goto(harnessUrl, { waitUntil: "networkidle" });
+  await openLayersDrawer(page);
   await expect(picker()).toHaveAccessibleName("Page: Page 1");
   await switchTo("Page 2");
   const safe = await designCanvasSafeRect(page);
@@ -343,6 +344,7 @@ async function exercisePageLayersNavigation({ page, check }) {
     `${origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html?denseLayers=1`,
     { waitUntil: "networkidle" },
   );
+  await openLayersDrawer(page);
   const panel = page.locator("[data-design-sidebar-panel]");
   const tree = panel.getByRole("tree");
   await expect
@@ -381,6 +383,7 @@ async function exercisePages({ page, check }) {
     `${origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html?pages=1`,
     { waitUntil: "networkidle" },
   );
+  await openLayersDrawer(page);
   const picker = () => page.getByRole("button", { name: /^Page: / });
   const viewport = page.locator("[data-design-canvas-viewport]");
   const view = () =>
@@ -608,6 +611,7 @@ async function exercisePages({ page, check }) {
     `${origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html?pages=1&workbench`,
     { waitUntil: "networkidle" },
   );
+  await openLayersDrawer(page);
   await page.getByRole("tab", { name: "Files", exact: true }).click();
   const files = page.getByTestId("design-files-section");
   await expect(files).toBeVisible();

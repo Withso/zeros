@@ -36,7 +36,7 @@ export async function runDesignWarmPreviewRefinementSmoke({ page: parent, check 
         file: `warm-${index}.html`, title: `Warm ${index}`,
         x: index % 6 * 1600, y: Math.floor(index / 6) * 1100, z: index,
       })));
-      ui.getState().setPanels(workspaceId, { layersVisible: false, inspectorVisible: false });
+      ui.getState().setPanels(workspaceId, { layersDrawerOpen: false, inspectorVisible: false });
       ui.getState().setSelectedTargets(workspaceId, [], { activeFrame: null });
       ui.getState().setViewport(workspaceId, { zoom: 0.04, panX: 32, panY: 96 });
     });

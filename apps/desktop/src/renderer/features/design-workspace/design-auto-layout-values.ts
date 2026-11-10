@@ -14,7 +14,7 @@ import {
 import { readDesignComputedStyle } from "./design-style-values";
 
 export type DesignAutoLayoutFlow = "none" | "row" | "column" | "grid";
-export type DesignSizingMode = "fixed" | "hug" | "fill" | "custom";
+export type DesignSizingMode = "fixed" | "relative" | "hug" | "fill" | "custom";
 type Styles = Record<string, string | null>;
 const style = (node: DesignRuntimeNodeDetails, property: string) =>
   readDesignComputedStyle(node.styles, property);
@@ -70,6 +70,7 @@ export function designSizingMode(
   }
   if (["max-content", "min-content", "fit-content"].includes(value))
     return "hug";
+  if (/^\d*\.?\d+%$/.test(value)) return "relative";
   if (value === "auto")
     return axis === "y" ||
       canFillDesignContainer(node) ||
@@ -84,7 +85,7 @@ export function designSizingMode(
 export function designSizingStyles(
   node: DesignRuntimeNodeDetails,
   axis: DesignLayoutAxis,
-  mode: Exclude<DesignSizingMode, "custom">,
+  mode: Exclude<DesignSizingMode, "custom" | "relative">,
 ): Styles {
   const property = axis === "x" ? "width" : "height";
   const parentMode = designLayoutMode(node.layout?.parentDisplay ?? "");
@@ -120,6 +121,43 @@ export function designSizingStyles(
       style(node, `min-${property}`) === "auto")
   )
     result[`min-${property}`] = "0px";
+  return result;
+}
+
+/** Relative sizing: the layer's current size as a percentage of what CSS
+ * resolves it against, the parent's content box in flow and its padding box
+ * for a positioned layer. */
+export function designRelativeSizeStyles(
+  node: DesignRuntimeNodeDetails,
+  parent: DesignRuntimeNodeDetails | null,
+  axis: DesignLayoutAxis,
+): Styles {
+  const property = axis === "x" ? "width" : "height";
+  if (!node.layout?.parentId)
+    throw new Error("Relative sizing needs a layer inside a frame.");
+  const positioned = ["absolute", "fixed"].includes(style(node, "position"));
+  const paddingBox = axis === "x" ? node.layout.parentWidth : node.layout.parentHeight;
+  const padding = positioned || !parent
+    ? 0
+    : (axis === "x" ? ["padding-left", "padding-right"] : ["padding-top", "padding-bottom"])
+        .reduce((sum, edge) => sum + (Number.parseFloat(style(parent, edge)) || 0), 0);
+  const base = paddingBox - padding;
+  if (!(base > 0)) throw new Error("The parent has no room to size against.");
+  const size = Number.parseFloat(cssSize(node, axis, borderSize(node, axis)));
+  const result: Styles = {
+    [property]: `${Math.round((size / base) * 10_000) / 100 || 0}%`,
+  };
+  // A flex item would otherwise grow or shrink away from its percentage.
+  if (
+    canFillDesignContainer(node) &&
+    designLayoutMode(node.layout.parentDisplay) === "flex" &&
+    mainAxis(node) === axis
+  )
+    Object.assign(result, {
+      "flex-grow": "0",
+      "flex-shrink": "0",
+      "flex-basis": "auto",
+    });
   return result;
 }
 
@@ -418,7 +456,8 @@ export function designAutoLayoutUpdates(
           });
         for (const axis of ["x", "y"] as const) {
           const intent = designSizingMode(child, axis);
-          if (intent !== "custom")
+          // A percentage stays as authored; it resolves the same in the new flow.
+          if (intent !== "custom" && intent !== "relative")
             Object.assign(sizing, designSizingStyles(next, axis, intent));
         }
         childUpdates.set(child.oid, { ...childUpdates.get(child.oid), ...sizing });

@@ -468,7 +468,10 @@ describe("auto layout intent", () => {
     expect(designSizingMode(child, "x")).toBe("fill");
     child.styles.flexGrow = "0";
     expect(designSizingMode(child, "x")).toBe("hug");
+    // A percentage is Relative sizing; other written lengths stay custom.
     child.layout!.widthValue = "60%";
+    expect(designSizingMode(child, "x")).toBe("relative");
+    child.layout!.widthValue = "12em";
     expect(designSizingMode(child, "x")).toBe("custom");
   });
 
@@ -523,5 +526,31 @@ describe("auto layout intent", () => {
     expect(designGridTrackCount("[start] minmax(0px, 1fr) [end] 100px")).toBe(
       2,
     );
+  });
+});
+
+describe("Relative never relabels a size that read Fill", () => {
+  const sized = (widthValue: string, styles: Record<string, string> = {}) => {
+    const child = node(styles);
+    child.layout!.widthValue = widthValue;
+    return child;
+  };
+
+  it("reads an authored 50% width as Relative", () => {
+    expect(designSizingMode(sized("50%"), "x")).toBe("relative");
+  });
+
+  it("keeps a growing 100% flex item on Fill, as it read before", () => {
+    expect(designSizingMode(sized("100%", { flexGrow: "1" }), "x")).toBe("fill");
+  });
+
+  it("reads a fixed-growth 100% as Relative: Fill never writes a percentage", () => {
+    // Before Relative existed this read Custom (word "CSS"); Fill's own
+    // output is auto plus growth or stretch, so no Fill reading moves.
+    expect(designSizingMode(sized("100%", { flexGrow: "0" }), "x")).toBe("relative");
+    for (const axis of ["x", "y"] as const) {
+      const fill = designSizingStyles(node(), axis, "fill");
+      expect(Object.values(fill).some((value) => value?.endsWith("%"))).toBe(false);
+    }
   });
 });

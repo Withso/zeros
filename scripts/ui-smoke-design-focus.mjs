@@ -1,4 +1,5 @@
 import { expect } from "@playwright/test";
+import { openLayersDrawer } from "./ui-smoke-design-helpers.mjs";
 
 // Hold the real Design transaction while a second edit claims focus. These
 // nonmodal tool windows must not take it back when the earlier save completes.
@@ -12,6 +13,7 @@ export async function runDesignDeferredFocusSmoke({
   await page.setViewportSize({ width: 1440, height: 900 });
   for (const operation of operations) {
     await page.goto(`${origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html`);
+    await openLayersDrawer(page);
     await page.getByRole("button", { name: "Open theme editor", exact: true }).click();
     const dialog = page.getByRole("dialog", { name: "Theme editor" });
     const search = dialog.getByRole("textbox", { name: "Search theme variables" });
@@ -68,6 +70,7 @@ export async function runDesignDeferredFocusSmoke({
 export async function runDesignCloseFocusSmoke({ page, check }) {
   const origin = new URL(page.url()).origin;
   await page.goto(`${origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html`);
+  await openLayersDrawer(page);
   await page.locator('[data-design-layer-id="home-heading"]').click();
   const size = page.getByRole("textbox", { name: "Size", exact: true });
   await expect(size).toBeVisible();
@@ -91,6 +94,7 @@ export async function runDesignCloseFocusSmoke({ page, check }) {
 export async function runDesignPageFocusSmoke({ page, check, moveFocus = true }) {
   const origin = new URL(page.url()).origin;
   await page.goto(`${origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html?pages=1`);
+  await openLayersDrawer(page);
   const picker = page.getByRole("button", { name: /^Page:/ });
   await picker.click();
   await page.getByRole("menuitem", { name: "Rename page…", exact: true }).click();

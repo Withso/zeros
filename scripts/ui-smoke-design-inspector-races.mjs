@@ -1,4 +1,5 @@
 import { expect } from "@playwright/test";
+import { openLayersDrawer } from "./ui-smoke-design-helpers.mjs";
 
 export async function runDesignInspectorRacesSmoke({ page, check }) {
   const origin = new URL(page.url()).origin;
@@ -6,6 +7,7 @@ export async function runDesignInspectorRacesSmoke({ page, check }) {
     `${origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html`,
     { waitUntil: "networkidle" },
   );
+  await openLayersDrawer(page);
   await page
     .locator(
       '[data-design-sidebar-panel] [data-design-layer-id="home-heading"]',
@@ -95,6 +97,7 @@ export async function runDesignInspectorRacesSmoke({ page, check }) {
       `${origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html`,
       { waitUntil: "networkidle" },
     );
+    await openLayersDrawer(page);
     await page
       .locator(
         '[data-design-sidebar-panel] [data-design-layer-id="home-heading"]',
@@ -193,6 +196,7 @@ export async function runDesignInspectorRacesSmoke({ page, check }) {
     `${origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html`,
     { waitUntil: "networkidle" },
   );
+  await openLayersDrawer(page);
   await page
     .locator(
       '[data-design-sidebar-panel] [data-design-layer-id="home-heading"]',

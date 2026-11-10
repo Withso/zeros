@@ -19,6 +19,8 @@ import {
   parseDesignShadow,
   parseDesignShadowList,
   parseDesignTransform,
+  designBlurAdd,
+  designEffectGroup,
 } from "../design-effect-values";
 
 describe("design effect values", () => {
@@ -228,5 +230,24 @@ describe("design effects list", () => {
     };
     expect(designEffectEntries(state, false)).toEqual([]);
     expect(designRawEffectFilters(state).boxShadow).toBe(true);
+  });
+});
+
+describe("Shadow and Blur sections", () => {
+  const none = { boxShadow: "none", textShadow: "none", filter: "none", backdropFilter: "none" };
+
+  it("files each effect kind under its own section", () => {
+    expect(designEffectGroup("drop-shadow")).toBe("shadow");
+    expect(designEffectGroup("inner-shadow")).toBe("shadow");
+    expect(designEffectGroup("layer-blur")).toBe("blur");
+    expect(designEffectGroup("background-blur")).toBe("blur");
+  });
+
+  it("adds a layer blur first, then a background blur, then nothing", () => {
+    expect(designBlurAdd(none)).toEqual({ filter: "blur(4px)" });
+    expect(designBlurAdd({ ...none, filter: "blur(2px)" })).toEqual({ "backdrop-filter": "blur(4px)" });
+    expect(designBlurAdd({ ...none, filter: "blur(2px)", backdropFilter: "blur(8px)" })).toBeNull();
+    // A raw filter the rows cannot show is never overwritten.
+    expect(designBlurAdd({ ...none, filter: "grayscale(1)", backdropFilter: "blur(8px)" })).toBeNull();
   });
 });

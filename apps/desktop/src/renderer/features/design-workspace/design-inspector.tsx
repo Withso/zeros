@@ -78,6 +78,7 @@ import {
   designFrameRootFixedStyles,
   designHugFrameSize,
   designSizingMode,
+  designRelativeSizeStyles,
   designSizingStyles,
   hasDesignIntrinsicSize,
 } from "./design-auto-layout-values";
@@ -143,6 +144,7 @@ import {
   scrubDesignSteppedValue,
   withDesignPositionContext,
 } from "./design-style-values";
+import { designFieldMixed } from "./design-style-mixed";
 import { dispatchDesignWorkspaceShortcut } from "./design-workspace-shortcuts";
 import {
   publishDesignLivePreviewStyles,
@@ -861,23 +863,15 @@ function InspectorFrameGeometryField({
   frame,
   geometryKey,
   saved,
-  sizing,
   ...field
 }: Omit<InspectorEditFieldProps, "value" | "numericValue"> & {
   workspaceId: string;
   frame: string;
   geometryKey: DesignFrameGeometryLiveKey;
   saved: number;
-  sizing?: "hug" | "fill";
 }) {
   const shown = useDesignFrameGeometryLiveValue(workspaceId, frame, geometryKey) ?? saved;
-  return (
-    <InspectorEditField
-      {...field}
-      value={sizing ? (sizing === "hug" ? "Hug" : "Fill") : shown}
-      numericValue={sizing ? String(shown) : undefined}
-    />
-  );
+  return <InspectorEditField {...field} value={shown} />;
 }
 
 const InspectorStyleField = React.memo(function InspectorStyleField({
@@ -985,12 +979,13 @@ const InspectorStyleField = React.memo(function InspectorStyleField({
   ) {
     displayedValue = `${Math.round(Number.parseFloat(displayedValue) * 10000) / 100}%`;
   }
-  if (options?.sizing && liveValue === undefined)
-    displayedValue = options.sizing === "hug" ? "Hug" : "Fill";
-  // Measured geometry and sizing modes show what the canvas resolves, never a
-  // token; a live preview shows its own value.
+  // Several layers that differ show the Mixed placeholder until a preview
+  // or an edit gives the field one value for all of them.
+  if (options?.mixed && liveValue === undefined) displayedValue = "";
+  // Measured geometry shows what the canvas resolves, never a token; a live
+  // preview shows its own value.
   const token =
-    !options?.geometry && !options?.sizing && !options?.percentage &&
+    !options?.geometry && !options?.percentage && !options?.mixed &&
     liveValue === undefined && originLabel
       ? designStyleTokenDisplay(details, property, originLabel)
       : null;
@@ -1014,12 +1009,7 @@ const InspectorStyleField = React.memo(function InspectorStyleField({
       shortLabel={options?.shortLabel}
       suffix={options?.suffix}
       percentage={options?.percentage}
-      numericValue={
-        options?.sizing && details
-          ? designLayoutFieldValue(details, property)
-          : undefined
-      }
-      placeholder={options?.placeholder ?? "–"}
+      placeholder={options?.mixed ? "Mixed" : (options?.placeholder ?? "–")}
       styleProperty={property}
       whole={options?.whole}
       compact={options?.compact}
@@ -1869,11 +1859,29 @@ export const DesignInspector = React.memo(function DesignInspector({
               ? designAutoLayoutUpdates(details, liveChildren,
                   action.infer ? designInferredAutoLayoutFlow(liveChildren) : action.flow)
               : designLayoutChildUpdates(details, liveChildren, action);
+        } else if (action.type === "sizing" && action.mode === "relative") {
+          // A percentage resolves against the parent, so each layer reads its
+          // own parent's padding.
+          const parents = await Promise.all(
+            details.map((node) =>
+              node.layout?.parentId
+                ? runtime.getNodeDetails(node.layout.parentId)
+                : Promise.resolve(null),
+            ),
+          );
+          updates = new Map(
+            details.map((node, index) => [
+              node.oid,
+              designRelativeSizeStyles(node, parents[index] ?? null, action.axis),
+            ]),
+          );
         } else if (action.type === "sizing") {
+          const { mode } = action;
+          if (mode === "relative") return;
           updates = new Map(
             details.map((node) => [
               node.oid,
-              designSizingStyles(node, action.axis, action.mode),
+              designSizingStyles(node, action.axis, mode),
             ]),
           );
           if (action.mode === "fill") {
@@ -2160,7 +2168,6 @@ export const DesignInspector = React.memo(function DesignInspector({
           frame={styleContext.frame.file}
           geometryKey={geometryKey}
           saved={geometryValue}
-          sizing={options?.sizing}
           label={label}
           whole={options?.whole}
           range={
@@ -2268,6 +2275,13 @@ export const DesignInspector = React.memo(function DesignInspector({
       property,
       value,
     );
+    const mixed =
+      options?.mixed ||
+      designFieldMixed(layoutParents, styleNodeIds.length, property, {
+        geometry: options?.geometry,
+        whole: options?.whole,
+        linkedProperties: options?.linkedProperties,
+      });
     return (
       <InspectorStyleField
         key={`${styleContext.workspaceId}:${styleContext.frame.file}:${styleNodeIds.join(":")}:${property}`}
@@ -2278,7 +2292,7 @@ export const DesignInspector = React.memo(function DesignInspector({
         property={property}
         value={designStyleFieldValue(authoredProperties, property, value)}
         computedValue={value}
-        options={options}
+        options={mixed ? { ...options, mixed } : options}
         details={elementDetails ?? undefined}
         originLabel={styleOriginLabel}
         onLayoutAction={commitLayoutAction}
@@ -2524,6 +2538,7 @@ export const DesignInspector = React.memo(function DesignInspector({
                       frameStyleTarget || elementDetails.oid === layoutRootId
                     }
                     layoutParents={layoutParents}
+                    selectionCount={styleNodeIds.length}
                     disabled={!active || pendingHistoryActions > 0}
                     onPreviewStyles={previewSelectedStyles}
                     onCancelStylePreview={clearSelectedStylePreview}

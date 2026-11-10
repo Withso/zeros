@@ -1,5 +1,5 @@
 import { expect } from "@playwright/test";
-import { designFrameElementBox } from "./ui-smoke-design-helpers.mjs";
+import { designFrameElementBox, openLayersDrawer } from "./ui-smoke-design-helpers.mjs";
 
 export async function runDesignLayoutGesturesSmoke({ page, check }) {
   const origin = new URL(page.url()).origin;
@@ -8,6 +8,7 @@ export async function runDesignLayoutGesturesSmoke({ page, check }) {
     `${origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html?layoutGestures`,
     { waitUntil: "networkidle" },
   );
+  await openLayersDrawer(page);
   const runtime = page.frameLocator(
     '[data-design-frame="home.html"] iframe[data-design-document-buffer="displayed"][data-design-document-ready]',
   );
@@ -75,13 +76,13 @@ export async function runDesignLayoutGesturesSmoke({ page, check }) {
 
   await select("home-heading");
   await layout
-    .getByRole("button", { name: "Width resizing", exact: true })
+    .getByRole("button", { name: /^Width sizing: / })
     .click();
   await expect(
-    page.getByRole("menuitemradio", { name: "Hug contents", exact: true }),
+    page.getByRole("menuitemradio", { name: "Hug", exact: true }),
   ).toHaveCount(0);
   await expect(
-    page.getByRole("menuitemradio", { name: "Fill container", exact: true }),
+    page.getByRole("menuitemradio", { name: "Fill", exact: true }),
   ).toBeVisible();
   await page.keyboard.press("Escape");
   const dragTo = async (target) => {
@@ -145,7 +146,7 @@ export async function runDesignLayoutGesturesSmoke({ page, check }) {
   const initialNodeBox = await designFrameElementBox(runtime.owner(), heading);
   const initialParentBox = await designFrameElementBox(runtime.owner(), runtime.locator('[data-oid="home-main"]'));
   const restingDistance = initialNodeBox.y - initialParentBox.y;
-  const freeY = layout.getByLabel("Y", { exact: true });
+  const freeY = page.locator("[data-design-position-section]").getByLabel("Y", { exact: true });
   await freeY.evaluate((input) => {
     input.dataset.dragIdentity = "free-y";
   });
@@ -253,19 +254,19 @@ export async function runDesignLayoutGesturesSmoke({ page, check }) {
     window.__zerosHarnessStyleDelay = 1500;
   });
   await layout
-    .getByRole("button", { name: "Width resizing", exact: true })
+    .getByRole("button", { name: /^Width sizing: / })
     .click();
   await page
-    .getByRole("menuitemradio", { name: "Fill container", exact: true })
+    .getByRole("menuitemradio", { name: "Fill", exact: true })
     .click();
   await expect
     .poll(() => heading.evaluate((el) => getComputedStyle(el).flexGrow))
     .toBe("1");
   await layout
-    .getByRole("button", { name: "Width resizing", exact: true })
+    .getByRole("button", { name: /^Width sizing: / })
     .click();
   await page
-    .getByRole("menuitemradio", { name: "Fixed width", exact: true })
+    .getByRole("menuitemradio", { name: "Fixed", exact: true })
     .click();
   await expect
     .poll(() => heading.evaluate((el) => getComputedStyle(el).flexGrow), {
@@ -482,6 +483,7 @@ export async function runDesignLayoutGesturesSmoke({ page, check }) {
     `${origin}/apps/desktop/src/renderer/harnesses/harness-design-workspace.html?layoutGestures&rejectTransfer`,
     { waitUntil: "networkidle" },
   );
+  await openLayersDrawer(page);
   const movableFrame = page.locator('[data-design-frame="home.html"]');
   const initialFrame = await movableFrame.boundingBox();
   const moveFrame = async () => {
