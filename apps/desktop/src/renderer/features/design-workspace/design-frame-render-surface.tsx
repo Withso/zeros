@@ -367,33 +367,35 @@ export const DesignFrameRenderSurface = React.memo(function DesignFrameRenderSur
   const still = recorded ? null : picture?.current
     ? picture.url
     : currentScreenshot?.dataUrl ?? picture?.url ?? null;
-  const retiring = useDesignLiveDocumentRetirement(live, active);
+  const retirement = useDesignLiveDocumentRetirement(live, active);
+  const runtimeDocument = (document: number, retiring: boolean) => (
+    <DesignFrameRuntimeIframe
+      key={document}
+      retiring={retiring}
+      workspaceId={workspaceId}
+      protocolCapability={protocolCapability}
+      folder={folder}
+      frame={frame}
+      active={active}
+      playbackSessionId={playbackSessionId}
+      onPlaybackStopped={onPlaybackStopped}
+      selected={selected}
+      selectedNodeIds={selectedNodeIds}
+      autoCapture={!playbackSessionId && (recorded ? selected : designFrameAutoCapture(selected, picture))}
+      underlayReady={sourcePainted || !!still || recorded}
+      theme={theme}
+      transitionCover={
+        currentScreenshot ??
+        (picture?.current ? pictureCover : null) ??
+        screenshot ??
+        pictureCover
+      }
+      designDirectory={designDirectory}
+    />
+  );
   let surface: React.ReactNode;
-  if (live || retiring) {
-    surface = (
-      <DesignFrameRuntimeIframe
-        retiring={!live}
-        workspaceId={workspaceId}
-        protocolCapability={protocolCapability}
-        folder={folder}
-        frame={frame}
-        active={active}
-        playbackSessionId={playbackSessionId}
-        onPlaybackStopped={onPlaybackStopped}
-        selected={selected}
-        selectedNodeIds={selectedNodeIds}
-        autoCapture={!playbackSessionId && (recorded ? selected : designFrameAutoCapture(selected, picture))}
-        underlayReady={sourcePainted || !!still || recorded}
-        theme={theme}
-        transitionCover={
-          currentScreenshot ??
-          (picture?.current ? pictureCover : null) ??
-          screenshot ??
-          pictureCover
-        }
-        designDirectory={designDirectory}
-      />
-    );
+  if (live || retirement.retiring !== null) {
+    surface = null;
   } else if (!sourcePainted && !still && !sourceEnabled && !recorded) {
     surface = (
       <div className="bg-bg2 text-muted-fg pointer-events-none flex size-full items-center justify-center gap-2 text-xs">
@@ -439,6 +441,12 @@ export const DesignFrameRenderSurface = React.memo(function DesignFrameRenderSur
         current={picture && still === picture.url ? picture.current : undefined}
         screenshot={still === currentScreenshot?.dataUrl}
       /> : null}
+      {[
+        // A document that left stays mounted, undrawn, until the frame's
+        // passive pixels have been presented; one that follows it is new.
+        retirement.retiring !== null ? runtimeDocument(retirement.retiring, true) : null,
+        live ? runtimeDocument(retirement.document, false) : null,
+      ]}
       {surface}
       {mountedHighResolutionCapture ? (
         <img

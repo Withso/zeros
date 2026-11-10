@@ -2,8 +2,10 @@ import { useEffect, useState } from "react";
 
 export interface DesignLiveDocumentRetirement {
   live: boolean;
-  /** Still mounted, no longer drawn; see `useDesignLiveDocumentRetirement`. */
-  retiring: boolean;
+  /** Identity of the frame's current (or next) live document. */
+  document: number;
+  /** A document that left: still mounted, no longer drawn. Null when none. */
+  retiring: number | null;
 }
 
 export function designLiveDocumentRetirement(
@@ -11,9 +13,13 @@ export function designLiveDocumentRetirement(
   live: boolean,
   active: boolean,
 ): DesignLiveDocumentRetirement {
-  if (live) return { live: true, retiring: false };
   // A hidden canvas presents nothing, so there is nothing to wait for.
-  return { live: false, retiring: active && (previous.live || previous.retiring) };
+  const retiring = active ? previous.retiring : null;
+  if (live === previous.live) return retiring === previous.retiring ? previous : { ...previous, retiring };
+  // A document that left never comes back: it may hold previews of a gesture
+  // that ended with it. A frame that is live again starts a new document.
+  if (live) return { live: true, document: previous.document + 1, retiring };
+  return { live: false, document: previous.document, retiring: active ? previous.document : null };
 }
 
 /** A live frame document leaves in two steps. Chromium frees a hidden
@@ -22,17 +28,14 @@ export function designLiveDocumentRetirement(
  * visible document showed its blank tiles for a frame. So the document first
  * stops being drawn, in the commit that paints the frame's passive pixels,
  * and is removed once that commit has been presented. */
-export function useDesignLiveDocumentRetirement(live: boolean, active: boolean): boolean {
-  const [state, setState] = useState<DesignLiveDocumentRetirement>({ live, retiring: false });
-  let current = state;
-  if (state.live !== live || (state.retiring && !active)) {
-    current = designLiveDocumentRetirement(state, live, active);
-    setState(current);
-  }
+export function useDesignLiveDocumentRetirement(live: boolean, active: boolean): DesignLiveDocumentRetirement {
+  const [state, setState] = useState<DesignLiveDocumentRetirement>({ live, document: 0, retiring: null });
+  const current = designLiveDocumentRetirement(state, live, active);
+  if (current !== state) setState(current);
   const retiring = current.retiring;
   useEffect(() => {
-    if (!retiring) return;
-    const finish = () => setState((latest) => latest.retiring ? { live: latest.live, retiring: false } : latest);
+    if (retiring === null) return;
+    const finish = () => setState((latest) => latest.retiring === retiring ? { ...latest, retiring: null } : latest);
     let second = 0;
     // The second animation frame runs after the first frame without the
     // document was produced. A hidden window delivers none; the timer bounds it.
@@ -44,5 +47,5 @@ export function useDesignLiveDocumentRetirement(live: boolean, active: boolean):
       window.clearTimeout(timer);
     };
   }, [retiring]);
-  return retiring;
+  return current;
 }

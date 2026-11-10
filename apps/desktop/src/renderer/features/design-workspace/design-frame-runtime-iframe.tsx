@@ -990,7 +990,8 @@ function DesignFrameRuntimeSession({
 
   return (
     <div
-      className="relative size-full overflow-hidden"
+      // A retiring document lies over the frame, out of the way of one that follows it.
+      className={retiring ? "absolute inset-0 size-full overflow-hidden" : "relative size-full overflow-hidden"}
       data-design-frame-retiring-document={retiring ? "" : undefined}
       // Opacity, not visibility: Chromium frees a hidden frame's tiles while
       // the canvas frame that still draws them is on screen.
