@@ -6,6 +6,7 @@
 
 // --- IMPORTS ---
 
+import { useDesignLiveDocumentRetirement } from "./design-frame-retirement";
 import { FileCode2 } from "lucide-react";
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
@@ -366,10 +367,12 @@ export const DesignFrameRenderSurface = React.memo(function DesignFrameRenderSur
   const still = recorded ? null : picture?.current
     ? picture.url
     : currentScreenshot?.dataUrl ?? picture?.url ?? null;
+  const retiring = useDesignLiveDocumentRetirement(live, active);
   let surface: React.ReactNode;
-  if (live) {
+  if (live || retiring) {
     surface = (
       <DesignFrameRuntimeIframe
+        retiring={!live}
         workspaceId={workspaceId}
         protocolCapability={protocolCapability}
         folder={folder}
