@@ -6,6 +6,7 @@
 // has an active chat.
 
 import { toast } from "../../shared/ui/primitives/elements";
+import { editChat } from "../../state/cloud-chat-edits";
 import React, {
   useCallback,
   useEffect,
@@ -501,7 +502,8 @@ export function ConversationPaneLayout({
         if (!current || current.archived || current.folder !== closedFolder) return;
         const next = replacement, hasSibling = visibleChats.length > 1;
         const currentPaneChats = paneChats;
-        dispatch({ type: discard ? "DELETE_CHAT" : "ARCHIVE_CHAT", id: chat.id });
+        if (discard) dispatch({ type: "DELETE_CHAT", id: chat.id });
+        else editChat(dispatch, chat.id, { archived: true }, { busy: wasRunning });
 
         if (wasActive) {
           if (next) {
@@ -553,7 +555,7 @@ export function ConversationPaneLayout({
               toast.error(`Couldn't confirm ${agentName} stopped`, {
                 description: "It may still be running in the cloud workspace.",
                 action: { label: "Reopen chat", onClick: () => {
-                  dispatch({ type: "UNARCHIVE_CHAT", id: chat.id });
+                  editChat(dispatch, chat.id, { archived: false });
                   dispatch({ type: "SET_ACTIVE_CHAT", id: chat.id });
                 } },
               });
@@ -620,7 +622,7 @@ export function ConversationPaneLayout({
         return;
       }
       if (chat.archived) {
-        dispatch({ type: "UNARCHIVE_CHAT", id: chat.id });
+        editChat(dispatch, chat.id, { archived: false });
       }
       if (activeWorkspacePath) {
         moveChatToPane(activeWorkspacePath, chat.id, paneId);

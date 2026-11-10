@@ -93,6 +93,21 @@ describe("zeros cloud", () => {
     expect(list.out()).toBe(`${WORKSPACE}  #3  ready  n  o/r  b\n(more: use --offset)\n`);
   });
 
+  it("passes repeatable --env KEY=VALUE pairs on workspace create and refuses malformed or repeated names", async () => {
+    const api = await fakeApi({ "POST /api/v0/workspaces": () => ({ status: 201, body: { workspace: { id: WORKSPACE } } }) });
+    const env = { ZEROS_API_URL: api.url, ZEROS_API_KEY: KEY };
+    expect(await run(["cloud", "workspace", "create", "--repository", "o/r", "--env", "APP_MODE=staging", "--env", "EMPTY=", "--env", "URL=https://x.test/?a=b"], io(env).io)).toBe(0);
+    expect(api.seen[0]!.body).toEqual({ repository: "o/r", env: { APP_MODE: "staging", EMPTY: "", URL: "https://x.test/?a=b" } });
+    for (const bad of [["--env", "NOVALUE"], ["--env", "=value"], ["--env", "A=1", "--env", "A=2"]]) {
+      const t = io(env);
+      expect(await run(["cloud", "workspace", "create", "--repository", "o/r", ...bad], t.io)).toBe(2);
+      expect(t.err()).toContain("--env");
+    }
+    expect(api.seen).toHaveLength(1);
+    const help = io({}); await run(["cloud", "--help"], help.io);
+    expect(help.out()).toContain("[--env KEY=VALUE]");
+  });
+
   it("sends a message from a file or standard input and creates sessions in this workspace", async () => {
     const directory = await mkdtemp(join(tmpdir(), "zeros-cli-")); cleanups.push(() => rm(directory, { recursive: true, force: true }));
     await writeFile(join(directory, "prompt.md"), "From a file\n");

@@ -1,12 +1,14 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { Hono } from "hono";
 import pg from "pg";
+import { z } from "zod";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createApp } from "../../app.js";
 import type { Config, GithubBackendConfig } from "../../config.js";
 import { HttpError } from "../../authz.js";
+import type { AuthedUser } from "../../auth.js";
 import { withSystemTx, withUserTx } from "../../db.js";
 import { workosTestAuth } from "../../test-workos-env.js";
 import { resetMigratedTestDatabase } from "../../test-database.js";
@@ -19,6 +21,8 @@ import { createCloudGithubServices } from "../github-composition.js";
 import { createCloudV2Routes, type CloudV2RouteDeps } from "../routes.js";
 import { createCloudV2WorkerRoutes, type CloudV2WorkerRouteDeps } from "../worker-routes.js";
 import { CloudV2PromptSignals } from "../prompt-signals.js";
+import { CloudEnvironments } from "../environment-store.js";
+import { CloudV2CapabilitiesSchema } from "../contract.js";
 import { CloudApiCredentials } from "./credentials.js";
 import { CloudWorkspaceApiTokens } from "./workspace-tokens.js";
 import { CloudApiService } from "./service.js";
@@ -40,7 +44,7 @@ database("cloud API through the assembled router and PostgreSQL", () => {
   afterEach(async () => { await credentials?.close(); vi.restoreAllMocks(); });
   beforeEach(async () => {
     await resetMigratedTestDatabase(pool);
-    store = new CloudV2Store(pool); credentials = new CloudApiCredentials(pool); tokens = new CloudWorkspaceApiTokens(pool, keys);
+    store = new CloudV2Store(pool, keys); credentials = new CloudApiCredentials(pool); tokens = new CloudWorkspaceApiTokens(pool, keys);
     [org, otherOrg, owner, member] = Array.from({ length: 4 }, () => randomUUID());
     clientAddress = `198.51.100.${++clientSequence}`;
     for (const id of [owner, member]) {
@@ -85,9 +89,9 @@ database("cloud API through the assembled router and PostgreSQL", () => {
     expect(body).not.toHaveProperty("error");
     return body.result;
   }
-  function management(userId = owner) {
+  function management(userId = owner, authority: Partial<AuthedUser> = {}) {
     const router = new Hono();
-    router.use("*", async (c, next) => { c.set("user", { id: userId } as never); await next(); });
+    router.use("*", async (c, next) => { c.set("user", { id: userId, ...authority } as AuthedUser); await next(); });
     router.onError((error, c) => error instanceof HttpError ? c.json({ error: { code: error.code } }, error.status) : c.json({ error: { code: "internal" } }, 500));
     router.route("/", createCloudApiManagementRoutes(credentials));
     router.route("/", createCloudV2Routes(routes));
@@ -100,7 +104,7 @@ database("cloud API through the assembled router and PostgreSQL", () => {
     expect(typeof credential).toBe("string");
     return { credential: credential!, worker, bootId };
   }
-  function workerRouter(promptOutbox = false, waitForPrompts?: CloudV2WorkerRouteDeps["waitForPrompts"]) {
+  function workerRouter(promptOutbox = false, waitForPrompts?: CloudV2WorkerRouteDeps["waitForPrompts"], environments?: CloudEnvironments) {
     const router = new Hono();
     const apiConfiguration = vi.fn(async (id: string) => {
       const token = await tokens.token(id);
@@ -110,7 +114,8 @@ database("cloud API through the assembled router and PostgreSQL", () => {
     router.route("/", createCloudV2WorkerRoutes({ store, apiConfiguration, promptOutbox, runtimeSha256: "a".repeat(64),
       ...(waitForPrompts ? { waitForPrompts } : {}),
       config: async row => ({ t: "config", workspace: { id: row.id, organizationId: row.organizationId, repository: row.repository,
-        checkoutPath: `/home/user/${row.repository}`, branch: row.branch, baseBranch: row.baseBranch }, agents: {} }),
+        checkoutPath: `/home/user/${row.repository}`, branch: row.branch, baseBranch: row.baseBranch }, agents: {},
+        ...(environments ? { environment: await environments.resolve(row) } : {}) }),
       githubToken: async () => ({ token: "synthetic-github", expiresAt: 5000 }),
     }));
     return { router, apiConfiguration };
@@ -180,7 +185,7 @@ database("cloud API through the assembled router and PostgreSQL", () => {
     expect((await command("workspace", "sessions", "--include-archived")).data).toHaveLength(2);
     const nextId = randomUUID();
     expect(await command("message", "send", "--session", sessionId, "--message-file", "-", "--message-id", nextId))
-      .toEqual({ message: { id: nextId } });
+      .toEqual({ message: { id: nextId, createdBySessionId: null } });
     await store.writeHistory(workspaceId, { messages: { chatId: sessionId, rows: [
       { msgId: messageId, kind: "text", payload: JSON.stringify({ role: "user", text: "Next" }), createdAt: 123 },
       { msgId: nextId, kind: "text", payload: JSON.stringify({ role: "user", text: "A message from stdin" }), createdAt: 124 },
@@ -221,6 +226,130 @@ database("cloud API through the assembled router and PostgreSQL", () => {
     const mutate = (id: string, action: string, body?: object) => app.request(`/api/v0/sessions/${id}/${action}`, {
       method: "POST", headers: { authorization: `Bearer ${key}`, "x-real-ip": clientAddress,
         ...(body ? { "content-type": "application/json" } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}),
+    });
+    const edit = (id: string, body?: unknown, userId = owner, workspaceId = workspace.id) =>
+      management(userId).request(`/v1/cloud-v2/workspaces/${workspaceId}/chats/${encodeURIComponent(id)}/edit`, {
+        method: "POST", headers: { "content-type": "application/json" }, ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      });
+
+    describe("app chat edit route", () => {
+      it("advertises chatEdits only at the top level and remains readable by released strict capability parsers", async () => {
+        const router = management(), base = "/v1/cloud-v2/workspaces";
+        const one = await (await router.request(`${base}/${workspace.id}`)).json();
+        const listed = await (await router.request(`${base}?organizationId=${org}`)).json();
+        const numbered = await (await router.request(`${base}/by-number/org-${org}/${workspace.number}`)).json();
+        const created = await router.request(base, { method: "POST", headers: { "content-type": "application/json" },
+          body: JSON.stringify({ organizationId: org, repository: "example/project" }) });
+        expect(created.status).toBe(201);
+        const legacy = z.object({ version: z.literal(2), capabilities: CloudV2CapabilitiesSchema }).passthrough();
+        for (const document of [one.workspace, ...listed.workspaces, numbered.workspace, (await created.json()).workspace]) {
+          expect(document.chatEdits).toBe(1);
+          expect(document.capabilities).not.toHaveProperty("chatEdits");
+          expect(legacy.safeParse(document).success).toBe(true);
+        }
+      });
+
+      it("matches API rename/archive/unarchive while stopped without waking, source checks or activity", async () => {
+        const native = chat(), api = chat();
+        await store.writeHistory(workspace.id, { chats: [native, api] });
+        await store.transition(workspace.id, ["creating"], "stopped");
+        const before = await store.get(workspace.id, owner), lifecycle = vi.spyOn(store, "requestLifecycle"), active = vi.spyOn(store, "markActive");
+        for (const [action, input, patch] of [
+          ["rename", { name: "  Shared title  " }, { title: "  Shared title  " }],
+          ["archive", undefined, { archived: true }], ["unarchive", undefined, { archived: false }],
+        ] as const) {
+          const nativeReply = await edit(native.id, patch), apiReply = await mutate(api.id, action, input);
+          expect([nativeReply.status, apiReply.status]).toEqual([200, 200]);
+          expect(nativeReply.headers.get("cache-control")).toBe("no-store");
+          const session = await apiReply.json();
+          expect(await nativeReply.json()).toEqual({ chat: { id: native.id, title: session.name, archived: session.archived } });
+        }
+        const combined = await edit(native.id, { title: "Combined", archived: true });
+        expect(combined.status).toBe(200);
+        expect(await combined.json()).toEqual({ chat: { id: native.id, title: "Combined", archived: true } });
+        expect(await store.get(workspace.id, owner)).toEqual(before);
+        expect(lifecycle).not.toHaveBeenCalled(); expect(active).not.toHaveBeenCalled();
+        expect(routes.authorizeSource).not.toHaveBeenCalled(); expect(routes.continueSource).not.toHaveBeenCalled();
+        expect((await pool.query("SELECT 1 FROM cloud_v2_prompt_outbox")).rowCount).toBe(0);
+        expect((await pool.query("SELECT 1 FROM cloud_v2_prompt_chats")).rowCount).toBe(0);
+      });
+
+      it.each([true, false])("matches the API for a running worker with chat-edit-v1=%s", async capable => {
+        await worker(capable ? "chat-edit-v1" : "");
+        const row = chat(); await store.writeHistory(workspace.id, { chats: [row] });
+        for (const [action, input, patch] of [
+          ["rename", { name: "New title" }, { title: "New title" }],
+          ["archive", undefined, { archived: true }], ["unarchive", undefined, { archived: false }],
+        ] as const) {
+          const native = await edit(row.id, patch), api = await mutate(row.id, action, input);
+          expect([native.status, api.status]).toEqual([capable ? 200 : 409, capable ? 200 : 409]);
+          if (!capable) for (const response of [native, api]) expect((await response.json()).error.code).toBe("worker_update_required");
+        }
+        if (!capable) {
+          expect((await pool.query("SELECT 1 FROM cloud_v2_chat_edits")).rowCount).toBe(0);
+          await store.requestLifecycle(workspace.id, owner, "stop");
+          await store.transition(workspace.id, ["stopping"], "stopped");
+          expect((await edit(row.id, { title: "Next boot" })).status).toBe(200);
+        }
+      });
+
+      it("returns the API's session_busy refusal and permits archiving after cancel", async () => {
+        await worker();
+        const created = await (await request("/sessions", { workspaceId: workspace.id, agent: "codex", message: "Working" })).json();
+        const id = created.session.id;
+        for (const response of [await edit(id, { archived: true }), await mutate(id, "archive")]) {
+          expect(response.status).toBe(409); expect((await response.json()).error.code).toBe("session_busy");
+        }
+        expect((await edit(id, { title: "Working title" })).status).toBe(200);
+        expect((await mutate(id, "cancel")).status).toBe(200);
+        expect((await edit(id, { archived: true })).status).toBe(200);
+        expect((await edit(id, { archived: false })).status).toBe(200);
+      });
+
+      it("enforces strict fields, the same title bounds and exact creator/workspace/chat ownership", async () => {
+        const row = chat(), terminal = { ...chat(), kind: "terminal" }, deleted = chat();
+        await store.writeHistory(workspace.id, { chats: [row, terminal, deleted], chatDeletions: [deleted.id] });
+        await store.transition(workspace.id, ["creating"], "stopped");
+        for (const body of [undefined, {}, null, { title: "" }, { title: "  " }, { title: "x".repeat(121) }, { title: "line\nbreak" },
+          { title: "tab\tname" }, { title: "control\u0085" }, { title: "Allowed", extra: true }, { archived: "true" }, { title: null }])
+          expect((await edit(row.id, body)).status).toBe(400);
+        expect((await edit(row.id, { title: "Allowed" }, member)).status).toBe(404);
+        for (const id of [terminal.id, deleted.id, randomUUID(), "cloud:invalid"])
+          expect((await edit(id, { archived: true })).status).toBe(404);
+        const another = await createWorkspace(org, member), foreignChat = chat();
+        await store.writeHistory(another.id, { chats: [foreignChat] });
+        expect((await edit(foreignChat.id, { archived: true }, owner, another.id)).status).toBe(404);
+        expect((await edit(row.id, { archived: true }, owner, another.id)).status).toBe(404);
+        expect((await edit(foreignChat.id, { archived: true })).status).toBe(404);
+        expect((await pool.query("SELECT 1 FROM cloud_v2_chat_edits")).rowCount).toBe(0);
+      });
+
+      it("rechecks the WorkOS session after waiting for the mutation lock", async () => {
+        const row = chat(), subject = `user_${randomUUID()}`, sessionId = `session_${randomUUID()}`;
+        await store.writeHistory(workspace.id, { chats: [row] });
+        await store.transition(workspace.id, ["creating"], "stopped");
+        await pool.query("INSERT INTO user_identities(user_id,provider,provider_sub,email_at_link) VALUES($1,'workos',$2,$3)", [owner, subject, `${owner}@example.test`]);
+        await pool.query("INSERT INTO auth_sessions(provider_session_id,provider_sub,user_id,client_kind) VALUES($1,$2,$3,'desktop')", [sessionId, subject, owner]);
+        const authority = { identity: { provider: "workos" as const, subject }, accountRevision: Number((await pool.query("SELECT auth_revision FROM users WHERE id=$1", [owner])).rows[0].auth_revision),
+          authentication: { sessionId, clientKind: "desktop" as const, authTime: null, tokenExpiresAt: Math.floor(Date.now() / 1000) + 600 } };
+        const router = management(owner, authority), send = (body: object) => router.request(`/v1/cloud-v2/workspaces/${workspace.id}/chats/${row.id}/edit`, {
+          method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+        });
+        expect((await send({ title: "Before revocation" })).status).toBe(200);
+        const held = await pool.connect(); let pending: Promise<Response> | undefined;
+        try {
+          await held.query("BEGIN");
+          await held.query("SELECT id FROM cloud_v2_workspaces WHERE id=$1 FOR UPDATE", [workspace.id]);
+          const pid = (await held.query("SELECT pg_backend_pid() AS pid")).rows[0].pid;
+          pending = send({ archived: true });
+          await expect.poll(async () => (await pool.query("SELECT 1 FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid))", [pid])).rowCount).toBeGreaterThan(0);
+          await held.query("UPDATE auth_sessions SET status='revoked',revoked_at=clock_timestamp() WHERE provider_session_id=$1", [sessionId]);
+          await held.query("COMMIT");
+          const response = await pending;
+          expect(response.status).toBe(401); expect((await response.json()).error.code).toBe("session_revoked");
+          expect((await (await request(`/sessions/${row.id}`)).json()).archived).toBe(false);
+        } finally { await held.query("ROLLBACK"); held.release(); await pending; }
+      });
     });
 
     it("coalesces sleeping session edits in the mirror without waking, activity, or pending prompts", async () => {
@@ -531,7 +660,7 @@ database("cloud API through the assembled router and PostgreSQL", () => {
     expect(await response.json()).toMatchObject({ userId: owner, organizationId: org, credential: "api_key" });
     expect((await app.request("/api/v0/me", { headers: { "x-real-ip": clientAddress } })).status).toBe(401);
     expect((await request("/me", undefined, "malformed")).status).toBe(401);
-    expect((await request("/me", undefined, key, { "X-Zeros-Session-Id": "cloud:invalid" })).status).toBe(400);
+    expect((await request("/me", undefined, key, { "X-Zeros-Session-Id": "cloud:invalid" })).status).toBe(200);
     expect((await app.request(`/v1/organizations/${org}/api-keys`, { headers: { authorization: `Bearer ${key}` } })).status).toBe(401);
     for (const path of ["/routines", "/sql", "/attachments", "/sections", "/previews"])
       expect((await request(path)).status).toBe(404);
@@ -904,6 +1033,226 @@ database("cloud API through the assembled router and PostgreSQL", () => {
     expect((await request("/workspaces", { ...body, message: "Changed" }, key, headers)).status).toBe(409);
   });
 
+  describe("request attribution", () => {
+    const callingChat = (id = randomUUID()) => ({ id, title: "Caller", agentId: "codex" });
+
+    it.each(["api_key", "workspace_token"])("accepts only the %s caller's permitted session headers and ignores all others", async kind => {
+      const otherWorkspace = await createWorkspace(), foreignUser = await createWorkspace(org, member), foreignOrg = await createWorkspace(otherOrg);
+      const own = callingChat(), elsewhere = callingChat(), otherUser = callingChat(), otherOrganization = callingChat();
+      const terminal = callingChat(), deleted = callingChat();
+      await store.writeHistory(workspace.id, { chats: [own, { ...terminal, kind: "terminal" }, deleted], chatDeletions: [deleted.id] });
+      await store.writeHistory(otherWorkspace.id, { chats: [elsewhere] });
+      await store.writeHistory(foreignUser.id, { chats: [otherUser] });
+      await store.writeHistory(foreignOrg.id, { chats: [otherOrganization] });
+      const credential = kind === "api_key" ? key : (await workspaceCredential()).credential;
+      const cases: Array<[string | undefined, string | null]> = [
+        [own.id, own.id], [elsewhere.id, kind === "api_key" ? elsewhere.id : null],
+        [otherUser.id, null], [otherOrganization.id, null], [terminal.id, null], [deleted.id, null],
+        [randomUUID(), null], ["cloud:invalid", null], ["x".repeat(257), null], [undefined, null],
+      ];
+      for (const [header, attribution] of cases) {
+        const headers = header === undefined ? {} : { "X-Zeros-Session-Id": header };
+        const response = await request("/sessions", { workspaceId: otherWorkspace.id, agent: "codex", message: "Delegated" }, credential, headers);
+        expect(response.status, header).toBe(201);
+        const result = await response.json();
+        expect(result.session.createdBySessionId, header).toBe(attribution);
+        expect(result.message.createdBySessionId, header).toBe(attribution);
+        expect((await pool.query("SELECT created_by_session_id FROM cloud_v2_prompt_outbox WHERE workspace_id=$1 AND user_message_id=$2",
+          [otherWorkspace.id, result.message.id])).rows[0].created_by_session_id).toBe(attribution);
+        expect((await (await request(`/sessions/${result.session.id}`)).json()).createdBySessionId).toBe(attribution);
+      }
+      expect((await request("/sessions", { workspaceId: otherWorkspace.id, agent: "codex", message: "Spoofed", createdBySessionId: own.id })).status).toBe(400);
+    });
+
+    it.each(["api_key", "workspace_token"])("keeps %s attribution through create and send replays, worker mirrors and MCP reads", async kind => {
+      const source = callingChat(), alternate = callingChat();
+      await store.writeHistory(workspace.id, { chats: [source, alternate] });
+      const credential = kind === "api_key" ? key : (await workspaceCredential()).credential;
+      const headers = { "X-Zeros-Session-Id": source.id, "Idempotency-Key": randomUUID() };
+      const input = { repository: "example/project", agent: "codex", message: "First" };
+      const first = await request("/workspaces", input, credential, headers);
+      expect(first.status).toBe(201);
+      const created = await first.json(), id = created.workspace.id, sessionId = created.session.id;
+      expect(created.workspace.createdBySessionId).toBe(source.id);
+      expect(created.session.createdBySessionId).toBe(source.id);
+      expect(await (await request("/workspaces", input, credential, { ...headers, "X-Zeros-Session-Id": alternate.id })).json()).toEqual(created);
+      expect((await (await request(`/workspaces/${id}`)).json()).createdBySessionId).toBe(source.id);
+      expect((await (await request("/workspaces")).json()).data.find((row: { id: string }) => row.id === id).createdBySessionId).toBe(source.id);
+      const send = { message: "Follow up", messageId: randomUUID() }, path = `/sessions/${sessionId}/messages`;
+      const expected = { message: { id: send.messageId, createdBySessionId: source.id } };
+      const sent = await request(path, send, credential, headers);
+      expect(sent.status).toBe(201); expect(await sent.json()).toEqual(expected);
+      const replay = await request(path, send, credential, { "X-Zeros-Session-Id": alternate.id });
+      expect(replay.status).toBe(200); expect(await replay.json()).toEqual(expected);
+      const queue = (await pool.query("SELECT created_by_session_id,payload FROM cloud_v2_prompt_outbox WHERE workspace_id=$1", [id])).rows;
+      expect(queue).toHaveLength(2);
+      expect(queue.every(row => row.created_by_session_id === source.id)).toBe(true);
+      expect(queue.every(row => !Object.hasOwn(row.payload, "createdBySessionId"))).toBe(true);
+      await store.writeHistory(id, { chats: [{ id: sessionId, agentId: "codex", title: "Mirrored", createdBySessionId: alternate.id } as never],
+        messages: { chatId: sessionId, rows: [{ msgId: send.messageId, kind: "text", payload: JSON.stringify({ role: "user", text: send.message }), createdAt: 123 }] } });
+      expect((await (await request(`/sessions/${sessionId}`)).json()).createdBySessionId).toBe(source.id);
+      expect((await (await request(`/workspaces/${id}/sessions`)).json()).data[0].createdBySessionId).toBe(source.id);
+      expect((await (await request(`/sessions/${sessionId}/messages/${send.messageId}`)).json()).createdBySessionId).toBe(source.id);
+      expect((await (await request(`/sessions/${sessionId}/messages`)).json()).data[0].createdBySessionId).toBe(source.id);
+      expect((await tool("get_session", { sessionId })).structuredContent.createdBySessionId).toBe(source.id);
+      expect((await tool("get_message", { sessionId, messageId: send.messageId })).structuredContent.createdBySessionId).toBe(source.id);
+      await store.writeHistory(workspace.id, { chatDeletions: [source.id] });
+      expect((await (await request(`/workspaces/${id}`)).json()).createdBySessionId).toBe(source.id);
+    });
+
+    it("uses the same attribution boundary for MCP creates and sends and preserves CLI JSON", async () => {
+      const source = callingChat();
+      await store.writeHistory(workspace.id, { chats: [source] });
+      const headers = { "X-Zeros-Session-Id": source.id };
+      const created = await (await mcp("tools/call", { name: "create_workspace", arguments: { repository: "example/project" } }, key, headers)).json();
+      expect(created.result.structuredContent.workspace.createdBySessionId).toBe(source.id);
+      const result = await (await mcp("tools/call", { name: "create_session", arguments: { workspaceId: workspace.id, agent: "codex", message: "MCP" } }, key, headers)).json();
+      const sessionId = result.result.structuredContent.session.id;
+      expect(result.result.structuredContent.session.createdBySessionId).toBe(source.id);
+      expect(result.result.structuredContent.message.createdBySessionId).toBe(source.id);
+      const sent = await (await mcp("tools/call", { name: "send_message", arguments: { sessionId, message: "MCP next" } }, key, headers)).json();
+      expect(sent.result.structuredContent.message.createdBySessionId).toBe(source.id);
+      const { env, command } = await cloudCli();
+      env.ZEROS_SESSION_ID = source.id;
+      const cli = await command("session", "create", "--agent", "codex", "--message", "CLI");
+      expect(cli.session.createdBySessionId).toBe(source.id);
+      expect(cli.message.createdBySessionId).toBe(source.id);
+    });
+  });
+
+  describe("create-time workspace environment", () => {
+    const environments = () => new CloudEnvironments(pool, keys, async () => ({ repositoryId: "42",
+      assertCurrent: async () => {}, assertReadable: async () => {} }));
+    const create = (env: unknown, headers: Record<string, string> = {}) => request("/workspaces", { repository: "example/project", env }, key, headers);
+
+    it("rejects invalid names, reserved runtime authority, non-string values and byte/count overflows before creating", async () => {
+      const invalid = [null, [], { VALUE: 1 }, { VALUE: null }, { VALUE: "nul\0byte" }, { "": "value" }, { "BAD-NAME": "value" },
+        { "NAME\n": "value" }, { ["X".repeat(129)]: "value" }, JSON.parse('{"__proto__":"value"}'),
+        Object.fromEntries(Array.from({ length: 51 }, (_, i) => [`VALUE_${i}`, "value"])),
+        { VALUE: "a".repeat(8193) }, { VALUE: "🔑".repeat(2048) + "x" },
+        Object.fromEntries(Array.from({ length: 9 }, (_, i) => [`VALUE_${i}`, "a".repeat(i === 8 ? 1 : 8192)])),
+        ...["PATH", "HOME", "NODE_OPTIONS", "GH_TOKEN", "GITHUB_TOKEN", "ANTHROPIC_API_KEY", "OPENAI_API_KEY",
+          "ZEROS_API_URL", "ZEROS_API_TOKEN", "ZEROS_WORKSPACE_ID", "ZEROS_SESSION_ID", "zeros_api_key", "constructor"].map(name => ({ [name]: "value" })),
+      ];
+      for (const [index, env] of invalid.entries()) {
+        const response = await create(env);
+        expect(response.status, `environment case ${index}`).toBe(400);
+        expect(await response.json()).toMatchObject({ error: { code: "invalid_request" } });
+      }
+      expect((await pool.query("SELECT 1 FROM cloud_v2_workspaces")).rowCount).toBe(1);
+      expect((await pool.query("SELECT 1 FROM cloud_environment_versions")).rowCount).toBe(0);
+      expect((await tool("create_workspace", { repository: "example/project", env: { PATH: "bad" } })).structuredContent.error.code).toBe("invalid_request");
+      expect((await tool("create_workspace", { repository: "example/project", env: JSON.parse('{"__proto__":"value"}') })).structuredContent.error.code).toBe("invalid_request");
+      const definitions = await (await mcp("tools/list")).json();
+      expect(definitions.result.tools.find((tool: { name: string }) => tool.name === "create_workspace").inputSchema.properties.env)
+        .toMatchObject({ type: "object", maxProperties: 50, additionalProperties: { type: "string" } });
+    });
+
+    it("accepts exact byte and entry limits, empty values, and the user-settable API key name", async () => {
+      for (const env of [Object.fromEntries(Array.from({ length: 50 }, (_, i) => [`VALUE_${i}`, ""])),
+        Object.fromEntries(Array.from({ length: 8 }, (_, i) => [`VALUE_${i}`, "a".repeat(8192)])),
+        { UNICODE: "🔑".repeat(2048), ZEROS_API_KEY: "synthetic-api-key" }, {}]) {
+        const response = await create(env);
+        expect(response.status).toBe(201);
+        const { workspace: created } = await response.json();
+        expect((await environments().resolve(await store.get(created.id, owner)))?.variables ?? {}).toEqual(env);
+      }
+    });
+
+    it("pins encrypted overrides over Cloud defaults, delivers through environment config, and erases them on deletion", async () => {
+      const saved = environments(), secret = "synthetic-workspace-secret";
+      const defaults = await saved.patch(org, owner, "42", "example/project", { expectedRevision: 0,
+        variables: { SHARED: "synthetic-default", ONLY_DEFAULT: "retained" }, files: [{ path: ".env.local", content: "APP_FILE=retained" }] });
+      routes.asyncCreate = () => true;
+      const response = await create({ SHARED: secret, ONLY_WORKSPACE: "workspace-value" });
+      expect(response.status).toBe(201);
+      const created = (await response.json()).workspace, row = await store.get(created.id, owner);
+      // N-1 source binding inserts its default pin unconditionally. An explicit
+      // environment finishes that binding before publishing its private pin.
+      expect(row.sourcePending).toBeUndefined();
+      expect(routes.authorizeBuildRepository).toHaveBeenCalled();
+      const material = await saved.resolve(row);
+      expect(material).toMatchObject({ repositoryId: "42", variables: { SHARED: secret, ONLY_DEFAULT: "retained", ONLY_WORKSPACE: "workspace-value" },
+        files: [{ path: ".env.local", content: "APP_FILE=retained" }] });
+      expect(material!.versionId).not.toBe(defaults.versionId);
+      await saved.patch(org, owner, "42", "example/project", { expectedRevision: 1, variables: { SHARED: "later-default" } });
+      expect(await saved.resolve(row)).toEqual(material);
+      const worker = await store.rotateWorkerToken(row.id), bootId = randomUUID(), { router } = workerRouter(false, undefined, saved);
+      const hello = (features: string) => router.request("/v2/cloud/worker/hello", { method: "POST", headers: {
+        authorization: `Bearer ${worker}`, "content-type": "application/json", "x-zeros-worker-boot": bootId, "x-zeros-worker-features": features },
+      body: JSON.stringify({ bootId, protocol: 2, runtimeSha256: "a".repeat(64) }) });
+      const configured = await hello("workspace-environment-v1");
+      expect(configured.status).toBe(200);
+      expect((await configured.json()).config.environment).toEqual(material);
+      expect((await hello("")).status).toBe(409);
+      for (const read of [await request(`/workspaces/${row.id}`), await request(`/workspaces/${row.id}/status`), await request("/workspaces"),
+        await management().request(`/v1/cloud-v2/workspaces/${row.id}`)]) {
+        expect(read.status).toBe(200);
+        const text = await read.text();
+        expect(text.includes(secret) || text.includes("ONLY_WORKSPACE")).toBe(false);
+      }
+      expect(JSON.stringify((await tool("get_workspace", { workspaceId: row.id })).structuredContent).includes(secret)).toBe(false);
+      const stored = await pool.query("SELECT envelope FROM cloud_environment_versions");
+      expect(JSON.stringify(stored.rows).includes(secret)).toBe(false);
+      expect((await saved.get(org, owner, "42", "example/project")).variables.map(value => value.name)).not.toContain("ONLY_WORKSPACE");
+      for (const table of ["cloud_environment_versions", "cloud_workspace_environment_pins"])
+        expect((await withUserTx(pool, owner, tx => tx.query(`SELECT 1 FROM ${table}`))).rowCount).toBe(0);
+      expect((await management().request(`/v1/cloud-v2/workspaces/${row.id}`, { method: "DELETE" })).status).toBe(202);
+      await store.transition(row.id, ["deleting"], "deleted");
+      expect((await pool.query("SELECT 1 FROM cloud_workspace_environment_pins WHERE workspace_id=$1", [row.id])).rowCount).toBe(0);
+      expect((await pool.query("SELECT 1 FROM cloud_environment_versions WHERE id=$1", [material!.versionId])).rowCount).toBe(0);
+      expect((await pool.query("SELECT 1 FROM cloud_environment_versions")).rowCount).toBe(1);
+    });
+
+    it("keeps one immutable private environment across idempotent replay and rejects changed values through HTTP and MCP", async () => {
+      const env = { B: "synthetic-two", A: "synthetic-one" }, headers = { "Idempotency-Key": randomUUID() };
+      const first = await create(env, headers);
+      expect(first.status).toBe(201);
+      const document = await first.json();
+      expect(await (await create({ A: env.A, B: env.B }, headers)).json()).toEqual(document);
+      expect((await create({ ...env, A: "changed" }, headers)).status).toBe(409);
+      const result = await tool("create_workspace", { repository: "example/project", env, idempotencyKey: headers["Idempotency-Key"] });
+      expect(result.structuredContent).toEqual(document);
+      expect((await tool("create_workspace", { repository: "example/project", env: { A: "changed" }, idempotencyKey: headers["Idempotency-Key"] })).structuredContent.error.code).toBe("idempotency_conflict");
+      expect((await pool.query("SELECT 1 FROM cloud_environment_versions")).rowCount).toBe(1);
+      expect((await pool.query("SELECT 1 FROM cloud_workspace_environment_pins")).rowCount).toBe(1);
+      expect(JSON.stringify((await pool.query("SELECT response FROM cloud_v2_create_requests")).rows).includes(env.A)).toBe(false);
+    });
+
+    it("joins repeatable CLI --env with encrypted creation, read secrecy and idempotency", async () => {
+      const saved = environments();
+      await saved.patch(org, owner, "42", "example/project", { expectedRevision: 0,
+        variables: { SHARED: "saved-default", ONLY_DEFAULT: "retained" } });
+      const { command } = await cloudCli(), createKey = randomUUID();
+      const args = ["workspace", "create", "--repository", "example/project", "--idempotency-key", createKey];
+      const overrides = ["SHARED=synthetic-cli=override", "ONLY_WORKSPACE=synthetic-cli-private", "EMPTY="];
+      const flags = (values: string[]) => values.flatMap(value => ["--env", value]);
+      const created = await command(...args, ...flags(overrides));
+      const material = await saved.resolve(await store.get(created.workspace.id, owner));
+      expect(material?.variables).toEqual({ SHARED: "synthetic-cli=override", ONLY_DEFAULT: "retained",
+        ONLY_WORKSPACE: "synthetic-cli-private", EMPTY: "" });
+      expect(await command(...args, ...flags([...overrides].reverse()))).toEqual(created);
+      const reads = JSON.stringify([created, await command("workspace", "get", created.workspace.id), await command("workspace", "list")]);
+      for (const hidden of ["synthetic-cli=override", "synthetic-cli-private", "ONLY_WORKSPACE"])
+        expect(reads).not.toContain(hidden);
+      expect((await pool.query("SELECT 1 FROM cloud_workspace_environment_pins WHERE workspace_id=$1", [created.workspace.id])).rowCount).toBe(1);
+    });
+
+    it("retains unreadable defaults and rolls back a merged environment that exceeds the existing worker limits", async () => {
+      const saved = environments();
+      await saved.patch(org, owner, "42", "example/project", { expectedRevision: 0,
+        variables: Object.fromEntries(Array.from({ length: 128 }, (_, i) => [`DEFAULT_${i}`, "value"])) });
+      expect((await create({ EXTRA: "value" })).status).toBe(400);
+      await pool.query("UPDATE cloud_environment_versions SET envelope='{}'::jsonb");
+      const unreadable = await create({ DEFAULT_0: "value" });
+      expect(unreadable.status).toBe(503);
+      expect((await unreadable.json()).error.code).toBe("cloud_environment_unreadable");
+      expect((await pool.query("SELECT 1 FROM cloud_v2_workspaces")).rowCount).toBe(1);
+      expect((await pool.query("SELECT 1 FROM cloud_environment_versions")).rowCount).toBe(1);
+      expect((await pool.query("SELECT 1 FROM cloud_workspace_environment_pins")).rowCount).toBe(0);
+    });
+  });
+
   it("replays a message by id and text across concurrent sends and rejects a changed text", async () => {
     await store.transition(workspace.id, ["creating"], "stopped");
     const first = await request("/sessions", { workspaceId: workspace.id, agent: "codex", message: "First" });
@@ -1197,7 +1546,7 @@ database("cloud API through the assembled router and PostgreSQL", () => {
       expect((await tool("get_session_status", { sessionId })).structuredContent.status).toBe("working");
       const send = { sessionId, messageId: randomUUID(), message: "Next" };
       const sent = await tool("send_message", send);
-      expect(sent.structuredContent).toEqual({ message: { id: send.messageId } });
+      expect(sent.structuredContent).toEqual({ message: { id: send.messageId, createdBySessionId: null } });
       expect((await tool("send_message", send)).structuredContent).toEqual(sent.structuredContent);
       expect(await tool("send_message", { ...send, message: "Changed" })).toMatchObject({ isError: true, structuredContent: { error: { code: "prompt_conflict" } } });
       expect((await tool("cancel_session", { sessionId })).structuredContent.status).toBe("idle");

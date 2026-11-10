@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { isRunSessionId } from "@zeros/protocol/run-actions";
 import { mkdir, readdir, readFile, readlink, realpath, rename, rm, stat, writeFile, type FileHandle } from "node:fs/promises";
 import { join } from "node:path";
 import { createMessage, type BridgeMessage, type PtyCreateMessage, type PtyTerminalInfo } from "@zeros/protocol/messages";
@@ -142,8 +143,10 @@ export class Terminals {
 
   /** Read-only agent view: one shared (not client-owned) terminal, by id or
    * the most recently active one. Bounded by the mirror's scrollback. */
-  async output(input: { terminalId?: string; maxLines: number }): Promise<{ terminalId: string; lines: string[]; truncated: boolean } | undefined> {
-    const shared = [...this.sessions.values()].filter(session => !session.owner && !session.removed);
+  async output(input: { terminalId?: string; maxLines: number; kind?: "terminal" | "run_script" }): Promise<{ terminalId: string; lines: string[]; truncated: boolean } | undefined> {
+    // Run scripts are ordinary shared PTYs; the desktop names them by run session id.
+    const shared = [...this.sessions.values()].filter(session => !session.owner && !session.removed &&
+      (input.kind === undefined || (input.kind === "run_script") === isRunSessionId(session.sessionId)));
     const session = input.terminalId === undefined ? shared.sort((a, b) => b.lastActivityAt - a.lastActivityAt)[0]
       : shared.find(candidate => candidate.sessionId === input.terminalId);
     if (!session) return undefined;

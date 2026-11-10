@@ -22,6 +22,8 @@ type CreateOptions = {
   canary?: string | undefined;
   requestHash?: string;
   workspaceTokenCreate?: true;
+  createdBySessionId?: string | null;
+  env?: Record<string, string> | undefined;
   initialPrompt?: Parameters<CloudV2RouteDeps["store"]["createWorkspace"]>[0]["initialPrompt"];
   authorize?(): Promise<void>;
   receiptDocument(workspace: CloudV2Workspace): Record<string, unknown>;
@@ -85,6 +87,8 @@ export function createCloudWorkspaceOperations(deps: CloudV2RouteDeps) {
       await options.authorize?.();
       if (options.initialPrompt) create = { ...create, initialPrompt: options.initialPrompt };
       if (options.workspaceTokenCreate) create = { ...create, workspaceTokenCreate: true };
+      if (options.createdBySessionId) create = { ...create, createdBySessionId: options.createdBySessionId };
+      if (options.env) create = { ...create, env: options.env };
       if (key) {
         const receipt = await deps.store.createWorkspaceOnce(create, key, hash, options.receiptDocument);
         // Another request may have committed this key after our initial read.
@@ -98,7 +102,9 @@ export function createCloudWorkspaceOperations(deps: CloudV2RouteDeps) {
     // Returns before its GitHub checks, which the lifecycle runs before any VM
     // exists. A canary binds a repository ID, and a renamed repository's name
     // needs GitHub to match it, so both stay on the synchronous path below.
-    const pendingEntry = runtimeCanary === undefined && deps.asyncCreate?.() ? computer.repositories.find(named) : undefined;
+    // N-1 source resolvers insert the default environment pin unconditionally;
+    // finish source binding here before writing an explicit workspace pin.
+    const pendingEntry = runtimeCanary === undefined && !Object.keys(options.env ?? {}).length && deps.asyncCreate?.() ? computer.repositories.find(named) : undefined;
     if (pendingEntry) {
       const baseBranch = input.baseBranch ?? pendingEntry.defaultBranch;
       if (!baseBranch) throw new HttpError(409, "repository_branch_required", "Select a branch or rebuild the Cloud Computer to record its default branch");

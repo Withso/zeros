@@ -6,6 +6,7 @@ import type { ApiWorkspaceList } from "./api/contract.js";
 import { withSystemStatement, withSystemTx, type Tx } from "../db.js";
 import { sql, SqlFragment } from "../sql-fragment.js";
 import type { AuthedUser } from "../auth.js";
+import type { CloudAgentCredentialKeys } from "../agent-credentials/agent-credential-envelope.js";
 import { securityStreamAuthority } from "../security-events.js";
 import { HttpError } from "../authz.js";
 import type { CloudV2HistoryState, CloudV2MessageRow } from "./contract.js";
@@ -35,6 +36,8 @@ type CreateWorkspace = {
   baseBranch: string; computerBuildId: string | null;
   sourceRepositoryId?: string;
   initialPrompt?: CloudApiPrompt;
+  createdBySessionId?: string | null;
+  env?: Record<string, string>;
   workspaceTokenCreate?: true;
   /** GitHub repository IDs the creator was just verified to read. */
   readableRepositoryIds?: readonly string[];
@@ -67,6 +70,7 @@ export type CloudV2Workspace = {
   id: string;
   organizationId: string;
   creatorUserId: string;
+  createdBySessionId?: string | null;
   name: string;
   /** Permanent within the organization (`w-<n>`); never reused. */
   number?: number | null;
@@ -152,10 +156,11 @@ type Row = {
   state: CloudV2WorkspaceState; boat_sandbox_id: string | null; computer_build_id: string | null;
   error_code: string | null; active_at: Date | null; archived_at: Date | null; created_at: Date; updated_at: Date;
   source_pending: boolean;
+  created_by_session_id: string | null;
 };
 
 const WORKSPACE_COLUMNS_SQL = sql`id, org_id, creator_user_id, name, number, title, repository, branch, base_branch, state, boat_sandbox_id,
-  computer_build_id, error_code, active_at, archived_at, created_at, updated_at, source_pending`;
+  computer_build_id, error_code, active_at, archived_at, created_at, updated_at, source_pending, created_by_session_id`;
 const COLUMNS = WORKSPACE_COLUMNS_SQL.text;
 
 type LifecycleRow = Row & {
@@ -224,6 +229,7 @@ function workspace(row: Row): CloudV2Workspace {
     id: row.id,
     organizationId: row.org_id,
     creatorUserId: row.creator_user_id,
+    createdBySessionId: row.created_by_session_id,
     name: row.name,
     number: row.number ?? null,
     title: row.title ?? null,
@@ -302,7 +308,7 @@ export class CloudV2Store {
   readonly prompts: CloudV2PromptOutbox;
   readonly api: CloudApiReads;
   readonly chatEdits: CloudV2ChatEdits;
-  constructor(private readonly pool: pg.Pool) {
+  constructor(private readonly pool: pg.Pool, private readonly environmentKeys?: CloudAgentCredentialKeys) {
     this.prompts = new CloudV2PromptOutbox(pool);
     this.api = new CloudApiReads(pool);
     this.chatEdits = new CloudV2ChatEdits(pool);
@@ -348,17 +354,21 @@ export class CloudV2Store {
     return { sourceRepositoryId: target.repositoryId, scope };
   }
 
-  private async bindSources(tx: Tx, workspace: CloudV2Workspace, sourceRepositoryId: string, scope: readonly CloudSourceTarget[] | undefined): Promise<void> {
+  private async bindSources(tx: Tx, workspace: CloudV2Workspace, sourceRepositoryId: string, scope: readonly CloudSourceTarget[] | undefined,
+    variables?: Record<string, string>): Promise<void> {
     if (!CloudSourceTargetSchema.safeParse({ repository: workspace.repository, repositoryId: sourceRepositoryId }).success) throw new HttpError(422, "github_repository_invalid", "Invalid repository identity.");
     for (const source of scope ?? [{ repository: workspace.repository, repositoryId: sourceRepositoryId }])
       await tx.query("INSERT INTO cloud_v2_github_sources(workspace_id,source_repository,repository_id) VALUES($1,lower($2),$3)",
         [workspace.id, source.repository, source.repositoryId]);
-    await pinCloudEnvironment(tx, workspace, sourceRepositoryId);
+    if (variables && Object.keys(variables).length) {
+      if (!this.environmentKeys) throw new HttpError(503, "cloud_environment_unavailable", "Cloud environment encryption is unavailable.");
+      await pinCloudEnvironment(tx, workspace, sourceRepositoryId, { variables, keys: this.environmentKeys });
+    } else await pinCloudEnvironment(tx, workspace, sourceRepositoryId);
   }
 
   private async insertWorkspace(tx: Tx, input: CreateWorkspace, createKey?: string): Promise<CloudV2Workspace> {
     const pending = input.pendingSource === true;
-    if (pending && (!input.computerBuildId || input.sourceRepositoryId !== undefined || input.runtimeCanary))
+    if (pending && (!input.computerBuildId || input.sourceRepositoryId !== undefined || input.runtimeCanary || Object.keys(input.env ?? {}).length))
       throw new Error("A pending create needs a Computer build and no verified source");
     let sourceRepositoryId = input.sourceRepositoryId, scope: readonly CloudSourceTarget[] | undefined;
     await this.admitCreator(tx, input.organizationId, input.creatorUserId, input.workspaceTokenCreate);
@@ -376,15 +386,17 @@ export class CloudV2Store {
     if (input.computerBuildId)
       ({ sourceRepositoryId, scope } = await this.computerScope(tx, input.organizationId, input.computerBuildId, input.repository,
         input.sourceRepositoryId, input.readableRepositoryIds));
+    if (Object.keys(input.env ?? {}).length && sourceRepositoryId === undefined)
+      throw new HttpError(409, "cloud_source_review_required", "A workspace environment requires a verified repository identity.");
     const row = (await tx.query<Row>(
-      `INSERT INTO cloud_v2_workspaces (id, org_id, creator_user_id, name, repository, branch, base_branch, state, computer_build_id, source_repositories, source_pending, api_access)
+      `INSERT INTO cloud_v2_workspaces (id, org_id, creator_user_id, name, repository, branch, base_branch, state, computer_build_id, source_repositories, source_pending, api_access, created_by_session_id)
        VALUES ($1, $2, $3, $4, $5, $6, $7, 'creating', $8, $9::text[], $10,
-         coalesce((SELECT workspace_api_access FROM cloud_api_access_settings WHERE org_id=$2 AND user_id=$3),true)) RETURNING ${COLUMNS}`,
+         coalesce((SELECT workspace_api_access FROM cloud_api_access_settings WHERE org_id=$2 AND user_id=$3),true), $11) RETURNING ${COLUMNS}`,
       [input.id, input.organizationId, input.creatorUserId, input.name, input.repository, input.branch,
         input.baseBranch, input.computerBuildId,
-        pending ? null : (scope ?? [{ repository: input.repository }]).map(source => source.repository.toLowerCase()), pending],
+        pending ? null : (scope ?? [{ repository: input.repository }]).map(source => source.repository.toLowerCase()), pending, input.createdBySessionId ?? null],
     )).rows[0]!;
-    if (!pending && sourceRepositoryId !== undefined) await this.bindSources(tx, workspace(row), sourceRepositoryId, scope);
+    if (!pending && sourceRepositoryId !== undefined) await this.bindSources(tx, workspace(row), sourceRepositoryId, scope, input.env);
     if (input.runtimeCanary) await consumeRuntimeCanary(tx, workspace(row), input.runtimeCanary, sourceRepositoryId, createKey);
     if (input.initialPrompt) await this.prompts.enqueueApi(row.id, input.creatorUserId, input.initialPrompt, tx);
     return workspace(row);

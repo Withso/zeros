@@ -37,6 +37,10 @@ function harness(local = false, title = "Untitled") {
   });
   const hydrateChat = vi.fn(async () => { slot.transcriptState = "resident"; });
   const context = vm.createContext({
+    // The real editChat dispatches this same action synchronously, then (for a
+    // chatEdits workspace) sends it to the control plane in the background.
+    editChat: (send: (action: { type: string; id: string; title?: string }) => void, id: string, change: { title: string } | { archived: boolean }) =>
+      send("title" in change ? { type: "UPDATE_CHAT_TITLE", id, title: change.title } : { type: change.archived ? "ARCHIVE_CHAT" : "UNARCHIVE_CHAT", id }),
     chatId: chat.id, chatThread: chat, session: {}, agentSessions: { closeSession, hydrateChat }, agentSwitchRef: { current: 0 },
     useSessionsStore: { getState: () => ({ sessions: { [chat.id]: slot } }) },
     useWorkspaceStore: { getState: () => state }, dispatch, updateChatSettings: update,

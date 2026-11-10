@@ -11,7 +11,7 @@ const state = vi.hoisted(() => ({
   projects: {} as Record<string, Project>, cloudAccess: true,
 }));
 vi.mock("../../features/team/team-store", () => ({ getOrganizationStoreGeneration: () => 1 }));
-vi.mock("../../features/team/cloud-workspace-account-access", () => ({ useCloudWorkspaceAccountAccess: () => state.cloudAccess }));
+vi.mock("../../features/team/cloud-workspace-account-access", () => ({ useCloudWorkspaceAccountAccess: () => state.cloudAccess, useSignedInUserName: () => null }));
 vi.mock("../conversation/use-cloud-workspace-surface", () => ({ useCloudWorkspaceSurfaceActive: (active: boolean) => active }));
 vi.mock("../../state/cloud-workspace-catalog", () => ({
   cloudCatalogGeneration: () => 2, subscribeCloudWorkspaces: () => () => {}, manageCloudWorkspace: async () => {},
@@ -249,6 +249,12 @@ describe("Cloud workspace details", () => {
     expect(text(html)).toEqual(["Fix login", "Environment", "Zeros Cloud", "Repository", "example/repo", "Created", "3d ago",
       "Status", "Running", "CPU", "4 cores · 12% used", "Memory", "8 GB · 50% used", "Disk", "64 GB · 10% used", "Stop workspace"]);
     expect(html).toContain('aria-label="Restart workspace"');
+  });
+
+  it("names who created it beside its age when the creator is known", () => {
+    const shown = text(card({ creatorName: "Alex Rivera" }));
+    expect(shown.slice(shown.indexOf("Created"), shown.indexOf("Created") + 2)).toEqual(["Created", "Alex Rivera · 3d ago"]);
+    expect(text(card({ creatorName: null }))).toContain("3d ago");
   });
 
   it("leaves out the usage rows when the worker gave no sample, as an older worker does", () => {

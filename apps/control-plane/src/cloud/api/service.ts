@@ -49,7 +49,8 @@ export class CloudApiService {
     return { id: workspace.id, number: workspace.number ?? null, name: workspace.name, title: workspace.title ?? null,
       state: workspace.state, status: workspaceStatus(workspace), repository: workspace.repository, branch: workspace.branch,
       baseBranch: workspace.baseBranch, archived: workspace.archivedAt !== null, createdAt: workspace.createdAt,
-      lastActivityAt: workspace.activeAt, creatorId: workspace.creatorUserId, creatorName: credential.name, link: this.link(credential, workspace) };
+      lastActivityAt: workspace.activeAt, creatorId: workspace.creatorUserId, creatorName: credential.name,
+      createdBySessionId: workspace.createdBySessionId ?? null, link: this.link(credential, workspace) };
   }
   private sessionDocument(credential: CloudApiCredential, saved: ApiChatRow, workspace: CloudV2Workspace) {
     const row = saved.row, link = this.link(credential, workspace);
@@ -57,6 +58,7 @@ export class CloudApiService {
       agent: typeof row.agentId === "string" ? row.agentId : null, model: typeof row.model === "string" && row.model ? row.model : null,
       effort: typeof row.effort === "string" && row.effort ? row.effort : null, archived: row.archived === true,
       createdAt: timestamp(row.createdAt, saved.updatedAt), updatedAt: timestamp(row.updatedAt, saved.updatedAt),
+      createdBySessionId: saved.createdBySessionId,
       link: link ? `${link}?session=${encodeURIComponent(saved.id)}` : null };
   }
   private async owned(credential: CloudApiCredential, id: string): Promise<CloudV2Workspace> {
@@ -102,24 +104,26 @@ export class CloudApiService {
     return { workspaceId: id, status: workspaceStatus(workspace), state: workspace.state, updatedAt: workspace.updatedAt };
   }
 
-  async createWorkspace(credential: CloudApiCredential, raw: unknown, key?: string) {
+  async createWorkspace(credential: CloudApiCredential, raw: unknown, key?: string, sourceSessionId?: string) {
     const input = apiInput(ApiWorkspaceCreateSchema, raw);
+    const createdBySessionId = await this.deps.store.api.attribution(credential, sourceSessionId);
     let initialPrompt: CloudApiPrompt | undefined;
     if (input.message !== undefined) {
       this.requirePrompts();
       initialPrompt = { chatId: randomUUID(), userMessageId: input.messageId ?? randomUUID(), agentId: input.agent!,
-        message: input.message, model: input.model, effort: input.effort, sessionName: input.sessionName, startedAt: Date.now() };
+        message: input.message, model: input.model, effort: input.effort, sessionName: input.sessionName, startedAt: Date.now(), createdBySessionId };
     }
     const requestHash = createHash("sha256").update(JSON.stringify({ api: "v0", organizationId: credential.organizationId,
       ...input, repository: input.repository.toLowerCase() })).digest("hex");
     const document = (workspace: CloudV2Workspace) => ({ workspace: this.workspaceDocument(credential, workspace),
       ...(initialPrompt ? { session: this.sessionDocument(credential, { workspaceId: workspace.id, id: initialPrompt.chatId,
+        createdBySessionId,
         row: { title: initialPrompt.sessionName ?? "", agentId: initialPrompt.agentId, model: initialPrompt.model,
           effort: initialPrompt.effort, createdAt: initialPrompt.startedAt, updatedAt: initialPrompt.startedAt }, updatedAt: workspace.createdAt }, workspace) } : {}) });
     const result = await this.operations.create(credential.userId, { organizationId: credential.organizationId,
       repository: input.repository, ...(input.name === undefined ? {} : { name: input.name }),
       ...(input.branch === undefined ? {} : { branch: input.branch }), ...(input.baseBranch === undefined ? {} : { baseBranch: input.baseBranch }) },
-    { key, requestHash, initialPrompt, ...(credential.kind === "workspace_token" ? { workspaceTokenCreate: true as const } : {}),
+    { key, requestHash, initialPrompt, createdBySessionId, env: input.env, ...(credential.kind === "workspace_token" ? { workspaceTokenCreate: true as const } : {}),
       authorize: () => this.deps.credentials.assertCurrent(credential), receiptDocument: document, document });
     return result.response;
   }
@@ -151,15 +155,16 @@ export class CloudApiService {
     const result = await this.deps.store.api.status(credential, workspace.id, id);
     return { workspaceId: workspace.id, sessionId: id, status: result.status, updatedAt: result.updatedAt };
   }
-  async createSession(credential: CloudApiCredential, raw: unknown) {
+  async createSession(credential: CloudApiCredential, raw: unknown, sourceSessionId?: string) {
     const input = apiInput(ApiSessionCreateSchema, raw);
     this.requirePrompts();
     await this.owned(credential, input.workspaceId);
     await this.authorizePrompt(credential, input.workspaceId);
+    const createdBySessionId = await this.deps.store.api.attribution(credential, sourceSessionId);
     const chatId = input.sessionId ?? randomUUID(), userMessageId = input.messageId ?? randomUUID();
-    await this.deps.store.prompts.enqueueApi(input.workspaceId, credential.userId,
-      { chatId, userMessageId, agentId: input.agent, message: input.message, model: input.model, effort: input.effort, sessionName: input.name });
-    return { session: await this.getSession(credential, chatId), message: { id: userMessageId } };
+    const result = await this.deps.store.prompts.enqueueApi(input.workspaceId, credential.userId,
+      { chatId, userMessageId, agentId: input.agent, message: input.message, model: input.model, effort: input.effort, sessionName: input.name, createdBySessionId });
+    return { session: await this.getSession(credential, chatId), message: { id: userMessageId, createdBySessionId: result.createdBySessionId } };
   }
   async cancelSession(credential: CloudApiCredential, id: string) {
     const { workspace } = await this.session(credential, id);
@@ -180,19 +185,20 @@ export class CloudApiService {
   archiveSession(credential: CloudApiCredential, id: string, archived: boolean) {
     return this.editSession(credential, id, { archived });
   }
-  async sendMessage(credential: CloudApiCredential, id: string, raw: unknown) {
+  async sendMessage(credential: CloudApiCredential, id: string, raw: unknown, sourceSessionId?: string) {
     const { saved, workspace } = await this.session(credential, id);
     const input = apiInput(ApiMessageSendSchema, raw);
     this.requirePrompts();
     const agent = z.enum(["codex", "claude", "cursor"]).safeParse(saved.row.agentId);
     if (!agent.success) throw new HttpError(409, "session_unavailable", "This session has no supported agent");
     await this.authorizePrompt(credential, workspace.id);
+    const createdBySessionId = await this.deps.store.api.attribution(credential, sourceSessionId);
     const userMessageId = input.messageId ?? randomUUID();
     const result = await this.deps.store.prompts.enqueueApi(workspace.id, credential.userId, { chatId: id, userMessageId,
-      agentId: agent.data, message: input.message,
+      agentId: agent.data, message: input.message, createdBySessionId,
       ...(typeof saved.row.model === "string" && saved.row.model ? { model: saved.row.model } : {}),
       ...(typeof saved.row.effort === "string" && saved.row.effort ? { effort: saved.row.effort } : {}) });
-    return { replay: result.replay, message: { id: userMessageId } };
+    return { replay: result.replay, message: { id: userMessageId, createdBySessionId: result.createdBySessionId } };
   }
   async messages(credential: CloudApiCredential, id: string, query: unknown = {}) {
     const { workspace } = await this.session(credential, id);

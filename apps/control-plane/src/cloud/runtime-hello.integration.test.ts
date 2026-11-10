@@ -46,6 +46,7 @@ suite("runtime hello through the production composition", () => {
       if (["/repositories/42", "/repositories/43"].includes(url.pathname)) return Response.json({ id: Number(url.pathname.split("/").at(-1)),
         name: "repo", owner: { login: url.pathname.endsWith("43") ? "secondary" : "fixture" }, default_branch: "main",
         private: true, archived: false, permissions: { pull: true, push: true } });
+      if (url.pathname === "/repositories/42/branches/main") return Response.json({ commit: { sha: "c".repeat(40) } });
       if (url.pathname.endsWith("/branches")) return Response.json([]);
       throw new Error(`Unexpected GitHub fixture path: ${url.pathname}`);
     });
@@ -101,8 +102,31 @@ suite("runtime hello through the production composition", () => {
         "x-zeros-worker-features": `runtime-update-v1,prompt-outbox-v1,workspace-environment-v1,repository-setup-v1,mcp-v1,github-pr-v1,git-identity-v1${apiFeature ? ",workspace-api-v1" : ""}` },
       ...(route === "hello" ? { body: JSON.stringify({ protocol: 2, bootId: boot, runtimeSha256 }) } : {}),
     });
-    return { cp, creator, org, workspace, token, boot, h, handoffs, hello, ordinary, costs, fetcher, deny: () => { allowed = false; } };
+    return { cp, creator, org, workspace, token, boot, h, handoffs, hello, ordinary, costs, fetcher, app, deny: () => { allowed = false; } };
   }
+
+  it("encrypts API create environment with the production keyring and resolves it in the worker configuration", async () => {
+    const f = await fixture(false), build = randomUUID();
+    await pool.query(`INSERT INTO cloud_v2_computer_builds(id,org_id,version,recipe,state,snapshot_id,created_by,source_policy_version,source_targets)
+      VALUES($1,$2,1,$3,'succeeded','synthetic-snapshot',$4,2,$5)`, [build, f.org,
+      { repositories: [{ repository: "fixture/repo", branch: "main" }] }, f.creator, JSON.stringify([{ repository: "fixture/repo", repositoryId: "42" }])]);
+    await pool.query("INSERT INTO cloud_v2_computers(org_id,active_build_id,snapshot_name) VALUES($1,$2,'synthetic-snapshot')", [f.org, build]);
+    const key = await f.cp.api.credentials.create(f.org, f.creator, "Environment fixture");
+    const env = { APP_SECRET: "synthetic-composition-environment" };
+    const response = await createCloudApiRoutes(f.cp.api).request("/workspaces", { method: "POST",
+      headers: { authorization: `Bearer ${key.key}`, "content-type": "application/json" }, body: JSON.stringify({ repository: "fixture/repo", env }) });
+    expect(response.status).toBe(201);
+    const { workspace } = await response.json();
+    expect(workspace).not.toHaveProperty("env");
+    const worker = await f.cp.store.rotateWorkerToken(workspace.id), bootId = randomUUID();
+    const hello = await f.app.request("/v2/cloud/worker/hello", { method: "POST", headers: {
+      authorization: `Bearer ${worker}`, "content-type": "application/json", "x-zeros-worker-features": "prompt-outbox-v1,workspace-environment-v1,repository-setup-v1" },
+    body: JSON.stringify({ protocol: 2, bootId, runtimeSha256: "b".repeat(64) }) });
+    const configured = await hello.json();
+    expect({ status: hello.status, code: configured.code }).toEqual({ status: 200, code: undefined });
+    expect(configured.config.environment).toMatchObject({ repositoryId: "42", variables: env, files: [] });
+    expect(JSON.stringify((await pool.query("SELECT envelope FROM cloud_environment_versions")).rows).includes(env.APP_SECRET)).toBe(false);
+  });
 
   it("grants a pre-column workspace API access only to a worker advertising the feature", async () => {
     const f = await fixture(false, true, false, true);
@@ -254,8 +278,8 @@ suite("runtime hello through the production composition", () => {
   }
 
   it.each((["hello", "config"] as const).flatMap(route =>
-    (["member", "access", "stop", "source", "denial", "expiry", "disconnect", "checkout"] as const).map(change => [route, change] as const)))
-  ("withholds %s when %s changes during held profile I/O", async (route, change) => {
+    (["member", "access", "stop", "source", "denial", "expiry", "disconnect", "checkout"] as const).map(change => [route, change] as const)))(
+  "withholds %s when %s changes during held profile I/O", async (route, change) => {
     const f = await fixture(false);
     expect((await f.ordinary("hello")).status).toBe(200);
     await f.cp.loginChanges?.stop();

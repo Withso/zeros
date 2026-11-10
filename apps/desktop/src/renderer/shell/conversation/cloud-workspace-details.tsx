@@ -13,7 +13,7 @@ import { useCloudWorkspaceSurfaceActive } from "./use-cloud-workspace-surface";
 import { manageCloudWorkspace } from "../../state/cloud-workspace-catalog";
 import { parseCloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
 import { useWorkspaceStore } from "../../state/workspace-store";
-import { useCloudWorkspaceAccountAccess } from "../../features/team/cloud-workspace-account-access";
+import { useCloudWorkspaceAccountAccess, useSignedInUserName } from "../../features/team/cloud-workspace-account-access";
 import { useWorkbenchAvailability } from "../../state/workbench-availability";
 import { useCloudWorkspaceResources } from "../../platform/cloud-workspace-resources";
 import { WorkspaceIdentityLabel, WorkspaceIdentityTrigger, useWorkspaceDetailsOpen } from "./workspace-identity";
@@ -30,9 +30,11 @@ type LifecycleChange = "wake" | "stop" | "restart";
 /** What a cloud workspace is and whether it runs: where, its repository, age
  * and status (with Start, Stop and Restart), then the VM's usage when its
  * worker reports it. Older workers report none, and those rows stay out. */
-export function CloudWorkspaceDetailsCard({ workspace, title, statusLabel, resources, changing, onChange }: {
+export function CloudWorkspaceDetailsCard({ workspace, title, statusLabel, resources, changing, onChange, creatorName }: {
   workspace: CloudWorkspaceDocument;
   title?: string;
+  /** Known only when the signed-in account created it (cloud access is creator-only). */
+  creatorName?: string | null;
   statusLabel: string;
   resources: CloudWorkspaceResources | null;
   changing: boolean;
@@ -51,7 +53,7 @@ export function CloudWorkspaceDetailsCard({ workspace, title, statusLabel, resou
         onClick={() => { void shellOpenUrl(repositoryUrl).catch(() => toast.error("Couldn't open repository")); }}><ArrowUpRight /></IconButton></Tooltip>}
     </span> },
     { Icon: Clock, label: "Created", value: <Tooltip label={new Date(workspace.createdAt).toLocaleString()}>
-      <span>{createdAge === "now" ? "Just now" : `${createdAge} ago`}</span></Tooltip> },
+      <span>{creatorName ? `${creatorName} · ` : ""}{createdAge === "now" ? "Just now" : `${createdAge} ago`}</span></Tooltip> },
     { Icon: Activity, label: "Status", value: <span className="inline-flex min-w-0 items-center justify-end gap-1">
       <span role="status">{statusLabel}</span>
       {workspace.capabilities.canManage && running && <Tooltip label="Restart workspace"><IconButton size="compact" label="Restart workspace"
@@ -101,6 +103,7 @@ export function CloudWorkspaceDetails({ folder, name, title, workspace }: {
 }) {
   const target = parseCloudWorkspaceKey(folder);
   const allowed = useCloudWorkspaceAccountAccess(target?.organizationId);
+  const creatorName = useSignedInUserName(workspace?.createdBy);
   const pageActive = useWorkspaceStore(state => state.activePage === "workspace");
   const surfaceActive = useCloudWorkspaceSurfaceActive(pageActive);
   const { availability } = useWorkbenchAvailability(folder, surfaceActive);
@@ -122,7 +125,7 @@ export function CloudWorkspaceDetails({ folder, name, title, workspace }: {
       <WorkspaceIdentityTrigger name={name} title={title} placement="cloud" open={shown} />
       <PopoverContent align="start" sideOffset={6} className="w-[320px]" aria-label="Cloud workspace details">
         {workspace ? (
-          <CloudWorkspaceDetailsCard workspace={workspace} title={title} statusLabel={cloudStatusLabel(workspace.status, availability)}
+          <CloudWorkspaceDetailsCard workspace={workspace} title={title} creatorName={creatorName} statusLabel={cloudStatusLabel(workspace.status, availability)}
             resources={running ? resources : null} changing={changing} onChange={change} />
         ) : <p className="text-fg2 text-xs">Loading workspace details…</p>}
       </PopoverContent>

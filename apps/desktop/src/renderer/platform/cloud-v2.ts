@@ -45,6 +45,9 @@ export const CloudV2WorkspaceSchema = z.object({
   github: z.object({ repositoryId: z.string().regex(/^[1-9][0-9]*$/), branch: z.string().nullable(), baseBranch: z.string(), headSha: z.string().nullable(),
     prNumber: z.number().int().positive().nullable(), prState: z.enum(["draft", "ready", "merged", "closed"]).nullable(), prUrl: z.string().url().nullable() }).optional(),
   checkoutPath: z.string().optional(),
+  /** The chat edit route exists (top level only: older desktops parse
+   * capabilities strictly). Any other value reads as absent. */
+  chatEdits: z.literal(1).optional().catch(undefined),
 }).passthrough();
 export type CloudV2Workspace = z.infer<typeof CloudV2WorkspaceSchema>;
 
@@ -103,6 +106,7 @@ export function cloudV2Document(workspace: CloudV2Workspace): CloudWorkspaceDocu
     capabilities: {
       ...(workspace.capabilities.promptOutbox === 1 ? { promptOutbox: 1 as const } : {}),
       ...(workspace.capabilities.githubPullRequests === 1 ? { githubPullRequests: 1 as const } : {}),
+      ...(workspace.chatEdits === 1 ? { chatEdits: 1 as const } : {}),
       canWrite: true, canEdit: true, canManage: true,
       canStart: workspace.state === "stopped" || (workspace.state === "failed" && RETRYABLE.has(workspace.errorCode ?? "")),
       startUnavailableReason: workspace.state === "failed" && !RETRYABLE.has(workspace.errorCode ?? "") ? "This workspace failed. Create a new one." : null,
@@ -193,6 +197,16 @@ export async function changeCloudV2Workspace(target: CloudWorkspaceTarget, actio
     throw new Error("Cloud workspace response changed identity");
   if (erase) erase();
   return workspace;
+}
+
+const ChatEditReplySchema = z.object({ chat: z.object({ id: z.string().min(1).max(256), title: z.string().max(200), archived: z.boolean() }) });
+/** A chat's title or archive mark through the control plane, which applies it
+ * at once and hands it to the worker; it never wakes the VM. */
+export async function editCloudV2Chat(target: CloudWorkspaceTarget, chatId: string, change: { title: string } | { archived: boolean }) {
+  const { chat } = await cloudAccountRequest(`/v1/cloud-v2/workspaces/${uuid.parse(target.workspaceId)}/chats/${encodeURIComponent(chatId)}/edit`,
+    ChatEditReplySchema, { body: change, idempotencyKey: key() });
+  if (chat.id !== chatId) throw new Error("Chat edit response changed identity");
+  return chat;
 }
 
 export const CloudV2ConnectSchema = z.object({

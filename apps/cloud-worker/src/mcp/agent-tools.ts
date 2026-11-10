@@ -15,17 +15,22 @@ export interface AgentToolSet {
 }
 
 export const WORKSPACE_TOOL_INSTRUCTIONS = [
-  "Zeros cloud workspace tools. GetTerminalOutput reads the newest lines of this workspace's terminals (the most recently active one unless terminalId is given).",
+  "Zeros cloud workspace tools. GetTerminalOutput reads the newest lines of this workspace's terminals (the most recently active one unless terminalId is given; source selects a shell, a run script or the setup output).",
   "GetWorkspaceDiff shows this branch's changes against its merge base, including uncommitted and untracked work, the comparison the Changes view calls All; pass stat for a file list or file for one path.",
   "The `zeros cloud` command line (run `zeros cloud --help`) reads and drives Zeros cloud workspaces, sessions and messages through the Zeros API when API access is enabled for this workspace.",
 ].join(" ");
 
 const DEFAULT_LINES = 1000, MAX_LINES = 2000, MAX_ID = 256, MAX_PATH = 4096;
+/** Only what a cloud worker has: shared shells, run-script terminals and the setup log. */
+const SOURCES = ["auto", "terminal", "run_script", "setup"] as const;
+export type TerminalSource = typeof SOURCES[number];
 const definitions: ToolDefinition[] = [
-  { name: "GetTerminalOutput", description: "Read the newest lines of a terminal in this workspace, read-only. Without terminalId, the most recently active terminal.",
+  { name: "GetTerminalOutput", description: "Read the newest lines of a terminal in this workspace, read-only. Without terminalId, the most recently active one of the chosen source.",
     inputSchema: { type: "object", additionalProperties: false, properties: {
       maxLines: { type: "integer", minimum: 1, maximum: MAX_LINES, default: DEFAULT_LINES, description: "Newest lines to return." },
       terminalId: { type: "string", minLength: 1, maxLength: MAX_ID, description: "A terminal's id; omit for the most recently active one." },
+      source: { type: "string", enum: [...SOURCES], default: "auto",
+        description: "auto: any terminal; terminal: a shell; run_script: a run script; setup: the workspace's setup output." },
     } } },
   { name: "GetWorkspaceDiff", description: "Read this branch's changes against its merge base, including uncommitted and untracked work (the Changes view's All). Read-only and size-bounded.",
     inputSchema: { type: "object", additionalProperties: false, properties: {
@@ -46,7 +51,7 @@ const truncatedNote = "\n[Output truncated to the tool's size limit.]";
 
 export interface WorkspaceAgentToolOptions {
   assertCurrent(): void;
-  terminalOutput(input: { terminalId?: string; maxLines: number }): Promise<{ terminalId: string; lines: string[]; truncated: boolean } | undefined>;
+  terminalOutput(input: { terminalId?: string; maxLines: number; source: TerminalSource }): Promise<{ terminalId: string; lines: string[]; truncated: boolean } | undefined>;
   diff(input: { stat?: boolean; file?: string }): Promise<{ text: string; truncated: boolean }>;
   review?: CodeReviewAgentToolsCore;
 }
@@ -78,15 +83,20 @@ export class WorkspaceAgentTools implements AgentToolSet {
     }
     try {
       if (name === "GetTerminalOutput") {
-        const input = object(raw, ["maxLines", "terminalId"]);
+        const input = object(raw, ["maxLines", "terminalId", "source"]);
         const maxLines = input.maxLines ?? DEFAULT_LINES;
         if (typeof maxLines !== "number" || !Number.isInteger(maxLines) || maxLines < 1 || maxLines > MAX_LINES)
           throw new ToolInputError("INVALID_INPUT", `maxLines must be a whole number from 1 to ${MAX_LINES}.`);
         if (input.terminalId !== undefined && (typeof input.terminalId !== "string" || !input.terminalId || input.terminalId.length > MAX_ID))
           throw new ToolInputError("INVALID_INPUT", "terminalId must be a terminal's id.");
-        const output = await this.options.terminalOutput({ ...(input.terminalId === undefined ? {} : { terminalId: input.terminalId as string }), maxLines });
+        const source = input.source ?? "auto";
+        if (typeof source !== "string" || !(SOURCES as readonly string[]).includes(source))
+          throw new ToolInputError("INVALID_INPUT", `source must be one of ${SOURCES.join(", ")}.`);
+        if (source === "setup" && input.terminalId !== undefined) throw new ToolInputError("INVALID_INPUT", "The setup output has no terminalId.");
+        const output = await this.options.terminalOutput({ ...(input.terminalId === undefined ? {} : { terminalId: input.terminalId as string }), maxLines, source: source as TerminalSource });
         this.assertCurrent();
-        if (!output) return failure("TERMINAL_NOT_FOUND", input.terminalId === undefined ? "This workspace has no open terminal." : "No open terminal has that id.");
+        if (!output) return failure("TERMINAL_NOT_FOUND", source === "setup" ? "This workspace has no setup output."
+          : input.terminalId === undefined ? "This workspace has no open terminal of that kind." : "No open terminal of that kind has that id.");
         return { content: [{ type: "text", text: output.lines.join("\n") + (output.truncated ? truncatedNote : "") }] };
       }
       const input = object(raw, ["stat", "file"]);

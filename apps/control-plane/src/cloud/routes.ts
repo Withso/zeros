@@ -6,12 +6,14 @@ import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
 import { HttpError } from "../authz.js";
+import { securityStreamAuthority } from "../security-events.js";
 import type { CloudV2Capabilities } from "./contract.js";
 import type { CloudV2InstalledRepository, CloudV2Store, CloudV2Workspace } from "./store.js";
 import { CloudV2DraftSchema, CloudV2RecipeSchema, type CloudV2Computers } from "./computer.js";
 import { readCloudV2History } from "./history.js";
 import { CLOUD_V2_BRIDGE_PROTOCOL } from "./relay.js";
 import { createCloudV2PromptRoutes } from "./prompt-routes.js";
+import { CloudV2PromptIdSchema, CloudV2SessionNameSchema } from "./prompt-contract.js";
 import { type CloudSourceTarget, type CloudSourceContinuation, type CloudSourceProof } from "./source-authority.js";
 import { CloudGithubPrService } from "./github-pr-service.js";
 import type { CloudGithubConnections } from "./github-connections.js";
@@ -40,9 +42,11 @@ const WORKSPACE_NUMBER = /^[1-9][0-9]{0,9}$/;
 const MAX_WORKSPACE_NUMBER = 2_147_483_647;
 const ConnectSchema = z.object({ wake: z.boolean().default(true) }).strict();
 const WarmSchema = z.object({ repository: CloudWorkspaceCreateSchema.shape.repository }).strict();
+const ChatEditSchema = z.object({ title: CloudV2SessionNameSchema.transform(value => value.trim()).optional(), archived: z.boolean().optional() })
+  .strict().refine(value => value.title !== undefined || value.archived !== undefined);
 
 export type CloudV2RouteDeps = {
-  store: Pick<CloudV2Store, "activeComputer" | "createWorkspace" | "createWorkspaceOnce" | "readCreateReceipt" | "get" | "promptContext" | "list" | "requestLifecycle" | "transition" | "issueToken" | "listChats" | "messageWindow" | "searchMessages" | "markActive"> & Partial<Pick<CloudV2Store, "prompts" | "getByNumber">>;
+  store: Pick<CloudV2Store, "activeComputer" | "createWorkspace" | "createWorkspaceOnce" | "readCreateReceipt" | "get" | "promptContext" | "list" | "requestLifecycle" | "transition" | "issueToken" | "listChats" | "messageWindow" | "searchMessages" | "markActive"> & Partial<Pick<CloudV2Store, "prompts" | "getByNumber" | "chatEdits">>;
   /** Roll out only with a runtime that advertises durable prompt delivery. */
   promptOutbox?: boolean;
   computers: Pick<CloudV2Computers, "requireMember" | "requireAdmin" | "overview" | "enqueue" | "buildConfigured" | "buildSourceTargets" | "saveRecipe" | "discardRecipe" | "reactivate" | "log" | "logRepositories">;
@@ -71,17 +75,19 @@ export type CloudV2RouteDeps = {
   runtimeCanaryStatus?(userId: string, grantId: string): Promise<RuntimeCanaryStatus | null>;
 };
 
-function workspaceDocument(workspace: CloudGithubWorkspaceDocument, promptOutbox: boolean) {
+function workspaceDocument(workspace: CloudGithubWorkspaceDocument, promptOutbox: boolean, chatEdits: boolean) {
   return { ...workspace, placement: "cloud" as const, version: 2 as const,
+    ...(chatEdits ? { chatEdits: 1 as const } : {}),
     capabilities: { ...CLOUD_V2_CAPABILITIES, ...(promptOutbox ? { promptOutbox: 1 as const } : {}), ...(workspace.github ? { githubPullRequests: 1 as const } : {}) } };
 }
 
 export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
   const app = new Hono();
+  const chatEdits = deps.store.chatEdits;
   if (deps.environments) app.route("/", createCloudEnvironmentRoutes(deps.environments));
   if (deps.githubConnections) app.route("/",createCloudGithubConnectionRoutes(deps.githubConnections));
   const documents = async (workspaces: readonly CloudV2Workspace[]) =>
-    (deps.github ? await deps.github.documents(workspaces) : workspaces).map(workspace => workspaceDocument(workspace, deps.promptOutbox === true));
+    (deps.github ? await deps.github.documents(workspaces) : workspaces).map(workspace => workspaceDocument(workspace, deps.promptOutbox === true, !!chatEdits));
   const document = async (workspace: CloudV2Workspace) => (await documents([workspace]))[0]!;
   // A pending create holds only its creator's own request: no VM, worker,
   // token or repository metadata exists before the lifecycle verifies it.
@@ -99,6 +105,22 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
   }
   const json = bodyLimit({ maxSize: 16 * 1024, onError: c => c.json({ error: { code: "payload_too_large", message: "Request is too large" } }, 413) });
   const { create: createWorkspace, buildRepository, computerUnavailable } = createCloudWorkspaceOperations(deps);
+
+  if (chatEdits) app.post("/v1/cloud-v2/workspaces/:id/chats/:chatId/edit", json, async c => {
+    c.header("Cache-Control", "no-store");
+    const id = uuid.safeParse(c.req.param("id")), chatId = CloudV2PromptIdSchema.safeParse(c.req.param("chatId"));
+    if (!id.success || !chatId.success) throw new HttpError(404, "not_found", "Session not found");
+    const parsed = ChatEditSchema.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) throw new HttpError(400, "invalid_request", "Invalid session edit");
+    const user = c.get("user"), workspace = await deps.store.get(id.data, user.id);
+    const { title, archived } = parsed.data;
+    const patch = { ...(title === undefined ? {} : { title }), ...(archived === undefined ? {} : { archived }) };
+    const chat = await chatEdits.apply({ organizationId: workspace.organizationId, userId: user.id }, id.data, chatId.data, patch, async tx => {
+      if (user.authentication && !await securityStreamAuthority(tx, user))
+        throw new HttpError(401, "session_revoked", "Authentication is no longer current");
+    });
+    return c.json({ chat });
+  });
 
   app.post("/v1/cloud-v2/workspaces/:id/github", bodyLimit({ maxSize: 72 * 1024 }), async c => {
     const id = uuid.safeParse(c.req.param("id"));
@@ -121,7 +143,7 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
     if (!parsed.success) throw new HttpError(400, "invalid_request", "Invalid cloud workspace request");
     const result = await createWorkspace(c.get("user").id, parsed.data, {
       key: c.req.header("Idempotency-Key"), canary: c.req.header(RUNTIME_CANARY_HEADER),
-      receiptDocument: workspace => ({ workspace: workspaceDocument(workspace, deps.promptOutbox === true) }),
+      receiptDocument: workspace => ({ workspace: workspaceDocument(workspace, deps.promptOutbox === true, !!chatEdits) }),
       document: async workspace => ({ workspace: await document(workspace) }),
     });
     return c.json(result.response, result.status);

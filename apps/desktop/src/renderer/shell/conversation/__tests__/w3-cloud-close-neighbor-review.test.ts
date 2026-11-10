@@ -55,6 +55,10 @@ function harness(folder = cloud) {
   const closeSession = vi.fn(() => folder.startsWith("cloud://") ? waiting : undefined);
   const spawn = vi.fn();
   const context = vm.createContext({
+    // The real editChat dispatches this same action synchronously, then (for a
+    // chatEdits workspace) sends it to the control plane in the background.
+    editChat: (send: (action: { type: string; id: string; title?: string }) => void, id: string, change: { title: string } | { archived: boolean }) =>
+      send("title" in change ? { type: "UPDATE_CHAT_TITLE", id, title: change.title } : { type: change.archived ? "ARCHIVE_CHAT" : "UNARCHIVE_CHAT", id }),
     ...closeHelpers, readOnly: false, EMPTY_CHATS: [], useWorkspaceStore,
     useSessionsStore: { getState: () => ({ sessions: { [a.id]: { ...BLANK,
       messages: [{ kind: "text", role: "user", text: "saved history", id: "message-a", createdAt: 1 }] } } }) },

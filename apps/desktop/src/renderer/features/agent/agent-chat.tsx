@@ -1,4 +1,5 @@
 import { LocalLinksProvider } from "./local-links/provider";
+import { editChat } from "../../state/cloud-chat-edits";
 import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import { AGENT_NOTICE_ACTION, AgentNotice } from "./agent-notice";
 import { getFollowUpBehavior, type FollowUpBehavior } from "../settings/follow-up-behavior";
@@ -1571,7 +1572,7 @@ function AgentChatBody({
             if (!current || current.archived || current.folder !== chatThread.folder || current.agentId !== chatThread.agentId) return;
             if (!deferred || state.navigationVersion === navigationVersion && state.activeChatId === activeChatId)
               dispatch({ type: "ADD_CHAT", chat: fresh, recordWorkspaceActivity: true });
-            dispatch({ type: "ARCHIVE_CHAT", id: chatId });
+            editChat(dispatch, chatId, { archived: true });
           };
           const closing = agentSessions.closeSession(chatId);
           if (closing) void closing.then((confirmed) => { if (confirmed) finish(true); }).catch(() => {});
@@ -2066,7 +2067,7 @@ function AgentChatBody({
    *  the selection keeper bounces it. UNARCHIVE_CHAT is a no-op for open chats. */
   const openTranscriptChat = useCallback(
     (sourceChatId: string) => {
-      dispatch({ type: "UNARCHIVE_CHAT", id: sourceChatId });
+      editChat(dispatch, sourceChatId, { archived: false });
       dispatch({ type: "SET_ACTIVE_CHAT", id: sourceChatId });
     },
     [dispatch],

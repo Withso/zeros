@@ -12,6 +12,7 @@ import {
   cloudWorkspaceAccountAccess,
   hasCloudWorkspaceAccountAccess,
   useCloudWorkspaceAccountAccess,
+  useSignedInUserName,
 } from "../cloud-workspace-account-access";
 
 const organization = {
@@ -81,5 +82,24 @@ describe("Cloud workspace account admission after rollout", () => {
     expect(readHook()).toBe(false);
     state.me = null;
     expect(readHook()).toBe(false);
+  });
+});
+
+describe("signed-in creator name", () => {
+  const read = (userId: string | undefined) => {
+    let value: string | null = "unset";
+    function Probe() { value = useSignedInUserName(userId); return null; }
+    renderToStaticMarkup(createElement(Probe));
+    return value;
+  };
+  it("names the signed-in account only when it is the creator, preferring its display name over its email", () => {
+    state.me = { ...account(), user: { ...account().user, displayName: "  Alex Rivera " } };
+    expect(read("nonstaff-member")).toBe("Alex Rivera");
+    expect(read("someone-else")).toBeNull();
+    expect(read(undefined)).toBeNull();
+    state.me = account();
+    expect(read("nonstaff-member")).toBe("fixture@example.test");
+    state.me = null;
+    expect(read("nonstaff-member")).toBeNull();
   });
 });

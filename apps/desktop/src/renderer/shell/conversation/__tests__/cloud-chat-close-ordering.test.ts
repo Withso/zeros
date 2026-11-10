@@ -36,7 +36,14 @@ function harness(local = false, running = false, pristine = false) {
   const closeSession = vi.fn(() => local ? undefined : wait);
   const spawn = vi.fn();
   const toast = { error: vi.fn() };
+  const edits: Array<{ id: string; change: unknown; options?: { busy?: boolean } }> = [];
   const context = vm.createContext({
+    // The real editChat dispatches this same action synchronously, then (for a
+    // chatEdits workspace) sends it to the control plane in the background.
+    editChat: (send: (action: { type: string; id: string; title?: string }) => void, id: string, change: { title: string } | { archived: boolean }, options?: { busy?: boolean }) => {
+      edits.push({ id, change, options });
+      send("title" in change ? { type: "UPDATE_CHAT_TITLE", id, title: change.title } : { type: change.archived ? "ARCHIVE_CHAT" : "UNARCHIVE_CHAT", id });
+    },
     ...close, readOnly: false, EMPTY_CHATS: [],
     useWorkspaceStore: { getState: () => state },
     useSessionsStore: { getState: () => ({ sessions: { [chat.id]: { ...BLANK, messages: pristine ? [] : [{ kind: "text", text: "retained" }] } } }) },
@@ -47,7 +54,7 @@ function harness(local = false, running = false, pristine = false) {
     setPaneActiveChat: vi.fn(), resolvePaneActiveChatId: () => chat.id, layout: {},
   });
   vm.runInContext(code, context);
-  return { state, chat, actions, spawn, confirm, closeSession, toast,
+  return { state, chat, actions, spawn, confirm, closeSession, toast, edits,
     close: () => (context.closeTab as (paneId: string, chat: unknown) => void)("pane", chat) };
 }
 
@@ -77,6 +84,15 @@ describe("cloud tab close is instant", () => {
   it("archives rather than discards a pristine-looking chat that was working", () => {
     const h = harness(false, true, true); h.close();
     expect(h.actions[0]).toEqual({ type: "ARCHIVE_CHAT", id: h.chat.id });
+  });
+
+  it("closes a working cloud chat through today's path: archive at once, Stop in the background, no control-plane edit", () => {
+    const h = harness(false, true); h.close();
+    expect(h.actions[0]).toEqual({ type: "ARCHIVE_CHAT", id: h.chat.id });
+    expect(h.closeSession).toHaveBeenCalledOnce();
+    expect(h.edits).toEqual([{ id: h.chat.id, change: { archived: true }, options: { busy: true } }]);
+    const idle = harness(); idle.close();
+    expect(idle.edits).toEqual([{ id: idle.chat.id, change: { archived: true }, options: { busy: false } }]);
   });
 
   it("keeps Local close and archive synchronous", () => {

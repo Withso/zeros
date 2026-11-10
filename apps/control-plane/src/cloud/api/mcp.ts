@@ -28,6 +28,7 @@ export function createCloudApiMcpRoutes({ credentials, service }: CloudApiDepend
     if (Array.isArray(body)) return c.json({ jsonrpc: "2.0", id: null,
       error: { code: -32600, message: "Batch requests are not supported" } }, 400);
     const credential = c.get("cloudApiCredential");
+    const sourceSessionId = c.req.header("x-zeros-session-id");
     const tools = new Map<string, { definition: Tool; run(input: unknown): Promise<Record<string, unknown>> }>();
     function tool<T extends z.ZodObject>(name: string, description: string, schema: T, readOnly: boolean,
       run: (input: z.output<T>) => Record<string, unknown> | Promise<Record<string, unknown>>) {
@@ -45,7 +46,7 @@ export function createCloudApiMcpRoutes({ credentials, service }: CloudApiDepend
       ApiWorkspaceCreateSchema.safeExtend({ idempotencyKey: z.string().min(1).max(200).regex(/^[\x21-\x7e]+$/).optional() }), false,
       async ({ idempotencyKey, ...input }) => {
         await createLimit(c, async () => {});
-        return service.createWorkspace(credential, input, idempotencyKey);
+        return service.createWorkspace(credential, input, idempotencyKey, sourceSessionId);
       });
     tool("get_workspace", "Read a workspace without waking it.", workspace, true, ({ workspaceId }) => service.workspace(credential, workspaceId));
     tool("get_workspace_status", "Read workspace lifecycle status without waking it.", workspace, true,
@@ -59,7 +60,7 @@ export function createCloudApiMcpRoutes({ credentials, service }: CloudApiDepend
     tool("list_workspace_sessions", "List mirrored sessions without waking the workspace.", ApiSessionListSchema.extend(workspace.shape), true,
       ({ workspaceId, ...input }) => service.sessions(credential, workspaceId, input));
     tool("create_session", "Create a session with its first message; wakes a sleeping workspace. An archived workspace must be unarchived first.",
-      ApiSessionCreateSchema, false, input => service.createSession(credential, input));
+      ApiSessionCreateSchema, false, input => service.createSession(credential, input, sourceSessionId));
     tool("get_session", "Read a mirrored session without waking its workspace.", session, true,
       ({ sessionId }) => service.getSession(credential, sessionId));
     tool("get_session_status", "Read whether a session is idle, working or in error.", session, true,
@@ -73,7 +74,7 @@ export function createCloudApiMcpRoutes({ credentials, service }: CloudApiDepend
     tool("unarchive_session", "Unarchive a session without waking its workspace.", session, false,
       ({ sessionId }) => service.archiveSession(credential, sessionId, false));
     tool("send_message", "Queue a message; wakes a sleeping workspace. Reuse messageId to retry safely.", session.extend(ApiMessageSendSchema.shape), false,
-      async ({ sessionId, ...input }) => ({ message: (await service.sendMessage(credential, sessionId, input)).message }));
+      async ({ sessionId, ...input }) => ({ message: (await service.sendMessage(credential, sessionId, input, sourceSessionId)).message }));
     tool("list_messages", "Read mirrored messages in order, optionally after a message ID. Never wakes a workspace.", ApiMessageListSchema.extend(session.shape), true,
       ({ sessionId, ...input }) => service.messages(credential, sessionId, input));
     tool("get_message", "Read one mirrored message without waking its workspace.", session.extend({ messageId: CloudV2PromptIdSchema }), true,

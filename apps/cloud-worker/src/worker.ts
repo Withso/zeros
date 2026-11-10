@@ -20,7 +20,7 @@ import { HistoryMirror } from "./sessions/history-mirror";
 import type { Transport } from "./transport";
 import { ChatService } from "./workspace/chat-service";
 import { prepareCheckout, type CheckoutRefresh, type CheckoutResult } from "./workspace/checkout";
-import { WorkspaceSetup, type SetupRunner } from "./workspace/setup";
+import { WorkspaceSetup, readSetupOutput, type SetupRunner } from "./workspace/setup";
 import { WorkspaceError, WorkspaceScope, type WorkerConfig } from "./workspace/scope";
 import { WorkspaceService, type WorkspaceServiceOptions } from "./workspace/service";
 import { isGitMutation } from "./workspace/git";
@@ -493,7 +493,11 @@ export class CloudWorker {
       }, config,
         (frame) => this.broadcast(frame), () => { this.runtimeGate.activity(); void this.reportIdle(); }, this.options.onTiming, this.options.modelDiscovery, executionId => mcp!.providers(executionId),
         async input => this.workspaceMcp.admit(input.executionId, new WorkspaceAgentTools({ assertCurrent: () => input.assertExecutionCurrent(),
-          terminalOutput: request => terminals!.output(request), diff: request => workspace!.git.agentDiff(request),
+          terminalOutput: async ({ source, ...request }) => {
+            if (source !== "setup") return terminals!.output({ ...request, ...(source === "auto" ? {} : { kind: source }) });
+            const setupOutput = await readSetupOutput(this.options.directory, scope.workspace.id, request.maxLines);
+            return setupOutput && { terminalId: "setup", truncated: setupOutput.truncated, lines: setupOutput.lines.map(line => application.text(line)) };
+          }, diff: request => workspace!.git.agentDiff(request),
           ...(reviews!.enabled ? { review: reviews!.tools(input) } : {}) })), application, !!this.options.runtimeResume, workspaceApi);
       terminals = new Terminals(scope, { gitEnvironment: this.gitEnvironment, applicationEnvironment: application.variables,
         zerosEnvironment: () => workspaceApi.variables(), redact: text => application.text(text),
