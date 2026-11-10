@@ -133,6 +133,19 @@ describe("canvas layout drop intent", () => {
       )?.styles,
     ).toMatchObject({ left: "80px", top: "30px" });
   });
+  it("lands a layer moved within its parent on whole pixels at any zoom", () => {
+    // A zoomed-out pointer travels in fractions of a canvas pixel.
+    const parent = node("parent", "root", 100, 0, 400, 300);
+    const child = {
+      ...node("child", "parent", 120, 30, 40, 30),
+      parentCoordinateSpace: [1, 0, 0, 1, 0, 0],
+      styles: { position: "absolute", left: "20px", top: "30px" },
+      layout: { ...a.layout!, parentId: "parent", x: 20, y: 30 },
+    } as DesignRuntimeNodeDetails;
+    expect(
+      designLayoutDrop(child, [parent, child], { x: 190, y: 80 }, { x: 171.6, y: 63.2 })?.styles,
+    ).toMatchObject({ left: "72px", top: "63px" });
+  });
   it.each([0.5, 1, 8])(
     "uses the moved center and screen-space boundary hysteresis at zoom %s",
     (zoom) => {

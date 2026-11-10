@@ -74,6 +74,42 @@ describe("design movement coordinates", () => {
       ),
     ).toThrow(/appearance/);
   });
+  it("moves a layer pinned from the right by its right inset, not by adding a left one", () => {
+    // Writing `left` beside the authored `right` squeezed the layer between them.
+    const badge = {
+      sourceVersion: "a".repeat(24), oid: "badge", tag: "span", name: "Badge", text: null, selector: "",
+      visible: true, breadcrumb: [],
+      rect: { x: 615.531, y: 48, width: 56.469, height: 31 },
+      box: { x: 615.531, y: 48, width: 56.469, height: 31, rotation: 0, scaleX: 1, scaleY: 1, originX: 0.5, originY: 0.5 },
+      parentCoordinateSpace: [1, 0, 0, 1, 0, 0],
+      styles: { position: "absolute", left: "615.531px", right: "48px", top: "48px", bottom: "341px" },
+      authoredStyleProperties: ["position", "right", "top"],
+      layout: { x: 615.531, y: 48, parentId: "hero", parentDisplay: "block", parentPosition: "relative", isContainingBlock: true, parentWidth: 720, parentHeight: 420 },
+    } as DesignRuntimeNodeDetails;
+    const moved = designNodeMovementStyles(badge, { x: -20, y: 50 });
+    expect(moved).toMatchObject({ left: "auto", right: "68px", top: "98px" });
+    expect(moved.bottom).toBeUndefined();
+    // Pinned on both sides it keeps its stretch: both insets move, the width stays automatic.
+    const banner = { ...badge, styles: { ...badge.styles, left: "24px", right: "48px" }, authoredStyleProperties: ["position", "left", "right", "top"],
+      rect: { ...badge.rect, x: 24, width: 648 }, box: { ...badge.box!, x: 24, width: 648 }, layout: { ...badge.layout!, x: 24 } } as DesignRuntimeNodeDetails;
+    expect(designNodeMovementStyles(banner, { x: 10, y: 0 })).toMatchObject({ left: "34px", right: "38px" });
+  });
+  it("lands an upright layer on whole pixels of its new parent, and leaves a turned one exact", () => {
+    // A zoomed pointer, and the matrix arithmetic, leave fractions behind.
+    const upright = {
+      sourceVersion: "a".repeat(24), oid: "tile", tag: "div", name: "Tile", text: null, selector: "",
+      visible: true, breadcrumb: [], styles: {},
+      rect: { x: 457, y: 502, width: 653, height: 628 },
+      box: { x: 457, y: 502, width: 653, height: 628, rotation: 0, scaleX: 1, scaleY: 1, originX: 0.5, originY: 0.5 },
+      borderCoordinateSpace: [1, 0, 0, 1, 457, 502],
+      relocationContext: { inheritedStyles: {}, unsupported: [] },
+    } as DesignRuntimeNodeDetails;
+    expect(designNodeRelocation(upright, { x: 2085.50070014, y: 502.0022643 }, [1, 0, 0, 1, 0, 0]).matrix)
+      .toEqual([1, 0, 0, 1, 2086, 502]);
+    const turned = { ...upright, borderCoordinateSpace: [0, 1, -1, 0, 457, 502] } as DesignRuntimeNodeDetails;
+    expect(designNodeRelocation(turned, { x: 460.25, y: 502 }, [1, 0, 0, 1, 0, 0]).matrix)
+      .toEqual([0, 1, -1, 0, 460.25, 502]);
+  });
   it("previews a same-frame relocation with every inherited value and saves only what the drop parent would change", () => {
     // A label taking the body's dark text, dropped into a `.card { color: white }`.
     const label = {

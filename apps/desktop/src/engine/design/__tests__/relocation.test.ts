@@ -56,6 +56,30 @@ describe("bounded source-preserving relocation", () => {
     expect(await captureDesignFrameRestorePoint(workspace, result.frame)).toEqual(moved);
   });
 
+  it("makes an unturned layer that becomes a frame follow that frame, so a later resize takes its fill along", async () => {
+    // Its root kept the layer's pixel size: resizing the new frame left the
+    // fill and children behind at the old size.
+    const { input } = await fixture();
+    const result = await transferDesignNode(workspace, { ...input,
+      relocation: { width: 100, height: 80, matrix: [1, 0, 0, 1, 0, 0], inheritedStyles: { color: "navy" } },
+      geometry: { x: 700, y: 50, w: 100, h: 80, z: 1 } });
+    const moved = await captureDesignFrameRestorePoint(workspace, result.frame);
+    expect(moved.source).toMatch(/width:\s*100%/);
+    expect(moved.source).toMatch(/height:\s*100vh/);
+    expect(moved.source).not.toMatch(/width:\s*100px/);
+    expect(moved.geometry).toMatchObject({ w: 100, h: 80 });
+  });
+
+  it("lets a layer with a fractional size follow the whole-pixel frame it becomes", async () => {
+    const { input } = await fixture();
+    const result = await transferDesignNode(workspace, { ...input,
+      relocation: { width: 100.4, height: 79.2, matrix: [1, 0, 0, 1, 0, 0], inheritedStyles: { color: "navy" } },
+      geometry: { x: 700, y: 50, w: 101, h: 80, z: 1 } });
+    const moved = await captureDesignFrameRestorePoint(workspace, result.frame);
+    expect(moved.source).toMatch(/width:\s*100%/);
+    expect(moved.source).toMatch(/height:\s*100vh/);
+  });
+
   it("reparents within the scene in one reversible source transaction", async () => {
     const { before, input } = await fixture();
     const result = await transferDesignNode(workspace, { ...input, destinationFrame: input.frame, destinationSourceVersion: input.sourceVersion, parentId: "destination" });

@@ -5914,11 +5914,15 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
     frameBox.x + frameBox.width * 0.22,
     frameBox.y + frameBox.height * 0.22,
   );
+  // With a layer selected the press first asks what is under it.
   check(
     "dragging an empty area inside a frame paints a scoped marquee",
-    await page
-      .locator("[data-design-marquee]")
-      .evaluate((element) => getComputedStyle(element).display !== "none"),
+    await waitFor(
+      () => page
+        .locator("[data-design-marquee]")
+        .evaluate((element) => getComputedStyle(element).display !== "none"),
+      "design-in-frame-marquee",
+    ),
   );
   await page.mouse.up();
   check(

@@ -300,7 +300,12 @@ export function preserveDesignLayoutPins(
   if (!details.layout || style(details, "position") !== "absolute")
     return result;
   for (const axis of ["x", "y"] as const) {
-    const marker = style(details, `--zeros-layout-${axis}`);
+    // A layer authored with only `right` or `bottom` is pinned there without a
+    // marker; an added start inset would squeeze it between the two. The
+    // runtime's authored list is what tells a pin from a computed pixel inset.
+    const marker = details.authoredStyleProperties
+      ? designLayoutConstraint(details, axis)
+      : style(details, `--zeros-layout-${axis}`);
     const keys = AXES[axis];
     if (
       !marker ||

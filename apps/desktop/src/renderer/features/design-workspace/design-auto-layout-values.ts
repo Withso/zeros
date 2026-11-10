@@ -183,20 +183,51 @@ export function designFrameRootFixedStyles(
   return styles;
 }
 
+const pixels = (value: string | undefined) => /^\d*\.?\d+px$/.test(value ?? "");
+
+/** A root that sits at its frame's corner unturned with a width declared in
+ * pixels. A layer dragged out to the canvas becomes such a frame: its root is
+ * the frame, as in Figma, but a pixel size does not follow a resize. Only the
+ * width tells: a root that follows the frame keeps its percentage there,
+ * while `100vh` computes to pixels like any authored height. */
+function pixelSizedFrameRoot(root: DesignRuntimeNodeDetails): boolean {
+  const box = root.box;
+  if (box && (Math.abs(box.rotation) > 0.001 || Math.abs(box.scaleX - 1) > 0.0001 || Math.abs(box.scaleY - 1) > 0.0001))
+    return false;
+  return Math.abs(root.rect.x) <= 0.5 && Math.abs(root.rect.y) <= 0.5 && pixels(root.layout?.widthValue);
+}
+
+/** The root axes a manual frame resize makes follow the frame. */
+function frameResizeRootAxes(
+  root: DesignRuntimeNodeDetails,
+  start: { w: number; h: number },
+  next: { w: number; h: number },
+): { width: boolean; height: boolean } {
+  const changed = { x: next.w !== start.w, y: next.h !== start.h };
+  const pixelRoot = (changed.x || changed.y) && pixelSizedFrameRoot(root);
+  const pixelHeight = pixelRoot && pixels(root.layout?.heightValue);
+  // A root an earlier resize left behind catches up on the next one.
+  const behind = Math.abs((root.box?.width ?? root.rect.width) - start.w) > 0.5;
+  const width = (changed.x && (intrinsicSize(root, "x") || pixelRoot)) || (pixelRoot && behind);
+  // Once the width follows, a pixel height can no longer be told from 100vh:
+  // it follows in the same write.
+  const height = (changed.y && (intrinsicSize(root, "y") || pixelHeight)) || (pixelHeight && width);
+  return { width, height };
+}
+
 /** A manual frame resize fixes each Hug axis it changes, as in Figma; the
  * root then follows the frame viewport like any Fixed canvas frame. Without
- * this the next layout edit re-hugs the frame back to its content. */
+ * this the next layout edit re-hugs the frame back to its content. A
+ * pixel-sized root follows too, or the frame's fill and children stay behind
+ * at the old size. */
 export function designFrameResizeRootStyles(
   root: DesignRuntimeNodeDetails | null | undefined,
   start: { w: number; h: number },
   next: { w: number; h: number },
 ): Styles | null {
   if (!root) return null;
-  const width = next.w !== start.w && intrinsicSize(root, "x");
-  const height = next.h !== start.h && intrinsicSize(root, "y");
-  return width || height
-    ? designFrameRootFixedStyles(root, { width, height })
-    : null;
+  const axes = frameResizeRootAxes(root, start, next);
+  return axes.width || axes.height ? designFrameRootFixedStyles(root, axes) : null;
 }
 
 /** Where a frame's root is while its frame is resized by hand, ahead of the
@@ -217,11 +248,14 @@ export function designFrameResizeRootGeometry(
       Math.abs(box.scaleY - 1) > 0.0001)
   )
     return null;
+  const pixelRoot = pixelSizedFrameRoot(root);
+  const follows = frameResizeRootAxes(root, start, next);
   const extent = (axis: DesignLayoutAxis) => {
     const position = axis === "x" ? root.rect.x : root.rect.y;
     const size = axis === "x" ? root.rect.width : root.rect.height;
     const from = axis === "x" ? start.w : start.h;
     const to = axis === "x" ? next.w : next.h;
+    if (pixelRoot && (axis === "x" ? follows.width : follows.height)) return Math.max(0, to - position);
     if (to === from) return size;
     if (intrinsicSize(root, axis)) return Math.max(0, to - position);
     return Math.abs(position) <= 0.5 && Math.abs(size - from) <= 0.5

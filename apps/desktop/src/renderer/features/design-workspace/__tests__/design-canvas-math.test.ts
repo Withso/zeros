@@ -80,6 +80,9 @@ import {
   selectLiveDesignFrameFiles,
   settleDesignFrameGesture,
   zoomDesignViewportAtPoint,
+  designFrameBodyPress,
+  designMarqueeScope,
+  designWholeMoveDelta,
 } from "../design-canvas-math";
 
 describe("design canvas viewport math", () => {
@@ -1422,3 +1425,41 @@ describe("designWholeCanvasRect", () => {
   });
 });
 
+
+describe("a press on a frame's body", () => {
+  const plain = { frameSelected: false, layerSelected: false, modifier: false, repeat: false };
+  it("moves a selected frame, as pressing its name does", () => {
+    // It started a marquee: a frame with a fill could only be moved by its name.
+    expect(designFrameBodyPress({ ...plain, frameSelected: true })).toBe("move-frame");
+  });
+  it("asks what is under the pointer once a layer in the frame is selected, so that layer can move", () => {
+    expect(designFrameBodyPress({ ...plain, layerSelected: true })).toBe("layer");
+  });
+  it("keeps the marquee for an unselected frame, a modifier, and the second press of a double-click", () => {
+    expect(designFrameBodyPress(plain)).toBe("marquee");
+    expect(designFrameBodyPress({ ...plain, frameSelected: true, modifier: true })).toBe("marquee");
+    expect(designFrameBodyPress({ ...plain, layerSelected: true, modifier: true })).toBe("marquee");
+    expect(designFrameBodyPress({ ...plain, layerSelected: true, repeat: true })).toBe("marquee");
+  });
+});
+
+describe("a marquee inside a frame", () => {
+  it("looks among the layers of the frame's own root, not at that root", () => {
+    // With nothing selected it asked for the body's children: the root alone,
+    // so the marquee selected the frame instead of the layers it covered.
+    expect(designMarqueeScope({ selectedParentId: null, frameRootId: "f-main" })).toBe("f-main");
+  });
+  it("stays among the selected layer's siblings, and asks the body of a frame without a root", () => {
+    expect(designMarqueeScope({ selectedParentId: "card", frameRootId: "f-main" })).toBe("card");
+    expect(designMarqueeScope({ selectedParentId: null, frameRootId: "" })).toBeNull();
+    expect(designMarqueeScope({ selectedParentId: null, frameRootId: undefined })).toBeNull();
+  });
+});
+
+describe("designWholeMoveDelta", () => {
+  it("moves a group by whole pixels, so every layer keeps its place in the group", () => {
+    // A zoomed-out pointer travels in fractions of a canvas pixel.
+    expect(designWholeMoveDelta({ x: 159.576, y: 176.841 }, { x: 119, y: 92 })).toEqual({ x: 41, y: 85 });
+    expect(designWholeMoveDelta({ x: 10.4, y: -3.6 }, { x: 10, y: 0 })).toEqual({ x: 0, y: -4 });
+  });
+});

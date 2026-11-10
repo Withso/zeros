@@ -1646,6 +1646,16 @@ original unsnapped geometry writes nothing and preserves authored sizing.
   transform or delete so no subtree is mutated twice. A marquee claims its
   selection generation before hit testing; a newer click, directory, source,
   inactive surface or replacement runtime retires the delayed result.
+- **Body presses:** a selected frame moves from its body as it does from its
+  name, and Option-drag copies it. With a layer of the frame selected, a press
+  selects the layer under it and a drag moves that layer in the same gesture;
+  over empty frame the drag is a marquee. An unselected frame's body, Shift, and
+  Command or Control always marquee. A marquee inside a frame looks among the
+  selected layer's siblings, otherwise among the layers of the frame's root.
+  Layers and groups land on whole pixels, as frames do. A layer dragged out to
+  the canvas becomes a whole-pixel frame whose root fills it (`100%` by `100vh`),
+  so later resizes carry its fill and children; a frame saved earlier with a
+  pixel-sized root is repaired by its next manual resize.
 - **Camera:** pinch follows Chromium's synthesized pinch scale, Cmd-wheel uses
   the flatter scroll curve, ordinary wheel pans, and every zoom preserves its
   focal point. Imperative camera state updates the world transform and inverse

@@ -335,16 +335,13 @@ export async function transferDesignLayerOnCanvas(input: {
             : {}),
         }
       : {}),
-    x: relocation ? origin.x : Math.round(origin.x),
-    y: relocation ? origin.y : Math.round(origin.y),
-    w: Math.max(
-      1,
-      relocation ? details.rect.width : Math.round(details.rect.width),
-    ),
-    h: Math.max(
-      1,
-      relocation ? details.rect.height : Math.round(details.rect.height),
-    ),
+    // A new frame sits on whole pixels like every other frame. The layer is
+    // placed inside it from its own corner, so the frame only ever grows by
+    // the fraction: a narrower one would rewrap its text.
+    x: Math.round(origin.x),
+    y: Math.round(origin.y),
+    w: Math.max(1, relocation ? Math.ceil(details.rect.width - 0.01) : Math.round(details.rect.width)),
+    h: Math.max(1, relocation ? Math.ceil(details.rect.height - 0.01) : Math.round(details.rect.height)),
     z: Math.min(DESIGN_MAX_FRAMES_PER_PAGE, Math.max(0, ...input.frames.map((candidate) => candidate.z + 1))),
   };
   // The selection follows the move in the same render that publishes it. A

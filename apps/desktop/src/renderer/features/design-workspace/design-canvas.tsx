@@ -92,6 +92,9 @@ import {
   designCssSizeAfterResize,
   designHighResolutionViewportTile,
   DESIGN_TINY_FRAME_PIXELS,
+  designFrameBodyPress,
+  designMarqueeScope,
+  designWholeMoveDelta,
   designLocalDelta,
   designResizeHandleLayout,
   designRotatedOverlayFrame,
@@ -3122,7 +3125,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
       }
       event.preventDefault();
       event.stopPropagation();
-      // Labels move the whole frame; body drags retain scoped marquee.
+      // A frame moves by its name, and by its body once it is selected.
       viewportRef.current?.focus({ preventScroll: true });
       gestureCancelRef.current?.();
       if (event.shiftKey && mode === "move") {
@@ -4763,10 +4766,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
           pointerEvent.metaKey || pointerEvent.ctrlKey
             ? { rect: moving, guides: {} }
             : snapDesignRect(moving, peerRects, 6 / zoom);
-        delta = {
-          x: snapped.rect.x - groupBounds.x,
-          y: snapped.rect.y - groupBounds.y,
-        };
+        delta = designWholeMoveDelta(snapped.rect, groupBounds);
         const margin = DESIGN_REPARENT_HYSTERESIS_PIXELS / zoom;
         if (selection.selectedTargets.length > 1 && starts.some(({ details }) => {
           const x = details.rect.x + delta.x + details.rect.width / 2;
@@ -7436,10 +7436,16 @@ export const DesignCanvas = React.memo(function DesignCanvas({
           width: screenRect.width / camera.zoom,
           height: screenRect.height / camera.zoom,
         };
-        const scopeNodeId =
-          options?.frame?.file === selectedFrame?.file && view.selectedNodeId
-            ? designLayerParentId(selectedRuntimeTree, view.selectedNodeId)
-            : null;
+        const frameRootId = options?.frame
+          ? useDesignRuntimeStore.getState().byWorkspace[workspaceId]?.frames[options.frame.file]?.snapshot?.frame.oid
+          : undefined;
+        const scopeNodeId = designMarqueeScope({
+          selectedParentId:
+            options?.frame?.file === selectedFrame?.file && view.selectedNodeId
+              ? designLayerParentId(selectedRuntimeTree, view.selectedNodeId)
+              : null,
+          frameRootId: frameRootId === DESIGN_RUNTIME_DOCUMENT_BODY_ID ? undefined : frameRootId,
+        });
         void selectDesignTargetsInRect({
           workspaceId,
           folder,
@@ -7479,6 +7485,160 @@ export const DesignCanvas = React.memo(function DesignCanvas({
       view.selectedNodeId,
       workspaceId,
     ],
+  );
+
+  /** Run `click` when this press is released where it started. */
+  const onDesignPressClick = useCallback((event: React.PointerEvent<HTMLElement>, click: () => void) => {
+    const { pointerId, clientX, clientY } = event;
+    const stop = () => {
+      window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", cancel);
+    };
+    const up = (released: PointerEvent) => {
+      if (released.pointerId !== pointerId) return;
+      stop();
+      if (Math.hypot(released.clientX - clientX, released.clientY - clientY) < 3) click();
+    };
+    const cancel = (cancelled: PointerEvent) => {
+      if (cancelled.pointerId === pointerId) stop();
+    };
+    window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", cancel);
+  }, []);
+
+  // A deferred press selects a layer before it hands off, so it reads the
+  // gestures of the render that followed that selection.
+  const pressGesturesRef = useRef({ startNodeGesture, startMarquee });
+  useLayoutEffect(() => {
+    pressGesturesRef.current = { startNodeGesture, startMarquee };
+  });
+
+  /** A plain press on a frame's body while one of its layers is selected. The
+   * layer under it is selected at once and, when the press drags, moves in
+   * that same gesture. Over empty frame it is the marquee it always was. */
+  const startLayerPress = useCallback(
+    (
+      event: React.PointerEvent<HTMLElement>,
+      frame: DesignCanvasFrameWire,
+      onClick: () => void,
+    ) => {
+      if (!workspaceId || !folder || !active || !event.isPrimary || event.button !== 0) return false;
+      const article = event.currentTarget;
+      const bounds = article.getBoundingClientRect();
+      if (bounds.width <= 0 || bounds.height <= 0) return false;
+      const pointerId = event.pointerId;
+      const start = { clientX: event.clientX, clientY: event.clientY, altKey: event.altKey };
+      event.preventDefault();
+      event.stopPropagation();
+      article.setPointerCapture?.(pointerId);
+      // The gestures read only these fields of the press that starts them.
+      const press = (currentTarget: HTMLElement) =>
+        ({
+          ...start,
+          currentTarget,
+          target: currentTarget,
+          pointerId,
+          isPrimary: true,
+          button: 0,
+          detail: 1,
+          shiftKey: false,
+          metaKey: false,
+          ctrlKey: false,
+          preventDefault() {},
+          stopPropagation() {},
+        }) as unknown as React.PointerEvent<HTMLElement>;
+      let hit: DesignRuntimeNodeDetails | null | undefined;
+      let latest = { clientX: start.clientX, clientY: start.clientY };
+      let moved = false;
+      let released = false;
+      let ended = false;
+      let waiting: number | null = null;
+      // The gesture that takes over starts at the press; it hears where the
+      // pointer has reached since without waiting for it to move again.
+      const handOff = (begin: () => void) => {
+        end();
+        begin();
+        window.dispatchEvent(new PointerEvent("pointermove", { ...latest, pointerId, isPrimary: true }));
+      };
+      const end = () => {
+        ended = true;
+        window.removeEventListener("pointermove", move);
+        window.removeEventListener("pointerup", up);
+        window.removeEventListener("pointercancel", end);
+        window.removeEventListener("blur", end);
+        if (waiting !== null) window.cancelAnimationFrame(waiting);
+        waiting = null;
+        if (article.hasPointerCapture?.(pointerId)) article.releasePointerCapture(pointerId);
+        if (gestureCancelRef.current === end) gestureCancelRef.current = null;
+      };
+      const settle = () => {
+        if (ended || hit === undefined) return;
+        if (released) {
+          end();
+          // A click on empty frame selects the frame, as it did.
+          if (!moved && hit === null) onClick();
+          return;
+        }
+        if (!moved || waiting !== null) return;
+        if (hit === null) {
+          handOff(() => pressGesturesRef.current.startMarquee(press(article), { frame, onClick }));
+          return;
+        }
+        const nodeId = hit.oid;
+        let frames = 0;
+        // The move starts from the selection's own overlay, once it is drawn.
+        const begin = () => {
+          waiting = null;
+          const overlay = article.querySelector<HTMLElement>(`[data-design-element-overlay="${CSS.escape(nodeId)}"]`);
+          const details = useDesignRuntimeStore.getState().byWorkspace[workspaceId]?.frames[frame.file]?.detailsByNode[nodeId];
+          const selection = designWorkspaceView(workspaceId);
+          if (overlay && details && selection.selectedFrame === frame.file && selection.selectedNodeId === nodeId) {
+            handOff(() => pressGesturesRef.current.startNodeGesture(press(overlay), frame, details, "move"));
+          } else if (++frames > 30) end();
+          else waiting = window.requestAnimationFrame(begin);
+        };
+        begin();
+      };
+      const move = (pointerEvent: PointerEvent) => {
+        if (pointerEvent.pointerId !== pointerId) return;
+        latest = { clientX: pointerEvent.clientX, clientY: pointerEvent.clientY };
+        if (moved || Math.hypot(latest.clientX - start.clientX, latest.clientY - start.clientY) < 3) return;
+        moved = true;
+        settle();
+      };
+      const up = () => {
+        released = true;
+        settle();
+      };
+      gestureCancelRef.current?.();
+      gestureCancelRef.current = end;
+      window.addEventListener("pointermove", move);
+      window.addEventListener("pointerup", up);
+      window.addEventListener("pointercancel", end);
+      window.addEventListener("blur", end);
+      void selectDesignFrameBodyAtLocation({
+        workspaceId,
+        folder,
+        frame,
+        x: ((start.clientX - bounds.left) * frame.width) / bounds.width,
+        y: ((start.clientY - bounds.top) * frame.height) / bounds.height,
+        intent: "plain",
+        layersOnly: true,
+        owner: captureDesignPageOwner(workspaceId),
+      }).then(
+        (details) => {
+          hit = details;
+          settle();
+        },
+        (selectionError) => {
+          if (ended) return;
+          end();
+          toast.error("Couldn't inspect that design element", { description: errorMessage(selectionError) });
+        },
+      );
+      return true;
+    },
+    [active, folder, workspaceId],
   );
 
   const handleViewportPointerDown = useCallback(
@@ -7925,15 +8085,32 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                         });
                       });
                   };
+                  const selection = designWorkspaceView(workspaceId);
+                  const press = designFrameBodyPress({
+                    frameSelected: frameSelectedOnly,
+                    layerSelected: selection.selectedFrame === frame.file && Boolean(selection.selectedNodeId),
+                    modifier: pointer.metaKey || pointer.ctrlKey || pointer.shiftKey,
+                    repeat: pointer.detail > 1,
+                  });
                   if (
                     activeTool === "select" &&
                     frameSelectedOnly &&
                     !pointer.metaKey &&
                     !pointer.ctrlKey &&
-                    Math.min(frame.width, frame.height) * liveDesignZoom() <
-                      DESIGN_TINY_FRAME_PIXELS
+                    (press === "move-frame" ||
+                      Math.min(frame.width, frame.height) * liveDesignZoom() <
+                        DESIGN_TINY_FRAME_PIXELS)
                   ) {
                     startFrameGesture(event, frame, "move");
+                    // A press that never moves is still a click on the frame.
+                    if (press === "move-frame") onDesignPressClick(event, selectAtPoint);
+                    return;
+                  }
+                  if (
+                    activeTool === "select" &&
+                    press === "layer" &&
+                    startLayerPress(event, frame, selectAtPoint)
+                  ) {
                     return;
                   }
                   if (
