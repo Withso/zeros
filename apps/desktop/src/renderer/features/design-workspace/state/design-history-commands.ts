@@ -10,12 +10,22 @@ function element(target: EventTarget | null): Element | null {
   return target && "nodeType" in target && target.nodeType === 1 ? target as Element : null;
 }
 
+function textField(target: EventTarget | null): Element | null {
+  return element(target)?.closest('input, textarea, [role="textbox"]') ?? null;
+}
+
+/** Anywhere a key press is text: single-key shortcuts stay out of these. */
+export function isDesignTextEntryTarget(target: EventTarget | null): boolean {
+  if (textField(target)) return true;
+  const editable = element(target)?.closest("[contenteditable]");
+  return !!(editable && editable.getAttribute("contenteditable") !== "false");
+}
+
 export function isNativeHistoryTarget(target: EventTarget | null): boolean {
-  const node = element(target);
-  if (!node) return false;
-  const editable = node.closest("[contenteditable]");
-  return !!node.closest('input, textarea, [role="textbox"]') ||
-    !!(editable && editable.getAttribute("contenteditable") !== "false");
+  // A Style field showing its committed value has no text history of its own:
+  // Command-Z there belongs to the design, not to an empty native undo.
+  if (textField(target)?.getAttribute("data-design-draft") === "clean") return false;
+  return isDesignTextEntryTarget(target);
 }
 
 /** Only mounted active surfaces register. Pointer intent covers canvas clicks
@@ -23,6 +33,7 @@ export function isNativeHistoryTarget(target: EventTarget | null): boolean {
 export class DesignHistoryCommands {
   private owners = new Map<Element, HistoryOwner>();
   private pointerOwner: Element | null = null;
+  private stepListeners = new Set<() => void>();
   constructor(private document: Document) {}
 
   private eligible(owner: HistoryOwner): boolean {
@@ -89,8 +100,16 @@ export class DesignHistoryCommands {
   dispatch(direction: DesignHistoryDirection): boolean {
     const owner = this.focused();
     if (!owner) return false;
+    for (const listener of this.stepListeners) listener();
     owner.run(direction);
     return true;
+  }
+
+  /** Told just before an undo or redo runs, so a focused field or an open
+   * editor that holds back outside values can show what the step leaves. */
+  onStep(listener: () => void): () => void {
+    this.stepListeners.add(listener);
+    return () => { this.stepListeners.delete(listener); };
   }
 }
 
@@ -111,4 +130,7 @@ export function isDesignHistoryFocusOwner(workspaceId: string, allowEditable = f
 }
 export function dispatchFocusedDesignHistory(direction: DesignHistoryDirection): boolean {
   return typeof document !== "undefined" && commands(document).dispatch(direction);
+}
+export function subscribeDesignHistorySteps(listener: () => void): () => void {
+  return typeof document === "undefined" ? () => {} : commands(document).onStep(listener);
 }

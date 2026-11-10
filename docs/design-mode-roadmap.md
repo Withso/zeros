@@ -1763,8 +1763,14 @@ original unsnapped geometry writes nothing and preserves authored sizing.
   preview live and commit once. Numeric label scrubs require 3px of movement;
   clicking or returning to the starting value preserves Hug/Fill and authored
   units. Escape, lost pointer capture, window blur or deactivation cancels the
-  scrub and restores its baseline without writing. Effect arrow steps remain
-  local until commit. Preview cancellation retains the originating workspace,
+  scrub and restores its baseline without writing. A scrub or arrow step lands
+  on the field's step: whole numbers everywhere, from a fractional start or a
+  fractional pointer distance alike. Only line height and letter spacing keep
+  decimals (0.1 for a unitless or em line height, 0.01 for an em letter
+  spacing, with Alt one digit finer; Alt gives 0.1 for their pixel values and
+  nothing elsewhere). Effect fields move one step per two pointer pixels and
+  snap the same way. Effect arrow steps remain local until commit. Preview
+  cancellation retains the originating workspace,
   directory, frame and selected nodes; retired callbacks and color samples
   cannot follow a replacement selection. Color and opacity drafts preserve
   refreshed, untouched channels, and an untouched focused field adopts the
@@ -2551,7 +2557,15 @@ The active, selected, renaming or playing frame retains its controls.
 A focused Design surface owns Undo/Redo through one command registry. Native
 Edit-menu commands enter the same registry as canvas shortcuts; text inputs,
 modal dialogs, unrelated surfaces and focused DevTools keep their native
-history. Marked inspector portals share their Design owner. A hidden retained
+history. A Style or effect number field that shows its committed value marks
+itself `data-design-draft="clean"` and hands Undo/Redo to the design, so a
+field reached with Tab does not swallow the command; typing makes it `dirty`
+and returns the chord to the text. Shift+A in any text field stays a capital
+A, never auto layout. A focused field and an open Transform or Fill editor
+hold back values published from elsewhere, but a step from Undo/Redo shows
+there at once: it hands their draft back to the source until the person edits,
+focuses or reopens them, and never replaces typing already under way. Marked
+inspector portals share their Design owner. A hidden retained
 surface cannot consume a command. Windows Ctrl+Y remains a Redo chord.
 Save also requires Design focus, including its editable text drafts. Native
 macOS qualification must cover text-field Undo through the menu-to-IPC native

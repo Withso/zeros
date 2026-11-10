@@ -10,7 +10,10 @@ import {
   parseDesignStyleNumericParts,
   replaceDesignStyleNumericUnit,
   resolveDesignNumericExpression,
+  designScrubStep,
   scrubDesignNumericValue,
+  scrubDesignSteppedValue,
+  snapDesignNumberToStep,
   parseDesignCssDeclarations,
   readDesignComputedStyle,
   serializeDesignCssDeclarations,
@@ -309,5 +312,45 @@ describe("design style values", () => {
     expect(
       withDesignPositionContext({ position: "fixed", left: "12px" }, "static"),
     ).toEqual({ position: "fixed", left: "12px" });
+  });
+});
+
+describe("scrubbing lands on the field's step", () => {
+  it("moves ordinary values in whole numbers and offers no finer step", () => {
+    expect(designScrubStep("width", "px")).toEqual({ step: 1, fine: null });
+    expect(designScrubStep("opacity", "")).toEqual({ step: 1, fine: null });
+    expect(designScrubStep(undefined, "px")).toEqual({ step: 1, fine: null });
+  });
+
+  it("keeps decimals for line height and letter spacing only", () => {
+    expect(designScrubStep("line-height", "px")).toEqual({ step: 1, fine: 0.1 });
+    expect(designScrubStep("line-height", "")).toEqual({ step: 0.1, fine: 0.01 });
+    expect(designScrubStep("letter-spacing", "px")).toEqual({ step: 1, fine: 0.1 });
+    expect(designScrubStep("letter-spacing", "em")).toEqual({ step: 0.01, fine: 0.001 });
+  });
+
+  it("snaps a fractional pointer distance and a fractional start to the step", () => {
+    // A zoomed window reports fractional pointer positions; a computed size
+    // such as 19.25px is a fractional start. Neither may leak into the value.
+    expect(scrubDesignSteppedValue("12px", 3.4, 1)).toBe("15px");
+    expect(scrubDesignSteppedValue("12px", 3.5, 1)).toBe("16px");
+    expect(scrubDesignSteppedValue("19.25px", 3, 1)).toBe("22px");
+    expect(scrubDesignSteppedValue("19.25px", -0.2, 1)).toBe("19px");
+    expect(scrubDesignSteppedValue("-0px", 0.2, 1)).toBe("0px");
+  });
+
+  it("snaps finer steps without floating point noise", () => {
+    expect(scrubDesignSteppedValue("1.35", 0.1, 0.1)).toBe("1.5");
+    expect(scrubDesignSteppedValue("-0.01em", 0.03, 0.01)).toBe("0.02em");
+    expect(scrubDesignSteppedValue("0.3", 0.3, 0.1)).toBe("0.6");
+    expect(scrubDesignSteppedValue("auto", 10, 1)).toBeNull();
+  });
+
+  it("snaps an effect's number the same way, half pixels included", () => {
+    // An effect field moves half a step per pointer pixel before snapping.
+    expect(snapDesignNumberToStep(4.5, 1)).toBe(5);
+    expect(snapDesignNumberToStep(-0.4, 1)).toBe(-0);
+    expect(snapDesignNumberToStep(1.02, 0.05)).toBe(1);
+    expect(snapDesignNumberToStep(1.03, 0.05)).toBe(1.05);
   });
 });

@@ -904,8 +904,9 @@ describe("design workspace interaction wiring", () => {
 
   it("adds auto layout with Shift+A and moves the motion timeline to Shift+M", () => {
     const inspector = readSection("design-inspector.tsx");
-    // Never while typing: a capital A belongs to the focused field.
-    expect(inspector).toContain(`if (!editableTarget && event.shiftKey && !event.metaKey && !event.ctrlKey && !event.altKey &&
+    // Never in a text field, even one that hands Command-Z to the design: a
+    // capital A belongs to the focused field.
+    expect(inspector).toContain(`if (!isDesignTextEntryTarget(event.target) && event.shiftKey && !event.metaKey && !event.ctrlKey && !event.altKey &&
         event.key.toLowerCase() === "a") {`);
     expect(inspector).toContain('layoutShortcutRef.current({ type: "auto-layout", flow: "column", infer: true })');
     expect(inspector).toContain("layoutShortcutRef.current = commitLayoutAction;");

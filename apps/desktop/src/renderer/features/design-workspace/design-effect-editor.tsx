@@ -46,7 +46,8 @@ import {
   type DesignTransformValue,
 } from "./design-effect-values";
 import type { DesignLayoutFieldOptions } from "./design-layout-values";
-import { readDesignComputedStyle } from "./design-style-values";
+import { readDesignComputedStyle, snapDesignNumberToStep } from "./design-style-values";
+import { useDesignHistoryHandBack, useDesignHistoryStep } from "./use-design-history-step";
 import { beginDesignPointerGesture } from "./design-pointer-gesture";
 
 type RenderField = (
@@ -98,6 +99,7 @@ export function EffectNumberField({
   const skipCommitRef = useRef(false);
   const previewedRef = useRef(false);
   const focusBaselineRef = useRef(value);
+  const historyStep = useDesignHistoryStep();
   const scrubCancelRef = useRef<(() => void) | null>(null);
   const scrubRef = useRef<{
     originX: number;
@@ -116,12 +118,18 @@ export function EffectNumberField({
   };
 
   useLayoutEffect(() => {
-    if (document.activeElement === inputRef.current || scrubRef.current) return;
+    if (scrubRef.current) return;
+    // A focused field keeps its text, except after its own undo or redo, and
+    // even then never over a draft the person has started.
+    if (
+      document.activeElement === inputRef.current &&
+      (dirtyRef.current || !historyStep.handedBack())
+    ) return;
     focusBaselineRef.current = value;
     dirtyRef.current = false;
     draftRef.current = String(value);
     setDraft(String(value));
-  }, [value]);
+  }, [historyStep, value]);
 
   useEffect(() => () => scrubCancelRef.current?.(), []);
   useEffect(() => {
@@ -201,10 +209,11 @@ export function EffectNumberField({
               if (!scrub.moved && Math.abs(pointerEvent.clientX - scrub.originX) < 3)
                 return;
               scrub.moved = true;
-              const multiplier = pointerEvent.altKey ? 0.1 : pointerEvent.shiftKey ? 10 : 1;
-              scrub.distance += ((pointerEvent.clientX - scrub.startX) / 2) * step * multiplier;
+              // Two pointer pixels per step, snapped so an odd pixel distance
+              // leaves no half step in the value.
+              scrub.distance += ((pointerEvent.clientX - scrub.startX) / 2) * step * (pointerEvent.shiftKey ? 10 : 1);
               scrub.startX = pointerEvent.clientX;
-              const next = clampValue(scrub.start + scrub.distance);
+              const next = clampValue(snapDesignNumberToStep(scrub.start + scrub.distance, step));
               if (next === scrub.latest) return;
               scrub.latest = next;
               setFieldDraft(String(next));
@@ -233,15 +242,18 @@ export function EffectNumberField({
         ref={inputRef}
         inputMode="decimal"
         value={draft}
+        data-design-draft={draft === String(value) ? "clean" : "dirty"}
         disabled={disabled}
         aria-label={name ?? label}
         className={suffix ? "pr-1" : "pr-2"}
         onFocus={() => {
+          historyStep.drop();
           focusBaselineRef.current = value;
           dirtyRef.current = false;
           skipCommitRef.current = false;
         }}
         onChange={(event) => {
+          historyStep.drop();
           dirtyRef.current = true;
           setFieldDraft(event.currentTarget.value);
         }}
@@ -263,9 +275,12 @@ export function EffectNumberField({
             event.preventDefault();
             const parsed = Number(draftRef.current);
             const next = clampValue(
-              (Number.isFinite(parsed) ? parsed : value) +
-                (event.key === "ArrowUp" ? step : -step) *
-                  (event.shiftKey ? 10 : 1),
+              snapDesignNumberToStep(
+                (Number.isFinite(parsed) ? parsed : value) +
+                  (event.key === "ArrowUp" ? step : -step) *
+                    (event.shiftKey ? 10 : 1),
+                step,
+              ),
             );
             dirtyRef.current = true;
             setFieldDraft(String(next));
@@ -873,19 +888,24 @@ function DesignTransformEditor({
   const skipRawCommitRef = useRef(false);
   /** The last transform this popover wrote, for reverting a field draft. */
   const committedRef = useRef(value || "none");
+  const { step: historyStep, revision: historyRevision } = useDesignHistoryHandBack();
 
-  // Adopt confirmed values only while closed; an open editor owns its draft.
+  // Each opening starts a draft of its own.
+  useEffect(() => historyStep.drop(), [historyStep, open]);
+  // An open editor owns its draft: it adopts a confirmed value only while
+  // closed, or when that value is what the person's own undo or redo left.
   useEffect(() => {
-    if (open) return;
+    if (open && !historyStep.handedBack()) return;
     skipRawCommitRef.current = false;
     committedRef.current = value || "none";
     setTransform(parseDesignTransform(value));
     setRawTransform(value || "none");
-  }, [open, value]);
+  }, [historyRevision, historyStep, open, value]);
 
   const update = (patch: Partial<DesignTransformValue>) => {
     const next = { ...transform, ...patch };
     const formatted = formatDesignTransform(next);
+    historyStep.drop();
     setTransform(next);
     setRawTransform(formatted);
     onPreview?.(formatted);
@@ -893,6 +913,7 @@ function DesignTransformEditor({
   };
   const commit = (next = transform) => {
     const formatted = formatDesignTransform(next);
+    historyStep.drop();
     committedRef.current = formatted;
     setRawTransform(formatted);
     onCommit(formatted);
@@ -1002,6 +1023,7 @@ function DesignTransformEditor({
               // `rotate(1` is not a transform, and applying every keystroke
               // reflowed the element through every intermediate state.
               const next = event.currentTarget.value;
+              historyStep.drop();
               setRawTransform(next);
               setTransform(parseDesignTransform(next));
             }}
