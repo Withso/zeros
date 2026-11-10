@@ -70,7 +70,9 @@ import {
   registerDesignHistoryCommand,
 } from "./state/design-history-commands";
 import {
+  designAutoLayoutFlow,
   designAutoLayoutUpdates,
+  designInferredAutoLayoutFlow,
   designFrameRootFixedStyles,
   designHugFrameSize,
   designSizingMode,
@@ -1297,6 +1299,8 @@ export const DesignInspector = React.memo(function DesignInspector({
     });
   }, [active, workspaceId, historyDirectoryRevision]);
 
+  // The layout commit is defined below with the style owner it captures.
+  const layoutShortcutRef = useRef<(action: DesignLayoutAction) => Promise<void>>(() => Promise.resolve());
   useEffect(() => {
     if (!active || !workspaceId) return;
     const onKeyDown = (event: KeyboardEvent) => {
@@ -1309,6 +1313,14 @@ export const DesignInspector = React.memo(function DesignInspector({
       ) return;
       if (event.defaultPrevented || !isDesignHistoryFocusOwner(workspaceId, true)) return;
       const editableTarget = isNativeHistoryTarget(event.target);
+      if (!editableTarget && event.shiftKey && !event.metaKey && !event.ctrlKey && !event.altKey &&
+        event.key.toLowerCase() === "a") {
+        // Figma's Shift+A. The motion timeline is Shift+M.
+        event.preventDefault();
+        void layoutShortcutRef.current({ type: "auto-layout", flow: "column", infer: true }).catch((error: unknown) =>
+          toast.error("Couldn't add auto layout", { description: errorMessage(error) }));
+        return;
+      }
       dispatchDesignWorkspaceShortcut(event, editableTarget, {
         save: () => {
           // Inspector and inline-text fields publish drafts on blur. React
@@ -1800,9 +1812,14 @@ export const DesignInspector = React.memo(function DesignInspector({
           const liveChildren = childDetails.filter(
             (node): node is DesignRuntimeNodeDetails => node !== null,
           );
+          // Shift+A leaves an existing layout, and a layer with nothing to
+          // lay out, exactly as they are.
+          if (action.type === "auto-layout" && action.infer &&
+            (liveChildren.length === 0 || details.some((node) => designAutoLayoutFlow(node) !== "none"))) return;
           updates =
             action.type === "auto-layout"
-              ? designAutoLayoutUpdates(details, liveChildren, action.flow)
+              ? designAutoLayoutUpdates(details, liveChildren,
+                  action.infer ? designInferredAutoLayoutFlow(liveChildren) : action.flow)
               : designLayoutChildUpdates(details, liveChildren, action);
         } else if (action.type === "sizing") {
           updates = new Map(
@@ -2063,6 +2080,7 @@ export const DesignInspector = React.memo(function DesignInspector({
     },
     [styleOwner, stylePreviewIntentRef],
   );
+  useLayoutEffect(() => { layoutShortcutRef.current = commitLayoutAction; }, [commitLayoutAction]);
 
   const styleContext =
     workspaceId && folder && frame && styleTargetNodeId && elementDetails

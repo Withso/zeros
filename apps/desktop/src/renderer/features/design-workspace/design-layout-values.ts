@@ -9,7 +9,13 @@ import {
 export type DesignLayoutAxis = "x" | "y";
 export type DesignLayoutConstraint = "start" | "center" | "end" | "stretch";
 export type DesignLayoutAction =
-  | { type: "auto-layout"; flow: "none" | "row" | "column" | "grid" }
+  | {
+      type: "auto-layout";
+      flow: "none" | "row" | "column" | "grid";
+      /** Shift+A: add auto layout only where there is none yet, in the
+       * direction the children already sit; `flow` is the fallback. */
+      infer?: boolean;
+    }
   | { type: "sizing"; axis: DesignLayoutAxis; mode: "fixed" | "hug" | "fill" }
   | { type: "reset"; property: string }
   | { type: "clip" }

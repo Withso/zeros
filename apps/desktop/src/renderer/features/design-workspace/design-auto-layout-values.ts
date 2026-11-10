@@ -246,6 +246,18 @@ export function designAutoLayoutFlow(
     : mode;
 }
 
+/** The direction Shift+A lays children out in: the one they already sit in.
+ * Children that one horizontal line crosses form a row; anything else,
+ * including wrapped rows and a single child, stacks down the page. */
+export function designInferredAutoLayoutFlow(
+  children: readonly Pick<DesignRuntimeNodeDetails, "rect">[],
+): "row" | "column" {
+  if (children.length < 2) return "column";
+  const top = Math.max(...children.map((child) => child.rect.y));
+  const bottom = Math.min(...children.map((child) => child.rect.y + child.rect.height));
+  return top < bottom ? "row" : "column";
+}
+
 export function designAutoLayoutFlowStyles(
   node: DesignRuntimeNodeDetails,
   flow: DesignAutoLayoutFlow,

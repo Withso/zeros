@@ -307,7 +307,7 @@ Changes:
 - One shortcut style for menus, tooltips and the command palette (three today: this chip, 60% text and fg2 text).
 - An 18px chip, border2 on bg2, so it reads on bg3 menus (border1 was faint there).
 - Combinations are one chip per key.
-- The Design tab’s shortcuts use the same chip in the rail, the Layers tree, fields and the canvas (V · F · T · ⌥T · ⇧A · ⌘\ · F2 · ⌘D · ⇧H).
+- The Design tab’s shortcuts use the same chip in the rail, the Layers tree, fields and the canvas (V · F · T · ⌥T · ⇧A · ⇧M · ⌘\ · F2 · ⌘D · ⇧H).
 
 ## Avatar — sizes (`Avatar`)
 

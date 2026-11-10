@@ -6271,7 +6271,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         !event.metaKey &&
         !event.ctrlKey &&
         !event.altKey &&
-        event.key.toLowerCase() === "a" &&
+        event.key.toLowerCase() === "m" &&
         motionTargetSelected
       ) {
         event.preventDefault();
@@ -8858,11 +8858,11 @@ export const DesignCanvas = React.memo(function DesignCanvas({
             <DesignToolbarButton
               label="Toggle motion timeline"
               tooltip="Motion"
-              shortcut="⇧A"
+              shortcut="⇧M"
               tooltipSide="right"
               pressed={motionTimelineOpen}
               disabled={!workspaceId || !selectedFrame || !motionTargetSelected}
-              aria-keyshortcuts="Shift+A"
+              aria-keyshortcuts="Shift+M"
               onClick={() => onMotionTimelineOpenChange(!motionTimelineOpen)}
             >
               <Diamond />

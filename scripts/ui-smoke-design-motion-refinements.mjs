@@ -45,7 +45,7 @@ export async function runDesignFrameMotionSmoke({ page, check }) {
   await expect(timeline).toBeVisible();
   await close();
   await canvas.focus();
-  await page.keyboard.press("Shift+A");
+  await page.keyboard.press("Shift+M");
   await expect(timeline).toBeVisible();
   await expect(duration).toHaveValue("18");
   await expect.poll(selection).toEqual({ frameSelected: true, selectedNodeId: null });

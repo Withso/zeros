@@ -10,6 +10,7 @@ import {
   designAutoLayoutFlowStyles,
   designGridTrackCount,
   designAutoLayoutUpdates,
+  designInferredAutoLayoutFlow,
   designFrameAlwaysClips,
   designFrameResizeRootStyles,
   designFrameRootFixedStyles,
@@ -52,6 +53,20 @@ const node = (
     boxSizing: "border-box",
     ...styles,
   },
+});
+
+describe("auto layout shortcut", () => {
+  const at = (x: number, y: number, width = 100, height = 40) => ({ rect: { x, y, width, height } });
+  it("runs in the direction the children already sit, as Figma's Shift+A does", () => {
+    expect(designInferredAutoLayoutFlow([at(0, 0), at(120, 4), at(240, 0)])).toBe("row");
+    expect(designInferredAutoLayoutFlow([at(0, 0), at(6, 60), at(0, 120)])).toBe("column");
+    // A wrapped grid of cards reads as rows stacked down the page.
+    expect(designInferredAutoLayoutFlow([at(0, 0), at(120, 0), at(0, 200), at(120, 200), at(0, 400)])).toBe("column");
+  });
+  it("stacks a single child or none vertically", () => {
+    expect(designInferredAutoLayoutFlow([])).toBe("column");
+    expect(designInferredAutoLayoutFlow([at(40, 40)])).toBe("column");
+  });
 });
 
 describe("auto layout intent", () => {

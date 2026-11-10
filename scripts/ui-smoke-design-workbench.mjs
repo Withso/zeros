@@ -280,7 +280,7 @@ async function exerciseInactiveDesignTools({
   // a long preview in a wide window.
   await page.setViewportSize({ width: 2400, height: 900 });
   await canvas.locator("[data-design-canvas-viewport]").focus();
-  await page.keyboard.press("Shift+A");
+  await page.keyboard.press("Shift+M");
   const timeline = canvas.locator("[data-design-motion-timeline]");
   await timeline.waitFor({ state: "visible" });
   await canvas.getByRole("button", { name: /^Animate opacity$/i }).click();

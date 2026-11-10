@@ -893,6 +893,21 @@ describe("design workspace interaction wiring", () => {
     expect(source).toContain("event.detail > 1");
   });
 
+  it("adds auto layout with Shift+A and moves the motion timeline to Shift+M", () => {
+    const inspector = readSection("design-inspector.tsx");
+    // Never while typing: a capital A belongs to the focused field.
+    expect(inspector).toContain(`if (!editableTarget && event.shiftKey && !event.metaKey && !event.ctrlKey && !event.altKey &&
+        event.key.toLowerCase() === "a") {`);
+    expect(inspector).toContain('layoutShortcutRef.current({ type: "auto-layout", flow: "column", infer: true })');
+    expect(inspector).toContain("layoutShortcutRef.current = commitLayoutAction;");
+    // Only where there is no auto layout yet, in the children's own direction.
+    expect(inspector).toContain("designInferredAutoLayoutFlow(liveChildren)");
+    expect(source).toContain('aria-keyshortcuts="Shift+M"');
+    expect(source).not.toContain('aria-keyshortcuts="Shift+A"');
+    expect(source).toContain(`event.key.toLowerCase() === "m" &&
+        motionTargetSelected`);
+  });
+
   it("keeps typed text on Escape, as Figma does, instead of discarding it", () => {
     const editor = readSection("design-inline-text-editor.tsx");
     // Escape ends the edit through the same commit as blur and Cmd/Ctrl+Enter.
