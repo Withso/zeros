@@ -1722,7 +1722,8 @@
   visibility: hidden;
 }
 /* Retained HTML and pictures cover editor startup. Painting them beneath a ready editor
-   would composite authored alpha twice. Switch both surfaces in one style pass. */
-[data-design-frame-render-surface]:has(iframe[data-design-document-buffer="displayed"][data-design-document-ready]) > :is([data-design-source-surface][data-design-source-ready], [data-design-source-vector-host], [data-design-frame-pixel-cover]) {
+   would composite authored alpha twice, but a just-revealed native document can
+   composite nothing for a frame: keep them until it reports a produced frame. */
+[data-design-frame-render-surface]:has(iframe[data-design-document-buffer="displayed"][data-design-document-ready][data-design-document-presented]) > :is([data-design-source-surface][data-design-source-ready], [data-design-source-vector-host], [data-design-frame-pixel-cover]) {
   visibility: hidden !important;
 }

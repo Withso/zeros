@@ -1,6 +1,6 @@
 // Cloud workspaces are `w-<n>` within their organization, permanently, and
 // are "Untitled" until one of their chats is first named. These run the real
-// migration 0224 trigger, the store and the by-number route on PostgreSQL.
+// migration 0225 trigger, the store and the by-number route on PostgreSQL.
 import { randomUUID } from "node:crypto";
 import pg from "pg";
 import { Hono } from "hono";

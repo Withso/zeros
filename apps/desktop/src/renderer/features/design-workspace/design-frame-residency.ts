@@ -160,7 +160,11 @@ export function createDesignFrameResidencyReader<T extends DesignSpatialFrame>()
       // prospective slot as painted content while its passive HTML is loading.
       // In an overview a small frame waits for its picture instead of running
       // a whole frame document; only explicit demand keeps an editor there.
-      frames: candidates.filter(frame => (frame as T & { preparation?: string }).preparation !== "unprepared" &&
+      // A frame that already runs a document keeps it while it revalidates:
+      // its last confirmed generation paints, and the same document carries on
+      // once that generation is confirmed again, instead of reloading.
+      frames: candidates.filter(frame => ((frame as T & { preparation?: string }).preparation !== "unprepared" ||
+        (!!(frame as T & { previous?: unknown }).previous && !!prior?.live.has(frame.file))) &&
         (!overview || needsSource(frame) || frame.file === input.selectedFrame ||
           input.requiredFiles.includes(frame.file) || (input.protectedFiles ?? []).includes(frame.file))).map((frame) => {
         const rect = input.geometry?.get(frame.file);

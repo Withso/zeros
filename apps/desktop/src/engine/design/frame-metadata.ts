@@ -40,6 +40,34 @@ export function nextFrameGeometry(
   };
 }
 
+/** A duplicate sits beside its original, like a design tool's copy: to the
+ * right at the same top, past every frame already in that space. The grid
+ * slot for the next new frame ignores where frames were moved and can land
+ * the copy on top of other work. */
+export function duplicateFrameGeometry(
+  original: DesignFrameGeometry,
+  existing: DesignFrameGeometry[],
+  meta: { width: number; height: number },
+): DesignFrameGeometry {
+  const y = original.y;
+  let x = original.x + original.w + FRAME_GRID_GAP;
+  // Each pass moves past at least one frame, so this ends within one pass per frame.
+  for (let pass = 0; pass <= existing.length; pass += 1) {
+    const blocking = existing.filter((frame) =>
+      x < frame.x + frame.w && frame.x < x + meta.width &&
+      y < frame.y + frame.h && frame.y < y + meta.height);
+    if (!blocking.length) break;
+    x = Math.max(...blocking.map((frame) => frame.x + frame.w)) + FRAME_GRID_GAP;
+  }
+  return {
+    x: Math.min(FRAME_COORDINATE_LIMIT, x),
+    y: Math.min(FRAME_COORDINATE_LIMIT, y),
+    w: meta.width,
+    h: meta.height,
+    z: existing.length,
+  };
+}
+
 export function readFrameMeta(
   document: DefaultTreeAdapterTypes.Document,
   file: string,

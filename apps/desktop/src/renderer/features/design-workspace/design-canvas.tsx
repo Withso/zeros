@@ -140,6 +140,8 @@ import {
 } from "./design-gesture-loop";
 import {
   beginInlineTextCommit,
+  inlineTextKeepsSelection,
+  inlineTextSettleFrame,
   cancelInlineTextCommit,
   createInlineTextCommitGuard,
   finishInlineTextCommit,
@@ -1058,7 +1060,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
     result: Promise<DesignCanvasFrameWire | null>;
   } | null>(null);
   /** Unsaved keyboard copies take the next grid slots in submission order. */
-  const pendingFrameCopySlotsRef = useRef(new Map<number, { pageId: string | undefined; width: number; height: number }>());
+  const pendingFrameCopySlotsRef = useRef(new Map<number, { pageId: string | undefined; x: number; y: number; width: number; height: number }>());
   const [selectionOverlaySuppressed, setSelectionOverlaySuppressed] =
     useState(false);
   const nudgeGestureRef = useRef<
@@ -2281,20 +2283,12 @@ export const DesignCanvas = React.memo(function DesignCanvas({
   // the same microtask, then unmount and persist selection independently.
   useLayoutEffect(() => {
     const edit = inlineTextEdit;
-    if (
-      !workspaceId ||
-      !folder ||
-      !edit ||
-      edit.status !== "settling" ||
-      !selectedFrame ||
-      selectedFrame.file !== edit.frame ||
-      selectedFrame.sourceVersion !== edit.sourceVersion
-    ) {
-      return;
-    }
+    if (!workspaceId || !folder || !edit || edit.status !== "settling") return;
+    const editedFrame = inlineTextSettleFrame(frameViews.filter(isPreparedDesignFrame), edit);
+    if (!editedFrame) return;
     const viewport = viewportRef.current;
     const frameElement = viewport?.querySelector<HTMLElement>(
-      `[data-design-frame="${CSS.escape(edit.frame)}"]`,
+      `[data-design-frame="${CSS.escape(editedFrame.file)}"]`,
     );
     if (!frameElement) return;
     let settled = false;
@@ -2319,6 +2313,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
       setInlineTextEdit((current) =>
         current?.id === edit.id ? null : current,
       );
+      if (!inlineTextKeepsSelection(designWorkspaceView(workspaceId), edit)) return true;
       const exactDetails =
         selectedNodeDetails?.oid === edit.nodeId &&
         selectedNodeDetails.sourceVersion === edit.sourceVersion
@@ -2327,7 +2322,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
       void selectDesignNode({
         workspaceId,
         folder,
-        frame: selectedFrame,
+        frame: editedFrame,
         nodeId: edit.nodeId,
         ...(exactDetails
           ? { details: exactDetails }
@@ -2352,7 +2347,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
     return () => {
       observer.disconnect();
     };
-  }, [folder, inlineTextEdit, selectedFrame, selectedNodeDetails, workspaceId]);
+  }, [folder, frameViews, inlineTextEdit, selectedNodeDetails, workspaceId]);
 
   const insertAsset = useCallback(
     async (
@@ -2413,7 +2408,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
       const page = designFrameViews(catalog).filter((candidate) => candidate.pageId === pageId);
       const geometry = designFrameCopyGeometry([...page, ...[...pendingFrameCopySlotsRef.current.values()]
         .filter((slot) => slot.pageId === pageId)], frame);
-      pendingFrameCopySlotsRef.current.set(intent, { pageId, width: frame.width, height: frame.height });
+      pendingFrameCopySlotsRef.current.set(intent, { pageId, x: geometry.x, y: geometry.y, width: geometry.w, height: geometry.h });
       const article = frameElementsRef.current.get(frame.file);
       const provisional = article && isPreparedDesignFrame(frame) ? presentDesignFrameCopy({
         workspaceId, frame, article, geometry,
@@ -8110,7 +8105,9 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                     selectedNodeIds={
                       selected ? view.selectedNodeIds : EMPTY_NODE_IDS
                     }
-                    live={prepared && liveFrameFiles.has(frame.file)}
+                    // Residency keeps a revalidating frame live only if it
+                    // already was: it presents its last confirmed generation.
+                    live={liveFrameFiles.has(frame.file)}
                     sourceSurface={sourceFrameFiles.has(frame.file)}
                     sourceReadOnly={!prepared}
                     onSourceReady={sourceSurfaceReady}

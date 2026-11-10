@@ -34,6 +34,9 @@ type CreateWorkspace = {
   /** GitHub repository IDs the creator was just verified to read. */
   readableRepositoryIds?: readonly string[];
   runtimeCanary?: RuntimeCanaryAdmission;
+  /** The lifecycle runs the GitHub checks and sets the source scope before
+   * any VM exists; until then the row has no scope (resolvePendingSource). */
+  pendingSource?: true;
 };
 type CreateReceipt = { status: 201; response: Record<string, unknown> };
 type HistoryInput = {
@@ -74,6 +77,9 @@ export type CloudV2Workspace = {
   archivedAt: string | null;
   createdAt: string;
   updatedAt: string;
+  /** Created before its GitHub checks: no source scope, sandbox or worker
+   * yet. Only the lifecycle's resolvePendingSource may end it. */
+  sourcePending?: true;
 };
 
 /** What a checkpoint is compared by at the next stop: the fingerprint of what
@@ -139,10 +145,11 @@ type Row = {
   repository: string; branch: string; base_branch: string;
   state: CloudV2WorkspaceState; boat_sandbox_id: string | null; computer_build_id: string | null;
   error_code: string | null; active_at: Date | null; archived_at: Date | null; created_at: Date; updated_at: Date;
+  source_pending: boolean;
 };
 
 const WORKSPACE_COLUMNS_SQL = sql`id, org_id, creator_user_id, name, number, title, repository, branch, base_branch, state, boat_sandbox_id,
-  computer_build_id, error_code, active_at, archived_at, created_at, updated_at`;
+  computer_build_id, error_code, active_at, archived_at, created_at, updated_at, source_pending`;
 const COLUMNS = WORKSPACE_COLUMNS_SQL.text;
 
 type LifecycleRow = Row & {
@@ -225,6 +232,7 @@ function workspace(row: Row): CloudV2Workspace {
     archivedAt: row.archived_at?.toISOString() ?? null,
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),
+    ...(row.source_pending ? { sourcePending: true as const } : {}),
   };
 }
 
@@ -292,51 +300,87 @@ export class CloudV2Store {
     return withSystemTx(this.pool, tx => this.insertWorkspace(tx, input));
   }
 
-  private async insertWorkspace(tx: Tx, input: CreateWorkspace, createKey?: string): Promise<CloudV2Workspace> {
-    let sourceRepositoryId = input.sourceRepositoryId, scope: CloudSourceTarget[] | undefined;
+  /** Shared by insertion and a pending create's resolution. */
+  private async admitCreator(tx: Tx, organizationId: string, creatorUserId: string): Promise<void> {
     const member = await tx.query<{ pro: boolean; held: boolean }>(
       `SELECT account_pro_active(m.user_id) AS pro, ${memberOnHoldSql("m.org_id", "m.user_id")} AS held
        FROM organization_members m JOIN organizations o ON o.id = m.org_id AND o.deleted_at IS NULL
        WHERE m.org_id = $1 AND m.user_id = $2 AND NOT o.is_personal AND o.cloud_workspaces_allowed FOR SHARE OF o,m`,
-      [input.organizationId, input.creatorUserId],
+      [organizationId, creatorUserId],
     );
     if (!member.rows[0]) throw new HttpError(404, "not_found", "Organization not found");
     if (member.rows[0].held) throw organizationMemberOnHold();
     if (!member.rows[0].pro) throw new HttpError(403, "pro_required", "Creating a cloud workspace requires Pro");
-    if (input.computerBuildId) {
-      // Activation waits for this lock, so cleanup observes the new workspace
-      // pin before it can retire an inactive source snapshot.
-      const selected = await tx.query<{ recipe: { repositories: { repository: string }[] }; source_targets: unknown; source_policy_version: number }>(
-        `SELECT b.recipe,b.source_targets,b.source_policy_version FROM cloud_v2_computers c
-         JOIN cloud_v2_computer_builds b ON b.id=c.active_build_id AND b.org_id=c.org_id
-         WHERE c.org_id=$1 AND c.active_build_id=$2 AND c.snapshot_name IS NOT NULL
-           AND b.state='succeeded' AND b.source_policy_version IN (2,3) AND b.snapshot_id=c.snapshot_name AND b.snapshot_deleted_at IS NULL AND b.cleanup_requested_at IS NULL
-         FOR SHARE OF c,b`, [input.organizationId, input.computerBuildId]);
-      if (!selected.rowCount) throw new HttpError(409, "cloud_computer_changed", "The Cloud Computer changed. Create the workspace again.");
-      const build = selected.rows[0]!;
-      const targets = readComputerSourceTargets(build.recipe.repositories, build.source_targets);
-      const target = targets.find(source => source.repository.toLowerCase() === input.repository.toLowerCase());
-      if (!target || sourceRepositoryId !== undefined && sourceRepositoryId !== target.repositoryId) throw computerSourceReviewRequired();
-      sourceRepositoryId = target.repositoryId;
-      // A v3 image carries every recipe repository's source. Only a creator
-      // verified to read all of them may take that whole scope and start from it.
-      if (build.source_policy_version === 3 && targets.every(source => input.readableRepositoryIds?.includes(source.repositoryId))) scope = targets;
-    }
+  }
+
+  /** The build's ID for this repository, and the scope a v3 image needs. */
+  private async computerScope(tx: Tx, organizationId: string, computerBuildId: string, repository: string,
+    sourceRepositoryId?: string, readableRepositoryIds?: readonly string[]) {
+    // Activation waits for this lock, so cleanup observes the new workspace
+    // pin before it can retire an inactive source snapshot.
+    const selected = await tx.query<{ recipe: { repositories: { repository: string }[] }; source_targets: unknown; source_policy_version: number }>(
+      `SELECT b.recipe,b.source_targets,b.source_policy_version FROM cloud_v2_computers c
+       JOIN cloud_v2_computer_builds b ON b.id=c.active_build_id AND b.org_id=c.org_id
+       WHERE c.org_id=$1 AND c.active_build_id=$2 AND c.snapshot_name IS NOT NULL
+         AND b.state='succeeded' AND b.source_policy_version IN (2,3) AND b.snapshot_id=c.snapshot_name AND b.snapshot_deleted_at IS NULL AND b.cleanup_requested_at IS NULL
+       FOR SHARE OF c,b`, [organizationId, computerBuildId]);
+    if (!selected.rowCount) throw new HttpError(409, "cloud_computer_changed", "The Cloud Computer changed. Create the workspace again.");
+    const build = selected.rows[0]!;
+    const targets = readComputerSourceTargets(build.recipe.repositories, build.source_targets);
+    const target = targets.find(source => source.repository.toLowerCase() === repository.toLowerCase());
+    if (!target || sourceRepositoryId !== undefined && sourceRepositoryId !== target.repositoryId) throw computerSourceReviewRequired();
+    // A v3 image carries every recipe repository's source. Only a creator
+    // verified to read all of them may take that whole scope and start from it.
+    const scope = build.source_policy_version === 3 && targets.every(source => readableRepositoryIds?.includes(source.repositoryId)) ? targets : undefined;
+    return { sourceRepositoryId: target.repositoryId, scope };
+  }
+
+  private async bindSources(tx: Tx, workspace: CloudV2Workspace, sourceRepositoryId: string, scope: readonly CloudSourceTarget[] | undefined): Promise<void> {
+    if (!CloudSourceTargetSchema.safeParse({ repository: workspace.repository, repositoryId: sourceRepositoryId }).success) throw new HttpError(422, "github_repository_invalid", "Invalid repository identity.");
+    for (const source of scope ?? [{ repository: workspace.repository, repositoryId: sourceRepositoryId }])
+      await tx.query("INSERT INTO cloud_v2_github_sources(workspace_id,source_repository,repository_id) VALUES($1,lower($2),$3)",
+        [workspace.id, source.repository, source.repositoryId]);
+    await pinCloudEnvironment(tx, workspace, sourceRepositoryId);
+  }
+
+  private async insertWorkspace(tx: Tx, input: CreateWorkspace, createKey?: string): Promise<CloudV2Workspace> {
+    const pending = input.pendingSource === true;
+    if (pending && (!input.computerBuildId || input.sourceRepositoryId !== undefined || input.runtimeCanary))
+      throw new Error("A pending create needs a Computer build and no verified source");
+    let sourceRepositoryId = input.sourceRepositoryId, scope: readonly CloudSourceTarget[] | undefined;
+    await this.admitCreator(tx, input.organizationId, input.creatorUserId);
+    if (input.computerBuildId)
+      ({ sourceRepositoryId, scope } = await this.computerScope(tx, input.organizationId, input.computerBuildId, input.repository,
+        input.sourceRepositoryId, input.readableRepositoryIds));
     const row = (await tx.query<Row>(
-      `INSERT INTO cloud_v2_workspaces (id, org_id, creator_user_id, name, repository, branch, base_branch, state, computer_build_id, source_repositories)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, 'creating', $8, $9::text[]) RETURNING ${COLUMNS}`,
+      `INSERT INTO cloud_v2_workspaces (id, org_id, creator_user_id, name, repository, branch, base_branch, state, computer_build_id, source_repositories, source_pending)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'creating', $8, $9::text[], $10) RETURNING ${COLUMNS}`,
       [input.id, input.organizationId, input.creatorUserId, input.name, input.repository, input.branch,
-        input.baseBranch, input.computerBuildId, (scope ?? [{ repository: input.repository }]).map(source => source.repository.toLowerCase())],
+        input.baseBranch, input.computerBuildId,
+        pending ? null : (scope ?? [{ repository: input.repository }]).map(source => source.repository.toLowerCase()), pending],
     )).rows[0]!;
-    if (sourceRepositoryId !== undefined) {
-      if (!CloudSourceTargetSchema.safeParse({ repository: input.repository, repositoryId: sourceRepositoryId }).success) throw new HttpError(422, "github_repository_invalid", "Invalid repository identity.");
-      for (const source of scope ?? [{ repository: input.repository, repositoryId: sourceRepositoryId }])
-        await tx.query("INSERT INTO cloud_v2_github_sources(workspace_id,source_repository,repository_id) VALUES($1,lower($2),$3)",
-          [input.id, source.repository, source.repositoryId]);
-      await pinCloudEnvironment(tx, workspace(row), sourceRepositoryId);
-    }
+    if (!pending && sourceRepositoryId !== undefined) await this.bindSources(tx, workspace(row), sourceRepositoryId, scope);
     if (input.runtimeCanary) await consumeRuntimeCanary(tx, workspace(row), input.runtimeCanary, sourceRepositoryId, createKey);
     return workspace(row);
+  }
+
+  /** Ends a pending create with the scope its creator was just verified for,
+   * before any VM exists. False when it is no longer a pending creating row. */
+  async resolvePendingSource(id: string, input: { sourceRepositoryId: string; readableRepositoryIds: readonly string[]; baseCommit: string | null }): Promise<boolean> {
+    return withSystemTx(this.pool, async tx => {
+      const { rows } = await tx.query<Row>(`SELECT ${COLUMNS} FROM cloud_v2_workspaces
+        WHERE id=$1 AND state='creating' AND source_pending AND boat_sandbox_id IS NULL AND computer_build_id IS NOT NULL FOR UPDATE`, [id]);
+      if (!rows[0]) return false;
+      const current = workspace(rows[0]);
+      await this.admitCreator(tx, current.organizationId, current.creatorUserId);
+      const { sourceRepositoryId, scope } = await this.computerScope(tx, current.organizationId, current.computerBuildId!, current.repository,
+        input.sourceRepositoryId, input.readableRepositoryIds);
+      await tx.query(`UPDATE cloud_v2_workspaces SET source_repositories=$2::text[], source_pending=false,
+          base_commit=coalesce(base_commit,$3) WHERE id=$1`,
+        [id, (scope ?? [{ repository: current.repository }]).map(source => source.repository.toLowerCase()), input.baseCommit]);
+      await this.bindSources(tx, current, sourceRepositoryId, scope);
+      return true;
+    });
   }
 
   private async createReceipt(tx: Tx, creator: string, key: string, hash: string): Promise<CreateReceipt | null> {

@@ -93,6 +93,26 @@ describe("design document", () => {
     expect((await captureDesignFrameRestorePoint(root, copy.frame)).source).toContain('data-oid="copy"');
   });
 
+  it("places a duplicate beside its original, past any frame in the way", async () => {
+    const original = await createDesignFrame(root, { title: "Original" });
+    const other = await createDesignFrame(root, { title: "Other" });
+    const gap = 120;
+    // The person moved frames since they were created: the slot beside the
+    // original is taken, and the grid slot for a third frame is not free.
+    await updateDesignFrameGeometry(root, original.file, { x: 200, y: 900, w: original.width, h: original.height, z: original.z });
+    await updateDesignFrameGeometry(root, other.file, { x: 200 + original.width + gap, y: 950, w: other.width, h: other.height, z: other.z });
+    const copy = await duplicateDesignFrame(root, original.file);
+    const frames = await listDesignFrames(root);
+    const placed = frames.find((frame) => frame.file === copy.file)!;
+    expect(placed).toMatchObject({ x: 200 + original.width + gap + other.width + gap, y: 900, width: original.width, height: original.height });
+    for (const frame of frames) {
+      if (frame.file === copy.file) continue;
+      const overlaps = placed.x < frame.x + frame.width && frame.x < placed.x + placed.width &&
+        placed.y < frame.y + frame.height && frame.y < placed.y + placed.height;
+      expect(overlaps, frame.file).toBe(false);
+    }
+  });
+
   it("duplicates a frame at the released geometry in its single history entry", async () => {
     const original = await createDesignFrame(root, { title: "Original" });
     const sourceVersion = (await readDesignFrameRenderIdentity(root, original.file)).sourceVersion;

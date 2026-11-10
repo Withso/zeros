@@ -153,6 +153,28 @@ function healthNonceMatches(
   });
 }
 
+/** Engine messages at least this long are sent as pure ASCII. */
+export const ENGINE_ASCII_MESSAGE_MIN = 64 * 1024;
+const NON_ASCII = /[\u0080-\uffff]/g;
+
+/** A message's JSON text. Chromium decodes a WebSocket text message on its
+ * fast path only when every byte is ASCII: one other character (a "×" in a
+ * recorder error, a page named in another script) makes the renderer convert
+ * the whole message to UTF-16, and JSON.parse then builds two-byte strings of
+ * all of it, which on a memory-pressed Mac cost far more than the decode
+ * alone. A large message whose text is mostly ASCII sends the rest escaped;
+ * text mostly in another script stays as written: it is two-byte either way,
+ * and escaping would only grow it. */
+export function engineMessageJson(message: unknown): string {
+  const text = JSON.stringify(message);
+  if (text.length < ENGINE_ASCII_MESSAGE_MIN) return text;
+  // UTF-8 bytes beyond one per character: none when every character is ASCII.
+  const extra = Buffer.byteLength(text, "utf8") - text.length;
+  if (extra === 0 || extra > text.length / 64) return text;
+  // JSON.stringify writes a surrogate pair raw; each half escapes on its own.
+  return text.replace(NON_ASCII, (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`);
+}
+
 class LocalClient implements TransportClient {
   readonly kind = "local" as const;
   /** Under Bun, a socket's native side can be released while readyState still
@@ -166,7 +188,7 @@ class LocalClient implements TransportClient {
   send(msg: EngineMessage): void {
     if (this.retired || this.ws.readyState !== WebSocket.OPEN) return;
     try {
-      this.ws.send(JSON.stringify(msg));
+      this.ws.send(engineMessageJson(msg));
     } catch {
       this.retired = true;
     }

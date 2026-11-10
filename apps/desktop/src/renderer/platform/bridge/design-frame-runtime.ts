@@ -72,6 +72,9 @@ export interface DesignFrameRuntimeCallbacks {
     event: "ready" | "mutation",
   ) => void;
   onReady?: (capabilities: DesignRuntimeCapabilities) => void;
+  /** The ready document has produced a frame; only then may the pixels
+   * beneath it stop painting. Sent when capabilities include `painted`. */
+  onPainted?: () => void;
   onGenerationChanged?: () => void;
   onPlaybackStopped?: (event: DesignRuntimePlaybackStopped) => void;
 }
@@ -462,6 +465,10 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
         this.captureCompletion = message.payload.capabilities.captureCompletion === true;
         this.callbacks.onReady?.(message.payload.capabilities);
         this.callbacks.onSnapshot?.(message.payload.snapshot, "ready");
+      } else if (message.event === "painted") {
+        // This port is the document's identity; a same-document generation
+        // adoption between ready and its next frame still presented it.
+        if (this.methods !== null) this.callbacks.onPainted?.();
       } else if (message.event === "playbackStopped") {
         if (this.supports("setPlayback") && message.payload.sourceVersion === this.expectedSourceVersion) {
           this.callbacks.onPlaybackStopped?.(message.payload);
@@ -1129,21 +1136,48 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
   }
 
   private closeRetiredPort(): void {
-    if (!this.destroyed || this.pending.size) return;
+    if (!this.destroyed || this.pending.size || this.teardownDeferred) return;
     this.channel.port1.removeEventListener("message", this.handleMessage);
     this.channel.port1.close();
   }
 
-  destroy(documentDisposed = false): void {
-    if (this.destroyed && !documentDisposed) return;
-    if (!this.destroyed) this.cancelCaptures();
+  /** Retired at a handoff, its runtime not yet told to tear down: the
+   * outgoing document still paints until its buffer unmounts. */
+  private teardownDeferred = false;
+
+  private postTeardown(): void {
     const teardown: DesignRuntimeHostTeardown = {
       protocol: DESIGN_RUNTIME_PROTOCOL,
       version: DESIGN_RUNTIME_VERSION,
       type: "teardown",
       sourceVersion: this.expectedSourceVersion,
     };
-    if (!this.destroyed) this.channel.port1.postMessage(teardown);
+    this.channel.port1.postMessage(teardown);
+  }
+
+  /** Give up authority to a replacement that has connected, while this
+   * document still paints until its buffer is swapped out. Teardown would make
+   * the runtime restore every preview (an edited text, styles) under the
+   * user's eyes for the frames before that swap; it waits for `destroy`. */
+  retire(): void {
+    if (this.destroyed) return;
+    this.teardownDeferred = true;
+    this.destroy();
+  }
+
+  destroy(documentDisposed = false): void {
+    if (this.destroyed && !documentDisposed) {
+      if (this.teardownDeferred) {
+        this.teardownDeferred = false;
+        this.postTeardown();
+        this.closeRetiredPort();
+      }
+      return;
+    }
+    // A disposed document has nothing left to restore.
+    if (documentDisposed) this.teardownDeferred = false;
+    if (!this.destroyed) this.cancelCaptures();
+    if (!this.destroyed && !this.teardownDeferred) this.postTeardown();
     this.destroyed = true;
     for (const [id, pending] of this.pending) {
       this.host.clearTimeout(pending.timeout);
@@ -1198,7 +1232,7 @@ export function connectDesignFrameRuntime(
       onReady: (capabilities) => {
         if (connectingByFrame.get(key) !== connection) return;
         connectingByFrame.delete(key);
-        connectionsByFrame.get(key)?.destroy();
+        connectionsByFrame.get(key)?.retire();
         connectionsByFrame.set(key, connection);
         for (const waiter of [...(readyWaiters.get(key) ?? [])]) waiter();
         callbacks.onReady?.(capabilities);

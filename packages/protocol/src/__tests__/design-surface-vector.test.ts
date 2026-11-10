@@ -163,3 +163,29 @@ it("accepts exact-parent layout delivery when a native child receives no resize 
     await expect.poll(() => page.evaluate(() => (window as Window & { __surfaceMessages?: unknown[] }).__surfaceMessages!.length), { timeout: 1000 }).toBe(1);
   } finally { await page.close(); }
 });
+
+it("announces its first presented frame after readiness, and never while frames are suspended", async () => {
+  const { designSurfaceReadyScript } = await import("../design-surface");
+  const run = async (suspended: boolean) => {
+    const page = await browser.newPage({ viewport: { width: 320, height: 240 } });
+    try {
+      await page.setContent('<!doctype html><style>body{margin:0;background:#fff}</style><main>Presented surface</main>');
+      await page.evaluate(({ script, suspended }) => {
+        const target = window as Window & { __surfaceKinds?: Array<{ kind: string; painted?: unknown; sourceVersion?: string }> };
+        target.__surfaceKinds = [];
+        window.addEventListener("message", event => {
+          if (typeof event.data?.kind === "string") target.__surfaceKinds!.push({ kind: event.data.kind, painted: event.data.painted, sourceVersion: event.data.sourceVersion });
+        });
+        if (suspended) window.requestAnimationFrame = () => 1;
+        new Function(script)();
+      }, { script: designSurfaceReadyScript("d".repeat(24), null, true), suspended });
+      await page.waitForTimeout(300);
+      return await page.evaluate(() => (window as Window & { __surfaceKinds?: unknown[] }).__surfaceKinds);
+    } finally { await page.close(); }
+  };
+  expect(await run(false)).toEqual([
+    { kind: "zeros-design-surface-ready", painted: true, sourceVersion: "d".repeat(24) },
+    { kind: "zeros-design-surface-painted", painted: undefined, sourceVersion: "d".repeat(24) },
+  ]);
+  expect(await run(true)).toEqual([{ kind: "zeros-design-surface-ready", painted: true, sourceVersion: "d".repeat(24) }]);
+});

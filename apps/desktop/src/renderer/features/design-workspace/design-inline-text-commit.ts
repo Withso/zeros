@@ -42,3 +42,24 @@ export function finishInlineTextCommit<Edit extends object>(
 ): void {
   if (guard.activeKey === key) guard.activeKey = null;
 }
+
+/** The frame a committed text edit settles in: its own, at the committed
+ * generation. Never the selection's, which falls back to the page's first
+ * frame once nothing is selected. */
+export function inlineTextSettleFrame<Frame extends { file: string; sourceVersion: string }>(
+  frames: readonly Frame[],
+  edit: { frame?: string | null; sourceVersion?: string | null },
+): Frame | null {
+  const frame = frames.find((candidate) => candidate.file === edit.frame);
+  return frame && frame.sourceVersion === edit.sourceVersion ? frame : null;
+}
+
+/** Whether a settled edit keeps its text selected: only while the selection
+ * is still the edit's. An empty-canvas click (which also ends the edit) or a
+ * click on another layer chose otherwise while the commit settled. */
+export function inlineTextKeepsSelection(
+  selection: { selectedFrame: string | null; selectedNodeId: string | null },
+  edit: { frame?: string | null; nodeId: string },
+): boolean {
+  return selection.selectedFrame === edit.frame && selection.selectedNodeId === edit.nodeId;
+}

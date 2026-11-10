@@ -259,7 +259,7 @@ d("migration ladder", { timeout: 30_000 }, () => {
 
   it("numbers existing cloud workspaces per organization in creation order and titles them from named chats", async () => {
     await reset();
-    const boundary = LADDER.indexOf("0224_cloud_workspace_numbers.sql");
+    const boundary = LADDER.indexOf("0225_cloud_workspace_numbers.sql");
     expect(boundary).toBeGreaterThan(0);
     await applyThrough(boundary);
     const owner = await seedCredentialOwner(pool);

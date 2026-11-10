@@ -40,6 +40,8 @@ import {
   previewDesignNodeTextTransient,
   clearDesignNodeTextPreviewTransient,
   resetDesignSelectionWorkflowsForTests,
+  beginDesignHistorySelection,
+  settleDesignHistorySelection,
   selectDesignFrame,
   setDesignSelectionSnapshotReader,
   selectDesignNode,
@@ -246,6 +248,63 @@ describe("design selection workflows", () => {
       viewport: { width: FRAME.width, height: FRAME.height, scrollX: 0, scrollY: 0 },
     } });
     expect(designWorkspaceView("workspace-a").selectedTargets).toEqual([{ frame: "other.html" }]);
+  });
+
+  describe("selection across history", () => {
+    const BEFORE = "a".repeat(24);
+    const AFTER = "b".repeat(24);
+    const node = (oid: string): DesignRuntimeTreeNode => ({ oid, tag: "button", name: oid, text: oid, visible: true, children: [] });
+    const show = (sourceVersion: string, oids: string[]) => reconcileDesignRuntimeSnapshot({
+      workspaceId: "workspace-a", folder: "/design", frame: { ...FRAME, sourceVersion }, snapshot: {
+        sourceVersion, revision: 1, frame: details("root", sourceVersion), tree: oids.map(node), warnings: [],
+        viewport: { width: FRAME.width, height: FRAME.height, scrollX: 0, scrollY: 0 },
+      } });
+    const select = (nodeId: string) => useDesignWorkspaceUiStore.getState().setSelection("workspace-a", FRAME.file, nodeId);
+    // The person selects the button, then duplicates it; the copy is selected.
+    const duplicate = () => {
+      show(BEFORE, ["button"]);
+      select("button");
+      show(AFTER, ["button", "button-copy"]);
+      select("button-copy");
+    };
+
+    it("brings back the selection each undo and redo returns to, as Figma does", () => {
+      duplicate();
+      // Undo returns the frame to its earlier bytes, where the copy is gone.
+      beginDesignHistorySelection("workspace-a");
+      settleDesignHistorySelection("workspace-a", FRAME.file);
+      show(BEFORE, ["button"]);
+      expect(designWorkspaceView("workspace-a").selectedTargets).toEqual([{ frame: FRAME.file, nodeId: "button" }]);
+      // Redo restores the copy and selects it again.
+      beginDesignHistorySelection("workspace-a");
+      settleDesignHistorySelection("workspace-a", FRAME.file);
+      show(AFTER, ["button", "button-copy"]);
+      expect(designWorkspaceView("workspace-a").selectedTargets).toEqual([{ frame: FRAME.file, nodeId: "button-copy" }]);
+    });
+
+    it("restores when the frame's runtime reaches the generation before the engine's reply", () => {
+      duplicate();
+      beginDesignHistorySelection("workspace-a");
+      show(BEFORE, ["button"]);
+      expect(designWorkspaceView("workspace-a").selectedTargets).toEqual([]);
+      settleDesignHistorySelection("workspace-a", FRAME.file);
+      expect(designWorkspaceView("workspace-a").selectedTargets).toEqual([{ frame: FRAME.file, nodeId: "button" }]);
+    });
+
+    it("restores only in the frame the history step changed", () => {
+      duplicate();
+      beginDesignHistorySelection("workspace-a");
+      settleDesignHistorySelection("workspace-a", "other.html");
+      show(BEFORE, ["button"]);
+      expect(designWorkspaceView("workspace-a").selectedTargets).toEqual([]);
+    });
+
+    it("leaves a removed selection empty when no history step returned the frame there", () => {
+      duplicate();
+      // Deleting the copy also returns the frame to its earlier bytes.
+      show(BEFORE, ["button"]);
+      expect(designWorkspaceView("workspace-a").selectedTargets).toEqual([]);
+    });
   });
 
   it("does not treat an incomplete runtime tree as proof that selected references were deleted", () => {

@@ -8,7 +8,7 @@ import { HttpError } from "../authz.js";
 import { observeTransactionTiming, requestTiming, type RequestDatabaseCost } from "../request-timing.js";
 import { resetMigratedTestDatabase } from "../test-database.js";
 import { grantTestPro } from "../test-pro.js";
-import { createCloudV2 } from "./composition.js";
+import { CLOUD_V2_ASYNC_CREATE_DELAY_MS, createCloudV2 } from "./composition.js";
 import { createCloudV2WorkerRoutes } from "./worker-routes.js";
 import type { CloudV2LifecycleDeps } from "./lifecycle.js";
 import { CLOUD_SOURCE_ADMISSION_MS, CLOUD_SOURCE_GRACE_MS, CLOUD_SOURCE_REFRESH_MS } from "./source-authority.js";
@@ -227,6 +227,17 @@ suite("runtime hello through the production composition", () => {
     expect((await response.json()).config.gitIdentity).toMatchObject({ name: "Fixture" });
     expect(f.fetcher).not.toHaveBeenCalled();
     expect((await f.cp.store.get(f.workspace.id, f.creator)).state).toBe("running");
+  });
+
+  // A draining replica would refuse a pending create's row, as for #903.
+  it("returns creates early only one lifecycle scan interval after start", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const f = await fixture(false);
+      expect(f.cp.routes.asyncCreate?.()).toBe(false);
+      vi.setSystemTime(Date.now() + CLOUD_V2_ASYNC_CREATE_DELAY_MS);
+      expect(f.cp.routes.asyncCreate?.()).toBe(true);
+    } finally { vi.useRealTimers(); }
   });
 
   it("rechecks a secondary original source after held configuration I/O", async () => {

@@ -163,6 +163,49 @@ describe("Design recordings", () => {
       .toEqual([["render", "f0.html", 64], ["render", "f64.html", 64]]);
   });
 
+  it("reads one batch at a time, so two replies never carry the chunks their frames share", async () => {
+    // A 1,000-frame reload: unprepared frames are read without a version. Two
+    // reads in flight each carried the same new chunks (12 MB apiece), since
+    // neither request could claim what the other's reply would bring.
+    const { calls, recordings } = harness();
+    const frames = Array.from({ length: 800 }, (_, index) => ({ file: `f${index}.html` }));
+    recordings.demand(owner, frames);
+    expect(calls).toHaveLength(1);
+    calls[0]!.resolve(readReply(calls[0]!.frames, []));
+    await recordings.settled();
+    expect(calls.slice(1).map((call) => [call.op, call.frames[0]!.file, call.frames.length])).toEqual([["read", "f256.html", 256]]);
+    // The next read claims what the last reply delivered.
+    expect(calls[1]!.known).toContain(SHARED.id);
+    calls[1]!.resolve(readReply(calls[1]!.frames, [], calls[1]!.known));
+    await recordings.settled();
+    expect(calls.slice(2).map((call) => [call.op, call.frames[0]!.file])).toEqual([["read", "f512.html"]]);
+  });
+
+  it("doesn't hold the next read behind one whose frames are no longer shown", async () => {
+    // A stored lookup can't be cancelled, so an abandoned read stays in flight
+    // until the engine answers; its reply is dropped, so waiting saves nothing.
+    const { calls, recordings } = harness();
+    recordings.demand(owner, [{ file: "first.html" }]);
+    calls[0]!.resolve(readReply(calls[0]!.frames, []));
+    await recordings.settled();
+    recordings.demand(owner, Array.from({ length: 10 }, (_, index) => ({ file: `old${index}.html` })));
+    expect(calls.slice(1).map((call) => call.frames[0]!.file)).toEqual(["old0.html"]);
+    recordings.demand(owner, Array.from({ length: 10 }, (_, index) => ({ file: `new${index}.html` })));
+    expect(calls[1]!.signal.aborted).toBe(true);
+    expect(calls.slice(2).map((call) => [call.op, call.frames[0]!.file])).toEqual([["read", "new0.html"]]);
+  });
+
+  it("still records while a read is in flight", async () => {
+    const { calls, recordings } = harness();
+    const recorded = Array.from({ length: 64 }, (_, index) => ({ file: `r${index}.html`, sourceVersion: version(index + 1) }));
+    const unread = Array.from({ length: 300 }, (_, index) => ({ file: `u${index}.html` }));
+    recordings.demand(owner, [...recorded, ...unread]);
+    // Nothing stored for the recorded frames: they need recording.
+    calls[0]!.resolve(readReply(calls[0]!.frames, calls[0]!.frames.filter((frame) => frame.sourceVersion).map((frame) => frame.file)));
+    await recordings.settled();
+    expect(calls.slice(1).map((call) => call.op).sort()).toEqual(["read", "render"]);
+  });
+
   it("reads a recording again when its chunks left the cache", async () => {
     const { calls, chunks, recordings } = harness(new DesignRecordingChunks({ budgetBytes: 1 }));
     recordings.demand(owner, [{ file: "a.html", sourceVersion: version(1) }]);

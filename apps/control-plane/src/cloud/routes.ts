@@ -47,6 +47,7 @@ const CreateSchema = z.object({
   name: z.string().trim().min(1).max(200).optional(),
 }).strict();
 const ConnectSchema = z.object({ wake: z.boolean().default(true) }).strict();
+const WarmSchema = z.object({ repository: CreateSchema.shape.repository }).strict();
 
 export type CloudV2RouteDeps = {
   store: Pick<CloudV2Store, "activeComputer" | "createWorkspace" | "createWorkspaceOnce" | "readCreateReceipt" | "get" | "promptContext" | "list" | "requestLifecycle" | "transition" | "issueToken" | "listChats" | "messageWindow" | "searchMessages" | "markActive"> & Partial<Pick<CloudV2Store, "prompts" | "getByNumber">>;
@@ -59,10 +60,14 @@ export type CloudV2RouteDeps = {
   authorizeRepositories?(organizationId: string, userId: string, repositories: readonly string[]): Promise<void>;
   authorizeSourceTargets?(organizationId: string, userId: string, targets: readonly CloudSourceTarget[]): Promise<void>;
   /** `fresh` skips the reuse of a recently resolved identity. */
-  authorizeBuildRepository?(organizationId: string, userId: string, buildId: string, repository: string, options?: { fresh?: boolean }): Promise<CloudSourceTarget>;
+  /** fresh reads the identity live; renew renews a verification near expiry. */
+  authorizeBuildRepository?(organizationId: string, userId: string, buildId: string, repository: string, options?: { fresh?: boolean; renew?: boolean }): Promise<CloudSourceTarget>;
   remoteHead(organizationId: string, userId: string, target: CloudSourceTarget, branch: string): Promise<string | null>;
   authorizeSource?(workspace: CloudV2Workspace): Promise<void>;
   continueSource?(workspace: CloudV2Workspace, proof?: CloudSourceProof): Promise<CloudSourceContinuation>;
+  /** Whether a create may return before its GitHub checks, which the
+   * lifecycle then runs before any VM exists (a deploy gate, as for #903). */
+  asyncCreate?(): boolean;
   /** Public wss:// base of the realtime service, e.g. wss://realtime.example.com. */
   bridgeBaseUrl: string;
   /** Default branch names start with this, e.g. "zeros/". */
@@ -90,14 +95,18 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
   const documents = async (workspaces: readonly CloudV2Workspace[]) =>
     (deps.github ? await deps.github.documents(workspaces) : workspaces).map(workspace => workspaceDocument(workspace, deps.promptOutbox === true));
   const document = async (workspace: CloudV2Workspace) => (await documents([workspace]))[0]!;
+  // A pending create holds only its creator's own request: no VM, worker,
+  // token or repository metadata exists before the lifecycle verifies it.
   const continueWorkspace = async (workspace: CloudV2Workspace, proof?: CloudSourceProof) => {
+    if (workspace.sourcePending) return;
     if (workspace.state === "running" && deps.continueSource) await deps.continueSource(workspace, proof);
     else await deps.authorizeSource?.(workspace);
   };
   const authorizeReceipt = async (response: Record<string, unknown>, userId: string) => {
     const original = z.object({ workspace: z.object({ id: uuid }) }).safeParse(response);
     if (!original.success || !deps.authorizeSource) throw new HttpError(503, "github_unavailable", "Original source access could not be verified.");
-    await deps.authorizeSource(await deps.store.get(original.data.workspace.id, userId));
+    const workspace = await deps.store.get(original.data.workspace.id, userId);
+    if (!workspace.sourcePending) await deps.authorizeSource(workspace);
   };
   if (deps.promptOutbox) {
     if (!deps.store.prompts) throw new Error("Cloud prompt store is required");
@@ -108,10 +117,11 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
   }
   const prefix = deps.branchPrefix ?? "zeros/";
   const json = bodyLimit({ maxSize: 16 * 1024, onError: c => c.json({ error: { code: "payload_too_large", message: "Request is too large" } }, 413) });
-  const buildRepository = async (organizationId: string, userId: string, buildId: string, entry: CloudV2InstalledRepository, fresh = false) => {
+  const buildRepository = async (organizationId: string, userId: string, buildId: string, entry: CloudV2InstalledRepository,
+    options: { fresh?: true; renew?: true } = {}) => {
     if (!deps.authorizeBuildRepository) throw new HttpError(503, "github_unavailable", "Original source access could not be verified.");
     const target = CloudSourceTargetSchema.safeParse(await deps.authorizeBuildRepository(organizationId, userId, buildId, entry.repository,
-      ...(fresh ? [{ fresh }] : [])));
+      ...(options.fresh || options.renew ? [options] : [])));
     if (!target.success) throw new HttpError(409, "cloud_source_review_required", "The original repository identity needs verification.");
     return { entry, target: target.data };
   };
@@ -165,29 +175,53 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
       { creatorUserId: c.get("user").id, organizationId: input.organizationId, createKey: key });
     const computer = await deps.store.activeComputer(input.organizationId);
     if (!computer) throw await computerUnavailable(input.organizationId, c.get("user").id);
+    const record = async (create: Parameters<CloudV2RouteDeps["store"]["createWorkspace"]>[0]) => {
+      if (key) {
+        const receipt = await deps.store.createWorkspaceOnce(create, key, hash, workspace => ({ workspace: workspaceDocument(workspace, deps.promptOutbox === true) }));
+        // Another request may have committed this key after our initial read.
+        await authorizeReceipt(receipt.response, c.get("user").id);
+        return c.json(receipt.response, receipt.status);
+      }
+      const workspace = await deps.store.createWorkspace(create);
+      return c.json({ workspace: await document(workspace) }, 201);
+    };
+    const named = (entry: CloudV2InstalledRepository) => entry.repository.toLowerCase() === input.repository.toLowerCase();
+    // Returns before its GitHub checks, which the lifecycle runs before any VM
+    // exists. A canary binds a repository ID, and a renamed repository's name
+    // needs GitHub to match it, so both stay on the synchronous path below.
+    const pendingEntry = runtimeCanary === undefined && deps.asyncCreate?.() ? computer.repositories.find(named) : undefined;
+    if (pendingEntry) {
+      const baseBranch = input.baseBranch ?? pendingEntry.defaultBranch;
+      if (!baseBranch) throw new HttpError(409, "repository_branch_required", "Select a branch or rebuild the Cloud Computer to record its default branch");
+      const id = randomUUID(), name = input.name ?? input.repository.split("/")[1]!;
+      return record({ id, organizationId: input.organizationId, creatorUserId: c.get("user").id, name,
+        repository: pendingEntry.repository, branch: input.branch ?? `${prefix}${slug(name)}-${id.slice(0, 8)}`,
+        baseBranch, computerBuildId: computer.buildId, pendingSource: true });
+    }
     // Display names can move. Select among the build's authorized ID bindings,
     // retaining the original recipe entry for checkout, setup and branch pins.
     // The source authority verifies one repository at a time per creator, and
     // a denial invalidates the checks queued behind it, so they run in order,
     // the requested repository first. Only its branch read, a connection call
     // that authority never invalidates, overlaps the rest.
-    const userId = c.get("user").id, requested = (entry: CloudV2InstalledRepository) => entry.repository.toLowerCase() === input.repository.toLowerCase();
-    const named = computer.repositories.findIndex(requested), indices = [...computer.repositories.keys()];
+    const userId = c.get("user").id, requested = named;
+    const namedIndex = computer.repositories.findIndex(requested), indices = [...computer.repositories.keys()];
     const resolved: Awaited<ReturnType<typeof buildRepository>>[] = [];
     let originalError: HttpError | undefined, early: Promise<string | null> | undefined;
-    for (const index of named < 0 ? indices : [named, ...indices.filter(other => other !== named)]) {
+    for (const index of namedIndex < 0 ? indices : [namedIndex, ...indices.filter(other => other !== namedIndex)]) {
       const entry = computer.repositories[index]!;
       // The other repositories decide whether the creator may take a v3 image
       // holding their source, so read them live. The requested repository's
-      // branch read below is live anyway.
-      try { resolved[index] = await buildRepository(input.organizationId, userId, computer.buildId, entry, !requested(entry)); }
+      // branch read below is live anyway; its check renews a verification near
+      // expiry, which the lifecycle and the worker's hello reuse seconds later.
+      try { resolved[index] = await buildRepository(input.organizationId, userId, computer.buildId, entry, requested(entry) ? { renew: true } : { fresh: true }); }
       catch (error) {
         if (!(error instanceof HttpError) || ![403, 404].includes(error.status)) throw error;
         if (requested(entry)) originalError = error;
         continue;
       }
       const branch = input.baseBranch ?? entry.defaultBranch;
-      if (index === named && branch) { early = deps.remoteHead(input.organizationId, userId, resolved[index].target, branch); early.catch(() => {}); }
+      if (index === namedIndex && branch) { early = deps.remoteHead(input.organizationId, userId, resolved[index].target, branch); early.catch(() => {}); }
     }
     const candidates = resolved.filter(Boolean);
     const selected = candidates.find(({ target }) => target.repository.toLowerCase() === input.repository.toLowerCase())
@@ -201,7 +235,7 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
     const baseBranch = input.baseBranch ?? repository.defaultBranch;
     if (!baseBranch) throw new HttpError(409, "repository_branch_required", "Select a branch or rebuild the Cloud Computer to record its default branch");
     // A renamed repository can select another entry than the early lookup read.
-    const head = early && selected.entry === computer.repositories[named] ? await early
+    const head = early && selected.entry === computer.repositories[namedIndex] ? await early
       : await deps.remoteHead(input.organizationId, userId, target, baseBranch);
     if (head === null)
       throw new HttpError(404, "repository_branch_not_found", `Branch ${baseBranch} does not exist in ${target.repository}.`);
@@ -216,14 +250,7 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
       readableRepositoryIds: candidates.map(candidate => candidate.target.repositoryId),
       ...(runtimeCanary ? { runtimeCanary } : {}),
     };
-    if (key) {
-      const receipt = await deps.store.createWorkspaceOnce(create, key, hash, workspace => ({ workspace: workspaceDocument(workspace, deps.promptOutbox === true) }));
-      // Another request may have committed this key after our initial read.
-      await authorizeReceipt(receipt.response, c.get("user").id);
-      return c.json(receipt.response, receipt.status);
-    }
-    const workspace = await deps.store.createWorkspace(create);
-    return c.json({ workspace: await document(workspace) }, 201);
+    return record(create);
   });
 
   app.get("/v1/cloud-v2/workspaces", async c => {
@@ -258,7 +285,7 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
     const { wake } = parsed.data;
     const userId = c.get("user").id;
     const workspace = await deps.store.get(id.data, userId);
-    await deps.authorizeSource?.(workspace);
+    if (!workspace.sourcePending) await deps.authorizeSource?.(workspace);
     const explicitWake = c.req.query("wakePolicy") === "explicit";
     if (explicitWake && (workspace.archivedAt || workspace.state === "stopping" || (!wake && workspace.state === "stopped")))
       throw new HttpError(409, "cloud_workspace_not_running", "This cloud workspace is not ready for a connection");
@@ -351,6 +378,21 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
       catch (error) { if (!(error instanceof HttpError) || ![403,404].includes(error.status)) throw error; }
     }
     return c.json({ repositories: repositories === null ? null : allowed });
+  });
+
+  // The Create page calls this on intent for its selected repository, so the
+  // create request seconds later reuses a fresh GitHub verification.
+  app.post("/v1/cloud-v2/organizations/:org/computer/repositories/warm", json, async c => {
+    const organizationId = org(c.req.param("org")), userId = c.get("user").id;
+    const parsed = WarmSchema.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) throw new HttpError(400, "invalid_request", "Invalid repository");
+    await deps.computers.requireMember(organizationId, userId);
+    const computer = await deps.store.activeComputer(organizationId);
+    const entry = computer?.repositories.find(value => value.repository.toLowerCase() === parsed.data.repository.toLowerCase());
+    if (!computer || !entry) throw new HttpError(404, "repository_not_installed", "Add this repository to the Cloud Computer first");
+    await buildRepository(organizationId, userId, computer.buildId, entry, { renew: true });
+    c.header("Cache-Control", "no-store");
+    return c.json({ ok: true });
   });
 
   app.get("/v1/cloud-v2/organizations/:org/computer", async c => {

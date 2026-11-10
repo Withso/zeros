@@ -42,6 +42,18 @@ a provider), workspace pages and step-up sign-ins. No caller can select a WorkOS
 connection or organization, and any other `provider` value is ignored before it
 reaches the WorkOS SDK.
 
+A direct Google or GitHub start skips Hosted AuthKit, so WorkOS can answer its
+code exchange with a ceremony instead of a session. A person in more than one
+WorkOS organization gets `organization_selection_required`; MFA and SSO send
+their own codes. For those, the callback discards the pending token, starts a
+fresh `provider=authkit` flow with the same return path and redirects there,
+so Hosted AuthKit's organization picker, MFA or SSO screens finish the sign-in.
+A host-only `__Host-zeros_auth_handoff=1` marker, which Pages forwards only on
+the callback, limits this to one hand-off per attempt: a second ceremony ends on
+"Sign-in didn't finish". `email_verification_required` maps to the verify-email
+page. Every failed exchange logs `[auth] WorkOS code exchange failed` with only
+the error class, ceremony code, status and WorkOS request ID.
+
 The application-owned GitHub email-verification continuation stays removed.
 There is no anonymous endpoint that accepts pending WorkOS credentials or infers
 verification from webhook timing. If a provider or Hosted AuthKit has not

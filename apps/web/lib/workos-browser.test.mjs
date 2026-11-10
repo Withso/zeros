@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   WORKOS_FLOW_COOKIE,
+  WORKOS_HANDOFF_COOKIE,
   WORKOS_SESSION_COOKIE,
   beginWorkOSBrowserAuth,
   browserAuthStartOptions,
@@ -224,6 +225,38 @@ test("callback and logout forward only their required opaque cookie", async () =
       `${WORKOS_SESSION_COOKIE}=${SESSION_ID}`,
     ],
   );
+});
+
+test("callback forwards the exact Hosted AuthKit hand-off marker so Railway hands off once", async () => {
+  const forwarded = [];
+  const fetch = async (_url, init) => {
+    forwarded.push(init.headers.get("cookie"));
+    return new Response(null, { status: 400 });
+  };
+  for (const marker of ["1", "yes"]) {
+    await finishWorkOSBrowserAuth(
+      new Request(`${APP_ORIGIN}/auth/callback?code=code&state=state`, {
+        headers: {
+          cookie: `${WORKOS_FLOW_COOKIE}=${SESSION_ID}; ${WORKOS_HANDOFF_COOKIE}=${marker}`,
+        },
+      }),
+      ENV,
+      { fetch },
+    );
+  }
+  await beginWorkOSBrowserAuth(
+    new Request(`${APP_ORIGIN}/auth/start?provider=github`, {
+      headers: { cookie: `${WORKOS_HANDOFF_COOKIE}=1` },
+    }),
+    ENV,
+    { fetch },
+  );
+
+  assert.deepEqual(forwarded, [
+    `${WORKOS_FLOW_COOKIE}=${SESSION_ID}; ${WORKOS_HANDOFF_COOKIE}=1`,
+    `${WORKOS_FLOW_COOKIE}=${SESSION_ID}`,
+    null,
+  ]);
 });
 
 test("callback rehomes the completion document and every Set-Cookie header", async () => {

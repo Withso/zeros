@@ -2,6 +2,7 @@ import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypt
 import {
   DESIGN_CATALOG_BATCH_BYTES,
   DESIGN_CATALOG_BATCH_ENTRIES,
+  DESIGN_CATALOG_WIDE_BATCH_BYTES,
   DESIGN_CATALOG_DESCRIPTOR_LIMIT,
   designCatalogBatchSchema,
   designCatalogOwnerSchema,
@@ -308,7 +309,9 @@ export class DesignCatalogReader {
         nextCursor: null,
       };
       const limit = input.limit ?? DESIGN_CATALOG_BATCH_ENTRIES;
-      const byteLimit = DESIGN_CATALOG_BATCH_BYTES - 1024;
+      // Only a wide request, from a reader that saw the capability, may fill
+      // the wide byte bound; any other keeps the original one.
+      const byteLimit = (limit > DESIGN_CATALOG_BATCH_ENTRIES ? DESIGN_CATALOG_WIDE_BATCH_BYTES : DESIGN_CATALOG_BATCH_BYTES) - 1024;
       let frameBytes = 0;
       do {
         const frame = snapshot.frames[offset + batch.frames.length];

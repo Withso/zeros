@@ -602,8 +602,10 @@ function ActiveDispatcherPage({
                 cloud.selectComputerRepository(id);
                 dispatch({ type: "OPEN_CREATE_PAGE", projectId: null });
               }}
-              warm={repository => { if (active && cloud.computerOwner)
-                warmComputerSources(computerSourceReadKey(cloud.computerOwner, repository)); }}
+              warm={repository => {
+                if (active && cloud.computerOwner) warmComputerSources(computerSourceReadKey(cloud.computerOwner, repository));
+                cloud.warmRepositoryAccess(repository);
+              }}
             /> : (
             <DropdownMenu
               open={active && projectMenuOpen}
@@ -715,7 +717,7 @@ function ActiveDispatcherPage({
           {placementReason && !cloud.checking && (cloud.computerRequired
             ? <CloudComputerV2CreateNotice required reason={cloud.computerReason} canManage={cloud.canManageComputer} warm={cloud.warmComputer} />
             : <p className="text-fg3 mb-2 px-2 text-xs" role="status">{placementReason}</p>)}
-          <section aria-label="Workspace prompt" onPointerEnter={cloud.warm} onFocus={cloud.warm}>
+          <section aria-label="Workspace prompt" onPointerEnter={cloud.warm} onFocus={cloud.warm} onKeyDown={cloud.warmAccess}>
             <DispatcherComposer
               key={draftKey ?? JSON.stringify([draftOwner, placement])}
               draftKey={draftKey}

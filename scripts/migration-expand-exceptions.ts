@@ -2,6 +2,22 @@ import { createHash } from "node:crypto";
 
 // Each reviewed migration lists its exact exempted statements by rule.
 const reviewed: Readonly<Record<string, Readonly<Record<string, readonly string[]>>>> = {
+  "0224_cloud_v2_pending_create_source.sql": {
+    "pending-source-scope": [`CREATE OR REPLACE FUNCTION cloud_v2_preserve_source_scope() RETURNS trigger LANGUAGE plpgsql
+SET search_path=pg_catalog,public,pg_temp AS $$
+BEGIN
+  IF OLD.source_repositories IS DISTINCT FROM NEW.source_repositories AND NOT (
+      OLD.source_repositories IS NULL AND coalesce(cardinality(NEW.source_repositories), 0) > 0
+      AND OLD.source_pending AND NOT NEW.source_pending
+      AND OLD.state = 'creating' AND NEW.state = 'creating'
+      AND OLD.boat_sandbox_id IS NULL AND NEW.boat_sandbox_id IS NULL) THEN
+    RAISE EXCEPTION 'workspace source scope is immutable';
+  END IF;
+  RETURN NEW;
+END;
+$$;`],
+    "privilege-tightening": ["REVOKE ALL ON FUNCTION cloud_v2_preserve_source_pending() FROM PUBLIC;"],
+  },
   "0223_cloud_computer_source_snapshots.sql": {
     "widen-check": ["ALTER TABLE cloud_v2_computer_builds DROP CONSTRAINT cloud_v2_computer_builds_source_policy_version_check;"],
   },

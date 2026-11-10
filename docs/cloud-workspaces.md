@@ -375,6 +375,13 @@ later doesn't wait for GitHub. Other checks, including that hello and status
 polls, never renew, so a boot costs at most about one extra verification. A
 renewal's outage response records nothing and leaves the positive to expire; a
 confirmed refusal withdraws it at once.
+The create request's check of its requested repository renews the same way.
+Before that, the Create page warms the selected repository on intent: picking
+or hovering it, or pointing at, focusing or typing in the prompt sends
+`POST /v1/cloud-v2/organizations/:org/computer/repositories/warm`, at most
+once per 10 seconds per repository. The route runs the create's member and
+repository check with renewal and returns `{ ok: true }`; the desktop ignores
+its result.
 Transient failures back off from one to fifteen minutes, with bounded jitter, and respect
 GitHub's longer retry delay. An idle workspace does not refresh GitHub access.
 
@@ -880,7 +887,7 @@ belonging to its Zeros organization.
 
 ## Numbers and titles
 
-Every cloud workspace is `w-<n>` within its organization (migration 0224). A
+Every cloud workspace is `w-<n>` within its organization (migration 0225). A
 `BEFORE INSERT` trigger takes the next number from the organization's
 `cloud_v2_workspace_number_sequences` row, under that row's lock, so concurrent
 creates get distinct numbers and a release that predates numbers is numbered
@@ -1062,7 +1069,34 @@ VM, creation checks the requested branch (or the build's recorded default)
 with the creator's selected GitHub connection against the admitted repository
 ID. A tag or commit with the same spelling is not a branch. A confirmed miss
 returns `repository_branch_not_found`; rate limits, outages and connection
-changes retain their own errors. At creation the control plane records GitHub's
+changes retain their own errors.
+
+A create can return before those GitHub checks. The control plane then
+persists the row in `creating` with `source_pending`, and checks only the
+database:
+- membership, Pro and member holds;
+- the active Computer;
+- a recipe entry with the requested name;
+- the base branch.
+
+The lifecycle's first creating step runs the checks above, in the same order
+and as the creator, before any VM exists. It then sets the source scope once.
+The database refuses a sandbox, or any other scope change, while
+`source_pending` is set.
+- A refused repository fails the workspace with `cloud_source_access_denied`.
+- A missing branch fails it with `repository_branch_not_found`.
+- A rebuilt Computer fails it with `cloud_computer_changed`.
+- Outages retry with the lifecycle's backoff.
+
+Until then, routes that hold only the creator's own data skip the source check:
+connect tickets, the prompt outbox, history and creation receipts. Documents
+show a plain creating row. The relay admits the app and checks again within a
+second. Every other source check refuses `cloud_source_pending`.
+
+Runtime canaries stay synchronous, and so do names that match no recipe entry,
+such as a renamed repository: only GitHub can map those. A new replica returns
+creates early only after one lifecycle scan interval (10 minutes; none on the
+development channel), so a draining replica never sees a pending row. At creation the control plane records GitHub's
 head of the base branch. Workers advertising
 `checkout-v2` receive it as `baseCommit` and start the branch there when the
 VM has that commit; otherwise the branch starts from the cached
@@ -1490,6 +1524,7 @@ The control plane reads these names in
 | --- | --- |
 | `CLOUD_V2_ENABLED` | Enables the v2 routes, the app bridge relay and lifecycle roles. |
 | `CLOUD_V2_PROMPT_OUTBOX_ENABLED` | Enables durable HTTPS sends and advertises `promptOutbox: 1`. Defaults to `false`; enable only with a compatible worker runtime. `electron:cloud` defaults it to `true`. |
+| `CLOUD_V2_ASYNC_CREATE_ENABLED` | Lets a create return before its GitHub checks, which the lifecycle then runs before any VM exists. Defaults to `true`; `false` keeps every create synchronous. Pending rows created earlier still resolve. |
 | `CLOUD_V2_CHECKPOINT_RETRY_ENABLED` | Retries a stop's failed checkpoint on a fork of the stopped VM. Defaults to `false`; enable only after qualifying forks of stopped VMs on the deployment's Boat account. `electron:cloud` passes it through when set. |
 | `BOAT_API_KEY`, optional `BOAT_BILLING_ORG` | Boat provisioning and billing. |
 | `CLOUD_V2_API_URL`, `CLOUD_V2_REALTIME_URL` | Public HTTPS API (also the worker's outbound origin) and the app's WSS bridge origin. |
