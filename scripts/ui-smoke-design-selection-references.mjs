@@ -204,10 +204,13 @@ export async function runDesignParkedReferenceRemovalSmoke({ page, check }) {
     };
   });
   const frame = await page.locator('[data-design-frame="pricing.html"]').boundingBox();
+  // The frame is selected, so a plain drag on its body would move it; Command keeps the marquee.
+  await page.keyboard.down("Meta");
   await page.mouse.move(frame.x + frame.width - 8, frame.y + frame.height - 8);
   await page.mouse.down();
   await page.mouse.move(frame.x + 8, frame.y + 8, { steps: 4 });
   await page.mouse.up();
+  await page.keyboard.up("Meta");
   await expect.poll(() => page.evaluate(() => typeof window.__selectionReferenceRelease)).toBe("function");
   await pill.click();
   const before = await page.evaluate(async () => {

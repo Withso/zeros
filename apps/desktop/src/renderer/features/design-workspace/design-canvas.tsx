@@ -93,6 +93,8 @@ import {
   designHighResolutionViewportTile,
   DESIGN_TINY_FRAME_PIXELS,
   designFrameBodyPress,
+  designMarqueeScope,
+  designWholeMoveDelta,
   designLocalDelta,
   designResizeHandleLayout,
   designRotatedOverlayFrame,
@@ -4764,10 +4766,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
           pointerEvent.metaKey || pointerEvent.ctrlKey
             ? { rect: moving, guides: {} }
             : snapDesignRect(moving, peerRects, 6 / zoom);
-        delta = {
-          x: snapped.rect.x - groupBounds.x,
-          y: snapped.rect.y - groupBounds.y,
-        };
+        delta = designWholeMoveDelta(snapped.rect, groupBounds);
         const margin = DESIGN_REPARENT_HYSTERESIS_PIXELS / zoom;
         if (selection.selectedTargets.length > 1 && starts.some(({ details }) => {
           const x = details.rect.x + delta.x + details.rect.width / 2;
@@ -7437,10 +7436,16 @@ export const DesignCanvas = React.memo(function DesignCanvas({
           width: screenRect.width / camera.zoom,
           height: screenRect.height / camera.zoom,
         };
-        const scopeNodeId =
-          options?.frame?.file === selectedFrame?.file && view.selectedNodeId
-            ? designLayerParentId(selectedRuntimeTree, view.selectedNodeId)
-            : null;
+        const frameRootId = options?.frame
+          ? useDesignRuntimeStore.getState().byWorkspace[workspaceId]?.frames[options.frame.file]?.snapshot?.frame.oid
+          : undefined;
+        const scopeNodeId = designMarqueeScope({
+          selectedParentId:
+            options?.frame?.file === selectedFrame?.file && view.selectedNodeId
+              ? designLayerParentId(selectedRuntimeTree, view.selectedNodeId)
+              : null,
+          frameRootId: frameRootId === DESIGN_RUNTIME_DOCUMENT_BODY_ID ? undefined : frameRootId,
+        });
         void selectDesignTargetsInRect({
           workspaceId,
           folder,
