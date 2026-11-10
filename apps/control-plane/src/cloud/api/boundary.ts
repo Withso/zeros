@@ -3,7 +3,7 @@ import { bodyLimit } from "hono/body-limit";
 import { HttpError } from "../../authz.js";
 import { isDatabaseUnavailable } from "../../db.js";
 import { rateLimit } from "../../ratelimit.js";
-import { CLOUD_V2_MAX_PROMPT_BYTES, CloudV2PromptIdSchema } from "../prompt-contract.js";
+import { CLOUD_V2_MAX_PROMPT_BYTES } from "../prompt-contract.js";
 import type { CloudApiCredential, CloudApiCredentials } from "./credentials.js";
 import type { CloudApiService } from "./service.js";
 import { cloudApiPreAuthLimit, resolveCloudApiCredential } from "./preauth.js";
@@ -33,9 +33,6 @@ export function createCloudApiBoundary(credentials: CloudApiCredentials): Hono<C
   });
   app.use("*", rateLimit("cloud-api", 240, 60_000, c => c.get("cloudApiCredential").credentialId));
   app.use("*", async (c, next) => {
-    const sessionId = c.req.header("x-zeros-session-id");
-    if (sessionId !== undefined && !CloudV2PromptIdSchema.safeParse(sessionId).success)
-      throw new HttpError(400, "invalid_request", "Invalid session attribution");
     if (["POST", "PUT", "PATCH"].includes(c.req.method) && c.req.header("content-type")?.split(";")[0]?.trim().toLowerCase() !== "application/json"
       && (await c.req.arrayBuffer()).byteLength > 0)
       throw new HttpError(415, "unsupported_media_type", "Use application/json");

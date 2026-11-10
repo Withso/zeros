@@ -20,6 +20,8 @@ export const CloudWorkspaceDocumentSchema = z.object({
   capabilities: z.object({
     promptOutbox: z.literal(1).optional(),
     githubPullRequests: z.literal(1).optional(),
+    /** Chat rename and archive go to the control plane route. */
+    chatEdits: z.literal(1).optional(),
     canWrite: z.boolean(),
     // Older servers do not project edit authority. Consumers must fail closed.
     canEdit: z.boolean().optional(),

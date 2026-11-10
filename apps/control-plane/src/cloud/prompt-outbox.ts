@@ -14,6 +14,7 @@ export type CloudApiPrompt = {
   chatId: string; userMessageId: string; agentId: CloudV2Prompt["agentId"];
   message: string; model?: string | undefined; effort?: string | undefined; startedAt?: number | undefined;
   sessionName?: string | undefined;
+  createdBySessionId?: string | null | undefined;
 };
 
 const PENDING = "('queued','inboxed','dispatching','accepted')";
@@ -23,6 +24,7 @@ type Workspace = { id: string; repository: string; state: CloudV2PromptReceipt["
   access_epoch: string; worker_boot_id: string | null; previous?: Row };
 type Row = { user_message_id: string; chat_id: string; sequence: string; epoch: string; access_epoch: string;
   payload_hash: string; payload: CloudV2Prompt | null; receipt: CloudV2PromptReceipt; state: CloudV2PromptState;
+  created_by_session_id: string | null;
   cancel_requested: boolean; delivery_id: string | null; worker_boot_id: string | null; dispatch_id: string | null };
 type WorkerSnapshot = Workspace & { handoff: boolean; prompt?: Row; chatEpoch: string | null; chatDeleted: boolean };
 const notFound = () => new HttpError(404, "not_found", "Cloud workspace not found");
@@ -103,11 +105,13 @@ export class CloudV2PromptOutbox {
     // API retries carry text and an ID, not the producer's original timestamp.
     // This digest survives terminal payload compaction just like native receipts.
     const requestHash = createHash("sha256").update(JSON.stringify(["cloud-api-v0", chatId, message])).digest("hex");
-    return this.enqueue(id, userId, payload, undefined, { tx, requestHash, apiSession: true, sessionName: input.sessionName });
+    return this.enqueue(id, userId, payload, undefined, { tx, requestHash, apiSession: true, sessionName: input.sessionName,
+      createdBySessionId: input.createdBySessionId });
   }
 
   async enqueue(id: string, userId: string, raw: CloudV2Prompt, authority?: AuthedUser,
-    options?: { tx?: Tx | undefined; requestHash?: string; apiSession?: boolean; sessionName?: string | undefined }): Promise<{ receipt: CloudV2PromptReceipt; replay: boolean }> {
+    options?: { tx?: Tx | undefined; requestHash?: string; apiSession?: boolean; sessionName?: string | undefined;
+      createdBySessionId?: string | null | undefined }): Promise<{ receipt: CloudV2PromptReceipt; replay: boolean; createdBySessionId: string | null }> {
     const parsed = CloudV2PromptSchema.safeParse(raw);
     if (!parsed.success) throw new HttpError(400, "invalid_request", "Invalid cloud prompt");
     const named = CloudV2SessionNameSchema.transform(value => value.trim()).optional().safeParse(options?.sessionName);
@@ -133,7 +137,7 @@ export class CloudV2PromptOutbox {
       const previous = workspace.previous;
       if (previous) {
         if (previous.payload_hash !== hash) throw conflict();
-        return { receipt: previous.receipt, replay: true };
+        return { receipt: previous.receipt, replay: true, createdBySessionId: previous.created_by_session_id };
       }
       if (workspace.state === "failed") throw new HttpError(409, "workspace_unavailable", "This cloud workspace is unavailable");
       const chat = await this.chat(tx, id, payload.chatId);
@@ -163,13 +167,13 @@ export class CloudV2PromptOutbox {
       // One explicit wake belongs to this committed send, not to its retries.
       // A send racing stopping remains pending until the stop has completed.
       await tx.query(`WITH inserted AS (
-        INSERT INTO cloud_v2_prompt_outbox(workspace_id,user_message_id,chat_id,creator_user_id,sequence,epoch,access_epoch,payload_hash,payload,payload_bytes,receipt,wake_after_stop,session_name)
+        INSERT INTO cloud_v2_prompt_outbox(workspace_id,user_message_id,chat_id,creator_user_id,sequence,epoch,access_epoch,payload_hash,payload,payload_bytes,receipt,wake_after_stop,session_name,created_by_session_id)
         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,
-          CASE WHEN NOT EXISTS (SELECT 1 FROM cloud_v2_chats WHERE workspace_id=$1 AND chat_id=$3) THEN $14 ELSE NULL END) RETURNING workspace_id),
+          CASE WHEN NOT EXISTS (SELECT 1 FROM cloud_v2_chats WHERE workspace_id=$1 AND chat_id=$3) THEN $14 ELSE NULL END, $15) RETURNING workspace_id),
       advanced AS (UPDATE cloud_v2_prompt_chats SET next_sequence=$5 WHERE workspace_id=$1 AND chat_id=$3
         AND EXISTS (SELECT 1 FROM inserted) RETURNING workspace_id),
-      discovered AS (INSERT INTO cloud_v2_chats(workspace_id,chat_id,row)
-        SELECT $1,$3,$13 FROM advanced ON CONFLICT DO NOTHING),
+      discovered AS (INSERT INTO cloud_v2_chats(workspace_id,chat_id,row,created_by_session_id)
+        SELECT $1,$3,$13,$15 FROM advanced ON CONFLICT DO NOTHING),
       woke AS (UPDATE cloud_v2_workspaces SET state=CASE WHEN state='stopped' THEN 'starting' ELSE state END,
         worker_token_hash=CASE WHEN state='stopped' THEN NULL ELSE worker_token_hash END,
         worker_boot_id=CASE WHEN state='stopped' THEN NULL ELSE worker_boot_id END,
@@ -180,8 +184,8 @@ export class CloudV2PromptOutbox {
         AND EXISTS (SELECT 1 FROM advanced) RETURNING id)
       SELECT pg_notify('zeros_cloud_v2_prompts', id::text) FROM woke`,
       [id, payload.userMessageId, payload.chatId, userId, sequence, chat.epoch, workspace.access_epoch, hash, encoded, bytes,
-        JSON.stringify(receipt), workspace.state === "stopping", chatRow, named.data ?? null]);
-      return { receipt, replay: false };
+        JSON.stringify(receipt), workspace.state === "stopping", chatRow, named.data ?? null, options?.createdBySessionId ?? null]);
+      return { receipt, replay: false, createdBySessionId: options?.createdBySessionId ?? null };
     };
     return options?.tx ? write(options.tx) : withSystemTx(this.pool, write);
   }

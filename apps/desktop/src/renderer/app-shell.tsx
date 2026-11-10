@@ -1,4 +1,5 @@
 import { useCloudFocusActivity } from "./state/use-cloud-focus-activity";
+import { hasPendingCloudChatEdit, onCloudChatEditFallback } from "./state/cloud-chat-edits";
 import { subscribeChatSnapshots } from "./state/chat-snapshot-subscription";
 
 import React, { useEffect, useRef } from "react";
@@ -440,7 +441,9 @@ function ChatsPersistence() {
    * Optimistically advance the mirror so a React effect caused by the same
    * reconciliation cannot send a duplicate batch back to the engine. */
   const pushRowsToEngine = React.useCallback((candidates: ChatThread[]) => {
-    const rows = candidates.filter((chat) =>
+    // A rename or archive held by the control plane reaches the worker through
+    // it; mirroring the optimistic row now could apply a refused edit.
+    const rows = candidates.filter((chat) => !hasPendingCloudChatEdit(chat.id) &&
       canMirrorChat(chat, confirmedCloudWorkspacesRef.current, confirmedLocalChatsRef.current, canBackgroundSyncCloudWorkspace),
     );
     if (rows.length === 0) return;
@@ -499,6 +502,13 @@ function ChatsPersistence() {
       console.warn("[Zeros] engine chat mirror failed:", err);
     });
   }, []);
+
+  // A close the control plane refused as busy keeps today's path: hand the
+  // closed row back to this mirror, which carries it to the worker as before.
+  useEffect(() => onCloudChatEditFallback((chatId) => {
+    const row = useWorkspaceStore.getState().chats.find((chat) => chat.id === chatId);
+    if (row) pushRowsToEngine([row]);
+  }), [pushRowsToEngine]);
 
   // Each backend confirms independently. A Local restart keeps the cloud
   // subscription installed and closes only Local's read-before-write gate.

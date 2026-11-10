@@ -46,6 +46,15 @@ function fixture(repositories: { repository: string; defaultBranch: string | nul
 }
 
 describe("cloud v2 creation", () => {
+  it("advertises no chat edit route when its store is absent", async () => {
+    const f = fixture(), id = "55555555-5555-4555-8555-555555555555";
+    const document = await (await f.app.request(`/v1/cloud-v2/workspaces/${id}`)).json();
+    expect(document.workspace).not.toHaveProperty("chatEdits");
+    expect((await f.app.request(`/v1/cloud-v2/workspaces/${id}/chats/chat/edit`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ title: "New" }),
+    })).status).toBe(404);
+  });
+
   it("checks the requested repository first, then the rest in order, reading its branch meanwhile", async () => {
     const f = fixture([{ repository: "example/docs", defaultBranch: "main" }, { repository: "example/project", defaultBranch: "master" },
       { repository: "example/site", defaultBranch: "main" }]);

@@ -29,3 +29,11 @@ export function useCloudWorkspaceAccountAccess(organizationId?: string): boolean
   const { me } = useTeams();
   return cloudWorkspaceAccountAccess(me, organizationId);
 }
+
+/** The signed-in account's name when it is `userId`, else null. The workspace
+ * document carries only the creator's id; cloud access is creator-only. */
+export function useSignedInUserName(userId: string | undefined): string | null {
+  const { me } = useTeams();
+  if (!userId || me?.user.id !== userId) return null;
+  return me.user.displayName?.trim() || me.user.email || null;
+}

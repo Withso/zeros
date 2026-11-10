@@ -10,6 +10,7 @@ vi.mock("../../features/team/control-plane", () => ({
     constructor(public status: number, public code: string, message: string) { super(message); }
   },
 }));
+import { editCloudV2Chat } from "../cloud-v2";
 import { CloudWorkspaceDocumentSchema, changeCloudWorkspaceLifecycle, cloudAccountRequest, createCloudWorkspaceDocument,
   getCloudWorkspaceDocument } from "../cloud-workspaces";
 
@@ -48,6 +49,26 @@ describe("cloud request account boundaries", () => {
     vi.stubGlobal("fetch", vi.fn(async () => Response.json({ error: { code: "workspace_unavailable", message: "The workspace cannot restart yet." } }, { status: 409 })));
     await expect(changeCloudWorkspaceLifecycle(target, "restart", "fixture-restart-2")).rejects.toMatchObject({ status: 409, code: "workspace_unavailable" });
   });
+  it("edits a chat through the control-plane route, which never needs the VM", async () => {
+    state.session.mockResolvedValue(session);
+    const id = "11111111-1111-4111-8111-111111111111", target = { organizationId: id, workspaceId: id };
+    const fetch = vi.fn(async () => Response.json({ chat: { id: "chat/1", title: "Renamed", archived: false } })); vi.stubGlobal("fetch", fetch);
+    await expect(editCloudV2Chat(target, "chat/1", { title: "Renamed" })).resolves.toEqual({ id: "chat/1", title: "Renamed", archived: false });
+    expect(fetch).toHaveBeenLastCalledWith(`https://api.example.test/v1/cloud-v2/workspaces/${id}/chats/chat%2F1/edit`,
+      expect.objectContaining({ method: "POST", body: JSON.stringify({ title: "Renamed" }) }));
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ chat: { id: "other", title: "x", archived: true } })));
+    await expect(editCloudV2Chat(target, "chat/1", { archived: true })).rejects.toThrow("identity");
+  });
+
+  it("enables chat edits only from a top-level chatEdits: 1 on the workspace", async () => {
+    state.session.mockResolvedValue(session);
+    const id = "11111111-1111-4111-8111-111111111111", target = { organizationId: id, workspaceId: id };
+    for (const [extra, expected] of [[{ chatEdits: 1 }, 1], [{}, undefined], [{ chatEdits: 2 }, undefined], [{ chatEdits: "1" }, undefined]] as const) {
+      vi.stubGlobal("fetch", vi.fn(async () => Response.json({ workspace: { ...v2Workspace(id, "stopped"), ...extra } })));
+      expect((await getCloudWorkspaceDocument(target)).capabilities.chatEdits).toBe(expected);
+    }
+  });
+
   it("shows a stopped workspace with an archive mark as archived, and only then", async () => {
     state.session.mockResolvedValue(session);
     const id = "11111111-1111-4111-8111-111111111111", target = { organizationId: id, workspaceId: id };

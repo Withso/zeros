@@ -32,6 +32,7 @@ const HELP = `Usage: zeros cloud <command> [options]
   workspace create --repository r [--name n] [--branch b] [--base-branch b]
                    [--agent a --message text|--message-file path|-] [--model m]
                    [--effort e] [--message-id id] [--session-name n] [--idempotency-key k]
+                   [--env KEY=VALUE] (repeatable)
   workspace get|status|archive|unarchive|sleep|wake|sessions [id]
   workspace rename [id] --name n
   session create --agent a (--message text | --message-file path|-) [--workspace id]
@@ -63,13 +64,13 @@ interface Command {
   run(context: Context): Promise<unknown>;
 }
 interface Context {
-  values: Record<string, string | boolean | undefined>;
+  values: Record<string, string | boolean | string[] | undefined>;
   positionals: string[];
   api: Api;
   io: CliIo;
 }
 
-function integer(value: string | boolean | undefined, name: string, min: number, max: number): number | undefined {
+function integer(value: Context["values"][string], name: string, min: number, max: number): number | undefined {
   if (value === undefined) return undefined;
   if (typeof value !== "string" || !/^\d+$/.test(value) || Number(value) < min || Number(value) > max) throw usage(`--${name} must be a whole number from ${min} to ${max}.`);
   return Number(value);
@@ -106,6 +107,20 @@ async function message(context: Context, needed: boolean): Promise<string | unde
   if (needed && !value?.trim()) throw usage("--message or --message-file is required.");
   return value;
 }
+/** `--env NAME=value`, split at the first "="; the server applies the name rules. */
+function environment(context: Context): Record<string, string> | undefined {
+  const pairs = context.values.env;
+  if (!Array.isArray(pairs) || !pairs.length) return undefined;
+  const env: Record<string, string> = {};
+  for (const pair of pairs) {
+    const index = pair.indexOf("=");
+    if (index < 1) throw usage("--env takes NAME=value.");
+    const name = pair.slice(0, index);
+    if (Object.hasOwn(env, name)) throw usage(`--env names ${name} more than once.`);
+    env[name] = pair.slice(index + 1);
+  }
+  return env;
+}
 const defined = (values: Record<string, unknown>) => Object.fromEntries(Object.entries(values).filter(([, value]) => value !== undefined));
 const page = (context: Context, extra: Record<string, string | undefined> = {}) => defined({
   limit: integer(context.values.limit, "limit", 1, 100)?.toString(), offset: integer(context.values.offset, "offset", 0, Number.MAX_SAFE_INTEGER)?.toString(), ...extra,
@@ -122,11 +137,12 @@ const commands: Record<string, Command> = {
   "workspace list": { options: { ...text("state", "repository", "name"), ...flag("include-archived") }, run: c => c.api.request("GET", "/workspaces", {
     query: page(c, { state: optional(c, "state"), repository: optional(c, "repository"), name: optional(c, "name"), includeArchived: c.values["include-archived"] ? "true" : undefined }) }) },
   "workspace create": {
-    options: text("repository", "name", "branch", "base-branch", "agent", "model", "effort", "message", "message-file", "message-id", "session-name", "idempotency-key"),
+    options: { ...text("repository", "name", "branch", "base-branch", "agent", "model", "effort", "message", "message-file", "message-id", "session-name", "idempotency-key"),
+      env: { type: "string", multiple: true } },
     run: async c => {
       const body = defined({ repository: required(c, "repository"), name: optional(c, "name"), branch: optional(c, "branch"), baseBranch: optional(c, "base-branch"),
         agent: optional(c, "agent"), model: optional(c, "model"), effort: optional(c, "effort"), message: await message(c, false),
-        messageId: optional(c, "message-id"), sessionName: optional(c, "session-name") });
+        messageId: optional(c, "message-id"), sessionName: optional(c, "session-name"), env: environment(c) });
       if (body.message !== undefined && body.agent === undefined) throw usage("--agent is required with a first message.");
       const key = optional(c, "idempotency-key");
       return c.api.request("POST", "/workspaces", { body, headers: key ? { "Idempotency-Key": key } : {} });
@@ -285,7 +301,6 @@ export async function run(argv: readonly string[], io: CliIo): Promise<number> {
   let values: Context["values"], positionals: string[];
   try {
     const parsed = parseArgs({ args: [...args], options: { ...common, ...command.options }, allowPositionals: true, strict: true });
-    // No option is declared `multiple`, so parseArgs yields no arrays here.
     values = parsed.values as Context["values"]; positionals = parsed.positionals;
   } catch (error) { return fail(EXIT.usage, error instanceof Error ? error.message : "Invalid options."); }
   if (values.help) { io.stdout(HELP); return EXIT.ok; }

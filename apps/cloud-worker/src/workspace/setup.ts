@@ -78,6 +78,27 @@ function usesGitLfs(checkoutPath: string): boolean {
 
 /** Admission is durable before execution. An interrupted or failed script is
  * left for the user to inspect; worker restarts never execute it again. */
+/** The newest lines of this workspace's setup output, for agent tools. The
+ * log was redacted as it was written and is capped at MAX_LOG_BYTES. */
+export async function readSetupOutput(directory: string, workspaceId: string, maxLines: number, maxBytes = MAX_LOG_BYTES): Promise<{ lines: string[]; truncated: boolean } | undefined> {
+  let file: FileHandle;
+  try { file = await open(join(directory, "workspace-setup", `${workspaceId}.log`), constants.O_RDONLY | constants.O_NOFOLLOW); }
+  catch { return undefined; }
+  try {
+    const { size, isFile } = await file.stat().then(stat => ({ size: stat.size, isFile: stat.isFile() }));
+    if (!isFile) return undefined;
+    const length = Math.min(size, maxBytes), buffer = Buffer.alloc(length);
+    const { bytesRead } = await file.read(buffer, 0, length, size - length);
+    // A cut first line is partial; drop it unless it is the only one.
+    let lines = buffer.subarray(0, bytesRead).toString("utf8").split("\n").map(line => line.split("\r").filter(Boolean).at(-1) ?? "");
+    let truncated = size > length;
+    if (truncated && lines.length > 1) lines = lines.slice(1);
+    while (lines.length && !lines.at(-1)!.trim()) lines.pop();
+    if (lines.length > maxLines) { lines = lines.slice(-maxLines); truncated = true; }
+    return { lines, truncated };
+  } finally { await file.close(); }
+}
+
 export class WorkspaceSetup {
   private readonly controller = new AbortController();
   private operation?: Promise<void>;

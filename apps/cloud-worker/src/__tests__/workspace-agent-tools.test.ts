@@ -69,3 +69,27 @@ it("keeps the read-only tools working across Stop without reopening the native d
   expect(drivers).toHaveLength(1);
   drivers[0].complete();
 });
+
+it("reads the setup output through GetTerminalOutput source setup, and says when there is none", async () => {
+  const f = await repositoryFixture();
+  const relay = new FakeRelay(), drivers: FakeDriver[] = [];
+  let release!: () => void; const ran = new Promise<void>(resolve => { release = resolve; });
+  const worker = new CloudWorker({ directory: f.state, homeDirectory: f.directory, transport: relay, prepareCheckout: async () => ({ createdBranch: true }),
+    workspaceServices: { watch: false }, drivers: { codex: () => { const driver = new FakeDriver(); drivers.push(driver); return driver; } },
+    setupRunner: async (_file, _args, options) => { options.output(Buffer.from("installing\r\ninstalled 42 packages\n")); release(); return 0; } });
+  cleanups.push(() => worker.dispose());
+  worker.start();
+  await relay.receive({ ...config, workspace: { ...f.scope.workspace, setup: "pnpm install" } });
+  await relay.receive({ t: "open", clientId: CLIENT_A });
+  await ran;
+  await relay.request(CLIENT_A, browserFrame("AGENT_NEW_SESSION", { agentId: "codex", chatId: "chat", cwd: f.scope.key }));
+  await expect.poll(() => drivers[0]?.opened?.mcpServers).toBeDefined();
+  const tools = drivers[0].opened!.mcpServers!.zeros_workspace;
+  const client = new Client({ name: "fixture-agent", version: "1" });
+  cleanups.push(() => client.close());
+  await client.connect(new StreamableHTTPClientTransport(new URL(tools.url), { requestInit: { headers: tools.headers } }));
+  const read = async () => await client.callTool({ name: "GetTerminalOutput", arguments: { source: "setup" } }) as { isError?: boolean; content: Array<{ text: string }> };
+  await expect.poll(async () => (await read()).content[0].text).toBe("installing\ninstalled 42 packages");
+  const shells = await client.callTool({ name: "GetTerminalOutput", arguments: { source: "run_script" } }) as { isError?: boolean; content: Array<{ text: string }> };
+  expect(shells.isError).toBe(true); expect(shells.content[0].text).toContain("no open terminal of that kind");
+});

@@ -91,8 +91,16 @@ when its body is missing or empty. Responses have
 `Cache-Control: no-store`. Request bodies are limited to 8 MiB. Creation,
 rename and message bodies are strict: unknown fields return
 `400 invalid_request`. The optional
-`X-Zeros-Session-Id` header identifies the calling chat; v1 validates its shape
-but does not use it to grant access.
+`X-Zeros-Session-Id` header identifies the calling chat. A workspace token may
+attribute work only to a chat in its own workspace; a user key may attribute it
+to any of the caller's chats in that organization. Missing, malformed,
+ambiguous or inaccessible IDs are ignored. Attribution grants no access.
+
+Workspace creation, session creation and queued messages retain the validated
+ID as nullable, read-only `createdBySessionId`. The first message and session
+created with a workspace receive it too. Replays retain the original value,
+even when their header changes. Worker history updates and deletion of the
+calling chat do not erase it. HTTP, MCP and CLI JSON expose the same field.
 
 Paginated lists accept `limit` (1–100, default 20) and `offset` (a nonnegative
 integer, default 0), and return:
@@ -138,7 +146,7 @@ Errors use the control-plane envelope:
 
 | Status | Meaning |
 | --- | --- |
-| `400 invalid_request` | Invalid parameters, unknown fields or malformed session attribution |
+| `400 invalid_request` | Invalid parameters or unknown fields |
 | `401 unauthorized` | Missing, malformed, unknown or revoked credential, or authority lost since the preceding request |
 | `404 not_found` | Missing or inaccessible object, or an unsupported v1 route |
 | `409 idempotency_conflict` | A creation key was reused with different content |
@@ -165,11 +173,11 @@ not its UUID. Unnumbered workspaces have a null link.
 
 | Object | Fields |
 | --- | --- |
-| `Workspace` | `id`, `number`, `name`, `title`, `state`, `status`, `repository`, `branch`, `baseBranch`, `archived`, `createdAt`, `lastActivityAt`, `creatorId`, `creatorName`, `link` |
-| `Session` | `id`, `workspaceId`, `name`, `agent`, `model`, `effort`, `archived`, `createdAt`, `updatedAt`, `link` |
+| `Workspace` | `id`, `number`, `name`, `title`, `state`, `status`, `repository`, `branch`, `baseBranch`, `archived`, `createdAt`, `lastActivityAt`, `creatorId`, `creatorName`, `createdBySessionId`, `link` |
+| `Session` | `id`, `workspaceId`, `name`, `agent`, `model`, `effort`, `archived`, `createdAt`, `updatedAt`, `createdBySessionId`, `link` |
 | `WorkspaceStatus` | `workspaceId`, `status`, `state`, `updatedAt` |
 | `SessionStatus` | `workspaceId`, `sessionId`, `status`, `updatedAt` |
-| `Message` | `id`, `sessionId`, `index`, `type`, `content`, `createdAt` |
+| `Message` | `id`, `sessionId`, `index`, `type`, `content`, `createdAt`, `createdBySessionId` |
 
 `Workspace.name` is the workspace name; `title` is its optional display title.
 The rename endpoint sets `title`. `state` is the stored cloud lifecycle state.
@@ -229,7 +237,7 @@ curl --fail-with-body --silent --show-error \
 | `POST /workspaces/{id}/sleep` | No body required | `Workspace`; requests stop |
 | `POST /workspaces/{id}/wake` | No body required | `Workspace`; requests start |
 | `GET /workspaces/{id}/sessions` | Pagination; `includeArchived` | Page of `Session` |
-| `POST /sessions` | Session creation body below | `201 { session, message: { id } }` |
+| `POST /sessions` | Session creation body below | `201 { session, message: { id, createdBySessionId } }` |
 | `GET /sessions/{id}` | — | `Session` |
 | `GET /sessions/{id}/status` | — | `SessionStatus` |
 | `POST /sessions/{id}/cancel` | No body required | `SessionStatus`; stops the current turn and drops queued prompts |
@@ -237,7 +245,7 @@ curl --fail-with-body --silent --show-error \
 | `POST /sessions/{id}/archive` | No body required | `Session`; archives an idle session without waking the workspace |
 | `POST /sessions/{id}/unarchive` | No body required | `Session`; unarchives it without waking the workspace |
 | `GET /sessions/{id}/messages` | Pagination; optional `after=<message id>` | Page of `Message` |
-| `POST /sessions/{id}/messages` | `{ message, messageId? }` | `201 { message: { id } }`; `200` on replay |
+| `POST /sessions/{id}/messages` | `{ message, messageId? }` | `201 { message: { id, createdBySessionId } }`; `200` on replay |
 | `GET /sessions/{id}/messages/{messageId}` | — | `Message` |
 
 The model list mirrors the repository's existing catalog. `effortLevels` is
@@ -257,7 +265,7 @@ rows than `limit` with `hasMore: true`; use the last returned ID for the next
 
 ```text
 { repository, name?, branch?, baseBranch?, agent?, model?, effort?,
-  message?, messageId?, sessionName? }
+  message?, messageId?, sessionName?, env? }
 ```
 
 `repository` is `owner/repository`. The optional workspace `name` is trimmed,
@@ -267,6 +275,31 @@ uses the recorded default and `branch` is generated. Creating with `message`
 requires `agent` (`codex`, `claude` or `cursor`). The workspace, first session
 and queued prompt are committed together. `messageId` and `sessionName`
 require a message.
+
+`env` is an optional map of application variable names to strings, with at most
+50 entries. Each value is at most 8 KiB in UTF-8 and all values together at most
+64 KiB; empty strings are allowed, NUL bytes are not. Names follow the existing
+Cloud environment rules (1–128 ASCII letters, digits or underscores, starting
+with a letter or underscore). Runtime, GitHub and agent credential names remain
+reserved. Exactly `ZEROS_API_KEY` is user-settable; `ZEROS_API_URL`,
+`ZEROS_API_TOKEN`, `ZEROS_WORKSPACE_ID` and `ZEROS_SESSION_ID` are reserved.
+Invalid input returns `400 invalid_request`.
+
+Workspace values override the creator's saved Cloud values for that repository.
+The merged variables and saved files must also fit the existing Cloud
+environment limits. Creation stores a private encrypted version and pins it to
+the workspace in the creation transaction. It does not change the saved
+defaults. Later default edits and idempotent replays cannot change that pin;
+changing `env` on a replay returns `409 idempotency_conflict`. Map entry order
+does not change the creation identity.
+
+Creates with nonempty `env` finish the existing source check before returning,
+so older lifecycle replicas receive a workspace with verified sources and
+its complete environment pin. The worker receives the values through its
+existing environment configuration and redaction path. API and MCP reads never
+return the values. Workspace deletion releases the private version; checkpoint
+and environment-file handling stay the same as for saved Cloud environments.
+MCP `create_workspace` accepts the same `env` map.
 
 `POST /sessions` requires the first message:
 
@@ -327,8 +360,22 @@ edit whose acknowledged version is at least the pending version. An older
 acknowledgement leaves newer fields pending. Within a boot, history gaps are
 rejected and already-processed older batches cannot overwrite the mirror.
 
-The desktop still renames through the worker with a whole chat row. A desktop
-edit racing an unapplied API edit is last-writer-wins on the worker.
+The app uses the WorkOS-authenticated
+`POST /v1/cloud-v2/workspaces/:id/chats/:chatId/edit` route for the same
+creator-only operation. Its strict body is `{ title?, archived? }`, with at
+least one field. Titles have the same bounds as API session names. It returns
+`200 { chat: { id, title, archived } }` and the same `session_busy` and
+`worker_update_required` refusals. The edit never wakes the workspace or
+refreshes GitHub credentials, and rechecks the signed-in session in the mutation
+transaction.
+
+V2 workspace documents advertise this route with top-level `chatEdits: 1`.
+It is deliberately outside `capabilities`, whose strict schema is already used
+by released desktops. Desktops that support this field use the route for
+rename, archive and unarchive, including while asleep. Without it, they keep
+the worker chat-write path. Local workspace edits stay unchanged. An older
+desktop's worker edit racing an unapplied API edit remains last-writer-wins
+on the worker.
 
 ### Safe retries
 

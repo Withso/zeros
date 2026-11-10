@@ -57,11 +57,38 @@ async function lockScope(tx: Tx, scope: Pick<Scope, "organizationId" | "userId">
     [`cloud-environment:${scope.organizationId}:${scope.userId}`]);
 }
 
+async function environmentHead(tx: Tx, scope: Scope): Promise<Head | undefined> {
+  return (await tx.query<Head>(`SELECT h.revision::text,h.version_id,h.updated_at,v.envelope FROM cloud_environment_heads h
+    LEFT JOIN cloud_environment_versions v ON v.id=h.version_id AND v.org_id=h.org_id AND v.owner_user_id=h.owner_user_id AND v.repository_id=h.repository_id
+    WHERE h.org_id=$1 AND h.owner_user_id=$2 AND h.repository_id=$3`, params(scope))).rows[0];
+}
+function environmentMaterial(scope: Scope, head: Head | undefined, keys: CloudAgentCredentialKeys): CloudEnvironmentMaterial {
+  if (!head || head.version_id === null) return empty();
+  try { return openCloudEnvironment(head.envelope, { ...scope, versionId: head.version_id, revision: Number(head.revision) }, keys); }
+  catch { throw unreadable(); }
+}
+
 /** Called in the creation/idempotency transaction; concurrent default edits
  * cannot change the version between selecting it and retaining its pin. */
-export async function pinCloudEnvironment(tx: Tx, workspace: Pick<CloudV2Workspace, "id" | "organizationId" | "creatorUserId">, repositoryId: string): Promise<void> {
+export async function pinCloudEnvironment(tx: Tx, workspace: Pick<CloudV2Workspace, "id" | "organizationId" | "creatorUserId">, repositoryId: string,
+  overrides?: { variables: Record<string, string>; keys: CloudAgentCredentialKeys }): Promise<void> {
   const scope = target(workspace.organizationId, workspace.creatorUserId, repositoryId);
   await lockScope(tx, scope);
+  if (overrides) {
+    const current = environmentMaterial(scope, await environmentHead(tx, scope), overrides.keys);
+    const material = CloudEnvironmentMaterialSchema.safeParse({ variables: { ...current.variables, ...overrides.variables }, files: current.files });
+    if (!material.success) {
+      const error = invalid(material.error.issues);
+      throw new HttpError(400, error.code, error.message);
+    }
+    const versionId = randomUUID(), revision = 1;
+    const envelope = sealCloudEnvironment(material.data, { ...scope, versionId, revision }, overrides.keys);
+    await tx.query("INSERT INTO cloud_environment_versions(id,org_id,owner_user_id,repository_id,revision,envelope) VALUES($4,$1,$2,$3,$5,$6)",
+      [...params(scope), versionId, revision, envelope]);
+    await tx.query(`INSERT INTO cloud_workspace_environment_pins(workspace_id,org_id,owner_user_id,repository_id,version_id)
+      VALUES($4,$1,$2,$3,$5)`, [...params(scope), workspace.id, versionId]);
+    return;
+  }
   await tx.query(`INSERT INTO cloud_workspace_environment_pins(workspace_id,org_id,owner_user_id,repository_id,version_id)
     SELECT $4,org_id,owner_user_id,repository_id,version_id FROM cloud_environment_heads
     WHERE org_id=$1 AND owner_user_id=$2 AND repository_id=$3 AND version_id IS NOT NULL`, [...params(scope), workspace.id]);
@@ -114,21 +141,11 @@ export class CloudEnvironments {
     if (proof.repositoryId !== scope.repositoryId) throw notFound();
     return proof;
   }
-  private async head(tx: Tx, scope: Scope): Promise<Head | undefined> {
-    return (await tx.query<Head>(`SELECT h.revision::text,h.version_id,h.updated_at,v.envelope FROM cloud_environment_heads h
-      LEFT JOIN cloud_environment_versions v ON v.id=h.version_id AND v.org_id=h.org_id AND v.owner_user_id=h.owner_user_id AND v.repository_id=h.repository_id
-      WHERE h.org_id=$1 AND h.owner_user_id=$2 AND h.repository_id=$3`, params(scope))).rows[0];
-  }
-  private material(scope: Scope, head: Head | undefined): CloudEnvironmentMaterial {
-    if (!head || head.version_id === null) return empty();
-    try { return openCloudEnvironment(head.envelope, { ...scope, versionId: head.version_id, revision: Number(head.revision) }, this.keys); }
-    catch { throw unreadable(); }
-  }
   async get(organizationId: string, userId: string, repositoryId: string, repository: string): Promise<CloudEnvironmentMetadata> {
     const scope = target(organizationId, userId, repositoryId), proof = await this.admission(scope, repository);
     const result = await withSystemTx(this.pool, async tx => {
       await member(tx, scope);
-      const head = await this.head(tx, scope), material = this.material(scope, head);
+      const head = await environmentHead(tx, scope), material = environmentMaterial(scope, head, this.keys);
       return cloudEnvironmentMetadata(repositoryId, Number(head?.revision ?? 0), head?.version_id ?? null, head?.updated_at.toISOString() ?? null, material);
     });
     await proof.assertReadable();
@@ -142,7 +159,7 @@ export class CloudEnvironments {
     const scope = target(organizationId, userId, repositoryId), proof = await this.admission(scope, repository), input = parsed.data;
     return withSystemTx(this.pool, async tx => {
       await member(tx, scope, true); await proof.assertCurrent(tx); await lockScope(tx, scope);
-      const current = await this.head(tx, scope), previous = this.material(scope, current);
+      const current = await environmentHead(tx, scope), previous = environmentMaterial(scope, current, this.keys);
       if (Number(current?.revision ?? 0) !== input.expectedRevision || input.expectedRevision >= Number.MAX_SAFE_INTEGER) throw conflict();
       if (!current) {
         const count = await tx.query<{ count: string }>("SELECT count(*)::text AS count FROM cloud_environment_heads WHERE org_id=$1 AND owner_user_id=$2", params(scope).slice(0, 2));

@@ -36,6 +36,7 @@
 //   - The active tab pins to whichever strip edge it reaches.
 
 import { AgentActivityIndicator } from "../../features/agent/agent-activity-indicator";
+import { editChat } from "../../state/cloud-chat-edits";
 import React, {
   useCallback,
   useEffect,
@@ -780,7 +781,7 @@ function TabRow({
     const next = draft.trim();
     setRenaming(false);
     if (!next || next === chat.title) return;
-    dispatch({ type: "UPDATE_CHAT_TITLE", id: chat.id, title: next });
+    editChat(dispatch, chat.id, { title: next });
   }, [chat.id, chat.title, dispatch, draft]);
 
   const cancelRename = useCallback(() => {

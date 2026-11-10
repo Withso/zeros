@@ -85,15 +85,15 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   const v2 = config.cloudV2;
   if (!v2) return null;
   const localOwner = config.development && !("generation" in config.development) ? config.development.owner : undefined;
-  const store = new CloudV2Store(pool);
+  const keys = cloudAgentCredentialKeys(config.cloudAgentCredentials ?? null);
+  if (!keys) throw new Error("Cloud v2 requires the credential encryption keyring");
+  const store = new CloudV2Store(pool, keys);
   const runtime = cloudV2Runtime(v2.runtime.sha256, v2.runtime.store);
   const runtimeCanary = config.deploymentChannel === "alpha" && v2.runtimeCanary ? new RuntimeCanaryAuthority(v2.runtimeCanary) : undefined;
   const runtimeForWorkspace = workspaceRuntimeResolver(pool, runtime, runtimeCanary?.policy);
   const compute = new BoatCloudV2Compute(new BoatApiClient({
     apiKey: v2.boat.apiKey, timeoutMs: 120_000, ...(v2.boat.billingOrg ? { billingOrg: v2.boat.billingOrg } : {}),
   }));
-  const keys = cloudAgentCredentialKeys(config.cloudAgentCredentials ?? null);
-  if (!keys) throw new Error("Cloud v2 requires the credential encryption keyring");
   const apiCredentials = new CloudApiCredentials(pool), apiTokens = new CloudWorkspaceApiTokens(pool, keys);
   const apiConfiguration = async (workspaceId: string) => {
     const token = await apiTokens.token(workspaceId);

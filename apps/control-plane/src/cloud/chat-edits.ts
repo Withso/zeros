@@ -19,8 +19,8 @@ const notFound = () => new HttpError(404, "not_found", "Session not found");
 export class CloudV2ChatEdits {
   constructor(private readonly pool: pg.Pool) {}
 
-  async apply(scope: Scope, workspaceId: string, chatId: string, patch: Patch, authorize: (tx: Tx) => Promise<void>): Promise<void> {
-    await withSystemTx(this.pool, async tx => {
+  async apply(scope: Scope, workspaceId: string, chatId: string, patch: Patch, authorize: (tx: Tx) => Promise<void>): Promise<{ id: string; title: string; archived: boolean }> {
+    return withSystemTx(this.pool, async tx => {
       const locked = await tx.query(`SELECT id FROM cloud_v2_workspaces w WHERE id=$1 AND org_id=$2
         AND creator_user_id=$3 AND state NOT IN ('deleting','deleted') FOR UPDATE`, [workspaceId, scope.organizationId, scope.userId]);
       if (!locked.rowCount) throw notFound();
@@ -46,8 +46,10 @@ export class CloudV2ChatEdits {
         WHERE cloud_v2_chat_edits.version<9223372036854775806 RETURNING version`, [workspaceId, chatId, patch.title ?? null, patch.archived ?? null]);
       if (!edited.rowCount) throw new HttpError(409, "session_version_exhausted", "This session cannot accept further edits");
       // Preserve the chat's JSON updatedAt: metadata edits must not reorder it.
-      await tx.query("UPDATE cloud_v2_chats SET row=row || $3::jsonb WHERE workspace_id=$1 AND chat_id=$2", [workspaceId, chatId, JSON.stringify(patch)]);
+      const saved = (await tx.query<{ row: Record<string, unknown> }>("UPDATE cloud_v2_chats SET row=row || $3::jsonb WHERE workspace_id=$1 AND chat_id=$2 RETURNING row",
+        [workspaceId, chatId, JSON.stringify(patch)])).rows[0]!;
       await tx.query("SELECT pg_notify('zeros_cloud_v2_prompts',$1)", [workspaceId]);
+      return { id: chatId, title: typeof saved.row.title === "string" ? saved.row.title : "", archived: saved.row.archived === true };
     });
   }
 

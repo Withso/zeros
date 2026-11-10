@@ -2,24 +2,37 @@ import type pg from "pg";
 import { HttpError } from "../../authz.js";
 import { withSystemTx, type Tx } from "../../db.js";
 import { CLOUD_V2_LIVE_ACCESS } from "../workspace-access.js";
+import { CloudV2PromptIdSchema } from "../prompt-contract.js";
 import type { ApiMessageList, ApiSessionList } from "./contract.js";
 
 export type ApiScope = { userId: string; organizationId: string };
-export type ApiChatRow = { workspaceId: string; id: string; row: Record<string, unknown>; updatedAt: string };
-type ChatRow = { workspace_id: string; chat_id: string; row: Record<string, unknown>; updated_at: Date };
-type MessageRow = { msg_id: string; ord: string; kind: string; payload: string; created_at_ms: string };
+export type ApiChatRow = { workspaceId: string; id: string; row: Record<string, unknown>; updatedAt: string; createdBySessionId: string | null };
+type ChatRow = { workspace_id: string; chat_id: string; row: Record<string, unknown>; updated_at: Date; created_by_session_id: string | null };
+type MessageRow = { msg_id: string; ord: string; kind: string; payload: string; created_at_ms: string; created_by_session_id: string | null };
 const MESSAGE_PAGE_BYTES = 8 * 1024 * 1024;
-const chat = (row: ChatRow): ApiChatRow => ({ workspaceId: row.workspace_id, id: row.chat_id, row: row.row, updatedAt: row.updated_at.toISOString() });
+const chat = (row: ChatRow): ApiChatRow => ({ workspaceId: row.workspace_id, id: row.chat_id, row: row.row,
+  updatedAt: row.updated_at.toISOString(), createdBySessionId: row.created_by_session_id });
 const notFound = () => new HttpError(404, "not_found", "Session or message not found");
 const message = (row: MessageRow, sessionId: string, index: number) => {
   let content: unknown;
   try { content = JSON.parse(row.payload); } catch { content = row.payload; }
-  return { id: row.msg_id, sessionId, index, type: row.kind, content, createdAt: new Date(Number(row.created_at_ms)).toISOString() };
+  return { id: row.msg_id, sessionId, index, type: row.kind, content, createdAt: new Date(Number(row.created_at_ms)).toISOString(),
+    createdBySessionId: row.created_by_session_id };
 };
 
 /** Additional projections of the existing history mirror; never a worker RPC. */
 export class CloudApiReads {
   constructor(private readonly pool: pg.Pool) {}
+
+  async attribution(scope: ApiScope & { workspaceId?: string }, id: string | undefined): Promise<string | null> {
+    if (!CloudV2PromptIdSchema.safeParse(id).success) return null;
+    const { rows } = await withSystemTx(this.pool, tx => tx.query<{ chat_id: string }>(`SELECT c.chat_id FROM cloud_v2_chats c
+      JOIN cloud_v2_workspaces w ON w.id=c.workspace_id WHERE c.chat_id=$1 AND w.org_id=$2 AND w.creator_user_id=$3
+        AND ($4::uuid IS NULL OR w.id=$4) AND w.state NOT IN ('deleting','deleted')
+        AND c.deleted_at IS NULL AND coalesce(c.row->>'kind','')<>'terminal' AND ${CLOUD_V2_LIVE_ACCESS}
+      LIMIT 2`, [id, scope.organizationId, scope.userId, scope.workspaceId ?? null]));
+    return rows.length === 1 ? rows[0]!.chat_id : null;
+  }
 
   private async owned(tx: Tx, scope: ApiScope, workspaceId: string, chatId?: string): Promise<void> {
     const result = await tx.query(`SELECT 1 FROM cloud_v2_workspaces w WHERE w.id=$1 AND w.creator_user_id=$2
@@ -31,7 +44,7 @@ export class CloudApiReads {
 
   resolve(scope: ApiScope, id: string): Promise<ApiChatRow> {
     return withSystemTx(this.pool, async tx => {
-      const { rows } = await tx.query<ChatRow>(`SELECT c.workspace_id,c.chat_id,c.row,c.updated_at FROM cloud_v2_chats c
+      const { rows } = await tx.query<ChatRow>(`SELECT c.workspace_id,c.chat_id,c.row,c.updated_at,c.created_by_session_id FROM cloud_v2_chats c
         JOIN cloud_v2_workspaces w ON w.id=c.workspace_id WHERE c.chat_id=$1 AND w.org_id=$2 AND w.creator_user_id=$3
           AND w.state<>'deleted' AND c.deleted_at IS NULL AND coalesce(c.row->>'kind','')<>'terminal' AND ${CLOUD_V2_LIVE_ACCESS}
         LIMIT 2`, [id, scope.organizationId, scope.userId]);
@@ -43,7 +56,7 @@ export class CloudApiReads {
   sessions(scope: ApiScope, workspaceId: string, page: ApiSessionList) {
     return withSystemTx(this.pool, async tx => {
       await this.owned(tx, scope, workspaceId);
-      const { rows } = await tx.query<ChatRow>(`SELECT workspace_id,chat_id,row,updated_at FROM cloud_v2_chats
+      const { rows } = await tx.query<ChatRow>(`SELECT workspace_id,chat_id,row,updated_at,created_by_session_id FROM cloud_v2_chats
         WHERE workspace_id=$1 AND deleted_at IS NULL AND coalesce(row->>'kind','')<>'terminal'
           AND ($2::boolean OR row->>'archived' IS DISTINCT FROM 'true')
         ORDER BY updated_at,chat_id LIMIT $3 OFFSET $4`, [workspaceId, page.includeArchived, page.limit + 1, page.offset]);
@@ -88,8 +101,9 @@ export class CloudApiReads {
         ids.push(candidate.msg_id); bytes += candidate.bytes + 1024;
       }
       if (candidates.length && !ids.length) throw new HttpError(413, "message_too_large", "This message exceeds the response limit");
-      const { rows } = await tx.query<MessageRow>(`SELECT msg_id,ord,kind,payload,created_at_ms FROM cloud_v2_messages
-        WHERE workspace_id=$1 AND chat_id=$2 AND msg_id=ANY($3::text[]) ORDER BY ord`, [workspaceId, id, ids]);
+      const { rows } = await tx.query<MessageRow>(`SELECT m.msg_id,m.ord,m.kind,m.payload,m.created_at_ms,p.created_by_session_id FROM cloud_v2_messages m
+        LEFT JOIN cloud_v2_prompt_outbox p ON p.workspace_id=m.workspace_id AND p.chat_id=m.chat_id AND p.user_message_id=m.msg_id
+        WHERE m.workspace_id=$1 AND m.chat_id=$2 AND m.msg_id=ANY($3::text[]) ORDER BY m.ord`, [workspaceId, id, ids]);
       const data: ReturnType<typeof message>[] = [];
       bytes = 1024;
       for (const row of rows) {
@@ -105,9 +119,11 @@ export class CloudApiReads {
   message(scope: ApiScope, workspaceId: string, id: string, messageId: string) {
     return withSystemTx(this.pool, async tx => {
       await this.owned(tx, scope, workspaceId, id);
-      const { rows } = await tx.query<MessageRow & { position: string }>(`SELECT m.msg_id,m.ord,m.kind,m.payload,m.created_at_ms,
+      const { rows } = await tx.query<MessageRow & { position: string }>(`SELECT m.msg_id,m.ord,m.kind,m.payload,m.created_at_ms,p.created_by_session_id,
         (SELECT count(*) FROM cloud_v2_messages earlier WHERE earlier.workspace_id=m.workspace_id AND earlier.chat_id=m.chat_id AND earlier.ord<=m.ord) AS position
-        FROM cloud_v2_messages m WHERE workspace_id=$1 AND chat_id=$2 AND msg_id=$3`, [workspaceId, id, messageId]);
+        FROM cloud_v2_messages m
+        LEFT JOIN cloud_v2_prompt_outbox p ON p.workspace_id=m.workspace_id AND p.chat_id=m.chat_id AND p.user_message_id=m.msg_id
+        WHERE m.workspace_id=$1 AND m.chat_id=$2 AND m.msg_id=$3`, [workspaceId, id, messageId]);
       if (!rows[0]) throw notFound();
       return message(rows[0], id, Number(rows[0].position));
     }, { consistentRead: true });

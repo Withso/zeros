@@ -276,3 +276,19 @@ it("reads the newest lines of the most recently active shared terminal, bounded 
   expect(await service.output({ terminalId: "login", maxLines: 3 })).toBeUndefined();
   expect(await service.output({ terminalId: "missing", maxLines: 3 })).toBeUndefined();
 });
+
+it("selects the most recent terminal of a kind: run scripts by their run session id, shells otherwise", async () => {
+  const { scope } = await repositoryFixture(); const natives: FakeProcess[] = [];
+  let now = 1_000; vi.spyOn(Date, "now").mockImplementation(() => now);
+  const service = new Terminals(scope, { spawn: async () => { const native = new FakeProcess(); natives.push(native); return native; } }); services.push(service);
+  const a = client("a");
+  await service.handle(a.client, frame("PTY_CREATE", { sessionId: "shell", cols: 40, rows: 5 }));
+  await service.handle(a.client, frame("PTY_CREATE", { sessionId: "pty-run-abc", cols: 40, rows: 5 }));
+  now = 2_000; natives[0]!.emit("shell line\r\n");
+  now = 3_000; natives[1]!.emit("dev server ready\r\n");
+  await service.flush();
+  expect((await service.output({ maxLines: 5 }))?.terminalId).toBe("pty-run-abc");
+  expect((await service.output({ maxLines: 5, kind: "terminal" }))?.lines).toEqual(["shell line"]);
+  expect((await service.output({ maxLines: 5, kind: "run_script" }))?.lines).toEqual(["dev server ready"]);
+  expect(await service.output({ maxLines: 5, kind: "run_script", terminalId: "shell" })).toBeUndefined();
+});

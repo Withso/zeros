@@ -20,7 +20,7 @@ function fixture(review: boolean) {
   const run = vi.fn(() => ({ workspaceId: "workspace", threads: [] }));
   const core = new CodeReviewAgentToolsCore({ workspaceId: "workspace", workspacePath: "/fixture", assertCurrent: () => {} }, run,
     { id: "agent:codex:chat", name: "Codex", kind: "agent", provider: "codex" });
-  const output = vi.fn(async (input: { terminalId?: string; maxLines: number }) => input.terminalId === "gone" ? undefined
+  const output = vi.fn(async (input: { terminalId?: string; maxLines: number; source: string }) => input.terminalId === "gone" ? undefined
     : { terminalId: input.terminalId ?? "recent", lines: ["$ pnpm test", "ok"], truncated: false });
   const diff = vi.fn(async (input: { stat?: boolean; file?: string }) => ({ text: input.stat ? "M a.txt +1 -0\n" : "+changed\n", truncated: false }));
   const tools = new WorkspaceAgentTools({ assertCurrent: () => {}, terminalOutput: output, diff, ...(review ? { review: core } : {}) });
@@ -38,9 +38,15 @@ describe("zeros_workspace agent tools", () => {
     expect(review.isError).toBe(true);
     expect(f.run).not.toHaveBeenCalled();
     expect(text(await client.callTool({ name: "GetTerminalOutput", arguments: {} }))).toBe("$ pnpm test\nok");
-    expect(f.output).toHaveBeenLastCalledWith({ maxLines: 1000 });
+    expect(f.output).toHaveBeenLastCalledWith({ maxLines: 1000, source: "auto" });
     await client.callTool({ name: "GetTerminalOutput", arguments: { terminalId: "t1", maxLines: 5 } });
-    expect(f.output).toHaveBeenLastCalledWith({ terminalId: "t1", maxLines: 5 });
+    expect(f.output).toHaveBeenLastCalledWith({ terminalId: "t1", maxLines: 5, source: "auto" });
+    for (const source of ["terminal", "run_script", "setup"]) {
+      await client.callTool({ name: "GetTerminalOutput", arguments: { source } });
+      expect(f.output).toHaveBeenLastCalledWith({ maxLines: 1000, source });
+    }
+    const schema = (await client.listTools()).tools.find(tool => tool.name === "GetTerminalOutput")!.inputSchema as unknown as { properties: { source: { enum: string[] } } };
+    expect(schema.properties.source.enum).toEqual(["auto", "terminal", "run_script", "setup"]);
     expect(text(await client.callTool({ name: "GetWorkspaceDiff", arguments: { stat: true } }))).toBe("M a.txt +1 -0\n");
     expect(f.diff).toHaveBeenLastCalledWith({ stat: true });
   });
@@ -55,7 +61,7 @@ describe("zeros_workspace agent tools", () => {
 
   it("validates bounds, reports a missing terminal and marks truncated output", async () => {
     const f = fixture(false), client = await connect(await f.mcp.admit(randomUUID(), f.tools));
-    for (const args of [{ maxLines: 0 }, { maxLines: 2001 }, { maxLines: 1.5 }, { terminalId: "" }, { extra: true }])
+    for (const args of [{ maxLines: 0 }, { maxLines: 2001 }, { maxLines: 1.5 }, { terminalId: "" }, { extra: true }, { source: "browser" }, { source: "setup", terminalId: "t1" }])
       expect((await client.callTool({ name: "GetTerminalOutput", arguments: args })).isError).toBe(true);
     expect((await client.callTool({ name: "GetWorkspaceDiff", arguments: { file: 1 } })).isError).toBe(true);
     const gone = await client.callTool({ name: "GetTerminalOutput", arguments: { terminalId: "gone" } });
