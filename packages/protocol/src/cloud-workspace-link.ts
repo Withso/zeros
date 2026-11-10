@@ -4,9 +4,10 @@
 //
 // `zeros[-alpha|-beta|-dev]://cloud-workspace/<organizationId>/<workspaceId>`
 // opens one cloud workspace in the desktop app and switches to its
-// organization. The web workspace page (app.zeros.build/workspace/<id>) offers
-// it as Open in Zeros; apps/web formats the same string without this package,
-// and a root test keeps the two equal.
+// organization. The older web workspace page (app.zeros.build/workspace/<id>)
+// opens it; the numbered page opens `<scheme>://<organization ID>/w/<n>`
+// (local-orchestration.ts). apps/web formats both without this package, and a
+// root test keeps them equal.
 //
 // The link carries the control plane's two UUIDs and nothing else. It grants
 // nothing: the desktop reads the workspace as the signed-in account, and the
@@ -15,9 +16,11 @@
 
 import {
   LOCAL_LINK_SCHEMES,
+  LOCAL_WORKSPACE_LINK_OWNER,
   formatWorkspaceAddress,
   isWorkspaceLinkOwner,
   isWorkspaceNumber,
+  type LocalLink,
   type LocalLinkScheme,
   type WorkspaceAddress,
 } from "./local-orchestration";
@@ -90,4 +93,18 @@ export function parseCloudWorkspacePagePath(pathname: string): WorkspaceAddress 
   const owner = match[1]!.toLowerCase();
   const number = Number(match[2]);
   return isCloudWorkspacePageOwner(owner) && isWorkspaceNumber(number) ? { owner, number } : null;
+}
+
+/** A numbered link whose owner is an organization's ID: one of its cloud
+ * workspaces (`<id>/w/<n>`), or a chat in one (`?session=<chat id>`). */
+export type OrganizationWorkspaceLink = LocalLink & { address: WorkspaceAddress };
+
+/** A link the desktop opens from the control plane, as the signed-in account:
+ * `cloud-workspace/<organization>/<workspace>`, or a numbered link whose owner
+ * is not `local`. Local links read the engine instead. */
+export function isCloudNavigationLink(
+  link: LocalLink | CloudWorkspaceLink,
+): link is CloudWorkspaceLink | OrganizationWorkspaceLink {
+  return link.kind === CLOUD_WORKSPACE_LINK_ACTION ||
+    (link.address !== undefined && link.address.owner !== LOCAL_WORKSPACE_LINK_OWNER);
 }

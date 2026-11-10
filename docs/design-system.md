@@ -188,11 +188,12 @@ exported page by page to [design-implementation/](design-implementation/README.m
     and cloud behavior; cloud lifecycle never enters a tab banner.
 13. **Split panes and the side column run flush** (2026-11-09, replacing the
     solid islands of 2026-11-06 to 2026-11-08). The workspace header row draws no divider
-    (`PanelHeader divider={false}`) and starts with the workspace's name, then
-    where it lives, 6px after it (2026-11-09): a 16px laptop for every Local
-    workspace (branch, folder or unpublished, personal or organization) and a
-    cloud for cloud; whether a branch is published never changes the icon.
-    Name and icon are one 28px Ghost control with no fill at rest and
+    (`PanelHeader divider={false}`) and starts with where the workspace
+    lives, then its name (`w-310`) 6px after it (2026-11-10, replacing the
+    name-first order of 2026-11-09): a 16px laptop for every Local workspace
+    (branch, folder or unpublished, personal or organization) and a cloud for
+    cloud; whether a branch is published never changes the icon. Its title is
+    the tooltip. Icon and name are one 28px Ghost control with no fill at rest and
     `bg2-highlight` on hover and while open. It opens the workspace's details:
     for Local, its branch, its folder (`~` for the home folder) and Local in
     `fg3`; for cloud, the cloud details (repository, created and status, with

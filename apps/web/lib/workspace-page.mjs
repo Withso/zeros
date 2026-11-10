@@ -17,28 +17,80 @@ export function parseWorkspacePagePath(pathname) {
   return OWNER.test(owner)&&!RESERVED_WORKSPACE_PAGE_OWNERS.includes(owner)&&number<=2147483647?{owner,number}:null;
 }
 
-/** A cloud workspace's page for its creator: the control plane's exact v2 read
- * (creator-only, current members) by id or by its shareable address
- * `<organization slug>/w/<n>`, then Open in Zeros through
- * `<scheme>://cloud-workspace/<organizationId>/<workspaceId>`, the link every
- * desktop app opens (packages/protocol/src/cloud-workspace-link.ts). Each state
- * names itself in the title and one line (the Zeros Design Web app frames). */
-export function renderWorkspacePage({workspaceId,address,appLink,nonce}) {
+/** A chat a numbered link names (`?session=`): the desktop's opaque chat ids.
+ * The exact grammar of @zeros/protocol isWorkspaceLinkSession. */
+const SESSION=/^[A-Za-z0-9_.:-]{1,200}$/;
+
+/** The `?session=` of a numbered page: absent, one valid chat id, or invalid. */
+export function workspacePageSession(searchParams) {
+  const sessions=searchParams.getAll("session");
+  if(sessions.length===0)return {ok:true,session:null};
+  return sessions.length===1&&SESSION.test(sessions[0])?{ok:true,session:sessions[0]}:{ok:false,session:null};
+}
+
+/** `<scheme>://<organization ID>/w/<n>[?session=<chat id>]`, the link the
+ * desktop parses (packages/protocol/src/local-orchestration.ts). */
+export function workspacePageAppLink(appLink,address,session=null) {
+  if(!APP_LINK.test(appLink)||!validAddress(address)||(session!==null&&!SESSION.test(session)))
+    throw new TypeError("Invalid workspace link");
+  return `${appLink}${address.owner}/w/${address.number}${session===null?"":`?session=${encodeURIComponent(session)}`}`;
+}
+
+function validAddress(address) {
+  return !!address&&OWNER.test(address.owner)&&!RESERVED_WORKSPACE_PAGE_OWNERS.includes(address.owner)&&
+    Number.isSafeInteger(address.number)&&NUMBER.test(String(address.number))&&address.number<=2147483647;
+}
+
+function escapeHtml(value) {
+  return String(value).replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;");
+}
+
+/** A cloud workspace's page. A numbered page (`/<organization ID>/w/<n>`, a
+ * chat in it with `?session=`) opens Zeros at once with its own link and reads
+ * nothing: the desktop app checks access as its signed-in account and says
+ * when that account can't open it. The older `/workspace/<id>` page reads the
+ * workspace (creator-only, current members) to learn its organization, then
+ * opens `<scheme>://cloud-workspace/<organizationId>/<workspaceId>`, the link
+ * every desktop release opens (packages/protocol/src/cloud-workspace-link.ts).
+ * Each state names itself in the title and one line (the Zeros Design Web app
+ * frames). */
+export function renderWorkspacePage({workspaceId,address,session=null,appLink,nonce,marketingOrigin}) {
   const numbered=address!==undefined;
-  if((numbered?!(address&&OWNER.test(address.owner)&&!RESERVED_WORKSPACE_PAGE_OWNERS.includes(address.owner)&&Number.isSafeInteger(address.number)&&NUMBER.test(String(address.number))&&address.number<=2147483647):!UUID.test(workspaceId))||
-    !APP_LINK.test(appLink)||!/^[A-Za-z0-9_-]{8,128}$/.test(nonce))throw new TypeError("Invalid workspace page identity");
-  workspaceId=numbered?null:workspaceId.toLowerCase();
-  const path=numbered?`/${address.owner}/w/${address.number}`:`/workspace/${workspaceId}`;
-  const read=numbered?`/api/v1/cloud-v2/workspaces/by-number/${address.owner}/${address.number}`:`/api/v1/cloud-v2/workspaces/${workspaceId}`;
+  if((numbered?!validAddress(address)||(session!==null&&!SESSION.test(session)):!UUID.test(workspaceId)||session!==null)||
+    !APP_LINK.test(appLink)||!/^[A-Za-z0-9_-]{8,128}$/.test(nonce)||
+    (marketingOrigin!==undefined&&!/^https?:\/\/[^\s"'<>]+$/.test(marketingOrigin)))throw new TypeError("Invalid workspace page identity");
+  const download=marketingOrigin?`<p class="meta" id="download">Don’t have Zeros? <a href="${escapeHtml(marketingOrigin)}">Download it</a></p>`:"";
+  if(numbered)return numberedPage(address,session,appLink,nonce,download);
+  return idPage(workspaceId.toLowerCase(),appLink,nonce,download);
+}
+
+function numberedPage(address,session,appLink,nonce,download) {
+  const link=workspacePageAppLink(appLink,address,session);
+  const name=`w-${address.number}`;
+  // Open the app at once. The button stays for a browser that asks first,
+  // blocks the launch, or has no Zeros to open.
+  const script=`window.location.href=${JSON.stringify(link)};`;
+  const inner=`<div class="title" id="title">${session===null?`Opening ${name} in Zeros`:`Opening a chat in ${name}`}</div>
+    <div class="sub" id="sub">If Zeros didn’t open, open it here. Zeros says if your account can’t access it.</div>
+    <div class="acts"><a class="btn" id="open" href="${escapeHtml(link)}">Open in Zeros</a></div>
+    <p class="meta" id="meta">${escapeHtml(address.owner)} · ${name} · Cloud workspace</p>
+    ${download}
+    <script nonce="${nonce}">${script}</script>`;
+  return {html:invitationPageShell(`Zeros — ${name}`,inner,nonce),headers:invitationResponseHeaders(nonce)};
+}
+
+function idPage(workspaceId,appLink,nonce,download) {
+  const path=`/workspace/${workspaceId}`;
+  const read=`/api/v1/cloud-v2/workspaces/${workspaceId}`;
   const script=`
-    const WORKSPACE=${JSON.stringify(workspaceId)},NUMBER=${JSON.stringify(numbered?address.number:null)},PATH=${JSON.stringify(path)},READ=${JSON.stringify(read)},APP=${JSON.stringify(appLink)};
+    const WORKSPACE=${JSON.stringify(workspaceId)},PATH=${JSON.stringify(path)},READ=${JSON.stringify(read)},APP=${JSON.stringify(appLink)};
     const UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
     const AUTH_KEY="zeros:workspace-lookup-auth";
     const title=document.getElementById("title"),sub=document.getElementById("sub"),spin=document.getElementById("spin");
     const open=document.getElementById("open"),proceed=document.getElementById("proceed"),another=document.getElementById("another"),meta=document.getElementById("meta");
     const auth="/auth/start?return="+encodeURIComponent(PATH),logout="/auth/logout?return="+encodeURIComponent(PATH);
     another.href=logout;
-    let busy=false;
+    let busy=false,launched=false;
     function show(view){
       title.textContent=view.title;sub.textContent=view.sub;
       if(view.loading)spin.classList.remove("hidden");else spin.classList.add("hidden");
@@ -73,7 +125,7 @@ export function renderWorkspacePage({workspaceId,address,appLink,nonce}) {
         const result=await response.json().catch(()=>null);
         if(response.ok){
           const workspace=result?.workspace;
-          if(typeof workspace?.id!=="string"||!UUID.test(workspace.id)||(WORKSPACE?workspace.id!==WORKSPACE:workspace.number!==NUMBER)||
+          if(typeof workspace?.id!=="string"||!UUID.test(workspace.id)||workspace.id!==WORKSPACE||
             typeof workspace.organizationId!=="string"||!UUID.test(workspace.organizationId)){
             unavailable("This link doesn’t match an available workspace.");return;
           }
@@ -83,9 +135,13 @@ export function renderWorkspacePage({workspaceId,address,appLink,nonce}) {
           const name=typeof workspace.title==="string"&&workspace.title.trim()?workspace.title.trim()
             :workspace.title===null?"Untitled":typeof workspace.name==="string"?workspace.name.trim():"";
           const number=Number.isSafeInteger(workspace.number)&&workspace.number>0?"w-"+workspace.number+" · ":"";
+          const link=APP+"cloud-workspace/"+workspace.organizationId.toLowerCase()+"/"+workspace.id.toLowerCase();
           meta.textContent=number+"Cloud workspace · same identity on every device";
           show({title:name||"Cloud workspace",sub:"You have access to this workspace on every device.",
-            open:APP+"cloud-workspace/"+workspace.organizationId.toLowerCase()+"/"+workspace.id.toLowerCase(),action:"Refresh",meta:true});
+            open:link,action:"Refresh",meta:true});
+          // Open the app once, as soon as the workspace is known; Refresh
+          // and Open in Zeros stay for another try.
+          if(!launched){launched=true;window.location.href=link;}
           return;
         }
         if(response.status===404||response.status===403){
@@ -111,6 +167,7 @@ export function renderWorkspacePage({workspaceId,address,appLink,nonce}) {
       <a class="btn ghost hidden" id="another">Use another account</a>
     </div>
     <p class="meta hidden" id="meta">Cloud workspace · same identity on every device</p>
+    ${download}
     <script nonce="${nonce}">${script}</script>`;
   return {html:invitationPageShell("Zeros — cloud workspace",inner,nonce),headers:invitationResponseHeaders(nonce)};
 }

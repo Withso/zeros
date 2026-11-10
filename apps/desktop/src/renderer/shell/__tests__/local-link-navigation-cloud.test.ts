@@ -3,6 +3,7 @@ import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { CloudWorkspaceLink } from "@zeros/protocol/cloud-workspace-link";
+import { parseLocalLink } from "@zeros/protocol/local-orchestration";
 
 const fixture = vi.hoisted(() => ({
   deliver: null as null | ((link: unknown) => void),
@@ -130,4 +131,22 @@ it("retires a cloud link's read when the owner changes, and a newer link replace
   expect(fixture.navigate).toHaveBeenCalledTimes(2);
   expect(fixture.navigate.mock.calls[1]![0]).toEqual(next);
   expect(fixture.navigate.mock.calls[1]![1].current()).toBe(true);
+});
+
+it("sends an organization's numbered workspace or chat link to the cloud, never to the engine", async () => {
+  fixture.teams = { me: { user: { id: "u" }, organizations: [] }, status: "ready" };
+  fixture.bridge = { status: "connected", executionIdentity: { kind: "local" }, onStatusChange: () => () => {} };
+  fixture.status = "connected";
+  await render();
+  fixture.navigate.mockResolvedValue(undefined);
+  const chat = parseLocalLink("zeros://acme/w/310?session=chat-1")!;
+  await act(async () => fixture.deliver!(chat));
+  expect(fixture.navigate).toHaveBeenCalledOnce();
+  expect(fixture.navigate.mock.calls[0]![0]).toEqual(chat);
+  expect(fixture.readLocal).not.toHaveBeenCalled();
+
+  // Local's own numbered link reads the engine.
+  fixture.readLocal.mockReturnValue(new Promise(() => {}));
+  await act(async () => fixture.deliver!(parseLocalLink("zeros://local/w/3")!));
+  expect(fixture.navigate).toHaveBeenCalledOnce();
 });

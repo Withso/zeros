@@ -7,12 +7,19 @@ import {
   parseCloudWorkspaceLink,
   parseCloudWorkspacePagePath,
 } from "@zeros/protocol/cloud-workspace-link";
-import { LOCAL_LINK_SCHEMES } from "@zeros/protocol/local-orchestration";
+import {
+  LOCAL_LINK_SCHEMES,
+  formatWorkspaceLink,
+  isWorkspaceLinkSession,
+  parseLocalLink,
+} from "@zeros/protocol/local-orchestration";
 import { deploymentAppLink, SCHEMES } from "../../apps/web/lib/schemes.mjs";
 import {
   RESERVED_WORKSPACE_PAGE_OWNERS,
   parseWorkspacePagePath,
   renderWorkspacePage,
+  workspacePageAppLink,
+  workspacePageSession,
 } from "../../apps/web/lib/workspace-page.mjs";
 
 // apps/web is a standalone package that cannot import @zeros/protocol, so its
@@ -84,4 +91,29 @@ describe("the web's numbered workspace page path", () => {
     const address = { owner: "acme-labs", number: 310 };
     expect(parseWorkspacePagePath(formatCloudWorkspacePagePath(address))).toEqual(address);
   });
+});
+
+describe("the web's numbered page opens the desktop's numbered link", () => {
+  const address = { owner: "acme-labs", number: 310 };
+
+  it.each(["alpha", "beta", "production", undefined] as const)(
+    "is the desktop's workspace and chat link on %s",
+    (environment) => {
+      const appLink = deploymentAppLink(environment);
+      const scheme = appLink.slice(0, -3) as (typeof LOCAL_LINK_SCHEMES)[number];
+      expect(workspacePageAppLink(appLink, address)).toBe(formatWorkspaceLink(scheme, address));
+      for (const session of ["7e2b720c-ab56-441d-b189-6e7d1eb7a628", "chat:1", "a_b.c-d"]) {
+        const href = workspacePageAppLink(appLink, address, session);
+        expect(href).toBe(formatWorkspaceLink(scheme, address, session));
+        expect(parseLocalLink(href)).toEqual({ scheme, kind: "chat", id: session, address });
+      }
+    },
+  );
+
+  it.each(["chat_1", "a:b", "x".repeat(200), "x".repeat(201), "", "a/b", "a b", "a%b", "<x>"])(
+    "accepts the session %s exactly when the desktop does",
+    (session) => {
+      expect(workspacePageSession(new URLSearchParams({ session })).ok).toBe(isWorkspaceLinkSession(session));
+    },
+  );
 });

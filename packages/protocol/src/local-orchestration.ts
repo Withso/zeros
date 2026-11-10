@@ -261,6 +261,11 @@ export function isWorkspaceLinkOwner(value: unknown): value is string {
   return typeof value === "string" && WORKSPACE_LINK_OWNER.test(value);
 }
 
+/** Can this chat id be a numbered link's `?session=`? */
+export function isWorkspaceLinkSession(value: unknown): value is string {
+  return typeof value === "string" && LOCAL_LINK_ID.test(value);
+}
+
 /** The name a workspace is known by everywhere: `w-310`. */
 export function workspaceNumberLabel(number: number): string {
   if (!isWorkspaceNumber(number)) throw new Error("Invalid workspace number.");

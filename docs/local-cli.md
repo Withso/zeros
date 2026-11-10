@@ -252,8 +252,9 @@ within its owner (migration 46, `db/workspace-numbers.ts`). Its link is
 with the channel's scheme (`zeros`, `zeros-alpha`, `zeros-beta`, `zeros-dev`)
 ([`local-orchestration.ts`](../packages/protocol/src/local-orchestration.ts)
 `formatWorkspaceLink`). `local` is the owner segment of the Local collection;
-an organization's slug in that place names one of its cloud workspaces, which
-these links never open. A repository folder has no number and keeps
+an organization's ID in that place names one of its cloud workspaces, which the
+desktop opens from the control plane instead
+([cloud workspaces](cloud-workspaces.md#web-page-and-desktop-link)). A repository folder has no number and keeps
 `<scheme>://workspace/folder:<projectId>` and `<scheme>://chat/<id>`. The older
 `chat/<id>` and `workspace/<id>` links still parse everywhere a link is read.
 Chat and workspace menus offer **Copy link** for Local (Personal) owners while
@@ -274,7 +275,7 @@ A workspace is "Untitled" until one of its chats first gets a name (the title
 of its first prompt, or the user's rename): the engine copies that title onto
 the workspace when it saves the chat and broadcasts a `workspaces` change. The
 title never follows later renames. The sidebar shows the title; the column
-header shows `w-<n>` with the laptop.
+header shows the laptop, then `w-<n>`.
 
 Opening a link only navigates (`electron/deep-link.ts` → `local-navigation`
 event → `shell/local-link-navigation.tsx`). Electron keeps the latest intent

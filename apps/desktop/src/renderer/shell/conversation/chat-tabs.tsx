@@ -97,6 +97,11 @@ import { ActivityScope } from "../../shared/ui/loading/activity-scope";
 import { NewChatMenu } from "./new-chat-menu";
 import { copyChatTranscript } from "../copy-chat-transcript";
 import { copyLocalLink, useCanCopyLocalLink } from "../../state/local-link-actions";
+import {
+  copyCloudChatLink,
+  isCloudChatOfWorkspace,
+  useCanCopyCloudChatLink,
+} from "../../state/cloud-workspace-link-actions";
 import { useActiveWorkspace } from "../../state/use-active-workspace";
 import { folderIsWithinRoot } from "../../state/workspace-resolution";
 import type { Workspace } from "../../platform/git";
@@ -303,8 +308,9 @@ export function ChatTabs({
   trailing,
 }: ChatTabsProps) {
   const { workspace } = useActiveWorkspace();
-  const canCopyLink = useCanCopyLocalLink(workspace);
-  const linkWorkspace = canCopyLink ? workspace : null;
+  const canCopyLocalLink = useCanCopyLocalLink(workspace);
+  const canCopyCloudLink = useCanCopyCloudChatLink(workspace);
+  const linkWorkspace = canCopyLocalLink || canCopyCloudLink ? workspace : null;
   // Sticky strip refs + compositor-synced fade/hover machinery. All of
   // this is unchanged from the single-strip era — just scoped per pane.
   const chatNavRef = useRef<HTMLDivElement | null>(null);
@@ -724,8 +730,11 @@ function TabRow({
   registerRef,
 }: TabRowProps) {
   const dispatch = useWorkspaceDispatch();
+  const cloudLink = !!linkWorkspace && isCloudWorkspace(linkWorkspace.path);
   const canCopyLink = linkWorkspace && !chat.archived &&
-    folderIsWithinRoot(chat.folder, linkWorkspace.path);
+    (cloudLink
+      ? isCloudChatOfWorkspace(linkWorkspace, chat.id)
+      : folderIsWithinRoot(chat.folder, linkWorkspace.path));
   const [renaming, setRenaming] = useState(false);
   const [draft, setDraft] = useState(chat.title || "");
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -999,7 +1008,13 @@ function TabRow({
               <span>Copy full transcript</span>
             </ContextMenuItem>
             {canCopyLink && (
-              <ContextMenuItem onSelect={() => void copyLocalLink(linkWorkspace, chat.id)}>
+              <ContextMenuItem
+                onSelect={() =>
+                  void (cloudLink
+                    ? copyCloudChatLink(linkWorkspace, chat.id)
+                    : copyLocalLink(linkWorkspace, chat.id))
+                }
+              >
                 <Link />
                 <span>Copy link</span>
               </ContextMenuItem>

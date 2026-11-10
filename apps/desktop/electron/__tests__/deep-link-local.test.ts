@@ -73,6 +73,8 @@ describe("Local chat/workspace links", () => {
         // An organization named after an action still has workspace links.
         "auth/w/3",
         "acme/w/12",
+        // A cloud chat link from its web page.
+        "acme/w/12?session=7e2b720c-ab56-441d-b189-6e7d1eb7a628",
       ]) {
         await handleUrl(`${scheme}://${path}`);
         expect(state.navigate).toHaveBeenLastCalledWith(`${scheme}://${path}`);

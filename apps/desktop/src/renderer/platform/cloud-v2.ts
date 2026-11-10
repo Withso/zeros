@@ -3,6 +3,8 @@
 import { z } from "zod";
 import { CloudGithubUnavailableReasonSchema } from "@zeros/protocol/cloud-github-connection";
 import { RepositorySetupPathSchema } from "@zeros/protocol/cloud-v2-relay";
+import { isCloudWorkspacePageOwner } from "@zeros/protocol/cloud-workspace-link";
+import { isWorkspaceNumber, type WorkspaceAddress } from "@zeros/protocol/local-orchestration";
 import { prepareCloudPromptErasure } from "./cloud-prompt-erasure";
 import { cloudAccountRequest } from "./cloud-workspaces";
 import type { CloudWorkspaceDocument } from "./cloud-workspace-contract";
@@ -137,6 +139,19 @@ export async function getCloudV2Workspace(target: CloudWorkspaceTarget): Promise
   const { workspace } = await cloudAccountRequest(`/v1/cloud-v2/workspaces/${uuid.parse(target.workspaceId)}`, one);
   if (workspace.id !== target.workspaceId || workspace.organizationId !== target.organizationId)
     throw new Error("Cloud workspace response changed identity");
+  return workspace;
+}
+
+/** The workspace a numbered link names (`<organization slug>/w/<n>`), as
+ * creator-only as the read by id. */
+export async function getCloudV2WorkspaceByNumber(address: WorkspaceAddress): Promise<CloudV2Workspace> {
+  if (!isCloudWorkspacePageOwner(address.owner) || !isWorkspaceNumber(address.number))
+    throw new Error("Invalid cloud workspace address");
+  const { workspace } = await cloudAccountRequest(
+    `/v1/cloud-v2/workspaces/by-number/${address.owner}/${address.number}`,
+    one,
+  );
+  if (workspace.number !== address.number) throw new Error("Cloud workspace response changed identity");
   return workspace;
 }
 

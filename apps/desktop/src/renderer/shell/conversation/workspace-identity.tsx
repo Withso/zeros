@@ -22,8 +22,8 @@ function IdentityContent({ name, placement }: { name: string; placement: Workspa
   const Icon = placement === "cloud" ? Cloud : Laptop;
   return (
     <>
-      <span className="min-w-0 truncate" data-workspace-name="">{name}</span>
       <Icon className="text-fg2 size-4 shrink-0" strokeWidth={1.5} aria-hidden="true" data-workspace-placement={placement} />
+      <span className="min-w-0 truncate" data-workspace-name="">{name}</span>
     </>
   );
 }
@@ -34,7 +34,7 @@ function describedTitle(name: string, title: string | undefined): string | undef
   return trimmed && trimmed !== name ? trimmed : undefined;
 }
 
-/** The workspace's name (`w-310`), then where it lives: a laptop for every
+/** Where the workspace lives, then its name (`w-310`): a laptop for every
  * Local workspace (branch, folder or unpublished), a cloud for cloud. One ghost
  * control inside a Popover that opens the workspace's details. Its title (the
  * sidebar's name) is the tooltip and part of its accessible name. */

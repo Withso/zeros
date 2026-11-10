@@ -86,19 +86,19 @@ describe("workspace column header", () => {
     expect(html).not.toContain("Share workspace"); expect(html).not.toContain("Port forwarding");
     expect(state.reads).toEqual([]);
   });
-  // 2026-11-09 direction: the name comes first and where the workspace lives
-  // after it, as one ghost control that opens the workspace's details. It has
-  // no fill at rest, only on hover and while its details are open.
+  // 2026-11-10 direction: where the workspace lives comes first, then its
+  // name (`w-310`), as one ghost control that opens the workspace's details.
+  // It has no fill at rest, only on hover and while its details are open.
   it.each([[local, "local", "lucide-laptop"], [organizationLocal, "local", "lucide-laptop"],
     [first, "cloud", "lucide-cloud"], [second, "cloud", "lucide-cloud"]] as const)(
-    "puts the %s name first and its %s icon after it, in one ghost control",
+    "puts the %s %s icon first and its name after it, in one ghost control",
     (folder, placement, glyph) => {
       const control = identity(render({ folder, name: "Feature", branch: "alex/feature" }));
       expect(control.tag).toBe("button");
       expect(control.opening).toContain('aria-haspopup="dialog"');
-      const name = control.html.indexOf("data-workspace-name");
-      expect(name).toBeGreaterThan(0);
-      expect(name).toBeLessThan(control.html.indexOf(`data-workspace-placement="${placement}"`));
+      const icon = control.html.indexOf(`data-workspace-placement="${placement}"`);
+      expect(icon).toBeGreaterThan(0);
+      expect(icon).toBeLessThan(control.html.indexOf("data-workspace-name"));
       expect(control.html).toContain(glyph);
       const classes = control.className.split(/\s+/);
       expect(classes.filter(cls => /^bg-/.test(cls))).toEqual([]);

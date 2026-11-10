@@ -1,9 +1,11 @@
+import type { WorkspaceAddress } from "@zeros/protocol/local-orchestration";
 import type { Workspace } from "../platform/git";
 import { publishCloudGithubPrCapabilities } from "../platform/cloud-github-pr-capability";
 import {
   CloudWorkspaceDocumentSchema,
   changeCloudWorkspaceLifecycle,
   getCloudWorkspaceDocument,
+  getCloudWorkspaceDocumentByNumber,
   listCloudWorkspaceCatalogSnapshot,
   type CloudWorkspaceCatalogSnapshot,
   type CloudWorkspaceDocument,
@@ -153,6 +155,18 @@ export function cloudWorkspaceDocument(
       row.id === target.workspaceId &&
       row.organizationId === target.organizationId,
   );
+}
+/** A loaded workspace by its permanent number in its organization. */
+export function cloudWorkspaceDocumentByNumber(
+  organizationId: string,
+  number: number,
+): CloudWorkspaceDocument | undefined {
+  return documents.find((row) => row.organizationId === organizationId && row.number === number);
+}
+/** Resolve `<organization ID>/w/<n>` for the signed-in account. Identity only:
+ * the caller reads the workspace by id, which updates the catalog. */
+export function readCloudWorkspaceByNumber(address: WorkspaceAddress): Promise<CloudWorkspaceDocument> {
+  return getCloudWorkspaceDocumentByNumber(address);
 }
 
 function rebuild(documentsChanged = false, { pruneRepositoryFilters = true } = {}): void {

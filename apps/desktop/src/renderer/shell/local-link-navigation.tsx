@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import type { LocalLink } from "@zeros/protocol/local-orchestration";
+import { isCloudNavigationLink } from "@zeros/protocol/cloud-workspace-link";
 import { agentControlUnavailableReason } from "@zeros/protocol/agent-control-rollout";
 import type { ChatRowWire } from "../features/agent/agent-history-client";
 import {
@@ -163,8 +164,9 @@ export async function navigateLocalLink(
 
 /** Main retains an intent until this listener mounts; the bridge and staff
  * gate may then finish booting independently. A newer link or user selection
- * retires the old read, including A → B → A owner switches. Cloud workspace
- * links share the intent and wait only for the account's organizations. */
+ * retires the old read, including A → B → A owner switches. Cloud links (an
+ * organization's `<ID>/w/<n>` or `cloud-workspace/…`) share the intent and wait
+ * only for the account's organizations. */
 export function LocalLinkNavigation({ readChat }: { readChat: ReadChat }) {
   const [pending, setPending] = useState<{
     link: NavigationLink;
@@ -211,7 +213,8 @@ export function LocalLinkNavigation({ readChat }: { readChat: ReadChat }) {
 
   // A cloud link reads the control plane, so bridge changes never retire it.
   useEffect(() => {
-    if (pending?.link.kind !== "cloud-workspace") return;
+    if (!pending || !isCloudNavigationLink(pending.link)) return;
+    const link = pending.link;
     const clear = () =>
       setPending((value) => (value === pending ? null : value));
     if (
@@ -223,7 +226,7 @@ export function LocalLinkNavigation({ readChat }: { readChat: ReadChat }) {
     }
     if (accessPending) return;
     const observation = observeLocalLinkNavigation(undefined, clear);
-    void navigateCloudWorkspaceLink(pending.link, {
+    void navigateCloudWorkspaceLink(link, {
       openWorkspace,
       current: observation.current,
       beforeCommit: observation.stop,
@@ -235,7 +238,7 @@ export function LocalLinkNavigation({ readChat }: { readChat: ReadChat }) {
   }, [pending, accessPending, openWorkspace]);
 
   useEffect(() => {
-    if (!pending || pending.link.kind === "cloud-workspace") return;
+    if (!pending || isCloudNavigationLink(pending.link)) return;
     const { link } = pending;
     const clear = () =>
       setPending((value) => (value === pending ? null : value));
