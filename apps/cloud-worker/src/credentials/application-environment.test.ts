@@ -57,3 +57,17 @@ describe("application secret diagnostics", () => {
     expect(output.includes(fileSecret) || output.includes(JSON.stringify(canary).slice(1, -1))).toBe(false);
   });
 });
+
+describe("worker-delivered secrets", () => {
+  it("scrubs a protected token from text, values, diagnostics and later streams, and ignores empty or repeated values", () => {
+    const token = `zw2a_${"P".repeat(43)}`, environment = new ApplicationEnvironment();
+    expect(environment.text(`token ${token}`)).toBe(`token ${token}`);
+    environment.protect([undefined, "", token]); environment.protect([token]);
+    expect(environment.text(`token ${token}`)).toBe("token [redacted]");
+    expect(environment.value({ kind: "agent", text: `x ${JSON.stringify(token)}` })).toEqual({ kind: "agent", text: "x \"[redacted]\"" });
+    expect(environment.diagnostic(JSON.stringify({ rawOutput: token }))).not.toContain(token);
+    let output = ""; const stream = environment.stream(text => { output += text; });
+    stream.push(Buffer.from(token.slice(0, 20))); stream.push(Buffer.from(`${token.slice(20)}\n`)); stream.end();
+    expect(output).toBe("[redacted]\n");
+  });
+});

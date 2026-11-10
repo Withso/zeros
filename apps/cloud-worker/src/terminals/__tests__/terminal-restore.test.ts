@@ -1,4 +1,4 @@
-import { mkdir, readdir, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, expect, it } from "vitest";
 import { Terminal } from "@xterm/headless";
@@ -212,3 +212,20 @@ const art = (cols: number, rows: number) => {
   }
   return screen;
 };
+
+it("scrubs the workspace API token from a screen saved for restore, keeping the rest of it", async () => {
+  const fixture = await repositoryFixture(), records = join(fixture.state, "terminals"), token = `zw2a_${"R".repeat(43)}`;
+  const natives: FakeProcess[] = [];
+  const service = new Terminals(fixture.scope, { records, recordDelayMs: 0, redact: text => text.split(token).join("[redacted]"),
+    workingDirectory: async () => fixture.scope.root, spawn: async () => { const native = new FakeProcess(); natives.push(native); return native; } });
+  services.push(service);
+  const a = client("a");
+  await service.handle(a.client, frame("PTY_CREATE", { sessionId: "printed", restore: true, cols: 120, rows: 10 }));
+  natives[0]!.emit(`$ echo $ZEROS_API_TOKEN\r\n${token}\r\n$ `); await service.flush();
+  await service.dispose();
+  const [name] = (await readdir(records)).filter(entry => entry.endsWith(".json"));
+  const saved = await readFile(join(records, name!), "utf8");
+  expect(saved).not.toContain(token);
+  expect(saved).toContain("[redacted]");
+  expect(saved).toContain("echo $ZEROS_API_TOKEN");
+});

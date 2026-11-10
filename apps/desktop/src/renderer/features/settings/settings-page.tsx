@@ -125,6 +125,8 @@ import { JoinTeamDialog } from "../team/join-team-dialog";
 import { OrganizationSwitcher } from "../team/organization-switcher";
 import { TRAFFIC_LIGHT_RESERVE_CLS } from "../../shell/sidebar-toggle";
 import { getActiveOrganizationIdSnapshot, useActiveOrganization, useTeams } from "../team/team-store";
+import { WorkspaceApiAccessSetting, showsWorkspaceApiAccess } from "./workspace-api-access-setting";
+import { hasCloudWorkspaceAccountAccess } from "../team/cloud-workspace-account-access";
 import { readScopedSettingsSelection, writeScopedSettingsSelection, settingsOwnerKey } from "./settings-scope";
 import { retainedDialogOpen } from "./retained-surface";
 import {
@@ -855,11 +857,14 @@ function SectionNavButton({
 
 function GeneralPanel({ surfaceActive = true }: { surfaceActive?: boolean }) {
   const organization = useActiveOrganization();
+  // useActiveOrganization re-renders this panel on every team-store change.
+  const cloudAccess = !!organization && hasCloudWorkspaceAccountAccess(organization.id);
   // An organization's General holds only this Mac's controls; the app-wide
   // preferences belong to the Local owner.
   if (organization ? !organization.isPersonal : Boolean(getActiveOrganizationIdSnapshot())) {
     return (
       <div className="flex flex-col gap-8">
+        {showsWorkspaceApiAccess(organization, cloudAccess) && <WorkspaceApiAccessSetting organizationId={organization!.id} surfaceActive={surfaceActive} />}
         <ComputerUseSettingsSection surfaceActive={surfaceActive} withPermissions />
       </div>
     );

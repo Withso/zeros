@@ -107,7 +107,7 @@ export class CodexDriver implements Driver {
       command, args: [...args, "app-server", ...(input.onQuestion ? codexQuestionFeatureArgs() : []),
         ...Object.entries(config).flatMap(([key, value]) => ["-c", `${key}=${JSON.stringify(value)}`])],
       cwd: input.cwd,
-      env: agentEnvironment({ agent: "codex", token: input.proxy.token }, this.options.environment, this.options.gitEnvironment, input.application?.variables),
+      env: agentEnvironment({ agent: "codex", token: input.proxy.token }, this.options.environment, this.options.gitEnvironment, input.application?.variables, input.zerosEnvironment),
       requestTimeoutMs: this.options.requestTimeoutMs ?? 30_000,
       onNotification: (method, params) => this.notification(method, params),
       onRequest: (method, params, id) => this.nativeRequest(method, params, id),

@@ -26,15 +26,29 @@ const redactionPattern = (variants: readonly string[]) => variants.length
  * selection scrubs diagnostics and mirrored prose, including escaped echoes. */
 export class ApplicationEnvironment {
   readonly variables: Readonly<Record<string, string>>;
-  private readonly pattern?: RegExp;
-  private readonly carry: number;
-  private readonly variants: readonly string[];
+  private pattern?: RegExp;
+  private carry = 0;
+  private variants: readonly string[] = [];
+  private readonly values: (string | undefined)[];
 
   constructor(material: CloudEnvironmentMaterial = { variables: {}, files: [] }) {
     if (!CloudEnvironmentMaterialSchema.safeParse(material).success) throw new Error("Invalid application environment.");
     this.variables = Object.freeze({ ...material.variables });
-    const values = [...Object.values(material.variables), ...material.files.flatMap(file => [file.content, ...Object.values(parseEnv(file.content))])];
-    const variants = this.variants = redactionVariants(values);
+    this.values = [...Object.values(material.variables), ...material.files.flatMap(file => [file.content, ...Object.values(parseEnv(file.content))])];
+    this.rebuild();
+  }
+
+  /** Worker-delivered secrets (the workspace API token) are scrubbed exactly
+   * like application values. The set only grows for the life of this process. */
+  protect(values: readonly (string | undefined)[]): void {
+    const added = [...new Set(values.filter((value): value is string => !!value && !this.values.includes(value)))];
+    if (!added.length) return;
+    this.values.push(...added);
+    this.rebuild();
+  }
+
+  private rebuild(): void {
+    const variants = this.variants = redactionVariants(this.values);
     this.pattern = redactionPattern(variants);
     this.carry = variants.reduce((longest, value) => Math.max(longest, value.length - 1), 0);
   }

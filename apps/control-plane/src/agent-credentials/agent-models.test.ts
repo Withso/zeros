@@ -1,8 +1,15 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { cloudAgentModels, cloudAgentModelAllowed } from "./agent-models.js";
+import { cloudAgentModels, cloudAgentModelAllowed, cloudAgentCatalog } from "./agent-models.js";
 
 describe("standalone control-plane provider catalog", () => {
+  it("mirrors API effort levels from the same catalog without inventing provider capabilities", () => {
+    const catalog = JSON.parse(readFileSync(new URL("../../../../catalogs/models-v1.json", import.meta.url), "utf8"));
+    expect(cloudAgentCatalog()).toEqual(Object.entries(catalog.families).map(([agent, models]) => ({ agent,
+      models: (models as { value: string; effortLevels?: string[] }[]).map(model => ({ id: model.value,
+        ...(model.effortLevels?.length ? { effortLevels: model.effortLevels } : {}) })),
+    })));
+  });
   it("matches the curated model identities shipped to the desktop", () => {
     const catalog = JSON.parse(readFileSync(new URL("../../../../catalogs/models-v1.json", import.meta.url), "utf8"));
     for (const [provider, models] of Object.entries(catalog.families))

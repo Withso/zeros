@@ -11,7 +11,7 @@ import { CLOUD_V2_MAX_FRAME_BYTES, CloudV2WorkerFrameSchema, type CloudV2Control
 import type { PostgresSecurityEventBroker } from "../security-events.js";
 import type { CloudV2Store, CloudV2Workspace, CloudV2WorkerBinding } from "./store.js";
 import { isCloudV2Token } from "./tokens.js";
-import { dialWorker, workerSupportsCheckout, workerSupportsMcp, workerSupportsSetup, workerSupportsRepositorySetup, workerSupportsGithub, workerSupportsGitIdentity, workerSupportsGithubUserTokens, workerSupportsAgentInteractions, workerSupportsCodeReview, workerSupportsHistoryReplacement, workerSupportsEnvironment, workerSupportsRuntimeUpdate, workerSupportsPush, type WorkerRoute } from "./worker-connection.js";
+import { dialWorker, workerSupportsApi, workerSupportsCheckout, workerSupportsMcp, workerSupportsSetup, workerSupportsRepositorySetup, workerSupportsGithub, workerSupportsGitIdentity, workerSupportsGithubUserTokens, workerSupportsAgentInteractions, workerSupportsCodeReview, workerSupportsHistoryReplacement, workerSupportsEnvironment, workerSupportsRuntimeUpdate, workerSupportsPush, type WorkerRoute } from "./worker-connection.js";
 import { emitCloudV2Timing, type CloudV2TimingRecord } from "./lifecycle.js";
 import { HttpError } from "../authz.js";
 import { isGithubAccessRevoked, isGithubTemporary } from "../github-availability.js";
@@ -38,6 +38,7 @@ export type CloudV2RelayDeps = {
   securityEvents?: Pick<PostgresSecurityEventBroker, "start" | "subscribe">;
   /** proof, when present, comes from this room's current allowed database read. */
   config(workspace: CloudV2Workspace, mode?: "admission" | "continuation", proof?: CloudSourceProof): Promise<ConfigFrame>;
+  apiConfiguration?(workspaceId: string): Promise<ConfigFrame["api"]>;
   runtimeAdmission?: {
     admitClient(workspaceId: string, clientId: string): Promise<boolean>;
     renewClient(workspaceId: string, clientId: string): Promise<boolean>;
@@ -543,10 +544,12 @@ export class CloudV2Relay {
       if (await this.current(room) !== "allowed" || room.worker !== ws) return false;
       // Only a proof inside the fresh window lets source continuation reuse its lease.
       const config = await this.deps.config(room.workspace, "continuation", this.fresh(room) ? room.authorizedProof : undefined);
+      const apiConfiguration = workerSupportsApi(ws) && this.deps.apiConfiguration
+        ? await this.deps.apiConfiguration(room.workspace.id) : undefined;
       if (await this.current(room) !== "allowed" || room.worker !== ws) return false;
       if (revision !== await this.deps.store.loginRevision(room.workspace.id)) { flight.requested = true; flight.force = true; continue; }
       if (room.worker !== ws || room.revoked) return false;
-      const { mcpServers, githubPullRequests, githubUserTokens, gitIdentity, agentInteractions, codeReview, historyReplacement: _historyReplacement, environment, runtimeUpdate, ...legacy } = config;
+      const { api: _api, mcpServers, githubPullRequests, githubUserTokens, gitIdentity, agentInteractions, codeReview, historyReplacement: _historyReplacement, environment, runtimeUpdate, ...legacy } = config;
       if (environment && !workerSupportsEnvironment(ws)) throw new Error("Cloud environment runtime support is required.");
       const { setup, setupScript, baseCommit, github, ...workspaceConfig } = config.workspace;
       if (setupScript !== undefined && !workerSupportsRepositorySetup(ws)) throw new Error("Repository setup runtime support is required.");
@@ -555,6 +558,7 @@ export class CloudV2Relay {
         ...(workerSupportsGithub(ws) && github ? { github } : {}),
         ...(workerSupportsSetup(ws) && setup !== undefined ? { setup } : {}),
         ...(workerSupportsCheckout(ws) && baseCommit !== undefined ? { baseCommit } : {}) },
+        ...(apiConfiguration ? { api: apiConfiguration } : {}),
         ...(workerSupportsHistoryReplacement(ws) ? { historyReplacement: 1 } : {}),
         ...(workerSupportsMcp(ws) && mcpServers ? { mcpServers } : {}),
         ...(workerSupportsAgentInteractions(ws) && agentInteractions === 1 ? { agentInteractions } : {}),

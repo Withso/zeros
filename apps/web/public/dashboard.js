@@ -79,7 +79,7 @@ export async function tryWriteClipboard(clipboard, value) {
   }
 }
 
-const COLLABORATIVE_SECTIONS = new Set(["members", "teams", "billing"]);
+const COLLABORATIVE_SECTIONS = new Set(["members", "teams", "api-keys", "billing"]);
 const SECURITY_REVALIDATE_SILENCE_MS = 60_000;
 
 export function securityEventAction(kind) {
@@ -311,6 +311,7 @@ const icon = (size, body, className = "") =>
   `<svg${className ? ` class="${className}"` : ""} viewBox="0 0 24 24" width="${size}" height="${size}" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${body}</svg>`;
 
 export const ICONS = {
+  "api-keys": icon(14, '<circle cx="8" cy="15" r="5"/><path d="m11.5 11.5 9-9 2 2-3 3 2 2-3 3-2-2"/>'),
   profile: icon(14, '<path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>'),
   general: icon(14, '<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/>'),
   members: icon(14, '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>'),
@@ -336,10 +337,12 @@ const ORGANIZATION_SECTIONS = [
   ["general", "General"],
   ["members", "Members"],
   ["teams", "Teams"],
+  ["api-keys", "API keys"],
   ["billing", "Billing"],
 ];
 
 export const SECTION_COPY = {
+  "api-keys": { title: "API keys", line: "Connect scripts and agents to your cloud workspaces." },
   members: { title: "Members", line: "Members join the default team automatically." },
   teams: { title: "Teams", line: "Teams group members and workspace access." },
   billing: { title: "Billing", line: "Plan, seats and payment for this organization." },
@@ -405,8 +408,8 @@ export function navHtml({
   }`;
 }
 
-function headHtml(title, line = "") {
-  return `<header class="page-head"><div><h1>${escapeHtml(title)}</h1>${line ? `<p>${escapeHtml(line)}</p>` : ""}</div></header>`;
+function headHtml(title, line = "", action = "") {
+  return `<header class="page-head"><div><h1>${escapeHtml(title)}</h1>${line ? `<p>${escapeHtml(line)}</p>` : ""}</div>${action}</header>`;
 }
 
 function groupHtml(title, description, body) {
@@ -667,6 +670,22 @@ export function teamsHtml({ organization, data }) {
   )}`;
 }
 
+export function apiKeysHtml({ organization, data, userId }) {
+  const admin = canAdminister(organization);
+  const cloud = organization?.workspaceCapabilities?.cloud === true;
+  const keys = (Array.isArray(data?.apiKeys) ? data.apiKeys : []).filter(key => admin || key.ownerUserId === userId);
+  const create = cloud ? '<button class="button primary" type="button" data-action="create-api-key">Create key</button>' : "";
+  const rows = keys.map(key => {
+    const owner = key.ownerUserId === userId ? "You" : key.ownerName || "Organization member";
+    const created = formatShortDate(key.createdAt), used = formatShortDate(key.lastUsedAt);
+    return rowHtml(textHtml(escapeHtml(key.name), `${escapeHtml(key.prefix)}… · ${escapeHtml(owner)}${created ? ` · Created ${escapeHtml(created)}` : ""} · ${used ? `Last used ${escapeHtml(used)}` : "Never used"}`),
+      `<button class="button danger-secondary" type="button" data-revoke-api-key="${escapeHtml(key.id)}" aria-label="Revoke ${escapeHtml(key.name)}">Revoke</button>`);
+  }).join("");
+  const copy = SECTION_COPY["api-keys"];
+  return `${headHtml(copy.title, cloud ? copy.line : "Cloud workspaces are not enabled for this organization.", keys.length ? create : "")}${groupHtml("", "",
+    keys.length ? `<div class="card">${rows}</div>` : emptyCardHtml(icon(32, '<circle cx="8" cy="15" r="5"/><path d="m11.5 11.5 9-9 2 2-3 3 2 2-3 3-2-2"/>'), "No API keys yet.", create))}`;
+}
+
 const capitalize = (value) => {
   const text = String(value ?? "");
   return text ? `${text[0].toUpperCase()}${text.slice(1)}` : text;
@@ -708,14 +727,65 @@ export function sectionErrorHtml(section) {
   )}</section>`;
 }
 
-function dialogHtml({ id, title, line, field, error, submit, destructive = false }) {
+function dialogHtml({ id, title, line, field, error, submit, destructive = false, dismissOnly = false }) {
   return `<dialog id="${id}-dialog" class="dialog" aria-labelledby="${id}-title">
     <form method="dialog" id="${id}-form">
       <div class="dialog-head"><div class="dialog-titlerow"><h2 class="dialog-title" id="${id}-title">${title}</h2><button class="icon-button" type="button" value="cancel" data-action="close-dialog" aria-label="Close">${ICONS.close}</button></div><p class="dialog-desc">${line}</p></div>
       <div class="dialog-body">${field}<div class="dialog-error" id="${error}" role="alert"></div></div>
-      <div class="dialog-foot"><button class="button ghost" type="button" value="cancel" data-action="close-dialog">Cancel</button><button class="button ${destructive ? "danger" : "primary"}" type="submit" value="default">${submit}</button></div>
+      <div class="dialog-foot">${dismissOnly ? '<button class="button primary" type="button" value="cancel" data-action="close-dialog">Done</button>' : `<button class="button ghost" type="button" value="cancel" data-action="close-dialog">Cancel</button><button class="button ${destructive ? "danger" : "primary"}" type="submit" value="default">${submit}</button>`}</div>
     </form>
   </dialog>`;
+}
+
+export function createApiKeyDialogHtml(organizationName) {
+  return dialogHtml({ id: "create-api-key", title: "Create API key", line: `Access your cloud workspaces in ${escapeHtml(organizationName)}.`,
+    field: '<label class="field"><span>Name</span><input class="input" name="name" maxlength="80" required autofocus autocomplete="off" placeholder="Automation" /></label>',
+    error: "create-api-key-error", submit: "Create key" });
+}
+
+export function createdApiKeyDialogHtml() {
+  return dialogHtml({ id: "created-api-key", title: "API key created", line: "Copy it now. You won’t be able to see it again.",
+    field: '<div class="field"><label for="created-api-key-value">API key</label><div class="key-value"><input class="input" id="created-api-key-value" data-api-key-secret readonly autocomplete="off" spellcheck="false" /><button class="button secondary" type="button" data-action="copy-api-key">Copy key</button></div></div>',
+    error: "created-api-key-error", dismissOnly: true });
+}
+
+function revokeApiKeyDialogHtml(name) {
+  return dialogHtml({ id: "revoke-api-key", title: "Revoke API key", line: "Requests using this key will stop working.",
+    field: `<p class="group-line">${escapeHtml(name)}</p>`, error: "revoke-api-key-error", submit: "Revoke key", destructive: true });
+}
+
+/** The one-time secret never enters a snapshot. A closed or replaced view
+ * cannot reveal a late create response, even after switching A → B → A. */
+export function createApiKeyActions({ scope, request, changed, reveal, hide }) {
+  let generation = 0;
+  const current = (identity, started) => {
+    const now = scope();
+    return started === generation && identity?.organizationId === now?.organizationId && identity?.userId === now?.userId;
+  };
+  return {
+    reset() { generation++; hide(); },
+    async create(name) {
+      const identity = scope(), started = generation;
+      if (!identity?.organizationId || !identity?.userId) return;
+      try {
+        const result = await request(`/v1/organizations/${identity.organizationId}/api-keys`, { method: "POST", body: { name } });
+        changed(identity.organizationId);
+        if (!current(identity, started)) return;
+        if (typeof result?.key !== "string" || !/^zk_[A-Za-z0-9_-]{43}$/.test(result.key))
+          throw new Error("The key was created but couldn’t be displayed. Revoke it and create another.");
+        reveal(result.key);
+      } catch (error) { if (current(identity, started)) throw error; }
+    },
+    async revoke(id) {
+      const identity = scope(), started = generation;
+      if (!identity?.organizationId || !identity?.userId) return false;
+      try {
+        await request(`/v1/organizations/${identity.organizationId}/api-keys/${encodeURIComponent(id)}`, { method: "DELETE", body: {} });
+        changed(identity.organizationId);
+        return current(identity, started);
+      } catch (error) { if (current(identity, started)) throw error; return false; }
+    },
+  };
 }
 
 export const ORGANIZATION_ID_MAX_LENGTH = 40;
@@ -917,6 +987,46 @@ function bootDashboard() {
     orgList: orgList(),
   });
 
+  let apiKeyDialogScope = null, apiKeyReturnFocus = null;
+  const apiKeyScope = () => state.section === "api-keys" && !securitySigningOut && activeOrganization()
+    ? { organizationId: activeOrganization().id, userId: state.user?.id } : null;
+  function showApiKeyDialog(html) {
+    const slot = document.getElementById("api-key-dialog-slot");
+    if (!slot) return null;
+    slot.querySelector("dialog")?.close();
+    slot.innerHTML = html;
+    const dialog = slot.querySelector("dialog");
+    dialog.addEventListener("close", () => { if (dialog.isConnected) apiKeyActions.reset(); });
+    dialog.showModal();
+    return dialog;
+  }
+  const apiKeyActions = createApiKeyActions({ scope: apiKeyScope, request: api,
+    changed(organizationId) {
+      invalidateExactSnapshot(snapshots, `${organizationId}:api-keys`, { inflight, generations: snapshotGenerations });
+      if (apiKeyScope()?.organizationId === organizationId) void render();
+    },
+    reveal(key) {
+      const dialog = showApiKeyDialog(createdApiKeyDialogHtml());
+      const field = dialog?.querySelector("[data-api-key-secret]");
+      if (field) { field.value = key; field.focus(); field.select(); }
+    },
+    hide() {
+      const slot = document.getElementById("api-key-dialog-slot");
+      const dialog = slot?.querySelector("dialog"), current = apiKeyScope();
+      const restoreFocus = dialog && apiKeyDialogScope?.organizationId === current?.organizationId &&
+        apiKeyDialogScope?.userId === current?.userId &&
+        (dialog.contains(document.activeElement) || document.activeElement === document.body);
+      const field = slot?.querySelector("[data-api-key-secret]");
+      if (field) field.value = "";
+      dialog?.close();
+      slot?.replaceChildren();
+      if (restoreFocus) (apiKeyReturnFocus?.isConnected ? apiKeyReturnFocus :
+        content.querySelector('[data-action="create-api-key"]') || document.querySelector('[data-section="api-keys"]'))?.focus();
+      apiKeyDialogScope = null;
+      apiKeyReturnFocus = null;
+    },
+  });
+
   function syncOrganizationCreationSurface() {
     const allowed = organizationCreationAllowed(state.capabilities);
     const slot = document.getElementById("create-organization-dialog-slot");
@@ -1086,6 +1196,9 @@ function bootDashboard() {
     syncChrome();
     updateUrl();
     const organization = activeOrganization();
+    const keyScope = apiKeyScope();
+    if (apiKeyDialogScope && (apiKeyDialogScope.organizationId !== keyScope?.organizationId || apiKeyDialogScope.userId !== keyScope?.userId))
+      apiKeyActions.reset();
     if (state.section === "profile") {
       content.innerHTML = profileHtml(profileModel());
       try {
@@ -1117,7 +1230,9 @@ function bootDashboard() {
         ? membersHtml({ organization, data: value, userId: state.user?.id })
         : section === "teams"
           ? teamsHtml({ organization, data: value })
-          : billingHtml({ data: value });
+          : section === "api-keys"
+            ? apiKeysHtml({ organization, data: value, userId: state.user?.id })
+            : billingHtml({ data: value });
     content.innerHTML = prior ? paint(prior) : sectionLoadingHtml(section);
     try {
       const value = await loadExact(key, async () => {
@@ -1127,6 +1242,7 @@ function bootDashboard() {
         if (section === "billing") {
           return api(`/v1/organizations/${organization.id}/billing`);
         }
+        if (section === "api-keys") return api(`/v1/organizations/${organization.id}/api-keys`);
         const [members, invitations] = await Promise.all([
           api(`/v1/organizations/${organization.id}/members`),
           canAdmin(organization)
@@ -1202,6 +1318,7 @@ function bootDashboard() {
   function signOutForSecurityEvent() {
     if (securitySigningOut) return;
     securitySigningOut = true;
+    apiKeyActions.reset();
     securityEventSource?.close();
     const returnTo = `${window.location.origin}/`;
     window.location.replace(
@@ -1335,12 +1452,14 @@ function bootDashboard() {
     const target = event.target.closest("button, [data-action]");
     if (!target) return;
     if (target.dataset.section && !target.disabled) {
+      apiKeyActions.reset();
       state.section = target.dataset.section;
       setMobileNavigationOpen(false);
       await render();
       return;
     }
     if (target.dataset.orgId) {
+      apiKeyActions.reset();
       state.activeOrganizationId = target.dataset.orgId;
       if (state.section === "profile") state.section = "general";
       document.getElementById("org-switcher")?.removeAttribute("open");
@@ -1361,6 +1480,28 @@ function bootDashboard() {
     const action = target.dataset.action;
     if (action === "close-dialog") {
       target.closest("dialog")?.close();
+    } else if (action === "create-api-key") {
+      const scope = apiKeyScope();
+      if (!scope || activeOrganization()?.workspaceCapabilities?.cloud !== true) return;
+      apiKeyActions.reset();
+      apiKeyDialogScope = scope;
+      apiKeyReturnFocus = target;
+      showApiKeyDialog(createApiKeyDialogHtml(organizationDisplayName(activeOrganization())));
+    } else if (action === "copy-api-key") {
+      const field = document.querySelector("[data-api-key-secret]");
+      if (field?.value) {
+        const copied = await tryWriteClipboard(navigator.clipboard, field.value);
+        toast(copied ? "API key copied" : "Couldn’t copy the API key", !copied);
+      }
+    } else if (target.dataset.revokeApiKey) {
+      const organization = activeOrganization(), scope = apiKeyScope();
+      const entry = snapshots.get(`${organization?.id}:api-keys`)?.apiKeys?.find(key => key.id === target.dataset.revokeApiKey);
+      if (!scope || !entry || !canAdmin(organization) && entry.ownerUserId !== state.user?.id) return;
+      apiKeyActions.reset();
+      apiKeyDialogScope = scope;
+      apiKeyReturnFocus = target;
+      const form = showApiKeyDialog(revokeApiKeyDialogHtml(entry.name))?.querySelector("form");
+      if (form) form.dataset.apiKeyId = entry.id;
     } else if (action === "dismiss-toast") {
       target.closest(".toast")?.remove();
     } else if (action === "create-organization") {
@@ -1747,7 +1888,18 @@ function bootDashboard() {
     if (submitter) submitter.disabled = true;
     const organization = activeOrganization();
     try {
-      if (form.id === "create-organization-form") {
+      if (form.id === "create-api-key-form") {
+        const name = new FormData(form).get("name")?.toString().trim();
+        if (!name) return;
+        const error = form.querySelector("[role=alert]");
+        if (error) error.textContent = "";
+        await apiKeyActions.create(name);
+      } else if (form.id === "revoke-api-key-form" && form.dataset.apiKeyId) {
+        if (await apiKeyActions.revoke(form.dataset.apiKeyId)) {
+          apiKeyActions.reset();
+          toast("API key revoked");
+        }
+      } else if (form.id === "create-organization-form") {
         if (!organizationCreationAllowed(state.capabilities)) return;
         const name = new FormData(form).get("name")?.toString().trim();
         const errorNode = document.getElementById("create-organization-error");
@@ -1878,7 +2030,10 @@ function bootDashboard() {
         await render();
       }
     } catch (error) {
-      if (form.id === "create-organization-form") {
+      if (["create-api-key-form", "revoke-api-key-form"].includes(form.id)) {
+        const node = form.isConnected ? form.querySelector("[role=alert]") : null;
+        if (node) node.textContent = error.message;
+      } else if (form.id === "create-organization-form") {
         const errorNode = document.getElementById("create-organization-error");
         if (errorNode) errorNode.textContent = error.message;
         organizationId.rejected(error);
@@ -1909,6 +2064,7 @@ function bootDashboard() {
   window.addEventListener("focus", onSecurityLifecycleHint);
   window.addEventListener("online", onSecurityLifecycleHint);
   window.addEventListener("pageshow", onSecurityLifecycleHint);
+  window.addEventListener("pagehide", () => apiKeyActions.reset());
   document.addEventListener("visibilitychange", onSecurityLifecycleHint);
   void revalidateSecurityLifecycle();
   void render();

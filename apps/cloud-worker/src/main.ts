@@ -1,5 +1,5 @@
 import { closeSync, constants, fsyncSync, mkdirSync, openSync, realpathSync, renameSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CloudWorker } from "./worker";
 import { HybridTransport } from "./hybrid-transport";
@@ -50,6 +50,8 @@ export function startWorker(options: BootOptions): { worker: CloudWorker; stop: 
     gitAskpassPath: fileURLToPath(new URL("./bin/git-askpass", import.meta.url)), onError: code => log(code),
     onTiming: record => log(`timing ${JSON.stringify(record)}`),
     onReconfigure: changed => log(`reconfigure ${changed.join(",")}`),
+    memoryWatchdog: { runtimeRoots: [...new Set([dirname(fileURLToPath(import.meta.url)), dirname(realpathSync(fileURLToPath(import.meta.url)))])] },
+    onMemory: event => log(event),
   });
   const shutdown = () => { void stop(); };
   const stop = (code = 0): Promise<void> => {

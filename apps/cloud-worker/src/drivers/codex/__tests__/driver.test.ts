@@ -74,6 +74,20 @@ describe("Codex driver with an offline app-server process", () => {
     expect(JSON.parse(prose(events))).toEqual({ config: { mcp_servers: { tools: { url: mcpServers.tools.url, http_headers: { Authorization: "[redacted]" } } } }, secretInArgs: false });
   });
 
+  it("keeps the user's own MCP servers beside zeros_workspace in the one native mcp_servers table", async () => {
+    const { driver, events } = setup();
+    const mcpServers = {
+      fixture_33333333333343338333333333333333: { type: "http" as const, url: "http://127.0.0.1:3222/mcp/user", headers: { Authorization: "Bearer fixture-user-secret" } },
+      zeros_workspace: { type: "http" as const, url: "http://127.0.0.1:3223/mcp/execution", headers: { Authorization: "Bearer fixture-tools-secret" } },
+    };
+    await driver.open({ ...openInput, mcpServers });
+    await driver.prompt(content("mcp-configuration"));
+    expect(JSON.parse(prose(events))).toEqual({ config: { mcp_servers: {
+      fixture_33333333333343338333333333333333: { url: mcpServers.fixture_33333333333343338333333333333333.url, http_headers: { Authorization: "[redacted]" } },
+      zeros_workspace: { url: mcpServers.zeros_workspace.url, http_headers: { Authorization: "[redacted]" } },
+    } }, secretInArgs: false });
+  });
+
   it("classifies a model refusal inside JSON-RPC data before flattening the reply", async () => {
     const { driver, events } = setup();
     await driver.open(openInput);

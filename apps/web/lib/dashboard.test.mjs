@@ -38,6 +38,8 @@ const org = {
 };
 
 test("dashboard intent survives sign-in without carrying unrelated query state", () => {
+  assert.equal(dashboardReturnUrl("https://app.zeros.build", `https://app.zeros.build/?organization=${org.id}&section=api-keys&key=private`),
+    `https://app.zeros.build/?organization=${org.id}&section=api-keys`);
   assert.equal(
     dashboardReturnUrl(
       "https://app.zeros.build",
@@ -59,6 +61,18 @@ test("dashboard intent survives sign-in without carrying unrelated query state",
     ),
     "https://app.zeros.build/",
   );
+});
+
+test("the API keys page is organization-only and boots with no credential material", () => {
+  const page = dashboardPage({ session, me: { user: { id: "u1" }, organizations: [personal, org] },
+    requestUrl: `https://app.zeros.build/?organization=${org.id}&section=api-keys`, signOutHref: "/auth/logout" });
+  assert.match(page, /data-section="api-keys" aria-current="page"/);
+  assert.match(page, /<h1>API keys<\/h1>/);
+  assert.match(page, /id="api-key-dialog-slot"/);
+  assert.doesNotMatch(page, /secret-token-must-not-render|refresh-secret-must-not-render/);
+  const local = dashboardPage({ session, me: { user: { id: "u1" }, organizations: [personal] },
+    requestUrl: "https://app.zeros.build/?section=api-keys", signOutHref: "/auth/logout" });
+  assert.doesNotMatch(local, /data-section="api-keys"|<h1>API keys<\/h1>/);
 });
 
 test("the dashboard lists cloud organizations only and renders no bearer tokens", () => {

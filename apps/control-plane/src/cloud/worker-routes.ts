@@ -18,7 +18,7 @@ import { CloudRuntimeUpdateRequestSchema } from "./runtime-update-contract.js";
 export const CLOUD_V2_WORKER_API = "/v2/cloud/worker";
 type ConfigFrame = Extract<CloudV2ControlFrame, { t: "config" }>;
 export type CloudV2WorkerRouteDeps = {
-  store: Pick<CloudV2Store, "beginWorkerHello" | "acceptWorkerHello" | "workerSession" | "accessEpoch" | "loginRevision" | "markActive" | "writeWorkerHistory" | "failWorkerCheckout"> & Partial<Pick<CloudV2Store, "prompts" | "workerHelloIdentity">>;
+  store: Pick<CloudV2Store, "beginWorkerHello" | "acceptWorkerHello" | "workerSession" | "accessEpoch" | "loginRevision" | "markActive" | "writeWorkerHistory" | "failWorkerCheckout"> & Partial<Pick<CloudV2Store, "prompts" | "workerHelloIdentity" | "chatEdits">>;
   runtimeSha256: string;
   runtimeSha256ForWorkspace?(workspace: CloudV2Workspace): Promise<string>;
   runtimeUpdates?: RuntimeAdoption;
@@ -28,6 +28,7 @@ export type CloudV2WorkerRouteDeps = {
   logger?: Pick<Console, "warn">;
   waitForPrompts?(workspaceId: string, waitMs: number, signal: AbortSignal): { wait: Promise<void>; dispose(): void };
   config(workspace: CloudV2Workspace, mode?: "admission" | "continuation", proof?: CloudSourceProof): Promise<ConfigFrame>;
+  apiConfiguration?(workspaceId: string): Promise<ConfigFrame["api"]>;
   authorizeSource?(workspace: CloudV2Workspace): Promise<void>;
   continueSource?(workspace: CloudV2Workspace, proof?: CloudSourceProof): Promise<CloudSourceContinuation>;
   githubToken(workspace: CloudV2Workspace, purpose?: "git" | "gh", failedTokenSha256?: string): Promise<{ token: string; expiresAt: number }>;
@@ -82,7 +83,13 @@ async function configuration(deps: CloudV2WorkerRouteDeps, workspace: CloudV2Wor
     fence = undefined;
     if (!before) throw unauthorized();
     let config: ConfigFrame;
-    try { config = await deps.config(before, mode, before); }
+    try {
+      config = await deps.config(before, mode, before);
+      if (features.has("workspace-api-v1") && deps.apiConfiguration) {
+        const api = await deps.apiConfiguration(before.id);
+        if (api) config = { ...config, api };
+      }
+    }
     catch (error) {
       if (!(error instanceof HttpError) || error.code !== "github_authorization_changed") throw error;
       const current = await currentSession(deps, token, bootId, handoff);
@@ -94,7 +101,7 @@ async function configuration(deps: CloudV2WorkerRouteDeps, workspace: CloudV2Wor
     if (!after || before.accessEpoch !== after.accessEpoch) throw unauthorized();
     const revision = before.loginRevision;
     if (revision === after.loginRevision) {
-      const { mcpServers, githubPullRequests, githubUserTokens, gitIdentity, agentInteractions, codeReview, historyReplacement: _historyReplacement, environment, runtimeUpdate: _runtimeUpdate, ...legacy } = config;
+      const { api, mcpServers, githubPullRequests, githubUserTokens, gitIdentity, agentInteractions, codeReview, historyReplacement: _historyReplacement, environment, runtimeUpdate: _runtimeUpdate, ...legacy } = config;
       if (environment && !features.has("workspace-environment-v1"))
         throw new HttpError(409, "cloud_environment_runtime_required", "Update the cloud runtime before opening this workspace.");
       const { setup, setupScript, baseCommit, github, ...workspaceConfig } = config.workspace;
@@ -106,6 +113,7 @@ async function configuration(deps: CloudV2WorkerRouteDeps, workspace: CloudV2Wor
         ...(features.has("workspace-setup-v1") && setup !== undefined ? { setup } : {}),
         ...(features.has("checkout-v2") && baseCommit !== undefined ? { baseCommit } : {}) },
         ...(features.has("agent-interactions-v1") && agentInteractions === 1 ? { agentInteractions } : {}),
+        ...(features.has("workspace-api-v1") && api ? { api } : {}),
         ...(environment ? { environment } : {}),
         ...(features.has("runtime-update-v1") && deps.runtimeUpdates ? { runtimeUpdate: 1 } : {}),
         loginRevision: revision, ...(features.has("history-replace-v1") ? { historyReplacement: 1 } : {}), ...(features.has("git-identity-v1") && gitIdentity !== undefined ? { gitIdentity } : {}),
@@ -135,6 +143,7 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
       if (!workerFeatures(c).has("runtime-update-v1") || !z.string().uuid().safeParse(handoff).success || !deps.runtimeUpdates) throw unauthorized();
       const identity = await deps.runtimeUpdates.session(token, input.bootId, handoff, input.runtimeSha256);
       if (!identity) throw unauthorized();
+      if (deps.store.chatEdits && !await deps.store.chatEdits.advertise(token, input.bootId, workerFeatures(c).has("chat-edit-v1"), handoff)) throw unauthorized();
       return c.json({ config: await configuration(deps, identity, token, input.bootId, workerFeatures(c), "admission", handoff) });
     }
     let runtimeSha256 = deps.runtimeSha256;
@@ -151,6 +160,7 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
       throw new HttpError(409, "worker_runtime_mismatch", "Worker runtime requires an update");
     const workspace = await deps.store.beginWorkerHello(token, input.bootId);
     if (!workspace) throw unauthorized();
+    if (deps.store.chatEdits && !await deps.store.chatEdits.advertise(token, input.bootId, workerFeatures(c).has("chat-edit-v1"))) throw unauthorized();
     const configStarted = Date.now();
     const config = await configuration(deps, workspace, token, input.bootId, workerFeatures(c));
     const configMs = Math.max(0, Date.now() - configStarted);
@@ -198,6 +208,8 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
   app.post(`${CLOUD_V2_WORKER_API}/history`, async c => {
     const auth = await session(c, deps), input = await body(c, CloudV2WorkerHistorySchema);
     if (input.bootId !== auth.bootId) throw unauthorized();
+    if (input.chatEditAcks !== undefined && !workerFeatures(c).has("chat-edit-v1"))
+      throw new HttpError(400, "invalid_request", "Unsupported worker history fields");
     const { t: _t, bootId, sequence, ...history } = input;
     await deps.store.writeWorkerHistory(auth.token, bootId, sequence, history);
     return c.json({ sequence });
@@ -255,8 +267,11 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
     app.post(`${CLOUD_V2_WORKER_API}/prompts/pull`, async c => {
       const auth = await session(c, deps);
       const { waitMs, held } = await body(c, CloudV2PromptPullSchema);
+      const features = workerFeatures(c);
       const forWorker = async (batch: CloudV2PromptPullReply): Promise<CloudV2PromptPullReply> => {
-        if (workerFeatures(c).has("agent-interactions-v1")) return batch;
+        if (!features.has("chat-edit-v1")) { const { chatEdits: _edits, ...legacy } = batch; batch = legacy; }
+        if (!features.has("session-name-v1")) batch = { ...batch, prompts: batch.prompts.map(({ sessionName: _name, ...item }) => item) };
+        if (features.has("agent-interactions-v1")) return batch;
         const prompts: CloudV2PromptPullReply["prompts"] = [];
         for (const item of batch.prompts) {
           // Older workers reject unknown payload fields. Explicit Plan can
@@ -271,13 +286,15 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
         return { ...batch, prompts };
       };
       const waiter = waitMs ? deps.waitForPrompts?.(auth.workspace.id, waitMs, c.req.raw.signal) : undefined;
+      const pull = (mode: "new" | "due") => features.has("chat-edit-v1")
+        ? outbox.pull(auth.token, auth.bootId, held, { chatEdits: mode }) : outbox.pull(auth.token, auth.bootId, held);
       try {
-        const first = await outbox.pull(auth.token, auth.bootId, held);
-        if (!waiter || first.prompts.length || first.stops.length) return c.json(await forWorker(first));
+        const first = await pull(waiter ? "new" : "due");
+        if (!waiter || first.prompts.length || first.stops.length || first.chatEdits?.length) return c.json(await forWorker(first));
         await waiter.wait;
         if (c.req.raw.signal.aborted) throw new HttpError(503, "request_cancelled", "Delivery poll ended");
         await session(c, deps);
-        return c.json(await forWorker(await outbox.pull(auth.token, auth.bootId, held)));
+        return c.json(await forWorker(await pull("due")));
       } finally { waiter?.dispose(); }
     });
     app.post(`${CLOUD_V2_WORKER_API}/prompts/ack`, async c => {

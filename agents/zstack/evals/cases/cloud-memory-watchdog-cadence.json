@@ -1,0 +1,9 @@
+{
+  "id": "cloud-memory-watchdog-cadence",
+  "kind": "replay",
+  "area": "cloud-worker",
+  "fixedBy": "pr:983",
+  "symptom": "The memory watchdog passed every test with injected readings, yet on a real VM a fast allocator went from healthy to a kernel OOM kill in about four seconds, inside one five-second sampling interval, so the watchdog never acted.",
+  "rule": "A resource guard's cadence is part of its contract and is tested with an injected clock (principle 16: simulated readings prove the decision, not that it runs in time); it samples every second and every 200 ms while memory is tight.",
+  "check": "pnpm --dir apps/cloud-worker exec vitest run src/resources/watchdog.test.ts -t 'samples every second while healthy and every 200 ms while tight'"
+}

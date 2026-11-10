@@ -27,6 +27,7 @@ vi.mock("../workspace-tabs", () => ({ workspaceLabel: () => "Local branch" }));
 import { TooltipProvider } from "../../shared/ui/primitives";
 import { ConversationWorkspaceHeader, WorkspaceHeader, workspaceHeaderBranch } from "../conversation/workspace-header";
 import { LocalWorkspaceDetailsCard, displayFolderPath } from "../conversation/local-workspace-details";
+import { CloudWorkspaceDetailsCard } from "../conversation/cloud-workspace-details";
 
 const first = "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222";
 const second = "cloud://33333333-3333-4333-8333-333333333333/44444444-4444-4444-8444-444444444444";
@@ -227,5 +228,44 @@ describe("Local workspace details", () => {
     expect(workspaceHeaderBranch(base)).toBe("alex/fix-login");
     expect(workspaceHeaderBranch({ ...base, id: "local:example/app", branch: "app" })).toBeUndefined();
     expect(workspaceHeaderBranch(null)).toBeUndefined();
+  });
+});
+
+describe("Cloud workspace details", () => {
+  const text = (html: string) => html.replace(/<[^>]+>/g, "\n").split("\n").map(line => line.trim()).filter(Boolean);
+  const cloud = (status: string, canManage = true) => ({
+    name: "w-7", status, createdAt: new Date(Date.now() - 3 * 86_400_000).toISOString(),
+    repository: { forge: "github.com", owner: "example", name: "repo", revision: "refs/heads/main" },
+    capabilities: { canWrite: true, canManage, canStart: true, startUnavailableReason: null },
+  }) as CloudWorkspaceDocument;
+  const resources = { cpu: { cores: 4, usedPercent: 12.4 }, memory: { totalBytes: 8 * 2 ** 30, usedPercent: 50 },
+    disk: { totalBytes: 64 * 2 ** 30, usedPercent: 9.6 }, sampledAt: 1 };
+  const card = (props: Partial<Parameters<typeof CloudWorkspaceDetailsCard>[0]>) => provided(createElement(CloudWorkspaceDetailsCard, {
+    workspace: cloud("ready"), title: "Fix login", statusLabel: "Running", resources: null, changing: false, onChange: () => {}, ...props,
+  }));
+
+  it("shows where it runs, its status with Restart, and the VM's CPU, memory and disk", () => {
+    const html = card({ resources });
+    expect(text(html)).toEqual(["Fix login", "Environment", "Zeros Cloud", "Repository", "example/repo", "Created", "3d ago",
+      "Status", "Running", "CPU", "4 cores · 12% used", "Memory", "8 GB · 50% used", "Disk", "64 GB · 10% used", "Stop workspace"]);
+    expect(html).toContain('aria-label="Restart workspace"');
+  });
+
+  it("leaves out the usage rows when the worker gave no sample, as an older worker does", () => {
+    const shown = text(card({}));
+    for (const label of ["CPU", "Memory", "Disk"]) expect(shown).not.toContain(label);
+    expect(shown).toContain("Zeros Cloud");
+  });
+
+  it("offers Restart only to a manager of a running workspace", () => {
+    expect(card({ workspace: cloud("stopped"), statusLabel: "Stopped" })).not.toContain("Restart workspace");
+    expect(card({ workspace: cloud("ready", false) })).not.toContain("Restart workspace");
+    expect(card({ workspace: cloud("busy") })).toContain("Restart workspace");
+    expect(card({ changing: true })).toMatch(/aria-label="Restart workspace"[^>]*disabled=""|disabled=""[^>]*aria-label="Restart workspace"/);
+  });
+
+  it("keeps Local's details free of cloud rows", () => {
+    const html = provided(createElement(LocalWorkspaceDetailsCard, { name: "fix-login", folder: "/home/sam/fix-login" }));
+    for (const label of ["Environment", "Zeros Cloud", "CPU", "Restart"]) expect(html).not.toContain(label);
   });
 });

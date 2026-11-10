@@ -16,12 +16,12 @@ import {
 
 export { organizationCreationAllowed, safeOrganizationLogo };
 
-const SECTIONS = ["profile", "general", "members", "teams", "billing"];
+const SECTIONS = ["profile", "general", "members", "teams", "api-keys", "billing"];
 const ORGANIZATION_ID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const RECOVERY_CODE_RE = /^ZR-[A-Z2-9]{4}-[A-Z2-9]{4}$/;
 const DELETION_CODE_RE = /^ZD-[A-Z2-9]{4}-[A-Z2-9]{4}$/;
-const DASHBOARD_ASSET_REVISION = "2026-11-05.1";
+const DASHBOARD_ASSET_REVISION = "2026-11-10.1";
 
 // The page follows the system appearance before first paint, so a light
 // system never flashes the dark default.
@@ -292,6 +292,7 @@ export function dashboardPage({ session, me, requestUrl, signOutHref, loadError 
   <div id="create-organization-dialog-slot" data-enabled="${String(canCreateOrganization)}">${canCreateOrganization ? createOrganizationDialogHtml() : ""}</div>
   ${deleteOrganizationDialogHtml(active?.name ?? "")}
   ${deleteAccountDialogHtml()}
+  <div id="api-key-dialog-slot"></div>
   <div class="toast-region" id="toast-region" aria-live="polite" aria-atomic="false"></div>
   <script type="application/json" id="dashboard-data">${safeJson(boot)}</script>
 </body>

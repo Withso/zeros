@@ -176,6 +176,11 @@ export async function proxyControlPlane(
     });
   }
 
+  if (request.method === "DELETE" && upstream.status === 204) {
+    await cancelUnusedResponseBody(upstream);
+    return new Response(null, { status: 204, headers: { "cache-control": "no-store", pragma: "no-cache" } });
+  }
+
   const upstreamContentType = upstream.headers.get("content-type") ?? "";
   const responseType = acceptedControlPlaneResponseType(
     pathname,

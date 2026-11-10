@@ -3,7 +3,9 @@ import type { Transport } from "../transport";
 import type { ChatRow } from "./chat-history";
 import type { SessionChange, SessionStore } from "./session-store";
 
-interface Pending { chat?: ChatRow; deleted?: true; replace?: true; revision: number; historyState?: CloudV2HistoryState; rows: Map<string, CloudV2MessageRow>; due: number }
+interface Pending { chat?: ChatRow; deleted?: true; replace?: true; revision: number; historyState?: CloudV2HistoryState; rows: Map<string, CloudV2MessageRow>; due: number;
+  /** chat-edit-v1: acknowledged only in the frame that carries this chat's row. */
+  ack?: string }
 
 /** Live viewers use bridge frames. The sleeping-VM mirror batches streamed
  * rows on a one-second trailing edge; durable changes and turn end flush it.
@@ -33,6 +35,20 @@ export class HistoryMirror {
     for (const chatId of chatDeletions) this.pending.set(chatId, { deleted: true, revision: 0, rows: new Map(), due: 0 });
     for (const chat of chats) this.pending.set(chat.id, { chat, ...(this.replacement() ? { replace: true, historyState: this.store.historyState(chat.id) } : {}),
       revision: this.store.historyRevision(chat.id), rows: new Map(this.store.history(chat.id).map((row) => [row.msgId, row])), due: 0 });
+    this.drain();
+  }
+
+  /** Call after the edit is in the store. The next frame for this chat sends
+   * its current row with the acknowledgement; offline, the control plane
+   * offers the edit again and it is acknowledged again. */
+  acknowledgeChatEdit(chatId: string, version: string): void {
+    const chat = this.store.metadata(chatId)?.chat;
+    if (!this.online || !chat) return;
+    const pending: Pending = this.pending.get(chatId) ?? { rows: new Map(), revision: this.store.historyRevision(chatId), due: 0 };
+    if (pending.deleted) return;
+    pending.chat = chat; pending.due = 0;
+    if (pending.ack === undefined || BigInt(version) > BigInt(pending.ack)) pending.ack = version;
+    this.pending.set(chatId, pending);
     this.drain();
   }
 
@@ -85,7 +101,8 @@ export class HistoryMirror {
         const frames: CloudV2WorkerFrame[] = [];
         if (pending.deleted) frames.push({ t: "history", chatDeletions: [chatId] });
         else {
-          if (pending.chat) frames.push({ t: "history", chats: [{ ...this.sanitize(pending.chat) }] });
+          if (pending.chat) frames.push({ t: "history", chats: [{ ...this.sanitize(pending.chat) }],
+            ...(pending.ack !== undefined ? { chatEditAcks: [{ chatId, version: pending.ack }] } : {}) });
           let rows: CloudV2MessageRow[] = [], size = 1024;
           let replace = pending.replace;
           const batch = () => { frames.push({ t: "history", messages: { chatId, rows, ...(replace ? { replace, historyState: pending.historyState } : {}) } }); replace = undefined; };

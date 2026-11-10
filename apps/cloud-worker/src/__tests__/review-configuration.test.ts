@@ -36,7 +36,9 @@ async function fixture() {
   const registration = drivers[0].opened!.mcpServers!.zeros_workspace;
   const client = new Client({ name: "configuration-review-probe", version: "1" }); cleanups.push(() => client.close());
   await client.connect(new StreamableHTTPClientTransport(new URL(registration.url), { requestInit: { headers: registration.headers } }));
-  expect((await client.listTools()).tools).toHaveLength(4);
+  const names = (await client.listTools()).tools.map(tool => tool.name);
+  expect(names.filter(name => name.startsWith("code_review_"))).toHaveLength(4);
+  expect(names).toEqual(expect.arrayContaining(["GetTerminalOutput", "GetWorkspaceDiff"]));
   return { worker, relay, configuration, client };
 }
 
@@ -77,7 +79,7 @@ describe("exact snapshot review configuration revocation", () => {
     const configuring = f.relay.receive({ ...f.configuration, loginRevision: "1", workspace: { ...f.configuration.workspace, baseBranch: "release" } });
     try {
       await expect.poll(() => entered).toBe(true);
-      expect((await f.client.listTools()).tools).toHaveLength(4);
+      expect((await f.client.listTools()).tools.filter(tool => tool.name.startsWith("code_review_"))).toHaveLength(4);
     } finally { release(); await configuring; }
   });
 
@@ -89,7 +91,7 @@ describe("exact snapshot review configuration revocation", () => {
       : boundary === "foreign workspace" ? f.relay.receive({ ...disabled, loginRevision: "3", workspace: { ...disabled.workspace, id: CLIENT_A } })
       : f.relay.receive({ ...f.configuration, loginRevision: "3", codeReview: { userId: CLIENT_A } });
     if (boundary === "stale") await receive; else await expect(receive).rejects.toThrow(/identity changed/);
-    expect((await f.client.listTools()).tools).toHaveLength(4);
+    expect((await f.client.listTools()).tools.filter(tool => tool.name.startsWith("code_review_"))).toHaveLength(4);
   });
 });
 

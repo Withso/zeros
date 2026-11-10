@@ -9,8 +9,9 @@ import { z } from "zod";
 import { CloudWorkspaceEnvironmentSchema } from "./cloud-workspace-environment";
 export * from "./cloud-workspace-environment";
 export * from "./cloud-runtime-update";
+export * from "./cloud-workspace-resources";
 import { MAX_BRIDGE_FRAME_BYTES } from "./schemas";
-import { CloudV2PromptCounterSchema } from "./cloud-v2-prompts";
+import { CloudV2ChatEditAckSchema, CloudV2PromptCounterSchema } from "./cloud-v2-prompts";
 import { RepositorySetupPathSchema } from "./repository-setup";
 export { RepositorySetupPathSchema, REPOSITORY_SETUP_MAX_BYTES } from "./repository-setup";
 export { CloudFailureSchema, CloudProviderFailureSchema, CloudMcpFailureSchema, cloudFailureMessage } from "./cloud-failure";
@@ -78,6 +79,8 @@ export const CloudV2HistoryFrameSchema = z.object({
       replace: z.literal(true).optional(),
       historyState: CloudV2HistoryStateSchema.optional(),
     }).strict().refine(value => !value.historyState || value.replace === true, "History state requires replacement").optional(),
+    /** chat-edit-v1 only: edits whose chat rows this same batch carries. */
+    chatEditAcks: z.array(CloudV2ChatEditAckSchema).max(128).optional(),
   }).strict();
 
 export const CloudV2WorkerFrameSchema = z.discriminatedUnion("t", [
@@ -150,6 +153,12 @@ export const CloudV2ControlFrameSchema = z.discriminatedUnion("t", [
   githubPullRequests: z.literal(1).optional(),
     githubUserTokens: z.literal(1).optional(),
     loginRevision: z.string().regex(/^(0|[1-9][0-9]{0,19})$/),
+    /** Sent only to workers advertising workspace-api-v1 whose workspace has
+     * API access. The token is fixed for one VM run (create or wake until stop). */
+    api: z.object({
+      url: z.url({ protocol: /^https$/ }).max(2048),
+      token: z.string().regex(/^zw2a_[A-Za-z0-9_-]{43}$/),
+    }).strict().optional(),
     mcpServers: z.array(RuntimeMcpServerSchema).max(128).optional(),
     workspace: z.object({
       id: z.uuid(),

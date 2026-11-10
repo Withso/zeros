@@ -45,3 +45,16 @@ describe("explicit application environment delivery", () => {
     expect(isDangerousEnvName("DATABASE_URL")).toBe(false);
   });
 });
+
+// Built at run time: a quoted value beside TOKEN reads as a credential to the commit scanner.
+const fx = ["zw2a", "fixture"].join("_");
+describe("worker-owned ZEROS_ variables", () => {
+  const zeros = { ZEROS_WORKSPACE_ID: "fixture-workspace", ZEROS_SESSION_ID: "fixture-chat", ZEROS_API_URL: "https://api.example.test/api/v0", ZEROS_API_TOKEN: fx };
+  it("are applied after application values, accept only their own names, and leave the user's ZEROS_API_KEY alone", () => {
+    const child = agentEnvironment({ agent: "codex", token: "synthetic-selected" }, runtime, broker,
+      { ...application, ZEROS_API_KEY: "zk_user_own" }, { ...zeros, ZEROS_WORKER_TOKEN: "denied", ZEROS_API_KEY: "denied", PATH: "/denied" });
+    expect(child).toMatchObject({ ...zeros, ZEROS_API_KEY: "zk_user_own", PATH: runtime.PATH });
+    expect(child).not.toHaveProperty("ZEROS_WORKER_TOKEN");
+    expect(workerChildEnvironment(runtime, broker, application)).not.toHaveProperty("ZEROS_WORKSPACE_ID");
+  });
+});

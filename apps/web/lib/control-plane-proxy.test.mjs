@@ -14,6 +14,16 @@ import {
 const ORG = "6dfb8df2-a31d-42e1-b95f-c37a90f24955";
 const USER = "de7159b8-b163-44ef-9742-a63099bc4f38";
 
+test("proxy admits only API key list, create and revoke under an organization", () => {
+  const collection = `/v1/organizations/${ORG}/api-keys`, key = `${collection}/${USER}`;
+  for (const method of ["GET", "POST"]) assert.equal(allowedControlPlaneRoute(method, collection), true);
+  assert.equal(allowedControlPlaneRoute("DELETE", key), true);
+  for (const method of ["GET", "POST", "PATCH"]) assert.equal(allowedControlPlaneRoute(method, key), false);
+  assert.equal(allowedControlPlaneRoute("DELETE", collection), false);
+  assert.equal(allowedControlPlaneRoute("POST", "/api/v0/workspaces"), false);
+  assert.equal(allowedControlPlaneRoute("GET", `${collection}/not-a-uuid`), false);
+});
+
 test("proxy allow-list exposes only dashboard organization operations", () => {
   assert.equal(allowedControlPlaneRoute("GET", "/v1/me"), true);
   assert.equal(allowedControlPlaneRoute("GET", "/v1/auth/snapshot"), true);

@@ -34,6 +34,10 @@ export function allowedControlPlaneRoute(method, pathname) {
   if (invitations.test(pathname)) return method === "GET" || method === "POST";
   const invitation = new RegExp(`^/v1/organizations/${UUID}/invitations/${UUID}$`);
   if (invitation.test(pathname)) return method === "DELETE";
+  const apiKeys = new RegExp(`^/v1/organizations/${UUID}/api-keys$`);
+  if (apiKeys.test(pathname)) return method === "GET" || method === "POST";
+  const apiKey = new RegExp(`^/v1/organizations/${UUID}/api-keys/${UUID}$`);
+  if (apiKey.test(pathname)) return method === "DELETE";
   const teams = new RegExp(`^/v1/organizations/${UUID}/teams$`);
   if (teams.test(pathname)) return method === "GET" || method === "POST";
   const billing = new RegExp(`^/v1/organizations/${UUID}/billing$`);

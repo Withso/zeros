@@ -1,8 +1,8 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 
 /** Bearer prefixes make a leaked value recognisable in logs and scanners. */
-export type CloudV2TokenKind = "worker" | "connect" | "proxy";
-const PREFIX: Record<CloudV2TokenKind, string> = { worker: "zw2w_", connect: "zw2c_", proxy: "zw2p_" };
+export type CloudV2TokenKind = "worker" | "connect" | "proxy" | "api";
+const PREFIX: Record<CloudV2TokenKind, string> = { worker: "zw2w_", connect: "zw2c_", proxy: "zw2p_", api: "zw2a_" };
 const BODY = /^[A-Za-z0-9_-]{43}$/;
 
 export function newCloudV2Token(kind: CloudV2TokenKind): { token: string; hash: Buffer } {

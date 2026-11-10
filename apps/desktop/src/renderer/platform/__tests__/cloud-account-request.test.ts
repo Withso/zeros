@@ -39,6 +39,15 @@ describe("cloud request account boundaries", () => {
     await changeCloudWorkspaceLifecycle(target, "delete", "fixture-delete");
     expect(fetch).toHaveBeenLastCalledWith(`https://api.example.test/v1/cloud-v2/workspaces/${id}`, expect.objectContaining({ method: "DELETE" }));
   });
+  it("restarts through its own v2 endpoint and surfaces a workspace that cannot restart yet", async () => {
+    state.session.mockResolvedValue(session);
+    const id = "11111111-1111-4111-8111-111111111111", target = { organizationId: id, workspaceId: id };
+    const fetch = vi.fn(async () => Response.json({ workspace: v2Workspace(id, "stopping") }, { status: 202 })); vi.stubGlobal("fetch", fetch);
+    expect((await changeCloudWorkspaceLifecycle(target, "restart", "fixture-restart")).status).toBe("stopping");
+    expect(fetch).toHaveBeenLastCalledWith(`https://api.example.test/v1/cloud-v2/workspaces/${id}/restart`, expect.objectContaining({ method: "POST", body: "{}" }));
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ error: { code: "workspace_unavailable", message: "The workspace cannot restart yet." } }, { status: 409 })));
+    await expect(changeCloudWorkspaceLifecycle(target, "restart", "fixture-restart-2")).rejects.toMatchObject({ status: 409, code: "workspace_unavailable" });
+  });
   it("shows a stopped workspace with an archive mark as archived, and only then", async () => {
     state.session.mockResolvedValue(session);
     const id = "11111111-1111-4111-8111-111111111111", target = { organizationId: id, workspaceId: id };

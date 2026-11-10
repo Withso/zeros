@@ -1,5 +1,6 @@
 import { generateKeyPairSync, randomUUID } from "node:crypto";
 import { performance } from "node:perf_hooks";
+import { readFile } from "node:fs/promises";
 import { Hono } from "hono";
 import pg from "pg";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -14,6 +15,7 @@ import type { CloudV2LifecycleDeps } from "./lifecycle.js";
 import { CLOUD_SOURCE_ADMISSION_MS, CLOUD_SOURCE_GRACE_MS, CLOUD_SOURCE_REFRESH_MS } from "./source-authority.js";
 import { DatabaseCloudAgentCredentialService } from "../agent-credentials/agent-credentials.js";
 import { cloudAgentModels } from "../agent-credentials/agent-models.js";
+import { createCloudApiRoutes } from "./api/routes.js";
 
 const suite = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 suite("runtime hello through the production composition", () => {
@@ -27,7 +29,8 @@ suite("runtime hello through the production composition", () => {
   });
   afterAll(() => pool.end());
 
-  async function fixture(privateBoot = true, secondary = false) {
+  async function fixture(privateBoot = true, secondary = false, api = false, beforeApiColumn = false) {
+    if (beforeApiColumn) await pool.query("ALTER TABLE cloud_v2_workspaces DROP COLUMN api_access, DROP COLUMN restart_stop_generation");
     const creator = randomUUID(), org = randomUUID();
     await pool.query("INSERT INTO users(id,email,display_name) VALUES($1,$2,'Fixture')", [creator, `${creator}@example.test`]);
     await grantTestPro(pool, creator);
@@ -48,13 +51,13 @@ suite("runtime hello through the production composition", () => {
     });
     vi.stubGlobal("fetch", fetcher);
     const config = {
-      github: null, deploymentChannel: "alpha", cloudAgentCredentials: { settingsSecretKeyV1: Buffer.alloc(32, 7).toString("base64url") },
+      github: null, deploymentChannel: "alpha", inviteLinkBase: "https://app.example.test/invite", cloudAgentCredentials: { settingsSecretKeyV1: Buffer.alloc(32, 7).toString("base64url") },
       cloudV2: { boat: { apiKey: "synthetic-boat-credential" }, apiUrl: "https://api.example.test", realtimeUrl: "https://rt.example.test", promptOutbox: true,
         workerSigningKey: generateKeyPairSync("ed25519").privateKey.export({ type: "pkcs8", format: "der" }).toString("base64"),
         runtime: { sha256: "b".repeat(64), store: { endpoint: "https://store.example.test", bucket: "fixture", accessKeyId: "fixture", secretAccessKey: "fixture" } } },
     } as Config;
     const cp = createCloudV2(config, pool, { relay: false, lifecycle: false })!;
-    cleanup.push(async () => { cp.runtimeUpdates.close(); await cp.loginChanges?.stop(); await cp.promptChanges?.stop(); });
+    cleanup.push(async () => { cp.runtimeUpdates.close(); await cp.api.credentials.close(); await cp.loginChanges?.stop(); await cp.promptChanges?.stop(); });
     const scope = { organizationId: org, userId: creator }, connections = cp.routes.githubConnections!;
     await connections.store.save(scope, await connections.store.fingerprint(scope), { id: "12", login: "fixture" },
       { method: "pat", accessToken: "synthetic-pat", expiresAt: null });
@@ -64,6 +67,12 @@ suite("runtime hello through the production composition", () => {
         VALUES($1,$2,$3,'Historical workspace','fixture/repo','workspace/fixture','main','creating',ARRAY['fixture/repo','secondary/repo'])`, [id, org, creator]);
       await pool.query(`INSERT INTO cloud_v2_github_sources(workspace_id,source_repository,repository_id)
         VALUES($1,'fixture/repo',42),($1,'secondary/repo',43)`, [id]);
+    }
+    if (beforeApiColumn) {
+      const migration = await readFile(new URL("../../migrations/0226_cloud_api.sql", import.meta.url), "utf8");
+      const expansion = migration.match(/ALTER TABLE cloud_v2_workspaces\s[\s\S]*?;/)?.[0];
+      expect(expansion).toBeDefined();
+      await pool.query(expansion!);
     }
     const workspace = secondary ? await cp.store.get(id, creator) : await cp.store.createWorkspace({ id, organizationId: org, creatorUserId: creator, name: "Runtime",
       repository: "fixture/repo", sourceRepositoryId: "42", branch: "workspace/fixture", baseBranch: "main", computerBuildId: null });
@@ -82,18 +91,103 @@ suite("runtime hello through the production composition", () => {
     app.use("*", requestTiming({ slowMs: Infinity, databasePool: pool, costObserver: value => { costs.push(value); } }));
     app.onError((error, c) => c.json({ code: error instanceof HttpError ? error.code : "internal" }, error instanceof HttpError ? error.status : 500));
     app.route("/", createCloudV2WorkerRoutes(cp.workers));
-    const hello = (bootId = h.next_boot_id, runtimeSha256 = h.target_sha256, id = h.id) => app.request("/v2/cloud/worker/hello", {
+    const hello = (bootId = h.next_boot_id, runtimeSha256 = h.target_sha256, id = h.id, chatEdits = false) => app.request("/v2/cloud/worker/hello", {
       method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json", "x-zeros-runtime-handoff": id,
-        "x-zeros-worker-features": "runtime-update-v1,prompt-outbox-v1,workspace-environment-v1,repository-setup-v1,mcp-v1,github-pr-v1,git-identity-v1" },
+        "x-zeros-worker-features": `runtime-update-v1,prompt-outbox-v1,workspace-environment-v1,repository-setup-v1,mcp-v1,github-pr-v1,git-identity-v1${api ? ",workspace-api-v1" : ""}${chatEdits ? ",chat-edit-v1" : ""}` },
       body: JSON.stringify({ protocol: 2, bootId, runtimeSha256 }),
     });
-    const ordinary = (route: "hello" | "config") => app.request(`/v2/cloud/worker/${route}`, {
+    const ordinary = (route: "hello" | "config", apiFeature = api, runtimeSha256 = "b".repeat(64)) => app.request(`/v2/cloud/worker/${route}`, {
       method: route === "hello" ? "POST" : "GET", headers: { authorization: `Bearer ${token}`, "content-type": "application/json", "x-zeros-worker-boot": boot,
-        "x-zeros-worker-features": "runtime-update-v1,prompt-outbox-v1,workspace-environment-v1,repository-setup-v1,mcp-v1,github-pr-v1,git-identity-v1" },
-      ...(route === "hello" ? { body: JSON.stringify({ protocol: 2, bootId: boot, runtimeSha256: "b".repeat(64) }) } : {}),
+        "x-zeros-worker-features": `runtime-update-v1,prompt-outbox-v1,workspace-environment-v1,repository-setup-v1,mcp-v1,github-pr-v1,git-identity-v1${apiFeature ? ",workspace-api-v1" : ""}` },
+      ...(route === "hello" ? { body: JSON.stringify({ protocol: 2, bootId: boot, runtimeSha256 }) } : {}),
     });
     return { cp, creator, org, workspace, token, boot, h, handoffs, hello, ordinary, costs, fetcher, deny: () => { allowed = false; } };
   }
+
+  it("grants a pre-column workspace API access only to a worker advertising the feature", async () => {
+    const f = await fixture(false, true, false, true);
+    const legacy = await f.ordinary("config");
+    expect(legacy.status).toBe(200); expect((await legacy.json()).config).not.toHaveProperty("api");
+    expect((await pool.query("SELECT 1 FROM cloud_v2_tokens WHERE workspace_id=$1 AND kind='api'", [f.workspace.id])).rowCount).toBe(0);
+    const capable = await f.ordinary("config", true);
+    expect(capable.status).toBe(200);
+    const api = (await capable.json()).config.api;
+    expect(typeof api?.token).toBe("string");
+    const authenticated = await createCloudApiRoutes(f.cp.api).request("/me", { headers: { authorization: `Bearer ${api.token}` } });
+    expect(authenticated.status).toBe(200);
+    expect(await authenticated.json()).toMatchObject({ workspaceId: f.workspace.id, userId: f.creator, organizationId: f.org });
+    const oldAgain = await f.ordinary("config", false);
+    expect(oldAgain.status).toBe(200); expect((await oldAgain.json()).config).not.toHaveProperty("api");
+  });
+
+  it.each([false, true])("shares one VM-run API token with the current and private worker through rollback=%s", async rollback => {
+    const f = await fixture(false, false, true);
+    const original = await f.ordinary("config"); expect(original.status).toBe(200);
+    const api = (await original.json()).config.api;
+    expect(typeof api?.token).toBe("string");
+    expect(await f.handoffs.commit(f.token, f.boot, f.h.id, f.h.login_revision, 7, f.h.target_sha256)).toBe(true);
+    await f.handoffs.activate(f.token, f.h.id);
+    const response = await f.hello();
+    expect(response.status).toBe(200);
+    expect((await response.json()).config.api?.token === api.token).toBe(true);
+    if (rollback) {
+      expect(await f.handoffs.rollback(f.h.id)).not.toBeNull();
+      expect((await (await f.hello(f.h.rollback_boot_id, f.h.previous_sha256)).json()).config.api?.token === api.token).toBe(true);
+    }
+    expect(await f.handoffs.promote(f.token, f.h.id, rollback ? f.h.rollback_boot_id : f.h.next_boot_id)).toBe(true);
+    expect((await f.cp.api.credentials.resolve(`Bearer ${api.token}`)).workspaceId).toBe(f.workspace.id);
+    const repeated = (await (await (rollback ? f.hello(f.h.rollback_boot_id, f.h.previous_sha256) : f.hello())).json()).config.api;
+    expect(repeated?.token === api.token).toBe(true);
+    expect((await pool.query("SELECT stop_generation::text AS generation FROM cloud_v2_workspaces WHERE id=$1", [f.workspace.id])).rows[0].generation).toBe(f.h.stop_generation);
+    expect((await pool.query("SELECT 1 FROM cloud_v2_tokens WHERE workspace_id=$1 AND kind='api'", [f.workspace.id])).rowCount).toBe(1);
+  });
+
+  it.each([false, true])("retains the current worker's API token when a committed=%s runtime adoption is cancelled", async committed => {
+    const f = await fixture(false, false, true);
+    const before = await f.ordinary("config"); expect(before.status).toBe(200);
+    const token = (await before.json()).config.api?.token;
+    expect(typeof token).toBe("string");
+    if (committed) expect(await f.handoffs.commit(f.token, f.boot, f.h.id, f.h.login_revision, 7, f.h.target_sha256)).toBe(true);
+    expect(await f.handoffs.cancel(f.token, f.h.id, f.boot)).toBe(true);
+    const after = await f.ordinary("config"); expect(after.status).toBe(200);
+    expect((await after.json()).config.api?.token === token).toBe(true);
+    expect((await f.cp.api.credentials.resolve(`Bearer ${token}`)).workspaceId).toBe(f.workspace.id);
+    expect((await pool.query("SELECT stop_generation::text AS generation FROM cloud_v2_workspaces WHERE id=$1", [f.workspace.id])).rows[0].generation).toBe(f.h.stop_generation);
+  });
+
+  it.each([false, true])("binds session-edit support to the promoted worker, including rollback=%s", async rollback => {
+    const f = await fixture(), sessionId = randomUUID();
+    await f.cp.store.writeHistory(f.workspace.id, { chats: [{ id: sessionId, title: "Original", agentId: "codex" } as never] });
+    const key = (await f.cp.api.credentials.create(f.org, f.creator, "Capability test")).key;
+    const api = createCloudApiRoutes(f.cp.api);
+    const rename = () => api.request(`/sessions/${sessionId}/rename`, { method: "POST",
+      headers: { authorization: `Bearer ${key}`, "content-type": "application/json" }, body: JSON.stringify({ name: "Edited" }) });
+    expect((await rename()).status).toBe(409);
+    expect((await f.hello(f.h.next_boot_id, f.h.target_sha256, f.h.id, true)).status).toBe(200);
+    const beforePromotion = await rename();
+    expect(beforePromotion.status).toBe(409);
+    expect((await beforePromotion.json()).error.code).toBe("worker_update_required");
+    if (rollback) {
+      expect(await f.handoffs.rollback(f.h.id)).not.toBeNull();
+      expect((await f.hello(f.h.rollback_boot_id, f.h.previous_sha256, f.h.id, false)).status).toBe(200);
+    }
+    expect(await f.handoffs.promote(f.token, f.h.id, rollback ? f.h.rollback_boot_id : f.h.next_boot_id)).toBe(true);
+    expect((await rename()).status).toBe(rollback ? 409 : 200);
+    expect((await pool.query("SELECT cardinality(chat_edit_boot_ids) AS n FROM cloud_v2_workspaces WHERE id=$1", [f.workspace.id])).rows[0].n).toBeLessThanOrEqual(2);
+  });
+
+  it("preserves an adoption candidate's session-edit support through a repeated current hello", async () => {
+    const f = await fixture(), sessionId = randomUUID();
+    await f.cp.store.writeHistory(f.workspace.id, { chats: [{ id: sessionId, title: "Original", agentId: "codex" } as never] });
+    const key = (await f.cp.api.credentials.create(f.org, f.creator, "Capability test")).key;
+    expect((await f.hello(f.h.next_boot_id, f.h.target_sha256, f.h.id, true)).status).toBe(200);
+    expect((await f.ordinary("hello", false, f.h.previous_sha256)).status).toBe(200);
+    expect(await f.handoffs.promote(f.token, f.h.id, f.h.next_boot_id)).toBe(true);
+    const response = await createCloudApiRoutes(f.cp.api).request(`/sessions/${sessionId}/rename`, { method: "POST",
+      headers: { authorization: `Bearer ${key}`, "content-type": "application/json" }, body: JSON.stringify({ name: "Edited" }) });
+    expect(response.status).toBe(200);
+    expect((await response.json()).name).toBe("Edited");
+  });
 
   it("bounds ordinary hello and configuration refresh through the real services", async () => {
     const f = await fixture(false), samples: Array<{ phase: string; transactions: number; queries: number; githubCalls: number }> = [];

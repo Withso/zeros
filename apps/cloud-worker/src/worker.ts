@@ -3,7 +3,7 @@ import { access, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { CloudV2ControlFrameSchema, CLOUD_V2_RELAY_PROTOCOL, type CloudV2ControlFrame, type CloudV2WorkerFrame } from "@zeros/protocol/cloud-v2-relay";
+import { CloudV2ControlFrameSchema, CLOUD_V2_RELAY_PROTOCOL, CLOUD_WORKSPACE_RESOURCES_CAPABILITY, type CloudV2ControlFrame, type CloudV2WorkerFrame } from "@zeros/protocol/cloud-v2-relay";
 import { CloudV2PromptPullReplySchema } from "@zeros/protocol/cloud-v2-prompts";
 import { createMessage, type BridgeMessage } from "@zeros/protocol/messages";
 import { safeParseClientBridgeMessage } from "@zeros/protocol/schemas";
@@ -33,10 +33,13 @@ import type { ModelDiscoveryOptions } from "./credentials/model-availability";
 import { PromptInbox } from "./prompt-inbox";
 import { McpGateway } from "./mcp/gateway";
 import { WorkspaceToolsMcp } from "./mcp/workspace-tools";
+import { WorkspaceAgentTools } from "./mcp/agent-tools";
+import { MemoryWatchdog, type KillReport } from "./resources/watchdog";
 import { WorkerCodeReview } from "./workspace/code-review";
 import { measureStartup, recordStartupTiming, type StartupTimingObserver } from "./startup-timings";
 import { EnvironmentSeedError, seedEnvironment } from "./workspace/environment-seed";
 import { ApplicationEnvironment } from "./credentials/application-environment";
+import { WorkspaceApiEnvironment } from "./credentials/workspace-api";
 import { RuntimeQuiescence, type RuntimeCensus } from "./runtime-quiescence";
 import { RuntimeUpdate } from "./runtime-update";
 import type { RuntimePermit } from "./runtime-permit";
@@ -60,6 +63,10 @@ interface WorkerOptions {
   /** Closed configuration paths only; never values or user-defined keys. */
   onReconfigure?: (changed: readonly string[]) => void;
   modelDiscovery?: ModelDiscoveryOptions;
+  /** Production only: the directories the shipped runtime runs from. */
+  memoryWatchdog?: { runtimeRoots: readonly string[] };
+  /** Closed codes only. */
+  onMemory?: (event: "memory_stopped" | "memory_pressure") => void;
 }
 interface Client extends AppClient { rejected: boolean }
 
@@ -103,6 +110,9 @@ export class CloudWorker {
   private promptInbox?: PromptInbox;
   private workspace?: WorkspaceService;
   private terminals?: Terminals;
+  private application?: ApplicationEnvironment;
+  private watchdog?: MemoryWatchdog;
+  private workspaceApi?: WorkspaceApiEnvironment;
   private setup?: WorkspaceSetup;
   private checkoutRefresh?: CheckoutRefresh;
   private initialSetupNeeded = false;
@@ -177,7 +187,7 @@ export class CloudWorker {
 
   async dispose(): Promise<void> {
     if (this.disposed) return;
-    this.disposed = true; this.runtimeUpdater?.stop(); clearInterval(this.heartbeat); this.tokens.dispose(); this.githubCredentials.invalidate();
+    this.disposed = true; this.runtimeUpdater?.stop(); this.watchdog?.stop(); clearInterval(this.heartbeat); this.tokens.dispose(); this.githubCredentials.invalidate();
     const workspaceTools = this.workspaceMcp.dispose();
     const agentsClosing = this.agents?.dispose();
     this.environmentLifetime.abort();
@@ -345,11 +355,12 @@ export class CloudWorker {
     if (!this.scope) {
       if (!await this.initialize(scope, config, timing)) return;
     } else {
+      if (!changed || changed.includes("api")) { this.application!.protect([config.api?.token]); this.workspaceApi!.configure(config.api); }
       if (!changed || changed.some(key => key.startsWith("workspace.")))
         await measureStartup("worker_reconfigure_workspace", () => this.workspace!.configure(config.workspace), timing);
       await measureStartup("worker_reconfigure_mcp", () => this.mcp!.configure(config.mcpServers ?? [], config.loginRevision), timing);
       if (!this.stopping) await this.reviews!.configure(config.codeReview);
-      if (!this.reviews!.enabled) this.workspaceMcp.revoke();
+      if (!this.reviews!.enabled) this.workspaceMcp.revokeReview();
       this.agents!.configure(config);
     }
     if (this.disposed) return;
@@ -374,7 +385,7 @@ export class CloudWorker {
           if (batch.success && batch.data.prompts.length) await this.touchCheckout();
         }
         return reply;
-      });
+      }, (chatId, version) => this.history?.acknowledgeChatEdit(chatId, version));
       this.promptInbox.start();
     } else if (this.promptInbox) { await this.promptInbox.dispose(); this.promptInbox = undefined; }
     this.configurationRevision = revision;
@@ -438,6 +449,9 @@ export class CloudWorker {
       }
       if (this.disposed || this.stopping) return false;
       const application = new ApplicationEnvironment(config.environment && { variables: config.environment.variables, files: config.environment.files });
+      application.protect([config.api?.token]);
+      const workspaceApi = new WorkspaceApiEnvironment(scope.workspace.id);
+      workspaceApi.configure(config.api);
       const restoreMarker = join(this.options.directory, "restored-from-checkpoint");
       const restored = await access(restoreMarker).then(() => true, (error: NodeJS.ErrnoException) => {
         if (error.code !== "ENOENT") throw error;
@@ -478,8 +492,11 @@ export class CloudWorker {
         cursor: () => new CursorDriver({ gitEnvironment: this.gitEnvironment }),
       }, config,
         (frame) => this.broadcast(frame), () => { this.runtimeGate.activity(); void this.reportIdle(); }, this.options.onTiming, this.options.modelDiscovery, executionId => mcp!.providers(executionId),
-        async input => reviews!.enabled ? this.workspaceMcp.admit(input.executionId, reviews!.tools(input)) : undefined, application, !!this.options.runtimeResume);
+        async input => this.workspaceMcp.admit(input.executionId, new WorkspaceAgentTools({ assertCurrent: () => input.assertExecutionCurrent(),
+          terminalOutput: request => terminals!.output(request), diff: request => workspace!.git.agentDiff(request),
+          ...(reviews!.enabled ? { review: reviews!.tools(input) } : {}) })), application, !!this.options.runtimeResume, workspaceApi);
       terminals = new Terminals(scope, { gitEnvironment: this.gitEnvironment, applicationEnvironment: application.variables,
+        zerosEnvironment: () => workspaceApi.variables(), redact: text => application.text(text),
         records: join(this.options.directory, "terminals"), broadcast: frame => this.broadcast(frame), activity: () => { this.runtimeGate.activity(); void this.reportIdle(); } });
       const chats = new ChatService(store, scope, (chatId) => agents!.closeChat(chatId), agents.turns, {
         historyReplacement: () => this.historyReplacementEnabled,
@@ -509,9 +526,10 @@ export class CloudWorker {
       if (this.disposed || this.stopping) return false;
       this.environmentVersion = config.environment?.versionId;
       this.store = store; this.workspace = workspace; this.mcp = mcp; this.agents = agents; this.reviews = reviews;
-      this.terminals = terminals; this.chats = chats; this.history = history; this.setup = setup; this.checkoutRefresh = refresh;
+      this.terminals = terminals; this.application = application; this.workspaceApi = workspaceApi; this.chats = chats; this.history = history; this.setup = setup; this.checkoutRefresh = refresh;
       this.unsubscribers.push(...unsubscribers); this.scope = scope; published = true;
       recordStartupTiming("worker_services", servicesStarted, timing);
+      if (this.options.memoryWatchdog && process.platform === "linux" && process.getuid) this.startWatchdog(this.options.memoryWatchdog.runtimeRoots, process.getuid());
       const refreshing = refresh?.start();
       if (!this.options.runtimeResume) setup.start(this.initialSetupNeeded || restored);
       return true;
@@ -528,11 +546,27 @@ export class CloudWorker {
     }
   }
 
+  private startWatchdog(runtimeRoots: readonly string[], uid: number): void {
+    const watchdog = this.watchdog = new MemoryWatchdog({ self: process.pid, uid, runtimeRoots, loginShells: () => new Set(this.terminals?.shellPids().keys()),
+      onPressure: () => this.options.onMemory?.("memory_pressure"),
+      onKilled: report => { this.options.onMemory?.("memory_stopped"); void this.reportStopped(report).catch(() => {}); } });
+    watchdog.start();
+  }
+  private async reportStopped(report: KillReport): Promise<void> {
+    const name = report.name.replace(/[^\x20-\x7e]/g, "?").slice(0, 32) || "a process";
+    const size = report.rssBytes >= 2 ** 30 ? `${(report.rssBytes / 2 ** 30).toFixed(1)} GB` : `${Math.round(report.rssBytes / 2 ** 20)} MB`;
+    const message = `Zeros stopped ${name} (PID ${report.pid}, ${size}) because the workspace was almost out of memory.`;
+    if (report.owner.kind === "chat") this.agents?.processStopped(report.owner.chatId, message);
+    else if (report.owner.kind === "terminal") {
+      const sessionId = this.terminals?.shellPids().get(report.owner.shellPid);
+      if (sessionId) await this.terminals!.notice(sessionId, `\r\n\x1b[33m${message}\x1b[0m\r\n`);
+    }
+  }
   private broadcast(frame: BridgeMessage): Promise<void> { return this.send({ t: "frame", clientId: "*", frame }).then(() => {}); }
   private readyFrame(): BridgeMessage {
     return createMessage({ type: "ENGINE_READY", source: "engine", version: "0.0.0", root: "", framework: "cloud", port: 0,
       protocolVersion: PROTOCOL_VERSION, minProtocolVersion: MIN_SUPPORTED_PROTOCOL, instanceId: this.instanceId,
-      ...(this.reviews?.enabled ? { capabilities: ["code-review-v1"] } : {}) });
+      capabilities: [...(this.reviews?.enabled ? ["code-review-v1"] : []), CLOUD_WORKSPACE_RESOURCES_CAPABILITY] });
   }
   private async touchCheckout(): Promise<void> {
     await this.checkoutRefresh?.touch();
@@ -549,7 +583,7 @@ export class CloudWorker {
     await setup;
   }
   private async prepareStop(): Promise<void> {
-    clearInterval(this.heartbeat);
+    clearInterval(this.heartbeat); this.watchdog?.stop();
     const workspaceTools = this.workspaceMcp.dispose();
     // A delivery waiting behind a mutation can hold inbox/configuration drain.
     // Retire native inputs before either wait permits a late approval.

@@ -59,6 +59,7 @@ Environment=NODE_COMPILE_CACHE=${COMPILE_CACHE}
 ExecStart=/usr/bin/env node ${CURRENT}/worker.mjs
 Restart=always
 RestartSec=2
+OOMPolicy=continue
 
 [Install]
 WantedBy=multi-user.target

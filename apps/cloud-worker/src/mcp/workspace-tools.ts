@@ -3,7 +3,8 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { CallToolRequestSchema, InitializeRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
-import { CodeReviewError, type CodeReviewAgentToolsCore } from "@zeros/protocol/code-review";
+import { CodeReviewError } from "@zeros/protocol/code-review";
+import type { AgentToolSet } from "./agent-tools";
 import type { DriverMcpServers } from "./gateway";
 import { McpRuntimeActivity } from "./runtime-activity";
 
@@ -11,17 +12,22 @@ export interface WorkspaceToolAdmission {
   agentId: string;
   conversationId: string;
   executionId: string;
+  /** Review authority: retired by Stop and by review configuration changes. */
   assertCurrent(): void;
+  /** Read-only tools: retired only with the native execution itself. */
+  assertExecutionCurrent(): void;
 }
 export interface WorkspaceToolGrant {
   servers: DriverMcpServers;
+  /** Whether this grant was admitted with review tools, whose writes Stop must fence. */
+  review: boolean;
   revoke(): void;
   dispose(): Promise<void>;
 }
 export type WorkspaceToolFactory = (input: WorkspaceToolAdmission) => Promise<WorkspaceToolGrant | undefined>;
 interface Session { server: Server; transport: StreamableHTTPServerTransport }
 interface Entry {
-  id: string; credential: string; tools: CodeReviewAgentToolsCore; controller: AbortController;
+  id: string; credential: string; tools: AgentToolSet; controller: AbortController;
   sessions: Map<string, Session>; pending: Set<Session>; requests: Set<ServerResponse>; flights: Set<Promise<void>>; closing?: Promise<void>;
 }
 const equal = (a: string, b: string) => Buffer.byteLength(a) === Buffer.byteLength(b) && timingSafeEqual(Buffer.from(a), Buffer.from(b));
@@ -54,7 +60,7 @@ export class WorkspaceToolsMcp {
     await this.activity.http(req, res, () => this.handle(req, res));
   }
 
-  async admit(id: string, tools: CodeReviewAgentToolsCore): Promise<WorkspaceToolGrant> {
+  async admit(id: string, tools: AgentToolSet): Promise<WorkspaceToolGrant> {
     tools.assertCurrent();
     if (this.disposed || !/^[a-f0-9-]{36}$/.test(id) || this.entries.has(id) || this.entries.size >= 64)
       throw new Error("Workspace tools are unavailable.");
@@ -76,6 +82,7 @@ export class WorkspaceToolsMcp {
       this.assertCurrent(entry);
       return {
         servers: { zeros_workspace: { type: "http", url: `${this.origin}/mcp/${id}`, headers: { Authorization: `Bearer ${entry.credential}` } } },
+        review: tools.includesReview !== false,
         revoke: () => { void this.close(entry); },
         dispose: () => this.close(entry),
       };
@@ -125,7 +132,7 @@ export class WorkspaceToolsMcp {
     }
     if (req.method !== "POST" || !InitializeRequestSchema.safeParse(body).success) { res.writeHead(400).end(); return; }
     if (entry.sessions.size + entry.pending.size >= 8) { res.writeHead(503).end(); return; }
-    const server = new Server({ name: "zeros-workspace", version: "1" }, { capabilities: { tools: {} } });
+    const server = new Server({ name: "zeros-workspace", version: "1" }, { capabilities: { tools: {} }, ...(entry.tools.instructions ? { instructions: entry.tools.instructions } : {}) });
     server.setRequestHandler(ListToolsRequestSchema, () => { this.assertCurrent(entry); return { tools: entry.tools.listTools() }; });
     server.setRequestHandler(CallToolRequestSchema, (request, extra) => this.call(entry, async () => {
       this.assertCurrent(entry);
@@ -176,6 +183,14 @@ export class WorkspaceToolsMcp {
   }
 
   revoke(): void { for (const entry of this.entries.values()) void this.close(entry); }
+  /** Review withdrawal keeps each execution's terminal and diff tools; a set
+   * that is only review tools is retired whole, as before. */
+  revokeReview(): void {
+    for (const entry of this.entries.values()) {
+      if (entry.tools.withdrawReview) entry.tools.withdrawReview();
+      else void this.close(entry);
+    }
+  }
   dispose(): Promise<void> {
     if (this.disposing) return this.disposing;
     this.disposed = true;

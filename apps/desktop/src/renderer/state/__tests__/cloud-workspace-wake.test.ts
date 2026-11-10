@@ -223,6 +223,26 @@ describe("explicit cloud wake readiness", () => {
     expect(api.wake).toHaveBeenCalledTimes(2);
   });
 
+  it("restarts a running workspace as its own intent, fencing earlier input, and retries an uncertain restart with the same key", async () => {
+    acceptCloudWorkspaceDocument(doc(1, "ready"));
+    api.wake.mockRejectedValueOnce(new ControlPlaneError(503, "unavailable", "Try again."));
+    await expect(manageCloudWorkspace(target, "restart")).rejects.toThrow("Try again.");
+    api.wake.mockResolvedValue(doc(2, "stopping"));
+    await expect(manageCloudWorkspace(target, "restart")).resolves.toMatchObject({ status: "stopping" });
+    const [first, second] = api.wake.mock.calls;
+    expect(first![1]).toBe("restart"); expect(second![1]).toBe("restart"); expect(second![2]).toBe(first![2]);
+    expect(cloudWorkspaceDocument(target)).toMatchObject({ status: "stopping", version: 2 });
+  });
+
+  it("forgets a restart the server refused, so the next one is a new request", async () => {
+    acceptCloudWorkspaceDocument(doc(1, "ready"));
+    api.wake.mockRejectedValueOnce(new ControlPlaneError(409, "workspace_unavailable", "The workspace cannot restart yet."));
+    await expect(manageCloudWorkspace(target, "restart")).rejects.toMatchObject({ code: "workspace_unavailable" });
+    api.wake.mockResolvedValue(doc(2, "stopping"));
+    await manageCloudWorkspace(target, "restart");
+    expect(api.wake.mock.calls[1]![2]).not.toBe(api.wake.mock.calls[0]![2]);
+  });
+
   it("does not carry a settled intent into a replacement account", async () => {
     acceptCloudWorkspaceDocument(doc(1, "ready"));
     api.wake.mockResolvedValue(doc(2, "ready"));

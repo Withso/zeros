@@ -56,7 +56,7 @@ suite("Settings changes reach connected cloud workers", () => {
     settings.use("*", async (c, next) => { c.set("user", { id: owner.userId } as never); await next(); });
     settings.onError((error, c) => error instanceof HttpError ? c.json({ error: error.code }, error.status) : c.json({ error: "internal" }, 500));
     settings.route("/", createCloudAgentCredentialRoutes(service));
-    runtime = createCloudV2({ deploymentChannel: "alpha", github: {} as Config["github"], cloudAgentCredentials: { settingsSecretKeyV1: key }, cloudV2: {
+    runtime = createCloudV2({ deploymentChannel: "alpha", inviteLinkBase: "https://app.example.test/invite", github: {} as Config["github"], cloudAgentCredentials: { settingsSecretKeyV1: key }, cloudV2: {
       boat: { apiKey: "synthetic-boat-key-never-used" }, apiUrl: "https://example.test", realtimeUrl: "wss://example.test",
       workerSigningKey: generateKeyPairSync("ed25519").privateKey.export({ type: "pkcs8", format: "der" }).toString("base64"),
       runtime: { sha256: "b".repeat(64), store: { endpoint: "https://storage.example.test", bucket: "test", accessKeyId: "fixture", secretAccessKey: "fixture" } },

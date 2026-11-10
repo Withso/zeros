@@ -2,7 +2,7 @@
 // control plane. Contract parity is tested without a runtime package import.
 import { z } from "zod";
 import { CloudWorkspaceEnvironmentSchema } from "./environment-contract.js";
-import { CloudV2PromptCounterSchema } from "./prompt-contract.js";
+import { CloudV2ChatEditAckSchema, CloudV2PromptCounterSchema } from "./prompt-contract.js";
 import { RepositorySetupPathSchema } from "./repository-setup-contract.js";
 
 export const CLOUD_V2_RELAY_PROTOCOL = 2;
@@ -66,6 +66,7 @@ export const CloudV2HistoryFrameSchema = z.object({
       replace: z.literal(true).optional(),
       historyState: CloudV2HistoryStateSchema.optional(),
     }).strict().refine(value => !value.historyState || value.replace === true, "History state requires replacement").optional(),
+    chatEditAcks: z.array(CloudV2ChatEditAckSchema).max(128).optional(),
   }).strict();
 
 export const CloudV2WorkerFrameSchema = z.discriminatedUnion("t", [
@@ -123,6 +124,10 @@ export const CloudV2ControlFrameSchema = z.discriminatedUnion("t", [
    * owns proxy token refresh. */
   z.object({
     t: z.literal("config"),
+    api: z.object({
+      url: z.string().url().max(2048).refine(value => new URL(value).protocol === "https:"),
+      token: z.string().regex(/^zw2a_[A-Za-z0-9_-]{43}$/),
+    }).strict().optional(),
     environment: CloudWorkspaceEnvironmentSchema.optional(),
     promptOutbox: z.literal(1).optional(),
     runtimeUpdate: z.literal(1).optional(),

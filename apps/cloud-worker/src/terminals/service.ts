@@ -26,6 +26,10 @@ interface Options {
   environment?: NodeJS.ProcessEnv;
   gitEnvironment?: NodeJS.ProcessEnv;
   applicationEnvironment?: Readonly<Record<string, string>>;
+  /** Read at each spawn: worker-owned ZEROS_* identity and API variables. */
+  zerosEnvironment?: () => Readonly<Record<string, string>>;
+  /** Scrubs delivered secrets from screens the worker writes to disk. */
+  redact?: (text: string) => string;
   shellArgs?: string[];
   broadcast?: (frame: BridgeMessage) => void | Promise<void>;
   activity?: () => void;
@@ -83,6 +87,8 @@ const nativeSpawn = async ({ shell, args, cwd, cols, rows, env }: TerminalSpawnO
 
 /** Shared shells survive app disconnects. Each shell has a serialized screen
  * and subscription queue so replay and live bytes never overlap on reattach. */
+const TERMINAL_OUTPUT_MAX_BYTES = 256 * 1024;
+
 export class Terminals {
   private readonly sessions = new Map<string, Session>();
   private readonly pending = new Map<string, Pending>();
@@ -132,6 +138,34 @@ export class Terminals {
         return;
       }
     }
+  }
+
+  /** Read-only agent view: one shared (not client-owned) terminal, by id or
+   * the most recently active one. Bounded by the mirror's scrollback. */
+  async output(input: { terminalId?: string; maxLines: number }): Promise<{ terminalId: string; lines: string[]; truncated: boolean } | undefined> {
+    const shared = [...this.sessions.values()].filter(session => !session.owner && !session.removed);
+    const session = input.terminalId === undefined ? shared.sort((a, b) => b.lastActivityAt - a.lastActivityAt)[0]
+      : shared.find(candidate => candidate.sessionId === input.terminalId);
+    if (!session) return undefined;
+    let result = { lines: [] as string[], truncated: false };
+    await this.enqueue(session, async () => { result = await session.mirror.lines(input.maxLines, TERMINAL_OUTPUT_MAX_BYTES); });
+    const redact = this.options.redact ?? (text => text);
+    return { terminalId: session.sessionId, lines: result.lines.map(line => redact(line)), truncated: result.truncated };
+  }
+
+  /** Every live PTY shell, for the memory watchdog's protected set. */
+  shellPids(): Map<number, string> {
+    return new Map([...this.sessions.values()].filter(session => !session.exit && !session.removed).map(session => [session.native.pid, session.sessionId]));
+  }
+
+  /** Writes a worker line into a shell's screen, as its own output would be. */
+  async notice(sessionId: string, text: string): Promise<void> {
+    const session = this.sessions.get(sessionId);
+    if (!session || session.removed) return;
+    await this.enqueue(session, async () => {
+      session.hasOutput = true; session.mirror.write(text); await session.mirror.flush();
+      await this.publish(session, createMessage({ type: "PTY_DATA", source: "engine", sessionId: session.sessionId, data: text }));
+    });
   }
 
   detach(client: AppClient): void {
@@ -231,7 +265,7 @@ export class Terminals {
         cwd: `/proc/${process.pid}/fd/${descriptor.fd}`, cols, rows,
         // bash keeps an inherited PWD that names its working directory, so the
         // prompt shows the checkout instead of the held descriptor's /proc path.
-        env: { ...workerChildEnvironment(this.options.environment, this.options.gitEnvironment, this.options.applicationEnvironment), TERM: "xterm-256color", PWD: cwd,
+        env: { ...workerChildEnvironment(this.options.environment, this.options.gitEnvironment, this.options.applicationEnvironment, this.options.zerosEnvironment?.()), TERM: "xterm-256color", PWD: cwd,
           PROMPT_COMMAND: namePrompt(terminalName(this.scope.workspace.id, [this.scope.workspace.repository])) },
       });
       await this.files.assertDescriptor(descriptor);
@@ -349,7 +383,7 @@ export class Terminals {
     const record = (text: string) => JSON.stringify({ version: 1, sessionId: session.sessionId, cwd, cols: session.cols, rows: session.rows,
       screen: text, savedAt: Date.now() } satisfies TerminalRecord);
     // A screen too large to keep still leaves the latest directory, never an older record.
-    let body = record(screen.data);
+    let body = record(this.options.redact?.(screen.data) ?? screen.data);
     if (Buffer.byteLength(body) > RECORD_MAX_BYTES) body = record("");
     await mkdir(this.options.records!, { recursive: true, mode: 0o700 });
     const temporary = `${path}.${randomUUID()}.tmp`;

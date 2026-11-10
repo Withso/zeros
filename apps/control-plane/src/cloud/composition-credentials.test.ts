@@ -39,7 +39,7 @@ it("wires workspace git, gh, legacy, hydration and restore credentials to the cr
       return github.connections.gitIdentity({ organizationId: workspace.organizationId, userId: workspace.creatorUserId });
     } }));
   const config = {
-    github: null, deploymentChannel: "alpha", cloudAgentCredentials: { settingsSecretKeyV1: Buffer.alloc(32, 1).toString("base64url") },
+    github: null, deploymentChannel: "alpha", inviteLinkBase: "https://app.example.test/invite", cloudAgentCredentials: { settingsSecretKeyV1: Buffer.alloc(32, 1).toString("base64url") },
     cloudV2: { boat: { apiKey: "synthetic-boat-credential" }, apiUrl: "https://api.example.test", realtimeUrl: "https://rt.example.test",
       workerSigningKey: generateKeyPairSync("ed25519").privateKey.export({ type: "pkcs8", format: "der" }).toString("base64"),
       runtime: { sha256: "a".repeat(64), store: { endpoint: "https://store.example.test", bucket: "fixture", accessKeyId: "fixture", secretAccessKey: "fixture" } } },
@@ -91,7 +91,7 @@ it("wires workspace git, gh, legacy, hydration and restore credentials to the cr
 
 it("passes the relay room's proof into configuration authority after entry continuation", async () => {
   const config = {
-    github: null, deploymentChannel: "alpha", cloudAgentCredentials: { settingsSecretKeyV1: Buffer.alloc(32, 1).toString("base64url") },
+    github: null, deploymentChannel: "alpha", inviteLinkBase: "https://app.example.test/invite", cloudAgentCredentials: { settingsSecretKeyV1: Buffer.alloc(32, 1).toString("base64url") },
     cloudV2: { boat: { apiKey: "synthetic-boat-credential" }, apiUrl: "https://api.example.test", realtimeUrl: "https://rt.example.test",
       workerSigningKey: generateKeyPairSync("ed25519").privateKey.export({ type: "pkcs8", format: "der" }).toString("base64"),
       runtime: { sha256: "a".repeat(64), store: { endpoint: "https://store.example.test", bucket: "fixture", accessKeyId: "fixture", secretAccessKey: "fixture" } } },

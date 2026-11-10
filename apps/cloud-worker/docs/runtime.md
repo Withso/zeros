@@ -111,7 +111,7 @@ to the worker. Entry-point detection compares canonical paths; bundled helpers
 and native package resolution stay beside that version's real bundle. Build into
 a real staging directory before archiving, rather than through the live symlink.
 The package includes `worker.mjs`, `cursor-host.mjs`, `git-askpass.mjs`,
-`gh.mjs`, executable `bin/gh` and `bin/git-askpass` wrappers, `package.json`,
+`gh.mjs`, `zeros.mjs`, executable `bin/gh`, `bin/git-askpass` and `bin/zeros` wrappers, `package.json`,
 `runtime-manifest.json`, license notices and a materialized `node_modules/`.
 There are no links back to the build checkout or pnpm store. The manifest records
 the exact runtime pins, dependency versions and SHA-256 of every shipped file.
@@ -138,6 +138,14 @@ The two non-secret boot variables are `ZEROS_WORKER_URL` and
 `/home/user/.config/zeros/worker-token` and rereads it for every connection.
 State is under `/home/user/.local/share/zeros/cloud-worker`; the checkout is
 the absolute path from the relay config. Service logs contain status codes only.
+
+`bin/zeros` is the `zeros cloud` command line for agents and terminals: it
+reads `ZEROS_API_URL` and `ZEROS_API_KEY`, else `ZEROS_API_TOKEN`, and explains
+that API access is not enabled when the control plane delivered none. The
+worker gives agents `ZEROS_WORKSPACE_ID` and `ZEROS_SESSION_ID`, terminals only
+`ZEROS_WORKSPACE_ID`; the URL and token are added only with `workspace-api-v1`
+delivery, and the token is redacted from transcripts, diagnostics and saved
+terminal screens. Setup scripts receive none of them.
 
 Git HTTPS askpass and the gh wrapper obtain short-lived GitHub tokens from the
 private worker Unix socket. Tokens stay in process memory; persistent Git

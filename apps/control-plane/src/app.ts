@@ -14,6 +14,7 @@ import { createAuthMiddleware } from "./auth.js";
 import { createCloudV2ProxyRoutes, CLOUD_V2_PROXY_PREFIX, type CloudV2ProxyDeps } from "./cloud/proxy.js";
 import { createCloudV2Routes, type CloudV2RouteDeps } from "./cloud/routes.js";
 import { createMcpServices } from "./mcp/composition.js";
+import { createCloudApiMcpRoutes } from "./cloud/api/mcp.js";
 import { createMcpPublicRoutes, createMcpRoutes } from "./mcp/routes.js";
 import { createCloudV2WorkerRoutes, CLOUD_V2_WORKER_API, type CloudV2WorkerRouteDeps } from "./cloud/worker-routes.js";
 import { createPrivateRateLimitKey, rateLimit } from "./ratelimit.js";
@@ -56,8 +57,11 @@ import { DEFAULT_SLOW_REQUEST_LOG_MS, requestTiming, type RequestCostObserverSta
 import { createDatabaseTimingReporter } from "./database-timing.js";
 import { observeDatabaseTiming, tracingMiddleware } from "./tracing.js";
 import { cloudAgentCredentialKeys } from "./agent-credentials/agent-credentials.js";
+import { createCloudApiRoutes, type CloudApiDependencies } from "./cloud/api/routes.js";
+import { createCloudApiManagementRoutes } from "./cloud/api/management-routes.js";
 
 export type CreateAppDependencies = {
+  cloudApi?: CloudApiDependencies;
   /** Cloud workspace v2: creator routes under /v1 and the worker model proxy. */
   cloudV2?: { routes: CloudV2RouteDeps; proxy: CloudV2ProxyDeps; workers: CloudV2WorkerRouteDeps };
   zerosDevAuth?: ZerosDevAuthDependencies;
@@ -85,7 +89,9 @@ const CLOUD_DIAGNOSTIC_CODES = new Set([
 ]);
 
 function isCloudWorkspaceApiPath(path: string): boolean {
-  return path === "/v1/auth/snapshot" || path === "/v1/auth/events" || path.startsWith("/v1/cloud-v2/") || path.startsWith("/v2/cloud/") ||
+  return path === "/api/v0" || path.startsWith("/api/v0/") || path === "/api/mcp" ||
+    /^\/v1\/organizations\/[^/]+\/api-keys(?:\/|$)/.test(path) ||
+    path === "/v1/auth/snapshot" || path === "/v1/auth/events" || path.startsWith("/v1/cloud-v2/") || path.startsWith("/v2/cloud/") ||
     path === "/v1/cloud-agent-credentials" || path.startsWith("/v1/cloud-agent-credentials/") ||
     /^\/v1\/organizations\/[^/]+\/agent-connections(?:\/|$)/.test(path);
 }
@@ -175,6 +181,10 @@ export function createApp(
         503,
       );
     });
+  }
+  if (dependencies.cloudApi) {
+    app.route("/api/v0", createCloudApiRoutes(dependencies.cloudApi));
+    app.route("/api/mcp", createCloudApiMcpRoutes(dependencies.cloudApi));
   }
   if (dependencies.cloudV2) {
     app.use(`${CLOUD_V2_WORKER_API}/*`, rateLimit("cloud-v2-worker", 600, 60_000,
@@ -393,6 +403,7 @@ export function createApp(
     ),
   );
   if (dependencies.cloudV2) app.route("/", createCloudV2Routes(dependencies.cloudV2.routes));
+  if (dependencies.cloudApi) app.route("/", createCloudApiManagementRoutes(dependencies.cloudApi.credentials));
   app.route(
     "/",
     createRoutes(pool, emailConfig, {

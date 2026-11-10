@@ -554,11 +554,11 @@ export function cloudWorkspaceLifecycleTask(
 /** Observe an accepted lifecycle operation; never submit a second mutation. */
 export async function waitForCloudWorkspaceLifecycle(
   target: CloudWorkspaceTarget,
-  operation: "wake" | "stop" | "archive" | "delete",
+  operation: "wake" | "stop" | "restart" | "archive" | "delete",
   initial: CloudWorkspaceDocument,
 ): Promise<CloudWorkspaceDocument> {
   const account = epoch;
-  const terminal = operation === "wake" ? ["ready", "busy"]
+  const terminal = operation === "wake" || operation === "restart" ? ["ready", "busy"]
     : [operation === "archive" ? "archived" : operation === "delete" ? "deleted" : "stopped"];
   if (terminal.includes(initial.status)) return initial;
   // The accepted document can still carry an earlier error, such as a past
@@ -652,7 +652,7 @@ function settleLifecycleIntents(doc: CloudWorkspaceDocument): void {
 }
 export async function manageCloudWorkspace(
   target: CloudWorkspaceTarget,
-  operation: "wake" | "stop" | "archive" | "delete",
+  operation: "wake" | "stop" | "restart" | "archive" | "delete",
   wait = false,
   reason?: "interaction",
   wakeIntentId?: string,
@@ -705,7 +705,7 @@ export async function manageCloudWorkspace(
         !(doc.status === "stopping" && doc.generation.number > (generation ?? doc.generation.number)) && lifecycleIntents.get(key) === intent)
       lifecycleIntents.delete(key);
     const terminal =
-      operation === "wake"
+      operation === "wake" || operation === "restart"
         ? ["ready", "busy"]
         : [
             operation === "archive"
@@ -719,7 +719,7 @@ export async function manageCloudWorkspace(
   })().catch(error => {
     // A definitive rejection cannot become a successful replay. Retain the
     // identity only when the server's outcome is still unknown (network/5xx).
-    if ((operation === "wake" || operation === "stop") && error instanceof ControlPlaneError &&
+    if ((operation === "wake" || operation === "stop" || operation === "restart") && error instanceof ControlPlaneError &&
         error.status >= 400 && error.status < 500 && error.status !== 408 &&
         lifecycleIntents.get(key) === intent)
       lifecycleIntents.delete(key);

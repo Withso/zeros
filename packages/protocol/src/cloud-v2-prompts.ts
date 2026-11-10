@@ -65,9 +65,22 @@ export const CloudV2PromptStopSchema = z.object({ chatId: CloudV2PromptIdSchema,
 export const CloudV2PromptStopReplySchema = z.object({ chatId: CloudV2PromptIdSchema, epoch: CloudV2PromptCounterSchema }).strict();
 export const CloudV2PromptPullSchema = z.object({ waitMs: z.number().int().min(0).max(CLOUD_V2_PROMPT_POLL_MS),
   held: z.array(CloudV2PromptIdSchema).max(128).optional() }).strict();
-export const CloudV2PromptDeliverySchema = z.object({ receipt: CloudV2PromptReceiptSchema, payload: CloudV2PromptSchema, deliveryId: z.string().uuid() }).strict();
+/** A chat name chosen through the Zeros API: 1..120 characters once trimmed,
+ * no control characters. Outside the payload, so its hash stays unchanged. */
+export const CloudV2SessionNameSchema = z.string().max(1024)
+  .refine(value => { const trimmed = value.trim(); return trimmed.length >= 1 && trimmed.length <= 120 && !/\p{Cc}/u.test(value); });
+/** `sessionName` is sent only to workers advertising session-name-v1. */
+export const CloudV2PromptDeliverySchema = z.object({ receipt: CloudV2PromptReceiptSchema, payload: CloudV2PromptSchema, deliveryId: z.string().uuid(),
+  sessionName: CloudV2SessionNameSchema.optional() }).strict();
 export type CloudV2PromptDelivery = z.infer<typeof CloudV2PromptDeliverySchema>;
-export const CloudV2PromptPullReplySchema = z.object({ prompts: z.array(CloudV2PromptDeliverySchema).max(16), stops: z.array(CloudV2PromptStopReplySchema).max(128) }).strict();
+/** chat-edit-v1: a control-plane rename or archive of an existing chat. A
+ * worker applies it once per version and acknowledges it in history. */
+export const CloudV2ChatEditSchema = z.object({ chatId: z.string().min(1).max(256), version: CloudV2PromptCounterSchema,
+  title: CloudV2SessionNameSchema.optional(), archived: z.boolean().optional() }).strict();
+export type CloudV2ChatEdit = z.infer<typeof CloudV2ChatEditSchema>;
+export const CloudV2ChatEditAckSchema = z.object({ chatId: z.string().min(1).max(256), version: CloudV2PromptCounterSchema }).strict();
+export const CloudV2PromptPullReplySchema = z.object({ prompts: z.array(CloudV2PromptDeliverySchema).max(16), stops: z.array(CloudV2PromptStopReplySchema).max(128),
+  chatEdits: z.array(CloudV2ChatEditSchema).max(128).optional() }).strict();
 export type CloudV2PromptPullReply = z.infer<typeof CloudV2PromptPullReplySchema>;
 export const CloudV2PromptAckSchema = z.object({ userMessageId: CloudV2PromptIdSchema, deliveryId: z.string().uuid() }).strict();
 export const CloudV2PromptBeginSchema = CloudV2PromptAckSchema.extend({ dispatchId: z.string().uuid() });

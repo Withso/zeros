@@ -57,6 +57,21 @@ describe("cloud v2 runtime install", () => {
       expect(readFileSync(log, "utf8").length).toBeGreaterThan(privileged.length);
       // Neither path discards the current runtime's compiled code.
       expect(readFileSync(entry, "utf8")).toBe("current runtime");
+      const unitPath = join(root, "etc/systemd/system/zeros-worker.service");
+      const unit = readFileSync(unitPath, "utf8");
+      expect(unit).toContain("\nOOMPolicy=continue\n");
+      // A snapshot with the old policy needs a reload, never a worker restart.
+      writeFileSync(unitPath, unit.replace("OOMPolicy=continue\n", ""));
+      const beforeRepair = readFileSync(log, "utf8");
+      expect(run()).not.toContain("runtime-changed");
+      const repair = readFileSync(log, "utf8").slice(beforeRepair.length);
+      expect(readFileSync(unitPath, "utf8")).toBe(unit);
+      expect(repair).toContain("systemctl daemon-reload");
+      expect(repair).not.toMatch(/(?:try-restart|restart|stop) zeros-worker/);
+      expect(readFileSync(entry, "utf8")).toBe("current runtime");
+      const afterRepair = readFileSync(log, "utf8");
+      run();
+      expect(readFileSync(log, "utf8")).toBe(afterRepair);
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 

@@ -53,7 +53,7 @@ it("ships a relocatable dependency graph and a complete SHA-256 inventory", asyn
     }
   }
   await walk(); expect(Object.keys(manifest.files).sort()).toEqual(files.sort());
-  for (const name of ["worker.mjs", "cursor-host.mjs", "git-askpass.mjs", "git-credential.mjs", "gh.mjs", "bin/gh", "bin/git-askpass", "bin/git-credential"])
+  for (const name of ["worker.mjs", "cursor-host.mjs", "git-askpass.mjs", "git-credential.mjs", "gh.mjs", "zeros.mjs", "bin/gh", "bin/git-askpass", "bin/git-credential", "bin/zeros"])
     expect(files).toContain(name);
   // Hash the native executables too, not only their package manifests.
   for (const name of files) {
@@ -69,7 +69,7 @@ it("ships a relocatable dependency graph and a complete SHA-256 inventory", asyn
 it("keeps the per-request Git helpers small enough to start like bare Node", async () => {
   // Git starts a helper process for every credential or askpass request; the
   // shared protocol schemas made each one 768 KB and three times slower.
-  for (const name of ["git-credential.mjs", "git-askpass.mjs"]) {
+  for (const name of ["git-credential.mjs", "git-askpass.mjs", "zeros.mjs"]) {
     const source = await readFile(join(dist, name), "utf8");
     expect(source.length, name).toBeLessThan(64 * 1024);
     expect(source, name).not.toContain("ZodError");
@@ -335,4 +335,59 @@ it("imports its helpers when the calling process has no file entry", async () =>
   const source = `await import(${JSON.stringify(pathToFileURL(join(dist, "worker.mjs")).href)}); process.stdout.write('WORKER_IMPORT_OK');`;
   const result = await exec(process.execPath, ["--input-type=module", "-e", source, "-"], { cwd: directory, env: workerChildEnvironment(), timeout: 10_000 });
   expect(result.stdout).toBe("WORKER_IMPORT_OK"); expect(result.stderr).toBe("");
+});
+
+it("runs the packaged zeros CLI from PATH against the API it was given, without printing the token", async () => {
+  const token = `zw2a_${"P".repeat(43)}`, seen: Array<{ url: string; authorization?: string; session?: string }> = [];
+  const server = createServer((req, res) => {
+    seen.push({ url: req.url!, authorization: req.headers.authorization, session: req.headers["x-zeros-session-id"] as string | undefined });
+    res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ workspaceId: WORKSPACE_ID, status: "ready", state: "running", updatedAt: 1 }));
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const base = { ...workerChildEnvironment({ PATH: `${join(dist, "bin")}:${process.env.PATH}`, HOME: directory }), ZEROS_WORKSPACE_ID: WORKSPACE_ID };
+    const disabled = await exec("zeros", ["cloud", "workspace", "status"], { cwd: directory, env: base, timeout: 10_000 }).catch(error => error);
+    expect(disabled.code).toBe(3);
+    expect(disabled.stderr).toContain("Zeros API access is not enabled");
+    const result = await exec("zeros", ["cloud", "workspace", "status", "--json", "--debug"], { cwd: directory, timeout: 10_000,
+      env: { ...base, ZEROS_API_URL: `http://127.0.0.1:${(server.address() as AddressInfo).port}/api/v0`, ZEROS_API_TOKEN: token, ZEROS_SESSION_ID: "chat-fixture" } });
+    expect(JSON.parse(result.stdout)).toMatchObject({ workspaceId: WORKSPACE_ID, status: "ready" });
+    expect(result.stdout + result.stderr).not.toContain(token);
+    expect(seen).toEqual([{ url: `/api/v0/workspaces/${WORKSPACE_ID}/status`, authorization: `Bearer ${token}`, session: "chat-fixture" }]);
+    const local = await exec("zeros", ["local", "workspace", "list"], { cwd: directory, env: base, timeout: 10_000 }).catch(error => error);
+    expect(local.code).toBe(2);
+  } finally { await new Promise<void>(resolve => server.close(() => resolve())); }
+});
+
+it("exits quietly with 0 when the packaged zeros CLI's reader closes early, and makes no further requests", async () => {
+  const token = `zw2a_${"Q".repeat(43)}`;
+  let requests = 0;
+  const server = createServer((req, res) => {
+    requests++;
+    const body = req.url!.endsWith("/status") ? { workspaceId: WORKSPACE_ID, sessionId: "s", status: "working", updatedAt: 1 }
+      : { userId: "u", email: "fixture@example.test", organizationId: "o", organizationName: "Org", credential: "workspace_token", padding: "x".repeat(256 * 1024) };
+    res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(body));
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const env = { ...workerChildEnvironment({ PATH: `${join(dist, "bin")}:${process.env.PATH}`, HOME: directory }),
+      ZEROS_API_URL: `http://127.0.0.1:${(server.address() as AddressInfo).port}/api/v0`, ZEROS_API_TOKEN: token };
+    const run = async (args: string[], closed: "stdout" | "stderr") => {
+      const child = spawn("zeros", args, { cwd: directory, env, stdio: ["ignore", "pipe", "pipe"] });
+      let stderr = "";
+      // The reader goes away before the CLI writes, as `| head -c 0` does.
+      if (closed === "stdout") child.stdout!.destroy(); else child.stderr!.destroy();
+      if (closed === "stdout") child.stderr!.on("data", data => { stderr += data; }); else child.stdout!.resume();
+      const timer = setTimeout(() => child.kill("SIGKILL"), 15_000);
+      const [code, signal] = await once(child, "close") as [number | null, string | null];
+      clearTimeout(timer);
+      return { code, signal, stderr };
+    };
+    const piped = await run(["cloud", "me", "--json"], "stdout");
+    expect(piped).toEqual({ code: 0, signal: null, stderr: "" });
+    const before = requests;
+    const debug = await run(["cloud", "session", "wait", "s", "--debug", "--interval", "1", "--timeout", "30"], "stderr");
+    expect(debug).toMatchObject({ code: 0, signal: null });
+    expect(requests - before).toBe(1);
+  } finally { await new Promise<void>(resolve => server.close(() => resolve())); }
 });

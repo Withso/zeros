@@ -163,14 +163,14 @@ export class CloudGithubConnections {
       refreshExpiresAt: bundle.refreshTokenExpiresAtMs,
     };
   }
-  async access(scope: CloudGithubConnectionScope, failedTokenSha256?: string) {
+  async access(scope: CloudGithubConnectionScope, failedTokenSha256?: string, options: { refresh?: false } = {}) {
     const refresh = (credential: AppCredential, account: CloudGithubAccount) => this.refresh(credential, account);
-    let snapshot = await this.store.credential(scope, refresh, failedTokenSha256);
+    let snapshot = await this.store.credential(scope, options.refresh === false ? undefined : refresh, failedTokenSha256);
     let identity: CloudGithubAccount & { avatarUrl?: string };
     try {
       identity = await this.identity(snapshot.material.accessToken, snapshot.assertCurrent);
     } catch (error) {
-      if (failedTokenSha256 || !(error instanceof HttpError) || error.code !== "github_authorization_expired") throw error;
+      if (options.refresh === false || failedTokenSha256 || !(error instanceof HttpError) || error.code !== "github_authorization_expired") throw error;
       await snapshot.assertCurrent();
       snapshot = await this.store.credential(scope, refresh, createHash("sha256").update(snapshot.material.accessToken).digest("hex"));
       identity = await this.identity(snapshot.material.accessToken, snapshot.assertCurrent);

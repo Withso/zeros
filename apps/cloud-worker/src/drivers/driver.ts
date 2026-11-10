@@ -13,6 +13,8 @@ interface DriverSession {
   fast?: boolean;
   nativeSessionId?: string;
   application?: ApplicationEnvironment;
+  /** Worker-owned ZEROS_* identity and API variables for this chat's process. */
+  zerosEnvironment?: Readonly<Record<string, string>>;
   onTiming?: (stage: DriverTimingStage) => void;
   mcpServers?: DriverMcpServers;
   modeId?: string;
