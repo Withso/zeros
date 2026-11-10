@@ -244,8 +244,10 @@ export function createDesignLayoutDropResolver(
         const local = designParentDelta(node.parentCoordinateSpace, delta);
         const left = parseFloat(node.styles.left ?? "");
         const top = parseFloat(node.styles.top ?? "");
-        styles.left = `${(Number.isFinite(left) ? left : node.layout.x - margin.x) + local.x}px`;
-        styles.top = `${(Number.isFinite(top) ? top : node.layout.y - margin.y) + local.y}px`;
+        // A zoomed pointer travels in fractions of a pixel; the layer lands on
+        // whole ones, like a frame.
+        styles.left = `${Math.round((Number.isFinite(left) ? left : node.layout.x - margin.x) + local.x)}px`;
+        styles.top = `${Math.round((Number.isFinite(top) ? top : node.layout.y - margin.y) + local.y)}px`;
       } else if (node.borderCoordinateSpace && parent.childCoordinateSpace) {
         Object.assign(
           styles,
