@@ -1018,6 +1018,16 @@
   pointer-events: none;
 }
 
+/* A small frame keeps its name. Only the Play control, which would cover
+ * most of the name, waits for hover or focus; the name takes its room. */
+[data-design-frame-compact-play]:not(:hover):not(:focus-within):not([data-design-frame-pointer]) > [data-design-frame-play-chrome] {
+  clip: rect(0px, 0px, 0px, 0px);
+  pointer-events: none;
+}
+[data-design-frame-compact-play]:not(:hover):not(:focus-within):not([data-design-frame-pointer]) > [data-design-frame-chrome]:not([data-design-frame-play-chrome]) {
+  max-width: var(--design-frame-label-full-width, none) !important;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .zd-canvas-tool {
     transition: none;

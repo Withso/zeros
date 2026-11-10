@@ -214,11 +214,11 @@ it("updates automatic controls with the actual camera and resize geometry while 
     await page.mouse.move(600, 400);
     const frame = page.locator('[data-design-frame="near"]');
     await frame.evaluate(element => element.setAttribute("data-design-frame-controls", "automatic"));
-    await paint(page, .5, 0, 500);
+    await paint(page, .25, 0, 500);
     expect(await frame.getAttribute("data-design-frame-compact-controls")).toBe("");
     await paint(page, 2);
     expect(await frame.getAttribute("data-design-frame-compact-controls")).toBe(null);
-    await paint(page, .5);
+    await paint(page, .25);
     expect(await frame.getAttribute("data-design-frame-compact-controls")).toBe("");
     await frame.evaluate(element => {
       (element as HTMLElement).style.width = "300px";
@@ -264,7 +264,7 @@ it("paints a camera change that compacts frame controls once, never again for it
       let count = 0;
       const stop = api.observeDesignCanvasPaint(world, () => count++);
       count = 0;
-      api.paintDesignCanvasCamera(world, { zoom: .5, panX: 0, panY: 0 }, true);
+      api.paintDesignCanvasCamera(world, { zoom: .25, panX: 0, panY: 0 }, true);
       await new Promise(requestAnimationFrame); await new Promise(requestAnimationFrame);
       stop();
       return { count, compact: document.querySelector('[data-design-frame="near"]')!.hasAttribute("data-design-frame-compact-controls") };
@@ -294,3 +294,41 @@ it("holds frame chrome scale through small steps of a live camera gesture and se
     expect(await inverse()).toBeCloseTo(1 / 3.2);
   } finally { await page.close(); }
 });
+
+it("keeps a small frame's name on an uncrowded page, hides only its Play control, and keeps crowded overviews compact", async () => {
+  const page = await open();
+  try {
+    await page.mouse.move(600, 400);
+    const frame = page.locator('[data-design-frame="near"]');
+    await frame.evaluate(element => {
+      element.setAttribute("data-design-frame-controls", "automatic");
+      element.insertAdjacentHTML("beforeend", '<div data-design-frame-chrome data-design-frame-play-chrome style="position:absolute;right:0;bottom:100%;height:28px"><button style="height:28px">Play</button></div>');
+    });
+    const state = () => frame.evaluate(element => ({
+      compact: element.hasAttribute("data-design-frame-compact-controls"),
+      play: element.hasAttribute("data-design-frame-compact-play"),
+      label: getComputedStyle(element.querySelector("[data-design-frame-chrome]:not([data-design-frame-play-chrome])")!).clip,
+      control: getComputedStyle(element.querySelector("[data-design-frame-play-chrome]")!).clip,
+    }));
+    // 60 px on screen: the name stays, the 28 px Play control waits for intent.
+    await paint(page, .5, 0, 500);
+    expect(await state()).toEqual({ compact: false, play: true, label: "auto", control: "rect(0px, 0px, 0px, 0px)" });
+    await page.mouse.move(40, 40);
+    expect((await state()).control).toBe("auto");
+    await page.mouse.move(600, 400);
+    // 30 px: too small for a name.
+    await paint(page, .25);
+    expect(await state()).toMatchObject({ compact: true, play: false });
+    // Wide enough for both.
+    await paint(page, 2);
+    expect(await state()).toEqual({ compact: false, play: false, label: "auto", control: "auto" });
+    // A crowded page keeps the cheap overview path at the old threshold.
+    await page.locator("#world").evaluate(world => {
+      for (let index = 0; index < 70; index++) world.insertAdjacentHTML("beforeend",
+        `<article data-design-frame="extra-${index}" data-design-frame-controls="automatic" style="position:absolute;left:${3000 + index * 200}px;top:40px;width:120px;height:80px"><div data-design-frame-chrome style="height:28px"><button style="height:28px">Extra</button></div></article>`);
+    });
+    await paint(page, .5);
+    expect(await state()).toMatchObject({ compact: true, play: false });
+  } finally { await page.close(); }
+});
+

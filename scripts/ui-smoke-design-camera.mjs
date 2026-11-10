@@ -334,13 +334,13 @@ async function runAsyncDesignCameraSmoke({ page: parent, check }) {
       const c = window.__zerosHarnessDesignSurface, { flushSync } = window.__zerosDesignHarnessRuntime;
       const canvas = document.querySelector("[data-design-canvas-viewport]");
       const world = canvas.querySelector("[data-design-canvas-world]");
-      flushSync(() => c.ui.getState().setViewport("ws_design_harness", { zoom: .05, panX: 30, panY: 50 }));
+      flushSync(() => c.ui.getState().setViewport("ws_design_harness", { zoom: .02, panX: 30, panY: 50 }));
       const frame = world.querySelector('[data-design-frame]:not([data-design-frame-chrome-protected])');
       const before = frame.hasAttribute("data-design-frame-compact-controls");
       const bounds = canvas.getBoundingClientRect();
       const anchor = {
-        x: (Number.parseFloat(frame.style.left) + Number.parseFloat(frame.style.width) / 2) * .05 + 30,
-        y: (Number.parseFloat(frame.style.top) + Number.parseFloat(frame.style.height) / 2) * .05 + 50,
+        x: (Number.parseFloat(frame.style.left) + Number.parseFloat(frame.style.width) / 2) * .02 + 30,
+        y: (Number.parseFloat(frame.style.top) + Number.parseFloat(frame.style.height) / 2) * .02 + 50,
       };
       const wheel = deltaY => canvas.dispatchEvent(new WheelEvent("wheel", { bubbles: true, cancelable: true,
         ctrlKey: true, deltaY, clientX: bounds.left + anchor.x, clientY: bounds.top + anchor.y }));
@@ -359,7 +359,7 @@ async function runAsyncDesignCameraSmoke({ page: parent, check }) {
         screenWidth: Number.parseFloat(frame.style.width) * new DOMMatrixReadOnly(world.style.transform).a };
     });
     check("frame controls follow the displayed zoom after an unrelated render during the gesture",
-      compactReturn.before && compactReturn.expanded && compactReturn.compact && compactReturn.connected && compactReturn.gesture && compactReturn.screenWidth < 128,
+      compactReturn.before && compactReturn.expanded && compactReturn.compact && compactReturn.connected && compactReturn.gesture && compactReturn.screenWidth < 40,
       JSON.stringify(compactReturn));
     const direct = await page.evaluate(async () => {
       const canvas = document.querySelector("[data-design-canvas-viewport]");
