@@ -1,12 +1,26 @@
 import vm from "node:vm";
 import { describe, expect, it } from "vitest";
 import {
+  RESERVED_WORKSPACE_LINK_OWNERS,
   formatCloudWorkspaceLink,
+  formatCloudWorkspacePagePath,
   parseCloudWorkspaceLink,
+  parseCloudWorkspacePagePath,
 } from "@zeros/protocol/cloud-workspace-link";
-import { LOCAL_LINK_SCHEMES } from "@zeros/protocol/local-orchestration";
+import {
+  LOCAL_LINK_SCHEMES,
+  formatWorkspaceLink,
+  isWorkspaceLinkSession,
+  parseLocalLink,
+} from "@zeros/protocol/local-orchestration";
 import { deploymentAppLink, SCHEMES } from "../../apps/web/lib/schemes.mjs";
-import { renderWorkspacePage } from "../../apps/web/lib/workspace-page.mjs";
+import {
+  RESERVED_WORKSPACE_PAGE_OWNERS,
+  parseWorkspacePagePath,
+  renderWorkspacePage,
+  workspacePageAppLink,
+  workspacePageSession,
+} from "../../apps/web/lib/workspace-page.mjs";
 
 // apps/web is a standalone package that cannot import @zeros/protocol, so its
 // workspace page builds Open in Zeros by hand. This keeps that string equal to
@@ -57,6 +71,49 @@ describe("the web workspace page's Open in Zeros link", () => {
         organizationId,
         workspaceId,
       });
+    },
+  );
+});
+
+describe("the web's numbered workspace page path", () => {
+  it("reserves the same owners as desktop links", () => {
+    expect([...RESERVED_WORKSPACE_PAGE_OWNERS].sort()).toEqual([...RESERVED_WORKSPACE_LINK_OWNERS].sort());
+  });
+
+  it.each([
+    "/acme/w/310", "/Acme-Labs/w/7", "/acme/w/0", "/acme/w/01", "/acme/w/3/", "/acme/w", "/api/w/3",
+    "/local/w/3", "/-acme/w/3", "/acme-/w/3", "/a/b/w/3", "/acme/w/2147483647", "/acme/w/2147483648",
+  ])("parses %s exactly as the protocol does", (path) => {
+    expect(parseWorkspacePagePath(path)).toEqual(parseCloudWorkspacePagePath(path));
+  });
+
+  it("round-trips the protocol's formatted path", () => {
+    const address = { owner: "acme-labs", number: 310 };
+    expect(parseWorkspacePagePath(formatCloudWorkspacePagePath(address))).toEqual(address);
+  });
+});
+
+describe("the web's numbered page opens the desktop's numbered link", () => {
+  const address = { owner: "acme-labs", number: 310 };
+
+  it.each(["alpha", "beta", "production", undefined] as const)(
+    "is the desktop's workspace and chat link on %s",
+    (environment) => {
+      const appLink = deploymentAppLink(environment);
+      const scheme = appLink.slice(0, -3) as (typeof LOCAL_LINK_SCHEMES)[number];
+      expect(workspacePageAppLink(appLink, address)).toBe(formatWorkspaceLink(scheme, address));
+      for (const session of ["7e2b720c-ab56-441d-b189-6e7d1eb7a628", "chat:1", "a_b.c-d"]) {
+        const href = workspacePageAppLink(appLink, address, session);
+        expect(href).toBe(formatWorkspaceLink(scheme, address, session));
+        expect(parseLocalLink(href)).toEqual({ scheme, kind: "chat", id: session, address });
+      }
+    },
+  );
+
+  it.each(["chat_1", "a:b", "x".repeat(200), "x".repeat(201), "", "a/b", "a b", "a%b", "<x>"])(
+    "accepts the session %s exactly when the desktop does",
+    (session) => {
+      expect(workspacePageSession(new URLSearchParams({ session })).ok).toBe(isWorkspaceLinkSession(session));
     },
   );
 });

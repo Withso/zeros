@@ -807,6 +807,59 @@ describe("Zeros DB — migration ladder data safety (forward-only)", () => {
     }
   });
 
+  it("migration 46 numbers existing workspaces per owner in creation order and never reuses a number", () => {
+    const db = new Database(":memory:");
+    try {
+      applyUpTo(db, 45);
+      const insert = db.prepare(
+        `INSERT INTO workspaces
+           (id, repo_slug, repo_root, branch, base_branch, path, status, created_at, organization_id, placement)
+         VALUES (?, 'repo', '/r', ?, 'main', ?, 'in-progress', ?, ?, 'local')`,
+      );
+      insert.run("ws_c", "zeros/Cream", "/w/c", 30, null);
+      insert.run("ws_a", "zeros/Amber", "/w/a", 10, null);
+      insert.run("ws_b", "zeros/Bone", "/w/b", 20, null);
+      insert.run("ws_tie", "zeros/Tie", "/w/tie", 20, null);
+      insert.run("ws_org", "zeros/Onyx", "/w/org", 5, "org-1");
+
+      runMigrations(db);
+
+      const numbers = Object.fromEntries(
+        (db.prepare("SELECT id, number FROM workspaces").all() as { id: string; number: number }[])
+          .map((row) => [row.id, row.number]),
+      );
+      expect(numbers).toEqual({ ws_a: 1, ws_b: 2, ws_tie: 3, ws_c: 4, ws_org: 1 });
+      expect(
+        db.prepare("SELECT owner, last_number FROM workspace_number_sequences ORDER BY owner").all(),
+      ).toEqual([
+        { owner: "", last_number: 4 },
+        { owner: "org-1", last_number: 1 },
+      ]);
+      expect(db.prepare("SELECT title FROM workspaces WHERE id = 'ws_a'").get()).toEqual({ title: null });
+
+      // A deleted number stays spent; a writer that omits the number is numbered.
+      db.prepare("DELETE FROM workspaces WHERE id = 'ws_c'").run();
+      insert.run("ws_new", "zeros/New", "/w/new", 40, null);
+      expect(db.prepare("SELECT number FROM workspaces WHERE id = 'ws_new'").get()).toEqual({ number: 5 });
+
+      // An explicit number raises the sequence; a duplicate in one owner is refused.
+      db.prepare(
+        `INSERT INTO workspaces (id, repo_slug, repo_root, branch, base_branch, path, status, created_at, number)
+         VALUES ('ws_seed', 'repo', '/r', 'zeros/Seed', 'main', '/w/seed', 'in-progress', 50, 9)`,
+      ).run();
+      insert.run("ws_after", "zeros/After", "/w/after", 60, null);
+      expect(db.prepare("SELECT number FROM workspaces WHERE id = 'ws_after'").get()).toEqual({ number: 10 });
+      expect(() =>
+        db.prepare(
+          `INSERT INTO workspaces (id, repo_slug, repo_root, branch, base_branch, path, status, created_at, number)
+           VALUES ('ws_dup', 'repo', '/r', 'zeros/Dup', 'main', '/w/dup', 'in-progress', 70, 9)`,
+        ).run(),
+      ).toThrow(/UNIQUE/);
+    } finally {
+      db.close();
+    }
+  });
+
   it("migration 37 backfills immutable UUIDs without rewriting compatibility ids", () => {
     const db = new Database(":memory:");
     try {

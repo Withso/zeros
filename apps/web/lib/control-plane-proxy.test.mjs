@@ -19,6 +19,8 @@ test("proxy allow-list exposes only dashboard organization operations", () => {
   assert.equal(allowedControlPlaneRoute("GET", "/v1/auth/snapshot"), true);
   assert.equal(allowedControlPlaneRoute("GET", "/v1/auth/events"), true);
   assert.equal(allowedControlPlaneRoute("POST", "/v1/organizations"), true);
+  assert.equal(allowedControlPlaneRoute("GET", "/v1/organizations/id-availability"), true);
+  assert.equal(allowedControlPlaneRoute("POST", "/v1/organizations/id-availability"), false);
   assert.equal(allowedControlPlaneRoute("GET", "/v1/account/deletion"), true);
   assert.equal(allowedControlPlaneRoute("POST", "/v1/account/deletion"), true);
   assert.equal(

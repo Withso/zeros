@@ -2,26 +2,36 @@ import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
-import {renderWorkspacePage} from "./workspace-page.mjs";
+import {parseWorkspacePagePath,renderWorkspacePage,workspacePageAppLink,workspacePageSession} from "./workspace-page.mjs";
 import {allowedControlPlaneRoute} from "./control-plane-policy.mjs";
 const workspaceId="11111111-1111-4111-8111-111111111111",organizationId="5d2f8c1a-3b7e-4f90-a6d4-9c1e2b7f8a35";
 const IDS=["title","sub","spin","open","proceed","another","meta"];
 const ok=(workspace)=>({status:200,ok:true,json:async()=>({workspace})});
 const ready={id:workspaceId,organizationId,name:"Acme API",state:"stopped",placement:"cloud",version:2};
 function fixture({storage=new Map(),response={status:401},appLink="zeros-alpha://"}={}) {
-  const page=renderWorkspacePage({workspaceId,appLink,nonce:"testnonce"}),elements=new Map(),replacements=[],requests=[];
+  const page=renderWorkspacePage({workspaceId,appLink,nonce:"testnonce"}),elements=new Map(),replacements=[],requests=[],launches=[];
   for(const id of IDS){const hidden=new Set(["hidden"]);elements.set(id,{textContent:"",className:"",href:"",disabled:false,events:{},hidden,classList:{add(name){hidden.add(name);},remove(name){hidden.delete(name);},contains(name){return hidden.has(name);}},removeAttribute(name){if(name==="href")this.href="";},addEventListener(name,fn){this.events[name]=fn;}});}
   const script=page.html.match(/<script nonce="testnonce">([\s\S]*?)<\/script>/)[1];
   vm.runInNewContext(script,{Date,document:{getElementById:id=>elements.get(id)},
     sessionStorage:{getItem:key=>storage.get(key)??null,setItem:(key,value)=>storage.set(key,value),removeItem:key=>storage.delete(key)},
-    window:{location:{replace:value=>replacements.push(value)}},
+    window:{location:{replace:value=>replacements.push(value),set href(value){launches.push(value);}}},
     fetch:async(url,options)=>{requests.push({url,options});return response;}});
   const shown=id=>!elements.get(id).classList.contains("hidden");
-  return {page,elements,replacements,requests,storage,shown,settle:()=>new Promise(resolve=>setImmediate(resolve))};
+  return {page,elements,replacements,requests,launches,storage,shown,settle:()=>new Promise(resolve=>setImmediate(resolve))};
 }
 
-test("the creator sees the workspace by name, with Open in Zeros for this deployment's app",async()=>{
+/** Run a numbered page's script: it may only launch its link. */
+function numbered(options) {
+  const page=renderWorkspacePage({appLink:"zeros-alpha://",nonce:"testnonce",...options}),launches=[],requests=[];
+  const script=page.html.match(/<script nonce="testnonce">([\s\S]*?)<\/script>/)[1];
+  vm.runInNewContext(script,{window:{location:{set href(value){launches.push(value);}}},
+    fetch:async(url)=>{requests.push(url);return {status:500};},document:{getElementById:()=>{throw new Error("no DOM reads");}}});
+  return {page,launches,requests};
+}
+
+test("the creator sees the workspace by name, and Zeros opens at once for this deployment's app",async()=>{
   const f=fixture({response:ok(ready)});await f.settle();
+  assert.deepEqual(f.launches,[`zeros-alpha://cloud-workspace/${organizationId}/${workspaceId}`]);
   assert.equal(f.requests.length,1);
   assert.equal(f.requests[0].url,`/api/v1/cloud-v2/workspaces/${workspaceId}`);
   assert.equal(f.requests[0].options.credentials,"same-origin");
@@ -33,6 +43,9 @@ test("the creator sees the workspace by name, with Open in Zeros for this deploy
   assert.equal(f.elements.get("proceed").className,"btn ghost");
   assert.equal(f.shown("another"),false);
   assert.equal(f.shown("meta"),true);
+  // Refresh re-reads without launching the app again.
+  f.elements.get("proceed").events.click();await f.settle();
+  assert.equal(f.launches.length,1);
 });
 
 test("each deployment opens its own app, and an unnamed workspace keeps the plain title",async()=>{
@@ -49,6 +62,7 @@ test("a response for another workspace, or without its organization, opens nothi
     assert.equal(f.elements.get("sub").textContent,"This link doesn’t match an available workspace.");
     assert.equal(f.shown("open"),false);
     assert.equal(f.elements.get("open").href,"");
+    assert.deepEqual(f.launches,[]);
   }
 });
 
@@ -60,6 +74,7 @@ test("an account that can't open it is told so, with another account",async()=>{
     assert.equal(f.elements.get("proceed").textContent,"Try again");
     assert.equal(f.shown("another"),true);
     assert.equal(f.shown("open"),false);
+    assert.deepEqual(f.launches,[]);
   }
   const down=fixture({response:{status:503,ok:false,json:async()=>null}});await down.settle();
   assert.equal(down.elements.get("sub").textContent,"Zeros is unavailable right now. Try again shortly.");
@@ -112,4 +127,50 @@ test("the browser proxy admits only the exact v2 workspace read",()=>{
   assert.equal(allowedControlPlaneRoute("DELETE",`/v1/cloud-v2/workspaces/${workspaceId}`),false);
   assert.equal(allowedControlPlaneRoute("GET",`/v1/cloud-workspaces/${workspaceId}`),false);
   assert.equal(allowedControlPlaneRoute("POST","/v1/cloud-workspace-invitations/accept"),false);
+});
+
+test("a numbered page opens Zeros at once with its own link and reads nothing",()=>{
+  const address={owner:"acme",number:310};
+  const workspace=numbered({address});
+  assert.deepEqual(workspace.launches,["zeros-alpha://acme/w/310"]);
+  assert.deepEqual(workspace.requests,[]);
+  assert.match(workspace.page.html,/<div class="title" id="title">Opening w-310 in Zeros<\/div>/);
+  assert.match(workspace.page.html,/<a class="btn" id="open" href="zeros-alpha:\/\/acme\/w\/310">Open in Zeros<\/a>/);
+  assert.match(workspace.page.html,/<p class="meta" id="meta">acme · w-310 · Cloud workspace<\/p>/);
+  assert.doesNotMatch(workspace.page.html,/\/api\/|auth\/start|sessionStorage/);
+  const chat=numbered({address,session:"7e2b720c-ab56-441d-b189-6e7d1eb7a628"});
+  assert.deepEqual(chat.launches,["zeros-alpha://acme/w/310?session=7e2b720c-ab56-441d-b189-6e7d1eb7a628"]);
+  assert.match(chat.page.html,/<div class="title" id="title">Opening a chat in w-310<\/div>/);
+  assert.match(chat.page.html,/href="zeros-alpha:\/\/acme\/w\/310\?session=7e2b720c-ab56-441d-b189-6e7d1eb7a628"/);
+  // A chat id with a colon stays one opaque, encoded query value.
+  assert.deepEqual(numbered({address,session:"chat:1"}).launches,["zeros-alpha://acme/w/310?session=chat%3A1"]);
+  assert.deepEqual(numbered({address,appLink:"zeros://"}).launches,["zeros://acme/w/310"]);
+  const download=numbered({address,marketingOrigin:"https://zeros.build"});
+  assert.match(download.page.html,/Don’t have Zeros\? <a href="https:\/\/zeros\.build">Download it<\/a>/);
+  for(const session of ["","a/b","a b","<x>","a".repeat(201)])
+    assert.throws(()=>renderWorkspacePage({address,session,appLink:"zeros://",nonce:"testnonce"}),undefined,session);
+  assert.throws(()=>renderWorkspacePage({workspaceId,session:"chat",appLink:"zeros://",nonce:"testnonce"}));
+  assert.throws(()=>workspacePageAppLink("javascript:",address));
+});
+
+test("a numbered page takes at most one valid session",()=>{
+  assert.deepEqual(workspacePageSession(new URLSearchParams("")),{ok:true,session:null});
+  assert.deepEqual(workspacePageSession(new URLSearchParams("utm_source=x")),{ok:true,session:null});
+  assert.deepEqual(workspacePageSession(new URLSearchParams("session=chat_1.a-b:c")),{ok:true,session:"chat_1.a-b:c"});
+  for(const query of ["session=","session=a%2Fb","session=a&session=b","session=%3Cx%3E"])
+    assert.deepEqual(workspacePageSession(new URLSearchParams(query)),{ok:false,session:null},query);
+});
+
+test("a numbered path names one organization's workspace, never a product route",()=>{
+  assert.deepEqual(parseWorkspacePagePath("/Acme-Labs/w/7"),{owner:"acme-labs",number:7});
+  for(const path of ["/acme/w/0","/acme/w/01","/acme/w/3/","/api/w/3","/workspace/w/3","/local/w/3","/-acme/w/3","/acme/w/2147483648"])
+    assert.equal(parseWorkspacePagePath(path),null,path);
+  for(const address of [{owner:"api",number:3},{owner:"acme",number:0},{owner:"Acme",number:3},{owner:"acme",number:1.5}])
+    assert.throws(()=>renderWorkspacePage({address,appLink:"zeros://",nonce:"testnonce"}));
+});
+
+test("the browser proxy admits no numbered read: the numbered page reads nothing",()=>{
+  for(const path of ["/v1/cloud-v2/workspaces/by-number/acme/310","/v1/cloud-v2/workspaces/by-number/acme/3/history","/v1/cloud-v2/workspaces/by-number/acme"])
+    assert.equal(allowedControlPlaneRoute("GET",path),false,path);
+  assert.equal(allowedControlPlaneRoute("POST","/v1/cloud-v2/workspaces/by-number/acme/3"),false);
 });

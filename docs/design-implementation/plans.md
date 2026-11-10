@@ -306,9 +306,11 @@ Boards: `web-app.md`. Landed on 2026-11-05:
   desktop parser). Electron main carries it on the Local links' navigation
   intent, so it opens a window and waits for the signed-in app. The desktop
   reads the workspace as the signed-in account, switches to its organization
-  and opens it as the sidebar does: a stopped workspace wakes and an archived
+  and opens it as the sidebar does, without starting it (since 2026-11-10 a
+  link never starts a workspace; the first interaction does), and an archived
   one opens read-only. A cloud workspace's menu has Copy link, which copies
-  the web page. The page's invite route and its two frames are gone: cloud
+  the web page. Numbered `<organization ID>/w/<n>` pages and links followed;
+  see `docs/cloud-workspaces.md`. The page's invite route and its two frames are gone: cloud
   workspaces are creator-only and the accept API was retired with cloud v1.
 
 Nothing in §8 is left.

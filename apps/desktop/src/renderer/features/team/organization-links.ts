@@ -1,3 +1,5 @@
+import { formatCloudWorkspacePagePath } from "@zeros/protocol/cloud-workspace-link";
+import { isWorkspaceLinkSession, type WorkspaceAddress } from "@zeros/protocol/local-orchestration";
 const DEFAULT_APP_BASE_URL = "https://app.zeros.build";
 
 /** This channel's web app; each release build sets its own origin. */
@@ -41,7 +43,24 @@ export function organizationDashboardUrl(
   return base.toString();
 }
 
-/** A cloud workspace's web page, which offers Open in Zeros. */
+/** A cloud workspace's shareable page by its organization's slug and its
+ * permanent number: `<app>/<slug>/w/<n>`, and a chat in it with
+ * `?session=<chat id>`, the query its desktop link carries too. */
+export function numberedCloudWorkspacePageUrl(
+  appBaseUrl: string | null | undefined,
+  address: WorkspaceAddress,
+  session?: string | null,
+): string {
+  const base = appOrigin(appBaseUrl);
+  base.pathname = formatCloudWorkspacePagePath(address);
+  if (session != null) {
+    if (!isWorkspaceLinkSession(session)) throw new Error("Invalid chat id for a link.");
+    base.search = `?session=${encodeURIComponent(session)}`;
+  }
+  return base.toString();
+}
+
+/** A cloud workspace's web page by id (the older form), which offers Open in Zeros. */
 export function cloudWorkspacePageUrl(
   appBaseUrl: string | null | undefined,
   workspaceId: string,

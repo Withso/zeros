@@ -885,24 +885,92 @@ historical source provenance. Withheld PR data is not replaced by a stale
 cached discussion. A denied repository is never made accessible merely by
 belonging to its Zeros organization.
 
+## Numbers and titles
+
+Every cloud workspace is `w-<n>` within its organization (migration 0225). A
+`BEFORE INSERT` trigger takes the next number from the organization's
+`cloud_v2_workspace_number_sequences` row, under that row's lock, so concurrent
+creates get distinct numbers and a release that predates numbers is numbered
+too. Numbers are never reused: the sequence outlives deleted and purged rows.
+A workspace is "Untitled" (`title` NULL) until one of its chats is first named;
+the history mirror then copies that chat's title onto the workspace once and
+advances `updated_at`, so clients replace their document. The desktop re-reads
+the document a few bounded times after it names a cloud chat instead of waiting
+for the catalog's 30-second refresh. The sidebar shows the title; the column
+header shows the cloud, then `w-<n>`.
+
+### Organization IDs
+
+An organization's ID (its `slug`) is the owner segment of its workspace pages
+and links. Its display name can change; its ID cannot (`PATCH` with a `slug`
+answers `422 organization_id_immutable`). Display names may repeat; IDs never
+do, deleted organizations' included. At creation the control plane tries the
+display name's own ID (lowercase ASCII letters and digits in hyphen-joined runs,
+at most 40 characters, cut on a word boundary), then that ID with `-org`. It
+skips IDs a workspace page cannot use (`organization-slugs.ts`, mirrored by
+`RESERVED_WORKSPACE_LINK_OWNERS`: web routes, Local's own `local` owner and
+link actions), so `Local` becomes `local-org`. When every candidate is taken
+it answers `409 organization_id_required` and the creator chooses the ID; a
+chosen ID that is taken answers `409 organization_id_taken`. Personal
+organizations keep their longer `personal-<id>` IDs, which no new organization
+can choose.
+
+The web dashboard's create form shows the generated ID under the name as it is
+typed (`GET /v1/organizations/id-availability?name=`, Pro only, rate-limited)
+and lets the creator edit it (`?id=` checks an edited ID). Creating waits for
+the answer for exactly the current name and sends the ID the field then shows;
+when every candidate is taken it asks for an ID instead of creating, and when
+the check fails it sends none, so the control plane generates it the same way.
+A control plane that predates chosen IDs ignores one; the dashboard then names
+the ID it created. General shows the ID read-only, beside the organization's
+internal UUID.
+
 ## Web page and desktop link
 
-`app.zeros.build/workspace/<id>` shows one cloud workspace to its creator. The
-page reads `GET /v1/cloud-v2/workspaces/<id>` through the web's control-plane
-proxy, which admits only that exact read, and offers Open in Zeros:
-`zeros[-alpha|-beta|-dev]://cloud-workspace/<organizationId>/<workspaceId>`,
-with the deployment's scheme
-([`cloud-workspace-link.ts`](../packages/protocol/src/cloud-workspace-link.ts)).
-The link carries no secret and grants nothing. Electron main accepts only its
-channel's scheme and two UUIDs and passes the link on the navigation intent
-Local links use, so it opens a window and waits for the signed-in app; a local
-development build ignores it. The desktop reads the workspace as the signed-in
-account, switches to its organization and opens it as the sidebar does: a
-stopped workspace wakes and an archived one opens read-only. An organization
-the account is not in, a 404, or a deleting workspace says the workspace
-couldn't be found, and nothing switches. A cloud workspace's context menu has
-Copy link, which copies the page for the build's web app (`VITE_APP_BASE_URL`).
-There is no invite route: cloud workspaces are creator-only.
+`app.zeros.build/<organization ID>/w/<n>` is a cloud workspace's shareable
+page, and `?session=<chat id>` names a chat in it. The page reads nothing and
+needs no browser sign-in: it opens
+`zeros[-alpha|-beta|-dev]://<organization ID>/w/<n>[?session=<chat id>]` with
+the deployment's scheme as soon as it loads, and keeps Open in Zeros for a
+browser that asks first or blocks the launch
+([`local-orchestration.ts`](../packages/protocol/src/local-orchestration.ts)
+formats the link; a root test keeps the web's copy equal). A malformed or
+repeated `session` is a 404. The older `app.zeros.build/workspace/<id>` page is
+still served: it signs in, reads `GET /v1/cloud-v2/workspaces/<id>` through the
+web's control-plane proxy (which admits only that read), shows the workspace,
+and opens `zeros[-alpha|-beta|-dev]://cloud-workspace/<organizationId>/<workspaceId>`
+once ([`cloud-workspace-link.ts`](../packages/protocol/src/cloud-workspace-link.ts)),
+the link every desktop release opens.
+
+Neither link carries a secret or grants anything. Electron main accepts only its
+channel's scheme and passes the link on the navigation intent Local links use,
+so it opens a window and waits for the signed-in app. A local development build
+ignores a `cloud-workspace/` link; a numbered link reaches its renderer, which
+says when cloud workspaces aren't available. A numbered link whose owner is not
+`local` is a cloud link (`isCloudNavigationLink`). The desktop finds the
+organization by its ID among the account's organizations, finds the workspace
+by number in the loaded catalog or with
+`GET /v1/cloud-v2/workspaces/by-number/<organization ID>/<n>` (creator-only,
+like the read by id), reads it by id, switches to its organization and opens it
+as the sidebar does, except that a link never starts it: anyone can send a link,
+and numbers are easy to guess. A stopped workspace shows its history and starts
+on the first click or key inside it, as a restored tab does; an archived one
+opens read-only. An organization the account is not in, a 404 or a deleting
+workspace shows an error toast, and nothing switches.
+
+A chat link then selects its chat in the same store update that loads the
+workspace's chats, before the pane picks one, and waits at most 30 seconds. A
+chat the loaded list lacks, or one that is archived or a terminal, shows an
+error toast in the workspace that opened. Leaving that workspace, or any newer
+link, ends the wait quietly, so a chat link can never select over a later
+navigation. Desktop releases before numbered links ignore a numbered cloud link.
+
+A cloud workspace's context menu has Copy link, which copies the
+`/<organization ID>/w/<n>` page for the build's web app (`VITE_APP_BASE_URL`),
+or the id page while the number or the organization's ID is not known. A cloud
+chat tab's Copy link copies `/<organization ID>/w/<n>?session=<chat id>`, and
+only appears when both are known. There is no invite route: cloud workspaces
+are creator-only.
 
 ## Lifecycle
 

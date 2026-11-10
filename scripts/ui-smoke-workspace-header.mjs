@@ -1,9 +1,9 @@
 import { expect } from "@playwright/test";
 
-/** 2026-11-09: the workspace header reads name first, then where the workspace
- *  lives (a laptop for every Local workspace, a cloud for cloud) as one ghost
- *  control: no fill at rest, bg2-highlight on hover and while its details are
- *  open, in both themes. It opens the Local details (branch, folder and Local)
+/** 2026-11-10: the workspace header reads where the workspace lives first (a
+ *  laptop for every Local workspace, a cloud for cloud), then its name, as one
+ *  ghost control: no fill at rest, bg2-highlight on hover and while its details
+ *  are open, in both themes. It opens the Local details (branch, folder and Local)
  *  or the cloud details, which close on Escape and when the workspace page is
  *  hidden, and stay closed when it returns. */
 export async function runWorkspaceHeaderSmoke({ page, check, harnessBase }) {
@@ -33,12 +33,12 @@ export async function runWorkspaceHeaderSmoke({ page, check, harnessBase }) {
     probe.remove();
     return color;
   }, name);
-  const nameThenIcon = async placement => {
+  const iconThenName = async placement => {
     const [name, icon] = await Promise.all([
       nameText.boundingBox(),
       identity.locator(`[data-workspace-placement="${placement}"]`).boundingBox(),
     ]);
-    return name.x + name.width <= icon.x && Math.abs(name.y + name.height / 2 - (icon.y + icon.height / 2)) <= 1;
+    return icon.x + icon.width <= name.x && Math.abs(name.y + name.height / 2 - (icon.y + icon.height / 2)) <= 1;
   };
   const ghost = async () => {
     for (const theme of ["dark", "light"]) {
@@ -54,18 +54,18 @@ export async function runWorkspaceHeaderSmoke({ page, check, harnessBase }) {
     await expect.poll(fill).toBe("rgba(0, 0, 0, 0)");
   };
 
-  // Local: the name, then the laptop.
+  // Local: the laptop, then the name.
   const { folder } = await state();
   const name = (await nameText.textContent()).trim();
   const branch = `zeros/${folder.split("/").pop()}`;
   await expect(identity.locator(".lucide-laptop")).toBeVisible();
-  expect(await nameThenIcon("local")).toBe(true);
+  expect(await iconThenName("local")).toBe(true);
   await expect(identity).toHaveAccessibleName(`${name}, Local workspace`);
   const [headerBox, identityBox] = await Promise.all([header.boundingBox(), identity.boundingBox()]);
   expect(identityBox.height).toBe(28);
   expect(Math.round(identityBox.y + identityBox.height / 2)).toBe(Math.round(headerBox.y + headerBox.height / 2));
   await ghost();
-  check("Workspace header: a Local workspace reads name then laptop, one 28px ghost control filled only on hover, in both themes", true);
+  check("Workspace header: a Local workspace reads laptop then name, one 28px ghost control filled only on hover, in both themes", true);
 
   const details = page.getByRole("dialog", { name: "Local workspace details", exact: true });
   await identity.click();
@@ -107,7 +107,7 @@ export async function runWorkspaceHeaderSmoke({ page, check, harnessBase }) {
   await expect(nameText).toHaveText("cloud-one");
   await expect(identity.locator(".lucide-cloud")).toBeVisible();
   await expect(identity.locator(".lucide-laptop")).toHaveCount(0);
-  expect(await nameThenIcon("cloud")).toBe(true);
+  expect(await iconThenName("cloud")).toBe(true);
   await expect(identity).toHaveAccessibleName("cloud-one, Cloud workspace");
   await ghost();
   const cloudDetails = page.getByRole("dialog", { name: "Cloud workspace details", exact: true });
@@ -120,7 +120,7 @@ export async function runWorkspaceHeaderSmoke({ page, check, harnessBase }) {
   await expect.poll(fill).toBe(await token("--bg2-highlight"));
   await page.keyboard.press("Escape");
   await expect(cloudDetails).toHaveCount(0);
-  check("Workspace header: a cloud workspace reads name then cloud and opens the same cloud details", true);
+  check("Workspace header: a cloud workspace reads cloud then name and opens the same cloud details", true);
 
   await page.evaluate(() => window.appSidebarSelectOwner(null));
   await page.evaluate(() => {

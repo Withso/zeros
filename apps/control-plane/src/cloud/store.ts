@@ -62,6 +62,10 @@ export type CloudV2Workspace = {
   organizationId: string;
   creatorUserId: string;
   name: string;
+  /** Permanent within the organization (`w-<n>`); never reused. */
+  number?: number | null;
+  /** The first name one of its chats received; null shows as "Untitled". */
+  title?: string | null;
   repository: string;
   branch: string;
   baseBranch: string;
@@ -137,13 +141,14 @@ function restoreCreate(value: CloudV2RestoreCreate | null): CloudV2RestoreCreate
 }
 
 type Row = {
-  id: string; org_id: string; creator_user_id: string; name: string; repository: string; branch: string; base_branch: string;
+  id: string; org_id: string; creator_user_id: string; name: string; number: number | null; title: string | null;
+  repository: string; branch: string; base_branch: string;
   state: CloudV2WorkspaceState; boat_sandbox_id: string | null; computer_build_id: string | null;
   error_code: string | null; active_at: Date | null; archived_at: Date | null; created_at: Date; updated_at: Date;
   source_pending: boolean;
 };
 
-const WORKSPACE_COLUMNS_SQL = sql`id, org_id, creator_user_id, name, repository, branch, base_branch, state, boat_sandbox_id,
+const WORKSPACE_COLUMNS_SQL = sql`id, org_id, creator_user_id, name, number, title, repository, branch, base_branch, state, boat_sandbox_id,
   computer_build_id, error_code, active_at, archived_at, created_at, updated_at, source_pending`;
 const COLUMNS = WORKSPACE_COLUMNS_SQL.text;
 
@@ -214,6 +219,8 @@ function workspace(row: Row): CloudV2Workspace {
     organizationId: row.org_id,
     creatorUserId: row.creator_user_id,
     name: row.name,
+    number: row.number ?? null,
+    title: row.title ?? null,
     repository: row.repository,
     branch: row.branch,
     baseBranch: row.base_branch,
@@ -257,6 +264,32 @@ async function ownedRow(tx: Tx, id: string, userId: string, lock = false): Promi
     [id, userId],
   );
   throw held.rowCount ? organizationMemberOnHold() : notFound();
+}
+
+/** Titles a chat carries before it is named; they never name a workspace. */
+const UNNAMED_CHAT_TITLES = new Set(["", "Untitled", "New chat"]);
+const MAX_WORKSPACE_TITLE_CHARS = 200;
+
+/** The title a workspace takes from a chat row: its name, unless it is still
+ * unnamed, a terminal tab or archived. Mirrors the Local engine's rule. */
+export function workspaceTitleFromChat(chat: unknown): string | null {
+  const row = chat as { title?: unknown; kind?: unknown; archived?: unknown } | null;
+  if (!row || typeof row.title !== "string" || row.kind === "terminal" || row.archived === true) return null;
+  const title = row.title.replace(/\s+/g, " ").trim();
+  return UNNAMED_CHAT_TITLES.has(title) ? null : Array.from(title).slice(0, MAX_WORKSPACE_TITLE_CHARS).join("");
+}
+
+/** The earliest-created named chat in one mirror write. */
+function firstWorkspaceTitle(chats: readonly unknown[]): string | null {
+  let best: { title: string; createdAt: number } | null = null;
+  for (const chat of chats) {
+    const title = workspaceTitleFromChat(chat);
+    if (!title) continue;
+    const created = (chat as { createdAt?: unknown }).createdAt;
+    const createdAt = typeof created === "number" && Number.isFinite(created) ? created : Number.POSITIVE_INFINITY;
+    if (!best || createdAt < best.createdAt) best = { title, createdAt };
+  }
+  return best?.title ?? null;
 }
 
 export class CloudV2Store {
@@ -378,6 +411,20 @@ export class CloudV2Store {
 
   async get(id: string, userId: string): Promise<CloudV2Workspace> {
     return workspace(await withSystemTx(this.pool, tx => ownedRow(tx, id, userId)));
+  }
+
+  /** The workspace an organization's page names (`<slug>/w/<n>`), with the
+   * same creator-only access as by id: anyone else sees the same 404. */
+  async getByNumber(organizationSlug: string, number: number, userId: string): Promise<CloudV2Workspace> {
+    return workspace(await withSystemTx(this.pool, async tx => {
+      const { rows } = await tx.query<{ id: string }>(
+        `SELECT w.id FROM cloud_v2_workspaces w JOIN organizations o ON o.id = w.org_id
+         WHERE o.slug = $1 AND o.deleted_at IS NULL AND NOT o.is_personal AND w.number = $2`,
+        [organizationSlug, number],
+      );
+      if (!rows[0]) throw notFound();
+      return ownedRow(tx, rows[0].id, userId);
+    }));
   }
 
   async promptContext(id: string, userId: string) {
@@ -1129,6 +1176,13 @@ export class CloudV2Store {
           [workspaceId, chat.id, JSON.stringify(chat)],
         );
       }
+      // An Untitled workspace takes the first name one of its chats receives,
+      // and keeps it. The version moves so clients replace their document.
+      const title = firstWorkspaceTitle(input.chats ?? []);
+      if (title) await tx.query(
+        `UPDATE cloud_v2_workspaces SET title = $2, updated_at = clock_timestamp() WHERE id = $1 AND title IS NULL`,
+        [workspaceId, title],
+      );
       for (const chatId of input.chatDeletions ?? []) {
         await tx.query(`DELETE FROM cloud_v2_messages WHERE workspace_id = $1 AND chat_id = $2`, [workspaceId, chatId]);
         await tx.query(

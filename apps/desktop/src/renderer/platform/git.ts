@@ -240,6 +240,12 @@ export interface Workspace {
   /** Where execution is provisioned. Optional only for rolling compatibility;
    * legacy rows are local. */
   placement?: "local" | "cloud";
+  /** Permanent number within its owner (`w-310`), never reused. Absent from an
+   * older engine or control plane. */
+  number?: number | null;
+  /** The first title one of its chats received; null is "Untitled". Absent
+   * (undefined) from an older engine, which still names it by its branch. */
+  title?: string | null;
   repoSlug: string;
   repoRoot: string;
   branch: string;
@@ -436,8 +442,10 @@ export interface PreparedWorkspaceCreate {
   workspaceId: string;
   path: string;
   repoSlug: string;
-  /** The reserved branch name — the workspace's display name from frame one. */
+  /** The reserved branch name; it also names the workspace's folder. */
   branch: string;
+  /** The number reserved for the workspace (`w-<n>`); absent from older engines. */
+  number?: number;
 }
 
 /** Reserve the new workspace's identity and final path without touching disk,

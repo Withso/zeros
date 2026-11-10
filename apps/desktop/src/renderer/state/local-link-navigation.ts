@@ -1,4 +1,7 @@
-import type { LocalLink } from "@zeros/protocol/local-orchestration";
+import {
+  LOCAL_WORKSPACE_LINK_OWNER,
+  type LocalLink,
+} from "@zeros/protocol/local-orchestration";
 import type { ChatRowWire } from "../features/agent/agent-history-client";
 import type { Workspace } from "../platform/git";
 import type { LocalLinkSnapshot } from "../platform/local-link-snapshot";
@@ -72,7 +75,12 @@ export function resolveLocalLinkDestination(
     };
   };
 
+  // A numbered link names a Local workspace only under the Local owner; an
+  // organization's number is a cloud workspace, which this resolver never opens.
+  if (link.address && link.address.owner !== LOCAL_WORKSPACE_LINK_OWNER) return foreign;
+
   if (link.kind === "chat") {
+    // A numbered chat link finds its chat by session wherever it lives now.
     const chat = snapshot.chats.find((row) => row.id === link.id);
     if (!chat || chat.archived || chat.kind === "terminal") return missing;
     const destination = resolveFolder(chat.folder);
@@ -80,7 +88,19 @@ export function resolveLocalLinkDestination(
   }
 
   let destination: LocalLinkDestination;
-  if (link.id.startsWith("folder:")) {
+  if (link.address) {
+    const number = link.address.number;
+    const workspace = snapshot.workspaces.find(
+      (row) =>
+        row.id.startsWith("ws_") &&
+        row.number === number &&
+        isPersonalLocalLinkWorkspace(row),
+    );
+    if (!workspace) return missing;
+    destination = resolveFolder(workspace.path);
+    if (destination.ok && destination.workspace.id !== workspace.id)
+      return missing;
+  } else if (link.id.startsWith("folder:")) {
     const project = snapshot.projects.find(
       (row) => row.id === link.id.slice("folder:".length),
     );

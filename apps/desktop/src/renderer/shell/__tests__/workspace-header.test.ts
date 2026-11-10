@@ -25,7 +25,7 @@ vi.mock("../../state/use-projects", () => ({ useProjectForFolder: (folder: strin
 vi.mock("../../state/workspace-store", () => ({ useWorkspaceStore: (select: (value: typeof state) => unknown) => select(state) }));
 vi.mock("../workspace-tabs", () => ({ workspaceLabel: () => "Local branch" }));
 import { TooltipProvider } from "../../shared/ui/primitives";
-import { WorkspaceHeader, workspaceHeaderBranch } from "../conversation/workspace-header";
+import { ConversationWorkspaceHeader, WorkspaceHeader, workspaceHeaderBranch } from "../conversation/workspace-header";
 import { LocalWorkspaceDetailsCard, displayFolderPath } from "../conversation/local-workspace-details";
 
 const first = "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222";
@@ -86,19 +86,19 @@ describe("workspace column header", () => {
     expect(html).not.toContain("Share workspace"); expect(html).not.toContain("Port forwarding");
     expect(state.reads).toEqual([]);
   });
-  // 2026-11-09 direction: the name comes first and where the workspace lives
-  // after it, as one ghost control that opens the workspace's details. It has
-  // no fill at rest, only on hover and while its details are open.
+  // 2026-11-10 direction: where the workspace lives comes first, then its
+  // name (`w-310`), as one ghost control that opens the workspace's details.
+  // It has no fill at rest, only on hover and while its details are open.
   it.each([[local, "local", "lucide-laptop"], [organizationLocal, "local", "lucide-laptop"],
     [first, "cloud", "lucide-cloud"], [second, "cloud", "lucide-cloud"]] as const)(
-    "puts the %s name first and its %s icon after it, in one ghost control",
+    "puts the %s %s icon first and its name after it, in one ghost control",
     (folder, placement, glyph) => {
       const control = identity(render({ folder, name: "Feature", branch: "alex/feature" }));
       expect(control.tag).toBe("button");
       expect(control.opening).toContain('aria-haspopup="dialog"');
-      const name = control.html.indexOf("data-workspace-name");
-      expect(name).toBeGreaterThan(0);
-      expect(name).toBeLessThan(control.html.indexOf(`data-workspace-placement="${placement}"`));
+      const icon = control.html.indexOf(`data-workspace-placement="${placement}"`);
+      expect(icon).toBeGreaterThan(0);
+      expect(icon).toBeLessThan(control.html.indexOf("data-workspace-name"));
       expect(control.html).toContain(glyph);
       const classes = control.className.split(/\s+/);
       expect(classes.filter(cls => /^bg-/.test(cls))).toEqual([]);
@@ -107,6 +107,19 @@ describe("workspace column header", () => {
       expect(classes).toEqual(expect.arrayContaining(["hover:bg-bg2-highlight", "aria-expanded:bg-bg2-highlight"]));
     },
   );
+  it("names a numbered workspace w-<n>, with its title as the tooltip and in its name", () => {
+    const local = { id: "ws_a1b2c3-w-12", number: 12, path: "/local/personal", repoRoot: "/local/repo", branch: "alex/w-12" } as Workspace;
+    const control = identity(provided(createElement(ConversationWorkspaceHeader, { workspace: local, readOnly: false, windowControlsInset: false })));
+    expect(control.html).toContain(">w-12<");
+    expect(control.opening).toContain('aria-label="w-12, Local branch, Local workspace"');
+    state.documents[first] = { ...state.documents[first]!, number: 3, title: "Add canvas zoom" };
+    const cloud = identity(render());
+    expect(cloud.html).toContain(">w-3<");
+    expect(cloud.opening).toContain('aria-label="w-3, Add canvas zoom, Cloud workspace"');
+    state.documents[first] = { ...state.documents[first]!, title: null };
+    expect(identity(render()).opening).toContain('aria-label="w-3, Untitled, Cloud workspace"');
+  });
+
   it("names the control by its visible name and placement", () => {
     expect(identity(render({ folder: local, name: "alex/fix-login" })).opening).toContain('aria-label="alex/fix-login, Local workspace"');
     expect(identity(render()).opening).toContain('aria-label="Cloud feature, Cloud workspace"');

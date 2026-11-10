@@ -108,25 +108,34 @@ export function joinBranchPrefix(
   return prefix ? `${prefix}${BRANCH_PREFIX_SEPARATOR}${name}` : name;
 }
 
-/** The allocator's name shape — a capitalized colour, optionally `-vN`. Its
- *  distinctiveness is what lets branchDisplayName strip a prefix it has never
- *  seen: only a name in this shape could have come from pickFreeColourName. */
-const ALLOCATED_NAME_RE = /^[A-Z][a-z]{2,15}(?:-v[1-9][0-9]{0,2})?$/;
+/** The allocators' name shapes — a numbered workspace's `w-<n>` (with a
+ *  `-<k>` variant when that name was taken), or a legacy capitalized colour,
+ *  optionally `-vN`. Their distinctiveness is what lets branchDisplayName strip
+ *  a prefix it has never seen: only a name in these shapes could have come
+ *  from pickFreeWorkspaceNumberName or pickFreeColourName. */
+const NUMBER_NAME = "w-[1-9][0-9]{0,9}(?:-[1-9][0-9]?)?";
+const COLOUR_NAME = "[A-Z][a-z]{2,15}(?:-v[1-9][0-9]{0,2})?";
+const ALLOCATED_NAME_RE = new RegExp(`^(?:${NUMBER_NAME}|${COLOUR_NAME})$`);
+const NUMBER_NAME_SUFFIX_RE = new RegExp(`(?:^|[^A-Za-z0-9])(${NUMBER_NAME})$`);
+const COLOUR_NAME_SUFFIX_RE = new RegExp(`${COLOUR_NAME}$`);
 
 /** The allocator name at the END of a string, if any: `myname-Cream` → `Cream`,
- *  `Cream` → `Cream`, `login-fix` → null.
+ *  `Cream` → `Cream`, `x-w-12` → `w-12`, `login-fix` → null. A number name
+ *  must start the string or follow a separator: `raw-12` ends in no name.
  *
  *  Unlike branchDisplayName this does not care about slashes — it answers "does
  *  this string end in a name we could have handed out", which is what the
- *  used-name scan needs in order to reserve a colour that is buried inside
+ *  used-name scan needs in order to reserve a name that is buried inside
  *  somebody else's ref path. */
 export function allocatedNameSuffix(value: string): string | null {
-  const match = /[A-Z][a-z]{2,15}(?:-v[1-9][0-9]{0,2})?$/.exec(value);
-  return match ? match[0] : null;
+  const number = NUMBER_NAME_SUFFIX_RE.exec(value);
+  if (number) return number[1]!;
+  const colour = COLOUR_NAME_SUFFIX_RE.exec(value);
+  return colour ? colour[0] : null;
 }
 
-/** Strip the ownership prefix to get the display name: `zeros/Cream` →
- *  `Cream`, `jordan/Cream` → `Cream`.
+/** Strip the ownership prefix to get the display name: `zeros/w-12` →
+ *  `w-12`, `jordan/w-12` → `w-12`, `jordan/Cream` → `Cream`.
  *
  *  Two strip cases, and no others:
  *
@@ -134,7 +143,7 @@ export function allocatedNameSuffix(value: string): string | null {
  *       construction, whatever the name looks like, which keeps
  *       pre-2026-07-29 workspaces (`zeros/lupine-1a2b`, the old lowercase
  *       flower scheme) reading correctly;
- *    2. any prefix whose tail is an allocated colour name — that is how a
+ *    2. any prefix whose tail is an allocated name (`w-12`, a colour) — that is how a
  *       branch created under a CONFIGURED prefix (Settings → Git) is
  *       recognized without knowing which prefix was in force when it was made.
  *       An allocated name can never contain a slash, so the last slash is

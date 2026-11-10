@@ -132,12 +132,15 @@ describe("isAppOnlyPath", () => {
     assert.equal(isAppOnlyPath("/api/v1/me"), true);
     assert.equal(isAppOnlyPath("/invite"), true);
     assert.equal(isAppOnlyPath("/github/connected"), true);
+    assert.equal(isAppOnlyPath("/acme/w/310"), true);
   });
 
   it("does not flag marketing paths", () => {
     assert.equal(isAppOnlyPath("/"), false);
     assert.equal(isAppOnlyPath("/changelog"), false);
     assert.equal(isAppOnlyPath("/schemas/settings.schema.json"), false);
+    assert.equal(isAppOnlyPath("/acme/w/0"), false);
+    assert.equal(isAppOnlyPath("/acme/w/3/files"), false);
   });
 });
 

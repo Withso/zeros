@@ -10,7 +10,8 @@ import {
 } from "../features/team/control-plane";
 import type { CloudWorkspaceTarget } from "./bridge/cloud-workspace-key";
 import { isFeatureEnabled } from "../config/release-channel";
-import { changeCloudV2Workspace, cloudV2Document, createCloudV2Workspace, getCloudV2Workspace, listCloudV2Workspaces } from "./cloud-v2";
+import type { WorkspaceAddress } from "@zeros/protocol/local-orchestration";
+import { changeCloudV2Workspace, cloudV2Document, createCloudV2Workspace, getCloudV2Workspace, getCloudV2WorkspaceByNumber, listCloudV2Workspaces } from "./cloud-v2";
 import { getTeamStoreState } from "../features/team/team-store";
 
 async function readCloudJson(response: Response, maxBytes = 4 * 1024 * 1024): Promise<unknown> {
@@ -132,6 +133,13 @@ export async function getCloudWorkspaceDocument(
   target: CloudWorkspaceTarget,
 ): Promise<CloudWorkspaceDocument> {
   return cloudV2Document(await getCloudV2Workspace(target));
+}
+
+/** The workspace `<organization slug>/w/<n>` names, for the signed-in account. */
+export async function getCloudWorkspaceDocumentByNumber(
+  address: WorkspaceAddress,
+): Promise<CloudWorkspaceDocument> {
+  return cloudV2Document(await getCloudV2WorkspaceByNumber(address));
 }
 
 export async function changeCloudWorkspaceLifecycle(

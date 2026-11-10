@@ -196,6 +196,107 @@ d("organization routes", () => {
     } finally { actor = previous; }
   });
 
+  it("never gives a new organization an ID its workspace pages cannot use", async () => {
+    for (const name of ["Local", "API", "Auth", "Workspace"]) {
+      const response = await request("/v1/organizations", { method: "POST", body: { name } });
+      expect(response.status).toBe(201);
+      const { organization } = (await response.json()) as { organization: { slug: string; name: string } };
+      expect(organization).toMatchObject({ slug: `${name.toLowerCase()}-org`, name });
+    }
+    const chosen = await request("/v1/organizations", { method: "POST", body: { name: "Reserved", slug: "local" } });
+    expect(chosen.status).toBe(422);
+    expect(((await chosen.json()) as { error: { code: string } }).error.code).toBe("organization_id_reserved");
+    for (const slug of ["Bad_ID", "-lead", "trail-", "two--hyphens", "a".repeat(41), 7]) {
+      const invalid = await request("/v1/organizations", { method: "POST", body: { name: "Invalid", slug } });
+      expect(invalid.status).toBe(422);
+      expect(((await invalid.json()) as { error: { code: string } }).error.code).toBe("organization_id_invalid");
+    }
+  });
+
+  it("gives a display name its own ID, then -org, then asks the creator to choose one", async () => {
+    const create = async (body: Record<string, unknown>) => {
+      const response = await request("/v1/organizations", { method: "POST", body });
+      return { status: response.status, body: (await response.json()) as {
+        organization?: { slug: string; name: string };
+        error?: { code: string; message: string };
+      } };
+    };
+    expect(await create({ name: "Acme Labs" })).toMatchObject({ status: 201, body: { organization: { slug: "acme-labs", name: "Acme Labs" } } });
+    // Display names may repeat; IDs never do.
+    expect(await create({ name: "Acme Labs" })).toMatchObject({ status: 201, body: { organization: { slug: "acme-labs-org", name: "Acme Labs" } } });
+    const third = await create({ name: "Acme Labs" });
+    expect(third).toMatchObject({ status: 409, body: { error: { code: "organization_id_required" } } });
+    expect(third.body.error?.message).toContain("acme-labs and acme-labs-org");
+    expect(await create({ name: "Acme Labs", slug: " Acme-Studio " })).toMatchObject({
+      status: 201,
+      body: { organization: { slug: "acme-studio", name: "Acme Labs" } },
+    });
+    expect(await create({ name: "Elsewhere", slug: "ACME-LABS" })).toMatchObject({
+      status: 409,
+      body: { error: { code: "organization_id_taken" } },
+    });
+    const long = await create({ name: `${"Long ".repeat(9)}Name` });
+    expect(long.body.organization?.slug).toBe("long-long-long-long-long-long-long-long");
+    const longAgain = await create({ name: `${"Long ".repeat(9)}Name` });
+    expect(longAgain.body.organization?.slug).toBe("long-long-long-long-long-long-long-org");
+  });
+
+  it("keeps an organization's ID when its display name changes", async () => {
+    const created = await request("/v1/organizations", { method: "POST", body: { name: "Fixed Identity" } });
+    const { organization } = (await created.json()) as { organization: { id: string; slug: string } };
+    expect(organization.slug).toBe("fixed-identity");
+    const renamed = await request(`/v1/organizations/${organization.id}`, { method: "PATCH", body: { name: "Renamed Identity" } });
+    expect(renamed.status).toBe(200);
+    expect(((await renamed.json()) as { organization: { slug: string; name: string } }).organization).toMatchObject({
+      slug: "fixed-identity",
+      name: "Renamed Identity",
+    });
+    const reslug = await request(`/v1/organizations/${organization.id}`, {
+      method: "PATCH",
+      body: { name: "Again", slug: "renamed-identity" },
+    });
+    expect(reslug.status).toBe(422);
+    expect(((await reslug.json()) as { error: { code: string } }).error.code).toBe("organization_id_immutable");
+    const after = await request(`/v1/organizations/${organization.id}`);
+    expect(((await after.json()) as { organization: { slug: string; name: string } }).organization).toMatchObject({
+      slug: "fixed-identity",
+      name: "Renamed Identity",
+    });
+  });
+
+  it("answers the create form's live Organization ID check", async () => {
+    const check = async (query: string) => {
+      const response = await request(`/v1/organizations/id-availability?${query}`);
+      return { status: response.status, body: await response.json() as Record<string, unknown> };
+    };
+    expect(await check("name=Probe%20Availability")).toEqual({
+      status: 200,
+      body: { suggestion: "probe-availability", candidates: ["probe-availability", "probe-availability-org"] },
+    });
+    expect((await request("/v1/organizations", { method: "POST", body: { name: "Probe Availability" } })).status).toBe(201);
+    expect((await check("name=Probe%20Availability")).body).toMatchObject({ suggestion: "probe-availability-org" });
+    expect((await request("/v1/organizations", { method: "POST", body: { name: "Probe Availability" } })).status).toBe(201);
+    expect((await check("name=Probe%20Availability")).body).toMatchObject({ suggestion: null });
+    expect((await check("name=Workspace%20")).body).toMatchObject({ candidates: ["workspace-org"] });
+    expect(await check("id=Probe-Availability")).toEqual({
+      status: 200,
+      body: { id: "probe-availability", available: false, reason: "taken" },
+    });
+    expect((await check("id=LOCAL")).body).toEqual({ id: "local", available: false, reason: "reserved" });
+    expect((await check("id=bad_id")).body).toEqual({ id: "bad_id", available: false, reason: "invalid" });
+    expect((await check("id=probe-free")).body).toEqual({ id: "probe-free", available: true });
+    expect((await check("")).status).toBe(422);
+    const previous = actor;
+    actor = member;
+    try {
+      const denied = await check("id=probe-free");
+      expect(denied.status).toBe(403);
+      expect(denied.body).toMatchObject({ error: { code: "pro_required" } });
+    } finally {
+      actor = previous;
+    }
+  });
+
   it("creates an organization and its one default team atomically", async () => {
     const response = await request("/v1/organizations", {
       method: "POST",

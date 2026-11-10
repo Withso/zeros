@@ -536,9 +536,15 @@ export function generalHtml(organization) {
       organizationAvatarHtml(organization),
     ),
     nameRow,
+    typeof organization.slug === "string" && organization.slug
+      ? rowHtml(
+          textHtml("Organization ID", "Used in workspace and chat links. It can’t change."),
+          `<code class="id-code">${escapeHtml(organization.slug)}</code><button class="icon-button" type="button" data-copy-organization-slug="${escapeHtml(organization.slug)}" aria-label="Copy organization ID">${ICONS.copy}</button>`,
+        )
+      : "",
     rowHtml(
-      textHtml("Organization ID", "Your stable tenant identifier."),
-      `<code class="id-code">${escapeHtml(organization.id)}</code><button class="icon-button" type="button" data-copy-organization-id="${escapeHtml(organization.id)}" aria-label="Copy organization ID">${ICONS.copy}</button>`,
+      textHtml("Internal ID", "Your stable tenant identifier, for support."),
+      `<code class="id-code">${escapeHtml(organization.id)}</code><button class="icon-button" type="button" data-copy-organization-id="${escapeHtml(organization.id)}" aria-label="Copy internal ID">${ICONS.copy}</button>`,
     ),
     rowHtml(textHtml("Your role"), `<span class="badge">${escapeHtml(roleLabel(organization.role))}</span>`),
     seat
@@ -712,12 +718,47 @@ function dialogHtml({ id, title, line, field, error, submit, destructive = false
   </dialog>`;
 }
 
+export const ORGANIZATION_ID_MAX_LENGTH = 40;
+const ORGANIZATION_ID_DEFAULT_HINT = "Used in workspace and chat links. You can’t change it later.";
+
+/** What someone typed as an Organization ID, as they type it: lowercase,
+ * with anything but letters, digits and hyphens turned into a hyphen. */
+export function organizationIdInput(value) {
+  return String(value ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9-]/g, "-")
+    .slice(0, ORGANIZATION_ID_MAX_LENGTH);
+}
+
+/** The line under the Organization ID field for the latest check. */
+export function organizationIdHint(check, host) {
+  if (check?.kind === "checking") return { text: "Checking…", error: false };
+  if (check?.kind === "available") {
+    return { text: `Links use ${host}/${check.id}/w/1. You can’t change it later.`, error: false };
+  }
+  if (check?.kind === "required") {
+    const taken = check.candidates.join(" and ");
+    return { text: `${taken} ${check.candidates.length === 1 ? "is" : "are"} taken. Enter an organization ID.`, error: true };
+  }
+  if (check?.kind === "taken") return { text: `${check.id} is taken. Choose another.`, error: true };
+  if (check?.kind === "reserved") return { text: `${check.id} is reserved. Choose another.`, error: true };
+  if (check?.kind === "invalid") {
+    return {
+      text: `Use lowercase letters, numbers and single hyphens, up to ${ORGANIZATION_ID_MAX_LENGTH} characters.`,
+      error: true,
+    };
+  }
+  return { text: ORGANIZATION_ID_DEFAULT_HINT, error: false };
+}
+
+/** The name, then the ID it generates. The ID follows the name until it is
+ * edited, and never changes once the organization exists. */
 export function createOrganizationDialogHtml() {
   return dialogHtml({
     id: "create-organization",
     title: "Create organization",
     line: "Organizations share workspaces, members and settings.",
-    field: '<label class="field"><span>Organization name</span><input class="input" name="name" maxlength="80" required autocomplete="organization" placeholder="Acme" /></label>',
+    field: `<label class="field"><span>Organization name</span><input class="input" name="name" maxlength="80" required autocomplete="organization" placeholder="Acme" data-organization-name /></label><div class="field"><label for="create-organization-id">Organization ID</label><input class="input" id="create-organization-id" name="slug" maxlength="${ORGANIZATION_ID_MAX_LENGTH}" autocomplete="off" autocapitalize="none" spellcheck="false" aria-describedby="create-organization-id-hint" data-organization-id /><p class="field-hint" id="create-organization-id-hint" aria-live="polite" data-organization-id-hint>${ORGANIZATION_ID_DEFAULT_HINT}</p></div>`,
     error: "create-organization-error",
     submit: "Create organization",
   });
@@ -1327,6 +1368,7 @@ function bootDashboard() {
       document.getElementById("org-switcher")?.removeAttribute("open");
       const errorNode = document.getElementById("create-organization-error");
       if (errorNode) errorNode.textContent = "";
+      organizationId.sync();
       document.getElementById("create-organization-dialog")?.showModal();
     } else if (action === "toggle-mobile-nav") {
       setMobileNavigationOpen(
@@ -1362,6 +1404,17 @@ function bootDashboard() {
         target.disabled = false;
         toast(error.message, true);
       }
+    } else if (target.dataset.copyOrganizationSlug) {
+      if (
+        await tryWriteClipboard(
+          navigator.clipboard,
+          target.dataset.copyOrganizationSlug,
+        )
+      ) {
+        toast("Organization ID copied");
+      } else {
+        toast("Couldn’t copy the organization ID", true);
+      }
     } else if (target.dataset.copyOrganizationId) {
       if (
         await tryWriteClipboard(
@@ -1369,9 +1422,9 @@ function bootDashboard() {
           target.dataset.copyOrganizationId,
         )
       ) {
-        toast("Organization ID copied");
+        toast("Internal ID copied");
       } else {
-        toast("Couldn’t copy the organization ID", true);
+        toast("Couldn’t copy the internal ID", true);
       }
     } else if (action === "delete-organization") {
       const organization = activeOrganization();
@@ -1470,6 +1523,159 @@ function bootDashboard() {
     }
   });
 
+  // The create form's Organization ID: the name's own ID (or its `-org` form)
+  // until someone edits it, checked against the control plane as they type.
+  // Only the answer for the field's current text is ever shown.
+  const organizationId = (() => {
+    let edited = false;
+    let timer = 0;
+    let generation = 0;
+    // The name the field's generated ID was answered for.
+    let answeredFor = null;
+    let shownForm = null;
+    const nodes = () => {
+      const form = document.getElementById("create-organization-form");
+      // A re-rendered dialog starts over: its fields are new and empty, and
+      // a check for the old one no longer applies.
+      if (form !== shownForm) {
+        shownForm = form;
+        edited = false;
+        answeredFor = null;
+        generation += 1;
+        window.clearTimeout(timer);
+      }
+      return {
+        name: form?.querySelector("[data-organization-name]"),
+        id: form?.querySelector("[data-organization-id]"),
+        hint: form?.querySelector("[data-organization-id-hint]"),
+      };
+    };
+    const show = (check) => {
+      const { hint, id } = nodes();
+      if (!hint) return;
+      const line = organizationIdHint(check, window.location.host);
+      hint.textContent = line.text;
+      if (line.error) hint.dataset.tone = "error";
+      else delete hint.dataset.tone;
+      id?.setAttribute("aria-invalid", String(line.error));
+    };
+    /** Ask about exactly what the fields hold now and show the answer.
+     * Resolves with it, or null when the check failed or newer typing or a
+     * newer check replaced it. A failed name check clears the ID it held. */
+    const ask = async () => {
+      const { name, id } = nodes();
+      window.clearTimeout(timer);
+      const asked = ++generation;
+      const typed = id?.value.trim() ?? "";
+      const named = name?.value.trim() ?? "";
+      const query = edited ? `id=${encodeURIComponent(typed)}` : `name=${encodeURIComponent(named)}`;
+      let answer;
+      try {
+        answer = await api(`/v1/organizations/id-availability?${query}`);
+      } catch {
+        if (asked === generation) {
+          if (!edited && id) id.value = "";
+          show(null);
+        }
+        return null;
+      }
+      if (asked !== generation) return null;
+      const current = nodes();
+      if (edited) {
+        if (current.id?.value.trim() !== typed) return null;
+        show(answer.available ? { kind: "available", id: answer.id } : { kind: answer.reason, id: answer.id });
+        return answer;
+      }
+      if (current.name?.value.trim() !== named || !current.id) return null;
+      current.id.value = answer.suggestion ?? "";
+      answeredFor = named;
+      show(
+        answer.suggestion
+          ? { kind: "available", id: answer.suggestion }
+          : { kind: "required", candidates: answer.candidates ?? [] },
+      );
+      return answer;
+    };
+    const check = () => {
+      const { name, id } = nodes();
+      window.clearTimeout(timer);
+      generation += 1;
+      const typed = id?.value.trim() ?? "";
+      const named = name?.value.trim() ?? "";
+      if (!edited && answeredFor !== named) answeredFor = null;
+      if (edited ? !typed : !named) {
+        if (!edited && id) id.value = "";
+        show(null);
+        return;
+      }
+      show({ kind: "checking" });
+      timer = window.setTimeout(() => void ask(), 200);
+    };
+    return {
+      nameInput() {
+        nodes();
+        if (!edited) check();
+      },
+      idInput(input) {
+        nodes();
+        const normalized = organizationIdInput(input.value);
+        if (normalized !== input.value) {
+          const caret = input.selectionStart;
+          input.value = normalized;
+          if (caret !== null) input.setSelectionRange(caret, caret);
+        }
+        // Clearing the field hands the ID back to the name.
+        edited = normalized !== "";
+        check();
+      },
+      /** Opening the dialog shows the answer for what it holds now. */
+      sync() {
+        check();
+      },
+      /** The ID to create with, once the field shows the answer for exactly
+       * this name: `{ slug }` (undefined lets the control plane derive it the
+       * same way, when the check failed), or `{ required: true }` when the
+       * name's IDs are taken and the creator must choose one. */
+      async chosen() {
+        const { name, id } = nodes();
+        if (edited) return { slug: id?.value.trim().toLowerCase() || undefined };
+        if (answeredFor !== (name?.value.trim() ?? "") && !(await ask())) return { slug: undefined };
+        const value = nodes().id?.value.trim().toLowerCase() ?? "";
+        return value ? { slug: value } : { required: true };
+      },
+      focusId() {
+        const { id } = nodes();
+        id?.focus();
+        id?.select();
+      },
+      reset() {
+        edited = false;
+        answeredFor = null;
+        generation += 1;
+        window.clearTimeout(timer);
+        show(null);
+      },
+      rejected(error) {
+        if (!String(error?.code ?? "").startsWith("organization_id_")) return;
+        const { id } = nodes();
+        edited = true;
+        generation += 1;
+        window.clearTimeout(timer);
+        if (id) {
+          id.setAttribute("aria-invalid", "true");
+          id.focus();
+          id.select();
+        }
+      },
+    };
+  })();
+
+  document.addEventListener("input", (event) => {
+    if (!(event.target instanceof HTMLInputElement)) return;
+    if (event.target.matches("[data-organization-name]")) organizationId.nameInput();
+    else if (event.target.matches("[data-organization-id]")) organizationId.idInput(event.target);
+  });
+
   document.addEventListener("change", async (event) => {
     const logoInput = event.target.closest("input[data-organization-logo]");
     if (logoInput) {
@@ -1547,9 +1753,16 @@ function bootDashboard() {
         const errorNode = document.getElementById("create-organization-error");
         if (!name) return;
         if (errorNode) errorNode.textContent = "";
+        // Create with the ID the field shows for exactly this name.
+        const choice = await organizationId.chosen();
+        if (choice.required) {
+          organizationId.focusId();
+          return;
+        }
+        const { slug } = choice;
         const result = await api("/v1/organizations", {
           method: "POST",
-          body: { name },
+          body: slug ? { name, slug } : { name },
         });
         const [created] = cloudOrganizations([result.organization]);
         if (created) {
@@ -1558,8 +1771,14 @@ function bootDashboard() {
           state.section = "general";
         }
         form.reset();
+        organizationId.reset();
         document.getElementById("create-organization-dialog")?.close();
-        toast("Organization created");
+        // A control plane that predates chosen IDs keeps its own.
+        toast(
+          slug && created?.slug && created.slug !== slug
+            ? `Organization created with the ID ${created.slug}`
+            : "Organization created",
+        );
         await render();
       } else if (form.id === "delete-organization-form" && organization) {
         const confirmation = new FormData(form)
@@ -1662,6 +1881,7 @@ function bootDashboard() {
       if (form.id === "create-organization-form") {
         const errorNode = document.getElementById("create-organization-error");
         if (errorNode) errorNode.textContent = error.message;
+        organizationId.rejected(error);
       } else if (
         form.id !== "delete-organization-form" &&
         form.id !== "delete-account-form"
@@ -1679,6 +1899,7 @@ function bootDashboard() {
     boot.action === "create-organization" &&
     organizationCreationAllowed(state.capabilities)
   ) {
+    organizationId.sync();
     document.getElementById("create-organization-dialog")?.showModal();
   } else if (boot.action === "delete-account") {
     document.getElementById("delete-account-dialog")?.showModal();

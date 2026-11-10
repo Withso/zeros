@@ -24,9 +24,12 @@ export function cloudStatusLabel(status: string, availability?: WorkspaceAvailab
 /** A cloud workspace's name and cloud in its header, opening what it is and
  * whether it is running, with Start and Stop. Everything else is the Local
  * workspace UI. The header owns the document's subscription. */
-export function CloudWorkspaceDetails({ folder, name, workspace }: {
+export function CloudWorkspaceDetails({ folder, name, title, workspace }: {
   folder: string;
+  /** `w-<n>` when the workspace has a number. */
   name: string;
+  /** Its title: the first chat's name, or "Untitled". */
+  title?: string;
   workspace: CloudWorkspaceDocument | undefined;
 }) {
   const target = parseCloudWorkspaceKey(folder);
@@ -37,7 +40,7 @@ export function CloudWorkspaceDetails({ folder, name, workspace }: {
   const [open, setOpen] = useWorkspaceDetailsOpen(pageActive);
   const shown = open && surfaceActive;
   const [changing, setChanging] = useState(false);
-  if (!target || !allowed) return <WorkspaceIdentityLabel name={name} placement="cloud" />;
+  if (!target || !allowed) return <WorkspaceIdentityLabel name={name} title={title} placement="cloud" />;
   const change = (operation: "wake" | "stop", failure: string) => {
     setChanging(true);
     void manageCloudWorkspace(target, operation)
@@ -60,11 +63,11 @@ export function CloudWorkspaceDetails({ folder, name, workspace }: {
   ] : [];
   return (
     <Popover open={shown} onOpenChange={setOpen}>
-      <WorkspaceIdentityTrigger name={name} placement="cloud" open={shown} />
+      <WorkspaceIdentityTrigger name={name} title={title} placement="cloud" open={shown} />
       <PopoverContent align="start" sideOffset={6} className="w-[320px]" aria-label="Cloud workspace details">
         {workspace ? (
           <>
-            <p className="text-fg1 mb-3 truncate text-xs leading-4.5 font-medium">{workspace.name}</p>
+            <p className="text-fg1 mb-3 truncate text-xs leading-4.5 font-medium">{title?.trim() || workspace.name}</p>
             <dl className="space-y-2">
               {rows.map(({ Icon, label, value }) => (
                 <div key={label} className="flex min-w-0 items-center gap-2">

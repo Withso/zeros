@@ -93,6 +93,11 @@ export interface Workspace {
   /** Execution location. Desktop creation currently emits only `local`;
    * `cloud` is reserved for the organization-only provisioner. */
   placement?: WorkspacePlacement;
+  /** Permanent number within the owner (`w-310`), never reused. Null only on
+   * a row that is not a Local workspace; absent from pre-v46 wire objects. */
+  number?: number | null;
+  /** The first title one of its chats received; null shows as "Untitled". */
+  title?: string | null;
   repoSlug: string;
   /** Absolute path to the repo root (the "main" working tree). Stored
    *  per workspace so archive / restore / delete don't need the caller
@@ -293,6 +298,8 @@ export interface CreatedWorkspace {
   branch: string;
   path: string;
   status: WorkspaceStatus;
+  /** The workspace's permanent number within its owner (`w-<n>`). */
+  number?: number;
   /** The resolved setup command to run in the background after create, or null
    *  when the repo has no setup configured (or this is a remote create, which
    *  never runs host shell). The engine spawns the setup PTY from this; the

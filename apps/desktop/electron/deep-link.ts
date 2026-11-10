@@ -3,7 +3,11 @@
 // without creating its first worktree.
 
 import { app, shell } from "electron";
-import { formatLocalLink, parseLocalLink } from "@zeros/protocol/local-orchestration";
+import {
+  formatLocalLink,
+  formatParsedLocalLink,
+  parseLocalLink,
+} from "@zeros/protocol/local-orchestration";
 import {
   CLOUD_WORKSPACE_LINK_ACTION,
   formatCloudWorkspaceLink,
@@ -78,6 +82,19 @@ export async function handleUrl(rawUrl: string): Promise<void> {
   // in `hostname`; falls back to the stripped pathname for exotic
   // forms like `zeros:/open?...`.
   const action = parsed.hostname || parsed.pathname.replace(/^\/+/, "");
+
+  // A numbered link's host is its owner (`local`, an organization slug), not
+  // an action, so its `/w/<n>` shape is recognized first: an organization
+  // named "auth" or "open" still opens its workspace.
+  if (/^\/w(?:\/|$)/.test(parsed.pathname)) {
+    const link = parseLocalLink(rawUrl);
+    if (!link?.address || link.scheme !== scheme()) {
+      console.warn("[Zeros] deep-link: invalid workspace link");
+      return;
+    }
+    emitLocalNavigation(formatParsedLocalLink(link));
+    return;
+  }
 
   if (action === "chat" || action === "workspace") {
     const link = parseLocalLink(rawUrl);

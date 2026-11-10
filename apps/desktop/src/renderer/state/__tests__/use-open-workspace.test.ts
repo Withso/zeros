@@ -85,6 +85,13 @@ describe("useOpenWorkspace", () => {
     expect(wake.request).toHaveBeenCalledExactlyOnceWith(folder);
     expect(dispatch.mock.invocationCallOrder[0]).toBeLessThan(wake.request.mock.invocationCallOrder[0]);
   });
+  it.each(["code", "design"] as const)("opens a linked cloud %s workspace without requesting compute", kind => {
+    const folder = "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222";
+    selectChatToRestoreForFolder.mockReturnValue("saved-chat");
+    useOpenWorkspace()({ id: folder, path: folder, repoRoot: folder, kind }, { wake: false });
+    expect(dispatch).toHaveBeenCalledWith(expect.objectContaining({ type: "OPEN_WORKSPACE", folder }));
+    expect(wake.request).not.toHaveBeenCalled();
+  });
   it.each(["signed-out", "no-entitlement", "archive"])("does not request compute for a cloud open blocked by %s", reason => {
     const folder = "cloud://11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222";
     wake.signedIn = reason !== "signed-out";

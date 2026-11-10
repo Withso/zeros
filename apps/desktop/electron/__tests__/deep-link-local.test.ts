@@ -61,6 +61,47 @@ describe("Local chat/workspace links", () => {
     },
   );
 
+  it.each(["stable", "alpha", "beta", "dev"])(
+    "routes %s's numbered workspace and chat links as navigation",
+    async (channel) => {
+      state.channel = channel;
+      state.localDevelopment = channel === "dev";
+      const scheme = channel === "stable" ? "zeros" : `zeros-${channel}`;
+      for (const path of [
+        "local/w/310",
+        "local/w/310?session=7e2b720c-ab56-441d-b189-6e7d1eb7a628",
+        // An organization named after an action still has workspace links.
+        "auth/w/3",
+        "acme/w/12",
+        // A cloud chat link from its web page.
+        "acme/w/12?session=7e2b720c-ab56-441d-b189-6e7d1eb7a628",
+      ]) {
+        await handleUrl(`${scheme}://${path}`);
+        expect(state.navigate).toHaveBeenLastCalledWith(`${scheme}://${path}`);
+      }
+      // The owner is a case-insensitive host; navigation carries it canonically.
+      await handleUrl(`${scheme}://Local/w/9`);
+      expect(state.navigate).toHaveBeenLastCalledWith(`${scheme}://local/w/9`);
+      expect(state.spawn).not.toHaveBeenCalled();
+      expect(state.emit).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    "zeros-beta://local/w/3",
+    "zeros://local/w/0",
+    "zeros://local/w/3?session=a&next=b",
+    "zeros://local/w/3#chat",
+    "zeros://local/w/3/files",
+    "zeros://local/w/",
+    "zeros://user@local/w/3",
+    "zeros://local:44/w/3",
+  ])("refuses a malformed or foreign numbered link without forwarding it: %s", async (url) => {
+    await handleUrl(url);
+    expect(state.navigate).not.toHaveBeenCalled();
+    expect(state.emit).not.toHaveBeenCalled();
+  });
+
   it.each([
     "zeros-beta://chat/one",
     "zeros://chat/one?start=true",

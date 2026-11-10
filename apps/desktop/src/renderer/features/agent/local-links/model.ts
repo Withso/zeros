@@ -1,4 +1,7 @@
 import {
+  LOCAL_WORKSPACE_LINK_OWNER,
+  formatWorkspaceAddress,
+  isWorkspaceNumber,
   parseLocalLink,
   type LocalLink,
   type LocalLinkScheme,
@@ -26,8 +29,9 @@ export function localLinkSpans(
   scheme: LocalLinkScheme,
 ): LocalLinkSpan[] {
   const spans: LocalLinkSpan[] = [];
+  // `<owner>/w/<n>` before the legacy kinds, so `chat/w/3` is a numbered link.
   const pattern =
-    /\bzeros(?:-alpha|-beta|-dev)?:\/\/(?:chat|workspace)\/[^\s<>"'`()[\]{}]+/g;
+    /\bzeros(?:-alpha|-beta|-dev)?:\/\/(?:[A-Za-z0-9-]{1,100}\/w|chat|workspace)\/[^\s<>"'`()[\]{}]+/g;
   for (const match of text.matchAll(pattern)) {
     if (match.index > 0 && /[\w/:.-]/.test(text[match.index - 1])) continue;
     const href = match[0].replace(/[.,:;!?-]+$/, "");
@@ -168,11 +172,15 @@ export function localLinkIndex(
     if (!row.id.startsWith("ws_")) continue;
     const owner = resolveFolder(row.path);
     const available = owner.available && owner.workspaceId === row.id;
-    workspaces.set(row.id, {
+    const label: LocalLinkLabel = {
       available,
       label: available ? workspaceLabel(row) : "Workspace",
       glyphSeed: `${row.repoSlug}/${row.branch}`,
-    });
+    };
+    workspaces.set(row.id, label);
+    // A numbered link's id is its address; it names the same workspace.
+    if (isWorkspaceNumber(row.number))
+      workspaces.set(formatWorkspaceAddress({ owner: LOCAL_WORKSPACE_LINK_OWNER, number: row.number }), label);
   }
   for (const project of snapshot.projects) {
     const id = `folder:${project.id}`;

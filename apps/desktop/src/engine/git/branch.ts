@@ -602,9 +602,14 @@ export async function continueOnNewBranch(
   // Allocated against the repo's used-set, not generated blind. Until
   // 2026-07-29 this called generateBranchName() and leaned entirely on the
   // 4-hex tail for uniqueness ("if the impossible happens git fails loudly").
-  // Colour names have no tail, so an unchecked pick here would collide with an
-  // existing workspace as soon as the dictionary got crowded.
-  const branch = await allocateWorkspaceBranch(ws.repoRoot, ws.repoSlug);
+  // Allocated names have no random tail, so an unchecked pick here would
+  // collide with an existing workspace. A numbered workspace keeps its number:
+  // its earlier `w-<n>` branch still exists, so this becomes `w-<n>-2`.
+  const branch = await allocateWorkspaceBranch(
+    ws.repoRoot,
+    ws.repoSlug,
+    ws.number ?? null,
+  );
   // `checkout -b` (not -B): never reset an existing branch. The allocator can
   // still lose a race with a concurrent create, and -b makes git refuse rather
   // than silently move someone else's ref. Git carries compatible index/

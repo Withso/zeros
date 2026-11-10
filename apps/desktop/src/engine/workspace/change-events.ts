@@ -213,8 +213,11 @@ export const LONG_LIFECYCLE_OPS = new Set([
  *      Every `pick(resolved, …)` provenance tag on the repo settings pages had
  *      the same lag more quietly. Echoing costs one small resolve the poll was
  *      going to force moments later regardless. */
-export function dbChangedIncludesOriginator(op: string): boolean {
+export function dbChangedIncludesOriginator(op: string, result?: unknown): boolean {
   return (
+    // The writer saved a chat, not its workspace's new title: only the engine
+    // knows the workspace adopted the chat's name.
+    (CHAT_MUTATIONS.has(op) && chatMutationTitledWorkspaces(result).length > 0) ||
     CODE_REVIEW_MUTATIONS.has(op) ||
     LONG_LIFECYCLE_OPS.has(op) ||
     SETTINGS_MUTATIONS.has(op) ||
@@ -237,12 +240,21 @@ export function dbChangedIncludesOriginator(op: string): boolean {
   );
 }
 
+/** Workspaces a chat save named (they took the chat's first title). */
+export function chatMutationTitledWorkspaces(result: unknown): string[] {
+  const ids = result && typeof result === "object"
+    ? (result as { workspaceIds?: unknown }).workspaceIds
+    : undefined;
+  return Array.isArray(ids) ? ids.filter((id): id is string => typeof id === "string" && id.length > 0) : [];
+}
+
 /** Which renderer server-state collections a successful operation changed. */
 export function dbChangedKinds(op: string, result?: unknown): string[] | null {
   if (CODE_REVIEW_MUTATIONS.has(op)) return ["codeReview"];
   if (op === "design.transaction.apply" && result && typeof result === "object" &&
       (result as { result?: { dryRun?: boolean } }).result?.dryRun === true) return null;
-  if (CHAT_MUTATIONS.has(op)) return ["chats"];
+  if (CHAT_MUTATIONS.has(op))
+    return chatMutationTitledWorkspaces(result).length > 0 ? ["chats", "workspaces"] : ["chats"];
   if (op === "project.reconcileGithubRemote")
     return result && typeof result === "object" && (result as { changed?: boolean }).changed === true
       ? ["projects", "workspaces"] : null;

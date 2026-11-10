@@ -98,6 +98,8 @@ export function isAppOnlyPath(pathname: string): boolean {
   return (
     pathname === "/invite" ||
     pathname.startsWith("/workspace/") ||
+    // A cloud workspace's page: /<organization slug>/w/<n>.
+    /^\/[A-Za-z0-9-]{1,100}\/w\/[1-9][0-9]{0,9}$/.test(pathname) ||
     pathname === "/github/connected" ||
     pathname === "/api" ||
     pathname.startsWith("/api/") ||

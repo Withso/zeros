@@ -44,7 +44,9 @@ import {
   joinBranchPrefix,
   normalizeBranchPrefix,
   pickFreeColourName,
+  pickFreeWorkspaceNumberName,
 } from "./naming";
+import { reserveWorkspaceNumber } from "../db/workspace-numbers";
 import { cachedGithubLogin } from "./github";
 import { isRepo, readOriginUrl, repoSlugFromOriginUrl } from "./repo";
 import {
@@ -696,12 +698,15 @@ export type InternalCreateWorkspaceOptions = {
  *  of generateWorkspaceId. Anything else is rejected before it can reach a
  *  path join. */
 const WORKSPACE_ID_RE = /^ws_[a-z0-9]{6}-[a-z0-9-]+$/;
-/** The allocator's exact NAME output — a colour ("Cream") plus the exhaustion
- *  fallback suffix ("Cream-v2"). Anchored at the END of the branch so the
- *  prefix can be peeled off whatever it is. Was
+/** The allocators' exact NAME output — a workspace number ("w-310") with its
+ *  taken-name variant ("w-310-2"), or a legacy colour ("Cream") with the
+ *  exhaustion fallback suffix ("Cream-v2"). Anchored at the END of the branch
+ *  so the prefix can be peeled off whatever it is. Was
  *  `/^zeros\/[a-z]+-[0-9a-f]{4}$/` before the 2026-07-29 colour scheme, and
- *  `/^zeros\/…/` before Settings → Git made the prefix a choice. */
-const PREPARED_NAME_RE = /[A-Z][a-z]{2,15}(?:-v[1-9][0-9]{0,2})?$/;
+ *  `/^zeros\/…/` before Settings → Git made the prefix a choice. Colours stay
+ *  accepted for a create journaled by an older build. */
+const PREPARED_NAME_RE =
+  /(?:w-[1-9][0-9]{0,9}(?:-[1-9][0-9]?)?|[A-Z][a-z]{2,15}(?:-v[1-9][0-9]{0,2})?)$/;
 
 /** Is this a branch prepareWorkspaceCreate could have produced?
  *
@@ -1119,18 +1124,26 @@ function branchPrefixIsBlocked(
 export async function allocateWorkspaceBranch(
   repoRoot: string,
   repoSlug: string,
+  /** The workspace's number: its branch is `w-<n>`. Null keeps the legacy
+   *  colour name, for a row that predates numbering. */
+  number: number | null,
   githubLogin: string | null = cachedGithubLogin(),
 ): Promise<string> {
   const { used, branches } = await collectUsedWorkspaceNames(
     repoRoot,
     repoSlug,
   );
-  const name = pickFreeColourName(used);
+  const name =
+    number === null
+      ? pickFreeColourName(used)
+      : pickFreeWorkspaceNumberName(number, used);
   if (!name) {
     throw new GitError({
       code: "WORKSPACE_ALREADY_EXISTS",
       message:
-        "Could not allocate a workspace name: every colour name is in use in this repository.",
+        number === null
+          ? "Could not allocate a workspace name: every colour name is in use in this repository."
+          : `Could not allocate a branch for w-${number}: every variant of its name is in use in this repository.`,
       remediation:
         "Delete or archive-and-remove some workspaces in this repository, then retry.",
     });
@@ -1167,6 +1180,8 @@ export interface PreparedWorkspaceCreate {
   path: string;
   repoSlug: string;
   branch: string;
+  /** The Local workspace number reserved for this create (`w-<n>`). */
+  number: number;
 }
 
 type WorkspaceBranchOwnershipOperation = "create" | "restore";
@@ -1384,7 +1399,11 @@ export async function prepareWorkspaceCreate(input: {
       message: `prepareWorkspaceCreate: id collision for ${workspaceId}. Retry.`,
     });
   }
-  // Reserve the branch name too — it IS the workspace's display name. Avoid a
+  // The renderer shows `w-<n>` from the first frame, so the number is held
+  // durably now and the create's row consumes it. Local workspaces belong to
+  // Local (organizations create in the cloud), so the owner is Local's.
+  const number = reserveWorkspaceNumber(workspaceId, null);
+  // Reserve the branch name too — it names the workspace's folder. Avoid a
   // stale filesystem occupant as well as a DB collision; a leaked folder from
   // an older build must never be silently overwritten. (The initial mode no
   // longer affects placement — one root for every workspace — so prepare
@@ -1394,7 +1413,11 @@ export async function prepareWorkspaceCreate(input: {
   for (let attempt = 0; attempt < 20; attempt++) {
     // Re-reads the used-set each attempt, so a name that lost a race to a
     // concurrent create is seen as taken on the next pass.
-    const candidate = await allocateWorkspaceBranch(input.repoRoot, repoSlug);
+    const candidate = await allocateWorkspaceBranch(
+      input.repoRoot,
+      repoSlug,
+      number,
+    );
     const candidatePath = managedWorkspacePath(
       input.repoRoot,
       repoSlug,
@@ -1422,7 +1445,7 @@ export async function prepareWorkspaceCreate(input: {
         "prepareWorkspaceCreate: couldn't reserve a unique workspace name. Retry.",
     });
   }
-  return { workspaceId, path: workspacePath, repoSlug, branch };
+  return { workspaceId, path: workspacePath, repoSlug, branch, number };
 }
 
 export function createWorkspace(
@@ -1534,17 +1557,11 @@ async function createWorkspaceInner(
   // A prepared branch (prepareWorkspaceCreate) is reused verbatim — the
   // renderer already shows it as the workspace name. Shape-validated: only
   // the generator's own format is accepted, never an arbitrary ref.
-  let branch: string;
-  if (input.preparedBranch) {
-    if (!isPreparedBranch(input.preparedBranch)) {
-      throw new GitError({
-        code: "VALIDATION_FAILED",
-        message: `createWorkspace: invalid prepared branch "${input.preparedBranch}"`,
-      });
-    }
-    branch = input.preparedBranch;
-  } else {
-    branch = await allocateWorkspaceBranch(input.repoRoot, repoSlug);
+  if (input.preparedBranch && !isPreparedBranch(input.preparedBranch)) {
+    throw new GitError({
+      code: "VALIDATION_FAILED",
+      message: `createWorkspace: invalid prepared branch "${input.preparedBranch}"`,
+    });
   }
   // A prepared id (prepareWorkspaceCreate) is reused verbatim — the renderer
   // already navigated to its path. Validate the SHAPE and re-derive the path
@@ -1567,6 +1584,12 @@ async function createWorkspaceInner(
   } else {
     workspaceId = generateWorkspaceId(input.prompt);
   }
+  // The number prepare announced (its reservation), or a new one. A failed
+  // create leaves the number spent: numbers are never handed out twice.
+  const number = reserveWorkspaceNumber(workspaceId, organizationId);
+  const branch =
+    input.preparedBranch ??
+    (await allocateWorkspaceBranch(input.repoRoot, repoSlug, number));
   const workspacePath = managedWorkspacePath(input.repoRoot, repoSlug, branch);
 
   // Sanity: branch should be unique. The 4-char hex suffix means a
@@ -1654,6 +1677,8 @@ async function createWorkspaceInner(
     kind,
     organizationId,
     placement,
+    number,
+    title: null,
     repoSlug,
     repoRoot: input.repoRoot,
     branch,
@@ -1930,6 +1955,7 @@ async function createWorkspaceInner(
     branch,
     path: workspacePath,
     status: "in-progress",
+    number,
     setupCommand,
   };
 }

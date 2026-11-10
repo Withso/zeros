@@ -32,6 +32,8 @@ import {
   LocalOrchestrationError,
   extractLocalLinks,
   formatLocalLink,
+  formatWorkspaceLink,
+  LOCAL_WORKSPACE_LINK_OWNER,
   localAgentFamily,
   localFail,
   localModeLevel,
@@ -330,12 +332,44 @@ export class LocalOrchestrationService {
 
   // ── Summaries ──────────────────────────────────────────
 
-  private chatLink(chatId: string): string {
-    return formatLocalLink(this.ports.linkScheme(), "chat", chatId);
+  /** One registry read per synchronous pass: a transcript page links many
+   * chats; the next turn of the event loop reads fresh rows. */
+  private linkOwners: LocalOwnerIndex | null = null;
+
+  private linkOwnerIndex(): LocalOwnerIndex | null {
+    if (this.linkOwners) return this.linkOwners;
+    try {
+      this.linkOwners = new LocalOwnerIndex(this.ports);
+    } catch {
+      return null;
+    }
+    queueMicrotask(() => {
+      this.linkOwners = null;
+    });
+    return this.linkOwners;
   }
 
-  private workspaceLink(workspaceId: string): string {
-    return formatLocalLink(this.ports.linkScheme(), "workspace", workspaceId);
+  /** `<scheme>://local/w/<n>?session=<chat>` for a chat in a numbered
+   * workspace; a chat in a repository folder keeps `<scheme>://chat/<id>`. */
+  private chatLink(chatId: string, owner?: LocalWorkspaceOwner | "foreign" | null): string {
+    let resolved = owner;
+    if (resolved === undefined) {
+      const chat = this.ports.getChat(chatId);
+      resolved = chat ? (this.linkOwnerIndex()?.ownerOfFolder(chat.folder) ?? null) : null;
+    }
+    const number = resolved && resolved !== "foreign" ? resolved.number : null;
+    return number !== null
+      ? formatWorkspaceLink(this.ports.linkScheme(), { owner: LOCAL_WORKSPACE_LINK_OWNER, number }, chatId)
+      : formatLocalLink(this.ports.linkScheme(), "chat", chatId);
+  }
+
+  /** `<scheme>://local/w/<n>`; a repository folder keeps `<scheme>://workspace/folder:<id>`. */
+  private workspaceLink(workspaceId: string, owner?: LocalWorkspaceOwner | "foreign" | null): string {
+    const resolved = owner === undefined ? (this.linkOwnerIndex()?.ownerById(workspaceId) ?? null) : owner;
+    const number = resolved && resolved !== "foreign" && resolved.id === workspaceId ? resolved.number : null;
+    return number !== null
+      ? formatWorkspaceLink(this.ports.linkScheme(), { owner: LOCAL_WORKSPACE_LINK_OWNER, number })
+      : formatLocalLink(this.ports.linkScheme(), "workspace", workspaceId);
   }
 
   private lastTurn(chatId: string): LocalTurnSummary | null {
@@ -383,10 +417,10 @@ export class LocalOrchestrationService {
     const workspaceId = owner && owner !== "foreign" ? owner.id : null;
     return {
       chatId: chat.id,
-      link: this.chatLink(chat.id),
+      link: this.chatLink(chat.id, owner),
       title: chat.title || "Untitled",
       workspaceId,
-      workspaceLink: workspaceId ? this.workspaceLink(workspaceId) : null,
+      workspaceLink: workspaceId ? this.workspaceLink(workspaceId, owner) : null,
       folder: chat.folder,
       agent: chat.agentId,
       model: chat.model,
@@ -414,8 +448,9 @@ export class LocalOrchestrationService {
             : "ready";
     return {
       workspaceId: owner.id,
-      link: this.workspaceLink(owner.id),
+      link: this.workspaceLink(owner.id, owner),
       name: owner.name,
+      number: owner.number,
       repoRoot: owner.repoRoot,
       path: owner.path,
       branch: owner.branch,
@@ -438,7 +473,8 @@ export class LocalOrchestrationService {
     return link;
   }
 
-  /** Resolve a chat id or link the caller can see. */
+  /** Resolve a chat id or link the caller can see. A numbered chat link names
+   * its chat by `session`; the chat is found wherever it lives now. */
   private visibleChat(ctx: CallContext, ref: string): { chat: ChatRow; visibleAs: LocalChatSummary["visibleAs"] } {
     const link = this.ownLink(ref);
     if (link && link.kind !== "chat") throw new LocalOrchestrationError("USAGE", "That is a workspace link, not a chat link.");
@@ -462,8 +498,9 @@ export class LocalOrchestrationService {
   private visibleWorkspace(ctx: CallContext, ref: string): { owner: LocalWorkspaceOwner; visibleAs: LocalWorkspaceSummary["visibleAs"] } {
     const link = this.ownLink(ref);
     if (link && link.kind !== "workspace") throw new LocalOrchestrationError("USAGE", "That is a chat link, not a workspace link.");
-    const id = link ? link.id : ref === "current" ? ctx.owner.id : ref;
-    const owner = ctx.index.ownerById(id);
+    const numbered = link?.address ? ctx.index.ownerByAddress(link.address) : undefined;
+    const id = numbered && numbered !== "foreign" ? numbered.id : link ? link.id : ref === "current" ? ctx.owner.id : ref;
+    const owner = numbered === undefined ? ctx.index.ownerById(id) : numbered;
     const notFound = () =>
       new LocalOrchestrationError(
         "NOT_FOUND",
@@ -609,7 +646,7 @@ export class LocalOrchestrationService {
     const parsed = this.ownLink(args.target);
     if (parsed?.kind === "workspace" || args.target === "current" || args.target.startsWith("ws_") || args.target.startsWith(FOLDER_WORKSPACE_PREFIX)) {
       const { owner } = this.visibleWorkspace(ctx, args.target);
-      return { kind: "workspace", id: owner.id, link: this.workspaceLink(owner.id) };
+      return { kind: "workspace", id: owner.id, link: this.workspaceLink(owner.id, owner) };
     }
     const { chat } = this.visibleChat(ctx, args.target);
     return { kind: "chat", id: chat.id, link: this.chatLink(chat.id) };
@@ -1456,7 +1493,7 @@ export class LocalOrchestrationService {
         if (owner === "foreign" || !chatVisibleAs(senderVisibility, target.id, owner)) continue;
         insertLocalShare({ holderChatId: recipientChatId, kind: "chat", targetId: target.id, grantedBy: `agent:${senderChatId}` });
       } else {
-        const owner = index.ownerById(link.id);
+        const owner = link.address ? index.ownerByAddress(link.address) : index.ownerById(link.id);
         if (!owner || owner === "foreign") continue;
         if (!senderVisibility.workspaceIds.has(owner.id) && !this.isOwnWorkspace(senderChatId, owner.id, index)) continue;
         insertLocalShare({ holderChatId: recipientChatId, kind: "workspace", targetId: owner.id, grantedBy: `agent:${senderChatId}` });
@@ -1492,7 +1529,7 @@ export class LocalOrchestrationService {
           if (!target || !owner || owner === "foreign") continue;
           insertLocalShare({ holderChatId: input.chatId, kind: "chat", targetId: target.id, grantedBy: "human" });
         } else {
-          const owner = index.ownerById(link.id);
+          const owner = link.address ? index.ownerByAddress(link.address) : index.ownerById(link.id);
           if (!owner || owner === "foreign") continue;
           insertLocalShare({ holderChatId: input.chatId, kind: "workspace", targetId: owner.id, grantedBy: "human" });
         }

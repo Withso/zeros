@@ -11,7 +11,9 @@ const harness = vi.hoisted(() => ({
   transport: "local",
   copy: vi.fn(),
   copyCloud: vi.fn(),
+  copyCloudChat: vi.fn(),
   cloudAccess: true,
+  me: null as null | { organizations: Array<{ id: string; slug: string; isPersonal: boolean }> },
   selectCopy: undefined as (() => void) | undefined,
 }));
 vi.mock("react", async (original) => {
@@ -24,6 +26,8 @@ vi.mock("../../../features/settings/agent-control-rollout", () => ({
 vi.mock("../../../features/team/team-store", () => ({
   useActiveOrganization: () => ({ isPersonal: harness.owner == null }),
   getActiveOrganizationIdSnapshot: () => harness.owner,
+  getTeamStoreState: () => ({ me: harness.me }),
+  subscribeOrganizationSnapshots: () => () => {},
 }));
 vi.mock("../../../platform/bridge/active-bridge", () => ({
   getActiveBridge: () => ({ executionIdentity: { kind: harness.transport } }),
@@ -38,6 +42,7 @@ vi.mock("../../../features/team/cloud-workspace-account-access", () => ({
 vi.mock("../../../state/cloud-workspace-link-actions", async (original) => ({
   ...(await original<typeof import("../../../state/cloud-workspace-link-actions")>()),
   copyCloudWorkspaceLink: harness.copyCloud,
+  copyCloudChatLink: harness.copyCloudChat,
 }));
 vi.mock("../../../state/use-active-workspace", () => ({
   useActiveWorkspace: () => ({ workspace: harness.workspace }),
@@ -160,6 +165,7 @@ beforeEach(() => {
   harness.owner = null;
   harness.transport = "local";
   harness.cloudAccess = true;
+  harness.me = null;
 });
 
 describe.each(["chat", "workspace"] as const)("%s Copy link menu", (kind) => {
@@ -235,5 +241,54 @@ describe("cloud workspace Copy link", () => {
   it("hides for a path inside a cloud workspace", () => {
     harness.workspace = { ...cloud, path: `${key}/src` };
     expect(renderMenu("workspace")).not.toContain("Copy link");
+  });
+});
+
+describe("cloud chat Copy link", () => {
+  const ORG = "5d2f8c1a-3b7e-4f90-a6d4-9c1e2b7f8a35";
+  const WS = "6e3a9d2b-4c8f-4a01-b7e5-0d2f3c8a9b46";
+  const key = `cloud://${ORG}/${WS}`;
+  const cloud = {
+    ...local,
+    id: key,
+    path: key,
+    repoRoot: key,
+    organizationId: ORG,
+    placement: "cloud",
+    number: 310,
+  } as Workspace;
+  const cloudChat = { ...chat, id: `cloud:${ORG}:${WS}:chat-1`, folder: key } as ChatThread;
+
+  beforeEach(() => {
+    harness.workspace = { ...cloud };
+    harness.owner = ORG;
+    harness.transport = "cloud";
+    harness.me = { organizations: [{ id: ORG, slug: "acme", isPersonal: false }] };
+  });
+
+  it("copies the chat's numbered page link", () => {
+    expect(renderMenu("chat", cloudChat)).toContain("Copy link");
+    harness.selectCopy!();
+    expect(harness.copyCloudChat).toHaveBeenCalledExactlyOnceWith(harness.workspace, cloudChat.id);
+    expect(harness.copy).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["no number yet", () => { harness.workspace = { ...cloud, number: null }; }],
+    ["an unknown organization ID", () => { harness.me = { organizations: [] }; }],
+    ["a reserved organization ID", () => { harness.me = { organizations: [{ id: ORG, slug: "api", isPersonal: false }] }; }],
+    ["no cloud access", () => { harness.cloudAccess = false; }],
+  ])("hides with %s", (_label, arrange) => {
+    arrange();
+    expect(renderMenu("chat", cloudChat)).not.toContain("Copy link");
+  });
+
+  it.each<Partial<ChatThread>>([
+    { archived: true },
+    { kind: "terminal" },
+    { id: `cloud:${ORG}:7a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d:chat-1` },
+    { id: "chat-1" },
+  ])("does not offer a link for an ineligible cloud chat: %j", (patch) => {
+    expect(renderMenu("chat", { ...cloudChat, ...patch })).not.toContain("Copy link");
   });
 });

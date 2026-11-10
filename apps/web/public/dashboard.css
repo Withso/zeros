@@ -241,8 +241,10 @@ dialog.dialog::backdrop { background: var(--scrim); }
 .dialog-desc { margin: 0; color: var(--fg2); }
 .dialog-body { display: flex; flex-direction: column; gap: 16px; padding: 16px; }
 .field { display: flex; flex-direction: column; gap: 6px; }
-.field > span { color: var(--fg1); font-weight: 450; }
+.field > span, .field > label { color: var(--fg1); font-weight: 450; }
 .field .input { width: 100%; }
+.field-hint { margin: 0; color: var(--fg3); font-size: 12px; line-height: 16px; overflow-wrap: anywhere; }
+.field-hint[data-tone="error"] { color: var(--red-fg); }
 .dialog-error { color: var(--red-fg); font-size: 12px; line-height: 16px; }
 .dialog-error:empty { display: none; }
 .dialog-foot { display: flex; justify-content: flex-end; gap: 8px; padding: 0 16px 16px; }

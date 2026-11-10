@@ -221,26 +221,117 @@ export type LocalLinkKind = (typeof LOCAL_LINK_KINDS)[number];
 export const LOCAL_LINK_SCHEMES = ["zeros", "zeros-alpha", "zeros-beta", "zeros-dev"] as const;
 export type LocalLinkScheme = (typeof LOCAL_LINK_SCHEMES)[number];
 
+/** A workspace's permanent place: its owner and its number within that owner
+ * (`local/w/310`). The owner is `local` for the device's Local collection and
+ * an organization's slug otherwise. Numbers are never reused. */
+export interface WorkspaceAddress {
+  owner: string;
+  number: number;
+}
+
+/** The owner segment of every Local workspace link. Local (Personal) is the
+ * only owner that creates Local workspaces; organizations work in the cloud. */
+export const LOCAL_WORKSPACE_LINK_OWNER = "local" as const;
+
 export interface LocalLink {
   scheme: LocalLinkScheme;
   kind: LocalLinkKind;
+  /** A chat id, a legacy workspace id (`ws_…`, `folder:<project>`), or for a
+   * numbered workspace link its `<owner>/w/<n>` address, which no stored id
+   * can equal because ids never contain `/`. */
   id: string;
+  /** Present only on a numbered link (`<owner>/w/<n>`, `?session=` names the chat). */
+  address?: WorkspaceAddress;
 }
 
 /** Opaque ids only: letters, digits and `_ - . :` — never paths or queries. */
 const LOCAL_LINK_ID = /^[A-Za-z0-9_.:-]{1,200}$/;
+/** Organization slugs and `local`: lowercase, no edge hyphen. */
+const WORKSPACE_LINK_OWNER = /^[a-z0-9](?:[a-z0-9-]{0,98}[a-z0-9])?$/;
+/** Both stores keep numbers in a signed 32-bit integer column. */
+const MAX_WORKSPACE_NUMBER = 2_147_483_647;
+const NUMBERED_LINK =
+  /^(zeros(?:-alpha|-beta|-dev)?):\/\/([A-Za-z0-9-]{1,100})\/w\/([1-9][0-9]{0,9})(?:\?session=([^&#\s]+))?$/;
+
+export function isWorkspaceNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 && value <= MAX_WORKSPACE_NUMBER;
+}
+
+export function isWorkspaceLinkOwner(value: unknown): value is string {
+  return typeof value === "string" && WORKSPACE_LINK_OWNER.test(value);
+}
+
+/** Can this chat id be a numbered link's `?session=`? */
+export function isWorkspaceLinkSession(value: unknown): value is string {
+  return typeof value === "string" && LOCAL_LINK_ID.test(value);
+}
+
+/** The name a workspace is known by everywhere: `w-310`. */
+export function workspaceNumberLabel(number: number): string {
+  if (!isWorkspaceNumber(number)) throw new Error("Invalid workspace number.");
+  return `w-${number}`;
+}
+
+export function formatWorkspaceAddress(address: WorkspaceAddress): string {
+  if (!isWorkspaceLinkOwner(address.owner) || !isWorkspaceNumber(address.number))
+    throw new Error("Invalid workspace for a link.");
+  return `${address.owner}/w/${address.number}`;
+}
+
+/** `<scheme>://<owner>/w/<n>`, or a chat in it with `?session=<chat id>`. */
+export function formatWorkspaceLink(
+  scheme: LocalLinkScheme,
+  address: WorkspaceAddress,
+  session?: string | null,
+): string {
+  if (!LOCAL_LINK_SCHEMES.includes(scheme)) throw new Error("Unknown Zeros link scheme.");
+  const base = `${scheme}://${formatWorkspaceAddress(address)}`;
+  if (session == null) return base;
+  if (!LOCAL_LINK_ID.test(session)) throw new Error("Invalid chat id for a link.");
+  return `${base}?session=${encodeURIComponent(session)}`;
+}
 
 export function formatLocalLink(scheme: LocalLinkScheme, kind: LocalLinkKind, id: string): string {
   if (!LOCAL_LINK_ID.test(id)) throw new Error(`Invalid ${kind} id for a link.`);
   return `${scheme}://${kind}/${encodeURIComponent(id)}`;
 }
 
-/** Parse exactly one link. Anything with userinfo, port, query or fragment, or
- * an unknown scheme or kind, is not a Zeros Local link. */
+/** The exact string a parsed link was, in canonical form. */
+export function formatParsedLocalLink(link: LocalLink): string {
+  return link.address
+    ? formatWorkspaceLink(link.scheme, link.address, link.kind === "chat" ? link.id : null)
+    : formatLocalLink(link.scheme, link.kind, link.id);
+}
+
+function parseNumberedLink(text: string): LocalLink | null {
+  const match = NUMBERED_LINK.exec(text);
+  if (!match) return null;
+  const owner = match[2]!.toLowerCase();
+  const number = Number(match[3]);
+  if (!isWorkspaceLinkOwner(owner) || !isWorkspaceNumber(number)) return null;
+  const address = { owner, number };
+  if (match[4] === undefined) {
+    return { scheme: match[1] as LocalLinkScheme, kind: "workspace", id: formatWorkspaceAddress(address), address };
+  }
+  let session: string;
+  try {
+    session = decodeURIComponent(match[4]);
+  } catch {
+    return null;
+  }
+  if (!LOCAL_LINK_ID.test(session)) return null;
+  return { scheme: match[1] as LocalLinkScheme, kind: "chat", id: session, address };
+}
+
+/** Parse exactly one link: a numbered `<owner>/w/<n>` link (with at most a
+ * `session` query) or a legacy `chat/<id>` / `workspace/<id>` link. Anything
+ * with userinfo, a port, another query or a fragment, or an unknown scheme or
+ * kind, is not a Zeros Local link. */
 export function parseLocalLink(text: string): LocalLink | null {
-  const match = /^(zeros(?:-alpha|-beta|-dev)?):\/\/(chat|workspace)\/([^/?#\s]+)$/.exec(
-    text.trim(),
-  );
+  const trimmed = text.trim();
+  const numbered = parseNumberedLink(trimmed);
+  if (numbered) return numbered;
+  const match = /^(zeros(?:-alpha|-beta|-dev)?):\/\/(chat|workspace)\/([^/?#\s]+)$/.exec(trimmed);
   if (!match) return null;
   let id: string;
   try {
@@ -259,7 +350,11 @@ export function parseLocalLink(text: string): LocalLink | null {
 export function extractLocalLinks(text: string, limit = 64): LocalLink[] {
   const out: LocalLink[] = [];
   const seen = new Set<string>();
-  const pattern = /zeros(?:-alpha|-beta|-dev)?:\/\/(?:chat|workspace)\/[A-Za-z0-9_.:%-]+/g;
+  // Numbered first: `chat/w/3` is the organization `chat`'s workspace 3, not
+  // a legacy chat whose id is `w`.
+  // A number runs to its end (`w/31a` names no workspace, not w-31).
+  const pattern =
+    /zeros(?:-alpha|-beta|-dev)?:\/\/(?:[A-Za-z0-9-]{1,100}\/w\/[0-9]{1,10}(?:\?session=[A-Za-z0-9_.:%-]+|(?![A-Za-z0-9_%]))|(?:chat|workspace)\/[A-Za-z0-9_.:%-]+)/g;
   for (const match of text.matchAll(pattern)) {
     // A suffix regexp retries from every punctuation character when a long
     // internal run ends in a non-punctuation character. Scan only the suffix.
@@ -510,6 +605,9 @@ export interface LocalWorkspaceSummary {
   workspaceId: string;
   link: string;
   name: string;
+  /** Permanent Local number (`w-<n>`); null for a repository folder. Optional
+   * for older engines. */
+  number?: number | null;
   repoRoot: string;
   path: string;
   branch: string | null;

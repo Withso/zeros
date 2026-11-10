@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { cloudWorkspacePageUrl, organizationDashboardUrl } from "../organization-links";
+import {
+  cloudWorkspacePageUrl,
+  numberedCloudWorkspacePageUrl,
+  organizationDashboardUrl,
+} from "../organization-links";
 
 describe("organization dashboard links", () => {
   it("opens a selected organization section on the web dashboard", () => {
@@ -52,5 +56,22 @@ describe("cloud workspace page links", () => {
 
   it("refuses an id that is not a workspace UUID", () => {
     expect(() => cloudWorkspacePageUrl("https://app.zeros.build", "../ops")).toThrow();
+  });
+});
+
+describe("numbered cloud workspace pages", () => {
+  it("addresses a workspace by its organization's ID and number, and a chat by its session", () => {
+    const address = { owner: "acme-labs", number: 310 };
+    expect(numberedCloudWorkspacePageUrl("https://app-alpha.zeros.build/base?x=1#y", address)).toBe(
+      "https://app-alpha.zeros.build/acme-labs/w/310",
+    );
+    expect(numberedCloudWorkspacePageUrl(undefined, address, "7e2b720c-ab56-441d-b189-6e7d1eb7a628")).toBe(
+      "https://app.zeros.build/acme-labs/w/310?session=7e2b720c-ab56-441d-b189-6e7d1eb7a628",
+    );
+    expect(numberedCloudWorkspacePageUrl(undefined, address, "chat:1")).toBe(
+      "https://app.zeros.build/acme-labs/w/310?session=chat%3A1",
+    );
+    for (const session of ["", "a/b", "a b", "a".repeat(201)])
+      expect(() => numberedCloudWorkspacePageUrl(undefined, address, session)).toThrow();
   });
 });

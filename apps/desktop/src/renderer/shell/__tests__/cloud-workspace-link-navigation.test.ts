@@ -1,5 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { CloudWorkspaceLink } from "@zeros/protocol/cloud-workspace-link";
+import {
+  isCloudNavigationLink,
+  type CloudWorkspaceLink,
+  type OrganizationWorkspaceLink,
+} from "@zeros/protocol/cloud-workspace-link";
+import { parseLocalLink } from "@zeros/protocol/local-orchestration";
 
 const ACME = "5d2f8c1a-3b7e-4f90-a6d4-9c1e2b7f8a35";
 const NORTHWIND = "7a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d";
@@ -9,6 +14,7 @@ const KEY = `cloud://${ACME}/${WS}`;
 
 const organization = (id: string, overrides: Record<string, unknown> = {}) => ({
   id,
+  slug: id === ACME ? "acme" : id === NORTHWIND ? "northwind" : `personal-${id.replaceAll("-", "")}`,
   name: id === ACME ? "Acme" : "Northwind",
   isPersonal: false,
   seat: "full",
@@ -22,7 +28,9 @@ const state = vi.hoisted(() => ({
   active: null as string | null,
   switchSticks: true,
   rows: [] as Array<Record<string, unknown>>,
+  docs: [] as Array<{ id: string; organizationId: string; number?: number | null }>,
   read: vi.fn(),
+  byNumber: vi.fn(),
   calls: [] as string[],
   toast: { info: vi.fn(), error: vi.fn() },
 }));
@@ -53,11 +61,20 @@ vi.mock("../../state/cloud-workspace-catalog", () => ({
   canReadCloudWorkspace: (doc?: { deletedAt: string | null; status: string }) =>
     doc !== undefined && doc.deletedAt === null && doc.status !== "deleting" && doc.status !== "deleted",
   getCloudWorkspaceRows: () => state.rows,
+  cloudWorkspaceDocumentByNumber: (organizationId: string, number: number) =>
+    state.docs.find((doc) => doc.organizationId === organizationId && doc.number === number),
+  readCloudWorkspaceByNumber: state.byNumber,
+}));
+vi.mock("../../state/cloud-chat-link-selection", () => ({
+  selectCloudChatWhenLoaded: (folder: string, chatId: string) => state.calls.push(`select:${folder}:${chatId}`),
 }));
 vi.mock("../../shared/ui/primitives/elements", () => ({ toast: state.toast }));
 
 import { ControlPlaneError } from "../../features/team/control-plane";
-import { navigateCloudWorkspaceLink } from "../cloud-workspace-link-navigation";
+import {
+  navigateCloudWorkspaceLink,
+  type CloudNavigationLink,
+} from "../cloud-workspace-link-navigation";
 
 const link: CloudWorkspaceLink = {
   scheme: "zeros",
@@ -68,7 +85,7 @@ const link: CloudWorkspaceLink = {
 const row = { id: KEY, path: KEY, repoRoot: KEY, placement: "cloud", archivedAt: null };
 let current = true;
 const openWorkspace = vi.fn((workspace: { path: string }) => state.calls.push(`open:${workspace.path}`));
-const run = (target: CloudWorkspaceLink = link) =>
+const run = (target: CloudNavigationLink = link) =>
   navigateCloudWorkspaceLink(target, {
     openWorkspace,
     current: () => current,
@@ -91,8 +108,14 @@ beforeEach(() => {
   };
   state.active = PERSONAL;
   state.rows = [row];
+  state.docs = [];
   state.read.mockResolvedValue({ id: WS, organizationId: ACME, status: "stopped", deletedAt: null });
+  state.byNumber.mockResolvedValue({ id: WS, organizationId: ACME, number: 310, status: "stopped", deletedAt: null });
 });
+
+const UNAVAILABLE = "You don't have access to that cloud workspace.";
+const CHAT_UNAVAILABLE = "You don't have access to that chat.";
+const numbered = (href: string) => parseLocalLink(href) as OrganizationWorkspaceLink;
 
 describe("opening a cloud workspace link", () => {
   it.each([
@@ -104,7 +127,7 @@ describe("opening a cloud workspace link", () => {
     await run();
     expect(state.read).toHaveBeenCalledExactlyOnceWith({ organizationId: ACME, workspaceId: WS });
     expect(state.calls).toEqual(["beforeCommit", `switch:${ACME}:false`, `open:${KEY}`]);
-    expect(openWorkspace).toHaveBeenCalledWith(row);
+    expect(openWorkspace).toHaveBeenCalledWith(row, { wake: false });
     expect(state.toast.info).not.toHaveBeenCalled();
     expect(state.toast.error).not.toHaveBeenCalled();
     expect(state.active).toBe(ACME);
@@ -114,13 +137,13 @@ describe("opening a cloud workspace link", () => {
     const archived = { ...row, archivedAt: "2026-11-01T00:00:00.000Z" };
     state.rows = [archived];
     await run();
-    expect(openWorkspace).toHaveBeenCalledWith(archived);
+    expect(openWorkspace).toHaveBeenCalledWith(archived, { wake: false });
   });
 
   it("opens the exact key when the catalog has not built its row", async () => {
     state.rows = [];
     await run();
-    expect(openWorkspace).toHaveBeenCalledWith({ path: KEY, repoRoot: KEY });
+    expect(openWorkspace).toHaveBeenCalledWith({ path: KEY, repoRoot: KEY }, { wake: false });
   });
 
   it.each([
@@ -128,7 +151,7 @@ describe("opening a cloud workspace link", () => {
     ["the device's Personal organization", { ...link, organizationId: PERSONAL }],
   ])("refuses %s without reading or switching", async (_label, target) => {
     await run(target);
-    expect(state.toast.info).toHaveBeenCalledWith("That cloud workspace couldn't be found.");
+    expect(state.toast.error).toHaveBeenCalledWith(UNAVAILABLE);
     expect(state.read).not.toHaveBeenCalled();
     expect(state.calls).toEqual([]);
   });
@@ -139,7 +162,7 @@ describe("opening a cloud workspace link", () => {
   ])("says so when the organization %s", async (_label, overrides) => {
     state.me!.organizations[1] = organization(ACME, overrides);
     await run();
-    expect(state.toast.info).toHaveBeenCalledWith("Cloud workspaces aren't available in Acme.");
+    expect(state.toast.error).toHaveBeenCalledWith("Cloud workspaces aren't available in Acme.");
     expect(state.read).not.toHaveBeenCalled();
     expect(state.calls).toEqual([]);
   });
@@ -158,10 +181,10 @@ describe("opening a cloud workspace link", () => {
     expect(state.read).not.toHaveBeenCalled();
   });
 
-  it("treats the control plane's 404 as not found, without switching", async () => {
+  it("treats the control plane's 404 as no access, without switching", async () => {
     state.read.mockRejectedValue(new ControlPlaneError(404, "not_found", "Cloud workspace not found"));
     await run();
-    expect(state.toast.info).toHaveBeenCalledWith("That cloud workspace couldn't be found.");
+    expect(state.toast.error).toHaveBeenCalledWith(UNAVAILABLE);
     expect(state.calls).toEqual([]);
     expect(state.active).toBe(PERSONAL);
   });
@@ -176,7 +199,7 @@ describe("opening a cloud workspace link", () => {
   it.each(["deleting", "deleted"])("refuses a %s workspace", async (status) => {
     state.read.mockResolvedValue({ id: WS, organizationId: ACME, status, deletedAt: null });
     await run();
-    expect(state.toast.info).toHaveBeenCalledWith("That cloud workspace couldn't be found.");
+    expect(state.toast.error).toHaveBeenCalledWith(UNAVAILABLE);
     expect(state.calls).toEqual([]);
   });
 
@@ -208,5 +231,91 @@ describe("opening a cloud workspace link", () => {
     expect(state.calls).toEqual(["beforeCommit", `switch:${ACME}:false`]);
     expect(state.toast.info).toHaveBeenCalledWith("Select Acme to open this link.");
     expect(openWorkspace).not.toHaveBeenCalled();
+  });
+});
+
+describe("opening an organization's numbered link", () => {
+  it("routes every owner but local to the cloud", () => {
+    expect(isCloudNavigationLink(numbered("zeros://acme/w/310"))).toBe(true);
+    expect(isCloudNavigationLink(numbered("zeros://acme/w/310?session=chat-1"))).toBe(true);
+    expect(isCloudNavigationLink(link)).toBe(true);
+    expect(isCloudNavigationLink(parseLocalLink("zeros://local/w/3")!)).toBe(false);
+    expect(isCloudNavigationLink(parseLocalLink("zeros://chat/chat-1")!)).toBe(false);
+  });
+
+  it("finds the organization by its ID and a loaded workspace by number, then opens it", async () => {
+    state.docs = [{ id: WS, organizationId: ACME, number: 310 }];
+    await run(numbered("zeros://Acme/w/310"));
+    expect(state.byNumber).not.toHaveBeenCalled();
+    expect(state.read).toHaveBeenCalledExactlyOnceWith({ organizationId: ACME, workspaceId: WS });
+    expect(state.calls).toEqual(["beforeCommit", `switch:${ACME}:false`, `open:${KEY}`]);
+    expect(state.toast.error).not.toHaveBeenCalled();
+  });
+
+  it("asks the control plane for a workspace the catalog has not loaded", async () => {
+    state.active = NORTHWIND;
+    await run(numbered("zeros://acme/w/310"));
+    expect(state.byNumber).toHaveBeenCalledExactlyOnceWith({ owner: "acme", number: 310 });
+    expect(state.read).toHaveBeenCalledExactlyOnceWith({ organizationId: ACME, workspaceId: WS });
+    expect(state.calls).toEqual(["beforeCommit", `switch:${ACME}:false`, `open:${KEY}`]);
+  });
+
+  it("lands a chat link on its chat in the opened workspace", async () => {
+    await run(numbered("zeros://acme/w/310?session=chat-1"));
+    expect(state.calls).toEqual([
+      "beforeCommit",
+      `switch:${ACME}:false`,
+      `open:${KEY}`,
+      `select:${KEY}:cloud:${ACME}:${WS}:chat-1`,
+    ]);
+  });
+
+  it.each([
+    ["an organization the account is not in", "zeros://elsewhere/w/310"],
+    ["a Personal organization's ID", `zeros://personal-${PERSONAL.replaceAll("-", "")}/w/310`],
+    ["a reserved owner", "zeros://api/w/310"],
+  ])("shows an error for %s without reading or switching", async (_label, href) => {
+    await run(numbered(href));
+    expect(state.toast.error).toHaveBeenCalledWith(UNAVAILABLE);
+    expect(state.byNumber).not.toHaveBeenCalled();
+    expect(state.read).not.toHaveBeenCalled();
+    expect(state.calls).toEqual([]);
+  });
+
+  it("says a chat link's chat is unavailable when the account can't open it", async () => {
+    state.byNumber.mockRejectedValue(new ControlPlaneError(404, "not_found", "Cloud workspace not found"));
+    await run(numbered("zeros://acme/w/311?session=chat-1"));
+    expect(state.toast.error).toHaveBeenCalledWith(CHAT_UNAVAILABLE);
+    expect(state.read).not.toHaveBeenCalled();
+    expect(state.calls).toEqual([]);
+    await run(numbered("zeros://nobody/w/1?session=chat-1"));
+    expect(state.toast.error).toHaveBeenLastCalledWith(CHAT_UNAVAILABLE);
+  });
+
+  it("refuses an answer for another organization or number", async () => {
+    for (const doc of [
+      { id: WS, organizationId: NORTHWIND, number: 310 },
+      { id: WS, organizationId: ACME, number: 309 },
+    ]) {
+      state.byNumber.mockResolvedValueOnce({ ...doc, status: "ready", deletedAt: null });
+      await run(numbered("zeros://acme/w/310"));
+      expect(state.toast.error).toHaveBeenLastCalledWith(UNAVAILABLE);
+    }
+    expect(state.read).not.toHaveBeenCalled();
+    expect(state.calls).toEqual([]);
+  });
+
+  it("reports an unreachable control plane, and stays quiet once retired", async () => {
+    state.byNumber.mockRejectedValueOnce(new Error("offline"));
+    await run(numbered("zeros://acme/w/310"));
+    expect(state.toast.error).toHaveBeenCalledWith("Couldn't open that cloud workspace. Try again in a moment.");
+    let fail!: (error: unknown) => void;
+    state.byNumber.mockReturnValueOnce(new Promise((_resolve, reject) => { fail = reject; }));
+    const pending = run(numbered("zeros://acme/w/310"));
+    current = false;
+    fail(new ControlPlaneError(404, "not_found", "gone"));
+    await pending;
+    expect(state.toast.error).toHaveBeenCalledTimes(1);
+    expect(state.calls).toEqual([]);
   });
 });

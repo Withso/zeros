@@ -13,6 +13,7 @@ import type { ChatThread } from "../state/store";
 import { folderIsWithinRoot } from "../state/workspace-resolution";
 import { workspaceIsReadOnly } from "../state/workspace-history";
 import { workspaceLabel } from "./workspace-tabs";
+import { workspaceNumberName } from "../shared/lib/workspace-name";
 import { searchWorkspaceFiles } from "./workbench/quick-open";
 
 export const PALETTE_CATEGORIES = [
@@ -404,6 +405,7 @@ export function workspacePaletteEntries(
         ? "Archived workspaces"
         : "Workspaces",
       detail: [
+        workspaceNumberName(workspace),
         projects.find((project) => project.repoSlug === workspace.repoSlug)
           ?.name ?? workspace.repoSlug,
         isCloudWorkspace(workspace.path) ? "Cloud" : "Local",
@@ -415,7 +417,7 @@ export function workspacePaletteEntries(
       ]
         .filter(Boolean)
         .join(" · "),
-      keywords: [workspace.branch, workspace.repoSlug],
+      keywords: [workspace.branch, workspace.repoSlug, workspaceNumberName(workspace) ?? ""],
       icon: isCloudWorkspace(workspace.path) ? "cloud" : "workspace",
       timestamp: workspace.lastActiveAt ?? workspace.createdAt,
       target: { type: "workspace", workspace },

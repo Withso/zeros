@@ -142,6 +142,7 @@ import {
   getWorkspace,
   getWorkspaceLifecycleStatus,
   getWorkspaceById,
+  refreshWorktreeSeed,
   whenSeedingSettled,
   workspaceOwnsManagedCheckout,
   resolveSetupCommand,
@@ -3992,12 +3993,14 @@ export class WorkspaceService {
       }
       case "chats.upsert": {
         const c = coerceChatRow(params.chat);
-        if (c) {
-          upsertChat(
-            remote ? preserveHostOnlyFields(c) : preserveProviderIdentity(c),
-          );
-        }
-        return { ok: true };
+        const titled = c
+          ? upsertChat(
+              remote ? preserveHostOnlyFields(c) : preserveProviderIdentity(c),
+            )
+          : null;
+        if (titled) refreshWorktreeSeed(titled);
+        // A workspace that just took this chat's title is a workspace change.
+        return titled ? { ok: true, workspaceIds: [titled] } : { ok: true };
       }
       case "chats.setComposerMode": {
         const mode = reqStr(params, "mode");
@@ -4064,8 +4067,9 @@ export class WorkspaceService {
           .map((c) =>
             remote ? preserveHostOnlyFields(c) : preserveProviderIdentity(c),
           );
-        bulkUpsertChats(rows);
-        return { ok: true };
+        const titled = bulkUpsertChats(rows);
+        for (const workspaceId of titled) refreshWorktreeSeed(workspaceId);
+        return titled.length > 0 ? { ok: true, workspaceIds: titled } : { ok: true };
       }
       // ── Transcript reads; the engine persists on emit. ──
       case "messages.window": {

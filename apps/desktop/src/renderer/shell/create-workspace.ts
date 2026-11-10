@@ -43,6 +43,7 @@ import {
   finishPendingCreate,
   markWorkspaceSettling,
 } from "../state/pending-workspaces";
+import { pendingWorkspaceIdentity } from "../shared/lib/workspace-name";
 import type { Project } from "../state/projects-store";
 import { spawnPreparedDefaultChat } from "../state/spawn-default-chat";
 import type { useWorkspaceDispatch } from "../state/store";
@@ -134,6 +135,7 @@ export async function createWorkspaceForProject(args: {
     kind,
     path: prepared.path,
     branch: prepared.branch,
+    ...pendingWorkspaceIdentity(prepared),
   });
   // Workbench shows its "Setting up workspace" loading rows from the first
   // frame; the flag clears once the row lands and its surface data is in.

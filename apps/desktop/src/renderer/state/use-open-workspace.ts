@@ -28,6 +28,9 @@ interface OpenWorkspaceOptions {
    * Grouped/Ungrouped/Active or follow the destination from a repository-only
    * view. */
   workspaceListFilter?: WorkspaceListFilter;
+  /** A link opens a cloud workspace without starting it: its history shows,
+   * and the first click or key inside it starts it (cloud-workspace-lifecycle). */
+  wake?: false;
 }
 
 /** Open a workspace: switch to the workspace view and land on the chat the user
@@ -67,7 +70,7 @@ export function useOpenWorkspace(): (
           validationPending: workspace.validationPending,
           workspaceListFilter: options?.workspaceListFilter,
         });
-        if (cloudComputerV2 && isCloudWorkspace(workspace.path) && hasCloudWorkspaceAccountAccess(parseCloudWorkspaceKey(workspace.path)?.organizationId)) requestCloudWorkspaceOpen(workspace.path);
+        if (cloudComputerV2 && options?.wake !== false && isCloudWorkspace(workspace.path) && hasCloudWorkspaceAccountAccess(parseCloudWorkspaceKey(workspace.path)?.organizationId)) requestCloudWorkspaceOpen(workspace.path);
         return;
       }
       // Last-viewed chat there (validated), else the most-recent live one.
@@ -97,7 +100,7 @@ export function useOpenWorkspace(): (
         validationPending: workspace.validationPending,
         workspaceListFilter: options?.workspaceListFilter,
       });
-      if (cloudComputerV2 && !historyOnly && isCloudWorkspace(workspace.path) &&
+      if (cloudComputerV2 && options?.wake !== false && !historyOnly && isCloudWorkspace(workspace.path) &&
           hasCloudWorkspaceAccountAccess(parseCloudWorkspaceKey(workspace.path)?.organizationId)) requestCloudWorkspaceOpen(workspace.path);
       if (fallbackId) {
         return;

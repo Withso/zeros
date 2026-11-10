@@ -31,7 +31,12 @@ import {
   type OrganizationSeat,
 } from "./organization-seats.js";
 import { generateInviteToken, hashInviteToken } from "./invites.js";
-import { randomSuffix, slugify } from "./auth.js";
+import {
+  ORGANIZATION_ID_MAX_LENGTH,
+  organizationIdCandidates,
+  organizationIdProblem,
+  type OrganizationIdProblem,
+} from "./organization-slugs.js";
 import type { EmailConfig } from "./email.js";
 import { deliverInvitationEmail } from "./invitation-delivery.js";
 import { rateLimit } from "./ratelimit.js";
@@ -268,6 +273,24 @@ async function resolveInvitationId(
     );
   }
   throw invalidInvitation();
+}
+
+/** A creator-chosen organization ID, lowercased. Never one a web route or
+ * link word uses, and immutable once the organization exists. */
+function requestedOrganizationId(value: unknown): string {
+  const id = typeof value === "string" ? value.trim().toLowerCase() : "";
+  const problem = organizationIdProblem(id);
+  if (problem === "reserved") {
+    throw new HttpError(422, "organization_id_reserved", "That organization ID is reserved. Choose another.");
+  }
+  if (problem) {
+    throw new HttpError(
+      422,
+      "organization_id_invalid",
+      `Use lowercase letters, numbers and single hyphens, up to ${ORGANIZATION_ID_MAX_LENGTH} characters.`,
+    );
+  }
+  return id;
 }
 
 function parse<T>(
@@ -725,11 +748,15 @@ function createOrganizationRouter(
     >;
     const name = parse(NameSchema, body.name);
     const logo = body.logo == null ? null : parse(LogoSchema, body.logo);
+    // The creator's chosen ID, or the name's own ID and then its `-org` form.
+    const chosen = body.slug == null || body.slug === ""
+      ? null
+      : requestedOrganizationId(body.slug);
     const organization = await withSystemTx(pool, async (tx) => {
       requireOrganizationCreationCapability(await accountProActive(tx, user.id));
-      let created: { rows: OrganizationRow[] } | null = null;
-      let slug = slugify(name);
-      for (let attempt = 0; attempt < 5 && !created?.rows[0]; attempt++) {
+      const candidates = chosen ? [chosen] : organizationIdCandidates(name);
+      let root: OrganizationRow | undefined;
+      for (const slug of candidates) {
         const result = await tx.query<OrganizationRow>(
           `INSERT INTO organizations (
              slug, name, logo, created_by, is_personal,
@@ -741,16 +768,17 @@ function createOrganizationRouter(
                      cloud_workspaces_allowed, workos_sync_revision`,
           [slug, name, logo, user.id],
         );
-        if (result.rows[0]) created = result;
-        else slug = `${slugify(name)}-${randomSuffix()}`;
+        root = result.rows[0];
+        if (root) break;
       }
-      const root = created?.rows[0];
       if (!root) {
-        throw new HttpError(
-          409,
-          "slug_conflict",
-          "Couldn't allocate a unique organization URL — try again",
-        );
+        throw chosen
+          ? new HttpError(409, "organization_id_taken", "That organization ID is taken. Choose another.")
+          : new HttpError(
+              409,
+              "organization_id_required",
+              `${candidates.join(" and ")} ${candidates.length === 1 ? "is" : "are"} taken. Choose an organization ID.`,
+            );
       }
       await tx.query(
         `INSERT INTO organization_members (org_id, user_id, role)
@@ -814,6 +842,49 @@ function createOrganizationRouter(
       : c.json({ organization }, 201);
   });
 
+  // The create form's live check, before the dynamic `/:organization` routes.
+  // `?name=` answers the ID that name would get (null when the creator must
+  // choose one); `?id=` answers whether a chosen ID can be used.
+  app.get(
+    "/id-availability",
+    rateLimit("organization-id-availability", 120, 60_000),
+    async (c) => {
+      const user = c.get("user");
+      const id = c.req.query("id");
+      const name = id === undefined ? c.req.query("name") : undefined;
+      if (id === undefined && name === undefined) {
+        throw new HttpError(422, "invalid_input", "Pass name or id");
+      }
+      const answer = await withSystemTx(pool, async (tx) => {
+        requireOrganizationCreationCapability(await accountProActive(tx, user.id));
+        const taken = async (slugs: string[]): Promise<Set<string>> => {
+          if (slugs.length === 0) return new Set();
+          const result = await tx.query<{ slug: string }>(
+            "SELECT lower(slug::text) AS slug FROM organizations WHERE slug = ANY($1::citext[])",
+            [slugs],
+          );
+          return new Set(result.rows.map((row) => row.slug));
+        };
+        if (id !== undefined) {
+          const normalized = id.trim().toLowerCase();
+          const problem: OrganizationIdProblem | "taken" | null =
+            organizationIdProblem(normalized) ??
+            ((await taken([normalized])).has(normalized) ? "taken" : null);
+          return problem
+            ? { id: normalized, available: false, reason: problem }
+            : { id: normalized, available: true };
+        }
+        const candidates = organizationIdCandidates(parse(NameSchema, name));
+        const used = await taken(candidates);
+        return {
+          suggestion: candidates.find((slug) => !used.has(slug)) ?? null,
+          candidates,
+        };
+      });
+      return c.json(answer);
+    },
+  );
+
   app.get("/:organization", async (c) => {
     const user = c.get("user");
     const orgId = param(c);
@@ -836,6 +907,13 @@ function createOrganizationRouter(
       string,
       unknown
     >;
+    if (body.slug !== undefined) {
+      throw new HttpError(
+        422,
+        "organization_id_immutable",
+        "An organization's ID can't change. Rename it instead.",
+      );
+    }
     const name =
       body.name === undefined ? undefined : parse(NameSchema, body.name);
     const logo =

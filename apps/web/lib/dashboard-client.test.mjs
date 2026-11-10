@@ -5,6 +5,8 @@ import {
   cloudOrganizations,
   collaborationSectionDisabled,
   createOrganizationDialogHtml,
+  organizationIdHint,
+  organizationIdInput,
   deleteAccountDialogHtml,
   deleteOrganizationDialogHtml,
   escapeHtml,
@@ -353,6 +355,7 @@ test("focus/visibility is a silence backstop, not a periodic poll", () => {
 
 const acme = {
   id: "5d2f8c1a-3b7e-4f90-a6d4-9c1e2b7f8a35",
+  slug: "acme",
   name: "Acme",
   logo: null,
   role: "owner",
@@ -450,7 +453,11 @@ test("General gives owners every control and members a read-only view", () => {
   assert.match(owner, /<img class="avatar-image" src="data:image\/png;base64,AA==" alt="" \/>/);
   assert.match(owner, /<span class="row-hint">Shown for Acme across Zeros\.<\/span><\/span><\/span><span class="row-ctl"><label class="button secondary">Change<input class="file-input" type="file" accept="image\/png,image\/jpeg,image\/webp,image\/gif" data-organization-logo \/><\/label><button class="button ghost" type="button" data-action="remove-organization-logo">Remove<\/button>/);
   assert.match(owner, /<form class="row" data-form="rename-organization"><span class="row-text"><span class="row-name">Name<\/span><span class="row-hint">Shown across Zeros and in invitations\.<\/span><\/span><span class="row-ctl"><input class="input" name="name" required maxlength="80" value="Acme" aria-label="Organization name" \/><button class="button secondary" type="submit">Save<\/button>/);
-  assert.match(owner, new RegExp(`<code class="id-code">${acme.id}</code><button class="icon-button" type="button" data-copy-organization-id="${acme.id}" aria-label="Copy organization ID"><svg`));
+  assert.match(owner, /<span class="row-name">Organization ID<\/span><span class="row-hint">Used in workspace and chat links\. It can’t change\.<\/span><\/span><span class="row-ctl"><code class="id-code">acme<\/code><button class="icon-button" type="button" data-copy-organization-slug="acme" aria-label="Copy organization ID"><svg/);
+  assert.match(owner, new RegExp(`<span class="row-name">Internal ID</span><span class="row-hint">Your stable tenant identifier, for support\\.</span></span><span class="row-ctl"><code class="id-code">${acme.id}</code><button class="icon-button" type="button" data-copy-organization-id="${acme.id}" aria-label="Copy internal ID"><svg`));
+  // An organization's ID is shown, never edited: only the display name has a form.
+  assert.doesNotMatch(owner, /name="slug"/);
+  assert.doesNotMatch(generalHtml({ ...acme, slug: undefined }), /data-copy-organization-slug/);
   assert.match(owner, /<span class="row-name">Your role<\/span><\/span><span class="row-ctl"><span class="badge">Owner<\/span>/);
   assert.match(owner, /<h2 class="group-title">Delete organization<\/h2><div class="card"><div class="row"><span class="row-text"><span class="row-name">Delete organization<\/span><span class="row-hint">Removes access now\. An owner can restore it for 30 days\.<\/span><\/span><span class="row-ctl"><button class="button danger-secondary" type="button" data-action="delete-organization">Delete organization<\/button>/);
   assert.doesNotMatch(generalHtml(acme), /remove-organization-logo/);
@@ -554,6 +561,7 @@ test("dialogs follow the 400px recipe with the canvas copy", () => {
   const create = createOrganizationDialogHtml();
   assert.match(create, /<h2 class="dialog-title" id="create-organization-title">Create organization<\/h2><button class="icon-button" type="button" value="cancel" data-action="close-dialog" aria-label="Close"><svg/);
   assert.match(create, /<p class="dialog-desc">Organizations share workspaces, members and settings\.<\/p>/);
+  assert.match(create, /<label class="field"><span>Organization name<\/span><input class="input" name="name" maxlength="80" required autocomplete="organization" placeholder="Acme" data-organization-name \/><\/label><div class="field"><label for="create-organization-id">Organization ID<\/label><input class="input" id="create-organization-id" name="slug" maxlength="40" autocomplete="off" autocapitalize="none" spellcheck="false" aria-describedby="create-organization-id-hint" data-organization-id \/><p class="field-hint" id="create-organization-id-hint" aria-live="polite" data-organization-id-hint>Used in workspace and chat links\. You can’t change it later\.<\/p><\/div>/);
   assert.match(create, /<div class="dialog-foot"><button class="button ghost" type="button" value="cancel" data-action="close-dialog">Cancel<\/button><button class="button primary" type="submit" value="default">Create organization<\/button><\/div>/);
   const remove = deleteOrganizationDialogHtml('Acme "Labs"');
   assert.match(remove, /<p class="dialog-desc">Access stops now\. An owner can restore it for 30 days\.<\/p>/);
@@ -562,6 +570,37 @@ test("dialogs follow the 400px recipe with the canvas copy", () => {
   const account = deleteAccountDialogHtml();
   assert.match(account, /<p class="dialog-desc">Signs out every device\. Recoverable for 30 days; local work stays\.<\/p>/);
   assert.match(account, /<span>Type DELETE MY ACCOUNT to confirm<\/span><input class="input" name="confirmation" maxlength="64" required autocomplete="off" placeholder="DELETE MY ACCOUNT" \/>/);
+});
+
+test("the Organization ID field keeps typing link-safe and says what the check found", () => {
+  assert.equal(organizationIdInput("Acme Labs"), "acme-labs");
+  assert.equal(organizationIdInput("Acme_Labs!"), "acme-labs-");
+  assert.equal(organizationIdInput("a".repeat(50)), "a".repeat(40));
+  assert.equal(organizationIdInput(null), "");
+  const host = "app.zeros.build";
+  assert.deepEqual(organizationIdHint(null, host), {
+    text: "Used in workspace and chat links. You can’t change it later.",
+    error: false,
+  });
+  assert.deepEqual(organizationIdHint({ kind: "checking" }, host), { text: "Checking…", error: false });
+  assert.deepEqual(organizationIdHint({ kind: "available", id: "acme-org" }, host), {
+    text: "Links use app.zeros.build/acme-org/w/1. You can’t change it later.",
+    error: false,
+  });
+  assert.deepEqual(organizationIdHint({ kind: "required", candidates: ["acme", "acme-org"] }, host), {
+    text: "acme and acme-org are taken. Enter an organization ID.",
+    error: true,
+  });
+  assert.deepEqual(organizationIdHint({ kind: "required", candidates: ["local-org"] }, host), {
+    text: "local-org is taken. Enter an organization ID.",
+    error: true,
+  });
+  assert.equal(organizationIdHint({ kind: "taken", id: "acme" }, host).text, "acme is taken. Choose another.");
+  assert.equal(organizationIdHint({ kind: "reserved", id: "local" }, host).text, "local is reserved. Choose another.");
+  assert.deepEqual(organizationIdHint({ kind: "invalid", id: "a--b" }, host), {
+    text: "Use lowercase letters, numbers and single hyphens, up to 40 characters.",
+    error: true,
+  });
 });
 
 test("markup helpers escape, abbreviate and format deterministically", () => {
