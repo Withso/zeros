@@ -1200,6 +1200,22 @@ export const DESIGN_COMPACT_SELECTION_PIXELS = 16;
  * no room to start, and its name label has no width left to grab. */
 export const DESIGN_TINY_FRAME_PIXELS = 24;
 
+/** What a Select-tool press on a frame's body becomes when it drags. A selected
+ * frame moves, as pressing its name does. With a layer of the frame selected
+ * the press asks what is under it: a layer moves like the selected one, empty
+ * frame starts the marquee. A modifier always keeps the marquee, and so does
+ * the second press of a double-click, which descends instead. */
+export function designFrameBodyPress(input: {
+  frameSelected: boolean;
+  layerSelected: boolean;
+  modifier: boolean;
+  repeat: boolean;
+}): "move-frame" | "layer" | "marquee" {
+  if (input.modifier) return "marquee";
+  if (input.frameSelected) return "move-frame";
+  return input.layerSelected && !input.repeat ? "layer" : "marquee";
+}
+
 export interface DesignResizeHandleLayout {
   corners: boolean;
   /** The left and right edge strips, which take width from the body. */

@@ -80,6 +80,7 @@ import {
   selectLiveDesignFrameFiles,
   settleDesignFrameGesture,
   zoomDesignViewportAtPoint,
+  designFrameBodyPress,
 } from "../design-canvas-math";
 
 describe("design canvas viewport math", () => {
@@ -1422,3 +1423,20 @@ describe("designWholeCanvasRect", () => {
   });
 });
 
+
+describe("a press on a frame's body", () => {
+  const plain = { frameSelected: false, layerSelected: false, modifier: false, repeat: false };
+  it("moves a selected frame, as pressing its name does", () => {
+    // It started a marquee: a frame with a fill could only be moved by its name.
+    expect(designFrameBodyPress({ ...plain, frameSelected: true })).toBe("move-frame");
+  });
+  it("asks what is under the pointer once a layer in the frame is selected, so that layer can move", () => {
+    expect(designFrameBodyPress({ ...plain, layerSelected: true })).toBe("layer");
+  });
+  it("keeps the marquee for an unselected frame, a modifier, and the second press of a double-click", () => {
+    expect(designFrameBodyPress(plain)).toBe("marquee");
+    expect(designFrameBodyPress({ ...plain, frameSelected: true, modifier: true })).toBe("marquee");
+    expect(designFrameBodyPress({ ...plain, layerSelected: true, modifier: true })).toBe("marquee");
+    expect(designFrameBodyPress({ ...plain, layerSelected: true, repeat: true })).toBe("marquee");
+  });
+});

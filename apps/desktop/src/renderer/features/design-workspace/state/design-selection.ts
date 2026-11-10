@@ -1286,6 +1286,9 @@ export async function selectDesignFrameBodyAtLocation(
     y: number;
     intent: DesignFrameBodyIntent;
     additive?: boolean;
+    /** A press that may become a drag selects the layer under it and leaves
+     * the selection alone when there is none: the frame is not its target. */
+    layersOnly?: boolean;
     /** Single-node entry can open its editor before selection persistence. */
     onLocalSelection?: (details: DesignRuntimeNodeDetails) => void;
     owner?: DesignPageOwner;
@@ -1300,6 +1303,7 @@ export async function selectDesignFrameBodyAtLocation(
     current.selectedFrame === frame.file ? current.selectedNodeId : null;
   const labeledFrame = frame.kind !== "text";
   const selectFrame = async () => {
+    if (input.layersOnly) return null;
     // Empty-space Shift-click must not replace an existing group of layers.
     if (input.additive && current.selectedFrame === frame.file && current.selectedNodeIds.length > 0) return null;
     const selected = !(
