@@ -1,4 +1,10 @@
-import { WorkOS, type Event, type EventName, type User } from "@workos-inc/node";
+import {
+  AuthenticationException,
+  WorkOS,
+  type Event,
+  type EventName,
+  type User,
+} from "@workos-inc/node";
 import { createRemoteJWKSet, decodeJwt, jwtVerify } from "jose";
 import { fetchWithWorkOSRequestSignal, withWorkOSRequestSignal } from "./workos-provider-request-context.js";
 
@@ -35,6 +41,25 @@ export type WorkOSRefreshResult =
 export type WorkOSRestoreResult =
   | ({ status: "active" } & WorkOSExchange)
   | { status: "terminal"; reason: string };
+
+/** The closed codes WorkOS returns instead of a session when the person still
+ * owes a ceremony: choosing an organization, MFA, verification or SSO. */
+export type WorkOSAuthenticationCeremony = AuthenticationException["code"];
+
+/** A code exchange WorkOS answered with a ceremony instead of a session. The
+ * pending authentication token is deliberately not carried: Zeros never
+ * continues a ceremony itself, so it never holds that credential. */
+export class WorkOSAuthenticationRequiredError extends Error {
+  override readonly name = "WorkOSAuthenticationRequiredError";
+
+  constructor(
+    readonly code: WorkOSAuthenticationCeremony,
+    readonly status: number,
+    readonly requestId: string,
+  ) {
+    super(`WorkOS requires ${code}`);
+  }
+}
 
 /** The web sign-in page's two direct choices; every other start uses Hosted AuthKit. */
 export type WorkOSSocialProvider = "google" | "github";
@@ -307,14 +332,26 @@ export class RailwayWorkOSProvider
     code: string;
     codeVerifier: string;
   }): Promise<WorkOSExchange> {
-    const response = await this.client.userManagement.authenticateWithCode({
-      code: options.code,
-      codeVerifier: options.codeVerifier,
-      session: {
-        sealSession: true,
-        cookiePassword: this.backend.cookiePassword,
-      },
-    });
+    let response;
+    try {
+      response = await this.client.userManagement.authenticateWithCode({
+        code: options.code,
+        codeVerifier: options.codeVerifier,
+        session: {
+          sealSession: true,
+          cookiePassword: this.backend.cookiePassword,
+        },
+      });
+    } catch (error) {
+      if (error instanceof AuthenticationException) {
+        throw new WorkOSAuthenticationRequiredError(
+          error.code,
+          error.status,
+          error.requestID,
+        );
+      }
+      throw error;
+    }
     if (!response.sealedSession) {
       throw new Error("WorkOS did not return a sealed session");
     }

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   WORKOS_FLOW_COOKIE,
+  WORKOS_HANDOFF_COOKIE,
   WORKOS_SESSION_COOKIE,
   WorkOSBrowserSessions,
   createWorkOSBrowserSessionRoutes,
@@ -10,11 +11,12 @@ import {
   type WorkOSFlowRecord,
   type WorkOSSessionRecord,
 } from "./workos-browser-sessions.js";
-import type {
-  WorkOSBrowserProvider,
-  WorkOSExchange,
-  WorkOSRefreshResult,
-  WorkOSRestoreResult,
+import {
+  WorkOSAuthenticationRequiredError,
+  type WorkOSBrowserProvider,
+  type WorkOSExchange,
+  type WorkOSRefreshResult,
+  type WorkOSRestoreResult,
 } from "./workos-provider.js";
 
 const START = 1_800_000_000_000;
@@ -449,6 +451,183 @@ describe("Railway WorkOS browser-session coordinator", () => {
     ).toEqual({ ok: false, reason: "email_unverified" });
     expect(value.repository.session).toBeNull();
     expect(revoked).toEqual(["session_01TEST"]);
+  });
+
+  it("hands a multi-organization social sign-in to Hosted AuthKit once, keeping the return path", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const authorizationUrl = vi.fn(
+        ({ state, codeChallenge }: { state: string; codeChallenge: string }) =>
+          `https://api.workos.test/authorize?state=${state}&code_challenge=${codeChallenge}`,
+      );
+      const exchangeCode = vi.fn(async (): Promise<WorkOSExchange> => {
+        throw new WorkOSAuthenticationRequiredError(
+          "organization_selection_required",
+          403,
+          "req_handoff",
+        );
+      });
+      const value = subject({
+        provider: provider({ authorizationUrl, exchange: exchangeCode }),
+      });
+      const app = createWorkOSBrowserSessionRoutes(value.sessions, APP_ORIGIN, {
+        socialProviders: true,
+      });
+
+      const started = await app.request(
+        `/auth/start?provider=github&return=${encodeURIComponent("/dashboard")}`,
+      );
+      expect(started.headers.getSetCookie().join("\n")).toContain(
+        `${WORKOS_HANDOFF_COOKIE}=;`,
+      );
+      const firstState = new URL(
+        started.headers.get("location")!,
+      ).searchParams.get("state")!;
+      const handedOff = await app.request(
+        `/auth/callback?code=one-time-code&state=${encodeURIComponent(firstState)}`,
+        { headers: { cookie: `${WORKOS_FLOW_COOKIE}=${TOKENS[0]}` } },
+      );
+
+      expect(handedOff.status).toBe(303);
+      expect(handedOff.headers.get("cache-control")).toBe("no-store");
+      expect(authorizationUrl.mock.calls.map((call) => call[0].socialProvider)).toEqual([
+        "github",
+        undefined,
+      ]);
+      const hostedUrl = new URL(handedOff.headers.get("location")!);
+      const hostedState = hostedUrl.searchParams.get("state")!;
+      expect(hostedState).not.toBe(firstState);
+      const handoffCookies = handedOff.headers.getSetCookie();
+      const flowCookies = handoffCookies.filter((cookie) =>
+        cookie.startsWith(`${WORKOS_FLOW_COOKIE}=`),
+      );
+      expect(flowCookies).toHaveLength(1);
+      // Each start draws credential, state and verifier; this is the second start.
+      const hostedCredential = "D".repeat(43);
+      expect(flowCookies[0]).toContain(`${WORKOS_FLOW_COOKIE}=${hostedCredential};`);
+      expect(flowCookies[0]).toContain("SameSite=Lax");
+      const handoffCookie = handoffCookies.find((cookie) =>
+        cookie.startsWith(`${WORKOS_HANDOFF_COOKIE}=`),
+      );
+      expect(handoffCookie).toContain(`${WORKOS_HANDOFF_COOKIE}=1;`);
+      expect(handoffCookie).toContain("HttpOnly");
+      expect(handoffCookie).toContain("Secure");
+      expect(value.repository.flow?.record.returnPath).toBe("/dashboard");
+      expect(value.repository.session).toBeNull();
+      const logged = JSON.stringify(warn.mock.calls);
+      expect(logged).toContain("organization_selection_required");
+      expect(logged).toContain("req_handoff");
+      expect(logged).not.toContain("one-time-code");
+      expect(logged).not.toContain(firstState);
+
+      // A second ceremony from the hosted flow ends on the page, never a loop.
+      const repeated = await app.request(
+        `/auth/callback?code=hosted-code&state=${encodeURIComponent(hostedState)}`,
+        {
+          headers: {
+            cookie: `${WORKOS_FLOW_COOKIE}=${hostedCredential}; ${WORKOS_HANDOFF_COOKIE}=1`,
+          },
+        },
+      );
+      expect(repeated.status).toBe(400);
+      expect(await repeated.text()).toContain(
+        '<div class="sub">This account needs a step the sign-in page couldn’t finish. Nothing was changed.</div>',
+      );
+      const repeatedCookies = repeated.headers.getSetCookie().join("\n");
+      expect(repeatedCookies).toContain(`${WORKOS_FLOW_COOKIE}=;`);
+      expect(repeatedCookies).toContain(`${WORKOS_HANDOFF_COOKIE}=;`);
+      expect(authorizationUrl).toHaveBeenCalledTimes(2);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("finishes the hosted hand-off normally and clears its marker", async () => {
+    const value = subject();
+    const app = createWorkOSBrowserSessionRoutes(value.sessions, APP_ORIGIN, {
+      socialProviders: true,
+    });
+    const started = await app.request("/auth/start");
+    const state = new URL(started.headers.get("location")!).searchParams.get(
+      "state",
+    )!;
+
+    const completed = await app.request(
+      `/auth/callback?code=hosted-code&state=${encodeURIComponent(state)}`,
+      {
+        headers: {
+          cookie: `${WORKOS_FLOW_COOKIE}=${TOKENS[0]}; ${WORKOS_HANDOFF_COOKIE}=1`,
+        },
+      },
+    );
+
+    expect(completed.status).toBe(200);
+    expect(completed.headers.getSetCookie().join("\n")).toContain(
+      `${WORKOS_HANDOFF_COOKIE}=;`,
+    );
+    expect(value.repository.session).not.toBeNull();
+  });
+
+  it("maps a provider email-verification ceremony to the verify-email page", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const value = subject({
+        provider: provider({
+          async exchange() {
+            throw new WorkOSAuthenticationRequiredError(
+              "email_verification_required",
+              403,
+              "req_verify",
+            );
+          },
+        }),
+      });
+      const started = await value.sessions.start({ returnPath: "/" });
+      const state = new URL(started.authorizationUrl).searchParams.get("state")!;
+
+      expect(
+        await value.sessions.complete({
+          credential: started.credential,
+          code: "code",
+          state,
+        }),
+      ).toEqual({ ok: false, reason: "email_unverified" });
+      expect(value.repository.flow).toBeNull();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("logs a failed code exchange by class and status only", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const value = subject({
+        provider: provider({
+          async exchange() {
+            throw Object.assign(new Error("secret-bearing provider message"), {
+              status: 400,
+              requestID: "req_failed",
+            });
+          },
+        }),
+      });
+      const started = await value.sessions.start({ returnPath: "/" });
+      const state = new URL(started.authorizationUrl).searchParams.get("state")!;
+
+      expect(
+        await value.sessions.complete({
+          credential: started.credential,
+          code: "code",
+          state,
+        }),
+      ).toEqual({ ok: false, reason: "exchange_failed" });
+      const logged = JSON.stringify(warn.mock.calls);
+      expect(logged).toContain("req_failed");
+      expect(logged).toContain("400");
+      expect(logged).not.toContain("secret-bearing");
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it("serializes near-expiry refreshes across coordinator instances", async () => {

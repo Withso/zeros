@@ -4,10 +4,12 @@ import type pg from "pg";
 
 import { withSystemTx, type Tx } from "./db.js";
 import { HOSTED_PAGE_STYLE_SOURCE, hostedPage } from "./hosted-page.js";
-import type {
-  WorkOSBrowserProvider,
-  WorkOSExchange,
-  WorkOSSocialProvider,
+import {
+  WorkOSAuthenticationRequiredError,
+  type WorkOSAuthenticationCeremony,
+  type WorkOSBrowserProvider,
+  type WorkOSExchange,
+  type WorkOSSocialProvider,
 } from "./workos-provider.js";
 import {
   withWorkOSProviderLocks,
@@ -20,6 +22,9 @@ import {
 
 export const WORKOS_FLOW_COOKIE = "__Host-zeros_auth_flow";
 export const WORKOS_SESSION_COOKIE = "__Host-zeros_session";
+/** Marks a flow the callback already handed to Hosted AuthKit, so a second
+ * ceremony ends on the failure page instead of redirecting again. */
+export const WORKOS_HANDOFF_COOKIE = "__Host-zeros_auth_handoff";
 export const WORKOS_FLOW_TTL_S = 10 * 60;
 export const WORKOS_SESSION_TTL_S = 30 * 24 * 60 * 60;
 
@@ -518,6 +523,36 @@ function validString(value: unknown, max: number): value is string {
   return typeof value === "string" && value.length > 0 && value.length <= max;
 }
 
+/** Ceremonies a direct Google or GitHub start cannot finish but Hosted AuthKit
+ * can: its organization picker, MFA and SSO routing. */
+const HOSTED_AUTHKIT_CEREMONIES: ReadonlySet<WorkOSAuthenticationCeremony> =
+  new Set([
+    "organization_selection_required",
+    "mfa_enrollment",
+    "mfa_challenge",
+    "sso_required",
+  ]);
+
+/** Closed fields only: provider messages and bodies can carry user data. */
+function logExchangeFailure(error: unknown): void {
+  const fields: Record<string, string | number> = {
+    error: error instanceof Error ? error.name : typeof error,
+  };
+  if (error instanceof WorkOSAuthenticationRequiredError) {
+    fields.code = error.code;
+    fields.status = error.status;
+    fields.requestId = error.requestId;
+  } else if (error && typeof error === "object") {
+    const { status, requestID } = error as {
+      status?: unknown;
+      requestID?: unknown;
+    };
+    if (typeof status === "number") fields.status = status;
+    if (typeof requestID === "string") fields.requestId = requestID;
+  }
+  console.warn(`[auth] WorkOS code exchange failed ${JSON.stringify(fields)}`);
+}
+
 function validExchange(exchange: WorkOSExchange, now: number): boolean {
   return (
     validString(exchange.sealedSession, 64 * 1_024) &&
@@ -644,7 +679,8 @@ export class WorkOSBrowserSessions {
     code: string;
     state: string;
   }): Promise<
-    { ok: true; returnPath: string } | { ok: false; reason: string }
+    | { ok: true; returnPath: string }
+    | { ok: false; reason: string; hostedReturnPath?: string }
   > {
     if (
       !OPAQUE_ID.test(options.credential) ||
@@ -668,8 +704,21 @@ export class WorkOSBrowserSessions {
         codeVerifier: flow.codeVerifier,
         redirectUri: flow.redirectUri,
       });
-    } catch {
+    } catch (error) {
       await this.repository.deleteFlow(credentialHash);
+      logExchangeFailure(error);
+      if (error instanceof WorkOSAuthenticationRequiredError) {
+        if (error.code === "email_verification_required") {
+          return { ok: false, reason: "email_unverified" };
+        }
+        if (HOSTED_AUTHKIT_CEREMONIES.has(error.code)) {
+          return {
+            ok: false,
+            reason: "hosted_authkit_required",
+            hostedReturnPath: flow.returnPath,
+          };
+        }
+      }
       return { ok: false, reason: "exchange_failed" };
     }
     const now = this.now();
@@ -979,6 +1028,7 @@ function expireCookie(
 
 function appendFlowCleanup(headers: Headers): void {
   headers.append("set-cookie", expireCookie(WORKOS_FLOW_COOKIE));
+  headers.append("set-cookie", expireCookie(WORKOS_HANDOFF_COOKIE));
   for (const name of [
     "zeros_pkce_verifier",
     "zeros_oauth_state",
@@ -1014,6 +1064,8 @@ function failureResponse(reason: string): Response {
     invalid_flow: "This attempt expired, was used, or came from another browser.",
     email_unverified: "Verify your email with the provider, then try again.",
     exchange_failed: "The sign-in service couldn’t finish. Nothing was changed.",
+    hosted_authkit_required:
+      "This account needs a step the sign-in page couldn’t finish. Nothing was changed.",
     provider_error: "The identity provider didn’t finish. Nothing was changed.",
     unavailable: "Sign-in is unavailable right now. Try again shortly.",
   };
@@ -1119,6 +1171,7 @@ export function createWorkOSBrowserSessionRoutes(
           "Lax",
         ),
       );
+      headers.append("set-cookie", expireCookie(WORKOS_HANDOFF_COOKIE));
       return new Response(null, { status: 303, headers });
     } catch {
       return failureResponse("unavailable");
@@ -1141,11 +1194,45 @@ export function createWorkOSBrowserSessionRoutes(
       appendFlowCleanup(failed.headers);
       return failed;
     }
-    let result;
+    let result: Awaited<ReturnType<WorkOSBrowserSessions["complete"]>>;
     try {
       result = await sessions.complete({ credential, code, state });
     } catch {
-      result = { ok: false as const, reason: "unavailable" };
+      result = { ok: false, reason: "unavailable" };
+    }
+    if (
+      !result.ok &&
+      result.hostedReturnPath !== undefined &&
+      cookies(c.req.raw).get(WORKOS_HANDOFF_COOKIE) !== "1"
+    ) {
+      // Hosted AuthKit can finish these ceremonies and a direct Google or
+      // GitHub start cannot, so the attempt continues there in a fresh flow.
+      try {
+        const started = await sessions.start({
+          returnPath: safeWorkOSReturnPath(result.hostedReturnPath, appOrigin),
+        });
+        const headers = new Headers({
+          location: started.authorizationUrl,
+          "cache-control": "no-store",
+          "referrer-policy": "no-referrer",
+        });
+        headers.append(
+          "set-cookie",
+          hostCookie(
+            WORKOS_FLOW_COOKIE,
+            started.credential,
+            WORKOS_FLOW_TTL_S,
+            "Lax",
+          ),
+        );
+        headers.append(
+          "set-cookie",
+          hostCookie(WORKOS_HANDOFF_COOKIE, "1", WORKOS_FLOW_TTL_S, "Lax"),
+        );
+        return new Response(null, { status: 303, headers });
+      } catch {
+        result = { ok: false, reason: "unavailable" };
+      }
     }
     if (!result.ok) {
       const failed = failureResponse(result.reason);
