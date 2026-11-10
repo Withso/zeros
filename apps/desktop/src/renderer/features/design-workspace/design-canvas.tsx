@@ -7487,6 +7487,25 @@ export const DesignCanvas = React.memo(function DesignCanvas({
     ],
   );
 
+  /** Run `click` when this press is released where it started. */
+  const onDesignPressClick = useCallback((event: React.PointerEvent<HTMLElement>, click: () => void) => {
+    const { pointerId, clientX, clientY } = event;
+    const stop = () => {
+      window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", cancel);
+    };
+    const up = (released: PointerEvent) => {
+      if (released.pointerId !== pointerId) return;
+      stop();
+      if (Math.hypot(released.clientX - clientX, released.clientY - clientY) < 3) click();
+    };
+    const cancel = (cancelled: PointerEvent) => {
+      if (cancelled.pointerId === pointerId) stop();
+    };
+    window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", cancel);
+  }, []);
+
   // A deferred press selects a layer before it hands off, so it reads the
   // gestures of the render that followed that selection.
   const pressGesturesRef = useRef({ startNodeGesture, startMarquee });
@@ -7529,10 +7548,18 @@ export const DesignCanvas = React.memo(function DesignCanvas({
           stopPropagation() {},
         }) as unknown as React.PointerEvent<HTMLElement>;
       let hit: DesignRuntimeNodeDetails | null | undefined;
+      let latest = { clientX: start.clientX, clientY: start.clientY };
       let moved = false;
       let released = false;
       let ended = false;
       let waiting: number | null = null;
+      // The gesture that takes over starts at the press; it hears where the
+      // pointer has reached since without waiting for it to move again.
+      const handOff = (begin: () => void) => {
+        end();
+        begin();
+        window.dispatchEvent(new PointerEvent("pointermove", { ...latest, pointerId, isPrimary: true }));
+      };
       const end = () => {
         ended = true;
         window.removeEventListener("pointermove", move);
@@ -7554,8 +7581,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         }
         if (!moved || waiting !== null) return;
         if (hit === null) {
-          end();
-          pressGesturesRef.current.startMarquee(press(article), { frame, onClick });
+          handOff(() => pressGesturesRef.current.startMarquee(press(article), { frame, onClick }));
           return;
         }
         const nodeId = hit.oid;
@@ -7567,15 +7593,16 @@ export const DesignCanvas = React.memo(function DesignCanvas({
           const details = useDesignRuntimeStore.getState().byWorkspace[workspaceId]?.frames[frame.file]?.detailsByNode[nodeId];
           const selection = designWorkspaceView(workspaceId);
           if (overlay && details && selection.selectedFrame === frame.file && selection.selectedNodeId === nodeId) {
-            end();
-            pressGesturesRef.current.startNodeGesture(press(overlay), frame, details, "move");
+            handOff(() => pressGesturesRef.current.startNodeGesture(press(overlay), frame, details, "move"));
           } else if (++frames > 30) end();
           else waiting = window.requestAnimationFrame(begin);
         };
         begin();
       };
       const move = (pointerEvent: PointerEvent) => {
-        if (moved || Math.hypot(pointerEvent.clientX - start.clientX, pointerEvent.clientY - start.clientY) < 3) return;
+        if (pointerEvent.pointerId !== pointerId) return;
+        latest = { clientX: pointerEvent.clientX, clientY: pointerEvent.clientY };
+        if (moved || Math.hypot(latest.clientX - start.clientX, latest.clientY - start.clientY) < 3) return;
         moved = true;
         settle();
       };
@@ -8075,6 +8102,8 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                         DESIGN_TINY_FRAME_PIXELS)
                   ) {
                     startFrameGesture(event, frame, "move");
+                    // A press that never moves is still a click on the frame.
+                    if (press === "move-frame") onDesignPressClick(event, selectAtPoint);
                     return;
                   }
                   if (
