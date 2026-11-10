@@ -94,10 +94,15 @@ export function designNodeRelocation(
     e: border.e + origin.x - details.rect.x,
     f: border.f + origin.y - details.rect.y,
   });
+  // An upright layer lands on whole pixels of its new parent, like a moved
+  // one; a turned or scaled layer keeps the exact pose it was dropped in.
+  const upright = [local.a - 1, local.b, local.c, local.d - 1].every((value) => Math.abs(value) < 1e-6);
   return designRelocationSchema.parse({
     width: details.box.width,
     height: details.box.height,
-    matrix: [local.a, local.b, local.c, local.d, local.e, local.f],
+    matrix: upright
+      ? [1, 0, 0, 1, Math.round(local.e) + 0, Math.round(local.f) + 0]
+      : [local.a, local.b, local.c, local.d, local.e, local.f],
     inheritedStyles: designRelocationInheritedStyles(context, destination, sameDocument),
   });
 }
