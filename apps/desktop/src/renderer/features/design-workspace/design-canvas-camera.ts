@@ -46,6 +46,15 @@ export function repaintDesignCanvasPixels(world: HTMLDivElement): void {
 // Labels, handles and badges can extend past an artboard. Keep that nearby
 // chrome current as well as the pixels, without retaining a browser observer.
 const CHROME_OVERSCAN_PIXELS = 96;
+/** Screen widths below which a frame's name, and its 28px Play control, no
+ * longer fit above it. */
+const FRAME_NAME_MIN_PIXELS = 40;
+const FRAME_PLAY_MIN_PIXELS = 128;
+/** Up to this many mounted frames, a small frame keeps its name. A crowded
+ * overview hides names and controls together below the Play width: each
+ * visible name is a transformed layer and a DOM hit box per frame, which a
+ * 1,000-frame page cannot afford. */
+const FRAME_NAME_BUDGET = 64;
 
 /** The scale this module last wrote and the inline style text it left. An
  * unchanged attribute proves no other writer replaced those values, so a camera
@@ -134,8 +143,15 @@ export function paintDesignFrameVisibility(element: HTMLElement, context?: Chrom
   // their nearby chrome. Expanding all retained roots at a zoom threshold
   // makes layout/paint cost depend on document size instead of the viewport.
   const controls = element.getAttribute("data-design-frame-controls");
-  if (controls) element.toggleAttribute("data-design-frame-compact-controls",
-    controls === "automatic" && !!bounds && (outside || bounds.width * viewport.zoom < 128));
+  if (controls) {
+    const automatic = controls === "automatic" && !!bounds;
+    const width = bounds ? bounds.width * viewport.zoom : 0;
+    const hidden = automatic && (outside ||
+      width < (world.childElementCount > FRAME_NAME_BUDGET ? FRAME_PLAY_MIN_PIXELS : FRAME_NAME_MIN_PIXELS));
+    element.toggleAttribute("data-design-frame-compact-controls", hidden);
+    // Between the two widths the name stays and only Play waits for intent.
+    element.toggleAttribute("data-design-frame-compact-play", automatic && !hidden && width < FRAME_PLAY_MIN_PIXELS);
+  }
   element.toggleAttribute("data-design-frame-chrome-outside", outside);
   // Ready source paint follows the camera in this write, including a return
   // before React runs. Cold documents still lay out and caches stay mounted.

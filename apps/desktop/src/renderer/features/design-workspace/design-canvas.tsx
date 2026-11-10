@@ -7995,6 +7995,8 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                         {
                           // Reserve the 28px Play control and its 12px gap in screen space.
                           "--design-frame-label-max-width": `max(0px, calc(${frame.width}px * var(--design-canvas-zoom) - 40px))`,
+                          // A small frame hides Play until intent; its name takes the whole width.
+                          "--design-frame-label-full-width": `calc(${frame.width}px * var(--design-canvas-zoom))`,
                           maxWidth: "var(--design-frame-label-max-width)",
                           transform: `translateY(${designCanvasScreenPixels(-8)}) scale(${DESIGN_CANVAS_INVERSE_ZOOM})`,
                         } as React.CSSProperties
@@ -8053,6 +8055,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                     <div
                       data-design-controls
                       data-design-frame-chrome=""
+                      data-design-frame-play-chrome=""
                       className="absolute right-0 bottom-full origin-bottom-right"
                       style={{ transform: `translateY(${designCanvasScreenPixels(-8)}) scale(${DESIGN_CANVAS_INVERSE_ZOOM})` }}
                     >

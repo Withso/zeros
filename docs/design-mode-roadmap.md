@@ -4259,6 +4259,9 @@ the exact scale before re-entry without layout reads or source replacement.
 Decoded source pixels and already inverse-scaled control children do not
 inherit wheel-by-wheel camera values. Hidden compact controls also isolate
 these values until hover or keyboard focus restores their screen-sized chrome.
+A frame at least 40 screen pixels wide keeps its name while the page mounts at
+most 64 frames, and hides only its Play control below 128 pixels; a more
+crowded page hides both below 128 pixels, as before.
 This bounds style work as well as source
 work; it does not establish a universal FPS or memory guarantee.
 Displayed and inactive source-vector images share the loaded-element retention
