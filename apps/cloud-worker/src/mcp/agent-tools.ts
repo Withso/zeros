@@ -1,4 +1,8 @@
+import { randomUUID } from "node:crypto";
+import { mkdir, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { CodeReviewError, type CodeReviewAgentToolsCore } from "@zeros/protocol/code-review";
+import { LOCAL_COMMAND_LIMITS, LocalCommandInputSchema, type LocalCommandInput, type LocalCommandResult } from "@zeros/protocol/local-commands";
 
 type ToolResult = { content: Array<{ type: "text"; text: string }>; isError?: boolean };
 type ToolDefinition = { name: string; description: string; inputSchema: { type: "object"; [key: string]: unknown } };
@@ -49,11 +53,58 @@ function object(raw: unknown, allowed: readonly string[]): Record<string, unknow
 const failure = (code: string, message: string): ToolResult => ({ isError: true, content: [{ type: "text", text: JSON.stringify({ code, message }) }] });
 const truncatedNote = "\n[Output truncated to the tool's size limit.]";
 
+const localCommandDefinition: ToolDefinition = { name: "RunLocalCommand",
+  description: "Run one shell command on the Mac of the person who sent this chat's latest message, in their login shell, after they approve it there. " +
+    "Use it for things only their Mac can do (local apps, simulators, files outside this workspace). It never runs in this workspace's VM. " +
+    "It is one-shot: when the shell exits its whole process group is ended, so a process started with & does not survive, " +
+    "and one that keeps stdout or stderr open holds the command until its timeout (redirect it to /dev/null).",
+  inputSchema: { type: "object", additionalProperties: false, required: ["command"], properties: {
+    command: { type: "string", minLength: 1, maxLength: LOCAL_COMMAND_LIMITS.commandChars, description: "The command line, run by the Mac's login shell." },
+    cwd: { type: "string", maxLength: LOCAL_COMMAND_LIMITS.cwdChars, description: "Directory on the Mac; defaults to the home directory, relative paths resolve from it." },
+    description: { type: "string", maxLength: LOCAL_COMMAND_LIMITS.textChars, description: "What the command does, shown in the approval." },
+    reason: { type: "string", maxLength: LOCAL_COMMAND_LIMITS.textChars, description: "Why it is needed, shown in the approval." },
+    timeoutMs: { type: "integer", minimum: 1, maximum: LOCAL_COMMAND_LIMITS.extendedTimeoutMs, default: LOCAL_COMMAND_LIMITS.defaultTimeoutMs,
+      description: "Up to 120000; up to 1800000 only with extendedTimeoutReason." },
+    extendedTimeoutReason: { type: "string", maxLength: LOCAL_COMMAND_LIMITS.textChars, description: "Required for a timeout above 120 s; shown in the approval." },
+    mac: { type: "string", maxLength: LOCAL_COMMAND_LIMITS.macChars, description: "Another connected Mac of the same person, by name. Omit to use the Mac the latest message came from." },
+  } } };
+
+/** One line per outcome; an approval timeout is never described as a denial. */
+const OUTCOME_TEXT: Record<Exclude<LocalCommandResult["outcome"], "completed">, (mac: string, error?: string) => string> = {
+  failed: (mac, error) => error === "cwd_not_found" ? `That directory does not exist on ${mac}; the command did not run.`
+    : `The login shell on ${mac} could not start the command; it did not run.`,
+  denied: mac => `The person declined this command on ${mac}; it did not run.`,
+  approval_timed_out: mac => `No one answered the approval on ${mac} within 120 s, so the command did not run. Ask the person before trying again.`,
+  command_timed_out: mac => `The command ran past its timeout on ${mac} and was stopped.`,
+  mac_not_connected: () => "That Mac is not connected to this workspace, so the command did not run.",
+  no_target: () => "This chat's latest message did not come from a Zeros Mac app, so there is no Mac to run on.",
+  disabled: () => "Local commands are turned off for this organization.",
+  cancelled: () => "The command was cancelled (Stop).",
+  interrupted: mac => `The Zeros app on ${mac} restarted before the command finished; it was not run again.`,
+};
+
+function formatLocalCommand(result: LocalCommandResult): string {
+  const mac = result.mac ?? "the Mac";
+  const lines = [`outcome: ${result.outcome}`, ...(result.mac ? [`mac: ${result.mac}`] : [])];
+  if (result.outcome !== "completed") lines.push(OUTCOME_TEXT[result.outcome](mac, result.error));
+  if (result.error) lines.push(`error: ${result.error}`);
+  if (result.cwd) lines.push(`cwd: ${result.cwd}`);
+  if (result.code !== undefined && result.code !== null) lines.push(`exit code: ${result.code}`);
+  let text = lines.join("\n") + "\n";
+  if (result.stdout) text += `--- stdout ---\n${result.stdout}${result.stdout.endsWith("\n") ? "" : "\n"}`;
+  if (result.stdoutTruncated) text += "[stdout truncated on the Mac at 1 MiB]\n";
+  if (result.stderr) text += `--- stderr ---\n${result.stderr}${result.stderr.endsWith("\n") ? "" : "\n"}`;
+  if (result.stderrTruncated) text += "[stderr truncated on the Mac at 1 MiB]\n";
+  return text;
+}
+
 export interface WorkspaceAgentToolOptions {
   assertCurrent(): void;
   terminalOutput(input: { terminalId?: string; maxLines: number; source: TerminalSource }): Promise<{ terminalId: string; lines: string[]; truncated: boolean } | undefined>;
   diff(input: { stat?: boolean; file?: string }): Promise<{ text: string; truncated: boolean }>;
   review?: CodeReviewAgentToolsCore;
+  /** Present only while this worker and its organization allow local commands. */
+  localCommands?: { run(input: LocalCommandInput, signal: AbortSignal): Promise<{ result: LocalCommandResult; acknowledge(): Promise<void> }>; checkout: string };
 }
 
 /** The product tools every native execution receives over `zeros_workspace`.
@@ -71,12 +122,13 @@ export class WorkspaceAgentTools implements AgentToolSet {
 
   listTools(): ToolDefinition[] {
     this.assertCurrent();
-    return [...definitions, ...(this.review?.listTools() ?? [])];
+    return [...definitions, ...(this.options.localCommands ? [localCommandDefinition] : []), ...(this.review?.listTools() ?? [])];
   }
 
   async callTool(name: string, raw: unknown, signal: AbortSignal): Promise<ToolResult> {
     this.assertCurrent();
     signal.throwIfAborted();
+    if (name === "RunLocalCommand" && this.options.localCommands) return this.runLocalCommand(this.options.localCommands, raw, signal);
     if (name !== "GetTerminalOutput" && name !== "GetWorkspaceDiff") {
       if (!this.review) throw new CodeReviewError("CODE_REVIEW_INVALID", "Unknown workspace tool.");
       return this.review.callTool(name, raw, signal);
@@ -113,5 +165,31 @@ export class WorkspaceAgentTools implements AgentToolSet {
       this.assertCurrent();
       return failure("WORKSPACE_TOOL_UNAVAILABLE", "The workspace tool request could not complete.");
     }
+  }
+
+  private async runLocalCommand(local: NonNullable<WorkspaceAgentToolOptions["localCommands"]>, raw: unknown, signal: AbortSignal): Promise<ToolResult> {
+    const parsed = LocalCommandInputSchema.safeParse(raw ?? {});
+    if (!parsed.success) return failure("INVALID_INPUT", parsed.error.issues[0]?.message ?? "Invalid RunLocalCommand input.");
+    let outcome: { result: LocalCommandResult; acknowledge(): Promise<void> };
+    try { outcome = await local.run(parsed.data, signal); }
+    catch (error) {
+      this.assertCurrent();
+      // Unknown is not an outcome: the command may still have run.
+      return failure("LOCAL_COMMAND_UNKNOWN", error instanceof Error && error.message ? error.message : "The local command's outcome is unknown.");
+    }
+    const { result } = outcome;
+    this.assertCurrent();
+    let text = formatLocalCommand(result);
+    if (text.length > LOCAL_COMMAND_LIMITS.inlineChars) {
+      const directory = join(local.checkout, ".context", "local-commands");
+      const path = join(directory, `${new Date().toISOString().replace(/[:.]/g, "-")}-${randomUUID().slice(0, 8)}.txt`);
+      await mkdir(directory, { recursive: true, mode: 0o700 });
+      await writeFile(path, text, { mode: 0o600, flag: "wx" });
+      const head = text.slice(0, text.indexOf("--- ") >= 0 ? text.indexOf("--- ") : 600).slice(0, 600);
+      text = `${head}Output is ${text.length} characters, saved to ${path}\n`;
+    }
+    // Retained here (inline or saved), so the control plane may erase its copy.
+    await outcome.acknowledge();
+    return { content: [{ type: "text", text }], ...(result.outcome === "completed" ? {} : { isError: true }) };
   }
 }

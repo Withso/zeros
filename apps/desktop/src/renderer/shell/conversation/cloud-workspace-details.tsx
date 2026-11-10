@@ -16,6 +16,8 @@ import { useWorkspaceStore } from "../../state/workspace-store";
 import { useCloudWorkspaceAccountAccess, useSignedInUserName } from "../../features/team/cloud-workspace-account-access";
 import { useWorkbenchAvailability } from "../../state/workbench-availability";
 import { useCloudWorkspaceResources } from "../../platform/cloud-workspace-resources";
+import { ConnectedMacs } from "./connected-macs";
+import { useWorkspaceMacs } from "./use-workspace-macs";
 import { WorkspaceIdentityLabel, WorkspaceIdentityTrigger, useWorkspaceDetailsOpen } from "./workspace-identity";
 
 /** With this desktop's engine connection, Running waits until agents can run. */
@@ -112,6 +114,7 @@ export function CloudWorkspaceDetails({ folder, name, title, workspace }: {
   const [changing, setChanging] = useState(false);
   const running = !!workspace && ["ready", "busy"].includes(workspace.status);
   const resources = useCloudWorkspaceResources(target && allowed ? target : null, shown && running);
+  const macs = useWorkspaceMacs(target && allowed ? target.workspaceId : null, shown);
   if (!target || !allowed) return <WorkspaceIdentityLabel name={name} title={title} placement="cloud" />;
   const failures: Record<LifecycleChange, string> = { wake: "Couldn't start cloud workspace", stop: "Couldn't stop cloud workspace", restart: "Couldn't restart cloud workspace" };
   const change = (operation: LifecycleChange) => {
@@ -128,6 +131,7 @@ export function CloudWorkspaceDetails({ folder, name, title, workspace }: {
           <CloudWorkspaceDetailsCard workspace={workspace} title={title} creatorName={creatorName} statusLabel={cloudStatusLabel(workspace.status, availability)}
             resources={running ? resources : null} changing={changing} onChange={change} />
         ) : <p className="text-fg2 text-xs">Loading workspace details…</p>}
+        {workspace && macs.macs && <ConnectedMacs macs={macs.macs} now={Date.now()} busyDeviceId={macs.busyDeviceId} onConnect={macs.connect} onDisconnect={macs.disconnect} />}
       </PopoverContent>
     </Popover>
   );

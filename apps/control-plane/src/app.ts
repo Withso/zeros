@@ -59,6 +59,7 @@ import { observeDatabaseTiming, tracingMiddleware } from "./tracing.js";
 import { cloudAgentCredentialKeys } from "./agent-credentials/agent-credentials.js";
 import { createCloudApiRoutes, type CloudApiDependencies } from "./cloud/api/routes.js";
 import { createCloudApiManagementRoutes } from "./cloud/api/management-routes.js";
+import { isLocalCommandResultPath } from "./cloud/local-commands/routes.js";
 
 export type CreateAppDependencies = {
   cloudApi?: CloudApiDependencies;
@@ -301,7 +302,9 @@ export function createApp(
         "x-zeros-client",
         "idempotency-key",
         "traceparent",
-
+        "x-zeros-device-id",
+        "x-zeros-device-registration",
+        "x-zeros-device-instance",
       ],
       maxAge: 86400,
     }),
@@ -358,7 +361,7 @@ export function createApp(
   const defaultBodyLimit = bodyLimit({ maxSize: 256 * 1024 });
   const feedbackBodyLimit = bodyLimit({ maxSize: 2 * 1024 * 1024 });
   app.use("/v1/*", async (c, next) => {
-    if (c.req.path === "/v1/feedback") {
+    if (c.req.path === "/v1/feedback" || (c.req.method === "POST" && isLocalCommandResultPath(c.req.path))) {
       await next();
       return;
     }

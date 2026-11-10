@@ -12,13 +12,14 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { withSystemTx, withUserTx, type Tx } from "./db.js";
 import { resetMigratedTestDatabase } from "./test-database.js";
 import { seedCredentialOwner } from "./agent-credentials/test-fixtures.js";
+import { CloudV2Store } from "./cloud/store.js";
 
 const url = process.env.TEST_DATABASE_URL, d = url ? describe : describe.skip;
 
 /** Every non-internal trigger on a table with a policy that admits a
  * non-system write, as of this suite's cases. */
 const COVERED_TRIGGERS: Record<string, readonly string[]> = {
-  organizations: ["organizations_personal_classification_immutable"],
+  organizations: ["organizations_personal_classification_immutable", "local_command_setting_changed"],
   users: ["cloud_actor_staff_revision", "staff_pro_benefit_sync"],
 };
 
@@ -70,6 +71,18 @@ d("triggers on user-writable tables with PostgreSQL", () => {
   });
 
   describe("user-context writes", () => {
+    it("organizations: local-command settings succeed when invoker RLS filters workspace cleanup", async () => {
+      const store = new CloudV2Store(pool);
+      const workspace = await store.createWorkspace({ id: randomUUID(), organizationId: fixture.organizationId,
+        creatorUserId: fixture.userId, name: "Fixture", repository: "example/project", branch: "work", baseBranch: "main", computerBuildId: null });
+      const revision = await store.loginRevision(workspace.id);
+      const changed = await asUser(fixture.userId, "UPDATE organizations SET local_commands_allowed=false WHERE id=$1 RETURNING local_commands_allowed", [fixture.organizationId]);
+      expect(changed.rowCount).toBe(1); expect(changed.rows[0].local_commands_allowed).toBe(false);
+      expect(await store.loginRevision(workspace.id)).toBe(revision);
+      await asSystem("UPDATE organizations SET local_commands_allowed=true WHERE id=$1", [fixture.organizationId]);
+      expect(await store.loginRevision(workspace.id)).not.toBe(revision);
+    });
+
     it("organization_members: add, change a role, leave", async () => {
       const invitee = await addUser("Invitee");
       await asUser(fixture.userId, "INSERT INTO organization_members(org_id,user_id,role) VALUES($1,$2,'member')", [fixture.organizationId, invitee]);

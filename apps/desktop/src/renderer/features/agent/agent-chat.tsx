@@ -1,5 +1,6 @@
 import { LocalLinksProvider } from "./local-links/provider";
 import { editChat } from "../../state/cloud-chat-edits";
+import { LocalCommandChatApprovals } from "./local-command-approvals";
 import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import { AGENT_NOTICE_ACTION, AgentNotice } from "./agent-notice";
 import { getFollowUpBehavior, type FollowUpBehavior } from "../settings/follow-up-behavior";
@@ -4574,6 +4575,8 @@ function AgentChatBody({
               cwd={session.cwd ?? chatThread?.folder ?? null}
             />
           )}
+          {/* A cloud agent's command for this Mac; main holds the decision. */}
+          <LocalCommandChatApprovals chatId={chatId} active={surfaceActive} />
           {/* Shared question card. Blocking asks resolve a parked turn;
             optional answers follow the ordinary prompt/steering path. */}
           {questionCardActive && pendingQuestion && (

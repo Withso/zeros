@@ -63,6 +63,14 @@ const commandTable: Record<string, CommandHandler> = {
   keep_awake_get: notImpl("keep_awake_get", 1),
   keep_awake_set: notImpl("keep_awake_set", 1),
   keep_awake_activity: notImpl("keep_awake_activity", 1),
+  local_commands_approvals: notImpl("local_commands_approvals", 1),
+  local_commands_decide: notImpl("local_commands_decide", 1),
+  local_commands_notify: notImpl("local_commands_notify", 1),
+  local_commands_always_get: notImpl("local_commands_always_get", 1),
+  local_commands_always_set: notImpl("local_commands_always_set", 1),
+  local_commands_device: notImpl("local_commands_device", 1),
+  local_commands_connect: notImpl("local_commands_connect", 1),
+  local_commands_disconnect: notImpl("local_commands_disconnect", 1),
 
   // ── Sidecar / engine lifecycle ────────────────────────────
   get_engine_port: notImpl("get_engine_port", 2),

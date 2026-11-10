@@ -55,6 +55,7 @@ import {
 } from "@zeros/protocol/computer-use-tools";
 import { registerIpcHandlers } from "./ipc/router";
 import { installKeepAwake } from "./keep-awake-runtime";
+import { installLocalCommands } from "./local-commands/install";
 import { registerIframeSessionCommands } from "./ipc/iframe-session";
 import { registerIframePickerCommands } from "./ipc/iframe-picker";
 import { registerBrowserFrameDevToolsCommand } from "./browser-frame-devtools";
@@ -1073,6 +1074,9 @@ app.whenReady().then(async () => {
   registerIpcHandlers();
   registerAllCommands();
   const keepAwake = installKeepAwake();
+  const localCommands = installLocalCommands();
+  // Running commands end with their process groups; the journal reports them as interrupted next start.
+  app.once("will-quit", () => { void localCommands.dispose(); });
   installDesignProtocol();
   installFileMediaProtocol();
 

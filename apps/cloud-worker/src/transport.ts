@@ -1,4 +1,5 @@
 import type { CloudEnvironmentReport, CloudRuntimeUpdateReply, CloudRuntimeUpdateRequest, CloudV2WorkerFrame, CloudV2WorkerTiming } from "@zeros/protocol/cloud-v2-relay";
+import type { LocalCommandInput, LocalCommandResult } from "@zeros/protocol/local-commands";
 import type { McpAuthorizationRequest } from "./mcp/gateway";
 import type { ReportGithubCheckout } from "./workspace/github-checkout";
 
@@ -20,6 +21,13 @@ export interface Transport {
   /** Durable explicit work has its own typed/idempotent HTTPS channel. */
   promptRequest?: PromptRequest;
   mcpAuthorization?: McpAuthorizationRequest;
+  /** local-commands-v1: one RunLocalCommand through the control plane to the
+   * requester's Mac. The control plane chooses the Mac; the worker only names the chat. */
+  localCommand?(request: { chatId: string; executionId: string; input: LocalCommandInput }, signal: AbortSignal): Promise<{ result: LocalCommandResult; acknowledge(): Promise<void> }>;
+  /** Before dispatching a legacy relay prompt or steer: a narrow secondary fence; never restores authority. */
+  retireLocalCommandSender?(request: { chatId: string; executionId: string }): Promise<void>;
+  /** Local commands awaiting their terminal result count as busy work. */
+  readonly localCommandsPending?: number;
   reportGithubCheckout?: ReportGithubCheckout;
   reportCheckoutFailure?: () => Promise<void>;
   reportEnvironment?: (report: CloudEnvironmentReport, signal?: AbortSignal) => Promise<void>;

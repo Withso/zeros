@@ -412,7 +412,17 @@ function clearCapturedSession(
   if (removed) notifySessionChanged();
 }
 
+const beforeSignOutListeners = new Set<() => Promise<void>>();
+/** Work that needs the still-valid session (such as unregistering this Mac's
+ * local command device) runs before the tokens are cleared, bounded. */
+export function onBeforeMainSignOut(listener: () => Promise<void>): () => void {
+  beforeSignOutListeners.add(listener);
+  return () => { beforeSignOutListeners.delete(listener); };
+}
+
 async function signOutWorkOS(scope: "current" | "all"): Promise<boolean> {
+  await Promise.race([Promise.allSettled([...beforeSignOutListeners].map(listener => listener())),
+    new Promise(resolve => setTimeout(resolve, 5_000))]);
   const rawAtStart = getSecret(TOKENS_KEY);
   const snapshot = parseStoredTokenSnapshot(rawAtStart);
   const session = await getValidSessionForMain().catch(() => null);

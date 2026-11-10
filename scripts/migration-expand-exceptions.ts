@@ -2,6 +2,36 @@ import { createHash } from "node:crypto";
 
 // Each reviewed migration lists its exact exempted statements by rule.
 const reviewed: Readonly<Record<string, Readonly<Record<string, readonly string[]>>>> = {
+  "0230_cloud_local_commands.sql": {
+    "privilege-tightening": [
+      "REVOKE ALL ON FUNCTION notify_local_command_request() FROM PUBLIC;",
+      "REVOKE ALL ON FUNCTION notify_connected_mac() FROM PUBLIC;",
+      "REVOKE ALL ON FUNCTION fence_local_command_sender() FROM PUBLIC;",
+      "REVOKE ALL ON FUNCTION erase_local_commands() FROM PUBLIC;",
+      "REVOKE ALL ON FUNCTION fence_local_command_device() FROM PUBLIC;",
+      "REVOKE ALL ON FUNCTION revoke_local_command_session() FROM PUBLIC;",
+      "REVOKE ALL ON FUNCTION change_local_command_setting() FROM PUBLIC;",
+    ],
+    "local-command-erasure": [`CREATE FUNCTION erase_local_commands() RETURNS trigger
+LANGUAGE plpgsql SECURITY INVOKER SET search_path = pg_catalog, public, pg_temp AS $$
+BEGIN
+  IF TG_TABLE_NAME IN ('cloud_v2_prompt_chats','cloud_v2_chats') THEN
+    DELETE FROM public.local_command_requests WHERE workspace_id=OLD.workspace_id AND chat_id=OLD.chat_id;
+    IF TG_OP='DELETE' THEN RETURN OLD; END IF;
+    RETURN NEW;
+  END IF;
+  IF NEW.state='deleted' THEN
+    DELETE FROM public.local_command_requests WHERE workspace_id=NEW.id;
+    DELETE FROM public.cloud_v2_connected_macs WHERE workspace_id=NEW.id;
+  ELSE
+    UPDATE public.local_command_requests SET phase='terminal',outcome='cancelled',terminal_at=clock_timestamp(),updated_at=clock_timestamp(),
+      reserved_output_bytes=0,result_summary=jsonb_strip_nulls(jsonb_build_object('outcome','cancelled','mac',target_name))
+      WHERE workspace_id=NEW.id AND phase IN ('pending','claimed');
+  END IF;
+  RETURN NEW;
+END;
+$$;`],
+  },
   "0226_cloud_api.sql": {
     "widen-check": ["ALTER TABLE cloud_v2_tokens DROP CONSTRAINT cloud_v2_tokens_kind_check;"],
     "credential-erasure": [`CREATE FUNCTION fence_cloud_api_tokens() RETURNS trigger

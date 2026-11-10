@@ -6,6 +6,8 @@ import { HttpError } from "../authz.js";
 import { withSystemTx, type Tx } from "../db.js";
 import { securityStreamAuthority } from "../security-events.js";
 import { hashCloudV2Token } from "./tokens.js";
+import { CloudLocalDevices } from "./local-commands/devices.js";
+import type { LocalDeviceBinding } from "./local-commands/contract.js";
 import { CLOUD_V2_LIVE_ACCESS } from "./workspace-access.js";
 import { CLOUD_V2_MAX_PROMPT_BYTES, CloudV2PromptSchema, CloudV2SessionNameSchema, type CloudV2Prompt, type CloudV2PromptReceipt,
   type CloudV2PromptPullReply, type CloudV2PromptState, type CloudV2PromptStatus } from "./prompt-contract.js";
@@ -39,7 +41,10 @@ const notify = (tx: Tx, id: string) => tx.query("SELECT pg_notify('zeros_cloud_v
  * original receipt/hash survives terminal payload compaction: retries never
  * become new executions merely because a retention window ended. */
 export class CloudV2PromptOutbox {
-  constructor(private readonly pool: pg.Pool, private readonly limits: Limits = CLOUD_V2_PROMPT_LIMITS) {}
+  private readonly localDevices: CloudLocalDevices;
+  constructor(private readonly pool: pg.Pool, private readonly limits: Limits = CLOUD_V2_PROMPT_LIMITS) {
+    this.localDevices = new CloudLocalDevices(pool);
+  }
 
   private async owned(tx: Tx, id: string, userId: string, lock: boolean, messageId?: string): Promise<Workspace> {
     const { rows } = await tx.query<Workspace>(`SELECT id, repository, state, archived_at, access_epoch::text, worker_boot_id
@@ -111,7 +116,7 @@ export class CloudV2PromptOutbox {
 
   async enqueue(id: string, userId: string, raw: CloudV2Prompt, authority?: AuthedUser,
     options?: { tx?: Tx | undefined; requestHash?: string; apiSession?: boolean; sessionName?: string | undefined;
-      createdBySessionId?: string | null | undefined }): Promise<{ receipt: CloudV2PromptReceipt; replay: boolean; createdBySessionId: string | null }> {
+      createdBySessionId?: string | null | undefined; device?: LocalDeviceBinding | undefined }): Promise<{ receipt: CloudV2PromptReceipt; replay: boolean; createdBySessionId: string | null }> {
     const parsed = CloudV2PromptSchema.safeParse(raw);
     if (!parsed.success) throw new HttpError(400, "invalid_request", "Invalid cloud prompt");
     const named = CloudV2SessionNameSchema.transform(value => value.trim()).optional().safeParse(options?.sessionName);
@@ -135,7 +140,10 @@ export class CloudV2PromptOutbox {
       if (authority?.authentication && !await securityStreamAuthority(tx, authority))
         throw new HttpError(401, "session_revoked", "Authentication is no longer current");
       const previous = workspace.previous;
+      if (options?.device && (!authority || authority.id !== userId))
+        throw new HttpError(401, "unauthorized", "A signed-in desktop session is required");
       if (previous) {
+        if (options?.device) await this.localDevices.verify(tx, authority!, options.device);
         if (previous.payload_hash !== hash) throw conflict();
         return { receipt: previous.receipt, replay: true, createdBySessionId: previous.created_by_session_id };
       }
@@ -164,12 +172,15 @@ export class CloudV2PromptOutbox {
       const chatRow = JSON.stringify({ id: payload.chatId, folder: `/home/user/${workspace.repository}`,
           agentId: payload.agentId, agentName: { codex: "Codex", claude: "Claude", cursor: "Cursor" }[payload.agentId],
           title: named.data ?? "", model: payload.model ?? null, effort: payload.effort ?? "", createdAt: payload.startedAt, updatedAt: payload.startedAt });
+      if (options?.device) await this.localDevices.connectMessage(tx, authority!, id, options.device);
       // One explicit wake belongs to this committed send, not to its retries.
       // A send racing stopping remains pending until the stop has completed.
       await tx.query(`WITH inserted AS (
-        INSERT INTO cloud_v2_prompt_outbox(workspace_id,user_message_id,chat_id,creator_user_id,sequence,epoch,access_epoch,payload_hash,payload,payload_bytes,receipt,wake_after_stop,session_name,created_by_session_id)
+        INSERT INTO cloud_v2_prompt_outbox(workspace_id,user_message_id,chat_id,creator_user_id,sequence,epoch,access_epoch,payload_hash,payload,payload_bytes,receipt,wake_after_stop,session_name,created_by_session_id,
+          sender_device_id,sender_registration_id,sender_binding_generation)
         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,
-          CASE WHEN NOT EXISTS (SELECT 1 FROM cloud_v2_chats WHERE workspace_id=$1 AND chat_id=$3) THEN $14 ELSE NULL END, $15) RETURNING workspace_id),
+          CASE WHEN NOT EXISTS (SELECT 1 FROM cloud_v2_chats WHERE workspace_id=$1 AND chat_id=$3) THEN $14 ELSE NULL END, $15,
+          $16,$17,CASE WHEN $16::uuid IS NOT NULL THEN (SELECT local_command_generation FROM cloud_v2_prompt_chats WHERE workspace_id=$1 AND chat_id=$3) END) RETURNING workspace_id),
       advanced AS (UPDATE cloud_v2_prompt_chats SET next_sequence=$5 WHERE workspace_id=$1 AND chat_id=$3
         AND EXISTS (SELECT 1 FROM inserted) RETURNING workspace_id),
       discovered AS (INSERT INTO cloud_v2_chats(workspace_id,chat_id,row,created_by_session_id)
@@ -184,10 +195,25 @@ export class CloudV2PromptOutbox {
         AND EXISTS (SELECT 1 FROM advanced) RETURNING id)
       SELECT pg_notify('zeros_cloud_v2_prompts', id::text) FROM woke`,
       [id, payload.userMessageId, payload.chatId, userId, sequence, chat.epoch, workspace.access_epoch, hash, encoded, bytes,
-        JSON.stringify(receipt), workspace.state === "stopping", chatRow, named.data ?? null, options?.createdBySessionId ?? null]);
+        JSON.stringify(receipt), workspace.state === "stopping", chatRow, named.data ?? null, options?.createdBySessionId ?? null,
+        options?.device?.deviceId ?? null, options?.device?.registrationId ?? null]);
       return { receipt, replay: false, createdBySessionId: options?.createdBySessionId ?? null };
     };
     return options?.tx ? write(options.tx) : withSystemTx(this.pool, write);
+  }
+
+  async retireLocalSender(id: string, userId: string, accessEpoch: string, sessionId: string | null): Promise<void> {
+    await withSystemTx(this.pool, async tx => {
+      const workspace = await this.owned(tx, id, userId, true);
+      if (workspace.access_epoch !== accessEpoch || !["creating","starting","running"].includes(workspace.state) || workspace.archived_at)
+        throw new HttpError(401, "session_revoked", "Authentication is no longer current");
+      if (sessionId && !(await tx.query(`SELECT 1 FROM auth_sessions WHERE provider='workos' AND provider_session_id=$1 AND user_id=$2
+        AND status='active' AND revoked_at IS NULL AND (provider_session_expires_at IS NULL OR provider_session_expires_at>clock_timestamp())`, [sessionId, userId])).rowCount)
+        throw new HttpError(401, "session_revoked", "Authentication is no longer current");
+      // Legacy frames identify a native execution, whose chat mapping lives
+      // only on the worker. Retiring every binding fails closed across replicas.
+      await tx.query("UPDATE cloud_v2_prompt_chats SET local_command_generation=local_command_generation+1 WHERE workspace_id=$1", [id]);
+    });
   }
 
   async list(id: string, userId: string, chatId: string, after = "0", limit = 100, includePayload = true): Promise<{ epoch: string; items: CloudV2PromptStatus[]; nextAfter: string | null }> {

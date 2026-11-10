@@ -790,6 +790,7 @@ export class CloudV2Store {
        WHERE state = 'running' AND coalesce(active_at, updated_at) < $1
          AND NOT EXISTS (SELECT 1 FROM cloud_v2_prompt_outbox p WHERE p.workspace_id=w.id
            AND p.state IN ('queued','inboxed','dispatching','accepted') AND p.access_epoch=w.access_epoch)
+         AND NOT EXISTS (SELECT 1 FROM local_command_requests r WHERE r.workspace_id=w.id AND r.phase IN ('pending','claimed'))
        ORDER BY coalesce(active_at, updated_at) LIMIT $2`,
       [before, limit],
     ));
@@ -798,11 +799,15 @@ export class CloudV2Store {
 
   /** Recheck at the mutation, so a send between idle discovery and Stop wins. */
   async stopIdle(id: string, before: Date): Promise<void> {
-    await withSystemTx(this.pool, tx => tx.query(`UPDATE cloud_v2_workspaces w SET state='stopping',attempts=0,stop_generation=stop_generation+1,
+    await withSystemTx(this.pool, async tx => {
+      await tx.query("SELECT id FROM cloud_v2_workspaces WHERE id=$1 FOR UPDATE", [id]);
+      await tx.query(`UPDATE cloud_v2_workspaces w SET state='stopping',attempts=0,stop_generation=stop_generation+1,
       next_attempt_at=NULL,updated_at=clock_timestamp()
       WHERE id=$1 AND state='running' AND coalesce(active_at,updated_at)<$2
         AND NOT EXISTS (SELECT 1 FROM cloud_v2_prompt_outbox p WHERE p.workspace_id=w.id
-          AND p.state IN ('queued','inboxed','dispatching','accepted') AND p.access_epoch=w.access_epoch)`, [id, before]));
+          AND p.state IN ('queued','inboxed','dispatching','accepted') AND p.access_epoch=w.access_epoch)
+        AND NOT EXISTS (SELECT 1 FROM local_command_requests r WHERE r.workspace_id=w.id AND r.phase IN ('pending','claimed'))`, [id, before]);
+    });
   }
 
   /** A one-use app connect ticket, or a worker model-proxy token. */

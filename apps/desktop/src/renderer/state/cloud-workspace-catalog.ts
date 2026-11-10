@@ -156,6 +156,10 @@ export function cloudWorkspaceDocument(
       row.organizationId === target.organizationId,
   );
 }
+/** A loaded workspace by its id alone (ids are unique across organizations). */
+export function cloudWorkspaceDocumentById(workspaceId: string): CloudWorkspaceDocument | undefined {
+  return documents.find((row) => row.id === workspaceId);
+}
 /** A loaded workspace by its permanent number in its organization. */
 export function cloudWorkspaceDocumentByNumber(
   organizationId: string,

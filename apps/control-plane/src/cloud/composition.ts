@@ -43,6 +43,10 @@ import { RuntimeAdoption } from "./runtime-adoption.js";
 import { CloudApiCredentials } from "./api/credentials.js";
 import { CloudWorkspaceApiTokens } from "./api/workspace-tokens.js";
 import { CloudApiService } from "./api/service.js";
+import { CloudLocalDevices } from "./local-commands/devices.js";
+import { CloudLocalCommandSignals } from "./local-commands/signals.js";
+import { CloudLocalCommands } from "./local-commands/requests.js";
+import { startLocalCommandMaintenance } from "./local-commands/maintenance.js";
 
 const PROXY_TOKEN_TTL_MS = 24 * 60 * 60_000;
 
@@ -95,6 +99,8 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     apiKey: v2.boat.apiKey, timeoutMs: 120_000, ...(v2.boat.billingOrg ? { billingOrg: v2.boat.billingOrg } : {}),
   }));
   const apiCredentials = new CloudApiCredentials(pool), apiTokens = new CloudWorkspaceApiTokens(pool, keys);
+  const localDevices = new CloudLocalDevices(pool), localCommandSignals = new CloudLocalCommandSignals(listenerPool);
+  const localCommands = new CloudLocalCommands(pool,keys,localDevices);
   const apiConfiguration = async (workspaceId: string) => {
     const token = await apiTokens.token(workspaceId);
     return token ? { url: `${v2.apiUrl}/api/v0`, token } : undefined;
@@ -187,12 +193,15 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     ...(runtimeCanary ? { runtimeCanary, runtimeCanaryStatus: (userId: string, grantId: string) => readRuntimeCanary(pool, runtimeCanary.policy, userId, grantId) } : {}),
     bridgeBaseUrl: v2.realtimeUrl,
     promptOutbox: v2.promptOutbox === true,
+    localDevices: { devices: localDevices, signals: localCommandSignals, requests: localCommands },
   };
   const proxy: CloudV2ProxyDeps = { store, logins, authorizeSource, continueSource, ...(keys ? { refreshCodex: createCloudV2CodexRefresh(pool, keys) } : {}) };
   const api = { credentials: apiCredentials,
     service: new CloudApiService({ store, routes, credentials: apiCredentials, appBaseUrl: new URL(config.inviteLinkBase).origin }) };
   const connections = roles.relay || roles.lifecycle ? new CloudV2Relay({
     apiConfiguration,
+    localCommandsEnabled: id => localCommands.enabled(id),
+    retireLocalSender: (id, userId, epoch, sessionId) => store.prompts.retireLocalSender(id, userId, epoch, sessionId),
     store, timing, authorizeSource, continueSource, ...(securityEvents ? { securityEvents } : {}),
     runtimeAdmission: runtimeHandoffs,
     config: async (workspace, mode = "admission", proof) => {
@@ -221,6 +230,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   const promptSignals = new CloudV2PromptSignals();
   const workers: CloudV2WorkerRouteDeps = { store, timing, logger: console, authorizeSource, continueSource, config: workerConfig, githubToken, runtimeSha256: v2.runtime.sha256,
     apiConfiguration,
+    localCommands: { requests: localCommands, signals: localCommandSignals },
     runtimeUpdates, runtimeHandoffs,
     runtimeSha256ForWorkspace: async workspace => (await runtimeForWorkspace(workspace)).sha256,
     environmentReport: (token, bootId, value) => environments.report(token, bootId, value),
@@ -323,5 +333,6 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     onNotification: () => lifecycle.wake(),
   }) : null;
   void lifecycleChanges?.start().catch(() => {});
-  return { store, compute, routes, proxy, workers, api, relay, connections, lifecycle, runtimeUpdates, loginChanges, promptChanges, lifecycleChanges, promptSignals };
+  return { store, compute, routes, proxy, workers, api, relay, connections, lifecycle, runtimeUpdates, loginChanges, promptChanges, lifecycleChanges, promptSignals, localCommandSignals,
+    startLocalCommands: () => roles.lifecycle ? startLocalCommandMaintenance(localCommands,localCommandSignals) : async () => {} };
 }
