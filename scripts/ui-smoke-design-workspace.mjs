@@ -4185,13 +4185,41 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
     ),
   );
   check(
-    "Escape restores authored runtime text",
+    "Escape keeps the typed runtime text, like blur",
     await waitFor(
       async () =>
         (await runtimeHeading.textContent().catch(() => "")) ===
-        "Make the next move unmistakable.",
-      "design-inline-text-restore",
+        "Make the next move unmistakable.!",
+      "design-inline-text-escape-commit",
     ),
+  );
+  // Escape keeps typed text. Put the authored text back through the same
+  // editor, so the rest of this scenario starts from the text it expects.
+  const removeTypedInlineText = async (overlay, runtime, text, label) => {
+    const box = await overlay.boundingBox();
+    if (!box) throw new Error(`${label}: overlay has no bounds`);
+    await page.mouse.dblclick(box.x + box.width / 2, box.y + box.height / 2);
+    await inlineText.waitFor({ state: "visible" });
+    // Replace the whole draft: a committed multiline edit does not come back
+    // as the same character count that was typed.
+    await inlineText.evaluate((editor) => {
+      const range = document.createRange();
+      range.selectNodeContents(editor);
+      const selection = window.getSelection();
+      selection?.removeAllRanges();
+      selection?.addRange(range);
+    });
+    await page.keyboard.insertText(text);
+    await page.keyboard.press("ControlOrMeta+Enter");
+    return waitFor(async () => {
+      if (await inlineText.isVisible().catch(() => false)) return false;
+      return (await runtime.textContent().catch(() => "")) === text;
+    }, label);
+  };
+  check(
+    "retyping the authored text and committing restores the runtime text",
+    await removeTypedInlineText(inlineHeadingOverlay, runtimeHeading,
+      "Make the next move unmistakable.", "design-inline-text-restore"),
   );
   check(
     "escaping inline text returns to the Select tool",
@@ -4534,11 +4562,17 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
   );
   await page.keyboard.press("Escape");
   check(
-    "Escape after multiline editing restores the exact committed source text",
+    "Escape after multiline editing keeps every typed and pasted line",
     await waitFor(async () => {
       if (await inlineText.isVisible().catch(() => false)) return false;
-      return (await runtimeHeading.textContent()) === committedHeading;
-    }, "design-inline-text-multiline-cancel"),
+      const text = (await runtimeHeading.textContent().catch(() => "")) ?? "";
+      return text.startsWith(`${committedHeading} again pasted`) && text.endsWith("next line");
+    }, "design-inline-text-multiline-escape-commit"),
+  );
+  check(
+    "retyping the committed text after a multiline edit restores the exact source text",
+    await removeTypedInlineText(inlineHeadingOverlay, runtimeHeading,
+      committedHeading, "design-inline-text-multiline-cancel"),
   );
 
   const imeHeadingBox = await inlineHeadingOverlay.boundingBox();
@@ -4645,11 +4679,16 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
     "design-inline-text-intrinsic-cancel",
   );
   check(
-    "cancelling intrinsic-width text restores its exact authored line",
+    "Escape keeps intrinsic-width text on its one typed line",
     await waitFor(
-      async () => (await runtimeAction.textContent()) === actionTextBeforeEdit,
-      "design-inline-text-intrinsic-cancel-restored",
+      async () => (await runtimeAction.textContent().catch(() => "")) === `${actionTextBeforeEdit}${actionSuffix}`,
+      "design-inline-text-intrinsic-escape-commit",
     ),
+  );
+  check(
+    "retyping the authored line restores intrinsic-width text exactly",
+    await removeTypedInlineText(actionOverlay, runtimeAction,
+      actionTextBeforeEdit, "design-inline-text-intrinsic-cancel-restored"),
   );
 
   await page.getByRole("button", { name: "Text tool" }).click();
