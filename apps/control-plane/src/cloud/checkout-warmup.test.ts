@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, utimes, writeFile } from "node:f
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it } from "vitest";
-import { CHECKOUT_WARMUP_SCRIPT } from "./lifecycle.js";
+import { CHECKOUT_WARMUP_SCRIPT, checkoutWarmupCommand } from "./lifecycle.js";
 
 // The warm-up runs beside the worker's own checkout, so it must never write the
 // index, a submodule's index or anything else, nor run an fsmonitor command.
@@ -13,6 +13,14 @@ afterEach(async () => { for (const directory of directories.splice(0)) await rm(
 const temporary = async (prefix: string) => { const directory = await mkdtemp(join(tmpdir(), prefix)); directories.push(directory); return directory; };
 const identity = { GIT_AUTHOR_NAME: "Fixture", GIT_AUTHOR_EMAIL: "fixture@example.test", GIT_COMMITTER_NAME: "Fixture", GIT_COMMITTER_EMAIL: "fixture@example.test" };
 const warm = (cwd: string, env: NodeJS.ProcessEnv) => execFileSync("sh", ["-c", CHECKOUT_WARMUP_SCRIPT], { cwd, env, encoding: "utf8" });
+
+it("launches in a background group with redirected streams and a foreground acknowledgement", () => {
+  const command = checkoutWarmupCommand("/home/user/owner/repo")!;
+  expect(command).toMatch(/^cd -- '\/home\/user\/owner\/repo' && \{ setsid nohup sh -c '/);
+  expect(command).toContain(CHECKOUT_WARMUP_SCRIPT);
+  expect(command).toMatch(/' >\/dev\/null 2>&1 <\/dev\/null & \} ; echo started$/);
+  expect(execFileSync("sh", ["-n", "-c", command], { encoding: "utf8" })).toBe("");
+});
 
 it("reads a restored checkout without changing its branch, index or files", async () => {
   const repository = await temporary("zeros-warmup-restored-"), env = { ...process.env, ...identity };

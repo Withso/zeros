@@ -935,12 +935,6 @@ describe("cloud v2 lifecycle", () => {
     expect(order[warm]!).toBeGreaterThan(order[runtime]!);
     expect(order[warm]!).toBeLessThan(order[token]!);
     expect(calls[warm]![1]).toContain("'/home/user/o/r'");
-    // A warm-up still running never holds the worker back.
-    const held = setup([workspace("creating")], { checkout: true });
-    vi.mocked(held.compute.exec).mockImplementation(async (_id: string, command: string) =>
-      command.includes("ls-tree") ? new Promise(() => {}) : { exitCode: 0, stdout: command.includes("runtime-changed") ? "" : "", timedOut: false });
-    await held.lifecycle.tick();
-    expect(vi.mocked(held.compute.exec).mock.calls.some(([, command]) => command.includes("worker-token"))).toBe(true);
     for (const [name, options] of [["stock", { stock: true }], ["hydrated", {}]] as const) {
       const other = setup([workspace("creating")], options);
       await other.lifecycle.tick();
@@ -951,11 +945,49 @@ describe("cloud v2 lifecycle", () => {
     expect(vi.mocked(woken.compute.exec).mock.calls.some(([, command]) => command.includes("ls-tree"))).toBe(false);
   });
 
+  it("finishes a create and a concurrent wake while the checkout warm-up launch is hung", async () => {
+    const waking = workspace("starting", { id: "7f2b7c1e-3b0a-4f7e-9d43-8a0b2b9c6d11", boatSandboxId: "bx_wake1" });
+    const f = setup([workspace("creating"), waking], { checkout: true });
+    let release!: () => void, launchReturned = false, finished = false;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    vi.mocked(f.compute.exec).mockImplementation(async (_id, command) => {
+      if (command.includes("ls-tree")) { await held; launchReturned = true; }
+      return { exitCode: 0, stdout: "", timedOut: false };
+    });
+    const tick = f.lifecycle.tick().then(() => { finished = true; });
+    try {
+      await vi.waitFor(() => expect(finished).toBe(true));
+      expect(vmCommand(f, "ls-tree")).toBeDefined();
+      expect(launchReturned).toBe(false);
+      for (const sandbox of ["bx_new1", "bx_wake1"])
+        expect(f.compute.exec).toHaveBeenCalledWith(sandbox, expect.stringContaining(CLOUD_V2_WORKER_TOKEN_PATH), expect.any(Number));
+      expect(f.store.defer).toHaveBeenCalledWith(WS, "creating", expect.any(Number));
+      expect(f.store.defer).toHaveBeenCalledWith(waking.id, "starting", expect.any(Number));
+      expect(f.store.transition).not.toHaveBeenCalled();
+    } finally { release(); await tick; }
+  });
+
+  it.each(["rejects", "fails", "times out"])("finishes a create when the checkout warm-up launch %s", async failure => {
+    const f = setup([workspace("creating")], { checkout: true });
+    vi.mocked(f.compute.exec).mockImplementation(async (_id, command) => {
+      if (command.includes("ls-tree")) {
+        if (failure === "rejects") throw new Error("warm-up launch unavailable");
+        return { exitCode: 1, stdout: "", timedOut: failure === "times out" };
+      }
+      return { exitCode: 0, stdout: "", timedOut: false };
+    });
+    await f.lifecycle.tick();
+    expect(vmCommand(f, "ls-tree")).toBeDefined();
+    expect(vmCommand(f, CLOUD_V2_WORKER_TOKEN_PATH)).toBeDefined();
+    expect(f.store.defer).toHaveBeenCalledWith(WS, "creating", expect.any(Number));
+    expect(f.store.transition).not.toHaveBeenCalled();
+  });
+
   it("warms read-only and detached, and never for an unusual checkout path", () => {
     const command = checkoutWarmupCommand("/home/user/Withso/.github")!;
     for (const part of ["GIT_OPTIONAL_LOCKS=0", "core.fsmonitor=false", "core.hooksPath=/dev/null", "--ignore-submodules",
       "core.checkStat=minimal", "core.trustctime=false", "setsid", "nohup", "timeout 60"]) expect(command, part).toContain(part);
-    expect(command).toMatch(/&\s*$/);
+    expect(command).toMatch(/echo started$/);
     for (const path of ["/etc/passwd", "/home/user/../root", "/home/user/o/..", "/home/user/a b/c", "/home/user/o", "/home/user/o/r/s"])
       expect(checkoutWarmupCommand(path), path).toBeNull();
   });

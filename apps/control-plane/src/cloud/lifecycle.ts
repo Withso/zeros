@@ -170,7 +170,7 @@ const READ_ONLY_GIT = "GIT_OPTIONAL_LOCKS=0 timeout 60 git -c core.fsmonitor=fal
  * cannot collide with the worker's own checkout. Null for an unusual path. */
 export function checkoutWarmupCommand(checkoutPath: string): string | null {
   if (!CHECKOUT_PATH.test(checkoutPath)) return null;
-  return `cd -- '${checkoutPath}' && setsid nohup sh -c '${CHECKOUT_WARMUP_SCRIPT}' >/dev/null 2>&1 </dev/null &`;
+  return `cd -- '${checkoutPath}' && { setsid nohup sh -c '${CHECKOUT_WARMUP_SCRIPT}' >/dev/null 2>&1 </dev/null & } ; echo started`;
 }
 /** Run in the checkout. Compared by mtime and size alone, restored files stay
  * clean, so `diff-files --quiet` visits every file instead of the first; on
@@ -443,8 +443,8 @@ export class CloudV2Lifecycle {
         const routed = this.measure(workspace, "protected_route", () => this.host(workspace, sandboxId));
         routed.catch(() => {});
         await this.measure(workspace, "runtime_install", () => this.ensureRuntime(sandboxId, boot.runtime), runtimeChanged => ({ runtimeChanged }));
-        // Never awaited: Boat's exec returns only when the warm-up finishes, and
-        // the worker must not wait for it. Its failure never fails the create.
+        // Boat exec waited ~6 s for a 6 s child with trailing "&"; braces + echo returned in ~120 ms.
+        // Still unawaited so a slow or failed launch cannot hold up worker startup.
         const warmup = image.checkout ? checkoutWarmupCommand(`${CLOUD_V2_HOME}/${workspace.repository}`) : null;
         if (warmup) void this.deps.compute.exec(sandboxId, warmup, 30).catch(() => undefined);
         if (image.prune.length || !image.from) await this.measure(workspace, "image_prepare", () => this.prepareImage(sandboxId, image));
