@@ -205,6 +205,8 @@ import {
   clearDesignLivePreview,
   designLivePreviewValue,
   publishDesignGestureLivePreview,
+  publishDesignFrameGeometryLive,
+  clearDesignFrameGeometryLive,
 } from "./state/design-live-preview";
 import { publishDesignMotionPlayhead } from "./state/design-motion-playhead";
 import { commitDesignLayoutOwnerStyles } from "./state/design-layout-owner-commit";
@@ -2225,53 +2227,21 @@ export const DesignCanvas = React.memo(function DesignCanvas({
     [workspaceId],
   );
 
-  const cancelInlineTextEditing = useCallback(
-    (edit: InlineTextEdit) => {
-      // Escape cancels a draft, not a transaction that already started. Keep
-      // its glyph owner through the displayed-buffer handoff. The guard also
-      // covers Escape arriving before React publishes the committing state.
-      const key = `${edit.frame ?? "canvas"}\u0000${edit.nodeId}\u0000${edit.sourceVersion ?? "draft"}`;
-      if (edit.status !== "editing" || textCommitGuardRef.current.activeKey === key) return;
-      cancelInlineTextCommit(textCommitGuardRef.current, edit);
-      if (inlineTextPreviewRef.current.pending?.edit.id === edit.id) {
-        inlineTextPreviewRef.current.pending = null;
-      }
-      if (workspaceId && edit.kind === "existing") {
-        void clearDesignNodeTextPreviewTransient({
-          workspaceId,
-          frame: edit.frame,
-          sourceVersion: edit.sourceVersion,
-          runtime: edit.runtime,
-          nodeId: edit.nodeId,
-        }).catch(() => {});
-      }
-      if (workspaceId && edit.kind === "new") {
-        const store = useDesignWorkspaceUiStore.getState();
-        if (edit.previousFrame) {
-          store.setSelection(
-            workspaceId,
-            edit.previousFrame,
-            edit.previousNodeId,
-            edit.previousNodeIds,
-            { owner: canvasPageOwner },
-          );
-        } else {
-          store.setSelectedFrame(workspaceId, null, canvasPageOwner);
-        }
-      }
-      setInlineTextEdit((current) =>
-        current?.id === edit.id ? null : current,
-      );
+  const finishInlineTextEditing = useCallback(
+    (edit: InlineTextEdit, measured: { width: number; height: number }) => {
+      // Escape keeps what was typed: it ends the edit through the same commit
+      // as blur and Cmd/Ctrl+Enter, then the canvas takes the next shortcut.
+      void commitInlineText(edit, measured);
       activateTool("select");
       window.requestAnimationFrame(() => {
         // A rapid double-click can already have opened a new editor. The
-        // cancelled edit must not steal its focus and trigger an immediate blur.
-        if (!inlineTextEditRef.current) {
+        // finished edit must not steal its focus and trigger an immediate blur.
+        if (!inlineTextEditRef.current || inlineTextEditRef.current.status !== "editing") {
           viewportRef.current?.focus({ preventScroll: true });
         }
       });
     },
-    [activateTool, workspaceId, canvasPageOwner],
+    [activateTool, commitInlineText],
   );
 
   // Created and edited text settles only when the exact committed document is
@@ -3476,6 +3446,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         preview.geometry = latest;
         frameGeometryPreviewsRef.current.set(previewKey, preview);
         paintFrameGeometry(element, latest);
+        publishDesignFrameGeometryLive(workspaceId, frame.file, latest);
         if (mode !== "move") {
           previewRootSizing(latest);
           paintRootGeometry(latest);
@@ -3638,9 +3609,12 @@ export const DesignCanvas = React.memo(function DesignCanvas({
           if (frameGeometryPreviewsRef.current.get(previewKey) !== preview)
             return;
           frameGeometryPreviewsRef.current.delete(previewKey);
+          clearDesignFrameGeometryLive(workspaceId, frame.file);
           if (ownerIsCurrent() && element.isConnected)
             paintFrameGeometry(element, geometry);
         };
+        // The release position shows at once, ahead of the throttled gesture.
+        publishDesignFrameGeometryLive(workspaceId, frame.file, latest, { settle: true });
         completed = true;
         preview.commit = persist();
         // The destination stays live until the nest that needed it settles.
@@ -3673,6 +3647,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
           if (ownerIsCurrent() && previousPreview && !previousPreview.settled)
             frameGeometryPreviewsRef.current.set(previewKey, previousPreview);
           else frameGeometryPreviewsRef.current.delete(previewKey);
+          clearDesignFrameGeometryLive(workspaceId, frame.file);
           // The label DOM can survive a directory replacement. React has
           // already painted the new owner; the old rollback must not touch it.
           if (ownerIsCurrent()) {
@@ -6303,7 +6278,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         !event.metaKey &&
         !event.ctrlKey &&
         !event.altKey &&
-        event.key.toLowerCase() === "a" &&
+        event.key.toLowerCase() === "m" &&
         motionTargetSelected
       ) {
         event.preventDefault();
@@ -8514,7 +8489,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                     onMounted={suppressInlineTextGlyphs}
                     onDraft={previewInlineTextDraft}
                     onCommit={commitInlineText}
-                    onCancel={cancelInlineTextEditing}
+                    onEscape={finishInlineTextEditing}
                   />
                 ) : null}
 
@@ -8646,7 +8621,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
               onMounted={suppressInlineTextGlyphs}
               onDraft={previewInlineTextDraft}
               onCommit={commitInlineText}
-              onCancel={cancelInlineTextEditing}
+              onEscape={finishInlineTextEditing}
             />
           ) : null}
           <div
@@ -8890,11 +8865,11 @@ export const DesignCanvas = React.memo(function DesignCanvas({
             <DesignToolbarButton
               label="Toggle motion timeline"
               tooltip="Motion"
-              shortcut="⇧A"
+              shortcut="⇧M"
               tooltipSide="right"
               pressed={motionTimelineOpen}
               disabled={!workspaceId || !selectedFrame || !motionTargetSelected}
-              aria-keyshortcuts="Shift+A"
+              aria-keyshortcuts="Shift+M"
               onClick={() => onMotionTimelineOpenChange(!motionTimelineOpen)}
             >
               <Diamond />

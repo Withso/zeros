@@ -685,7 +685,7 @@ export function DesignStyleEditor({
           <InspectorIconButton
             label="Open motion timeline"
             tooltip="Motion"
-            shortcut="⇧A"
+            shortcut="⇧M"
             pressed={motionTimelineOpen}
             disabled={disabled}
             onClick={() => onOpenMotionTimeline()}

@@ -887,10 +887,48 @@ describe("design workspace interaction wiring", () => {
     expect(source).toContain("sessionOwnerKey={motionOverlayOwner}");
   });
 
-  it("returns the one-shot text tool to Select after entering or cancelling inline editing", () => {
+  it("returns the one-shot text tool to Select after entering or finishing inline editing", () => {
     expect(source).toContain("finishInlineTextTool");
-    expect(source).toContain("cancelInlineTextEditing");
+    expect(source).toContain("finishInlineTextEditing");
     expect(source).toContain("event.detail > 1");
+  });
+
+  it("adds auto layout with Shift+A and moves the motion timeline to Shift+M", () => {
+    const inspector = readSection("design-inspector.tsx");
+    // Never while typing: a capital A belongs to the focused field.
+    expect(inspector).toContain(`if (!editableTarget && event.shiftKey && !event.metaKey && !event.ctrlKey && !event.altKey &&
+        event.key.toLowerCase() === "a") {`);
+    expect(inspector).toContain('layoutShortcutRef.current({ type: "auto-layout", flow: "column", infer: true })');
+    expect(inspector).toContain("layoutShortcutRef.current = commitLayoutAction;");
+    // Only where there is no auto layout yet, in the children's own direction.
+    expect(inspector).toContain("designInferredAutoLayoutFlow(liveChildren)");
+    expect(source).toContain('aria-keyshortcuts="Shift+M"');
+    expect(source).not.toContain('aria-keyshortcuts="Shift+A"');
+    expect(source).toContain(`event.key.toLowerCase() === "m" &&
+        motionTargetSelected`);
+  });
+
+  it("shows a frame's position and size in the inspector while it is dragged or resized", () => {
+    const inspector = readSection("design-inspector.tsx");
+    // The gesture publishes each painted geometry; the saved snapshot takes
+    // over when the gesture settles or is cancelled.
+    expect(source).toContain("publishDesignFrameGeometryLive(workspaceId, frame.file, latest);");
+    expect(source).toContain("clearDesignFrameGeometryLive(workspaceId, frame.file);");
+    // Both frame field groups read it through one subscribed field.
+    expect(inspector).toContain("useDesignFrameGeometryLiveValue(workspaceId, frame, geometryKey)");
+    expect(inspector.match(/<InspectorFrameGeometryField/g)).toHaveLength(2);
+  });
+
+  it("keeps typed text on Escape, as Figma does, instead of discarding it", () => {
+    const editor = readSection("design-inline-text-editor.tsx");
+    // Escape ends the edit through the same commit as blur and Cmd/Ctrl+Enter.
+    expect(editor).toContain(`if (event.key === "Escape") {
+            event.preventDefault();
+            if (edit.status === "editing") onEscape(edit, measure(event.currentTarget));`);
+    expect(editor).not.toContain("onCancel");
+    // The canvas commits, then takes focus back for the next shortcut.
+    expect(source).toContain("void commitInlineText(edit, measured);");
+    expect(source).not.toContain("cancelInlineTextEditing");
   });
 
   it("supports Figma-style frame and text insertion without per-keystroke React state", () => {
