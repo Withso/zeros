@@ -1027,6 +1027,15 @@
 [data-design-frame-compact-play]:not(:hover):not(:focus-within):not([data-design-frame-pointer]) > [data-design-frame-chrome]:not([data-design-frame-play-chrome]) {
   max-width: var(--design-frame-label-full-width, none) !important;
 }
+/* A small frame's 28px name row can lie over the frame above it. Only the
+ * name itself takes the pointer there; the row around it lets a hover or a
+ * click reach the frame beneath. */
+[data-design-frame-compact-play] > [data-design-frame-chrome]:not([data-design-frame-play-chrome]) {
+  pointer-events: none;
+}
+[data-design-frame-compact-play] > [data-design-frame-chrome]:not([data-design-frame-play-chrome]) > * {
+  pointer-events: auto;
+}
 
 @media (prefers-reduced-motion: reduce) {
   .zd-canvas-tool {

@@ -313,6 +313,11 @@ it("keeps a small frame's name on an uncrowded page, hides only its Play control
     // 60 px on screen: the name stays, the 28 px Play control waits for intent.
     await paint(page, .5, 0, 500);
     expect(await state()).toEqual({ compact: false, play: true, label: "auto", control: "rect(0px, 0px, 0px, 0px)" });
+    // The name row can lie over the frame above: only the name takes the pointer.
+    expect(await frame.evaluate(element => {
+      const row = element.querySelector("[data-design-frame-chrome]:not([data-design-frame-play-chrome])")!;
+      return [getComputedStyle(row).pointerEvents, getComputedStyle(row.querySelector("button")!).pointerEvents];
+    })).toEqual(["none", "auto"]);
     await page.mouse.move(40, 40);
     expect((await state()).control).toBe("auto");
     await page.mouse.move(600, 400);
