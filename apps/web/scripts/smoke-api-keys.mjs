@@ -25,6 +25,8 @@ const assets = new Map([
   ["/dashboard.css", ["text/css", await readFile(path.join(web, "public/dashboard.css"), "utf8")]],
   ["/dashboard-tokens.css", ["text/css", tokenSource.slice(concreteStart + 1)]],
 ]);
+const dashboardHtml = dashboardPage({ session: { email: user.email, name: user.displayName }, me,
+  requestUrl: "http://127.0.0.1/?section=api-keys", signOutHref: "/auth/logout" });
 const keys = new Map(me.organizations.map(org => [org.id, []]));
 let failCreate = false, failRevoke = false, holdCreate = false, releaseCreate, createArrived;
 const server = createServer(async (request, response) => {
@@ -39,8 +41,7 @@ const server = createServer(async (request, response) => {
   }
   if (url.pathname === "/") {
     response.writeHead(200, { "content-type": "text/html" });
-    response.end(dashboardPage({ session: { email: user.email, name: user.displayName }, me,
-      requestUrl: `http://127.0.0.1${request.url}`, signOutHref: "/auth/logout" }));
+    response.end(dashboardHtml);
     return;
   }
   if (url.pathname === "/api/v1/me") return json(me);
@@ -82,6 +83,11 @@ const requireCheck = (condition, label) => { if (!condition) failures.push(label
 const colors = [];
 try {
   if (screenshotDirectory) await mkdir(screenshotDirectory, { recursive: true });
+  const fixedPage = await fetch(`${origin}/?section=api-keys`);
+  const alteredPage = await fetch(`${origin}/?section=profile&action=untrusted-smoke-request`);
+  assert.equal(fixedPage.status, 200);
+  assert.equal(alteredPage.status, 200);
+  assert.ok(await fixedPage.text() === await alteredPage.text(), "Request parameters must not change the smoke server's HTML");
   for (const theme of ["light", "dark"]) {
     keys.set(organization.id, []); keys.set(otherOrganization.id, []);
     const context = await browser.newContext({ viewport: { width: 1200, height: 840 }, colorScheme: theme });

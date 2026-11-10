@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { parseFragment } from "parse5";
 import {
   apiKeysHtml,
   createApiKeyDialogHtml,
@@ -45,14 +46,17 @@ import {
 
 test("API keys show only metadata and scope actions to the owner or an organization admin", () => {
   const keys = [
-    { id: "own", name: "Build <script>", ownerUserId: "u1", ownerName: "Ada", prefix: "zk_abcd", createdAt: "2026-11-10T00:00:00Z", lastUsedAt: null, key: "private-never-render" },
+    { id: "own", name: "Build <script><SCRIPT>", ownerUserId: "u1", ownerName: "Ada", prefix: "zk_abcd", createdAt: "2026-11-10T00:00:00Z", lastUsedAt: null, key: "private-never-render" },
     { id: "other", name: "Bot", ownerUserId: "u2", ownerName: "Grace", prefix: "zk_efgh", createdAt: "2026-11-09T00:00:00Z", lastUsedAt: "2026-11-10T00:00:00Z" },
   ];
   const member = apiKeysHtml({ organization: { role: "member", workspaceCapabilities: { cloud: true } }, userId: "u1", data: { apiKeys: keys } });
-  assert.match(member, /Build &lt;script&gt;/);
+  const walk = node => [node, ...(node.childNodes ?? []).flatMap(walk)];
+  const nodes = walk(parseFragment(member));
+  assert.ok(nodes.some(node => node.nodeName === "#text" && node.value === keys[0].name));
+  assert.equal(nodes.some(node => node.tagName === "script"), false);
   assert.match(member, /zk_abcd/); assert.match(member, /Never used/);
   assert.match(member, /data-revoke-api-key="own"/);
-  assert.doesNotMatch(member, /Bot|Grace|private-never-render|<script>/);
+  assert.doesNotMatch(member, /Bot|Grace|private-never-render/);
   const admin = apiKeysHtml({ organization: { role: "admin", workspaceCapabilities: { cloud: true } }, userId: "u1", data: { apiKeys: keys } });
   assert.match(admin, /data-revoke-api-key="other"/); assert.match(admin, /Grace/);
   assert.doesNotMatch(admin, /private-never-render/);
