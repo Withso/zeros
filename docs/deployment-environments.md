@@ -788,6 +788,19 @@ provider retains the 3,600-second login TTL as a backstop, never a successful
 cleanup claim. A pending deployment does not count as completed and does not
 authorize early drain release. Cleanup saves only allowlisted recovery results.
 
+A run whose runtime transaction has succeeded cannot be completed by rerunning
+it. A rerun keeps the run ID, the build drain keeps one row per run ID and never
+renews a consumed lease, and the live pin is by then the runtime that the earlier
+attempt published, so `beginBuildDrain` refuses with
+`runtime_build_drain_mismatch` (reported as a failed database operation). The
+rerun also rebuilds the archive with a different digest and redeploys the
+control plane, which interrupts an automatic Cloud Computer rebuild in flight
+(`computer_build_interrupted`). When a later job of such a run fails, for example
+the desktop feed, leave the run alone: the next push to `main` starts a new run
+with a new ID, and its resolve step republishes a runtime whose qualifying
+publication never completed. Only a rerun of failed jobs before the runtime
+transaction has succeeded is safe.
+
 If cleanup remains unconfirmed, reconcile the exact recorded channel, run,
 source, login, lease and deployment IDs before dispatching again:
 
