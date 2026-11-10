@@ -157,7 +157,10 @@ describe("worker bridge routing through a fake relay", () => {
     const id = randomUUID(), mcp = { id, name: "fixture", transport: "http", url: "https://mcp.example.test", headers: { "X-Api-Key": "upstream-fixture-secret" } };
     await relay.receive({ ...config, loginRevision: "1", mcpServers: [mcp] });
     const sessionId = await chat();
-    expect(Object.values(drivers[0].opened?.mcpServers ?? {})).toMatchObject([{ type: "http", url: expect.stringContaining(`/mcp/${id}`) }]);
+    // Every execution also gets the product's own zeros_workspace server.
+    const upstream = (driver: FakeDriver) => Object.entries(driver.opened?.mcpServers ?? {}).filter(([name]) => name !== "zeros_workspace").map(([, server]) => server);
+    expect(Object.keys(drivers[0].opened?.mcpServers ?? {})).toContain("zeros_workspace");
+    expect(upstream(drivers[0])).toMatchObject([{ type: "http", url: expect.stringContaining(`/mcp/${id}`) }]);
     expect(JSON.stringify(drivers[0].opened)).not.toContain("upstream-fixture-secret");
     const request = prompt(sessionId);
     await relay.request(CLIENT_A, request);
@@ -167,10 +170,10 @@ describe("worker bridge routing through a fake relay", () => {
     drivers[0].complete(); await worker.flush();
     await relay.request(CLIENT_A, prompt(sessionId));
     await expect.poll(() => drivers.length).toBe(2);
-    if (change === "configuration") expect(drivers[1].opened?.mcpServers).toEqual({});
+    if (change === "configuration") expect(Object.keys(drivers[1].opened?.mcpServers ?? {})).toEqual(["zeros_workspace"]);
     else {
-      const oldServer = Object.values(drivers[0].opened!.mcpServers!)[0];
-      const newServer = Object.values(drivers[1].opened!.mcpServers!)[0];
+      const oldServer = upstream(drivers[0])[0];
+      const newServer = upstream(drivers[1])[0];
       expect(newServer.url).toBe(oldServer.url);
       expect(newServer.headers.Authorization === oldServer.headers.Authorization).toBe(true);
       expect(newServer.headers["X-Zeros-Mcp-Execution"]).not.toBe(oldServer.headers["X-Zeros-Mcp-Execution"]);

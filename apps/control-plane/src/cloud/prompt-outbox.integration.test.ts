@@ -83,6 +83,15 @@ suite("durable cloud prompt delivery", () => {
     expect((await (await status()).json()).items).toHaveLength(1);
   });
 
+  it("preserves the native prompt route's explicit wake from an archived workspace", async () => {
+    await store.transition(workspace.id, ["running"], "stopped");
+    await store.requestLifecycle(workspace.id, creator, "archive");
+    expect((await store.get(workspace.id, creator)).archivedAt).not.toBeNull();
+    expect((await submit()).status).toBe(201);
+    const woke = await store.get(workspace.id, creator);
+    expect(woke.state).toBe("starting"); expect(woke.archivedAt).toBeNull();
+  });
+
   it("saves without a socket or VM, owns one explicit wake, and passive status never wakes", async () => {
     await store.transition(workspace.id, ["running"], "stopped");
     expect((await status()).status).toBe(200);

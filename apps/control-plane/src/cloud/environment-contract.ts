@@ -22,6 +22,7 @@ const runtime = new Set(["PATH", "HOME", "SHELL", "USER", "LOGNAME", "PWD", "OLD
 
 /** App values cannot select the worker's startup, credential or routing authority. */
 export function isCloudReservedEnvironmentName(name: string): boolean {
+  if (name === "ZEROS_API_KEY") return false;
   const upper = name.toUpperCase();
   return isDangerousEnvName(upper) || isCredentialRedirectEnvName(name) || isCredentialRedirectEnvName(upper) || runtime.has(upper) ||
     /^(?:GH_|GITHUB_|GIT_|CLOUD_V2_|ZEROS_|COORDINATE_|ANTHROPIC_|CLAUDE_|CODEX_|CURSOR_|OPENAI_|LC_|XDG_)/.test(upper) ||

@@ -243,6 +243,8 @@ dialog.dialog::backdrop { background: var(--scrim); }
 .field { display: flex; flex-direction: column; gap: 6px; }
 .field > span, .field > label { color: var(--fg1); font-weight: 450; }
 .field .input { width: 100%; }
+.key-value { display: flex; align-items: center; gap: 8px; }
+.key-value .input { flex: 1; }
 .field-hint { margin: 0; color: var(--fg3); font-size: 12px; line-height: 16px; overflow-wrap: anywhere; }
 .field-hint[data-tone="error"] { color: var(--red-fg); }
 .dialog-error { color: var(--red-fg); font-size: 12px; line-height: 16px; }

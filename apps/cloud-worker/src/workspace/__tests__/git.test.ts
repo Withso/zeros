@@ -160,3 +160,36 @@ it("refuses a commit of Git LFS files when this VM has no LFS clean filter, and 
   await git("config", "filter.lfs.clean", "cat");
   await expect(service.handle("git.commit", { message: "add model" })).resolves.toMatchObject({ sha: expect.stringMatching(/^[a-f0-9]{40}$/) });
 });
+
+it("gives agents the Changes view's All comparison as text, including untracked files, bounded", async () => {
+  const { root, scope, git } = await repositoryFixture(); const service = new GitService(scope);
+  await writeFile(join(root, "committed.txt"), "one\n"); await git("add", "."); await git("commit", "-m", "work");
+  await writeFile(join(root, "readme.txt"), "initial\nworking\n"); await writeFile(join(root, "untracked.txt"), "new\n");
+  const all = await service.agentDiff({});
+  expect(all.truncated).toBe(false);
+  for (const text of ["+one", "+working", "untracked.txt", "+new"]) expect(all.text).toContain(text);
+  const stat = await service.agentDiff({ stat: true });
+  expect(stat.text.split("\n").filter(Boolean).sort()).toEqual(["A committed.txt +1 -0", "A untracked.txt (untracked)", "M readme.txt +1 -0"]);
+  const one = await service.agentDiff({ file: "readme.txt" });
+  expect(one.text).toContain("+working"); expect(one.text).not.toContain("committed.txt");
+  expect((await service.agentDiff({ file: "untracked.txt" })).text).toContain("+new");
+  await expect(service.agentDiff({ file: "../outside" })).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+  await writeFile(join(root, "huge.txt"), "x".repeat(200) + "\n".repeat(1) + Array.from({ length: 5000 }, (_, i) => `line ${i} ${"y".repeat(80)}`).join("\n"));
+  const bounded = await service.agentDiff({}, { maxBytes: 64 * 1024 });
+  expect(bounded.truncated).toBe(true);
+  expect(Buffer.byteLength(bounded.text)).toBeLessThanOrEqual(64 * 1024);
+});
+
+it("lists the changed files instead of an empty diff when the tracked patch is too large for Git's buffer", async () => {
+  const { root, scope, git } = await repositoryFixture(); const service = new GitService(scope);
+  await writeFile(join(root, "big.txt"), "seed\n"); await git("add", "."); await git("commit", "-m", "base big");
+  await writeFile(join(root, "big.txt"), Array.from({ length: 2000 }, (_, i) => `changed line ${i}`).join("\n"));
+  await writeFile(join(root, "readme.txt"), "initial\nsmall edit\n"); await writeFile(join(root, "new.txt"), "new\n");
+  const result = await service.agentDiff({}, { gitBytes: 4 * 1024 });
+  expect(result.truncated).toBe(true);
+  expect(result.text).toContain("A big.txt +2000 -0");
+  expect(result.text).toContain("M readme.txt +1 -0");
+  expect(result.text).toContain("A new.txt (untracked)");
+  expect(result.text).toContain("Ask for one file at a time");
+  expect(result.text).not.toContain("+changed line");
+});

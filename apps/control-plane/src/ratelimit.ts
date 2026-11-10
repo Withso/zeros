@@ -38,6 +38,7 @@ export function rateLimit(
   limit: number,
   windowMs: number,
   keyFor?: (context: Context) => string,
+  options: { checkOnly?: boolean } = {},
 ): MiddlewareHandler {
   return async (c, next) => {
     const now = Date.now();
@@ -46,11 +47,13 @@ export function rateLimit(
     const key = `${bucket}:${identity}`;
     const existing = windows.get(key);
     if (!existing || existing.resetAt <= now) {
-      sweep(now);
-      windows.set(key, { count: 1, resetAt: now + windowMs });
+      if (!options.checkOnly) {
+        sweep(now);
+        windows.set(key, { count: 1, resetAt: now + windowMs });
+      }
     } else {
-      existing.count += 1;
-      if (existing.count > limit) {
+      if (!options.checkOnly) existing.count += 1;
+      if (existing.count > limit || options.checkOnly && existing.count === limit) {
         const retry = Math.ceil((existing.resetAt - now) / 1000);
         c.header("Retry-After", String(retry));
         throw new HttpError(429, "rate_limited", "Too many requests — slow down");

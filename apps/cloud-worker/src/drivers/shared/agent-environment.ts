@@ -6,6 +6,7 @@ export type AgentLogin =
   | { agent: "claude"; apiKey: string; oauthToken?: never }
   | { agent: "cursor"; apiKey: string };
 
+const ZEROS_NAMES = new Set(["ZEROS_WORKSPACE_ID", "ZEROS_SESSION_ID", "ZEROS_API_URL", "ZEROS_API_TOKEN"]);
 const runtimeNames = new Set(["PATH", "HOME", "USER", "LANG", "TERM", "TMPDIR", "SHELL"]);
 
 /** Never inherit the worker credential or another provider's login. Git/GH
@@ -15,8 +16,9 @@ export function agentEnvironment(
   source: NodeJS.ProcessEnv = process.env,
   git: NodeJS.ProcessEnv = {},
   application: Readonly<Record<string, string>> = {},
+  zeros: Readonly<Record<string, string>> = {},
 ): NodeJS.ProcessEnv {
-  const env = workerChildEnvironment(source, git, application);
+  const env = workerChildEnvironment(source, git, application, zeros);
   switch (login.agent) {
     case "codex": env.ZEROS_CLOUD_PROXY_TOKEN = login.token; break;
     case "claude":
@@ -30,7 +32,8 @@ export function agentEnvironment(
 
 /** Generic commands receive no app values; only explicit application callers
  * opt in, without changing worker or credential-provider environments. */
-export function workerChildEnvironment(source: NodeJS.ProcessEnv = process.env, git: NodeJS.ProcessEnv = {}, application: Readonly<Record<string, string>> = {}): NodeJS.ProcessEnv {
+export function workerChildEnvironment(source: NodeJS.ProcessEnv = process.env, git: NodeJS.ProcessEnv = {}, application: Readonly<Record<string, string>> = {},
+  zeros: Readonly<Record<string, string>> = {}): NodeJS.ProcessEnv {
   if (!CloudEnvironmentMaterialSchema.safeParse({ variables: application, files: [] }).success) throw new Error("Invalid application environment.");
   const env: NodeJS.ProcessEnv = {};
   for (const [name, value] of Object.entries(source)) {
@@ -40,5 +43,8 @@ export function workerChildEnvironment(source: NodeJS.ProcessEnv = process.env, 
     if (value !== undefined && /^(GIT|GH)_[A-Z_0-9]+$/.test(name)) env[name] = value;
   }
   Object.assign(env, application);
+  // Worker-owned identity and API access come last, so no other input can
+  // replace them; only these exact names are accepted from that map.
+  for (const [name, value] of Object.entries(zeros)) if (ZEROS_NAMES.has(name)) env[name] = value;
   return env;
 }

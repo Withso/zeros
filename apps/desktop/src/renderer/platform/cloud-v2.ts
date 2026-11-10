@@ -184,7 +184,7 @@ export async function createCloudV2Workspace(input: {
   return (await cloudAccountRequest("/v1/cloud-v2/workspaces", one, { body, idempotencyKey })).workspace;
 }
 
-export async function changeCloudV2Workspace(target: CloudWorkspaceTarget, action: "start" | "stop" | "archive" | "delete"): Promise<CloudV2Workspace> {
+export async function changeCloudV2Workspace(target: CloudWorkspaceTarget, action: "start" | "stop" | "restart" | "archive" | "delete"): Promise<CloudV2Workspace> {
   const id = uuid.parse(target.workspaceId), erase = action === "delete" && prepareCloudPromptErasure(target);
   const { workspace } = action === "delete"
     ? await cloudAccountRequest(`/v1/cloud-v2/workspaces/${id}`, one, { body: {}, idempotencyKey: key(), method: "DELETE" })

@@ -681,3 +681,30 @@ it("interrupts unanswered native input before a held control-plane Stop can rele
     expect(f.driver.prompts).toHaveLength(1);
   } finally { stop.resolve({ chatId: "chat", epoch: "1" }); }
 });
+
+it("applies chat edits after the reply's prompts and acknowledges each with its row in history; unknown chats wait", async () => {
+  const f = await setup();
+  await until(() => !!f.relay.waiting).toBe(true);
+  const acks = () => f.relay.frames.flatMap(frame => frame.t === "history" && frame.chatEditAcks ? [{ acks: frame.chatEditAcks, chats: frame.chats?.map(chat => chat.id) }] : []);
+  f.relay.enqueue({ prompts: [delivery(randomUUID(), "created")], stops: [],
+    chatEdits: [{ chatId: "created", version: "1", title: "From the API" }, { chatId: "unknown", version: "1", archived: true }] } as unknown as Batch);
+  await until(() => acks().length).toBe(1);
+  expect(acks()).toEqual([{ acks: [{ chatId: "created", version: "1" }], chats: ["created"] }]);
+  const { store } = f.worker as unknown as { store: SessionStore };
+  expect(store.metadata("created")!.chat).toMatchObject({ title: "From the API", archived: false });
+  expect(store.metadata("unknown")).toBeUndefined();
+  f.driver.complete();
+  const pulls = f.relay.calls.filter(call => call.op === "pull").length;
+  f.relay.enqueue({ prompts: [], stops: [], chatEdits: [{ chatId: "created", version: "1", title: "Replayed" }, { chatId: "created", version: "2", archived: true }] } as unknown as Batch);
+  // The replayed version is acknowledged again, changing nothing; then version 2.
+  await until(() => acks().at(-1)?.acks[0]?.version).toBe("2");
+  // Both may coalesce into one frame: acknowledging 2 also covers 1.
+  for (const entry of acks().slice(1)) expect(["1", "2"]).toContain(entry.acks[0]!.version);
+  expect(acks().every(entry => entry.chats?.[0] === "created")).toBe(true);
+  expect(store.metadata("created")!.chat).toMatchObject({ title: "From the API", archived: true });
+  // An edit this worker cannot apply yet counts as an empty reply for the poll guard.
+  for (let i = 0; i < 4; i++) f.relay.enqueue({ prompts: [], stops: [], chatEdits: [{ chatId: "unknown", version: "1", archived: true }] } as unknown as Batch);
+  const started = Date.now();
+  await until(() => f.relay.calls.filter(call => call.op === "pull").length).toBeGreaterThanOrEqual(pulls + 5);
+  expect(Date.now() - started).toBeGreaterThanOrEqual(700);
+});

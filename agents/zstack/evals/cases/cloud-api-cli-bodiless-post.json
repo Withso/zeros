@@ -1,0 +1,9 @@
+{
+  "id": "cloud-api-cli-bodiless-post",
+  "kind": "replay",
+  "area": "control-plane",
+  "fixedBy": "pr:983",
+  "symptom": "The cloud API answered 415 to every POST without a body while the cloud CLI sends none for workspace sleep, wake, archive and session cancel. Each half passed against its own fake; the commands failed only against a live API.",
+  "rule": "Two halves built from one contract get a joined test that drives the real producer into the real consumer (principle 13): every CLI command runs through the assembled router and PostgreSQL.",
+  "check": "pnpm --dir apps/control-plane exec vitest run src/cloud/api/routes.integration.test.ts -t 'drives every initial cloud CLI command through the real router and PostgreSQL'"
+}

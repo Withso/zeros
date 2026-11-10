@@ -30,7 +30,9 @@ export class PromptInbox {
       !terminal(entry) || entry.outbox?.reported !== entry.state);
   }
 
-  constructor(private readonly store: SessionStore, private readonly agents: Agents, private readonly request: PromptRequest) {
+  constructor(private readonly store: SessionStore, private readonly agents: Agents, private readonly request: PromptRequest,
+    /** chat-edit-v1: acknowledged in history with the chat's row, never on the pull. */
+    private readonly acknowledgeChatEdit?: (chatId: string, version: string) => void) {
     agents.setOutboxDispatch(entry => this.dispatch(entry), async (chatId, throughEpoch) => {
       const reply = CloudV2PromptStopReplySchema.parse(await this.call("stop", { chatId, throughEpoch }));
       if (reply.chatId !== chatId) throw new Error("Invalid conversation Stop receipt.");
@@ -141,9 +143,18 @@ export class PromptInbox {
           await this.call("stop-ack", stop);
         }));
         for (const item of batch.prompts) await this.receive(item);
+        // After the deliveries, which may create the chats these edits name.
+        let edited = false;
+        for (const edit of batch.chatEdits ?? []) {
+          const result = await this.store.applyChatEdit(edit);
+          if (result === "unknown") continue;
+          edited ||= result === "applied";
+          this.acknowledgeChatEdit?.(edit.chatId, edit.version);
+        }
         attempt = 0;
-        // A proxy that prematurely ends an empty poll cannot create a hot loop.
-        if (!batch.prompts.length && !batch.stops.length && Date.now() - started < 250)
+        // A proxy that prematurely ends an empty poll cannot create a hot loop,
+        // nor can edits that are offered again but change nothing here.
+        if (!batch.prompts.length && !batch.stops.length && !edited && Date.now() - started < 250)
           await delay(250, undefined, { signal: this.lifetime.signal, ref: false });
       } catch (error) {
         if (this.lifetime.signal.aborted) break;

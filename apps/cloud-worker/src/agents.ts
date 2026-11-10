@@ -17,6 +17,7 @@ import { TurnService } from "./workspace/turns";
 import type { AgentTextMessage } from "@zeros/protocol/agent-messages";
 import { providerAvailability, providerFailure } from "./provider-failure";
 import type { ApplicationEnvironment } from "./credentials/application-environment";
+import type { WorkspaceApiEnvironment } from "./credentials/workspace-api";
 
 export type DriverFactories = Partial<Record<CloudV2Agent, () => Driver>>;
 export interface AppClient { id: string; send(frame: BridgeMessage): Promise<void> }
@@ -86,6 +87,7 @@ export class Agents {
     private readonly workspaceToolFactory?: WorkspaceToolFactory,
     private readonly application?: ApplicationEnvironment,
     private readonly resumeIdleExecutions = false,
+    private readonly zeros?: WorkspaceApiEnvironment,
   ) { this.config = config; this.reviewConfig = config.codeReview; this.models = new CodexModelAvailability(modelDiscovery); this.models.configure(config); this.turns = new TurnService(store, scope); }
 
   fenceReviewConfiguration(review: WorkerConfig["codeReview"]): boolean {
@@ -114,6 +116,19 @@ export class Agents {
       await this.store.fold(route.chatId, notification, ownsFailure);
       if (ownsFailure()) await this.update(route, notification);
     }).catch(() => { if (ownsFailure()) this.cancelForInput(route, INPUT_CANCELLED); });
+  }
+  /** The memory watchdog stopped a process this chat's agent started. */
+  processStopped(chatId: string, message: string): void {
+    const route = this.chats.get(chatId);
+    if (!route || route.closed) return;
+    const owns = () => !route.closed && this.chats.get(chatId) === route;
+    const notification: SessionNotification = { sessionId: route.id, update: { sessionUpdate: "error_notice", noticeId: `memory:${randomUUID()}`,
+      severity: "warning", recoverable: true, message, at: Date.now() } };
+    route.events = route.events.then(async () => {
+      if (!owns()) return;
+      await this.store.fold(route.chatId, notification, owns);
+      if (owns()) await this.update(route, notification);
+    }).catch(() => { if (owns()) this.cancelForInput(route, INPUT_CANCELLED); });
   }
   private initialized(agentId: CloudV2Agent): InitializeResponse {
     return { ...initialized(agentId), _meta: this.models.metadata(agentId === "codex") };
@@ -221,7 +236,7 @@ export class Agents {
     await this.open({ id: "outbox", send: async () => {} }, createMessage({ type: "AGENT_NEW_SESSION", source: "browser",
       chatId: payload.chatId, agentId: payload.agentId, cwd: this.scope.root, workspaceId: this.scope.workspace.id,
       env: { ...(payload.model ? { [MODEL_ENV[payload.agentId]]: payload.model } : {}), ...(payload.effort ? { ZEROS_THINKING_EFFORT: payload.effort } : {}) },
-    }), true, signal);
+    }), true, signal, { ...(item.sessionName?.trim() ? { title: item.sessionName.trim() } : {}) });
     const route = this.chats.get(payload.chatId)!;
     route.admitting++;
     const ownsAdmission = () => { this.assertAdmission(signal); this.assertCurrent(route); };
@@ -282,7 +297,7 @@ export class Agents {
       let tools: Promise<void> | undefined;
       if (route && freshEpoch && !active && this.workspaceToolFactory) {
         route.stopping++;
-        tools = this.retireWorkspaceTools(route);
+        tools = this.stopWorkspaceTools(route);
       }
       await this.store.stopOutbox(chatId, epoch);
       await tools;
@@ -290,7 +305,7 @@ export class Agents {
     }
     route.stopping++; route.stopInFlight = (route.stopInFlight ?? 0) + 1;
     if (active) active.cancelRequested = true;
-    const tools = this.retireWorkspaceTools(route);
+    const tools = this.stopWorkspaceTools(route);
     const stopped = Promise.all([route.interactions?.dismiss(INPUT_CANCELLED), route.driver?.interrupt(), tools]);
     void stopped.catch(() => {});
     try {
@@ -462,6 +477,12 @@ export class Agents {
     this.activity();
   }
 
+  /** Stop fences review writes by retiring their grant (the next turn reopens
+   * the driver). Read-only terminal and diff tools stay with their execution. */
+  private stopWorkspaceTools(route: Runtime): Promise<void> {
+    return route.workspaceTools?.review === false ? Promise.resolve() : this.retireWorkspaceTools(route);
+  }
+
   private retireWorkspaceTools(route: Runtime): Promise<void> {
     const tools = route.workspaceTools;
     route.workspaceTools = undefined;
@@ -535,7 +556,9 @@ export class Agents {
     if (route.closed || this.chats.get(route.chatId) !== route) throw new WorkspaceError("session-expired", "This execution has ended. Reopen the conversation to continue.");
   }
 
-  private async open(client: AppClient, message: AgentNewSessionMessage | AgentLoadSessionMessage, deferDriver = false, signal?: AbortSignal): Promise<void> {
+  private async open(client: AppClient, message: AgentNewSessionMessage | AgentLoadSessionMessage, deferDriver = false, signal?: AbortSignal,
+    /** Applies only if this open creates the chat; an existing chat keeps its title. */
+    creation: { title?: string } = {}): Promise<void> {
     this.scope.folder(message.cwd, true); this.scope.assertId(message.workspaceId);
     if (message.type === "AGENT_NEW_SESSION" && message.agentRole === "design") throw new WorkspaceError("CLOUD_V2_UNSUPPORTED", "Design is not available in cloud workspaces.");
     const agentId = this.agent(message.agentId);
@@ -587,7 +610,7 @@ export class Agents {
       const selected = route;
       selected.preparing = (async () => {
         await retiring;
-        const chat = await this.store.selectAgent({ id: chatId, folder: this.scope.root, agentId, agentName: NAMES[agentId], executionId: selected.id,
+        const chat = await this.store.selectAgent({ id: chatId, folder: this.scope.root, agentId, agentName: NAMES[agentId], executionId: selected.id, ...creation,
           // These existing open couriers carry selections only. Credentials
           // always come from the control plane, never the caller's env.
           model: message.env?.[MODEL_ENV[agentId]] || undefined, effort: message.env?.ZEROS_THINKING_EFFORT || undefined,
@@ -724,17 +747,23 @@ export class Agents {
       try {
         const mcpServers = await this.mcpProviders?.(route.mcpExecutionId);
         const executionId = route.mcpExecutionId;
-        const assertToolsCurrent = () => {
+        const assertExecutionCurrent = () => {
           this.assertCurrent(route);
-          if (route.driver !== driver || route.mcpExecutionId !== executionId || route.stopping !== openingStop || this.reviewConfiguration !== openingReview)
+          if (route.driver !== driver || route.mcpExecutionId !== executionId) throw new WorkspaceError("session-expired", "This execution's tools have been retired.");
+        };
+        const assertToolsCurrent = () => {
+          assertExecutionCurrent();
+          if (route.stopping !== openingStop || this.reviewConfiguration !== openingReview)
             throw new WorkspaceError("session-expired", "This execution's tools have been retired.");
         };
-        route.workspaceTools = await this.workspaceToolFactory?.({ agentId: route.agentId, conversationId: route.chatId, executionId, assertCurrent: assertToolsCurrent });
+        route.workspaceTools = await this.workspaceToolFactory?.({ agentId: route.agentId, conversationId: route.chatId, executionId,
+          assertCurrent: assertToolsCurrent, assertExecutionCurrent });
         assertToolsCurrent();
         this.assertCurrent(route);
         const interactions = route.interactions;
         const native = await driver.open({ sessionId: route.id, cwd: this.scope.root, model: route.model, effort: route.effort, fast: route.fast,
           ...(this.application ? { application: this.application } : {}),
+          ...(this.zeros ? { zerosEnvironment: this.zeros.variables(route.chatId) } : {}),
           ...(mcpServers || route.workspaceTools ? { mcpServers: { ...mcpServers, ...route.workspaceTools?.servers } } : {}),
           ...(this.config.agentInteractions === 1 ? { modeId: cloudModeId(route.agentId, route.permissionMode ?? "bypass"),
             onQuestion: (request, signal) => interactions!.question(request, signal),
@@ -934,7 +963,7 @@ export class Agents {
     this.cancelWaitingOpens(route.chatId);
     route.stopping++; route.stopInFlight = (route.stopInFlight ?? 0) + 1;
     if (route.active) route.active.cancelRequested = true;
-    const tools = this.retireWorkspaceTools(route);
+    const tools = this.stopWorkspaceTools(route);
     // Claim the dismissal first, then interrupt before any provider callback
     // can continue while the control-plane Stop receipt is in flight.
     const dismissed = route.interactions?.dismiss(reason);

@@ -2,6 +2,21 @@ import { createHash } from "node:crypto";
 
 // Each reviewed migration lists its exact exempted statements by rule.
 const reviewed: Readonly<Record<string, Readonly<Record<string, readonly string[]>>>> = {
+  "0226_cloud_api.sql": {
+    "widen-check": ["ALTER TABLE cloud_v2_tokens DROP CONSTRAINT cloud_v2_tokens_kind_check;"],
+    "credential-erasure": [`CREATE FUNCTION fence_cloud_api_tokens() RETURNS trigger
+LANGUAGE plpgsql SECURITY INVOKER
+SET search_path = pg_catalog, public, pg_temp AS $$
+BEGIN
+  IF NEW.state NOT IN ('creating','starting','running') OR NEW.archived_at IS NOT NULL
+    OR NEW.stop_generation IS DISTINCT FROM OLD.stop_generation THEN
+    DELETE FROM public.cloud_v2_tokens WHERE workspace_id = NEW.id AND kind = 'api';
+  END IF;
+  RETURN NEW;
+END;
+$$;`],
+    "privilege-tightening": ["REVOKE ALL ON FUNCTION fence_cloud_api_tokens() FROM PUBLIC;"],
+  },
   "0224_cloud_v2_pending_create_source.sql": {
     "pending-source-scope": [`CREATE OR REPLACE FUNCTION cloud_v2_preserve_source_scope() RETURNS trigger LANGUAGE plpgsql
 SET search_path=pg_catalog,public,pg_temp AS $$

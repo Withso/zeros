@@ -122,7 +122,7 @@ describe("cloud private review comments", () => {
       const registration = f.drivers[1].opened!.mcpServers!.zeros_workspace;
       const client = new Client({ name: "review-toggle-fixture", version: "1" }); cleanups.push(() => client.close());
       await client.connect(new StreamableHTTPClientTransport(new URL(registration.url), { requestInit: { headers: registration.headers } }));
-      expect((await client.listTools()).tools).toHaveLength(4);
+      expect((await client.listTools()).tools.filter(tool => tool.name.startsWith("code_review_"))).toHaveLength(4);
     } finally { release(); await opening; }
   });
 
@@ -252,7 +252,7 @@ describe("cloud private review comments", () => {
     const client = new Client({ name: "cloud-review-fixture", version: "1" });
     cleanups.push(() => client.close());
     await client.connect(new StreamableHTTPClientTransport(new URL(registration!.url), { requestInit: { headers: registration!.headers } }));
-    expect((await client.listTools()).tools.map(tool => tool.name)).toEqual(["code_review_list", "code_review_create", "code_review_reply", "code_review_set_resolved"]);
+    expect((await client.listTools()).tools.map(tool => tool.name)).toEqual(["GetTerminalOutput", "GetWorkspaceDiff", "code_review_list", "code_review_create", "code_review_reply", "code_review_set_resolved"]);
     const read = await client.callTool({ name: "code_review_list", arguments: {} });
     expect(read.content).toEqual([{ type: "text", text: expect.stringContaining(input.body) }]);
     const replied = await client.callTool({ name: "code_review_reply", arguments: { threadId: thread.id, body: "Agent reply", requestId: "agent-reply" } });
@@ -324,7 +324,7 @@ describe("cloud private review comments", () => {
     const client = new Client({ name: "newer-review-fixture", version: "1" }); cleanups.push(() => client.close());
     await client.connect(new StreamableHTTPClientTransport(new URL(registration.url), { requestInit: { headers: registration.headers } }));
     await agents.stopOutbox(chatId, "1");
-    expect((await client.listTools()).tools).toHaveLength(4);
+    expect((await client.listTools()).tools.filter(tool => tool.name.startsWith("code_review_"))).toHaveLength(4);
     expect(f.drivers[0].interrupts).toBe(0);
   });
 });

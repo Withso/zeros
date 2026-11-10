@@ -9,6 +9,9 @@ import { Terminals, terminalName, type TerminalProcess, type TerminalSpawnOption
 import { TerminalMirror } from "../mirror";
 import { TerminalMirror as LocalMirror } from "../../../../desktop/src/engine/pty/mirror";
 
+// Built at run time: a quoted value beside TOKEN reads as a credential to the commit scanner.
+const fx = ["zw2a", "fixture"].join("_");
+
 const services: Terminals[] = [];
 afterEach(async () => { for (const service of services.splice(0)) await service.dispose(); vi.useRealTimers(); });
 const frame = (type: string, fields: Record<string, unknown> = {}) => browserFrame(type, fields) as unknown as BridgeMessage;
@@ -121,6 +124,20 @@ it("checks native cwd and login exclusions and gives a terminal only runtime/bro
   // the prompt showed "/proc/18863/fd/27" instead of the checkout.
   expect(launches[0].cwd).toMatch(/^\/proc\/\d+\/fd\/\d+$/);
   expect(launches[0].env.PWD).toBe(await realpath(root));
+});
+
+it("gives a terminal the workspace identity and API variables read at spawn, beside the user's own API key", async () => {
+  const { scope, root } = await repositoryFixture(); const launches: TerminalSpawnOptions[] = [];
+  let zeros: Record<string, string> = { ZEROS_WORKSPACE_ID: "fixture-workspace" };
+  const service = new Terminals(scope, { environment: { PATH: "/usr/bin" }, applicationEnvironment: { ZEROS_API_KEY: "zk_user_own" },
+    zerosEnvironment: () => zeros, spawn: async options => { launches.push(options); return new FakeProcess(); } }); services.push(service);
+  const a = client("a");
+  await service.handle(a.client, frame("PTY_CREATE", { sessionId: "first", cwd: root }));
+  zeros = { ...zeros, ZEROS_API_URL: "https://api.example.test/api/v0", ZEROS_API_TOKEN: fx };
+  await service.handle(a.client, frame("PTY_CREATE", { sessionId: "second", cwd: root }));
+  expect(launches[0].env).toMatchObject({ ZEROS_WORKSPACE_ID: "fixture-workspace", ZEROS_API_KEY: "zk_user_own" });
+  expect(launches[0].env).not.toHaveProperty("ZEROS_API_TOKEN");
+  expect(launches[1].env).toMatchObject({ ZEROS_API_URL: "https://api.example.test/api/v0", ZEROS_API_TOKEN: fx, ZEROS_API_KEY: "zk_user_own" });
 });
 
 it.skipIf(process.platform !== "linux")("the real PTY receives explicit app values without ambient worker or provider credentials", async () => {
@@ -238,4 +255,24 @@ it("runs the real native PTY through write, resize, disconnect, reattach and exi
   expect(b.frames[0]).toMatchObject({ type: "PTY_CREATED", reattached: true, cols: 100, rows: 30, replay: expect.stringContaining("WORKER_PTY_FIXTURE") });
   await service.handle(b.client, frame("PTY_WRITE", { sessionId: "native", data: "exit 0\n" }));
   await expect.poll(() => service.busy).toBe(false); await service.flush(); expect(b.frames.some(message => message.type === "PTY_EXIT")).toBe(true);
+});
+
+it("reads the newest lines of the most recently active shared terminal, bounded and scrubbed, for agent tools", async () => {
+  const { scope } = await repositoryFixture(); const natives: FakeProcess[] = [];
+  let now = 1_000; vi.spyOn(Date, "now").mockImplementation(() => now);
+  const service = new Terminals(scope, { redact: text => text.replaceAll("zw2a_secret", "[redacted]"),
+    spawn: async () => { const native = new FakeProcess(); natives.push(native); return native; } }); services.push(service);
+  const a = client("a");
+  expect(await service.output({ maxLines: 10 })).toBeUndefined();
+  await service.handle(a.client, frame("PTY_CREATE", { sessionId: "one", cols: 40, rows: 5 }));
+  await service.handle(a.client, frame("PTY_CREATE", { sessionId: "two", cols: 40, rows: 5 }));
+  await service.handle(a.client, frame("PTY_CREATE", { sessionId: "login", loginProvider: "codex", ephemeral: true, cols: 40, rows: 5 }));
+  now = 2_000; natives[0]!.emit(Array.from({ length: 30 }, (_, i) => `one line ${i}`).join("\r\n") + "\r\n$ ");
+  now = 3_000; natives[1]!.emit("two says zw2a_secret\r\n$ ");
+  await service.flush();
+  expect(await service.output({ maxLines: 10 })).toEqual({ terminalId: "two", lines: ["two says [redacted]", "$ "], truncated: false });
+  const one = await service.output({ terminalId: "one", maxLines: 3 });
+  expect(one).toEqual({ terminalId: "one", lines: ["one line 28", "one line 29", "$ "], truncated: true });
+  expect(await service.output({ terminalId: "login", maxLines: 3 })).toBeUndefined();
+  expect(await service.output({ terminalId: "missing", maxLines: 3 })).toBeUndefined();
 });

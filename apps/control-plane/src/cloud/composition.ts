@@ -40,6 +40,9 @@ import { readRuntimeCanary, workspaceRuntimeResolver } from "./runtime-canary-st
 import { RuntimeHandoffStore } from "./runtime-handoff-store.js";
 import { buildDrainActive } from "./runtime-build-drain.js";
 import { RuntimeAdoption } from "./runtime-adoption.js";
+import { CloudApiCredentials } from "./api/credentials.js";
+import { CloudWorkspaceApiTokens } from "./api/workspace-tokens.js";
+import { CloudApiService } from "./api/service.js";
 
 const PROXY_TOKEN_TTL_MS = 24 * 60 * 60_000;
 
@@ -91,6 +94,11 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   }));
   const keys = cloudAgentCredentialKeys(config.cloudAgentCredentials ?? null);
   if (!keys) throw new Error("Cloud v2 requires the credential encryption keyring");
+  const apiCredentials = new CloudApiCredentials(pool), apiTokens = new CloudWorkspaceApiTokens(pool, keys);
+  const apiConfiguration = async (workspaceId: string) => {
+    const token = await apiTokens.token(workspaceId);
+    return token ? { url: `${v2.apiUrl}/api/v0`, token } : undefined;
+  };
   const signer = new CloudV2WorkerSigner(v2.workerSigningKey, v2.workerSigningKeyPrevious);
   const logins = createCloudV2AgentLogins(pool, keys);
   const github = createCloudGithubServices(pool, config.github, keys, store);
@@ -181,7 +189,10 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     promptOutbox: v2.promptOutbox === true,
   };
   const proxy: CloudV2ProxyDeps = { store, logins, authorizeSource, continueSource, ...(keys ? { refreshCodex: createCloudV2CodexRefresh(pool, keys) } : {}) };
+  const api = { credentials: apiCredentials,
+    service: new CloudApiService({ store, routes, credentials: apiCredentials, appBaseUrl: new URL(config.inviteLinkBase).origin }) };
   const connections = roles.relay || roles.lifecycle ? new CloudV2Relay({
+    apiConfiguration,
     store, timing, authorizeSource, continueSource, ...(securityEvents ? { securityEvents } : {}),
     runtimeAdmission: runtimeHandoffs,
     config: async (workspace, mode = "admission", proof) => {
@@ -209,6 +220,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   const relay = roles.relay ? connections : null;
   const promptSignals = new CloudV2PromptSignals();
   const workers: CloudV2WorkerRouteDeps = { store, timing, logger: console, authorizeSource, continueSource, config: workerConfig, githubToken, runtimeSha256: v2.runtime.sha256,
+    apiConfiguration,
     runtimeUpdates, runtimeHandoffs,
     runtimeSha256ForWorkspace: async workspace => (await runtimeForWorkspace(workspace)).sha256,
     environmentReport: (token, bootId, value) => environments.report(token, bootId, value),
@@ -311,5 +323,5 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     onNotification: () => lifecycle.wake(),
   }) : null;
   void lifecycleChanges?.start().catch(() => {});
-  return { store, compute, routes, proxy, workers, relay, connections, lifecycle, runtimeUpdates, loginChanges, promptChanges, lifecycleChanges, promptSignals };
+  return { store, compute, routes, proxy, workers, api, relay, connections, lifecycle, runtimeUpdates, loginChanges, promptChanges, lifecycleChanges, promptSignals };
 }

@@ -13,6 +13,7 @@ const f = vi.hoisted(() => ({
   securityConstructor: vi.fn(), securityStart: vi.fn(), securityNotify: vi.fn(), securityStop: vi.fn(async () => {}),
   brokerConstructor: vi.fn(), broker: { stop: vi.fn(async () => {}) },
   cloud: vi.fn(), lifecycle: { start: vi.fn() }, lifecycleStop: vi.fn(async () => {}),
+  api: { credentials: { close: vi.fn(async () => {}) }, service: {} },
   runtimeUpdates: { close: vi.fn() },
   loginChanges: { stop: vi.fn(async () => {}) }, relay: { close: vi.fn(), handleUpgrade: vi.fn() },
   promptChanges: { stop: vi.fn(async () => {}) }, promptSignals: { wakeAll: vi.fn() },
@@ -73,7 +74,7 @@ beforeEach(() => {
   f.startWorkos.mockReturnValue(f.workos); f.securityStart.mockReturnValue(f.securityStop);
   f.notifications.mockReturnValue(f.stopNotifications); f.lifecycle.start.mockReturnValue(f.lifecycleStop);
   f.cloud.mockImplementation((config, _pool, roles) => config.cloudV2 ? {
-    routes: f.routes, proxy: f.proxy, connections: f.relay, workers: {}, relay: roles.relay ? f.relay : null,
+    routes: f.routes, proxy: f.proxy, api: f.api, connections: f.relay, workers: {}, relay: roles.relay ? f.relay : null,
     lifecycle: roles.lifecycle ? f.lifecycle : null, loginChanges: roles.relay ? f.loginChanges : null,
     runtimeUpdates: f.runtimeUpdates,
     promptChanges: config.cloudV2.promptOutbox ? f.promptChanges : null, promptSignals: f.promptSignals,
@@ -98,6 +99,8 @@ describe("account workers and cloud v2 boot composition", () => {
     expect(f.cloud).toHaveBeenCalledExactlyOnceWith(expect.anything(), f.apiPool,
       { relay: role === "realtime", lifecycle: false }, f.broker, f.listenerPool);
     expect(f.createApp.mock.calls[0]![3]).toMatchObject({ securityEventBroker: f.broker });
+    if (role === "api") expect(f.createApp.mock.calls[0]![3]).toMatchObject({ cloudApi: f.api });
+    else expect(f.createApp.mock.calls[0]![3]).not.toHaveProperty("cloudApi");
   });
 
   it("uses the worker pool and keeps account work enabled without cloud", async () => {
@@ -162,7 +165,9 @@ describe("account workers and cloud v2 boot composition", () => {
     expect(f.cloud).toHaveBeenCalledExactlyOnceWith(expect.anything(), f.workerPool, { relay: true, lifecycle: true }, f.broker, f.listenerPool, f.lockPool);
     expect(f.lifecycle.start).toHaveBeenCalledOnce();
     let releasePromptListener!: () => void;
+    let releaseApiUsage!: () => void;
     f.promptChanges.stop.mockImplementationOnce(() => new Promise<void>(resolve => { releasePromptListener = resolve; }));
+    f.api.credentials.close.mockImplementationOnce(() => new Promise<void>(resolve => { releaseApiUsage = resolve; }));
     const shutdown = process.listeners("SIGTERM").find(listener => !oldTerm.includes(listener))!;
     shutdown("SIGTERM"); await vi.advanceTimersByTimeAsync(0);
     expect(f.runtimeUpdates.close).toHaveBeenCalledOnce();
@@ -171,9 +176,12 @@ describe("account workers and cloud v2 boot composition", () => {
     expect(f.loginChanges.stop).toHaveBeenCalledOnce(); expect(f.broker.stop).toHaveBeenCalledOnce();
     expect(f.stopNotifications).toHaveBeenCalledOnce(); expect(f.workos.stop).toHaveBeenCalledOnce(); expect(f.securityStop).toHaveBeenCalledOnce();
     expect(f.promptSignals.wakeAll).toHaveBeenCalledOnce(); expect(f.promptChanges.stop).toHaveBeenCalledOnce();
+    expect(f.api.credentials.close).toHaveBeenCalledOnce();
     expect(f.promptSignals.wakeAll.mock.invocationCallOrder[0]).toBeLessThan(f.server.close.mock.invocationCallOrder[0]!);
     for (const pool of [f.apiPool, f.workerPool, f.listenerPool, f.lockPool]) expect(pool.end).not.toHaveBeenCalled();
     releasePromptListener(); await vi.advanceTimersByTimeAsync(0);
+    for (const pool of [f.apiPool, f.workerPool, f.listenerPool, f.lockPool]) expect(pool.end).not.toHaveBeenCalled();
+    releaseApiUsage(); await vi.advanceTimersByTimeAsync(0);
     for (const pool of [f.apiPool, f.workerPool, f.listenerPool, f.lockPool]) expect(pool.end).toHaveBeenCalledOnce();
     expect(exit).toHaveBeenCalledWith(0);
   });

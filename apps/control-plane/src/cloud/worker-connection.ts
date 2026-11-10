@@ -6,6 +6,7 @@ import type { CloudV2Workspace } from "./store.js";
 export type WorkerRoute = { workspace: CloudV2Workspace; accessEpoch: string; url: string | null; token: string | null; bootId: string | null;
   workerTokenHash?: string | null; stopBootIds?: readonly string[] };
 const peerFeatures = new WeakMap<WebSocket, ReadonlySet<string>>();
+export const workerSupportsApi = (socket: WebSocket): boolean => peerFeatures.get(socket)?.has("workspace-api-v1") ?? false;
 export const workerSupportsMcp = (socket: WebSocket): boolean => peerFeatures.get(socket)?.has("mcp-v1") ?? false;
 export const workerSupportsSetup = (socket: WebSocket): boolean => peerFeatures.get(socket)?.has("workspace-setup-v1") ?? false;
 export const workerSupportsRepositorySetup = (socket: WebSocket): boolean => peerFeatures.get(socket)?.has("repository-setup-v1") ?? false;

@@ -1,0 +1,9 @@
+{
+  "id": "cloud-worker-child-oom-stops-unit",
+  "kind": "replay",
+  "area": "control-plane",
+  "fixedBy": "pr:983",
+  "symptom": "A child of the cloud worker exhausted the VM's memory. The kernel killed that child, and systemd's default OOMPolicy=stop then failed the whole worker service, cancelling the running turn and ending every terminal.",
+  "rule": "The worker unit sets OOMPolicy=continue, and the installer upgrades an older unit without restarting a running worker; a kernel OOM kill inside a service's cgroup stops the unit unless the unit says otherwise.",
+  "check": "pnpm --dir apps/control-plane exec vitest run src/cloud/runtime.test.ts -t 'leaves an unchanged VM untouched without any privileged command'"
+}

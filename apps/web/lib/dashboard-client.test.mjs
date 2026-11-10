@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  apiKeysHtml,
+  createApiKeyDialogHtml,
+  createdApiKeyDialogHtml,
+  createApiKeyActions,
   billingHtml,
   cloudOrganizations,
   collaborationSectionDisabled,
@@ -38,6 +42,83 @@ import {
   shouldRevalidateSecurityLifecycle,
   tryWriteClipboard,
 } from "../public/dashboard.js";
+
+test("API keys show only metadata and scope actions to the owner or an organization admin", () => {
+  const keys = [
+    { id: "own", name: "Build <script>", ownerUserId: "u1", ownerName: "Ada", prefix: "zk_abcd", createdAt: "2026-11-10T00:00:00Z", lastUsedAt: null, key: "private-never-render" },
+    { id: "other", name: "Bot", ownerUserId: "u2", ownerName: "Grace", prefix: "zk_efgh", createdAt: "2026-11-09T00:00:00Z", lastUsedAt: "2026-11-10T00:00:00Z" },
+  ];
+  const member = apiKeysHtml({ organization: { role: "member", workspaceCapabilities: { cloud: true } }, userId: "u1", data: { apiKeys: keys } });
+  assert.match(member, /Build &lt;script&gt;/);
+  assert.match(member, /zk_abcd/); assert.match(member, /Never used/);
+  assert.match(member, /data-revoke-api-key="own"/);
+  assert.doesNotMatch(member, /Bot|Grace|private-never-render|<script>/);
+  const admin = apiKeysHtml({ organization: { role: "admin", workspaceCapabilities: { cloud: true } }, userId: "u1", data: { apiKeys: keys } });
+  assert.match(admin, /data-revoke-api-key="other"/); assert.match(admin, /Grace/);
+  assert.doesNotMatch(admin, /private-never-render/);
+  const empty = apiKeysHtml({ organization: { role: "member", workspaceCapabilities: { cloud: true } }, userId: "u1", data: { apiKeys: [] } });
+  assert.match(empty, /No API keys yet/);
+  assert.equal([...empty.matchAll(/data-action="create-api-key"/g)].length, 1);
+  assert.equal(collaborationSectionDisabled({ isPersonal: true }, "api-keys"), true);
+});
+
+test("key dialogs use the existing fields and show the secret only in a client-filled read-only input", () => {
+  const create = createApiKeyDialogHtml("Acme <script>");
+  assert.match(create, /Acme &lt;script&gt;/);
+  assert.match(create, /name="name"[^>]*maxlength="80"[^>]*required/);
+  assert.match(create, /id="create-api-key-form"/);
+  const shown = createdApiKeyDialogHtml();
+  assert.match(shown, /won’t be able to see it again/);
+  assert.match(shown, /data-api-key-secret[^>]*readonly/);
+  assert.match(shown, /data-action="copy-api-key"/);
+  assert.doesNotMatch(shown, /value="zk_/);
+});
+
+test("organizations without cloud access can revoke keys but cannot create unusable ones", () => {
+  const organization = { role: "owner", workspaceCapabilities: { local: true, cloud: false } };
+  for (const apiKeys of [[], [{ id: "own", name: "Old key", ownerUserId: "u1", prefix: "zk_abcd" }]]) {
+    const html = apiKeysHtml({ organization, userId: "u1", data: { apiKeys } });
+    assert.match(html, /Cloud workspaces are not enabled for this organization/);
+    assert.doesNotMatch(html, /data-action="create-api-key"/);
+    if (apiKeys.length) assert.match(html, /data-revoke-api-key="own"/);
+  }
+});
+
+test("key creation never reveals a late credential after close or an A to B to A owner switch", async () => {
+  let active = { organizationId: "A", userId: "u1" }, pending, shown = null;
+  const changed = [], requests = [];
+  const actions = createApiKeyActions({ scope: () => active, request: (path, options) => {
+    requests.push({ path, options });
+    return new Promise(resolve => { pending = resolve; });
+  }, changed: org => changed.push(org), reveal: key => { shown = key; }, hide: () => { shown = null; } });
+  const create = actions.create("Automation");
+  assert.equal(requests[0].path, "/v1/organizations/A/api-keys");
+  assert.deepEqual(requests[0].options, { method: "POST", body: { name: "Automation" } });
+  active = { organizationId: "B", userId: "u1" }; actions.reset();
+  active = { organizationId: "A", userId: "u1" }; actions.reset();
+  pending({ apiKey: { id: "key" }, key: `zk_${"a".repeat(43)}` });
+  await create;
+  assert.equal(shown, null); assert.deepEqual(changed, ["A"]);
+  const same = actions.create("Visible once");
+  pending({ apiKey: { id: "next" }, key: `zk_${"b".repeat(43)}` });
+  await same;
+  assert.equal(typeof shown, "string");
+  actions.reset(); assert.equal(shown, null);
+  const closed = actions.create("Closed while saving");
+  actions.reset();
+  pending({ apiKey: { id: "closed" }, key: `zk_${"c".repeat(43)}` });
+  await closed; assert.equal(shown, null);
+});
+
+test("a late key creation error cannot replace another account's dialog", async () => {
+  let active = { organizationId: "A", userId: "u1" }, reject;
+  const actions = createApiKeyActions({ scope: () => active,
+    request: () => new Promise((_resolve, fail) => { reject = fail; }), changed() {}, reveal() { assert.fail("No key was created"); }, hide() {} });
+  const saving = actions.create("Old account");
+  active = { organizationId: "A", userId: "u2" };
+  reject(new Error("Old account error"));
+  await saving;
+});
 
 test("a truncated workspace repair snapshot forces discovery refresh even when its bounded prefix is unchanged",()=>{
   const before={account:{id:"account",revision:1},session:{id:"session"},organizations:[],workspaces:[{id:"workspace",role:"viewer",accessRevision:1}],workspacesTruncated:true,cursor:1};

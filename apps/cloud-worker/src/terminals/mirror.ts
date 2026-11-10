@@ -112,6 +112,25 @@ export class TerminalMirror {
     return { data, truncated: data.length > 0, bytes };
   }
 
+  /** Plain text for agent tools: the newest logical lines of the active
+   * screen and its retained scrollback, joined across soft wraps. */
+  async lines(maxLines: number, maxBytes: number): Promise<{ lines: string[]; truncated: boolean }> {
+    await this.flush();
+    const buffer = this.term.buffer.active, logical: string[] = [];
+    for (let index = 0; index < buffer.length; index++) {
+      const line = buffer.getLine(index);
+      if (!line) continue;
+      const text = line.translateToString(true);
+      if (line.isWrapped && logical.length) logical[logical.length - 1] += text;
+      else logical.push(text);
+    }
+    while (logical.length && !logical[logical.length - 1].trim()) logical.pop();
+    let lines = logical.slice(-maxLines), bytes = lines.reduce((sum, line) => sum + Buffer.byteLength(line) + 1, 0);
+    let truncated = logical.length > lines.length;
+    while (lines.length > 1 && bytes > maxBytes) { bytes -= Buffer.byteLength(lines[0]) + 1; lines = lines.slice(1); truncated = true; }
+    return { lines, truncated };
+  }
+
   dispose(): void {
     try {
       this.serializer.dispose();

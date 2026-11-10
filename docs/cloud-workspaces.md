@@ -477,6 +477,62 @@ Computer settings. Its workspace execution begins only after environment files
 are durably seeded and the ready report is confirmed. Environment selection
 alone never opts into repository code or private repository settings files.
 
+## Workspace API, agent tools and resources
+
+Workers advertising `workspace-api-v1` may receive an optional `api` field
+(`https` base URL and a `zw2a_` workspace token) in their configuration. The
+token is fixed for one VM run, so a repeated configuration changes nothing and
+never respawns agents or shells. Agents receive `ZEROS_WORKSPACE_ID` and their
+chat id as `ZEROS_SESSION_ID`; terminals receive `ZEROS_WORKSPACE_ID`. Only a
+delivered `api` adds `ZEROS_API_URL` and `ZEROS_API_TOKEN`. Setup scripts get
+none of them. The token is redacted like application values, including saved
+terminal screens. `ZEROS_API_KEY` is the one `ZEROS_` name users may set.
+
+The runtime ships `zeros cloud` (`/opt/zeros/worker/bin/zeros`, already first
+on `PATH`), which prefers `ZEROS_API_KEY` over the token and explains when API
+access is not enabled. Every agent execution receives the `zeros_workspace`
+MCP server with read-only, size-bounded `GetTerminalOutput` and
+`GetWorkspaceDiff` (the Changes view's All comparison); code review tools join
+only while review is enabled, and Stop retires only grants that carry them.
+
+`WORKSPACE_REQUEST` `workspace.resources` returns CPU, memory and disk usage,
+sampled only when asked; workers advertise it with the `ENGINE_READY`
+capability `workspace-resources-v1`. A memory watchdog reads `/proc/meminfo`
+every second, and every 200 ms while available memory is under 15 %. Under 15 %
+it raises unprotected descendants' `oom_score_adj` (restored once memory
+recovers), so a kernel OOM kill that wins the race still picks one of them.
+When available memory is below the larger of 5 % and 256 MiB on two consecutive
+samples, it stops the largest one of at least 128 MiB, one every two seconds. It never signals the worker, its ancestors or direct children, the
+runtime's agent CLIs or a login shell, and it reports what it stopped in the
+owning chat or terminal. Local Personal and organization-local workspaces are
+unchanged.
+
+The worker's unit sets `OOMPolicy=continue`. systemd's default (`stop`) fails
+the whole service when the kernel OOM-kills any process in its cgroup, which
+ended every turn and terminal for one runaway child. The create and wake
+installer writes the unit; running workers are never restarted for it and take
+it at their next wake. A workspace cloned from a Cloud Computer snapshot built
+before this unit pays one unit repair on its first boot, until that snapshot
+is rebuilt for a newer runtime.
+
+On the desktop, a cloud workspace's details popup shows Environment (Zeros
+Cloud), Status with a Restart action (`POST /v1/cloud-v2/workspaces/:id/restart`)
+for managers of a running workspace, and CPU, memory and disk. Usage is asked
+only while the popup is open on a running workspace whose worker advertises
+`workspace-resources-v1`, every five seconds; an older worker simply shows no
+usage rows. Settings, General has a "Workspace API access" switch for each
+cloud organization (`/v1/cloud-v2/organizations/:org/api-access`); it applies
+to new workspaces and is hidden for the Local owner. A first API message can
+name its chat: workers advertising `session-name-v1` take the delivery's
+`sessionName` as the title only when that delivery creates the chat.
+Workers advertising `chat-edit-v1` also receive `chatEdits` (title and/or
+archived) on the prompt pull. After that reply's deliveries they apply each
+edit to a chat they already have, once per version (recorded in the chat's
+session file), leave `updatedAt` unchanged, and acknowledge it in the history
+frame that carries the edited row. An edit for an unknown chat is not
+acknowledged and is offered again; a version already applied is acknowledged
+again without a change.
+
 ## Credentials and history
 
 Settings → Agents stores encrypted logins in the control plane. The creator's

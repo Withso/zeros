@@ -1,5 +1,8 @@
 import type pg from "pg";
 import { createHash } from "node:crypto";
+import { CloudApiReads } from "./api/reads.js";
+import { acknowledgeCloudChatEdits, CloudV2ChatEdits, overlayCloudChatEdits } from "./chat-edits.js";
+import type { ApiWorkspaceList } from "./api/contract.js";
 import { withSystemStatement, withSystemTx, type Tx } from "../db.js";
 import { sql, SqlFragment } from "../sql-fragment.js";
 import type { AuthedUser } from "../auth.js";
@@ -9,7 +12,7 @@ import type { CloudV2HistoryState, CloudV2MessageRow } from "./contract.js";
 import { hashCloudV2Token, newCloudV2Token } from "./tokens.js";
 import { CLOUD_V2_CREATOR_ON_HOLD, CLOUD_V2_LIVE_ACCESS as LIVE_ACCESS, CLOUD_V2_LIVE_ACCESS_SQL } from "./workspace-access.js";
 import { memberOnHoldSql, organizationMemberOnHold } from "../organization-seats.js";
-import { CloudV2PromptOutbox } from "./prompt-outbox.js";
+import { CloudV2PromptOutbox, type CloudApiPrompt } from "./prompt-outbox.js";
 import { computerSourceReviewRequired, readComputerSourceTargets } from "./computer-provenance.js";
 import { CloudSourceTargetSchema, type CloudSourceTarget } from "./source-authority.js";
 import { pinCloudEnvironment, releaseCloudEnvironment } from "./environment-store.js";
@@ -31,6 +34,8 @@ type CreateWorkspace = {
   id: string; organizationId: string; creatorUserId: string; name: string; repository: string; branch: string;
   baseBranch: string; computerBuildId: string | null;
   sourceRepositoryId?: string;
+  initialPrompt?: CloudApiPrompt;
+  workspaceTokenCreate?: true;
   /** GitHub repository IDs the creator was just verified to read. */
   readableRepositoryIds?: readonly string[];
   runtimeCanary?: RuntimeCanaryAdmission;
@@ -41,6 +46,7 @@ type CreateWorkspace = {
 type CreateReceipt = { status: 201; response: Record<string, unknown> };
 type HistoryInput = {
   chats?: readonly { id: string }[] | undefined; chatDeletions?: readonly string[] | undefined;
+  chatEditAcks?: readonly { chatId: string; version: string }[] | undefined;
   messages?: { chatId: string; rows: readonly CloudV2MessageRow[]; replace?: true | undefined; historyState?: CloudV2HistoryState | undefined } | undefined;
 };
 export type CloudV2WorkerSession = CloudV2Workspace & {
@@ -294,18 +300,25 @@ function firstWorkspaceTitle(chats: readonly unknown[]): string | null {
 
 export class CloudV2Store {
   readonly prompts: CloudV2PromptOutbox;
-  constructor(private readonly pool: pg.Pool) { this.prompts = new CloudV2PromptOutbox(pool); }
+  readonly api: CloudApiReads;
+  readonly chatEdits: CloudV2ChatEdits;
+  constructor(private readonly pool: pg.Pool) {
+    this.prompts = new CloudV2PromptOutbox(pool);
+    this.api = new CloudApiReads(pool);
+    this.chatEdits = new CloudV2ChatEdits(pool);
+  }
 
   async createWorkspace(input: CreateWorkspace): Promise<CloudV2Workspace> {
     return withSystemTx(this.pool, tx => this.insertWorkspace(tx, input));
   }
 
   /** Shared by insertion and a pending create's resolution. */
-  private async admitCreator(tx: Tx, organizationId: string, creatorUserId: string): Promise<void> {
+  private async admitCreator(tx: Tx, organizationId: string, creatorUserId: string, serializeCreates = false): Promise<void> {
     const member = await tx.query<{ pro: boolean; held: boolean }>(
       `SELECT account_pro_active(m.user_id) AS pro, ${memberOnHoldSql("m.org_id", "m.user_id")} AS held
        FROM organization_members m JOIN organizations o ON o.id = m.org_id AND o.deleted_at IS NULL
-       WHERE m.org_id = $1 AND m.user_id = $2 AND NOT o.is_personal AND o.cloud_workspaces_allowed FOR SHARE OF o,m`,
+       WHERE m.org_id = $1 AND m.user_id = $2 AND NOT o.is_personal AND o.cloud_workspaces_allowed
+       FOR SHARE OF o ${serializeCreates ? "FOR UPDATE OF m" : "FOR SHARE OF m"}`,
       [organizationId, creatorUserId],
     );
     if (!member.rows[0]) throw new HttpError(404, "not_found", "Organization not found");
@@ -348,19 +361,32 @@ export class CloudV2Store {
     if (pending && (!input.computerBuildId || input.sourceRepositoryId !== undefined || input.runtimeCanary))
       throw new Error("A pending create needs a Computer build and no verified source");
     let sourceRepositoryId = input.sourceRepositoryId, scope: readonly CloudSourceTarget[] | undefined;
-    await this.admitCreator(tx, input.organizationId, input.creatorUserId);
+    await this.admitCreator(tx, input.organizationId, input.creatorUserId, input.workspaceTokenCreate);
+    if (input.workspaceTokenCreate) {
+      // Membership locking serializes this budget across tokens and replicas;
+      // the fresh statement also sees any creator admitted before the lock.
+      const budget = (await tx.query<{ count: number; retry_after: number }>(`SELECT count(*)::int AS count,
+        greatest(1,ceil(extract(epoch FROM min(created_at)+interval '1 hour'-statement_timestamp())))::int AS retry_after
+        FROM (SELECT created_at FROM cloud_v2_workspaces WHERE org_id=$1 AND creator_user_id=$2
+          AND created_at>statement_timestamp()-interval '1 hour' ORDER BY created_at DESC LIMIT 10) recent`,
+      [input.organizationId, input.creatorUserId])).rows[0]!;
+      if (budget.count >= 10) throw new HttpError(429, "workspace_create_limit", "Workspace token creation limit reached for this user and organization",
+        { retryAfterSeconds: budget.retry_after });
+    }
     if (input.computerBuildId)
       ({ sourceRepositoryId, scope } = await this.computerScope(tx, input.organizationId, input.computerBuildId, input.repository,
         input.sourceRepositoryId, input.readableRepositoryIds));
     const row = (await tx.query<Row>(
-      `INSERT INTO cloud_v2_workspaces (id, org_id, creator_user_id, name, repository, branch, base_branch, state, computer_build_id, source_repositories, source_pending)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, 'creating', $8, $9::text[], $10) RETURNING ${COLUMNS}`,
+      `INSERT INTO cloud_v2_workspaces (id, org_id, creator_user_id, name, repository, branch, base_branch, state, computer_build_id, source_repositories, source_pending, api_access)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'creating', $8, $9::text[], $10,
+         coalesce((SELECT workspace_api_access FROM cloud_api_access_settings WHERE org_id=$2 AND user_id=$3),true)) RETURNING ${COLUMNS}`,
       [input.id, input.organizationId, input.creatorUserId, input.name, input.repository, input.branch,
         input.baseBranch, input.computerBuildId,
         pending ? null : (scope ?? [{ repository: input.repository }]).map(source => source.repository.toLowerCase()), pending],
     )).rows[0]!;
     if (!pending && sourceRepositoryId !== undefined) await this.bindSources(tx, workspace(row), sourceRepositoryId, scope);
     if (input.runtimeCanary) await consumeRuntimeCanary(tx, workspace(row), input.runtimeCanary, sourceRepositoryId, createKey);
+    if (input.initialPrompt) await this.prompts.enqueueApi(row.id, input.creatorUserId, input.initialPrompt, tx);
     return workspace(row);
   }
 
@@ -447,28 +473,59 @@ export class CloudV2Store {
     return rows.map(workspace);
   }
 
+  async listApiWorkspaces(organizationId: string, userId: string, page: ApiWorkspaceList): Promise<CloudV2Workspace[]> {
+    const { rows } = await withSystemTx(this.pool, tx => tx.query<Row>(
+      `SELECT ${COLUMNS} FROM cloud_v2_workspaces w WHERE w.org_id=$1 AND w.creator_user_id=$2
+        AND w.state<>'deleted' AND ${LIVE_ACCESS} AND ($3::boolean OR w.archived_at IS NULL)
+        AND ($4::text IS NULL OR w.state=$4) AND ($5::text IS NULL OR lower(w.repository)=lower($5))
+        AND ($6::text IS NULL OR strpos(lower(w.name || ' ' || coalesce(w.title,'')),lower($6))>0)
+        ORDER BY w.created_at DESC,w.id LIMIT $7 OFFSET $8`,
+      [organizationId, userId, page.includeArchived, page.state ?? null, page.repository ?? null, page.name ?? null, page.limit + 1, page.offset]));
+    return rows.map(workspace);
+  }
+
+  rename(id: string, userId: string, title: string): Promise<CloudV2Workspace> {
+    return withSystemTx(this.pool, async tx => {
+      await ownedRow(tx, id, userId, true);
+      const { rows } = await tx.query<Row>(`UPDATE cloud_v2_workspaces w SET title=$3,updated_at=clock_timestamp()
+        WHERE w.id=$1 AND w.creator_user_id=$2 AND ${LIVE_ACCESS} RETURNING ${COLUMNS}`, [id, userId, title]);
+      if (!rows[0]) throw notFound();
+      return workspace(rows[0]);
+    });
+  }
+
   /** Serialize a creator's intent with lifecycle progress. Flag-only changes
    * advance the document version without rescheduling a pending stop. A wake
    * revokes the suspended boot before Boat can resume its old service. */
-  async requestLifecycle(id: string, userId: string, action: "start" | "stop" | "archive"):
+  async requestLifecycle(id: string, userId: string, action: "start" | "stop" | "archive" | "restart"):
     Promise<{ workspace: CloudV2Workspace; moved: boolean }> {
     return withSystemTx(this.pool, async tx => {
       const current = await ownedRow(tx, id, userId, true);
+      await ownedRow(tx, id, userId);
+      const intent = (await tx.query<{ stop_generation: string; restart_stop_generation: string | null }>(
+        "SELECT stop_generation::text,restart_stop_generation::text FROM cloud_v2_workspaces WHERE id=$1", [id])).rows[0]!;
+      const priorRestart = intent.restart_stop_generation;
+      if (action === "restart" && (current.state === "deleting" || current.state === "creating" && current.boat_sandbox_id === null))
+        throw new HttpError(409, "workspace_unavailable", "This cloud workspace cannot be restarted yet");
       if (action === "archive" && (current.state === "creating" || current.state === "deleting"))
         throw new HttpError(409, "workspace_unavailable", "This cloud workspace cannot be archived yet");
       // A bound first boot already owns its VM, even while configuration keeps
       // it in creating. Stop must win without racing an unassigned allocation.
-      const configuring = action === "stop" && current.state === "creating" && current.boat_sandbox_id !== null &&
-        (await tx.query("SELECT 1 FROM cloud_v2_workspaces WHERE id=$1 AND worker_boot_id IS NOT NULL", [id])).rowCount === 1;
-      const state = action === "start"
+      const configuring = (action === "stop" || action === "restart") && current.state === "creating" && current.boat_sandbox_id !== null &&
+        (action === "restart" || (await tx.query("SELECT 1 FROM cloud_v2_workspaces WHERE id=$1 AND worker_boot_id IS NOT NULL", [id])).rowCount === 1);
+      const starts = action === "start" || action === "restart" && (current.state === "stopped" || current.state === "failed");
+      const state = starts
         ? current.state === "stopped" || current.state === "failed" ? "starting" : current.state
         : current.state === "running" || current.state === "starting" || configuring ? "stopping" : current.state;
       const moved = state !== current.state;
       const archived = action === "archive" || (action === "stop" && current.archived_at !== null);
-      if (!moved && archived === (current.archived_at !== null)) return { workspace: workspace(current), moved };
+      const restart = state === "stopping" && action === "restart" ? (BigInt(intent.stop_generation) + (moved ? 1n : 0n)).toString()
+        : state === "stopping" && action === "start" && priorRestart === intent.stop_generation ? priorRestart : null;
+      if (!moved && archived === (current.archived_at !== null) && restart === priorRestart) return { workspace: workspace(current), moved };
       const { rows } = await tx.query<Row>(
         `UPDATE cloud_v2_workspaces SET
            archived_at = CASE WHEN $3::boolean THEN coalesce(archived_at, clock_timestamp()) ELSE NULL END,
+           restart_stop_generation = $4::bigint,
            attempts = CASE WHEN state <> $2 THEN 0 ELSE attempts END,
            next_attempt_at = CASE WHEN state <> $2 THEN NULL ELSE next_attempt_at END,
            worker_token_hash = CASE WHEN state <> $2 AND $2 = 'starting' THEN NULL ELSE worker_token_hash END,
@@ -477,7 +534,7 @@ export class CloudV2Store {
            updated_at = clock_timestamp(),
            state = $2
          WHERE id = $1 RETURNING ${COLUMNS}`,
-        [id, state, archived],
+        [id, state, archived, restart],
       );
       return { workspace: workspace(rows[0]!), moved };
     });
@@ -492,7 +549,9 @@ export class CloudV2Store {
     patch: { boatSandboxId?: string | null; expectedSandboxId?: string | null; errorCode?: string | null; stopGeneration?: string; revoke?: boolean; unarchived?: boolean } = {}): Promise<CloudV2Workspace | null> {
     return withSystemTx(this.pool, async tx => {
     const { rows } = await tx.query<Row>(
-      `UPDATE cloud_v2_workspaces SET state = $3,
+      `UPDATE cloud_v2_workspaces SET state = CASE WHEN state='stopping' AND $3='stopped'
+           AND restart_stop_generation=$8::bigint AND archived_at IS NULL AND $12::boolean THEN 'starting' ELSE $3 END,
+         restart_stop_generation = CASE WHEN $3 IN ('stopped','starting','failed','deleting','deleted') THEN NULL ELSE restart_stop_generation END,
          boat_sandbox_id = CASE WHEN $4::boolean THEN $5 ELSE boat_sandbox_id END,
          error_code = CASE WHEN $6::boolean THEN $7 ELSE error_code END,
          worker_token_hash = CASE WHEN $3 IN ('starting','deleted') THEN NULL ELSE worker_token_hash END,
@@ -514,7 +573,7 @@ export class CloudV2Store {
          AND (NOT $10::boolean OR boat_sandbox_id IS NOT DISTINCT FROM $11::text) RETURNING ${COLUMNS}`,
       [id, from, to, patch.boatSandboxId !== undefined, patch.boatSandboxId ?? null,
         patch.errorCode !== undefined, patch.errorCode ?? null, patch.stopGeneration ?? null, patch.unarchived ?? false,
-        patch.expectedSandboxId !== undefined, patch.expectedSandboxId ?? null],
+        patch.expectedSandboxId !== undefined, patch.expectedSandboxId ?? null, patch.revoke ?? false],
     );
     if (!rows[0]) return null;
     if (to === "deleted") await releaseCloudEnvironment(tx, id);
@@ -1163,11 +1222,18 @@ export class CloudV2Store {
 
   /** Mirror of the worker's history; the same rows Local persists. */
   async writeHistory(workspaceId: string, input: HistoryInput): Promise<void> {
-    await withSystemTx(this.pool, tx => this.mirrorHistory(tx, workspaceId, input));
+    await withSystemTx(this.pool, async tx => {
+      await tx.query("SELECT id FROM cloud_v2_workspaces WHERE id=$1 FOR UPDATE", [workspaceId]);
+      await this.mirrorHistory(tx, workspaceId, input);
+    });
   }
 
   private async mirrorHistory(tx: Tx, workspaceId: string, input: HistoryInput): Promise<void> {
-      for (const chat of input.chats ?? []) {
+      const ids = new Set(input.chats?.map(chat => chat.id));
+      if (input.chatEditAcks?.some(ack => !ids.has(ack.chatId)))
+        throw new HttpError(400, "invalid_request", "A chat edit acknowledgement requires its row in the same history batch");
+      const chats = await overlayCloudChatEdits(tx, workspaceId, input.chats ?? []);
+      for (const chat of chats) {
         await tx.query(
           `INSERT INTO cloud_v2_chats (workspace_id, chat_id, row) VALUES ($1, $2, $3::jsonb - 'historyState')
            ON CONFLICT (workspace_id, chat_id) DO UPDATE SET row = EXCLUDED.row ||
@@ -1178,12 +1244,13 @@ export class CloudV2Store {
       }
       // An Untitled workspace takes the first name one of its chats receives,
       // and keeps it. The version moves so clients replace their document.
-      const title = firstWorkspaceTitle(input.chats ?? []);
+      const title = firstWorkspaceTitle(chats);
       if (title) await tx.query(
         `UPDATE cloud_v2_workspaces SET title = $2, updated_at = clock_timestamp() WHERE id = $1 AND title IS NULL`,
         [workspaceId, title],
       );
       for (const chatId of input.chatDeletions ?? []) {
+        await tx.query("DELETE FROM cloud_v2_chat_edits WHERE workspace_id=$1 AND chat_id=$2", [workspaceId, chatId]);
         await tx.query(`DELETE FROM cloud_v2_messages WHERE workspace_id = $1 AND chat_id = $2`, [workspaceId, chatId]);
         await tx.query(
           `INSERT INTO cloud_v2_chats (workspace_id, chat_id, row, deleted_at) VALUES ($1, $2, jsonb_build_object('id', $2::text), clock_timestamp())
@@ -1210,6 +1277,7 @@ export class CloudV2Store {
           })))],
         );
       }
+      await acknowledgeCloudChatEdits(tx, workspaceId, input.chatEditAcks ?? []);
   }
 
   async listChats(workspaceId: string): Promise<{ chats: unknown[]; chatDeletions: string[] }> {

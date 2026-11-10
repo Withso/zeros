@@ -105,7 +105,7 @@ const cloudV2 = runtimeReady ? createCloudV2(config, workerPool ?? pool, {
 }, securityEventBroker, listenerPool, ...(computerLockPool ? [computerLockPool] : [])) : null;
 const stopCloudV2Lifecycle = cloudV2?.lifecycle?.start() ?? (async () => {});
 const app = createApp(config, pool, emailConfig, {
-  ...(cloudV2 && servesHttpApi ? { cloudV2: { routes: cloudV2.routes, proxy: cloudV2.proxy, workers: cloudV2.workers } } : {}),
+  ...(cloudV2 && servesHttpApi ? { cloudV2: { routes: cloudV2.routes, proxy: cloudV2.proxy, workers: cloudV2.workers }, cloudApi: cloudV2.api } : {}),
   securityEventBroker,
   migrationStatus: migrationResult.status,
   ...(workosProvider ? { workosProvider } : {}),
@@ -140,6 +140,7 @@ function shutdown(signal: string): void {
   cloudV2?.connections?.close();
   cloudV2?.promptSignals.wakeAll();
   const backgroundStopped = Promise.allSettled([
+    cloudV2?.api.credentials.close() ?? Promise.resolve(),
     stopCloudV2Lifecycle(), stopWorkerNotifications(), cloudV2?.loginChanges?.stop() ?? Promise.resolve(),
     cloudV2?.promptChanges?.stop() ?? Promise.resolve(), cloudV2?.lifecycleChanges?.stop() ?? Promise.resolve(),
     workosSync?.stop() ?? Promise.resolve(), securityEventBroker.stop(), stopSecurityEventPublisher(),

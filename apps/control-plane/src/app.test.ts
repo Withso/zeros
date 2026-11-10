@@ -551,6 +551,9 @@ describe("app assembly — healthz", () => {
       },
     );
     const paths = [
+      "/api/v0/me", "/api/v0/workspaces", "/api/mcp",
+      "/v1/organizations/11111111-1111-4111-8111-111111111111/api-keys",
+      "/v1/cloud-v2/organizations/11111111-1111-4111-8111-111111111111/api-access",
       "/v1/cloud-v2/workspaces", "/v1/cloud-v2/computers",
       "/v1/cloud-agent-credentials", "/v1/organizations/11111111-1111-4111-8111-111111111111/agent-connections",
       "/v1/auth/snapshot", "/v1/auth/events",

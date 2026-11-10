@@ -118,8 +118,9 @@ it.each([
     const prompt = () => relay.request(CLIENT_A, browserFrame("AGENT_PROMPT", { agentId: "claude", sessionId: created.session.sessionId, prompt: [{ type: "text", text: "fixture" }] }));
     await prompt(); await expect.poll(() => h.queries.length).toBe(1);
     const first = h.queries[0], sent = await first.read(), nativeId = first.args.options.sessionId!;
-    const expectedEnv = (login: typeof initial) => "oauthToken" in login
-      ? { CLAUDE_CODE_OAUTH_TOKEN: login.oauthToken } : { ANTHROPIC_API_KEY: login.apiKey };
+    // Worker-owned chat identity is always present; API variables only when delivered.
+    const expectedEnv = (login: typeof initial) => ({ ZEROS_WORKSPACE_ID: scope.workspace.id, ZEROS_SESSION_ID: "rotation", ...("oauthToken" in login
+      ? { CLAUDE_CODE_OAUTH_TOKEN: login.oauthToken } : { ANTHROPIC_API_KEY: login.apiKey }) });
     expect(JSON.stringify(first.args.options.env) === JSON.stringify(expectedEnv(initial))).toBe(true);
     await configure(replacement);
     expect(first.closed).toBe(false); expect(h.queries).toHaveLength(1);

@@ -26,7 +26,8 @@
     "workbench-status",
     "file-prefetch",
     "design-shadow-layers",
-    "design-gpu-canvas"
+    "design-gpu-canvas",
+    "cloud-workspace-details"
   ],
   [
     "design-motion-refinements",

@@ -24,6 +24,9 @@ const invalid = (message: string) => new WorkspaceError("VALIDATION_FAILED", mes
 
 /** One checkout-scoped writer queue. Ordinary reads never wait behind a
  * fetch, push or editor operation; every comparison has its own Git baseline. */
+const AGENT_DIFF_MAX_BYTES = 256 * 1024;
+const AGENT_DIFF_GIT_BYTES = 6 * 1024 * 1024;
+
 export class GitService {
   private readonly run: CommandRunner;
   private mutations = Promise.resolve();
@@ -168,6 +171,50 @@ export class GitService {
       for (const file of parseNumstat(rawStats)) { result.additions += file.additions; result.deletions += file.deletions; }
     }
     return result;
+  }
+
+  /** Read-only text for agents: the Changes view's All comparison (fork
+   * point against the worktree, plus untracked files), cut at maxBytes. */
+  async agentDiff(input: { stat?: boolean; file?: string }, limits: { maxBytes?: number; gitBytes?: number } = {}): Promise<{ text: string; truncated: boolean }> {
+    const maxBytes = limits.maxBytes ?? AGENT_DIFF_MAX_BYTES, gitBytes = limits.gitBytes ?? AGENT_DIFF_GIT_BYTES;
+    const paths = input.file === undefined ? [] : [this.scope.relative(input.file)];
+    const floor = await this.forkPoint() ?? await this.headOrEmpty();
+    const { untracked } = await this.status({ includeTracking: false, ...(paths.length ? { paths } : {}) });
+    const stat = async () => {
+      const letters: Record<string, string> = { added: "A", modified: "M", deleted: "D", renamed: "R" };
+      return [...(await this.metadata([floor], paths)).map(file =>
+        `${letters[file.status] ?? "M"} ${file.oldPath ? `${file.oldPath} -> ` : ""}${file.path} ${file.binary ? "(binary)" : `+${file.additions} -${file.deletions}`}\n`),
+      ...untracked.map(path => `A ${path} (untracked)\n`)];
+    };
+    const tooLarge = (error: unknown) => error instanceof WorkspaceError && error.code === "GIT_OUTPUT_TOO_LARGE";
+    const parts: string[] = [];
+    let truncated = false;
+    if (input.stat) parts.push(...await stat());
+    else {
+      const args = ["-c", "core.quotePath=false", "diff", "--no-ext-diff", "--no-textconv", "--no-color", "-U3"];
+      try { parts.push(await this.git([...args, floor, "--", ...this.literal(paths)], { readOnly: true, maxBuffer: gitBytes })); }
+      catch (error) {
+        if (!tooLarge(error)) throw error;
+        // An empty tracked section would read as "nothing changed": list the files instead.
+        return this.cut([...await stat(), "The full diff is too large to show. Ask for one file at a time with file.\n"].join(""), maxBytes, true);
+      }
+      let bytes = parts.reduce((sum, part) => sum + Buffer.byteLength(part), 0);
+      for (const path of untracked) {
+        if (bytes >= maxBytes) { truncated = true; break; }
+        this.scope.path(path);
+        try {
+          const patch = await this.git([...args, "--no-index", "--", "/dev/null", path], { readOnly: true, allowExitCodes: [1], maxBuffer: gitBytes });
+          parts.push(patch); bytes += Buffer.byteLength(patch);
+        } catch (error) { if (!tooLarge(error)) throw error; truncated = true; }
+      }
+    }
+    return this.cut(parts.join(""), maxBytes, truncated);
+  }
+
+  private cut(text: string, maxBytes: number, truncated: boolean): { text: string; truncated: boolean } {
+    if (Buffer.byteLength(text) <= maxBytes) return { text, truncated };
+    const cut = Buffer.from(text).subarray(0, maxBytes).toString("utf8").replace(/\uFFFD$/, "");
+    return { text: cut.slice(0, Math.max(0, cut.lastIndexOf("\n") + 1)) || cut, truncated: true };
   }
 
   private async read(op: string, params: Record<string, unknown>): Promise<unknown> {

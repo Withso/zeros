@@ -13,6 +13,7 @@ import { GithubCheckoutReporter, type ReportGithubCheckout } from "./github-chec
 import { reconcileGithubRemote } from "./github-remote";
 import type { WorkerCodeReview } from "./code-review";
 import { recordStartupTiming, type StartupTimingObserver } from "../startup-timings";
+import { ResourceSampler } from "../resources/sampler";
 
 export interface PrSummary { prNumber: number | null; prState: "draft" | "ready" | "merged" | "closed" | null; prUrl: string | null }
 const EMPTY_PR: PrSummary = { prNumber: null, prState: null, prUrl: null };
@@ -29,12 +30,14 @@ export interface WorkspaceServiceOptions {
   pollingAllowed?(): boolean;
   activity?(): void;
   onStartupTiming?: StartupTimingObserver;
+  resources?: Pick<ResourceSampler, "sample">;
 }
 
 /** Native wire contract from engine/workspace/service.ts and git/types.ts,
  * snapshot be2801b9. One primary row; the renderer owns cloud key translation. */
 export class WorkspaceService {
   readonly git: GitService;
+  private resources?: Pick<ResourceSampler, "sample">;
   readonly files: FileService;
   private readonly attachments: AttachmentTransfers;
   private readonly run: CommandRunner;
@@ -135,6 +138,7 @@ export class WorkspaceService {
         return { workspaces: [await this.row(params.withChanges === true)] };
       }
       case "workspace.get": return this.row();
+      case "workspace.resources": return (this.resources ??= this.options.resources ?? new ResourceSampler(this.scope.root)).sample();
       default: return unsupported();
     }
   }

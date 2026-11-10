@@ -26,7 +26,7 @@ function fixture(repositories: { repository: string; defaultBranch: string | nul
   const activeComputer = vi.fn(async () => repositories ? { buildId, repositories } : null);
   const createWorkspace = vi.fn(async (input: Record<string, unknown>) => ({ ...input, state: "creating" }));
   const authorizeSource = vi.fn(async () => {});
-  const get = vi.fn(async (id: string) => ({ id }));
+  const get = vi.fn(async (id: string) => ({ id, organizationId: org }));
   const readCreateReceipt = vi.fn<() => Promise<{ status: 201; response: Record<string, unknown> } | null>>(async () => null);
   const createWorkspaceOnce = vi.fn(async () => ({ status: 201 as const, response: { workspace: { id: "55555555-5555-4555-8555-555555555555", name: "original-source-receipt" } } }));
   const app = new Hono();
@@ -137,7 +137,7 @@ describe("cloud v2 creation", () => {
     expect(response.status).toBe(403);
     expect(await response.text()).not.toContain("original-source-receipt");
     expect(f.get).toHaveBeenCalledWith(receipt.response.workspace.id, member);
-    expect(f.authorizeSource).toHaveBeenCalledWith({ id: receipt.response.workspace.id });
+    expect(f.authorizeSource).toHaveBeenCalledWith({ id: receipt.response.workspace.id, organizationId: org });
   });
   it("persists the build's verified repository ID without resolving its reused name again", async () => {
     const f = fixture();
@@ -313,7 +313,7 @@ describe("cloud v2 creation", () => {
 
     it("keeps the creation key's receipt, replayed without a source check while pending", async () => {
       const f = pendingFixture();
-      f.get.mockResolvedValue({ id: "55555555-5555-4555-8555-555555555555", sourcePending: true } as never);
+      f.get.mockResolvedValue({ id: "55555555-5555-4555-8555-555555555555", organizationId: org, sourcePending: true } as never);
       expect((await f.create({}, "pending-key")).status).toBe(201);
       expect(f.createWorkspaceOnce).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ pendingSource: true }), "pending-key", expect.any(String), expect.any(Function));
       f.readCreateReceipt.mockResolvedValue({ status: 201, response: { workspace: { id: "55555555-5555-4555-8555-555555555555" } } });

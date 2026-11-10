@@ -12,7 +12,7 @@ import { CloudV2MessageRowSchema, type CloudV2MessageRow, type CloudV2HistorySta
 import { providerBindingForResume } from "@zeros/protocol/identities";
 import { coerceChat, messageWindow, upsertRows, type ChatRow, type MessageWindow } from "./chat-history";
 import { WorkspaceError } from "../workspace/scope";
-import { CloudV2PromptCounterSchema, CloudV2PromptStateSchema, type CloudV2PromptDelivery, type CloudV2PromptState } from "@zeros/protocol/cloud-v2-prompts";
+import { CloudV2PromptCounterSchema, CloudV2PromptStateSchema, type CloudV2ChatEdit, type CloudV2PromptDelivery, type CloudV2PromptState } from "@zeros/protocol/cloud-v2-prompts";
 import type { TurnInfo } from "@zeros/protocol/turns";
 import { messageSearchInput, MessageSearchIndex, MessageSearchError, boundMessageSearchHits, type MessageSearchDatabase, type MessageSearchHit } from "@zeros/protocol/agent-messages";
 
@@ -93,6 +93,8 @@ export interface SessionData {
   historyRevision?: number;
   historyBeforeEpoch?: string;
   continuation?: number;
+  /** chat-edit-v1: the newest control-plane edit applied to this chat. */
+  appliedChatEdit?: string;
 }
 export interface SessionChange {
   chatId: string;
@@ -212,6 +214,7 @@ export class SessionStore {
           (value.historyRevision !== undefined && (!Number.isSafeInteger(value.historyRevision) || value.historyRevision < 0)) ||
           (value.historyBeforeEpoch !== undefined && !CloudV2PromptCounterSchema.safeParse(value.historyBeforeEpoch).success) ||
           (value.continuation !== undefined && (!Number.isSafeInteger(value.continuation) || value.continuation < 0)) ||
+          (value.appliedChatEdit !== undefined && !CloudV2PromptCounterSchema.safeParse(value.appliedChatEdit).success) ||
           (value.resets !== undefined && (!Array.isArray(value.resets) || value.resets.length > 5 || value.resets.some(reset =>
             typeof reset.resetId !== "string" || !Array.isArray(reset.paths) || !Array.isArray(reset.rows) || !Array.isArray(reset.turns)))) ||
           value.inbox.some(entry => entry.outbox !== undefined && !outboxInputSchema.safeParse(entry.outbox).success) ||
@@ -474,7 +477,9 @@ export class SessionStore {
 
   /** Serialize selection with the inbox and imported history. Only untouched
    * conversations may change provider; a queued first Send already owns it. */
-  async selectAgent(input: { id: string; folder: string; agentId: string; agentName: string; model?: string; effort?: string; fast?: boolean; executionId: string }, admit: () => void): Promise<ChatRow> {
+  async selectAgent(input: { id: string; folder: string; agentId: string; agentName: string; model?: string; effort?: string; fast?: boolean; executionId: string;
+    /** Only the row this call creates takes it; an existing chat is never renamed. */
+    title?: string }, admit: () => void): Promise<ChatRow> {
     const { executionId, ...selection } = input;
     const initial = coerceChat({ ...selection, createdAt: Date.now(), updatedAt: Date.now() })!;
     return this.change(input.id, (draft) => {
@@ -494,6 +499,22 @@ export class SessionStore {
       }
       return chat;
     }, initial);
+  }
+
+  /** A control-plane rename or archive: title and archived only, never
+   * updatedAt, and each version at most once. Unknown or deleted chats are
+   * left for a later offer. */
+  async applyChatEdit(edit: CloudV2ChatEdit): Promise<"unknown" | "applied" | "already"> {
+    if (!this.sessions.get(edit.chatId)?.chat) return "unknown";
+    return this.change(edit.chatId, (draft) => {
+      const chat = draft.chat;
+      if (!chat) return "unknown";
+      if (draft.appliedChatEdit !== undefined && BigInt(draft.appliedChatEdit) >= BigInt(edit.version)) return "already";
+      if (edit.title !== undefined) chat.title = edit.title.trim();
+      if (edit.archived !== undefined) chat.archived = edit.archived;
+      draft.appliedChatEdit = edit.version;
+      return "applied";
+    }).catch(error => { if (error instanceof Error && error.message === "Cloud conversation was deleted.") return "unknown" as const; throw error; });
   }
 
   async bind(chatId: string, agentId: string, nativeSessionId: string): Promise<void> {
