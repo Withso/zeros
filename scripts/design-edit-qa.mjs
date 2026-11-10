@@ -253,6 +253,11 @@ async function main() {
       const area = display.workArea;
       window.setBounds({ x: area.x, y: area.y, width: Math.min(1440, area.width), height: Math.min(900, area.height) });
       window.setVisibleOnAllWorkspaces(true, { skipTransformProcessType: true });
+      // Someone is using this Mac. The window stays composited (so rendering,
+      // input and screencasts work) but is never visible: fully transparent,
+      // no shadow, click-through, and it never takes focus.
+      window.setOpacity(0);
+      window.setHasShadow(false);
       window.setAlwaysOnTop(true, "floating");
       window.setIgnoreMouseEvents(true);
       window.showInactive();
