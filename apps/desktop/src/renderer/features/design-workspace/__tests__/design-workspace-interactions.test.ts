@@ -102,6 +102,15 @@ describe("design workspace interaction wiring", () => {
     expect(inspector).toContain("settleDesignHistorySelection(workspaceId, result.historySelection === undefined ? result.historyFrame ?? null : null);");
   });
 
+  it("creates drawn frames and canvas text on whole canvas pixels", () => {
+    // The Frame tool's rectangle and the Text tool's point came straight from
+    // the zoomed pointer: a new text landed at x = -103.285.
+    expect(source).toContain("? designWholeCanvasRect(designCanvasRectFromPoints(start, latest, frameSizeLimit))");
+    expect(source).toContain(": { x: Math.round(start.x), y: Math.round(start.y), width: 100, height: 100 };");
+    expect(source).toContain("? designWholeCanvasRect(designCanvasRectFromPoints(start, latest))");
+    expect(source).toContain(": { x: Math.round(start.x), y: Math.round(start.y), width: undefined, height: undefined };");
+  });
+
   it("keeps the selected frame and engine selection aligned on canvas clicks", () => {
     // An empty-canvas click keeps the frame active for the Layers panel but
     // deselects — activation, not frame selection.

@@ -87,6 +87,7 @@ import {
   designAuthoredResizeAxis,
   designCanvasPointFromClient,
   designCanvasRectFromPoints,
+  designWholeCanvasRect,
   designConstraintSides,
   designCssSizeAfterResize,
   designHighResolutionViewportTile,
@@ -6907,8 +6908,8 @@ export const DesignCanvas = React.memo(function DesignCanvas({
       };
       const finish = () => {
         const rect = moved
-          ? designCanvasRectFromPoints(start, latest, frameSizeLimit)
-          : { x: start.x, y: start.y, width: 100, height: 100 };
+          ? designWholeCanvasRect(designCanvasRectFromPoints(start, latest, frameSizeLimit))
+          : { x: Math.round(start.x), y: Math.round(start.y), width: 100, height: 100 };
         const geometry = {
           x: rect.x,
           y: rect.y,
@@ -7050,8 +7051,8 @@ export const DesignCanvas = React.memo(function DesignCanvas({
       const finish = () => {
         cleanup();
         const rect = moved
-          ? designCanvasRectFromPoints(start, latest)
-          : { x: start.x, y: start.y, width: undefined, height: undefined };
+          ? designWholeCanvasRect(designCanvasRectFromPoints(start, latest))
+          : { x: Math.round(start.x), y: Math.round(start.y), width: undefined, height: undefined };
         const previousSelection = designWorkspaceView(workspaceId);
         const nodeId = createDesignTextNodeId();
         inlineTextDraftRef.current = "";
