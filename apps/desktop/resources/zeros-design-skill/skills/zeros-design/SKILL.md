@@ -23,10 +23,23 @@ Zeros injects the facts for the current conversation. Read them before acting:
 
 Provider permissions and Plan mode still apply. Saving never stages or commits; Git is a separate, explicit action.
 
+## Authoring contract
+
+Every frame in a directory follows these rules, so people and agents share one vocabulary. `design validate` warns when a frame breaks rule 3, 4 or 8; the warnings never fail validation or block a save.
+
+1. **One class vocabulary.** Reuse the classes the directory's stylesheets and style sources already define; never invent a second name for one. Cards are `.card` in every frame, not `.tile` in the next.
+2. **States on the same markup.** Set a state with an attribute or a state class, never a second copy: `<button class="btn is-active" data-state="open">`.
+3. **Tokens, not their values.** Write `var(--name)` wherever a token holds the value: `color: var(--fg2)`, not the hex it resolves to.
+4. **Inline style for one-offs.** Inline declarations are for single values and for people's Style panel edits; anything used on several elements is a class: `.row { display: flex; gap: var(--space-2); }`.
+5. **`data-oid` only where needed.** Keep existing values; add stable ones only where selection must survive a restructure. Component definitions use `data-zid`.
+6. **Name meaningful layers.** `<section data-name="Pricing table">` (up to 80 characters).
+7. **Mark captured markup.** Markup captured or pasted from a site or an app carries `data-zd-captured` on its root, optionally naming its source (`<main data-zd-captured="zeros renderer">`); its classes are not this directory's vocabulary. A title such as `"Settings — captured"` tells people. The contract warnings skip marked markup, so mark only markup that really came from elsewhere, never the directory's own frames.
+8. **Three repeats make a component.** Markup repeated three or more times becomes `components/<name>.html` with `<slot>` and `data-zd-attr`, placed as `<zd-card title="Plans">Body</zd-card>`.
+
 ## Workflow
 
 1. **Read** the directory's `rules.md`, `meta/canvas.json` (pages, frames, themes, style sources) and the frames the request names. Re-read a file right before you edit it.
-2. **Write** ordinary HTML and CSS with your normal tools: classes, the application's utilities and tokens (`var(--…)`), `@keyframes` and transitions. Save sources before the `meta/canvas.json` records that reference them.
+2. **Write** ordinary HTML and CSS with your normal tools, following the authoring contract: the directory's classes, the application's utilities and tokens (`var(--…)`), components for repeats, `@keyframes` and transitions. Save sources before the `meta/canvas.json` records that reference them.
 3. **Register** each new frame in `frames` and in exactly one page's `frames` array.
 4. **Verify** with the native command from your context, in proportion to the change.
 5. **Report** what you made, what you assumed, and anything you did not verify.

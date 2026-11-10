@@ -8,10 +8,13 @@ export interface DesignLintViolationGroup {
 }
 
 const RULE_LABELS: Record<DesignLintViolationWire["ruleId"], string> = {
+  "audit-limit": "Audit limit",
   "component-invalid": "Component definition",
   "component-undefined": "Missing component",
   contrast: "Text contrast",
   "frames-are-valid-html": "HTML structure",
+  "layer-tree-limit": "Layer tree limit",
+  "literal-token-value": "Literal token values",
   "local-refs-only": "Local references",
   "no-event-handlers": "Event handlers",
   "no-external-url": "External resources",
@@ -20,6 +23,8 @@ const RULE_LABELS: Record<DesignLintViolationWire["ruleId"], string> = {
   "oid-missing": "Missing layer ids",
   overflow: "Layout overflow",
   "render-budget": "Render budget",
+  "repeated-inline-style": "Repeated inline styles",
+  "repeated-markup": "Repeated markup",
   "spacing-scale": "Spacing scale",
   "unknown-token": "Unknown tokens",
   "unknown-class": "Unknown classes",
@@ -43,7 +48,9 @@ export function groupDesignLintViolations(
     }
     groups.set(violation.ruleId, {
       ruleId: violation.ruleId,
-      label: RULE_LABELS[violation.ruleId],
+      // The wire's rule id is open: an engine newer than this renderer can
+      // report one it has no label for.
+      label: RULE_LABELS[violation.ruleId] ?? violation.ruleId,
       count: 1,
       first: violation,
     });

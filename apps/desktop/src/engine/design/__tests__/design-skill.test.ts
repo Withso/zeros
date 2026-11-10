@@ -73,6 +73,23 @@ describe("Zeros Design skill package", () => {
     }
   });
 
+  it("states the authoring contract early and documents each warning that checks it", () => {
+    const skillFile = path.join(process.cwd(), DESIGN_SKILL_SOURCE, DESIGN_SKILL_FILE);
+    const skill = readFileSync(skillFile, "utf8");
+    const contract = skill.indexOf("## Authoring contract");
+    expect(contract).toBeGreaterThan(0);
+    expect(contract).toBeLessThan(skill.indexOf("## Workflow"));
+    expect([...skill.slice(contract, skill.indexOf("## Workflow")).matchAll(/^\d\. \*\*/gm)]).toHaveLength(8);
+    const verify = readFileSync(path.join(path.dirname(skillFile), "reference", "verify.md"), "utf8");
+    for (const ruleId of ["repeated-inline-style", "literal-token-value", "repeated-markup"])
+      expect(verify).toContain(`\`${ruleId}\``);
+    expect(verify).toContain("skip markup under a `data-zd-captured` root");
+    expect(skill).toContain("`data-zd-captured`");
+    // States are drawn on one markup; three copies are a component.
+    const states = readFileSync(path.join(path.dirname(skillFile), "reference", "states.md"), "utf8");
+    expect(states).not.toContain("Repeat the same markup once per state");
+  });
+
   it("keeps SKILL.md a short contract whose table links every shipped reference page", () => {
     const skillFile = path.join(process.cwd(), DESIGN_SKILL_SOURCE, DESIGN_SKILL_FILE);
     const skill = readFileSync(skillFile, "utf8");

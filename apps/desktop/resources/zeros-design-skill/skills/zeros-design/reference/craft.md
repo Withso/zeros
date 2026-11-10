@@ -11,7 +11,7 @@ For a simple visual request, produce an editable HTML/CSS draft early, then refi
 3. **Write the first draft before optional precision work.** Use a close available font when the reference does not name one. Pixel sampling, font identification, image-processing dependencies and geometric fitting are useful when a visible mismatch or the requested precision calls for them; they are not prerequisites for drawing text and simple shapes. If a measurement is inconclusive, use a reasonable approximation and inspect the render.
 4. **Save, validate and look.** Use the supplied verification command, capture the result and inspect the PNG. Correct visible differences in a focused pass. Continue when a concrete mismatch remains; do not keep revisiting an already resolved choice without new evidence. Report any remaining approximation that matters to the request.
 
-Use already-declared styles and tokens when they fit. A standalone reference can use frame-local CSS; it does not require scanning the application or setting up style syncing. Keep content in normal flow where practical. Decorative circles, overlapping artwork and edge-clipped shapes may use absolute positioning inside a relative container; separate elements also remain selectable on the canvas.
+Use already-declared styles and tokens when they fit. A standalone reference can use frame-local CSS; it does not require scanning the application or setting up style syncing. Markup captured or pasted from a site or an app keeps its own classes: put `data-zd-captured` on its root (on `<body>` when the whole frame is captured), optionally naming the source, say so in the frame title (`"Pricing — captured"`), and do not copy its classes into the directory's other frames. Mark only markup that really came from elsewhere; the marker is not a way to quiet warnings on the directory's own frames. Keep content in normal flow where practical. Decorative circles, overlapping artwork and edge-clipped shapes may use absolute positioning inside a relative container; separate elements also remain selectable on the canvas.
 
 ## Layout that stays editable
 
@@ -27,5 +27,8 @@ Use already-declared styles and tokens when they fit. A standalone reference can
 
 ## Follow the existing vocabulary
 
-- Reuse what the directory already declares: its style sources, the application's utility classes and tokens, `tokens.css` and its components. Copy exact values from source rather than rounding them.
+- Reuse what the directory already declares: its style sources, the application's utility classes and tokens, `tokens.css` and its components. A frame never reinvents a class that exists under another name.
+- Write a token as `var(--name)` rather than the value it holds; copy exact values from source only where no token exists.
+- Declarations shared by several elements belong in one class; inline `style` is for one-off values and people's Style panel edits.
+- Markup repeated three or more times belongs in a component (`reference/format.md`, Components).
 - A targeted request stays targeted: change what was asked and leave unrelated layout, spacing, colors and copy as they are.

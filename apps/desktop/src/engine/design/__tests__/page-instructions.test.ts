@@ -12,6 +12,7 @@ import {
   LEGACY_DESIGN_RULES,
   PREVIOUS_NATIVE_DESIGN_RULES,
   PREVIOUS_PAGED_DESIGN_RULES,
+  PREVIOUS_PER_PAGE_DESIGN_RULES,
   upgradedDesignRules,
 } from "../design-rules";
 
@@ -43,17 +44,47 @@ describe("page authoring guidance", () => {
       "f38ac7a9b872d87d8e5deedbf7ae052356ee7d88e7d9b574db6e8c7c4b62d762",
     );
     expect(GENERATED_DESIGN_RULES).toContain(PREVIOUS_PAGED_DESIGN_RULES);
+    // The per-page rules shipped before the authoring contract.
+    expect(createHash("sha256").update(PREVIOUS_PER_PAGE_DESIGN_RULES).digest("hex")).toBe(
+      "69aa279db449eeac1e53b17ce7ee5e9e957096d11c721085851261233067b114",
+    );
+    expect(GENERATED_DESIGN_RULES).toContain(PREVIOUS_PER_PAGE_DESIGN_RULES);
     for (const previous of [
       ROOT_DESIGN_RULES,
       LEGACY_DESIGN_RULES,
       PREVIOUS_NATIVE_DESIGN_RULES,
       PREVIOUS_PAGED_DESIGN_RULES,
+      PREVIOUS_PER_PAGE_DESIGN_RULES,
     ])
       expect(upgradedDesignRules(previous + "\nKeep our brand.\n", 2)).toBe(
         DESIGN_RULES + "\nKeep our brand.\n",
       );
     const custom = "# Project rules\nUse native Pages.\n";
     expect(upgradedDesignRules(custom, 2)).toBe(custom);
+  });
+
+  it("carries the authoring contract into upgraded directories and leaves edited rules alone", () => {
+    for (const rule of [
+      "One class vocabulary per directory",
+      "never a second copy",
+      "var(--name)",
+      "Inline style is for one-off values",
+      "data-oid is optional",
+      "data-name",
+      "data-zd-captured on its root",
+      "The contract checks skip marked markup",
+      "repeated three or more times becomes a component",
+    ])
+      expect(DESIGN_RULES).toContain(rule);
+    const project = "\n## Project\nKeep the supplied brand.\n";
+    expect(upgradedDesignRules(PREVIOUS_PER_PAGE_DESIGN_RULES + project, 2)).toBe(DESIGN_RULES + project);
+    // Upgrading twice changes nothing more.
+    expect(upgradedDesignRules(DESIGN_RULES + project, 2)).toBe(DESIGN_RULES + project);
+    // One changed word makes the whole file the project's own.
+    const edited = PREVIOUS_PER_PAGE_DESIGN_RULES.replace("Commit this folder together.", "Commit this folder with the app.") + project;
+    expect(upgradedDesignRules(edited, 2)).toBe(edited);
+    // An unpaged directory keeps its own generated rules until it moves to pages.
+    expect(upgradedDesignRules(ROOT_DESIGN_RULES + project, 1)).toBe(ROOT_DESIGN_RULES + project);
   });
 
   it("keeps frame and workflow guides aligned with the active directory's pages", () => {

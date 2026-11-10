@@ -8,7 +8,7 @@ People edit frames in the Design tab while agents work on the same files. This p
 - These edits do not rewrite class rules, `<style>` blocks, `tokens.css` or imported style sources. A value that comes from a class is overridden by an inline declaration on the edited element, so other elements sharing the class keep theirs.
 - The theme editor writes Manual tokens in `tokens.css`. Imported style sources are read-only there; their repository files own them.
 - Renaming a layer writes `data-name`. Editing text replaces the element's text. Frame titles, geometry and page membership live in `meta/canvas.json`.
-- Saving never stages or commits. When you find unfamiliar inline declarations, they are often a person's edits; keep them unless the task changes them.
+- Saving never stages or commits. When you find unfamiliar inline declarations, they are often a person's edits; keep them unless the task changes them. Inline style is for such one-off values; declarations repeated on several elements belong in a class.
 
 ## Values as written
 
