@@ -54,6 +54,21 @@ it.each([
   ["the base branch is gone", (f: ReturnType<typeof fixture>) => { f.deps.remoteHead.mockResolvedValue(null); }, "repository_branch_not_found"],
   ["the member lost Pro", (f: ReturnType<typeof fixture>) => {
     f.deps.resolve.mockRejectedValue(new HttpError(403, "pro_required", "Requires Pro")); }, "pro_required"],
+  ["the member left the organization", (f: ReturnType<typeof fixture>) => {
+    f.deps.resolve.mockRejectedValue(new HttpError(404, "not_found", "Organization not found")); }, "not_found"],
+  // Definite answers that aren't a plain refusal fail at once too, instead of
+  // retrying for minutes: a synchronous create returns them to the request.
+  ["the creator disconnected GitHub", (f: ReturnType<typeof fixture>) => {
+    f.deps.authorizeBuildRepository.mockRejectedValueOnce(new HttpError(401, "github_connection_required", "Connect GitHub")); }, "github_connection_required"],
+  ["the repository's identity changed", (f: ReturnType<typeof fixture>) => {
+    f.deps.authorizeBuildRepository.mockRejectedValueOnce(new HttpError(409, "cloud_source_review_required", "Review")); }, "cloud_source_review_required"],
+  ["another repository's identity changed", (f: ReturnType<typeof fixture>) => {
+    f.deps.authorizeBuildRepository.mockImplementation(async (_o, _u, _b, repository) => {
+      if (repository === "example/site") throw new HttpError(409, "cloud_source_review_required", "Review");
+      return { repository, repositoryId: ids[repository]! };
+    }); }, "cloud_source_review_required"],
+  ["the branch read is refused", (f: ReturnType<typeof fixture>) => {
+    f.deps.remoteHead.mockRejectedValue(new HttpError(403, "github_cloud_access_denied", "Denied")); }, "cloud_source_access_denied"],
 ] as const)("fails the create when %s", async (_case, change, errorCode) => {
   const f = fixture();
   change(f);
@@ -75,8 +90,11 @@ it.each([
     }); }],
   ["an unavailable branch read", (f: ReturnType<typeof fixture>) => { f.deps.remoteHead.mockRejectedValue(new GithubTemporaryError("github_unavailable")); }],
   ["a busy database", (f: ReturnType<typeof fixture>) => { f.deps.resolve.mockRejectedValue(new HttpError(503, "database_busy", "Busy")); }],
+  ["a connection that changed during the check", (f: ReturnType<typeof fixture>) => {
+    f.deps.authorizeBuildRepository.mockRejectedValueOnce(new HttpError(409, "github_authorization_changed", "Changed")); }],
+  ["an unexpected error", (f: ReturnType<typeof fixture>) => { f.deps.resolve.mockRejectedValue(new Error("connection reset")); }],
 ] as const)("throws %s so the lifecycle retries it", async (_case, change) => {
   const f = fixture();
   change(f);
-  await expect(f.resolve(workspace)).rejects.toBeInstanceOf(HttpError);
+  await expect(f.resolve(workspace)).rejects.toBeInstanceOf(Error);
 });
