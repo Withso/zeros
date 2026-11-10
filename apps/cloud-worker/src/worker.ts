@@ -121,6 +121,8 @@ export class CloudWorker {
   private readonly githubCredentials: GithubCredentialRecovery;
   private githubUserTokensEnabled = false;
   private historyReplacementEnabled = false;
+  /** Read when a native execution's tools are admitted. */
+  private localCommandsEnabled = false;
   private readonly github: GithubBroker;
   private readonly gitEnvironment: NodeJS.ProcessEnv;
   private configuring: Promise<void> = Promise.resolve();
@@ -289,6 +291,7 @@ export class CloudWorker {
     if (frame.type === "HEARTBEAT") return;
     if (frame.type.startsWith("AGENT_")) {
       if (frame.type !== "AGENT_LIST_AGENTS" && frame.type !== "AGENT_INIT_AGENT") await this.touchCheckout();
+      if ((frame.type === "AGENT_PROMPT" || frame.type === "AGENT_STEER") && this.localCommandsEnabled) await this.retireLocalCommandSender(frame.sessionId);
       return this.agents!.handle(client, frame);
     }
     if (frame.type.startsWith("PTY_")) {
@@ -350,6 +353,7 @@ export class CloudWorker {
       this.workspaceMcp.revoke();
     }
     this.historyReplacementEnabled = config.historyReplacement === 1;
+    this.localCommandsEnabled = config.localCommands === 1;
     if (this.configurationRevision !== revision) { this.tokens.invalidate(); this.githubCredentials.invalidate(); }
     if (!changed || changed.includes("gitIdentity")) await configureGitIdentity(this.options.homeDirectory ?? homedir(), config.gitIdentity);
     if (!this.scope) {
@@ -498,6 +502,8 @@ export class CloudWorker {
             const setupOutput = await readSetupOutput(this.options.directory, scope.workspace.id, request.maxLines);
             return setupOutput && { terminalId: "setup", truncated: setupOutput.truncated, lines: setupOutput.lines.map(line => application.text(line)) };
           }, diff: request => workspace!.git.agentDiff(request),
+          ...(this.localCommandsEnabled && this.options.transport.localCommand ? { localCommands: { checkout: scope.root,
+            run: (command, signal) => this.options.transport.localCommand!({ chatId: input.conversationId, executionId: input.executionId, input: command }, signal) } } : {}),
           ...(reviews!.enabled ? { review: reviews!.tools(input) } : {}) })), application, !!this.options.runtimeResume, workspaceApi);
       terminals = new Terminals(scope, { gitEnvironment: this.gitEnvironment, applicationEnvironment: application.variables,
         zerosEnvironment: () => workspaceApi.variables(), redact: text => application.text(text),
@@ -566,6 +572,15 @@ export class CloudWorker {
       if (sessionId) await this.terminals!.notice(sessionId, `\r\n\x1b[33m${message}\x1b[0m\r\n`);
     }
   }
+  /** A legacy relay prompt changes who the chat's latest sender is. The control
+   * plane fences that before forwarding; this narrow second fence is best
+   * effort and can never restore an authority. */
+  private async retireLocalCommandSender(executionId: string): Promise<void> {
+    const chatId = this.agents?.chatForExecution(executionId);
+    if (!chatId || !this.options.transport.retireLocalCommandSender) return;
+    await Promise.race([this.options.transport.retireLocalCommandSender({ chatId, executionId }).catch(() => {}),
+      new Promise<void>(resolve => { setTimeout(resolve, 5_000).unref(); })]);
+  }
   private broadcast(frame: BridgeMessage): Promise<void> { return this.send({ t: "frame", clientId: "*", frame }).then(() => {}); }
   private readyFrame(): BridgeMessage {
     return createMessage({ type: "ENGINE_READY", source: "engine", version: "0.0.0", root: "", framework: "cloud", port: 0,
@@ -611,7 +626,7 @@ export class CloudWorker {
   }
   private get busy(): boolean {
     return Boolean(this.agents?.busy || this.terminals?.busy || this.setup?.busy || this.workspace?.uploading ||
-      this.activeMutations || Date.now() - this.lastMutationAt < RECENT_ACTIVITY_MS);
+      this.activeMutations || (this.options.transport.localCommandsPending ?? 0) > 0 || Date.now() - this.lastMutationAt < RECENT_ACTIVITY_MS);
   }
   get runtimeCensus(): RuntimeCensus {
     return {
@@ -626,7 +641,7 @@ export class CloudWorker {
       prompts: this.promptInbox?.runtimeBusy ?? false,
       attachments: this.workspace?.uploading ?? null,
       storage: this.store && this.history ? this.store.runtimeBusy || this.history.runtimeBusy : null,
-      tools: this.mcp ? this.mcp.runtimeBusy || this.workspaceMcp.runtimeBusy : null,
+      tools: this.mcp ? this.mcp.runtimeBusy || this.workspaceMcp.runtimeBusy || (this.options.transport.localCommandsPending ?? 0) > 0 : null,
     };
   }
   private async reportIdle(force = false): Promise<void> {

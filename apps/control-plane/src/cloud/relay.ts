@@ -11,7 +11,7 @@ import { CLOUD_V2_MAX_FRAME_BYTES, CloudV2WorkerFrameSchema, type CloudV2Control
 import type { PostgresSecurityEventBroker } from "../security-events.js";
 import type { CloudV2Store, CloudV2Workspace, CloudV2WorkerBinding } from "./store.js";
 import { isCloudV2Token } from "./tokens.js";
-import { dialWorker, workerSupportsApi, workerSupportsCheckout, workerSupportsMcp, workerSupportsSetup, workerSupportsRepositorySetup, workerSupportsGithub, workerSupportsGitIdentity, workerSupportsGithubUserTokens, workerSupportsAgentInteractions, workerSupportsCodeReview, workerSupportsHistoryReplacement, workerSupportsEnvironment, workerSupportsRuntimeUpdate, workerSupportsPush, type WorkerRoute } from "./worker-connection.js";
+import { dialWorker, workerSupportsApi, workerSupportsLocalCommands, workerSupportsCheckout, workerSupportsMcp, workerSupportsSetup, workerSupportsRepositorySetup, workerSupportsGithub, workerSupportsGitIdentity, workerSupportsGithubUserTokens, workerSupportsAgentInteractions, workerSupportsCodeReview, workerSupportsHistoryReplacement, workerSupportsEnvironment, workerSupportsRuntimeUpdate, workerSupportsPush, type WorkerRoute } from "./worker-connection.js";
 import { emitCloudV2Timing, type CloudV2TimingRecord } from "./lifecycle.js";
 import { HttpError } from "../authz.js";
 import { isGithubAccessRevoked, isGithubTemporary } from "../github-availability.js";
@@ -39,6 +39,8 @@ export type CloudV2RelayDeps = {
   /** proof, when present, comes from this room's current allowed database read. */
   config(workspace: CloudV2Workspace, mode?: "admission" | "continuation", proof?: CloudSourceProof): Promise<ConfigFrame>;
   apiConfiguration?(workspaceId: string): Promise<ConfigFrame["api"]>;
+  localCommandsEnabled?(workspaceId: string): Promise<boolean>;
+  retireLocalSender?(workspaceId: string, userId: string, accessEpoch: string, sessionId: string | null): Promise<void>;
   runtimeAdmission?: {
     admitClient(workspaceId: string, clientId: string): Promise<boolean>;
     renewClient(workspaceId: string, clientId: string): Promise<boolean>;
@@ -74,6 +76,7 @@ type Room = {
   clients: Map<string, { ws: WebSocket; sessionId: string | null }>; queued: Map<string, unknown[]>;
   admitting: Map<string, WebSocket>;
   delivered: Map<string, Map<string, DeliveredPrompt>>;
+  forwarding?: Map<string, Promise<void>>;
   stops: Map<string, (ok: boolean) => void>; abort: AbortController; wakeRequested: boolean; wakeAllowed: boolean;
 };
 function reject(socket: Duplex): void {
@@ -390,12 +393,15 @@ export class CloudV2Relay {
             emitCloudV2Timing(this.deps.timing, { workspaceId: room.workspace.id.slice(0, 8), phase: "relay_ready",
               durationMs: Math.max(0, Math.round(at - started)), dialMs: Math.max(0, Math.round(dialed - dialStarted)), configMs: Math.max(0, Math.round(at - dialed)),
               attempts: attempts + 1 });
+            const forwarding: Promise<void>[] = [];
             for (const [clientId, client] of room.clients) {
               if (client.ws.readyState !== WebSocket.OPEN) continue;
               send(ws, { t: "open", clientId });
-              for (const frame of room.queued.get(clientId) ?? []) this.forward(room, ws, clientId, frame);
+              for (const frame of room.queued.get(clientId) ?? []) forwarding.push(this.forward(room, ws, clientId, frame));
             }
             room.queued.clear();
+            await Promise.all(forwarding);
+            if (room.worker !== ws || room.revoked) return;
             for (const id of room.stops.keys()) send(ws, { t: "stop", id });
             return;
           }
@@ -484,9 +490,27 @@ export class CloudV2Relay {
     });
   }
 
-  private forward(room: Room, worker: WebSocket, clientId: string, frame: unknown): void {
+  private forward(room: Room, worker: WebSocket, clientId: string, frame: unknown): Promise<void> {
+    const pending = room.forwarding ??= new Map();
+    const operation = (pending.get(clientId) ?? Promise.resolve()).then(() => this.forwardCurrent(room, worker, clientId, frame));
+    pending.set(clientId, operation);
+    void operation.finally(() => { if (pending.get(clientId) === operation) pending.delete(clientId); }).catch(() => {});
+    return operation;
+  }
+
+  private async forwardCurrent(room: Room, worker: WebSocket, clientId: string, frame: unknown): Promise<void> {
+    const client = room.clients.get(clientId), epoch = room.accessEpoch;
+    if (!client || room.revoked || room.worker !== worker) return;
     const request = frame as { id?: unknown; type?: unknown; agentId?: unknown } | null;
-    if ((request?.type === "AGENT_PROMPT" || request?.type === "AGENT_STEER") && typeof request.id === "string" && request.id.length <= 256) {
+    const legacySend = request?.type === "AGENT_PROMPT" || request?.type === "AGENT_STEER";
+    if (legacySend && this.deps.retireLocalSender) {
+      try {
+        await this.deps.retireLocalSender(room.workspace.id, room.workspace.creatorUserId, epoch, client.sessionId);
+      } catch { client.ws.close(1013, "workspace_verification_unavailable"); return; }
+      if (room.revoked || room.worker !== worker || room.accessEpoch !== epoch || room.clients.get(clientId) !== client) return;
+      if (await this.authorized(room) !== "allowed" || room.worker !== worker || room.accessEpoch !== epoch || room.clients.get(clientId) !== client) return;
+    }
+    if (legacySend && typeof request.id === "string" && request.id.length <= 256) {
       const pending = room.delivered.get(clientId) ?? new Map<string, DeliveredPrompt>();
       if (pending.size >= MAX_QUEUED_FRAMES && !pending.has(request.id)) { room.clients.get(clientId)?.ws.close(1013, "too_many_prompts"); return; }
       pending.set(request.id, { worker, ...(typeof request.agentId === "string" ? { agentId: request.agentId } : {}) });
@@ -546,10 +570,11 @@ export class CloudV2Relay {
       const config = await this.deps.config(room.workspace, "continuation", this.fresh(room) ? room.authorizedProof : undefined);
       const apiConfiguration = workerSupportsApi(ws) && this.deps.apiConfiguration
         ? await this.deps.apiConfiguration(room.workspace.id) : undefined;
+      const localCommands = workerSupportsLocalCommands(ws) && config.promptOutbox === 1 && await this.deps.localCommandsEnabled?.(room.workspace.id);
       if (await this.current(room) !== "allowed" || room.worker !== ws) return false;
       if (revision !== await this.deps.store.loginRevision(room.workspace.id)) { flight.requested = true; flight.force = true; continue; }
       if (room.worker !== ws || room.revoked) return false;
-      const { api: _api, mcpServers, githubPullRequests, githubUserTokens, gitIdentity, agentInteractions, codeReview, historyReplacement: _historyReplacement, environment, runtimeUpdate, ...legacy } = config;
+      const { api: _api, localCommands: _localCommands, mcpServers, githubPullRequests, githubUserTokens, gitIdentity, agentInteractions, codeReview, historyReplacement: _historyReplacement, environment, runtimeUpdate, ...legacy } = config;
       if (environment && !workerSupportsEnvironment(ws)) throw new Error("Cloud environment runtime support is required.");
       const { setup, setupScript, baseCommit, github, ...workspaceConfig } = config.workspace;
       if (setupScript !== undefined && !workerSupportsRepositorySetup(ws)) throw new Error("Repository setup runtime support is required.");
@@ -559,6 +584,7 @@ export class CloudV2Relay {
         ...(workerSupportsSetup(ws) && setup !== undefined ? { setup } : {}),
         ...(workerSupportsCheckout(ws) && baseCommit !== undefined ? { baseCommit } : {}) },
         ...(apiConfiguration ? { api: apiConfiguration } : {}),
+        ...(localCommands ? { localCommands: 1 } : {}),
         ...(workerSupportsHistoryReplacement(ws) ? { historyReplacement: 1 } : {}),
         ...(workerSupportsMcp(ws) && mcpServers ? { mcpServers } : {}),
         ...(workerSupportsAgentInteractions(ws) && agentInteractions === 1 ? { agentInteractions } : {}),
@@ -659,10 +685,10 @@ export class CloudV2Relay {
     // do not each wait on a database read. Revocation clears it immediately on
     // this replica; the short window bounds a lost cross-replica notice.
     if (room.ready && room.worker && room.clients.has(clientId) && this.fresh(room)) {
-      this.forward(room, room.worker, clientId, frame); return;
+      await this.forward(room, room.worker, clientId, frame); return;
     }
     if (await this.authorized(room) !== "allowed" || !room.clients.has(clientId)) return;
-    if (room.ready && room.worker) { this.forward(room, room.worker, clientId, frame); return; }
+    if (room.ready && room.worker) { await this.forward(room, room.worker, clientId, frame); return; }
     // Connection housekeeping is not explicit workspace activity. Bridge
     // payload validation still belongs to the worker when it is online.
     const type = (frame as { type?: unknown } | null)?.type;
@@ -670,7 +696,7 @@ export class CloudV2Relay {
     const answer = await this.deps.answerOffline(room.workspace, frame).catch(() => null);
     if (await this.authorized(room) !== "allowed" || !room.clients.has(clientId)) return;
     if (answer) { send(ws, answer); return; }
-    if (room.ready && room.worker) { this.forward(room, room.worker, clientId, frame); return; }
+    if (room.ready && room.worker) { await this.forward(room, room.worker, clientId, frame); return; }
     const queue = room.queued.get(clientId) ?? [];
     if (queue.length >= MAX_QUEUED_FRAMES) { ws.close(1013, "workspace_starting"); return; }
     queue.push(frame); room.queued.set(clientId, queue);

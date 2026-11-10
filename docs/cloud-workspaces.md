@@ -533,6 +533,17 @@ frame that carries the edited row. An edit for an unknown chat is not
 acknowledged and is offered again; a version already applied is acknowledged
 again without a change.
 
+When the configuration carries `localCommands: 1`, workers advertising
+`local-commands-v1` add `RunLocalCommand` to `zeros_workspace`: one shell
+command on the Mac the chat's latest message came from, run by that person's
+login shell only after they approve it in the app there (Always allow covers
+only that default Mac). A local command is one-shot. The shell runs as its own
+process group, and once it exits and its output closes the whole group is
+ended, so a job started with `&` does not survive it. A background job that
+keeps stdout or stderr open holds the command until its timeout; redirect it
+(`>/dev/null 2>&1`) when it should not. Output above 32 000 characters is saved
+under the checkout's `.context/local-commands/`.
+
 ## Credentials and history
 
 Settings → Agents stores encrypted logins in the control plane. The creator's

@@ -67,7 +67,8 @@
     "./crypto": "./src/crypto/index.ts",
     "./reliable": "./src/reliable.ts",
     "./cloud-v2-relay": "./src/cloud-v2-relay.ts",
-    "./cloud-v2-prompts": "./src/cloud-v2-prompts.ts"
+    "./cloud-v2-prompts": "./src/cloud-v2-prompts.ts",
+    "./local-commands": "./src/local-commands.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit"

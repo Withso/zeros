@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
 import { HttpError } from "../authz.js";
+import { localDeviceHeaders } from "./local-commands/routes.js";
 import type { CloudV2PromptOutbox } from "./prompt-outbox.js";
 import { CLOUD_V2_MAX_PROMPT_BYTES, CloudV2PromptSchema, CloudV2PromptIdSchema,
   CloudV2PromptCounterSchema, CloudV2PromptStopSchema } from "./prompt-contract.js";
@@ -24,7 +25,7 @@ export function createCloudV2PromptRoutes(outbox: CloudV2PromptOutbox, authorize
   app.post(path, body, async c => {
     const parsed = CloudV2PromptSchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) throw new HttpError(400, "invalid_request", "Invalid cloud prompt");
-    const { receipt, replay } = await outbox.enqueue(id(c.req.param("id")), c.get("user").id, parsed.data, c.get("user"));
+    const { receipt, replay } = await outbox.enqueue(id(c.req.param("id")), c.get("user").id, parsed.data, c.get("user"), { device: localDeviceHeaders(c, true) });
     return c.json({ receipt }, replay ? 200 : 201);
   });
   app.get(path, async c => {

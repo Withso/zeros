@@ -2,6 +2,7 @@ import { z } from "zod";
 import { CloudV2PromptCounterSchema, CloudV2PromptIdSchema, CloudV2PromptReceiptSchema, CloudV2PromptStatusSchema,
   CloudV2PromptStopReplySchema, type CloudV2Prompt, type CloudV2PromptReceipt } from "@zeros/protocol/cloud-v2-prompts";
 import { cloudAccountRequest } from "./cloud-workspaces";
+import { localCommandDevice } from "./local-commands";
 import type { CloudWorkspaceTarget } from "./bridge/cloud-workspace-key";
 
 export function cloudPromptApi(target: CloudWorkspaceTarget, chatId: string) {
@@ -14,8 +15,10 @@ export function cloudPromptApi(target: CloudWorkspaceTarget, chatId: string) {
   return {
     async enqueue(payload: CloudV2Prompt) {
       if (payload.chatId !== chatId) throw new Error("This message belongs to another conversation.");
+      // A message from this Mac makes it the chat's local-command target.
+      const device = await localCommandDevice();
       const { receipt } = await cloudAccountRequest(path, z.object({ receipt: CloudV2PromptReceiptSchema }),
-        { body: payload, idempotencyKey: payload.userMessageId });
+        { body: payload, idempotencyKey: payload.userMessageId }, device ? { deviceHeaders: device.headers } : undefined);
       if (receipt.userMessageId !== payload.userMessageId) throw new Error("Cloud receipt changed message identity.");
       return check(receipt);
     },

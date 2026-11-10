@@ -93,3 +93,52 @@ it("reads the setup output through GetTerminalOutput source setup, and says when
   const shells = await client.callTool({ name: "GetTerminalOutput", arguments: { source: "run_script" } }) as { isError?: boolean; content: Array<{ text: string }> };
   expect(shells.isError).toBe(true); expect(shells.content[0].text).toContain("no open terminal of that kind");
 });
+
+it("offers RunLocalCommand only when the configuration allows it, sends the chat's command to the control plane, and Stop cancels it", async () => {
+  const f = await repositoryFixture();
+  const pending: Array<{ request: { chatId: string; executionId: string; input: unknown }; signal: AbortSignal }> = [];
+  const retired: Array<{ chatId: string; executionId: string }> = [];
+  const relay = Object.assign(new FakeRelay(), {
+    localCommand: (request: { chatId: string; executionId: string; input: unknown }, signal: AbortSignal) =>
+      new Promise<{ result: { outcome: "cancelled" }; acknowledge(): Promise<void> }>(resolve => { pending.push({ request, signal });
+        signal.addEventListener("abort", () => resolve({ result: { outcome: "cancelled" }, acknowledge: async () => {} }), { once: true }); }),
+    retireLocalCommandSender: async (request: { chatId: string; executionId: string }) => { retired.push(request); },
+  });
+  const drivers: FakeDriver[] = [];
+  const worker = new CloudWorker({ directory: f.state, homeDirectory: f.directory, transport: relay, prepareCheckout: async () => {},
+    workspaceServices: { watch: false }, drivers: { codex: () => { const driver = new FakeDriver(); drivers.push(driver); return driver; } } });
+  cleanups.push(() => worker.dispose());
+  worker.start();
+  const connect = async (driver: FakeDriver) => {
+    const tools = driver.opened!.mcpServers!.zeros_workspace;
+    const client = new Client({ name: "fixture-agent", version: "1" }); cleanups.push(() => client.close());
+    await client.connect(new StreamableHTTPClientTransport(new URL(tools.url), { requestInit: { headers: tools.headers } }));
+    return client;
+  };
+  await relay.receive({ ...config, workspace: f.scope.workspace });
+  await relay.receive({ t: "open", clientId: CLIENT_A });
+  const plain = browserFrame("AGENT_NEW_SESSION", { agentId: "codex", chatId: "plain", cwd: f.scope.key });
+  await relay.request(CLIENT_A, plain);
+  await expect.poll(() => drivers[0]?.opened?.mcpServers).toBeDefined();
+  expect((await (await connect(drivers[0])).listTools()).tools.map(tool => tool.name)).not.toContain("RunLocalCommand");
+
+  await relay.receive({ ...config, workspace: f.scope.workspace, localCommands: 1, loginRevision: "1" });
+  const created = browserFrame("AGENT_NEW_SESSION", { agentId: "codex", chatId: "local", cwd: f.scope.key });
+  await relay.request(CLIENT_A, created);
+  const sessionId = (relay.response(created.id) as unknown as { session: { sessionId: string } }).session.sessionId;
+  const prompt = browserFrame("AGENT_PROMPT", { agentId: "codex", sessionId, userMessageId: "user-1", prompt: [{ type: "text", text: "run it" }] });
+  await relay.request(CLIENT_A, prompt);
+  await expect.poll(() => drivers.find(driver => driver.prompts.length)?.opened).toBeDefined();
+  const driver = drivers.find(candidate => candidate.prompts.length)!;
+  const client = await connect(driver);
+  expect((await client.listTools()).tools.map(tool => tool.name)).toContain("RunLocalCommand");
+  const running = client.callTool({ name: "RunLocalCommand", arguments: { command: "open -a Simulator" } }) as Promise<{ content: Array<{ text: string }> }>;
+  await expect.poll(() => pending.length).toBe(1);
+  expect(pending[0]!.request).toMatchObject({ chatId: "local", input: { command: "open -a Simulator" } });
+  // The relay prompt that started this turn retired the chat's previous sender first.
+  expect(retired).toEqual([{ chatId: "local", executionId: sessionId }]);
+  expect(worker.runtimeCensus.tools).toBe(true);
+  await relay.request(CLIENT_A, browserFrame("AGENT_CANCEL", { agentId: "codex", sessionId }));
+  await expect.poll(() => pending[0]!.signal.aborted).toBe(true);
+  expect((await running).content[0].text.split("\n")[0]).toBe("outcome: cancelled");
+});

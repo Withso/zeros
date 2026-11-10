@@ -21,6 +21,8 @@ export interface WorkspaceToolGrant {
   servers: DriverMcpServers;
   /** Whether this grant was admitted with review tools, whose writes Stop must fence. */
   review: boolean;
+  /** Stop: abort this execution's calls in flight while keeping the grant. */
+  cancel(): void;
   revoke(): void;
   dispose(): Promise<void>;
 }
@@ -28,6 +30,8 @@ export type WorkspaceToolFactory = (input: WorkspaceToolAdmission) => Promise<Wo
 interface Session { server: Server; transport: StreamableHTTPServerTransport }
 interface Entry {
   id: string; credential: string; tools: AgentToolSet; controller: AbortController;
+  /** Aborted by Stop for calls in flight (a pending local command); renewed after. */
+  calls: AbortController;
   sessions: Map<string, Session>; pending: Set<Session>; requests: Set<ServerResponse>; flights: Set<Promise<void>>; closing?: Promise<void>;
 }
 const equal = (a: string, b: string) => Buffer.byteLength(a) === Buffer.byteLength(b) && timingSafeEqual(Buffer.from(a), Buffer.from(b));
@@ -64,7 +68,7 @@ export class WorkspaceToolsMcp {
     tools.assertCurrent();
     if (this.disposed || !/^[a-f0-9-]{36}$/.test(id) || this.entries.has(id) || this.entries.size >= 64)
       throw new Error("Workspace tools are unavailable.");
-    const entry: Entry = { id, tools, credential: randomBytes(32).toString("base64url"), controller: new AbortController(), sessions: new Map(), pending: new Set(), requests: new Set(), flights: new Set() };
+    const entry: Entry = { id, tools, credential: randomBytes(32).toString("base64url"), controller: new AbortController(), calls: new AbortController(), sessions: new Map(), pending: new Set(), requests: new Set(), flights: new Set() };
     this.entries.set(id, entry);
     try {
       if (!this.listening) {
@@ -83,6 +87,7 @@ export class WorkspaceToolsMcp {
       return {
         servers: { zeros_workspace: { type: "http", url: `${this.origin}/mcp/${id}`, headers: { Authorization: `Bearer ${entry.credential}` } } },
         review: tools.includesReview !== false,
+        cancel: () => { entry.calls.abort(); entry.calls = new AbortController(); },
         revoke: () => { void this.close(entry); },
         dispose: () => this.close(entry),
       };
@@ -137,7 +142,7 @@ export class WorkspaceToolsMcp {
     server.setRequestHandler(CallToolRequestSchema, (request, extra) => this.call(entry, async () => {
       this.assertCurrent(entry);
       try {
-        const result = await entry.tools.callTool(request.params.name, request.params.arguments ?? {}, AbortSignal.any([extra.signal, entry.controller.signal]));
+        const result = await entry.tools.callTool(request.params.name, request.params.arguments ?? {}, AbortSignal.any([extra.signal, entry.controller.signal, entry.calls.signal]));
         this.assertCurrent(entry);
         return result;
       } catch (error) {

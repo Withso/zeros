@@ -14,6 +14,10 @@ import { CloudEnvironmentReportSchema, type CloudEnvironmentReport } from "./env
 import type { RuntimeAdoption } from "./runtime-adoption.js";
 import type { RuntimeHandoffStore } from "./runtime-handoff-store.js";
 import { CloudRuntimeUpdateRequestSchema } from "./runtime-update-contract.js";
+import { LOCAL_COMMANDS_FEATURE, LocalCommandIdSchema } from "./local-commands/contract.js";
+import { NewLocalCommandSchema, localUnavailable, type CloudLocalCommands } from "./local-commands/requests.js";
+import { localBody, localUuid, localRouteError } from "./local-commands/routes.js";
+import { requestSignal, type CloudLocalCommandSignals } from "./local-commands/signals.js";
 
 export const CLOUD_V2_WORKER_API = "/v2/cloud/worker";
 type ConfigFrame = Extract<CloudV2ControlFrame, { t: "config" }>;
@@ -24,6 +28,7 @@ export type CloudV2WorkerRouteDeps = {
   runtimeUpdates?: RuntimeAdoption;
   runtimeHandoffs?: RuntimeHandoffStore;
   promptOutbox?: boolean;
+  localCommands?: { requests: CloudLocalCommands; signals: CloudLocalCommandSignals };
   timing?: (record: CloudV2TimingRecord) => void;
   logger?: Pick<Console, "warn">;
   waitForPrompts?(workspaceId: string, waitMs: number, signal: AbortSignal): { wait: Promise<void>; dispose(): void };
@@ -83,12 +88,14 @@ async function configuration(deps: CloudV2WorkerRouteDeps, workspace: CloudV2Wor
     fence = undefined;
     if (!before) throw unauthorized();
     let config: ConfigFrame;
+    let localCommandsEnabled = false;
     try {
       config = await deps.config(before, mode, before);
       if (features.has("workspace-api-v1") && deps.apiConfiguration) {
         const api = await deps.apiConfiguration(before.id);
         if (api) config = { ...config, api };
       }
+      localCommandsEnabled = Boolean(features.has(LOCAL_COMMANDS_FEATURE) && deps.promptOutbox && await deps.localCommands?.requests.enabled(before.id));
     }
     catch (error) {
       if (!(error instanceof HttpError) || error.code !== "github_authorization_changed") throw error;
@@ -101,7 +108,7 @@ async function configuration(deps: CloudV2WorkerRouteDeps, workspace: CloudV2Wor
     if (!after || before.accessEpoch !== after.accessEpoch) throw unauthorized();
     const revision = before.loginRevision;
     if (revision === after.loginRevision) {
-      const { api, mcpServers, githubPullRequests, githubUserTokens, gitIdentity, agentInteractions, codeReview, historyReplacement: _historyReplacement, environment, runtimeUpdate: _runtimeUpdate, ...legacy } = config;
+      const { api, localCommands: _localCommands, mcpServers, githubPullRequests, githubUserTokens, gitIdentity, agentInteractions, codeReview, historyReplacement: _historyReplacement, environment, runtimeUpdate: _runtimeUpdate, ...legacy } = config;
       if (environment && !features.has("workspace-environment-v1"))
         throw new HttpError(409, "cloud_environment_runtime_required", "Update the cloud runtime before opening this workspace.");
       const { setup, setupScript, baseCommit, github, ...workspaceConfig } = config.workspace;
@@ -114,6 +121,7 @@ async function configuration(deps: CloudV2WorkerRouteDeps, workspace: CloudV2Wor
         ...(features.has("checkout-v2") && baseCommit !== undefined ? { baseCommit } : {}) },
         ...(features.has("agent-interactions-v1") && agentInteractions === 1 ? { agentInteractions } : {}),
         ...(features.has("workspace-api-v1") && api ? { api } : {}),
+        ...(localCommandsEnabled ? { localCommands: 1 } : {}),
         ...(environment ? { environment } : {}),
         ...(features.has("runtime-update-v1") && deps.runtimeUpdates ? { runtimeUpdate: 1 } : {}),
         loginRevision: revision, ...(features.has("history-replace-v1") ? { historyReplacement: 1 } : {}), ...(features.has("git-identity-v1") && gitIdentity !== undefined ? { gitIdentity } : {}),
@@ -135,6 +143,60 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
   const timingBoots = new Map<string, Set<string>>();
   app.use(`${CLOUD_V2_WORKER_API}/*`, bodyLimit({ maxSize: CLOUD_V2_MAX_FRAME_BYTES, onError: c => c.json({ error: { code: "payload_too_large" } }, 413) }));
   app.use(`${CLOUD_V2_WORKER_API}/*`, async (c, next) => { bearer(c); c.header("Cache-Control", "no-store"); await next(); });
+  if (deps.localCommands) {
+    const local = new Hono().onError(localRouteError);
+    const { requests, signals } = deps.localCommands, path = `${CLOUD_V2_WORKER_API}/local-commands`, empty = z.object({}).strict();
+    const authority = async (c: Context) => {
+      if (!deps.promptOutbox || !workerFeatures(c).has(LOCAL_COMMANDS_FEATURE)) throw unauthorized();
+      return session(c,deps);
+    };
+    local.use(`${path}*`, bodyLimit({ maxSize: 256*1024, onError: c => c.json({ error: { code: "payload_too_large", message: "Request is too large" } },413) }));
+    local.use(`${path}*`, async (c,next) => {
+      await next();
+      if (c.res.status === 429 && !c.res.headers.has("Retry-After")) c.header("Retry-After","60");
+    });
+    local.post(path, async c => {
+      const auth = await authority(c), input = await localBody(c,NewLocalCommandSchema);
+      const result = await requests.create(auth.token,auth.bootId,input);
+      return c.json(result.receipt,result.replay ? 200 : 201);
+    });
+    local.post(`${path}/retire-sender`, async c => {
+      const auth = await authority(c), input = await localBody(c,z.object({ chatId: LocalCommandIdSchema, executionId: LocalCommandIdSchema }).strict());
+      await requests.retireSender(auth.token,auth.bootId,input.chatId); return c.json({ ok: true });
+    });
+    local.get(`${path}/:requestId`, async c => {
+      const query = z.object({ waitMs: z.coerce.number().int().min(0).max(25_000).default(0) }).strict().safeParse(c.req.query());
+      if (!query.success) throw new HttpError(400,"invalid_request","Invalid local command wait");
+      const id = localUuid(c.req.param("requestId")), deadline = Date.now()+query.data.waitMs;
+      let auth = await authority(c), firstState: string | undefined;
+      if (query.data.waitMs) { try { await signals.start(); } catch { throw localUnavailable(); } }
+      for (;;) {
+        const waiter = query.data.waitMs ? signals.wait(requestSignal(auth.workspace.id,id),Math.max(0,deadline-Date.now()),c.req.raw.signal) : undefined;
+        try {
+          const current = await requests.read(auth.token,auth.bootId,id), receipt = current.receipt;
+          if (receipt.state === "terminal" || (firstState !== undefined && receipt.state !== firstState) || Date.now() >= deadline) return c.json(receipt);
+          firstState = receipt.state;
+          if (!waiter || !signals.healthy() || c.req.raw.signal.aborted) throw localUnavailable();
+          // A passive projection also observes deadlines if a maintenance
+          // replica is down; no connection is held during either wait.
+          let timer: NodeJS.Timeout | undefined;
+          try { await Promise.race([waiter.wait,new Promise<void>(resolve => { timer = setTimeout(resolve,Math.max(0,current.wakeAt-Date.now())); timer.unref(); })]); }
+          finally { clearTimeout(timer); }
+          if (c.req.raw.signal.aborted) throw localUnavailable();
+          auth = await authority(c);
+        } finally { waiter?.dispose(); }
+      }
+    });
+    local.post(`${path}/:requestId/cancel`, async c => {
+      const auth = await authority(c); await localBody(c,empty,true);
+      return c.json(await requests.cancel(auth.token,auth.bootId,localUuid(c.req.param("requestId"))));
+    });
+    local.post(`${path}/:requestId/ack`, async c => {
+      const auth = await authority(c); await localBody(c,empty,true);
+      await requests.ack(auth.token,auth.bootId,localUuid(c.req.param("requestId"))); return c.body(null,204);
+    });
+    app.route("/",local);
+  }
   app.post(`${CLOUD_V2_WORKER_API}/hello`, async c => {
     const input = await body(c, CloudV2WorkerHelloSchema);
     const token = bearer(c);
@@ -144,6 +206,8 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
       const identity = await deps.runtimeUpdates.session(token, input.bootId, handoff, input.runtimeSha256);
       if (!identity) throw unauthorized();
       if (deps.store.chatEdits && !await deps.store.chatEdits.advertise(token, input.bootId, workerFeatures(c).has("chat-edit-v1"), handoff)) throw unauthorized();
+      if (deps.localCommands && workerFeatures(c).has(LOCAL_COMMANDS_FEATURE)
+        && !await deps.localCommands.requests.advertise(token,input.bootId,true,handoff)) throw unauthorized();
       return c.json({ config: await configuration(deps, identity, token, input.bootId, workerFeatures(c), "admission", handoff) });
     }
     let runtimeSha256 = deps.runtimeSha256;
@@ -161,6 +225,8 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
     const workspace = await deps.store.beginWorkerHello(token, input.bootId);
     if (!workspace) throw unauthorized();
     if (deps.store.chatEdits && !await deps.store.chatEdits.advertise(token, input.bootId, workerFeatures(c).has("chat-edit-v1"))) throw unauthorized();
+    if (deps.localCommands && workerFeatures(c).has(LOCAL_COMMANDS_FEATURE)
+      && !await deps.localCommands.requests.advertise(token,input.bootId,true)) throw unauthorized();
     const configStarted = Date.now();
     const config = await configuration(deps, workspace, token, input.bootId, workerFeatures(c));
     const configMs = Math.max(0, Date.now() - configStarted);

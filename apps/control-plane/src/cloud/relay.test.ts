@@ -117,6 +117,48 @@ describe("cloud v2 relay", () => {
     return ws;
   };
 
+  it("commits legacy sender retirement before forwarding a prompt", async () => {
+    let entered!: () => void, release!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; }), held = new Promise<void>(resolve => { release = resolve; });
+    deps.retireLocalSender = vi.fn(async () => { entered(); await held; });
+    const frames: any[] = [];
+    workerServer.on("connection", ws => ws.on("message", data => frames.push(JSON.parse(String(data)))));
+    await worker();
+    const frame = { type: "AGENT_PROMPT", id: "legacy", sessionId: "native-execution" };
+    sockets[0]!.send(JSON.stringify(frame));
+    await started;
+    expect(frames.some(value => value.frame?.id === frame.id)).toBe(false);
+    release();
+    await vi.waitFor(() => expect(frames.some(value => value.frame?.id === frame.id)).toBe(true));
+    expect(deps.retireLocalSender).toHaveBeenCalledExactlyOnceWith(workspaceId, workspaceId, "0", ticketSession);
+  });
+
+  it("does not forward legacy work when sender retirement fails", async () => {
+    deps.retireLocalSender = vi.fn(async () => { throw new Error("fixture database unavailable"); });
+    const frames: any[] = [];
+    workerServer.on("connection", ws => ws.on("message", data => frames.push(JSON.parse(String(data)))));
+    await worker();
+    const a = sockets[0]!, closed = new Promise<number>(resolve => a.once("close", resolve));
+    a.send(JSON.stringify({ type: "AGENT_STEER", id: "legacy-refused", sessionId: "native-execution" }));
+    expect(await closed).toBe(1013);
+    expect(frames.some(value => value.frame?.id === "legacy-refused")).toBe(false);
+  });
+
+  it("bounds frames waiting behind a legacy sender retirement",async () => {
+    let entered!: () => void, release!: () => void;
+    const observed = new Promise<void>(resolve => { entered = resolve; }), held = new Promise<void>(resolve => { release = resolve; });
+    deps.retireLocalSender = vi.fn(async () => { entered(); await held; });
+    await worker();
+    const a = sockets[0]!, closed = new Promise<number>(resolve => a.once("close",resolve));
+    try {
+      a.send(JSON.stringify({ type: "AGENT_PROMPT",id: "held",sessionId: "native-execution" }));
+      await observed;
+      for (let i = 0; i < 65; i++) a.send(JSON.stringify({ type: "WORKSPACE_REQUEST",id: `queued-${i}`,op: "chats.list" }));
+      await vi.waitFor(() => expect(a.readyState).not.toBe(WebSocket.OPEN));
+      expect(await closed).toBe(1013);
+    } finally { release(); }
+  });
+
   describe("negotiated worker activity", () => {
     const enable = () => {
       workerServer.on("headers", headers => { headers.push("X-Zeros-Worker-Features: worker-push-v1"); });
@@ -737,6 +779,24 @@ describe("cloud v2 relay", () => {
     }
     if (features === "workspace-api-v1") expect(deps.apiConfiguration).toHaveBeenCalledWith(workspaceId);
     else expect(deps.apiConfiguration).not.toHaveBeenCalled();
+  });
+
+  it.each(["","local-commands-v10","local-commands-v1"])("negotiates local commands and removes the tool on a setting refresh: %s",async features => {
+    workerServer.on("headers",headers => { headers.push(`X-Zeros-Worker-Features: ${features}`); });
+    const original = deps.config;
+    deps.config = async workspace => ({ ...await original(workspace),promptOutbox: 1,localCommands: 1 });
+    let enabled = true;
+    deps.localCommandsEnabled = vi.fn(async () => enabled);
+    const frames: any[] = [];
+    workerServer.on("connection",ws => ws.on("message",raw => frames.push(JSON.parse(String(raw)))));
+    await app();
+    await vi.waitFor(() => expect(frames.filter(frame => frame.t === "config")).toHaveLength(1));
+    expect(frames.find(frame => frame.t === "config").localCommands).toBe(features === "local-commands-v1" ? 1 : undefined);
+    enabled = false; loginRevision = "1"; await relay.refreshLogins();
+    await vi.waitFor(() => expect(frames.filter(frame => frame.t === "config")).toHaveLength(2));
+    expect(frames.filter(frame => frame.t === "config").at(-1)).not.toHaveProperty("localCommands");
+    if (features === "local-commands-v1") expect(deps.localCommandsEnabled).toHaveBeenCalledWith(workspaceId);
+    else expect(deps.localCommandsEnabled).not.toHaveBeenCalled();
   });
 
   it.each([false, true])("gates managed identity on WebSocket upgrade support=%s for initial and refreshed config", async supported => {

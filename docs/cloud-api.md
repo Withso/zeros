@@ -479,6 +479,119 @@ The VM's existing `zeros-workspace` MCP server is separate from the remote API.
 Its `GetTerminalOutput` and `GetWorkspaceDiff` tools read the current workspace;
 they are not additional remote Cloud API routes.
 
+## Commands on a connected Mac
+
+The cloud worker's `zeros_workspace` MCP server exposes `RunLocalCommand` when
+the worker advertises `local-commands-v1`, its configuration has
+`localCommands: 1`, the durable prompt outbox is enabled, and the organization
+allows local commands. This tool is absent from `/api/mcp` and from Local
+workspaces. Personal and organization-local execution stays on the Local
+engine.
+
+The tool accepts `command`, with optional `cwd`, `description`, `reason`,
+`timeoutMs`, `extendedTimeoutReason` and `mac`. The command is at most 16,384
+characters, cwd 4,096, descriptions and reasons 1,000 each, and a Mac name 128.
+Values must be nonblank and contain no NUL. Timeout defaults to 60 seconds;
+above 120 seconds an extended reason is required, with a 30-minute maximum.
+Approval has a separate 120-second deadline. Each output stream is limited to
+1 MiB of UTF-8; larger tool presentations are saved in the VM's `.context/`.
+
+Only the target Mac approves and runs a command. The control plane resolves
+the target from the chat's latest accepted prompt and the verified desktop
+headers on that prompt. Without a desktop binding, the result is `no_target`,
+even when `mac` is supplied. API keys, CLI sends, agents and older desktops
+cannot establish that binding. The prompt's body, hash and delivery do not
+contain the device identity; idempotent prompt retries never retarget it.
+
+The default target is the Mac that sent that chat's latest message. An explicit
+`mac` is an exact, case-sensitive name of another connected Mac belonging to
+the same sender. An explicit target always asks for approval, including when
+it names the default Mac. Unreachable or ambiguous targets return
+`mac_not_connected`; there is no fallback or broadcast. These two recovery
+outcomes include `connectedMacs: [{ name, isDefault }]`, at most 20 names from
+that sender's eligible devices, with no user or device IDs.
+
+Desktop device routes use a normal WorkOS desktop bearer. All except
+registration also require `X-Zeros-Device-Id`, `X-Zeros-Device-Registration`
+and `X-Zeros-Device-Instance`. The server issues registration and instance
+UUIDs bound to the exact account and sign-in session. API credentials cannot
+use these routes. The same three optional headers on
+`POST /v1/cloud-v2/workspaces/:id/prompts` are verified inside enqueue; all must
+be present together. A stale supplied binding is refused.
+
+| Desktop route | Purpose |
+| --- | --- |
+| `PUT /v1/cloud-v2/devices/:deviceId` | Register with `{ requestId, name, capabilities: ["local-commands-v1"] }`; preserve requestId across retries |
+| `DELETE /v1/cloud-v2/devices/:deviceId` | Unregister before sign-out |
+| `POST /v1/cloud-v2/devices/:deviceId/heartbeat` | Renew a connected device's 65-second presence lease |
+| `GET /v1/cloud-v2/devices/:deviceId/events` | Account-level SSE, including when no workspace is open |
+| `GET /v1/cloud-v2/workspaces/:id/macs` | Read the caller's connected-Macs choices without waking the VM |
+| `POST /v1/cloud-v2/workspaces/:id/macs/:deviceId/connect` | Connect from that Mac itself |
+| `POST /v1/cloud-v2/workspaces/:id/macs/:deviceId/disconnect` | Disconnect one of the caller's Macs |
+| `GET /v1/cloud-v2/devices/:deviceId/requests/:requestId` | Read the target registration's notice |
+| `POST` to that request's `/received`, `/claim`, `/result`, `/ack` | Acknowledge delivery, submit a local decision, report the result, acknowledge the terminal notice |
+
+`/claim` accepts `{ decision: "approve" | "deny" }` once. `/result` accepts
+`{ result }`. Other actions accept an absent body or `{}`. Requests with JSON
+bodies require `application/json`; unknown fields are rejected. SSE events are
+`ready`, `presence`, `request`, `heartbeat` and `revoked`. Reconnect replays
+durable notices. A notice carries input while pending or claimed, and only the
+outcome after termination; it never carries output or grants execution.
+The Mac journals its decision before claiming and reconciles a lost reply by
+reading the same request, never by executing again.
+
+The latest app-sending Mac in a workspace remains connected until disconnected
+or signed out. Other connections expire 12 hours after connect, a message or
+a claimed command. Heartbeats do not extend this clock. A Mac connected
+nowhere sends no presence heartbeat. Its SSE connection uses at most two
+indexed reads per 25 seconds; a connected Mac adds at most one lease update
+per 25 seconds, excluding normal authentication work.
+
+Worker requests use the worker bearer, `X-Zeros-Worker-Boot` and
+`X-Zeros-Worker-Features: local-commands-v1`:
+
+| Worker route | Request and response |
+| --- | --- |
+| `POST /v2/cloud/worker/local-commands` | `{ requestId, chatId, executionId, input }`; 201 receipt, or 200 for an identical retry |
+| `GET /v2/cloud/worker/local-commands/:requestId?waitMs=25000` | Receipt; waitMs is 0–25,000 and holds no database connection |
+| `POST /v2/cloud/worker/local-commands/:requestId/cancel` | Idempotently cancel and return the receipt |
+| `POST /v2/cloud/worker/local-commands/:requestId/ack` | Erase retained input/output after the worker consumes the result; 204 |
+| `POST /v2/cloud/worker/local-commands/retire-sender` | `{ chatId, executionId }`; secondary fence for legacy relay sends |
+
+A receipt contains `requestId`, `state` (`pending`, `claimed`, `terminal`),
+`approvalDeadline`, nullable `runDeadline` and `mac`, nullable `result`, and
+`outputAvailable`. Request IDs are UUIDs preserved across retries; different
+input for the same ID returns `409 local_command_conflict`. The VM cannot
+choose a user or device. Stop, a new chat message, sign-out, boot or workspace
+authority changes fence outstanding work. Pending and claimed commands also
+prevent idle stop. Reads, retries and device connection changes never wake a
+VM. Legacy relay prompts retire bindings in the control plane before forwarding.
+
+Outcomes are `completed`, `failed`, `denied`, `approval_timed_out`,
+`command_timed_out`, `mac_not_connected`, `no_target`, `disabled`, `cancelled`
+and `interrupted`. A request not delivered within 10 seconds becomes
+`mac_not_connected`. An app restart interrupts a claimed command; it cannot be
+claimed again. A failed launch has exactly `error: "cwd_not_found"` or
+`"spawn_failed"` and no exit code. Transport and database failures remain
+availability errors; they never invent a denial or command outcome.
+
+Input and output use the existing envelope encryption keyring with separate
+purpose and request identity. They are erased after worker acknowledgement or
+24 hours after termination. A bounded receipt retains the request hash,
+outcome, Mac name, recovery hints and a failed launch's closed error reason,
+never its command, path or output. Chat or workspace deletion removes receipts.
+Creation limits are durable across replicas: 10/minute/chat and sender,
+30/minute/device, two outstanding/chat, four/device, 128 unacknowledged notices
+per current device registration, and 10,000 receipts/workspace. Output reserves
+are capped at 32 MiB/device and 64 MiB/workspace. Reads and identical retries
+do not consume creation quotas. Capacity errors return `429` with `Retry-After`.
+
+Organization members read `GET /v1/cloud-v2/organizations/:org/local-commands`.
+Owners and admins can `PUT` `{ localCommandsEnabled: boolean }` to the same
+route. It defaults to true. Disabling ends outstanding commands with `disabled`
+and refreshes worker configuration. Older workers receive no new field;
+new workers receiving an old configuration expose no local-command tool.
+
 ## Restart and v1 scope
 
 The desktop's WorkOS-authenticated route

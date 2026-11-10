@@ -22,6 +22,7 @@ import type { CloudGithubUnavailableReason } from "./github-connection-contract.
 import type { CloudEnvironments } from "./environment-store.js";
 import { createCloudEnvironmentRoutes } from "./environment-routes.js";
 import { RUNTIME_CANARY_HEADER, type RuntimeCanaryAuthority, type RuntimeCanaryStatus } from "./runtime-canary.js";
+import { createCloudLocalDeviceRoutes, type CloudLocalDeviceRoutes } from "./local-commands/routes.js";
 
 export type CloudGithubWorkspaceDocument = CloudV2Workspace & {
   checkoutPath?: string;
@@ -46,6 +47,7 @@ const ChatEditSchema = z.object({ title: CloudV2SessionNameSchema.transform(valu
   .strict().refine(value => value.title !== undefined || value.archived !== undefined);
 
 export type CloudV2RouteDeps = {
+  localDevices?: CloudLocalDeviceRoutes;
   store: Pick<CloudV2Store, "activeComputer" | "createWorkspace" | "createWorkspaceOnce" | "readCreateReceipt" | "get" | "promptContext" | "list" | "requestLifecycle" | "transition" | "issueToken" | "listChats" | "messageWindow" | "searchMessages" | "markActive"> & Partial<Pick<CloudV2Store, "prompts" | "getByNumber" | "chatEdits">>;
   /** Roll out only with a runtime that advertises durable prompt delivery. */
   promptOutbox?: boolean;
@@ -84,6 +86,7 @@ function workspaceDocument(workspace: CloudGithubWorkspaceDocument, promptOutbox
 export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
   const app = new Hono();
   const chatEdits = deps.store.chatEdits;
+  if (deps.localDevices) app.route("/", createCloudLocalDeviceRoutes(deps.localDevices));
   if (deps.environments) app.route("/", createCloudEnvironmentRoutes(deps.environments));
   if (deps.githubConnections) app.route("/",createCloudGithubConnectionRoutes(deps.githubConnections));
   const documents = async (workspaces: readonly CloudV2Workspace[]) =>

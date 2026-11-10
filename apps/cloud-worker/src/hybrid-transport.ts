@@ -1,4 +1,6 @@
 import { randomInt, randomUUID } from "node:crypto";
+import type { LocalCommandInput } from "@zeros/protocol/local-commands";
+import { requestLocalCommand } from "./local-commands/client";
 import { CLOUD_WORKER_FEATURES } from "./worker-features";
 import { CLOUD_V2_MAX_FRAME_BYTES, CLOUD_V2_RELAY_PROTOCOL, CloudV2ControlFrameSchema, CloudV2WorkerActivityReplySchema,
   CloudV2WorkerFrameSchema, CloudV2WorkerTimingSchema, type CloudV2WorkerTiming, type CloudV2ControlFrame, type CloudV2WorkerFrame } from "@zeros/protocol/cloud-v2-relay";
@@ -132,6 +134,18 @@ export class HybridTransport implements Transport {
     await this.recovering;
     if (this.listening) { await this.listener.dispose(); this.listening = false; }
     this.handlers?.close();
+  }
+  private localCommandsInFlight = 0;
+  get localCommandsPending(): number { return this.localCommandsInFlight; }
+  async localCommand(request: { chatId: string; executionId: string; input: LocalCommandInput }, signal: AbortSignal) {
+    this.localCommandsInFlight++;
+    try {
+      return await requestLocalCommand((method, path, body, timeoutMs, callSignal) =>
+        this.request(path, method === "POST" ? body ?? {} : undefined, callSignal, timeoutMs), request, signal);
+    } finally { this.localCommandsInFlight--; }
+  }
+  async retireLocalCommandSender(request: { chatId: string; executionId: string }): Promise<void> {
+    await this.request("local-commands/retire-sender", request, undefined, 5_000);
   }
   async promptRequest(operation: PromptOperation, body: unknown, signal?: AbortSignal): Promise<unknown> {
     const controller = new AbortController();
@@ -370,6 +384,7 @@ export class HybridTransport implements Transport {
         } else await response.body?.cancel();
         throw new HttpFailure(response.status, code, githubReason);
       }
+      if (response.status === 204) { await response.body?.cancel(); return {}; }
       const reader = response.body?.getReader();
       if (!reader) throw new Error("Empty worker control response.");
       const chunks: Uint8Array[] = []; let bytes = 0;

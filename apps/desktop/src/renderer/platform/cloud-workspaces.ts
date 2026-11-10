@@ -37,11 +37,20 @@ async function readCloudJson(response: Response, maxBytes = 4 * 1024 * 1024): Pr
   }
 }
 
+const DEVICE_HEADER_NAMES = ["X-Zeros-Device-Id", "X-Zeros-Device-Registration", "X-Zeros-Device-Instance"] as const;
+/** Only the three device headers, and only together: the control plane refuses a partial binding. */
+function pickDeviceHeaders(headers: Record<string, string> | undefined): Record<string, string> {
+  if (!headers || !DEVICE_HEADER_NAMES.every(name => typeof headers[name] === "string" && /^[0-9a-f-]{36}$/i.test(headers[name]!))) return {};
+  return Object.fromEntries(DEVICE_HEADER_NAMES.map(name => [name, headers[name]!]));
+}
+
 export async function cloudAccountRequest<T>(
   path: string,
   schema: z.ZodType<T>,
   input?: { body: unknown; idempotencyKey: string; method?: "POST" | "DELETE" | "PUT" | "PATCH" },
-  options?: { promptRecovery?: true; signal?: AbortSignal; githubPullRequest?: true; mutationReceipt?: true },
+  options?: { promptRecovery?: true; signal?: AbortSignal; githubPullRequest?: true; mutationReceipt?: true;
+    /** This Mac's three local-command device headers, all or none. */
+    deviceHeaders?: Record<string, string> },
 ): Promise<T> {
   if (!isFeatureEnabled("cloud-workspaces"))
     throw new Error("Cloud workspaces are not available in this release channel.");
@@ -61,6 +70,7 @@ export async function cloudAccountRequest<T>(
     signal: options?.signal ? AbortSignal.any([options.signal, AbortSignal.timeout(options.githubPullRequest ? 60_000 : 20_000)]) : AbortSignal.timeout(options?.githubPullRequest ? 60_000 : 20_000),
     headers: {
       authorization: `Bearer ${session.access_token}`,
+      ...pickDeviceHeaders(options?.deviceHeaders),
       ...(input
         ? {
             "content-type": "application/json",

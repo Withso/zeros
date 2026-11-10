@@ -101,6 +101,11 @@ export class Agents {
     this.fenceReviewConfiguration(config.codeReview);
     this.config = config; this.models.configure(config);
   }
+  /** The chat a native execution (route) belongs to, if it is still open. */
+  chatForExecution(executionId: string): string | undefined {
+    const route = this.routes.get(executionId);
+    return route && !route.closed ? route.chatId : undefined;
+  }
   mcpFailure(executionId: string, cloud: CloudMcpFailure): void {
     const route = [...this.routes.values()].find(value => value.mcpExecutionId === executionId);
     if (!route || route.closed || this.chats.get(route.chatId) !== route) return;
@@ -480,7 +485,8 @@ export class Agents {
   /** Stop fences review writes by retiring their grant (the next turn reopens
    * the driver). Read-only terminal and diff tools stay with their execution. */
   private stopWorkspaceTools(route: Runtime): Promise<void> {
-    return route.workspaceTools?.review === false ? Promise.resolve() : this.retireWorkspaceTools(route);
+    if (route.workspaceTools?.review === false) { route.workspaceTools.cancel(); return Promise.resolve(); }
+    return this.retireWorkspaceTools(route);
   }
 
   private retireWorkspaceTools(route: Runtime): Promise<void> {

@@ -29,7 +29,7 @@ suite("runtime hello through the production composition", () => {
   });
   afterAll(() => pool.end());
 
-  async function fixture(privateBoot = true, secondary = false, api = false, beforeApiColumn = false) {
+  async function fixture(privateBoot = true, secondary = false, api = false, beforeApiColumn = false, localCommands = false) {
     if (beforeApiColumn) await pool.query("ALTER TABLE cloud_v2_workspaces DROP COLUMN api_access, DROP COLUMN restart_stop_generation");
     const creator = randomUUID(), org = randomUUID();
     await pool.query("INSERT INTO users(id,email,display_name) VALUES($1,$2,'Fixture')", [creator, `${creator}@example.test`]);
@@ -58,7 +58,7 @@ suite("runtime hello through the production composition", () => {
         runtime: { sha256: "b".repeat(64), store: { endpoint: "https://store.example.test", bucket: "fixture", accessKeyId: "fixture", secretAccessKey: "fixture" } } },
     } as Config;
     const cp = createCloudV2(config, pool, { relay: false, lifecycle: false })!;
-    cleanup.push(async () => { cp.runtimeUpdates.close(); await cp.api.credentials.close(); await cp.loginChanges?.stop(); await cp.promptChanges?.stop(); });
+    cleanup.push(async () => { cp.runtimeUpdates.close(); await cp.api.credentials.close(); await cp.loginChanges?.stop(); await cp.promptChanges?.stop(); await cp.localCommandSignals.close(); });
     const scope = { organizationId: org, userId: creator }, connections = cp.routes.githubConnections!;
     await connections.store.save(scope, await connections.store.fingerprint(scope), { id: "12", login: "fixture" },
       { method: "pat", accessToken: "synthetic-pat", expiresAt: null });
@@ -92,14 +92,14 @@ suite("runtime hello through the production composition", () => {
     app.use("*", requestTiming({ slowMs: Infinity, databasePool: pool, costObserver: value => { costs.push(value); } }));
     app.onError((error, c) => c.json({ code: error instanceof HttpError ? error.code : "internal" }, error instanceof HttpError ? error.status : 500));
     app.route("/", createCloudV2WorkerRoutes(cp.workers));
-    const hello = (bootId = h.next_boot_id, runtimeSha256 = h.target_sha256, id = h.id, chatEdits = false) => app.request("/v2/cloud/worker/hello", {
+    const hello = (bootId = h.next_boot_id, runtimeSha256 = h.target_sha256, id = h.id, chatEdits = false, localFeature = localCommands) => app.request("/v2/cloud/worker/hello", {
       method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json", "x-zeros-runtime-handoff": id,
-        "x-zeros-worker-features": `runtime-update-v1,prompt-outbox-v1,workspace-environment-v1,repository-setup-v1,mcp-v1,github-pr-v1,git-identity-v1${api ? ",workspace-api-v1" : ""}${chatEdits ? ",chat-edit-v1" : ""}` },
+        "x-zeros-worker-features": `runtime-update-v1,prompt-outbox-v1,workspace-environment-v1,repository-setup-v1,mcp-v1,github-pr-v1,git-identity-v1${api ? ",workspace-api-v1" : ""}${chatEdits ? ",chat-edit-v1" : ""}${localFeature ? ",local-commands-v1" : ""}` },
       body: JSON.stringify({ protocol: 2, bootId, runtimeSha256 }),
     });
-    const ordinary = (route: "hello" | "config", apiFeature = api, runtimeSha256 = "b".repeat(64)) => app.request(`/v2/cloud/worker/${route}`, {
+    const ordinary = (route: "hello" | "config", apiFeature = api, runtimeSha256 = "b".repeat(64), localFeature = localCommands) => app.request(`/v2/cloud/worker/${route}`, {
       method: route === "hello" ? "POST" : "GET", headers: { authorization: `Bearer ${token}`, "content-type": "application/json", "x-zeros-worker-boot": boot,
-        "x-zeros-worker-features": `runtime-update-v1,prompt-outbox-v1,workspace-environment-v1,repository-setup-v1,mcp-v1,github-pr-v1,git-identity-v1${apiFeature ? ",workspace-api-v1" : ""}` },
+        "x-zeros-worker-features": `runtime-update-v1,prompt-outbox-v1,workspace-environment-v1,repository-setup-v1,mcp-v1,github-pr-v1,git-identity-v1${apiFeature ? ",workspace-api-v1" : ""}${localFeature ? ",local-commands-v1" : ""}` },
       ...(route === "hello" ? { body: JSON.stringify({ protocol: 2, bootId: boot, runtimeSha256 }) } : {}),
     });
     return { cp, creator, org, workspace, token, boot, h, handoffs, hello, ordinary, costs, fetcher, app, deny: () => { allowed = false; } };
@@ -126,6 +126,62 @@ suite("runtime hello through the production composition", () => {
     expect({ status: hello.status, code: configured.code }).toEqual({ status: 200, code: undefined });
     expect(configured.config.environment).toMatchObject({ repositoryId: "42", variables: env, files: [] });
     expect(JSON.stringify((await pool.query("SELECT envelope FROM cloud_environment_versions")).rows).includes(env.APP_SECRET)).toBe(false);
+  });
+
+  it("negotiates local commands only with the feature, organization switch and durable outbox", async () => {
+    const f = await fixture(false,false,false,false,true);
+    const legacy = await f.ordinary("hello",false,f.h.previous_sha256,false);
+    expect(legacy.status).toBe(200); expect((await legacy.json()).config).not.toHaveProperty("localCommands");
+    const capable = await f.ordinary("hello",false,f.h.previous_sha256);
+    expect(capable.status).toBe(200); expect((await capable.json()).config.localCommands).toBe(1);
+    expect((await pool.query("SELECT local_command_boot_ids FROM cloud_v2_workspaces WHERE id=$1",[f.workspace.id])).rows[0].local_command_boot_ids).toContain(f.boot);
+    await pool.query("UPDATE organizations SET local_commands_allowed=false WHERE id=$1",[f.org]);
+    expect((await (await f.ordinary("config")).json()).config).not.toHaveProperty("localCommands");
+    const disabled = await f.app.request("/v2/cloud/worker/local-commands",{ method: "POST",headers: {
+      authorization: `Bearer ${f.token}`,"x-zeros-worker-boot": f.boot,"x-zeros-worker-features": "local-commands-v1","content-type": "application/json",
+    },body: JSON.stringify({ requestId: randomUUID(),chatId: "chat",executionId: "execution",input: { command: "x" } }) });
+    expect(disabled.status).toBe(201); expect((await disabled.json()).result).toEqual({ outcome: "disabled" });
+    await pool.query("UPDATE organizations SET local_commands_allowed=true WHERE id=$1",[f.org]);
+    f.cp.workers.promptOutbox = false;
+    expect((await (await f.ordinary("config")).json()).config).not.toHaveProperty("localCommands");
+  });
+
+  it.each([false,true])("negotiates private local-command support without granting requests before promotion, rollback=%s",async rollback => {
+    const f = await fixture(true,false,false,false,true);
+    const candidate = await f.hello(); expect(candidate.status).toBe(200); expect((await candidate.json()).config.localCommands).toBe(1);
+    const create = (bootId: string) => f.app.request("/v2/cloud/worker/local-commands",{ method: "POST",headers: {
+      authorization: `Bearer ${f.token}`,"x-zeros-worker-boot": bootId,"x-zeros-worker-features": "local-commands-v1","content-type": "application/json",
+    },body: JSON.stringify({ requestId: randomUUID(),chatId: "chat",executionId: "execution",input: { command: "x" } }) });
+    expect((await create(f.h.next_boot_id)).status).toBe(401);
+    expect((await f.ordinary("hello",false,f.h.previous_sha256,false)).status).toBe(200);
+    if (rollback) {
+      await f.handoffs.rollback(f.h.id);
+      const fallback = await f.hello(f.h.rollback_boot_id,f.h.previous_sha256,f.h.id,false,false);
+      expect(fallback.status).toBe(200); expect((await fallback.json()).config).not.toHaveProperty("localCommands");
+    }
+    const promoted = rollback ? f.h.rollback_boot_id : f.h.next_boot_id;
+    expect(await f.handoffs.promote(f.token,f.h.id,promoted)).toBe(true);
+    expect((await create(promoted)).status).toBe(rollback ? 401 : 201);
+    expect((await pool.query("SELECT cardinality(local_command_boot_ids) AS n FROM cloud_v2_workspaces WHERE id=$1",[f.workspace.id])).rows[0].n).toBeLessThanOrEqual(2);
+  });
+
+  it("skips N-1 setting reads and retries a configuration whose organization was disabled during the read",async () => {
+    const f = await fixture(false,false,false,false,true), commands = f.cp.workers.localCommands!.requests;
+    const read = commands.enabled.bind(commands), spy = vi.spyOn(commands,"enabled");
+    const legacy = await f.ordinary("config",false,f.h.previous_sha256,false);
+    expect(legacy.status).toBe(200); expect(spy).not.toHaveBeenCalled();
+    let entered!: () => void, release!: () => void;
+    const observed = new Promise<void>(resolve => { entered = resolve; }), held = new Promise<void>(resolve => { release = resolve; });
+    spy.mockImplementationOnce(async id => { const value = await read(id); entered(); await held; return value; });
+    const pending = f.ordinary("config");
+    try {
+      await observed;
+      await pool.query("UPDATE organizations SET local_commands_allowed=false WHERE id=$1",[f.org]);
+      release();
+      const response = await pending; expect(response.status).toBe(200);
+      expect((await response.json()).config).not.toHaveProperty("localCommands");
+      expect(spy.mock.calls.length).toBeGreaterThanOrEqual(2);
+    } finally { release(); await pending; }
   });
 
   it("grants a pre-column workspace API access only to a worker advertising the feature", async () => {
