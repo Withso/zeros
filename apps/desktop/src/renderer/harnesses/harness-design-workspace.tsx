@@ -24,12 +24,13 @@ import {
   componentExpressionScope,
   componentInheritedValues,
   componentOptionCss,
+  componentOptionValues,
   readComponentDeclaration,
 } from "@zeros/design-core/components";
-import { mutateComponentOption } from "@zeros/design-web/component-options";
+import { appendComponentVariant, mutateComponentOption } from "@zeros/design-web/component-options";
 import { createComponentTemplateBudget, designComponentSummaryOf, renderComponentTemplate } from "@zeros/design-web/component-template";
 import { designComponentPreviewMessagesForTests } from "../features/design-workspace/state/design-component-options";
-import { mutateDesignNodeDuplicateSource, mutateDesignNodeDeleteSource } from "@zeros/design-web/html";
+import { mutateDesignNodeAttributeSource, mutateDesignNodeDuplicateSource, mutateDesignNodeDeleteSource } from "@zeros/design-web/html";
 import {
   mutateDesignKeyframes,
   readDesignKeyframes,
@@ -135,9 +136,10 @@ const HARNESS_STYLE_SOURCES: DesignWorkspaceSnapshotWire["styleSources"] = [
   },
 ];
 
-function withDesignRuntime(authored: string, sourceVersion: string): string {
-  // The engine renders a component frame's template before the runtime sees it.
-  const source = componentOptionsHarness ? renderHarnessComponentFrame(authored) : authored;
+function withDesignRuntime(authored: string, sourceVersion: string, variant: string | null = null): string {
+  // The engine renders a component frame's template, and the instances a
+  // frame places, before the runtime sees it.
+  const source = componentOptionsHarness ? renderHarnessInstances(renderHarnessComponentFrame(authored, variant)) : authored;
   const runtime =
     `<script>window.__zerosDesignSourceVersion=${JSON.stringify(sourceVersion)};` +
     `${DESIGN_RUNTIME_SOURCE}</script>`;
@@ -283,6 +285,8 @@ const COMPONENT_OPTIONS_SOURCE = `<!doctype html>
       <zd-option name="send-label" type="text" label="Label" group="Send button" default="Send"></zd-option>
       <zd-option name="motion" type="easing" label="Easing" default="ease-out 150ms"></zd-option>
       <zd-option name="settle" type="easing" label="Settle" default="spring(0.3) 400ms"></zd-option>
+      <zd-variant name="compact" width="800" mode="plan"></zd-variant>
+      <zd-variant name="wide-plan" width="1400" mode="plan"></zd-variant>
     </template>
     <style>
       :root { --blue-primary: royalblue; }
@@ -309,15 +313,65 @@ const COMPONENT_OPTIONS_SOURCE = `<!doctype html>
 </html>`;
 
 /** A main component frame as the engine renders it: its template with its
- * defaults, and its options as custom properties on :root. */
-function renderHarnessComponentFrame(source: string): string {
+ * defaults (or the variant it shows), and its options as custom properties
+ * on :root. */
+function renderHarnessComponentFrame(source: string, variant: string | null = null): string {
   const summary = designComponentSummaryOf(source);
   if (!summary) return source;
   const { declaration } = readComponentDeclaration(summary.elements.map((element) => ({ ...element, offset: 0 })));
-  const values = componentInheritedValues(declaration, null);
+  const values = componentInheritedValues(declaration, variant);
   const scope = componentExpressionScope(declaration, values);
   const html = renderComponentTemplate(source, { scope, ids: "copy", budget: createComponentTemplateBudget(), document: true });
   return html.replace(/<\/head>/i, `<style data-zeros-options>:root { ${componentOptionCss(declaration, values, scope)} }</style></head>`);
+}
+
+// The home frame places one Chat composer, expanded as the engine expands an
+// instance: the definition's markup with the instance's values, its inner
+// layers as parts, and its values on a zero-specificity rule for its host.
+const HARNESS_INSTANCE = '<zd-chat-composer data-oid="home-composer" width="800" mode="plan"></zd-chat-composer>';
+let harnessComponentDefinition = COMPONENT_OPTIONS_SOURCE;
+const harnessInstanceFailures = new Set<string>();
+
+function harnessInstanceAttributes(source: string): Map<string, Map<string, string>> {
+  const hosts = new Map<string, Map<string, string>>();
+  for (const element of new DOMParser().parseFromString(source, "text/html").querySelectorAll("zd-chat-composer[data-oid]"))
+    hosts.set(element.getAttribute("data-oid")!, new Map([...element.attributes].filter((attribute) => attribute.name !== "data-oid").map((attribute) => [attribute.name, attribute.value])));
+  return hosts;
+}
+
+function renderHarnessInstances(source: string): string {
+  if (!/<zd-chat-composer\b/.test(source)) return source;
+  const summary = designComponentSummaryOf(harnessComponentDefinition)!;
+  const { declaration } = readComponentDeclaration(summary.elements.map((element) => ({ ...element, offset: 0 })));
+  const body = /<body>([\s\S]*)<\/body>/i.exec(harnessComponentDefinition)![1]!;
+  const styles = (/<style>([\s\S]*?)<\/style>/i.exec(harnessComponentDefinition)![1] ?? "").replace(/^\s*body \{[^}]*\}\s*$/m, "");
+  const hosts = harnessInstanceAttributes(source);
+  const rules: string[] = [];
+  let count = 0;
+  const html = source.replace(/<zd-chat-composer\b([^>]*)><\/zd-chat-composer>/g, (_match, attributes: string) => {
+    const id = String(++count);
+    const oid = /data-oid="([^"]+)"/.exec(attributes)?.[1] ?? "";
+    const values = componentOptionValues(declaration, hosts.get(oid) ?? new Map()).values;
+    const scope = componentExpressionScope(declaration, values);
+    rules.push(`:where([data-zd-instance="${id}"]) { ${componentOptionCss(declaration, values, scope)} }`);
+    const inner = renderComponentTemplate(body, { scope, ids: "part", budget: createComponentTemplateBudget() });
+    return `<zd-chat-composer${attributes} data-zd-instance="${id}" style="display:block">${inner}</zd-chat-composer>`;
+  });
+  return html.replace(/<\/head>/i, `<style data-zeros-component="chat-composer">${styles}</style><style data-zeros-options>${rules.join("\n")}</style></head>`);
+}
+
+/** What the engine reports about the home frame's instance. */
+function harnessInstancesRecord(source: string, notApplied?: "last-good" | "defaults") {
+  const summary = designComponentSummaryOf(harnessComponentDefinition)!;
+  const hosts = Object.fromEntries([...harnessInstanceAttributes(source)].map(([oid, attributes]) => [oid, {
+    component: "chat-composer", attributes: Object.fromEntries(attributes), ...(harnessInstanceFailures.has(oid) ? { failed: true as const } : {}),
+  }]));
+  if (!Object.keys(hosts).length) return undefined;
+  const record = { components: { "chat-composer": { elements: summary.elements, reach: summary.reach, file: "pricing.html", frame: true } }, hosts,
+    ...(notApplied ? { notApplied } : {}) };
+  let hash = 0x811c9dc5;
+  for (const character of JSON.stringify(record)) hash = Math.imul(hash ^ character.charCodeAt(0), 0x01000193) >>> 0;
+  return { key: hash.toString(16).padStart(8, "0").repeat(2), ...record };
 }
 // Its colours are hex, the common case, so the card shows what the field does.
 const STYLE_ORIGINS_HEX: Record<string, string> = { "--bg1": "#FFFFFF", "--bg2": "#F5F5F5", "--fg1": "#1C1C1C", "--fg2": "#696969", "--border2": "#C0C0C0" }; // check:ui ignore-line -- fixture frame CSS, not app chrome
@@ -381,7 +435,9 @@ const STYLE_ORIGINS_HOME_SOURCE = `<!doctype html>
     </main>
   </body>
 </html>`;
-const homeSource = styleOriginsHarness
+const homeSource = styleOriginsHarness && componentOptionsHarness
+  ? STYLE_ORIGINS_HOME_SOURCE.replace(/(\s*)<\/main>/, `$1  ${HARNESS_INSTANCE}$1</main>`)
+  : styleOriginsHarness
   ? STYLE_ORIGINS_HOME_SOURCE
   : tokenPillsHarness
   ? TOKEN_PILLS_HOME_SOURCE
@@ -672,6 +728,7 @@ async function main() {
         nodeCount: 12,
         modifiedAt: 1,
         sourceVersion: HOME_SOURCE_VERSION,
+        ...(componentOptionsHarness ? { instances: harnessInstancesRecord(homeSource) } : {}),
       },
       {
         file: "pricing.html",
@@ -1080,10 +1137,33 @@ async function main() {
   let currentHomeSource = homeSource;
   let currentPricingSource = pricingSource;
   // The component frame's own history: each option write, undone exactly.
-  const componentUndo: Array<{ source: string; snapshot: typeof currentWorkspaceSnapshot }> = [];
+  const componentUndo: Array<{ source: string; home: string; frame: string; snapshot: typeof currentWorkspaceSnapshot }> = [];
   const componentRedo: typeof componentUndo = [];
   let componentGeneration = 0;
+  // The home frame's next generation: its instance follows its own source and
+  // the component's definition.
+  const publishHomeFrame = (source: string, notApplied?: "last-good" | "defaults") => {
+    componentGeneration += 1;
+    const sourceVersion = componentGeneration.toString(16).padStart(24, "d").slice(-24);
+    const previous = currentWorkspaceSnapshot.frames.find((frame) => frame.file === "home.html")!;
+    const instances = harnessInstancesRecord(source, notApplied);
+    const frame = { ...previous, sourceVersion, modifiedAt: previous.modifiedAt + 1, ...(instances ? { instances } : {}) };
+    if (!instances) delete (frame as { instances?: unknown }).instances;
+    currentHomeSource = source;
+    currentWorkspaceSnapshot = { ...currentWorkspaceSnapshot, frames: currentWorkspaceSnapshot.frames.map((entry) => entry.file === "home.html" ? frame : entry) };
+    designFrameDocumentCache.setData(designFrameDocumentKey(workspaceId, "home.html", sourceVersion),
+      { ...frame, source, srcDoc: withDesignRuntime(source, sourceVersion), tree: [] });
+    const foundation = foundationReplies.get(designFoundationKey(workspaceId, "home.html", previous.sourceVersion))!;
+    publishFoundation(designFoundationKey(workspaceId, "home.html", sourceVersion), {
+      ...foundation,
+      summary: { ...foundation.summary, revision: `harness:${sourceVersion}` },
+      foundation: { ...foundation.foundation, revision: `harness:${sourceVersion}` },
+    });
+    designWorkspaceSnapshotCache.setData(workspaceId, currentWorkspaceSnapshot);
+    return { before: previous.sourceVersion, after: sourceVersion };
+  };
   const publishComponentFrame = (source: string, notApplied?: "last-good" | "defaults") => {
+    harnessComponentDefinition = source;
     componentGeneration += 1;
     const sourceVersion = componentGeneration.toString(16).padStart(24, "c").slice(-24);
     const previous = currentWorkspaceSnapshot.frames.find((frame) => frame.file === "pricing.html")!;
@@ -1101,6 +1181,8 @@ async function main() {
       foundation: { ...foundation.foundation, revision: `harness:${sourceVersion}` },
     });
     designWorkspaceSnapshotCache.setData(workspaceId, currentWorkspaceSnapshot);
+    // The instance in the home frame renders the definition anew.
+    publishHomeFrame(currentHomeSource);
     return { before: previous.sourceVersion, after: sourceVersion };
   };
   if (componentOptionsHarness) {
@@ -1112,6 +1194,12 @@ async function main() {
     harness.__zerosHarnessComponentNotApplied = (shows) => { publishComponentFrame(currentPricingSource, shows ?? undefined); };
     harness.__zerosHarnessComponentPreviewMessages = () => designComponentPreviewMessagesForTests();
     harness.__zerosHarnessComponentSource = () => currentPricingSource;
+    (harness as unknown as Record<string, unknown>).__zerosHarnessHomeSource = () => currentHomeSource;
+    (harness as unknown as Record<string, unknown>).__zerosHarnessInstanceNotApplied = (shows: "last-good" | "defaults" | null) => {
+      if (shows) harnessInstanceFailures.add("home-composer");
+      else harnessInstanceFailures.delete("home-composer");
+      publishHomeFrame(currentHomeSource, shows ?? undefined);
+    };
   }
   let nestedFrameCounter = 0;
   let styleGenerationCounter = 0;
@@ -1640,20 +1728,23 @@ async function main() {
         const restored = (undo ? componentUndo : componentRedo).pop();
         const previous = currentWorkspaceSnapshot;
         if (restored) {
-          (undo ? componentRedo : componentUndo).push({ source: currentPricingSource, snapshot: currentWorkspaceSnapshot });
+          (undo ? componentRedo : componentUndo).push({ source: currentPricingSource, home: currentHomeSource, frame: restored.frame, snapshot: currentWorkspaceSnapshot });
           currentPricingSource = restored.source;
+          harnessComponentDefinition = restored.source;
+          currentHomeSource = restored.home;
           currentWorkspaceSnapshot = restored.snapshot;
           designWorkspaceSnapshotCache.setData(workspaceId, currentWorkspaceSnapshot);
           applyDesignWorkspaceRefreshVersion(workspaceId, 500 + ++componentGeneration);
         }
         designShortcutOperations.push("history:confirmed");
-        const version = (snapshot: typeof previous) => snapshot.frames.find((frame) => frame.file === "pricing.html")!.sourceVersion;
+        const historyFrame = restored?.frame ?? "pricing.html";
+        const version = (snapshot: typeof previous) => snapshot.frames.find((frame) => frame.file === historyFrame)!.sourceVersion;
         return {
           type: "WORKSPACE_RESPONSE",
           result: {
             result: restored ? { revision: `harness:${version(currentWorkspaceSnapshot)}`,
               receipt: { status: "applied", beforeRevision: `harness:${version(previous)}`, afterRevision: `harness:${version(currentWorkspaceSnapshot)}` } } : null,
-            historyFrame: "pricing.html",
+            historyFrame,
             snapshot: currentWorkspaceSnapshot,
           },
         };
@@ -1911,16 +2002,23 @@ async function main() {
             },
           };
         }
-        if (componentOptionsHarness && transaction?.operations?.length && transaction.operations.every((operation) => operation.type === "component.set-option")) {
-          const current = currentWorkspaceSnapshot.frames.find((frame) => frame.file === "pricing.html")!;
-          if (transaction.documentId !== "harness:pricing.html" || transaction.baseRevision !== `harness:${current.sourceVersion}`)
+        const componentWrite = transaction?.operations?.length && transaction.operations.every((operation) => operation.type === "component.set-option" || operation.type === "component.save-variant");
+        const instanceWrite = transaction?.operations?.length && transaction.documentId === "harness:home.html" &&
+          transaction.operations.every((operation) => operation.type === "node.set-attribute");
+        if (componentOptionsHarness && (componentWrite || instanceWrite)) {
+          const file = componentWrite ? "pricing.html" : "home.html";
+          const current = currentWorkspaceSnapshot.frames.find((frame) => frame.file === file)!;
+          if (transaction.documentId !== `harness:${file}` || transaction.baseRevision !== `harness:${current.sourceVersion}`)
             throw new Error("The option transaction document or revision is stale.");
-          let next = currentPricingSource;
-          for (const operation of transaction.operations as unknown as Array<{ file: string; option: string; variant: string | null; value: string | number | boolean | null }>)
-            next = mutateComponentOption(next, operation.file, operation);
-          componentUndo.push({ source: currentPricingSource, snapshot: currentWorkspaceSnapshot });
+          componentUndo.push({ source: currentPricingSource, home: currentHomeSource, frame: file, snapshot: currentWorkspaceSnapshot });
           componentRedo.length = 0;
-          const { before, after } = publishComponentFrame(next);
+          let next = componentWrite ? currentPricingSource : currentHomeSource;
+          for (const operation of (transaction.operations ?? []) as unknown as Array<Record<string, never>>) {
+            if (operation.type === "component.set-option") next = mutateComponentOption(next, operation.file, operation as never);
+            else if (operation.type === "component.save-variant") next = appendComponentVariant(next, operation.file, operation as never);
+            else next = mutateDesignNodeAttributeSource(next, operation.nodeId, operation.attribute, operation.value, "home.html");
+          }
+          const { before, after } = componentWrite ? publishComponentFrame(next) : publishHomeFrame(next);
           applyDesignWorkspaceRefreshVersion(workspaceId, 500 + componentGeneration);
           return {
             type: "WORKSPACE_RESPONSE",
@@ -1929,7 +2027,7 @@ async function main() {
                 revision: `harness:${after}`,
                 receipt: { status: "applied", transactionId: transaction.transactionId, documentId: transaction.documentId,
                   beforeRevision: `harness:${before}`, afterRevision: `harness:${after}`,
-                  appliedOperationIds: transaction.operations.map((operation) => operation.operationId), skippedOperationIds: [] },
+                  appliedOperationIds: (transaction.operations ?? []).map((operation) => operation.operationId), skippedOperationIds: [] },
               },
               snapshot: currentWorkspaceSnapshot,
             },
@@ -2553,7 +2651,8 @@ async function main() {
         const retained = designFrameDocumentCache.peekSnapshot(designFrameDocumentKey(workspaceId, file, frame.sourceVersion)).data;
         const source = file === "home.html" ? currentHomeSource : file === "pricing.html" ? currentPricingSource : performanceSources.get(file) ?? retained?.source;
         if (!source) throw new Error("The harness frame source is unavailable.");
-        return { type: "WORKSPACE_RESPONSE", result: { frame: { ...frame, source, srcDoc: withDesignRuntime(source, frame.sourceVersion), tree: [] } } };
+        const variant = typeof message.params?.variant === "string" ? message.params.variant : null;
+        return { type: "WORKSPACE_RESPONSE", result: { frame: { ...frame, source, srcDoc: withDesignRuntime(source, frame.sourceVersion, variant), tree: [] } } };
       }
       if (message.op === "design.frame.delete") {
         const frameFile = String(message.params?.frame ?? "");

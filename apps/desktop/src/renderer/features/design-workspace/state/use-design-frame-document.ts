@@ -15,8 +15,9 @@ export function useDesignFrameDocument(
   frame: string,
   sourceVersion: string,
   enabled: boolean,
+  variant?: string | null,
 ) {
-  const key = designFrameDocumentKey(workspaceId, frame, sourceVersion);
+  const key = designFrameDocumentKey(workspaceId, frame, sourceVersion, variant);
   const read = useCachedRead(
     designFrameDocumentCache,
     enabled ? key : null,

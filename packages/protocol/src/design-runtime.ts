@@ -260,6 +260,34 @@ export interface DesignRuntimeComponentOptionsPreview {
   applied: number;
 }
 
+/** A component instance's inner part, addressed through its host layer.
+ * Parts carry no data-oid, so the id lives in the reserved "::" namespace
+ * (like the document body's) and no authored layer can share it; a write
+ * that reaches the engine with one finds no layer. Both halves are
+ * percent-encoded, so neither can contain the separator. */
+export const DESIGN_COMPONENT_PART_PREFIX = "::zeros-part:";
+
+export function designComponentPartNodeId(host: string, part: string): string {
+  return `${DESIGN_COMPONENT_PART_PREFIX}${encodeURIComponent(host)}:${encodeURIComponent(part)}`;
+}
+
+/** The host and part a part id names; null for any other id. */
+export function designComponentPartOf(nodeId: string): { host: string; part: string } | null {
+  if (!nodeId.startsWith(DESIGN_COMPONENT_PART_PREFIX)) return null;
+  const rest = nodeId.slice(DESIGN_COMPONENT_PART_PREFIX.length);
+  const split = rest.indexOf(":");
+  if (split <= 0 || split === rest.length - 1 || rest.indexOf(":", split + 1) >= 0) return null;
+  try {
+    return { host: decodeURIComponent(rest.slice(0, split)), part: decodeURIComponent(rest.slice(split + 1)) };
+  } catch {
+    return null;
+  }
+}
+
+/** A host oid an instance preview may name: the same strict form inserted
+ * layers use, so it can sit in a selector with nothing to escape. */
+export const DESIGN_RUNTIME_INSTANCE_TARGET = /^[A-Za-z0-9_-]{1,128}$/;
+
 export function isDesignRuntimeComponentOptionsPreview(value: unknown): value is DesignRuntimeComponentOptionsPreview {
   return isRecord(value) && typeof value.sourceVersion === "string" && /^[a-f0-9]{24}$/.test(value.sourceVersion) &&
     Number.isInteger(value.applied) && (value.applied as number) >= 0 && (value.applied as number) <= DESIGN_RUNTIME_COMPONENT_PREVIEW_LIMITS.properties;
@@ -759,12 +787,18 @@ export type DesignRuntimeMethod =
   /** Opt-in: the frame's changes made by hand, in one reply. */
   | "getFrameChanges"
   /** Opt-in: show a component's option values before they are written. */
-  | "previewComponentOptions";
+  | "previewComponentOptions"
+  /** Opt-in: the same, for one instance's host. */
+  | "previewComponentInstanceOptions"
+  /** Opt-in: an instance's part under a point. A host that asks for it also
+   * gets part ids in every node read, and a repeated copy of a main
+   * component's layer hits as its source. */
+  | "getComponentPartAtLoc";
 
 /** Methods a runtime advertises only when the host's handshake lists them
  * in `features`, so a host that predates them still accepts the runtime's
  * capabilities. */
-export const DESIGN_RUNTIME_OPT_IN_METHODS = ["previewStylesheet", "setPlayback", "previewInsert", "clearPreviewInserts", "previewHistory", "commitStructure", "previewStructure", "clearPreviewStructure", "holdNodeState", "releaseNodeState", "getFrameChanges", "previewComponentOptions"] as const;
+export const DESIGN_RUNTIME_OPT_IN_METHODS = ["previewStylesheet", "setPlayback", "previewInsert", "clearPreviewInserts", "previewHistory", "commitStructure", "previewStructure", "clearPreviewStructure", "holdNodeState", "releaseNodeState", "getFrameChanges", "previewComponentOptions", "previewComponentInstanceOptions", "getComponentPartAtLoc"] as const;
 
 export interface DesignRuntimePlaybackStopped {
   sourceVersion: string;
@@ -855,6 +889,8 @@ const DESIGN_RUNTIME_METHODS = new Set<DesignRuntimeMethod>([
   "releaseNodeState",
   "getFrameChanges",
   "previewComponentOptions",
+  "previewComponentInstanceOptions",
+  "getComponentPartAtLoc",
 ]);
 
 export interface DesignRuntimeHostRequest {
@@ -1370,7 +1406,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   ];
   // Advertised only to a host whose handshake asks for them, so a host that
   // predates a method still accepts these capabilities.
-  var OPT_IN_METHODS = ["previewStylesheet", "setPlayback", "previewInsert", "clearPreviewInserts", "previewHistory", "commitStructure", "previewStructure", "clearPreviewStructure", "holdNodeState", "releaseNodeState", "getFrameChanges", "previewComponentOptions"];
+  var OPT_IN_METHODS = ["previewStylesheet", "setPlayback", "previewInsert", "clearPreviewInserts", "previewHistory", "commitStructure", "previewStructure", "clearPreviewStructure", "holdNodeState", "releaseNodeState", "getFrameChanges", "previewComponentOptions", "previewComponentInstanceOptions", "getComponentPartAtLoc"];
   var enabledOptInMethods = [];
   var MAX_PREVIEW_STYLESHEET_CHARS = 4194304;
   // Everything one frame of direct manipulation paints from. Deliberately tiny:
@@ -1600,7 +1636,86 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   }
 
   function targetOidOf(element) {
-    return element === document.body ? ${JSON.stringify(DESIGN_RUNTIME_DOCUMENT_BODY_ID)} : oidOf(element);
+    if (element === document.body) return ${JSON.stringify(DESIGN_RUNTIME_DOCUMENT_BODY_ID)};
+    var oid = oidOf(element);
+    return !oid && componentAddressing() && element && element.getAttribute ? partIdOf(element) : oid;
+  }
+
+  // ── Component instances ───────────────────────────────────
+  // An instance's inner elements carry data-zd-part and no data-oid, so the
+  // layer tree and hit testing stop at the host. A host that asked for
+  // getComponentPartAtLoc can also address a part through its host, and a
+  // main component's repeated copy (data-zd-copy) hits as its source layer.
+
+  var PART_PREFIX = ${JSON.stringify(DESIGN_COMPONENT_PART_PREFIX)};
+  var componentMarks = false;
+
+  function componentAddressing() {
+    return enabledOptInMethods.indexOf("getComponentPartAtLoc") >= 0;
+  }
+
+  /** The instance a part belongs to: the nearest host above it. */
+  function partOwnerOf(element) {
+    var parent = element.parentElement;
+    while (parent && !parent.hasAttribute("data-zd-instance")) parent = parent.parentElement;
+    return parent;
+  }
+
+  function partIdOf(element) {
+    var part = element.getAttribute("data-zd-part");
+    if (!part) return "";
+    var owner = partOwnerOf(element);
+    var host = owner ? oidOf(owner) : "";
+    return host ? PART_PREFIX + encodeURIComponent(host) + ":" + encodeURIComponent(part) : "";
+  }
+
+  function partElementFor(id) {
+    var rest = id.slice(PART_PREFIX.length);
+    var split = rest.indexOf(":");
+    if (split <= 0 || rest.indexOf(":", split + 1) >= 0) return null;
+    var host;
+    var part;
+    try {
+      host = decodeURIComponent(rest.slice(0, split));
+      part = decodeURIComponent(rest.slice(split + 1));
+    } catch (_error) {
+      return null;
+    }
+    ensureElementMap();
+    var hostElement = elementsByOid.get(host);
+    if (!hostElement || !hostElement.hasAttribute("data-zd-instance")) return null;
+    var marked = hostElement.querySelectorAll("[data-zd-part]");
+    for (var index = 0; index < marked.length; index += 1) {
+      if (marked[index].getAttribute("data-zd-part") === part && partOwnerOf(marked[index]) === hostElement) return marked[index];
+    }
+    return null;
+  }
+
+  function copySourceOf(element) {
+    var copy = element.getAttribute("data-zd-copy");
+    if (!copy) return null;
+    var mark = copy.lastIndexOf("#");
+    return mark > 0 ? elementsByOid.get(copy.slice(0, mark)) || null : null;
+  }
+
+  function componentPartAtLoc(x, y, hostNodeId) {
+    if (!Number.isFinite(x) || !Number.isFinite(y)) {
+      throw new Error("x and y must be finite frame coordinates.");
+    }
+    var host = elementForOid(hostNodeId);
+    if (!host.hasAttribute("data-zd-instance")) throw typedError("BAD_REQUEST", "That layer is not a component instance.", false);
+    var found = null;
+    visitElementsFromPoint(x, y, function (element) {
+      if (element === host || !host.contains(element)) return false;
+      for (var current = element; current && current !== host; current = current.parentElement) {
+        if (current.hasAttribute("data-zd-part") && partOwnerOf(current) === host) {
+          found = current;
+          return true;
+        }
+      }
+      return false;
+    });
+    return found ? detailsOf(found) : null;
   }
 
   // Frames may carry open shadow roots, for example a declarative
@@ -3253,6 +3368,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     }
     if (document.body) next.set(${JSON.stringify(DESIGN_RUNTIME_DOCUMENT_BODY_ID)}, document.body);
     elementsByOid = next;
+    componentMarks = document.querySelector("[data-zd-copy]") !== null;
     visibilityOverridesByOid.forEach(function (_display, oid) {
       if (!next.has(oid)) visibilityOverridesByOid.delete(oid);
     });
@@ -3514,6 +3630,10 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     return { inheritedStyles: inheritedStyles, baseStyles: baseStyles, rootStyles: rootStyles, unsupported: Array.from(unsupported) };
   }
 
+  function cssEscaped(text) {
+    return window.CSS && typeof window.CSS.escape === "function" ? window.CSS.escape(text) : text.replace(/["\\]/g, "\\$&");
+  }
+
   function detailsOf(element, layoutOnly, relocation) {
     // A held state can move and resize layers outside it (a wider flex item
     // pushes its siblings). Those are read with the state set aside, so no
@@ -3538,7 +3658,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       name: nameOf(element),
       text: textEditable ? editableTextOf(element) : directText(element),
       textEditable: textEditable,
-      selector: element === document.body ? "body" : "[data-oid=\"" + escaped + "\"]",
+      selector: element === document.body ? "body" : oidOf(element) ? "[data-oid=\"" + escaped + "\"]" : "[data-zd-part=\"" + cssEscaped(element.getAttribute("data-zd-part") || "") + "\"]",
       visible: hiddenBy === null,
       breadcrumb: layoutOnly ? [] : breadcrumbOf(element),
       rect: rect,
@@ -3641,13 +3761,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     return depth === 0;
   }
 
-  function previewComponentOptions(args) {
-    var existing = document.querySelector("style[data-zeros-runtime-options]");
-    if (args && args.clear === true) {
-      if (existing) withoutObservedMutations(function () { existing.remove(); });
-      return { sourceVersion: SOURCE_VERSION, applied: 0 };
-    }
-    var properties = args && args.properties;
+  function componentPreviewDeclarations(properties) {
     if (!properties || typeof properties !== "object" || Array.isArray(properties)) throw typedError("BAD_REQUEST", "Component option preview needs properties.", false);
     var names = Object.keys(properties);
     if (names.length > ${DESIGN_RUNTIME_COMPONENT_PREVIEW_LIMITS.properties}) throw typedError("BAD_REQUEST", "Too many component option properties.", false);
@@ -3658,6 +3772,49 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       if (!COMPONENT_PREVIEW_NAME.test(name) || !componentPreviewValueOk(value)) throw typedError("BAD_REQUEST", "Component option preview refused " + name.slice(0, 80) + ".", false);
       declarations.push(name + ": " + value);
     }
+    return declarations;
+  }
+
+  var INSTANCE_TARGET = ${DESIGN_RUNTIME_INSTANCE_TARGET.toString()};
+
+  /** One instance's preview, over its generated :where() rule: the host is
+   * named by its own oid, so other instances and the frame keep theirs, and
+   * an inner instance's own rule still sets its own values. */
+  function previewComponentInstanceOptions(args) {
+    var target = args && args.target;
+    if (typeof target !== "string" || !INSTANCE_TARGET.test(target)) throw typedError("BAD_REQUEST", "Component instance preview needs a host layer.", false);
+    ensureElementMap();
+    var host = elementsByOid.get(target);
+    if (!host) {
+      refreshElementMap();
+      host = elementsByOid.get(target);
+    }
+    if (!host || !host.hasAttribute("data-zd-instance")) throw typedError("BAD_REQUEST", "That layer is not a component instance.", false);
+    var existing = document.querySelector("style[data-zeros-runtime-instance-options]");
+    if (args.clear === true) {
+      if (existing) withoutObservedMutations(function () { existing.remove(); });
+      return { sourceVersion: SOURCE_VERSION, applied: 0 };
+    }
+    var declarations = componentPreviewDeclarations(args.properties);
+    withoutObservedMutations(function () {
+      var style = existing;
+      if (!style) {
+        style = document.createElement("style");
+        style.setAttribute("data-zeros-runtime-instance-options", "");
+        (document.head || document.documentElement).appendChild(style);
+      }
+      style.textContent = declarations.length ? "[data-zd-instance][data-oid=\"" + target + "\"] { " + declarations.join("; ") + "; }" : "";
+    });
+    return { sourceVersion: SOURCE_VERSION, applied: declarations.length };
+  }
+
+  function previewComponentOptions(args) {
+    var existing = document.querySelector("style[data-zeros-runtime-options]");
+    if (args && args.clear === true) {
+      if (existing) withoutObservedMutations(function () { existing.remove(); });
+      return { sourceVersion: SOURCE_VERSION, applied: 0 };
+    }
+    var declarations = componentPreviewDeclarations(args && args.properties);
     withoutObservedMutations(function () {
       var style = existing;
       if (!style) {
@@ -3982,6 +4139,11 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     if (typeof oid !== "string" || !oid) {
       throw new Error("nodeId must be a non-empty data-oid.");
     }
+    if (oid.indexOf(PART_PREFIX) === 0 && componentAddressing()) {
+      var part = partElementFor(oid);
+      if (!part) throw new Error("Element not found: " + oid);
+      return part;
+    }
     ensureElementMap();
     var element = elementsByOid.get(oid);
     if (!element) {
@@ -3997,8 +4159,13 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   function editableOidPath(element) {
     var path = [];
     var current = element;
+    var copies = componentMarks && componentAddressing();
     while (current && current instanceof Element) {
       if (oidOf(current)) path.push(current);
+      else if (copies) {
+        var source = copySourceOf(current);
+        if (source && path[path.length - 1] !== source) path.push(source);
+      }
       current = composedParentOf(current);
     }
     path.reverse();
@@ -4012,6 +4179,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     if (!Number.isFinite(x) || !Number.isFinite(y)) {
       throw new Error("x and y must be finite frame coordinates.");
     }
+    ensureElementMap();
     // Hover samples this every frame: the single topmost hit usually has an
     // editable path, and the full point list is walked only when it does not.
     var top = deepElementFromPoint(x, y);
@@ -6181,6 +6349,12 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       case "previewComponentOptions":
         if (enabledOptInMethods.indexOf("previewComponentOptions") < 0) throw new Error("Unknown design runtime method: previewComponentOptions");
         return previewComponentOptions(args);
+      case "previewComponentInstanceOptions":
+        if (enabledOptInMethods.indexOf("previewComponentInstanceOptions") < 0) throw new Error("Unknown design runtime method: previewComponentInstanceOptions");
+        return previewComponentInstanceOptions(args);
+      case "getComponentPartAtLoc":
+        if (enabledOptInMethods.indexOf("getComponentPartAtLoc") < 0) throw new Error("Unknown design runtime method: getComponentPartAtLoc");
+        return componentPartAtLoc(Number(args.x), Number(args.y), args.hostNodeId);
       case "getFrameChanges":
         if (enabledOptInMethods.indexOf("getFrameChanges") < 0) throw new Error("Unknown design runtime method: getFrameChanges");
         // Read as Default: a held state's copies are no layer's own value.

@@ -116,7 +116,7 @@ function previewHost(): HTMLDivElement {
  * bounded slots as canvas source loads and fenced by window and generation. */
 export function loadDesignSurfaceVector(target: DesignSourceVectorTarget, signal?: AbortSignal): Promise<unknown> {
   const url = designProtocolFrameUrl({ workspaceId: target.workspaceId, capability: target.capability,
-    frame: target.file, sourceVersion: target.sourceVersion, surface: true, theme: target.theme });
+    frame: target.file, sourceVersion: target.sourceVersion, surface: true, theme: target.theme, variant: target.variant });
   if (!url) return Promise.reject(new Error("Design surface URL is unavailable."));
   return new Promise((resolve, reject) => {
     let iframe: HTMLIFrameElement | null = null, timer = 0, layoutFrame = 0, settled = false;

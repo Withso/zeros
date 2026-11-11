@@ -83,6 +83,9 @@ interface DesignFrameRuntimeIframeProps {
   /** The Design directory the canvas shows; an agent's in-flight edits of
    * its linked stylesheets apply to this frame live. */
   designDirectory?: string;
+  /** The variant a main component frame shows: its document is that view of
+   * the same generation. */
+  variant?: string | null;
 }
 
 // --- WORKFLOWS ---
@@ -114,6 +117,7 @@ interface DesignFrameDocumentBufferProps {
   folder: string;
   frame: DesignCanvasFrameWire;
   documentSourceVersion: string;
+  variant: string | null;
   buffer: DesignDocumentBuffer;
   replacement: DesignDocumentReplacement | null;
   ready: boolean;
@@ -152,6 +156,7 @@ function DesignFrameDocumentBuffer({
   folder,
   frame,
   documentSourceVersion,
+  variant,
   buffer,
   replacement,
   ready,
@@ -380,6 +385,7 @@ function DesignFrameDocumentBuffer({
         capability: protocolCapability,
         frame: frame.file,
         sourceVersion: documentSourceVersion,
+        variant,
       })
     : null;
   const useProtocol =
@@ -655,6 +661,7 @@ function DesignFrameDocumentBuffer({
     frame.file,
     documentSourceVersion,
     runtimeActive && !useProtocol,
+    variant,
   );
   useEffect(() => {
     if (runtimeActive && !useProtocol && fallback.error && !fallback.data) {
@@ -720,7 +727,8 @@ export function DesignFrameRuntimeIframe(props: DesignFrameRuntimeIframeProps) {
   // even identical frame bytes belong to a new document owner.
   return (
     <DesignFrameRuntimeSession
-      key={`${props.workspaceId}\u0000${props.folder}\u0000${props.frame.file}\u0000${props.protocolCapability ?? "bridge"}\u0000${props.playbackSessionId ?? "editing"}`}
+      // Showing another variant is another document of the same generation.
+      key={`${props.workspaceId}\u0000${props.folder}\u0000${props.frame.file}\u0000${props.protocolCapability ?? "bridge"}\u0000${props.playbackSessionId ?? "editing"}\u0000${props.variant ?? ""}`}
       {...props}
       active={props.active && !props.retiring}
     />
@@ -744,6 +752,7 @@ function DesignFrameRuntimeSession({
   underlayReady,
   retiring = false,
   designDirectory,
+  variant = null,
 }: DesignFrameRuntimeIframeProps) {
   const stylesheetPreviews = useDesignAgentStylesheetPreviews(
     workspaceId,
@@ -1017,6 +1026,7 @@ function DesignFrameRuntimeSession({
           folder={folder}
           frame={frame}
           documentSourceVersion={entry.sourceVersion}
+          variant={variant}
           buffer={entry.buffer}
           replacement={entry.buffer === "incoming" ? replacement : null}
           ready={readySourceVersions.includes(entry.sourceVersion)}

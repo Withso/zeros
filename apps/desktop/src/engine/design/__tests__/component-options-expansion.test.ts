@@ -151,7 +151,9 @@ describe("a frame whose options stop applying", () => {
     const first = await render(good, true);
     expect(first.componentOptions).toBeUndefined();
     const failing = await render(bad, false);
-    expect(failing).toEqual({ html: first.html, componentOptions: { applied: false, shows: "last-good" } });
+    expect({ html: failing.html, componentOptions: failing.componentOptions }).toEqual({ html: first.html, componentOptions: { applied: false, shows: "last-good" } });
+    // The frame's instances are still named, whichever render it shows.
+    expect(Object.keys(failing.instances?.hosts ?? {})).toEqual(["ws"]);
   });
 
   it("shows the component's defaults when this session has no good render, and says so", async () => {

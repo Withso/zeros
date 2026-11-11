@@ -1,5 +1,6 @@
 import {
   encodeDesignFramePath,
+  isDesignComponentVariantName,
   isDesignFrameFile,
 } from "@zeros/protocol/design-path";
 
@@ -16,6 +17,8 @@ export function designProtocolFrameUrl(input: {
   sourceVersion: string;
   surface?: boolean;
   theme?: string | null;
+  /** The variant a main component frame shows. */
+  variant?: string | null;
 }): string | null {
   if (
     !WORKSPACE_ID_PATTERN.test(input.workspaceId) ||
@@ -23,13 +26,15 @@ export function designProtocolFrameUrl(input: {
     !input.capability ||
     !CAPABILITY_PATTERN.test(input.capability) ||
     !SOURCE_VERSION_PATTERN.test(input.sourceVersion) ||
-    (input.theme != null && (!input.surface || !/^[a-z][a-z0-9_-]{0,63}$/.test(input.theme)))
+    (input.theme != null && (!input.surface || !/^[a-z][a-z0-9_-]{0,63}$/.test(input.theme))) ||
+    (input.variant != null && !isDesignComponentVariantName(input.variant))
   ) {
     return null;
   }
   return (
     `zeros-design://workspace/${encodeURIComponent(input.workspaceId)}/` +
     `${input.capability}/${encodeDesignFramePath(input.frame)}?v=${input.sourceVersion}` +
-    (input.surface ? `&surface=1${input.theme ? `&theme=${input.theme}` : ""}` : "")
+    (input.surface ? `&surface=1${input.theme ? `&theme=${input.theme}` : ""}` : "") +
+    (input.variant ? `&variant=${input.variant}` : "")
   );
 }

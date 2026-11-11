@@ -120,6 +120,8 @@ export interface DesignCanvasFrame extends DesignFrameSummary {
   surfaceCost?: import("@zeros/protocol/design-surface").DesignSurfaceCost | null;
   /** Set when the frame's file declares options. */
   component?: import("@zeros/protocol/design-catalog").DesignFrameComponent;
+  /** Set when the frame places component instances with options. */
+  instances?: import("@zeros/protocol/design-catalog").DesignFrameInstances;
 }
 
 export interface DesignFrameTreeNode {

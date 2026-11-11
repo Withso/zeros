@@ -1,20 +1,27 @@
-// PURPOSE: The Options section of a component frame: one row per declared
-// option, which is its control. Agents create options; a person only
-// adjusts them here (the one authoring affordance is "Ask agent to change
-// options"). The main component shows and writes its declared defaults.
-// Mounted only while the frame itself is selected and its file declares
-// options; a folded group mounts no rows. Local only.
+// PURPOSE: A component's Options section: one row per declared option, which
+// is its control. Agents create options; a person only adjusts them here.
+// On the main component frame the Variant row picks which variant it shows
+// (personal view state) and a row writes that variant's line, or the default
+// with Default shown; "Save current as variant…" adds one line. On an
+// instance in another frame each row writes the host's attribute, a dot marks
+// a value that differs from what it inherits, and Reset removes them all.
+// Mounted only for one selected component frame or instance; a folded group
+// mounts no rows. Local only.
 
 import { useEffect, useMemo, useState } from "react";
-import { Sparkles } from "lucide-react";
+import { Plus, RotateCcw, Sparkles } from "lucide-react";
+import { componentInheritedValues } from "@zeros/design-core/component-options";
+import type { DesignFrameComponent, DesignFrameInstances } from "@zeros/protocol/design-catalog";
 import type { ComponentEasing, ComponentOption, ComponentOptionValue } from "@zeros/design-core/component-options";
 
 import {
   Button,
   DropdownMenu,
   DropdownMenuContent,
+  DropdownMenuItem,
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
   toast,
 } from "../../shared/ui/primitives";
@@ -23,6 +30,7 @@ import {
 import {
   OptionActionRow,
   OptionButtonRow,
+  OptionEntryRow,
   OptionGroupHeading,
   OptionNumberRow,
   OptionRangeRow,
@@ -36,13 +44,20 @@ import type { DesignCanvasFrameWire, DesignLintReportWire } from "../../platform
 import { designComponentOptionsBrief, designComponentOptionsFixBrief, type DesignAgentBrief } from "./design-agent-brief";
 import { DesignColorPicker } from "./design-color-picker";
 import { DesignColorSwatch } from "./design-color-swatch";
-import { InspectorSection } from "./design-inspector-kit";
+import { InspectorIconButton, InspectorSection } from "./design-inspector-kit";
 import {
   commitDesignComponentOption,
+  commitDesignComponentVariant,
+  commitDesignInstanceAttributes,
   createDesignComponentPreview,
+  designComponentAttributeText,
   designComponentPreviewProperties,
+  designComponentVariantName,
+  designInstanceOptionState,
   readDesignFrameComponent,
+  sameDesignComponentValue,
 } from "./state/design-component-options";
+import { showDesignComponentVariant, useDesignShownComponentVariant } from "./state/design-component-variants";
 
 const EASINGS = [
   { value: "linear", label: "Linear" },
@@ -56,74 +71,142 @@ const SEGMENTED_CHOICES = 3;
 const MAX_DURATION_MS = 1_000;
 
 const errorMessage = (error: unknown) => (error instanceof Error ? error.message : String(error));
-const sameValue = (left: ComponentOptionValue, right: ComponentOptionValue) =>
-  typeof left === "object" && typeof right === "object"
-    ? left.curve === right.curve && left.duration === right.duration
-    : left === right;
+/** A variant's name as a person reads it: "wide-plan" is Wide plan. */
+const variantLabel = (name: string) => {
+  const words = name.replace(/-/g, " ");
+  return words.charAt(0).toUpperCase() + words.slice(1);
+};
+
+/** What the section edits: the main component frame itself, or one instance
+ * of a component placed in this frame. */
+export type DesignComponentOptionsTarget =
+  | { kind: "main"; component: DesignFrameComponent }
+  | {
+      kind: "instance";
+      /** The host layer's data-oid. */
+      nodeId: string;
+      /** The component's name and title, as the header reads it. */
+      title: string;
+      host: DesignFrameInstances["hosts"][string];
+      component: DesignFrameInstances["components"][string];
+      /** What the frame shows when this instance's values did not apply. */
+      notApplied?: "last-good" | "defaults";
+    };
 
 export function DesignComponentOptions({
   workspaceId,
   frame,
+  target,
   directory,
   lint,
   disabled,
   onAskAgent,
 }: {
   workspaceId: string;
-  frame: DesignCanvasFrameWire & { component: NonNullable<DesignCanvasFrameWire["component"]> };
+  frame: DesignCanvasFrameWire;
+  target: DesignComponentOptionsTarget;
   directory: string;
   lint: DesignLintReportWire | null;
   disabled: boolean;
   onAskAgent?: (brief: DesignAgentBrief) => void;
 }) {
-  const view = readDesignFrameComponent(frame.component);
+  const instance = target.kind === "instance" ? target : null;
+  const view = readDesignFrameComponent(target.component);
   const { declaration } = view;
+  const notApplied = instance ? (instance.host.failed ? instance.notApplied ?? "defaults" : undefined) : view.notApplied;
+  const shownVariant = useDesignShownComponentVariant(workspaceId, frame);
+  // Keyed by the host's record, which a new generation replaces.
+  const host = instance?.host;
+  const instanceState = useMemo(
+    () => (host ? designInstanceOptionState(declaration, host.attributes) : null),
+    [declaration, host],
+  );
+  const variant = instanceState ? instanceState.variant : shownVariant;
+  // What a row shows before anything is set here: the main's shown variant,
+  // else its defaults; an instance's own values.
+  const base = useMemo(
+    () => instanceState?.values ?? componentInheritedValues(declaration, shownVariant),
+    [declaration, instanceState, shownVariant],
+  );
   // A value written and not yet in a new generation: the row keeps showing it.
   const [pending, setPending] = useState<ReadonlyMap<string, ComponentOptionValue>>(() => new Map());
   const [folded, setFolded] = useState<ReadonlySet<string>>(() => new Set());
-  useEffect(() => setPending(new Map()), [frame.sourceVersion]);
+  const [naming, setNaming] = useState(false);
+  useEffect(() => setPending(new Map()), [frame.sourceVersion, shownVariant]);
   const preview = useMemo(
-    () => createDesignComponentPreview(workspaceId, frame.file, frame.sourceVersion),
-    [workspaceId, frame.file, frame.sourceVersion],
+    () => createDesignComponentPreview(workspaceId, frame.file, frame.sourceVersion, instance?.nodeId),
+    [workspaceId, frame.file, frame.sourceVersion, instance?.nodeId],
   );
   useEffect(() => () => preview.clear(), [preview]);
 
-  const current = (option: ComponentOption): ComponentOptionValue => pending.get(option.name) ?? option.default;
-  const values = (option: ComponentOption, value: ComponentOptionValue) => {
-    const all = new Map<string, ComponentOptionValue>(declaration.options.map((entry) => [entry.name, current(entry)]));
-    all.set(option.name, value);
-    return all;
-  };
+  const current = (option: ComponentOption): ComponentOptionValue => pending.get(option.name) ?? base.get(option.name) ?? option.default;
+  const shownValues = () => new Map<string, ComponentOptionValue>(declaration.options.map((entry) => [entry.name, current(entry)]));
+  const values = (option: ComponentOption, value: ComponentOptionValue) => shownValues().set(option.name, value);
   const show = (option: ComponentOption, value: ComponentOptionValue) => {
     if (view.reach[option.name] === "css") preview.set(designComponentPreviewProperties(declaration, values(option, value)));
   };
+  const failed = (label: string) => (error: unknown) => {
+    preview.clear();
+    toast.error(`Couldn't change ${label}`, { description: errorMessage(error) });
+  };
   const commit = (option: ComponentOption, value: ComponentOptionValue) => {
-    if (sameValue(value, current(option))) {
+    if (sameDesignComponentValue(value, current(option))) {
       preview.clear();
       return;
     }
     setPending((previous) => new Map(previous).set(option.name, value));
-    void commitDesignComponentOption(workspaceId, frame, option.name, value).catch((error) => {
-      preview.clear();
-      setPending((previous) => {
-        const next = new Map(previous);
-        next.delete(option.name);
-        return next;
-      });
-      toast.error(`Couldn't change ${option.label}`, { description: errorMessage(error) });
+    const forget = () => setPending((previous) => {
+      const next = new Map(previous);
+      next.delete(option.name);
+      return next;
+    });
+    // An instance's value that lands on what it inherits needs no attribute.
+    const written = instance && instanceState
+      ? commitDesignInstanceAttributes(workspaceId, frame, instance.nodeId,
+        { [option.name]: sameDesignComponentValue(value, instanceState.inherited.get(option.name)) ? null : designComponentAttributeText(value) },
+        `Set ${option.name}`)
+      : commitDesignComponentOption(workspaceId, frame, option.name, value, shownVariant);
+    void written.catch((error) => {
+      forget();
+      failed(option.label)(error);
     });
   };
+  const chooseVariant = (next: string | null) => {
+    if (next === variant) return;
+    if (!instance) {
+      showDesignComponentVariant(workspaceId, frame.file, next);
+      return;
+    }
+    void commitDesignInstanceAttributes(workspaceId, frame, instance.nodeId, { "zd-variant": next }, next ? `Use variant ${next}` : "Use Default")
+      .catch(failed("the variant"));
+  };
+  const reset = instance && instanceState?.resettable
+    ? () => {
+        const removed: Record<string, null> = {};
+        for (const name of Object.keys(instance.host.attributes)) removed[name] = null;
+        void commitDesignInstanceAttributes(workspaceId, frame, instance.nodeId, removed, `Reset ${instance.title}`).catch(failed("the options"));
+      }
+    : undefined;
+  const saveVariant = (typed: string) => {
+    const named = designComponentVariantName(declaration, typed);
+    if ("error" in named) return named.error;
+    setNaming(false);
+    void commitDesignComponentVariant(workspaceId, frame, declaration, named.name, shownValues())
+      .then(() => showDesignComponentVariant(workspaceId, frame.file, named.name))
+      .catch((error) => toast.error("Couldn't save the variant", { description: errorMessage(error) }));
+    return null;
+  };
 
-  const title = frame.title;
-  const askToChange = onAskAgent ? () => onAskAgent(designComponentOptionsBrief({ directory, frame: frame.file, title })) : undefined;
+  const title = instance ? instance.title : frame.title;
+  const askToChange = onAskAgent && !instance ? () => onAskAgent(designComponentOptionsBrief({ directory, frame: frame.file, title })) : undefined;
   const askToFix =
-    onAskAgent && view.notApplied
+    onAskAgent && notApplied
       ? () =>
           onAskAgent(designComponentOptionsFixBrief({
             directory,
             frame: frame.file,
-            title,
-            shows: view.notApplied!,
+            title: instance ? `the ${instance.title} instance in ${frame.title}` : title,
+            shows: notApplied,
             problems: (lint?.violations ?? [])
               .filter((violation) => violation.file === frame.file && violation.ruleId.startsWith("component-"))
               .slice(0, 20)
@@ -153,25 +236,37 @@ export function DesignComponentOptions({
       }
     }
     if (option.group && folded.has(option.group)) continue;
+    const value = current(option);
     rows.push(
       <DesignComponentOptionRow
         key={option.name}
         option={option}
-        value={current(option)}
+        value={value}
+        inherited={instanceState?.inherited.get(option.name)}
         disabled={disabled}
-        onPreview={(value) => show(option, value)}
+        onPreview={(next) => show(option, next)}
         onCancel={() => preview.clear()}
-        onCommit={(value) => commit(option, value)}
+        onCommit={(next) => commit(option, next)}
       />,
     );
   }
+  const variants = declaration.variants.map((entry) => entry.name);
 
   return (
-    <InspectorSection title="Options" data-design-component-options="" bodyClassName="gap-1.5">
-      {view.notApplied ? (
-        <div role="alert" data-design-options-not-applied={view.notApplied} className="bg-red-bg text-red-fg flex flex-col items-start gap-2 rounded-md p-2.5 text-3xxs leading-4.5">
+    <InspectorSection
+      title="Options"
+      data-design-component-options={instance ? "instance" : "main"}
+      bodyClassName="gap-1.5"
+      actions={instance ? (
+        <InspectorIconButton label="Reset options" data-design-options-reset="" disabled={disabled || !reset} onClick={reset}>
+          <RotateCcw />
+        </InspectorIconButton>
+      ) : undefined}
+    >
+      {notApplied ? (
+        <div role="alert" data-design-options-not-applied={notApplied} className="bg-red-bg text-red-fg flex flex-col items-start gap-2 rounded-md p-2.5 text-3xxs leading-4.5">
           <p>
-            {view.notApplied === "last-good"
+            {notApplied === "last-good"
               ? "These options could not be applied. The frame shows its last good render."
               : "These options could not be applied. The frame shows the component's defaults."}
           </p>
@@ -181,25 +276,85 @@ export function DesignComponentOptions({
           </Button>
         </div>
       ) : null}
+      {!instance || variants.length ? (
+        <OptionVariantRow
+          variant={variant}
+          variants={variants}
+          disabled={disabled}
+          onChoose={chooseVariant}
+          onSave={instance ? undefined : () => setNaming(true)}
+        />
+      ) : null}
+      {naming ? <OptionEntryRow label="Name" inputLabel="Variant name" placeholder="Compact" onSubmit={saveVariant} onCancel={() => setNaming(false)} /> : null}
       {rows}
-      <OptionActionRow disabled={!askToChange} onClick={askToChange} data-design-options-ask="">
-        <Sparkles aria-hidden="true" />
-        Ask agent to change options
-      </OptionActionRow>
+      {/* Options are the main's to change, so an instance does not offer it. */}
+      {instance ? null : (
+        <OptionActionRow disabled={!askToChange} onClick={askToChange} data-design-options-ask="">
+          <Sparkles aria-hidden="true" />
+          Ask agent to change options
+        </OptionActionRow>
+      )}
     </InspectorSection>
+  );
+}
+
+/** Which variant shows (the main) or applies (an instance): Default, then
+ * the declared variants; on the main, a way to save the shown values as one. */
+function OptionVariantRow({ variant, variants, disabled, onChoose, onSave }: {
+  variant: string | null; variants: readonly string[]; disabled: boolean;
+  onChoose: (variant: string | null) => void; onSave?: () => void;
+}) {
+  const menu = (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <OptionButtonRow label="Variant" aria-label="Variant" disabled={disabled} data-design-options-variant="">
+          {variant ? variantLabel(variant) : "Default"}
+        </OptionButtonRow>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="w-48">
+        <DropdownMenuRadioGroup value={variant ?? ""} onValueChange={(next) => onChoose(next || null)}>
+          <DropdownMenuRadioItem value="">Default</DropdownMenuRadioItem>
+          {variants.map((name) => (
+            <DropdownMenuRadioItem key={name} value={name}>{variantLabel(name)}</DropdownMenuRadioItem>
+          ))}
+        </DropdownMenuRadioGroup>
+        {onSave ? (
+          <>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onSelect={onSave}>
+              <Plus aria-hidden="true" />
+              Save current as variant…
+            </DropdownMenuItem>
+          </>
+        ) : null}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+  if (!onSave) return menu;
+  return (
+    <div className="flex items-center gap-1.5">
+      <div className="min-w-0 flex-1">{menu}</div>
+      <InspectorIconButton label="Save as variant" size="row" className="bg-bg2 size-8 rounded-md" disabled={disabled} onClick={onSave}>
+        <Plus />
+      </InspectorIconButton>
+    </div>
   );
 }
 
 interface RowProps<T extends ComponentOptionValue> {
   option: ComponentOption;
   value: T;
+  /** An instance's inherited value; absent on the main. */
+  inherited?: T;
   disabled: boolean;
   onPreview: (value: ComponentOptionValue) => void;
   onCancel: () => void;
   onCommit: (value: ComponentOptionValue) => void;
 }
 
-function DesignComponentOptionRow({ option, value, disabled, onPreview, onCancel, onCommit }: RowProps<ComponentOptionValue>) {
+function DesignComponentOptionRow({ option, value, inherited, disabled, onPreview, onCancel, onCommit }: RowProps<ComponentOptionValue>) {
+  // On an instance, a value other than the one it inherits carries a dot.
+  const changed = inherited !== undefined && !sameDesignComponentValue(value, inherited);
   switch (option.kind) {
     case "number":
       return option.min !== undefined && option.max !== undefined ? (
@@ -211,39 +366,41 @@ function DesignComponentOptionRow({ option, value, disabled, onPreview, onCancel
           step={option.step}
           unit={option.unit}
           disabled={disabled}
+          changed={changed}
           onPreview={onPreview}
           onCancel={onCancel}
           onCommit={onCommit}
         />
       ) : (
-        <OptionNumberRow label={option.label} value={value as number} step={option.step} unit={option.unit} disabled={disabled} onCommit={onCommit} />
+        <OptionNumberRow label={option.label} value={value as number} step={option.step} unit={option.unit} disabled={disabled} changed={changed} onCommit={onCommit} />
       );
     case "boolean":
-      return <OptionSwitchRow label={option.label} value={value as boolean} disabled={disabled} onCommit={onCommit} />;
+      return <OptionSwitchRow label={option.label} value={value as boolean} disabled={disabled} changed={changed} onCommit={onCommit} />;
     case "choice": {
       const choices = option.choices.map((choice, index) => ({ value: choice, label: option.choiceLabels[index] ?? choice }));
       return choices.length <= SEGMENTED_CHOICES ? (
-        <OptionSegmentedRow label={option.label} value={value as string} choices={choices} disabled={disabled} onCommit={onCommit} />
+        <OptionSegmentedRow label={option.label} value={value as string} choices={choices} disabled={disabled} changed={changed} onCommit={onCommit} />
       ) : (
-        <OptionMenuRow label={option.label} value={value as string} choices={choices} disabled={disabled} onCommit={onCommit} />
+        <OptionMenuRow label={option.label} value={value as string} choices={choices} disabled={disabled} changed={changed} onCommit={onCommit} />
       );
     }
     case "text":
-      return <OptionTextRow label={option.label} value={value as string} disabled={disabled} onCommit={onCommit} />;
+      return <OptionTextRow label={option.label} value={value as string} disabled={disabled} changed={changed} onCommit={onCommit} />;
     case "color":
-      return <OptionColorRow label={option.label} value={value as string} disabled={disabled} onPreview={onPreview} onCancel={onCancel} onCommit={onCommit} />;
+      return <OptionColorRow label={option.label} value={value as string} disabled={disabled} changed={changed} onPreview={onPreview} onCancel={onCancel} onCommit={onCommit} />;
     case "easing":
-      return <OptionEasingRows label={option.label} value={value as ComponentEasing} disabled={disabled} onPreview={onPreview} onCancel={onCancel} onCommit={onCommit} />;
+      return <OptionEasingRows label={option.label} value={value as ComponentEasing} inherited={inherited as ComponentEasing | undefined} disabled={disabled}
+        onPreview={onPreview} onCancel={onCancel} onCommit={onCommit} />;
   }
 }
 
-function OptionMenuRow({ label, value, choices, disabled, onCommit }: {
-  label: string; value: string; choices: { value: string; label: string }[]; disabled: boolean; onCommit: (value: string) => void;
+function OptionMenuRow({ label, value, choices, disabled, changed, onCommit }: {
+  label: string; value: string; choices: { value: string; label: string }[]; disabled: boolean; changed: boolean; onCommit: (value: string) => void;
 }) {
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <OptionButtonRow label={label} aria-label={label} disabled={disabled}>
+        <OptionButtonRow label={label} aria-label={label} disabled={disabled} changed={changed}>
           {choices.find((choice) => choice.value === value)?.label ?? value}
         </OptionButtonRow>
       </DropdownMenuTrigger>
@@ -260,13 +417,13 @@ function OptionMenuRow({ label, value, choices, disabled, onCommit }: {
 
 const TOKEN = /^var\(\s*--([A-Za-z0-9_-]+)\s*\)$/;
 
-function OptionColorRow({ label, value, disabled, onPreview, onCancel, onCommit }: {
-  label: string; value: string; disabled: boolean;
+function OptionColorRow({ label, value, disabled, changed, onPreview, onCancel, onCommit }: {
+  label: string; value: string; disabled: boolean; changed: boolean;
   onPreview: (value: string) => void; onCancel: () => void; onCommit: (value: string) => void;
 }) {
   const token = TOKEN.exec(value)?.[1];
   return (
-    <OptionRow label={label}>
+    <OptionRow label={label} changed={changed}>
       <DesignColorPicker
         value={value}
         label={label}
@@ -323,10 +480,12 @@ function curvePath(curve: string): string {
   return `M${x(0)} ${y(0)}C${x(x1!)} ${y(y1!)} ${x(x2!)} ${y(y2!)} ${x(1)} ${y(1)}`;
 }
 
-function OptionEasingRows({ label, value, disabled, onPreview, onCancel, onCommit }: {
-  label: string; value: ComponentEasing; disabled: boolean;
+function OptionEasingRows({ label, value, inherited, disabled, onPreview, onCancel, onCommit }: {
+  label: string; value: ComponentEasing; inherited?: ComponentEasing; disabled: boolean;
   onPreview: (value: ComponentEasing) => void; onCancel: () => void; onCommit: (value: ComponentEasing) => void;
 }) {
+  const curveChanged = inherited !== undefined && inherited.curve !== value.curve;
+  const durationChanged = inherited !== undefined && inherited.duration !== value.duration;
   const spring = SPRING.exec(value.curve);
   const bounce = spring ? Number(spring[1]) : 0;
   const keyword = EASINGS.find((easing) => easing.value === value.curve);
@@ -345,6 +504,7 @@ function OptionEasingRows({ label, value, disabled, onPreview, onCancel, onCommi
         value={spring ? "spring" : "easing"}
         choices={[{ value: "easing", label: "Easing" }, { value: "spring", label: "Spring" }]}
         disabled={disabled}
+        changed={curveChanged}
         onCommit={(type) => onCommit({ ...value, curve: type === "spring" ? "spring(0.2)" : "ease-out" })}
       />
       {spring ? (
@@ -355,6 +515,7 @@ function OptionEasingRows({ label, value, disabled, onPreview, onCancel, onCommi
           max={1}
           step={0.05}
           disabled={disabled}
+          changed={curveChanged}
           onPreview={(next) => onPreview({ ...value, curve: `spring(${next})` })}
           onCancel={onCancel}
           onCommit={(next) => onCommit({ ...value, curve: `spring(${next})` })}
@@ -362,7 +523,7 @@ function OptionEasingRows({ label, value, disabled, onPreview, onCancel, onCommi
       ) : (
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
-            <OptionButtonRow label="Curve" aria-label={`${label} curve`} disabled={disabled}>
+            <OptionButtonRow label="Curve" aria-label={`${label} curve`} disabled={disabled} changed={curveChanged}>
               {keyword?.label ?? "Custom"}
             </OptionButtonRow>
           </DropdownMenuTrigger>
@@ -382,6 +543,7 @@ function OptionEasingRows({ label, value, disabled, onPreview, onCancel, onCommi
         max={Math.max(MAX_DURATION_MS, value.duration)}
         unit="ms"
         disabled={disabled}
+        changed={durationChanged}
         onPreview={(next) => onPreview({ ...value, duration: next })}
         onCancel={onCancel}
         onCommit={(next) => onCommit({ ...value, duration: next })}

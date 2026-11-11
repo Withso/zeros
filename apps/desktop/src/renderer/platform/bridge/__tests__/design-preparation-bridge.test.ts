@@ -23,6 +23,14 @@ it("negotiates a component frame's options through the actual preparation reply 
   // A reply that does not hold the declaration's shape is refused.
   await expect(bridgeDesignPrepareFrames(client({ ...reply(), frames: [{ ...frame, component: { ...component, reach: { width: "sometimes" } } }] }, true, false, true) as unknown as RuntimeClient, input)).rejects.toThrow();
 });
+it("carries a frame's component instances through the actual preparation reply decoder", async () => {
+  const instances = { key: "0123456789abcdef", components: { "chat-composer": { elements: [], reach: {}, file: "page/main.html", frame: true } },
+    hosts: { inst: { component: "chat-composer", attributes: { width: "800", "zd-variant": "compact" }, failed: true as const } } };
+  const value = { ...reply(), frames: [{ ...frame, instances }] };
+  await expect(bridgeDesignPrepareFrames(client(value, true, false, true) as unknown as RuntimeClient, input)).resolves.toEqual(value);
+  for (const bad of [{ ...instances, key: "x" }, { ...instances, hosts: { inst: { component: "Bad Name", attributes: {} } } }])
+    await expect(bridgeDesignPrepareFrames(client({ ...reply(), frames: [{ ...frame, instances: bad }] }, true, false, true) as unknown as RuntimeClient, input)).rejects.toThrow();
+});
 it("negotiates and retains passive HTML costs through the actual preparation reply decoder", async () => {
   const value = { ...reply(), frames: [{ ...frame, surfaceCost: { sourceBytes: 400, nodes: 7, imageBytes: 0 } }] };
   const bridge = client(value, true, true);

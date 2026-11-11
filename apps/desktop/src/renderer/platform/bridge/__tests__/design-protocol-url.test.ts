@@ -41,4 +41,11 @@ describe("design protocol frame URLs", () => {
     expect(designProtocolFrameUrl({ ...input, workspaceId: "cloud://team/workspace" })).toBeNull();
     expect(designProtocolFrameUrl({ ...input, theme: "bad name" })).toBeNull();
   });
+
+  it("keys a main component frame's document by the variant it shows", () => {
+    const input = { workspaceId: "ws_a", capability: "c".repeat(64), frame: "home.html", sourceVersion: "a".repeat(24) };
+    expect(designProtocolFrameUrl({ ...input, variant: "wide-plan" })).toBe(`zeros-design://workspace/ws_a/${input.capability}/home.html?v=${input.sourceVersion}&variant=wide-plan`);
+    expect(designProtocolFrameUrl({ ...input, variant: null })).toBe(designProtocolFrameUrl(input));
+    for (const variant of ["Wide", "default", "a&b=1"]) expect(designProtocolFrameUrl({ ...input, variant })).toBeNull();
+  });
 });

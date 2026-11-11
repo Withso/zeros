@@ -7,7 +7,7 @@ import {
 import { DESIGN_CATALOG_BATCH_ENTRIES, designCatalogReadSchema, designNavigationReadSchema, designFramesPrepareSchema, designPageHashesSchema, type DesignCatalogRead, type DesignCatalogReply, type DesignPageHashes } from "@zeros/protocol/design-catalog";
 import { prepareDesignNavigationFrames } from "./document";
 import type { DesignCatalogAdmission } from "./catalog";
-import { encodeDesignFramePath } from "@zeros/protocol/design-path";
+import { encodeDesignFramePath, isDesignComponentVariantName } from "@zeros/protocol/design-path";
 import { DESIGN_MAX_FRAMES_PER_PAGE, designPageCreateInputSchema, designPageDeleteInputSchema, designPageIdSchema, designPageRenameInputSchema } from "@zeros/protocol/design-pages";
 import { selectDesignPageHint } from "./page-selection";
 import { DESIGN_CAPTURE_TIMEOUT_MS, designPreviewCancelSchema, designPreviewRequestSchema, designRecordingsReadSchema, designRecordingsRenderSchema, designThumbnailsReadSchema, designThumbnailsRenderSchema, designWorkspaceCaptureSchema } from "@zeros/protocol/design-capture";
@@ -315,6 +315,15 @@ const DESIGN_WORKSPACE_ROUTES = new Set([
   "design.removeDirectory",
   "design.renameDirectory",
 ]);
+/** The variant a main component frame shows, for its document read. */
+function designFrameVariantParam(params: Record<string, unknown>): { variant?: string } {
+  const variant = params.variant;
+  if (variant === undefined || variant === null) return {};
+  if (!isDesignComponentVariantName(variant))
+    throw new GitError({ code: "VALIDATION_FAILED", message: "variant must name a component variant." });
+  return { variant };
+}
+
 export function isDesignWorkspaceRoute(op: string): boolean {
   return DESIGN_WORKSPACE_ROUTES.has(op);
 }
@@ -357,10 +366,11 @@ export async function handleDesignWorkspaceRoute(
       // Older preparation decoders reject unknown fields. Keep their exact
       // reply shape; a new renderer opts in after capability negotiation.
       if (input.surfaceCosts && input.componentOptions) return result;
-      return { ...result, frames: result.frames.map(({ surfaceCost, component, ...frame }) => ({
+      return { ...result, frames: result.frames.map(({ surfaceCost, component, instances, ...frame }) => ({
         ...frame,
         ...(input.surfaceCosts && surfaceCost !== undefined ? { surfaceCost } : {}),
         ...(input.componentOptions && component ? { component } : {}),
+        ...(input.componentOptions && instances ? { instances } : {}),
       })) };
     }
     case "design.catalog.read": {
@@ -971,7 +981,7 @@ export async function handleDesignWorkspaceRoute(
             root,
             reqStr(params, "frame"),
             optNum(params, "depth") ?? 4,
-            { writeBack },
+            { writeBack, ...designFrameVariantParam(params) },
           ),
         }),
       );

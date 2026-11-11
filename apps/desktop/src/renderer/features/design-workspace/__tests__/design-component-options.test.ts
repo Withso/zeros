@@ -6,9 +6,14 @@ vi.mock("../state/design-workspace-cache", () => ({ applyDesignEditCached: mocks
 vi.mock("../state/design-background-work", () => ({ designBackgroundWork: { pause: mocks.pause } }));
 
 import type { DesignFrameComponent } from "@zeros/protocol/design-catalog";
+import type { ComponentOptionValue } from "@zeros/design-core/component-options";
 import {
   commitDesignComponentOption,
+  commitDesignComponentVariant,
+  commitDesignInstanceAttributes,
   createDesignComponentPreview,
+  designComponentVariantName,
+  designInstanceOptionState,
   designComponentPreviewMessagesForTests,
   designComponentPreviewProperties,
   readDesignFrameComponent,
@@ -57,6 +62,62 @@ describe("a component frame's options in the panel", () => {
       [expect.objectContaining({ type: "component.set-option", option: "motion", value: "spring(0.2) 300ms" })],
     ]);
     expect(calls[0]![2].intent).toBe("Set width");
+  });
+});
+
+const VARIANTS: DesignFrameComponent = {
+  elements: [...COMPONENT.elements, element("zd-variant", { name: "compact", width: "700" })],
+  reach: COMPONENT.reach,
+};
+
+describe("variants and instances", () => {
+  beforeEach(() => mocks.apply.mockClear());
+  const calls = () => mocks.apply.mock.calls as unknown as [string, { file: string }, { operations: Record<string, unknown>[]; intent: string }][];
+
+  it("writes the shown variant's own line, and saves a new one with the values that differ from the defaults", async () => {
+    const frame = { file: "chat/composer.html", sourceVersion: V1 } as never;
+    await commitDesignComponentOption("w", frame, "width", 680, "compact");
+    expect(calls()[0]![2].operations).toEqual([expect.objectContaining({ type: "component.set-option", option: "width", variant: "compact", value: 680 })]);
+    const { declaration } = readDesignFrameComponent(VARIANTS);
+    await commitDesignComponentVariant("w", frame, declaration, "wide-plan", new Map<string, ComponentOptionValue>([["width", 1400], ["label", "Send"], ["motion", { curve: "ease-out", duration: 150 }]]));
+    expect(calls()[1]![2].operations).toEqual([expect.objectContaining({ type: "component.save-variant", file: "chat/composer.html", name: "wide-plan", values: { width: 1400 } })]);
+    expect(calls()[1]![2].intent).toBe("Save variant wide-plan");
+  });
+
+  it("turns a typed variant name into one the format accepts, or says why not", () => {
+    const { declaration } = readDesignFrameComponent(VARIANTS);
+    expect(designComponentVariantName(declaration, "Wide plan")).toEqual({ name: "wide-plan" });
+    expect(designComponentVariantName(declaration, "  Two  words ")).toEqual({ name: "two-words" });
+    expect(designComponentVariantName(declaration, "Compact")).toEqual({ error: "There is already a variant compact." });
+    expect(designComponentVariantName(declaration, "Default")).toEqual({ error: "Default is the declared defaults; choose another name." });
+    expect("error" in designComponentVariantName(declaration, "")).toBe(true);
+    expect("error" in designComponentVariantName(declaration, "1st")).toBe(true);
+    expect("error" in designComponentVariantName(declaration, "x".repeat(40))).toBe(true);
+  });
+
+  it("reads an instance's values, what it inherits and what differs", () => {
+    const { declaration } = readDesignFrameComponent(VARIANTS);
+    const state = designInstanceOptionState(declaration, { width: "700", "zd-variant": "compact", label: "Go" });
+    expect(state.variant).toBe("compact");
+    expect(state.values.get("width")).toBe(700);
+    expect(state.inherited.get("width")).toBe(700);
+    expect(state.changed).toEqual(new Set(["label"]));
+    expect(state.resettable).toBe(true);
+    expect(designInstanceOptionState(declaration, {}).resettable).toBe(false);
+    // A variant the component no longer declares shows as Default.
+    expect(designInstanceOptionState(declaration, { "zd-variant": "gone" }).variant).toBeNull();
+  });
+
+  it("writes an instance's values as attributes in one transaction, removing those that land on what it inherits", async () => {
+    const frame = { file: "home.html", sourceVersion: V1 } as never;
+    await commitDesignInstanceAttributes("w", frame, "inst", { width: "760", label: null, "zd-variant": null }, "Reset Chat composer");
+    expect(calls()[0]![1]).toBe(frame);
+    expect(calls()[0]![2].intent).toBe("Reset Chat composer");
+    expect(calls()[0]![2].operations).toEqual([
+      expect.objectContaining({ type: "node.set-attribute", nodeId: "inst", attribute: "width", value: "760" }),
+      expect.objectContaining({ type: "node.set-attribute", nodeId: "inst", attribute: "label", value: null }),
+      expect.objectContaining({ type: "node.set-attribute", nodeId: "inst", attribute: "zd-variant", value: null }),
+    ]);
   });
 });
 
@@ -121,6 +182,22 @@ describe("previewing while a row is dragged", () => {
     pending.clear();
     tick();
     expect(connection.previewComponentOptions).toHaveBeenCalledTimes(2);
+  });
+
+  it("previews one instance through its host, once per animation frame", () => {
+    const connection = { ...runtime(), supports: (method: string) => method === "previewComponentInstanceOptions",
+      previewComponentInstanceOptions: vi.fn(async () => ({ sourceVersion: V1, applied: 1 })) };
+    mocks.runtime.mockReturnValue(connection);
+    const preview = createDesignComponentPreview("w", "home.html", V1, "inst");
+    preview.set({ "--zd-width": "700px" });
+    preview.set({ "--zd-width": "720px" });
+    tick();
+    expect(connection.previewComponentInstanceOptions).toHaveBeenCalledExactlyOnceWith("inst", { "--zd-width": "720px" });
+    expect(connection.previewComponentOptions).not.toHaveBeenCalled();
+    preview.clear();
+    expect(connection.previewComponentInstanceOptions).toHaveBeenLastCalledWith("inst", null);
+    // A host the runtime could not name in its selector is never previewed.
+    expect(createDesignComponentPreview("w", "home.html", V1, 'a"b').supported()).toBe(false);
   });
 
   it("sends nothing to another generation's document, or to one that cannot preview", () => {

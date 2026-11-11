@@ -56,3 +56,9 @@ export function portableDesignName(value: string): string {
 export const designFrameFileSchema = z
   .string()
   .refine(isDesignFrameFile, "Invalid Design frame file.");
+
+/** A component variant's name, as its <zd-variant name> requires: what a
+ * request may name as the variant a main component frame shows. */
+export function isDesignComponentVariantName(value: unknown): value is string {
+  return typeof value === "string" && value.length <= 32 && value !== "default" && /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/.test(value);
+}

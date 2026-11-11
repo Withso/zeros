@@ -16,15 +16,23 @@ const VALUE = "relative inline-flex min-w-0 items-center gap-1.5 whitespace-nowr
 const UNIT = "-ml-0.5 text-3xxs text-fg3";
 const FIELD = "relative w-0 min-w-0 flex-1 border-0 bg-transparent p-0 pr-1 text-right text-xs leading-4.5 text-fg1 tabular-nums outline-none";
 
+/** An instance's value that differs from what it inherits: a dot at the
+ * row's corner (its variant's value, else the default). */
+function ChangedDot({ changed }: { changed?: boolean }) {
+  return changed ? <i aria-hidden="true" data-option-changed="" className="bg-blue-primary absolute top-0.75 left-0.75 size-1 rounded-full" /> : null;
+}
+
 interface RowProps extends Omit<React.HTMLAttributes<HTMLDivElement>, "children"> {
   label: string;
+  changed?: boolean;
   children?: React.ReactNode;
 }
 
 /** A row with its name and whatever value or control sits at its end. */
-export const OptionRow = React.forwardRef<HTMLDivElement, RowProps>(function OptionRow({ label, children, className, ...rest }, ref) {
+export const OptionRow = React.forwardRef<HTMLDivElement, RowProps>(function OptionRow({ label, changed, children, className, ...rest }, ref) {
   return (
     <div ref={ref} data-option-row="" {...rest} className={cn(ROW, className)}>
+      <ChangedDot changed={changed} />
       <span data-option-row-label="" className={LABEL}>{label}</span>
       <span data-option-row-value="" className={VALUE}>{children}</span>
     </div>
@@ -80,6 +88,7 @@ interface RangeProps {
   step?: number;
   unit?: string;
   disabled?: boolean;
+  changed?: boolean;
   /** While dragged, with each new value. */
   onPreview?: (value: number) => void;
   /** A drag or a typed value that ended without writing (Escape). */
@@ -90,7 +99,7 @@ interface RangeProps {
 /** A number with a range: the row is the slider. The fill shows the value;
  * drag anywhere on the row, a handle marks the edge on hover, click the value
  * to type it, and the arrows step (Shift by ten). */
-export function OptionRangeRow({ label, value, min, max, step, unit, disabled = false, onPreview, onCancel, onCommit }: RangeProps) {
+export function OptionRangeRow({ label, value, min, max, step, unit, disabled = false, changed, onPreview, onCancel, onCommit }: RangeProps) {
   const [shown, setShown] = React.useState(value);
   const [editing, setEditing] = React.useState(false);
   const drag = React.useRef<{ x: number; moved: boolean; id: number | undefined } | null>(null);
@@ -192,6 +201,7 @@ export function OptionRangeRow({ label, value, min, max, step, unit, disabled = 
       }}
     >
       <i aria-hidden="true" data-option-row-fill="" className="bg-bg2-highlight absolute inset-y-0 left-0" style={{ width: fill }} />
+      <ChangedDot changed={changed} />
       <b
         aria-hidden="true"
         className="bg-fg3 absolute inset-y-2.25 -ml-1.5 hidden w-0.5 rounded-full group-hover/option:block"
@@ -224,8 +234,8 @@ export function OptionRangeRow({ label, value, min, max, step, unit, disabled = 
 }
 
 /** A number without a range: a field typed in place, arrows step. */
-export function OptionNumberRow({ label, value, step, unit, disabled = false, onCommit }: {
-  label: string; value: number; step?: number; unit?: string; disabled?: boolean; onCommit: (value: number) => void;
+export function OptionNumberRow({ label, value, step, unit, disabled = false, changed, onCommit }: {
+  label: string; value: number; step?: number; unit?: string; disabled?: boolean; changed?: boolean; onCommit: (value: number) => void;
 }) {
   const typed = useTypedValue(formatted(value), (text) => {
     const number = Number(text.trim());
@@ -233,6 +243,7 @@ export function OptionNumberRow({ label, value, step, unit, disabled = false, on
   });
   return (
     <div data-option-row="" className={ROW}>
+      <ChangedDot changed={changed} />
       <span data-option-row-label="" className={LABEL}>{label}</span>
       <input
         aria-label={label}
@@ -256,23 +267,24 @@ export function OptionNumberRow({ label, value, step, unit, disabled = false, on
 }
 
 /** On or off: the app's switch at the row's end. */
-export function OptionSwitchRow({ label, value, disabled = false, onCommit }: {
-  label: string; value: boolean; disabled?: boolean; onCommit: (value: boolean) => void;
+export function OptionSwitchRow({ label, value, disabled = false, changed, onCommit }: {
+  label: string; value: boolean; disabled?: boolean; changed?: boolean; onCommit: (value: boolean) => void;
 }) {
   return (
-    <OptionRow label={label}>
+    <OptionRow label={label} changed={changed}>
       <Switch aria-label={label} checked={value} disabled={disabled} onCheckedChange={(checked) => onCommit(checked)} />
     </OptionRow>
   );
 }
 
 /** Up to three choices sit in the row; more belong in a menu. */
-export function OptionSegmentedRow<T extends string>({ label, value, choices, disabled = false, onCommit }: {
-  label: string; value: T; choices: readonly { value: T; label: string }[]; disabled?: boolean; onCommit: (value: T) => void;
+export function OptionSegmentedRow<T extends string>({ label, value, choices, disabled = false, changed, onCommit }: {
+  label: string; value: T; choices: readonly { value: T; label: string }[]; disabled?: boolean; changed?: boolean; onCommit: (value: T) => void;
 }) {
   const buttons = React.useRef<(HTMLButtonElement | null)[]>([]);
   return (
     <div data-option-row="" className={ROW}>
+      <ChangedDot changed={changed} />
       <span data-option-row-label="" className={LABEL}>{label}</span>
       <div role="radiogroup" aria-label={label} className="relative flex gap-0.5">
         {choices.map((choice, index) => {
@@ -313,10 +325,11 @@ export function OptionSegmentedRow<T extends string>({ label, value, choices, di
 }
 
 /** A row that opens something (a menu, a picker): its value and a chevron. */
-export const OptionButtonRow = React.forwardRef<HTMLButtonElement, React.ButtonHTMLAttributes<HTMLButtonElement> & { label: string; chevron?: boolean }>(
-  function OptionButtonRow({ label, chevron = true, className, children, type = "button", ...rest }, ref) {
+export const OptionButtonRow = React.forwardRef<HTMLButtonElement, React.ButtonHTMLAttributes<HTMLButtonElement> & { label: string; chevron?: boolean; changed?: boolean }>(
+  function OptionButtonRow({ label, chevron = true, changed, className, children, type = "button", ...rest }, ref) {
     return (
       <button ref={ref} type={type} data-option-row="" {...rest} className={cn(ROW, FOCUS, "hover:bg-bg2-hover disabled:opacity-50", className)}>
+        <ChangedDot changed={changed} />
         <span data-option-row-label="" className={LABEL}>{label}</span>
         <span data-option-row-value="" className={cn(VALUE, "[&_svg]:text-fg3 [&_svg]:size-3.5")}>
           {children}
@@ -328,12 +341,13 @@ export const OptionButtonRow = React.forwardRef<HTMLButtonElement, React.ButtonH
 );
 
 /** Text typed in place, right aligned. */
-export function OptionTextRow({ label, value, disabled = false, onCommit }: {
-  label: string; value: string; disabled?: boolean; onCommit: (value: string) => void;
+export function OptionTextRow({ label, value, disabled = false, changed, onCommit }: {
+  label: string; value: string; disabled?: boolean; changed?: boolean; onCommit: (value: string) => void;
 }) {
   const typed = useTypedValue(value, onCommit);
   return (
     <div data-option-row="" className={ROW}>
+      <ChangedDot changed={changed} />
       <span data-option-row-label="" className={LABEL}>{label}</span>
       <input aria-label={label} disabled={disabled} className={cn(FIELD, "disabled:opacity-50")} {...typed} />
     </div>
@@ -367,5 +381,50 @@ export function OptionActionRow({ className, children, type = "button", ...rest 
     >
       {children}
     </button>
+  );
+}
+
+/** A new name typed in place: Enter submits it, and a refusal shows under the
+ * row; Escape, or leaving it empty, cancels. */
+export function OptionEntryRow({ label, inputLabel, placeholder, onSubmit, onCancel }: {
+  label: string; inputLabel: string; placeholder?: string;
+  /** Null when accepted, else why not. */
+  onSubmit: (text: string) => string | null;
+  onCancel: () => void;
+}) {
+  const [text, setText] = React.useState("");
+  const [problem, setProblem] = React.useState<string | null>(null);
+  return (
+    <div className="flex flex-col gap-1">
+      <div data-option-row="" className={ROW}>
+        <span data-option-row-label="" className={LABEL}>{label}</span>
+        <input
+          autoFocus
+          aria-label={inputLabel}
+          aria-invalid={problem ? true : undefined}
+          placeholder={placeholder}
+          value={text}
+          className={cn(FIELD, "placeholder:text-fg3")}
+          onChange={(event) => {
+            setText(event.target.value);
+            setProblem(null);
+          }}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              event.preventDefault();
+              setProblem(onSubmit(text));
+            } else if (event.key === "Escape") {
+              event.preventDefault();
+              event.stopPropagation();
+              onCancel();
+            }
+          }}
+          onBlur={() => {
+            if (!text.trim()) onCancel();
+          }}
+        />
+      </div>
+      {problem ? <p role="alert" className="text-red-fg px-0.5 text-3xxs leading-4">{problem}</p> : null}
+    </div>
   );
 }
