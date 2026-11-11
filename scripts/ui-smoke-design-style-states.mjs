@@ -57,7 +57,8 @@ export async function runDesignStyleStatesSmoke({ page, check }) {
   const rows = await page.getByRole("menuitemradio").allTextContents();
   check(
     "the menu offers Default and the layer's own states, in order",
-    rows.join(",") === "Default,Hover,Focus visible,Disabled",
+    // The fixture's .submit:active (it changes the box) adds Active.
+    rows.join(",") === "Default,Hover,Focus visible,Active,Disabled",
     rows.join(","),
   );
   await page.keyboard.press("Escape");
@@ -91,6 +92,12 @@ export async function runDesignStyleStatesSmoke({ page, check }) {
     (await inspector.getByRole("button", { name: "What styles this layer" }).count()) === 1 &&
       (await inspector.locator('[data-design-styled-by-source="class:.submit"]').isDisabled()),
   );
+
+  // Section actions, icon buttons and the Stroke sides select act on fields
+  // the held view does not edit: none shows.
+  const companions = () =>
+    inspector.locator("[data-design-filter-companion]").evaluateAll((nodes) => nodes.filter((node) => node.getClientRects().length > 0).length);
+  check("a held state shows no section actions, icon buttons or sides select", (await companions()) === 0, String(await companions()));
 
   // Nothing edits while held: a press, typing, the token shortcut, Type
   // settings.
@@ -133,6 +140,7 @@ export async function runDesignStyleStatesSmoke({ page, check }) {
   await inspector.getByRole("button", { name: "Back to Default" }).click();
   await expect(stateButton).toHaveText("Default");
   await expect.poll(() => heldInFrame("home-submit")).toBe(null);
+  check("the Styled-by filter still hides the section actions it hid before", (await companions()) === 0);
   check(
     "Back to Default lets go and restores the Styled-by filter chosen before",
     (await note.count()) === 0 &&
@@ -141,6 +149,25 @@ export async function runDesignStyleStatesSmoke({ page, check }) {
     (await visible()).join(","),
   );
   await inspector.getByRole("button", { name: "Show all" }).click();
+  check("with the filter gone the section actions show again", (await companions()) > 0);
+
+  // Active changes the box (padding): the selection outline follows the
+  // held box, not the Default one.
+  const outline = () => page.locator('[data-design-frame="home.html"] [data-design-layout-owner="home-submit"]').boundingBox();
+  const defaultBox = await designFrameElementBox(iframe, runtime.locator('[data-oid="home-submit"]'));
+  await pick("Active");
+  await expect.poll(() => heldInFrame("home-submit")).toBe("hover active");
+  const activeBox = await designFrameElementBox(iframe, runtime.locator('[data-oid="home-submit"]'));
+  const near = (a, b) => a && b && ["x", "y", "width", "height"].every((key) => Math.abs(a[key] - b[key]) <= 1.5);
+  await expect.poll(async () => near(await outline(), activeBox)).toBe(true).catch(() => {});
+  check(
+    "holding Active, which grows the box, moves the selection outline with it",
+    activeBox.width > defaultBox.width && near(await outline(), activeBox),
+    `${JSON.stringify(defaultBox)} → ${JSON.stringify(activeBox)} outline ${JSON.stringify(await outline())}`,
+  );
+  await inspector.getByRole("button", { name: "Back to Default" }).click();
+  await expect.poll(async () => near(await outline(), defaultBox)).toBe(true).catch(() => {});
+  check("Back to Default puts the outline back on the Default box", near(await outline(), defaultBox));
 
   // A state whose rule loses to the layer's own value.
   await layer("home-tag").click();
@@ -202,12 +229,12 @@ export async function runDesignStyleStatesSmoke({ page, check }) {
   await pick("Focus visible");
   await expect.poll(() => heldInFrame("home-submit")).toBe("focus focus-visible");
   // Weight is no card field, but the filter keeps it (it sits beside Size,
-  // not as the section's child), and Type settings is read-only too.
+  // not as the section's child); Type settings, which edits, does not show.
   await expect(inspector.locator('[data-design-filter-property="font-weight"]')).toBeVisible();
-  await inspector.getByRole("button", { name: "Type settings", exact: true }).click();
   check(
-    "a held state keeps Weight under its filter and Type settings does not open",
-    (await page.locator("[data-design-popover]").count()) === 0 &&
+    "a held state keeps Weight under its filter and shows no Type settings",
+    (await inspector.getByRole("button", { name: "Type settings", exact: true }).isHidden()) &&
+      (await page.locator("[data-design-popover]").count()) === 0 &&
       (await inspector.locator("[data-design-font-family]").evaluate((element) => element.getClientRects().length === 0)),
   );
   await layer("home-cancel").click();

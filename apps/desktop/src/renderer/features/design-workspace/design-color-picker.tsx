@@ -1365,6 +1365,7 @@ export function DesignColorField({
       data-design-style-property={property}
       data-design-field-label={label}
       data-design-origin={origin.mark}
+      data-design-theme-mark={origin.themed ? "" : undefined}
       data-design-filter-out={origin.hidden ? "" : undefined}
       className={cn("group/design-field zd-field relative min-w-0 gap-0 pl-1", className)}
     >

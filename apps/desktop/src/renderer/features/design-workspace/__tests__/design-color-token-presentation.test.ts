@@ -139,7 +139,8 @@ describe("token pill", () => {
     expect(missing).toContain('aria-label="Corner radius: missing token radius-card"');
     expect(catalog.types.has("color")).toBe(true);
     expect(catalog.types.has("font-weight")).toBe(false);
-    expect(missing).toContain(">radius-card is missing<");
+    // Two spans: the name gives way before "is missing" in a narrow field.
+    expect(missing).toMatch(/<span class="shrink-\[1000\]">radius-card<\/span><span>\u00a0is missing<\/span>/);
     expect(missing).toContain("bg-yellow-bg");
   });
 });
