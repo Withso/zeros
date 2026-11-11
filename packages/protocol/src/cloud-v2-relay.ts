@@ -147,7 +147,9 @@ export const CloudV2ControlFrameSchema = z.discriminatedUnion("t", [
   }).strict(),
   z.object({ t: z.literal("prompts") }).strict(),
   /** passive (Order 3): a syncing Mac; never activity, never in the census, sync reads only. */
-  z.object({ t: z.literal("open"), clientId, passive: z.literal(true).optional() }).strict(),
+  z.object({ t: z.literal("open"), clientId, passive: z.literal(true).optional(),
+    /** The worker's own inbound bridge only: the syncing Mac's device id (never from the control plane). */
+    device: z.string().uuid().optional() }).strict(),
   z.object({ t: z.literal("close"), clientId }).strict(),
   z.object({ t: z.literal("frame"), clientId, frame }).strict(),
   z.object({ t: z.literal("stop"), id: z.uuid() }).strict(),

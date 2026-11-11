@@ -29,8 +29,9 @@ const MIN_INTERVAL_MS = 10_000, PERIOD_MS = 5 * 60_000, UNSUPPORTED_MS = 30 * 60
  * renderer shows: a workspace wanted here starts in its default folder, one
  * set to false stops. Every page is read before anything changes; a failed
  * read keeps the current state. A workspace this Mac changed after the read
- * began is left alone, so the person's own switch is never undone. Workspaces
- * the list does not name (an expired connection) are left as they are. */
+ * began is left alone, so the person's own switch is never undone. A running
+ * workspace the complete list does not name (this Mac is no longer connected
+ * there) stops: sync needs the connection, and a restart must not resume it. */
 export class SyncWantedFollower {
   private lastAt = Number.NEGATIVE_INFINITY;
   private unsupportedUntil = Number.NEGATIVE_INFINITY;
@@ -97,6 +98,12 @@ export class SyncWantedFollower {
         // One folder that cannot be used (not empty, another workspace's) never blocks the rest; its run shows the error.
         this.deps.log(`wanted failed workspace=${row.workspaceId.slice(0, 8)}`);
       }
+    }
+    const listed = new Set(rows.map(row => row.workspaceId));
+    for (const workspaceId of running) {
+      if (listed.has(workspaceId) || (this.changedAt.get(workspaceId) ?? Number.NEGATIVE_INFINITY) >= started) continue;
+      await this.deps.disable(workspaceId).catch(() => {});
+      this.deps.log(`wanted stop workspace=${workspaceId.slice(0, 8)} reason=not_connected`);
     }
   }
 }

@@ -46,13 +46,15 @@ export function workspaceSyncLabel(status: WorkspaceSyncStatus): string {
     const git = status.reason === "git_missing" ? " · Git not installed" : status.reason === "git_failed" ? " · Git history pending" : "";
     return `${status.problems ? `In sync · ${status.problems} not mirrored` : "In sync"}${git}`;
   }
-  if (status.state === "paused") return "Paused (workspace asleep)";
+  // Running but not reachable is not asleep: its own words while main retries (with a growing wait).
+  if (status.state === "paused") return status.reason === "unreachable" ? "Can't reach the workspace, retrying" : "Paused (workspace asleep)";
   return `Error (${SYNC_REASONS[status.reason ?? ""] ?? "sync failed"})`;
 }
 const SYNC_REASONS: Record<string, string> = {
   too_many_files: "more than 200,000 files", too_many_bytes: "more than 5 GB", update_required: "restart the workspace to update it",
   folder_not_directory: "folder missing", folder_not_empty: "folder not empty", folder_other_workspace: "folder belongs to another workspace",
   folder_unsafe_root: "folder not usable", write_failed: "could not write files", not_connected: "connect this Mac",
+  unreachable: "can't reach the workspace",
 };
 /** Why a chosen folder was refused, for a toast. */
 export const SYNC_CHOOSE_ERRORS: Record<string, string> = {

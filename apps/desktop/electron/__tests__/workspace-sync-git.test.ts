@@ -115,3 +115,35 @@ describe("the sync folder as a real Git clone", () => {
     expect((await c.local("rev-parse", "HEAD")).trim()).toBe(await c.git("rev-parse", "HEAD"));
   });
 });
+
+describe("the bundle download", () => {
+  it("reads at most 1 MiB per chunk with at most two in flight, and a retry of the same bundle resumes where it stopped", async () => {
+    const { GitMirror } = await import("../workspace-sync/git");
+    const base = await realpath(await mkdtemp(join(tmpdir(), "sync-bundle-"))); cleanups.push(base);
+    await mkdir(join(base, "meta", "tmp"), { recursive: true });
+    const bytes = Buffer.alloc(5 * 1024 * 1024 + 123, 7), bundle = { id: randomUUID(), size: bytes.length, sha256: sha(bytes), full: true };
+    let inFlight = 0, peak = 0, fail = true;
+    const offsets: number[] = [];
+    const source = {
+      bootstrap: async () => { throw new Error("unused"); },
+      bundleRead: async (_id: string, offset: number, length: number) => {
+        expect(length).toBeLessThanOrEqual(1024 * 1024);
+        inFlight++; peak = Math.max(peak, inFlight); offsets.push(offset);
+        try {
+          await new Promise(resolve => setTimeout(resolve, 2));
+          if (fail && offset >= 3 * 1024 * 1024) throw new Error("connection lost");
+          const chunk = bytes.subarray(offset, offset + length); return { bytes: chunk.length, base64: chunk.toString("base64") };
+        } finally { inFlight--; }
+      },
+    };
+    const mirror = new GitMirror(base, join(base, "meta")) as unknown as { download(source: unknown, bundle: unknown): Promise<string> };
+    await expect(mirror.download(source, bundle)).rejects.toThrow("connection lost");
+    expect(peak).toBeLessThanOrEqual(2);
+    const before = offsets.length;
+    fail = false;
+    const path = await mirror.download(source, bundle);
+    expect(sha(await readFile(path))).toBe(bundle.sha256);
+    // The second attempt starts at the end of what had already landed in order (3 MiB), not at 0.
+    expect(Math.min(...offsets.slice(before))).toBe(3 * 1024 * 1024);
+  });
+});

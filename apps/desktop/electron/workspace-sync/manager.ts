@@ -19,6 +19,10 @@ export interface SyncManagerDeps {
 }
 
 const IDLE_PULL_MS = 60_000, PAUSED_MS = 60_000, RETRY_MS = 1_000, ERROR_MS = 60_000, UPDATE_MS = 300_000;
+/** A workspace that cannot be reached: 2 s doubling to 5 min; after this many failures in a row the row shows an error. */
+const UNREACHABLE_FIRST_MS = 2_000, UNREACHABLE_MAX_MS = 300_000, UNREACHABLE_ERROR_AFTER = 5;
+/** Turning sync off never waits longer than this for a run to end (a stuck pull must not keep the switch on). */
+const STOP_WAIT_MS = 250;
 
 interface Run { stop: AbortController; wake: () => void; wakePromise: Promise<void>; status: WorkspaceSyncStatus; done: Promise<void> }
 
@@ -82,10 +86,12 @@ export class SyncManager {
   async disable(workspaceId: string): Promise<void> {
     const run = this.runs.get(workspaceId);
     this.runs.delete(workspaceId);
-    if (run) { run.stop.abort(); run.wake(); await run.done; this.log(`stopped workspace=${short(workspaceId)} reason=turned_off`); }
+    // At once: the run is told to stop (its socket closes), this Mac's entry goes, the server hears syncing false.
+    if (run) { run.stop.abort(); run.wake(); this.log(`stopped workspace=${short(workspaceId)} reason=turned_off`); }
     const folders = this.folders(); delete folders[workspaceId]; this.saveFolders(folders);
-    await this.deps.setSyncing(workspaceId, false).catch(() => {});
     this.publish();
+    await this.deps.setSyncing(workspaceId, false).catch(() => {});
+    if (run) await Promise.race([run.done, new Promise(resolve => setTimeout(resolve, STOP_WAIT_MS))]);
   }
 
   private syncIdentity(workspaceId: string, identity: { accountId: string; deviceId: string }): SyncIdentity {
@@ -96,7 +102,7 @@ export class SyncManager {
   private run(workspaceId: string, folder: string, identity: { accountId: string; deviceId: string }, resumed: boolean): void {
     const id = short(workspaceId);
     this.log(`started workspace=${id} resumed=${resumed}`);
-    let connects = 0, lastState = "";
+    let connects = 0, lastState = "", unreachable = 0;
     // Paused and error lines only when they change, so a minute's retry is not a log line.
     const note = (state: string, reason: string) => { const key = `${state}:${reason}`; if (key !== lastState) { lastState = key; this.log(`${state} workspace=${id} reason=${reason}`); } };
     const stop = new AbortController();
@@ -108,13 +114,19 @@ export class SyncManager {
     const wait = (ms: number) => { const sleeping = (this.deps.wait ?? defaultWait)(ms, { promise: run.wakePromise }); return sleeping.finally(rearm); };
     this.runs.set(workspaceId, run);
     run.done = (async () => {
-      let engine: SyncEngine | undefined;
+      let engine: SyncEngine | undefined, lastFiles = -1;
+      // Files landed since the last failure: the link works, start the backoff over.
+      const progressed = () => { const files = engine?.position?.files ?? -1; const moved = lastFiles >= 0 && files > lastFiles; lastFiles = files; return moved; };
       while (!stop.signal.aborted) {
         let connection: SyncConnection | undefined;
         try {
           engine ??= await (this.deps.open ?? SyncEngine.open)(folder, this.syncIdentity(workspaceId, identity));
           if (connects++ > 0) this.log(`reconnect workspace=${id} attempt=${connects - 1}`);
           connection = await this.deps.connect(workspaceId, { hint: () => run.wake(), closed: () => run.wake() });
+          // A stop closes the socket at once, so a pull waiting on it ends.
+          const opened = connection;
+          stop.signal.addEventListener("abort", () => opened.close(), { once: true });
+          if (stop.signal.aborted) opened.close();
           lastState = "";
           let open = true;
           while (open && !stop.signal.aborted) {
@@ -124,6 +136,7 @@ export class SyncManager {
             const stats = result.stats;
             if (stats && (stats.kind === "full" || stats.files || stats.deletes || result.state !== "in_sync"))
               this.log(`pulled workspace=${id} kind=${stats.kind} files=${stats.files} bytes=${stats.bytes} deletes=${stats.deletes} ms=${Date.now() - started} git=${result.git ?? "none"} state=${result.state}`);
+            unreachable = 0;
             if (result.state === "stopped") note("error", result.stopped ?? "stopped");
             if (result.state === "stopped") { set({ state: "error", reason: result.stopped, problems: 0 }); await wait(ERROR_MS); break; }
             if (result.state === "retry") { await wait(RETRY_MS); continue; }
@@ -138,7 +151,14 @@ export class SyncManager {
           else if (error instanceof SyncConnectError && error.kind === "update_required") { note("error", "update_required"); set({ state: "error", reason: "update_required", problems: 0 }); await wait(UPDATE_MS); }
           else if (error instanceof SyncConnectError && error.kind === "not_connected") { note("error", "not_connected"); set({ state: "error", reason: "not_connected", problems: 0 }); await wait(ERROR_MS); }
           else if (error instanceof SyncRootError) { note("error", `folder_${error.code}`); set({ state: "error", reason: `folder_${error.code}`, problems: 0 }); await wait(ERROR_MS); engine = undefined; }
-          else if (error instanceof SyncConnectError) { note("paused", "unavailable"); set({ state: "paused", problems: run.status.problems }); await wait(PAUSED_MS); }
+          else if (error instanceof SyncConnectError) {
+            // Running but unreachable (a failed dial, a closed socket, a timeout): its own words, a growing wait, then an error.
+            if (progressed()) unreachable = 0;
+            unreachable++;
+            note("paused", `unavailable detail=${error.detail ?? "unknown"}`);
+            set({ state: unreachable >= UNREACHABLE_ERROR_AFTER ? "error" : "paused", reason: "unreachable", problems: run.status.problems });
+            await wait(Math.min(UNREACHABLE_MAX_MS, UNREACHABLE_FIRST_MS * 2 ** (unreachable - 1)));
+          }
           else { note("error", "write_failed"); set({ state: "error", reason: "write_failed", problems: run.status.problems }); await wait(ERROR_MS); }
         } finally { connection?.close(); }
       }

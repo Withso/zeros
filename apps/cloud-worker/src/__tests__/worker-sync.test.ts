@@ -161,7 +161,7 @@ it("keeps the VM awake while a sync transfers (60 s after its last read), never 
   try {
     const f = await fixture();
     const busy = () => (f.worker as unknown as { busy: boolean }).busy;
-    await f.relay.receive({ t: "open", clientId: CLIENT_A, passive: true });
+    await f.relay.receive({ t: "open", clientId: CLIENT_A, passive: true, device: DEVICE });
     vi.advanceTimersByTime(RECENT + 1);   // past the configuration's own recent activity
     // An in-sync mirror: snapshots and hints only.
     await f.snapshot(CLIENT_A);
@@ -179,9 +179,27 @@ it("keeps the VM awake while a sync transfers (60 s after its last read), never 
     }
     await f.request(CLIENT_A, "sync.read", { path: "readme.txt", sha256: sha("initial\n"), offset: 0, length: 4 });
     expect(busy()).toBe(false);
-    // Closing the socket ends its session.
+    // A retry loop cannot restart the allowance: a new socket from the same Mac within the window continues its run.
     await f.relay.receive({ t: "close", clientId: CLIENT_A });
+    await f.relay.receive({ t: "open", clientId: CLIENT_B, passive: true, device: DEVICE });
+    await f.request(CLIENT_B, "sync.read", { path: "readme.txt", sha256: sha("initial\n"), offset: 0, length: 4 });
     expect(busy()).toBe(false);
+    // After a real pause (past the window), a new run gets a new allowance.
+    vi.advanceTimersByTime(61_000);
+    await f.request(CLIENT_B, "sync.read", { path: "readme.txt", sha256: sha("initial\n"), offset: 0, length: 4 });
+    expect(busy()).toBe(true);
   } finally { vi.useRealTimers(); }
 });
-const RECENT = 60_000;
+const RECENT = 60_000, DEVICE = "7f1f6c1e-3b0a-4f7e-9d43-8a0b2b9c6d11";
+
+it("reuses the same bundle for a retried bootstrap (same HEAD and have) for its lifetime, instead of rebuilding it", async () => {
+  const f = await fixture();
+  await f.relay.receive({ t: "open", clientId: CLIENT_A, passive: true });
+  await f.snapshot(CLIENT_A);
+  const boot = async (params: Record<string, unknown>) => ((await f.request(CLIENT_A, "sync.bootstrap", params)) as { result: { bundle: { id: string } } }).result.bundle;
+  const first = await boot({}), retry = await boot({});
+  expect(retry.id).toBe(first.id);
+  // Another starting point is another bundle.
+  await writeFile(join(f.root, "next.txt"), "next\n"); await f.git("add", "next.txt"); await f.git("commit", "-m", "next");
+  expect((await boot({})).id).not.toBe(first.id);
+});

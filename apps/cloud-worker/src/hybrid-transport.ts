@@ -24,6 +24,8 @@ interface Options {
   runtimeHandoff?: { id: string; bootId: string };
   publicKeys?: readonly string[]; publicKeysFile?: string; port?: number; fetch?: typeof fetch;
   retryBaseMs?: number; retryMaxMs?: number; onStatus?: (status: HybridStatus) => void;
+  /** Worker journal lines from the inbound bridge (sync sockets): short ids and codes only. */
+  log?: (line: string) => void;
 }
 class HttpFailure extends Error {
   constructor(readonly status: number, readonly code?: "mcp_auth_required", readonly githubReason?: CloudGithubUnavailableReason) { super("Worker control request failed."); }
@@ -81,7 +83,7 @@ export class HybridTransport implements Transport {
         void this.handlers?.frame({ t: "prompts" }).catch(() => {});
       },
       ...(options.publicKeys ? { publicKeys: options.publicKeys } : {}), ...(options.publicKeysFile ? { publicKeysFile: options.publicKeysFile } : {}),
-      ...(options.port === undefined ? {} : { port: options.port }) });
+      ...(options.port === undefined ? {} : { port: options.port }), ...(options.log ? { log: options.log } : {}) });
   }
   start(handlers: TransportHandlers): void {
     if (this.handlers || this.stopped) return;

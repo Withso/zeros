@@ -113,3 +113,21 @@ it("never delivers a reply after the deadline, even for a request made in time",
   expect(await closedWith(socket.ws)).toBe(4001);
   expect(socket.frames).toEqual([]);
 });
+
+it("holds a slow Mac's sync replies (backpressure) instead of terminating its socket, and delivers them in order once it reads", async () => {
+  const f = await fixture();
+  const socket = await sync(f, grant());
+  await expect.poll(() => f.incoming.find(frame => frame.t === "open")).toBeDefined();
+  const clientId = (f.incoming.find(frame => frame.t === "open") as { clientId: string }).clientId;
+  // A slow link: the Mac stops reading, so the worker's send buffer fills.
+  const raw = (socket.ws as unknown as { _socket: { pause(): void; resume(): void } })._socket;
+  raw.pause();
+  const big = (index: number) => ({ type: "WORKSPACE_RESPONSE", requestId: `r${index}`, result: { base64: String(index).repeat(3 * 1024 * 1024) } });
+  const sends = [0, 1, 2, 3].map(index => f.bridge.send({ t: "frame", clientId, frame: big(index) } as never));
+  await new Promise(resolve => setTimeout(resolve, 300));
+  expect(socket.ws.readyState).toBe(WebSocket.OPEN);
+  raw.resume();
+  expect(await Promise.all(sends)).toEqual([true, true, true, true]);
+  await expect.poll(() => socket.frames.length, { timeout: 10_000 }).toBe(4);
+  expect(socket.frames.map(frame => (frame as { requestId: string }).requestId)).toEqual(["r0", "r1", "r2", "r3"]);
+}, 30_000);

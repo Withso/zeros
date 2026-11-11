@@ -219,7 +219,7 @@ describe("sync engine", () => {
     // 2,000 small files in a handful of batches (512 per request), the big one by chunked reads.
     expect(calls).toBeLessThanOrEqual(Math.ceil(2_000 / SYNC_LIMITS.batchFiles) + 1);
     expect(peak).toBeGreaterThan(1);
-    expect(c.reads).toEqual(["big.bin"]);
+    expect(c.reads).toEqual(["big.bin", "big.bin"]);   // 1 MiB + 1 byte: two chunks of at most 1 MiB
     // The changed file did not land and asks for another pass; every other file did.
     expect(first.state).toBe("retry");
     await expect(lstat(join(s.root, "dir3/file3.txt"))).rejects.toThrow();
@@ -257,5 +257,29 @@ describe("sync engine", () => {
     const result = await (await open(s.root, { git })).pull(source);
     expect(result).toMatchObject({ state: "in_sync", git: "ok" });
     expect(order).toEqual(["git", "read"]);
+  });
+
+  it("keeps at most 2 MiB requested in flight (batches of at most 1 MiB, chunks of at most 1 MiB), so an older worker's 4 MiB send buffer never fills", async () => {
+    const files: Record<string, string> = {};
+    for (let index = 0; index < 60; index++) files[`small/${index}.txt`] = "s".repeat(200 * 1024);
+    files["big.bin"] = "b".repeat(5 * 1024 * 1024);
+    const s = await sandbox(), c = cloud(files);
+    let inFlight = 0, peak = 0, largestBatch = 0, largestChunk = 0;
+    const track = async <T>(bytes: number, work: () => Promise<T>) => {
+      inFlight += bytes; peak = Math.max(peak, inFlight);
+      try { await new Promise(resolve => setTimeout(resolve, 2)); return await work(); } finally { inFlight -= bytes; }
+    };
+    const source: SyncSource = { ...c.source, batching: () => true,
+      read: request => { largestChunk = Math.max(largestChunk, request.length); return track(request.length, () => c.source.read(request)); },
+      readBatch: async ({ files: wanted }) => {
+        const bytes = wanted.reduce((sum, file) => sum + Buffer.byteLength(files[file.path]!), 0);
+        largestBatch = Math.max(largestBatch, bytes);
+        return track(bytes, async () => ({ entries: wanted.map(({ path }) => ({ path, bytes: Buffer.byteLength(files[path]!), base64: Buffer.from(files[path]!).toString("base64") })) }));
+      } };
+    expect((await (await open(s.root)).pull(source)).state).toBe("in_sync");
+    expect(largestBatch).toBeLessThanOrEqual(1024 * 1024);
+    expect(largestChunk).toBeLessThanOrEqual(1024 * 1024);
+    expect(peak).toBeLessThanOrEqual(2 * 1024 * 1024);
+    expect(await readFile(join(s.root, "big.bin"), "utf8")).toHaveLength(5 * 1024 * 1024);
   });
 });

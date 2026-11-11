@@ -13,6 +13,8 @@ interface Options {
   workspaceId: string; bootId: string; port?: number; publicKeys?: readonly string[]; publicKeysFile?: string;
   failedAuthLimit?: number; pingIntervalMs?: number; now?: () => number;
   onPushChange?: () => void;
+  /** Worker journal lines for sync sockets: short ids, codes and counts only. */
+  log?(line: string): void;
 }
 type ActivityReply = Extract<CloudV2ControlFrame, { t: "activity-reply" }>;
 interface Connection {
@@ -22,7 +24,9 @@ interface Connection {
 }
 
 /** Order 3: one Mac's direct sync socket, carrying plain bridge messages for one passive client. */
-interface SyncConnection { socket: WebSocket; clientId: string; sub: string; dev: string; alive: boolean; deadline: number; renew?: ReturnType<typeof setTimeout> }
+interface SyncConnection { socket: WebSocket; clientId: string; sub: string; dev: string; alive: boolean; deadline: number; renew?: ReturnType<typeof setTimeout>; queue: Promise<void> }
+/** Sync backpressure: replies wait while more than this is buffered, for at most SYNC_STALL_MS. */
+const SYNC_LOW_WATER_BYTES = 1024 * 1024, SYNC_STALL_MS = 120_000;
 /** A sync socket lives until the newest accepted grant's SIGNED iat + 10 minutes, less the 30 s skew allowance. */
 const syncDeadline = (iat: number) => (iat + SYNC_LIMITS.renewMs / 1000 - 30) * 1000;
 const MAX_SYNC_SOCKETS = 4;
@@ -88,7 +92,7 @@ export class InboundBridge {
       // A sync socket hears only its own replies and hints, as plain bridge messages, and nothing past its deadline.
       if (sync) {
         if (this.now() >= sync.deadline) { sync.socket.close(4001); return false; }
-        return this.write(sync.socket, frame.frame as object);
+        return this.writeSync(sync, frame.frame as object);
       }
       const route = this.routes.get(frame.clientId);
       return route ? this.write(route.connection.socket, { ...frame, clientId: route.clientId }) : false;
@@ -174,14 +178,16 @@ export class InboundBridge {
   private now(): number { return this.options.now?.() ?? Date.now(); }
 
   private attachSync(socket: WebSocket, identity: { sub: string; dev: string; iat: number }): void {
-    const sync: SyncConnection = { socket, clientId: randomUUID(), sub: identity.sub, dev: identity.dev, alive: true, deadline: syncDeadline(identity.iat) };
+    const sync: SyncConnection = { socket, clientId: randomUUID(), sub: identity.sub, dev: identity.dev, alive: true, deadline: syncDeadline(identity.iat), queue: Promise.resolve() };
     // Unrenewed past its deadline: closed, so a revoked Mac stops reading without any push.
     const arm = () => { clearTimeout(sync.renew); sync.renew = setTimeout(() => socket.close(4001), Math.max(0, sync.deadline - this.now())); sync.renew.unref?.(); };
     arm();
     this.syncs.set(sync.clientId, sync);
     socket.on("error", () => {});
     socket.on("pong", () => { sync.alive = true; });
-    void this.receive!({ t: "open", clientId: sync.clientId, passive: true }).catch(() => socket.close(1011));
+    this.options.log?.(`sync socket open client=${sync.clientId.slice(0, 8)}`);
+    // The Mac's device id: a sync's keep-awake allowance counts per device across sockets.
+    void this.receive!({ t: "open", clientId: sync.clientId, passive: true, device: sync.dev }).catch(() => socket.close(1011));
     socket.on("message", (data, binary) => {
       if (binary) { socket.close(4003); return; }
       // Checked on every frame, a renewal included: a late renewal cannot revive a socket.
@@ -198,8 +204,9 @@ export class InboundBridge {
       if (!value || typeof value !== "object" || Array.isArray(value)) { socket.close(4003); return; }
       void this.receive!({ t: "frame", clientId: sync.clientId, frame: value as Record<string, unknown> } as CloudV2ControlFrame).catch(() => socket.close(1011));
     });
-    socket.on("close", () => {
+    socket.on("close", code => {
       clearTimeout(sync.renew);
+      this.options.log?.(`sync socket closed client=${sync.clientId.slice(0, 8)} code=${code}`);
       if (this.syncs.get(sync.clientId) !== sync) return;
       this.syncs.delete(sync.clientId);
       void this.receive!({ t: "close", clientId: sync.clientId }).catch(() => {});
@@ -261,6 +268,32 @@ export class InboundBridge {
         void this.receive!({ t: "close", clientId }).catch(() => {});
       }
       connection.clients.clear(); connection.stops.clear();
+    });
+  }
+
+  /** A sync socket carries large replies (bundle chunks, batches) over a Mac's own link: they queue in
+   * order and wait for the send buffer to drain (backpressure) instead of ending the socket. A link
+   * that does not drain for SYNC_STALL_MS is closed with 4008; the Mac reconnects and backs off. */
+  private writeSync(sync: SyncConnection, frame: object): Promise<boolean> {
+    const run = sync.queue.then(() => this.writePaced(sync, frame));
+    sync.queue = run.then(() => {}, () => {});
+    return run;
+  }
+  private async writePaced(sync: SyncConnection, frame: object): Promise<boolean> {
+    const socket = sync.socket;
+    if (socket.readyState !== WebSocket.OPEN) return false;
+    const payload = JSON.stringify(frame), bytes = Buffer.byteLength(payload);
+    if (bytes > CLOUD_V2_MAX_FRAME_BYTES) { socket.close(1009); return false; }
+    const started = Date.now();
+    while (socket.bufferedAmount > SYNC_LOW_WATER_BYTES) {
+      if (Date.now() - started > SYNC_STALL_MS) { this.options.log?.(`sync socket stalled client=${sync.clientId.slice(0, 8)}`); socket.close(4008); return false; }
+      await new Promise(resolve => setTimeout(resolve, 25));
+      if (socket.readyState !== WebSocket.OPEN) return false;
+    }
+    return new Promise(resolve => {
+      // Long enough for a slow link (at least 32 KiB/s), never the 10 s a small control frame gets.
+      const timer = setTimeout(() => { socket.close(4008); resolve(false); }, Math.max(30_000, Math.ceil(bytes / 32_768) * 1000));
+      socket.send(payload, error => { clearTimeout(timer); resolve(!error); });
     });
   }
 

@@ -34,7 +34,7 @@ export function startWorker(options: BootOptions): { worker: CloudWorker; stop: 
   const transport = new HybridTransport({ apiUrl: options.apiUrl, workspaceId: options.workspaceId, runtimeSha256: options.runtimeSha256,
     ...(runtimeHandoff ? { runtimeHandoff } : {}),
     ...(options.publicKeys ? { publicKeys: options.publicKeys } : {}), ...(options.port === undefined ? {} : { port: options.port }),
-    tokenFile: options.tokenFile ?? WORKER_TOKEN_FILE,
+    tokenFile: options.tokenFile ?? WORKER_TOKEN_FILE, log,
     onStatus: status => {
       log(status);
       if (status === "connected" && !connected) { connected = true; log(`boot connected ${uptime()}`); setImmediate(persistCompileCache); }
@@ -47,7 +47,7 @@ export function startWorker(options: BootOptions): { worker: CloudWorker; stop: 
   renameSync(`${bootPath}.${transport.bootId}`, bootPath);
   const worker = new CloudWorker({ directory, workspaceId: options.workspaceId, transport, runtimePermit: runtimePermit(directory, transport.bootId),
     ...(runtimeHandoff ? { runtimeResume: { instanceId: runtimeHandoff.instanceId, ready: () => completeRuntimeHandoff(directory, runtimeHandoff) } } : {}),
-    gitAskpassPath: fileURLToPath(new URL("./bin/git-askpass", import.meta.url)), onError: code => log(code),
+    gitAskpassPath: fileURLToPath(new URL("./bin/git-askpass", import.meta.url)), onError: code => log(code), onSync: line => log(line),
     onTiming: record => log(`timing ${JSON.stringify(record)}`),
     onReconfigure: changed => log(`reconfigure ${changed.join(",")}`),
     memoryWatchdog: { runtimeRoots: [...new Set([dirname(fileURLToPath(import.meta.url)), dirname(realpathSync(fileURLToPath(import.meta.url)))])] },
