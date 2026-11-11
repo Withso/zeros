@@ -84,7 +84,8 @@ SHA. It puts them together in `$RUNNER_TEMP/ci-policy/`, preserving relative
 imports, and runs the trusted classifier with `--mode pr` against the candidate
 checkout. PR copies of the policy never authorize skips. Event identities and
 `LABELS_JSON` enter through `env:`; the workflow uses `pull_request` and
-`contents: read` permissions.
+`contents: read` permissions, plus `pull-requests: read` on the scope job to
+read the PR's current labels.
 
 The classifier owns path and label selection through the registry below.
 CI validates the `zeros.ci-selection/v1` ledger and output format, forwards the
@@ -206,9 +207,15 @@ maintainer labels on fork PRs. The classifier alone validates the closed
 vocabulary and computes additions. Removing a label recomputes optional
 coverage while retaining the path floor.
 
-CI runs for `opened`, `synchronize`, `reopened`, `ready_for_review`, `labeled`,
-and `unlabeled`. Label changes start a fresh run on the same PR head; per-PR
-concurrency cancels its predecessor. Selection uses the event's label snapshot.
+CI runs for `opened`, `synchronize`, `reopened` and `ready_for_review`; label
+events start no run. The scope job reads the PR's current labels from the API
+(waiting up to 15 seconds after `opened` so `gh pr create --label` labels are
+seen) and fails closed when it cannot. Until 2026-11-11 a `labeled` run cancelled
+the first run; its `always()` aggregates then reported failure for the minutes
+before the new run's aggregates existed, and `pnpm agent:merge` refused on them.
+A label added after the run started applies on the next push or a rerun of the
+whole `CI` run (`gh run rerun <run-id>`); the ledger's `requests` show what a
+run used.
 It does not provide an immutable merge request or an App-owned merge gate.
 
 | Label                 | Additional selection                           |
