@@ -1,6 +1,6 @@
 import { useSyncExternalStore } from "react";
 import { z } from "zod";
-import { LocalCommandConnectReplySchema, LocalCommandDisconnectReplySchema, LocalCommandMacsReplySchema, LocalCommandOrganizationSettingSchema,
+import { LocalCommandConnectReplySchema, LocalCommandDisconnectReplySchema, LocalCommandMacsReplySchema,
   type LocalCommandMac } from "@zeros/protocol/local-commands";
 import { LOCAL_COMMAND_APPROVALS_EVENT, LOCAL_COMMAND_OPEN_EVENT, type LocalCommandApprovalView, type LocalCommandDecision } from "../../../shared/local-commands";
 import { cloudAccountRequest } from "./cloud-workspaces";
@@ -74,12 +74,3 @@ export async function disconnectMac(workspaceId: string, deviceId: string) {
   return LocalCommandDisconnectReplySchema.parse(await nativeInvoke("local_commands_disconnect", { workspaceId, deviceId }));
 }
 
-// ── Organization switch ─────────────────────────────────────────────────
-const settingPath = (organizationId: string) => `/v1/cloud-v2/organizations/${encodeURIComponent(z.string().uuid().parse(organizationId))}/local-commands`;
-export async function readLocalCommandsEnabled(organizationId: string): Promise<boolean> {
-  return (await cloudAccountRequest(settingPath(organizationId), LocalCommandOrganizationSettingSchema)).localCommandsEnabled;
-}
-export async function writeLocalCommandsEnabled(organizationId: string, enabled: boolean): Promise<boolean> {
-  return (await cloudAccountRequest(settingPath(organizationId), LocalCommandOrganizationSettingSchema,
-    { body: { localCommandsEnabled: enabled }, idempotencyKey: crypto.randomUUID(), method: "PUT" })).localCommandsEnabled;
-}

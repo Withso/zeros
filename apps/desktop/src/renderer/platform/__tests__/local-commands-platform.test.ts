@@ -9,7 +9,7 @@ vi.mock("../../features/auth/auth-store", () => ({ getSession: async () => ({ ac
 vi.mock("../../features/team/team-store", () => ({ getOrganizationStoreGeneration: () => 0 }));
 vi.mock("../../features/team/control-plane", () => ({ CONTROL_PLANE_URL: "https://api.example.test", ControlPlaneError: class extends Error {} }));
 import { cloudPromptApi } from "../cloud-prompt-api";
-import { connectThisMac, decideLocalCommand, isDecidingLocalCommand, listWorkspaceMacs, readLocalCommandsEnabled, resetLocalCommandApprovalsForTests, writeLocalCommandsEnabled } from "../local-commands";
+import { connectThisMac, decideLocalCommand, isDecidingLocalCommand, listWorkspaceMacs, resetLocalCommandApprovalsForTests } from "../local-commands";
 
 const ws = "11111111-1111-4111-8111-111111111111", org = "22222222-2222-4222-8222-222222222222";
 const deviceId = "7f1f6c1e-3b0a-4f7e-9d43-8a0b2b9c6d11";
@@ -44,15 +44,11 @@ describe("local commands in the renderer", () => {
     expect(isDecidingLocalCommand(id)).toBe(true);
   });
 
-  it("reads Macs and the organization switch from their routes, and connects through main", async () => {
+  it("reads Macs from their route, and connects through main", async () => {
     const mac = { deviceId, name: "Studio", connected: true, active: true, reachable: true, expiresAt: null };
     respond({ macs: [mac] });
     expect(await listWorkspaceMacs(ws)).toEqual([mac]);
     expect(fetches[0]!.url).toBe(`https://api.example.test/v1/cloud-v2/workspaces/${ws}/macs`);
-    respond({ localCommandsEnabled: false });
-    expect(await readLocalCommandsEnabled(org)).toBe(false);
-    await writeLocalCommandsEnabled(org, true);
-    expect(fetches.at(-1)).toMatchObject({ url: `https://api.example.test/v1/cloud-v2/organizations/${org}/local-commands`, init: { method: "PUT", body: JSON.stringify({ localCommandsEnabled: true }) } });
     state.reply = { mac, presence: { presenceRequired: true, reachableUntil: iso } };
     expect((await connectThisMac(ws)).mac.active).toBe(true);
     expect(state.invokes.at(-1)).toEqual({ cmd: "local_commands_connect", args: { workspaceId: ws } });

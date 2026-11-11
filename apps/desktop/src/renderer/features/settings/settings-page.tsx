@@ -125,8 +125,9 @@ import { JoinTeamDialog } from "../team/join-team-dialog";
 import { OrganizationSwitcher } from "../team/organization-switcher";
 import { TRAFFIC_LIGHT_RESERVE_CLS } from "../../shell/sidebar-toggle";
 import { getActiveOrganizationIdSnapshot, useActiveOrganization, useTeams } from "../team/team-store";
-import { WorkspaceApiAccessSetting, showsWorkspaceApiAccess } from "./workspace-api-access-setting";
-import { AlwaysAllowLocalCommands, OrganizationLocalCommands } from "./local-commands-settings";
+import { WorkspaceApiAccessSetting } from "./workspace-api-access-setting";
+import { AlwaysAllowLocalCommands } from "./local-commands-settings";
+import { organizationGeneralSections } from "./organization-general";
 import { hasCloudWorkspaceAccountAccess } from "../team/cloud-workspace-account-access";
 import { readScopedSettingsSelection, writeScopedSettingsSelection, settingsOwnerKey } from "./settings-scope";
 import { retainedDialogOpen } from "./retained-surface";
@@ -863,13 +864,12 @@ function GeneralPanel({ surfaceActive = true }: { surfaceActive?: boolean }) {
   // An organization's General holds only this Mac's controls; the app-wide
   // preferences belong to the Local owner.
   if (organization ? !organization.isPersonal : Boolean(getActiveOrganizationIdSnapshot())) {
+    const sections = organizationGeneralSections(organization, cloudAccess);
     return (
       <div className="flex flex-col gap-8">
-        {showsWorkspaceApiAccess(organization, cloudAccess) && <WorkspaceApiAccessSetting organizationId={organization!.id} surfaceActive={surfaceActive} />}
-        {showsWorkspaceApiAccess(organization, cloudAccess) && <OrganizationLocalCommands organizationId={organization!.id} surfaceActive={surfaceActive}
-          canChange={organization!.role === "owner" || organization!.role === "admin"} />}
+        {sections.includes("workspace-api-access") && <WorkspaceApiAccessSetting organizationId={organization!.id} surfaceActive={surfaceActive} />}
         <ComputerUseSettingsSection surfaceActive={surfaceActive} withPermissions />
-        {showsWorkspaceApiAccess(organization, cloudAccess) && <AlwaysAllowLocalCommands surfaceActive={surfaceActive} />}
+        {sections.includes("always-allow-local-commands") && <AlwaysAllowLocalCommands surfaceActive={surfaceActive} />}
       </div>
     );
   }
