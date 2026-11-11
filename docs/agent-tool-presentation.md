@@ -454,7 +454,8 @@ suites, `features/agent/__tests__/fallback-transcript.test.ts`,
   server/tool, Claude's `mcp__zeros_workspace__*`, Cursor's provider identifier)
   and never show the raw `mcp__` name. **RunLocalCommand** is one row with a
   laptop-and-prompt icon, its `description` as the title and the command as the
-  chip; while waiting it reads "Waiting for approval on <Mac>", and every ending
+  chip, with the agent's `reason` (wire v1.3, when given) as a muted line above
+  it; while waiting it reads "Waiting for approval on <Mac>", and every ending
   is plain words on a neutral row (Ran on <Mac>, Denied, Mac not connected,
   Timed out, Failed with exit code N), never a generic red **Error**.
   NotifyUser reads **Notified you: <title>**; GetTerminalOutput and

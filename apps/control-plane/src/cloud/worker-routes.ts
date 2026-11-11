@@ -14,8 +14,8 @@ import { CloudEnvironmentReportSchema, type CloudEnvironmentReport } from "./env
 import type { RuntimeAdoption } from "./runtime-adoption.js";
 import type { RuntimeHandoffStore } from "./runtime-handoff-store.js";
 import { CloudRuntimeUpdateRequestSchema } from "./runtime-update-contract.js";
-import { LOCAL_COMMANDS_FEATURE, LocalCommandIdSchema } from "./local-commands/contract.js";
-import { NewLocalCommandSchema, localUnavailable, type CloudLocalCommands } from "./local-commands/requests.js";
+import { LOCAL_COMMANDS_FEATURE, LOCAL_COMMANDS_REASON_FEATURE, LocalCommandIdSchema } from "./local-commands/contract.js";
+import { LocalCommandSubmissionSchema, localUnavailable, type CloudLocalCommands } from "./local-commands/requests.js";
 import { localBody, localUuid, localRouteError } from "./local-commands/routes.js";
 import { requestSignal, type CloudLocalCommandSignals } from "./local-commands/signals.js";
 import { NOTIFY_USER_FEATURE, NotifyUserWorkerRequestSchema } from "./notify-user/contract.js";
@@ -115,7 +115,7 @@ async function configuration(deps: CloudV2WorkerRouteDeps, workspace: CloudV2Wor
     if (!after || before.accessEpoch !== after.accessEpoch) throw unauthorized();
     const revision = before.loginRevision;
     if (revision === after.loginRevision) {
-      const { api, localCommands: _localCommands, notifyUser: _notifyUser, mcpServers, githubPullRequests, githubUserTokens, gitIdentity, agentInteractions, codeReview, historyReplacement: _historyReplacement, environment, runtimeUpdate: _runtimeUpdate, ...legacy } = config;
+      const { api, localCommands: _localCommands, localCommandReason: _localCommandReason, notifyUser: _notifyUser, mcpServers, githubPullRequests, githubUserTokens, gitIdentity, agentInteractions, codeReview, historyReplacement: _historyReplacement, environment, runtimeUpdate: _runtimeUpdate, ...legacy } = config;
       if (environment && !features.has("workspace-environment-v1"))
         throw new HttpError(409, "cloud_environment_runtime_required", "Update the cloud runtime before opening this workspace.");
       const { setup, setupScript, baseCommit, github, ...workspaceConfig } = config.workspace;
@@ -129,6 +129,7 @@ async function configuration(deps: CloudV2WorkerRouteDeps, workspace: CloudV2Wor
         ...(features.has("agent-interactions-v1") && agentInteractions === 1 ? { agentInteractions } : {}),
         ...(features.has("workspace-api-v1") && api ? { api } : {}),
         ...(localCommandsEnabled ? { localCommands: 1 } : {}),
+        ...(localCommandsEnabled && features.has(LOCAL_COMMANDS_REASON_FEATURE) ? { localCommandReason: 1 } : {}),
         ...(features.has(NOTIFY_USER_FEATURE) && deps.promptOutbox && deps.notifications ? { notifyUser: 1 } : {}),
         ...(environment ? { environment } : {}),
         ...(features.has("runtime-update-v1") && deps.runtimeUpdates ? { runtimeUpdate: 1 } : {}),
@@ -181,7 +182,7 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
       if (c.res.status === 429 && !c.res.headers.has("Retry-After")) c.header("Retry-After","60");
     });
     local.post(path, async c => {
-      const auth = await authority(c), input = await localBody(c,NewLocalCommandSchema);
+      const auth = await authority(c), input = await localBody(c,LocalCommandSubmissionSchema);
       const result = await requests.create(auth.token,auth.bootId,input);
       return c.json(result.receipt,result.replay ? 200 : 201);
     });

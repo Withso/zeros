@@ -40,12 +40,15 @@ export const LocalCommandApprovalCard = memo(function LocalCommandApprovalCard({
   const rows = [
     { label: "Directory", value: request.cwd ?? "Home folder" },
     { label: "Timeout", value: timeout },
-    ...(request.reason ? [{ label: "Reason", value: request.reason }] : []),
   ];
   return (
     <div data-local-command-card="" role="group" aria-label={`Run a command on ${request.macName}`}
       className={cn(DOCK_CARD_CLS, "flex w-full min-w-0 flex-col gap-2.5 px-3.5 py-3")}>
-      <div className="text-fg1 text-xs leading-4.5 font-medium">Run this command on {request.macName}?</div>
+      <div className="flex min-w-0 flex-col gap-0.5">
+        <div className="text-fg1 text-xs leading-4.5 font-medium">Run this command on {request.macName}?</div>
+        {/* Why the agent needs this Mac rather than the cloud VM (wire v1.3). */}
+        {request.reason && <p className="text-fg3 min-w-0 text-xs leading-4.5 break-words select-text" data-local-command-reason="">{request.reason}</p>}
+      </div>
       <div className="flex min-w-0 flex-wrap gap-1.5">
         {[request.workspaceName, request.chatTitle].map((item, index) => (
           <span key={index} className="border-border1 bg-bg1 text-fg2 max-w-full select-text truncate rounded-md border px-2 py-1 text-xs">{item}</span>

@@ -92,14 +92,14 @@ suite("runtime hello through the production composition", () => {
     app.use("*", requestTiming({ slowMs: Infinity, databasePool: pool, costObserver: value => { costs.push(value); } }));
     app.onError((error, c) => c.json({ code: error instanceof HttpError ? error.code : "internal" }, error instanceof HttpError ? error.status : 500));
     app.route("/", createCloudV2WorkerRoutes(cp.workers));
-    const hello = (bootId = h.next_boot_id, runtimeSha256 = h.target_sha256, id = h.id, chatEdits = false, localFeature = localCommands, notifyFeature = false) => app.request("/v2/cloud/worker/hello", {
+    const hello = (bootId = h.next_boot_id, runtimeSha256 = h.target_sha256, id = h.id, chatEdits = false, localFeature = localCommands, notifyFeature = false, reasonFeature = false) => app.request("/v2/cloud/worker/hello", {
       method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json", "x-zeros-runtime-handoff": id,
-        "x-zeros-worker-features": `runtime-update-v1,prompt-outbox-v1,workspace-environment-v1,repository-setup-v1,mcp-v1,github-pr-v1,git-identity-v1${api ? ",workspace-api-v1" : ""}${chatEdits ? ",chat-edit-v1" : ""}${localFeature ? ",local-commands-v1" : ""}${notifyFeature ? ",notify-user-v1" : ""}` },
+        "x-zeros-worker-features": `runtime-update-v1,prompt-outbox-v1,workspace-environment-v1,repository-setup-v1,mcp-v1,github-pr-v1,git-identity-v1${api ? ",workspace-api-v1" : ""}${chatEdits ? ",chat-edit-v1" : ""}${localFeature ? ",local-commands-v1" : ""}${notifyFeature ? ",notify-user-v1" : ""}${reasonFeature ? ",local-commands-reason-v1" : ""}` },
       body: JSON.stringify({ protocol: 2, bootId, runtimeSha256 }),
     });
-    const ordinary = (route: "hello" | "config", apiFeature = api, runtimeSha256 = "b".repeat(64), localFeature = localCommands, notifyFeature = false) => app.request(`/v2/cloud/worker/${route}`, {
+    const ordinary = (route: "hello" | "config", apiFeature = api, runtimeSha256 = "b".repeat(64), localFeature = localCommands, notifyFeature = false, reasonFeature = false) => app.request(`/v2/cloud/worker/${route}`, {
       method: route === "hello" ? "POST" : "GET", headers: { authorization: `Bearer ${token}`, "content-type": "application/json", "x-zeros-worker-boot": boot,
-        "x-zeros-worker-features": `runtime-update-v1,prompt-outbox-v1,workspace-environment-v1,repository-setup-v1,mcp-v1,github-pr-v1,git-identity-v1${apiFeature ? ",workspace-api-v1" : ""}${localFeature ? ",local-commands-v1" : ""}${notifyFeature ? ",notify-user-v1" : ""}` },
+        "x-zeros-worker-features": `runtime-update-v1,prompt-outbox-v1,workspace-environment-v1,repository-setup-v1,mcp-v1,github-pr-v1,git-identity-v1${apiFeature ? ",workspace-api-v1" : ""}${localFeature ? ",local-commands-v1" : ""}${notifyFeature ? ",notify-user-v1" : ""}${reasonFeature ? ",local-commands-reason-v1" : ""}` },
       ...(route === "hello" ? { body: JSON.stringify({ protocol: 2, bootId: boot, runtimeSha256 }) } : {}),
     });
     return { cp, creator, org, workspace, token, boot, h, handoffs, hello, ordinary, costs, fetcher, app, deny: () => { allowed = false; } };
@@ -164,6 +164,26 @@ suite("runtime hello through the production composition", () => {
     await pool.query("UPDATE organizations SET local_commands_allowed=true WHERE id=$1",[f.org]);
     f.cp.workers.promptOutbox = false;
     expect((await (await f.ordinary("config")).json()).config).not.toHaveProperty("localCommands");
+  });
+
+  it.each([false, true])("gates local command reasons in current and private-boot configurations (private=%s)", async privateBoot => {
+    const f = await fixture(privateBoot,false,false,false,true);
+    const configure = (local: boolean, reason: boolean) => privateBoot
+      ? f.hello(undefined,undefined,undefined,false,local,false,reason)
+      : f.ordinary("hello",false,f.h.previous_sha256,local,false,reason);
+    const legacy = await configure(true,false);
+    expect(legacy.status).toBe(200); expect((await legacy.json()).config).not.toHaveProperty("localCommandReason");
+    const capable = await configure(true,true);
+    expect(capable.status).toBe(200); expect((await capable.json()).config).toMatchObject({ localCommands: 1,localCommandReason: 1 });
+    const reasonOnly = await configure(false,true);
+    expect(reasonOnly.status).toBe(200); expect((await reasonOnly.json()).config).not.toHaveProperty("localCommandReason");
+    await pool.query("UPDATE organizations SET local_commands_allowed=false WHERE id=$1",[f.org]);
+    const disabled = await configure(true,true);
+    if (privateBoot) { expect(disabled.status).toBe(401); return; }
+    expect(disabled.status).toBe(200); expect((await disabled.json()).config).not.toHaveProperty("localCommandReason");
+    await pool.query("UPDATE organizations SET local_commands_allowed=true WHERE id=$1",[f.org]);
+    f.cp.workers.promptOutbox = false;
+    expect((await (await configure(true,true)).json()).config).not.toHaveProperty("localCommandReason");
   });
 
   it("negotiates NotifyUser only for capable workers with the durable outbox, independently of local commands", async () => {

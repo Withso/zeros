@@ -1,6 +1,6 @@
 import type { z } from "zod";
 import {
-  LOCAL_COMMAND_DEVICE_HEADERS, LOCAL_COMMANDS_FEATURE, LocalCommandConnectReplySchema, LocalCommandDisconnectReplySchema, LocalCommandEventSchemas,
+  LOCAL_COMMAND_DEVICE_HEADERS, LocalCommandConnectReplySchema, LocalCommandDisconnectReplySchema, LocalCommandEventSchemas,
   LocalCommandNoticeSchema, LocalCommandPresenceSchema, LocalCommandRegistrationReplySchema, LocalCommandResultReplySchema, WorkspaceSyncFlagReplySchema,
   type LocalCommandDevice, type LocalCommandMacResult,
 } from "@zeros/protocol/local-commands";
@@ -70,8 +70,10 @@ export class DeviceControl {
     return `${this.device(device.deviceId)}/requests/${encodeURIComponent(requestId)}${action ? `/${action}` : ""}`;
   }
 
-  register(deviceId: string, input: { requestId: string; name: string }) {
-    return this.send("PUT", this.device(deviceId), { body: { requestId: input.requestId, name: input.name, capabilities: [LOCAL_COMMANDS_FEATURE] }, schema: LocalCommandRegistrationReplySchema });
+  /** One PUT with exactly the capabilities given. A request id is idempotent only for its exact body, so the
+   * caller (LocalCommandService) owns the id and the set, and changes them together. */
+  register(deviceId: string, input: { requestId: string; name: string; capabilities: readonly string[] }) {
+    return this.send("PUT", this.device(deviceId), { body: { requestId: input.requestId, name: input.name, capabilities: [...input.capabilities] }, schema: LocalCommandRegistrationReplySchema });
   }
   unregister(device: LocalCommandDevice) { return this.send<void>("DELETE", this.device(device.deviceId), { device, timeoutMs: 5_000 }); }
   heartbeat(device: LocalCommandDevice) { return this.send("POST", `${this.device(device.deviceId)}/heartbeat`, { device, body: {}, schema: LocalCommandPresenceSchema }); }

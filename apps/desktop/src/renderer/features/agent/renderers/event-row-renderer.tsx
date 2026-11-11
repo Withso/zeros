@@ -1,4 +1,5 @@
 import { ToolResourceLink } from "./tool-resource-link";
+import { localCommandReason } from "./workspace-tool-presentation";
 import { CloudMcpFailureSchema } from "@zeros/protocol/cloud-v2-relay";
 import { modelRejectionDisplayText } from "@zeros/protocol/model-rejection";
 import { generatedImageInputPaths, generatedImagePath, isCodexImageGenerationTool, isImageGenerationTool, structuredToolOutput } from "./tool-artifacts";
@@ -194,6 +195,14 @@ export const EventRowRenderer: Renderer<AgentMessage> = memo(
       }
     }
     const detail = renderDetail(message, ctx);
+    const reason = message.kind === "tool" ? localCommandReason(message as AgentToolMessage) : undefined;
+    // As Conductor shows it: why the agent needs the Mac, muted, above the command's row.
+    if (reason) return (
+      <div className="flex min-w-0 flex-col gap-0.5">
+        <p className="text-fg3 min-w-0 truncate text-xs leading-4.5" data-local-command-reason="">{reason}</p>
+        <EventRow message={message} ctx={ctx} detail={detail} />
+      </div>
+    );
     return <EventRow message={message} ctx={ctx} detail={detail} />;
   },
 );

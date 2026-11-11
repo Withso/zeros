@@ -1,5 +1,5 @@
 import { beforeAll, expect, it } from "vitest";
-import { LOCAL_COMMANDS_FEATURE, LOCAL_COMMAND_FAILURE_REASONS, LOCAL_COMMAND_LIMITS, LOCAL_COMMAND_OUTCOMES, LOCAL_DEVICE_HEADERS,
+import { LOCAL_COMMANDS_FEATURE, LOCAL_COMMANDS_REASON_FEATURE, LOCAL_COMMAND_FAILURE_REASONS, LOCAL_COMMAND_LIMITS, LOCAL_COMMAND_OUTCOMES, LOCAL_DEVICE_HEADERS,
   LocalCommandInputSchema, LocalCommandResultSchema, LocalMacResultSchema, LocalDeviceRegistrationSchema } from "./contract.js";
 import { NewLocalCommandSchema } from "./requests.js";
 import { CloudV2ControlFrameSchema } from "../contract.js";
@@ -19,6 +19,7 @@ it("mirrors the optional top-level configuration field without changing N-1 fram
     organizationId: "22222222-2222-4222-8222-222222222222",checkoutPath: "/home/user/example/repo",repository: "example/repo",branch: "work",baseBranch: "main" } };
   parity(CloudV2ControlFrameSchema,control,frame,true);
   for (const localCommands of [1,0,2,true]) parity(CloudV2ControlFrameSchema,control,{ ...frame,localCommands },localCommands === 1);
+  for (const localCommandReason of [1,0,2,true]) parity(CloudV2ControlFrameSchema,control,{ ...frame,localCommandReason },localCommandReason === 1);
 });
 function parity(left: Schema, right: Schema, value: unknown, valid: boolean) {
   const a = left.safeParse(value), b = right.safeParse(value);
@@ -27,6 +28,7 @@ function parity(left: Schema, right: Schema, value: unknown, valid: boolean) {
 }
 it("matches feature, limits, outcomes, closed failure reasons and device headers", () => {
   expect(LOCAL_COMMANDS_FEATURE).toEqual(protocol.LOCAL_COMMANDS_FEATURE);
+  expect(LOCAL_COMMANDS_REASON_FEATURE).toEqual(protocol.LOCAL_COMMANDS_REASON_FEATURE);
   expect(LOCAL_COMMAND_LIMITS).toEqual(protocol.LOCAL_COMMAND_LIMITS);
   expect(LOCAL_COMMAND_OUTCOMES).toEqual(protocol.LOCAL_COMMAND_OUTCOMES);
   expect(LOCAL_COMMAND_FAILURE_REASONS).toEqual(protocol.LOCAL_COMMAND_FAILURE_REASONS);
@@ -43,6 +45,13 @@ it("matches command bounds, strict input, whitespace and extended timeout admiss
   ];
   for (const [input,valid] of examples) parity(LocalCommandInputSchema,protocol.LocalCommandInputSchema,input,valid);
 });
+it("matches v1.3 reason bounds without rewriting bytes used by idempotency", () => {
+  for (const [reason,valid] of [["why this Mac",true],["x".repeat(280),true],[` ${"x".repeat(280)} `,true],
+    [" ".repeat(64)+"x".repeat(280),true],[" ".repeat(65)+"x".repeat(280),false],["x".repeat(281),false],
+    ["",false],[" ",false],["why\nlocal",false],["\twhy",false],["why\u0000local",false],["why\u007f",false],[null,false],[1,false]] as const) {
+    parity(LocalCommandInputSchema,protocol.LocalCommandInputSchema,{ command: "x",reason },valid);
+  }
+});
 it("matches worker IDs including control characters at the end", () => {
   const base = { requestId: "11111111-1111-4111-8111-111111111111",chatId: "chat",executionId: "execution",input: { command: "x" } };
   for (const [id,valid] of [["chat",true],["x".repeat(256),true],["",false],["x".repeat(257),false],
@@ -58,6 +67,11 @@ it("matches registration and rejects injected identities and untrimmed names", (
     parity(LocalDeviceRegistrationSchema,protocol.LocalCommandRegistrationRequestSchema,{ ...base,name },valid);
   }
   parity(LocalDeviceRegistrationSchema,protocol.LocalCommandRegistrationRequestSchema,{ ...base,instanceId: base.requestId },false);
+  for (const [capabilities,valid] of [
+    [[LOCAL_COMMANDS_FEATURE,LOCAL_COMMANDS_REASON_FEATURE],true],[[LOCAL_COMMANDS_REASON_FEATURE],false],
+    [[LOCAL_COMMANDS_REASON_FEATURE,LOCAL_COMMANDS_FEATURE],false],[[LOCAL_COMMANDS_FEATURE,LOCAL_COMMANDS_FEATURE],false],
+    [[LOCAL_COMMANDS_FEATURE,"local-commands-reason-v10"],false],
+  ] as Array<[unknown,boolean]>) parity(LocalDeviceRegistrationSchema,protocol.LocalCommandRegistrationRequestSchema,{ ...base,capabilities },valid);
 });
 it("matches UTF-8 result limits, failed receipts and names-only recovery hints", () => {
   for (const [result,valid] of [

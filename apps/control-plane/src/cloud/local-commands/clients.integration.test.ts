@@ -21,6 +21,7 @@ const root = new URL(process.env.CLOUD_API_TEST_CLIENT_ROOT ?? "../../../../../"
 const source = (path: string) => new URL(path, root);
 const renderer = "apps/desktop/src/renderer/";
 const database = process.env.TEST_DATABASE_URL ? describe : describe.skip;
+const deviceCapabilities = ["local-commands-v1", "local-commands-reason-v1"] as const;
 
 database("real desktop and worker local-command clients against the router and PostgreSQL", () => {
   let pool: pg.Pool, f: LocalCommandsFixture, credentials: CloudApiCredentials;
@@ -88,7 +89,7 @@ database("real desktop and worker local-command clients against the router and P
     };
     vi.stubGlobal("fetch", fetcher);
     control = new clients.DeviceControl({ fetch: fetcher, baseUrl: () => "https://api.example.test", token: async () => "synthetic-desktop-session" });
-    const registered = await control.register(randomUUID(), { requestId: randomUUID(), name: "Studio" });
+    const registered = await control.register(randomUUID(), { requestId: randomUUID(), name: "Studio", capabilities: deviceCapabilities });
     expect(registered.presence).toEqual({ presenceRequired: false, reachableUntil: null });
     mac = registered.device;
     rendererDevice = { deviceId: mac.deviceId, headers: { "X-Zeros-Device-Id": mac.deviceId,
@@ -129,13 +130,13 @@ database("real desktop and worker local-command clients against the router and P
     expect(await event("ready")).toMatchObject({ deviceId: device.deviceId, registrationId: device.registrationId, instanceId: device.instanceId });
     return { event, events };
   }
-  async function desktopNotifications() {
-    const notifications: NotifyUserEvent[] = [], events: any[] = [], deviceId = randomUUID();
+  async function desktopNotifications(client = control, deviceId = randomUUID()) {
+    const notifications: NotifyUserEvent[] = [], events: any[] = [];
     const run = vi.fn(async () => { throw new Error("A notification must not run a local command"); });
     const approval = vi.fn();
-    const service = new clients.LocalCommandService({ control,
+    const service = new clients.LocalCommandService({ control: client,
       events: async function* (device: LocalDevice, signal: AbortSignal) {
-        for await (const event of clients.parseEventStream(await control.events(device,signal))) { events.push(event); yield event; }
+        for await (const event of clients.parseEventStream(await client.events(device,signal))) { events.push(event); yield event; }
       },
       journal: (accountId: string) => clients.LocalCommandJournal.open(directory,accountId),
       run, identity: { deviceId: () => deviceId,name: async () => "Laptop" },
@@ -145,7 +146,7 @@ database("real desktop and worker local-command clients against the router and P
     });
     cleanups.push(() => service.stop());
     await service.start();
-    await expect.poll(() => events.find(event => event.event === "ready")).toBeDefined();
+    await expect.poll(() => events.find(event => event.event === "ready"), { timeout: 5000 }).toBeDefined();
     expect(events.find(event => event.event === "ready").data.presence).toEqual({ presenceRequired: false,reachableUntil: null });
     return { service,notifications,run,approval };
   }
@@ -193,6 +194,53 @@ database("real desktop and worker local-command clients against the router and P
     expect(calls.find(call => call.method === "DELETE")?.status).toBe(204);
   });
 
+  it("delivers the v1.3 reason through the production worker and desktop clients", async () => {
+    expect(mac.capabilities).toContain("local-commands-reason-v1");
+    expect(calls.find(call => call.path === "/v2/cloud/worker/hello")?.reply.config.localCommandReason).toBe(1);
+    const reason = "This check needs the app installed on the Mac", stream = await channel(), { done } = command({ reason });
+    const notice = await stream.event("request", data => data.state === "pending");
+    expect(notice.input.reason).toBe(reason);
+    expect((await control.received(mac, notice.requestId)).input.reason).toBe(reason);
+    expect((await control.claim(mac, notice.requestId, "approve")).input.reason).toBe(reason);
+    expect(await control.result(mac, notice.requestId, { outcome: "completed", code: 0 })).toEqual({ outcome: "completed" });
+    await finish(done, { outcome: "completed", mac: "Studio" });
+  });
+
+  it("reconciles a lost N-1 fallback registration reply after the retry reaches the new control plane", async () => {
+    const id = randomUUID(), registrations: Array<{ body: { requestId: string; capabilities: string[] }; status: number }> = [];
+    let legacy = true, committed: LocalDevice | undefined;
+    const mixed = new clients.DeviceControl({ baseUrl: () => "https://api.example.test", token: async () => "synthetic-desktop-session",
+      fetch: async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = new Request(input, init);
+        if (request.method !== "PUT") return f.app.fetch(request);
+        const body = await request.clone().json();
+        // The released route's strict capability tuple refuses v1.3 before its store runs.
+        if (legacy && body.capabilities.length !== 1) {
+          registrations.push({ body, status: 400 });
+          return Response.json({ error: { code: "invalid_request" } }, { status: 400 });
+        }
+        const response = await f.app.fetch(request);
+        registrations.push({ body, status: response.status });
+        if (legacy && response.ok) {
+          committed = (await response.clone().json()).device;
+          legacy = false; await response.body?.cancel();
+          throw new TypeError("fixture lost committed registration reply");
+        }
+        return response;
+      },
+    });
+    const { service } = await desktopNotifications(mixed, id);
+    expect(registrations.map(call => call.status)).toEqual([400, 200, 200]);
+    expect(registrations[0]!.body.capabilities).toEqual(deviceCapabilities);
+    expect(registrations[1]!.body.capabilities).toEqual(["local-commands-v1"]);
+    expect(registrations[1]!.body.requestId).not.toBe(registrations[0]!.body.requestId);
+    expect(registrations[2]!.body).toEqual(registrations[1]!.body);
+    expect(service.currentDevice()).toEqual(committed);
+    const row = (await pool.query("SELECT registration_id,instance_id,registration_request_id FROM local_command_devices WHERE user_id=$1 AND device_id=$2", [f.owner.id,id])).rows[0];
+    expect(row).toEqual({ registration_id: committed!.registrationId, instance_id: committed!.instanceId,
+      registration_request_id: registrations[1]!.body.requestId });
+  });
+
   it("returns a Mac's denial through the worker client", async () => {
     const stream = await channel(), { done } = command();
     const notice = await stream.event("request", data => data.state === "pending");
@@ -202,7 +250,7 @@ database("real desktop and worker local-command clients against the router and P
   });
 
   it("routes an explicit Mac only to its connected registration and always requires approval", async () => {
-    const other = (await control.register(randomUUID(), { requestId: randomUUID(), name: "Laptop" })).device;
+    const other = (await control.register(randomUUID(), { requestId: randomUUID(), name: "Laptop", capabilities: deviceCapabilities })).device;
     expect(await control.connect(other, f.workspaceId)).toMatchObject({ mac: { name: "Laptop", connected: true }, presence: { presenceRequired: true } });
     const stream = await channel(other), { done } = command({ mac: "Laptop" });
     const notice = await stream.event("request", data => data.state === "pending");
@@ -233,7 +281,7 @@ database("real desktop and worker local-command clients against the router and P
     } else {
       const credential = kind === "API key" ? apiKey : await new CloudWorkspaceApiTokens(pool,
         { currentKeyVersion: 1, keys: { 1: Buffer.alloc(32,23).toString("base64url") } }).token(f.workspaceId);
-      const forged = (await control.register(randomUUID(), { requestId: randomUUID(), name: "Other" })).device;
+      const forged = (await control.register(randomUUID(), { requestId: randomUUID(), name: "Other", capabilities: deviceCapabilities })).device;
       const reply = await f.app.request("/api/v0/sessions/chat/messages", { method: "POST", headers: { authorization: `Bearer ${credential}`,
         "content-type": "application/json", "x-zeros-device-id": forged.deviceId,
         "x-zeros-device-registration": forged.registrationId, "x-zeros-device-instance": forged.instanceId },
@@ -295,7 +343,7 @@ database("real desktop and worker local-command clients against the router and P
     const stream = await channel(), { done } = command();
     const notice = await stream.event("request", data => data.state === "pending");
     await control.received(mac, notice.requestId); await control.claim(mac, notice.requestId, "approve");
-    const restarted = (await control.register(mac.deviceId, { requestId: randomUUID(), name: "Studio" })).device;
+    const restarted = (await control.register(mac.deviceId, { requestId: randomUUID(), name: "Studio", capabilities: deviceCapabilities })).device;
     expect(restarted.registrationId).toBe(mac.registrationId); expect(restarted.instanceId).not.toBe(mac.instanceId);
     await expect(control.result(mac, notice.requestId, { outcome: "completed", code: 0 })).rejects.toMatchObject({ status: 409, code: "device_registration_changed" });
     expect(await control.get(restarted, notice.requestId)).toEqual({ requestId: notice.requestId, state: "terminal", outcome: "interrupted" });

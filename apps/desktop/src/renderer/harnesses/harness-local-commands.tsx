@@ -32,7 +32,7 @@ async function main() {
         status, rawInput, createdAt: 1, updatedAt: 2, content: text ? [{ type: "content", content: { type: "text", text } }] : [] });
       const rows = [
         tool("search", "ToolSearch", { query: "select:mcp__zeros_workspace__RunLocalCommand" }, "completed", undefined, "tool_search"),
-        tool("waiting", "mcp__zeros_workspace__RunLocalCommand", args, "in_progress"),
+        tool("waiting", "mcp__zeros_workspace__RunLocalCommand", { ...args, reason: "The simulator only runs on the Mac." }, "in_progress"),
         tool("ran", "zeros_workspace:RunLocalCommand", { server: "zeros_workspace", tool: "RunLocalCommand", arguments: args }, "completed", "outcome: completed\nmac: Studio\nexit code: 0\n"),
         tool("denied", "MCP RunLocalCommand", { providerIdentifier: "zeros_workspace", toolName: "RunLocalCommand", args }, "failed", "outcome: denied\nmac: Studio\n"),
         tool("exit", "mcp__zeros_workspace__RunLocalCommand", args, "completed", "outcome: completed\nmac: Studio\nexit code: 3\n"),
