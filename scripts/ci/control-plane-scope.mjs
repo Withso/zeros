@@ -42,6 +42,8 @@ export const CONTROL_PLANE_DATABASE_INPUTS = Object.freeze([
   "scripts/electron-local-process-group.mjs",
   // Runtime adoption and mirror parity suites exercise the actual worker.
   "apps/cloud-worker/src/",
+  // The local-command client suite drives the desktop device client against the real routes.
+  "apps/desktop/electron/local-commands/",
   // The operator publisher invokes the portable runtime packager.
   "apps/cloud-worker/scripts/",
   "apps/cloud-worker/package.json",
