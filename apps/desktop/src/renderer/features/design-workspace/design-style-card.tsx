@@ -88,6 +88,7 @@ export function DesignFieldOverlays({
   ownerKey,
   origins,
   disabled = false,
+  readOnly = false,
   onChooseToken,
   onReset,
   children,
@@ -99,6 +100,9 @@ export function DesignFieldOverlays({
   ownerKey: string;
   origins: DesignFieldOrigins;
   disabled?: boolean;
+  /** A held layer state: the card still says where a value comes from, but
+   * offers nothing, and no picker or Reset opens. */
+  readOnly?: boolean;
   /** `companion` is what the field itself writes beside a token (Fill clears
    * a gradient), so a token chosen here lands the same way. */
   onChooseToken: (properties: readonly string[], name: string, companion?: Record<string, string>) => void;
@@ -118,8 +122,8 @@ export function DesignFieldOverlays({
   const cardStateRef = useRef(card);
   cardStateRef.current = card;
   // The panel's listeners stay attached across renders; they read these.
-  const latest = useRef({ disabled, onReset, onChooseToken });
-  latest.current = { disabled, onReset, onChooseToken };
+  const latest = useRef({ disabled, readOnly, onReset, onChooseToken });
+  latest.current = { disabled, readOnly, onReset, onChooseToken };
 
   const clearTimers = () => {
     if (openTimer.current !== null) window.clearTimeout(openTimer.current);
@@ -155,6 +159,7 @@ export function DesignFieldOverlays({
 
   const api = useMemo<DesignFieldOverlaysApi>(() => {
     const openPicker = (request: DesignPickerRequest) => {
+      if (latest.current.readOnly) return;
       const current = pickerRef.current;
       if (current?.field === request.field) {
         closePicker(true);
@@ -167,6 +172,7 @@ export function DesignFieldOverlays({
       setPicker(request);
     };
     const openPickerForField = (field: HTMLElement, trigger?: HTMLElement | null) => {
+      if (latest.current.readOnly) return false;
       const properties = tokenProperties(field);
       const accepts = properties[0] ? designTokenFieldTypes(properties[0]) : null;
       if (!accepts || !accepts.some((type) => catalog.types.has(type))) return false;
@@ -188,13 +194,14 @@ export function DesignFieldOverlays({
       const field = element.closest<HTMLElement>(FIELD);
       clearTimers();
       setCard(null);
-      if (field && !latest.current.disabled) latest.current.onReset(fieldProperties(field));
+      if (field && !latest.current.disabled && !latest.current.readOnly) latest.current.onReset(fieldProperties(field));
     };
     return {
       openPicker,
       openPickerForField,
       resetField,
       fieldShortcut(event) {
+        if (latest.current.readOnly) return;
         const field = event.target instanceof Element ? event.target.closest<HTMLElement>(FIELD) : null;
         if (!field || !event.altKey || event.metaKey || event.ctrlKey) return;
         if (event.key === "Backspace") {
@@ -226,10 +233,11 @@ export function DesignFieldOverlays({
     closePicker(false);
   }, [closeCard, closePicker, ownerKey]);
 
-  // A hidden retained surface holds no open overlay.
+  // A hidden retained surface holds no open overlay, and a held state
+  // offers no picker.
   useEffect(() => {
-    if (!active) closePicker(false);
-  }, [active, closePicker]);
+    if (!active || readOnly) closePicker(false);
+  }, [active, closePicker, readOnly]);
 
   useEffect(() => {
     const root = rootRef.current;
@@ -348,6 +356,7 @@ export function DesignFieldOverlays({
           origins={origins}
           catalog={catalog}
           disabled={disabled}
+          readOnly={readOnly}
           onKeep={() => {
             if (closeTimer.current !== null) window.clearTimeout(closeTimer.current);
             closeTimer.current = null;
@@ -401,6 +410,7 @@ const DesignStyleCardContent = React.forwardRef<
     origins: DesignFieldOrigins;
     catalog: ReturnType<typeof useDesignTokens>;
     disabled: boolean;
+    readOnly: boolean;
     onKeep: () => void;
     onLeave: () => void;
     onClose: () => void;
@@ -408,12 +418,12 @@ const DesignStyleCardContent = React.forwardRef<
     onUseToken: () => void;
   }
 >(function DesignStyleCardContent(
-  { id, target, panel, origins, catalog, disabled, onKeep, onLeave, onClose, onReset, onUseToken },
+  { id, target, panel, origins, catalog, disabled, readOnly, onKeep, onLeave, onClose, onReset, onUseToken },
   ref,
 ) {
   const { field, property } = target;
   const edge = useMemo(() => designFieldEdgeAnchor(field, panel), [field, panel]);
-  const content = designStyleCardContent(readDesignCardField(field, property), origins, catalog);
+  const content = designStyleCardContent(readDesignCardField(field, property), origins, catalog, readOnly);
   const detach = useDesignTokenDetach();
   const actions = detach ? content.actions : content.actions.filter((action) => action.kind !== "detach");
   return (
@@ -561,6 +571,9 @@ export function designStyleCardContent(
   { property, tokenProperty, label, mixed, tokenName, missing }: DesignCardField,
   origins: DesignFieldOrigins,
   catalog: ReturnType<typeof useDesignTokens>,
+  /** A held layer state: where the value comes from, and nothing the card
+   * could do about it. */
+  readOnly = false,
 ): DesignStyleCardText {
   if (mixed) {
     return { label, rows: [{ key: "Value", text: "Mixed: the selected layers differ" }], notes: [], actions: [] };
@@ -588,6 +601,11 @@ export function designStyleCardContent(
   }
   if (!tokenName && offered && origin?.kind !== "forced") {
     actions.push({ kind: "token", label: "Use a token", keys: "⌥↓", shortcut: "Alt+ArrowDown" });
+  }
+  if (readOnly) {
+    // Only the forcing rule stays: it says where the value comes from.
+    const forced = origin?.card.forcedBy ? [`Forced by ${origin.card.forcedBy}`] : [];
+    return { label, rows, notes: forced, foot: origin?.card.foot, actions: [] };
   }
   return { label, rows, notes, foot: origin?.card.foot, actions };
 }

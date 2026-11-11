@@ -6,6 +6,7 @@
 import type {
   DesignRuntimeAuthoredStyle,
   DesignRuntimeNodeDetails,
+  DesignRuntimeNodeState,
   DesignRuntimeReplacedStyle,
 } from "@zeros/protocol/design-runtime";
 
@@ -55,7 +56,8 @@ export interface DesignStyleOrigin {
 }
 
 export interface DesignStyledByGroup {
-  kind: "class" | "utility" | "component" | "changed";
+  /** `state`: what a held layer state changes, never a Styled-by row. */
+  kind: "class" | "utility" | "component" | "changed" | "state";
   /** Stable within one model: the row's identity for a filter. */
   key: string;
   label: string;
@@ -259,6 +261,36 @@ function themeRows(
   }));
 }
 
+const STATE_LABELS: Record<DesignRuntimeNodeState, string> = {
+  hover: "Hover",
+  focus: "Focus",
+  "focus-visible": "Focus visible",
+  active: "Active",
+  disabled: "Disabled",
+};
+
+/** A layer state as the State menu names it. */
+export function designStateLabel(state: DesignRuntimeNodeState): string {
+  return STATE_LABELS[state];
+}
+
+function stateClause(state: DesignRuntimeNodeState): string {
+  return state === "disabled" ? "when disabled" : `on ${STATE_LABELS[state].toLowerCase()}`;
+}
+
+/** What a held state changes on the layer: the properties its own rules
+ * win, for the panel's filter, and how many fields that is, a shorthand
+ * counted once with the longhands it sets. */
+export function designHeldStateChanges(details: DesignRuntimeNodeDetails): { properties: string[]; count: number } {
+  const properties = Object.entries(details.authoredStyles ?? {})
+    .filter(([, style]) => style.state !== undefined)
+    .map(([property]) => property);
+  const count = properties.filter(
+    (property) => !properties.some((other) => other !== property && authoredDeclarationAffects(other, property)),
+  ).length;
+  return { properties, count };
+}
+
 function originOfStyle(
   property: string,
   style: DesignRuntimeAuthoredStyle,
@@ -306,7 +338,7 @@ function originOfStyle(
     return { kind: "changed", from: "this layer", card };
   }
   const source = sourceOf(style, context);
-  const from = fromPhrase(source);
+  const from = style.state ? `${fromPhrase(source)}, ${stateClause(style.state)}` : fromPhrase(source);
   const rows: DesignStyleCardRow[] = [
     { key: "Value", text: tokenPhrase(style.value, style.tokens, (name, resolved) => `${name}, which is ${resolved}`) },
     { key: "From", text: from },

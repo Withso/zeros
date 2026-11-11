@@ -33,7 +33,7 @@ function ApiProbe() {
   return null;
 }
 
-function mount(active: boolean) {
+function mount(active: boolean, readOnly = false) {
   const rootRef = createRef<HTMLElement>();
   const panel = (children: ReactNode) =>
     createElement(TooltipProvider, {
@@ -41,7 +41,7 @@ function mount(active: boolean) {
       children: createElement(DesignTokenCatalogContext.Provider, { value: catalog },
         createElement("aside", { ref: rootRef },
           createElement(DesignFieldOverlays, {
-            rootRef, active, ownerKey: "selection", origins,
+            rootRef, active, readOnly, ownerKey: "selection", origins,
             onChooseToken: chosen, onReset: reset,
             children,
           }))),
@@ -134,6 +134,24 @@ describe("the panel's overlays", () => {
     const option = document.querySelector<HTMLElement>('[data-design-token-picker] [data-design-token-option="--bg2"]')!;
     act(() => option.click());
     expect(chosen).toHaveBeenLastCalledWith(["background-color"], "--bg2", { "background-image": "none" });
+  });
+
+  it("opens no picker, Reset or field shortcut while a state is held, and closes an open picker", () => {
+    mount(true);
+    act(() => { api!.openPickerForField(byId("radius").parentElement!); });
+    expect(document.querySelector("[data-design-token-picker]")).not.toBeNull();
+    mount(true, true);
+    expect(document.querySelector("[data-design-token-picker]")).toBeNull();
+    reset.mockClear();
+    chosen.mockClear();
+    act(() => { expect(api!.openPickerForField(byId("fill"))).toBe(false); });
+    act(() => api!.resetField(byId("gradient")));
+    const prevent = vi.fn();
+    act(() => api!.fieldShortcut({ key: "ArrowDown", altKey: true, metaKey: false, ctrlKey: false, target: byId("radius"),
+      preventDefault: prevent, stopPropagation: () => {} }));
+    expect(document.querySelector("[data-design-token-picker]")).toBeNull();
+    expect(reset).not.toHaveBeenCalled();
+    expect(prevent).not.toHaveBeenCalled();
   });
 
   it("opens no keyboard card once focus has left the panel during the delay", () => {

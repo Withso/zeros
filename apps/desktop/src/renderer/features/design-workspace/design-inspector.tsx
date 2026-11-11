@@ -34,7 +34,7 @@ import {
   DESIGN_TRANSACTION_MAX_OPERATIONS,
   type DesignOperation,
 } from "@zeros/design-core";
-import type { DesignRuntimeNodeDetails } from "@zeros/protocol/design-runtime";
+import type { DesignRuntimeNodeDetails, DesignRuntimeNodeState } from "@zeros/protocol/design-runtime";
 import { DESIGN_SELECTION_NODE_LIMIT } from "@zeros/protocol/design-runtime";
 
 import { designFrameRuntime } from "../../platform/bridge/design-frame-runtime";
@@ -104,6 +104,15 @@ import {
 import { DesignFieldOverlays } from "./design-style-card";
 import { designInputResetsOnAltBackspace, useDesignFieldOverlays } from "./design-field-overlays";
 import { DesignStyledByLine } from "./design-styled-by";
+import { DesignHeldStateNote, DesignLayerStateMenu, useDesignHeldReadOnly } from "./design-state-picker";
+import { designHeldStateChanges } from "./design-style-origins";
+import {
+  designHeldDetails,
+  holdDesignNodeState,
+  releaseDesignNodeState,
+  releaseDesignNodeStateUnless,
+  useDesignHeldStateStore,
+} from "./state/design-held-state";
 import {
   DesignFieldOriginsContext,
   designFieldOrigins,
@@ -1496,14 +1505,61 @@ export const DesignInspector = React.memo(function DesignInspector({
     [styleOwnerKey],
   );
   styleOwner.contextRef.current = styleEditContextRef.current;
+  // A layer held in one of its states (single selection only): its details
+  // come from the held slot under the exact layer, frame and generation, and
+  // never from the runtime store, which keeps Default.
+  const heldKey =
+    active && workspaceId && frame && elementDetails && styleNodeIds.length === 1
+      ? { workspaceId, frame: frame.file, sourceVersion: elementDetails.sourceVersion, nodeId: elementDetails.oid }
+      : null;
+  const heldDetails = useDesignHeldStateStore((store) => (heldKey ? designHeldDetails(store, heldKey) : null));
+  const heldParents = useMemo(() => (heldDetails ? [heldDetails] : null), [heldDetails]);
+  const heldChanges = useMemo(() => (heldDetails ? designHeldStateChanges(heldDetails) : null), [heldDetails]);
+  const shownDetails = heldDetails ?? elementDetails;
+  const shownParents = heldParents ?? layoutParents;
+  const heldState = heldDetails?.heldState ?? null;
   const originsContext = useDesignStyleOriginsContext(workspaceId);
-  // The Styled-by filter belongs to the selection it was chosen for.
+  // The Styled-by filter belongs to the selection it was chosen for. A held
+  // state narrows the panel to what it changes and leaves this filter as it
+  // was, so Back to Default restores it.
   const [sourceFilter, setSourceFilter] = useState<{ owner: string; key: string } | null>(null);
   const sourceFilterKey = sourceFilter?.owner === styleOwnerKey ? sourceFilter.key : null;
-  const fieldOrigins = useMemo(
+  const defaultOrigins = useMemo(
     () => designFieldOrigins(layoutParents, originsContext, sourceFilterKey),
     [layoutParents, originsContext, sourceFilterKey],
   );
+  const fieldOrigins = useMemo(
+    () => (heldParents && heldChanges ? designFieldOrigins(heldParents, originsContext, null, heldChanges) : defaultOrigins),
+    [defaultOrigins, heldChanges, heldParents, originsContext],
+  );
+  const heldStateRef = useRef(heldState);
+  heldStateRef.current = heldState;
+  // Anything but this single layer on this frame and generation, or a hidden
+  // surface, lets a held state go.
+  useEffect(() => {
+    if (!workspaceId) return;
+    releaseDesignNodeStateUnless(workspaceId, heldKey);
+  }, [workspaceId, heldKey?.frame, heldKey?.sourceVersion, heldKey?.nodeId]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => () => { if (workspaceId) releaseDesignNodeState(workspaceId); }, [workspaceId]);
+  useDesignHeldReadOnly(inspectorRef, heldState !== null);
+  const latestPickRef = useRef({ heldKey, elementDetails });
+  latestPickRef.current = { heldKey, elementDetails };
+  /** Pick from the State menu: one request, painted when it answers. Back to
+   * Default paints the retained Default box at once. Never awaited. */
+  const pickLayerState = useCallback((state: DesignRuntimeNodeState | null) => {
+    const { heldKey: key, elementDetails: rest } = latestPickRef.current;
+    if (!key || !rest) return;
+    if (state === null) {
+      releaseDesignNodeState(key.workspaceId);
+      paintDesignInspectorPreviewDetails(key.workspaceId, key.frame, rest);
+      return;
+    }
+    holdDesignNodeState({
+      ...key,
+      state,
+      onHeld: (held) => paintDesignInspectorPreviewDetails(key.workspaceId, key.frame, held),
+    });
+  }, []);
   const currentStyleOwnerRef = useRef(styleOwner);
   currentStyleOwnerRef.current = styleOwner;
   const stylePreviewIntentRef = styleOwner.previewIntentRef;
@@ -1685,6 +1741,8 @@ export const DesignInspector = React.memo(function DesignInspector({
       // An eyedropper or a pending animation frame cannot follow a new layer.
       if (currentStyleOwnerRef.current !== styleOwner || !context.active)
         return Promise.resolve();
+      // A held state is view only: no value it shows reaches the source.
+      if (heldStateRef.current) return Promise.resolve();
       if (
         !context.workspaceId ||
         !context.frame ||
@@ -1897,6 +1955,7 @@ export const DesignInspector = React.memo(function DesignInspector({
     (action: DesignLayoutAction): Promise<void> => {
       if (currentStyleOwnerRef.current !== styleOwner || !styleEditContextRef.current.active)
         return Promise.resolve();
+      if (heldStateRef.current) return Promise.resolve();
       const intent = ++stylePreviewIntentRef.current;
       // Capture the semantic owner at intent. Queued clicks must never follow a
       // later selection, and every relative rotation reads its own latest value.
@@ -2358,7 +2417,7 @@ export const DesignInspector = React.memo(function DesignInspector({
         />
       );
     }
-    const authoredProperties = elementDetails?.authoredStyleProperties;
+    const authoredProperties = shownDetails?.authoredStyleProperties;
     const applied = isDesignRuntimeStylePropertyAuthored(
       authoredProperties,
       property,
@@ -2368,13 +2427,13 @@ export const DesignInspector = React.memo(function DesignInspector({
     // when every selected layer names one token.
     const mixed =
       options?.mixed ||
-      designFieldMixed(layoutParents, styleNodeIds.length, property, {
+      designFieldMixed(shownParents, styleNodeIds.length, property, {
         geometry: options?.geometry,
         whole: options?.whole,
         linkedProperties: options?.linkedProperties,
       }) ||
       designValuesMixed(
-        layoutParents.map(
+        shownParents.map(
           (node) => designStyleTokenDisplay(node, property, styleOriginLabel)?.name ?? "",
         ),
         styleNodeIds.length,
@@ -2390,7 +2449,7 @@ export const DesignInspector = React.memo(function DesignInspector({
         value={designStyleFieldValue(authoredProperties, property, value)}
         computedValue={value}
         options={mixed ? { ...options, mixed } : options}
-        details={elementDetails ?? undefined}
+        details={shownDetails ?? undefined}
         originLabel={styleOriginLabel}
         onLayoutAction={commitLayoutAction}
         onPreviewLayoutAction={previewLayoutAction}
@@ -2463,6 +2522,15 @@ export const DesignInspector = React.memo(function DesignInspector({
           {selectionType ? (
             <span className="text-fg3 shrink-0 text-3xxs leading-4 tabular-nums">{selectionType}</span>
           ) : null}
+          {heldKey && elementDetails?.states?.length && !cssMode ? (
+            <DesignLayerStateMenu
+              states={elementDetails.states}
+              held={heldState}
+              active={active}
+              disabled={pendingHistoryActions > 0}
+              onPick={pickLayerState}
+            />
+          ) : null}
         </>}
       </div>
     </section>
@@ -2507,6 +2575,7 @@ export const DesignInspector = React.memo(function DesignInspector({
       id={inspectorId}
       data-design-inspector=""
       data-design-source-filter={fieldOrigins.filter ? "" : undefined}
+      data-design-state-held={heldState ?? undefined}
       className="bg-bg1 relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
     >
       <PanelHeader data-design-style-panel-header="" size="window">
@@ -2529,7 +2598,11 @@ export const DesignInspector = React.memo(function DesignInspector({
             disabled={!styleContext && !cssMode}
             aria-label="CSS"
             aria-pressed={cssMode}
-            onClick={() => setCssMode((current) => !current)}
+            onClick={() => {
+              // The CSS view edits Default; the canvas follows it there.
+              if (!cssMode && workspaceId) pickLayerState(null);
+              setCssMode((current) => !current);
+            }}
           >
             CSS
           </button>
@@ -2593,11 +2666,15 @@ export const DesignInspector = React.memo(function DesignInspector({
         <ScrollArea className="min-h-0 flex-1">
           <div className="flex flex-col pb-6">
             {inspectorSelectionHeader}
-            {styleContext && elementDetails && fieldOrigins.styledBy ? (
+            {heldState && heldChanges ? (
+              <DesignHeldStateNote state={heldState} count={heldChanges.count} onBack={() => pickLayerState(null)} />
+            ) : null}
+            {styleContext && elementDetails && defaultOrigins.styledBy ? (
               <DesignStyledByLine
                 key={styleOwnerKey}
-                styledBy={fieldOrigins.styledBy}
-                filter={fieldOrigins.filter}
+                styledBy={defaultOrigins.styledBy}
+                filter={heldState ? null : defaultOrigins.filter}
+                inert={heldState !== null}
                 onFilter={(key) => setSourceFilter(key ? { owner: styleOwnerKey, key } : null)}
               />
             ) : null}
@@ -2624,12 +2701,13 @@ export const DesignInspector = React.memo(function DesignInspector({
                   ownerKey={styleOwnerKey}
                   origins={fieldOrigins}
                   disabled={!active || pendingHistoryActions > 0}
+                  readOnly={heldState !== null}
                   onChooseToken={chooseFieldToken}
                   onReset={resetField}
                 >
                   <DesignStyleEditor
                     key={styleOwner.key}
-                    details={elementDetails}
+                    details={shownDetails ?? elementDetails}
                     livePreviewOwner={
                       styleContext
                         ? {
@@ -2644,7 +2722,7 @@ export const DesignInspector = React.memo(function DesignInspector({
                     frameSelected={
                       frameStyleTarget || elementDetails.oid === layoutRootId
                     }
-                    layoutParents={layoutParents}
+                    layoutParents={shownParents}
                     selectionCount={styleNodeIds.length}
                     disabled={!active || pendingHistoryActions > 0}
                     onPreviewStyles={previewSelectedStyles}

@@ -1919,6 +1919,44 @@ original unsnapped geometry writes nothing and preserves authored sizing.
   Detach, a forced value names its rule. The token picker is likewise one
   instance per panel. The engine's per-field `design.provenance` read and its
   hint dot are gone.
+- **Layer states (view only):** a layer whose own rules give it `:hover`,
+  `:focus`, `:focus-visible`, `:active` or `:disabled` reports `states` on its
+  details (menu order; Focus and Focus visible only for a focusable element,
+  Disabled only for one that can be disabled), found from the rule index by
+  matching each selector branch without its state, with no
+  `querySelectorAll`: 5 `element.matches` for a class-styled button with five
+  states, none for a layer no state rule names. The header's State button
+  ("Layer state"; Default, then the offered states) holds one: the runtime
+  copies each matching rule into a runtime-owned `<style
+  data-zeros-runtime-state>` with the state written as
+  `[data-zd-state~="hover"]`, keeping the rule's `@layer`, `@media` and
+  `@supports` and its specificity, and sets `data-zd-state` on the layer
+  (Focus visible also applies Focus; Active also applies Hover). One level of
+  `&` nesting under a single plain selector resolves, so Tailwind v4's nested
+  `&:hover { @media (hover: hover) {…} }` variants are found. Hold and
+  release change no source and bump no revision: replies carry `heldState`,
+  the runtime store refuses them and a held slot keyed by workspace, frame,
+  generation and layer keeps them; Back to Default paints the retained
+  Default box at once. While held the panel shows only what the state
+  changes ("Hover changes 2 properties. The rest matches Default."; "changes
+  nothing here" at 0), the hover card names "the class .btn, on hover" and
+  offers nothing, and no field, shortcut, picker, Type settings or Styled-by
+  row edits (document-level capture, so portaled popovers are covered);
+  Tab, Escape, undo and redo pass. A new selection, page, frame or
+  generation, a hidden surface, the CSS tab (which edits Default), a canvas
+  gesture that passes its drag threshold, and any edit the runtime receives
+  (it lets go itself and says `stateReleased`) all release; a click that
+  only re-selects the held layer keeps it. Captures (Export PNG, drag
+  ghosts) set the state aside for their synchronous span and strip the copy
+  from the clone. Single selection, Local workspaces only. Known limits:
+  a copy sits after every original rule of its layer, so a later rule of
+  equal specificity that beats the state for real loses to the held copy
+  (pinned by a protocol test); states on an ancestor (`.row:hover .label`),
+  inside functional pseudo-classes (`:is(:hover)`, `:not(:hover)`, kept as
+  written), in an anonymous `@layer`, under deeper nesting or a selector
+  list parent, in container or scope queries, and in shadow roots are not
+  offered; the note's property count can include a property the panel has
+  no field for.
 - **Token picker:** `design-token-catalog.ts` derives each token's types from
   its resolved value (colour, length, percentage, number, weight, font
   family, shadow, duration, easing; aliases resolve, cycles and undeclared

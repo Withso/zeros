@@ -125,6 +125,17 @@ describe("the Style panel's hover card", () => {
   });
 });
 
+describe("the card while a state is held", () => {
+  it("still says where the value comes from, with no action and no note about one", () => {
+    const content = designStyleCardContent(field("gap", { tokenName: "--space-4" }), origins, catalog, true);
+    expect(content.rows.length).toBeGreaterThan(0);
+    expect(content.actions).toEqual([]);
+    expect(content.notes).toEqual([]);
+    expect(designStyleCardContent(field("border-radius"), origins, catalog, true).actions).toEqual([]);
+    expect(designStyleCardContent(field("border-color"), origins, catalog, true).notes).toEqual(["Forced by .legacy"]);
+  });
+});
+
 describe("the card's title", () => {
   it("is the name the panel shows for the field", () => {
     expect(designFieldTitle({ property: "border-radius", label: "Radius", groupLabel: "Corner radius", groupFields: 1 })).toBe("Corner radius");

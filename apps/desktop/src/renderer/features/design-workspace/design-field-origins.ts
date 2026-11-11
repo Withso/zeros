@@ -42,10 +42,13 @@ const NO_ORIGINS: DesignFieldOrigins = {
   hidden: () => false,
 };
 
+/** `held`: the layer shows a held state; the panel then shows only the
+ * properties that state changes, and no Styled-by row filters it. */
 export function designFieldOrigins(
   nodes: readonly DesignRuntimeNodeDetails[],
   context: DesignStyleOriginsContext,
   filterKey: string | null,
+  held?: { properties: readonly string[] },
 ): DesignFieldOrigins {
   if (nodes.length === 0) return NO_ORIGINS;
   const models = nodes.map((node) => designStyleOrigins(node, context));
@@ -57,11 +60,16 @@ export function designFieldOrigins(
     models.every((model) => model.styledBy?.groups.map((group) => group.key).join("\u0000") === keys)
       ? primary
       : null;
-  const filter = (filterKey && styledBy?.groups.find((group) => group.key === filterKey)) || null;
+  const heldGroup: DesignStyledByGroup | null = held
+    ? { kind: "state", key: "state", label: "State", name: "", properties: [...held.properties] }
+    : null;
+  const filter = heldGroup ?? ((filterKey && styledBy?.groups.find((group) => group.key === filterKey)) || null);
   // The rows match by key; each layer's group lists what it sets there.
-  const filterGroups = filter
-    ? models.map((model) => model.styledBy!.groups.find((group) => group.key === filter.key)!)
-    : [];
+  const filterGroups = heldGroup
+    ? [heldGroup]
+    : filter
+      ? models.map((model) => model.styledBy!.groups.find((group) => group.key === filter.key)!)
+      : [];
   const hidden = new Map<string, boolean>();
   return {
     mark(property) {

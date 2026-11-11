@@ -112,6 +112,12 @@ interface DesignRuntimeStore {
   retireFrame(workspaceId: string, frame: string): void;
 }
 
+/** A reply read while its layer was held in a state shows that state, not
+ * the layer; only the held-state slot may keep it. */
+function isHeldReply(details: DesignRuntimeNodeDetails): boolean {
+  return details.heldState !== undefined;
+}
+
 function nodeKey(nodeId: string | null): string {
   return nodeId ?? "";
 }
@@ -505,7 +511,7 @@ export const useDesignRuntimeStore = create<DesignRuntimeStore>((set) => ({
   },
 
   publishNodeDetails(workspaceId, folder, frame, details, sourceVersion, options) {
-    if (details.sourceVersion !== sourceVersion) return;
+    if (details.sourceVersion !== sourceVersion || isHeldReply(details)) return;
     set((state) => {
       const existing = state.byWorkspace[workspaceId]?.frames[frame];
       const existingWorkspace = state.byWorkspace[workspaceId];
@@ -637,10 +643,11 @@ export const useDesignRuntimeStore = create<DesignRuntimeStore>((set) => ({
                 );
           let detailOrder = options.dropUnrefreshed
             ? ownedFrame.detailOrder.filter((nodeId) =>
-                details.some((value) => value.oid === nodeId),
+                details.some((value) => value.oid === nodeId && !isHeldReply(value)),
               )
             : ownedFrame.detailOrder;
           for (const value of details) {
+            if (isHeldReply(value)) continue;
             rebasedDetails[value.oid] = value;
             detailOrder = touchOrder(
               detailOrder,
@@ -694,6 +701,7 @@ export const useDesignRuntimeStore = create<DesignRuntimeStore>((set) => ({
           const detailsByNode: Record<string, DesignRuntimeNodeDetails> = {};
           let detailOrder: string[] = [];
           for (const value of details) {
+            if (isHeldReply(value)) continue;
             detailsByNode[value.oid] = value;
             detailOrder = touchOrder(detailOrder, value.oid, MAX_DETAILS_PER_FRAME);
           }

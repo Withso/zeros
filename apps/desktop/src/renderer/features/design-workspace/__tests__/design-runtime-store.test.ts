@@ -30,6 +30,25 @@ function details(): DesignRuntimeNodeDetails {
 describe("design runtime store", () => {
   beforeEach(() => resetDesignRuntimeStoreForTests());
 
+  it("never stores a reply read while a layer state is held as the layer's details", () => {
+    const store = useDesignRuntimeStore.getState();
+    store.publishNodeDetails("held", "/design", "home.html", details(), SOURCE_VERSION);
+    const held = { ...details(), heldState: "hover" as const, styles: { left: "12px", top: "20px" } };
+    store.publishNodeDetails("held", "/design", "home.html", held, SOURCE_VERSION);
+    expect(designRuntimeFrameState("held", "home.html")?.detailsByNode.heading?.styles.left).toBe("10px");
+
+    const snapshot = { sourceVersion: NEXT_SOURCE_VERSION, revision: 2, tree: [], warnings: [], frame: { ...details(), sourceVersion: NEXT_SOURCE_VERSION, oid: "frame" },
+      viewport: { width: 100, height: 80, scrollX: 0, scrollY: 0 } };
+    expect(store.adoptFrameGeneration("held", "home.html", SOURCE_VERSION, NEXT_SOURCE_VERSION, snapshot,
+      [{ ...held, sourceVersion: NEXT_SOURCE_VERSION }], true)).toBe(true);
+    // The held reply is not adopted; the retained Default is rebased instead.
+    expect(designRuntimeFrameState("held", "home.html")?.detailsByNode.heading).toMatchObject({ sourceVersion: NEXT_SOURCE_VERSION, styles: { left: "10px" } });
+
+    expect(store.replaceFrameGeometry("held", "home.html", NEXT_SOURCE_VERSION, snapshot,
+      [{ ...held, sourceVersion: NEXT_SOURCE_VERSION }])).toBe(true);
+    expect(designRuntimeFrameState("held", "home.html")?.detailsByNode.heading).toBeUndefined();
+  });
+
   it("bounds screenshot bytes across all workspace owners while preserving their geometry", () => {
     for (let index = 0; index < 40; index++) {
       const workspace = `workspace-${index}`;
