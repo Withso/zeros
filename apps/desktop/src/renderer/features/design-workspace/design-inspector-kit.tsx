@@ -184,6 +184,8 @@ interface InspectorSelectProps<T extends string> {
   placeholder?: string;
   className?: string;
   contentClassName?: string;
+  /** The value comes from a parent or a reset, not from the layer. */
+  dimmed?: boolean;
 }
 
 /** A 28px field-surface Select. An authored value outside the preset list
@@ -198,6 +200,7 @@ export function InspectorSelect<T extends string>({
   placeholder,
   className,
   contentClassName,
+  dimmed = false,
 }: InspectorSelectProps<T>) {
   const choices: readonly InspectorOption<string>[] =
     value && !options.some((option) => option.value === value)
@@ -211,6 +214,7 @@ export function InspectorSelect<T extends string>({
     >
       <SelectTrigger
         aria-label={label}
+        data-design-origin={dimmed ? "dimmed" : undefined}
         className={cn(
           "zd-field zd-select w-full min-w-0 justify-between gap-1 pr-1.5 pl-2 text-left",
           leading ? "pl-0" : null,

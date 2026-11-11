@@ -54,6 +54,12 @@ function TooltipProvider({
     </TooltipSettings.Provider>
   );
 }
+/** The app's tooltip open delay, for hover help that is not a Tooltip, such
+ * as a panel's shared hover card. */
+function useTooltipDelay(): number {
+  return React.useContext(TooltipSettings).delayDuration ?? 1000;
+}
+
 function TooltipRoot({
   open,
   defaultOpen = false,
@@ -214,4 +220,4 @@ function Tooltip({
   );
 }
 
-export { Tooltip, TooltipProvider, TooltipRoot, TooltipTrigger, TooltipContent };
+export { Tooltip, TooltipProvider, TooltipRoot, TooltipTrigger, TooltipContent, useTooltipDelay };

@@ -1890,6 +1890,34 @@ original unsnapped geometry writes nothing and preserves authored sizing.
   the frame no longer declares reads "<name> is missing" in yellow, with
   Detach always shown. Several layers show a pill only when they name the
   same token; the same value from different tokens reads Mixed.
+- **Where values come from:** the frame runtime reports, for each winning
+  declaration, the element classes its selector names (`subjectClasses`), a
+  component's styles (`origin.component` from `<style data-zeros-component>`),
+  and for a declaration the layer owns (its `style` attribute, or a rule whose
+  selector is exactly its `[data-oid]`) what it replaced, how it was written
+  (`declared`) and how many other layers in the frame the replaced rule
+  matches; a declaration another theme changes carries `themeValues`. A
+  single-selector rule's specificity needs no matching, and these additions
+  reuse the matches the winners already found, so a layer drawn by hand costs
+  the same selection work as before. `design-style-origins.ts` turns that into
+  one model per details object: kinds (token, class, utility, component,
+  changed, set here, inherited, reset, forced), the Styled-by groups and the
+  hover card's strings. A field changed over its class shows a dot; an
+  inherited or reset value is dimmed; initial values stay plain; across
+  several layers a mark shows only when every loaded layer agrees. The
+  Styled-by line under the header ("Styled by 2 classes, 3 utilities, 1
+  component"; hidden for a layer drawn by hand, and when the selected layers
+  differ) opens to Class / Utilities / Component / Changed here rows that
+  narrow the panel to their properties until Show all or a new selection. A
+  colour in the hover card reads as the colour field shows it (hex), and the
+  card is titled with the field's visible name. One hover card per panel, delegated from the panel's listeners
+  while the Design surface is shown, says Value / From / Source, what a
+  change replaced and how many other layers use it, with Reset (removes the
+  layer's own declaration whole, one undoable step; also Alt+Backspace on a
+  field) and Use a token (also Alt+↓); a missing token offers Pick another and
+  Detach, a forced value names its rule. The token picker is likewise one
+  instance per panel. The engine's per-field `design.provenance` read and its
+  hint dot are gone.
 - **Token picker:** `design-token-catalog.ts` derives each token's types from
   its resolved value (colour, length, percentage, number, weight, font
   family, shadow, duration, easing; aliases resolve, cycles and undeclared

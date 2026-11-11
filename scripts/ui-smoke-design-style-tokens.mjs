@@ -1,17 +1,18 @@
 // The inspector names the tokens a frame's styles read and where they are
 // declared: an imported style source ("App styles") or tokens.css ("Manual").
-// A token shows as a pill; its hover text says where it comes from. The real
-// frame runtime resolves the winning declarations in Chromium.
+// A token shows as a pill; the panel's hover card says where it comes from.
+// The real frame runtime resolves the winning declarations in Chromium.
 const pill = (page, property) =>
   page.locator(
     `[data-design-inspector] [data-design-style-property="${property}"] [data-design-style-token]`,
   ).first();
 const hoverText = async (page, locator) => {
   await locator.hover();
-  const tooltip = page.getByRole("tooltip").first();
-  await tooltip.waitFor({ timeout: 5_000 });
-  const text = (await tooltip.textContent()) ?? "";
+  const card = page.locator("[data-design-style-card]");
+  await card.waitFor({ timeout: 5_000 });
+  const text = (await card.textContent()) ?? "";
   await page.mouse.move(1, 1);
+  await card.waitFor({ state: "detached", timeout: 5_000 });
   return text;
 };
 

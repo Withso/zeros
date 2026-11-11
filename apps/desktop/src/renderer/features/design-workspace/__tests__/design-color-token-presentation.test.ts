@@ -8,6 +8,9 @@ import { DesignColorPickerBody, DesignColorTokenList } from "../design-color-pic
 import { designTokenCatalog, designTokenGroups } from "../design-token-catalog";
 import { DesignTokenCatalogContext } from "../design-token-context";
 import { InspectorEditField } from "../design-inspector";
+import { DesignFieldOriginsContext, designFieldOrigins } from "../design-field-origins";
+import { DesignFieldOverlays } from "../design-style-card";
+import type { DesignStyleOriginsContext } from "../design-style-origins";
 import {
   DesignTokenPill,
   DesignTokenRows,
@@ -43,6 +46,8 @@ const catalog = designTokenCatalog({
   theme: null,
 });
 const groups = designTokenListGroups(designTokenGroups(catalog, ["color"]));
+
+const originsContext: DesignStyleOriginsContext = { label: () => "Frame styles", utilitySources: new Set() };
 
 // The app mounts one TooltipProvider at its root.
 const render = (element: ReactElement) =>
@@ -117,7 +122,7 @@ describe("token pill", () => {
     const pill = render(
       createElement(DesignTokenPill, {
         label: "Corner radius",
-        token: { name: "--radius-md", description: "radius-md · Manual · 6px", missing: false },
+        token: { name: "--radius-md", missing: false },
       }),
     );
     expect(pill).toContain('aria-label="Corner radius: token radius-md"');
@@ -127,7 +132,7 @@ describe("token pill", () => {
     const missing = render(
       createElement(DesignTokenPill, {
         label: "Corner radius",
-        token: { name: "--radius-card", description: "", missing: true },
+        token: { name: "--radius-card", missing: true },
       }),
     );
     expect(missing).toContain('aria-label="Corner radius: missing token radius-card"');
@@ -139,32 +144,74 @@ describe("token pill", () => {
 });
 
 describe("token field at rest", () => {
-  const token = { name: "--radius-md", description: "radius-md · Manual · 6px", missing: false };
-  it("is one pill button that announces its picker, and a closed picker mounts nothing", () => {
-    const html = render(
+  const token = { name: "--radius-md", missing: false };
+  const field = (origins = designFieldOrigins([], originsContext, null)) =>
+    render(
       createElement(
         DesignTokenCatalogContext.Provider,
         { value: catalog },
-        createElement(InspectorEditField, {
-          label: "Radius",
-          value: "6px",
-          styleProperty: "border-radius",
-          token,
-          tokenAccepts: ["length"],
-          onChooseToken: () => {},
-          onCommit: async () => {},
-        }),
+        createElement(
+          DesignFieldOriginsContext.Provider,
+          { value: origins },
+          createElement(
+            DesignFieldOverlays,
+            {
+              rootRef: { current: null },
+              active: true,
+              ownerKey: "selection",
+              origins,
+              onChooseToken: () => {},
+              onReset: () => {},
+              children: createElement(InspectorEditField, {
+                label: "Radius",
+                value: "6px",
+                styleProperty: "border-radius",
+                linkedProperties: ["border-top-left-radius"],
+                token,
+                tokenAccepts: ["length"],
+                onCommit: async () => {},
+              }),
+            },
+          ),
+        ),
       ),
     );
+
+  it("is one pill button that announces its picker; the panel's card and picker mount nothing", () => {
+    const html = field();
     const pills = [...html.matchAll(/<button[^>]*data-design-style-token="--radius-md"[^>]*>/g)];
     expect(pills).toHaveLength(1);
     expect(pills[0]![0]).toContain('aria-haspopup="dialog"');
     expect(pills[0]![0]).toContain('aria-expanded="false"');
     expect(html).not.toContain("data-design-token-picker");
+    expect(html).not.toContain("data-design-style-card");
     expect(html).not.toContain("data-radix-popper-content-wrapper");
     expect(html).not.toContain("zd-popover-edge-anchor");
-    // Detach is the field's only other control, hidden by CSS until hover.
+    // No per-field tooltip: Detach keeps its name, and nothing else wraps it.
     expect(html).toContain('aria-label="Detach token"');
+    expect(html).not.toContain('data-state="closed"');
+    // What the card and Reset read from the field.
+    expect(html).toContain('data-design-field-label="Radius"');
+    expect(html).toContain('data-design-linked-properties="border-top-left-radius"');
+  });
+
+  it("carries the selection's mark, and steps aside while a filter hides it", () => {
+    const changed = {
+      sourceVersion: "a".repeat(24), oid: "send", tag: "button", name: "Send", text: null,
+      selector: '[data-oid="send"]', visible: true, breadcrumb: [], rect: { x: 0, y: 0, width: 1, height: 1 },
+      styles: {}, classes: "btn",
+      authoredStyleProperties: ["border-radius", "color"],
+      authoredStyles: {
+        "border-radius": {
+          origin: "inline" as const, scope: "inline" as const, value: "8px", declared: "border-radius",
+          replaced: { origin: "frame" as const, selector: ".btn", scope: "element" as const, subjectClasses: ["btn"], value: "6px" },
+        },
+        color: { origin: "frame" as const, selector: ".btn", scope: "element" as const, subjectClasses: ["btn"], value: "navy" },
+      },
+    };
+    expect(field(designFieldOrigins([changed], originsContext, null))).toContain('data-design-origin="changed"');
+    const classGroup = designFieldOrigins([changed], originsContext, null).styledBy!.groups[0]!.key;
+    expect(field(designFieldOrigins([changed], originsContext, classGroup))).toContain("data-design-filter-out");
   });
 });
 

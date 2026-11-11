@@ -19,8 +19,7 @@ import type {
   DesignRuntimeStyleOrigin,
 } from "@zeros/protocol/design-runtime";
 
-import { designTokenDetachHint } from "./design-token-catalog";
-import { useDesignTokenDetach, useDesignTokens } from "./design-token-context";
+import { useDesignTokenDetach } from "./design-token-context";
 import { designWorkspaceSnapshotCache } from "./state/design-workspace-cache";
 
 export type DesignStyleOriginLabel = (
@@ -72,7 +71,7 @@ export function designStyleTokenReference(
 }
 
 /** The shorthands that can set a longhand whole, nearest first. */
-function designStyleShorthands(property: string): readonly string[] {
+export function designStyleShorthands(property: string): readonly string[] {
   let shorthands = SHORTHANDS.get(property);
   if (!shorthands) {
     shorthands = shorthandsFor(property);
@@ -225,11 +224,8 @@ export const DesignStyleOriginLabelContext =
 
 export interface DesignStyleTokenField {
   tokenName?: string;
-  tokenDescription?: string;
   /** The frame no longer declares the token. */
   tokenMissing?: boolean;
-  /** Detach's hint when the token differs by theme. */
-  tokenDetachHint?: string;
   /** Each selected layer keeps its own resolved value. */
   onDetachToken?: () => void;
 }
@@ -240,17 +236,14 @@ export function useDesignStyleToken(
   property: string,
 ): DesignStyleTokenField {
   const label = useContext(DesignStyleOriginLabelContext);
-  const catalog = useDesignTokens();
   const detach = useDesignTokenDetach();
   return useMemo(() => {
     const token = label ? designStyleTokenDisplay(details, property, label) : null;
     if (!token) return {};
     return {
       tokenName: token.name,
-      tokenDescription: designStyleTokenDescription(token),
       tokenMissing: !token.value.trim(),
-      tokenDetachHint: designTokenDetachHint(catalog.byName.get(token.name), catalog.themeLabel),
       ...(detach ? { onDetachToken: () => detach([property]) } : {}),
     };
-  }, [catalog, detach, details, label, property]);
+  }, [detach, details, label, property]);
 }

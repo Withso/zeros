@@ -125,6 +125,7 @@ describe("winning authored declarations in Chromium", () => {
       sourceId: "app",
       selector: ".bg-primary-button-bg",
       scope: "element",
+      subjectClasses: ["bg-primary-button-bg"],
       value: "var(--primary-button-bg)",
       tokens: [
         {
@@ -165,6 +166,7 @@ describe("winning authored declarations in Chromium", () => {
       origin: "frame",
       selector: "main .title",
       scope: "element",
+      subjectClasses: ["title"],
       value: "var(--brand)",
       tokens: [
         { name: "--brand", value: "rebeccapurple", origin: "source", sourceId: "semantic" },
@@ -272,7 +274,217 @@ describe("winning authored declarations in Chromium", () => {
   });
 });
 
+/** Measured on the previous runtime with the fixture below. */
+const BASELINE_COST = {
+  drawn: { matches: 11, queries: 0 },
+  oneOverride: { matches: 11, queries: 0 },
+  card: { matches: 11, queries: 0 },
+};
+
+// Where a value comes from: a class, a utility, a component, this layer's own
+// declaration and what it replaced, and a declaration that differs by theme.
+const ORIGINS_HEAD = `
+<style data-zeros-style-source="app">
+  @layer theme, utilities;
+  @layer theme { :root { --radius-md: 6px; --bg: white; } }
+  @layer utilities { .p-2\\.5 { padding: 10px; } .rounded-md { border-radius: 6px; } }
+</style>
+<style data-zeros-component="chip">.chip { gap: 4px; }</style>
+<style>
+  .btn { border-radius: var(--radius-md); padding: 8px 12px; color: navy; }
+  .btn.btn--primary { background-color: var(--bg); }
+  [data-oid="own-rule"] { color: maroon; }
+  .legacy { border-radius: 4px !important; }
+  .card { background-color: white; }
+  [data-zd-theme="dark"] .card { background-color: black; }
+  .themed-token { background-color: var(--bg); }
+</style>`;
+const ORIGINS_BODY = `
+<button data-oid="changed" class="btn btn--primary" style="border-radius: 8px; padding: 2px">Send</button>
+<button data-oid="one-override" class="btn" style="border-radius: 8px">One override</button>
+<button data-oid="own-rule" class="btn">Own rule</button>
+<button data-oid="other" class="btn">Other</button>
+<div data-oid="drawn" style="border-radius: 3px; width: 40px">Drawn</div>
+<div data-oid="forced" class="legacy" style="border-radius: 9px">Forced</div>
+<div data-oid="chip" class="chip">Chip</div>
+<div data-oid="card" class="card">Card</div>
+<div data-oid="themed-token" class="themed-token">Token</div>
+<div data-oid="utility" class="p-2.5 rounded-md">Utility</div>`;
+
+describe("where a value comes from, in Chromium", () => {
+  let browser: Browser;
+  let page: Page;
+  beforeAll(async () => {
+    browser = await chromium.launch({ headless: true });
+    page = await fixture(browser, ORIGINS_HEAD, ORIGINS_BODY);
+    await page.evaluate(() => document.documentElement.setAttribute("data-zd-theme", "light"));
+  });
+  afterAll(async () => {
+    await browser?.close();
+  });
+
+  it("says what this layer's own declaration replaced, and how it was written", async () => {
+    const changed = await details(page, "changed");
+    expect(changed.authoredStyles?.["border-radius"]).toEqual({
+      origin: "inline",
+      scope: "inline",
+      value: "8px",
+      declared: "border-radius",
+      replaced: {
+        origin: "frame",
+        selector: ".btn",
+        scope: "element",
+        subjectClasses: ["btn"],
+        value: "var(--radius-md)",
+        tokens: [{ name: "--radius-md", value: "6px" }],
+        others: 3,
+      },
+    });
+    // A shorthand written on the layer is reported as written.
+    expect(changed.authoredStyles?.padding).toMatchObject({
+      declared: "padding",
+      replaced: { selector: ".btn", value: "8px 12px", others: 3 },
+    });
+    // A class value nothing overrides has nothing replaced.
+    expect(changed.authoredStyles?.["background-color"]).toEqual({
+      origin: "frame",
+      selector: ".btn.btn--primary",
+      scope: "element",
+      subjectClasses: ["btn", "btn--primary"],
+      value: "var(--bg)",
+      tokens: [{ name: "--bg", value: "white", origin: "source", sourceId: "app" }],
+    });
+    expect(isDesignRuntimeAuthoredStyles(changed.authoredStyles)).toBe(true);
+  });
+
+  it("treats a rule written for exactly this layer as its own", async () => {
+    const own = await details(page, "own-rule");
+    expect(own.authoredStyles?.color).toMatchObject({
+      selector: '[data-oid="own-rule"]',
+      value: "maroon",
+      declared: "color",
+      replaced: { selector: ".btn", value: "navy", others: 3 },
+    });
+    expect(own.authoredStyles?.color?.subjectClasses).toBeUndefined();
+  });
+
+  it("reports nothing replaced for a layer drawn by hand, or a value forced over it", async () => {
+    const drawn = await details(page, "drawn");
+    expect(drawn.authoredStyles?.["border-radius"]).toEqual({ origin: "inline", scope: "inline", value: "3px" });
+    const forced = await details(page, "forced");
+    expect(forced.authoredStyles?.["border-radius"]).toEqual({
+      origin: "frame",
+      selector: ".legacy",
+      scope: "element",
+      subjectClasses: ["legacy"],
+      value: "4px",
+      important: true,
+    });
+  });
+
+  it("names a component's styles and a utility's escaped class", async () => {
+    expect((await details(page, "chip")).authoredStyles?.gap).toMatchObject({
+      origin: "frame",
+      component: "chip",
+      subjectClasses: ["chip"],
+    });
+    expect((await details(page, "utility")).authoredStyles?.padding).toMatchObject({
+      origin: "source",
+      sourceId: "app",
+      selector: ".p-2\\.5",
+      subjectClasses: ["p-2.5"],
+    });
+  });
+
+  it("gives another theme's value only where the declaration itself differs", async () => {
+    expect((await details(page, "card")).authoredStyles?.["background-color"]).toMatchObject({
+      value: "white",
+      themeValues: { dark: "black" },
+    });
+    expect((await details(page, "themed-token")).authoredStyles?.["background-color"]?.themeValues).toBeUndefined();
+  });
+
+  it("reports the root font size for rem", async () => {
+    expect((await details(page, "drawn")).rootFontSize).toBe(16);
+  });
+});
+
+// Selection cost: element.matches and querySelectorAll calls one
+// getNodeDetails makes on a cold element, against the counts measured before
+// this provenance existed (scratchpad probe on the previous runtime).
+describe("provenance cost per selection", () => {
+  const counted = async (nodeId: string) => {
+    const browser = await chromium.launch({ headless: true });
+    try {
+      const page = await fixture(browser, ORIGINS_HEAD, ORIGINS_BODY);
+      return await page.evaluate(async (nodeId) => {
+        const runtime = window as unknown as RuntimeWindow;
+        document.documentElement.setAttribute("data-zd-theme", "light");
+        // Build the rule index on another element first.
+        await runtime.detailsRequest("other");
+        const counts = { matches: 0, queries: 0 };
+        const matches = Element.prototype.matches;
+        Element.prototype.matches = function (this: Element, selector: string) {
+          counts.matches += 1;
+          return matches.call(this, selector);
+        };
+        for (const prototype of [Document.prototype, Element.prototype, DocumentFragment.prototype]) {
+          const query = prototype.querySelectorAll;
+          prototype.querySelectorAll = function (this: ParentNode, selector: string) {
+            counts.queries += 1;
+            return query.call(this, selector);
+          } as typeof query;
+        }
+        await runtime.detailsRequest(nodeId);
+        return counts;
+      }, nodeId);
+    } finally {
+      await browser.close();
+    }
+  };
+
+  it("costs a layer drawn by hand nothing more", async () => {
+    const cost = await counted("drawn");
+    expect(cost.matches).toBeLessThanOrEqual(BASELINE_COST.drawn.matches);
+    expect(cost.queries).toBe(BASELINE_COST.drawn.queries);
+  });
+
+  it("costs a class-styled layer with one override one in-frame count", async () => {
+    const cost = await counted("one-override");
+    expect(cost.matches).toBeLessThanOrEqual(BASELINE_COST.oneOverride.matches);
+    expect(cost.queries).toBe(BASELINE_COST.oneOverride.queries + 1);
+  });
+
+  it("costs a themed class one match per theme rule naming its classes", async () => {
+    const cost = await counted("card");
+    expect(cost.matches).toBeLessThanOrEqual(BASELINE_COST.card.matches + 1);
+    expect(cost.queries).toBe(BASELINE_COST.card.queries);
+  });
+});
+
 describe("authored style wire validation", () => {
+  it("accepts bounded origins, replacements and theme values", () => {
+    const replaced = { origin: "frame", selector: ".btn", value: "var(--radius-md)", tokens: [{ name: "--radius-md", value: "6px" }], others: 3 };
+    expect(
+      isDesignRuntimeAuthoredStyles({
+        "border-radius": { origin: "inline", scope: "inline", value: "8px", declared: "border-radius", replaced },
+        gap: { origin: "frame", component: "chip", subjectClasses: ["chip"], value: "4px", themeValues: { dark: "2px" } },
+      }),
+    ).toBe(true);
+    const bad = (style: Record<string, unknown>) =>
+      isDesignRuntimeAuthoredStyles({ color: { origin: "frame", value: "red", ...style } });
+    expect(bad({ component: "x".repeat(65) })).toBe(false);
+    expect(bad({ subjectClasses: Array.from({ length: 17 }, (_, index) => `c${index}`) })).toBe(false);
+    expect(bad({ subjectClasses: [""] })).toBe(false);
+    expect(bad({ declared: "Bad Name" })).toBe(false);
+    expect(bad({ replaced: { ...replaced, value: "x".repeat(1025) } })).toBe(false);
+    expect(bad({ replaced: { ...replaced, others: -1 } })).toBe(false);
+    expect(bad({ replaced: { ...replaced, others: 10000 } })).toBe(false);
+    expect(bad({ replaced: { ...replaced, origin: "cdn" } })).toBe(false);
+    expect(bad({ themeValues: { "Not A Theme": "red" } })).toBe(false);
+    expect(bad({ themeValues: Object.fromEntries(Array.from({ length: 9 }, (_, index) => [`t${index}`, "red"])) })).toBe(false);
+  });
+
   it("accepts bounded provenance and refuses oversized or unknown fields", () => {
     expect(
       isDesignRuntimeAuthoredStyles({

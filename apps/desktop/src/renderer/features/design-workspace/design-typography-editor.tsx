@@ -68,9 +68,10 @@ import {
   type DesignTokenType,
 } from "./design-token-catalog";
 import { useDesignTokenDetach, useDesignTokens } from "./design-token-context";
+import { useDesignFieldOverlays } from "./design-field-overlays";
+import { useDesignFieldOrigin } from "./design-field-origins";
 import {
   DesignTokenDetachButton,
-  DesignTokenPicker,
   DesignTokenPill,
   type DesignTokenListGroup,
 } from "./design-token-picker";
@@ -212,6 +213,7 @@ function FontFamilyField({
   const [draft, setDraft] = useState(primary);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const skipRef = useRef(false);
+  const origin = useDesignFieldOrigin("font-family");
 
   useEffect(() => {
     if (document.activeElement !== inputRef.current) setDraft(primary);
@@ -228,7 +230,11 @@ function FontFamilyField({
   ];
 
   return (
-    <div className="zd-field pr-0.5" data-design-font-family="">
+    <div
+      className="zd-field pr-0.5"
+      data-design-font-family=""
+      data-design-origin={origin.mark === "dimmed" ? "dimmed" : undefined}
+    >
       <input
         ref={inputRef}
         value={draft}
@@ -333,6 +339,7 @@ export function DesignTypographySection({
   // A text style's own parts read as values beside its pill, as drawn.
   const styledBy = new Set(textStyle.current ? designTextStyleProperties(textStyle.current) : []);
   const colorToken = useDesignStyleToken(details, "color");
+  const weightOrigin = useDesignFieldOrigin("font-weight");
   const verticalAlignable = textLayer && BLOCK_TEXT_DISPLAYS.has(read("display", "block"));
   const authoredTypography = TYPOGRAPHY_PROPERTIES.some((property) =>
     isAuthored(property),
@@ -398,6 +405,7 @@ export function DesignTypographySection({
                 <div className="grid grid-cols-2 gap-2">
                   <InspectorSelect
                     label="Weight"
+                    dimmed={weightOrigin.mark === "dimmed"}
                     {...designMixedSelect(
                       mixed("font-weight"),
                       read("font-weight", "400"),
@@ -582,8 +590,8 @@ function DesignTextStyleRow({
   onCommit: (styles: Record<string, string | null>) => void;
 }) {
   const detach = useDesignTokenDetach();
-  const [open, setOpen] = useState(false);
-  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const overlays = useDesignFieldOverlays();
+  const rowRef = useRef<HTMLDivElement | null>(null);
   const rows = useMemo<DesignTokenListGroup[]>(
     () => [
       {
@@ -600,31 +608,47 @@ function DesignTextStyleRow({
   );
   if (styles.length === 0) return null;
   const label = "Text style";
-  // The picker mounts only while open, beside the trigger.
+  // The panel's one picker opens beside the row and keeps aria-expanded.
+  const openPicker = (trigger: HTMLElement) => {
+    if (!rowRef.current) return;
+    overlays.openPicker({
+      field: rowRef.current,
+      label,
+      accepts: NO_TOKEN_TYPES,
+      rows,
+      kind: "text",
+      activeName: current?.name ?? null,
+      trigger,
+      onChoose: (name) => {
+        const style = styles.find((candidate) => candidate.name === name);
+        if (style) onCommit(designTextStyleStyles(style));
+      },
+    });
+  };
   const trigger = {
     "aria-haspopup": "dialog" as const,
-    "aria-expanded": open,
-    onClick: () => setOpen((value) => !value),
+    "aria-expanded": false,
+    "aria-keyshortcuts": "Alt+ArrowDown",
+    onClick: (event: React.MouseEvent<HTMLButtonElement>) => openPicker(event.currentTarget),
     onKeyDown: (event: React.KeyboardEvent<HTMLButtonElement>) => {
       if (event.key === "ArrowDown" && event.altKey) {
         event.preventDefault();
-        setOpen(true);
+        openPicker(event.currentTarget);
       }
     },
   };
   return (
     <InspectorGroup label="Style">
       <div
+        ref={rowRef}
         data-design-text-style={current?.name ?? ""}
         className="group/design-field zd-field relative min-w-0 pr-0.5 pl-1"
       >
         {current ? (
           <DesignTokenPill
-            ref={triggerRef}
             label={label}
             token={{
               name: current.name,
-              description: `${current.name.replace(/^--/, "")} · ${designTextStyleSummary(current)}`,
               missing: false,
             }}
             disabled={disabled}
@@ -633,7 +657,6 @@ function DesignTextStyleRow({
           />
         ) : (
           <Button
-            ref={triggerRef}
             type="button"
             variant="ghost"
             size="compact"
@@ -646,23 +669,6 @@ function DesignTextStyleRow({
             <ChevronDown aria-hidden="true" />
           </Button>
         )}
-        {open ? (
-          <DesignTokenPicker
-            label={label}
-            accepts={NO_TOKEN_TYPES}
-            rows={rows}
-            kind="text"
-            activeName={current?.name ?? null}
-            disabled={disabled}
-            open
-            trigger={triggerRef}
-            onOpenChange={setOpen}
-            onChoose={(name) => {
-              const style = styles.find((candidate) => candidate.name === name);
-              if (style) onCommit(designTextStyleStyles(style));
-            }}
-          />
-        ) : null}
         {current && detach ? (
           <span className="zd-field-token-detach" data-design-token-action="hover">
             <DesignTokenDetachButton

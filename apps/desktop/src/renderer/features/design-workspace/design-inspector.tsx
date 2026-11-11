@@ -34,7 +34,6 @@ import {
   DESIGN_TRANSACTION_MAX_OPERATIONS,
   type DesignOperation,
 } from "@zeros/design-core";
-import type { DesignStyleProvenance } from "@zeros/design-web";
 import type { DesignRuntimeNodeDetails } from "@zeros/protocol/design-runtime";
 import { DESIGN_SELECTION_NODE_LIMIT } from "@zeros/protocol/design-runtime";
 
@@ -91,7 +90,6 @@ import {
   DesignTokenCatalogContext,
   DesignTokenDetachContext,
   useDesignFrameTokenCatalog,
-  useDesignTokens,
 } from "./design-token-context";
 import {
   designTokenFieldTypes,
@@ -99,15 +97,22 @@ import {
 } from "./design-token-catalog";
 import {
   DesignTokenDetachButton,
-  DesignTokenPicker,
   DesignTokenPill,
-  designTokenDetachHint,
   useDesignTokensFor,
   type DesignFieldToken,
 } from "./design-token-picker";
+import { DesignFieldOverlays } from "./design-style-card";
+import { useDesignFieldOverlays } from "./design-field-overlays";
+import { DesignStyledByLine } from "./design-styled-by";
+import {
+  DesignFieldOriginsContext,
+  designFieldOrigins,
+  designResetStyles,
+  useDesignFieldOrigin,
+  useDesignStyleOriginsContext,
+} from "./design-field-origins";
 import {
   DesignStyleOriginLabelContext,
-  designStyleTokenDescription,
   designDetachedStyles,
   designSelectionStyleUpdates,
   designStyleTokenDisplay,
@@ -172,7 +177,6 @@ import {
   beginDesignHistorySelection,
   captureDesignRuntimeScreenshot,
   clearDesignNodeStylePreviewTransient,
-  inspectDesignNodeStyleProvenance,
   previewDesignNodeGeometry,
   settleDesignHistorySelection,
 } from "./state/design-selection";
@@ -193,7 +197,6 @@ import {
   isCurrentDesignPageOwner,
   useDesignWorkspaceUiStore,
 } from "./state/design-workspace-ui";
-import { useDesignFoundation } from "./state/use-design-foundation";
 
 import { errorMessage } from "./design-workspace-error";
 import {
@@ -219,14 +222,6 @@ function designFrameSizeValue(value: number): number {
   return Math.min(DESIGN_FRAME_MAX_SIZE, Math.max(1, Math.round(value)));
 }
 
-interface InspectorProvenanceState {
-  ownerKey: string;
-  property: string;
-  loading: boolean;
-  value: DesignStyleProvenance | null;
-  error: string | null;
-}
-
 interface InspectorEditFieldProps {
   numericValue?: string;
   icon?: DesignLayoutFieldOptions["icon"];
@@ -238,9 +233,11 @@ interface InspectorEditFieldProps {
   value: string | number;
   applied?: boolean;
   disabled?: boolean;
-  hint?: string;
   placeholder?: string;
   styleProperty?: string;
+  /** Properties the field writes with styleProperty, such as both sides of
+   * Horizontal padding; Reset covers them too. */
+  linkedProperties?: readonly string[];
   whole?: boolean;
   /** Bounds a plain numeric value: typed, stepped or scrubbed input settles
    * on the nearest allowed value instead of failing on commit. */
@@ -251,16 +248,12 @@ interface InspectorEditFieldProps {
   token?: DesignFieldToken;
   /** The token types this field takes; null offers no picker. */
   tokenAccepts?: readonly DesignTokenType[] | null;
-  /** Detach's hint when the token's value differs by theme. */
-  tokenDetachHint?: string;
   onDetachToken?: () => void;
-  onChooseToken?: (name: string) => void;
   motion?: {
     modeActive: boolean;
     trackActive: boolean;
     onAddKeyframe: () => void;
   };
-  onInspect?: () => void;
   onPreview?: (value: string) => Promise<unknown> | void;
   onCancelPreview?: () => Promise<unknown> | void;
   onCommit: (value: string) => Promise<unknown>;
@@ -309,19 +302,16 @@ export function InspectorEditField({
   value,
   applied = false,
   disabled = false,
-  hint,
   placeholder,
   styleProperty,
+  linkedProperties,
   whole = false,
   range,
   compact = false,
   token,
   tokenAccepts = null,
-  tokenDetachHint,
   onDetachToken,
-  onChooseToken,
   motion,
-  onInspect,
   onPreview,
   onCancelPreview,
   onCommit,
@@ -330,8 +320,8 @@ export function InspectorEditField({
   const [focused, setFocused] = useState(false);
   /** A key typed on the pill: the field edits a plain value until it settles. */
   const [typingOverToken, setTypingOverToken] = useState(false);
-  const [tokenPickerOpen, setTokenPickerOpen] = useState(false);
-  const tokensOffered = useDesignTokensFor(onChooseToken ? tokenAccepts : null);
+  const tokensOffered = useDesignTokensFor(tokenAccepts);
+  const overlays = useDesignFieldOverlays();
   const fieldRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const pillRef = useRef<HTMLButtonElement | null>(null);
@@ -574,13 +564,21 @@ export function InspectorEditField({
   const showUnit =
     !compact && !tokenShown && Boolean(presentation.unit) && unitOptions.length > 0;
   const motionPersistent = Boolean(motion?.trackActive);
+  const origin = useDesignFieldOrigin(styleProperty);
 
   return (
-    <div ref={fieldRef} className="group/design-field relative min-w-0">
+    <div
+      ref={fieldRef}
+      data-design-filter-out={origin.hidden ? "" : undefined}
+      className="group/design-field relative min-w-0"
+    >
       <div
         data-design-inspector-field=""
         data-design-applied={applied ? "" : undefined}
         data-design-style-property={styleProperty}
+        data-design-linked-properties={linkedProperties?.length ? linkedProperties.join(" ") : undefined}
+        data-design-field-label={label}
+        data-design-origin={origin.mark}
         data-design-layout-field={compact ? "" : undefined}
         data-design-motion-field={motion ? "" : undefined}
         data-design-motion-tracked={motionPersistent ? "" : undefined}
@@ -605,10 +603,7 @@ export function InspectorEditField({
             const startValue = parseDesignStyleNumericParts(resolvedDraft)
               ? resolvedDraft
               : (numericValue ?? resolvedDraft);
-            if (scrubDesignNumericValue(startValue, 0) === null) {
-              onInspect?.();
-              return;
-            }
+            if (scrubDesignNumericValue(startValue, 0) === null) return;
             event.preventDefault();
             const scrub = {
               pointerId: event.pointerId,
@@ -670,7 +665,6 @@ export function InspectorEditField({
               },
               onCancel: restore,
             });
-            onInspect?.();
           }}
         >
           <Label htmlFor={id} className="pointer-events-none text-inherit">
@@ -684,18 +678,16 @@ export function InspectorEditField({
               label={label}
               token={token}
               disabled={disabled}
-              onFocus={() => onInspect?.()}
               onType={typeOverToken}
               {...(tokensOffered
                 ? {
+                    // The panel's one picker keeps aria-expanded current.
                     "aria-haspopup": "dialog" as const,
-                    "aria-expanded": tokenPickerOpen,
-                    onClick: () => setTokenPickerOpen((open) => !open),
-                    onKeyDown: (event: React.KeyboardEvent<HTMLButtonElement>) => {
-                      if (event.key === "ArrowDown" && event.altKey) {
-                        event.preventDefault();
-                        setTokenPickerOpen(true);
-                      }
+                    "aria-expanded": false,
+                    "aria-keyshortcuts": "Alt+ArrowDown",
+                    onClick: (event: React.MouseEvent<HTMLButtonElement>) => {
+                      const field = event.currentTarget.closest<HTMLElement>("[data-design-style-property]");
+                      if (field) overlays.openPickerForField(field, event.currentTarget);
                     },
                   }
                 : { onClick: () => typeOverToken(null) })}
@@ -715,14 +707,13 @@ export function InspectorEditField({
           className={cn(
             "h-full min-w-0 flex-1 rounded-none border-0 bg-transparent py-0 pl-0 font-sans text-xs shadow-none focus-visible:border-transparent",
             applied ? "text-fg1" : "text-fg2",
-            (suffix && !tokenShown) || showUnit || hint ? "pr-1" : "pr-2",
+            (suffix && !tokenShown) || showUnit ? "pr-1" : "pr-2",
           )}
           onFocus={() => {
             setFocused(true);
             historyStep.drop();
             baselineRef.current = String(value);
             focusValueRef.current = String(value);
-            onInspect?.();
           }}
           onChange={(event) => {
             // Deliberately local. A canvas write per keystroke reflowed the
@@ -770,10 +761,6 @@ export function InspectorEditField({
             if (event.key === "Enter") {
               event.preventDefault();
               event.currentTarget.blur();
-            } else if (event.key === "ArrowDown" && event.altKey && tokensOffered) {
-              // The token picker, as a combobox opens its list.
-              event.preventDefault();
-              setTokenPickerOpen(true);
             } else if (event.key === "ArrowUp" || event.key === "ArrowDown") {
               const normalized = resolveDraft(draft, baselineRef.current);
               const direction = event.key === "ArrowUp" ? 1 : -1;
@@ -790,6 +777,20 @@ export function InspectorEditField({
                 event.preventDefault();
                 setPresentedDraft(withinRange(next));
               }
+            } else if (
+              event.key === "Backspace" &&
+              event.altKey &&
+              !event.metaKey &&
+              !event.ctrlKey
+            ) {
+              // Reset: the draft is dropped so blur cannot write it back.
+              event.preventDefault();
+              skipCommitRef.current = true;
+              setPresentedDraft(String(value));
+              cancelPreview();
+              const input = event.currentTarget;
+              input.blur();
+              overlays.resetField(input);
             } else if (event.key === "Escape") {
               event.preventDefault();
               skipCommitRef.current = true;
@@ -817,7 +818,6 @@ export function InspectorEditField({
             data-design-token-motion={motion ? "" : undefined}
           >
           <DesignTokenDetachButton
-            hint={tokenDetachHint}
             disabled={disabled}
             onDetach={() => {
               if (onDetachToken) {
@@ -840,26 +840,6 @@ export function InspectorEditField({
             }}
           />
           </span>
-        ) : null}
-        {tokensOffered && tokenPickerOpen ? (
-          // Mounted only while open: the pill opens it, and a plain value
-          // from the keyboard (Alt+↓). Focus returns to whichever the field
-          // shows once the choice lands.
-          <DesignTokenPicker
-            label={label}
-            accepts={tokenAccepts ?? []}
-            activeName={token && !token.missing ? token.name : null}
-            disabled={disabled}
-            open
-            trigger={pillRef}
-            onOpenChange={(open) => {
-              setTokenPickerOpen(open);
-              if (!open) {
-                requestAnimationFrame(() => (pillRef.current ?? inputRef.current)?.focus());
-              }
-            }}
-            onChoose={(name) => onChooseToken?.(name)}
-          />
         ) : null}
         {showUnit ? (
           <Select
@@ -912,15 +892,6 @@ export function InspectorEditField({
               ))}
             </SelectContent>
           </Select>
-        ) : null}
-        {hint ? (
-          <Tooltip label={hint}>
-            <span
-              className="bg-fg3 mr-2 size-1.5 shrink-0 rounded-full"
-              aria-label={hint}
-              role="img"
-            />
-          </Tooltip>
         ) : null}
         {motion ? (
           <div
@@ -992,8 +963,6 @@ const InspectorStyleField = React.memo(function InspectorStyleField({
   onPreviewLayoutAction,
   disabled,
   applied,
-  hint,
-  onInspect,
   onPreviewStyles,
   onCancelPreview,
   onCommitStyles,
@@ -1016,8 +985,6 @@ const InspectorStyleField = React.memo(function InspectorStyleField({
   onPreviewLayoutAction?: (action: DesignLayoutAction) => Promise<void>;
   disabled?: boolean;
   applied: boolean;
-  hint?: string;
-  onInspect: (property: string, computedValue: string) => void;
   onPreviewStyles: (
     styles: Record<string, string | null>,
   ) => void | Promise<void>;
@@ -1104,8 +1071,6 @@ const InspectorStyleField = React.memo(function InspectorStyleField({
     )
       ? ownToken
       : null;
-  const catalog = useDesignTokens();
-  const catalogToken = token ? catalog.byName.get(token.name) : undefined;
   const styleUpdate = (next: string): Record<string, string | null> => {
     const value =
       options?.percentage && next.trim()
@@ -1128,39 +1093,25 @@ const InspectorStyleField = React.memo(function InspectorStyleField({
       percentage={options?.percentage}
       placeholder={options?.mixed ? "Mixed" : (options?.placeholder ?? "–")}
       styleProperty={property}
+      linkedProperties={options?.linkedProperties}
       whole={options?.whole}
       compact={options?.compact}
       token={
         token
           ? {
               name: token.name,
-              description: designStyleTokenDescription(token),
               missing: !token.value.trim(),
             }
           : undefined
       }
       tokenAccepts={tokenAccepts}
-      tokenDetachHint={designTokenDetachHint(catalogToken, catalog.themeLabel)}
       onDetachToken={
         onDetachToken
           ? () => onDetachToken([property, ...(options?.linkedProperties ?? [])])
           : undefined
       }
-      onChooseToken={(name) => {
-        const next = `var(${name})`;
-        void onCommitStyles(
-          Object.fromEntries(
-            [property, ...(options?.linkedProperties ?? [])].map((key) => [key, next]),
-          ),
-        ).catch((error) =>
-          toast.error(`Couldn't update ${label.toLowerCase()}`, {
-            description: errorMessage(error),
-          }),
-        );
-      }}
       disabled={disabled}
       applied={applied}
-      hint={hint}
       motion={
         motionModeActive
           ? {
@@ -1170,12 +1121,6 @@ const InspectorStyleField = React.memo(function InspectorStyleField({
                 onAddMotionKeyframe(property, displayedValue || computedValue),
             }
           : undefined
-      }
-      onInspect={() =>
-        onInspect(
-          property,
-          typeof liveValue === "string" ? liveValue : computedValue,
-        )
       }
       onPreview={(next) =>
         options?.geometry && onPreviewLayoutAction
@@ -1274,10 +1219,6 @@ export const DesignInspector = React.memo(function DesignInspector({
   const [exportScale, setExportScale] = useState(1);
   const [pendingHistoryActions, setPendingHistoryActions] = useState(0);
   const [cssMode, setCssMode] = useState(false);
-  const [provenance, setProvenance] = useState<InspectorProvenanceState | null>(
-    null,
-  );
-  const provenanceAbortRef = useRef<AbortController | null>(null);
   const inspectorRef = useRef<HTMLElement | null>(null);
   const inspectorId = workspaceId
     ? `design-style-panel-${workspaceId}`
@@ -1312,89 +1253,6 @@ export const DesignInspector = React.memo(function DesignInspector({
       onCanvasBackgroundChange(normalized);
     },
     [onCanvasBackgroundChange, paintCanvasBackground],
-  );
-
-  const foundation = useDesignFoundation(
-    workspaceId,
-    frame?.file,
-    frame?.sourceVersion,
-    active,
-  );
-  const foundationData = foundation.data;
-  const provenanceOwnerKey = `${workspaceId ?? ""}\u0000${frame?.file ?? ""}\u0000${frame?.sourceVersion ?? ""}\u0000${foundationData?.summary.revision ?? ""}\u0000${styleTargetNodeId ?? ""}`;
-
-  useEffect(() => {
-    provenanceAbortRef.current?.abort();
-    provenanceAbortRef.current = null;
-    setProvenance(null);
-    return () => {
-      provenanceAbortRef.current?.abort();
-      provenanceAbortRef.current = null;
-    };
-  }, [provenanceOwnerKey]);
-
-  const inspectStyle = useCallback(
-    (property: string, computedValue: string) => {
-      if (
-        !active ||
-        !workspaceId ||
-        !frame ||
-        !styleTargetNodeId ||
-        !foundationData
-      ) {
-        return;
-      }
-      provenanceAbortRef.current?.abort();
-      const controller = new AbortController();
-      provenanceAbortRef.current = controller;
-      const ownerKey = provenanceOwnerKey;
-      setProvenance({
-        ownerKey,
-        property,
-        loading: true,
-        value: null,
-        error: null,
-      });
-      void inspectDesignNodeStyleProvenance({
-        workspaceId,
-        frame: frame.file,
-        sourceVersion: frame.sourceVersion,
-        expectedRevision: foundationData.summary.revision,
-        nodeId: styleTargetNodeId,
-        property,
-        computedValue,
-        signal: controller.signal,
-      })
-        .then((value) => {
-          if (controller.signal.aborted) return;
-          setProvenance((current) =>
-            current?.ownerKey === ownerKey && current.property === property
-              ? { ...current, loading: false, value, error: null }
-              : current,
-          );
-        })
-        .catch((provenanceError) => {
-          if (controller.signal.aborted) return;
-          setProvenance((current) =>
-            current?.ownerKey === ownerKey && current.property === property
-              ? {
-                  ...current,
-                  loading: false,
-                  value: null,
-                  error: errorMessage(provenanceError),
-                }
-              : current,
-          );
-        });
-    },
-    [
-      active,
-      foundationData,
-      frame,
-      provenanceOwnerKey,
-      styleTargetNodeId,
-      workspaceId,
-    ],
   );
 
   const layoutActionQueueRef = useRef<Promise<unknown>>(Promise.resolve());
@@ -1634,6 +1492,14 @@ export const DesignInspector = React.memo(function DesignInspector({
     [styleOwnerKey],
   );
   styleOwner.contextRef.current = styleEditContextRef.current;
+  const originsContext = useDesignStyleOriginsContext(workspaceId);
+  // The Styled-by filter belongs to the selection it was chosen for.
+  const [sourceFilter, setSourceFilter] = useState<{ owner: string; key: string } | null>(null);
+  const sourceFilterKey = sourceFilter?.owner === styleOwnerKey ? sourceFilter.key : null;
+  const fieldOrigins = useMemo(
+    () => designFieldOrigins(layoutParents, originsContext, sourceFilterKey),
+    [layoutParents, originsContext, sourceFilterKey],
+  );
   const currentStyleOwnerRef = useRef(styleOwner);
   currentStyleOwnerRef.current = styleOwner;
   const stylePreviewIntentRef = styleOwner.previewIntentRef;
@@ -1932,6 +1798,43 @@ export const DesignInspector = React.memo(function DesignInspector({
         (nodeId) => byNode.get(nodeId) ?? {},
       ).catch((error) =>
         toast.error("Couldn't detach the token", { description: errorMessage(error) }),
+      );
+    },
+    [commitSelectedStyles],
+  );
+
+  const layoutParentsRef = useRef(layoutParents);
+  layoutParentsRef.current = layoutParents;
+  const originsContextRef = useRef(originsContext);
+  originsContextRef.current = originsContext;
+  const chooseFieldToken = useCallback(
+    (properties: readonly string[], name: string) => {
+      const next = `var(${name})`;
+      void commitSelectedStyles(
+        Object.fromEntries(properties.map((property) => [property, next])),
+      ).catch((error) =>
+        toast.error("Couldn't use the token", { description: errorMessage(error) }),
+      );
+    },
+    [commitSelectedStyles],
+  );
+  /** Reset: each selected layer's own declaration for the field, removed
+   * whole in one step, so its class or component value shows again. */
+  const resetField = useCallback(
+    (properties: readonly string[]) => {
+      const updates = designResetStyles(layoutParentsRef.current, originsContextRef.current, properties);
+      if (updates.length === 0) {
+        toast("Nothing to reset", {
+          description: "No selected layer changes this value over its class or component.",
+        });
+        return;
+      }
+      const byNode = new Map(updates.map((update) => [update.nodeId, update.styles]));
+      void commitSelectedStyles(
+        Object.assign({}, ...updates.map((update) => update.styles)),
+        (nodeId) => byNode.get(nodeId) ?? {},
+      ).catch((error) =>
+        toast.error("Couldn't reset the value", { description: errorMessage(error) }),
       );
     },
     [commitSelectedStyles],
@@ -2485,20 +2388,9 @@ export const DesignInspector = React.memo(function DesignInspector({
         onPreviewLayoutAction={previewLayoutAction}
         disabled={!active || pendingHistoryActions > 0}
         applied={applied}
-        hint={
-          provenance?.ownerKey === provenanceOwnerKey &&
-          provenance.property === property
-            ? provenance.loading
-              ? "Resolving…"
-              : provenance.value?.winner
-                ? `${provenance.value.winner.origin} · ${provenance.value.winner.file}`
-                : provenance.value?.origin
-            : undefined
-        }
         motionModeActive={motionTimelineOpen}
         motionTrackActive={motionProperties.includes(property)}
         onAddMotionKeyframe={onOpenMotionTimeline}
-        onInspect={inspectStyle}
         onPreviewStyles={previewSelectedStyles}
         onCancelPreview={clearSelectedStylePreview}
         onCommitStyles={commitSelectedStyles}
@@ -2606,6 +2498,7 @@ export const DesignInspector = React.memo(function DesignInspector({
       ref={inspectorRef}
       id={inspectorId}
       data-design-inspector=""
+      data-design-source-filter={fieldOrigins.filter ? "" : undefined}
       className="bg-bg1 relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
     >
       <PanelHeader data-design-style-panel-header="" size="window">
@@ -2692,6 +2585,14 @@ export const DesignInspector = React.memo(function DesignInspector({
         <ScrollArea className="min-h-0 flex-1">
           <div className="flex flex-col pb-6">
             {inspectorSelectionHeader}
+            {styleContext && elementDetails && fieldOrigins.styledBy ? (
+              <DesignStyledByLine
+                key={styleOwnerKey}
+                styledBy={fieldOrigins.styledBy}
+                filter={fieldOrigins.filter}
+                onFilter={(key) => setSourceFilter(key ? { owner: styleOwnerKey, key } : null)}
+              />
+            ) : null}
 
             {styleTargetNodeId && errors.length > 0 ? (
               <Tooltip label={`${firstBlockingReason}: ${errors[0]?.message}`}>
@@ -2706,8 +2607,18 @@ export const DesignInspector = React.memo(function DesignInspector({
 
             {styleContext && elementDetails ? (
               <DesignStyleOriginLabelContext.Provider value={styleOriginLabel}>
+                <DesignFieldOriginsContext.Provider value={fieldOrigins}>
                 <DesignTokenCatalogContext.Provider value={tokenCatalog}>
                 <DesignTokenDetachContext.Provider value={detachSelectedToken}>
+                <DesignFieldOverlays
+                  rootRef={inspectorRef}
+                  active={active}
+                  ownerKey={styleOwnerKey}
+                  origins={fieldOrigins}
+                  disabled={!active || pendingHistoryActions > 0}
+                  onChooseToken={chooseFieldToken}
+                  onReset={resetField}
+                >
                   <DesignStyleEditor
                     key={styleOwner.key}
                     details={elementDetails}
@@ -2735,8 +2646,10 @@ export const DesignInspector = React.memo(function DesignInspector({
                     motionProperties={motionProperties}
                     onOpenMotionTimeline={onOpenMotionTimeline}
                   />
+                </DesignFieldOverlays>
                 </DesignTokenDetachContext.Provider>
                 </DesignTokenCatalogContext.Provider>
+                </DesignFieldOriginsContext.Provider>
               </DesignStyleOriginLabelContext.Provider>
             ) : workspaceId && !frameSelected && !selectedNodeId ? (
               <DesignCanvasBackgroundEditor

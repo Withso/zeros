@@ -33,6 +33,7 @@ import {
   type DesignFillType,
   type DesignGradientValue,
 } from "./design-fill-values";
+import { useDesignFieldOrigin } from "./design-field-origins";
 import { useDesignHistoryHandBack } from "./use-design-history-step";
 
 interface DesignFillEditorProps {
@@ -44,9 +45,7 @@ interface DesignFillEditorProps {
   disabled?: boolean;
   /** The token a solid fill's winning declaration reads, if any. */
   tokenName?: string;
-  tokenDescription?: string;
   tokenMissing?: boolean;
-  tokenDetachHint?: string;
   onDetachToken?: () => void;
   /** The selected layers' fills differ: the row reads "Mixed" behind a
    * neutral swatch; a fill chosen in the popover or typed sets all of them. */
@@ -118,15 +117,14 @@ export function DesignFillEditor({
   repeat,
   disabled,
   tokenName,
-  tokenDescription,
   tokenMissing,
-  tokenDetachHint,
   onDetachToken,
   mixed = false,
   onPreview,
   onCancelPreview,
   onCommit,
 }: DesignFillEditorProps) {
+  const origin = useDesignFieldOrigin("background-color");
   const fillType = mixed ? "solid" : classifyDesignFill(image);
   const gradient = parseDesignGradient(image);
   const swatch = (
@@ -164,6 +162,9 @@ export function DesignFillEditor({
     <div
       data-design-color-field=""
       data-design-style-property="background-color"
+      data-design-field-label="Fill"
+      data-design-origin={origin.mark}
+      data-design-filter-out={origin.hidden ? "" : undefined}
       className="group/design-field zd-field relative min-w-0 gap-0 pl-1"
     >
       {popover}
@@ -173,9 +174,7 @@ export function DesignFillEditor({
           label="Fill"
           disabled={disabled}
           tokenName={tokenName}
-          tokenDescription={tokenDescription}
           tokenMissing={tokenMissing}
-          tokenDetachHint={tokenDetachHint}
           onDetachToken={onDetachToken}
           mixed={mixed}
           onPreview={(next) => onPreview?.({ "background-color": next })}

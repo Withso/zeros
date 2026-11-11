@@ -196,7 +196,7 @@ const AUTHORED_SHORTHAND_TARGETS: Readonly<Record<string, readonly string[]>> =
     ],
   };
 
-function authoredDeclarationAffects(
+export function authoredDeclarationAffects(
   authoredProperty: string,
   inspectedProperty: string,
 ): boolean {

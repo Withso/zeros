@@ -23,6 +23,9 @@ import {
 import { designColorTokenValue } from "./design-color-tokens";
 import { designTokenGroups } from "./design-token-catalog";
 import { useDesignTokens } from "./design-token-context";
+import { checkerboardBackground, DesignColorSwatch } from "./design-color-swatch";
+import { useDesignFieldOrigin } from "./design-field-origins";
+import { useDesignFieldOverlays } from "./design-field-overlays";
 import {
   DesignTokenDetachButton,
   DesignTokenPill,
@@ -142,16 +145,6 @@ function sameDesignColor(left: string, right: string): boolean {
   return Boolean(a && b && formatDesignColor(a) === formatDesignColor(b));
 }
 
-function checkerboardBackground(): React.CSSProperties {
-  return {
-    backgroundColor: "var(--bg1)",
-    backgroundImage:
-      "linear-gradient(45deg,var(--border2) 25%,transparent 25%),linear-gradient(-45deg,var(--border2) 25%,transparent 25%),linear-gradient(45deg,transparent 75%,var(--border2) 75%),linear-gradient(-45deg,transparent 75%,var(--border2) 75%)",
-    backgroundPosition: "0 0,0 4px,4px -4px,-4px 0",
-    backgroundSize: "8px 8px",
-  };
-}
-
 function safeCancel(handler: DesignColorCallbacks["onCancelPreview"]) {
   if (!handler) return;
   void Promise.resolve(handler()).catch(() => {});
@@ -195,34 +188,7 @@ function restoreFailedPreview(
   });
 }
 
-export function DesignColorSwatch({
-  value,
-  className,
-  mixed = false,
-}: {
-  value: string;
-  className?: string;
-  /** Several differing colors: a neutral swatch that shows none of them. */
-  mixed?: boolean;
-}) {
-  return (
-    <span
-      className={cn(
-        "relative block shrink-0 overflow-hidden rounded-sm shadow-[inset_0_0_0_1px_var(--border3)]",
-        mixed && "bg-bg2-hover",
-        className,
-      )}
-      style={mixed ? undefined : checkerboardBackground()}
-      aria-hidden="true"
-      data-design-color-mixed={mixed ? "" : undefined}
-    >
-      {mixed ? null : (
-        <span className="absolute inset-0" style={{ background: value }} />
-      )}
-      <span className="absolute inset-0 rounded-[inherit] shadow-[inset_0_0_0_1px_var(--border3)]" />
-    </span>
-  );
-}
+export { DesignColorSwatch };
 
 // --- PANEL ---
 
@@ -1067,8 +1033,6 @@ interface DesignColorFieldProps extends DesignColorCallbacks {
   /** A design token the winning declaration reads, shown in place of the hex
    * while the field is unfocused and unedited. */
   tokenName?: string;
-  /** Token, declaring source and resolved value, for hover and assistive tech. */
-  tokenDescription?: string;
   /** False keeps only Custom, for a color inside a composed value. */
   tokenPicker?: boolean;
   /** The selected layers' colors differ: the row reads "Mixed" behind a
@@ -1076,8 +1040,6 @@ interface DesignColorFieldProps extends DesignColorCallbacks {
   mixed?: boolean;
   /** The token the field reads is no longer declared. */
   tokenMissing?: boolean;
-  /** Detach's hint when the token's value differs by theme. */
-  tokenDetachHint?: string;
   /** Writes each selected layer's own resolved colour over its token. */
   onDetachToken?: () => void;
 }
@@ -1094,9 +1056,7 @@ export function DesignColorValueInputs({
   label,
   disabled = false,
   tokenName,
-  tokenDescription,
   tokenMissing = false,
-  tokenDetachHint,
   onDetachToken,
   mixed = false,
   onPreview,
@@ -1108,9 +1068,7 @@ export function DesignColorValueInputs({
   | "label"
   | "disabled"
   | "tokenName"
-  | "tokenDescription"
   | "tokenMissing"
-  | "tokenDetachHint"
   | "onDetachToken"
   | "mixed"
   | "onPreview"
@@ -1119,6 +1077,7 @@ export function DesignColorValueInputs({
 >) {
   const [typingOverToken, setTypingOverToken] = useState(false);
   const [hexFocused, setHexFocused] = useState(false);
+  const overlays = useDesignFieldOverlays();
   const previewOwner = useDesignColorPreviewOwner();
   const [acceptedValue, setAcceptedValue] = useState(value);
   const confirmedValueRef = useRef(value);
@@ -1239,6 +1198,14 @@ export function DesignColorValueInputs({
         skipRef.current = true;
         restore();
         event.currentTarget.blur();
+      } else if (event.key === "Backspace" && event.altKey && !event.metaKey && !event.ctrlKey) {
+        // Reset: the draft is dropped so blur cannot write it back.
+        event.preventDefault();
+        skipRef.current = true;
+        restore();
+        const input = event.currentTarget;
+        input.blur();
+        overlays.resetField(input);
       } else if (
         (event.key === "ArrowUp" || event.key === "ArrowDown") &&
         event.currentTarget === alphaRef.current
@@ -1272,7 +1239,7 @@ export function DesignColorValueInputs({
         <span className="relative flex min-w-0 flex-1 items-center self-stretch pr-1 pl-1">
           <DesignTokenPill
             label={label}
-            token={{ name: tokenName!, description: tokenDescription ?? tokenLabel, missing: tokenMissing }}
+            token={{ name: tokenName!, missing: tokenMissing }}
             disabled={disabled}
             onType={(key) => {
               setTypingOverToken(true);
@@ -1292,7 +1259,6 @@ export function DesignColorValueInputs({
             data-design-token-action={tokenMissing ? "always" : "hover"}
           >
             <DesignTokenDetachButton
-              hint={tokenDetachHint}
               disabled={disabled}
               onDetach={() => {
                 if (onDetachToken) onDetachToken();
@@ -1376,21 +1342,23 @@ export function DesignColorField({
   swatch,
   property,
   tokenName,
-  tokenDescription,
   tokenPicker,
   mixed = false,
   tokenMissing,
-  tokenDetachHint,
   onDetachToken,
   onPreview,
   onCancelPreview,
   onCommit,
 }: DesignColorFieldProps) {
+  const origin = useDesignFieldOrigin(property);
   return (
     <DesignColorPreviewScope>
     <div
       data-design-color-field=""
       data-design-style-property={property}
+      data-design-field-label={label}
+      data-design-origin={origin.mark}
+      data-design-filter-out={origin.hidden ? "" : undefined}
       className={cn("group/design-field zd-field relative min-w-0 gap-0 pl-1", className)}
     >
       {swatch ?? (
@@ -1415,9 +1383,7 @@ export function DesignColorField({
         label={label}
         disabled={disabled}
         tokenName={tokenName}
-        tokenDescription={tokenDescription}
         tokenMissing={tokenMissing}
-        tokenDetachHint={tokenDetachHint}
         onDetachToken={onDetachToken}
         mixed={mixed}
         onPreview={onPreview}

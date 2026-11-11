@@ -12,10 +12,10 @@ import {
   Input,
   Pill,
   Popover,
+  PopoverAnchor,
   PopoverContent,
-  Tooltip,
 } from "../../shared/ui/primitives";
-import { DesignColorSwatch } from "./design-color-picker";
+import { DesignColorSwatch } from "./design-color-swatch";
 import {
   focusDesignPopoverSurface,
   InspectorPopoverAnchor,
@@ -34,8 +34,6 @@ import { useDesignTokens } from "./design-token-context";
 export interface DesignFieldToken {
   /** Custom property name, with its leading dashes. */
   name: string;
-  /** Hover text: the token, its source, and what it resolves to. */
-  description: string;
   /** The frame no longer declares it. */
   missing: boolean;
 }
@@ -52,36 +50,35 @@ export const DesignTokenPill = React.forwardRef<
   }
 >(function DesignTokenPill({ label, token, onType, onKeyDown, className, ...props }, ref) {
   const name = token.name.replace(/^--/, "");
+  // Its source and value are on the panel's hover card.
   return (
-    <Tooltip label={token.description}>
-      <Pill
-        ref={ref}
-        tone={token.missing ? "missing" : "token"}
-        aria-label={
-          token.missing ? `${label}: missing token ${name}` : `${label}: token ${name}`
+    <Pill
+      ref={ref}
+      tone={token.missing ? "missing" : "token"}
+      aria-label={
+        token.missing ? `${label}: missing token ${name}` : `${label}: token ${name}`
+      }
+      data-design-style-token={token.name}
+      data-design-token-missing={token.missing ? "" : undefined}
+      className={cn("min-w-0 max-w-full", className)}
+      onKeyDown={(event) => {
+        onKeyDown?.(event);
+        if (event.defaultPrevented || !onType) return;
+        if (
+          event.key.length === 1 &&
+          event.key !== " " &&
+          !event.metaKey &&
+          !event.ctrlKey &&
+          !event.altKey
+        ) {
+          event.preventDefault();
+          onType(event.key);
         }
-        data-design-style-token={token.name}
-        data-design-token-missing={token.missing ? "" : undefined}
-        className={cn("min-w-0 max-w-full", className)}
-        onKeyDown={(event) => {
-          onKeyDown?.(event);
-          if (event.defaultPrevented || !onType) return;
-          if (
-            event.key.length === 1 &&
-            event.key !== " " &&
-            !event.metaKey &&
-            !event.ctrlKey &&
-            !event.altKey
-          ) {
-            event.preventDefault();
-            onType(event.key);
-          }
-        }}
-        {...props}
-      >
-        <span>{token.missing ? `${name} is missing` : name}</span>
-      </Pill>
-    </Tooltip>
+      }}
+      {...props}
+    >
+      <span>{token.missing ? `${name} is missing` : name}</span>
+    </Pill>
   );
 });
 
@@ -89,31 +86,26 @@ export { designTokenDetachHint };
 
 /** Detach, at the end of a field holding a token. Its `.zd-field-token-detach`
  * wrapper shows it on hover and focus within the field, always for a missing
- * token. */
+ * token; what a theme-dependent token loses is on the panel's hover card. */
 export function DesignTokenDetachButton({
-  hint,
   disabled,
   onDetach,
 }: {
-  /** What Detach writes when the token differs by theme. */
-  hint?: string;
   disabled?: boolean;
   onDetach: () => void;
 }) {
   return (
-    <Tooltip label={hint ?? "Detach token"}>
-      <IconButton
-        size="inline"
-        label="Detach token"
-        disabled={disabled}
-        data-design-token-detach=""
-        className="mr-0.5"
-        onPointerDown={(event) => event.stopPropagation()}
-        onClick={onDetach}
-      >
-        <Unlink />
-      </IconButton>
-    </Tooltip>
+    <IconButton
+      size="inline"
+      label="Detach token"
+      disabled={disabled}
+      data-design-token-detach=""
+      className="mr-0.5"
+      onPointerDown={(event) => event.stopPropagation()}
+      onClick={onDetach}
+    >
+      <Unlink />
+    </IconButton>
   );
 }
 
@@ -308,6 +300,24 @@ export function designTokenListGroups(groups: readonly DesignTokenGroup[]): Desi
   }));
 }
 
+/** Where the panel's popovers attach for a field: level with the field,
+ * at the panel's own left edge so nothing covers the panel's other fields;
+ * without a panel, 12px left of the field, as InspectorPopoverAnchor marks. */
+export function designFieldEdgeAnchor(
+  element: HTMLElement,
+  panel?: HTMLElement | null,
+): React.RefObject<{ getBoundingClientRect: () => DOMRect }> {
+  return {
+    current: {
+      getBoundingClientRect: () => {
+        const rect = element.getBoundingClientRect();
+        const left = panel ? panel.getBoundingClientRect().left : rect.left - 12;
+        return new DOMRect(left, rect.top, 0, rect.height);
+      },
+    },
+  };
+}
+
 /** The token picker for one field: the tokens of its own type, by role.
  * The caller renders it only while open, beside the field's pill or input,
  * so a closed picker mounts nothing. */
@@ -322,6 +332,8 @@ export function DesignTokenPicker({
   onOpenChange,
   onChoose,
   trigger,
+  anchor,
+  panel,
 }: {
   label: string;
   accepts: readonly DesignTokenType[];
@@ -338,8 +350,13 @@ export function DesignTokenPicker({
   /** The control that opened it, such as the pill: a press on it closes the
    * picker rather than reopening it, and focus returns to it on close. */
   trigger?: React.RefObject<HTMLElement | null>;
+  /** The field it belongs to, when the panel's one picker opens for it. */
+  anchor?: HTMLElement | null;
+  /** The panel the picker opens beside. */
+  panel?: HTMLElement | null;
 }) {
   const [query, setQuery] = useState("");
+  const edge = useMemo(() => (anchor ? designFieldEdgeAnchor(anchor, panel) : null), [anchor, panel]);
   return (
     <Popover
       open={open}
@@ -348,7 +365,7 @@ export function DesignTokenPicker({
         onOpenChange(next);
       }}
     >
-      <InspectorPopoverAnchor />
+      {edge ? <PopoverAnchor virtualRef={edge} /> : <InspectorPopoverAnchor />}
       <PopoverContent
         data-design-popover=""
         data-design-token-picker=""

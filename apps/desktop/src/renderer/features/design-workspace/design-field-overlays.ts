@@ -1,0 +1,45 @@
+// PURPOSE: The Style panel's overlay API for its fields: the one token
+// picker and Reset, reached through context. No components here, so fields
+// and the overlays that serve them can both import it.
+
+import { createContext, useContext } from "react";
+
+import type { DesignTokenType } from "./design-token-catalog";
+import type { DesignTokenListGroup } from "./design-token-picker";
+
+/** A picker request from a control that is not an ordinary style field, such
+ * as Typography's Style row. */
+export interface DesignPickerRequest {
+  field: HTMLElement;
+  label: string;
+  accepts: readonly DesignTokenType[];
+  rows?: readonly DesignTokenListGroup[];
+  kind?: string;
+  activeName: string | null;
+  onChoose: (name: string) => void;
+  /** The control focus goes back to; it toggles the picker closed. */
+  trigger?: HTMLElement | null;
+}
+
+export interface DesignFieldOverlaysApi {
+  openPicker(request: DesignPickerRequest): void;
+  /** Opens the picker for a style field from its own attributes; false
+   * when the field takes no tokens the frame offers. */
+  openPickerForField(field: HTMLElement, trigger?: HTMLElement | null): boolean;
+  /** Reset for the field the element belongs to (Alt+Backspace). A text
+   * input calls it after dropping its draft, so blur cannot write it back. */
+  resetField(element: HTMLElement): void;
+}
+
+const NO_OVERLAYS: DesignFieldOverlaysApi = {
+  openPicker: () => {},
+  openPickerForField: () => false,
+  resetField: () => {},
+};
+
+export const DesignFieldOverlaysContext = createContext<DesignFieldOverlaysApi>(NO_OVERLAYS);
+
+export function useDesignFieldOverlays(): DesignFieldOverlaysApi {
+  return useContext(DesignFieldOverlaysContext);
+}
+
