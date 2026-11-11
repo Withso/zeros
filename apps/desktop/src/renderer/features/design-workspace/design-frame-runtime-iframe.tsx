@@ -31,6 +31,7 @@ import {
   reconcileDesignRuntimeSnapshot,
   settleDesignSelectionDetails,
 } from "./state/design-selection";
+import { forgetDesignHeldStateRelease } from "./state/design-held-state";
 import {
   reconcileDesignWorkspaceRuntimeAudit,
   refreshDesignWorkspaceSnapshot,
@@ -468,6 +469,7 @@ function DesignFrameDocumentBuffer({
         },
         onPainted: () => setPresentedRuntime(connection),
         onPlaybackStopped: ({ sessionId }) => latestRef.current.onPlaybackStopped?.(sessionId),
+        onStateReleased: ({ holdId }) => forgetDesignHeldStateRelease(workspaceId, frame.file, holdId),
         onSnapshot: (snapshot, event) => {
           if (event !== "ready") {
             onSnapshot(snapshot);

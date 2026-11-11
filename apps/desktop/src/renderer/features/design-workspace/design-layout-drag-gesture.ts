@@ -54,6 +54,11 @@ export function startDesignLayoutDrag(input: {
   finished: () => void;
   clicked: () => void;
   failed: (error: unknown) => void;
+  /** The layer shows a held state: measure nothing until the press becomes
+   * a drag, since its held box is not where it rests. */
+  held?: boolean;
+  /** The press became a drag; called before the drag's first request. */
+  activated?: () => void;
   saving?: (save: Promise<void>) => void;
   copied?: (frame: DesignCanvasFrameWire, nodeId: string) => void;
   isCurrent?: () => boolean;
@@ -429,6 +434,7 @@ export function startDesignLayoutDrag(input: {
         DESIGN_MOVE_ACTIVATION_PIXELS
     )
       return;
+    if (!moved) input.activated?.();
     moved = true;
     sample++;
     if (preparationFailure) {
@@ -706,8 +712,11 @@ export function startDesignLayoutDrag(input: {
   // the activation travel, so the first move past it previews the layer at
   // once instead of waiting for that read. A click only discards the result;
   // a failure is reported by the first move, as it was when measured there.
-  void prepare().catch((error: unknown) => {
-    preparationFailure = { error };
-  });
+  // A held layer is measured only once the drag has let go of its state.
+  if (!input.held) {
+    void prepare().catch((error: unknown) => {
+      preparationFailure = { error };
+    });
+  }
   return cancelPointerGesture;
 }

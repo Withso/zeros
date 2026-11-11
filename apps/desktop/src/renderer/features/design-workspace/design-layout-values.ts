@@ -30,7 +30,9 @@ export type DesignLayoutAction =
   | { type: "center"; target?: DesignLayoutActionTarget }
   /** Out of its parent's auto layout, at the box it occupies now. */
   | { type: "place-freely" }
-  | { type: "rotate"; delta: number }
+  /** `bases`: each layer's own rotation when the Mixed scrub began, so a
+   * preview followed by its commit turns by the delta once. */
+  | { type: "rotate"; delta: number; bases?: Readonly<Record<string, number>> }
   | { type: "rotation"; value: number }
   | { type: "flip"; axis: DesignLayoutAxis }
   | {
@@ -50,8 +52,11 @@ export type DesignLayoutAction =
   | { type: "distribute"; axis: DesignLayoutAxis }
   | { type: "resize-fit" }
   | { type: "resize-fill" }
-  | { type: "position"; axis: DesignLayoutAxis; value: number }
-  | { type: "size"; axis: DesignLayoutAxis; value: number };
+  /** With `by`, `value` is an amount from each layer's own position or
+   * size (a Mixed field's scrub), measured from `bases` when given: the value
+   * each layer had when the scrub began, before its own preview moved it. */
+  | { type: "position"; axis: DesignLayoutAxis; value: number; by?: boolean; bases?: Readonly<Record<string, number>> }
+  | { type: "size"; axis: DesignLayoutAxis; value: number; by?: boolean; bases?: Readonly<Record<string, number>> };
 
 /** In-field glyphs the inspector kit draws (design-inspector-kit.tsx). */
 export type InspectorGlyphName =
@@ -439,6 +444,14 @@ export function designLayoutFieldValue(
   return roundDesignLayoutValue(style(details, property));
 }
 
+/** What a relative layout step moves from on one layer: its position, size
+ * or own rotation as the field reads it. */
+export function designLayoutStepBase(details: DesignRuntimeNodeDetails, property: string): number {
+  if (property === "rotate") return ownRotation(details);
+  if (property === "width" || property === "height") return borderSize(details, property === "width" ? "x" : "y");
+  return Number.parseFloat(designLayoutFieldValue(details, property)) || 0;
+}
+
 /** Custom properties describe pin intent that computed pixel insets alone
  * cannot recover. The actual resizing is ordinary CSS; no resize script or
  * private sidecar is needed. Only directly authored markers are read. */
@@ -590,7 +603,7 @@ export function designLayoutActionStyles(
   if (action.type === "rotate" || action.type === "rotation") {
     const rotation =
       action.type === "rotate"
-        ? ownRotation(details) + action.delta
+        ? (action.bases?.[details.oid] ?? ownRotation(details)) + action.delta
         : action.value -
           parseDesignTransform(style(details, "transform")).rotate;
     if (!Number.isFinite(rotation)) throw new Error("Enter a finite angle.");
@@ -615,10 +628,13 @@ export function designLayoutActionStyles(
   const { axis } = action;
   const keys = AXES[axis];
   if (action.type === "size") {
-    if (!Number.isFinite(action.value) || action.value < 0)
+    const target = action.by
+      ? Math.max(0, (action.bases?.[details.oid] ?? borderSize(details, axis)) + action.value)
+      : action.value;
+    if (!Number.isFinite(target) || target < 0)
       throw new Error("Enter a size of zero or more.");
     const result: Record<string, string | null> = {
-      [keys.size]: cssSize(details, axis, Math.round(action.value)),
+      [keys.size]: cssSize(details, axis, Math.round(target)),
     };
     if (
       designLayoutMode(details.layout?.parentDisplay ?? "") === "flex" &&
@@ -642,9 +658,12 @@ export function designLayoutActionStyles(
   const layout = details.layout;
   const position = style(details, "position");
   if (action.type === "position") {
-    if (!Number.isFinite(action.value))
+    const target = action.by
+      ? (action.bases?.[details.oid] ?? designLayoutStepBase(details, axis === "x" ? "left" : "top")) + action.value
+      : action.value;
+    if (!Number.isFinite(target))
       throw new Error("Enter a finite position.");
-    const value = Math.round(action.value);
+    const value = Math.round(target);
     const offset =
       (position === "absolute" || position === "fixed") &&
       (!layout || layout.isContainingBlock)

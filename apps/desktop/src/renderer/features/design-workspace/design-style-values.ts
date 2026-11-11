@@ -1,3 +1,5 @@
+import type { DesignRuntimeNodeDetails } from "@zeros/protocol/design-runtime";
+
 const CSS_PROPERTY = /^(?:--[A-Za-z0-9_-]+|-?[a-z][a-z0-9-]*)$/;
 
 function withoutCssComments(source: string): string {
@@ -759,6 +761,9 @@ export function clampDesignStyleFieldValue(
     .join(" ");
 }
 
+/** A typed value as CSS will take it: an expression worked out and a bare
+ * number given the property's unit. A negative stays negative, for the field
+ * to refuse (designStyleFieldRefusal). */
 export function normalizeDesignStyleFieldInput(
   property: string,
   input: string,
@@ -767,13 +772,8 @@ export function normalizeDesignStyleFieldInput(
   const normalizedProperty = cssStyleProperty(property);
   const resolved = resolveDesignNumericExpression(input, baseline);
   const parsed = parseDesignNumericValue(resolved);
-  if (!parsed || parsed.unit)
-    return clampDesignStyleFieldValue(normalizedProperty, resolved);
-  const number = formatDesignNumber(
-    DESIGN_NON_NEGATIVE_PROPERTIES.has(normalizedProperty)
-      ? Math.max(0, parsed.number)
-      : parsed.number,
-  );
+  if (!parsed || parsed.unit) return resolved;
+  const number = formatDesignNumber(parsed.number);
   if (normalizedProperty === "rotate") return `${number}deg`;
   if (DESIGN_PX_DEFAULT_PROPERTIES.has(normalizedProperty)) {
     return `${number}px`;
@@ -781,7 +781,13 @@ export function normalizeDesignStyleFieldInput(
   if (DESIGN_MS_DEFAULT_PROPERTIES.has(normalizedProperty)) {
     return `${number}ms`;
   }
-  return clampDesignStyleFieldValue(normalizedProperty, resolved);
+  return resolved;
+}
+
+/** Why CSS would reject a typed value, if it would: a negative number for a
+ * property that cannot be negative, in any component of a shorthand. */
+export function designStyleFieldRefusal(property: string, value: string): "negative" | null {
+  return clampDesignStyleFieldValue(property, value) === value ? null : "negative";
 }
 
 /** Whether a preview needs browser layout readback to keep the selected box,
@@ -799,12 +805,17 @@ export function designStylePropertyAffectsLayout(property: string): boolean {
   );
 }
 
+class DesignDivisionByZero extends Error {}
+
 class NumericExpressionParser {
   private index = 0;
+  /** Every unit written in the expression; x brings the baseline's. */
+  readonly units = new Set<string>();
 
   constructor(
     private readonly source: string,
     private readonly baseline: number,
+    private readonly baselineUnit = "",
   ) {}
 
   parse(): number {
@@ -840,8 +851,11 @@ class NumericExpressionParser {
     let value = this.power();
     while (true) {
       if (this.match("*")) value *= this.power();
-      else if (this.match("/")) value /= this.power();
-      else return value;
+      else if (this.match("/")) {
+        const divisor = this.power();
+        if (divisor === 0) throw new DesignDivisionByZero();
+        value /= divisor;
+      } else return value;
     }
   }
 
@@ -866,45 +880,160 @@ class NumericExpressionParser {
     }
     if ((this.source[this.index] ?? "").toLocaleLowerCase() === "x") {
       this.index += 1;
+      if (this.baselineUnit) this.units.add(this.baselineUnit);
       return this.baseline;
     }
     const remainder = this.source.slice(this.index);
-    const match = /^(?:\d+(?:\.\d*)?|\.\d+)/.exec(remainder);
-    if (!match?.[0]) throw new Error("Expected a number.");
+    const match = /^(\d+(?:\.\d*)?|\.\d+)(%|[a-z]+)?/i.exec(remainder);
+    if (!match?.[1]) throw new Error("Expected a number.");
     this.index += match[0].length;
-    return Number(match[0]);
+    if (match[2]) this.units.add(match[2].toLocaleLowerCase());
+    return Number(match[1]);
   }
 }
 
-/** Resolve compact design-tool equations (+10, *2, or x-based arithmetic)
- * against the value captured on focus. Ordinary absolute CSS values pass
- * through unchanged. */
-export function resolveDesignNumericExpression(
+export type DesignExpressionResult = { value: string } | { refused: "mixed-units" | "division" };
+
+/** Work out compact design-tool maths (24*2, +8, x/2, 50%/2) against the
+ * value captured on focus. A unit written in it is the result's unit (50%/2
+ * is 25%); otherwise the baseline's. Two different units are refused, as is
+ * a division by zero. Null for anything that is not such maths: a plain
+ * value or a CSS function stays for the field and CSS to judge. */
+export function evaluateDesignNumericExpression(
   input: string,
   baseline: string,
-): string {
+): DesignExpressionResult | null {
   const source = input.trim();
   const prior = parseDesignNumericValue(baseline);
-  if (!prior || !source) return input;
+  if (!prior || !source) return null;
   const absolute = parseDesignNumericValue(source);
   if (
     absolute &&
     !absolute.unit &&
     /^-\s*(?:\d+(?:\.\d*)?|\.\d+)\s*$/.test(source)
   ) {
-    return `${formatDesignNumber(absolute.number)}${prior.unit}`;
+    return { value: `${formatDesignNumber(absolute.number)}${prior.unit}` };
   }
-  if (absolute?.unit || (!/[xX()+*/^]/.test(source) && !/^[+-]/.test(source))) {
-    return input;
-  }
+  if (absolute?.unit || (!/[xX()+*/^]/.test(source) && !/^[+-]/.test(source))) return null;
+  // A CSS function keeps its own maths: the panel never rewrites it.
+  if (/[a-z]{2,}\s*\(/i.test(source)) return null;
   const expression =
     /^[+*/^]/.test(source) || /^-\s*\d/.test(source) ? `x${source}` : source;
+  const parser = new NumericExpressionParser(expression, prior.number, prior.unit.toLocaleLowerCase());
+  let value: number;
   try {
-    const value = new NumericExpressionParser(expression, prior.number).parse();
-    return `${formatDesignNumber(value)}${prior.unit}`;
-  } catch {
-    return input;
+    value = parser.parse();
+  } catch (error) {
+    if (error instanceof DesignDivisionByZero) return { refused: "division" };
+    return null;
   }
+  if (parser.units.size > 1) return { refused: "mixed-units" };
+  const unit = parser.units.values().next().value ?? prior.unit;
+  return { value: `${formatDesignNumber(value)}${unit}` };
+}
+
+/** Resolve compact design-tool equations (+10, *2, or x-based arithmetic)
+ * against the value captured on focus. Ordinary absolute CSS values, and
+ * maths the field refuses, pass through unchanged. */
+export function resolveDesignNumericExpression(
+  input: string,
+  baseline: string,
+): string {
+  const result = evaluateDesignNumericExpression(input, baseline);
+  return result && "value" in result ? result.value : input;
+}
+
+/** What a unit is measured against, for converting a value between units:
+ * the reference a percentage resolves against, the root and element font
+ * sizes in px. A missing basis means that unit is not offered. */
+export interface DesignLengthBasis {
+  percent?: number;
+  rem?: number;
+  em?: number;
+}
+
+function designUnitPixels(unit: string, basis: DesignLengthBasis): number | null {
+  if (unit === "px") return 1;
+  const reference = unit === "%" ? basis.percent : unit === "rem" ? basis.rem : unit === "em" ? basis.em : undefined;
+  if (reference === undefined || !(reference > 0) || !Number.isFinite(reference)) return null;
+  return unit === "%" ? reference / 100 : reference;
+}
+
+/** The value in another unit, measured against its basis: 12px of a 400px
+ * parent is 3%. Percent, rem and em round to two decimals, px to a whole
+ * number in a whole-number field. Null without a basis or a number. */
+export function convertDesignLength(
+  value: string,
+  unit: string,
+  basis: DesignLengthBasis,
+  options: { whole?: boolean } = {},
+): string | null {
+  if (unit === "auto") return "auto";
+  const parsed = parseDesignNumericValue(value);
+  if (!parsed) return null;
+  const from = designUnitPixels(parsed.unit.toLocaleLowerCase() || "px", basis);
+  const to = designUnitPixels(unit, basis);
+  if (from === null || to === null) return null;
+  const converted = (parsed.number * from) / to;
+  const factor = unit === "px" && options.whole ? 1 : 100;
+  return `${formatDesignNumber(Math.round(converted * factor) / factor)}${unit}`;
+}
+
+/** Properties where CSS takes auto as a length. */
+const DESIGN_AUTO_LENGTH_PROPERTIES = new Set([
+  "margin",
+  "margin-top",
+  "margin-right",
+  "margin-bottom",
+  "margin-left",
+  "flex-basis",
+]);
+
+/** The unit menu for a length: px, then percent and rem where their basis is
+ * known, the unit already written if it is another, and Auto where CSS takes
+ * it. Other kinds of value (durations, angles) keep their own units. */
+export function designLengthUnitOptions(
+  property: string,
+  currentUnit: string,
+  basis: DesignLengthBasis,
+): string[] {
+  const normalizedProperty = cssStyleProperty(property);
+  const options = designStyleUnitOptions(normalizedProperty, currentUnit);
+  if (!options.includes("px")) return options;
+  const unit = currentUnit.trim().toLocaleLowerCase();
+  const menu = ["px"];
+  if (options.includes("%") && designUnitPixels("%", basis) !== null) menu.push("%");
+  if (options.includes("rem") && designUnitPixels("rem", basis) !== null) menu.push("rem");
+  if (unit && !menu.includes(unit)) menu.push(unit);
+  if (DESIGN_AUTO_LENGTH_PROPERTIES.has(normalizedProperty)) menu.push("auto");
+  return menu;
+}
+
+/** Each layer of a Mixed field moved by the same number of steps from its
+ * own value, in its own unit and with its own step, stopping at zero where
+ * CSS takes no negative. A layer with no plain number is left out. */
+export function designMixedScrubValues(
+  property: string,
+  layers: readonly { nodeId: string; value: string }[],
+  steps: number,
+  options: { whole: boolean; fine?: boolean },
+): { values: Record<string, string>; skipped: string[] } {
+  const values: Record<string, string> = {};
+  const skipped: string[] = [];
+  for (const layer of layers) {
+    const parsed = parseDesignNumericValue(layer.value);
+    if (!parsed) {
+      skipped.push(layer.nodeId);
+      continue;
+    }
+    const scrub = options.whole ? { step: 1, fine: null } : designScrubStep(property, parsed.unit);
+    const step = options.fine && scrub.fine !== null ? scrub.fine : scrub.step;
+    let number = snapDesignNumberToStep(parsed.number + steps * step, step);
+    if (options.whole) number = Math.round(number);
+    if (number < 0 && DESIGN_NON_NEGATIVE_PROPERTIES.has(cssStyleProperty(property))) number = 0;
+    values[layer.nodeId] = `${formatDesignNumber(number)}${parsed.unit}`;
+  }
+  return { values, skipped };
 }
 
 /** The history key a Style commit carries: continuous edits of the same
@@ -918,4 +1047,66 @@ export function designStyleCommitCoalesceKey(
 ): string {
   const key = `styles:${nodeIds.join(":")}:${properties.join(":")}`;
   return intent ? `${intent}:${crypto.randomUUID()}:${key}` : key;
+}
+
+/** A length the layer's own winning declaration writes as a plain number
+ * with a unit (50%, 1rem): what the field shows, so its unit is the one
+ * written. Anything else (a token, calc(), a unitless line height) is left
+ * to the computed value. */
+export function designAuthoredLength(details: DesignRuntimeNodeDetails, property: string): string | null {
+  const value = details.authoredStyles?.[property]?.value;
+  if (!value) return null;
+  const parsed = parseDesignNumericValue(value);
+  return parsed && parsed.unit && designStyleUnitOptions(property, parsed.unit).length > 0 ? value.trim() : null;
+}
+
+/** Percentages that resolve against the containing block's width, height. */
+const DESIGN_WIDTH_PERCENT_PROPERTIES = new Set([
+  "width", "min-width", "max-width", "left", "right", "text-indent", "column-gap", "flex-basis",
+  "padding", "padding-top", "padding-right", "padding-bottom", "padding-left",
+  "margin", "margin-top", "margin-right", "margin-bottom", "margin-left",
+]);
+const DESIGN_HEIGHT_PERCENT_PROPERTIES = new Set(["height", "min-height", "max-height", "top", "bottom", "row-gap"]);
+
+function finitePositive(value: number | undefined): number | undefined {
+  return value !== undefined && Number.isFinite(value) && value > 0 ? value : undefined;
+}
+
+/** What each unit of a layer's length is measured against, for converting
+ * `current` between units. A basis that cannot be known is left out, so its
+ * unit is not offered. */
+export function designLengthBasis(
+  details: DesignRuntimeNodeDetails,
+  property: string,
+  current: string,
+): DesignLengthBasis {
+  const normalized = cssStyleProperty(property);
+  const rem = finitePositive(details.rootFontSize);
+  const fontSize = finitePositive(Number.parseFloat(readDesignComputedStyle(details.styles, "font-size")));
+  const basis: DesignLengthBasis = {};
+  if (normalized === "font-size") {
+    // Its em and percent are the parent's size, known only from the ratio
+    // the value is already written in.
+    const parsed = parseDesignNumericValue(current);
+    const unit = parsed?.unit.toLocaleLowerCase();
+    const parent = fontSize && parsed && parsed.number > 0
+      ? unit === "em" ? fontSize / parsed.number : unit === "%" ? fontSize / (parsed.number / 100) : undefined
+      : undefined;
+    if (parent) basis.percent = Math.round(parent * 10_000) / 10_000;
+    if (rem) basis.rem = rem;
+    if (parent) basis.em = basis.percent;
+    return basis;
+  }
+  const reference = DESIGN_WIDTH_PERCENT_PROPERTIES.has(normalized)
+    ? details.layout?.percentBasis?.width
+    : DESIGN_HEIGHT_PERCENT_PROPERTIES.has(normalized)
+      ? details.layout?.percentBasis?.height
+      : normalized === "line-height"
+        ? fontSize
+        : undefined;
+  const percent = finitePositive(reference);
+  if (percent) basis.percent = percent;
+  if (rem) basis.rem = rem;
+  if (fontSize) basis.em = fontSize;
+  return basis;
 }

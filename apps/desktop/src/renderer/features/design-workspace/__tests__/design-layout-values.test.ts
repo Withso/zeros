@@ -277,6 +277,16 @@ describe("designer layout values", () => {
     ).toMatchObject({ right: "248px", width: "76px" });
   });
 
+  it("moves or resizes by an amount from each layer's own value, for a Mixed scrub", () => {
+    const details = node();
+    expect(designLayoutActionStyles(details, { type: "size", axis: "x", value: 10, by: true })).toMatchObject({ width: "110px" });
+    expect(designLayoutActionStyles(details, { type: "size", axis: "x", value: -500, by: true })).toMatchObject({ width: "0px" });
+    expect(designLayoutActionStyles(details, { type: "position", axis: "y", value: 5, by: true })).toMatchObject({ top: "35px" });
+    // From the value the scrub began with, not one its preview already moved.
+    expect(designLayoutActionStyles(node({ width: "200px" }), { type: "size", axis: "x", value: 10, by: true, bases: { child: 100 } })).toMatchObject({ width: "110px" });
+    expect(designLayoutActionStyles(details, { type: "rotate", delta: 15, bases: { child: 30 } })).toMatchObject({ rotate: "45deg" });
+  });
+
   it("clears the obsolete far edge when typing a position on a right-pinned child", () => {
     expect(
       designLayoutActionStyles(node({ left: "auto", right: "260px" }), {
