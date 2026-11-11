@@ -136,6 +136,23 @@ export async function runDesignStyleOriginsSmoke({ page, check }) {
   await inspector.getByRole("button", { name: "Show all" }).click();
   check("Show all brings every field back", (await visible()).includes("border-radius"));
 
+  // Font and Weight are no card fields but take part in the filter: a source
+  // that sets only them keeps Typography and both controls; another source
+  // hides them.
+  const shown = (locator) => locator.evaluate((element) => element.getClientRects().length > 0);
+  const font = inspector.locator("[data-design-font-family]");
+  const weight = inspector.locator('[data-design-filter-property="font-weight"]');
+  const typography = inspector.locator("[data-design-typography-section]");
+  await inspector.locator('[data-design-styled-by-source="component:composer"]').click();
+  check(
+    "a source that sets only the font keeps Typography, Font and Weight",
+    (await shown(typography)) && (await shown(font)) && (await shown(weight)),
+    `${await shown(typography)} ${await shown(font)} ${await shown(weight)}`,
+  );
+  await inspector.locator('[data-design-styled-by-source="class:.btn--primary"]').click();
+  check("another source hides Font and Weight", !(await shown(font)) && !(await shown(weight)) && (await shown(typography)));
+  await inspector.getByRole("button", { name: "Show all" }).click();
+
   // Type settings sits in a popover outside the panel; its fields keep the
   // token shortcut, and choosing a token leaves the popover open.
   await inspector.getByRole("button", { name: "Type settings", exact: true }).click();

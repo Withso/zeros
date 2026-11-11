@@ -152,6 +152,7 @@ import {
   designStyleFieldValue,
   designStylePropertyAffectsLayout,
   designStyleUnitOptions,
+  designStyleCommitCoalesceKey,
   isDesignRuntimeStylePropertyAuthored,
   normalizeDesignStyleFieldInput,
   parseDesignStyleNumericParts,
@@ -564,7 +565,7 @@ export function InspectorEditField({
   const showUnit =
     !compact && !tokenShown && Boolean(presentation.unit) && unitOptions.length > 0;
   const motionPersistent = Boolean(motion?.trackActive);
-  const origin = useDesignFieldOrigin(styleProperty);
+  const origin = useDesignFieldOrigin(styleProperty, linkedProperties);
 
   return (
     <div
@@ -1674,6 +1675,7 @@ export const DesignInspector = React.memo(function DesignInspector({
       /** Each layer's own values for the same properties, such as the value
        * a token resolves to on that layer. */
       perNode?: (nodeId: string) => Record<string, string | null>,
+      intent?: "reset" | "token" | "detach",
     ): Promise<void> => {
       const context = styleEditContextRef.current;
       // Retire stale callbacks during render, before passive unmount cleanup.
@@ -1748,7 +1750,7 @@ export const DesignInspector = React.memo(function DesignInspector({
             actor: { kind: "human", id: "desktop" },
             intent: `Set ${properties.join(", ")} on ${updates.length} layers`,
             createdAt: Date.now(),
-            coalesceKey: `styles:${styleNodeIds.join(":")}:${properties.join(":")}`,
+            coalesceKey: designStyleCommitCoalesceKey(styleNodeIds, properties, intent),
             operations: [
               ...updates.map((update) => ({
                 operationId: `styles:${crypto.randomUUID()}`,
@@ -1796,6 +1798,7 @@ export const DesignInspector = React.memo(function DesignInspector({
       void commitSelectedStyles(
         Object.assign({}, ...updates.map((update) => update.styles)),
         (nodeId) => byNode.get(nodeId) ?? {},
+        "detach",
       ).catch((error) =>
         toast.error("Couldn't detach the token", { description: errorMessage(error) }),
       );
@@ -1813,7 +1816,7 @@ export const DesignInspector = React.memo(function DesignInspector({
       void commitSelectedStyles({
         ...companion,
         ...Object.fromEntries(properties.map((property) => [property, next])),
-      }).catch((error) =>
+      }, undefined, "token").catch((error) =>
         toast.error("Couldn't use the token", { description: errorMessage(error) }),
       );
     },
@@ -1834,6 +1837,7 @@ export const DesignInspector = React.memo(function DesignInspector({
       void commitSelectedStyles(
         Object.assign({}, ...updates.map((update) => update.styles)),
         (nodeId) => byNode.get(nodeId) ?? {},
+        "reset",
       ).catch((error) =>
         toast.error("Couldn't reset the value", { description: errorMessage(error) }),
       );

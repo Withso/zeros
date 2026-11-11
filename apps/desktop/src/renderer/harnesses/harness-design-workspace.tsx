@@ -266,7 +266,7 @@ const STYLE_ORIGINS_HOME_SOURCE = `<!doctype html>
     <style data-zeros-source="tokens.css">
       :root { ${STYLE_ORIGINS_MANUAL.map(([name, value]) => `${name}: ${value};`).join(" ")} }
     </style>
-    <style data-zeros-component="composer">.composer-send { font-weight: 500; }</style>
+    <style data-zeros-component="composer">.composer-send { font-weight: 500; font-family: system-ui; }</style>
     <style>
       body { margin: 0; font-family: system-ui; color: var(--fg1); }
       main { display: flex; flex-direction: column; align-items: flex-start; gap: 16px; padding: 48px; }

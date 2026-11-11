@@ -367,6 +367,12 @@ export function isDesignRuntimeAuthoredStyles(
   return isRuntimeAuthoredStyles(value);
 }
 
+/** A declared property name as the runtime reports it: a custom property
+ * or a lowercase CSS property, as its declarationProperties keeps them. */
+function isRuntimeAuthoredPropertyName(value: unknown): boolean {
+  return typeof value === "string" && value.length <= 64 && /^(?:--[A-Za-z0-9_-]+|-?[a-z][a-z0-9-]*)$/.test(value);
+}
+
 function isRuntimeAuthoredStyles(value: unknown): boolean {
   if (!isRecord(value)) return false;
   const entries = Object.entries(value);
@@ -374,8 +380,7 @@ function isRuntimeAuthoredStyles(value: unknown): boolean {
     return false;
   return entries.every(([property, style]) => {
     if (
-      property.length > 64 ||
-      !/^(?:--[A-Za-z0-9_-]+|-?[a-z][a-z0-9-]*)$/.test(property) ||
+      !isRuntimeAuthoredPropertyName(property) ||
       !isRecord(style) ||
       typeof style.value !== "string" ||
       style.value.length > DESIGN_RUNTIME_AUTHORED_STYLE_LIMITS.value ||
@@ -384,10 +389,7 @@ function isRuntimeAuthoredStyles(value: unknown): boolean {
         (typeof style.selector !== "string" || style.selector.length > 256)) ||
       (style.scope !== undefined &&
         style.scope !== "inline" && style.scope !== "element" && style.scope !== "base") ||
-      (style.declared !== undefined &&
-        (typeof style.declared !== "string" ||
-          style.declared.length > 64 ||
-          !/^-?[a-z][a-z0-9-]*$/.test(style.declared))) ||
+      (style.declared !== undefined && !isRuntimeAuthoredPropertyName(style.declared)) ||
       !isRuntimeStyleOrigin(style, true)
     )
       return false;
@@ -2215,8 +2217,11 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
             themed.push(entry);
             THEME_HOOK.lastIndex = 0;
             for (var hook = THEME_HOOK.exec(entry.selector); hook; hook = THEME_HOOK.exec(entry.selector)) themeNames.add(hook[1]);
+            // A shorthand sets its longhands too; those are what fields ask about.
             declared.forEach(function (property) {
-              if (property.indexOf("--") !== 0) themeProperties.add(property);
+              if (property.indexOf("--") === 0) return;
+              themeProperties.add(property);
+              longhandsOf(property).forEach(function (longhand) { themeProperties.add(longhand); });
             });
           }
           declared.forEach(function (property) {
@@ -2338,14 +2343,14 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   /** The winning declaration of one property. A rule that sets it through a
    * var()-based shorthand competes with an unknown value, so the inspector
    * never claims a value the browser could not expand. */
-  function winningDeclaration(element, property, matches, othersThan) {
-    // With othersThan (an oid), the best declaration that is not the layer's
-    // own: what its own declaration replaced.
-    var inline = othersThan === undefined ? declarationValue(element.style, property, null) : null;
+  function winningDeclaration(element, property, matches, without) {
+    // With without (the inline style, or one rule), the best declaration
+    // once that one is gone: what the layer's own declaration replaced.
+    var inline = !without || !without.inline ? declarationValue(element.style, property, null) : null;
     var best = inline ? { inline: true, value: inline.value, important: inline.important } : null;
     for (var index = 0; index < matches.length; index += 1) {
       var match = matches[index];
-      if (othersThan !== undefined && ownRule(match.entry, othersThan)) continue;
+      if (without && match.entry === without.entry) continue;
       var declaration = declarationValue(match.entry.rule.style, property, match.entry.declared);
       if (!declaration) continue;
       var candidate = { match: match, value: declaration.value, important: declaration.important };
@@ -2475,6 +2480,20 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     return !!winner.inline || ownRule(winner.match.entry, oid);
   }
 
+  /** The declaration Reset removes, as the engine picks it: the style
+   * attribute's whenever it declares the property, otherwise the layer's one
+   * rule. Null when that is not the winner (Reset would change nothing shown)
+   * or two of the layer's rules set it (the engine refuses to choose). */
+  function resetTargetOf(element, property, winner, matches, oid) {
+    if (winner.inline) return { inline: true };
+    if (declarationValue(element.style, property, null)) return null;
+    for (var index = 0; index < matches.length; index += 1) {
+      var entry = matches[index].entry;
+      if (entry !== winner.match.entry && ownRule(entry, oid) && declarationValue(entry.rule.style, property, entry.declared)) return null;
+    }
+    return { entry: winner.match.entry };
+  }
+
   function unescapeIdentifier(text) {
     return text.replace(/\\([0-9a-fA-F]{1,6}\s?|[\s\S])/g, function (_match, escaped) {
       if (/^[0-9a-fA-F]{1,6}\s?$/.test(escaped)) {
@@ -2536,7 +2555,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       if (branches && branches.indexOf(set) < 0) continue;
       for (var index = 0; index < sets[set].length; index += 1) {
         var name = sets[set][index];
-        if (names.length < ${DESIGN_RUNTIME_AUTHORED_STYLE_LIMITS.subjectClasses} && name.length <= ${DESIGN_RUNTIME_AUTHORED_STYLE_LIMITS.className} && names.indexOf(name) < 0 && element.classList.contains(name)) names.push(name);
+        if (names.length < ${DESIGN_RUNTIME_AUTHORED_STYLE_LIMITS.subjectClasses} && name.length > 0 && name.length <= ${DESIGN_RUNTIME_AUTHORED_STYLE_LIMITS.className} && names.indexOf(name) < 0 && element.classList.contains(name)) names.push(name);
       }
     }
     return names;
@@ -2712,8 +2731,9 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       }
       style.value = winner.value;
       if (winner.important) style.important = true;
-      if (ownsWinner(winner, oid)) {
-        var others = winningDeclaration(element, property, matches, oid);
+      var resetTarget = ownsWinner(winner, oid) ? resetTargetOf(element, property, winner, matches, oid) : null;
+      if (resetTarget) {
+        var others = winningDeclaration(element, property, matches, resetTarget);
         var replaced = others && others.value ? replacedStyleOf(element, others, index, computed) : null;
         if (replaced) {
           var declared = declaredNameOf(element, winner, property);

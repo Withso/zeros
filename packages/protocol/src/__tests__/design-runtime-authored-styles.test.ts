@@ -443,6 +443,42 @@ describe("review fixes for where a value comes from, in Chromium", () => {
     }
   });
 
+  // Regression: the layer's own custom property reported declared "--gap",
+  // the validator refused it and the bridge dropped every origin.
+  it("reports what a layer's own custom property replaced in a form its validator accepts", async () => {
+    const page = await fixture(browser, `<style>
+      .card { --gap: 8px; gap: var(--gap); }
+    </style>`, '<div data-oid="card" class="card" style="--gap: 12px">Card</div>');
+    try {
+      const card = await details(page, "card");
+      expect(card.authoredStyles?.["--gap"]).toMatchObject({ scope: "inline", value: "12px", declared: "--gap", replaced: { selector: ".card", value: "8px" } });
+      expect(isDesignRuntimeAuthoredStyles(card.authoredStyles)).toBe(true);
+    } finally {
+      await page.close();
+    }
+  });
+
+  // Reset removes the style attribute's declaration when there is one, and
+  // the layer's own rule only when there is none (mutateDesignNodeStyles);
+  // what it replaced is what shows after Reset.
+  it("reports as replaced what shows once Reset removes the declaration it targets", async () => {
+    const page = await fixture(browser, `<style>
+      .btn { color: navy; }
+      [data-oid="both"] { color: maroon; }
+      [data-oid="twice"] { color: maroon; }
+      [data-oid="twice"] { color: teal; }
+    </style>`, '<button data-oid="both" class="btn" style="color: red">Both</button><button data-oid="twice" class="btn">Twice</button>');
+    try {
+      expect((await details(page, "both")).authoredStyles?.color).toMatchObject({
+        scope: "inline", value: "red", replaced: { selector: '[data-oid="both"]', value: "maroon" },
+      });
+      // Two rules for the layer: Reset cannot pick one, so it is not offered.
+      expect((await details(page, "twice")).authoredStyles?.color?.replaced).toBeUndefined();
+    } finally {
+      await page.close();
+    }
+  });
+
   it("names only the classes of the selector branches that match the layer", async () => {
     const page = await fixture(browser, `<style>
       .enabled .foo, .disabled .bar { color: red; }
@@ -452,6 +488,22 @@ describe("review fixes for where a value comes from, in Chromium", () => {
       const both = await details(page, "both");
       expect(both.authoredStyles?.color).toMatchObject({ selector: ".enabled .foo, .disabled .bar", subjectClasses: ["foo"] });
       expect(both.authoredStyles?.padding?.subjectClasses).toEqual(["solo"]);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it("gives another theme's value for a longhand its rule sets through a shorthand", async () => {
+    const page = await fixture(browser, `<style>
+      .card { background-color: white; }
+      [data-zd-theme="dark"] .card { background: black; }
+    </style>`, '<div data-oid="card" class="card">Card</div>');
+    try {
+      await page.evaluate(() => document.documentElement.setAttribute("data-zd-theme", "light"));
+      expect((await details(page, "card")).authoredStyles?.["background-color"]).toMatchObject({
+        value: "white",
+        themeValues: { dark: "black" },
+      });
     } finally {
       await page.close();
     }

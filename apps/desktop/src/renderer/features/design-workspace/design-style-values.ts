@@ -906,3 +906,16 @@ export function resolveDesignNumericExpression(
     return input;
   }
 }
+
+/** The history key a Style commit carries: continuous edits of the same
+ * properties on the same layers fold into one undo step. Reset, choosing a
+ * token and Detach are steps of their own, so Undo returns to the edit
+ * before them. */
+export function designStyleCommitCoalesceKey(
+  nodeIds: readonly string[],
+  properties: readonly string[],
+  intent?: "reset" | "token" | "detach",
+): string {
+  const key = `styles:${nodeIds.join(":")}:${properties.join(":")}`;
+  return intent ? `${intent}:${crypto.randomUUID()}:${key}` : key;
+}

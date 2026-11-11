@@ -52,6 +52,14 @@ function fieldProperties(field: HTMLElement): string[] {
   return property ? [property, ...linked] : [];
 }
 
+/** What a token is written to: the field's `data-design-token-property`
+ * when the declaration it shows is another (a gradient Fill takes a colour
+ * token), its own properties otherwise. */
+function tokenProperties(field: HTMLElement): string[] {
+  const property = field.getAttribute("data-design-token-property");
+  return property ? [property] : fieldProperties(field);
+}
+
 /** Hover or focus is busy elsewhere: an edit, a drag or another overlay. */
 function cardBlocked(root: HTMLElement, card: HTMLElement | null): boolean {
   const active = document.activeElement;
@@ -159,7 +167,7 @@ export function DesignFieldOverlays({
       setPicker(request);
     };
     const openPickerForField = (field: HTMLElement, trigger?: HTMLElement | null) => {
-      const properties = fieldProperties(field);
+      const properties = tokenProperties(field);
       const accepts = properties[0] ? designTokenFieldTypes(properties[0]) : null;
       if (!accepts || !accepts.some((type) => catalog.types.has(type))) return false;
       const pill = field.querySelector<HTMLElement>("[data-design-style-token]");
@@ -467,7 +475,7 @@ const DesignStyleCardContent = React.forwardRef<
                           onClose();
                           // The field's own Detach does the same: each selected
                           // layer's resolved value over the token.
-                          detach?.(fieldProperties(field));
+                          detach?.(tokenProperties(field));
                         }
                       }}
                     >
@@ -497,6 +505,8 @@ export interface DesignStyleCardText {
 /** What a field shows that the card speaks to, read from its markup. */
 export interface DesignCardField {
   property: string;
+  /** Where a token goes when that is not `property` (a gradient Fill). */
+  tokenProperty?: string;
   label: string;
   mixed: boolean;
   tokenName: string | null;
@@ -532,6 +542,7 @@ export function readDesignCardField(field: HTMLElement, property: string): Desig
   const group = field.closest(".zd-group");
   return {
     property,
+    tokenProperty: field.getAttribute("data-design-token-property") ?? undefined,
     label: designFieldTitle({
       property,
       label: field.getAttribute("data-design-field-label") ?? property,
@@ -547,7 +558,7 @@ export function readDesignCardField(field: HTMLElement, property: string): Desig
 /** What the card says about one field: the origin model's strings, plus what
  * the field itself shows (a pill, a missing token, Mixed). */
 export function designStyleCardContent(
-  { property, label, mixed, tokenName, missing }: DesignCardField,
+  { property, tokenProperty, label, mixed, tokenName, missing }: DesignCardField,
   origins: DesignFieldOrigins,
   catalog: ReturnType<typeof useDesignTokens>,
 ): DesignStyleCardText {
@@ -558,7 +569,7 @@ export function designStyleCardContent(
   const rows = [...(origin?.card.rows ?? [])];
   const notes: string[] = [];
   const actions: DesignStyleCardText["actions"] = [];
-  const accepts = designTokenFieldTypes(property);
+  const accepts = designTokenFieldTypes(tokenProperty ?? property);
   const offered = Boolean(accepts?.some((type) => catalog.types.has(type)));
   if (tokenName && missing) {
     const name = tokenName.replace(/^--/, "");

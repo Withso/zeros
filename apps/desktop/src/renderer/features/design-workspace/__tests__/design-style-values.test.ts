@@ -11,6 +11,7 @@ import {
   replaceDesignStyleNumericUnit,
   resolveDesignNumericExpression,
   designScrubStep,
+  designStyleCommitCoalesceKey,
   scrubDesignNumericValue,
   scrubDesignSteppedValue,
   snapDesignNumberToStep,
@@ -358,5 +359,17 @@ describe("scrubbing lands on the field's step", () => {
     expect(Object.is(snapDesignNumberToStep(-0.4, 1), -0)).toBe(false);
     expect(snapDesignNumberToStep(1.02, 0.05)).toBe(1);
     expect(snapDesignNumberToStep(1.03, 0.05)).toBe(1.05);
+  });
+});
+
+describe("Style commit history keys", () => {
+  it("folds continuous edits and keeps Reset, a token and Detach as steps of their own", () => {
+    const edit = designStyleCommitCoalesceKey(["send"], ["border-radius"]);
+    expect(designStyleCommitCoalesceKey(["send"], ["border-radius"])).toBe(edit);
+    for (const intent of ["reset", "token", "detach"] as const) {
+      const key = designStyleCommitCoalesceKey(["send"], ["border-radius"], intent);
+      expect(key, intent).not.toBe(edit);
+      expect(designStyleCommitCoalesceKey(["send"], ["border-radius"], intent), intent).not.toBe(key);
+    }
   });
 });

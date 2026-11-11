@@ -216,6 +216,25 @@ describe("token field at rest", () => {
   });
 });
 
+describe("a linked field under the Styled-by filter", () => {
+  it("stays when its source sets only the linked side it edits", () => {
+    const node = {
+      sourceVersion: "a".repeat(24), oid: "card", tag: "div", name: "Card", text: null,
+      selector: '[data-oid="card"]', visible: true, breadcrumb: [], rect: { x: 0, y: 0, width: 1, height: 1 },
+      styles: {}, classes: "inset",
+      authoredStyleProperties: ["padding-right"],
+      authoredStyles: { "padding-right": { origin: "frame" as const, selector: ".inset", scope: "element" as const, subjectClasses: ["inset"], value: "8px" } },
+    };
+    const key = designFieldOrigins([node], originsContext, null).styledBy!.groups[0]!.key;
+    const html = (linkedProperties: string[]) => render(
+      createElement(DesignFieldOriginsContext.Provider, { value: designFieldOrigins([node], originsContext, key) },
+        createElement(InspectorEditField, { label: "Horizontal padding", value: "8", styleProperty: "padding-left", linkedProperties, onCommit: async () => {} })),
+    );
+    expect(html(["padding-right"])).not.toContain("data-design-filter-out");
+    expect(html([])).toContain("data-design-filter-out");
+  });
+});
+
 describe("Fill under the Styled-by filter", () => {
   const layer = (authoredStyles: NonNullable<Parameters<typeof designFieldOrigins>[0][number]["authoredStyles"]>) => ({
     sourceVersion: "a".repeat(24), oid: "card", tag: "div", name: "Card", text: null,
@@ -244,6 +263,15 @@ describe("Fill under the Styled-by filter", () => {
     expect(fill(layer({ "background-size": { ...fromHero, value: "cover" }, color: { ...fromHero, value: "navy" } }), "none"))
       .not.toContain("data-design-filter-out");
     expect(fill(layer({ color: { ...fromHero, value: "navy" } }), "none")).toContain("data-design-filter-out");
+  });
+
+  it("names the declaration that paints it to the card and Reset, and the colour to a token", () => {
+    const node = layer({ "background-image": { ...fromHero, value: "linear-gradient(white, black)" } });
+    const gradient = fill(node, "linear-gradient(white, black)");
+    expect(gradient).toContain('data-design-style-property="background-image"');
+    expect(gradient).toContain('data-design-token-property="background-color"');
+    const solid = fill(layer({ "background-color": { ...fromHero, value: "white" } }), "none");
+    expect(solid).toContain('data-design-style-property="background-color"');
   });
 });
 

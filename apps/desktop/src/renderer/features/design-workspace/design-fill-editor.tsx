@@ -134,10 +134,9 @@ export function DesignFillEditor({
   onCommit,
 }: DesignFillEditorProps) {
   const fillType = mixed ? "solid" : classifyDesignFill(image);
-  const origin = useDesignFieldOrigin(
-    fillType === "solid" ? "background-color" : "background-image",
-    FILL_PROPERTIES,
-  );
+  // The declaration that paints the fill: the card and Reset speak to it.
+  const painted = fillType === "solid" ? "background-color" : "background-image";
+  const origin = useDesignFieldOrigin(painted, FILL_PROPERTIES);
   const gradient = parseDesignGradient(image);
   const swatch = (
     <span className="relative block size-4 shrink-0 overflow-hidden rounded-sm">
@@ -173,9 +172,11 @@ export function DesignFillEditor({
     <DesignColorPreviewScope>
     <div
       data-design-color-field=""
-      data-design-style-property="background-color"
+      data-design-style-property={painted}
       data-design-field-label="Fill"
-      // A token chosen from the card or Alt+Down lands as a solid fill would.
+      // A token chosen from the card or Alt+Down is a colour, and lands as a
+      // solid fill would.
+      data-design-token-property="background-color"
       data-design-token-companion="background-image:none"
       data-design-origin={origin.mark}
       data-design-filter-out={origin.hidden ? "" : undefined}

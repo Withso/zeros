@@ -1860,13 +1860,17 @@
 
 /* A Styled-by row narrows the panel to what its source sets: fields outside
  * it, and groups and sections left with none, step aside. Font and Weight
- * count as fields here without being card fields. */
+ * count as fields here without being card fields. A field that is itself a
+ * section's child answers for itself through its own filter-out. */
 [data-design-filter-out] {
   display: none;
 }
 
 [data-design-source-filter]
   :is(.zd-section, .zd-group, .zd-section-body > *):not(
+    [data-design-style-property],
+    [data-design-filter-property]
+  ):not(
     :has(
       :is([data-design-style-property], [data-design-filter-property]):not(
           [data-design-filter-out],

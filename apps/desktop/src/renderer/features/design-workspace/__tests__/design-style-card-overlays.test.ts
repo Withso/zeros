@@ -21,6 +21,7 @@ const manual = (name: string, value: string): DesignTokenWire => ({
 });
 const catalog = designTokenCatalog({ manual: [manual("--radius-md", "6px"), manual("--bg2", "silver")], sources: [], theme: null });
 const chosen = vi.fn();
+const reset = vi.fn();
 const origins = designFieldOrigins([], { label: () => null, utilitySources: new Set() }, null);
 
 let root: Root | null = null;
@@ -41,7 +42,7 @@ function mount(active: boolean) {
         createElement("aside", { ref: rootRef },
           createElement(DesignFieldOverlays, {
             rootRef, active, ownerKey: "selection", origins,
-            onChooseToken: chosen, onReset: () => {},
+            onChooseToken: chosen, onReset: reset,
             children,
           }))),
     });
@@ -53,6 +54,10 @@ function mount(active: boolean) {
     createElement("div", { key: "fill", id: "fill", "data-design-style-property": "background-color", "data-design-field-label": "Fill",
       "data-design-token-companion": "background-image:none" }),
     createElement("div", { key: "text", id: "text", "data-design-style-property": "color", "data-design-field-label": "Text color" }),
+    // A gradient Fill: the card and Reset describe the gradient, a token is
+    // still written to the colour.
+    createElement("div", { key: "gradient", id: "gradient", "data-design-style-property": "background-image", "data-design-field-label": "Fill",
+      "data-design-token-property": "background-color", "data-design-token-companion": "background-image:none" }),
   ];
   act(() => {
     root ??= createRoot(host);
@@ -119,6 +124,16 @@ describe("the panel's overlays", () => {
       choose("text");
       expect(chosen).toHaveBeenLastCalledWith(["color"], "--bg2", undefined);
     }
+  });
+
+  it("resets a gradient Fill's own declaration and writes a token chosen for it to the colour", () => {
+    mount(true);
+    act(() => api!.resetField(byId("gradient")));
+    expect(reset).toHaveBeenLastCalledWith(["background-image"]);
+    act(() => { expect(api!.openPickerForField(byId("gradient"))).toBe(true); });
+    const option = document.querySelector<HTMLElement>('[data-design-token-picker] [data-design-token-option="--bg2"]')!;
+    act(() => option.click());
+    expect(chosen).toHaveBeenLastCalledWith(["background-color"], "--bg2", { "background-image": "none" });
   });
 
   it("opens no keyboard card once focus has left the panel during the delay", () => {

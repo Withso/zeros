@@ -113,9 +113,9 @@ export function designResetStyles(
 export const DesignFieldOriginsContext = createContext<DesignFieldOrigins>(NO_ORIGINS);
 
 /** The attributes a field carries: its mark on the field, and whether the
- * Styled-by filter hides it on the field's cell. A field that edits several
- * properties passes them all as `edits`: it hides only when the source sets
- * none of them. */
+ * Styled-by filter hides it on the field's cell. A field that edits other
+ * properties too (linked sides, a fill's image) passes them as `edits`: it
+ * hides only when the source sets none of them. */
 export function useDesignFieldOrigin(
   property: string | undefined,
   edits?: readonly string[],
@@ -127,7 +127,7 @@ export function useDesignFieldOrigin(
   if (!property) return { mark: undefined, hidden: false };
   return {
     mark: origins.mark(property),
-    hidden: edits ? edits.every((edited) => origins.hidden(edited)) : origins.hidden(property),
+    hidden: origins.hidden(property) && (edits?.every((edited) => origins.hidden(edited)) ?? true),
   };
 }
 
