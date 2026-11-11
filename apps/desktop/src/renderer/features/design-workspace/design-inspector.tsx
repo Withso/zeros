@@ -2076,6 +2076,25 @@ export const DesignInspector = React.memo(function DesignInspector({
           useDesignRuntimeStore.getState().byWorkspace[workspaceId]?.frames[
             frame.file
           ]?.snapshot?.frame;
+        // A hold can begin while the refit below awaits its reads; the edit
+        // then writes nothing and its preview goes.
+        const held = designHeldStateWatch(workspaceId, frame.file, styleNodeIds);
+        const dropPreview = () =>
+          Promise.all(
+            updates.map(async ({ nodeId }) => {
+              try {
+                const restored = await clearDesignNodeStylePreviewTransient({
+                  workspaceId,
+                  frame: frame.file,
+                  sourceVersion: frame.sourceVersion,
+                  nodeId,
+                });
+                paintDesignInspectorPreviewDetails(workspaceId, frame.file, restored);
+              } catch {
+                /* The runtime may have been replaced by a newer generation. */
+              }
+            }),
+          ).then(() => null);
         let resizedFrame: DesignOperation | null = null;
         if (
           root &&
@@ -2093,7 +2112,8 @@ export const DesignInspector = React.memo(function DesignInspector({
               }),
             ),
           );
-          const measured = await runtime.getNodeDetails(root.oid);
+          const measured = await measureDesignNodeUnheld(runtime, root.oid, held);
+          if (!measured) return dropPreview();
           const current =
             designWorkspaceSnapshotCache
               .peekSnapshot(workspaceId)
@@ -2107,6 +2127,8 @@ export const DesignInspector = React.memo(function DesignInspector({
               geometry: { x: current.x, y: current.y, z: current.z, ...size },
             };
         }
+        // Nothing is written once a hold has met the edit.
+        if (held.blocked()) return dropPreview();
         if (updates.length === 1 && !resizedFrame) {
           return {
             persist: updateDesignNodeStylesCached(workspaceId, {
@@ -2143,7 +2165,7 @@ export const DesignInspector = React.memo(function DesignInspector({
         () => {},
         () => {},
       );
-      const saved = task.then((prepared) => prepared.persist);
+      const saved = task.then((prepared) => prepared?.persist);
       // A plain value written over values the themes gave apart is one
       // value for all of them now; say so under the field once it saved.
       // Read before the write: after it, the value no longer differs.

@@ -50,6 +50,7 @@ import { DesignCanvas, EMPTY_NODE_IDS } from "./design-canvas";
 import { DesignSavedEditingContext, DesignSavedEditingSession } from "./design-saved-editing";
 import { DesignDirectoryPill } from "./design-directory-pill";
 import { DesignFloatingPanel } from "./design-floating-panel";
+import { DesignFrameChangesPanel } from "./design-frame-changes-panel";
 import { DesignInspector } from "./design-inspector";
 import type { DesignRuntimeTreeNode } from "@zeros/protocol/design-runtime";
 import { errorMessage } from "./design-workspace-error";
@@ -499,6 +500,20 @@ export function DesignWorkspaceColumn({
           active={surfaceActive}
           visible={panelVisible}
           layersExpanded={layersExpanded}
+          // A frame, not a layer in it, while the panel is shown: its
+          // changes made by hand and Tidy.
+          info={
+            workspaceId && folder && selectedFrame && frameSelected && !selectedNodeId && surfaceActive && panelVisible ? (
+              <DesignFrameChangesPanel
+                workspaceId={workspaceId}
+                folder={folder}
+                frame={selectedFrame.file}
+                directory={snapshot.data?.directory ?? null}
+                active={surfaceActive && panelVisible}
+                onAskAgent={askAgent}
+              />
+            ) : null
+          }
           layers={
             <DesignWorkspaceSidebarPanels
               surfaceActive={surfaceActive && panelVisible}

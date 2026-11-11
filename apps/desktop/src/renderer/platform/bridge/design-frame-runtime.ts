@@ -17,6 +17,7 @@ import {
   MAX_DESIGN_RUNTIME_PREVIEW_STYLESHEET_CHARS,
   isDesignRuntimeAuthoredStyles,
   isDesignRuntimeFrameMessage,
+  isDesignRuntimeFrameChanges,
   isDesignRuntimeNodeState,
   isRuntimeNodeLayout,
   type DesignRuntimeFrameMessage,
@@ -38,6 +39,7 @@ import {
   type DesignRuntimeStateReleased,
   type DesignRuntimeNodeDetails,
   type DesignRuntimeNodeGeometry,
+  type DesignRuntimeFrameChanges,
   type DesignRuntimeNodeState,
   type DesignRuntimeRect,
   type DesignRuntimeScreenshot,
@@ -155,6 +157,12 @@ export interface DesignFrameRuntimeConnection {
   /** Show the layer in one of its own states, view only, and read it there.
    * Opt-in: check `supports("holdNodeState")`. Any edit releases it first. */
   holdNodeState?(nodeId: string, state: DesignRuntimeNodeState, holdId: string, signal?: AbortSignal): Promise<DesignRuntimeNodeDetails>;
+  /** The frame's changes made by hand in one reply, and where each `follow`
+   * value comes from now. Opt-in: check `supports("getFrameChanges")`. */
+  getFrameChanges?(
+    follow?: readonly { oid: string; property: string }[],
+    signal?: AbortSignal,
+  ): Promise<DesignRuntimeFrameChanges>;
   releaseNodeState?(signal?: AbortSignal): Promise<{ released: boolean }>;
   previewStyles(
     nodeId: string,
@@ -817,6 +825,18 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
   async clearPreviewStructure(previewId?: string, signal?: AbortSignal): Promise<void> {
     if (!this.supports("clearPreviewStructure")) throw runtimeError("clearPreviewStructure is not supported", "METHOD_NOT_SUPPORTED");
     await this.request("clearPreviewStructure", previewId === undefined ? {} : { previewId }, signal);
+  }
+
+  async getFrameChanges(
+    follow?: readonly { oid: string; property: string }[],
+    signal?: AbortSignal,
+  ): Promise<DesignRuntimeFrameChanges> {
+    if (!this.supports("getFrameChanges")) throw runtimeError("getFrameChanges is not supported", "METHOD_NOT_SUPPORTED");
+    const result = await this.request("getFrameChanges", follow ? { follow } : {}, signal);
+    if (!isDesignRuntimeFrameChanges(result) || result.sourceVersion !== this.expectedSourceVersion) {
+      throw runtimeError("getFrameChanges returned malformed data");
+    }
+    return result;
   }
 
   async holdNodeState(nodeId: string, state: DesignRuntimeNodeState, holdId: string, signal?: AbortSignal): Promise<DesignRuntimeNodeDetails> {

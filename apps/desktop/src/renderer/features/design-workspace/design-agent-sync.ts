@@ -33,17 +33,27 @@ function whenChatHasAgent(chatId: string): Promise<void> {
   });
 }
 
+/** What a caller hears back: the chat the brief went to, or that it could
+ * not be sent (the person is told either way). */
+export interface DesignAskAgentHooks {
+  onSent?: (chatId: string) => void;
+  onFailed?: () => void;
+}
+
 /** Open a new chat with the person's default agent and model in this
  * workspace, and send it a brief marked as sent by Zeros. */
 export function useAskDesignAgent(
   workspacePath: string | null | undefined,
-): (brief: DesignAgentBrief) => void {
+): (brief: DesignAgentBrief, hooks?: DesignAskAgentHooks) => void {
   const sessions = useOptionalAgentSessions();
   const dispatch = useWorkspaceDispatch();
   const sendToChat = useSendToChat(workspacePath ?? "");
   return useCallback(
-    (brief: DesignAgentBrief) => {
-      if (!workspacePath) return;
+    (brief: DesignAgentBrief, hooks?: DesignAskAgentHooks) => {
+      if (!workspacePath) {
+        hooks?.onFailed?.();
+        return;
+      }
       void (async () => {
         if (!sessions) throw new Error("Agent chats are unavailable here.");
         const chat = await spawnNewChatTab({ folder: workspacePath, sessions, dispatch });
@@ -53,7 +63,9 @@ export function useAskDesignAgent(
           displayText: brief.label,
           autoAction: "design-sync",
         });
+        hooks?.onSent?.(chat.id);
       })().catch((error: unknown) => {
+        hooks?.onFailed?.();
         toast.error("Couldn't ask the agent", {
           description: error instanceof Error ? error.message : String(error),
         });

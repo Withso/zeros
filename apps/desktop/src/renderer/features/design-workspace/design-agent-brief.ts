@@ -1,5 +1,5 @@
 // PURPOSE: The briefs Design sends to an agent for "Ask agent to sync",
-// "Ask agent to fix" and "Ask agent to change". They stay short: the
+// "Ask agent to fix", "Ask agent to change" and Tidy. They stay short: the
 // procedure lives in the packaged Zeros Design skill, so typing "sync my
 // styles" in any chat matches them.
 
@@ -83,6 +83,34 @@ export function designForcedValueBrief(input: {
       `In the frame "${input.frame}" in the Design directory "${input.directory}", the layer "${input.layer}" (data-oid "${input.nodeId}") shows ${input.property}: ${input.value}, forced by ${where} with !important, so the Style panel cannot edit it.`,
       "Remove the !important, or move the value so this layer's own value can be edited, without changing how other layers look. Tell me what you changed.",
       CODE_RULE,
+    ].join("\n"),
+  };
+}
+
+/** Tidy a frame's changes made by hand: the procedure is in the skill. */
+export function designTidyBrief(input: {
+  directory: string;
+  frame: string;
+  changes: readonly {
+    oid: string;
+    layer: string;
+    property: string;
+    value: string;
+    replaced: { value: string; selector?: string; component?: string };
+  }[];
+}): DesignAgentBrief {
+  const count = input.changes.length;
+  const from = (replaced: (typeof input.changes)[number]["replaced"]) =>
+    replaced.component ? `the component ${replaced.component}` : (replaced.selector ?? "a rule");
+  return {
+    label: `Tidy ${count} ${count === 1 ? "change" : "changes"} in ${input.frame}`,
+    text: [
+      `Tidy the changes made by hand in the frame "${input.frame}"${input.directory ? ` in the Design directory "${input.directory}"` : ""}.`,
+      'Follow "Tidy changes made by hand" in the Zeros Design skill. The frame must look the same. Do not stage or commit. Tell me what moved where.',
+      CODE_RULE,
+      `Changes (value on the layer over the value it replaced):\n${input.changes
+        .map((change) => `- ${change.layer} (data-oid "${change.oid}"): ${change.property}: ${change.value} over ${change.replaced.value} from ${from(change.replaced)}`)
+        .join("\n")}`,
     ].join("\n"),
   };
 }

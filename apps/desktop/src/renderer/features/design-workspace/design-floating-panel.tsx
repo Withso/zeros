@@ -43,13 +43,15 @@ interface DesignFloatingPanelProps {
   layersExpanded: boolean;
   layers: React.ReactNode;
   inspector: React.ReactNode;
+  /** The frame info panel, directly above Layers; null mounts nothing. */
+  info?: React.ReactNode;
 }
 
 export const DesignFloatingPanel = React.forwardRef<
   HTMLElement,
   DesignFloatingPanelProps
 >(function DesignFloatingPanel(
-  { workspaceId, active, visible, layersExpanded, layers, inspector },
+  { workspaceId, active, visible, layersExpanded, layers, inspector, info = null },
   forwardedRef,
 ) {
   const panelRef = useRef<HTMLElement | null>(null);
@@ -230,6 +232,7 @@ export const DesignFloatingPanel = React.forwardRef<
       >
         {inspector}
       </div>
+      {info}
       {/* Layers is a drawer at the foot of the Style panel: closed, its header
           shows the path to the selection; open, it takes the height the
           person drags from its top edge. */}
