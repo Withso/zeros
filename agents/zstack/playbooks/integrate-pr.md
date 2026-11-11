@@ -40,6 +40,8 @@ session itself.
    merge queue on the base, only one armed PR at a time: arm each one after
    the previous merges. With a queue, arm any green PR; GitHub tests and
    merges them in order.
+   Runtime upgrade PRs are the owner's to merge
+   (`docs/agent-runtime-notifications.md`); do not arm them.
    Apply `ci:*` and `agent-runtime:hold` labels before the final push. A label
    added later starts a new CI run for the same head and cancels the running
    one, whose roll-ups then fail with "Invalid … selection/result"; read the

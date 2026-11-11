@@ -8,7 +8,7 @@ named test proves only its covered cases; the table states the remaining gap.
 The PR-body gate parses Markdown headings rather than finding words in prose,
 comments or code fences. Automation is identified by GitHub's author kind, never
 by an editable title, label or agent trailer. Both merge paths recheck the author
-with the PR snapshot. Existing incident and CI-definition refusals still apply.
+with the PR snapshot. The existing incident refusal still applies.
 
 Held by the agent-merge suites, zstack-enforcement.test.ts and the
 seeded-pr-required-sections eval. Missing or misleading section contents still
