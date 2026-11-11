@@ -8,6 +8,7 @@ import { isDevRuntime } from "../runtime";
 import { durableDesignDependenciesCurrent, type DurableDesignDependency } from "./dependency-read-set";
 import type { CanvasDocument } from "./document-model";
 import { designPrivateStorageDirectory } from "./metadata-storage";
+import { designComponentRegistry } from "./component-registry";
 
 /** What preparing a frame computes from its sources, beside canvas metadata. */
 export interface DesignFrameIdentity {
@@ -90,7 +91,10 @@ export function designFrameIdentityContext(canvas: CanvasDocument, file: string,
   let shared = canvasLevel.get(canvas);
   if (shared === undefined) {
     const { frames: _frames, frame_info: _info, pages: _pages, view: _view, ...rest } = canvas as CanvasDocument & { view?: unknown };
-    shared = JSON.stringify(rest);
+    // Which frame each <zd-name> resolves to is canvas-wide; a canvas that
+    // registers no component keeps the context it always had.
+    const components = [...designComponentRegistry(canvas).files];
+    shared = components.length ? JSON.stringify([rest, components]) : JSON.stringify(rest);
     if (Object.isFrozen(canvas)) canvasLevel.set(canvas, shared);
   }
   const page = pageId === undefined ? undefined : canvas.pages?.find((candidate) => candidate.id === pageId);

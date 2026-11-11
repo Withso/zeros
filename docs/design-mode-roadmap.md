@@ -1670,6 +1670,89 @@ source location and suggested correction, without rewriting saved source.
 Lifecycle updates replace recognized generated rules while preserving appended
 project guidance; independently authored rules remain intact.
 
+#### Components with options
+
+A frame becomes a component when its file declares options and its record in
+`meta/canvas.json` carries `"component": "<name>"`, the tag other frames place
+(`<zd-chat-composer>`). The record holds the name, so a title change keeps it,
+a duplicate does not copy it and a delete removes it. Frame records pass unknown
+keys through, so an older build reads and rewrites the field unchanged, and a
+canvas that registers nothing keeps its bytes and its frames' identity keys. A
+name registered twice, or also present as `components/<name>.html`, is an error
+on the registering frame; a frame that declares options without registering
+is a warning that says what to add. `components/<name>.html` stays valid as it
+is: without a declaration it expands byte for byte as before (a golden fixture
+of the expander's earlier output holds this), and it may declare options too.
+
+Options are declared in the file's `<head>` inside `<template
+data-zd-options>`, one `<zd-option>`, `<zd-derive>` or `<zd-variant>` per line,
+so a person sliding one option changes one line in Git: the instance's
+attribute (`width="800"` → `width="760"`), or on the main component the
+`default` (or the line of the variant it shows). Kinds are number (a slider only
+with both `min` and `max`), boolean, choice, colour (or `var(--token)`), text
+and easing (a keyword, `cubic-bezier()`, `steps()` or `spring(bounce)`, then a
+duration); `group` folds rows; action rows are not declarable. An instance
+carries its values as attributes and its variant as `zd-variant`; a missing
+attribute takes the variant's value, else the default. Which variant a main
+frame shows is personal view state, never in Git. `component.set-option` edits
+one default or variant attribute and `component.save-variant` adds one line,
+each one transaction and one undo; instance values use `node.set-attribute`.
+
+The template layer runs only in a declaring file: `{{ expression }}` in text
+and attribute values (escaped), `data-zd-if` and `data-zd-for`. Logic is
+declarative, evaluated by the Design core's own interpreter
+(`component-expressions.ts`): no `eval`, no `Function`, no host object, and
+only option values, derived values and loop names in scope (Maps, so no
+prototype names; those are also refused as names). It has literals, lists,
+names, `!`, unary `-`, arithmetic, `+` joining text, comparisons, `&&`/`||`,
+`a ? b : c`, and `range`, `min`, `max`, `clamp`, `round`, `floor`, `ceil`, `len`.
+Types never convert; a hyphenated name means subtraction needs spaces, and
+`width-1` says so. Holes are refused in attributes that load, run or carry
+identity (`style`, URL attributes, `srcdoc`, `data`, `on*`, `id`, `data-oid`,
+`data-zid`, `data-zd-*`, `<meta content>`) and are not evaluated in `<style>`,
+`<script>`, comments or the declaration; `{{ "{{" }}` writes a literal `{{`.
+
+Number, colour, easing and numeric derived values reach CSS as custom
+properties (`--zd-<name>`, easing as `-easing` and `-duration`) in a generated
+`<style data-zeros-options>`: `:root` on a main frame and
+`:where([data-zd-instance="n"])` on each instance, so authored CSS on the host
+still wins and nothing counts as a change made by hand. Each instance's rule
+sets every such option of its component, defaults included, so an outer
+instance's value never reaches an inner component with an option of the same
+name. Values enter CSS only in strict forms (finite numbers with a known unit,
+a fixed colour grammar or `var(--token)`, a fixed easing grammar; a spring is a
+generated `linear()` of at most 32 stops); text, choices and booleans never do.
+A component's linked stylesheets come into the host frame once each, and its
+URLs resolve from its own file. An instance's inner elements carry
+`data-zd-part` (the main frame's `data-oid`, or a `components/` file's
+`data-zid`), with `#n` on repeats after the first; on a main frame the first
+repeat keeps its `data-oid` and the others carry `data-zd-copy`.
+
+Budgets, on top of the expander's own: 64 options, 32 variants and 32 derived
+values per component, 16 choices; text up to 2,048 characters; an expression of
+256 characters, 96 parts, depth 16 and 2,000 steps; per frame, 100,000
+expression steps, 4,096 repeats (a loop at most 256, nested 3 deep) and 512
+holes per rendering. `design validate` and lint report
+`component-option-invalid`, `component-expression-invalid`,
+`component-value-invalid`, `component-unregistered` and the existing
+`component-invalid` and `component-undefined`, at the line in the frame or
+naming the component's file and line. An instance whose values do not fit
+keeps the inherited value; one whose template fails renders its defaults, or
+nothing when those fail too. A frame whose options do not all apply shows the
+last expansion that applied in this session (held for the 12 most recently
+rendered frames within 16 MiB, dropped when the frame is deleted, never stored
+as a durable identity) and the render says so (`shows: "last-good"`); without
+one it shows the component's defaults (`shows: "defaults"`). The expander's
+fast path is unchanged for a frame with no `<zd-` and no declaration in its
+head (about 12 µs for a 400-layer frame, before and after).
+
+Known limits: the Options section, variants menu, instance editing, Edit main,
+the error message in the panel and selecting inner parts ship in later slices;
+the interpreter has no records, string formatting, loops with state or maths
+beyond the functions above; an instance past the frame's repeat budget renders
+empty; the last good render does not survive a restart; options are read only
+from `<head>`.
+
 The DOM renderer runs in an opaque `allow-scripts` sandbox. Authored scripts,
 active URLs, forms, nested frames, workers, and network access remain blocked.
 Zeros injects the only runtime and connects through a private `MessagePort`.
@@ -4278,6 +4361,9 @@ memory plateau targets are measured. Unsupported general-script/GPU cases
 remain unavailable until qualification.
 
 ### Phase 6: Lite design components (M; available after Phase 2)
+
+Components with options (above) define the format: registration on the frame
+record, declared options and variants, the template layer and instance values.
 
 - Expose existing definition/instance operations: create from selection, insert
   from a Components list, edit supported props/slots, detach, edit main, and
