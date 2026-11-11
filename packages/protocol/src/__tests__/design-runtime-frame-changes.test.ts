@@ -131,6 +131,12 @@ describe("a frame's changes made by hand", () => {
     const many = Array.from({ length: 300 }, (_, index) => `<div data-oid="l${index}" class="btn" style="padding: 1px">L</div>`).join("");
     const scoped = await fixture(browser, many);
     try {
+      // The clock stands still, so only the layer cap can stop the pass: on a
+      // loaded machine the 12 ms budget would otherwise stop it first.
+      await scoped.evaluate(() => {
+        const at = performance.now();
+        performance.now = () => at;
+      });
       const frame = await changes(scoped);
       expect(frame.truncated).toBe(true);
       expect(frame.examined).toBe(200);
