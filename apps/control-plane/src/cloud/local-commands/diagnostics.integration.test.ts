@@ -103,7 +103,7 @@ database("local-command diagnostics through the router and PostgreSQL", () => {
 
   it.each(["sender_invalid", "not_reachable", "not_connected", "ambiguous_name"] as const)("explains a missing target with %s", async reason => {
     const call = input();
-    if (reason === "sender_invalid") await f.submit();
+    if (reason === "sender_invalid") { call.chatId = "never-desktop"; await f.submit(f.prompt(call.chatId)); }
     if (reason === "not_reachable") await pool.query("UPDATE local_command_devices SET reachable_until=now()-interval '1 second' WHERE device_id=$1", [mac.device.deviceId]);
     if (reason === "not_connected") await f.call(`/v1/cloud-v2/workspaces/${f.workspaceId}/macs/${mac.device.deviceId}/disconnect`, "POST", undefined, mac.headers);
     if (reason === "ambiguous_name") {

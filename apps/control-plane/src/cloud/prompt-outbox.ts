@@ -175,12 +175,21 @@ export class CloudV2PromptOutbox {
       if (options?.device) await this.localDevices.connectMessage(tx, authority!, id, options.device);
       // One explicit wake belongs to this committed send, not to its retries.
       // A send racing stopping remains pending until the stop has completed.
-      await tx.query(`WITH inserted AS (
+      // Chat Stop cancels a turn, not its Mac. Inheritance still respects the
+      // person's identity, access epoch and explicit binding-retirement fence.
+      await tx.query(`WITH sender AS (
+        SELECT coalesce($16::uuid,p.sender_device_id) AS device_id,coalesce($17::uuid,p.sender_registration_id) AS registration_id,
+          CASE WHEN $16::uuid IS NOT NULL THEN c.local_command_generation ELSE p.sender_binding_generation END AS generation
+        FROM cloud_v2_prompt_chats c LEFT JOIN cloud_v2_prompt_outbox p
+          ON p.workspace_id=c.workspace_id AND p.chat_id=c.chat_id AND p.sequence=c.next_sequence
+            AND p.creator_user_id=$4 AND p.access_epoch=$7 AND p.sender_binding_generation=c.local_command_generation
+        WHERE c.workspace_id=$1 AND c.chat_id=$3),
+      inserted AS (
         INSERT INTO cloud_v2_prompt_outbox(workspace_id,user_message_id,chat_id,creator_user_id,sequence,epoch,access_epoch,payload_hash,payload,payload_bytes,receipt,wake_after_stop,session_name,created_by_session_id,
           sender_device_id,sender_registration_id,sender_binding_generation)
-        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,
+        SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,
           CASE WHEN NOT EXISTS (SELECT 1 FROM cloud_v2_chats WHERE workspace_id=$1 AND chat_id=$3) THEN $14 ELSE NULL END, $15,
-          $16,$17,CASE WHEN $16::uuid IS NOT NULL THEN (SELECT local_command_generation FROM cloud_v2_prompt_chats WHERE workspace_id=$1 AND chat_id=$3) END) RETURNING workspace_id),
+          device_id,registration_id,generation FROM sender RETURNING workspace_id),
       advanced AS (UPDATE cloud_v2_prompt_chats SET next_sequence=$5 WHERE workspace_id=$1 AND chat_id=$3
         AND EXISTS (SELECT 1 FROM inserted) RETURNING workspace_id),
       discovered AS (INSERT INTO cloud_v2_chats(workspace_id,chat_id,row,created_by_session_id)
