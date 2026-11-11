@@ -91,3 +91,23 @@ describe("RunLocalCommand", () => {
     expect(unknown.acknowledged).not.toHaveBeenCalled();
   });
 });
+
+describe("RunLocalCommand reason (wire v1.3)", () => {
+  const tools = (reason: boolean, run = vi.fn(async (_input: LocalCommandInput, _signal: AbortSignal) => ({ result: { outcome: "completed", code: 0, mac: "Studio" } as LocalCommandResult, acknowledge: async () => {} }))) => ({
+    run, tools: new WorkspaceAgentTools({ assertCurrent: () => {}, terminalOutput: async () => undefined, diff: async () => ({ text: "", truncated: false }), localCommands: { run, checkout: "/tmp", reason } }),
+  });
+  it("offers and sends reason only when the configuration allows it", async () => {
+    const off = tools(false);
+    const offSchema = off.tools.listTools().find(tool => tool.name === "RunLocalCommand")!.inputSchema as unknown as { properties: Record<string, unknown> };
+    expect(offSchema.properties).not.toHaveProperty("reason");
+    await off.tools.callTool("RunLocalCommand", { command: "ls", reason: "needs the Mac" }, new AbortController().signal);
+    expect(off.run.mock.calls[0]![0]).toEqual({ command: "ls" });
+    const on = tools(true);
+    const onSchema = on.tools.listTools().find(tool => tool.name === "RunLocalCommand")!.inputSchema as unknown as { properties: Record<string, { maxLength?: number }> };
+    expect(onSchema.properties.reason).toMatchObject({ maxLength: 280 });
+    await on.tools.callTool("RunLocalCommand", { command: "ls", reason: "needs the Mac" }, new AbortController().signal);
+    expect(on.run.mock.calls[0]![0]).toEqual({ command: "ls", reason: "needs the Mac" });
+    const refused = await on.tools.callTool("RunLocalCommand", { command: "ls", reason: "x".repeat(281) }, new AbortController().signal) as { isError?: boolean };
+    expect(refused.isError).toBe(true);
+  });
+});

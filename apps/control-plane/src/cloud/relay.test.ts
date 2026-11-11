@@ -781,21 +781,25 @@ describe("cloud v2 relay", () => {
     else expect(deps.apiConfiguration).not.toHaveBeenCalled();
   });
 
-  it.each(["","local-commands-v10","local-commands-v1"])("negotiates local commands and removes the tool on a setting refresh: %s",async features => {
+  it.each(["","local-commands-v10","local-commands-v1","local-commands-reason-v1","local-commands-v1,local-commands-reason-v10",
+    "local-commands-v1,local-commands-reason-v1"])("negotiates local commands and removes the tool on a setting refresh: %s",async features => {
     workerServer.on("headers",headers => { headers.push(`X-Zeros-Worker-Features: ${features}`); });
     const original = deps.config;
-    deps.config = async workspace => ({ ...await original(workspace),promptOutbox: 1,localCommands: 1 });
+    deps.config = async workspace => ({ ...await original(workspace),promptOutbox: 1,localCommands: 1,localCommandReason: 1 });
     let enabled = true;
     deps.localCommandsEnabled = vi.fn(async () => enabled);
     const frames: any[] = [];
     workerServer.on("connection",ws => ws.on("message",raw => frames.push(JSON.parse(String(raw)))));
     await app();
     await vi.waitFor(() => expect(frames.filter(frame => frame.t === "config")).toHaveLength(1));
-    expect(frames.find(frame => frame.t === "config").localCommands).toBe(features === "local-commands-v1" ? 1 : undefined);
+    const local = features.split(",").includes("local-commands-v1"), reason = features.split(",").includes("local-commands-reason-v1");
+    expect(frames.find(frame => frame.t === "config").localCommands).toBe(local ? 1 : undefined);
+    expect(frames.find(frame => frame.t === "config").localCommandReason).toBe(local && reason ? 1 : undefined);
     enabled = false; loginRevision = "1"; await relay.refreshLogins();
     await vi.waitFor(() => expect(frames.filter(frame => frame.t === "config")).toHaveLength(2));
     expect(frames.filter(frame => frame.t === "config").at(-1)).not.toHaveProperty("localCommands");
-    if (features === "local-commands-v1") expect(deps.localCommandsEnabled).toHaveBeenCalledWith(workspaceId);
+    expect(frames.filter(frame => frame.t === "config").at(-1)).not.toHaveProperty("localCommandReason");
+    if (local) expect(deps.localCommandsEnabled).toHaveBeenCalledWith(workspaceId);
     else expect(deps.localCommandsEnabled).not.toHaveBeenCalled();
   });
 

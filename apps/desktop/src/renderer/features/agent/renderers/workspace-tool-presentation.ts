@@ -97,3 +97,11 @@ export function workspaceToolMeta(tool: AgentToolMessage): EventMeta | null {
   }
   return { Icon: Wrench, label: humanize(name).slice(0, 80), expandable: true };
 }
+
+/** RunLocalCommand's reason (wire v1.3), shown as a muted line above its row; one line, bounded. */
+export function localCommandReason(tool: AgentToolMessage): string | undefined {
+  const call = workspaceToolCall(tool);
+  if (call?.name !== "RunLocalCommand" || typeof call.args.reason !== "string") return undefined;
+  const reason = call.args.reason.replace(/\s+/g, " ").trim().slice(0, 280);
+  return reason || undefined;
+}

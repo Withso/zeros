@@ -128,6 +128,7 @@ export class CloudWorker {
   private historyReplacementEnabled = false;
   /** Read when a native execution's tools are admitted. */
   private localCommandsEnabled = false;
+  private localCommandReason = false;
   private notifyUserEnabled = false;
   private notifyUserService?: NotifyUserService;
   private readonly github: GithubBroker;
@@ -386,6 +387,7 @@ export class CloudWorker {
     }
     this.historyReplacementEnabled = config.historyReplacement === 1;
     this.localCommandsEnabled = config.localCommands === 1;
+    this.localCommandReason = config.localCommandReason === 1;
     this.notifyUserEnabled = config.notifyUser === 1;
     if (this.configurationRevision !== revision) { this.tokens.invalidate(); this.githubCredentials.invalidate(); }
     if (!changed || changed.includes("gitIdentity")) await configureGitIdentity(this.options.homeDirectory ?? homedir(), config.gitIdentity);
@@ -538,7 +540,7 @@ export class CloudWorker {
             const setupOutput = await readSetupOutput(this.options.directory, scope.workspace.id, request.maxLines);
             return setupOutput && { terminalId: "setup", truncated: setupOutput.truncated, lines: setupOutput.lines.map(line => application.text(line)) };
           }, diff: request => workspace!.git.agentDiff(request),
-          ...(this.localCommandsEnabled && this.options.transport.localCommand ? { localCommands: { checkout: scope.root,
+          ...(this.localCommandsEnabled && this.options.transport.localCommand ? { localCommands: { checkout: scope.root, reason: this.localCommandReason,
             run: (command, signal) => this.options.transport.localCommand!({ chatId: input.conversationId, executionId: input.nativeExecutionId, input: command }, signal) } } : {}),
           ...(this.notifyUserEnabled && this.notifyUserService ? { notifyUser: { notify: (request, signal) => this.notifyUserService!.notify(input.executionId, request, signal) } } : {}),
           ...(reviews!.enabled ? { review: reviews!.tools(input) } : {}) })), application, !!this.options.runtimeResume, workspaceApi);

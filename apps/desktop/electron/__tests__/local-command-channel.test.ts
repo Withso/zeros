@@ -52,6 +52,48 @@ async function fixture(streams: Stream[], options: { register?: Array<Error | nu
 }
 const revoked: DeviceEvent = { event: "revoked", data: { code: "session_revoked" } };
 
+describe("registration across a rollout (wire v1.3 reason capability)", () => {
+  it("never sends one request id with two bodies: a refused capability set takes a fresh id, a lost reply repeats the exact body, a conflict mints a fresh id", async () => {
+    // A strict control plane: an N-1 router refuses the two-element set with 400; afterwards the new one replays a
+    // request id only for the identical body (409 device_registration_conflict for any other).
+    const committed = new Map<string, string>(), sent: Array<[string, string]> = [];
+    let legacy = true, loseNextReply = false;
+    const f = await fixture([[ready(false), "hang"]]);
+    (f.service as unknown as { deps: LocalCommandServiceDeps }).deps.control.register = vi.fn(async (_id: string, input: { requestId: string; capabilities: readonly string[] }) => {
+      const body = input.capabilities.join(","); sent.push([input.requestId, body]);
+      if (legacy && input.capabilities.length > 1) throw new DeviceControlError(400, "invalid_request");
+      const previous = committed.get(input.requestId);
+      if (previous !== undefined && previous !== body) throw new DeviceControlError(409, "device_registration_conflict");
+      committed.set(input.requestId, body);
+      if (legacy) { legacy = false; loseNextReply = true; }
+      if (loseNextReply) { loseNextReply = false; throw new TypeError("fetch failed"); }   // committed, but the 200 never arrives
+      return { device, presence: { presenceRequired: false, reachableUntil: null }, heartbeatIntervalMs: 25000 as const };
+    }) as never;
+    await f.service.start();
+    await vi.waitFor(() => expect(f.calls).toContain("events"));
+    const bodiesById = new Map<string, Set<string>>();
+    for (const [id, body] of sent) bodiesById.set(id, (bodiesById.get(id) ?? new Set()).add(body));
+    for (const bodies of bodiesById.values()) expect(bodies.size).toBe(1);
+    expect(sent.length).toBeLessThanOrEqual(4);
+    await f.service.stop();
+  });
+
+  it("registers again with a fresh request id after a device_registration_conflict instead of looping", async () => {
+    const sent: string[] = [];
+    const f = await fixture([[ready(false), "hang"]]);
+    (f.service as unknown as { deps: LocalCommandServiceDeps }).deps.control.register = vi.fn(async (_id: string, input: { requestId: string }) => {
+      sent.push(input.requestId);
+      if (sent.length === 1) throw new DeviceControlError(409, "device_registration_conflict");
+      return { device, presence: { presenceRequired: false, reachableUntil: null }, heartbeatIntervalMs: 25000 as const };
+    }) as never;
+    await f.service.start();
+    await vi.waitFor(() => expect(f.calls).toContain("events"));
+    expect(sent).toHaveLength(2);
+    expect(sent[1]).not.toBe(sent[0]);
+    await f.service.stop();
+  });
+});
+
 describe("the local command channel survives token expiry", () => {
   it("reconnects after the stream says session_revoked while the same session is signed in (an expired token, not a sign-out)", async () => {
     const f = await fixture([[ready(false), revoked], [ready(false), "hang"]]);

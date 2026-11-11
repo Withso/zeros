@@ -59,4 +59,13 @@ describe("zeros_workspace tools in the transcript", () => {
     expect(toolPresentationReady(search("select:mcp__zeros_workspace__RunLocalCommand,ExitPlanMode"))).toBe(true);
     expect(toolPresentationReady(search("local command"))).toBe(true);
   });
+
+  it("shows RunLocalCommand's reason as a muted line above the row (wire v1.3), and nothing without one", () => {
+    const withReason = row(tool({ ...args, reason: "The simulator only runs on the Mac." }, "mcp__zeros_workspace__RunLocalCommand", "in_progress"));
+    expect(words(withReason)[0]).toBe("The simulator only runs on the Mac.");
+    expect(withReason).toMatch(/<p[^>]*class="text-fg3[^"]*"[^>]*data-local-command-reason=""/);
+    expect(row(tool(args, "mcp__zeros_workspace__RunLocalCommand", "in_progress"))).not.toContain("data-local-command-reason");
+    // Codex and Cursor carry it in their argument envelopes.
+    expect(words(row(tool({ server: "zeros_workspace", tool: "RunLocalCommand", arguments: { ...args, reason: "Needs Xcode." } }, "zeros_workspace:RunLocalCommand")))[0]).toBe("Needs Xcode.");
+  });
 });

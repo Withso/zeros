@@ -72,7 +72,8 @@ const NOTIFY_USER_TEXT: Record<NotifyUserOutcome, (title: string) => string> = {
   no_turn: () => "NotifyUser works only while a turn is running.",
 };
 
-const localCommandDefinition: ToolDefinition = { name: "RunLocalCommand",
+/** `reason` appears only when the configuration carries localCommandReason (wire v1.3). */
+const localCommandDefinition = (reason: boolean): ToolDefinition => ({ name: "RunLocalCommand",
   description: "Run one shell command on the Mac of the person who sent this chat's latest message, in their login shell, after they approve it there. " +
     "Use it for things only their Mac can do (local apps, simulators, files outside this workspace). It never runs in this workspace's VM. " +
     "It is one-shot: when the shell exits its whole process group is ended, so a process started with & does not survive, " +
@@ -81,12 +82,12 @@ const localCommandDefinition: ToolDefinition = { name: "RunLocalCommand",
     command: { type: "string", minLength: 1, maxLength: LOCAL_COMMAND_LIMITS.commandChars, description: "The command line, run by the Mac's login shell." },
     cwd: { type: "string", maxLength: LOCAL_COMMAND_LIMITS.cwdChars, description: "Directory on the Mac; defaults to the home directory, relative paths resolve from it." },
     description: { type: "string", maxLength: LOCAL_COMMAND_LIMITS.textChars, description: "What the command does, shown in the approval." },
-    reason: { type: "string", maxLength: LOCAL_COMMAND_LIMITS.textChars, description: "Why it is needed, shown in the approval." },
+    ...(reason ? { reason: { type: "string", minLength: 1, maxLength: LOCAL_COMMAND_LIMITS.reasonChars, description: "Why this needs the person's Mac rather than this workspace's VM, in one line; shown above the command." } } : {}),
     timeoutMs: { type: "integer", minimum: 1, maximum: LOCAL_COMMAND_LIMITS.extendedTimeoutMs, default: LOCAL_COMMAND_LIMITS.defaultTimeoutMs,
       description: "Up to 120000; up to 1800000 only with extendedTimeoutReason." },
     extendedTimeoutReason: { type: "string", maxLength: LOCAL_COMMAND_LIMITS.textChars, description: "Required for a timeout above 120 s; shown in the approval." },
     mac: { type: "string", maxLength: LOCAL_COMMAND_LIMITS.macChars, description: "Another connected Mac of the same person, by name. Omit to use the Mac the latest message came from." },
-  } } };
+  } } });
 
 /** One line per outcome; an approval timeout is never described as a denial. */
 const OUTCOME_TEXT: Record<Exclude<LocalCommandResult["outcome"], "completed">, (mac: string, error?: string) => string> = {
@@ -123,7 +124,9 @@ export interface WorkspaceAgentToolOptions {
   diff(input: { stat?: boolean; file?: string }): Promise<{ text: string; truncated: boolean }>;
   review?: CodeReviewAgentToolsCore;
   /** Present only while this worker and its organization allow local commands. */
-  localCommands?: { run(input: LocalCommandInput, signal: AbortSignal): Promise<{ result: LocalCommandResult; acknowledge(): Promise<void> }>; checkout: string };
+  localCommands?: { run(input: LocalCommandInput, signal: AbortSignal): Promise<{ result: LocalCommandResult; acknowledge(): Promise<void> }>; checkout: string;
+    /** Wire v1.3: offer and send `reason` (the control plane accepts it). */
+    reason?: boolean };
   /** notify-user-v1: present only when the configuration carries notifyUser: 1. */
   notifyUser?: { notify(input: NotifyUserInput, signal: AbortSignal): Promise<NotifyUserOutcome> };
 }
@@ -143,7 +146,7 @@ export class WorkspaceAgentTools implements AgentToolSet {
 
   listTools(): ToolDefinition[] {
     this.assertCurrent();
-    return [...definitions, ...(this.options.localCommands ? [localCommandDefinition] : []), ...(this.options.notifyUser ? [notifyUserDefinition] : []),
+    return [...definitions, ...(this.options.localCommands ? [localCommandDefinition(!!this.options.localCommands.reason)] : []), ...(this.options.notifyUser ? [notifyUserDefinition] : []),
       ...(this.review?.listTools() ?? [])];
   }
 
@@ -202,6 +205,8 @@ export class WorkspaceAgentTools implements AgentToolSet {
   private async runLocalCommand(local: NonNullable<WorkspaceAgentToolOptions["localCommands"]>, raw: unknown, signal: AbortSignal): Promise<ToolResult> {
     const parsed = LocalCommandInputSchema.safeParse(raw ?? {});
     if (!parsed.success) return failure("INVALID_INPUT", parsed.error.issues[0]?.message ?? "Invalid RunLocalCommand input.");
+    // Without v1.3 the control plane would refuse the field: it never leaves this worker.
+    if (!local.reason) delete (parsed.data as { reason?: string }).reason;
     let outcome: { result: LocalCommandResult; acknowledge(): Promise<void> };
     try { outcome = await local.run(parsed.data, signal); }
     catch (error) {

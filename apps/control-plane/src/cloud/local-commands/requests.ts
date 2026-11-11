@@ -9,7 +9,7 @@ import { hashCloudV2Token } from "../tokens.js";
 import { CLOUD_V2_LIVE_ACCESS } from "../workspace-access.js";
 import { RUNTIME_HANDOFF_SESSION } from "../runtime-handoff-store.js";
 import { cloudChatSender } from "../prompt-sender.js";
-import { LocalCommandIdSchema, LocalCommandInputSchema, LocalMacResultSchema, type LocalCommandInput, type LocalCommandNotice,
+import { LocalCommandIdSchema, LocalCommandInputSchema, LocalCommandReasonSchema, StoredLocalCommandInputSchema, LocalMacResultSchema, type LocalCommandInput, type LocalCommandNotice,
   type LocalCommandOutcome, type LocalCommandReceipt, type LocalCommandResult, type LocalDeviceBinding } from "./contract.js";
 import { CloudLocalDevices, limited, localUserAuthority, notFound } from "./devices.js";
 import { openLocalInput, openLocalResult, sealLocalInput, sealLocalResult } from "./envelope.js";
@@ -17,6 +17,9 @@ import { localCommandDiagnostic, type LocalCommandDiagnostic, type LocalTargetRe
 
 export const NewLocalCommandSchema = z.object({ requestId: z.string().uuid(), chatId: LocalCommandIdSchema,
   executionId: LocalCommandIdSchema, input: LocalCommandInputSchema }).strict();
+// An accepted N-1 body must still replay after bounds tighten. The store
+// applies current bounds only after the exact existing-receipt hash check.
+export const LocalCommandSubmissionSchema = NewLocalCommandSchema.extend({ input: StoredLocalCommandInputSchema });
 export type NewLocalCommand = z.infer<typeof NewLocalCommandSchema>;
 type MacResult = z.infer<typeof LocalMacResultSchema>;
 export const LOCAL_REQUEST_LIMITS = { chatRate: 10, deviceRate: 30, chatPending: 2, devicePending: 4,
@@ -40,7 +43,7 @@ export type LocalRequestRow = {
   phase: "pending" | "claimed" | "terminal"; outcome: LocalCommandOutcome | null; timeout_ms: number;
   created_at: Date; delivery_deadline: Date; approval_deadline: Date; run_deadline: Date | null; delivered_at: Date | null;
   terminal_at: Date | null; device_ack_at: Date | null; output_ack_at: Date | null; updated_at: Date;
-  checked_at: Date; fences_valid: boolean; enabled: boolean; reachable: boolean; instance_changed: boolean;
+  checked_at: Date; fences_valid: boolean; enabled: boolean; reachable: boolean; instance_changed: boolean; reason_supported: boolean;
   workspace_name: string; workspace_title: string | null; chat_title: string; default_device_id: string | null;
 };
 
@@ -50,6 +53,7 @@ const snapshot = `SELECT r.*,clock_timestamp() AS checked_at,o.local_commands_al
   w.name AS workspace_name,w.title AS workspace_title,coalesce(h.row->>'title','') AS chat_title,p.sender_device_id AS default_device_id,
   coalesce(d.reachable_until>clock_timestamp(),false) AS reachable,
   d.instance_id IS DISTINCT FROM r.target_instance_id AS instance_changed,
+  coalesce(d.reason_instance_id=d.instance_id,false) AS reason_supported,
   coalesce(w.state='running' AND w.archived_at IS NULL AND w.access_epoch=r.access_epoch AND w.stop_generation=r.stop_generation
     AND w.worker_boot_id=r.worker_boot_id AND ${CLOUD_V2_LIVE_ACCESS}
     AND c.next_sequence=r.message_sequence AND c.epoch=r.chat_epoch AND c.local_command_generation=r.binding_generation
@@ -171,6 +175,10 @@ export class CloudLocalCommands {
     if (outcome) return { requestId: row.request_id, state: "terminal", outcome };
     let input: LocalCommandInput;
     try { input = openLocalInput(row.input_envelope,row,this.keys); } catch { throw localUnavailable(); }
+    if (!row.reason_supported || (input.reason !== undefined && !LocalCommandReasonSchema.safeParse(input.reason).success)) {
+      const { reason: _reason, ...legacy } = input;
+      input = legacy;
+    }
     return { requestId: row.request_id, state: row.phase as "pending" | "claimed", workspace: { id: row.workspace_id,
       name: row.workspace_name.slice(0,120), title: row.workspace_title?.slice(0,120) ?? null }, chat: { id: row.chat_id, title: row.chat_title.slice(0,4096) },
       input, mac: row.target_name!, defaultMac: row.default_mac_name, isDefaultTarget: row.is_default_target,
@@ -202,6 +210,7 @@ export class CloudLocalCommands {
         if (!existing.input_hash.equals(hash)) throw conflict();
         return { receipt: await this.receipt(tx,await this.row(tx,workspace.id,input.requestId)), replay: true };
       }
+      if (!NewLocalCommandSchema.safeParse(input).success) throw new HttpError(400, "invalid_request", "Invalid local command request");
       if (workspace.state !== "running" || workspace.archived_at) throw unauthorized();
       const sender = await cloudChatSender(tx,workspace,input.chatId);
       const userId = sender?.creator_user_id ?? null, defaultId = sender?.valid ? sender.sender_device_id : null;

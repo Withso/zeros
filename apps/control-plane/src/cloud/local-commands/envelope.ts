@@ -1,7 +1,7 @@
 import { hkdfSync } from "node:crypto";
 import { z } from "zod";
 import { openCredentialBytes, sealCredentialBytes, type CloudAgentCredentialKeys } from "../../agent-credentials/agent-credential-envelope.js";
-import { LocalCommandInputSchema, LocalCommandResultSchema, type LocalCommandInput, type LocalCommandResult } from "./contract.js";
+import { StoredLocalCommandInputSchema, LocalCommandResultSchema, type LocalCommandInput, type LocalCommandResult } from "./contract.js";
 
 const purpose = "zeros-cloud-local-command-v1";
 const Envelope = z.object({ version: z.literal(1), keyVersion: z.number().int().positive(), nonce: z.string().max(32),
@@ -36,7 +36,7 @@ function open(value: unknown, row: Binding, kind: "input" | "result", keys: Clou
 export const sealLocalInput = (input: LocalCommandInput, row: Binding, keys: CloudAgentCredentialKeys) => seal(Buffer.from(JSON.stringify(input)), row, "input", keys);
 export function openLocalInput(value: unknown, row: Binding, keys: CloudAgentCredentialKeys): LocalCommandInput {
   const bytes = open(value, row, "input", keys);
-  try { return LocalCommandInputSchema.parse(JSON.parse(bytes.toString("utf8"))); } finally { bytes.fill(0); }
+  try { return StoredLocalCommandInputSchema.parse(JSON.parse(bytes.toString("utf8"))); } finally { bytes.fill(0); }
 }
 // Raw UTF-8 streams avoid JSON's sixfold expansion for control characters;
 // the reserved two MiB remains a bound on retained output, even for binary text.

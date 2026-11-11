@@ -30,6 +30,9 @@ export async function runLocalCommandsSmoke({ page, harnessBase, check }) {
     await expect(card.getByText("xcrun simctl list devices | grep Booted")).toBeVisible();
     expect(await color(card.getByText("Run this command on Alex's MacBook Pro?"), "color")).toBe(await token("--fg1"));
     expect(await color(card.locator("pre"), "color")).toBe(await token("--fg2"));
+    // Wire v1.3: the reason is a muted line under the title.
+    expect(await color(card.locator("[data-local-command-reason]"), "color")).toBe(await token("--fg3"));
+    await expect(card.locator("[data-local-command-reason]")).toHaveText("Verify the iOS build");
     // No shortcut decides: Enter with nothing focused does nothing.
     await page.locator("main").click({ position: { x: 4, y: 4 } });
     await page.keyboard.press("Enter"); await page.keyboard.press("Backspace");
@@ -87,6 +90,11 @@ export async function runLocalCommandsSmoke({ page, harnessBase, check }) {
       await expect(item.getByText(said, { exact: true })).toBeVisible();
     }
     await expect(transcript.getByText("xcrun simctl list devices | grep Booted").first()).toBeVisible();
+    // Wire v1.3: a muted reason line above the row, only where the agent gave one.
+    const reason = transcript.locator("[data-local-command-reason]");
+    await expect(reason).toHaveCount(1);
+    await expect(reason).toHaveText("The simulator only runs on the Mac.");
+    expect(await color(reason, "color")).toBe(await token("--fg3"));
     await expect(transcript.getByText(/mcp__|Loading tool/)).toHaveCount(0);
     await expect(transcript.getByText("Error", { exact: true })).toHaveCount(0);
     expect(await color(transcript.locator('[data-local-command-row="denied"]').getByText("List booted simulators", { exact: true }), "color")).toBe(await token("--fg1"));

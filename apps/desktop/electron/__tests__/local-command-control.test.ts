@@ -20,6 +20,13 @@ function fake(handler: (method: string, path: string, init: RequestInit) => Resp
 }
 
 describe("device control client", () => {
+  it("sends exactly the capabilities it is given: no fallback hides a second body under the same request id", async () => {
+    const deviceId = "7f1f6c1e-3b0a-4f7e-9d43-8a0b2b9c6d11", requestId = "0f0e0d0c-0b0a-4908-8706-050403020100";
+    const f = fake(() => Response.json({ error: { code: "invalid_request" } }, { status: 400 }));
+    await expect(f.control.register(deviceId, { requestId, name: "Studio", capabilities: ["local-commands-v1", "local-commands-reason-v1"] })).rejects.toMatchObject({ status: 400 });
+    expect(f.calls.map(call => (call.body as { capabilities: string[] }).capabilities)).toEqual([["local-commands-v1", "local-commands-reason-v1"]]);
+  });
+
   it("registers without H, then sends exactly the three H headers and the bearer on device routes", async () => {
     const f = fake((method, path) => {
       if (method === "PUT") return Response.json({ device, presence, heartbeatIntervalMs: 25000 });
@@ -28,9 +35,9 @@ describe("device control client", () => {
       if (path.endsWith("/ack")) return new Response(null, { status: 204 });
       return new Response(null, { status: 404 });
     });
-    const registered = await f.control.register(deviceId, { requestId, name: "Studio" });
+    const registered = await f.control.register(deviceId, { requestId, name: "Studio", capabilities: ["local-commands-v1", "local-commands-reason-v1"] });
     expect(registered.device).toEqual(device);
-    expect(f.calls[0]).toMatchObject({ method: "PUT", path: `/v1/cloud-v2/devices/${deviceId}`, body: { requestId, name: "Studio", capabilities: ["local-commands-v1"] } });
+    expect(f.calls[0]).toMatchObject({ method: "PUT", path: `/v1/cloud-v2/devices/${deviceId}`, body: { requestId, name: "Studio", capabilities: ["local-commands-v1", "local-commands-reason-v1"] } });
     expect(f.calls[0]!.headers.get("x-zeros-device-id")).toBeNull();
     expect(await f.control.heartbeat(device)).toEqual(presence);
     expect(await f.control.claim(device, requestId, "deny")).toEqual({ requestId, state: "terminal", outcome: "denied" });

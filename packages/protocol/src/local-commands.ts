@@ -7,8 +7,10 @@ import { NotifyUserEventSchema } from "./notify-user";
 // request and result transport is defined with the control plane's design.
 
 export const LOCAL_COMMANDS_FEATURE = "local-commands-v1";
+/** Wire v1.3: the worker may send, and a Mac may receive, `reason`. */
+export const LOCAL_COMMANDS_REASON_FEATURE = "local-commands-reason-v1";
 export const LOCAL_COMMAND_LIMITS = {
-  commandChars: 16_384, cwdChars: 4096, textChars: 1000, macChars: 128,
+  commandChars: 16_384, cwdChars: 4096, textChars: 1000, reasonChars: 280, macChars: 128,
   defaultTimeoutMs: 60_000, timeoutMs: 120_000, extendedTimeoutMs: 1_800_000,
   /** Waiting for the person's decision, on top of the command's own timeout. */
   approvalMs: 120_000,
@@ -31,7 +33,8 @@ export const LocalCommandInputSchema = z.object({
   command: text(LOCAL_COMMAND_LIMITS.commandChars),
   cwd: text(LOCAL_COMMAND_LIMITS.cwdChars).optional(),
   description: text(LOCAL_COMMAND_LIMITS.textChars).optional(),
-  reason: text(LOCAL_COMMAND_LIMITS.textChars).optional(),
+  /** Why the person's Mac and not the cloud VM (v1.3): 1-280 characters after trim, one line, no control characters. */
+  reason: z.string().max(LOCAL_COMMAND_LIMITS.reasonChars + 64).refine(value => !/[\u0000-\u001f\u007f]/.test(value) && value.trim().length > 0 && value.trim().length <= LOCAL_COMMAND_LIMITS.reasonChars).optional(),
   timeoutMs: z.number().int().min(1).max(LOCAL_COMMAND_LIMITS.extendedTimeoutMs).optional(),
   extendedTimeoutReason: text(LOCAL_COMMAND_LIMITS.textChars).optional(),
   /** Another connected Mac of the same person, by its name. */
@@ -80,7 +83,8 @@ const uuid = z.string().uuid();
 const iso = z.string().datetime();
 const id = z.string().min(1).max(256).refine(value => !/[\u0000-\u001f]/.test(value));
 const deviceName = z.string().min(1).max(LOCAL_COMMAND_LIMITS.macChars).refine(value => value.trim() === value && value.length > 0 && !/[\u0000-\u001f\u007f]/.test(value));
-const capabilities = z.tuple([z.literal(LOCAL_COMMANDS_FEATURE)]);
+/** local-commands-v1, optionally with local-commands-reason-v1 (released desktops send only the first). */
+const capabilities = z.union([z.tuple([z.literal(LOCAL_COMMANDS_FEATURE)]), z.tuple([z.literal(LOCAL_COMMANDS_FEATURE), z.literal(LOCAL_COMMANDS_REASON_FEATURE)])]);
 
 export const LocalCommandReceiptSchema = z.object({
   requestId: uuid, state: z.enum(["pending", "claimed", "terminal"]), approvalDeadline: iso, runDeadline: iso.nullable(),

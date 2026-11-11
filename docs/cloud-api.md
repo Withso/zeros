@@ -511,11 +511,22 @@ engine.
 
 The tool accepts `command`, with optional `cwd`, `description`, `reason`,
 `timeoutMs`, `extendedTimeoutReason` and `mac`. The command is at most 16,384
-characters, cwd 4,096, descriptions and reasons 1,000 each, and a Mac name 128.
+characters, cwd 4,096, descriptions and extended timeout reasons 1,000 each, and a Mac name 128.
 Values must be nonblank and contain no NUL. Timeout defaults to 60 seconds;
 above 120 seconds an extended reason is required, with a 30-minute maximum.
 Approval has a separate 120-second deadline. Each output stream is limited to
 1 MiB of UTF-8; larger tool presentations are saved in the VM's `.context/`.
+
+The optional `reason` explains why the command needs the person's Mac. It has
+1–280 characters after trimming, contains no C0 controls or DEL, and has a raw
+limit of 344 characters. The worker offers it only with `localCommandReason: 1`,
+negotiated through `local-commands-reason-v1`. The control plane encrypts it
+with the input, includes its exact bytes in the request hash, and never logs
+it. Notices include it only for a device instance that registered the same
+capability; older desktops receive the command without the reason.
+Receipts created under the older reason limit still replay by their exact
+input hash, including after input erasure. New commands use the current bound;
+an older retained reason outside that bound is omitted from device notices.
 
 Only the target Mac approves and runs a command. The control plane resolves
 the target from the chat's latest verified desktop message. Later messages

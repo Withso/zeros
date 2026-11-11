@@ -116,3 +116,25 @@ describe("order 2 wire v1.1 shapes", () => {
     expect(LocalCommandOrganizationSettingSchema.parse({ localCommandsEnabled: false })).toEqual({ localCommandsEnabled: false });
   });
 });
+
+describe("wire v1.3: reason", () => {
+  it("bounds reason to 1-280 characters after trim with no C0 controls", async () => {
+    const { LocalCommandInputSchema: input, LOCAL_COMMAND_LIMITS: limits } = await import("../local-commands");
+    expect(limits.reasonChars).toBe(280);
+    expect(input.safeParse({ command: "ls", reason: "The simulator only runs on the Mac." }).success).toBe(true);
+    expect(input.safeParse({ command: "ls", reason: `  ${"x".repeat(280)}  ` }).success).toBe(true);
+    for (const reason of ["", "   ", "x".repeat(281), "line\nbreak", "tab\tbed", "nul\u0000"]) expect(input.safeParse({ command: "ls", reason }).success, JSON.stringify(reason)).toBe(false);
+  });
+  it("lets a Mac register local-commands-reason-v1 beside local-commands-v1, never alone, and adds the worker config flag", async () => {
+    const { LocalCommandRegistrationRequestSchema: request, LOCAL_COMMANDS_REASON_FEATURE: reason } = await import("../local-commands");
+    const body = { requestId: "0f0e0d0c-0b0a-4908-8706-050403020100", name: "Studio" };
+    expect(reason).toBe("local-commands-reason-v1");
+    expect(request.safeParse({ ...body, capabilities: ["local-commands-v1"] }).success).toBe(true);
+    expect(request.safeParse({ ...body, capabilities: ["local-commands-v1", "local-commands-reason-v1"] }).success).toBe(true);
+    for (const capabilities of [["local-commands-reason-v1"], ["local-commands-v1", "other"], []]) expect(request.safeParse({ ...body, capabilities }).success).toBe(false);
+    const { CloudV2ControlFrameSchema: frames } = await import("../cloud-v2-relay");
+    const config = frames.options.find(option => option.shape.t.value === "config") as unknown as { shape: Record<string, { safeParse(value: unknown): { success: boolean } }> };
+    for (const value of [undefined, 1]) expect(config.shape.localCommandReason!.safeParse(value).success).toBe(true);
+    expect(config.shape.localCommandReason!.safeParse(2).success).toBe(false);
+  });
+});

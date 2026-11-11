@@ -12,16 +12,17 @@ const text = (html: string) => html.replace(/<[^>]+>/g, "\n").replaceAll("&#x27;
 const render = (value: Partial<LocalCommandApproval> = {}) => renderToStaticMarkup(createElement(LocalCommandApprovalCard, { request: { ...request, ...value }, onDecide: () => {} }));
 
 describe("local command approval card", () => {
-  it("shows where it asks from, the whole command, its directory, timeout and reasons, then Deny, Yes, Yes always", () => {
-    expect(text(render())).toEqual(["Run this command on Alex's MacBook Pro?", "w-7 · Fix login", "Simulator check", "List booted simulators",
-      "xcrun simctl list devices\n| grep Booted".split("\n")[0], "| grep Booted", "Directory", "~/src/app", "Timeout", "60 s", "Reason", "Verify the iOS build",
+  it("shows where it asks from, the reason as a muted line under the title, the whole command, its directory and timeout, then Deny, Yes, Yes always", () => {
+    expect(text(render())).toEqual(["Run this command on Alex's MacBook Pro?", "Verify the iOS build", "w-7 · Fix login", "Simulator check", "List booted simulators",
+      "xcrun simctl list devices\n| grep Booted".split("\n")[0], "| grep Booted", "Directory", "~/src/app", "Timeout", "60 s",
       "Deny", "Yes", "Yes always"]);
+    expect(render()).toMatch(/<p[^>]*class="text-fg3[^"]*"[^>]*data-local-command-reason=""[^>]*>Verify the iOS build<\/p>/);
   });
 
   it("shows the extended timeout with its reason, and home when no directory is given", () => {
     const shown = text(render({ timeoutMs: 1_800_000, extendedTimeoutReason: "Full archive build", cwd: undefined, reason: undefined, description: undefined }));
     expect(shown).toEqual(expect.arrayContaining(["Directory", "Home folder", "Timeout", "30 min · Full archive build"]));
-    expect(shown).not.toContain("Reason");
+    expect(render({ reason: undefined })).not.toContain("data-local-command-reason");
   });
 
   it("says which Mac the chat's latest message came from when the request names this Mac explicitly", () => {

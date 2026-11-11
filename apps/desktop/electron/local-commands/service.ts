@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import {
-  LOCAL_COMMAND_DEVICE_HEADERS, LOCAL_COMMAND_LIMITS,
+  LOCAL_COMMAND_DEVICE_HEADERS, LOCAL_COMMAND_LIMITS, LOCAL_COMMANDS_FEATURE, LOCAL_COMMANDS_REASON_FEATURE,
   type LocalCommandDevice, type LocalCommandMacResult, type LocalCommandNotice, type LocalCommandPendingNotice, type LocalCommandPresence,
 } from "@zeros/protocol/local-commands";
 import type { NotifyUserEvent } from "@zeros/protocol/notify-user";
@@ -134,7 +134,8 @@ export class LocalCommandService {
    * or changed (install.ts then starts it again for the new one). */
   private async channel(session: { accountId: string; sessionId: string }, signal: AbortSignal): Promise<void> {
     const { accountId } = session;
-    let registrationRequest = randomUUID(), attempt = 0;
+    // One request id is only ever sent with one exact body: the id and the capability set change together.
+    let registration = { requestId: randomUUID(), capabilities: [LOCAL_COMMANDS_FEATURE, LOCAL_COMMANDS_REASON_FEATURE] as readonly string[] }, attempt = 0;
     const stillSignedIn = async () => {
       const current = await this.deps.session().catch(() => null);
       return !!current && current.accountId === session.accountId && current.sessionId === session.sessionId;
@@ -147,7 +148,7 @@ export class LocalCommandService {
     while (!signal.aborted) {
       // Register (same request id on retry); a changed registration needs a new one.
       try {
-        const reply = await this.deps.control.register(this.deps.identity.deviceId(accountId), { requestId: registrationRequest, name: await this.deps.identity.name() });
+        const reply = await this.deps.control.register(this.deps.identity.deviceId(accountId), { ...registration, name: await this.deps.identity.name() });
         if (signal.aborted) return;
         this.device = reply.device; attempt = 0;
         this.log("registered");
@@ -157,6 +158,12 @@ export class LocalCommandService {
         const code = codeOf(error);
         this.log(`register failed code=${code}`);
         if (authFailure(code) && !await stillSignedIn()) { this.log("channel stopped reason=signed_out"); return; }
+        // A control plane from before wire v1.3 refuses the reason capability: register as v1 alone, under a new id.
+        if (error instanceof DeviceControlError && error.status === 400 && registration.capabilities.length > 1) {
+          registration = { requestId: randomUUID(), capabilities: [LOCAL_COMMANDS_FEATURE] }; continue;
+        }
+        // That id was committed with another body: never loop on it.
+        if (code === "device_registration_conflict") registration = { ...registration, requestId: randomUUID() };
         await backoff(); continue;
       }
       await this.recover();
@@ -190,7 +197,7 @@ export class LocalCommandService {
         }
         if (signal.aborted) return;
         this.log(`channel closed reason=${reason} open_s=${Math.round((Date.now() - opened) / 1000)}`);
-        if (reason === "device_registration_changed") { registrationRequest = randomUUID(); break; }
+        if (reason === "device_registration_changed") { registration = { ...registration, requestId: randomUUID() }; break; }
         if (authFailure(reason) && !await stillSignedIn()) { this.log("channel stopped reason=signed_out"); return; }
         // The server ends a healthy stream cleanly just before its token expires (every few minutes):
         // reconnect at once, or a request sent in the gap misses its delivery deadline.
