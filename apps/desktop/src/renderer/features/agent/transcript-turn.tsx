@@ -12,6 +12,7 @@
 // travels in `tail`, which is null for every other turn.
 // ──────────────────────────────────────────────────────────
 
+import { usePromptSender } from "./use-prompt-sender";
 import React, { memo, useCallback, useMemo } from "react";
 import type { CloudV2PromptState } from "@zeros/protocol/cloud-v2-prompts";
 import { isCloudWorkspace } from "../../platform/bridge/cloud-workspace-key";
@@ -158,6 +159,8 @@ export const TranscriptTurn = memo(function TranscriptTurn({
 
   const promptId = prompt?.id;
   const promptText = prompt?.text;
+  // Team sharing: who sent this turn's message, when it was someone else.
+  const sender = usePromptSender(shared.chatId, prompt?.role === "user" ? promptId : null, shared.surfaceActive !== false);
   const editable =
     !!prompt &&
     !(shared.transcriptReadOnly || prompt.autoAction || prompt.localFrom || prompt.queued || turn.isSteer);
@@ -226,6 +229,7 @@ export const TranscriptTurn = memo(function TranscriptTurn({
               originalSegments={prompt.segments}
               autoAction={prompt.autoAction}
               localFrom={prompt.localFrom}
+              sender={sender}
               onEdit={editable ? onEdit : undefined}
               editToolbarPills={editToolbarPills}
               editAgentContext={editAgentContext}

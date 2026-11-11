@@ -47,6 +47,20 @@ export const CONTROL_PLANE_DATABASE_INPUTS = Object.freeze([
   // The sync client suite drives the desktop sync connection and the renderer's Macs list against the real routes.
   "apps/desktop/electron/workspace-sync/connection.ts",
   "apps/desktop/src/renderer/platform/local-commands.ts",
+  // The sharing and sender client suites drive these renderer clients against the real routes.
+  "apps/desktop/shared/client-compatibility.ts",
+  "apps/desktop/src/renderer/features/update/control-plane-fetch.ts",
+  "apps/desktop/src/renderer/features/update/required-update-state.ts",
+  "apps/desktop/src/renderer/platform/chat-senders-lookup.ts",
+  "apps/desktop/src/renderer/platform/chat-senders.ts",
+  "apps/desktop/src/renderer/platform/cloud-prompt-erasure.ts",
+  "apps/desktop/src/renderer/platform/cloud-v2.ts",
+  "apps/desktop/src/renderer/platform/cloud-workspace-contract.ts",
+  "apps/desktop/src/renderer/platform/cloud-workspace-read-only.ts",
+  "apps/desktop/src/renderer/platform/cloud-workspaces.ts",
+  "apps/desktop/src/renderer/platform/team-sharing-registry.ts",
+  "apps/desktop/src/renderer/platform/team-sharing-schema.ts",
+  "apps/desktop/src/renderer/platform/team-sharing-state.ts",
   // The operator publisher invokes the portable runtime packager.
   "apps/cloud-worker/scripts/",
   "apps/cloud-worker/package.json",

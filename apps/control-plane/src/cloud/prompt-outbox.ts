@@ -17,6 +17,7 @@ export type CloudApiPrompt = {
   message: string; model?: string | undefined; effort?: string | undefined; startedAt?: number | undefined;
   sessionName?: string | undefined;
   createdBySessionId?: string | null | undefined;
+  senderCredential?: { kind: "api_key" | "workspace_token"; credentialId: string } | undefined;
 };
 
 const PENDING = "('queued','inboxed','dispatching','accepted')";
@@ -24,7 +25,7 @@ export const CLOUD_V2_PROMPT_LIMITS = { pending: 128, bytes: 32 * 1024 * 1024, r
 type Limits = typeof CLOUD_V2_PROMPT_LIMITS;
 type Workspace = { id: string; repository: string; state: CloudV2PromptReceipt["workspaceState"]; archived_at: Date | null;
   access_epoch: string; worker_boot_id: string | null; previous?: Row };
-type Row = { user_message_id: string; chat_id: string; sequence: string; epoch: string; access_epoch: string;
+type Row = { user_message_id: string; chat_id: string; creator_user_id: string; sequence: string; epoch: string; access_epoch: string;
   payload_hash: string; payload: CloudV2Prompt | null; receipt: CloudV2PromptReceipt; state: CloudV2PromptState;
   created_by_session_id: string | null;
   cancel_requested: boolean; delivery_id: string | null; worker_boot_id: string | null; dispatch_id: string | null };
@@ -111,12 +112,13 @@ export class CloudV2PromptOutbox {
     // This digest survives terminal payload compaction just like native receipts.
     const requestHash = createHash("sha256").update(JSON.stringify(["cloud-api-v0", chatId, message])).digest("hex");
     return this.enqueue(id, userId, payload, undefined, { tx, requestHash, apiSession: true, sessionName: input.sessionName,
-      createdBySessionId: input.createdBySessionId });
+      createdBySessionId: input.createdBySessionId, senderCredential: input.senderCredential });
   }
 
   async enqueue(id: string, userId: string, raw: CloudV2Prompt, authority?: AuthedUser,
     options?: { tx?: Tx | undefined; requestHash?: string; apiSession?: boolean; sessionName?: string | undefined;
-      createdBySessionId?: string | null | undefined; device?: LocalDeviceBinding | undefined }): Promise<{ receipt: CloudV2PromptReceipt; replay: boolean; createdBySessionId: string | null }> {
+      createdBySessionId?: string | null | undefined; device?: LocalDeviceBinding | undefined;
+      senderCredential?: CloudApiPrompt["senderCredential"] }): Promise<{ receipt: CloudV2PromptReceipt; replay: boolean; createdBySessionId: string | null }> {
     const parsed = CloudV2PromptSchema.safeParse(raw);
     if (!parsed.success) throw new HttpError(400, "invalid_request", "Invalid cloud prompt");
     const named = CloudV2SessionNameSchema.transform(value => value.trim()).optional().safeParse(options?.sessionName);
@@ -137,14 +139,14 @@ export class CloudV2PromptOutbox {
             AND c.deleted_at IS NULL LIMIT 1`, [id, payload.chatId, userId]);
         if (duplicate.rowCount) throw new HttpError(409, "session_conflict", "This session id is already in use");
       }
-      if (authority?.authentication && !await securityStreamAuthority(tx, authority))
+      if (authority && (authority.id !== userId || (authority.authentication && !await securityStreamAuthority(tx, authority))))
         throw new HttpError(401, "session_revoked", "Authentication is no longer current");
       const previous = workspace.previous;
       if (options?.device && (!authority || authority.id !== userId))
         throw new HttpError(401, "unauthorized", "A signed-in desktop session is required");
       if (previous) {
         if (options?.device) await this.localDevices.verify(tx, authority!, options.device);
-        if (previous.payload_hash !== hash) throw conflict();
+        if (previous.creator_user_id !== userId || previous.payload_hash !== hash) throw conflict();
         return { receipt: previous.receipt, replay: true, createdBySessionId: previous.created_by_session_id };
       }
       if (workspace.state === "failed") throw new HttpError(409, "workspace_unavailable", "This cloud workspace is unavailable");
@@ -186,10 +188,10 @@ export class CloudV2PromptOutbox {
         WHERE c.workspace_id=$1 AND c.chat_id=$3),
       inserted AS (
         INSERT INTO cloud_v2_prompt_outbox(workspace_id,user_message_id,chat_id,creator_user_id,sequence,epoch,access_epoch,payload_hash,payload,payload_bytes,receipt,wake_after_stop,session_name,created_by_session_id,
-          sender_device_id,sender_registration_id,sender_binding_generation)
+          sender_device_id,sender_registration_id,sender_binding_generation,sender_provider_session_id,sender_credential_kind,sender_credential_id)
         SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,
           CASE WHEN NOT EXISTS (SELECT 1 FROM cloud_v2_chats WHERE workspace_id=$1 AND chat_id=$3) THEN $14 ELSE NULL END, $15,
-          device_id,registration_id,generation FROM sender RETURNING workspace_id),
+          device_id,registration_id,generation,$18,$19,$20 FROM sender RETURNING workspace_id),
       advanced AS (UPDATE cloud_v2_prompt_chats SET next_sequence=$5 WHERE workspace_id=$1 AND chat_id=$3
         AND EXISTS (SELECT 1 FROM inserted) RETURNING workspace_id),
       discovered AS (INSERT INTO cloud_v2_chats(workspace_id,chat_id,row,created_by_session_id)
@@ -205,7 +207,8 @@ export class CloudV2PromptOutbox {
       SELECT pg_notify('zeros_cloud_v2_prompts', id::text) FROM woke`,
       [id, payload.userMessageId, payload.chatId, userId, sequence, chat.epoch, workspace.access_epoch, hash, encoded, bytes,
         JSON.stringify(receipt), workspace.state === "stopping", chatRow, named.data ?? null, options?.createdBySessionId ?? null,
-        options?.device?.deviceId ?? null, options?.device?.registrationId ?? null]);
+        options?.device?.deviceId ?? null, options?.device?.registrationId ?? null,
+        authority?.authentication?.sessionId ?? null, options?.senderCredential?.kind ?? null, options?.senderCredential?.credentialId ?? null]);
       return { receipt, replay: false, createdBySessionId: options?.createdBySessionId ?? null };
     };
     return options?.tx ? write(options.tx) : withSystemTx(this.pool, write);
