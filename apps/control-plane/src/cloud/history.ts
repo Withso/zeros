@@ -7,12 +7,13 @@ import { CloudV2HistoryStateSchema, type CloudV2HistoryState, type CloudV2Messag
 import type { CloudV2Store } from "./store.js";
 import { MessageSearchError } from "./message-search.js";
 
-export type MessageWindow = { messages: CloudV2MessageRow[]; turnOpening?: CloudV2MessageRow; historyState?: CloudV2HistoryState };
-export type WindowOptions = { limit?: number; before?: number; beforeMsgId?: string };
+export type MessageSenders = Record<string, { userId: string } | null>;
+export type MessageWindow = { messages: CloudV2MessageRow[]; turnOpening?: CloudV2MessageRow; historyState?: CloudV2HistoryState; senders?: MessageSenders };
+export type WindowOptions = { limit?: number; before?: number; beforeMsgId?: string; includeSenders?: boolean };
 type Row = { ord: string; msg_id: string; kind: string; payload: string; created_at_ms: string };
 const columns = "ord, msg_id, kind, payload, created_at_ms";
 const persisted = (row: Row): CloudV2MessageRow => ({ msgId: row.msg_id, kind: row.kind, payload: row.payload, createdAt: Number(row.created_at_ms) });
-const user = (row: Row, openingOnly = false): boolean => {
+const user = (row: Pick<Row, "kind" | "payload">, openingOnly = false): boolean => {
   if (row.kind !== "text") return false;
   try { const value = JSON.parse(row.payload); return value?.role === "user" && (!openingOnly || value.steeredTurnId == null); }
   catch { return false; }
@@ -22,7 +23,22 @@ export async function mirrorMessageWindow(tx: Tx, workspaceId: string, chatId: s
   const saved = await tx.query<{ state: unknown }>("SELECT row->'historyState' AS state FROM cloud_v2_chats WHERE workspace_id=$1 AND chat_id=$2 AND deleted_at IS NULL", [workspaceId, chatId]);
   const parsed = CloudV2HistoryStateSchema.safeParse(saved.rows[0]?.state);
   const state = parsed.success ? { historyState: parsed.data } : {};
-  return { ...await mirrorMessageRows(tx, workspaceId, chatId, options), ...state };
+  const result = { ...await mirrorMessageRows(tx, workspaceId, chatId, options), ...state };
+  if (!options.includeSenders) return result;
+  const ids = [...result.messages, ...(result.turnOpening ? [result.turnOpening] : [])].filter(row => user(row)).map(row => row.msgId);
+  return { ...result, senders: await mirrorMessageSenders(tx, workspaceId, chatId, ids) };
+}
+
+export async function mirrorMessageSenders(tx: Tx, workspaceId: string, chatId: string, ids: string[]): Promise<MessageSenders> {
+  // Receipts precede worker mirroring and outlive prompt payload compaction.
+  // No receipt means unknown; payloads and the current Creator cannot fill it.
+  const keys = [...new Set(ids)];
+  const readable = chatId.includes("\0") ? [] : keys.filter(id => !id.includes("\0"));
+  const rows = readable.length ? (await tx.query<{ user_message_id: string; creator_user_id: string }>(
+    `SELECT user_message_id,creator_user_id FROM cloud_v2_prompt_outbox
+     WHERE workspace_id=$1 AND chat_id=$2 AND user_message_id=ANY($3::text[])`, [workspaceId, chatId, readable])).rows : [];
+  const senders = new Map(rows.map(row => [row.user_message_id, { userId: row.creator_user_id }]));
+  return Object.fromEntries(keys.map(id => [id, senders.get(id) ?? null]));
 }
 
 async function mirrorMessageRows(tx: Tx, workspaceId: string, chatId: string, options: WindowOptions): Promise<MessageWindow> {
@@ -74,8 +90,24 @@ async function mirrorMessageRows(tx: Tx, workspaceId: string, chatId: string, op
 
 export const HISTORY_OPS = ["chats.list", "messages.window", "messages.windowOlder", "messages.search"] as const;
 const HistorySchema = z.object({ op: z.enum(HISTORY_OPS), params: z.record(z.string(), z.unknown()).default({}) }).strict();
+const SharingHistorySchema = HistorySchema.extend({ op: z.enum([...HISTORY_OPS, "messages.senders"]) });
 const id = z.string().min(1).max(256);
-export async function readCloudV2History(store: Pick<CloudV2Store, "listChats" | "messageWindow" | "searchMessages">, workspaceId: string, request: unknown): Promise<unknown> {
+const SendersSchema = z.object({ chatId: id, userMessageIds: z.array(id).min(1).max(200) }).strict();
+export async function readCloudV2SharingHistory(store: Pick<CloudV2Store, "listChats" | "messageWindow" | "searchMessages" | "messageSenders">,
+  workspaceId: string, request: unknown): Promise<unknown> {
+  const parsed = SharingHistorySchema.safeParse(request);
+  if (!parsed.success) throw new HttpError(400, "invalid_request", "Unsupported history read");
+  const { op, params } = parsed.data;
+  if (op === "messages.senders") {
+    const lookup = SendersSchema.safeParse(params);
+    if (!lookup.success) throw new HttpError(400, "invalid_request", "Invalid sender lookup");
+    return { senders: await store.messageSenders(workspaceId, lookup.data.chatId, lookup.data.userMessageIds) };
+  }
+  return readCloudV2History(store, workspaceId, parsed.data, { includeSenders: true });
+}
+
+export async function readCloudV2History(store: Pick<CloudV2Store, "listChats" | "messageWindow" | "searchMessages">,
+  workspaceId: string, request: unknown, options: { includeSenders?: boolean } = {}): Promise<unknown> {
   const parsed = HistorySchema.safeParse(request);
   if (!parsed.success) throw new HttpError(400, "invalid_request", "Unsupported history read");
   const { op, params } = parsed.data;
@@ -95,8 +127,8 @@ export async function readCloudV2History(store: Pick<CloudV2Store, "listChats" |
   if (op === "messages.windowOlder") {
     const beforeMsgId = id.safeParse(params.beforeMsgId);
     if (!beforeMsgId.success) throw new HttpError(400, "invalid_request", "beforeMsgId is required");
-    return store.messageWindow(workspaceId, chatId.data, { limit, beforeMsgId: beforeMsgId.data });
+    return store.messageWindow(workspaceId, chatId.data, { limit, beforeMsgId: beforeMsgId.data, ...options });
   }
   const before = z.number().finite().catch(0).parse(params.before);
-  return store.messageWindow(workspaceId, chatId.data, { limit, before });
+  return store.messageWindow(workspaceId, chatId.data, { limit, before, ...options });
 }

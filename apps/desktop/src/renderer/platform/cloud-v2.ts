@@ -272,7 +272,9 @@ export async function connectCloudV2Workspace(target: CloudWorkspaceTarget, opti
 /** Chat history from the control plane's mirror, readable while the VM sleeps. */
 export async function readCloudV2History(target: CloudWorkspaceTarget, op: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
   const { result } = await cloudAccountRequest(`/v1/cloud-v2/workspaces/${uuid.parse(target.workspaceId)}/history`,
-    z.object({ result: z.record(z.string(), z.unknown()) }), { body: { op, params }, idempotencyKey: key() }, sharingFor(target.workspaceId));
+    z.object({ result: z.record(z.string(), z.unknown()) }), { body: { op, params }, idempotencyKey: key() },
+    // messages.senders exists only under the sharing opt-in, for every viewer (the Creator too); every other history op follows the role rule.
+    op === "messages.senders" ? { teamSharing: true } : sharingFor(target.workspaceId));
   return result;
 }
 

@@ -3,7 +3,7 @@ import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
 import { HttpError } from "../../authz.js";
 import { rateLimit } from "../../ratelimit.js";
-import { readCloudV2History } from "../history.js";
+import { readCloudV2SharingHistory } from "../history.js";
 import { CloudV2PromptCounterSchema, CloudV2PromptIdSchema, CloudV2SessionNameSchema } from "../prompt-contract.js";
 import { ApiRenameSchema } from "../api/contract.js";
 import type { CloudTeamSharing } from "./store.js";
@@ -34,7 +34,10 @@ export function createCloudTeamRoutes(sharing: CloudTeamSharing, document: (valu
     }
   };
   const limited = bodyLimit({ maxSize: 16*1024,onError: c => c.json({ error: { code: "payload_too_large" } },413) });
+  // 200 IDs of 256 characters, including JSON escaping, fit the lookup bound.
+  const historyLimit = bodyLimit({ maxSize: 320*1024,onError: c => c.json({ error: { code: "payload_too_large" } },413) });
   app.use("/v1/cloud-v2/workspaces*",async (c,next) => {
+    if (c.req.header(TEAM_SHARING_HEADER) === "1" && c.req.path.endsWith("/history")) return historyLimit(c,next);
     if (c.req.header(TEAM_SHARING_HEADER) === "1" && !["/prompts","/github"].some(suffix => c.req.path.endsWith(suffix))) return limited(c,next);
     return next();
   });
@@ -57,7 +60,7 @@ export function createCloudTeamRoutes(sharing: CloudTeamSharing, document: (valu
   })));
   app.post(`${path}/history`,share(async c => {
     const id = uuid(c.req.param("id")!), request = await c.req.json().catch(() => null);
-    return c.json({ result: await sharing.read(id,c.get("user"),() => readCloudV2History(sharing.workspaces,id,request)) });
+    return c.json({ result: await sharing.read(id,c.get("user"),() => readCloudV2SharingHistory(sharing.workspaces,id,request)) });
   }));
   app.get(`${path}/prompts`,share(async c => {
     const query = z.object({ chatId: CloudV2PromptIdSchema,after: CloudV2PromptCounterSchema.default("0"),

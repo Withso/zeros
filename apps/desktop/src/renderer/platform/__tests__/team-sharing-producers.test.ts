@@ -67,6 +67,16 @@ describe("the Team sharing opt-in follows the viewer's role in the document held
     }
   });
 
+  it("always opts in on the sharing-only messages.senders lookup, for the Creator too, while the Creator's other history stays headerless", async () => {
+    for (const held of ["creator", undefined, "member"]) {
+      calls = []; role = held;
+      reply = () => Response.json({ result: { senders: {} } });
+      await readCloudV2History(target, "messages.senders", { chatId: "chat", userMessageIds: ["m1"] });
+      await readCloudV2History(target, "messages.window", { chatId: "chat", limit: 100 });
+      expect(headers(), String(held)).toEqual(["1", held === "member" ? "1" : null]);
+    }
+  });
+
   it("always opts in on discovery and sharing-only routes", async () => {
     role = "creator";
     reply = url => Response.json(/\/rename$/.test(url) ? { workspace: doc, teamSharing: 1 } : { workspace: doc });
@@ -87,4 +97,5 @@ describe("the Team sharing opt-in follows the viewer's role in the document held
     expect(reported).toEqual([target.workspaceId, target.workspaceId]);
     stop();
   });
+
 });
