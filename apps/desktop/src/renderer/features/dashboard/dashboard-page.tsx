@@ -84,6 +84,7 @@ import {
   saveDashboardRepoFilter,
   useDashboardRepoFilter,
   useDashboardPreferences,
+  useDashboardByState,
   updateDashboardPreferences,
   type DashboardDisplay,
   type DashboardView,
@@ -93,6 +94,7 @@ import {
   dashboardRowsForArchive,
   dashboardPendingLabel,
   filterDashboardRows,
+  filterDashboardRowsBy,
   filterDashboardPending,
   type DashboardRow as BoardRow,
 } from "./dashboard-model";
@@ -130,6 +132,9 @@ import {
   type Workspace,
 } from "../../platform/git";
 import { useActiveOrganization } from "../team/team-store";
+import { useMyUserId, useSharingOrganization } from "../../platform/team-sharing-state";
+import { memberName, useOrganizationRoster } from "../../state/organization-roster";
+import { useCloudWorkspaceCreators } from "../../state/cloud-workspace-creators";
 import { filterRowsForOrganization } from "../team/organization-capabilities";
 import { isLocalMainWorkspace } from "../../state/local-main-workspace";
 import { useFolderWorkspaces } from "../../state/use-folder-workspaces";
@@ -199,10 +204,32 @@ export function DashboardPage() {
   const [search, setSearch] = useState({ owner, query: "" });
   const query = search.owner === owner ? search.query : "";
   const setQuery = (value: string) => setSearch({ owner, query: value });
-  const ownerName = (workspace: Workspace) =>
-    !workspace.organizationId || activeOrganization?.isPersonal
-      ? "Local"
-      : (activeOrganization?.name ?? "Organization");
+  // Team sharing: By (anyone, me, a person) and the Creator's name, only for an organization that shares.
+  const sharingOrganizationId =
+    activeOrganization && !activeOrganization.isPersonal ? activeOrganization.id : null;
+  const sharing = useSharingOrganization(sharingOrganizationId);
+  const roster = useOrganizationRoster(sharingOrganizationId, sharing && active);
+  const me = useMyUserId();
+  const creatorOf = useCloudWorkspaceCreators();
+  const [byValue, setBy] = useDashboardByState(sharing ? sharingOrganizationId : null);
+  const by = sharing ? byValue : "anyone";
+  const byControl = useMemo(
+    () =>
+      sharing && sharingOrganizationId
+        ? {
+            value: byValue,
+            onChange: setBy,
+            people: (roster ?? []).filter((member) => member.id !== me),
+          }
+        : undefined,
+    [sharing, sharingOrganizationId, byValue, setBy, roster, me],
+  );
+  const ownerName = (workspace: Workspace) => {
+    if (!workspace.organizationId || activeOrganization?.isPersonal) return "Local";
+    const creator = sharing ? creatorOf(workspace) : null;
+    if (creator) return creator === me ? "You" : memberName(roster, creator);
+    return activeOrganization?.name ?? "Organization";
+  };
   const [now, setNow] = useState(Date.now);
   // One deadline for the aggregate; no per-card polling. Re-evaluate on app
   // resume, and detach timers/listeners while the retained page is inactive.
@@ -311,7 +338,8 @@ export function DashboardPage() {
   );
   const pendingRows = useMemo(
     () =>
-      preferences.archive === "archived"
+      // A pending create is the viewer's own: it hides under By = another person.
+      preferences.archive === "archived" || by.startsWith("user:")
         ? EMPTY_PENDING_ROWS
         : filterDashboardPending(
             dedupedPending,
@@ -319,7 +347,7 @@ export function DashboardPage() {
             repoFilter,
             query,
           ),
-    [dedupedPending, projectBySlug, repoFilter, query, preferences.archive],
+    [dedupedPending, projectBySlug, repoFilter, query, preferences.archive, by],
   );
   // Confirmed archived and missing rows share this column. Archive intent
   // alone never inserts a row; its confirmed commit removes the live card
@@ -355,12 +383,17 @@ export function DashboardPage() {
   const visibleRows = useMemo(
     () =>
       filterDashboardRows(
-        dashboardRowsForArchive(allRows, preferences.archive),
+        filterDashboardRowsBy(
+          dashboardRowsForArchive(allRows, preferences.archive),
+          by,
+          me,
+          (row) => creatorOf(row.workspace),
+        ),
         repoFilter,
         query,
         preferences.sort,
       ),
-    [allRows, preferences.archive, preferences.sort, repoFilter, query],
+    [allRows, preferences.archive, preferences.sort, repoFilter, query, by, me, creatorOf],
   );
   const filteredArchived = useMemo(
     () => visibleRows.filter((row) => row.workspace.archivedAt != null),
@@ -439,6 +472,7 @@ export function DashboardPage() {
         query={query}
         onQueryChange={setQuery}
         active={active}
+        by={byControl}
       />
       <div
         className="flex shrink-0 items-center gap-1 overflow-x-auto px-6 pb-3 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"

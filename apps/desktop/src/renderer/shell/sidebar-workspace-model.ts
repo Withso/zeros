@@ -337,3 +337,35 @@ export function sidebarScrollTopToReveal(args: {
   }
   return scrollTop;
 }
+
+/** Team sharing's sidebar sections for an organization that shares. */
+export type SidebarSharingSection = "pinned" | "mine" | "following";
+export interface SidebarSection {
+  id: SidebarSharingSection;
+  label: string;
+  entries: SidebarWorkspaceEntry[];
+}
+const SECTION_LABELS: Record<SidebarSharingSection, string> = { pinned: "Pinned", mine: "My workspaces", following: "Following" };
+
+/** Pinned, then the viewer's own, then followed teammates' workspaces; a
+ * workspace sits in one section (Pinned wins), and a teammate's workspace that
+ * is neither pinned nor followed stays on Home. Pending creates are the
+ * viewer's own. Only My workspaces keeps empty repositories and plain folders;
+ * Pinned and Following show only when they have rows. Keys are prefixed per
+ * section so React and the DOM see each entry once. */
+export function buildSidebarSharingSections(args: Parameters<typeof buildSidebarWorkspaceEntries>[0] & {
+  sectionOf: (workspace: Workspace) => SidebarSharingSection | null;
+}): SidebarSection[] {
+  const { sectionOf, ...base } = args;
+  const bySection: Record<SidebarSharingSection, Workspace[]> = { pinned: [], mine: [], following: [] };
+  for (const workspace of base.workspaces) {
+    const section = sectionOf(workspace);
+    if (section) bySection[section].push(workspace);
+  }
+  return (["pinned", "mine", "following"] as const).flatMap(id => {
+    let entries = buildSidebarWorkspaceEntries({ ...base, workspaces: bySection[id], pending: id === "mine" ? base.pending : [] });
+    if (id !== "mine") entries = entries.filter(entry => entry.kind !== "folder" && (entry.kind === "row" || entry.items.length > 0));
+    if (id !== "mine" && entries.length === 0) return [];
+    return [{ id, label: SECTION_LABELS[id], entries: entries.map(entry => ({ ...entry, key: `${id}:${entry.key}` })) }];
+  });
+}

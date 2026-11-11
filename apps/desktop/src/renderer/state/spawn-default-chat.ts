@@ -25,6 +25,7 @@
 // ──────────────────────────────────────────────────────────
 
 import type { SessionsCtx } from "../features/agent/sessions-context";
+import { cloudFolderIsReader } from "./cloud-workspace-creators";
 import { workspaceAgentsSnapshot } from "../features/agent/workspace-agent-registry";
 import type { BridgeRegistryAgent } from "../platform/bridge/messages";
 import { pickAgentForNewChat } from "../features/settings/default-agent";
@@ -82,6 +83,8 @@ export async function spawnNewChatTab(args: {
   dispatch: Dispatch;
 }): Promise<ChatThread> {
   const { folder, dispatch } = args;
+  // Team sharing: a teammate's workspace gets no new chats from this account.
+  if (cloudFolderIsReader(folder)) throw new Error("This workspace is read only.");
   // Never put tab creation behind a native registry read. A cold cache creates
   // an agentless tab synchronously; AutoBindAgent fills it on first render.
   const chat = bornChatThread(cachedDefaultAgent(folder), folder);
@@ -140,6 +143,8 @@ export async function spawnDefaultChatForWorkspace(args: {
   dispatch: Dispatch;
 }): Promise<boolean> {
   const { folder, dispatch } = args;
+  // Team sharing: a teammate's workspace gets no new chats from this account.
+  if (cloudFolderIsReader(folder)) return false;
   // Coalesce concurrent calls for the same folder. The second caller
   // just activates the in-flight scope so the user still sees the
   // workspace switch immediately; the first caller's dispatch will

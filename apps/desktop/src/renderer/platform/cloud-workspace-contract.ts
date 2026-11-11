@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { CloudGithubUnavailableReasonSchema } from "@zeros/protocol/cloud-github-connection";
 import { CloudV2AgentCostSchema, CloudV2SetupStatusSchema } from "@zeros/protocol/cloud-v2-relay";
+import { CloudWorkspaceSharingSchema } from "./team-sharing-schema";
 
 /** Read leniently: a field a newer server extends, or one this build cannot
  * read, drops only itself, never the whole document. */
@@ -63,6 +64,8 @@ export const CloudWorkspaceDocumentSchema = z.object({
   setup: lenient(z.object(CloudV2SetupStatusSchema.shape)),
   /** Running total of mirrored turns that reported a cost; absent before any did. */
   agentCost: lenient(z.object(CloudV2AgentCostSchema.shape)),
+  /** Team sharing phase 1 (opt-in): who this account is to the workspace, and its follow/pin state. */
+  sharing: lenient(CloudWorkspaceSharingSchema),
   version: z.number().int().nonnegative(),
   error: z.object({ code: z.string(), message: z.string() }).nullable(),
   createdAt: z.string().datetime(),

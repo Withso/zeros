@@ -134,6 +134,22 @@ export function filterDashboardRows(
     });
 }
 
+/** Team sharing's By filter. Cloud rows are judged by their current Creator;
+ * Local rows always belong to this account (they count as Me, never as a teammate). */
+export function filterDashboardRowsBy(
+  rows: readonly DashboardRow[],
+  by: "anyone" | "me" | `user:${string}`,
+  me: string | null,
+  creatorOf: (row: DashboardRow) => string | null,
+): readonly DashboardRow[] {
+  if (by === "anyone") return rows;
+  const person = by === "me" ? me : by.slice("user:".length);
+  return rows.filter(row => {
+    const creator = creatorOf(row);
+    return creator === null ? by === "me" : creator === person;
+  });
+}
+
 export function dashboardPendingLabel(pending: PendingWorkspaceCreate): string {
   return (
     pending.label?.trim() ||

@@ -34,6 +34,8 @@ import {
   useProjects,
 } from "../../state/use-projects";
 import { readOnlyWorkspaceForFolder } from "../../state/workspace-history";
+import { useCloudReaderLookup } from "../../state/cloud-workspace-creators";
+import { TeamSharingReadOnlyBar } from "../team-sharing-read-only-bar";
 import { WorkspaceHistoryBar } from "../workspace-history-bar";
 
 const MAX_RETAINED_CHAT_VIEWS = 12;
@@ -75,6 +77,8 @@ export function ChatDeck({
   );
   const activeFolder = useWorkspaceStore(selectActiveFolder);
   const activePage = useActivePage();
+  // Team sharing: a teammate's workspace reads like history, with its own bar.
+  const isReaderFolder = useCloudReaderLookup();
   const pendingAutoSend = useWorkspaceStore((state) => state.pendingAutoSend);
   const paneSlots = usePanePortalsStore((state) => state.panes);
   const layoutsByFolder = useChatPanesStore((state) => state.byFolder);
@@ -159,7 +163,8 @@ export function ChatDeck({
         const chat = chatsById.get(chatId);
         if (!chat) return null;
         const historyWorkspace = historyOwners.get(chat.id);
-        const readOnly = !!historyWorkspace;
+        const reader = !historyWorkspace && isReaderFolder(chat.folder);
+        const readOnly = !!historyWorkspace || reader;
         const layoutFolder = historyWorkspace?.path ?? chat.folder;
         const layout = layoutsByFolder[layoutFolder] ?? DEFAULT_PANE_LAYOUT;
         const paneId = paneForChat(layout, chat.id);
@@ -181,7 +186,7 @@ export function ChatDeck({
         const isActive =
           activePage === "workspace" &&
           (chat.folder === activeFolder ||
-            (readOnly && historyWorkspace.id === workspace?.id)) &&
+            (!!historyWorkspace && historyWorkspace.id === workspace?.id)) &&
           slot.activeChatId === chat.id;
         const layer = (
           <div
@@ -219,6 +224,8 @@ export function ChatDeck({
                     workspace={historyWorkspace}
                     surfaceActive={isActive}
                   />
+                ) : reader ? (
+                  <TeamSharingReadOnlyBar folder={chat.folder} surfaceActive={isActive} />
                 ) : null
               }
             />

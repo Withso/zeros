@@ -11,6 +11,9 @@ import {
 import type { CloudWorkspaceTarget } from "./bridge/cloud-workspace-key";
 import { isFeatureEnabled } from "../config/release-channel";
 import type { WorkspaceAddress } from "@zeros/protocol/local-orchestration";
+import { recordOrganizationSharing } from "./team-sharing-state";
+import { reportWorkspaceReadOnly } from "./team-sharing-registry";
+import { CloudWorkspaceReadOnlyError } from "./cloud-workspace-read-only";
 import { changeCloudV2Workspace, cloudV2Document, createCloudV2Workspace, getCloudV2Workspace, getCloudV2WorkspaceByNumber, listCloudV2Workspaces } from "./cloud-v2";
 import { getTeamStoreState } from "../features/team/team-store";
 
@@ -52,7 +55,9 @@ export async function cloudAccountRequest<T>(
     /** This Mac's three local-command device headers, all or none. */
     deviceHeaders?: Record<string, string>;
     /** Order 3: ask for the connected-Macs `syncing` field (released desktops parse those replies strictly). */
-    syncField?: true },
+    syncField?: true;
+    /** Team sharing phase 1: opt in to organization-wide reads and the top-level sharing fields. */
+    teamSharing?: true },
 ): Promise<T> {
   if (!isFeatureEnabled("cloud-workspaces"))
     throw new Error("Cloud workspaces are not available in this release channel.");
@@ -74,6 +79,7 @@ export async function cloudAccountRequest<T>(
       authorization: `Bearer ${session.access_token}`,
       ...pickDeviceHeaders(options?.deviceHeaders),
       ...(options?.syncField ? { "X-Zeros-Sync": "1" } : {}),
+      ...(options?.teamSharing ? { "X-Zeros-Team-Sharing": "1" } : {}),
       ...(input
         ? {
             "content-type": "application/json",
@@ -92,6 +98,13 @@ export async function cloudAccountRequest<T>(
   if (epoch !== getOrganizationStoreGeneration() && !(response.ok && options?.mutationReceipt))
     throw new Error("Your account changed while loading cloud workspaces");
   if (!response.ok) {
+    // Team sharing: execution on a teammate's workspace. One error for it, and
+    // the workspace's document is read again so the view becomes read-only.
+    if (response.status === 409 && (body as { error?: { code?: unknown } } | null)?.error?.code === "workspace_read_only") {
+      const workspaceId = /^\/v1\/cloud-v2\/workspaces\/([0-9a-f-]{36})(?:[/?]|$)/i.exec(path)?.[1];
+      if (workspaceId) reportWorkspaceReadOnly(workspaceId);
+      throw new CloudWorkspaceReadOnlyError();
+    }
     const error = z
       .object({ error: z.object({ code: z.string(), message: z.string() }) })
       .safeParse(body);
@@ -134,10 +147,10 @@ export async function listCloudWorkspaceCatalogSnapshot(organizationId?: string)
     const page = await listCloudV2Workspaces(id);
     if (generation !== getOrganizationStoreGeneration() || organizationId === undefined && me !== getTeamStoreState().me)
       throw new Error("Cloud organization memberships changed while loading");
-    // The existing endpoint caps at 200 and has no continuation contract.
-    // Keep omitted cached rows until a complete observation or exact deletion.
-    if (page.length >= 200) complete = false;
-    workspaces.push(...page.map(cloudV2Document));
+    // Keep omitted cached rows until a complete observation or exact deletion: a capped read, or a
+    // creator-only reply (an N-1 replica) for an organization whose shared set was confirmed.
+    if (!page.complete || recordOrganizationSharing(id, page.teamSharing).keepShared) complete = false;
+    workspaces.push(...page.workspaces.map(cloudV2Document));
   }
   return { workspaces, catalogVersion: null, complete };
 }

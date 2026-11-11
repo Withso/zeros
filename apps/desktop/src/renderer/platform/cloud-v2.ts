@@ -3,6 +3,8 @@
 import { z } from "zod";
 import { CloudGithubUnavailableReasonSchema } from "@zeros/protocol/cloud-github-connection";
 import { CloudV2AgentCostSchema, CloudV2SetupStatusSchema, RepositorySetupPathSchema } from "@zeros/protocol/cloud-v2-relay";
+import { sharingOf } from "./team-sharing-schema";
+import { sharingFor } from "./team-sharing-registry";
 import { isCloudWorkspacePageOwner } from "@zeros/protocol/cloud-workspace-link";
 import { isWorkspaceNumber, type WorkspaceAddress } from "@zeros/protocol/local-orchestration";
 import { prepareCloudPromptErasure } from "./cloud-prompt-erasure";
@@ -88,6 +90,9 @@ const RETRYABLE = new Set(["checkpoint_restore_failed", "checkpoint_download_fai
 
 export function cloudV2Document(workspace: CloudV2Workspace): CloudWorkspaceDocument {
   const [owner, name] = workspace.repository.split("/") as [string, string];
+  // Team sharing: a teammate's workspace is read-only for this account; only the Creator and admins manage it.
+  const sharing = sharingOf(workspace as Record<string, unknown>);
+  const readOnly = sharing?.readOnly === true, canManage = sharing ? sharing.canManage : true;
   const iso = (value: string) => new Date(value).toISOString();
   return {
     id: workspace.id,
@@ -107,8 +112,8 @@ export function cloudV2Document(workspace: CloudV2Workspace): CloudWorkspaceDocu
       ...(workspace.capabilities.promptOutbox === 1 ? { promptOutbox: 1 as const } : {}),
       ...(workspace.capabilities.githubPullRequests === 1 ? { githubPullRequests: 1 as const } : {}),
       ...(workspace.chatEdits === 1 ? { chatEdits: 1 as const } : {}),
-      canWrite: true, canEdit: true, canManage: true,
-      canStart: workspace.state === "stopped" || (workspace.state === "failed" && RETRYABLE.has(workspace.errorCode ?? "")),
+      canWrite: !readOnly, canEdit: !readOnly || canManage, canManage,
+      canStart: !readOnly && (workspace.state === "stopped" || (workspace.state === "failed" && RETRYABLE.has(workspace.errorCode ?? ""))),
       startUnavailableReason: workspace.state === "failed" && !RETRYABLE.has(workspace.errorCode ?? "") ? "This workspace failed. Create a new one." : null,
     },
     repository: { forge: "github.com", owner, name, revision: workspace.baseBranch },
@@ -117,6 +122,7 @@ export function cloudV2Document(workspace: CloudV2Workspace): CloudWorkspaceDocu
     ...(workspace.checkoutPath ? { checkoutPath: workspace.checkoutPath } : {}),
     // Top-level fields the popup reads (setup-status-v1, agent cost). The reply passes them through; the
     // document must carry them too, each dropped alone when malformed.
+    ...(sharing ? { sharing } : {}),
     ...topLevel("setup", CloudV2SetupStatusSchema, (workspace as Record<string, unknown>).setup),
     ...topLevel("agentCost", CloudV2AgentCostSchema, (workspace as Record<string, unknown>).agentCost),
     generation: {
@@ -149,15 +155,31 @@ export function cloudV2CheckoutPath(document: Pick<CloudWorkspaceDocument, "repo
 const one = z.object({ workspace: CloudV2WorkspaceSchema });
 const key = () => crypto.randomUUID();
 
-export async function listCloudV2Workspaces(organizationId: string): Promise<CloudV2Workspace[]> {
-  const { workspaces } = await cloudAccountRequest(`/v1/cloud-v2/workspaces?organizationId=${uuid.parse(organizationId)}`,
-    z.object({ workspaces: z.array(CloudV2WorkspaceSchema).max(200) }));
-  if (workspaces.some(row => row.organizationId !== organizationId)) throw new Error("Cloud catalog returned another organization");
-  return workspaces;
+/** Team sharing phase 1: the organization's workspaces this account may see, in keyset pages. A control plane
+ * without sharing ignores the opt-in and answers its creator-only list (teamSharing false). */
+export async function listCloudV2Workspaces(organizationId: string): Promise<{ workspaces: CloudV2Workspace[]; teamSharing: boolean; complete: boolean }> {
+  const workspaces: CloudV2Workspace[] = [];
+  let cursor: string | null = null, teamSharing = false, complete = true;
+  for (let page = 0; ; page++) {
+    const query = `organizationId=${uuid.parse(organizationId)}&archived=include&limit=200${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`;
+    const reply: { workspaces: CloudV2Workspace[]; teamSharing?: unknown; nextCursor?: unknown } = await cloudAccountRequest(`/v1/cloud-v2/workspaces?${query}`,
+      z.object({ workspaces: z.array(CloudV2WorkspaceSchema).max(200), teamSharing: z.unknown().optional(), nextCursor: z.unknown().optional() }).passthrough(),
+      undefined, { teamSharing: true });
+    if (reply.workspaces.some(row => row.organizationId !== organizationId)) throw new Error("Cloud catalog returned another organization");
+    workspaces.push(...reply.workspaces);
+    teamSharing = reply.teamSharing === 1;
+    const next = typeof reply.nextCursor === "string" && reply.nextCursor.length <= 2048 ? reply.nextCursor : null;
+    // The creator-only endpoint caps at 200 without continuation; a capped observation proves no omission.
+    if (!teamSharing) { if (reply.workspaces.length >= 200) complete = false; break; }
+    if (!next) break;
+    if (page >= 49) { complete = false; break; }
+    cursor = next;
+  }
+  return { workspaces, teamSharing, complete };
 }
 
 export async function getCloudV2Workspace(target: CloudWorkspaceTarget): Promise<CloudV2Workspace> {
-  const { workspace } = await cloudAccountRequest(`/v1/cloud-v2/workspaces/${uuid.parse(target.workspaceId)}`, one);
+  const { workspace } = await cloudAccountRequest(`/v1/cloud-v2/workspaces/${uuid.parse(target.workspaceId)}`, one, undefined, { teamSharing: true });
   if (workspace.id !== target.workspaceId || workspace.organizationId !== target.organizationId)
     throw new Error("Cloud workspace response changed identity");
   return workspace;
@@ -170,7 +192,7 @@ export async function getCloudV2WorkspaceByNumber(address: WorkspaceAddress): Pr
     throw new Error("Invalid cloud workspace address");
   const { workspace } = await cloudAccountRequest(
     `/v1/cloud-v2/workspaces/by-number/${address.owner}/${address.number}`,
-    one,
+    one, undefined, { teamSharing: true },
   );
   if (workspace.number !== address.number) throw new Error("Cloud workspace response changed identity");
   return workspace;
@@ -200,11 +222,22 @@ export async function createCloudV2Workspace(input: {
 export async function changeCloudV2Workspace(target: CloudWorkspaceTarget, action: "start" | "stop" | "restart" | "archive" | "delete"): Promise<CloudV2Workspace> {
   const id = uuid.parse(target.workspaceId), erase = action === "delete" && prepareCloudPromptErasure(target);
   const { workspace } = action === "delete"
-    ? await cloudAccountRequest(`/v1/cloud-v2/workspaces/${id}`, one, { body: {}, idempotencyKey: key(), method: "DELETE" })
-    : await cloudAccountRequest(`/v1/cloud-v2/workspaces/${id}/${action}`, one, { body: {}, idempotencyKey: key() });
+    ? await cloudAccountRequest(`/v1/cloud-v2/workspaces/${id}`, one, { body: {}, idempotencyKey: key(), method: "DELETE" }, sharingFor(id))
+    : await cloudAccountRequest(`/v1/cloud-v2/workspaces/${id}/${action}`, one, { body: {}, idempotencyKey: key() }, sharingFor(id));
   if (workspace.id !== target.workspaceId || workspace.organizationId !== target.organizationId)
     throw new Error("Cloud workspace response changed identity");
   if (erase) erase();
+  return workspace;
+}
+
+/** Team sharing: rename (the Creator, or an admin). The reply carries the document with its sharing fields. */
+export async function renameCloudV2Workspace(target: CloudWorkspaceTarget, name: string): Promise<CloudV2Workspace> {
+  const trimmed = name.trim();
+  if (trimmed.length < 1 || trimmed.length > 120) throw new Error("A workspace name is 1 to 120 characters.");
+  const { workspace } = await cloudAccountRequest(`/v1/cloud-v2/workspaces/${uuid.parse(target.workspaceId)}/rename`, one,
+    { body: { name: trimmed }, idempotencyKey: key() }, { teamSharing: true });
+  if (workspace.id !== target.workspaceId || workspace.organizationId !== target.organizationId)
+    throw new Error("Cloud workspace response changed identity");
   return workspace;
 }
 
@@ -213,7 +246,7 @@ const ChatEditReplySchema = z.object({ chat: z.object({ id: z.string().min(1).ma
  * at once and hands it to the worker; it never wakes the VM. */
 export async function editCloudV2Chat(target: CloudWorkspaceTarget, chatId: string, change: { title: string } | { archived: boolean }) {
   const { chat } = await cloudAccountRequest(`/v1/cloud-v2/workspaces/${uuid.parse(target.workspaceId)}/chats/${encodeURIComponent(chatId)}/edit`,
-    ChatEditReplySchema, { body: change, idempotencyKey: key() });
+    ChatEditReplySchema, { body: change, idempotencyKey: key() }, sharingFor(target.workspaceId));
   if (chat.id !== chatId) throw new Error("Chat edit response changed identity");
   return chat;
 }
@@ -228,18 +261,18 @@ export const CloudV2ConnectSchema = z.object({
 /** A focused window keeps a running VM awake; it never wakes a stopped one. */
 export async function pingCloudV2WorkspaceActivity(target: CloudWorkspaceTarget): Promise<void> {
   await cloudAccountRequest(`/v1/cloud-v2/workspaces/${uuid.parse(target.workspaceId)}/activity`, z.object({ running: z.boolean() }),
-    { body: {}, idempotencyKey: crypto.randomUUID() });
+    { body: {}, idempotencyKey: crypto.randomUUID() }, sharingFor(target.workspaceId));
 }
 
 export async function connectCloudV2Workspace(target: CloudWorkspaceTarget, options: { wake: boolean; signal?: AbortSignal }) {
   return cloudAccountRequest(`/v1/cloud-v2/workspaces/${uuid.parse(target.workspaceId)}/connect?wakePolicy=explicit`, CloudV2ConnectSchema,
-    { body: { wake: options.wake }, idempotencyKey: key() }, { signal: options.signal });
+    { body: { wake: options.wake }, idempotencyKey: key() }, { ...sharingFor(target.workspaceId), signal: options.signal });
 }
 
 /** Chat history from the control plane's mirror, readable while the VM sleeps. */
 export async function readCloudV2History(target: CloudWorkspaceTarget, op: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
   const { result } = await cloudAccountRequest(`/v1/cloud-v2/workspaces/${uuid.parse(target.workspaceId)}/history`,
-    z.object({ result: z.record(z.string(), z.unknown()) }), { body: { op, params }, idempotencyKey: key() });
+    z.object({ result: z.record(z.string(), z.unknown()) }), { body: { op, params }, idempotencyKey: key() }, sharingFor(target.workspaceId));
   return result;
 }
 

@@ -7,6 +7,7 @@ import {
   Search,
   TextAlignJustify,
   SlidersHorizontal,
+  UserRound,
   X,
 } from "lucide-react";
 import { Button } from "../../shared/ui/primitives/button";
@@ -28,6 +29,7 @@ import {
   type DashboardSort,
   type DashboardArchive,
   type DashboardView,
+  type DashboardBy,
 } from "./preferences";
 
 const ARCHIVE_OPTIONS: { value: DashboardArchive; label: string }[] = [
@@ -49,6 +51,13 @@ const DISPLAY_OPTIONS: { value: keyof DashboardDisplay; label: string }[] = [
   { value: "owner", label: "Owner" },
   { value: "lastActive", label: "Last active" },
 ];
+
+function byLabel(by: DashboardByControl): string {
+  if (by.value === "anyone") return "By anyone";
+  if (by.value === "me") return "By me";
+  const id = by.value.slice("user:".length);
+  return `By ${by.people.find((person) => person.id === id)?.name ?? "a teammate"}`;
+}
 
 export function DashboardViewToggle({ view }: { view: DashboardView }) {
   return (
@@ -82,18 +91,28 @@ export function DashboardViewToggle({ view }: { view: DashboardView }) {
   );
 }
 
+/** Team sharing's By filter: present only for an organization that shares. */
+export interface DashboardByControl {
+  value: DashboardBy;
+  onChange: (value: DashboardBy) => void;
+  /** Every roster member except the viewer, by name. */
+  people: readonly { id: string; name: string }[];
+}
+
 export function DashboardToolbar({
   preferences,
   query,
   onQueryChange,
   active,
+  by,
 }: {
   preferences: DashboardPreferences;
   query: string;
   onQueryChange: (query: string) => void;
   active: boolean;
+  by?: DashboardByControl;
 }) {
-  const [menu, setMenu] = useState<"archive" | "sort" | "display" | null>(null);
+  const [menu, setMenu] = useState<"by" | "archive" | "sort" | "display" | null>(null);
   useEffect(() => {
     if (!active) setMenu(null);
   }, [active]);
@@ -134,6 +153,36 @@ export function DashboardToolbar({
         )}
       </div>
       <div className="ml-auto flex shrink-0 items-center gap-1">
+        {by && (
+          <DropdownMenu {...open("by")}>
+            <DropdownMenuTrigger asChild>
+              <Button
+                variant="ghost"
+                className="text-fg2"
+                aria-label="Workspaces by"
+              >
+                <UserRound />
+                <span className="max-w-32 truncate">{byLabel(by)}</span>
+                <ChevronDown className="text-muted-fg" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="max-h-80 min-w-44 overflow-y-auto">
+              <DropdownMenuRadioGroup
+                value={by.value}
+                onValueChange={(value) => by.onChange(value as DashboardBy)}
+              >
+                <DropdownMenuRadioItem value="anyone">By anyone</DropdownMenuRadioItem>
+                <DropdownMenuRadioItem value="me">By me</DropdownMenuRadioItem>
+                {/* By name, as in the sidebar's Team list. */}
+                {[...by.people].sort((a, b) => a.name.localeCompare(b.name)).map((person) => (
+                  <DropdownMenuRadioItem key={person.id} value={`user:${person.id}`}>
+                    <span className="truncate">{person.name}</span>
+                  </DropdownMenuRadioItem>
+                ))}
+              </DropdownMenuRadioGroup>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        )}
         <DropdownMenu {...open("archive")}>
           <DropdownMenuTrigger asChild>
             <Button

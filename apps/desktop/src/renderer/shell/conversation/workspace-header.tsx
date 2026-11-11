@@ -15,6 +15,7 @@ import {
 import { CloudWorkspaceDetails } from "./cloud-workspace-details";
 import { LocalWorkspaceDetails } from "./local-workspace-details";
 import { WorkspaceIdentityLabel } from "./workspace-identity";
+import { TeamSharingHeaderControls } from "./team-sharing-header-controls";
 
 /** The branch the Local details show. A synthetic folder row keeps its
  * display name in `branch`, which is not a branch. */
@@ -70,12 +71,14 @@ function CloudHeader({ folder, ...props }: Parameters<typeof WorkspaceHeader>[0]
   const title = workspace ? cloudWorkspaceDocumentTitle(workspace) : props.title;
   return <WorkspaceHeaderView {...props} identity={
     <CloudWorkspaceDetails folder={folder} name={number ?? workspace?.name ?? props.name} title={title} workspace={workspace} />
-  } />;
+  } sharing={workspace?.sharing && <TeamSharingHeaderControls target={target} workspace={workspace} active={active} />} />;
 }
 
-export function WorkspaceHeaderView({ identity, actions, readOnly, windowControlsInset, trailing }: {
+export function WorkspaceHeaderView({ identity, actions, readOnly, windowControlsInset, trailing, sharing }: {
   /** The name, then where the workspace lives. */
   identity: ReactNode;
+  /** Team sharing's presence, Follow and Pin: shown to readers, too. */
+  sharing?: ReactNode;
   actions?: ReactNode;
   readOnly?: boolean;
   windowControlsInset?: boolean;
@@ -86,6 +89,7 @@ export function WorkspaceHeaderView({ identity, actions, readOnly, windowControl
   return <PanelHeader size="window" divider={false} aria-label="Workspace header" data-workspace-header="" data-tauri-drag-region="">
     {windowControlsInset && <span className="block h-full w-[108px] shrink-0" aria-hidden="true" data-window-controls-reserve="" />}
     <div className="flex min-w-0 flex-1 items-center">{identity}</div>
+    {sharing}
     {!readOnly && <div className="flex shrink-0 items-center gap-1" data-workspace-header-actions="">{actions}{trailing}</div>}
   </PanelHeader>;
 }

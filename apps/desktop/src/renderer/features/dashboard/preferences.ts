@@ -1,6 +1,6 @@
 // Dashboard navigation preferences shared with repository-owner cleanup.
 
-import { useSyncExternalStore } from "react";
+import { useCallback, useSyncExternalStore } from "react";
 
 const REPO_FILTER_KEY = "zeros:dashboard-repo-filter:v1";
 
@@ -56,8 +56,51 @@ export function useDashboardRepoFilter(): string | null {
   );
 }
 
+// ── Team sharing: By (Anyone, Me, or one person), per organization ──
+export type DashboardBy = "anyone" | "me" | `user:${string}`;
+const BY_KEY = (organizationId: string) => `zeros:dashboard-by:v1:${organizationId}`;
+const bySnapshots = new Map<string, DashboardBy>();
+const byListeners = new Set<() => void>();
+const validBy = (value: unknown): value is DashboardBy =>
+  value === "anyone" || value === "me" || (typeof value === "string" && /^user:[0-9a-f-]{36}$/i.test(value));
+
+export function readDashboardBy(organizationId: string): DashboardBy {
+  const cached = bySnapshots.get(organizationId);
+  if (cached) return cached;
+  let stored: unknown = null;
+  try { stored = localStorage.getItem(BY_KEY(organizationId)); } catch { /* storage disabled */ }
+  const value = validBy(stored) ? stored : "anyone";
+  if (stored !== null && value === "anyone") {
+    try { localStorage.removeItem(BY_KEY(organizationId)); } catch { /* storage disabled */ }
+  }
+  bySnapshots.set(organizationId, value);
+  return value;
+}
+export function saveDashboardBy(organizationId: string, value: DashboardBy): void {
+  if (readDashboardBy(organizationId) === value) return;
+  try { if (value === "anyone") localStorage.removeItem(BY_KEY(organizationId)); else localStorage.setItem(BY_KEY(organizationId), value); }
+  catch { /* storage disabled (private mode) — non-fatal */ }
+  bySnapshots.set(organizationId, value);
+  for (const listener of byListeners) listener();
+}
+export function useDashboardBy(organizationId: string | null | undefined): DashboardBy {
+  return useSyncExternalStore(
+    listener => { byListeners.add(listener); return () => { byListeners.delete(listener); }; },
+    () => (organizationId ? readDashboardBy(organizationId) : "anyone"),
+    () => (organizationId ? readDashboardBy(organizationId) : "anyone"),
+  );
+}
+
+/** The By value and a stable setter for one organization (null: no sharing, always Anyone). */
+export function useDashboardByState(organizationId: string | null): [DashboardBy, (value: DashboardBy) => void] {
+  const value = useDashboardBy(organizationId);
+  const set = useCallback((next: DashboardBy) => { if (organizationId) saveDashboardBy(organizationId, next); }, [organizationId]);
+  return [value, set];
+}
+
 /** Test-only singleton reset. */
 export function resetDashboardPreferencesForTests(): void {
+  bySnapshots.clear();
   loaded = false;
   snapshot = null;
   listeners.clear();
