@@ -93,3 +93,12 @@ describe("Connected Macs mapping", () => {
     expect(toConnectedMac({ ...base, connected: true, active: false, expiresAt: null }, null)).not.toHaveProperty("syncWanted");
   });
 });
+
+describe("sync status words", () => {
+  it("tells an unreachable running workspace from a sleeping one, and turns it into an error after repeated failures", async () => {
+    const { workspaceSyncLabel } = await import("../../platform/workspace-sync");
+    expect(workspaceSyncLabel({ workspaceId: "w", state: "paused", problems: 0 })).toBe("Paused (workspace asleep)");
+    expect(workspaceSyncLabel({ workspaceId: "w", state: "paused", reason: "unreachable", problems: 0 })).toBe("Can't reach the workspace, retrying");
+    expect(workspaceSyncLabel({ workspaceId: "w", state: "error", reason: "unreachable", problems: 0 })).toBe("Error (can't reach the workspace)");
+  });
+});

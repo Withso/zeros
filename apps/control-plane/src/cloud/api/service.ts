@@ -113,7 +113,8 @@ export class CloudApiService {
     if (input.message !== undefined) {
       this.requirePrompts();
       initialPrompt = { chatId: randomUUID(), userMessageId: input.messageId ?? randomUUID(), agentId: input.agent!,
-        message: input.message, model: input.model, effort: input.effort, sessionName: input.sessionName, startedAt: Date.now(), createdBySessionId };
+        message: input.message, model: input.model, effort: input.effort, sessionName: input.sessionName, startedAt: Date.now(), createdBySessionId,
+        senderCredential: { credentialId: credential.credentialId, kind: credential.kind } };
     }
     const requestHash = createHash("sha256").update(JSON.stringify({ api: "v0", organizationId: credential.organizationId,
       ...input, repository: input.repository.toLowerCase() })).digest("hex");
@@ -165,7 +166,8 @@ export class CloudApiService {
     const createdBySessionId = await this.deps.store.api.attribution(credential, sourceSessionId);
     const chatId = input.sessionId ?? randomUUID(), userMessageId = input.messageId ?? randomUUID();
     const result = await this.deps.store.prompts.enqueueApi(input.workspaceId, credential.userId,
-      { chatId, userMessageId, agentId: input.agent, message: input.message, model: input.model, effort: input.effort, sessionName: input.name, createdBySessionId });
+      { chatId, userMessageId, agentId: input.agent, message: input.message, model: input.model, effort: input.effort, sessionName: input.name, createdBySessionId,
+        senderCredential: { credentialId: credential.credentialId, kind: credential.kind } });
     return { session: await this.getSession(credential, chatId), message: { id: userMessageId, createdBySessionId: result.createdBySessionId } };
   }
   async cancelSession(credential: CloudApiCredential, id: string) {
@@ -198,6 +200,7 @@ export class CloudApiService {
     const userMessageId = input.messageId ?? randomUUID();
     const result = await this.deps.store.prompts.enqueueApi(workspace.id, credential.userId, { chatId: id, userMessageId,
       agentId: agent.data, message: input.message, createdBySessionId,
+      senderCredential: { credentialId: credential.credentialId, kind: credential.kind },
       ...(typeof saved.row.model === "string" && saved.row.model ? { model: saved.row.model } : {}),
       ...(typeof saved.row.effort === "string" && saved.row.effort ? { effort: saved.row.effort } : {}) });
     return { replay: result.replay, message: { id: userMessageId, createdBySessionId: result.createdBySessionId } };

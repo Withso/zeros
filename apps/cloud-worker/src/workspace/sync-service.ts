@@ -17,9 +17,11 @@ export class SyncService {
   private tracker?: SyncTracker;
   private readonly checked: CheckedFiles;
   private disposed = false;
-  private readonly bundles = new Map<string, { path: string; size: number; expires: number }>();
+  private readonly bundles = new Map<string, { path: string; size: number; expires: number; key: string; sha256: string; full: boolean }>();
   constructor(private readonly scope: WorkspaceScope, private readonly run: CommandRunner, private readonly hint: () => void,
-    private readonly options: { bundleDirectory: string; baseBranch?: string; now?(): number; contextLimits?: Partial<ContextLimits>; onActive?(): void }) {
+    private readonly options: { bundleDirectory: string; baseBranch?: string; now?(): number; contextLimits?: Partial<ContextLimits>; onActive?(): void;
+      /** Worker journal lines: sizes, counts and durations only. */
+      log?(line: string): void }) {
     this.checked = new CheckedFiles(scope);
   }
 
@@ -93,6 +95,14 @@ export class SyncService {
       if (await this.git(["rev-parse", "--verify", "--quiet", `refs/remotes/origin/${name}`]).then(() => true, () => false)) refs.push(`refs/remotes/origin/${name}`);
     await mkdir(this.options.bundleDirectory, { recursive: true, mode: 0o700 });
     this.expireBundles();
+    // A retried bootstrap (same HEAD, same starting point, same refs) gets the same bundle for its lifetime, so the
+    // Mac resumes its download instead of the worker rebuilding tens of MB on every attempt.
+    const reuseKey = JSON.stringify([head.sha, incremental ? have : null, refs, await Promise.all(refs.map(ref => this.git(["rev-parse", ref]).catch(() => "")))]);
+    for (const [id, bundle] of this.bundles) if (bundle.key === reuseKey) {
+      this.options.log?.(`sync bootstrap reused bytes=${bundle.size}`);
+      return { ...base, bundle: { id, size: bundle.size, sha256: bundle.sha256, full: bundle.full } };
+    }
+    const started = this.now();
     const id = randomUUID(), path = join(this.options.bundleDirectory, `${id}.bundle`);
     try { await this.run("git", ["bundle", "create", "--quiet", path, ...refs, ...(incremental ? [`^${have}`] : [])], { readOnly: true }); }
     catch { await rm(path, { force: true }); throw new WorkspaceError("SYNC_BUNDLE_FAILED", "The repository history could not be bundled."); }
@@ -101,7 +111,8 @@ export class SyncService {
     if (size + this.trackerFor().totalBytes() > SYNC_LIMITS.totalBytes) { await rm(path, { force: true }); return { ...base, stopped: "too_many_bytes" }; }
     const sha256 = await hashFile(path);
     while (this.bundles.size >= 2) { const [oldest, entry] = this.bundles.entries().next().value!; this.bundles.delete(oldest); await rm(entry.path, { force: true }); }
-    this.bundles.set(id, { path, size, expires: this.now() + SYNC_LIMITS.bundleLifetimeMs });
+    this.bundles.set(id, { path, size, expires: this.now() + SYNC_LIMITS.bundleLifetimeMs, key: reuseKey, sha256, full: !incremental });
+    this.options.log?.(`sync bootstrap built bytes=${size} full=${!incremental} ms=${this.now() - started}`);
     return { ...base, bundle: { id, size, sha256, full: !incremental } };
   }
 

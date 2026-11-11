@@ -77,7 +77,10 @@ export const DesignTokenPill = React.forwardRef<
       }}
       {...props}
     >
-      <span>{token.missing ? `${name} is missing` : name}</span>
+      {/* A missing token's name truncates first; "is missing" gives way only
+          once the name is gone (a field too narrow for both). */}
+      <span className={token.missing ? "shrink-[1000]" : undefined}>{name}</span>
+      {token.missing ? <span>{"\u00a0is missing"}</span> : null}
     </Pill>
   );
 });

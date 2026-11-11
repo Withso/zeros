@@ -842,6 +842,41 @@ invalidate new viewers for older history writers. An older control plane omits
 `teamSharing` and may return `404` for new routes. A desktop must treat that as
 unsupported sharing during rollout, preserving its shared snapshot.
 
+### Durable sender attribution
+
+With `X-Zeros-Team-Sharing: 1`, `messages.window` and
+`messages.windowOlder` history results add `senders`, a map from each returned
+user-message ID to `{ userId }` or `null`. It also covers the optional
+`turnOpening`; the existing bound remains 1,000 messages plus one opening.
+The strict message rows and prompt receipts keep their existing shape.
+
+Connected clients receiving messages directly from the worker can resolve their
+senders through the same authorized history route:
+
+```json
+{ "op": "messages.senders", "params": { "chatId": "chat", "userMessageIds": ["message"] } }
+```
+
+The reply is `{ "result": { "senders": { "message": { "userId": "<uuid>" } } } }`.
+The lookup requires the sharing header and accepts 1–200 IDs of 1–256 characters.
+It reads durable receipts, including before the worker mirrors a message.
+Unknown IDs and imported or legacy messages without receipts return `null`.
+Reads are scoped to the admitted workspace and chat and never wake a VM or
+count as activity. Names come from the roster; an unknown roster ID can be shown
+as “Former member”.
+
+The sender is the authenticated person behind the desktop session, API key or
+workspace token. CLI and MCP sends use their bearer credential's identity.
+`X-Zeros-Session-Id` remains source-chat attribution and cannot choose a sender.
+An identical retry must have the same sender; it preserves the original receipt
+and provenance. Sender IDs survive payload compaction and history replacement;
+session and credential references are never included in these reads.
+
+Apply additive migration `0238_cloud_prompt_senders.sql` first. Older writers
+leave the new provenance columns null; existing receipts already retain their
+sender. This attribution addition does not enable member execution or change
+worker configuration, credential selection or Local workspace behavior.
+
 ## Restart and v1 scope
 
 The desktop's WorkOS-authenticated route

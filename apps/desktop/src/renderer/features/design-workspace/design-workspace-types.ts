@@ -18,6 +18,7 @@ import {
   type Workspace,
 } from "../../platform/git";
 import { type DesignMotionPropertyRequest } from "./design-motion-timeline";
+import type { DesignAgentBrief } from "./design-agent-brief";
 
 
 // --- TYPES ---
@@ -84,6 +85,9 @@ export interface DesignInspectorProps {
   motionProperties: readonly string[];
   onOpenMotionTimeline: (property?: string, value?: string) => void;
   zoomActionsRef: React.MutableRefObject<DesignCanvasZoomActions | null>;
+  /** Sends a brief to a new agent chat ("Ask agent to change"); absent
+   * where no agent chat is available. */
+  onAskAgent?: (brief: DesignAgentBrief) => void;
 }
 
 export interface DesignCanvasZoomActions {

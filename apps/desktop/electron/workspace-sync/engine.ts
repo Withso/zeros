@@ -18,6 +18,19 @@ export interface SyncSource extends Partial<GitSource> {
 }
 /** Files written at once: each a batch or a chunked file. The socket keeps SYNC_LIMITS.inFlight requests open. */
 const CONCURRENCY = 4;
+
+/** Bytes asked for and not yet answered, bounded (one request may always proceed). */
+export class ByteBudget {
+  private used = 0;
+  private readonly waiting: Array<() => void> = [];
+  constructor(private readonly limit: number) {}
+  async run<T>(bytes: number, work: () => Promise<T>): Promise<T> {
+    while (this.used > 0 && this.used + bytes > this.limit) await new Promise<void>(resolve => this.waiting.push(resolve));
+    this.used += bytes;
+    try { return await work(); }
+    finally { this.used -= bytes; for (const resume of this.waiting.splice(0)) resume(); }
+  }
+}
 export { SyncChangedError, SyncRootError } from "./engine-errors";
 
 interface FileState { sha256: string; size: number; mode: number; symlink?: string; localMtimeMs: number; localSize: number }
@@ -48,6 +61,7 @@ export class SyncEngine {
   private changedInCycle = false;
   private committing: Promise<void> = Promise.resolve();
   private counts = { files: 0, bytes: 0, deletes: 0 };
+  private readonly budget = new ByteBudget(SYNC_LIMITS.macInFlightBytes);
   private constructor(readonly root: string, private readonly identity: SyncIdentity, private state: SyncState, private readonly deps: SyncEngineDeps) {}
 
   static async open(folder: string, identity: SyncIdentity, deps: Partial<SyncEngineDeps> = {}): Promise<SyncEngine> {
@@ -197,9 +211,9 @@ export class SyncEngine {
     const flush = () => { if (batch.length) groups.push({ batch: true, entries: batch }); batch = []; bytes = 0; };
     for (const entry of entries) {
       const known = this.state.files[entry.path];
-      const small = batching && entry.symlink === undefined && entry.size <= SYNC_LIMITS.batchFileBytes && !(known && known.sha256 === entry.sha256);
+      const small = batching && entry.symlink === undefined && entry.size <= SYNC_LIMITS.macRequestBytes && !(known && known.sha256 === entry.sha256);
       if (!small) { groups.push({ batch: false, entries: [entry] }); continue; }
-      if (batch.length >= SYNC_LIMITS.batchFiles || bytes + entry.size > SYNC_LIMITS.batchBytes) flush();
+      if (batch.length >= SYNC_LIMITS.batchFiles || bytes + entry.size > SYNC_LIMITS.macRequestBytes) flush();
       batch.push(entry); bytes += entry.size;
     }
     flush();
@@ -208,7 +222,8 @@ export class SyncEngine {
 
   /** One sync.readBatch: each file's bytes (verified later against its sha256), `changed`, or absent (ask again). */
   private async fetchBatch(source: SyncSource, entries: SyncEntry[]): Promise<Map<string, Buffer | "changed">> {
-    const reply = await source.readBatch!({ files: entries.map(entry => ({ path: entry.path, sha256: entry.sha256 })) });
+    const bytes = entries.reduce((sum, entry) => sum + entry.size, 0);
+    const reply = await this.budget.run(bytes, () => source.readBatch!({ files: entries.map(entry => ({ path: entry.path, sha256: entry.sha256 })) }));
     // A reply must answer at least the first file; otherwise this cycle would ask forever.
     if (!reply.entries.length || reply.entries[0]!.path !== entries[0]!.path) throw new SyncChangedError();
     const wanted = new Map(entries.map(entry => [entry.path, entry]));
@@ -258,8 +273,8 @@ export class SyncEngine {
     const hash = createHash("sha256");
     try {
       for (let offset = 0; offset < entry.size; ) {
-        const length = Math.min(SYNC_LIMITS.chunkBytes, entry.size - offset);
-        const chunk = await source.read({ path: entry.path, sha256: entry.sha256, offset, length });
+        const length = Math.min(SYNC_LIMITS.macRequestBytes, entry.size - offset);
+        const chunk = await this.budget.run(length, () => source.read({ path: entry.path, sha256: entry.sha256, offset, length }));
         const bytes = Buffer.from(chunk.base64, "base64");
         if (bytes.length !== chunk.bytes || !bytes.length || bytes.length > length) throw new SyncChangedError();
         hash.update(bytes); await file.write(bytes, 0, bytes.length, offset);

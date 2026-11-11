@@ -8,6 +8,7 @@
 // limit. Durable selection identity remains in design-workspace-ui.ts.
 
 import type {
+  DesignRuntimeAuthoredStyle,
   DesignRuntimeNodeDetails,
   DesignRuntimeScreenshot,
   DesignRuntimeSnapshot,
@@ -18,6 +19,9 @@ import { create } from "zustand";
 import { noteDesignHeldReplyRefused } from "./design-held-state";
 
 const MAX_WORKSPACES = 32;
+/** Bumped when a workspace's runtime state is forgotten (its Design directory
+ * changed). Work begun before then publishes nothing after. */
+const forgottenGeneration = new Map<string, number>();
 const MAX_FRAMES_PER_WORKSPACE = 24;
 const MAX_DETAILS_PER_FRAME = 32;
 const MAX_SCREENSHOTS_PER_FRAME = 4;
@@ -303,6 +307,71 @@ function sameStringRecord(
   );
 }
 
+function keyCount(record: object): number {
+  let count = 0;
+  for (const _key in record) count++;
+  return count;
+}
+
+/** A missing record and an empty one are the same. No allocation. */
+function sameOptionalStringRecord(
+  left: Readonly<Record<string, string>> | undefined,
+  right: Readonly<Record<string, string>> | undefined,
+): boolean {
+  if (left === right) return true;
+  const leftCount = left ? keyCount(left) : 0;
+  if (leftCount !== (right ? keyCount(right) : 0)) return false;
+  if (!left || !right) return true;
+  for (const key in left) if (left[key] !== right[key]) return false;
+  return true;
+}
+
+type DesignStyleTokens = readonly { name: string; value: string; origin?: string; sourceId?: string; file?: string; component?: string }[] | undefined;
+
+function sameTokens(left: DesignStyleTokens, right: DesignStyleTokens): boolean {
+  if (left === right) return true;
+  if ((left?.length ?? 0) !== (right?.length ?? 0)) return false;
+  if (!left || !right) return true;
+  for (let index = 0; index < left.length; index++) {
+    const a = left[index]!;
+    const b = right[index]!;
+    if (a.name !== b.name || a.value !== b.value || a.origin !== b.origin || a.sourceId !== b.sourceId ||
+      a.file !== b.file || a.component !== b.component) return false;
+  }
+  return true;
+}
+
+/** Where each value comes from, as the panel's marks and card read it.
+ * Compared field by field, bailing at the first difference. */
+function sameAuthoredStyles(
+  left: Readonly<Record<string, DesignRuntimeAuthoredStyle>> | undefined,
+  right: Readonly<Record<string, DesignRuntimeAuthoredStyle>> | undefined,
+): boolean {
+  if (left === right) return true;
+  if (!left || !right) return false;
+  if (keyCount(left) !== keyCount(right)) return false;
+  for (const property in left) {
+    const a = left[property]!;
+    const b = right[property];
+    if (!b) return false;
+    if (
+      a.value !== b.value || a.origin !== b.origin || a.sourceId !== b.sourceId || a.file !== b.file ||
+      a.component !== b.component || a.important !== b.important || a.selector !== b.selector ||
+      a.scope !== b.scope || a.declared !== b.declared || a.conditional !== b.conditional || a.state !== b.state ||
+      !sameStringArray(a.subjectClasses, b.subjectClasses) || !sameTokens(a.tokens, b.tokens) ||
+      !sameOptionalStringRecord(a.themeValues, b.themeValues)
+    ) return false;
+    const was = a.replaced;
+    const now = b.replaced;
+    if (was !== now && (!was || !now ||
+      was.value !== now.value || was.origin !== now.origin || was.sourceId !== now.sourceId || was.file !== now.file ||
+      was.component !== now.component || was.important !== now.important || was.selector !== now.selector ||
+      was.scope !== now.scope || was.others !== now.others || !sameStringArray(was.subjectClasses, now.subjectClasses) ||
+      !sameTokens(was.tokens, now.tokens))) return false;
+  }
+  return true;
+}
+
 function sameNodeBox(
   left: DesignRuntimeNodeDetails["box"],
   right: DesignRuntimeNodeDetails["box"],
@@ -338,6 +407,7 @@ function sameNodeDetails(
     left.textSizing?.availableWidth === right.textSizing?.availableWidth &&
     left.selector === right.selector &&
     left.visible === right.visible &&
+    left.hiddenBy === right.hiddenBy &&
     left.rect.x === right.rect.x &&
     left.rect.y === right.rect.y &&
     left.rect.width === right.rect.width &&
@@ -372,7 +442,8 @@ function sameNodeDetails(
       right.authoredStyleProperties,
     ) &&
     sameStringArray(left.states, right.states) &&
-    sameStringRecord(left.styles, right.styles),
+    sameStringRecord(left.styles, right.styles) &&
+    sameAuthoredStyles(left.authoredStyles, right.authoredStyles),
   );
 }
 
@@ -516,14 +587,22 @@ export const useDesignRuntimeStore = create<DesignRuntimeStore>((set, get) => ({
   publishNodeDetails(workspaceId, folder, frame, details, sourceVersion, options) {
     if (details.sourceVersion !== sourceVersion) return;
     if (isHeldReply(details)) {
+      // The old directory's frame runtime stays registered until React
+      // replaces it, so the store owns this check, not the runtime's.
+      const generation = forgottenGeneration.get(workspaceId) ?? 0;
+      const forgotten = () => (forgottenGeneration.get(workspaceId) ?? 0) !== generation;
       noteDesignHeldReplyRefused({
         workspaceId,
         frame,
         sourceVersion,
         nodeId: details.oid,
+        // Forgotten counts as nothing to read.
         hasDefault: () =>
+          forgotten() ||
           get().byWorkspace[workspaceId]?.frames[frame]?.detailsByNode[details.oid]?.sourceVersion === sourceVersion,
-        publish: (next) => get().publishNodeDetails(workspaceId, folder, frame, next, sourceVersion),
+        publish: (next) => {
+          if (!forgotten()) get().publishNodeDetails(workspaceId, folder, frame, next, sourceVersion);
+        },
       });
       return;
     }
@@ -788,6 +867,7 @@ export const useDesignRuntimeStore = create<DesignRuntimeStore>((set, get) => ({
   },
 
   forgetWorkspace(workspaceId) {
+    forgottenGeneration.set(workspaceId, (forgottenGeneration.get(workspaceId) ?? 0) + 1);
     set((state) => {
       const workspace = state.byWorkspace[workspaceId];
       if (!workspace) return state;

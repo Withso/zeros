@@ -19,7 +19,7 @@ import { CloudSourceTargetSchema, type CloudSourceTarget } from "./source-author
 import { pinCloudEnvironment, releaseCloudEnvironment } from "./environment-store.js";
 import { originalSetupBuild } from "./setup-selection.js";
 
-import { mirrorMessageWindow, type MessageWindow, type WindowOptions } from "./history.js";
+import { mirrorMessageSenders, mirrorMessageWindow, type MessageWindow, type WindowOptions } from "./history.js";
 import { mirrorMessageSearch, type SearchOptions } from "./history-search.js";
 import { MESSAGE_SEARCH_DEADLINE_MS } from "./message-search.js";
 import { consumeRuntimeCanary } from "./runtime-canary-store.js";
@@ -1375,6 +1375,10 @@ export class CloudV2Store {
 
   messageWindow(workspaceId: string, chatId: string, options: WindowOptions = {}): Promise<MessageWindow> {
     return withSystemTx(this.pool, tx => mirrorMessageWindow(tx, workspaceId, chatId, options), { consistentRead: true });
+  }
+
+  messageSenders(workspaceId: string, chatId: string, userMessageIds: string[]) {
+    return withSystemTx(this.pool, tx => mirrorMessageSenders(tx, workspaceId, chatId, userMessageIds));
   }
 
   searchMessages(workspaceId: string, options: SearchOptions) {

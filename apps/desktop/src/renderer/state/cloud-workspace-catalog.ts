@@ -1,4 +1,5 @@
 import type { WorkspaceAddress } from "@zeros/protocol/local-orchestration";
+import { clearChatSenders } from "../platform/chat-senders";
 import type { Workspace } from "../platform/git";
 import { publishCloudGithubPrCapabilities } from "../platform/cloud-github-pr-capability";
 import {
@@ -527,6 +528,8 @@ export function refreshCloudWorkspaceTitleSoon(target: CloudWorkspaceTarget): vo
 }
 
 export function clearCloudWorkspaceCatalog(): void {
+  // Another account's attributions never carry over.
+  clearChatSenders();
   for (const { timer } of titleReads.values()) clearTimeout(timer);
   titleReads.clear();
   clearCloudComposerPrs();

@@ -33,6 +33,7 @@ import { WorkspaceRuntimeClient } from "./workspace-runtime-client";
 import { cloudWorkspaceKey } from "./cloud-workspace-key";
 import { openCloudV2Runtime } from "./open-cloud-v2-runtime";
 import { cloudV2CheckoutPath, readCloudV2History } from "../cloud-v2";
+import { keepHistorySenders } from "../chat-senders";
 import { canReadCloudWorkspace, cloudCatalogGeneration, cloudWorkspaceCatalogConfirmed, cloudWorkspaceDocument, cloudWorkspaceLifecycleTask, cloudWorkspaceOperation, cloudWorkspaceStopVersion, getCloudWorkspaceRows, isCloudWorkspaceLifecyclePending } from "../../state/cloud-workspace-catalog";
 import { getActiveWorkspaceFolder } from "../../state/active-workspace-folder";
 import { wireWorkbenchConnectionRejection } from "../../state/workbench-availability";
@@ -80,7 +81,8 @@ export function BridgeProvider({ children }: { children: React.ReactNode }) {
         manage: cloudWorkspaceOperation,
         // History comes from the worker when connected and from the control
         // plane's mirror otherwise; neither read wakes the VM.
-        readHistory: readCloudV2History,
+        // Team sharing phase 2: keep a reply's sender map (present only under the sharing opt-in).
+        readHistory: keepHistorySenders(readCloudV2History),
         historyRoot: target => {
           const doc = cloudWorkspaceDocument(target);
           return doc ? cloudV2CheckoutPath(doc) : undefined;

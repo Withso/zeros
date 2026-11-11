@@ -26,6 +26,10 @@ export const SYNC_LIMITS = {
   batchFiles: 512,
   /** Requests a Mac keeps in flight on its sync socket. */
   inFlight: 6,
+  /** What a Mac asks for at once, in bytes, so a reply never meets a full send buffer on a slow link (an older
+   * worker ends a sync socket with more than 4 MiB buffered): 1 MiB per batch or chunk, 2 MiB in flight in all. */
+  macRequestBytes: 1024 * 1024,
+  macInFlightBytes: 2 * 1024 * 1024,
   /** A transfer keeps the VM awake this long after its last read, for at most this long in one continuous run. */
   transferActivityMs: 60_000,
   transferActivityCapMs: 30 * 60_000,

@@ -124,8 +124,11 @@ export interface DesignFrameRuntimeConnection {
     visible: boolean,
     signal?: AbortSignal,
   ): Promise<DesignRuntimeNodeDetails>;
+  /** `baseTheme`: the directory's default theme, which can move without a
+   * new handshake; omitted, the frame lists no value for it. */
   setTheme(
     theme: string | null,
+    baseTheme?: string | null,
     signal?: AbortSignal,
   ): Promise<DesignRuntimeSnapshot>;
   /** Show a linked Design stylesheet's in-flight text (an agent draft) in
@@ -766,9 +769,10 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
 
   async setTheme(
     theme: string | null,
+    baseTheme?: string | null,
     signal?: AbortSignal,
   ): Promise<DesignRuntimeSnapshot> {
-    const result = await this.request("setTheme", { theme }, signal);
+    const result = await this.request("setTheme", baseTheme === undefined ? { theme } : { theme, baseTheme }, signal);
     if (
       !isRuntimeSnapshot(result) ||
       result.sourceVersion !== this.expectedSourceVersion

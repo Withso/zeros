@@ -71,6 +71,8 @@ interface DesignFrameRuntimeIframeProps {
   autoCapture: boolean;
   /** Workspace-owned token mode applied inside the opaque frame runtime. */
   theme: string | null;
+  /** The directory's default theme; values list theirs under its name. */
+  baseTheme?: string | null;
   /** Last confirmed pixels cover unavoidable structural document navigation. */
   transitionCover: { sourceVersion: string; dataUrl: string } | null;
   /** A retained HTML document or decoded picture already supplies pixels. */
@@ -123,6 +125,8 @@ interface DesignFrameDocumentBufferProps {
   selectedNodeIds: readonly string[];
   autoCapture: boolean;
   theme: string | null;
+  /** The directory's default theme, sent with every theme applied. */
+  baseTheme?: string | null;
   /** An agent's in-flight text per linked stylesheet of this directory. */
   stylesheetPreviews: ReadonlyMap<string, DesignAgentStylesheetPreview>;
   onSnapshot: (snapshot: DesignRuntimeSnapshot) => void;
@@ -159,6 +163,7 @@ function DesignFrameDocumentBuffer({
   selectedNodeIds,
   autoCapture,
   theme,
+  baseTheme,
   stylesheetPreviews,
   onSnapshot,
   onConnection,
@@ -194,6 +199,7 @@ function DesignFrameDocumentBuffer({
     selectedNodeIds,
     autoCapture,
     theme,
+    baseTheme,
     stylesheetPreviews,
     savedEditingSession,
   });
@@ -207,6 +213,7 @@ function DesignFrameDocumentBuffer({
     selectedNodeIds,
     autoCapture,
     theme,
+    baseTheme,
     stylesheetPreviews,
     savedEditingSession,
   };
@@ -489,7 +496,7 @@ function DesignFrameDocumentBuffer({
             return;
           }
           void connection
-            .setTheme(latestRef.current.theme)
+            .setTheme(latestRef.current.theme, latestRef.current.baseTheme)
             .then(async (themedSnapshot) => {
               onSnapshot(themedSnapshot);
               // An agent's in-flight stylesheet shows before this generation
@@ -629,12 +636,12 @@ function DesignFrameDocumentBuffer({
     const connection = connectionRef.current;
     if (!connection) return;
     void connection
-      .setTheme(theme)
+      .setTheme(theme, baseTheme)
       .then(onSnapshot)
       .catch(() => {
         // A replacement buffer applies the latest theme before it is revealed.
       });
-  }, [onSnapshot, runtimeActive, theme]);
+  }, [baseTheme, onSnapshot, runtimeActive, theme]);
 
   useEffect(() => {
     if (!runtimeActive) return;
@@ -732,6 +739,7 @@ function DesignFrameRuntimeSession({
   selectedNodeIds,
   autoCapture,
   theme,
+  baseTheme,
   transitionCover,
   underlayReady,
   retiring = false,
@@ -1023,6 +1031,7 @@ function DesignFrameRuntimeSession({
           selectedNodeIds={selectedNodeIds}
           autoCapture={autoCapture}
           theme={theme}
+          baseTheme={baseTheme}
           stylesheetPreviews={stylesheetPreviews}
           onSnapshot={handleSnapshot}
           onConnection={handleConnection}

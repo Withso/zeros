@@ -210,17 +210,13 @@ for (const [id, selected] of Object.entries(ledger.jobs)) console.log("job-" + i
 }
 
 describe("selective pull-request CI", () => {
-  it("reruns for label changes without path filters or elevated permissions", () => {
+  it("starts no run for a label event, so creation labels never cancel the first run", () => {
+    // `gh pr create --label` fires `opened` and `labeled` in the same second.
+    // A labeled run cancelled the opened run, whose always() aggregates then
+    // reported failure until the new run's aggregates existed (minutes).
     expect(ci.on).toEqual({
       pull_request: {
-        types: [
-          "opened",
-          "synchronize",
-          "reopened",
-          "ready_for_review",
-          "labeled",
-          "unlabeled",
-        ],
+        types: ["opened", "synchronize", "reopened", "ready_for_review"],
       },
     });
     expect(ci.permissions).toEqual({ contents: "read" });
@@ -232,7 +228,9 @@ describe("selective pull-request CI", () => {
       if (job.permissions)
         expect(job.permissions).toEqual(id === "ci-gate"
           ? { contents: "read", actions: "read", "pull-requests": "read" }
-          : { contents: "read" });
+          : id === "scope"
+            ? { contents: "read", "pull-requests": "read" }
+            : { contents: "read" });
       for (const step of job.steps ?? [])
         expect(step.run ?? "").not.toContain("${{");
     }
@@ -250,7 +248,7 @@ describe("selective pull-request CI", () => {
       PULL_REQUEST_BASE_SHA: "${{ github.event.pull_request.base.sha }}",
       PULL_REQUEST_HEAD_SHA: "${{ github.event.pull_request.head.sha }}",
       GITHUB_SHA: "${{ github.sha }}",
-      LABELS_JSON: "${{ toJSON(github.event.pull_request.labels.*.name) }}",
+      LABELS_JSON: "${{ steps.labels.outputs.labels }}",
     });
     for (const file of [
       "scope.mjs",
@@ -973,5 +971,77 @@ describe("the CI gate's executable ledger validation", () => {
         expect(verdict(state).status, `${id}:${result}`).not.toBe(0);
       }
     }
+  });
+});
+
+describe("current pull-request labels", () => {
+  function labelsStep() {
+    const steps = ci.jobs.scope?.steps ?? [];
+    const index = steps.findIndex((candidate) => candidate.id === "labels");
+    expect(index, "the scope job reads current labels").toBeGreaterThan(-1);
+    expect(index).toBeLessThan(steps.findIndex((candidate) => candidate.id === "scope"));
+    return steps[index];
+  }
+  function fakeGh(body: string, status = 0) {
+    const bin = temporaryDirectory();
+    const log = path.join(bin, "calls");
+    writeFileSync(path.join(bin, "gh"), `#!/bin/bash\necho "$*" >> ${JSON.stringify(log)}\nprintf '%s' ${JSON.stringify(body)}\nexit ${status}\n`, { mode: 0o755 });
+    return { bin, log };
+  }
+  function run(env: Record<string, string>, gh: { bin: string }) {
+    const runner = temporaryDirectory();
+    const output = path.join(runner, "outputs");
+    writeFileSync(output, "");
+    const result = runStep(labelsStep(), {
+      GH_TOKEN: "fixture-token-value",
+      GITHUB_REPOSITORY: "Withso/zeros",
+      PR_NUMBER: "123",
+      EVENT_ACTION: "synchronize",
+      PR_CREATED_AT: "2026-01-01T00:00:00Z",
+      LABEL_SETTLE_SECONDS: "15",
+      LABEL_RETRY_SECONDS: "0",
+      GITHUB_OUTPUT: output,
+      PATH: `${gh.bin}:${process.env.PATH}`,
+      ...env,
+    });
+    return { result, output: readFileSync(output, "utf8") };
+  }
+
+  it("reads labels from the API at run time, not from the triggering event", () => {
+    const step = labelsStep();
+    expect(step.env).toMatchObject({
+      GH_TOKEN: "${{ github.token }}",
+      PR_NUMBER: "${{ github.event.pull_request.number }}",
+      EVENT_ACTION: "${{ github.event.action }}",
+      PR_CREATED_AT: "${{ github.event.pull_request.created_at }}",
+    });
+    const gh = fakeGh('["reviewed","ci:ui-smoke"]');
+    const { result, output } = run({}, gh);
+    expect(result.status, result.stderr).toBe(0);
+    expect(output).toBe('labels=["reviewed","ci:ui-smoke"]\n');
+    expect(readFileSync(gh.log, "utf8")).toContain("api repos/Withso/zeros/pulls/123 --jq [.labels[].name]");
+    expect(result.stdout + result.stderr).not.toContain("fixture-token-value");
+  });
+
+  it("waits out the label settle window only for a just-opened PR", () => {
+    const gh = fakeGh("[]");
+    const started = Date.now();
+    const opened = run({ EVENT_ACTION: "opened", PR_CREATED_AT: new Date().toISOString(), LABEL_SETTLE_SECONDS: "2" }, gh);
+    expect(opened.result.status, opened.result.stderr).toBe(0);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(1000);
+    const late = Date.now();
+    expect(run({ EVENT_ACTION: "opened" }, gh).result.status).toBe(0);
+    expect(Date.now() - late).toBeLessThan(1000);
+  });
+
+  it.each([
+    ["a failed read", "[]", 1],
+    ["a non-array", '{"name":"ci:full"}', 0],
+    ["a non-string label", "[1]", 0],
+    ["no JSON", "not json", 0],
+  ])("fails closed on %s without publishing labels", (_label, body, status) => {
+    const { result, output } = run({}, fakeGh(body, status));
+    expect(result.status).not.toBe(0);
+    expect(output).toBe("");
   });
 });

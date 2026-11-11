@@ -24,7 +24,7 @@ export const runGit: GitRun = (args, options = {}) => new Promise((resolve, reje
   (error, stdout) => error ? reject(error) : resolve(String(stdout)));
 });
 
-const STALE_LOCK_MS = 10 * 60_000, BUNDLE_IN_FLIGHT = 4;
+const STALE_LOCK_MS = 10 * 60_000, BUNDLE_IN_FLIGHT = 2;
 
 async function hashPath(path: string): Promise<string> {
   const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
@@ -115,27 +115,42 @@ export class GitMirror {
     }
   }
 
-  /** The bundle in SYNC_LIMITS.chunkBytes reads, BUNDLE_IN_FLIGHT at a time, each written at its offset; then the whole file is hashed. */
+  /** A bundle partly downloaded by an earlier attempt: its id and how much of it landed in order. */
+  private partial?: { id: string; done: number; path: string };
+
+  /** The bundle in 1 MiB reads, BUNDLE_IN_FLIGHT at a time, each written at its offset; a retry of the same bundle
+   * (the worker keeps it for its lifetime) resumes from the prefix that had landed in order. Then the whole file is hashed. */
   private async download(source: GitSource, bundle: NonNullable<SyncBootstrapReply["bundle"]>): Promise<string> {
     const path = join(this.meta, "tmp", `${bundle.id}.bundle`);
-    const file = await open(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+    const resume = this.partial?.id === bundle.id && this.partial.path === path && await lstat(path).then(info => info.isFile(), () => false) ? this.partial.done : 0;
+    if (!resume) { await rm(path, { force: true }); this.partial = undefined; }
+    const file = await open(path, constants.O_WRONLY | constants.O_CREAT | constants.O_NOFOLLOW | (resume ? 0 : constants.O_EXCL), 0o600);
     const offsets: number[] = [];
-    for (let offset = 0; offset < bundle.size; offset += SYNC_LIMITS.chunkBytes) offsets.push(offset);
-    let failure: unknown;
+    for (let offset = resume; offset < bundle.size; offset += SYNC_LIMITS.macRequestBytes) offsets.push(offset);
+    const landed = new Set<number>();
+    let done = resume, failure: unknown;
     const worker = async () => {
       for (let offset = offsets.shift(); offset !== undefined && failure === undefined; offset = offsets.shift()) {
         try {
-          const length = Math.min(SYNC_LIMITS.chunkBytes, bundle.size - offset);
+          const length = Math.min(SYNC_LIMITS.macRequestBytes, bundle.size - offset);
           const chunk = await source.bundleRead(bundle.id, offset, length);
           const bytes = Buffer.from(chunk.base64, "base64");
           if (bytes.length !== length || bytes.length !== chunk.bytes) throw new SyncChangedError();
           await file.write(bytes, 0, bytes.length, offset);
+          landed.add(offset);
+          while (landed.has(done)) { landed.delete(done); done = Math.min(bundle.size, done + SYNC_LIMITS.macRequestBytes); }
         } catch (error) { failure ??= error; }
       }
     };
     try { await Promise.all(Array.from({ length: BUNDLE_IN_FLIGHT }, worker)); }
     finally { await file.close(); }
-    if (failure !== undefined) { await rm(path, { force: true }); throw failure; }
+    if (failure !== undefined) {
+      // Keep what landed in order for the next attempt; a changed bundle starts over.
+      this.partial = failure instanceof SyncChangedError ? undefined : { id: bundle.id, done, path };
+      if (!this.partial) await rm(path, { force: true });
+      throw failure;
+    }
+    this.partial = undefined;
     if (await hashPath(path) !== bundle.sha256) { await rm(path, { force: true }); throw new SyncChangedError(); }
     return path;
   }

@@ -3,6 +3,9 @@
 // a turn at each user text message; events before any prompt form a system
 // turn with a null prompt.
 
+import { Avatar, AvatarFallback, AvatarImage } from "@/renderer/shared/ui/primitives/avatar";
+import { initialsOf } from "@/renderer/shared/lib/initials";
+import type { PromptSender } from "./use-prompt-sender";
 import React, { memo, useCallback, useEffect, useRef, useState } from "react";
 import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
 import type { LocalMessageChatRef } from "@zeros/protocol/agent-messages";
@@ -164,6 +167,7 @@ export const TurnPromptHeader = memo(function TurnPromptHeader({
   editAgentContext,
   autoAction,
   localFrom,
+  sender,
   surfaceActive = true,
 }: {
   children: React.ReactNode;
@@ -208,6 +212,8 @@ export const TurnPromptHeader = memo(function TurnPromptHeader({
   autoAction?: string;
   /** Provenance belongs above the bubble, including steers and saved history. */
   localFrom?: LocalMessageChatRef;
+  /** Team sharing: another person sent this message (their roster name and avatar). */
+  sender?: PromptSender | null;
   /** Whether this chat is currently surfaced in its pane. The retained edit
    *  composer uses this to keep hidden attachment previews inert. Defaults
    *  true for callers that do not track surfacing. */
@@ -313,6 +319,19 @@ export const TurnPromptHeader = memo(function TurnPromptHeader({
           <div data-local-from="" className="mb-2 flex max-w-full min-w-0 items-center self-end text-xs">
             <span className="sr-only">Sent from</span>
             <LocalLinkPill href={localFrom.link} fallback={localFrom} appearance="sender" className="shrink" />
+          </div>
+          {bubble}
+        </div>
+      ) : sender ? (
+        // Team sharing: who sent it, the same sender line as a chat app.
+        <div data-prompt-sender-group="" className="flex w-full min-w-0 flex-col items-end">
+          <div data-prompt-sender="" className="text-fg2 mb-2 flex max-w-full min-w-0 items-center gap-1.5 self-end text-xs leading-4.5">
+            <span className="sr-only">Sent by</span>
+            <Avatar size="xs" aria-hidden="true">
+              {sender.avatarUrl && <AvatarImage src={sender.avatarUrl} alt="" referrerPolicy="no-referrer" />}
+              <AvatarFallback>{initialsOf(sender.name)}</AvatarFallback>
+            </Avatar>
+            <span className="min-w-0 truncate">{sender.name}</span>
           </div>
           {bubble}
         </div>

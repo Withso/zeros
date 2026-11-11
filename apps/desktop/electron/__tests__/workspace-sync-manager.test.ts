@@ -116,4 +116,34 @@ describe("SyncManager", () => {
     expect(restarted.folderFor(WS)).toBe("/real/f");
     await restarted.stop();
   });
+
+  it("backs off a workspace it cannot reach (2 s doubling to 5 min), says so, turns to an error after 5 failures, and logs each closed reason", async () => {
+    const f = fixture({ connect: async () => { throw new SyncConnectError("unavailable", "close_1006"); } });
+    await f.manager.enable(WS, "/f");
+    const delays: number[] = [];
+    for (let attempt = 0; attempt < 9; attempt++) {
+      await vi.waitFor(() => expect(f.waits.length).toBe(attempt + 1));
+      delays.push(f.waits.at(-1)!.ms);
+      if (attempt === 0) expect(f.last()).toEqual([{ workspaceId: WS, state: "paused", reason: "unreachable", problems: 0 }]);
+      if (attempt === 4) expect(f.last()).toEqual([{ workspaceId: WS, state: "error", reason: "unreachable", problems: 0 }]);
+      f.waits.at(-1)!.resolve();
+    }
+    expect(delays).toEqual([2_000, 4_000, 8_000, 16_000, 32_000, 64_000, 128_000, 256_000, 300_000]);
+    expect(f.logs).toContain("paused workspace=11111111 reason=unavailable detail=close_1006");
+    await f.manager.disable(WS);
+  });
+
+  it("turns off at once even while a pull is stuck: clears this Mac's entry, says syncing false, and stops showing it", async () => {
+    let started!: () => void;
+    const pulling = new Promise<void>(resolve => { started = resolve; });
+    const f = fixture({ pull: () => { started(); return new Promise(() => {}); } });
+    await f.manager.enable(WS, "/f");
+    await pulling;
+    const off = f.manager.disable(WS);
+    await expect(Promise.race([off.then(() => "off"), new Promise(resolve => setTimeout(() => resolve("stuck"), 500))])).resolves.toBe("off");
+    expect(f.flags.at(-1)).toEqual([WS, false]);
+    expect(f.manager.folderFor(WS)).toBeUndefined();
+    expect(f.last()).toEqual([]);
+    expect(f.closed).toHaveBeenCalled();
+  });
 });

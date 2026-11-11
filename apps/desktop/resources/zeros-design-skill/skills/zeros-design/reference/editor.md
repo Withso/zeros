@@ -30,9 +30,13 @@ People edit frames in the Design tab while agents work on the same files. This p
 - A field refuses a value CSS rejects instead of writing something else: a negative size, padding, gap, radius, border width, font size or duration writes nothing and the field keeps its value. Margins, insets, letter spacing and offsets keep negatives. Ranged values such as opacity are held to their range.
 - Emptying a field restores its value. To remove a value set on the layer, a person uses Clear in the field's hover card (or Alt+Backspace); Reset does the same for a value that replaces a class or component value. Either removes the whole declaration, so after one the layer shows the class, inherited or initial value again.
 - Fields take maths in one unit: `24*2`, `+8`, `x/2`, `50%/2` (which writes `25%`). Mixed units are refused; write `calc()` in CSS for those.
-- A plain length with a unit (`50%`, `1rem`) shows as written. Tokens, `calc()` and unitless values show what they resolve to.
+- A plain length with a unit (`50%`, `1rem`) shows as written. Tokens and unitless values show what they resolve to.
 - The unit menu converts the value against what the unit measures: `12px` to rem writes `0.75rem` with a 16px root, and percent uses the parent's width as CSS resolves it. Units with no known basis are not offered, so expect px, % and rem, the unit already written, and `auto` only for margins and flex-basis. Converted percent and rem values have at most two decimals.
 - On several layers with different values, a scrub or arrow moves each by the same step in its own unit, written in one undoable step. A layer whose value has no number (`auto`, `calc()`) is left as it is.
+- A value written with a CSS math function (`calc()`, `clamp()`, `min()`, `max()` and the like) shows as written, dimmed, and is read only in the Style panel; its hover card offers Edit in CSS. People change it in the CSS tab, so keep such values readable.
+- A value a rule forces with `!important` is read only, with a lock; the card names the rule and offers Ask agent to change, which asks you to remove the `!important` or move the value so the layer can be edited without changing other layers. When several layers are selected and one of them is computed or forced, the field is read only for all of them.
+- A plain value that a theme rule makes differ (`[data-zd-theme="dark"] .card { … }`) carries a theme mark, and the card lists each other theme's value. Setting it on the layer writes one value for every theme, and the panel says so ("Changes Light and Dark."). Prefer a token when a value should follow the theme.
+- A hidden layer stays editable; the header says Hidden (with Show) or "In a hidden layer". Show is the Layers eye: it changes the canvas, not the source.
 
 ## The More styles section
 

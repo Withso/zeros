@@ -204,7 +204,8 @@ export async function runDesignTokenPillsSmoke({ page, check }) {
   check(
     "a missing token reads as a warning pill with Detach always shown",
     (await missing.getAttribute("aria-label")) === "Radius: missing token radius-card" &&
-      ((await missing.textContent()) ?? "").includes("radius-card is missing") &&
+      // Two spans, the name and " is missing", joined by a no-break space.
+      ((await missing.textContent()) ?? "").replace(/\u00a0/g, " ").includes("radius-card is missing") &&
       (await field("border-radius").getByRole("button", { name: "Detach token", exact: true }).isVisible()),
   );
 

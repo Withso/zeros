@@ -38,7 +38,7 @@ jobs:
           pnpm install --frozen-lockfile
           pnpm --dir apps/control-plane install --frozen-lockfile
       - name: Install browser prerequisite
-        run: pnpm exec playwright install --with-deps chromium
+        run: bash scripts/ci/retry.sh pnpm exec playwright install --with-deps chromium
       - name: Replay every case and compare the committed baseline
         timeout-minutes: 160
         env:

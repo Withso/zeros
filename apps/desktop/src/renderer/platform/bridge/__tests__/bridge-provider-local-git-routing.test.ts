@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { RuntimeClient } from "../ws-client";
 import { WorkspaceRuntimeClient, type CloudPeer, type WorkspaceRuntimeOptions } from "../workspace-runtime-client";
 import { cloudWorkspaceKey, type CloudWorkspaceTarget } from "../cloud-workspace-key";
+import { keepHistorySenders } from "../../chat-senders";
 
 const organizationId = "11111111-1111-4111-8111-111111111111";
 const cloud = { organizationId, workspaceId: "22222222-2222-4222-8222-222222222222" };
@@ -35,7 +36,7 @@ function providerRouting(open: WorkspaceRuntimeOptions["open"]) {
     cloudWorkspaceKey, getActiveWorkspaceFolder: () => selection.folder,
     cloudWorkspaceLifecycleTask: (target: CloudWorkspaceTarget, operation: string) =>
       operation === "wake" && wake.target && cloudWorkspaceKey(target) === cloudWorkspaceKey(wake.target) ? Promise.resolve() : undefined,
-    readCloudV2History: vi.fn(async () => ({ chats: [], chatDeletions: [] })),
+    readCloudV2History: vi.fn(async () => ({ chats: [], chatDeletions: [] })), keepHistorySenders,
     cloudV2CheckoutPath: (doc: { repository: { owner: string; name: string } }) => `/home/user/${doc.repository.owner}/${doc.repository.name}`,
   };
   vm.runInNewContext(ts.transpileModule(expression.getText(source), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, context);

@@ -1033,6 +1033,68 @@ database("cloud API through the assembled router and PostgreSQL", () => {
     expect((await request("/workspaces", { ...body, message: "Changed" }, key, headers)).status).toBe(409);
   });
 
+  describe("durable sender identity", () => {
+    const receiptRows = async (workspaceIds: string[]) => (await pool.query(
+      "SELECT to_jsonb(p) AS row FROM cloud_v2_prompt_outbox p WHERE workspace_id=ANY($1::uuid[]) ORDER BY created_at,user_message_id", [workspaceIds])).rows.map(value => value.row);
+    it.each([
+      { kind: "api_key", transport: "HTTP" }, { kind: "workspace_token", transport: "HTTP" },
+      { kind: "api_key", transport: "MCP" }, { kind: "workspace_token", transport: "MCP" },
+    ])("records authenticated $kind senders on every $transport prompt entry point", async ({ kind, transport }) => {
+      const bearer = kind === "api_key" ? key : (await workspaceCredential()).credential;
+      const credential = await credentials.resolve(`Bearer ${bearer}`);
+      const source = randomUUID();
+      await store.writeHistory(workspace.id, { chats: [{ id: source, agentId: "codex" }] });
+      const headers = { "X-Zeros-Session-Id": source, "X-Zeros-User-Id": member, "X-Zeros-Context-Id": randomUUID() };
+      async function invoke(name: string, args: Record<string, unknown>, path: string) {
+        const response = transport === "MCP"
+          ? await mcp("tools/call", { name, arguments: args }, bearer, headers)
+          : await request(path, args, bearer, headers);
+        expect(response.status).toBe(transport === "MCP" ? 200 : 201);
+        const body = await response.json();
+        return transport === "MCP" ? body.result.structuredContent : body;
+      }
+      const created = await invoke("create_workspace", { repository: "example/project", agent: "codex", message: "Initial" }, "/workspaces");
+      const chat = await invoke("create_session", { workspaceId: workspace.id, agent: "codex", message: "Session" }, "/sessions");
+      const messageId = randomUUID();
+      const args = { message: "Follow up", messageId, ...(transport === "MCP" ? { sessionId: chat.session.id } : {}) };
+      await invoke("send_message", args, `/sessions/${chat.session.id}/messages`);
+      const rows = await receiptRows([workspace.id, created.workspace.id]);
+      expect(rows).toHaveLength(3);
+      for (const row of rows) {
+        expect(row).toMatchObject({ creator_user_id: owner, sender_provider_session_id: null,
+          sender_credential_kind: kind, sender_credential_id: credential.credentialId, sender_context_id: null, created_by_session_id: source });
+        for (const field of ["senderUserId", "senderProviderSessionId", "senderCredentialId", "senderContextId"])
+          expect(row.payload).not.toHaveProperty(field);
+      }
+    });
+
+    it.each(["api_key", "workspace_token"])("records real CLI creates and sends as its %s owner", async kind => {
+      const { env, command } = await cloudCli();
+      env.ZEROS_API_KEY = kind === "api_key" ? key : (await workspaceCredential()).credential;
+      const credential = await credentials.resolve(`Bearer ${env.ZEROS_API_KEY}`);
+      const created = await command("workspace", "create", "--repository", "example/project", "--agent", "codex", "--message", "Initial");
+      const chat = await command("session", "create", "--agent", "codex", "--message", "Session");
+      await command("message", "send", "--session", chat.session.id, "--message", "Follow up");
+      const rows = await receiptRows([workspace.id, created.workspace.id]);
+      expect(rows).toHaveLength(3);
+      for (const row of rows) expect(row).toMatchObject({ creator_user_id: owner, sender_provider_session_id: null,
+        sender_credential_kind: kind, sender_credential_id: credential.credentialId, sender_context_id: null });
+    });
+
+    it("preserves the first credential on same-person replay and refuses caller-supplied sender fields", async () => {
+      const body = { workspaceId: workspace.id, agent: "codex", message: "First", sessionId: randomUUID(), messageId: randomUUID() };
+      const first = await request("/sessions", body); expect(first.status).toBe(201);
+      const another = await credentials.create(org, owner, "Another key");
+      const replay = await request("/sessions", body, another.key); expect(replay.status).toBe(201);
+      expect(await replay.json()).toEqual(await first.json());
+      const rows = await receiptRows([workspace.id]);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ creator_user_id: owner, sender_credential_id: keyId, sender_credential_kind: "api_key" });
+      for (const field of ["senderUserId", "senderProviderSessionId", "senderCredentialId", "senderContextId"])
+        expect((await request("/sessions", { ...body, [field]: member })).status).toBe(400);
+    });
+  });
+
   describe("request attribution", () => {
     const callingChat = (id = randomUUID()) => ({ id, title: "Caller", agentId: "codex" });
 

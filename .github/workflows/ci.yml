@@ -9,13 +9,18 @@ name: CI
 # after a successful scope decision. Composer runs on an explicit ci:ui-smoke
 # or ci:full label; path selection and missing-policy fallback do not add it.
 
+# No labeled/unlabeled trigger: `gh pr create --label` fires `opened` and
+# `labeled` together, and the label run cancelled the first run, whose
+# always() aggregates then reported failure for minutes. The scope job reads
+# the PR's current labels instead. A label added later applies on the next
+# push or a rerun of this workflow (`gh run rerun <run-id>`).
 on:
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
+    types: [opened, synchronize, reopened, ready_for_review]
 
 # No job here needs a secret. Fork pull requests run arbitrary install scripts,
-# so the token stays read-only. The trusted final gate also reads Actions and
-# pull-request review metadata.
+# so the token stays read-only. The scope job reads the PR's labels; the
+# trusted final gate also reads Actions and pull-request review metadata.
 permissions:
   contents: read
 
@@ -27,6 +32,9 @@ jobs:
   scope:
     name: scope
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
     outputs:
       ledger: ${{ steps.scope.outputs.ledger }}
       job-quality: ${{ steps.scope.outputs.job-quality }}
@@ -47,6 +55,35 @@ jobs:
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
+      - name: Read the PR's current labels
+        id: labels
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          EVENT_ACTION: ${{ github.event.action }}
+          PR_CREATED_AT: ${{ github.event.pull_request.created_at }}
+          # Creation labels land a moment after `opened`.
+          LABEL_SETTLE_SECONDS: "15"
+          LABEL_RETRY_SECONDS: "5"
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_ACTION" = "opened" ]; then
+            wait=$(node -e 'const s = Number(process.env.LABEL_SETTLE_SECONDS) - (Date.now() - Date.parse(process.env.PR_CREATED_AT)) / 1000; process.stdout.write(String(Math.max(0, Math.ceil(s))))')
+            if [ "$wait" -gt 0 ]; then sleep "$wait"; fi
+          fi
+          labels=""
+          for attempt in 1 2 3; do
+            if labels=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '[.labels[].name]'); then break; fi
+            labels=""
+            if [ "$attempt" -lt 3 ]; then sleep $(( LABEL_RETRY_SECONDS * attempt )); fi
+          done
+          if [ -z "$labels" ]; then
+            echo "::error::The PR's current labels could not be read."
+            exit 1
+          fi
+          # Publish only a compact JSON array of strings; anything else fails closed.
+          compact=$(LABELS="$labels" node -e 'const value = JSON.parse(process.env.LABELS); if (!Array.isArray(value) || value.some(label => typeof label !== "string")) process.exit(1); process.stdout.write(JSON.stringify(value))')
+          echo "labels=$compact" >> "$GITHUB_OUTPUT"
       - name: Select trusted CI jobs
         id: scope
         env:
@@ -54,7 +91,7 @@ jobs:
           PULL_REQUEST_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PULL_REQUEST_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           GITHUB_SHA: ${{ github.sha }}
-          LABELS_JSON: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+          LABELS_JSON: ${{ steps.labels.outputs.labels }}
         run: |
           set -euo pipefail
           touch "$GITHUB_OUTPUT"
@@ -440,7 +477,7 @@ jobs:
       - name: Install Playwright Chromium headless shell
         # The Vitest suite contains real-browser design-runtime protocol tests.
         # pnpm installs Playwright's API package but intentionally not its browser.
-        run: pnpm exec playwright install --with-deps --only-shell chromium
+        run: bash scripts/ci/retry.sh pnpm exec playwright install --with-deps --only-shell chromium
 
       - name: Run vitest suite
         # Offline artifact closure tests require a private read-only namespace.
@@ -702,7 +739,7 @@ jobs:
       - name: Install Playwright Chromium headless shell
         # The named containment gate also proves the real headless Design
         # export path. macOS does not need Playwright's Linux system packages.
-        run: pnpm exec playwright install --only-shell chromium
+        run: bash scripts/ci/retry.sh pnpm exec playwright install --only-shell chromium
 
       - name: Bundled agent runtime pins (darwin artifact)
         # The `test` job runs this too, but on ubuntu it can only prove the
@@ -1117,7 +1154,7 @@ jobs:
       - name: Install control-plane dependencies for title smoke
         run: pnpm --dir apps/control-plane install --frozen-lockfile
       - name: Install Playwright Chromium
-        run: pnpm exec playwright install --with-deps chromium
+        run: bash scripts/ci/retry.sh pnpm exec playwright install --with-deps chromium
       - name: Run composer UI smoke shard
         # Real-browser event-timing coverage the unit suite structurally cannot
         # provide: a document-capture click listener can race Radix's open/focus
@@ -1226,8 +1263,10 @@ jobs:
         # a `${{ github.event.* }}` value spliced into `run:` is a shell-injection
         # sink. On a push (no pull_request payload) there is no base, so fall back
         # to the single pushed commit.
+        # A merge-group commit stacks every queued PR ahead of it on main, so
+        # its range starts at the queue's base, not only its own HEAD commit.
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
         run: |
           set -euo pipefail
           if [ -n "${BASE_SHA:-}" ]; then
