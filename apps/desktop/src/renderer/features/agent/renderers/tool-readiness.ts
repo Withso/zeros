@@ -131,12 +131,31 @@ export function toolPresentationReady(tool: AgentToolMessage): boolean {
   }
 }
 
-/** Claude's ToolSearch loading only zeros_workspace tools is harness mechanics:
- * the tool's own row follows, so "Loading tool mcp__zeros_workspace__…" never shows. */
+/** A tool search is harness mechanics. It never shows while pending (its query
+ * may still be streaming, so it could flash "Finding tools" before the tool's own
+ * row), and a finished one shows only when it loaded something other than
+ * zeros_workspace tools, by its select list or by the tools its output names. */
 export function isWorkspaceToolLoading(tool: AgentToolMessage): boolean {
   if (tool.toolKind !== "tool_search") return false;
+  if (tool.status === "pending" || tool.status === "in_progress") return true;
   const query = toolRecord(tool.rawInput).query;
-  if (typeof query !== "string" || !query.startsWith("select:")) return false;
-  const names = query.slice("select:".length).split(",").map(name => name.trim()).filter(Boolean);
-  return names.length > 0 && names.every(isWorkspaceToolName);
+  const selected = typeof query === "string" && query.startsWith("select:")
+    ? query.slice("select:".length).split(",").map(name => name.trim()).filter(Boolean) : [];
+  const loaded = selected.length ? selected : loadedToolNames(tool);
+  return loaded.length > 0 && loaded.every(isWorkspaceToolName);
+}
+
+/** Tool names a finished search's result references (tool_reference blocks), bounded. */
+function loadedToolNames(tool: AgentToolMessage): string[] {
+  const names: string[] = [];
+  const visit = (value: unknown, depth: number) => {
+    if (depth > 4 || names.length >= 64) return;
+    if (Array.isArray(value)) { for (const item of value.slice(0, 64)) visit(item, depth + 1); return; }
+    const record = toolRecord(value);
+    if (record.type === "tool_reference" && typeof record.tool_name === "string") { names.push(record.tool_name); return; }
+    for (const key of ["content", "rawOutput"]) if (key in record) visit(record[key], depth + 1);
+  };
+  visit(tool.rawOutput, 0);
+  visit(tool.content, 0);
+  return names;
 }

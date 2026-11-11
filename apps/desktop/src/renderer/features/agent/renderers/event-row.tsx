@@ -117,6 +117,7 @@ export const EventRow = memo(function EventRow({
     toneOverride ?? (pendingChecks ? "ok" : meta.tone ?? (isTool ? statusTone(status as any) : undefined));
   const expandable = meta.expandable && detail !== undefined && detail !== null;
   const Icon = sTone === "fail" ? CircleX : meta.Icon;
+  const SecondIcon = sTone === "fail" ? undefined : meta.SecondIcon;
   const surface = isTool
     ? nativeToolSurface(message as AgentToolMessage)
     : null;
@@ -212,6 +213,8 @@ export const EventRow = memo(function EventRow({
       <span
         className={cn(
           "relative inline-flex size-3 shrink-0 items-center justify-center [&_svg]:size-3",
+          // Two glyphs side by side (a local command): 12 + 4 + 12px.
+          SecondIcon && "w-7 justify-start",
           iconTone,
         )}
         aria-hidden="true"
@@ -219,6 +222,7 @@ export const EventRow = memo(function EventRow({
         <span
           className={cn(
             "inline-flex",
+            SecondIcon && "gap-1",
             expandable && "group-hover/event-row:hidden",
           )}
         >
@@ -233,6 +237,7 @@ export const EventRow = memo(function EventRow({
             active={ctx.attachmentImagesActive !== false}
             className={cn("size-3", meta.iconClassName)}
           />
+          {SecondIcon && <SecondIcon className={cn("size-3", meta.iconClassName)} />}
         </span>
         {expandable && (
           <>

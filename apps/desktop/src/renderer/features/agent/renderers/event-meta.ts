@@ -59,6 +59,8 @@ export interface EventMeta {
   /** Leading icon for the row — a Lucide glyph, or any component taking a
    *  className (e.g. the compaction row's live ZerosSpinner wrapper). */
   Icon: ComponentType<{ className?: string }>;
+  /** A second glyph beside the first (a local command: laptop, then prompt). */
+  SecondIcon?: ComponentType<{ className?: string }>;
   /** Optional className applied to the leading icon. */
   iconClassName?: string;
   /** Primary label — usually the tool's display name ("Read 42 lines",

@@ -1,17 +1,13 @@
-import { createLucideIcon, BellRing, FileDiff, SquareTerminal, Wrench } from "lucide-react";
+import { BellRing, FileDiff, Laptop, SquareTerminal, Terminal, Wrench } from "lucide-react";
 import type { AgentToolMessage } from "../use-agent-session";
 import { toolRecord } from "./native-tool-presentation";
 import type { EventMeta } from "./event-meta";
 
 const SERVER = "zeros_workspace";
 
-/** A laptop with a prompt: a command that runs on the person's Mac. */
-export const LaptopTerminal = createLucideIcon("laptop-terminal", [
-  ["path", { d: "M18 5a2 2 0 0 1 2 2v8.526a2 2 0 0 0 .212.897l1.068 2.127a1 1 0 0 1-.9 1.45H3.62a1 1 0 0 1-.9-1.45l1.068-2.127A2 2 0 0 0 4 15.526V7a2 2 0 0 1 2-2z", key: "body" }],
-  ["path", { d: "M20.054 15.987H3.946", key: "base" }],
-  ["path", { d: "m8 9 2 2-2 2", key: "prompt" }],
-  ["path", { d: "M12 13h3", key: "cursor" }],
-]);
+/** A command on the person's Mac: a laptop, then a terminal prompt, as two
+ * glyphs side by side (as Conductor shows it) wherever a local command appears. */
+export const LOCAL_COMMAND_ICONS = [Laptop, Terminal] as const;
 
 /** A zeros_workspace tool by native MCP identity: Codex server/tool, Claude's
  * qualified name, Cursor's providerIdentifier/toolName. Never an unqualified
@@ -57,31 +53,48 @@ function resultText(tool: AgentToolMessage): string {
 }
 const line = (text: string, key: string) => new RegExp(`^${key}: (.+)$`, "m").exec(text)?.[1]?.trim();
 
-/** RunLocalCommand: what it does (its description), the command, and plain words for where it stands. */
-function localCommandMeta(tool: AgentToolMessage, args: Record<string, unknown>): EventMeta {
+/** Where a RunLocalCommand row stands, beyond its own record: the Mac whose
+ * pending approval main holds for this call's chat, if any. */
+export interface LocalCommandRowState { waitingOn?: string }
+
+/** RunLocalCommand: what it does (its description) and the command, known as soon
+ * as its arguments are, also while running. The generic title is only a fallback
+ * while they are not, and never claims an approval. A pending call says it waits
+ * for approval only while main really holds one; a success adds no words; every
+ * other ending is plain words on a neutral row. */
+function localCommandMeta(tool: AgentToolMessage, args: Record<string, unknown>, state: LocalCommandRowState = {}): EventMeta {
   const description = typeof args.description === "string" && args.description.trim() ? args.description.replace(/\s+/g, " ").trim().slice(0, 120) : "Run a command on your Mac";
-  const command = typeof args.command === "string" ? args.command.replace(/\s+/g, " ").trim().slice(0, 160) : undefined;
-  const asked = typeof args.mac === "string" && args.mac.trim() ? args.mac.trim().slice(0, 128) : "your Mac";
-  const base = { Icon: LaptopTerminal, label: description, ...(command ? { target: command } : {}), expandable: true };
-  if (tool.status === "pending" || tool.status === "in_progress") return { ...base, trailing: `Waiting for approval on ${asked}` };
-  const text = resultText(tool), outcome = line(text, "outcome"), mac = line(text, "mac") ?? asked, exit = line(text, "exit code"), error = line(text, "error");
-  let words: string;
-  if (outcome === "completed") words = exit && exit !== "0" ? `Failed with exit code ${exit}` : `Ran on ${mac}`;
+  const command = localCommandText(args);
+  const [Icon, SecondIcon] = LOCAL_COMMAND_ICONS;
+  const base = { Icon, SecondIcon, label: description, ...(command ? { target: command } : {}), expandable: true };
+  if (tool.status === "pending" || tool.status === "in_progress")
+    return state.waitingOn ? { ...base, trailing: `Waiting for approval on ${state.waitingOn.slice(0, 128)}` } : base;
+  const text = resultText(tool), outcome = line(text, "outcome"), exit = line(text, "exit code"), error = line(text, "error");
+  let words: string | undefined;
+  if (outcome === "completed") words = exit && exit !== "0" ? `Failed with exit code ${exit}` : undefined;
   else if (outcome === "failed") words = error === "cwd_not_found" ? "Folder not found" : "Could not start";
   else if (outcome && OUTCOME_WORDS[outcome]) words = OUTCOME_WORDS[outcome]!;
-  else words = tool.status === "failed" ? "Outcome unknown" : `Ran on ${mac}`;
+  else words = tool.status === "failed" ? "Outcome unknown" : undefined;
   // Every ending reads as words on a neutral row, never a generic red "Error".
-  return { ...base, trailing: words, tone: "ok" };
+  return { ...base, ...(words ? { trailing: words } : {}), tone: "ok" };
+}
+const localCommandText = (args: Record<string, unknown>) =>
+  typeof args.command === "string" && args.command.trim() ? args.command.replace(/\s+/g, " ").trim().slice(0, 160) : undefined;
+
+/** A RunLocalCommand call's command as the approval shows it, for matching main's pending approvals. */
+export function localCommandCall(tool: AgentToolMessage): { command: string | undefined } | null {
+  const call = workspaceToolCall(tool);
+  return call?.name === "RunLocalCommand" ? { command: typeof call.args.command === "string" ? call.args.command : undefined } : null;
 }
 
 const humanize = (name: string) => name.replace(/([a-z0-9])([A-Z])/g, "$1 $2").replace(/_/g, " ").replace(/^./, first => first.toUpperCase());
 
 /** A human row for every zeros_workspace tool: never the raw `mcp__…` name. */
-export function workspaceToolMeta(tool: AgentToolMessage): EventMeta | null {
+export function workspaceToolMeta(tool: AgentToolMessage, state?: LocalCommandRowState): EventMeta | null {
   const call = workspaceToolCall(tool);
   if (!call) return null;
   const { name, args } = call;
-  if (name === "RunLocalCommand") return localCommandMeta(tool, args);
+  if (name === "RunLocalCommand") return localCommandMeta(tool, args, state);
   if (name === "NotifyUser") {
     const title = typeof args.title === "string" ? args.title.replace(/\s+/g, " ").trim().slice(0, 80) : "";
     return tool.status === "failed" ? { Icon: BellRing, label: "Notification not sent", ...(title ? { target: title } : {}), tone: "ok", expandable: true }

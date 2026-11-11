@@ -5,6 +5,11 @@ import type { AgentMessage, AgentToolMessage } from "../use-agent-session";
 import { metaForEvent } from "../renderers/event-meta";
 import { EventRowRenderer } from "../renderers/event-row-renderer";
 import { toolPresentationReady } from "../renderers/tool-readiness";
+import { workspaceToolMeta } from "../renderers/workspace-tool-presentation";
+import { summaryIcons } from "../renderers/tool-summary";
+import { Laptop, Plug, Terminal } from "lucide-react";
+import { acceptLocalCommandApprovalsForTests, type LocalCommandApprovalView } from "../../../platform/local-commands";
+import { cloudScopedId } from "../../../platform/bridge/cloud-workspace-key";
 import { TooltipProvider } from "../../../shared/ui/primitives";
 
 const args = { command: "xcrun simctl list devices | grep Booted", description: "List booted simulators", mac: "Studio" };
@@ -21,9 +26,14 @@ const words = (html: string) => html.replace(/<[^>]+>/g, "\n").split("\n").map(p
 
 describe("zeros_workspace tools in the transcript", () => {
   it.each(shapes)("names RunLocalCommand by its description, with the command, for %s", (_provider, rawInput, title) => {
-    const waiting = metaForEvent(tool(rawInput, title, "in_progress") as unknown as AgentMessage);
-    expect(waiting).toMatchObject({ label: "List booted simulators", target: "xcrun simctl list devices | grep Booted", trailing: "Waiting for approval on Studio" });
-    expect(metaForEvent(tool(rawInput, title, "completed", "outcome: completed\nmac: Studio\nexit code: 0\n") as unknown as AgentMessage).trailing).toBe("Ran on Studio");
+    // Running with its arguments known: the description and the command, and no approval claim.
+    const running = metaForEvent(tool(rawInput, title, "in_progress") as unknown as AgentMessage);
+    expect(running).toMatchObject({ label: "List booted simulators", target: "xcrun simctl list devices | grep Booted" });
+    expect(running.trailing).toBeUndefined();
+    // Waiting only when main really holds this chat's approval.
+    expect(workspaceToolMeta(tool(rawInput, title, "in_progress"), { waitingOn: "Studio" })?.trailing).toBe("Waiting for approval on Studio");
+    // A successful ending adds no words: reason, icons, title and command.
+    expect(metaForEvent(tool(rawInput, title, "completed", "outcome: completed\nmac: Studio\nexit code: 0\n") as unknown as AgentMessage).trailing).toBeUndefined();
   });
 
   it("tells each ending in plain words on a neutral row, never a red Error or the raw tool name", () => {
@@ -67,5 +77,62 @@ describe("zeros_workspace tools in the transcript", () => {
     expect(row(tool(args, "mcp__zeros_workspace__RunLocalCommand", "in_progress"))).not.toContain("data-local-command-reason");
     // Codex and Cursor carry it in their argument envelopes.
     expect(words(row(tool({ server: "zeros_workspace", tool: "RunLocalCommand", arguments: { ...args, reason: "Needs Xcode." } }, "zeros_workspace:RunLocalCommand")))[0]).toBe("Needs Xcode.");
+  });
+
+  it("shows a laptop and then a terminal prompt as two glyphs, on the row and in a group's summary, never the MCP plug", () => {
+    for (const [, rawInput, title] of shapes) {
+      const meta = metaForEvent(tool(rawInput, title, "completed", "outcome: completed\nmac: Studio\nexit code: 0\n") as unknown as AgentMessage);
+      expect([meta.Icon, meta.SecondIcon]).toEqual([Laptop, Terminal]);
+      const html = row(tool(rawInput, title, "completed", "outcome: completed\nmac: Studio\nexit code: 0\n"));
+      expect(html.indexOf("lucide-laptop")).toBeGreaterThan(-1);
+      expect(html.indexOf("lucide-laptop")).toBeLessThan(html.indexOf("lucide-terminal"));
+      expect(summaryIcons([tool(rawInput, title) as unknown as AgentMessage])).toEqual([Laptop, Terminal]);
+    }
+    // A group of only zeros_workspace tools never shows the plug.
+    const group = ["NotifyUser", "GetTerminalOutput", "GetWorkspaceDiff", "CreateReviewComment"].map(name => tool({ title: "t" }, `mcp__zeros_workspace__${name}`) as unknown as AgentMessage);
+    expect(summaryIcons(group)).not.toContain(Plug);
+    // A foreign MCP tool keeps it.
+    expect(summaryIcons([tool({ server: "github", tool: "x", arguments: {} }, "github:x") as unknown as AgentMessage])).toContain(Plug);
+  });
+
+  it("removes Ran on <Mac> from a successful row and keeps plain words for every other ending", () => {
+    const done = words(row(tool(args, "mcp__zeros_workspace__RunLocalCommand", "completed", "outcome: completed\nmac: Studio\nexit code: 0\n")));
+    expect(done).toContain("List booted simulators");
+    expect(done.join(" ")).not.toMatch(/Ran on/);
+  });
+
+  it("never shows a tool search while it is pending, for any query, and shows a finished one only when it loaded other tools", () => {
+    const search = (rawInput: unknown, status: AgentToolMessage["status"], output?: unknown) =>
+      ({ ...tool(rawInput, "ToolSearch", status, undefined, "tool_search"), ...(output ? { rawOutput: output } : {}) }) as AgentToolMessage;
+    for (const status of ["pending", "in_progress"] as const)
+      for (const input of [{}, { query: "" }, { query: "local command" }, { query: "select:ExitPlanMode" }])
+        expect(toolPresentationReady(search(input, status))).toBe(false);
+    expect(toolPresentationReady(search({ query: "select:ExitPlanMode" }, "completed"))).toBe(true);
+    expect(toolPresentationReady(search({ query: "local command" }, "completed",
+      [{ type: "tool_reference", tool_name: "mcp__zeros_workspace__RunLocalCommand" }]))).toBe(false);
+    expect(toolPresentationReady(search({ query: "plan" }, "completed", [{ type: "tool_reference", tool_name: "ExitPlanMode" }]))).toBe(true);
+  });
+
+  it("says it waits for approval only while main holds this chat's approval for this command; otherwise a pending call is the running row", () => {
+    const target = { organizationId: "11111111-1111-4111-8111-111111111111", workspaceId: "22222222-2222-4222-8222-222222222222" };
+    const chatId = cloudScopedId(target, "chat-1");
+    const rowIn = (message: AgentToolMessage, chat: string | null) => renderToStaticMarkup(createElement(TooltipProvider, {
+      children: createElement(EventRowRenderer as never, { message, ctx: { editBaselines: new Map(), chatId: chat } }) }));
+    const approval = { requestId: "r", workspaceId: target.workspaceId, workspaceName: "w-1", workspaceTitle: null, chatId: "chat-1", chatTitle: "Chat",
+      macName: "Studio", command: args.command, timeoutMs: 60_000, approvalDeadline: "2026-11-11T10:00:00Z" } as LocalCommandApprovalView;
+    const running = tool(args, "mcp__zeros_workspace__RunLocalCommand", "in_progress");
+    try {
+      acceptLocalCommandApprovalsForTests([]);   // Always allow: nothing waits
+      expect(words(rowIn(running, chatId))).toEqual(["List booted simulators", "xcrun simctl list devices | grep Booted"]);
+      acceptLocalCommandApprovalsForTests([approval]);
+      expect(words(rowIn(running, chatId))).toContain("Waiting for approval on Studio");
+      // Another chat's approval, or another command's, is not this row's.
+      expect(rowIn(running, cloudScopedId(target, "chat-2"))).not.toContain("Waiting for approval");
+      acceptLocalCommandApprovalsForTests([{ ...approval, command: "ls" }]);
+      expect(rowIn(running, chatId)).not.toContain("Waiting for approval");
+      // Arguments not known yet: the generic title, without any approval claim.
+      acceptLocalCommandApprovalsForTests([]);
+      expect(words(rowIn(tool({}, "mcp__zeros_workspace__RunLocalCommand", "pending"), chatId))).toEqual(["Run a command on your Mac"]);
+    } finally { acceptLocalCommandApprovalsForTests([]); }
   });
 });

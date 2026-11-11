@@ -83,12 +83,26 @@ export async function runLocalCommandsSmoke({ page, harnessBase, check }) {
 
     await open("view=transcript", theme);
     const transcript = page.locator("main");
-    await expect(transcript.locator("[data-local-command-row]")).toHaveCount(4);   // the ToolSearch row is hidden
-    for (const [row, said] of [["waiting", "Waiting for approval on Studio"], ["ran", "Ran on Studio"], ["denied", "Denied"], ["exit", "Failed with exit code 3"]]) {
+    // Both ToolSearch rows stay hidden: the finished one loading it, and a pending one (no "Finding tools" flash).
+    await expect(transcript.locator("[data-local-command-row]")).toHaveCount(5);
+    await expect(transcript.getByText(/Finding tools|Loading tool/)).toHaveCount(0);
+    for (const [row, said] of [["waiting", "Waiting for approval on Studio"], ["denied", "Denied"], ["exit", "Failed with exit code 3"]]) {
       const item = transcript.locator(`[data-local-command-row="${row}"]`);
       await expect(item.getByText("List booted simulators", { exact: true })).toBeVisible();
       await expect(item.getByText(said, { exact: true })).toBeVisible();
     }
+    // Always allow (nothing held for that chat): the running row, with no approval claim; a success adds no words.
+    for (const row of ["running", "ran"]) {
+      const item = transcript.locator(`[data-local-command-row="${row}"]`);
+      await expect(item.getByText("List booted simulators", { exact: true })).toBeVisible();
+      await expect(item.getByText(/Waiting for approval|Ran on/)).toHaveCount(0);
+    }
+    // Two glyphs, a laptop and then a terminal prompt, on every row.
+    for (const row of ["waiting", "running", "ran", "denied", "exit"])
+      expect(await transcript.locator(`[data-local-command-row="${row}"] button svg`).evaluateAll(nodes => nodes.slice(0, 2).map(node => node.getAttribute("class")?.match(/lucide-(laptop|terminal)\b/)?.[1])))
+        .toEqual(["laptop", "terminal"]);
+    // The held approval's card is in its chat's dock.
+    await expect(page.getByRole("region", { name: "Chat A dock" }).getByRole("group", { name: "Run a command on Studio" })).toBeVisible();
     await expect(transcript.getByText("xcrun simctl list devices | grep Booted").first()).toBeVisible();
     // Wire v1.3: a muted reason line above the row, only where the agent gave one.
     const reason = transcript.locator("[data-local-command-reason]");
@@ -99,7 +113,11 @@ export async function runLocalCommandsSmoke({ page, harnessBase, check }) {
     await expect(transcript.getByText("Error", { exact: true })).toHaveCount(0);
     expect(await color(transcript.locator('[data-local-command-row="denied"]').getByText("List booted simulators", { exact: true }), "color")).toBe(await token("--fg1"));
     await shoot(transcript, `local-command-transcript-${theme}`);
-    check(`RunLocalCommand rows read the description and command with plain-word endings, never mcp__ names, Loading tool or Error, in ${theme}`, true);
+    // Always allow everywhere: no card and no waiting text.
+    await open("view=transcript&approval=none", theme);
+    await expect(page.locator("[data-local-command-card]")).toHaveCount(0);
+    await expect(page.getByText(/Waiting for approval/)).toHaveCount(0);
+    check(`RunLocalCommand rows show the laptop and prompt pair, the description and command, waiting only on a held approval (its card in the chat), plain-word endings and no Ran on, never mcp__ names, a tool search row or Error, in ${theme}`, true);
 
     // Order 3: This Mac's sync row in the popup, off and on, from the keyboard.
     await open("view=sync&sync=off", theme);
