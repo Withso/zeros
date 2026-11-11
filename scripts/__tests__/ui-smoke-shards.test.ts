@@ -101,6 +101,7 @@ const originalOrder = [
   "local-commands",
   "notify-user",
   "cloud-workspace-details",
+  "team-sharing",
   "subscription",
 ];
 

@@ -27,7 +27,8 @@
     "file-prefetch",
     "design-shadow-layers",
     "design-gpu-canvas",
-    "cloud-workspace-details"
+    "cloud-workspace-details",
+    "team-sharing"
   ],
   [
     "design-motion-refinements",
