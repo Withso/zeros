@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { designSourceFixBrief, designSyncBrief } from "../design-agent-brief";
+import { designForcedValueBrief, designSourceFixBrief, designSyncBrief } from "../design-agent-brief";
 
 const source = {
   id: "app",
@@ -45,5 +45,30 @@ describe("Design agent briefs", () => {
   it("names the fonts list when App fonts needs fixing", () => {
     const brief = designSourceFixBrief("Shop - Design", { ...source, id: "@fonts", title: "App fonts", kind: "fonts", path: "fonts/Brand.woff2" });
     expect(brief.text).toContain('The App fonts (the `fonts` list) in the Design directory "Shop - Design" need fixing:');
+  });
+
+  it("asks for a forced value to be freed, naming the layer, property, rule, source and value", () => {
+    const brief = designForcedValueBrief({
+      directory: "Shop - Design",
+      frame: "home.html",
+      layer: "Card",
+      nodeId: "home-card",
+      property: "border-radius",
+      label: "Corner radius",
+      value: "4px",
+      rule: ".legacy-card",
+      source: "App styles",
+    });
+    expect(brief.label).toBe("Change Corner radius on Card");
+    expect(brief.text).toContain('"home.html" in the Design directory "Shop - Design"');
+    expect(brief.text).toContain('layer "Card" (data-oid "home-card")');
+    expect(brief.text).toContain("border-radius: 4px");
+    expect(brief.text).toContain("`.legacy-card` in App styles");
+    expect(brief.text).toContain("!important");
+    expect(brief.text).toContain("Remove the !important, or move the value");
+    expect(brief.text).toContain("Ask before changing application code.");
+    // Without a named source the rule stands alone.
+    expect(designForcedValueBrief({ directory: "D", frame: "f.html", layer: "L", nodeId: "n", property: "color", label: "Text color", value: "red", rule: ".x" }).text)
+      .toContain("forced by `.x` with !important");
   });
 });

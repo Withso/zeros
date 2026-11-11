@@ -102,15 +102,17 @@ import {
   type DesignFieldToken,
 } from "./design-token-picker";
 import { DesignFieldOverlays, readDesignCardField } from "./design-style-card";
-import { designInputResetsOnAltBackspace, useDesignFieldOverlays } from "./design-field-overlays";
+import { designInputResetsOnAltBackspace, useDesignFieldOverlays, type DesignFieldOverlaysApi } from "./design-field-overlays";
+import { designForcedValueBrief } from "./design-agent-brief";
 import { DesignStyledByLine } from "./design-styled-by";
 import { DesignHeldStateNote, DesignLayerStateMenu, useDesignHeldReadOnly } from "./design-state-picker";
-import { designHeldStateChanges } from "./design-style-origins";
+import { designHeldStateChanges, designStylePropertyLabel } from "./design-style-origins";
 import {
   designHeldStateEntry,
   designHeldStateHolds,
   designHeldStateWatch,
   holdDesignNodeState,
+  measureDesignNodeUnheld,
   releaseDesignNodeState,
   releaseDesignNodeStateUnless,
   useDesignHeldStateStore,
@@ -199,6 +201,7 @@ import {
   captureDesignRuntimeScreenshot,
   clearDesignNodeStylePreviewTransient,
   previewDesignNodeGeometry,
+  setDesignNodeVisibility,
   settleDesignHistorySelection,
 } from "./state/design-selection";
 import {
@@ -334,7 +337,7 @@ export function InspectorEditField({
   suffix: fieldSuffix,
   percentage,
   label,
-  value,
+  value: valueProp,
   applied = false,
   disabled = false,
   placeholder,
@@ -355,6 +358,11 @@ export function InspectorEditField({
   mixedSteps,
 }: InspectorEditFieldProps) {
   const id = useId();
+  const origin = useDesignFieldOrigin(styleProperty, linkedProperties);
+  // A computed value (calc(), clamp()…) shows as written and is edited in
+  // CSS; layers that differ still read Mixed.
+  const value =
+    origin.lock?.kind === "computed" && String(valueProp) !== "" ? origin.lock.text : valueProp;
   const [focused, setFocused] = useState(false);
   /** A key typed on the pill: the field edits a plain value until it settles. */
   const [typingOverToken, setTypingOverToken] = useState(false);
@@ -639,20 +647,22 @@ export function InspectorEditField({
   // Letters and glyphs sit in one square slot so values start on one line;
   // words size to their text instead of wrapping inside a compact field.
   const letterLabel = glyph !== null || (labelText?.length ?? 0) <= 2;
-  const suffix =
-    fieldSuffix ??
-    (compact && styleProperty === "rotate"
-      ? "°"
-      : compact && percentage
-        ? "%"
-        : null);
+  // A value written as calc() carries its own units.
+  const writtenAsIs = origin.lock?.kind === "computed" && value !== valueProp;
+  const suffix = writtenAsIs
+    ? null
+    : (fieldSuffix ??
+      (compact && styleProperty === "rotate"
+        ? "°"
+        : compact && percentage
+          ? "%"
+          : null));
   // A token reads as the value only while nothing is being edited.
   const tokenShown =
     Boolean(token) && !typingOverToken && !focused && draft === String(value);
   const showUnit =
     !compact && !tokenShown && Boolean(presentation.unit) && unitOptions.length > 0;
   const motionPersistent = Boolean(motion?.trackActive);
-  const origin = useDesignFieldOrigin(styleProperty, linkedProperties);
 
   return (
     <div
@@ -667,6 +677,8 @@ export function InspectorEditField({
         data-design-linked-properties={linkedProperties?.length ? linkedProperties.join(" ") : undefined}
         data-design-field-label={label}
         data-design-origin={origin.mark}
+        data-design-theme-mark={origin.themed ? "" : undefined}
+        aria-readonly={origin.lock ? true : undefined}
         data-design-layout-field={compact ? "" : undefined}
         data-design-motion-field={motion ? "" : undefined}
         data-design-motion-tracked={motionPersistent ? "" : undefined}
@@ -828,6 +840,7 @@ export function InspectorEditField({
           value={presentation.text}
           placeholder={placeholder}
           disabled={disabled}
+          readOnly={Boolean(origin.lock)}
           spellCheck={false}
           autoComplete="off"
           className={cn(
@@ -1428,6 +1441,7 @@ export const DesignInspector = React.memo(function DesignInspector({
   motionProperties,
   onOpenMotionTimeline,
   zoomActionsRef,
+  onAskAgent,
 }: DesignInspectorProps) {
   const styleOriginLabel = useDesignStyleOriginLabel(workspaceId);
   const tokenCatalog = useDesignFrameTokenCatalog(workspaceId, frame?.file);
@@ -1794,6 +1808,34 @@ export const DesignInspector = React.memo(function DesignInspector({
     () => (heldParents && heldChanges ? designFieldOrigins(heldParents, originsContext, null, heldChanges) : defaultOrigins),
     [defaultOrigins, heldChanges, heldParents, originsContext],
   );
+  const fieldOriginsRef = useRef(fieldOrigins);
+  fieldOriginsRef.current = fieldOrigins;
+  /** The panel's overlays, for what a commit says under its field. */
+  const overlaysApiRef = useRef<DesignFieldOverlaysApi | null>(null);
+  const askAgentRef = useRef(onAskAgent);
+  askAgentRef.current = onAskAgent;
+  /** A forced value's card: the agent frees it, as the person sees it. */
+  const askAgentToChange = useCallback(
+    (properties: readonly string[]) => {
+      const property = properties[0];
+      const lock = property ? fieldOriginsRef.current.lock(property) : null;
+      const { workspaceId: owner, frame: shown } = styleEditContextRef.current;
+      const askAgent = askAgentRef.current;
+      if (!askAgent || !property || lock?.kind !== "forced" || !lock.rule || !owner || !shown) return;
+      askAgent(designForcedValueBrief({
+        directory: designWorkspaceSnapshotCache.peekSnapshot(owner).data?.directory ?? "",
+        frame: shown.file,
+        layer: lock.layer,
+        nodeId: lock.nodeId,
+        property,
+        label: designStylePropertyLabel(property),
+        value: lock.text,
+        rule: lock.rule,
+        ...(lock.source ? { source: lock.source } : {}),
+      }));
+    },
+    [],
+  );
   // Anything but this single layer on this frame and generation, or a hidden
   // surface, lets a held state go.
   useEffect(() => {
@@ -1820,6 +1862,11 @@ export const DesignInspector = React.memo(function DesignInspector({
       onHeld: (held) => paintDesignInspectorPreviewDetails(key.workspaceId, key.frame, held),
     });
   }, []);
+  /** A computed value's card: the CSS tab, which edits Default. */
+  const editInCss = useCallback(() => {
+    pickLayerState(null);
+    setCssMode(true);
+  }, [pickLayerState]);
   const currentStyleOwnerRef = useRef(styleOwner);
   currentStyleOwnerRef.current = styleOwner;
   const stylePreviewIntentRef = styleOwner.previewIntentRef;
@@ -2096,7 +2143,23 @@ export const DesignInspector = React.memo(function DesignInspector({
         () => {},
         () => {},
       );
-      return task.then((prepared) => prepared.persist);
+      const saved = task.then((prepared) => prepared.persist);
+      // A plain value written over values the themes gave apart is one
+      // value for all of them now; say so under the field once it saved.
+      // Read before the write: after it, the value no longer differs.
+      const themed =
+        intent === undefined || intent === "detach"
+          ? Object.keys(styles).find((property) => styles[property] !== null && fieldOriginsRef.current.themeChange(property))
+          : undefined;
+      if (themed) {
+        const text = fieldOriginsRef.current.themeChange(themed)!;
+        void saved.then(() => {
+          if (currentStyleOwnerRef.current !== styleOwner) return;
+          const field = inspectorRef.current?.querySelector<HTMLElement>(`[data-design-style-property="${CSS.escape(themed)}"]`);
+          if (field) overlaysApiRef.current?.showFieldMessage(field, text, "info");
+        }, () => {});
+      }
+      return saved;
     },
     [styleOwner, stylesForNode],
   );
@@ -2421,9 +2484,7 @@ export const DesignInspector = React.memo(function DesignInspector({
           throw new Error(
             "Select a smaller frame to arrange its children together.",
           );
-        const recover = async (error: unknown): Promise<never> => {
-          // An earlier failed save must not erase a more recent local choice.
-          if (stylePreviewIntentRef.current !== intent) throw error;
+        const restorePreview = async (): Promise<void> => {
           await Promise.all(
             [...updates.keys()].map(async (nodeId) => {
               try {
@@ -2443,6 +2504,11 @@ export const DesignInspector = React.memo(function DesignInspector({
               }
             }),
           );
+        };
+        const recover = async (error: unknown): Promise<never> => {
+          // An earlier failed save must not erase a more recent local choice.
+          if (stylePreviewIntentRef.current !== intent) throw error;
+          await restorePreview();
           throw error;
         };
         try {
@@ -2495,7 +2561,12 @@ export const DesignInspector = React.memo(function DesignInspector({
             (hasDesignIntrinsicSize(root) ||
               (action.type === "sizing" && updates.has(root.oid)))
           ) {
-            const measured = await runtime.getNodeDetails(root.oid);
+            // A hold can begin on the root after the preview let go of any.
+            const measured = await measureDesignNodeUnheld(runtime, root.oid, held);
+            if (!measured) {
+              if (stylePreviewIntentRef.current === intent) await restorePreview();
+              return;
+            }
             const current =
               designWorkspaceSnapshotCache
                 .peekSnapshot(workspaceId)
@@ -2522,6 +2593,11 @@ export const DesignInspector = React.memo(function DesignInspector({
             throw new Error(
               "Select a smaller frame to arrange its children together.",
             );
+          // Nothing is persisted once a hold has met the edit.
+          if (held.blocked()) {
+            if (stylePreviewIntentRef.current === intent) await restorePreview();
+            return;
+          }
           if (operations.length === 1) {
             const [nodeId, styles] = updates.entries().next().value!;
             return {
@@ -2782,6 +2858,23 @@ export const DesignInspector = React.memo(function DesignInspector({
               ? File
               : FrameIcon;
 
+  // A hidden layer stays editable; the header says so, and offers Show when
+  // the layer hides itself: the Layers eye's canvas visibility, which writes
+  // no source and so adds no undo step.
+  const hiddenBy = styleNodeIds.length === 1 ? elementDetails?.hiddenBy : undefined;
+  const showSelectedLayer = () => {
+    if (!workspaceId || !folder || !frame || !elementDetails) return;
+    void setDesignNodeVisibility({
+      workspaceId,
+      folder,
+      frame: frame.file,
+      sourceVersion: frame.sourceVersion,
+      nodeId: elementDetails.oid,
+      visible: true,
+    }).catch((error) => {
+      toast.error("Couldn't show the layer", { description: errorMessage(error) });
+    });
+  };
   const inspectorSelectionHeader = (
     <section className="border-border1 shrink-0 border-b">
       <div
@@ -2797,6 +2890,23 @@ export const DesignInspector = React.memo(function DesignInspector({
           <span className="text-fg1 min-w-0 flex-1 truncate text-xs font-medium">{selectionTitle ?? selectionName}</span>
           {selectionType ? (
             <span className="text-fg3 shrink-0 text-3xxs leading-4 tabular-nums">{selectionType}</span>
+          ) : null}
+          {hiddenBy === "self" ? (
+            <>
+              <span data-design-hidden="self" className="text-fg2 shrink-0 text-3xxs leading-4">Hidden</span>
+              <Button
+                type="button"
+                variant="ghost"
+                size="compact"
+                data-design-hidden-show=""
+                disabled={!active || pendingHistoryActions > 0}
+                onClick={showSelectedLayer}
+              >
+                Show
+              </Button>
+            </>
+          ) : hiddenBy === "ancestor" ? (
+            <span data-design-hidden="ancestor" className="text-fg3 shrink-0 text-3xxs leading-4">In a hidden layer</span>
           ) : null}
           {heldKey && elementDetails?.states?.length && !cssMode ? (
             <DesignLayerStateMenu
@@ -2978,8 +3088,11 @@ export const DesignInspector = React.memo(function DesignInspector({
                   origins={fieldOrigins}
                   disabled={!active || pendingHistoryActions > 0}
                   readOnly={holding}
+                  apiRef={overlaysApiRef}
                   onChooseToken={chooseFieldToken}
                   onReset={resetField}
+                  onEditInCss={editInCss}
+                  onAskAgent={askAgentToChange}
                 >
                   <DesignStyleEditor
                     key={styleOwner.key}

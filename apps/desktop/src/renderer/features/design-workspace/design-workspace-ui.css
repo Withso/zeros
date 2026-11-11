@@ -1858,6 +1858,58 @@
   color: var(--fg3);
 }
 
+/* A value the panel cannot edit. Computed (calc(), clamp()…) shows as
+ * written, dimmed; forced by !important carries a lock at the field's end.
+ * Neither edits: design-style-card.tsx keeps edits out and opens the card
+ * on a press, Enter or Space. A plain value that differs by theme carries a
+ * theme mark there too. Lucide's lock and circle-half, as masks, so the
+ * marks are attributes and CSS only. */
+.zd-field[data-design-origin="computed"] input {
+  color: var(--fg3);
+}
+
+.zd-field[data-design-origin="computed"] :is(input, button),
+.zd-field[data-design-origin="forced"] :is(input, button) {
+  cursor: default;
+}
+
+.zd-field[data-design-origin="forced"],
+.zd-field[data-design-theme-mark] {
+  --zd-field-mark-size: 12px;
+  padding-right: calc(var(--zd-field-mark-size) + 6px);
+}
+
+.zd-field[data-design-origin="forced"][data-design-theme-mark] {
+  padding-right: calc(var(--zd-field-mark-size) * 2 + 10px);
+}
+
+.zd-field[data-design-origin="forced"]::after,
+.zd-field[data-design-theme-mark]::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  right: 6px;
+  width: var(--zd-field-mark-size);
+  height: var(--zd-field-mark-size);
+  transform: translateY(-50%);
+  background-color: var(--fg3);
+  mask-repeat: no-repeat;
+  mask-size: contain;
+  pointer-events: none;
+}
+
+.zd-field[data-design-origin="forced"]::after {
+  mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='4' y='11' width='16' height='10' rx='2'/%3E%3Cpath d='M8 11V7a4 4 0 0 1 8 0v4'/%3E%3C/svg%3E");
+}
+
+.zd-field[data-design-theme-mark]::before {
+  mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='9'/%3E%3Cpath d='M12 3v18'/%3E%3C/svg%3E");
+}
+
+.zd-field[data-design-origin="forced"][data-design-theme-mark]::before {
+  right: calc(var(--zd-field-mark-size) + 10px);
+}
+
 /* A held layer state is view only (design-state-picker.tsx drops every
  * press and keystroke): fields keep their rest fill and the default cursor,
  * Detach stays hidden, scrub handles stay quiet and Styled-by rows filter
@@ -1881,6 +1933,13 @@
 
 [data-design-state-held] [data-design-styled-by-source] {
   pointer-events: none;
+}
+
+/* Section actions, icon buttons and the Stroke sides select act on what the
+ * panel shows: a filter narrows it to some fields, and a held state edits
+ * nothing, so neither shows them inert. */
+:is([data-design-source-filter], [data-design-state-held]) [data-design-filter-companion] {
+  display: none;
 }
 
 /* A Styled-by row narrows the panel to what its source sets: fields outside

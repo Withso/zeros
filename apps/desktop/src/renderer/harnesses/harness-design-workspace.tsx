@@ -244,7 +244,9 @@ const TOKEN_PILLS_HOME_SOURCE = `<!doctype html>
 // value forced by !important, one reads a token that is gone. A paragraph
 // inherits its text colour; a box is drawn by hand. A real button has hover,
 // keyboard-focus and disabled rules, one hover written the way Tailwind v4
-// nests its variants; a tag's hover loses to its own colour.
+// nests its variants; a tag's hover loses to its own colour. Field states:
+// a width written with calc(), a radius forced over the layer's own, a fill
+// that differs by theme, a layer hidden itself and one inside a hidden layer.
 const styleOriginsHarness = new URLSearchParams(window.location.search).has(
   "styleOrigins",
 );
@@ -280,10 +282,15 @@ const STYLE_ORIGINS_HOME_SOURCE = `<!doctype html>
         .missing { border-radius: var(--radius-card); }
         .submit { border: 1px solid var(--border2); border-radius: var(--radius-md); padding: 6px 12px; background-color: var(--bg1); color: var(--fg1); font: inherit; }
         .submit:hover { background-color: var(--bg2); }
+        .submit:active { padding: 8px 16px; }
         .submit:focus-visible { outline: 2px solid var(--fg2); outline-offset: 2px; font-weight: 600; }
         .submit:disabled { opacity: 0.5; }
         .tag { color: var(--fg2); }
         .tag:hover { color: var(--fg1); }
+        .calc-box { width: calc(100% - 48px); height: 24px; }
+        .legacy-card { border-radius: 4px !important; }
+        .theme-card { width: 80px; height: 24px; background-color: ${STYLE_ORIGINS_HEX["--bg1"]}; }
+        [data-zd-theme="dark"] .theme-card { background-color: ${STYLE_ORIGINS_HEX["--fg1"]}; }
       }
     </style>
   </head>
@@ -297,6 +304,11 @@ const STYLE_ORIGINS_HOME_SOURCE = `<!doctype html>
       <div data-oid="home-drawn" style="width: 120px; height: 40px; background-color: var(--bg1); border-radius: 4px"></div>
       <button data-oid="home-submit" class="submit hover:border-fg2"><span data-oid="home-submit-label">Submit</span></button>
       <span data-oid="home-tag" class="tag" style="color: var(--fg1)">Tag</span>
+      <div data-oid="home-calc" class="calc-box"></div>
+      <div data-oid="home-legacy" class="legacy-card" style="width: 80px; height: 24px; border-radius: 12px"></div>
+      <div data-oid="home-themed" class="theme-card"></div>
+      <div data-oid="home-hidden" style="display: none; width: 40px; height: 10px"></div>
+      <div data-oid="home-veiled" style="visibility: hidden"><span data-oid="home-veiled-label">Veiled</span></div>
     </main>
   </body>
 </html>`;

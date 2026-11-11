@@ -126,6 +126,7 @@ export const DesignFrameRenderSurface = React.memo(function DesignFrameRenderSur
   selectedNodeIds,
   live,
   theme,
+  baseTheme,
   highResolutionTile,
   highResolutionDisabled,
   designDirectory,
@@ -150,6 +151,8 @@ export const DesignFrameRenderSurface = React.memo(function DesignFrameRenderSur
   selectedNodeIds: readonly string[];
   live: boolean;
   theme: string | null;
+  /** The directory's default theme, for the frame runtime. */
+  baseTheme?: string | null;
   highResolutionTile: DesignHighResolutionViewportTile | null;
   highResolutionDisabled: boolean;
   /** The Design directory the canvas shows (agent stylesheet drafts). */
@@ -384,6 +387,7 @@ export const DesignFrameRenderSurface = React.memo(function DesignFrameRenderSur
       autoCapture={!playbackSessionId && (recorded ? selected : designFrameAutoCapture(selected, picture))}
       underlayReady={sourcePainted || !!still || recorded}
       theme={theme}
+      baseTheme={baseTheme}
       transitionCover={
         currentScreenshot ??
         (picture?.current ? pictureCover : null) ??

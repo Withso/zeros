@@ -179,6 +179,7 @@ export function DesignFillEditor({
       data-design-token-property="background-color"
       data-design-token-companion="background-image:none"
       data-design-origin={origin.mark}
+      data-design-theme-mark={origin.themed ? "" : undefined}
       data-design-filter-out={origin.hidden ? "" : undefined}
       className="group/design-field zd-field relative min-w-0 gap-0 pl-1"
     >

@@ -534,6 +534,7 @@ export function DesignWorkspaceColumn({
               motionProperties={motionProperties}
               onOpenMotionTimeline={openMotionTimeline}
               zoomActionsRef={zoomActionsRef}
+              onAskAgent={askAgent}
             />
           }
         />

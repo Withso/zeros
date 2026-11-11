@@ -464,13 +464,13 @@ describe("design frame runtime client", () => {
     expect(source.postMessage).toHaveBeenCalledTimes(1);
     await expect(pending).resolves.toMatchObject({ revision: 2 });
 
-    const theme = connection.setTheme("dark");
+    // The default theme travels with every theme applied: it can change
+    // without a new handshake.
+    const theme = connection.setTheme("dark", "light");
     await vi.waitFor(() => expect(requests).toHaveLength(2));
-    const themeRequest = requests[1] as { requestId: string };
-    expect(themeRequest).toMatchObject({
-      method: "setTheme",
-      args: { theme: "dark" },
-    });
+    const themeRequest = requests[1] as { requestId: string; args: unknown };
+    expect(themeRequest).toMatchObject({ method: "setTheme" });
+    expect(themeRequest.args).toEqual({ theme: "dark", baseTheme: "light" });
     framePort.postMessage({
       protocol: DESIGN_RUNTIME_PROTOCOL,
       version: DESIGN_RUNTIME_VERSION,
