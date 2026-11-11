@@ -14,7 +14,7 @@ function fixture(pages: Array<{ connections: ReturnType<typeof row>[]; nextCurso
     folderFor: () => undefined,
     enable: vi.fn(async (workspaceId: string, folder: string) => { calls.push(`enable ${workspaceId.slice(0, 1)} ${folder}`); runs.add(workspaceId); }),
     disable: vi.fn(async (workspaceId: string) => { calls.push(`disable ${workspaceId.slice(0, 1)}`); runs.delete(workspaceId); }),
-    home: "/Users/alex", now: () => now, log: () => {},
+    channel: "/Users/alex/zeros-alpha", now: () => now, log: () => {},
   };
   return { follower: new SyncWantedFollower(deps), calls, cursors, runs, advance: (ms: number) => { now += ms; } };
 }
@@ -25,7 +25,7 @@ describe("following syncWanted for this Mac (12.z)", () => {
     await f.follower.refresh();
     expect(f.cursors).toEqual([undefined, A]);
     // 4444… is not among this Mac's live connections (disconnected): an app restart must not keep syncing it.
-    expect(f.calls).toEqual(["enable 1 /Users/alex/zeros/cloud-sync/zeros/w-19", "disable 2", "enable 3 /Users/alex/zeros/cloud-sync/zeros/Docs", "disable 4"]);
+    expect(f.calls).toEqual(["enable 1 /Users/alex/zeros-alpha/cloud-sync/zeros/w-19", "disable 2", "enable 3 /Users/alex/zeros-alpha/cloud-sync/zeros/Docs", "disable 4"]);
     expect([...f.runs].sort()).toEqual([A, C].sort());
   });
 

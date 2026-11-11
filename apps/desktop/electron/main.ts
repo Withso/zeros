@@ -136,7 +136,9 @@ import {
   appIdentity,
   zerosChannelDataDir,
   zerosDataDir,
+  zerosDesignWorkspacesRoot,
 } from "../src/engine/db/paths";
+import { removeEmptyLegacyDesignFolder } from "./legacy-design-folder";
 // CHANNELS/isChannel only — importing the runtime module is side-effect-free, so
 // this cannot read ZEROS_CHANNEL before the seeding block below sets it.
 import { CHANNELS, isChannel, type Channel } from "../src/engine/runtime";
@@ -1080,6 +1082,8 @@ app.whenReady().then(async () => {
   const localCommands = installLocalCommands({ notifyUser: event => notifyUser.receiveDevice(event) });
   // Running commands end with their process groups; the journal reports them as interrupted next start.
   const workspaceSync = installWorkspaceSync(localCommands);
+  // 12.zz: the obsolete `design workspaces/` folder goes only when nothing is in it (best effort, off the boot path).
+  void removeEmptyLegacyDesignFolder(zerosDesignWorkspacesRoot()).catch(() => false);
   app.once("will-quit", () => { notifyUser.dispose(); void workspaceSync.dispose(); void localCommands.dispose(); });
   installDesignProtocol();
   installFileMediaProtocol();

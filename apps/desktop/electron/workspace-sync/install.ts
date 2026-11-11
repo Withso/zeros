@@ -1,6 +1,7 @@
-import { app, dialog, shell, type IpcMainInvokeEvent } from "electron";
+import { dialog, shell, type IpcMainInvokeEvent } from "electron";
 import { mkdir } from "node:fs/promises";
-import { defaultSyncFolder } from "./default-folder";
+import { defaultSyncFolder, syncChannelFolder } from "./default-folder";
+import { zerosWorkspacesRoot } from "../../src/engine/db/paths";
 import { SyncWantedFollower } from "./wanted";
 import type { WorkspaceSyncStatus } from "../../shared/workspace-sync";
 import type { LocalCommandDevice } from "@zeros/protocol/local-commands";
@@ -61,7 +62,7 @@ export function installWorkspaceSync(local: { enabled: boolean; control: DeviceC
     enable: (workspaceId, folder) => manager.enable(workspaceId, folder),
     disable: workspaceId => manager.disable(workspaceId),
     mkdir: folder => mkdir(folder, { recursive: true, mode: 0o755 }).then(() => {}),
-    home: app.getPath("home"), now: Date.now, log: line => console.info(`[workspace-sync] ${line}`),
+    channel: syncChannelFolder(zerosWorkspacesRoot()), now: Date.now, log: line => console.info(`[workspace-sync] ${line}`),
   });
   const stopHints = local.onSyncHint(() => { void follower.hint(); });
   let changing = Promise.resolve();
@@ -88,7 +89,7 @@ export function installWorkspaceSync(local: { enabled: boolean; control: DeviceC
     requireMainFrame(event);
     const workspaceId = workspace(args.workspaceId);
     if (!local.enabled) return { ok: false, reason: "unavailable" };
-    const folder = manager.folderFor(workspaceId) ?? defaultSyncFolder(app.getPath("home"), label(args.repository, "repository"), label(args.workspace, "workspace"));
+    const folder = manager.folderFor(workspaceId) ?? defaultSyncFolder(syncChannelFolder(zerosWorkspacesRoot()), label(args.repository, "repository"), label(args.workspace, "workspace"));
     follower.noteLocalChange(workspaceId);
     try { await mkdir(folder, { recursive: true, mode: 0o755 }); await manager.enable(workspaceId, folder); return { ok: true }; }
     catch (error) { return { ok: false, reason: error instanceof SyncRootError ? error.code : "failed" }; }
