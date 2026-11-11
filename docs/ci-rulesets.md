@@ -183,6 +183,9 @@ node scripts/ci/ruleset-migration.mjs apply --stage remove-merge-queue --yes
 Qualify with a canary PR: enqueue it with `pnpm agent:merge <n>` and confirm the
 merge group's runs report every required check and that GitHub merged it.
 
+Applied to `main` on 2026-11-11; this paragraph was the canary PR that first
+went through the queue.
+
 ## Rollback: restore producers, restore requirements, then retire replacements
 
 First restore the legacy workflow producers, triggers, and exact display names
