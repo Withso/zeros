@@ -2,7 +2,7 @@
 // so the shared workspace UI renders v2 workspaces without its own copy.
 import { z } from "zod";
 import { CloudGithubUnavailableReasonSchema } from "@zeros/protocol/cloud-github-connection";
-import { RepositorySetupPathSchema } from "@zeros/protocol/cloud-v2-relay";
+import { CloudV2AgentCostSchema, CloudV2SetupStatusSchema, RepositorySetupPathSchema } from "@zeros/protocol/cloud-v2-relay";
 import { isCloudWorkspacePageOwner } from "@zeros/protocol/cloud-workspace-link";
 import { isWorkspaceNumber, type WorkspaceAddress } from "@zeros/protocol/local-orchestration";
 import { prepareCloudPromptErasure } from "./cloud-prompt-erasure";
@@ -115,6 +115,10 @@ export function cloudV2Document(workspace: CloudV2Workspace): CloudWorkspaceDocu
     ...(workspace.github ? { github: workspace.github } : {}),
     ...(workspace.githubUnavailableReason ? { githubUnavailableReason: workspace.githubUnavailableReason } : {}),
     ...(workspace.checkoutPath ? { checkoutPath: workspace.checkoutPath } : {}),
+    // Top-level fields the popup reads (setup-status-v1, agent cost). The reply passes them through; the
+    // document must carry them too, each dropped alone when malformed.
+    ...topLevel("setup", CloudV2SetupStatusSchema, (workspace as Record<string, unknown>).setup),
+    ...topLevel("agentCost", CloudV2AgentCostSchema, (workspace as Record<string, unknown>).agentCost),
     generation: {
       number: 1,
       architecture: "linux/amd64",
@@ -129,6 +133,11 @@ export function cloudV2Document(workspace: CloudV2Workspace): CloudWorkspaceDocu
     updatedAt: iso(workspace.updatedAt),
     deletedAt: workspace.state === "deleted" ? iso(workspace.updatedAt) : null,
   };
+}
+
+function topLevel<K extends string, T>(key: K, schema: z.ZodType<T>, value: unknown): Partial<Record<K, T>> {
+  const parsed = schema.safeParse(value);
+  return parsed.success ? { [key]: parsed.data } as Partial<Record<K, T>> : {};
 }
 
 /** The worker's native checkout, as the control plane configures it
