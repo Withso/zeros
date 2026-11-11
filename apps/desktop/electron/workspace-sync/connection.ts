@@ -1,6 +1,6 @@
 import { createMessage } from "@zeros/protocol/messages";
-import { SYNC_BRIDGE_PATH, SYNC_BRIDGE_PROTOCOL, SYNC_HINT_KIND, SyncBootstrapReplySchema, SyncReadReplySchema, SyncSnapshotReplySchema,
-  type SyncGrantReply, type SyncReadRequest, type SyncSnapshotRequest } from "@zeros/protocol/workspace-sync";
+import { SYNC_BATCH_CAPABILITY, SYNC_BRIDGE_PATH, SYNC_BRIDGE_PROTOCOL, SYNC_HINT_KIND, SYNC_LIMITS, SyncBootstrapReplySchema, SyncReadBatchReplySchema,
+  SyncReadReplySchema, SyncSnapshotReplySchema, type SyncGrantReply, type SyncReadBatchRequest, type SyncReadRequest, type SyncSnapshotRequest } from "@zeros/protocol/workspace-sync";
 import { SyncChangedError, type SyncSource } from "./engine";
 
 /** Why a sync socket could not be opened. Paused waits for the VM. */
@@ -25,12 +25,16 @@ const REQUEST_TIMEOUT_MS = 120_000, MAX_FRAME_CHARS = 16 * 1024 * 1024, RENEW_MS
 /** The Mac's direct socket to the worker through Boat's protected route. The
  * control plane only authorizes it; no file byte passes through it. The
  * socket is renewed with a fresh grant about every 8 minutes (the worker
- * closes one unrenewed for 10). One request is in flight at a time. */
+ * closes one unrenewed for 10). Up to SYNC_LIMITS.inFlight requests are in
+ * flight (the worker serves a passive client's frames concurrently); batches
+ * are used only after the worker's ENGINE_READY says sync-batch-v1. */
 export class DirectSyncConnection implements SyncSource {
   private readonly pending = new Map<string, { resolve(value: unknown): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> }>();
   private closed = false;
   private renew?: ReturnType<typeof setInterval>;
-  private queue = Promise.resolve();
+  private inFlight = 0;
+  private readonly waiting: Array<() => void> = [];
+  private batch = false;
   private constructor(private readonly ws: SyncSocket, private readonly hint: () => void, private readonly ended: () => void) {}
 
   static async connect(deps: DirectDeps, handlers: { hint(): void; closed(): void }): Promise<DirectSyncConnection> {
@@ -57,13 +61,17 @@ export class DirectSyncConnection implements SyncSource {
   read(request: SyncReadRequest) { return this.request("sync.read", request).then(result => SyncReadReplySchema.parse(result)); }
   bootstrap(have?: string) { return this.request("sync.bootstrap", have ? { have } : {}).then(result => SyncBootstrapReplySchema.parse(result)); }
   bundleRead(id: string, offset: number, length: number) { return this.request("sync.bundleRead", { id, offset, length }).then(result => SyncReadReplySchema.parse(result)); }
+  readBatch(request: SyncReadBatchRequest) { return this.request("sync.readBatch", request).then(result => SyncReadBatchReplySchema.parse(result)); }
+  /** The worker serves sync.readBatch (an older one never says so). */
+  batching(): boolean { return this.batch; }
   close(): void { if (!this.closed) { this.ws.close(1000); this.end(); } }
 
-  /** One request at a time: the decision is one read in flight per Mac. */
-  private request(op: string, params: object): Promise<unknown> {
-    const run = this.queue.then(() => this.send(op, params));
-    this.queue = run.then(() => {}, () => {});
-    return run;
+  /** At most SYNC_LIMITS.inFlight at once; the rest wait their turn in order. */
+  private async request(op: string, params: object): Promise<unknown> {
+    if (this.inFlight >= SYNC_LIMITS.inFlight) await new Promise<void>(resolve => this.waiting.push(resolve));
+    this.inFlight++;
+    try { return await this.send(op, params); }
+    finally { this.inFlight--; this.waiting.shift()?.(); }
   }
   private send(op: string, params: object): Promise<unknown> {
     if (this.closed || this.ws.readyState !== 1) return Promise.reject(new SyncConnectError("unavailable"));
@@ -77,10 +85,11 @@ export class DirectSyncConnection implements SyncSource {
 
   private receive(raw: string): void {
     if (raw.length > MAX_FRAME_CHARS) return;
-    let message: { type?: unknown; source?: unknown; requestId?: unknown; result?: unknown; code?: unknown; kinds?: unknown };
+    let message: { type?: unknown; source?: unknown; requestId?: unknown; result?: unknown; code?: unknown; kinds?: unknown; capabilities?: unknown };
     try { message = JSON.parse(raw); } catch { return; }
     if (message.source !== "engine") return;
     if (message.type === "DB_CHANGED" && Array.isArray(message.kinds) && message.kinds.includes(SYNC_HINT_KIND)) { this.hint(); return; }
+    if (message.type === "ENGINE_READY") { this.batch = Array.isArray(message.capabilities) && message.capabilities.includes(SYNC_BATCH_CAPABILITY); return; }
     if ((message.type !== "WORKSPACE_RESPONSE" && message.type !== "WORKSPACE_ERROR") || typeof message.requestId !== "string") return;
     const pending = this.pending.get(message.requestId);
     if (!pending) return;
@@ -94,6 +103,8 @@ export class DirectSyncConnection implements SyncSource {
     this.closed = true; clearInterval(this.renew);
     for (const pending of this.pending.values()) { clearTimeout(pending.timer); pending.reject(new SyncConnectError("unavailable")); }
     this.pending.clear();
+    // Waiting requests then fail fast in send() (closed).
+    for (const resume of this.waiting.splice(0)) resume();
     this.ended();
   }
 }

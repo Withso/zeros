@@ -2,19 +2,20 @@ import { useCallback, useEffect, useState } from "react";
 import type { LocalCommandMac } from "@zeros/protocol/local-commands";
 import { connectThisMac, disconnectMac, listWorkspaceMacs, localCommandDevice } from "../../platform/local-commands";
 import { isElectron } from "../../platform/runtime";
-import { SYNC_CHOOSE_ERRORS, chooseWorkspaceSyncFolder, openWorkspaceSyncTerminal, startWorkspaceSyncStatus, stopWorkspaceSync, useWorkspaceSyncStatus } from "../../platform/workspace-sync";
+import { SYNC_CHOOSE_ERRORS, chooseWorkspaceSyncFolder, enableWorkspaceSync, openWorkspaceSyncTerminal, revealWorkspaceSyncFolder, setWorkspaceSyncWanted,
+  startWorkspaceSyncStatus, stopWorkspaceSync, useWorkspaceSyncStatus } from "../../platform/workspace-sync";
 import { toast } from "../../shared/ui/primitives/elements";
 import type { ConnectedMac, ThisMacSync } from "./connected-macs";
 
 export function toConnectedMac(mac: LocalCommandMac, thisDeviceId: string | null): ConnectedMac {
   return { deviceId: mac.deviceId, name: mac.name, thisMac: mac.deviceId === thisDeviceId, reachable: mac.reachable,
     state: mac.active && mac.connected ? "active" : mac.connected ? "connected" : "available", ...(mac.expiresAt ? { expiresAt: Date.parse(mac.expiresAt) } : {}),
-    ...(mac.syncing ? { syncing: true } : {}) };
+    ...(mac.syncing ? { syncing: true } : {}), ...(mac.syncWanted !== undefined ? { syncWanted: mac.syncWanted } : {}) };
 }
 
 /** Read only while the popup is open (no polling, no VM wake), keyed by
  * workspace so another workspace's late reply never shows. Mac app only. */
-export function useWorkspaceMacs(workspaceId: string | null, active: boolean) {
+export function useWorkspaceMacs(workspaceId: string | null, active: boolean, labels?: { repository: string; workspace: string }) {
   const [state, setState] = useState<{ key: string; macs: ConnectedMac[] } | null>(null);
   const [busy, setBusy] = useState<string | undefined>();
   const [syncBusy, setSyncBusy] = useState(false);
@@ -47,17 +48,27 @@ export function useWorkspaceMacs(workspaceId: string | null, active: boolean) {
   };
   const sync: ThisMacSync = {
     status: syncStatus, busy: syncBusy,
+    onEnable: () => syncAct(async () => {
+      const result = await enableWorkspaceSync(workspaceId!, labels ?? { repository: "repository", workspace: workspaceId!.slice(0, 8) });
+      if (!result.ok) toast.error(SYNC_CHOOSE_ERRORS[result.reason] ?? SYNC_CHOOSE_ERRORS.failed!, result.reason === "not_empty" ? { description: "Use Choose another folder… in the folder's menu." } : undefined);
+    }),
     onChoose: () => syncAct(async () => {
       const result = await chooseWorkspaceSyncFolder(workspaceId!);
       if (!result.ok && result.reason !== "cancelled") toast.error(SYNC_CHOOSE_ERRORS[result.reason] ?? SYNC_CHOOSE_ERRORS.failed!);
     }),
     onStop: () => syncAct(() => stopWorkspaceSync(workspaceId!)),
     onOpenTerminal: () => { if (workspaceId) void openWorkspaceSyncTerminal(workspaceId).catch(() => toast.error("Couldn't open a terminal in the sync folder.")); },
+    onReveal: () => { if (workspaceId) void revealWorkspaceSyncFolder(workspaceId).catch(() => toast.error("Couldn't open the sync folder in Finder.")); },
+    onCopyPath: () => { const folder = syncStatus?.folder; if (folder) void navigator.clipboard.writeText(folder).then(() => toast.success("Path copied"), () => toast.error("Couldn't copy the path.")); },
   };
   return {
     sync,
     macs: state && state.key === workspaceId ? state.macs : null, busyDeviceId: busy,
     connect: (deviceId: string) => act(deviceId, () => connectThisMac(workspaceId!)),
     disconnect: (deviceId: string) => act(deviceId, () => disconnectMac(workspaceId!, deviceId)),
+    setWanted: (deviceId: string, wanted: boolean) => act(deviceId, async () => {
+      const result = await setWorkspaceSyncWanted(workspaceId!, deviceId, wanted);
+      if (!result.ok) toast.error("Couldn't change that Mac's sync. Connect this Mac first.");
+    }),
   };
 }

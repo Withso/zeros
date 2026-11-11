@@ -1,6 +1,9 @@
 import React, { useRef, type MouseEvent, type ReactNode } from "react";
 import { isLocalMainWorkspace } from "../../state/local-main-workspace";
-import { Archive, Check, Link, RotateCw } from "lucide-react";
+import { Archive, BellOff, BellRing, Check, Link, Pin, PinOff, RotateCw } from "lucide-react";
+import { useCloudFolderSharedDocument } from "../../state/cloud-workspace-creators";
+import { setCloudWorkspaceSharingFlag } from "../../state/team-sharing-actions";
+import { parseCloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
 import { copyLocalLink, useCanCopyLocalLink } from "../../state/local-link-actions";
 import {
   copyCloudWorkspaceLink,
@@ -75,6 +78,14 @@ export function WorkspaceContextMenu({
   const canCopyCloudLink = useCanCopyCloudWorkspaceLink(workspace);
   const folderWorkspace = isLocalMainWorkspace(workspace);
   const archiveInert = archiveDisabled || archiving;
+  // Team sharing: a reader cannot set status or restart; only managers archive; anyone follows (but its Creator) and pins.
+  const shared = useCloudFolderSharedDocument(workspace.path);
+  const sharedTarget = shared ? parseCloudWorkspaceKey(workspace.path) : null;
+  const reader = shared?.sharing?.readOnly === true;
+  const canArchive = !shared || shared.capabilities.canManage;
+  const toggleShared = (field: "following" | "pinned", value: boolean, failure: string) => {
+    if (sharedTarget) void setCloudWorkspaceSharingFlag(sharedTarget, field, value).catch(() => toast.error(failure, { description: "Try again." }));
+  };
   const setStatus = (status: WorkspaceStatus) => {
     if (status === workspace.status) return;
     void workspaceSetStatus({ workspaceId: workspace.id, status })
@@ -138,7 +149,7 @@ export function WorkspaceContextMenu({
         {guardedTrigger}
       </ContextMenuTrigger>
       <ContextMenuContent>
-        {!folderWorkspace && <ContextMenuSub>
+        {!folderWorkspace && !reader && <ContextMenuSub>
           <ContextMenuSubTrigger>
             <StatusIcon status={workspace.status} className="size-3.5" />
             <span>Set status</span>
@@ -172,7 +183,24 @@ export function WorkspaceContextMenu({
           </ContextMenuItem>
         )}
 
-        {!folderWorkspace && onRestart && (
+        {shared?.sharing && (
+          <>
+            {shared.sharing.viewerRole !== "creator" && (
+              <ContextMenuItem onSelect={() => toggleShared("following", !shared.sharing!.following,
+                shared.sharing!.following ? "Couldn't unfollow workspace" : "Couldn't follow workspace")}>
+                {shared.sharing.following ? <BellOff /> : <BellRing />}
+                <span>{shared.sharing.following ? "Unfollow" : "Follow"}</span>
+              </ContextMenuItem>
+            )}
+            <ContextMenuItem onSelect={() => toggleShared("pinned", !shared.sharing!.pinned,
+              shared.sharing!.pinned ? "Couldn't unpin workspace" : "Couldn't pin workspace")}>
+              {shared.sharing.pinned ? <PinOff /> : <Pin />}
+              <span>{shared.sharing.pinned ? "Unpin" : "Pin"}</span>
+            </ContextMenuItem>
+          </>
+        )}
+
+        {!folderWorkspace && !reader && onRestart && (
           <>
             <ContextMenuSeparator />
             <Tooltip label={restartDisabledReason}>
@@ -186,7 +214,7 @@ export function WorkspaceContextMenu({
           </>
         )}
 
-        {!folderWorkspace && onArchive && (
+        {!folderWorkspace && canArchive && onArchive && (
           <>
             <ContextMenuSeparator />
             <ContextMenuItem onSelect={onArchive} disabled={archiveInert}>

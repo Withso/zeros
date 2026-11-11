@@ -56,6 +56,9 @@ import {
 import { filterRowsForOrganization } from "../features/team/organization-capabilities";
 import { OrganizationSwitcher } from "../features/team/organization-switcher";
 import { getActiveOrganizationIdSnapshot, getTeamStoreState, useActiveOrganization } from "../features/team/team-store";
+import { useMyUserId, useSharingOrganization } from "../platform/team-sharing-state";
+import { useSharingSections } from "../state/cloud-workspace-creators";
+import { SidebarTeamSection } from "./sidebar-team-section";
 import { CONTROL_PLANE_URL } from "../features/team/control-plane";
 import { useArchiveWorkspace } from "../state/archive-actions";
 import { draftChatIdsByWorkspace } from "../state/composer-draft-presence";
@@ -133,7 +136,9 @@ import {
   SidebarRepositoryHeader,
 } from "./sidebar-repository-header";
 import {
+  buildSidebarSharingSections,
   buildSidebarWorkspaceEntries,
+  type SidebarWorkspaceEntry,
   sidebarItemSelectionKey,
   sidebarScrollTopToReveal,
   sidebarWorkspaceItems,
@@ -355,7 +360,18 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
     isLocalMainWorkspace(activeResolution.workspace)
       ? activeResolution.workspace
       : null;
-  const realWorkspaces = useLiveVisible(accessibleWorkspaces);
+  // Team sharing: the sidebar lists Pinned, the viewer's own and Following;
+  // other teammates' workspaces stay on Home (and keep no sidebar effects).
+  const sharingOrganizationId =
+    activeOrganization && !activeOrganization.isPersonal ? activeOrganization.id : null;
+  const sharing = useSharingOrganization(sharingOrganizationId);
+  const me = useMyUserId();
+  const sectionOf = useSharingSections(me);
+  const liveVisibleWorkspaces = useLiveVisible(accessibleWorkspaces);
+  const realWorkspaces = useMemo(
+    () => sharing ? liveVisibleWorkspaces.filter(workspace => sectionOf(workspace) !== null) : liveVisibleWorkspaces,
+    [liveVisibleWorkspaces, sectionOf, sharing],
+  );
   const activeAtByWorkspaceId = useSidebarWorkspaceActivity(filterOwner, realWorkspaces, chats, !hidden);
   useWorkspaceRunActivitySync(realWorkspaces);
 
@@ -403,19 +419,21 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
     [chats, realWorkspaces],
   );
 
-  const entries = useMemo(
-    () =>
-      buildSidebarWorkspaceEntries({
-        filter: listFilter,
-        sort: preferences.sort,
-        repositoryIds,
-        activity: { activeAtByWorkspaceId },
-        projects,
-        workspaces: realWorkspaces,
-        pending: dedupedPendingCreates,
-      }),
-    [dedupedPendingCreates, listFilter, preferences.sort, repositoryIds, activeAtByWorkspaceId, projects, realWorkspaces],
-  );
+  const sections = useMemo(() => {
+    const args = {
+      filter: listFilter,
+      sort: preferences.sort,
+      repositoryIds,
+      activity: { activeAtByWorkspaceId },
+      projects,
+      workspaces: realWorkspaces,
+      pending: dedupedPendingCreates,
+    };
+    return sharing
+      ? buildSidebarSharingSections({ ...args, sectionOf })
+      : [{ id: null, label: "", entries: buildSidebarWorkspaceEntries(args) }];
+  }, [dedupedPendingCreates, listFilter, preferences.sort, repositoryIds, activeAtByWorkspaceId, projects, realWorkspaces, sharing, sectionOf]);
+  const entries = useMemo(() => sections.flatMap(section => section.entries), [sections]);
   const listedItems = useMemo(() => sidebarWorkspaceItems(entries), [entries]);
   const navigableWorkspaces = useMemo(
     () => listedItems.flatMap(item => item.kind === "workspace" ? [item.workspace] : []),
@@ -652,6 +670,99 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
   );
   const displayName = session?.user.name ?? null;
 
+  const renderEntry = (entry: SidebarWorkspaceEntry, section: string | null) => {
+    if (entry.kind === "row") {
+      return renderItem(entry.item, false);
+    }
+    if (entry.kind === "status") {
+      const collapsed = preferences.collapsedStatuses.includes(entry.status.value);
+      const groupId = `sidebar-${section ? `${section}-` : ""}status-${entry.status.value}`;
+      return (
+        <React.Fragment key={entry.key}>
+          <Button type="button" variant="ghost"
+            className={cn(SIDEBAR_ENTRY_CLS, "group/status font-medium")}
+            data-sidebar-status={entry.status.value}
+            aria-expanded={!collapsed} aria-controls={groupId}
+            onClick={() => setSidebarStatusCollapsed(entry.status.value, !collapsed)}>
+            <span className="relative inline-flex size-4 shrink-0 items-center justify-center" aria-hidden="true">
+              <StatusIcon status={entry.status.value} className="size-3.5 group-hover/status:invisible group-focus-visible/status:invisible" />
+              <span className="absolute inset-0 hidden items-center justify-center group-hover/status:flex group-focus-visible/status:flex">
+                {collapsed ? <ChevronRight strokeWidth={1.5} /> : <ChevronDown strokeWidth={1.5} />}
+              </span>
+            </span>
+            <span className="min-w-0 truncate">{entry.status.label}</span>
+            <span className="text-muted-fg ml-auto text-3xxs tabular-nums">{entry.items.length}</span>
+          </Button>
+          <div id={groupId} role="group" aria-label={`${entry.status.label} workspaces`}
+            className="flex flex-col gap-0.5 empty:hidden">
+            {visibleRepositoryItems(entry.items, collapsed, activeSelectionKey).map(item => renderItem(item, true))}
+          </div>
+        </React.Fragment>
+      );
+    }
+    if (entry.kind === "folder") {
+      const selected =
+        effectiveActivePage === "repo" &&
+        activeRepoId === entry.project.id;
+      const prefetch = () =>
+        prefetchSettingsForRepo(entry.project.repoRoot);
+      return (
+        <Button
+          key={entry.key}
+          type="button"
+          variant="ghost"
+          className={SIDEBAR_ENTRY_CLS}
+          data-sidebar-folder={entry.project.id}
+          data-state={selected ? "active" : "inactive"}
+          aria-current={selected ? "page" : undefined}
+          onPointerEnter={prefetch}
+          onFocus={prefetch}
+          onClick={() =>
+            dispatch({
+              type: "OPEN_REPO_PAGE",
+              projectId: entry.project.id,
+            })
+          }
+        >
+          {/* The 16px box puts the name on the rows' 40px column. */}
+          <span className={cn("inline-flex size-4 shrink-0 items-center justify-center", selected ? "text-fg2" : "text-fg3")} aria-hidden="true">
+            <Folder strokeWidth={1.5} />
+          </span>
+          <span className="truncate">{entry.project.name}</span>
+        </Button>
+      );
+    }
+    const groupId = `sidebar-${section ? `${section}-` : ""}repository-${entry.project.id}`;
+    const collapsed = collapsedRepositories.has(entry.project.id);
+    return (
+      <React.Fragment key={entry.key}>
+        <SidebarRepositoryHeader
+          project={entry.project}
+          collapsed={collapsed}
+          active={
+            effectiveActivePage === "repo" &&
+            activeRepoId === entry.project.id
+          }
+          opening={openingRoot === entry.project.repoRoot}
+          groupId={groupId}
+          onToggle={handleToggleRepository}
+        />
+        <div
+          id={groupId}
+          role="group"
+          aria-label={`${entry.project.name} workspaces`}
+          className="flex flex-col gap-0.5 empty:hidden"
+        >
+          {visibleRepositoryItems(
+            entry.items,
+            collapsed,
+            activeSelectionKey,
+          ).map((item) => renderItem(item, true))}
+        </div>
+      </React.Fragment>
+    );
+  };
+
   const renderItem = (item: SidebarWorkspaceItem, grouped: boolean) => {
     const selectionKey = sidebarItemSelectionKey(item);
     const active = activeSelectionKey === selectionKey;
@@ -852,98 +963,21 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
               (no workspaces, or collapsed without the selection) drops out
               of the flex flow so it cannot double that gap. */}
           <div className="flex flex-col gap-0.5">
-            {entries.map((entry) => {
-              if (entry.kind === "row") {
-                return renderItem(entry.item, false);
-              }
-              if (entry.kind === "status") {
-                const collapsed = preferences.collapsedStatuses.includes(entry.status.value);
-                const groupId = `sidebar-status-${entry.status.value}`;
-                return (
-                  <React.Fragment key={entry.key}>
-                    <Button type="button" variant="ghost"
-                      className={cn(SIDEBAR_ENTRY_CLS, "group/status font-medium")}
-                      data-sidebar-status={entry.status.value}
-                      aria-expanded={!collapsed} aria-controls={groupId}
-                      onClick={() => setSidebarStatusCollapsed(entry.status.value, !collapsed)}>
-                      <span className="relative inline-flex size-4 shrink-0 items-center justify-center" aria-hidden="true">
-                        <StatusIcon status={entry.status.value} className="size-3.5 group-hover/status:invisible group-focus-visible/status:invisible" />
-                        <span className="absolute inset-0 hidden items-center justify-center group-hover/status:flex group-focus-visible/status:flex">
-                          {collapsed ? <ChevronRight strokeWidth={1.5} /> : <ChevronDown strokeWidth={1.5} />}
-                        </span>
-                      </span>
-                      <span className="min-w-0 truncate">{entry.status.label}</span>
-                      <span className="text-muted-fg ml-auto text-3xxs tabular-nums">{entry.items.length}</span>
-                    </Button>
-                    <div id={groupId} role="group" aria-label={`${entry.status.label} workspaces`}
-                      className="flex flex-col gap-0.5 empty:hidden">
-                      {visibleRepositoryItems(entry.items, collapsed, activeSelectionKey).map(item => renderItem(item, true))}
-                    </div>
-                  </React.Fragment>
-                );
-              }
-              if (entry.kind === "folder") {
-                const selected =
-                  effectiveActivePage === "repo" &&
-                  activeRepoId === entry.project.id;
-                const prefetch = () =>
-                  prefetchSettingsForRepo(entry.project.repoRoot);
-                return (
-                  <Button
-                    key={entry.key}
-                    type="button"
-                    variant="ghost"
-                    className={SIDEBAR_ENTRY_CLS}
-                    data-sidebar-folder={entry.project.id}
-                    data-state={selected ? "active" : "inactive"}
-                    aria-current={selected ? "page" : undefined}
-                    onPointerEnter={prefetch}
-                    onFocus={prefetch}
-                    onClick={() =>
-                      dispatch({
-                        type: "OPEN_REPO_PAGE",
-                        projectId: entry.project.id,
-                      })
-                    }
-                  >
-                    {/* The 16px box puts the name on the rows' 40px column. */}
-                    <span className={cn("inline-flex size-4 shrink-0 items-center justify-center", selected ? "text-fg2" : "text-fg3")} aria-hidden="true">
-                      <Folder strokeWidth={1.5} />
-                    </span>
-                    <span className="truncate">{entry.project.name}</span>
-                  </Button>
-                );
-              }
-              const groupId = `sidebar-repository-${entry.project.id}`;
-              const collapsed = collapsedRepositories.has(entry.project.id);
-              return (
-                <React.Fragment key={entry.key}>
-                  <SidebarRepositoryHeader
-                    project={entry.project}
-                    collapsed={collapsed}
-                    active={
-                      effectiveActivePage === "repo" &&
-                      activeRepoId === entry.project.id
-                    }
-                    opening={openingRoot === entry.project.repoRoot}
-                    groupId={groupId}
-                    onToggle={handleToggleRepository}
-                  />
+            {sections.map((section) =>
+              section.id === null ? (
+                section.entries.map((entry) => renderEntry(entry, null))
+              ) : (
+                <React.Fragment key={section.id}>
                   <div
-                    id={groupId}
-                    role="group"
-                    aria-label={`${entry.project.name} workspaces`}
-                    className="flex flex-col gap-0.5 empty:hidden"
+                    className={cn(SECTION_LABEL_CLS, "px-2 pt-2 pb-1 first:pt-0")}
+                    data-sidebar-section={section.id}
                   >
-                    {visibleRepositoryItems(
-                      entry.items,
-                      collapsed,
-                      activeSelectionKey,
-                    ).map((item) => renderItem(item, true))}
+                    {section.label}
                   </div>
+                  {section.entries.map((entry) => renderEntry(entry, section.id))}
                 </React.Fragment>
-              );
-            })}
+              ),
+            )}
             {pendingOnly && (
               <div
                 className="text-fg2 flex h-8 min-w-0 items-center gap-2 rounded-md px-2 text-xs"
@@ -966,6 +1000,17 @@ export function AppSidebar({ hidden = false }: { hidden?: boolean }) {
               </div>
             )}
           </div>
+          {sharing && sharingOrganizationId && (
+            <SidebarTeamSection
+              organizationId={sharingOrganizationId}
+              me={me}
+              active={!hidden}
+              homeActive={effectiveActivePage === "dashboard"}
+              onHome={() => dispatch({ type: "SET_ACTIVE_PAGE", page: "dashboard" })}
+              entryClassName={SIDEBAR_ENTRY_CLS}
+              labelClassName={SECTION_LABEL_CLS}
+            />
+          )}
         </div>
 
         {/* Profile row — identity + the Settings entry point (⌘, works too).

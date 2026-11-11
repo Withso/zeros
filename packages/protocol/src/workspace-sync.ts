@@ -4,6 +4,8 @@ import { z } from "zod";
  * a folder on a Mac. Worker ops on the app's cloud bridge; cloud always wins. */
 export const SYNC_FEATURE = "sync-v1";
 export const SYNC_CAPABILITY = "workspace-sync-v1";
+/** On the worker's ENGINE_READY to a sync socket: `sync.readBatch` is served. An older worker never says it, and the Mac reads files one by one. */
+export const SYNC_BATCH_CAPABILITY = "sync-batch-v1";
 export const SYNC_LIMITS = {
   fileBytes: 100 * 1024 * 1024,
   totalBytes: 5 * 1024 * 1024 * 1024,
@@ -18,13 +20,24 @@ export const SYNC_LIMITS = {
   /** A sync socket is re-authorized at least this often, or the worker closes it. */
   renewMs: 10 * 60_000,
   bundleLifetimeMs: 10 * 60_000,
+  /** sync.readBatch: files up to this size go in batches; a reply carries at most this many raw bytes (base64 stays well under a 16 MiB frame). */
+  batchFileBytes: 1024 * 1024,
+  batchBytes: 4 * 1024 * 1024,
+  batchFiles: 512,
+  /** Requests a Mac keeps in flight on its sync socket. */
+  inFlight: 6,
+  /** A transfer keeps the VM awake this long after its last read, for at most this long in one continuous run. */
+  transferActivityMs: 60_000,
+  transferActivityCapMs: 30 * 60_000,
 } as const;
 
 /** The Mac's direct socket through Boat's protected route (not the control-plane relay). */
 export const SYNC_BRIDGE_PATH = "/v2/worker/sync";
 export const SYNC_BRIDGE_PROTOCOL = "zeros.worker.sync.v1";
 /** The worker answers a passive sync client only these. */
-export const SYNC_PASSIVE_OPS = ["sync.snapshot", "sync.read", "sync.bootstrap", "sync.bundleRead"] as const;
+export const SYNC_PASSIVE_OPS = ["sync.snapshot", "sync.read", "sync.readBatch", "sync.bootstrap", "sync.bundleRead"] as const;
+/** The passive ops that move bytes: a recent one keeps the VM awake (CONTRACT.md 12, 2026-11-11 amendment). */
+export const SYNC_TRANSFER_OPS: ReadonlySet<string> = new Set(["sync.read", "sync.readBatch", "sync.bundleRead"]);
 
 /** `POST /v1/cloud-v2/workspaces/:id/sync/grant` (D+H) reply: the route base, its port-auth value and a
  * single-use Ed25519 grant (claims iss, aud, boot, iat, exp <= 60 s, jti, scope "sync", sub, dev). */
@@ -127,6 +140,21 @@ export const SyncReadRequestSchema = z.object({
 export type SyncReadRequest = z.infer<typeof SyncReadRequestSchema>;
 export const SyncReadReplySchema = z.object({ bytes: z.number().int().min(0).max(SYNC_LIMITS.chunkBytes), base64: z.string() }).strict();
 
+/** Several whole small files in one round trip (sync-batch-v1), each bound to the inventory's sha256. */
+export const SyncReadBatchRequestSchema = z.object({
+  files: z.array(z.object({ path, sha256 }).strict()).min(1).max(SYNC_LIMITS.batchFiles),
+}).strict();
+export type SyncReadBatchRequest = z.infer<typeof SyncReadBatchRequestSchema>;
+/** Answers a prefix of the request, in order, within batchBytes; the Mac asks again for the rest.
+ * A file that no longer matches its sha256 (or is not a small regular file) says `changed`. */
+export const SyncReadBatchReplySchema = z.object({
+  entries: z.array(z.union([
+    z.object({ path, bytes: z.number().int().min(0).max(SYNC_LIMITS.batchFileBytes), base64: z.string() }).strict(),
+    z.object({ path, changed: z.literal(true) }).strict(),
+  ])).max(SYNC_LIMITS.batchFiles),
+}).strict();
+export type SyncReadBatchReply = z.infer<typeof SyncReadBatchReplySchema>;
+
 const HOST = "[A-Za-z0-9][A-Za-z0-9.-]*", PORT = "(?::[0-9]{1,5})?", REPO_PATH = "[A-Za-z0-9._~][A-Za-z0-9._~/-]*";
 const SAFE_REMOTE = [
   new RegExp(`^https://${HOST}${PORT}/${REPO_PATH}$`),
@@ -153,6 +181,21 @@ export type SyncBootstrapReply = z.infer<typeof SyncBootstrapReplySchema>;
 export const SyncBundleReadRequestSchema = z.object({
   id: z.string().uuid(), offset: z.number().int().min(0).max(SYNC_LIMITS.totalBytes), length: z.number().int().min(1).max(SYNC_LIMITS.chunkBytes),
 }).strict();
+
+/** 12.z: GET /v1/cloud-v2/devices/:deviceId/connections (D+H for this device, X-Zeros-Sync-Wanted: 1): this
+ * registration's live connections with the person's wanted state, 200 per keyset page. Read leniently. */
+export const DeviceSyncConnectionSchema = z.object({
+  workspaceId: z.string().uuid(),
+  repository: z.string().min(3).max(201).regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/),
+  number: z.number().int().positive().nullable(),
+  name: z.string().min(1).max(120),
+  syncWanted: z.boolean(),
+  syncing: z.boolean().optional(),
+}).passthrough();
+export const DeviceSyncConnectionsReplySchema = z.object({
+  connections: z.array(DeviceSyncConnectionSchema).max(200),
+  nextCursor: z.string().uuid().nullable(),
+}).passthrough();
 
 /** The worker's live hint to passive clients after a debounced batch. */
 export const SYNC_HINT_KIND = "workspaceSync";

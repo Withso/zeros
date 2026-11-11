@@ -194,6 +194,32 @@ database("real desktop and worker local-command clients against the router and P
     expect(calls.find(call => call.method === "DELETE")?.status).toBe(204);
   });
 
+  it("joins the Mac's sync switch, device discovery and channel hint with the real server", async () => {
+    const target = (await control.register(randomUUID(), { requestId: randomUUID(), name: "Laptop", capabilities: deviceCapabilities })).device;
+    expect((await control.connect(target, f.workspaceId)).mac).toMatchObject({ syncing: false, syncWanted: false });
+    const stream = await channel(target);
+    const changed = await control.setSyncWanted(mac, f.workspaceId, target.deviceId, true);
+    expect(changed.mac).toMatchObject({ deviceId: target.deviceId, syncWanted: true, syncing: false });
+    await stream.event("presence");
+    const found = await control.syncConnections(target);
+    const read = calls.findLast(call => call.path === `/v1/cloud-v2/devices/${target.deviceId}/connections`)!;
+    expect(found).toEqual(read.reply);
+    expect(found).toMatchObject({ connections: [{ workspaceId: f.workspaceId, repository: "example/project",
+      name: "Fixture", syncWanted: true, syncing: false }], nextCursor: null });
+    expect((await control.syncConnections(target, f.workspaceId)).connections).toEqual([]);
+    expect((await control.setSyncing(target, f.workspaceId, true)).mac).toMatchObject({ syncWanted: true, syncing: true });
+    expect((await control.setSyncWanted(mac, f.workspaceId, target.deviceId, false)).mac).toMatchObject({ syncWanted: false, syncing: true });
+    for (const call of calls.filter(call => call.path.endsWith("/sync") || call.path.includes("/connections"))) {
+      expect(call.status).toBe(200);
+      expect(call.headers.get("x-zeros-sync")).toBe("1"); expect(call.headers.get("x-zeros-sync-wanted")).toBe("1");
+    }
+    expect(calls.filter(call => call.path.endsWith("/sync")).map(call => call.body))
+      .toEqual([{ wanted: true }, { syncing: true, wanted: true }, { wanted: false }]);
+    expect(calls.findLast(call => call.path === `/v1/cloud-v2/devices/${target.deviceId}/events`)!.headers.get("x-zeros-sync-wanted")).toBe("1");
+    expect((await control.disconnect(mac, f.workspaceId, target.deviceId)).mac.syncWanted).toBe(false);
+    expect(await control.syncConnections(target)).toEqual({ connections: [], nextCursor: null });
+  });
+
   it("delivers the v1.3 reason through the production worker and desktop clients", async () => {
     expect(mac.capabilities).toContain("local-commands-reason-v1");
     expect(calls.find(call => call.path === "/v2/cloud/worker/hello")?.reply.config.localCommandReason).toBe(1);

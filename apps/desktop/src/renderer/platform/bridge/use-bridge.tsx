@@ -61,6 +61,7 @@ export function BridgeProvider({ children }: { children: React.ReactNode }) {
         workspaces: () => getCloudWorkspaceRows() as unknown as Record<string, unknown>[],
         workspacesConfirmed: cloudWorkspaceCatalogConfirmed,
         canAccess: target => canReadCloudWorkspace(cloudWorkspaceDocument(target)),
+        readOnly: target => cloudWorkspaceDocument(target)?.sharing?.readOnly === true,
         liveWork: target => getActiveWorkspaceFolder() === cloudWorkspaceKey(target) ||
           cloudWorkspaceDocument(target)?.status === "busy" || !!cloudWorkspaceLifecycleTask(target, "wake"),
         canReuseForWork: target => {

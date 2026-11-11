@@ -1099,3 +1099,24 @@ describe("cloud v2 history ownership", () => {
     } finally { client.dispose(); }
   });
 });
+
+describe("Team sharing readers", () => {
+  it("never opens a teammate's workspace for a reader: history comes from the mirror, everything else refuses without a connection", async () => {
+    const peer = fakePeer(a), open = vi.fn(async () => peer.peer);
+    const readHistory = vi.fn(async (_target: CloudWorkspaceTarget, op: string) => op === "chats.list"
+      ? { chats: [], chatDeletions: [], revision: 1 } : { messages: [] });
+    let reader = true;
+    const client = new WorkspaceRuntimeClient({ open, readHistory, historyRoot: () => MIRROR_ROOT, workspaces: () => [], readOnly: () => reader });
+    try {
+      expect(await client.request({ type: "WORKSPACE_REQUEST", op: "messages.window", params: { chatId: cloudScopedId(a, "chat"), limit: 100 } } as never))
+        .toMatchObject({ result: { messages: [] } });
+      await expect(client.warmWorkspace(a)).rejects.toThrow(/read only/i);
+      await expect(client.request({ type: "WORKSPACE_REQUEST", op: "git.status", params: { workspaceId: cloudScopedId(a, "local-main") } } as never)).rejects.toThrow(/read only/i);
+      expect(open).not.toHaveBeenCalled();
+      // The Creator (or a transfer) can connect as before.
+      reader = false;
+      await client.warmWorkspace(a);
+      expect(open).toHaveBeenCalledOnce();
+    } finally { client.dispose(); }
+  });
+});

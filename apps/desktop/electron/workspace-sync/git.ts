@@ -24,7 +24,16 @@ export const runGit: GitRun = (args, options = {}) => new Promise((resolve, reje
   (error, stdout) => error ? reject(error) : resolve(String(stdout)));
 });
 
-const STALE_LOCK_MS = 10 * 60_000;
+const STALE_LOCK_MS = 10 * 60_000, BUNDLE_IN_FLIGHT = 4;
+
+async function hashPath(path: string): Promise<string> {
+  const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const hash = createHash("sha256"), buffer = Buffer.allocUnsafe(1024 * 1024);
+    for (;;) { const { bytesRead } = await file.read(buffer, 0, buffer.length, null); if (!bytesRead) break; hash.update(buffer.subarray(0, bytesRead)); }
+    return hash.digest("hex");
+  } finally { await file.close(); }
+}
 
 /** The sync root's `.git`, written only by these commands. History comes from
  * the worker's bundles; the index always equals the cloud HEAD, so `git status`
@@ -106,20 +115,28 @@ export class GitMirror {
     }
   }
 
+  /** The bundle in SYNC_LIMITS.chunkBytes reads, BUNDLE_IN_FLIGHT at a time, each written at its offset; then the whole file is hashed. */
   private async download(source: GitSource, bundle: NonNullable<SyncBootstrapReply["bundle"]>): Promise<string> {
     const path = join(this.meta, "tmp", `${bundle.id}.bundle`);
     const file = await open(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
-    const hash = createHash("sha256");
-    try {
-      for (let offset = 0; offset < bundle.size; ) {
-        const chunk = await source.bundleRead(bundle.id, offset, Math.min(SYNC_LIMITS.chunkBytes, bundle.size - offset));
-        const bytes = Buffer.from(chunk.base64, "base64");
-        if (!bytes.length || bytes.length !== chunk.bytes) throw new SyncChangedError();
-        hash.update(bytes); await file.write(bytes, 0, bytes.length, offset); offset += bytes.length;
+    const offsets: number[] = [];
+    for (let offset = 0; offset < bundle.size; offset += SYNC_LIMITS.chunkBytes) offsets.push(offset);
+    let failure: unknown;
+    const worker = async () => {
+      for (let offset = offsets.shift(); offset !== undefined && failure === undefined; offset = offsets.shift()) {
+        try {
+          const length = Math.min(SYNC_LIMITS.chunkBytes, bundle.size - offset);
+          const chunk = await source.bundleRead(bundle.id, offset, length);
+          const bytes = Buffer.from(chunk.base64, "base64");
+          if (bytes.length !== length || bytes.length !== chunk.bytes) throw new SyncChangedError();
+          await file.write(bytes, 0, bytes.length, offset);
+        } catch (error) { failure ??= error; }
       }
-    } catch (error) { await file.close(); await rm(path, { force: true }); throw error; }
-    await file.close();
-    if (hash.digest("hex") !== bundle.sha256) { await rm(path, { force: true }); throw new SyncChangedError(); }
+    };
+    try { await Promise.all(Array.from({ length: BUNDLE_IN_FLIGHT }, worker)); }
+    finally { await file.close(); }
+    if (failure !== undefined) { await rm(path, { force: true }); throw failure; }
+    if (await hashPath(path) !== bundle.sha256) { await rm(path, { force: true }); throw new SyncChangedError(); }
     return path;
   }
 }

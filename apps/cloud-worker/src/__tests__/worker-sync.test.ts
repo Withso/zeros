@@ -137,3 +137,51 @@ it("strips credentials from the origin URL and refuses unknown forms", async () 
   expect(credentialFree("git@github.com:o/r.git")).toBe("git@github.com:o/r.git");
   for (const bad of ["", "file:///etc", "ext::sh -c touch", "http://github.com/o/r", "-uhttps://x"]) expect(credentialFree(bad)).toBeNull();
 });
+
+it("advertises sync-batch-v1 and reads several small files in one round trip, reporting a changed file per entry so the rest still land", async () => {
+  const f = await fixture();
+  await writeFile(join(f.root, "a.txt"), "alpha\n"); await writeFile(join(f.root, "b.txt"), "beta\n"); await writeFile(join(f.root, "empty.txt"), "");
+  await f.relay.receive({ t: "open", clientId: CLIENT_A, passive: true });
+  const ready = f.relay.bridge().find(entry => entry.clientId === CLIENT_A && entry.frame.type === "ENGINE_READY");
+  expect((ready!.frame as { capabilities?: string[] }).capabilities).toContain("sync-batch-v1");
+  await f.snapshot(CLIENT_A);
+  const reply = await f.request(CLIENT_A, "sync.readBatch", { files: [
+    { path: "a.txt", sha256: sha("alpha\n") }, { path: "b.txt", sha256: sha("stale\n") }, { path: "empty.txt", sha256: sha("") }, { path: "readme.txt", sha256: sha("initial\n") }] });
+  expect(reply).toMatchObject({ type: "WORKSPACE_RESPONSE", result: { entries: [
+    { path: "a.txt", bytes: 6, base64: Buffer.from("alpha\n").toString("base64") },
+    { path: "b.txt", changed: true },
+    { path: "empty.txt", bytes: 0, base64: "" },
+    { path: "readme.txt", bytes: 8, base64: Buffer.from("initial\n").toString("base64") },
+  ] } });
+  for (const files of [[], [{ path: "../x", sha256: sha("x") }]]) expect(await f.request(CLIENT_A, "sync.readBatch", { files })).toMatchObject({ type: "WORKSPACE_ERROR", code: "VALIDATION_FAILED" });
+});
+
+it("keeps the VM awake while a sync transfers (60 s after its last read), never for an in-sync mirror, and at most 30 continuous minutes", async () => {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  try {
+    const f = await fixture();
+    const busy = () => (f.worker as unknown as { busy: boolean }).busy;
+    await f.relay.receive({ t: "open", clientId: CLIENT_A, passive: true });
+    vi.advanceTimersByTime(RECENT + 1);   // past the configuration's own recent activity
+    // An in-sync mirror: snapshots and hints only.
+    await f.snapshot(CLIENT_A);
+    expect(busy()).toBe(false);
+    // A transfer: busy for 60 s after the last read.
+    await f.request(CLIENT_A, "sync.read", { path: "readme.txt", sha256: sha("initial\n"), offset: 0, length: 4 });
+    expect(busy()).toBe(true);
+    vi.advanceTimersByTime(59_000); expect(busy()).toBe(true);
+    vi.advanceTimersByTime(2_000); expect(busy()).toBe(false);
+    // Continuous reads count for at most 30 minutes.
+    for (let minute = 0; minute <= 31; minute++) {
+      await f.request(CLIENT_A, "sync.readBatch", { files: [{ path: "readme.txt", sha256: sha("initial\n") }] });
+      if (minute < 30) expect(busy(), `minute ${minute}`).toBe(true);
+      vi.advanceTimersByTime(59_000);   // under the 60 s window: one continuous run
+    }
+    await f.request(CLIENT_A, "sync.read", { path: "readme.txt", sha256: sha("initial\n"), offset: 0, length: 4 });
+    expect(busy()).toBe(false);
+    // Closing the socket ends its session.
+    await f.relay.receive({ t: "close", clientId: CLIENT_A });
+    expect(busy()).toBe(false);
+  } finally { vi.useRealTimers(); }
+});
+const RECENT = 60_000;

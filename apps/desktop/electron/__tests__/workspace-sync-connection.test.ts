@@ -16,7 +16,7 @@ function socket() {
 }
 
 describe("the direct sync socket", () => {
-  it("dials the worker's sync path with the port-auth cookie and grant, renews with fresh grants, and keeps one request in flight", async () => {
+  it("dials the worker's sync path with the port-auth cookie and grant, and renews with fresh grants", async () => {
     vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
     try {
       let grants = 0;
@@ -25,10 +25,9 @@ describe("the direct sync socket", () => {
       expect(dial).toHaveBeenCalledWith("wss://route.example.test/v2/worker/sync", "zeros.worker.sync.v1",
         { Cookie: "_port_auth=synthetic-port-auth-value", "X-Zeros-Worker-Auth": "v1.payload1.signature" });
       const first = connection.snapshot({}), second = connection.read({ path: "a.txt", sha256: "a".repeat(64), offset: 0, length: 1 });
-      await vi.waitFor(() => expect(s.sent).toHaveLength(1));   // the read waits for the snapshot
+      await vi.waitFor(() => expect(s.sent).toHaveLength(2));
       s.ws.emitMessage({ type: "WORKSPACE_RESPONSE", requestId: s.sent[0]!.id, result: { epoch: EPOCH, seq: 0, full: [] } });
       expect(await first).toEqual({ epoch: EPOCH, seq: 0, full: [] });
-      await vi.waitFor(() => expect(s.sent).toHaveLength(2));
       s.ws.emitMessage({ type: "WORKSPACE_ERROR", requestId: s.sent[1]!.id, code: "SYNC_CHANGED" });
       await expect(second).rejects.toBeInstanceOf(SyncChangedError);
       await vi.advanceTimersByTimeAsync(1000);
@@ -54,5 +53,29 @@ describe("the direct sync socket", () => {
     expect(closed).toBe(1);
     await expect(DirectSyncConnection.connect({ grant: async () => { throw new SyncConnectError("paused"); }, dial: () => s.ws }, { hint: () => {}, closed: () => {} }))
       .rejects.toMatchObject({ kind: "paused" });
+  });
+
+  it("keeps up to six requests in flight (a seventh waits for a reply), and batches only once the worker says sync-batch-v1", async () => {
+    const s = socket();
+    const connection = await DirectSyncConnection.connect({ grant: async () => grant(1), dial: () => s.ws }, { hint: () => {}, closed: () => {} });
+    expect(connection.batching()).toBe(false);
+    s.ws.emitMessage({ type: "ENGINE_READY", capabilities: ["workspace-sync-v1"] });
+    expect(connection.batching()).toBe(false);
+    s.ws.emitMessage({ type: "ENGINE_READY", capabilities: ["workspace-sync-v1", "sync-batch-v1"] });
+    expect(connection.batching()).toBe(true);
+    const reads = Array.from({ length: 7 }, (_, index) => connection.read({ path: `f${index}.txt`, sha256: "a".repeat(64), offset: 0, length: 1 }));
+    await vi.waitFor(() => expect(s.sent).toHaveLength(6));
+    await new Promise(resolve => setTimeout(resolve, 5));
+    expect(s.sent).toHaveLength(6);
+    s.ws.emitMessage({ type: "WORKSPACE_RESPONSE", requestId: s.sent[0]!.id, result: { bytes: 1, base64: "YQ==" } });
+    await vi.waitFor(() => expect(s.sent).toHaveLength(7));
+    const batch = connection.readBatch({ files: [{ path: "a.txt", sha256: "a".repeat(64) }] });
+    for (const frame of s.sent.slice(1)) s.ws.emitMessage({ type: "WORKSPACE_RESPONSE", requestId: frame.id, result: { bytes: 1, base64: "YQ==" } });
+    await Promise.all(reads);
+    await vi.waitFor(() => expect(s.sent).toHaveLength(8));
+    expect(s.sent[7]).toMatchObject({ op: "sync.readBatch", params: { files: [{ path: "a.txt" }] } });
+    s.ws.emitMessage({ type: "WORKSPACE_RESPONSE", requestId: s.sent[7]!.id, result: { entries: [{ path: "a.txt", changed: true }] } });
+    expect(await batch).toEqual({ entries: [{ path: "a.txt", changed: true }] });
+    connection.close();
   });
 });

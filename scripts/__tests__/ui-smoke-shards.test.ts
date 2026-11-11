@@ -99,6 +99,7 @@ const originalOrder = [
   "scroll-area-drag",
   "cloud-chat-edits",
   "local-commands",
+  "notify-user",
   "cloud-workspace-details",
   "subscription",
 ];

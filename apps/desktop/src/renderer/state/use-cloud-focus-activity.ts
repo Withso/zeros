@@ -29,6 +29,8 @@ export function useCloudFocusActivity(): void {
     let lastPingAt = Number.NEGATIVE_INFINITY;
     const ping = () => {
       const now = Date.now();
+      // Team sharing: a teammate's workspace this account only reads never counts as activity.
+      if (cloudWorkspaceDocument(current)?.sharing?.readOnly) return;
       if (!cloudFocusPingDue({ visible: document.visibilityState === "visible", focused: document.hasFocus(),
         status: cloudWorkspaceDocument(current)?.status, lastPingAt, now })) return;
       lastPingAt = now;

@@ -2,7 +2,8 @@ import { createHash, randomUUID } from "node:crypto";
 import { constants, type Stats } from "node:fs";
 import { chmod, lstat, mkdir, open, readFile, readdir, readlink, realpath, rename, rm, rmdir, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { SYNC_LIMITS, isSyncPath, type SyncEntry, type SyncReadRequest, type SyncSnapshotReply, type SyncSnapshotRequest } from "@zeros/protocol/workspace-sync";
+import { SYNC_LIMITS, isSyncPath, type SyncEntry, type SyncReadBatchReply, type SyncReadBatchRequest, type SyncReadRequest, type SyncSnapshotReply,
+  type SyncSnapshotRequest } from "@zeros/protocol/workspace-sync";
 import { admitEntries, safeParent, type SyncProblem } from "./paths";
 import { SyncChangedError, SyncRootError } from "./engine-errors";
 import { GitMirror, type GitSource, type GitState } from "./git";
@@ -11,7 +12,12 @@ import { GitMirror, type GitSource, type GitState } from "./git";
 export interface SyncSource extends Partial<GitSource> {
   snapshot(request: SyncSnapshotRequest): Promise<SyncSnapshotReply>;
   read(request: SyncReadRequest): Promise<{ bytes: number; base64: string }>;
+  /** sync-batch-v1: whole small files in one round trip, when batching() says the worker serves it. */
+  readBatch?(request: SyncReadBatchRequest): Promise<SyncReadBatchReply>;
+  batching?(): boolean;
 }
+/** Files written at once: each a batch or a chunked file. The socket keeps SYNC_LIMITS.inFlight requests open. */
+const CONCURRENCY = 4;
 export { SyncChangedError, SyncRootError } from "./engine-errors";
 
 interface FileState { sha256: string; size: number; mode: number; symlink?: string; localMtimeMs: number; localSize: number }
@@ -24,6 +30,8 @@ export interface SyncResult {
   stopped?: SyncSnapshotReply["stopped"];
   /** The real clone: in step with the cloud HEAD, Git missing on this Mac, or a failed update (retried next cycle). */
   git?: "ok" | "missing" | "failed";
+  /** For the [workspace-sync] log: counts only, never paths. */
+  stats?: { kind: "full" | "delta"; files: number; bytes: number; deletes: number };
 }
 
 const META = ".zeros-sync", OVERWRITTEN_DAYS = 7, OVERWRITTEN_BYTES = 500 * 1024 * 1024;
@@ -36,6 +44,10 @@ const IGNORED_IN_EMPTY = new Set([".DS_Store", META]);
 export class SyncEngine {
   /** One folder of kept edits per cycle, so one pull's losses sit together. */
   private stamp: string | undefined;
+  /** A file a batch reported changed this cycle: the rest land, then the cycle asks again. */
+  private changedInCycle = false;
+  private committing: Promise<void> = Promise.resolve();
+  private counts = { files: 0, bytes: 0, deletes: 0 };
   private constructor(readonly root: string, private readonly identity: SyncIdentity, private state: SyncState, private readonly deps: SyncEngineDeps) {}
 
   static async open(folder: string, identity: SyncIdentity, deps: Partial<SyncEngineDeps> = {}): Promise<SyncEngine> {
@@ -70,7 +82,7 @@ export class SyncEngine {
   /** One cycle: the snapshot since our position (all pages of a full one), then
    * apply. `retry` means the cloud moved during the cycle; pull again soon. */
   async pull(source: SyncSource, onProgress: (remaining: number) => void = () => {}): Promise<SyncResult> {
-    this.stamp = undefined;
+    this.stamp = undefined; this.changedInCycle = false; this.counts = { files: 0, bytes: 0, deletes: 0 };
     let reply = await source.snapshot(this.state.epoch !== undefined && this.state.seq !== undefined ? { epoch: this.state.epoch, seq: this.state.seq } : {});
     if (reply.stopped) return { state: "stopped", problems: [], skipped: [], stopped: reply.stopped };
     let full: SyncEntry[] | undefined, skipped = reply.skipped ?? [];
@@ -88,13 +100,18 @@ export class SyncEngine {
     }
     const pacer = this.pacer();
     try {
+      // A first sync builds the clone first, so a long first transfer is already a Git folder.
+      const early = head && !this.state.git ? await this.syncGit(source, head) : undefined;
+      if (early === "too_many_bytes") return { state: "stopped", problems: [], skipped, stopped: "too_many_bytes" };
       const problems = full ? await this.applyFull(source, full, pacer, onProgress) : await this.applyChanges(source, reply.changes ?? [], reply.deletes ?? [], pacer, onProgress);
+      const stats = { kind: full ? "full" as const : "delta" as const, ...this.counts };
+      if (this.changedInCycle) { await this.commit(); return { state: "retry", problems: [], skipped, stats }; }
       this.state.epoch = reply.epoch; this.state.seq = reply.seq;
       await this.commit();
       await this.pruneOverwritten();
-      const git = head ? await this.syncGit(source, head) : undefined;
-      if (git === "too_many_bytes") return { state: "stopped", problems, skipped, stopped: "too_many_bytes" };
-      return { state: "in_sync", problems, skipped, ...(git ? { git } : {}) };
+      const git = early ?? (head ? await this.syncGit(source, head) : undefined);
+      if (git === "too_many_bytes") return { state: "stopped", problems, skipped, stopped: "too_many_bytes", stats };
+      return { state: "in_sync", problems, skipped, stats, ...(git ? { git } : {}) };
     } catch (error) {
       await this.commit();
       if (error instanceof SyncChangedError) return { state: "retry", problems: [], skipped };
@@ -141,19 +158,73 @@ export class SyncEngine {
     return problems;
   }
 
+  /** Small files go in batches when the worker serves them; others are read in
+   * chunks. CONCURRENCY groups are in flight; the first error stops new ones. */
   private async writeAll(source: SyncSource, entries: SyncEntry[], pacer: Pacer, problems: SyncProblem[], onProgress: (remaining: number) => void): Promise<void> {
-    let remaining = entries.length, sinceCommit = 0;
-    for (const entry of entries) {
-      onProgress(remaining--);
-      const problem = await this.write(source, entry, pacer);
+    let remaining = entries.length, sinceCommit = 0, failure: unknown;
+    const groups = this.groups(entries, !!source.readBatch && source.batching?.() === true);
+    const finish = async (entry: SyncEntry, problem: SyncProblem["reason"] | undefined) => {
       if (problem) problems.push({ path: entry.path, reason: problem });
+      onProgress(--remaining);
       if (++sinceCommit >= this.deps.commitEvery) { sinceCommit = 0; await this.commit(); }
-    }
+    };
+    const worker = async () => {
+      for (let group = groups.shift(); group && failure === undefined; group = groups.shift()) {
+        try {
+          if (group.batch) {
+            const contents = await this.fetchBatch(source, group.entries);
+            for (const entry of group.entries) {
+              const content = contents.get(entry.path);
+              if (content === "changed") { this.changedInCycle = true; onProgress(--remaining); continue; }
+              // Left out by the reply's byte budget: the next group asks again.
+              if (content === undefined) { groups.unshift({ batch: true, entries: group.entries.filter(item => !contents.has(item.path)) }); break; }
+              await finish(entry, await this.write(source, entry, pacer, content));
+            }
+          } else for (const entry of group.entries) await finish(entry, await this.write(source, entry, pacer));
+        } catch (error) { failure ??= error; }
+      }
+    };
+    onProgress(remaining);
+    await Promise.all(Array.from({ length: CONCURRENCY }, worker));
+    if (failure !== undefined) throw failure;
     onProgress(0);
   }
 
+  /** Batches of small regular files that need bytes (by size and count); everything else alone. */
+  private groups(entries: SyncEntry[], batching: boolean): Array<{ batch: boolean; entries: SyncEntry[] }> {
+    const groups: Array<{ batch: boolean; entries: SyncEntry[] }> = [];
+    let batch: SyncEntry[] = [], bytes = 0;
+    const flush = () => { if (batch.length) groups.push({ batch: true, entries: batch }); batch = []; bytes = 0; };
+    for (const entry of entries) {
+      const known = this.state.files[entry.path];
+      const small = batching && entry.symlink === undefined && entry.size <= SYNC_LIMITS.batchFileBytes && !(known && known.sha256 === entry.sha256);
+      if (!small) { groups.push({ batch: false, entries: [entry] }); continue; }
+      if (batch.length >= SYNC_LIMITS.batchFiles || bytes + entry.size > SYNC_LIMITS.batchBytes) flush();
+      batch.push(entry); bytes += entry.size;
+    }
+    flush();
+    return groups;
+  }
+
+  /** One sync.readBatch: each file's bytes (verified later against its sha256), `changed`, or absent (ask again). */
+  private async fetchBatch(source: SyncSource, entries: SyncEntry[]): Promise<Map<string, Buffer | "changed">> {
+    const reply = await source.readBatch!({ files: entries.map(entry => ({ path: entry.path, sha256: entry.sha256 })) });
+    // A reply must answer at least the first file; otherwise this cycle would ask forever.
+    if (!reply.entries.length || reply.entries[0]!.path !== entries[0]!.path) throw new SyncChangedError();
+    const wanted = new Map(entries.map(entry => [entry.path, entry]));
+    const contents = new Map<string, Buffer | "changed">();
+    for (const item of reply.entries) {
+      const entry = wanted.get(item.path);
+      if (!entry || contents.has(item.path)) continue;
+      if ("changed" in item) { contents.set(item.path, "changed"); continue; }
+      const bytes = Buffer.from(item.base64, "base64");
+      contents.set(item.path, bytes.length === item.bytes && bytes.length === entry.size ? bytes : "changed");
+    }
+    return contents;
+  }
+
   /** Write one cloud entry unless the local file is already exactly it. */
-  private async write(source: SyncSource, entry: SyncEntry, pacer: Pacer): Promise<SyncProblem["reason"] | undefined> {
+  private async write(source: SyncSource, entry: SyncEntry, pacer: Pacer, content?: Buffer): Promise<SyncProblem["reason"] | undefined> {
     const absolute = join(this.root, ...entry.path.split("/"));
     const parent = await safeParent(this.root, entry.path);
     if (!parent) return "unsafe_parent";
@@ -169,6 +240,7 @@ export class SyncEngine {
     const temp = join(this.root, META, "tmp", randomUUID());
     try {
       if (entry.symlink !== undefined) await symlink(entry.symlink, temp);
+      else if (content) await this.place(entry, temp, content);
       else await this.download(source, entry, temp, pacer);
       // The parent was checked before the download; check it again just before the rename.
       if (await safeParent(this.root, entry.path) !== parent) return "unsafe_parent";
@@ -177,6 +249,7 @@ export class SyncEngine {
       await rename(temp, absolute);
     } finally { await rm(temp, { force: true }).catch(() => {}); }
     this.record(entry, await lstat(absolute));
+    this.counts.files++; this.counts.bytes += entry.size;
     return undefined;
   }
 
@@ -193,9 +266,16 @@ export class SyncEngine {
         offset += bytes.length;
         await pacer(bytes.length);
       }
-      await file.sync();
+      // No fsync per file: the verified hash and the rename are what make it safe; state.json is written atomically.
     } finally { await file.close(); }
     if (hash.digest("hex") !== entry.sha256) throw new SyncChangedError();
+    await chmod(temp, entry.mode);
+  }
+
+  /** A batched file's bytes, verified against the inventory's sha256 before the rename. */
+  private async place(entry: SyncEntry, temp: string, content: Buffer): Promise<void> {
+    if (createHash("sha256").update(content).digest("hex") !== entry.sha256) throw new SyncChangedError();
+    await writeFile(temp, content, { flag: "wx", mode: 0o600 });
     await chmod(temp, entry.mode);
   }
 
@@ -208,6 +288,7 @@ export class SyncEngine {
     if (!local || local.isDirectory()) return;
     if (!untouched(previous, local) && await this.edited(absolute, previous, local)) await this.keepOverwritten(path, absolute);
     else await unlink(absolute).catch(() => {});
+    this.counts.deletes++;
     // Empty directories the mirror no longer needs go too; others stay.
     for (let directory = dirname(absolute); directory.startsWith(this.root + "/") && directory !== this.root; directory = dirname(directory))
       if (!await rmdir(directory).then(() => true, () => false)) break;
@@ -245,7 +326,12 @@ export class SyncEngine {
       localMtimeMs: Math.round(local.mtimeMs), localSize: local.size };
   }
 
-  private commit(): Promise<void> { return writeAtomic(join(this.root, META), "state.json", JSON.stringify(this.state)); }
+  /** One state.json write at a time, in order (writes run concurrently). */
+  private commit(): Promise<void> {
+    const next = this.committing.catch(() => {}).then(() => writeAtomic(join(this.root, META), "state.json", JSON.stringify(this.state)));
+    this.committing = next;
+    return next;
+  }
 
   private pacer(): Pacer {
     const started = this.deps.now();

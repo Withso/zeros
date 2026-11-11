@@ -17,6 +17,7 @@ import {
 } from "../platform/bridge/cloud-workspace-key";
 import { KeyedAsyncCache } from "../shared/lib/keyed-async-cache";
 import { ControlPlaneError } from "../features/team/control-plane";
+import { registerSharingRoleLookup, subscribeWorkspaceReadOnly } from "../platform/team-sharing-registry";
 import type { Project } from "./projects-store";
 import { clearCloudComposerPrs } from "./read-caches";
 import { forgetSidebarRepositoryFilter, sidebarRepositoryFilterOwner } from "./sidebar-list-preferences";
@@ -765,3 +766,13 @@ export async function cloudWorkspaceOperation(
   };
 }
 
+
+// Team sharing: a 409 workspace_read_only means this account only reads the
+// workspace now (a transfer, a role change). Read its document again, so the
+// view becomes read-only from the server's answer rather than a local guess.
+// The opt-in on a workspace's own requests follows the viewer's role in the document held here.
+registerSharingRoleLookup(workspaceId => cloudWorkspaceDocumentById(workspaceId)?.sharing?.viewerRole);
+subscribeWorkspaceReadOnly(workspaceId => {
+  const doc = cloudWorkspaceDocumentById(workspaceId);
+  if (doc) void refreshCloudWorkspace({ organizationId: doc.organizationId, workspaceId }).catch(() => {});
+});

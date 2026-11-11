@@ -44,6 +44,9 @@ export const CONTROL_PLANE_DATABASE_INPUTS = Object.freeze([
   "apps/cloud-worker/src/",
   // The local-command client suite drives the desktop device client against the real routes.
   "apps/desktop/electron/local-commands/",
+  // The sync client suite drives the desktop sync connection and the renderer's Macs list against the real routes.
+  "apps/desktop/electron/workspace-sync/connection.ts",
+  "apps/desktop/src/renderer/platform/local-commands.ts",
   // The operator publisher invokes the portable runtime packager.
   "apps/cloud-worker/scripts/",
   "apps/cloud-worker/package.json",

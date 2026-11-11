@@ -78,6 +78,9 @@ const commandTable: Record<string, CommandHandler> = {
   workspace_sync_choose: notImpl("workspace_sync_choose", 1),
   workspace_sync_stop: notImpl("workspace_sync_stop", 1),
   workspace_sync_open_terminal: notImpl("workspace_sync_open_terminal", 1),
+  workspace_sync_enable: notImpl("workspace_sync_enable", 1),
+  workspace_sync_reveal: notImpl("workspace_sync_reveal", 1),
+  workspace_sync_set_wanted: notImpl("workspace_sync_set_wanted", 1),
 
   // ── Sidecar / engine lifecycle ────────────────────────────
   get_engine_port: notImpl("get_engine_port", 2),

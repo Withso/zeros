@@ -89,6 +89,7 @@
     "folder-design-setup",
     "context-gauge",
     "simulator-tab",
-    "local-commands"
+    "local-commands",
+    "notify-user"
   ]
 ]
