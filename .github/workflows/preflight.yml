@@ -259,7 +259,7 @@ jobs:
       - name: Install Playwright Chromium headless shell
         # The Vitest suite contains real-browser design-runtime protocol tests.
         # pnpm installs Playwright's API package but intentionally not its browser.
-        run: pnpm exec playwright install --with-deps --only-shell chromium
+        run: bash scripts/ci/retry.sh pnpm exec playwright install --with-deps --only-shell chromium
 
       - name: Run vitest suite
         # Offline artifact closure tests require a private read-only namespace.
@@ -469,7 +469,7 @@ jobs:
       - name: Install Playwright Chromium headless shell
         # The named containment gate also proves the real headless Design
         # export path. macOS does not need Playwright's Linux system packages.
-        run: pnpm exec playwright install --only-shell chromium
+        run: bash scripts/ci/retry.sh pnpm exec playwright install --only-shell chromium
 
       - name: Bundled agent runtime pins (darwin artifact)
         # The `test` job runs this too, but on ubuntu it can only prove the
@@ -809,7 +809,7 @@ jobs:
       - name: Install control-plane dependencies for title smoke
         run: pnpm --dir apps/control-plane install --frozen-lockfile
       - name: Install Playwright Chromium
-        run: pnpm exec playwright install --with-deps chromium
+        run: bash scripts/ci/retry.sh pnpm exec playwright install --with-deps chromium
       - name: Run composer UI smoke shard
         # Real-browser event-timing coverage the unit suite structurally cannot
         # provide: a document-capture click listener can race Radix's open/focus

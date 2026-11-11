@@ -18,8 +18,17 @@ runs:
             's|mirror+file:/etc/apt/apt-mirrors.txt|https://archive.ubuntu.com/ubuntu|g' \
             "$runner_ubuntu_sources"
         fi
-        sudo apt-get update
-        sudo apt-get install --yes bubblewrap util-linux libsystemd-dev
+        # Use the runner image's packages when it already has them; otherwise
+        # retry, since a DNS blip ("Temporary failure resolving") failed every
+        # Vitest shard. Error-Mode=any makes a failed index fetch fail the
+        # update so it retries instead of installing from stale lists.
+        packages="bubblewrap util-linux libsystemd-dev"
+        # shellcheck disable=SC2086
+        if [ "$(dpkg-query -W -f='${db:Status-Status}\n' $packages 2>/dev/null | grep -cx installed)" -ne 3 ]; then
+          bash "$PWD/scripts/ci/retry.sh" sudo apt-get update -o APT::Update::Error-Mode=any
+          # shellcheck disable=SC2086
+          bash "$PWD/scripts/ci/retry.sh" sudo apt-get install --yes $packages
+        fi
         command -v setpriv
 
     - name: Verify offline artifact namespace prerequisites

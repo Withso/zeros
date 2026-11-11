@@ -319,6 +319,18 @@ The 60-PR replay fixture and per-PR JSON lane/job snapshot live under
 `scripts/__tests__/fixtures/ci/`. Replay must keep at least half of the sample
 out of all-lanes fallback and select full composer smoke from paths for none.
 
+## Network installs
+
+Runner DNS blips ("Temporary failure resolving 'archive.ubuntu.com'") failed
+every Vitest and composer shard of a PR on 2026-11-11. Every Playwright browser
+install and the offline-closure `apt-get` steps run through
+`bash scripts/ci/retry.sh <command>`: three attempts, 15 s and 30 s apart,
+exiting with the last status. The closure action skips `apt-get` when the
+runner image already has its packages, and `apt-get update` uses
+`APT::Update::Error-Mode=any` so a failed index fetch retries instead of
+installing from stale lists. `scripts/__tests__/ci-retry.test.ts` fails when a
+new install step bypasses the wrapper.
+
 ## Fail-closed job results
 
 Every producer uses `!cancelled()` with a condition that runs when its trusted
