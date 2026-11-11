@@ -71,7 +71,7 @@ export function InspectorSection({
       <div className="zd-section-header">
         <h3 className="zd-section-title">{title}</h3>
         {actions ? (
-          <div className="flex shrink-0 items-center gap-0.5">{actions}</div>
+          <div data-design-filter-companion="" className="flex shrink-0 items-center gap-0.5">{actions}</div>
         ) : null}
       </div>
       {hasBody ? (
@@ -154,6 +154,7 @@ export const InspectorIconButton = React.forwardRef<
         aria-label={label}
         aria-pressed={pressed}
         data-size={size === "header" ? undefined : size}
+        data-design-filter-companion=""
         className={cn("zd-icon-button", className)}
         {...props}
       >
@@ -190,6 +191,9 @@ interface InspectorSelectProps<T extends string> {
    * field; `filteredOut` while the filter hides it. */
   filterProperty?: string;
   filteredOut?: boolean;
+  /** A control beside the fields (Stroke sides) that a filter or a held
+   * state hides with the section actions. */
+  filterCompanion?: boolean;
 }
 
 /** A 28px field-surface Select. An authored value outside the preset list
@@ -207,6 +211,7 @@ export function InspectorSelect<T extends string>({
   dimmed = false,
   filterProperty,
   filteredOut = false,
+  filterCompanion = false,
 }: InspectorSelectProps<T>) {
   const choices: readonly InspectorOption<string>[] =
     value && !options.some((option) => option.value === value)
@@ -223,6 +228,7 @@ export function InspectorSelect<T extends string>({
         data-design-origin={dimmed ? "dimmed" : undefined}
         data-design-filter-property={filterProperty}
         data-design-filter-out={filteredOut ? "" : undefined}
+        data-design-filter-companion={filterCompanion ? "" : undefined}
         className={cn(
           "zd-field zd-select w-full min-w-0 justify-between gap-1 pr-1.5 pl-2 text-left",
           leading ? "pl-0" : null,

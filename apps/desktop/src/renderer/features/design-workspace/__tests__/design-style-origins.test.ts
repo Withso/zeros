@@ -277,7 +277,33 @@ describe("where a field's value comes from", () => {
   });
 
   it("says when another theme gives a plain value something else", () => {
-    expect(origins.of("opacity")?.card.rows).toContainEqual({ key: "Dark", text: "0.8" });
+    // Listed as "Dark uses 0.8" beside the card's rows, not as a row.
+    expect(origins.of("opacity")?.card.themes).toEqual([{ theme: "dark", label: "Dark", value: "0.8" }]);
+    expect(origins.of("opacity")?.card.rows.some((row) => row.key === "Dark")).toBe(false);
+    expect(origins.of("color")?.card.themes).toBeUndefined();
+  });
+
+  it("names the CSS function a value the panel cannot edit is written with", () => {
+    const computed = (value: string) =>
+      designStyleOrigins(
+        details({ authoredStyles: { width: { origin: "frame", selector: ".card", scope: "element", subjectClasses: ["card"], value } } }),
+        context,
+      ).of("width")?.computed;
+    expect(computed("calc(100% - 48px)")).toBe("calc");
+    expect(computed("clamp(200px, 50%, 400px)")).toBe("clamp");
+    expect(computed("min(100%, 20rem)")).toBe("min");
+    expect(computed("MAX(1px, 2px)")).toBe("max");
+    expect(computed("calc(var(--space) * 2)")).toBe("calc");
+    // A token or a plain value is the panel's to edit.
+    expect(computed("var(--width)")).toBeUndefined();
+    expect(computed("48px")).toBeUndefined();
+    // On the layer's own style it is just as read only.
+    const inline = designStyleOrigins(
+      details({ authoredStyles: { width: { origin: "inline", scope: "inline", value: "calc(100% - 8px)" } } }),
+      context,
+    ).of("width");
+    expect(inline?.computed).toBe("calc");
+    expect(inline?.card.clear).toBeUndefined();
   });
 
   it("answers each field from one model per details object", () => {

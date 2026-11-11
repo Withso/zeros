@@ -10,6 +10,7 @@ import {
   designHeldStateHolds,
   designHeldStateWatch,
   forgetDesignHeldStateRelease,
+  measureDesignNodeUnheld,
   holdDesignNodeState,
   noteDesignHeldReplyRefused,
   releaseDesignNodeState,
@@ -126,6 +127,33 @@ describe("held layer state", () => {
     const plain = designHeldStateWatch("w", "home.html", ["send"]);
     plain.read(details());
     expect(plain.blocked()).toBe(false);
+  });
+
+  it("blocks a write when the frame root's measurement after the preview comes back held", () => {
+    const { runtime } = fakeRuntime();
+    mocks.runtime.mockReturnValue(runtime);
+    // Resize to fit on a child: the root is not among the edited layers.
+    const watch = designHeldStateWatch("w", "home.html", ["child"]);
+    watch.read({ ...details(), oid: "child" });
+    // The check before the preview passed.
+    expect(watch.blocked()).toBe(false);
+    // A hold on the root begins after the preview (which let go of any
+    // earlier one); the root's measurement comes back marked.
+    holdDesignNodeState({ ...KEY, nodeId: "root", state: "hover" });
+    expect(watch.blocked()).toBe(false);
+    watch.read({ ...details("hover"), oid: "root" });
+    expect(watch.blocked()).toBe(true);
+  });
+
+  it("measures a layer for an edit through its watch, and gives nothing once a hold met it", async () => {
+    const { runtime } = fakeRuntime();
+    mocks.runtime.mockReturnValue(runtime);
+    runtime.getNodeDetails.mockImplementationOnce(() => Promise.resolve({ ...details(), oid: "root" }));
+    const watch = designHeldStateWatch("w", "home.html", ["child"]);
+    expect((await measureDesignNodeUnheld(runtime, "root", watch))?.oid).toBe("root");
+    runtime.getNodeDetails.mockImplementationOnce(() => Promise.resolve({ ...details("hover"), oid: "root" }));
+    expect(await measureDesignNodeUnheld(runtime, "root", watch)).toBeNull();
+    expect(watch.blocked()).toBe(true);
   });
 
   it("drops a reply that arrives after Back to Default and lets go without waiting", async () => {

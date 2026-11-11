@@ -49,6 +49,11 @@ export interface DesignStyleCard {
   clear?: { properties: string[]; text: string };
   /** The rule whose !important forces the value. */
   forcedBy?: string;
+  /** Where that rule is written, as the Source row names it. */
+  forcedSource?: string;
+  /** The value under each other theme, when a theme rule makes the plain
+   * value itself differ: "Light uses FFFFFF". */
+  themes?: { theme: string; label: string; value: string }[];
 }
 
 export interface DesignStyleOrigin {
@@ -56,6 +61,11 @@ export interface DesignStyleOrigin {
   /** "the class .btn", "this layer", "a parent layer"… */
   from: string;
   card: DesignStyleCard;
+  /** The value as written, on a computed or forced value only. */
+  written?: string;
+  /** The CSS function (calc, clamp, min, max…) the value is written with:
+   * the panel shows it as written and does not edit it. */
+  computed?: string;
 }
 
 export interface DesignStyledByGroup {
@@ -86,6 +96,9 @@ export interface DesignStyleOriginsContext {
   /** Style sources whose classes are utilities (Tailwind). */
   utilitySources: ReadonlySet<string>;
   themeLabel?: (theme: string) => string;
+  /** Every theme's name, the default first: what a value set on the layer
+   * changes when the themes gave it different values. */
+  themes?: readonly string[];
 }
 
 // Properties a layer takes from its parent when it does not set them.
@@ -254,14 +267,22 @@ function tokenRows(
   return label && label !== ruleLabel ? [{ key: "Token", text: `declared in ${label}` }] : [];
 }
 
-function themeRows(
+function themesOf(
   style: DesignRuntimeAuthoredStyle,
   context: DesignStyleOriginsContext,
-): DesignStyleCardRow[] {
-  return Object.entries(style.themeValues ?? {}).map(([theme, value]) => ({
-    key: context.themeLabel?.(theme) ?? theme,
-    text: shown(value),
-  }));
+): DesignStyleCard["themes"] {
+  const entries = Object.entries(style.themeValues ?? {});
+  if (entries.length === 0) return undefined;
+  return entries.map(([theme, value]) => ({ theme, label: context.themeLabel?.(theme) ?? theme, value: shown(value) }));
+}
+
+// The CSS math functions: a value written with one resolves only in the
+// browser, so the panel shows it as written.
+const COMPUTED_FUNCTION =
+  /(?:^|[^\w-])(calc|clamp|min|max|round|mod|rem|abs|sign|sqrt|pow|hypot|log|exp|sin|cos|tan|asin|acos|atan2?)\(/i;
+
+function computedFunction(value: string): string | undefined {
+  return COMPUTED_FUNCTION.exec(value)?.[1]?.toLowerCase();
 }
 
 /** "Reset", or what it removes when that is a whole shorthand. */
@@ -318,12 +339,15 @@ function originOfStyle(
         rows: [
           { key: "Value", text: `${tokenPhrase(style.value, style.tokens, (name) => name)}, set on this layer` },
           ...tokenRows(style, null, context),
-          ...themeRows(style, context),
         ],
       };
+      const themes = themesOf(style, context);
+      if (themes) card.themes = themes;
+      const computed = computedFunction(style.value);
       // Only the style attribute: the editor removes its declaration exactly.
-      if (style.scope === "inline") card.clear = { properties: [key], text: removalText(property, key, "Clear") };
-      return { kind: "set-here", from: "this layer", card };
+      // A computed value is edited in CSS, so the card offers that instead.
+      if (style.scope === "inline" && !computed) card.clear = { properties: [key], text: removalText(property, key, "Clear") };
+      return withWritten({ kind: "set-here", from: "this layer", card }, style.value, computed);
     }
     const declared = style.declared ?? property;
     const card: DesignStyleCard = {
@@ -334,14 +358,15 @@ function originOfStyle(
           key: "Was",
           text: `${tokenPhrase(replaced.value, replaced.tokens, (name, resolved) => `${name} (${resolved})`)} from ${fromPhrase(sourceOf(replaced, context))}`,
         },
-        ...themeRows(style, context),
       ],
       reset: { properties: [declared], text: removalText(property, declared, "Reset") },
     };
+    const themes = themesOf(style, context);
+    if (themes) card.themes = themes;
     if (replaced.others) {
       card.foot = `Used by ${plural(replaced.others, "other layer", "other layers")} in this frame`;
     }
-    return { kind: "changed", from: "this layer", card };
+    return withWritten({ kind: "changed", from: "this layer", card }, style.value, computedFunction(style.value));
   }
   const source = sourceOf(style, context);
   const from = style.state ? `${fromPhrase(source)}, ${stateClause(style.state)}` : fromPhrase(source);
@@ -351,9 +376,14 @@ function originOfStyle(
   ];
   const label = context.label(style);
   if (label) rows.push({ key: "Source", text: label });
-  rows.push(...tokenRows(style, label, context), ...themeRows(style, context));
+  rows.push(...tokenRows(style, label, context));
+  const themes = themesOf(style, context);
+  const computed = computedFunction(style.value);
   if (style.important) {
-    return { kind: "forced", from, card: { rows, forcedBy: source.name || (style.selector ?? "") } };
+    const card: DesignStyleCard = { rows, forcedBy: source.name || (style.selector ?? "") };
+    if (label) card.forcedSource = label;
+    if (themes) card.themes = themes;
+    return withWritten({ kind: "forced", from, card }, style.value, computed);
   }
   const kind: DesignStyleOriginKind =
     source.kind === "rule"
@@ -361,7 +391,15 @@ function originOfStyle(
         ? "token"
         : "class"
       : source.kind;
-  return { kind, from, card: { rows } };
+  return withWritten({ kind, from, card: themes ? { rows, themes } : { rows } }, style.value, computed);
+}
+
+/** What a read-only field shows and an agent brief quotes: only for a value
+ * the panel does not edit. */
+function withWritten(origin: DesignStyleOrigin, written: string, computed: string | undefined): DesignStyleOrigin {
+  if (computed) origin.computed = computed;
+  if (computed || origin.kind === "forced") origin.written = written;
+  return origin;
 }
 
 function styledByOf(

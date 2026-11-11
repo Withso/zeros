@@ -155,6 +155,18 @@ export function designHeldStateWatch(
   };
 }
 
+/** A layer measured for an edit after its preview (the frame root a resize
+ * fits to): read through the edit's watch, and null once a hold has met the
+ * edit, so a held size is never written as Default. */
+export async function measureDesignNodeUnheld(
+  runtime: Pick<DesignFrameRuntimeConnection, "getNodeDetails">,
+  nodeId: string,
+  watch: ReturnType<typeof designHeldStateWatch>,
+): Promise<DesignRuntimeNodeDetails | null> {
+  const measured = watch.read(await runtime.getNodeDetails(nodeId));
+  return watch.blocked() ? null : measured;
+}
+
 /** Ask the frame to show the layer in a state. Never awaited by a click: the
  * reply publishes once, and only while it is still the latest hold for the
  * same document, generation and layer. */

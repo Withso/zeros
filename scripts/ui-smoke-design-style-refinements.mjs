@@ -3,6 +3,7 @@ import { addDesignSection, openLayersDrawer } from "./ui-smoke-design-helpers.mj
 import { runDesignStyleTokensSmoke } from "./ui-smoke-design-style-tokens.mjs";
 import { runDesignStyleOriginsSmoke } from "./ui-smoke-design-style-origins.mjs";
 import { runDesignStyleStatesSmoke } from "./ui-smoke-design-style-states.mjs";
+import { runDesignFieldMarksSmoke } from "./ui-smoke-design-field-marks.mjs";
 import { runDesignFieldStatesSmoke } from "./ui-smoke-design-field-states.mjs";
 import { runDesignTokenPillsSmoke } from "./ui-smoke-design-token-pills.mjs";
 import { runDesignDeferredFocusSmoke, runDesignCloseFocusSmoke } from "./ui-smoke-design-focus.mjs";
@@ -446,6 +447,7 @@ export async function runDesignStyleRefinementsSmoke(context) {
   await runDesignStyleStatesSmoke(context);
   // Field behaviour: refused values, restore, Clear, maths, units, Mixed.
   await runDesignFieldStatesSmoke(context);
+  await runDesignFieldMarksSmoke(context);
   await runDesignDeferredFocusSmoke(context);
   await runDesignDeferredFocusSmoke({ ...context, moveFocus: false });
   await runDesignCloseFocusSmoke(context);
