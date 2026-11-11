@@ -170,6 +170,24 @@ describe("local command service", () => {
     await s.service.stop();
   });
 
+  // Escaped in CI: Stop arrived between the claim and the process start, was lost, and the command ran anyway.
+  it("never starts a command that was stopped while its claim was in flight", async () => {
+    let s!: Awaited<ReturnType<typeof setup>>;
+    s = await setup({ claim: async requestId => {
+      s.push({ event: "request", data: { requestId, state: "terminal", outcome: "cancelled" } });
+      await until(() => s.published.length > 0);
+      await new Promise(resolve => setTimeout(resolve, 20));
+      return { ...notice(requestId), state: "claimed" as const };
+    } });
+    s.push({ event: "request", data: notice(R1) });
+    await until(() => s.published.at(-1)?.includes(R1));
+    await s.service.decide(R1, "yes");
+    await until(() => s.results.some(entry => entry.result.outcome === "cancelled"));
+    expect(s.calls.some(call => call.startsWith("run"))).toBe(false);
+    await until(() => s.calls.includes(`ack ${R1}`));
+    await s.service.stop();
+  });
+
   it("never runs a claim the server refused, and reconciles it by GET only", async () => {
     const s = await setup({ claim: async () => { throw new DeviceControlError(409, "local_command_not_pending"); } });
     s.push({ event: "request", data: notice(R1) });

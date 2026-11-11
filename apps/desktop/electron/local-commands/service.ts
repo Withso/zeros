@@ -283,23 +283,28 @@ export class LocalCommandService {
       catch { await this.reconcile(device, notice.requestId); }
       return;
     }
-    await journal.mark(notice.requestId, "approved");
-    let claimed: LocalCommandNotice;
-    try { claimed = await this.deps.control.claim(device, notice.requestId, "approve"); }
-    catch { await this.reconcile(device, notice.requestId); return; }
-    if (claimed.state !== "claimed") { if (claimed.state === "terminal") await journal.finish(notice.requestId, claimed.outcome); return; }
-    this.log(`request claimed id=${idPrefix(notice.requestId)}`);
-    await journal.mark(notice.requestId, "running");
-    const started = Date.now();
+    // Registered before the claim: a Stop that lands while the claim or the
+    // journal write is in flight must still reach this command.
     const controller = new AbortController();
     this.lifetime?.signal.addEventListener("abort", () => controller.abort(), { once: true });
     this.running.set(notice.requestId, controller);
-    const runFor = claimed.runDeadline ? Math.min(notice.input.timeoutMs ?? LOCAL_COMMAND_LIMITS.defaultTimeoutMs, Math.max(1, Date.parse(claimed.runDeadline) - Date.now()))
-      : notice.input.timeoutMs ?? LOCAL_COMMAND_LIMITS.defaultTimeoutMs;
-    let result: LocalCommandMacResult;
-    try { result = await this.deps.run({ command: notice.input.command, ...(notice.input.cwd ? { cwd: notice.input.cwd } : {}), timeoutMs: runFor }, controller.signal); }
-    catch { result = { outcome: "failed", error: "spawn_failed" }; }
-    finally { this.running.delete(notice.requestId); }
+    let result: LocalCommandMacResult, started = Date.now();
+    try {
+      await journal.mark(notice.requestId, "approved");
+      let claimed: LocalCommandNotice;
+      try { claimed = await this.deps.control.claim(device, notice.requestId, "approve"); }
+      catch { await this.reconcile(device, notice.requestId); return; }
+      if (claimed.state !== "claimed") { if (claimed.state === "terminal") await journal.finish(notice.requestId, claimed.outcome); return; }
+      this.log(`request claimed id=${idPrefix(notice.requestId)}`);
+      await journal.mark(notice.requestId, "running");
+      started = Date.now();
+      const runFor = claimed.runDeadline ? Math.min(notice.input.timeoutMs ?? LOCAL_COMMAND_LIMITS.defaultTimeoutMs, Math.max(1, Date.parse(claimed.runDeadline) - Date.now()))
+        : notice.input.timeoutMs ?? LOCAL_COMMAND_LIMITS.defaultTimeoutMs;
+      // Stopped before it began: the process is never started.
+      if (controller.signal.aborted) result = { outcome: "cancelled" };
+      else try { result = await this.deps.run({ command: notice.input.command, ...(notice.input.cwd ? { cwd: notice.input.cwd } : {}), timeoutMs: runFor }, controller.signal); }
+      catch { result = { outcome: "failed", error: "spawn_failed" }; }
+    } finally { this.running.delete(notice.requestId); }
     this.log(`request ran id=${idPrefix(notice.requestId)} outcome=${result.outcome}${typeof result.code === "number" ? ` exit=${result.code}` : ""}${result.error ? ` error=${result.error}` : ""} duration_ms=${Date.now() - started}`);
     await this.report(device, notice.requestId, result);
     await journal.finish(notice.requestId, result.outcome);
