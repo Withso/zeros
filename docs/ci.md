@@ -475,7 +475,20 @@ Drafts, forks, closed PRs, changes to
 bodies, and failed or cancelled required checks are also refused. Pending checks
 may wait for GitHub's normal auto-merge requirements in the default mode only.
 
-Only one open PR may have auto-merge enabled. Only a human may override this
+**Merge queue.** When the base branch has a merge queue (main, from the
+`add-merge-queue` stage in [the ruleset guide](ci-rulesets.md)), the default mode
+enqueues instead of arming one PR at a time:
+`gh pr merge <n> --auto --match-head-commit <head>`. GitHub adds the PR to the
+queue once its required checks pass, runs the complete Preflight, CodeQL and
+actionlint on a merge-group commit that contains main plus the entries ahead of
+it, and squash-merges only when that group is green. Several PRs may therefore be
+in flight; the one-armed guard below applies only to branches without a queue.
+Every other guard still applies. The queue's squash takes its message from the
+repository default (the commits' messages), so the wrapper also refuses a PR
+whose commit messages contain a skip marker. An unreadable queue state or commit
+list refuses. Immediate mode still refuses queue branches.
+
+Without a merge queue, only one open PR may have auto-merge enabled. Only a human may override this
 guard: first document the justification in a comment on the target PR using the
 same human GitHub identity, then run
 `pnpm agent:merge <pr-number> --force --reason <comment-URL>`. The wrapper verifies

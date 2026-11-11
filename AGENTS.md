@@ -128,7 +128,8 @@ For provider event handling or tool transcript UI, also read
   required checks. Only a human
   may use `--force`, after documenting the override in a comment on that PR;
   pass the comment URL with `--reason`. This overrides only the one-armed-PR
-  guard. See [docs/ci.md](docs/ci.md).
+  guard, which applies only while the base branch has no merge queue; with
+  one, the wrapper enqueues and several PRs may be in flight. See [docs/ci.md](docs/ci.md).
 - Use the bot only for automation that is not a person's work: cutting a release
   branch
   (`pnpm agent:git push origin <sha>:refs/heads/release/X.Y.Z`), and
