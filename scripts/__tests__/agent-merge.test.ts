@@ -7,8 +7,8 @@ import { decideMerge, runAgentMerge } from "../agent-merge.mjs";
 const HEAD = "a".repeat(40);
 const REPOSITORY = "Withso/zeros";
 const COMMENT_URL = `https://github.com/${REPOSITORY}/pull/123#issuecomment-456`;
-const OWNER_REVIEW =
-  "This PR changes CI definitions; the owner must review and merge it.";
+const CI_DEFINITION_NOTE = (paths: string) =>
+  `This PR changes CI definitions (${paths}); its own CI already ran them, so the normal merge guards apply.`;
 const SECTIONS = [
   "Why", "What changes", "Tests", "Rollout",
   "Local workspace impact", "Cloud workspace impact",
@@ -100,10 +100,11 @@ function fixture(): Snapshot {
   };
 }
 
-// The shared policy is supplied independently; the wrapper must consult it,
-// including paths outside .github/workflows and the policy module itself.
+// The shared policy is supplied independently; the wrapper reports what it
+// matches, including paths outside .github/workflows and the policy itself.
 const isCiDefinitionPath = (file: string) =>
   file.startsWith("scripts/ci/") ||
+  file.startsWith(".github/workflows/") ||
   file === "vitest.config.ts" ||
   file === "pnpm-lock.yaml";
 
@@ -255,15 +256,12 @@ describe("agent merge decision", () => {
     expect(gh.calls.some(call => call[1] === "merge")).toBe(false);
   });
 
-  it.each([
-    [".github/workflows/ci.yml", "ci-definition"],
-    [".github/ci-incidents/open.json", "incident"],
-  ])("preserves the %s refusal for bot PRs without sections", (filename, code) => {
+  it("preserves the incident refusal for bot PRs without sections", () => {
     const snapshot = fixture();
     snapshot.pr.author = { login: "maintenance[bot]", is_bot: true };
     snapshot.pr.body = "Automated maintenance.";
-    snapshot.files[0].filename = filename;
-    expect(decideMerge(snapshot, { isCiDefinitionPath })).toMatchObject({ allowed: false, code });
+    snapshot.files[0].filename = ".github/ci-incidents/open.json";
+    expect(decideMerge(snapshot, { isCiDefinitionPath })).toMatchObject({ allowed: false, code: "incident" });
   });
 
   it("cannot override missing sections with --force", async () => {
@@ -292,16 +290,26 @@ describe("agent merge decision", () => {
     ".github/workflows/codeql.yml",
     "vitest.config.ts",
     "pnpm-lock.yaml",
-  ])("requires owner review for %s", async (filename) => {
+  ])("lets an agent merge %s and names the CI definition", async (filename) => {
     const snapshot = fixture();
     snapshot.files = [{ filename, status: "modified" }];
     const gh = fakeGh(snapshot);
-    expect(await runAgentMerge(["123", "--dry-run"], gh)).toBe(1);
-    expect(gh.stderr).toHaveBeenCalledWith(OWNER_REVIEW);
+    expect(await runAgentMerge(["123"], gh)).toBe(0);
+    expect(gh.stdout).toHaveBeenCalledWith(CI_DEFINITION_NOTE(filename));
+    expect(gh.calls.some((args) => args[1] === "merge")).toBe(true);
+    expect(gh.stderr).not.toHaveBeenCalled();
+  });
+
+  it("still refuses a CI-definition PR whose required checks failed", async () => {
+    const snapshot = fixture();
+    snapshot.files = [{ filename: ".github/workflows/ci.yml", status: "modified" }];
+    snapshot.requiredChecks = [{ name: "test", bucket: "fail", state: "FAILURE" }];
+    const gh = fakeGh(snapshot);
+    expect(await runAgentMerge(["123"], gh)).toBe(1);
     expect(gh.calls.some((args) => args[1] === "merge")).toBe(false);
   });
 
-  it("checks the previous path of a renamed CI definition", () => {
+  it("names the previous path of a renamed CI definition", () => {
     const snapshot = fixture();
     snapshot.files = [
       {
@@ -311,8 +319,8 @@ describe("agent merge decision", () => {
       },
     ];
     expect(decideMerge(snapshot, { isCiDefinitionPath })).toMatchObject({
-      allowed: false,
-      code: "ci-definition",
+      allowed: true,
+      ciDefinitionPaths: ["vitest.config.ts"],
     });
   });
 
@@ -475,13 +483,13 @@ describe("agent merge decision", () => {
     expect(gh.calls.some((args) => args[1] === "merge")).toBe(false);
   });
 
-  it("fails closed when the shared CI-definition policy is unavailable", async () => {
-    const gh = fakeGh();
+  it("still merges, without a CI-definition note, when the shared policy is unavailable", async () => {
+    const snapshot = fixture();
+    snapshot.files = [{ filename: ".github/workflows/ci.yml", status: "modified" }];
+    const gh = fakeGh(snapshot);
     gh.loadCiDefinition.mockResolvedValue(null);
-    expect(await runAgentMerge(["123", "--dry-run"], gh)).toBe(1);
-    expect(gh.stderr).toHaveBeenCalledWith(
-      expect.stringContaining("CI-definition policy is unavailable"),
-    );
+    expect(await runAgentMerge(["123", "--dry-run"], gh)).toBe(0);
+    expect(gh.stdout).not.toHaveBeenCalledWith(expect.stringContaining("CI definitions"));
     expect(gh.calls.some((args) => args[1] === "merge")).toBe(false);
   });
 });
@@ -542,11 +550,10 @@ describe("documented human override", () => {
     expect(gh.calls.some((args) => args[1] === "merge")).toBe(false);
   });
 
-  it.each(["ci", "skip", "draft", "fork", "incident", "checks"])(
+  it.each(["skip", "draft", "fork", "incident", "checks"])(
     "cannot override the %s guard",
     async (guard) => {
       const snapshot = fixture();
-      if (guard === "ci") snapshot.files[0].filename = "vitest.config.ts";
       if (guard === "skip") snapshot.pr.body = "[skip ci]";
       if (guard === "draft") snapshot.pr.isDraft = true;
       if (guard === "fork") snapshot.pr.isCrossRepository = true;
@@ -569,7 +576,7 @@ describe("agent merge CLI", () => {
     const original = gh.spawn.getMockImplementation()!;
     gh.spawn.mockImplementation((command, args, options) => {
       if (command === "git") {
-        if (args.includes("diff")) return { status: 0, stdout: "M\0.github/workflows/ci.yml\0", stderr: "" };
+        if (args.includes("diff")) return { status: 0, stdout: "M\0.github/ci-incidents/open.json\0", stderr: "" };
         if (args.includes("merge-base")) return { status: 0, stdout: "b".repeat(40) + "\n", stderr: "" };
         if (args.includes("--is-shallow-repository")) return { status: 0, stdout: "false\n", stderr: "" };
         return { status: 0, stdout: "", stderr: "" };
@@ -635,8 +642,8 @@ describe("agent merge CLI", () => {
     snapshot.pr.changedFiles = 2;
     snapshot.files.push({ filename: "docs/config.md", previous_filename: "vitest.config.ts", status: "renamed" });
     const gh = fakeGh(snapshot);
-    expect(await runAgentMerge(["123"], gh)).toBe(1);
-    expect(gh.stderr).toHaveBeenCalledWith(OWNER_REVIEW);
+    expect(await runAgentMerge(["123"], gh)).toBe(0);
+    expect(gh.stdout).toHaveBeenCalledWith(CI_DEFINITION_NOTE("vitest.config.ts"));
     expect(gh.calls.some(args => args.includes("diff") && args.includes(HEAD))).toBe(true);
     expect(gh.calls.some(args => args.some(arg => arg.includes("/files?")))).toBe(false);
   });

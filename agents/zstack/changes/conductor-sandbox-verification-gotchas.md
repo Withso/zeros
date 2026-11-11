@@ -1,6 +1,6 @@
 # Conductor sandbox: private settings, browser builds and smoke paths
 
-Target: `gotchas.md` (credentials and CI-definition entries).
+Target: `gotchas.md` (credentials entries).
 
 - **Private settings print credentials.** `.conductor/settings.local.toml`
   embeds base64 workspace environment variables, including hosted profiles and
@@ -18,8 +18,3 @@ Target: `gotchas.md` (credentials and CI-definition entries).
   under `umask 022`, as CI does, before treating them as regressions.
 - **Never edit while a full suite runs.** A red-check edit made mid-run lands
   in that run's results; prove a regression red only between suite runs.
-- **New smoke checks stay agent-mergeable.** `scripts/ui-smoke/**`
-  (`scenarios.mjs`, `shards.json`) is a CI-definition path, so adding a
-  scenario needs the owner's merge. To keep a PR mergeable with
-  `pnpm agent:merge`, export a new `scripts/ui-smoke-<area>-*.mjs` function and
-  call it from an existing scenario's script, which is not a definition path.
