@@ -395,9 +395,12 @@ export function DesignFieldOverlays({
       latestApiRef.current.fieldShortcut(event);
     };
     // The panel scrolled under an open card; a pending one checks the field
-    // is still under the pointer when it opens.
-    const scroll = () => {
-      if (!cardStateRef.current) return;
+    // is still under the pointer when it opens. A long value scrolling inside
+    // its own input moves no field, so only what holds the field counts.
+    const scroll = (event: Event) => {
+      const open = cardStateRef.current;
+      if (!open) return;
+      if (event.target instanceof Element && !event.target.contains(open.field)) return;
       if (closeTimer.current !== null) window.clearTimeout(closeTimer.current);
       closeTimer.current = null;
       setCard(null);

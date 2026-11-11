@@ -141,6 +141,24 @@ describe("the panel's overlays", () => {
     expect(card()).not.toBeNull();
   });
 
+  it("keeps a card open while its field's own text scrolls, and closes it when the panel scrolls", () => {
+    mount(true, false, lockedOrigins);
+    const card = () => document.querySelector("[data-design-style-card]");
+    const enter = () => act(() => { byId("width-input").dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, key: "Enter" })); });
+    enter();
+    expect(card()).not.toBeNull();
+    // A long value (calc(100% - 48px)) scrolls inside its input as the caret
+    // moves; that event arrives a frame later, after the card has opened.
+    act(() => { byId("width-input").dispatchEvent(new Event("scroll")); });
+    expect(card()).not.toBeNull();
+    // Another field's text scrolling moves nothing either.
+    act(() => { byId("corner-input").dispatchEvent(new Event("scroll")); });
+    expect(card()).not.toBeNull();
+    // The panel scrolling moves the field from under the card.
+    act(() => { (byId("width").closest("aside") as HTMLElement).dispatchEvent(new Event("scroll")); });
+    expect(card()).toBeNull();
+  });
+
   it("offers the agent for a forced field, for its properties", () => {
     mount(true, false, lockedOrigins);
     act(() => { byId("corner-input").dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, cancelable: true })); });
