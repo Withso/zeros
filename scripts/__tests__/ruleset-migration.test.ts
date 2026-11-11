@@ -902,7 +902,9 @@ describe("main merge queue stages", () => {
     const live = liveRuleset();
     const plan = createPlan(live, "add-merge-queue");
     expect(queueRules(plan.payload)).toEqual([{ type: "merge_queue", parameters: MERGE_QUEUE_PARAMETERS }]);
-    expect(MERGE_QUEUE_PARAMETERS).toMatchObject({ merge_method: "SQUASH", grouping_strategy: "ALLGREEN" });
+    // Matches the owner's live tuning, so a re-apply never undoes it.
+    expect(MERGE_QUEUE_PARAMETERS).toEqual({ merge_method: "SQUASH", grouping_strategy: "ALLGREEN", max_entries_to_build: 3,
+      min_entries_to_merge: 1, max_entries_to_merge: 5, min_entries_to_merge_wait_minutes: 0, check_response_timeout_minutes: 180 });
     expect(plan.payload.rules.filter((rule: { type: string }) => rule.type !== "merge_queue")).toEqual(live.rules);
     expect(plan.after).toEqual(plan.before);
     expect(plan.diff).toEqual([{ op: "add", path: `/rules/${live.rules.length}`, value: queueRules(plan.payload)[0] }]);
