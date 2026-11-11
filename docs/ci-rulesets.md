@@ -156,6 +156,33 @@ workflow change. Preserve the full `Preflight` and `CodeQL` release-evidence
 identities and Beta/Production's existing barrier. Resume ordinary merge
 operations only after the current-head and incoming-head canaries remain green.
 
+## Merge queue on main
+
+The `add-merge-queue` stage adds exactly one `merge_queue` rule (squash,
+`ALLGREEN` grouping, up to five entries built and merged together, 60-minute
+check timeout) and changes nothing else; `remove-merge-queue` removes only that
+rule. Required checks are unchanged, so these stages skip the open-PR evidence
+check, but `apply --yes` still re-reads the live ruleset immediately before its
+single PUT and confirms the readback. An existing queue with other parameters is
+refused, never overwritten.
+
+Every required check reports on `merge_group`: Preflight (`quality`, `test`,
+`build`, `source-sync (macOS)`, `control plane`, `ui-smoke (composer)`,
+`secret scan (PR commit range)`, which scans from the queue's base), `codeql`
+and `actionlint`. Path selection is PR-only; a merge group always runs the full
+Preflight (about 22 minutes).
+
+```bash
+gh api --method GET repos/Withso/zeros/rulesets/20461995 > .context/ci-rollout/main-original.json
+node scripts/ci/ruleset-migration.mjs plan --stage add-merge-queue
+node scripts/ci/ruleset-migration.mjs apply --stage add-merge-queue --yes
+# Roll back:
+node scripts/ci/ruleset-migration.mjs apply --stage remove-merge-queue --yes
+```
+
+Qualify with a canary PR: enqueue it with `pnpm agent:merge <n>` and confirm the
+merge group's runs report every required check and that GitHub merged it.
+
 ## Rollback: restore producers, restore requirements, then retire replacements
 
 First restore the legacy workflow producers, triggers, and exact display names
