@@ -6,6 +6,7 @@ import { withSystemTx, type Tx } from "../../db.js";
 import { securityStreamAuthority } from "../../security-events.js";
 import { CLOUD_V2_LIVE_ACCESS } from "../workspace-access.js";
 import { LOCAL_COMMANDS_FEATURE, type ConnectedMac, type LocalDevice, type LocalDeviceBinding, type LocalDevicePresence, type LocalDeviceRegistration } from "./contract.js";
+import { localCommandDiagnostic } from "./diagnostics.js";
 
 export const DEVICE_HEARTBEAT_MS = 25_000;
 export const DEVICE_LEASE_MS = 65_000;
@@ -61,8 +62,9 @@ export class CloudLocalDevices {
     }, { consistentRead: true });
   }
 
-  register(user: AuthedUser, deviceId: string, input: LocalDeviceRegistration) {
-    return withSystemTx(this.pool, async tx => {
+  async register(user: AuthedUser, deviceId: string, input: LocalDeviceRegistration) {
+    let replayed = false;
+    const result = await withSystemTx(this.pool, async tx => {
       await localUserAuthority(tx, user, true);
       // The account row orders concurrent new installs against the device cap.
       await tx.query("SELECT id FROM users WHERE id=$1 FOR UPDATE", [user.id]);
@@ -72,6 +74,7 @@ export class CloudLocalDevices {
       if (old?.registration_request_id === input.requestId) {
         if (old.revoked_at || old.provider_session_id !== user.authentication.sessionId) throw changed();
         if (!old.registration_hash.equals(hash)) throw new HttpError(409, "device_registration_conflict", "This registration request was already used");
+        replayed = true;
       } else {
         if (Number((await tx.query(`SELECT count(*) FROM local_command_devices d
           JOIN auth_sessions s ON s.provider='workos' AND s.provider_session_id=d.provider_session_id AND s.user_id=d.user_id
@@ -88,6 +91,9 @@ export class CloudLocalDevices {
       const row = (await tx.query<DeviceRow>(`SELECT d.*,${presenceSql} AS presence_required FROM local_command_devices d WHERE user_id=$1 AND device_id=$2`, [user.id, deviceId])).rows[0]!;
       return { device: device(row), presence: presence(row), heartbeatIntervalMs: DEVICE_HEARTBEAT_MS };
     });
+    localCommandDiagnostic({ event: "device_registered", outcome: replayed ? "replayed" : "new", userId: user.id,
+      deviceId, registrationId: result.device.registrationId, instanceId: result.device.instanceId });
+    return result;
   }
 
   /** A NotifyUser hint reaches every live registration of the person. It

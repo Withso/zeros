@@ -4,6 +4,7 @@ import { CloudV2PromptSignals } from "../prompt-signals.js";
 import { HttpError } from "../../authz.js";
 import type { LocalDeviceBinding } from "./contract.js";
 import type { NotificationHint } from "../notify-user/store.js";
+import { LocalCommandTerminalDiagnostics } from "./diagnostics.js";
 
 const uuid = (value: unknown): value is string => typeof value === "string" && /^[0-9a-f-]{36}$/.test(value);
 export const deviceSignal = (userId: string, deviceId: string) => `device:${userId}:${deviceId}`;
@@ -16,7 +17,9 @@ export class CloudLocalCommandSignals {
   private readonly changes = new Set<() => void>();
   private readonly notificationListeners = new Map<string,Set<{ binding: LocalDeviceBinding; notify: (hint: NotificationHint) => void }>>();
   private readonly listener: PostgresNotificationSubscription;
+  private readonly diagnostics: LocalCommandTerminalDiagnostics;
   constructor(pool: pg.Pool) {
+    this.diagnostics = new LocalCommandTerminalDiagnostics(pool);
     this.listener = postgresNotificationSubscription(pool, {
       channels: ["zeros_local_commands", "zeros_security_event"],
       onReady: () => { this.signals.wakeAll(); for (const notify of this.changes) notify(); }, onDisconnect: () => this.signals.wakeAll(),
@@ -38,7 +41,10 @@ export class CloudLocalCommandSignals {
             return;
           }
           if ("userId" in value && "deviceId" in value && uuid(value.userId) && uuid(value.deviceId)) this.signals.wake(deviceSignal(value.userId, value.deviceId));
-          if ("workspaceId" in value && "requestId" in value && uuid(value.workspaceId) && uuid(value.requestId)) this.signals.wake(requestSignal(value.workspaceId, value.requestId));
+          if ("workspaceId" in value && "requestId" in value && uuid(value.workspaceId) && uuid(value.requestId)) {
+            this.signals.wake(requestSignal(value.workspaceId, value.requestId));
+            this.diagnostics.changed(value.workspaceId, value.requestId);
+          }
         } catch { /* A malformed hint cannot authorize delivery or execution. */ }
       },
     });
@@ -58,5 +64,5 @@ export class CloudLocalCommandSignals {
       throw error;
     }
   }
-  async close() { this.signals.wakeAll(); await this.listener.stop(); }
+  async close() { this.signals.wakeAll(); await this.listener.stop(); await this.diagnostics.close(); }
 }
