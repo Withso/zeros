@@ -127,8 +127,7 @@ function cursor(value: string | null | undefined): number {
 
 /** Streams outlive their HTTP authentication. Recheck the exact identity and
  * session in the same snapshot as each replay batch, including token expiry. */
-export async function securityStreamAuthority(tx:Tx,user:AuthedUser):Promise<boolean> {
-  const result=await tx.query<{live:boolean}>(`SELECT EXISTS (
+export const SECURITY_STREAM_AUTHORITY = `EXISTS (
     SELECT 1 FROM users account JOIN user_identities identity ON identity.user_id=account.id
     WHERE account.id=$1 AND account.auth_status='active' AND account.deleted_at IS NULL
       AND account.auth_revision=$4 AND identity.provider=$2 AND identity.provider_sub=$3 AND identity.status='active'
@@ -137,9 +136,14 @@ export async function securityStreamAuthority(tx:Tx,user:AuthedUser):Promise<boo
         WHERE session.provider='workos' AND session.provider_session_id=$5 AND session.user_id=account.id
           AND session.provider_sub=identity.provider_sub AND session.status='active' AND session.revoked_at IS NULL
           AND (session.provider_session_expires_at IS NULL OR session.provider_session_expires_at>now())))
-    ) AS live`,[user.id,user.identity.provider,user.identity.subject,user.accountRevision,
-    user.authentication.sessionId,user.authentication.tokenExpiresAt]);
-  return result.rows[0]?.live===true;
+    )`;
+export function securityStreamParameters(user: AuthedUser) {
+  return [user.id,user.identity.provider,user.identity.subject,user.accountRevision,
+    user.authentication.sessionId,user.authentication.tokenExpiresAt];
+}
+export async function securityStreamAuthority(tx:Tx,user:AuthedUser):Promise<boolean> {
+  const result = await tx.query<{ live: boolean }>(`SELECT ${SECURITY_STREAM_AUTHORITY} AS live`,securityStreamParameters(user));
+  return result.rows[0]?.live === true;
 }
 
 export async function getSecuritySnapshot(

@@ -417,6 +417,17 @@ describe("control-plane middleware wiring", () => {
     feedback: null,
     cloudWorkspaces: null,
   };
+  it("allows the desktop team-sharing opt-in header through real CORS preflight", async () => {
+    const app = createApp(config,{ query: vi.fn(async () => ({ rows: [] })) } as unknown as pg.Pool,
+      { from: null,token: null,apiUrl: "",inviteLinkBase: "" },{ clientCompatibility: harness().compatibility });
+    const response = await app.request("/v1/cloud-v2/workspaces",{ method: "OPTIONS",headers: {
+      origin: "http://localhost:5173","Access-Control-Request-Method": "GET",
+      "Access-Control-Request-Headers": "authorization,x-zeros-client,x-zeros-team-sharing",
+    } });
+    expect(response.status).toBe(204);
+    expect(response.headers.get("Access-Control-Allow-Headers")?.split(",")).toContain("x-zeros-team-sharing");
+    expect(response.headers.get("Access-Control-Allow-Credentials")).toBeNull();
+  });
   it("blocks unsupported user requests before dispatch, retains auth for untagged callers and allows CORS", async () => {
     const { compatibility, fetchLedger } = harness();
     const query = vi.fn(async () => ({ rows: [] }));
