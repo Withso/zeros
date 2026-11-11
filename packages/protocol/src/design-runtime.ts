@@ -213,6 +213,62 @@ export interface DesignRuntimeNodeDetails {
   hiddenBy?: "self" | "ancestor";
 }
 
+/** A value a layer sets on itself (its style attribute or a rule written for
+ * it) over one a class, a component or another rule gave it. */
+export interface DesignRuntimeFrameChange {
+  /** The property as the layer declares it, which can be a shorthand. */
+  property: string;
+  value: string;
+  replaced: DesignRuntimeStyleOrigin & {
+    value: string;
+    selector?: string;
+    subjectClasses?: string[];
+  };
+}
+
+/** Every layer in the frame with changes made by hand, from one bounded
+ * pass over the layers that carry a style attribute or a rule of their own. */
+export interface DesignRuntimeFrameChanges {
+  sourceVersion: string;
+  /** Layers looked at; at most DESIGN_RUNTIME_FRAME_CHANGE_LIMITS.layers. */
+  examined: number;
+  /** More layers carried their own styles than were looked at. */
+  truncated: boolean;
+  layers: { oid: string; name: string; changes: DesignRuntimeFrameChange[] }[];
+  /** Where each asked-about value comes from now: the layer itself or not,
+   * and its winning value (null when nothing sets it). */
+  follow?: { oid: string; property: string; own: boolean; value: string | null }[];
+}
+
+/** budgetMs: the layer pass stops once it has spent this long (one task in
+ * the frame's document) and reports `truncated`; followed values are still
+ * answered. */
+export const DESIGN_RUNTIME_FRAME_CHANGE_LIMITS = { layers: 200, changes: 32, follow: 64, value: 256, budgetMs: 12 } as const;
+
+function isFrameChangeValue(value: unknown): value is string {
+  return typeof value === "string" && value.length <= DESIGN_RUNTIME_FRAME_CHANGE_LIMITS.value;
+}
+
+export function isDesignRuntimeFrameChanges(value: unknown): value is DesignRuntimeFrameChanges {
+  if (!isRecord(value) || !isSourceVersion(value.sourceVersion) || !Array.isArray(value.layers)) return false;
+  if (typeof value.examined !== "number" || !Number.isInteger(value.examined) || value.examined < 0 ||
+    value.examined > DESIGN_RUNTIME_FRAME_CHANGE_LIMITS.layers || typeof value.truncated !== "boolean") return false;
+  if (value.layers.length > DESIGN_RUNTIME_FRAME_CHANGE_LIMITS.layers) return false;
+  const layersValid = value.layers.every((layer) =>
+    isRecord(layer) && typeof layer.oid === "string" && typeof layer.name === "string" && Array.isArray(layer.changes) &&
+    layer.changes.length <= DESIGN_RUNTIME_FRAME_CHANGE_LIMITS.changes &&
+    layer.changes.every((change) =>
+      isRecord(change) && typeof change.property === "string" && change.property.length <= 64 && isFrameChangeValue(change.value) &&
+      isRecord(change.replaced) && isFrameChangeValue(change.replaced.value) && isRuntimeStyleOrigin(change.replaced, true) &&
+      (change.replaced.selector === undefined || (typeof change.replaced.selector === "string" && change.replaced.selector.length <= 256)) &&
+      (change.replaced.subjectClasses === undefined ||
+        (Array.isArray(change.replaced.subjectClasses) && change.replaced.subjectClasses.every((name) => typeof name === "string")))));
+  if (!layersValid) return false;
+  return value.follow === undefined || (Array.isArray(value.follow) && value.follow.length <= DESIGN_RUNTIME_FRAME_CHANGE_LIMITS.follow &&
+    value.follow.every((entry) => isRecord(entry) && typeof entry.oid === "string" && typeof entry.property === "string" &&
+      typeof entry.own === "boolean" && (entry.value === null || isFrameChangeValue(entry.value))));
+}
+
 export const DESIGN_RUNTIME_NODE_STATES = ["hover", "focus", "focus-visible", "active", "disabled"] as const;
 export type DesignRuntimeNodeState = (typeof DESIGN_RUNTIME_NODE_STATES)[number];
 
@@ -683,12 +739,14 @@ export type DesignRuntimeMethod =
   | "clearPreviewInserts"
   /** Opt-in: hold the layer in one of its own states, view only. */
   | "holdNodeState"
-  | "releaseNodeState";
+  | "releaseNodeState"
+  /** Opt-in: the frame's changes made by hand, in one reply. */
+  | "getFrameChanges";
 
 /** Methods a runtime advertises only when the host's handshake lists them
  * in `features`, so a host that predates them still accepts the runtime's
  * capabilities. */
-export const DESIGN_RUNTIME_OPT_IN_METHODS = ["previewStylesheet", "setPlayback", "previewInsert", "clearPreviewInserts", "previewHistory", "commitStructure", "previewStructure", "clearPreviewStructure", "holdNodeState", "releaseNodeState"] as const;
+export const DESIGN_RUNTIME_OPT_IN_METHODS = ["previewStylesheet", "setPlayback", "previewInsert", "clearPreviewInserts", "previewHistory", "commitStructure", "previewStructure", "clearPreviewStructure", "holdNodeState", "releaseNodeState", "getFrameChanges"] as const;
 
 export interface DesignRuntimePlaybackStopped {
   sourceVersion: string;
@@ -777,6 +835,7 @@ const DESIGN_RUNTIME_METHODS = new Set<DesignRuntimeMethod>([
   "clearPreviewInserts",
   "holdNodeState",
   "releaseNodeState",
+  "getFrameChanges",
 ]);
 
 export interface DesignRuntimeHostRequest {
@@ -1292,7 +1351,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   ];
   // Advertised only to a host whose handshake asks for them, so a host that
   // predates a method still accepts these capabilities.
-  var OPT_IN_METHODS = ["previewStylesheet", "setPlayback", "previewInsert", "clearPreviewInserts", "previewHistory", "commitStructure", "previewStructure", "clearPreviewStructure", "holdNodeState", "releaseNodeState"];
+  var OPT_IN_METHODS = ["previewStylesheet", "setPlayback", "previewInsert", "clearPreviewInserts", "previewHistory", "commitStructure", "previewStructure", "clearPreviewStructure", "holdNodeState", "releaseNodeState", "getFrameChanges"];
   var enabledOptInMethods = [];
   var MAX_PREVIEW_STYLESHEET_CHARS = 4194304;
   // Everything one frame of direct manipulation paints from. Deliberately tiny:
@@ -3502,6 +3561,95 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     } catch (_error) {
       // Older-runtime behavior: the inspector shows computed values.
     }
+  }
+
+  // ── Changes made by hand ──────────────────────────────────
+  // A value a layer sets on itself over one a class, a component or another
+  // rule gave it, as the panel's Changed here names them. Only layers that
+  // carry a style attribute or a rule written for them can have one, so the
+  // pass starts from those; it reads the rule index and no computed style.
+
+  function ownChangesOf(element, oid) {
+    var index = cascadeRules(styleScopeOf(element));
+    var matches = matchingEntries(element, index.rules);
+    var names = declarationProperties(element.style);
+    var ownRules = styleRulesByOid().get(oid) || [];
+    for (var ruleIndex = 0; ruleIndex < ownRules.length; ruleIndex += 1) {
+      var declared = declarationProperties(ownRules[ruleIndex].style);
+      for (var nameIndex = 0; nameIndex < declared.length; nameIndex += 1) {
+        if (names.indexOf(declared[nameIndex]) < 0) names.push(declared[nameIndex]);
+      }
+    }
+    var changes = [];
+    for (var position = 0; position < names.length && changes.length < ${DESIGN_RUNTIME_FRAME_CHANGE_LIMITS.changes}; position += 1) {
+      var property = names[position];
+      var winner = winningDeclaration(element, property, matches);
+      if (!winner || !winner.value || !ownsWinner(winner, oid)) continue;
+      var target = resetTargetOf(element, property, winner, matches, oid);
+      if (!target) continue;
+      var other = winningDeclaration(element, property, matches, target);
+      if (!other || !other.value) continue;
+      var replaced = originOfWinner(other);
+      replaced.value = other.value.slice(0, ${DESIGN_RUNTIME_FRAME_CHANGE_LIMITS.value});
+      var entry = other.match && other.match.entry;
+      if (entry && entry.selector) {
+        replaced.selector = (entry.reportSelector || entry.selector).slice(0, 256);
+        var classes = subjectClassesOf(element, other.match);
+        if (classes.length > 0) replaced.subjectClasses = classes;
+      }
+      changes.push({ property: property, value: winner.value.slice(0, ${DESIGN_RUNTIME_FRAME_CHANGE_LIMITS.value}), replaced: replaced });
+    }
+    return changes;
+  }
+
+  function frameChangesOf(args) {
+    ensureElementMap();
+    var candidates = [];
+    var seen = new Set();
+    var styled = document.querySelectorAll("[style]");
+    for (var styledIndex = 0; styledIndex < styled.length; styledIndex += 1) {
+      var candidate = styled[styledIndex];
+      if (!targetOidOf(candidate) || seen.has(candidate)) continue;
+      seen.add(candidate);
+      candidates.push(candidate);
+    }
+    styleRulesByOid().forEach(function (_rules, oid) {
+      var owner = elementsByOid.get(oid);
+      if (owner && !seen.has(owner)) {
+        seen.add(owner);
+        candidates.push(owner);
+      }
+    });
+    var limit = Math.min(candidates.length, ${DESIGN_RUNTIME_FRAME_CHANGE_LIMITS.layers});
+    var started = performance.now();
+    var examined = 0;
+    var layers = [];
+    for (var layerIndex = 0; layerIndex < limit; layerIndex += 1) {
+      if (layerIndex > 0 && performance.now() - started > ${DESIGN_RUNTIME_FRAME_CHANGE_LIMITS.budgetMs}) break;
+      examined += 1;
+      var layer = candidates[layerIndex];
+      var layerOid = targetOidOf(layer);
+      var found = ownChangesOf(layer, layerOid);
+      if (found.length > 0) layers.push({ oid: layerOid, name: nameOf(layer), changes: found });
+    }
+    var result = { sourceVersion: SOURCE_VERSION, examined: examined, truncated: candidates.length > examined, layers: layers };
+    if (Array.isArray(args.follow)) {
+      result.follow = [];
+      for (var followIndex = 0; followIndex < args.follow.length && result.follow.length < ${DESIGN_RUNTIME_FRAME_CHANGE_LIMITS.follow}; followIndex += 1) {
+        var asked = args.follow[followIndex];
+        if (!asked || typeof asked.oid !== "string" || typeof asked.property !== "string" || asked.property.length > 64) continue;
+        var element = elementsByOid.get(asked.oid);
+        if (!element) continue;
+        var current = winningDeclaration(element, asked.property, matchingEntries(element, cascadeRules(styleScopeOf(element)).rules));
+        result.follow.push({
+          oid: asked.oid,
+          property: asked.property,
+          own: Boolean(current && current.value && ownsWinner(current, asked.oid)),
+          value: current && current.value ? current.value.slice(0, ${DESIGN_RUNTIME_FRAME_CHANGE_LIMITS.value}) : null
+        });
+      }
+    }
+    return result;
   }
 
   function frameDetailsOf(element) {
@@ -5961,6 +6109,10 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       case "releaseNodeState":
         if (enabledOptInMethods.indexOf("releaseNodeState") < 0) throw new Error("Unknown design runtime method: releaseNodeState");
         return { released: releaseHeldState() };
+      case "getFrameChanges":
+        if (enabledOptInMethods.indexOf("getFrameChanges") < 0) throw new Error("Unknown design runtime method: getFrameChanges");
+        // Read as Default: a held state's copies are no layer's own value.
+        return withoutHeldState(function () { return frameChangesOf(args); });
       default:
         throw new Error("Unknown design runtime method: " + method);
     }

@@ -269,6 +269,49 @@ describe("design frame runtime client", () => {
     }
   });
 
+  it("negotiates the frame's changes made by hand and validates the reply", async () => {
+    const source = { postMessage: vi.fn() };
+    const connection = connectDesignFrameRuntime("frame-changes", "home.html", SOURCE_VERSION,
+      { contentWindow: source } as unknown as HTMLIFrameElement, {},
+      { setTimeout: vi.fn(() => 7), clearTimeout: vi.fn() });
+    const port = source.postMessage.mock.calls[0]![1].transfer[0] as MessagePort;
+    const requests: Array<Record<string, unknown>> = [];
+    let reply: () => unknown = () => null;
+    port.onmessage = ({ data }) => {
+      if (data.type !== "request") return;
+      requests.push(data);
+      port.postMessage({ protocol: DESIGN_RUNTIME_PROTOCOL, version: DESIGN_RUNTIME_VERSION, type: "response",
+        requestId: data.requestId, ok: true, result: reply() });
+    };
+    port.start();
+    const changes = (overrides: Record<string, unknown> = {}) => ({
+      sourceVersion: SOURCE_VERSION, examined: 1, truncated: false,
+      layers: [{ oid: "send", name: "Send", changes: [{ property: "border-radius", value: "8px", replaced: { origin: "frame", value: "6px", selector: ".btn" } }] }],
+      ...overrides,
+    });
+    try {
+      // A runtime that predates it fails honestly before any request is sent.
+      await expect(connection.getFrameChanges!()).rejects.toMatchObject({ code: "METHOD_NOT_SUPPORTED" });
+      expect(requests).toHaveLength(0);
+      port.postMessage({ protocol: DESIGN_RUNTIME_PROTOCOL, version: DESIGN_RUNTIME_VERSION, type: "event", event: "ready",
+        payload: { sourceVersion: SOURCE_VERSION, capabilities: { ...capabilities, methods: [...capabilities.methods, "getFrameChanges"] }, snapshot: snapshot(1) } });
+      await vi.waitFor(() => expect(connection.supports("getFrameChanges")).toBe(true));
+      reply = () => changes();
+      await expect(connection.getFrameChanges!()).resolves.toMatchObject({ layers: [{ oid: "send" }] });
+      expect(requests.at(-1)).toMatchObject({ method: "getFrameChanges", args: {} });
+      await connection.getFrameChanges!([{ oid: "send", property: "border-radius" }]);
+      expect(requests.at(-1)).toMatchObject({ args: { follow: [{ oid: "send", property: "border-radius" }] } });
+      // Another generation's reply, or a malformed one, is refused.
+      reply = () => changes({ sourceVersion: NEXT_SOURCE_VERSION });
+      await expect(connection.getFrameChanges!()).rejects.toThrow("malformed");
+      reply = () => changes({ examined: "many" });
+      await expect(connection.getFrameChanges!()).rejects.toThrow("malformed");
+    } finally {
+      connection.destroy();
+      port.close();
+    }
+  });
+
   it("negotiates frame playback and source-fences lifecycle events on its private port", async () => {
     const source = { postMessage: vi.fn() };
     const onPlaybackStopped = vi.fn();
@@ -418,7 +461,7 @@ describe("design frame runtime client", () => {
       sourceVersion: SOURCE_VERSION,
       // Opt-in methods: a runtime advertises them only when asked, so a host
       // that predates one still accepts the runtime's capabilities.
-      features: ["previewStylesheet", "setPlayback", "previewInsert", "clearPreviewInserts", "previewHistory", "commitStructure", "previewStructure", "clearPreviewStructure", "holdNodeState", "releaseNodeState"],
+      features: ["previewStylesheet", "setPlayback", "previewInsert", "clearPreviewInserts", "previewHistory", "commitStructure", "previewStructure", "clearPreviewStructure", "holdNodeState", "releaseNodeState", "getFrameChanges"],
     });
     expect(handshake?.[1]).toMatchObject({ targetOrigin: "*" });
     const framePort = handshake?.[1]?.transfer?.[0] as MessagePort;

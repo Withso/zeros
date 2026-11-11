@@ -39,7 +39,8 @@ import { wireWorkbenchConnectionRejection } from "../../state/workbench-availabi
 
 // ── Context ──────────────────────────────────────────────
 
-const BridgeContext = createContext<RuntimeClient | null>(null);
+/** Exported for harnesses that supply their own connected client. */
+export const BridgeContext = createContext<RuntimeClient | null>(null);
 
 function disposeClientIfEffectWasNotReplayed(
   client: RuntimeClient,

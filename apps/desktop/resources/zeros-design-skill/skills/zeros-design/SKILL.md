@@ -50,7 +50,7 @@ Every frame in a directory follows these rules, so people and agents share one v
 | --- | --- | --- |
 | Create or edit frames, pages, components or assets | [`reference/format.md`](reference/format.md) | [`reference/craft.md`](reference/craft.md) |
 | Recreate a reference image or an existing design | [`reference/craft.md`](reference/craft.md) | [`reference/verify.md`](reference/verify.md) |
-| Tokens, themes, fonts, style sources, or syncing the application's styles | [`reference/styling.md`](reference/styling.md) | [`reference/verify.md`](reference/verify.md) |
+| Tokens, themes, fonts, style sources, syncing the application's styles, or tidying changes made by hand | [`reference/styling.md`](reference/styling.md) | [`reference/verify.md`](reference/verify.md) |
 | Show every state or variant of a component or screen | [`reference/states.md`](reference/states.md) | [`reference/format.md`](reference/format.md) |
 | Read a frame a person has edited, or predict how markup appears in the inspector | [`reference/editor.md`](reference/editor.md) | [`reference/styling.md`](reference/styling.md) |
 | Check one frame or many generated frames | [`reference/verify.md`](reference/verify.md) | |

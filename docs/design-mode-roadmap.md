@@ -2044,6 +2044,52 @@ original unsnapped geometry writes nothing and preserves authored sizing.
   filter and a held state. A layer inside a component instance cannot be
   selected today (the expander drops `data-oid` from definition content),
   so "Part of <component>." waits for Phase 7.
+- **Frame changes and Tidy:** with a frame (not a layer in it) selected, an
+  info panel at the foot of the side panel, directly above Layers
+  (`design-frame-changes-panel.tsx`), counts the frame's changes made by
+  hand: a value a layer sets over one its class, component or another rule
+  gave it, the hover card's Changed here, one per field as the panel names
+  fields ("3 changes made by hand", "Corner radius, Fill and Gap, on 2
+  layers."). A value set on a layer that replaces nothing is not counted, or
+  every drawn layer would show. The count comes from the opt-in runtime
+  method `getFrameChanges`: one request and one reply, starting from the
+  elements with a `style` attribute and the oids of `[data-oid]` rules, with
+  no `getComputedStyle`. The layer pass is one task in the frame's document,
+  so it stops at 200 layers or once it has spent 12 ms, whichever comes
+  first (`truncated` says so, and the panel adds "Not every layer was
+  checked, so there may be more."). Measured in Chromium on Linux: the
+  harness frame takes about 1 ms on the first read and 0.3 ms after; 200
+  layers that each override their class, under about 300 rules with states
+  and media, took 16-26 ms (median, first read) before the budget. It is read when the frame becomes selected and on each new
+  generation, keyed by workspace and frame and holding the generation it
+  describes; a newer reply replaces it, a late or replaced document's reply is
+  dropped, and a frame whose document has not connected yet is read once it
+  connects. With no changes, no Tidy running and none just done, nothing is
+  mounted. Tidy sends one brief (`designTidyBrief`, "Tidy 3 changes in
+  home.html") to a new chat and writes nothing itself; the packaged Zeros
+  Design skill's "Tidy changes made by hand" (reference/styling.md) moves
+  each value into a token, then a class, then the component, otherwise leaves
+  it, checks each theme looks the same before and after, and never stages or
+  commits. While its turn runs the panel reads "Tidying 3 changes" with View
+  chat; one sessions-store subscription exists only while a Tidy runs, and
+  the turn ends when that chat stops streaming after it started. Then the
+  panel compares the changes before and after, asks where each value that
+  left the layer comes from now (the same method's `follow`, at most 64,
+  asked for by the panel), and reads
+  "Tidied" with what moved ("2 now use tokens, 1 stays on its layer. Nothing
+  is committed.") and Review, which opens the frame's file in Changes (warmed
+  on pointer or focus). Selecting something else or the frame's next change
+  dismisses it. No toast, canvas mark or indicator elsewhere. Local only:
+  cloud v2 has no Design surface. Known limits: the frame's look is not
+  verified by the panel, so the done line does not say "The frame looks the
+  same" (the skill checks it); a Tidy whose turn ends while something else
+  is selected keeps its outcome until the frame is selected again, and
+  shows "Tidying" until that outcome is read; the outcome counts what the frame shows in the
+  active theme; a frame whose pass hits the budget or the 200-layer cap counts
+  only the layers it reached, so that count can differ from one read to the
+  next; past 64 values that left their layers, and for a layer the agent
+  deleted, the outcome can say only "no longer on its layer", not where the
+  value went; the harness exports `BridgeContext` to supply a connected client.
 - **Token picker:** `design-token-catalog.ts` derives each token's types from
   its resolved value (colour, length, percentage, number, weight, font
   family, shadow, duration, easing; aliases resolve, cycles and undeclared

@@ -476,6 +476,26 @@ async function main() {
   const ConversationPane = workbenchHarness ? (await import("../shell/conversation/conversation-pane")).ConversationPane : null;
   const ReferenceFixture = selectionReferencesHarness ? (await import("./harness-design-selection-reference")).DesignSelectionReferenceFixture : null;
   const { ActionsCtx } = await import("../features/agent/sessions-context");
+  // Design's agent briefs (Tidy, Ask agent) open a chat and send to it: one
+  // agent binds new chats at once, sessions start resident, and each prompt
+  // is recorded instead of run. Smokes drive a turn through the store.
+  const { BLANK: blankSession, useSessionsStore: harnessSessions } = await import("../features/agent/sessions-store");
+  const agentPrompts: Array<{ chatId: string; text: string; displayText?: string; autoAction?: string }> = [];
+  if (styleOriginsHarness) {
+    const { loadAgents } = await import("../features/agent/agents-cache");
+    await loadAgents(async () => [{ id: "harness-agent", name: "Harness agent", installed: true, authenticated: true, version: "1.0.0", description: "", distribution: {} }] as never);
+    const target = window as Window & { __zerosHarnessAgentPrompts?: typeof agentPrompts; __zerosHarnessSessions?: typeof harnessSessions };
+    target.__zerosHarnessAgentPrompts = agentPrompts;
+    target.__zerosHarnessSessions = harnessSessions;
+    // What each frame's changes read found, so a smoke can tell "none" from "not read yet".
+    const { useDesignFrameChangesStore } = await import("../features/design-workspace/state/design-frame-changes");
+    (window as Window & { __zerosHarnessFrameChanges?: typeof useDesignFrameChangesStore }).__zerosHarnessFrameChanges = useDesignFrameChangesStore;
+  }
+  const residentSession = (chatId: string, agentId?: string) =>
+    harnessSessions.setState((state) => ({
+      sessions: { ...state.sessions, [chatId]: { ...(state.sessions[chatId] ?? blankSession), transcriptState: "resident",
+        ...(agentId ? { agentId, sessionId: `harness-session-${chatId}` } : {}) } },
+    }));
   const { createRoot } = await import("react-dom/client");
   const { flushSync } = await import("react-dom");
   // Preview races must use this harness's exact runtime even when Chromium's
@@ -515,7 +535,8 @@ async function main() {
     await import("../features/design-workspace/state/design-renderer-resources");
   const { designFramePreviews } =
     await import("../features/design-workspace/state/use-design-frame-previews");
-  const { setActiveBridge } = await import("../platform/bridge/active-bridge");
+  const { getActiveBridge, setActiveBridge } = await import("../platform/bridge/active-bridge");
+  const { BridgeContext } = await import("../platform/bridge/use-bridge");
   const { setWorkspaceRowsForTesting } = await import("../state/use-projects");
   const { useWorkspaceStore } = await import("../state/store");
   if (attributeContinuityHarness) {
@@ -2710,9 +2731,15 @@ async function main() {
       ? <RetainedDesignDeck workspace={visibleWorkspace} folder={visibleWorkspace.path} active={surfaceActive} />
       : <DesignWorkspaceColumn workspace={visibleWorkspace} folder={visibleWorkspace.path} surfaceActive={surfaceActive} />;
     return (
+      <BridgeContext.Provider value={styleOriginsHarness ? getActiveBridge() : null}>
       <ActionsCtx.Provider value={new Proxy({
-        setRetainedChatIds: () => {}, getSession: () => undefined, getCloseActivity: () => ({ running: false, queuedCount: 0 }),
-        hydrateChat: async () => {}, listAgents: async () => [],
+        setRetainedChatIds: () => {}, getCloseActivity: () => ({ running: false, queuedCount: 0 }), listAgents: async () => [],
+        getSession: (chatId: string) => (styleOriginsHarness ? harnessSessions.getState().sessions[chatId] : undefined),
+        hydrateChat: async (chatId: string) => { if (styleOriginsHarness) residentSession(chatId); },
+        ensureSession: async (chatId: string, agentId: string) => { if (styleOriginsHarness) residentSession(chatId, agentId); },
+        sendPrompt: async (chatId: string, text: string, displayText?: string, _attachments?: unknown, _bubbles?: unknown, _segments?: unknown, autoAction?: string) => {
+          agentPrompts.push({ chatId, text, displayText, autoAction });
+        },
       }, { get: (target, key) => key in target ? target[key as keyof typeof target] : () => Promise.resolve() }) as unknown as import("../features/agent/sessions-context").SessionsCtx}>
       <TooltipProvider delayDuration={300} skipDelayDuration={0}>
         <main data-harness-design-root={rootPath} data-harness-design-owner={measureContinuityHarness ? ownerId : undefined}
@@ -2730,6 +2757,7 @@ async function main() {
         <Toaster />
       </TooltipProvider>
       </ActionsCtx.Provider>
+      </BridgeContext.Provider>
     );
   }
 

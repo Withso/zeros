@@ -102,6 +102,17 @@ When the person asks you to sync, connect or use the application's styles, or Ze
 
 After syncing, the theme editor's **Update** re-reads every source from disk, reruns builds and retries font downloads, for changes Zeros cannot see (a package installed from a terminal, a failed build or download). A source whose declaration no longer matches the repository (a moved file, a theme selector the stylesheet no longer uses) shows **Ask agent to fix**, which sends you that source's status: correct its declaration, run `design styles`, and report.
 
+## Tidy changes made by hand
+
+When Zeros sends "Tidy N changes in <frame>", or the person asks you to tidy a frame's hand changes, each listed change is a value a layer sets on itself (its `style` attribute or a rule written for its `data-oid`) over one its class, component or another rule gave it. For each one, in this order:
+
+1. **A token.** When the value equals a token's value (in `tokens.css` or an imported style source; see Choosing tokens), write `var(--name)` in its place on the layer.
+2. **The class.** When every layer using the class should take the new value, move it into the class's rule and remove it from the layer. Check the other layers the rule matches first; when they should not change, leave it.
+3. **The component.** When the layer belongs to a component (`components/<name>.html`), change the component the same way.
+4. **Otherwise leave it** on the layer.
+
+The frame must look the same: validate it and capture it before and after in each theme, and undo a move that changes how it looks. Never stage or commit. Report what moved where and what stayed.
+
 ## Choosing tokens
 
 - **The catalog.** The theme editor lists every variable a frame can use: Manual (`tokens.css`) and each imported style source, with its type, group and per-theme values. `design styles` reports each source's status and token count, and the color picker's Theme tab lists the color tokens a frame resolves (`reference/editor.md`).

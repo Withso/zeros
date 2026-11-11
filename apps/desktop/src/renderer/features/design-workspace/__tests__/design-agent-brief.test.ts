@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { designForcedValueBrief, designSourceFixBrief, designSyncBrief } from "../design-agent-brief";
+import { designForcedValueBrief, designSourceFixBrief, designSyncBrief, designTidyBrief } from "../design-agent-brief";
 
 const source = {
   id: "app",
@@ -70,5 +70,27 @@ describe("Design agent briefs", () => {
     // Without a named source the rule stands alone.
     expect(designForcedValueBrief({ directory: "D", frame: "f.html", layer: "L", nodeId: "n", property: "color", label: "Text color", value: "red", rule: ".x" }).text)
       .toContain("forced by `.x` with !important");
+  });
+
+  it("asks to tidy a frame's changes made by hand through the skill, listing each one", () => {
+    const brief = designTidyBrief({
+      directory: "Shop - Design",
+      frame: "sign-in.html",
+      changes: [
+        { oid: "send", layer: "Send", property: "border-radius", value: "8px",
+          replaced: { value: "var(--radius-md)", selector: ".btn" } },
+        { oid: "card", layer: "Card", property: "gap", value: "12px",
+          replaced: { component: "card", value: "8px", selector: ".card" } },
+      ],
+    });
+    expect(brief.label).toBe("Tidy 2 changes in sign-in.html");
+    expect(brief.text).toContain('"sign-in.html" in the Design directory "Shop - Design"');
+    expect(brief.text).toContain('Follow "Tidy changes made by hand" in the Zeros Design skill');
+    expect(brief.text).toContain('- Send (data-oid "send"): border-radius: 8px over var(--radius-md) from .btn');
+    expect(brief.text).toContain('- Card (data-oid "card"): gap: 12px over 8px from the component card');
+    expect(brief.text).toContain("The frame must look the same. Do not stage or commit.");
+    expect(brief.text).toContain("Ask before changing application code.");
+    expect(designTidyBrief({ directory: "D", frame: "a.html", changes: [{ oid: "x", layer: "X", property: "gap", value: "1px", replaced: { value: "2px" } }] }).label)
+      .toBe("Tidy 1 change in a.html");
   });
 });
