@@ -108,6 +108,18 @@ describe("full runtime CI barrier", () => {
     expect(sleep).toHaveBeenCalledOnce(); expect(read).toHaveBeenCalledTimes(8);
     expect(read.mock.calls.every(([path]) => /preflight\.yml|codeql\.yml/.test(path))).toBe(true);
   });
+  it.each(["failure", "cancelled"])("stops as soon as exact-source Preflight concluded %s, instead of holding the Alpha lock", async conclusion => {
+    const config = { repository: "example/project", workflowSha: source };
+    const read = vi.fn(async (path: string) => {
+      const file = path.includes("preflight.yml") ? "preflight.yml" : "codeql.yml";
+      return { total_count: 1, workflow_runs: [{ id: 10, run_attempt: 2, path: `.github/workflows/${file}`, name: file === "preflight.yml" ? "Preflight" : "CodeQL",
+        head_sha: source, status: file === "preflight.yml" ? "completed" : "in_progress", conclusion: file === "preflight.yml" ? conclusion : null,
+        event: "push", repository: { full_name: config.repository }, head_repository: { full_name: config.repository } }] };
+    });
+    const sleep = vi.fn(async () => {});
+    await expect(waitForRuntimeCI(config, read, { sleep, attempts: 660 })).rejects.toThrow(new RegExp(`Preflight run 10 attempt 2 concluded ${conclusion}`));
+    expect(sleep).not.toHaveBeenCalled();
+  });
   it("refuses missing full CI within a bounded wait", async () => {
     const read = vi.fn(async () => ({ total_count: 0, workflow_runs: [] })), sleep = vi.fn(async () => {});
     await expect(waitForRuntimeCI({ repository: "example/project", workflowSha: source }, read, { sleep, attempts: 2 })).rejects.toThrow(/timed out/);

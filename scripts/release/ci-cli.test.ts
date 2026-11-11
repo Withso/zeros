@@ -289,6 +289,43 @@ describe("exact-source CI CLI mutation authority", () => {
     expect(mocked.requiredChecks).not.toHaveBeenCalled();
   });
 
+  it("waits for a destination another release has made unavailable, then admits this candidate", async () => {
+    const output = await automaticBarrier();
+    process.chdir(path.dirname(output));
+    vi.stubEnv("ZEROS_ALPHA_FORWARD_ONLY", "enabled");
+    vi.stubEnv("GITHUB_RUN_ID", "300"); vi.stubEnv("GITHUB_RUN_ATTEMPT", "1");
+    const { AlphaDestinationUnavailableError } = await import("./alpha-frontier");
+    mocked.assertCurrent.mockRejectedValueOnce(new AlphaDestinationUnavailableError("Alpha live API/schema identity is unavailable"))
+      .mockResolvedValue(undefined);
+    mocked.requiredChecks.mockResolvedValue([{ workflow: "Preflight", runId: 100, attempt: 1, succeeded: true }]);
+    mocked.waitForRequiredCI.mockImplementation(async (read: () => Promise<unknown[]>, options: { failFast?: boolean }) => {
+      expect(options.failFast).toBe(true);
+      for (;;) { const evidence = await read(); if (evidence.length) return evidence; }
+    });
+    await import("./ci-cli");
+    await vi.waitFor(() => expect(console.log).toHaveBeenCalledWith(expect.stringContaining("Alpha gate succeeded")));
+    expect(await readFile(output, "utf8")).toBe("admission_issued=true\nready=true\n");
+    expect(mocked.assertCurrent.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(process.exitCode).toBeUndefined();
+  });
+
+  it("turns a destination unavailable for 45 minutes red instead of a green skip", async () => {
+    const output = await automaticBarrier();
+    vi.stubEnv("ZEROS_ALPHA_FORWARD_ONLY", "enabled");
+    const { AlphaDestinationUnavailableError } = await import("./alpha-frontier");
+    mocked.assertCurrent.mockRejectedValue(new AlphaDestinationUnavailableError("Alpha live API/schema identity is unavailable"));
+    let now = 1_000_000;
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    mocked.waitForRequiredCI.mockImplementation(async (read: () => Promise<unknown[]>) => {
+      for (;;) { await read(); now += 60_000; }
+    });
+    await import("./ci-cli");
+    await vi.waitFor(() => expect(console.error).toHaveBeenCalledWith(expect.stringMatching(/unavailable for 45 minutes/)));
+    expect(process.exitCode).toBe(1);
+    expect(console.log).not.toHaveBeenCalled();
+    await expect(readFile(output)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it.each(["--verify", "worker"])("keeps an unavailable destination red outside initial admission (%s)", async location => {
     const output = await automaticBarrier();
     if (location === "--verify") process.argv[2] = location;

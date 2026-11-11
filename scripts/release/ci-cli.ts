@@ -1,7 +1,12 @@
 import { appendFile, mkdir, writeFile } from "node:fs/promises";
 import { PromotionError, releaseSource, requireCheck } from "./contracts";
 import { CandidateSupersededError } from "./alpha-ci";
-import { AlphaAdmissionReceipt, AlphaAdmissionRejectedError, AlphaPublicationPendingError, alphaForwardOnlyMode } from "./alpha-frontier";
+import { AlphaAdmissionReceipt, AlphaAdmissionRejectedError, AlphaDestinationUnavailableError, AlphaPublicationPendingError,
+  alphaForwardOnlyMode } from "./alpha-frontier";
+
+/** Another Alpha release's hosted promotion and runtime publication take about
+ * 25 minutes; a destination unavailable for longer than this is red. */
+const DESTINATION_WAIT_MS = 45 * 60_000;
 import { waitForRequiredCI } from "./ci";
 import { githubClient } from "./github";
 import { command } from "./io";
@@ -26,6 +31,7 @@ async function main() {
   };
   const required = await github.requiredWorkflows();
   let publicationPending: { since: number; observations: number; error: AlphaPublicationPendingError } | undefined;
+  let destinationUnavailableSince: number | undefined;
   try {
     if (mode === "--wait") await waitForRequiredCI(async () => {
       if (publicationPending && Date.now() - publicationPending.since >= 120_000) throw publicationPending.error;
@@ -37,8 +43,17 @@ async function main() {
         if (barrier && required.every(check => evidence.some(item => item.workflow === check.name && item.succeeded))) await github.assertCurrent();
         if (publicationPending && Date.now() - publicationPending.since >= 120_000) throw publicationPending.error;
         publicationPending = undefined;
+        destinationUnavailableSince = undefined;
         return evidence;
       } catch (error) {
+        // Skipping here left the newest green commit off Alpha until the next
+        // push (160ba5e, 2026-11-11). Wait for the other release instead.
+        if (barrier && error instanceof AlphaDestinationUnavailableError) {
+          destinationUnavailableSince ??= Date.now();
+          if (Date.now() - destinationUnavailableSince >= DESTINATION_WAIT_MS)
+            throw new PromotionError(`${error.message}; destinations stayed unavailable for ${DESTINATION_WAIT_MS / 60_000} minutes`);
+          return [];
+        }
         if (!barrier || !(error instanceof AlphaPublicationPendingError)) throw error;
         publicationPending ??= { since: Date.now(), observations: 0, error };
         publicationPending.error = error;
@@ -48,7 +63,7 @@ async function main() {
         if (++publicationPending.observations >= 12 || Date.now() - publicationPending.since >= 120_000) throw error;
         return [];
       }
-    }, {}, required);
+    }, { failFast: barrier }, required);
     else await github.assertRequiredChecks();
     if (!barrier) await github.assertCurrent();
   } catch (error) {

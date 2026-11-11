@@ -165,6 +165,29 @@ describe("automatic Alpha exact-source evidence", () => {
       .rejects.toBeInstanceOf(CandidateSupersededError);
   });
 
+  it.each(["failure", "cancelled", "timed_out"])("fails fast on a %s gate for the current head instead of polling for 110 minutes", async conclusion => {
+    const { client } = fixture({ jobs: [{ ...gate, conclusion }] });
+    const sleep = vi.fn(async () => {});
+    await expect(waitForRequiredCI(() => client.requiredChecks(), { attempts: 660, sleep, failFast: true }, ALPHA_REQUIRED_CI))
+      .rejects.toThrow(/Preflight .*concluded without success/);
+    expect(sleep).not.toHaveBeenCalled();
+  });
+
+  it("fails fast on a completed current-head run that never produced a green gate", async () => {
+    const { client } = fixture({ preflight: [{ ...preflight, status: "completed", conclusion: "failure" }], jobs: [] });
+    const sleep = vi.fn(async () => {});
+    await expect(waitForRequiredCI(() => client.requiredChecks(), { sleep, failFast: true }, ALPHA_REQUIRED_CI)).rejects.toThrow(/concluded without success/);
+    expect(sleep).not.toHaveBeenCalled();
+  });
+
+  it("still waits for a running gate with fail-fast", async () => {
+    const state = { ...gate, status: "in_progress", conclusion: null as string | null };
+    const { client } = fixture({ jobs: [state] });
+    const sleep = vi.fn(async () => { state.status = "completed"; state.conclusion = "success"; });
+    await waitForRequiredCI(() => client.requiredChecks(), { attempts: 3, sleep, failFast: true }, ALPHA_REQUIRED_CI);
+    expect(sleep).toHaveBeenCalledOnce();
+  });
+
   it("keeps waiting for a gate whose producers are still running when main has moved on", async () => {
     const error = await fixture({ jobs: [{ ...gate, status: "queued", conclusion: null }], branchSha: "b".repeat(40) })
       .client.assertRequiredChecks().catch(error => error);

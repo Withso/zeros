@@ -263,7 +263,17 @@ jobs:
           # Advance the schema/worker baseline only after publishing the assets.
           gh api --method PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/$TAG" \
             -f sha="$GITHUB_SHA" -F force=true --silent
-          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" --jq .object.sha)" = "$GITHUB_SHA"
+          # An immediate ref read can still return the old commit; a bare
+          # `test` here exited 1 silently after a complete publication.
+          for attempt in 1 2 3 4 5 6; do
+            tag_sha=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" --jq .object.sha) || tag_sha=""
+            if [ "$tag_sha" = "$GITHUB_SHA" ]; then break; fi
+            if [ "$attempt" -eq 6 ]; then
+              echo "::error::The $TAG tag reads back as ${tag_sha:-unavailable}, not $GITHUB_SHA, after moving it."
+              exit 1
+            fi
+            sleep $(( attempt * 5 ))
+          done
           pnpm exec tsx scripts/release/release-ledger-cli.ts --verify
           echo "✓ published $TITLE → release '$TAG' (prerelease, alpha-mac.yml feed)"
 

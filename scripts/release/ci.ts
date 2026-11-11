@@ -1,5 +1,5 @@
 import { poll } from "./io";
-import { requireCheck } from "./contracts";
+import { PromotionError, requireCheck } from "./contracts";
 
 export const REQUIRED_CI = [
   { file: "preflight.yml", name: "Preflight" },
@@ -12,7 +12,9 @@ type WorkflowRun = {
   status: string; conclusion: string | null; event: string;
   repository: { full_name: string }; head_repository: { full_name: string };
 };
-export type RequiredCIEvidence = Array<{ workflow: string; runId: number; attempt: number; succeeded: boolean }>;
+/** `failed` names a newest run/attempt that already concluded without
+ * success; only a fail-fast wait acts on it (a rerun is a newer attempt). */
+export type RequiredCIEvidence = Array<{ workflow: string; runId: number; attempt: number; succeeded: boolean; failed?: string }>;
 
 export function requiredCIEvidence(candidate: Candidate, file: string, name: string, value: unknown): RequiredCIEvidence[number] {
   const response = value as { total_count?: unknown; workflow_runs?: unknown } | null;
@@ -24,8 +26,9 @@ export function requiredCIEvidence(candidate: Candidate, file: string, name: str
     Number.isSafeInteger(run.id) && run.id > 0 && Number.isSafeInteger(run.run_attempt) && run.run_attempt > 0)
     .sort((left, right) => right.id - left.id || right.run_attempt - left.run_attempt);
   const latest = runs[0];
-  return { workflow: name, runId: latest?.id ?? 0, attempt: latest?.run_attempt ?? 0,
-    succeeded: latest?.status === "completed" && latest.conclusion === "success" };
+  const succeeded = latest?.status === "completed" && latest.conclusion === "success";
+  return { workflow: name, runId: latest?.id ?? 0, attempt: latest?.run_attempt ?? 0, succeeded,
+    ...(latest?.status === "completed" && !succeeded ? { failed: String(latest.conclusion ?? "without a conclusion") } : {}) };
 }
 
 export function assertRequiredCI(evidence: RequiredCIEvidence, required: readonly RequiredWorkflow[] = REQUIRED_CI,
@@ -34,10 +37,19 @@ export function assertRequiredCI(evidence: RequiredCIEvidence, required: readonl
     failure);
 }
 
-export async function waitForRequiredCI(read: () => Promise<RequiredCIEvidence>, options: Parameters<typeof poll>[1] = {},
-  required: readonly RequiredWorkflow[] = REQUIRED_CI) {
+/** `failFast` stops as soon as a required run has concluded without success,
+ * instead of polling the full window for a rerun. Automatic Alpha uses it: a
+ * waiting runtime job holds the Alpha publication lock, and a new push to
+ * main, not a release rerun, is the recovery. */
+export async function waitForRequiredCI(read: () => Promise<RequiredCIEvidence>,
+  options: Parameters<typeof poll>[1] & { failFast?: boolean } = {}, required: readonly RequiredWorkflow[] = REQUIRED_CI) {
+  const { failFast = false, ...pollOptions } = options;
   return poll(async () => {
     const evidence = await read();
-    return required.every(check => evidence.some(item => item.workflow === check.name && item.succeeded)) ? evidence : false;
-  }, { attempts: 660, timeoutMs: 110 * 60_000, ...options });
+    if (required.every(check => evidence.some(item => item.workflow === check.name && item.succeeded))) return evidence;
+    const failed = failFast ? evidence.find(item => item.failed && required.some(check => check.name === item.workflow)) : undefined;
+    if (failed) throw new PromotionError(`Exact-source ${failed.workflow} run ${failed.runId} attempt ${failed.attempt} concluded ${failed.failed}; ` +
+      "stopping now instead of waiting for a rerun. A new push to main ships the next candidate.");
+    return false;
+  }, { attempts: 660, timeoutMs: 110 * 60_000, ...pollOptions });
 }

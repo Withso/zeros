@@ -103,7 +103,7 @@ export async function alphaRequiredChecks(candidate: Candidate, read: Read): Pro
       const head = await read(`/commits/${encodeURIComponent(candidate.branch)}`);
       requireCheck(typeof head?.sha === "string" && SHA.test(head.sha), "Current main identity is unavailable for automatic Alpha");
       if (head.sha !== candidate.sourceSha) throw new CandidateSupersededError();
-      return evidence;
+      return { ...evidence, failed: "without success" };
     };
     if (run.conclusion === "cancelled") return unshippable();
     const jobs = await jobPages(read, `/actions/runs/${run.id}/attempts/${run.run_attempt}/jobs`);
