@@ -102,7 +102,7 @@ import {
   type DesignFieldToken,
 } from "./design-token-picker";
 import { DesignFieldOverlays } from "./design-style-card";
-import { useDesignFieldOverlays } from "./design-field-overlays";
+import { designInputResetsOnAltBackspace, useDesignFieldOverlays } from "./design-field-overlays";
 import { DesignStyledByLine } from "./design-styled-by";
 import {
   DesignFieldOriginsContext,
@@ -782,9 +782,12 @@ export function InspectorEditField({
               event.key === "Backspace" &&
               event.altKey &&
               !event.metaKey &&
-              !event.ctrlKey
+              !event.ctrlKey &&
+              designInputResetsOnAltBackspace(event.currentTarget)
             ) {
-              // Reset: the draft is dropped so blur cannot write it back.
+              // Reset: the draft is dropped so blur cannot write it back. With
+              // a caret in the text the keys keep their own meaning, delete
+              // the word before it.
               event.preventDefault();
               skipCommitRef.current = true;
               setPresentedDraft(String(value));

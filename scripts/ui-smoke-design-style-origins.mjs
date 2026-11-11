@@ -111,10 +111,12 @@ export async function runDesignStyleOriginsSmoke({ page, check }) {
   await expect(field("border-radius")).toHaveAttribute("data-design-origin", "changed");
   // The panel takes edits again once the undo has landed.
   await expect(field("border-radius").locator("input")).toBeEnabled();
-  await field("border-radius").locator("input").focus();
+  // With a caret in the text the keys keep their own meaning (delete a
+  // word); the field resets when its whole value is selected, as on Tab.
+  await field("border-radius").locator("input").selectText();
   await page.keyboard.press("Alt+Backspace");
   await expect.poll(inlineRadius).toBe(false);
-  check("Alt+Backspace on a field resets it", true);
+  check("Alt+Backspace on a field whose value is selected resets it", true);
   await page.getByLabel("Design canvas", { exact: true }).focus();
   await page.keyboard.press("ControlOrMeta+z");
   await expect.poll(inlineRadius).toBe(true);

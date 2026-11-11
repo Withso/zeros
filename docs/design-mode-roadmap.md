@@ -1914,7 +1914,8 @@ original unsnapped geometry writes nothing and preserves authored sizing.
   while the Design surface is shown, says Value / From / Source, what a
   change replaced and how many other layers use it, with Reset (removes the
   layer's own declaration whole, one undoable step; also Alt+Backspace on a
-  field) and Use a token (also Alt+↓); a missing token offers Pick another and
+  field whose whole value is selected, as after tabbing in, so a caret in the
+  text keeps the keys for deleting a word) and Use a token (also Alt+↓); a missing token offers Pick another and
   Detach, a forced value names its rule. The token picker is likewise one
   instance per panel. The engine's per-field `design.provenance` read and its
   hint dot are gone.

@@ -25,7 +25,7 @@ import { designTokenGroups } from "./design-token-catalog";
 import { useDesignTokens } from "./design-token-context";
 import { checkerboardBackground, DesignColorSwatch } from "./design-color-swatch";
 import { useDesignFieldOrigin } from "./design-field-origins";
-import { useDesignFieldOverlays } from "./design-field-overlays";
+import { designInputResetsOnAltBackspace, useDesignFieldOverlays } from "./design-field-overlays";
 import {
   DesignTokenDetachButton,
   DesignTokenPill,
@@ -1198,8 +1198,15 @@ export function DesignColorValueInputs({
         skipRef.current = true;
         restore();
         event.currentTarget.blur();
-      } else if (event.key === "Backspace" && event.altKey && !event.metaKey && !event.ctrlKey) {
-        // Reset: the draft is dropped so blur cannot write it back.
+      } else if (
+        event.key === "Backspace" &&
+        event.altKey &&
+        !event.metaKey &&
+        !event.ctrlKey &&
+        designInputResetsOnAltBackspace(event.currentTarget)
+      ) {
+        // Reset: the draft is dropped so blur cannot write it back. With a
+        // caret in the text the keys delete the word before it, as usual.
         event.preventDefault();
         skipRef.current = true;
         restore();

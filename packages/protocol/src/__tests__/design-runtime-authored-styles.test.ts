@@ -289,7 +289,7 @@ const ORIGINS_HEAD = `
   @layer theme { :root { --radius-md: 6px; --bg: white; } }
   @layer utilities { .p-2\\.5 { padding: 10px; } .rounded-md { border-radius: 6px; } }
 </style>
-<style data-zeros-component="chip">.chip { gap: 4px; }</style>
+<style data-zeros-component="chip">.chip { gap: 4px; --chip-inset: 3px; text-indent: var(--chip-inset); }</style>
 <style>
   .btn { border-radius: var(--radius-md); padding: 8px 12px; color: navy; }
   .btn.btn--primary { background-color: var(--bg); }
@@ -380,6 +380,12 @@ describe("where a value comes from, in Chromium", () => {
       value: "4px",
       important: true,
     });
+  });
+
+  it("names the component that declares a token a value reads", async () => {
+    expect((await details(page, "chip")).authoredStyles?.["text-indent"]?.tokens).toEqual([
+      { name: "--chip-inset", value: "3px", origin: "frame", component: "chip" },
+    ]);
   });
 
   it("names a component's styles and a utility's escaped class", async () => {

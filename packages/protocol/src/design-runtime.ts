@@ -2754,6 +2754,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
           token.origin = origin.origin;
           if (origin.sourceId) token.sourceId = origin.sourceId;
           if (origin.file) token.file = origin.file;
+          if (origin.component) token.component = origin.component;
         }
         tokens.push(token);
       }

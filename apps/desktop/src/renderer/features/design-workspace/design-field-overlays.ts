@@ -57,3 +57,12 @@ export function useDesignFieldOverlays(): DesignFieldOverlaysApi {
   return useContext(DesignFieldOverlaysContext);
 }
 
+/** Alt+Backspace deletes a word in a text input. It resets the field only
+ * when there is no word under the caret to delete: the whole value is
+ * selected, as after tabbing in, or the input is empty. */
+export function designInputResetsOnAltBackspace(
+  input: Pick<HTMLInputElement, "value" | "selectionStart" | "selectionEnd">,
+): boolean {
+  const length = input.value.length;
+  return length === 0 || (input.selectionStart === 0 && input.selectionEnd === length);
+}
