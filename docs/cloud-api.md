@@ -728,6 +728,84 @@ with `X-Zeros-Sync: 1`, preserving older desktops' strict response schemas.
 New desktops accept the field being absent when reading an older control
 plane. The local-command organization switch does not grant or revoke sync.
 
+## Desktop team sharing (phase 1)
+
+Team sharing uses the desktop's WorkOS session and
+`X-Zeros-Team-Sharing: 1` on `/v1/cloud-v2/workspaces` routes. API keys,
+workspace tokens, the CLI and remote MCP remain Creator-only. Requests without
+the header keep the released Creator-only selection and response shape.
+
+A reader must be an eligible member of the workspace's organization and have
+their own GitHub access to every recorded source repository, including repositories
+in the original Cloud Computer snapshot. The Creator must retain their existing
+runtime authority too. A confirmed refusal is hidden from lists and returns
+`404 not_found` on a direct read. A temporary verification failure returns
+`503 github_verification_unavailable` with `Retry-After`; clients retain their
+last confirmed snapshot. A reader's source refusal never stops the Creator's VM.
+
+Fresh admission reuses a positive source verification for 30 seconds. An open
+viewer refreshes it after ten minutes and can retain the original positive during
+an outage for at most one hour. Session, membership, credential generation,
+workspace access epoch and immutable repository identities are rechecked before
+data is returned. Following, pinning and presence do not grant access.
+
+The opt-in list includes the viewer's own workspaces and teammates' workspaces:
+
+| Method and path suffix | Request and response |
+| --- | --- |
+| `GET /workspaces` | Required `organizationId`; optional `creator`, `mine=1`, `following=1`, `pinned=1`, `repositoryId`, `archived=exclude\|include\|only`, `limit=1..200` (default 50), `cursor`. Reply `{ workspaces, teamSharing: 1, nextCursor }`. |
+| `GET /workspaces/:id` or `/workspaces/by-number/:organization/:number` | `{ workspace, teamSharing: 1 }`. The organization path segment is its fixed ID. |
+| `POST /workspaces/:id/history` | Existing bounded mirror read body and `{ result }` reply. |
+| `GET /workspaces/:id/prompts` | Existing bounded receipt read parameters and response. |
+| `POST /workspaces/:id/activity` | `{ running }`; at most 12 requests/minute/person and one activity write/30 seconds/workspace. Never wakes a VM. |
+| `POST /workspaces/:id/follow` or `/unfollow` | No body or `{}`; `{ following }`. Following one's own workspace returns `409 own_workspace`. |
+| `POST /workspaces/:id/pin` or `/unpin` | No body or `{}`; `{ pinned }`. Pinning one's own workspace is allowed. |
+| `GET /workspaces/:id/followers` | `limit=1..200`, optional `cursor`; `{ userIds, nextCursor }`. |
+| `POST /workspaces/:id/rename` | `{ name }`, trimmed 1–120 characters; `{ workspace, teamSharing: 1 }`. |
+
+These paths are under `/v1/cloud-v2`. List cursors are bounded to 2,048 characters
+and scoped to the viewer, organization and filters. `creator` and `mine` cannot be
+combined. Follow/pin mutations share a 60/minute/person/organization limit and
+are idempotent. They affect only the caller's rows.
+
+Sharing documents add top-level `teamSharing: 1`, `createdByUserId`,
+`viewerRole` (`creator`, `admin`, `member`), `readOnly`, `canManage`, `following`,
+`pinned`, `followerIds` (up to 200) and `followerCount`. `creatorUserId` is the
+current Creator; `createdByUserId` preserves the original Creator and becomes
+null after that account is erased. Names and avatars come from the existing
+organization roster. The strict `capabilities` object is unchanged.
+
+Members can read only. Creators and admins with their own repository access may
+rename, stop, archive or delete a workspace and edit its chat metadata. A member's
+management request returns `403 workspace_read_only`. An admin
+cannot start, restart or wake another Creator's workspace, send prompts, open its
+execution bridge, or use its terminal, files or Git. Those execution entrances
+return `409 workspace_read_only` for admitted shared readers; no worker
+configuration, route credential or connection ticket is released. Existing chat
+edit conflicts, including `session_busy` and `worker_update_required`, still apply.
+
+`GET /workspaces/:id/events` is a passive SSE feed. It emits
+`ready: { teamSharing: 1 }`, `changed: { workspaceId }`,
+`presence: { workspaceId, userIds, total }`, `heartbeat: {}`, and, on actual
+revocation, `revoked: { code: "session_revoked" | "workspace_access_changed" }`.
+It carries no transcript or worker frames. `ready` and `changed` trigger
+authorized HTTP reads; there is no replay cursor. A lost database subscription
+ends the stream so reconnect obtains a fresh snapshot. The server closes cleanly
+two seconds before token expiry; the desktop reconnects with a fresh token.
+
+Presence deduplicates people across windows, expires after 65 seconds, and
+renews at most every 30 seconds. Caps are two streams/person/workspace and
+16/person overall. Presence renewal, focused activity and runtime metrics produce
+no transcript invalidation; presence emits only when the set of people changes.
+Passive history, events and presence never wake a VM or block idle stop. Only the
+focused-window activity route marks a running workspace active.
+
+Apply migration `0236_cloud_team_sharing.sql` before deploying this control
+plane. Its provenance trigger supports older inserts, and statement triggers
+invalidate new viewers for older history writers. An older control plane omits
+`teamSharing` and may return `404` for new routes. A desktop must treat that as
+unsupported sharing during rollout, preserving its shared snapshot.
+
 ## Restart and v1 scope
 
 The desktop's WorkOS-authenticated route

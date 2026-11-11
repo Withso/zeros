@@ -228,6 +228,20 @@ export class CloudV2PromptOutbox {
   async list(id: string, userId: string, chatId: string, after = "0", limit = 100, includePayload = true): Promise<{ epoch: string; items: CloudV2PromptStatus[]; nextAfter: string | null }> {
     return withSystemTx(this.pool, async tx => {
       await this.owned(tx, id, userId, false);
+      return this.readStatuses(tx,id,chatId,after,limit,includePayload);
+    }, { consistentRead: true });
+  }
+
+  async listForViewer(id: string, chatId: string, after: string, limit: number, includePayload: boolean, authorize: (tx: Tx) => Promise<void>) {
+    return withSystemTx(this.pool,async tx => {
+      await authorize(tx);
+      const result = await this.readStatuses(tx,id,chatId,after,limit,includePayload);
+      await authorize(tx);
+      return result;
+    });
+  }
+
+  private async readStatuses(tx: Tx, id: string, chatId: string, after: string, limit: number, includePayload: boolean) {
       const chat = (await tx.query<{ epoch: string; next_sequence: string }>("SELECT epoch::text,next_sequence::text FROM cloud_v2_prompt_chats WHERE workspace_id=$1 AND chat_id=$2", [id, chatId])).rows[0];
       const { rows } = await tx.query<Row>(`WITH candidates AS (
         SELECT user_message_id,sequence,CASE WHEN $6::boolean THEN payload_bytes ELSE 0 END AS payload_bytes FROM cloud_v2_prompt_outbox
@@ -238,7 +252,6 @@ export class CloudV2PromptOutbox {
         WHERE p.workspace_id=$1 AND b.bytes<=$5 ORDER BY p.sequence`, [id, chatId, after, limit, this.limits.readBytes, includePayload]);
       const last = rows.at(-1)?.sequence;
       return { epoch: chat?.epoch ?? "0", items: rows.map(status), nextAfter: last && BigInt(last) < BigInt(chat?.next_sequence ?? "0") ? last : null };
-    }, { consistentRead: true });
   }
 
   async stop(id: string, userId: string, chatId: string, throughEpoch: string, authority?: AuthedUser): Promise<{ chatId: string; epoch: string }> {

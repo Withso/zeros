@@ -14,6 +14,7 @@ const f = vi.hoisted(() => ({
   brokerConstructor: vi.fn(), broker: { stop: vi.fn(async () => {}) },
   cloud: vi.fn(), lifecycle: { start: vi.fn() }, lifecycleStop: vi.fn(async () => {}),
   startLocalCommands: vi.fn(), localCommandsStop: vi.fn(async () => {}), localCommandSignals: { close: vi.fn(async () => {}) },
+  teamSharing: { signals: { close: vi.fn(async () => {}) } },
   api: { credentials: { close: vi.fn(async () => {}) }, service: {} },
   runtimeUpdates: { close: vi.fn() },
   loginChanges: { stop: vi.fn(async () => {}) }, relay: { close: vi.fn(), handleUpgrade: vi.fn() },
@@ -80,6 +81,7 @@ beforeEach(() => {
     lifecycle: roles.lifecycle ? f.lifecycle : null, loginChanges: roles.relay ? f.loginChanges : null,
     runtimeUpdates: f.runtimeUpdates,
     startLocalCommands: roles.lifecycle ? f.startLocalCommands : () => async () => {}, localCommandSignals: f.localCommandSignals,
+    teamSharing: f.teamSharing,
     promptChanges: config.cloudV2.promptOutbox ? f.promptChanges : null, promptSignals: f.promptSignals,
   } : null);
   f.serve.mockImplementation((_options, ready) => { ready({ port: 8080 }); return f.server; });
@@ -172,9 +174,11 @@ describe("account workers and cloud v2 boot composition", () => {
     let releasePromptListener!: () => void;
     let releaseApiUsage!: () => void;
     let releaseLocalCommands!: () => void;
+    let releaseTeamSharing!: () => void;
     f.promptChanges.stop.mockImplementationOnce(() => new Promise<void>(resolve => { releasePromptListener = resolve; }));
     f.api.credentials.close.mockImplementationOnce(() => new Promise<void>(resolve => { releaseApiUsage = resolve; }));
     f.localCommandsStop.mockImplementationOnce(() => new Promise<void>(resolve => { releaseLocalCommands = resolve; }));
+    f.teamSharing.signals.close.mockImplementationOnce(() => new Promise<void>(resolve => { releaseTeamSharing = resolve; }));
     const shutdown = process.listeners("SIGTERM").find(listener => !oldTerm.includes(listener))!;
     shutdown("SIGTERM"); await vi.advanceTimersByTimeAsync(0);
     expect(f.runtimeUpdates.close).toHaveBeenCalledOnce();
@@ -185,6 +189,7 @@ describe("account workers and cloud v2 boot composition", () => {
     expect(f.promptSignals.wakeAll).toHaveBeenCalledOnce(); expect(f.promptChanges.stop).toHaveBeenCalledOnce();
     expect(f.api.credentials.close).toHaveBeenCalledOnce();
     expect(f.localCommandSignals.close).toHaveBeenCalledOnce(); expect(f.localCommandsStop).toHaveBeenCalledOnce();
+    expect(f.teamSharing.signals.close).toHaveBeenCalledOnce();
     expect(f.promptSignals.wakeAll.mock.invocationCallOrder[0]).toBeLessThan(f.server.close.mock.invocationCallOrder[0]!);
     for (const pool of [f.apiPool, f.workerPool, f.listenerPool, f.lockPool]) expect(pool.end).not.toHaveBeenCalled();
     releasePromptListener(); await vi.advanceTimersByTimeAsync(0);
@@ -192,6 +197,8 @@ describe("account workers and cloud v2 boot composition", () => {
     releaseApiUsage(); await vi.advanceTimersByTimeAsync(0);
     for (const pool of [f.apiPool, f.workerPool, f.listenerPool, f.lockPool]) expect(pool.end).not.toHaveBeenCalled();
     releaseLocalCommands(); await vi.advanceTimersByTimeAsync(0);
+    for (const pool of [f.apiPool, f.workerPool, f.listenerPool, f.lockPool]) expect(pool.end).not.toHaveBeenCalled();
+    releaseTeamSharing(); await vi.advanceTimersByTimeAsync(0);
     for (const pool of [f.apiPool, f.workerPool, f.listenerPool, f.lockPool]) expect(pool.end).toHaveBeenCalledOnce();
     expect(exit).toHaveBeenCalledWith(0);
   });

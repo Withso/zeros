@@ -67,6 +67,14 @@ type Snapshot = {
   generation: string;
   rows: Row[];
 };
+type FingerprintRow = Pick<Row,"id" | "method" | "generation" | "github_user_id">;
+const actorColumns = `u.auth_revision::text AS user_revision,o.authorization_revision::text AS org_revision,
+  m.authorization_revision::text AS member_revision,m.created_at::text AS member_created,
+  s.selected_method,s.generation::text AS selection_generation,m.org_id AS organization_id,m.user_id`;
+function fingerprintOf(organizationId: string, userId: string, actor: Actor, rows: readonly FingerprintRow[]): string {
+  return createHash("sha256").update(JSON.stringify([organizationId,userId,actor,
+    rows.map(row => [row.id,row.method,row.generation,row.github_user_id])])).digest("hex");
+}
 const changed = () =>
   new HttpError(
     409,
@@ -115,9 +123,7 @@ export class CloudGithubConnectionStore {
   ): Promise<Snapshot> {
     const confirmed = (
       await tx.query<Actor & { organization_id: string; user_id: string }>(
-        `SELECT u.auth_revision::text AS user_revision,o.authorization_revision::text AS org_revision,
-      m.authorization_revision::text AS member_revision,m.created_at::text AS member_created,
-      s.selected_method,s.generation::text AS selection_generation,m.org_id AS organization_id,m.user_id
+        `SELECT ${actorColumns}
       FROM organization_members m JOIN users u ON u.id=m.user_id JOIN organizations o ON o.id=m.org_id
       LEFT JOIN cloud_github_selections s ON s.org_id=m.org_id AND s.owner_user_id=m.user_id
       WHERE m.org_id=$1 AND m.user_id=$2 AND u.auth_status='active' AND u.deleted_at IS NULL
@@ -138,22 +144,25 @@ export class CloudGithubConnectionStore {
         [scope.organizationId, scope.userId],
       )
     ).rows;
-    const generation = createHash("sha256")
-      .update(
-        JSON.stringify([
-          organizationId,
-          userId,
-          actor,
-          rows.map((row) => [
-            row.id,
-            row.method,
-            row.generation,
-            row.github_user_id,
-          ]),
-        ]),
-      )
-      .digest("hex");
+    const generation = fingerprintOf(organizationId,userId,actor,rows);
     return { scope: { organizationId, userId }, actor, generation, rows };
+  }
+
+  /** Presence projects at most 200 people at once. Read only generation
+   * metadata in two queries, never decrypt credentials or call GitHub. */
+  async fingerprintsForPeople(tx: Tx, organizationId: string, userIds: readonly string[]): Promise<Map<string,string>> {
+    if (!userIds.length) return new Map();
+    if (userIds.length>200) throw new Error("too_many_github_fingerprints");
+    const actors = (await tx.query<Actor & { organization_id: string; user_id: string }>(`SELECT ${actorColumns}
+      FROM organization_members m JOIN users u ON u.id=m.user_id JOIN organizations o ON o.id=m.org_id
+      LEFT JOIN cloud_github_selections s ON s.org_id=m.org_id AND s.owner_user_id=m.user_id
+      WHERE m.org_id=$1 AND m.user_id=ANY($2::uuid[]) AND u.auth_status='active' AND u.deleted_at IS NULL
+        AND o.deleted_at IS NULL AND NOT o.is_personal AND o.cloud_workspaces_allowed`,[organizationId,userIds])).rows;
+    const rows = (await tx.query<FingerprintRow & { owner_user_id: string }>(`SELECT owner_user_id,id,method,generation,github_user_id
+      FROM cloud_github_credentials WHERE org_id=$1 AND owner_user_id=ANY($2::uuid[]) ORDER BY owner_user_id,method`,[organizationId,userIds])).rows;
+    const byUser = new Map<string,FingerprintRow[]>();
+    for (const row of rows) { const values = byUser.get(row.owner_user_id) ?? []; values.push(row); byUser.set(row.owner_user_id,values); }
+    return new Map(actors.map(({ organization_id,user_id,...actor }) => [user_id,fingerprintOf(organization_id,user_id,actor,byUser.get(user_id) ?? [])]));
   }
   private read(scope: CloudGithubConnectionScope) {
     return withSystemTx(this.pool, (tx) => this.snapshot(tx, scope));

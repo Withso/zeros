@@ -153,7 +153,7 @@ function restoreCreate(value: CloudV2RestoreCreate | null): CloudV2RestoreCreate
   return value && { from: value.from, ...(value.prune?.length ? { prune: value.prune } : {}), name: value.name, env: value.env, requestedAt: value.requestedAt };
 }
 
-type Row = {
+export type CloudV2WorkspaceRow = {
   id: string; org_id: string; creator_user_id: string; name: string; number: number | null; title: string | null;
   repository: string; branch: string; base_branch: string;
   state: CloudV2WorkspaceState; boat_sandbox_id: string | null; computer_build_id: string | null;
@@ -163,11 +163,13 @@ type Row = {
   setup_status: CloudV2SetupStatus | null;
   agent_cost_usd: string; agent_cost_turns: string; agent_cost_estimated_turns: string;
 };
+type Row = CloudV2WorkspaceRow;
 
 const WORKSPACE_COLUMNS_SQL = sql`id, org_id, creator_user_id, name, number, title, repository, branch, base_branch, state, boat_sandbox_id,
   computer_build_id, error_code, active_at, archived_at, created_at, updated_at, source_pending, created_by_session_id, setup_status,
   agent_cost_usd, agent_cost_turns, agent_cost_estimated_turns`;
 const COLUMNS = WORKSPACE_COLUMNS_SQL.text;
+export const CLOUD_V2_WORKSPACE_COLUMNS = COLUMNS.split(",").map(value => value.trim());
 
 type LifecycleRow = Row & {
   lease_renewed_at: Date | null; base_commit: string | null; restore_pending: boolean; restore_attempt: string | null;
@@ -255,6 +257,7 @@ function workspace(row: Row): CloudV2Workspace {
     ...(row.source_pending ? { sourcePending: true as const } : {}),
   };
 }
+export { workspace as cloudV2WorkspaceFromRow };
 
 // WorkOS sid is the device/session authority, independent of the workspace's
 // account/membership epoch. Do not let a lost broker notification keep it live.
@@ -522,6 +525,40 @@ export class CloudV2Store {
     return withSystemTx(this.pool, async tx => {
       const current = await ownedRow(tx, id, userId, true);
       await ownedRow(tx, id, userId);
+      return this.lifecycleIntent(tx,id,current,action);
+    });
+  }
+
+  /** The only shared management entry point. Its caller proves the viewer's
+   * source scope and admin role again after the workspace lock; no actor is
+   * substituted for the Creator and no start/restart action is accepted. */
+  async manage(id: string, action: "stop" | "archive" | "delete" | "rename", authorize: (tx: Tx) => Promise<void>, title?: string):
+    Promise<{ workspace: CloudV2Workspace; moved: boolean }> {
+    return withSystemTx(this.pool,async tx => {
+      const row = (await tx.query<Row>(`SELECT ${COLUMNS} FROM cloud_v2_workspaces w
+        WHERE w.id=$1 AND w.state<>'deleted' FOR UPDATE OF w`,[id])).rows[0];
+      if (!row) throw notFound();
+      await authorize(tx);
+      if (action === "stop" || action === "archive") {
+        const result = await this.lifecycleIntent(tx,id,row,action);
+        await authorize(tx);
+        return result;
+      }
+      if (action === "rename") {
+        if (title === undefined) throw new Error("workspace_title_required");
+        const updated = (await tx.query<Row>(`UPDATE cloud_v2_workspaces SET title=$2,updated_at=clock_timestamp()
+          WHERE id=$1 RETURNING ${COLUMNS}`,[id,title])).rows[0]!;
+        await authorize(tx);
+        return { workspace: workspace(updated),moved: false };
+      }
+      const updated = (await tx.query<Row>(`UPDATE cloud_v2_workspaces SET state='deleting',restart_stop_generation=NULL,
+        attempts=0,next_attempt_at=NULL,updated_at=clock_timestamp() WHERE id=$1 RETURNING ${COLUMNS}`,[id])).rows[0]!;
+      await authorize(tx);
+      return { workspace: workspace(updated),moved: row.state !== "deleting" };
+    });
+  }
+
+  private async lifecycleIntent(tx: Tx, id: string, current: Row, action: "start" | "stop" | "archive" | "restart") {
       const intent = (await tx.query<{ stop_generation: string; restart_stop_generation: string | null }>(
         "SELECT stop_generation::text,restart_stop_generation::text FROM cloud_v2_workspaces WHERE id=$1", [id])).rows[0]!;
       const priorRestart = intent.restart_stop_generation;
@@ -557,7 +594,6 @@ export class CloudV2Store {
         [id, state, archived, restart],
       );
       return { workspace: workspace(rows[0]!), moved };
-    });
   }
 
   /** Compare-and-set. Returns null when the workspace was not in `from`, or,

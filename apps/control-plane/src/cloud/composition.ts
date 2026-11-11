@@ -45,6 +45,7 @@ import { CloudWorkspaceApiTokens } from "./api/workspace-tokens.js";
 import { CloudApiService } from "./api/service.js";
 import { CloudLocalDevices } from "./local-commands/devices.js";
 import { CloudLocalCommandSignals } from "./local-commands/signals.js";
+import { CloudTeamSharing } from "./team-sharing/store.js";
 import { CloudLocalCommands } from "./local-commands/requests.js";
 import { startLocalCommandMaintenance } from "./local-commands/maintenance.js";
 import { CloudNotifyUser } from "./notify-user/store.js";
@@ -184,7 +185,9 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   // A draining replica would refuse a pending create's row, so a new one waits
   // a lifecycle scan interval before returning creates early, as for #903.
   const asyncCreateFrom = Date.now() + (v2.asyncCreateDelayMs ?? (config.deploymentChannel === "development" ? 0 : CLOUD_V2_ASYNC_CREATE_DELAY_MS));
+  const teamSharing = new CloudTeamSharing(pool,store,github,listenerPool);
   const routes: CloudV2RouteDeps = {
+    teamSharing,
     store,
     computers,
     ...(v2.asyncCreate !== false ? { asyncCreate: () => Date.now() >= asyncCreateFrom } : {}),
@@ -340,6 +343,6 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     onNotification: () => lifecycle.wake(),
   }) : null;
   void lifecycleChanges?.start().catch(() => {});
-  return { store, compute, routes, proxy, workers, api, relay, connections, lifecycle, runtimeUpdates, loginChanges, promptChanges, lifecycleChanges, promptSignals, localCommandSignals,
+  return { store, compute, routes, proxy, workers, api, relay, connections, lifecycle, runtimeUpdates, loginChanges, promptChanges, lifecycleChanges, promptSignals, localCommandSignals, teamSharing,
     startLocalCommands: () => roles.lifecycle ? startLocalCommandMaintenance(localCommands,localCommandSignals,console,notifications) : async () => {} };
 }

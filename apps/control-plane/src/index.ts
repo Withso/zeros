@@ -143,6 +143,7 @@ function shutdown(signal: string): void {
   const backgroundStopped = Promise.allSettled([
     cloudV2?.api.credentials.close() ?? Promise.resolve(),
     cloudV2?.localCommandSignals.close() ?? Promise.resolve(),
+    cloudV2?.teamSharing.signals.close() ?? Promise.resolve(),
     stopLocalCommands(),
     stopCloudV2Lifecycle(), stopWorkerNotifications(), cloudV2?.loginChanges?.stop() ?? Promise.resolve(),
     cloudV2?.promptChanges?.stop() ?? Promise.resolve(), cloudV2?.lifecycleChanges?.stop() ?? Promise.resolve(),
