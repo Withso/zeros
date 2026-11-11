@@ -63,6 +63,9 @@ const IMMEDIATE_QUEUE_QUERY = `query ImmediateMergeQueue($branch: String!) {
   ${IMMEDIATE_VIEWER_FIELDS}
   repository(owner: "Withso", name: "zeros") { mergeQueue(branch: $branch) { id } }
 }`;
+const QUEUE_QUERY = `query MergeQueue($branch: String!) {
+  repository(owner: "Withso", name: "zeros") { mergeQueue(branch: $branch) { id } }
+}`;
 const MERGED_FIELDS = `id number state merged headRefOid baseRefName
   mergedBy { login __typename ... on User { id databaseId } }
   mergeCommit { oid author { email } } autoMergeRequest { enabledAt } isInMergeQueue`;
@@ -275,10 +278,20 @@ export function decideMerge(
       "A human override requires the caller's justification comment on this PR; refusing to arm auto-merge.",
     );
   }
+  // A merge queue tests each entry on top of the ones ahead of it, so several
+  // PRs may wait at once. Without one, a second armed PR could land untested
+  // against the first.
+  const queued = !immediate && mergeQueue !== null;
+  if (queued && (typeof mergeQueue?.id !== "string" || !mergeQueue.id)) {
+    return refuse(
+      "queue-unavailable",
+      "Unable to confirm whether the base branch uses a merge queue; refusing to arm auto-merge.",
+    );
+  }
   const armed = openPullRequests.filter(
     (other) => other.number !== number && other.autoMergeRequest !== null,
   );
-  if (armed.length && !force) {
+  if (armed.length && !force && !queued) {
     return refuse(
       "already-armed",
       `Another open PR already has auto-merge enabled (${armed.map((other) => `#${other.number}`).join(", ")}); wait for it to merge or be disarmed.`,
@@ -371,7 +384,9 @@ export function decideMerge(
   return {
     allowed: true,
     code: "arm",
-    message: `Arm auto-merge for PR #${number} at ${pr.headRefOid}.`,
+    message: queued
+      ? `Queue PR #${number} at ${pr.headRefOid} for ${pr.baseRefName}: it joins the merge queue once its checks pass.`
+      : `Arm auto-merge for PR #${number} at ${pr.headRefOid}.`,
     args: [
       "pr",
       "merge",
@@ -604,7 +619,14 @@ export async function runAgentMerge(
           "-f",
           `branch=${pr.baseRefName}`,
         ]).repository?.mergeQueue
-      : null;
+      : json([
+          "api",
+          "graphql",
+          "-f",
+          `query=${QUEUE_QUERY}`,
+          "-f",
+          `branch=${pr.baseRefName}`,
+        ]).data?.repository?.mergeQueue;
     const openPages = json([
       "api",
       "graphql",

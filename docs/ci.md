@@ -473,8 +473,14 @@ cancelled required checks are refused. Renamed files are checked under both
 paths. Pending checks may wait for GitHub's normal auto-merge requirements in
 the default mode only.
 
-Only one open PR may have auto-merge enabled. Only a human may override this
-guard: first document the justification in a comment on the target PR using the
+Only one open PR may have auto-merge enabled, unless the base branch has a
+merge queue. A queue tests each entry on top of the ones ahead of it, so the
+wrapper lets several PRs wait at once; the same command adds the PR to the
+queue when its checks pass, still pinned to the checked head. A queue sets the
+merge method and commit message itself, so the wrapper's explicit title and
+body apply only without one. See [the merge queue runbook](ci-rulesets.md#merge-queue).
+
+Without a queue, only a human may override the one-armed-PR guard: first document the justification in a comment on the target PR using the
 same human GitHub identity, then run
 `pnpm agent:merge <pr-number> --force --reason <comment-URL>`. The wrapper verifies
 the comment's author and PR. This flag cannot override any other guard. Agents

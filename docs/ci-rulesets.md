@@ -190,3 +190,50 @@ This second verified PUT moves **11 → 9**, removing only `zeros/ci-gate` and
 present. Retire replacement producers only after this readback; keep at least
 one qualified gate/family set and every required scanner throughout. No phase
 disables protection or changes the strict flag.
+
+## Merge queue
+
+A merge queue on `main` lets several PRs be armed at once: GitHub builds each
+entry on top of the latest `main` and the entries ahead of it, runs the required
+checks on that synthetic commit, and merges it itself. It replaces "Require
+branches to be up to date", which gives the same guarantee one PR at a time.
+
+The workflows are ready. `Preflight`, `actionlint` and `codeql` trigger on
+`merge_group`, and `scripts/__tests__/ci-merge-queue-contexts.test.ts` fails if
+any of the nine required contexts loses its single producer on that event. The
+final-ruleset contexts `zeros/ci-gate` and `secret-scan` have no `merge_group`
+producer yet; that test names them. Do not require them on a queue branch until
+they have one, or every queued PR waits for a check that never reports.
+
+Enabling the queue is a ruleset change only the owner can make; the migration
+tool above does not manage it.
+
+1. **Canary before switching (recommended).** Create a branch `queue-canary`
+   from `main` and a temporary ruleset targeting it with the same nine required
+   checks (integration 15368) and "Require merge queue". Open a one-line PR
+   against `queue-canary`, wait for its PR checks, and add it to the queue.
+   All nine contexts must report on the `gh-readonly-queue/queue-canary/…`
+   commit and the PR must merge. Delete the ruleset and the branch.
+2. **Switch `main`.** In ruleset 20461995, enable "Require merge queue" with:
+   merge method **Squash**; "All entries must pass" (not head-of-group only);
+   build concurrency 5; minimum group size 1 with a 1-minute wait; maximum
+   group size 5; status-check timeout **60 minutes** (a full Preflight takes
+   about 40). Turn off "Require branches to be up to date" in the same edit.
+   Set the repository's default squash message to "Pull request title and
+   description" (Settings ▸ General), since a queue writes the commit message.
+3. **Watch the first queued PR.** A required check that never reports removes
+   the entry after the timeout; nothing merges on a gap. `main` still gets its
+   own push Preflight for every merged commit, which is what releases read.
+4. **Rollback.** Turn "Require merge queue" off and "Require branches to be up
+   to date" back on. Armed PRs fall back to ordinary auto-merge.
+
+What changes for agents: `pnpm agent:merge <n>` adds the PR to the queue when
+its checks pass and no longer refuses because another PR is armed. In a cloud
+session without `gh`, enabling auto-merge through the GitHub connector does the
+same. Immediate mode still refuses a queue branch.
+
+Limits to know. The wrapper checks a PR's title and body for skip markers when
+it arms; a queue composes the commit message at merge time, so an edit made
+after arming is not re-checked. The queue runs a full Preflight per entry on
+top of the PR's own CI, so one PR takes longer end to end even though nobody
+waits on it.

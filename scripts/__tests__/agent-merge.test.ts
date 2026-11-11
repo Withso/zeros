@@ -58,6 +58,7 @@ type Snapshot = {
   files: { filename: string; status: string; previous_filename?: string }[];
   requiredChecks: { name: string; bucket: string; state: string }[];
   openPullRequests: { number: number; autoMergeRequest: AutoMerge }[];
+  mergeQueue?: { id?: unknown } | null;
   forceComment: {
     html_url: string;
     issue_url: string;
@@ -91,6 +92,7 @@ function fixture(): Snapshot {
     ],
     requiredChecks: [{ name: "test", bucket: "pass", state: "SUCCESS" }],
     openPullRequests: [{ number: 123, autoMergeRequest: null }],
+    mergeQueue: null,
     forceComment: {
       html_url: COMMENT_URL,
       issue_url: `https://api.github.com/repos/${REPOSITORY}/issues/123`,
@@ -123,6 +125,8 @@ function fakeGh(snapshot = fixture()) {
     if (args[0] === "api" && args[1] === "user") return json(snapshot.viewer);
     if (args[0] === "api" && args[1].includes("/files?"))
       return json([snapshot.files]);
+    if (args[0] === "api" && args[1] === "graphql" && args.some(arg => arg.includes("mergeQueue(")))
+      return json({ data: { repository: { mergeQueue: snapshot.mergeQueue } } });
     if (args[0] === "api" && args[1] === "graphql") {
       return json([
         {
@@ -465,6 +469,55 @@ describe("agent merge decision", () => {
 
 });
 
+describe("a base branch with a merge queue", () => {
+  const otherArmed = () => {
+    const snapshot = fixture();
+    snapshot.openPullRequests.push({
+      number: 124,
+      autoMergeRequest: { enabledAt: "2026-11-11T00:00:00Z" },
+    });
+    return snapshot;
+  };
+
+  it("still arms one PR at a time when the base has no queue", async () => {
+    const gh = fakeGh(otherArmed());
+    expect(await runAgentMerge(["123"], gh)).toBe(1);
+    expect(gh.stderr).toHaveBeenCalledWith(expect.stringContaining("already has auto-merge enabled"));
+    expect(gh.calls.some((args) => args[1] === "merge")).toBe(false);
+  });
+
+  it("queues a PR while others are armed or queued, pinned to the checked head", async () => {
+    const snapshot = otherArmed();
+    snapshot.mergeQueue = { id: "MQ_main" };
+    expect(decideMerge(snapshot)).toMatchObject({ allowed: true, code: "arm" });
+    const gh = fakeGh(snapshot);
+    expect(await runAgentMerge(["123"], gh)).toBe(0);
+    expect(gh.stderr).not.toHaveBeenCalled();
+    const merge = gh.calls.find((args) => args[1] === "merge")!;
+    expect(merge).toEqual(expect.arrayContaining(["--auto", "--match-head-commit", HEAD]));
+    expect(gh.calls.some((args) => args.includes("branch=main"))).toBe(true);
+  });
+
+  it.each([undefined, {}, { id: "" }, { id: 7 }, "MQ_main"])(
+    "refuses when the queue read is %j",
+    async (mergeQueue) => {
+      const snapshot = fixture();
+      snapshot.mergeQueue = mergeQueue as Snapshot["mergeQueue"];
+      expect(decideMerge(snapshot)).toMatchObject({ allowed: false, code: "queue-unavailable" });
+      const gh = fakeGh(snapshot);
+      expect(await runAgentMerge(["123"], gh)).toBe(1);
+      expect(gh.calls.some((args) => args[1] === "merge")).toBe(false);
+    },
+  );
+
+  it("keeps every other guard on a queue branch", () => {
+    const snapshot = fixture();
+    snapshot.mergeQueue = { id: "MQ_main" };
+    snapshot.requiredChecks[0].bucket = "fail";
+    expect(decideMerge(snapshot)).toMatchObject({ allowed: false, code: "checks" });
+  });
+});
+
 describe("documented human override", () => {
   it("allows only the one-armed-PR override with the caller's human PR comment", async () => {
     const snapshot = fixture();
@@ -648,7 +701,7 @@ describe("agent merge CLI", () => {
     );
     expect(await runAgentMerge(["123"], gh)).toBe(1);
     expect(gh.stderr).toHaveBeenCalledWith(expect.stringContaining("#999"));
-    expect(gh.calls.find((args) => args[1] === "graphql")).toContain("--slurp");
+    expect(gh.calls.find((args) => args[1] === "graphql" && args.includes("--paginate"))).toContain("--slurp");
   });
 
   it.each([
