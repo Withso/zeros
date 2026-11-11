@@ -68,7 +68,9 @@ export function createCloudTeamRoutes(sharing: CloudTeamSharing, document: (valu
       async tx => { await sharing.authority.assert(proof,tx); })));
   }));
   const creator = share(async (c,next) => {
-    const proof = await sharing.authority.admit(uuid(c.req.param("id")!),c.get("user"));
+    const id = uuid(c.req.param("id")!), user = c.get("user");
+    if (await sharing.authority.isCreator(id,user.id)) return next();
+    const proof = await sharing.authority.admit(id,user);
     if (proof.view.role !== "creator") throw teamReadOnly();
     return next();
   });
