@@ -58,6 +58,8 @@ type Snapshot = {
   files: { filename: string; status: string; previous_filename?: string }[];
   requiredChecks: { name: string; bucket: string; state: string }[];
   openPullRequests: { number: number; autoMergeRequest: AutoMerge }[];
+  mergeQueue?: { id: string } | null;
+  commitMessages?: string[];
   forceComment: {
     html_url: string;
     issue_url: string;
@@ -91,6 +93,8 @@ function fixture(): Snapshot {
     ],
     requiredChecks: [{ name: "test", bucket: "pass", state: "SUCCESS" }],
     openPullRequests: [{ number: 123, autoMergeRequest: null }],
+    mergeQueue: null,
+    commitMessages: ["Retain the current selection"],
     forceComment: {
       html_url: COMMENT_URL,
       issue_url: `https://api.github.com/repos/${REPOSITORY}/issues/123`,
@@ -131,6 +135,10 @@ function fakeGh(snapshot = fixture()) {
     if (args[0] === "api" && args[1] === "user") return json(snapshot.viewer);
     if (args[0] === "api" && args[1].includes("/files?"))
       return json([snapshot.files]);
+    if (args[0] === "api" && args[1] === "graphql" && args.some((arg) => arg.startsWith("branch=")))
+      return json({ data: { repository: { mergeQueue: snapshot.mergeQueue } } });
+    if (args[0] === "api" && args[1].endsWith("/pulls/123/commits"))
+      return json([(snapshot.commitMessages ?? []).map((message) => ({ commit: { message } }))]);
     if (args[0] === "api" && args[1] === "graphql") {
       return json([
         {
@@ -147,6 +155,8 @@ function fakeGh(snapshot = fixture()) {
     }
     if (args[0] === "api" && args[1].includes("/issues/comments/"))
       return json(snapshot.forceComment);
+    if (args[0] === "pr" && args[1] === "merge" && !args.includes("--body-file"))
+      return { status: 0, stdout: "", stderr: "" };
     if (args[0] === "pr" && args[1] === "merge") {
       const bodyFile = args[args.indexOf("--body-file") + 1];
       expect(readFileSync(bodyFile, "utf8")).toBe(snapshot.pr.body);
@@ -677,7 +687,7 @@ describe("agent merge CLI", () => {
     );
     expect(await runAgentMerge(["123"], gh)).toBe(1);
     expect(gh.stderr).toHaveBeenCalledWith(expect.stringContaining("#999"));
-    expect(gh.calls.find((args) => args[1] === "graphql")).toContain("--slurp");
+    expect(gh.calls.find((args) => args[1] === "graphql" && args.includes("--paginate"))).toContain("--slurp");
   });
 
   it.each([
@@ -751,5 +761,48 @@ describe("agent merge CLI", () => {
     const gh = fakeGh();
     expect(await runAgentMerge(argv, gh)).toBe(2);
     expect(gh.spawn).not.toHaveBeenCalled();
+  });
+});
+
+describe("merge queue on the base branch", () => {
+  const queued = () => { const snapshot = fixture(); snapshot.mergeQueue = { id: "MQ_main" }; return snapshot; };
+
+  it("enqueues through auto-merge with the pinned head and lets several PRs be in flight", async () => {
+    const snapshot = queued();
+    snapshot.openPullRequests.push({ number: 124, autoMergeRequest: { enabledAt: "2026-11-11T00:00:00Z" } });
+    const gh = fakeGh(snapshot);
+    expect(await runAgentMerge(["123"], gh)).toBe(0);
+    const merge = gh.calls.find((args) => args[1] === "merge")!;
+    expect(merge).toEqual(["pr", "merge", "123", "--repo", REPOSITORY, "--auto", "--match-head-commit", HEAD]);
+    expect(gh.stdout).toHaveBeenCalledWith(expect.stringContaining("merge queue"));
+  });
+
+  it.each(["[skip ci] tidy", "Fix\n\nskip-checks: true"])("refuses a commit message the queue's squash would carry: %j", async (message) => {
+    const snapshot = queued();
+    snapshot.commitMessages = ["First", message];
+    const gh = fakeGh(snapshot);
+    expect(await runAgentMerge(["123"], gh)).toBe(1);
+    expect(gh.stderr).toHaveBeenCalledWith(expect.stringContaining("commit message"));
+    expect(gh.calls.some((args) => args[1] === "merge")).toBe(false);
+  });
+
+  it("keeps the one-armed guard while main has no merge queue", async () => {
+    const snapshot = fixture();
+    snapshot.openPullRequests.push({ number: 124, autoMergeRequest: { enabledAt: "2026-11-11T00:00:00Z" } });
+    expect(await runAgentMerge(["123"], fakeGh(snapshot))).toBe(1);
+  });
+
+  it("fails closed when the merge queue state is unreadable", async () => {
+    const snapshot = fixture();
+    snapshot.mergeQueue = undefined;
+    const gh = fakeGh(snapshot);
+    expect(await runAgentMerge(["123"], gh)).toBe(1);
+    expect(gh.calls.some((args) => args[1] === "merge")).toBe(false);
+  });
+
+  it("still refuses failed required checks in queue mode", async () => {
+    const snapshot = queued();
+    snapshot.requiredChecks = [{ name: "test", bucket: "cancel", state: "CANCELLED" }];
+    expect(await runAgentMerge(["123"], fakeGh(snapshot))).toBe(1);
   });
 });

@@ -8279,6 +8279,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
                     onSourceUnavailable={sourceSurfaceUnavailable}
                     onSourceRetired={sourceSurfaceRetired}
                     theme={frameTheme}
+                    baseTheme={baseThemeId}
                     highResolutionTile={
                       highResolutionTiles.get(frame.file) ?? null
                     }

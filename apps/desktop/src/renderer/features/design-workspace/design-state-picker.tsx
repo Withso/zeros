@@ -94,13 +94,14 @@ export function DesignHeldStateNote({
     <div
       data-design-state-control=""
       data-design-state-note=""
-      className="border-border1 text-fg3 flex min-h-7 items-center gap-2 border-b py-0.5 pr-2 pl-3 text-3xxs leading-4"
+      className="border-border1 text-fg3 flex min-h-7 flex-wrap items-center gap-x-2 gap-y-0.5 border-b py-0.5 pr-2 pl-3 text-3xxs leading-4"
     >
-      <span className="min-w-0 flex-1">
+      {/* At narrow widths the way back drops below the note, at the end. */}
+      <span className="min-w-0 flex-[1_1_14rem]">
         <b className="text-fg2 font-medium">{note.lead}</b>
         {note.rest}
       </span>
-      <Button type="button" variant="ghost" size="compact" onClick={onBack}>
+      <Button type="button" variant="ghost" size="compact" className="ml-auto" onClick={onBack}>
         Back to Default
       </Button>
     </div>

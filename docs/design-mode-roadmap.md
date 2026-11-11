@@ -2011,6 +2011,39 @@ original unsnapped geometry writes nothing and preserves authored sizing.
   `getComputedStyle` beyond the parent read (a protocol test holds the
   count), and a Mixed scrub tick renders each field no more than a
   single-layer tick and reads no bridge details.
+- **Field states:** what a field shows when the panel cannot edit its value,
+  read from the origin model (`designFieldOrigins`: `lock`, `themed`,
+  `themeChange`) and drawn as attributes and CSS only. A value written with
+  a CSS math function (calc, clamp, min, max and the rest, var() inside
+  included) is computed: the field shows it as written, dimmed, read only
+  (`data-design-origin="computed"`). A value a rule forces with !important
+  is read only with a lock at the field's end (`forced`). Neither takes
+  typing, arrows, a scrub, paste or Alt+Backspace; the panel's one listener
+  set keeps them out, and a press, Enter or Space opens the hover card at
+  once with its one action: Edit in CSS (the CSS tab) for computed, Ask
+  agent to change for forced, which sends `designForcedValueBrief` (layer,
+  property, value as shown, the rule and its source) through the
+  workspace's agent chat. When any selected layer is computed or forced the
+  field is read only for all of them and the card names that layer ("Button
+  label uses calc().", "Card is forced by .legacy-card"; forced wins). A
+  plain value a theme rule makes differ carries a theme mark and the card
+  lists each other theme's value ("Light uses FFFFFF"); a token handles
+  themes by itself and has none. The default theme's own value usually has
+  no theme rule to name it, so the host sends `baseTheme` with every
+  `setTheme`, including the first after a frame loads (the default theme
+  can move without a new handshake); a directory whose default theme has no
+  name lists none for it, and a frame that never gets `setTheme` shows no
+  mark. After a plain value is written over values that differed, the
+  field message says "Changes Light and Dark.". Details carry `hiddenBy`
+  (`self` or `ancestor`), found in the walk `visible` already made: the
+  header reads Hidden with Show (the Layers eye's canvas visibility, which
+  writes no source and has no undo step) or "In a hidden layer" with no
+  action. A missing token's pill is two spans, so the name truncates and
+  "is missing" always shows. Section actions, icon buttons and the Stroke
+  sides select (`data-design-filter-companion`) hide under a Styled-by
+  filter and a held state. A layer inside a component instance cannot be
+  selected today (the expander drops `data-oid` from definition content),
+  so "Part of <component>." waits for Phase 7.
 - **Token picker:** `design-token-catalog.ts` derives each token's types from
   its resolved value (colour, length, percentage, number, weight, font
   family, shadow, duration, easing; aliases resolve, cycles and undeclared
@@ -4230,6 +4263,10 @@ Architecture A. Phase 7 extends that qualified shared-session workflow.
 - Reuse source-bound reviews/results and durable tasks. Compare accepted-output
   quality and cost against the single-session workflow before increasing
   concurrency or autonomous scope.
+- A layer inside a component instance: selectable with definition-local
+  identity, its styles read only, with "Part of <component>." and Select
+  instance or Edit main in the Style panel. Moved here from Phase 5c, where no
+  such layer could be selected.
 
 Exit gates: multi-step work pauses/resumes across conflicts, resource limits,
 and disconnects without duplicate edits, leaked authority, or orphan processes.

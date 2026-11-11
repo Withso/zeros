@@ -1226,8 +1226,10 @@ jobs:
         # a `${{ github.event.* }}` value spliced into `run:` is a shell-injection
         # sink. On a push (no pull_request payload) there is no base, so fall back
         # to the single pushed commit.
+        # A merge-group commit stacks every queued PR ahead of it on main, so
+        # its range starts at the queue's base, not only its own HEAD commit.
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
         run: |
           set -euo pipefail
           if [ -n "${BASE_SHA:-}" ]; then

@@ -208,6 +208,9 @@ export interface DesignRuntimeNodeDetails {
   /** Present only on details read while that state is held: its values are
    * the state's, never the layer's Default. */
   heldState?: DesignRuntimeNodeState;
+  /** Why a layer does not show: `self` when it is hidden itself, `ancestor`
+   * when a layer around it is. Omitted when it shows. */
+  hiddenBy?: "self" | "ancestor";
 }
 
 export const DESIGN_RUNTIME_NODE_STATES = ["hover", "focus", "focus-visible", "active", "disabled"] as const;
@@ -1018,6 +1021,7 @@ function isRuntimeNodeDetails(
     (value.textSizing === undefined || isRuntimeTextSizing(value.textSizing)) &&
     typeof value.selector === "string" &&
     typeof value.visible === "boolean" &&
+    (value.hiddenBy === undefined || ((value.hiddenBy === "self" || value.hiddenBy === "ancestor") && value.visible === false)) &&
     Array.isArray(value.breadcrumb) &&
     value.breadcrumb.length <= 64 &&
     value.breadcrumb.every((part) => typeof part === "string") &&
@@ -1678,7 +1682,10 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       : element.tagName.toLowerCase();
   }
 
-  function visibleOf(element, elementStyle) {
+  /** "self" when the layer itself is hidden, "ancestor" when a layer around
+   * it is, null when it shows. The same walk visibleOf always made. */
+  function hiddenByOf(element, elementStyle) {
+    var invisibleSelf = false;
     for (
       var current = element;
       current && current instanceof Element;
@@ -1687,16 +1694,22 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       var style = current === element && elementStyle
         ? elementStyle
         : getComputedStyle(current);
-      if (
-        current.hidden ||
-        style.display === "none" ||
-        style.visibility === "hidden" ||
-        style.visibility === "collapse"
-      ) {
-        return false;
+      var removed = current.hidden || style.display === "none";
+      var invisible = style.visibility === "hidden" || style.visibility === "collapse";
+      if (current === element) {
+        if (removed) return "self";
+        // Visibility inherits, so the layer's own hidden value can come from
+        // a layer around it: keep walking to see.
+        if (invisible) invisibleSelf = true;
+        continue;
       }
+      if (removed || invisible) return "ancestor";
     }
-    return true;
+    return invisibleSelf ? "self" : null;
+  }
+
+  function visibleOf(element, elementStyle) {
+    return hiddenByOf(element, elementStyle) === null;
   }
 
   function rectOf(element) {
@@ -2236,6 +2249,9 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   /** The one layer held in a state, its copied rules and their originals;
    * null at rest. */
   var heldState = null;
+  /** The directory's default theme, as the host last named it with setTheme:
+   * undefined until it does, null when the default theme has no name. */
+  var defaultTheme = undefined;
   /** True while a held state is set aside, so reads in that span are Default's. */
   var heldStateAside = false;
   var HELD_STATE_RELEASES = ["previewStyles", "previewLayout", "restoreGeneration", "previewHistory", "commitStyles", "commitStructure", "previewStructure", "previewText", "previewMotion", "previewStylesheet", "previewInsert", "setNodeVisibility", "setPlayback"];
@@ -2821,6 +2837,16 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       values[theme] = themed.value;
       count += 1;
     });
+    // The default theme's own value usually has no theme rule to name it
+    // (it is :root), so it is read under its name when the host gave one.
+    if (typeof defaultTheme === "string" && defaultTheme !== current && !index.themeNames.has(defaultTheme) &&
+      count < ${DESIGN_RUNTIME_AUTHORED_STYLE_LIMITS.themes}) {
+      var base = winningDeclaration(element, property, themeMatchesFor(element, matches, index, defaultTheme));
+      if (base && base.value !== null && base.value !== winner.value && base.value.length <= ${DESIGN_RUNTIME_AUTHORED_STYLE_LIMITS.value}) {
+        if (!values) values = {};
+        values[defaultTheme] = base.value;
+      }
+    }
     return values;
   }
 
@@ -3426,6 +3452,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     var computed = getComputedStyle(element);
     var authoredStyleProperties = layoutOnly ? [] : authoredStylePropertiesOf(element);
     var rect = rectOf(element);
+    var hiddenBy = hiddenByOf(element, computed);
     var result = {
       sourceVersion: SOURCE_VERSION,
       oid: oid,
@@ -3434,7 +3461,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       text: textEditable ? editableTextOf(element) : directText(element),
       textEditable: textEditable,
       selector: element === document.body ? "body" : "[data-oid=\"" + escaped + "\"]",
-      visible: visibleOf(element, computed),
+      visible: hiddenBy === null,
       breadcrumb: layoutOnly ? [] : breadcrumbOf(element),
       rect: rect,
       box: boxOf(element, computed, rect),
@@ -3455,6 +3482,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       var rootFontSize = parseFloat(getComputedStyle(document.documentElement).fontSize);
       if (rootFontSize > 0 && rootFontSize <= 1024) result.rootFontSize = rootFontSize;
     }
+    if (hiddenBy) result.hiddenBy = hiddenBy;
     var classAttribute = element.getAttribute("class");
     if (classAttribute && classAttribute.trim()) result.classes = classAttribute.replace(/\s+/g, " ").trim().slice(0, 1024);
     result.styles["--zeros-layout-origin-flow"] = element.style ? element.style.getPropertyValue("--zeros-layout-origin-flow").trim() : "";
@@ -3910,15 +3938,27 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     return detailsAfterLayout(element);
   }
 
-  function setTheme(theme) {
+  function setTheme(theme, base) {
     if (theme !== null && (typeof theme !== "string" || !/^[a-z][a-z0-9_-]{0,63}$/.test(theme))) {
       throw new Error("theme must be null or a portable theme name.");
     }
+    if (base !== undefined && base !== null && (typeof base !== "string" || !/^[a-z][a-z0-9_-]{0,63}$/.test(base))) {
+      throw new Error("baseTheme must be null or a portable theme name.");
+    }
+    // The default theme can change without a new handshake, so it travels
+    // with every theme the host applies. Absent: the host did not say.
+    var nextBase = base === undefined ? undefined : base;
+    var baseChanged = nextBase !== defaultTheme;
+    defaultTheme = nextBase;
     var currentTheme = document.documentElement.getAttribute("data-zd-theme");
     // Re-applying the active mode is a semantic no-op. Reuse the exact cached
     // snapshot so the host store can preserve reference identity and avoid a
     // second React commit during iframe readiness.
-    if (currentTheme === theme) return lastSnapshot || snapshot();
+    if (currentTheme === theme) {
+      // A new default theme changes only what each value lists for it.
+      if (baseChanged) resetStyleCaches();
+      return lastSnapshot || snapshot();
+    }
     // Only a theme that changes ends a held state.
     releaseHeldState(true);
     withoutObservedMutations(function () {
@@ -5858,7 +5898,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       case "setNodeVisibility":
         return setNodeVisibility(args.nodeId, args.visible === true);
       case "setTheme":
-        return setTheme(args.theme === null ? null : args.theme);
+        return setTheme(args.theme === null ? null : args.theme, args.baseTheme);
       case "previewStyles":
         return previewStyles(args.nodeId, args.styles);
       case "getLayoutTargets":

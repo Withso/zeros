@@ -71,6 +71,26 @@ describe("design runtime store", () => {
     expect(held.refused).toHaveBeenCalledTimes(1);
   });
 
+  it("lets a refused reply's reread publish nothing once the workspace was forgotten", () => {
+    held.refused.mockClear();
+    const store = useDesignRuntimeStore.getState();
+    store.publishNodeDetails("moved", "/design", "home.html", details(), SOURCE_VERSION);
+    store.publishNodeDetails("moved", "/design", "home.html", { ...details(), oid: "child", heldState: "hover" }, SOURCE_VERSION);
+    const refusal = held.refused.mock.calls[0]![0];
+    expect(refusal.hasDefault()).toBe(false);
+    // The Design directory changes; the old frame runtime is still registered.
+    store.forgetWorkspace("moved");
+    // No reread starts, and one already on its way publishes nothing.
+    expect(refusal.hasDefault()).toBe(true);
+    refusal.publish({ ...details(), oid: "child" });
+    expect(useDesignRuntimeStore.getState().byWorkspace.moved).toBeUndefined();
+    // A refusal taken after the change is current again.
+    store.publishNodeDetails("moved", "/design", "home.html", { ...details(), oid: "child", heldState: "hover" }, SOURCE_VERSION);
+    const later = held.refused.mock.calls[1]![0];
+    later.publish({ ...details(), oid: "child" });
+    expect(designRuntimeFrameState("moved", "home.html")?.detailsByNode.child).toBeDefined();
+  });
+
   it("keeps a reread whose only change is the layer's states", () => {
     const store = useDesignRuntimeStore.getState();
     store.publishNodeDetails("states", "/design", "home.html", details(), SOURCE_VERSION);
@@ -79,6 +99,35 @@ describe("design runtime store", () => {
     expect(designRuntimeFrameState("states", "home.html")?.detailsByNode.heading?.states).toEqual(["hover"]);
     store.publishNodeDetails("states", "/design", "home.html", details(), SOURCE_VERSION);
     expect(designRuntimeFrameState("states", "home.html")?.detailsByNode.heading?.states).toBeUndefined();
+  });
+
+  it("keeps a reread whose only change is where a value comes from", () => {
+    const store = useDesignRuntimeStore.getState();
+    const from = (style: Record<string, unknown>) =>
+      ({ ...details(), authoredStyles: { left: { origin: "frame", selector: ".a", scope: "element", value: "10px", ...style } } }) as DesignRuntimeNodeDetails;
+    const stored = () => designRuntimeFrameState("origins", "home.html")?.detailsByNode.heading?.authoredStyles?.left;
+    store.publishNodeDetails("origins", "/design", "home.html", from({}), SOURCE_VERSION);
+    const kept = designRuntimeFrameState("origins", "home.html")?.detailsByNode.heading;
+    // An equal reread keeps the stored object.
+    store.publishNodeDetails("origins", "/design", "home.html", from({}), SOURCE_VERSION);
+    expect(designRuntimeFrameState("origins", "home.html")?.detailsByNode.heading).toBe(kept);
+    for (const change of [
+      { selector: ".b" },
+      { origin: "inline", scope: "inline", selector: undefined },
+      { important: true },
+      { value: "calc(10px + 0px)" },
+      { themeValues: { dark: "12px" } },
+      { tokens: [{ name: "--x", value: "10px" }] },
+      { replaced: { origin: "frame", selector: ".a", value: "8px" } },
+      { subjectClasses: ["a"] },
+    ]) {
+      store.publishNodeDetails("origins", "/design", "home.html", from(change), SOURCE_VERSION);
+      expect(stored(), JSON.stringify(change)).toMatchObject(Object.fromEntries(Object.entries(change).filter(([, value]) => value !== undefined)));
+      store.publishNodeDetails("origins", "/design", "home.html", from({}), SOURCE_VERSION);
+    }
+    const withRight = { ...from({}), authoredStyles: { ...from({}).authoredStyles, right: { origin: "frame" as const, value: "0px" } } };
+    store.publishNodeDetails("origins", "/design", "home.html", withRight, SOURCE_VERSION);
+    expect(designRuntimeFrameState("origins", "home.html")?.detailsByNode.heading?.authoredStyles?.right).toBeDefined();
   });
 
   it("never stores a snapshot whose frame was read while held", () => {
