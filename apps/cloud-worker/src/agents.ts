@@ -1013,9 +1013,10 @@ export class Agents {
               const assigned = await this.beginWhenFree(route, entry, stopping);
               if (!assigned || route.closed || stopping !== route.stopping) response = { stopReason: "cancelled" };
               else {
+                // The lease first, so the running turn names its person.
+                await this.leaseTurn(route, entry, assigned);
                 await this.update(route, { sessionId: route.id, update: { sessionUpdate: "user_message_recorded", message: userMessage(entry) } });
                 await this.turnState(route, entry, "running");
-                await this.leaseTurn(route, entry, assigned);
               }
             }
           }
@@ -1265,6 +1266,8 @@ export class Agents {
     await this.broadcast(createMessage({ type: "DB_CHANGED", source: "engine", kinds: ["workspaces"], workspaceIds: [this.scope.workspace.id] }));
   }
   private turnState(route: Runtime, entry: InboxEntry, state: "running" | "completed" | "failed" | "cancelled", stopReason?: PromptResponse["stopReason"]): Promise<void> {
-    return this.update(route, { sessionId: route.id, update: { sessionUpdate: "turn_state", turnId: entry.userMessageId, state, startedAt: entry.startedAt, ...(stopReason ? { stopReason } : {}) } });
+    const actingUserId = state === "running" && this.acting ? route.context?.lease.userId : undefined;
+    return this.update(route, { sessionId: route.id, update: { sessionUpdate: "turn_state", turnId: entry.userMessageId, state, startedAt: entry.startedAt,
+      ...(stopReason ? { stopReason } : {}), ...(actingUserId ? { actingUserId } : {}) } });
   }
 }

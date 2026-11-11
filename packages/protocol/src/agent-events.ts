@@ -566,6 +566,8 @@ export interface TurnStateUpdateNotification {
   startedAt: number;
   /** Present on terminal states when the adapter supplied one. */
   stopReason?: StopReason | null;
+  /** Team sharing (activated): on a running turn, the person it runs as. */
+  actingUserId?: string;
 }
 
 export interface UserMessageChunkUpdate {

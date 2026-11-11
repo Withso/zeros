@@ -15,6 +15,7 @@
 //     trailing text of providers without phases — rendered brightly below it.
 // ──────────────────────────────────────────────────────────
 
+import { ActingAs } from "./acting-as";
 import { memo, useMemo, type ReactNode } from "react";
 
 import { ActivityShimmer } from "@/renderer/shared/ui/loading";
@@ -178,6 +179,7 @@ export const TurnEventList = memo(function TurnEventList({
             gibberish={gibberish}
           />
         )}
+        {showShimmer && ctx.chatId && <ActingAs chatId={ctx.chatId} active={surfaceActive} />}
         {/* Per-turn footer, in-lane so it hugs the answer (see prop doc). */}
         {footer}
         {showBackgroundWaiting && (

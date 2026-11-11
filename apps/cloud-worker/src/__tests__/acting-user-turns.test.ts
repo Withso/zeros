@@ -398,3 +398,22 @@ it("renews an open desktop connection's client context while it stays open, and 
   await new Promise(resolve => setTimeout(resolve, 100));
   expect(renewed().slice(after + 1).some(ids => ids.includes(handle))).toBe(false);
 });
+
+it("names the running turn's person on its turn_state, and nobody on a legacy turn", async () => {
+  const states = (relay: ActingRelay) => relay.bridge("AGENT_SESSION_UPDATE").flatMap(({ frame }) => frame.type === "AGENT_SESSION_UPDATE" &&
+    frame.notification.update.sessionUpdate === "turn_state" ? [frame.notification.update as { state: string; actingUserId?: string }] : []);
+  const f = await setup();
+  await f.relay.receive({ t: "open", clientId: CLIENT_A, userId: ALEX, contextId: randomUUID() });
+  f.relay.deliver(delivery(ALEX));
+  await until(() => f.drivers[0]?.prompts.length ?? 0).toBe(1);
+  await until(() => states(f.relay).find(update => update.state === "running")?.actingUserId).toBe(ALEX);
+  f.drivers[0]!.complete();
+  await until(() => states(f.relay).some(update => update.state === "completed")).toBe(true);
+  expect(states(f.relay).find(update => update.state === "completed")).not.toHaveProperty("actingUserId");
+  const legacy = await setup({ activated: false });
+  await legacy.relay.receive({ t: "open", clientId: CLIENT_A });
+  legacy.relay.deliver(delivery(ALEX));
+  await until(() => legacy.drivers[0]?.prompts.length ?? 0).toBe(1);
+  expect(states(legacy.relay).every(update => !("actingUserId" in update))).toBe(true);
+  legacy.drivers[0]!.complete();
+});
