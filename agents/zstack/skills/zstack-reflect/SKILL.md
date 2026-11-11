@@ -76,8 +76,7 @@ Where it lands:
 - Reflect never adds a skill, playbook or reference file.
 - From a feature branch, guidance goes in a `changes/<id>.md` fragment.
 - A dedicated pack branch edits the target directly, within its budget.
-- Safety rules, CI definitions and credential policy go to the owner as a
-  proposal.
+- Safety rules and credential policy go to the owner as a proposal.
 
 ## 5. Report and land
 

@@ -122,8 +122,10 @@ For provider event handling or tool transcript UI, also read
   records the agent. Never author a commit as `zeros-agent[bot]`.
 - Agents arm merges only through `pnpm agent:merge <pr-number>`, using the
   workspace's own `gh` identity. Preview with `--dry-run`. Never bypass the
-  wrapper with `gh pr merge` or `pnpm agent:gh pr merge`. PRs that change
-  CI-definition paths require the owner to review and merge them. Only a human
+  wrapper with `gh pr merge` or `pnpm agent:gh pr merge`. Agents may merge PRs
+  that change CI-definition paths through the same wrapper; the required-check
+  list stays in GitHub rules and the wrapper still refuses failed or cancelled
+  required checks. Only a human
   may use `--force`, after documenting the override in a comment on that PR;
   pass the comment URL with `--reason`. This overrides only the one-armed-PR
   guard. See [docs/ci.md](docs/ci.md).
@@ -166,4 +168,4 @@ Never claim a platform-only check passed when it was not run on that platform.
 Run `pnpm ci:plan` to preview the path-selected lanes, and add any extra `ci:*`
 labels before the final push. Labels only add checks; they cannot remove path
 floors. See [docs/ci.md](docs/ci.md) for the closed label vocabulary and fallback
-rules. CI-definition PRs need an owner merge; agents must not auto-merge them.
+rules. CI-definition PRs merge through `pnpm agent:merge` like any other PR.

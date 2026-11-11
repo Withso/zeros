@@ -622,6 +622,18 @@ describe("immediate-only agent merge", () => {
     },
   );
 
+  it.each(["scripts/ci/scope.mjs", "scripts/ci/ci-definition.mjs", ".github/workflows/ci.yml"])(
+    "dry-runs an immediate merge of CI definition %s",
+    async (filename) => {
+      const snapshot = fixture();
+      snapshot.files[0].filename = filename;
+      const gh = fakeGh(snapshot);
+      expect(await runAgentMerge(["123", "--immediate", "--dry-run"], gh)).toBe(0);
+      expect(gh.stdout).toHaveBeenCalledWith(expect.stringContaining(`CI definitions (${filename})`));
+      expectNoWrite(gh);
+    },
+  );
+
   it("dry-runs the immediate mode truthfully with no mutation", async () => {
     const gh = fakeGh();
     expect(await runAgentMerge(["--immediate", "--dry-run", "123"], gh)).toBe(
@@ -807,24 +819,6 @@ describe("immediate-only agent merge", () => {
           isInMergeQueue: false,
           autoMergeRequest: { enabledAt: "2026-10-18T00:00:00Z" },
         });
-      },
-    ],
-    [
-      "CI definition",
-      (s) => {
-        s.files[0].filename = "scripts/ci/scope.mjs";
-      },
-    ],
-    [
-      "CI policy itself",
-      (s) => {
-        s.files[0].filename = "scripts/ci/ci-definition.mjs";
-      },
-    ],
-    [
-      "workflow",
-      (s) => {
-        s.files[0].filename = ".github/workflows/ci.yml";
       },
     ],
     [
