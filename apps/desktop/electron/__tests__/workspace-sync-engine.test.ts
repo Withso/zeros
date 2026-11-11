@@ -3,7 +3,7 @@ import { lstat, mkdir, mkdtemp, readFile, readdir, readlink, realpath, rm, stat,
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import type { SyncEntry, SyncReadRequest, SyncSnapshotReply, SyncSnapshotRequest } from "@zeros/protocol/workspace-sync";
+import { SYNC_LIMITS, type SyncEntry, type SyncReadRequest, type SyncSnapshotReply, type SyncSnapshotRequest } from "@zeros/protocol/workspace-sync";
 import { SyncChangedError, SyncEngine, SyncRootError, type SyncSource } from "../workspace-sync/engine";
 
 const cleanups: string[] = [];
@@ -132,13 +132,16 @@ describe("sync engine", () => {
     const s = await sandbox(), c = cloud({ "1.txt": "1", "2.txt": "2", "3.txt": "3", "4.txt": "4" });
     c.failAfter(2);
     await expect((await open(s.root)).pull(c.source)).rejects.toThrow("connection lost");
-    expect(c.reads).toEqual(["1.txt", "2.txt"]);
+    // Files are written several at a time, so which two landed first varies; the rest are never fetched twice.
+    const first = [...c.reads];
+    expect(first).toHaveLength(2);
     expect(await readdir(join(s.root, ".zeros-sync", "tmp"))).toEqual([]);
     c.failAfter(Infinity);
     const reopened = await open(s.root);
     expect(reopened.position).toMatchObject({ files: 2 });
     expect((await reopened.pull(c.source)).state).toBe("in_sync");
-    expect(c.reads).toEqual(["1.txt", "2.txt", "3.txt", "4.txt"]);
+    expect([...c.reads].sort()).toEqual(["1.txt", "2.txt", "3.txt", "4.txt"]);
+    expect(c.reads.slice(2).some(path => first.includes(path))).toBe(false);
     expect(await readFile(join(s.root, "4.txt"), "utf8")).toBe("4");
   });
 
@@ -194,5 +197,65 @@ describe("sync engine", () => {
     const engine = await open(s.root, { now: () => 0, sleep: async (ms: number) => { sleeps.push(ms); }, paceBytesPerSecond: 1000 });
     await engine.pull(c.source);
     expect(sleeps.at(-1)).toBe(3000);
+  });
+
+  it("fetches small files in batches with several requests in flight, and lands the rest when one file changed", async () => {
+    const files: Record<string, string> = {};
+    for (let index = 0; index < 2_000; index++) files[`dir${index % 20}/file${index}.txt`] = `content ${index}\n`;
+    files["big.bin"] = "b".repeat(SYNC_LIMITS.batchFileBytes + 1);
+    const s = await sandbox(), c = cloud(files);
+    let calls = 0, active = 0, peak = 0, changed: string | undefined = "dir3/file3.txt";
+    const batched: SyncSource = { ...c.source,
+      batching: () => true,
+      readBatch: async ({ files: wanted }) => {
+        calls++; active++; peak = Math.max(peak, active);
+        await new Promise(resolve => setTimeout(resolve, 2));
+        active--;
+        return { entries: wanted.map(({ path }) => path === changed ? { path, changed: true as const }
+          : { path, bytes: Buffer.byteLength(files[path]!), base64: Buffer.from(files[path]!).toString("base64") }) };
+      } };
+    const engine = await open(s.root);
+    const first = await engine.pull(batched);
+    // 2,000 small files in a handful of batches (512 per request), the big one by chunked reads.
+    expect(calls).toBeLessThanOrEqual(Math.ceil(2_000 / SYNC_LIMITS.batchFiles) + 1);
+    expect(peak).toBeGreaterThan(1);
+    expect(c.reads).toEqual(["big.bin"]);
+    // The changed file did not land and asks for another pass; every other file did.
+    expect(first.state).toBe("retry");
+    await expect(lstat(join(s.root, "dir3/file3.txt"))).rejects.toThrow();
+    expect(await readFile(join(s.root, "dir4/file4.txt"), "utf8")).toBe("content 4\n");
+    expect(engine.position.files).toBe(2_000);
+    changed = undefined;
+    calls = 0;
+    expect((await engine.pull(batched)).state).toBe("in_sync");
+    expect(calls).toBe(1);
+    expect(await readFile(join(s.root, "dir3/file3.txt"), "utf8")).toBe("content 3\n");
+  });
+
+  it("asks again for files a batch reply left out (its byte budget), and reads one by one from a worker without batches", async () => {
+    const s = await sandbox(), c = cloud({ "a.txt": "a", "b.txt": "b", "c.txt": "c" });
+    const asked: string[][] = [];
+    const partial: SyncSource = { ...c.source, batching: () => true,
+      readBatch: async ({ files }) => { asked.push(files.map(file => file.path));
+        const [first] = files; return { entries: [{ path: first!.path, bytes: 1, base64: Buffer.from(first!.path[0]!).toString("base64") }] }; } };
+    expect((await (await open(s.root)).pull(partial)).state).toBe("in_sync");
+    expect(asked.flat().sort()).toEqual(expect.arrayContaining(["a.txt", "b.txt", "c.txt"]));
+    expect(await readFile(join(s.root, "c.txt"), "utf8")).toBe("c");
+    const t = await sandbox(), d = cloud({ "a.txt": "a", "b.txt": "b" });
+    expect((await (await open(t.root)).pull({ ...d.source, batching: () => false, readBatch: async () => { throw new Error("not served"); } })).state).toBe("in_sync");
+    expect(d.reads.sort()).toEqual(["a.txt", "b.txt"]);
+  });
+
+  it("builds the clone before the files on a first sync, so a long first sync is already a Git folder", async () => {
+    const s = await sandbox(), c = cloud({ "a.txt": "a" });
+    const order: string[] = [];
+    const head = { branch: "main", sha: "a".repeat(40) };
+    c.replies.push({ epoch: EPOCH, seq: 0, full: [c.entry("a.txt")], head });
+    const git = { available: async () => true, apply: async () => { order.push("git"); return { head: head.sha, branch: head.branch, created: [head.branch] }; } };
+    const source: SyncSource = { ...c.source, read: async request => { order.push("read"); return c.source.read(request); },
+      bootstrap: async () => ({ branch: head.branch, head: head.sha, remoteUrl: null }), bundleRead: async () => ({ bytes: 0, base64: "" }) };
+    const result = await (await open(s.root, { git })).pull(source);
+    expect(result).toMatchObject({ state: "in_sync", git: "ok" });
+    expect(order).toEqual(["git", "read"]);
   });
 });

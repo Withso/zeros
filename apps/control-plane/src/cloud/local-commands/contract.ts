@@ -52,7 +52,7 @@ export const LocalDeviceRegistrationSchema = z.object({ requestId: z.string().uu
 export type LocalDeviceRegistration = z.infer<typeof LocalDeviceRegistrationSchema>;
 export type LocalDevice = LocalDeviceBinding & { name: string; capabilities: LocalDeviceRegistration["capabilities"] };
 export type LocalDevicePresence = { presenceRequired: boolean; reachableUntil: string | null };
-export type ConnectedMac = { deviceId: string; name: string; connected: boolean; active: boolean; reachable: boolean; expiresAt: string | null; syncing?: boolean };
+export type ConnectedMac = { deviceId: string; name: string; connected: boolean; active: boolean; reachable: boolean; expiresAt: string | null; syncing?: boolean; syncWanted?: boolean };
 export type LocalCommandReceipt = { requestId: string; state: "pending" | "claimed" | "terminal"; approvalDeadline: string;
   runDeadline: string | null; mac: string | null; result: LocalCommandResult | null; outputAvailable: boolean };
 export type LocalCommandNotice = { requestId: string; state: "terminal"; outcome: LocalCommandOutcome } | {

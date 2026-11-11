@@ -22,6 +22,7 @@ import { useMyUserId } from "../../platform/team-sharing-state";
 import { renameSharedCloudWorkspace } from "../../state/team-sharing-actions";
 import { Input } from "../../shared/ui/primitives/input";
 import { memberName, useOrganizationRoster } from "../../state/organization-roster";
+import { workspaceNumberName } from "../../shared/lib/workspace-name";
 import { WorkspaceIdentityLabel, WorkspaceIdentityTrigger, useWorkspaceDetailsOpen } from "./workspace-identity";
 
 /** With this desktop's engine connection, Running waits until agents can run. */
@@ -176,7 +177,8 @@ export function CloudWorkspaceDetails({ folder, name, title, workspace }: {
   const [changing, setChanging] = useState(false);
   const running = !!workspace && ["ready", "busy"].includes(workspace.status);
   const resources = useCloudWorkspaceResources(target && allowed && !reader ? target : null, shown && running);
-  const macs = useWorkspaceMacs(target && allowed && !reader ? target.workspaceId : null, shown);
+  const macs = useWorkspaceMacs(target && allowed && !reader ? target.workspaceId : null, shown,
+    workspace ? { repository: workspace.repository.name, workspace: workspaceNumberName(workspace) ?? workspace.name } : undefined);
   if (!target || !allowed) return <WorkspaceIdentityLabel name={name} title={title} placement="cloud" />;
   const failures: Record<LifecycleChange, string> = { wake: "Couldn't start cloud workspace", stop: "Couldn't stop cloud workspace", restart: "Couldn't restart cloud workspace" };
   const change = (operation: LifecycleChange) => {
@@ -194,7 +196,7 @@ export function CloudWorkspaceDetails({ folder, name, title, workspace }: {
             onRename={sharing && workspace.capabilities.canManage ? name => renameSharedCloudWorkspace(target, name) : undefined} statusLabel={cloudStatusLabel(workspace.status, availability)}
             resources={running ? resources : null} changing={changing} onChange={change} />
         ) : <p className="text-fg2 text-xs">Loading workspace details…</p>}
-        {workspace && !reader && macs.macs && <ConnectedMacs macs={macs.macs} now={Date.now()} busyDeviceId={macs.busyDeviceId} onConnect={macs.connect} onDisconnect={macs.disconnect} sync={macs.sync} />}
+        {workspace && !reader && macs.macs && <ConnectedMacs macs={macs.macs} now={Date.now()} busyDeviceId={macs.busyDeviceId} onConnect={macs.connect} onDisconnect={macs.disconnect} sync={macs.sync} onSetWanted={macs.setWanted} />}
       </PopoverContent>
     </Popover>
   );

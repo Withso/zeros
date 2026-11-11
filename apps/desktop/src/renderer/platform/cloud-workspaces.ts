@@ -78,7 +78,8 @@ export async function cloudAccountRequest<T>(
     headers: {
       authorization: `Bearer ${session.access_token}`,
       ...pickDeviceHeaders(options?.deviceHeaders),
-      ...(options?.syncField ? { "X-Zeros-Sync": "1" } : {}),
+      // 12.z: syncWanted has its own opt-in (released apps parse the Mac strictly); both travel together here.
+      ...(options?.syncField ? { "X-Zeros-Sync": "1", "X-Zeros-Sync-Wanted": "1" } : {}),
       ...(options?.teamSharing ? { "X-Zeros-Team-Sharing": "1" } : {}),
       ...(input
         ? {

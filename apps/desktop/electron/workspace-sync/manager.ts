@@ -12,6 +12,8 @@ export interface SyncManagerDeps {
   /** The connected-Macs row's syncing flag (G's route); best effort. */
   setSyncing(workspaceId: string, syncing: boolean): Promise<void>;
   publish(statuses: WorkspaceSyncStatus[]): void;
+  /** One `[workspace-sync]` line per event: workspace id prefixes, closed reasons and counts; never a path or file name. */
+  log?(line: string): void;
   open?: typeof SyncEngine.open;
   wait?(ms: number, wake: { promise: Promise<void> }): Promise<void>;
 }
@@ -25,6 +27,7 @@ interface Run { stop: AbortController; wake: () => void; wakePromise: Promise<vo
  * retried without waking them. */
 export class SyncManager {
   private readonly runs = new Map<string, Run>();
+  private log(line: string): void { (this.deps.log ?? (text => console.info(`[workspace-sync] ${text}`)))(line); }
   private account: string | null = null;
   constructor(private readonly deps: SyncManagerDeps) {}
 
@@ -49,12 +52,12 @@ export class SyncManager {
     const identity = this.deps.identity(), account = identity ? `${identity.accountId}:${identity.deviceId}` : null;
     if (account !== this.account) { await this.stop(); this.account = account; }
     if (!identity) return;
-    for (const [workspaceId, folder] of Object.entries(this.folders())) if (!this.runs.has(workspaceId)) this.run(workspaceId, folder, identity);
+    for (const [workspaceId, folder] of Object.entries(this.folders())) if (!this.runs.has(workspaceId)) this.run(workspaceId, folder, identity, true);
     this.publish();
   }
   async stop(): Promise<void> {
     const runs = [...this.runs.values()]; this.runs.clear();
-    for (const run of runs) { run.stop.abort(); run.wake(); }
+    for (const run of runs) { run.stop.abort(); run.wake(); this.log(`stopped workspace=${short(run.status.workspaceId)} reason=app_stopped`); }
     await Promise.all(runs.map(run => run.done));
     this.publish();
   }
@@ -72,14 +75,14 @@ export class SyncManager {
     if (previous) { this.runs.delete(workspaceId); previous.stop.abort(); previous.wake(); await previous.done; }
     this.saveFolders({ ...this.folders(), [workspaceId]: engine.root });
     await this.deps.setSyncing(workspaceId, true).catch(() => {});
-    this.run(workspaceId, engine.root, identity);
+    this.run(workspaceId, engine.root, identity, false);
     this.publish();
   }
   /** Stop mirroring; the folder and its files stay as they are. */
   async disable(workspaceId: string): Promise<void> {
     const run = this.runs.get(workspaceId);
     this.runs.delete(workspaceId);
-    if (run) { run.stop.abort(); run.wake(); await run.done; }
+    if (run) { run.stop.abort(); run.wake(); await run.done; this.log(`stopped workspace=${short(workspaceId)} reason=turned_off`); }
     const folders = this.folders(); delete folders[workspaceId]; this.saveFolders(folders);
     await this.deps.setSyncing(workspaceId, false).catch(() => {});
     this.publish();
@@ -90,7 +93,12 @@ export class SyncManager {
   }
   private publish(): void { this.deps.publish(this.statuses()); }
 
-  private run(workspaceId: string, folder: string, identity: { accountId: string; deviceId: string }): void {
+  private run(workspaceId: string, folder: string, identity: { accountId: string; deviceId: string }, resumed: boolean): void {
+    const id = short(workspaceId);
+    this.log(`started workspace=${id} resumed=${resumed}`);
+    let connects = 0, lastState = "";
+    // Paused and error lines only when they change, so a minute's retry is not a log line.
+    const note = (state: string, reason: string) => { const key = `${state}:${reason}`; if (key !== lastState) { lastState = key; this.log(`${state} workspace=${id} reason=${reason}`); } };
     const stop = new AbortController();
     let wake!: () => void;
     const run: Run = { stop, wake: () => wake(), wakePromise: Promise.resolve(), status: { workspaceId, state: "syncing", problems: 0 }, done: Promise.resolve() };
@@ -105,11 +113,18 @@ export class SyncManager {
         let connection: SyncConnection | undefined;
         try {
           engine ??= await (this.deps.open ?? SyncEngine.open)(folder, this.syncIdentity(workspaceId, identity));
+          if (connects++ > 0) this.log(`reconnect workspace=${id} attempt=${connects - 1}`);
           connection = await this.deps.connect(workspaceId, { hint: () => run.wake(), closed: () => run.wake() });
+          lastState = "";
           let open = true;
           while (open && !stop.signal.aborted) {
             set({ state: "syncing", problems: run.status.problems });
+            const started = Date.now();
             const result = await engine.pull(connection, remaining => { if (remaining) set({ state: "syncing", files: remaining, problems: run.status.problems }); });
+            const stats = result.stats;
+            if (stats && (stats.kind === "full" || stats.files || stats.deletes || result.state !== "in_sync"))
+              this.log(`pulled workspace=${id} kind=${stats.kind} files=${stats.files} bytes=${stats.bytes} deletes=${stats.deletes} ms=${Date.now() - started} git=${result.git ?? "none"} state=${result.state}`);
+            if (result.state === "stopped") note("error", result.stopped ?? "stopped");
             if (result.state === "stopped") { set({ state: "error", reason: result.stopped, problems: 0 }); await wait(ERROR_MS); break; }
             if (result.state === "retry") { await wait(RETRY_MS); continue; }
             set({ state: "in_sync", problems: result.problems.length + result.skipped.length, ...(result.git === "missing" ? { reason: "git_missing" } : result.git === "failed" ? { reason: "git_failed" } : {}) });
@@ -118,13 +133,13 @@ export class SyncManager {
           }
         } catch (error) {
           if (stop.signal.aborted) break;
-          if (error instanceof SyncConnectError && error.kind === "paused") { set({ state: "paused", problems: run.status.problems }); await wait(PAUSED_MS); }
-          else if (error instanceof SyncConnectError && error.kind === "signed_out") break;
-          else if (error instanceof SyncConnectError && error.kind === "update_required") { set({ state: "error", reason: "update_required", problems: 0 }); await wait(UPDATE_MS); }
-          else if (error instanceof SyncConnectError && error.kind === "not_connected") { set({ state: "error", reason: "not_connected", problems: 0 }); await wait(ERROR_MS); }
-          else if (error instanceof SyncRootError) { set({ state: "error", reason: `folder_${error.code}`, problems: 0 }); await wait(ERROR_MS); engine = undefined; }
-          else if (error instanceof SyncConnectError) { set({ state: "paused", problems: run.status.problems }); await wait(PAUSED_MS); }
-          else { set({ state: "error", reason: "write_failed", problems: run.status.problems }); await wait(ERROR_MS); }
+          if (error instanceof SyncConnectError && error.kind === "paused") { note("paused", "workspace_stopped"); set({ state: "paused", problems: run.status.problems }); await wait(PAUSED_MS); }
+          else if (error instanceof SyncConnectError && error.kind === "signed_out") { this.log(`stopped workspace=${id} reason=signed_out`); break; }
+          else if (error instanceof SyncConnectError && error.kind === "update_required") { note("error", "update_required"); set({ state: "error", reason: "update_required", problems: 0 }); await wait(UPDATE_MS); }
+          else if (error instanceof SyncConnectError && error.kind === "not_connected") { note("error", "not_connected"); set({ state: "error", reason: "not_connected", problems: 0 }); await wait(ERROR_MS); }
+          else if (error instanceof SyncRootError) { note("error", `folder_${error.code}`); set({ state: "error", reason: `folder_${error.code}`, problems: 0 }); await wait(ERROR_MS); engine = undefined; }
+          else if (error instanceof SyncConnectError) { note("paused", "unavailable"); set({ state: "paused", problems: run.status.problems }); await wait(PAUSED_MS); }
+          else { note("error", "write_failed"); set({ state: "error", reason: "write_failed", problems: run.status.problems }); await wait(ERROR_MS); }
         } finally { connection?.close(); }
       }
     })();
@@ -137,3 +152,6 @@ function defaultWait(ms: number, wake: { promise: Promise<void> }): Promise<void
     void wake.promise.then(() => { clearTimeout(timer); resolve(); });
   });
 }
+
+/** A workspace id's first 8 characters: enough to tell runs apart in a log, never a path. */
+const short = (workspaceId: string) => workspaceId.slice(0, 8);

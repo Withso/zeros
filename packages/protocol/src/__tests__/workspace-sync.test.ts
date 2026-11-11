@@ -28,7 +28,7 @@ describe("Order 3 sync wire", () => {
     expect(SyncReadRequestSchema.safeParse({ path: "a", sha256: sha, offset: 0, length: 4 * 1024 * 1024 + 1 }).success).toBe(false);
     expect(SyncReadRequestSchema.safeParse({ path: "a", sha256: "short", offset: 0, length: 1 }).success).toBe(false);
   });
-  it("shapes the direct path: a grant reply for an https route base, the renew frame, and exactly four passive ops", () => {
+  it("shapes the direct path: a grant reply for an https route base, the renew frame, and exactly five passive ops", () => {
     const reply = { url: "https://route.example.test/", portAuth: "p".repeat(16), grant: "v1.abc.def", expiresAt: "2026-11-11T00:00:00Z" };
     expect(SyncGrantReplySchema.parse(reply)).toEqual(reply);
     for (const url of ["http://route.example.test/", "https://route.example.test/path", "https://u:p@route.example.test/", "https://route.example.test/?q=1"])
@@ -36,7 +36,7 @@ describe("Order 3 sync wire", () => {
     expect(SyncGrantReplySchema.safeParse({ ...reply, grant: "bearer x" }).success).toBe(false);
     expect(SyncRenewFrameSchema.safeParse({ t: "renew", grant: "v1.abc.def" }).success).toBe(true);
     expect(SyncRenewFrameSchema.safeParse({ t: "renew", grant: "v1.abc.def", dev: "x" }).success).toBe(false);
-    expect([...SYNC_PASSIVE_OPS]).toEqual(["sync.snapshot", "sync.read", "sync.bootstrap", "sync.bundleRead"]);
+    expect([...SYNC_PASSIVE_OPS]).toEqual(["sync.snapshot", "sync.read", "sync.readBatch", "sync.bootstrap", "sync.bundleRead"]);
   });
   it("carries the cloud HEAD in a snapshot and bounds the bootstrap and bundle reads", () => {
     const head = { branch: "workspace/fix-login", sha: "a".repeat(40) };

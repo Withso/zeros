@@ -4,7 +4,7 @@ import {
   LocalCommandNoticeSchema, LocalCommandPresenceSchema, LocalCommandRegistrationReplySchema, LocalCommandResultReplySchema, WorkspaceSyncFlagReplySchema,
   type LocalCommandDevice, type LocalCommandMacResult,
 } from "@zeros/protocol/local-commands";
-import { SyncGrantReplySchema } from "@zeros/protocol/workspace-sync";
+import { DeviceSyncConnectionsReplySchema, SyncGrantReplySchema } from "@zeros/protocol/workspace-sync";
 
 /** A control-plane refusal or an unusable reply. Never carries a body beyond its closed code. */
 export class DeviceControlError extends Error {
@@ -42,7 +42,8 @@ export class DeviceControl {
     const headers: Record<string, string> = { authorization: `Bearer ${token}`, ...(options.accept ? { accept: options.accept } : {}) };
     if (options.body !== undefined) headers["content-type"] = "application/json";
     // Order 3: replies carrying a connected-Macs row include `syncing` only when asked.
-    if (options.syncField) headers["x-zeros-sync"] = "1";
+    // 12.z: syncWanted has its own opt-in beside the Order 3 syncing field; both always travel together here.
+    if (options.syncField) { headers["x-zeros-sync"] = "1"; headers["x-zeros-sync-wanted"] = "1"; }
     if (options.device) Object.assign(headers, {
       [LOCAL_COMMAND_DEVICE_HEADERS.deviceId]: options.device.deviceId,
       [LOCAL_COMMAND_DEVICE_HEADERS.registrationId]: options.device.registrationId,
@@ -84,7 +85,9 @@ export class DeviceControl {
     if (!token) throw new DeviceControlError(401, "unauthorized");
     const response = await this.deps.fetch(`${this.deps.baseUrl()}${this.device(device.deviceId)}/events`, { method: "GET", redirect: "error", signal,
       headers: { authorization: `Bearer ${token}`, accept: "text/event-stream", [LOCAL_COMMAND_DEVICE_HEADERS.deviceId]: device.deviceId,
-        [LOCAL_COMMAND_DEVICE_HEADERS.registrationId]: device.registrationId, [LOCAL_COMMAND_DEVICE_HEADERS.instanceId]: device.instanceId } });
+        [LOCAL_COMMAND_DEVICE_HEADERS.registrationId]: device.registrationId, [LOCAL_COMMAND_DEVICE_HEADERS.instanceId]: device.instanceId,
+        // 12.z: forwarded wanted changes arrive as this stream's presence event.
+        "x-zeros-sync-wanted": "1" } });
     if (!response.ok || !response.body) {
       let code = "unavailable";
       try { const value = JSON.parse(await bounded(response, ERROR_BYTES)) as { error?: { code?: unknown } }; if (typeof value.error?.code === "string") code = value.error.code.slice(0, 64); } catch { /* closed code only */ }
@@ -108,7 +111,23 @@ export class DeviceControl {
   }
   /** Order 3: this Mac's syncing flag on its connected-Macs row. The one place the route is named. */
   setSyncing(device: LocalCommandDevice, workspaceId: string, syncing: boolean) {
-    return this.send("PUT", `/v1/cloud-v2/workspaces/${encodeURIComponent(workspaceId)}/macs/${encodeURIComponent(device.deviceId)}/sync`, { device, body: { syncing }, schema: WorkspaceSyncFlagReplySchema , syncField: true });
+    // This Mac's own switch: what it does (syncing) and what the person wants (wanted) move together.
+    // A control plane without 12.z refuses the unknown field (400): keep the Order 3 flag there.
+    const path = `/v1/cloud-v2/workspaces/${encodeURIComponent(workspaceId)}/macs/${encodeURIComponent(device.deviceId)}/sync`;
+    return this.send("PUT", path, { device, body: { syncing, wanted: syncing }, schema: WorkspaceSyncFlagReplySchema, syncField: true })
+      .catch(error => {
+        if (!(error instanceof DeviceControlError) || error.status !== 400) throw error;
+        return this.send("PUT", path, { device, body: { syncing }, schema: WorkspaceSyncFlagReplySchema, syncField: true });
+      });
+  }
+  /** 12.z: this registration's live connections and what the person wants synced here; one keyset page. */
+  syncConnections(device: LocalCommandDevice, cursor?: string) {
+    return this.send("GET", `${this.device(device.deviceId)}/connections${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`,
+      { device, schema: DeviceSyncConnectionsReplySchema, syncField: true });
+  }
+  /** 12.z: another of this person's Macs should (not) sync this workspace; that Mac follows it. */
+  setSyncWanted(device: LocalCommandDevice, workspaceId: string, targetDeviceId: string, wanted: boolean) {
+    return this.send("PUT", `/v1/cloud-v2/workspaces/${encodeURIComponent(workspaceId)}/macs/${encodeURIComponent(targetDeviceId)}/sync`, { device, body: { wanted }, schema: WorkspaceSyncFlagReplySchema, syncField: true });
   }
   /** Order 3: a single-use grant for this Mac's direct sync socket (never wakes the VM). */
   syncGrant(device: LocalCommandDevice, workspaceId: string) {

@@ -23,6 +23,8 @@ export interface LocalCommandServiceDeps {
   notify(approval: LocalCommandApprovalView): void;
   /** notify-user-v1: a `notify` event from the same device channel. */
   notifyUser?(event: NotifyUserEvent): void;
+  /** 12.z: a stream opened (ready) or the control plane forwarded a change (presence): what to sync may have changed. */
+  syncHint?(): void;
   sleep?(ms: number): Promise<void>;
   /** One `[local-commands]` line per state change: closed codes and id prefixes only. */
   log?(line: string): void;
@@ -229,7 +231,10 @@ export class LocalCommandService {
   }
 
   private onEvent(event: DeviceEvent): void {
-    if (event.event === "ready" || event.event === "presence") this.setPresence(event.event === "ready" ? event.data.presence : event.data);
+    if (event.event === "ready" || event.event === "presence") {
+      this.setPresence(event.event === "ready" ? event.data.presence : event.data);
+      this.deps.syncHint?.();
+    }
     else if (event.event === "heartbeat") this.setPresence(event.data.presence);
     // notify-user-v1 shares this channel; it never touches the journal or approvals.
     else if (event.event === "notify") this.deps.notifyUser?.(event.data);

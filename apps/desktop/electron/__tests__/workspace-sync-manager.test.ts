@@ -11,6 +11,7 @@ function fixture(options: { connect?: SyncManagerDeps["connect"]; pull?: () => P
   const pull = vi.fn(options.pull ?? (async () => ({ state: "in_sync" as const, problems: [] as [], skipped: [] as [] })));
   const closed = vi.fn();
   const waits: Array<{ ms: number; resolve(): void }> = [];
+  const logs: string[] = [];
   const manager = new SyncManager({
     settings: { get: key => settings.get(key), set: (key, value) => { settings.set(key, value); } },
     identity: () => account,
@@ -19,8 +20,9 @@ function fixture(options: { connect?: SyncManagerDeps["connect"]; pull?: () => P
     publish: statuses => { published.push(statuses); },
     open: (async (folder: string) => ({ root: `/real${folder}`, pull })) as unknown as typeof SyncEngine.open,
     wait: (ms, wake) => new Promise<void>(resolve => { waits.push({ ms, resolve }); void wake.promise.then(resolve); }),
+    log: line => { logs.push(line); },
   });
-  return { manager, settings, flags, published, pull, closed, waits, setAccount: (next: typeof account) => { account = next; }, last: () => published.at(-1) ?? [] };
+  return { logs, manager, settings, flags, published, pull, closed, waits, setAccount: (next: typeof account) => { account = next; }, last: () => published.at(-1) ?? [] };
 }
 
 describe("SyncManager", () => {
@@ -77,5 +79,41 @@ describe("SyncManager", () => {
     f.setAccount(null);
     await f.manager.start();
     expect(f.last()).toEqual([]);
+  });
+
+  it("logs each run with ids and counts only: started, the pull's kind, files, bytes and duration, git, and every stop with its closed reason", async () => {
+    let connects = 0;
+    const f = fixture({
+      connect: async () => { if (connects++ === 0) throw new SyncConnectError("paused"); return { snapshot: async () => { throw new Error("unused"); }, read: async () => { throw new Error("unused"); }, close: () => {} }; },
+      pull: async () => ({ state: "in_sync", problems: [], skipped: [], git: "ok", stats: { kind: "full", files: 8000, bytes: 123456, deletes: 0 } }) as never,
+    });
+    await f.manager.enable(WS, "/Users/alex/secret-project");
+    await vi.waitFor(() => expect(f.logs.some(line => line.startsWith("paused"))).toBe(true));
+    f.waits.at(-1)!.resolve();
+    await vi.waitFor(() => expect(f.logs.some(line => line.startsWith("pulled"))).toBe(true));
+    const text = f.logs.join("\n");
+    expect(f.logs[0]).toMatch(/^started workspace=11111111 resumed=false$/);
+    expect(text).toMatch(/^paused workspace=11111111 reason=workspace_stopped$/m);
+    expect(text).toMatch(/^reconnect workspace=11111111 attempt=1$/m);
+    expect(text).toMatch(/^pulled workspace=11111111 kind=full files=8000 bytes=123456 deletes=0 ms=\d+ git=ok state=in_sync$/m);
+    expect(text).not.toMatch(/alex|secret|\//);
+    await f.manager.disable(WS);
+    expect(f.logs.at(-1)).toBe("stopped workspace=11111111 reason=turned_off");
+  });
+
+  it("resumes every synced workspace after an app restart from this Mac's settings, without asking for the folder", async () => {
+    const f = fixture();
+    await f.manager.enable(WS, "/f");
+    await vi.waitFor(() => expect(f.last()).toEqual([{ workspaceId: WS, state: "in_sync", problems: 0 }]));
+    await f.manager.stop();   // app quit
+    const restarted = new SyncManager({ settings: { get: key => f.settings.get(key), set: () => {} }, identity: () => ({ accountId: "acct-a", deviceId: "22222222-2222-4222-8222-222222222222" }),
+      connect: async () => ({ snapshot: async () => { throw new Error("unused"); }, read: async () => { throw new Error("unused"); }, close: () => {} }),
+      setSyncing: async () => {}, publish: () => {}, log: () => {},
+      open: (async (folder: string) => ({ root: folder, pull: async () => ({ state: "in_sync", problems: [], skipped: [] }) })) as unknown as typeof SyncEngine.open,
+      wait: (_ms, wake) => wake.promise });
+    await restarted.start();
+    await vi.waitFor(() => expect(restarted.statuses()).toEqual([{ workspaceId: WS, state: "in_sync", problems: 0 }]));
+    expect(restarted.folderFor(WS)).toBe("/real/f");
+    await restarted.stop();
   });
 });

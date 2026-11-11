@@ -18,7 +18,7 @@ it("advertises workspace resources on ENGINE_READY and samples them only when as
   await relay.receive({ ...config, agents: {}, workspace: f.scope.workspace });
   await relay.receive({ t: "open", clientId: CLIENT_A });
   const ready = relay.bridge("ENGINE_READY")[0]!.frame as { capabilities?: string[] };
-  expect(ready.capabilities).toEqual([CLOUD_WORKSPACE_RESOURCES_CAPABILITY, "workspace-sync-v1"]);
+  expect(ready.capabilities).toEqual([CLOUD_WORKSPACE_RESOURCES_CAPABILITY, "workspace-sync-v1", "sync-batch-v1"]);
   expect(samples).toBe(0);
   const request = browserFrame("WORKSPACE_REQUEST", { op: "workspace.resources", params: {} });
   await relay.request(CLIENT_A, request); await worker.flush();

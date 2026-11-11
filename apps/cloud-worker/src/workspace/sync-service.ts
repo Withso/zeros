@@ -2,8 +2,8 @@ import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { mkdir, open, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
-import { SYNC_LIMITS, SYNC_PASSIVE_OPS, isSafeRemoteUrl, SyncBootstrapRequestSchema, SyncBundleReadRequestSchema, SyncReadRequestSchema, SyncSnapshotRequestSchema,
-  type SyncBootstrapReply, type SyncSnapshotReply } from "@zeros/protocol/workspace-sync";
+import { SYNC_LIMITS, SYNC_PASSIVE_OPS, isSafeRemoteUrl, SyncBootstrapRequestSchema, SyncBundleReadRequestSchema, SyncReadBatchRequestSchema, SyncReadRequestSchema,
+  SyncSnapshotRequestSchema, type SyncBootstrapReply, type SyncReadBatchReply, type SyncSnapshotReply } from "@zeros/protocol/workspace-sync";
 import { CheckedFiles } from "./checked-files";
 import type { CommandRunner } from "./commands";
 import { WorkspaceError, type WorkspaceScope } from "./scope";
@@ -28,6 +28,7 @@ export class SyncService {
   async handle(op: string, params: Record<string, unknown>): Promise<unknown> {
     if (op === "sync.snapshot") return this.snapshot(params);
     if (op === "sync.read") return this.read(params);
+    if (op === "sync.readBatch") return this.readBatch(params);
     if (op === "sync.bootstrap") return this.bootstrap(params);
     if (op === "sync.bundleRead") return this.bundleRead(params);
     throw new WorkspaceError("VALIDATION_FAILED", "Unknown sync operation.");
@@ -121,6 +122,30 @@ export class SyncService {
   private expireBundles(): void {
     const now = this.now();
     for (const [id, bundle] of this.bundles) if (bundle.expires <= now) { this.bundles.delete(id); void rm(bundle.path, { force: true }); }
+  }
+
+  /** Whole small files in request order until the byte budget; a mismatch is reported per file. */
+  private async readBatch(params: Record<string, unknown>): Promise<SyncReadBatchReply> {
+    const parsed = SyncReadBatchRequestSchema.safeParse(params);
+    if (!parsed.success) throw new WorkspaceError("VALIDATION_FAILED", "Invalid sync batch.");
+    const entries: SyncReadBatchReply["entries"] = [];
+    let used = 0;
+    for (const { path, sha256 } of parsed.data.files) {
+      const entry = this.trackerFor().current(path);
+      if (!entry || entry.symlink !== undefined || entry.sha256 !== sha256 || entry.size > SYNC_LIMITS.batchFileBytes) { entries.push({ path, changed: true }); continue; }
+      // Always at least one file; then stop at the budget (the Mac asks again for the rest).
+      if (entries.length && used + entry.size > SYNC_LIMITS.batchBytes) break;
+      if (entry.size === 0) { entries.push({ path, bytes: 0, base64: "" }); continue; }
+      try {
+        const { bytes, base64 } = await this.read({ path, sha256, offset: 0, length: entry.size });
+        if (bytes !== entry.size) { entries.push({ path, changed: true }); continue; }
+        entries.push({ path, bytes, base64 }); used += bytes;
+      } catch (error) {
+        if (error instanceof WorkspaceError && error.code === "SYNC_CHANGED") { entries.push({ path, changed: true }); continue; }
+        throw error;
+      }
+    }
+    return { entries };
   }
 
   private async read(params: Record<string, unknown>): Promise<{ bytes: number; base64: string }> {
