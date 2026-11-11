@@ -37,6 +37,15 @@ describe("Pill", () => {
     expect(classes(renderToStaticMarkup(createElement(Pill, { tone: "mode" }, "x")))).toContain("bg-brown-bg");
     expect(classes(renderToStaticMarkup(createElement(Pill, { tone: "gone" }, "x")))).toContain("border-dashed");
   });
+
+  it("names a design token on a quiet fill, and a missing one in yellow", () => {
+    const token = classes(renderToStaticMarkup(createElement(Pill, { tone: "token" }, "radius-md")));
+    for (const cls of ["border-transparent", "bg-bg2-highlight", "text-fg1", "font-medium"]) expect(token, cls).toContain(cls);
+    expect(token).not.toContain("border-border2");
+    expect(token).not.toContain("font-mono");
+    const missing = classes(renderToStaticMarkup(createElement(Pill, { tone: "missing" }, "radius-card is missing")));
+    for (const cls of ["bg-yellow-bg", "text-yellow-fg"]) expect(missing, cls).toContain(cls);
+  });
 });
 
 describe("Badge", () => {

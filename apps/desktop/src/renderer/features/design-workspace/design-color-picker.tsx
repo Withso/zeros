@@ -1,9 +1,7 @@
 import React, { createContext, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { Check, Pipette } from "lucide-react";
+import { Pipette } from "lucide-react";
 
 import {
-  Button,
-  Input,
   Popover,
   PopoverContent,
   PopoverTrigger,
@@ -15,7 +13,6 @@ import {
 } from "../../shared/ui/primitives";
 import { cn } from "../../shared/ui/cn";
 import { beginDesignPointerGesture } from "./design-pointer-gesture";
-import { DesignDetachVariableButton, DesignVariableGlyph } from "./design-inspector-kit";
 import {
   InspectorIconButton,
   InspectorSegmented,
@@ -23,13 +20,16 @@ import {
   focusDesignPopoverSurface,
   InspectorPopoverAnchor,
 } from "./design-inspector-kit";
-import { useDesignColorTokens } from "./design-color-token-context";
+import { designColorTokenValue } from "./design-color-tokens";
+import { designTokenGroups } from "./design-token-catalog";
+import { useDesignTokens } from "./design-token-context";
 import {
-  activeDesignColorToken,
-  designColorTokenValue,
-  filterDesignColorTokenGroups,
-  type DesignColorTokenGroup,
-} from "./design-color-tokens";
+  DesignTokenDetachButton,
+  DesignTokenPill,
+  DesignTokenRows,
+  designTokenListGroups,
+  type DesignTokenListGroup,
+} from "./design-token-picker";
 import {
   designColorValueText,
   formatDesignColor,
@@ -805,7 +805,8 @@ export function DesignColorPanel({
 }
 
 interface DesignColorTokenListProps {
-  groups: readonly DesignColorTokenGroup[];
+  /** Colour tokens by role, as the picker lists them. */
+  groups: readonly DesignTokenListGroup[];
   /** The token the field's winning declaration reads, if listed. */
   activeToken: string | null;
   query: string;
@@ -814,8 +815,8 @@ interface DesignColorTokenListProps {
   onChoose: (name: string) => void;
 }
 
-/** The Theme tab: the frame's color tokens by declaring source, searchable.
- * Arrow keys move between swatches; choosing one writes `var(--name)`. */
+/** The Theme tab: the frame's colour tokens by role, searchable. Arrow keys
+ * move between rows; choosing one writes `var(--name)`. */
 export function DesignColorTokenList({
   groups,
   activeToken,
@@ -824,92 +825,16 @@ export function DesignColorTokenList({
   onQueryChange,
   onChoose,
 }: DesignColorTokenListProps) {
-  const shown = useMemo(
-    () => filterDesignColorTokenGroups(groups, query),
-    [groups, query],
-  );
-  const moveFocus = (event: React.KeyboardEvent<HTMLDivElement>) => {
-    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
-    const options = [
-      ...event.currentTarget.querySelectorAll<HTMLButtonElement>(
-        "[data-design-color-token]:not(:disabled)",
-      ),
-    ];
-    if (options.length === 0) return;
-    event.preventDefault();
-    const index = options.indexOf(document.activeElement as HTMLButtonElement);
-    const step = event.key === "ArrowDown" ? 1 : -1;
-    const next =
-      index < 0
-        ? step > 0
-          ? 0
-          : options.length - 1
-        : Math.min(options.length - 1, Math.max(0, index + step));
-    options[next]?.focus();
-  };
   return (
-    <div className="flex min-w-0 flex-col gap-2" onKeyDown={moveFocus}>
-      <Input
-        type="search"
-        value={query}
-        disabled={disabled}
-        spellCheck={false}
-        autoComplete="off"
-        placeholder="Search tokens"
-        aria-label="Search color tokens"
-        className="text-xs"
-        onChange={(event) => onQueryChange(event.currentTarget.value)}
-      />
-      <div
-        data-design-color-tokens=""
-        className="-mx-1 flex max-h-64 min-w-0 flex-col gap-1 overflow-y-auto px-1"
-      >
-        {shown.length === 0 ? (
-          <p className="text-fg3 px-1 py-2 text-xs">No color tokens match.</p>
-        ) : (
-          shown.map((group) => (
-            <div
-              key={group.key}
-              role="group"
-              aria-label={group.label}
-              className="flex min-w-0 flex-col"
-            >
-              <div className="text-muted-fg truncate px-1.5 pt-1 pb-0.5 text-2xxs">
-                {group.label}
-              </div>
-              {group.tokens.map((token) => {
-                const active = token.name === activeToken;
-                return (
-                  <Button
-                    key={token.name}
-                    type="button"
-                    variant="ghost"
-                    size="compact"
-                    disabled={disabled}
-                    aria-pressed={active}
-                    title={`${token.name}: ${token.declared}`}
-                    data-design-color-token={token.name}
-                    className="text-fg2 aria-pressed:bg-bg2-highlight aria-pressed:text-fg1 w-full justify-start font-normal"
-                    onClick={() => onChoose(token.name)}
-                  >
-                    <DesignColorSwatch
-                      value={token.color ?? "transparent"}
-                      className="size-3.5"
-                    />
-                    <span className="min-w-0 flex-1 truncate text-left">
-                      {token.name.replace(/^--/, "")}
-                    </span>
-                    {active ? (
-                      <Check className="text-fg1 size-3" aria-hidden="true" />
-                    ) : null}
-                  </Button>
-                );
-              })}
-            </div>
-          ))
-        )}
-      </div>
-    </div>
+    <DesignTokenRows
+      groups={groups}
+      kind="color"
+      activeName={activeToken}
+      query={query}
+      disabled={disabled}
+      onQueryChange={onQueryChange}
+      onChoose={onChoose}
+    />
   );
 }
 
@@ -920,7 +845,7 @@ const DESIGN_COLOR_SOURCES = [
   { value: "custom", label: "Custom" },
 ] as const satisfies readonly { value: DesignColorSource; label: string }[];
 
-const NO_COLOR_TOKENS: readonly DesignColorTokenGroup[] = [];
+const NO_COLOR_TOKENS: readonly DesignTokenListGroup[] = [];
 
 interface DesignColorPickerBodyProps extends DesignColorCallbacks {
   value: string;
@@ -949,9 +874,16 @@ export function DesignColorPickerBody({
   onCancelPreview,
   onCommit,
 }: DesignColorPickerBodyProps) {
-  const offered = useDesignColorTokens();
-  const groups = tokenPicker ? offered : NO_COLOR_TOKENS;
-  const activeToken = activeDesignColorToken(groups, tokenName);
+  const catalog = useDesignTokens();
+  const offered = useMemo(
+    () => designTokenListGroups(designTokenGroups(catalog, ["color"])),
+    [catalog],
+  );
+  const groups = tokenPicker && offered.length > 0 ? offered : NO_COLOR_TOKENS;
+  const activeToken =
+    tokenName && groups.some((group) => group.rows.some((row) => row.name === tokenName))
+      ? tokenName
+      : null;
   const [source, setSource] = useState<DesignColorSource>(() =>
     activeToken ? "theme" : "custom",
   );
@@ -1142,6 +1074,12 @@ interface DesignColorFieldProps extends DesignColorCallbacks {
   /** The selected layers' colors differ: the row reads "Mixed" behind a
    * neutral swatch until a color is chosen for all of them. */
   mixed?: boolean;
+  /** The token the field reads is no longer declared. */
+  tokenMissing?: boolean;
+  /** Detach's hint when the token's value differs by theme. */
+  tokenDetachHint?: string;
+  /** Writes each selected layer's own resolved colour over its token. */
+  onDetachToken?: () => void;
 }
 
 function colorInputKey(value: string): string {
@@ -1157,6 +1095,9 @@ export function DesignColorValueInputs({
   disabled = false,
   tokenName,
   tokenDescription,
+  tokenMissing = false,
+  tokenDetachHint,
+  onDetachToken,
   mixed = false,
   onPreview,
   onCancelPreview,
@@ -1168,11 +1109,15 @@ export function DesignColorValueInputs({
   | "disabled"
   | "tokenName"
   | "tokenDescription"
+  | "tokenMissing"
+  | "tokenDetachHint"
+  | "onDetachToken"
   | "mixed"
   | "onPreview"
   | "onCancelPreview"
   | "onCommit"
 >) {
+  const [typingOverToken, setTypingOverToken] = useState(false);
   const [hexFocused, setHexFocused] = useState(false);
   const previewOwner = useDesignColorPreviewOwner();
   const [acceptedValue, setAcceptedValue] = useState(value);
@@ -1208,6 +1153,13 @@ export function DesignColorValueInputs({
   const skipRef = useRef(false);
   const hexDirtyRef = useRef(false);
   const alphaDirtyRef = useRef(false);
+  // A key typed on the pill starts a plain colour in the hex input.
+  useLayoutEffect(() => {
+    const input = hexRef.current;
+    if (!typingOverToken || !input || document.activeElement === input) return;
+    input.focus();
+    input.setSelectionRange(input.value.length, input.value.length);
+  }, [typingOverToken]);
 
   const commitColor = (next: string) => {
     const id = ++sequenceRef.current;
@@ -1308,25 +1260,58 @@ export function DesignColorValueInputs({
   // a picker change that has not been confirmed yet.
   const tokenShown =
     Boolean(tokenName) &&
+    !typingOverToken &&
     !showMixed &&
     !hexFocused &&
     hexDraft === displayHex &&
     acceptedValue === value;
+  const tokenLabel = tokenName?.replace(/^--/, "") ?? "";
   return (
     <>
-      {tokenShown ? <DesignVariableGlyph className="ml-1.5" /> : null}
+      {tokenShown ? (
+        <span className="relative flex min-w-0 flex-1 items-center self-stretch pr-1 pl-1">
+          <DesignTokenPill
+            label={label}
+            token={{ name: tokenName!, description: tokenDescription ?? tokenLabel, missing: tokenMissing }}
+            disabled={disabled}
+            onType={(key) => {
+              setTypingOverToken(true);
+              hexDirtyRef.current = true;
+              setHexDraft(key);
+            }}
+            onClick={(event) =>
+              // The field's swatch opens the picker on its Theme tab.
+              event.currentTarget
+                .closest("[data-design-color-field]")
+                ?.querySelector<HTMLButtonElement>('[aria-haspopup="dialog"]')
+                ?.click()
+            }
+          />
+          <span
+            className="zd-field-token-detach"
+            data-design-token-action={tokenMissing ? "always" : "hover"}
+          >
+            <DesignTokenDetachButton
+              hint={tokenDetachHint}
+              disabled={disabled}
+              onDetach={() => {
+                if (onDetachToken) onDetachToken();
+                // An empty reading would remove the declaration instead.
+                else if (value.trim()) commitColor(value);
+              }}
+            />
+          </span>
+        </span>
+      ) : (
       <input
         ref={hexRef}
-        value={tokenShown ? tokenName!.replace(/^--/, "") : hexDraft}
+        value={hexDraft}
         disabled={disabled}
         spellCheck={false}
         autoComplete="off"
         aria-label={label}
         placeholder={showMixed ? "Mixed" : undefined}
-        aria-description={tokenShown ? tokenDescription : undefined}
-        title={tokenShown ? tokenDescription : undefined}
-        data-design-style-token={tokenShown ? tokenName : undefined}
-        className={cn("pl-1.5", parsed && !tokenShown && !showMixed && "uppercase")}
+        className={cn("pl-1.5", parsed && !showMixed && "uppercase")}
         onChange={(event) => {
           hexDirtyRef.current = true;
           setHexDraft(event.currentTarget.value);
@@ -1346,16 +1331,13 @@ export function DesignColorValueInputs({
         }}
         onBlur={() => {
           setHexFocused(false);
+          setTypingOverToken(false);
           commitHex();
         }}
         onKeyDown={keyDown(() => setHexDraft(displayHex))}
       />
-      {tokenShown ? (
-        <DesignDetachVariableButton
-          disabled={disabled}
-          onDetach={() => commitColor(value)}
-        />
-      ) : parsed && !showMixed ? (
+      )}
+      {parsed && !showMixed ? (
         <>
           <span className="bg-border2 h-4 w-px shrink-0" aria-hidden="true" />
           <input
@@ -1364,6 +1346,8 @@ export function DesignColorValueInputs({
             disabled={disabled}
             inputMode="numeric"
             aria-label={`${label} opacity`}
+            // A colour with an opacity of its own is a plain value.
+            title={tokenShown ? `Changing opacity detaches ${tokenLabel}` : undefined}
             className="zd-field-fixed w-9 text-right"
             onChange={(event) => {
               alphaDirtyRef.current = true;
@@ -1395,6 +1379,9 @@ export function DesignColorField({
   tokenDescription,
   tokenPicker,
   mixed = false,
+  tokenMissing,
+  tokenDetachHint,
+  onDetachToken,
   onPreview,
   onCancelPreview,
   onCommit,
@@ -1404,7 +1391,7 @@ export function DesignColorField({
     <div
       data-design-color-field=""
       data-design-style-property={property}
-      className={cn("zd-field relative min-w-0 gap-0 pl-1", className)}
+      className={cn("group/design-field zd-field relative min-w-0 gap-0 pl-1", className)}
     >
       {swatch ?? (
         <DesignColorPicker
@@ -1429,6 +1416,9 @@ export function DesignColorField({
         disabled={disabled}
         tokenName={tokenName}
         tokenDescription={tokenDescription}
+        tokenMissing={tokenMissing}
+        tokenDetachHint={tokenDetachHint}
+        onDetachToken={onDetachToken}
         mixed={mixed}
         onPreview={onPreview}
         onCancelPreview={onCancelPreview}

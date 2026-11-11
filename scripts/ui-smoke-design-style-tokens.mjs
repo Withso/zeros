@@ -1,6 +1,20 @@
 // The inspector names the tokens a frame's styles read and where they are
 // declared: an imported style source ("App styles") or tokens.css ("Manual").
-// The real frame runtime resolves the winning declarations in Chromium.
+// A token shows as a pill; its hover text says where it comes from. The real
+// frame runtime resolves the winning declarations in Chromium.
+const pill = (page, property) =>
+  page.locator(
+    `[data-design-inspector] [data-design-style-property="${property}"] [data-design-style-token]`,
+  ).first();
+const hoverText = async (page, locator) => {
+  await locator.hover();
+  const tooltip = page.getByRole("tooltip").first();
+  await tooltip.waitFor({ timeout: 5_000 });
+  const text = (await tooltip.textContent()) ?? "";
+  await page.mouse.move(1, 1);
+  return text;
+};
+
 export async function runDesignStyleTokensSmoke({ page, check }) {
   const origin = new URL(page.url()).origin;
   await page.setViewportSize({ width: 1440, height: 900 });
@@ -33,48 +47,36 @@ export async function runDesignStyleTokensSmoke({ page, check }) {
     }, nodeId);
 
   await select("home-cta");
-  const fill = page.locator(
-    '[data-design-inspector] [data-design-style-property="background-color"] input[aria-label="Fill"]',
-  );
-  await page.waitForFunction(
-    () =>
-      document
-        .querySelector(
-          '[data-design-inspector] [data-design-style-property="background-color"] input[aria-label="Fill"]',
-        )
-        ?.getAttribute("data-design-style-token") === "--primary-button-bg",
-    undefined,
-    { timeout: 10_000 },
-  );
-  const title = (await fill.getAttribute("title")) ?? "";
+  const fillPill = pill(page, "background-color");
+  await fillPill.waitFor({ timeout: 10_000 });
+  const title = await hoverText(page, fillPill);
   check(
-    "Fill names the token and the source that declares it",
-    (await fill.inputValue()) === "primary-button-bg" &&
-      title.includes("--primary-button-bg") &&
+    "Fill names the token as a pill, and its hover the source that declares it",
+    (await fillPill.getAttribute("data-design-style-token")) === "--primary-button-bg" &&
+      (await fillPill.getAttribute("aria-label")) === "Fill: token primary-button-bg" &&
+      ((await fillPill.textContent()) ?? "").trim() === "primary-button-bg" &&
+      title.includes("primary-button-bg") &&
       title.includes("App styles") &&
       title.includes("darkslategray"),
     title,
   );
-  await fill.focus();
+  const fill = page.locator(
+    '[data-design-inspector] [data-design-style-property="background-color"] input[aria-label="Fill"]',
+  );
+  await fillPill.focus();
+  await page.keyboard.press("1");
   await page.waitForFunction(
     () =>
       document.activeElement?.getAttribute("aria-label") === "Fill" &&
-      !document.activeElement.hasAttribute("data-design-style-token"),
+      document.activeElement.tagName === "INPUT",
   );
   check(
-    "focusing the Fill edits its color value as before",
-    /^[0-9A-F]{6}$/i.test(await fill.inputValue()),
+    "a key typed on the Fill pill starts a plain colour in its field",
+    (await fill.inputValue()) === "1",
     await fill.inputValue(),
   );
   await fill.press("Escape");
-  await page.waitForFunction(
-    () =>
-      document
-        .querySelector(
-          '[data-design-inspector] [data-design-style-property="background-color"] input[aria-label="Fill"]',
-        )
-        ?.getAttribute("data-design-style-token") === "--primary-button-bg",
-  );
+  await fillPill.waitFor({ timeout: 5_000 });
 
   await page.getByRole("button", { name: "CSS", exact: true }).click();
   const editor = page.locator('.cm-content[aria-label="Computed CSS declarations"]');
@@ -94,47 +96,47 @@ export async function runDesignStyleTokensSmoke({ page, check }) {
   );
   await page.getByRole("button", { name: "Style", exact: true }).click();
 
-  // A bound field shows the variable glyph and offers Detach variable, which
-  // writes the value the variable resolves to as a plain value.
+  // A field holding a token offers Detach token on hover, which writes the
+  // value the token resolves to as a plain value.
   const fillField = page.locator(
     '[data-design-inspector] [data-design-style-property="background-color"]',
   );
-  await fillField.locator("svg.lucide-variable").waitFor({ timeout: 5_000 });
+  await fillPill.waitFor({ timeout: 5_000 });
+  await fillField.hover();
   await fillField
-    .getByRole("button", { name: "Detach variable", exact: true })
+    .getByRole("button", { name: "Detach token", exact: true })
     .click();
   await page.waitForFunction(
     () => {
       const input = document.querySelector(
         '[data-design-inspector] [data-design-style-property="background-color"] input[aria-label="Fill"]',
       );
-      return input && !input.hasAttribute("data-design-style-token") && /^2F4F4F$/i.test(input.value);
+      return input && /^2F4F4F$/i.test(input.value);
     },
     undefined,
     { timeout: 10_000 },
   );
   check(
-    "Detach variable keeps the colour and drops the variable",
-    (await fillField.getByRole("button", { name: "Detach variable", exact: true }).count()) === 0,
+    "Detach token keeps the colour and drops the token",
+    (await fillField.getByRole("button", { name: "Detach token", exact: true }).count()) === 0 &&
+      (await fillField.locator("[data-design-style-token]").count()) === 0,
   );
 
   await select("home-heading");
+  const text = pill(page, "color");
   await page.waitForFunction(
     () =>
       document
-        .querySelector('[data-design-inspector] [data-design-style-property="color"] input[data-design-style-token]')
+        .querySelector('[data-design-inspector] [data-design-style-property="color"] [data-design-style-token]')
         ?.getAttribute("data-design-style-token") === "--brand",
     undefined,
     { timeout: 10_000 },
   );
-  const text = page
-    .locator('[data-design-inspector] [data-design-style-property="color"] input[data-design-style-token]')
-    .first();
+  const textHover = await hoverText(page, text);
   check(
     "a text color read from tokens.css names the Manual source",
-    (await text.inputValue()) === "brand" &&
-      ((await text.getAttribute("title")) ?? "").includes("Manual"),
-    (await text.getAttribute("title")) ?? "",
+    ((await text.textContent()) ?? "").trim() === "brand" && textHover.includes("Manual"),
+    textHover,
   );
 
   // A number field detaches the same way: the resolved length, as a plain value.
@@ -155,26 +157,27 @@ export async function runDesignStyleTokensSmoke({ page, check }) {
   await page.waitForFunction(
     () =>
       document
-        .querySelector('[data-design-inspector] [data-design-style-property="letter-spacing"] input')
+        .querySelector('[data-design-inspector] [data-design-style-property="letter-spacing"] [data-design-style-token]')
         ?.getAttribute("data-design-style-token") === "--tracking",
     undefined,
     { timeout: 10_000 },
   );
-  await tracking.locator("svg.lucide-variable").waitFor({ timeout: 5_000 });
-  await tracking.getByRole("button", { name: "Detach variable", exact: true }).click();
+  await tracking.hover();
+  await tracking.getByRole("button", { name: "Detach token", exact: true }).click();
   await page.waitForFunction(
     () => {
       const input = document.querySelector(
         '[data-design-inspector] [data-design-style-property="letter-spacing"] input',
       );
-      return input && !input.hasAttribute("data-design-style-token") && /^-1(px)?$/.test(input.value);
+      return input && /^-1(px)?$/.test(input.value);
     },
     undefined,
     { timeout: 10_000 },
   );
   check(
-    "a number field bound to a variable detaches to the length it resolves to",
-    (await tracking.getByRole("button", { name: "Detach variable", exact: true }).count()) === 0,
+    "a number field bound to a token detaches to the length it resolves to",
+    (await tracking.getByRole("button", { name: "Detach token", exact: true }).count()) === 0 &&
+      (await tracking.locator("[data-design-style-token]").count()) === 0,
     await tracking.locator("input").first().inputValue(),
   );
 }

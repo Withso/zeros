@@ -300,6 +300,29 @@ describe("design workspace cache", () => {
     expect(stabilizeDesignWorkspaceSnapshot(previous, snapshot([])).themes).toEqual([]);
   });
 
+  it("keeps the previous snapshot while each frame's style sources and token descriptions are unchanged", () => {
+    const previous = {
+      ...snapshot([]),
+      tokens: [{
+        name: "--surface", syntax: "*", inherits: true, initialValue: "", value: "white",
+        themeValues: {}, usageCount: 0, line: 1, description: "Card background",
+      }],
+      frameStyleSources: { home: ["app"], pricing: ["brand"] },
+    };
+    expect(stabilizeDesignWorkspaceSnapshot(previous, structuredClone(previous))).toBe(previous);
+    const reordered = { ...previous, frameStyleSources: { pricing: ["brand"], home: ["app"] } };
+    expect(stabilizeDesignWorkspaceSnapshot(previous, reordered)).toBe(previous);
+    const moved = { ...previous, frameStyleSources: { home: ["app", "brand"], pricing: ["brand"] } };
+    const published = stabilizeDesignWorkspaceSnapshot(previous, moved);
+    expect(published).not.toBe(previous);
+    expect(published.frameStyleSources).toEqual(moved.frameStyleSources);
+    expect(published.tokens).toBe(previous.tokens);
+    const described = { ...previous, tokens: [{ ...previous.tokens[0]!, description: "Raised card" }] };
+    expect(stabilizeDesignWorkspaceSnapshot(previous, described).tokens).toEqual(described.tokens);
+    const legacy = snapshot([]);
+    expect(stabilizeDesignWorkspaceSnapshot(legacy, structuredClone(legacy))).toBe(legacy);
+  });
+
   it("retains identical catalogs but publishes changed registered IDs even without rendered frames", () => {
     const previous = { ...snapshot([]), pages: [{ id: "a", title: "A", folder: "a", frameFiles: ["a/missing.html"], frameIds: ["before"] }] };
     expect(stabilizeDesignWorkspaceSnapshot(previous, structuredClone(previous))).toBe(previous);

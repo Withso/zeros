@@ -19,6 +19,8 @@ import type {
   DesignRuntimeStyleOrigin,
 } from "@zeros/protocol/design-runtime";
 
+import { designTokenDetachHint } from "./design-token-catalog";
+import { useDesignTokenDetach, useDesignTokens } from "./design-token-context";
 import { designWorkspaceSnapshotCache } from "./state/design-workspace-cache";
 
 export type DesignStyleOriginLabel = (
@@ -69,24 +71,96 @@ export function designStyleTokenReference(
   return designStyleTokenReference(fallback, resolved);
 }
 
-/** The token a Style panel field shows for one property, if any. */
+/** The shorthands that can set a longhand whole, nearest first. */
+function designStyleShorthands(property: string): readonly string[] {
+  let shorthands = SHORTHANDS.get(property);
+  if (!shorthands) {
+    shorthands = shorthandsFor(property);
+    SHORTHANDS.set(property, shorthands);
+  }
+  return shorthands;
+}
+
+const SHORTHANDS = new Map<string, readonly string[]>();
+
+function shorthandsFor(property: string): string[] {
+  const side = /^(padding|margin)-(?:top|right|bottom|left)$/.exec(property);
+  if (side) return [side[1]!];
+  if (property === "row-gap" || property === "column-gap") return ["gap"];
+  if (/^border-(?:top|bottom)-(?:left|right)-radius$/.test(property)) return ["border-radius"];
+  const border = /^border-(?:top|right|bottom|left)-(width|style|color)$/.exec(property);
+  if (border) return [`border-${border[1]}`];
+  return [];
+}
+
+/** The token a Style panel field shows for one property, if any: its own
+ * declaration's, else a shorthand's that sets it whole (`padding:
+ * var(--space-4)` for each padding side). */
 export function designStyleTokenDisplay(
   details: DesignRuntimeNodeDetails | null | undefined,
   property: string,
   label: DesignStyleOriginLabel,
 ): DesignStyleTokenDisplay | null {
-  const authored = details?.authoredStyles?.[property];
+  const authored =
+    details?.authoredStyles?.[property] ??
+    designStyleShorthands(property)
+      .map((shorthand) => details?.authoredStyles?.[shorthand])
+      .find(Boolean);
   if (!authored) return null;
-  const tokens = new Map((authored.tokens ?? []).map((token) => [token.name, token]));
-  const name = designStyleTokenReference(authored.value, (candidate) => tokens.get(candidate)?.value);
+  // Fields render often; a declaration is parsed once per snapshot entry.
+  let name = TOKEN_REFERENCES.get(authored);
+  if (name === undefined) {
+    const tokens = new Map((authored.tokens ?? []).map((token) => [token.name, token]));
+    name = designStyleTokenReference(authored.value, (candidate) => tokens.get(candidate)?.value);
+    TOKEN_REFERENCES.set(authored, name);
+  }
   if (!name) return null;
-  const token = tokens.get(name);
+  const token = authored.tokens?.find((candidate) => candidate.name === name);
   return { name, value: token?.value ?? "", source: token?.origin ? label(token) : null };
 }
 
-/** Accessible and hover text for a token field. */
+const TOKEN_REFERENCES = new WeakMap<object, string | null>();
+
+/** What Detach writes: on each selected layer, the value each property
+ * computes to there. A layer with no reading for a property keeps its token
+ * for it, so Detach never removes a declaration; layers with nothing to
+ * write are left out. */
+export function designDetachedStyles(
+  nodeIds: readonly string[],
+  properties: readonly string[],
+  computed: (nodeId: string, property: string) => string | undefined,
+): { nodeId: string; styles: Record<string, string> }[] {
+  return nodeIds.flatMap((nodeId) => {
+    const styles: Record<string, string> = {};
+    for (const property of properties) {
+      const value = computed(nodeId, property)?.trim();
+      if (value) styles[property] = value;
+    }
+    return Object.keys(styles).length > 0 ? [{ nodeId, styles }] : [];
+  });
+}
+
+/** The style writes of one commit across the selection, before position
+ * context: every layer gets `styles`, or with `perNode` its own values, and
+ * a layer given nothing of its own gets no operation. */
+export function designSelectionStyleUpdates(
+  nodeIds: readonly string[],
+  styles: Record<string, string | null>,
+  perNode?: (nodeId: string) => Record<string, string | null>,
+): { nodeId: string; styles: Record<string, string | null> }[] {
+  return nodeIds.flatMap((nodeId) => {
+    if (!perNode) return [{ nodeId, styles }];
+    const own = perNode(nodeId);
+    return Object.keys(own).length > 0 ? [{ nodeId, styles: own }] : [];
+  });
+}
+
+/** Hover text for a token field: its name in full, where it is declared,
+ * and what it resolves to; or that it is no longer declared. */
 export function designStyleTokenDescription(token: DesignStyleTokenDisplay): string {
-  return [token.name, token.source, token.value].filter(Boolean).join(" · ");
+  const name = token.name.replace(/^--/, "");
+  if (!token.value.trim()) return `${name} is not declared; the field keeps its last value`;
+  return [name, token.source, token.value].filter(Boolean).join(" · ");
 }
 
 export interface DesignCssDeclarationHint {
@@ -149,16 +223,34 @@ export function useDesignStyleOriginLabel(
 export const DesignStyleOriginLabelContext =
   createContext<DesignStyleOriginLabel | null>(null);
 
+export interface DesignStyleTokenField {
+  tokenName?: string;
+  tokenDescription?: string;
+  /** The frame no longer declares the token. */
+  tokenMissing?: boolean;
+  /** Detach's hint when the token differs by theme. */
+  tokenDetachHint?: string;
+  /** Each selected layer keeps its own resolved value. */
+  onDetachToken?: () => void;
+}
+
 /** The token a field shows for one property of the selected element. */
 export function useDesignStyleToken(
   details: DesignRuntimeNodeDetails | null | undefined,
   property: string,
-): { tokenName?: string; tokenDescription?: string } {
+): DesignStyleTokenField {
   const label = useContext(DesignStyleOriginLabelContext);
+  const catalog = useDesignTokens();
+  const detach = useDesignTokenDetach();
   return useMemo(() => {
     const token = label ? designStyleTokenDisplay(details, property, label) : null;
-    return token
-      ? { tokenName: token.name, tokenDescription: designStyleTokenDescription(token) }
-      : {};
-  }, [details, label, property]);
+    if (!token) return {};
+    return {
+      tokenName: token.name,
+      tokenDescription: designStyleTokenDescription(token),
+      tokenMissing: !token.value.trim(),
+      tokenDetachHint: designTokenDetachHint(catalog.byName.get(token.name), catalog.themeLabel),
+      ...(detach ? { onDetachToken: () => detach([property]) } : {}),
+    };
+  }, [catalog, detach, details, label, property]);
 }

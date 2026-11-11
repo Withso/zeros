@@ -88,19 +88,33 @@ import { DesignPagePicker } from "./design-page-picker";
 import { restoreDesignPageHistorySelection } from "./state/design-page-history";
 import { DesignComputedCssEditor } from "./design-computed-css-editor";
 import {
-  DesignColorTokensContext,
-  useDesignColorTokenGroups,
-} from "./design-color-token-context";
+  DesignTokenCatalogContext,
+  DesignTokenDetachContext,
+  useDesignFrameTokenCatalog,
+  useDesignTokens,
+} from "./design-token-context";
+import {
+  designTokenFieldTypes,
+  type DesignTokenType,
+} from "./design-token-catalog";
+import {
+  DesignTokenDetachButton,
+  DesignTokenPicker,
+  DesignTokenPill,
+  designTokenDetachHint,
+  useDesignTokensFor,
+  type DesignFieldToken,
+} from "./design-token-picker";
 import {
   DesignStyleOriginLabelContext,
   designStyleTokenDescription,
+  designDetachedStyles,
+  designSelectionStyleUpdates,
   designStyleTokenDisplay,
   useDesignStyleOriginLabel,
   type DesignStyleOriginLabel,
 } from "./design-style-provenance";
 import {
-  DesignDetachVariableButton,
-  DesignVariableGlyph,
   InspectorGlyph,
   InspectorSection,
   InspectorSelect,
@@ -144,7 +158,7 @@ import {
   scrubDesignSteppedValue,
   withDesignPositionContext,
 } from "./design-style-values";
-import { designFieldMixed } from "./design-style-mixed";
+import { designFieldMixed, designValuesMixed } from "./design-style-mixed";
 import { dispatchDesignWorkspaceShortcut } from "./design-workspace-shortcuts";
 import {
   publishDesignLivePreviewStyles,
@@ -232,11 +246,15 @@ interface InspectorEditFieldProps {
    * on the nearest allowed value instead of failing on commit. */
   range?: { min: number; max: number };
   compact?: boolean;
-  /** A design token the winning declaration reads, shown in place of the
-   * value while the field is unfocused and unedited. */
-  tokenName?: string;
-  /** Token, declaring source and resolved value, for hover and assistive tech. */
-  tokenDescription?: string;
+  /** A design token the winning declaration reads, shown as a pill in
+   * place of the value while the field is unfocused and unedited. */
+  token?: DesignFieldToken;
+  /** The token types this field takes; null offers no picker. */
+  tokenAccepts?: readonly DesignTokenType[] | null;
+  /** Detach's hint when the token's value differs by theme. */
+  tokenDetachHint?: string;
+  onDetachToken?: () => void;
+  onChooseToken?: (name: string) => void;
   motion?: {
     modeActive: boolean;
     trackActive: boolean;
@@ -281,7 +299,7 @@ function inspectorFieldDraftWithUnit(text: string, unit: string): string {
   return text;
 }
 
-function InspectorEditField({
+export function InspectorEditField({
   numericValue,
   icon,
   shortLabel,
@@ -297,8 +315,11 @@ function InspectorEditField({
   whole = false,
   range,
   compact = false,
-  tokenName,
-  tokenDescription,
+  token,
+  tokenAccepts = null,
+  tokenDetachHint,
+  onDetachToken,
+  onChooseToken,
   motion,
   onInspect,
   onPreview,
@@ -307,8 +328,13 @@ function InspectorEditField({
 }: InspectorEditFieldProps) {
   const id = useId();
   const [focused, setFocused] = useState(false);
+  /** A key typed on the pill: the field edits a plain value until it settles. */
+  const [typingOverToken, setTypingOverToken] = useState(false);
+  const [tokenPickerOpen, setTokenPickerOpen] = useState(false);
+  const tokensOffered = useDesignTokensFor(onChooseToken ? tokenAccepts : null);
   const fieldRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const pillRef = useRef<HTMLButtonElement | null>(null);
   const baselineRef = useRef(String(value));
   /** The value shown when this field took focus. */
   const focusValueRef = useRef(String(value));
@@ -416,6 +442,18 @@ function InspectorEditField({
   useEffect(() => {
     if (disabled) scrubCancelRef.current?.();
   }, [disabled]);
+
+  useLayoutEffect(() => {
+    const input = inputRef.current;
+    if (!typingOverToken || !input || document.activeElement === input) return;
+    input.focus();
+    input.setSelectionRange(input.value.length, input.value.length);
+  }, [typingOverToken]);
+
+  const typeOverToken = (key: string | null) => {
+    setTypingOverToken(true);
+    if (key !== null) setPresentedDraft(key);
+  };
 
   const cancelPreview = () => {
     if (previewFrameRef.current !== null) {
@@ -532,7 +570,7 @@ function InspectorEditField({
         : null);
   // A token reads as the value only while nothing is being edited.
   const tokenShown =
-    Boolean(tokenName) && !focused && draft === String(value);
+    Boolean(token) && !typingOverToken && !focused && draft === String(value);
   const showUnit =
     !compact && !tokenShown && Boolean(presentation.unit) && unitOptions.length > 0;
   const motionPersistent = Boolean(motion?.trackActive);
@@ -639,16 +677,37 @@ function InspectorEditField({
             {glyph ? <InspectorGlyph name={glyph} /> : labelText}
           </Label>
         </button>
-        {tokenShown ? <DesignVariableGlyph className="mr-1.5" /> : null}
+        {tokenShown && token ? (
+          <span className="flex min-w-0 flex-1 items-center pr-1">
+            <DesignTokenPill
+              ref={pillRef}
+              label={label}
+              token={token}
+              disabled={disabled}
+              onFocus={() => onInspect?.()}
+              onType={typeOverToken}
+              {...(tokensOffered
+                ? {
+                    "aria-haspopup": "dialog" as const,
+                    "aria-expanded": tokenPickerOpen,
+                    onClick: () => setTokenPickerOpen((open) => !open),
+                    onKeyDown: (event: React.KeyboardEvent<HTMLButtonElement>) => {
+                      if (event.key === "ArrowDown" && event.altKey) {
+                        event.preventDefault();
+                        setTokenPickerOpen(true);
+                      }
+                    },
+                  }
+                : { onClick: () => typeOverToken(null) })}
+            />
+          </span>
+        ) : (
         <Input
           ref={inputRef}
           id={id}
           aria-label={label}
-          aria-description={tokenShown ? tokenDescription : undefined}
-          title={tokenShown ? tokenDescription : undefined}
-          data-design-style-token={tokenShown ? tokenName : undefined}
           data-design-draft={draft === String(value) ? "clean" : "dirty"}
-          value={tokenShown ? tokenName!.replace(/^--/, "") : presentation.text}
+          value={presentation.text}
           placeholder={placeholder}
           disabled={disabled}
           spellCheck={false}
@@ -697,6 +756,7 @@ function InspectorEditField({
           }}
           onBlur={(event) => {
             setFocused(false);
+            setTypingOverToken(false);
             if (
               unitMenuOpenRef.current ||
               fieldRef.current?.contains(event.relatedTarget)
@@ -705,10 +765,15 @@ function InspectorEditField({
             }
             void commit();
           }}
+          aria-keyshortcuts={tokensOffered ? "Alt+ArrowDown" : undefined}
           onKeyDown={(event) => {
             if (event.key === "Enter") {
               event.preventDefault();
               event.currentTarget.blur();
+            } else if (event.key === "ArrowDown" && event.altKey && tokensOffered) {
+              // The token picker, as a combobox opens its list.
+              event.preventDefault();
+              setTokenPickerOpen(true);
             } else if (event.key === "ArrowUp" || event.key === "ArrowDown") {
               const normalized = resolveDraft(draft, baselineRef.current);
               const direction = event.key === "ArrowUp" ? 1 : -1;
@@ -743,19 +808,57 @@ function InspectorEditField({
             }
           }}
         />
+        )}
         {suffix && !tokenShown ? <span className="zd-field-suffix">{suffix}</span> : null}
-        {tokenShown && !motion ? (
-          <DesignDetachVariableButton
+        {tokenShown && token ? (
+          <span
+            className="zd-field-token-detach"
+            data-design-token-action={token.missing ? "always" : "hover"}
+            data-design-token-motion={motion ? "" : undefined}
+          >
+          <DesignTokenDetachButton
+            hint={tokenDetachHint}
             disabled={disabled}
             onDetach={() => {
-              // The variable's resolved value, written as a plain value; the
-              // commit path would treat it as unchanged.
+              if (onDetachToken) {
+                onDetachToken();
+                return;
+              }
+              // The token's resolved value, written as a plain value; an
+              // empty reading would remove the declaration instead.
+              if (!String(value).trim()) {
+                toast.error("Couldn't detach the token", {
+                  description: "The layer has not reported its value yet.",
+                });
+                return;
+              }
               void onCommit(String(value)).catch((fieldError) =>
                 toast.error(`Couldn't update ${label.toLowerCase()}`, {
                   description: errorMessage(fieldError),
                 }),
               );
             }}
+          />
+          </span>
+        ) : null}
+        {tokensOffered && tokenPickerOpen ? (
+          // Mounted only while open: the pill opens it, and a plain value
+          // from the keyboard (Alt+↓). Focus returns to whichever the field
+          // shows once the choice lands.
+          <DesignTokenPicker
+            label={label}
+            accepts={tokenAccepts ?? []}
+            activeName={token && !token.missing ? token.name : null}
+            disabled={disabled}
+            open
+            trigger={pillRef}
+            onOpenChange={(open) => {
+              setTokenPickerOpen(open);
+              if (!open) {
+                requestAnimationFrame(() => (pillRef.current ?? inputRef.current)?.focus());
+              }
+            }}
+            onChoose={(name) => onChooseToken?.(name)}
           />
         ) : null}
         {showUnit ? (
@@ -897,6 +1000,7 @@ const InspectorStyleField = React.memo(function InspectorStyleField({
   motionModeActive,
   motionTrackActive,
   onAddMotionKeyframe,
+  onDetachToken,
 }: {
   workspaceId: string;
   frame: string;
@@ -922,6 +1026,8 @@ const InspectorStyleField = React.memo(function InspectorStyleField({
   motionModeActive: boolean;
   motionTrackActive: boolean;
   onAddMotionKeyframe: (property: string, value: string) => void;
+  /** Writes each selected layer's own resolved value over its token. */
+  onDetachToken?: (properties: readonly string[]) => void;
 }) {
   const liveValue = useDesignLivePreviewValue(
     workspaceId,
@@ -982,13 +1088,24 @@ const InspectorStyleField = React.memo(function InspectorStyleField({
   // Several layers that differ show the Mixed placeholder until a preview
   // or an edit gives the field one value for all of them.
   if (options?.mixed && liveValue === undefined) displayedValue = "";
-  // Measured geometry shows what the canvas resolves, never a token; a live
-  // preview shows its own value.
-  const token =
-    !options?.geometry && !options?.percentage && !options?.mixed &&
-    liveValue === undefined && originLabel
+  // Measured geometry (X, Y, rotation) never shows a token; a live preview
+  // shows its own value, and differing layers read Mixed.
+  const tokenAccepts = designTokenFieldTypes(property);
+  const ownToken =
+    tokenAccepts && !options?.mixed && !options?.tokenHidden && liveValue === undefined && originLabel
       ? designStyleTokenDisplay(details, property, originLabel)
       : null;
+  // A paired field (horizontal padding) shows a pill only when every side
+  // it edits reads the same token.
+  const token =
+    ownToken &&
+    (options?.linkedProperties ?? []).every(
+      (linked) => designStyleTokenDisplay(details, linked, originLabel!)?.name === ownToken.name,
+    )
+      ? ownToken
+      : null;
+  const catalog = useDesignTokens();
+  const catalogToken = token ? catalog.byName.get(token.name) : undefined;
   const styleUpdate = (next: string): Record<string, string | null> => {
     const value =
       options?.percentage && next.trim()
@@ -1013,8 +1130,34 @@ const InspectorStyleField = React.memo(function InspectorStyleField({
       styleProperty={property}
       whole={options?.whole}
       compact={options?.compact}
-      tokenName={token?.name}
-      tokenDescription={token ? designStyleTokenDescription(token) : undefined}
+      token={
+        token
+          ? {
+              name: token.name,
+              description: designStyleTokenDescription(token),
+              missing: !token.value.trim(),
+            }
+          : undefined
+      }
+      tokenAccepts={tokenAccepts}
+      tokenDetachHint={designTokenDetachHint(catalogToken, catalog.themeLabel)}
+      onDetachToken={
+        onDetachToken
+          ? () => onDetachToken([property, ...(options?.linkedProperties ?? [])])
+          : undefined
+      }
+      onChooseToken={(name) => {
+        const next = `var(${name})`;
+        void onCommitStyles(
+          Object.fromEntries(
+            [property, ...(options?.linkedProperties ?? [])].map((key) => [key, next]),
+          ),
+        ).catch((error) =>
+          toast.error(`Couldn't update ${label.toLowerCase()}`, {
+            description: errorMessage(error),
+          }),
+        );
+      }}
       disabled={disabled}
       applied={applied}
       hint={hint}
@@ -1071,7 +1214,7 @@ export const DesignInspector = React.memo(function DesignInspector({
   zoomActionsRef,
 }: DesignInspectorProps) {
   const styleOriginLabel = useDesignStyleOriginLabel(workspaceId);
-  const colorTokens = useDesignColorTokenGroups(workspaceId);
+  const tokenCatalog = useDesignFrameTokenCatalog(workspaceId, frame?.file);
   // Cloud workspaces have no Design preview; the control stays visible and inert.
   const previewAllowed = !isCloudWorkspace(workspaceId);
   const previewDirectoryId = useDesignWorkspaceUiStore(state =>
@@ -1660,7 +1803,12 @@ export const DesignInspector = React.memo(function DesignInspector({
   }, [restoreSelectedStylePreview]);
 
   const commitSelectedStyles = useCallback(
-    (styles: Record<string, string | null>): Promise<void> => {
+    (
+      styles: Record<string, string | null>,
+      /** Each layer's own values for the same properties, such as the value
+       * a token resolves to on that layer. */
+      perNode?: (nodeId: string) => Record<string, string | null>,
+    ): Promise<void> => {
       const context = styleEditContextRef.current;
       // Retire stale callbacks during render, before passive unmount cleanup.
       // An eyedropper or a pending animation frame cannot follow a new layer.
@@ -1676,10 +1824,9 @@ export const DesignInspector = React.memo(function DesignInspector({
         );
       }
       const { workspaceId, frame, styleNodeIds } = context;
-      const updates = styleNodeIds.map((nodeId) => ({
-        nodeId,
-        styles: stylesForNode(nodeId, styles),
-      }));
+      const updates = designSelectionStyleUpdates(styleNodeIds, styles, perNode).map(
+        (update) => ({ nodeId: update.nodeId, styles: stylesForNode(update.nodeId, update.styles) }),
+      );
       // Serialize local geometry preparation only. The cache orders durable
       // writes separately, so a later choice can paint while this one saves.
       const task = layoutActionQueueRef.current.then(async () => {
@@ -1733,7 +1880,7 @@ export const DesignInspector = React.memo(function DesignInspector({
             schemaVersion: 1,
             transactionId: `desktop:${crypto.randomUUID()}`,
             actor: { kind: "human", id: "desktop" },
-            intent: `Set ${properties.join(", ")} on ${styleNodeIds.length} layers`,
+            intent: `Set ${properties.join(", ")} on ${updates.length} layers`,
             createdAt: Date.now(),
             coalesceKey: `styles:${styleNodeIds.join(":")}:${properties.join(":")}`,
             operations: [
@@ -1757,6 +1904,37 @@ export const DesignInspector = React.memo(function DesignInspector({
       return task.then((prepared) => prepared.persist);
     },
     [styleOwner, stylesForNode],
+  );
+
+  /** Detach: every selected layer keeps the value its token resolves to on
+   * that layer, in one undoable step. */
+  const detachSelectedToken = useCallback(
+    (properties: readonly string[]) => {
+      const context = styleEditContextRef.current;
+      const updates = designDetachedStyles(context.styleNodeIds, properties, (nodeId, property) => {
+        const details =
+          (context.workspaceId && context.frame
+            ? useDesignRuntimeStore.getState().byWorkspace[context.workspaceId]
+                ?.frames[context.frame.file]?.detailsByNode[nodeId]
+            : undefined) ??
+          (nodeId === context.elementDetails?.oid ? context.elementDetails : undefined);
+        return details ? readDesignComputedStyle(details.styles, property) : undefined;
+      });
+      if (updates.length === 0) {
+        toast.error("Couldn't detach the token", {
+          description: "The selected layers have not reported their values yet.",
+        });
+        return;
+      }
+      const byNode = new Map(updates.map((update) => [update.nodeId, update.styles]));
+      void commitSelectedStyles(
+        Object.assign({}, ...updates.map((update) => update.styles)),
+        (nodeId) => byNode.get(nodeId) ?? {},
+      ).catch((error) =>
+        toast.error("Couldn't detach the token", { description: errorMessage(error) }),
+      );
+    },
+    [commitSelectedStyles],
   );
 
   const previewLayoutAction = useCallback(
@@ -2275,13 +2453,21 @@ export const DesignInspector = React.memo(function DesignInspector({
       property,
       value,
     );
+    // The same value from different tokens is Mixed too: a pill shows only
+    // when every selected layer names one token.
     const mixed =
       options?.mixed ||
       designFieldMixed(layoutParents, styleNodeIds.length, property, {
         geometry: options?.geometry,
         whole: options?.whole,
         linkedProperties: options?.linkedProperties,
-      });
+      }) ||
+      designValuesMixed(
+        layoutParents.map(
+          (node) => designStyleTokenDisplay(node, property, styleOriginLabel)?.name ?? "",
+        ),
+        styleNodeIds.length,
+      );
     return (
       <InspectorStyleField
         key={`${styleContext.workspaceId}:${styleContext.frame.file}:${styleNodeIds.join(":")}:${property}`}
@@ -2316,6 +2502,7 @@ export const DesignInspector = React.memo(function DesignInspector({
         onPreviewStyles={previewSelectedStyles}
         onCancelPreview={clearSelectedStylePreview}
         onCommitStyles={commitSelectedStyles}
+        onDetachToken={detachSelectedToken}
       />
     );
   };
@@ -2519,7 +2706,8 @@ export const DesignInspector = React.memo(function DesignInspector({
 
             {styleContext && elementDetails ? (
               <DesignStyleOriginLabelContext.Provider value={styleOriginLabel}>
-                <DesignColorTokensContext.Provider value={colorTokens}>
+                <DesignTokenCatalogContext.Provider value={tokenCatalog}>
+                <DesignTokenDetachContext.Provider value={detachSelectedToken}>
                   <DesignStyleEditor
                     key={styleOwner.key}
                     details={elementDetails}
@@ -2547,7 +2735,8 @@ export const DesignInspector = React.memo(function DesignInspector({
                     motionProperties={motionProperties}
                     onOpenMotionTimeline={onOpenMotionTimeline}
                   />
-                </DesignColorTokensContext.Provider>
+                </DesignTokenDetachContext.Provider>
+                </DesignTokenCatalogContext.Provider>
               </DesignStyleOriginLabelContext.Provider>
             ) : workspaceId && !frameSelected && !selectedNodeId ? (
               <DesignCanvasBackgroundEditor

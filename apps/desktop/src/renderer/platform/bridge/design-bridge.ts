@@ -161,6 +161,9 @@ export interface DesignTokenWire {
   usageCount: number;
   usageCountKnown?: boolean;
   line: number;
+  /** The comment attached to the declaration in tokens.css, as plain text.
+   * Absent from older engines. */
+  description?: string;
 }
 
 /** An imported style source declared in meta/canvas.json, as the theme editor
@@ -253,6 +256,9 @@ export interface DesignWorkspaceSnapshotWire {
   /** Absent on older engines, which have no imported style sources. */
   styleSources?: DesignStyleSourceWire[];
   styleSourceErrors?: string[];
+  /** Frames that choose their own style sources, with the sources each
+   * receives. Absent from older engines; an unlisted frame receives all. */
+  frameStyleSources?: Record<string, string[]>;
   /** Absent on older engines, whose default theme is always "Base". */
   themes?: DesignThemeWire[];
   assets: DesignAssetWire[];

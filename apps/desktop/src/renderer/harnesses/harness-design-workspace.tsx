@@ -195,7 +195,52 @@ const SHADOW_CONTENT_HOME_SOURCE = `<!doctype html><html><head><style>
     </diffs-container>
   </div>
 </main></body></html>`;
-const homeSource = designTokensHarness
+// `?tokenPills`: layers whose colour, radius, padding and type read tokens
+// from tokens.css (with descriptions) and from two imported sources that the
+// home and pricing frames receive separately; one layer reads a token that is
+// no longer declared.
+const tokenPillsHarness = new URLSearchParams(window.location.search).has(
+  "tokenPills",
+);
+const TOKEN_PILLS_MANUAL = [
+  ["--bg1", "white", "App canvas"],
+  ["--bg2", "whitesmoke", "Raised surfaces and the composer"],
+  ["--fg1", "black", "Emphasis and selected"],
+  ["--fg2", "dimgray", "Default text"],
+  ["--border2", "silver", "Dividers between rows"],
+  ["--radius-md", "6px", "Fields and buttons"],
+  ["--radius-lg", "10px", undefined],
+  ["--space-2", "8px", undefined],
+  ["--space-4", "16px", "Card padding"],
+  ["--text-xs", "13px", undefined],
+  ["--text-xs--line-height", "calc(18 / 13)", undefined],
+  ["--text-heading-lg", "28px", "Page titles"],
+  ["--text-heading-lg--line-height", "36px", undefined],
+  ["--text-heading-lg--font-weight", "600", undefined],
+] as const;
+const TOKEN_PILLS_HOME_SOURCE = `<!doctype html>
+<html>
+  <head>
+    <style data-zeros-style-source="app">:root { --surface: gainsboro; }</style>
+    <style data-zeros-source="tokens.css">
+      :root { ${TOKEN_PILLS_MANUAL.map(([name, value]) => `${name}: ${value};`).join(" ")} }
+    </style>
+    <style>body { margin: 0; font-family: system-ui; } main { padding: 48px; }</style>
+  </head>
+  <body>
+    <main data-oid="home-main" data-zeros-frame-root>
+      <div data-oid="home-card" style="display:flex;flex-direction:column;gap:var(--space-2);width:420px;min-width:var(--space-4);background-color:var(--bg2);border-radius:var(--radius-md);padding:var(--space-4);border-width:1px;border-style:solid;border-color:var(--border2)">
+        <h1 data-oid="home-heading" style="margin:0;font-size:var(--text-heading-lg);line-height:var(--text-heading-lg--line-height);font-weight:var(--text-heading-lg--font-weight);color:var(--fg1)">Make the next move unmistakable.</h1>
+        <p data-oid="home-copy" style="margin:0;font-size:var(--text-xs);line-height:var(--text-xs--line-height);color:var(--fg2)">A decisive launch surface.</p>
+      </div>
+      <div data-oid="home-missing" style="display:block;width:120px;height:48px;margin-top:16px;background-color:var(--surface);border-radius:var(--radius-card)"></div>
+      <div data-oid="home-chip" style="display:block;width:120px;height:32px;margin-top:16px;background-color:var(--bg2);border-radius:var(--radius-md)"></div>
+    </main>
+  </body>
+</html>`;
+const homeSource = tokenPillsHarness
+  ? TOKEN_PILLS_HOME_SOURCE
+  : designTokensHarness
   ? DESIGN_TOKENS_HOME_SOURCE
   : new URLSearchParams(window.location.search).has("shadowContent")
   ? SHADOW_CONTENT_HOME_SOURCE
@@ -475,7 +520,19 @@ async function main() {
         sourceVersion: PRICING_SOURCE_VERSION,
       },
     ],
-    tokens: [
+    tokens: tokenPillsHarness
+      ? TOKEN_PILLS_MANUAL.map(([name, value, description], index) => ({
+          name,
+          syntax: "*",
+          inherits: true,
+          initialValue: "",
+          value,
+          themeValues: name === "--bg2" ? { dark: "dimgray" } : {},
+          usageCount: 1,
+          line: index + 1,
+          ...(description ? { description } : {}),
+        }))
+      : [
       {
         name: "--accent",
         syntax: "<color>",
@@ -512,6 +569,22 @@ async function main() {
         : []),
     ],
     tokenSourceVersion: "tokens-source-version-1",
+    ...(tokenPillsHarness
+      ? {
+          styleSources: [
+            { ...HARNESS_STYLE_SOURCES![0]!, title: "App styles", status: "ready" as const, messages: [], themes: [],
+              tokens: [{ name: "--surface", value: "gainsboro", themeValues: {} }] },
+            { ...HARNESS_STYLE_SOURCES![1]!, title: "Brand kit", status: "ready" as const, messages: [],
+              tokens: [{ name: "--brand-accent", value: "rebeccapurple", themeValues: {} }] },
+          ],
+          styleSourceErrors: [],
+          frameStyleSources: { "home.html": ["app"], "pricing.html": ["brand"] },
+          themes: [
+            { id: "light", label: "Light", base: true as const },
+            { id: "dark", label: "Dark" },
+          ],
+        }
+      : {}),
     ...(styleSourcesHarness
       ? { styleSources: HARNESS_STYLE_SOURCES, styleSourceErrors: [] }
       : designTokensHarness

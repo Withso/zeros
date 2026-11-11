@@ -6,7 +6,7 @@
 // USED IN: DesignStyleEditor
 // ============================================
 
-import React, { useEffect, useRef, useState } from "react";
+import React, { useContext, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlignCenter,
   AlignJustify,
@@ -25,6 +25,7 @@ import {
 import type { DesignRuntimeNodeDetails } from "@zeros/protocol/design-runtime";
 
 import {
+  Button,
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuRadioGroup,
@@ -48,13 +49,31 @@ import {
 } from "./design-inspector-kit";
 import type { DesignLayoutFieldOptions } from "./design-layout-values";
 import { readDesignComputedStyle } from "./design-style-values";
-import { useDesignStyleToken } from "./design-style-provenance";
+import {
+  DesignStyleOriginLabelContext,
+  designStyleTokenDisplay,
+  useDesignStyleToken,
+} from "./design-style-provenance";
 import {
   DESIGN_MIXED_VALUE,
   designMixedSegment,
   designMixedSelect,
   designStyleMixed,
+  designValuesMixed,
 } from "./design-style-mixed";
+import {
+  designTextStyles,
+  designTextStyleSummary,
+  type DesignTextStyle,
+  type DesignTokenType,
+} from "./design-token-catalog";
+import { useDesignTokenDetach, useDesignTokens } from "./design-token-context";
+import {
+  DesignTokenDetachButton,
+  DesignTokenPicker,
+  DesignTokenPill,
+  type DesignTokenListGroup,
+} from "./design-token-picker";
 
 type RenderField = (
   label: string,
@@ -310,6 +329,9 @@ export function DesignTypographySection({
     readDesignComputedStyle(details.styles, property) || fallback;
   const mixed = (property: string) =>
     designStyleMixed(selection ?? [details], selectionCount, property);
+  const textStyle = useDesignTextStyle(details, selection, selectionCount);
+  // A text style's own parts read as values beside its pill, as drawn.
+  const styledBy = new Set(textStyle.current ? designTextStyleProperties(textStyle.current) : []);
   const colorToken = useDesignStyleToken(details, "color");
   const verticalAlignable = textLayer && BLOCK_TEXT_DISPLAYS.has(read("display", "block"));
   const authoredTypography = TYPOGRAPHY_PROPERTIES.some((property) =>
@@ -359,6 +381,14 @@ export function DesignTypographySection({
           >
             {open ? (
               <>
+                <DesignTextStyleRow
+                  textStyle={textStyle}
+                  disabled={disabled}
+                  onCommit={(styles) => {
+                    onPreview?.(styles);
+                    onCommit(styles, "text style");
+                  }}
+                />
                 <FontFamilyField
                   value={mixed("font-family") ? "" : read("font-family")}
                   placeholder={mixed("font-family") ? "Mixed" : undefined}
@@ -381,6 +411,7 @@ export function DesignTypographySection({
                   {renderField("Size", "font-size", mixed("font-size") ? "" : read("font-size"), {
                     icon: "font-size",
                     mixed: mixed("font-size"),
+                    tokenHidden: styledBy.has("font-size"),
                   })}
                 </div>
                 <div className="grid grid-cols-2 gap-2">
@@ -389,7 +420,7 @@ export function DesignTypographySection({
                       "Line height",
                       "line-height",
                       mixed("line-height") ? "" : read("line-height"),
-                      { icon: "line-height", mixed: mixed("line-height") },
+                      { icon: "line-height", mixed: mixed("line-height"), tokenHidden: styledBy.has("line-height") },
                     )}
                   </InspectorGroup>
                   <InspectorGroup label="Letter spacing">
@@ -397,7 +428,7 @@ export function DesignTypographySection({
                       "Letter spacing",
                       "letter-spacing",
                       mixed("letter-spacing") ? "" : read("letter-spacing"),
-                      { icon: "letter-spacing", mixed: mixed("letter-spacing") },
+                      { icon: "letter-spacing", mixed: mixed("letter-spacing"), tokenHidden: styledBy.has("letter-spacing") },
                     )}
                   </InspectorGroup>
                 </div>
@@ -491,6 +522,157 @@ export function DesignTypographySection({
         </PopoverContent>
       ) : null}
     </Popover>
+  );
+}
+
+/** The CSS each part of a text style sets, beside its size. */
+const TEXT_STYLE_PROPERTIES = [
+  ["lineHeight", "line-height"],
+  ["letterSpacing", "letter-spacing"],
+  ["fontWeight", "font-weight"],
+] as const;
+
+/** Applying a text style: its size and each part it declares, as tokens. */
+export function designTextStyleStyles(style: DesignTextStyle): Record<string, string> {
+  const styles: Record<string, string> = { "font-size": `var(${style.name})` };
+  for (const [part, property] of TEXT_STYLE_PROPERTIES) {
+    const member = style[part];
+    if (member) styles[property] = `var(${member.name})`;
+  }
+  return styles;
+}
+
+/** The directory's text styles and the one every selected layer's size
+ * reads, if they share one. */
+function useDesignTextStyle(
+  details: DesignRuntimeNodeDetails,
+  selection: readonly DesignRuntimeNodeDetails[] | undefined,
+  selectionCount: number,
+): { styles: readonly DesignTextStyle[]; current?: DesignTextStyle; mixed: boolean } {
+  const catalog = useDesignTokens();
+  const styles = useMemo(() => designTextStyles(catalog), [catalog]);
+  const originLabel = useContext(DesignStyleOriginLabelContext);
+  if (styles.length === 0 || !originLabel) return { styles, mixed: false };
+  const nameOf = (node: DesignRuntimeNodeDetails) =>
+    designStyleTokenDisplay(node, "font-size", originLabel)?.name ?? "";
+  const mixed = designValuesMixed((selection ?? [details]).map(nameOf), selectionCount);
+  const current = mixed ? undefined : styles.find((style) => style.name === nameOf(details));
+  return { styles, current, mixed };
+}
+
+/** The properties a text style sets on the layer. */
+function designTextStyleProperties(style: DesignTextStyle): string[] {
+  return [
+    "font-size",
+    ...TEXT_STYLE_PROPERTIES.filter(([part]) => style[part]).map(([, property]) => property),
+  ];
+}
+
+const NO_TOKEN_TYPES: readonly DesignTokenType[] = [];
+
+/** Typography's Style row: the text style (`--text-<name>` and its parts)
+ * the layer's size reads, as a pill; hidden when the directory has none. */
+function DesignTextStyleRow({
+  textStyle: { styles, current, mixed },
+  disabled,
+  onCommit,
+}: {
+  textStyle: ReturnType<typeof useDesignTextStyle>;
+  disabled?: boolean;
+  onCommit: (styles: Record<string, string | null>) => void;
+}) {
+  const detach = useDesignTokenDetach();
+  const [open, setOpen] = useState(false);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const rows = useMemo<DesignTokenListGroup[]>(
+    () => [
+      {
+        key: "text-styles",
+        label: "Text styles",
+        rows: styles.map((style) => ({
+          name: style.name,
+          summary: designTextStyleSummary(style),
+          glyph: "text" as const,
+        })),
+      },
+    ],
+    [styles],
+  );
+  if (styles.length === 0) return null;
+  const label = "Text style";
+  // The picker mounts only while open, beside the trigger.
+  const trigger = {
+    "aria-haspopup": "dialog" as const,
+    "aria-expanded": open,
+    onClick: () => setOpen((value) => !value),
+    onKeyDown: (event: React.KeyboardEvent<HTMLButtonElement>) => {
+      if (event.key === "ArrowDown" && event.altKey) {
+        event.preventDefault();
+        setOpen(true);
+      }
+    },
+  };
+  return (
+    <InspectorGroup label="Style">
+      <div
+        data-design-text-style={current?.name ?? ""}
+        className="group/design-field zd-field relative min-w-0 pr-0.5 pl-1"
+      >
+        {current ? (
+          <DesignTokenPill
+            ref={triggerRef}
+            label={label}
+            token={{
+              name: current.name,
+              description: `${current.name.replace(/^--/, "")} · ${designTextStyleSummary(current)}`,
+              missing: false,
+            }}
+            disabled={disabled}
+            className="mr-auto"
+            {...trigger}
+          />
+        ) : (
+          <Button
+            ref={triggerRef}
+            type="button"
+            variant="ghost"
+            size="compact"
+            disabled={disabled}
+            aria-label={`${label}: ${mixed ? "Mixed" : "none"}`}
+            className="text-fg3 w-full justify-between font-normal"
+            {...trigger}
+          >
+            {mixed ? "Mixed" : "None"}
+            <ChevronDown aria-hidden="true" />
+          </Button>
+        )}
+        {open ? (
+          <DesignTokenPicker
+            label={label}
+            accepts={NO_TOKEN_TYPES}
+            rows={rows}
+            kind="text"
+            activeName={current?.name ?? null}
+            disabled={disabled}
+            open
+            trigger={triggerRef}
+            onOpenChange={setOpen}
+            onChoose={(name) => {
+              const style = styles.find((candidate) => candidate.name === name);
+              if (style) onCommit(designTextStyleStyles(style));
+            }}
+          />
+        ) : null}
+        {current && detach ? (
+          <span className="zd-field-token-detach" data-design-token-action="hover">
+            <DesignTokenDetachButton
+              disabled={disabled}
+              onDetach={() => detach(designTextStyleProperties(current))}
+            />
+          </span>
+        ) : null}
+      </div>
+    </InspectorGroup>
   );
 }
 
