@@ -5,13 +5,16 @@ import { SyncChangedError, type SyncSource } from "./engine";
 
 /** Why a sync socket could not be opened. Paused waits for the VM. */
 export class SyncConnectError extends Error {
-  constructor(readonly kind: "paused" | "update_required" | "not_connected" | "unavailable" | "signed_out") { super(`Sync connection: ${kind}`); }
+  /** `detail`: a closed code for the log (dial_<status>, dial_timeout, close_<code>, reply_<CODE>, timeout). */
+  constructor(readonly kind: "paused" | "update_required" | "not_connected" | "unavailable" | "signed_out", readonly detail?: string) { super(`Sync connection: ${kind}`); }
 }
 
 export interface SyncSocket {
   readonly readyState: number; send(data: string): void; close(code?: number): void; terminate(): void;
   on(event: "open" | "close" | "error", listener: () => void): unknown;
   on(event: "message", listener: (data: unknown, binary: boolean) => void): unknown;
+  on(event: "close", listener: (code?: number) => void): unknown;
+  on(event: "unexpected-response", listener: (request: unknown, response: { statusCode?: number }) => void): unknown;
 }
 export interface DirectDeps {
   /** A fresh single-use grant from the control plane (D+H); throws SyncConnectError. */
@@ -42,13 +45,15 @@ export class DirectSyncConnection implements SyncSource {
     const url = new URL(first.url); url.protocol = "wss:"; url.pathname = SYNC_BRIDGE_PATH;
     const ws = deps.dial(url.toString(), SYNC_BRIDGE_PROTOCOL, { Cookie: `_port_auth=${first.portAuth}`, "X-Zeros-Worker-Auth": first.grant });
     await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => { ws.terminate(); reject(new SyncConnectError("unavailable")); }, 20_000);
+      let status: number | undefined;
+      const timer = setTimeout(() => { ws.terminate(); reject(new SyncConnectError("unavailable", "dial_timeout")); }, 20_000);
       ws.on("open", () => { clearTimeout(timer); resolve(); });
-      ws.on("error", () => { clearTimeout(timer); reject(new SyncConnectError("unavailable")); });
+      ws.on("unexpected-response", (_request, response) => { status = response.statusCode; });
+      ws.on("error", () => { clearTimeout(timer); reject(new SyncConnectError("unavailable", status ? `dial_${status}` : "dial_error")); });
     });
     const connection = new DirectSyncConnection(ws, handlers.hint, handlers.closed);
     ws.on("message", (data, binary) => { if (!binary) connection.receive(String(data)); });
-    ws.on("close", () => connection.end());
+    ws.on("close", (code?: number) => connection.end(`close_${code ?? 0}`));
     connection.renew = setInterval(() => {
       void deps.grant().then(next => { if (!connection.closed) ws.send(JSON.stringify({ t: "renew", grant: next.grant })); },
         () => { /* A refused renewal (revoked, disconnected): the worker closes the socket at its deadline. */ });
@@ -64,7 +69,7 @@ export class DirectSyncConnection implements SyncSource {
   readBatch(request: SyncReadBatchRequest) { return this.request("sync.readBatch", request).then(result => SyncReadBatchReplySchema.parse(result)); }
   /** The worker serves sync.readBatch (an older one never says so). */
   batching(): boolean { return this.batch; }
-  close(): void { if (!this.closed) { this.ws.close(1000); this.end(); } }
+  close(): void { if (!this.closed) { this.ws.close(1000); this.end("closed_here"); } }
 
   /** At most SYNC_LIMITS.inFlight at once; the rest wait their turn in order. */
   private async request(op: string, params: object): Promise<unknown> {
@@ -74,10 +79,10 @@ export class DirectSyncConnection implements SyncSource {
     finally { this.inFlight--; this.waiting.shift()?.(); }
   }
   private send(op: string, params: object): Promise<unknown> {
-    if (this.closed || this.ws.readyState !== 1) return Promise.reject(new SyncConnectError("unavailable"));
+    if (this.closed || this.ws.readyState !== 1) return Promise.reject(new SyncConnectError("unavailable", this.endedWith ?? "closed"));
     const frame = createMessage({ type: "WORKSPACE_REQUEST", source: "browser", op, params: params as Record<string, unknown> });
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => { this.pending.delete(frame.id); reject(new SyncConnectError("unavailable")); }, REQUEST_TIMEOUT_MS);
+      const timer = setTimeout(() => { this.pending.delete(frame.id); reject(new SyncConnectError("unavailable", "timeout")); }, REQUEST_TIMEOUT_MS);
       this.pending.set(frame.id, { resolve, reject, timer });
       this.ws.send(JSON.stringify(frame));
     });
@@ -95,13 +100,15 @@ export class DirectSyncConnection implements SyncSource {
     if (!pending) return;
     this.pending.delete(message.requestId); clearTimeout(pending.timer);
     if (message.type === "WORKSPACE_RESPONSE") pending.resolve(message.result);
-    else pending.reject(message.code === "SYNC_CHANGED" ? new SyncChangedError() : new SyncConnectError("unavailable"));
+    else pending.reject(message.code === "SYNC_CHANGED" ? new SyncChangedError()
+      : new SyncConnectError("unavailable", `reply_${typeof message.code === "string" && /^[A-Z_]{1,40}$/.test(message.code) ? message.code : "error"}`));
   }
 
-  private end(): void {
+  private endedWith?: string;
+  private end(detail: string): void {
     if (this.closed) return;
-    this.closed = true; clearInterval(this.renew);
-    for (const pending of this.pending.values()) { clearTimeout(pending.timer); pending.reject(new SyncConnectError("unavailable")); }
+    this.closed = true; this.endedWith = detail; clearInterval(this.renew);
+    for (const pending of this.pending.values()) { clearTimeout(pending.timer); pending.reject(new SyncConnectError("unavailable", detail)); }
     this.pending.clear();
     // Waiting requests then fail fast in send() (closed).
     for (const resume of this.waiting.splice(0)) resume();

@@ -71,9 +71,11 @@ interface WorkerOptions {
   memoryWatchdog?: { runtimeRoots: readonly string[] };
   /** Closed codes only. */
   onMemory?: (event: "memory_stopped" | "memory_pressure") => void;
+  /** Worker journal lines for Sync to Mac: counts, sizes and durations; never a path. */
+  onSync?: (line: string) => void;
 }
 /** passive (Order 3): a syncing Mac; never activity, never in the census, sync reads only. */
-interface Client extends AppClient { rejected: boolean; passive?: boolean }
+interface Client extends AppClient { rejected: boolean; passive?: boolean; device?: string; served?: number }
 
 const stableJson = (value: unknown): string => Array.isArray(value) ? `[${value.map(stableJson).join(",")}]`
   : value && typeof value === "object" ? `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${stableJson((value as Record<string, unknown>)[key])}`).join(",")}}`
@@ -274,14 +276,15 @@ export class CloudWorker {
     }
     if (message.t === "close") {
       this.pendingClients.delete(message.clientId);
-      this.syncTransfers.ended(message.clientId);
       const client = this.clients.get(message.clientId); if (client) this.terminals?.detach(client);
+      if (client?.passive) this.options.onSync?.(`sync served client=${client.id.slice(0, 8)} reads=${client.served ?? 0}`);
       this.clients.delete(message.clientId); return;
     }
     if (this.stopping) return;
     if (message.t === "open") {
       const previous = this.clients.get(message.clientId); if (previous) this.terminals?.detach(previous);
-      const client: Client = { id: message.clientId, rejected: false, ...(message.passive ? { passive: true } : {}), send: async (frame) => {
+      const client: Client = { id: message.clientId, rejected: false, ...(message.passive ? { passive: true } : {}),
+        ...(message.passive && message.device ? { device: message.device } : {}), send: async (frame) => {
         if (this.clients.get(client.id) === client && !client.rejected) await this.send({ t: "frame", clientId: client.id, frame });
       } };
       this.clients.set(client.id, client);
@@ -318,7 +321,11 @@ export class CloudWorker {
         if (!this.sync) throw new WorkspaceError("CLOUD_V2_UNSUPPORTED", "Sync is not available.");
         const result = await this.sync.handle(frame.op, frame.params ?? {});
         // A Mac moving bytes keeps the VM awake (bounded); an in-sync mirror's snapshots never do.
-        if (client.passive && SYNC_TRANSFER_OPS.has(frame.op)) this.syncTransfers.transferred(client.id, Date.now());
+        // Per Mac (device), across its sockets: a reconnect loop cannot restart the 30-minute allowance.
+        if (client.passive && SYNC_TRANSFER_OPS.has(frame.op)) {
+          this.syncTransfers.transferred(client.device ?? client.id, Date.now());
+          client.served = (client.served ?? 0) + 1;
+        }
         await client.send(createMessage({ type: "WORKSPACE_RESPONSE", source: "engine", requestId: frame.id, op: frame.op, result }));
       } catch (error) {
         await client.send(createMessage({ type: "WORKSPACE_ERROR", source: "engine", requestId: frame.id, op: frame.op,
@@ -511,7 +518,8 @@ export class CloudWorker {
       await reviewConfiguring;
       if (this.disposed || this.stopping) return false;
       const sync = new SyncService(scope, (program, args, options) => run(program, args, options), () => this.syncHint(sync),
-        { bundleDirectory: join(this.options.directory, "sync-bundles"), baseBranch: config.workspace.baseBranch, onActive: () => workspace?.refreshWatch() });
+        { bundleDirectory: join(this.options.directory, "sync-bundles"), baseBranch: config.workspace.baseBranch, onActive: () => workspace?.refreshWatch(),
+          ...(this.options.onSync ? { log: this.options.onSync } : {}) });
       workspace = await measureStartup("worker_services_workspace", () => WorkspaceService.open(scope, this.options.directory, {
         onContentChange: () => sync.changed(), onWatchLossy: () => sync.lossy(), watchContext: () => sync.active,
         historyDiff: params => agents!.turns.historyDiff(params),

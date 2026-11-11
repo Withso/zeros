@@ -20,12 +20,13 @@ function fixture(pages: Array<{ connections: ReturnType<typeof row>[]; nextCurso
 }
 
 describe("following syncWanted for this Mac (12.z)", () => {
-  it("collects every page, then starts wanted workspaces in their default folder and stops one set to false; unlisted ones stay", async () => {
+  it("collects every page, then starts wanted workspaces in their default folder, and stops one set to false or no longer connected here", async () => {
     const f = fixture([{ connections: [row(A, true)], nextCursor: A }, { connections: [row(B, false), row(C, true, { number: null, name: "Docs" })], nextCursor: null }], [B, "44444444-4444-4444-8444-444444444444"]);
     await f.follower.refresh();
     expect(f.cursors).toEqual([undefined, A]);
-    expect(f.calls).toEqual(["enable 1 /Users/alex/zeros/cloud-sync/zeros/w-19", "disable 2", "enable 3 /Users/alex/zeros/cloud-sync/zeros/Docs"]);
-    expect([...f.runs].sort()).toEqual([A, C, "44444444-4444-4444-8444-444444444444"].sort());
+    // 4444… is not among this Mac's live connections (disconnected): an app restart must not keep syncing it.
+    expect(f.calls).toEqual(["enable 1 /Users/alex/zeros/cloud-sync/zeros/w-19", "disable 2", "enable 3 /Users/alex/zeros/cloud-sync/zeros/Docs", "disable 4"]);
+    expect([...f.runs].sort()).toEqual([A, C].sort());
   });
 
   it("changes nothing when any page fails (the prior state stays), and backs off a control plane without the route", async () => {
