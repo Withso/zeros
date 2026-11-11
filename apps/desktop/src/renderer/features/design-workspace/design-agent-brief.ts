@@ -1,6 +1,7 @@
-// PURPOSE: The briefs Design sends to an agent for "Ask agent to sync" and
-// "Ask agent to fix". They stay short: the procedure lives in the packaged
-// Zeros Design skill, so typing "sync my styles" in any chat matches them.
+// PURPOSE: The briefs Design sends to an agent for "Ask agent to sync",
+// "Ask agent to fix" and "Ask agent to change". They stay short: the
+// procedure lives in the packaged Zeros Design skill, so typing "sync my
+// styles" in any chat matches them.
 
 import type { DesignStyleSourceWire } from "../../platform/git";
 
@@ -54,6 +55,33 @@ export function designSourceFixBrief(
         : `The style source "${source.id}" in the Design directory "${directory}" needs fixing:`,
       sourceLine(source),
       `${SKILL_PROCEDURE} to correct its declaration in "${directory}/meta/canvas.json", check it with \`zeros-engine design styles\`, and tell me what changed.`,
+      CODE_RULE,
+    ].join("\n"),
+  };
+}
+
+/** Free a value a rule forces with !important, so the Style panel can edit
+ * it on this layer. */
+export function designForcedValueBrief(input: {
+  directory: string;
+  frame: string;
+  layer: string;
+  nodeId: string;
+  property: string;
+  /** The field's name in the panel, for the chat label. */
+  label: string;
+  /** The value as the person sees it written. */
+  value: string;
+  rule: string;
+  /** Where the rule is written, as the panel names it. */
+  source?: string;
+}): DesignAgentBrief {
+  const where = input.source ? `\`${input.rule}\` in ${input.source}` : `\`${input.rule}\``;
+  return {
+    label: `Change ${input.label} on ${input.layer}`,
+    text: [
+      `In the frame "${input.frame}" in the Design directory "${input.directory}", the layer "${input.layer}" (data-oid "${input.nodeId}") shows ${input.property}: ${input.value}, forced by ${where} with !important, so the Style panel cannot edit it.`,
+      "Remove the !important, or move the value so this layer's own value can be edited, without changing how other layers look. Tell me what you changed.",
       CODE_RULE,
     ].join("\n"),
   };

@@ -65,6 +65,52 @@ describe("field marks across the selection", () => {
   });
 });
 
+describe("values the panel cannot edit", () => {
+  const calc = { ...btn, value: "calc(100% - 48px)" };
+  const forced = { origin: "frame" as const, selector: ".legacy-card", scope: "element" as const, subjectClasses: ["legacy-card"], value: "4px", important: true };
+
+  it("locks a value written with a CSS function, and says so with the function", () => {
+    const origins = designFieldOrigins([layer("label", { width: calc }, { name: "Button label" })], context, null);
+    expect(origins.mark("width")).toBe("computed");
+    expect(origins.lock("width")).toEqual({ kind: "computed", nodeId: "label", layer: "Button label", text: "calc(100% - 48px)", why: "Uses calc()." });
+  });
+
+  it("locks a value forced by !important, naming the rule", () => {
+    const origins = designFieldOrigins([layer("card", { "border-radius": forced }, { name: "Card" })], context, null);
+    expect(origins.mark("border-radius")).toBe("forced");
+    expect(origins.lock("border-radius")).toMatchObject({ kind: "forced", nodeId: "card", layer: "Card", rule: ".legacy-card", text: "4px", why: "Forced by .legacy-card" });
+  });
+
+  it("locks the field for every layer when one is computed or forced, saying which and why", () => {
+    const plain = layer("plain", { width: { ...btn, value: "40px" } }, { name: "Plain" });
+    const computed = designFieldOrigins([plain, layer("label", { width: calc }, { name: "Button label" })], context, null);
+    expect(computed.mark("width")).toBe("computed");
+    expect(computed.lock("width")?.why).toBe("Button label uses calc().");
+    const both = designFieldOrigins(
+      [plain, layer("label", { "border-radius": { ...btn, value: "calc(2px * 2)" } }, { name: "Button label" }), layer("card", { "border-radius": forced }, { name: "Card" })],
+      context,
+      null,
+    );
+    // A forced value is the harder stop, so it is the one named.
+    expect(both.mark("border-radius")).toBe("forced");
+    expect(both.lock("border-radius")?.why).toBe("Card is forced by .legacy-card");
+    expect(both.lock("gap")).toBeNull();
+  });
+
+  it("marks a field whose plain value differs by theme, and says what an edit changes", () => {
+    const themed = { themes: ["Light", "Dark"], themeLabel: (theme: string) => (theme === "light" ? "Light" : "Dark") };
+    const origins = designFieldOrigins(
+      [layer("card", { opacity: { ...btn, value: "0.8", themeValues: { light: "1" } } })],
+      { ...context, ...themed },
+      null,
+    );
+    expect(origins.themed("opacity")).toBe(true);
+    expect(origins.themed("color")).toBe(false);
+    expect(origins.themeChange("opacity")).toBe("Changes Light and Dark.");
+    expect(origins.themeChange("color")).toBeNull();
+  });
+});
+
 describe("Styled by across the selection", () => {
   it("shows the line only when every layer has the same sources", () => {
     const one = layer("one", { color: { ...btn, value: "navy" } });
@@ -113,6 +159,26 @@ describe("Styled by across the selection", () => {
   });
 });
 
+describe("a held state's filter", () => {
+  it("shows only what the state changes, and offers no Styled-by filter of its own", () => {
+    const held = layer("held", {
+      color: { ...btn, selector: ".btn:hover", value: "blue", state: "hover" },
+      gap: { ...btn, value: "4px" },
+      "border-radius": changed("8px"),
+    }, { heldState: "hover" });
+    const origins = designFieldOrigins([held], context, null, { properties: ["color"] });
+    expect(origins.filter).not.toBeNull();
+    expect(origins.hidden("color")).toBe(false);
+    expect(origins.hidden("gap")).toBe(true);
+    expect(origins.hidden("border-radius")).toBe(true);
+    // A state that changes nothing here hides every field.
+    expect(designFieldOrigins([held], context, null, { properties: [] }).hidden("color")).toBe(true);
+    // A Styled-by key passed alongside is ignored while held.
+    const key = designFieldOrigins([held], context, null).styledBy!.groups[0]!.key;
+    expect(designFieldOrigins([held], context, key, { properties: ["color"] }).hidden("gap")).toBe(true);
+  });
+});
+
 describe("Reset", () => {
   it("removes each layer's own declaration whole and leaves the others alone", () => {
     const own = layer("own", { padding: changed("2px", "padding") });
@@ -129,6 +195,11 @@ describe("Reset", () => {
     expect(designResetStyles([sides], context, ["padding-left", "padding-right"])).toEqual([
       { nodeId: "sides", styles: { "padding-left": null, "padding-right": null } },
     ]);
+  });
+
+  it("clears a value set on the layer's own style that replaces nothing", () => {
+    const drawn = layer("drawn", { width: { origin: "inline", scope: "inline", value: "40px" } }, { classes: undefined });
+    expect(designResetStyles([drawn], context, ["width"])).toEqual([{ nodeId: "drawn", styles: { width: null } }]);
   });
 
   it("has nothing to reset where no layer changed the value", () => {

@@ -213,6 +213,62 @@ describe("design frame runtime client", () => {
     } finally { connection.destroy(); port.close(); }
   });
 
+  it("negotiates holding a layer state, validates the held reply and source-fences the release event", async () => {
+    const source = { postMessage: vi.fn() };
+    const onStateReleased = vi.fn();
+    const connection = connectDesignFrameRuntime("held-state", "home.html", SOURCE_VERSION,
+      { contentWindow: source } as unknown as HTMLIFrameElement, { onStateReleased },
+      { setTimeout: vi.fn(() => 7), clearTimeout: vi.fn() });
+    const port = source.postMessage.mock.calls[0]![1].transfer[0] as MessagePort;
+    const requests: Array<Record<string, unknown>> = [];
+    let reply: (args: Record<string, unknown>) => unknown = () => null;
+    port.onmessage = ({ data }) => {
+      if (data.type !== "request") return;
+      requests.push(data);
+      port.postMessage({ protocol: DESIGN_RUNTIME_PROTOCOL, version: DESIGN_RUNTIME_VERSION, type: "response",
+        requestId: data.requestId, ok: true, result: reply(data.args) });
+    };
+    port.start();
+    const held = (state: string, overrides: Record<string, unknown> = {}) => ({
+      ...snapshot(1).frame, oid: "send", heldState: state, states: ["hover", "focus-visible"], ...overrides,
+    });
+    try {
+      // An older runtime fails honestly before any request is sent.
+      await expect(connection.holdNodeState!("send", "hover", "hold-1")).rejects.toMatchObject({ code: "METHOD_NOT_SUPPORTED" });
+      expect(requests).toHaveLength(0);
+      port.postMessage({ protocol: DESIGN_RUNTIME_PROTOCOL, version: DESIGN_RUNTIME_VERSION, type: "event", event: "ready",
+        payload: { sourceVersion: SOURCE_VERSION, capabilities: { ...capabilities, methods: [...capabilities.methods, "holdNodeState", "releaseNodeState"] }, snapshot: snapshot(1) } });
+      await vi.waitFor(() => expect(connection.supports("holdNodeState")).toBe(true));
+      reply = (args) => held(args.state as string);
+      await expect(connection.holdNodeState!("send", "hover", "hold-1")).resolves.toMatchObject({ heldState: "hover" });
+      expect(requests.at(-1)).toMatchObject({ method: "holdNodeState", args: { nodeId: "send", state: "hover", holdId: "hold-1" } });
+      // A reply that is not the held state, or not that layer, is refused.
+      reply = () => held("focus");
+      await expect(connection.holdNodeState!("send", "hover", "hold-2")).rejects.toThrow("malformed");
+      reply = () => held("hover", { oid: "other" });
+      await expect(connection.holdNodeState!("send", "hover", "hold-3")).rejects.toThrow("malformed");
+      reply = () => ({ ...snapshot(1).frame, oid: "send" });
+      await expect(connection.holdNodeState!("send", "hover", "hold-4")).rejects.toThrow("malformed");
+      // An unreadable held state never passes for Default.
+      reply = () => held("visited");
+      await expect(connection.getNodeDetails("send")).rejects.toThrow("malformed");
+      reply = () => ({ released: true });
+      await expect(connection.releaseNodeState!()).resolves.toEqual({ released: true });
+      reply = () => ({ released: "yes" });
+      await expect(connection.releaseNodeState!()).rejects.toThrow("malformed");
+
+      const release = (version: string, holdId: string) => port.postMessage({ protocol: DESIGN_RUNTIME_PROTOCOL, version: DESIGN_RUNTIME_VERSION,
+        type: "event", event: "stateReleased", payload: { sourceVersion: version, holdId } });
+      release(NEXT_SOURCE_VERSION, "foreign");
+      release(SOURCE_VERSION, "hold-1");
+      await vi.waitFor(() => expect(onStateReleased).toHaveBeenCalledTimes(1));
+      expect(onStateReleased).toHaveBeenCalledWith({ sourceVersion: SOURCE_VERSION, holdId: "hold-1" });
+    } finally {
+      connection.destroy();
+      port.close();
+    }
+  });
+
   it("negotiates frame playback and source-fences lifecycle events on its private port", async () => {
     const source = { postMessage: vi.fn() };
     const onPlaybackStopped = vi.fn();
@@ -362,7 +418,7 @@ describe("design frame runtime client", () => {
       sourceVersion: SOURCE_VERSION,
       // Opt-in methods: a runtime advertises them only when asked, so a host
       // that predates one still accepts the runtime's capabilities.
-      features: ["previewStylesheet", "setPlayback", "previewInsert", "clearPreviewInserts", "previewHistory", "commitStructure", "previewStructure", "clearPreviewStructure"],
+      features: ["previewStylesheet", "setPlayback", "previewInsert", "clearPreviewInserts", "previewHistory", "commitStructure", "previewStructure", "clearPreviewStructure", "holdNodeState", "releaseNodeState"],
     });
     expect(handshake?.[1]).toMatchObject({ targetOrigin: "*" });
     const framePort = handshake?.[1]?.transfer?.[0] as MessagePort;
@@ -408,13 +464,13 @@ describe("design frame runtime client", () => {
     expect(source.postMessage).toHaveBeenCalledTimes(1);
     await expect(pending).resolves.toMatchObject({ revision: 2 });
 
-    const theme = connection.setTheme("dark");
+    // The default theme travels with every theme applied: it can change
+    // without a new handshake.
+    const theme = connection.setTheme("dark", "light");
     await vi.waitFor(() => expect(requests).toHaveLength(2));
-    const themeRequest = requests[1] as { requestId: string };
-    expect(themeRequest).toMatchObject({
-      method: "setTheme",
-      args: { theme: "dark" },
-    });
+    const themeRequest = requests[1] as { requestId: string; args: unknown };
+    expect(themeRequest).toMatchObject({ method: "setTheme" });
+    expect(themeRequest.args).toEqual({ theme: "dark", baseTheme: "light" });
     framePort.postMessage({
       protocol: DESIGN_RUNTIME_PROTOCOL,
       version: DESIGN_RUNTIME_VERSION,

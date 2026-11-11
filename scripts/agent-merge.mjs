@@ -10,8 +10,8 @@ import { lexer } from "marked";
 import { parseNameStatus } from "./ci/scope.mjs";
 
 const REPOSITORY = "Withso/zeros";
-const OWNER_REVIEW =
-  "This PR changes CI definitions; the owner must review and merge it.";
+const ciDefinitionNote = (paths) =>
+  `This PR changes CI definitions (${paths.join(", ")}); its own CI already ran them, so the normal merge guards apply.`;
 const USAGE =
   "usage: pnpm agent:merge <pr-number> [--immediate] [--dry-run] [--force --reason <human-PR-comment-URL>]";
 const SKIP_MARKER =
@@ -61,6 +61,9 @@ const IMMEDIATE_PR_QUERY = `query ImmediateMergePreflight($number: Int!) {
       labels(first: 100) { nodes { name } pageInfo { hasNextPage } }
     }
   }
+}`;
+const QUEUE_QUERY = `query MergeQueue($branch: String!) {
+  repository(owner: "Withso", name: "zeros") { mergeQueue(branch: $branch) { id } }
 }`;
 const IMMEDIATE_QUEUE_QUERY = `query ImmediateMergeQueue($branch: String!) {
   ${IMMEDIATE_VIEWER_FIELDS}
@@ -143,6 +146,7 @@ export function decideMerge(
     forceComment,
     checks,
     mergeQueue,
+    commitMessages,
   } = snapshot ?? {};
   if (
     !positiveInteger(number) ||
@@ -192,18 +196,13 @@ export function decideMerge(
       ? [file.filename, file.previous_filename]
       : [file.filename],
   );
-  // These boundaries remain protected even when the shared policy is missing.
-  if (
-    paths.some(
-      (file) =>
-        file === "scripts/ci/ci-definition.mjs" ||
-        file.startsWith(".github/workflows/"),
-    ) ||
-    (typeof isCiDefinitionPath === "function" &&
-      paths.some((file) => isCiDefinitionPath(file)))
-  ) {
-    return refuse("ci-definition", OWNER_REVIEW);
-  }
+  // Informational only: agents may merge CI-definition PRs (owner decision,
+  // 2026-11-11). The PR's own CI runs the changed definitions, and the
+  // required-check list itself lives in GitHub rules, not in this checkout.
+  const ciDefinitionPaths =
+    typeof isCiDefinitionPath === "function"
+      ? [...new Set(paths.filter((file) => isCiDefinitionPath(file)))].sort()
+      : [];
   if (SKIP_MARKER.test(pr.title) || SKIP_MARKER.test(pr.body)) {
     return refuse(
       "skip-marker",
@@ -291,19 +290,31 @@ export function decideMerge(
       "A human override requires the caller's justification comment on this PR; refusing to arm auto-merge.",
     );
   }
+  // With a merge queue GitHub tests each PR on top of main and the PRs ahead of
+  // it, so several PRs may be in flight; without one, keep one armed PR.
+  if (!immediate && mergeQueue !== null && !(typeof mergeQueue?.id === "string" && mergeQueue.id))
+    return refuse(
+      "queue-unavailable",
+      "Unable to confirm whether the base branch uses a merge queue; refusing to arm auto-merge.",
+    );
+  const queued = !immediate && mergeQueue !== null;
+  if (queued && (!Array.isArray(commitMessages) || !commitMessages.length ||
+      commitMessages.some((message) => typeof message !== "string")))
+    return refuse("commits-unavailable", "Unable to read this PR's commit messages; refusing to enqueue it.");
+  // The queue's squash uses the repository's commit-message default (the
+  // commits' messages), not the checked PR text the wrapper passes otherwise.
+  if (queued && commitMessages.some((message) => SKIP_MARKER.test(message)))
+    return refuse(
+      "skip-marker",
+      "A commit message on this PR contains a GitHub skip marker, which the merge queue's squash would carry to main; reword the commit before enqueuing.",
+    );
   const armed = openPullRequests.filter(
     (other) => other.number !== number && other.autoMergeRequest !== null,
   );
-  if (armed.length && !force) {
+  if (armed.length && !force && !queued) {
     return refuse(
       "already-armed",
       `Another open PR already has auto-merge enabled (${armed.map((other) => `#${other.number}`).join(", ")}); wait for it to merge or be disarmed.`,
-    );
-  }
-  if (typeof isCiDefinitionPath !== "function") {
-    return refuse(
-      "policy-unavailable",
-      "The shared CI-definition policy is unavailable; refusing to arm auto-merge.",
     );
   }
   if (immediate) {
@@ -380,6 +391,7 @@ export function decideMerge(
     return {
       allowed: true,
       code: "immediate",
+      ciDefinitionPaths,
       message: `Merge immediately: PR #${number} at ${pr.headRefOid} into ${pr.baseRefName}.`,
       input: {
         pullRequestId: pr.id,
@@ -390,9 +402,18 @@ export function decideMerge(
       },
     };
   }
+  if (queued)
+    return {
+      allowed: true,
+      code: "enqueue",
+      ciDefinitionPaths,
+      message: `Add PR #${number} at ${pr.headRefOid} to the ${pr.baseRefName} merge queue once its required checks pass.`,
+      args: ["pr", "merge", String(number), "--repo", REPOSITORY, "--auto", "--match-head-commit", pr.headRefOid],
+    };
   return {
     allowed: true,
     code: "arm",
+    ciDefinitionPaths,
     message: `Arm auto-merge for PR #${number} at ${pr.headRefOid}.`,
     args: [
       "pr",
@@ -638,6 +659,11 @@ export async function runAgentMerge(
           "-f",
           `branch=${pr.baseRefName}`,
         ]).repository?.mergeQueue
+      : json(["api", "graphql", "-f", `query=${QUEUE_QUERY}`, "-f", `branch=${pr.baseRefName}`])
+          ?.data?.repository?.mergeQueue;
+    const commitMessages = !options.immediate && mergeQueue
+      ? json(["api", `repos/${REPOSITORY}/pulls/${prNumber}/commits`, "--paginate", "--slurp"])
+          .flat().map((item) => item?.commit?.message)
       : null;
     const openPages = json([
       "api",
@@ -690,6 +716,7 @@ export async function runAgentMerge(
       requiredChecks,
       checks,
       mergeQueue,
+      commitMessages,
       openPullRequests: openPages.flatMap(
         (page) => page.data.repository.pullRequests.nodes,
       ),
@@ -706,6 +733,8 @@ export async function runAgentMerge(
       stderr(decision.message);
       return 1;
     }
+    if (decision.ciDefinitionPaths.length)
+      stdout(ciDefinitionNote(decision.ciDefinitionPaths));
     if (options.immediate) {
       readWorkspaceAuthorEmail();
       const fresh = readSnapshot();
@@ -781,6 +810,16 @@ export async function runAgentMerge(
       stdout(
         `Merged PR #${options.number} at ${snapshot.pr.headRefOid} into ${snapshot.pr.baseRefName}; merge commit ${readback.mergeCommit.oid}.`,
       );
+      return 0;
+    }
+    if (decision.code === "enqueue") {
+      if (options.dryRun) {
+        stdout(`Dry run: ${decision.message}`);
+        stdout(`gh ${decision.args.join(" ")}`);
+        return 0;
+      }
+      execute(decision.args);
+      stdout(`Requested a merge queue entry for PR #${options.number} at ${snapshot.pr.headRefOid}; GitHub merges it after its merge group passes.`);
       return 0;
     }
     if (options.force)

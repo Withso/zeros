@@ -106,10 +106,38 @@ describe("the Style panel's hover card", () => {
     expect(card.actions.map((action) => action.label)).toEqual(["Pick another", "Detach"]);
   });
 
-  it("names the rule forcing a value, and offers no token for it", () => {
+  it("names the rule forcing a value and offers the agent, no token", () => {
     const card = designStyleCardContent(field("border-color"), origins, catalog);
     expect(card.notes).toEqual(["Forced by .legacy"]);
-    expect(card.actions).toEqual([]);
+    expect(card.actions).toEqual([{ kind: "agent", label: "Ask agent to change" }]);
+  });
+
+  it("says a computed value is written with a CSS function and offers the CSS tab only", () => {
+    const sized: DesignRuntimeNodeDetails = { ...layer, authoredStyles: { ...layer.authoredStyles, width: { ...btn, value: "calc(100% - 48px)" } } };
+    const card = designStyleCardContent(field("width"), designFieldOrigins([sized], context, null), catalog);
+    expect(card.notes).toEqual(["Uses calc()."]);
+    expect(card.actions).toEqual([{ kind: "css", label: "Edit in CSS" }]);
+  });
+
+  it("names which layer makes a field of several read only, and why", () => {
+    const other: DesignRuntimeNodeDetails = { ...layer, oid: "card", name: "Card" };
+    const card = designStyleCardContent(field("border-color"), designFieldOrigins([{ ...layer, authoredStyles: { width: { ...btn, value: "1px" } } }, other], context, null), catalog);
+    expect(card.notes).toEqual(["Card is forced by .legacy"]);
+    expect(card.actions).toEqual([{ kind: "agent", label: "Ask agent to change" }]);
+    // The layers' values differ too: why the field is read only comes first.
+    const mixed = designStyleCardContent(field("border-color", { mixed: true }), designFieldOrigins([{ ...layer, authoredStyles: { width: { ...btn, value: "1px" } } }, other], context, null), catalog);
+    expect(mixed.notes).toEqual(["Card is forced by .legacy"]);
+    expect(mixed.rows).toEqual([{ key: "Value", text: "Mixed: the selected layers differ" }]);
+  });
+
+  it("lists another theme's value for a plain value that differs by theme", () => {
+    const themed: DesignRuntimeNodeDetails = { ...layer, authoredStyles: { ...layer.authoredStyles, width: { ...btn, value: "72px", themeValues: { light: "80px" } } } };
+    const card = designStyleCardContent(
+      field("width"),
+      designFieldOrigins([themed], { ...context, themeLabel: (theme) => (theme === "light" ? "Light" : "Dark") }, null),
+      catalog,
+    );
+    expect(card.notes).toEqual(["Light uses 80"]);
   });
 
   it("offers a token for a plain value the field could take one for", () => {
@@ -122,6 +150,28 @@ describe("the Style panel's hover card", () => {
     expect(designStyleCardContent(field("width", { mixed: true }), origins, catalog).rows).toEqual([
       { key: "Value", text: "Mixed: the selected layers differ" },
     ]);
+  });
+});
+
+describe("Clear", () => {
+  it("is offered for a value set on the layer that replaces nothing, with Reset's shortcut", () => {
+    const drawn: DesignRuntimeNodeDetails = { ...layer, oid: "drawn", classes: undefined, authoredStyleProperties: ["width"],
+      authoredStyles: { width: { origin: "inline", scope: "inline", value: "40px" } } };
+    const content = designStyleCardContent(field("width"), designFieldOrigins([drawn], context, null), catalog);
+    expect(content.actions[0]).toEqual({ kind: "clear", label: "Clear", keys: "⌥⌫", shortcut: "Alt+Backspace" });
+    expect(content.actions.some((action) => action.kind === "reset")).toBe(false);
+  });
+});
+
+describe("the card while a state is held", () => {
+  it("still says where the value comes from, with no action and no note about one", () => {
+    const content = designStyleCardContent(field("gap", { tokenName: "--space-4" }), origins, catalog, true);
+    expect(content.rows.length).toBeGreaterThan(0);
+    expect(content.actions).toEqual([]);
+    expect(content.notes).toEqual([]);
+    expect(designStyleCardContent(field("border-radius"), origins, catalog, true).actions).toEqual([]);
+    expect(designStyleCardContent(field("border-color"), origins, catalog, true).notes).toEqual(["Forced by .legacy"]);
+    expect(designStyleCardContent(field("border-color"), origins, catalog, true).actions).toEqual([]);
   });
 });
 

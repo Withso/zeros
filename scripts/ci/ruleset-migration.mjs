@@ -30,7 +30,19 @@ export const FINAL_CONTEXTS = [
   "secret-scan",
 ];
 const REPLACEMENTS = ["zeros/ci-gate", "secret-scan"];
-const STAGES = ["add-gate", "add-secret-scan", "finalize", "rollback"];
+const QUEUE_STAGES = ["add-merge-queue", "remove-merge-queue"];
+const STAGES = ["add-gate", "add-secret-scan", "finalize", "rollback", ...QUEUE_STAGES];
+// Each queued PR is tested on top of main plus the entries ahead of it by the
+// complete Preflight (about 22 minutes) before GitHub squash-merges it.
+export const MERGE_QUEUE_PARAMETERS = Object.freeze({
+  merge_method: "SQUASH",
+  grouping_strategy: "ALLGREEN",
+  max_entries_to_build: 5,
+  min_entries_to_merge: 1,
+  max_entries_to_merge: 5,
+  min_entries_to_merge_wait_minutes: 0,
+  check_response_timeout_minutes: 60,
+});
 const RULESET_ENDPOINT = `repos/${REPOSITORY}/rulesets/${RULESET_ID}`;
 const API_ROOT = `repos/${REPOSITORY}`;
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -114,6 +126,25 @@ export function createPlan(live, stage, rollbackPhase = "restore") {
   const payload = writableRuleset(live);
   const { index, parameters, checks } = requiredRule(payload);
   const before = structuredClone(checks);
+  if (QUEUE_STAGES.includes(stage)) {
+    // Only the merge_queue rule changes; required checks stay exactly as they are.
+    const queues = payload.rules.flatMap((rule, position) => rule.type === "merge_queue" ? [position] : []);
+    requireCondition(queues.length <= 1, "Expected at most one merge queue rule.");
+    const diff = [];
+    if (stage === "add-merge-queue" && queues.length === 0) {
+      const rule = { type: "merge_queue", parameters: { ...MERGE_QUEUE_PARAMETERS } };
+      payload.rules.push(rule);
+      diff.push({ op: "add", path: `/rules/${payload.rules.length - 1}`, value: rule });
+    } else if (stage === "add-merge-queue") {
+      requireCondition(isDeepStrictEqual({ ...payload.rules[queues[0]].parameters }, { ...MERGE_QUEUE_PARAMETERS }),
+        "A different merge queue is already configured; refusing to overwrite it.");
+    } else if (queues.length === 1) {
+      payload.rules.splice(queues[0], 1);
+      diff.push({ op: "remove", path: `/rules/${queues[0]}` });
+    }
+    return { stage, rollbackPhase, payload, beforePayload: writableRuleset(live), before,
+      after: structuredClone(checks), verifyContexts: [], diff };
+  }
   const has = (context) => checks.some((check) => check.context === context);
   const requireNames = (names, message) => {
     const missing = names.filter((name) => !has(name));
@@ -633,7 +664,7 @@ export function runMigration(
   const options = parseArgs(argv);
   if (options.help) {
     log(
-      "Usage: node scripts/ci/ruleset-migration.mjs plan|verify|apply --stage add-gate|add-secret-scan|finalize|rollback [--rollback-phase restore|retire] [--yes]\nApply is a dry run unless --yes is supplied. Rollback defaults to restore; retire requires the full legacy set already required.",
+      "Usage: node scripts/ci/ruleset-migration.mjs plan|verify|apply --stage add-gate|add-secret-scan|finalize|rollback|add-merge-queue|remove-merge-queue [--rollback-phase restore|retire] [--yes]\nApply is a dry run unless --yes is supplied. Rollback defaults to restore; retire requires the full legacy set already required.",
     );
     return 0;
   }
@@ -646,7 +677,11 @@ export function runMigration(
   const payloadFile =
     options.command === "verify" ? undefined : writePlan(plan, live, cwd, log);
   if (options.command === "plan") return 0;
-  const verification = verifyPlan(gh, plan, { now, log });
+  // The queue changes no required check, so open-PR check evidence cannot
+  // qualify it; its canary is a real merge group after apply.
+  const verification = QUEUE_STAGES.includes(plan.stage)
+    ? (log("Merge queue stage: required checks are unchanged; no check evidence is needed."), { passed: true, prs: openPullRequests(gh) })
+    : verifyPlan(gh, plan, { now, log });
   if (!verification.passed) return 1;
   if (options.command === "verify") return 0;
   if (!options.yes) {
@@ -672,7 +707,7 @@ export function runMigration(
     "Open PR heads changed during verification; plan and verify again.",
   );
   const problems = [];
-  inspectPullRequests(checkReader(gh), currentPrs, plan, problems, log);
+  if (!QUEUE_STAGES.includes(plan.stage)) inspectPullRequests(checkReader(gh), currentPrs, plan, problems, log);
   requireCondition(
     problems.length === 0,
     `PR checks changed during verification: ${problems.join(" ")}`,

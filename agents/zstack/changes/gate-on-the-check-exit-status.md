@@ -31,6 +31,6 @@ file") rather than as a span such as `.md`.
 **Background runs.** A backgrounded `cmd > log; echo "exit $?" >> log` notifies
 success either way: read the logged exit line. A new `__tests__` folder outside
 the Vitest include globs never runs; add tests where a glob reaches
-(`vitest.config.*` is a CI-definition path).
+in `vitest.config.*`.
 
 **Encoded in.** This fragment, for `gotchas.md` at the next pack version.

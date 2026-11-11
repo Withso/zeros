@@ -242,7 +242,11 @@ const TOKEN_PILLS_HOME_SOURCE = `<!doctype html>
 // components layer, Tailwind-like utilities from a tailwind-kind source and a
 // component's styles; one changes its corner radius on the layer, one has a
 // value forced by !important, one reads a token that is gone. A paragraph
-// inherits its text colour; a box is drawn by hand.
+// inherits its text colour; a box is drawn by hand. A real button has hover,
+// keyboard-focus and disabled rules, one hover written the way Tailwind v4
+// nests its variants; a tag's hover loses to its own colour. Field states:
+// a width written with calc(), a radius forced over the layer's own, a fill
+// that differs by theme, a layer hidden itself and one inside a hidden layer.
 const styleOriginsHarness = new URLSearchParams(window.location.search).has(
   "styleOrigins",
 );
@@ -261,6 +265,7 @@ const STYLE_ORIGINS_HOME_SOURCE = `<!doctype html>
         .h-7 { height: 28px; }
         .px-2\\.5 { padding-left: 10px; padding-right: 10px; }
         .gap-1\\.5 { gap: 6px; }
+        .hover\\:border-fg2 { &:hover { @media (hover: hover) { border-color: var(--fg2); } } }
       }
     </style>
     <style data-zeros-source="tokens.css">
@@ -275,6 +280,17 @@ const STYLE_ORIGINS_HOME_SOURCE = `<!doctype html>
         .btn--primary { background-color: var(--bg2); color: var(--fg1); }
         .legacy { border-color: ${STYLE_ORIGINS_LEGACY} !important; }
         .missing { border-radius: var(--radius-card); }
+        .submit { border: 1px solid var(--border2); border-radius: var(--radius-md); padding: 6px 12px; background-color: var(--bg1); color: var(--fg1); font: inherit; }
+        .submit:hover { background-color: var(--bg2); }
+        .submit:active { padding: 8px 16px; }
+        .submit:focus-visible { outline: 2px solid var(--fg2); outline-offset: 2px; font-weight: 600; }
+        .submit:disabled { opacity: 0.5; }
+        .tag { color: var(--fg2); }
+        .tag:hover { color: var(--fg1); }
+        .calc-box { width: calc(100% - 48px); height: 24px; }
+        .legacy-card { border-radius: 4px !important; }
+        .theme-card { width: 80px; height: 24px; background-color: ${STYLE_ORIGINS_HEX["--bg1"]}; }
+        [data-zd-theme="dark"] .theme-card { background-color: ${STYLE_ORIGINS_HEX["--fg1"]}; }
       }
     </style>
   </head>
@@ -286,6 +302,13 @@ const STYLE_ORIGINS_HOME_SOURCE = `<!doctype html>
       <div data-oid="home-badge" class="btn missing"><span data-oid="home-badge-label">Badge</span></div>
       <p data-oid="home-note" style="margin: 0">This text takes its colour from the page.</p>
       <div data-oid="home-drawn" style="width: 120px; height: 40px; background-color: var(--bg1); border-radius: 4px"></div>
+      <button data-oid="home-submit" class="submit hover:border-fg2"><span data-oid="home-submit-label">Submit</span></button>
+      <span data-oid="home-tag" class="tag" style="color: var(--fg1)">Tag</span>
+      <div data-oid="home-calc" class="calc-box"></div>
+      <div data-oid="home-legacy" class="legacy-card" style="width: 80px; height: 24px; border-radius: 12px"></div>
+      <div data-oid="home-themed" class="theme-card"></div>
+      <div data-oid="home-hidden" style="display: none; width: 40px; height: 10px"></div>
+      <div data-oid="home-veiled" style="visibility: hidden"><span data-oid="home-veiled-label">Veiled</span></div>
     </main>
   </body>
 </html>`;
@@ -1649,6 +1672,9 @@ async function main() {
         };
       }
       if (message.op === "design.transaction.apply") {
+        // Smokes count writes: a view-only state must add none.
+        const counted = window as Window & { __zerosHarnessDesignTransactions?: number };
+        counted.__zerosHarnessDesignTransactions = (counted.__zerosHarnessDesignTransactions ?? 0) + 1;
         await (window as Window & {
           __zerosHarnessDesignTransactionGate?: Promise<void>;
         }).__zerosHarnessDesignTransactionGate;

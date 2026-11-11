@@ -11,8 +11,9 @@ import React, {
   useRef,
   useState,
 } from "react";
-import { RotateCcw } from "lucide-react";
+import { MessageSquarePlus, RotateCcw } from "lucide-react";
 
+import { cn } from "../../shared/ui/cn";
 import { isKeyboardNavigationActive } from "../../shared/ui/focus-navigation";
 import { Button, Popover, PopoverAnchor, PopoverContent } from "../../shared/ui/primitives";
 import { KbdKeys } from "../../shared/ui/primitives/kbd";
@@ -23,6 +24,7 @@ import { designStylePropertyLabel } from "./design-style-origins";
 import { useDesignTokenDetach, useDesignTokens } from "./design-token-context";
 import {
   DesignFieldOverlaysContext,
+  type DesignFieldMessageTone,
   type DesignFieldOverlaysApi,
   type DesignPickerRequest,
 } from "./design-field-overlays";
@@ -31,7 +33,15 @@ import { DesignTokenPicker, designFieldEdgeAnchor } from "./design-token-picker"
 // Radix HoverCard's close delay: long enough to cross from the field to the
 // card beside the panel.
 const CARD_CLOSE_DELAY = 300;
+/** How long a field message stays when nothing else dismisses it. */
+const FIELD_MESSAGE_DURATION = 3_000;
 const FIELD = "[data-design-style-property]";
+/** A field whose value is computed or forced: read only, its card one press away. */
+const LOCKED = '[data-design-origin="forced"], [data-design-origin="computed"]';
+/** Keys that leave a locked field's value alone: moving on, the caret. */
+const LOCKED_PASSING = new Set(["Tab", "Escape", "ArrowLeft", "ArrowRight", "Home", "End", "Shift", "Meta", "Control", "Alt", "CapsLock"]);
+/** Events that would change a locked field, besides its keys and presses. */
+const LOCKED_EDITS = ["mousedown", "click", "dblclick", "beforeinput", "paste", "cut", "drop", "dragstart"] as const;
 
 /** A field's `data-design-token-companion`: `property:value` pairs separated
  * by `;`, written with any token chosen for it. */
@@ -88,8 +98,12 @@ export function DesignFieldOverlays({
   ownerKey,
   origins,
   disabled = false,
+  readOnly = false,
   onChooseToken,
   onReset,
+  onEditInCss,
+  onAskAgent,
+  apiRef,
   children,
 }: {
   rootRef: React.RefObject<HTMLElement | null>;
@@ -99,16 +113,29 @@ export function DesignFieldOverlays({
   ownerKey: string;
   origins: DesignFieldOrigins;
   disabled?: boolean;
+  /** A held layer state: the card still says where a value comes from, but
+   * offers nothing, and no picker or Reset opens. */
+  readOnly?: boolean;
   /** `companion` is what the field itself writes beside a token (Fill clears
    * a gradient), so a token chosen here lands the same way. */
   onChooseToken: (properties: readonly string[], name: string, companion?: Record<string, string>) => void;
   onReset: (properties: readonly string[]) => void;
+  /** A computed value's card: show the CSS tab. */
+  onEditInCss?: () => void;
+  /** A forced value's card: ask the agent to free it. */
+  onAskAgent?: (properties: readonly string[]) => void;
+  /** The API, for the panel around the provider (what a commit says). */
+  apiRef?: React.MutableRefObject<DesignFieldOverlaysApi | null>;
   children: React.ReactNode;
 }) {
   const catalog = useDesignTokens();
   const delay = useTooltipDelay();
   const [card, setCard] = useState<CardTarget | null>(null);
   const [picker, setPicker] = useState<DesignPickerRequest | null>(null);
+  const [message, setMessage] = useState<{ field: HTMLElement; text: string; tone: DesignFieldMessageTone } | null>(null);
+  const messageTimer = useRef<number | null>(null);
+  const messageRef = useRef(message);
+  messageRef.current = message;
   const cardRef = useRef<HTMLDivElement | null>(null);
   const cardId = useId();
   const openTimer = useRef<number | null>(null);
@@ -118,8 +145,8 @@ export function DesignFieldOverlays({
   const cardStateRef = useRef(card);
   cardStateRef.current = card;
   // The panel's listeners stay attached across renders; they read these.
-  const latest = useRef({ disabled, onReset, onChooseToken });
-  latest.current = { disabled, onReset, onChooseToken };
+  const latest = useRef({ disabled, readOnly, onReset, onChooseToken });
+  latest.current = { disabled, readOnly, onReset, onChooseToken };
 
   const clearTimers = () => {
     if (openTimer.current !== null) window.clearTimeout(openTimer.current);
@@ -155,6 +182,7 @@ export function DesignFieldOverlays({
 
   const api = useMemo<DesignFieldOverlaysApi>(() => {
     const openPicker = (request: DesignPickerRequest) => {
+      if (latest.current.readOnly) return;
       const current = pickerRef.current;
       if (current?.field === request.field) {
         closePicker(true);
@@ -167,6 +195,7 @@ export function DesignFieldOverlays({
       setPicker(request);
     };
     const openPickerForField = (field: HTMLElement, trigger?: HTMLElement | null) => {
+      if (latest.current.readOnly) return false;
       const properties = tokenProperties(field);
       const accepts = properties[0] ? designTokenFieldTypes(properties[0]) : null;
       if (!accepts || !accepts.some((type) => catalog.types.has(type))) return false;
@@ -188,13 +217,23 @@ export function DesignFieldOverlays({
       const field = element.closest<HTMLElement>(FIELD);
       clearTimers();
       setCard(null);
-      if (field && !latest.current.disabled) latest.current.onReset(fieldProperties(field));
+      if (field && !latest.current.disabled && !latest.current.readOnly) latest.current.onReset(fieldProperties(field));
+    };
+    const showFieldMessage = (field: HTMLElement, text: string, tone: DesignFieldMessageTone = "info") => {
+      if (messageTimer.current !== null) window.clearTimeout(messageTimer.current);
+      messageTimer.current = window.setTimeout(() => {
+        messageTimer.current = null;
+        setMessage(null);
+      }, FIELD_MESSAGE_DURATION);
+      setMessage({ field, text, tone });
     };
     return {
       openPicker,
       openPickerForField,
       resetField,
+      showFieldMessage,
       fieldShortcut(event) {
+        if (latest.current.readOnly) return;
         const field = event.target instanceof Element ? event.target.closest<HTMLElement>(FIELD) : null;
         if (!field || !event.altKey || event.metaKey || event.ctrlKey) return;
         if (event.key === "Backspace") {
@@ -217,8 +256,9 @@ export function DesignFieldOverlays({
     };
   }, [catalog, closePicker]);
 
-  const apiRef = useRef(api);
-  apiRef.current = api;
+  const latestApiRef = useRef(api);
+  latestApiRef.current = api;
+  if (apiRef) apiRef.current = api;
 
   // A new selection or frame starts with nothing open.
   useEffect(() => {
@@ -226,16 +266,44 @@ export function DesignFieldOverlays({
     closePicker(false);
   }, [closeCard, closePicker, ownerKey]);
 
-  // A hidden retained surface holds no open overlay.
+  // A hidden retained surface holds no open overlay, and a held state
+  // offers no picker.
   useEffect(() => {
-    if (!active) closePicker(false);
-  }, [active, closePicker]);
+    if (!active || readOnly) closePicker(false);
+  }, [active, closePicker, readOnly]);
+
+  const clearMessage = useCallback(() => {
+    if (messageTimer.current !== null) window.clearTimeout(messageTimer.current);
+    messageTimer.current = null;
+    if (messageRef.current) setMessage(null);
+  }, []);
+  useEffect(() => {
+    if (!active) clearMessage();
+  }, [active, clearMessage, ownerKey]);
+  useEffect(() => clearMessage, [clearMessage]);
 
   useEffect(() => {
     const root = rootRef.current;
     if (!active || !root) return;
     const fieldOf = (target: EventTarget | null) =>
       target instanceof Element ? target.closest<HTMLElement>(FIELD) : null;
+    const lockedOf = (target: EventTarget | null) => {
+      const field = fieldOf(target);
+      return field?.matches(LOCKED) ? field : null;
+    };
+    // A locked field's card opens at once on a press, Enter or Space: it is
+    // the field's only action.
+    const openNow = (field: HTMLElement, focus: HTMLElement | null) => {
+      clearTimers();
+      clearMessage();
+      const property = field.getAttribute("data-design-style-property");
+      if (property && !pickerRef.current) setCard({ field, property, focus });
+    };
+    const blockLocked = (event: Event) => {
+      if (!lockedOf(event.target)) return;
+      event.preventDefault();
+      event.stopPropagation();
+    };
     const scheduleClose = () => {
       if (openTimer.current !== null) window.clearTimeout(openTimer.current);
       openTimer.current = null;
@@ -278,9 +346,17 @@ export function DesignFieldOverlays({
       scheduleClose();
     };
     // A press starts an edit, a scrub or a drag; the card steps aside.
-    const pointerDown = () => {
+    const pointerDown = (event: PointerEvent) => {
+      const locked = lockedOf(event.target);
+      if (locked) {
+        event.preventDefault();
+        event.stopPropagation();
+        openNow(locked, null);
+        return;
+      }
       clearTimers();
       setCard(null);
+      clearMessage();
     };
     const focusIn = (event: FocusEvent) => {
       const field = fieldOf(event.target);
@@ -301,17 +377,30 @@ export function DesignFieldOverlays({
       }
     };
     const keyDown = (event: KeyboardEvent) => {
+      clearMessage();
       if (event.key === "Escape") {
         clearTimers();
         setCard(null);
         return;
       }
-      apiRef.current.fieldShortcut(event);
+      const locked = lockedOf(event.target);
+      if (locked) {
+        const command = (event.metaKey || event.ctrlKey) && !event.altKey && event.key !== "ArrowUp" && event.key !== "ArrowDown";
+        if (LOCKED_PASSING.has(event.key) || command) return;
+        event.preventDefault();
+        event.stopPropagation();
+        if (event.key === "Enter" || event.key === " ") openNow(locked, event.target instanceof HTMLElement ? event.target : null);
+        return;
+      }
+      latestApiRef.current.fieldShortcut(event);
     };
     // The panel scrolled under an open card; a pending one checks the field
-    // is still under the pointer when it opens.
-    const scroll = () => {
-      if (!cardStateRef.current) return;
+    // is still under the pointer when it opens. A long value scrolling inside
+    // its own input moves no field, so only what holds the field counts.
+    const scroll = (event: Event) => {
+      const open = cardStateRef.current;
+      if (!open) return;
+      if (event.target instanceof Element && !event.target.contains(open.field)) return;
       if (closeTimer.current !== null) window.clearTimeout(closeTimer.current);
       closeTimer.current = null;
       setCard(null);
@@ -323,7 +412,9 @@ export function DesignFieldOverlays({
     root.addEventListener("focusout", focusOut);
     root.addEventListener("keydown", keyDown, true);
     root.addEventListener("scroll", scroll, true);
+    for (const type of LOCKED_EDITS) root.addEventListener(type, blockLocked, true);
     return () => {
+      for (const type of LOCKED_EDITS) root.removeEventListener(type, blockLocked, true);
       root.removeEventListener("pointerover", pointerOver);
       root.removeEventListener("pointerleave", pointerLeave);
       root.removeEventListener("pointerdown", pointerDown, true);
@@ -334,11 +425,15 @@ export function DesignFieldOverlays({
       clearTimers();
       setCard(null);
     };
-  }, [active, delay, rootRef]);
+  }, [active, clearMessage, delay, rootRef]);
 
   return (
     <DesignFieldOverlaysContext.Provider value={api}>
       {children}
+      {/* The panel's one live region: present and empty at rest, so a message
+          written into it is announced. */}
+      <span className="sr-only" role="status" aria-live="polite">{message?.text ?? ""}</span>
+      {message ? <DesignFieldMessage field={message.field} panel={rootRef.current} text={message.text} tone={message.tone} /> : null}
       {card ? (
         <DesignStyleCardContent
           ref={cardRef}
@@ -348,6 +443,7 @@ export function DesignFieldOverlays({
           origins={origins}
           catalog={catalog}
           disabled={disabled}
+          readOnly={readOnly}
           onKeep={() => {
             if (closeTimer.current !== null) window.clearTimeout(closeTimer.current);
             closeTimer.current = null;
@@ -367,6 +463,14 @@ export function DesignFieldOverlays({
           onUseToken={() => {
             closeCard();
             api.openPickerForField(card.field);
+          }}
+          onEditInCss={() => {
+            closeCard();
+            onEditInCss?.();
+          }}
+          onAskAgent={() => {
+            closeCard();
+            onAskAgent?.(fieldProperties(card.field));
           }}
         />
       ) : null}
@@ -392,6 +496,42 @@ export function DesignFieldOverlays({
   );
 }
 
+/** The message under a field. Its text is announced by the panel's live
+ * region; this is what the eye reads. */
+function DesignFieldMessage({
+  field,
+  panel,
+  text,
+  tone,
+}: {
+  field: HTMLElement;
+  panel: HTMLElement | null;
+  text: string;
+  tone: DesignFieldMessageTone;
+}) {
+  const anchor = useMemo(() => ({ current: { getBoundingClientRect: () => field.getBoundingClientRect() } }), [field]);
+  return (
+    <Popover open>
+      <PopoverAnchor virtualRef={anchor} />
+      <PopoverContent
+        data-design-field-message={tone}
+        aria-hidden="true"
+        side="bottom"
+        align="start"
+        sideOffset={4}
+        padding="none"
+        collisionBoundary={panel ?? undefined}
+        className="w-auto max-w-64"
+        onOpenAutoFocus={(event) => event.preventDefault()}
+        onCloseAutoFocus={(event) => event.preventDefault()}
+        onInteractOutside={(event) => event.preventDefault()}
+      >
+        <p className={cn("px-2.5 py-1.5 text-3xxs leading-4", tone === "error" ? "text-red-primary" : "text-fg2")}>{text}</p>
+      </PopoverContent>
+    </Popover>
+  );
+}
+
 const DesignStyleCardContent = React.forwardRef<
   HTMLDivElement,
   {
@@ -401,19 +541,22 @@ const DesignStyleCardContent = React.forwardRef<
     origins: DesignFieldOrigins;
     catalog: ReturnType<typeof useDesignTokens>;
     disabled: boolean;
+    readOnly: boolean;
     onKeep: () => void;
     onLeave: () => void;
     onClose: () => void;
     onReset: () => void;
     onUseToken: () => void;
+    onEditInCss: () => void;
+    onAskAgent: () => void;
   }
 >(function DesignStyleCardContent(
-  { id, target, panel, origins, catalog, disabled, onKeep, onLeave, onClose, onReset, onUseToken },
+  { id, target, panel, origins, catalog, disabled, readOnly, onKeep, onLeave, onClose, onReset, onUseToken, onEditInCss, onAskAgent },
   ref,
 ) {
   const { field, property } = target;
   const edge = useMemo(() => designFieldEdgeAnchor(field, panel), [field, panel]);
-  const content = designStyleCardContent(readDesignCardField(field, property), origins, catalog);
+  const content = designStyleCardContent(readDesignCardField(field, property), origins, catalog, readOnly);
   const detach = useDesignTokenDetach();
   const actions = detach ? content.actions : content.actions.filter((action) => action.kind !== "detach");
   return (
@@ -469,8 +612,10 @@ const DesignStyleCardContent = React.forwardRef<
                       data-design-card-action={action.kind}
                       aria-keyshortcuts={action.shortcut}
                       onClick={() => {
-                        if (action.kind === "reset") onReset();
+                        if (action.kind === "reset" || action.kind === "clear") onReset();
                         else if (action.kind === "token" || action.kind === "pick") onUseToken();
+                        else if (action.kind === "css") onEditInCss();
+                        else if (action.kind === "agent") onAskAgent();
                         else {
                           onClose();
                           // The field's own Detach does the same: each selected
@@ -480,6 +625,7 @@ const DesignStyleCardContent = React.forwardRef<
                       }}
                     >
                       {action.kind === "reset" ? <RotateCcw aria-hidden="true" /> : null}
+                      {action.kind === "agent" ? <MessageSquarePlus aria-hidden="true" /> : null}
                       {action.label}
                       {action.keys ? <KbdKeys keys={action.keys} aria-hidden="true" /> : null}
                     </Button>
@@ -499,7 +645,7 @@ export interface DesignStyleCardText {
   rows: { key: string; text: string }[];
   notes: string[];
   foot?: string;
-  actions: { kind: "reset" | "token" | "pick" | "detach"; label: string; keys?: string; shortcut?: string }[];
+  actions: { kind: "reset" | "clear" | "token" | "pick" | "detach" | "css" | "agent"; label: string; keys?: string; shortcut?: string }[];
 }
 
 /** What a field shows that the card speaks to, read from its markup. */
@@ -561,13 +707,26 @@ export function designStyleCardContent(
   { property, tokenProperty, label, mixed, tokenName, missing }: DesignCardField,
   origins: DesignFieldOrigins,
   catalog: ReturnType<typeof useDesignTokens>,
+  /** A held layer state: where the value comes from, and nothing the card
+   * could do about it. */
+  readOnly = false,
 ): DesignStyleCardText {
-  if (mixed) {
-    return { label, rows: [{ key: "Value", text: "Mixed: the selected layers differ" }], notes: [], actions: [] };
-  }
+  const mixedRows = [{ key: "Value", text: "Mixed: the selected layers differ" }];
   const origin = origins.origin(property);
-  const rows = [...(origin?.card.rows ?? [])];
-  const notes: string[] = [];
+  const themeNotes = mixed ? [] : (origin?.card.themes ?? []).map((theme) => `${theme.label} uses ${theme.value}`);
+  // A computed or forced value is not the panel's to edit: the card says
+  // why and offers the one way to change it, Mixed or not.
+  const lock = origins.lock(property);
+  if (!lock && mixed) return { label, rows: mixedRows, notes: [], actions: [] };
+  const rows = mixed ? mixedRows : [...(origin?.card.rows ?? [])];
+  if (lock) {
+    const notes = [lock.why, ...themeNotes];
+    const actions: DesignStyleCardText["actions"] = readOnly
+      ? []
+      : [lock.kind === "computed" ? { kind: "css", label: "Edit in CSS" } : { kind: "agent", label: "Ask agent to change" }];
+    return { label, rows, notes, foot: origin?.card.foot, actions };
+  }
+  const notes: string[] = [...themeNotes];
   const actions: DesignStyleCardText["actions"] = [];
   const accepts = designTokenFieldTypes(tokenProperty ?? property);
   const offered = Boolean(accepts?.some((type) => catalog.types.has(type)));
@@ -582,12 +741,21 @@ export function designStyleCardContent(
   }
   if (origin?.card.forcedBy) notes.push(`Forced by ${origin.card.forcedBy}`);
   const reset = origin?.card.reset;
+  const clear = origin?.card.clear;
   if (reset) {
     if (reset.text !== "Reset") notes.push(reset.text);
     actions.unshift({ kind: "reset", label: "Reset", keys: "⌥⌫", shortcut: "Alt+Backspace" });
+  } else if (clear) {
+    if (clear.text !== "Clear") notes.push(clear.text);
+    actions.unshift({ kind: "clear", label: "Clear", keys: "⌥⌫", shortcut: "Alt+Backspace" });
   }
   if (!tokenName && offered && origin?.kind !== "forced") {
     actions.push({ kind: "token", label: "Use a token", keys: "⌥↓", shortcut: "Alt+ArrowDown" });
+  }
+  if (readOnly) {
+    // Only the forcing rule stays: it says where the value comes from.
+    const forced = origin?.card.forcedBy ? [`Forced by ${origin.card.forcedBy}`] : [];
+    return { label, rows, notes: forced, foot: origin?.card.foot, actions: [] };
   }
   return { label, rows, notes, foot: origin?.card.foot, actions };
 }

@@ -325,6 +325,7 @@ function StrokeRows({
           {kind === "border" ? (
             <InspectorSelect
               label={`${name} sides`}
+              filterCompanion
               value={sidesSelect.value}
               disabled={disabled}
               options={sidesSelect.options}

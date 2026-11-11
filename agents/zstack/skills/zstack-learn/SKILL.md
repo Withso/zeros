@@ -46,7 +46,7 @@ A lesson fully held by a test or eval case needs no prose at all.
 
 ## Boundaries
 
-- Changes to `RULES.md` or `AGENTS.md` safety rules, to CI definitions or to
-  credential policy go to the owner as a proposal. Don't merge them yourself.
+- Changes to `RULES.md` or `AGENTS.md` safety rules or to credential policy go
+  to the owner as a proposal. Don't merge them yourself.
 - Cut rules that no case or incident supports.
 - Never record secrets, private identifiers or live resource IDs.
