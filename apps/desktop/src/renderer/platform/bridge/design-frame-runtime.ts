@@ -17,6 +17,7 @@ import {
   MAX_DESIGN_RUNTIME_PREVIEW_STYLESHEET_CHARS,
   isDesignRuntimeAuthoredStyles,
   isDesignRuntimeFrameMessage,
+  isDesignRuntimeNodeState,
   isRuntimeNodeLayout,
   type DesignRuntimeFrameMessage,
   type DesignRuntimeCapabilities,
@@ -34,8 +35,10 @@ import {
   type DesignRuntimeStructurePreviewResult,
   type DesignRuntimeMotionPreview,
   type DesignRuntimePlaybackStopped,
+  type DesignRuntimeStateReleased,
   type DesignRuntimeNodeDetails,
   type DesignRuntimeNodeGeometry,
+  type DesignRuntimeNodeState,
   type DesignRuntimeRect,
   type DesignRuntimeScreenshot,
   type DesignRuntimeSnapshot,
@@ -77,6 +80,9 @@ export interface DesignFrameRuntimeCallbacks {
   onPainted?: () => void;
   onGenerationChanged?: () => void;
   onPlaybackStopped?: (event: DesignRuntimePlaybackStopped) => void;
+  /** The runtime let go of a held layer state by itself (before an edit, or
+   * when the layer left the document). */
+  onStateReleased?: (event: DesignRuntimeStateReleased) => void;
 }
 
 export interface DesignFrameRuntimeConnection {
@@ -143,6 +149,10 @@ export interface DesignFrameRuntimeConnection {
   clearPreviewInserts(nodeIds?: readonly string[], signal?: AbortSignal): Promise<{ snapshot: DesignRuntimeSnapshot }>;
   previewStructure?(input: DesignRuntimeStructurePreview, signal?: AbortSignal): Promise<DesignRuntimeStructurePreviewResult>;
   clearPreviewStructure?(previewId?: string, signal?: AbortSignal): Promise<void>;
+  /** Show the layer in one of its own states, view only, and read it there.
+   * Opt-in: check `supports("holdNodeState")`. Any edit releases it first. */
+  holdNodeState?(nodeId: string, state: DesignRuntimeNodeState, holdId: string, signal?: AbortSignal): Promise<DesignRuntimeNodeDetails>;
+  releaseNodeState?(signal?: AbortSignal): Promise<{ released: boolean }>;
   previewStyles(
     nodeId: string,
     styles: Record<string, string | null>,
@@ -274,7 +284,11 @@ function isNodeDetails(value: unknown): value is DesignRuntimeNodeDetails {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const details = value as Partial<DesignRuntimeNodeDetails>;
   dropMalformedAuthoredStyles(details);
+  if (details.states !== undefined && !(Array.isArray(details.states) && details.states.length <= 5 && details.states.every(isDesignRuntimeNodeState)))
+    delete details.states;
   return (
+    // A held reply whose state cannot be read must never pass for Default.
+    (details.heldState === undefined || isDesignRuntimeNodeState(details.heldState)) &&
     typeof details.sourceVersion === "string" &&
     typeof details.oid === "string" &&
     typeof details.tag === "string" &&
@@ -472,6 +486,10 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
       } else if (message.event === "playbackStopped") {
         if (this.supports("setPlayback") && message.payload.sourceVersion === this.expectedSourceVersion) {
           this.callbacks.onPlaybackStopped?.(message.payload);
+        }
+      } else if (message.event === "stateReleased") {
+        if (this.supports("holdNodeState") && message.payload.sourceVersion === this.expectedSourceVersion) {
+          this.callbacks.onStateReleased?.(message.payload);
         }
       } else if (
         isRuntimeSnapshot(message.payload) &&
@@ -795,6 +813,21 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
   async clearPreviewStructure(previewId?: string, signal?: AbortSignal): Promise<void> {
     if (!this.supports("clearPreviewStructure")) throw runtimeError("clearPreviewStructure is not supported", "METHOD_NOT_SUPPORTED");
     await this.request("clearPreviewStructure", previewId === undefined ? {} : { previewId }, signal);
+  }
+
+  async holdNodeState(nodeId: string, state: DesignRuntimeNodeState, holdId: string, signal?: AbortSignal): Promise<DesignRuntimeNodeDetails> {
+    if (!this.supports("holdNodeState")) throw runtimeError("holdNodeState is not supported", "METHOD_NOT_SUPPORTED");
+    const result = await this.request("holdNodeState", { nodeId, state, holdId }, signal);
+    if (!isNodeDetails(result) || result.sourceVersion !== this.expectedSourceVersion || result.oid !== nodeId || result.heldState !== state)
+      throw runtimeError("holdNodeState returned malformed data");
+    return result;
+  }
+
+  async releaseNodeState(signal?: AbortSignal): Promise<{ released: boolean }> {
+    if (!this.supports("releaseNodeState")) throw runtimeError("releaseNodeState is not supported", "METHOD_NOT_SUPPORTED");
+    const result = await this.request("releaseNodeState", {}, signal) as { released?: unknown } | null;
+    if (!result || typeof result.released !== "boolean") throw runtimeError("releaseNodeState returned malformed data");
+    return { released: result.released };
   }
 
   async previewInsert(

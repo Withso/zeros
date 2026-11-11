@@ -1858,6 +1858,31 @@
   color: var(--fg3);
 }
 
+/* A held layer state is view only (design-state-picker.tsx drops every
+ * press and keystroke): fields keep their rest fill and the default cursor,
+ * Detach stays hidden, scrub handles stay quiet and Styled-by rows filter
+ * nothing. The hover card still opens. */
+[data-design-state-held] .zd-field,
+[data-design-state-held] .zd-field:hover {
+  --zd-field-fill: var(--zd-field-rest, var(--bg2));
+}
+
+[data-design-state-held] [data-radix-scroll-area-viewport] :is(input, button, .zd-field, .zd-field *) {
+  cursor: default;
+}
+
+[data-design-state-held] .zd-field-token-detach {
+  display: none;
+}
+
+[data-design-state-held] .zd-field-scrub:hover:not(:disabled) {
+  color: inherit;
+}
+
+[data-design-state-held] [data-design-styled-by-source] {
+  pointer-events: none;
+}
+
 /* A Styled-by row narrows the panel to what its source sets: fields outside
  * it, and groups and sections left with none, step aside. Font and Weight
  * count as fields here without being card fields. A field that is itself a

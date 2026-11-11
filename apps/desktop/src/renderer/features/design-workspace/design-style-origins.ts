@@ -6,6 +6,7 @@
 import type {
   DesignRuntimeAuthoredStyle,
   DesignRuntimeNodeDetails,
+  DesignRuntimeNodeState,
   DesignRuntimeReplacedStyle,
 } from "@zeros/protocol/design-runtime";
 
@@ -43,6 +44,9 @@ export interface DesignStyleCard {
   foot?: string;
   /** This layer's own declaration, removed whole so the class shows again. */
   reset?: { properties: string[]; text: string };
+  /** A value set in this layer's style that replaces nothing, removed whole:
+   * what emptying the field once did. */
+  clear?: { properties: string[]; text: string };
   /** The rule whose !important forces the value. */
   forcedBy?: string;
 }
@@ -55,7 +59,8 @@ export interface DesignStyleOrigin {
 }
 
 export interface DesignStyledByGroup {
-  kind: "class" | "utility" | "component" | "changed";
+  /** `state`: what a held layer state changes, never a Styled-by row. */
+  kind: "class" | "utility" | "component" | "changed" | "state";
   /** Stable within one model: the row's identity for a filter. */
   key: string;
   label: string;
@@ -259,27 +264,66 @@ function themeRows(
   }));
 }
 
+/** "Reset", or what it removes when that is a whole shorthand. */
+function removalText(property: string, declared: string, action: "Reset" | "Clear"): string {
+  return declared === property || !designStyleShorthands(property).includes(declared)
+    ? action
+    : `${action}s ${declared} on all sides`;
+}
+
+const STATE_LABELS: Record<DesignRuntimeNodeState, string> = {
+  hover: "Hover",
+  focus: "Focus",
+  "focus-visible": "Focus visible",
+  active: "Active",
+  disabled: "Disabled",
+};
+
+/** A layer state as the State menu names it. */
+export function designStateLabel(state: DesignRuntimeNodeState): string {
+  return STATE_LABELS[state];
+}
+
+function stateClause(state: DesignRuntimeNodeState): string {
+  return state === "disabled" ? "when disabled" : `on ${STATE_LABELS[state].toLowerCase()}`;
+}
+
+/** What a held state changes on the layer: the properties its own rules
+ * win, for the panel's filter, and how many fields that is, a shorthand
+ * counted once with the longhands it sets. */
+export function designHeldStateChanges(details: DesignRuntimeNodeDetails): { properties: string[]; count: number } {
+  const properties = Object.entries(details.authoredStyles ?? {})
+    .filter(([, style]) => style.state !== undefined)
+    .map(([property]) => property);
+  const count = properties.filter(
+    (property) => !properties.some((other) => other !== property && authoredDeclarationAffects(other, property)),
+  ).length;
+  return { properties, count };
+}
+
 function originOfStyle(
   property: string,
   style: DesignRuntimeAuthoredStyle,
   oid: string,
   context: DesignStyleOriginsContext,
+  /** The authored key the style was found under: the property or one of
+   * its shorthands. */
+  key = property,
 ): DesignStyleOrigin {
   const own = ownStyle(style, oid);
   if (own) {
     const replaced = style.replaced;
     if (!replaced) {
-      return {
-        kind: "set-here",
-        from: "this layer",
-        card: {
-          rows: [
-            { key: "Value", text: `${tokenPhrase(style.value, style.tokens, (name) => name)}, set on this layer` },
-            ...tokenRows(style, null, context),
-            ...themeRows(style, context),
-          ],
-        },
+      const card: DesignStyleCard = {
+        rows: [
+          { key: "Value", text: `${tokenPhrase(style.value, style.tokens, (name) => name)}, set on this layer` },
+          ...tokenRows(style, null, context),
+          ...themeRows(style, context),
+        ],
       };
+      // Only the style attribute: the editor removes its declaration exactly.
+      if (style.scope === "inline") card.clear = { properties: [key], text: removalText(property, key, "Clear") };
+      return { kind: "set-here", from: "this layer", card };
     }
     const declared = style.declared ?? property;
     const card: DesignStyleCard = {
@@ -292,13 +336,7 @@ function originOfStyle(
         },
         ...themeRows(style, context),
       ],
-      reset: {
-        properties: [declared],
-        text:
-          declared === property || !designStyleShorthands(property).includes(declared)
-            ? "Reset"
-            : `Resets ${declared} on all sides`,
-      },
+      reset: { properties: [declared], text: removalText(property, declared, "Reset") },
     };
     if (replaced.others) {
       card.foot = `Used by ${plural(replaced.others, "other layer", "other layers")} in this frame`;
@@ -306,7 +344,7 @@ function originOfStyle(
     return { kind: "changed", from: "this layer", card };
   }
   const source = sourceOf(style, context);
-  const from = fromPhrase(source);
+  const from = style.state ? `${fromPhrase(source)}, ${stateClause(style.state)}` : fromPhrase(source);
   const rows: DesignStyleCardRow[] = [
     { key: "Value", text: tokenPhrase(style.value, style.tokens, (name, resolved) => `${name}, which is ${resolved}`) },
     { key: "From", text: from },
@@ -404,12 +442,9 @@ export function designStyleOrigins(
   const styles = details.authoredStyles ?? {};
   const answers = new Map<string, DesignStyleOrigin | null>();
   const resolve = (property: string): DesignStyleOrigin | null => {
-    const style =
-      styles[property] ??
-      designStyleShorthands(property)
-        .map((shorthand) => styles[shorthand])
-        .find(Boolean);
-    if (style) return originOfStyle(property, style, details.oid, context);
+    const key = styles[property] ? property : designStyleShorthands(property).find((shorthand) => styles[shorthand]);
+    const style = key ? styles[key] : undefined;
+    if (style) return originOfStyle(property, style, details.oid, context, key);
     if (details.baseStyleProperties?.includes(property)) {
       return { kind: "reset", from: "a reset", card: { rows: [{ key: "From", text: "a reset" }] } };
     }

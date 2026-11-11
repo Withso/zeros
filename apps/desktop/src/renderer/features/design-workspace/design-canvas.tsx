@@ -254,6 +254,7 @@ import {
   selectDesignTargetsInRect,
   toggleDesignNodeSelection,
 } from "./state/design-selection";
+import { designHeldStateHold, releaseDesignNodeStateOn } from "./state/design-held-state";
 import { createDesignSerialQueue } from "./state/design-serial-queue";
 import {
   appendDesignNodeHtmlCached,
@@ -4020,6 +4021,9 @@ export const DesignCanvas = React.memo(function DesignCanvas({
           box,
         );
         if (!moved && Math.hypot(local.x, local.y) < 2 / zoom) return;
+        // A held state is view only: a drag lets go of it before its first
+        // preview; a click leaves it held.
+        if (!moved) releaseDesignNodeStateOn(workspaceId, frame.file, details.oid);
         moved = true;
         const next = designOriginFraction(
           box,
@@ -4294,6 +4298,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         const dy = pointer.y - start.y;
         if (!dragging) {
           if (Math.hypot(dx, dy) < DESIGN_SPACING_DRAG_THRESHOLD) return;
+          releaseDesignNodeStateOn(workspaceId, frame.file, details.oid);
           dragging = true;
           document.body.style.cursor = designLocalAxisCursor(
             control.axis,
@@ -4754,6 +4759,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         const rawX = point.x - grab.x;
         const rawY = point.y - grab.y;
         if (!moved && Math.hypot(rawX, rawY) < 3 / zoom) return;
+        if (!moved) for (const node of nodes) releaseDesignNodeStateOn(workspaceId, frame.file, node.oid);
         moved = true;
         releasePointer = { x: grab.x + rawX, y: grab.y + rawY };
         const moving = {
@@ -5417,6 +5423,8 @@ export const DesignCanvas = React.memo(function DesignCanvas({
           const lifetime = ++nudgeLifetimeRef.current;
           const gestureViewportBounds = viewportRef.current?.getBoundingClientRect();
           const cancel = startDesignLayoutDrag({
+            held: designHeldStateHold(workspaceId)?.nodeId === details.oid,
+            activated: () => releaseDesignNodeStateOn(workspaceId, frame.file, details.oid),
             saving: (save) => savedEditingSession?.retain(save),
             copied: (copyFrame, nodeId) => {
               if (folder) void selectDesignNode({ workspaceId, folder, frame: copyFrame, nodeId }).catch(() => {});
@@ -5787,6 +5795,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
         const screenX = (pointerEvent.clientX - startX) / zoom;
         const screenY = (pointerEvent.clientY - startY) / zoom;
         if (!moved && Math.hypot(screenX, screenY) < 3 / zoom) return;
+        if (!moved) releaseDesignNodeStateOn(workspaceId, frame.file, details.oid);
         moved = true;
         // A resize runs along the element's own edges, so its pointer travel
         // rotates into the element's axes first. A move stays screen-aligned.
