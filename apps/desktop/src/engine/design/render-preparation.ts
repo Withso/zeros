@@ -4,7 +4,8 @@ import { designSurfaceCost } from "./surface-document";
 import path from "node:path";
 import postcss from "postcss";
 import { designCssUrlReferences, designSrcsetReferences, rebaseDesignCssReferences } from "@zeros/design-web";
-import { expandDesignComponentsHtml } from "./components";
+import { expandDesignComponentsForRender, type DesignComponentOptionsFallback } from "./components";
+import { designComponentRegistry } from "./component-registry";
 import { parseDesignSource, sharedDesignParse, withSharedDesignParses } from "./shared-parse";
 import { designDirectoryNameFor } from "./directory-registry";
 import {
@@ -619,7 +620,7 @@ export function prepareFrameRenderSource(
   canvas?: CanvasDocument,
   options: FrameRenderOptions = {},
 ): Promise<{ sanitized: string; sourceVersion: string; surfaceCost: DesignSurfaceCost | null; sheets?: DesignFrameRenderSheet[];
-  retained?: RetainedFrameRender }> {
+  retained?: RetainedFrameRender; componentOptions?: DesignComponentOptionsFallback }> {
   return withSharedDesignParses(() =>
     prepareSharedFrameRenderSource(workspacePath, source, viewport, sources, readAsset, entryFile, canvas, options));
 }
@@ -634,13 +635,16 @@ async function prepareSharedFrameRenderSource(
   canvas: CanvasDocument | undefined,
   options: FrameRenderOptions,
 ): Promise<{ sanitized: string; sourceVersion: string; surfaceCost: DesignSurfaceCost | null; sheets?: DesignFrameRenderSheet[];
-  retained?: RetainedFrameRender }> {
+  retained?: RetainedFrameRender; componentOptions?: DesignComponentOptionsFallback }> {
   assertRenderByteLimit(
     source,
     MAX_DESIGN_TEXT_BYTES,
     "Authored frame HTML exceeded the 2 MiB source limit.",
   );
-  const expanded = await expandDesignComponentsHtml(workspacePath, healDesignOids(source).html, sources, entryFile);
+  const expansion = await expandDesignComponentsForRender(workspacePath, healDesignOids(source).html, sources, entryFile,
+    canvas ? { registry: designComponentRegistry(canvas).files } : {}, !options.identityOnly);
+  const expanded = expansion.html;
+  const componentOptions = expansion.componentOptions ? { componentOptions: expansion.componentOptions } : {};
   assertRenderByteLimit(
     expanded,
     MAX_SANITIZED_RENDER_BYTES,
@@ -695,7 +699,7 @@ async function prepareSharedFrameRenderSource(
     // unless a removed value could spell some: the sanitized tree, already
     // parsed, then counts for the skeleton's.
     const tree = stripped.removed.every((text) => !/data:image|[\\&]/i.test(text)) ? sharedDesignParse(safe) : undefined;
-    return { sanitized: skeleton, sourceVersion, surfaceCost: designSurfaceCost(skeleton, sheets, tree),
+    return { sanitized: skeleton, sourceVersion, surfaceCost: designSurfaceCost(skeleton, sheets, tree), ...componentOptions,
       ...(options.retain ? { retained: { skeleton, sourceVersion, expanded, linked: linked.sheets,
         imported: imported.sheets.map((sheet) => sheet.token), ...(tailwind.candidates ? { tailwindCandidates: tailwind.candidates } : {}) } } : {}) };
   }
@@ -706,7 +710,7 @@ async function prepareSharedFrameRenderSource(
     MAX_SANITIZED_RENDER_BYTES,
     "Sanitized frame HTML exceeded the 15 MiB per-frame render limit.",
   );
-  return { sanitized, sourceVersion, surfaceCost: designSurfaceCost(sanitized) };
+  return { sanitized, sourceVersion, surfaceCost: designSurfaceCost(sanitized), ...componentOptions };
 }
 
 export async function composeFrameSrcDoc(

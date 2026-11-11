@@ -63,7 +63,8 @@ import postcss from "postcss";
 import { withDesignDirectoryNameLease } from "./directory-registry";
 import { withDesignDocumentWrite as withDocumentWrite } from "./document-write-lock";
 
-import { expandDesignComponents } from "./components";
+import { designSourceDeclaresOptions, expandDesignComponents } from "./components";
+import { designComponentRegistry } from "./component-registry";
 import {
   DESIGN_CANVAS_FILE as CANVAS_MARKER_FILE,
   DEFAULT_DESIGN_DIRECTORY_NAME,
@@ -539,6 +540,8 @@ async function mutateDesignFrameSource(
           knownTokens,
           knownClasses,
           source,
+          undefined,
+          null,
         ),
         lintFrame(
           workspacePath,
@@ -547,6 +550,8 @@ async function mutateDesignFrameSource(
           knownTokens,
           knownClasses,
           healed,
+          undefined,
+          null,
         ),
       ]);
       const baselineErrors = new Map<string, number>();
@@ -1754,6 +1759,37 @@ function lineAndColumnAt(
   };
 }
 
+/** Whether this frame's registration as a component holds, and whether a
+ * frame declaring options is registered at all. */
+async function designComponentRegistrationViolations(workspacePath: string, file: string, source: string, known?: CanvasDocument): Promise<DesignLintViolation[]> {
+  let canvas: CanvasDocument;
+  try {
+    canvas = known ?? (await readSharedCanvasContext(workspacePath)).canvas;
+  } catch {
+    return [];
+  }
+  const registry = designComponentRegistry(canvas);
+  const violations: DesignLintViolation[] = [];
+  for (const problem of registry.problems) {
+    if (problem.file !== file) continue;
+    violations.push(violationAt(file, "component-invalid", problem.message, null, {
+      severity: "error", fix: 'Give each registered frame its own "component" name in meta/canvas.json.' }));
+  }
+  const name = [...registry.files].find(([, registered]) => registered === file)?.[0];
+  if (name && (await readSafeRegularFile(designDirectory(workspacePath), path.join(designDirectory(workspacePath), "components", `${name}.html`), MAX_DESIGN_TEXT_BYTES)))
+    violations.push(violationAt(file, "component-invalid", `zd-${name} is both this frame's registration and components/${name}.html; rename one.`, null, {
+      severity: "error", fix: `Change this frame's "component" in meta/canvas.json, or rename components/${name}.html.` }));
+  if (!name && !registry.problems.some((problem) => problem.file === file) && designSourceDeclaresOptions(source)) {
+    const suggested = path.posix.basename(file, ".html").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").replace(/^(?=\d)/, "c-") || "component";
+    violations.push(violationAt(file, "component-unregistered",
+      "This frame declares options but is not registered as a component, so no other frame can place it.", null, {
+        severity: "warning",
+        fix: `Add "component": "${suggested}" to this frame's record in meta/canvas.json, then place it as <zd-${suggested}>.`,
+      }));
+  }
+  return violations;
+}
+
 async function lintFrame(
   workspacePath: string,
   file: string,
@@ -1762,6 +1798,9 @@ async function lintFrame(
   knownClasses: DesignKnownClasses,
   sourceOverride?: string,
   tokenColors?: DesignTokenColorIndex,
+  /** The canvas this lint reads, for component registration; null skips
+   * those checks (a mutation's before/after comparison of source errors). */
+  canvas?: CanvasDocument | null,
 ): Promise<{ violations: DesignLintViolation[]; healedOids: number }> {
   const target = path.join(
     designDirectory(workspacePath),
@@ -1951,6 +1990,7 @@ async function lintFrame(
     source,
     undefined,
     file,
+    canvas ? { registry: designComponentRegistry(canvas).files } : {},
   );
   const availableClasses = componentExpansion.errors.length === 0
     ? await knownClasses(file, componentExpansion.html, componentExpansion.html === source ? document : undefined)
@@ -2021,20 +2061,45 @@ async function lintFrame(
     const record = componentRecords.find(
       ({ element }) => element.tagName === `zd-${error.component}`,
     );
+    if (!error.code) {
+      violations.push(
+        violationAt(
+          file,
+          "component-invalid",
+          error.message,
+          record?.element.sourceCodeLocation?.startTag,
+          {
+            severity: "error",
+            oid: record?.oid ?? undefined,
+            fix: `Repair components/${error.component}.html and lint again.`,
+          },
+        ),
+      );
+      continue;
+    }
+    // A problem in this frame's own options or template sits where it is
+    // written; one in a component it uses sits at the instance and names
+    // the file and line to repair.
+    const here = (error.file === undefined || error.file === file) && error.offset !== undefined;
     violations.push(
       violationAt(
         file,
-        "component-invalid",
-        error.message,
-        record?.element.sourceCodeLocation?.startTag,
+        error.code,
+        here || error.file === undefined || error.file === file
+          ? error.message
+          : `${error.file}${error.line ? `, line ${error.line}` : ""}: ${error.message}`,
+        here ? lineAndColumnAt(source, error.offset!) : record?.element.sourceCodeLocation?.startTag,
         {
-          severity: "error",
-          oid: record?.oid ?? undefined,
-          fix: `Repair components/${error.component}.html and lint again.`,
+          severity: error.severity ?? "error",
+          oid: here ? undefined : record?.oid ?? undefined,
+          fix: error.code === "component-value-invalid"
+            ? "Use a value the component's option allows, or remove the attribute to inherit it."
+            : `Repair ${error.file ?? `components/${error.component}.html`} and lint again.`,
         },
       ),
     );
   }
+  if (canvas !== null) violations.push(...await designComponentRegistrationViolations(workspacePath, file, source, canvas));
   return { violations, healedOids };
 }
 
@@ -2062,6 +2127,7 @@ async function lintDesignDocumentUnlocked(
         knownClasses,
         undefined,
         knownTokens.colors(file),
+        context?.canvas,
       );
     } catch (error) {
       if (!(error instanceof DesignRenderBudgetError)) throw error;

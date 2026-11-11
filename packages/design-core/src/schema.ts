@@ -804,6 +804,29 @@ export const designOperationSchema = z.discriminatedUnion("type", [
       parameterId: designPortableIdSchema,
     })
     .strict(),
+  // A component's options live in its own file. These edit one attribute of
+  // one <zd-option> (its default) or <zd-variant>, or add one <zd-variant>.
+  operationBase
+    .extend({
+      type: z.literal("component.set-option"),
+      file: designRelativeFileSchema,
+      option: z.string().min(1).max(32),
+      /** null edits the default; a name edits that variant, where a null
+       * value removes the variant's own value. */
+      variant: z.string().min(1).max(32).nullable().default(null),
+      value: designParameterValueSchema,
+    })
+    .strict(),
+  operationBase
+    .extend({
+      type: z.literal("component.save-variant"),
+      file: designRelativeFileSchema,
+      name: z.string().min(1).max(32),
+      values: z
+        .record(z.string().min(1).max(32), z.union([z.string().max(2_048), z.number().finite(), z.boolean()]))
+        .refine((values) => Object.keys(values).length <= 64, { message: "A variant may set at most 64 options" }),
+    })
+    .strict(),
 ]);
 export type DesignOperation = z.infer<typeof designOperationSchema>;
 

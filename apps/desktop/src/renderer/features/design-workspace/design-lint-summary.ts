@@ -9,8 +9,12 @@ export interface DesignLintViolationGroup {
 
 const RULE_LABELS: Record<DesignLintViolationWire["ruleId"], string> = {
   "audit-limit": "Audit limit",
+  "component-expression-invalid": "Component expressions",
   "component-invalid": "Component definition",
+  "component-option-invalid": "Component options",
   "component-undefined": "Missing component",
+  "component-unregistered": "Unregistered component",
+  "component-value-invalid": "Component option values",
   contrast: "Text contrast",
   "frames-are-valid-html": "HTML structure",
   "layer-tree-limit": "Layer tree limit",

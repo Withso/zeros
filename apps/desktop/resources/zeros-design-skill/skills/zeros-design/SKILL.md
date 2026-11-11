@@ -31,10 +31,10 @@ Every frame in a directory follows these rules, so people and agents share one v
 2. **States on the same markup.** Set a state with an attribute or a state class, never a second copy: `<button class="btn is-active" data-state="open">`.
 3. **Tokens, not their values.** Write `var(--name)` wherever a token holds the value: `color: var(--fg2)`, not the hex it resolves to.
 4. **Inline style for one-offs.** Inline declarations are for single values and for people's Style panel edits; anything used on several elements is a class: `.row { display: flex; gap: var(--space-2); }`.
-5. **`data-oid` only where needed.** Keep existing values; add stable ones only where selection must survive a restructure. Component definitions use `data-zid`.
+5. **`data-oid` only where needed.** Keep existing values; add stable ones only where selection must survive a restructure. Definitions in `components/` use `data-zid`; a frame registered as a component keeps its `data-oid` values.
 6. **Name meaningful layers.** `<section data-name="Pricing table">` (up to 80 characters).
 7. **Mark captured markup.** Markup captured or pasted from a site or an app carries `data-zd-captured` on its root, optionally naming its source (`<main data-zd-captured="zeros renderer">`); its classes are not this directory's vocabulary. A title such as `"Settings — captured"` tells people. The contract warnings skip marked markup, so mark only markup that really came from elsewhere, never the directory's own frames.
-8. **Three repeats make a component.** Markup repeated three or more times becomes `components/<name>.html` with `<slot>` and `data-zd-attr`, placed as `<zd-card title="Plans">Body</zd-card>`.
+8. **Three repeats make a component.** Markup repeated three or more times becomes `components/<name>.html` with `<slot>` and `data-zd-attr`, placed as `<zd-card title="Plans">Body</zd-card>`. Give a component people should adjust options and a template (`reference/format.md`, Components with options); Zeros evaluates them itself, so it still holds no JavaScript.
 
 ## Workflow
 

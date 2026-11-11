@@ -103,6 +103,7 @@ import {
   type DesignMovementGuard,
 } from "@zeros/protocol/design-relocation";
 import { assertDesignRelocationSource, designRelocationFlowRootStyles, designRelocationRootStyles } from "./relocation-source";
+import { forgetDesignComponentRender } from "./component-last-good";
 
 export interface DesignFrameCreateInput {
   title?: string;
@@ -378,6 +379,7 @@ export async function listDesignFramesUnlocked(
     if (live.has(file)) continue;
     delete canvas.frames[file];
     delete canvas.frame_info[file];
+    forgetDesignComponentRender(workspacePath, file);
     canvasChanged = true;
   }
   if (writeBack && (canvasChanged || sourceChanges.length))
@@ -695,6 +697,7 @@ export async function deleteDesignFrame(
     const canvas = await readCanvas(workspacePath);
     delete canvas.frames[file];
     delete canvas.frame_info[file];
+    forgetDesignComponentRender(workspacePath, file);
     await writeCanvas(workspacePath, canvas, [
       {
         file: `${designDirectoryNameFor(workspacePath)}/${file}`,
@@ -822,6 +825,7 @@ async function applyDesignFrameChangesUnlocked(
     } else {
       delete canvas.frames[file];
       delete canvas.frame_info[file];
+      forgetDesignComponentRender(workspacePath, file);
     }
     sourceChanges.push({
       file: `${designDirectoryNameFor(workspacePath)}/${file}`,

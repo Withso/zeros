@@ -1,5 +1,6 @@
 import {
   canonicalDesignJson,
+  componentOptionValues,
   designComponentDefinitionSchema,
   designFoundationManifestSchema,
   designFrameGeometryError,
@@ -42,6 +43,12 @@ import type {
   DesignWebMutation,
 } from "./model";
 import { updateDesignWebState } from "./revision";
+import {
+  appendComponentVariant,
+  designSourceDeclaresComponentOptions,
+  mutateComponentOption,
+  readDesignComponentDeclaration,
+} from "./component-options";
 
 function inverseId(operation: DesignOperation, suffix = "0"): string {
   return `inverse:${operation.operationId}:${suffix}`;
@@ -285,11 +292,14 @@ function escapeAttribute(value: string): string {
 
 function instanceMarkup(
   operation: Extract<DesignOperation, { type: "instance.create" }>,
+  declaresOptions = false,
 ): string {
+  // A component with options reads a missing attribute as its default, so
+  // false has to be written; a plain component's boolean prop is presence.
   const attributes = Object.entries(operation.props)
-    .filter(([, value]) => value !== null && value !== false)
+    .filter(([, value]) => value !== null && (value !== false || declaresOptions))
     .map(([name, value]) =>
-      value === true
+      value === true && !declaresOptions
         ? ` ${name}`
         : ` ${name}="${escapeAttribute(String(value))}"`,
     )
@@ -621,13 +631,21 @@ function applyOperation(
     );
     if (!component)
       throw new Error(`Design component not found: ${operation.componentId}`);
-    assertInstanceProps(component, operation.props);
+    const definition = state.files[component.file];
+    const declaresOptions = definition !== undefined && designSourceDeclaresComponentOptions(definition);
+    if (declaresOptions) {
+      const declaration = readDesignComponentDeclaration(definition, component.file);
+      const { problems } = componentOptionValues(declaration, new Map(Object.entries(operation.props)
+        .filter(([, value]) => value !== null).map(([name, value]) => [name, String(value)])));
+      const refused = problems.find((problem) => problem.severity === "error") ?? problems[0];
+      if (refused) throw new Error(refused.message);
+    } else assertInstanceProps(component, operation.props);
     assertSafeDesignHtmlFragment(operation.slotHtml, state.entryFile);
     const source = state.files[state.entryFile]!;
     const inserted = mutateDesignNodeHtmlSource(
       source,
       operation.parentNodeId,
-      instanceMarkup(operation),
+      instanceMarkup(operation, declaresOptions),
       "append",
       state.entryFile,
     );
@@ -638,6 +656,14 @@ function applyOperation(
       { ...state.files, [state.entryFile]: healed },
       [operation.parentNodeId, operation.instanceNodeId],
     );
+  }
+  if (operation.type === "component.set-option" || operation.type === "component.save-variant") {
+    const source = state.files[operation.file];
+    if (source === undefined) throw new Error(`Design component file is missing: ${operation.file}`);
+    const next = operation.type === "component.set-option"
+      ? mutateComponentOption(source, operation.file, operation)
+      : appendComponentVariant(source, operation.file, operation);
+    return withFiles(state, operation, { ...state.files, [operation.file]: next }, []);
   }
   if (operation.type === "parameter.create") {
     const parameter = designParameterSchema.parse(operation.parameter);
