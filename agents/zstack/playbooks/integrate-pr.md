@@ -3,9 +3,8 @@
 This is for the integrator, the master in multi-agent mode or the single
 session itself.
 
-1. **Verify the handoff.** Match the patch SHA256 to the READY post, check
-   whether it touches CI-definition paths, and confirm it applies cleanly to
-   current `main`.
+1. **Verify the handoff.** Match the patch SHA256 to the READY post and confirm
+   it applies cleanly to current `main`.
    Authors emit frozen patches with `git diff --binary` from an index (use
    `git add -N` for new files). An isolated scratch index can preserve the
    workspace index. Before READY, run `git apply --check --whitespace=error`
@@ -43,9 +42,6 @@ session itself.
    added later starts a new CI run for the same head and cancels the running
    one, whose roll-ups then fail with "Invalid … selection/result"; read the
    newest run instead.
-   CI-definition PRs need the owner's merge. Auto-merge stays on when an armed
-   PR gains a CI-definition path, so disarm it before that push (GraphQL
-   `disablePullRequestAutoMerge`) and confirm `autoMergeRequest` is null.
    Before arming, wait for the PR's `CodeQL` alert check (separate from the
    `codeql` job). It is not required, so auto-merge won't wait for it; a new
    high alert, even in a test, is fixed before merge.

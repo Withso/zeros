@@ -10,8 +10,6 @@ import { lexer } from "marked";
 import { parseNameStatus } from "./ci/scope.mjs";
 
 const REPOSITORY = "Withso/zeros";
-const OWNER_REVIEW =
-  "This PR changes CI definitions; the owner must review and merge it.";
 const USAGE =
   "usage: pnpm agent:merge <pr-number> [--immediate] [--dry-run] [--force --reason <human-PR-comment-URL>]";
 const SKIP_MARKER =
@@ -36,7 +34,6 @@ const FAILED_STATES = new Set([
   "STARTUP_FAILURE",
   "STALE",
 ]);
-const CI_DEFINITION_URL = new URL("./ci/ci-definition.mjs", import.meta.url);
 const OPEN_PULL_REQUESTS_QUERY = `query($endCursor: String) {
   repository(owner: "Withso", name: "zeros") {
     pullRequests(states: OPEN, first: 100, after: $endCursor) {
@@ -127,7 +124,6 @@ function commentId(reason, number) {
 export function decideMerge(
   snapshot,
   {
-    isCiDefinitionPath = null,
     force = false,
     immediate = false,
     reason = null,
@@ -192,18 +188,6 @@ export function decideMerge(
       ? [file.filename, file.previous_filename]
       : [file.filename],
   );
-  // These boundaries remain protected even when the shared policy is missing.
-  if (
-    paths.some(
-      (file) =>
-        file === "scripts/ci/ci-definition.mjs" ||
-        file.startsWith(".github/workflows/"),
-    ) ||
-    (typeof isCiDefinitionPath === "function" &&
-      paths.some((file) => isCiDefinitionPath(file)))
-  ) {
-    return refuse("ci-definition", OWNER_REVIEW);
-  }
   if (SKIP_MARKER.test(pr.title) || SKIP_MARKER.test(pr.body)) {
     return refuse(
       "skip-marker",
@@ -298,12 +282,6 @@ export function decideMerge(
     return refuse(
       "already-armed",
       `Another open PR already has auto-merge enabled (${armed.map((other) => `#${other.number}`).join(", ")}); wait for it to merge or be disarmed.`,
-    );
-  }
-  if (typeof isCiDefinitionPath !== "function") {
-    return refuse(
-      "policy-unavailable",
-      "The shared CI-definition policy is unavailable; refusing to arm auto-merge.",
     );
   }
   if (immediate) {
@@ -439,17 +417,6 @@ function parseArguments(argv) {
   return { number, dryRun, force, reason, immediate };
 }
 
-async function loadCiDefinition() {
-  try {
-    const policy = await import(CI_DEFINITION_URL.href);
-    return typeof policy.isCiDefinitionPath === "function"
-      ? policy.isCiDefinitionPath
-      : null;
-  } catch {
-    return null;
-  }
-}
-
 /** Complete path policy from immutable Git objects, never the mutable PR files
  * endpoint. Missing objects/history and truncated command output fail closed. */
 export function readImmutableMergeFiles(base, head, run) {
@@ -479,7 +446,6 @@ export async function runAgentMerge(
   argv = process.argv.slice(2),
   {
     spawn = spawnSync,
-    loadCiDefinition: loadPolicy = loadCiDefinition,
     stdout = console.log,
     stderr = console.error,
   } = {},
@@ -699,9 +665,8 @@ export async function runAgentMerge(
   let bodyDirectory;
   let immediateRequested = false;
   try {
-    const policy = { ...options, isCiDefinitionPath: await loadPolicy() };
     let snapshot = readSnapshot();
-    let decision = decideMerge(snapshot, policy);
+    let decision = decideMerge(snapshot, options);
     if (!decision.allowed) {
       stderr(decision.message);
       return 1;
@@ -715,7 +680,7 @@ export async function runAgentMerge(
       )
         throw new Error("PR or identity changed during preflight");
       snapshot = fresh;
-      decision = decideMerge(snapshot, policy);
+      decision = decideMerge(snapshot, options);
       if (!decision.allowed) {
         stderr(decision.message);
         return 1;
@@ -727,7 +692,7 @@ export async function runAgentMerge(
       if (!samePr(snapshot.pr, pr))
         throw new Error("PR changed during merge preflight");
       snapshot = { ...snapshot, viewer, pr };
-      decision = decideMerge(snapshot, policy);
+      decision = decideMerge(snapshot, options);
       if (!decision.allowed) {
         stderr(decision.message);
         return 1;

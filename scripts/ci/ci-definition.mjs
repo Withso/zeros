@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 // ──────────────────────────────────────────────────────────
-// ci-definition — paths that require an owner to merge a CI-definition PR
+// ci-definition — paths that define CI, listed for review
 // ──────────────────────────────────────────────────────────
 //
 // List both sides of moves with --no-renames. A failed diff must fail this
-// command, never print an empty list that could permit an automatic merge.
+// command, never print an empty list that reads as "no CI change".
 // Usage: node scripts/ci/ci-definition.mjs --base <commit> [--head <commit>]
 // Defaults: origin/main and HEAD. Stdout contains one sorted path per line.
 // ──────────────────────────────────────────────────────────
@@ -121,7 +121,7 @@ export function runCli({
     return 0;
   } catch {
     stderr.write(
-      "CI-definition diff failed; verify the base/head commits and fetch complete history before deciding whether an owner merge is required.\n",
+      "CI-definition diff failed; verify the base/head commits and fetch complete history before relying on this list.\n",
     );
     return 1;
   }

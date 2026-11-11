@@ -194,10 +194,6 @@ function fakeGh(snapshot = fixture()) {
     spawn,
     stdout: vi.fn(),
     stderr: vi.fn(),
-    loadCiDefinition: vi.fn(
-      async () => (file: string) =>
-        file.startsWith("scripts/ci/") || file.startsWith(".github/workflows/"),
-    ),
   };
 }
 
@@ -640,6 +636,23 @@ describe("immediate-only agent merge", () => {
   });
 
   it.each([
+    "scripts/ci/scope.mjs",
+    "scripts/ci/ci-definition.mjs",
+    ".github/workflows/ci.yml",
+  ])("admits a PR that changes the CI definition %s", async (filename) => {
+    const snapshot = fixture();
+    snapshot.files[0].filename = filename;
+    const gh = fakeGh(snapshot);
+    expect(await runAgentMerge(["--immediate", "--dry-run", "123"], gh)).toBe(
+      0,
+    );
+    expect(gh.stdout).toHaveBeenCalledWith(
+      expect.stringContaining("Dry run: Merge immediately"),
+    );
+    expectNoWrite(gh);
+  });
+
+  it.each([
     ["pending", "IN_PROGRESS"],
     ["fail", "FAILURE"],
     ["cancel", "CANCELLED"],
@@ -810,24 +823,6 @@ describe("immediate-only agent merge", () => {
       },
     ],
     [
-      "CI definition",
-      (s) => {
-        s.files[0].filename = "scripts/ci/scope.mjs";
-      },
-    ],
-    [
-      "CI policy itself",
-      (s) => {
-        s.files[0].filename = "scripts/ci/ci-definition.mjs";
-      },
-    ],
-    [
-      "workflow",
-      (s) => {
-        s.files[0].filename = ".github/workflows/ci.yml";
-      },
-    ],
-    [
       "incident",
       (s) => {
         s.files[0].filename = ".github/ci-incidents/repair.json";
@@ -995,16 +990,6 @@ describe("immediate-only agent merge", () => {
     const queue = fakeGh(snapshot);
     expect(await runAgentMerge(["123", "--immediate"], queue)).toBe(1);
     expectNoWrite(queue);
-  });
-
-  it("retains fail-closed shared-policy loading in immediate mode", async () => {
-    const gh = fakeGh();
-    gh.loadCiDefinition.mockRejectedValue(new Error("private-output-fixture"));
-    expect(await runAgentMerge(["123", "--immediate"], gh)).toBe(1);
-    expectNoWrite(gh);
-    expect(JSON.stringify(gh.stderr.mock.calls)).not.toContain(
-      "private-output-fixture",
-    );
   });
 
   it.each([2, 3, 4, 5])(

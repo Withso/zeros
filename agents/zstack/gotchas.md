@@ -156,8 +156,6 @@ revision in the same checkout and compare failing test names.
 - `pnpm test:ui-smoke` stops at the first scenario that throws. Confirm that
   failure on the base commit, then run the rest from an untracked copy of
   `scripts/` without it (registry and partition) and delete the copy.
-  `scripts/ui-smoke/**` is a CI-definition path: add checks as modules called
-  from an existing registered scenario.
 - Playwright's `waitForFunction` treats a returned Promise as truthy; poll an
   awaited `page.evaluate`. After a hot update, a bare dynamic import can load a
   second store instance; inspect the stores the fixture exposes.
@@ -194,11 +192,9 @@ revision in the same checkout and compare failing test names.
 - `pnpm check:secrets` scans tracked files only: stage new files before
   running it. Build credential-shaped test values at runtime, and give
   credential URLs a `.test` host.
-- CI-definition paths need the owner's merge and include `scripts/check-*`,
-  `scripts/ci/**`, `package.json` and the lockfiles. The full list is in
-  `scripts/ci/ci-definition.mjs`. Check planned paths against that list
-  before planning a change to a shared script. Its CLI compares committed
-  history only (`--base origin/main`), so run it again after committing.
+- CI-definition paths (`scripts/check-*`, `scripts/ci/**`, `package.json`, the
+  lockfiles; full list in `scripts/ci/ci-definition.mjs`) select every PR lane.
+  They merge through the wrapper like any other PR.
 - pnpm installs share blocks through the store: measure reclaimed disk with
   `df`, and prune only your own scratch.
 - Run merge tooling from a checkout at current `origin/main`. A held

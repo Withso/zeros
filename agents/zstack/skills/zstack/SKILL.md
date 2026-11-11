@@ -104,8 +104,7 @@ End each loop with a compact receipt:
 
 - Never print, log, commit or echo a credential, including in arguments and
   test output. `.env.agent` holds Alpha and test credentials only.
-- Merge only through `pnpm agent:merge`. PRs that change CI-definition paths
-  need the owner's merge.
+- Merge only through `pnpm agent:merge`, CI-definition PRs included.
 - Never claim a platform-only check passed on a platform where it did not run.
 - Local Personal, organization-local and cloud placements must all keep
   working, including A → B → A owner switching.

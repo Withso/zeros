@@ -3,6 +3,15 @@
 Each entry records the lesson behind the change as symptom → cause → rule →
 where it is encoded.
 
+## 0.3.5
+
+- **A test could not ship with the feature it covered.** CI-definition paths
+  needed the owner's merge, so a restored suite landed apart from the change
+  it depended on and `main` went red when the two drifted (#1001 after #1009).
+  Rule: CI-definition PRs merge through the wrapper like any other; the
+  required checks live in GitHub's ruleset, which a PR cannot change.
+  Encoded in `scripts/agent-merge.mjs`, `AGENTS.md` and `integrate-pr.md`.
+
 ## 0.3.4
 
 - **A reviewer's armed merge landed a force-pushed head.** #953 was armed at

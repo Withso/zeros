@@ -9,7 +9,7 @@
 // dispatching or rerunning a release workflow — so
 // those steps are attributed to automation. The App is installed on this
 // repository only. PR merges use `pnpm agent:merge <pr-number>` with the
-// workspace's own gh identity; CI-definition PRs require an owner merge.
+// workspace's own gh identity, CI-definition PRs included.
 //
 // The App key never enters the repository. It is read, in order, from
 // `ZEROS_AGENT_GITHUB_APP_B64` (Conductor cloud workspaces),

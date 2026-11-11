@@ -358,10 +358,18 @@ temporary repositories and cover policy replacement, label additions/removal,
 fallback, invalid outputs, database unions, failures, cancellation, and selected
 skips.
 
-## Owner merges for CI definitions
+## CI-definition changes
 
-CI-definition PRs need an owner merge. Agents must not auto-merge changes to the
-paths recognized by `scripts/ci/ci-definition.mjs`: workflows/actions,
+Agents merge CI-definition PRs through the wrapper like any other PR, so a
+test can ship in the same PR as the feature it covers. Two things still hold
+whatever a PR contains: the list of required checks lives in GitHub's ruleset,
+which a PR cannot change, and the trusted scope loads its selection policy
+from the base commit, so a CI-definition change selects every PR lane instead
+of attesting to its own skips. What the ruleset does not protect is the content
+of a required job: a PR that weakens one still reports its name, so reviewing
+workflow and check-script diffs remains the reviewer's job.
+
+The paths recognized by `scripts/ci/ci-definition.mjs` are workflows/actions,
 `.github/actionlint.yaml`, `.github/CODEOWNERS`, `scripts/ci/**`, `scripts/agent-runtime/**`, `scripts/check-*`,
 the explicit Vitest runner, composer entry and `scripts/ui-smoke/**`, release
 scripts, root Vitest/ESLint configs, root package/lock/workspace files, the
@@ -374,8 +382,8 @@ node scripts/ci/ci-definition.mjs --base origin/main --head HEAD
 ```
 
 The command lists sorted paths, including both sides of renames and deletions.
-A failed comparison exits nonzero so an unreadable diff cannot authorize an
-automatic merge. This is a definition detector, not a repository merge action.
+A failed comparison exits nonzero rather than print an empty list. This is a
+definition detector for review, not a merge gate.
 
 ## Agent merge wrapper
 
@@ -458,13 +466,12 @@ mode rejects `--force`, `--admin`, auto/queue flags and branch-deletion flags.
 The repository-wide one-armed-PR guard is still a snapshot, not an atomic lock
 across workspaces; serialize authorized landing attempts.
 
-CI-definition PRs require the owner to review and merge them. The shared
-`scripts/ci/ci-definition.mjs` policy must export `isCiDefinitionPath(path)`;
-the wrapper refuses to arm a merge when that policy is unavailable. Renamed
-files are checked under both paths. Drafts, forks, closed PRs, changes to
-`.github/ci-incidents/*.json` (including removals), skip markers in PR titles or
-bodies, and failed or cancelled required checks are also refused. Pending checks
-may wait for GitHub's normal auto-merge requirements in the default mode only.
+The wrapper does not refuse CI-definition paths. Drafts, forks, closed PRs,
+changes to `.github/ci-incidents/*.json` (including removals; the owner
+resolves an incident), skip markers in PR titles or bodies, and failed or
+cancelled required checks are refused. Renamed files are checked under both
+paths. Pending checks may wait for GitHub's normal auto-merge requirements in
+the default mode only.
 
 Only one open PR may have auto-merge enabled. Only a human may override this
 guard: first document the justification in a comment on the target PR using the

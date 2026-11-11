@@ -63,7 +63,7 @@ Prefer an API or type that excludes the invalid state, then a lint or script
 gate, then a focused regression through the real boundary. A new instruction
 alone does not complete a correction. Preserve runtime behavior and serialized
 contracts; account for Local Personal, organization-local and cloud placements.
-Changes to safety rules or CI definitions need the owner under repository policy.
+Changes to safety rules need the owner under repository policy.
 
 ## Prove the enforcer against history
 

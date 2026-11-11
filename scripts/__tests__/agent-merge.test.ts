@@ -7,8 +7,8 @@ import { decideMerge, runAgentMerge } from "../agent-merge.mjs";
 const HEAD = "a".repeat(40);
 const REPOSITORY = "Withso/zeros";
 const COMMENT_URL = `https://github.com/${REPOSITORY}/pull/123#issuecomment-456`;
-const OWNER_REVIEW =
-  "This PR changes CI definitions; the owner must review and merge it.";
+const INCIDENT_REVIEW =
+  "This PR changes a CI incident marker; the owner must resolve the incident and merge it.";
 const SECTIONS = [
   "Why", "What changes", "Tests", "Rollout",
   "Local workspace impact", "Cloud workspace impact",
@@ -100,13 +100,6 @@ function fixture(): Snapshot {
   };
 }
 
-// The shared policy is supplied independently; the wrapper must consult it,
-// including paths outside .github/workflows and the policy module itself.
-const isCiDefinitionPath = (file: string) =>
-  file.startsWith("scripts/ci/") ||
-  file === "vitest.config.ts" ||
-  file === "pnpm-lock.yaml";
-
 function fakeGh(snapshot = fixture()) {
   const calls: string[][] = [];
   const responses = new Map<
@@ -155,10 +148,7 @@ function fakeGh(snapshot = fixture()) {
   });
   const stdout = vi.fn();
   const stderr = vi.fn();
-  const loadCiDefinition = vi.fn(
-    async (): Promise<typeof isCiDefinitionPath | null> => isCiDefinitionPath,
-  );
-  return { calls, responses, spawn, stdout, stderr, loadCiDefinition };
+  return { calls, responses, spawn, stdout, stderr };
 }
 
 function json(value: unknown, status = 0) {
@@ -169,7 +159,7 @@ describe("agent merge decision", () => {
   it.each(SECTIONS)("refuses a human PR missing the %s section", async (section) => {
     const snapshot = fixture();
     snapshot.pr.body = PR_BODY.replace(section, "Other notes");
-    expect(decideMerge(snapshot, { isCiDefinitionPath })).toMatchObject({
+    expect(decideMerge(snapshot)).toMatchObject({
       allowed: false, code: "pr-sections",
     });
     for (const args of [["123"], ["123", "--dry-run"]]) {
@@ -201,7 +191,7 @@ describe("agent merge decision", () => {
   ])("does not count a heading hidden inside %s", (text) => {
     const snapshot = fixture();
     snapshot.pr.body = PR_BODY.replace("## Tests", text);
-    expect(decideMerge(snapshot, { isCiDefinitionPath })).toMatchObject({
+    expect(decideMerge(snapshot)).toMatchObject({
       allowed: false, code: "pr-sections",
       message: expect.stringContaining("Tests"),
     });
@@ -212,7 +202,7 @@ describe("agent merge decision", () => {
     snapshot.pr.body = PR_BODY.replace("## Why", "WHY\n---")
       .replace("## Tests", "## **Tests** ##")
       .replace("### Cloud workspace impact", "### Cloud workspace impact:");
-    expect(decideMerge(snapshot, { isCiDefinitionPath }).allowed).toBe(true);
+    expect(decideMerge(snapshot).allowed).toBe(true);
   });
 
   it.each(["renovate[bot]", "zeros-agent-runtime[bot]", "zeros-ci-incident[bot]"])(
@@ -234,7 +224,7 @@ describe("agent merge decision", () => {
       snapshot.pr.author = author;
       snapshot.pr.title = "Automated runtime maintenance";
       snapshot.pr.body = "Automated maintenance. Agent: GPT-6 Astra.";
-      expect(decideMerge(snapshot, { isCiDefinitionPath })).toMatchObject({
+      expect(decideMerge(snapshot)).toMatchObject({
         allowed: false, code: "pr-sections",
       });
     },
@@ -255,15 +245,12 @@ describe("agent merge decision", () => {
     expect(gh.calls.some(call => call[1] === "merge")).toBe(false);
   });
 
-  it.each([
-    [".github/workflows/ci.yml", "ci-definition"],
-    [".github/ci-incidents/open.json", "incident"],
-  ])("preserves the %s refusal for bot PRs without sections", (filename, code) => {
+  it("preserves the incident refusal for bot PRs without sections", () => {
     const snapshot = fixture();
     snapshot.pr.author = { login: "maintenance[bot]", is_bot: true };
     snapshot.pr.body = "Automated maintenance.";
-    snapshot.files[0].filename = filename;
-    expect(decideMerge(snapshot, { isCiDefinitionPath })).toMatchObject({ allowed: false, code });
+    snapshot.files[0].filename = ".github/ci-incidents/open.json";
+    expect(decideMerge(snapshot)).toMatchObject({ allowed: false, code: "incident" });
   });
 
   it("cannot override missing sections with --force", async () => {
@@ -278,7 +265,7 @@ describe("agent merge decision", () => {
   it("exports a pure decision that keeps its input unchanged", () => {
     const snapshot = fixture();
     const before = structuredClone(snapshot);
-    expect(decideMerge(snapshot, { isCiDefinitionPath })).toMatchObject({
+    expect(decideMerge(snapshot)).toMatchObject({
       allowed: true,
       code: "arm",
     });
@@ -292,27 +279,28 @@ describe("agent merge decision", () => {
     ".github/workflows/codeql.yml",
     "vitest.config.ts",
     "pnpm-lock.yaml",
-  ])("requires owner review for %s", async (filename) => {
+  ])("arms a PR that changes the CI definition %s like any other", async (filename) => {
     const snapshot = fixture();
     snapshot.files = [{ filename, status: "modified" }];
+    expect(decideMerge(snapshot)).toMatchObject({ allowed: true, code: "arm" });
     const gh = fakeGh(snapshot);
-    expect(await runAgentMerge(["123", "--dry-run"], gh)).toBe(1);
-    expect(gh.stderr).toHaveBeenCalledWith(OWNER_REVIEW);
+    expect(await runAgentMerge(["123", "--dry-run"], gh)).toBe(0);
+    expect(gh.stderr).not.toHaveBeenCalled();
     expect(gh.calls.some((args) => args[1] === "merge")).toBe(false);
   });
 
-  it("checks the previous path of a renamed CI definition", () => {
+  it("checks the previous path of a renamed CI incident marker", () => {
     const snapshot = fixture();
     snapshot.files = [
       {
-        filename: "docs/former-config.md",
+        filename: "docs/former-incident.md",
         status: "renamed",
-        previous_filename: "vitest.config.ts",
+        previous_filename: ".github/ci-incidents/open.json",
       },
     ];
-    expect(decideMerge(snapshot, { isCiDefinitionPath })).toMatchObject({
+    expect(decideMerge(snapshot)).toMatchObject({
       allowed: false,
-      code: "ci-definition",
+      code: "incident",
     });
   });
 
@@ -407,7 +395,7 @@ describe("agent merge decision", () => {
   ])("refuses %s without invoking merge", async (_label, change, code) => {
     const snapshot = fixture();
     change(snapshot);
-    expect(decideMerge(snapshot, { isCiDefinitionPath })).toMatchObject({
+    expect(decideMerge(snapshot)).toMatchObject({
       allowed: false,
       code,
     });
@@ -441,7 +429,7 @@ describe("agent merge decision", () => {
         previous_filename: ".github/ci-incidents/incident-123.json",
       },
     ];
-    expect(decideMerge(snapshot, { isCiDefinitionPath })).toMatchObject({
+    expect(decideMerge(snapshot)).toMatchObject({
       allowed: false,
       code: "incident",
     });
@@ -457,7 +445,7 @@ describe("agent merge decision", () => {
     expect(await runAgentMerge(["123"], gh)).toBe(1);
     expect(gh.stderr).toHaveBeenCalledWith(expect.stringContaining("#124"));
     snapshot.openPullRequests.pop();
-    expect(decideMerge(snapshot, { isCiDefinitionPath })).toMatchObject({
+    expect(decideMerge(snapshot)).toMatchObject({
       allowed: true,
     });
   });
@@ -475,15 +463,6 @@ describe("agent merge decision", () => {
     expect(gh.calls.some((args) => args[1] === "merge")).toBe(false);
   });
 
-  it("fails closed when the shared CI-definition policy is unavailable", async () => {
-    const gh = fakeGh();
-    gh.loadCiDefinition.mockResolvedValue(null);
-    expect(await runAgentMerge(["123", "--dry-run"], gh)).toBe(1);
-    expect(gh.stderr).toHaveBeenCalledWith(
-      expect.stringContaining("CI-definition policy is unavailable"),
-    );
-    expect(gh.calls.some((args) => args[1] === "merge")).toBe(false);
-  });
 });
 
 describe("documented human override", () => {
@@ -542,11 +521,10 @@ describe("documented human override", () => {
     expect(gh.calls.some((args) => args[1] === "merge")).toBe(false);
   });
 
-  it.each(["ci", "skip", "draft", "fork", "incident", "checks"])(
+  it.each(["skip", "draft", "fork", "incident", "checks"])(
     "cannot override the %s guard",
     async (guard) => {
       const snapshot = fixture();
-      if (guard === "ci") snapshot.files[0].filename = "vitest.config.ts";
       if (guard === "skip") snapshot.pr.body = "[skip ci]";
       if (guard === "draft") snapshot.pr.isDraft = true;
       if (guard === "fork") snapshot.pr.isCrossRepository = true;
@@ -569,7 +547,7 @@ describe("agent merge CLI", () => {
     const original = gh.spawn.getMockImplementation()!;
     gh.spawn.mockImplementation((command, args, options) => {
       if (command === "git") {
-        if (args.includes("diff")) return { status: 0, stdout: "M\0.github/workflows/ci.yml\0", stderr: "" };
+        if (args.includes("diff")) return { status: 0, stdout: "M\0.github/ci-incidents/open.json\0", stderr: "" };
         if (args.includes("merge-base")) return { status: 0, stdout: "b".repeat(40) + "\n", stderr: "" };
         if (args.includes("--is-shallow-repository")) return { status: 0, stdout: "false\n", stderr: "" };
         return { status: 0, stdout: "", stderr: "" };
@@ -633,10 +611,10 @@ describe("agent merge CLI", () => {
   it("checks both sides of renamed paths in the immutable diff", async () => {
     const snapshot = fixture();
     snapshot.pr.changedFiles = 2;
-    snapshot.files.push({ filename: "docs/config.md", previous_filename: "vitest.config.ts", status: "renamed" });
+    snapshot.files.push({ filename: "docs/incident.md", previous_filename: ".github/ci-incidents/open.json", status: "renamed" });
     const gh = fakeGh(snapshot);
     expect(await runAgentMerge(["123"], gh)).toBe(1);
-    expect(gh.stderr).toHaveBeenCalledWith(OWNER_REVIEW);
+    expect(gh.stderr).toHaveBeenCalledWith(INCIDENT_REVIEW);
     expect(gh.calls.some(args => args.includes("diff") && args.includes(HEAD))).toBe(true);
     expect(gh.calls.some(args => args.some(arg => arg.includes("/files?")))).toBe(false);
   });

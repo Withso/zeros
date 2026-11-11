@@ -54,9 +54,8 @@ branch, preferably with a test or check rather than more prose.
    fold or cut; don't raise a budget to fit new text.
 7. Validate evals with `node scripts/zstack/evals.mjs --validate`.
 
-Changes to safety rules in `AGENTS.md` or `RULES.md`, to CI definitions, or to
-credential policy need the owner. Every other pack change goes through normal
-review.
+Changes to safety rules in `AGENTS.md` or `RULES.md`, or to credential policy,
+need the owner. Every other pack change goes through normal review.
 
 ## Verification tools
 

@@ -31,10 +31,10 @@ branch-writing workflows ship disabled; repository configuration enables them.
    the **current** frozen SHA; a write already in flight may finish before that
    acknowledgment. Human pushes remain possible while held and require a fresh
    acknowledgment and current-head checks. Removing the label resumes updates.
-6. The owner merges when integration and required checks are ready. Root manifest
-   and lockfile changes are CI-definition changes under `docs/ci.md`, so
-   `pnpm agent:merge` continues to refuse these PRs. A later upstream version
-   opens the next PR from the actual main pin.
+6. The owner merges when integration and required checks are ready. The merge
+   wrapper does not enforce this: it no longer refuses root manifest and
+   lockfile changes as CI-definition changes. A later upstream version opens
+   the next PR from the actual main pin.
 
 ### Runtime pin parity
 
@@ -297,8 +297,8 @@ that group; applying the label alone is not the acknowledgment.
 ## One-time setup and rollout
 
 This implementation does not install an App, add secrets, subscribe users,
-create an issue/PR or enable automation merely by existing on a branch. An owner
-must review and merge the CI-definition change, then configure Actions:
+create an issue/PR or enable automation merely by existing on a branch. After
+the change merges, an owner configures Actions:
 
 | Repository variable                  | Meaning                                                                                                                                                          |
 | ------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
