@@ -246,6 +246,9 @@ export interface DesignRuntimeAuthoredStyle extends DesignRuntimeStyleOrigin {
   /** The winning value under each other theme, when a theme-scoped rule makes
    * the declaration itself differ (a token handles themes by itself). */
   themeValues?: Record<string, string>;
+  /** A rule written for this layer that sits inside @media, @supports or
+   * @layer: not the layer's own change, which the editor could remove. */
+  conditional?: true;
 }
 
 export interface DesignRuntimeReplacedStyle extends DesignRuntimeStyleOrigin {
@@ -392,7 +395,8 @@ function isRuntimeAuthoredStyles(value: unknown): boolean {
       isRuntimeStyleTokens(style.tokens, true) &&
       isRuntimeSubjectClasses(style.subjectClasses) &&
       isRuntimeReplacedStyle(style.replaced) &&
-      isRuntimeThemeValues(style.themeValues)
+      isRuntimeThemeValues(style.themeValues) &&
+      (style.conditional === undefined || style.conditional === true)
     );
   });
 }
@@ -2192,7 +2196,8 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       });
       return { key: key, path: path };
     }
-    function visit(list, active, layer, origin, uncertain, nested) {
+    // grouped: inside any at-rule; the engine edits only ungrouped rules.
+    function visit(list, active, layer, origin, uncertain, nested, grouped) {
       for (var index = 0; index < list.length; index += 1) {
         var rule = list[index];
         var kind = rule.constructor && rule.constructor.name;
@@ -2201,7 +2206,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
           // A nested selector is relative to its parent, so element.matches()
           // cannot establish applicability or specificity. Keep its property
           // footprint rather than silently selecting a losing outer rule.
-          var entry = { rule: rule, selector: nested ? null : rule.selectorText, uncertain: uncertain || nested, active: active, layer: layer.path, order: rules.length, origin: origin, declared: declared, shadow: scope !== document };
+          var entry = { rule: rule, selector: nested ? null : rule.selectorText, uncertain: uncertain || nested, active: active, layer: layer.path, order: rules.length, origin: origin, declared: declared, shadow: scope !== document, grouped: grouped };
           rules.push(entry);
           // Theme-scoped rules that set real properties; a theme's tokens
           // need no second look, the computed token value already follows it.
@@ -2220,24 +2225,24 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
             if (!list) { list = []; customRules.set(property, list); }
             list.push(entry);
           });
-          if (rule.cssRules) visit(rule.cssRules, active, layer, origin, uncertain, true);
+          if (rule.cssRules) visit(rule.cssRules, active, layer, origin, uncertain, true, grouped);
         } else if (kind === "CSSLayerStatementRule" && rule.nameList) {
           for (var name = 0; name < rule.nameList.length; name += 1) layerPosition(layer.key, layer.path, rule.nameList[name]);
         } else if (kind === "CSSLayerBlockRule") {
           anonymousLayers += 1;
-          visit(rule.cssRules || [], active, layerPosition(layer.key, layer.path, rule.name || "\u0001" + anonymousLayers), origin, uncertain, nested);
+          visit(rule.cssRules || [], active, layerPosition(layer.key, layer.path, rule.name || "\u0001" + anonymousLayers), origin, uncertain, nested, true);
         } else if (rule.cssRules) {
           // Media/supports are document-wide. Container queries, scopes and
           // other groups need evidence this resolver does not have per element.
           var knownCondition = rule.type === CSSRule.MEDIA_RULE || rule.type === CSSRule.SUPPORTS_RULE;
-          visit(rule.cssRules, active && conditionalRuleActive(rule), layer, origin, uncertain || !knownCondition, nested);
+          visit(rule.cssRules, active && conditionalRuleActive(rule), layer, origin, uncertain || !knownCondition, nested, true);
         }
       }
     }
     for (var sheetIndex = 0; sheetIndex < scope.styleSheets.length; sheetIndex += 1) {
       var sheet = scope.styleSheets[sheetIndex];
       try {
-        visit(sheet.cssRules || [], true, { key: "", path: [] }, styleOriginOf(sheet), false, false);
+        visit(sheet.cssRules || [], true, { key: "", path: [] }, styleOriginOf(sheet), false, false, false);
       } catch (_error) {
         // Inaccessible sheets cannot provide trustworthy provenance.
       }
@@ -2258,16 +2263,14 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     }
   }
 
-  function specificityFor(element, entry) {
+  function specificityFor(element, match) {
+    var entry = match.entry;
     // A matching single selector's specificity is its own.
-    if (!entry.complexes) entry.complexes = entry.selector ? splitTopLevel(entry.selector, ",") : [];
-    if (entry.complexes.length === 1) return selectorSpecificity(entry.complexes[0]);
+    var branches = matchedBranches(element, match);
+    if (!branches) return entry.complexes.length === 1 ? selectorSpecificity(entry.complexes[0]) : maxListSpecificity(entry.selector);
     var best = null;
-    entry.complexes.forEach(function (selector) {
-      var matches = false;
-      try { matches = element.matches(selector); } catch (_error) { matches = false; }
-      if (!matches) return;
-      var specificity = selectorSpecificity(selector);
+    branches.forEach(function (branch) {
+      var specificity = selectorSpecificity(entry.complexes[branch]);
       if (!best || compareSpecificity(specificity, best) > 0) best = specificity;
     });
     return best || maxListSpecificity(entry.selector);
@@ -2309,8 +2312,8 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     if (candidate.inline) return false;
     var layers = compareLayers(candidate.match.entry.layer, current.match.entry.layer);
     if (layers !== 0) return candidate.important ? layers < 0 : layers > 0;
-    if (!candidate.match.specificity) candidate.match.specificity = specificityFor(element, candidate.match.entry);
-    if (!current.match.specificity) current.match.specificity = specificityFor(element, current.match.entry);
+    if (!candidate.match.specificity) candidate.match.specificity = specificityFor(element, candidate.match);
+    if (!current.match.specificity) current.match.specificity = specificityFor(element, current.match);
     var specificity = compareSpecificity(candidate.match.specificity, current.match.specificity);
     if (specificity !== 0) return specificity > 0;
     return candidate.match.entry.order > current.match.entry.order;
@@ -2452,8 +2455,14 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   var THEME_HOOK = /\[\s*data-zd-theme\s*=\s*["']?([a-z][a-z0-9_-]{0,63})["']?\s*\]/g;
 
   /** A rule written for exactly this layer is as much its own as its style
-   * attribute: the editor writes there when such a rule already sets it. */
+   * attribute: the editor writes there when such a rule already sets it.
+   * Inside @media, @supports or @layer the editor cannot remove it, so it is
+   * one of the layer's rules, not its own change. */
   function ownRule(entry, oid) {
+    return !entry.grouped && namesOwnLayer(entry, oid);
+  }
+
+  function namesOwnLayer(entry, oid) {
     if (!oid || !entry.selector) return false;
     if (entry.ownOid === undefined) {
       var found = OWN_RULE.exec(entry.selector.trim());
@@ -2504,10 +2513,27 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     return entry.subjectClassSets;
   }
 
-  function subjectClassesOf(element, entry) {
+  /** The indexes of a multi-selector rule's branches that match the element,
+   * once per match; null for a single selector, which matched whole. */
+  function matchedBranches(element, match) {
+    var entry = match.entry;
+    if (!entry.complexes) entry.complexes = entry.selector ? splitTopLevel(entry.selector, ",") : [];
+    if (entry.complexes.length <= 1) return null;
+    if (!match.branches) {
+      match.branches = [];
+      for (var branch = 0; branch < entry.complexes.length; branch += 1) {
+        try { if (element.matches(entry.complexes[branch])) match.branches.push(branch); } catch (_error) { /* An unsupported branch names nothing. */ }
+      }
+    }
+    return match.branches;
+  }
+
+  function subjectClassesOf(element, match) {
     var names = [];
-    var sets = subjectClassSets(entry);
+    var sets = subjectClassSets(match.entry);
+    var branches = matchedBranches(element, match);
     for (var set = 0; set < sets.length; set += 1) {
+      if (branches && branches.indexOf(set) < 0) continue;
       for (var index = 0; index < sets[set].length; index += 1) {
         var name = sets[set][index];
         if (names.length < ${DESIGN_RUNTIME_AUTHORED_STYLE_LIMITS.subjectClasses} && name.length <= ${DESIGN_RUNTIME_AUTHORED_STYLE_LIMITS.className} && names.indexOf(name) < 0 && element.classList.contains(name)) names.push(name);
@@ -2579,7 +2605,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     if (entry.selector) {
       replaced.selector = entry.selector.slice(0, 256);
       replaced.scope = ruleTargetsElement(element, entry) ? "element" : "base";
-      var classes = subjectClassesOf(element, entry);
+      var classes = subjectClassesOf(element, candidate.match);
       if (classes.length > 0) replaced.subjectClasses = classes;
       replaced.others = othersMatching(element, entry, index);
     }
@@ -2601,15 +2627,25 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       var entry = index.themed[themedIndex];
       if (!entry.active || !classesAllow(element, entry)) continue;
       if (!entry.themeSelectors) entry.themeSelectors = new Map();
-      var selector = entry.themeSelectors.get(theme);
-      if (selector === undefined) {
-        selector = entry.selector.replace(THEME_HOOK, function (_hook, name) { return name === theme ? ":root" : ":not(*)"; });
-        entry.themeSelectors.set(theme, selector);
+      if (!entry.complexes) entry.complexes = splitTopLevel(entry.selector, ",");
+      var selectors = entry.themeSelectors.get(theme);
+      if (selectors === undefined) {
+        selectors = entry.complexes.map(function (complex) {
+          return complex.replace(THEME_HOOK, function (_hook, name) { return name === theme ? ":root" : ":not(*)"; });
+        });
+        entry.themeSelectors.set(theme, selectors);
       }
-      var matched = false;
-      try { matched = element.matches(selector); } catch (_error) { matched = false; }
-      // The rule's own specificity, not the stand-in's.
-      if (matched) result.push({ entry: entry, specificity: maxListSpecificity(entry.selector) });
+      // The specificity of the original branches that match, not the
+      // stand-in's and not a branch that names another element.
+      var specificity = null;
+      for (var branch = 0; branch < selectors.length; branch += 1) {
+        var matched = false;
+        try { matched = element.matches(selectors[branch]); } catch (_error) { matched = false; }
+        if (!matched) continue;
+        var own = selectorSpecificity(entry.complexes[branch]);
+        if (!specificity || compareSpecificity(own, specificity) > 0) specificity = own;
+      }
+      if (specificity) result.push({ entry: entry, specificity: specificity });
     }
     return result;
   }
@@ -2670,8 +2706,9 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       } else if (winner.match.entry.selector) {
         style.selector = winner.match.entry.selector.slice(0, 256);
         style.scope = ruleTargetsElement(element, winner.match.entry) ? "element" : "base";
-        var subjectClasses = subjectClassesOf(element, winner.match.entry);
+        var subjectClasses = subjectClassesOf(element, winner.match);
         if (subjectClasses.length > 0) style.subjectClasses = subjectClasses;
+        if (winner.match.entry.grouped && namesOwnLayer(winner.match.entry, oid)) style.conditional = true;
       }
       style.value = winner.value;
       if (winner.important) style.important = true;

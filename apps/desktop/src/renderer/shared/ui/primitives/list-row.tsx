@@ -2,7 +2,28 @@ import * as React from "react";
 
 import { cn } from "@/renderer/shared/ui/cn";
 
-export type ListRowProps = React.ButtonHTMLAttributes<HTMLButtonElement>;
+export interface ListRowProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
+  /** `panel`: a full-width row flush with an inspector panel's edges, in the
+   * panel's 11px type; `aria-pressed` fills it with `selected-bg`. */
+  variant?: "inline" | "panel";
+  /** Panel rows only: `md` is the panel's 28px line with 12px lead, `sm` a
+   * 26px row inside a group, with 6px sides and 4px corners. */
+  size?: "md" | "sm";
+}
+
+const LIST_ROW_FOCUS =
+  "hover:bg-bg1-hover focus-visible:inset-ring focus-visible:inset-ring-highlighted-bright focus-visible:ring-highlighted-bright/50 text-left transition-colors duration-120 ease-out focus-visible:ring-[3px] focus-visible:outline-none";
+
+const LIST_ROW_SHAPES = {
+  inline: "-ml-2 flex min-h-7 w-fit max-w-full items-center gap-2 rounded-md px-2 py-1",
+  panel:
+    "flex w-full min-w-0 items-center py-0 text-3xxs leading-4 aria-pressed:bg-selected-bg aria-pressed:text-fg1 aria-pressed:hover:bg-selected-bg",
+} as const;
+
+const PANEL_ROW_SIZES = {
+  md: "h-7 min-h-7 gap-1 rounded-none pr-2 pl-3",
+  sm: "h-6.5 min-h-0 gap-2 rounded-sm px-1.5",
+} as const;
 
 /** Compact tool disclosure/hover row: 28px, a bg1-hover hover (the canvas's
  * own hover token) and the keyboard ring, drawn as an inset edge plus the
@@ -11,13 +32,15 @@ export type ListRowProps = React.ButtonHTMLAttributes<HTMLButtonElement>;
  * Disclosure state and keyboard behavior belong to the caller; this
  * primitive adds no state or event handlers. */
 const ListRow = React.forwardRef<HTMLButtonElement, ListRowProps>(
-  ({ type = "button", className, ...props }, ref) => (
+  ({ type = "button", variant = "inline", size = "md", className, ...props }, ref) => (
     <button
       {...props}
       ref={ref}
       type={type}
       className={cn(
-        "hover:bg-bg1-hover focus-visible:inset-ring focus-visible:inset-ring-highlighted-bright focus-visible:ring-highlighted-bright/50 -ml-2 flex min-h-7 w-fit max-w-full items-center gap-2 rounded-md px-2 py-1 text-left transition-colors duration-120 ease-out focus-visible:ring-[3px] focus-visible:outline-none",
+        LIST_ROW_FOCUS,
+        LIST_ROW_SHAPES[variant],
+        variant === "panel" && PANEL_ROW_SIZES[size],
         className,
       )}
     />

@@ -60,6 +60,15 @@ interface DesignFillEditorProps {
 const NEW_GRADIENT_START = "#FFFFFF"; // check:ui ignore-line -- authored CSS default
 const NEW_GRADIENT_END = "#000000"; // check:ui ignore-line -- authored CSS default
 
+/** What the Fill field edits, for the Styled-by filter. */
+const FILL_PROPERTIES = [
+  "background-color",
+  "background-image",
+  "background-position",
+  "background-size",
+  "background-repeat",
+] as const;
+
 const FILL_TYPES = [
   { value: "solid", label: "Solid" },
   { value: "gradient", label: "Gradient" },
@@ -124,8 +133,11 @@ export function DesignFillEditor({
   onCancelPreview,
   onCommit,
 }: DesignFillEditorProps) {
-  const origin = useDesignFieldOrigin("background-color");
   const fillType = mixed ? "solid" : classifyDesignFill(image);
+  const origin = useDesignFieldOrigin(
+    fillType === "solid" ? "background-color" : "background-image",
+    FILL_PROPERTIES,
+  );
   const gradient = parseDesignGradient(image);
   const swatch = (
     <span className="relative block size-4 shrink-0 overflow-hidden rounded-sm">
@@ -163,6 +175,8 @@ export function DesignFillEditor({
       data-design-color-field=""
       data-design-style-property="background-color"
       data-design-field-label="Fill"
+      // A token chosen from the card or Alt+Down lands as a solid fill would.
+      data-design-token-companion="background-image:none"
       data-design-origin={origin.mark}
       data-design-filter-out={origin.hidden ? "" : undefined}
       className="group/design-field zd-field relative min-w-0 gap-0 pl-1"

@@ -2,11 +2,16 @@ import { expect } from "@playwright/test";
 
 import { openLayersDrawer } from "./ui-smoke-design-helpers.mjs";
 
+// design-style-card.tsx: how long the card waits after the pointer leaves.
+const CARD_CLOSE_DELAY = 300;
+
 // Where values come from: the Styled-by line and its filter, the dot on a
 // value changed on the layer, dimmed inherited values, the panel's one hover
 // card (and Reset, Use a token, a missing token, a forced value), and Reset
 // from the keyboard. The real runtime resolves every origin in Chromium.
 export async function runDesignStyleOriginsSmoke({ page, check }) {
+  // Time flows normally until a check pauses it; it resumes after.
+  await page.clock.install();
   const origin = new URL(page.url()).origin;
   await page.setViewportSize({ width: 1440, height: 1000 });
   await page.goto(
@@ -69,10 +74,26 @@ export async function runDesignStyleOriginsSmoke({ page, check }) {
     "one card follows the field under the pointer",
     (await card.count()) === 1 && ((await card.textContent()) ?? "").includes("the class .btn--primary"),
   );
+  // With time paused, leave the field for the panel's edge: the close is
+  // pending and the card still shows; entering the card cancels it.
   const box = await card.boundingBox();
-  await page.mouse.move(box.x + box.width - 12, box.y + 12, { steps: 12 });
-  await page.waitForTimeout(500);
-  check("the card stays while the pointer moves into it", (await card.count()) === 1);
+  const fieldBox = await field("background-color").boundingBox();
+  const panelBox = await inspector.boundingBox();
+  const between = { x: panelBox.x + 2, y: fieldBox.y + fieldBox.height / 2 };
+  await page.clock.pauseAt(await page.evaluate(() => Date.now() + 1_000));
+  await page.mouse.move(between.x, between.y);
+  await page.clock.runFor(CARD_CLOSE_DELAY - 50);
+  const pending = (await card.count()) === 1;
+  await page.mouse.move(box.x + box.width - 12, box.y + 12, { steps: 4 });
+  await page.clock.runFor(CARD_CLOSE_DELAY * 4);
+  check("the card stays while the pointer moves into it", pending && (await card.count()) === 1);
+  // The same exit that does not reach the card closes it once the delay ends.
+  await page.mouse.move(between.x, between.y);
+  await page.clock.runFor(CARD_CLOSE_DELAY - 50);
+  const stillOpen = (await card.count()) === 1;
+  await page.clock.runFor(100);
+  check("the close was pending: leaving without entering the card closes it after the delay", stillOpen && (await card.count()) === 0);
+  await page.clock.resume();
   await away();
 
   // Reset from the card: one step, the class value again, one undo back.
@@ -114,6 +135,30 @@ export async function runDesignStyleOriginsSmoke({ page, check }) {
   );
   await inspector.getByRole("button", { name: "Show all" }).click();
   check("Show all brings every field back", (await visible()).includes("border-radius"));
+
+  // Type settings sits in a popover outside the panel; its fields keep the
+  // token shortcut, and choosing a token leaves the popover open.
+  await inspector.getByRole("button", { name: "Type settings", exact: true }).click();
+  const indent = page.locator('[data-design-popover] [data-design-style-property="text-indent"] input');
+  await indent.focus();
+  await page.keyboard.press("Alt+ArrowDown");
+  const typePicker = page.locator("[data-design-token-picker]");
+  await typePicker.waitFor();
+  check("Alt+Down in Type settings opens the token picker for that field", (await typePicker.getAttribute("aria-label")) === "Indent token");
+  await typePicker.locator('[data-design-token-option="--radius-md"]').click();
+  await expect.poll(() =>
+    runtime.locator('[data-oid="home-send"]').evaluate((element) => element.style.getPropertyValue("text-indent")),
+  ).toBe("var(--radius-md)");
+  check("a token chosen there is written and Type settings stays open", (await page.locator("[data-design-popover]").count()) === 1);
+  await inspector.getByRole("button", { name: "Type settings", exact: true }).click();
+  await page.locator("[data-design-popover]").waitFor({ state: "detached" });
+  await page.getByLabel("Design canvas", { exact: true }).focus();
+  await page.keyboard.press("ControlOrMeta+z");
+  await expect.poll(() =>
+    runtime.locator('[data-oid="home-send"]').evaluate((element) => element.style.getPropertyValue("text-indent")),
+  ).toBe("");
+  // The panel takes edits again once the undo has landed.
+  await expect(field("border-radius").locator("input")).toBeEnabled();
 
   // Use a token from the card opens the panel's one picker for that field.
   await layer("home-drawn").click();

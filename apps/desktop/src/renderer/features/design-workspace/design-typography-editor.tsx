@@ -234,6 +234,8 @@ function FontFamilyField({
       className="zd-field pr-0.5"
       data-design-font-family=""
       data-design-origin={origin.mark === "dimmed" ? "dimmed" : undefined}
+      data-design-filter-property="font-family"
+      data-design-filter-out={origin.hidden ? "" : undefined}
     >
       <input
         ref={inputRef}
@@ -340,6 +342,7 @@ export function DesignTypographySection({
   const styledBy = new Set(textStyle.current ? designTextStyleProperties(textStyle.current) : []);
   const colorToken = useDesignStyleToken(details, "color");
   const weightOrigin = useDesignFieldOrigin("font-weight");
+  const overlays = useDesignFieldOverlays();
   const verticalAlignable = textLayer && BLOCK_TEXT_DISPLAYS.has(read("display", "block"));
   const authoredTypography = TYPOGRAPHY_PROPERTIES.some((property) =>
     isAuthored(property),
@@ -406,6 +409,8 @@ export function DesignTypographySection({
                   <InspectorSelect
                     label="Weight"
                     dimmed={weightOrigin.mark === "dimmed"}
+                    filterProperty="font-weight"
+                    filteredOut={weightOrigin.hidden}
                     {...designMixedSelect(
                       mixed("font-weight"),
                       read("font-weight", "400"),
@@ -519,6 +524,13 @@ export function DesignTypographySection({
           padding="none"
           size="md"
           onEscapeKeyDown={keepDesignPopoverWhileEditing}
+          // Portaled outside the panel, whose listener never sees these keys;
+          // the panel's token picker for one of these fields keeps it open.
+          onKeyDownCapture={overlays.fieldShortcut}
+          onInteractOutside={(event) => {
+            if (event.target instanceof Element && event.target.closest("[data-design-token-picker]"))
+              event.preventDefault();
+          }}
         >
           <TypeSettings
             read={read}

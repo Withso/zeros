@@ -163,6 +163,12 @@ const AUTHORED_SHORTHAND_TARGETS: Readonly<Record<string, readonly string[]>> =
     "border-left": ["border-width", "border-style", "border-color"],
     "border-block": ["border-width", "border-style", "border-color"],
     "border-inline": ["border-width", "border-style", "border-color"],
+    "border-radius": [
+      "border-top-left-radius",
+      "border-top-right-radius",
+      "border-bottom-right-radius",
+      "border-bottom-left-radius",
+    ],
     background: [
       "background-color",
       "background-image",

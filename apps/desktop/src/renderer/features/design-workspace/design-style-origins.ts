@@ -191,6 +191,13 @@ function ownSelector(selector: string | undefined, oid: string): boolean {
   return Boolean(found && (found[1] ?? found[2] ?? found[3]) === oid);
 }
 
+/** The layer's own declaration: its style attribute, or an unconditional
+ * rule written for exactly it. One inside @media, @supports or @layer is
+ * named like any other rule; the editor cannot reset it. */
+function ownStyle(style: DesignRuntimeAuthoredStyle, oid: string): boolean {
+  return style.scope === "inline" || (!style.conditional && ownSelector(style.selector, oid));
+}
+
 type Attributed = Pick<
   DesignRuntimeReplacedStyle,
   "origin" | "sourceId" | "component" | "selector" | "subjectClasses"
@@ -258,7 +265,7 @@ function originOfStyle(
   oid: string,
   context: DesignStyleOriginsContext,
 ): DesignStyleOrigin {
-  const own = style.scope === "inline" || ownSelector(style.selector, oid);
+  const own = ownStyle(style, oid);
   if (own) {
     const replaced = style.replaced;
     if (!replaced) {
@@ -329,7 +336,7 @@ function styledByOf(
   const components = new Map<string, string[]>();
   const changed: string[] = [];
   for (const [property, style] of Object.entries(styles)) {
-    if (style.scope === "inline" || ownSelector(style.selector, oid)) {
+    if (ownStyle(style, oid)) {
       if (style.replaced) changed.push(property);
       continue;
     }
@@ -406,8 +413,10 @@ export function designStyleOrigins(
     if (details.baseStyleProperties?.includes(property)) {
       return { kind: "reset", from: "a reset", card: { rows: [{ key: "From", text: "a reset" }] } };
     }
+    // Without the authored list the runtime said nothing either way.
     if (
       INHERITED_PROPERTIES.has(property) &&
+      details.authoredStyleProperties !== undefined &&
       !isDesignRuntimeStylePropertyAuthored(details.authoredStyleProperties, property)
     ) {
       return {

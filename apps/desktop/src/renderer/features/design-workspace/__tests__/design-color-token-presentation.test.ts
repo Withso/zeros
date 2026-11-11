@@ -10,6 +10,7 @@ import { DesignTokenCatalogContext } from "../design-token-context";
 import { InspectorEditField } from "../design-inspector";
 import { DesignFieldOriginsContext, designFieldOrigins } from "../design-field-origins";
 import { DesignFieldOverlays } from "../design-style-card";
+import { DesignFillEditor } from "../design-fill-editor";
 import type { DesignStyleOriginsContext } from "../design-style-origins";
 import {
   DesignTokenPill,
@@ -212,6 +213,37 @@ describe("token field at rest", () => {
     expect(field(designFieldOrigins([changed], originsContext, null))).toContain('data-design-origin="changed"');
     const classGroup = designFieldOrigins([changed], originsContext, null).styledBy!.groups[0]!.key;
     expect(field(designFieldOrigins([changed], originsContext, classGroup))).toContain("data-design-filter-out");
+  });
+});
+
+describe("Fill under the Styled-by filter", () => {
+  const layer = (authoredStyles: NonNullable<Parameters<typeof designFieldOrigins>[0][number]["authoredStyles"]>) => ({
+    sourceVersion: "a".repeat(24), oid: "card", tag: "div", name: "Card", text: null,
+    selector: '[data-oid="card"]', visible: true, breadcrumb: [], rect: { x: 0, y: 0, width: 1, height: 1 },
+    styles: {}, classes: "hero",
+    authoredStyleProperties: Object.keys(authoredStyles),
+    authoredStyles,
+  });
+  const fromHero = { origin: "frame" as const, selector: ".hero", scope: "element" as const, subjectClasses: ["hero"] };
+  const fill = (node: ReturnType<typeof layer>, image: string) => {
+    const unfiltered = designFieldOrigins([node], originsContext, null);
+    const origins = designFieldOrigins([node], originsContext, unfiltered.styledBy!.groups[0]!.key);
+    return render(
+      createElement(
+        DesignFieldOriginsContext.Provider,
+        { value: origins },
+        createElement(DesignFillEditor, { color: "white", image, position: "0% 0%", size: "auto", repeat: "repeat", onCommit: () => {} }),
+      ),
+    );
+  };
+
+  it("stays when the source sets only the gradient or image the field edits", () => {
+    const gradient = "linear-gradient(white, black)";
+    expect(fill(layer({ "background-image": { ...fromHero, value: gradient }, color: { ...fromHero, value: "navy" } }), gradient))
+      .not.toContain("data-design-filter-out");
+    expect(fill(layer({ "background-size": { ...fromHero, value: "cover" }, color: { ...fromHero, value: "navy" } }), "none"))
+      .not.toContain("data-design-filter-out");
+    expect(fill(layer({ color: { ...fromHero, value: "navy" } }), "none")).toContain("data-design-filter-out");
   });
 });
 

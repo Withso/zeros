@@ -5,7 +5,6 @@
 import { useState } from "react";
 import { ChevronDown, ChevronRight } from "lucide-react";
 
-import { cn } from "../../shared/ui/cn";
 import { Button, ListRow } from "../../shared/ui/primitives";
 import type { DesignStyledBy, DesignStyledByGroup } from "./design-style-origins";
 
@@ -32,12 +31,10 @@ export function DesignStyledByLine({
   return (
     <div data-design-styled-by="">
       <ListRow
+        variant="panel"
         aria-label="What styles this layer"
         aria-expanded={open}
-        className={cn(
-          "ml-0 h-7 w-full min-w-0 gap-1 rounded-none py-0 pr-2 pl-3 text-3xxs leading-4",
-          open ? "text-fg2" : "border-border1 text-fg3 border-b",
-        )}
+        className={open ? "text-fg2" : "border-border1 text-fg3 border-b"}
         onClick={() => setOpen((value) => !value)}
       >
         <span className="min-w-0 flex-1 truncate" data-design-styled-by-summary="">
@@ -56,12 +53,11 @@ export function DesignStyledByLine({
             return (
               <ListRow
                 key={group.key}
+                variant="panel"
+                size="sm"
                 aria-pressed={on}
                 data-design-styled-by-source={group.key}
-                className={cn(
-                  "ml-0 grid h-6.5 min-h-0 w-full grid-cols-[84px_minmax(0,1fr)_auto] gap-2 rounded-sm px-1.5 py-0 text-3xxs leading-4",
-                  on ? "bg-bg2 text-fg1" : "text-fg2",
-                )}
+                className="text-fg2 grid grid-cols-[84px_minmax(0,1fr)_auto]"
                 onClick={() => onFilter(on ? null : group.key)}
               >
                 <span className="text-fg3 truncate">{group.label}</span>

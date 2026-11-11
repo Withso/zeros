@@ -79,6 +79,37 @@ describe("ListRow", () => {
   });
 });
 
+describe("ListRow in a panel", () => {
+  const classes = (props: Record<string, unknown>) =>
+    new Set(renderToStaticMarkup(createElement(ListRow, props, "row")).match(/class="([^"]*)"/)![1]!.split(/\s+/));
+
+  it("is a full-width row flush with the panel at its two heights", () => {
+    const line = classes({ variant: "panel" });
+    for (const cls of ["w-full", "min-w-0", "h-7", "rounded-none", "pl-3", "pr-2", "text-3xxs", "leading-4", "hover:bg-bg1-hover", "focus-visible:inset-ring"]) {
+      expect(line, cls).toContain(cls);
+    }
+    expect(line).not.toContain("-ml-2");
+    expect(line).not.toContain("w-fit");
+    const row = classes({ variant: "panel", size: "sm" });
+    for (const cls of ["h-6.5", "min-h-0", "rounded-sm", "px-1.5"]) expect(row, cls).toContain(cls);
+    expect(row).not.toContain("h-7");
+    expect(row).not.toContain("rounded-none");
+  });
+
+  it("fills a pressed row with the selected fill, never bg2", () => {
+    const row = classes({ variant: "panel", size: "sm", "aria-pressed": true });
+    expect(row).toContain("aria-pressed:bg-selected-bg");
+    expect(row).toContain("aria-pressed:hover:bg-selected-bg");
+    expect([...row].some((cls) => /(^|:)bg-bg2$/.test(cls))).toBe(false);
+  });
+
+  it("leaves the inline row as it was", () => {
+    const inline = classes({});
+    expect(inline).toContain("-ml-2");
+    expect([...inline].some((cls) => cls.startsWith("aria-pressed:"))).toBe(false);
+  });
+});
+
 // Regression: a tool row with a file or link target beside its name hovered
 // only its bare name, with no side padding and 4px corners.
 describe("ListRowGroup", () => {

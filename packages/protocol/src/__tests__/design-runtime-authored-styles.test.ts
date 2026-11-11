@@ -409,6 +409,112 @@ describe("where a value comes from, in Chromium", () => {
   });
 });
 
+describe("review fixes for where a value comes from, in Chromium", () => {
+  let browser: Browser;
+  beforeAll(async () => {
+    browser = await chromium.launch({ headless: true });
+  });
+  afterAll(async () => {
+    await browser?.close();
+  });
+
+  // The engine removes a layer's own declaration only from an unconditional
+  // [data-oid] rule (packages/design-web/src/css.ts, mutateDesignNodeStyles);
+  // one inside @media, @supports or @layer is not the layer's to reset.
+  it("does not report a conditional rule written for the layer as its own change", async () => {
+    const page = await fixture(browser, `<style>
+      .btn { color: navy; padding: 4px; }
+      @media (min-width: 1px) { [data-oid="cond"] { color: maroon; } }
+      @supports (display: grid) { [data-oid="cond"] { padding: 2px; } }
+      [data-oid="plain"] { color: maroon; }
+    </style>`, '<button data-oid="cond" class="btn">Cond</button><button data-oid="plain" class="btn">Plain</button>');
+    try {
+      const cond = await details(page, "cond");
+      expect(cond.authoredStyles?.color).toMatchObject({ selector: '[data-oid="cond"]', value: "maroon", conditional: true });
+      expect(cond.authoredStyles?.color?.replaced).toBeUndefined();
+      expect(cond.authoredStyles?.padding).toMatchObject({ value: "2px", conditional: true });
+      expect(cond.authoredStyles?.padding?.replaced).toBeUndefined();
+      expect(isDesignRuntimeAuthoredStyles(cond.authoredStyles)).toBe(true);
+      const plain = await details(page, "plain");
+      expect(plain.authoredStyles?.color).toMatchObject({ value: "maroon", replaced: { selector: ".btn" } });
+      expect(plain.authoredStyles?.color?.conditional).toBeUndefined();
+    } finally {
+      await page.close();
+    }
+  });
+
+  it("names only the classes of the selector branches that match the layer", async () => {
+    const page = await fixture(browser, `<style>
+      .enabled .foo, .disabled .bar { color: red; }
+      .solo { padding: 1px; }
+    </style>`, '<div class="enabled"><div data-oid="both" class="foo bar solo">Both</div></div>');
+    try {
+      const both = await details(page, "both");
+      expect(both.authoredStyles?.color).toMatchObject({ selector: ".enabled .foo, .disabled .bar", subjectClasses: ["foo"] });
+      expect(both.authoredStyles?.padding?.subjectClasses).toEqual(["solo"]);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it("ranks a theme rule by the branch that matches, not an unrelated one", async () => {
+    const page = await fixture(browser, `<style>
+      [data-zd-theme="dark"] .card, #unrelated { background-color: black; }
+      .card.card-x.card-y { background-color: white; }
+    </style>`, '<div data-oid="card" class="card card-x card-y">Card</div>');
+    try {
+      await page.evaluate(() => document.documentElement.setAttribute("data-zd-theme", "light"));
+      const light = await details(page, "card");
+      expect(light.authoredStyles?.["background-color"]).toMatchObject({ value: "white" });
+      expect(light.authoredStyles?.["background-color"]?.themeValues).toBeUndefined();
+      // The real dark theme agrees: the class rule still wins there.
+      await page.evaluate(() => document.documentElement.setAttribute("data-zd-theme", "dark"));
+      expect(await page.locator(".card").evaluate((element) => getComputedStyle(element).backgroundColor)).toBe("rgb(255, 255, 255)");
+    } finally {
+      await page.close();
+    }
+  });
+
+  it("costs a rule with one selector nothing more, and one match per extra branch", async () => {
+    const page = await fixture(browser, `<style>
+      .enabled .foo, .disabled .bar { color: red; }
+      .solo { padding: 1px; }
+      [data-zd-theme="dark"] .card, #unrelated { background-color: black; }
+      .card.card-x.card-y { background-color: white; }
+    </style>`, '<div class="enabled"><div data-oid="both" class="foo bar solo">Both</div></div><div data-oid="card" class="card card-x card-y">Card</div><div data-oid="warm" class="solo">Warm</div>');
+    try {
+      const counts = await page.evaluate(async () => {
+        document.documentElement.setAttribute("data-zd-theme", "light");
+        const runtime = window as unknown as RuntimeWindow;
+        await runtime.detailsRequest("warm");
+        const seen: string[] = [];
+        const matches = Element.prototype.matches;
+        Element.prototype.matches = function (this: Element, selector: string) {
+          seen.push(selector);
+          return matches.call(this, selector);
+        };
+        await runtime.detailsRequest("both");
+        const both = seen.splice(0);
+        await runtime.detailsRequest("card");
+        const card = seen.splice(0);
+        Element.prototype.matches = matches;
+        return { both, card };
+      });
+      // The two-branch rule costs each branch once more than the whole list;
+      // the one-selector rule costs no more than any rule's own match.
+      expect(counts.both.filter((selector) => selector === ".enabled .foo" || selector === ".disabled .bar")).toEqual([".enabled .foo", ".disabled .bar"]);
+      expect(counts.both.filter((selector) => selector === ".solo").length).toBe(
+        counts.both.filter((selector) => selector === ".enabled .foo, .disabled .bar").length,
+      );
+      // The theme pass tests each rewritten branch once, in place of the list.
+      expect(counts.card.filter((selector) => selector === ":root .card" || selector === "#unrelated")).toEqual([":root .card", "#unrelated"]);
+      expect(counts.card.filter((selector) => selector.includes(":root .card,"))).toEqual([]);
+    } finally {
+      await page.close();
+    }
+  });
+});
+
 // Selection cost: element.matches and querySelectorAll calls one
 // getNodeDetails makes on a cold element, against the counts measured before
 // this provenance existed (scratchpad probe on the previous runtime).

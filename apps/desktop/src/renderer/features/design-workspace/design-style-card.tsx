@@ -33,6 +33,19 @@ import { DesignTokenPicker, designFieldEdgeAnchor } from "./design-token-picker"
 const CARD_CLOSE_DELAY = 300;
 const FIELD = "[data-design-style-property]";
 
+/** A field's `data-design-token-companion`: `property:value` pairs separated
+ * by `;`, written with any token chosen for it. */
+function fieldCompanion(field: HTMLElement): Record<string, string> | undefined {
+  const declared = field.getAttribute("data-design-token-companion");
+  if (!declared) return undefined;
+  return Object.fromEntries(
+    declared.split(";").flatMap((pair) => {
+      const colon = pair.indexOf(":");
+      return colon > 0 ? [[pair.slice(0, colon).trim(), pair.slice(colon + 1).trim()]] : [];
+    }),
+  );
+}
+
 function fieldProperties(field: HTMLElement): string[] {
   const property = field.getAttribute("data-design-style-property") ?? "";
   const linked = field.getAttribute("data-design-linked-properties")?.split(" ").filter(Boolean) ?? [];
@@ -78,7 +91,9 @@ export function DesignFieldOverlays({
   ownerKey: string;
   origins: DesignFieldOrigins;
   disabled?: boolean;
-  onChooseToken: (properties: readonly string[], name: string) => void;
+  /** `companion` is what the field itself writes beside a token (Fill clears
+   * a gradient), so a token chosen here lands the same way. */
+  onChooseToken: (properties: readonly string[], name: string, companion?: Record<string, string>) => void;
   onReset: (properties: readonly string[]) => void;
   children: React.ReactNode;
 }) {
@@ -143,31 +158,53 @@ export function DesignFieldOverlays({
       request.trigger?.setAttribute("aria-expanded", "true");
       setPicker(request);
     };
+    const openPickerForField = (field: HTMLElement, trigger?: HTMLElement | null) => {
+      const properties = fieldProperties(field);
+      const accepts = properties[0] ? designTokenFieldTypes(properties[0]) : null;
+      if (!accepts || !accepts.some((type) => catalog.types.has(type))) return false;
+      const pill = field.querySelector<HTMLElement>("[data-design-style-token]");
+      openPicker({
+        field,
+        label: field.getAttribute("data-design-field-label") ?? properties[0]!,
+        accepts,
+        activeName:
+          pill && !pill.hasAttribute("data-design-token-missing")
+            ? pill.getAttribute("data-design-style-token")
+            : null,
+        onChoose: (name) => latest.current.onChooseToken(properties, name, fieldCompanion(field)),
+        trigger: trigger ?? pill,
+      });
+      return true;
+    };
+    const resetField = (element: HTMLElement) => {
+      const field = element.closest<HTMLElement>(FIELD);
+      clearTimers();
+      setCard(null);
+      if (field && !latest.current.disabled) latest.current.onReset(fieldProperties(field));
+    };
     return {
       openPicker,
-      openPickerForField(field, trigger) {
-        const properties = fieldProperties(field);
-        const accepts = properties[0] ? designTokenFieldTypes(properties[0]) : null;
-        if (!accepts || !accepts.some((type) => catalog.types.has(type))) return false;
-        const pill = field.querySelector<HTMLElement>("[data-design-style-token]");
-        openPicker({
-          field,
-          label: field.getAttribute("data-design-field-label") ?? properties[0]!,
-          accepts,
-          activeName:
-            pill && !pill.hasAttribute("data-design-token-missing")
-              ? pill.getAttribute("data-design-style-token")
-              : null,
-          onChoose: (name) => latest.current.onChooseToken(properties, name),
-          trigger: trigger ?? pill,
-        });
-        return true;
-      },
-      resetField(element) {
-        const field = element.closest<HTMLElement>(FIELD);
-        clearTimers();
-        setCard(null);
-        if (field && !latest.current.disabled) latest.current.onReset(fieldProperties(field));
+      openPickerForField,
+      resetField,
+      fieldShortcut(event) {
+        const field = event.target instanceof Element ? event.target.closest<HTMLElement>(FIELD) : null;
+        if (!field || !event.altKey || event.metaKey || event.ctrlKey) return;
+        if (event.key === "Backspace") {
+          // A text input drops its draft first and asks itself.
+          if (event.target instanceof HTMLInputElement) return;
+          event.preventDefault();
+          event.stopPropagation();
+          resetField(field);
+        } else if (event.key === "ArrowDown") {
+          const trigger = event.target instanceof HTMLElement ? event.target : null;
+          if (
+            !latest.current.disabled &&
+            openPickerForField(field, trigger?.hasAttribute("aria-haspopup") ? trigger : null)
+          ) {
+            event.preventDefault();
+            event.stopPropagation();
+          }
+        }
       },
     };
   }, [catalog, closePicker]);
@@ -180,6 +217,11 @@ export function DesignFieldOverlays({
     closeCard();
     closePicker(false);
   }, [closeCard, closePicker, ownerKey]);
+
+  // A hidden retained surface holds no open overlay.
+  useEffect(() => {
+    if (!active) closePicker(false);
+  }, [active, closePicker]);
 
   useEffect(() => {
     const root = rootRef.current;
@@ -195,16 +237,20 @@ export function DesignFieldOverlays({
         setCard(null);
       }, CARD_CLOSE_DELAY);
     };
+    // The control a pending keyboard open is for.
+    let pendingFocus: HTMLElement | null = null;
     const scheduleOpen = (field: HTMLElement, focus: HTMLElement | null) => {
       if (closeTimer.current !== null) window.clearTimeout(closeTimer.current);
       closeTimer.current = null;
       if (cardStateRef.current?.field === field) return;
       if (openTimer.current !== null) window.clearTimeout(openTimer.current);
+      pendingFocus = focus;
       openTimer.current = window.setTimeout(() => {
         openTimer.current = null;
         if (!field.isConnected || pickerRef.current || cardBlocked(root, cardRef.current)) return;
-        // A scroll since may have moved the field from under the pointer.
-        if (!focus && !field.matches(":hover")) return;
+        // A scroll since may have moved the field from under the pointer, and
+        // keyboard focus may have moved on.
+        if (focus ? document.activeElement !== focus : !field.matches(":hover")) return;
         const property = field.getAttribute("data-design-style-property");
         if (property) setCard({ field, property, focus });
       }, delay);
@@ -236,35 +282,23 @@ export function DesignFieldOverlays({
     const focusOut = (event: FocusEvent) => {
       const next = event.relatedTarget;
       if (next instanceof Node && (fieldOf(next) || cardRef.current?.contains(next))) return;
+      // Leaving the panel drops a keyboard card still waiting to open.
+      if (!(next instanceof Node && root.contains(next)) && openTimer.current !== null && pendingFocus === event.target) {
+        window.clearTimeout(openTimer.current);
+        openTimer.current = null;
+      }
       if (cardStateRef.current?.focus) {
         clearTimers();
         setCard(null);
       }
     };
     const keyDown = (event: KeyboardEvent) => {
-      const field = fieldOf(event.target);
       if (event.key === "Escape") {
         clearTimers();
         setCard(null);
         return;
       }
-      if (!field || !event.altKey || event.metaKey || event.ctrlKey) return;
-      if (event.key === "Backspace") {
-        // A text input drops its draft first and asks itself.
-        if (event.target instanceof HTMLInputElement) return;
-        event.preventDefault();
-        event.stopPropagation();
-        apiRef.current.resetField(field);
-      } else if (event.key === "ArrowDown") {
-        const trigger = event.target instanceof HTMLElement ? event.target : null;
-        if (
-          !latest.current.disabled &&
-          apiRef.current.openPickerForField(field, trigger?.hasAttribute("aria-haspopup") ? trigger : null)
-        ) {
-          event.preventDefault();
-          event.stopPropagation();
-        }
-      }
+      apiRef.current.fieldShortcut(event);
     };
     // The panel scrolled under an open card; a pending one checks the field
     // is still under the pointer when it opens.

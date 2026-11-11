@@ -66,12 +66,35 @@ describe("field marks across the selection", () => {
 });
 
 describe("Styled by across the selection", () => {
-  it("shows the line only when every layer shares the same summary", () => {
+  it("shows the line only when every layer has the same sources", () => {
     const one = layer("one", { color: { ...btn, value: "navy" } });
     const two = layer("two", { gap: { ...btn, value: "4px" } });
     const other = layer("other", { color: { ...btn, selector: ".chip", subjectClasses: ["chip"], value: "red" }, gap: { ...btn, selector: ".x", subjectClasses: ["x"], value: "1px" } });
     expect(designFieldOrigins([one, two], context, null).styledBy?.summary).toBe("Styled by 1 class");
     expect(designFieldOrigins([one, other], context, null).styledBy).toBeNull();
+  });
+
+  it("does not share the line between layers styled by different classes with the same count", () => {
+    const button = layer("button", { color: { ...btn, value: "navy" } });
+    const chip = layer("chip", { gap: { ...btn, selector: ".chip", subjectClasses: ["chip"], value: "4px" } }, { classes: "chip" });
+    expect(designFieldOrigins([button], context, null).styledBy?.summary).toBe(
+      designFieldOrigins([chip], context, null).styledBy?.summary,
+    );
+    expect(designFieldOrigins([button, chip], context, null).styledBy).toBeNull();
+    // A filter left from before the selection changed hides nothing.
+    const key = designFieldOrigins([button], context, null).styledBy!.groups[0]!.key;
+    expect(designFieldOrigins([button, chip], context, key).hidden("gap")).toBe(false);
+  });
+
+  it("hides a field while filtering only when no layer's group sets it", () => {
+    const one = layer("one", { color: { ...btn, value: "navy" } });
+    const two = layer("two", { gap: { ...btn, value: "4px" } });
+    const key = designFieldOrigins([one], context, null).styledBy!.groups[0]!.key;
+    const filtered = designFieldOrigins([one, two], context, key);
+    expect(filtered.filter?.key).toBe(key);
+    expect(filtered.hidden("color")).toBe(false);
+    expect(filtered.hidden("gap")).toBe(false);
+    expect(filtered.hidden("padding-top")).toBe(true);
   });
 
   it("hides fields outside a source's properties while it filters", () => {
@@ -80,7 +103,8 @@ describe("Styled by across the selection", () => {
     const changedGroup = origins.styledBy!.groups.find((group) => group.kind === "changed")!;
     const filtered = designFieldOrigins([one], context, changedGroup.key);
     expect(filtered.filter?.key).toBe("changed");
-    expect(filtered.hidden("border-top-left-radius")).toBe(true);
+    // The corner fields edit the longhands border-radius sets.
+    expect(filtered.hidden("border-top-left-radius")).toBe(false);
     expect(filtered.hidden("border-radius")).toBe(false);
     expect(filtered.hidden("color")).toBe(true);
     expect(origins.hidden("color")).toBe(false);

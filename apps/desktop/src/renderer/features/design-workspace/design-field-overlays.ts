@@ -29,12 +29,26 @@ export interface DesignFieldOverlaysApi {
   /** Reset for the field the element belongs to (Alt+Backspace). A text
    * input calls it after dropping its draft, so blur cannot write it back. */
   resetField(element: HTMLElement): void;
+  /** Alt+Down and Alt+Backspace on a field. The panel listens itself; a
+   * portaled surface (Type settings) forwards its key events here. */
+  fieldShortcut(event: DesignFieldShortcutEvent): void;
+}
+
+export interface DesignFieldShortcutEvent {
+  key: string;
+  altKey: boolean;
+  metaKey: boolean;
+  ctrlKey: boolean;
+  target: EventTarget | null;
+  preventDefault(): void;
+  stopPropagation(): void;
 }
 
 const NO_OVERLAYS: DesignFieldOverlaysApi = {
   openPicker: () => {},
   openPickerForField: () => false,
   resetField: () => {},
+  fieldShortcut: () => {},
 };
 
 export const DesignFieldOverlaysContext = createContext<DesignFieldOverlaysApi>(NO_OVERLAYS);

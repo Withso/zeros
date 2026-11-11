@@ -1808,11 +1808,12 @@ export const DesignInspector = React.memo(function DesignInspector({
   const originsContextRef = useRef(originsContext);
   originsContextRef.current = originsContext;
   const chooseFieldToken = useCallback(
-    (properties: readonly string[], name: string) => {
+    (properties: readonly string[], name: string, companion?: Record<string, string>) => {
       const next = `var(${name})`;
-      void commitSelectedStyles(
-        Object.fromEntries(properties.map((property) => [property, next])),
-      ).catch((error) =>
+      void commitSelectedStyles({
+        ...companion,
+        ...Object.fromEntries(properties.map((property) => [property, next])),
+      }).catch((error) =>
         toast.error("Couldn't use the token", { description: errorMessage(error) }),
       );
     },

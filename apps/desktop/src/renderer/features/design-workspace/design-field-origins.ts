@@ -26,7 +26,7 @@ export interface DesignFieldOrigins {
   mark(property: string): DesignFieldMark | undefined;
   /** The first selected layer's origin, which the hover card describes. */
   origin(property: string): DesignStyleOrigin | null;
-  /** Shown only when every selected layer has the same summary. */
+  /** Shown only when every selected layer has the same sources, in order. */
   styledBy: DesignStyledBy | null;
   /** The Styled-by row the panel is narrowed to. */
   filter: DesignStyledByGroup | null;
@@ -51,9 +51,17 @@ export function designFieldOrigins(
   const models = nodes.map((node) => designStyleOrigins(node, context));
   const marks = new Map<string, DesignFieldMark | undefined>();
   const primary = models[0]!.styledBy;
+  const keys = primary?.groups.map((group) => group.key).join("\u0000");
   const styledBy =
-    primary && models.every((model) => model.styledBy?.summary === primary.summary) ? primary : null;
+    primary &&
+    models.every((model) => model.styledBy?.groups.map((group) => group.key).join("\u0000") === keys)
+      ? primary
+      : null;
   const filter = (filterKey && styledBy?.groups.find((group) => group.key === filterKey)) || null;
+  // The rows match by key; each layer's group lists what it sets there.
+  const filterGroups = filter
+    ? models.map((model) => model.styledBy!.groups.find((group) => group.key === filter.key)!)
+    : [];
   const hidden = new Map<string, boolean>();
   return {
     mark(property) {
@@ -75,7 +83,8 @@ export function designFieldOrigins(
     filter,
     hidden(property) {
       if (!filter) return false;
-      if (!hidden.has(property)) hidden.set(property, !designStyleFilterIncludes(filter, property));
+      if (!hidden.has(property))
+        hidden.set(property, !filterGroups.some((group) => designStyleFilterIncludes(group, property)));
       return hidden.get(property)!;
     },
   };
@@ -104,15 +113,22 @@ export function designResetStyles(
 export const DesignFieldOriginsContext = createContext<DesignFieldOrigins>(NO_ORIGINS);
 
 /** The attributes a field carries: its mark on the field, and whether the
- * Styled-by filter hides it on the field's cell. */
-export function useDesignFieldOrigin(property: string | undefined): {
+ * Styled-by filter hides it on the field's cell. A field that edits several
+ * properties passes them all as `edits`: it hides only when the source sets
+ * none of them. */
+export function useDesignFieldOrigin(
+  property: string | undefined,
+  edits?: readonly string[],
+): {
   mark: DesignFieldMark | undefined;
   hidden: boolean;
 } {
   const origins = useContext(DesignFieldOriginsContext);
-  return property
-    ? { mark: origins.mark(property), hidden: origins.hidden(property) }
-    : { mark: undefined, hidden: false };
+  if (!property) return { mark: undefined, hidden: false };
+  return {
+    mark: origins.mark(property),
+    hidden: edits ? edits.every((edited) => origins.hidden(edited)) : origins.hidden(property),
+  };
 }
 
 /** Labels, utility sources and theme names for the workspace the inspector

@@ -58,6 +58,11 @@ describe("design style values", () => {
     expect(
       isDesignRuntimeStylePropertyAuthored(["border"], "border-width"),
     ).toBe(true);
+    for (const corner of ["top-left", "top-right", "bottom-right", "bottom-left"]) {
+      expect(
+        isDesignRuntimeStylePropertyAuthored(["border-radius"], `border-${corner}-radius`),
+      ).toBe(true);
+    }
     expect(isDesignRuntimeStylePropertyAuthored(["all"], "margin-bottom")).toBe(
       true,
     );

@@ -155,6 +155,27 @@ describe("where a field's value comes from", () => {
     expect(origins.of("rotate")).toBeNull();
   });
 
+  it("names a conditional rule written for the layer, with no dot and no Reset", () => {
+    const conditional = designStyleOrigins(
+      details({
+        authoredStyleProperties: ["color"],
+        authoredStyles: { color: { origin: "frame", selector: '[data-oid="send"]', scope: "element", value: "maroon", conditional: true } },
+      }),
+      context,
+    );
+    const origin = conditional.of("color")!;
+    expect(origin.kind).toBe("class");
+    expect(origin.from).toBe('the rule [data-oid="send"]');
+    expect(origin.card.reset).toBeUndefined();
+    expect(conditional.styledBy).toBeNull();
+  });
+
+  it("claims no parent when the runtime could not say which properties are authored", () => {
+    const unknown = designStyleOrigins(details({ authoredStyleProperties: undefined, authoredStyles: undefined, baseStyleProperties: undefined }), context);
+    expect(unknown.of("letter-spacing")).toBeNull();
+    expect(unknown.of("color")).toBeNull();
+  });
+
   it("says a value set on a layer drawn by hand is set here, with no Reset", () => {
     const drawn = designStyleOrigins(
       details({

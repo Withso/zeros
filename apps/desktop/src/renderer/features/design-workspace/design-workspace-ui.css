@@ -1859,14 +1859,20 @@
 }
 
 /* A Styled-by row narrows the panel to what its source sets: fields outside
- * it, and groups and sections left with none, step aside. */
+ * it, and groups and sections left with none, step aside. Font and Weight
+ * count as fields here without being card fields. */
 [data-design-filter-out] {
   display: none;
 }
 
 [data-design-source-filter]
   :is(.zd-section, .zd-group, .zd-section-body > *):not(
-    :has([data-design-style-property]:not([data-design-filter-out], [data-design-filter-out] *))
+    :has(
+      :is([data-design-style-property], [data-design-filter-property]):not(
+          [data-design-filter-out],
+          [data-design-filter-out] *
+        )
+    )
   ) {
   display: none;
 }
