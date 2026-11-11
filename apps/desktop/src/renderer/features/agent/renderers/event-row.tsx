@@ -114,7 +114,7 @@ export const EventRow = memo(function EventRow({
   const status = isTool ? (message as AgentToolMessage).status : undefined;
   const pendingChecks = isTool ? pendingChecksMessage(message) : null;
   const sTone =
-    toneOverride ?? (pendingChecks ? "ok" : isTool ? statusTone(status as any) : undefined);
+    toneOverride ?? (pendingChecks ? "ok" : meta.tone ?? (isTool ? statusTone(status as any) : undefined));
   const expandable = meta.expandable && detail !== undefined && detail !== null;
   const Icon = sTone === "fail" ? CircleX : meta.Icon;
   const surface = isTool

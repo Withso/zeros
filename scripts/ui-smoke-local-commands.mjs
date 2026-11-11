@@ -77,5 +77,20 @@ export async function runLocalCommandsSmoke({ page, harnessBase, check }) {
     expect(await calls()).toEqual(["always:true"]);
     await shoot(page.locator("main"), `local-commands-setting-${theme}`);
     check(`Always allow local commands starts off and turns on from the keyboard in ${theme}`, true);
+
+    await open("view=transcript", theme);
+    const transcript = page.locator("main");
+    await expect(transcript.locator("[data-local-command-row]")).toHaveCount(4);   // the ToolSearch row is hidden
+    for (const [row, said] of [["waiting", "Waiting for approval on Studio"], ["ran", "Ran on Studio"], ["denied", "Denied"], ["exit", "Failed with exit code 3"]]) {
+      const item = transcript.locator(`[data-local-command-row="${row}"]`);
+      await expect(item.getByText("List booted simulators", { exact: true })).toBeVisible();
+      await expect(item.getByText(said, { exact: true })).toBeVisible();
+    }
+    await expect(transcript.getByText("xcrun simctl list devices | grep Booted").first()).toBeVisible();
+    await expect(transcript.getByText(/mcp__|Loading tool/)).toHaveCount(0);
+    await expect(transcript.getByText("Error", { exact: true })).toHaveCount(0);
+    expect(await color(transcript.locator('[data-local-command-row="denied"]').getByText("List booted simulators", { exact: true }), "color")).toBe(await token("--fg1"));
+    await shoot(transcript, `local-command-transcript-${theme}`);
+    check(`RunLocalCommand rows read the description and command with plain-word endings, never mcp__ names, Loading tool or Error, in ${theme}`, true);
   }
 }
