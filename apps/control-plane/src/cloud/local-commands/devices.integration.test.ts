@@ -178,6 +178,26 @@ database("local command devices through the router and PostgreSQL", () => {
     } finally { controller.abort(); await reader.cancel(); }
   });
 
+  // Escaped on Alpha: the stream told a signed-in Mac "session_revoked" when its
+  // five-minute access token ran out; the app stopped for good and showed offline.
+  it("ends the channel without revoking when only the access token expires", async () => {
+    const registered = await register(), controller = new AbortController();
+    owner.authentication.tokenExpiresAt = Math.floor(Date.now()/1000)+4;
+    const response = await app.request(`/v1/cloud-v2/devices/${registered.device.deviceId}/events`, { headers: registered.headers, signal: controller.signal });
+    expect(response.status).toBe(200);
+    const reader = response.body!.getReader(), decoder = new TextDecoder();
+    let text = "";
+    try {
+      for (;;) { const chunk = await reader.read(); if (chunk.done) break; text += decoder.decode(chunk.value, { stream: true }); }
+    } finally { controller.abort(); }
+    expect(text).toContain("event: ready\n");
+    expect(text).not.toContain("event: revoked");
+    expect(Date.now()/1000).toBeLessThan(owner.authentication.tokenExpiresAt);
+    // The same session reconnects with a fresh token.
+    owner.authentication.tokenExpiresAt = Math.floor(Date.now()/1000)+3600;
+    expect((await call(`/v1/cloud-v2/devices/${registered.device.deviceId}/heartbeat`, "POST", undefined, registered.headers)).status).toBe(200);
+  }, 15_000);
+
   it("keeps passive reads lock-free while another transaction holds the workspace and device", async () => {
     const registered = await register(), tx = await pool.connect();
     try {
