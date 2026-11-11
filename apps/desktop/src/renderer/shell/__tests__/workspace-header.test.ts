@@ -265,6 +265,19 @@ describe("Cloud workspace details", () => {
     expect(html).toContain('aria-label="Restart workspace"');
   });
 
+  it("lets a member of an activated workspace restart and stop it as themself, but not a reader or a waiting member", () => {
+    const member = (readOnly: boolean, teamWriting?: true) => ({ ...cloud("ready", false), sharing: { createdByUserId: null, viewerRole: "member", readOnly, canManage: false,
+      following: false, pinned: false, followerIds: [], followerCount: 0, ...(teamWriting ? { teamWriting, canExecute: !readOnly } : {}) } }) as CloudWorkspaceDocument;
+    const writer = card({ workspace: member(false, true) });
+    expect(writer).toContain('aria-label="Restart workspace"');
+    expect(text(writer)).toContain("Stop workspace");
+    for (const workspace of [member(true), member(true, true)]) {
+      const html = card({ workspace });
+      expect(html).not.toContain('aria-label="Restart workspace"');
+      expect(text(html)).not.toContain("Stop workspace");
+    }
+  });
+
   it("names who created it beside its age when the creator is known", () => {
     const shown = text(card({ creatorName: "Alex Rivera" }));
     expect(shown.slice(shown.indexOf("Created"), shown.indexOf("Created") + 2)).toEqual(["Created", "Alex Rivera · 3d ago"]);

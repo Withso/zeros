@@ -135,3 +135,10 @@ it.each(["queued", "inboxed", "dispatching", "accepted"] as const)("anchors a %s
   const turns = groupMessagesIntoTurns(projectCloudPromptSession(slot).messages);
   expect(cloudPromptTurnActivity(slot, turns, turns.length - 1)).toMatchObject({ active: true, startedAt: 1234 });
 });
+it("presents a shared workspace's agent-login refusal as the person's own provider sign-in, on that message", () => {
+  const record = journal();
+  Object.assign(record.entries[0]!, { phase: "refused", failure: "Connect your Claude account to send messages in this workspace.", refusal: { code: "agent_login_required", agent: "claude" } });
+  const row = cloudPromptView(record, "ready").rows.find(value => value.id === "one")!;
+  expect(row.recoveryFailure).toEqual({ kind: "auth-required", message: "Connect your Claude account to send messages in this workspace.",
+    cloud: { source: "provider", provider: "claude", reason: "auth-required" }, ownAccount: true });
+});

@@ -166,3 +166,17 @@ describe("persistent turn failure card", () => {
     expect(html).not.toContain("<script>");
   });
 });
+
+describe("a shared workspace's own-account refusal", () => {
+  const recoveryFailure = { kind: "auth-required", message: "Connect your Claude account to send messages in this workspace.",
+    cloud: { source: "provider" as const, provider: "claude" as const, reason: "auth-required" as const }, ownAccount: true as const };
+  it("keeps its message and offers the person's own account, then a retry of the unsent message", () => {
+    const failure = turnFailureForCard({ events: [], turnId: "one", recoveryFailure, status: "failed" })!;
+    expect(failure).toMatchObject({ message: recoveryFailure.message, cloud: recoveryFailure.cloud, ownAccount: true });
+    const onReconnect = vi.fn(), onRetry = vi.fn();
+    const html = renderToStaticMarkup(createElement(TurnFailureCard, { failure, onReconnect, onRetry }));
+    expect(html).toContain("Connect your Claude account");
+    expect(html).not.toContain("Reconnect provider account");
+    expect(html).toContain("Retry");
+  });
+});
