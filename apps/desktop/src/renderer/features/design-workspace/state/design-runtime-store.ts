@@ -15,6 +15,8 @@ import type {
 } from "@zeros/protocol/design-runtime";
 import { create } from "zustand";
 
+import { noteDesignHeldReplyRefused } from "./design-held-state";
+
 const MAX_WORKSPACES = 32;
 const MAX_FRAMES_PER_WORKSPACE = 24;
 const MAX_DETAILS_PER_FRAME = 32;
@@ -110,6 +112,12 @@ interface DesignRuntimeStore {
   ): void;
   forgetWorkspace(workspaceId: string): void;
   retireFrame(workspaceId: string, frame: string): void;
+}
+
+/** A reply read while its layer was held in a state shows that state, not
+ * the layer; only the held-state slot may keep it. */
+function isHeldReply(details: DesignRuntimeNodeDetails): boolean {
+  return details.heldState !== undefined;
 }
 
 function nodeKey(nodeId: string | null): string {
@@ -363,6 +371,7 @@ function sameNodeDetails(
       left.authoredStyleProperties,
       right.authoredStyleProperties,
     ) &&
+    sameStringArray(left.states, right.states) &&
     sameStringRecord(left.styles, right.styles),
   );
 }
@@ -470,12 +479,12 @@ function updateWorkspace(
   return { byWorkspace, workspaceIdByFolder };
 }
 
-export const useDesignRuntimeStore = create<DesignRuntimeStore>((set) => ({
+export const useDesignRuntimeStore = create<DesignRuntimeStore>((set, get) => ({
   byWorkspace: {},
   workspaceIdByFolder: {},
 
   publishSnapshot(workspaceId, folder, frame, snapshot, sourceVersion) {
-    if (snapshot.sourceVersion !== sourceVersion) return;
+    if (snapshot.sourceVersion !== sourceVersion || isHeldReply(snapshot.frame)) return;
     set((state) => {
       const workspace = state.byWorkspace[workspaceId];
       const current = workspace?.frames[frame];
@@ -506,6 +515,18 @@ export const useDesignRuntimeStore = create<DesignRuntimeStore>((set) => ({
 
   publishNodeDetails(workspaceId, folder, frame, details, sourceVersion, options) {
     if (details.sourceVersion !== sourceVersion) return;
+    if (isHeldReply(details)) {
+      noteDesignHeldReplyRefused({
+        workspaceId,
+        frame,
+        sourceVersion,
+        nodeId: details.oid,
+        hasDefault: () =>
+          get().byWorkspace[workspaceId]?.frames[frame]?.detailsByNode[details.oid]?.sourceVersion === sourceVersion,
+        publish: (next) => get().publishNodeDetails(workspaceId, folder, frame, next, sourceVersion),
+      });
+      return;
+    }
     set((state) => {
       const existing = state.byWorkspace[workspaceId]?.frames[frame];
       const existingWorkspace = state.byWorkspace[workspaceId];
@@ -637,10 +658,11 @@ export const useDesignRuntimeStore = create<DesignRuntimeStore>((set) => ({
                 );
           let detailOrder = options.dropUnrefreshed
             ? ownedFrame.detailOrder.filter((nodeId) =>
-                details.some((value) => value.oid === nodeId),
+                details.some((value) => value.oid === nodeId && !isHeldReply(value)),
               )
             : ownedFrame.detailOrder;
           for (const value of details) {
+            if (isHeldReply(value)) continue;
             rebasedDetails[value.oid] = value;
             detailOrder = touchOrder(
               detailOrder,
@@ -694,6 +716,7 @@ export const useDesignRuntimeStore = create<DesignRuntimeStore>((set) => ({
           const detailsByNode: Record<string, DesignRuntimeNodeDetails> = {};
           let detailOrder: string[] = [];
           for (const value of details) {
+            if (isHeldReply(value)) continue;
             detailsByNode[value.oid] = value;
             detailOrder = touchOrder(detailOrder, value.oid, MAX_DETAILS_PER_FRAME);
           }

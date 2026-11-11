@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import type { DesignRuntimeNodeDetails } from "@zeros/protocol/design-runtime";
 import {
+  designHeldStateChanges,
+  designStateLabel,
   designStyleFilterIncludes,
   designStyleOrigins,
   type DesignStyleOriginsContext,
@@ -170,6 +172,46 @@ describe("where a field's value comes from", () => {
     expect(conditional.styledBy).toBeNull();
   });
 
+  it("says a held state's value comes from its rule on that state", () => {
+    const held = designStyleOrigins(
+      details({
+        heldState: "hover",
+        authoredStyleProperties: ["background-color", "color"],
+        authoredStyles: {
+          "background-color": { origin: "frame", selector: ".btn:hover", scope: "element", subjectClasses: ["btn"], value: "blue", state: "hover" },
+          color: { origin: "frame", selector: ".btn:disabled", scope: "element", subjectClasses: ["btn"], value: "gray", state: "disabled" },
+        },
+      }),
+      context,
+    );
+    expect(held.of("background-color")!.from).toBe("the class .btn, on hover");
+    expect(held.of("background-color")!.card.rows).toContainEqual({ key: "From", text: "the class .btn, on hover" });
+    expect(held.of("color")!.from).toBe("the class .btn, when disabled");
+  });
+
+  it("names the states as the menu does", () => {
+    expect(["hover", "focus", "focus-visible", "active", "disabled"].map((state) => designStateLabel(state as never))).toEqual([
+      "Hover", "Focus", "Focus visible", "Active", "Disabled",
+    ]);
+  });
+
+  it("counts what a held state changes, a shorthand once with its longhands", () => {
+    const style = (value: string, state?: "hover") => ({ origin: "frame" as const, selector: state ? ".btn:hover" : ".btn", scope: "element" as const, value, ...(state ? { state } : {}) });
+    const changes = designHeldStateChanges(details({
+      heldState: "hover",
+      authoredStyles: {
+        "background-color": style("blue", "hover"),
+        padding: style("4px", "hover"),
+        "padding-top": style("4px", "hover"),
+        "padding-left": style("4px", "hover"),
+        color: style("navy"),
+      },
+    }));
+    expect(changes.count).toBe(2);
+    expect(changes.properties).toEqual(["background-color", "padding", "padding-top", "padding-left"]);
+    expect(designHeldStateChanges(details({ heldState: "hover", authoredStyles: { color: style("navy") } })).count).toBe(0);
+  });
+
   it("claims no parent when the runtime could not say which properties are authored", () => {
     const unknown = designStyleOrigins(details({ authoredStyleProperties: undefined, authoredStyles: undefined, baseStyleProperties: undefined }), context);
     expect(unknown.of("letter-spacing")).toBeNull();
@@ -189,9 +231,31 @@ describe("where a field's value comes from", () => {
     expect(drawn.of("width")).toEqual({
       kind: "set-here",
       from: "this layer",
-      card: { rows: [{ key: "Value", text: "40, set on this layer" }] },
+      card: { rows: [{ key: "Value", text: "40, set on this layer" }], clear: { properties: ["width"], text: "Clear" } },
     });
     expect(drawn.styledBy).toBeNull();
+  });
+
+  it("offers Clear for a value set in the layer's style, written whole as declared", () => {
+    const set = designStyleOrigins(
+      details({
+        classes: undefined,
+        authoredStyleProperties: ["padding"],
+        baseStyleProperties: undefined,
+        authoredStyles: { padding: { origin: "inline", scope: "inline", value: "4px" } },
+      }),
+      context,
+    );
+    expect(set.of("padding-left")?.card.clear).toEqual({ properties: ["padding"], text: "Clears padding on all sides" });
+    // A rule written for the layer is cleared only through its own Reset.
+    const own = designStyleOrigins(
+      details({
+        authoredStyleProperties: ["color"],
+        authoredStyles: { color: { origin: "frame", selector: '[data-oid="send"]', scope: "element", value: "red" } },
+      }),
+      context,
+    );
+    expect(own.of("color")?.card.clear).toBeUndefined();
   });
 
   it("shows a colour the way the colour field does; names stay as written", () => {

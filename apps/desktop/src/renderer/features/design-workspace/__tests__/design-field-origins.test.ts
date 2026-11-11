@@ -113,6 +113,26 @@ describe("Styled by across the selection", () => {
   });
 });
 
+describe("a held state's filter", () => {
+  it("shows only what the state changes, and offers no Styled-by filter of its own", () => {
+    const held = layer("held", {
+      color: { ...btn, selector: ".btn:hover", value: "blue", state: "hover" },
+      gap: { ...btn, value: "4px" },
+      "border-radius": changed("8px"),
+    }, { heldState: "hover" });
+    const origins = designFieldOrigins([held], context, null, { properties: ["color"] });
+    expect(origins.filter).not.toBeNull();
+    expect(origins.hidden("color")).toBe(false);
+    expect(origins.hidden("gap")).toBe(true);
+    expect(origins.hidden("border-radius")).toBe(true);
+    // A state that changes nothing here hides every field.
+    expect(designFieldOrigins([held], context, null, { properties: [] }).hidden("color")).toBe(true);
+    // A Styled-by key passed alongside is ignored while held.
+    const key = designFieldOrigins([held], context, null).styledBy!.groups[0]!.key;
+    expect(designFieldOrigins([held], context, key, { properties: ["color"] }).hidden("gap")).toBe(true);
+  });
+});
+
 describe("Reset", () => {
   it("removes each layer's own declaration whole and leaves the others alone", () => {
     const own = layer("own", { padding: changed("2px", "padding") });
@@ -129,6 +149,11 @@ describe("Reset", () => {
     expect(designResetStyles([sides], context, ["padding-left", "padding-right"])).toEqual([
       { nodeId: "sides", styles: { "padding-left": null, "padding-right": null } },
     ]);
+  });
+
+  it("clears a value set on the layer's own style that replaces nothing", () => {
+    const drawn = layer("drawn", { width: { origin: "inline", scope: "inline", value: "40px" } }, { classes: undefined });
+    expect(designResetStyles([drawn], context, ["width"])).toEqual([{ nodeId: "drawn", styles: { width: null } }]);
   });
 
   it("has nothing to reset where no layer changed the value", () => {

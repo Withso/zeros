@@ -1401,8 +1401,9 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
       "design-frame-style-commit",
     ),
   );
+  // Clearing the frame's own opacity is Alt+Backspace now; emptying restores.
   await frameOpacity.fill("");
-  await page.keyboard.press("Enter");
+  await page.keyboard.press("Alt+Backspace");
   await waitFor(
     () =>
       homeRuntime
@@ -1548,27 +1549,31 @@ export async function runDesignWorkspaceCanvasSmoke({ page, waitFor, check }) {
   const untouchedPaddingUnit =
     untouchedPaddingTop.getByLabel("Unit for Word gap");
   await untouchedPaddingUnit.click();
-  await page.getByRole("option", { name: "em", exact: true }).click();
+  // The unit menu converts: 12px is 0.75rem at the 16px root.
+  await page.getByRole("option", { name: "rem", exact: true }).click();
   check(
-    "a numeric field changes units without rewriting its value",
+    "a numeric field's unit menu converts its value",
     await waitFor(
       () =>
         homeRuntime
           .locator('[data-oid="home-heading"]')
           .evaluate(
             (element) =>
-              element.style.getPropertyValue("word-spacing") === "12em",
+              element.style.getPropertyValue("word-spacing") === "0.75rem",
           )
           .catch(() => false),
       "design-style-unit-percent",
     ),
   );
-  // An empty field means "remove the authored declaration", so this restores
-  // the fixture without leaving a 0px of its own behind.
+  // An emptied field restores its value; Alt+Backspace on it clears the
+  // layer's own declaration, leaving no 0px of its own behind.
   await untouchedPaddingInput.fill("");
   await page.keyboard.press("Enter");
+  await expect(untouchedPaddingInput).toHaveValue("0.75");
+  await untouchedPaddingInput.fill("");
+  await page.keyboard.press("Alt+Backspace");
   check(
-    "clearing a numeric field removes the authored declaration",
+    "an emptied field restores its value, and Alt+Backspace clears the layer's own",
     await waitFor(
       () =>
         homeRuntime

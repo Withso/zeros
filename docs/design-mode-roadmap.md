@@ -1919,6 +1919,98 @@ original unsnapped geometry writes nothing and preserves authored sizing.
   Detach, a forced value names its rule. The token picker is likewise one
   instance per panel. The engine's per-field `design.provenance` read and its
   hint dot are gone.
+- **Layer states (view only):** a layer whose own rules give it `:hover`,
+  `:focus`, `:focus-visible`, `:active` or `:disabled` reports `states` on its
+  details (menu order; Focus and Focus visible only for a focusable element,
+  Disabled only for one that can be disabled), found from the rule index by
+  matching each selector branch without its state, with no
+  `querySelectorAll`: 5 `element.matches` for a class-styled button with five
+  states, none for a layer no state rule names. The header's State button
+  ("Layer state"; Default, then the offered states) holds one: the runtime
+  copies each matching rule into a runtime-owned `<style
+  data-zeros-runtime-state>` with the state written as
+  `[data-zd-state~="hover"]`, keeping the rule's `@layer`, `@media` and
+  `@supports` and its specificity, and sets `data-zd-state` on the layer
+  (Focus visible also applies Focus; Active also applies Hover). One level of
+  `&` nesting under a single plain selector resolves, so Tailwind v4's nested
+  `&:hover { @media (hover: hover) {…} }` variants are found. Hold and
+  release change no source and bump no revision: replies carry `heldState`,
+  the runtime store refuses them and a held slot keyed by workspace, frame,
+  generation and layer keeps them; Back to Default paints the retained
+  Default box at once. While held the panel shows only what the state
+  changes ("Hover changes 2 properties. The rest matches Default."; "changes
+  nothing here" at 0), the hover card names "the class .btn, on hover" and
+  offers nothing, and no field, shortcut, picker, Type settings or Styled-by
+  row edits (document-level capture, so portaled popovers are covered: a
+  popover whose trigger is in the panel, or one with no trigger such as the
+  token picker; the theme editor's colour picker stays usable). Stepping
+  arrows with any modifier, cut and paste are dropped; Tab, Escape, undo,
+  redo and copy pass. A hold still waiting for its reply counts as held for
+  this and for every commit, since the frame may already show it. A new
+  selection, page, frame or generation, a hidden surface, the CSS tab
+  (which edits Default), a canvas gesture that passes its drag threshold, a
+  theme that changes (re-applying the shown one keeps it), and any edit the
+  runtime receives (it lets go itself and says `stateReleased`) all release;
+  a click that only re-selects the held layer keeps it. A reply read inside
+  the held layer (its child, say, when it is selected or hovered) is refused
+  by the store and read again as Default once the hold is gone, unless the
+  store already has that layer's Default details. Captures (Export PNG, drag
+  ghosts), every snapshot the runtime produces and every read of a layer
+  outside the held one (a sibling the state pushes along, a parent it
+  resizes, a hover over either) set the state aside for their synchronous
+  span, so no unmarked reply carries what the state moved, a held frame root
+  never reaches `snapshot.frame`, and the store refuses a snapshot whose
+  frame is marked held. An edit that awaits reads (a layout action) checks
+  again before it writes and drops any read that came back held. Single
+  selection, Local workspaces only. Known limits:
+  a copy sits after every original rule of its layer, so a later rule of
+  equal specificity that beats the state for real loses to the held copy
+  (pinned by a protocol test); states on an ancestor (`.row:hover .label`),
+  inside functional pseudo-classes (`:is(:hover)`, `:not(:hover)`, kept as
+  written), in an anonymous `@layer`, under deeper nesting or a selector
+  list parent, in container or scope queries, and in shadow roots are not
+  offered; the note's property count can include a property the panel has
+  no field for.
+- **Field values:** a field refuses a value CSS rejects rather than writing
+  something else. A typed negative where CSS takes none (sizes, padding, gap,
+  radius, border width, font size, durations; `designStyleFieldRefusal`)
+  writes nothing, restores the field and says "Width cannot be negative. Kept
+  120." with the field's visible name and the value as it shows. An emptied
+  field restores its value; X, Y and rotation, which have no menu, keep empty
+  as removing the offset. Removal moved to the hover card: a value set on the
+  layer that replaces nothing offers Clear (one undoable step, also
+  Alt+Backspace under Reset's rule), shown only where Reset is not; Reset
+  stays for a value over a class or component. Both paint their preview
+  before the write. Maths works in one unit (`24*2`, `+8`, `x/2`, `50%/2` →
+  `25%`, `evaluateDesignNumericExpression`); mixed units ("Use CSS for mixed
+  units.") and division by zero are refused, and a negative result follows
+  the rule above. A plain authored length with a unit shows as written
+  (`50%` reads 50 with %, `1rem` reads 1 with rem; `designAuthoredLength`);
+  tokens, `calc()` and unitless values still show what they resolve to. The
+  unit menu (on fields with one) converts the value, not just its unit
+  (`convertDesignLength`, two decimals for % and rem, whole px in a whole
+  field): px, % and rem when their basis is known, the unit already written,
+  and Auto only for margins and flex-basis. Percent measures against the
+  runtime's `layout.percentBasis`, read from the parent style `layoutOf`
+  already has (content width in flow; padding box for an absolute layer
+  whose offset parent is its parent; omitted for grid parents, fixed and
+  slotted layers, where it is not definite); height percentages in flow, and
+  radius, are not offered. A font size offers em and % only when it is
+  already written in one, deriving the parent size from the ratio. On a
+  Mixed field a scrub or arrow moves each layer by the same step from its
+  own value in its own unit (`designMixedScrubValues`; geometry through the
+  layout actions with `bases` captured at the start, so a preview and its
+  commit agree), one preview call per tick and one transaction and undo on
+  commit, while the field keeps reading Mixed; a layer with no number is
+  left out and the message says so once ("2 layers moved. 1 has no number
+  to move."). These messages share one surface per panel
+  (`showFieldMessage` on the field overlays): mounted only while shown,
+  anchored under the field, gone on the next key or pointer in the panel or
+  after 3 s on the page clock, announced by the panel's one polite live
+  region, never focused. Measured on the harness: percentBasis adds no
+  `getComputedStyle` beyond the parent read (a protocol test holds the
+  count), and a Mixed scrub tick renders each field no more than a
+  single-layer tick and reads no bridge details.
 - **Token picker:** `design-token-catalog.ts` derives each token's types from
   its resolved value (colour, length, percentage, number, weight, font
   family, shadow, duration, easing; aliases resolve, cycles and undeclared
@@ -2069,13 +2161,14 @@ original unsnapped geometry writes nothing and preserves authored sizing.
   an opaque white fill, and explicit dimensions. Opacity is displayed as a
   percentage. Text layers keep text semantics: Fill edits `color`, and the
   inspector does not offer conversion into a layout container or a background.
-  Numeric fields settle on what can be stored instead of failing on commit:
-  frame W/H stay within 1–16,384 and X/Y within ±1,000,000, and a negative
-  size, padding, gap, radius, border width, font size or duration becomes 0
-  (the engine writes declarations verbatim, so `padding-top:-10px` would
-  persist a declaration the browser ignores); each component of a shorthand
-  settles on its own (`-5px 10px` → `0px 10px`). Margins, insets, letter
-  spacing, offsets and delays keep negative values. Frame W/H edits are built
+  Ranged fields settle on what can be stored instead of failing on commit:
+  frame W/H stay within 1–16,384, X/Y within ±1,000,000, and opacity and the
+  like within their range. A typed negative size, padding, gap, radius,
+  border width, font size or duration is refused instead (see Field values
+  below; the engine writes declarations verbatim, so `padding-top:-10px`
+  would persist a declaration the browser ignores), including one component
+  of a shorthand (`-5px 10px`); a scrub or arrow stops at 0. Margins, insets,
+  letter spacing, offsets and delays keep negative values. Frame W/H edits are built
   in the mutation lane from the confirmed frame, so W then H typed before the
   first save replies keep both. A value saved elsewhere while a field is
   focused but untouched is adopted when the field settles, never written back

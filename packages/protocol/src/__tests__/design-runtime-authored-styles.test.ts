@@ -220,16 +220,37 @@ describe("winning authored declarations in Chromium", () => {
     }
   });
 
+  // One level of nesting under a simple parent resolves the way Tailwind v4
+  // emits its variants; anything deeper is left to the computed value.
   it.each([
-    ".card { color: var(--outer); & { color: var(--inner); } }",
-    ".wrapper { .card { color: var(--inner); } }",
-    ".card { @media (min-width: 1px) { color: var(--inner); } }",
-  ])("uses computed values when nesting can override a declaration: %s", async (nested) => {
+    [".card { color: var(--outer); & { color: var(--inner); } }", ".card"],
+    [".wrapper { .card { color: var(--inner); } }", ".wrapper .card"],
+    [".card { @media (min-width: 1px) { color: var(--inner); } }", ".card"],
+  ])("resolves one level of nesting to the rule that wins: %s", async (nested, selector) => {
     const scoped = await fixture(browser, `<style>
       :root { --outer: red; --inner: blue; }
       .card { color: var(--outer); padding: 4px; }
       ${nested}
     </style>`, '<div class="wrapper"><div data-oid="card" class="card">Card</div></div>');
+    try {
+      expect(await scoped.locator(".card").evaluate((element) => getComputedStyle(element).color)).toBe("rgb(0, 0, 255)");
+      const card = await details(scoped, "card");
+      expect(card.authoredStyles?.color).toMatchObject({ selector, value: "var(--inner)" });
+      expect(card.authoredStyles?.padding).toMatchObject({ value: "4px" });
+    } finally {
+      await scoped.close();
+    }
+  });
+
+  it.each([
+    ".wrapper { .inner { .card { color: var(--inner); } } }",
+    ".wrapper, .other { .card { color: var(--inner); } }",
+  ])("uses computed values when deeper nesting can override a declaration: %s", async (nested) => {
+    const scoped = await fixture(browser, `<style>
+      :root { --outer: red; --inner: blue; }
+      .card { color: var(--outer); padding: 4px; }
+      ${nested}
+    </style>`, '<div class="wrapper"><div class="inner"><div data-oid="card" class="card">Card</div></div></div>');
     try {
       expect(await scoped.locator(".card").evaluate((element) => getComputedStyle(element).color)).toBe("rgb(0, 0, 255)");
       const card = await details(scoped, "card");
@@ -258,18 +279,27 @@ describe("winning authored declarations in Chromium", () => {
     }
   });
 
-  it("does not attribute a nested token override to an ancestor's declaration", async () => {
+  it("attributes a nested token override to the nested rule, not an ancestor's declaration", async () => {
     const scoped = await fixture(browser, `<style data-zeros-source="tokens.css">
       :root { --brand: red; }
       .card { color: var(--brand); & { --brand: blue; } }
     </style>`, '<div data-oid="card" class="card">Card</div>');
+    const deep = await fixture(browser, `<style data-zeros-source="tokens.css">
+      :root { --brand: red; }
+      .card { color: var(--brand); & { & { --brand: green; } } }
+    </style>`, '<div data-oid="deep" class="card">Deep</div>');
     try {
       expect((await details(scoped, "card")).authoredStyles?.color).toMatchObject({
-        value: "var(--brand)", tokens: [{ name: "--brand", value: "blue" }],
+        value: "var(--brand)", tokens: [{ name: "--brand", value: "blue", origin: "linked", file: "tokens.css" }],
       });
-      expect((await details(scoped, "card")).authoredStyles?.color?.tokens?.[0]?.origin).toBeUndefined();
+      // Two levels down stays uncertain: the value is reported, the origin is not.
+      expect((await details(deep, "deep")).authoredStyles?.color).toMatchObject({
+        value: "var(--brand)", tokens: [{ name: "--brand", value: "green" }],
+      });
+      expect((await details(deep, "deep")).authoredStyles?.color?.tokens?.[0]?.origin).toBeUndefined();
     } finally {
       await scoped.close();
+      await deep.close();
     }
   });
 });
@@ -480,6 +510,38 @@ describe("review fixes for where a value comes from, in Chromium", () => {
       });
       // Two rules for the layer: Reset cannot pick one, so it is not offered.
       expect((await details(page, "twice")).authoredStyles?.color?.replaced).toBeUndefined();
+    } finally {
+      await page.close();
+    }
+  });
+
+  // The engine reads a nested rule's selector as written (&), so one level
+  // of nesting resolved for provenance is still not the layer's to reset.
+  it("does not report a nested rule that resolves to the layer as its own change", async () => {
+    const page = await fixture(browser, `<style>
+      .btn { color: navy; }
+      [data-oid="nested"] { & { color: maroon; } }
+    </style>`, '<button data-oid="nested" class="btn">Nested</button>');
+    try {
+      const nested = await details(page, "nested");
+      expect(nested.authoredStyles?.color).toMatchObject({ selector: '[data-oid="nested"]', value: "maroon", conditional: true });
+      expect(nested.authoredStyles?.color?.replaced).toBeUndefined();
+    } finally {
+      await page.close();
+    }
+  });
+
+  // CSSOM writes a class that starts with a digit (2xl:) as \32 xl…; the
+  // space ends the escape, not the compound.
+  it("names a class that starts with a digit", async () => {
+    const page = await fixture(browser, `<style>
+      .\\32xl\\:p-4 { padding: 4px; }
+      .wrap .\\31 23 { gap: 2px; }
+    </style>`, '<div class="wrap"><div data-oid="digit" class="2xl:p-4 123">Digit</div></div>');
+    try {
+      const digit = await details(page, "digit");
+      expect(digit.authoredStyles?.padding?.subjectClasses).toEqual(["2xl:p-4"]);
+      expect(digit.authoredStyles?.gap?.subjectClasses).toEqual(["123"]);
     } finally {
       await page.close();
     }
