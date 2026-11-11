@@ -31,9 +31,9 @@ branch-writing workflows ship disabled; repository configuration enables them.
    the **current** frozen SHA; a write already in flight may finish before that
    acknowledgment. Human pushes remain possible while held and require a fresh
    acknowledgment and current-head checks. Removing the label resumes updates.
-6. The owner merges when integration and required checks are ready. Root manifest
-   and lockfile changes are CI-definition changes under `docs/ci.md`, so
-   `pnpm agent:merge` continues to refuse these PRs. A later upstream version
+6. The owner decides when the upgrade lands, once integration and required
+   checks are ready. Root manifest and lockfile changes are CI-definition
+   changes under `docs/ci.md`; `pnpm agent:merge` names them. A later upstream version
    opens the next PR from the actual main pin.
 
 ### Runtime pin parity

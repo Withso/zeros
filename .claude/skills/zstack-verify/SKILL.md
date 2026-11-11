@@ -24,10 +24,10 @@ never with a disable comment, unless the merge base already has it.
 | Electron IPC or preload | `pnpm check:preload` and the relevant Electron tests |
 | `apps/control-plane/` | `pnpm test:control-plane`, `pnpm --dir apps/control-plane typecheck` |
 | Control-plane concurrency, locks or transactions | Label the PR `ci:control-plane-db`: without it the full database lane runs only after merge, where a timing race turns `main` red. |
-| `.github/workflows/` | `pnpm check:actions` (owner merge required) |
+| `.github/workflows/` | `pnpm check:actions` |
 | Migrations, packaging, protocol or deploy paths | the matching `check:*` scripts in `package.json` |
 | Runtime dependencies or packaged assets | `pnpm check:licenses` |
-| Agent runtime pins (Codex, Claude, Cursor SDK/CLI) | Move Local and `apps/cloud-worker` to the same exact version in one PR, with the worker's `VERSIONS` and `CURSOR_VERSION`; run `scripts/__tests__/agent-runtime-pin-parity.test.ts`, the cloud-worker suite and `pnpm check:licenses` (owner merge: lockfile) |
+| Agent runtime pins (Codex, Claude, Cursor SDK/CLI) | Move Local and `apps/cloud-worker` to the same exact version in one PR, with the worker's `VERSIONS` and `CURSOR_VERSION`; run `scripts/__tests__/agent-runtime-pin-parity.test.ts`, the cloud-worker suite and `pnpm check:licenses` |
 | `zeros-engine.ts` dispatch, or an object the engine constructs | the whole `apps/desktop/src/engine/__tests__/` and `apps/desktop/electron/__tests__/` directories |
 | A wire or shared helper used across features | the whole root suite: coupled suites fail far from the edit |
 | Engine lifecycle | `pnpm smoke:engine`, on macOS only |
