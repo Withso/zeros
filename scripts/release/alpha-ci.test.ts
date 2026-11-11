@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { assertRequiredCI, waitForRequiredCI } from "./ci";
 import { githubClient } from "./github";
-import { ALPHA_REQUIRED_CI, CandidateSupersededError } from "./alpha-ci";
+import { ALPHA_REQUIRED_CI, alphaRequiredChecks, CandidateSupersededError, mergeGroupPreflight } from "./alpha-ci";
 
 const candidate = { repository: "example/zeros", sourceSha: "a".repeat(40), branch: "main" };
 const preflight = { id: 100, run_attempt: 1, name: "Preflight", path: ".github/workflows/preflight.yml", head_sha: candidate.sourceSha,
@@ -52,7 +52,7 @@ describe("automatic Alpha exact-source evidence", () => {
     expect(requests).toContain("/actions/runs/300");
     expect(requests).toContain("/actions/runs/100/attempts/1/jobs?per_page=100&page=1");
     const histories = requests.filter(url => url.includes("/workflows/"));
-    expect(histories.every(url => url.includes(`head_sha=${candidate.sourceSha}`) && url.includes("event=push") && !url.includes("status="))).toBe(true);
+    expect(histories.every(url => url.includes(`head_sha=${candidate.sourceSha}`) && (url.includes("event=push") || url.includes("event=merge_group")) && !url.includes("status="))).toBe(true);
     expect(requests.every(url => !url.includes("fake-token") && !url.includes("artifacts"))).toBe(true);
   });
 
@@ -390,5 +390,60 @@ describe("automatic Alpha pre-mutation supersession proof", () => {
     await expect(worker.client.alphaBarrierUnmutated()).resolves.toBe(false);
     expect(worker.requests).toEqual([]);
     await expect(fixture({ parent: { ...parent, path: ".github/workflows/other.yml" } }).client.alphaBarrierUnmutated()).resolves.toBe(false);
+  });
+});
+
+describe("exact-SHA merge-group Preflight evidence", () => {
+  const queueBranch = `gh-readonly-queue/main/pr-1025-${"c".repeat(40)}`;
+  const group = { ...preflight, id: 90, event: "merge_group", head_branch: queueBranch, status: "completed", conclusion: "success" };
+  const groupJobs = [
+    { ...gate, run_id: 90, head_branch: queueBranch },
+    ...["quality", "test", "build", "control plane", "secret scan (PR commit range)", "source-sync workload (macOS)"].map((name, index) =>
+      ({ id: 20 + index, run_id: 90, run_attempt: 1, head_sha: candidate.sourceSha, head_branch: queueBranch, name, status: "completed", conclusion: "success" })),
+  ];
+  // The push run skipped its duplicated workloads for this SHA.
+  const coveredPush = { ...preflight, status: "completed", conclusion: "success" };
+  it("accepts a successful merge-group Preflight whose head is exactly the candidate", async () => {
+    const read = vi.fn(async (route: string) => route.includes("event=merge_group")
+      ? { total_count: 1, workflow_runs: [group] }
+      : /\/actions\/runs\/90\/attempts\/1\/jobs/.test(route) ? { total_count: groupJobs.length, jobs: groupJobs }
+        : route === "/actions/runs/90" ? group : null);
+    await expect(mergeGroupPreflight(candidate, read)).resolves.toEqual({ runId: 90, attempt: 1 });
+  });
+
+  it.each([
+    ["a different head SHA", { head_sha: "d".repeat(40) }],
+    ["a failed merge group", { conclusion: "failure" }],
+    ["a running merge group", { status: "in_progress", conclusion: null }],
+    ["a push run posing as a merge group", { event: "push", head_branch: "main" }],
+    ["a merge group for another branch", { head_branch: `gh-readonly-queue/release/1.0/pr-1-${"c".repeat(40)}` }],
+    ["a fork", { head_repository: { full_name: "fork/zeros" } }],
+  ])("refuses %s", async (_label, patch) => {
+    const run = { ...group, ...patch };
+    const read = vi.fn(async (route: string) => route.includes("event=merge_group") ? { total_count: 1, workflow_runs: [run] }
+      : /\/jobs/.test(route) ? { total_count: groupJobs.length, jobs: groupJobs } : route === "/actions/runs/90" ? run : null);
+    await expect(mergeGroupPreflight(candidate, read)).resolves.toBeNull();
+  });
+
+  it.each(["alpha-gate", "control plane", "source-sync workload (macOS)"])("refuses a group whose %s job did not succeed", async name => {
+    const jobs = groupJobs.map(job => job.name === name ? { ...job, conclusion: "failure" } : job);
+    const read = vi.fn(async (route: string) => route.includes("event=merge_group") ? { total_count: 1, workflow_runs: [group] }
+      : /\/jobs/.test(route) ? { total_count: jobs.length, jobs } : route === "/actions/runs/90" ? group : null);
+    await expect(mergeGroupPreflight(candidate, read)).resolves.toBeNull();
+  });
+
+  it("finds no evidence for a direct push without a merge group", async () => {
+    const read = vi.fn(async (route: string) => route.includes("event=merge_group") ? { total_count: 0, workflow_runs: [] } : null);
+    await expect(mergeGroupPreflight(candidate, read)).resolves.toBeNull();
+  });
+
+  it("lets the fast-path barrier use the exact merge-group evidence instead of the push run", async () => {
+    const read = vi.fn(async (route: string) => route.includes("event=merge_group") ? { total_count: 1, workflow_runs: [group] }
+      : /\/actions\/runs\/90\/attempts\/1\/jobs/.test(route) ? { total_count: groupJobs.length, jobs: groupJobs }
+        : route === "/actions/runs/90" ? group
+          // A covered push run has skipped workloads: on its own it would be vetoed.
+          : route.includes("event=push") ? { total_count: 1, workflow_runs: [coveredPush] }
+            : /\/actions\/runs\/100\/attempts\/1\/jobs/.test(route) ? { total_count: 0, jobs: [] } : { sha: candidate.sourceSha });
+    await expect(alphaRequiredChecks(candidate, read)).resolves.toEqual([{ workflow: "Preflight", runId: 90, attempt: 1, succeeded: true }]);
   });
 });

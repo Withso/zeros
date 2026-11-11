@@ -126,3 +126,31 @@ describe("full runtime CI barrier", () => {
     expect(read).toHaveBeenCalledTimes(4);
   });
 });
+
+describe("runtime CI accepts the exact merge group", () => {
+  const queue = `gh-readonly-queue/main/pr-7-${"c".repeat(40)}`;
+  const runFor = (file: string, patch: Record<string, unknown>) => ({ id: 10, run_attempt: 1, path: `.github/workflows/${file}`,
+    name: file === "preflight.yml" ? "Preflight" : "CodeQL", head_sha: source, event: "push", head_branch: "main",
+    status: "in_progress", conclusion: null, repository: { full_name: "example/project" }, head_repository: { full_name: "example/project" }, ...patch });
+  const reader = (group: Record<string, unknown> | null) => vi.fn(async (path: string) => {
+    const file = path.includes("preflight.yml") ? "preflight.yml" : "codeql.yml";
+    const runs = [runFor(file, { id: 20 }), ...(group ? [runFor(file, { id: 11, event: "merge_group", head_branch: queue, ...group })] : [])];
+    return { total_count: runs.length, workflow_runs: runs };
+  });
+
+  it("does not wait for the duplicate push run when the exact merge group succeeded", async () => {
+    const sleep = vi.fn(async () => {});
+    await waitForRuntimeCI({ repository: "example/project", workflowSha: source }, reader({ status: "completed", conclusion: "success" }), { sleep, attempts: 2 });
+    expect(sleep).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["a failed merge group", { status: "completed", conclusion: "failure" }],
+    ["another SHA", { status: "completed", conclusion: "success", head_sha: "e".repeat(40) }],
+    ["another branch's queue", { status: "completed", conclusion: "success", head_branch: `gh-readonly-queue/release/1/pr-7-${"c".repeat(40)}` }],
+  ])("falls back to the push run for %s", async (_label, group) => {
+    const sleep = vi.fn(async () => {});
+    await expect(waitForRuntimeCI({ repository: "example/project", workflowSha: source }, reader(group), { sleep, attempts: 2 })).rejects.toThrow(/timed out/);
+    expect(sleep).toHaveBeenCalled();
+  });
+});

@@ -58,6 +58,6 @@ export async function waitForRuntimeCI(config: Pick<RuntimeReleaseConfig, "repos
   const checks = sources.flatMap(sourceSha => REQUIRED_CI.map(workflow => ({ sourceSha, workflow, name: `${sourceSha}/${workflow.name}`, file: workflow.file })));
   return waitForRequiredCI(() => Promise.all(checks.map(async check => ({
     ...requiredCIEvidence({ repository: config.repository, sourceSha: check.sourceSha }, check.workflow.file, check.workflow.name,
-      await read(`/actions/workflows/${check.file}/runs?head_sha=${check.sourceSha}&per_page=100`)), workflow: check.name,
+      await read(`/actions/workflows/${check.file}/runs?head_sha=${check.sourceSha}&per_page=100`), { mergeGroup: true }), workflow: check.name,
   }))), { failFast: true, ...options }, checks);
 }

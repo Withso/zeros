@@ -88,7 +88,43 @@ function securityVeto(jobs: any[]) {
 export const ALPHA_REQUIRED_CI = [{ file: "preflight.yml", name: "Preflight" }] as const;
 export const ALPHA_CI_FAILURE = "Exact-source Alpha gate must succeed before any provider or feed mutation";
 
+// Merge groups for main only: GitHub names them gh-readonly-queue/main/pr-<n>-<base>.
+const MAIN_QUEUE_BRANCH = /^gh-readonly-queue\/main\/pr-[1-9]\d*-[a-f\d]{40}$/;
+
+/** A merged queue entry fast-forwards main to the merge-group commit, so its
+ * successful Preflight ran on exactly the candidate SHA. Accept it only for
+ * that exact SHA, from this repository's main queue, completed with success,
+ * with the same alpha-gate, critical-job and macOS security proof the push
+ * run must carry. Anything else is null: callers keep today's push-run proof.
+ * The push run uses this same predicate to skip its duplicated workloads. */
+export async function mergeGroupPreflight(candidate: Pick<Candidate, "repository" | "sourceSha">, read: Read):
+  Promise<{ runId: number; attempt: number } | null> {
+  const trusted = (run: Run | null | undefined): run is Run => !!run && run.head_sha === candidate.sourceSha &&
+    run.event === "merge_group" && typeof run.head_branch === "string" && MAIN_QUEUE_BRANCH.test(run.head_branch) &&
+    run.repository?.full_name === candidate.repository && run.head_repository?.full_name === candidate.repository &&
+    run.path === ".github/workflows/preflight.yml" && run.name === "Preflight" &&
+    Number.isSafeInteger(run.id) && run.id > 0 && Number.isSafeInteger(run.run_attempt) && run.run_attempt > 0;
+  const response = await read(`/actions/workflows/preflight.yml/runs?head_sha=${candidate.sourceSha}&event=merge_group&per_page=100`);
+  if (!response || !Number.isSafeInteger(response.total_count) || response.total_count > 100 ||
+    !Array.isArray(response.workflow_runs) || response.workflow_runs.length !== response.total_count) return null;
+  const run = (response.workflow_runs as Run[]).filter(trusted).sort((a, b) => b.id - a.id || b.run_attempt - a.run_attempt)[0];
+  if (!run || run.status !== "completed" || run.conclusion !== "success") return null;
+  const jobs = await jobPages(read, `/actions/runs/${run.id}/attempts/${run.run_attempt}/jobs`);
+  const owned = (job: any) => job?.run_id === run.id && job.head_sha === candidate.sourceSha && job.head_branch === run.head_branch;
+  const gates = jobs.filter(job => job?.name === "alpha-gate");
+  if (gates.length !== 1 || !owned(gates[0]) || gates[0].status !== "completed" || gates[0].conclusion !== "success" ||
+    [...CRITICAL_JOBS, "source-sync workload (macOS)"].some(name => !jobs.some(job => job?.name === name && owned(job) &&
+      job.status === "completed" && job.conclusion === "success")) ||
+    jobs.some(job => CRITICAL_JOBS.has(job?.name) && (!owned(job) || job.conclusion !== "success")) || securityVeto(jobs)) return null;
+  // A rerun during job retrieval must invalidate this snapshot.
+  const current = await read(`/actions/runs/${run.id}`) as Run | null;
+  return trusted(current) && current.id === run.id && current.run_attempt === run.run_attempt &&
+    current.status === "completed" && current.conclusion === "success" ? { runId: run.id, attempt: run.run_attempt } : null;
+}
+
 export async function alphaRequiredChecks(candidate: Candidate, read: Read): Promise<RequiredCIEvidence> {
+  const merged = await mergeGroupPreflight(candidate, read).catch(() => null);
+  if (merged) return [{ workflow: ALPHA_REQUIRED_CI[0].name, runId: merged.runId, attempt: merged.attempt, succeeded: true }];
   return Promise.all(ALPHA_REQUIRED_CI.map(async check => {
     const run = newestRun(candidate, check.file, check.name,
       await read(`/actions/workflows/${check.file}/runs?head_sha=${candidate.sourceSha}&event=push&per_page=100`));

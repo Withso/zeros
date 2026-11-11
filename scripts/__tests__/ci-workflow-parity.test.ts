@@ -63,7 +63,9 @@ const PR_ONLY_JOBS = new Set([
   "cloud-v2-worker",
 ]);
 // The Alpha gate and composer browser shards run only in full Preflight.
-const PREFLIGHT_ONLY_JOBS = new Set(["alpha-gate"]);
+// merge-group-evidence lets a push of an already-verified merge-group commit
+// skip duplicated workloads; it exists only on Preflight's push path.
+const PREFLIGHT_ONLY_JOBS = new Set(["alpha-gate", "merge-group-evidence"]);
 const PR_ONLY_STEPS = new Set([
   "Prettier — changed files only (advisory)",
   "Reject unresolved CI incident markers",
@@ -88,7 +90,7 @@ const comparable = (job: Job) => ({
   needs: (typeof job.needs === "string"
     ? [job.needs]
     : (job.needs ?? [])
-  ).filter((id) => id !== "scope"),
+  ).filter((id) => id !== "scope" && id !== "merge-group-evidence"),
   strategy: job.strategy,
   runner: job["runs-on"],
   timeout: job["timeout-minutes"],
@@ -242,7 +244,7 @@ describe("CI and Preflight job parity", () => {
       expect(jobs.test!.name).toBe("test");
       expect(jobs.test!.if).toContain("always()");
       expect(
-        (jobs.test!.needs as string[]).filter((id) => id !== "scope"),
+        (jobs.test!.needs as string[]).filter((id) => id !== "scope" && id !== "merge-group-evidence"),
       ).toEqual(["test-shard", "runtime-qualification"]);
       const verdict = jobs.test!.steps!.find(
         (step) => step.name === "Enforce the test result",
@@ -344,8 +346,9 @@ describe("CI and Preflight job parity", () => {
     const gate = preflight.jobs["alpha-gate"];
     expect(gate).toBeDefined();
     expect(gate!.name).toBe("alpha-gate");
-    expect(gate!.if).toBe("always() && github.event_name != 'pull_request'");
+    expect(gate!.if).toBe("always() && github.event_name != 'pull_request' && needs.merge-group-evidence.outputs.covered != 'true'");
     expect(gate!.needs).toEqual([
+      "merge-group-evidence",
       "quality",
       "test",
       "build",

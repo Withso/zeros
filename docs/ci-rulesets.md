@@ -180,6 +180,17 @@ node scripts/ci/ruleset-migration.mjs apply --stage add-merge-queue --yes
 node scripts/ci/ruleset-migration.mjs apply --stage remove-merge-queue --yes
 ```
 
+**One full run per merged commit.** The queue fast-forwards `main` to the merge-group
+commit, so its push to `main` has the same SHA the merge group already tested. The
+push run's `merge-group evidence` job looks for that exact-SHA merge-group Preflight
+(main's queue, this repository, completed success, with successful `alpha-gate`,
+critical aggregates and macOS source-sync workload) and, when found, every workload
+and aggregate of the push run is skipped. The automatic Alpha barrier and the
+cloud-runtime wait accept the same merge-group evidence. A direct push without a
+merge group, a release branch, a failed or foreign merge group, or any error in the
+evidence job runs the full push Preflight as before; `continue-on-error` keeps the
+shortcut from turning the push run red.
+
 Qualify with a canary PR: enqueue it with `pnpm agent:merge <n>` and confirm the
 merge group's runs report every required check and that GitHub merged it.
 

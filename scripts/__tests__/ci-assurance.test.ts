@@ -125,20 +125,12 @@ describe("independent full CI assurance", () => {
     const direct = { event_name: "push" };
     const assurance = { event_name: "pull_request" };
     for (const id of ["secret-scan", "alpha-gate"]) {
-      const condition = preflight.jobs[id].if!;
-      const admitted = new Function(
-        "github",
-        "always",
-        `return (${condition});`,
-      );
-      expect(
-        admitted(assurance, () => true),
-        id,
-      ).toBe(false);
-      expect(
-        admitted(direct, () => true),
-        id,
-      ).toBe(true);
+      const condition = preflight.jobs[id].if!.replace(/^\$\{\{\s*([\s\S]*?)\s*\}\}$/, "$1")
+        .replaceAll("needs.merge-group-evidence", 'needs["merge-group-evidence"]');
+      const admitted = new Function("github", "always", "cancelled", "needs", `return (${condition});`);
+      const needs = { "merge-group-evidence": { outputs: { covered: "" } } };
+      expect(admitted(assurance, () => true, () => false, needs), id).toBe(false);
+      expect(admitted(direct, () => true, () => false, needs), id).toBe(true);
     }
     const scanner = read("ci.yml").jobs["secret-scan"];
     // ci-selection-workflow.test.ts exercises the trusted scope and its

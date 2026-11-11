@@ -15,18 +15,17 @@ function condition(
   expression: string,
   inputs: Record<string, unknown>,
   event = "pull_request",
+  covered = "",
 ) {
-  return new Function(
-    "github",
-    "inputs",
-    "needs",
-    "always",
-    `return (${expression.replaceAll("needs.control-plane-scope", 'needs["control-plane-scope"]')});`,
-  )(
+  const body = expression.replace(/^\$\{\{\s*([\s\S]*?)\s*\}\}$/, "$1")
+    .replaceAll("needs.control-plane-scope", 'needs["control-plane-scope"]')
+    .replaceAll("needs.merge-group-evidence", 'needs["merge-group-evidence"]');
+  return new Function("github", "inputs", "needs", "always", "cancelled", `return (${body});`)(
     { event_name: event },
     inputs,
-    { "control-plane-scope": { outputs: { database: "true" } } },
+    { "control-plane-scope": { outputs: { database: "true" } }, "merge-group-evidence": { outputs: { covered } } },
     () => true,
+    () => false,
   );
 }
 
@@ -72,6 +71,10 @@ describe("shared PR verification", () => {
           expect(condition(jobs[id].if, inputs, event), `${event}:${id}`).toBe(
             true,
           );
+        // A push of an already-verified merge-group commit skips the duplicate
+        // (the database shards skip with their skipped scope dependency).
+        const gate = id === "control-plane-database" ? "control-plane-scope" : id;
+        expect(condition(jobs[gate].if ?? "", inputs, "push", "true"), `covered:${id}`).toBe(false);
       }
     }
     for (const result of ["success", "failure", "cancelled", "skipped"]) {

@@ -88,7 +88,7 @@ describe("repository layout contracts", () => {
 
     expect(preflight).toContain("  source-sync-workload:");
     expect(preflight).toMatch(
-      /  source-sync:\n(?:.|\n)*?    name: source-sync \(macOS\)\n(?:.|\n)*?    if: always\(\) && \(github.event_name != 'pull_request' \|\| !inputs.pr_selected_macos\)\n    needs:\n      - source-sync-workload\n    runs-on:/,
+      /  source-sync:\n(?:.|\n)*?    name: source-sync \(macOS\)\n(?:.|\n)*?    if: always\(\) && \(github.event_name != 'pull_request' \|\| !inputs.pr_selected_macos\) && needs.merge-group-evidence.outputs.covered != 'true'\n    needs:\n      - merge-group-evidence\n      - source-sync-workload\n    runs-on:/,
     );
     expect(preflight).toContain("SOURCE_SYNC_RESULT:");
     // Only shipped targets gate a pull request: the Mac app is Apple Silicon
@@ -763,7 +763,7 @@ describe("repository layout contracts", () => {
     const publication = read(".github/workflows/alpha-publication.yml");
     const preflight = read(".github/workflows/preflight.yml");
     expect(preflight).toContain(
-      "    needs: [quality, test, build, control-plane, secret-scan]",
+      "    needs: [merge-group-evidence, quality, test, build, control-plane, secret-scan]",
     );
     expect(alpha).toContain("ready: ${{ steps.barrier.outputs.ready }}");
     expect(

@@ -107,9 +107,49 @@ concurrency:
   cancel-in-progress: ${{ github.event_name != 'push' || github.ref != 'refs/heads/main' }}
 
 jobs:
+  # A merged queue entry fast-forwards main to its merge-group commit, whose
+  # full Preflight already passed. The push run for exactly that commit skips
+  # the duplicated workloads (halving macOS demand per merge) when
+  # scripts/release/merge-group-evidence-cli.ts proves it with the same
+  # predicate the Alpha barrier accepts. Direct pushes, release branches,
+  # merge groups and PR calls skip this job and run everything.
+  merge-group-evidence:
+    name: merge-group evidence
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    # Any failure here means "not covered": the workloads still run and the
+    # run's conclusion does not depend on this shortcut.
+    continue-on-error: true
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      covered: ${{ steps.evidence.outputs.covered }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Setup pnpm
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - name: Setup Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Install JavaScript dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Look for this commit's successful merge group
+        id: evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: pnpm exec tsx scripts/release/merge-group-evidence-cli.ts
+
   quality:
     name: quality
-    if: (github.event_name != 'pull_request' || !inputs.pr_selected_quality)
+    needs: merge-group-evidence
+    if: ${{ !cancelled() && needs.merge-group-evidence.outputs.covered != 'true' && ((github.event_name != 'pull_request' || !inputs.pr_selected_quality)) }}
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -178,7 +218,8 @@ jobs:
 
   test-shard:
     name: tests-vitest (${{ matrix.part }}/4)
-    if: (github.event_name != 'pull_request' || !inputs.pr_selected_vitest)
+    needs: merge-group-evidence
+    if: ${{ !cancelled() && needs.merge-group-evidence.outputs.covered != 'true' && ((github.event_name != 'pull_request' || !inputs.pr_selected_vitest)) }}
     # Keep the browser host compatible with the lockfile-pinned Playwright.
     runs-on: ubuntu-24.04
     strategy:
@@ -351,7 +392,8 @@ jobs:
 
   runtime-qualification:
     name: runtime-qualification
-    if: (github.event_name != 'pull_request' || !inputs.pr_selected_vitest)
+    needs: merge-group-evidence
+    if: ${{ !cancelled() && needs.merge-group-evidence.outputs.covered != 'true' && ((github.event_name != 'pull_request' || !inputs.pr_selected_vitest)) }}
     uses: ./.github/workflows/agent-runtime-qualification.yml
 
   # The repository ruleset requires `test`. Keep that context as an explicit
@@ -359,8 +401,9 @@ jobs:
   # part into a red required check rather than a skipped one that can be missed.
   test:
     name: test
-    if: always() && (github.event_name != 'pull_request' || !inputs.pr_selected_vitest)
+    if: always() && (github.event_name != 'pull_request' || !inputs.pr_selected_vitest) && needs.merge-group-evidence.outputs.covered != 'true'
     needs:
+      - merge-group-evidence
       - test-shard
       - runtime-qualification
     runs-on: ubuntu-latest
@@ -386,7 +429,8 @@ jobs:
 
   build:
     name: build
-    if: (github.event_name != 'pull_request' || !inputs.pr_selected_build)
+    needs: merge-group-evidence
+    if: ${{ !cancelled() && needs.merge-group-evidence.outputs.covered != 'true' && ((github.event_name != 'pull_request' || !inputs.pr_selected_build)) }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -445,7 +489,8 @@ jobs:
 
   source-sync-workload:
     name: source-sync workload (macOS)
-    if: (github.event_name != 'pull_request' || !inputs.pr_selected_macos)
+    needs: merge-group-evidence
+    if: ${{ !cancelled() && needs.merge-group-evidence.outputs.covered != 'true' && ((github.event_name != 'pull_request' || !inputs.pr_selected_macos)) }}
     runs-on: macos-latest
     steps:
       - name: Checkout
@@ -567,8 +612,9 @@ jobs:
   # the `test` job already runs the sandbox suites.
   source-sync:
     name: source-sync (macOS)
-    if: always() && (github.event_name != 'pull_request' || !inputs.pr_selected_macos)
+    if: always() && (github.event_name != 'pull_request' || !inputs.pr_selected_macos) && needs.merge-group-evidence.outputs.covered != 'true'
     needs:
+      - merge-group-evidence
       - source-sync-workload
     runs-on: ubuntu-latest
     steps:
@@ -589,6 +635,8 @@ jobs:
   # split across shards that each own a Postgres service.
   control-plane-scope:
     name: control-plane scope
+    needs: merge-group-evidence
+    if: ${{ !cancelled() && needs.merge-group-evidence.outputs.covered != 'true' }}
     runs-on: ubuntu-latest
     outputs:
       database: ${{ steps.scope.outputs.database }}
@@ -618,7 +666,8 @@ jobs:
 
   control-plane-static:
     name: control-plane typecheck + audit
-    if: github.event_name != 'pull_request' || inputs.pr_control_plane_static_result == ''
+    needs: merge-group-evidence
+    if: ${{ !cancelled() && needs.merge-group-evidence.outputs.covered != 'true' && (github.event_name != 'pull_request' || inputs.pr_control_plane_static_result == '') }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -729,8 +778,9 @@ jobs:
   # cover every test file once, with no failed or skipped DB-backed test.
   control-plane:
     name: control plane
-    if: always() && (github.event_name != 'pull_request' || !inputs.pr_selected_database)
+    if: always() && (github.event_name != 'pull_request' || !inputs.pr_selected_database) && needs.merge-group-evidence.outputs.covered != 'true'
     needs:
+      - merge-group-evidence
       - control-plane-scope
       - control-plane-static
       - control-plane-database
@@ -765,8 +815,8 @@ jobs:
   alpha-gate:
     name: alpha-gate
     # The complementary PR invocation supplies coverage, never Alpha admission.
-    if: always() && github.event_name != 'pull_request'
-    needs: [quality, test, build, control-plane, secret-scan]
+    if: always() && github.event_name != 'pull_request' && needs.merge-group-evidence.outputs.covered != 'true'
+    needs: [merge-group-evidence, quality, test, build, control-plane, secret-scan]
     runs-on: ubuntu-latest
     steps:
       - name: Enforce the Alpha gate results
@@ -787,7 +837,8 @@ jobs:
 
   ui-smoke-shard:
     name: tests-ui-smoke (${{ matrix.shard }}/3)
-    if: (github.event_name != 'pull_request' || !inputs.pr_selected_ui_smoke)
+    needs: merge-group-evidence
+    if: ${{ !cancelled() && needs.merge-group-evidence.outputs.covered != 'true' && ((github.event_name != 'pull_request' || !inputs.pr_selected_ui_smoke)) }}
     # Keep the browser host compatible with the lockfile-pinned Playwright.
     runs-on: ubuntu-24.04
     strategy:
@@ -821,8 +872,8 @@ jobs:
 
   ui-smoke:
     name: ui-smoke (composer)
-    if: always() && (github.event_name != 'pull_request' || !inputs.pr_selected_ui_smoke)
-    needs: [ui-smoke-shard]
+    if: always() && (github.event_name != 'pull_request' || !inputs.pr_selected_ui_smoke) && needs.merge-group-evidence.outputs.covered != 'true'
+    needs: [merge-group-evidence, ui-smoke-shard]
     runs-on: ubuntu-latest
     permissions: {}
     steps:
@@ -838,9 +889,10 @@ jobs:
 
   secret-scan:
     name: secret scan (PR commit range)
+    needs: merge-group-evidence
     # CI owns the required PR commit-range scanner. Avoid a second scanner in
     # complementary PR coverage. Push/merge-group Preflight keeps its scan.
-    if: github.event_name != 'pull_request'
+    if: ${{ !cancelled() && needs.merge-group-evidence.outputs.covered != 'true' && (github.event_name != 'pull_request') }}
     runs-on: ubuntu-latest
     # ── Why the PR's COMMIT RANGE, not the tree and not all history ──
     #

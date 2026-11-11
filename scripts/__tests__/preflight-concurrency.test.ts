@@ -149,6 +149,7 @@ describe("independent main Preflight runs", () => {
       "control-plane-database",
       "control-plane-scope",
       "control-plane-static",
+      "merge-group-evidence",
       "quality",
       "runtime-qualification",
       "secret-scan",
