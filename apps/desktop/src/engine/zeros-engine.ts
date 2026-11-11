@@ -33,6 +33,7 @@ import { DESIGN_CATALOG_READ_CAPABILITY, DESIGN_CATALOG_READ_OPERATION, DESIGN_C
 import { DESIGN_PREVIEW_JOBS_CAPABILITY, DESIGN_RECORDINGS_CAPABILITY, DESIGN_RECORDINGS_COLOR_SCHEME_CAPABILITY, DESIGN_RECORDINGS_READ_FAILURES_CAPABILITY, DESIGN_THUMBNAILS_CAPABILITY, DESIGN_THUMBNAILS_PREPARE_CAPABILITY, DESIGN_THUMBNAILS_STORE_CAPABILITY } from "@zeros/protocol/design-capture";
 import { DESIGN_SOURCE_SURFACES_CAPABILITY } from "@zeros/protocol/design-surface";
 import { DESIGN_COMPONENT_OPTIONS_CAPABILITY } from "@zeros/protocol/design-catalog";
+import { isDesignComponentVariantName } from "@zeros/protocol/design-path";
 import { DESIGN_COPY_PLACEMENT_CAPABILITY } from "@zeros/protocol/design-relocation";
 import {
   personalRepoRoot,
@@ -1664,14 +1665,17 @@ export class ZerosEngine {
         const { workspaceId, resourcePath } = parsed;
         const surface = url.searchParams.get("surface");
         const theme = url.searchParams.get("theme");
+        const variant = url.searchParams.get("variant");
         if ((surface !== null && surface !== "1") ||
-            (theme !== null && (surface !== "1" || !/^[a-z][a-z0-9_-]{0,63}$/.test(theme)))) return null;
+            (theme !== null && (surface !== "1" || !/^[a-z][a-z0-9_-]{0,63}$/.test(theme))) ||
+            (variant !== null && !isDesignComponentVariantName(variant))) return null;
         const resource = await this.workspace.readDesignProtocolResource(
           workspaceId,
           {
             path: resourcePath,
             sourceVersion: url.searchParams.get("v"),
             ...(surface === "1" ? { surface: true, theme } : {}),
+            ...(variant !== null ? { variant } : {}),
           },
         );
         if (!resource) return null;

@@ -30,6 +30,8 @@ export interface DesignWorkspaceColumnProps {
   folder: string | null;
   /** Hidden retained shells must not read, poll, focus, or attach shortcuts. */
   surfaceActive: boolean;
+  /** Open a Design-directory file in Files. */
+  onOpenFile?: (path: string) => void;
 }
 
 export interface DesignCanvasProps {
@@ -90,9 +92,13 @@ export interface DesignInspectorProps {
   onAskAgent?: (brief: DesignAgentBrief) => void;
   /** The side panel is shown; a hidden one mounts no Options rows. */
   panelVisible?: boolean;
+  /** Open a Design-directory file in Files (a components/ file's main). */
+  onOpenFile?: (path: string) => void;
 }
 
 export interface DesignCanvasZoomActions {
   zoomIn(): void;
   zoomOut(): void;
+  /** Bring frames into view, switching to their page first. */
+  revealFrames?(target: { files: readonly string[]; pageId?: string }): void;
 }

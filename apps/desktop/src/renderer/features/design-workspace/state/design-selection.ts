@@ -7,6 +7,8 @@
 // readback uses a per-workspace generation so A → B races cannot republish A
 // after the user has already selected B.
 
+import { designShownComponentVariant } from "./design-component-variants";
+import { designComponentPartHost, isDesignComponentPartNodeId } from "./design-component-parts";
 import { designBackgroundWork } from "./design-background-work";
 import { designFrameViews, isPreparedDesignFrame, type DesignFrameView } from "./design-frame-view";
 import type {
@@ -89,7 +91,8 @@ function revealDesignSelectionPath(
   requestDesignLayerReveal({
     workspaceId,
     frame: frame.file,
-    nodeIds,
+    // Layers keeps an instance as one row: a part reveals its instance.
+    nodeIds: nodeIds.map(designComponentPartHost),
     tree: snapshot?.tree,
     frameRowNodeId: frame.kind === "text" ? null : snapshot?.frame.oid,
   });
@@ -791,7 +794,8 @@ function elementSelection(
     frame: frame.file,
     sourceVersion: frame.sourceVersion,
     updatedAt: Date.now(),
-    nodeIds: [details.oid],
+    // An agent is told about the instance a selected part belongs to.
+    nodeIds: [designComponentPartHost(details.oid)],
     breadcrumb: details.breadcrumb,
     rects: [details.rect],
     keyComputedStyles: persistedKeyStyles(details.styles),
@@ -817,7 +821,7 @@ function multiElementSelection(
     frame: frame.file,
     sourceVersion: frame.sourceVersion,
     updatedAt: Date.now(),
-    nodeIds: details.map((candidate) => candidate.oid),
+    nodeIds: details.map((candidate) => designComponentPartHost(candidate.oid)),
     breadcrumb: primary.breadcrumb,
     rects: details.map((candidate) => candidate.rect),
     keyComputedStyles,
@@ -843,6 +847,9 @@ export async function captureDesignRuntimeScreenshot(
 ): Promise<DesignRuntimeScreenshot | null> {
   const runtime = designFrameRuntime(workspaceId, frame);
   if (!runtime || runtime.isActive?.() === false) return null;
+  // A still is the source's picture; a variant shown is only a view of it.
+  const record = readSelectionSnapshot(workspaceId)?.frames.find((candidate) => candidate.file === frame);
+  if (record?.component && designShownComponentVariant(workspaceId, record)) return null;
   const screenshot = await designBackgroundWork.schedule(
     `capture:${workspaceId}\0${frame}\0${nodeId ?? ""}`,
     async () => {
@@ -1299,8 +1306,18 @@ export async function selectDesignFrameBodyAtLocation(
   const owner = input.owner ?? captureDesignPageOwner(workspaceId);
   if (!selectionPageOwnerIsCurrent(owner)) return null;
   const current = designWorkspaceView(workspaceId);
-  const selectedNodeId =
+  const selectedId =
     current.selectedFrame === frame.file ? current.selectedNodeId : null;
+  // Inside an entered instance (a part selected) a click picks another part;
+  // a double-click on a selected instance enters it. Only a frame that
+  // places instances ever asks for a part.
+  const enteredHost = selectedId && frame.instances && !input.additive
+    ? isDesignComponentPartNodeId(selectedId)
+      ? designComponentPartHost(selectedId)
+      : input.intent === "descend" && frame.instances.hosts[selectedId] ? selectedId : null
+    : null;
+  // The layers around an instance know its host, not its parts.
+  const selectedNodeId = selectedId ? designComponentPartHost(selectedId) : null;
   const labeledFrame = frame.kind !== "text";
   const selectFrame = async () => {
     if (input.layersOnly) return null;
@@ -1363,6 +1380,11 @@ export async function selectDesignFrameBodyAtLocation(
       return retryAdoptedClick();
     }
     if (!details) return selectFrame();
+    if (enteredHost && details.oid === enteredHost && runtime.supports?.("getComponentPartAtLoc") && runtime.getComponentPartAtLoc) {
+      const part = await runtime.getComponentPartAtLoc(input.x, input.y, enteredHost);
+      if (!isCurrent() || (part && part.sourceVersion !== frame.sourceVersion)) return retryAdoptedClick();
+      if (part) return selectDesignNode({ ...input, owner, nodeId: part.oid, details: part });
+    }
     const snapshot = designRuntimeFrameState(workspaceId, frame.file)?.snapshot;
     const exactSnapshot =
       snapshot?.sourceVersion === frame.sourceVersion ? snapshot : null;
@@ -1704,10 +1726,16 @@ export async function hoverDesignNodeAtLocation(input: {
   const runtime = designFrameRuntime(input.workspaceId, input.frame.file);
   if (!runtime) return;
   let details: DesignRuntimeNodeDetails | null = null;
+  // Inside an entered instance the hover is the part under the pointer.
+  const view = designWorkspaceView(input.workspaceId);
+  const enteredHost = input.frame.instances && view.selectedFrame === input.frame.file && isDesignComponentPartNodeId(view.selectedNodeId)
+    ? designComponentPartHost(view.selectedNodeId) : null;
   try {
     details = await runtime.getElementAtLoc(input.x, input.y, {
       mode: "deepest",
     });
+    if (enteredHost && details?.oid === enteredHost && runtime.supports?.("getComponentPartAtLoc") && runtime.getComponentPartAtLoc)
+      details = (await runtime.getComponentPartAtLoc(input.x, input.y, enteredHost)) ?? details;
   } catch {
     return;
   }

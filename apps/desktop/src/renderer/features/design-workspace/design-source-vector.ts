@@ -102,6 +102,8 @@ export interface DesignSourceVectorTarget extends DesignSourceVectorOwner {
   readonly theme: string | null;
   readonly width: number;
   readonly height: number;
+  /** The variant a main component frame shows; absent for its defaults. */
+  readonly variant?: string | null;
   /** Authenticated source-cost estimate, not part of render identity. */
   readonly imageBytes?: number;
 }
@@ -139,6 +141,7 @@ interface VectorEntry {
 const ownerKey = (owner: DesignSourceVectorOwner) => JSON.stringify([owner.workspaceId, owner.folder, owner.directoryId, owner.capability]);
 export const designSourceVectorKey = (target: DesignSourceVectorTarget) => JSON.stringify([
   ownerKey(target), target.file, target.sourceVersion, target.theme, target.width, target.height,
+  ...(target.variant ? [target.variant] : []),
 ]);
 export const DESIGN_SOURCE_VECTOR_IDLE_MS = 24 * 60 * 60_000;
 

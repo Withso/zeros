@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   OptionActionRow,
+  OptionEntryRow,
   OptionGroupHeading,
   OptionNumberRow,
   OptionRangeRow,
@@ -189,5 +190,49 @@ describe("the other rows", () => {
     expect(button.classList).toContain("justify-center");
     act(() => button.click());
     expect(onClick).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("a row whose value differs from what it inherits", () => {
+  it("carries the blue dot at its corner, in every kind, and none otherwise", () => {
+    const rows = [
+      createElement(OptionRow, { key: "row", label: "Row", changed: true }, "x"),
+      createElement(OptionRangeRow, { key: "range", label: "Width", value: 1, min: 0, max: 2, changed: true, onCommit: () => {} }),
+      createElement(OptionNumberRow, { key: "number", label: "Gap", value: 1, changed: true, onCommit: () => {} }),
+      createElement(OptionSwitchRow, { key: "switch", label: "Toolbar", value: true, changed: true, onCommit: () => {} }),
+      createElement(OptionSegmentedRow, { key: "segments", label: "Mode", value: "a", choices: [{ value: "a", label: "A" }], changed: true, onCommit: () => {} }),
+      createElement(OptionTextRow, { key: "text", label: "Label", value: "Go", changed: true, onCommit: () => {} }),
+      createElement(OptionRangeRow, { key: "plain", label: "Plain", value: 1, min: 0, max: 2, onCommit: () => {} }),
+    ];
+    render(createElement("div", null, rows));
+    const dots = host.querySelectorAll("[data-option-changed]");
+    expect(dots).toHaveLength(6);
+    for (const cls of ["bg-blue-primary", "size-1", "rounded-full", "absolute"]) expect(dots[0]!.classList, cls).toContain(cls);
+    expect(host.querySelector('[aria-label="Plain"] [data-option-changed]')).toBeNull();
+  });
+});
+
+describe("a name typed in place", () => {
+  it("submits on Enter, says why a name is refused, and leaves on Escape or an empty blur", () => {
+    const submitted: string[] = [];
+    const cancels = vi.fn();
+    render(createElement(OptionEntryRow, { label: "Name", inputLabel: "Variant name", placeholder: "Compact",
+      onSubmit: (text: string) => (submitted.push(text), text === "Bad" ? "That name is taken." : null), onCancel: cancels }));
+    const input = host.querySelector("input")!;
+    expect(input.getAttribute("aria-label")).toBe("Variant name");
+    expect(document.activeElement).toBe(input);
+    const type = (text: string) => act(() => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, text);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    type("Bad");
+    key(input, "Enter");
+    expect(submitted).toEqual(["Bad"]);
+    expect(host.querySelector('[role="alert"]')!.textContent).toBe("That name is taken.");
+    expect(input.getAttribute("aria-invalid")).toBe("true");
+    type("Good");
+    expect(host.querySelector('[role="alert"]')).toBeNull();
+    key(input, "Escape");
+    expect(cancels).toHaveBeenCalledTimes(1);
   });
 });

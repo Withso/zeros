@@ -557,6 +557,16 @@ describe("page operations through WorkspaceService", () => {
     });
   });
 
+  it("reads a frame's document with the variant it shows only when it names one", async () => {
+    const frame = (await service.handle("design.frame.create", { ...params, title: "Plain" }, options)) as { frame: Snapshot["frames"][number] };
+    const plain = (await service.handle("design.frame", { ...params, frame: frame.frame.file }, options)) as { frame: { sourceVersion: string } };
+    // A frame that declares no variant renders its defaults; the generation is its source's either way.
+    const shown = (await service.handle("design.frame", { ...params, frame: frame.frame.file, variant: "compact" }, options)) as { frame: { sourceVersion: string } };
+    expect(shown.frame.sourceVersion).toBe(plain.frame.sourceVersion);
+    for (const variant of ["Compact", "default", "a b", 7])
+      await expect(service.handle("design.frame", { ...params, frame: frame.frame.file, variant }, options)).rejects.toThrow("variant");
+  });
+
   it("forwards page targets for text frames, duplicates and detach, including transfer history", async () => {
     const created = (await service.handle(
       "design.page.create",
