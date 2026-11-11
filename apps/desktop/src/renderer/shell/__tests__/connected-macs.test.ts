@@ -22,6 +22,24 @@ describe("Connected Macs", () => {
       "Studio", "Connected · expires in 4 h", "Disconnect", "Old Mini", "Active · offline", "Disconnect", "Spare", "Not connected"]);
   });
 
+  it("marks another Mac that syncs, and offers This Mac's sync: off, then each status with its actions and the copy note", () => {
+    const syncing = macs.map(mac => mac.deviceId === "d2" ? { ...mac, syncing: true } : mac);
+    expect(text(render({ macs: syncing }))).toContain("Connected · expires in 4 h · Syncing");
+    const sync = (status: Parameters<typeof ConnectedMacs>[0]["sync"] extends infer S ? S extends { status: infer T } ? T : never : never) =>
+      text(render({ sync: { status, busy: false, onChoose: () => {}, onStop: () => {}, onOpenTerminal: () => {} } }));
+    expect(sync(null).slice(-1)).toEqual(["Sync to a local directory"]);
+    const on = ["Open terminal here", "Stop sync", "A local copy: changes in the cloud overwrite edits made here."];
+    expect(sync({ workspaceId: "w", state: "syncing", files: 12, problems: 0 }).slice(-4)).toEqual(["Syncing (12 files)", ...on]);
+    expect(sync({ workspaceId: "w", state: "in_sync", problems: 0 }).slice(-4)).toEqual(["In sync", ...on]);
+    expect(sync({ workspaceId: "w", state: "in_sync", problems: 2 }).slice(-4)[0]).toBe("In sync · 2 not mirrored");
+    expect(sync({ workspaceId: "w", state: "paused", problems: 0 }).slice(-4)[0]).toBe("Paused (workspace asleep)");
+    expect(sync({ workspaceId: "w", state: "in_sync", reason: "git_missing", problems: 0 }).slice(-4)[0]).toBe("In sync · Git not installed");
+    expect(sync({ workspaceId: "w", state: "error", reason: "not_connected", problems: 0 }).slice(-4)[0]).toBe("Error (connect this Mac)");
+    expect(sync({ workspaceId: "w", state: "error", reason: "too_many_bytes", problems: 0 }).slice(-4)[0]).toBe("Error (more than 5 GB)");
+    // No This Mac in the list, no sync row.
+    expect(text(render({ macs: macs.filter(mac => !mac.thisMac), sync: { status: null, busy: false, onChoose: () => {}, onStop: () => {}, onOpenTerminal: () => {} } }))).not.toContain("Sync to a local directory");
+  });
+
   it("disables only the Mac whose change is being sent, and says when there is none", () => {
     const html = render({ busyDeviceId: "d2" });
     expect(html).toContain('aria-label="Disconnect Studio"');
@@ -43,5 +61,8 @@ describe("Connected Macs mapping", () => {
     expect(toConnectedMac({ ...base, connected: true, active: false, expiresAt: "2026-11-10T16:00:00.000Z" }, "other"))
       .toEqual({ ...base, thisMac: false, state: "connected", expiresAt: Date.parse("2026-11-10T16:00:00.000Z") });
     expect(toConnectedMac({ ...base, connected: false, active: false, expiresAt: null }, null)).toMatchObject({ state: "available", thisMac: false });
+    // Order 3's syncing flag, absent from older control planes.
+    expect(toConnectedMac({ ...base, connected: true, active: false, expiresAt: null, syncing: true }, null)).toMatchObject({ syncing: true });
+    expect(toConnectedMac({ ...base, connected: true, active: false, expiresAt: null, syncing: false }, null)).not.toHaveProperty("syncing");
   });
 });

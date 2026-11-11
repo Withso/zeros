@@ -5,6 +5,8 @@ import { rateLimit } from "../ratelimit.js";
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
+import type { CloudWorkspaceSync } from "./workspace-sync/store.js";
+import { createCloudWorkspaceSyncRoutes } from "./workspace-sync/routes.js";
 import { HttpError } from "../authz.js";
 import { securityStreamAuthority } from "../security-events.js";
 import type { CloudV2Capabilities } from "./contract.js";
@@ -47,6 +49,7 @@ const ChatEditSchema = z.object({ title: CloudV2SessionNameSchema.transform(valu
   .strict().refine(value => value.title !== undefined || value.archived !== undefined);
 
 export type CloudV2RouteDeps = {
+  workspaceSync?: CloudWorkspaceSync;
   localDevices?: CloudLocalDeviceRoutes;
   store: Pick<CloudV2Store, "activeComputer" | "createWorkspace" | "createWorkspaceOnce" | "readCreateReceipt" | "get" | "promptContext" | "list" | "requestLifecycle" | "transition" | "issueToken" | "listChats" | "messageWindow" | "searchMessages" | "markActive"> & Partial<Pick<CloudV2Store, "prompts" | "getByNumber" | "chatEdits">>;
   /** Roll out only with a runtime that advertises durable prompt delivery. */
@@ -87,6 +90,7 @@ export function createCloudV2Routes(deps: CloudV2RouteDeps): Hono {
   const app = new Hono();
   const chatEdits = deps.store.chatEdits;
   if (deps.localDevices) app.route("/", createCloudLocalDeviceRoutes(deps.localDevices));
+  if (deps.workspaceSync) app.route("/", createCloudWorkspaceSyncRoutes(deps.workspaceSync));
   if (deps.environments) app.route("/", createCloudEnvironmentRoutes(deps.environments));
   if (deps.githubConnections) app.route("/",createCloudGithubConnectionRoutes(deps.githubConnections));
   const documents = async (workspaces: readonly CloudV2Workspace[]) =>

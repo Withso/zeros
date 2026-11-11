@@ -140,7 +140,7 @@ export function CloudWorkspaceDetails({ folder, name, title, workspace }: {
           <CloudWorkspaceDetailsCard workspace={workspace} title={title} creatorName={creatorName} statusLabel={cloudStatusLabel(workspace.status, availability)}
             resources={running ? resources : null} changing={changing} onChange={change} />
         ) : <p className="text-fg2 text-xs">Loading workspace details…</p>}
-        {workspace && macs.macs && <ConnectedMacs macs={macs.macs} now={Date.now()} busyDeviceId={macs.busyDeviceId} onConnect={macs.connect} onDisconnect={macs.disconnect} />}
+        {workspace && macs.macs && <ConnectedMacs macs={macs.macs} now={Date.now()} busyDeviceId={macs.busyDeviceId} onConnect={macs.connect} onDisconnect={macs.disconnect} sync={macs.sync} />}
       </PopoverContent>
     </Popover>
   );

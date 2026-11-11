@@ -672,6 +672,51 @@ At most 10,000 receipts are retained per workspace (`429 notifications_full`
 when full). No notification text is sent in PostgreSQL notification hints or
 written to server logs.
 
+## Direct sync to a Mac
+
+The desktop uses `POST /v1/cloud-v2/workspaces/:id/sync/grant` with its WorkOS
+session and the three registered-device headers. It accepts no body or `{}`
+and returns `{ url, portAuth, grant, expiresAt }`. The creator must still have
+workspace access, and that Mac must be connected. Sync never wakes the VM or
+updates workspace activity. These routes accept neither Cloud API keys nor
+workspace API tokens.
+
+The HTTPS route base and port-auth value let Electron open the worker's
+`/v2/worker/sync` WebSocket directly, using subprotocol `zeros.worker.sync.v1`,
+cookie `_port_auth` and `X-Zeros-Worker-Auth: <grant>`. File bytes never pass
+through the control plane. The Ed25519 grant has a 60-second admission lifetime,
+a single-use nonce, and binds the workspace, boot, user, device and `sync`
+scope. It cannot open a control connection or authorize non-sync operations.
+
+The desktop obtains a fresh grant about every eight minutes and sends
+`{ t: "renew", grant }` on the existing socket. The worker's read deadline is
+the grant's signed `iat + 600` seconds minus its 30-second skew allowance,
+including requests already in flight. A delayed renewal does not restart that
+clock. Sign-out, device replacement or disconnection, lost workspace access,
+archive and Stop prevent new grants. Existing sockets expire at their signed
+deadline or when the worker stops; grants from a previous boot cannot reopen
+them.
+
+Grant errors include `409 worker_update_required` for a worker without
+`sync-v1`, `409 cloud_workspace_not_running`, and `403 mac_not_connected`.
+Malformed bodies return `400`. An unreadable route credential returns
+`503 cloud_sync_unavailable`; it does not rotate the credential or stop the VM.
+Limits are 120 grants/minute/user, 12/minute/user/workspace/device, and
+`429` with `Retry-After` when exhausted.
+
+`PUT /v1/cloud-v2/workspaces/:id/macs/:deviceId/sync` takes
+`{ syncing: boolean }` and returns `{ mac }` with `syncing`. It requires the
+same desktop/device authority, and the path must identify this Mac. Turning
+it on requires a live connection, but the VM may be asleep. This flag is
+display state, not read authority or activity; it is false for disconnected
+or expired connections. Flag writes are limited to 60/minute/user. No local
+folder paths or file contents are stored in the control plane.
+
+Existing Mac list, connect and disconnect replies include `syncing` only
+with `X-Zeros-Sync: 1`, preserving older desktops' strict response schemas.
+New desktops accept the field being absent when reading an older control
+plane. The local-command organization switch does not grant or revoke sync.
+
 ## Restart and v1 scope
 
 The desktop's WorkOS-authenticated route

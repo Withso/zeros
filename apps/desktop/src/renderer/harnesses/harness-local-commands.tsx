@@ -43,6 +43,23 @@ async function main() {
       </div></main>;
     }
     if (view === "setting") return <main className="bg-bg1 min-h-screen p-8"><div className="mx-auto max-w-2xl"><Setting /></div></main>;
+    if (view === "sync") {
+      // This Mac's sync row: off (sync=off) or a status; the actions record their calls.
+      const state = params.get("sync") ?? "off";
+      const status = state === "off" ? null : { workspaceId: "w", state: state as "syncing" | "in_sync" | "paused" | "error",
+        ...(state === "syncing" ? { files: 12 } : {}), ...(state === "error" ? { reason: "too_many_bytes" } : {}), problems: 0 };
+      return <main className="bg-bg1 min-h-screen p-8">
+        <Popover open>
+          <PopoverAnchor asChild><span className="inline-block size-1" /></PopoverAnchor>
+          <PopoverContent align="start" sideOffset={6} className="w-[320px]" aria-label="Cloud workspace details">
+            <ConnectedMacs now={now} onConnect={() => {}} onDisconnect={() => {}} macs={[
+              { deviceId: "d1", name: "Alex's MacBook Pro", thisMac: true, state: "connected", reachable: true },
+              { deviceId: "d2", name: "Studio", thisMac: false, state: "connected", reachable: true, syncing: true },
+            ]} sync={{ status, busy: false, onChoose: () => calls.push("sync:choose"), onStop: () => calls.push("sync:stop"), onOpenTerminal: () => calls.push("sync:terminal") }} />
+          </PopoverContent>
+        </Popover>
+      </main>;
+    }
     if (view === "macs") return <main className="bg-bg1 min-h-screen p-8">
       <Popover open>
         <PopoverAnchor asChild><span className="inline-block size-1" /></PopoverAnchor>

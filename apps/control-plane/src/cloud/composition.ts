@@ -48,6 +48,7 @@ import { CloudLocalCommandSignals } from "./local-commands/signals.js";
 import { CloudLocalCommands } from "./local-commands/requests.js";
 import { startLocalCommandMaintenance } from "./local-commands/maintenance.js";
 import { CloudNotifyUser } from "./notify-user/store.js";
+import { CloudWorkspaceSync } from "./workspace-sync/store.js";
 
 const PROXY_TOKEN_TTL_MS = 24 * 60 * 60_000;
 
@@ -134,6 +135,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   const runtimeUpdates = new RuntimeAdoption({ handoffs: runtimeHandoffs, store, compute, runtimeForWorkspace, authorizeSource,
     drainActive: () => buildDrainActive(pool), logger: console });
   const continueSource = github.continueSource;
+  const workspaceSync = new CloudWorkspaceSync(pool, localDevices, store, keys, signer, continueSource);
   const mcp = createMcpServices(pool, config, github.connections.authorizeRepositoryConfiguration.bind(github.connections));
   const timing = (record: CloudV2TimingRecord) => console.log(`[cloud-v2] timing ${JSON.stringify(record)}`);
 
@@ -196,6 +198,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     bridgeBaseUrl: v2.realtimeUrl,
     promptOutbox: v2.promptOutbox === true,
     localDevices: { devices: localDevices, signals: localCommandSignals, requests: localCommands, notifications },
+    workspaceSync,
   };
   const proxy: CloudV2ProxyDeps = { store, logins, authorizeSource, continueSource, ...(keys ? { refreshCodex: createCloudV2CodexRefresh(pool, keys) } : {}) };
   const api = { credentials: apiCredentials,
@@ -234,6 +237,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     apiConfiguration,
     localCommands: { requests: localCommands, signals: localCommandSignals },
     notifications,
+    workspaceSync,
     runtimeUpdates, runtimeHandoffs,
     runtimeSha256ForWorkspace: async workspace => (await runtimeForWorkspace(workspace)).sha256,
     environmentReport: (token, bootId, value) => environments.report(token, bootId, value),

@@ -49,6 +49,10 @@ describe("local commands in the renderer", () => {
     respond({ macs: [mac] });
     expect(await listWorkspaceMacs(ws)).toEqual([mac]);
     expect(fetches[0]!.url).toBe(`https://api.example.test/v1/cloud-v2/workspaces/${ws}/macs`);
+    // Order 3: the list asks for `syncing`; a control plane that sends it only then keeps released desktops' strict parse.
+    expect(new Headers(fetches[0]!.init.headers).get("x-zeros-sync")).toBe("1");
+    respond({ macs: [{ ...mac, syncing: true }] });
+    expect(await listWorkspaceMacs(ws)).toEqual([{ ...mac, syncing: true }]);
     state.reply = { mac, presence: { presenceRequired: true, reachableUntil: iso } };
     expect((await connectThisMac(ws)).mac.active).toBe(true);
     expect(state.invokes.at(-1)).toEqual({ cmd: "local_commands_connect", args: { workspaceId: ws } });

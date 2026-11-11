@@ -22,6 +22,8 @@ import { ChatService } from "./workspace/chat-service";
 import { prepareCheckout, type CheckoutRefresh, type CheckoutResult } from "./workspace/checkout";
 import { WorkspaceSetup, readSetupOutput, type SetupRunner } from "./workspace/setup";
 import { NotifyUserService } from "./notify-user/service";
+import { SyncService } from "./workspace/sync-service";
+import { SYNC_CAPABILITY, SYNC_HINT_KIND } from "@zeros/protocol/workspace-sync";
 import { WorkspaceError, WorkspaceScope, type WorkerConfig } from "./workspace/scope";
 import { WorkspaceService, type WorkspaceServiceOptions } from "./workspace/service";
 import { isGitMutation } from "./workspace/git";
@@ -69,7 +71,8 @@ interface WorkerOptions {
   /** Closed codes only. */
   onMemory?: (event: "memory_stopped" | "memory_pressure") => void;
 }
-interface Client extends AppClient { rejected: boolean }
+/** passive (Order 3): a syncing Mac; never activity, never in the census, sync reads only. */
+interface Client extends AppClient { rejected: boolean; passive?: boolean }
 
 const stableJson = (value: unknown): string => Array.isArray(value) ? `[${value.map(stableJson).join(",")}]`
   : value && typeof value === "object" ? `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${stableJson((value as Record<string, unknown>)[key])}`).join(",")}}`
@@ -110,6 +113,7 @@ export class CloudWorker {
   private history?: HistoryMirror;
   private promptInbox?: PromptInbox;
   private workspace?: WorkspaceService;
+  private sync?: SyncService;
   private terminals?: Terminals;
   private application?: ApplicationEnvironment;
   private watchdog?: MemoryWatchdog;
@@ -203,6 +207,7 @@ export class CloudWorker {
     await this.stopCheckout();
     await this.promptInbox?.dispose();
     await this.terminals?.dispose();
+    this.sync?.dispose();
     await this.workspace?.dispose();
     await agentsClosing;
     await this.mcp?.dispose();
@@ -221,6 +226,10 @@ export class CloudWorker {
     const parsed = CloudV2ControlFrameSchema.safeParse(raw);
     if (!parsed.success) return;
     const message = parsed.data;
+    // A syncing Mac never admits work, holds a runtime update, or counts as activity.
+    const passive = message.t === "open" ? message.passive === true
+      : (message.t === "frame" || message.t === "close") && this.clients.get(message.clientId)?.passive === true;
+    if (passive) return this.control(message);
     if (["stop", "close", "prompts"].includes(message.t)) this.runtimeGate.activity();
     if (["stop", "close", "prompts", "reply", "refusal"].includes(message.t)) return this.control(message);
     const opening = {};
@@ -268,7 +277,7 @@ export class CloudWorker {
     if (this.stopping) return;
     if (message.t === "open") {
       const previous = this.clients.get(message.clientId); if (previous) this.terminals?.detach(previous);
-      const client: Client = { id: message.clientId, rejected: false, send: async (frame) => {
+      const client: Client = { id: message.clientId, rejected: false, ...(message.passive ? { passive: true } : {}), send: async (frame) => {
         if (this.clients.get(client.id) === client && !client.rejected) await this.send({ t: "frame", clientId: client.id, frame });
       } };
       this.clients.set(client.id, client);
@@ -284,6 +293,12 @@ export class CloudWorker {
     if (!this.scope || !this.online || this.disposed || this.stopping || this.clients.get(client.id) !== client) return;
     const frame = safeParseClientBridgeMessage(message.frame);
     if (!frame) return;
+    if (client.passive && (frame.type !== "WORKSPACE_REQUEST" || !SyncService.ops.has(frame.op))) {
+      // Passivity is self-declared: a passive client may ONLY call sync.snapshot and sync.read.
+      if (frame.type === "WORKSPACE_REQUEST")
+        await client.send(createMessage({ type: "WORKSPACE_ERROR", source: "engine", requestId: frame.id, op: frame.op, code: "PASSIVE_CLIENT", message: "A syncing Mac may only read sync data." }));
+      return;
+    }
     if (frame.type === "CONNECTED") {
       const version = frame.protocolVersion ?? PROTOCOL_VERSION;
       if (version < MIN_SUPPORTED_PROTOCOL || version > PROTOCOL_VERSION) {
@@ -294,6 +309,18 @@ export class CloudWorker {
       return;
     }
     if (frame.type === "HEARTBEAT") return;
+    if (frame.type === "WORKSPACE_REQUEST" && SyncService.ops.has(frame.op)) {
+      try {
+        if (!this.sync) throw new WorkspaceError("CLOUD_V2_UNSUPPORTED", "Sync is not available.");
+        const result = await this.sync.handle(frame.op, frame.params ?? {});
+        await client.send(createMessage({ type: "WORKSPACE_RESPONSE", source: "engine", requestId: frame.id, op: frame.op, result }));
+      } catch (error) {
+        await client.send(createMessage({ type: "WORKSPACE_ERROR", source: "engine", requestId: frame.id, op: frame.op,
+          code: error instanceof WorkspaceError ? error.code : "WORKSPACE_ERROR",
+          message: error instanceof WorkspaceError ? error.message : "The sync request could not be completed." }));
+      }
+      return;
+    }
     if (frame.type.startsWith("AGENT_")) {
       if (frame.type !== "AGENT_LIST_AGENTS" && frame.type !== "AGENT_INIT_AGENT") await this.touchCheckout();
       if ((frame.type === "AGENT_PROMPT" || frame.type === "AGENT_STEER") && this.localCommandsEnabled) await this.retireLocalCommandSender(frame.sessionId);
@@ -476,7 +503,10 @@ export class CloudWorker {
       const run = this.options.workspaceServices?.run ?? commandRunner(scope.root, this.gitEnvironment);
       await reviewConfiguring;
       if (this.disposed || this.stopping) return false;
+      const sync = new SyncService(scope, (program, args, options) => run(program, args, options), () => this.syncHint(sync),
+        { bundleDirectory: join(this.options.directory, "sync-bundles"), baseBranch: config.workspace.baseBranch, onActive: () => workspace?.refreshWatch() });
       workspace = await measureStartup("worker_services_workspace", () => WorkspaceService.open(scope, this.options.directory, {
+        onContentChange: () => sync.changed(), onWatchLossy: () => sync.lossy(), watchContext: () => sync.active,
         historyDiff: params => agents!.turns.historyDiff(params),
         ...this.options.workspaceServices,
         codeReview: reviews,
@@ -546,6 +576,7 @@ export class CloudWorker {
       if (config.environment) await this.options.transport.reportEnvironment!({ versionId: config.environment.versionId, sequence: 1, state: "ready" }, this.environmentLifetime.signal);
       if (this.disposed || this.stopping) return false;
       this.environmentVersion = config.environment?.versionId;
+      this.sync?.dispose(); this.sync = sync;
       this.store = store; this.workspace = workspace; this.mcp = mcp; this.agents = agents; this.reviews = reviews;
       this.terminals = terminals; this.application = application; this.workspaceApi = workspaceApi; this.chats = chats; this.history = history; this.setup = setup; this.checkoutRefresh = refresh;
       this.unsubscribers.push(...unsubscribers); this.scope = scope; published = true;
@@ -594,11 +625,17 @@ export class CloudWorker {
     await Promise.race([this.options.transport.retireLocalCommandSender({ chatId, executionId }).catch(() => {}),
       new Promise<void>(resolve => { setTimeout(resolve, 5_000).unref(); })]);
   }
+  /** After a recorded batch: only syncing Macs need it, and they pull. */
+  private syncHint(sync: SyncService): void {
+    if (this.sync !== sync || !this.scope) return;
+    const hint = createMessage({ type: "DB_CHANGED", source: "engine", kinds: [SYNC_HINT_KIND], workspaceIds: [this.scope.workspace.id] });
+    for (const client of this.clients.values()) if (client.passive) void client.send(hint).catch(() => {});
+  }
   private broadcast(frame: BridgeMessage): Promise<void> { return this.send({ t: "frame", clientId: "*", frame }).then(() => {}); }
   private readyFrame(): BridgeMessage {
     return createMessage({ type: "ENGINE_READY", source: "engine", version: "0.0.0", root: "", framework: "cloud", port: 0,
       protocolVersion: PROTOCOL_VERSION, minProtocolVersion: MIN_SUPPORTED_PROTOCOL, instanceId: this.instanceId,
-      capabilities: [...(this.reviews?.enabled ? ["code-review-v1"] : []), CLOUD_WORKSPACE_RESOURCES_CAPABILITY] });
+      capabilities: [...(this.reviews?.enabled ? ["code-review-v1"] : []), CLOUD_WORKSPACE_RESOURCES_CAPABILITY, SYNC_CAPABILITY] });
   }
   private async touchCheckout(): Promise<void> {
     await this.checkoutRefresh?.touch();
@@ -643,7 +680,7 @@ export class CloudWorker {
   }
   get runtimeCensus(): RuntimeCensus {
     return {
-      clients: this.clients.size > 0,
+      clients: [...this.clients.values()].some(client => !client.passive),
       requests: this.activeMutations > 0,
       agents: this.agents?.runtimeBusy ?? null,
       terminals: this.terminals?.runtimeBusy ?? null,

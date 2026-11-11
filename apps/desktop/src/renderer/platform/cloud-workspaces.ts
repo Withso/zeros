@@ -50,7 +50,9 @@ export async function cloudAccountRequest<T>(
   input?: { body: unknown; idempotencyKey: string; method?: "POST" | "DELETE" | "PUT" | "PATCH" },
   options?: { promptRecovery?: true; signal?: AbortSignal; githubPullRequest?: true; mutationReceipt?: true;
     /** This Mac's three local-command device headers, all or none. */
-    deviceHeaders?: Record<string, string> },
+    deviceHeaders?: Record<string, string>;
+    /** Order 3: ask for the connected-Macs `syncing` field (released desktops parse those replies strictly). */
+    syncField?: true },
 ): Promise<T> {
   if (!isFeatureEnabled("cloud-workspaces"))
     throw new Error("Cloud workspaces are not available in this release channel.");
@@ -71,6 +73,7 @@ export async function cloudAccountRequest<T>(
     headers: {
       authorization: `Bearer ${session.access_token}`,
       ...pickDeviceHeaders(options?.deviceHeaders),
+      ...(options?.syncField ? { "X-Zeros-Sync": "1" } : {}),
       ...(input
         ? {
             "content-type": "application/json",

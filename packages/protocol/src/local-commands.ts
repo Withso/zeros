@@ -96,11 +96,15 @@ export const LocalCommandDeviceSchema = z.object({ deviceId: uuid, registrationI
 export type LocalCommandDevice = z.infer<typeof LocalCommandDeviceSchema>;
 export const LocalCommandRegistrationRequestSchema = z.object({ requestId: uuid, name: deviceName, capabilities }).strict();
 export const LocalCommandRegistrationReplySchema = z.object({ device: LocalCommandDeviceSchema, presence: LocalCommandPresenceSchema, heartbeatIntervalMs: z.literal(25_000) }).strict();
-export const LocalCommandMacSchema = z.object({ deviceId: uuid, name: deviceName, connected: z.boolean(), active: z.boolean(), reachable: z.boolean(), expiresAt: iso.nullable() }).strict();
+export const LocalCommandMacSchema = z.object({ deviceId: uuid, name: deviceName, connected: z.boolean(), active: z.boolean(), reachable: z.boolean(), expiresAt: iso.nullable(),
+  /** Order 3: this Mac mirrors the workspace into a local folder (optional until every control plane sends it). */
+  syncing: z.boolean().optional() }).strict();
 export type LocalCommandMac = z.infer<typeof LocalCommandMacSchema>;
 export const LocalCommandMacsReplySchema = z.object({ macs: z.array(LocalCommandMacSchema).max(20) }).strict();
 export const LocalCommandConnectReplySchema = z.object({ mac: LocalCommandMacSchema, presence: LocalCommandPresenceSchema }).strict();
 export const LocalCommandDisconnectReplySchema = z.object({ mac: LocalCommandMacSchema }).strict();
+/** Order 3: `PUT /v1/cloud-v2/workspaces/:id/macs/:deviceId/sync` (D+H, this Mac) answers the updated row. */
+export const WorkspaceSyncFlagReplySchema = z.object({ mac: LocalCommandMacSchema }).strict();
 
 const workspaceLabel = z.object({ id: uuid, name: z.string().max(120), title: z.string().max(120).nullable() }).strict();
 const chatLabel = z.object({ id, title: z.string().max(4096) }).strict();

@@ -19,6 +19,11 @@ export interface PrSummary { prNumber: number | null; prState: "draft" | "ready"
 const EMPTY_PR: PrSummary = { prNumber: null, prState: null, prUrl: null };
 interface State { workspaceId: string; root: string; baseBranch: string; configuredBase: string; createdAt: number }
 export interface WorkspaceServiceOptions {
+  /** Order 3: the watcher saw content change, or lost events. */
+  onContentChange?(): void;
+  onWatchLossy?(): void;
+  /** Watch `.context` too (a Mac is syncing). */
+  watchContext?(): boolean;
   run?: CommandRunner;
   publish?: (frame: BridgeMessage) => void;
   lookupPr?: (branch: string) => Promise<PrSummary>;
@@ -72,7 +77,8 @@ export class WorkspaceService {
       }
       throw new WorkspaceError("GIT_STATE_CHANGED", "The checkout changed while confirming its branch.");
     }, options.reportGithubCheckout, options.nextCheckoutSequence);
-    if (options.watch !== false) this.watcher = new CheckoutWatch(scope, this.run, content => this.poll(content), options);
+    if (options.watch !== false) this.watcher = new CheckoutWatch(scope, this.run, content => this.poll(content),
+      { ...options, ...(options.onWatchLossy ? { lossy: options.onWatchLossy } : {}), ...(options.watchContext ? { watchContext: options.watchContext } : {}) });
   }
 
   static async open(scope: WorkspaceScope, directory: string, options: WorkspaceServiceOptions = {}): Promise<WorkspaceService> {
@@ -153,9 +159,12 @@ export class WorkspaceService {
     this.signature = signature;
     if (refsChanged) this.invalidatePr();
     if (refsChanged || content) this.publish(false);
+    if (content) this.options.onContentChange?.();
     const reporting = this.reportCheckout();
     if (options.waitForCheckoutReport !== false) await reporting;
   }
+  /** Rescan what the watcher covers (a Mac started syncing `.context`). */
+  refreshWatch(): void { this.watcher?.schedule(true); }
   async flush(): Promise<void> { await this.git.flush(); await this.metadataQueue; await this.watcher?.flush(); await this.checkoutFlight; await this.githubCheckout?.flush(); }
   get uploading(): boolean { return this.attachments.busy; }
   stopAttachmentTransfers(): Promise<void> { return this.attachments.dispose(); }

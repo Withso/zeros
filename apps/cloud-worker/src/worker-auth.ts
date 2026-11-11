@@ -20,27 +20,42 @@ export class WorkerTokenVerifier {
     });
   }
 
-  accept(token: unknown): boolean {
-    if (typeof token !== "string" || token.length > 4096) return false;
+  /** A control-plane grant: exactly today's six claims. */
+  accept(token: unknown): boolean { return this.verify(token)?.scope === "control"; }
+
+  /** Order 3: a single-use grant for one Mac's sync socket: the control claims
+   * plus scope "sync", the user (sub) and the device (dev). */
+  acceptSync(token: unknown): { sub: string; dev: string; iat: number } | null {
+    const result = this.verify(token);
+    return result?.scope === "sync" ? { sub: result.sub!, dev: result.dev!, iat: result.iat } : null;
+  }
+
+  private verify(token: unknown): { scope: "control" | "sync"; iat: number; sub?: string; dev?: string } | null {
+    if (typeof token !== "string" || token.length > 4096) return null;
     const parts = /^v1\.([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)$/.exec(token);
-    if (!parts) return false;
+    if (!parts) return null;
     try {
       const payload = Buffer.from(parts[1]!, "base64url"), signature = Buffer.from(parts[2]!, "base64url");
-      if (payload.toString("base64url") !== parts[1] || signature.toString("base64url") !== parts[2] || signature.length !== 64) return false;
-      if (!this.keys.some(key => verify(null, Buffer.from(`v1.${parts[1]}`), key, signature))) return false;
+      if (payload.toString("base64url") !== parts[1] || signature.toString("base64url") !== parts[2] || signature.length !== 64) return null;
+      if (!this.keys.some(key => verify(null, Buffer.from(`v1.${parts[1]}`), key, signature))) return null;
       const claims = JSON.parse(payload.toString("utf8"));
-      if (!claims || typeof claims !== "object" || Object.keys(claims).sort().join(",") !== "aud,boot,exp,iat,iss,jti") return false;
+      if (!claims || typeof claims !== "object") return null;
+      const keys = Object.keys(claims).sort().join(",");
+      const sync = keys === "aud,boot,dev,exp,iat,iss,jti,scope,sub";
+      if (keys !== "aud,boot,exp,iat,iss,jti" && !sync) return null;
       const { iss, aud, boot, iat, exp, jti } = claims;
       if (iss !== "zeros-cp" || aud !== this.options.workspaceId || boot !== this.options.bootId ||
           !Number.isSafeInteger(iat) || !Number.isSafeInteger(exp) || iat < 0 || exp <= iat || exp - iat > 60 ||
-          typeof jti !== "string" || !/^[A-Za-z0-9_-]{16,128}$/.test(jti)) return false;
+          typeof jti !== "string" || !/^[A-Za-z0-9_-]{16,128}$/.test(jti)) return null;
+      if (sync && (claims.scope !== "sync" || typeof claims.sub !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(claims.sub)
+        || typeof claims.dev !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(claims.dev))) return null;
       const now = Math.floor((this.options.now?.() ?? Date.now()) / 1000);
-      if (iat > now + SKEW_SECONDS || exp < now - SKEW_SECONDS) return false;
+      if (iat > now + SKEW_SECONDS || exp < now - SKEW_SECONDS) return null;
       for (const [id, expires] of this.used) if (expires < now) this.used.delete(id);
-      if (this.used.has(jti) || this.used.size >= (this.options.capacity ?? 4096)) return false;
+      if (this.used.has(jti) || this.used.size >= (this.options.capacity ?? 4096)) return null;
       this.used.set(jti, exp + SKEW_SECONDS);
-      return true;
-    } catch { return false; }
+      return sync ? { scope: "sync", iat, sub: claims.sub, dev: claims.dev.toLowerCase() } : { scope: "control", iat };
+    } catch { return null; }
   }
 }
 

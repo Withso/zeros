@@ -92,5 +92,29 @@ export async function runLocalCommandsSmoke({ page, harnessBase, check }) {
     expect(await color(transcript.locator('[data-local-command-row="denied"]').getByText("List booted simulators", { exact: true }), "color")).toBe(await token("--fg1"));
     await shoot(transcript, `local-command-transcript-${theme}`);
     check(`RunLocalCommand rows read the description and command with plain-word endings, never mcp__ names, Loading tool or Error, in ${theme}`, true);
+
+    // Order 3: This Mac's sync row in the popup, off and on, from the keyboard.
+    await open("view=sync&sync=off", theme);
+    const offPopup = page.getByRole("dialog", { name: "Cloud workspace details" });
+    await expect(offPopup.getByText("Connected · for 12 h · Syncing")).toBeVisible();
+    const start = offPopup.getByRole("button", { name: "Sync to a local directory" });
+    await start.focus(); await page.keyboard.press("Enter");
+    expect(await calls()).toContain("sync:choose");
+    await shoot(offPopup, `workspace-sync-off-${theme}`);
+    for (const [state, label] of [["syncing", "Syncing (12 files)"], ["in_sync", "In sync"], ["paused", "Paused (workspace asleep)"], ["error", "Error (more than 5 GB)"]]) {
+      await open(`view=sync&sync=${state}`, theme);
+      const group = page.getByRole("group", { name: "Sync on this Mac" });
+      const status = group.getByRole("status");
+      await expect(status).toHaveText(label);
+      expect(await color(status, "color")).toBe(await token(state === "error" ? "--red-primary" : "--fg1"));
+      await expect(group.getByText("A local copy: changes in the cloud overwrite edits made here.")).toBeVisible();
+      if (state === "in_sync") {
+        await group.getByRole("button", { name: "Open terminal here" }).focus(); await page.keyboard.press("Enter");
+        await group.getByRole("button", { name: "Stop sync" }).focus(); await page.keyboard.press("Enter");
+        expect((await calls()).slice(-2)).toEqual(["sync:terminal", "sync:stop"]);
+        await shoot(group, `workspace-sync-in-sync-${theme}`);
+      }
+    }
+    check(`This Mac's sync row starts from the keyboard, shows each status on its token with the copy note, and opens a terminal or stops in ${theme}`, true);
   }
 }
