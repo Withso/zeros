@@ -37,9 +37,10 @@ database("team sharing expand migration and hot-table cost", () => {
     const proof = await f.sharing.authority.admit(f.workspace.id,f.viewer);
     const connection = await f.sharing.events.presence.open(proof);
     await withSystemTx(pool,async tx => {
-      // Tiny fixtures otherwise prefer sequential scans. This checks that the
-      // production predicates have usable indexes, not a planner-cost ratio.
-      await tx.query("SET LOCAL enable_seqscan=off");
+      // Tiny fixtures otherwise prefer sequential scans, or another index plus a
+      // sort when parallel suites shift the table statistics. This checks that the
+      // production predicates and orderings have usable indexes, not a planner-cost ratio.
+      await tx.query("SET LOCAL enable_seqscan=off"); await tx.query("SET LOCAL enable_sort=off");
       const plans = [
         ["list","SELECT id FROM cloud_v2_workspaces WHERE org_id=$1 AND state<>'deleted' ORDER BY created_at DESC,id LIMIT 50",[f.organizationId],"cloud_v2_workspaces_organization_page"],
         ["source","SELECT verified_at FROM cloud_github_source_verifications WHERE org_id=$1 AND owner_user_id=$2 AND repository_id=ANY($3::bigint[]) AND fingerprint=$4",
