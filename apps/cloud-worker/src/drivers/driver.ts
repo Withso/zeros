@@ -15,6 +15,8 @@ interface DriverSession {
   application?: ApplicationEnvironment;
   /** Worker-owned ZEROS_* identity and API variables for this chat's process. */
   zerosEnvironment?: Readonly<Record<string, string>>;
+  /** Team sharing: this turn's person as Git author and committer, over the worker's shared Git environment. */
+  gitEnvironment?: Readonly<Record<string, string>>;
   onTiming?: (stage: DriverTimingStage) => void;
   mcpServers?: DriverMcpServers;
   modeId?: string;

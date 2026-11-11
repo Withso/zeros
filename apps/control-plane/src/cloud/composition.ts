@@ -27,7 +27,7 @@ import { CLOUD_V2_PROXY_PREFIX, type CloudV2ProxyDeps } from "./proxy.js";
 import { CloudV2Relay } from "./relay.js";
 import { cloudV2Runtime } from "./runtime.js";
 import type { CloudV2RouteDeps } from "./routes.js";
-import { CloudV2Store, type CloudV2WorkerSession, type CloudV2Workspace } from "./store.js";
+import { CloudV2Store, type CloudV2LifecycleWorkspace, type CloudV2WorkerSession, type CloudV2Workspace } from "./store.js";
 import { CloudV2WorkerSigner } from "./worker-auth.js";
 import { openPortToken, sealPortToken } from "./worker-port-token.js";
 import type { CloudV2WorkerRouteDeps } from "./worker-routes.js";
@@ -50,6 +50,11 @@ import { CloudLocalCommands } from "./local-commands/requests.js";
 import { startLocalCommandMaintenance } from "./local-commands/maintenance.js";
 import { CloudNotifyUser } from "./notify-user/store.js";
 import { CloudWorkspaceSync } from "./workspace-sync/store.js";
+
+import { CloudExecutionContexts } from "./execution/store.js";
+import { lifecycleExecution } from "./execution/lifecycle.js";
+import { CloudExecutionAuthority } from "./execution/authority.js";
+import { CloudExecutionLogins } from "./execution/logins.js";
 
 const PROXY_TOKEN_TTL_MS = 24 * 60 * 60_000;
 
@@ -138,10 +143,71 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   const continueSource = github.continueSource;
   const workspaceSync = new CloudWorkspaceSync(pool, localDevices, store, keys, signer, continueSource);
   const mcp = createMcpServices(pool, config, github.connections.authorizeRepositoryConfiguration.bind(github.connections));
+  const execution: CloudExecutionContexts = new CloudExecutionContexts(pool, {
+    authority: new CloudExecutionAuthority(pool, source, github.connections.store), logins: new CloudExecutionLogins(pool, keys), keys,
+    apiUrl: `${v2.apiUrl}/api/v0`, proxyBase, agentConfig: cloudV2AgentConfig,
+    githubToken: async (context, check, purpose, failed) => {
+      const target = await withSystemTx(pool, async tx => {
+        await check(tx);
+        const row = (await tx.query<{ repository: string; repositoryId: string }>(`SELECT s.source_repository AS repository,s.repository_id::text AS "repositoryId"
+          FROM cloud_v2_github_sources s JOIN cloud_v2_workspaces w ON w.id=s.workspace_id
+          WHERE w.id=$1 AND s.source_repository=lower(w.repository)`, [context.workspace_id])).rows[0];
+        if (!row) throw new HttpError(409, "actor_changed", "Execution source changed");
+        return row;
+      });
+      await check();
+      return github.token({ organizationId: context.org_id, userId: context.user_id! }, target, "user", purpose, () => check(), failed);
+    },
+    ...(mcp ? { mcpAuthorization: async (context, check, id, force) => {
+      const { workspace } = await execution.workspace(context.workspace_id, context.user_id!);
+      const target = await github.identities.primary(workspace); await check();
+      const result = await mcp.oauth.authorizationForRepository(context.org_id, context.user_id!, workspace.repository, id, force, target);
+      await check(); return result;
+    } } satisfies Pick<import("./execution/store.js").ExecutionDeps, "mcpAuthorization"> : {}),
+    material: async (context, check) => {
+      const workspace = await store.get(context.workspace_id, (await withSystemTx(pool, tx => tx.query<{ creator_user_id: string }>(
+        "SELECT creator_user_id FROM cloud_v2_workspaces WHERE id=$1", [context.workspace_id]))).rows[0]!.creator_user_id);
+      await check();
+      const credential = await withSystemTx(pool, tx => github.connections.store.currentCredential(tx, { organizationId: context.org_id, userId: context.user_id! }));
+      await check();
+      if (!credential) throw new HttpError(503, "agent_credentials_unavailable", "Execution credentials are temporarily unavailable");
+      const profile = await github.connections.workerProfile(credential, () => check());
+      await check();
+      const primary = await github.identities.primary(workspace);
+      await check();
+      const material = await withSystemTx(pool, async tx => {
+        await check(tx);
+        const environment = context.kind === "client" ? undefined : await environments.resolveExecution(workspace, context.user_id!, context.id, tx);
+        await check(tx);
+        const mcpServers = context.kind === "turn" && mcp ? await mcp.store.resolve(context.org_id, context.user_id!, workspace.repository,
+          primary, tx) : undefined;
+        await check(tx);
+        return { ...(environment ? { environment } : {}), ...(mcpServers ? { mcpServers } : {}) };
+      });
+      await check();
+      return { ...material, gitIdentity: { name: profile.name ?? profile.login, email: `${profile.id}+${profile.login}@users.noreply.github.com` } };
+    },
+  });
+  store.prompts.execution = execution;
+  store.api.execution = execution;
+  apiCredentials.execution = execution;
+  localCommands.execution = execution;
+  notifications.execution = execution;
+  localDevices.execution = execution;
+  workspaceSync.execution = execution;
   const timing = (record: CloudV2TimingRecord) => console.log(`[cloud-v2] timing ${JSON.stringify(record)}`);
 
-  const workerConfig = async (workspace: CloudV2Workspace & Partial<Pick<CloudV2WorkerSession, "loginRevision">>, mode: "admission" | "continuation" = "admission",
+  const workerConfig = async (workspace: CloudV2Workspace & Partial<Pick<CloudV2WorkerSession, "loginRevision" | "executionMode">>, mode: "admission" | "continuation" = "admission",
     proof?: CloudSourceProof): Promise<ConfigFrame> => {
+    if (workspace.executionMode === "active" || workspace.executionMode === undefined && await execution.active(workspace.id)) {
+      const bootstrapContextId = await execution.bootstrap(workspace.id);
+      const [setup, target, baseCommit] = await Promise.all([github.workspaceSetup(workspace, computers), github.identities.primary(workspace), store.baseCommit(workspace.id)]);
+      return { t: "config", actingUser: 1, bootstrapContextId, agents: {}, gitIdentity: null, loginRevision: workspace.loginRevision ?? "0",
+        promptOutbox: 1, notifyUser: 1, githubPullRequests: 1, githubUserTokens: 1, agentInteractions: 1, runtimeUpdate: 1,
+        workspace: { id: workspace.id, organizationId: workspace.organizationId, repository: workspace.repository,
+          checkoutPath: `${CLOUD_V2_HOME}/${workspace.repository}`, branch: workspace.branch, baseBranch: workspace.baseBranch,
+          github: { ...target, previousRepositories: [workspace.repository] }, ...(setup ?? {}), ...(baseCommit ? { baseCommit } : {}) } };
+    }
     const proxy = async () => {
       const issued = await store.issueToken({ workspaceId: workspace.id, kind: "proxy", userId: null, ttlMs: PROXY_TOKEN_TTL_MS });
       return { token: issued.token, expiresAt: issued.expiresAt.getTime() };
@@ -188,6 +254,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   const teamSharing = new CloudTeamSharing(pool,store,github,listenerPool);
   const routes: CloudV2RouteDeps = {
     teamSharing,
+    execution,
     store,
     computers,
     ...(v2.asyncCreate !== false ? { asyncCreate: () => Date.now() >= asyncCreateFrom } : {}),
@@ -203,17 +270,17 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     localDevices: { devices: localDevices, signals: localCommandSignals, requests: localCommands, notifications },
     workspaceSync,
   };
-  const proxy: CloudV2ProxyDeps = { store, logins, authorizeSource, continueSource, ...(keys ? { refreshCodex: createCloudV2CodexRefresh(pool, keys) } : {}) };
+  const proxy: CloudV2ProxyDeps = { store, execution, logins, authorizeSource, continueSource, ...(keys ? { refreshCodex: createCloudV2CodexRefresh(pool, keys) } : {}) };
   const api = { credentials: apiCredentials,
     service: new CloudApiService({ store, routes, credentials: apiCredentials, appBaseUrl: new URL(config.inviteLinkBase).origin }) };
   const connections = roles.relay || roles.lifecycle ? new CloudV2Relay({
-    apiConfiguration,
+    apiConfiguration, execution,
     localCommandsEnabled: id => localCommands.enabled(id),
     retireLocalSender: (id, userId, epoch, sessionId) => store.prompts.retireLocalSender(id, userId, epoch, sessionId),
     store, timing, authorizeSource, continueSource, ...(securityEvents ? { securityEvents } : {}),
     runtimeAdmission: runtimeHandoffs,
     config: async (workspace, mode = "admission", proof) => {
-      if (mode === "continuation") await continueSource(workspace, proof); else await authorizeSource(workspace);
+      if (!await execution.active(workspace.id)) { if (mode === "continuation") await continueSource(workspace, proof); else await authorizeSource(workspace); }
       return workerConfig(workspace, mode, proof);
     },
     workerRoute: async id => {
@@ -226,7 +293,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     workerActivity: async (binding, idle) => {
       const current = await store.relayActivity(binding, idle);
       if (!current) return null;
-      if (!idle && current.state === "running") void continueSource(current, current).catch(() => {});
+      if (!idle && current.state === "running" && current.executionMode !== "active") void continueSource(current, current).catch(() => {});
       return { state: current.state, loginRevision: current.loginRevision, prompts: current.promptsPending };
     },
     mintWorkerToken: (id, boot) => signer.mint(id, boot),
@@ -236,7 +303,7 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   }) : null;
   const relay = roles.relay ? connections : null;
   const promptSignals = new CloudV2PromptSignals();
-  const workers: CloudV2WorkerRouteDeps = { store, timing, logger: console, authorizeSource, continueSource, config: workerConfig, githubToken, runtimeSha256: v2.runtime.sha256,
+  const workers: CloudV2WorkerRouteDeps = { store, execution, timing, logger: console, authorizeSource, continueSource, config: workerConfig, githubToken, runtimeSha256: v2.runtime.sha256,
     apiConfiguration,
     localCommands: { requests: localCommands, signals: localCommandSignals },
     notifications,
@@ -259,12 +326,50 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     },
   }) : null;
   void promptChanges?.start().catch(() => {});
-  const loginChanges = postgresNotificationSubscription(listenerPool, {
+  const executionHints = new Map<string, { pending: boolean; flight: Promise<void> }>();
+  let executionClosing = false;
+  const executionHint = (id: string) => {
+    if (executionClosing) return Promise.resolve();
+    const previous = executionHints.get(id);
+    if (previous) { previous.pending = true; return previous.flight; }
+    const entry = { pending: true, flight: Promise.resolve() };
+    entry.flight = Promise.resolve().then(async () => {
+      do {
+        entry.pending = false;
+        await execution.maintenance.publish(id, async (workspaceId, frames) => { await connections?.revokeContexts(workspaceId, frames); });
+      } while (entry.pending && !executionClosing);
+    }).catch(() => {}).finally(() => executionHints.delete(id));
+    executionHints.set(id, entry);
+    return entry.flight;
+  };
+  const executionSweep = async () => { for (const id of await execution.maintenance.due()) await executionHint(id); };
+  const executionScope = async (scope: { userId?: string; organizationId?: string }) => {
+    let after: string | undefined;
+    while (!executionClosing) {
+      const ids = await execution.maintenance.affected(scope, after);
+      for (const id of ids) await executionHint(id);
+      if (ids.length < 128) break;
+      after = ids.at(-1);
+    }
+  };
+  const loginListener = postgresNotificationSubscription(listenerPool, {
     // The existing shared LISTEN connection carries these hints. No connection
     // or polling loop is added for permission-cache invalidation or readiness.
-    channels: ["zeros_cloud_v2_logins", "zeros_cloud_github_access", CLOUD_V2_READY_CHANNEL],
-    onReady: () => { source.invalidate(); relay?.revalidateSources({}); void relay?.refreshLogins(); },
+    channels: ["zeros_cloud_v2_logins", "zeros_cloud_github_access", "zeros_cloud_v2_execution", CLOUD_V2_READY_CHANNEL],
+    onReady: () => { source.invalidate(); relay?.revalidateSources({}); void relay?.refreshLogins(); void executionScope({}).catch(() => {}); void executionSweep().catch(() => {}); },
     onNotification: notice => {
+      if (notice.channel === "zeros_cloud_v2_execution") {
+        try {
+          const value = JSON.parse(notice.payload ?? "");
+          if (typeof value.workspaceId === "string" && /^[a-f0-9-]{36}$/.test(value.workspaceId)) void executionHint(value.workspaceId);
+          else {
+            const scope = { ...(typeof value.userId === "string" && /^[a-f0-9-]{36}$/.test(value.userId) ? { userId: value.userId } : {}),
+              ...(typeof value.organizationId === "string" && /^[a-f0-9-]{36}$/.test(value.organizationId) ? { organizationId: value.organizationId } : {}) };
+            void executionScope(scope).catch(() => {}); void executionSweep().catch(() => {});
+          }
+        } catch { /* A notification is only a hint; durable leases remain authoritative. */ }
+        return;
+      }
       if (notice.channel === CLOUD_V2_READY_CHANNEL) {
         if (/^[a-f0-9-]{36}$/.test(notice.payload ?? "")) connections?.hintReady(notice.payload!);
         return;
@@ -280,8 +385,22 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
       } catch { /* Invalid wake hints carry no authority. */ }
     },
   });
+  const loginChanges = { start: () => loginListener.start(), stop: async () => {
+    executionClosing = true; await loginListener.stop();
+    await Promise.all([...executionHints.values()].map(value => value.flight));
+  } };
   void loginChanges?.start().catch(() => {}); // The shared listener retries and re-reads onReady.
   const remoteHeads = github.remoteHead;
+  const lifecycleSource = async (workspace: CloudV2LifecycleWorkspace) => {
+    const actor = await lifecycleExecution(execution, workspace);
+    if (!actor) return null;
+    const target = await github.identities.primary(workspace); await actor.check();
+    const scope = { organizationId: workspace.organizationId, userId: actor.userId };
+    const access = await github.connections.access(scope); await actor.check();
+    const binding = await access.api.repository(target); await actor.check();
+    const credential = await github.token(scope, binding, "read", "git", actor.check); await actor.check();
+    return { ...actor, credential, repository: binding.repository };
+  };
   const builder = roles.lifecycle ? new CloudV2ComputerBuilder({
     computers, compute, channel: config.deploymentChannel, localOwner, runtime, publicKeys: signer.publicKeys,
     cloneToken: async (organizationId, userId, target) => {
@@ -307,14 +426,20 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     compute,
     runtime,
     runtimeForWorkspace,
-    authorizeSource,
+    authorizeSource: async (workspace, options) => {
+      if (!await lifecycleExecution(execution, workspace)) await authorizeSource(workspace, options);
+    },
+    assertExecution: async workspace => { await lifecycleExecution(execution, workspace); },
     prepareRepository: async (workspace, sandboxId) => {
-      const credential = await github.workspaceToken(workspace);
-      const repositoryBinding = await github.binding(workspace);
+      const actor = await lifecycleSource(workspace);
+      const credential = actor?.credential ?? await github.workspaceToken(workspace);
+      const repository = actor?.repository ?? (await github.binding(workspace)).repository;
       const input = `Authorization: Basic ${Buffer.from(`x-access-token:${credential.token}`).toString("base64")}\n`;
-      const result = await compute.execLong(sandboxId, hydrateCloudRepository(workspace, repositoryBinding.repository), 900, input);
+      await actor?.check();
+      const result = await compute.execLong(sandboxId, hydrateCloudRepository(workspace, repository), 900, input);
+      await actor?.check();
       if (result.exitCode !== 0) throw new HttpError(409, "cloud_source_checkout_failed", "The repository checkout could not be prepared. Existing files were retained.");
-      await authorizeSource(workspace);
+      if (!actor) await authorizeSource(workspace);
     },
     prompts: store.prompts, stopIdle: (id, before) => store.stopIdle(id, before),
     pruneEnvironments: () => environments.prune(),
@@ -330,9 +455,13 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
       seal: (key, id, object) => sealCheckpointKey(key, id, object, keys),
       open: (sealed, id, object) => openCheckpointKey(sealed, id, object, keys),
     },
-    remoteHead: async (workspace: CloudV2Workspace) => remoteHeads(workspace.organizationId, workspace.creatorUserId, workspace.repository,
-      workspace.baseBranch,(await github.identities.primary(workspace)).repositoryId),
-    githubToken: (workspace: CloudV2Workspace) => github.workspaceToken(workspace),
+    remoteHead: async workspace => {
+      const actor = await lifecycleExecution(execution, workspace);
+      const target = await github.identities.primary(workspace); await actor?.check();
+      const head = await remoteHeads(workspace.organizationId, actor?.userId ?? workspace.creatorUserId, workspace.repository, workspace.baseBranch, target.repositoryId);
+      await actor?.check(); return head;
+    },
+    githubToken: async workspace => (await lifecycleSource(workspace))?.credential ?? github.workspaceToken(workspace),
     logger: console,
   }) : null;
   // Lifecycle rows notify on change. Reconnecting sweeps once, covering any
@@ -343,6 +472,11 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
     onNotification: () => lifecycle.wake(),
   }) : null;
   void lifecycleChanges?.start().catch(() => {});
-  return { store, compute, routes, proxy, workers, api, relay, connections, lifecycle, runtimeUpdates, loginChanges, promptChanges, lifecycleChanges, promptSignals, localCommandSignals, teamSharing,
-    startLocalCommands: () => roles.lifecycle ? startLocalCommandMaintenance(localCommands,localCommandSignals,console,notifications) : async () => {} };
+  return { store, execution, compute, routes, proxy, workers, api, relay, connections, lifecycle, runtimeUpdates, loginChanges, promptChanges, lifecycleChanges, promptSignals, localCommandSignals, teamSharing,
+    startLocalCommands: () => {
+      if (!roles.lifecycle) return async () => {};
+      const local = startLocalCommandMaintenance(localCommands,localCommandSignals,console,notifications);
+      const acting = execution.maintenance.start(async (id, frames) => { await connections?.revokeContexts(id, frames); });
+      return async () => { await Promise.all([local(), acting()]); };
+    } };
 }

@@ -10,6 +10,7 @@ import { createApp, type CreateAppDependencies } from "./app.js";
 import type { Config, GithubBackendConfig } from "./config.js";
 import { configureControlPlaneTracing, shutdownControlPlaneTracing } from "./tracing.js";
 import { workosTestAuth } from "./test-workos-env.js";
+import { AgentLoginRequired } from "./cloud/execution/errors.js";
 
 // These assert POSITION in the middleware chain, which no per-router test can
 // see. `github.test.ts` proved `createGithubUnconfiguredRoutes()` answers 503
@@ -157,6 +158,26 @@ function workosConfig(): Config {
 }
 
 describe("unexpected error privacy", () => {
+  it("preserves the selected agent on a shared execution login refusal", async () => {
+    const app = createApp(config(null), pool, emailConfig as never);
+    const path = "/v1/cloud-v2/workspaces/11111111-1111-4111-8111-111111111111/prompts";
+    const context = new Context(new Request(`https://api.example.test${path}`), { path });
+    const response = await app.errorHandler(new AgentLoginRequired("claude"), context);
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({ error: { code: "agent_login_required", agent: "claude", message: "Connect your claude account" } });
+  });
+  it("keeps credential uncertainty retryable without exposing the underlying diagnostic", async () => {
+    const app = createApp(config(null), pool, emailConfig as never), sentinel = "private_credential_diagnostic";
+    const path = "/v1/cloud-v2/workspaces/11111111-1111-4111-8111-111111111111/prompts";
+    const context = new Context(new Request(`https://api.example.test${path}`), { path });
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const response = await app.errorHandler(new HttpError(503, "agent_credentials_unavailable", sentinel, { target: sentinel }), context);
+      expect(response.status).toBe(503);
+      expect(await response.json()).toEqual({ error: { code: "agent_credentials_unavailable", message: "Execution credentials are temporarily unavailable" } });
+      expect(JSON.stringify(log.mock.calls)).not.toContain(sentinel);
+    } finally { log.mockRestore(); }
+  });
   it("keeps application values and escaped echoes out of cloud environment responses and logs", async () => {
     const app = createApp(config(null), pool, emailConfig as never), canary = 'synthetic-app-"canary"\nnext';
     const path = "/v1/cloud-v2/organizations/11111111-1111-4111-8111-111111111111/environment/123";

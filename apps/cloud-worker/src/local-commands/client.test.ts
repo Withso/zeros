@@ -82,4 +82,10 @@ describe("worker local command client", () => {
     expect(await running).toBeInstanceOf(LocalCommandUnknownError);
     expect(calls).toContain(`POST local-commands/${requestId}/cancel`);
   });
+  it("carries the active turn's execution context on create only", async () => {
+    const contextId = "66666666-6666-4666-8666-666666666666";
+    const s = server([() => receipt("terminal", { outcome: "completed", code: 0, stdout: "ok", mac: "Studio" })]);
+    await requestLocalCommand(s.call, { ...request, contextId }, new AbortController().signal, { requestId, sleep });
+    expect(s.calls[0]).toMatchObject({ method: "POST", path: "local-commands", body: { requestId, ...request, contextId } });
+  });
 });

@@ -16,7 +16,8 @@ export function cloudApiFailure(error: unknown) {
     error: { code: "service_busy", message: "Service is temporarily busy" } };
   if (error instanceof HttpError) return { status: error.status === 403 ? 404 as const : error.status,
     retryAfter: error.status === 429 && typeof error.details?.retryAfterSeconds === "number" ? error.details.retryAfterSeconds : undefined,
-    error: { code: error.status === 403 ? "not_found" : error.code, message: error.status === 403 ? "Not found" : error.message } };
+    error: { code: error.status === 403 ? "not_found" : error.code, message: error.status === 403 ? "Not found" : error.message,
+      ...(error.code === "agent_login_required" && "agent" in error ? { agent: error.agent } : {}) } };
   return { status: 500 as const, error: { code: "internal", message: "Internal error" } };
 }
 

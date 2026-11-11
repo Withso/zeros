@@ -14,9 +14,12 @@ import { LocalCommandIdSchema, LocalCommandInputSchema, LocalCommandReasonSchema
 import { CloudLocalDevices, limited, localUserAuthority, notFound } from "./devices.js";
 import { openLocalInput, openLocalResult, sealLocalInput, sealLocalResult } from "./envelope.js";
 import { localCommandDiagnostic, type LocalCommandDiagnostic, type LocalTargetReason } from "./diagnostics.js";
+import type { CloudExecutionContexts } from "../execution/store.js";
+import { actorChanged } from "../execution/errors.js";
+import { memberOnHoldSql } from "../../organization-seats.js";
 
 export const NewLocalCommandSchema = z.object({ requestId: z.string().uuid(), chatId: LocalCommandIdSchema,
-  executionId: LocalCommandIdSchema, input: LocalCommandInputSchema }).strict();
+  executionId: LocalCommandIdSchema, input: LocalCommandInputSchema, contextId: z.uuid().optional() }).strict();
 // An accepted N-1 body must still replay after bounds tighten. The store
 // applies current bounds only after the exact existing-receipt hash check.
 export const LocalCommandSubmissionSchema = NewLocalCommandSchema.extend({ input: StoredLocalCommandInputSchema });
@@ -34,7 +37,7 @@ const summary = (result: LocalCommandResult): LocalCommandResult => ({ outcome: 
   ...(result.outcome === "failed" && result.error !== undefined ? { error: result.error } : {}),
   ...(result.mac === undefined ? {} : { mac: result.mac }), ...(result.connectedMacs === undefined ? {} : { connectedMacs: result.connectedMacs }) });
 type Worker = { id: string; org_id: string; access_epoch: string; stop_generation: string; state: string;
-  archived_at: Date | null; local_commands_allowed: boolean };
+  archived_at: Date | null; local_commands_allowed: boolean; execution_mode: string };
 export type LocalRequestRow = {
   workspace_id: string; request_id: string; chat_id: string; sender_user_id: string | null; target_device_id: string | null;
   target_registration_id: string | null; target_instance_id: string | null; target_name: string | null; default_mac_name: string | null;
@@ -56,19 +59,23 @@ const snapshot = `SELECT r.*,clock_timestamp() AS checked_at,o.local_commands_al
   coalesce(d.reason_instance_id=d.instance_id,false) AS reason_supported,
   coalesce(w.state='running' AND w.archived_at IS NULL AND w.access_epoch=r.access_epoch AND w.stop_generation=r.stop_generation
     AND w.worker_boot_id=r.worker_boot_id AND ${CLOUD_V2_LIVE_ACCESS}
-    AND c.next_sequence=r.message_sequence AND c.epoch=r.chat_epoch AND c.local_command_generation=r.binding_generation
+    AND c.epoch=r.chat_epoch AND ((r.context_id IS NULL AND c.next_sequence=r.message_sequence AND c.local_command_generation=r.binding_generation)
+      OR (r.context_id IS NOT NULL AND x.id=c.active_context_id AND x.state='active' AND x.expires_at>clock_timestamp()
+        AND x.user_id=r.sender_user_id AND x.user_message_id=r.message_id AND x.chat_epoch=c.epoch AND x.sender_binding_generation=r.binding_generation))
     AND p.user_message_id=r.message_id AND p.creator_user_id=r.sender_user_id AND p.sender_device_id IS NOT NULL
-    AND p.sender_binding_generation=c.local_command_generation AND NOT p.cancel_requested AND h.deleted_at IS NULL
+    AND p.sender_binding_generation=r.binding_generation AND NOT p.cancel_requested AND h.deleted_at IS NULL
     AND d.registration_id=r.target_registration_id AND d.instance_id=r.target_instance_id AND d.revoked_at IS NULL
     AND s.status='active' AND s.revoked_at IS NULL AND (s.provider_session_expires_at IS NULL OR s.provider_session_expires_at>clock_timestamp())
     AND EXISTS (SELECT 1 FROM user_identities i WHERE i.user_id=d.user_id AND i.provider='workos' AND i.provider_sub=s.provider_sub AND i.status='active')
     AND u.auth_status='active' AND u.deleted_at IS NULL
-    AND EXISTS (SELECT 1 FROM organization_members m WHERE m.org_id=w.org_id AND m.user_id=r.sender_user_id)
+    AND EXISTS (SELECT 1 FROM organization_members m WHERE m.org_id=w.org_id AND m.user_id=r.sender_user_id
+      AND (r.context_id IS NULL OR NOT ${memberOnHoldSql("m.org_id", "m.user_id")}))
     AND cm.registration_id=r.target_registration_id AND cm.disconnected_at IS NULL
     AND (cm.is_latest_sender OR greatest(cm.connected_at,cm.last_used_at)>clock_timestamp()-interval '12 hours'),false) AS fences_valid
   FROM local_command_requests r JOIN cloud_v2_workspaces w ON w.id=r.workspace_id JOIN organizations o ON o.id=w.org_id
   LEFT JOIN cloud_v2_prompt_chats c ON c.workspace_id=r.workspace_id AND c.chat_id=r.chat_id
   LEFT JOIN cloud_v2_prompt_outbox p ON p.workspace_id=r.workspace_id AND p.user_message_id=r.message_id
+  LEFT JOIN cloud_v2_execution_contexts x ON x.id=r.context_id AND x.workspace_id=r.workspace_id
   LEFT JOIN cloud_v2_chats h ON h.workspace_id=r.workspace_id AND h.chat_id=r.chat_id
   LEFT JOIN local_command_devices d ON d.user_id=r.sender_user_id AND d.device_id=r.target_device_id
   LEFT JOIN auth_sessions s ON s.provider='workos' AND s.provider_session_id=d.provider_session_id AND s.user_id=d.user_id
@@ -86,6 +93,7 @@ function terminalOutcome(row: LocalRequestRow): LocalCommandOutcome | null {
 }
 
 export class CloudLocalCommands {
+  execution?: CloudExecutionContexts;
   constructor(readonly pool: pg.Pool, private readonly keys: CloudAgentCredentialKeys, readonly devices: CloudLocalDevices,
     private readonly limits = LOCAL_REQUEST_LIMITS) {}
 
@@ -128,7 +136,7 @@ export class CloudLocalCommands {
   }
 
   private async worker(tx: Tx, token: string, bootId: string, lock = false): Promise<Worker> {
-    const sql = `SELECT w.id,w.org_id,w.access_epoch::text,w.stop_generation::text,w.state,w.archived_at,o.local_commands_allowed
+    const sql = `SELECT w.id,w.org_id,w.access_epoch::text,w.stop_generation::text,w.state,w.archived_at,o.local_commands_allowed,w.execution_mode
       FROM cloud_v2_workspaces w JOIN organizations o ON o.id=w.org_id WHERE w.worker_token_hash=$1 AND w.worker_boot_id=$2
         AND $2::uuid=ANY(w.local_command_boot_ids) AND w.state IN ('starting','running','stopping') AND ${CLOUD_V2_LIVE_ACCESS}`;
     const params = [hashCloudV2Token(token), bootId];
@@ -202,9 +210,14 @@ export class CloudLocalCommands {
   }
 
   async create(token: string, bootId: string, input: NewLocalCommand): Promise<{ receipt: LocalCommandReceipt; replay: boolean }> {
+    const replay = input.contextId && this.execution ? await withSystemTx(this.pool, async tx => {
+      const workspace = await this.worker(tx,token,bootId);
+      return Boolean((await tx.query("SELECT 1 FROM local_command_requests WHERE workspace_id=$1 AND request_id=$2", [workspace.id,input.requestId])).rowCount);
+    }) : false;
+    const authority = input.contextId && this.execution && !replay ? await this.execution.authorizedContext({ token, bootId }, input.contextId, ["turn"]) : undefined;
     let diagnostic: LocalCommandDiagnostic | undefined;
     try { const result = await withSystemTx(this.pool, async tx => {
-      const workspace = await this.worker(tx,token,bootId,true), hash = digest([input.chatId,input.executionId,input.input]);
+      const workspace = await this.worker(tx,token,bootId,true), hash = digest([input.chatId,input.executionId,input.input,...(input.contextId ? [input.contextId] : [])]);
       const existing = (await tx.query("SELECT input_hash FROM local_command_requests WHERE workspace_id=$1 AND request_id=$2", [workspace.id,input.requestId])).rows[0];
       if (existing) {
         if (!existing.input_hash.equals(hash)) throw conflict();
@@ -212,7 +225,11 @@ export class CloudLocalCommands {
       }
       if (!NewLocalCommandSchema.safeParse(input).success) throw new HttpError(400, "invalid_request", "Invalid local command request");
       if (workspace.state !== "running" || workspace.archived_at) throw unauthorized();
-      const sender = await cloudChatSender(tx,workspace,input.chatId);
+      if (workspace.execution_mode === "active") {
+        if (!authority || authority.context.chat_id !== input.chatId || authority.context.workspace_id !== workspace.id) throw actorChanged();
+        await authority.check(tx);
+      } else if (input.contextId) throw actorChanged();
+      const sender = await cloudChatSender(tx,workspace,input.chatId,input.contextId);
       const userId = sender?.creator_user_id ?? null, defaultId = sender?.valid ? sender.sender_device_id : null;
       let outcome: LocalCommandOutcome | null = !workspace.local_commands_allowed ? "disabled" : !sender?.valid ? "no_target" : null;
       let reason: LocalTargetReason | undefined = outcome === "no_target" ? "sender_invalid" : undefined;
@@ -258,14 +275,15 @@ export class CloudLocalCommands {
       await tx.query(`WITH clock AS (SELECT clock_timestamp() AS at) INSERT INTO local_command_requests(
         workspace_id,request_id,chat_id,sender_user_id,target_device_id,target_registration_id,target_instance_id,target_name,default_mac_name,is_default_target,
         message_id,message_sequence,chat_epoch,binding_generation,access_epoch,stop_generation,worker_boot_id,execution_id,input_hash,input_envelope,input_bytes,
-        phase,outcome,timeout_ms,result_summary,reserved_output_bytes,created_at,delivery_deadline,approval_deadline,terminal_at)
+        phase,outcome,timeout_ms,result_summary,reserved_output_bytes,created_at,delivery_deadline,approval_deadline,terminal_at,context_id)
         SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,
-          CASE WHEN $23::text IS NULL THEN 2097152 ELSE 0 END,at,at+interval '10 seconds',at+interval '120 seconds',CASE WHEN $23::text IS NOT NULL THEN at END FROM clock`,
+          CASE WHEN $23::text IS NULL THEN 2097152 ELSE 0 END,at,at+interval '10 seconds',at+interval '120 seconds',CASE WHEN $23::text IS NOT NULL THEN at END,$26 FROM clock`,
       [workspace.id,input.requestId,input.chatId,userId,target?.device_id ?? null,target?.registration_id ?? null,target?.instance_id ?? null,target?.name ?? null,
         defaultId ? sender?.name ?? null : null,input.input.mac === undefined && target?.device_id === defaultId,sender?.user_message_id ?? null,sender?.sequence ?? null,
         sender?.epoch ?? null,sender?.local_command_generation ?? null,workspace.access_epoch,workspace.stop_generation,bootId,input.executionId,hash,
         envelope ? JSON.stringify(envelope) : null,envelope ? Buffer.byteLength(JSON.stringify(input.input)) : 0,outcome ? "terminal" : "pending",outcome,input.input.timeoutMs ?? 60_000,
-        terminal ? JSON.stringify(terminal) : null]);
+        terminal ? JSON.stringify(terminal) : null,input.contextId ?? null]);
+      await authority?.check(tx);
       if (!outcome) await tx.query("UPDATE cloud_v2_workspaces SET active_at=clock_timestamp() WHERE id=$1", [workspace.id]);
       diagnostic = { event: "request_created", workspaceId: workspace.id, requestId: input.requestId,
         userId, deviceId: target?.device_id ?? (input.input.mac === undefined ? defaultId : null), outcome: outcome ?? "pending", ...(reason ? { reason } : {}) };

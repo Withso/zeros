@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { workerChildEnvironment } from "../drivers/shared/agent-environment";
 import { WorkspaceError } from "./scope";
+import { operationEnvironment } from "../sharing/operation-environment";
 
 export interface CommandOptions {
   input?: string | Uint8Array;
@@ -16,7 +17,8 @@ export type CommandRunner = (program: "git" | "gh", args: string[], options?: Co
  * can contain remote URLs and credentials, so it never crosses the bridge. */
 export function commandRunner(cwd: string, wiring: NodeJS.ProcessEnv = {}): CommandRunner {
   return (program, args, options = {}) => new Promise((resolve, reject) => {
-    const env = workerChildEnvironment(undefined, wiring);
+    const operation = operationEnvironment.getStore();
+    const env = operation ? workerChildEnvironment(undefined, { ...wiring, ...operation.git }, {}, operation.zeros) : workerChildEnvironment(undefined, wiring);
     env.GIT_TERMINAL_PROMPT = "0"; env.GIT_EDITOR = "true";
     if (options.readOnly) env.GIT_OPTIONAL_LOCKS = "0";
     const child = execFile(program, args, { cwd, env, encoding: "utf8", timeout: options.timeout ?? 30_000,

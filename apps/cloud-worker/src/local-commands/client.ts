@@ -15,7 +15,7 @@ const status = (error: unknown) => (error as { status?: unknown } | null)?.statu
 /** A 4xx other than 408 and 429 is the server's final word on this request. */
 const refused = (error: unknown) => typeof status(error) === "number" && (status(error) as number) >= 400 && (status(error) as number) < 500 && status(error) !== 408 && status(error) !== 429;
 
-export async function requestLocalCommand(call: LocalCommandCall, request: { chatId: string; executionId: string; input: LocalCommandInput }, signal: AbortSignal,
+export async function requestLocalCommand(call: LocalCommandCall, request: { chatId: string; executionId: string; input: LocalCommandInput; contextId?: string }, signal: AbortSignal,
   options: { requestId?: string; sleep?: (ms: number) => Promise<void> } = {}): Promise<{ result: LocalCommandResult; acknowledge(): Promise<void> }> {
   // Fresh per tool call and kept for every retry, so a lost reply never creates a second request.
   const requestId = options.requestId ?? randomUUID();

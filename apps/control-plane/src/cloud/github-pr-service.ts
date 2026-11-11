@@ -14,6 +14,8 @@ export interface CloudGithubPrContext {
   workspaceId: string;
   organizationId: string;
   creatorUserId: string;
+  actorUserId?: string;
+  authorityRevision?: string;
   repository: string;
   repositoryId: string | null;
   repositoryBound?: boolean;
@@ -58,7 +60,7 @@ const changed = () =>
 
 export function assertCloudGithubPrContext(expected: CloudGithubPrContext, current: CloudGithubPrContext, checkout = true): void {
   if (current.workspaceId !== expected.workspaceId || current.organizationId !== expected.organizationId ||
-    current.creatorUserId !== expected.creatorUserId || (checkout && (current.revision !== expected.revision ||
+    current.creatorUserId !== expected.creatorUserId || current.actorUserId !== expected.actorUserId || current.authorityRevision !== expected.authorityRevision || (checkout && (current.revision !== expected.revision ||
     current.branch !== expected.branch || current.baseBranch !== expected.baseBranch)) ||
     (current.repositoryId && current.repositoryId !== expected.repositoryId)) throw changed();
 }
@@ -111,7 +113,7 @@ export class CloudGithubPrService {
     request: CloudGithubPrRequest,
     { context, access }: Awaited<ReturnType<CloudGithubPrDependencies["open"]>>,
   ) {
-    if (context.workspaceId !== workspaceId || context.creatorUserId !== userId)
+    if (context.workspaceId !== workspaceId || (context.actorUserId ?? context.creatorUserId) !== userId)
       throw new HttpError(404, "not_found", "Cloud workspace not found.");
     if (!context.branch)
       throw new HttpError(

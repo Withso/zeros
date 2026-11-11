@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { workerChildEnvironment } from "../drivers/shared/agent-environment";
 import { WorkspaceError, type WorkerConfig } from "./scope";
 import { measureStartup, recordStartupTiming, type StartupTimingObserver } from "../startup-timings";
+import { operationEnvironment } from "../sharing/operation-environment";
 
 export interface CheckoutRefresh {
   readonly mayFastForward: boolean;
@@ -18,7 +19,9 @@ type Git = (args: string[], signal?: AbortSignal) => Promise<string>;
 /** No shell or stderr in errors. Background Git owns a process group so a
  * cancelled fetch cannot leave a remote helper writing the checkout at Stop. */
 function git(cwd: string, environment: NodeJS.ProcessEnv): Git {
-  const env = workerChildEnvironment(undefined, environment);
+  // Activated: the bootstrap lease's person and context (team sharing); none otherwise.
+  const operation = operationEnvironment.getStore();
+  const env = operation ? workerChildEnvironment(undefined, { ...environment, ...operation.git }, {}, operation.zeros) : workerChildEnvironment(undefined, environment);
   return (args, signal) => new Promise((resolve, reject) => {
     const failure = (code = -1) => Object.assign(new Error("Git command failed."), { code });
     if (signal?.aborted) { reject(failure()); return; }

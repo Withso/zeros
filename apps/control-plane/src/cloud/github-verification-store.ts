@@ -5,7 +5,7 @@ import { HttpError } from "../authz.js";
 import { isGithubAccessRevoked } from "../github-availability.js";
 import { CLOUD_SOURCE_ADMISSION_MS, CloudSourceTargetSchema, type CloudSourceProof } from "./source-authority.js";
 import type { CloudV2Workspace } from "./store.js";
-import { CLOUD_V2_LIVE_ACCESS } from "./workspace-access.js";
+import { CLOUD_V2_LIVE_ACCESS, cloudV2ActorAccess } from "./workspace-access.js";
 
 export type GithubVerificationScope = {
   organizationId: string; userId: string; repositoryId: string; fingerprint: string;
@@ -81,9 +81,9 @@ export class PostgresGithubVerificationStore implements GithubVerificationStore 
         v.verified_at,v.failure_code,clock_timestamp() AS database_now
       FROM cloud_v2_workspaces w CROSS JOIN LATERAL unnest(w.source_repositories) src(name)
       LEFT JOIN cloud_v2_github_sources s ON s.workspace_id=w.id AND s.source_repository=lower(src.name)
-      LEFT JOIN cloud_github_source_verifications v ON v.org_id=w.org_id AND v.owner_user_id=w.creator_user_id
+      LEFT JOIN cloud_github_source_verifications v ON v.org_id=w.org_id AND v.owner_user_id=$3
         AND v.repository_id=s.repository_id AND v.fingerprint=$4
-      WHERE w.id=$1 AND w.org_id=$2 AND w.creator_user_id=$3 AND w.state NOT IN ('deleted','deleting')
+      WHERE w.id=$1 AND w.org_id=$2 AND ${cloudV2ActorAccess("$3")} AND ${CLOUD_V2_LIVE_ACCESS} AND w.state NOT IN ('deleted','deleting')
       LIMIT 101`, [workspaceId, scope.organizationId, scope.userId, fingerprint]);
     return admission(rows, started);
   }

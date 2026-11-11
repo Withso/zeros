@@ -2,6 +2,8 @@
 // cloud v2 VM calls these routes with a short-lived workspace proxy token; the
 // proxy swaps in the creator's login from the vault, so a ChatGPT refresh token
 // never reaches the VM. The upstream host is fixed; a caller picks only the path.
+import { proxyExecution } from "./execution/proxy.js";
+import type { CloudExecutionContexts } from "./execution/store.js";
 import { Hono } from "hono";
 import type { CloudV2AgentLogins } from "./agent-logins.js";
 import type { CloudV2Store, CloudV2Workspace } from "./store.js";
@@ -21,6 +23,7 @@ const DROP = new Set([
 ]);
 
 export type CloudV2ProxyDeps = {
+  execution?: CloudExecutionContexts;
   store: Pick<CloudV2Store, "verifyProxyToken">;
   logins: CloudV2AgentLogins;
   authorizeSource?(workspace: CloudV2Workspace): Promise<void>;
@@ -58,6 +61,12 @@ export function createCloudV2ProxyRoutes(deps: CloudV2ProxyDeps): Hono {
     const provider = c.req.param("provider");
     if (provider !== "openai") return failure(404, "not_found", "Unknown proxy");
     const token = bearer(c.req.raw);
+    if (deps.execution && /^zw2q_[A-Za-z0-9_-]{43}$/.test(token)) {
+      if (Number(c.req.header("content-length") ?? 0) > MAX_REQUEST_BYTES) return failure(413, "payload_too_large", "Request is too large");
+      const rest = new URL(c.req.url).pathname.slice(`${CLOUD_V2_PROXY_PREFIX}/${provider}`.length) || "/";
+      if (rest.split("/").some(part => part === ".." || part === ".")) return failure(400, "invalid_path", "Invalid proxy path");
+      return proxyExecution({ execution: deps.execution, token, request: c.req.raw, rest, headers: forwardHeaders(c.req.raw.headers), fetch: upstreamFetch, models });
+    }
     if (!isCloudV2Token(token, "proxy")) return failure(401, "proxy_token_invalid", "Invalid workspace proxy token");
     const workspace = await deps.store.verifyProxyToken(token);
     if (!workspace) return failure(401, "proxy_token_invalid", "The workspace proxy token expired or was revoked");

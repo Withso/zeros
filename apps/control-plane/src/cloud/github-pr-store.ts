@@ -11,7 +11,7 @@ import type { CloudGithubRepositoryIdentity } from "./github-http.js";
 import type { CloudGithubWorkspaceDocument } from "./routes.js";
 import type { CloudV2Workspace } from "./store.js";
 import { hashCloudV2Token } from "./tokens.js";
-import { CLOUD_V2_LIVE_ACCESS } from "./workspace-access.js";
+import { CLOUD_V2_LIVE_ACCESS, cloudV2ActorAccess } from "./workspace-access.js";
 
 type Metadata = {
   workspace_id: string;
@@ -60,11 +60,15 @@ export class CloudGithubPrStore {
         base_branch: string;
         worker_boot_id: string | null;
         metadata: Metadata | null;
+        execution_mode: string;
+        authority_revision: string;
       }>(
         `SELECT w.id,w.org_id,w.creator_user_id,w.repository,w.branch,w.base_branch,w.worker_boot_id,
+        w.execution_mode,concat_ws(':',w.access_epoch,w.stop_generation,u.auth_revision,m.authorization_revision,o.authorization_revision) AS authority_revision,
         row_to_json(g.*) AS metadata FROM cloud_v2_workspaces w
+        JOIN organization_members m ON m.org_id=w.org_id AND m.user_id=$2 JOIN users u ON u.id=m.user_id JOIN organizations o ON o.id=m.org_id
         LEFT JOIN cloud_v2_github_workspaces g ON g.workspace_id=w.id
-        WHERE w.id=$1 AND w.creator_user_id=$2 AND w.state NOT IN ('deleting','deleted') AND ${CLOUD_V2_LIVE_ACCESS}
+        WHERE w.id=$1 AND ${cloudV2ActorAccess("$2")} AND w.state NOT IN ('deleting','deleted') AND ${CLOUD_V2_LIVE_ACCESS}
         ${lock ? "FOR UPDATE OF w" : ""}`,
         [workspaceId, userId],
       )
@@ -77,6 +81,7 @@ export class CloudGithubPrStore {
       workspaceId: row.id,
       organizationId: row.org_id,
       creatorUserId: row.creator_user_id,
+      ...(row.execution_mode === "active" ? { actorUserId: userId, authorityRevision: row.authority_revision } : {}),
       repository: g?.canonical_repository ?? row.repository,
       repositoryId: g?.repository_id == null ? null : String(g.repository_id),
       repositoryBound: g?.repository_id != null && !!g.canonical_repository,
@@ -101,11 +106,11 @@ export class CloudGithubPrStore {
     const live = await this.readContext(
       tx,
       expected.workspaceId,
-      expected.creatorUserId,
+      expected.actorUserId ?? expected.creatorUserId,
       true,
     );
     if (
-      live.revision !== expected.revision ||
+      live.revision !== expected.revision || live.actorUserId !== expected.actorUserId || live.authorityRevision !== expected.authorityRevision ||
       live.branch !== expected.branch ||
       live.baseBranch !== expected.baseBranch ||
       live.organizationId !== expected.organizationId

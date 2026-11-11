@@ -120,7 +120,7 @@ export async function readCloudV2History(store: Pick<CloudV2Store, "listChats" |
       throw error;
     }
   }
-  if (op === "chats.list") return store.listChats(workspaceId);
+  if (op === "chats.list") return options.includeSenders ? store.listChats(workspaceId, true) : store.listChats(workspaceId);
   const chatId = id.safeParse(params.chatId);
   if (!chatId.success) throw new HttpError(400, "invalid_request", "chatId is required");
   const limit = z.number().finite().catch(200).parse(params.limit);

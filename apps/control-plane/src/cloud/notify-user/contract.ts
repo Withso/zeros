@@ -11,7 +11,7 @@ export const NotifyUserInputSchema = z.object({
   title: text(NOTIFY_USER_LIMITS.titleChars), message: text(NOTIFY_USER_LIMITS.messageChars), kind: z.enum(NOTIFY_USER_KINDS),
 }).strict();
 export const NotifyUserWorkerRequestSchema = NotifyUserInputSchema.extend({
-  notificationId: z.string().uuid(), chatId: id, userMessageId: id, executionId: id,
+  notificationId: z.string().uuid(), chatId: id, userMessageId: id, executionId: id, contextId: z.uuid().optional(),
 }).strict();
 export type NotifyUserWorkerRequest = z.infer<typeof NotifyUserWorkerRequestSchema>;
 export const NotifyUserEventSchema = z.object({

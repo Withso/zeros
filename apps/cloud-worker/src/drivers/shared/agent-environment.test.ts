@@ -40,4 +40,12 @@ describe("native agent environment", () => {
     expect("GIT_CONFIG_COUNT" in env).toBe(false);
     expect("ZEROS_WORKER_TOKEN" in env).toBe(false);
   });
+
+  it("passes an activated turn's execution context and its own person as Git author, never a caller's other ZEROS_ names", () => {
+    const env = agentEnvironment({ agent: "claude", apiKey: "fixture-own" }, source, { GIT_ASKPASS: "/worker/askpass", GIT_AUTHOR_NAME: "Alex", GIT_COMMITTER_EMAIL: "1+a@users.noreply.github.com" }, {},
+      { ZEROS_EXECUTION_CONTEXT: "44444444-4444-4444-8444-444444444444", ZEROS_WORKER_TOKEN: "fixture-denied" });
+    expect(env.ZEROS_EXECUTION_CONTEXT === "44444444-4444-4444-8444-444444444444").toBe(true);
+    expect(env.GIT_AUTHOR_NAME === "Alex" && env.GIT_COMMITTER_EMAIL === "1+a@users.noreply.github.com" && env.GIT_ASKPASS === "/worker/askpass").toBe(true);
+    expect("ZEROS_WORKER_TOKEN" in env).toBe(false);
+  });
 });

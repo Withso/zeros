@@ -1,7 +1,8 @@
 import type pg from "pg";
 import { HttpError } from "../../authz.js";
 import { withSystemTx, type Tx } from "../../db.js";
-import { CLOUD_V2_LIVE_ACCESS } from "../workspace-access.js";
+import { CLOUD_V2_LIVE_ACCESS, cloudV2ActorAccess } from "../workspace-access.js";
+import type { CloudExecutionContexts } from "../execution/store.js";
 import { CloudV2PromptIdSchema } from "../prompt-contract.js";
 import type { ApiMessageList, ApiSessionList } from "./contract.js";
 
@@ -22,12 +23,26 @@ const message = (row: MessageRow, sessionId: string, index: number) => {
 
 /** Additional projections of the existing history mirror; never a worker RPC. */
 export class CloudApiReads {
+  execution?: CloudExecutionContexts;
   constructor(private readonly pool: pg.Pool) {}
+
+  private async read<T>(scope: ApiScope, workspaceId: string, action: (tx: Tx) => Promise<T>) {
+    const proof = await this.execution?.active(workspaceId) ? await this.execution!.deps.authority.admit(workspaceId, scope.userId) : undefined;
+    if (proof && proof.person.organizationId !== scope.organizationId) throw notFound();
+    const result = await withSystemTx(this.pool, async tx => {
+      if (proof) await this.execution!.deps.authority.assert(proof, tx);
+      const value = await action(tx);
+      if (proof) await this.execution!.deps.authority.assert(proof, tx);
+      return value;
+    }, { consistentRead: !proof });
+    if (proof) await this.execution!.deps.authority.assert(proof);
+    return result;
+  }
 
   async attribution(scope: ApiScope & { workspaceId?: string }, id: string | undefined): Promise<string | null> {
     if (!CloudV2PromptIdSchema.safeParse(id).success) return null;
     const { rows } = await withSystemTx(this.pool, tx => tx.query<{ chat_id: string }>(`SELECT c.chat_id FROM cloud_v2_chats c
-      JOIN cloud_v2_workspaces w ON w.id=c.workspace_id WHERE c.chat_id=$1 AND w.org_id=$2 AND w.creator_user_id=$3
+      JOIN cloud_v2_workspaces w ON w.id=c.workspace_id WHERE c.chat_id=$1 AND w.org_id=$2 AND ${cloudV2ActorAccess("$3")}
         AND ($4::uuid IS NULL OR w.id=$4) AND w.state NOT IN ('deleting','deleted')
         AND c.deleted_at IS NULL AND coalesce(c.row->>'kind','')<>'terminal' AND ${CLOUD_V2_LIVE_ACCESS}
       LIMIT 2`, [id, scope.organizationId, scope.userId, scope.workspaceId ?? null]));
@@ -35,37 +50,38 @@ export class CloudApiReads {
   }
 
   private async owned(tx: Tx, scope: ApiScope, workspaceId: string, chatId?: string): Promise<void> {
-    const result = await tx.query(`SELECT 1 FROM cloud_v2_workspaces w WHERE w.id=$1 AND w.creator_user_id=$2
+    const result = await tx.query(`SELECT 1 FROM cloud_v2_workspaces w WHERE w.id=$1 AND ${cloudV2ActorAccess("$2")}
       AND w.org_id=$3 AND w.state<>'deleted' AND ${CLOUD_V2_LIVE_ACCESS}
       AND ($4::text IS NULL OR EXISTS (SELECT 1 FROM cloud_v2_chats c WHERE c.workspace_id=w.id AND c.chat_id=$4
         AND c.deleted_at IS NULL AND coalesce(c.row->>'kind','')<>'terminal'))`, [workspaceId, scope.userId, scope.organizationId, chatId ?? null]);
     if (!result.rowCount) throw notFound();
   }
 
-  resolve(scope: ApiScope, id: string): Promise<ApiChatRow> {
-    return withSystemTx(this.pool, async tx => {
+  async resolve(scope: ApiScope, id: string): Promise<ApiChatRow> {
+    const saved = await withSystemTx(this.pool, async tx => {
       const { rows } = await tx.query<ChatRow>(`SELECT c.workspace_id,c.chat_id,c.row,c.updated_at,c.created_by_session_id FROM cloud_v2_chats c
-        JOIN cloud_v2_workspaces w ON w.id=c.workspace_id WHERE c.chat_id=$1 AND w.org_id=$2 AND w.creator_user_id=$3
+        JOIN cloud_v2_workspaces w ON w.id=c.workspace_id WHERE c.chat_id=$1 AND w.org_id=$2 AND ${cloudV2ActorAccess("$3")}
           AND w.state<>'deleted' AND c.deleted_at IS NULL AND coalesce(c.row->>'kind','')<>'terminal' AND ${CLOUD_V2_LIVE_ACCESS}
         LIMIT 2`, [id, scope.organizationId, scope.userId]);
       if (rows.length !== 1) throw notFound();
       return chat(rows[0]!);
     });
+    return this.read(scope, saved.workspaceId, async tx => { await this.owned(tx, scope, saved.workspaceId, saved.id); return saved; });
   }
 
   sessions(scope: ApiScope, workspaceId: string, page: ApiSessionList) {
-    return withSystemTx(this.pool, async tx => {
+    return this.read(scope, workspaceId, async tx => {
       await this.owned(tx, scope, workspaceId);
       const { rows } = await tx.query<ChatRow>(`SELECT workspace_id,chat_id,row,updated_at,created_by_session_id FROM cloud_v2_chats
         WHERE workspace_id=$1 AND deleted_at IS NULL AND coalesce(row->>'kind','')<>'terminal'
           AND ($2::boolean OR row->>'archived' IS DISTINCT FROM 'true')
         ORDER BY updated_at,chat_id LIMIT $3 OFFSET $4`, [workspaceId, page.includeArchived, page.limit + 1, page.offset]);
       return rows.map(chat);
-    }, { consistentRead: true });
+    });
   }
 
   status(scope: ApiScope, workspaceId: string, id: string) {
-    return withSystemTx(this.pool, async tx => {
+    return this.read(scope, workspaceId, async tx => {
       await this.owned(tx, scope, workspaceId, id);
       const { rows } = await tx.query<{ working: boolean; latest_state: string | null; epoch: string; updated_at: Date }>(`SELECT
         EXISTS (SELECT 1 FROM cloud_v2_prompt_outbox p JOIN cloud_v2_prompt_chats c USING(workspace_id,chat_id)
@@ -78,11 +94,11 @@ export class CloudApiReads {
       const row = rows[0]!;
       return { epoch: row.epoch, status: row.working ? "working" as const : row.latest_state === "failed" ? "error" as const : "idle" as const,
         updatedAt: row.updated_at.toISOString() };
-    }, { consistentRead: true });
+    });
   }
 
   messages(scope: ApiScope, workspaceId: string, id: string, page: ApiMessageList) {
-    return withSystemTx(this.pool, async tx => {
+    return this.read(scope, workspaceId, async tx => {
       await this.owned(tx, scope, workspaceId, id);
       let after: string | null = null, index = page.offset;
       if (page.after !== undefined) {
@@ -113,11 +129,11 @@ export class CloudApiReads {
       }
       if (rows.length && !data.length) throw new HttpError(413, "message_too_large", "This message exceeds the response limit");
       return { data, offset: index, hasMore: candidates.length > data.length };
-    }, { consistentRead: true });
+    });
   }
 
   message(scope: ApiScope, workspaceId: string, id: string, messageId: string) {
-    return withSystemTx(this.pool, async tx => {
+    return this.read(scope, workspaceId, async tx => {
       await this.owned(tx, scope, workspaceId, id);
       const { rows } = await tx.query<MessageRow & { position: string }>(`SELECT m.msg_id,m.ord,m.kind,m.payload,m.created_at_ms,p.created_by_session_id,
         (SELECT count(*) FROM cloud_v2_messages earlier WHERE earlier.workspace_id=m.workspace_id AND earlier.chat_id=m.chat_id AND earlier.ord<=m.ord) AS position
@@ -126,6 +142,6 @@ export class CloudApiReads {
         WHERE m.workspace_id=$1 AND m.chat_id=$2 AND m.msg_id=$3`, [workspaceId, id, messageId]);
       if (!rows[0]) throw notFound();
       return message(rows[0], id, Number(rows[0].position));
-    }, { consistentRead: true });
+    });
   }
 }

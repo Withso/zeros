@@ -97,7 +97,8 @@ export async function pinCloudEnvironment(tx: Tx, workspace: Pick<CloudV2Workspa
 async function prune(tx: Tx, scope: Scope): Promise<void> {
   await tx.query(`DELETE FROM cloud_environment_versions v WHERE org_id=$1 AND owner_user_id=$2 AND repository_id=$3
     AND NOT EXISTS (SELECT 1 FROM cloud_environment_heads h WHERE h.version_id=v.id)
-    AND NOT EXISTS (SELECT 1 FROM cloud_workspace_environment_pins p WHERE p.version_id=v.id)`, params(scope));
+    AND NOT EXISTS (SELECT 1 FROM cloud_workspace_environment_pins p WHERE p.version_id=v.id)
+      AND NOT EXISTS (SELECT 1 FROM cloud_v2_execution_contexts e WHERE e.environment_version_id=v.id)`, params(scope));
 }
 
 /** Callers hold the workspace row before the creator lock, matching deletion. */
@@ -128,7 +129,8 @@ export class CloudEnvironments {
     const unused = await withSystemTx(this.pool, tx => tx.query<{ org_id: string; owner_user_id: string; repository_id: string }>(
       `SELECT DISTINCT v.org_id,v.owner_user_id,v.repository_id::text FROM cloud_environment_versions v
        WHERE NOT EXISTS (SELECT 1 FROM cloud_environment_heads h WHERE h.version_id=v.id)
-       AND NOT EXISTS (SELECT 1 FROM cloud_workspace_environment_pins p WHERE p.version_id=v.id) LIMIT 100`));
+       AND NOT EXISTS (SELECT 1 FROM cloud_workspace_environment_pins p WHERE p.version_id=v.id)
+      AND NOT EXISTS (SELECT 1 FROM cloud_v2_execution_contexts e WHERE e.environment_version_id=v.id) LIMIT 100`));
     for (const row of unused.rows) await withSystemTx(this.pool, async tx => {
       const scope = { organizationId: row.org_id, userId: row.owner_user_id, repositoryId: row.repository_id };
       await lockScope(tx, scope); await prune(tx, scope);
@@ -208,6 +210,34 @@ export class CloudEnvironments {
       } catch { throw unreadable(); }
     };
     return transaction ? read(transaction) : withSystemTx(this.pool, read);
+  }
+
+  async resolveExecution(workspace: CloudV2Workspace, userId: string, contextId: string, tx: Tx): Promise<CloudWorkspaceEnvironment | undefined> {
+    // Selection and pruning share this lock. The context pin (including an
+    // empty selection) is fixed before a competing material fetch can read it.
+    await lockScope(tx, { organizationId: workspace.organizationId, userId });
+    const context = (await tx.query<{ environment_version_id: string | null; environment_repository_id: string | null }>(
+      "SELECT environment_version_id,environment_repository_id::text FROM cloud_v2_execution_contexts WHERE id=$1 AND workspace_id=$2 AND org_id=$3 AND user_id=$4 AND state='active' FOR UPDATE",
+      [contextId, workspace.id, workspace.organizationId, userId])).rows[0];
+    if (!context) throw notFound();
+    if (context.environment_repository_id && !context.environment_version_id) return undefined;
+    const primary = (await tx.query<{ repository_id: string }>(
+      "SELECT repository_id::text FROM cloud_v2_github_sources WHERE workspace_id=$1 AND source_repository=lower($2)", [workspace.id, workspace.repository])).rows[0];
+    if (!primary) throw notFound();
+    const version = context.environment_version_id ?? (userId === workspace.creatorUserId
+      ? (await tx.query<{ version_id: string }>("SELECT version_id FROM cloud_workspace_environment_pins WHERE workspace_id=$1 AND owner_user_id=$2", [workspace.id, userId])).rows[0]?.version_id
+      : (await tx.query<{ version_id: string }>("SELECT version_id FROM cloud_environment_heads WHERE org_id=$1 AND owner_user_id=$2 AND repository_id=$3",
+        [workspace.organizationId, userId, primary.repository_id])).rows[0]?.version_id);
+    await tx.query("UPDATE cloud_v2_execution_contexts SET environment_version_id=$2,environment_repository_id=$3 WHERE id=$1 AND environment_repository_id IS NULL",
+      [contextId, version ?? null, primary.repository_id]);
+    if (!version) return undefined;
+    const row = (await tx.query<{ revision: string; envelope: CloudEnvironmentEnvelope }>(
+      "SELECT revision::text,envelope FROM cloud_environment_versions WHERE id=$1 AND org_id=$2 AND owner_user_id=$3 AND repository_id=$4",
+      [version, workspace.organizationId, userId, primary.repository_id])).rows[0];
+    if (!row) throw unreadable();
+    try { return { versionId: version, repositoryId: primary.repository_id, ...openCloudEnvironment(row.envelope,
+      { organizationId: workspace.organizationId, userId, repositoryId: primary.repository_id, versionId: version, revision: Number(row.revision) }, this.keys) }; }
+    catch { throw unreadable(); }
   }
 
   async report(token: string, bootId: string, raw: unknown): Promise<void> {

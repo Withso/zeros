@@ -40,7 +40,7 @@ export class RuntimeAdoption {
     const { handoffs } = this.options;
     if (input.op === "ready") {
       const workspace = await this.session(token, bootId, input.id);
-      if (!workspace) return { status: "unavailable" };
+      if (!workspace || workspace.executionMode === "active") return { status: "unavailable" };
       await this.options.authorizeSource(workspace);
       if (this.closed) return { status: "unavailable" };
       if (await handoffs.published(token, bootId, input.id)) return { status: "completed", id: input.id };
@@ -53,7 +53,9 @@ export class RuntimeAdoption {
     }
     if (input.op === "cancel") return await handoffs.cancel(token, input.id, bootId) ? { status: "cancelled", id: input.id } : { status: "unavailable" };
     const workspace = await this.options.store.workerSession(token, bootId);
-    if (this.closed || !workspace || workspace.state !== "running") return { status: "unavailable" };
+    // Shared execution needs the separate drain and clean-boot rollout before
+    // a runtime handoff may use any legacy setup or credential path.
+    if (this.closed || !workspace || workspace.state !== "running" || workspace.executionMode === "active") return { status: "unavailable" };
     if (input.op === "status" && input.id) {
       const h = await handoffs.inspect(token, input.id);
       if (!h || h.workspace_id !== workspace.id || h.old_boot_id !== bootId.toLowerCase()) return { status: "unavailable" };

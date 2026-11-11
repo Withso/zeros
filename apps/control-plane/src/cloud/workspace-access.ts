@@ -1,4 +1,4 @@
-import { PRO_ORGANIZATION_MEMBER_LIMIT, PRO_ORGANIZATION_FREE_MEMBER_LIMIT } from "../organization-seats.js";
+import { PRO_ORGANIZATION_MEMBER_LIMIT, PRO_ORGANIZATION_FREE_MEMBER_LIMIT, memberOnHoldSql } from "../organization-seats.js";
 import { sql, SqlFragment } from "../sql-fragment.js";
 
 const LIVE_CREATOR = sql`SELECT 1 FROM organization_members m
@@ -17,6 +17,15 @@ export const CLOUD_V2_LIVE_ACCESS_SQL = sql`EXISTS (
   ${LIVE_CREATOR}
     AND NOT ${ON_HOLD})`;
 export const CLOUD_V2_LIVE_ACCESS = CLOUD_V2_LIVE_ACCESS_SQL.text;
+
+/** Only the membership part of execution authority; callers must also prove
+ * that person's immutable repository scope before releasing data or effects. */
+export function cloudV2ActorAccess(parameter: "$1" | "$2" | "$3") {
+  return `(w.creator_user_id=${parameter} OR w.execution_mode='active' AND EXISTS (
+    SELECT 1 FROM organization_members am JOIN users au ON au.id=am.user_id
+    WHERE am.org_id=w.org_id AND am.user_id=${parameter} AND au.auth_status='active' AND au.deleted_at IS NULL
+      AND NOT ${memberOnHoldSql("am.org_id", "am.user_id")}))`;
+}
 
 /** Live access fails only because the creator is on Hold. */
 export const CLOUD_V2_CREATOR_ON_HOLD = sql`EXISTS (

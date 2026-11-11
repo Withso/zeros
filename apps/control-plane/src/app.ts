@@ -60,6 +60,7 @@ import { cloudAgentCredentialKeys } from "./agent-credentials/agent-credentials.
 import { createCloudApiRoutes, type CloudApiDependencies } from "./cloud/api/routes.js";
 import { createCloudApiManagementRoutes } from "./cloud/api/management-routes.js";
 import { isLocalCommandResultPath } from "./cloud/local-commands/routes.js";
+import { AgentLoginRequired } from "./cloud/execution/errors.js";
 
 export type CreateAppDependencies = {
   cloudApi?: CloudApiDependencies;
@@ -81,6 +82,7 @@ const cloudTokenBucket = createPrivateRateLimitKey();
 // HttpError codes are strings, so even a syntactically valid code can contain
 // upstream or request data. Diagnostics admit only known causes.
 const CLOUD_DIAGNOSTIC_CODES = new Set([
+  "agent_credentials_unavailable",
   "auth_unavailable", "authentication_temporarily_unavailable", "boat_credit_limit",
   "cloud_agent_credential_busy", "cloud_github_unavailable", "configuration_changing",
   "github_bad_response", "github_cloud_not_configured", "github_invalid_response", "github_not_configured",
@@ -432,6 +434,8 @@ export function createApp(
     if (err instanceof HttpError) {
       if (c.req.path.startsWith("/v1/cloud-v2/") && err.status >= 500) {
         console.error("[cloud-v2] request failed", { code: CLOUD_DIAGNOSTIC_CODES.has(err.code) ? err.code : "unclassified", status: err.status });
+        if (err.status === 503 && err.code === "agent_credentials_unavailable")
+          return c.json({ error: { code: "agent_credentials_unavailable", message: "Execution credentials are temporarily unavailable" } }, 503);
         return c.json({ error: { code: "cloud_workspace_unavailable", message: "The cloud workspace is temporarily unavailable" } }, err.status);
       }
       return c.json(
@@ -439,6 +443,7 @@ export function createApp(
           error: {
             code: err.code,
             message: err.message,
+            ...(err instanceof AgentLoginRequired ? { agent: err.agent } : {}),
             ...(err.details ? { details: err.details } : {}),
           },
         },

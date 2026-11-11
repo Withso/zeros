@@ -7,6 +7,8 @@ import { withSystemStatement, withSystemTx, type Tx } from "../../db.js";
 import { memberOnHoldSql, PRO_ORGANIZATION_FREE_MEMBER_LIMIT, PRO_ORGANIZATION_MEMBER_LIMIT } from "../../organization-seats.js";
 import { sql, SqlFragment } from "../../sql-fragment.js";
 import { hashCloudV2Token, isCloudV2Token } from "../tokens.js";
+import type { CloudExecutionContexts } from "../execution/store.js";
+import type { ExecutionAdmission } from "../execution/authority.js";
 
 export type CloudApiCredential = {
   credentialId: string;
@@ -18,6 +20,8 @@ export type CloudApiCredential = {
   organizationSlug: string;
   organizationName: string;
   workspaceId?: string;
+  contextId?: string;
+  executionProof?: ExecutionAdmission;
 };
 export type CloudApiKey = { id: string; name: string; ownerUserId: string; ownerName: string | null;
   prefix: string; createdAt: string; lastUsedAt: string | null };
@@ -38,6 +42,7 @@ const LIVE_MEMBER = sql`u.auth_status='active' AND u.deleted_at IS NULL AND o.de
     ${SqlFragment.integer(PRO_ORGANIZATION_FREE_MEMBER_LIMIT, 0, 1000)})`;
 
 export class CloudApiCredentials {
+  execution?: CloudExecutionContexts;
   private readonly used = new Map<string, number>();
   private timer: NodeJS.Timeout | undefined;
   private flushing: Promise<void> | undefined;
@@ -54,7 +59,7 @@ export class CloudApiCredentials {
           u.email,u.display_name,o.slug AS organization_slug,o.name AS organization_name FROM cloud_v2_tokens t
           JOIN cloud_v2_workspaces w ON w.id=t.workspace_id JOIN users u ON u.id=w.creator_user_id
           JOIN organizations o ON o.id=w.org_id JOIN organization_members m ON m.org_id=w.org_id AND m.user_id=w.creator_user_id
-          WHERE ${condition} AND t.kind='api' AND w.api_access AND w.stop_generation=t.api_stop_generation
+          WHERE ${condition} AND t.kind='api' AND w.execution_mode<>'active' AND w.api_access AND w.stop_generation=t.api_stop_generation
             AND w.state IN ('creating','starting','running')
             AND w.archived_at IS NULL AND ${LIVE_MEMBER}`;
     const result = tx ? await tx.query<CredentialRow>(query.text) : await withSystemStatement<CredentialRow>(this.pool, query);
@@ -68,6 +73,7 @@ export class CloudApiCredentials {
 
   async resolve(authorization: string | undefined): Promise<CloudApiCredential> {
     const token = authorization?.startsWith("Bearer ") ? authorization.slice(7) : "";
+    if (/^zw2x_[A-Za-z0-9_-]{43}$/.test(token) && this.execution) return this.contextCredential({ token });
     const kind = KEY.test(token) ? "api_key" : isCloudV2Token(token, "api") ? "workspace_token" : null;
     if (!kind) throw unauthorized();
     const hash = SqlFragment.text(hashCloudV2Token(token).toString("hex"), /^[0-9a-f]{64}$/);
@@ -77,9 +83,32 @@ export class CloudApiCredentials {
   }
 
   async assertCurrent(credential: CloudApiCredential, tx?: Tx): Promise<void> {
+    if (credential.contextId) {
+      if (!this.execution || !credential.executionProof) throw unauthorized();
+      const read = async (current: Tx) => {
+        await this.execution!.assertToken(current, credential.credentialId, credential.contextId!, "api", credential.executionProof!);
+      };
+      if (tx) await read(tx); else await withSystemTx(this.pool, read);
+      return;
+    }
     const id = SqlFragment.uuid(credential.credentialId);
     const current = await this.lookup(credential.kind, credential.kind === "api_key" ? sql`k.id=${id}` : sql`t.id=${id}`, tx);
     if (!current || current.userId !== credential.userId || current.organizationId !== credential.organizationId) throw unauthorized();
+  }
+
+  private async contextCredential(value: { token: string } | { id: string }, transaction?: Tx): Promise<CloudApiCredential> {
+    if (!this.execution) throw unauthorized();
+    const { context, proof } = await this.execution.tokenContext("api", value, transaction);
+    const read = async (tx: Tx) => {
+      const row = (await tx.query<CredentialRow>(`SELECT u.email,u.display_name,o.slug AS organization_slug,o.name AS organization_name
+        FROM users u JOIN organizations o ON o.id=$2 WHERE u.id=$1`, [context.user_id, context.org_id])).rows[0];
+      await this.execution!.assertContext(tx, context, proof);
+      if (!row) throw unauthorized();
+      return { credentialId: context.token_id, kind: "workspace_token" as const, userId: context.user_id!, email: row.email, name: row.display_name,
+        organizationId: context.org_id, organizationSlug: row.organization_slug, organizationName: row.organization_name,
+        workspaceId: context.workspace_id, contextId: context.id, executionProof: proof };
+    };
+    return transaction ? read(transaction) : withSystemTx(this.pool, read);
   }
 
   private async member(tx: Tx, org: string, user: string, lock = false): Promise<OrganizationRole> {

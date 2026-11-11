@@ -9,7 +9,7 @@ import { CloudGithubSourceIdentities } from "./github-source-identities.js";
 import { CloudV2SourceAuthority, type CloudSourceProof } from "./source-authority.js";
 import { PostgresGithubVerificationStore } from "./github-verification-store.js";
 import { CloudGithubPrStore } from "./github-pr-store.js";
-import { CloudGithubPrService } from "./github-pr-service.js";
+import { CloudGithubPrService, assertCloudGithubPrContext } from "./github-pr-service.js";
 import { CloudGithubActions } from "./github-actions.js";
 import { createSelectedCloudGithubTokens } from "./github-selected-tokens.js";
 import type { CloudV2Store, CloudV2Workspace } from "./store.js";
@@ -133,9 +133,20 @@ export function createCloudGithubServices(
       throw error;
     }
   };
+  const authorizePerson = async (id: string, userId: string) => {
+    const before = await metadata.context(id, userId);
+    const workspace = await workspaces.get(id, before.creatorUserId);
+    if (before.actorUserId) {
+      const scope = await withSystemTx(pool, tx => tx.query<{ source_repositories: string[] }>(
+        "SELECT source_repositories FROM cloud_v2_workspaces WHERE id=$1", [id]));
+      await source.viewer(workspace.organizationId, userId, await identities.targets(workspace, scope.rows[0]?.source_repositories ?? []), false);
+    }
+    else await authorizeSource(workspace);
+    assertCloudGithubPrContext(before, await metadata.context(id, userId));
+    return workspace;
+  };
   const context = async (id: string, userId: string) => {
-    const workspace = await workspaces.get(id, userId);
-    await authorizeSource(workspace);
+    const workspace = await authorizePerson(id, userId);
     await actions.assertCurrent(id);
     const value = await metadata.context(id, userId),
       primary = await identities.primary(workspace);
@@ -148,7 +159,7 @@ export function createCloudGithubServices(
     return { ...value, repositoryId: primary.repositoryId };
   };
   const open = cloudGithubRequestContext({ pool, connections, metadata, actions, verifications,
-    authorize: async (id, userId) => authorizeSource(await workspaces.get(id, userId)), fetch: fetchImpl });
+    authorize: async (id, userId) => { await authorizePerson(id, userId); }, fetch: fetchImpl });
   const service = new CloudGithubPrService({
     open,
     repository: async (value, identity, access) => {

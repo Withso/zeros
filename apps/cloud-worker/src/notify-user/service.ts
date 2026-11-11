@@ -14,7 +14,7 @@ export class NotifyUserService {
   private readonly notified = new Set<string>();
   constructor(private readonly deps: {
     /** The turn the tool's grant is running; `executionId` is the native execution identity, not the grant id. */
-    activeTurn(grantId: string): { chatId: string; turnId: string; executionId: string } | undefined;
+    activeTurn(grantId: string): { chatId: string; turnId: string; executionId: string; contextId?: string } | undefined;
     /** The live `attention` update to every attached app. */
     publish(executionId: string, update: Omit<AttentionUpdate, "sessionUpdate">): Promise<void>;
     /** The worker route; absent without a control plane that supports it. */
@@ -31,7 +31,8 @@ export class NotifyUserService {
     const notificationId = randomUUID();
     let outcome: NotifyUserOutcome = "unreachable";
     if (this.deps.deliver) {
-      try { outcome = await this.deps.deliver({ notificationId, chatId: turn.chatId, userMessageId: turn.turnId, executionId: turn.executionId, ...input }, signal); }
+      try { outcome = await this.deps.deliver({ notificationId, chatId: turn.chatId, userMessageId: turn.turnId, executionId: turn.executionId,
+        ...(turn.contextId ? { contextId: turn.contextId } : {}), ...input }, signal); }
       catch { outcome = "unreachable"; }
     }
     if (outcome === "sent" || outcome === "unreachable")

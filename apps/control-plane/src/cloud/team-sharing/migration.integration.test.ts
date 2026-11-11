@@ -19,7 +19,7 @@ database("team sharing expand migration and hot-table cost", () => {
       await tx.query(`DROP FUNCTION cloud_v2_original_creator() CASCADE;
         DROP FUNCTION notify_cloud_v2_team_rows() CASCADE;
         DROP TABLE cloud_v2_workspace_presence,cloud_v2_workspace_followers,cloud_v2_workspace_pins;
-        ALTER TABLE cloud_v2_workspaces DROP COLUMN created_by_user_id,DROP CONSTRAINT cloud_v2_workspaces_id_org;
+        ALTER TABLE cloud_v2_workspaces DROP COLUMN created_by_user_id,DROP CONSTRAINT cloud_v2_workspaces_id_org CASCADE;
         DROP INDEX cloud_v2_workspaces_organization_page;`);
       const id = randomUUID();
       await tx.query("SET LOCAL ROLE zeros_app"); await tx.query("SELECT set_config('app.system','on',true)");

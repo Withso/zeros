@@ -3,7 +3,7 @@ import { INPUT_CANCELLED, INPUT_STOPPED, INPUT_TIMEOUT } from "./sessions/intera
 import { randomUUID } from "node:crypto";
 import { cloudModeId, cloudPermissionMode, cloudSessionModes, type CloudPermissionMode, type AttentionUpdate, type BackgroundTasksUpdate, type InitializeResponse, type PromptResponse, type SessionNotification } from "@zeros/protocol/agent-events";
 import { createMessage, type AgentLoadSessionMessage, type AgentNewSessionMessage, type AgentPromptMessage, type AgentSteerMessage, type BridgeAgentFailure, type BridgeMessage, type SteerOutcome } from "@zeros/protocol/messages";
-import { cloudFailureMessage, type CloudMcpFailure, type CloudV2Agent } from "@zeros/protocol/cloud-v2-relay";
+import { cloudFailureMessage, type CloudMcpFailure, type CloudV2Actor, type CloudV2Agent, type CloudV2ContextReason, type CloudV2TurnLease, type RuntimeMcpServer } from "@zeros/protocol/cloud-v2-relay";
 import type { CloudV2PromptDelivery } from "@zeros/protocol/cloud-v2-prompts";
 import type { Driver } from "./drivers/driver";
 import { agentTiming, type TimingObserver, type TimingSpan } from "./agent-timings";
@@ -16,8 +16,13 @@ import type { WorkspaceToolFactory, WorkspaceToolGrant } from "./mcp/workspace-t
 import { TurnService } from "./workspace/turns";
 import type { AgentTextMessage } from "@zeros/protocol/agent-messages";
 import { providerAvailability, providerFailure } from "./provider-failure";
-import type { ApplicationEnvironment } from "./credentials/application-environment";
+import { ApplicationEnvironment } from "./credentials/application-environment";
+import { parseEnv } from "node:util";
 import type { WorkspaceApiEnvironment } from "./credentials/workspace-api";
+import type { ExecutionContexts } from "./sharing/execution-contexts";
+import { gitIdentityEnvironment } from "./sharing/identity";
+import type { PersonalEnvironments } from "./sharing/personal-env";
+import { retireContext } from "./sharing/retire";
 
 export type DriverFactories = Partial<Record<CloudV2Agent, () => Driver>>;
 export interface AppClient { id: string; send(frame: BridgeMessage): Promise<void> }
@@ -44,7 +49,14 @@ interface Runtime {
   mcpExecutionId?: string;
   mcpFailures?: Set<string>;
   workspaceTools?: WorkspaceToolGrant;
+  /** Team sharing (activated): the person this turn runs as, from its lease. The driver lives only as long as it. */
+  context?: { id: string; lease: CloudV2TurnLease; env?: { directory: string; variables: Record<string, string> }; ended?: CloudV2ContextReason };
 }
+
+/** An activated begin: the person the control plane chose for this dispatch and its context. */
+export interface OutboxAssignment { actingUser: CloudV2Actor; contextId: string; mode: "prompt" | "steer" }
+type OutboxDispatch = (entry: InboxEntry) => Promise<boolean | OutboxAssignment>;
+const contextCode = (error: unknown) => error && typeof error === "object" && "contextCode" in error ? error.contextCode : undefined;
 
 const VERSIONS = { codex: "0.166.0", claude: "0.3.311", cursor: "1.2.0" };
 const NAMES = { codex: "Codex", claude: "Claude", cursor: "Cursor" };
@@ -64,7 +76,9 @@ export class Agents {
   private reviewConfig: WorkerConfig["codeReview"];
   private reviewConfiguration = 0;
   private readonly models: CodexModelAvailability;
-  private outboxDispatch?: (entry: InboxEntry) => Promise<boolean>;
+  private outboxDispatch?: OutboxDispatch;
+  private contexts?: ExecutionContexts;
+  private personal?: PersonalEnvironments;
   private outboxStop?: (chatId: string, throughEpoch: string) => Promise<string>;
   private readonly chatMutations = new Map<string, Promise<unknown>>();
   private readonly mutationEpochs = new Map<string, number>();
@@ -83,7 +97,7 @@ export class Agents {
     private readonly activity: () => void,
     private readonly onTiming?: TimingObserver,
     modelDiscovery?: ModelDiscoveryOptions,
-    private readonly mcpProviders?: (executionId: string) => Promise<DriverMcpServers>,
+    private readonly mcpProviders?: (executionId: string, context?: { contextId: string; servers: readonly RuntimeMcpServer[] }) => Promise<DriverMcpServers>,
     private readonly workspaceToolFactory?: WorkspaceToolFactory,
     private readonly application?: ApplicationEnvironment,
     private readonly resumeIdleExecutions = false,
@@ -103,9 +117,9 @@ export class Agents {
   }
   /** The chat a native execution (route) belongs to, if it is still open. */
   /** NotifyUser: the turn an execution is running now. */
-  activeTurn(executionId: string): { chatId: string; turnId: string; executionId: string } | undefined {
+  activeTurn(executionId: string): { chatId: string; turnId: string; executionId: string; contextId?: string } | undefined {
     const route = this.notifyRoute(executionId);
-    return route?.active ? { chatId: route.chatId, turnId: route.active.userMessageId, executionId: route.id } : undefined;
+    return route?.active ? { chatId: route.chatId, turnId: route.active.userMessageId, executionId: route.id, ...(route.context ? { contextId: route.context.id } : {}) } : undefined;
   }
   /** notify-user-v1: live only, to every attached app; never stored in the transcript. */
   async attention(executionId: string, update: Omit<AttentionUpdate, "sessionUpdate">): Promise<void> {
@@ -161,7 +175,14 @@ export class Agents {
         route.interactions?.runtimeBusy || this.hasBackground(route) || [...(route.tools?.values() ?? [])].some(tool => tool.active)));
   }
 
-  setOutboxDispatch(dispatch?: (entry: InboxEntry) => Promise<boolean>, stop?: (chatId: string, throughEpoch: string) => Promise<string>): void {
+  /** Team sharing slice B: where an activated turn's lease comes from. */
+  setExecutionContexts(contexts?: ExecutionContexts, personal?: PersonalEnvironments): void { this.contexts = contexts; this.personal = personal; }
+  /** An activated workspace: every turn runs as the person the control plane names, never as the config's login. */
+  private get acting(): boolean { return this.config.actingUser === 1; }
+  /** Between an activated chat's turns no driver exists; selections apply at the next open. */
+  private idle(route: Runtime): boolean { return this.acting && !route.context; }
+
+  setOutboxDispatch(dispatch?: OutboxDispatch, stop?: (chatId: string, throughEpoch: string) => Promise<string>): void {
     this.outboxDispatch = dispatch; this.outboxStop = stop;
   }
 
@@ -291,9 +312,17 @@ export class Agents {
         const entry = await this.store.prepareOutboxDispatch(chatId, next.requestId, true);
         if (!entry) return;
         let outcome: SteerOutcome = "interrupted";
-        if (await this.outboxDispatch?.(entry)) {
+        let assigned: boolean | OutboxAssignment | undefined;
+        try { assigned = await this.outboxDispatch?.(entry); }
+        catch (error) {
+          // Activated: another person's turn still owns the chat; this one waits as an ordinary turn.
+          if (!this.acting || contextCode(error) !== "actor_busy") throw error;
+          assigned = undefined; outcome = "queued";
+        }
+        if (assigned) {
+          const joined = !this.acting || await this.leaseSteer(route, entry, assigned);
           if (route.closed || stopping !== route.stopping) outcome = "interrupted";
-          else if (route.active !== active || !route.nativeRunning || !matchesActiveMode() || route.interactions?.blocking) outcome = "queued";
+          else if (!joined || route.active !== active || !route.nativeRunning || !matchesActiveMode() || route.interactions?.blocking) outcome = "queued";
           else outcome = await route.driver!.steer(content);
         }
         await this.store.finishOutboxSteer(chatId, entry.requestId, outcome, active.userMessageId);
@@ -393,10 +422,12 @@ export class Agents {
           if (route.activePermissionMode !== mode) route.activePermissionMode = undefined;
           const revision = route.modeRevision = (route.modeRevision ?? 0) + 1;
           return this.withModeChange(route, async () => {
-            await this.ensureDriver(route); this.assertCurrent(route);
-            if (route.modeRevision !== revision) return;
-            if (!route.driver!.setMode) throw new WorkspaceError("CLOUD_V2_UNSUPPORTED", "This agent cannot change mode.");
-            await route.driver!.setMode(message.modeId); this.assertCurrent(route);
+            if (!this.idle(route)) {
+              await this.ensureDriver(route); this.assertCurrent(route);
+              if (route.modeRevision !== revision) return;
+              if (!route.driver!.setMode) throw new WorkspaceError("CLOUD_V2_UNSUPPORTED", "This agent cannot change mode.");
+              await route.driver!.setMode(message.modeId); this.assertCurrent(route);
+            }
             if (route.modeRevision !== revision) return;
             await this.saveMode(route, mode);
             if (mode === "bypass") await route.interactions?.allowPending();
@@ -408,11 +439,13 @@ export class Agents {
         case "AGENT_SET_MODEL": {
           const route = this.route(message);
           const revision = route.configRevision = (route.configRevision ?? 0) + 1;
-          await this.ensureDriver(route);
-          this.assertCurrent(route);
-          if (route.configRevision !== revision) return;
-          await route.driver!.setModel(message.model);
-          this.assertCurrent(route);
+          if (!this.idle(route)) {
+            await this.ensureDriver(route);
+            this.assertCurrent(route);
+            if (route.configRevision !== revision) return;
+            await route.driver!.setModel(message.model);
+            this.assertCurrent(route);
+          }
           // The renderer sends model selection and complete config without
           // awaiting either. An older native ACK cannot erase newer knobs.
           if (route.configRevision !== revision) return;
@@ -649,8 +682,8 @@ export class Agents {
     }
     route.preparing = undefined;
     if (deferDriver) return;
-    await this.ensureDriver(route, timing);
-    this.assertCurrent(route);
+    // Activated: a driver opens only for a leased turn, as that turn's person.
+    if (!this.acting) { await this.ensureDriver(route, timing); this.assertCurrent(route); }
     timing.mark("driver_ready");
     const chat = this.store.metadata(chatId)!.chat!;
     const session = { sessionId: route.id, executionId: route.id, ...(this.config.agentInteractions === 1 ? { modes: cloudSessionModes(agentId, route.permissionMode ?? "bypass") } : {}), ...(chat.providerBinding ? { providerBinding: chat.providerBinding } : {}), ...(route.background ? { backgroundTasks: route.background } : {}) };
@@ -667,13 +700,18 @@ export class Agents {
     if (route.permissionMode === "plan" && this.config.agentInteractions !== 1)
       throw new WorkspaceError("CLOUD_V2_UNSUPPORTED", "This cloud worker does not support Plan mode yet. Update it before sending this Plan request.");
     if (route.driver && (route.nativeRunning || this.hasBackground(route))) return;
-    const unavailable = providerAvailability(route.agentId, this.config, !!this.factories[route.agentId]);
+    const context = this.acting ? route.context : undefined;
+    if (this.acting && (!context || !this.contexts?.live(context.id)))
+      throw new WorkspaceError("session-expired", "This turn's person is no longer current. Send the message again.");
+    const config = context ? { ...this.config, agents: context.lease.agents } : this.config;
+    const unavailable = providerAvailability(route.agentId, config, !!this.factories[route.agentId]);
     if (unavailable) throw Object.assign(new Error(cloudFailureMessage(unavailable)), { cloud: unavailable });
     if (route.opening) return route.opening;
-    const login = this.config.agents[route.agentId];
+    const login = config.agents[route.agentId];
     // Personal MCP sign-in changes readiness without changing the shared
     // server definition. Reopen between turns after that pushed revision.
-    const key = JSON.stringify([login, this.config.mcpServers ?? [], this.config.mcpServers?.length ? this.config.loginRevision : undefined, this.config.agentInteractions, this.config.codeReview]);
+    const shared = [login, this.config.mcpServers ?? [], this.config.mcpServers?.length ? this.config.loginRevision : undefined, this.config.agentInteractions, this.config.codeReview];
+    const key = JSON.stringify(context ? [...shared, context.id] : shared);
     if (route.driver && route.login === key) return;
     if (!login) throw new WorkspaceError("auth-required", "Connect this agent before sending a message.");
     const factory = this.factories[route.agentId];
@@ -766,7 +804,8 @@ export class Agents {
         if (!this.hasBackground(route) && !route.active) this.pump(route);
       });
       try {
-        const mcpServers = await this.mcpProviders?.(route.mcpExecutionId);
+        const mcpServers = await (context ? this.mcpProviders?.(route.mcpExecutionId, { contextId: context.id, servers: context.lease.mcpServers ?? [] })
+          : this.mcpProviders?.(route.mcpExecutionId));
         const executionId = route.mcpExecutionId;
         const assertExecutionCurrent = () => {
           this.assertCurrent(route);
@@ -783,8 +822,9 @@ export class Agents {
         this.assertCurrent(route);
         const interactions = route.interactions;
         const native = await driver.open({ sessionId: route.id, cwd: this.scope.root, model: route.model, effort: route.effort, fast: route.fast,
-          ...(this.application ? { application: this.application } : {}),
-          ...(this.zeros ? { zerosEnvironment: this.zeros.variables(route.chatId) } : {}),
+          ...(this.application ? { application: context?.lease.environment ? this.personalApplication(context.lease.environment, context.env) : this.application } : {}),
+          ...(context ? { zerosEnvironment: this.actingVariables(route.chatId, context), gitEnvironment: gitIdentityEnvironment(context.lease.gitIdentity) }
+            : this.zeros ? { zerosEnvironment: this.zeros.variables(route.chatId) } : {}),
           ...(mcpServers || route.workspaceTools ? { mcpServers: { ...mcpServers, ...route.workspaceTools?.servers } } : {}),
           ...(this.config.agentInteractions === 1 ? { modeId: cloudModeId(route.agentId, route.permissionMode ?? "bypass"),
             onQuestion: (request, signal) => interactions!.question(request, signal),
@@ -834,12 +874,111 @@ export class Agents {
     } finally { route.admitting--; }
   }
 
+  /** Activated begin: while a previous person's cleanup still holds the chat the control plane answers actor_busy;
+   * that is a wait (same dispatch, backed off), never a failed turn. Stop or close ends the wait. */
+  private async beginWhenFree(route: Runtime, entry: InboxEntry, stopping: number): Promise<boolean | OutboxAssignment | undefined> {
+    for (let attempt = 0; ; attempt++) {
+      try { return await this.outboxDispatch?.(entry); }
+      catch (error) {
+        if (contextCode(error) !== "actor_busy" || route.closed || stopping !== route.stopping || this.lifetime.signal.aborted) throw error;
+        await new Promise(resolve => setTimeout(resolve, Math.min(5_000, 250 * 2 ** Math.min(attempt, 5))));
+        if (route.closed || stopping !== route.stopping || this.lifetime.signal.aborted) return false;
+      }
+    }
+  }
+
+  /** Activated: the begin must name this turn's person; the lease supplies only that person's material. Fails closed. */
+  private async leaseTurn(route: Runtime, entry: InboxEntry, assigned: boolean | OutboxAssignment): Promise<void> {
+    if (assigned === true || assigned === false || assigned.mode !== "prompt" || assigned.actingUser.userMessageId !== entry.userMessageId)
+      throw new WorkspaceError("session-expired", "The control plane named no person for this turn.");
+    const context: NonNullable<Runtime["context"]> = { id: assigned.contextId, lease: await this.lease(route, entry, assigned) };
+    route.context = context;
+    // Revoked, refused at renewal or expired: the person's turn stops now; the settled turn then retires the context.
+    this.contexts?.onEnd(context.id, reason => {
+      if (route.context !== context) return;
+      context.ended = reason;
+      if (route.active) route.active.cancelRequested = true;
+      void route.driver?.interrupt().catch(() => {});
+    });
+    // The person's env files: private to this context, never in the checkout; retirement erases them.
+    if (context.lease.environment && this.personal) context.env = await this.personal.materialize(context.id, context.lease.environment);
+  }
+
+  /** Activated steer: only into the active turn's own context, after the control plane checks this message's link to it. */
+  private async leaseSteer(route: Runtime, entry: InboxEntry, assigned: boolean | OutboxAssignment): Promise<boolean> {
+    if (assigned === true || assigned === false) throw new WorkspaceError("session-expired", "The control plane named no person for this steer.");
+    if (assigned.mode !== "steer") return false;
+    if (!route.context || assigned.contextId !== route.context.id) throw new WorkspaceError("session-expired", "This steer belongs to another turn.");
+    const lease = await this.lease(route, entry, assigned);
+    return lease.userId === route.context.lease.userId;
+  }
+
+  private async lease(route: Runtime, entry: InboxEntry, assigned: OutboxAssignment): Promise<CloudV2TurnLease> {
+    if (!this.contexts) throw new WorkspaceError("CLOUD_V2_UNSUPPORTED", "This cloud worker cannot run turns as their person.");
+    let lease: CloudV2TurnLease;
+    try {
+      lease = await this.contexts.turnLease({ chatId: route.chatId, userMessageId: entry.userMessageId, dispatchId: entry.outbox!.dispatchId!,
+        generation: assigned.actingUser.generation, contextId: assigned.contextId });
+    } catch (error) {
+      const code = contextCode(error);
+      const reason = code === "agent_login_required" ? "auth-required" as const : code === "agent_credentials_unavailable" ? "credentials-unavailable" as const : undefined;
+      if (!reason) throw error;
+      const cloud = { source: "provider" as const, provider: route.agentId, reason };
+      throw Object.assign(new Error(cloudFailureMessage(cloud)), { cloud });
+    }
+    if (lease.userId !== assigned.actingUser.userId || lease.generation !== assigned.actingUser.generation)
+      throw new WorkspaceError("session-expired", "The control plane answered for another person.");
+    return lease;
+  }
+
+  /** The person's own variables over the workspace's, for this context's processes only. Their values (and env-file
+   * contents, which are never planted in the shared checkout) are redacted from everything the chat mirrors. */
+  private personalApplication(environment: NonNullable<CloudV2TurnLease["environment"]>, env?: { variables: Record<string, string> }): ApplicationEnvironment {
+    const shared = this.application!;
+    const secrets = [...Object.values(environment.variables), ...environment.files.flatMap(file => [file.content, ...Object.values(parseEnv(file.content))])];
+    shared.protect(secrets);
+    const personal = new ApplicationEnvironment({ variables: { ...shared.variables, ...(env?.variables ?? environment.variables) }, files: [] });
+    personal.protect(secrets);
+    return personal;
+  }
+
+  /** Wire "Personal env files in shared mode": one line, for the driver only, naming where the repository's expected env files are. */
+  private withEnvNotice<T extends { type: string }>(route: Runtime, content: T[]): Array<T | { type: "text"; text: string }> {
+    const files = route.context?.env ? route.context.lease.environment?.files ?? [] : [];
+    if (!files.length) return content;
+    const names = files.map(file => file.path).join(", ");
+    return [{ type: "text", text: `Personal env files for this turn (${names}) are in $ZEROS_PERSONAL_ENV_DIR, not in the checkout.` }, ...content];
+  }
+
+  private actingVariables(chatId: string, context: NonNullable<Runtime["context"]>): Record<string, string> {
+    const { ZEROS_API_URL: _url, ZEROS_API_TOKEN: _token, ...shared } = this.zeros?.variables(chatId) ?? {};
+    const api = context.lease.api;
+    return { ...shared, ...(api ? { ZEROS_API_URL: api.url, ZEROS_API_TOKEN: api.token } : {}), ZEROS_EXECUTION_CONTEXT: context.id,
+      ...(context.env ? { ZEROS_PERSONAL_ENV_DIR: context.env.directory } : {}) };
+  }
+
+  /** Ends the person's turn: their driver and tools go first, then the receipt. A lost receipt is retried; the control plane keeps the chat until it lands. */
+  private async retireContext(route: Runtime): Promise<void> {
+    const context = route.context;
+    if (!context) return;
+    route.context = undefined;
+    route.unsubscribe?.(); route.unsubscribe = undefined;
+    const tools = this.retireWorkspaceTools(route);
+    await route.interactions?.dismiss(INPUT_CANCELLED);
+    await route.driver?.dispose().catch(() => {});
+    await tools;
+    route.driver = undefined; route.login = undefined; route.mcpExecutionId = undefined; route.interactions = undefined;
+    if (this.contexts) await retireContext(this.contexts, context.id, context.ended === "expired" ? "expired" : context.ended ? "revoked" : "outcome", { personal: this.personal, signal: this.lifetime.signal });
+  }
+
   private pump(route: Runtime): void {
     if (route.pumping || route.closed || route.cancelling || route.stopInFlight || route.outboxSteering || this.hasBackground(route)) return;
     route.pumping = (async () => {
       while (!route.closed && !route.cancelling && !route.stopInFlight && !this.hasBackground(route)) {
         await route.events;
         if (route.closed || route.cancelling || route.stopInFlight || this.hasBackground(route)) break;
+        // The finished turn's person leaves with its driver before anyone else's turn starts.
+        if (route.context) await this.retireContext(route);
         const stopping = route.stopping;
         let entry = await this.store.claim(route.chatId);
         if (!entry) break;
@@ -862,11 +1001,32 @@ export class Agents {
             if (mode === "plan" && this.config.agentInteractions !== 1) throw new WorkspaceError("CLOUD_V2_UNSUPPORTED", "This cloud worker does not support Plan mode yet. Update it before sending this Plan request.");
             await this.withModeChange(route, async () => { if (mode !== route.permissionMode) await this.saveMode(route, mode); });
           }
-          await this.ensureDriver(route);
-          route.turnTiming.mark("driver_ready");
-          if (route.closed || stopping !== route.stopping) response = { stopReason: "cancelled" };
+          // Activated: begin names the person before any driver or credential exists.
+          const acting = this.acting && !!entry.outbox;
+          if (acting) {
+            // §10a: nothing is begun for anyone until this boot's clean start is accepted.
+            await this.contexts?.ready();
+            const prepared = await this.store.prepareOutboxDispatch(route.chatId, entry.requestId);
+            if (!prepared) response = { stopReason: "cancelled" };
+            else {
+              entry = prepared; route.active = entry;
+              const assigned = await this.beginWhenFree(route, entry, stopping);
+              if (!assigned || route.closed || stopping !== route.stopping) response = { stopReason: "cancelled" };
+              else {
+                await this.update(route, { sessionId: route.id, update: { sessionUpdate: "user_message_recorded", message: userMessage(entry) } });
+                await this.turnState(route, entry, "running");
+                await this.leaseTurn(route, entry, assigned);
+              }
+            }
+          }
+          if (!response) {
+            await this.ensureDriver(route);
+            route.turnTiming.mark("driver_ready");
+          }
+          if (response) { /* settled before any driver */ }
+          else if (route.closed || stopping !== route.stopping) response = { stopReason: "cancelled" };
           else {
-            if (entry.outbox) {
+            if (entry.outbox && !acting) {
               const prepared = await this.store.prepareOutboxDispatch(route.chatId, entry.requestId);
               if (!prepared) response = { stopReason: "cancelled" };
               else {
@@ -901,7 +1061,7 @@ export class Agents {
                   }
                   if (route.closed || stopping !== route.stopping) return { completion: Promise.resolve<PromptResponse>({ stopReason: "cancelled" }) };
                   route.nativeRunning = true; route.activePermissionMode = route.permissionMode ?? "bypass";
-                  const completion = route.driver!.prompt(content); void completion.catch(() => {});
+                  const completion = route.driver!.prompt(this.withEnvNotice(route, content)); void completion.catch(() => {});
                   // Release mode admission immediately; a live turn still accepts mode controls.
                   return { completion };
                 });
@@ -957,7 +1117,9 @@ export class Agents {
       route.active = undefined; route.closed = true; this.activity();
     }).finally(() => {
       route.pumping = undefined;
-      if (this.store.hasQueued(route.chatId)) this.pump(route);
+      if (route.context && !route.active && !this.hasBackground(route) && !route.cancelling && !route.stopInFlight)
+        void this.retireContext(route).finally(() => { if (this.store.hasQueued(route.chatId)) this.pump(route); });
+      else if (this.store.hasQueued(route.chatId)) this.pump(route);
     });
   }
 

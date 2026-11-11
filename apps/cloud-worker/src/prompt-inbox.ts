@@ -2,7 +2,8 @@ import { setTimeout as delay } from "node:timers/promises";
 import { z } from "zod";
 import { CLOUD_V2_PROMPT_POLL_MS, CloudV2PromptPullReplySchema, CloudV2PromptStateSchema, CloudV2PromptStopReplySchema,
   type CloudV2PromptDelivery, type CloudV2PromptState } from "@zeros/protocol/cloud-v2-prompts";
-import type { Agents } from "./agents";
+import { CloudV2BeginActiveReplySchema } from "@zeros/protocol/cloud-v2-relay";
+import type { Agents, OutboxAssignment } from "./agents";
 import type { InboxEntry, SessionStore } from "./sessions/session-store";
 import type { PromptOperation, PromptRequest } from "./transport";
 import { WorkspaceError } from "./workspace/scope";
@@ -79,12 +80,17 @@ export class PromptInbox {
     void this.agents.fenceOutbox().catch(() => {});
   }
 
-  private async dispatch(entry: InboxEntry): Promise<boolean> {
+  /** true/false: today's begin. An assignment: an activated dispatch's person and context (team sharing slice B). */
+  private async dispatch(entry: InboxEntry): Promise<boolean | OutboxAssignment> {
     const input = entry.outbox;
     if (!input?.acknowledged || !input.dispatchId) throw new Error("Prompt has no durable dispatch intent.");
-    const reply = begin.parse(await this.call("begin", { userMessageId: entry.userMessageId,
-      deliveryId: input.deliveryId, dispatchId: input.dispatchId }));
-    return reply.dispatch;
+    const body = await this.call("begin", { userMessageId: entry.userMessageId,
+      deliveryId: input.deliveryId, dispatchId: input.dispatchId });
+    if (body && typeof body === "object" && "actingUser" in body) {
+      const reply = CloudV2BeginActiveReplySchema.parse(body);
+      return { actingUser: reply.actingUser, contextId: reply.contextId, mode: reply.mode };
+    }
+    return begin.parse(body).dispatch;
   }
 
   private async report(): Promise<void> {

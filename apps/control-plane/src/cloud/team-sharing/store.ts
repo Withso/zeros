@@ -14,8 +14,8 @@ import { CloudTeamEvents } from "./events.js";
 
 type Github = Pick<ReturnType<typeof createCloudGithubServices>,"source" | "connections" | "metadata">;
 
-/** Desktop read and management authority is deliberately separate from the
- * Creator-only store used by API keys, VM credentials and executable RPCs. */
+/** Read and management admission cannot grant execution credentials;
+ * activated writes require the separate per-person execution authority. */
 export class CloudTeamSharing {
   readonly authority: CloudTeamAuthority;
   readonly signals: CloudTeamSignals;
@@ -40,19 +40,20 @@ export class CloudTeamSharing {
     const metadata = new Map((await this.github.metadata.documents(current.map(proof => proof.view.workspace),
       new Map(current.map(proof => [proof.view.workspace.id,proof.source!.fingerprint])))).map(row => [row.id,row]));
     const flags = await withSystemTx(this.pool,async tx => {
-      const rows = (await tx.query<{ id: string; following: boolean; pinned: boolean; follower_ids: string[]; follower_count: string }>(`SELECT w.id,
+      const rows = (await tx.query<{ id: string; following: boolean; pinned: boolean; follower_ids: string[]; follower_count: string; execution_mode: string; can_execute: boolean }>(`SELECT w.id,w.execution_mode,coalesce(w.execution_mode='active' AND (w.state IN ('stopped','starting','creating') OR w.worker_boot_id=ANY(w.acting_user_boot_ids)),false) AS can_execute,
         EXISTS(SELECT 1 FROM cloud_v2_workspace_followers WHERE workspace_id=w.id AND user_id=$2) AS following,
         EXISTS(SELECT 1 FROM cloud_v2_workspace_pins WHERE workspace_id=w.id AND user_id=$2) AS pinned,
         ARRAY(SELECT user_id FROM cloud_v2_workspace_followers WHERE workspace_id=w.id ORDER BY user_id LIMIT 200) AS follower_ids,
         (SELECT count(*) FROM cloud_v2_workspace_followers WHERE workspace_id=w.id)::text AS follower_count
-        FROM unnest($1::uuid[]) w(id)`,[proofs.map(proof => proof.view.workspace.id),proofs[0]!.user.id])).rows;
+        FROM cloud_v2_workspaces w WHERE w.id=ANY($1::uuid[])`,[proofs.map(proof => proof.view.workspace.id),proofs[0]!.user.id])).rows;
       const allowed = await this.authority.assertMany(proofs,tx,omitDenied);
       return new Map(rows.filter(row => allowed.has(row.id)).map(row => [row.id,row]));
     });
     return proofs.filter(proof => flags.has(proof.view.workspace.id)).map(proof => {
       const id = proof.view.workspace.id, row = flags.get(id)!;
       return { ...(metadata.get(id) ?? proof.view.workspace),teamSharing: 1 as const,createdByUserId: proof.view.createdByUserId,viewerRole: proof.view.role,
-        readOnly: proof.view.role !== "creator",canManage: proof.view.role !== "member",
+        ...(row.execution_mode === "active" ? { teamWriting: 1 as const, canExecute: row.can_execute } : {}),
+        readOnly: row.execution_mode === "active" ? !row.can_execute : proof.view.role !== "creator",canManage: proof.view.role !== "member",
         following: row.following,pinned: row.pinned,followerIds: row.follower_ids,followerCount: Number(row.follower_count) };
     });
   }

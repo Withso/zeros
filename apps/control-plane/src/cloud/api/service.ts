@@ -49,7 +49,7 @@ export class CloudApiService {
     return { id: workspace.id, number: workspace.number ?? null, name: workspace.name, title: workspace.title ?? null,
       state: workspace.state, status: workspaceStatus(workspace), repository: workspace.repository, branch: workspace.branch,
       baseBranch: workspace.baseBranch, archived: workspace.archivedAt !== null, createdAt: workspace.createdAt,
-      lastActivityAt: workspace.activeAt, creatorId: workspace.creatorUserId, creatorName: credential.name,
+      lastActivityAt: workspace.activeAt, creatorId: workspace.creatorUserId, creatorName: workspace.creatorUserId === credential.userId ? credential.name : null,
       createdBySessionId: workspace.createdBySessionId ?? null, link: this.link(credential, workspace),
       ...(workspace.setup ? { setup: workspace.setup } : {}),
       ...(workspace.agentCost ? { agentCost: workspace.agentCost } : {}) };
@@ -65,7 +65,8 @@ export class CloudApiService {
   }
   private async owned(credential: CloudApiCredential, id: string): Promise<CloudV2Workspace> {
     if (!z.string().uuid().safeParse(id).success) throw notFound();
-    const workspace = await this.deps.store.get(id, credential.userId);
+    const execution = this.deps.store.prompts.execution;
+    const workspace = await execution?.active(id) ? (await execution!.workspace(id, credential.userId)).workspace : await this.deps.store.get(id, credential.userId);
     if (workspace.organizationId !== credential.organizationId) throw notFound();
     return workspace;
   }
@@ -78,6 +79,11 @@ export class CloudApiService {
     if (!this.deps.routes.promptOutbox) throw new HttpError(503, "api_prompts_unavailable", "Cloud prompt delivery is not available");
   }
   private async authorizePrompt(credential: CloudApiCredential, workspaceId: string): Promise<void> {
+    if (await this.deps.store.prompts.execution?.active(workspaceId)) {
+      await this.owned(credential, workspaceId);
+      await this.deps.credentials.assertCurrent(credential);
+      return;
+    }
     const { workspace, proof } = await this.deps.store.promptContext(workspaceId, credential.userId);
     if (workspace.organizationId !== credential.organizationId) throw notFound();
     if (workspace.archivedAt) throw new HttpError(409, "workspace_archived", "Unarchive the workspace before sending a message");
@@ -114,7 +120,7 @@ export class CloudApiService {
       this.requirePrompts();
       initialPrompt = { chatId: randomUUID(), userMessageId: input.messageId ?? randomUUID(), agentId: input.agent!,
         message: input.message, model: input.model, effort: input.effort, sessionName: input.sessionName, startedAt: Date.now(), createdBySessionId,
-        senderCredential: { credentialId: credential.credentialId, kind: credential.kind } };
+        senderCredential: { credentialId: credential.credentialId, kind: credential.kind, contextId: credential.contextId } };
     }
     const requestHash = createHash("sha256").update(JSON.stringify({ api: "v0", organizationId: credential.organizationId,
       ...input, repository: input.repository.toLowerCase() })).digest("hex");
@@ -139,7 +145,7 @@ export class CloudApiService {
   async lifecycle(credential: CloudApiCredential, id: string, action: "archive" | "unarchive" | "sleep" | "wake") {
     const workspace = await this.owned(credential, id);
     const operation = action === "archive" ? "archive" : action === "sleep" ? "stop" : "start";
-    if (operation === "start") await this.deps.routes.authorizeSource?.(workspace);
+    if (operation === "start" && !await this.deps.store.prompts.execution?.active(id)) await this.deps.routes.authorizeSource?.(workspace);
     await this.deps.credentials.assertCurrent(credential);
     const result = await this.deps.store.requestLifecycle(id, credential.userId, operation);
     return this.workspaceDocument(credential, result.workspace);
@@ -167,7 +173,8 @@ export class CloudApiService {
     const chatId = input.sessionId ?? randomUUID(), userMessageId = input.messageId ?? randomUUID();
     const result = await this.deps.store.prompts.enqueueApi(input.workspaceId, credential.userId,
       { chatId, userMessageId, agentId: input.agent, message: input.message, model: input.model, effort: input.effort, sessionName: input.name, createdBySessionId,
-        senderCredential: { credentialId: credential.credentialId, kind: credential.kind } });
+        senderCredential: { credentialId: credential.credentialId, kind: credential.kind, contextId: credential.contextId } }, undefined,
+      tx => this.deps.credentials.assertCurrent(credential, tx));
     return { session: await this.getSession(credential, chatId), message: { id: userMessageId, createdBySessionId: result.createdBySessionId } };
   }
   async cancelSession(credential: CloudApiCredential, id: string) {
@@ -200,9 +207,10 @@ export class CloudApiService {
     const userMessageId = input.messageId ?? randomUUID();
     const result = await this.deps.store.prompts.enqueueApi(workspace.id, credential.userId, { chatId: id, userMessageId,
       agentId: agent.data, message: input.message, createdBySessionId,
-      senderCredential: { credentialId: credential.credentialId, kind: credential.kind },
+      senderCredential: { credentialId: credential.credentialId, kind: credential.kind, contextId: credential.contextId },
       ...(typeof saved.row.model === "string" && saved.row.model ? { model: saved.row.model } : {}),
-      ...(typeof saved.row.effort === "string" && saved.row.effort ? { effort: saved.row.effort } : {}) });
+      ...(typeof saved.row.effort === "string" && saved.row.effort ? { effort: saved.row.effort } : {}) }, undefined,
+    tx => this.deps.credentials.assertCurrent(credential, tx));
     return { replay: result.replay, message: { id: userMessageId, createdBySessionId: result.createdBySessionId } };
   }
   async messages(credential: CloudApiCredential, id: string, query: unknown = {}) {

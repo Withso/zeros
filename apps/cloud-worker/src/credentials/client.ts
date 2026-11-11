@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { workerChildEnvironment } from "../drivers/shared/agent-environment";
 import { githubEnvironment } from "./github";
 import { githubAuthenticationMessage } from "./github-failure";
-import { askpass, brokerRequest, gitCredential, token } from "./broker";
+import { askpass, brokerRequest, executionContext, gitCredential, token } from "./broker";
 
 export { askpass, brokerRequest, gitCredential };
 
@@ -28,7 +28,8 @@ export async function runGh(args: string[], source: NodeJS.ProcessEnv = process.
   const socketPath = source.GH_ZEROS_BROKER_SOCKET ?? "";
   const login = await token(socketPath, "user-token");
   const wiring = githubEnvironment(socketPath, source.GIT_ASKPASS ?? "/opt/zeros/worker/bin/git-askpass");
-  const env = { ...workerChildEnvironment(source, wiring), GH_TOKEN: login, GH_HOST: "github.com", GH_PROMPT_DISABLED: "1" };
+  const contextId = executionContext(source);
+  const env = { ...workerChildEnvironment(source, wiring, {}, contextId ? { ZEROS_EXECUTION_CONTEXT: contextId } : {}), GH_TOKEN: login, GH_HOST: "github.com", GH_PROMPT_DISABLED: "1" };
   const result = await execute(args, env), code = typeof result === "number" ? result : result.code;
   if (code !== 0 && typeof result !== "number" && result.unauthorized)
     await brokerRequest(socketPath, "report-failure", { purpose: "gh", rejectedToken: login }).catch(error => { process.stderr.write(githubAuthenticationMessage(error) + "\n"); });

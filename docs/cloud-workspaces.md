@@ -460,6 +460,17 @@ common escaped forms are redacted from worker diagnostics, setup logs and mirror
 history; checkpoint manifests contain metadata only. Encrypted checkpoints carry
 the file bytes needed for recovery.
 
+In a workspace shared for team sharing's "write as yourself" (activated, worker
+feature `acting-user-v1`), each turn, terminal and setup runs from the lease of
+the person it acts for. That person's environment files are never written into
+the shared checkout: they live in `~/.zeros/contexts/<contextId>/env/`
+(directories 0700, files 0600, their configured relative paths), named by
+`ZEROS_PERSONAL_ENV_DIR`, with their `KEY=VALUE` pairs loaded under the person's
+own variables. The agent is told in one line where they are. The directory is
+erased when the context retires, after its processes are gone. The VM is still
+one trust domain: other members' processes can read that directory, and the
+person's variables, while the context lives.
+
 Deploy expand-only migration `0218_cloud_workspace_environment.sql` and the control
 plane before publishing the worker runtime. The optional `environment` config is
 negotiated by `workspace-environment-v1`; an old worker is refused when a workspace

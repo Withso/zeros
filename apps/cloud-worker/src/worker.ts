@@ -3,7 +3,7 @@ import { access, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { CloudV2ControlFrameSchema, CLOUD_V2_RELAY_PROTOCOL, CLOUD_WORKSPACE_RESOURCES_CAPABILITY, type CloudV2ControlFrame, type CloudV2SetupStatus, type CloudV2WorkerFrame } from "@zeros/protocol/cloud-v2-relay";
+import { CloudV2ClientOperationSchema, CloudV2ControlFrameSchema, CLOUD_V2_RELAY_PROTOCOL, CLOUD_WORKSPACE_RESOURCES_CAPABILITY, type CloudV2ControlFrame, type CloudV2SetupStatus, type CloudV2WorkerFrame, type RuntimeMcpServer } from "@zeros/protocol/cloud-v2-relay";
 import { CloudV2PromptPullReplySchema } from "@zeros/protocol/cloud-v2-prompts";
 import { createMessage, type BridgeMessage } from "@zeros/protocol/messages";
 import { safeParseClientBridgeMessage } from "@zeros/protocol/schemas";
@@ -28,11 +28,16 @@ import { SYNC_CAPABILITY, SYNC_HINT_KIND, SYNC_BATCH_CAPABILITY, SYNC_TRANSFER_O
 import { WorkspaceError, WorkspaceScope, type WorkerConfig } from "./workspace/scope";
 import { WorkspaceService, type WorkspaceServiceOptions } from "./workspace/service";
 import { isGitMutation } from "./workspace/git";
-import { GithubBroker, GithubTokens, githubEnvironment } from "./credentials/github";
+import { GithubBroker, GithubTokens, githubEnvironment, type GithubToken } from "./credentials/github";
+import { githubAuthenticationError } from "./credentials/github-failure";
 import { GithubCredentialRecovery } from "./credentials/github-recovery";
 import { configureGitIdentity } from "./credentials/git-identity";
 import { commandRunner } from "./workspace/commands";
-import { Terminals } from "./terminals/service";
+import { Terminals, type TerminalPeople } from "./terminals/service";
+import { gitIdentityEnvironment } from "./sharing/identity";
+import { PersonalEnvironments } from "./sharing/personal-env";
+import { operationEnvironment } from "./sharing/operation-environment";
+import { retireContext } from "./sharing/retire";
 import type { ModelDiscoveryOptions } from "./credentials/model-availability";
 import { PromptInbox } from "./prompt-inbox";
 import { McpGateway } from "./mcp/gateway";
@@ -47,10 +52,16 @@ import { WorkspaceApiEnvironment } from "./credentials/workspace-api";
 import { RuntimeQuiescence, type RuntimeCensus } from "./runtime-quiescence";
 import { RuntimeUpdate } from "./runtime-update";
 import type { RuntimePermit } from "./runtime-permit";
+import { ExecutionContexts } from "./sharing/execution-contexts";
 
 interface WorkerOptions {
   directory: string;
   homeDirectory?: string;
+  /** Team sharing §7a: this boot's pre-boot process sweep, returning what it could not end or prove. Only the
+   * production entry supplies the real /proc sweep; without one an activated boot is unproven and acts for no one. */
+  bootClean?: () => Promise<number>;
+  /** Context renewal cadence override (tests); 10 s otherwise. */
+  contextRenewMs?: number;
   workspaceId?: string;
   runtimeResume?: { instanceId: string; ready?(): void };
   runtimePermit?: RuntimePermit;
@@ -75,7 +86,9 @@ interface WorkerOptions {
   onSync?: (line: string) => void;
 }
 /** passive (Order 3): a syncing Mac; never activity, never in the census, sync reads only. */
-interface Client extends AppClient { rejected: boolean; passive?: boolean; device?: string; served?: number }
+interface Client extends AppClient { rejected: boolean; passive?: boolean; device?: string; served?: number;
+  /** Activated acting-user-v1: the control plane's person and client context for this connection. */
+  userId?: string; contextId?: string }
 
 const stableJson = (value: unknown): string => Array.isArray(value) ? `[${value.map(stableJson).join(",")}]`
   : value && typeof value === "object" ? `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${stableJson((value as Record<string, unknown>)[key])}`).join(",")}}`
@@ -137,6 +150,14 @@ export class CloudWorker {
   private notifyUserService?: NotifyUserService;
   private readonly github: GithubBroker;
   private readonly gitEnvironment: NodeJS.ProcessEnv;
+  /** Team sharing slice B: the leased people this boot runs work as (in memory only). */
+  private readonly contexts?: ExecutionContexts;
+  private acting = false;
+  private readonly personal: PersonalEnvironments;
+  /** One GitHub credential flight per live context; it ends with its context. */
+  private readonly contextGithub = new Map<string, { tokens: GithubTokens; recovery: GithubCredentialRecovery }>();
+  /** A context's own MCP servers, behind its own gateway; closed when the context ends. */
+  private readonly contextMcp = new Map<string, Promise<McpGateway>>();
   private configuring: Promise<void> = Promise.resolve();
   private appliedSections?: Map<string, string>;
   private disconnects = 0;
@@ -159,8 +180,79 @@ export class CloudWorker {
     this.instanceId = options.runtimeResume?.instanceId ?? randomUUID();
     this.tokens = new GithubTokens((frame, timeoutMs) => this.send(frame, timeoutMs));
     this.githubCredentials = new GithubCredentialRecovery(this.tokens, { fetch: options.githubFetch, supportsRecovery: () => this.githubUserTokensEnabled });
-    this.github = new GithubBroker(`/tmp/zeros-github-${this.instanceId}/github.sock`, (purpose, failed) => this.githubCredentials.get(purpose, failed), () => this.workspace?.githubChanged());
+    this.github = new GithubBroker(`/tmp/zeros-github-${this.instanceId}/github.sock`, (purpose, failed, contextId) => this.githubToken(purpose, failed, contextId), () => this.workspace?.githubChanged());
     this.gitEnvironment = githubEnvironment(this.github.socketPath, options.gitAskpassPath ?? fileURLToPath(new URL("../bin/git-askpass", import.meta.url)));
+    this.personal = new PersonalEnvironments(options.homeDirectory ?? homedir());
+    const transport = options.transport;
+    if (transport.contextRequest) this.contexts = new ExecutionContexts({ post: (path, body) => transport.contextRequest!(path, body),
+      ...(options.contextRenewMs ? { renewMs: options.contextRenewMs } : {}) });
+  }
+
+  private contextGateway(context: { contextId: string; servers: readonly RuntimeMcpServer[] }, workspaceRoot: string, agents: Agents): Promise<McpGateway> {
+    const { contextId } = context;
+    if (!this.contexts?.live(contextId)) return Promise.reject(new Error("This context has ended."));
+    let gateway = this.contextMcp.get(contextId);
+    if (!gateway) {
+      const transport = this.options.transport;
+      const created = new McpGateway({ workspaceRoot, admit: async () => this.runtimeGate.admit(),
+        ...(transport.mcpAuthorization ? { authorization: (id: string, force?: boolean, signal?: AbortSignal) => transport.mcpAuthorization!(id, force, signal, contextId) } : {}),
+        onFailure: (executionId, failure) => agents.mcpFailure(executionId, failure) });
+      gateway = created.configure(context.servers, contextId).then(() => created, async error => { await created.dispose(); throw error; });
+      this.contextMcp.set(contextId, gateway);
+      this.contexts.onEnd(contextId, () => {
+        const ending = this.contextMcp.get(contextId); this.contextMcp.delete(contextId);
+        void ending?.then(value => value.dispose()).catch(() => {});
+      });
+    }
+    return gateway;
+  }
+
+  /** Activated: a client's mutation runs as the connection's person, from an operation lease retired when the request ends. */
+  private async asClient<T>(client: Client, requestId: string, op: string, params: Record<string, unknown>, work: () => Promise<T>): Promise<T> {
+    const operation = CloudV2ClientOperationSchema.safeParse(op);
+    if (!this.acting || !operation.success || (op === "git.repoBranchCatalog" && params.fetch !== true)) return work();
+    if (!this.contexts || !client.userId) throw new WorkspaceError("CLOUD_V2_UNSUPPORTED", "Reconnect to the workspace to make changes as yourself.");
+    const lease = await this.contexts.clientLease({ clientId: client.id, requestId, operation: operation.data });
+    try {
+      if (lease.userId !== client.userId) throw new WorkspaceError("CLOUD_V2_UNSUPPORTED", "Reconnect to the workspace to make changes as yourself.");
+      return await operationEnvironment.run({ git: gitIdentityEnvironment(lease.gitIdentity), zeros: { ZEROS_EXECUTION_CONTEXT: lease.contextId } }, work);
+    } finally {
+      await retireContext(this.contexts, lease.contextId, "operation_done");
+    }
+  }
+
+  /** Activated: a shell runs from its opener's terminal lease (identity, context, API and own variables). */
+  private terminalPeople(contexts: ExecutionContexts, application: ApplicationEnvironment): TerminalPeople {
+    return {
+      of: client => (client as Client).userId,
+      lease: async (client, terminalId, requestId) => {
+        const lease = await contexts.terminalLease({ clientId: client.id, terminalId, requestId });
+        const env = lease.environment ? await this.personal.materialize(lease.contextId, lease.environment) : undefined;
+        const variables = env?.variables ?? {};
+        application.protect([...Object.values(variables), ...(lease.environment?.files.map(file => file.content) ?? []), ...(lease.api ? [lease.api.token] : [])]);
+        return { contextId: lease.contextId, userId: lease.userId, git: gitIdentityEnvironment(lease.gitIdentity),
+          zeros: { ZEROS_EXECUTION_CONTEXT: lease.contextId, ...(lease.api ? { ZEROS_API_URL: lease.api.url, ZEROS_API_TOKEN: lease.api.token } : {}),
+            ...(env ? { ZEROS_PERSONAL_ENV_DIR: env.directory } : {}) },
+          application: variables };
+      },
+      ended: (contextId, listener) => contexts.onEnd(contextId, listener),
+      retire: contextId => retireContext(contexts, contextId, "terminal_closed", { personal: this.personal }),
+    };
+  }
+
+  /** An activated workspace never gives a credential outside a live context: no Creator fallback. */
+  private githubToken(purpose: "git" | "gh", failed: string | undefined, contextId: string | undefined): Promise<GithubToken> {
+    if (!this.acting) return this.githubCredentials.get(purpose, failed);
+    if (!contextId || !this.contexts?.live(contextId)) return Promise.reject(githubAuthenticationError("connection-changed"));
+    let flight = this.contextGithub.get(contextId);
+    if (!flight) {
+      const tokens = new GithubTokens((frame, timeoutMs) => this.send(frame, timeoutMs), { contextId });
+      if (this.online) tokens.connect();
+      flight = { tokens, recovery: new GithubCredentialRecovery(tokens, { fetch: this.options.githubFetch, supportsRecovery: () => this.githubUserTokensEnabled }) };
+      this.contextGithub.set(contextId, flight);
+      this.contexts.onEnd(contextId, () => { tokens.dispose(); flight!.recovery.invalidate(); this.contextGithub.delete(contextId); });
+    }
+    return flight.recovery.get(purpose, failed);
   }
 
   start(): void {
@@ -172,6 +264,7 @@ export class CloudWorker {
       open: async () => {
         if (this.disposed) return;
         this.online = true; this.idle = undefined; this.tokens.connect();
+        for (const { tokens } of this.contextGithub.values()) tokens.connect();
         await this.send({ t: "hello", protocol: CLOUD_V2_RELAY_PROTOCOL, workerVersion: "0.0.0",
           capabilities: { design: false, browser: false, simulators: false, terminal: true, files: true, git: true, agents: ["codex", "claude", "cursor"], mcp: 1 } });
         // setup-status-v1: once after each hello; a first hello has no workspace yet and configuration reports it.
@@ -181,7 +274,9 @@ export class CloudWorker {
       close: () => {
         this.online = false; this.appliedSections = undefined; this.disconnects++;
         for (const client of this.clients.values()) this.terminals?.detach(client);
+        for (const client of this.clients.values()) if (client.contextId) this.contexts?.release(client.contextId);
         this.clients.clear(); this.history?.disconnect(); this.tokens.disconnect(); this.githubCredentials.disconnect();
+        for (const { tokens, recovery } of this.contextGithub.values()) { tokens.disconnect(); recovery.disconnect(); }
       },
     });
   }
@@ -222,6 +317,7 @@ export class CloudWorker {
     await this.history?.flush();
     for (const unsubscribe of this.unsubscribers) unsubscribe();
     await this.history?.dispose();
+    this.contexts?.dispose();
     await this.github.dispose();
     await this.options.transport.dispose();
   }
@@ -236,7 +332,7 @@ export class CloudWorker {
       : (message.t === "frame" || message.t === "close") && this.clients.get(message.clientId)?.passive === true;
     if (passive) return this.control(message);
     if (["stop", "close", "prompts"].includes(message.t)) this.runtimeGate.activity();
-    if (["stop", "close", "prompts", "reply", "refusal"].includes(message.t)) return this.control(message);
+    if (["stop", "close", "prompts", "reply", "refusal", "revoke-context"].includes(message.t)) return this.control(message);
     const opening = {};
     if (message.t === "open") this.pendingClients.set(message.clientId, opening);
     const admission = this.runtimeGate.admit();
@@ -259,7 +355,13 @@ export class CloudWorker {
     }
     // Checkout preparation can be waiting for this reply. Never queue control
     // replies behind configuration or behind ordinary app work.
-    if (message.t === "reply" || message.t === "refusal") { this.tokens.receive(message); return; }
+    // Activated: the control plane ended this context (a lost push is caught by renewal or expiry).
+    if (message.t === "revoke-context") { this.contexts?.revoke(message.contextId, message.reason); return; }
+    if (message.t === "reply" || message.t === "refusal") {
+      this.tokens.receive(message);
+      for (const { tokens } of this.contextGithub.values()) tokens.receive(message);
+      return;
+    }
     if (message.t === "prompts") { this.promptInbox?.hint(); return; }
     if (message.t === "stop") {
       this.runtimeUpdater?.stop();
@@ -278,13 +380,18 @@ export class CloudWorker {
       this.pendingClients.delete(message.clientId);
       const client = this.clients.get(message.clientId); if (client) this.terminals?.detach(client);
       if (client?.passive) this.options.onSync?.(`sync served client=${client.id.slice(0, 8)} reads=${client.served ?? 0}`);
+      if (client?.contextId) this.contexts?.release(client.contextId);
       this.clients.delete(message.clientId); return;
     }
     if (this.stopping) return;
     if (message.t === "open") {
       const previous = this.clients.get(message.clientId); if (previous) this.terminals?.detach(previous);
+      if (previous?.contextId && previous.contextId !== message.contextId) this.contexts?.release(previous.contextId);
+      // The connection's client handle lives as long as the connection: adopted now, renewed in every batch.
+      if (message.userId && message.contextId) this.contexts?.adopt(message.contextId, message.userId);
       const client: Client = { id: message.clientId, rejected: false, ...(message.passive ? { passive: true } : {}),
-        ...(message.passive && message.device ? { device: message.device } : {}), send: async (frame) => {
+        ...(message.passive && message.device ? { device: message.device } : {}),
+        ...(message.userId && message.contextId ? { userId: message.userId, contextId: message.contextId } : {}), send: async (frame) => {
         if (this.clients.get(client.id) === client && !client.rejected) await this.send({ t: "frame", clientId: client.id, frame });
       } };
       this.clients.set(client.id, client);
@@ -356,7 +463,7 @@ export class CloudWorker {
           await this.reportIdle();
         }
         const service = /^(chats|messages|turns)\./.test(frame.op) ? this.chats! : this.workspace!;
-        const result = await service.handle(frame.op, frame.params ?? {});
+        const result = await this.asClient(client, frame.id, frame.op, frame.params ?? {}, () => service.handle(frame.op, frame.params ?? {}));
         if (frame.op === "attachment.write") await this.reportIdle();
         await client.send(createMessage({ type: "WORKSPACE_RESPONSE", source: "engine", requestId: frame.id, op: frame.op, result }));
       } catch (error) {
@@ -379,6 +486,8 @@ export class CloudWorker {
     const timing = this.options.transport.reportTiming?.bind(this.options.transport);
     const revision = BigInt(config.loginRevision);
     if (this.acceptedConfigurationRevision !== undefined && revision < this.acceptedConfigurationRevision) return;
+    this.acting = config.actingUser === 1;
+    if (this.acting && this.contexts) void this.contexts.clean(this.options.bootClean ?? (async () => 1));
     const sections = configurationSections(config), disconnects = this.disconnects;
     // Only a configuration applied in full on this connection is a baseline.
     const changed = this.scope && !this.stopping && this.appliedSections ? changedSections(this.appliedSections, sections) : undefined;
@@ -469,8 +578,13 @@ export class CloudWorker {
     try {
       await this.github.start();
       if (this.disposed || this.stopping) return false;
+      // Activated: checkout and setup run as the persisted starter, from the bootstrap lease; no Creator fallback.
+      const bootstrap = this.acting && config.bootstrapContextId && this.contexts && !this.options.runtimeResume
+        ? await this.contexts.bootstrapLease(config.bootstrapContextId) : undefined;
+      const bootstrapEnvironment = bootstrap && { git: gitIdentityEnvironment(bootstrap.gitIdentity), zeros: { ZEROS_EXECUTION_CONTEXT: bootstrap.contextId } };
+      const asStarter = <T>(work: () => T): T => bootstrapEnvironment ? operationEnvironment.run(bootstrapEnvironment, work) : work();
       const checking = measureStartup("worker_checkout", () => this.options.runtimeResume ? Promise.resolve(undefined)
-        : (this.options.prepareCheckout ?? prepareCheckout)(config.workspace, this.gitEnvironment, timing), timing)
+        : asStarter(() => (this.options.prepareCheckout ?? prepareCheckout)(config.workspace, this.gitEnvironment, timing)), timing)
         .catch(async error => {
           await this.options.transport.reportCheckoutFailure?.().catch(() => {});
           throw error;
@@ -546,15 +660,24 @@ export class CloudWorker {
         codex: () => new CodexDriver({ gitEnvironment: this.gitEnvironment }), claude: () => new ClaudeDriver({ gitEnvironment: this.gitEnvironment }),
         cursor: () => new CursorDriver({ gitEnvironment: this.gitEnvironment }),
       }, config,
-        (frame) => this.broadcast(frame), () => { this.runtimeGate.activity(); void this.reportIdle(); }, this.options.onTiming, this.options.modelDiscovery, executionId => mcp!.providers(executionId),
+        (frame) => this.broadcast(frame), () => { this.runtimeGate.activity(); void this.reportIdle(); }, this.options.onTiming, this.options.modelDiscovery,
+        (executionId, context) => context ? this.contextGateway(context, scope.root, agents!).then(gateway => gateway.providers(executionId)) : mcp!.providers(executionId),
         async input => this.workspaceMcp.admit(input.executionId, new WorkspaceAgentTools({ assertCurrent: () => input.assertExecutionCurrent(),
           terminalOutput: async ({ source, ...request }) => {
-            if (source !== "setup") return terminals!.output({ ...request, ...(source === "auto" ? {} : { kind: source }) });
+            if (source !== "setup") {
+              const contextId = config.actingUser === 1 ? agents!.activeTurn(input.nativeExecutionId)?.contextId : undefined;
+              const userId = contextId ? this.contexts?.userOf(contextId) : undefined;
+              return terminals!.output({ ...request, ...(source === "auto" ? {} : { kind: source }), ...(userId ? { userId } : {}) });
+            }
             const setupOutput = await readSetupOutput(this.options.directory, scope.workspace.id, request.maxLines);
             return setupOutput && { terminalId: "setup", truncated: setupOutput.truncated, lines: setupOutput.lines.map(line => application.text(line)) };
           }, diff: request => workspace!.git.agentDiff(request),
           ...(this.localCommandsEnabled && this.options.transport.localCommand ? { localCommands: { checkout: scope.root, reason: this.localCommandReason,
-            run: (command, signal) => this.options.transport.localCommand!({ chatId: input.conversationId, executionId: input.nativeExecutionId, input: command }, signal) } } : {}),
+            run: (command, signal) => {
+              // Activated: the active turn's context names whose Mac this may reach.
+              const contextId = agents!.activeTurn(input.nativeExecutionId)?.contextId;
+              return this.options.transport.localCommand!({ chatId: input.conversationId, executionId: input.nativeExecutionId, input: command, ...(contextId ? { contextId } : {}) }, signal);
+            } } } : {}),
           ...(this.notifyUserEnabled && this.notifyUserService ? { notifyUser: { notify: (request, signal) => this.notifyUserService!.notify(input.executionId, request, signal) } } : {}),
           ...(reviews!.enabled ? { review: reviews!.tools(input) } : {}) })), application, !!this.options.runtimeResume, workspaceApi);
       this.notifyUserService = new NotifyUserService({ activeTurn: executionId => agents!.activeTurn(executionId),
@@ -562,6 +685,7 @@ export class CloudWorker {
         ...(this.options.transport.notifyUser ? { deliver: (request, signal) => this.options.transport.notifyUser!(request, signal) } : {}) });
       terminals = new Terminals(scope, { gitEnvironment: this.gitEnvironment, applicationEnvironment: application.variables,
         zerosEnvironment: () => workspaceApi.variables(), redact: text => application.text(text),
+        ...(config.actingUser === 1 && this.contexts ? { people: this.terminalPeople(this.contexts, application) } : {}),
         records: join(this.options.directory, "terminals"), broadcast: frame => this.broadcast(frame), activity: () => { this.runtimeGate.activity(); void this.reportIdle(); } });
       const chats = new ChatService(store, scope, (chatId) => agents!.closeChat(chatId), agents.turns, {
         historyReplacement: () => this.historyReplacementEnabled,
@@ -592,7 +716,7 @@ export class CloudWorker {
       if (this.disposed || this.stopping) return false;
       this.environmentVersion = config.environment?.versionId;
       this.sync?.dispose(); this.sync = sync;
-      this.store = store; this.workspace = workspace; this.mcp = mcp; this.agents = agents; this.reviews = reviews;
+      this.store = store; this.workspace = workspace; this.mcp = mcp; this.agents = agents; agents.setExecutionContexts(this.contexts, this.personal); this.reviews = reviews;
       this.terminals = terminals; this.application = application; this.workspaceApi = workspaceApi; this.chats = chats; this.history = history; this.setup = setup; this.checkoutRefresh = refresh;
       this.unsubscribers.push(...unsubscribers); this.scope = scope; published = true;
       recordStartupTiming("worker_services", servicesStarted, timing);
@@ -600,7 +724,8 @@ export class CloudWorker {
       const refreshing = refresh?.start();
       // Before start: a file a hard stop left running reads as interrupted, never as this run.
       void setup.reportCurrent();
-      if (!this.options.runtimeResume) setup.start(this.initialSetupNeeded || restored);
+      if (!this.options.runtimeResume) asStarter(() => setup!.start(this.initialSetupNeeded || restored));
+      if (bootstrap) void setup.done().then(() => retireContext(this.contexts!, bootstrap.contextId, "setup_done")).catch(() => {});
       return true;
     } finally {
       if (!published) {

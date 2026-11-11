@@ -240,7 +240,7 @@ export class ClaudeDriver implements Driver {
       settings: claudeSettings(this.effort, this.fast),
       ...(this.effort?.trim() === "max" ? { effort: "max" as const } : {}),
       ...(this.resumed ? { resume: this.nativeSessionId } : { sessionId: this.nativeSessionId }),
-      env: agentEnvironment(session.oauthToken ? { agent: "claude", oauthToken: session.oauthToken } : { agent: "claude", apiKey: session.apiKey! }, this.options.environment, this.options.gitEnvironment, session.application?.variables, session.zerosEnvironment),
+      env: agentEnvironment(session.oauthToken ? { agent: "claude", oauthToken: session.oauthToken } : { agent: "claude", apiKey: session.apiKey! }, this.options.environment, session.gitEnvironment ? { ...this.options.gitEnvironment, ...session.gitEnvironment } : this.options.gitEnvironment, session.application?.variables, session.zerosEnvironment),
       permissionMode: claudePermissionMode(this.modeId),
       ...(fullAccessQuestions ? { permissionPromptToolName: "stdio" } : {}),
       ...(this.modeId === "bypass" ? { allowDangerouslySkipPermissions: true } : {
