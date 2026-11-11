@@ -19,6 +19,7 @@
 //
 // ──────────────────────────────────────────────────────────
 
+import { workspaceToolMeta } from "./workspace-tool-presentation";
 import { designToolLabel } from "./design-tool-presentation";
 import { notifyUserLabel } from "./notify-user-presentation";
 import {
@@ -133,6 +134,14 @@ export function summaryIcons(
       }
       if (notifyUserLabel(e)) {
         if (!seenKinds.has("notify")) { seenKinds.add("notify"); out.push(BellRing); }
+        continue;
+      }
+      // zeros_workspace tools show their own glyphs, never the MCP plug: a local
+      // command is its laptop and prompt pair.
+      const workspace = workspaceToolMeta(e);
+      if (workspace) {
+        for (const Icon of [workspace.Icon, ...(workspace.SecondIcon ? [workspace.SecondIcon] : [])])
+          if (!out.includes(Icon)) out.push(Icon);
         continue;
       }
       const activity = browserToolActivity(e);

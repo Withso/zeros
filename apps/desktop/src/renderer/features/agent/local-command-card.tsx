@@ -1,5 +1,5 @@
 import { memo } from "react";
-import { Terminal } from "lucide-react";
+import { LOCAL_COMMAND_ICONS } from "./renderers/workspace-tool-presentation";
 import { cn } from "../../shared/ui/cn";
 import { DOCK_CARD_CLS } from "./composer-shell";
 import { PermRow } from "./permission-card";
@@ -60,7 +60,10 @@ export const LocalCommandApprovalCard = memo(function LocalCommandApprovalCard({
       {/* The whole command, never truncated: it is what the person approves. */}
       <div className="border-border1 bg-bg1 flex min-w-0 flex-col gap-1 rounded-lg border px-2.5 py-2">
         <div className="flex min-w-0 items-center gap-2">
-          <Terminal className="text-fg2 size-3.5 shrink-0" aria-hidden="true" />
+          {/* The local command's pair: a laptop, then a prompt. */}
+          <span className="text-fg2 inline-flex shrink-0 items-center gap-1" aria-hidden="true" data-local-command-icons="">
+            {LOCAL_COMMAND_ICONS.map((Icon, index) => <Icon key={index} className="size-3.5" />)}
+          </span>
           {request.description && <span className="text-fg1 min-w-0 select-text truncate text-xs leading-4.5">{request.description}</span>}
         </div>
         <pre className="text-fg2 max-h-40 min-w-0 overflow-auto font-mono text-3xxs leading-4 break-all whitespace-pre-wrap select-text">{request.command}</pre>

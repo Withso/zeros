@@ -1,5 +1,7 @@
 import { ToolResourceLink } from "./tool-resource-link";
-import { localCommandReason } from "./workspace-tool-presentation";
+import { localCommandCall, localCommandReason, workspaceToolMeta } from "./workspace-tool-presentation";
+import { useLocalCommandApprovals } from "../../../platform/local-commands";
+import { parseCloudScopedId } from "../../../platform/bridge/cloud-workspace-key";
 import { CloudMcpFailureSchema } from "@zeros/protocol/cloud-v2-relay";
 import { modelRejectionDisplayText } from "@zeros/protocol/model-rejection";
 import { generatedImageInputPaths, generatedImagePath, isCodexImageGenerationTool, isImageGenerationTool, structuredToolOutput } from "./tool-artifacts";
@@ -195,17 +197,34 @@ export const EventRowRenderer: Renderer<AgentMessage> = memo(
       }
     }
     const detail = renderDetail(message, ctx);
-    const reason = message.kind === "tool" ? localCommandReason(message as AgentToolMessage) : undefined;
-    // As Conductor shows it: why the agent needs the Mac, muted, above the command's row.
-    if (reason) return (
-      <div className="flex min-w-0 flex-col gap-0.5">
-        <p className="text-fg3 min-w-0 truncate text-xs leading-4.5" data-local-command-reason="">{reason}</p>
-        <EventRow message={message} ctx={ctx} detail={detail} />
-      </div>
-    );
+    const localCommand = message.kind === "tool" ? localCommandCall(message as AgentToolMessage) : null;
+    if (localCommand) return <LocalCommandEventRow tool={message as AgentToolMessage} command={localCommand.command} ctx={ctx} detail={detail} />;
     return <EventRow message={message} ctx={ctx} detail={detail} />;
   },
 );
+
+/** RunLocalCommand. "Waiting for approval on <Mac>" only while main really holds
+ * a pending approval for this chat (and this command, when known); with Always
+ * allow on there is none, so a pending call is just the running row. The reason,
+ * as Conductor shows it, is a muted line above. */
+function LocalCommandEventRow({ tool, command, ctx, detail }: {
+  tool: AgentToolMessage; command: string | undefined; ctx: RendererContext; detail: React.ReactNode;
+}) {
+  const approvals = useLocalCommandApprovals();
+  const pending = tool.status === "pending" || tool.status === "in_progress";
+  const chat = pending ? parseCloudScopedId(ctx.chatId) : null;
+  const approval = chat ? approvals.find(item => item.workspaceId.toLowerCase() === chat.workspaceId && item.chatId === chat.id &&
+    (command === undefined || item.command === command)) : undefined;
+  const meta = workspaceToolMeta(tool, approval ? { waitingOn: approval.macName } : {}) ?? undefined;
+  const reason = localCommandReason(tool);
+  const row = <EventRow message={tool} ctx={ctx} detail={detail} meta={meta} />;
+  return reason ? (
+    <div className="flex min-w-0 flex-col gap-0.5">
+      <p className="text-fg3 min-w-0 truncate text-xs leading-4.5" data-local-command-reason="">{reason}</p>
+      {row}
+    </div>
+  ) : row;
+}
 
 /** Every file action stays visible, but only one shared execution result can
  * be open. The SDK does not provide output boundaries for a batched command. */
