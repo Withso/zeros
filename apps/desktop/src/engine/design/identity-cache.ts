@@ -4,7 +4,7 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { DesignSurfaceCost } from "@zeros/protocol/design-surface";
 import { DESIGN_MAX_FRAMES_PER_PAGE } from "@zeros/protocol/design-pages";
-import { designFrameComponentSchema, type DesignFrameComponent } from "@zeros/protocol/design-catalog";
+import { designFrameComponentSchema, designFrameInstancesSchema, type DesignFrameComponent, type DesignFrameInstances } from "@zeros/protocol/design-catalog";
 import { isDevRuntime } from "../runtime";
 import { durableDesignDependenciesCurrent, type DurableDesignDependency } from "./dependency-read-set";
 import type { CanvasDocument } from "./document-model";
@@ -21,6 +21,8 @@ export interface DesignFrameIdentity {
    * that showed a last good render is never stored, so `notApplied` here is
    * at most "defaults". */
   component?: DesignFrameComponent;
+  /** The frame's own component instances, from the same preparation. */
+  instances?: DesignFrameInstances;
 }
 
 // A frame's identity is reused while every file its preparation read keeps
@@ -147,10 +149,13 @@ async function load(workspacePath: string, page: Page): Promise<void> {
     if (page.entries.has(file)) continue;
     const component = identity.component === undefined ? undefined : designFrameComponentSchema.safeParse(identity.component);
     if (component && !component.success) continue;
+    const instances = identity.instances === undefined ? undefined : designFrameInstancesSchema.safeParse(identity.instances);
+    if (instances && !instances.success) continue;
     page.entries.set(file, { context: entry.context, identity: {
       sourceVersion: identity.sourceVersion, surfaceCost: identity.surfaceCost ?? null,
       nodeCount: identity.nodeCount, layerCount: identity.layerCount,
       ...(component ? { component: component.data } : {}),
+      ...(instances ? { instances: instances.data } : {}),
     }, dependencies: indexes.map((index) => table[index as number]!) });
   }
 }

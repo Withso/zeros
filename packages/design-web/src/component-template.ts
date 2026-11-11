@@ -279,6 +279,63 @@ export function componentTemplateExpressions(markup: string, options: { document
 export interface DesignComponentSummary {
   elements: { tag: string; attributes: { name: string; value: string }[] }[];
   reach: Record<string, ComponentOptionReach>;
+  /** Layers (by data-oid) whose own text a hole fills, and the options it
+   * reads, through any derived value (none for a loop's own name). A person
+   * cannot type over them. */
+  boundText?: Record<string, string[]>;
+}
+
+/** The options an expression reads, through derived values. */
+function optionsRead(expression: string, declaration: ReturnType<typeof readComponentDeclaration>["declaration"]): string[] {
+  const options = new Set(declaration.options.map((option) => option.name));
+  const derived = new Map(declaration.derived.map((entry) => [entry.name, entry.expression]));
+  const found = new Set<string>();
+  const seen = new Set<string>();
+  const visit = (names: Set<string>) => {
+    for (const name of names) {
+      if (options.has(name)) found.add(name);
+      else if (derived.has(name) && !seen.has(name)) {
+        seen.add(name);
+        visit(componentExpressionNames(derived.get(name)!));
+      }
+    }
+  };
+  try {
+    visit(componentExpressionNames(parseComponentExpression(expression)));
+  } catch {
+    // An expression that does not parse is lint's to report.
+  }
+  return [...found];
+}
+
+function boundTextOf(document: DefaultTreeAdapterTypes.Document, declaration: ReturnType<typeof readComponentDeclaration>["declaration"]) {
+  const bound: Record<string, string[]> = {};
+  let count = 0;
+  const visit = (nodes: readonly Node[]) => {
+    for (const node of nodes) {
+      if (!("tagName" in node)) continue;
+      const element = node as Element;
+      if (RAW_TEXT.has(element.tagName)) continue;
+      const oid = element.attrs.find((attribute) => attribute.name === "data-oid")?.value;
+      if (oid && count < 512) {
+        const read = new Set<string>();
+        let holes = false;
+        for (const child of element.childNodes)
+          if (child.nodeName === "#text")
+            for (const match of (child as DefaultTreeAdapterTypes.TextNode).value.matchAll(HOLE)) {
+              holes = true;
+              for (const name of optionsRead(match[1]!, declaration)) read.add(name);
+            }
+        if (holes) {
+          bound[oid] = [...read].sort().slice(0, 8);
+          count += 1;
+        }
+      }
+      visit(element.tagName === "template" ? (element as Template).content.childNodes : element.childNodes);
+    }
+  };
+  visit(document.childNodes);
+  return count ? bound : undefined;
 }
 
 export function designComponentSummaryOf(source: string): DesignComponentSummary | null {
@@ -303,5 +360,6 @@ export function designComponentSummaryOf(source: string): DesignComponentSummary
       // An expression that does not parse is lint's to report.
     }
   }
-  return { elements, reach: componentOptionReach(declaration, names) };
+  const boundText = boundTextOf(document, declaration);
+  return { elements, reach: componentOptionReach(declaration, names), ...(boundText ? { boundText } : {}) };
 }

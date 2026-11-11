@@ -4,6 +4,7 @@ import { designSurfaceCost } from "./surface-document";
 import path from "node:path";
 import postcss from "postcss";
 import { designCssUrlReferences, designSrcsetReferences, rebaseDesignCssReferences } from "@zeros/design-web";
+import type { DesignFrameInstances } from "@zeros/protocol/design-catalog";
 import { expandDesignComponentsForRender, type DesignComponentOptionsFallback } from "./components";
 import { designComponentRegistry } from "./component-registry";
 import { parseDesignSource, sharedDesignParse, withSharedDesignParses } from "./shared-parse";
@@ -557,6 +558,9 @@ export interface FrameRenderOptions {
   /** Identity only: also return what a capture of this version needs again
    * (composeRetainedFrameRender). */
   retain?: boolean;
+  /** The variant a main component frame shows: a view of its source, so the
+   * caller keeps the generation of the source without it. */
+  variant?: string;
 }
 
 /** What an identity-only preparation built that a capture of the same
@@ -620,7 +624,7 @@ export function prepareFrameRenderSource(
   canvas?: CanvasDocument,
   options: FrameRenderOptions = {},
 ): Promise<{ sanitized: string; sourceVersion: string; surfaceCost: DesignSurfaceCost | null; sheets?: DesignFrameRenderSheet[];
-  retained?: RetainedFrameRender; componentOptions?: DesignComponentOptionsFallback }> {
+  retained?: RetainedFrameRender; componentOptions?: DesignComponentOptionsFallback; instances?: DesignFrameInstances }> {
   return withSharedDesignParses(() =>
     prepareSharedFrameRenderSource(workspacePath, source, viewport, sources, readAsset, entryFile, canvas, options));
 }
@@ -635,16 +639,20 @@ async function prepareSharedFrameRenderSource(
   canvas: CanvasDocument | undefined,
   options: FrameRenderOptions,
 ): Promise<{ sanitized: string; sourceVersion: string; surfaceCost: DesignSurfaceCost | null; sheets?: DesignFrameRenderSheet[];
-  retained?: RetainedFrameRender; componentOptions?: DesignComponentOptionsFallback }> {
+  retained?: RetainedFrameRender; componentOptions?: DesignComponentOptionsFallback; instances?: DesignFrameInstances }> {
   assertRenderByteLimit(
     source,
     MAX_DESIGN_TEXT_BYTES,
     "Authored frame HTML exceeded the 2 MiB source limit.",
   );
   const expansion = await expandDesignComponentsForRender(workspacePath, healDesignOids(source).html, sources, entryFile,
-    canvas ? { registry: designComponentRegistry(canvas).files } : {}, !options.identityOnly);
+    { ...(canvas ? { registry: designComponentRegistry(canvas).files } : {}), ...(options.variant ? { variant: options.variant } : {}) },
+    !options.identityOnly);
   const expanded = expansion.html;
-  const componentOptions = expansion.componentOptions ? { componentOptions: expansion.componentOptions } : {};
+  const componentOptions = {
+    ...(expansion.componentOptions ? { componentOptions: expansion.componentOptions } : {}),
+    ...(expansion.instances ? { instances: expansion.instances } : {}),
+  };
   assertRenderByteLimit(
     expanded,
     MAX_SANITIZED_RENDER_BYTES,
@@ -718,15 +726,23 @@ export async function composeFrameSrcDoc(
   source: string,
   viewport: { width: number; height: number },
   entryFile = "",
+  variant?: string,
 ): Promise<{ sourceVersion: string; srcDoc: string }> {
-  const { sanitized, sourceVersion } = await prepareFrameRenderSource(
+  const rendered = await prepareFrameRenderSource(
     workspacePath,
     source,
     viewport,
     undefined,
     undefined,
     entryFile,
+    undefined,
+    variant ? { variant } : {},
   );
+  const { sanitized } = rendered;
+  // A variant is a view of the source: its document keeps the source's generation.
+  const sourceVersion = variant
+    ? (await prepareFrameRenderSource(workspacePath, source, viewport, undefined, undefined, entryFile, undefined, { identityOnly: true })).sourceVersion
+    : rendered.sourceVersion;
   const runtime = createDesignRuntimeScript(sourceVersion);
   const csp =
     `<meta http-equiv="Content-Security-Policy" ` +

@@ -262,23 +262,65 @@ export const designFramesPrepareSchema = z.object({
  * DB_CHANGED "designFrames" (see DbChangedMessage.designFrames). */
 export const DESIGN_FRAMES_CHANGES_CAPABILITY = "design.frames.changes.v1";
 
-/** Local engines that report a component frame's declared options with its
- * prepared record, when asked (design.frames.prepare componentOptions). */
+/** Local engines that report a component frame's declared options, and the
+ * instances a frame places, with its prepared record, when asked
+ * (design.frames.prepare componentOptions). */
 export const DESIGN_COMPONENT_OPTIONS_CAPABILITY = "design.component-options.v1";
 
 /** A frame whose file declares options: the declaration as written (the
  * renderer reads it with the Design core), whether each option reaches the
  * frame only through CSS, and, when its options did not all apply, what the
  * frame shows instead. */
+const declarationElementsSchema = z.array(z.object({
+  tag: z.string().min(1).max(32),
+  attributes: z.array(z.object({ name: z.string().min(1).max(64), value: z.string().max(2_048) }).strict()).max(72),
+}).strict()).max(160);
+const optionReachSchema = z.record(z.string().min(1).max(32), z.enum(["css", "structure"]));
+const boundedRecord = <T extends z.ZodTypeAny>(key: z.ZodString, value: T, max: number) =>
+  z.record(key, value).refine((record) => Object.keys(record).length <= max, { message: `At most ${max} entries` });
+
+/** Text a hole fills on a main component frame: the layer (its data-oid)
+ * and the options the hole reads (none when it reads only a loop's name),
+ * which set it instead of a person. */
+export const DESIGN_COMPONENT_BOUND_TEXT_LIMIT = 512;
+
 export const designFrameComponentSchema = z.object({
-  elements: z.array(z.object({
-    tag: z.string().min(1).max(32),
-    attributes: z.array(z.object({ name: z.string().min(1).max(64), value: z.string().max(2_048) }).strict()).max(72),
-  }).strict()).max(160),
-  reach: z.record(z.string().min(1).max(32), z.enum(["css", "structure"])),
+  elements: declarationElementsSchema,
+  reach: optionReachSchema,
   notApplied: z.enum(["last-good", "defaults"]).optional(),
+  boundText: boundedRecord(z.string().min(1).max(256), z.array(z.string().min(1).max(32)).max(8), DESIGN_COMPONENT_BOUND_TEXT_LIMIT).optional(),
 }).strict();
 export type DesignFrameComponent = z.infer<typeof designFrameComponentSchema>;
+
+/** Instances a frame places, at its top level (the layers it owns), and the
+ * components they are of. Bounded: a frame past these limits reports none,
+ * and its instances show no Options. */
+export const DESIGN_FRAME_INSTANCE_LIMITS = { components: 32, hosts: 256 } as const;
+const componentNameSchema = z.string().regex(/^[a-z][a-z0-9-]{0,63}$/);
+
+export const designFrameInstancesSchema = z.object({
+  /** Changes whenever anything below does, so a record can be compared
+   * without reading it. */
+  key: z.string().regex(/^[a-f0-9]{16}$/),
+  components: boundedRecord(componentNameSchema, z.object({
+    elements: declarationElementsSchema,
+    reach: optionReachSchema,
+    /** Design-root-relative file the component is in. */
+    file: z.string().min(1).max(512),
+    /** The file is a registered frame (its main), not a components/ file. */
+    frame: z.boolean(),
+  }).strict(), DESIGN_FRAME_INSTANCE_LIMITS.components),
+  hosts: boundedRecord(z.string().min(1).max(256), z.object({
+    component: componentNameSchema,
+    /** The host's option attributes and zd-variant, as written. */
+    attributes: boundedRecord(z.string().min(1).max(64), z.string().max(2_048), 72),
+    /** Some of its values did not apply. */
+    failed: z.literal(true).optional(),
+  }).strict(), DESIGN_FRAME_INSTANCE_LIMITS.hosts),
+  /** What the frame shows when some instance's values did not apply. */
+  notApplied: z.enum(["last-good", "defaults"]).optional(),
+}).strict();
+export type DesignFrameInstances = z.infer<typeof designFrameInstancesSchema>;
 
 export const designPreparedFrameSchema = designCatalogFrameSchema.pick({
   title: true, x: true, y: true, width: true, height: true, z: true,
@@ -297,6 +339,7 @@ export const designPreparedFrameSchema = designCatalogFrameSchema.pick({
     imageBytes: z.number().int().nonnegative(),
   }).strict().nullable().optional(),
   component: designFrameComponentSchema.optional(),
+  instances: designFrameInstancesSchema.optional(),
 }).strict();
 export const designFramesPrepareReplySchema = z.object({
   directoryId,

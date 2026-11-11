@@ -1,5 +1,6 @@
 import type { DesignRuntimeNodeDetails } from "@zeros/protocol/design-runtime";
 import { designRuntimeLayerLabel } from "./design-layer-label";
+import { isDesignComponentPartNodeId } from "./state/design-component-parts";
 
 /** Text replacement is destructive for container nodes. Treat an omitted
  * capability from an older runtime as unsafe instead of guessing from a tag or
@@ -10,6 +11,8 @@ export function canEditDesignNodeText(
 ): details is DesignRuntimeNodeDetails & { textEditable: true } {
   return (
     details?.textEditable === true &&
-    designRuntimeLayerLabel(details) === "Text"
+    designRuntimeLayerLabel(details) === "Text" &&
+    // An instance's part is read only.
+    !isDesignComponentPartNodeId(details.oid)
   );
 }

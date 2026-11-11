@@ -1777,11 +1777,50 @@ could not be applied. The frame shows its last good render." (or "…the
 component's defaults."), as the engine reports, and Ask agent to fix, which
 sends the lint problems for the frame; the rows stay adjustable.
 
-Known limits: the variants menu, instance editing, Edit main and selecting
-inner parts ship in slice 3, so the main always shows and writes its
-defaults; a preview reaches only this frame's document, so instances in other
-frames change once the write lands; an easing's curve offers the CSS keywords
-and shows any other `cubic-bezier()` as Custom without editing it;
+**Variants, instances and parts (slice 3).** On the main the Variant row
+(Default, the declared variants, "Save current as variant…") picks which
+variant the frame shows: personal view state per workspace and frame in the
+renderer's own store (`design-component-variants.ts`), restored synchronously,
+shown only while the frame declares it and dropped with its frame or variant.
+The frame's documents carry it (`&variant=` on the native route, `variant` on
+the `design.frame` fallback read) and the engine renders that variant under
+the source's own generation, so no identity, history key or exact-key read
+changes; a frame showing a variant saves no still. With a variant shown a row
+writes that `<zd-variant>` line; saving adds one line with the shown values
+that differ from the defaults (`component.save-variant`). Text a hole fills
+on the main is read only ("Set by option Label", or "Set by the component's
+template" for a loop's own name; `component.boundText` in the record), and a
+click on a repeated copy selects its source layer.
+
+A frame's prepared record also names the instances it places at its top
+level (`instances`: their components' declarations and reach, each host's
+option attributes and `zd-variant`, whether its values applied, and a key
+that changes with any of it; at most 32 components and 256 hosts). One
+selected instance shows "Instance of …" under its header, Edit main (or Open
+in Files for a `components/` file), and the component's rows with its own
+values: a dot marks a value that differs from what it inherits, a commit that
+lands on that value removes the attribute, the Variant row writes
+`zd-variant`, and Reset removes every option attribute and `zd-variant` in one
+transaction. A CSS-only value previews on that host through the opt-in
+`previewComponentInstanceOptions` (its oid, `[A-Za-z0-9_-]{1,128}`, in a
+runtime-owned style over the zero-specificity rule). A double-click on a
+selected instance enters it and selects the part under the pointer
+(`getComponentPartAtLoc`, opt-in; a part's id is
+`::zeros-part:<host>:<part>`, percent-encoded, which no authored layer can
+take). A part's Style panel is inert, its outline has no handle, Select
+instance and Edit main (the main with the layer of the same id) sit under the
+header, a click inside the instance picks another part and Escape or a click
+outside leaves it. Every node write the workspace cache sends refuses a part
+before anything is sent, and the engine finds no such layer either. Layers
+keeps an instance as one row; an agent's selection names its host.
+
+Known limits: several instances selected show no Options; a frame showing a
+variant shows its defaults in pictures drawn by the engine (thumbnails and
+recordings) and saves no still of the variant; Edit main to a main on
+another page switches the page and selects it there; a preview reaches only
+the frame being edited, so other frames change once the write lands; an
+easing's curve offers the CSS keywords and shows any other `cubic-bezier()`
+as Custom without editing it;
 the interpreter has no records, string formatting, loops with state or maths
 beyond the functions above; an instance past the frame's repeat budget renders
 empty; the last good render does not survive a restart; options are read only

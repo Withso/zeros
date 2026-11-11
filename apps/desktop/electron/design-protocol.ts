@@ -1,4 +1,5 @@
 import { net, protocol } from "electron";
+import { isDesignComponentVariantName } from "@zeros/protocol/design-path";
 
 import { currentLocalToken, ensureEngineRunning } from "./sidecar";
 
@@ -11,6 +12,8 @@ export interface ParsedDesignProtocolUrl {
   sourceVersion: string | null;
   surface?: true;
   theme?: string | null;
+  /** The variant a main component frame shows. */
+  variant?: string;
 }
 
 export function parseDesignProtocolUrl(
@@ -64,14 +67,17 @@ export function parseDesignProtocolUrl(
   if (rawVersion !== null && !/^[a-f0-9]{24}$/.test(rawVersion)) return null;
   const surface = url.searchParams.get("surface");
   const theme = url.searchParams.get("theme");
+  const variant = url.searchParams.get("variant");
   if ((surface !== null && surface !== "1") ||
-      (theme !== null && (surface !== "1" || !/^[a-z][a-z0-9_-]{0,63}$/.test(theme)))) return null;
+      (theme !== null && (surface !== "1" || !/^[a-z][a-z0-9_-]{0,63}$/.test(theme))) ||
+      (variant !== null && (rawVersion === null || !isDesignComponentVariantName(variant)))) return null;
   return {
     workspaceId,
     capability,
     path: segments.join("/"),
     sourceVersion: rawVersion,
     ...(surface === "1" ? { surface: true as const, theme } : {}),
+    ...(variant !== null ? { variant } : {}),
   };
 }
 
@@ -110,6 +116,7 @@ export function installDesignProtocol(): void {
       if (parsed.sourceVersion) params.set("v", parsed.sourceVersion);
       if (parsed.surface) params.set("surface", "1");
       if (parsed.surface && parsed.theme) params.set("theme", parsed.theme);
+      if (parsed.variant) params.set("variant", parsed.variant);
       const version = params.size ? `?${params}` : "";
       const target =
         `http://127.0.0.1:${port}/design/` +

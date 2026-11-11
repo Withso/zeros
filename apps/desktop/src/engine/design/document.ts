@@ -923,18 +923,24 @@ export async function readDesignFrameRenderSourceFromSource(
   frame: string,
   source: string,
   canvas?: CanvasDocument,
+  /** The variant a main component frame shows. The document is that view;
+   * its generation stays the source's, as every other read reports it. */
+  variant?: string,
 ): Promise<DesignFrameRenderSource> {
   const file = assertFrameFile(frame);
   const render = await prepareFrameRenderSourceForFile(
     workspacePath,
     file,
     source,
-    {},
+    variant ? { variant } : {},
     canvas,
   );
+  const sourceVersion = variant
+    ? (await prepareFrameRenderSourceForFile(workspacePath, file, source, { identityOnly: true }, canvas)).sourceVersion
+    : render.sourceVersion;
   return {
     file,
-    sourceVersion: render.sourceVersion,
+    sourceVersion,
     html: render.sanitized,
   };
 }
@@ -991,13 +997,16 @@ export async function readDesignFrame(
   workspacePath: string,
   frame: string,
   depth = 4,
-  options: DesignReadOptions = {},
+  options: DesignReadOptions & {
+    /** The variant a main component frame shows; its generation stays the source's. */
+    variant?: string;
+  } = {},
 ): Promise<DesignFrameDocument> {
   const file = assertFrameFile(frame);
   const context = options.writeBack ? await readCanvasContext(workspacePath) : await readSharedCanvasContext(workspacePath);
   if (!options.writeBack && context.layout?.canvasVersion === 2 && context.canvas.frames[file]) {
     const prepared = await prepareRegisteredDesignFrame(workspacePath, file, context.canvas);
-    return readDesignFrameFromSummary(workspacePath, prepared, depth);
+    return readDesignFrameFromSummary(workspacePath, prepared, depth, options.variant);
   }
   const summaries = await listDesignFrames(workspacePath, options);
   const summary = summaries.find((candidate) => candidate.file === file);
@@ -1008,13 +1017,14 @@ export async function readDesignFrame(
     await readBoundedDesignFrameSource(workspacePath, file);
     throw new Error(`Design frame not found: ${file}`);
   }
-  return readDesignFrameFromSummary(workspacePath, summary, depth);
+  return readDesignFrameFromSummary(workspacePath, summary, depth, options.variant);
 }
 
 async function readDesignFrameFromSummary(
   workspacePath: string,
   summary: DesignFrameSummary,
   depth: number,
+  variant?: string,
 ): Promise<DesignFrameDocument> {
   const source = await readBoundedDesignFrameSource(
     workspacePath,
@@ -1025,7 +1035,7 @@ async function readDesignFrameFromSummary(
   const composed = await composeFrameSrcDoc(workspacePath, source, {
     width: summary.width,
     height: summary.height,
-  }, summary.file);
+  }, summary.file, variant);
   return {
     ...summary,
     sourceVersion: composed.sourceVersion,
@@ -1050,7 +1060,8 @@ async function readDesignCanvasFrameFromSummary(
   }, undefined, undefined, summary.file, canvas, { identityOnly: true });
   const component = designComponentSummaryOf(source);
   return { ...summary, sourceVersion: render.sourceVersion, surfaceCost: render.surfaceCost,
-    ...(component ? { component: { ...component, ...(render.componentOptions ? { notApplied: render.componentOptions.shows } : {}) } } : {}) };
+    ...(component ? { component: { ...component, ...(render.componentOptions ? { notApplied: render.componentOptions.shows } : {}) } } : {}),
+    ...(render.instances ? { instances: render.instances } : {}) };
 }
 
 async function mapDesignFramesBounded<T>(
@@ -1243,7 +1254,8 @@ function registeredFrameRecord(canvas: CanvasDocument, file: string, pageIds: Re
     x: geometry.x, y: geometry.y, width: geometry.w, height: geometry.h, z: geometry.z,
     nodeCount: identity.nodeCount, layerCount: identity.layerCount,
     modifiedAt, sourceVersion: identity.sourceVersion, surfaceCost: identity.surfaceCost,
-    ...(identity.component ? { component: identity.component } : {}) };
+    ...(identity.component ? { component: identity.component } : {}),
+    ...(identity.instances ? { instances: identity.instances } : {}) };
 }
 
 /** A registered frame's identity, from its saved source. Main and worker
@@ -1262,7 +1274,8 @@ async function computeRegisteredFrameIdentity(workspacePath: string, file: strin
   const summary = designComponentSummaryOf(source);
   const identity: DesignFrameIdentity = { sourceVersion: render.sourceVersion, surfaceCost: render.surfaceCost,
     nodeCount: designNodeRecords(document).length, layerCount: designLayerCount(document),
-    ...(summary ? { component: { ...summary, ...(render.componentOptions ? { notApplied: render.componentOptions.shows } : {}) } } : {}) };
+    ...(summary ? { component: { ...summary, ...(render.componentOptions ? { notApplied: render.componentOptions.shows } : {}) } } : {}),
+    ...(render.instances ? { instances: render.instances } : {}) };
   return { identity, modifiedAt: safe.modifiedAt, retained: render.retained };
 }
 

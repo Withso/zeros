@@ -95,6 +95,8 @@ export interface DesignCanvasFrameWire extends DesignFrameSummaryWire {
   surfaceCost?: import("@zeros/protocol/design-surface").DesignSurfaceCost | null;
   /** Set when the frame's file declares options (component frames). */
   component?: import("@zeros/protocol/design-catalog").DesignFrameComponent;
+  /** Set when the frame places component instances with options. */
+  instances?: import("@zeros/protocol/design-catalog").DesignFrameInstances;
 }
 
 /** Navigation metadata cannot authorize rendering or editing. */
@@ -635,11 +637,14 @@ export async function bridgeDesignFrame(
   workspaceId: string,
   frame: string,
   depth = 4,
+  /** The variant a main component frame shows; the generation is the source's. */
+  variant?: string,
 ): Promise<DesignFrameDocumentWire> {
   const result = (await workspaceOp(bridge, "design.frame", {
     workspaceId,
     frame,
     depth,
+    ...(variant ? { variant } : {}),
   })) as { frame?: DesignFrameDocumentWire };
   if (!result?.frame || typeof result.frame.file !== "string") {
     throw new Error("design.frame: malformed engine response");

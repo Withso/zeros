@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { realpath } from "node:fs/promises";
 import path from "node:path";
 
@@ -12,18 +13,22 @@ import {
   componentOptionValues,
   componentInheritedValues,
   readComponentDeclaration,
+  COMPONENT_VARIANT_ATTRIBUTE,
   type ComponentDeclaration,
   type ComponentDeclarationElement,
   type ComponentOptionProblem,
 } from "@zeros/design-core/components";
 
+import { DESIGN_FRAME_INSTANCE_LIMITS, type DesignFrameInstances } from "@zeros/protocol/design-catalog";
 import { lastGoodDesignComponentRender, rememberDesignComponentRender } from "./component-last-good";
 import { designComponentRegistry } from "./component-registry";
 import {
   ComponentTemplateError,
   createComponentTemplateBudget,
+  designComponentSummaryOf,
   renderComponentTemplate,
   type ComponentTemplateBudget,
+  type DesignComponentSummary,
 } from "@zeros/design-web/component-template";
 import { designDirectoryNameFor } from "./directory-registry";
 import { readSharedCanvasContext } from "./document-storage";
@@ -67,6 +72,8 @@ interface ComponentDefinition {
     declaration: ComponentDeclaration;
     /** The definition's own stylesheet links, as written in its file. */
     links: string[];
+    /** What the Style panel shows for its instances; read on first use. */
+    summary?: () => DesignComponentSummary | null;
   };
 }
 
@@ -105,6 +112,12 @@ export interface DesignComponentExpansionOptions {
   registry?: ReadonlyMap<string, string>;
   /** The variant a main component frame shows. Personal view state. */
   variant?: string | null;
+}
+
+/** What an expansion learned about the frame's own instances. */
+interface DesignComponentExpansionUsage {
+  templated: boolean;
+  instances?: Omit<DesignFrameInstances, "key">;
 }
 
 type ParentNode =
@@ -327,11 +340,13 @@ async function loadDefinitions(
     if (registered || declared) {
       const file = registered ?? `components/${name}.html`;
       const read = readDeclaration(declared ?? [], name, file, errors, source);
+      let summary: DesignComponentSummary | null | undefined;
       definitions.set(name, {
         name,
         body: body ? innerSource(source, body) : "",
         styles,
-        template: { file, declaration: read, links: stylesheetLinksOf(document) },
+        template: { file, declaration: read, links: stylesheetLinksOf(document),
+          summary: () => (summary === undefined ? (summary = designComponentSummaryOf(source)) : summary) },
       });
       continue;
     }
@@ -511,7 +526,7 @@ export async function expandDesignComponents(
   sources?: Readonly<Record<string, string>>,
   entryFile = "",
   options: DesignComponentExpansionOptions = {},
-  usage?: { templated: boolean },
+  usage?: DesignComponentExpansionUsage,
 ): Promise<DesignComponentExpansion> {
   try {
     if (source.length > MAX_EXPANSION_BYTES || Buffer.byteLength(source) > MAX_EXPANSION_BYTES) throw new ComponentBudgetExceeded();
@@ -569,19 +584,25 @@ export async function expandDesignComponentsForRender(
   entryFile: string,
   options: DesignComponentExpansionOptions,
   remember: boolean,
-): Promise<{ html: string; componentOptions?: DesignComponentOptionsFallback }> {
+): Promise<{ html: string; componentOptions?: DesignComponentOptionsFallback; instances?: DesignFrameInstances }> {
   if (!/<zd-/i.test(source) && Buffer.byteLength(source) <= MAX_EXPANSION_BYTES && !DECLARES_OPTIONS.test(source)) return { html: source };
-  const usage = { templated: false };
+  const usage: DesignComponentExpansionUsage = { templated: false };
   const expansion = await expandDesignComponents(workspacePath, source, sources, entryFile, options, usage);
   if (!usage.templated || !entryFile) return { html: expansion.html };
+  const instancesOf = (shows?: DesignComponentOptionsFallback["shows"]) => {
+    if (!usage.instances || !Object.keys(usage.instances.hosts).length) return {};
+    const record = { ...usage.instances, ...(shows ? { notApplied: shows } : {}) };
+    return { instances: { key: createHash("sha256").update(JSON.stringify(record)).digest("hex").slice(0, 16), ...record } };
+  };
   if (!expansion.optionsFailed) {
-    if (remember) rememberDesignComponentRender(workspacePath, entryFile, expansion.html);
-    return { html: expansion.html };
+    // A variant is a view of the main, not its last good render.
+    if (remember && !options.variant) rememberDesignComponentRender(workspacePath, entryFile, expansion.html);
+    return { html: expansion.html, ...instancesOf() };
   }
   const lastGood = lastGoodDesignComponentRender(workspacePath, entryFile);
   return lastGood === undefined
-    ? { html: expansion.html, componentOptions: { applied: false, shows: "defaults" } }
-    : { html: lastGood, componentOptions: { applied: false, shows: "last-good" } };
+    ? { html: expansion.html, componentOptions: { applied: false, shows: "defaults" }, ...instancesOf("defaults") }
+    : { html: lastGood, componentOptions: { applied: false, shows: "last-good" }, ...instancesOf("last-good") };
 }
 
 export { designComponentSummaryOf, type DesignComponentSummary } from "@zeros/design-web/component-template";
@@ -622,11 +643,12 @@ function renderInstance(
   attributes: ReadonlyMap<string, string>,
   work: OptionsWork,
   errors: DesignComponentExpansionError[],
-): { body: string; css: string } {
+): { body: string; css: string; failed?: true } {
   const { declaration } = definition.template;
   const { values, problems } = componentOptionValues(declaration, attributes);
   errors.push(...problemsToErrors(definition.name, problems, "component-value-invalid"));
-  if (problems.some((problem) => problem.severity === "error")) work.failed = true;
+  const invalid = problems.some((problem) => problem.severity === "error");
+  if (invalid) work.failed = true;
   const attempt = (chosen: ReadonlyMap<string, unknown>) => {
     const holes = work.budget.holes;
     try {
@@ -639,7 +661,7 @@ function renderInstance(
     }
   };
   try {
-    return attempt(values);
+    return { ...attempt(values), ...(invalid ? { failed: true as const } : {}) };
   } catch (error) {
     const message = templateMessage(error);
     if (message === null) throw error;
@@ -648,16 +670,47 @@ function renderInstance(
   }
   const defaults = componentInheritedValues(declaration, null);
   try {
-    return attempt(defaults);
+    return { ...attempt(defaults), failed: true };
   } catch (error) {
     if (templateMessage(error) === null) throw error;
-    return { body: "", css: componentOptionCss(declaration, defaults) };
+    return { body: "", css: componentOptionCss(declaration, defaults), failed: true };
   }
+}
+
+/** The frame's own instances, for the Style panel: each host layer (its
+ * data-oid), its component and the option attributes it sets. */
+function recordInstance(
+  usage: DesignComponentExpansionUsage,
+  registry: ReadonlyMap<string, string>,
+  definition: ComponentDefinition & { template: NonNullable<ComponentDefinition["template"]> },
+  instance: DefaultTreeAdapterTypes.Element,
+  failed: boolean,
+): void {
+  const oid = instance.attrs.find((attribute) => attribute.name === "data-oid")?.value;
+  if (!oid || oid.length > 256) return;
+  const record = usage.instances ??= { components: {}, hosts: {} };
+  if (Object.keys(record.hosts).length >= DESIGN_FRAME_INSTANCE_LIMITS.hosts) return;
+  const { declaration, file } = definition.template;
+  if (!record.components[definition.name]) {
+    if (Object.keys(record.components).length >= DESIGN_FRAME_INSTANCE_LIMITS.components) return;
+    const summary = definition.template.summary?.() ?? null;
+    record.components[definition.name] = { elements: summary?.elements ?? [], reach: summary?.reach ?? {}, file,
+      frame: registry.get(definition.name) === file };
+  }
+  const names = new Set([...declaration.options.map((option) => option.name), COMPONENT_VARIANT_ATTRIBUTE]);
+  const attributes: Record<string, string> = {};
+  for (const attribute of instance.attrs) {
+    if (!names.has(attribute.name)) continue;
+    // A value too long to report would mislead; the host shows no Options.
+    if (attribute.value.length > 2_048) return;
+    attributes[attribute.name] = attribute.value;
+  }
+  record.hosts[oid] = { component: definition.name, attributes, ...(failed ? { failed: true as const } : {}) };
 }
 
 async function expandBoundedComponents(
   workspacePath: string, source: string, sources: Readonly<Record<string, string>> | undefined, entryFile: string,
-  options: DesignComponentExpansionOptions, usage?: { templated: boolean },
+  options: DesignComponentExpansionOptions, usage?: DesignComponentExpansionUsage,
 ): Promise<DesignComponentExpansion> {
   const budget = new ExpansionBudget();
   const registry = /<zd-/i.test(source) ? await registryFor(workspacePath, options) : new Map<string, string>();
@@ -741,7 +794,9 @@ async function expandBoundedComponents(
       let filled: string;
       if (definition.template) {
         const attributes = new Map(instance.attrs.map((attribute) => [attribute.name, attribute.value]));
-        const rendered = renderInstance(definition as ComponentDefinition & { template: NonNullable<ComponentDefinition["template"]> }, attributes, work, errors);
+        const templated = definition as ComponentDefinition & { template: NonNullable<ComponentDefinition["template"]> };
+        const rendered = renderInstance(templated, attributes, work, errors);
+        if (depth === 0 && usage) recordInstance(usage, registry, templated, instance, rendered.failed === true);
         const id = String(++work.instances);
         if (rendered.css) work.rules.push(`:where([data-zd-instance="${id}"]) { ${rendered.css} }`);
         startTag = startTag.replace(/\s*\/?>$/, (end) => ` data-zd-instance="${id}"${end.trim() === "/>" ? " />" : ">"}`);

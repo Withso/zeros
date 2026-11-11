@@ -117,4 +117,15 @@ describe("zeros-design protocol", () => {
     await mocks.handle.mock.calls[0]![1]({ method: "GET", url: `${root}&surface=1&theme=dark` });
     expect(mocks.fetch.mock.calls[0]![0]).toContain("&surface=1&theme=dark");
   });
+
+  it("proxies the component variant a frame shows only when it is a variant's name on a pinned generation", async () => {
+    const root = `zeros-design://workspace/ws_abc123/${capability}/home.html?v=${"a".repeat(24)}`;
+    expect(parseDesignProtocolUrl(`${root}&variant=wide-plan`)).toMatchObject({ variant: "wide-plan" });
+    for (const value of [`${root}&variant=Wide`, `${root}&variant=default`, `${root}&variant=a%22b`,
+      `zeros-design://workspace/ws_abc123/${capability}/home.html?variant=compact`])
+      expect(parseDesignProtocolUrl(value), value).toBeNull();
+    installDesignProtocol();
+    await mocks.handle.mock.calls[0]![1]({ method: "GET", url: `${root}&variant=compact` });
+    expect(mocks.fetch.mock.calls[0]![0]).toContain("&variant=compact");
+  });
 });

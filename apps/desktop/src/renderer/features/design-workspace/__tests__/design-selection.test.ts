@@ -392,6 +392,66 @@ describe("design selection workflows", () => {
     expect(runtime.getElementAtLoc).toHaveBeenCalledTimes(2);
   });
 
+  it("enters a selected instance on a double-click, picks the part under the pointer, and leaves with a click outside", async () => {
+    const { designComponentPartNodeId } = await import("@zeros/protocol/design-runtime");
+    const instances = { key: "0".repeat(16), components: { chat: { elements: [], reach: {}, file: "main.html", frame: true } },
+      hosts: { inst: { component: "chat", attributes: {} } } };
+    const frame = { ...FRAME, instances };
+    const send = designComponentPartNodeId("inst", "cc-send");
+    const chip = designComponentPartNodeId("inst", "cc-chip#1");
+    const runtime = {
+      sourceVersion: FRAME.sourceVersion,
+      supports: (method: string) => method === "getComponentPartAtLoc",
+      getElementAtLoc: vi.fn(async (x: number) => details(x < 50 ? "inst" : "other")),
+      getComponentPartAtLoc: vi.fn(async (x: number) => (x < 50 ? details(x < 20 ? send : chip) : null)),
+      getNodeDetails: vi.fn(async (nodeId: string) => details(nodeId)),
+      captureScreenshot: vi.fn(async () => null),
+    };
+    mocks.designFrameRuntime.mockReturnValue(runtime);
+    const input = { workspaceId: "workspace-a", folder: "/design/a", frame, y: 10 };
+    await selectDesignNode({ ...input, nodeId: "inst", details: details("inst") });
+    expect((await selectDesignFrameBodyAtLocation({ ...input, x: 10, intent: "descend" }))?.oid).toBe(send);
+    expect(runtime.getComponentPartAtLoc).toHaveBeenLastCalledWith(10, 10, "inst");
+    expect(designWorkspaceView("workspace-a").selectedNodeId).toBe(send);
+    // Inside the instance, a click picks another part, and so does a press
+    // that may become a drag: the drag then finds a part, which never moves.
+    expect((await selectDesignFrameBodyAtLocation({ ...input, x: 30, intent: "plain" }))?.oid).toBe(chip);
+    expect((await selectDesignFrameBodyAtLocation({ ...input, x: 10, intent: "plain", layersOnly: true }))?.oid).toBe(send);
+    expect((await selectDesignFrameBodyAtLocation({ ...input, x: 30, intent: "plain" }))?.oid).toBe(chip);
+    // Outside it, the instance is left behind.
+    expect((await selectDesignFrameBodyAtLocation({ ...input, x: 90, intent: "plain" }))?.oid).toBe("other");
+    expect(designWorkspaceView("workspace-a").selectedNodeId).toBe("other");
+    // Hover inside the entered instance outlines the part under the pointer.
+    const { hoverDesignNodeAtLocation } = await import("../state/design-selection");
+    await selectDesignNode({ ...input, nodeId: send, details: details(send) });
+    await hoverDesignNodeAtLocation({ ...input, x: 30 });
+    expect(useDesignRuntimeStore.getState().byWorkspace["workspace-a"]?.hoveredNodeId).toBe(chip);
+    // A frame without instances asks the runtime for no part.
+    runtime.getComponentPartAtLoc.mockClear();
+    await selectDesignNode({ ...input, frame: FRAME, nodeId: "inst", details: details("inst") });
+    await selectDesignFrameBodyAtLocation({ ...input, frame: FRAME, x: 10, intent: "descend" });
+    expect(runtime.getComponentPartAtLoc).not.toHaveBeenCalled();
+  });
+
+  it("captures no still of a main component frame while it shows a variant", async () => {
+    const { showDesignComponentVariant } = await import("../state/design-component-variants");
+    const component = { elements: [{ tag: "zd-variant", attributes: [{ name: "name", value: "compact" }] }], reach: {} };
+    setDesignSelectionSnapshotReader(() => ({ frames: [{ ...FRAME, component }] }) as never);
+    const captureScreenshot = vi.fn(async () => ({ sourceVersion: FRAME.sourceVersion, nodeId: null, mimeType: "image/png",
+      dataUrl: "data:image/png;base64,iVBORw==", width: 1, height: 1, scale: 1 }));
+    mocks.designFrameRuntime.mockReturnValue({ sourceVersion: FRAME.sourceVersion, captureScreenshot });
+    try {
+      showDesignComponentVariant("workspace-a", "home.html", "compact");
+      expect(await captureDesignRuntimeScreenshot("workspace-a", "/design/a", "home.html", FRAME.sourceVersion, null, 1)).toBeNull();
+      expect(captureScreenshot).not.toHaveBeenCalled();
+      showDesignComponentVariant("workspace-a", "home.html", null);
+      expect(await captureDesignRuntimeScreenshot("workspace-a", "/design/a", "home.html", FRAME.sourceVersion, null, 1)).not.toBeNull();
+    } finally {
+      showDesignComponentVariant("workspace-a", "home.html", null);
+      setDesignSelectionSnapshotReader(() => undefined);
+    }
+  });
+
   it("serializes raster captures across frames instead of cloning several documents together", async () => {
     const releases: Array<() => void> = [];
     const captureScreenshot = vi.fn(

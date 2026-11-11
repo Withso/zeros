@@ -19,6 +19,8 @@ import {
   isDesignRuntimeFrameMessage,
   isDesignRuntimeFrameChanges,
   isDesignRuntimeComponentOptionsPreview,
+  designComponentPartOf,
+  DESIGN_RUNTIME_INSTANCE_TARGET,
   type DesignRuntimeComponentOptionsPreview,
   isDesignRuntimeNodeState,
   isRuntimeNodeLayout,
@@ -169,6 +171,12 @@ export interface DesignFrameRuntimeConnection {
   /** Show a component's option values as custom properties before they are
    * written; null clears. Opt-in: check `supports("previewComponentOptions")`. */
   previewComponentOptions?(properties: Readonly<Record<string, string>> | null, signal?: AbortSignal): Promise<DesignRuntimeComponentOptionsPreview>;
+  /** The same for one instance, named by its host's oid; null clears.
+   * Opt-in: check `supports("previewComponentInstanceOptions")`. */
+  previewComponentInstanceOptions?(target: string, properties: Readonly<Record<string, string>> | null, signal?: AbortSignal): Promise<DesignRuntimeComponentOptionsPreview>;
+  /** The part of an instance under a frame point, as a layer to read but not
+   * write. Opt-in: check `supports("getComponentPartAtLoc")`. */
+  getComponentPartAtLoc?(x: number, y: number, hostNodeId: string, signal?: AbortSignal): Promise<DesignRuntimeNodeDetails | null>;
   previewStyles(
     nodeId: string,
     styles: Record<string, string | null>,
@@ -830,6 +838,30 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
   async clearPreviewStructure(previewId?: string, signal?: AbortSignal): Promise<void> {
     if (!this.supports("clearPreviewStructure")) throw runtimeError("clearPreviewStructure is not supported", "METHOD_NOT_SUPPORTED");
     await this.request("clearPreviewStructure", previewId === undefined ? {} : { previewId }, signal);
+  }
+
+  async previewComponentInstanceOptions(
+    target: string,
+    properties: Readonly<Record<string, string>> | null,
+    signal?: AbortSignal,
+  ): Promise<DesignRuntimeComponentOptionsPreview> {
+    if (!this.supports("previewComponentInstanceOptions")) throw runtimeError("previewComponentInstanceOptions is not supported", "METHOD_NOT_SUPPORTED");
+    if (!DESIGN_RUNTIME_INSTANCE_TARGET.test(target)) throw runtimeError("previewComponentInstanceOptions needs a plain host id", "BAD_REQUEST");
+    const result = await this.request("previewComponentInstanceOptions", properties ? { target, properties } : { target, clear: true }, signal);
+    if (!isDesignRuntimeComponentOptionsPreview(result) || result.sourceVersion !== this.expectedSourceVersion) {
+      throw runtimeError("previewComponentInstanceOptions returned malformed data");
+    }
+    return result;
+  }
+
+  async getComponentPartAtLoc(x: number, y: number, hostNodeId: string, signal?: AbortSignal): Promise<DesignRuntimeNodeDetails | null> {
+    if (!this.supports("getComponentPartAtLoc")) throw runtimeError("getComponentPartAtLoc is not supported", "METHOD_NOT_SUPPORTED");
+    const result = await this.request("getComponentPartAtLoc", { x, y, hostNodeId }, signal);
+    if (result === null) return null;
+    if (!isNodeDetails(result) || result.sourceVersion !== this.expectedSourceVersion || !designComponentPartOf(result.oid)) {
+      throw runtimeError("getComponentPartAtLoc returned malformed data");
+    }
+    return result;
   }
 
   async previewComponentOptions(
