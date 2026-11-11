@@ -333,6 +333,7 @@ export const scenarioRegistry = [
   fresh("scroll-area-drag", "scroll-area-drag", "runScrollAreaDragSmoke", 900, 650),
   fresh("cloud-chat-edits", "cloud-chat-edits", "runCloudChatEditsSmoke", 900, 400),
   fresh("local-commands", "local-commands", "runLocalCommandsSmoke", 900, 700),
+  fresh("notify-user", "notify-user", "runNotifyUserSmoke", 900, 700),
   fresh("cloud-workspace-details", "cloud-workspace-details", "runCloudWorkspaceDetailsSmoke", 900, 700),
   // Subscription installs a context-wide clock. Keep it last, including in its
   // shard; its context is also isolated from other units in a sharded run.
