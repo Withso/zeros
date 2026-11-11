@@ -20,9 +20,17 @@ export class CloudV2ChatEdits {
   constructor(private readonly pool: pg.Pool) {}
 
   async apply(scope: Scope, workspaceId: string, chatId: string, patch: Patch, authorize: (tx: Tx) => Promise<void>): Promise<{ id: string; title: string; archived: boolean }> {
+    return this.applyAuthorized(scope,workspaceId,chatId,patch,authorize,false);
+  }
+
+  applyForManager(scope: Scope, workspaceId: string, chatId: string, patch: Patch, authorize: (tx: Tx) => Promise<void>) {
+    return this.applyAuthorized(scope,workspaceId,chatId,patch,authorize,true);
+  }
+
+  private async applyAuthorized(scope: Scope, workspaceId: string, chatId: string, patch: Patch, authorize: (tx: Tx) => Promise<void>, shared: boolean) {
     return withSystemTx(this.pool, async tx => {
       const locked = await tx.query(`SELECT id FROM cloud_v2_workspaces w WHERE id=$1 AND org_id=$2
-        AND creator_user_id=$3 AND state NOT IN ('deleting','deleted') FOR UPDATE`, [workspaceId, scope.organizationId, scope.userId]);
+        AND ($4::boolean OR creator_user_id=$3) AND state NOT IN ('deleting','deleted') FOR UPDATE`, [workspaceId, scope.organizationId, scope.userId, shared]);
       if (!locked.rowCount) throw notFound();
       // The lock may have waited behind a revocation. Its subqueries need a
       // fresh statement snapshot, and credential rechecking uses this same tx.
@@ -49,6 +57,7 @@ export class CloudV2ChatEdits {
       const saved = (await tx.query<{ row: Record<string, unknown> }>("UPDATE cloud_v2_chats SET row=row || $3::jsonb WHERE workspace_id=$1 AND chat_id=$2 RETURNING row",
         [workspaceId, chatId, JSON.stringify(patch)])).rows[0]!;
       await tx.query("SELECT pg_notify('zeros_cloud_v2_prompts',$1)", [workspaceId]);
+      if (shared) await authorize(tx);
       return { id: chatId, title: typeof saved.row.title === "string" ? saved.row.title : "", archived: saved.row.archived === true };
     });
   }

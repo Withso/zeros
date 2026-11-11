@@ -2,6 +2,12 @@ import { createHash } from "node:crypto";
 
 // Each reviewed migration lists its exact exempted statements by rule.
 const reviewed: Readonly<Record<string, Readonly<Record<string, readonly string[]>>>> = {
+  "0236_cloud_team_sharing.sql": {
+    "privilege-tightening": [
+      "REVOKE ALL ON FUNCTION cloud_v2_original_creator() FROM PUBLIC;",
+      "REVOKE ALL ON FUNCTION notify_cloud_v2_team_rows() FROM PUBLIC;",
+    ],
+  },
   "0233_cloud_notify_user.sql": {
     "privilege-tightening": ["REVOKE ALL ON FUNCTION erase_cloud_v2_notifications() FROM PUBLIC;"],
     "notification-erasure": [`CREATE FUNCTION erase_cloud_v2_notifications() RETURNS trigger

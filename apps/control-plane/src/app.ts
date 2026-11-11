@@ -300,6 +300,7 @@ export function createApp(
         "authorization",
         "content-type",
         "x-zeros-client",
+        "x-zeros-team-sharing",
         "idempotency-key",
         "traceparent",
         "x-zeros-device-id",

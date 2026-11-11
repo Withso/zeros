@@ -27,6 +27,7 @@ export type CloudSourceProof = { accessEpoch: string; loginRevision: string };
 /** graceUntil is the earliest original verification time plus the grace across
  * every source; cached and grace continuations repeat it, never extend it. */
 export type CloudSourceContinuation = { recheckAt: number; refresh?: Promise<void>; graceUntil?: number };
+export type CloudViewerSourceProof = { fingerprint: string; until: number; recheckAt: number; continuation: boolean };
 type SourceVerifier = Pick<GithubRepositoryAuthority, "check" | "fingerprintFor"> & {
   verify?(input: RepositoryRequest): Promise<{ fingerprint: string; repositories: readonly CloudSourceTarget[] }>;
 };
@@ -79,6 +80,19 @@ export class CloudV2SourceAuthority {
     const parsed = z.array(CloudSourceTargetSchema).min(1).max(100).safeParse(targets);
     if (!parsed.success) throw new HttpError(409, "cloud_source_review_required", "The original source identities could not be verified. Existing data has been retained.");
     await this.observeSources(organizationId, userId, parsed.data.map(target => target.repository), parsed.data.map(target => target.repositoryId), false, renew);
+  }
+
+  /** A reader uses their own connection, independently of the VM's Creator.
+   * In particular, a failed refresh here must never retire the Creator's VM. */
+  async viewer(organizationId: string, userId: string, targets: readonly CloudSourceTarget[], continuation: boolean): Promise<CloudViewerSourceProof> {
+    const parsed = z.array(CloudSourceTargetSchema).min(1).max(100).parse(targets);
+    const observations = await this.observeSources(organizationId,userId,parsed.map(target => target.repository),
+      parsed.map(target => target.repositoryId),continuation);
+    const fingerprint = observations[0]!.fingerprint;
+    if (observations.some(value => value.fingerprint !== fingerprint))
+      throw new HttpError(409,"github_authorization_changed","GitHub authorization changed. Try again.");
+    return { fingerprint,until: Math.min(...observations.map(value => value.until)),
+      recheckAt: Math.min(...observations.map(value => value.recheckAt)),continuation };
   }
 
   private fingerprint(scope: RepositoryRequest): Promise<string> {
