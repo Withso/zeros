@@ -24,7 +24,8 @@ it("negotiates a component frame's options through the actual preparation reply 
   await expect(bridgeDesignPrepareFrames(client({ ...reply(), frames: [{ ...frame, component: { ...component, reach: { width: "sometimes" } } }] }, true, false, true) as unknown as RuntimeClient, input)).rejects.toThrow();
 });
 it("carries a frame's component instances through the actual preparation reply decoder", async () => {
-  const instances = { key: "0123456789abcdef", components: { "chat-composer": { elements: [], reach: {}, file: "page/main.html", frame: true } },
+  // A frame-instances comparison key (16 hex characters), not a credential.
+  const instances = { key: "00000000000000a1", components: { "chat-composer": { elements: [], reach: {}, file: "page/main.html", frame: true } },
     hosts: { inst: { component: "chat-composer", attributes: { width: "800", "zd-variant": "compact" }, failed: true as const } } };
   const value = { ...reply(), frames: [{ ...frame, instances }] };
   await expect(bridgeDesignPrepareFrames(client(value, true, false, true) as unknown as RuntimeClient, input)).resolves.toEqual(value);
