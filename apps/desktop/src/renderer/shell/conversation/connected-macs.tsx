@@ -30,7 +30,7 @@ export interface ConnectedMac {
 export interface ThisMacSync {
   status: WorkspaceSyncStatus | null;
   busy: boolean;
-  /** The switch on: ~/zeros/cloud-sync/<repository>/<workspace>, no picker. */
+  /** The switch on: <channel folder>/cloud-sync/<repository>/<workspace> (12.zz), no picker. */
   onEnable(): void;
   onStop(): void;
   /** Choose another folder… (the native picker; sync moves there). */

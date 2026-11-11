@@ -29,7 +29,7 @@ export function useWorkspaceSyncStatus(workspaceId: string | null): WorkspaceSyn
 export type ChooseSyncResult = { ok: true } | { ok: false; reason: string };
 export const chooseWorkspaceSyncFolder = (workspaceId: string) => nativeInvoke<ChooseSyncResult>("workspace_sync_choose", { workspaceId });
 export const stopWorkspaceSync = (workspaceId: string) => nativeInvoke<boolean>("workspace_sync_stop", { workspaceId });
-/** 12.z: the switch on, in ~/zeros/cloud-sync/<repository>/<workspace> (main builds and checks the folder). */
+/** 12.z: the switch on, in <channel folder>/cloud-sync/<repository>/<workspace> (~/zeros-alpha on Alpha; main builds and checks the folder). */
 export const enableWorkspaceSync = (workspaceId: string, labels: { repository: string; workspace: string }) =>
   nativeInvoke<ChooseSyncResult>("workspace_sync_enable", { workspaceId, ...labels });
 export const revealWorkspaceSyncFolder = (workspaceId: string) => nativeInvoke<boolean>("workspace_sync_reveal", { workspaceId });

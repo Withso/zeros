@@ -17,7 +17,8 @@ export interface SyncWantedDeps {
   folderFor(workspaceId: string): string | undefined;
   enable(workspaceId: string, folder: string): Promise<void>;
   disable(workspaceId: string): Promise<void>;
-  home: string;
+  /** The app's channel folder (12.zz). */
+  channel: string;
   now(): number;
   log(line: string): void;
   mkdir?(folder: string): Promise<void>;
@@ -85,7 +86,7 @@ export class SyncWantedFollower {
       if ((this.changedAt.get(row.workspaceId) ?? Number.NEGATIVE_INFINITY) >= started) continue;
       try {
         if (row.syncWanted && !running.has(row.workspaceId)) {
-          const folder = this.deps.folderFor(row.workspaceId) ?? defaultSyncFolder(this.deps.home, row.repository.split("/").pop() ?? row.repository,
+          const folder = this.deps.folderFor(row.workspaceId) ?? defaultSyncFolder(this.deps.channel, row.repository.split("/").pop() ?? row.repository,
             row.number ? `w-${row.number}` : row.name);
           await this.deps.mkdir?.(folder);
           await this.deps.enable(row.workspaceId, folder);
