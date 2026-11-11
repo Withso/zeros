@@ -507,6 +507,25 @@ export type SessionUpdate =
   | TurnStateUpdateNotification
   | UserMessageRecordedUpdate;
 
+/** notify-user-v1: the agent asked for the person (NotifyUser). Live only, on
+ * AGENT_SESSION_UPDATE: apps mark the chat unread and may raise an OS
+ * notification; the transcript already holds the tool call. Older apps ignore
+ * an unknown update. Deliberately outside SessionUpdate: no adapter emits it,
+ * and every reducer and switch over SessionUpdate stays unchanged. */
+export interface AttentionUpdate {
+  sessionUpdate: "attention";
+  notificationId: string;
+  kind: "review" | "blocked";
+  title: string;
+  message: string;
+}
+export function isAttentionUpdate(update: unknown): update is AttentionUpdate {
+  const value = update as Partial<AttentionUpdate> | null;
+  return !!value && value.sessionUpdate === "attention" && typeof value.notificationId === "string" && /^[0-9a-f-]{36}$/i.test(value.notificationId)
+    && (value.kind === "review" || value.kind === "blocked") && typeof value.title === "string" && value.title.length > 0 && value.title.length <= 80
+    && typeof value.message === "string" && value.message.length <= 280;
+}
+
 /** Engine-only: a complete user message the engine recorded on its own — an
  * agent's message or a note the Zeros Local CLI delivered — so every open
  * view shows it live, mid-turn included. Renderers insert it by `id`

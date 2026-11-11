@@ -20,6 +20,7 @@
 // ──────────────────────────────────────────────────────────
 
 import { designToolLabel } from "./design-tool-presentation";
+import { notifyUserLabel } from "./notify-user-presentation";
 import {
   Bot,
   Brain,
@@ -29,6 +30,7 @@ import {
   Globe,
   Plug,
   Search as SearchIcon,
+  BellRing,
   PenTool,
   Smartphone,
   SquareMousePointer,
@@ -127,6 +129,10 @@ export function summaryIcons(
       if (!toolPresentationReady(e)) continue;
       if (designToolLabel(e)) {
         if (!seenKinds.has("design")) { seenKinds.add("design"); out.push(PenTool); }
+        continue;
+      }
+      if (notifyUserLabel(e)) {
+        if (!seenKinds.has("notify")) { seenKinds.add("notify"); out.push(BellRing); }
         continue;
       }
       const activity = browserToolActivity(e);

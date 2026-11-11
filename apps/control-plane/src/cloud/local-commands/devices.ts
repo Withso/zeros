@@ -14,7 +14,7 @@ const changed = () => new HttpError(409, "device_registration_changed", "This de
 export const limited = () => new HttpError(429, "local_commands_limited", "Local command capacity is temporarily full");
 export type DeviceRow = { user_id: string; device_id: string; provider_session_id: string; registration_id: string; instance_id: string;
   registration_request_id: string; registration_hash: Buffer; name: string; revoked_at: Date | null; reachable_until: Date | null;
-  presence_required: boolean; has_requests: boolean };
+  presence_required: boolean; has_requests: boolean; checked_at: Date };
 const connectionLive = `(c.disconnected_at IS NULL AND c.registration_id=d.registration_id
   AND (c.is_latest_sender OR greatest(c.connected_at,c.last_used_at)>clock_timestamp()-interval '12 hours'))`;
 const presenceSql = `EXISTS (SELECT 1 FROM cloud_v2_connected_macs c JOIN cloud_v2_workspaces w ON w.id=c.workspace_id
@@ -44,7 +44,7 @@ export class CloudLocalDevices {
   constructor(readonly pool: pg.Pool) {}
 
   async verify(tx: Tx, user: AuthedUser, binding: LocalDeviceBinding, lock = false): Promise<DeviceRow> {
-    const row = (await tx.query<DeviceRow>(`SELECT d.*,${presenceSql} AS presence_required,
+    const row = (await tx.query<DeviceRow>(`SELECT d.*,clock_timestamp() AS checked_at,${presenceSql} AS presence_required,
       EXISTS (SELECT 1 FROM local_command_requests r WHERE r.sender_user_id=d.user_id AND r.target_device_id=d.device_id
         AND r.target_registration_id=d.registration_id AND r.device_ack_at IS NULL) AS has_requests FROM local_command_devices d
       WHERE user_id=$1 AND device_id=$2 ${lock ? "FOR UPDATE OF d" : ""}`, [user.id, binding.deviceId])).rows[0];
@@ -57,7 +57,7 @@ export class CloudLocalDevices {
   snapshot(user: AuthedUser, binding: LocalDeviceBinding) {
     return withSystemTx(this.pool, async tx => {
       const row = await this.verify(tx, user, binding);
-      return { device: device(row), presence: presence(row), hasRequests: row.has_requests };
+      return { device: device(row), presence: presence(row), hasRequests: row.has_requests, checkedAt: row.checked_at.toISOString() };
     }, { consistentRead: true });
   }
 
@@ -88,6 +88,19 @@ export class CloudLocalDevices {
       const row = (await tx.query<DeviceRow>(`SELECT d.*,${presenceSql} AS presence_required FROM local_command_devices d WHERE user_id=$1 AND device_id=$2`, [user.id, deviceId])).rows[0]!;
       return { device: device(row), presence: presence(row), heartbeatIntervalMs: DEVICE_HEARTBEAT_MS };
     });
+  }
+
+  /** A NotifyUser hint reaches every live registration of the person. It
+   * carries no text, and neither connections nor presence grant this delivery. */
+  async notifyUser(tx: Tx, userId: string, workspaceId: string, notificationId: string): Promise<void> {
+    await tx.query(`SELECT pg_notify('zeros_local_commands',json_build_object('userId',d.user_id,'deviceId',d.device_id,
+      'registrationId',d.registration_id,'instanceId',d.instance_id,'workspaceId',$2::uuid,'notificationId',$3::uuid)::text)
+      FROM local_command_devices d
+      JOIN auth_sessions s ON s.provider='workos' AND s.provider_session_id=d.provider_session_id AND s.user_id=d.user_id
+      WHERE d.user_id=$1 AND d.revoked_at IS NULL AND s.status='active' AND s.revoked_at IS NULL
+        AND (s.provider_session_expires_at IS NULL OR s.provider_session_expires_at>clock_timestamp())
+        AND EXISTS (SELECT 1 FROM user_identities i WHERE i.user_id=d.user_id AND i.provider='workos'
+          AND i.provider_sub=s.provider_sub AND i.status='active') LIMIT 20`,[userId,workspaceId,notificationId]);
   }
 
   unregister(user: AuthedUser, binding: LocalDeviceBinding) {

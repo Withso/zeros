@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { NotifyUserEventSchema } from "./notify-user";
 
 // RunLocalCommand: a cloud agent runs one shell command on the Mac of the
 // person who asked. Shared by the worker (tool), the desktop (runner and
@@ -123,6 +124,8 @@ export const LocalCommandEventSchemas = {
   request: LocalCommandNoticeSchema,
   heartbeat: z.object({ at: iso, presence: LocalCommandPresenceSchema }).strict(),
   revoked: z.object({ code: z.enum(["session_revoked", "device_registration_changed"]) }).strict(),
+  /** notify-user-v1 (batch B1) shares the account-level device channel. */
+  notify: NotifyUserEventSchema,
 } as const;
 
 export const LocalCommandOrganizationSettingSchema = z.object({ localCommandsEnabled: z.boolean() }).strict();

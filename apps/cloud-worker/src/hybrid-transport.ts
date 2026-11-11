@@ -1,3 +1,5 @@
+import { NotifyUserWorkerRequestSchema, type NotifyUserWorkerRequest } from "@zeros/protocol/notify-user";
+import type { NotifyUserDelivery } from "./notify-user/service";
 import { randomInt, randomUUID } from "node:crypto";
 import type { LocalCommandInput } from "@zeros/protocol/local-commands";
 import { requestLocalCommand } from "./local-commands/client";
@@ -186,6 +188,22 @@ export class HybridTransport implements Transport {
     } catch (error) {
       if (signal?.aborted) this.pendingEnvironment = undefined;
       throw error;
+    }
+  }
+  async notifyUser(request: NotifyUserWorkerRequest, signal?: AbortSignal): Promise<NotifyUserDelivery> {
+    const body = NotifyUserWorkerRequestSchema.parse(request);
+    // The same id and body on every try: a replay is inert on the server.
+    for (let attempt = 0; ; attempt++) {
+      try { await this.request("notifications", body, signal, 10_000); return "sent"; }
+      catch (error) {
+        if (error instanceof HttpFailure) {
+          if (error.status === 409) return "already_notified";
+          if (error.status === 429) return "rate_limited";
+          if (error.status >= 400 && error.status < 500 && error.status !== 408) throw error;
+        }
+        if (attempt >= 2 || signal?.aborted) throw error;
+        await new Promise<void>(resolve => { const timer = setTimeout(resolve, 500 * 2 ** attempt); timer.unref?.(); });
+      }
     }
   }
   async reportSetup(status: CloudV2SetupStatus): Promise<void> {
@@ -389,7 +407,8 @@ export class HybridTransport implements Transport {
       }
       if (response.status === 204) { await response.body?.cancel(); return {}; }
       const reader = response.body?.getReader();
-      if (!reader) throw new Error("Empty worker control response.");
+      // An accepted (202) answer may carry no body, as notify-user-v1's does.
+      if (!reader) { if (response.status === 202) return {}; throw new Error("Empty worker control response."); }
       const chunks: Uint8Array[] = []; let bytes = 0;
       for (;;) {
         const chunk = await reader.read(); if (chunk.done) break;
@@ -397,6 +416,7 @@ export class HybridTransport implements Transport {
         if (bytes > CLOUD_V2_MAX_FRAME_BYTES) { await reader.cancel(); throw new Error("Worker control response too large."); }
         chunks.push(chunk.value);
       }
+      if (response.status === 202 && bytes === 0) return {};
       const value: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8"));
       if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid worker control response.");
       return value as Record<string, unknown>;

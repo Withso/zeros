@@ -1,6 +1,7 @@
 import { useCloudFocusActivity } from "./state/use-cloud-focus-activity";
 import { hasPendingCloudChatEdit, onCloudChatEditFallback } from "./state/cloud-chat-edits";
 import { LocalCommandApprovalHost } from "./features/agent/local-command-approvals";
+import { NotifyUserHost } from "./features/agent/notify-user-host";
 import { subscribeChatSnapshots } from "./state/chat-snapshot-subscription";
 
 import React, { useEffect, useRef } from "react";
@@ -1304,6 +1305,7 @@ export function AppShell() {
         <AuthGate>
           <AppShellBody />
           <LocalCommandApprovalHost />
+          <NotifyUserHost />
         </AuthGate>
       </AuthProvider>
     </AppearanceProvider>

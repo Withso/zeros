@@ -134,11 +134,67 @@ it("offers RunLocalCommand only when the configuration allows it, sends the chat
   expect((await client.listTools()).tools.map(tool => tool.name)).toContain("RunLocalCommand");
   const running = client.callTool({ name: "RunLocalCommand", arguments: { command: "open -a Simulator" } }) as Promise<{ content: Array<{ text: string }> }>;
   await expect.poll(() => pending.length).toBe(1);
-  expect(pending[0]!.request).toMatchObject({ chatId: "local", input: { command: "open -a Simulator" } });
+  // executionId is the native execution identity (the wire's), the same one retire-sender names; never the tool grant's id.
+  expect(pending[0]!.request).toEqual({ chatId: "local", executionId: sessionId, input: { command: "open -a Simulator" } });
   // The relay prompt that started this turn retired the chat's previous sender first.
   expect(retired).toEqual([{ chatId: "local", executionId: sessionId }]);
   expect(worker.runtimeCensus.tools).toBe(true);
   await relay.request(CLIENT_A, browserFrame("AGENT_CANCEL", { agentId: "codex", sessionId }));
   await expect.poll(() => pending[0]!.signal.aborted).toBe(true);
   expect((await running).content[0].text.split("\n")[0]).toBe("outcome: cancelled");
+});
+
+it("offers NotifyUser only with notifyUser: 1, delivers once per turn to the route and attached apps, and again next turn", async () => {
+  const f = await repositoryFixture();
+  const delivered: Array<Record<string, unknown>> = [];
+  const relay = Object.assign(new FakeRelay(), { notifyUser: async (request: Record<string, unknown>) => { delivered.push(request); return "sent" as const; } });
+  const drivers: FakeDriver[] = [];
+  const worker = new CloudWorker({ directory: f.state, homeDirectory: f.directory, transport: relay, prepareCheckout: async () => {},
+    workspaceServices: { watch: false }, drivers: { codex: () => { const driver = new FakeDriver(); drivers.push(driver); return driver; } } });
+  cleanups.push(() => worker.dispose());
+  worker.start();
+  const connect = async (driver: FakeDriver) => {
+    const tools = driver.opened!.mcpServers!.zeros_workspace;
+    const client = new Client({ name: "fixture-agent", version: "1" }); cleanups.push(() => client.close());
+    await client.connect(new StreamableHTTPClientTransport(new URL(tools.url), { requestInit: { headers: tools.headers } }));
+    return client;
+  };
+  await relay.receive({ ...config, workspace: f.scope.workspace });
+  await relay.receive({ t: "open", clientId: CLIENT_A });
+  const plain = browserFrame("AGENT_NEW_SESSION", { agentId: "codex", chatId: "plain", cwd: f.scope.key });
+  await relay.request(CLIENT_A, plain);
+  await expect.poll(() => drivers[0]?.opened?.mcpServers).toBeDefined();
+  expect((await (await connect(drivers[0]!)).listTools()).tools.map(tool => tool.name)).not.toContain("NotifyUser");
+
+  await relay.receive({ ...config, workspace: f.scope.workspace, notifyUser: 1, loginRevision: "1" });
+  const created = browserFrame("AGENT_NEW_SESSION", { agentId: "codex", chatId: "notify", cwd: f.scope.key });
+  await relay.request(CLIENT_A, created);
+  const sessionId = (relay.response(created.id) as unknown as { session: { sessionId: string } }).session.sessionId;
+  const turn = async (userMessageId: string) => {
+    await relay.request(CLIENT_A, browserFrame("AGENT_PROMPT", { agentId: "codex", sessionId, userMessageId, prompt: [{ type: "text", text: "go" }] }));
+    await expect.poll(() => drivers.find(driver => driver.prompts.length)?.opened).toBeDefined();
+  };
+  await turn("user-1");
+  const driver = drivers.find(candidate => candidate.prompts.length)!;
+  const client = await connect(driver);
+  expect((await client.listTools()).tools.map(tool => tool.name)).toContain("NotifyUser");
+  const args = { title: "Ready for review", message: "The login fix is ready.", kind: "review" };
+  const first = await client.callTool({ name: "NotifyUser", arguments: args }) as { content: Array<{ text: string }> };
+  expect(first.content[0]!.text).toMatch(/^Notified the person/);
+  const again = await client.callTool({ name: "NotifyUser", arguments: args }) as { content: Array<{ text: string }> };
+  expect(again.content[0]!.text).toMatch(/^Already notified this turn/);
+  expect(delivered).toEqual([{ notificationId: expect.stringMatching(/^[0-9a-f-]{36}$/), chatId: "notify", userMessageId: "user-1", executionId: sessionId, ...args }]);
+  const attention = relay.bridge("AGENT_SESSION_UPDATE").filter(({ frame }) =>
+    (frame as { notification: { update: { sessionUpdate: string } } }).notification.update.sessionUpdate === "attention");
+  expect(attention).toHaveLength(1);
+  expect(attention[0]!.frame).toMatchObject({ chatId: "notify", notification: { update: { sessionUpdate: "attention", notificationId: delivered[0]!.notificationId, ...args } } });
+
+  driver.complete();
+  await expect.poll(() => relay.bridge("AGENT_PROMPT_COMPLETE").length).toBeGreaterThan(0);
+  await turn("user-2");
+  await expect.poll(() => driver.prompts.length).toBe(2);
+  const next = await client.callTool({ name: "NotifyUser", arguments: args }) as { content: Array<{ text: string }> };
+  expect(next.content[0]!.text).toMatch(/^Notified the person/);
+  expect(delivered).toHaveLength(2);
+  expect(delivered[1]).toMatchObject({ userMessageId: "user-2", executionId: sessionId });
 });

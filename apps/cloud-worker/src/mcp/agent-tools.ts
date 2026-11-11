@@ -3,6 +3,8 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { CodeReviewError, type CodeReviewAgentToolsCore } from "@zeros/protocol/code-review";
 import { LOCAL_COMMAND_LIMITS, LocalCommandInputSchema, type LocalCommandInput, type LocalCommandResult } from "@zeros/protocol/local-commands";
+import { NOTIFY_USER_KINDS, NOTIFY_USER_LIMITS, NotifyUserInputSchema, type NotifyUserInput } from "@zeros/protocol/notify-user";
+import type { NotifyUserOutcome } from "../notify-user/service";
 
 type ToolResult = { content: Array<{ type: "text"; text: string }>; isError?: boolean };
 type ToolDefinition = { name: string; description: string; inputSchema: { type: "object"; [key: string]: unknown } };
@@ -52,6 +54,23 @@ function object(raw: unknown, allowed: readonly string[]): Record<string, unknow
 }
 const failure = (code: string, message: string): ToolResult => ({ isError: true, content: [{ type: "text", text: JSON.stringify({ code, message }) }] });
 const truncatedNote = "\n[Output truncated to the tool's size limit.]";
+
+const notifyUserDefinition: ToolDefinition = { name: "NotifyUser",
+  description: "Tell the person who sent this chat's latest message that you need them: something is ready to review, or you are blocked on them. " +
+    "Call it at most once per turn, at the end of the turn, never for progress updates. They get a notification on their Mac that opens this chat. " +
+    "The title can show on a lock screen: keep secrets, tokens and private data out of it.",
+  inputSchema: { type: "object", additionalProperties: false, required: ["title", "message", "kind"], properties: {
+    title: { type: "string", minLength: 1, maxLength: NOTIFY_USER_LIMITS.titleChars, description: "What you need, in a few words; shown in the notification." },
+    message: { type: "string", minLength: 1, maxLength: NOTIFY_USER_LIMITS.messageChars, description: "One or two sentences shown in the app." },
+    kind: { type: "string", enum: [...NOTIFY_USER_KINDS], description: "review: something is ready for them; blocked: you cannot continue without them." },
+  } } };
+const NOTIFY_USER_TEXT: Record<NotifyUserOutcome, (title: string) => string> = {
+  sent: title => `Notified the person: ${title}. Do not call NotifyUser again this turn.`,
+  unreachable: title => `Shown in any open Zeros app: ${title}. The control plane could not be reached, so their Mac may not get a notification.`,
+  already_notified: () => "Already notified this turn; not sent again.",
+  rate_limited: () => "Not sent: this workspace reached its notification limit for the hour.",
+  no_turn: () => "NotifyUser works only while a turn is running.",
+};
 
 const localCommandDefinition: ToolDefinition = { name: "RunLocalCommand",
   description: "Run one shell command on the Mac of the person who sent this chat's latest message, in their login shell, after they approve it there. " +
@@ -105,6 +124,8 @@ export interface WorkspaceAgentToolOptions {
   review?: CodeReviewAgentToolsCore;
   /** Present only while this worker and its organization allow local commands. */
   localCommands?: { run(input: LocalCommandInput, signal: AbortSignal): Promise<{ result: LocalCommandResult; acknowledge(): Promise<void> }>; checkout: string };
+  /** notify-user-v1: present only when the configuration carries notifyUser: 1. */
+  notifyUser?: { notify(input: NotifyUserInput, signal: AbortSignal): Promise<NotifyUserOutcome> };
 }
 
 /** The product tools every native execution receives over `zeros_workspace`.
@@ -122,13 +143,15 @@ export class WorkspaceAgentTools implements AgentToolSet {
 
   listTools(): ToolDefinition[] {
     this.assertCurrent();
-    return [...definitions, ...(this.options.localCommands ? [localCommandDefinition] : []), ...(this.review?.listTools() ?? [])];
+    return [...definitions, ...(this.options.localCommands ? [localCommandDefinition] : []), ...(this.options.notifyUser ? [notifyUserDefinition] : []),
+      ...(this.review?.listTools() ?? [])];
   }
 
   async callTool(name: string, raw: unknown, signal: AbortSignal): Promise<ToolResult> {
     this.assertCurrent();
     signal.throwIfAborted();
     if (name === "RunLocalCommand" && this.options.localCommands) return this.runLocalCommand(this.options.localCommands, raw, signal);
+    if (name === "NotifyUser" && this.options.notifyUser) return this.notifyUser(this.options.notifyUser, raw, signal);
     if (name !== "GetTerminalOutput" && name !== "GetWorkspaceDiff") {
       if (!this.review) throw new CodeReviewError("CODE_REVIEW_INVALID", "Unknown workspace tool.");
       return this.review.callTool(name, raw, signal);
@@ -165,6 +188,15 @@ export class WorkspaceAgentTools implements AgentToolSet {
       this.assertCurrent();
       return failure("WORKSPACE_TOOL_UNAVAILABLE", "The workspace tool request could not complete.");
     }
+  }
+
+  private async notifyUser(notify: NonNullable<WorkspaceAgentToolOptions["notifyUser"]>, raw: unknown, signal: AbortSignal): Promise<ToolResult> {
+    const parsed = NotifyUserInputSchema.safeParse(raw ?? {});
+    if (!parsed.success) return failure("INVALID_INPUT", parsed.error.issues[0]?.message ?? "Invalid NotifyUser input.");
+    const outcome = await notify.notify(parsed.data, signal);
+    this.assertCurrent();
+    const text = NOTIFY_USER_TEXT[outcome](parsed.data.title);
+    return { content: [{ type: "text", text }], ...(outcome === "rate_limited" || outcome === "no_turn" ? { isError: true } : {}) };
   }
 
   private async runLocalCommand(local: NonNullable<WorkspaceAgentToolOptions["localCommands"]>, raw: unknown, signal: AbortSignal): Promise<ToolResult> {

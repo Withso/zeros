@@ -1,3 +1,5 @@
+import type { NotifyUserWorkerRequest } from "@zeros/protocol/notify-user";
+import type { NotifyUserDelivery } from "./notify-user/service";
 import type { CloudEnvironmentReport, CloudRuntimeUpdateReply, CloudRuntimeUpdateRequest, CloudV2SetupStatus, CloudV2WorkerFrame, CloudV2WorkerTiming } from "@zeros/protocol/cloud-v2-relay";
 import type { LocalCommandInput, LocalCommandResult } from "@zeros/protocol/local-commands";
 import type { McpAuthorizationRequest } from "./mcp/gateway";
@@ -31,6 +33,8 @@ export interface Transport {
   reportGithubCheckout?: ReportGithubCheckout;
   reportCheckoutFailure?: () => Promise<void>;
   reportEnvironment?: (report: CloudEnvironmentReport, signal?: AbortSignal) => Promise<void>;
+  /** notify-user-v1: POST notifications (202); 409 already_notified and 429 are answers, not failures. */
+  notifyUser?(request: NotifyUserWorkerRequest, signal?: AbortSignal): Promise<NotifyUserDelivery>;
   /** setup-status-v1: POST setup, 204. Best effort; the next hello reports again. */
   reportSetup?: (status: CloudV2SetupStatus) => Promise<void>;
   runtimeUpdate?: (request: CloudRuntimeUpdateRequest, signal?: AbortSignal) => Promise<CloudRuntimeUpdateReply>;

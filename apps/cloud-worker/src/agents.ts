@@ -1,7 +1,7 @@
 import { AgentInteractions } from "./interactions";
 import { INPUT_CANCELLED, INPUT_STOPPED, INPUT_TIMEOUT } from "./sessions/interaction-history";
 import { randomUUID } from "node:crypto";
-import { cloudModeId, cloudPermissionMode, cloudSessionModes, type CloudPermissionMode, type BackgroundTasksUpdate, type InitializeResponse, type PromptResponse, type SessionNotification } from "@zeros/protocol/agent-events";
+import { cloudModeId, cloudPermissionMode, cloudSessionModes, type CloudPermissionMode, type AttentionUpdate, type BackgroundTasksUpdate, type InitializeResponse, type PromptResponse, type SessionNotification } from "@zeros/protocol/agent-events";
 import { createMessage, type AgentLoadSessionMessage, type AgentNewSessionMessage, type AgentPromptMessage, type AgentSteerMessage, type BridgeAgentFailure, type BridgeMessage, type SteerOutcome } from "@zeros/protocol/messages";
 import { cloudFailureMessage, type CloudMcpFailure, type CloudV2Agent } from "@zeros/protocol/cloud-v2-relay";
 import type { CloudV2PromptDelivery } from "@zeros/protocol/cloud-v2-prompts";
@@ -102,6 +102,21 @@ export class Agents {
     this.config = config; this.models.configure(config);
   }
   /** The chat a native execution (route) belongs to, if it is still open. */
+  /** NotifyUser: the turn an execution is running now. */
+  activeTurn(executionId: string): { chatId: string; turnId: string; executionId: string } | undefined {
+    const route = this.notifyRoute(executionId);
+    return route?.active ? { chatId: route.chatId, turnId: route.active.userMessageId, executionId: route.id } : undefined;
+  }
+  /** notify-user-v1: live only, to every attached app; never stored in the transcript. */
+  async attention(executionId: string, update: Omit<AttentionUpdate, "sessionUpdate">): Promise<void> {
+    const route = this.notifyRoute(executionId);
+    // Outside SessionUpdate by design (protocol agent-events AttentionUpdate).
+    if (route) await this.update(route, { sessionId: route.id, update: { sessionUpdate: "attention", ...update } as unknown as SessionNotification["update"] });
+  }
+  private notifyRoute(executionId: string): Runtime | undefined {
+    const route = this.routes.get(executionId) ?? [...this.routes.values()].find(value => value.mcpExecutionId === executionId);
+    return route && !route.closed && this.chats.get(route.chatId) === route ? route : undefined;
+  }
   chatForExecution(executionId: string): string | undefined {
     const route = this.routes.get(executionId);
     return route && !route.closed ? route.chatId : undefined;
@@ -762,7 +777,7 @@ export class Agents {
           if (route.stopping !== openingStop || this.reviewConfiguration !== openingReview)
             throw new WorkspaceError("session-expired", "This execution's tools have been retired.");
         };
-        route.workspaceTools = await this.workspaceToolFactory?.({ agentId: route.agentId, conversationId: route.chatId, executionId,
+        route.workspaceTools = await this.workspaceToolFactory?.({ agentId: route.agentId, conversationId: route.chatId, executionId, nativeExecutionId: route.id,
           assertCurrent: assertToolsCurrent, assertExecutionCurrent });
         assertToolsCurrent();
         this.assertCurrent(route);

@@ -104,7 +104,7 @@ describe("order 2 wire v1.1 shapes", () => {
   });
 
   it("names the SSE events exactly and bounds worker, claim and setting bodies", () => {
-    expect(Object.keys(LocalCommandEventSchemas).sort()).toEqual(["heartbeat", "presence", "ready", "request", "revoked"]);
+    expect(Object.keys(LocalCommandEventSchemas).sort()).toEqual(["heartbeat", "notify", "presence", "ready", "request", "revoked"]);
     expect(LocalCommandEventSchemas.ready.safeParse({ deviceId: uuid, registrationId: other, instanceId: uuid, presence, heartbeatIntervalMs: 25000 }).success).toBe(true);
     expect(LocalCommandEventSchemas.revoked.safeParse({ code: "session_revoked" }).success).toBe(true);
     expect(LocalCommandEventSchemas.revoked.safeParse({ code: "other" }).success).toBe(false);

@@ -21,6 +21,7 @@ import type { Transport } from "./transport";
 import { ChatService } from "./workspace/chat-service";
 import { prepareCheckout, type CheckoutRefresh, type CheckoutResult } from "./workspace/checkout";
 import { WorkspaceSetup, readSetupOutput, type SetupRunner } from "./workspace/setup";
+import { NotifyUserService } from "./notify-user/service";
 import { WorkspaceError, WorkspaceScope, type WorkerConfig } from "./workspace/scope";
 import { WorkspaceService, type WorkspaceServiceOptions } from "./workspace/service";
 import { isGitMutation } from "./workspace/git";
@@ -123,6 +124,8 @@ export class CloudWorker {
   private historyReplacementEnabled = false;
   /** Read when a native execution's tools are admitted. */
   private localCommandsEnabled = false;
+  private notifyUserEnabled = false;
+  private notifyUserService?: NotifyUserService;
   private readonly github: GithubBroker;
   private readonly gitEnvironment: NodeJS.ProcessEnv;
   private configuring: Promise<void> = Promise.resolve();
@@ -356,6 +359,7 @@ export class CloudWorker {
     }
     this.historyReplacementEnabled = config.historyReplacement === 1;
     this.localCommandsEnabled = config.localCommands === 1;
+    this.notifyUserEnabled = config.notifyUser === 1;
     if (this.configurationRevision !== revision) { this.tokens.invalidate(); this.githubCredentials.invalidate(); }
     if (!changed || changed.includes("gitIdentity")) await configureGitIdentity(this.options.homeDirectory ?? homedir(), config.gitIdentity);
     if (!this.scope) {
@@ -505,8 +509,12 @@ export class CloudWorker {
             return setupOutput && { terminalId: "setup", truncated: setupOutput.truncated, lines: setupOutput.lines.map(line => application.text(line)) };
           }, diff: request => workspace!.git.agentDiff(request),
           ...(this.localCommandsEnabled && this.options.transport.localCommand ? { localCommands: { checkout: scope.root,
-            run: (command, signal) => this.options.transport.localCommand!({ chatId: input.conversationId, executionId: input.executionId, input: command }, signal) } } : {}),
+            run: (command, signal) => this.options.transport.localCommand!({ chatId: input.conversationId, executionId: input.nativeExecutionId, input: command }, signal) } } : {}),
+          ...(this.notifyUserEnabled && this.notifyUserService ? { notifyUser: { notify: (request, signal) => this.notifyUserService!.notify(input.executionId, request, signal) } } : {}),
           ...(reviews!.enabled ? { review: reviews!.tools(input) } : {}) })), application, !!this.options.runtimeResume, workspaceApi);
+      this.notifyUserService = new NotifyUserService({ activeTurn: executionId => agents!.activeTurn(executionId),
+        publish: (executionId, update) => agents!.attention(executionId, update),
+        ...(this.options.transport.notifyUser ? { deliver: (request, signal) => this.options.transport.notifyUser!(request, signal) } : {}) });
       terminals = new Terminals(scope, { gitEnvironment: this.gitEnvironment, applicationEnvironment: application.variables,
         zerosEnvironment: () => workspaceApi.variables(), redact: text => application.text(text),
         records: join(this.options.directory, "terminals"), broadcast: frame => this.broadcast(frame), activity: () => { this.runtimeGate.activity(); void this.reportIdle(); } });

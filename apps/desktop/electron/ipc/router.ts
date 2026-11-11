@@ -71,6 +71,9 @@ const commandTable: Record<string, CommandHandler> = {
   local_commands_device: notImpl("local_commands_device", 1),
   local_commands_connect: notImpl("local_commands_connect", 1),
   local_commands_disconnect: notImpl("local_commands_disconnect", 1),
+  notify_user_attention: notImpl("notify_user_attention", 1),
+  notify_user_view: notImpl("notify_user_view", 1),
+  notify_user_take_open: notImpl("notify_user_take_open", 1),
 
   // ── Sidecar / engine lifecycle ────────────────────────────
   get_engine_port: notImpl("get_engine_port", 2),

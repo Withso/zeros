@@ -60,6 +60,17 @@ function subscribe(listener: () => void): () => void {
   };
 }
 
+const viewListeners = new Set<(chatIds: ReadonlySet<string>) => void>();
+/** The on-screen set as it changes (NotifyUser tells main which chats need no
+ *  OS notification). Called at once with the current set. */
+export function subscribeChatsInView(listener: (chatIds: ReadonlySet<string>) => void): () => void {
+  viewListeners.add(listener);
+  listener(inView);
+  return () => {
+    viewListeners.delete(listener);
+  };
+}
+
 export function chatUnread(chatId: string): boolean {
   return current().has(chatId);
 }
@@ -67,7 +78,10 @@ export function chatUnread(chatId: string): boolean {
 /** The chats on screen right now. They read at once, and a chat that finishes
  *  while on screen never turns unread. */
 export function setChatsInView(chatIds: readonly string[]): void {
+  const previous = inView;
   inView = chatIds.length === 0 ? EMPTY : new Set(chatIds);
+  if (previous.size !== inView.size || [...inView].some((id) => !previous.has(id)))
+    for (const listener of viewListeners) listener(inView);
   const unread = current();
   if (chatIds.some((id) => unread.has(id))) {
     write([...unread].filter((id) => !inView.has(id)));
@@ -185,4 +199,5 @@ export function resetChatUnreadForTests(): void {
   snapshot = null;
   inView = EMPTY;
   listeners.clear();
+  viewListeners.clear();
 }

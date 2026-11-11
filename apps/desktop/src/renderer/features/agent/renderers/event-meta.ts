@@ -1,6 +1,7 @@
 import { generatedImagePath, isImageGenerationTool } from "./tool-artifacts";
 import { modelRejectionDisplayText } from "@zeros/protocol/model-rejection";
 import { designToolLabel } from "./design-tool-presentation";
+import { notifyUserFailedTarget, notifyUserLabel } from "./notify-user-presentation";
 import { ChromeIcon } from "@/renderer/shared/ui/chrome-icon";
 import { formatWorkingElapsed } from "@/renderer/shared/ui/loading/live-duration";
 // ──────────────────────────────────────────────────────────
@@ -23,6 +24,7 @@ import {
   toolRecord,
 } from "./native-tool-presentation";
 import {
+  BellRing,
   Bot,
   Hourglass,
   Brain,
@@ -378,6 +380,8 @@ function metaForTool(tool: AgentToolMessage): EventMeta {
   }
 
   if (kind === "mcp") {
+    const notified = notifyUserLabel(tool);
+    if (notified) return { Icon: BellRing, label: notified, target: notifyUserFailedTarget(tool), expandable: true };
     const designLabel = designToolLabel(tool);
     if (designLabel) return { Icon: PenTool, label: designLabel, expandable: true };
     const nativeTitle = nativeToolTitle(tool);
