@@ -1,4 +1,5 @@
 import type { BridgeMessage } from "./messages";
+import { CloudWorkspaceReadOnlyError } from "../cloud-workspace-read-only";
 import { RuntimeClient, runtimeExecutionKey, type ConnectionStatus } from "./ws-client";
 import { CloudRuntimeAccessError } from "./cloud-runtime-access-error";
 import { KeyedAsyncCache } from "../../shared/lib/keyed-async-cache";
@@ -49,6 +50,10 @@ export interface WorkspaceRuntimeOptions {
   /** Complete catalog confirmation includes an authoritative empty list. */
   workspacesConfirmed?: () => boolean;
   canAccess?: (target: CloudWorkspaceTarget) => boolean;
+  /** Team sharing: a teammate's workspace this account only reads. It is never
+   * connected or woken; history comes from readHistory and live updates from
+   * the workspace's events stream. */
+  readOnly?: (target: CloudWorkspaceTarget) => boolean;
   /** A relay socket can outlive its worker. Reuse it only while the worker is
    * running; background requests must not wake it through that old socket. */
   canReuseForWork?: (target: CloudWorkspaceTarget) => boolean;
@@ -64,6 +69,8 @@ export interface WorkspaceRuntimeOptions {
   historyRoot?: (target: CloudWorkspaceTarget) => string | undefined;
 }
 interface WakeOwner { account: string; generation: number; stopVersion: number; lifecyclePending?: boolean; retargetVersion?: number }
+/** A reader's request that needs the worker is refused here, never sent (the control plane would answer 409 workspace_read_only). */
+export { CloudWorkspaceReadOnlyError } from "../cloud-workspace-read-only";
 class CloudAdmissionGenerationChangedError extends Error {
   constructor(readonly generation: number) { super("Cloud workspace generation changed during admission"); }
 }
@@ -459,6 +466,14 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
     await this.warmHistorySnapshot(target);
   }
 
+  /** Team sharing: a reader's events stream said the workspace changed. Drop
+   * its cached history and tell open views to read again (no connection). */
+  refreshHistoryWorkspace(target: CloudWorkspaceTarget): void {
+    if (!this.routing.readHistory) return;
+    this.invalidateHistory(target);
+    this.changed(cloudWorkspaceKey(target), ["chats", "messages"]);
+  }
+
   private rememberHistoryIntent(target: CloudWorkspaceTarget): void {
     const now = performance.now();
     for (const [key, expires] of this.historyIntents) if (expires < now) this.historyIntents.delete(key);
@@ -714,6 +729,8 @@ export class WorkspaceRuntimeClient extends RuntimeClient {
   }
 
   private peer(target: CloudWorkspaceTarget, wake = false, reason?: "interaction", intentOwner?: WakeOwner, wakeIntent?: CloudWorkspaceWakeIntent): Promise<PeerEntry> {
+    if (this.routing.readOnly?.(target))
+      return Promise.reject(new CloudWorkspaceReadOnlyError());
     if (this.routing.canAccess && !this.routing.canAccess(target))
       return Promise.reject(
         new Error(

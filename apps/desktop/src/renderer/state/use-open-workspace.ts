@@ -16,6 +16,7 @@ import { resolveWorkspacePresentationKind } from "./workspace-resolution";
 import { pendingWorkspaceMode } from "./pending-workspaces";
 import type { WorkspaceListFilter } from "./workspace-list-filter";
 import { workspaceIsReadOnly } from "./workspace-history";
+import { cloudFolderIsReader } from "./cloud-workspace-creators";
 import { isCloudWorkspace, parseCloudWorkspaceKey } from "../platform/bridge/cloud-workspace-key";
 import { getActiveBridge } from "../platform/bridge/active-bridge";
 import { WorkspaceRuntimeClient } from "../platform/bridge/workspace-runtime-client";
@@ -47,7 +48,8 @@ export function useOpenWorkspace(): (
   const cloudComputerV2 = useCloudWorkspaceAccountAccess();
   return useCallback(
     (workspace: WorkspaceNavigationTarget, options?: OpenWorkspaceOptions) => {
-      const historyOnly = workspaceIsReadOnly(workspace);
+      // A teammate's workspace this account only reads opens like history: no warm-up, wake or new chat.
+      const historyOnly = workspaceIsReadOnly(workspace) || cloudFolderIsReader(workspace.path);
       const presentationKind = resolveWorkspacePresentationKind({
         confirmedKind: workspace.kind,
         requestedKind: pendingWorkspaceMode(workspace.id),

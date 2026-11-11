@@ -13,7 +13,8 @@ export function warmCloudWorkspaceDestination(folder: string, intent = false): P
   const bridge = getActiveBridge();
   if (!canReadCloudWorkspace(doc) || !(bridge instanceof WorkspaceRuntimeClient))
     return Promise.resolve();
-  if (doc && ["ready", "busy"].includes(doc.status))
+  // A Team sharing reader never connects: its history comes from the mirror.
+  if (doc && !doc.sharing?.readOnly && ["ready", "busy"].includes(doc.status))
     return bridge.warmWorkspace(target, { intent });
   return bridge.warmHistoryWorkspace(target, { intent });
 }

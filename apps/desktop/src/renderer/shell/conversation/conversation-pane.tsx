@@ -21,6 +21,8 @@ import { beginContinuousLayoutResize } from "../terminal/continuous-layout-resiz
 import { WorkbenchToggleButton } from "../workbench/toggle-button";
 import type { Workspace } from "../../platform/git";
 import { workspaceIsReadOnly } from "../../state/workspace-history";
+import { useCloudFolderIsReader } from "../../state/cloud-workspace-creators";
+import { TeamSharingReadOnlyBar } from "../team-sharing-read-only-bar";
 import { WorkspaceHistoryBar } from "../workspace-history-bar";
 import { TRANSCRIPT_STATUS_ROW_CLS } from "../../features/agent/composer-shell";
 import { selectActiveFolder, useActivePage, useWorkspaceStore } from "../../state/store";
@@ -116,7 +118,9 @@ export function ConversationPane({
    *  toggle float over this column's top-left corner (sidebar-toggle.tsx). */
   windowControlsInset?: boolean;
 } = {}) {
-  const readOnly = workspaceIsReadOnly(workspace);
+  // An archived checkout, or a teammate's workspace this account only reads.
+  const reader = useCloudFolderIsReader(workspace?.path);
+  const readOnly = workspaceIsReadOnly(workspace) || reader;
   const surfaceActive = useActivePage() === "workspace";
   const activateLinkedContext = (event: React.SyntheticEvent) => {
     if (!event.isTrusted || !surfaceActive) return;
@@ -132,11 +136,15 @@ export function ConversationPane({
         <div className="mx-auto w-full max-w-(--chat-column) flex-1 px-7 pt-8">
           <p className={TRANSCRIPT_STATUS_ROW_CLS}>No chat history.</p>
         </div>
-        <WorkspaceHistoryBar
-          key={workspace.id}
-          workspace={workspace}
-          surfaceActive={surfaceActive}
-        />
+        {reader ? (
+          <TeamSharingReadOnlyBar folder={workspace.path} surfaceActive={surfaceActive} />
+        ) : (
+          <WorkspaceHistoryBar
+            key={workspace.id}
+            workspace={workspace}
+            surfaceActive={surfaceActive}
+          />
+        )}
       </>
     ) : null;
   // User-resizable Conversation pane. Drag from the right edge updates conversation pane's

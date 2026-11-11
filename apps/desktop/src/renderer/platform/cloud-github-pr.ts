@@ -5,6 +5,7 @@ import {
   CloudGithubPrResponseSchema,
   type CloudGithubPrAuthority,
 } from "@zeros/protocol/cloud-github-pr";
+import { sharingFor } from "./team-sharing-registry";
 import {
   cloudGithubPrCatalogContext,
   cloudGithubPrCatalogKeys,
@@ -173,7 +174,7 @@ export function requestCloudGithubPr(
   if (existing) return existing;
   if (flights.size >= 256)
     return Promise.reject(new Error("GitHub is busy. Try again shortly."));
-  const pending = import("./cloud-workspaces")
+    const pending = import("./cloud-workspaces")
     .then(({ cloudAccountRequest }) => {
       if (!current()) throw changed();
       return cloudAccountRequest(
@@ -181,6 +182,8 @@ export function requestCloudGithubPr(
         CloudGithubPrResponseSchema,
         { body: parsed.data, idempotencyKey: crypto.randomUUID() },
         {
+          // Team sharing: only an admin's or member's request opts in (team-sharing-registry sharingFor).
+          ...sharingFor(target.workspaceId),
           githubPullRequest: true,
           ...(write ? { mutationReceipt: true } : {}),
         },

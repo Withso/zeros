@@ -10,7 +10,7 @@ const state = vi.hoisted(() => ({
   documents: {} as Record<string, CloudWorkspaceDocument>, reads: [] as string[], activePage: "workspace",
   projects: {} as Record<string, Project>, cloudAccess: true,
 }));
-vi.mock("../../features/team/team-store", () => ({ getOrganizationStoreGeneration: () => 1 }));
+vi.mock("../../features/team/team-store", () => ({ getOrganizationStoreGeneration: () => 1, getTeamStoreState: () => ({ me: null }), subscribeOrganizationSnapshots: () => () => {} }));
 vi.mock("../../features/team/cloud-workspace-account-access", () => ({ useCloudWorkspaceAccountAccess: () => state.cloudAccess, useSignedInUserName: () => null }));
 vi.mock("../conversation/use-cloud-workspace-surface", () => ({ useCloudWorkspaceSurfaceActive: (active: boolean) => active }));
 vi.mock("../../state/cloud-workspace-catalog", () => ({
@@ -24,6 +24,7 @@ vi.mock("../../state/use-active-workspace", () => ({ useActiveWorkspace: () => (
 vi.mock("../../state/use-projects", () => ({ useProjectForFolder: (folder: string) => state.projects[folder] ?? null }));
 vi.mock("../../state/workspace-store", () => ({ useWorkspaceStore: (select: (value: typeof state) => unknown) => select(state) }));
 vi.mock("../workspace-tabs", () => ({ workspaceLabel: () => "Local branch" }));
+vi.mock("../../state/use-cloud-workspace-events", () => ({ useCloudWorkspaceEvents: () => null }));
 import { TooltipProvider } from "../../shared/ui/primitives";
 import { ConversationWorkspaceHeader, WorkspaceHeader, workspaceHeaderBranch } from "../conversation/workspace-header";
 import { LocalWorkspaceDetailsCard, displayFolderPath } from "../conversation/local-workspace-details";
@@ -189,6 +190,19 @@ describe("workspace column header", () => {
     expect(html).toContain('aria-label="Cloud feature, Cloud workspace"'); expect(html).not.toContain("Share workspace");
     expect(html).not.toContain("Summary"); expect(html).not.toContain("Port forwarding");
     expect(identity(render({ folder: local, name: "History", readOnly: true })).tag).toBe("button");
+  });
+  it("shows Team sharing's Follow and Pin to a reader, even read-only, and no Follow to the Creator", () => {
+    const sharing: NonNullable<CloudWorkspaceDocument["sharing"]> = { createdByUserId: null, viewerRole: "member", readOnly: true, canManage: false, following: false, pinned: true, followerIds: [], followerCount: 0 };
+    state.documents[first] = { ...state.documents[first]!, sharing } as CloudWorkspaceDocument;
+    const reader = render({ readOnly: true });
+    expect(reader).toContain("data-team-sharing-header");
+    expect(reader).toContain(">Follow<"); expect(reader).toContain('aria-label="Unpin workspace"');
+    expect(reader).not.toContain("Summary");
+    state.documents[first] = { ...state.documents[first]!, sharing: { ...sharing, viewerRole: "creator", readOnly: false, canManage: true } } as CloudWorkspaceDocument;
+    const creator = render();
+    expect(creator).not.toContain(">Follow<"); expect(creator).toContain('aria-label="Unpin workspace"');
+    delete (state.documents[first] as { sharing?: unknown }).sharing;
+    expect(render()).not.toContain("data-team-sharing-header");
   });
   it("reserves native window controls only in the column header", () => {
     expect(render({ windowControlsInset: true })).toContain("data-window-controls-reserve");

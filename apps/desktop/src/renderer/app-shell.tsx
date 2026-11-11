@@ -92,6 +92,7 @@ import { useWorkspacePrSync } from "./shell/pr/use-workspace-pr-sync";
 import { useProjectCapabilitiesRefresh } from "./shell/use-project-capabilities-refresh";
 import { useEditHistoryMenu } from "./shell/use-edit-history-menu";
 import { workspaceIsReadOnly } from "./state/workspace-history";
+import { useCloudFolderIsReader } from "./state/cloud-workspace-creators";
 import {
   AddProjectProvider,
   useAddProject,
@@ -767,7 +768,8 @@ function ShellRouter() {
   // because it needs the bridge (BridgeProvider is inside AppShellBody).
   useTeamEngineSync();
   const active = useActiveWorkspace();
-  const workspaceToolsAvailable = !active.loading && !workspaceIsReadOnly(active.workspace);
+  const activeReader = useCloudFolderIsReader(active.workspace?.path ?? active.folder);
+  const workspaceToolsAvailable = !active.loading && !workspaceIsReadOnly(active.workspace) && !activeReader;
 
   // One persisted Workbench collapse for every workspace, changed only by the
   // user's toggle (window chrome or ⌥⌘B).
@@ -949,7 +951,9 @@ function MainShellBody({
     project: activeProject,
     loading: workspaceLoading,
   } = useActiveWorkspace();
-  const historyOnly = workspaceIsReadOnly(activeWorkspace);
+  // A teammate's workspace this account only reads has no tools either.
+  const activeReader = useCloudFolderIsReader(activeWorkspace?.path ?? activeWorkspaceFolder);
+  const historyOnly = workspaceIsReadOnly(activeWorkspace) || activeReader;
   const workspaceToolsAvailable = !workspaceLoading && !historyOnly;
   useOpenBrowserHotkey(
     activePage === "workspace" &&
