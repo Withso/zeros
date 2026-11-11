@@ -263,6 +263,26 @@ describe("Cloud workspace details", () => {
     expect(shown).toContain("Zeros Cloud");
   });
 
+  it("shows the setup status from the document, and no Setup row without one", () => {
+    const setupRow = (setup?: CloudWorkspaceDocument["setup"]) => { const shown = text(card({ workspace: { ...cloud("ready"), ...(setup ? { setup } : {}) } }));
+      const at = shown.indexOf("Setup"); return at < 0 ? null : shown.slice(at, at + 2); };
+    expect(setupRow()).toBeNull();
+    expect(setupRow({ state: "succeeded", startedAt: 1, finishedAt: 2, exitCode: 0 })).toEqual(["Setup", "Succeeded"]);
+    expect(setupRow({ state: "running", startedAt: 1 })).toEqual(["Setup", "Running"]);
+    expect(setupRow({ state: "failed", startedAt: 1, finishedAt: 2, exitCode: 3 })).toEqual(["Setup", "Failed"]);
+    expect(setupRow({ state: "failed", startedAt: 1, finishedAt: 2, reason: "timed_out" })).toEqual(["Setup", "Failed · timed out"]);
+    expect(setupRow({ state: "interrupted", startedAt: 1 })).toEqual(["Setup", "Interrupted"]);
+  });
+
+  it("shows the agent cost from the document, marking an estimate, and no row without one", () => {
+    const costRow = (agentCost?: CloudWorkspaceDocument["agentCost"]) => { const shown = text(card({ workspace: { ...cloud("ready"), ...(agentCost ? { agentCost } : {}) } }));
+      const at = shown.indexOf("Agent cost"); return at < 0 ? null : shown.slice(at, at + 2); };
+    expect(costRow()).toBeNull();
+    expect(costRow({ totalUsd: 1.234, estimated: false })).toEqual(["Agent cost", "$1.23"]);
+    expect(costRow({ totalUsd: 0.4, estimated: true })).toEqual(["Agent cost", "$0.40 · estimated"]);
+    expect(costRow({ totalUsd: 0, estimated: false })).toEqual(["Agent cost", "$0.00"]);
+  });
+
   it("offers Restart only to a manager of a running workspace", () => {
     expect(card({ workspace: cloud("stopped"), statusLabel: "Stopped" })).not.toContain("Restart workspace");
     expect(card({ workspace: cloud("ready", false) })).not.toContain("Restart workspace");

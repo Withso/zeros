@@ -83,6 +83,24 @@ export const CloudV2HistoryFrameSchema = z.object({
     chatEditAcks: z.array(CloudV2ChatEditAckSchema).max(128).optional(),
   }).strict();
 
+/** setup-status-v1: `POST /v2/cloud/worker/setup` body, and the workspace
+ * document's top-level `setup`. Times are epoch milliseconds. No path, script
+ * or log crosses the wire. */
+export const CLOUD_V2_SETUP_STATES = ["running", "succeeded", "failed", "interrupted"] as const;
+export const CloudV2SetupStatusSchema = z.object({
+  state: z.enum(CLOUD_V2_SETUP_STATES),
+  startedAt: z.number().int().nonnegative(),
+  finishedAt: z.number().int().nonnegative().optional(),
+  exitCode: z.number().int().optional(),
+  reason: z.enum(["timed_out", "script_refused", "source_changed"]).optional(),
+}).strict();
+export type CloudV2SetupStatus = z.infer<typeof CloudV2SetupStatusSchema>;
+
+/** The workspace document's top-level `agentCost`: the running total of turns
+ * whose mirrored prompt row carried `turnSummary.usage.totalCostUsd`. */
+export const CloudV2AgentCostSchema = z.object({ totalUsd: z.number().nonnegative().finite(), estimated: z.boolean() }).strict();
+export type CloudV2AgentCost = z.infer<typeof CloudV2AgentCostSchema>;
+
 export const CloudV2WorkerFrameSchema = z.discriminatedUnion("t", [
   z.object({
     t: z.literal("hello"),

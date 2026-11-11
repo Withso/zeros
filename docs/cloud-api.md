@@ -173,7 +173,7 @@ not its UUID. Unnumbered workspaces have a null link.
 
 | Object | Fields |
 | --- | --- |
-| `Workspace` | `id`, `number`, `name`, `title`, `state`, `status`, `repository`, `branch`, `baseBranch`, `archived`, `createdAt`, `lastActivityAt`, `creatorId`, `creatorName`, `createdBySessionId`, `link` |
+| `Workspace` | `id`, `number`, `name`, `title`, `state`, `status`, `repository`, `branch`, `baseBranch`, `archived`, `createdAt`, `lastActivityAt`, `creatorId`, `creatorName`, `createdBySessionId`, `link`, optional `setup` and `agentCost` |
 | `Session` | `id`, `workspaceId`, `name`, `agent`, `model`, `effort`, `archived`, `createdAt`, `updatedAt`, `createdBySessionId`, `link` |
 | `WorkspaceStatus` | `workspaceId`, `status`, `state`, `updatedAt` |
 | `SessionStatus` | `workspaceId`, `sessionId`, `status`, `updatedAt` |
@@ -184,6 +184,27 @@ The rename endpoint sets `title`. `state` is the stored cloud lifecycle state.
 The friendlier `status` is `initializing` for creating/starting, `ready` for
 running, `sleeping` for stopping/stopped, `failed` or `deleting`. The separate
 archive flag takes precedence and yields `archived`.
+
+`setup`, when reported by a worker advertising `setup-status-v1`, contains
+`state` (`running`, `succeeded`, `failed` or `interrupted`), `startedAt` (epoch
+milliseconds), and optional `finishedAt`, integer `exitCode` and `reason`
+(`timed_out`, `script_refused` or `source_changed`). It contains no script,
+path or logs. It remains readable while the workspace sleeps and is absent
+until reported. The v2 workspace document exposes the same top-level field;
+its strict `capabilities` object is unchanged. Reports do not count as activity
+or change lifecycle timestamps.
+Workers report this object to `POST /v2/cloud/worker/setup` with their worker
+credential and boot headers; an accepted report returns `204`.
+
+`agentCost`, when at least one mirrored prompt has a known cost, is
+`{ totalUsd: number, estimated: boolean }`. It sums the recorded
+`turnSummary.usage.totalCostUsd` values; `estimated` is true when any contributing
+turn is estimated. A known zero appears as zero; no reported costs means the
+field is absent. Replays never add twice, and rewrites, chat deletion and
+history replacement adjust the total to the current mirror. Earlier turns
+remain uncounted until their payload changes; there is no backfill. The same
+top-level field appears on v2 workspace documents and stays readable asleep.
+Cost changes do not count as activity or change lifecycle timestamps.
 
 A session ID is the chat ID. Its name comes from the mirrored title and is
 empty until named. Unselected model/effort fields are null. A session link is

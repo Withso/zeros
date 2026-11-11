@@ -255,3 +255,17 @@ describe("groupMessagesIntoTurns — mid-turn steering", () => {
     ]);
   });
 });
+
+describe("a mirrored cloud prompt row carrying turnSummary.usage (B3)", () => {
+  it("parses through the history client and reaches the turn's recorded summary unchanged", async () => {
+    const { fromPersistedMessage } = await import("../agent-history-client");
+    const usage = { accountingVersion: 1, costKind: "estimated", inputTokens: 1200, outputTokens: 80, totalCostUsd: 0.0123,
+      perModel: [{ model: "fixture-model", inputTokens: 1200, outputTokens: 80, costUsd: 0.0123 }] };
+    const turnSummary = { ord: 1, agentId: "codex", summary: null, startedAt: 1, endedAt: 2, stopReason: "end_turn", status: "completed", files: [], usage };
+    const prompt = fromPersistedMessage({ msgId: "opening", kind: "text", createdAt: 1,
+      payload: JSON.stringify({ id: "opening", kind: "text", role: "user", text: "Change files", createdAt: 1, turnSummary }) });
+    expect(prompt).not.toBeNull();
+    const [turn] = groupMessagesIntoTurns([prompt!]);
+    expect(turn?.recordedSummary).toEqual(turnSummary);
+  });
+});

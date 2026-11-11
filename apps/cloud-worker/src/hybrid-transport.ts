@@ -12,7 +12,7 @@ import { CloudGithubCheckoutSchema, type CloudGithubCheckout } from "@zeros/prot
 import { mcpFailure, mcpFailureError } from "./mcp/failure";
 import { CloudGithubUnavailableReasonSchema, type CloudGithubUnavailableReason } from "@zeros/protocol/cloud-github-connection";
 import { GITHUB_HTTP_TIMEOUT_MS } from "./credentials/github-failure";
-import { CloudEnvironmentReportSchema, type CloudEnvironmentReport } from "@zeros/protocol/cloud-v2-relay";
+import { CloudEnvironmentReportSchema, CloudV2SetupStatusSchema, type CloudEnvironmentReport, type CloudV2SetupStatus } from "@zeros/protocol/cloud-v2-relay";
 import { CloudRuntimeUpdateReplySchema, type CloudRuntimeUpdateRequest, type CloudRuntimeUpdateReply } from "@zeros/protocol/cloud-v2-relay";
 
 type ConfigFrame = Extract<CloudV2ControlFrame, { t: "config" }>;
@@ -187,6 +187,9 @@ export class HybridTransport implements Transport {
       if (signal?.aborted) this.pendingEnvironment = undefined;
       throw error;
     }
+  }
+  async reportSetup(status: CloudV2SetupStatus): Promise<void> {
+    await this.request("setup", CloudV2SetupStatusSchema.parse(status), undefined, 10_000);
   }
   async reportCheckoutFailure(): Promise<void> {
     this.checkoutFailed = true;

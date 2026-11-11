@@ -1,5 +1,10 @@
 import { z } from "zod";
 import { CloudGithubUnavailableReasonSchema } from "@zeros/protocol/cloud-github-connection";
+import { CloudV2AgentCostSchema, CloudV2SetupStatusSchema } from "@zeros/protocol/cloud-v2-relay";
+
+/** Read leniently: a field a newer server extends, or one this build cannot
+ * read, drops only itself, never the whole document. */
+const lenient = <T extends z.ZodType>(schema: T) => schema.optional().catch(undefined);
 
 // Pure response schemas shared by desktop and the Alpha Linux harness.
 
@@ -54,6 +59,10 @@ export const CloudWorkspaceDocumentSchema = z.object({
     observedState: z.string(),
     lastObservedAt: z.string().nullable(),
   }),
+  /** setup-status-v1, from the worker's report; absent when setup never ran. */
+  setup: lenient(z.object(CloudV2SetupStatusSchema.shape)),
+  /** Running total of mirrored turns that reported a cost; absent before any did. */
+  agentCost: lenient(z.object(CloudV2AgentCostSchema.shape)),
   version: z.number().int().nonnegative(),
   error: z.object({ code: z.string(), message: z.string() }).nullable(),
   createdAt: z.string().datetime(),

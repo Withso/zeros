@@ -1,7 +1,8 @@
 import { spawn } from "node:child_process";
 import { closeSync, constants, fstatSync, openSync, readFileSync } from "node:fs";
-import { mkdir, open, type FileHandle } from "node:fs/promises";
+import { mkdir, open, readFile, type FileHandle } from "node:fs/promises";
 import { join } from "node:path";
+import { CloudV2SetupStatusSchema, type CloudV2SetupStatus } from "@zeros/protocol/cloud-v2-relay";
 import { selectRepositorySetup, type RepositorySetupSelection } from "@zeros/protocol/run-actions";
 import { workerChildEnvironment } from "../drivers/shared/agent-environment";
 import type { WorkerConfig } from "./scope";
@@ -45,6 +46,8 @@ interface SetupOptions {
   signal?: AbortSignal;
   application?: ApplicationEnvironment;
   runner?: SetupRunner; activity(): void; onStorageError?(): void;
+  /** setup-status-v1: best effort, never affects the setup itself. */
+  report?(status: CloudV2SetupStatus): Promise<void>;
   beforeRun?(): Promise<void>;
   onAdmitted?(): Promise<void>;
 }
@@ -123,7 +126,49 @@ export class WorkspaceSetup {
     this.operation = this.execute().finally(() => { this.running = false; this.options.activity(); });
   }
 
+  /** After each hello: the status file as the control plane should see it.
+   * No file (setup never ran) reports nothing. */
+  reportCurrent(): Promise<void> { return this.enqueueReport(() => this.readStatus()); }
+
+  private reports = Promise.resolve();
+  private reportsClosed = false;
+  /** One chain, each read taken in turn, so an older read never lands after a newer report. */
+  private enqueueReport(read: () => SetupStatus | undefined | Promise<SetupStatus | undefined>): Promise<void> {
+    if (!this.options.report) return Promise.resolve();
+    this.reports = this.reports.then(async () => {
+      const status = await read();
+      const wire = status && wireStatus(status, this.running);
+      if (wire) await this.sendReport(wire);
+    }).catch(() => {});
+    return this.reports;
+  }
+  private async sendReport(status: CloudV2SetupStatus): Promise<void> {
+    for (let attempt = 0; ; attempt++) {
+      try { await this.options.report!(status); return; }
+      catch (error) {
+        const code = (error as { status?: unknown } | null)?.status;
+        const refused = typeof code === "number" && code >= 400 && code < 500 && code !== 408 && code !== 429;
+        if (refused || attempt >= 2 || this.reportsClosed) return;
+        await new Promise<void>(resolve => { const timer = setTimeout(resolve, 1_000 * 5 ** attempt); timer.unref?.(); });
+      }
+    }
+  }
+  private async readStatus(): Promise<SetupStatus | undefined> {
+    const path = join(this.options.directory, "workspace-setup", `${this.options.workspace.id}.json`);
+    let text: string;
+    try {
+      const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+      try { if ((await file.stat()).size > 64 * 1024) return undefined; text = await readFile(file, "utf8"); } finally { await file.close(); }
+    } catch { return undefined; }
+    try {
+      const value = JSON.parse(text) as SetupStatus;
+      return value && typeof value === "object" && value.workspaceId === this.options.workspace.id ? value : undefined;
+    } catch { return undefined; }
+  }
+
   async dispose(): Promise<void> {
+    // An in-flight report may finish; nothing retries after dispose, and the next hello reports the file.
+    this.reportsClosed = true;
     this.cancel(); this.options.signal?.removeEventListener("abort", this.cancel);
     await this.operation;
   }
@@ -156,6 +201,7 @@ export class WorkspaceSetup {
         try { await parent.sync(); } finally { await parent.close(); }
       }
       await this.options.onAdmitted?.();
+      void this.enqueueReport(() => ({ ...status }));
       // Keep descriptors throughout execution: a checkout cannot redirect an
       // already admitted status/log write by replacing its pathname.
       log = await open(join(directory, `${workspace.id}.log`), constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
@@ -204,6 +250,7 @@ export class WorkspaceSetup {
       status.finishedAt = new Date().toISOString(); status.exitCode = timedOut ? null : code;
       if (timedOut) status.reason = "timed_out";
       await this.persist(statusFile, status);
+      void this.enqueueReport(() => ({ ...status }));
     } catch { this.options.onStorageError?.(); }
     finally { await writes; await source?.close().catch(() => {}); await snapshot?.close().catch(() => {}); await log?.close().catch(() => {}); await statusFile?.close().catch(() => {}); }
   }
@@ -212,4 +259,17 @@ export class WorkspaceSetup {
     const body = Buffer.from(`${JSON.stringify(status)}\n`);
     await file.write(body, 0, body.length, 0); await file.truncate(body.length); await file.sync();
   }
+}
+
+/** The file's view as the control plane sees it. A run the file still calls
+ * running, while none runs here, ended with its VM: interrupted. */
+function wireStatus(status: SetupStatus, running: boolean): CloudV2SetupStatus | undefined {
+  const startedAt = Date.parse(status.startedAt), finishedAt = status.finishedAt ? Date.parse(status.finishedAt) : undefined;
+  const parsed = CloudV2SetupStatusSchema.safeParse({
+    state: status.state === "running" && !running ? "interrupted" : status.state, startedAt,
+    ...(finishedAt !== undefined ? { finishedAt } : {}),
+    ...(typeof status.exitCode === "number" ? { exitCode: status.exitCode } : {}),
+    ...(status.reason ? { reason: status.reason } : {}),
+  });
+  return parsed.success ? parsed.data : undefined;
 }

@@ -913,6 +913,8 @@ export class Agents {
           const recordedPrompt = await this.turns.finish(route.chatId, entry.userMessageId, {
             status: receipt.state === "cancelled" ? "cancelled" : receipt.state === "failed" ? "failed" : "completed",
             stopReason: receipt.response?.stopReason ?? null,
+            // Rides turnSummary on the mirrored prompt row; the control plane totals it per workspace.
+            ...(receipt.response?.usage ? { usage: receipt.response.usage } : {}),
           });
           await this.publishRecordedTurn(route, recordedPrompt);
           if (notice && receipt.state === "failed") await this.update(route, notice);

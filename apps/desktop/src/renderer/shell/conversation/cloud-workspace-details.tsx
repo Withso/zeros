@@ -1,6 +1,6 @@
 import { useState, type ReactNode } from "react";
 import { IconButton } from "@/renderer/shared/ui/primitives/icon-button";
-import { Activity, ArrowUpRight, Clock, Cloud, Cpu, FolderGit2, HardDrive, MemoryStick, RotateCw, type LucideIcon } from "lucide-react";
+import { Activity, ArrowUpRight, CircleDollarSign, Clock, Cloud, Cpu, FolderGit2, HardDrive, MemoryStick, RotateCw, Wrench, type LucideIcon } from "lucide-react";
 import type { CloudWorkspaceResources } from "@zeros/protocol/cloud-v2-relay";
 import { Button, Tooltip } from "../../shared/ui/primitives";
 import { Popover, PopoverContent } from "../../shared/ui/primitives/popover";
@@ -28,10 +28,15 @@ export function cloudStatusLabel(status: string, availability?: WorkspaceAvailab
 const formatBytes = (bytes: number) => `${(bytes / 2 ** 30).toFixed(bytes < 10 * 2 ** 30 ? 1 : 0).replace(/\.0$/, "")} GB`;
 const formatPercent = (value: number) => `${Math.round(value)}% used`;
 type LifecycleChange = "wake" | "stop" | "restart";
+const SETUP_LABELS = { running: "Running", succeeded: "Succeeded", failed: "Failed", interrupted: "Interrupted" } as const;
+function setupLabel(setup: NonNullable<CloudWorkspaceDocument["setup"]>): string {
+  return setup.state === "failed" && setup.reason === "timed_out" ? "Failed · timed out" : SETUP_LABELS[setup.state];
+}
 
 /** What a cloud workspace is and whether it runs: where, its repository, age
- * and status (with Start, Stop and Restart), then the VM's usage when its
- * worker reports it. Older workers report none, and those rows stay out. */
+ * and status (with Start, Stop and Restart), its setup and agent cost when the
+ * document carries them, then the VM's usage when its worker reports it.
+ * Older servers and workers report none, and those rows stay out. */
 export function CloudWorkspaceDetailsCard({ workspace, title, statusLabel, resources, changing, onChange, creatorName }: {
   workspace: CloudWorkspaceDocument;
   title?: string;
@@ -61,6 +66,10 @@ export function CloudWorkspaceDetailsCard({ workspace, title, statusLabel, resou
       {workspace.capabilities.canManage && running && <Tooltip label="Restart workspace"><IconButton size="compact" label="Restart workspace"
         disabled={changing} onClick={() => onChange("restart")}><RotateCw /></IconButton></Tooltip>}
     </span> },
+    ...(workspace.setup ? [{ Icon: Wrench, label: "Setup", value: setupLabel(workspace.setup) }] : []),
+    // Same rounding as a turn's usage card.
+    ...(workspace.agentCost ? [{ Icon: CircleDollarSign, label: "Agent cost",
+      value: `$${workspace.agentCost.totalUsd.toFixed(2)}${workspace.agentCost.estimated ? " · estimated" : ""}` }] : []),
     ...(resources ? [
       { Icon: Cpu, label: "CPU", value: `${resources.cpu.cores} ${resources.cpu.cores === 1 ? "core" : "cores"} · ${formatPercent(resources.cpu.usedPercent)}` },
       { Icon: MemoryStick, label: "Memory", value: `${formatBytes(resources.memory.totalBytes)} · ${formatPercent(resources.memory.usedPercent)}` },

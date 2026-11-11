@@ -26,6 +26,7 @@ import { consumeRuntimeCanary } from "./runtime-canary-store.js";
 import type { RuntimeCanaryAdmission } from "./runtime-canary.js";
 import { RUNTIME_HANDOFF_SESSION } from "./runtime-handoff-store.js";
 import { notifyCloudV2WorkerReady } from "./worker-ready.js";
+import type { CloudV2SetupStatus } from "./setup-status-contract.js";
 
 export type CloudV2WorkspaceState =
   | "creating" | "running" | "stopping" | "stopped" | "starting" | "deleting" | "deleted" | "failed";
@@ -87,6 +88,8 @@ export type CloudV2Workspace = {
   archivedAt: string | null;
   createdAt: string;
   updatedAt: string;
+  setup?: CloudV2SetupStatus;
+  agentCost?: { totalUsd: number; estimated: boolean };
   /** Created before its GitHub checks: no source scope, sandbox or worker
    * yet. Only the lifecycle's resolvePendingSource may end it. */
   sourcePending?: true;
@@ -157,10 +160,13 @@ type Row = {
   error_code: string | null; active_at: Date | null; archived_at: Date | null; created_at: Date; updated_at: Date;
   source_pending: boolean;
   created_by_session_id: string | null;
+  setup_status: CloudV2SetupStatus | null;
+  agent_cost_usd: string; agent_cost_turns: string; agent_cost_estimated_turns: string;
 };
 
 const WORKSPACE_COLUMNS_SQL = sql`id, org_id, creator_user_id, name, number, title, repository, branch, base_branch, state, boat_sandbox_id,
-  computer_build_id, error_code, active_at, archived_at, created_at, updated_at, source_pending, created_by_session_id`;
+  computer_build_id, error_code, active_at, archived_at, created_at, updated_at, source_pending, created_by_session_id, setup_status,
+  agent_cost_usd, agent_cost_turns, agent_cost_estimated_turns`;
 const COLUMNS = WORKSPACE_COLUMNS_SQL.text;
 
 type LifecycleRow = Row & {
@@ -244,6 +250,8 @@ function workspace(row: Row): CloudV2Workspace {
     archivedAt: row.archived_at?.toISOString() ?? null,
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),
+    ...(row.setup_status ? { setup: row.setup_status } : {}),
+    ...(Number(row.agent_cost_turns) > 0 ? { agentCost: { totalUsd: Number(row.agent_cost_usd), estimated: Number(row.agent_cost_estimated_turns) > 0 } } : {}),
     ...(row.source_pending ? { sourcePending: true as const } : {}),
   };
 }
@@ -714,6 +722,27 @@ export class CloudV2Store {
             AND state NOT IN ('deleting','deleted') AND ${CLOUD_V2_LIVE_ACCESS_SQL}`);
     const row = rows[0];
     return row ? { ...workspace(row), accessEpoch: row.access_epoch, loginRevision: row.login_revision } : null;
+  }
+
+  async reportWorkerSetup(token: string, bootId: string, value: CloudV2SetupStatus,
+    proof: { accessEpoch: string; handoff?: string }): Promise<void> {
+    await withSystemTx(this.pool, async tx => {
+      const hash = hashCloudV2Token(token);
+      await tx.query("SELECT id FROM cloud_v2_workspaces WHERE worker_token_hash=$1 FOR UPDATE", [hash]);
+      // Recheck authority after a lock wait, including a private adoption boot.
+      const { rows } = await tx.query<{ id: string; setup_status: CloudV2SetupStatus | null }>(
+        `SELECT id, setup_status FROM cloud_v2_workspaces w WHERE worker_token_hash=$1
+          AND (CASE WHEN $3::uuid IS NULL THEN worker_boot_id=$2 ELSE ${RUNTIME_HANDOFF_SESSION} END)
+          AND access_epoch=$5::bigint AND state IN ('creating','starting','running','stopping') AND ${LIVE_ACCESS}`,
+        [hash, bootId, proof.handoff ?? null, null, proof.accessEpoch]);
+      const row = rows[0];
+      if (!row) throw new HttpError(401, "worker_boot_changed", "Worker authorization changed");
+      const previous = row.setup_status;
+      if (previous && (value.startedAt < previous.startedAt ||
+          (value.startedAt === previous.startedAt && previous.state !== "running"))) return;
+      // Lifecycle deadlines and idle stop use updated_at; reports are not activity.
+      await tx.query("UPDATE cloud_v2_workspaces SET setup_status=$2 WHERE id=$1 AND setup_status IS DISTINCT FROM $2::jsonb", [row.id, JSON.stringify(value)]);
+    });
   }
 
   async relayActivity(binding: CloudV2WorkerBinding, idle: boolean): Promise<(CloudV2WorkerSession & { promptsPending: boolean }) | null> {

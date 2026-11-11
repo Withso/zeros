@@ -105,6 +105,26 @@ suite("runtime hello through the production composition", () => {
     return { cp, creator, org, workspace, token, boot, h, handoffs, hello, ordinary, costs, fetcher, app, deny: () => { allowed = false; } };
   }
 
+  it("accepts setup metadata from the current or private adoption boot without source I/O, and fences a cancelled candidate", async () => {
+    const f = await fixture(true), initial = await f.cp.store.get(f.workspace.id, f.creator);
+    const report = (boot: string, value: unknown, handoff?: string) => f.app.request("/v2/cloud/worker/setup", {
+      method: "POST", headers: { authorization: `Bearer ${f.token}`, "content-type": "application/json",
+        "x-zeros-worker-boot": boot, "x-zeros-worker-features": "setup-status-v1",
+        ...(handoff ? { "x-zeros-runtime-handoff": handoff } : {}) }, body: JSON.stringify(value),
+    });
+    const calls = f.fetcher.mock.calls.length;
+    const running = { state: "running", startedAt: 1 }, complete = { state: "succeeded", startedAt: 1, finishedAt: 2, exitCode: 0 };
+    expect((await report(f.boot, running)).status).toBe(204);
+    expect((await report(f.h.next_boot_id, complete)).status).toBe(401);
+    expect((await report(f.h.next_boot_id, complete, randomUUID())).status).toBe(401);
+    expect((await report(f.h.next_boot_id, complete, f.h.id)).status).toBe(204);
+    expect(await f.cp.store.get(f.workspace.id, f.creator)).toEqual({ ...initial, setup: complete });
+    await f.handoffs.settleUnstarted(f.h.id);
+    expect((await report(f.h.next_boot_id, { state: "running", startedAt: 3 }, f.h.id)).status).toBe(401);
+    expect(await f.cp.store.get(f.workspace.id, f.creator)).toEqual({ ...initial, setup: complete });
+    expect(f.fetcher).toHaveBeenCalledTimes(calls);
+  });
+
   it("encrypts API create environment with the production keyring and resolves it in the worker configuration", async () => {
     const f = await fixture(false), build = randomUUID();
     await pool.query(`INSERT INTO cloud_v2_computer_builds(id,org_id,version,recipe,state,snapshot_id,created_by,source_policy_version,source_targets)
