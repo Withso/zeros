@@ -55,7 +55,7 @@ suite("desktop direct sync client, worker and control-plane routes joined", () =
     };
     vi.stubGlobal("fetch", fetcher);
     control = new clients.DeviceControl({ fetch: fetcher, baseUrl: () => "https://api.example.test", token: async () => "synthetic-desktop-session" });
-    device = (await control.register(randomUUID(), { requestId: randomUUID(), name: "Sync Mac" })).device;
+    device = (await control.register(randomUUID(), { requestId: randomUUID(), name: "Sync Mac", capabilities: ["local-commands-v1"] })).device;
     await control.connect(device, f.workspaceId);
     directory = await mkdtemp(join(tmpdir(), "joined-cloud-sync-"));
     const checkout = join(directory, "checkout"), state = join(directory, "state");
