@@ -389,15 +389,65 @@ describe("layer states in Chromium", () => {
     }
   });
 
+  it("reads layers outside the held one as Default, though the state moves them", async () => {
+    const scoped = await fixture(
+      browser,
+      `<style>.row { display: flex; } .grow { width: 40px; height: 20px; } .grow:hover { width: 200px; } .after { width: 30px; height: 20px; }</style>`,
+      `<div data-oid="row" class="row"><div data-oid="grow" class="grow"></div><div data-oid="after" class="after"></div></div>`,
+    );
+    try {
+      const before = await details(scoped, "after");
+      const row = await details(scoped, "row");
+      await hold(scoped, "grow", "hover", "wide");
+      // The canvas shows the sibling pushed along by the wider item.
+      expect(await scoped.locator('[data-oid="after"]').evaluate((element) => element.getBoundingClientRect().x)).toBe(before.rect.x + 160);
+      const sibling = await details(scoped, "after");
+      expect(sibling.heldState).toBeUndefined();
+      expect(sibling.rect).toEqual(before.rect);
+      expect((await details(scoped, "row")).rect).toEqual(row.rect);
+      // Hit-testing reports what is under the pointer, read as Default too.
+      const hit = (await request(scoped, "getElementAtLoc", { x: before.rect.x + 160 + 5, y: before.rect.y + 5, mode: "deepest" })).result as DesignRuntimeNodeDetails;
+      expect(hit.oid).toBe("after");
+      expect(hit.rect).toEqual(before.rect);
+      // The held layer and the view keep the state.
+      expect((await details(scoped, "grow")).rect.width).toBe(200);
+      expect(await scoped.locator('[data-oid="after"]').evaluate((element) => element.getBoundingClientRect().x)).toBe(before.rect.x + 160);
+    } finally {
+      await scoped.close();
+    }
+  });
+
+  it("reads the held layer's parent from the layer's Default rules, not ones cached while held", async () => {
+    const scoped = await fixture(
+      browser,
+      `<style>.box { position: relative; width: 200px; height: 40px; } .pin { position: absolute; left: 0; width: 20px; height: 20px; } .pin:hover { right: 0; width: auto; }</style>`,
+      `<div data-oid="box" class="box"><div data-oid="pin" class="pin"></div></div>`,
+    );
+    try {
+      const before = await details(scoped, "box");
+      expect(before.childrenLayout).toMatchObject({ x: "start" });
+      // The hold's reply caches the pinned layer's rules as held: "right" is one.
+      await hold(scoped, "pin", "hover", "pinned");
+      const during = await details(scoped, "box");
+      expect(during.heldState).toBeUndefined();
+      expect(during.childrenLayout).toEqual(before.childrenLayout);
+      // The held layer still reads held afterwards.
+      expect((await details(scoped, "pin")).authoredStyles?.right).toMatchObject({ state: "hover" });
+    } finally {
+      await scoped.close();
+    }
+  });
+
   it("releases when the held layer leaves the document", async () => {
     const scoped = await fixture(browser);
     try {
       await hold(scoped, "card", "hover", "removed");
       await events(scoped);
       await scoped.evaluate(() => document.querySelector('[data-oid="card"]')!.remove());
-      // After the observer's debounce.
+      // After the observer's debounce. A fresh fixture's "painted" may land
+      // at any point and says nothing about the release.
       await vi.waitFor(async () =>
-        expect(await scoped.evaluate(() => (window as unknown as RuntimeWindow).runtimeEvents.slice())).toEqual(["stateReleased:removed", "mutation"]),
+        expect(await scoped.evaluate(() => (window as unknown as RuntimeWindow).runtimeEvents.filter((name) => name !== "painted"))).toEqual(["stateReleased:removed", "mutation"]),
       { timeout: 5_000 });
       expect(await scoped.evaluate(() => document.querySelectorAll("style[data-zeros-runtime-state]").length)).toBe(0);
     } finally {
@@ -419,7 +469,11 @@ describe("layer states across selector shapes in Chromium", () => {
       .nest { color: rgb(0, 0, 4); @media (min-width: 1px) { &:hover { color: rgb(0, 0, 5); } } }
       [data-oid="own"] { color: rgb(0, 0, 6); }
       [data-oid="own"]:hover { color: rgb(0, 0, 7); }
+      .download[href$=".pdf"]:hover { color: rgb(0, 0, 8); }
+      .tricky[data-note="x].y"]:hover { color: rgb(0, 0, 9); }
     </style>`, `
+      <a data-oid="download" class="download" href="guide.pdf">Guide</a>
+      <a data-oid="tricky" class="tricky" href="#" data-note="x].y">Tricky</a>
       <div data-oid="list" class="a">List</div>
       <div data-oid="nest" class="nest">Nest</div>
       <div data-oid="own">Own</div>`);
@@ -440,6 +494,15 @@ describe("layer states across selector shapes in Chromium", () => {
     expect(copies[0]).toMatch(/^\.a\[data-zd-state~="hover"\] \{/);
     // The unrelated outline rule was not copied for a hover.
     expect(await computed(page, "list", "outline-style")).toBe("none");
+    await request(page, "releaseNodeState", {});
+  });
+
+  it("reads no class from an attribute selector, quoted dots and brackets included", async () => {
+    expect((await details(page, "download")).states).toContain("hover");
+    expect((await hold(page, "download", "hover")).styles.color).toBe("rgb(0, 0, 8)");
+    await request(page, "releaseNodeState", {});
+    expect((await details(page, "tricky")).states).toContain("hover");
+    expect((await hold(page, "tricky", "hover")).styles.color).toBe("rgb(0, 0, 9)");
     await request(page, "releaseNodeState", {});
   });
 

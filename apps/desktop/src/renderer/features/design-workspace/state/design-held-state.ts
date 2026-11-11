@@ -62,7 +62,11 @@ function rereadRefused(refusal: DesignHeldReplyRefusal): void {
   rereading.add(key);
   void runtime
     .getNodeDetails(refusal.nodeId)
-    .then(refusal.publish, () => {})
+    .then((details) => {
+      // A replaced document or a later generation owns the frame now.
+      if (designFrameRuntime(refusal.workspaceId, refusal.frame) !== runtime || runtime.sourceVersion !== refusal.sourceVersion) return;
+      refusal.publish(details);
+    }, () => {})
     .finally(() => rereading.delete(key));
 }
 
@@ -131,6 +135,24 @@ export function designHeldDetails(
 export function designHeldStateHolds(workspaceId: string, frame: string, nodeIds: readonly string[]): boolean {
   const hold = holdByWorkspace.get(workspaceId);
   return Boolean(hold && hold.frame === frame && nodeIds.includes(hold.nodeId));
+}
+
+/** For an edit that awaits reads before it writes: a hold can begin after
+ * its admission check, and a read inside a held layer comes back marked.
+ * Pass each read through `read`, then ask `blocked` before writing. */
+export function designHeldStateWatch(
+  workspaceId: string,
+  frame: string,
+  nodeIds: readonly string[],
+): { read: (details: DesignRuntimeNodeDetails) => DesignRuntimeNodeDetails; blocked: () => boolean } {
+  let heldRead = false;
+  return {
+    read(details) {
+      if (details.heldState !== undefined) heldRead = true;
+      return details;
+    },
+    blocked: () => heldRead || designHeldStateHolds(workspaceId, frame, nodeIds),
+  };
 }
 
 /** Ask the frame to show the layer in a state. Never awaited by a click: the

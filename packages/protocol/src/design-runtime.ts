@@ -2636,6 +2636,19 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     for (var index = 0; index < compound.length; index += 1) {
       var character = compound[index];
       if (character === "\\") { index += 1; continue; }
+      // An attribute selector names no class, whatever its value holds:
+      // [href$=".pdf"], or a quoted "]".
+      if (character === "[") {
+        var quote = "";
+        for (index += 1; index < compound.length; index += 1) {
+          var inner = compound[index];
+          if (inner === "\\") { index += 1; continue; }
+          if (quote) { if (inner === quote) quote = ""; continue; }
+          if (inner === '"' || inner === "'") { quote = inner; continue; }
+          if (inner === "]") break;
+        }
+        continue;
+      }
       if (character === "(") { depth += 1; continue; }
       if (character === ")") { depth = Math.max(0, depth - 1); continue; }
       if (character === "." && depth === 0) {
@@ -2994,6 +3007,10 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       held.style.disabled = true;
     });
     suspendElementMotion(held.element);
+    // What was cached of it while held would answer for Default (a parent
+    // reads each child's own rules).
+    authoredStylePropertiesCache.delete(held.element);
+    authoredStylesCache.delete(held.element);
     heldStateAside = true;
     try {
       return work();
@@ -3005,8 +3022,10 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
           held.element.setAttribute("data-zd-state", STATE_TOKENS[held.state].join(" "));
         });
         suspendElementMotion(held.element);
-        // Caches built while it was aside hold Default's winners.
-        resetStyleCaches();
+        // Its own winners read while aside are Default's. Nothing else's
+        // depend on the state: copies are of rules whose subject it is.
+        authoredStylePropertiesCache.delete(held.element);
+        authoredStylesCache.delete(held.element);
       }
     }
   }
@@ -3392,6 +3411,12 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   }
 
   function detailsOf(element, layoutOnly, relocation) {
+    // A held state can move and resize layers outside it (a wider flex item
+    // pushes its siblings). Those are read with the state set aside, so no
+    // unmarked reply carries its geometry; the held subtree reads marked.
+    if (heldState && !heldStateAside && element !== heldState.element && !heldState.element.contains(element)) {
+      return withoutHeldState(function () { return detailsOf(element, layoutOnly, relocation); });
+    }
     var oid = targetOidOf(element);
     if (!oid) throw new Error("The selected element has no stable data-oid.");
     var escaped = window.CSS && typeof window.CSS.escape === "function"

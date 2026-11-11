@@ -109,6 +109,7 @@ import { designHeldStateChanges } from "./design-style-origins";
 import {
   designHeldStateEntry,
   designHeldStateHolds,
+  designHeldStateWatch,
   holdDesignNodeState,
   releaseDesignNodeState,
   releaseDesignNodeStateUnless,
@@ -2232,8 +2233,12 @@ export const DesignInspector = React.memo(function DesignInspector({
         if (!workspaceId || !frame || styleNodeIds.length === 0) return;
         const runtime = designFrameRuntime(workspaceId, frame.file);
         if (!runtime) throw new Error("The selected frame is still loading.");
+        // A hold can begin while these reads are awaited: what they return
+        // inside it is the state's, never Default to write.
+        const held = designHeldStateWatch(workspaceId, frame.file, styleNodeIds);
+        const readDetails = (nodeId: string) => runtime.getNodeDetails(nodeId).then(held.read);
         const details = await Promise.all(
-          styleNodeIds.map((nodeId) => runtime.getNodeDetails(nodeId)),
+          styleNodeIds.map((nodeId) => readDetails(nodeId)),
         );
         let updates: Map<string, Record<string, string | null>>;
         if (
@@ -2248,7 +2253,7 @@ export const DesignInspector = React.memo(function DesignInspector({
           const childDetails = await Promise.all(
             children.nodeIds.map(async (nodeId) => {
               try {
-                return await runtime.getNodeDetails(nodeId);
+                return await readDetails(nodeId);
               } catch (error) {
                 // A child removed after intent no longer belongs in this batch.
                 if (
@@ -2280,7 +2285,7 @@ export const DesignInspector = React.memo(function DesignInspector({
           const parents = await Promise.all(
             details.map((node) =>
               node.layout?.parentId
-                ? runtime.getNodeDetails(node.layout.parentId)
+                ? readDetails(node.layout.parentId)
                 : Promise.resolve(null),
             ),
           );
@@ -2308,7 +2313,7 @@ export const DesignInspector = React.memo(function DesignInspector({
               ),
             ];
             const parents = await Promise.all(
-              parentIds.map((nodeId) => runtime.getNodeDetails(nodeId)),
+              parentIds.map((nodeId) => readDetails(nodeId)),
             );
             for (const parent of parents) {
               if (designSizingMode(parent, action.axis) === "hug")
@@ -2327,7 +2332,7 @@ export const DesignInspector = React.memo(function DesignInspector({
             ...new Set(targets.map((node) => node.layout!.parentId!)),
           ];
           const parents = await Promise.all(
-            parentIds.map((nodeId) => runtime.getNodeDetails(nodeId)),
+            parentIds.map((nodeId) => readDetails(nodeId)),
           );
           updates = designLayoutChildUpdates(parents, targets, {
             type: "center",
@@ -2374,7 +2379,7 @@ export const DesignInspector = React.memo(function DesignInspector({
             }),
           );
         }
-        if (updates.size === 0) return;
+        if (updates.size === 0 || held.blocked()) return;
         const currentFrame = { ...frame, sourceVersion: runtime.sourceVersion };
         const fittedRoot =
           action.type === "resize-fit"

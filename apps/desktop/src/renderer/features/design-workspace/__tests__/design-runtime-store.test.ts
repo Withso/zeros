@@ -71,6 +71,16 @@ describe("design runtime store", () => {
     expect(held.refused).toHaveBeenCalledTimes(1);
   });
 
+  it("keeps a reread whose only change is the layer's states", () => {
+    const store = useDesignRuntimeStore.getState();
+    store.publishNodeDetails("states", "/design", "home.html", details(), SOURCE_VERSION);
+    // A Hover rule added through a stylesheet preview: same box, same values.
+    store.publishNodeDetails("states", "/design", "home.html", { ...details(), states: ["hover"] }, SOURCE_VERSION);
+    expect(designRuntimeFrameState("states", "home.html")?.detailsByNode.heading?.states).toEqual(["hover"]);
+    store.publishNodeDetails("states", "/design", "home.html", details(), SOURCE_VERSION);
+    expect(designRuntimeFrameState("states", "home.html")?.detailsByNode.heading?.states).toBeUndefined();
+  });
+
   it("never stores a snapshot whose frame was read while held", () => {
     const store = useDesignRuntimeStore.getState();
     const snapshot = (frame: DesignRuntimeNodeDetails) => ({ sourceVersion: SOURCE_VERSION, revision: 1, tree: [], warnings: [], frame,

@@ -371,6 +371,7 @@ function sameNodeDetails(
       left.authoredStyleProperties,
       right.authoredStyleProperties,
     ) &&
+    sameStringArray(left.states, right.states) &&
     sameStringRecord(left.styles, right.styles),
   );
 }

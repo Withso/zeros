@@ -27,7 +27,15 @@ export async function runDesignStyleStatesSmoke({ page, check }) {
   const stateButton = inspector.getByRole("button", { name: "Layer state" });
   const note = inspector.locator("[data-design-state-note]");
   const card = page.locator("[data-design-style-card]");
-  const writes = () => page.evaluate(() => window.__zerosHarnessDesignTransactions ?? 0);
+  // Every request that writes source, whichever path it takes: a one-layer
+  // commit (design.node.styles), a transaction, a token or theme update, a
+  // move. The harness logs each request it receives.
+  const writes = () =>
+    page.evaluate(() =>
+      (window.__zerosHarnessWorkbenchOperations ?? []).filter((op) =>
+        /^design\.(transaction\.apply|node\.(styles|text|html|transfer)|canvas\.update|frames\.move|frame\.(create|delete|duplicate|rename)|themes\.update|token\.update|save|stage|commit)$/.test(op),
+      ).length,
+    );
   const heldInFrame = (id) => runtime.locator(`[data-oid="${id}"]`).getAttribute("data-zd-state");
   const visible = () =>
     inspector.locator("[data-design-style-property]").evaluateAll((fields) =>
@@ -183,10 +191,12 @@ export async function runDesignStyleStatesSmoke({ page, check }) {
     order[0] === "release" && order.slice(1).includes("move") && !order.includes("hold"),
     order.slice(0, 6).join(","),
   );
-  if ((await writes()) > beforeDrag) {
-    await page.getByLabel("Design canvas", { exact: true }).focus();
-    await page.keyboard.press("ControlOrMeta+z");
-  }
+  // The drag's save can still be on its way after the pointer is up. A
+  // fresh page starts the fixture over, so a late save changes nothing that
+  // follows.
+  check("the drag moved the layer and saved it", (await expect.poll(writes).toBeGreaterThan(beforeDrag).then(() => true, () => false)));
+  await page.goto(page.url(), { waitUntil: "networkidle" });
+  await openLayersDrawer(page);
   await layer("home-submit").click();
   await stateButton.waitFor();
   await pick("Focus visible");

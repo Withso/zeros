@@ -1955,9 +1955,13 @@ original unsnapped geometry writes nothing and preserves authored sizing.
   the held layer (its child, say, when it is selected or hovered) is refused
   by the store and read again as Default once the hold is gone, unless the
   store already has that layer's Default details. Captures (Export PNG, drag
-  ghosts) and every snapshot the runtime produces set the state aside for
-  their synchronous span, so a held frame root never reaches `snapshot.frame`,
-  and the store refuses a snapshot whose frame is marked held. Single
+  ghosts), every snapshot the runtime produces and every read of a layer
+  outside the held one (a sibling the state pushes along, a parent it
+  resizes, a hover over either) set the state aside for their synchronous
+  span, so no unmarked reply carries what the state moved, a held frame root
+  never reaches `snapshot.frame`, and the store refuses a snapshot whose
+  frame is marked held. An edit that awaits reads (a layout action) checks
+  again before it writes and drops any read that came back held. Single
   selection, Local workspaces only. Known limits:
   a copy sits after every original rule of its layer, so a later rule of
   equal specificity that beats the state for real loses to the held copy

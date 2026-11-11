@@ -8,6 +8,7 @@ import {
   designHeldDetails,
   designHeldStateEntry,
   designHeldStateHolds,
+  designHeldStateWatch,
   forgetDesignHeldStateRelease,
   holdDesignNodeState,
   noteDesignHeldReplyRefused,
@@ -106,6 +107,25 @@ describe("held layer state", () => {
     holds[1]!.reject(new Error("gone"));
     await vi.waitFor(() => expect(designHeldStateHolds("w", "home.html", ["send"])).toBe(false));
     expect(held()).toBeUndefined();
+  });
+
+  it("stops an edit whose reads met a hold that began after its check", async () => {
+    const { runtime } = fakeRuntime();
+    mocks.runtime.mockReturnValue(runtime);
+    const watch = designHeldStateWatch("w", "home.html", ["send"]);
+    expect(watch.blocked()).toBe(false);
+    // The admission check passed; a pick lands while the edit awaits reads.
+    holdDesignNodeState({ ...KEY, state: "hover" });
+    expect(watch.blocked()).toBe(true);
+    releaseDesignNodeState("w");
+    expect(watch.blocked()).toBe(false);
+    // A child read while a state is held comes back marked: never used.
+    const child = watch.read({ ...details("hover"), oid: "send-label" });
+    expect(child.oid).toBe("send-label");
+    expect(watch.blocked()).toBe(true);
+    const plain = designHeldStateWatch("w", "home.html", ["send"]);
+    plain.read(details());
+    expect(plain.blocked()).toBe(false);
   });
 
   it("drops a reply that arrives after Back to Default and lets go without waiting", async () => {
@@ -274,6 +294,37 @@ describe("held layer state", () => {
     noteDesignHeldReplyRefused({ ...refusal("stale"), sourceVersion: NEXT_SOURCE_VERSION });
     await Promise.resolve();
     expect(runtime.getNodeDetails).toHaveBeenCalledTimes(2);
+  });
+
+  it("publishes a reread only while its frame runtime and generation are still current", async () => {
+    const { runtime } = fakeRuntime();
+    const replacement = fakeRuntime();
+    mocks.runtime.mockReturnValue(runtime);
+    const published = vi.fn();
+    let answer: (value: DesignRuntimeNodeDetails) => void = () => {};
+    runtime.getNodeDetails.mockImplementation(() => new Promise((resolve) => { answer = resolve; }));
+    const refusal = { workspaceId: "w", frame: "home.html", sourceVersion: SOURCE_VERSION, nodeId: "child", hasDefault: () => false, publish: published };
+    // The frame's document is replaced (a page or frame change) while the
+    // reread is in flight: its reply belongs to nothing shown.
+    noteDesignHeldReplyRefused(refusal);
+    mocks.runtime.mockReturnValue(replacement.runtime);
+    answer({ ...details(), oid: "child" });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(published).not.toHaveBeenCalled();
+    // The same runtime moved to a new generation.
+    mocks.runtime.mockReturnValue(runtime);
+    noteDesignHeldReplyRefused({ ...refusal, nodeId: "other" });
+    runtime.sourceVersion = NEXT_SOURCE_VERSION;
+    answer({ ...details(), oid: "other" });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(published).not.toHaveBeenCalled();
+    // Still current: it publishes.
+    runtime.sourceVersion = SOURCE_VERSION;
+    noteDesignHeldReplyRefused({ ...refusal, nodeId: "kept" });
+    answer({ ...details(), oid: "kept" });
+    await vi.waitFor(() => expect(published).toHaveBeenCalledTimes(1));
   });
 
   it("does not touch other workspaces", async () => {
