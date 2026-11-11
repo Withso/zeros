@@ -63,7 +63,7 @@ publisher validates qualification run/artifact provenance before updating a PR
 report. Public scans, the model publisher, watchdog and branch writer serialize
 through the non-cancelling `agent-runtime-state` group. Pending-run replacement
 is recovered by scheduled reconciliation; human pushes are checked separately.
-These workflows ship off and do not replace required CI or owner merges.
+These workflows ship off and do not replace required CI.
 
 CodeQL runs its `security-and-quality` suite across all JS/TS sources on PRs,
 main and release pushes. This includes every query in `security-extended` and
@@ -358,10 +358,19 @@ temporary repositories and cover policy replacement, label additions/removal,
 fallback, invalid outputs, database unions, failures, cancellation, and selected
 skips.
 
-## Owner merges for CI definitions
+## CI-definition paths
 
-CI-definition PRs need an owner merge. Agents must not auto-merge changes to the
-paths recognized by `scripts/ci/ci-definition.mjs`: workflows/actions,
+Since 2026-11-11 agents may merge CI-definition PRs through `pnpm agent:merge`
+(owner decision: owner-only merges held CI fixes for hours, and the held tests
+then broke `main` when they landed together). The wrapper names the
+CI-definition paths a PR changes and applies every other guard unchanged. What
+protects `main` costs no review time: the required-check list lives in the
+GitHub ruleset, not in this checkout, so a PR cannot remove a required check;
+a PR's own CI runs its changed definitions; and the wrapper refuses failed or
+cancelled required checks. Changes to `.github/ci-incidents/*.json` still need
+the owner.
+
+`scripts/ci/ci-definition.mjs` recognizes workflows/actions,
 `.github/actionlint.yaml`, `.github/CODEOWNERS`, `scripts/ci/**`, `scripts/agent-runtime/**`, `scripts/check-*`,
 the explicit Vitest runner, composer entry and `scripts/ui-smoke/**`, release
 scripts, root Vitest/ESLint configs, root package/lock/workspace files, the
@@ -374,8 +383,8 @@ node scripts/ci/ci-definition.mjs --base origin/main --head HEAD
 ```
 
 The command lists sorted paths, including both sides of renames and deletions.
-A failed comparison exits nonzero so an unreadable diff cannot authorize an
-automatic merge. This is a definition detector, not a repository merge action.
+A failed comparison exits nonzero rather than printing an empty list. This is a
+definition detector, not a repository merge action.
 
 ## Agent merge wrapper
 
@@ -458,10 +467,10 @@ mode rejects `--force`, `--admin`, auto/queue flags and branch-deletion flags.
 The repository-wide one-armed-PR guard is still a snapshot, not an atomic lock
 across workspaces; serialize authorized landing attempts.
 
-CI-definition PRs require the owner to review and merge them. The shared
-`scripts/ci/ci-definition.mjs` policy must export `isCiDefinitionPath(path)`;
-the wrapper refuses to arm a merge when that policy is unavailable. Renamed
-files are checked under both paths. Drafts, forks, closed PRs, changes to
+The wrapper prints the CI-definition paths a PR changes, using
+`isCiDefinitionPath(path)` from `scripts/ci/ci-definition.mjs` on both sides of
+renames; the note is informational and an unavailable policy only omits it.
+Drafts, forks, closed PRs, changes to
 `.github/ci-incidents/*.json` (including removals), skip markers in PR titles or
 bodies, and failed or cancelled required checks are also refused. Pending checks
 may wait for GitHub's normal auto-merge requirements in the default mode only.

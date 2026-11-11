@@ -43,9 +43,10 @@ session itself.
    added later starts a new CI run for the same head and cancels the running
    one, whose roll-ups then fail with "Invalid … selection/result"; read the
    newest run instead.
-   CI-definition PRs need the owner's merge. Auto-merge stays on when an armed
-   PR gains a CI-definition path, so disarm it before that push (GraphQL
-   `disablePullRequestAutoMerge`) and confirm `autoMergeRequest` is null.
+   CI-definition PRs merge through the same wrapper. Auto-merge stays on
+   across a later push, so disarm before pushing a change you have not
+   verified (GraphQL `disablePullRequestAutoMerge`) and confirm
+   `autoMergeRequest` is null.
    Before arming, wait for the PR's `CodeQL` alert check (separate from the
    `codeql` job). It is not required, so auto-merge won't wait for it; a new
    high alert, even in a test, is fixed before merge.

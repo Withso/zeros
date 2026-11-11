@@ -10,8 +10,8 @@ import { lexer } from "marked";
 import { parseNameStatus } from "./ci/scope.mjs";
 
 const REPOSITORY = "Withso/zeros";
-const OWNER_REVIEW =
-  "This PR changes CI definitions; the owner must review and merge it.";
+const ciDefinitionNote = (paths) =>
+  `This PR changes CI definitions (${paths.join(", ")}); its own CI already ran them, so the normal merge guards apply.`;
 const USAGE =
   "usage: pnpm agent:merge <pr-number> [--immediate] [--dry-run] [--force --reason <human-PR-comment-URL>]";
 const SKIP_MARKER =
@@ -192,18 +192,13 @@ export function decideMerge(
       ? [file.filename, file.previous_filename]
       : [file.filename],
   );
-  // These boundaries remain protected even when the shared policy is missing.
-  if (
-    paths.some(
-      (file) =>
-        file === "scripts/ci/ci-definition.mjs" ||
-        file.startsWith(".github/workflows/"),
-    ) ||
-    (typeof isCiDefinitionPath === "function" &&
-      paths.some((file) => isCiDefinitionPath(file)))
-  ) {
-    return refuse("ci-definition", OWNER_REVIEW);
-  }
+  // Informational only: agents may merge CI-definition PRs (owner decision,
+  // 2026-11-11). The PR's own CI runs the changed definitions, and the
+  // required-check list itself lives in GitHub rules, not in this checkout.
+  const ciDefinitionPaths =
+    typeof isCiDefinitionPath === "function"
+      ? [...new Set(paths.filter((file) => isCiDefinitionPath(file)))].sort()
+      : [];
   if (SKIP_MARKER.test(pr.title) || SKIP_MARKER.test(pr.body)) {
     return refuse(
       "skip-marker",
@@ -300,12 +295,6 @@ export function decideMerge(
       `Another open PR already has auto-merge enabled (${armed.map((other) => `#${other.number}`).join(", ")}); wait for it to merge or be disarmed.`,
     );
   }
-  if (typeof isCiDefinitionPath !== "function") {
-    return refuse(
-      "policy-unavailable",
-      "The shared CI-definition policy is unavailable; refusing to arm auto-merge.",
-    );
-  }
   if (immediate) {
     if (!sameImmediateViewer(viewer, pr.graphqlViewer))
       return refuse(
@@ -380,6 +369,7 @@ export function decideMerge(
     return {
       allowed: true,
       code: "immediate",
+      ciDefinitionPaths,
       message: `Merge immediately: PR #${number} at ${pr.headRefOid} into ${pr.baseRefName}.`,
       input: {
         pullRequestId: pr.id,
@@ -393,6 +383,7 @@ export function decideMerge(
   return {
     allowed: true,
     code: "arm",
+    ciDefinitionPaths,
     message: `Arm auto-merge for PR #${number} at ${pr.headRefOid}.`,
     args: [
       "pr",
@@ -706,6 +697,8 @@ export async function runAgentMerge(
       stderr(decision.message);
       return 1;
     }
+    if (decision.ciDefinitionPaths.length)
+      stdout(ciDefinitionNote(decision.ciDefinitionPaths));
     if (options.immediate) {
       readWorkspaceAuthorEmail();
       const fresh = readSnapshot();
