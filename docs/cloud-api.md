@@ -555,8 +555,8 @@ be present together. A stale supplied binding is refused.
 `/claim` accepts `{ decision: "approve" | "deny" }` once. `/result` accepts
 `{ result }`. Other actions accept an absent body or `{}`. Requests with JSON
 bodies require `application/json`; unknown fields are rejected. SSE events are
-`ready`, `presence`, `request`, `heartbeat` and `revoked`. Reconnect replays
-durable notices. A notice carries input while pending or claimed, and only the
+`ready`, `presence`, `request`, `heartbeat`, `revoked` and `notify`. Reconnect replays
+durable command notices; `notify` events are never replayed. A command notice carries input while pending or claimed, and only the
 outcome after termination; it never carries output or grants execution.
 The Mac journals its decision before claiming and reconciles a lost reply by
 reading the same request, never by executing again.
@@ -612,6 +612,59 @@ Owners and admins can `PUT` `{ localCommandsEnabled: boolean }` to the same
 route. It defaults to true. Disabling ends outstanding commands with `disabled`
 and refreshes worker configuration. Older workers receive no new field;
 new workers receiving an old configuration expose no local-command tool.
+
+## NotifyUser
+
+Cloud agents can use `NotifyUser { title, message, kind }` through
+`zeros_workspace`. `kind` is `review` or `blocked`; nonblank title and message
+are limited to 80 and 280 characters. Worker configuration includes
+`notifyUser: 1` only with the exact `notify-user-v1` feature and the durable
+prompt outbox. This feature is independent of the local-command organization
+switch and does not change Local workspaces.
+
+The worker sends `POST /v2/cloud/worker/notifications` using its worker bearer,
+`X-Zeros-Worker-Boot` and `X-Zeros-Worker-Features: notify-user-v1`. Its strict
+JSON body is:
+
+```json
+{
+  "notificationId": "11111111-1111-4111-8111-111111111111",
+  "chatId": "chat-id",
+  "userMessageId": "active-turn-user-message-id",
+  "executionId": "native-session-id",
+  "kind": "review",
+  "title": "Ready for review",
+  "message": "The change and its tests are ready."
+}
+```
+
+The three chat/message/execution IDs are 1–256 characters without C0 control
+characters. The server accepts one notification per `(chatId, userMessageId)`;
+`executionId` may be reused by later turns. Success returns `202` with no body.
+Replaying the same notification ID and input is inert; changed input returns
+`409 notification_conflict`. A second notification for a turn returns
+`409 already_notified`. New notifications share a rolling budget of thirty per
+hour per workspace across replicas, boots and chat deletion; excess returns
+`429 rate_limited` with `Retry-After`. Identical retries consume no budget.
+
+Delivery uses the account-level device channel's `notify` event:
+`{ notificationId, workspace: { id, name, title }, chat: { id, title }, kind,
+title, message, createdAt }`. `createdAt` is an ISO timestamp. Every currently
+registered Mac of the latest verified desktop sender is eligible, even with no
+workspace connection or presence lease. The latest message selects the sender
+separately from the notifying turn. If the latest message came from the API,
+CLI, an agent or an older desktop without verified device headers, the server
+still accepts the notification but sends no channel event; the worker also
+delivers to attached apps over the bridge.
+
+Channel delivery is best effort, lives for ten minutes and never replays after
+reconnection. Late delivery rechecks the receiver's sign-in and registration,
+workspace access, run and chat sender. Delivery does not wake the VM or extend
+its idle clocks. The event text is erased after ten minutes; a compact hash
+receipt remains until chat or workspace deletion so a retry cannot notify again.
+At most 10,000 receipts are retained per workspace (`429 notifications_full`
+when full). No notification text is sent in PostgreSQL notification hints or
+written to server logs.
 
 ## Restart and v1 scope
 

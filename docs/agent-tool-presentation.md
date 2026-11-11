@@ -450,6 +450,10 @@ suites, `features/agent/__tests__/fallback-transcript.test.ts`,
 - Use a compact icon, stable operation name, and concise target. Standard names
   include **Bash**, **Read**, **Edit**, **Glob**, **Grep**, **List**, and **Fetch**.
   Native MCP/app and browser actions keep their established semantic names.
+- `zeros_workspace`'s `NotifyUser` is recognized only by native MCP identity
+  (Codex server/tool, Claude's qualified name, Cursor's provider identifier)
+  and reads **Notified you: <title>**; a failed call keeps the shared red
+  **Error** row with the title as its target. Its collapsed summary icon is a bell.
 - Each burst of browser calls folds into one Browser activity group, whether it
   came from Codex's built-in Browser, Claude in Chrome, or the `zeros_browser`
   tools under Codex, Claude or Cursor native MCP identity. Codex computer-use

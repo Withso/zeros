@@ -544,6 +544,22 @@ keeps stdout or stderr open holds the command until its timeout; redirect it
 (`>/dev/null 2>&1`) when it should not. Output above 32 000 characters is saved
 under the checkout's `.context/local-commands/`.
 
+When the configuration carries `notifyUser: 1`, workers advertising
+`notify-user-v1` add `NotifyUser` (`title` up to 80 characters, `message` up to
+280, `kind` review or blocked) to `zeros_workspace`: the agent asks for the
+person at the end of a turn. The worker allows one per turn, sends it to
+`POST /v2/cloud/worker/notifications` (202; 409 `already_notified` for a second
+in the same turn; 429 past about 30 an hour) and a live `attention` session
+update to attached apps; delivery never fails the turn. The control plane sends
+a `notify` event on the device channel to every registered Mac of the chat's
+latest desktop sender, kept for 10 minutes and never replayed. On the Mac, main
+de-duplicates both paths by notification id, marks the chat unread, and raises a
+macOS notification only when that chat is not on screen in a focused window:
+the title is the chat's title and "needs you", the body only the agent's title
+(a lock screen can show it); the message stays in the app. A click opens the
+chat through the app's own link route. The transcript shows the call as
+"Notified you: <title>". Local workspaces have no NotifyUser.
+
 ## Credentials and history
 
 Settings → Agents stores encrypted logins in the control plane. The creator's

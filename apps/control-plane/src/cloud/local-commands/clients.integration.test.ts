@@ -9,6 +9,7 @@ import { createCloudApiRoutes } from "../api/routes.js";
 import { CloudApiService } from "../api/service.js";
 import { CloudV2Computers } from "../computer.js";
 import { createCloudV2WorkerRoutes } from "../worker-routes.js";
+import type { NotifyUserEvent, NotifyUserWorkerRequest } from "../notify-user/contract.js";
 import type { LocalDevice, LocalCommandInput } from "./contract.js";
 import { localCommandsFixture, type LocalCommandsFixture } from "./test-fixture.js";
 
@@ -21,10 +22,12 @@ const database = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 
 database("real desktop and worker local-command clients against the router and PostgreSQL", () => {
   let pool: pg.Pool, f: LocalCommandsFixture, credentials: CloudApiCredentials;
-  let clients: { DeviceControl: any; parseEventStream: any; HybridTransport: any; cloudPromptApi: any };
+  let clients: { DeviceControl: any; parseEventStream: any; HybridTransport: any; cloudPromptApi: any;
+    LocalCommandService: any; LocalCommandJournal: any; NotifyUserService: any };
   let control: any, worker: any, mac: LocalDevice, apiKey: string, directory: string;
   let rendererDevice: { deviceId: string; headers: Record<string, string> } | null;
   let promptApi: any, receipt: { epoch: string };
+  let activeMessageId: string, loseNotificationReply: boolean;
   let cleanups: Array<() => Promise<void>>;
   type Call = { method: string; path: string; body: any; status?: number; reply?: any; headers: Headers };
   let calls: Call[];
@@ -43,16 +46,20 @@ database("real desktop and worker local-command clients against the router and P
     const desktop = await import(source("apps/desktop/electron/local-commands/control.ts").href);
     const transport = await import(source("apps/cloud-worker/src/hybrid-transport.ts").href);
     const prompt = await import(source(`${renderer}platform/cloud-prompt-api.ts`).href);
-    clients = { ...desktop, ...transport, ...prompt };
+    const service = await import(source("apps/desktop/electron/local-commands/service.ts").href);
+    const journal = await import(source("apps/desktop/electron/local-commands/journal.ts").href);
+    const notifications = await import(source("apps/cloud-worker/src/notify-user/service.ts").href);
+    clients = { ...desktop, ...transport, ...prompt, ...service, ...journal, ...notifications };
   });
   afterAll(async () => { await pool?.end(); });
   beforeEach(async () => {
-    calls = []; cleanups = []; rendererDevice = null;
+    calls = []; cleanups = []; rendererDevice = null; loseNotificationReply = false;
     f = await localCommandsFixture(pool);
     f.app.route("/", createCloudV2WorkerRoutes({ store: f.store, runtimeSha256: "a".repeat(64), promptOutbox: true,
       localCommands: { requests: f.requests, signals: f.signals },
+      notifications: f.notifications,
       config: async row => ({ t: "config", workspace: { id: row.id, organizationId: row.organizationId, repository: row.repository,
-        checkoutPath: `/home/user/${row.repository}`, branch: row.branch, baseBranch: row.baseBranch }, agents: {} }),
+        checkoutPath: `/home/user/${row.repository}`, branch: row.branch, baseBranch: row.baseBranch }, agents: {},promptOutbox: 1 }),
       githubToken: async () => { throw new Error("unused fixture credential"); } }));
     credentials = new CloudApiCredentials(pool);
     apiKey = (await credentials.create(f.organizationId, f.owner.id, "Joined fixture")).key;
@@ -69,6 +76,10 @@ database("real desktop and worker local-command clients against the router and P
       const response = await f.app.fetch(request);
       call.status = response.status;
       if (response.headers.get("content-type")?.includes("application/json")) call.reply = await response.clone().json();
+      if (loseNotificationReply && call.path === "/v2/cloud/worker/notifications" && response.status === 202) {
+        loseNotificationReply = false;
+        throw new TypeError("Fixture lost the reply after the notification committed");
+      }
       return response;
     };
     vi.stubGlobal("fetch", fetcher);
@@ -79,7 +90,8 @@ database("real desktop and worker local-command clients against the router and P
     rendererDevice = { deviceId: mac.deviceId, headers: { "X-Zeros-Device-Id": mac.deviceId,
       "X-Zeros-Device-Registration": mac.registrationId, "X-Zeros-Device-Instance": mac.instanceId } };
     promptApi = clients.cloudPromptApi({ organizationId: f.organizationId, workspaceId: f.workspaceId }, "chat");
-    receipt = await promptApi.enqueue(f.prompt());
+    const prompt = f.prompt(); activeMessageId = prompt.userMessageId;
+    receipt = await promptApi.enqueue(prompt);
     directory = await mkdtemp(join(tmpdir(), "local-clients-"));
     const tokenFile = join(directory, "token");
     await writeFile(tokenFile, await f.store.rotateWorkerToken(f.workspaceId), { mode: 0o600 });
@@ -88,7 +100,7 @@ database("real desktop and worker local-command clients against the router and P
       publicKeys: [generateKeyPairSync("ed25519").publicKey.export({ type: "spki", format: "pem" }).toString()] });
     let configured = false;
     worker.start({ open: async () => {}, close: () => {}, frame: async (frame: any) => {
-      if (frame.t === "config") { expect(frame.localCommands).toBe(1); configured = true; }
+      if (frame.t === "config") { expect(frame.localCommands).toBe(1); expect(frame.notifyUser).toBe(1); configured = true; }
     } });
     await expect.poll(() => configured).toBe(true);
   });
@@ -111,7 +123,31 @@ database("real desktop and worker local-command clients against the router and P
       return events.find(item => item.event === name && matches(item.data)).data;
     };
     expect(await event("ready")).toMatchObject({ deviceId: device.deviceId, registrationId: device.registrationId, instanceId: device.instanceId });
-    return { event };
+    return { event, events };
+  }
+  async function desktopNotifications() {
+    const notifications: NotifyUserEvent[] = [], events: any[] = [], deviceId = randomUUID();
+    const run = vi.fn(async () => { throw new Error("A notification must not run a local command"); });
+    const approval = vi.fn();
+    const service = new clients.LocalCommandService({ control,
+      events: async function* (device: LocalDevice, signal: AbortSignal) {
+        for await (const event of clients.parseEventStream(await control.events(device,signal))) { events.push(event); yield event; }
+      },
+      journal: (accountId: string) => clients.LocalCommandJournal.open(directory,accountId),
+      run, identity: { deviceId: () => deviceId,name: async () => "Laptop" },
+      settings: { alwaysAllow: () => false,setAlwaysAllow: vi.fn() },
+      session: async () => ({ accountId: f.owner.id,sessionId: f.owner.authentication.sessionId }),
+      publish: vi.fn(),notify: approval,notifyUser: (event: NotifyUserEvent) => notifications.push(event),
+    });
+    cleanups.push(() => service.stop());
+    await service.start();
+    await expect.poll(() => events.find(event => event.event === "ready")).toBeDefined();
+    expect(events.find(event => event.event === "ready").data.presence).toEqual({ presenceRequired: false,reachableUntil: null });
+    return { service,notifications,run,approval };
+  }
+  function notification(overrides: Partial<NotifyUserWorkerRequest> = {}): NotifyUserWorkerRequest {
+    return { notificationId: randomUUID(),chatId: "chat",userMessageId: activeMessageId,executionId: "native-execution",
+      kind: "review",title: "Ready for review",message: "The change is ready.",...overrides };
   }
   function command(input: Partial<LocalCommandInput> = {}) {
     const abort = new AbortController();
@@ -228,5 +264,67 @@ database("real desktop and worker local-command clients against the router and P
     expect(calls.find(call => call.path.endsWith("/retire-sender"))).toMatchObject({ method: "POST", status: 200,
       body: { chatId: "chat", executionId: "native-execution" }, reply: { ok: true } });
     await finish(command({ mac: "Studio" }).done, { outcome: "no_target" });
+  });
+
+  it("delivers the worker's NotifyUser to both real Mac clients, retries a lost empty 202 inertly, and accepts the next turn", async () => {
+    await control.disconnect(mac,f.workspaceId,mac.deviceId);
+    const stream = await channel(), receiver = await desktopNotifications(), attached = vi.fn(async () => {});
+    const notifier = new clients.NotifyUserService({
+      activeTurn: () => ({ chatId: "chat",turnId: activeMessageId,executionId: "native-execution" }),publish: attached,
+      deliver: (request: NotifyUserWorkerRequest, signal: AbortSignal) => worker.notifyUser(request,signal),
+    });
+    const input = { title: "Ready for review",message: "The change is ready.",kind: "review" };
+    loseNotificationReply = true;
+    expect(await notifier.notify("fixture-grant",input,new AbortController().signal)).toBe("sent");
+    const attempts = calls.filter(call => call.path === "/v2/cloud/worker/notifications");
+    expect(attempts).toHaveLength(2);
+    expect(attempts.every(call => call.status === 202 && call.reply === undefined)).toBe(true);
+    expect(attempts[0]!.body).toEqual({ notificationId: expect.any(String),chatId: "chat",userMessageId: activeMessageId,
+      executionId: "native-execution",...input });
+    expect(attempts[1]!.body).toEqual(attempts[0]!.body);
+    const first = await stream.event("notify");
+    expect(first).toEqual({ notificationId: attempts[0]!.body.notificationId,workspace: { id: f.workspaceId,name: "Fixture",title: null },
+      chat: { id: "chat",title: "" },...input,createdAt: expect.any(String) });
+    await expect.poll(() => receiver.notifications).toEqual([first]);
+    expect(attached).toHaveBeenCalledTimes(1);
+
+    expect(await worker.notifyUser({ ...attempts[0]!.body,notificationId: randomUUID() })).toBe("already_notified");
+    expect(calls.findLast(call => call.path === "/v2/cloud/worker/notifications")).toMatchObject({ status: 409,reply: { error: { code: "already_notified" } } });
+    const next = f.prompt(); activeMessageId = next.userMessageId; await promptApi.enqueue(next);
+    expect(await notifier.notify("fixture-grant",input,new AbortController().signal)).toBe("sent");
+    const nextId = calls.findLast(call => call.path === "/v2/cloud/worker/notifications")!.body.notificationId;
+    const second = await stream.event("notify",event => event.notificationId === nextId);
+    await expect.poll(() => receiver.notifications).toEqual([first,second]);
+    expect(stream.events.filter(event => event.event === "notify").map(event => event.data)).toEqual([first,second]);
+    expect(attached).toHaveBeenCalledTimes(2);
+    expect(receiver.service.approvals()).toEqual([]);
+    expect(receiver.run).not.toHaveBeenCalled(); expect(receiver.approval).not.toHaveBeenCalled();
+    expect(calls.some(call => call.path.includes("/requests/") || call.path === "/v2/cloud/worker/local-commands")).toBe(false);
+  });
+
+  it("accepts a notification after an API message without falling back to the older desktop sender", async () => {
+    const stream = await channel(), receiver = await desktopNotifications();
+    const reply = await f.app.request("/api/v0/sessions/chat/messages",{ method: "POST",
+      headers: { authorization: `Bearer ${apiKey}`,"content-type": "application/json",...rendererDevice!.headers },
+      body: JSON.stringify({ message: "API message",messageId: randomUUID() }) });
+    expect(reply.status).toBe(201);
+    const untargeted = notification(); expect(await worker.notifyUser(untargeted)).toBe("sent");
+    expect((await pool.query("SELECT sender_user_id,event FROM cloud_v2_notifications WHERE workspace_id=$1 AND notification_id=$2",
+      [f.workspaceId,untargeted.notificationId])).rows[0]).toEqual({ sender_user_id: null,event: null });
+    const next = f.prompt(); activeMessageId = next.userMessageId; await promptApi.enqueue(next);
+    const targeted = notification(); expect(await worker.notifyUser(targeted)).toBe("sent");
+    const delivered = await stream.event("notify"); expect(delivered.notificationId).toBe(targeted.notificationId);
+    await expect.poll(() => receiver.notifications).toEqual([delivered]);
+    expect(stream.events.filter(event => event.event === "notify")).toHaveLength(1);
+  });
+
+  it("decodes the real workspace notification limit and still accepts the same receipt as an empty 202", async () => {
+    const first = notification(); expect(await worker.notifyUser(first)).toBe("sent");
+    for (let turn = 1; turn < 30; turn++) expect(await worker.notifyUser(notification({ userMessageId: `turn-${turn}` }))).toBe("sent");
+    expect(await worker.notifyUser(notification({ userMessageId: "over-budget" }))).toBe("rate_limited");
+    expect(calls.findLast(call => call.path === "/v2/cloud/worker/notifications")).toMatchObject({ status: 429,reply: { error: { code: "rate_limited" } } });
+    expect(await worker.notifyUser(first)).toBe("sent");
+    expect(calls.filter(call => call.path === "/v2/cloud/worker/notifications")).toHaveLength(32);
+    expect((await pool.query("SELECT count(*)::int AS n FROM cloud_v2_notifications WHERE workspace_id=$1",[f.workspaceId])).rows[0].n).toBe(30);
   });
 });

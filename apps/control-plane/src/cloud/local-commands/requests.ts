@@ -8,6 +8,7 @@ import type { CloudAgentCredentialKeys } from "../../agent-credentials/agent-cre
 import { hashCloudV2Token } from "../tokens.js";
 import { CLOUD_V2_LIVE_ACCESS } from "../workspace-access.js";
 import { RUNTIME_HANDOFF_SESSION } from "../runtime-handoff-store.js";
+import { cloudChatSender } from "../prompt-sender.js";
 import { LocalCommandIdSchema, LocalCommandInputSchema, LocalMacResultSchema, type LocalCommandInput, type LocalCommandNotice,
   type LocalCommandOutcome, type LocalCommandReceipt, type LocalCommandResult, type LocalDeviceBinding } from "./contract.js";
 import { CloudLocalDevices, limited, localUserAuthority, notFound } from "./devices.js";
@@ -30,9 +31,6 @@ const summary = (result: LocalCommandResult): LocalCommandResult => ({ outcome: 
   ...(result.mac === undefined ? {} : { mac: result.mac }), ...(result.connectedMacs === undefined ? {} : { connectedMacs: result.connectedMacs }) });
 type Worker = { id: string; org_id: string; access_epoch: string; stop_generation: string; state: string;
   archived_at: Date | null; local_commands_allowed: boolean };
-type Sender = { creator_user_id: string | null; user_message_id: string | null; sequence: string | null;
-  epoch: string; local_command_generation: string; sender_binding_generation: string | null; sender_device_id: string | null;
-  sender_registration_id: string | null; valid: boolean; name: string | null };
 export type LocalRequestRow = {
   workspace_id: string; request_id: string; chat_id: string; sender_user_id: string | null; target_device_id: string | null;
   target_registration_id: string | null; target_instance_id: string | null; target_name: string | null; default_mac_name: string | null;
@@ -203,15 +201,7 @@ export class CloudLocalCommands {
         return { receipt: await this.receipt(tx,await this.row(tx,workspace.id,input.requestId)), replay: true };
       }
       if (workspace.state !== "running" || workspace.archived_at) throw unauthorized();
-      const sender = (await tx.query<Sender>(`SELECT p.creator_user_id,p.user_message_id,p.sequence::text,c.epoch::text,c.local_command_generation::text,
-        p.sender_binding_generation::text,p.sender_device_id,p.sender_registration_id,d.name,
-        coalesce(p.epoch=c.epoch AND p.access_epoch=$3 AND NOT p.cancel_requested AND p.sender_device_id IS NOT NULL
-          AND p.sender_registration_id IS NOT NULL AND p.sender_binding_generation=c.local_command_generation AND h.deleted_at IS NULL
-          AND u.auth_status='active' AND u.deleted_at IS NULL AND EXISTS (SELECT 1 FROM organization_members m WHERE m.org_id=$4 AND m.user_id=p.creator_user_id),false) AS valid
-        FROM cloud_v2_prompt_chats c LEFT JOIN cloud_v2_prompt_outbox p ON p.workspace_id=c.workspace_id AND p.chat_id=c.chat_id AND p.sequence=c.next_sequence
-        LEFT JOIN cloud_v2_chats h ON h.workspace_id=c.workspace_id AND h.chat_id=c.chat_id LEFT JOIN users u ON u.id=p.creator_user_id
-        LEFT JOIN local_command_devices d ON d.user_id=p.creator_user_id AND d.device_id=p.sender_device_id
-        WHERE c.workspace_id=$1 AND c.chat_id=$2`, [workspace.id,input.chatId,workspace.access_epoch,workspace.org_id])).rows[0];
+      const sender = await cloudChatSender(tx,workspace,input.chatId);
       const userId = sender?.creator_user_id ?? null, defaultId = sender?.valid ? sender.sender_device_id : null;
       let outcome: LocalCommandOutcome | null = !workspace.local_commands_allowed ? "disabled" : !sender?.valid ? "no_target" : null;
       let target: { device_id: string; registration_id: string; instance_id: string; name: string } | undefined;

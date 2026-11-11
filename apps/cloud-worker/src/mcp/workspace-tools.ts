@@ -11,7 +11,10 @@ import { McpRuntimeActivity } from "./runtime-activity";
 export interface WorkspaceToolAdmission {
   agentId: string;
   conversationId: string;
+  /** The tool grant: fresh for every native start. */
   executionId: string;
+  /** The native execution identity the control plane knows (prompts, steers, retire-sender). */
+  nativeExecutionId: string;
   /** Review authority: retired by Stop and by review configuration changes. */
   assertCurrent(): void;
   /** Read-only tools: retired only with the native execution itself. */

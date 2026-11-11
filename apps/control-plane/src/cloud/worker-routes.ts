@@ -18,6 +18,8 @@ import { LOCAL_COMMANDS_FEATURE, LocalCommandIdSchema } from "./local-commands/c
 import { NewLocalCommandSchema, localUnavailable, type CloudLocalCommands } from "./local-commands/requests.js";
 import { localBody, localUuid, localRouteError } from "./local-commands/routes.js";
 import { requestSignal, type CloudLocalCommandSignals } from "./local-commands/signals.js";
+import { NOTIFY_USER_FEATURE, NotifyUserWorkerRequestSchema } from "./notify-user/contract.js";
+import { NotificationRateLimit, type CloudNotifyUser } from "./notify-user/store.js";
 import { CloudV2SetupStatusSchema } from "./setup-status-contract.js";
 
 export const CLOUD_V2_WORKER_API = "/v2/cloud/worker";
@@ -30,6 +32,7 @@ export type CloudV2WorkerRouteDeps = {
   runtimeHandoffs?: RuntimeHandoffStore;
   promptOutbox?: boolean;
   localCommands?: { requests: CloudLocalCommands; signals: CloudLocalCommandSignals };
+  notifications?: CloudNotifyUser;
   timing?: (record: CloudV2TimingRecord) => void;
   logger?: Pick<Console, "warn">;
   waitForPrompts?(workspaceId: string, waitMs: number, signal: AbortSignal): { wait: Promise<void>; dispose(): void };
@@ -109,7 +112,7 @@ async function configuration(deps: CloudV2WorkerRouteDeps, workspace: CloudV2Wor
     if (!after || before.accessEpoch !== after.accessEpoch) throw unauthorized();
     const revision = before.loginRevision;
     if (revision === after.loginRevision) {
-      const { api, localCommands: _localCommands, mcpServers, githubPullRequests, githubUserTokens, gitIdentity, agentInteractions, codeReview, historyReplacement: _historyReplacement, environment, runtimeUpdate: _runtimeUpdate, ...legacy } = config;
+      const { api, localCommands: _localCommands, notifyUser: _notifyUser, mcpServers, githubPullRequests, githubUserTokens, gitIdentity, agentInteractions, codeReview, historyReplacement: _historyReplacement, environment, runtimeUpdate: _runtimeUpdate, ...legacy } = config;
       if (environment && !features.has("workspace-environment-v1"))
         throw new HttpError(409, "cloud_environment_runtime_required", "Update the cloud runtime before opening this workspace.");
       const { setup, setupScript, baseCommit, github, ...workspaceConfig } = config.workspace;
@@ -123,6 +126,7 @@ async function configuration(deps: CloudV2WorkerRouteDeps, workspace: CloudV2Wor
         ...(features.has("agent-interactions-v1") && agentInteractions === 1 ? { agentInteractions } : {}),
         ...(features.has("workspace-api-v1") && api ? { api } : {}),
         ...(localCommandsEnabled ? { localCommands: 1 } : {}),
+        ...(features.has(NOTIFY_USER_FEATURE) && deps.promptOutbox && deps.notifications ? { notifyUser: 1 } : {}),
         ...(environment ? { environment } : {}),
         ...(features.has("runtime-update-v1") && deps.runtimeUpdates ? { runtimeUpdate: 1 } : {}),
         loginRevision: revision, ...(features.has("history-replace-v1") ? { historyReplacement: 1 } : {}), ...(features.has("git-identity-v1") && gitIdentity !== undefined ? { gitIdentity } : {}),
@@ -144,6 +148,23 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
   const timingBoots = new Map<string, Set<string>>();
   app.use(`${CLOUD_V2_WORKER_API}/*`, bodyLimit({ maxSize: CLOUD_V2_MAX_FRAME_BYTES, onError: c => c.json({ error: { code: "payload_too_large" } }, 413) }));
   app.use(`${CLOUD_V2_WORKER_API}/*`, async (c, next) => { bearer(c); c.header("Cache-Control", "no-store"); await next(); });
+  if (deps.notifications) {
+    const notifications = deps.notifications, path = `${CLOUD_V2_WORKER_API}/notifications`;
+    const route = new Hono().onError((error,c) => {
+      if (!(error instanceof HttpError)) console.error("[notify-user] request_failed");
+      const failure = error instanceof HttpError ? error : new HttpError(503,"notifications_unavailable","Notifications are temporarily unavailable");
+      if (failure.status === 429) c.header("Retry-After",String(error instanceof NotificationRateLimit ? error.retryAfter : 60));
+      return c.json({ error: { code: failure.code,message: failure.message } },failure.status);
+    });
+    route.use(path,bodyLimit({ maxSize: 16*1024,onError: c => c.json({ error: { code: "payload_too_large",message: "Request is too large" } },413) }));
+    route.post(path,async c => {
+      if (!deps.promptOutbox || !workerFeatures(c).has(NOTIFY_USER_FEATURE)) throw unauthorized();
+      const auth = await session(c,deps), input = await body(c,NotifyUserWorkerRequestSchema);
+      await notifications.accept({ token: auth.token,bootId: auth.bootId,workspaceId: auth.workspace.id,accessEpoch: auth.workspace.accessEpoch },input);
+      return c.body(null,202);
+    });
+    app.route("/",route);
+  }
   if (deps.localCommands) {
     const local = new Hono().onError(localRouteError);
     const { requests, signals } = deps.localCommands, path = `${CLOUD_V2_WORKER_API}/local-commands`, empty = z.object({}).strict();

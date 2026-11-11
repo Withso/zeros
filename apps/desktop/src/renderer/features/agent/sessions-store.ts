@@ -501,6 +501,12 @@ function reduceTranscriptUpdate(state: SessionsStoreState, chatId: string, notif
   }, undefined) } };
 }
 
+let attentionHandler: ((chatId: string, update: unknown) => void) | null = null;
+/** NotifyUser's live `attention` update goes to one handler (the app shell's). */
+export function setAttentionHandler(handler: ((chatId: string, update: unknown) => void) | null): void {
+  attentionHandler = handler;
+}
+
 export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
   sessions: {},
   warmAgentIds: new Set(),
@@ -959,6 +965,11 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
         notification.executionId ?? notification.sessionId
       ];
     if (!chatId) return;
+    // notify-user-v1: live only, never a transcript change.
+    if ((notification.update as { sessionUpdate?: string }).sessionUpdate === "attention") {
+      attentionHandler?.(chatId, notification.update);
+      return;
+    }
 
     const upd = notification.update as {
       sessionUpdate?: string;

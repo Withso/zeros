@@ -3,6 +3,7 @@ import {
   LOCAL_COMMAND_DEVICE_HEADERS, LOCAL_COMMAND_LIMITS,
   type LocalCommandDevice, type LocalCommandMacResult, type LocalCommandNotice, type LocalCommandPendingNotice, type LocalCommandPresence,
 } from "@zeros/protocol/local-commands";
+import type { NotifyUserEvent } from "@zeros/protocol/notify-user";
 import type { DeviceControl, DeviceEvent } from "./control";
 import { DeviceControlError } from "./control";
 import type { LocalCommandJournal } from "./journal";
@@ -20,6 +21,8 @@ export interface LocalCommandServiceDeps {
   session(): Promise<{ accountId: string; sessionId: string } | null>;
   publish(approvals: LocalCommandApprovalView[]): void;
   notify(approval: LocalCommandApprovalView): void;
+  /** notify-user-v1: a `notify` event from the same device channel. */
+  notifyUser?(event: NotifyUserEvent): void;
   sleep?(ms: number): Promise<void>;
 }
 
@@ -163,6 +166,8 @@ export class LocalCommandService {
   private onEvent(event: DeviceEvent): void {
     if (event.event === "ready" || event.event === "presence") this.setPresence(event.event === "ready" ? event.data.presence : event.data);
     else if (event.event === "heartbeat") this.setPresence(event.data.presence);
+    // notify-user-v1 shares this channel; it never touches the journal or approvals.
+    else if (event.event === "notify") this.deps.notifyUser?.(event.data);
     else if (event.event === "request") {
       const notice = event.data;
       // A terminal notice acts at once: it must reach a command still running in its own chain.

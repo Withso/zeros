@@ -173,6 +173,8 @@ export const CloudV2ControlFrameSchema = z.discriminatedUnion("t", [
     /** local-commands-v1 workers only, while the organization allows local
      * commands (provisional until the control plane's design is final). */
     localCommands: z.literal(1).optional(),
+    /** notify-user-v1: NotifyUser on zeros_workspace (batch B1). */
+    notifyUser: z.literal(1).optional(),
     loginRevision: z.string().regex(/^(0|[1-9][0-9]{0,19})$/),
     /** Sent only to workers advertising workspace-api-v1 whose workspace has
      * API access. The token is fixed for one VM run (create or wake until stop). */

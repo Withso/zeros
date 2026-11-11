@@ -799,6 +799,21 @@ describe("cloud v2 relay", () => {
     else expect(deps.localCommandsEnabled).not.toHaveBeenCalled();
   });
 
+  it.each(["","notify-user-v10","notify-user-v1"])("negotiates NotifyUser with durable outbox on initial and refreshed config: %s",async features => {
+    workerServer.on("headers",headers => { headers.push(`X-Zeros-Worker-Features: ${features}`); });
+    const original = deps.config;
+    let outbox = true;
+    deps.config = async workspace => ({ ...await original(workspace), ...(outbox ? { promptOutbox: 1 as const } : {}), notifyUser: 1 });
+    const frames: any[] = [];
+    workerServer.on("connection",ws => ws.on("message",raw => frames.push(JSON.parse(String(raw)))));
+    await app();
+    await vi.waitFor(() => expect(frames.filter(frame => frame.t === "config")).toHaveLength(1));
+    expect(frames.find(frame => frame.t === "config").notifyUser).toBe(features === "notify-user-v1" ? 1 : undefined);
+    outbox = false; loginRevision = "1"; await relay.refreshLogins();
+    await vi.waitFor(() => expect(frames.filter(frame => frame.t === "config")).toHaveLength(2));
+    expect(frames.filter(frame => frame.t === "config").at(-1)).not.toHaveProperty("notifyUser");
+  });
+
   it.each([false, true])("gates managed identity on WebSocket upgrade support=%s for initial and refreshed config", async supported => {
     workerServer.on("headers", headers => { headers.push(`X-Zeros-Worker-Features: mcp-v1${supported ? ",git-identity-v1" : ""}`); });
     const original = deps.config, gitIdentity = { name: "Fixture Contributor", email: "123+contributor@users.noreply.github.com" };

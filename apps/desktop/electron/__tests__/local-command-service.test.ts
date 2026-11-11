@@ -208,6 +208,22 @@ describe("local command service", () => {
     expect(s.service.deviceHeaders()).toBeNull();
   });
 
+  it("hands a notify event to NotifyUser and nothing else: no journal, no received, no approval", async () => {
+    const notified: unknown[] = [];
+    const root = await mkdtemp(join(tmpdir(), "local-command-service-")); directories.push(root);
+    const s = harness({ journalRoot: root });
+    const service = new LocalCommandService({ ...s.deps, notifyUser: event => { notified.push(event); } });
+    await service.start();
+    await vi.waitFor(() => expect(s.calls).toContain("register"));
+    const event = { notificationId: "0f0e0d0c-0b0a-4908-8706-050403020100", workspace: { id: "11111111-1111-4111-8111-111111111111", name: "w-7", title: "Fix login" },
+      chat: { id: "chat-1", title: "Simulator" }, kind: "review" as const, title: "Ready for review", message: "Done.", createdAt: new Date().toISOString() };
+    s.push({ event: "notify", data: event });
+    await vi.waitFor(() => expect(notified).toEqual([event]));
+    expect(s.calls).toEqual(["register"]);
+    expect(service.approvals()).toEqual([]);
+    await service.stop();
+  });
+
   it("exposes this Mac's H values only while registered", async () => {
     const s = await setup();
     expect(s.service.deviceHeaders()).toEqual({ "X-Zeros-Device-Id": deviceId, "X-Zeros-Device-Registration": device.registrationId, "X-Zeros-Device-Instance": device.instanceId });

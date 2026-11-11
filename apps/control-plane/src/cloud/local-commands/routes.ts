@@ -10,8 +10,9 @@ import { LocalMacResultSchema } from "./contract.js";
 import { localUnavailable, type CloudLocalCommands } from "./requests.js";
 import { CloudLocalDevices, DEVICE_HEARTBEAT_MS } from "./devices.js";
 import { CloudLocalCommandSignals, deviceSignal } from "./signals.js";
+import type { CloudNotifyUser, NotificationHint } from "../notify-user/store.js";
 
-export type CloudLocalDeviceRoutes = { devices: CloudLocalDevices; signals: CloudLocalCommandSignals; requests?: CloudLocalCommands };
+export type CloudLocalDeviceRoutes = { devices: CloudLocalDevices; signals: CloudLocalCommandSignals; requests?: CloudLocalCommands; notifications?: CloudNotifyUser };
 export const isLocalCommandResultPath = (path: string) => /^\/v1\/cloud-v2\/devices\/[0-9a-f-]{36}\/requests\/[0-9a-f-]{36}\/result$/i.test(path);
 export function localRouteError(error: Error, c: Context): Response {
   // PostgreSQL errors may include a failing row, including encrypted material
@@ -114,13 +115,20 @@ export function createCloudLocalDeviceRoutes(deps: CloudLocalDeviceRoutes): Hono
   }
   app.get(`${path}/events`, async c => {
     const user = c.get("user"), identity = binding(c);
-    await deps.devices.snapshot(user, identity);
+    const initial = await deps.devices.snapshot(user, identity);
     await deps.signals.start();
     return streamSSE(c, async stream => {
       const controller = new AbortController(); stream.onAbort(() => controller.abort());
       const signal = AbortSignal.any([controller.signal, c.req.raw.signal]);
       let first = true, previousPresence = "", lastHeartbeat = Date.now();
       const sent = new Map<string,string>();
+      // Only hints observed by this open stream are queued. The database clock
+      // also excludes an older hint delayed across a listener/channel reconnect.
+      const pendingNotifications = new Map<string,NotificationHint>();
+      const unsubscribe = deps.notifications ? deps.signals.notifications(user.id,identity,hint => {
+        if (pendingNotifications.size >= 128) pendingNotifications.delete(pendingNotifications.keys().next().value!);
+        pendingNotifications.set(`${hint.workspaceId}:${hint.notificationId}`,hint);
+      }) : undefined;
       try {
         while (!stream.aborted && !signal.aborted) {
           const waiter = deps.signals.wait(deviceSignal(user.id, identity.deviceId), Math.max(0, DEVICE_HEARTBEAT_MS-(Date.now()-lastHeartbeat)), signal);
@@ -152,6 +160,11 @@ export function createCloudLocalDeviceRoutes(deps: CloudLocalDeviceRoutes): Hono
                 await stream.writeSSE({ event: "request", data }); sent.set(notice.requestId,data);
               }
             } else sent.clear();
+            if (deps.notifications && pendingNotifications.size) {
+              const hints = [...pendingNotifications.values()]; pendingNotifications.clear();
+              const notifications = await deps.notifications.read(user,identity,hints,initial.checkedAt);
+              for (const notification of notifications) await stream.writeSSE({ event: "notify",data: JSON.stringify(notification) });
+            }
             if (Date.now()-lastHeartbeat >= DEVICE_HEARTBEAT_MS) {
               await stream.writeSSE({ event: "heartbeat", data: JSON.stringify({ at: new Date().toISOString(), presence: snapshot.presence }) });
               lastHeartbeat = Date.now();
@@ -163,7 +176,7 @@ export function createCloudLocalDeviceRoutes(deps: CloudLocalDeviceRoutes): Hono
       } catch (error) {
         if (!stream.aborted && !signal.aborted && error instanceof HttpError && [401,404,409].includes(error.status))
           await stream.writeSSE({ event: "revoked", data: JSON.stringify({ code: error.status === 401 ? "session_revoked" : "device_registration_changed" }) });
-      } finally { controller.abort(); }
+      } finally { unsubscribe?.(); controller.abort(); }
     });
   });
   return app;

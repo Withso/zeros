@@ -68,7 +68,8 @@
     "./reliable": "./src/reliable.ts",
     "./cloud-v2-relay": "./src/cloud-v2-relay.ts",
     "./cloud-v2-prompts": "./src/cloud-v2-prompts.ts",
-    "./local-commands": "./src/local-commands.ts"
+    "./local-commands": "./src/local-commands.ts",
+    "./notify-user": "./src/notify-user.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit"

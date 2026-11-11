@@ -13,11 +13,13 @@ import { CloudLocalDevices } from "./devices.js";
 import { CloudLocalCommandSignals } from "./signals.js";
 import type { LocalDevice } from "./contract.js";
 import { CloudLocalCommands } from "./requests.js";
+import { CloudNotifyUser } from "../notify-user/store.js";
 
 export async function localCommandsFixture(pool: pg.Pool) {
   await resetMigratedTestDatabase(pool);
   const store = new CloudV2Store(pool), devices = new CloudLocalDevices(pool), signals = new CloudLocalCommandSignals(pool);
   const requests = new CloudLocalCommands(pool,{ currentKeyVersion: 1, keys: { 1: Buffer.alloc(32,23).toString("base64url") } },devices);
+  const notifications = new CloudNotifyUser(pool,devices);
   async function actor(): Promise<AuthedUser> {
     const id = randomUUID(), subject = `user_${id}`, sessionId = `session_${randomUUID()}`;
     const row = (await pool.query("INSERT INTO users(id,email,display_name) VALUES($1,$2,'Fixture') RETURNING auth_revision", [id, `${id}@example.test`])).rows[0];
@@ -44,7 +46,7 @@ export async function localCommandsFixture(pool: pg.Pool) {
     throw error;
   });
   app.route("/", createCloudV2Routes({ store, computers: new CloudV2Computers(pool), promptOutbox: true,
-    localDevices: { devices, signals, requests }, remoteHead: async () => null,
+    localDevices: { devices, signals, requests, notifications }, remoteHead: async () => null,
     bridgeBaseUrl: "wss://api.example.test", installedRepositories: async () => [] }));
   const call = (path: string, method = "GET", body?: unknown, headers: Record<string, string> = {}) => app.request(path, {
     method, headers: { ...(body === undefined ? {} : { "content-type": "application/json" }), ...headers },
@@ -62,7 +64,7 @@ export async function localCommandsFixture(pool: pg.Pool) {
   const prompt = (chatId = "chat", userMessageId = randomUUID()) => ({ chatId, userMessageId, agentId: "codex" as const,
     prompt: [{ type: "text" as const, text: "Fixture prompt" }], startedAt: 1234 });
   const submit = (input = prompt(), headers: Record<string, string> = {}) => call(`/v1/cloud-v2/workspaces/${workspaceId}/prompts`, "POST", input, headers);
-  return { pool, store, devices, signals, requests, owner, other, organizationId, workspaceId, app, call, register, prompt, submit };
+  return { pool, store, devices, signals, requests, notifications, owner, other, organizationId, workspaceId, app, call, register, prompt, submit };
 }
 export type LocalCommandsFixture = Awaited<ReturnType<typeof localCommandsFixture>>;
 

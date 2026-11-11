@@ -67,6 +67,11 @@ export function emitLocalNavigation(url: string): void {
   openLocalNavigationWindow?.();
 }
 
+/** A notification click with no window: reopen it as dock activation does. */
+export function openMainWindowForNavigation(): void {
+  openLocalNavigationWindow?.();
+}
+
 export function takePendingLocalNavigation(): string | null {
   if (!getMainWindow()) return null;
   localNavigationReady = true;
