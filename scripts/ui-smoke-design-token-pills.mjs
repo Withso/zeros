@@ -187,14 +187,15 @@ export async function runDesignTokenPillsSmoke({ page, check }) {
   await field("background-color").hover();
   const detachFill = field("background-color").getByRole("button", { name: "Detach token", exact: true });
   await detachFill.hover();
-  const hint = page.getByRole("tooltip").first();
+  const hint = page.locator("[data-design-style-card]");
   await hint.waitFor();
   check(
-    "Detach's tooltip names what a theme-dependent token loses",
+    "the hover card names what Detach loses from a theme-dependent token",
     ((await hint.textContent()) ?? "").includes("Dark's dimgray"),
     (await hint.textContent()) ?? "",
   );
   await page.mouse.move(1, 1);
+  await hint.waitFor({ state: "detached" });
 
   // A token the frame no longer declares.
   await layer("home-missing").click();

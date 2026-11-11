@@ -33,6 +33,7 @@ import {
   type DesignFillType,
   type DesignGradientValue,
 } from "./design-fill-values";
+import { useDesignFieldOrigin } from "./design-field-origins";
 import { useDesignHistoryHandBack } from "./use-design-history-step";
 
 interface DesignFillEditorProps {
@@ -44,9 +45,7 @@ interface DesignFillEditorProps {
   disabled?: boolean;
   /** The token a solid fill's winning declaration reads, if any. */
   tokenName?: string;
-  tokenDescription?: string;
   tokenMissing?: boolean;
-  tokenDetachHint?: string;
   onDetachToken?: () => void;
   /** The selected layers' fills differ: the row reads "Mixed" behind a
    * neutral swatch; a fill chosen in the popover or typed sets all of them. */
@@ -60,6 +59,15 @@ interface DesignFillEditorProps {
 // Figma. These are authored CSS values, not application chrome.
 const NEW_GRADIENT_START = "#FFFFFF"; // check:ui ignore-line -- authored CSS default
 const NEW_GRADIENT_END = "#000000"; // check:ui ignore-line -- authored CSS default
+
+/** What the Fill field edits, for the Styled-by filter. */
+const FILL_PROPERTIES = [
+  "background-color",
+  "background-image",
+  "background-position",
+  "background-size",
+  "background-repeat",
+] as const;
 
 const FILL_TYPES = [
   { value: "solid", label: "Solid" },
@@ -118,9 +126,7 @@ export function DesignFillEditor({
   repeat,
   disabled,
   tokenName,
-  tokenDescription,
   tokenMissing,
-  tokenDetachHint,
   onDetachToken,
   mixed = false,
   onPreview,
@@ -128,6 +134,9 @@ export function DesignFillEditor({
   onCommit,
 }: DesignFillEditorProps) {
   const fillType = mixed ? "solid" : classifyDesignFill(image);
+  // The declaration that paints the fill: the card and Reset speak to it.
+  const painted = fillType === "solid" ? "background-color" : "background-image";
+  const origin = useDesignFieldOrigin(painted, FILL_PROPERTIES);
   const gradient = parseDesignGradient(image);
   const swatch = (
     <span className="relative block size-4 shrink-0 overflow-hidden rounded-sm">
@@ -163,7 +172,14 @@ export function DesignFillEditor({
     <DesignColorPreviewScope>
     <div
       data-design-color-field=""
-      data-design-style-property="background-color"
+      data-design-style-property={painted}
+      data-design-field-label="Fill"
+      // A token chosen from the card or Alt+Down is a colour, and lands as a
+      // solid fill would.
+      data-design-token-property="background-color"
+      data-design-token-companion="background-image:none"
+      data-design-origin={origin.mark}
+      data-design-filter-out={origin.hidden ? "" : undefined}
       className="group/design-field zd-field relative min-w-0 gap-0 pl-1"
     >
       {popover}
@@ -173,9 +189,7 @@ export function DesignFillEditor({
           label="Fill"
           disabled={disabled}
           tokenName={tokenName}
-          tokenDescription={tokenDescription}
           tokenMissing={tokenMissing}
-          tokenDetachHint={tokenDetachHint}
           onDetachToken={onDetachToken}
           mixed={mixed}
           onPreview={(next) => onPreview?.({ "background-color": next })}

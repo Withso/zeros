@@ -1837,3 +1837,46 @@
 [data-design-frame-render-surface]:has(iframe[data-design-document-buffer="displayed"][data-design-document-ready][data-design-document-presented]) > :is([data-design-source-surface][data-design-source-ready], [data-design-source-vector-host], [data-design-frame-pixel-cover]) {
   visibility: hidden !important;
 }
+
+/* Where a value comes from. A value this layer changed over its class or
+ * component carries a small dot at the field's top-left; one taken from a
+ * parent or a reset reads dimmed. Initial values stay plain. */
+.zd-field[data-design-origin="changed"]::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 4px;
+  height: 4px;
+  border-radius: var(--radius-full);
+  background-color: var(--design-selection-stroke);
+  pointer-events: none;
+}
+
+.zd-field[data-design-origin="dimmed"] input,
+.zd-select[data-design-origin="dimmed"] {
+  color: var(--fg3);
+}
+
+/* A Styled-by row narrows the panel to what its source sets: fields outside
+ * it, and groups and sections left with none, step aside. Font and Weight
+ * count as fields here without being card fields. A field that is itself a
+ * section's child answers for itself through its own filter-out. */
+[data-design-filter-out] {
+  display: none;
+}
+
+[data-design-source-filter]
+  :is(.zd-section, .zd-group, .zd-section-body > *):not(
+    [data-design-style-property],
+    [data-design-filter-property]
+  ):not(
+    :has(
+      :is([data-design-style-property], [data-design-filter-property]):not(
+          [data-design-filter-out],
+          [data-design-filter-out] *
+        )
+    )
+  ) {
+  display: none;
+}

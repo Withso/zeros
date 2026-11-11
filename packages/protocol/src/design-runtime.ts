@@ -195,6 +195,9 @@ export interface DesignRuntimeNodeDetails {
   /** Authored properties every declaration of which reaches this element only
    * through universal or type selectors (resets, imported preflight). */
   baseStyleProperties?: string[];
+  /** The frame root's computed font size in px, for rem conversion. Omitted by
+   * older runtimes. */
+  rootFontSize?: number;
 }
 
 /** Where a winning declaration lives in the rendered frame document. */
@@ -207,6 +210,9 @@ export interface DesignRuntimeStyleOrigin {
   sourceId?: string;
   /** Design-root-relative stylesheet, for `linked`. */
   file?: string;
+  /** The Design component (`components/<name>.html`) whose styles hold the
+   * declaration; its rules otherwise read as `frame`. */
+  component?: string;
 }
 
 /** A custom property a winning value reads, with its resolved value and the
@@ -227,6 +233,33 @@ export interface DesignRuntimeAuthoredStyle extends DesignRuntimeStyleOrigin {
    * this element by class, id or attribute. `base`: a universal or type
    * selector, such as a reset or imported preflight. */
   scope?: "inline" | "element" | "base";
+  /** The element's own classes the winning selector names in its subject
+   * (`.btn.btn--primary` → btn, btn--primary). */
+  subjectClasses?: string[];
+  /** Only on a declaration this layer owns (its style attribute, or a rule
+   * whose selector is exactly its `[data-oid]`) that beat another one: the
+   * property name as written there, which can be a wider shorthand. */
+  declared?: string;
+  /** What this layer's own declaration replaced: the best declaration among
+   * the others, such as its class's. */
+  replaced?: DesignRuntimeReplacedStyle;
+  /** The winning value under each other theme, when a theme-scoped rule makes
+   * the declaration itself differ (a token handles themes by itself). */
+  themeValues?: Record<string, string>;
+  /** A rule written for this layer that sits inside @media, @supports or
+   * @layer: not the layer's own change, which the editor could remove. */
+  conditional?: true;
+}
+
+export interface DesignRuntimeReplacedStyle extends DesignRuntimeStyleOrigin {
+  value: string;
+  important?: boolean;
+  selector?: string;
+  scope?: "element" | "base";
+  subjectClasses?: string[];
+  tokens?: { name: string; value: string }[];
+  /** Other elements in this frame the same rule matches, bounded. */
+  others?: number;
 }
 
 export const DESIGN_RUNTIME_AUTHORED_STYLE_LIMITS = {
@@ -234,6 +267,11 @@ export const DESIGN_RUNTIME_AUTHORED_STYLE_LIMITS = {
   value: 1024,
   tokensPerValue: 8,
   tokenValue: 256,
+  subjectClasses: 16,
+  className: 128,
+  component: 64,
+  themes: 8,
+  others: 9999,
 } as const;
 
 const STYLE_ORIGINS = new Set(["source", "linked", "frame", "inline"]);
@@ -249,7 +287,76 @@ function isRuntimeStyleOrigin(
     (value.sourceId === undefined ||
       (typeof value.sourceId === "string" && value.sourceId.length <= 64)) &&
     (value.file === undefined ||
-      (typeof value.file === "string" && value.file.length <= 256))
+      (typeof value.file === "string" && value.file.length <= 256)) &&
+    (value.component === undefined ||
+      (typeof value.component === "string" &&
+        value.component.length <= DESIGN_RUNTIME_AUTHORED_STYLE_LIMITS.component))
+  );
+}
+
+function isRuntimeSubjectClasses(value: unknown): boolean {
+  return (
+    value === undefined ||
+    (Array.isArray(value) &&
+      value.length <= DESIGN_RUNTIME_AUTHORED_STYLE_LIMITS.subjectClasses &&
+      value.every(
+        (name) =>
+          typeof name === "string" &&
+          name.length > 0 &&
+          name.length <= DESIGN_RUNTIME_AUTHORED_STYLE_LIMITS.className,
+      ))
+  );
+}
+
+function isRuntimeStyleTokens(value: unknown, origins: boolean): boolean {
+  return (
+    value === undefined ||
+    (Array.isArray(value) &&
+      value.length <= DESIGN_RUNTIME_AUTHORED_STYLE_LIMITS.tokensPerValue &&
+      value.every(
+        (token) =>
+          isRecord(token) &&
+          typeof token.name === "string" &&
+          /^--[A-Za-z0-9_-]{1,126}$/.test(token.name) &&
+          typeof token.value === "string" &&
+          token.value.length <= DESIGN_RUNTIME_AUTHORED_STYLE_LIMITS.tokenValue &&
+          (!origins || isRuntimeStyleOrigin(token, false)),
+      ))
+  );
+}
+
+function isRuntimeReplacedStyle(value: unknown): boolean {
+  if (value === undefined) return true;
+  return (
+    isRecord(value) &&
+    typeof value.value === "string" &&
+    value.value.length <= DESIGN_RUNTIME_AUTHORED_STYLE_LIMITS.value &&
+    (value.important === undefined || typeof value.important === "boolean") &&
+    (value.selector === undefined ||
+      (typeof value.selector === "string" && value.selector.length <= 256)) &&
+    (value.scope === undefined || value.scope === "element" || value.scope === "base") &&
+    (value.others === undefined ||
+      (Number.isInteger(value.others) &&
+        (value.others as number) >= 0 &&
+        (value.others as number) <= DESIGN_RUNTIME_AUTHORED_STYLE_LIMITS.others)) &&
+    isRuntimeSubjectClasses(value.subjectClasses) &&
+    isRuntimeStyleTokens(value.tokens, false) &&
+    isRuntimeStyleOrigin(value, true)
+  );
+}
+
+function isRuntimeThemeValues(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (!isRecord(value)) return false;
+  const entries = Object.entries(value);
+  return (
+    entries.length <= DESIGN_RUNTIME_AUTHORED_STYLE_LIMITS.themes &&
+    entries.every(
+      ([theme, themed]) =>
+        /^[a-z][a-z0-9_-]{0,63}$/.test(theme) &&
+        typeof themed === "string" &&
+        themed.length <= DESIGN_RUNTIME_AUTHORED_STYLE_LIMITS.value,
+    )
   );
 }
 
@@ -260,6 +367,12 @@ export function isDesignRuntimeAuthoredStyles(
   return isRuntimeAuthoredStyles(value);
 }
 
+/** A declared property name as the runtime reports it: a custom property
+ * or a lowercase CSS property, as its declarationProperties keeps them. */
+function isRuntimeAuthoredPropertyName(value: unknown): boolean {
+  return typeof value === "string" && value.length <= 64 && /^(?:--[A-Za-z0-9_-]+|-?[a-z][a-z0-9-]*)$/.test(value);
+}
+
 function isRuntimeAuthoredStyles(value: unknown): boolean {
   if (!isRecord(value)) return false;
   const entries = Object.entries(value);
@@ -267,8 +380,7 @@ function isRuntimeAuthoredStyles(value: unknown): boolean {
     return false;
   return entries.every(([property, style]) => {
     if (
-      property.length > 64 ||
-      !/^(?:--[A-Za-z0-9_-]+|-?[a-z][a-z0-9-]*)$/.test(property) ||
+      !isRuntimeAuthoredPropertyName(property) ||
       !isRecord(style) ||
       typeof style.value !== "string" ||
       style.value.length > DESIGN_RUNTIME_AUTHORED_STYLE_LIMITS.value ||
@@ -277,22 +389,16 @@ function isRuntimeAuthoredStyles(value: unknown): boolean {
         (typeof style.selector !== "string" || style.selector.length > 256)) ||
       (style.scope !== undefined &&
         style.scope !== "inline" && style.scope !== "element" && style.scope !== "base") ||
+      (style.declared !== undefined && !isRuntimeAuthoredPropertyName(style.declared)) ||
       !isRuntimeStyleOrigin(style, true)
     )
       return false;
-    if (style.tokens === undefined) return true;
     return (
-      Array.isArray(style.tokens) &&
-      style.tokens.length <= DESIGN_RUNTIME_AUTHORED_STYLE_LIMITS.tokensPerValue &&
-      style.tokens.every(
-        (token) =>
-          isRecord(token) &&
-          typeof token.name === "string" &&
-          /^--[A-Za-z0-9_-]{1,126}$/.test(token.name) &&
-          typeof token.value === "string" &&
-          token.value.length <= DESIGN_RUNTIME_AUTHORED_STYLE_LIMITS.tokenValue &&
-          isRuntimeStyleOrigin(token, false),
-      )
+      isRuntimeStyleTokens(style.tokens, true) &&
+      isRuntimeSubjectClasses(style.subjectClasses) &&
+      isRuntimeReplacedStyle(style.replaced) &&
+      isRuntimeThemeValues(style.themeValues) &&
+      (style.conditional === undefined || style.conditional === true)
     );
   });
 }
@@ -886,7 +992,9 @@ function isRuntimeNodeDetails(
           (property) => typeof property === "string" && property.length <= 64,
         ))) &&
     (value.authoredStyles === undefined ||
-      isRuntimeAuthoredStyles(value.authoredStyles))
+      isRuntimeAuthoredStyles(value.authoredStyles)) &&
+    (value.rootFontSize === undefined ||
+      (isFiniteNumber(value.rootFontSize) && value.rootFontSize > 0 && value.rootFontSize <= 1024))
   );
 }
 
@@ -1937,6 +2045,8 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     if (sourceId) return { origin: "source", sourceId: sourceId.slice(0, 64) };
     var file = node.getAttribute("data-zeros-source");
     if (file) return { origin: "linked", file: file.slice(0, 256) };
+    var component = node.getAttribute("data-zeros-component");
+    if (component) return { origin: "frame", component: component.slice(0, ${DESIGN_RUNTIME_AUTHORED_STYLE_LIMITS.component}) };
     return { origin: "frame" };
   }
 
@@ -2071,6 +2181,9 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     if (cachedIndex) return cachedIndex;
     var rules = [];
     var customRules = new Map();
+    var themed = [];
+    var themeNames = new Set();
+    var themeProperties = new Set();
     var siblingsByParent = new Map();
     var anonymousLayers = 0;
     function layerPosition(parentKey, parentPath, dottedName) {
@@ -2085,7 +2198,8 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       });
       return { key: key, path: path };
     }
-    function visit(list, active, layer, origin, uncertain, nested) {
+    // grouped: inside any at-rule; the engine edits only ungrouped rules.
+    function visit(list, active, layer, origin, uncertain, nested, grouped) {
       for (var index = 0; index < list.length; index += 1) {
         var rule = list[index];
         var kind = rule.constructor && rule.constructor.name;
@@ -2094,37 +2208,51 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
           // A nested selector is relative to its parent, so element.matches()
           // cannot establish applicability or specificity. Keep its property
           // footprint rather than silently selecting a losing outer rule.
-          var entry = { rule: rule, selector: nested ? null : rule.selectorText, uncertain: uncertain || nested, active: active, layer: layer.path, order: rules.length, origin: origin, declared: declared, shadow: scope !== document };
+          var entry = { rule: rule, selector: nested ? null : rule.selectorText, uncertain: uncertain || nested, active: active, layer: layer.path, order: rules.length, origin: origin, declared: declared, shadow: scope !== document, grouped: grouped };
           rules.push(entry);
+          // Theme-scoped rules that set real properties; a theme's tokens
+          // need no second look, the computed token value already follows it.
+          if (entry.selector && entry.selector.indexOf("data-zd-theme") >= 0 && declared.some(function (property) { return property.indexOf("--") !== 0; })) {
+            entry.themed = true;
+            themed.push(entry);
+            THEME_HOOK.lastIndex = 0;
+            for (var hook = THEME_HOOK.exec(entry.selector); hook; hook = THEME_HOOK.exec(entry.selector)) themeNames.add(hook[1]);
+            // A shorthand sets its longhands too; those are what fields ask about.
+            declared.forEach(function (property) {
+              if (property.indexOf("--") === 0) return;
+              themeProperties.add(property);
+              longhandsOf(property).forEach(function (longhand) { themeProperties.add(longhand); });
+            });
+          }
           declared.forEach(function (property) {
             if (property.indexOf("--") !== 0) return;
             var list = customRules.get(property);
             if (!list) { list = []; customRules.set(property, list); }
             list.push(entry);
           });
-          if (rule.cssRules) visit(rule.cssRules, active, layer, origin, uncertain, true);
+          if (rule.cssRules) visit(rule.cssRules, active, layer, origin, uncertain, true, grouped);
         } else if (kind === "CSSLayerStatementRule" && rule.nameList) {
           for (var name = 0; name < rule.nameList.length; name += 1) layerPosition(layer.key, layer.path, rule.nameList[name]);
         } else if (kind === "CSSLayerBlockRule") {
           anonymousLayers += 1;
-          visit(rule.cssRules || [], active, layerPosition(layer.key, layer.path, rule.name || "\u0001" + anonymousLayers), origin, uncertain, nested);
+          visit(rule.cssRules || [], active, layerPosition(layer.key, layer.path, rule.name || "\u0001" + anonymousLayers), origin, uncertain, nested, true);
         } else if (rule.cssRules) {
           // Media/supports are document-wide. Container queries, scopes and
           // other groups need evidence this resolver does not have per element.
           var knownCondition = rule.type === CSSRule.MEDIA_RULE || rule.type === CSSRule.SUPPORTS_RULE;
-          visit(rule.cssRules, active && conditionalRuleActive(rule), layer, origin, uncertain || !knownCondition, nested);
+          visit(rule.cssRules, active && conditionalRuleActive(rule), layer, origin, uncertain || !knownCondition, nested, true);
         }
       }
     }
     for (var sheetIndex = 0; sheetIndex < scope.styleSheets.length; sheetIndex += 1) {
       var sheet = scope.styleSheets[sheetIndex];
       try {
-        visit(sheet.cssRules || [], true, { key: "", path: [] }, styleOriginOf(sheet), false, false);
+        visit(sheet.cssRules || [], true, { key: "", path: [] }, styleOriginOf(sheet), false, false, false);
       } catch (_error) {
         // Inaccessible sheets cannot provide trustworthy provenance.
       }
     }
-    var built = { rules: rules, customRules: customRules };
+    var built = { rules: rules, customRules: customRules, themed: themed, themeNames: themeNames, themeProperties: themeProperties, others: new Map() };
     cascadeRuleIndex.set(scope, built);
     return built;
   }
@@ -2140,13 +2268,14 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     }
   }
 
-  function specificityFor(element, entry) {
+  function specificityFor(element, match) {
+    var entry = match.entry;
+    // A matching single selector's specificity is its own.
+    var branches = matchedBranches(element, match);
+    if (!branches) return entry.complexes.length === 1 ? selectorSpecificity(entry.complexes[0]) : maxListSpecificity(entry.selector);
     var best = null;
-    splitTopLevel(entry.selector, ",").forEach(function (selector) {
-      var matches = false;
-      try { matches = element.matches(selector); } catch (_error) { matches = false; }
-      if (!matches) return;
-      var specificity = selectorSpecificity(selector);
+    branches.forEach(function (branch) {
+      var specificity = selectorSpecificity(entry.complexes[branch]);
       if (!best || compareSpecificity(specificity, best) > 0) best = specificity;
     });
     return best || maxListSpecificity(entry.selector);
@@ -2188,8 +2317,8 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     if (candidate.inline) return false;
     var layers = compareLayers(candidate.match.entry.layer, current.match.entry.layer);
     if (layers !== 0) return candidate.important ? layers < 0 : layers > 0;
-    if (!candidate.match.specificity) candidate.match.specificity = specificityFor(element, candidate.match.entry);
-    if (!current.match.specificity) current.match.specificity = specificityFor(element, current.match.entry);
+    if (!candidate.match.specificity) candidate.match.specificity = specificityFor(element, candidate.match);
+    if (!current.match.specificity) current.match.specificity = specificityFor(element, current.match);
     var specificity = compareSpecificity(candidate.match.specificity, current.match.specificity);
     if (specificity !== 0) return specificity > 0;
     return candidate.match.entry.order > current.match.entry.order;
@@ -2214,11 +2343,14 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   /** The winning declaration of one property. A rule that sets it through a
    * var()-based shorthand competes with an unknown value, so the inspector
    * never claims a value the browser could not expand. */
-  function winningDeclaration(element, property, matches) {
-    var inline = declarationValue(element.style, property, null);
+  function winningDeclaration(element, property, matches, without) {
+    // With without (the inline style, or one rule), the best declaration
+    // once that one is gone: what the layer's own declaration replaced.
+    var inline = !without || !without.inline ? declarationValue(element.style, property, null) : null;
     var best = inline ? { inline: true, value: inline.value, important: inline.important } : null;
     for (var index = 0; index < matches.length; index += 1) {
       var match = matches[index];
+      if (without && match.entry === without.entry) continue;
       var declaration = declarationValue(match.entry.rule.style, property, match.entry.declared);
       if (!declaration) continue;
       var candidate = { match: match, value: declaration.value, important: declaration.important };
@@ -2237,6 +2369,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     var result = { origin: origin.origin };
     if (origin.sourceId) result.sourceId = origin.sourceId;
     if (origin.file) result.file = origin.file;
+    if (origin.component) result.component = origin.component;
     return result;
   }
 
@@ -2317,6 +2450,243 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     return null;
   }
 
+  // ── Where a value comes from ──────────────────────────────
+  // What a layer's own declaration replaced, which of its classes a rule
+  // names, and a declaration another theme changes. Everything reuses the
+  // matches the winners already found; the theme pass tests only the
+  // theme-scoped rules whose subject classes the element carries.
+
+  var OWN_RULE = /^\[\s*data-oid\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\]\s]+))\s*\]$/i;
+  var THEME_HOOK = /\[\s*data-zd-theme\s*=\s*["']?([a-z][a-z0-9_-]{0,63})["']?\s*\]/g;
+
+  /** A rule written for exactly this layer is as much its own as its style
+   * attribute: the editor writes there when such a rule already sets it.
+   * Inside @media, @supports or @layer the editor cannot remove it, so it is
+   * one of the layer's rules, not its own change. */
+  function ownRule(entry, oid) {
+    return !entry.grouped && namesOwnLayer(entry, oid);
+  }
+
+  function namesOwnLayer(entry, oid) {
+    if (!oid || !entry.selector) return false;
+    if (entry.ownOid === undefined) {
+      var found = OWN_RULE.exec(entry.selector.trim());
+      entry.ownOid = found ? (found[1] || found[2] || found[3] || "") : null;
+    }
+    return entry.ownOid === oid;
+  }
+
+  function ownsWinner(winner, oid) {
+    return !!winner.inline || ownRule(winner.match.entry, oid);
+  }
+
+  /** The declaration Reset removes, as the engine picks it: the style
+   * attribute's whenever it declares the property, otherwise the layer's one
+   * rule. Null when that is not the winner (Reset would change nothing shown)
+   * or two of the layer's rules set it (the engine refuses to choose). */
+  function resetTargetOf(element, property, winner, matches, oid) {
+    if (winner.inline) return { inline: true };
+    if (declarationValue(element.style, property, null)) return null;
+    for (var index = 0; index < matches.length; index += 1) {
+      var entry = matches[index].entry;
+      if (entry !== winner.match.entry && ownRule(entry, oid) && declarationValue(entry.rule.style, property, entry.declared)) return null;
+    }
+    return { entry: winner.match.entry };
+  }
+
+  function unescapeIdentifier(text) {
+    return text.replace(/\\([0-9a-fA-F]{1,6}\s?|[\s\S])/g, function (_match, escaped) {
+      if (/^[0-9a-fA-F]{1,6}\s?$/.test(escaped)) {
+        var code = parseInt(escaped, 16);
+        return code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : "";
+      }
+      return escaped;
+    });
+  }
+
+  /** The class names in one compound selector, outside functional pseudo-
+   * classes such as :not(). */
+  function classNamesIn(compound) {
+    var names = [];
+    var depth = 0;
+    for (var index = 0; index < compound.length; index += 1) {
+      var character = compound[index];
+      if (character === "\\") { index += 1; continue; }
+      if (character === "(") { depth += 1; continue; }
+      if (character === ")") { depth = Math.max(0, depth - 1); continue; }
+      if (character === "." && depth === 0) {
+        var end = identifierEnd(compound, index + 1);
+        if (end > index + 1) names.push(unescapeIdentifier(compound.slice(index + 1, end)));
+        index = end - 1;
+      }
+    }
+    return names;
+  }
+
+  /** Per complex selector of a rule, the classes its subject names; cached
+   * per rule and generation. */
+  function subjectClassSets(entry) {
+    if (entry.subjectClassSets !== undefined) return entry.subjectClassSets;
+    if (!entry.complexes) entry.complexes = entry.selector ? splitTopLevel(entry.selector, ",") : [];
+    entry.subjectClassSets = entry.complexes.map(function (complex) { return classNamesIn(lastCompound(complex)); });
+    return entry.subjectClassSets;
+  }
+
+  /** The indexes of a multi-selector rule's branches that match the element,
+   * once per match; null for a single selector, which matched whole. */
+  function matchedBranches(element, match) {
+    var entry = match.entry;
+    if (!entry.complexes) entry.complexes = entry.selector ? splitTopLevel(entry.selector, ",") : [];
+    if (entry.complexes.length <= 1) return null;
+    if (!match.branches) {
+      match.branches = [];
+      for (var branch = 0; branch < entry.complexes.length; branch += 1) {
+        try { if (element.matches(entry.complexes[branch])) match.branches.push(branch); } catch (_error) { /* An unsupported branch names nothing. */ }
+      }
+    }
+    return match.branches;
+  }
+
+  function subjectClassesOf(element, match) {
+    var names = [];
+    var sets = subjectClassSets(match.entry);
+    var branches = matchedBranches(element, match);
+    for (var set = 0; set < sets.length; set += 1) {
+      if (branches && branches.indexOf(set) < 0) continue;
+      for (var index = 0; index < sets[set].length; index += 1) {
+        var name = sets[set][index];
+        if (names.length < ${DESIGN_RUNTIME_AUTHORED_STYLE_LIMITS.subjectClasses} && name.length > 0 && name.length <= ${DESIGN_RUNTIME_AUTHORED_STYLE_LIMITS.className} && names.indexOf(name) < 0 && element.classList.contains(name)) names.push(name);
+      }
+    }
+    return names;
+  }
+
+  /** Whether some complex selector of the rule could name this element by
+   * its classes; a rule naming a class the element lacks cannot match. */
+  function classesAllow(element, entry) {
+    var sets = subjectClassSets(entry);
+    for (var set = 0; set < sets.length; set += 1) {
+      var allowed = true;
+      for (var index = 0; index < sets[set].length && allowed; index += 1) allowed = element.classList.contains(sets[set][index]);
+      if (allowed) return true;
+    }
+    return false;
+  }
+
+  /** The property name as the layer's own declaration wrote it: itself, or
+   * the shorthand that sets it there. */
+  function declaredNameOf(element, winner, property) {
+    var names = winner.inline
+      ? declarationProperties({ cssText: element.getAttribute("style") || "" })
+      : winner.match.entry.declared;
+    if (names.indexOf(property) >= 0) return property;
+    for (var index = names.length - 1; index >= 0; index -= 1) {
+      if (longhandsOf(names[index]).indexOf(property) >= 0) return names[index];
+    }
+    return null;
+  }
+
+  /** Other layers in this frame the rule matches; one query per rule and
+   * generation. */
+  function othersMatching(element, entry, index) {
+    var total = index.others.get(entry);
+    if (total === undefined) {
+      total = 0;
+      try {
+        var found = styleScopeOf(element).querySelectorAll(entry.selector);
+        for (var position = 0; position < found.length; position += 1) {
+          if (found[position].hasAttribute("data-oid")) total += 1;
+        }
+      } catch (_error) {
+        total = 0;
+      }
+      index.others.set(entry, total);
+    }
+    var others = total - (element.hasAttribute("data-oid") ? 1 : 0);
+    return Math.max(0, Math.min(${DESIGN_RUNTIME_AUTHORED_STYLE_LIMITS.others}, others));
+  }
+
+  function tokenNamesIn(value) {
+    var names = [];
+    var pattern = /var\(\s*(--[A-Za-z0-9_-]{1,126})/g;
+    for (var found = pattern.exec(value); found && names.length < ${DESIGN_RUNTIME_AUTHORED_STYLE_LIMITS.tokensPerValue}; found = pattern.exec(value)) {
+      if (names.indexOf(found[1]) < 0) names.push(found[1]);
+    }
+    return names;
+  }
+
+  function replacedStyleOf(element, candidate, index, computed) {
+    if (candidate.value.length > ${DESIGN_RUNTIME_AUTHORED_STYLE_LIMITS.value}) return null;
+    var entry = candidate.match.entry;
+    var replaced = originOfWinner(candidate);
+    replaced.value = candidate.value;
+    if (candidate.important) replaced.important = true;
+    if (entry.selector) {
+      replaced.selector = entry.selector.slice(0, 256);
+      replaced.scope = ruleTargetsElement(element, entry) ? "element" : "base";
+      var classes = subjectClassesOf(element, candidate.match);
+      if (classes.length > 0) replaced.subjectClasses = classes;
+      replaced.others = othersMatching(element, entry, index);
+    }
+    var tokens = tokenNamesIn(candidate.value).map(function (name) {
+      return { name: name, value: computed.getPropertyValue(name).trim().slice(0, ${DESIGN_RUNTIME_AUTHORED_STYLE_LIMITS.tokenValue}) };
+    });
+    if (tokens.length > 0) replaced.tokens = tokens;
+    return replaced;
+  }
+
+  /** The element's matches with the theme-scoped rules re-tested as if the
+   * frame showed another theme: no attribute changes, so no style work. */
+  function themeMatchesFor(element, matches, index, theme) {
+    var result = [];
+    for (var position = 0; position < matches.length; position += 1) {
+      if (!matches[position].entry.themed) result.push(matches[position]);
+    }
+    for (var themedIndex = 0; themedIndex < index.themed.length; themedIndex += 1) {
+      var entry = index.themed[themedIndex];
+      if (!entry.active || !classesAllow(element, entry)) continue;
+      if (!entry.themeSelectors) entry.themeSelectors = new Map();
+      if (!entry.complexes) entry.complexes = splitTopLevel(entry.selector, ",");
+      var selectors = entry.themeSelectors.get(theme);
+      if (selectors === undefined) {
+        selectors = entry.complexes.map(function (complex) {
+          return complex.replace(THEME_HOOK, function (_hook, name) { return name === theme ? ":root" : ":not(*)"; });
+        });
+        entry.themeSelectors.set(theme, selectors);
+      }
+      // The specificity of the original branches that match, not the
+      // stand-in's and not a branch that names another element.
+      var specificity = null;
+      for (var branch = 0; branch < selectors.length; branch += 1) {
+        var matched = false;
+        try { matched = element.matches(selectors[branch]); } catch (_error) { matched = false; }
+        if (!matched) continue;
+        var own = selectorSpecificity(entry.complexes[branch]);
+        if (!specificity || compareSpecificity(own, specificity) > 0) specificity = own;
+      }
+      if (specificity) result.push({ entry: entry, specificity: specificity });
+    }
+    return result;
+  }
+
+  function themeValuesOf(element, property, winner, matches, index, byTheme) {
+    if (index.themed.length === 0 || !index.themeProperties.has(property)) return null;
+    var current = document.documentElement.getAttribute("data-zd-theme");
+    var values = null;
+    var count = 0;
+    index.themeNames.forEach(function (theme) {
+      if (theme === current || count >= ${DESIGN_RUNTIME_AUTHORED_STYLE_LIMITS.themes}) return;
+      if (!byTheme.has(theme)) byTheme.set(theme, themeMatchesFor(element, matches, index, theme));
+      var themed = winningDeclaration(element, property, byTheme.get(theme));
+      if (!themed || themed.value === null || themed.value === winner.value) return;
+      if (themed.value.length > ${DESIGN_RUNTIME_AUTHORED_STYLE_LIMITS.value}) return;
+      if (!values) values = {};
+      values[theme] = themed.value;
+      count += 1;
+    });
+    return values;
+  }
+
   function authoredStylesOf(element, properties) {
     // Cached like authoredStylePropertiesOf: one rule scan per element and
     // generation; theme and style changes start a new generation.
@@ -2336,6 +2706,8 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     var count = 0;
     var budget = 32768;
     var origins = new Map();
+    var oid = oidOf(element);
+    var byTheme = new Map();
     for (var propertyIndex = 0; propertyIndex < properties.length && count < ${DESIGN_RUNTIME_AUTHORED_STYLE_LIMITS.properties}; propertyIndex += 1) {
       var property = properties[propertyIndex];
       var winner = winningDeclaration(element, property, matches);
@@ -2353,14 +2725,28 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       } else if (winner.match.entry.selector) {
         style.selector = winner.match.entry.selector.slice(0, 256);
         style.scope = ruleTargetsElement(element, winner.match.entry) ? "element" : "base";
+        var subjectClasses = subjectClassesOf(element, winner.match);
+        if (subjectClasses.length > 0) style.subjectClasses = subjectClasses;
+        if (winner.match.entry.grouped && namesOwnLayer(winner.match.entry, oid)) style.conditional = true;
       }
       style.value = winner.value;
       if (winner.important) style.important = true;
+      var resetTarget = ownsWinner(winner, oid) ? resetTargetOf(element, property, winner, matches, oid) : null;
+      if (resetTarget) {
+        var others = winningDeclaration(element, property, matches, resetTarget);
+        var replaced = others && others.value ? replacedStyleOf(element, others, index, computed) : null;
+        if (replaced) {
+          var declared = declaredNameOf(element, winner, property);
+          if (declared) style.declared = declared;
+          style.replaced = replaced;
+        }
+      }
+      var themeValues = themeValuesOf(element, property, winner, matches, index, byTheme);
+      if (themeValues) style.themeValues = themeValues;
       var tokens = [];
-      var pattern = /var\(\s*(--[A-Za-z0-9_-]{1,126})/g;
-      for (var found = pattern.exec(winner.value); found && tokens.length < ${DESIGN_RUNTIME_AUTHORED_STYLE_LIMITS.tokensPerValue}; found = pattern.exec(winner.value)) {
-        var name = found[1];
-        if (tokens.some(function (token) { return token.name === name; })) continue;
+      var names = tokenNamesIn(winner.value);
+      for (var nameIndex = 0; nameIndex < names.length; nameIndex += 1) {
+        var name = names[nameIndex];
         if (!origins.has(name)) origins.set(name, tokenOrigin(element, name, index));
         var token = { name: name, value: computed.getPropertyValue(name).trim().slice(0, ${DESIGN_RUNTIME_AUTHORED_STYLE_LIMITS.tokenValue}) };
         var origin = origins.get(name);
@@ -2368,6 +2754,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
           token.origin = origin.origin;
           if (origin.sourceId) token.sourceId = origin.sourceId;
           if (origin.file) token.file = origin.file;
+          if (origin.component) token.component = origin.component;
         }
         tokens.push(token);
       }
@@ -2680,6 +3067,8 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     if (!layoutOnly) {
       var baseProperties = baseStylePropertiesOf(element);
       if (baseProperties.length > 0) result.baseStyleProperties = baseProperties;
+      var rootFontSize = parseFloat(getComputedStyle(document.documentElement).fontSize);
+      if (rootFontSize > 0 && rootFontSize <= 1024) result.rootFontSize = rootFontSize;
     }
     var classAttribute = element.getAttribute("class");
     if (classAttribute && classAttribute.trim()) result.classes = classAttribute.replace(/\s+/g, " ").trim().slice(0, 1024);

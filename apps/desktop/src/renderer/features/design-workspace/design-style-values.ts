@@ -163,6 +163,12 @@ const AUTHORED_SHORTHAND_TARGETS: Readonly<Record<string, readonly string[]>> =
     "border-left": ["border-width", "border-style", "border-color"],
     "border-block": ["border-width", "border-style", "border-color"],
     "border-inline": ["border-width", "border-style", "border-color"],
+    "border-radius": [
+      "border-top-left-radius",
+      "border-top-right-radius",
+      "border-bottom-right-radius",
+      "border-bottom-left-radius",
+    ],
     background: [
       "background-color",
       "background-image",
@@ -196,7 +202,7 @@ const AUTHORED_SHORTHAND_TARGETS: Readonly<Record<string, readonly string[]>> =
     ],
   };
 
-function authoredDeclarationAffects(
+export function authoredDeclarationAffects(
   authoredProperty: string,
   inspectedProperty: string,
 ): boolean {
@@ -899,4 +905,17 @@ export function resolveDesignNumericExpression(
   } catch {
     return input;
   }
+}
+
+/** The history key a Style commit carries: continuous edits of the same
+ * properties on the same layers fold into one undo step. Reset, choosing a
+ * token and Detach are steps of their own, so Undo returns to the edit
+ * before them. */
+export function designStyleCommitCoalesceKey(
+  nodeIds: readonly string[],
+  properties: readonly string[],
+  intent?: "reset" | "token" | "detach",
+): string {
+  const key = `styles:${nodeIds.join(":")}:${properties.join(":")}`;
+  return intent ? `${intent}:${crypto.randomUUID()}:${key}` : key;
 }

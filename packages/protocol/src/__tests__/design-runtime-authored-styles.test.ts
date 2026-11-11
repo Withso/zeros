@@ -125,6 +125,7 @@ describe("winning authored declarations in Chromium", () => {
       sourceId: "app",
       selector: ".bg-primary-button-bg",
       scope: "element",
+      subjectClasses: ["bg-primary-button-bg"],
       value: "var(--primary-button-bg)",
       tokens: [
         {
@@ -165,6 +166,7 @@ describe("winning authored declarations in Chromium", () => {
       origin: "frame",
       selector: "main .title",
       scope: "element",
+      subjectClasses: ["title"],
       value: "var(--brand)",
       tokens: [
         { name: "--brand", value: "rebeccapurple", origin: "source", sourceId: "semantic" },
@@ -272,7 +274,381 @@ describe("winning authored declarations in Chromium", () => {
   });
 });
 
+/** Measured on the previous runtime with the fixture below. */
+const BASELINE_COST = {
+  drawn: { matches: 11, queries: 0 },
+  oneOverride: { matches: 11, queries: 0 },
+  card: { matches: 11, queries: 0 },
+};
+
+// Where a value comes from: a class, a utility, a component, this layer's own
+// declaration and what it replaced, and a declaration that differs by theme.
+const ORIGINS_HEAD = `
+<style data-zeros-style-source="app">
+  @layer theme, utilities;
+  @layer theme { :root { --radius-md: 6px; --bg: white; } }
+  @layer utilities { .p-2\\.5 { padding: 10px; } .rounded-md { border-radius: 6px; } }
+</style>
+<style data-zeros-component="chip">.chip { gap: 4px; --chip-inset: 3px; text-indent: var(--chip-inset); }</style>
+<style>
+  .btn { border-radius: var(--radius-md); padding: 8px 12px; color: navy; }
+  .btn.btn--primary { background-color: var(--bg); }
+  [data-oid="own-rule"] { color: maroon; }
+  .legacy { border-radius: 4px !important; }
+  .card { background-color: white; }
+  [data-zd-theme="dark"] .card { background-color: black; }
+  .themed-token { background-color: var(--bg); }
+</style>`;
+const ORIGINS_BODY = `
+<button data-oid="changed" class="btn btn--primary" style="border-radius: 8px; padding: 2px">Send</button>
+<button data-oid="one-override" class="btn" style="border-radius: 8px">One override</button>
+<button data-oid="own-rule" class="btn">Own rule</button>
+<button data-oid="other" class="btn">Other</button>
+<div data-oid="drawn" style="border-radius: 3px; width: 40px">Drawn</div>
+<div data-oid="forced" class="legacy" style="border-radius: 9px">Forced</div>
+<div data-oid="chip" class="chip">Chip</div>
+<div data-oid="card" class="card">Card</div>
+<div data-oid="themed-token" class="themed-token">Token</div>
+<div data-oid="utility" class="p-2.5 rounded-md">Utility</div>`;
+
+describe("where a value comes from, in Chromium", () => {
+  let browser: Browser;
+  let page: Page;
+  beforeAll(async () => {
+    browser = await chromium.launch({ headless: true });
+    page = await fixture(browser, ORIGINS_HEAD, ORIGINS_BODY);
+    await page.evaluate(() => document.documentElement.setAttribute("data-zd-theme", "light"));
+  });
+  afterAll(async () => {
+    await browser?.close();
+  });
+
+  it("says what this layer's own declaration replaced, and how it was written", async () => {
+    const changed = await details(page, "changed");
+    expect(changed.authoredStyles?.["border-radius"]).toEqual({
+      origin: "inline",
+      scope: "inline",
+      value: "8px",
+      declared: "border-radius",
+      replaced: {
+        origin: "frame",
+        selector: ".btn",
+        scope: "element",
+        subjectClasses: ["btn"],
+        value: "var(--radius-md)",
+        tokens: [{ name: "--radius-md", value: "6px" }],
+        others: 3,
+      },
+    });
+    // A shorthand written on the layer is reported as written.
+    expect(changed.authoredStyles?.padding).toMatchObject({
+      declared: "padding",
+      replaced: { selector: ".btn", value: "8px 12px", others: 3 },
+    });
+    // A class value nothing overrides has nothing replaced.
+    expect(changed.authoredStyles?.["background-color"]).toEqual({
+      origin: "frame",
+      selector: ".btn.btn--primary",
+      scope: "element",
+      subjectClasses: ["btn", "btn--primary"],
+      value: "var(--bg)",
+      tokens: [{ name: "--bg", value: "white", origin: "source", sourceId: "app" }],
+    });
+    expect(isDesignRuntimeAuthoredStyles(changed.authoredStyles)).toBe(true);
+  });
+
+  it("treats a rule written for exactly this layer as its own", async () => {
+    const own = await details(page, "own-rule");
+    expect(own.authoredStyles?.color).toMatchObject({
+      selector: '[data-oid="own-rule"]',
+      value: "maroon",
+      declared: "color",
+      replaced: { selector: ".btn", value: "navy", others: 3 },
+    });
+    expect(own.authoredStyles?.color?.subjectClasses).toBeUndefined();
+  });
+
+  it("reports nothing replaced for a layer drawn by hand, or a value forced over it", async () => {
+    const drawn = await details(page, "drawn");
+    expect(drawn.authoredStyles?.["border-radius"]).toEqual({ origin: "inline", scope: "inline", value: "3px" });
+    const forced = await details(page, "forced");
+    expect(forced.authoredStyles?.["border-radius"]).toEqual({
+      origin: "frame",
+      selector: ".legacy",
+      scope: "element",
+      subjectClasses: ["legacy"],
+      value: "4px",
+      important: true,
+    });
+  });
+
+  it("names the component that declares a token a value reads", async () => {
+    expect((await details(page, "chip")).authoredStyles?.["text-indent"]?.tokens).toEqual([
+      { name: "--chip-inset", value: "3px", origin: "frame", component: "chip" },
+    ]);
+  });
+
+  it("names a component's styles and a utility's escaped class", async () => {
+    expect((await details(page, "chip")).authoredStyles?.gap).toMatchObject({
+      origin: "frame",
+      component: "chip",
+      subjectClasses: ["chip"],
+    });
+    expect((await details(page, "utility")).authoredStyles?.padding).toMatchObject({
+      origin: "source",
+      sourceId: "app",
+      selector: ".p-2\\.5",
+      subjectClasses: ["p-2.5"],
+    });
+  });
+
+  it("gives another theme's value only where the declaration itself differs", async () => {
+    expect((await details(page, "card")).authoredStyles?.["background-color"]).toMatchObject({
+      value: "white",
+      themeValues: { dark: "black" },
+    });
+    expect((await details(page, "themed-token")).authoredStyles?.["background-color"]?.themeValues).toBeUndefined();
+  });
+
+  it("reports the root font size for rem", async () => {
+    expect((await details(page, "drawn")).rootFontSize).toBe(16);
+  });
+});
+
+describe("review fixes for where a value comes from, in Chromium", () => {
+  let browser: Browser;
+  beforeAll(async () => {
+    browser = await chromium.launch({ headless: true });
+  });
+  afterAll(async () => {
+    await browser?.close();
+  });
+
+  // The engine removes a layer's own declaration only from an unconditional
+  // [data-oid] rule (packages/design-web/src/css.ts, mutateDesignNodeStyles);
+  // one inside @media, @supports or @layer is not the layer's to reset.
+  it("does not report a conditional rule written for the layer as its own change", async () => {
+    const page = await fixture(browser, `<style>
+      .btn { color: navy; padding: 4px; }
+      @media (min-width: 1px) { [data-oid="cond"] { color: maroon; } }
+      @supports (display: grid) { [data-oid="cond"] { padding: 2px; } }
+      [data-oid="plain"] { color: maroon; }
+    </style>`, '<button data-oid="cond" class="btn">Cond</button><button data-oid="plain" class="btn">Plain</button>');
+    try {
+      const cond = await details(page, "cond");
+      expect(cond.authoredStyles?.color).toMatchObject({ selector: '[data-oid="cond"]', value: "maroon", conditional: true });
+      expect(cond.authoredStyles?.color?.replaced).toBeUndefined();
+      expect(cond.authoredStyles?.padding).toMatchObject({ value: "2px", conditional: true });
+      expect(cond.authoredStyles?.padding?.replaced).toBeUndefined();
+      expect(isDesignRuntimeAuthoredStyles(cond.authoredStyles)).toBe(true);
+      const plain = await details(page, "plain");
+      expect(plain.authoredStyles?.color).toMatchObject({ value: "maroon", replaced: { selector: ".btn" } });
+      expect(plain.authoredStyles?.color?.conditional).toBeUndefined();
+    } finally {
+      await page.close();
+    }
+  });
+
+  // Regression: the layer's own custom property reported declared "--gap",
+  // the validator refused it and the bridge dropped every origin.
+  it("reports what a layer's own custom property replaced in a form its validator accepts", async () => {
+    const page = await fixture(browser, `<style>
+      .card { --gap: 8px; gap: var(--gap); }
+    </style>`, '<div data-oid="card" class="card" style="--gap: 12px">Card</div>');
+    try {
+      const card = await details(page, "card");
+      expect(card.authoredStyles?.["--gap"]).toMatchObject({ scope: "inline", value: "12px", declared: "--gap", replaced: { selector: ".card", value: "8px" } });
+      expect(isDesignRuntimeAuthoredStyles(card.authoredStyles)).toBe(true);
+    } finally {
+      await page.close();
+    }
+  });
+
+  // Reset removes the style attribute's declaration when there is one, and
+  // the layer's own rule only when there is none (mutateDesignNodeStyles);
+  // what it replaced is what shows after Reset.
+  it("reports as replaced what shows once Reset removes the declaration it targets", async () => {
+    const page = await fixture(browser, `<style>
+      .btn { color: navy; }
+      [data-oid="both"] { color: maroon; }
+      [data-oid="twice"] { color: maroon; }
+      [data-oid="twice"] { color: teal; }
+    </style>`, '<button data-oid="both" class="btn" style="color: red">Both</button><button data-oid="twice" class="btn">Twice</button>');
+    try {
+      expect((await details(page, "both")).authoredStyles?.color).toMatchObject({
+        scope: "inline", value: "red", replaced: { selector: '[data-oid="both"]', value: "maroon" },
+      });
+      // Two rules for the layer: Reset cannot pick one, so it is not offered.
+      expect((await details(page, "twice")).authoredStyles?.color?.replaced).toBeUndefined();
+    } finally {
+      await page.close();
+    }
+  });
+
+  it("names only the classes of the selector branches that match the layer", async () => {
+    const page = await fixture(browser, `<style>
+      .enabled .foo, .disabled .bar { color: red; }
+      .solo { padding: 1px; }
+    </style>`, '<div class="enabled"><div data-oid="both" class="foo bar solo">Both</div></div>');
+    try {
+      const both = await details(page, "both");
+      expect(both.authoredStyles?.color).toMatchObject({ selector: ".enabled .foo, .disabled .bar", subjectClasses: ["foo"] });
+      expect(both.authoredStyles?.padding?.subjectClasses).toEqual(["solo"]);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it("gives another theme's value for a longhand its rule sets through a shorthand", async () => {
+    const page = await fixture(browser, `<style>
+      .card { background-color: white; }
+      [data-zd-theme="dark"] .card { background: black; }
+    </style>`, '<div data-oid="card" class="card">Card</div>');
+    try {
+      await page.evaluate(() => document.documentElement.setAttribute("data-zd-theme", "light"));
+      expect((await details(page, "card")).authoredStyles?.["background-color"]).toMatchObject({
+        value: "white",
+        themeValues: { dark: "black" },
+      });
+    } finally {
+      await page.close();
+    }
+  });
+
+  it("ranks a theme rule by the branch that matches, not an unrelated one", async () => {
+    const page = await fixture(browser, `<style>
+      [data-zd-theme="dark"] .card, #unrelated { background-color: black; }
+      .card.card-x.card-y { background-color: white; }
+    </style>`, '<div data-oid="card" class="card card-x card-y">Card</div>');
+    try {
+      await page.evaluate(() => document.documentElement.setAttribute("data-zd-theme", "light"));
+      const light = await details(page, "card");
+      expect(light.authoredStyles?.["background-color"]).toMatchObject({ value: "white" });
+      expect(light.authoredStyles?.["background-color"]?.themeValues).toBeUndefined();
+      // The real dark theme agrees: the class rule still wins there.
+      await page.evaluate(() => document.documentElement.setAttribute("data-zd-theme", "dark"));
+      expect(await page.locator(".card").evaluate((element) => getComputedStyle(element).backgroundColor)).toBe("rgb(255, 255, 255)");
+    } finally {
+      await page.close();
+    }
+  });
+
+  it("costs a rule with one selector nothing more, and one match per extra branch", async () => {
+    const page = await fixture(browser, `<style>
+      .enabled .foo, .disabled .bar { color: red; }
+      .solo { padding: 1px; }
+      [data-zd-theme="dark"] .card, #unrelated { background-color: black; }
+      .card.card-x.card-y { background-color: white; }
+    </style>`, '<div class="enabled"><div data-oid="both" class="foo bar solo">Both</div></div><div data-oid="card" class="card card-x card-y">Card</div><div data-oid="warm" class="solo">Warm</div>');
+    try {
+      const counts = await page.evaluate(async () => {
+        document.documentElement.setAttribute("data-zd-theme", "light");
+        const runtime = window as unknown as RuntimeWindow;
+        await runtime.detailsRequest("warm");
+        const seen: string[] = [];
+        const matches = Element.prototype.matches;
+        Element.prototype.matches = function (this: Element, selector: string) {
+          seen.push(selector);
+          return matches.call(this, selector);
+        };
+        await runtime.detailsRequest("both");
+        const both = seen.splice(0);
+        await runtime.detailsRequest("card");
+        const card = seen.splice(0);
+        Element.prototype.matches = matches;
+        return { both, card };
+      });
+      // The two-branch rule costs each branch once more than the whole list;
+      // the one-selector rule costs no more than any rule's own match.
+      expect(counts.both.filter((selector) => selector === ".enabled .foo" || selector === ".disabled .bar")).toEqual([".enabled .foo", ".disabled .bar"]);
+      expect(counts.both.filter((selector) => selector === ".solo").length).toBe(
+        counts.both.filter((selector) => selector === ".enabled .foo, .disabled .bar").length,
+      );
+      // The theme pass tests each rewritten branch once, in place of the list.
+      expect(counts.card.filter((selector) => selector === ":root .card" || selector === "#unrelated")).toEqual([":root .card", "#unrelated"]);
+      expect(counts.card.filter((selector) => selector.includes(":root .card,"))).toEqual([]);
+    } finally {
+      await page.close();
+    }
+  });
+});
+
+// Selection cost: element.matches and querySelectorAll calls one
+// getNodeDetails makes on a cold element, against the counts measured before
+// this provenance existed (scratchpad probe on the previous runtime).
+describe("provenance cost per selection", () => {
+  const counted = async (nodeId: string) => {
+    const browser = await chromium.launch({ headless: true });
+    try {
+      const page = await fixture(browser, ORIGINS_HEAD, ORIGINS_BODY);
+      return await page.evaluate(async (nodeId) => {
+        const runtime = window as unknown as RuntimeWindow;
+        document.documentElement.setAttribute("data-zd-theme", "light");
+        // Build the rule index on another element first.
+        await runtime.detailsRequest("other");
+        const counts = { matches: 0, queries: 0 };
+        const matches = Element.prototype.matches;
+        Element.prototype.matches = function (this: Element, selector: string) {
+          counts.matches += 1;
+          return matches.call(this, selector);
+        };
+        for (const prototype of [Document.prototype, Element.prototype, DocumentFragment.prototype]) {
+          const query = prototype.querySelectorAll;
+          prototype.querySelectorAll = function (this: ParentNode, selector: string) {
+            counts.queries += 1;
+            return query.call(this, selector);
+          } as typeof query;
+        }
+        await runtime.detailsRequest(nodeId);
+        return counts;
+      }, nodeId);
+    } finally {
+      await browser.close();
+    }
+  };
+
+  it("costs a layer drawn by hand nothing more", async () => {
+    const cost = await counted("drawn");
+    expect(cost.matches).toBeLessThanOrEqual(BASELINE_COST.drawn.matches);
+    expect(cost.queries).toBe(BASELINE_COST.drawn.queries);
+  });
+
+  it("costs a class-styled layer with one override one in-frame count", async () => {
+    const cost = await counted("one-override");
+    expect(cost.matches).toBeLessThanOrEqual(BASELINE_COST.oneOverride.matches);
+    expect(cost.queries).toBe(BASELINE_COST.oneOverride.queries + 1);
+  });
+
+  it("costs a themed class one match per theme rule naming its classes", async () => {
+    const cost = await counted("card");
+    expect(cost.matches).toBeLessThanOrEqual(BASELINE_COST.card.matches + 1);
+    expect(cost.queries).toBe(BASELINE_COST.card.queries);
+  });
+});
+
 describe("authored style wire validation", () => {
+  it("accepts bounded origins, replacements and theme values", () => {
+    const replaced = { origin: "frame", selector: ".btn", value: "var(--radius-md)", tokens: [{ name: "--radius-md", value: "6px" }], others: 3 };
+    expect(
+      isDesignRuntimeAuthoredStyles({
+        "border-radius": { origin: "inline", scope: "inline", value: "8px", declared: "border-radius", replaced },
+        gap: { origin: "frame", component: "chip", subjectClasses: ["chip"], value: "4px", themeValues: { dark: "2px" } },
+      }),
+    ).toBe(true);
+    const bad = (style: Record<string, unknown>) =>
+      isDesignRuntimeAuthoredStyles({ color: { origin: "frame", value: "red", ...style } });
+    expect(bad({ component: "x".repeat(65) })).toBe(false);
+    expect(bad({ subjectClasses: Array.from({ length: 17 }, (_, index) => `c${index}`) })).toBe(false);
+    expect(bad({ subjectClasses: [""] })).toBe(false);
+    expect(bad({ declared: "Bad Name" })).toBe(false);
+    expect(bad({ replaced: { ...replaced, value: "x".repeat(1025) } })).toBe(false);
+    expect(bad({ replaced: { ...replaced, others: -1 } })).toBe(false);
+    expect(bad({ replaced: { ...replaced, others: 10000 } })).toBe(false);
+    expect(bad({ replaced: { ...replaced, origin: "cdn" } })).toBe(false);
+    expect(bad({ themeValues: { "Not A Theme": "red" } })).toBe(false);
+    expect(bad({ themeValues: Object.fromEntries(Array.from({ length: 9 }, (_, index) => [`t${index}`, "red"])) })).toBe(false);
+  });
+
   it("accepts bounded provenance and refuses oversized or unknown fields", () => {
     expect(
       isDesignRuntimeAuthoredStyles({

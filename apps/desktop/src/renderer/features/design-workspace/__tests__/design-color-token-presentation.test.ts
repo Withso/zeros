@@ -8,6 +8,10 @@ import { DesignColorPickerBody, DesignColorTokenList } from "../design-color-pic
 import { designTokenCatalog, designTokenGroups } from "../design-token-catalog";
 import { DesignTokenCatalogContext } from "../design-token-context";
 import { InspectorEditField } from "../design-inspector";
+import { DesignFieldOriginsContext, designFieldOrigins } from "../design-field-origins";
+import { DesignFieldOverlays } from "../design-style-card";
+import { DesignFillEditor } from "../design-fill-editor";
+import type { DesignStyleOriginsContext } from "../design-style-origins";
 import {
   DesignTokenPill,
   DesignTokenRows,
@@ -43,6 +47,8 @@ const catalog = designTokenCatalog({
   theme: null,
 });
 const groups = designTokenListGroups(designTokenGroups(catalog, ["color"]));
+
+const originsContext: DesignStyleOriginsContext = { label: () => "Frame styles", utilitySources: new Set() };
 
 // The app mounts one TooltipProvider at its root.
 const render = (element: ReactElement) =>
@@ -117,7 +123,7 @@ describe("token pill", () => {
     const pill = render(
       createElement(DesignTokenPill, {
         label: "Corner radius",
-        token: { name: "--radius-md", description: "radius-md · Manual · 6px", missing: false },
+        token: { name: "--radius-md", missing: false },
       }),
     );
     expect(pill).toContain('aria-label="Corner radius: token radius-md"');
@@ -127,7 +133,7 @@ describe("token pill", () => {
     const missing = render(
       createElement(DesignTokenPill, {
         label: "Corner radius",
-        token: { name: "--radius-card", description: "", missing: true },
+        token: { name: "--radius-card", missing: true },
       }),
     );
     expect(missing).toContain('aria-label="Corner radius: missing token radius-card"');
@@ -139,32 +145,133 @@ describe("token pill", () => {
 });
 
 describe("token field at rest", () => {
-  const token = { name: "--radius-md", description: "radius-md · Manual · 6px", missing: false };
-  it("is one pill button that announces its picker, and a closed picker mounts nothing", () => {
-    const html = render(
+  const token = { name: "--radius-md", missing: false };
+  const field = (origins = designFieldOrigins([], originsContext, null)) =>
+    render(
       createElement(
         DesignTokenCatalogContext.Provider,
         { value: catalog },
-        createElement(InspectorEditField, {
-          label: "Radius",
-          value: "6px",
-          styleProperty: "border-radius",
-          token,
-          tokenAccepts: ["length"],
-          onChooseToken: () => {},
-          onCommit: async () => {},
-        }),
+        createElement(
+          DesignFieldOriginsContext.Provider,
+          { value: origins },
+          createElement(
+            DesignFieldOverlays,
+            {
+              rootRef: { current: null },
+              active: true,
+              ownerKey: "selection",
+              origins,
+              onChooseToken: () => {},
+              onReset: () => {},
+              children: createElement(InspectorEditField, {
+                label: "Radius",
+                value: "6px",
+                styleProperty: "border-radius",
+                linkedProperties: ["border-top-left-radius"],
+                token,
+                tokenAccepts: ["length"],
+                onCommit: async () => {},
+              }),
+            },
+          ),
+        ),
       ),
     );
+
+  it("is one pill button that announces its picker; the panel's card and picker mount nothing", () => {
+    const html = field();
     const pills = [...html.matchAll(/<button[^>]*data-design-style-token="--radius-md"[^>]*>/g)];
     expect(pills).toHaveLength(1);
     expect(pills[0]![0]).toContain('aria-haspopup="dialog"');
     expect(pills[0]![0]).toContain('aria-expanded="false"');
     expect(html).not.toContain("data-design-token-picker");
+    expect(html).not.toContain("data-design-style-card");
     expect(html).not.toContain("data-radix-popper-content-wrapper");
     expect(html).not.toContain("zd-popover-edge-anchor");
-    // Detach is the field's only other control, hidden by CSS until hover.
+    // No per-field tooltip: Detach keeps its name, and nothing else wraps it.
     expect(html).toContain('aria-label="Detach token"');
+    expect(html).not.toContain('data-state="closed"');
+    // What the card and Reset read from the field.
+    expect(html).toContain('data-design-field-label="Radius"');
+    expect(html).toContain('data-design-linked-properties="border-top-left-radius"');
+  });
+
+  it("carries the selection's mark, and steps aside while a filter hides it", () => {
+    const changed = {
+      sourceVersion: "a".repeat(24), oid: "send", tag: "button", name: "Send", text: null,
+      selector: '[data-oid="send"]', visible: true, breadcrumb: [], rect: { x: 0, y: 0, width: 1, height: 1 },
+      styles: {}, classes: "btn",
+      authoredStyleProperties: ["border-radius", "color"],
+      authoredStyles: {
+        "border-radius": {
+          origin: "inline" as const, scope: "inline" as const, value: "8px", declared: "border-radius",
+          replaced: { origin: "frame" as const, selector: ".btn", scope: "element" as const, subjectClasses: ["btn"], value: "6px" },
+        },
+        color: { origin: "frame" as const, selector: ".btn", scope: "element" as const, subjectClasses: ["btn"], value: "navy" },
+      },
+    };
+    expect(field(designFieldOrigins([changed], originsContext, null))).toContain('data-design-origin="changed"');
+    const classGroup = designFieldOrigins([changed], originsContext, null).styledBy!.groups[0]!.key;
+    expect(field(designFieldOrigins([changed], originsContext, classGroup))).toContain("data-design-filter-out");
+  });
+});
+
+describe("a linked field under the Styled-by filter", () => {
+  it("stays when its source sets only the linked side it edits", () => {
+    const node = {
+      sourceVersion: "a".repeat(24), oid: "card", tag: "div", name: "Card", text: null,
+      selector: '[data-oid="card"]', visible: true, breadcrumb: [], rect: { x: 0, y: 0, width: 1, height: 1 },
+      styles: {}, classes: "inset",
+      authoredStyleProperties: ["padding-right"],
+      authoredStyles: { "padding-right": { origin: "frame" as const, selector: ".inset", scope: "element" as const, subjectClasses: ["inset"], value: "8px" } },
+    };
+    const key = designFieldOrigins([node], originsContext, null).styledBy!.groups[0]!.key;
+    const html = (linkedProperties: string[]) => render(
+      createElement(DesignFieldOriginsContext.Provider, { value: designFieldOrigins([node], originsContext, key) },
+        createElement(InspectorEditField, { label: "Horizontal padding", value: "8", styleProperty: "padding-left", linkedProperties, onCommit: async () => {} })),
+    );
+    expect(html(["padding-right"])).not.toContain("data-design-filter-out");
+    expect(html([])).toContain("data-design-filter-out");
+  });
+});
+
+describe("Fill under the Styled-by filter", () => {
+  const layer = (authoredStyles: NonNullable<Parameters<typeof designFieldOrigins>[0][number]["authoredStyles"]>) => ({
+    sourceVersion: "a".repeat(24), oid: "card", tag: "div", name: "Card", text: null,
+    selector: '[data-oid="card"]', visible: true, breadcrumb: [], rect: { x: 0, y: 0, width: 1, height: 1 },
+    styles: {}, classes: "hero",
+    authoredStyleProperties: Object.keys(authoredStyles),
+    authoredStyles,
+  });
+  const fromHero = { origin: "frame" as const, selector: ".hero", scope: "element" as const, subjectClasses: ["hero"] };
+  const fill = (node: ReturnType<typeof layer>, image: string) => {
+    const unfiltered = designFieldOrigins([node], originsContext, null);
+    const origins = designFieldOrigins([node], originsContext, unfiltered.styledBy!.groups[0]!.key);
+    return render(
+      createElement(
+        DesignFieldOriginsContext.Provider,
+        { value: origins },
+        createElement(DesignFillEditor, { color: "white", image, position: "0% 0%", size: "auto", repeat: "repeat", onCommit: () => {} }),
+      ),
+    );
+  };
+
+  it("stays when the source sets only the gradient or image the field edits", () => {
+    const gradient = "linear-gradient(white, black)";
+    expect(fill(layer({ "background-image": { ...fromHero, value: gradient }, color: { ...fromHero, value: "navy" } }), gradient))
+      .not.toContain("data-design-filter-out");
+    expect(fill(layer({ "background-size": { ...fromHero, value: "cover" }, color: { ...fromHero, value: "navy" } }), "none"))
+      .not.toContain("data-design-filter-out");
+    expect(fill(layer({ color: { ...fromHero, value: "navy" } }), "none")).toContain("data-design-filter-out");
+  });
+
+  it("names the declaration that paints it to the card and Reset, and the colour to a token", () => {
+    const node = layer({ "background-image": { ...fromHero, value: "linear-gradient(white, black)" } });
+    const gradient = fill(node, "linear-gradient(white, black)");
+    expect(gradient).toContain('data-design-style-property="background-image"');
+    expect(gradient).toContain('data-design-token-property="background-color"');
+    const solid = fill(layer({ "background-color": { ...fromHero, value: "white" } }), "none");
+    expect(solid).toContain('data-design-style-property="background-color"');
   });
 });
 

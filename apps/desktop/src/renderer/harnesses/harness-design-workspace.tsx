@@ -238,7 +238,60 @@ const TOKEN_PILLS_HOME_SOURCE = `<!doctype html>
     </main>
   </body>
 </html>`;
-const homeSource = tokenPillsHarness
+// `?styleOrigins`: where values come from. Buttons styled by classes in a
+// components layer, Tailwind-like utilities from a tailwind-kind source and a
+// component's styles; one changes its corner radius on the layer, one has a
+// value forced by !important, one reads a token that is gone. A paragraph
+// inherits its text colour; a box is drawn by hand.
+const styleOriginsHarness = new URLSearchParams(window.location.search).has(
+  "styleOrigins",
+);
+// Its colours are hex, the common case, so the card shows what the field does.
+const STYLE_ORIGINS_HEX: Record<string, string> = { "--bg1": "#FFFFFF", "--bg2": "#F5F5F5", "--fg1": "#1C1C1C", "--fg2": "#696969", "--border2": "#C0C0C0" }; // check:ui ignore-line -- fixture frame CSS, not app chrome
+const STYLE_ORIGINS_LEGACY = "#B22222"; // check:ui ignore-line -- fixture frame CSS, not app chrome
+const STYLE_ORIGINS_MANUAL = TOKEN_PILLS_MANUAL.map(
+  ([name, value, description]) => [name, STYLE_ORIGINS_HEX[name] ?? value, description] as const,
+);
+const STYLE_ORIGINS_HOME_SOURCE = `<!doctype html>
+<html>
+  <head>
+    <style data-zeros-style-source="app">
+      @layer theme, base, components, utilities;
+      @layer utilities {
+        .h-7 { height: 28px; }
+        .px-2\\.5 { padding-left: 10px; padding-right: 10px; }
+        .gap-1\\.5 { gap: 6px; }
+      }
+    </style>
+    <style data-zeros-source="tokens.css">
+      :root { ${STYLE_ORIGINS_MANUAL.map(([name, value]) => `${name}: ${value};`).join(" ")} }
+    </style>
+    <style data-zeros-component="composer">.composer-send { font-weight: 500; font-family: system-ui; }</style>
+    <style>
+      body { margin: 0; font-family: system-ui; color: var(--fg1); }
+      main { display: flex; flex-direction: column; align-items: flex-start; gap: 16px; padding: 48px; }
+      @layer components {
+        .btn { display: flex; align-items: center; border-radius: var(--radius-md); padding: 8px 12px; border-width: 1px; border-style: solid; border-color: var(--border2); background-color: var(--bg1); }
+        .btn--primary { background-color: var(--bg2); color: var(--fg1); }
+        .legacy { border-color: ${STYLE_ORIGINS_LEGACY} !important; }
+        .missing { border-radius: var(--radius-card); }
+      }
+    </style>
+  </head>
+  <body>
+    <main data-oid="home-main" data-zeros-frame-root>
+      <div data-oid="home-send" class="btn btn--primary h-7 px-2.5 gap-1.5 composer-send" style="border-radius: 8px"><span data-oid="home-send-label">Send</span></div>
+      <div data-oid="home-cancel" class="btn"><span data-oid="home-cancel-label">Cancel</span></div>
+      <div data-oid="home-retry" class="btn legacy"><span data-oid="home-retry-label">Retry</span></div>
+      <div data-oid="home-badge" class="btn missing"><span data-oid="home-badge-label">Badge</span></div>
+      <p data-oid="home-note" style="margin: 0">This text takes its colour from the page.</p>
+      <div data-oid="home-drawn" style="width: 120px; height: 40px; background-color: var(--bg1); border-radius: 4px"></div>
+    </main>
+  </body>
+</html>`;
+const homeSource = styleOriginsHarness
+  ? STYLE_ORIGINS_HOME_SOURCE
+  : tokenPillsHarness
   ? TOKEN_PILLS_HOME_SOURCE
   : designTokensHarness
   ? DESIGN_TOKENS_HOME_SOURCE
@@ -520,8 +573,8 @@ async function main() {
         sourceVersion: PRICING_SOURCE_VERSION,
       },
     ],
-    tokens: tokenPillsHarness
-      ? TOKEN_PILLS_MANUAL.map(([name, value, description], index) => ({
+    tokens: tokenPillsHarness || styleOriginsHarness
+      ? (styleOriginsHarness ? STYLE_ORIGINS_MANUAL : TOKEN_PILLS_MANUAL).map(([name, value, description], index) => ({
           name,
           syntax: "*",
           inherits: true,
@@ -569,6 +622,20 @@ async function main() {
         : []),
     ],
     tokenSourceVersion: "tokens-source-version-1",
+    ...(styleOriginsHarness
+      ? {
+          styleSources: [
+            { ...HARNESS_STYLE_SOURCES![0]!, title: "App styles", kind: "tailwind", status: "ready" as const, messages: [], themes: [],
+              tokens: [] },
+          ],
+          styleSourceErrors: [],
+          frameStyleSources: { "home.html": ["app"] },
+          themes: [
+            { id: "light", label: "Light", base: true as const },
+            { id: "dark", label: "Dark" },
+          ],
+        }
+      : {}),
     ...(tokenPillsHarness
       ? {
           styleSources: [
