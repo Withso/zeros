@@ -23,6 +23,7 @@ export function localRouteError(error: Error, c: Context): Response {
   if (failure.status === 429) c.header("Retry-After","60");
   return c.json({ error: { code: failure.code, message: failure.message } },failure.status);
 }
+const TOKEN_END_MARGIN_MS = 2_000, TOKEN_END_SKEW_MS = 10_000;
 const empty = z.object({}).strict();
 export const localUuid = (value: string) => {
   if (!z.string().uuid().safeParse(value).success) throw new HttpError(404, "not_found", "Local command resource not found");
@@ -121,6 +122,10 @@ export function createCloudLocalDeviceRoutes(deps: CloudLocalDeviceRoutes): Hono
       const controller = new AbortController(); stream.onAbort(() => controller.abort());
       const signal = AbortSignal.any([controller.signal, c.req.raw.signal]);
       let first = true, previousPresence = "", lastHeartbeat = Date.now();
+      // An access token lives minutes and the session outlives it. The channel
+      // ends cleanly just before its token does, so the Mac reconnects with a
+      // fresh one; "revoked" is kept for a session that is really gone.
+      const expiresAt = user.authentication.tokenExpiresAt, tokenEnd = expiresAt ? expiresAt*1000 : Number.POSITIVE_INFINITY;
       const sent = new Map<string,string>();
       // Only hints observed by this open stream are queued. The database clock
       // also excludes an older hint delayed across a listener/channel reconnect.
@@ -130,8 +135,9 @@ export function createCloudLocalDeviceRoutes(deps: CloudLocalDeviceRoutes): Hono
         pendingNotifications.set(`${hint.workspaceId}:${hint.notificationId}`,hint);
       }) : undefined;
       try {
-        while (!stream.aborted && !signal.aborted) {
-          const waiter = deps.signals.wait(deviceSignal(user.id, identity.deviceId), Math.max(0, DEVICE_HEARTBEAT_MS-(Date.now()-lastHeartbeat)), signal);
+        while (!stream.aborted && !signal.aborted && Date.now() < tokenEnd-TOKEN_END_MARGIN_MS) {
+          const waiter = deps.signals.wait(deviceSignal(user.id, identity.deviceId),
+            Math.max(0, Math.min(DEVICE_HEARTBEAT_MS-(Date.now()-lastHeartbeat), tokenEnd-TOKEN_END_MARGIN_MS-Date.now())), signal);
           try {
             const snapshot = await deps.devices.snapshot(user, identity);
             const encodedPresence = JSON.stringify(snapshot.presence);
@@ -174,7 +180,9 @@ export function createCloudLocalDeviceRoutes(deps: CloudLocalDeviceRoutes): Hono
           } finally { waiter.dispose(); }
         }
       } catch (error) {
-        if (!stream.aborted && !signal.aborted && error instanceof HttpError && [401,404,409].includes(error.status))
+        // The database clock may pass the token's end before this one does.
+        const tokenEnded = error instanceof HttpError && error.status === 401 && Date.now() >= tokenEnd-TOKEN_END_SKEW_MS;
+        if (!tokenEnded && !stream.aborted && !signal.aborted && error instanceof HttpError && [401,404,409].includes(error.status))
           await stream.writeSSE({ event: "revoked", data: JSON.stringify({ code: error.status === 401 ? "session_revoked" : "device_registration_changed" }) });
       } finally { unsubscribe?.(); controller.abort(); }
     });
