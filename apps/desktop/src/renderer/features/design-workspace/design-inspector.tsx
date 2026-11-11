@@ -107,7 +107,8 @@ import { DesignStyledByLine } from "./design-styled-by";
 import { DesignHeldStateNote, DesignLayerStateMenu, useDesignHeldReadOnly } from "./design-state-picker";
 import { designHeldStateChanges } from "./design-style-origins";
 import {
-  designHeldDetails,
+  designHeldStateEntry,
+  designHeldStateHolds,
   holdDesignNodeState,
   releaseDesignNodeState,
   releaseDesignNodeStateUnless,
@@ -1512,7 +1513,11 @@ export const DesignInspector = React.memo(function DesignInspector({
     active && workspaceId && frame && elementDetails && styleNodeIds.length === 1
       ? { workspaceId, frame: frame.file, sourceVersion: elementDetails.sourceVersion, nodeId: elementDetails.oid }
       : null;
-  const heldDetails = useDesignHeldStateStore((store) => (heldKey ? designHeldDetails(store, heldKey) : null));
+  const heldEntry = useDesignHeldStateStore((store) => (heldKey ? designHeldStateEntry(store, heldKey) : null));
+  const heldDetails = heldEntry?.details ?? null;
+  // A hold still waiting for its reply is read-only too: the canvas may
+  // already show the state.
+  const holding = heldEntry !== null;
   const heldParents = useMemo(() => (heldDetails ? [heldDetails] : null), [heldDetails]);
   const heldChanges = useMemo(() => (heldDetails ? designHeldStateChanges(heldDetails) : null), [heldDetails]);
   const shownDetails = heldDetails ?? elementDetails;
@@ -1532,8 +1537,6 @@ export const DesignInspector = React.memo(function DesignInspector({
     () => (heldParents && heldChanges ? designFieldOrigins(heldParents, originsContext, null, heldChanges) : defaultOrigins),
     [defaultOrigins, heldChanges, heldParents, originsContext],
   );
-  const heldStateRef = useRef(heldState);
-  heldStateRef.current = heldState;
   // Anything but this single layer on this frame and generation, or a hidden
   // surface, lets a held state go.
   useEffect(() => {
@@ -1541,7 +1544,7 @@ export const DesignInspector = React.memo(function DesignInspector({
     releaseDesignNodeStateUnless(workspaceId, heldKey);
   }, [workspaceId, heldKey?.frame, heldKey?.sourceVersion, heldKey?.nodeId]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => () => { if (workspaceId) releaseDesignNodeState(workspaceId); }, [workspaceId]);
-  useDesignHeldReadOnly(inspectorRef, heldState !== null);
+  useDesignHeldReadOnly(inspectorRef, holding);
   const latestPickRef = useRef({ heldKey, elementDetails });
   latestPickRef.current = { heldKey, elementDetails };
   /** Pick from the State menu: one request, painted when it answers. Back to
@@ -1741,8 +1744,9 @@ export const DesignInspector = React.memo(function DesignInspector({
       // An eyedropper or a pending animation frame cannot follow a new layer.
       if (currentStyleOwnerRef.current !== styleOwner || !context.active)
         return Promise.resolve();
-      // A held state is view only: no value it shows reaches the source.
-      if (heldStateRef.current) return Promise.resolve();
+      // A held state is view only, answered or not: no value reaches the source.
+      if (context.workspaceId && context.frame && designHeldStateHolds(context.workspaceId, context.frame.file, context.styleNodeIds))
+        return Promise.resolve();
       if (
         !context.workspaceId ||
         !context.frame ||
@@ -1955,7 +1959,9 @@ export const DesignInspector = React.memo(function DesignInspector({
     (action: DesignLayoutAction): Promise<void> => {
       if (currentStyleOwnerRef.current !== styleOwner || !styleEditContextRef.current.active)
         return Promise.resolve();
-      if (heldStateRef.current) return Promise.resolve();
+      const target = styleEditContextRef.current;
+      if (target.workspaceId && target.frame && designHeldStateHolds(target.workspaceId, target.frame.file, target.styleNodeIds))
+        return Promise.resolve();
       const intent = ++stylePreviewIntentRef.current;
       // Capture the semantic owner at intent. Queued clicks must never follow a
       // later selection, and every relative rotation reads its own latest value.
@@ -2701,7 +2707,7 @@ export const DesignInspector = React.memo(function DesignInspector({
                   ownerKey={styleOwnerKey}
                   origins={fieldOrigins}
                   disabled={!active || pendingHistoryActions > 0}
-                  readOnly={heldState !== null}
+                  readOnly={holding}
                   onChooseToken={chooseFieldToken}
                   onReset={resetField}
                 >

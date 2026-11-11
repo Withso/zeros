@@ -1,5 +1,8 @@
 import type { DesignRuntimeNodeDetails, DesignRuntimeTreeNode, DesignRuntimeWarning } from "@zeros/protocol/design-runtime";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const held = vi.hoisted(() => ({ refused: vi.fn() }));
+vi.mock("../state/design-held-state", () => ({ noteDesignHeldReplyRefused: held.refused }));
 
 import {
   designRuntimeFrameState,
@@ -47,6 +50,35 @@ describe("design runtime store", () => {
     expect(store.replaceFrameGeometry("held", "home.html", NEXT_SOURCE_VERSION, snapshot,
       [{ ...held, sourceVersion: NEXT_SOURCE_VERSION }])).toBe(true);
     expect(designRuntimeFrameState("held", "home.html")?.detailsByNode.heading).toBeUndefined();
+  });
+
+  it("hands a refused held reply to the held state, with its own check and publish", () => {
+    held.refused.mockClear();
+    const store = useDesignRuntimeStore.getState();
+    store.publishNodeDetails("held", "/design", "home.html", details(), SOURCE_VERSION);
+    const child = { ...details(), oid: "child", heldState: "hover" as const };
+    store.publishNodeDetails("held", "/design", "home.html", child, SOURCE_VERSION);
+    expect(designRuntimeFrameState("held", "home.html")?.detailsByNode.child).toBeUndefined();
+    expect(held.refused).toHaveBeenCalledTimes(1);
+    const refusal = held.refused.mock.calls[0]![0];
+    expect(refusal).toMatchObject({ workspaceId: "held", frame: "home.html", sourceVersion: SOURCE_VERSION, nodeId: "child" });
+    expect(refusal.hasDefault()).toBe(false);
+    refusal.publish({ ...details(), oid: "child" });
+    expect(designRuntimeFrameState("held", "home.html")?.detailsByNode.child?.heldState).toBeUndefined();
+    expect(refusal.hasDefault()).toBe(true);
+    // A reply of another generation is not a held refusal.
+    store.publishNodeDetails("held", "/design", "home.html", { ...child, sourceVersion: NEXT_SOURCE_VERSION }, SOURCE_VERSION);
+    expect(held.refused).toHaveBeenCalledTimes(1);
+  });
+
+  it("never stores a snapshot whose frame was read while held", () => {
+    const store = useDesignRuntimeStore.getState();
+    const snapshot = (frame: DesignRuntimeNodeDetails) => ({ sourceVersion: SOURCE_VERSION, revision: 1, tree: [], warnings: [], frame,
+      viewport: { width: 100, height: 80, scrollX: 0, scrollY: 0 } });
+    store.publishSnapshot("held", "/design", "home.html", snapshot({ ...details(), oid: "frame" }), SOURCE_VERSION);
+    store.publishSnapshot("held", "/design", "home.html", snapshot({ ...details(), oid: "frame", heldState: "hover", styles: { left: "99px" } }), SOURCE_VERSION);
+    expect(designRuntimeFrameState("held", "home.html")?.snapshot?.frame).toMatchObject({ oid: "frame", styles: { left: "10px" } });
+    expect(designRuntimeFrameState("held", "home.html")?.snapshot?.frame.heldState).toBeUndefined();
   });
 
   it("bounds screenshot bytes across all workspace owners while preserving their geometry", () => {

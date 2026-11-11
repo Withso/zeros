@@ -15,7 +15,8 @@ export interface DesignHeldStateKey {
 export interface DesignHeldStateEntry extends DesignHeldStateKey {
   state: DesignRuntimeNodeState;
   holdId: string;
-  details: DesignRuntimeNodeDetails;
+  /** Null while the hold waits for its reply; the frame may already show it. */
+  details: DesignRuntimeNodeDetails | null;
 }
 
 interface DesignHeldStateStore {
@@ -34,6 +35,63 @@ interface DesignHold extends DesignHeldStateKey {
 const holdByWorkspace = new Map<string, DesignHold>();
 let holdSequence = 0;
 
+/** A layer whose reply the runtime store refused because it was read while
+ * a state was held on it or an ancestor. The store supplies its own check
+ * and publish, so this module does not depend on it. */
+export interface DesignHeldReplyRefusal {
+  workspaceId: string;
+  frame: string;
+  sourceVersion: string;
+  nodeId: string;
+  /** Whether the store already has this layer's Default details. */
+  hasDefault: () => boolean;
+  publish: (details: DesignRuntimeNodeDetails) => void;
+}
+
+const MAX_HELD_REFUSALS = 8;
+const refusalsByWorkspace = new Map<string, DesignHeldReplyRefusal[]>();
+/** Rereads on their way, so several refused replies of one layer cost one. */
+const rereading = new Set<string>();
+
+function rereadRefused(refusal: DesignHeldReplyRefusal): void {
+  if (refusal.hasDefault()) return;
+  const runtime = designFrameRuntime(refusal.workspaceId, refusal.frame);
+  if (!runtime || runtime.sourceVersion !== refusal.sourceVersion) return;
+  const key = `${refusal.workspaceId}\u0000${refusal.frame}\u0000${refusal.sourceVersion}\u0000${refusal.nodeId}`;
+  if (rereading.has(key)) return;
+  rereading.add(key);
+  void runtime
+    .getNodeDetails(refusal.nodeId)
+    .then(refusal.publish, () => {})
+    .finally(() => rereading.delete(key));
+}
+
+/** Read each layer refused during the hold that just ended. Its release is
+ * already on the port, so the replies are Default. */
+function rereadAfterRelease(workspaceId: string): void {
+  const refused = refusalsByWorkspace.get(workspaceId);
+  if (!refused) return;
+  refusalsByWorkspace.delete(workspaceId);
+  for (const refusal of refused) rereadRefused(refusal);
+}
+
+/** A selected layer inside a held one, such as its child, gets a reply the
+ * store refuses; the selection change then lets the hold go. Read it again
+ * once nothing is held: now when the hold has already gone (the read was
+ * sent before the release), otherwise when it is let go. A layer that keeps
+ * Default details from before the hold costs no read. */
+export function noteDesignHeldReplyRefused(refusal: DesignHeldReplyRefusal): void {
+  if (!holdByWorkspace.has(refusal.workspaceId)) {
+    rereadRefused(refusal);
+    return;
+  }
+  const refused = (refusalsByWorkspace.get(refusal.workspaceId) ?? []).filter(
+    (entry) => entry.frame !== refusal.frame || entry.nodeId !== refusal.nodeId,
+  );
+  refused.push(refusal);
+  refusalsByWorkspace.set(refusal.workspaceId, refused.slice(-MAX_HELD_REFUSALS));
+}
+
 function clearEntry(workspaceId: string): void {
   if (!useDesignHeldStateStore.getState().byWorkspace[workspaceId]) return;
   useDesignHeldStateStore.setState((store) => {
@@ -47,17 +105,32 @@ function sendRelease(runtime: DesignFrameRuntimeConnection): void {
   void runtime.releaseNodeState?.().catch(() => {});
 }
 
-export function designHeldDetails(
+/** The hold on exactly this layer, answered or still in flight. */
+export function designHeldStateEntry(
   store: DesignHeldStateStore,
   key: DesignHeldStateKey,
-): DesignRuntimeNodeDetails | null {
+): DesignHeldStateEntry | null {
   const entry = store.byWorkspace[key.workspaceId];
   return entry &&
     entry.frame === key.frame &&
     entry.sourceVersion === key.sourceVersion &&
     entry.nodeId === key.nodeId
-    ? entry.details
+    ? entry
     : null;
+}
+
+export function designHeldDetails(
+  store: DesignHeldStateStore,
+  key: DesignHeldStateKey,
+): DesignRuntimeNodeDetails | null {
+  return designHeldStateEntry(store, key)?.details ?? null;
+}
+
+/** Whether a write to these layers would meet a held state, including one
+ * whose reply has not arrived. Read at the moment of the write. */
+export function designHeldStateHolds(workspaceId: string, frame: string, nodeIds: readonly string[]): boolean {
+  const hold = holdByWorkspace.get(workspaceId);
+  return Boolean(hold && hold.frame === frame && nodeIds.includes(hold.nodeId));
 }
 
 /** Ask the frame to show the layer in a state. Never awaited by a click: the
@@ -75,6 +148,9 @@ export function holdDesignNodeState(input: DesignHeldStateKey & {
   if (previous && previous.runtime !== runtime) sendRelease(previous.runtime);
   const hold: DesignHold = { workspaceId, frame, sourceVersion, nodeId, state, holdId: `hold-${++holdSequence}`, runtime };
   holdByWorkspace.set(workspaceId, hold);
+  useDesignHeldStateStore.setState((store) => ({
+    byWorkspace: { ...store.byWorkspace, [workspaceId]: { workspaceId, frame, sourceVersion, nodeId, state, holdId: hold.holdId, details: null } },
+  }));
   runtime.holdNodeState(nodeId, state, hold.holdId).then(
     (details) => {
       if (holdByWorkspace.get(workspaceId) !== hold) return;
@@ -84,6 +160,7 @@ export function holdDesignNodeState(input: DesignHeldStateKey & {
         clearEntry(workspaceId);
         // A retired document takes no further work.
         if (current) sendRelease(runtime);
+        rereadAfterRelease(workspaceId);
         return;
       }
       useDesignHeldStateStore.setState((store) => ({
@@ -96,6 +173,7 @@ export function holdDesignNodeState(input: DesignHeldStateKey & {
       holdByWorkspace.delete(workspaceId);
       clearEntry(workspaceId);
       sendRelease(runtime);
+      rereadAfterRelease(workspaceId);
     },
   );
 }
@@ -108,6 +186,7 @@ export function releaseDesignNodeState(workspaceId: string): boolean {
   clearEntry(workspaceId);
   if (!hold) return false;
   sendRelease(hold.runtime);
+  rereadAfterRelease(workspaceId);
   return true;
 }
 
@@ -134,6 +213,7 @@ export function forgetDesignHeldStateRelease(workspaceId: string, frame: string,
   if (hold?.frame !== frame || hold.holdId !== holdId) return;
   holdByWorkspace.delete(workspaceId);
   clearEntry(workspaceId);
+  rereadAfterRelease(workspaceId);
 }
 
 export function designHeldStateHold(workspaceId: string): { frame: string; nodeId: string; state: DesignRuntimeNodeState } | null {
@@ -143,6 +223,8 @@ export function designHeldStateHold(workspaceId: string): { frame: string; nodeI
 
 export function resetDesignHeldStateForTests(): void {
   holdByWorkspace.clear();
+  refusalsByWorkspace.clear();
+  rereading.clear();
   holdSequence = 0;
   useDesignHeldStateStore.setState({ byWorkspace: {} });
 }

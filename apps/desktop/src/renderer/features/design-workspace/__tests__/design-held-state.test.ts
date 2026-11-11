@@ -6,8 +6,11 @@ vi.mock("../../../platform/bridge/design-frame-runtime", () => ({ designFrameRun
 
 import {
   designHeldDetails,
+  designHeldStateEntry,
+  designHeldStateHolds,
   forgetDesignHeldStateRelease,
   holdDesignNodeState,
+  noteDesignHeldReplyRefused,
   releaseDesignNodeState,
   releaseDesignNodeStateOn,
   releaseDesignNodeStateUnless,
@@ -44,6 +47,7 @@ function fakeRuntime(sourceVersion = SOURCE_VERSION) {
     holdNodeState: vi.fn((nodeId: string, state: DesignRuntimeNodeState, holdId: string) =>
       new Promise<DesignRuntimeNodeDetails>((resolve, reject) => holds.push({ nodeId, state, holdId, resolve, reject }))),
     releaseNodeState: vi.fn(() => Promise.resolve({ released: true })),
+    getNodeDetails: vi.fn((nodeId: string) => Promise.resolve({ ...details(), oid: nodeId })),
   };
   return { runtime, holds };
 }
@@ -64,11 +68,13 @@ describe("held layer state", () => {
     try {
       holdDesignNodeState({ ...KEY, state: "hover" });
       expect(runtime.holdNodeState).toHaveBeenCalledExactlyOnceWith("send", "hover", expect.any(String));
-      // Nothing is published until the reply: one request, one update.
-      expect(updates).not.toHaveBeenCalled();
+      // The request marks the hold as in flight; its details wait for the
+      // reply: one request, two updates.
+      expect(updates).toHaveBeenCalledTimes(1);
+      expect(designHeldDetails(useDesignHeldStateStore.getState(), KEY)).toBeNull();
       holds[0]!.resolve(details("hover"));
       await vi.waitFor(() => expect(held()?.details?.heldState).toBe("hover"));
-      expect(updates).toHaveBeenCalledTimes(1);
+      expect(updates).toHaveBeenCalledTimes(2);
     } finally {
       stop();
     }
@@ -76,6 +82,30 @@ describe("held layer state", () => {
     expect(designHeldDetails(useDesignHeldStateStore.getState(), { ...KEY, nodeId: "other" })).toBeNull();
     expect(designHeldDetails(useDesignHeldStateStore.getState(), { ...KEY, sourceVersion: NEXT_SOURCE_VERSION })).toBeNull();
     expect(designHeldDetails(useDesignHeldStateStore.getState(), { ...KEY, frame: "about.html" })).toBeNull();
+  });
+
+  it("counts a hold still waiting for its reply as held, for that layer only", async () => {
+    const { runtime, holds } = fakeRuntime();
+    mocks.runtime.mockReturnValue(runtime);
+    expect(designHeldStateHolds("w", "home.html", ["send"])).toBe(false);
+    holdDesignNodeState({ ...KEY, state: "hover" });
+    // The frame may already show the state: nothing may write meanwhile.
+    expect(designHeldStateHolds("w", "home.html", ["send"])).toBe(true);
+    expect(designHeldStateEntry(useDesignHeldStateStore.getState(), KEY)).toMatchObject({ state: "hover", details: null });
+    expect(designHeldStateHolds("w", "home.html", ["other"])).toBe(false);
+    expect(designHeldStateHolds("w", "about.html", ["send"])).toBe(false);
+    expect(designHeldStateEntry(useDesignHeldStateStore.getState(), { ...KEY, nodeId: "other" })).toBeNull();
+    holds[0]!.resolve(details("hover"));
+    await vi.waitFor(() => expect(held()?.details?.heldState).toBe("hover"));
+    expect(designHeldStateHolds("w", "home.html", ["send"])).toBe(true);
+    releaseDesignNodeState("w");
+    expect(designHeldStateHolds("w", "home.html", ["send"])).toBe(false);
+    expect(designHeldStateEntry(useDesignHeldStateStore.getState(), KEY)).toBeNull();
+    // A refused hold stops counting.
+    holdDesignNodeState({ ...KEY, state: "hover" });
+    holds[1]!.reject(new Error("gone"));
+    await vi.waitFor(() => expect(designHeldStateHolds("w", "home.html", ["send"])).toBe(false));
+    expect(held()).toBeUndefined();
   });
 
   it("drops a reply that arrives after Back to Default and lets go without waiting", async () => {
@@ -207,6 +237,43 @@ describe("held layer state", () => {
     await Promise.resolve();
     await Promise.resolve();
     expect(held()).toBeUndefined();
+  });
+
+  it("reads a layer refused while held again, as Default, once nothing is held", async () => {
+    const { runtime, holds } = fakeRuntime();
+    mocks.runtime.mockReturnValue(runtime);
+    const order: string[] = [];
+    runtime.releaseNodeState.mockImplementation(() => { order.push("release"); return Promise.resolve({ released: true }); });
+    runtime.getNodeDetails.mockImplementation((nodeId: string) => { order.push(`read:${nodeId}`); return Promise.resolve({ ...details(), oid: nodeId }); });
+    const published = vi.fn();
+    const refusal = (nodeId: string, hasDefault = false) => ({
+      workspaceId: "w", frame: "home.html", sourceVersion: SOURCE_VERSION, nodeId, hasDefault: () => hasDefault, publish: published,
+    });
+    holdDesignNodeState({ ...KEY, state: "hover" });
+    holds[0]!.resolve(details("hover"));
+    await vi.waitFor(() => expect(held()?.details).toBeTruthy());
+    // Selecting the held layer's child: its reply is refused while held.
+    noteDesignHeldReplyRefused(refusal("send-label"));
+    noteDesignHeldReplyRefused(refusal("send-label"));
+    // The held layer itself already has its Default details: no read.
+    noteDesignHeldReplyRefused(refusal("send", true));
+    expect(runtime.getNodeDetails).not.toHaveBeenCalled();
+    releaseDesignNodeState("w");
+    await vi.waitFor(() => expect(published).toHaveBeenCalledTimes(1));
+    expect(order).toEqual(["release", "read:send-label"]);
+    expect(published.mock.calls[0]![0]).toMatchObject({ oid: "send-label" });
+    expect(published.mock.calls[0]![0].heldState).toBeUndefined();
+    // A refused reply that arrives after the release is read again at once,
+    // once however many of its replies come back refused meanwhile.
+    noteDesignHeldReplyRefused(refusal("late"));
+    noteDesignHeldReplyRefused(refusal("late"));
+    noteDesignHeldReplyRefused(refusal("late"));
+    await vi.waitFor(() => expect(published).toHaveBeenCalledTimes(2));
+    expect(order.filter((step) => step === "read:late")).toHaveLength(1);
+    // Nothing is read for a generation the frame has left.
+    noteDesignHeldReplyRefused({ ...refusal("stale"), sourceVersion: NEXT_SOURCE_VERSION });
+    await Promise.resolve();
+    expect(runtime.getNodeDetails).toHaveBeenCalledTimes(2);
   });
 
   it("does not touch other workspaces", async () => {

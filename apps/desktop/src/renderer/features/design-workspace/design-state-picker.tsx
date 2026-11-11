@@ -107,7 +107,9 @@ export function DesignHeldStateNote({
   );
 }
 
-const READ_ONLY_EVENTS = ["pointerdown", "mousedown", "click", "dblclick", "auxclick", "contextmenu", "keydown", "beforeinput", "paste", "drop", "dragstart"] as const;
+const READ_ONLY_EVENTS = ["pointerdown", "mousedown", "click", "dblclick", "auxclick", "contextmenu", "keydown", "beforeinput", "paste", "cut", "drop", "dragstart"] as const;
+/** Keys a field steps its value with, whatever the modifiers. */
+const STEPPING_KEYS = new Set(["ArrowUp", "ArrowDown"]);
 /** Keys that move focus or the caret, or leave, and change nothing. */
 const PASSING_KEYS = new Set(["Tab", "Escape", "ArrowLeft", "ArrowRight", "Home", "End", "Shift", "Meta", "Control", "Alt", "CapsLock"]);
 
@@ -118,22 +120,36 @@ const PASSING_KEYS = new Set(["Tab", "Escape", "ArrowLeft", "ArrowRight", "Home"
 export function designHeldStateBlocks(root: HTMLElement, target: EventTarget | null): boolean {
   if (!(target instanceof Element)) return false;
   if (target.closest("[data-design-state-control]")) return false;
-  if (target.closest("[data-design-popover], [data-design-token-picker]")) return true;
+  const popover = target.closest("[data-design-popover], [data-design-token-picker]");
+  if (popover) return designPopoverOpenedFrom(root, popover);
   const viewport = target.closest("[data-radix-scroll-area-viewport]");
   return Boolean(viewport && root.contains(viewport));
 }
 
+/** A portaled popover belongs to the panel when its trigger (the element
+ * whose aria-controls names it) is inside the panel. The panel's popovers
+ * with no trigger, such as its token picker, belong to it as well; one
+ * opened elsewhere, such as the theme editor's colour picker, does not. */
+function designPopoverOpenedFrom(root: HTMLElement, popover: Element): boolean {
+  if (!popover.id) return true;
+  for (const trigger of document.querySelectorAll("[aria-controls]")) {
+    if (trigger.getAttribute("aria-controls") === popover.id) return root.contains(trigger);
+  }
+  return true;
+}
+
 /** While a state is held, nothing in the panel edits: presses, typing,
- * pasting and field shortcuts are dropped before any field sees them, at the
- * document so portaled popovers are covered too. Undo, redo and other
- * Cmd/Ctrl shortcuts, Tab and Escape pass. Listeners exist only while held. */
+ * cutting, pasting, stepping arrows (with any modifier) and field shortcuts
+ * are dropped before any field sees them, at the document so portaled
+ * popovers are covered too. Undo, redo, copy and other Cmd/Ctrl shortcuts,
+ * Tab and Escape pass. Listeners exist only while held. */
 export function useDesignHeldReadOnly(rootRef: RefObject<HTMLElement | null>, held: boolean): void {
   useEffect(() => {
     const root = rootRef.current;
     if (!held || !root) return;
     const block = (event: Event) => {
       if (!designHeldStateBlocks(root, event.target)) return;
-      if (event instanceof KeyboardEvent) {
+      if (event instanceof KeyboardEvent && !STEPPING_KEYS.has(event.key)) {
         if (PASSING_KEYS.has(event.key)) return;
         if ((event.metaKey || event.ctrlKey) && !event.altKey) return;
       }

@@ -153,13 +153,36 @@ export async function runDesignStyleStatesSmoke({ page, check }) {
   await page.waitForFunction(() => document.querySelector("[data-design-inspector]")?.getAttribute("data-design-state-held") === "hover");
   check("a click that re-selects the held layer keeps the state", (await heldInFrame("home-submit")) === "hover");
   const beforeDrag = await writes();
+  // The release and the move are recorded in the frame as they happen.
+  await runtime.locator("body").evaluate((body) => {
+    const view = body.ownerDocument.defaultView;
+    const submit = body.ownerDocument.querySelector('[data-oid="home-submit"]');
+    view.__zerosSmokeDragOrder = [];
+    view.__zerosSmokeDragObserver = new view.MutationObserver((records) => {
+      for (const record of records) {
+        if (record.attributeName === "data-zd-state") view.__zerosSmokeDragOrder.push(submit.hasAttribute("data-zd-state") ? "hold" : "release");
+        else view.__zerosSmokeDragOrder.push("move");
+      }
+    });
+    view.__zerosSmokeDragObserver.observe(submit, { attributes: true, attributeFilter: ["data-zd-state", "style"] });
+  });
+  const dragOrder = () => runtime.locator("body").evaluate((body) => body.ownerDocument.defaultView.__zerosSmokeDragOrder.slice());
   await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
   await page.mouse.down();
   await page.mouse.move(box.x + box.width / 2 + 40, box.y + box.height / 2 + 4, { steps: 8 });
-  await expect.poll(() => heldInFrame("home-submit")).toBe(null);
+  await expect.poll(async () => (await dragOrder()).includes("move")).toBe(true);
   await page.mouse.up();
   await expect(stateButton).toHaveText("Default");
-  check("a drag lets go of the state before it moves the layer", true);
+  const order = await runtime.locator("body").evaluate((body) => {
+    const view = body.ownerDocument.defaultView;
+    view.__zerosSmokeDragObserver.disconnect();
+    return view.__zerosSmokeDragOrder;
+  });
+  check(
+    "a drag lets go of the state before it moves the layer",
+    order[0] === "release" && order.slice(1).includes("move") && !order.includes("hold"),
+    order.slice(0, 6).join(","),
+  );
   if ((await writes()) > beforeDrag) {
     await page.getByLabel("Design canvas", { exact: true }).focus();
     await page.keyboard.press("ControlOrMeta+z");
@@ -190,4 +213,99 @@ export async function runDesignStyleStatesSmoke({ page, check }) {
   await expect.poll(() => heldInFrame("home-submit")).toBe(null);
   check("the CSS tab shows Default and lets go of a held state", (await stateButton.count()) === 0);
   await page.getByRole("button", { name: "Style", exact: true }).click();
+
+  // While the hold's reply is on its way the canvas already shows the state,
+  // so the panel is read-only then too. The reply is held back at the frame's
+  // port; nothing in the product changes for this.
+  await layer("home-submit").click();
+  await stateButton.waitFor();
+  await runtime.locator("body").evaluate((body) => {
+    const view = body.ownerDocument.defaultView;
+    const post = view.MessagePort.prototype.postMessage;
+    view.__zerosSmokeHeldReplies = [];
+    view.__zerosSmokeRestorePort = () => { view.MessagePort.prototype.postMessage = post; };
+    view.MessagePort.prototype.postMessage = function (message, ...rest) {
+      if (message?.type === "response" && message.result?.heldState) {
+        view.__zerosSmokeHeldReplies.push(() => post.call(this, message, ...rest));
+        return;
+      }
+      return post.call(this, message, ...rest);
+    };
+  });
+  const pendingWrites = await writes();
+  const widthBefore = await field("width").locator("input").first().inputValue();
+  await pick("Hover");
+  await expect.poll(() => heldInFrame("home-submit")).toBe("hover");
+  await expect.poll(() => runtime.locator("body").evaluate((body) => body.ownerDocument.defaultView.__zerosSmokeHeldReplies.length)).toBe(1);
+  const widthInput = field("width").locator("input").first();
+  await widthInput.click();
+  await page.keyboard.type("9");
+  await page.keyboard.press("Enter");
+  await inspector.getByRole("button", { name: "Auto layout: Vertical", exact: true }).click();
+  check(
+    "a hold still waiting for its reply keeps the panel read-only: no style commit, no layout action",
+    (await writes()) === pendingWrites &&
+      (await heldInFrame("home-submit")) === "hover" &&
+      (await widthInput.inputValue()) === widthBefore &&
+      ((await stateButton.textContent()) ?? "").trim() === "Default",
+    `${pendingWrites} → ${await writes()} | ${await widthInput.inputValue()} | ${await heldInFrame("home-submit")}`,
+  );
+  await runtime.locator("body").evaluate((body) => {
+    const view = body.ownerDocument.defaultView;
+    view.__zerosSmokeRestorePort();
+    for (const send of view.__zerosSmokeHeldReplies.splice(0)) send();
+  });
+  await expect(stateButton).toHaveText("Hover");
+  check("the reply that arrives late still shows the state", (await note.count()) === 1);
+
+  // A child of the held layer, with no details read before (a fresh page,
+  // and no pointer over the canvas): its reply comes back marked as held and
+  // is refused, the selection lets the hold go, and its Default details are
+  // read then.
+  await page.goto(page.url(), { waitUntil: "networkidle" });
+  await openLayersDrawer(page);
+  await layer("home-submit").click();
+  await stateButton.waitFor();
+  await pick("Hover");
+  await expect.poll(() => heldInFrame("home-submit")).toBe("hover");
+  await expect(stateButton).toHaveText("Hover");
+  await layer("home-submit").locator("[data-layer-disclosure]").click();
+  // The Layers warm-up reads uncached rows on idle timers; with the page's
+  // clock paused only the read after the release can bring the child in.
+  await page.mouse.move(1, 1);
+  await page.clock.pauseAt(await page.evaluate(() => Date.now() + 1_000));
+  await layer("home-submit-label").click();
+  await expect.poll(() => heldInFrame("home-submit")).toBe(null);
+  const labelWidth = () => field("width").locator("input").first().inputValue().catch(() => "");
+  await expect.poll(labelWidth, { timeout: 5_000 }).not.toBe("").catch(() => {});
+  check(
+    "selecting a child of the held layer shows its Default details once the hold lets go",
+    (await labelWidth()) !== "" && (await layer("home-submit-label").getAttribute("aria-selected")) === "true",
+    await labelWidth(),
+  );
+  await page.clock.resume();
+
+  // A popover the panel did not open stays usable while a state is held:
+  // the theme editor's colour picker, opened from the canvas chrome.
+  await layer("home-submit").click();
+  await stateButton.waitFor();
+  await pick("Hover");
+  await expect.poll(() => heldInFrame("home-submit")).toBe("hover");
+  await page.getByRole("button", { name: "Open theme editor", exact: true }).click();
+  const themeEditor = page.getByRole("dialog", { name: "Theme editor" });
+  await themeEditor.getByRole("button", { name: "Edit --bg1 light", exact: true }).click();
+  const hex = page.locator("[data-design-popover]").getByLabel("--bg1 Light value", { exact: true });
+  const themeWrites = await writes();
+  await hex.click();
+  await page.keyboard.press("ControlOrMeta+a");
+  await page.keyboard.type("123456");
+  check(
+    "the theme editor's colour picker takes typing while a layer state is held",
+    (await hex.inputValue()) === "123456" && (await heldInFrame("home-submit")) === "hover",
+    await hex.inputValue(),
+  );
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("Escape");
+  await themeEditor.waitFor({ state: "detached" }).catch(() => {});
+  check("cancelling the theme picker wrote nothing", (await writes()) === themeWrites, `${themeWrites} → ${await writes()}`);
 }

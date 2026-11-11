@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { chromium, type Browser, type Page } from "@playwright/test";
 import {
   DESIGN_RUNTIME_SOURCE,
@@ -201,7 +201,9 @@ describe("layer states in Chromium", () => {
 
   it("matches what a real hover shows on the class-styled button", async () => {
     await page.locator('[data-oid="button"]').hover();
-    await page.waitForTimeout(2100);
+    // The 2s transition has reached its end colour.
+    await page.waitForFunction(() =>
+      getComputedStyle(document.querySelector('[data-oid="button"]')!).backgroundColor === "rgb(0, 0, 255)");
     const real = await computed(page, "button", "background-color");
     await page.mouse.move(0, 400);
     await hold(page, "button", "hover");
@@ -276,9 +278,10 @@ describe("layer states in Chromium", () => {
     // Holding another state replaces the hold the host asked for: no event.
     await hold(page, "button", "focus", "second");
     await request(page, "releaseNodeState", {});
-    await page.evaluate(() => new Promise((resolve) => setTimeout(resolve, 50)));
-    expect(await events(page)).toEqual([]);
+    // Events travel on the reply port: anything these sent is in before the
+    // snapshot's reply.
     const after = await request(page, "getSnapshot", {});
+    expect(await events(page)).toEqual([]);
     expect((after.result as { revision: number }).revision).toBe((before.result as { revision: number }).revision);
   });
 
@@ -331,6 +334,61 @@ describe("layer states in Chromium", () => {
     await request(page, "clearPreviewStyles", {});
   });
 
+  it("keeps the hold when the theme it is asked for is the one shown, and lets go when it changes", async () => {
+    await request(page, "setTheme", { theme: "dark" });
+    await hold(page, "button", "hover", "same-theme");
+    await events(page);
+    await request(page, "setTheme", { theme: "dark" });
+    expect(await events(page)).toEqual([]);
+    expect(await computed(page, "button", "background-color")).toBe("rgb(0, 0, 255)");
+    expect((await details(page, "button")).heldState).toBe("hover");
+    await request(page, "setTheme", { theme: null });
+    expect((await events(page))[0]).toBe("stateReleased:same-theme");
+    expect(await computed(page, "button", "background-color")).toBe("rgb(0, 0, 128)");
+    // And from no theme: re-applying none keeps it, a theme lets go.
+    await hold(page, "button", "hover", "no-theme");
+    await events(page);
+    await request(page, "setTheme", { theme: null });
+    expect(await events(page)).toEqual([]);
+    expect((await details(page, "button")).heldState).toBe("hover");
+    await request(page, "setTheme", { theme: "dark" });
+    expect((await events(page))[0]).toBe("stateReleased:no-theme");
+    await request(page, "setTheme", { theme: null });
+  });
+
+  it("keeps a held frame root's values out of every snapshot, and keeps holding after one", async () => {
+    const scoped = await fixture(
+      browser,
+      `<style>.shell { background-color: rgb(0, 0, 128); } .shell:hover { background-color: rgb(0, 0, 255); }</style>`,
+      `<main data-oid="shell" data-zeros-frame-root class="shell"><p data-oid="copy">Copy</p></main>`,
+    );
+    try {
+      expect(((await request(scoped, "getSnapshot", {})).result as { frame: DesignRuntimeNodeDetails }).frame.oid).toBe("shell");
+      await hold(scoped, "shell", "hover", "root");
+      const taken = (await request(scoped, "getSnapshot", {})).result as { frame: DesignRuntimeNodeDetails };
+      expect(taken.frame.heldState).toBeUndefined();
+      expect(taken.frame.styles.backgroundColor).toBe("rgb(0, 0, 128)");
+      expect(taken.frame.authoredStyles?.["background-color"]?.state).toBeUndefined();
+      // The held view is as it was, and reads of it are still marked.
+      expect(await computed(scoped, "shell", "background-color")).toBe("rgb(0, 0, 255)");
+      const after = await details(scoped, "shell");
+      expect(after.heldState).toBe("hover");
+      expect(after.authoredStyles?.["background-color"]).toMatchObject({ selector: ".shell:hover", state: "hover" });
+      // The snapshot an observed change publishes is Default too.
+      await events(scoped);
+      await scoped.evaluate(() => document.querySelector('[data-oid="copy"]')!.textContent = "Changed");
+      await vi.waitFor(() => scoped.evaluate(() => (window as unknown as RuntimeWindow).runtimeEventMessages.some(
+        (message) => (message as { event?: string }).event === "mutation")).then((seen) => expect(seen).toBe(true)));
+      const published = await scoped.evaluate(() => ((window as unknown as RuntimeWindow).runtimeEventMessages.filter(
+        (message) => (message as { event?: string }).event === "mutation").at(-1) as { payload: { frame: DesignRuntimeNodeDetails } }).payload.frame);
+      expect(published.heldState).toBeUndefined();
+      expect(published.styles.backgroundColor).toBe("rgb(0, 0, 128)");
+      expect(await computed(scoped, "shell", "background-color")).toBe("rgb(0, 0, 255)");
+    } finally {
+      await scoped.close();
+    }
+  });
+
   it("releases when the held layer leaves the document", async () => {
     const scoped = await fixture(browser);
     try {
@@ -338,9 +396,10 @@ describe("layer states in Chromium", () => {
       await events(scoped);
       await scoped.evaluate(() => document.querySelector('[data-oid="card"]')!.remove());
       // After the observer's debounce.
-      await scoped.evaluate(() => new Promise((resolve) => setTimeout(resolve, 600)));
+      await vi.waitFor(async () =>
+        expect(await scoped.evaluate(() => (window as unknown as RuntimeWindow).runtimeEvents.slice())).toEqual(["stateReleased:removed", "mutation"]),
+      { timeout: 5_000 });
       expect(await scoped.evaluate(() => document.querySelectorAll("style[data-zeros-runtime-state]").length)).toBe(0);
-      expect(await events(scoped)).toEqual(["stateReleased:removed", "mutation"]);
     } finally {
       await scoped.close();
     }

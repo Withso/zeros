@@ -131,6 +131,53 @@ describe("the read-only rule while a state is held", () => {
     popover.remove();
   });
 
+  it("drops the keys and clipboard edits that change a field's draft, and lets command shortcuts through", () => {
+    render(createElement(Panel, { held: true }));
+    const radius = document.getElementById("radius")!;
+    for (const init of [
+      { key: "ArrowUp", metaKey: true },
+      { key: "ArrowDown", ctrlKey: true },
+      { key: "ArrowUp", shiftKey: true },
+      { key: "ArrowDown", metaKey: true, shiftKey: true },
+    ]) expect(key(radius, init), JSON.stringify(init)).toBe(true);
+    // Cut and paste are events of their own after their shortcut's keydown.
+    expect(fire(radius, new Event("cut", { bubbles: true, cancelable: true }))).toBe(true);
+    expect(fire(radius, new Event("paste", { bubbles: true, cancelable: true }))).toBe(true);
+    for (const init of [{ key: "c", metaKey: true }, { key: "a", metaKey: true }, { key: "x", metaKey: true }, { key: "v", ctrlKey: true }, { key: "y", ctrlKey: true }])
+      expect(key(radius, init), init.key).toBe(false);
+    expect(fire(radius, new Event("copy", { bubbles: true, cancelable: true }))).toBe(false);
+  });
+
+  it("drops presses in popovers the panel opened, not in one opened elsewhere", () => {
+    render(createElement(Panel, { held: true }));
+    const popover = (id: string, trigger: HTMLElement | null) => {
+      const element = document.createElement("div");
+      element.id = id;
+      element.setAttribute("data-design-popover", "");
+      element.append(document.createElement("button"));
+      document.body.append(element);
+      trigger?.setAttribute("aria-controls", id);
+      return element.firstElementChild!;
+    };
+    // Opened from the panel: its trigger is inside it.
+    const inside = document.createElement("button");
+    document.querySelector('[data-design-style-property="border-radius"]')!.append(inside);
+    const owned = popover("radix-:r1:", inside);
+    // The theme editor's colour picker, opened from the canvas chrome.
+    const chrome = document.createElement("button");
+    document.body.append(chrome);
+    const elsewhere = popover("radix-:r2:", chrome);
+    // A popover with no trigger, like the panel's token picker, is the panel's.
+    const anchored = popover("radix-:r3:", null);
+    const press = (target: Element) => fire(target, new PointerEvent("pointerdown", { bubbles: true, cancelable: true }));
+    expect(press(owned)).toBe(true);
+    expect(press(anchored)).toBe(true);
+    expect(press(elsewhere)).toBe(false);
+    expect(key(elsewhere, { key: "5" })).toBe(false);
+    for (const node of [owned, elsewhere, anchored]) node.parentElement!.remove();
+    chrome.remove();
+  });
+
   it("listens to nothing when no state is held", () => {
     render(createElement(Panel, { held: false }));
     const radius = document.getElementById("radius")!;

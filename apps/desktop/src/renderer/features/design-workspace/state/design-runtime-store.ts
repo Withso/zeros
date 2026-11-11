@@ -15,6 +15,8 @@ import type {
 } from "@zeros/protocol/design-runtime";
 import { create } from "zustand";
 
+import { noteDesignHeldReplyRefused } from "./design-held-state";
+
 const MAX_WORKSPACES = 32;
 const MAX_FRAMES_PER_WORKSPACE = 24;
 const MAX_DETAILS_PER_FRAME = 32;
@@ -476,12 +478,12 @@ function updateWorkspace(
   return { byWorkspace, workspaceIdByFolder };
 }
 
-export const useDesignRuntimeStore = create<DesignRuntimeStore>((set) => ({
+export const useDesignRuntimeStore = create<DesignRuntimeStore>((set, get) => ({
   byWorkspace: {},
   workspaceIdByFolder: {},
 
   publishSnapshot(workspaceId, folder, frame, snapshot, sourceVersion) {
-    if (snapshot.sourceVersion !== sourceVersion) return;
+    if (snapshot.sourceVersion !== sourceVersion || isHeldReply(snapshot.frame)) return;
     set((state) => {
       const workspace = state.byWorkspace[workspaceId];
       const current = workspace?.frames[frame];
@@ -511,7 +513,19 @@ export const useDesignRuntimeStore = create<DesignRuntimeStore>((set) => ({
   },
 
   publishNodeDetails(workspaceId, folder, frame, details, sourceVersion, options) {
-    if (details.sourceVersion !== sourceVersion || isHeldReply(details)) return;
+    if (details.sourceVersion !== sourceVersion) return;
+    if (isHeldReply(details)) {
+      noteDesignHeldReplyRefused({
+        workspaceId,
+        frame,
+        sourceVersion,
+        nodeId: details.oid,
+        hasDefault: () =>
+          get().byWorkspace[workspaceId]?.frames[frame]?.detailsByNode[details.oid]?.sourceVersion === sourceVersion,
+        publish: (next) => get().publishNodeDetails(workspaceId, folder, frame, next, sourceVersion),
+      });
+      return;
+    }
     set((state) => {
       const existing = state.byWorkspace[workspaceId]?.frames[frame];
       const existingWorkspace = state.byWorkspace[workspaceId];

@@ -1941,14 +1941,24 @@ original unsnapped geometry writes nothing and preserves authored sizing.
   changes ("Hover changes 2 properties. The rest matches Default."; "changes
   nothing here" at 0), the hover card names "the class .btn, on hover" and
   offers nothing, and no field, shortcut, picker, Type settings or Styled-by
-  row edits (document-level capture, so portaled popovers are covered);
-  Tab, Escape, undo and redo pass. A new selection, page, frame or
-  generation, a hidden surface, the CSS tab (which edits Default), a canvas
-  gesture that passes its drag threshold, and any edit the runtime receives
-  (it lets go itself and says `stateReleased`) all release; a click that
-  only re-selects the held layer keeps it. Captures (Export PNG, drag
-  ghosts) set the state aside for their synchronous span and strip the copy
-  from the clone. Single selection, Local workspaces only. Known limits:
+  row edits (document-level capture, so portaled popovers are covered: a
+  popover whose trigger is in the panel, or one with no trigger such as the
+  token picker; the theme editor's colour picker stays usable). Stepping
+  arrows with any modifier, cut and paste are dropped; Tab, Escape, undo,
+  redo and copy pass. A hold still waiting for its reply counts as held for
+  this and for every commit, since the frame may already show it. A new
+  selection, page, frame or generation, a hidden surface, the CSS tab
+  (which edits Default), a canvas gesture that passes its drag threshold, a
+  theme that changes (re-applying the shown one keeps it), and any edit the
+  runtime receives (it lets go itself and says `stateReleased`) all release;
+  a click that only re-selects the held layer keeps it. A reply read inside
+  the held layer (its child, say, when it is selected or hovered) is refused
+  by the store and read again as Default once the hold is gone, unless the
+  store already has that layer's Default details. Captures (Export PNG, drag
+  ghosts) and every snapshot the runtime produces set the state aside for
+  their synchronous span, so a held frame root never reaches `snapshot.frame`,
+  and the store refuses a snapshot whose frame is marked held. Single
+  selection, Local workspaces only. Known limits:
   a copy sits after every original rule of its layer, so a later rule of
   equal specificity that beats the state for real loses to the held copy
   (pinned by a protocol test); states on an ancestor (`.row:hover .label`),

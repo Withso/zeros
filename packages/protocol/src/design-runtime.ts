@@ -2227,7 +2227,9 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   /** The one layer held in a state, its copied rules and their originals;
    * null at rest. */
   var heldState = null;
-  var HELD_STATE_RELEASES = ["setTheme", "previewStyles", "previewLayout", "restoreGeneration", "previewHistory", "commitStyles", "commitStructure", "previewStructure", "previewText", "previewMotion", "previewStylesheet", "previewInsert", "setNodeVisibility", "setPlayback"];
+  /** True while a held state is set aside, so reads in that span are Default's. */
+  var heldStateAside = false;
+  var HELD_STATE_RELEASES = ["previewStyles", "previewLayout", "restoreGeneration", "previewHistory", "commitStyles", "commitStructure", "previewStructure", "previewText", "previewMotion", "previewStylesheet", "previewInsert", "setNodeVisibility", "setPlayback"];
   var longhandsByShorthand = new Map();
 
   /** Every active style rule in document order with its layer position,
@@ -2983,15 +2985,19 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       held.style.disabled = true;
     });
     suspendElementMotion(held.element);
+    heldStateAside = true;
     try {
       return work();
     } finally {
+      heldStateAside = false;
       if (heldState === held) {
         withoutObservedMutations(function () {
           held.style.disabled = false;
           held.element.setAttribute("data-zd-state", STATE_TOKENS[held.state].join(" "));
         });
         suspendElementMotion(held.element);
+        // Caches built while it was aside hold Default's winners.
+        resetStyleCaches();
       }
     }
   }
@@ -3405,7 +3411,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     if (!layoutOnly) attachAuthoredStyles(result, element, authoredStyleProperties);
     // Values read while a state is held are that state's, for the held layer
     // and anything inheriting from it; the host keeps them apart.
-    if (heldState && (element === heldState.element || heldState.element.contains(element))) result.heldState = heldState.state;
+    if (heldState && !heldStateAside && (element === heldState.element || heldState.element.contains(element))) result.heldState = heldState.state;
     return result;
   }
 
@@ -3588,6 +3594,8 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   }
 
   function snapshot(retainAudits) {
+    // A snapshot is Default: the host stores it as the frame's own values.
+    if (heldState && !heldStateAside) return withoutHeldState(function () { return snapshot(retainAudits); });
     if (structurePreviews.length) return withStructurePresentation(function () { return snapshot(retainAudits); });
     // A snapshot is the semantic cache generation. Theme changes and observed
     // DOM/style mutations both arrive through this boundary.
@@ -3642,6 +3650,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   }
 
   function styleOnlySnapshot() {
+    if (heldState && !heldStateAside) return withoutHeldState(styleOnlySnapshot);
     if (!lastSnapshot) return snapshot();
     authoredStylePropertiesCache = new WeakMap();
     authoredStylesCache = new WeakMap();
@@ -3858,6 +3867,8 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     // snapshot so the host store can preserve reference identity and avoid a
     // second React commit during iframe readiness.
     if (currentTheme === theme) return lastSnapshot || snapshot();
+    // Only a theme that changes ends a held state.
+    releaseHeldState(true);
     withoutObservedMutations(function () {
       if (theme === null) document.documentElement.removeAttribute("data-zd-theme");
       else document.documentElement.setAttribute("data-zd-theme", theme);
