@@ -40,10 +40,9 @@ session itself.
 7. **Merge** with `pnpm agent:merge <n>`. On main's merge queue it enqueues,
    and several PRs may be in flight; each is tested on top of main and the
    entries ahead of it. Without a queue it arms auto-merge for one PR at a time.
-   Apply `ci:*` and `agent-runtime:hold` labels before the final push. A label
-   added later starts a new CI run for the same head and cancels the running
-   one, whose roll-ups then fail with "Invalid … selection/result"; read the
-   newest run instead.
+   Apply `ci:*` labels when you open the PR (`gh pr create --label`) or before
+   the final push. Label events start no CI run; a label added after CI started
+   needs `gh run rerun <run-id>` (whole run) or a push.
    CI-definition PRs merge through the same wrapper. Auto-merge stays on
    across a later push, so disarm before pushing a change you have not
    verified (GraphQL `disablePullRequestAutoMerge`) and confirm

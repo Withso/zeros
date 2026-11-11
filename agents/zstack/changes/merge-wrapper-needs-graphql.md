@@ -21,8 +21,8 @@ owner asks for that PR: once every check is done and the PR reads `clean`,
 run `decideMerge` over connector reads and the local diff from the merge
 base, squash as `<title> (#<n>)` with the PR body and `expectedHeadSha`, and
 read the merge back. The connector cannot show other PRs' auto-merge state,
-so report that gap. Label a connector PR as soon as it opens and read only the
-labelled run: the cancelled run's `true:cancelled` roll-ups are not failures.
+so report that gap. Since 2026-11-11 label events start no CI run: a label added
+after a connector PR opens applies once you rerun its CI run.
 
 **Encoded in.** Target: the merge step of
 `agents/zstack/playbooks/integrate-pr.md`.
