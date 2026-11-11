@@ -24,7 +24,15 @@ export interface LocalCommandServiceDeps {
   /** notify-user-v1: a `notify` event from the same device channel. */
   notifyUser?(event: NotifyUserEvent): void;
   sleep?(ms: number): Promise<void>;
+  /** One `[local-commands]` line per state change: closed codes and id prefixes only. */
+  log?(line: string): void;
 }
+
+/** The server sends a heartbeat event every 25 s; this long without one is a dead stream. */
+const STREAM_SILENCE_MS = 70_000;
+const codeOf = (error: unknown) => error instanceof DeviceControlError ? (error.status === 401 ? "unauthorized" : error.code.replace(/[^a-z0-9_]/gi, "").slice(0, 40) || "unavailable") : "network";
+const authFailure = (code: string) => code === "unauthorized" || code === "session_revoked";
+const idPrefix = (id: string) => id.slice(0, 8);
 
 const expired = (notice: LocalCommandPendingNotice) => Date.now() >= Date.parse(notice.approvalDeadline);
 interface Pending { view: LocalCommandApprovalView; notice: LocalCommandPendingNotice; timer: ReturnType<typeof setTimeout> }
@@ -42,11 +50,15 @@ export class LocalCommandService {
   private readonly running = new Map<string, AbortController>();
   private readonly chains = new Map<string, Promise<void>>();
   private heartbeat?: ReturnType<typeof setInterval>;
+  private lastBeatAt = 0;
+  /** A stream is open and said ready: only then is this Mac deliverable, so only then does it beat. */
+  private streamLive = false;
   private loop?: Promise<void>;
 
   constructor(private readonly deps: LocalCommandServiceDeps) {}
 
   private sleep(ms: number) { return this.deps.sleep ? this.deps.sleep(ms) : new Promise<void>(resolve => setTimeout(resolve, ms)); }
+  private log(line: string): void { (this.deps.log ?? (text => console.info(`[local-commands] ${text}`)))(line); }
 
   /** Begin for the current session; resolves once registration started. */
   async start(): Promise<void> {
@@ -55,7 +67,7 @@ export class LocalCommandService {
     if (!session) return;
     const lifetime = this.lifetime = new AbortController();
     this.journal = await this.deps.journal(session.accountId);
-    this.loop = this.channel(session.accountId, lifetime.signal).catch(() => {});
+    this.loop = this.channel(session, lifetime.signal).catch(() => {});
   }
 
   /** Stop without unregistering (app quit): running commands end with their group. */
@@ -64,6 +76,7 @@ export class LocalCommandService {
     this.lifetime = undefined;
     lifetime?.abort();
     clearInterval(this.heartbeat); this.heartbeat = undefined;
+    this.presence = { presenceRequired: false, reachableUntil: null }; this.lastBeatAt = 0; this.streamLive = false;
     for (const controller of this.running.values()) controller.abort();
     for (const pending of this.pending.values()) clearTimeout(pending.timer);
     this.pending.clear(); this.publish();
@@ -95,7 +108,8 @@ export class LocalCommandService {
     if (!pending) return;
     this.withdraw(requestId);
     // The clock decides, not the timer: timers run late after the Mac sleeps.
-    if (expired(pending.notice)) return;
+    if (expired(pending.notice)) { this.log(`request decided id=${idPrefix(requestId)} decision=late`); return; }
+    this.log(`request decided id=${idPrefix(requestId)} decision=${decision}`);
     if (decision === "always") this.deps.settings.setAlwaysAllow(true);
     // Queued, not awaited: the command may run for minutes.
     void this.serial(requestId, () => this.execute(pending.notice, decision === "deny" ? "deny" : "approve"));
@@ -114,53 +128,97 @@ export class LocalCommandService {
     return next;
   }
 
-  private async channel(accountId: string, signal: AbortSignal): Promise<void> {
+  /** Register, then stream until aborted. An expired token (401, session_revoked)
+   * is not a sign-out: while the same session is signed in the channel backs off
+   * and reconnects with a fresh token. It stops only when that session is gone
+   * or changed (install.ts then starts it again for the new one). */
+  private async channel(session: { accountId: string; sessionId: string }, signal: AbortSignal): Promise<void> {
+    const { accountId } = session;
     let registrationRequest = randomUUID(), attempt = 0;
+    const stillSignedIn = async () => {
+      const current = await this.deps.session().catch(() => null);
+      return !!current && current.accountId === session.accountId && current.sessionId === session.sessionId;
+    };
+    const backoff = async (immediate = false) => {
+      const delay = immediate ? 0 : Math.min(30_000, 1_000 * 2 ** Math.min(attempt++, 5));
+      this.log(`reconnect scheduled attempt=${attempt} delay_ms=${delay}`);
+      await this.sleep(delay);
+    };
     while (!signal.aborted) {
       // Register (same request id on retry); a changed registration needs a new one.
       try {
         const reply = await this.deps.control.register(this.deps.identity.deviceId(accountId), { requestId: registrationRequest, name: await this.deps.identity.name() });
         if (signal.aborted) return;
-        this.device = reply.device; this.setPresence(reply.presence); attempt = 0;
+        this.device = reply.device; attempt = 0;
+        this.log("registered");
+        this.setPresence(reply.presence);
       } catch (error) {
         if (signal.aborted) return;
-        if (error instanceof DeviceControlError && (error.status === 401 || error.code === "session_revoked")) return;
-        await this.sleep(Math.min(30_000, 1_000 * 2 ** Math.min(attempt++, 5))); continue;
+        const code = codeOf(error);
+        this.log(`register failed code=${code}`);
+        if (authFailure(code) && !await stillSignedIn()) { this.log("channel stopped reason=signed_out"); return; }
+        await backoff(); continue;
       }
       await this.recover();
       // Stream until it ends; reconnect without registering again.
       for (;;) {
         if (signal.aborted) return;
-        let revoked: string | undefined;
+        const opened = Date.now(), stream = new AbortController();
+        let reason = "ended", watchdog: ReturnType<typeof setTimeout> | undefined, first = true;
+        // A half-dead socket (sleep, network change) can hang a read forever: silence ends it.
+        const pet = () => { clearTimeout(watchdog); watchdog = setTimeout(() => { reason = "stale"; stream.abort(); }, STREAM_SILENCE_MS); watchdog.unref?.(); };
+        pet();
+        this.log("channel open");
         try {
-          for await (const event of this.deps.events(this.device!, signal)) {
-            if (event.event === "revoked") { revoked = event.data.code; break; }
+          for await (const event of this.deps.events(this.device!, AbortSignal.any([signal, stream.signal]))) {
+            pet();
+            if (event.event === "revoked") { reason = event.data.code; break; }
+            if (event.event === "ready") this.streamLive = true;
             this.onEvent(event);
+            if (first) {
+              first = false; attempt = 0;
+              // A reconnect reports presence at once instead of 25 s later.
+              if (this.presence.presenceRequired) void this.beat();
+            }
           }
         } catch (error) {
-          if (error instanceof DeviceControlError && error.code === "device_registration_changed") revoked = "device_registration_changed";
-          else if (error instanceof DeviceControlError && (error.status === 401 || error.code === "session_revoked")) revoked = "session_revoked";
+          if (reason !== "stale") reason = codeOf(error);
+        } finally {
+          clearTimeout(watchdog);
+          // A closed stream delivers nothing: stop claiming reachability until the next ready.
+          this.streamLive = false; clearInterval(this.heartbeat); this.heartbeat = undefined;
         }
         if (signal.aborted) return;
-        if (revoked === "session_revoked") return;
-        if (revoked === "device_registration_changed") { registrationRequest = randomUUID(); break; }
-        await this.sleep(Math.min(30_000, 1_000 * 2 ** Math.min(attempt++, 5)));
+        this.log(`channel closed reason=${reason} open_s=${Math.round((Date.now() - opened) / 1000)}`);
+        if (reason === "device_registration_changed") { registrationRequest = randomUUID(); break; }
+        if (authFailure(reason) && !await stillSignedIn()) { this.log("channel stopped reason=signed_out"); return; }
+        // The server ends a healthy stream cleanly just before its token expires (every few minutes):
+        // reconnect at once, or a request sent in the gap misses its delivery deadline.
+        await backoff(reason === "ended" && !first && Date.now() - opened >= 5_000);
       }
     }
   }
 
   private setPresence(presence: LocalCommandPresence): void {
+    const was = this.presence.presenceRequired;
     this.presence = presence;
-    // A Mac connected nowhere sends no presence heartbeat.
-    if (presence.presenceRequired && !this.heartbeat) {
+    if (was !== presence.presenceRequired) this.log(`presence required ${presence.presenceRequired ? "on" : "off"}`);
+    // A Mac connected nowhere, or without a live stream, sends no presence heartbeat.
+    if (presence.presenceRequired && this.streamLive && !this.heartbeat) {
       this.heartbeat = setInterval(() => { void this.beat(); }, 25_000);
       this.heartbeat.unref?.();
+      // Becoming a command target is reported at once, not at the next tick.
+      void this.beat();
     } else if (!presence.presenceRequired && this.heartbeat) { clearInterval(this.heartbeat); this.heartbeat = undefined; }
   }
   private async beat(): Promise<void> {
     const device = this.device;
-    if (!device || !this.presence.presenceRequired) return;
-    try { this.setPresence(await this.deps.control.heartbeat(device)); } catch { /* The next beat or presence event repairs it. */ }
+    if (!device || !this.presence.presenceRequired || !this.streamLive) return;
+    // One beat per second at most (a reconnect and a presence flip can coincide).
+    if (Date.now() - this.lastBeatAt < 1_000) return;
+    this.lastBeatAt = Date.now();
+    try { this.setPresence(await this.deps.control.heartbeat(device)); }
+    catch (error) { this.log(`heartbeat failed code=${codeOf(error)}`); /* The next beat or presence event repairs it. */ }
   }
 
   private onEvent(event: DeviceEvent): void {
@@ -180,6 +238,7 @@ export class LocalCommandService {
     const device = this.device, journal = this.journal;
     if (!device || !journal) return;
     if (notice.state === "terminal") {
+      this.log(`request finished id=${idPrefix(notice.requestId)} outcome=${notice.outcome}`);
       // Withdraw an approval, kill a running group, record the outcome, then acknowledge.
       this.withdraw(notice.requestId);
       this.running.get(notice.requestId)?.abort();
@@ -192,9 +251,13 @@ export class LocalCommandService {
     if (known === undefined) { if (!await journal.begin(notice.requestId)) return; }
     else if (known !== "prompted" || this.pending.has(notice.requestId)) return;
     await this.deps.control.received(device, notice.requestId).catch(() => {});
+    this.log(`request received id=${idPrefix(notice.requestId)} default_target=${notice.isDefaultTarget ? "yes" : "no"}`);
     // Past its deadline: never offered or run; the server's terminal notice settles the journal.
     if (expired(notice)) return;
-    if (this.deps.settings.alwaysAllow() && notice.isDefaultTarget) { await this.execute(notice, "approve"); return; }
+    if (this.deps.settings.alwaysAllow() && notice.isDefaultTarget) {
+      this.log(`request decided id=${idPrefix(notice.requestId)} decision=always_allow`);
+      await this.execute(notice, "approve"); return;
+    }
     const view = this.view(notice);
     const timer = setTimeout(() => this.withdraw(notice.requestId), Math.max(0, Date.parse(notice.approvalDeadline) - Date.now()));
     timer.unref?.();
@@ -225,7 +288,9 @@ export class LocalCommandService {
     try { claimed = await this.deps.control.claim(device, notice.requestId, "approve"); }
     catch { await this.reconcile(device, notice.requestId); return; }
     if (claimed.state !== "claimed") { if (claimed.state === "terminal") await journal.finish(notice.requestId, claimed.outcome); return; }
+    this.log(`request claimed id=${idPrefix(notice.requestId)}`);
     await journal.mark(notice.requestId, "running");
+    const started = Date.now();
     const controller = new AbortController();
     this.lifetime?.signal.addEventListener("abort", () => controller.abort(), { once: true });
     this.running.set(notice.requestId, controller);
@@ -235,6 +300,7 @@ export class LocalCommandService {
     try { result = await this.deps.run({ command: notice.input.command, ...(notice.input.cwd ? { cwd: notice.input.cwd } : {}), timeoutMs: runFor }, controller.signal); }
     catch { result = { outcome: "failed", error: "spawn_failed" }; }
     finally { this.running.delete(notice.requestId); }
+    this.log(`request ran id=${idPrefix(notice.requestId)} outcome=${result.outcome}${typeof result.code === "number" ? ` exit=${result.code}` : ""}${result.error ? ` error=${result.error}` : ""} duration_ms=${Date.now() - started}`);
     await this.report(device, notice.requestId, result);
     await journal.finish(notice.requestId, result.outcome);
   }
