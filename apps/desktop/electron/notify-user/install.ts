@@ -68,6 +68,8 @@ export function installNotifyUser(): { receiveDevice(event: NotifyUserEvent): vo
   });
   return {
     receiveDevice: event => {
+      // Ids and the kind only: never the title or the message.
+      console.info(`[notify-user] received id=${event.notificationId.slice(0, 8)} workspace=${event.workspace.id.slice(0, 8)} kind=${event.kind}`);
       const createdAt = Date.parse(event.createdAt);
       center.receive("device", { notificationId: event.notificationId, workspaceId: event.workspace.id, chatId: event.chat.id,
         chatTitle: event.chat.title, title: event.title, ...(Number.isFinite(createdAt) ? { createdAt } : {}) });
