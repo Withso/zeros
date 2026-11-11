@@ -29,6 +29,13 @@ export function useWorkspaceSyncStatus(workspaceId: string | null): WorkspaceSyn
 export type ChooseSyncResult = { ok: true } | { ok: false; reason: string };
 export const chooseWorkspaceSyncFolder = (workspaceId: string) => nativeInvoke<ChooseSyncResult>("workspace_sync_choose", { workspaceId });
 export const stopWorkspaceSync = (workspaceId: string) => nativeInvoke<boolean>("workspace_sync_stop", { workspaceId });
+/** 12.z: the switch on, in ~/zeros/cloud-sync/<repository>/<workspace> (main builds and checks the folder). */
+export const enableWorkspaceSync = (workspaceId: string, labels: { repository: string; workspace: string }) =>
+  nativeInvoke<ChooseSyncResult>("workspace_sync_enable", { workspaceId, ...labels });
+export const revealWorkspaceSyncFolder = (workspaceId: string) => nativeInvoke<boolean>("workspace_sync_reveal", { workspaceId });
+/** 12.z: another of this person's Macs should (not) sync this workspace. */
+export const setWorkspaceSyncWanted = (workspaceId: string, deviceId: string, wanted: boolean) =>
+  nativeInvoke<{ ok: boolean; reason?: string }>("workspace_sync_set_wanted", { workspaceId, deviceId, wanted });
 export const openWorkspaceSyncTerminal = (workspaceId: string) => nativeInvoke<boolean>("workspace_sync_open_terminal", { workspaceId });
 
 /** The popup's words for a status (Off is no status). */

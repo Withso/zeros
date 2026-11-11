@@ -71,7 +71,45 @@ describe("device control client", () => {
       `/v1/cloud-v2/workspaces/11111111-1111-4111-8111-111111111111/macs/${deviceId}/disconnect`, `/v1/cloud-v2/workspaces/11111111-1111-4111-8111-111111111111/macs/${deviceId}/sync`]);
     // Rows include `syncing` only when asked; the result route never asks.
     expect(f.calls.map(call => call.headers.get("x-zeros-sync"))).toEqual([null, "1", "1", "1"]);
-    expect(f.calls.at(-1)).toMatchObject({ method: "PUT", body: { syncing: true } });
+    expect(f.calls.at(-1)).toMatchObject({ method: "PUT", body: { syncing: true, wanted: true } });
+    // 12.z: syncWanted needs its own opt-in, on connect, disconnect and the sync flag (released apps parse the Mac strictly).
+    expect(f.calls.map(call => call.headers.get("x-zeros-sync-wanted"))).toEqual([null, "1", "1", "1"]);
+  });
+
+  it("keeps this Mac's syncing flag on a control plane without 12.z: a 400 for wanted retries once without it", async () => {
+    const mac = { deviceId, name: "Studio", connected: true, active: false, reachable: true, expiresAt: iso, syncing: true };
+    const f = fake((_method, _path, init) => JSON.parse(String(init.body)).wanted === undefined ? Response.json({ mac })
+      : Response.json({ error: { code: "invalid_request", message: "Unknown field." } }, { status: 400 }));
+    expect(await f.control.setSyncing(device, "11111111-1111-4111-8111-111111111111", true)).toMatchObject({ mac: { syncing: true } });
+    expect(f.calls.map(call => call.body)).toEqual([{ syncing: true, wanted: true }, { syncing: true }]);
+  });
+
+  it("lists this Mac's live connections with syncWanted (12.z) page by page, with both sync opt-ins, reading new fields leniently", async () => {
+    const workspaceId = "11111111-1111-4111-8111-111111111111";
+    const f = fake((_method, path) => Response.json(path.includes("cursor=") ? { connections: [], nextCursor: null }
+      : { connections: [{ workspaceId, repository: "Withso/zeros", number: 19, name: "Fix login", syncWanted: true, syncing: false, futureField: 1 }], nextCursor: workspaceId }));
+    const first = await f.control.syncConnections(device);
+    expect(first).toEqual({ connections: [expect.objectContaining({ workspaceId, repository: "Withso/zeros", number: 19, name: "Fix login", syncWanted: true })], nextCursor: workspaceId });
+    await f.control.syncConnections(device, workspaceId);
+    expect(f.calls.map(call => call.path)).toEqual([`/v1/cloud-v2/devices/${deviceId}/connections`, `/v1/cloud-v2/devices/${deviceId}/connections?cursor=${workspaceId}`]);
+    expect([f.calls[0]!.headers.get("x-zeros-sync"), f.calls[0]!.headers.get("x-zeros-sync-wanted"), f.calls[0]!.headers.get("x-zeros-device-id")]).toEqual(["1", "1", deviceId]);
+    const bad = fake(() => Response.json({ connections: [{ workspaceId: "nope" }], nextCursor: null }));
+    await expect(bad.control.syncConnections(device)).rejects.toBeInstanceOf(DeviceControlError);
+  });
+
+  it("opts the device stream in to sync-wanted hints", async () => {
+    const f = fake(() => new Response(new ReadableStream({ start(controller) { controller.close(); } }), { headers: { "content-type": "text/event-stream" } }));
+    await f.control.events(device, new AbortController().signal);
+    expect(f.calls[0]!.headers.get("x-zeros-sync-wanted")).toBe("1");
+  });
+
+  it("sets another of this person's Macs' desired sync state (12.z), with both sync opt-ins, and reads syncWanted leniently", async () => {
+    const other = "33333333-3333-4333-8333-333333333333", workspaceId = "11111111-1111-4111-8111-111111111111";
+    const mac = { deviceId: other, name: "Studio", connected: true, active: false, reachable: true, expiresAt: iso, syncing: false, syncWanted: true };
+    const f = fake(() => Response.json({ mac }));
+    expect(await f.control.setSyncWanted(device, workspaceId, other, true)).toMatchObject({ mac: { deviceId: other, syncWanted: true } });
+    expect(f.calls[0]).toMatchObject({ method: "PUT", path: `/v1/cloud-v2/workspaces/${workspaceId}/macs/${other}/sync`, body: { wanted: true } });
+    expect([f.calls[0]!.headers.get("x-zeros-sync"), f.calls[0]!.headers.get("x-zeros-sync-wanted")]).toEqual(["1", "1"]);
   });
 
   it("parses named SSE events across chunk boundaries and skips comments and unknown names", async () => {

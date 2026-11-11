@@ -3,8 +3,9 @@ import type pg from "pg";
 import type { AuthedUser } from "../../auth.js";
 import { HttpError } from "../../authz.js";
 import { withSystemTx, type Tx } from "../../db.js";
-import { securityStreamAuthority } from "../../security-events.js";
+import { SECURITY_STREAM_AUTHORITY, securityStreamAuthority, securityStreamParameters } from "../../security-events.js";
 import { CLOUD_V2_LIVE_ACCESS } from "../workspace-access.js";
+import type { DeviceSyncConnectionsReply, SyncFlags } from "../workspace-sync/contract.js";
 import { LOCAL_COMMANDS_FEATURE, LOCAL_COMMANDS_REASON_FEATURE, type ConnectedMac, type LocalDevice, type LocalDeviceBinding, type LocalDevicePresence, type LocalDeviceRegistration } from "./contract.js";
 import { localCommandDiagnostic } from "./diagnostics.js";
 
@@ -132,10 +133,11 @@ export class CloudLocalDevices {
     });
   }
 
-  async macs(tx: Tx, userId: string, workspaceId: string, includeSync = false): Promise<ConnectedMac[]> {
-    const { rows } = await tx.query<{ device_id: string; name: string; connected: boolean; active: boolean; reachable: boolean; expires_at: Date | null; syncing: boolean | null }>(
+  async macs(tx: Tx, userId: string, workspaceId: string, includeSync = false, includeWanted = false): Promise<ConnectedMac[]> {
+    const { rows } = await tx.query<{ device_id: string; name: string; connected: boolean; active: boolean; reachable: boolean; expires_at: Date | null; syncing: boolean | null; sync_wanted: boolean | null }>(
       `WITH devices AS (SELECT d.device_id,d.name,coalesce(${connectionLive},false) AS connected,
         coalesce(${connectionLive} AND c.is_latest_sender,false) AS active,d.reachable_until,c.syncing,
+        (c.registration_id=d.registration_id AND c.disconnected_at IS NULL AND c.sync_wanted) AS sync_wanted,
         CASE WHEN ${connectionLive} AND NOT c.is_latest_sender THEN greatest(c.connected_at,c.last_used_at)+interval '12 hours' END AS expires_at
         FROM local_command_devices d JOIN auth_sessions s ON s.provider='workos' AND s.provider_session_id=d.provider_session_id AND s.user_id=d.user_id
         LEFT JOIN cloud_v2_connected_macs c ON c.user_id=d.user_id AND c.device_id=d.device_id AND c.workspace_id=$2
@@ -144,13 +146,38 @@ export class CloudLocalDevices {
        SELECT *,coalesce(connected AND reachable_until>clock_timestamp(),false) AS reachable FROM devices ORDER BY active DESC,name,device_id LIMIT 20`, [userId, workspaceId]);
     return rows.map(row => ({ deviceId: row.device_id, name: row.name, connected: row.connected, active: row.active,
       reachable: row.reachable, expiresAt: row.expires_at?.toISOString() ?? null,
-      ...(includeSync ? { syncing: row.connected && row.syncing === true } : {}) }));
+      ...(includeSync ? { syncing: row.connected && row.syncing === true } : {}),
+      ...(includeWanted ? { syncWanted: row.sync_wanted === true } : {}) }));
   }
 
-  list(user: AuthedUser, workspaceId: string, includeSync = false) {
+  list(user: AuthedUser, workspaceId: string, includeSync = false, includeWanted = false) {
     return withSystemTx(this.pool, async tx => {
       await localUserAuthority(tx, user); await localWorkspace(tx, workspaceId, user.id);
-      return { macs: await this.macs(tx, user.id, workspaceId, includeSync) };
+      return { macs: await this.macs(tx, user.id, workspaceId, includeSync, includeWanted) };
+    }, { consistentRead: true });
+  }
+
+  connections(user: AuthedUser, binding: LocalDeviceBinding, cursor: string | null, includeSync = false): Promise<DeviceSyncConnectionsReply> {
+    return withSystemTx(this.pool, async tx => {
+      await this.verify(tx, user, binding);
+      const { rows } = await tx.query<{ workspace_id: string; repository: string; number: number | null; name: string; sync_wanted: boolean; syncing: boolean }>(
+        // One organization admission covers its workspaces in this read snapshot.
+        `WITH live_organizations AS MATERIALIZED (
+           SELECT w.org_id FROM (SELECT org_id,user_id AS creator_user_id FROM organization_members WHERE user_id=$1) w
+           WHERE ${CLOUD_V2_LIVE_ACCESS})
+         SELECT w.id AS workspace_id,w.repository,w.number,w.name,c.sync_wanted,c.syncing
+         FROM cloud_v2_connected_macs c JOIN local_command_devices d ON d.user_id=c.user_id AND d.device_id=c.device_id
+         JOIN cloud_v2_workspaces w ON w.id=c.workspace_id JOIN live_organizations allowed ON allowed.org_id=w.org_id
+         WHERE c.user_id=$1 AND c.device_id=$2 AND c.registration_id=$3
+           AND d.registration_id=$3 AND d.instance_id=$4 AND d.provider_session_id=$5 AND d.revoked_at IS NULL
+           AND ${connectionLive} AND w.creator_user_id=$1 AND w.state NOT IN ('deleting','deleted')
+           AND ($6::uuid IS NULL OR c.workspace_id>$6) ORDER BY c.workspace_id LIMIT 201`,
+      [user.id, binding.deviceId, binding.registrationId, binding.instanceId, user.authentication.sessionId, cursor]);
+      const page = rows.slice(0, 200);
+      return { connections: page.map(row => ({ workspaceId: row.workspace_id, repository: row.repository, number: row.number,
+        // Legacy workspace names can be 200 characters; this opt-in wire is bounded to 120.
+        name: row.name.slice(0, 120), syncWanted: row.sync_wanted, ...(includeSync ? { syncing: row.syncing } : {}) })),
+      nextCursor: rows.length > 200 ? page.at(-1)!.workspace_id : null };
     }, { consistentRead: true });
   }
 
@@ -172,12 +199,12 @@ export class CloudLocalDevices {
       WHERE user_id=$1 AND device_id=$2`, [user.id, binding.deviceId]);
   }
 
-  connect(user: AuthedUser, workspaceId: string, targetId: string, binding: LocalDeviceBinding, includeSync = false) {
+  connect(user: AuthedUser, workspaceId: string, targetId: string, binding: LocalDeviceBinding, includeSync = false, includeWanted = false) {
     return withSystemTx(this.pool, async tx => {
       await localWorkspace(tx, workspaceId, user.id, true);
       if (targetId !== binding.deviceId) throw new HttpError(409, "device_mismatch", "Connect must be requested on that Mac");
       await this.connectRow(tx, user, workspaceId, binding, false);
-      const mac = (await this.macs(tx, user.id, workspaceId, includeSync)).find(row => row.deviceId === targetId)!;
+      const mac = (await this.macs(tx, user.id, workspaceId, includeSync, includeWanted)).find(row => row.deviceId === targetId)!;
       return { mac, presence: presence(await this.verify(tx, user, binding)) };
     });
   }
@@ -186,7 +213,7 @@ export class CloudLocalDevices {
     await this.connectRow(tx, user, workspaceId, binding, true);
   }
 
-  disconnect(user: AuthedUser, workspaceId: string, targetId: string, binding: LocalDeviceBinding, includeSync = false) {
+  disconnect(user: AuthedUser, workspaceId: string, targetId: string, binding: LocalDeviceBinding, includeSync = false, includeWanted = false) {
     return withSystemTx(this.pool, async tx => {
       await localWorkspace(tx, workspaceId, user.id, true);
       await this.verify(tx, user, binding);
@@ -196,24 +223,55 @@ export class CloudLocalDevices {
       await tx.query(`UPDATE local_command_requests SET phase='terminal',outcome='cancelled',terminal_at=clock_timestamp(),updated_at=clock_timestamp(),
         reserved_output_bytes=0,result_summary=jsonb_strip_nulls(jsonb_build_object('outcome','cancelled','mac',target_name))
         WHERE workspace_id=$1 AND sender_user_id=$2 AND target_device_id=$3 AND phase IN ('pending','claimed')`, [workspaceId, user.id, targetId]);
-      return { mac: (await this.macs(tx, user.id, workspaceId, includeSync)).find(row => row.deviceId === targetId)! };
+      return { mac: (await this.macs(tx, user.id, workspaceId, includeSync, includeWanted)).find(row => row.deviceId === targetId)! };
     });
   }
 
-  setSyncing(user: AuthedUser, workspaceId: string, targetId: string, binding: LocalDeviceBinding, syncing: boolean) {
+  setSync(user: AuthedUser, workspaceId: string, targetId: string, binding: LocalDeviceBinding, input: SyncFlags, includeWanted = false) {
     return withSystemTx(this.pool, async tx => {
       await localWorkspace(tx, workspaceId, user.id);
-      await this.verify(tx, user, binding);
-      if (targetId !== binding.deviceId) throw new HttpError(409, "device_mismatch", "Sync must be requested on that Mac");
+      const caller = await this.verify(tx, user, binding);
+      if (input.syncing !== undefined && targetId !== binding.deviceId) throw new HttpError(409, "device_mismatch", "Sync must be requested on that Mac");
+      const target = targetId === binding.deviceId ? caller : (await tx.query<{ registration_id: string }>(
+        "SELECT registration_id FROM local_command_devices WHERE user_id=$1 AND device_id=$2 AND revoked_at IS NULL", [user.id, targetId])).rows[0];
+      if (!target) throw notFound();
       await tx.query("SELECT workspace_id FROM cloud_v2_connected_macs WHERE workspace_id=$1 AND user_id=$2 AND device_id=$3 FOR UPDATE", [workspaceId, user.id, targetId]);
       await localWorkspace(tx, workspaceId, user.id);
       await this.verify(tx, user, binding);
-      const current = (await this.macs(tx, user.id, workspaceId, true)).find(row => row.deviceId === targetId);
+      if (!(await tx.query("SELECT device_id FROM local_command_devices WHERE user_id=$1 AND device_id=$2 AND registration_id=$3 AND revoked_at IS NULL",
+        [user.id, targetId, target.registration_id])).rowCount) throw changed();
+      const current = (await this.macs(tx, user.id, workspaceId, true, includeWanted)).find(row => row.deviceId === targetId);
       if (!current) throw notFound();
-      if (syncing && !current.connected) throw new HttpError(403, "mac_not_connected", "Connect this Mac to the workspace before syncing");
-      await tx.query("UPDATE cloud_v2_connected_macs SET syncing=$4 WHERE workspace_id=$1 AND user_id=$2 AND device_id=$3 AND syncing IS DISTINCT FROM $4",
-        [workspaceId, user.id, targetId, syncing]);
-      return { mac: { ...current, syncing } };
+      if ((input.syncing || input.wanted !== undefined) && !current.connected) throw new HttpError(403, "mac_not_connected", "Connect this Mac to the workspace before syncing");
+      // The connection lock fences its fields, but membership and an unconnected caller can change during the reads.
+      const admission = await tx.query<{ live: boolean }>(`WITH authority AS MATERIALIZED (
+        SELECT ${SECURITY_STREAM_AUTHORITY}
+          AND EXISTS (SELECT 1 FROM cloud_v2_workspaces w WHERE w.id=$7 AND w.creator_user_id=$1
+            AND w.state NOT IN ('deleting','deleted') AND ${CLOUD_V2_LIVE_ACCESS})
+          AND EXISTS (SELECT 1 FROM local_command_devices d WHERE d.user_id=$1 AND d.device_id=$9 AND d.registration_id=$10
+            AND d.instance_id=$11 AND d.provider_session_id=$5 AND d.revoked_at IS NULL)
+          AND EXISTS (SELECT 1 FROM local_command_devices d
+            JOIN auth_sessions s ON s.provider='workos' AND s.provider_session_id=d.provider_session_id AND s.user_id=d.user_id
+            LEFT JOIN cloud_v2_connected_macs c ON c.user_id=d.user_id AND c.device_id=d.device_id AND c.workspace_id=$7
+            WHERE d.user_id=$1 AND d.device_id=$8 AND d.registration_id=$12 AND d.revoked_at IS NULL
+              AND s.status='active' AND s.revoked_at IS NULL AND (s.provider_session_expires_at IS NULL OR s.provider_session_expires_at>clock_timestamp())
+              AND (($13::boolean IS NOT TRUE AND $14::boolean IS NULL) OR ${connectionLive})) AS live
+        ), changed AS (UPDATE cloud_v2_connected_macs SET syncing=coalesce($13::boolean,syncing),sync_wanted=coalesce($14::boolean,sync_wanted)
+          WHERE workspace_id=$7 AND user_id=$1 AND device_id=$8 AND (SELECT live FROM authority)
+            AND (($13::boolean IS NOT NULL AND syncing IS DISTINCT FROM $13) OR ($14::boolean IS NOT NULL AND sync_wanted IS DISTINCT FROM $14))
+          RETURNING 1)
+        SELECT live FROM authority`,
+      [...securityStreamParameters(user), workspaceId, targetId, binding.deviceId, binding.registrationId, binding.instanceId,
+        target.registration_id, input.syncing ?? null, input.wanted ?? null]);
+      if (!admission.rows[0]?.live) {
+        await localWorkspace(tx, workspaceId, user.id); await this.verify(tx, user, binding);
+        const latest = (await this.macs(tx, user.id, workspaceId)).find(row => row.deviceId === targetId);
+        if (!latest) throw notFound();
+        if (!latest.connected) throw new HttpError(403, "mac_not_connected", "Connect this Mac to the workspace before syncing");
+        throw changed();
+      }
+      return { mac: { ...current, ...(input.syncing === undefined ? {} : { syncing: input.syncing }),
+        ...(includeWanted && input.wanted !== undefined ? { syncWanted: input.wanted } : {}) } };
     });
   }
 }

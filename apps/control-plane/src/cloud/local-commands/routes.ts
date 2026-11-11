@@ -12,7 +12,7 @@ import { CloudLocalDevices, DEVICE_HEARTBEAT_MS } from "./devices.js";
 import { CloudLocalCommandSignals, deviceSignal } from "./signals.js";
 import type { CloudNotifyUser, NotificationHint } from "../notify-user/store.js";
 import { localCommandDiagnostic, type LocalChannelCloseReason } from "./diagnostics.js";
-import { SYNC_HEADER, SyncFlagSchema } from "../workspace-sync/contract.js";
+import { SYNC_HEADER, SYNC_WANTED_HEADER, SyncFlagSchema, SyncWantedFlagSchema } from "../workspace-sync/contract.js";
 
 export type CloudLocalDeviceRoutes = { devices: CloudLocalDevices; signals: CloudLocalCommandSignals; requests?: CloudLocalCommands; notifications?: CloudNotifyUser };
 export const isLocalCommandResultPath = (path: string) => /^\/v1\/cloud-v2\/devices\/[0-9a-f-]{36}\/requests\/[0-9a-f-]{36}\/result$/i.test(path);
@@ -81,18 +81,26 @@ export function createCloudLocalDeviceRoutes(deps: CloudLocalDeviceRoutes): Hono
   app.post(`${path}/heartbeat`, async c => {
     await localBody(c, empty, true); return c.json(await deps.devices.heartbeat(c.get("user"), binding(c)));
   });
-  app.get(macPath, async c => c.json(await deps.devices.list(c.get("user"), localUuid(c.req.param("id")), c.req.header(SYNC_HEADER) === "1")));
+  app.get(`${path}/connections`, rateLimit("cloud-sync-connections", 60, 60_000, c => `${c.get("user").id}:${binding(c).deviceId.toLowerCase()}`), async c => {
+    if (c.req.header(SYNC_WANTED_HEADER) !== "1") throw new HttpError(400, "invalid_request", "Sync wanted opt-in is required");
+    const cursors = c.req.queries("cursor");
+    if (cursors && (cursors.length !== 1 || !z.string().uuid().safeParse(cursors[0]).success))
+      throw new HttpError(400, "invalid_request", "Invalid connection cursor");
+    return c.json(await deps.devices.connections(c.get("user"), binding(c), cursors?.[0] ?? null, c.req.header(SYNC_HEADER) === "1"));
+  });
+  app.get(macPath, async c => c.json(await deps.devices.list(c.get("user"), localUuid(c.req.param("id")), c.req.header(SYNC_HEADER) === "1", c.req.header(SYNC_WANTED_HEADER) === "1")));
   app.post(`${macPath}/:deviceId/connect`, async c => {
     await localBody(c, empty, true);
-    return c.json(await deps.devices.connect(c.get("user"), localUuid(c.req.param("id")), localUuid(c.req.param("deviceId")), localDeviceHeaders(c)!, c.req.header(SYNC_HEADER) === "1"));
+    return c.json(await deps.devices.connect(c.get("user"), localUuid(c.req.param("id")), localUuid(c.req.param("deviceId")), localDeviceHeaders(c)!, c.req.header(SYNC_HEADER) === "1", c.req.header(SYNC_WANTED_HEADER) === "1"));
   });
   app.post(`${macPath}/:deviceId/disconnect`, async c => {
     await localBody(c, empty, true);
-    return c.json(await deps.devices.disconnect(c.get("user"), localUuid(c.req.param("id")), localUuid(c.req.param("deviceId")), localDeviceHeaders(c)!, c.req.header(SYNC_HEADER) === "1"));
+    return c.json(await deps.devices.disconnect(c.get("user"), localUuid(c.req.param("id")), localUuid(c.req.param("deviceId")), localDeviceHeaders(c)!, c.req.header(SYNC_HEADER) === "1", c.req.header(SYNC_WANTED_HEADER) === "1"));
   });
   app.put(`${macPath}/:deviceId/sync`, ordinaryLimit, rateLimit("cloud-sync-flag", 60, 60_000), async c => {
-    const input = await localBody(c, SyncFlagSchema);
-    return c.json(await deps.devices.setSyncing(c.get("user"), localUuid(c.req.param("id")), localUuid(c.req.param("deviceId")), localDeviceHeaders(c)!, input.syncing));
+    const includeWanted = c.req.header(SYNC_WANTED_HEADER) === "1";
+    const input = includeWanted ? await localBody(c, SyncWantedFlagSchema) : await localBody(c, SyncFlagSchema);
+    return c.json(await deps.devices.setSync(c.get("user"), localUuid(c.req.param("id")), localUuid(c.req.param("deviceId")), localDeviceHeaders(c)!, input, includeWanted));
   });
   if (deps.requests) {
     const requests = deps.requests, requestPath = `${path}/requests/:requestId`;
@@ -130,7 +138,9 @@ export function createCloudLocalDeviceRoutes(deps: CloudLocalDeviceRoutes): Hono
       localCommandDiagnostic({ event: "channel_opened", userId: user.id, ...identity });
       const controller = new AbortController(); stream.onAbort(() => controller.abort());
       const signal = AbortSignal.any([controller.signal, c.req.raw.signal]);
-      let first = true, previousPresence = "", lastHeartbeat = Date.now();
+      let first = true, previousPresence = "", lastHeartbeat = Date.now(), deviceChanged = false;
+      const unsubscribeDevice = c.req.header(SYNC_WANTED_HEADER) === "1"
+        ? deps.signals.deviceChanges(user.id, identity.deviceId, () => { deviceChanged = true; }) : undefined;
       // An access token lives minutes and the session outlives it. The channel
       // ends cleanly just before its token does, so the Mac reconnects with a
       // fresh one; "revoked" is kept for a session that is really gone.
@@ -148,12 +158,13 @@ export function createCloudLocalDeviceRoutes(deps: CloudLocalDeviceRoutes): Hono
           const waiter = deps.signals.wait(deviceSignal(user.id, identity.deviceId),
             Math.max(0, Math.min(DEVICE_HEARTBEAT_MS-(Date.now()-lastHeartbeat), tokenEnd-TOKEN_END_MARGIN_MS-Date.now())), signal);
           try {
+            const observedChange = deviceChanged; deviceChanged = false;
             const snapshot = await deps.devices.snapshot(user, identity);
             const encodedPresence = JSON.stringify(snapshot.presence);
             if (first) {
               await stream.writeSSE({ event: "ready", data: JSON.stringify({ ...identity, presence: snapshot.presence, heartbeatIntervalMs: DEVICE_HEARTBEAT_MS }) });
               first = false;
-            } else if (encodedPresence !== previousPresence) await stream.writeSSE({ event: "presence", data: encodedPresence });
+            } else if (observedChange || encodedPresence !== previousPresence) await stream.writeSSE({ event: "presence", data: encodedPresence });
             previousPresence = encodedPresence;
             if (deps.requests) {
               const notices = snapshot.hasRequests ? await deps.requests.notices(user,identity) : [], retained = new Set(notices.map(value => value.requestId));
@@ -201,7 +212,7 @@ export function createCloudLocalDeviceRoutes(deps: CloudLocalDeviceRoutes): Hono
           catch { closeReason = stream.aborted || signal.aborted ? "client_closed" : "error"; }
         }
       } finally {
-        unsubscribe?.(); controller.abort();
+        unsubscribe?.(); unsubscribeDevice?.(); controller.abort();
         localCommandDiagnostic({ event: "channel_closed", userId: user.id, ...identity, reason: closeReason, secondsOpen: (performance.now()-openedAt)/1000 });
       }
     });

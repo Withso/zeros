@@ -102,7 +102,9 @@ export const LocalCommandRegistrationRequestSchema = z.object({ requestId: uuid,
 export const LocalCommandRegistrationReplySchema = z.object({ device: LocalCommandDeviceSchema, presence: LocalCommandPresenceSchema, heartbeatIntervalMs: z.literal(25_000) }).strict();
 export const LocalCommandMacSchema = z.object({ deviceId: uuid, name: deviceName, connected: z.boolean(), active: z.boolean(), reachable: z.boolean(), expiresAt: iso.nullable(),
   /** Order 3: this Mac mirrors the workspace into a local folder (optional until every control plane sends it). */
-  syncing: z.boolean().optional() }).strict();
+  syncing: z.boolean().optional(),
+  /** 12.z: the person wants that Mac to sync this workspace (only with X-Zeros-Sync-Wanted: 1; released apps never ask). */
+  syncWanted: z.boolean().optional() }).strict();
 export type LocalCommandMac = z.infer<typeof LocalCommandMacSchema>;
 export const LocalCommandMacsReplySchema = z.object({ macs: z.array(LocalCommandMacSchema).max(20) }).strict();
 export const LocalCommandConnectReplySchema = z.object({ mac: LocalCommandMacSchema, presence: LocalCommandPresenceSchema }).strict();

@@ -11,4 +11,6 @@ export interface WorkspaceSyncStatus {
   reason?: string;
   /** Paths not mirrored (skipped by the cloud or refused here). */
   problems: number;
+  /** 12.z: This Mac's own folder, for the popup's path field; main adds it, never the server. */
+  folder?: string;
 }

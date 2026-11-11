@@ -15,6 +15,7 @@ export const requestSignal = (workspaceId: string, requestId: string) => `reques
 export class CloudLocalCommandSignals {
   private readonly signals = new CloudV2PromptSignals();
   private readonly changes = new Set<() => void>();
+  private readonly deviceListeners = new Map<string, Set<() => void>>();
   private readonly notificationListeners = new Map<string,Set<{ binding: LocalDeviceBinding; notify: (hint: NotificationHint) => void }>>();
   private readonly listener: PostgresNotificationSubscription;
   private readonly diagnostics: LocalCommandTerminalDiagnostics;
@@ -22,7 +23,10 @@ export class CloudLocalCommandSignals {
     this.diagnostics = new LocalCommandTerminalDiagnostics(pool);
     this.listener = postgresNotificationSubscription(pool, {
       channels: ["zeros_local_commands", "zeros_security_event"],
-      onReady: () => { this.signals.wakeAll(); for (const notify of this.changes) notify(); }, onDisconnect: () => this.signals.wakeAll(),
+      onReady: () => {
+        for (const listeners of this.deviceListeners.values()) for (const notify of listeners) notify();
+        this.signals.wakeAll(); for (const notify of this.changes) notify();
+      }, onDisconnect: () => this.signals.wakeAll(),
       onNotification: notification => {
         for (const notify of this.changes) notify();
         if (notification.channel === "zeros_security_event") { this.signals.wakeAll(); return; }
@@ -40,7 +44,11 @@ export class CloudLocalCommandSignals {
             }
             return;
           }
-          if ("userId" in value && "deviceId" in value && uuid(value.userId) && uuid(value.deviceId)) this.signals.wake(deviceSignal(value.userId, value.deviceId));
+          if ("userId" in value && "deviceId" in value && uuid(value.userId) && uuid(value.deviceId)) {
+            const key = deviceSignal(value.userId, value.deviceId);
+            for (const notify of this.deviceListeners.get(key) ?? []) notify();
+            this.signals.wake(key);
+          }
           if ("workspaceId" in value && "requestId" in value && uuid(value.workspaceId) && uuid(value.requestId)) {
             this.signals.wake(requestSignal(value.workspaceId, value.requestId));
             this.diagnostics.changed(value.workspaceId, value.requestId);
@@ -51,6 +59,11 @@ export class CloudLocalCommandSignals {
   }
   start() { return this.listener.start(); }
   subscribe(notify: () => void) { this.changes.add(notify); return () => { this.changes.delete(notify); }; }
+  deviceChanges(userId: string, deviceId: string, notify: () => void) {
+    const key = deviceSignal(userId, deviceId), listeners = this.deviceListeners.get(key) ?? new Set();
+    listeners.add(notify); this.deviceListeners.set(key, listeners);
+    return () => { listeners.delete(notify); if (!listeners.size) this.deviceListeners.delete(key); };
+  }
   notifications(userId: string, binding: LocalDeviceBinding, notify: (hint: NotificationHint) => void) {
     const key = deviceSignal(userId,binding.deviceId), listeners = this.notificationListeners.get(key) ?? new Set();
     const listener = { binding,notify }; listeners.add(listener); this.notificationListeners.set(key,listeners);

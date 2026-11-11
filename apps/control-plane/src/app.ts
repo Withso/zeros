@@ -301,6 +301,8 @@ export function createApp(
         "content-type",
         "x-zeros-client",
         "x-zeros-team-sharing",
+        "x-zeros-sync",
+        "x-zeros-sync-wanted",
         "idempotency-key",
         "traceparent",
         "x-zeros-device-id",

@@ -728,6 +728,42 @@ with `X-Zeros-Sync: 1`, preserving older desktops' strict response schemas.
 New desktops accept the field being absent when reading an older control
 plane. The local-command organization switch does not grant or revoke sync.
 
+With the additional `X-Zeros-Sync-Wanted: 1` header, the same `PUT` accepts
+`{ wanted: boolean }`, or both `wanted` and `syncing`. A registered Mac may
+set `wanted` for any of the person's connected Macs; `syncing` remains a
+self-report and cannot be set for another device. The target must still be
+connected, and setting intent never wakes a workspace or renews activity.
+The existing 60/minute/user flag limit covers both fields.
+
+List, connect, disconnect and sync replies include `syncWanted` only with
+`X-Zeros-Sync-Wanted: 1`. `X-Zeros-Sync: 1` alone retains the previous reply.
+Desired state survives an app restart with the same registration and pauses
+with an expired connection; explicit disconnect or registration replacement
+clears it. The migration preserves mirrors already syncing. An opted-in
+device channel forwards connection changes as the existing `presence` event,
+even when its presence values are unchanged, so the Mac can re-read its list.
+The control plane stores only desired state, never the local folder path.
+
+`GET /v1/cloud-v2/devices/:deviceId/connections?cursor=<workspace UUID>` lets
+the Mac discover its connections without an open workspace view. It requires
+that device's current desktop session and registration headers, plus
+`X-Zeros-Sync-Wanted: 1`. The reply is
+`{ connections: [{ workspaceId, repository, number, name, syncWanted, syncing? }], nextCursor }`.
+`repository` is `owner/name`, `number` is a positive integer or `null`, and
+`name` is at most 120 characters (older, longer names are shortened in this
+reply). `syncing` appears only with `X-Zeros-Sync: 1` too.
+
+The list includes wanted and unwanted live connections of this exact
+registration where the person is the current workspace Creator and retains
+organization membership and cloud access.
+It uses fixed pages of 200, ordered by workspace UUID, and a limit of
+60 requests/minute/device. `nextCursor` is `null` at the end. Collect every
+page before replacing the local snapshot; retain the prior snapshot if any
+page fails. Missing opt-in or an invalid cursor returns `400 invalid_request`.
+The read performs no VM or GitHub I/O, takes no mutation locks, and renews
+neither connection lifetime nor workspace activity. Main refreshes on app
+start, on a device-channel hint, and at most every few minutes otherwise.
+
 ## Desktop team sharing (phase 1)
 
 Team sharing uses the desktop's WorkOS session and

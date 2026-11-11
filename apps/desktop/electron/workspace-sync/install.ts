@@ -1,4 +1,8 @@
-import { dialog, type IpcMainInvokeEvent } from "electron";
+import { app, dialog, shell, type IpcMainInvokeEvent } from "electron";
+import { mkdir } from "node:fs/promises";
+import { defaultSyncFolder } from "./default-folder";
+import { SyncWantedFollower } from "./wanted";
+import type { WorkspaceSyncStatus } from "../../shared/workspace-sync";
 import type { LocalCommandDevice } from "@zeros/protocol/local-commands";
 import { getAppSetting, setAppSetting } from "../ipc/commands/app";
 import { getSessionUserForMain, onBeforeMainSignOut, onMainAuthSessionChanged } from "../ipc/commands/auth-session";
@@ -18,7 +22,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** Order 3 in main: folders stay on this Mac, writes happen only here, and the
  * renderer sees statuses, never paths. */
-export function installWorkspaceSync(local: { enabled: boolean; control: DeviceControl; device(): LocalCommandDevice | undefined }): { dispose(): Promise<void> } {
+export function installWorkspaceSync(local: { enabled: boolean; control: DeviceControl; device(): LocalCommandDevice | undefined; onSyncHint(listener: () => void): () => void }): { dispose(): Promise<void> } {
   const store = { get: getAppSetting, set: setAppSetting };
   /** The grant route (D+H) maps refusals to what the popup says. */
   const grantFor = async (workspaceId: string): ReturnType<DirectDeps["grant"]> => {
@@ -44,10 +48,29 @@ export function installWorkspaceSync(local: { enabled: boolean; control: DeviceC
     identity: () => { const user = getSessionUserForMain(); return user ? { accountId: user.accountId, deviceId: deviceIdFor(store, user.accountId) } : null; },
     connect: (workspaceId, handlers) => DirectSyncConnection.connect({ grant: () => grantFor(workspaceId), dial }, handlers),
     setSyncing: async (workspaceId, syncing) => { const device = local.device(); if (device) await local.control.setSyncing(device, workspaceId, syncing); },
-    publish: statuses => emitEvent(WORKSPACE_SYNC_STATUS_EVENT, statuses),
+    publish: statuses => emitEvent(WORKSPACE_SYNC_STATUS_EVENT, withFolders(statuses)),
   });
+  // 12.z: the renderer may see This Mac's own folder (it is the person's Mac); the server never does.
+  const withFolders = (statuses: WorkspaceSyncStatus[]): WorkspaceSyncStatus[] =>
+    statuses.map(status => { const folder = manager.folderFor(status.workspaceId); return folder ? { ...status, folder } : status; });
+  // 12.z: main follows what the person wants synced on this Mac, whatever the renderer shows.
+  const follower = new SyncWantedFollower({
+    list: cursor => { const device = local.device(); if (!device) return Promise.reject(new Error("not registered")); return local.control.syncConnections(device, cursor); },
+    running: () => manager.statuses().map(status => status.workspaceId),
+    folderFor: workspaceId => manager.folderFor(workspaceId),
+    enable: (workspaceId, folder) => manager.enable(workspaceId, folder),
+    disable: workspaceId => manager.disable(workspaceId),
+    mkdir: folder => mkdir(folder, { recursive: true, mode: 0o755 }).then(() => {}),
+    home: app.getPath("home"), now: Date.now, log: line => console.info(`[workspace-sync] ${line}`),
+  });
+  const stopHints = local.onSyncHint(() => { void follower.hint(); });
   let changing = Promise.resolve();
-  const sync = () => { changing = changing.then(() => local.enabled && getSessionUserForMain() ? manager.start() : manager.stop()).catch(() => {}); };
+  const sync = () => {
+    changing = changing.then(async () => {
+      if (local.enabled && getSessionUserForMain()) { await manager.start(); follower.start(); }
+      else { follower.stop(); await manager.stop(); }
+    }).catch(() => {});
+  };
   const stopSessionWatch = onMainAuthSessionChanged(sync);
   const stopSignOut = onBeforeMainSignOut(() => manager.stop());
   sync();
@@ -58,7 +81,36 @@ export function installWorkspaceSync(local: { enabled: boolean; control: DeviceC
       throw new Error("Sync requires the app window.");
   };
   const workspace = (value: unknown) => { if (typeof value !== "string" || !UUID.test(value)) throw new Error("Invalid workspace."); return value; };
-  setCommand("workspace_sync_statuses", (_args, event) => { requireMainFrame(event); return manager.statuses(); });
+  setCommand("workspace_sync_statuses", (_args, event) => { requireMainFrame(event); return withFolders(manager.statuses()); });
+  const label = (value: unknown, name: string) => { if (typeof value !== "string" || value.length > 200) throw new Error(`Invalid ${name}.`); return value; };
+  /** 12.z: the switch. No picker: ~/zeros/cloud-sync/<repository>/<workspace>, created if missing (the empty-or-own rule still applies). */
+  setCommand("workspace_sync_enable", async (args, event) => {
+    requireMainFrame(event);
+    const workspaceId = workspace(args.workspaceId);
+    if (!local.enabled) return { ok: false, reason: "unavailable" };
+    const folder = manager.folderFor(workspaceId) ?? defaultSyncFolder(app.getPath("home"), label(args.repository, "repository"), label(args.workspace, "workspace"));
+    follower.noteLocalChange(workspaceId);
+    try { await mkdir(folder, { recursive: true, mode: 0o755 }); await manager.enable(workspaceId, folder); return { ok: true }; }
+    catch (error) { return { ok: false, reason: error instanceof SyncRootError ? error.code : "failed" }; }
+  });
+  setCommand("workspace_sync_reveal", async (args, event) => {
+    requireMainFrame(event);
+    const folder = manager.folderFor(workspace(args.workspaceId));
+    if (!folder) throw new Error("This workspace is not synced on this Mac.");
+    const failure = await shell.openPath(folder);
+    if (failure) throw new Error("The sync folder could not be opened.");
+    return true;
+  });
+  /** 12.z: another of this person's Macs; that Mac starts or stops with its own default folder. */
+  setCommand("workspace_sync_set_wanted", async (args, event) => {
+    requireMainFrame(event);
+    const workspaceId = workspace(args.workspaceId), deviceId = workspace(args.deviceId);
+    if (typeof args.wanted !== "boolean") throw new Error("Invalid wanted.");
+    const device = local.device();
+    if (!device) return { ok: false, reason: "not_connected" };
+    await local.control.setSyncWanted(device, workspaceId, deviceId, args.wanted);
+    return { ok: true };
+  });
   /** The native open panel chooses the folder; the renderer never names a path. */
   setCommand("workspace_sync_choose", async (args, event) => {
     requireMainFrame(event);
@@ -70,10 +122,17 @@ export function installWorkspaceSync(local: { enabled: boolean; control: DeviceC
     const picked = window ? await dialog.showOpenDialog(window, options) : await dialog.showOpenDialog(options);
     const folder = picked.filePaths[0];
     if (picked.canceled || !folder) return { ok: false, reason: "cancelled" };
+    follower.noteLocalChange(workspaceId);
     try { await manager.enable(workspaceId, folder); return { ok: true }; }
     catch (error) { return { ok: false, reason: error instanceof SyncRootError ? error.code : "failed" }; }
   });
-  setCommand("workspace_sync_stop", async (args, event) => { requireMainFrame(event); await manager.disable(workspace(args.workspaceId)); return true; });
+  setCommand("workspace_sync_stop", async (args, event) => {
+    requireMainFrame(event);
+    const workspaceId = workspace(args.workspaceId);
+    follower.noteLocalChange(workspaceId);
+    await manager.disable(workspaceId);
+    return true;
+  });
   /** A Local terminal (Terminal.app, this Mac's shell) in the sync root; registers nothing. */
   setCommand("workspace_sync_open_terminal", async (args, event) => {
     requireMainFrame(event);
@@ -82,5 +141,5 @@ export function installWorkspaceSync(local: { enabled: boolean; control: DeviceC
     await openInTerminal({ path: folder }, event);
     return true;
   });
-  return { dispose: async () => { stopSessionWatch(); stopSignOut(); await manager.stop(); } };
+  return { dispose: async () => { stopSessionWatch(); stopSignOut(); stopHints(); follower.stop(); await manager.stop(); } };
 }

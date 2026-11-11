@@ -23,7 +23,10 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
  * and relays the person's choice for a request main raised. */
 export function installLocalCommands(options: { notifyUser?(event: NotifyUserEvent): void } = {}): {
   dispose(): Promise<void>; enabled: boolean; control: DeviceControl; device(): LocalCommandDevice | undefined;
+  /** 12.z: the device channel's hints for workspace sync. */
+  onSyncHint(listener: () => void): () => void;
 } {
+  const syncHints = new Set<() => void>();
   const enabled = !IS_LOCAL_DEVELOPMENT && cloudWorkspaceDesktopCapabilityEnabled();
   const control = new DeviceControl({ fetch: controlPlaneFetch, baseUrl: controlPlaneBaseUrl, token: getValidAccessTokenForMain });
   const notifications = new Map<string, Notification>();
@@ -55,6 +58,7 @@ export function installLocalCommands(options: { notifyUser?(event: NotifyUserEve
     },
     notify: approval => { if (!BrowserWindow.getFocusedWindow()) notify(approval); },
     ...(options.notifyUser ? { notifyUser: options.notifyUser } : {}),
+    syncHint: () => { for (const listener of syncHints) listener(); },
   });
 
   let current: string | null = null, changing = Promise.resolve();
@@ -118,5 +122,6 @@ export function installLocalCommands(options: { notifyUser?(event: NotifyUserEve
     return control.disconnect(device, args.workspaceId, args.deviceId);
   });
   return { enabled, control, device: () => service.currentDevice(),
+    onSyncHint: listener => { syncHints.add(listener); return () => { syncHints.delete(listener); }; },
     dispose: async () => { stopSessionWatch(); stopSignOut(); for (const notification of notifications.values()) notification.close(); await service.stop(); } };
 }

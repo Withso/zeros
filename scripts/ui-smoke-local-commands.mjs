@@ -119,28 +119,45 @@ export async function runLocalCommandsSmoke({ page, harnessBase, check }) {
     await expect(page.getByText(/Waiting for approval/)).toHaveCount(0);
     check(`RunLocalCommand rows show the laptop and prompt pair, the description and command, waiting only on a held approval (its card in the chat), plain-word endings and no Ran on, never mcp__ names, a tool search row or Error, in ${theme}`, true);
 
-    // Order 3: This Mac's sync row in the popup, off and on, from the keyboard.
+    // 12.z: a switch under each connected Mac, from the keyboard; This Mac's status dot, folder and menu.
     await open("view=sync&sync=off", theme);
     const offPopup = page.getByRole("dialog", { name: "Cloud workspace details" });
-    await expect(offPopup.getByText("Connected · for 12 h · Syncing")).toBeVisible();
-    const start = offPopup.getByRole("button", { name: "Sync to a local directory" });
-    await start.focus(); await page.keyboard.press("Enter");
-    expect(await calls()).toContain("sync:choose");
+    const mine = offPopup.getByRole("switch", { name: "Sync to a local directory on Alex's MacBook Pro" });
+    const studio = offPopup.getByRole("switch", { name: "Sync to a local directory on Studio" });
+    await expect(mine).toHaveAttribute("aria-checked", "false");
+    await expect(studio).toHaveAttribute("aria-checked", "true");
+    await expect(offPopup.getByRole("group", { name: "Sync on Studio" }).getByRole("status")).toHaveText("Syncing");
+    await mine.focus(); await page.keyboard.press("Space");
+    expect((await calls()).at(-1)).toBe("sync:enable");
+    await studio.focus(); await page.keyboard.press("Space");
+    expect((await calls()).at(-1)).toBe("wanted:d2:false");
+    await expect(offPopup.locator("[data-sync-path]")).toHaveCount(0);
     await shoot(offPopup, `workspace-sync-off-${theme}`);
-    for (const [state, label] of [["syncing", "Syncing (12 files)"], ["in_sync", "In sync"], ["paused", "Paused (workspace asleep)"], ["error", "Error (more than 5 GB)"]]) {
+    // A control plane without 12.z: only This Mac's switch is live.
+    await open("view=sync&sync=off&old=1", theme);
+    await expect(page.getByRole("switch", { name: "Sync to a local directory on Studio" })).toBeDisabled();
+    await expect(page.getByRole("switch", { name: "Sync to a local directory on Alex's MacBook Pro" })).toBeEnabled();
+    for (const [state, label, dot] of [["syncing", "Syncing (12 files)", "--fg3"], ["in_sync", "In sync", "--green-primary"], ["paused", "Paused (workspace asleep)", "--fg3"], ["error", "Error (more than 5 GB)", "--red-primary"]]) {
       await open(`view=sync&sync=${state}`, theme);
-      const group = page.getByRole("group", { name: "Sync on this Mac" });
+      const group = page.getByRole("group", { name: "Sync on Alex's MacBook Pro" });
       const status = group.getByRole("status");
       await expect(status).toHaveText(label);
-      expect(await color(status, "color")).toBe(await token(state === "error" ? "--red-primary" : "--fg1"));
-      await expect(group.getByText("A local copy: changes in the cloud overwrite edits made here.")).toBeVisible();
+      expect(await color(status, "color")).toBe(await token(state === "error" ? "--red-primary" : "--fg2"));
+      expect(await color(group.locator(`[data-sync-dot="${state}"]`), "backgroundColor")).toBe(await token(dot));
+      await expect(group.locator("[data-sync-path]")).toContainText("~/zeros/cloud-sync/zeros/w-19");
       if (state === "in_sync") {
-        await group.getByRole("button", { name: "Open terminal here" }).focus(); await page.keyboard.press("Enter");
-        await group.getByRole("button", { name: "Stop sync" }).focus(); await page.keyboard.press("Enter");
-        expect((await calls()).slice(-2)).toEqual(["sync:terminal", "sync:stop"]);
+        const menu = group.getByRole("button", { name: "Sync folder actions" });
+        for (const [item, call] of [["Open in Finder", "sync:reveal"], ["Open terminal here", "sync:terminal"], ["Copy path", "sync:copy"], ["Choose another folder…", "sync:choose"]]) {
+          await menu.focus(); await page.keyboard.press("Enter");
+          await page.getByRole("menuitem", { name: item }).focus(); await page.keyboard.press("Enter");
+          expect((await calls()).at(-1)).toBe(call);
+        }
+        const toggle = group.getByRole("switch");
+        await toggle.focus(); await page.keyboard.press("Space");
+        expect((await calls()).at(-1)).toBe("sync:stop");
         await shoot(group, `workspace-sync-in-sync-${theme}`);
       }
     }
-    check(`This Mac's sync row starts from the keyboard, shows each status on its token with the copy note, and opens a terminal or stops in ${theme}`, true);
+    check(`Each connected Mac's sync switch works from the keyboard (This Mac at once, another Mac's wanted state, disabled on an older control plane), with each status dot and This Mac's folder menu, in ${theme}`, true);
   }
 }

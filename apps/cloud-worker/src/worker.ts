@@ -23,7 +23,8 @@ import { prepareCheckout, type CheckoutRefresh, type CheckoutResult } from "./wo
 import { WorkspaceSetup, readSetupOutput, type SetupRunner } from "./workspace/setup";
 import { NotifyUserService } from "./notify-user/service";
 import { SyncService } from "./workspace/sync-service";
-import { SYNC_CAPABILITY, SYNC_HINT_KIND } from "@zeros/protocol/workspace-sync";
+import { SyncTransferActivity } from "./workspace/sync-activity";
+import { SYNC_CAPABILITY, SYNC_HINT_KIND, SYNC_BATCH_CAPABILITY, SYNC_TRANSFER_OPS } from "@zeros/protocol/workspace-sync";
 import { WorkspaceError, WorkspaceScope, type WorkerConfig } from "./workspace/scope";
 import { WorkspaceService, type WorkspaceServiceOptions } from "./workspace/service";
 import { isGitMutation } from "./workspace/git";
@@ -114,6 +115,7 @@ export class CloudWorker {
   private promptInbox?: PromptInbox;
   private workspace?: WorkspaceService;
   private sync?: SyncService;
+  private readonly syncTransfers = new SyncTransferActivity();
   private terminals?: Terminals;
   private application?: ApplicationEnvironment;
   private watchdog?: MemoryWatchdog;
@@ -272,6 +274,7 @@ export class CloudWorker {
     }
     if (message.t === "close") {
       this.pendingClients.delete(message.clientId);
+      this.syncTransfers.ended(message.clientId);
       const client = this.clients.get(message.clientId); if (client) this.terminals?.detach(client);
       this.clients.delete(message.clientId); return;
     }
@@ -314,6 +317,8 @@ export class CloudWorker {
       try {
         if (!this.sync) throw new WorkspaceError("CLOUD_V2_UNSUPPORTED", "Sync is not available.");
         const result = await this.sync.handle(frame.op, frame.params ?? {});
+        // A Mac moving bytes keeps the VM awake (bounded); an in-sync mirror's snapshots never do.
+        if (client.passive && SYNC_TRANSFER_OPS.has(frame.op)) this.syncTransfers.transferred(client.id, Date.now());
         await client.send(createMessage({ type: "WORKSPACE_RESPONSE", source: "engine", requestId: frame.id, op: frame.op, result }));
       } catch (error) {
         await client.send(createMessage({ type: "WORKSPACE_ERROR", source: "engine", requestId: frame.id, op: frame.op,
@@ -637,7 +642,7 @@ export class CloudWorker {
   private readyFrame(): BridgeMessage {
     return createMessage({ type: "ENGINE_READY", source: "engine", version: "0.0.0", root: "", framework: "cloud", port: 0,
       protocolVersion: PROTOCOL_VERSION, minProtocolVersion: MIN_SUPPORTED_PROTOCOL, instanceId: this.instanceId,
-      capabilities: [...(this.reviews?.enabled ? ["code-review-v1"] : []), CLOUD_WORKSPACE_RESOURCES_CAPABILITY, SYNC_CAPABILITY] });
+      capabilities: [...(this.reviews?.enabled ? ["code-review-v1"] : []), CLOUD_WORKSPACE_RESOURCES_CAPABILITY, SYNC_CAPABILITY, SYNC_BATCH_CAPABILITY] });
   }
   private async touchCheckout(): Promise<void> {
     await this.checkoutRefresh?.touch();
@@ -678,7 +683,8 @@ export class CloudWorker {
   }
   private get busy(): boolean {
     return Boolean(this.agents?.busy || this.terminals?.busy || this.setup?.busy || this.workspace?.uploading ||
-      this.activeMutations || (this.options.transport.localCommandsPending ?? 0) > 0 || Date.now() - this.lastMutationAt < RECENT_ACTIVITY_MS);
+      this.activeMutations || (this.options.transport.localCommandsPending ?? 0) > 0 || Date.now() - this.lastMutationAt < RECENT_ACTIVITY_MS ||
+      this.syncTransfers.active(Date.now()));
   }
   get runtimeCensus(): RuntimeCensus {
     return {
