@@ -14,7 +14,7 @@ and the labelled run cancels it.
 
 **Rule.** Do not arm the merge some other way on your own: the wrapper is the
 only merge path. Get CI green, check by hand what the wrapper would check (the required
-sections, no CI-definition paths through `isCiDefinitionPath`, no skip
+sections, no skip
 markers, no failed required checks, no other armed PR), then hand the merge to
 the owner: one click on the PR, or `pnpm agent:merge <pr>` from a terminal
 where `gh` has normal GitHub access. Merge through the connector only when the

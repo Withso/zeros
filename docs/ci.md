@@ -364,10 +364,16 @@ Agents merge CI-definition PRs through the wrapper like any other PR, so a
 test can ship in the same PR as the feature it covers. Two things still hold
 whatever a PR contains: the list of required checks lives in GitHub's ruleset,
 which a PR cannot change, and the trusted scope loads its selection policy
-from the base commit, so a CI-definition change selects every PR lane instead
-of attesting to its own skips. What the ruleset does not protect is the content
-of a required job: a PR that weakens one still reports its name, so reviewing
-workflow and check-script diffs remains the reviewer's job.
+from the base commit, so a PR cannot attest to its own skips. Most
+CI-definition paths are global invalidators and select every PR lane except
+`ui-smoke`; `scripts/ui-smoke/**` selects only the smoke-harness contracts. No
+path adds composer smoke, so a change to what the smoke suite runs still needs
+the `ci:ui-smoke` label. What the ruleset does not protect is the content of a
+required job: a PR that weakens one still reports its name, so reviewing
+workflow and check-script diffs remains the reviewer's job. Auto-merge also
+stays armed across later pushes to the PR, so a change pushed after review
+merges once green; disarm before pushing to an armed PR, as
+`integrate-pr.md` says.
 
 The paths recognized by `scripts/ci/ci-definition.mjs` are workflows/actions,
 `.github/actionlint.yaml`, `.github/CODEOWNERS`, `scripts/ci/**`, `scripts/agent-runtime/**`, `scripts/check-*`,

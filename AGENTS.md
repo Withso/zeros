@@ -167,5 +167,6 @@ Never claim a platform-only check passed when it was not run on that platform.
 Run `pnpm ci:plan` to preview the path-selected lanes, and add any extra `ci:*`
 labels before the final push. Labels only add checks; they cannot remove path
 floors. See [docs/ci.md](docs/ci.md) for the closed label vocabulary and fallback
-rules. A CI-definition PR selects every PR lane and merges through the wrapper
-like any other.
+rules. A CI-definition PR merges through the wrapper like any other. No path
+selects composer smoke, so it still needs `ci:ui-smoke` when it changes what
+the smoke suite runs.

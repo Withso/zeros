@@ -193,8 +193,10 @@ revision in the same checkout and compare failing test names.
   running it. Build credential-shaped test values at runtime, and give
   credential URLs a `.test` host.
 - CI-definition paths (`scripts/check-*`, `scripts/ci/**`, `package.json`, the
-  lockfiles; full list in `scripts/ci/ci-definition.mjs`) select every PR lane.
-  They merge through the wrapper like any other PR.
+  lockfiles; full list in `scripts/ci/ci-definition.mjs`) merge through the
+  wrapper like any other PR. No path selects composer smoke, and
+  `scripts/ui-smoke/**` selects only the smoke-harness contracts: label
+  `ci:ui-smoke` when a change alters what the smoke suite runs.
 - pnpm installs share blocks through the store: measure reclaimed disk with
   `df`, and prune only your own scratch.
 - Run merge tooling from a checkout at current `origin/main`. A held

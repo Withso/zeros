@@ -38,6 +38,8 @@ session itself.
    a push with `git ls-remote`, not with a pipeline's exit status.
 7. **Merge** with `pnpm agent:merge <n>`, which arms auto-merge. Only one armed
    PR at a time: queue the rest and arm each one after the previous merges.
+   Runtime upgrade PRs are the owner's to merge
+   (`docs/agent-runtime-notifications.md`); do not arm them.
    Apply `ci:*` and `agent-runtime:hold` labels before the final push. A label
    added later starts a new CI run for the same head and cancels the running
    one, whose roll-ups then fail with "Invalid … selection/result"; read the

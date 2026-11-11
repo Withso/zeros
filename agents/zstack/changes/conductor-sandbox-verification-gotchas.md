@@ -18,8 +18,8 @@ Target: `gotchas.md` (credentials and CI-definition entries).
   under `umask 022`, as CI does, before treating them as regressions.
 - **Never edit while a full suite runs.** A red-check edit made mid-run lands
   in that run's results; prove a regression red only between suite runs.
-- **New smoke checks stay agent-mergeable.** `scripts/ui-smoke/**`
-  (`scenarios.mjs`, `shards.json`) is a CI-definition path, so adding a
-  scenario needs the owner's merge. To keep a PR mergeable with
-  `pnpm agent:merge`, export a new `scripts/ui-smoke-<area>-*.mjs` function and
-  call it from an existing scenario's script, which is not a definition path.
+- **New smoke checks.** A scenario registered in `scripts/ui-smoke/**`
+  (`scenarios.mjs`, `shards.json`) can ship in the same PR as its feature. The
+  lighter option is still to export a new `scripts/ui-smoke-<area>-*.mjs`
+  function and call it from an existing scenario's script. Either way the PR
+  needs the `ci:ui-smoke` label for the smoke suite to run.

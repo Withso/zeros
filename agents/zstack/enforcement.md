@@ -69,7 +69,7 @@ not prove its contents, and bypassing the wrapper remains a review concern.
 | [A39](../../AGENTS.md#verification) Run matching migration, packaging, protocol, deep-link and deployment gates. <!-- rule:AGENTS.md:d8bc7d925b6197cf --> | `check:migrations`, `check:control-plane-migrations`, `check:packaging-paths`, `check:protocol`, `check:deep-link-schemes`, `check:web-deploy` | Each validates its named contract; deployment behavior needs applicable live checks. |
 | [A40](../../AGENTS.md#verification) Check licenses after dependency, generated-code or packaged-asset changes. <!-- rule:AGENTS.md:a9992dce89d52c3b --> | `check:licenses` | Audited graphs/notices only; provenance still needs human review. |
 | [A41](../../AGENTS.md#verification) Report a platform-only check as unverified unless run on that platform. <!-- rule:AGENTS.md:794d8ab1db8caba6 --> | judgment only | Receipts show the host; interpreting or overstating evidence remains judgment. |
-| [A42](../../AGENTS.md#ci-selection) Preview path-selected CI lanes; labels add checks and CI definitions select every lane. <!-- rule:AGENTS.md:a625f5fa4ec13bc8 --> | `ci:plan`, `CI scope` | Path floors and label vocabulary; reviewing a CI-definition diff is judgment. |
+| [A42](../../AGENTS.md#ci-selection) Preview path-selected CI lanes; labels add checks, and composer smoke always needs its label. <!-- rule:AGENTS.md:5d8f61ab22175c70 --> | `ci:plan`, `CI scope` | Path floors and label vocabulary; reviewing a CI-definition diff is judgment. |
 
 ## RULES.md
 
