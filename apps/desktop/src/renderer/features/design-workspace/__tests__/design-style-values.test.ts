@@ -184,9 +184,9 @@ describe("design style values", () => {
     expect(resolveDesignNumericExpression("18px", "24px")).toBe("18px");
   });
 
-  it("settles values CSS rejects as negative on zero instead of persisting them", () => {
-    // The engine writes declarations verbatim; the browser then ignores
-    // `padding-top:-10px`, so the field would silently snap back.
+  it("keeps a typed negative for the field to refuse, and settles a scrub on zero", () => {
+    // A typed negative is refused with a message (designStyleFieldRefusal);
+    // the engine writes declarations verbatim, so it must never be saved.
     for (const property of [
       "padding-top",
       "padding-left",
@@ -202,12 +202,12 @@ describe("design style values", () => {
       "transition-duration",
     ])
       expect(normalizeDesignStyleFieldInput(property, "-10", "8px")).toMatch(
-        /^0(px|ms)?$/,
+        /^-10(px|ms)?$/,
       );
     expect(normalizeDesignStyleFieldInput("padding-top", "x-30", "20px")).toBe(
-      "0px",
+      "-10px",
     );
-    expect(normalizeDesignStyleFieldInput("width", "-4%", "50%")).toBe("0%");
+    expect(normalizeDesignStyleFieldInput("width", "-4%", "50%")).toBe("-4%");
     // Negative values stay meaningful where CSS allows them.
     for (const property of [
       "margin-top",
@@ -222,6 +222,7 @@ describe("design style values", () => {
       expect(
         normalizeDesignStyleFieldInput(property, "-10", "0px"),
       ).toMatch(/^-10/);
+    // A scrub or arrow key stops at zero instead.
     expect(clampDesignStyleFieldValue("padding-left", "-3px")).toBe("0px");
     expect(clampDesignStyleFieldValue("margin-left", "-3px")).toBe("-3px");
     expect(clampDesignStyleFieldValue("gap", "12px 8px")).toBe("12px 8px");
@@ -239,10 +240,7 @@ describe("design style values", () => {
       "5px/10px",
     );
     expect(normalizeDesignStyleFieldInput("padding", "-4px 8px", "0px")).toBe(
-      "0px 8px",
-    );
-    expect(normalizeDesignStyleFieldInput("gap", "8px   -2px", "0px")).toBe(
-      "8px 0px",
+      "-4px 8px",
     );
     // Anything that is not plain numbers is left for CSS to judge.
     expect(

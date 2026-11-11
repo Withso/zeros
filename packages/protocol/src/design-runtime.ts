@@ -138,6 +138,10 @@ export interface DesignRuntimeNodeLayout {
   /** For `position: fixed`: the parent, a further ancestor, or the viewport
    * positions the box. Omitted by older runtimes and for other positions. */
   fixedContainingBlock?: "parent" | "ancestor" | "viewport";
+  /** What a percentage length resolves against, in px; omitted where it
+   * cannot be known (a grid area, a fixed layer) and by older runtimes. A
+   * layer in flow reports width only. */
+  percentBasis?: { width: number; height?: number };
 }
 
 export interface DesignRuntimeChildrenLayout {
@@ -198,6 +202,19 @@ export interface DesignRuntimeNodeDetails {
   /** The frame root's computed font size in px, for rem conversion. Omitted by
    * older runtimes. */
   rootFontSize?: number;
+  /** The states the layer's own rules give it and it can be in, in menu
+   * order; omitted when none. */
+  states?: DesignRuntimeNodeState[];
+  /** Present only on details read while that state is held: its values are
+   * the state's, never the layer's Default. */
+  heldState?: DesignRuntimeNodeState;
+}
+
+export const DESIGN_RUNTIME_NODE_STATES = ["hover", "focus", "focus-visible", "active", "disabled"] as const;
+export type DesignRuntimeNodeState = (typeof DESIGN_RUNTIME_NODE_STATES)[number];
+
+export function isDesignRuntimeNodeState(value: unknown): value is DesignRuntimeNodeState {
+  return typeof value === "string" && (DESIGN_RUNTIME_NODE_STATES as readonly string[]).includes(value);
 }
 
 /** Where a winning declaration lives in the rendered frame document. */
@@ -249,6 +266,8 @@ export interface DesignRuntimeAuthoredStyle extends DesignRuntimeStyleOrigin {
   /** A rule written for this layer that sits inside @media, @supports or
    * @layer: not the layer's own change, which the editor could remove. */
   conditional?: true;
+  /** The held state whose rule wins, on held details only. */
+  state?: DesignRuntimeNodeState;
 }
 
 export interface DesignRuntimeReplacedStyle extends DesignRuntimeStyleOrigin {
@@ -398,7 +417,8 @@ function isRuntimeAuthoredStyles(value: unknown): boolean {
       isRuntimeSubjectClasses(style.subjectClasses) &&
       isRuntimeReplacedStyle(style.replaced) &&
       isRuntimeThemeValues(style.themeValues) &&
-      (style.conditional === undefined || style.conditional === true)
+      (style.conditional === undefined || style.conditional === true) &&
+      (style.state === undefined || isDesignRuntimeNodeState(style.state))
     );
   });
 }
@@ -657,17 +677,27 @@ export type DesignRuntimeMethod =
   | "previewStylesheet"
   | "setPlayback"
   | "previewInsert"
-  | "clearPreviewInserts";
+  | "clearPreviewInserts"
+  /** Opt-in: hold the layer in one of its own states, view only. */
+  | "holdNodeState"
+  | "releaseNodeState";
 
 /** Methods a runtime advertises only when the host's handshake lists them
  * in `features`, so a host that predates them still accepts the runtime's
  * capabilities. */
-export const DESIGN_RUNTIME_OPT_IN_METHODS = ["previewStylesheet", "setPlayback", "previewInsert", "clearPreviewInserts", "previewHistory", "commitStructure", "previewStructure", "clearPreviewStructure"] as const;
+export const DESIGN_RUNTIME_OPT_IN_METHODS = ["previewStylesheet", "setPlayback", "previewInsert", "clearPreviewInserts", "previewHistory", "commitStructure", "previewStructure", "clearPreviewStructure", "holdNodeState", "releaseNodeState"] as const;
 
 export interface DesignRuntimePlaybackStopped {
   sourceVersion: string;
   sessionId: string;
   reason: "escape" | "hidden";
+}
+
+/** A held layer state the runtime let go of by itself, before an edit or
+ * because its layer left the document. */
+export interface DesignRuntimeStateReleased {
+  sourceVersion: string;
+  holdId: string;
 }
 
 /** The document's pixels have been presented since it reported ready. */
@@ -742,6 +772,8 @@ const DESIGN_RUNTIME_METHODS = new Set<DesignRuntimeMethod>([
   "setPlayback",
   "previewInsert",
   "clearPreviewInserts",
+  "holdNodeState",
+  "releaseNodeState",
 ]);
 
 export interface DesignRuntimeHostRequest {
@@ -821,6 +853,14 @@ export type DesignRuntimeFrameMessage =
       /** Sent only after an opted-in host starts a playback session. */
       event: "playbackStopped";
       payload: DesignRuntimePlaybackStopped;
+    }
+  | {
+      protocol: typeof DESIGN_RUNTIME_PROTOCOL;
+      version: typeof DESIGN_RUNTIME_VERSION;
+      type: "event";
+      /** Sent only for a hold the host started; never for its own release. */
+      event: "stateReleased";
+      payload: DesignRuntimeStateReleased;
     }
   | {
       protocol: typeof DESIGN_RUNTIME_PROTOCOL;
@@ -909,7 +949,12 @@ export function isRuntimeNodeLayout(
         value[key] === undefined ||
         (typeof value[key] === "string" && value[key].length <= 1024),
     ) &&
-    typeof value.isContainingBlock === "boolean"
+    typeof value.isContainingBlock === "boolean" &&
+    (value.percentBasis === undefined ||
+      (isRecord(value.percentBasis) &&
+        isFiniteNumber(value.percentBasis.width) && value.percentBasis.width >= 0 &&
+        (value.percentBasis.height === undefined ||
+          (isFiniteNumber(value.percentBasis.height) && value.percentBasis.height >= 0))))
   );
 }
 
@@ -941,6 +986,11 @@ export function isDesignRuntimeRelocationContext(value: unknown): value is Desig
     (value.rootStyles === undefined || boundedStyles(value.rootStyles)) &&
     Array.isArray(value.unsupported) && value.unsupported.length <= 8 &&
     value.unsupported.every((reason) => typeof reason === "string" && reason.length <= 256);
+}
+
+/** Validate one node's details at a trust boundary. */
+export function isDesignRuntimeNodeDetails(value: unknown): value is DesignRuntimeNodeDetails {
+  return isRuntimeNodeDetails(value);
 }
 
 function isRuntimeNodeDetails(
@@ -994,7 +1044,12 @@ function isRuntimeNodeDetails(
     (value.authoredStyles === undefined ||
       isRuntimeAuthoredStyles(value.authoredStyles)) &&
     (value.rootFontSize === undefined ||
-      (isFiniteNumber(value.rootFontSize) && value.rootFontSize > 0 && value.rootFontSize <= 1024))
+      (isFiniteNumber(value.rootFontSize) && value.rootFontSize > 0 && value.rootFontSize <= 1024)) &&
+    (value.states === undefined ||
+      (Array.isArray(value.states) &&
+        value.states.length <= DESIGN_RUNTIME_NODE_STATES.length &&
+        value.states.every(isDesignRuntimeNodeState))) &&
+    (value.heldState === undefined || isDesignRuntimeNodeState(value.heldState))
   );
 }
 
@@ -1134,7 +1189,7 @@ export function isDesignRuntimeFrameMessage(
   if (
     message.type !== "event" ||
     (message.event !== "ready" && message.event !== "mutation" && message.event !== "playbackStopped" &&
-      message.event !== "painted") ||
+      message.event !== "painted" && message.event !== "stateReleased") ||
     !isRecord(message.payload)
   ) {
     return false;
@@ -1142,6 +1197,8 @@ export function isDesignRuntimeFrameMessage(
   if (message.event === "mutation") return isRuntimeSnapshot(message.payload);
   const payload = message.payload;
   if (message.event === "painted") return isSourceVersion(payload.sourceVersion);
+  if (message.event === "stateReleased")
+    return isSourceVersion(payload.sourceVersion) && typeof payload.holdId === "string" && payload.holdId.length > 0 && payload.holdId.length <= 64;
   if (message.event === "playbackStopped") {
     return isSourceVersion(payload.sourceVersion) &&
       typeof payload.sessionId === "string" && payload.sessionId.length > 0 && payload.sessionId.length <= 128 &&
@@ -1231,7 +1288,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   ];
   // Advertised only to a host whose handshake asks for them, so a host that
   // predates a method still accepts these capabilities.
-  var OPT_IN_METHODS = ["previewStylesheet", "setPlayback", "previewInsert", "clearPreviewInserts", "previewHistory", "commitStructure", "previewStructure", "clearPreviewStructure"];
+  var OPT_IN_METHODS = ["previewStylesheet", "setPlayback", "previewInsert", "clearPreviewInserts", "previewHistory", "commitStructure", "previewStructure", "clearPreviewStructure", "holdNodeState", "releaseNodeState"];
   var enabledOptInMethods = [];
   var MAX_PREVIEW_STYLESHEET_CHARS = 4194304;
   // Everything one frame of direct manipulation paints from. Deliberately tiny:
@@ -2074,7 +2131,13 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   function identifierEnd(text, index) {
     while (index < text.length) {
       var code = text.charCodeAt(index);
-      if (text[index] === "\\") { index += 2; continue; }
+      if (text[index] === "\\") {
+        // A hex escape runs up to six digits and swallows one space.
+        var hex = 0;
+        while (hex < 6 && /[0-9a-fA-F]/.test(text[index + 1 + hex] || "")) hex += 1;
+        index += hex > 0 ? 1 + hex + (/\s/.test(text[index + 1 + hex] || "") ? 1 : 0) : 2;
+        continue;
+      }
       if ((code >= 48 && code <= 57) || (code >= 65 && code <= 90) || (code >= 97 && code <= 122) || code === 45 || code === 95 || code >= 128) {
         index += 1;
         continue;
@@ -2170,6 +2233,12 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   }
 
   var cascadeRuleIndex = null;
+  /** The one layer held in a state, its copied rules and their originals;
+   * null at rest. */
+  var heldState = null;
+  /** True while a held state is set aside, so reads in that span are Default's. */
+  var heldStateAside = false;
+  var HELD_STATE_RELEASES = ["previewStyles", "previewLayout", "restoreGeneration", "previewHistory", "commitStyles", "commitStructure", "previewStructure", "previewText", "previewMotion", "previewStylesheet", "previewInsert", "setNodeVisibility", "setPlayback"];
   var longhandsByShorthand = new Map();
 
   /** Every active style rule in document order with its layer position,
@@ -2182,6 +2251,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     var rules = [];
     var customRules = new Map();
     var themed = [];
+    var stateRules = [];
     var themeNames = new Set();
     var themeProperties = new Set();
     var siblingsByParent = new Map();
@@ -2198,18 +2268,38 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       });
       return { key: key, path: path };
     }
-    // grouped: inside any at-rule; the engine edits only ungrouped rules.
-    function visit(list, active, layer, origin, uncertain, nested, grouped) {
+    // context: the conditions, layer and nesting a rule list sits in. A
+    // nested rule one level under a rule with one plain selector resolves its
+    // & against that selector (Tailwind writes its variants this way); deeper
+    // nesting keeps only its property footprint, as before. A rule is grouped
+    // inside any at-rule or nested in another rule: the engine edits only
+    // top-level rules outside every at-rule, so neither is the layer's own.
+    function visit(list, context) {
       for (var index = 0; index < list.length; index += 1) {
         var rule = list[index];
         var kind = rule.constructor && rule.constructor.name;
-        if ((rule.type === CSSRule.STYLE_RULE && rule.selectorText && rule.style) || (nested && kind === "CSSNestedDeclarations" && rule.style)) {
+        if ((rule.type === CSSRule.STYLE_RULE && rule.selectorText && rule.style) || (context.nested && kind === "CSSNestedDeclarations" && rule.style)) {
           var declared = declarationProperties(rule.style);
-          // A nested selector is relative to its parent, so element.matches()
-          // cannot establish applicability or specificity. Keep its property
-          // footprint rather than silently selecting a losing outer rule.
-          var entry = { rule: rule, selector: nested ? null : rule.selectorText, uncertain: uncertain || nested, active: active, layer: layer.path, order: rules.length, origin: origin, declared: declared, shadow: scope !== document, grouped: grouped };
+          var selector = null;
+          if (kind === "CSSNestedDeclarations") selector = context.parent;
+          else if (!context.nested) selector = rule.selectorText;
+          else if (context.depth === 1 && context.parent) selector = resolveNestedSelector(rule.selectorText, context.parent);
+          // A nested selector that cannot be resolved is relative to its
+          // parent, so element.matches() cannot establish applicability or
+          // specificity. Keep its property footprint rather than silently
+          // selecting a losing outer rule.
+          var entry = { rule: rule, selector: selector, uncertain: context.uncertain || selector === null, active: context.active, layer: context.layer.path, order: rules.length, origin: context.origin, declared: declared, shadow: scope !== document, grouped: context.grouped || context.nested, chain: context.chain, anonymousLayer: context.anonymous };
+          var copied = heldState && heldState.copies.get(rule);
+          if (copied) {
+            entry.origin = copied.entry.origin;
+            entry.reportSelector = copied.entry.reportSelector || copied.entry.selector;
+            entry.state = copied.state;
+            entry.original = copied.entry;
+            // A copy is never source the editor could change.
+            entry.grouped = true;
+          }
           rules.push(entry);
+          if (selector && STATE_HINT.test(selector)) stateRules.push(entry);
           // Theme-scoped rules that set real properties; a theme's tokens
           // need no second look, the computed token value already follows it.
           if (entry.selector && entry.selector.indexOf("data-zd-theme") >= 0 && declared.some(function (property) { return property.indexOf("--") !== 0; })) {
@@ -2230,29 +2320,54 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
             if (!list) { list = []; customRules.set(property, list); }
             list.push(entry);
           });
-          if (rule.cssRules) visit(rule.cssRules, active, layer, origin, uncertain, true, grouped);
+          if (rule.cssRules && kind !== "CSSNestedDeclarations") {
+            visit(rule.cssRules, {
+              active: context.active,
+              layer: context.layer,
+              origin: context.origin,
+              uncertain: context.uncertain,
+              nested: true,
+              depth: context.nested ? context.depth + 1 : 1,
+              parent: selector && splitTopLevel(selector, ",").length === 1 ? selector : null,
+              chain: context.chain,
+              anonymous: context.anonymous,
+              grouped: context.grouped,
+            });
+          }
         } else if (kind === "CSSLayerStatementRule" && rule.nameList) {
-          for (var name = 0; name < rule.nameList.length; name += 1) layerPosition(layer.key, layer.path, rule.nameList[name]);
+          for (var name = 0; name < rule.nameList.length; name += 1) layerPosition(context.layer.key, context.layer.path, rule.nameList[name]);
         } else if (kind === "CSSLayerBlockRule") {
           anonymousLayers += 1;
-          visit(rule.cssRules || [], active, layerPosition(layer.key, layer.path, rule.name || "\u0001" + anonymousLayers), origin, uncertain, nested, true);
+          visit(rule.cssRules || [], Object.assign({}, context, {
+            layer: layerPosition(context.layer.key, context.layer.path, rule.name || "\u0001" + anonymousLayers),
+            chain: rule.name ? context.chain.concat([{ type: "layer", text: rule.name }]) : context.chain,
+            anonymous: context.anonymous || !rule.name,
+            grouped: true,
+          }));
         } else if (rule.cssRules) {
           // Media/supports are document-wide. Container queries, scopes and
           // other groups need evidence this resolver does not have per element.
           var knownCondition = rule.type === CSSRule.MEDIA_RULE || rule.type === CSSRule.SUPPORTS_RULE;
-          visit(rule.cssRules, active && conditionalRuleActive(rule), layer, origin, uncertain || !knownCondition, nested, true);
+          visit(rule.cssRules, Object.assign({}, context, {
+            active: context.active && conditionalRuleActive(rule),
+            uncertain: context.uncertain || !knownCondition,
+            chain: knownCondition
+              ? context.chain.concat([{ type: rule.type === CSSRule.MEDIA_RULE ? "media" : "supports", text: rule.conditionText || (rule.media && rule.media.mediaText) || "" }])
+              : context.chain,
+            grouped: true,
+          }));
         }
       }
     }
     for (var sheetIndex = 0; sheetIndex < scope.styleSheets.length; sheetIndex += 1) {
       var sheet = scope.styleSheets[sheetIndex];
       try {
-        visit(sheet.cssRules || [], true, { key: "", path: [] }, styleOriginOf(sheet), false, false, false);
+        visit(sheet.cssRules || [], { active: true, layer: { key: "", path: [] }, origin: styleOriginOf(sheet), uncertain: false, nested: false, depth: 0, parent: null, chain: [], anonymous: false, grouped: false });
       } catch (_error) {
         // Inaccessible sheets cannot provide trustworthy provenance.
       }
     }
-    var built = { rules: rules, customRules: customRules, themed: themed, themeNames: themeNames, themeProperties: themeProperties, others: new Map() };
+    var built = { rules: rules, customRules: customRules, themed: themed, stateRules: stateRules, themeNames: themeNames, themeProperties: themeProperties, others: new Map() };
     cascadeRuleIndex.set(scope, built);
     return built;
   }
@@ -2376,14 +2491,23 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   /** The last compound of a complex selector: what names the element itself,
    * after any ancestor or sibling context. */
   function lastCompound(complex) {
+    // Scanned forward so an escape such as \31 (a class starting with a
+    // digit, as CSSOM writes 2xl:) keeps its terminating space.
     var depth = 0;
-    for (var index = complex.length - 1; index >= 0; index -= 1) {
+    var start = 0;
+    for (var index = 0; index < complex.length; index += 1) {
       var character = complex[index];
-      if (character === ")" || character === "]") depth += 1;
-      else if (character === "(" || character === "[") depth = Math.max(0, depth - 1);
-      else if (depth === 0 && /[\s>+~]/.test(character) && complex[index - 1] !== "\\") return complex.slice(index + 1);
+      if (character === "\\") {
+        var hex = 0;
+        while (hex < 6 && /[0-9a-fA-F]/.test(complex[index + 1 + hex] || "")) hex += 1;
+        index += hex > 0 ? hex + (/\s/.test(complex[index + hex + 1] || "") ? 1 : 0) : 1;
+        continue;
+      }
+      if (character === "(" || character === "[") depth += 1;
+      else if (character === ")" || character === "]") depth = Math.max(0, depth - 1);
+      else if (depth === 0 && /[\s>+~]/.test(character)) start = index + 1;
     }
-    return complex;
+    return complex.slice(start);
   }
 
   /** Whether one complex selector names the element it matches: by class,
@@ -2512,6 +2636,19 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     for (var index = 0; index < compound.length; index += 1) {
       var character = compound[index];
       if (character === "\\") { index += 1; continue; }
+      // An attribute selector names no class, whatever its value holds:
+      // [href$=".pdf"], or a quoted "]".
+      if (character === "[") {
+        var quote = "";
+        for (index += 1; index < compound.length; index += 1) {
+          var inner = compound[index];
+          if (inner === "\\") { index += 1; continue; }
+          if (quote) { if (inner === quote) quote = ""; continue; }
+          if (inner === '"' || inner === "'") { quote = inner; continue; }
+          if (inner === "]") break;
+        }
+        continue;
+      }
       if (character === "(") { depth += 1; continue; }
       if (character === ")") { depth = Math.max(0, depth - 1); continue; }
       if (character === "." && depth === 0) {
@@ -2622,11 +2759,11 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     replaced.value = candidate.value;
     if (candidate.important) replaced.important = true;
     if (entry.selector) {
-      replaced.selector = entry.selector.slice(0, 256);
+      replaced.selector = (entry.reportSelector || entry.selector).slice(0, 256);
       replaced.scope = ruleTargetsElement(element, entry) ? "element" : "base";
       var classes = subjectClassesOf(element, candidate.match);
       if (classes.length > 0) replaced.subjectClasses = classes;
-      replaced.others = othersMatching(element, entry, index);
+      replaced.others = othersMatching(element, entry.original || entry, index);
     }
     var tokens = tokenNamesIn(candidate.value).map(function (name) {
       return { name: name, value: computed.getPropertyValue(name).trim().slice(0, ${DESIGN_RUNTIME_AUTHORED_STYLE_LIMITS.tokenValue}) };
@@ -2687,6 +2824,227 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     return values;
   }
 
+  // ── Layer states ──────────────────────────────────────────
+  // A layer's own :hover, :focus, :focus-visible, :active and :disabled
+  // rules, found from the rule index without querySelectorAll, and held on
+  // pick by copying them with the state written as an attribute selector into
+  // a runtime-owned sheet. Copies keep the original's layer, @media/@supports
+  // and specificity; their order within a layer follows every original.
+
+  var STATE_NAMES = ["hover", "focus", "focus-visible", "active", "disabled"];
+  var STATE_HINT = /:(?:hover|focus-visible|focus|active|disabled)(?![\w-])/;
+  /** What holding a state applies: focus-visible is also focus, and a press
+   * (active) is also a hover. */
+  var STATE_TOKENS = { hover: ["hover"], focus: ["focus"], "focus-visible": ["focus", "focus-visible"], active: ["hover", "active"], disabled: ["disabled"] };
+  var DISABLEABLE = /^(?:button|input|select|textarea|fieldset|optgroup|option)$/;
+
+  function resolveNestedSelector(child, parent) {
+    var parts = splitTopLevel(child, ",");
+    var resolved = [];
+    for (var index = 0; index < parts.length; index += 1) {
+      var part = parts[index].trim();
+      if (!part) return null;
+      resolved.push(part.indexOf("&") >= 0 ? part.split("&").join(parent) : parent + " " + part);
+    }
+    return resolved.join(", ");
+  }
+
+  /** One complex selector's states in its subject compound, the selector
+   * without them, and a template to write them as attributes. Null when a
+   * state sits anywhere else (an ancestor, inside :is() or :not()) or the
+   * subject is a pseudo-element. */
+  function statePartsOf(complex) {
+    var subject = lastCompound(complex);
+    var prefix = complex.slice(0, complex.length - subject.length);
+    if (STATE_HINT.test(prefix)) return null;
+    var states = [];
+    var template = "";
+    var depth = 0;
+    for (var index = 0; index < subject.length; index += 1) {
+      var character = subject[index];
+      if (character === "\\") { template += subject.slice(index, index + 2); index += 1; continue; }
+      if (character === "(") depth += 1;
+      else if (character === ")") depth = Math.max(0, depth - 1);
+      if (character === ":" && depth === 0) {
+        if (subject[index + 1] === ":") return null;
+        var end = identifierEnd(subject, index + 1);
+        var name = subject.slice(index + 1, end).toLowerCase();
+        if (STATE_NAMES.indexOf(name) >= 0 && subject[end] !== "(") {
+          if (states.indexOf(name) < 0) states.push(name);
+          template += "\u0000" + name + "\u0000";
+          index = end - 1;
+          continue;
+        }
+      }
+      template += character;
+    }
+    if (states.length === 0) return null;
+    var rest = template.replace(/\u0000[a-z-]+\u0000/g, "");
+    if (STATE_HINT.test(rest)) return null;
+    return {
+      states: states,
+      classes: classNamesIn(rest),
+      stateless: prefix + (rest.trim() ? rest : "*"),
+      template: prefix + template,
+    };
+  }
+
+  /** Cached per rule and generation. Uncertain rules, rules in an anonymous
+   * @layer (a copy could not rejoin it) and copies themselves have none. */
+  function stateComplexesOf(entry) {
+    if (entry.stateComplexes !== undefined) return entry.stateComplexes;
+    var result = [];
+    if (entry.selector && !entry.uncertain && !entry.anonymousLayer && !entry.state) {
+      splitTopLevel(entry.selector, ",").forEach(function (complex) {
+        var parts = statePartsOf(complex);
+        if (parts) result.push(parts);
+      });
+    }
+    entry.stateComplexes = result;
+    return result;
+  }
+
+  function canTakeState(element, state) {
+    if (state === "disabled") return DISABLEABLE.test(element.localName);
+    if (state === "focus" || state === "focus-visible") return element.tabIndex >= 0 || element.hasAttribute("tabindex");
+    return true;
+  }
+
+  function complexNamesElement(element, complex) {
+    for (var index = 0; index < complex.classes.length; index += 1) {
+      if (!element.classList.contains(complex.classes[index])) return false;
+    }
+    try { return element.matches(complex.stateless); } catch (_error) { return false; }
+  }
+
+  /** The states the layer's own rules give it, in menu order. */
+  function nodeStatesOf(element) {
+    if (styleScopeOf(element) !== document) return [];
+    var index = cascadeRules(document);
+    if (index.stateRules.length === 0) return [];
+    var wanted = STATE_NAMES.filter(function (state) { return canTakeState(element, state); });
+    var found = new Set();
+    for (var ruleIndex = 0; ruleIndex < index.stateRules.length && found.size < wanted.length; ruleIndex += 1) {
+      var entry = index.stateRules[ruleIndex];
+      if (!entry.active) continue;
+      var complexes = stateComplexesOf(entry);
+      for (var complexIndex = 0; complexIndex < complexes.length; complexIndex += 1) {
+        var complex = complexes[complexIndex];
+        var offers = wanted.filter(function (state) {
+          if (found.has(state) || complex.states.indexOf(state) < 0) return false;
+          return complex.states.every(function (name) { return STATE_TOKENS[state].indexOf(name) >= 0; });
+        });
+        if (offers.length === 0 || !complexNamesElement(element, complex)) continue;
+        offers.forEach(function (state) { found.add(state); });
+      }
+    }
+    return wanted.filter(function (state) { return found.has(state); });
+  }
+
+  function resetStyleCaches() {
+    authoredStylePropertiesCache = new WeakMap();
+    authoredStylesCache = new WeakMap();
+    cascadeRuleIndex = null;
+  }
+
+  function holdNodeState(oid, state, holdId) {
+    var element = elementForOid(oid);
+    if (STATE_NAMES.indexOf(state) < 0) throw new Error("Unknown layer state: " + state);
+    if (typeof holdId !== "string" || !holdId.length || holdId.length > 64) throw new Error("Invalid hold identity.");
+    if (nodeStatesOf(element).indexOf(state) < 0) throw new Error("The layer has no " + state + " state.");
+    releaseHeldState();
+    var tokens = STATE_TOKENS[state];
+    var index = cascadeRules(document);
+    var copies = [];
+    index.stateRules.forEach(function (entry) {
+      if (!entry.active) return;
+      var selectors = [];
+      stateComplexesOf(entry).forEach(function (complex) {
+        if (!complex.states.every(function (name) { return tokens.indexOf(name) >= 0; })) return;
+        if (!complexNamesElement(element, complex)) return;
+        selectors.push(complex.template.replace(/\u0000([a-z-]+)\u0000/g, function (_match, name) {
+          return '[data-zd-state~="' + name + '"]';
+        }));
+      });
+      if (selectors.length > 0 && entry.rule.style.length > 0) copies.push({ entry: entry, text: selectors.join(", ") + "{" + entry.rule.style.cssText + "}" });
+    });
+    var style = document.createElement("style");
+    style.setAttribute("data-zeros-runtime-state", "");
+    var copied = new Map();
+    withoutObservedMutations(function () {
+      (document.head || document.documentElement).appendChild(style);
+      copies.forEach(function (copy) {
+        var text = copy.text;
+        for (var wrapper = copy.entry.chain.length - 1; wrapper >= 0; wrapper -= 1) {
+          text = "@" + copy.entry.chain[wrapper].type + " " + copy.entry.chain[wrapper].text + "{" + text + "}";
+        }
+        try {
+          var inserted = style.sheet.cssRules[style.sheet.insertRule(text, style.sheet.cssRules.length)];
+          while (inserted && inserted.type !== CSSRule.STYLE_RULE && inserted.cssRules && inserted.cssRules.length) inserted = inserted.cssRules[0];
+          if (inserted) copied.set(inserted, { entry: copy.entry, state: state });
+        } catch (_error) {
+          // A copy the browser refuses shows nothing rather than failing the hold.
+        }
+      });
+      element.setAttribute("data-zd-state", tokens.join(" "));
+    });
+    heldState = { element: element, oid: oid, state: state, style: style, copies: copied, holdId: holdId };
+    resetStyleCaches();
+    suspendElementMotion(element);
+    return detailsOf(element, false, false);
+  }
+
+  /** A capture's document and the computed values it copies are read
+   * synchronously before it returns its promise; a held state is set aside
+   * for exactly that span, so no picture, export or drag ghost shows it. */
+  function withoutHeldState(work) {
+    var held = heldState;
+    if (!held) return work();
+    // Each switch also cancels the transition it would start, so the live
+    // values the capture copies are Default's, and the held ones return at once.
+    withoutObservedMutations(function () {
+      held.element.removeAttribute("data-zd-state");
+      held.style.disabled = true;
+    });
+    suspendElementMotion(held.element);
+    // What was cached of it while held would answer for Default (a parent
+    // reads each child's own rules).
+    authoredStylePropertiesCache.delete(held.element);
+    authoredStylesCache.delete(held.element);
+    heldStateAside = true;
+    try {
+      return work();
+    } finally {
+      heldStateAside = false;
+      if (heldState === held) {
+        withoutObservedMutations(function () {
+          held.style.disabled = false;
+          held.element.setAttribute("data-zd-state", STATE_TOKENS[held.state].join(" "));
+        });
+        suspendElementMotion(held.element);
+        // Its own winners read while aside are Default's. Nothing else's
+        // depend on the state: copies are of rules whose subject it is.
+        authoredStylePropertiesCache.delete(held.element);
+        authoredStylesCache.delete(held.element);
+      }
+    }
+  }
+
+  /** With notify, tells the host of a release it did not ask for. */
+  function releaseHeldState(notify) {
+    if (!heldState) return false;
+    var held = heldState;
+    heldState = null;
+    if (notify) event("stateReleased", { sourceVersion: SOURCE_VERSION, holdId: held.holdId });
+    withoutObservedMutations(function () {
+      held.style.remove();
+      held.element.removeAttribute("data-zd-state");
+    });
+    resetStyleCaches();
+    if (held.element.isConnected) suspendElementMotion(held.element);
+    return true;
+  }
+
   function authoredStylesOf(element, properties) {
     // Cached like authoredStylePropertiesOf: one rule scan per element and
     // generation; theme and style changes start a new generation.
@@ -2723,7 +3081,8 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       if (winner.inline) {
         style.scope = "inline";
       } else if (winner.match.entry.selector) {
-        style.selector = winner.match.entry.selector.slice(0, 256);
+        style.selector = (winner.match.entry.reportSelector || winner.match.entry.selector).slice(0, 256);
+        if (winner.match.entry.state) style.state = winner.match.entry.state;
         style.scope = ruleTargetsElement(element, winner.match.entry) ? "element" : "base";
         var subjectClasses = subjectClassesOf(element, winner.match);
         if (subjectClasses.length > 0) style.subjectClasses = subjectClasses;
@@ -2893,8 +3252,26 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       widthValue: typedSizingValue(element, "width"),
       heightValue: typedSizingValue(element, "height"),
       isContainingBlock: !!parent && (element.offsetParent === parent || parentComputed.position !== "static"),
-      fixedContainingBlock: computed.position === "fixed" ? fixedContainingBlockOf(element) : undefined
+      fixedContainingBlock: computed.position === "fixed" ? fixedContainingBlockOf(element) : undefined,
+      percentBasis: percentBasisOf(element, computed, parent, parentComputed, parentSize)
     };
+  }
+
+  /** What a percentage length resolves against, from the reads layoutOf has
+   * already made: the positioned parent's padding box for an absolute layer,
+   * the parent's content width for one in flow (its height is often not
+   * definite, so it is left out). Omitted where neither holds: a grid area,
+   * a fixed layer, a containing block further up. */
+  function percentBasisOf(element, computed, parent, parentComputed, parentSize) {
+    if (!parent || !parentComputed || !parentSize || element.assignedSlot) return undefined;
+    var paddingBoxWidth = parentSize.width - computedEdgeTotal(parentComputed, ["borderLeftWidth", "borderRightWidth"]);
+    var paddingBoxHeight = parentSize.height - computedEdgeTotal(parentComputed, ["borderTopWidth", "borderBottomWidth"]);
+    if (computed.position === "absolute") {
+      if (element.offsetParent !== parent) return undefined;
+      return { width: Math.max(0, paddingBoxWidth), height: Math.max(0, paddingBoxHeight) };
+    }
+    if (computed.position === "fixed" || /grid/.test(parentComputed.display) || parentComputed.display === "contents") return undefined;
+    return { width: Math.max(0, paddingBoxWidth - computedEdgeTotal(parentComputed, ["paddingLeft", "paddingRight"])) };
   }
 
   function borderCoordinateSpaceOf(element, computed, rect) {
@@ -3034,6 +3411,12 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   }
 
   function detailsOf(element, layoutOnly, relocation) {
+    // A held state can move and resize layers outside it (a wider flex item
+    // pushes its siblings). Those are read with the state set aside, so no
+    // unmarked reply carries its geometry; the held subtree reads marked.
+    if (heldState && !heldStateAside && element !== heldState.element && !heldState.element.contains(element)) {
+      return withoutHeldState(function () { return detailsOf(element, layoutOnly, relocation); });
+    }
     var oid = targetOidOf(element);
     if (!oid) throw new Error("The selected element has no stable data-oid.");
     var escaped = window.CSS && typeof window.CSS.escape === "function"
@@ -3067,6 +3450,8 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     if (!layoutOnly) {
       var baseProperties = baseStylePropertiesOf(element);
       if (baseProperties.length > 0) result.baseStyleProperties = baseProperties;
+      var states = nodeStatesOf(element);
+      if (states.length > 0) result.states = states;
       var rootFontSize = parseFloat(getComputedStyle(document.documentElement).fontSize);
       if (rootFontSize > 0 && rootFontSize <= 1024) result.rootFontSize = rootFontSize;
     }
@@ -3076,6 +3461,9 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     if (textEditable && !layoutOnly) result.textSizing = textSizingOf(element);
     if (relocation) result.relocationContext = relocationContextOf(element);
     if (!layoutOnly) attachAuthoredStyles(result, element, authoredStyleProperties);
+    // Values read while a state is held are that state's, for the held layer
+    // and anything inheriting from it; the host keeps them apart.
+    if (heldState && !heldStateAside && (element === heldState.element || heldState.element.contains(element))) result.heldState = heldState.state;
     return result;
   }
 
@@ -3258,6 +3646,8 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   }
 
   function snapshot(retainAudits) {
+    // A snapshot is Default: the host stores it as the frame's own values.
+    if (heldState && !heldStateAside) return withoutHeldState(function () { return snapshot(retainAudits); });
     if (structurePreviews.length) return withStructurePresentation(function () { return snapshot(retainAudits); });
     // A snapshot is the semantic cache generation. Theme changes and observed
     // DOM/style mutations both arrive through this boundary.
@@ -3312,6 +3702,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   }
 
   function styleOnlySnapshot() {
+    if (heldState && !heldStateAside) return withoutHeldState(styleOnlySnapshot);
     if (!lastSnapshot) return snapshot();
     authoredStylePropertiesCache = new WeakMap();
     authoredStylesCache = new WeakMap();
@@ -3528,6 +3919,8 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     // snapshot so the host store can preserve reference identity and avoid a
     // second React commit during iframe readiness.
     if (currentTheme === theme) return lastSnapshot || snapshot();
+    // Only a theme that changes ends a held state.
+    releaseHeldState(true);
     withoutObservedMutations(function () {
       if (theme === null) document.documentElement.removeAttribute("data-zd-theme");
       else document.documentElement.setAttribute("data-zd-theme", theme);
@@ -5259,6 +5652,12 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     if (disposed || cancelledRequests.has(requestId)) throw typedError("CANCELLED", "Capture cancelled.", false);
     var clone = document.documentElement.cloneNode(true);
     clone.setAttribute("xmlns", "http://www.w3.org/1999/xhtml");
+    // A held layer state is set aside around this capture already; these
+    // strips keep any copy of it out of the picture regardless.
+    var heldStateStyles = clone.querySelectorAll("style[data-zeros-runtime-state]");
+    for (var heldStyleIndex = 0; heldStyleIndex < heldStateStyles.length; heldStyleIndex += 1) heldStateStyles[heldStyleIndex].remove();
+    var heldStateNodes = clone.querySelectorAll("[data-zd-state]");
+    for (var heldNodeIndex = 0; heldNodeIndex < heldStateNodes.length; heldNodeIndex += 1) heldStateNodes[heldNodeIndex].removeAttribute("data-zd-state");
     // A dragged layer's paint is suppressed while the host shows its picture;
     // that editor state is not part of what the frame looks like.
     var dragPaintStyles = clone.querySelectorAll("style[data-zeros-drag-paint]");
@@ -5439,6 +5838,9 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   }
 
   function handle(method, args, requestId) {
+    // Any write or theme change ends a held state first, so a state never
+    // reaches a commit, a preview or another theme.
+    if (heldState && (HELD_STATE_RELEASES.indexOf(method) >= 0 || (method === "previewGeometry" && args.styles))) releaseHeldState(true);
     switch (method) {
       case "getSnapshot":
         return snapshot();
@@ -5492,7 +5894,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       case "clearPreviewStyles":
         return clearPreviewStyles(args.nodeId);
       case "captureScreenshot":
-        return captureScreenshot(args, requestId);
+        return withoutHeldState(function () { return captureScreenshot(args, requestId); });
       case "setPlayback":
         if (enabledOptInMethods.indexOf("setPlayback") < 0) {
           throw new Error("Unknown design runtime method: setPlayback");
@@ -5513,12 +5915,19 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
           throw new Error("Unknown design runtime method: clearPreviewInserts");
         }
         return clearPreviewInserts(args.nodeIds);
+      case "holdNodeState":
+        if (enabledOptInMethods.indexOf("holdNodeState") < 0) throw new Error("Unknown design runtime method: holdNodeState");
+        return holdNodeState(args.nodeId, args.state, args.holdId);
+      case "releaseNodeState":
+        if (enabledOptInMethods.indexOf("releaseNodeState") < 0) throw new Error("Unknown design runtime method: releaseNodeState");
+        return { released: releaseHeldState() };
       default:
         throw new Error("Unknown design runtime method: " + method);
     }
   }
 
   function teardown() {
+    releaseHeldState();
     rewindStructurePreviews();
     if (disposed) return;
     stopPlayback();
@@ -5765,6 +6174,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
 
   function publishMutation() {
     mutationTimer = null;
+    if (heldState && !heldState.element.isConnected) releaseHeldState(true);
     revision += 1;
     event("mutation", snapshot());
   }
