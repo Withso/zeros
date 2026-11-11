@@ -42,7 +42,7 @@ describe("CI-definition paths", () => {
     "apps/control-plane/pnpm-lock.yaml",
     "apps/web/package.json",
     "apps/web/package-lock.json",
-  ])("requires an owner merge for %s", (file) => {
+  ])("recognizes the CI definition %s", (file) => {
     expect(isCiDefinitionPath(file)).toBe(true);
   });
 

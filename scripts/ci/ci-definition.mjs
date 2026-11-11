@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 // ──────────────────────────────────────────────────────────
-// ci-definition — paths that require an owner to merge a CI-definition PR
+// ci-definition — paths that define CI; `pnpm agent:merge` names them
 // ──────────────────────────────────────────────────────────
 //
 // List both sides of moves with --no-renames. A failed diff must fail this
-// command, never print an empty list that could permit an automatic merge.
+// command, never print an empty list that hides a definition change.
 // Usage: node scripts/ci/ci-definition.mjs --base <commit> [--head <commit>]
 // Defaults: origin/main and HEAD. Stdout contains one sorted path per line.
 // ──────────────────────────────────────────────────────────
