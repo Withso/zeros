@@ -230,7 +230,9 @@ describe("sync engine", () => {
     expect((await engine.pull(batched)).state).toBe("in_sync");
     expect(calls).toBe(1);
     expect(await readFile(join(s.root, "dir3/file3.txt"), "utf8")).toBe("content 3\n");
-  });
+    // Lands 2,000 real files twice: about 10 s alone, and past the 20 s default
+    // on a CI shard that runs hundreds of files beside it.
+  }, 90_000);
 
   it("asks again for files a batch reply left out (its byte budget), and reads one by one from a worker without batches", async () => {
     const s = await sandbox(), c = cloud({ "a.txt": "a", "b.txt": "b", "c.txt": "c" });
