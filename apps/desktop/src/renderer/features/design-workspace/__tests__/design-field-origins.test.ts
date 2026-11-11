@@ -151,6 +151,11 @@ describe("Reset", () => {
     ]);
   });
 
+  it("clears a value set on the layer's own style that replaces nothing", () => {
+    const drawn = layer("drawn", { width: { origin: "inline", scope: "inline", value: "40px" } }, { classes: undefined });
+    expect(designResetStyles([drawn], context, ["width"])).toEqual([{ nodeId: "drawn", styles: { width: null } }]);
+  });
+
   it("has nothing to reset where no layer changed the value", () => {
     expect(designResetStyles([layer("plain", { color: { ...btn, value: "navy" } })], context, ["color"])).toEqual([]);
   });

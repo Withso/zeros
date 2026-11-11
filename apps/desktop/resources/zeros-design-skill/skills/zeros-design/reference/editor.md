@@ -25,6 +25,15 @@ People edit frames in the Design tab while agents work on the same files. This p
 - The color picker has **Theme** and **Custom** tabs. Theme lists the color tokens the frame resolves, grouped by source and family and searchable: every imported style source, then Manual (`tokens.css`, which overrides an imported name), for the theme the canvas shows. Choosing one writes `var(--name)`; the token a field already reads is marked. Custom is the color field: hex, opacity, notation and eyedropper.
 - The CSS tab lists the element's authored declarations as written. After a line it shows the computed value when that differs, and the source when the winner comes from an imported source or a linked stylesheet.
 
+## Editing values
+
+- A field refuses a value CSS rejects instead of writing something else: a negative size, padding, gap, radius, border width, font size or duration writes nothing and the field keeps its value. Margins, insets, letter spacing and offsets keep negatives. Ranged values such as opacity are held to their range.
+- Emptying a field restores its value. To remove a value set on the layer, a person uses Clear in the field's hover card (or Alt+Backspace); Reset does the same for a value that replaces a class or component value. Either removes the whole declaration, so after one the layer shows the class, inherited or initial value again.
+- Fields take maths in one unit: `24*2`, `+8`, `x/2`, `50%/2` (which writes `25%`). Mixed units are refused; write `calc()` in CSS for those.
+- A plain length with a unit (`50%`, `1rem`) shows as written. Tokens, `calc()` and unitless values show what they resolve to.
+- The unit menu converts the value against what the unit measures: `12px` to rem writes `0.75rem` with a 16px root, and percent uses the parent's width as CSS resolves it. Units with no known basis are not offered, so expect px, % and rem, the unit already written, and `auto` only for margins and flex-basis. Converted percent and rem values have at most two decimals.
+- On several layers with different values, a scrub or arrow moves each by the same step in its own unit, written in one undoable step. A layer whose value has no number (`auto`, `calc()`) is left as it is.
+
 ## The More styles section
 
 - Lists every authored declaration that no dedicated control shows, as an editable name/value row with the value as written. A row's tooltip reads "from `<selector>` in `<origin>`".

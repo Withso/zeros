@@ -231,9 +231,31 @@ describe("where a field's value comes from", () => {
     expect(drawn.of("width")).toEqual({
       kind: "set-here",
       from: "this layer",
-      card: { rows: [{ key: "Value", text: "40, set on this layer" }] },
+      card: { rows: [{ key: "Value", text: "40, set on this layer" }], clear: { properties: ["width"], text: "Clear" } },
     });
     expect(drawn.styledBy).toBeNull();
+  });
+
+  it("offers Clear for a value set in the layer's style, written whole as declared", () => {
+    const set = designStyleOrigins(
+      details({
+        classes: undefined,
+        authoredStyleProperties: ["padding"],
+        baseStyleProperties: undefined,
+        authoredStyles: { padding: { origin: "inline", scope: "inline", value: "4px" } },
+      }),
+      context,
+    );
+    expect(set.of("padding-left")?.card.clear).toEqual({ properties: ["padding"], text: "Clears padding on all sides" });
+    // A rule written for the layer is cleared only through its own Reset.
+    const own = designStyleOrigins(
+      details({
+        authoredStyleProperties: ["color"],
+        authoredStyles: { color: { origin: "frame", selector: '[data-oid="send"]', scope: "element", value: "red" } },
+      }),
+      context,
+    );
+    expect(own.of("color")?.card.clear).toBeUndefined();
   });
 
   it("shows a colour the way the colour field does; names stay as written", () => {

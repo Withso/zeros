@@ -46,16 +46,24 @@ export async function runDesignInspectorRacesSmoke({ page, check }) {
   await input.press("Enter");
   await expect.poll(spacing, { timeout: 300 }).toBe("12px");
   await field.getByLabel("Unit for Word gap").click();
-  await page.getByRole("option", { name: "em", exact: true }).click();
-  await expect.poll(spacing, { timeout: 300 }).toBe("12em");
+  // The menu converts the value: 12px is 0.75rem at the 16px root.
+  await page.getByRole("option", { name: "rem", exact: true }).click();
+  await expect.poll(spacing, { timeout: 300 }).toBe("0.75rem");
+  // An emptied field restores its value. Clearing the layer's own value is
+  // Alt+Backspace (or the card's Clear), which reads what the layer sets, so
+  // it waits for the unit change to land.
+  await expect
+    .poll(() => page.evaluate(() => (window.__zerosHarnessDesignShortcutOperations ?? []).filter((op) => op === "style:end").length), { timeout: 10_000 })
+    .toBe(2);
   await input.fill("");
-  await input.press("Enter");
+  await input.press("Alt+Backspace");
   await expect.poll(spacing, { timeout: 300 }).toBe("");
   check("rapid numeric commits and unit changes paint before saving", true);
 
   await input.fill("99");
   await input.press("Escape");
   await expect.poll(spacing, { timeout: 300 }).toBe("");
+  // The two saves before Clear have landed; Clear's own is still pending.
   expect(
     await page.evaluate(
       () =>
@@ -63,7 +71,7 @@ export async function runDesignInspectorRacesSmoke({ page, check }) {
           (op) => op === "style:end",
         ).length,
     ),
-  ).toBe(0);
+  ).toBe(2);
   check(
     "Escape cancels the new draft while retaining the preceding committed preview",
     true,
@@ -150,15 +158,19 @@ export async function runDesignInspectorRacesSmoke({ page, check }) {
         )
         .toBe(1);
       await field.getByLabel("Unit for Word gap").click();
-      await page.getByRole("option", { name: "em", exact: true }).click();
-      await expect.poll(spacing, { intervals: [30] }).toBe("12em");
+      // The menu converts the value: 12px is 0.75rem at the 16px root.
+      await page.getByRole("option", { name: "rem", exact: true }).click();
+      await expect.poll(spacing, { intervals: [30] }).toBe("0.75rem");
       await input.fill("");
       expect(
         await page.evaluate(() => window.__zerosInspectorPublicationWrites),
         `incoming publication must preserve the next focused selection (round ${round})`,
       ).toEqual([]);
       await expect(input).toHaveValue("");
-      await input.press("Enter");
+      await expect
+        .poll(() => page.evaluate(() => window.__zerosHarnessDesignShortcutOperations.filter((op) => op === "style:end").length))
+        .toBe(2);
+      await input.press("Alt+Backspace");
       await expect.poll(spacing).toBe("");
       await expect
         .poll(() =>

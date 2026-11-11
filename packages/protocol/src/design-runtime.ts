@@ -138,6 +138,10 @@ export interface DesignRuntimeNodeLayout {
   /** For `position: fixed`: the parent, a further ancestor, or the viewport
    * positions the box. Omitted by older runtimes and for other positions. */
   fixedContainingBlock?: "parent" | "ancestor" | "viewport";
+  /** What a percentage length resolves against, in px; omitted where it
+   * cannot be known (a grid area, a fixed layer) and by older runtimes. A
+   * layer in flow reports width only. */
+  percentBasis?: { width: number; height?: number };
 }
 
 export interface DesignRuntimeChildrenLayout {
@@ -945,7 +949,12 @@ export function isRuntimeNodeLayout(
         value[key] === undefined ||
         (typeof value[key] === "string" && value[key].length <= 1024),
     ) &&
-    typeof value.isContainingBlock === "boolean"
+    typeof value.isContainingBlock === "boolean" &&
+    (value.percentBasis === undefined ||
+      (isRecord(value.percentBasis) &&
+        isFiniteNumber(value.percentBasis.width) && value.percentBasis.width >= 0 &&
+        (value.percentBasis.height === undefined ||
+          (isFiniteNumber(value.percentBasis.height) && value.percentBasis.height >= 0))))
   );
 }
 
@@ -3224,8 +3233,26 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       widthValue: typedSizingValue(element, "width"),
       heightValue: typedSizingValue(element, "height"),
       isContainingBlock: !!parent && (element.offsetParent === parent || parentComputed.position !== "static"),
-      fixedContainingBlock: computed.position === "fixed" ? fixedContainingBlockOf(element) : undefined
+      fixedContainingBlock: computed.position === "fixed" ? fixedContainingBlockOf(element) : undefined,
+      percentBasis: percentBasisOf(element, computed, parent, parentComputed, parentSize)
     };
+  }
+
+  /** What a percentage length resolves against, from the reads layoutOf has
+   * already made: the positioned parent's padding box for an absolute layer,
+   * the parent's content width for one in flow (its height is often not
+   * definite, so it is left out). Omitted where neither holds: a grid area,
+   * a fixed layer, a containing block further up. */
+  function percentBasisOf(element, computed, parent, parentComputed, parentSize) {
+    if (!parent || !parentComputed || !parentSize || element.assignedSlot) return undefined;
+    var paddingBoxWidth = parentSize.width - computedEdgeTotal(parentComputed, ["borderLeftWidth", "borderRightWidth"]);
+    var paddingBoxHeight = parentSize.height - computedEdgeTotal(parentComputed, ["borderTopWidth", "borderBottomWidth"]);
+    if (computed.position === "absolute") {
+      if (element.offsetParent !== parent) return undefined;
+      return { width: Math.max(0, paddingBoxWidth), height: Math.max(0, paddingBoxHeight) };
+    }
+    if (computed.position === "fixed" || /grid/.test(parentComputed.display) || parentComputed.display === "contents") return undefined;
+    return { width: Math.max(0, paddingBoxWidth - computedEdgeTotal(parentComputed, ["paddingLeft", "paddingRight"])) };
   }
 
   function borderCoordinateSpaceOf(element, computed, rect) {

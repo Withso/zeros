@@ -98,8 +98,9 @@ export function designFieldOrigins(
   };
 }
 
-/** Reset for one field: on each layer that changed it, its own declaration
- * removed whole (a shorthand included); other layers get no operation. */
+/** Reset or Clear for one field: on each layer that changed it, or set it
+ * in its own style, that declaration removed whole (a shorthand included);
+ * other layers get no operation. */
 export function designResetStyles(
   nodes: readonly DesignRuntimeNodeDetails[],
   context: DesignStyleOriginsContext,
@@ -109,9 +110,8 @@ export function designResetStyles(
     const model = designStyleOrigins(node, context);
     const styles: Record<string, null> = {};
     for (const property of properties) {
-      const origin = model.of(property);
-      if (origin?.kind !== "changed") continue;
-      for (const declared of origin.card.reset?.properties ?? []) styles[declared] = null;
+      const removed = model.of(property)?.card;
+      for (const declared of removed?.reset?.properties ?? removed?.clear?.properties ?? []) styles[declared] = null;
     }
     return Object.keys(styles).length > 0 ? [{ nodeId: node.oid, styles }] : [];
   });

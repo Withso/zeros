@@ -154,6 +154,32 @@ describe("the panel's overlays", () => {
     expect(prevent).not.toHaveBeenCalled();
   });
 
+  it("shows one field message under a field, announced politely, without focus, gone on the next input or after its time", () => {
+    mount(true);
+    // Nothing at rest but the panel's one empty live region.
+    expect(document.querySelector("[data-design-field-message]")).toBeNull();
+    const status = document.querySelector('[role="status"][aria-live="polite"]');
+    expect(status?.textContent).toBe("");
+    byId("plain").focus();
+    act(() => api!.showFieldMessage(byId("radius").parentElement!, "Width cannot be negative. Kept 330.", "error"));
+    const message = document.querySelector("[data-design-field-message]");
+    expect(message?.textContent).toBe("Width cannot be negative. Kept 330.");
+    expect(message?.getAttribute("data-design-field-message")).toBe("error");
+    expect(status?.textContent).toBe("Width cannot be negative. Kept 330.");
+    expect(document.activeElement).toBe(byId("plain"));
+    // A second message replaces the first: one surface.
+    act(() => api!.showFieldMessage(byId("radius").parentElement!, "Use CSS for mixed units.", "error"));
+    expect(document.querySelectorAll("[data-design-field-message]")).toHaveLength(1);
+    act(() => { byId("plain").dispatchEvent(new KeyboardEvent("keydown", { key: "a", bubbles: true })); });
+    expect(document.querySelector("[data-design-field-message]")).toBeNull();
+    act(() => api!.showFieldMessage(byId("radius").parentElement!, "2 layers moved. 1 has no number to move.", "info"));
+    act(() => { vi.advanceTimersByTime(2_900); });
+    expect(document.querySelector("[data-design-field-message]")).not.toBeNull();
+    act(() => { vi.advanceTimersByTime(200); });
+    expect(document.querySelector("[data-design-field-message]")).toBeNull();
+    expect(status?.textContent).toBe("");
+  });
+
   it("opens no keyboard card once focus has left the panel during the delay", () => {
     mount(true);
     act(() => { tab(); byId("radius").focus(); });

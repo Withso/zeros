@@ -13,6 +13,7 @@ import React, {
 } from "react";
 import { RotateCcw } from "lucide-react";
 
+import { cn } from "../../shared/ui/cn";
 import { isKeyboardNavigationActive } from "../../shared/ui/focus-navigation";
 import { Button, Popover, PopoverAnchor, PopoverContent } from "../../shared/ui/primitives";
 import { KbdKeys } from "../../shared/ui/primitives/kbd";
@@ -23,6 +24,7 @@ import { designStylePropertyLabel } from "./design-style-origins";
 import { useDesignTokenDetach, useDesignTokens } from "./design-token-context";
 import {
   DesignFieldOverlaysContext,
+  type DesignFieldMessageTone,
   type DesignFieldOverlaysApi,
   type DesignPickerRequest,
 } from "./design-field-overlays";
@@ -31,6 +33,8 @@ import { DesignTokenPicker, designFieldEdgeAnchor } from "./design-token-picker"
 // Radix HoverCard's close delay: long enough to cross from the field to the
 // card beside the panel.
 const CARD_CLOSE_DELAY = 300;
+/** How long a field message stays when nothing else dismisses it. */
+const FIELD_MESSAGE_DURATION = 3_000;
 const FIELD = "[data-design-style-property]";
 
 /** A field's `data-design-token-companion`: `property:value` pairs separated
@@ -113,6 +117,10 @@ export function DesignFieldOverlays({
   const delay = useTooltipDelay();
   const [card, setCard] = useState<CardTarget | null>(null);
   const [picker, setPicker] = useState<DesignPickerRequest | null>(null);
+  const [message, setMessage] = useState<{ field: HTMLElement; text: string; tone: DesignFieldMessageTone } | null>(null);
+  const messageTimer = useRef<number | null>(null);
+  const messageRef = useRef(message);
+  messageRef.current = message;
   const cardRef = useRef<HTMLDivElement | null>(null);
   const cardId = useId();
   const openTimer = useRef<number | null>(null);
@@ -196,10 +204,19 @@ export function DesignFieldOverlays({
       setCard(null);
       if (field && !latest.current.disabled && !latest.current.readOnly) latest.current.onReset(fieldProperties(field));
     };
+    const showFieldMessage = (field: HTMLElement, text: string, tone: DesignFieldMessageTone = "info") => {
+      if (messageTimer.current !== null) window.clearTimeout(messageTimer.current);
+      messageTimer.current = window.setTimeout(() => {
+        messageTimer.current = null;
+        setMessage(null);
+      }, FIELD_MESSAGE_DURATION);
+      setMessage({ field, text, tone });
+    };
     return {
       openPicker,
       openPickerForField,
       resetField,
+      showFieldMessage,
       fieldShortcut(event) {
         if (latest.current.readOnly) return;
         const field = event.target instanceof Element ? event.target.closest<HTMLElement>(FIELD) : null;
@@ -238,6 +255,16 @@ export function DesignFieldOverlays({
   useEffect(() => {
     if (!active || readOnly) closePicker(false);
   }, [active, closePicker, readOnly]);
+
+  const clearMessage = useCallback(() => {
+    if (messageTimer.current !== null) window.clearTimeout(messageTimer.current);
+    messageTimer.current = null;
+    if (messageRef.current) setMessage(null);
+  }, []);
+  useEffect(() => {
+    if (!active) clearMessage();
+  }, [active, clearMessage, ownerKey]);
+  useEffect(() => clearMessage, [clearMessage]);
 
   useEffect(() => {
     const root = rootRef.current;
@@ -289,6 +316,7 @@ export function DesignFieldOverlays({
     const pointerDown = () => {
       clearTimers();
       setCard(null);
+      clearMessage();
     };
     const focusIn = (event: FocusEvent) => {
       const field = fieldOf(event.target);
@@ -309,6 +337,7 @@ export function DesignFieldOverlays({
       }
     };
     const keyDown = (event: KeyboardEvent) => {
+      clearMessage();
       if (event.key === "Escape") {
         clearTimers();
         setCard(null);
@@ -342,11 +371,15 @@ export function DesignFieldOverlays({
       clearTimers();
       setCard(null);
     };
-  }, [active, delay, rootRef]);
+  }, [active, clearMessage, delay, rootRef]);
 
   return (
     <DesignFieldOverlaysContext.Provider value={api}>
       {children}
+      {/* The panel's one live region: present and empty at rest, so a message
+          written into it is announced. */}
+      <span className="sr-only" role="status" aria-live="polite">{message?.text ?? ""}</span>
+      {message ? <DesignFieldMessage field={message.field} panel={rootRef.current} text={message.text} tone={message.tone} /> : null}
       {card ? (
         <DesignStyleCardContent
           ref={cardRef}
@@ -398,6 +431,42 @@ export function DesignFieldOverlays({
         />
       ) : null}
     </DesignFieldOverlaysContext.Provider>
+  );
+}
+
+/** The message under a field. Its text is announced by the panel's live
+ * region; this is what the eye reads. */
+function DesignFieldMessage({
+  field,
+  panel,
+  text,
+  tone,
+}: {
+  field: HTMLElement;
+  panel: HTMLElement | null;
+  text: string;
+  tone: DesignFieldMessageTone;
+}) {
+  const anchor = useMemo(() => ({ current: { getBoundingClientRect: () => field.getBoundingClientRect() } }), [field]);
+  return (
+    <Popover open>
+      <PopoverAnchor virtualRef={anchor} />
+      <PopoverContent
+        data-design-field-message={tone}
+        aria-hidden="true"
+        side="bottom"
+        align="start"
+        sideOffset={4}
+        padding="none"
+        collisionBoundary={panel ?? undefined}
+        className="w-auto max-w-64"
+        onOpenAutoFocus={(event) => event.preventDefault()}
+        onCloseAutoFocus={(event) => event.preventDefault()}
+        onInteractOutside={(event) => event.preventDefault()}
+      >
+        <p className={cn("px-2.5 py-1.5 text-3xxs leading-4", tone === "error" ? "text-red-primary" : "text-fg2")}>{text}</p>
+      </PopoverContent>
+    </Popover>
   );
 }
 
@@ -479,7 +548,7 @@ const DesignStyleCardContent = React.forwardRef<
                       data-design-card-action={action.kind}
                       aria-keyshortcuts={action.shortcut}
                       onClick={() => {
-                        if (action.kind === "reset") onReset();
+                        if (action.kind === "reset" || action.kind === "clear") onReset();
                         else if (action.kind === "token" || action.kind === "pick") onUseToken();
                         else {
                           onClose();
@@ -509,7 +578,7 @@ export interface DesignStyleCardText {
   rows: { key: string; text: string }[];
   notes: string[];
   foot?: string;
-  actions: { kind: "reset" | "token" | "pick" | "detach"; label: string; keys?: string; shortcut?: string }[];
+  actions: { kind: "reset" | "clear" | "token" | "pick" | "detach"; label: string; keys?: string; shortcut?: string }[];
 }
 
 /** What a field shows that the card speaks to, read from its markup. */
@@ -595,9 +664,13 @@ export function designStyleCardContent(
   }
   if (origin?.card.forcedBy) notes.push(`Forced by ${origin.card.forcedBy}`);
   const reset = origin?.card.reset;
+  const clear = origin?.card.clear;
   if (reset) {
     if (reset.text !== "Reset") notes.push(reset.text);
     actions.unshift({ kind: "reset", label: "Reset", keys: "⌥⌫", shortcut: "Alt+Backspace" });
+  } else if (clear) {
+    if (clear.text !== "Clear") notes.push(clear.text);
+    actions.unshift({ kind: "clear", label: "Clear", keys: "⌥⌫", shortcut: "Alt+Backspace" });
   }
   if (!tokenName && offered && origin?.kind !== "forced") {
     actions.push({ kind: "token", label: "Use a token", keys: "⌥↓", shortcut: "Alt+ArrowDown" });

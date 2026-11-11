@@ -101,7 +101,7 @@ import {
   useDesignTokensFor,
   type DesignFieldToken,
 } from "./design-token-picker";
-import { DesignFieldOverlays } from "./design-style-card";
+import { DesignFieldOverlays, readDesignCardField } from "./design-style-card";
 import { designInputResetsOnAltBackspace, useDesignFieldOverlays } from "./design-field-overlays";
 import { DesignStyledByLine } from "./design-styled-by";
 import { DesignHeldStateNote, DesignLayerStateMenu, useDesignHeldReadOnly } from "./design-state-picker";
@@ -150,6 +150,7 @@ import {
   designLayoutActionStyles,
   designLayoutActionUpdates,
   designLayoutFieldValue,
+  designLayoutStepBase,
   roundDesignLayoutValue,
   type DesignLayoutAction,
   type DesignLayoutFieldOptions,
@@ -159,7 +160,15 @@ import { beginDesignPointerGesture } from "./design-pointer-gesture";
 import { DesignStyleEditor } from "./design-style-editor";
 import {
   clampDesignStyleFieldValue,
+  convertDesignLength,
+  designAuthoredLength,
+  designLengthBasis,
+  designLengthUnitOptions,
+  designMixedScrubValues,
+  designStyleFieldRefusal,
   designStyleFieldValue,
+  evaluateDesignNumericExpression,
+  type DesignLengthBasis,
   designStylePropertyAffectsLayout,
   designStyleUnitOptions,
   designStyleCommitCoalesceKey,
@@ -268,6 +277,20 @@ interface InspectorEditFieldProps {
   onPreview?: (value: string) => Promise<unknown> | void;
   onCancelPreview?: () => Promise<unknown> | void;
   onCommit: (value: string) => Promise<unknown>;
+  /** What the units are measured against: given, the unit menu offers px,
+   * and percent and rem where their basis is known, and converts the value. */
+  unitBasis?: DesignLengthBasis;
+  /** Emptying the field means something here (X, Y and rotation remove the
+   * offset or turn); elsewhere an emptied field restores its value. */
+  emptyCommits?: boolean;
+  /** The layers differ: a scrub or arrow moves each by the same number of
+   * steps from its own value while the field keeps reading Mixed. */
+  mixedSteps?: {
+    preview: (steps: number, fine: boolean) => void;
+    /** Returns what the field message should say, if anything. */
+    commit: (steps: number, fine: boolean) => string | null;
+    cancel: () => void;
+  };
 }
 
 interface InspectorFieldPresentation {
@@ -326,6 +349,9 @@ export function InspectorEditField({
   onPreview,
   onCancelPreview,
   onCommit,
+  unitBasis,
+  emptyCommits = false,
+  mixedSteps,
 }: InspectorEditFieldProps) {
   const id = useId();
   const [focused, setFocused] = useState(false);
@@ -385,16 +411,22 @@ export function InspectorEditField({
     [styleProperty, whole],
   );
   const unitOptions = presentation.unit
-    ? designStyleUnitOptions(styleProperty ?? "", presentation.unit)
+    ? unitBasis
+      ? designLengthUnitOptions(styleProperty ?? "", presentation.unit, unitBasis)
+      : designStyleUnitOptions(styleProperty ?? "", presentation.unit)
     : [];
 
-  const withinRange = (next: string) => {
-    if (styleProperty) next = clampDesignStyleFieldValue(styleProperty, next);
+  /** A ranged value (opacity) settles inside its range. */
+  const withinBounds = (next: string) => {
     const number = Number(next);
     if (!range || next.trim() === "" || !Number.isFinite(number)) return next;
     const bounded = Math.min(range.max, Math.max(range.min, number));
     return bounded === number ? next : String(bounded);
   };
+  /** A scrub or arrow press also stops at zero where CSS takes no negative;
+   * a typed negative is refused instead (refusalOf). */
+  const withinRange = (next: string) =>
+    withinBounds(styleProperty ? clampDesignStyleFieldValue(styleProperty, next) : next);
   /** One pointer pixel or arrow press, in the value's own unit. */
   const scrubStepFor = (start: string, fine: boolean) => {
     const scrubStep = whole
@@ -402,12 +434,35 @@ export function InspectorEditField({
       : designScrubStep(styleProperty, parseDesignStyleNumericParts(start)?.unit ?? "");
     return fine && scrubStep.fine !== null ? scrubStep.fine : scrubStep.step;
   };
-  const resolveDraft = (next: string, baseline: string) => {
+  const typedValue = (next: string, baseline: string) => {
     const resolved = styleProperty
       ? normalizeDesignStyleFieldInput(styleProperty, next, baseline)
       : resolveDesignNumericExpression(next, baseline);
-    return withinRange(whole ? roundDesignLayoutValue(resolved) : resolved);
+    return whole ? roundDesignLayoutValue(resolved) : resolved;
   };
+  const resolveDraft = (next: string, baseline: string) => withinRange(typedValue(next, baseline));
+  /** Why a typed value is not taken, in the words the field message shows. */
+  const refusalOf = (next: string, baseline: string): string | null => {
+    const shown = inspectorFieldPresentation(styleProperty, baseline, whole).text;
+    const kept = shown.trim() ? ` Kept ${shown}.` : "";
+    const maths = evaluateDesignNumericExpression(next, baseline);
+    if (maths && "refused" in maths)
+      return maths.refused === "mixed-units" ? "Use CSS for mixed units." : `Cannot divide by zero.${kept}`;
+    if (!styleProperty || designStyleFieldRefusal(styleProperty, typedValue(next, baseline)) === null) return null;
+    const field = messageField();
+    const name = field ? readDesignCardField(field, styleProperty).label : label;
+    return `${name} cannot be negative.${kept}`;
+  };
+  /** Steps a Mixed field's scrub or arrows have moved its layers. */
+  const mixedStepsRef = useRef<{ steps: number; fine: boolean } | null>(null);
+  /** The field itself, which carries the attributes the card reads. */
+  const messageField = () =>
+    fieldRef.current?.querySelector<HTMLElement>("[data-design-inspector-field]") ?? fieldRef.current;
+  const showMixedMessage = (text: string | null) => {
+    const field = messageField();
+    if (text && field) overlays.showFieldMessage(field, text, "info");
+  };
+  const mixed = Boolean(mixedSteps) && String(value) === "" && draft === "";
 
   // Finish an unfocused incoming value in this commit. A passive state update
   // can land after the next focus/select-all and overwrite that user's draft.
@@ -518,13 +573,34 @@ export function InspectorEditField({
       cancelPreview();
       return;
     }
+    const pendingSteps = mixedStepsRef.current;
+    if (pendingSteps && mixedSteps) {
+      mixedStepsRef.current = null;
+      if (pendingSteps.steps === 0) mixedSteps.cancel();
+      else showMixedMessage(mixedSteps.commit(pendingSteps.steps, pendingSteps.fine));
+      return;
+    }
     const baseline = baselineRef.current;
     if (requestedDraft === baseline) {
       cancelPreview();
       adoptIncomingValue();
       return;
     }
-    const resolvedDraft = resolveDraft(requestedDraft, baseline);
+    // An emptied field restores its value; Clear and Reset remove one.
+    if (!emptyCommits && requestedDraft.trim() === "" && baseline.trim() !== "") {
+      cancelPreview();
+      setPresentedDraft(baseline);
+      return;
+    }
+    const refusal = refusalOf(requestedDraft, baseline);
+    if (refusal) {
+      cancelPreview();
+      setPresentedDraft(baseline);
+      const field = messageField();
+      if (field) overlays.showFieldMessage(field, refusal, "error");
+      return;
+    }
+    const resolvedDraft = withinBounds(typedValue(requestedDraft, baseline));
     if (resolvedDraft !== requestedDraft) setPresentedDraft(resolvedDraft);
     if (resolvedDraft === baseline) {
       cancelPreview();
@@ -607,6 +683,44 @@ export function InspectorEditField({
           onPointerDown={(event) => {
             if (event.button !== 0 || !event.isPrimary) return;
             scrubCancelRef.current?.();
+            if (mixed && mixedSteps) {
+              event.preventDefault();
+              const originX = event.clientX;
+              let lastX = event.clientX;
+              let distance = 0;
+              let moved = false;
+              let sent = 0;
+              let fine = false;
+              const end = () => {
+                scrubCancelRef.current = null;
+              };
+              scrubCancelRef.current = beginDesignPointerGesture({
+                target: event.currentTarget,
+                pointerId: event.pointerId,
+                cursor: "ew-resize",
+                onMove: (pointerEvent) => {
+                  if (!moved && Math.abs(pointerEvent.clientX - originX) < 3) return;
+                  moved = true;
+                  fine = pointerEvent.altKey;
+                  distance += (pointerEvent.clientX - lastX) * (pointerEvent.shiftKey ? 10 : 1);
+                  lastX = pointerEvent.clientX;
+                  const steps = Math.round(distance);
+                  if (steps === sent) return;
+                  sent = steps;
+                  mixedSteps.preview(steps, fine);
+                },
+                onFinish: () => {
+                  end();
+                  if (sent !== 0) showMixedMessage(mixedSteps.commit(sent, fine));
+                  else mixedSteps.cancel();
+                },
+                onCancel: () => {
+                  end();
+                  mixedSteps.cancel();
+                },
+              });
+              return;
+            }
             const resolvedDraft = resolveDraft(
               draftRef.current,
               baselineRef.current,
@@ -772,6 +886,15 @@ export function InspectorEditField({
             if (event.key === "Enter") {
               event.preventDefault();
               event.currentTarget.blur();
+            } else if ((event.key === "ArrowUp" || event.key === "ArrowDown") && mixed && mixedSteps) {
+              event.preventDefault();
+              const current = mixedStepsRef.current ?? { steps: 0, fine: false };
+              const next = {
+                steps: current.steps + (event.key === "ArrowUp" ? 1 : -1) * (event.shiftKey ? 10 : 1),
+                fine: event.altKey,
+              };
+              mixedStepsRef.current = next;
+              mixedSteps.preview(next.steps, next.fine);
             } else if (event.key === "ArrowUp" || event.key === "ArrowDown") {
               const normalized = resolveDraft(draft, baselineRef.current);
               const direction = event.key === "ArrowUp" ? 1 : -1;
@@ -819,6 +942,10 @@ export function InspectorEditField({
               baselineRef.current = restored;
               setPresentedDraft(restored);
               cancelPreview();
+              if (mixedStepsRef.current) {
+                mixedStepsRef.current = null;
+                mixedSteps?.cancel();
+              }
               event.currentTarget.blur();
             }
           }}
@@ -873,7 +1000,10 @@ export function InspectorEditField({
                 draftRef.current,
                 baselineRef.current,
               );
-              const next = replaceDesignStyleNumericUnit(resolved, unit);
+              // The menu converts: 12px of a 400px parent becomes 3%.
+              const next =
+                (unitBasis ? convertDesignLength(resolved, unit, unitBasis, { whole }) : null) ??
+                replaceDesignStyleNumericUnit(resolved, unit);
               if (next === null) return;
               setPresentedDraft(next);
               void commit(next);
@@ -984,6 +1114,7 @@ const InspectorStyleField = React.memo(function InspectorStyleField({
   motionTrackActive,
   onAddMotionKeyframe,
   onDetachToken,
+  selection,
 }: {
   workspaceId: string;
   frame: string;
@@ -994,6 +1125,9 @@ const InspectorStyleField = React.memo(function InspectorStyleField({
   computedValue: string;
   options?: DesignLayoutFieldOptions;
   details?: DesignRuntimeNodeDetails;
+  /** Every selected layer whose details are loaded: a Mixed field moves each
+   * from its own value. */
+  selection?: readonly DesignRuntimeNodeDetails[];
   originLabel?: DesignStyleOriginLabel;
   onLayoutAction?: (action: DesignLayoutAction) => Promise<void>;
   onPreviewLayoutAction?: (action: DesignLayoutAction) => Promise<void>;
@@ -1001,9 +1135,13 @@ const InspectorStyleField = React.memo(function InspectorStyleField({
   applied: boolean;
   onPreviewStyles: (
     styles: Record<string, string | null>,
+    perNode?: (nodeId: string) => Record<string, string | null>,
   ) => void | Promise<void>;
   onCancelPreview: () => void | Promise<void>;
-  onCommitStyles: (styles: Record<string, string | null>) => Promise<void>;
+  onCommitStyles: (
+    styles: Record<string, string | null>,
+    perNode?: (nodeId: string) => Record<string, string | null>,
+  ) => Promise<void>;
   motionModeActive: boolean;
   motionTrackActive: boolean;
   onAddMotionKeyframe: (property: string, value: string) => void;
@@ -1067,8 +1205,11 @@ const InspectorStyleField = React.memo(function InspectorStyleField({
     displayedValue = `${Math.round(Number.parseFloat(displayedValue) * 10000) / 100}%`;
   }
   // Several layers that differ show the Mixed placeholder until a preview
-  // or an edit gives the field one value for all of them.
-  if (options?.mixed && liveValue === undefined) displayedValue = "";
+  // or an edit gives the field one value for all of them. A Mixed scrub's
+  // preview moves each by the same amount, so they still differ: the field
+  // keeps reading Mixed until these details are replaced.
+  const steppingRef = useRef<DesignRuntimeNodeDetails | undefined>(undefined);
+  if (options?.mixed && (liveValue === undefined || (details && steppingRef.current === details))) displayedValue = "";
   // Measured geometry (X, Y, rotation) never shows a token; a live preview
   // shows its own value, and differing layers read Mixed.
   const tokenAccepts = designTokenFieldTypes(property);
@@ -1097,6 +1238,35 @@ const InspectorStyleField = React.memo(function InspectorStyleField({
       ]),
     );
   };
+  // Units convert against what the value is measured by; a percentage
+  // field (opacity) and geometry keep their own presentation.
+  const unitBasis = useMemo(
+    () => (details && !options?.geometry && !options?.percentage ? designLengthBasis(details, property, displayedValue) : undefined),
+    [details, displayedValue, options?.geometry, options?.percentage, property],
+  );
+  const mixedSteps = options?.mixed && selection && selection.length > 1
+    ? designMixedSteps({
+        property,
+        linked: options.linkedProperties ?? [],
+        geometry: options.geometry,
+        whole: Boolean(options.whole),
+        selection,
+        stepping: (on) => {
+          steppingRef.current = on ? details : undefined;
+        },
+        preview: (styles, perNode) => void Promise.resolve(onPreviewStyles(styles, perNode)).catch(() => {}),
+        previewLayout: (action) => void Promise.resolve(onPreviewLayoutAction?.(action)).catch(() => {}),
+        cancel: () => void Promise.resolve(onCancelPreview()).catch(() => {}),
+        commit: (styles, perNode) =>
+          void onCommitStyles(styles, perNode).catch((error) =>
+            toast.error(`Couldn't update ${label.toLowerCase()}`, { description: errorMessage(error) }),
+          ),
+        commitLayout: (action) =>
+          void Promise.resolve(onLayoutAction?.(action)).catch((error) =>
+            toast.error(`Couldn't update ${label.toLowerCase()}`, { description: errorMessage(error) }),
+          ),
+      })
+    : undefined;
   return (
     <InspectorEditField
       label={label}
@@ -1147,9 +1317,95 @@ const InspectorStyleField = React.memo(function InspectorStyleField({
           ? onLayoutAction(layoutAction(next))
           : onCommitStyles(styleUpdate(next))
       }
+      unitBasis={unitBasis}
+      // Emptying X, Y or rotation removes the offset or turn, which no menu
+      // offers; elsewhere an emptied field restores its value.
+      emptyCommits={Boolean(options?.geometry) && property !== "width" && property !== "height"}
+      mixedSteps={mixedSteps}
     />
   );
 });
+
+/** A Mixed field's steps as per-layer writes: geometry by an amount from
+ * each layer's own box, a style from each layer's own value in its own unit.
+ * One preview per tick and one commit for every layer. */
+function designMixedSteps(input: {
+  property: string;
+  linked: readonly string[];
+  geometry?: boolean;
+  whole: boolean;
+  selection: readonly DesignRuntimeNodeDetails[];
+  /** While true, the field keeps reading Mixed over its live preview. */
+  stepping: (on: boolean) => void;
+  preview: (styles: Record<string, string | null>, perNode: (nodeId: string) => Record<string, string | null>) => void;
+  previewLayout: (action: DesignLayoutAction) => void;
+  cancel: () => void;
+  commit: (styles: Record<string, string | null>, perNode: (nodeId: string) => Record<string, string | null>) => void;
+  commitLayout: (action: DesignLayoutAction) => void;
+}): NonNullable<InspectorEditFieldProps["mixedSteps"]> {
+  const { property, linked, selection } = input;
+  // Each layer moves from where it was when the scrub began: its preview
+  // must not move the base the commit adds to.
+  const bases = input.geometry
+    ? Object.fromEntries(selection.map((node) => [node.oid, designLayoutStepBase(node, property)]))
+    : {};
+  const layoutStep = (steps: number): DesignLayoutAction =>
+    property === "rotate"
+      ? { type: "rotate", delta: steps, bases }
+      : {
+          type: property === "width" || property === "height" ? "size" : "position",
+          axis: property === "left" || property === "width" ? "x" : "y",
+          value: steps,
+          by: true,
+          bases,
+        };
+  const writes = (steps: number, fine: boolean) => {
+    const { values, skipped } = designMixedScrubValues(
+      property,
+      selection.map((node) => ({
+        nodeId: node.oid,
+        value: designAuthoredLength(node, property) ?? readDesignComputedStyle(node.styles, property),
+      })),
+      steps,
+      { whole: input.whole, fine },
+    );
+    const perNode = (nodeId: string): Record<string, string | null> => {
+      const next = values[nodeId];
+      return next === undefined ? {} : Object.fromEntries([property, ...linked].map((key) => [key, next]));
+    };
+    const first = Object.values(values)[0];
+    const styles = Object.fromEntries([property, ...linked].map((key) => [key, first ?? null]));
+    return { perNode, styles, moved: Object.keys(values).length, skipped: skipped.length };
+  };
+  return {
+    preview: (steps, fine) => {
+      input.stepping(true);
+      if (input.geometry) {
+        input.previewLayout(layoutStep(steps));
+        return;
+      }
+      const { styles, perNode, moved } = writes(steps, fine);
+      if (moved > 0) input.preview(styles, perNode);
+    },
+    commit: (steps, fine) => {
+      input.stepping(true);
+      if (input.geometry) {
+        input.commitLayout(layoutStep(steps));
+        return null;
+      }
+      const { styles, perNode, moved, skipped } = writes(steps, fine);
+      if (moved > 0) input.commit(styles, perNode);
+      else input.cancel();
+      if (skipped === 0) return null;
+      if (moved === 0) return skipped === 1 ? "The layer has no number to move." : `None of the ${skipped} layers has a number to move.`;
+      return `${moved} ${moved === 1 ? "layer" : "layers"} moved. ${skipped} ${skipped === 1 ? "has" : "have"} no number to move.`;
+    },
+    cancel: () => {
+      input.stepping(false);
+      input.cancel();
+    },
+  };
+}
 
 export const DesignInspector = React.memo(function DesignInspector({
   workspaceId,
@@ -1590,7 +1846,11 @@ export const DesignInspector = React.memo(function DesignInspector({
   );
 
   const previewSelectedStyles = useCallback(
-    async (styles: Record<string, string | null>) => {
+    async (
+      styles: Record<string, string | null>,
+      /** Each layer's own values, as a Mixed scrub writes them. */
+      perNode?: (nodeId: string) => Record<string, string | null>,
+    ) => {
       const context = styleOwner.contextRef.current;
       if (currentStyleOwnerRef.current !== styleOwner || !context.active) return;
       if (
@@ -1602,12 +1862,13 @@ export const DesignInspector = React.memo(function DesignInspector({
         throw new Error("Select one or more design layers first.");
       }
       const intent = ++stylePreviewIntentRef.current;
+      const ownStyles = (nodeId: string) => (perNode ? perNode(nodeId) : styles);
       for (const nodeId of context.styleNodeIds)
         publishDesignLivePreviewStyles(
           context.workspaceId,
           context.frame.file,
           nodeId,
-          stylesForNode(nodeId, styles, context),
+          stylesForNode(nodeId, ownStyles(nodeId), context),
         );
       // A slider, a colour drag or a label scrub can ask for this many times a
       // second, so it asks for the same lean geometry a canvas gesture does —
@@ -1629,7 +1890,7 @@ export const DesignInspector = React.memo(function DesignInspector({
             workspaceId: context.workspaceId!,
             frame: context.frame!,
             nodeId,
-            styles: stylesForNode(nodeId, styles, context),
+            styles: stylesForNode(nodeId, ownStyles(nodeId), context),
             children: wantsChildren && nodeId === context.selectedNodeId,
           }),
         ),
@@ -1894,20 +2155,20 @@ export const DesignInspector = React.memo(function DesignInspector({
       const updates = designResetStyles(layoutParentsRef.current, originsContextRef.current, properties);
       if (updates.length === 0) {
         toast("Nothing to reset", {
-          description: "No selected layer changes this value over its class or component.",
+          description: "No selected layer changes this value over its class or component, or sets it in its own style.",
         });
         return;
       }
       const byNode = new Map(updates.map((update) => [update.nodeId, update.styles]));
-      void commitSelectedStyles(
-        Object.assign({}, ...updates.map((update) => update.styles)),
-        (nodeId) => byNode.get(nodeId) ?? {},
-        "reset",
-      ).catch((error) =>
+      const styles = Object.assign({}, ...updates.map((update) => update.styles));
+      const perNode = (nodeId: string) => byNode.get(nodeId) ?? {};
+      // The canvas shows it at once, as a typed commit does, before the save.
+      void previewSelectedStyles(styles, perNode).catch(() => {});
+      void commitSelectedStyles(styles, perNode, "reset").catch((error) =>
         toast.error("Couldn't reset the value", { description: errorMessage(error) }),
       );
     },
-    [commitSelectedStyles],
+    [commitSelectedStyles, previewSelectedStyles],
   );
 
   const previewLayoutAction = useCallback(
@@ -2452,10 +2713,14 @@ export const DesignInspector = React.memo(function DesignInspector({
         nodeId={styleContext.nodeId}
         label={label}
         property={property}
-        value={designStyleFieldValue(authoredProperties, property, value)}
+        value={
+          (!options?.geometry && shownDetails ? designAuthoredLength(shownDetails, property) : null) ??
+          designStyleFieldValue(authoredProperties, property, value)
+        }
         computedValue={value}
         options={mixed ? { ...options, mixed } : options}
         details={shownDetails ?? undefined}
+        selection={shownParents}
         originLabel={styleOriginLabel}
         onLayoutAction={commitLayoutAction}
         onPreviewLayoutAction={previewLayoutAction}

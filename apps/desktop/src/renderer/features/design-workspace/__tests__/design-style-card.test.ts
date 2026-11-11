@@ -125,6 +125,16 @@ describe("the Style panel's hover card", () => {
   });
 });
 
+describe("Clear", () => {
+  it("is offered for a value set on the layer that replaces nothing, with Reset's shortcut", () => {
+    const drawn: DesignRuntimeNodeDetails = { ...layer, oid: "drawn", classes: undefined, authoredStyleProperties: ["width"],
+      authoredStyles: { width: { origin: "inline", scope: "inline", value: "40px" } } };
+    const content = designStyleCardContent(field("width"), designFieldOrigins([drawn], context, null), catalog);
+    expect(content.actions[0]).toEqual({ kind: "clear", label: "Clear", keys: "⌥⌫", shortcut: "Alt+Backspace" });
+    expect(content.actions.some((action) => action.kind === "reset")).toBe(false);
+  });
+});
+
 describe("the card while a state is held", () => {
   it("still says where the value comes from, with no action and no note about one", () => {
     const content = designStyleCardContent(field("gap", { tokenName: "--space-4" }), origins, catalog, true);
