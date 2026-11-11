@@ -33,15 +33,18 @@ const REPLACEMENTS = ["zeros/ci-gate", "secret-scan"];
 const QUEUE_STAGES = ["add-merge-queue", "remove-merge-queue"];
 const STAGES = ["add-gate", "add-secret-scan", "finalize", "rollback", ...QUEUE_STAGES];
 // Each queued PR is tested on top of main plus the entries ahead of it by the
-// complete Preflight (about 22 minutes) before GitHub squash-merges it.
+// complete Preflight (about 22 minutes) before GitHub squash-merges it. Three
+// concurrent groups and a 180-minute timeout (owner tuning, 2026-11-11): five
+// groups plus PR runs starved macOS runners, so a group's queued
+// source-sync job passed the 60-minute timeout and was ejected.
 export const MERGE_QUEUE_PARAMETERS = Object.freeze({
   merge_method: "SQUASH",
   grouping_strategy: "ALLGREEN",
-  max_entries_to_build: 5,
+  max_entries_to_build: 3,
   min_entries_to_merge: 1,
   max_entries_to_merge: 5,
   min_entries_to_merge_wait_minutes: 0,
-  check_response_timeout_minutes: 60,
+  check_response_timeout_minutes: 180,
 });
 const RULESET_ENDPOINT = `repos/${REPOSITORY}/rulesets/${RULESET_ID}`;
 const API_ROOT = `repos/${REPOSITORY}`;

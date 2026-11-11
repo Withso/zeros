@@ -159,7 +159,7 @@ operations only after the current-head and incoming-head canaries remain green.
 ## Merge queue on main
 
 The `add-merge-queue` stage adds exactly one `merge_queue` rule (squash,
-`ALLGREEN` grouping, up to five entries built and merged together, 60-minute
+`ALLGREEN` grouping, up to three entries built and five merged together, 180-minute
 check timeout) and changes nothing else; `remove-merge-queue` removes only that
 rule. Required checks are unchanged, so these stages skip the open-PR evidence
 check, but `apply --yes` still re-reads the live ruleset immediately before its
