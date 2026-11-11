@@ -1097,12 +1097,14 @@ call, but never cancels an active transaction. A superseded initial CI barrier
 skips that call without cancelling independent builds.
 
 The read-only CI barrier checks the newest trusted run of each required workflow
-without filtering out failures. It waits up to 110 minutes, including through a
-failed Preflight attempt, and proceeds after that exact commit's rerun succeeds.
-Each poll also refuses a superseded branch SHA instead of occupying the channel
-lock for the whole bound while newer commits wait.
-If CI remains unsuccessful beyond the bound, rerun the failed required checks
-and retry the release; no provider or feed mutation has been authorized. Manual
+without filtering out failures. It waits up to 110 minutes for a run that is
+still going. Once the newest attempt has failed, it waits 20 more minutes for a
+rerun to start (CI Recovery reconciles every 15 and may start one) and proceeds
+if that rerun succeeds; with no rerun it stops there instead of holding the job
+for the rest of the bound. Each poll also refuses a superseded branch SHA
+instead of occupying the channel lock while newer commits wait.
+After the barrier stops, rerun the failed required checks and then rerun the
+release's barrier job; no provider or feed mutation has been authorized. Manual
 Production dispatch uses the same exact-SHA proof, not a branch-level green
 badge. The callable hosted guard, Apple jobs and every final publisher recheck
 required CI; the CI CLI and publisher also refuse a branch head that superseded

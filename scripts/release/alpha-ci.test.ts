@@ -159,6 +159,22 @@ describe("automatic Alpha exact-source evidence", () => {
     expect(current).not.toBeInstanceOf(CandidateSupersededError);
   });
 
+  it.each([
+    ["a failed gate", { jobs: [{ ...gate, conclusion: "failure" }] }],
+    ["a cancelled run", { preflight: [{ ...preflight, status: "completed", conclusion: "cancelled" }] }],
+    ["a completed run with no gate", { preflight: [{ ...preflight, status: "completed", conclusion: "failure" }], jobs: [] }],
+  ])("marks %s on the current main commit as failed, so the barrier stops after its grace", async (_label, state) => {
+    expect(await fixture(state).client.requiredChecks()).toEqual([
+      expect.objectContaining({ workflow: "Preflight", succeeded: false, failed: true }),
+    ]);
+  });
+
+  it("does not mark a gate that is still running as failed", async () => {
+    const [evidence] = await fixture({ jobs: [{ ...gate, status: "in_progress", conclusion: null }] }).client.requiredChecks();
+    expect(evidence).toMatchObject({ succeeded: false });
+    expect(evidence.failed).toBeUndefined();
+  });
+
   it("supersedes a completed run that never produced a green gate after main moved on", async () => {
     const completed = { preflight: [{ ...preflight, status: "completed", conclusion: "failure" }], jobs: [] };
     await expect(fixture({ ...completed, branchSha: "b".repeat(40) }).client.assertRequiredChecks())

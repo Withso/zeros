@@ -28,6 +28,39 @@ describe("exact-source required CI barrier", () => {
     }, { attempts: 3, sleep: async () => {} });
     expect(reads).toBe(2); expect(result[0].attempt).toBe(2); expect(() => assertRequiredCI(result)).not.toThrow();
   });
+  it("stops once a failed attempt has had no rerun for the grace period, not at the barrier timeout", async () => {
+    let clock = 0, reads = 0;
+    const failure = waitForRequiredCI(async () => {
+      reads++;
+      return [evidence([{ ...run, conclusion: "failure" }]), codeql];
+    }, { attempts: 660, sleep: async () => { clock += 5 * 60_000; }, now: () => clock });
+    await expect(failure).rejects.toThrow(/Preflight failed .* not re-run within 20 minutes/);
+    expect(reads).toBe(5);
+  });
+  it.each(["cancelled", "timed_out", "startup_failure"])("treats a completed %s attempt as failed", conclusion => {
+    expect(evidence([{ ...run, conclusion }])).toMatchObject({ succeeded: false, failed: true });
+    expect(evidence([{ ...run, status: "in_progress", conclusion: null }]).failed).toBe(false);
+    expect(evidence([]).failed).toBe(false);
+  });
+  it("gives a rerun that starts inside the grace period the full wait, and its own grace if it fails too", async () => {
+    let clock = 0, reads = 0;
+    const attempts = [
+      { run_attempt: 1, conclusion: "failure" },
+      { run_attempt: 1, conclusion: "failure" },
+      { run_attempt: 2, status: "in_progress", conclusion: null },
+      { run_attempt: 2, status: "in_progress", conclusion: null },
+      { run_attempt: 2, status: "in_progress", conclusion: null },
+      { run_attempt: 2, status: "in_progress", conclusion: null },
+      { run_attempt: 2, conclusion: "failure" },
+      { run_attempt: 2, conclusion: "failure" },
+      { run_attempt: 2, conclusion: "failure" },
+      { run_attempt: 3, conclusion: "success" },
+    ];
+    const result = await waitForRequiredCI(async () => [evidence([{ ...run, ...attempts[reads++] }]), codeql],
+      { attempts: 660, sleep: async () => { clock += 8 * 60_000; }, now: () => clock });
+    expect(reads).toBe(10);
+    expect(result[0]).toMatchObject({ attempt: 3, succeeded: true });
+  });
   it("fails closed when either required workflow is missing or unsuccessful", async () => {
     expect(() => assertRequiredCI([evidence([run])])).toThrow(/Preflight and CodeQL/);
     await expect(waitForRequiredCI(async () => [evidence([{ ...run, conclusion: "failure" }]), codeql], { attempts: 2, sleep: async () => {} })).rejects.toThrow(/timed out/);

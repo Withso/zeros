@@ -1,5 +1,5 @@
 import { poll } from "./io";
-import { requireCheck } from "./contracts";
+import { PromotionError, requireCheck } from "./contracts";
 
 export const REQUIRED_CI = [
   { file: "preflight.yml", name: "Preflight" },
@@ -12,7 +12,12 @@ type WorkflowRun = {
   status: string; conclusion: string | null; event: string;
   repository: { full_name: string }; head_repository: { full_name: string };
 };
-export type RequiredCIEvidence = Array<{ workflow: string; runId: number; attempt: number; succeeded: boolean }>;
+/** `failed`: the newest attempt completed without success. It cannot turn
+ * green; only a newer attempt can. */
+export type RequiredCIEvidence = Array<{ workflow: string; runId: number; attempt: number; succeeded: boolean; failed?: boolean }>;
+/** CI Recovery reconciles failed main Preflight every 15 minutes and may start
+ * one rerun; a person can start one too. Past this, nothing is coming. */
+export const FAILED_CI_GRACE_MS = 20 * 60_000;
 
 export function requiredCIEvidence(candidate: Candidate, file: string, name: string, value: unknown): RequiredCIEvidence[number] {
   const response = value as { total_count?: unknown; workflow_runs?: unknown } | null;
@@ -25,7 +30,8 @@ export function requiredCIEvidence(candidate: Candidate, file: string, name: str
     .sort((left, right) => right.id - left.id || right.run_attempt - left.run_attempt);
   const latest = runs[0];
   return { workflow: name, runId: latest?.id ?? 0, attempt: latest?.run_attempt ?? 0,
-    succeeded: latest?.status === "completed" && latest.conclusion === "success" };
+    succeeded: latest?.status === "completed" && latest.conclusion === "success",
+    failed: latest?.status === "completed" && latest.conclusion !== "success" };
 }
 
 export function assertRequiredCI(evidence: RequiredCIEvidence, required: readonly RequiredWorkflow[] = REQUIRED_CI,
@@ -34,10 +40,24 @@ export function assertRequiredCI(evidence: RequiredCIEvidence, required: readonl
     failure);
 }
 
-export async function waitForRequiredCI(read: () => Promise<RequiredCIEvidence>, options: Parameters<typeof poll>[1] = {},
+export async function waitForRequiredCI(read: () => Promise<RequiredCIEvidence>,
+  options: NonNullable<Parameters<typeof poll>[1]> & { graceMs?: number; now?: () => number } = {},
   required: readonly RequiredWorkflow[] = REQUIRED_CI) {
+  const { graceMs = FAILED_CI_GRACE_MS, now = Date.now, ...polling } = options;
+  // When each workflow's current failed attempt was first seen. A newer
+  // attempt, pending or failed, starts its own clock.
+  const failedSince = new Map<string, { attempt: string; since: number }>();
   return poll(async () => {
     const evidence = await read();
+    for (const check of required) {
+      const item = evidence.find(candidate => candidate.workflow === check.name);
+      if (!item?.failed) { failedSince.delete(check.name); continue; }
+      const attempt = `${item.runId}:${item.attempt}`, seen = failedSince.get(check.name);
+      const since = seen?.attempt === attempt ? seen.since : now();
+      failedSince.set(check.name, { attempt, since });
+      if (now() - since >= graceMs) throw new PromotionError(
+        `${check.name} failed for this exact source and was not re-run within ${Math.round(graceMs / 60_000)} minutes. Re-run its failed jobs, then re-run this job; no downstream publication is authorized`);
+    }
     return required.every(check => evidence.some(item => item.workflow === check.name && item.succeeded)) ? evidence : false;
-  }, { attempts: 660, timeoutMs: 110 * 60_000, ...options });
+  }, { attempts: 660, timeoutMs: 110 * 60_000, ...polling });
 }
