@@ -560,6 +560,41 @@ the title is the chat's title and "needs you", the body only the agent's title
 chat through the app's own link route. The transcript shows the call as
 "Notified you: <title>". Local workspaces have no NotifyUser.
 
+Sync to Mac (Order 3, worker feature `sync-v1`, `ENGINE_READY` capability
+`workspace-sync-v1`) mirrors a cloud checkout one way into a folder on a Mac,
+as a real Git clone. The person turns it on for This Mac in the details
+popup's Connected Macs and picks an empty folder (or that workspace's earlier
+sync folder) in a native panel; the path stays in Electron main on that Mac.
+Main asks the control plane for a single-use `sync` grant
+(`POST /v1/cloud-v2/workspaces/:id/sync/grant`, never wakes) and dials the
+worker itself through Boat's protected route (`wss://<route>/v2/worker/sync`,
+subprotocol `zeros.worker.sync.v1`, port-auth cookie and grant headers); no file
+byte passes through the control plane. The worker accepts only a `sync` grant
+there (a control grant is refused, and a sync grant is refused on the control
+path), treats the socket as one passive client outside its census, admission
+and activity, answers only `sync.snapshot`, `sync.read`, `sync.bootstrap` and
+`sync.bundleRead`, sends it no broadcasts, and closes it unless it is renewed
+with a fresh grant for the same user and device (`{ t: "renew" }`) within 10
+minutes; main renews about every 8. Snapshots carry an epoch (new per boot,
+checkout or watcher loss), a seq and the branch HEAD; an unknown epoch or a seq
+older than the retained 2,000 batches gets a full inventory, paged from a
+frozen copy. Tracked and unignored files only, never `.git`; symlinks only
+inside the root; 100 MB per file, 5 GB (bundle included) or 200,000 files in
+all. File bytes come by `sync.read` in 4 MiB chunks bound to the inventory's
+sha256, one read in flight per Mac. History comes as a Git bundle of the branch
+(full, or from the Mac's HEAD when that is an ancestor), chunked by
+`sync.bundleRead`; the Mac's own git builds `.git`, sets the branch to the cloud
+HEAD, `origin` to the credential-free remote URL and the index to HEAD, so
+`git status` shows the cloud's uncommitted work as unstaged. Engine git runs
+without hooks, credential helpers, fsmonitor or network transports and writes
+no credential, URL rewrite or hook into `.git`. Git LFS is not handled: LFS
+files show as modified. The Mac writes files through verified temp files and
+renames, lstat-checks every parent, refuses traversal and case twins, commits
+`.zeros-sync/state.json` per batch to resume, and only ever replaces or deletes
+paths it wrote; a local edit it replaces is kept in `.zeros-sync/overwritten/`
+(7 days, 500 MB). "Open terminal here" opens Terminal at the folder. Local
+workspaces have no sync.
+
 ## Credentials and history
 
 Settings → Agents stores encrypted logins in the control plane. The creator's

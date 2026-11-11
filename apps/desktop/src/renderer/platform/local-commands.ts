@@ -65,7 +65,7 @@ export const setAlwaysAllowLocalCommands = (enabled: boolean) => nativeInvoke<bo
 
 // ── Connected Macs (no VM wake) ─────────────────────────────────────────
 export async function listWorkspaceMacs(workspaceId: string): Promise<readonly LocalCommandMac[]> {
-  const { macs } = await cloudAccountRequest(`/v1/cloud-v2/workspaces/${z.string().uuid().parse(workspaceId)}/macs`, LocalCommandMacsReplySchema);
+  const { macs } = await cloudAccountRequest(`/v1/cloud-v2/workspaces/${z.string().uuid().parse(workspaceId)}/macs`, LocalCommandMacsReplySchema, undefined, { syncField: true });
   return macs;
 }
 /** Connect is issued by this Mac for itself (main adds the device headers). */

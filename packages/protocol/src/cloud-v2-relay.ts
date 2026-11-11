@@ -146,7 +146,8 @@ export const CloudV2ControlFrameSchema = z.discriminatedUnion("t", [
     state: z.enum(["creating", "starting", "running", "stopping", "stopped", "failed", "deleting", "deleted"]),
   }).strict(),
   z.object({ t: z.literal("prompts") }).strict(),
-  z.object({ t: z.literal("open"), clientId }).strict(),
+  /** passive (Order 3): a syncing Mac; never activity, never in the census, sync reads only. */
+  z.object({ t: z.literal("open"), clientId, passive: z.literal(true).optional() }).strict(),
   z.object({ t: z.literal("close"), clientId }).strict(),
   z.object({ t: z.literal("frame"), clientId, frame }).strict(),
   z.object({ t: z.literal("stop"), id: z.uuid() }).strict(),

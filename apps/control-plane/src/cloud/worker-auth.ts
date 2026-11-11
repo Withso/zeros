@@ -28,4 +28,14 @@ export class CloudV2WorkerSigner {
     const body = `v1.${Buffer.from(JSON.stringify({ iss: "zeros-cp", aud: workspaceId, boot: bootId, iat, exp: iat + 60, jti: randomUUID() })).toString("base64url")}`;
     return `${body}.${sign(null, Buffer.from(body), this.key).toString("base64url")}`;
   }
+
+  mintSync(workspaceId: string, bootId: string, userId: string, deviceId: string, iat: number): string {
+    if (![workspaceId, bootId, userId, deviceId].every(value => /^[a-f0-9-]{36}$/i.test(value)) || !Number.isSafeInteger(iat) || iat < 0)
+      throw new Error("Invalid sync grant identity");
+    // The socket deadline uses this observation time; signing after a wait
+    // must not extend the authority that the database actually checked.
+    const body = `v1.${Buffer.from(JSON.stringify({ iss: "zeros-cp", aud: workspaceId, boot: bootId, iat, exp: iat + 60,
+      jti: randomUUID(), scope: "sync", sub: userId, dev: deviceId })).toString("base64url")}`;
+    return `${body}.${sign(null, Buffer.from(body), this.key).toString("base64url")}`;
+  }
 }

@@ -327,7 +327,7 @@ suite("runtime hello through the production composition", () => {
       expect((await response.json()).config.workspace.github).toMatchObject({ repositoryId: "42", repository: "fixture/repo" });
     }
     console.info("Ordinary worker configuration cost", samples);
-    expect(samples[0]!.transactions).toBeLessThanOrEqual(30);
+    expect(samples[0]!.transactions).toBeLessThanOrEqual(31);
     expect(samples[0]!.queries).toBeLessThanOrEqual(145);
     for (const sample of samples.slice(1)) expect(sample.transactions).toBeLessThanOrEqual(20);
     for (const sample of samples.slice(1)) expect(sample.queries).toBeLessThanOrEqual(85);
@@ -593,7 +593,9 @@ suite("runtime hello through the production composition", () => {
   });
 
   it("refuses a revoked original source before releasing private configuration", async () => {
-    const f = await fixture(); f.deny();
+    const f = await fixture();
+    await f.cp.loginChanges?.stop();
+    f.deny();
     const reply = await f.hello();
     expect(reply.status).toBe(403); expect(await reply.json()).not.toHaveProperty("config");
   });

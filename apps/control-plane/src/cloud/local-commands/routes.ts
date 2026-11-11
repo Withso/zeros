@@ -12,6 +12,7 @@ import { CloudLocalDevices, DEVICE_HEARTBEAT_MS } from "./devices.js";
 import { CloudLocalCommandSignals, deviceSignal } from "./signals.js";
 import type { CloudNotifyUser, NotificationHint } from "../notify-user/store.js";
 import { localCommandDiagnostic, type LocalChannelCloseReason } from "./diagnostics.js";
+import { SYNC_HEADER, SyncFlagSchema } from "../workspace-sync/contract.js";
 
 export type CloudLocalDeviceRoutes = { devices: CloudLocalDevices; signals: CloudLocalCommandSignals; requests?: CloudLocalCommands; notifications?: CloudNotifyUser };
 export const isLocalCommandResultPath = (path: string) => /^\/v1\/cloud-v2\/devices\/[0-9a-f-]{36}\/requests\/[0-9a-f-]{36}\/result$/i.test(path);
@@ -80,14 +81,18 @@ export function createCloudLocalDeviceRoutes(deps: CloudLocalDeviceRoutes): Hono
   app.post(`${path}/heartbeat`, async c => {
     await localBody(c, empty, true); return c.json(await deps.devices.heartbeat(c.get("user"), binding(c)));
   });
-  app.get(macPath, async c => c.json(await deps.devices.list(c.get("user"), localUuid(c.req.param("id")))));
+  app.get(macPath, async c => c.json(await deps.devices.list(c.get("user"), localUuid(c.req.param("id")), c.req.header(SYNC_HEADER) === "1")));
   app.post(`${macPath}/:deviceId/connect`, async c => {
     await localBody(c, empty, true);
-    return c.json(await deps.devices.connect(c.get("user"), localUuid(c.req.param("id")), localUuid(c.req.param("deviceId")), localDeviceHeaders(c)!));
+    return c.json(await deps.devices.connect(c.get("user"), localUuid(c.req.param("id")), localUuid(c.req.param("deviceId")), localDeviceHeaders(c)!, c.req.header(SYNC_HEADER) === "1"));
   });
   app.post(`${macPath}/:deviceId/disconnect`, async c => {
     await localBody(c, empty, true);
-    return c.json(await deps.devices.disconnect(c.get("user"), localUuid(c.req.param("id")), localUuid(c.req.param("deviceId")), localDeviceHeaders(c)!));
+    return c.json(await deps.devices.disconnect(c.get("user"), localUuid(c.req.param("id")), localUuid(c.req.param("deviceId")), localDeviceHeaders(c)!, c.req.header(SYNC_HEADER) === "1"));
+  });
+  app.put(`${macPath}/:deviceId/sync`, ordinaryLimit, rateLimit("cloud-sync-flag", 60, 60_000), async c => {
+    const input = await localBody(c, SyncFlagSchema);
+    return c.json(await deps.devices.setSyncing(c.get("user"), localUuid(c.req.param("id")), localUuid(c.req.param("deviceId")), localDeviceHeaders(c)!, input.syncing));
   });
   if (deps.requests) {
     const requests = deps.requests, requestPath = `${path}/requests/:requestId`;

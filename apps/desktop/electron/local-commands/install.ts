@@ -14,13 +14,16 @@ import { runLocalCommand } from "./runner";
 import { LocalCommandService, type LocalCommandApprovalView, type LocalCommandDecision } from "./service";
 
 import type { NotifyUserEvent } from "@zeros/protocol/notify-user";
+import type { LocalCommandDevice } from "@zeros/protocol/local-commands";
 import { LOCAL_COMMAND_APPROVALS_EVENT, LOCAL_COMMAND_OPEN_EVENT } from "../../shared/local-commands";
 const ALWAYS_ALLOW_KEY = "localCommandsAlwaysAllow";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** Main owns every decision and execution; the renderer only shows approvals
  * and relays the person's choice for a request main raised. */
-export function installLocalCommands(options: { notifyUser?(event: NotifyUserEvent): void } = {}): { dispose(): Promise<void> } {
+export function installLocalCommands(options: { notifyUser?(event: NotifyUserEvent): void } = {}): {
+  dispose(): Promise<void>; enabled: boolean; control: DeviceControl; device(): LocalCommandDevice | undefined;
+} {
   const enabled = !IS_LOCAL_DEVELOPMENT && cloudWorkspaceDesktopCapabilityEnabled();
   const control = new DeviceControl({ fetch: controlPlaneFetch, baseUrl: controlPlaneBaseUrl, token: getValidAccessTokenForMain });
   const notifications = new Map<string, Notification>();
@@ -114,5 +117,6 @@ export function installLocalCommands(options: { notifyUser?(event: NotifyUserEve
       throw new Error("This Mac is not ready for local commands.");
     return control.disconnect(device, args.workspaceId, args.deviceId);
   });
-  return { dispose: async () => { stopSessionWatch(); stopSignOut(); for (const notification of notifications.values()) notification.close(); await service.stop(); } };
+  return { enabled, control, device: () => service.currentDevice(),
+    dispose: async () => { stopSessionWatch(); stopSignOut(); for (const notification of notifications.values()) notification.close(); await service.stop(); } };
 }

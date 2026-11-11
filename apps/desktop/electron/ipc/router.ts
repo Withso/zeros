@@ -74,6 +74,10 @@ const commandTable: Record<string, CommandHandler> = {
   notify_user_attention: notImpl("notify_user_attention", 1),
   notify_user_view: notImpl("notify_user_view", 1),
   notify_user_take_open: notImpl("notify_user_take_open", 1),
+  workspace_sync_statuses: notImpl("workspace_sync_statuses", 1),
+  workspace_sync_choose: notImpl("workspace_sync_choose", 1),
+  workspace_sync_stop: notImpl("workspace_sync_stop", 1),
+  workspace_sync_open_terminal: notImpl("workspace_sync_open_terminal", 1),
 
   // ── Sidecar / engine lifecycle ────────────────────────────
   get_engine_port: notImpl("get_engine_port", 2),

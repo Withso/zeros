@@ -6,11 +6,12 @@ import type { Duplex } from "node:stream";
 import WebSocket, { WebSocketServer } from "ws";
 import { CLOUD_V2_MAX_FRAME_BYTES, CLOUD_V2_WORKER_BRIDGE_PATH, CLOUD_V2_WORKER_BRIDGE_PROTOCOL, CLOUD_V2_WORKER_PORT,
   CloudV2ControlFrameSchema, type CloudV2ControlFrame, type CloudV2WorkerFrame } from "@zeros/protocol/cloud-v2-relay";
+import { SYNC_BRIDGE_PATH, SYNC_BRIDGE_PROTOCOL, SYNC_LIMITS, SyncRenewFrameSchema } from "@zeros/protocol/workspace-sync";
 import { readWorkerPublicKeys, WorkerTokenVerifier } from "./worker-auth";
 
 interface Options {
   workspaceId: string; bootId: string; port?: number; publicKeys?: readonly string[]; publicKeysFile?: string;
-  failedAuthLimit?: number; pingIntervalMs?: number;
+  failedAuthLimit?: number; pingIntervalMs?: number; now?: () => number;
   onPushChange?: () => void;
 }
 type ActivityReply = Extract<CloudV2ControlFrame, { t: "activity-reply" }>;
@@ -20,18 +21,27 @@ interface Connection {
   activity?: { id: string; finish: (reply: ActivityReply | null) => void };
 }
 
+/** Order 3: one Mac's direct sync socket, carrying plain bridge messages for one passive client. */
+interface SyncConnection { socket: WebSocket; clientId: string; sub: string; dev: string; alive: boolean; deadline: number; renew?: ReturnType<typeof setTimeout> }
+/** A sync socket lives until the newest accepted grant's SIGNED iat + 10 minutes, less the 30 s skew allowance. */
+const syncDeadline = (iat: number) => (iat + SYNC_LIMITS.renewMs / 1000 - 30) * 1000;
+const MAX_SYNC_SOCKETS = 4;
+
 /** Boat's protected route forwards to this loopback-only listener. Never log
  * request headers: Boat forwards its private _port_auth cookie too. */
 export class InboundBridge {
   private readonly connections = new Set<Connection>();
   private readonly routes = new Map<string, { connection: Connection; clientId: string }>();
+  private readonly syncs = new Map<string, SyncConnection>();
   private readonly server = createServer((request, response) => {
     if (request.method !== "GET" || request.url !== "/v2/worker/health") { response.writeHead(404).end(); return; }
     const status = this.authenticate(request);
     response.writeHead(status || 200, { "Cache-Control": "no-store" }).end();
   });
   private readonly websockets = new WebSocketServer({ noServer: true, maxPayload: CLOUD_V2_MAX_FRAME_BYTES, perMessageDeflate: false,
-    handleProtocols: protocols => protocols.has(CLOUD_V2_WORKER_BRIDGE_PROTOCOL) ? CLOUD_V2_WORKER_BRIDGE_PROTOCOL : false });
+    handleProtocols: (protocols, request) => request.url === SYNC_BRIDGE_PATH
+      ? protocols.has(SYNC_BRIDGE_PROTOCOL) ? SYNC_BRIDGE_PROTOCOL : false
+      : protocols.has(CLOUD_V2_WORKER_BRIDGE_PROTOCOL) ? CLOUD_V2_WORKER_BRIDGE_PROTOCOL : false });
   private verifier?: WorkerTokenVerifier;
   private receive?: (frame: CloudV2ControlFrame) => Promise<void>;
   private ping?: ReturnType<typeof setInterval>;
@@ -47,6 +57,7 @@ export class InboundBridge {
     this.verifier = new WorkerTokenVerifier({ ...this.options, publicKeys: this.options.publicKeys ?? await readWorkerPublicKeys(this.options.publicKeysFile) });
     this.receive = receive;
     this.server.on("upgrade", (request, socket, head) => {
+      if (request.method === "GET" && request.url === SYNC_BRIDGE_PATH) return this.upgradeSync(request, socket, head);
       if (request.method !== "GET" || request.url !== CLOUD_V2_WORKER_BRIDGE_PATH) return this.reject(socket, 404);
       const status = this.authenticate(request);
       if (status) return this.reject(socket, status);
@@ -61,7 +72,7 @@ export class InboundBridge {
       this.server.listen(this.options.port ?? CLOUD_V2_WORKER_PORT, "127.0.0.1", () => { this.server.off("error", reject); resolve(); });
     });
     this.ping = setInterval(() => {
-      for (const connection of this.connections) {
+      for (const connection of [...this.connections, ...this.syncs.values()]) {
         if (!connection.alive) { connection.socket.terminate(); continue; }
         connection.alive = false; connection.socket.ping();
       }
@@ -73,6 +84,12 @@ export class InboundBridge {
   async send(frame: CloudV2WorkerFrame): Promise<boolean> {
     if (frame.t === "frame") {
       if (frame.clientId === "*") return (await Promise.all([...this.connections].map(({ socket }) => this.write(socket, frame)))).every(Boolean);
+      const sync = this.syncs.get(frame.clientId);
+      // A sync socket hears only its own replies and hints, as plain bridge messages, and nothing past its deadline.
+      if (sync) {
+        if (this.now() >= sync.deadline) { sync.socket.close(4001); return false; }
+        return this.write(sync.socket, frame.frame as object);
+      }
       const route = this.routes.get(frame.clientId);
       return route ? this.write(route.connection.socket, { ...frame, clientId: route.clientId }) : false;
     }
@@ -135,8 +152,58 @@ export class InboundBridge {
   async dispose(): Promise<void> {
     clearInterval(this.ping);
     for (const connection of this.connections) connection.socket.terminate();
+    for (const sync of this.syncs.values()) { clearTimeout(sync.renew); sync.socket.terminate(); }
     await new Promise<void>(resolve => this.websockets.close(() => resolve()));
     await new Promise<void>(resolve => this.server.close(() => resolve()));
+  }
+
+  /** A Mac's sync grant, and only that, opens this path; a control grant does not. */
+  private upgradeSync(request: IncomingMessage, socket: Duplex, head: Buffer): void {
+    const identity = this.verifier?.acceptSync(request.headers["x-zeros-worker-auth"]);
+    if (!identity) {
+      if (Date.now() - this.failureWindow >= 30_000) { this.failureWindow = Date.now(); this.failures = 0; }
+      this.failures++;
+      return this.reject(socket, this.failures > (this.options.failedAuthLimit ?? 32) ? 429 : 401);
+    }
+    const protocols = String(request.headers["sec-websocket-protocol"] ?? "").split(",").map(value => value.trim());
+    if (!protocols.includes(SYNC_BRIDGE_PROTOCOL)) return this.reject(socket, 400);
+    if (this.syncs.size >= MAX_SYNC_SOCKETS) return this.reject(socket, 503);
+    this.websockets.handleUpgrade(request, socket, head, ws => this.attachSync(ws, identity));
+  }
+
+  private now(): number { return this.options.now?.() ?? Date.now(); }
+
+  private attachSync(socket: WebSocket, identity: { sub: string; dev: string; iat: number }): void {
+    const sync: SyncConnection = { socket, clientId: randomUUID(), sub: identity.sub, dev: identity.dev, alive: true, deadline: syncDeadline(identity.iat) };
+    // Unrenewed past its deadline: closed, so a revoked Mac stops reading without any push.
+    const arm = () => { clearTimeout(sync.renew); sync.renew = setTimeout(() => socket.close(4001), Math.max(0, sync.deadline - this.now())); sync.renew.unref?.(); };
+    arm();
+    this.syncs.set(sync.clientId, sync);
+    socket.on("error", () => {});
+    socket.on("pong", () => { sync.alive = true; });
+    void this.receive!({ t: "open", clientId: sync.clientId, passive: true }).catch(() => socket.close(1011));
+    socket.on("message", (data, binary) => {
+      if (binary) { socket.close(4003); return; }
+      // Checked on every frame, a renewal included: a late renewal cannot revive a socket.
+      if (this.now() >= sync.deadline) { socket.close(4001); return; }
+      let value: unknown;
+      try { value = JSON.parse(data.toString()); } catch { socket.close(4003); return; }
+      if (value && typeof value === "object" && (value as { t?: unknown }).t === "renew") {
+        const renew = SyncRenewFrameSchema.safeParse(value), next = renew.success ? this.verifier?.acceptSync(renew.data.grant) : null;
+        if (!next || next.sub !== sync.sub || next.dev !== sync.dev) { socket.close(4001); return; }
+        // A held grant (older iat) cannot extend the deadline; only a newer signature moves it.
+        sync.deadline = Math.max(sync.deadline, syncDeadline(next.iat));
+        arm(); return;
+      }
+      if (!value || typeof value !== "object" || Array.isArray(value)) { socket.close(4003); return; }
+      void this.receive!({ t: "frame", clientId: sync.clientId, frame: value as Record<string, unknown> } as CloudV2ControlFrame).catch(() => socket.close(1011));
+    });
+    socket.on("close", () => {
+      clearTimeout(sync.renew);
+      if (this.syncs.get(sync.clientId) !== sync) return;
+      this.syncs.delete(sync.clientId);
+      void this.receive!({ t: "close", clientId: sync.clientId }).catch(() => {});
+    });
   }
 
   private authenticate(request: IncomingMessage): number {
@@ -197,7 +264,7 @@ export class InboundBridge {
     });
   }
 
-  private async write(socket: WebSocket, frame: CloudV2WorkerFrame): Promise<boolean> {
+  private async write(socket: WebSocket, frame: CloudV2WorkerFrame | object): Promise<boolean> {
     if (socket.readyState !== WebSocket.OPEN) return false;
     const payload = JSON.stringify(frame);
     if (Buffer.byteLength(payload) > CLOUD_V2_MAX_FRAME_BYTES || socket.bufferedAmount > 4 * 1024 * 1024) { socket.terminate(); return false; }

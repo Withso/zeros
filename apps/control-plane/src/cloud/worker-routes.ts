@@ -21,6 +21,8 @@ import { requestSignal, type CloudLocalCommandSignals } from "./local-commands/s
 import { NOTIFY_USER_FEATURE, NotifyUserWorkerRequestSchema } from "./notify-user/contract.js";
 import { NotificationRateLimit, type CloudNotifyUser } from "./notify-user/store.js";
 import { CloudV2SetupStatusSchema } from "./setup-status-contract.js";
+import type { CloudWorkspaceSync } from "./workspace-sync/store.js";
+import { SYNC_FEATURE } from "./workspace-sync/contract.js";
 
 export const CLOUD_V2_WORKER_API = "/v2/cloud/worker";
 type ConfigFrame = Extract<CloudV2ControlFrame, { t: "config" }>;
@@ -33,6 +35,7 @@ export type CloudV2WorkerRouteDeps = {
   promptOutbox?: boolean;
   localCommands?: { requests: CloudLocalCommands; signals: CloudLocalCommandSignals };
   notifications?: CloudNotifyUser;
+  workspaceSync?: Pick<CloudWorkspaceSync, "advertise">;
   timing?: (record: CloudV2TimingRecord) => void;
   logger?: Pick<Console, "warn">;
   waitForPrompts?(workspaceId: string, waitMs: number, signal: AbortSignal): { wait: Promise<void>; dispose(): void };
@@ -227,6 +230,7 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
       if (!workerFeatures(c).has("runtime-update-v1") || !z.string().uuid().safeParse(handoff).success || !deps.runtimeUpdates) throw unauthorized();
       const identity = await deps.runtimeUpdates.session(token, input.bootId, handoff, input.runtimeSha256);
       if (!identity) throw unauthorized();
+      if (deps.workspaceSync && !await deps.workspaceSync.advertise(token, input.bootId, workerFeatures(c).has(SYNC_FEATURE), handoff)) throw unauthorized();
       if (deps.store.chatEdits && !await deps.store.chatEdits.advertise(token, input.bootId, workerFeatures(c).has("chat-edit-v1"), handoff)) throw unauthorized();
       if (deps.localCommands && workerFeatures(c).has(LOCAL_COMMANDS_FEATURE)
         && !await deps.localCommands.requests.advertise(token,input.bootId,true,handoff)) throw unauthorized();
@@ -246,6 +250,7 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
       throw new HttpError(409, "worker_runtime_mismatch", "Worker runtime requires an update");
     const workspace = await deps.store.beginWorkerHello(token, input.bootId);
     if (!workspace) throw unauthorized();
+    if (deps.workspaceSync && !await deps.workspaceSync.advertise(token, input.bootId, workerFeatures(c).has(SYNC_FEATURE))) throw unauthorized();
     if (deps.store.chatEdits && !await deps.store.chatEdits.advertise(token, input.bootId, workerFeatures(c).has("chat-edit-v1"))) throw unauthorized();
     if (deps.localCommands && workerFeatures(c).has(LOCAL_COMMANDS_FEATURE)
       && !await deps.localCommands.requests.advertise(token,input.bootId,true)) throw unauthorized();

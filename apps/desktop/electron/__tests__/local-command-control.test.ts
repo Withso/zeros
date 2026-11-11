@@ -59,8 +59,12 @@ describe("device control client", () => {
     expect(f.calls[0]!.body).toEqual({ result: { outcome: "completed", code: 0, stdout: "ok" } });
     expect((await f.control.connect(device, "11111111-1111-4111-8111-111111111111")).mac.connected).toBe(true);
     expect((await f.control.disconnect(device, "11111111-1111-4111-8111-111111111111", deviceId)).mac.connected).toBe(false);
+    expect(await f.control.setSyncing(device, "11111111-1111-4111-8111-111111111111", true)).toMatchObject({ mac: { deviceId } });
     expect(f.calls.slice(1).map(call => call.path)).toEqual([`/v1/cloud-v2/workspaces/11111111-1111-4111-8111-111111111111/macs/${deviceId}/connect`,
-      `/v1/cloud-v2/workspaces/11111111-1111-4111-8111-111111111111/macs/${deviceId}/disconnect`]);
+      `/v1/cloud-v2/workspaces/11111111-1111-4111-8111-111111111111/macs/${deviceId}/disconnect`, `/v1/cloud-v2/workspaces/11111111-1111-4111-8111-111111111111/macs/${deviceId}/sync`]);
+    // Rows include `syncing` only when asked; the result route never asks.
+    expect(f.calls.map(call => call.headers.get("x-zeros-sync"))).toEqual([null, "1", "1", "1"]);
+    expect(f.calls.at(-1)).toMatchObject({ method: "PUT", body: { syncing: true } });
   });
 
   it("parses named SSE events across chunk boundaries and skips comments and unknown names", async () => {

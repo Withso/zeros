@@ -1,9 +1,10 @@
 import type { z } from "zod";
 import {
   LOCAL_COMMAND_DEVICE_HEADERS, LOCAL_COMMANDS_FEATURE, LocalCommandConnectReplySchema, LocalCommandDisconnectReplySchema, LocalCommandEventSchemas,
-  LocalCommandNoticeSchema, LocalCommandPresenceSchema, LocalCommandRegistrationReplySchema, LocalCommandResultReplySchema,
+  LocalCommandNoticeSchema, LocalCommandPresenceSchema, LocalCommandRegistrationReplySchema, LocalCommandResultReplySchema, WorkspaceSyncFlagReplySchema,
   type LocalCommandDevice, type LocalCommandMacResult,
 } from "@zeros/protocol/local-commands";
+import { SyncGrantReplySchema } from "@zeros/protocol/workspace-sync";
 
 /** A control-plane refusal or an unusable reply. Never carries a body beyond its closed code. */
 export class DeviceControlError extends Error {
@@ -35,11 +36,13 @@ async function bounded(response: Response, limit: number): Promise<string> {
 export class DeviceControl {
   constructor(private readonly deps: { fetch: typeof fetch; baseUrl(): string; token(): Promise<string | null> }) {}
 
-  private async send<T>(method: string, path: string, options: { device?: LocalCommandDevice; body?: unknown; schema?: z.ZodType<T>; timeoutMs?: number; accept?: string; signal?: AbortSignal }): Promise<T> {
+  private async send<T>(method: string, path: string, options: { device?: LocalCommandDevice; body?: unknown; schema?: z.ZodType<T>; timeoutMs?: number; accept?: string; signal?: AbortSignal; syncField?: true }): Promise<T> {
     const token = await this.deps.token();
     if (!token) throw new DeviceControlError(401, "unauthorized");
     const headers: Record<string, string> = { authorization: `Bearer ${token}`, ...(options.accept ? { accept: options.accept } : {}) };
     if (options.body !== undefined) headers["content-type"] = "application/json";
+    // Order 3: replies carrying a connected-Macs row include `syncing` only when asked.
+    if (options.syncField) headers["x-zeros-sync"] = "1";
     if (options.device) Object.assign(headers, {
       [LOCAL_COMMAND_DEVICE_HEADERS.deviceId]: options.device.deviceId,
       [LOCAL_COMMAND_DEVICE_HEADERS.registrationId]: options.device.registrationId,
@@ -99,11 +102,19 @@ export class DeviceControl {
   ack(device: LocalCommandDevice, requestId: string) { return this.send<void>("POST", this.request(device, requestId, "ack"), { device, body: {} }); }
 
   connect(device: LocalCommandDevice, workspaceId: string) {
-    return this.send("POST", `/v1/cloud-v2/workspaces/${encodeURIComponent(workspaceId)}/macs/${encodeURIComponent(device.deviceId)}/connect`, { device, body: {}, schema: LocalCommandConnectReplySchema });
+    return this.send("POST", `/v1/cloud-v2/workspaces/${encodeURIComponent(workspaceId)}/macs/${encodeURIComponent(device.deviceId)}/connect`, { device, body: {}, schema: LocalCommandConnectReplySchema , syncField: true });
+  }
+  /** Order 3: this Mac's syncing flag on its connected-Macs row. The one place the route is named. */
+  setSyncing(device: LocalCommandDevice, workspaceId: string, syncing: boolean) {
+    return this.send("PUT", `/v1/cloud-v2/workspaces/${encodeURIComponent(workspaceId)}/macs/${encodeURIComponent(device.deviceId)}/sync`, { device, body: { syncing }, schema: WorkspaceSyncFlagReplySchema , syncField: true });
+  }
+  /** Order 3: a single-use grant for this Mac's direct sync socket (never wakes the VM). */
+  syncGrant(device: LocalCommandDevice, workspaceId: string) {
+    return this.send("POST", `/v1/cloud-v2/workspaces/${encodeURIComponent(workspaceId)}/sync/grant`, { device, body: {}, schema: SyncGrantReplySchema });
   }
   /** May name another of this person's Macs; H identifies the Mac asking. */
   disconnect(device: LocalCommandDevice, workspaceId: string, targetDeviceId: string) {
-    return this.send("POST", `/v1/cloud-v2/workspaces/${encodeURIComponent(workspaceId)}/macs/${encodeURIComponent(targetDeviceId)}/disconnect`, { device, body: {}, schema: LocalCommandDisconnectReplySchema });
+    return this.send("POST", `/v1/cloud-v2/workspaces/${encodeURIComponent(workspaceId)}/macs/${encodeURIComponent(targetDeviceId)}/disconnect`, { device, body: {}, schema: LocalCommandDisconnectReplySchema , syncField: true });
   }
 }
 

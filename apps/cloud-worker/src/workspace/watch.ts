@@ -1,5 +1,6 @@
 import { watch, type FSWatcher } from "node:fs";
-import { dirname } from "node:path";
+import { lstat, readdir } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import type { CommandRunner } from "./commands";
 import type { WorkspaceScope } from "./scope";
 
@@ -13,7 +14,7 @@ export class CheckoutWatch {
   private disposed = false;
   private refresh = false;
   constructor(private readonly scope: WorkspaceScope, private readonly run: CommandRunner, private readonly changed: (content: boolean) => Promise<void>,
-    private readonly options: { pollingAllowed?(): boolean; activity?(): void } = {}) {}
+    private readonly options: { pollingAllowed?(): boolean; activity?(): void; lossy?(): void; watchContext?(): boolean } = {}) {}
 
   async start(): Promise<void> {
     await this.scan();
@@ -56,15 +57,33 @@ export class CheckoutWatch {
         while (path !== this.scope.root && paths.size < 2048) { paths.add(path); path = dirname(path); }
       }
     } catch { /* HEAD polling remains available while a checkout is unavailable. */ }
+    // Order 3: Git ignores .context, but a syncing Mac mirrors it; watch it only then.
+    if (this.options.watchContext?.()) for (const path of await contextDirectories(join(this.scope.root, ".context"))) paths.add(path);
     if (this.disposed) return;
     for (const [path, watcher] of this.watchers) if (!paths.has(path)) { watcher.close(); this.watchers.delete(path); }
     for (const path of paths) {
       if (this.watchers.has(path)) continue;
       try {
         const watcher = watch(path, { persistent: false }, () => this.schedule(true));
-        watcher.on("error", () => { watcher.close(); this.watchers.delete(path); });
+        // A failed watcher may have dropped events: a mirror must not trust deltas across it.
+        watcher.on("error", () => { watcher.close(); this.watchers.delete(path); this.options.lossy?.(); });
         this.watchers.set(path, watcher);
       } catch { /* Missing/raced directories are retried on the next change. */ }
     }
   }
+}
+
+/** `.context` and its subdirectories the sync walks: no symlinks, attachments or nested repositories; bounded. */
+async function contextDirectories(base: string, limit = 512): Promise<string[]> {
+  const found: string[] = [];
+  const visit = async (directory: string, top: boolean): Promise<void> => {
+    const info = await lstat(directory).catch(() => null);
+    if (!info || info.isSymbolicLink() || !info.isDirectory() || found.length >= limit) return;
+    const names = await readdir(directory).catch(() => [] as string[]);
+    if (!top && names.includes(".git")) return;
+    found.push(directory);
+    for (const name of names.sort()) if (!(top && name === "attachments")) await visit(join(directory, name), false);
+  };
+  await visit(base, true);
+  return found;
 }
