@@ -31,6 +31,7 @@ import {
 import { designPageCatalogSchema, designPageIdSchema, normalizeDesignPagesSnapshot, type DesignPageSummary } from "@zeros/protocol/design-pages";
 import { DESIGN_LAZY_PREPARATION_CAPABILITY, DESIGN_MUTATION_SNAPSHOTS_CAPABILITY, DESIGN_PAGE_SCOPED_MUTATIONS_CAPABILITY, designMutationCatalogSchema, designPageScopedCatalogSchema, designPreparedFrameSchema, designFramesPrepareSchema, designFramesPrepareReplySchema, type DesignMutationCatalog, type DesignPageHashes, type DesignPageScopedCatalog } from "@zeros/protocol/design-catalog";
 import { DESIGN_SOURCE_SURFACES_CAPABILITY } from "@zeros/protocol/design-surface";
+import { DESIGN_COMPONENT_OPTIONS_CAPABILITY } from "@zeros/protocol/design-catalog";
 import {
   DESIGN_RECORDINGS_COLOR_SCHEME_CAPABILITY,
   DESIGN_RECORDINGS_READ_FAILURES_CAPABILITY,
@@ -92,6 +93,8 @@ export interface DesignFrameTreeNodeWire {
 export interface DesignCanvasFrameWire extends DesignFrameSummaryWire {
   sourceVersion: string;
   surfaceCost?: import("@zeros/protocol/design-surface").DesignSurfaceCost | null;
+  /** Set when the frame's file declares options (component frames). */
+  component?: import("@zeros/protocol/design-catalog").DesignFrameComponent;
 }
 
 /** Navigation metadata cannot authorize rendering or editing. */
@@ -114,6 +117,7 @@ export async function bridgeDesignPrepareFrames(bridge: RuntimeClient, input: {
 }) {
   const params = designFramesPrepareSchema.parse({ ...input,
     ...(bridge.supportsEngineCapability?.(DESIGN_SOURCE_SURFACES_CAPABILITY, input.workspaceId) ? { surfaceCosts: true } : {}),
+    ...(bridge.supportsEngineCapability?.(DESIGN_COMPONENT_OPTIONS_CAPABILITY, input.workspaceId) ? { componentOptions: true } : {}),
   });
   if (isCloudWorkspace(params.workspaceId) || !bridge.supportsEngineCapability?.(DESIGN_LAZY_PREPARATION_CAPABILITY, params.workspaceId))
     throw new Error("Design preparation requires a capable Local engine.");

@@ -302,3 +302,33 @@ export function evaluateComponentExpression(
   };
   return run(tree);
 }
+
+/** Every name an expression reads (not function names). */
+export function componentExpressionNames(tree: ComponentExpression, into: Set<string> = new Set()): Set<string> {
+  switch (tree.kind) {
+    case "name":
+      into.add(tree.name);
+      break;
+    case "list":
+      tree.items.forEach((item) => componentExpressionNames(item, into));
+      break;
+    case "call":
+      tree.args.forEach((arg) => componentExpressionNames(arg, into));
+      break;
+    case "unary":
+      componentExpressionNames(tree.arg, into);
+      break;
+    case "binary":
+      componentExpressionNames(tree.left, into);
+      componentExpressionNames(tree.right, into);
+      break;
+    case "conditional":
+      componentExpressionNames(tree.test, into);
+      componentExpressionNames(tree.yes, into);
+      componentExpressionNames(tree.no, into);
+      break;
+    default:
+      break;
+  }
+  return into;
+}

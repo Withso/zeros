@@ -254,11 +254,31 @@ export const designFramesPrepareSchema = z.object({
   files: z.array(designFrameFileSchema).min(1).max(16).refine((files) => new Set(files).size === files.length),
   /** Only requested after design.source-surfaces.v1 capability negotiation. */
   surfaceCosts: z.literal(true).optional(),
+  /** Only requested after design.component-options.v1 capability negotiation. */
+  componentOptions: z.literal(true).optional(),
 }).strict();
 
 /** Local engines that name the Design frames a worktree change reaches, as
  * DB_CHANGED "designFrames" (see DbChangedMessage.designFrames). */
 export const DESIGN_FRAMES_CHANGES_CAPABILITY = "design.frames.changes.v1";
+
+/** Local engines that report a component frame's declared options with its
+ * prepared record, when asked (design.frames.prepare componentOptions). */
+export const DESIGN_COMPONENT_OPTIONS_CAPABILITY = "design.component-options.v1";
+
+/** A frame whose file declares options: the declaration as written (the
+ * renderer reads it with the Design core), whether each option reaches the
+ * frame only through CSS, and, when its options did not all apply, what the
+ * frame shows instead. */
+export const designFrameComponentSchema = z.object({
+  elements: z.array(z.object({
+    tag: z.string().min(1).max(32),
+    attributes: z.array(z.object({ name: z.string().min(1).max(64), value: z.string().max(2_048) }).strict()).max(72),
+  }).strict()).max(160),
+  reach: z.record(z.string().min(1).max(32), z.enum(["css", "structure"])),
+  notApplied: z.enum(["last-good", "defaults"]).optional(),
+}).strict();
+export type DesignFrameComponent = z.infer<typeof designFrameComponentSchema>;
 
 export const designPreparedFrameSchema = designCatalogFrameSchema.pick({
   title: true, x: true, y: true, width: true, height: true, z: true,
@@ -276,6 +296,7 @@ export const designPreparedFrameSchema = designCatalogFrameSchema.pick({
     nodes: z.number().int().positive(),
     imageBytes: z.number().int().nonnegative(),
   }).strict().nullable().optional(),
+  component: designFrameComponentSchema.optional(),
 }).strict();
 export const designFramesPrepareReplySchema = z.object({
   directoryId,

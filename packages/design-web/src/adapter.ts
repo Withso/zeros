@@ -1,6 +1,5 @@
 import {
   canonicalDesignJson,
-  componentOptionValues,
   designComponentDefinitionSchema,
   designFoundationManifestSchema,
   designFrameGeometryError,
@@ -15,6 +14,9 @@ import {
   type DesignParameterValue,
   type DesignTransactionAdapter,
 } from "@zeros/design-core";
+import {
+  componentOptionValues,
+} from "@zeros/design-core/components";
 
 import {
   mutateDesignCssRuleDeclaration,

@@ -6,7 +6,7 @@ const FILES = [
   "../../../../../../packages/design-core/src/component-expressions.ts",
   "../../../../../../packages/design-core/src/component-options.ts",
   "../../../../../../packages/design-web/src/component-options.ts",
-  "../component-template.ts",
+  "../../../../../../packages/design-web/src/component-template.ts",
   "../component-registry.ts",
   "../component-last-good.ts",
 ];

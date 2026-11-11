@@ -15,7 +15,7 @@ import {
   type ComponentDeclaration,
   type ComponentDeclarationElement,
   type ComponentOptionProblem,
-} from "@zeros/design-core";
+} from "@zeros/design-core/components";
 
 import { lastGoodDesignComponentRender, rememberDesignComponentRender } from "./component-last-good";
 import { designComponentRegistry } from "./component-registry";
@@ -24,7 +24,7 @@ import {
   createComponentTemplateBudget,
   renderComponentTemplate,
   type ComponentTemplateBudget,
-} from "./component-template";
+} from "@zeros/design-web/component-template";
 import { designDirectoryNameFor } from "./directory-registry";
 import { readSharedCanvasContext } from "./document-storage";
 import { readSafeRegularFile } from "./safe-files";
@@ -583,6 +583,8 @@ export async function expandDesignComponentsForRender(
     ? { html: expansion.html, componentOptions: { applied: false, shows: "defaults" } }
     : { html: lastGood, componentOptions: { applied: false, shows: "last-good" } };
 }
+
+export { designComponentSummaryOf, type DesignComponentSummary } from "@zeros/design-web/component-template";
 
 /** The registered frame components: given, or read from the shared canvas. */
 async function registryFor(workspacePath: string, options: DesignComponentExpansionOptions): Promise<ReadonlyMap<string, string>> {

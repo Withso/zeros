@@ -118,6 +118,8 @@ export interface DesignCanvasFrame extends DesignFrameSummary {
   sourceVersion: string;
   /** Passive HTML admission. Unknown/legacy costs retain bounded previews. */
   surfaceCost?: import("@zeros/protocol/design-surface").DesignSurfaceCost | null;
+  /** Set when the frame's file declares options. */
+  component?: import("@zeros/protocol/design-catalog").DesignFrameComponent;
 }
 
 export interface DesignFrameTreeNode {

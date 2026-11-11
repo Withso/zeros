@@ -9,6 +9,7 @@
 import {
   COMPONENT_EXPRESSION_RESERVED_NAMES,
   ComponentExpressionError,
+  componentExpressionNames,
   createComponentExpressionBudget,
   evaluateComponentExpression,
   parseComponentExpression,
@@ -544,4 +545,25 @@ export function componentOptionCss(
     if (typeof value === "number" && Number.isFinite(value)) declarations.push(`--zd-${entry.name}: ${cssNumber(value)}${entry.unit ?? ""};`);
   }
   return declarations.join(" ");
+}
+
+/** css: the option reaches the frame only through its custom property (or a
+ * derived one), so a preview can set the property. structure: a hole, a
+ * condition or a loop reads it, directly or through a derived value, so the
+ * frame changes only once the option is written. Text, choices and booleans
+ * never reach CSS and are always structure. */
+export type ComponentOptionReach = "css" | "structure";
+
+export function componentOptionReach(
+  declaration: ComponentDeclaration,
+  templateNames: ReadonlySet<string>,
+): Record<string, ComponentOptionReach> {
+  const structural = new Set(templateNames);
+  // A derived value the template reads makes what it reads structural too.
+  for (const derived of [...declaration.derived].reverse())
+    if (structural.has(derived.name)) componentExpressionNames(derived.expression, structural);
+  const reach: Record<string, ComponentOptionReach> = {};
+  for (const option of declaration.options)
+    reach[option.name] = (option.kind === "number" || option.kind === "color" || option.kind === "easing") && !structural.has(option.name) ? "css" : "structure";
+  return reach;
 }

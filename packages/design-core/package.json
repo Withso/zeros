@@ -9,6 +9,7 @@
     ".": "./src/index.ts",
     "./component-expressions": "./src/component-expressions.ts",
     "./component-options": "./src/component-options.ts",
+    "./components": "./src/components.ts",
     "./geometry": "./src/geometry.ts",
     "./history": "./src/history.ts",
     "./schema": "./src/schema.ts",
