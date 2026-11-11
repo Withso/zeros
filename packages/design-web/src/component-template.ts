@@ -9,14 +9,18 @@ import { parse, parseFragment, type DefaultTreeAdapterTypes } from "parse5";
 import {
   COMPONENT_EXPRESSION_LIMITS,
   ComponentExpressionError,
+  componentExpressionNames,
   componentOptionNameProblem,
+  componentOptionReach,
+  readComponentDeclaration,
+  type ComponentOptionReach,
   createComponentExpressionBudget,
   evaluateComponentExpression,
   parseComponentExpression,
   type ComponentExpression,
   type ComponentExpressionBudget,
   type ComponentExpressionValue,
-} from "@zeros/design-core";
+} from "@zeros/design-core/components";
 
 export const COMPONENT_TEMPLATE_LIMITS = Object.freeze({
   /** Holes one rendering may fill. */
@@ -233,4 +237,71 @@ export function renderComponentTemplate(markup: string, options: ComponentTempla
   };
 
   return emitChildren(fragment.childNodes, options.scope, [], 0);
+}
+
+/** The expressions a template evaluates (holes, conditions and loop lists),
+ * found without evaluating anything. */
+export function componentTemplateExpressions(markup: string, options: { document?: boolean } = {}): string[] {
+  const fragment = options.document ? parse(markup) : parseFragment(markup);
+  const found: string[] = [];
+  const holes = (text: string) => {
+    for (const match of text.matchAll(HOLE)) found.push(match[1]!.trim());
+  };
+  const visit = (nodes: readonly Node[]) => {
+    for (const node of nodes) {
+      if (node.nodeName === "#text") {
+        const parent = (node as DefaultTreeAdapterTypes.TextNode).parentNode as Element | null;
+        if (!(parent && "tagName" in parent && RAW_TEXT.has(parent.tagName))) holes((node as DefaultTreeAdapterTypes.TextNode).value);
+        continue;
+      }
+      if (!("tagName" in node)) continue;
+      const element = node as Element;
+      if (element.tagName === "template" && element.attrs.some((attribute) => attribute.name === "data-zd-options")) continue;
+      for (const attribute of element.attrs) {
+        if (attribute.name === "data-zd-if") found.push(attribute.value.trim());
+        else if (attribute.name === "data-zd-for") {
+          const loop = LOOP.exec(attribute.value);
+          if (loop) found.push(loop[2]!.trim());
+        } else holes(attribute.value);
+      }
+      visit(element.tagName === "template" ? (element as Template).content.childNodes : element.childNodes);
+      if (found.length > COMPONENT_TEMPLATE_LIMITS.holes * 4) return;
+    }
+  };
+  visit(fragment.childNodes);
+  return found;
+}
+
+/** What the Style panel needs about a frame that declares options: its
+ * declaration as written (the <head>'s <template data-zd-options>), and
+ * whether each option reaches the frame only through CSS. Null for a frame
+ * that declares none. */
+export interface DesignComponentSummary {
+  elements: { tag: string; attributes: { name: string; value: string }[] }[];
+  reach: Record<string, ComponentOptionReach>;
+}
+
+export function designComponentSummaryOf(source: string): DesignComponentSummary | null {
+  const end = source.search(/<\/head\b|<body\b/i);
+  if (!/<template\b[^>]*\sdata-zd-options\b/i.test(end < 0 ? source : source.slice(0, end))) return null;
+  const document = parse(source);
+  const html = document.childNodes.find((node) => "tagName" in node && node.tagName === "html") as Element | undefined;
+  const head = html?.childNodes.find((node) => "tagName" in node && node.tagName === "head") as Element | undefined;
+  const template = head?.childNodes.find(
+    (node) => "tagName" in node && node.tagName === "template" && node.attrs.some((attribute) => attribute.name === "data-zd-options"),
+  ) as Template | undefined;
+  if (!template) return null;
+  const elements = template.content.childNodes
+    .filter((node): node is Element => "tagName" in node)
+    .map((element) => ({ tag: element.tagName, attributes: element.attrs.map(({ name, value }) => ({ name, value })) }));
+  const { declaration } = readComponentDeclaration(elements.map((element) => ({ ...element, offset: 0 })));
+  const names = new Set<string>();
+  for (const expression of componentTemplateExpressions(source, { document: true })) {
+    try {
+      componentExpressionNames(parseComponentExpression(expression), names);
+    } catch {
+      // An expression that does not parse is lint's to report.
+    }
+  }
+  return { elements, reach: componentOptionReach(declaration, names) };
 }

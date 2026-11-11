@@ -269,6 +269,41 @@ describe("design frame runtime client", () => {
     }
   });
 
+  it("negotiates the component option preview and validates the reply", async () => {
+    const source = { postMessage: vi.fn() };
+    const connection = connectDesignFrameRuntime("component-preview", "home.html", SOURCE_VERSION,
+      { contentWindow: source } as unknown as HTMLIFrameElement, {},
+      { setTimeout: vi.fn(() => 7), clearTimeout: vi.fn() });
+    const port = source.postMessage.mock.calls[0]![1].transfer[0] as MessagePort;
+    const requests: Array<Record<string, unknown>> = [];
+    let reply: () => unknown = () => null;
+    port.onmessage = ({ data }) => {
+      if (data.type !== "request") return;
+      requests.push(data);
+      port.postMessage({ protocol: DESIGN_RUNTIME_PROTOCOL, version: DESIGN_RUNTIME_VERSION, type: "response",
+        requestId: data.requestId, ok: true, result: reply() });
+    };
+    port.start();
+    try {
+      await expect(connection.previewComponentOptions!({ "--zd-width": "1px" })).rejects.toMatchObject({ code: "METHOD_NOT_SUPPORTED" });
+      expect(requests).toHaveLength(0);
+      port.postMessage({ protocol: DESIGN_RUNTIME_PROTOCOL, version: DESIGN_RUNTIME_VERSION, type: "event", event: "ready",
+        payload: { sourceVersion: SOURCE_VERSION, capabilities: { ...capabilities, methods: [...capabilities.methods, "previewComponentOptions"] }, snapshot: snapshot(1) } });
+      await vi.waitFor(() => expect(connection.supports("previewComponentOptions")).toBe(true));
+      reply = () => ({ sourceVersion: SOURCE_VERSION, applied: 1 });
+      await expect(connection.previewComponentOptions!({ "--zd-width": "420px" })).resolves.toEqual({ sourceVersion: SOURCE_VERSION, applied: 1 });
+      expect(requests.at(-1)).toMatchObject({ method: "previewComponentOptions", args: { properties: { "--zd-width": "420px" } } });
+      reply = () => ({ sourceVersion: SOURCE_VERSION, applied: 0 });
+      await connection.previewComponentOptions!(null);
+      expect(requests.at(-1)).toMatchObject({ method: "previewComponentOptions", args: { clear: true } });
+      reply = () => ({ sourceVersion: NEXT_SOURCE_VERSION, applied: 1 });
+      await expect(connection.previewComponentOptions!({ "--zd-width": "1px" })).rejects.toThrow("malformed");
+    } finally {
+      connection.destroy();
+      port.close();
+    }
+  });
+
   it("negotiates the frame's changes made by hand and validates the reply", async () => {
     const source = { postMessage: vi.fn() };
     const connection = connectDesignFrameRuntime("frame-changes", "home.html", SOURCE_VERSION,
@@ -461,7 +496,7 @@ describe("design frame runtime client", () => {
       sourceVersion: SOURCE_VERSION,
       // Opt-in methods: a runtime advertises them only when asked, so a host
       // that predates one still accepts the runtime's capabilities.
-      features: ["previewStylesheet", "setPlayback", "previewInsert", "clearPreviewInserts", "previewHistory", "commitStructure", "previewStructure", "clearPreviewStructure", "holdNodeState", "releaseNodeState", "getFrameChanges"],
+      features: ["previewStylesheet", "setPlayback", "previewInsert", "clearPreviewInserts", "previewHistory", "commitStructure", "previewStructure", "clearPreviewStructure", "holdNodeState", "releaseNodeState", "getFrameChanges", "previewComponentOptions"],
     });
     expect(handshake?.[1]).toMatchObject({ targetOrigin: "*" });
     const framePort = handshake?.[1]?.transfer?.[0] as MessagePort;

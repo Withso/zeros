@@ -63,7 +63,7 @@ import postcss from "postcss";
 import { withDesignDirectoryNameLease } from "./directory-registry";
 import { withDesignDocumentWrite as withDocumentWrite } from "./document-write-lock";
 
-import { designSourceDeclaresOptions, expandDesignComponents } from "./components";
+import { designComponentSummaryOf, designSourceDeclaresOptions, expandDesignComponents } from "./components";
 import { designComponentRegistry } from "./component-registry";
 import {
   DESIGN_CANVAS_FILE as CANVAS_MARKER_FILE,
@@ -1048,7 +1048,9 @@ async function readDesignCanvasFrameFromSummary(
     width: summary.width,
     height: summary.height,
   }, undefined, undefined, summary.file, canvas, { identityOnly: true });
-  return { ...summary, sourceVersion: render.sourceVersion, surfaceCost: render.surfaceCost };
+  const component = designComponentSummaryOf(source);
+  return { ...summary, sourceVersion: render.sourceVersion, surfaceCost: render.surfaceCost,
+    ...(component ? { component: { ...component, ...(render.componentOptions ? { notApplied: render.componentOptions.shows } : {}) } } : {}) };
 }
 
 async function mapDesignFramesBounded<T>(
@@ -1240,7 +1242,8 @@ function registeredFrameRecord(canvas: CanvasDocument, file: string, pageIds: Re
     title: info.title, kind: info.kind === "text" ? "text" : "frame",
     x: geometry.x, y: geometry.y, width: geometry.w, height: geometry.h, z: geometry.z,
     nodeCount: identity.nodeCount, layerCount: identity.layerCount,
-    modifiedAt, sourceVersion: identity.sourceVersion, surfaceCost: identity.surfaceCost };
+    modifiedAt, sourceVersion: identity.sourceVersion, surfaceCost: identity.surfaceCost,
+    ...(identity.component ? { component: identity.component } : {}) };
 }
 
 /** A registered frame's identity, from its saved source. Main and worker
@@ -1256,8 +1259,10 @@ async function computeRegisteredFrameIdentity(workspacePath: string, file: strin
   const document = healed.document ?? parseDesignSource(healed.html);
   const render = await prepareFrameRenderSource(workspacePath, source, { width: geometry.w, height: geometry.h },
     undefined, undefined, file, canvas, { identityOnly: true, retain: true });
+  const summary = designComponentSummaryOf(source);
   const identity: DesignFrameIdentity = { sourceVersion: render.sourceVersion, surfaceCost: render.surfaceCost,
-    nodeCount: designNodeRecords(document).length, layerCount: designLayerCount(document) };
+    nodeCount: designNodeRecords(document).length, layerCount: designLayerCount(document),
+    ...(summary ? { component: { ...summary, ...(render.componentOptions ? { notApplied: render.componentOptions.shows } : {}) } } : {}) };
   return { identity, modifiedAt: safe.modifiedAt, retained: render.retained };
 }
 

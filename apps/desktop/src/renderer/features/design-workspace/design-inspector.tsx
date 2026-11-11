@@ -232,8 +232,15 @@ import {
   paintedDesignFrameGeometry,
 } from "./design-workspace-overlays";
 import { type DesignInspectorProps } from "./design-workspace-types";
+import { loadDesignComponentOptions } from "./design-component-options-loader";
+import type { DesignCanvasFrameWire } from "../../platform/git";
 import { PanelHeader } from "@/renderer/shared/ui/primitives/panel-header";
 
+
+// Only a component frame's selection shows Options, so its rows and the Design
+// core's option code load on their own; the workspace warms them once it has
+// a component frame.
+const DesignComponentOptions = React.lazy(() => loadDesignComponentOptions().then((module) => ({ default: module.DesignComponentOptions })));
 
 /** What canvas metadata can store; frame fields settle inside it. */
 const DESIGN_FRAME_SIZE_RANGE = { min: 1, max: DESIGN_FRAME_MAX_SIZE };
@@ -1442,6 +1449,7 @@ export const DesignInspector = React.memo(function DesignInspector({
   onOpenMotionTimeline,
   zoomActionsRef,
   onAskAgent,
+  panelVisible = true,
 }: DesignInspectorProps) {
   const styleOriginLabel = useDesignStyleOriginLabel(workspaceId);
   const tokenCatalog = useDesignFrameTokenCatalog(workspaceId, frame?.file);
@@ -2865,8 +2873,15 @@ export const DesignInspector = React.memo(function DesignInspector({
           : elementDetails
             ? designRuntimeLayerDisplayName(elementDetails)
             : null;
-  const selectionType =
-    selectionTitle && selectionTitle !== selectionName ? selectionName : null;
+  // A frame whose file declares options is a component: its Options section
+  // mounts only while the frame itself is selected and the panel is shown.
+  const optionsFrame =
+    workspaceId && active && panelVisible && frameSelected && frame?.component && !selectedNodeId && styleNodeIds.length <= 1
+      ? (frame as DesignCanvasFrameWire & { component: NonNullable<DesignCanvasFrameWire["component"]> })
+      : null;
+  const selectionType = optionsFrame
+    ? "Component"
+    : selectionTitle && selectionTitle !== selectionName ? selectionName : null;
   const SelectionGlyph =
     styleNodeIds.length > 1
       ? Layers
@@ -3074,6 +3089,21 @@ export const DesignInspector = React.memo(function DesignInspector({
         <ScrollArea className="min-h-0 flex-1">
           <div className="flex flex-col pb-6">
             {inspectorSelectionHeader}
+            {optionsFrame && workspaceId ? (
+              <DesignTokenCatalogContext.Provider value={tokenCatalog}>
+                <React.Suspense fallback={null}>
+                <DesignComponentOptions
+                  key={`${optionsFrame.file}:${optionsFrame.sourceVersion}`}
+                  workspaceId={workspaceId}
+                  frame={optionsFrame}
+                  directory={designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.directory ?? ""}
+                  lint={lint}
+                  disabled={!active || pendingHistoryActions > 0}
+                  onAskAgent={onAskAgent}
+                />
+                </React.Suspense>
+              </DesignTokenCatalogContext.Provider>
+            ) : null}
             {heldState && heldChanges ? (
               <DesignHeldStateNote state={heldState} count={heldChanges.count} onBack={() => pickLayerState(null)} />
             ) : null}

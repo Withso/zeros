@@ -17,7 +17,18 @@ import {
   DESIGN_RUNTIME_SOURCE,
   DESIGN_RUNTIME_DOCUMENT_BODY_ID,
 } from "@zeros/protocol/design-runtime";
-import { designFrameGeometryError } from "@zeros/design-core";
+import {
+  designFrameGeometryError,
+} from "@zeros/design-core";
+import {
+  componentExpressionScope,
+  componentInheritedValues,
+  componentOptionCss,
+  readComponentDeclaration,
+} from "@zeros/design-core/components";
+import { mutateComponentOption } from "@zeros/design-web/component-options";
+import { createComponentTemplateBudget, designComponentSummaryOf, renderComponentTemplate } from "@zeros/design-web/component-template";
+import { designComponentPreviewMessagesForTests } from "../features/design-workspace/state/design-component-options";
 import { mutateDesignNodeDuplicateSource, mutateDesignNodeDeleteSource } from "@zeros/design-web/html";
 import {
   mutateDesignKeyframes,
@@ -124,7 +135,9 @@ const HARNESS_STYLE_SOURCES: DesignWorkspaceSnapshotWire["styleSources"] = [
   },
 ];
 
-function withDesignRuntime(source: string, sourceVersion: string): string {
+function withDesignRuntime(authored: string, sourceVersion: string): string {
+  // The engine renders a component frame's template before the runtime sees it.
+  const source = componentOptionsHarness ? renderHarnessComponentFrame(authored) : authored;
   const runtime =
     `<script>window.__zerosDesignSourceVersion=${JSON.stringify(sourceVersion)};` +
     `${DESIGN_RUNTIME_SOURCE}</script>`;
@@ -250,6 +263,62 @@ const TOKEN_PILLS_HOME_SOURCE = `<!doctype html>
 const styleOriginsHarness = new URLSearchParams(window.location.search).has(
   "styleOrigins",
 );
+// A component frame (pricing.html becomes "Chat composer") that declares
+// every option kind, rendered with the engine's own template layer.
+const componentOptionsHarness = new URLSearchParams(window.location.search).has("componentOptions");
+const COMPONENT_OPTIONS_SOURCE = `<!doctype html>
+<html lang="en">
+  <head>
+    <title>Chat composer</title>
+    <template data-zd-options>
+      <zd-option name="width" type="number" label="Width" default="1120" min="600" max="1600" unit="px"></zd-option>
+      <zd-option name="attachments" type="number" label="Attachments" default="2" min="0" max="6"></zd-option>
+      <zd-option name="gap" type="number" label="Gap" default="8" unit="px"></zd-option>
+      <zd-option name="mode" type="choice" label="Mode" choices="ask plan" default="ask"></zd-option>
+      <zd-option name="density" type="choice" label="Density" choices="compact cozy comfortable spacious" default="comfortable"></zd-option>
+      <zd-option name="toolbar" type="boolean" label="Toolbar" default="true"></zd-option>
+      <zd-option name="accent" type="color" label="Accent" default="var(--blue-primary)"></zd-option>
+      <zd-option name="ink" type="color" label="Ink" default="darkslategray"></zd-option>
+      <zd-option name="send-radius" type="number" label="Corner radius" group="Send button" default="8" min="0" max="14" unit="px"></zd-option>
+      <zd-option name="send-label" type="text" label="Label" group="Send button" default="Send"></zd-option>
+      <zd-option name="motion" type="easing" label="Easing" default="ease-out 150ms"></zd-option>
+      <zd-option name="settle" type="easing" label="Settle" default="spring(0.3) 400ms"></zd-option>
+    </template>
+    <style>
+      :root { --blue-primary: royalblue; }
+      body { margin: 0; font-family: system-ui, sans-serif; background: white; }
+      .composer { box-sizing: border-box; width: var(--zd-width); display: flex; flex-direction: column; gap: var(--zd-gap); padding: 16px;
+        color: var(--zd-ink); transition: box-shadow var(--zd-motion-duration) var(--zd-motion-easing); }
+      .chips { display: flex; gap: 6px; }
+      .chip { padding: 2px 8px; border-radius: 6px; background: gainsboro; }
+      .toolbar { display: flex; justify-content: space-between; }
+      .send { border: 0; border-radius: var(--zd-send-radius); padding: 4px 10px; background: var(--zd-accent); color: white;
+        transition: transform var(--zd-settle-duration) var(--zd-settle-easing); }
+    </style>
+  </head>
+  <body>
+    <main class="composer" data-oid="cc-root" data-density="{{ density }}">
+      <div class="chips" data-oid="cc-chips"><span class="chip" data-oid="cc-chip" data-zd-for="i in range(attachments)">File {{ i + 1 }}</span></div>
+      <p data-oid="cc-prompt">Ask anything</p>
+      <div class="toolbar" data-oid="cc-toolbar" data-zd-if="toolbar">
+        <span data-oid="cc-mode">{{ mode == "plan" ? "Plan" : "Ask" }}</span>
+        <button class="send" data-oid="cc-send">{{ send-label }}</button>
+      </div>
+    </main>
+  </body>
+</html>`;
+
+/** A main component frame as the engine renders it: its template with its
+ * defaults, and its options as custom properties on :root. */
+function renderHarnessComponentFrame(source: string): string {
+  const summary = designComponentSummaryOf(source);
+  if (!summary) return source;
+  const { declaration } = readComponentDeclaration(summary.elements.map((element) => ({ ...element, offset: 0 })));
+  const values = componentInheritedValues(declaration, null);
+  const scope = componentExpressionScope(declaration, values);
+  const html = renderComponentTemplate(source, { scope, ids: "copy", budget: createComponentTemplateBudget(), document: true });
+  return html.replace(/<\/head>/i, `<style data-zeros-options>:root { ${componentOptionCss(declaration, values, scope)} }</style></head>`);
+}
 // Its colours are hex, the common case, so the card shows what the field does.
 const STYLE_ORIGINS_HEX: Record<string, string> = { "--bg1": "#FFFFFF", "--bg2": "#F5F5F5", "--fg1": "#1C1C1C", "--fg2": "#696969", "--border2": "#C0C0C0" }; // check:ui ignore-line -- fixture frame CSS, not app chrome
 const STYLE_ORIGINS_LEGACY = "#B22222"; // check:ui ignore-line -- fixture frame CSS, not app chrome
@@ -391,7 +460,7 @@ const homeSource = styleOriginsHarness
   </body>
 </html>`;
 
-const pricingSource = `<!doctype html>
+const pricingSource = componentOptionsHarness ? COMPONENT_OPTIONS_SOURCE : `<!doctype html>
 <html data-oid="pricing-html">
   <head>
     <style>
@@ -606,7 +675,7 @@ async function main() {
       },
       {
         file: "pricing.html",
-        title: "Pricing",
+        title: componentOptionsHarness ? "Chat composer" : "Pricing",
         width: 1_440,
         height: 900,
         x: 1_560,
@@ -615,6 +684,7 @@ async function main() {
         nodeCount: 18,
         modifiedAt: 2,
         sourceVersion: PRICING_SOURCE_VERSION,
+        ...(componentOptionsHarness ? { component: designComponentSummaryOf(pricingSource)! } : {}),
       },
     ],
     tokens: tokenPillsHarness || styleOriginsHarness
@@ -812,7 +882,7 @@ async function main() {
     designFrameDocumentKey(workspaceId, "pricing.html", PRICING_SOURCE_VERSION),
     {
       file: "pricing.html",
-      title: "Pricing",
+      title: componentOptionsHarness ? "Chat composer" : "Pricing",
       width: 1_440,
       height: 900,
       x: 1_560,
@@ -1009,6 +1079,40 @@ async function main() {
   }
   let currentHomeSource = homeSource;
   let currentPricingSource = pricingSource;
+  // The component frame's own history: each option write, undone exactly.
+  const componentUndo: Array<{ source: string; snapshot: typeof currentWorkspaceSnapshot }> = [];
+  const componentRedo: typeof componentUndo = [];
+  let componentGeneration = 0;
+  const publishComponentFrame = (source: string, notApplied?: "last-good" | "defaults") => {
+    componentGeneration += 1;
+    const sourceVersion = componentGeneration.toString(16).padStart(24, "c").slice(-24);
+    const previous = currentWorkspaceSnapshot.frames.find((frame) => frame.file === "pricing.html")!;
+    const summary = designComponentSummaryOf(source)!;
+    const frame = { ...previous, sourceVersion, modifiedAt: previous.modifiedAt + 1,
+      component: notApplied ? { ...summary, notApplied } : summary };
+    currentPricingSource = source;
+    currentWorkspaceSnapshot = { ...currentWorkspaceSnapshot, frames: currentWorkspaceSnapshot.frames.map((entry) => entry.file === "pricing.html" ? frame : entry) };
+    designFrameDocumentCache.setData(designFrameDocumentKey(workspaceId, "pricing.html", sourceVersion),
+      { ...frame, source, srcDoc: withDesignRuntime(source, sourceVersion), tree: [] });
+    const foundation = foundationReplies.get(designFoundationKey(workspaceId, "pricing.html", previous.sourceVersion))!;
+    publishFoundation(designFoundationKey(workspaceId, "pricing.html", sourceVersion), {
+      ...foundation,
+      summary: { ...foundation.summary, revision: `harness:${sourceVersion}` },
+      foundation: { ...foundation.foundation, revision: `harness:${sourceVersion}` },
+    });
+    designWorkspaceSnapshotCache.setData(workspaceId, currentWorkspaceSnapshot);
+    return { before: previous.sourceVersion, after: sourceVersion };
+  };
+  if (componentOptionsHarness) {
+    const harness = window as Window & {
+      __zerosHarnessComponentNotApplied?: (shows: "last-good" | "defaults" | null) => void;
+      __zerosHarnessComponentPreviewMessages?: () => number;
+      __zerosHarnessComponentSource?: () => string;
+    };
+    harness.__zerosHarnessComponentNotApplied = (shows) => { publishComponentFrame(currentPricingSource, shows ?? undefined); };
+    harness.__zerosHarnessComponentPreviewMessages = () => designComponentPreviewMessagesForTests();
+    harness.__zerosHarnessComponentSource = () => currentPricingSource;
+  }
   let nestedFrameCounter = 0;
   let styleGenerationCounter = 0;
   let textTransactionCounter = 0;
@@ -1531,6 +1635,29 @@ async function main() {
           result: { frame: file, nodeId, snapshot: currentWorkspaceSnapshot },
         };
       }
+      if (componentOptionsHarness && (message.op === "design.history.undo" || message.op === "design.history.redo")) {
+        const undo = message.op.endsWith("undo");
+        const restored = (undo ? componentUndo : componentRedo).pop();
+        const previous = currentWorkspaceSnapshot;
+        if (restored) {
+          (undo ? componentRedo : componentUndo).push({ source: currentPricingSource, snapshot: currentWorkspaceSnapshot });
+          currentPricingSource = restored.source;
+          currentWorkspaceSnapshot = restored.snapshot;
+          designWorkspaceSnapshotCache.setData(workspaceId, currentWorkspaceSnapshot);
+          applyDesignWorkspaceRefreshVersion(workspaceId, 500 + ++componentGeneration);
+        }
+        designShortcutOperations.push("history:confirmed");
+        const version = (snapshot: typeof previous) => snapshot.frames.find((frame) => frame.file === "pricing.html")!.sourceVersion;
+        return {
+          type: "WORKSPACE_RESPONSE",
+          result: {
+            result: restored ? { revision: `harness:${version(currentWorkspaceSnapshot)}`,
+              receipt: { status: "applied", beforeRevision: `harness:${version(previous)}`, afterRevision: `harness:${version(currentWorkspaceSnapshot)}` } } : null,
+            historyFrame: "pricing.html",
+            snapshot: currentWorkspaceSnapshot,
+          },
+        };
+      }
       if (
         layoutGestureHarness &&
         (message.op === "design.node.styles" ||
@@ -1779,6 +1906,30 @@ async function main() {
                   appliedOperationIds: transaction.operations.map((operation) => operation.operationId),
                   skippedOperationIds: [],
                 },
+              },
+              snapshot: currentWorkspaceSnapshot,
+            },
+          };
+        }
+        if (componentOptionsHarness && transaction?.operations?.length && transaction.operations.every((operation) => operation.type === "component.set-option")) {
+          const current = currentWorkspaceSnapshot.frames.find((frame) => frame.file === "pricing.html")!;
+          if (transaction.documentId !== "harness:pricing.html" || transaction.baseRevision !== `harness:${current.sourceVersion}`)
+            throw new Error("The option transaction document or revision is stale.");
+          let next = currentPricingSource;
+          for (const operation of transaction.operations as unknown as Array<{ file: string; option: string; variant: string | null; value: string | number | boolean | null }>)
+            next = mutateComponentOption(next, operation.file, operation);
+          componentUndo.push({ source: currentPricingSource, snapshot: currentWorkspaceSnapshot });
+          componentRedo.length = 0;
+          const { before, after } = publishComponentFrame(next);
+          applyDesignWorkspaceRefreshVersion(workspaceId, 500 + componentGeneration);
+          return {
+            type: "WORKSPACE_RESPONSE",
+            result: {
+              result: {
+                revision: `harness:${after}`,
+                receipt: { status: "applied", transactionId: transaction.transactionId, documentId: transaction.documentId,
+                  beforeRevision: `harness:${before}`, afterRevision: `harness:${after}`,
+                  appliedOperationIds: transaction.operations.map((operation) => operation.operationId), skippedOperationIds: [] },
               },
               snapshot: currentWorkspaceSnapshot,
             },

@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
-import type { ComponentExpressionValue } from "@zeros/design-core";
+import type {
+  ComponentExpressionValue,
+} from "@zeros/design-core/components";
 
 import {
   COMPONENT_TEMPLATE_LIMITS,
@@ -7,7 +9,7 @@ import {
   createComponentTemplateBudget,
   renderComponentTemplate,
   REFUSED_HOLE_ATTRIBUTES,
-} from "../component-template";
+} from "@zeros/design-web/component-template";
 
 const scope = new Map<string, ComponentExpressionValue>([
   ["width", 1120],

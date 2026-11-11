@@ -249,6 +249,22 @@ function isFrameChangeValue(value: unknown): value is string {
   return typeof value === "string" && value.length <= DESIGN_RUNTIME_FRAME_CHANGE_LIMITS.value;
 }
 
+/** A preview of component option values: custom properties the runtime sets
+ * in a style it owns, over the frame's generated values, until it is cleared
+ * or the document is replaced by the commit's own generation. */
+export const DESIGN_RUNTIME_COMPONENT_PREVIEW_LIMITS = { properties: 256, value: 512 } as const;
+
+export interface DesignRuntimeComponentOptionsPreview {
+  sourceVersion: string;
+  /** Properties set; 0 after a clear. */
+  applied: number;
+}
+
+export function isDesignRuntimeComponentOptionsPreview(value: unknown): value is DesignRuntimeComponentOptionsPreview {
+  return isRecord(value) && typeof value.sourceVersion === "string" && /^[a-f0-9]{24}$/.test(value.sourceVersion) &&
+    Number.isInteger(value.applied) && (value.applied as number) >= 0 && (value.applied as number) <= DESIGN_RUNTIME_COMPONENT_PREVIEW_LIMITS.properties;
+}
+
 export function isDesignRuntimeFrameChanges(value: unknown): value is DesignRuntimeFrameChanges {
   if (!isRecord(value) || !isSourceVersion(value.sourceVersion) || !Array.isArray(value.layers)) return false;
   if (typeof value.examined !== "number" || !Number.isInteger(value.examined) || value.examined < 0 ||
@@ -741,12 +757,14 @@ export type DesignRuntimeMethod =
   | "holdNodeState"
   | "releaseNodeState"
   /** Opt-in: the frame's changes made by hand, in one reply. */
-  | "getFrameChanges";
+  | "getFrameChanges"
+  /** Opt-in: show a component's option values before they are written. */
+  | "previewComponentOptions";
 
 /** Methods a runtime advertises only when the host's handshake lists them
  * in `features`, so a host that predates them still accepts the runtime's
  * capabilities. */
-export const DESIGN_RUNTIME_OPT_IN_METHODS = ["previewStylesheet", "setPlayback", "previewInsert", "clearPreviewInserts", "previewHistory", "commitStructure", "previewStructure", "clearPreviewStructure", "holdNodeState", "releaseNodeState", "getFrameChanges"] as const;
+export const DESIGN_RUNTIME_OPT_IN_METHODS = ["previewStylesheet", "setPlayback", "previewInsert", "clearPreviewInserts", "previewHistory", "commitStructure", "previewStructure", "clearPreviewStructure", "holdNodeState", "releaseNodeState", "getFrameChanges", "previewComponentOptions"] as const;
 
 export interface DesignRuntimePlaybackStopped {
   sourceVersion: string;
@@ -836,6 +854,7 @@ const DESIGN_RUNTIME_METHODS = new Set<DesignRuntimeMethod>([
   "holdNodeState",
   "releaseNodeState",
   "getFrameChanges",
+  "previewComponentOptions",
 ]);
 
 export interface DesignRuntimeHostRequest {
@@ -1351,7 +1370,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   ];
   // Advertised only to a host whose handshake asks for them, so a host that
   // predates a method still accepts these capabilities.
-  var OPT_IN_METHODS = ["previewStylesheet", "setPlayback", "previewInsert", "clearPreviewInserts", "previewHistory", "commitStructure", "previewStructure", "clearPreviewStructure", "holdNodeState", "releaseNodeState", "getFrameChanges"];
+  var OPT_IN_METHODS = ["previewStylesheet", "setPlayback", "previewInsert", "clearPreviewInserts", "previewHistory", "commitStructure", "previewStructure", "clearPreviewStructure", "holdNodeState", "releaseNodeState", "getFrameChanges", "previewComponentOptions"];
   var enabledOptInMethods = [];
   var MAX_PREVIEW_STYLESHEET_CHARS = 4194304;
   // Everything one frame of direct manipulation paints from. Deliberately tiny:
@@ -3600,6 +3619,56 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       changes.push({ property: property, value: winner.value.slice(0, ${DESIGN_RUNTIME_FRAME_CHANGE_LIMITS.value}), replaced: replaced });
     }
     return changes;
+  }
+
+  // ── Component option preview ──────────────────────────────
+  // Custom properties a component's options set, shown before they are
+  // written: one runtime-owned style, replaced on each call, gone on clear or
+  // with the document. Only --zd-* names and plain values: no rule can end,
+  // no comment open, nothing load.
+
+  var COMPONENT_PREVIEW_NAME = /^--zd-[a-z0-9-]{1,80}$/;
+  var COMPONENT_PREVIEW_VALUE = /^[A-Za-z0-9 #%.,()\/+_-]*$/;
+
+  function componentPreviewValueOk(value) {
+    if (typeof value !== "string" || value.length > ${DESIGN_RUNTIME_COMPONENT_PREVIEW_LIMITS.value} || !COMPONENT_PREVIEW_VALUE.test(value)) return false;
+    if (/url\(|expression\(|image\(|\/\*|\*\//i.test(value)) return false;
+    var depth = 0;
+    for (var index = 0; index < value.length; index += 1) {
+      if (value[index] === "(") depth += 1;
+      else if (value[index] === ")") { depth -= 1; if (depth < 0) return false; }
+    }
+    return depth === 0;
+  }
+
+  function previewComponentOptions(args) {
+    var existing = document.querySelector("style[data-zeros-runtime-options]");
+    if (args && args.clear === true) {
+      if (existing) withoutObservedMutations(function () { existing.remove(); });
+      return { sourceVersion: SOURCE_VERSION, applied: 0 };
+    }
+    var properties = args && args.properties;
+    if (!properties || typeof properties !== "object" || Array.isArray(properties)) throw typedError("BAD_REQUEST", "Component option preview needs properties.", false);
+    var names = Object.keys(properties);
+    if (names.length > ${DESIGN_RUNTIME_COMPONENT_PREVIEW_LIMITS.properties}) throw typedError("BAD_REQUEST", "Too many component option properties.", false);
+    var declarations = [];
+    for (var nameIndex = 0; nameIndex < names.length; nameIndex += 1) {
+      var name = names[nameIndex];
+      var value = properties[name];
+      if (!COMPONENT_PREVIEW_NAME.test(name) || !componentPreviewValueOk(value)) throw typedError("BAD_REQUEST", "Component option preview refused " + name.slice(0, 80) + ".", false);
+      declarations.push(name + ": " + value);
+    }
+    withoutObservedMutations(function () {
+      var style = existing;
+      if (!style) {
+        style = document.createElement("style");
+        style.setAttribute("data-zeros-runtime-options", "");
+        (document.head || document.documentElement).appendChild(style);
+      }
+      // :root:root wins over the generated :root rule wherever it sits.
+      style.textContent = declarations.length ? ":root:root { " + declarations.join("; ") + "; }" : "";
+    });
+    return { sourceVersion: SOURCE_VERSION, applied: declarations.length };
   }
 
   function frameChangesOf(args) {
@@ -6109,6 +6178,9 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       case "releaseNodeState":
         if (enabledOptInMethods.indexOf("releaseNodeState") < 0) throw new Error("Unknown design runtime method: releaseNodeState");
         return { released: releaseHeldState() };
+      case "previewComponentOptions":
+        if (enabledOptInMethods.indexOf("previewComponentOptions") < 0) throw new Error("Unknown design runtime method: previewComponentOptions");
+        return previewComponentOptions(args);
       case "getFrameChanges":
         if (enabledOptInMethods.indexOf("getFrameChanges") < 0) throw new Error("Unknown design runtime method: getFrameChanges");
         // Read as Default: a held state's copies are no layer's own value.

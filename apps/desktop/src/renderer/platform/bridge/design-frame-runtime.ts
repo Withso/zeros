@@ -18,6 +18,8 @@ import {
   isDesignRuntimeAuthoredStyles,
   isDesignRuntimeFrameMessage,
   isDesignRuntimeFrameChanges,
+  isDesignRuntimeComponentOptionsPreview,
+  type DesignRuntimeComponentOptionsPreview,
   isDesignRuntimeNodeState,
   isRuntimeNodeLayout,
   type DesignRuntimeFrameMessage,
@@ -164,6 +166,9 @@ export interface DesignFrameRuntimeConnection {
     signal?: AbortSignal,
   ): Promise<DesignRuntimeFrameChanges>;
   releaseNodeState?(signal?: AbortSignal): Promise<{ released: boolean }>;
+  /** Show a component's option values as custom properties before they are
+   * written; null clears. Opt-in: check `supports("previewComponentOptions")`. */
+  previewComponentOptions?(properties: Readonly<Record<string, string>> | null, signal?: AbortSignal): Promise<DesignRuntimeComponentOptionsPreview>;
   previewStyles(
     nodeId: string,
     styles: Record<string, string | null>,
@@ -825,6 +830,18 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
   async clearPreviewStructure(previewId?: string, signal?: AbortSignal): Promise<void> {
     if (!this.supports("clearPreviewStructure")) throw runtimeError("clearPreviewStructure is not supported", "METHOD_NOT_SUPPORTED");
     await this.request("clearPreviewStructure", previewId === undefined ? {} : { previewId }, signal);
+  }
+
+  async previewComponentOptions(
+    properties: Readonly<Record<string, string>> | null,
+    signal?: AbortSignal,
+  ): Promise<DesignRuntimeComponentOptionsPreview> {
+    if (!this.supports("previewComponentOptions")) throw runtimeError("previewComponentOptions is not supported", "METHOD_NOT_SUPPORTED");
+    const result = await this.request("previewComponentOptions", properties ? { properties } : { clear: true }, signal);
+    if (!isDesignRuntimeComponentOptionsPreview(result) || result.sourceVersion !== this.expectedSourceVersion) {
+      throw runtimeError("previewComponentOptions returned malformed data");
+    }
+    return result;
   }
 
   async getFrameChanges(

@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 
-import { designForcedValueBrief, designSourceFixBrief, designSyncBrief, designTidyBrief } from "../design-agent-brief";
+import {
+  designComponentOptionsBrief,
+  designComponentOptionsFixBrief,
+  designForcedValueBrief,
+  designSourceFixBrief,
+  designSyncBrief,
+  designTidyBrief,
+} from "../design-agent-brief";
 
 const source = {
   id: "app",
@@ -92,5 +99,26 @@ describe("Design agent briefs", () => {
     expect(brief.text).toContain("Ask before changing application code.");
     expect(designTidyBrief({ directory: "D", frame: "a.html", changes: [{ oid: "x", layer: "X", property: "gap", value: "1px", replaced: { value: "2px" } }] }).label)
       .toBe("Tidy 1 change in a.html");
+  });
+
+  it("asks to change a component's options through the skill, naming the frame", () => {
+    const brief = designComponentOptionsBrief({ directory: "Shop - Design", frame: "chat/composer.html", title: "Chat composer" });
+    expect(brief.label).toBe("Change the options of Chat composer");
+    expect(brief.text).toContain('the component "Chat composer" (chat/composer.html) in the Design directory "Shop - Design"');
+    expect(brief.text).toContain('Follow "Change a component\'s options" in the Zeros Design skill');
+    expect(brief.text).toContain("Ask me what to change first.");
+  });
+
+  it("asks to fix options that could not be applied, with what the frame shows and each problem", () => {
+    const brief = designComponentOptionsFixBrief({
+      directory: "D", frame: "chat/composer.html", title: "Chat composer", shows: "defaults",
+      problems: [{ line: 4, message: 'Unknown name widht.' }, { line: 9, message: "width must be a number from 640 to 1440; 9000 does not fit." }],
+    });
+    expect(brief.label).toBe("Fix the options of Chat composer");
+    expect(brief.text).toContain("could not be applied; the frame shows the component's defaults.");
+    expect(brief.text).toContain('Follow "Fix a component\'s options" in the Zeros Design skill');
+    expect(brief.text).toContain("- line 4: Unknown name widht.");
+    expect(designComponentOptionsFixBrief({ directory: "D", frame: "a.html", title: "A", shows: "last-good", problems: [] }).text)
+      .toContain("the frame shows its last good render. Run design validate to see why.");
   });
 });
