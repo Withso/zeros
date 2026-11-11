@@ -11,6 +11,7 @@ import {
   createPlan,
   FINAL_CONTEXTS,
   LEGACY_CONTEXTS,
+  MERGE_QUEUE_PARAMETERS,
   parseArgs,
   RULESET_ID,
   runMigration,
@@ -891,5 +892,62 @@ describe("apply authorization and race guards", () => {
     );
     expect(refused.status).toBe(1);
     expect(refused.stderr).toContain("Ruleset migration refused");
+  });
+});
+
+describe("main merge queue stages", () => {
+  const queueRules = (ruleset: { rules: { type: string }[] }) => ruleset.rules.filter((rule) => rule.type === "merge_queue");
+
+  it("adds exactly one squash merge queue and leaves every other rule and check unchanged", () => {
+    const live = liveRuleset();
+    const plan = createPlan(live, "add-merge-queue");
+    expect(queueRules(plan.payload)).toEqual([{ type: "merge_queue", parameters: MERGE_QUEUE_PARAMETERS }]);
+    expect(MERGE_QUEUE_PARAMETERS).toMatchObject({ merge_method: "SQUASH", grouping_strategy: "ALLGREEN" });
+    expect(plan.payload.rules.filter((rule: { type: string }) => rule.type !== "merge_queue")).toEqual(live.rules);
+    expect(plan.after).toEqual(plan.before);
+    expect(plan.diff).toEqual([{ op: "add", path: `/rules/${live.rules.length}`, value: queueRules(plan.payload)[0] }]);
+    expect(createPlan({ ...live, rules: plan.payload.rules } as never, "add-merge-queue").diff).toEqual([]);
+  });
+
+  it("refuses to overwrite a merge queue the owner tuned", () => {
+    const live = liveRuleset();
+    live.rules.push({ type: "merge_queue", parameters: { ...MERGE_QUEUE_PARAMETERS, max_entries_to_build: 9 } } as never);
+    expect(() => createPlan(live, "add-merge-queue")).toThrow(/different merge queue/);
+  });
+
+  it("removes only the merge queue to roll back", () => {
+    const live = liveRuleset();
+    const queued = createPlan(live, "add-merge-queue").payload;
+    const plan = createPlan({ ...live, rules: queued.rules } as never, "remove-merge-queue");
+    expect(plan.payload.rules).toEqual(live.rules);
+    expect(plan.diff).toEqual([{ op: "remove", path: `/rules/${live.rules.length}` }]);
+    expect(createPlan(live, "remove-merge-queue").diff).toEqual([]);
+  });
+
+  it("applies the queue with one verified PUT without requiring every open PR to be green", () => {
+    const fixture = mockGh({ checks: [] });
+    const dry = invoke(["apply", "--stage", "add-merge-queue"], fixture);
+    expect(dry.exitCode).toBe(0);
+    expect(fixture.puts).toEqual([]);
+    const applied = invoke(["apply", "--stage", "add-merge-queue", "--yes"], fixture, dry.directory);
+    expect(applied.exitCode).toBe(0);
+    expect(fixture.puts).toHaveLength(1);
+    expect(queueRules(fixture.live)).toHaveLength(1);
+    expect(contexts(fixture.live)).toEqual(LEGACY_CONTEXTS);
+    const rollback = invoke(["apply", "--stage", "remove-merge-queue", "--yes"], fixture, dry.directory);
+    expect(rollback.exitCode).toBe(0);
+    expect(queueRules(fixture.live)).toEqual([]);
+    expect(fixture.puts).toHaveLength(2);
+  });
+});
+
+describe("required checks on merge groups", () => {
+  const read = (file: string) => readFileSync(path.join(ROOT, ".github/workflows", file), "utf8");
+  it("runs every required producer for merge_group and scans the whole queued range", () => {
+    for (const file of ["preflight.yml", "codeql.yml", "lint-ci.yml"]) expect(read(file), file).toMatch(/^  merge_group:/m);
+    const preflight = read("preflight.yml");
+    for (const name of ["quality", "test", "build", "source-sync (macOS)", "control plane", "ui-smoke (composer)", "secret scan (PR commit range)"])
+      expect(preflight, name).toContain(`name: ${name}\n`);
+    expect(preflight).toContain("BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}");
   });
 });

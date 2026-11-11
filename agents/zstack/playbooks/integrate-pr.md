@@ -37,8 +37,9 @@ session itself.
    `gh pr edit` is refused for review-request access, update the body with
    `gh api -X PATCH repos/<owner>/<repo>/pulls/<n> -F body=@<file>`. Confirm
    a push with `git ls-remote`, not with a pipeline's exit status.
-7. **Merge** with `pnpm agent:merge <n>`, which arms auto-merge. Only one armed
-   PR at a time: queue the rest and arm each one after the previous merges.
+7. **Merge** with `pnpm agent:merge <n>`. On main's merge queue it enqueues,
+   and several PRs may be in flight; each is tested on top of main and the
+   entries ahead of it. Without a queue it arms auto-merge for one PR at a time.
    Apply `ci:*` and `agent-runtime:hold` labels before the final push. A label
    added later starts a new CI run for the same head and cancels the running
    one, whose roll-ups then fail with "Invalid … selection/result"; read the
