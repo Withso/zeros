@@ -18,11 +18,12 @@ import { LOCAL_COMMANDS_FEATURE, LocalCommandIdSchema } from "./local-commands/c
 import { NewLocalCommandSchema, localUnavailable, type CloudLocalCommands } from "./local-commands/requests.js";
 import { localBody, localUuid, localRouteError } from "./local-commands/routes.js";
 import { requestSignal, type CloudLocalCommandSignals } from "./local-commands/signals.js";
+import { CloudV2SetupStatusSchema } from "./setup-status-contract.js";
 
 export const CLOUD_V2_WORKER_API = "/v2/cloud/worker";
 type ConfigFrame = Extract<CloudV2ControlFrame, { t: "config" }>;
 export type CloudV2WorkerRouteDeps = {
-  store: Pick<CloudV2Store, "beginWorkerHello" | "acceptWorkerHello" | "workerSession" | "accessEpoch" | "loginRevision" | "markActive" | "writeWorkerHistory" | "failWorkerCheckout"> & Partial<Pick<CloudV2Store, "prompts" | "workerHelloIdentity" | "chatEdits">>;
+  store: Pick<CloudV2Store, "beginWorkerHello" | "acceptWorkerHello" | "workerSession" | "accessEpoch" | "loginRevision" | "markActive" | "writeWorkerHistory" | "failWorkerCheckout"> & Partial<Pick<CloudV2Store, "prompts" | "workerHelloIdentity" | "chatEdits" | "reportWorkerSetup">>;
   runtimeSha256: string;
   runtimeSha256ForWorkspace?(workspace: CloudV2Workspace): Promise<string>;
   runtimeUpdates?: RuntimeAdoption;
@@ -270,6 +271,15 @@ export function createCloudV2WorkerRoutes(deps: CloudV2WorkerRouteDeps): Hono {
     if (!deps.environmentReport) throw new HttpError(404, "not_found", "Environment status is unavailable.");
     await deps.environmentReport(auth.token, auth.bootId, report);
     return c.json({ sequence: report.sequence });
+  });
+  app.post(`${CLOUD_V2_WORKER_API}/setup`, async c => {
+    if (!workerFeatures(c).has("setup-status-v1") || !deps.store.reportWorkerSetup)
+      throw new HttpError(404, "not_found", "Setup status is unavailable.");
+    const auth = await session(c, deps, false, true), report = await body(c, CloudV2SetupStatusSchema);
+    const handoff = c.req.header("x-zeros-runtime-handoff");
+    await deps.store.reportWorkerSetup(auth.token, auth.bootId, report,
+      { accessEpoch: auth.workspace.accessEpoch, ...(handoff ? { handoff } : {}) });
+    return c.body(null, 204);
   });
   app.post(`${CLOUD_V2_WORKER_API}/history`, async c => {
     const auth = await session(c, deps), input = await body(c, CloudV2WorkerHistorySchema);

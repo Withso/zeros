@@ -37,7 +37,7 @@ export async function runCloudWorkspaceDetailsSmoke({ page, harnessBase, check }
       await open("state=running", theme);
       const popup = page.getByRole("dialog", { name: "Cloud workspace details" });
       await expect(popup).toBeVisible();
-      for (const text of ["Zeros Cloud", "Running", "4 cores · 12% used", "8 GB · 50% used", "64 GB · 10% used"])
+      for (const text of ["Zeros Cloud", "Running", "Setup", "Succeeded", "Agent cost", "$1.23 · estimated", "4 cores · 12% used", "8 GB · 50% used", "64 GB · 10% used"])
         await expect(popup.getByText(text, { exact: true })).toBeVisible();
       expect(await color(popup, "backgroundColor")).toBe(await token("--bg3"));
       surfaces.set(theme, await color(popup.getByText("Zeros Cloud", { exact: true }), "color"));
@@ -56,17 +56,17 @@ export async function runCloudWorkspaceDetailsSmoke({ page, harnessBase, check }
       await shoot(page.locator("main"), `details-running-focused-${theme}`);
       await page.keyboard.press("Enter");
       expect(await page.evaluate(() => window.__detailsFixture.calls())).toEqual(["restart"]);
-      check(`Cloud details show Zeros Cloud, Restart from the keyboard and VM usage on token colors in ${theme}`, true);
+      check(`Cloud details show Zeros Cloud, Restart from the keyboard and VM usage, setup status and agent cost on token colors in ${theme}`, true);
 
       await open("state=stopped", theme);
       const stopped = page.getByRole("dialog", { name: "Cloud workspace details" });
       await expect(stopped.getByText("Stopped", { exact: true })).toBeVisible();
       await expect(stopped.getByRole("button", { name: "Start workspace" })).toBeVisible();
       await expect(stopped.getByRole("button", { name: "Restart workspace" })).toHaveCount(0);
-      for (const label of ["CPU", "Memory", "Disk"]) await expect(stopped.getByText(label, { exact: true })).toHaveCount(0);
+      for (const label of ["CPU", "Memory", "Disk", "Setup", "Agent cost"]) await expect(stopped.getByText(label, { exact: true })).toHaveCount(0);
       expect(await color(stopped, "backgroundColor")).toBe(await token("--bg3"));
       await shoot(stopped, `details-stopped-${theme}`);
-      check(`A stopped cloud workspace shows Start and no usage rows in ${theme}`, true);
+      check(`A stopped cloud workspace shows Start and no usage, setup or cost rows in ${theme}`, true);
 
       stored = true; writes.length = 0;
       await open("view=setting", theme);

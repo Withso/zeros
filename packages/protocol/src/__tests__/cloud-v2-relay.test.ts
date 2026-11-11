@@ -105,3 +105,21 @@ describe("cloud v2 relay contract", () => {
       expect(CloudV2ControlFrameSchema.safeParse({ ...config, agents: { claude: extra } }).success).toBe(false);
   });
 });
+
+describe("agent cost (B3)", () => {
+  it("bounds the agent cost document field", async () => {
+    const { CloudV2AgentCostSchema } = await import("../cloud-v2-relay");
+    expect(CloudV2AgentCostSchema.safeParse({ totalUsd: 0, estimated: false }).success).toBe(true);
+    for (const bad of [{ totalUsd: -0.01, estimated: false }, { totalUsd: Infinity, estimated: true }, { totalUsd: 1 }, { totalUsd: 1, estimated: true, turns: 2 }])
+      expect(CloudV2AgentCostSchema.safeParse(bad).success).toBe(false);
+  });
+
+  it("carries a prompt row with turnSummary.usage through the unchanged history frame (B3 N/N-1)", async () => {
+    const { CloudV2WorkerFrameSchema } = await import("../cloud-v2-relay");
+    const turnSummary = { ord: 1, agentId: "claude", summary: null, startedAt: 1, endedAt: 2, stopReason: "end_turn", status: "completed", files: [],
+      usage: { accountingVersion: 1, costKind: "reported", inputTokens: 10, outputTokens: 2, totalCostUsd: 0.01 } };
+    const row = { msgId: "opening", kind: "text", createdAt: 1, payload: JSON.stringify({ id: "opening", kind: "text", role: "user", text: "Hi", createdAt: 1, turnSummary }) };
+    const parsed = CloudV2WorkerFrameSchema.parse({ t: "history", messages: { chatId: "chat", rows: [row] } });
+    expect(parsed).toEqual({ t: "history", messages: { chatId: "chat", rows: [row] } });
+  });
+});

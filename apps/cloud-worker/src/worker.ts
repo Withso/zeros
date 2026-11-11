@@ -3,7 +3,7 @@ import { access, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { CloudV2ControlFrameSchema, CLOUD_V2_RELAY_PROTOCOL, CLOUD_WORKSPACE_RESOURCES_CAPABILITY, type CloudV2ControlFrame, type CloudV2WorkerFrame } from "@zeros/protocol/cloud-v2-relay";
+import { CloudV2ControlFrameSchema, CLOUD_V2_RELAY_PROTOCOL, CLOUD_WORKSPACE_RESOURCES_CAPABILITY, type CloudV2ControlFrame, type CloudV2SetupStatus, type CloudV2WorkerFrame } from "@zeros/protocol/cloud-v2-relay";
 import { CloudV2PromptPullReplySchema } from "@zeros/protocol/cloud-v2-prompts";
 import { createMessage, type BridgeMessage } from "@zeros/protocol/messages";
 import { safeParseClientBridgeMessage } from "@zeros/protocol/schemas";
@@ -162,6 +162,8 @@ export class CloudWorker {
         this.online = true; this.idle = undefined; this.tokens.connect();
         await this.send({ t: "hello", protocol: CLOUD_V2_RELAY_PROTOCOL, workerVersion: "0.0.0",
           capabilities: { design: false, browser: false, simulators: false, terminal: true, files: true, git: true, agents: ["codex", "claude", "cursor"], mcp: 1 } });
+        // setup-status-v1: once after each hello; a first hello has no workspace yet and configuration reports it.
+        void this.setup?.reportCurrent();
       },
       frame: (raw) => this.receive(raw),
       close: () => {
@@ -526,6 +528,7 @@ export class CloudWorker {
       setup = new WorkspaceSetup({ directory: this.options.directory, workspace: config.workspace, gitEnvironment: this.gitEnvironment, application,
         signal: this.environmentLifetime.signal,
         runner: this.options.setupRunner, activity: () => { void this.reportIdle(); }, onStorageError: () => this.options.onError?.("storage"),
+        ...(this.options.transport.reportSetup ? { report: (status: CloudV2SetupStatus) => this.options.transport.reportSetup!(status) } : {}),
         beforeRun: async () => {
           if (refresh?.mayFastForward) await refreshing;
           await refresh?.touch();
@@ -541,6 +544,8 @@ export class CloudWorker {
       recordStartupTiming("worker_services", servicesStarted, timing);
       if (this.options.memoryWatchdog && process.platform === "linux" && process.getuid) this.startWatchdog(this.options.memoryWatchdog.runtimeRoots, process.getuid());
       const refreshing = refresh?.start();
+      // Before start: a file a hard stop left running reads as interrupted, never as this run.
+      void setup.reportCurrent();
       if (!this.options.runtimeResume) setup.start(this.initialSetupNeeded || restored);
       return true;
     } finally {

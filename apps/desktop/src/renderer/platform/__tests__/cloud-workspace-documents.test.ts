@@ -26,4 +26,24 @@ describe("cloud workspace document", () => {
       setupFailure: { code: "setup_command_failed", hasLog: true }, recovery: null });
     for (const field of ["lifecycleVersion", "sharingMode", "setupFailure", "recovery"]) expect(parsed).not.toHaveProperty(field);
   });
+  it("reads the top-level setup status, and drops a malformed one without refusing the document", () => {
+    const setup = { state: "failed", startedAt: 1, finishedAt: 2, exitCode: 3 };
+    expect(CloudWorkspaceDocumentSchema.parse({ ...document, setup }).setup).toEqual(setup);
+    expect(CloudWorkspaceDocumentSchema.parse({ ...document, setup: { ...setup, later: true } }).setup).toEqual(setup);
+    for (const bad of [{ state: "paused", startedAt: 1 }, "failed", null]) {
+      const parsed = CloudWorkspaceDocumentSchema.parse({ ...document, setup: bad });
+      expect(parsed.setup).toBeUndefined();
+      expect(parsed.name).toBe(document.name);
+    }
+    expect(CloudWorkspaceDocumentSchema.parse(document)).not.toHaveProperty("setup");
+  });
+  it("reads the top-level agent cost, and drops a malformed one without refusing the document", () => {
+    expect(CloudWorkspaceDocumentSchema.parse({ ...document, agentCost: { totalUsd: 1.234, estimated: true } }).agentCost).toEqual({ totalUsd: 1.234, estimated: true });
+    for (const bad of [{ totalUsd: -1, estimated: false }, { totalUsd: 1 }, 3]) {
+      const parsed = CloudWorkspaceDocumentSchema.parse({ ...document, agentCost: bad });
+      expect(parsed.agentCost).toBeUndefined();
+      expect(parsed.name).toBe(document.name);
+    }
+    expect(CloudWorkspaceDocumentSchema.parse(document)).not.toHaveProperty("agentCost");
+  });
 });

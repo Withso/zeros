@@ -46,6 +46,33 @@ it.each(["claude", "codex", "cursor"] as const)("records %s before native dispat
   } finally { await close(); }
 });
 
+it.each(["claude", "codex", "cursor"] as const)("mirrors %s's turn usage on the opening prompt row", async agentId => {
+  const { store, driver, send, completed, frames, close } = await setup(agentId);
+  const usage = { accountingVersion: 1 as const, costKind: "reported" as const, inputTokens: 1200, outputTokens: 80, cacheReadTokens: 900, totalCostUsd: 0.0123,
+    perModel: [{ model: "fixture-model", inputTokens: 1200, outputTokens: 80, costUsd: 0.0123 }] };
+  const opening = () => store.history("chat").map(row => JSON.parse(row.payload)).find(message => message.id === "opening");
+  try {
+    await send(); await expect.poll(() => driver.prompts.length).toBe(1);
+    driver.complete({ stopReason: "end_turn", usage }); await expect.poll(completed).toBe(true);
+    await expect.poll(() => opening()?.turnSummary?.usage).toEqual(usage);
+    expect(store.turnRecord("chat", "opening")?.usage).toEqual(usage);
+    const recorded = frames.filter(frame => frame.type === "AGENT_SESSION_UPDATE" && frame.notification.update.sessionUpdate === "user_message_recorded");
+    expect(recorded.at(-1)).toMatchObject({ notification: { update: { message: { turnSummary: { usage } } } } });
+  } finally { await close(); }
+});
+
+it("mirrors no usage for a turn whose driver reported none", async () => {
+  const { store, driver, send, completed, close } = await setup("codex");
+  try {
+    await send(); await expect.poll(() => driver.prompts.length).toBe(1);
+    driver.complete(); await expect.poll(completed).toBe(true);
+    await expect.poll(() => store.turnRecord("chat", "opening")?.status).toBe("completed");
+    const row = store.history("chat").map(entry => JSON.parse(entry.payload)).find(message => message.id === "opening");
+    expect(row.turnSummary).toBeDefined();
+    expect(row.turnSummary.usage ?? null).toBeNull();
+  } finally { await close(); }
+});
+
 it("captures background edits that settle while the first post-snapshot is being finalized", async () => {
   const { root, store, driver, agents, send, completed, close } = await setup("claude");
   const snapshots = agents.turns as unknown as { snapshot(chatId: string, turnId: string, phase: "pre" | "post"): Promise<string | null> };

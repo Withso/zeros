@@ -33,6 +33,7 @@ async function main() {
     createdAt: new Date(Date.now() - 3 * 86_400_000).toISOString(),
     repository: { forge: "github.com", owner: "example", name: "repo", revision: "refs/heads/main" },
     capabilities: { canWrite: true, canManage: true, canStart: true, startUnavailableReason: null },
+    ...(running ? { setup: { state: "succeeded", startedAt: Date.now() - 60_000, finishedAt: Date.now() - 30_000, exitCode: 0 }, agentCost: { totalUsd: 1.234, estimated: true } } : {}),
   } as unknown as import("../platform/cloud-workspaces").CloudWorkspaceDocument;
   const resources = running ? { cpu: { cores: 4, usedPercent: 12 }, memory: { totalBytes: 8 * 2 ** 30, usedPercent: 50 },
     disk: { totalBytes: 64 * 2 ** 30, usedPercent: 10 }, sampledAt: Date.now() } : null;

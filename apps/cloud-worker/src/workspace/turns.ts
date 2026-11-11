@@ -82,7 +82,7 @@ export class TurnService {
       startedAt: entry.startedAt, endedAt: null, status: "running", stopReason: null, preSnapshot, postSnapshot: null, files: [] });
   }
 
-  finish(chatId: string, turnId: string, state?: Pick<TurnInfo, "status" | "stopReason">): Promise<AgentTextMessage | undefined> {
+  finish(chatId: string, turnId: string, state?: Pick<TurnInfo, "status" | "stopReason" | "usage">): Promise<AgentTextMessage | undefined> {
     // A background completion can overlap the first terminal capture. Read the
     // record only after its prior capture commits, so a refresh cannot restore
     // running status or replace a newer comparison with an older tree.
@@ -95,7 +95,7 @@ export class TurnService {
     return next;
   }
 
-  private async finishTurn(chatId: string, turnId: string, state?: Pick<TurnInfo, "status" | "stopReason">): Promise<AgentTextMessage | undefined> {
+  private async finishTurn(chatId: string, turnId: string, state?: Pick<TurnInfo, "status" | "stopReason" | "usage">): Promise<AgentTextMessage | undefined> {
     const turn = this.store.turnRecord(chatId, turnId);
     if (!turn) return;
     const messages = this.store.messagesForTurn(chatId, turnId);

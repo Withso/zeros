@@ -50,7 +50,9 @@ export class CloudApiService {
       state: workspace.state, status: workspaceStatus(workspace), repository: workspace.repository, branch: workspace.branch,
       baseBranch: workspace.baseBranch, archived: workspace.archivedAt !== null, createdAt: workspace.createdAt,
       lastActivityAt: workspace.activeAt, creatorId: workspace.creatorUserId, creatorName: credential.name,
-      createdBySessionId: workspace.createdBySessionId ?? null, link: this.link(credential, workspace) };
+      createdBySessionId: workspace.createdBySessionId ?? null, link: this.link(credential, workspace),
+      ...(workspace.setup ? { setup: workspace.setup } : {}),
+      ...(workspace.agentCost ? { agentCost: workspace.agentCost } : {}) };
   }
   private sessionDocument(credential: CloudApiCredential, saved: ApiChatRow, workspace: CloudV2Workspace) {
     const row = saved.row, link = this.link(credential, workspace);
