@@ -2,7 +2,7 @@ import { writeFile } from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { CandidateSupersededError } from "./alpha-ci";
-import { AlphaAdmissionRejectedError } from "./alpha-frontier";
+import { AlphaAdmissionRejectedError, AlphaDestinationUnavailableError } from "./alpha-frontier";
 import { PromotionError } from "./contracts";
 import { githubClient } from "./github";
 
@@ -467,6 +467,23 @@ describe("Stage 2 automatic Alpha admission", () => {
       if (failure === "tag/ledger disagreement") test.state.tag = sourceSha;
       await expect(test.client.assertCurrent()).rejects.toBeInstanceOf(PromotionError);
     });
+
+  it.each(["API unavailable", "maintenance", "ledger unavailable"])(
+    "marks %s as a transient destination the initial barrier may wait for", async failure => {
+      const test = fixture({ ZEROS_ALPHA_FORWARD_ONLY: "enabled", GITHUB_JOB: "ci" });
+      if (failure === "API unavailable") test.state.identityStatus = 500;
+      if (failure === "maintenance") test.state.maintenance = true;
+      if (failure === "ledger unavailable") test.state.ledgerStatus = 404;
+      await expect(test.client.assertCurrent()).rejects.toBeInstanceOf(AlphaDestinationUnavailableError);
+    });
+
+  it("keeps a newer published destination a plain rejection, never a wait", async () => {
+    const test = fixture({ ZEROS_ALPHA_FORWARD_ONLY: "enabled", GITHUB_JOB: "ci" });
+    test.state.head = descendant; test.state.ops = descendant;
+    const error = await test.client.assertCurrent().catch(caught => caught);
+    expect(error).toBeInstanceOf(AlphaAdmissionRejectedError);
+    expect(error).not.toBeInstanceOf(AlphaDestinationUnavailableError);
+  });
 
   it("re-reads every live destination after admission and stops when a newer source owns Pages", async () => {
     const test = fixture({ ZEROS_ALPHA_FORWARD_ONLY: "enabled" }); test.state.head = descendant;

@@ -12,12 +12,13 @@ const checkout = fileURLToPath(new URL("../../", import.meta.url));
 const temporary: string[] = [];
 afterEach(async () => { for (const directory of temporary.splice(0)) await rm(directory, { recursive: true, force: true }); });
 
-async function publication(statuses: number[]) {
+async function publication(statuses: number[], staleReads = 0) {
   const directory = await mkdtemp(path.join(os.tmpdir(), "alpha-edit-workflow-")); temporary.push(directory);
   const bin = path.join(directory, "bin"), release = path.join(directory, "release");
   await mkdir(bin); await mkdir(release);
   const version = "0.1.0-alpha.123", sha = "a".repeat(40), calls = path.join(directory, "calls.jsonl");
   await writeFile(path.join(directory, "count"), "0");
+  await writeFile(path.join(directory, "reads"), "0");
   for (const file of [`Zeros-Alpha-${version}-arm64.dmg`, `Zeros-Alpha-${version}-arm64-mac.zip`,
     `Zeros-Alpha-${version}-arm64-mac.zip.blockmap`, "alpha-mac.yml"]) await writeFile(path.join(release, file), "synthetic");
   await writeFile(path.join(bin, "gh"), `#!${process.execPath}
@@ -35,8 +36,13 @@ if (args[0] === 'release' && args[1] === 'edit') {
     process.exit(1);
   }
 } else if (args[0] === 'api' && args.includes('--jq')) {
-  process.stdout.write(process.env.GITHUB_SHA + '\\n');
+  const reads = Number(fs.readFileSync(process.env.TEST_READS, 'utf8')) + 1;
+  fs.writeFileSync(process.env.TEST_READS, String(reads));
+  process.stdout.write((reads > Number(process.env.TEST_STALE_READS) ? process.env.GITHUB_SHA : 'b'.repeat(40)) + '\\n');
 }
+`, { mode: 0o700 });
+  await writeFile(path.join(bin, "sleep"), `#!${process.execPath}
+require('node:fs').appendFileSync(process.env.TEST_CALLS, JSON.stringify(['sleep', ...process.argv.slice(2)]) + '\\n');
 `, { mode: 0o700 });
   await writeFile(path.join(bin, "pnpm"), `#!${process.execPath}
 const fs = require('node:fs');
@@ -50,23 +56,25 @@ if (args.join(' ') === 'exec tsx scripts/release/alpha-release-edit-cli.ts') {
 `, { mode: 0o700 });
   const workflow: any = load(await readFile(path.join(checkout, ".github/workflows/alpha-publication.yml"), "utf8"));
   const step = workflow.jobs.publish.steps.find((row: any) => row.name === 'Publish rolling "alpha" prerelease');
-  let code = 0, stderr = "";
+  let code = 0, stderr = "", stdout = "";
   try {
     const isolated = 'export PATH="$TEST_BIN:/usr/bin:/bin"\nhash -r\n'
       + 'test "$(command -v gh)" = "$TEST_BIN/gh" || exit 96\n'
       + 'test "$(command -v pnpm)" = "$TEST_BIN/pnpm" || exit 96\n' + step.run;
-    ({ stderr } = await promisify(execFile)("/bin/bash", ["-c", isolated], { cwd: directory, timeout: 10_000,
+    ({ stderr, stdout } = await promisify(execFile)("/bin/bash", ["-c", isolated], { cwd: directory, timeout: 10_000,
       // Never inherit credentials or Git routing into a synthetic publisher.
       env: { PATH: `${bin}:/usr/bin:/bin`, VERSION: version, GITHUB_REPOSITORY: "fixture/zeros", GITHUB_SHA: sha,
         TEST_BIN: bin, TEST_CALLS: calls, TEST_COUNT: path.join(directory, "count"), TEST_STATUSES: JSON.stringify(statuses),
+        TEST_READS: path.join(directory, "reads"), TEST_STALE_READS: String(staleReads),
         TEST_TSX: createRequire(import.meta.url).resolve("tsx/cli"),
         TEST_EDIT_HELPER: path.join(checkout, "scripts/release/alpha-release-edit-cli.ts") } }));
   } catch (error) {
     code = typeof (error as { code?: unknown }).code === "number" ? (error as { code: number }).code : -1;
     stderr = String((error as { stderr?: unknown }).stderr ?? "");
+    stdout = String((error as { stdout?: unknown }).stdout ?? "");
   }
   const operations: string[][] = (await readFile(calls, "utf8")).trim().split("\n").map(line => JSON.parse(line));
-  return { code, stderr, operations };
+  return { code, stderr, stdout, operations };
 }
 
 describe("actual Alpha feed publication with synthetic GitHub", () => {
@@ -80,6 +88,24 @@ describe("actual Alpha feed publication with synthetic GitHub", () => {
     const tag = result.operations.findIndex(row => row.includes("PATCH"));
     expect(upload).toBeGreaterThan(result.operations.indexOf(edits[1]!)); expect(tag).toBeGreaterThan(upload);
     expect(result.operations.at(-1)).toEqual(["pnpm", "exec", "tsx", "scripts/release/release-ledger-cli.ts", "--verify"]);
+  });
+
+  it("waits out a stale tag readback after the PATCH instead of exiting 1 silently", async () => {
+    // Run 42976840452 published every asset, moved the tag, then failed on a
+    // bare `test` of an immediate readback that still showed the old commit.
+    const result = await publication([200], 2);
+    expect(result.code, `${result.stderr}\n${JSON.stringify(result.operations)}`).toBe(0);
+    expect(result.operations.filter(row => row[0] === "sleep")).toHaveLength(2);
+    expect(result.operations.filter(row => row.includes("PATCH"))).toHaveLength(1);
+    expect(result.operations.at(-1)).toEqual(["pnpm", "exec", "tsx", "scripts/release/release-ledger-cli.ts", "--verify"]);
+  });
+
+  it("names a tag that never reads back as this commit", async () => {
+    const result = await publication([200], 1_000);
+    expect(result.code).toBe(1);
+    expect(result.stdout).toContain(`::error::The alpha tag reads back as ${"b".repeat(40)}, not ${"a".repeat(40)}`);
+    expect(result.operations.filter(row => row.includes("PATCH"))).toHaveLength(1);
+    expect(result.operations.some(row => row.includes("--verify"))).toBe(false);
   });
 
   it("stops before uploads and tag mutation on a terminal edit refusal", async () => {

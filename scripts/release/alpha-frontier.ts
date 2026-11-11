@@ -71,6 +71,15 @@ export class AlphaAdmissionRejectedError extends PromotionError {
   constructor(reason = "An Alpha destination is newer than or divergent from this candidate; forward-only admission refused") { super(reason); }
 }
 
+/** A live destination could not be read: typically another Alpha release is
+ * mid-publication (API maintenance, Pages deploy). The initial barrier waits
+ * for it instead of skipping this candidate; elsewhere it stays red. */
+export class AlphaDestinationUnavailableError extends AlphaAdmissionRejectedError {}
+
+function requireAvailable(condition: unknown, reason: string): asserts condition {
+  if (!condition) throw new AlphaDestinationUnavailableError(reason);
+}
+
 /** A publisher uploads the ledger before moving the rolling tag. Only a
  * schema- and ancestry-checked mismatch may wait at initial admission; it is
  * never an admission or a green pre-mutation skip on its own. */
@@ -181,12 +190,12 @@ export async function assertAlphaDestinations(candidate: { repository: string; s
     liveReleaseLedger(candidate.repository, env.GH_TOKEN, fetcher, sleep),
   ]).catch(error => {
     if (error instanceof AlphaAdmissionRejectedError) throw error;
-    throw new AlphaAdmissionRejectedError("Alpha live destination identity is unavailable; forward-only admission refused");
+    throw new AlphaDestinationUnavailableError("Alpha live destination identity is unavailable; forward-only admission refused");
   });
-  requireDestination(identity, "Alpha live API/schema identity is unavailable; forward-only admission refused");
-  requireDestination(app && ops, "Alpha live Pages identity is unavailable; forward-only admission refused");
+  requireAvailable(identity, "Alpha live API/schema identity is unavailable; forward-only admission refused");
+  requireAvailable(app && ops, "Alpha live Pages identity is unavailable; forward-only admission refused");
   const parsed = ReleaseLedger.safeParse(previous);
-  requireDestination(parsed.success && parsed.data.channel === "alpha" && parsed.data.releases.length > 0,
+  requireAvailable(parsed.success && parsed.data.channel === "alpha" && parsed.data.releases.length > 0,
     "Alpha live release ledger is unavailable; forward-only admission refused");
   const entry = parsed.data.releases.at(-1)!;
   // Reuse the feed's version, duplicate and idempotency checks. Missing feeds

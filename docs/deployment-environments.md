@@ -1141,7 +1141,12 @@ admission. Every main push has its own full Preflight
 ([CI concurrency](ci-concurrency.md)). If a cancelled or failed candidate's gate
 cannot succeed and main has moved on, the barrier treats it as superseded, a
 green skip before any destination mutation, instead of waiting for the barrier
-timeout. A newer pending or failed gate defeats an older success. API-listed
+timeout. When the failed gate belongs to current main HEAD, the barrier fails
+red at once (since 2026-11-11); it no longer polls 110 minutes for a rerun. The
+cloud runtime job's full Preflight and CodeQL wait fails the same way, because
+it runs inside the `release-alpha` publication lock and a doomed wait held the
+next candidates back (run 42972332787). A new push to main is the recovery.
+A newer pending or failed gate defeats an older success. API-listed
 carried successes count on an ancillary-only retry; timestamps and certificate
 artifacts are not inferred as proof. History is bounded to 100 runs per
 workflow and 1,000 jobs, and an attempt change during job retrieval denies the
@@ -1212,7 +1217,12 @@ foreign receipt blocks forward-only freshness. Enabling a stage midway through
 an older unflagged run cannot manufacture admission.
 
 Both stages read destinations after admission; Stage 2 also reads them at the
-initial barrier. The checks use the existing bounded public Alpha API release identity, both
+initial barrier. An unavailable destination there (API, Pages or ledger
+unreadable, typically while another Alpha release is mid-publication) is a
+wait of up to 45 minutes, then red; until 2026-11-11 it was a green
+`ready=false` skip that left the newest green commit off Alpha until the next
+push (160ba5e). A destination newer than or divergent from the candidate is
+still a green skip: a newer commit already owns Alpha. The checks use the existing bounded public Alpha API release identity, both
 app and Ops `/zeros-deployment.json` manifests, the current rolling `alpha`
 Git tag (including annotated tags), and the feed's cumulative
 `alpha-release-ledger.json`. It compares each source separately with the
