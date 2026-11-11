@@ -55,6 +55,7 @@ import { DesignInspector } from "./design-inspector";
 import type { DesignRuntimeTreeNode } from "@zeros/protocol/design-runtime";
 import { errorMessage } from "./design-workspace-error";
 import { DesignWorkspaceSidebarPanels } from "./design-workspace-sidebar-panels";
+import { loadDesignComponentOptions } from "./design-component-options-loader";
 import {
   type DesignCanvasZoomActions,
   type DesignWorkspaceColumnProps,
@@ -136,6 +137,11 @@ export function DesignWorkspaceColumn({
   // a new chat with the person's default agent sets up syncing.
   const askAgent = useAskDesignAgent(folder);
   const loadedDirectory = snapshot.data?.directory ?? null;
+  // A component frame here: warm the Options section so selecting it waits on nothing.
+  const hasComponentFrame = snapshot.data?.frames.some((frame) => frame.component) === true;
+  useEffect(() => {
+    if (hasComponentFrame) void loadDesignComponentOptions().catch(() => {});
+  }, [hasComponentFrame]);
   const loadedSources = snapshot.data?.styleSources;
   useEffect(() => {
     if (!workspaceId || !surfaceActive || !loadedDirectory) return;
@@ -550,6 +556,7 @@ export function DesignWorkspaceColumn({
               onOpenMotionTimeline={openMotionTimeline}
               zoomActionsRef={zoomActionsRef}
               onAskAgent={askAgent}
+              panelVisible={panelVisible}
             />
           }
         />

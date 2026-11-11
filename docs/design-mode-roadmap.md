@@ -1746,8 +1746,42 @@ one it shows the component's defaults (`shows: "defaults"`). The expander's
 fast path is unchanged for a frame with no `<zd-` and no declaration in its
 head (about 12 µs for a 400-layer frame, before and after).
 
-Known limits: the Options section, variants menu, instance editing, Edit main,
-the error message in the panel and selecting inner parts ship in later slices;
+**Options section (slice 2).** With a component frame itself selected, the
+header reads its title and Component, and an Options section sits first,
+above the style sections: one row per option, built from the shared option
+rows (`shared/ui/primitives/option-row.tsx`). A number with a range is the
+slider (drag anywhere, a handle on hover, click the value to type, arrows
+step, Shift by ten; whole numbers unless its step says otherwise), a number
+without one a field, a boolean the app's switch, up to three choices radios
+in the row and more a menu, a colour a swatch with its token as a pill (or
+its value) opening the existing colour and token picker, text typed in place,
+an easing its curve with Type (Easing or Spring), Curve or Bounce, and
+Duration. A group heading folds, and a folded group mounts no rows. The last
+row is Ask agent to change options; the skill's "Change a component's
+options" and "Fix a component's options" are the procedures its briefs name.
+The declaration, each option's reach and whether its options applied come
+with the frame's prepared record (`component`, negotiated as
+`design.component-options.v1`, Local engines only), so no row reads anything
+on a click, pointer or scrub. A number, colour or easing that reaches the
+frame only through `var()` previews through the opt-in runtime method
+`previewComponentOptions`, which sets `--zd-*` properties in a runtime-owned
+`<style data-zeros-runtime-options>` (names and plain values only, at most one
+message per animation frame, nothing through the engine); while a preview is
+shown, background captures wait, so no still of an unwritten value is saved.
+A number used by a hole, a condition or a loop shows its value in the row and
+updates the frame on release. Each commit writes the option's `default` with
+`component.set-option` through the existing transaction route: one write, one
+undo step; Escape during a drag restores the value and writes nothing. When
+the frame's options did not all apply the section leads with "These options
+could not be applied. The frame shows its last good render." (or "…the
+component's defaults."), as the engine reports, and Ask agent to fix, which
+sends the lint problems for the frame; the rows stay adjustable.
+
+Known limits: the variants menu, instance editing, Edit main and selecting
+inner parts ship in slice 3, so the main always shows and writes its
+defaults; a preview reaches only this frame's document, so instances in other
+frames change once the write lands; an easing's curve offers the CSS keywords
+and shows any other `cubic-bezier()` as Custom without editing it;
 the interpreter has no records, string formatting, loops with state or maths
 beyond the functions above; an instance past the frame's repeat budget renders
 empty; the last good render does not survive a restart; options are read only

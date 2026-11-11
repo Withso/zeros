@@ -356,7 +356,12 @@ export async function handleDesignWorkspaceRoute(
         prepareDesignNavigationFrames(root, input.catalogRevision, input.files, input.directoryId));
       // Older preparation decoders reject unknown fields. Keep their exact
       // reply shape; a new renderer opts in after capability negotiation.
-      return input.surfaceCosts ? result : { ...result, frames: result.frames.map(({ surfaceCost: _cost, ...frame }) => frame) };
+      if (input.surfaceCosts && input.componentOptions) return result;
+      return { ...result, frames: result.frames.map(({ surfaceCost, component, ...frame }) => ({
+        ...frame,
+        ...(input.surfaceCosts && surfaceCost !== undefined ? { surfaceCost } : {}),
+        ...(input.componentOptions && component ? { component } : {}),
+      })) };
     }
     case "design.catalog.read": {
       if (!options.catalogAdmission) throw new GitError({ code: "REMOTE_RESTRICTED", message: "Design catalog requires a live connection." });

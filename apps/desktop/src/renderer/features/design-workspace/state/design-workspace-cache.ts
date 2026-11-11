@@ -1067,6 +1067,10 @@ function sameFrame(
     left.layerCount === right.layerCount &&
     left.modifiedAt === right.modifiedAt &&
     left.sourceVersion === right.sourceVersion &&
+    // The declaration follows the source; whether its options applied can
+    // change without a new generation (a session's last good render).
+    (left.component === right.component ||
+      (left.component !== undefined && right.component !== undefined && left.component.notApplied === right.component.notApplied)) &&
     // Boot/legacy frames can gain confirmed costs without a source change.
     // Cost changes and withdrawals must reach the shared admission budget.
     (left.surfaceCost === right.surfaceCost ||

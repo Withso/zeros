@@ -88,6 +88,8 @@ export interface DesignInspectorProps {
   /** Sends a brief to a new agent chat ("Ask agent to change"); absent
    * where no agent chat is available. */
   onAskAgent?: (brief: DesignAgentBrief) => void;
+  /** The side panel is shown; a hidden one mounts no Options rows. */
+  panelVisible?: boolean;
 }
 
 export interface DesignCanvasZoomActions {

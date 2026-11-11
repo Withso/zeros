@@ -9,7 +9,7 @@ import {
   readComponentDeclaration,
   type ComponentDeclaration,
   type ComponentDeclarationElement,
-} from "@zeros/design-core";
+} from "@zeros/design-core/components";
 import { parse, type DefaultTreeAdapterTypes } from "parse5";
 
 type Element = DefaultTreeAdapterTypes.Element;

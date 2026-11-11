@@ -4,6 +4,7 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { DesignSurfaceCost } from "@zeros/protocol/design-surface";
 import { DESIGN_MAX_FRAMES_PER_PAGE } from "@zeros/protocol/design-pages";
+import { designFrameComponentSchema, type DesignFrameComponent } from "@zeros/protocol/design-catalog";
 import { isDevRuntime } from "../runtime";
 import { durableDesignDependenciesCurrent, type DurableDesignDependency } from "./dependency-read-set";
 import type { CanvasDocument } from "./document-model";
@@ -16,6 +17,10 @@ export interface DesignFrameIdentity {
   surfaceCost: DesignSurfaceCost | null;
   nodeCount: number;
   layerCount: number;
+  /** A frame that declares options. Derived from the frame's source; a read
+   * that showed a last good render is never stored, so `notApplied` here is
+   * at most "defaults". */
+  component?: DesignFrameComponent;
 }
 
 // A frame's identity is reused while every file its preparation read keeps
@@ -140,9 +145,12 @@ async function load(workspacePath: string, page: Page): Promise<void> {
     const indexes = entry.dependencies as unknown[];
     if (!indexes.every((index) => Number.isSafeInteger(index) && usable[index as number])) continue;
     if (page.entries.has(file)) continue;
+    const component = identity.component === undefined ? undefined : designFrameComponentSchema.safeParse(identity.component);
+    if (component && !component.success) continue;
     page.entries.set(file, { context: entry.context, identity: {
       sourceVersion: identity.sourceVersion, surfaceCost: identity.surfaceCost ?? null,
       nodeCount: identity.nodeCount, layerCount: identity.layerCount,
+      ...(component ? { component: component.data } : {}),
     }, dependencies: indexes.map((index) => table[index as number]!) });
   }
 }
