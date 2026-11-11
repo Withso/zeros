@@ -2,6 +2,8 @@ import { expect } from "@playwright/test";
 import { addDesignSection, openLayersDrawer } from "./ui-smoke-design-helpers.mjs";
 import { runDesignStyleTokensSmoke } from "./ui-smoke-design-style-tokens.mjs";
 import { runDesignStyleOriginsSmoke } from "./ui-smoke-design-style-origins.mjs";
+import { runDesignStyleStatesSmoke } from "./ui-smoke-design-style-states.mjs";
+import { runDesignFieldStatesSmoke } from "./ui-smoke-design-field-states.mjs";
 import { runDesignTokenPillsSmoke } from "./ui-smoke-design-token-pills.mjs";
 import { runDesignDeferredFocusSmoke, runDesignCloseFocusSmoke } from "./ui-smoke-design-focus.mjs";
 import { runDesignThemeSourcesSmoke } from "./ui-smoke-design-theme-sources.mjs";
@@ -440,6 +442,10 @@ export async function runDesignStyleRefinementsSmoke(context) {
   await runDesignStyleTokensSmoke(context);
   await runDesignTokenPillsSmoke(context);
   await runDesignStyleOriginsSmoke(context);
+  // Holding a layer state, view only; reuses the clock the origins smoke installs.
+  await runDesignStyleStatesSmoke(context);
+  // Field behaviour: refused values, restore, Clear, maths, units, Mixed.
+  await runDesignFieldStatesSmoke(context);
   await runDesignDeferredFocusSmoke(context);
   await runDesignDeferredFocusSmoke({ ...context, moveFocus: false });
   await runDesignCloseFocusSmoke(context);

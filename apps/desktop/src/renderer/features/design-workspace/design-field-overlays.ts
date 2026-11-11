@@ -32,7 +32,13 @@ export interface DesignFieldOverlaysApi {
   /** Alt+Down and Alt+Backspace on a field. The panel listens itself; a
    * portaled surface (Type settings) forwards its key events here. */
   fieldShortcut(event: DesignFieldShortcutEvent): void;
+  /** The panel's one field message, under `field`: a value refused and why,
+   * or what an edit did. Announced politely, never focused; gone on the next
+   * key or press in the panel, or after a few seconds. */
+  showFieldMessage(field: HTMLElement, text: string, tone?: DesignFieldMessageTone): void;
 }
+
+export type DesignFieldMessageTone = "error" | "info";
 
 export interface DesignFieldShortcutEvent {
   key: string;
@@ -49,6 +55,7 @@ const NO_OVERLAYS: DesignFieldOverlaysApi = {
   openPickerForField: () => false,
   resetField: () => {},
   fieldShortcut: () => {},
+  showFieldMessage: () => {},
 };
 
 export const DesignFieldOverlaysContext = createContext<DesignFieldOverlaysApi>(NO_OVERLAYS);

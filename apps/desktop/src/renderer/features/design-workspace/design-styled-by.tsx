@@ -19,10 +19,14 @@ function filterNote(group: DesignStyledByGroup): { lead: string; name?: string }
 export function DesignStyledByLine({
   styledBy,
   filter,
+  inert = false,
   onFilter,
 }: {
   styledBy: DesignStyledBy;
   filter: DesignStyledByGroup | null;
+  /** A held layer state: the rows say what styles the layer but filter
+   * nothing. */
+  inert?: boolean;
   onFilter: (key: string | null) => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -32,6 +36,8 @@ export function DesignStyledByLine({
     <div data-design-styled-by="">
       <ListRow
         variant="panel"
+        // Opening the list stays possible while a state is held.
+        data-design-state-control=""
         aria-label="What styles this layer"
         aria-expanded={open}
         className={open ? "text-fg2" : "border-border1 text-fg3 border-b"}
@@ -56,6 +62,7 @@ export function DesignStyledByLine({
                 variant="panel"
                 size="sm"
                 aria-pressed={on}
+                disabled={inert}
                 data-design-styled-by-source={group.key}
                 className="text-fg2 grid grid-cols-[84px_minmax(0,1fr)_auto]"
                 onClick={() => onFilter(on ? null : group.key)}
