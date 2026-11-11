@@ -2,7 +2,8 @@ import type pg from "pg";
 import { z } from "zod";
 import type { AuthedUser } from "../../auth.js";
 import { HttpError } from "../../authz.js";
-import { withSystemTx, type Tx } from "../../db.js";
+import { withSystemStatement, withSystemTx, type Tx } from "../../db.js";
+import { sql, SqlFragment } from "../../sql-fragment.js";
 import { isGithubAccessRevoked, isGithubTemporary } from "../../github-availability.js";
 import { SECURITY_STREAM_AUTHORITY, securityStreamParameters, securityStreamAuthority } from "../../security-events.js";
 import { memberOnHoldSql } from "../../organization-seats.js";
@@ -29,6 +30,13 @@ export const teamConnectionRevisionSql = (organization: string, person: string) 
  * credentials. Every use rechecks the current session and immutable scope. */
 export class CloudTeamAuthority {
   constructor(readonly pool: pg.Pool, readonly source: CloudV2SourceAuthority, readonly connections: CloudGithubConnectionStore) {}
+
+  async isCreator(id: string, userId: string): Promise<boolean> {
+    // A routing hint only: the Creator handler must authorize again after this read.
+    const result = await withSystemStatement(this.pool,sql`SELECT 1 FROM cloud_v2_workspaces
+      WHERE id=${SqlFragment.uuid(id.toLowerCase())} AND creator_user_id=${SqlFragment.uuid(userId.toLowerCase())}`);
+    return result.rowCount === 1;
+  }
 
   async snapshots(tx: Tx, ids: readonly string[], user: AuthedUser, proofs: readonly TeamAdmission[] = []): Promise<Map<string,TeamView>> {
     type Row = CloudV2WorkspaceRow & { created_by_user_id: string | null; role: string; access_epoch: string; login_revision: string;
