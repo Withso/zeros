@@ -74,21 +74,26 @@ database("security event stream token lifetime through the router and PostgreSQL
   }, 10_000);
 
   it("still sends the exact durable session revocation and closes before the token expires", async () => {
-    const controller = new AbortController();
-    const response = await app.request("/v1/auth/events", { signal: controller.signal });
-    const reader = response.body!.getReader(), decoder = new TextDecoder();
+    const holder = await pool.connect(), controller = new AbortController(), decoder = new TextDecoder();
+    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
     try {
+      await holder.query("BEGIN");
+      // Publish after the event commits; an earlier scan may legitimately send the fallback revocation.
+      await holder.query("SELECT pg_advisory_xact_lock(1936024437,1702258030) /*lock_purpose='security-event-publish'*/");
+      const response = await app.request("/v1/auth/events", { signal: controller.signal });
+      reader = response.body!.getReader();
       expect(decoder.decode((await reader.read()).value)).toContain("event: ready\n");
       await withSystemTx(pool, async tx => {
         await tx.query("UPDATE auth_sessions SET status='revoked',revoked_at=now() WHERE provider_session_id=$1", [user.authentication.sessionId]);
         await tx.query("INSERT INTO security_events(kind,user_id,provider_session_id) VALUES('session.revoked',$1,$2)", [user.id, user.authentication.sessionId]);
       });
+      await holder.query("COMMIT");
       let text = "";
       for (;;) { const chunk = await reader.read(); if (chunk.done) break; text += decoder.decode(chunk.value); }
       expect(text).toContain("event: session.revoked\n");
       const data = text.split("\n").find(line => line.startsWith("data: ") && line.includes('"kind":"session.revoked"'));
       expect(data).toBeDefined();
       expect(JSON.parse(data!.slice(6))).toMatchObject({ kind: "session.revoked", sequence: expect.any(Number) });
-    } finally { controller.abort(); await reader.cancel(); }
+    } finally { controller.abort(); await holder.query("ROLLBACK"); holder.release(); await reader?.cancel(); }
   });
 });
