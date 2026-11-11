@@ -2,6 +2,7 @@ import type { AgentMessage, AgentToolMessage } from "../use-agent-session";
 import { toolCompletionUnreported } from "./raw-output";
 import { toolRecord } from "./native-tool-presentation";
 import { agentReportText } from "./subagent";
+import { isWorkspaceToolName } from "./workspace-tool-presentation";
 
 /** Claude persists task lifecycle records separately from the real Agent call.
  * Hide only records represented by an exact native child identity in this
@@ -79,7 +80,7 @@ export function isRoutineNativeSleep(tool: AgentToolMessage): boolean {
  * its command/target is ready. Terminal and missing-completion records always
  * remain inspectable, even when the producer never supplied arguments. */
 export function toolPresentationReady(tool: AgentToolMessage): boolean {
-  if (isLegacyEnvironmentConnection(tool) || isRoutineNativeSleep(tool)) return false;
+  if (isLegacyEnvironmentConnection(tool) || isRoutineNativeSleep(tool) || isWorkspaceToolLoading(tool)) return false;
   if (
     !["pending", "in_progress"].includes(tool.status) ||
     toolCompletionUnreported(tool.rawOutput)
@@ -128,4 +129,14 @@ export function toolPresentationReady(tool: AgentToolMessage): boolean {
     default:
       return true;
   }
+}
+
+/** Claude's ToolSearch loading only zeros_workspace tools is harness mechanics:
+ * the tool's own row follows, so "Loading tool mcp__zeros_workspace__…" never shows. */
+export function isWorkspaceToolLoading(tool: AgentToolMessage): boolean {
+  if (tool.toolKind !== "tool_search") return false;
+  const query = toolRecord(tool.rawInput).query;
+  if (typeof query !== "string" || !query.startsWith("select:")) return false;
+  const names = query.slice("select:".length).split(",").map(name => name.trim()).filter(Boolean);
+  return names.length > 0 && names.every(isWorkspaceToolName);
 }

@@ -1,7 +1,7 @@
 import { generatedImagePath, isImageGenerationTool } from "./tool-artifacts";
 import { modelRejectionDisplayText } from "@zeros/protocol/model-rejection";
 import { designToolLabel } from "./design-tool-presentation";
-import { notifyUserFailedTarget, notifyUserLabel } from "./notify-user-presentation";
+import { workspaceToolMeta } from "./workspace-tool-presentation";
 import { ChromeIcon } from "@/renderer/shared/ui/chrome-icon";
 import { formatWorkingElapsed } from "@/renderer/shared/ui/loading/live-duration";
 // ──────────────────────────────────────────────────────────
@@ -24,7 +24,6 @@ import {
   toolRecord,
 } from "./native-tool-presentation";
 import {
-  BellRing,
   Bot,
   Hourglass,
   Brain,
@@ -81,6 +80,8 @@ export interface EventMeta {
   /** Whether this event has detail content worth expanding inline.
    *  When false, EventRow renders without a hover +/- affordance. */
   expandable: boolean;
+  /** Overrides the status tone, e.g. a local command's ending told in words on a neutral row. */
+  tone?: "ok" | "fail" | "run" | "pending";
 }
 
 // Image extensions a Read can return — drives the "Read image" label (no line
@@ -380,8 +381,8 @@ function metaForTool(tool: AgentToolMessage): EventMeta {
   }
 
   if (kind === "mcp") {
-    const notified = notifyUserLabel(tool);
-    if (notified) return { Icon: BellRing, label: notified, target: notifyUserFailedTarget(tool), expandable: true };
+    const workspace = workspaceToolMeta(tool);
+    if (workspace) return workspace;
     const designLabel = designToolLabel(tool);
     if (designLabel) return { Icon: PenTool, label: designLabel, expandable: true };
     const nativeTitle = nativeToolTitle(tool);
