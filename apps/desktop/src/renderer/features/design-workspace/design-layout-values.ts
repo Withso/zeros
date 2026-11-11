@@ -94,6 +94,8 @@ export interface DesignLayoutFieldOptions {
   /** Several selected layers differ here: the field reads Mixed and shows no
    * token until a value is typed for all of them. */
   mixed?: boolean;
+  /** The text style row owns this value's token; the field shows its value. */
+  tokenHidden?: boolean;
 }
 
 export function roundDesignLayoutValue(value: string): string {

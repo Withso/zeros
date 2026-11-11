@@ -1,6 +1,7 @@
 import { expect } from "@playwright/test";
 import { addDesignSection, openLayersDrawer } from "./ui-smoke-design-helpers.mjs";
 import { runDesignStyleTokensSmoke } from "./ui-smoke-design-style-tokens.mjs";
+import { runDesignTokenPillsSmoke } from "./ui-smoke-design-token-pills.mjs";
 import { runDesignDeferredFocusSmoke, runDesignCloseFocusSmoke } from "./ui-smoke-design-focus.mjs";
 import { runDesignThemeSourcesSmoke } from "./ui-smoke-design-theme-sources.mjs";
 import { runDesignThemeVariablesSmoke } from "./ui-smoke-design-theme-variables.mjs";
@@ -436,6 +437,7 @@ export async function runDesignStyleRefinementsSmoke(context) {
   await runDesignInspectorPreviewOwnerSmoke(context);
   // The inspector names the tokens and sources behind the selected styles.
   await runDesignStyleTokensSmoke(context);
+  await runDesignTokenPillsSmoke(context);
   await runDesignDeferredFocusSmoke(context);
   await runDesignDeferredFocusSmoke({ ...context, moveFocus: false });
   await runDesignCloseFocusSmoke(context);

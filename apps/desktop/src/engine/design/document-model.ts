@@ -179,6 +179,9 @@ export interface DesignTokenSummary {
   /** Navigation omits the full-directory usage scan. */
   usageCountKnown?: boolean;
   line: number;
+  /** The comment attached to the declaration in tokens.css, one line of plain
+   * text. Absent from older engines. */
+  description?: string;
 }
 
 export interface DesignTokensDocument {
@@ -214,6 +217,10 @@ export interface DesignWorkspaceSnapshot {
   styleSources: DesignStyleSourceStatus[];
   /** Problems with the declared list itself. */
   styleSourceErrors: string[];
+  /** Frames that choose their own style sources (meta/canvas.json
+   * `frame_info[file].styles`), with the declared sources each receives.
+   * Absent from older engines; a frame not listed receives every source. */
+  frameStyleSources?: Record<string, string[]>;
   /** Every theme the directory uses, named; the default theme first when it
    * has a name (meta/canvas.json `themes`). */
   themes: DesignThemeSummary[];

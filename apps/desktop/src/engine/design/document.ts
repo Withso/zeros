@@ -132,6 +132,7 @@ import {
   designStyleSourcesUseFonts,
   frameStyleSourceIds,
   readDesignStyleSourceCatalog,
+  frameStyleSourceChoices,
   readDesignStyleSources,
 } from "./style-sources";
 import { readDesignFontCatalog } from "./style-fonts";
@@ -1133,6 +1134,7 @@ async function readDesignNavigationSnapshotUnlocked(workspacePath: string, affec
         frames: metadata.frames.filter((frame) => changed.has(frame.pageId)) } } : {}),
       styleSources: styles.sources.map(({ css: _css, fontImports: _fonts, ...status }) => status),
       styleSourceErrors: styles.errors,
+      frameStyleSources: frameStyleSourceChoices(context.canvas, readDesignStyleSourceCatalog(context.canvas)),
       themes: mergeDesignThemes(readDesignThemeCatalog(context.canvas), [...tokens.themes, ...styles.sources.flatMap((source) => source.themes)]),
       lint: { workspacePath, checkedFiles: [], violations: [], healedOids: 0 },
     } };
@@ -1540,6 +1542,7 @@ export async function readDesignWorkspaceSnapshot(
       // The CSS itself reaches frames through rendering, not the snapshot.
       styleSources: styleSources.sources.map(({ css: _css, fontImports: _fontImports, ...status }) => status),
       styleSourceErrors: styleSources.errors,
+      frameStyleSources: frameStyleSourceChoices(context.canvas, readDesignStyleSourceCatalog(context.canvas)),
       themes: mergeDesignThemes(readDesignThemeCatalog(context.canvas), [
         ...tokensDocument.themes,
         ...styleSources.sources.flatMap((source) => source.themes),
@@ -2164,6 +2167,29 @@ export async function readDesignBaseTheme(workspacePath: string): Promise<string
   return canvas ? readDesignThemeCatalog(canvas).baseId : null;
 }
 
+const DESIGN_TOKEN_DESCRIPTION_LIMIT = 120;
+
+/** The comment attached to a token declaration: a trailing comment on the
+ * same line, else one ending on the line just above (no blank line between)
+ * that is not itself another declaration's trailing comment. One line of
+ * plain text; the inspector renders it as text, never as markup. */
+function designTokenDescription(declaration: postcss.Declaration): string | undefined {
+  const line = declaration.source?.end?.line ?? declaration.source?.start?.line;
+  const startLine = declaration.source?.start?.line;
+  if (line === undefined || startLine === undefined) return undefined;
+  const text = (comment: postcss.Comment) => {
+    const value = comment.text.replace(/\s+/g, " ").trim();
+    return value ? value.slice(0, DESIGN_TOKEN_DESCRIPTION_LIMIT).trimEnd() : undefined;
+  };
+  const next = declaration.next();
+  if (next?.type === "comment" && next.source?.start?.line === line) return text(next);
+  const previous = declaration.prev();
+  if (previous?.type !== "comment" || previous.source?.end?.line !== startLine - 1) return undefined;
+  const before = previous.prev();
+  if (before && before.source?.end?.line === previous.source?.start?.line) return undefined;
+  return text(previous);
+}
+
 export async function readDesignTokensDocument(
   workspacePath: string,
   context?: DesignCanvasReadContext,
@@ -2210,12 +2236,14 @@ export async function readDesignTokensDocument(
       line: rule.source?.start?.line ?? 1,
     });
   });
+  const describedByBase = new Set<string>();
   root.walkRules((rule) => {
     const theme = designTokenThemeName(rule.selector);
     const base = rule.selector.trim() === ":root";
     if (!base && !theme) return;
     if (theme) themes.add(theme);
     rule.walkDecls(/^--/, (declaration) => {
+      const description = designTokenDescription(declaration);
       let token = byName.get(declaration.prop);
       if (!token) {
         token = {
@@ -2232,6 +2260,12 @@ export async function readDesignTokensDocument(
       }
       if (base) token.value = declaration.value.trim();
       else if (theme) token.themeValues[theme] = declaration.value.trim();
+      // The base declaration's comment describes the token; a theme's comment
+      // does only while no base declaration carries one.
+      if (description && (base || (!describedByBase.has(token.name) && !token.description))) {
+        token.description = description;
+        if (base) describedByBase.add(token.name);
+      }
     });
   });
 

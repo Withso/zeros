@@ -28,6 +28,10 @@ const pillVariants = cva(
         // A missing attachment: a yellow outline and a grey icon.
         invalid:
           "border-yellow-icon/45 bg-bg2 text-fg2 [&_svg]:opacity-60 [&_svg]:grayscale",
+        // A design token applied to a Style field: its name on a quiet fill.
+        token: "border-transparent bg-bg2-highlight font-medium text-fg1 hover:bg-bg2-highlight",
+        // A design token the frame no longer declares.
+        missing: "border-transparent bg-yellow-bg font-medium text-yellow-fg",
       },
     },
     defaultVariants: { size: "inline", tone: "neutral" },

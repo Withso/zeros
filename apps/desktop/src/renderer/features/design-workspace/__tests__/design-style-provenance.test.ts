@@ -10,6 +10,8 @@ import type { DesignRuntimeNodeDetails } from "@zeros/protocol/design-runtime";
 import { computedDesignCssDeclarations } from "../design-computed-css";
 import {
   designCssDeclarationHints,
+  designDetachedStyles,
+  designSelectionStyleUpdates,
   designStyleOriginLabel,
   designStyleTokenDisplay,
   designStyleTokenReference,
@@ -99,8 +101,26 @@ describe("Design style provenance", () => {
       source: "App styles (Tailwind)",
     });
     expect(designStyleTokenDisplay(button, "color", label)).toBeNull();
+    // A second read of the same declaration answers the same, from its cache.
+    expect(designStyleTokenDisplay(button, "background-color", label)?.name).toBe("--primary-button-bg");
     // Older runtimes omit provenance entirely.
     expect(designStyleTokenDisplay(details({ authoredStyles: undefined }), "background-color", label)).toBeNull();
+  });
+
+  it("reads a longhand's token from the shorthand that sets it whole", () => {
+    const card = details({
+      authoredStyles: {
+        padding: { origin: "inline", value: "var(--space-4)", tokens: [{ name: "--space-4", value: "16px", origin: "linked", file: "tokens.css" }] },
+        gap: { origin: "inline", value: "var(--space-2)", tokens: [{ name: "--space-2", value: "8px", origin: "linked", file: "tokens.css" }] },
+        "border-radius": { origin: "inline", value: "var(--radius-md)", tokens: [{ name: "--radius-md", value: "6px", origin: "linked", file: "tokens.css" }] },
+        margin: { origin: "inline", value: "var(--space-2) 0", tokens: [{ name: "--space-2", value: "8px" }] },
+      },
+    });
+    expect(designStyleTokenDisplay(card, "padding-left", label)?.name).toBe("--space-4");
+    expect(designStyleTokenDisplay(card, "row-gap", label)?.name).toBe("--space-2");
+    expect(designStyleTokenDisplay(card, "border-top-left-radius", label)?.name).toBe("--radius-md");
+    // A shorthand with several values names no single token for one side.
+    expect(designStyleTokenDisplay(card, "margin-top", label)).toBeNull();
   });
 
   it("shows authored values in the CSS panel with computed values as hints", () => {
@@ -125,5 +145,47 @@ describe("Design style provenance", () => {
       "line-height": "18px",
       padding: "12px",
     });
+  });
+});
+
+describe("Detach", () => {
+  // The loaded layer has computed styles; the other has not reported yet.
+  const computed: Record<string, Record<string, string>> = {
+    loaded: { "border-radius": "6px", "font-size": "28px", "line-height": "36px" },
+  };
+  const read = (nodeId: string, property: string) => computed[nodeId]?.[property];
+
+  it("writes each loaded layer's value and leaves a layer without a reading untouched", () => {
+    const updates = designDetachedStyles(["unloaded", "loaded"], ["border-radius"], read);
+    expect(updates).toEqual([{ nodeId: "loaded", styles: { "border-radius": "6px" } }]);
+    expect(updates.flatMap((update) => Object.values(update.styles))).not.toContain(null);
+  });
+
+  it("detaches a text style's parts only where each one reads", () => {
+    const updates = designDetachedStyles(
+      ["loaded", "unloaded"],
+      ["font-size", "line-height", "letter-spacing"],
+      read,
+    );
+    expect(updates).toEqual([
+      { nodeId: "loaded", styles: { "font-size": "28px", "line-height": "36px" } },
+    ]);
+  });
+
+  it("is one commit whose only operation is the loaded layer's", () => {
+    const detached = designDetachedStyles(["unloaded", "loaded"], ["border-radius"], read);
+    const byNode = new Map(detached.map((update) => [update.nodeId, update.styles]));
+    const updates = designSelectionStyleUpdates(
+      ["unloaded", "loaded"],
+      Object.assign({}, ...detached.map((update) => update.styles)),
+      (nodeId) => byNode.get(nodeId) ?? {},
+    );
+    expect(updates).toEqual([{ nodeId: "loaded", styles: { "border-radius": "6px" } }]);
+    // Without per-layer values every layer gets the shared styles.
+    expect(designSelectionStyleUpdates(["a", "b"], { gap: "4px" })).toHaveLength(2);
+  });
+
+  it("has nothing to write when no selected layer has a reading", () => {
+    expect(designDetachedStyles(["unloaded"], ["border-radius"], read)).toEqual([]);
   });
 });

@@ -826,6 +826,47 @@ describe("design document", () => {
     expect(tokens.find((token) => token.name === "--bg1")?.usageCount).toBe(2);
   });
 
+  it("reads a token's description from the comment attached to its declaration", async () => {
+    await initializeDesignDocument(root);
+    await writeFile(
+      path.join(root, DESIGN_DIRECTORY_NAME, "tokens.css"),
+      [
+        ":root {",
+        "  /* App canvas */",
+        "  --bg1: white;",
+        "  --bg2: whitesmoke; /* Raised surfaces and the composer */",
+        "  --bg3: gainsboro; /* trailing wins */",
+        "  /* <b>Not markup</b>   spread",
+        "     over lines */",
+        "  --fg1: black;",
+        "  /* Detached by a blank line */",
+        "",
+        "  --fg2: dimgray;",
+        `  --fg3: gray; /* ${"x".repeat(200)} */`,
+        "  --border1: silver; /* belongs to border1 */",
+        "  --border2: darkgray;",
+        "}",
+        '[data-zd-theme="dark"] {',
+        "  --bg1: black; /* Theme comments never replace the base one */",
+        "  --accent: tomato; /* Only a theme declares this */",
+        "}",
+      ].join("\n"),
+    );
+    const tokens = new Map(
+      (await readDesignTokensDocument(root)).tokens.map((token) => [token.name, token.description]),
+    );
+    expect(tokens.get("--bg1")).toBe("App canvas");
+    expect(tokens.get("--bg2")).toBe("Raised surfaces and the composer");
+    expect(tokens.get("--bg3")).toBe("trailing wins");
+    expect(tokens.get("--fg1")).toBe("<b>Not markup</b> spread over lines");
+    expect(tokens.get("--fg2")).toBeUndefined();
+    expect(tokens.get("--fg3")).toHaveLength(120);
+    // A trailing comment on the line above belongs to that line's declaration.
+    expect(tokens.get("--border1")).toBe("belongs to border1");
+    expect(tokens.get("--border2")).toBeUndefined();
+    expect(tokens.get("--accent")).toBe("Only a theme declares this");
+  });
+
   it("round-trips base and per-theme token values with an exact generation", async () => {
     await initializeDesignDocument(root);
     const tokenPath = path.join(root, DESIGN_DIRECTORY_NAME, "tokens.css");

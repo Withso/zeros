@@ -50,8 +50,12 @@
   --zd-field-fill: var(--bg2-highlight);
 }
 
-/* A read-only field has nothing to edit, so the pointer changes nothing. */
-.zd-field[data-design-field-readonly]:hover {
+/* A read-only field has nothing to edit, so the pointer changes nothing. A
+ * field holding a token pill keeps its fill too: the pill is drawn in the
+ * hover fill and would disappear into it. */
+.zd-field[data-design-field-readonly]:hover,
+.zd-field:has(> * > [data-design-style-token]):hover,
+.zd-field:has(> [data-design-style-token]):hover {
   --zd-field-fill: var(--zd-field-rest, var(--bg2));
 }
 
@@ -610,7 +614,8 @@
   .zd-field,
   .zd-segment,
   .zd-icon-button,
-  .zd-field-motion {
+  .zd-field-motion,
+  .zd-field-token-detach {
     transition: none;
   }
 }
@@ -699,6 +704,73 @@
 .zd-inspector-field:focus-within .zd-field-motion,
 .zd-field-motion:focus-within {
   opacity: 1;
+}
+
+/* Detach on a field holding a token pill is laid over the field's trailing
+ * edge like the keyframe diamond, so the pill keeps the full width at rest
+ * and never moves under the pointer. Visibility goes with the opacity, so the
+ * hidden button takes no pointer or Tab stop; it turns hidden after the fade. */
+.zd-field-token-detach {
+  position: absolute;
+  top: 0;
+  right: calc(var(--zd-token-detach-end, 0px) + var(--zd-token-detach-motion, 0px));
+  bottom: 0;
+  display: flex;
+  width: 36px;
+  align-items: center;
+  justify-content: flex-end;
+  padding-right: 1px;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  background-image: linear-gradient(
+    to left,
+    var(--zd-field-fill) 55%,
+    transparent
+  );
+  transition:
+    opacity 120ms ease-out,
+    visibility 0s linear 120ms;
+}
+
+/* Only the button takes the pointer; the fade still lets a press reach the
+ * pill beneath. */
+.zd-field-token-detach > * {
+  pointer-events: auto;
+}
+
+.zd-field:hover .zd-field-token-detach,
+.zd-field:focus-within .zd-field-token-detach {
+  opacity: 1;
+  visibility: visible;
+  transition-delay: 0s;
+}
+
+/* A missing token's Detach is permanent, so it keeps a slot of its own. */
+.zd-field-token-detach[data-design-token-action="always"] {
+  position: static;
+  width: auto;
+  flex-shrink: 0;
+  margin-right: var(--zd-token-detach-motion, 0px);
+  padding-right: 0;
+  opacity: 1;
+  visibility: visible;
+  background-image: none;
+}
+
+/* In Motion mode the diamond keeps the field's last 36px; Detach sits
+ * before it, clear of the diamond's fade. */
+.zd-field-token-detach[data-design-token-motion] {
+  --zd-token-detach-motion: 33px;
+}
+
+/* The size word sits over the field's end; a pill and Detach end before it. */
+.zd-size-control .zd-inspector-field:has([data-design-style-token]) {
+  padding-right: 34px;
+}
+
+.zd-size-control .zd-field-token-detach {
+  --zd-token-detach-end: 35px;
 }
 
 /* An animated property keeps its value fully visible; its in-field label

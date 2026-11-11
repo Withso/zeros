@@ -45,6 +45,9 @@ interface DesignFillEditorProps {
   /** The token a solid fill's winning declaration reads, if any. */
   tokenName?: string;
   tokenDescription?: string;
+  tokenMissing?: boolean;
+  tokenDetachHint?: string;
+  onDetachToken?: () => void;
   /** The selected layers' fills differ: the row reads "Mixed" behind a
    * neutral swatch; a fill chosen in the popover or typed sets all of them. */
   mixed?: boolean;
@@ -116,6 +119,9 @@ export function DesignFillEditor({
   disabled,
   tokenName,
   tokenDescription,
+  tokenMissing,
+  tokenDetachHint,
+  onDetachToken,
   mixed = false,
   onPreview,
   onCancelPreview,
@@ -158,7 +164,7 @@ export function DesignFillEditor({
     <div
       data-design-color-field=""
       data-design-style-property="background-color"
-      className="zd-field relative min-w-0 gap-0 pl-1"
+      className="group/design-field zd-field relative min-w-0 gap-0 pl-1"
     >
       {popover}
       {fillType === "solid" ? (
@@ -168,6 +174,9 @@ export function DesignFillEditor({
           disabled={disabled}
           tokenName={tokenName}
           tokenDescription={tokenDescription}
+          tokenMissing={tokenMissing}
+          tokenDetachHint={tokenDetachHint}
+          onDetachToken={onDetachToken}
           mixed={mixed}
           onPreview={(next) => onPreview?.({ "background-color": next })}
           onCancelPreview={onCancelPreview}

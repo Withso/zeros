@@ -870,6 +870,7 @@ async function refreshDesignStyleStatus(workspaceId: string): Promise<void> {
     ...current,
     styleSources: next.styleSources,
     styleSourceErrors: next.styleSourceErrors,
+    frameStyleSources: next.frameStyleSources,
     themes: next.themes,
   });
 }
@@ -1093,7 +1094,8 @@ function sameToken(
     ) &&
     left.usageCount === right.usageCount &&
     left.usageCountKnown === right.usageCountKnown &&
-    left.line === right.line
+    left.line === right.line &&
+    left.description === right.description
   );
 }
 
@@ -1305,6 +1307,9 @@ export function stabilizeDesignWorkspaceSnapshot(
     next.themes ?? NO_THEMES,
     (left, right) => left.id === right.id && left.label === right.label && left.base === right.base,
   );
+  const frameStyleSources = sameFrameStyleSources(previous.frameStyleSources, next.frameStyleSources)
+    ? previous.frameStyleSources
+    : next.frameStyleSources;
   const assets = stableArray(previous.assets, next.assets, sameAsset);
   const violations = stableArray(
     previous.lint.violations,
@@ -1331,6 +1336,7 @@ export function stabilizeDesignWorkspaceSnapshot(
     styleSources === (previous.styleSources ?? NO_STYLE_SOURCES) &&
     styleSourceErrors === (previous.styleSourceErrors ?? NO_STYLE_SOURCE_ERRORS) &&
     themes === (previous.themes ?? NO_THEMES) &&
+    frameStyleSources === previous.frameStyleSources &&
     assets === previous.assets &&
     lint === previous.lint
     ? previous
@@ -1345,10 +1351,24 @@ export function stabilizeDesignWorkspaceSnapshot(
         tokenSourceVersion: next.tokenSourceVersion,
         styleSources,
         styleSourceErrors,
+        ...(frameStyleSources ? { frameStyleSources } : {}),
         themes,
         assets,
         lint,
       };
+}
+
+function sameFrameStyleSources(
+  left: DesignWorkspaceSnapshotWire["frameStyleSources"],
+  right: DesignWorkspaceSnapshotWire["frameStyleSources"],
+): boolean {
+  if (left === right) return true;
+  if (!left || !right) return false;
+  const files = Object.keys(left);
+  return (
+    files.length === Object.keys(right).length &&
+    files.every((file) => right[file]?.join("\u0000") === left[file]!.join("\u0000"))
+  );
 }
 
 /** Called after a cache publication, never from an unadmitted fetch result. */

@@ -9,6 +9,7 @@ import {
   MAX_DESIGN_STYLE_SOURCE_FONT_BYTES,
   designStyleSourcePathError,
   forgetDesignStyleSourceCaches,
+  frameStyleSourceChoices,
   frameStyleSourceIds,
   frameStyleSources,
   importPlainDesignCss,
@@ -84,6 +85,22 @@ describe("style source declarations", () => {
     expect(frameStyleSourceIds({ frame_info: info() }, catalog, "page/a.html")).toEqual(["app", "brand"]);
     expect(frameStyleSourceIds({ frame_info: info(["brand", "missing", "brand", "app"]) }, catalog, "page/a.html")).toEqual(["brand", "app"]);
     expect(frameStyleSourceIds({ frame_info: info([]) }, catalog, "page/a.html")).toEqual([]);
+  });
+
+  it("reports only the frames that choose their own sources, for the token picker", () => {
+    const catalog = readDesignStyleSourceCatalog(canvas([
+      { id: "app", kind: "css", path: "a.css" },
+      { id: "brand", kind: "css", path: "b.css" },
+    ]));
+    const frame_info = {
+      "page/a.html": { id: "a", title: "A", kind: "frame" },
+      "page/b.html": { id: "b", title: "B", kind: "frame", styles: ["brand", "gone"] },
+      "page/c.html": { id: "c", title: "C", kind: "frame", styles: [] },
+    } as unknown as CanvasDocument["frame_info"];
+    expect(frameStyleSourceChoices({ frame_info }, catalog)).toEqual({
+      "page/b.html": ["brand"],
+      "page/c.html": [],
+    });
   });
 });
 

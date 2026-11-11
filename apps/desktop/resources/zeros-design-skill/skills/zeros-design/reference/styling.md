@@ -24,6 +24,8 @@ A theme id is a lowercase letter, then letters, digits, `_` or `-`. Name the the
 - `tokens.css` holds Design-only tokens: values the application lacks. A new directory starts with none; never add placeholder tokens that duplicate the application's.
 - `:root` holds the default theme's values; another theme is a `[data-zd-theme="<id>"]` rule. A manual token overrides an imported one with the same name (the theme editor marks it).
 - Use `var(--token)` whenever a matching token exists. Add a typed `@property` declaration before introducing a new token.
+- A comment attached to a declaration is that token's description: a trailing comment on the same line (`--bg2: #f4f4f4; /* Raised surfaces */`), else one on the line just above with no blank line between. The Style panel's token picker shows it under the name, as plain text cut at 120 characters.
+- A text style is a `--text-<name>` size token, optionally with `--text-<name>--line-height`, `--text-<name>--letter-spacing` and `--text-<name>--font-weight` beside it (Tailwind's convention). Applying one in the Style panel writes `font-size: var(--text-<name>)` and each part that exists as `var()`.
 - The theme editor edits this same file. Some projects generate it; follow the directory's `rules.md`.
 
 ## Imported style sources (`meta/canvas.json` `styles`)

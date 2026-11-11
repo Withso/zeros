@@ -1867,15 +1867,54 @@ original unsnapped geometry writes nothing and preserves authored sizing.
   CSS panel shows the written value (`background-color:
   var(--primary-button-bg)`) and, after the line, the computed value when it
   differs and the source of an imported or linked winner ("rgb(44, 40, 38) ·
-  App styles"), drawn with CSS so it is never editable or copied. Fill, text
-  color and stroke colors, and generic value fields such as type size, line
-  height and letter spacing (not the weight and font menus), show a token's
-  name in place of the value while unfocused and
-  unedited (`var(--a, var(--b))` shows the first token that resolves); the
-  title and accessible description add the source — the style source's title,
-  "Manual" for `tokens.css`, "Frame styles" or "Inline style" — and the
-  resolved value. Focusing a field edits its value exactly as before. A token
-  picker is a follow-up.
+  App styles"), drawn with CSS so it is never editable or copied.
+- **Tokens as pills:** a Fill, text or stroke colour, and every field
+  that goes through the shared inspector field (radius and corners, padding,
+  gap, W/H/min/max, opacity, stroke weight, type size, line height, letter
+  spacing; not the weight and font menus, measured X/Y/rotation, stacking
+  order or More styles rows), shows the token its winning declaration reads
+  as a pill with the token's name (`var(--a, var(--b))` shows the first that
+  resolves; a longhand reads a shorthand that sets it whole, so `padding:
+  var(--space-4)` gives each side's field the pill). Hover names the token,
+  its source ("Manual" for `tokens.css`) and resolved value. The pill takes
+  the value's Tab stop; a printable key typed on it starts a plain value
+  (Enter writes it, Escape restores the pill), and scrubbing starts from the
+  resolved value. Detach, laid over the field's end on hover and keyboard
+  focus so the pill keeps the full width (before the keyframe diamond in
+  Motion), writes each selected layer's own computed value in one undoable
+  step; when
+  the token differs by theme its tooltip says which theme's value it keeps.
+  A layer that has not reported a value keeps its token, and Detach with no
+  reading anywhere does nothing and says so.
+  Typing an opacity over a colour token detaches it with that alpha. A token
+  the frame no longer declares reads "<name> is missing" in yellow, with
+  Detach always shown. Several layers show a pill only when they name the
+  same token; the same value from different tokens reads Mixed.
+- **Token picker:** `design-token-catalog.ts` derives each token's types from
+  its resolved value (colour, length, percentage, number, weight, font
+  family, shadow, duration, easing; aliases resolve, cycles and undeclared
+  names type as nothing) and its role from its family word (bg/surface →
+  Surfaces, fg/text → Text, border → Borders, radius → Radius, space/gap →
+  Spacing, font → Fonts, shadow, motion, sizes, opacity; any other family is
+  its own word in sentence case, and single-token families join Other). A
+  field's picker (the pill, or Alt+↓ on a plain value) lists only tokens of
+  the field's types that the frame
+  resolves: tokens.css plus the style sources the frame receives
+  (`frameStyleSources` in the snapshot, from meta/canvas.json). Rows show the
+  name and the token's description (the comment attached to its tokens.css
+  declaration) or its value; search filters, Escape clears a search before
+  closing, and Command-Z from a row or an empty search undoes the design. The
+  colour picker's Theme tab is the same list. Nothing is stored. The pill is
+  a plain button (`aria-haspopup="dialog"`, `aria-expanded`); the picker is
+  mounted beside the field only while open, returns focus to the pill on
+  close, and groups its list only then.
+- **Text styles:** a `--text-<name>` size token with optional
+  `--text-<name>--line-height`, `--letter-spacing` and `--font-weight` (Tailwind's
+  convention) is a text style. Typography's Style row, hidden when the
+  directory declares none, shows the style the layer's font size reads as a
+  pill; choosing one writes its size and each part it declares as `var()`, and
+  Detach writes their resolved values. The size, line and spacing fields show
+  plain values beside it.
 - **Inspector UI:** one geometry for every Design surface — 28px fields on
   quiet `bg2` fills, 36px section headers, 13px values, 12px in-field labels,
   14px glyphs (`design-workspace-ui.css`, "Design UI standard v1", and

@@ -236,6 +236,21 @@ export function frameStyleSourceIds(
   return [...new Set(chosen.filter((id): id is string => typeof id === "string" && known.has(id)))];
 }
 
+/** The frames that choose their own style sources, with the sources each
+ * receives; every other frame receives every declared source. The renderer's
+ * token picker offers a frame only what it can resolve. */
+export function frameStyleSourceChoices(
+  canvas: Pick<CanvasDocument, "frame_info">,
+  catalog: DesignStyleSourceCatalog,
+): Record<string, string[]> {
+  const choices: Record<string, string[]> = {};
+  for (const [file, info] of Object.entries(canvas.frame_info ?? {})) {
+    if (Array.isArray((info as Record<string, unknown> | undefined)?.styles))
+      choices[file] = frameStyleSourceIds(canvas, catalog, file);
+  }
+  return choices;
+}
+
 interface ImportedCss {
   css: string;
   messages: DesignStyleSourceMessage[];
