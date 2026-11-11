@@ -452,16 +452,26 @@ suites, `features/agent/__tests__/fallback-transcript.test.ts`,
   Native MCP/app and browser actions keep their established semantic names.
 - `zeros_workspace` tools are recognized only by native MCP identity (Codex
   server/tool, Claude's `mcp__zeros_workspace__*`, Cursor's provider identifier)
-  and never show the raw `mcp__` name. **RunLocalCommand** is one row with a
-  laptop-and-prompt icon, its `description` as the title and the command as the
-  chip, with the agent's `reason` (wire v1.3, when given) as a muted line above
-  it; while waiting it reads "Waiting for approval on <Mac>", and every ending
-  is plain words on a neutral row (Ran on <Mac>, Denied, Mac not connected,
-  Timed out, Failed with exit code N), never a generic red **Error**.
+  and never show the raw `mcp__` name. **RunLocalCommand** is one row with two
+  glyphs side by side, a laptop and then a terminal prompt (as Conductor shows
+  it; the same pair in a collapsed group's summary and on the approval card,
+  never the MCP plug). Its `description` is the title and the command the chip
+  as soon as the arguments are known, also while running, with the agent's
+  `reason` (wire v1.3, when given) as a muted line above it. The generic title
+  "Run a command on your Mac" is only a fallback while the arguments are
+  unknown, and claims no approval. It reads "Waiting for approval on <Mac>"
+  only while main holds a pending approval for that chat and command (whose
+  card is then in that chat's dock); with Always allow on, a pending call is
+  just the running row. A success adds no words; every other ending is plain
+  words on a neutral row (Denied, Mac not connected, Timed out, Failed with
+  exit code N), never a generic red **Error**. A group of only
+  `zeros_workspace` tools never shows the plug.
   NotifyUser reads **Notified you: <title>**; GetTerminalOutput and
   GetWorkspaceDiff read **Read terminal output**, **Read workspace diff** or
-  **Read changed files**. Claude's ToolSearch row that only loads
-  `zeros_workspace` tools is hidden: the tool's own row follows.
+  **Read changed files**. A tool-search row never shows while pending (its
+  query may still be streaming, which flashed "Finding tools"); a finished one
+  shows only when it loaded something other than `zeros_workspace` tools, by
+  its select list or the tools its result names.
 - Each burst of browser calls folds into one Browser activity group, whether it
   came from Codex's built-in Browser, Claude in Chrome, or the `zeros_browser`
   tools under Codex, Claude or Cursor native MCP identity. Codex computer-use
