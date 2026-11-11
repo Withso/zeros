@@ -10,6 +10,7 @@ import { CloudWorkerScheduler } from "./worker-scheduler.js";
 
 const EVENT_PAGE_SIZE = 100;
 const HEARTBEAT_MS = 25_000;
+const TOKEN_END_MARGIN_MS = 2_000, TOKEN_END_SKEW_MS = 10_000;
 const MAX_CURSOR = Number.MAX_SAFE_INTEGER;
 const activePublications=new WeakMap<pg.Pool,Promise<number>>();
 
@@ -349,6 +350,7 @@ export function waitForSecurityEventWake(
   broker: PostgresSecurityEventBroker,
   signal: AbortSignal,
   beforeReplay: number,
+  maxWaitMs = HEARTBEAT_MS,
 ): Promise<void> {
   return new Promise((resolve) => {
     let done = false;
@@ -361,7 +363,7 @@ export function waitForSecurityEventWake(
       resolve();
     };
     const unsubscribe = broker.subscribe(finish);
-    const timer = setTimeout(finish, HEARTBEAT_MS);
+    const timer = setTimeout(finish, Math.max(0, Math.min(HEARTBEAT_MS, maxWaitMs)));
     signal.addEventListener("abort", finish, { once: true });
     if (signal.aborted || broker.revision() !== beforeReplay) finish();
   });
@@ -382,36 +384,39 @@ export function createSecurityEventRoutes(
     );
     await broker.start();
     return streamSSE(c, async (stream) => {
-      await stream.writeSSE({
-        event: "ready",
-        data: JSON.stringify({ cursor: after }),
-        retry: 3_000,
-      });
-      while (!stream.aborted && !c.req.raw.signal.aborted) {
-        const beforeReplay = broker.revision();
-        const published = await publishPendingSecurityEvents(pool);
-        let authorityLive=true;
-        const events = await listSecurityEvents(pool, user, after, { publish: false,onAuthority:live=>{authorityLive=live;} });
-        for (const event of events) {
-          await stream.writeSSE({
-            id: String(event.sequence),
-            event: event.kind,
-            data: JSON.stringify(event),
-          });
-          after = event.sequence;
-        }
-        if(!authorityLive) {
-          if(!events.some(event=>event.kind==='session.revoked'||event.kind==='account.revoked')) {
-            await stream.writeSSE({event:'session.revoked',data:JSON.stringify({reason:'authentication_changed'})});
+      const controller = new AbortController();
+      stream.onAbort(() => controller.abort());
+      const signal = AbortSignal.any([controller.signal, c.req.raw.signal]);
+      // Token renewal is a clean reconnect, not a session revocation. Database
+      // waits and an idle heartbeat must not carry replay past this deadline.
+      const expiry = user.authentication.tokenExpiresAt;
+      const tokenEnd = expiry ? expiry*1000 : Number.POSITIVE_INFINITY;
+      const ended = () => signal.aborted || Date.now() >= tokenEnd-TOKEN_END_MARGIN_MS;
+      try {
+        await stream.writeSSE({ event: "ready", data: JSON.stringify({ cursor: after }), retry: 3_000 });
+        while (!ended()) {
+          const beforeReplay = broker.revision();
+          const published = await publishPendingSecurityEvents(pool);
+          if (ended()) break;
+          let authorityLive=true;
+          const events = await listSecurityEvents(pool, user, after, { publish: false,onAuthority:live=>{authorityLive=live;} });
+          if (ended() || (!authorityLive && Date.now() >= tokenEnd-TOKEN_END_SKEW_MS)) break;
+          for (const event of events) {
+            if (ended()) break;
+            await stream.writeSSE({ id: String(event.sequence), event: event.kind, data: JSON.stringify(event) });
+            after = event.sequence;
           }
-          break;
+          if (!authorityLive) {
+            if (!ended() && !events.some(event=>event.kind==='session.revoked'||event.kind==='account.revoked'))
+              await stream.writeSSE({event:'session.revoked',data:JSON.stringify({reason:'authentication_changed'})});
+            break;
+          }
+          if (events.length === EVENT_PAGE_SIZE || published === 1000) continue;
+          if (!broker.healthy()) break;
+          await waitForSecurityEventWake(broker, signal, beforeReplay, tokenEnd-TOKEN_END_MARGIN_MS-Date.now());
+          if (!ended()) await stream.writeSSE({ event: "heartbeat", data: "{}" });
         }
-        if (events.length === EVENT_PAGE_SIZE || published === 1000) continue;
-        if (!broker.healthy()) break;
-        await waitForSecurityEventWake(broker, c.req.raw.signal, beforeReplay);
-        if (!stream.aborted)
-          await stream.writeSSE({ event: "heartbeat", data: "{}" });
-      }
+      } finally { controller.abort(); }
     });
   });
   return app;

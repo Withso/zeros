@@ -87,18 +87,37 @@ database("local command requests through real routers and PostgreSQL", () => {
     expect((await worker("", "POST", { ...call, input: { command: "different" } })).status).toBe(409);
   });
 
-  it("returns no_target for a non-desktop latest message even with explicit mac", async () => {
+  it.each([false, true])("inherits the desktop target for a headerless message (explicit=%s) without changing approval rules", async explicit => {
     await f.submit();
-    const call = input(), result = await worker("", "POST", { ...call, input: { ...call.input, mac: mac.device.name } });
+    const call = input(), result = await worker("", "POST", { ...call, input: { ...call.input, ...(explicit ? { mac: mac.device.name } : {}) } });
+    expect(result.status).toBe(201);
+    expect(await result.json()).toMatchObject({ state: "pending", mac: mac.device.name });
+    expect(await (await device(call.requestId)).json()).toMatchObject({ mac: mac.device.name, defaultMac: mac.device.name, isDefaultTarget: !explicit });
+  });
+
+  it("returns no_target for a chat with no desktop message even with explicit mac", async () => {
+    await f.submit(f.prompt("api-only"));
+    const call = input(), result = await worker("", "POST", { ...call, chatId: "api-only", input: { ...call.input, mac: mac.device.name } });
     expect(result.status).toBe(201);
     expect(await result.json()).toMatchObject({ state: "terminal", result: { outcome: "no_target", connectedMacs: [{ name: mac.device.name, isDefault: false }] } });
   });
 
-  it("cancels a pending request when a newer message retires its sender", async () => {
+  it("does not upgrade an inherited binding to a new registration of the same Mac", async () => {
+    const previous = mac.device.registrationId;
+    expect((await f.call(`/v1/cloud-v2/devices/${mac.device.deviceId}`, "DELETE", undefined, mac.headers)).status).toBe(204);
+    mac = await f.register(mac.device.deviceId);
+    expect(mac.device.registrationId).not.toBe(previous);
+    expect((await f.call(`/v1/cloud-v2/workspaces/${f.workspaceId}/macs/${mac.device.deviceId}/connect`, "POST", undefined, mac.headers)).status).toBe(200);
+    expect((await f.submit()).status).toBe(201);
+    expect(await (await worker("", "POST", input())).json()).toMatchObject({ state: "terminal", result: { outcome: "mac_not_connected" } });
+  });
+
+  it("cancels a pending request on a newer turn even when it inherits the same Mac", async () => {
     const call = input(); expect((await worker("", "POST", call)).status).toBe(201);
     await f.submit();
     expect((await device(call.requestId, "claim", { decision: "approve" })).status).toBe(409);
     expect(await (await worker(`/${call.requestId}`)).json()).toMatchObject({ state: "terminal", result: { outcome: "cancelled" } });
+    expect(await (await worker("", "POST", input())).json()).toMatchObject({ state: "pending", mac: mac.device.name });
   });
 
   it("keeps pending and claimed local work out of idle-stop admission", async () => {

@@ -518,14 +518,19 @@ Approval has a separate 120-second deadline. Each output stream is limited to
 1 MiB of UTF-8; larger tool presentations are saved in the VM's `.context/`.
 
 Only the target Mac approves and runs a command. The control plane resolves
-the target from the chat's latest accepted prompt and the verified desktop
-headers on that prompt. Without a desktop binding, the result is `no_target`,
-even when `mac` is supplied. API keys, CLI sends, agents and older desktops
-cannot establish that binding. The prompt's body, hash and delivery do not
+the target from the chat's latest verified desktop message. Later messages
+from the same person through an API key, `zeros cloud`, remote MCP, a workspace
+token or a desktop without device headers inherit that binding. A desktop
+message from another Mac moves it; a message by a different person never
+inherits it. Without a prior desktop binding, the result is `no_target`, even
+when `mac` is supplied. Non-desktop sends cannot establish a new binding or
+reconnect a disconnected Mac. The prompt's body, hash and delivery do not
 contain the device identity; idempotent prompt retries never retarget it.
+Every new turn still cancels in-flight local commands, even when its Mac is
+unchanged. A new message after chat Stop can inherit the same Mac.
 
-The default target is the Mac that sent that chat's latest message. An explicit
-`mac` is an exact, case-sensitive name of another connected Mac belonging to
+The default target is the Mac that sent that chat's latest desktop message.
+An explicit `mac` is an exact, case-sensitive name of another connected Mac belonging to
 the same sender. An explicit target always asks for approval, including when
 it names the default Mac. Unreachable or ambiguous targets return
 `mac_not_connected`; there is no fallback or broadcast. These two recovery
@@ -652,10 +657,11 @@ Delivery uses the account-level device channel's `notify` event:
 title, message, createdAt }`. `createdAt` is an ISO timestamp. Every currently
 registered Mac of the latest verified desktop sender is eligible, even with no
 workspace connection or presence lease. The latest message selects the sender
-separately from the notifying turn. If the latest message came from the API,
-CLI, an agent or an older desktop without verified device headers, the server
-still accepts the notification but sends no channel event; the worker also
-delivers to attached apps over the bridge.
+separately from the notifying turn and inherits the same person's desktop
+binding across API, CLI, remote MCP, agent and headerless desktop messages.
+A different person never inherits that binding. If the chat has no verified
+desktop sender, the server accepts the notification but sends no channel
+event; the worker also delivers to attached apps over the bridge.
 
 Channel delivery is best effort, lives for ten minutes and never replays after
 reconnection. Late delivery rechecks the receiver's sign-in and registration,

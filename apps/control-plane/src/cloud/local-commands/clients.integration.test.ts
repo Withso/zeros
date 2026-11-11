@@ -6,7 +6,9 @@ import pg from "pg";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { CloudApiCredentials } from "../api/credentials.js";
 import { createCloudApiRoutes } from "../api/routes.js";
+import { createCloudApiMcpRoutes } from "../api/mcp.js";
 import { CloudApiService } from "../api/service.js";
+import { CloudWorkspaceApiTokens } from "../api/workspace-tokens.js";
 import { CloudV2Computers } from "../computer.js";
 import { createCloudV2WorkerRoutes } from "../worker-routes.js";
 import type { NotifyUserEvent, NotifyUserWorkerRequest } from "../notify-user/contract.js";
@@ -23,7 +25,7 @@ const database = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 database("real desktop and worker local-command clients against the router and PostgreSQL", () => {
   let pool: pg.Pool, f: LocalCommandsFixture, credentials: CloudApiCredentials;
   let clients: { DeviceControl: any; parseEventStream: any; HybridTransport: any; cloudPromptApi: any;
-    LocalCommandService: any; LocalCommandJournal: any; NotifyUserService: any };
+    LocalCommandService: any; LocalCommandJournal: any; NotifyUserService: any; runCli: any };
   let control: any, worker: any, mac: LocalDevice, apiKey: string, directory: string;
   let rendererDevice: { deviceId: string; headers: Record<string, string> } | null;
   let promptApi: any, receipt: { epoch: string };
@@ -49,7 +51,8 @@ database("real desktop and worker local-command clients against the router and P
     const service = await import(source("apps/desktop/electron/local-commands/service.ts").href);
     const journal = await import(source("apps/desktop/electron/local-commands/journal.ts").href);
     const notifications = await import(source("apps/cloud-worker/src/notify-user/service.ts").href);
-    clients = { ...desktop, ...transport, ...prompt, ...service, ...journal, ...notifications };
+    const cli = await import(source("apps/cloud-worker/src/cli/zeros.ts").href);
+    clients = { ...desktop, ...transport, ...prompt, ...service, ...journal, ...notifications, runCli: cli.run };
   });
   afterAll(async () => { await pool?.end(); });
   beforeEach(async () => {
@@ -68,6 +71,7 @@ database("real desktop and worker local-command clients against the router and P
       installedRepositories: async () => [], remoteHead: async () => null,
     } });
     f.app.route("/api/v0", createCloudApiRoutes({ credentials, service }));
+    f.app.route("/api/mcp", createCloudApiMcpRoutes({ credentials, service }));
     const fetcher: typeof fetch = async (input, init) => {
       const request = new Request(input, init), url = new URL(request.url);
       const call: Call = { method: request.method, path: url.pathname + url.search, headers: request.headers,
@@ -149,9 +153,9 @@ database("real desktop and worker local-command clients against the router and P
     return { notificationId: randomUUID(),chatId: "chat",userMessageId: activeMessageId,executionId: "native-execution",
       kind: "review",title: "Ready for review",message: "The change is ready.",...overrides };
   }
-  function command(input: Partial<LocalCommandInput> = {}) {
+  function command(input: Partial<LocalCommandInput> = {}, chatId = "chat") {
     const abort = new AbortController();
-    const done = worker.localCommand({ chatId: "chat", executionId: "native-execution", input: { command: "printf fixture", ...input } }, abort.signal);
+    const done = worker.localCommand({ chatId, executionId: "native-execution", input: { command: "printf fixture", ...input } }, abort.signal);
     cleanups.push(async () => { abort.abort(); await done.catch(() => {}); });
     return { done, abort };
   }
@@ -210,17 +214,56 @@ database("real desktop and worker local-command clients against the router and P
     await finish(done, { outcome: "completed", mac: "Laptop" });
   });
 
-  it("returns no_target, including an explicit Mac, after a message through the real API", async () => {
-    const reply = await f.app.request("/api/v0/sessions/chat/messages", { method: "POST",
+  it.each(["API key", "CLI", "remote MCP", "workspace token"])("keeps the desktop target after a same-person %s message", async kind => {
+    const messageId = randomUUID(), message = "Non-desktop follow-up";
+    if (kind === "CLI") {
+      let output = "", error = "";
+      const exit = await clients.runCli(["cloud", "message", "send", "--session", "chat", "--message", message, "--message-id", messageId, "--json"], {
+        env: { ZEROS_API_URL: "https://api.example.test/api/v0", ZEROS_API_KEY: apiKey }, fetch,
+        stdout: (text: string) => { output += text; }, stderr: (text: string) => { error += text; },
+      });
+      expect({ exit, error }).toEqual({ exit: 0, error: "" });
+      expect(JSON.parse(output)).toEqual(calls.findLast(call => call.path === "/api/v0/sessions/chat/messages")!.reply);
+    } else if (kind === "remote MCP") {
+      const reply = await f.app.request("/api/mcp", { method: "POST", headers: { authorization: `Bearer ${apiKey}`,
+        "content-type": "application/json", accept: "application/json, text/event-stream", "mcp-protocol-version": "2025-11-25" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "send_message", arguments: { sessionId: "chat", messageId, message } } }) });
+      expect(reply.status).toBe(200);
+      expect((await reply.json()).result).toMatchObject({ structuredContent: { message: { id: messageId } } });
+    } else {
+      const credential = kind === "API key" ? apiKey : await new CloudWorkspaceApiTokens(pool,
+        { currentKeyVersion: 1, keys: { 1: Buffer.alloc(32,23).toString("base64url") } }).token(f.workspaceId);
+      const forged = (await control.register(randomUUID(), { requestId: randomUUID(), name: "Other" })).device;
+      const reply = await f.app.request("/api/v0/sessions/chat/messages", { method: "POST", headers: { authorization: `Bearer ${credential}`,
+        "content-type": "application/json", "x-zeros-device-id": forged.deviceId,
+        "x-zeros-device-registration": forged.registrationId, "x-zeros-device-instance": forged.instanceId },
+        body: JSON.stringify({ message, messageId }) });
+      expect(reply.status).toBe(201);
+    }
+    const stream = await channel(), { done } = command();
+    await expect.poll(() => calls.findLast(call => call.path === "/v2/cloud/worker/local-commands")?.reply).toBeDefined();
+    expect(calls.findLast(call => call.path === "/v2/cloud/worker/local-commands")!.reply).toMatchObject({ state: "pending", mac: "Studio" });
+    const notice = await stream.event("request", data => data.state === "pending");
+    expect(notice).toMatchObject({ mac: "Studio", defaultMac: "Studio", isDefaultTarget: true });
+    await control.received(mac, notice.requestId);
+    await control.claim(mac, notice.requestId, "approve");
+    await control.result(mac, notice.requestId, { outcome: "completed", code: 0 });
+    await finish(done, { outcome: "completed", mac: "Studio" });
+  });
+
+  it("keeps no_target for a never-desktop chat even when the API sends device headers and an explicit Mac", async () => {
+    const reply = await f.app.request("/api/v0/sessions", { method: "POST",
       headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json", ...rendererDevice!.headers },
-      body: JSON.stringify({ message: "API message", messageId: randomUUID() }) });
+      body: JSON.stringify({ workspaceId: f.workspaceId, sessionId: "api-only", agent: "codex", message: "API message" }) });
     expect(reply.status).toBe(201);
-    await finish(command({ mac: "Studio" }).done, { outcome: "no_target", connectedMacs: [{ name: "Studio", isDefault: false }] });
+    await finish(command({ mac: "Studio" }, "api-only").done, { outcome: "no_target", connectedMacs: [{ name: "Studio", isDefault: false }] });
   });
 
   it("returns mac_not_connected and recovery hints when the default Mac disconnects", async () => {
     expect(await control.disconnect(mac, f.workspaceId, mac.deviceId)).toMatchObject({ mac: { connected: false } });
     expect(await control.heartbeat(mac)).toEqual({ presenceRequired: false, reachableUntil: null });
+    rendererDevice = null;
+    await promptApi.enqueue(f.prompt());
     await finish(command().done, { outcome: "mac_not_connected", connectedMacs: [] });
   });
 
@@ -302,20 +345,23 @@ database("real desktop and worker local-command clients against the router and P
     expect(calls.some(call => call.path.includes("/requests/") || call.path === "/v2/cloud/worker/local-commands")).toBe(false);
   });
 
-  it("accepts a notification after an API message without falling back to the older desktop sender", async () => {
+  it("delivers NotifyUser to the inherited desktop sender after an API message", async () => {
     const stream = await channel(), receiver = await desktopNotifications();
     const reply = await f.app.request("/api/v0/sessions/chat/messages",{ method: "POST",
       headers: { authorization: `Bearer ${apiKey}`,"content-type": "application/json",...rendererDevice!.headers },
       body: JSON.stringify({ message: "API message",messageId: randomUUID() }) });
     expect(reply.status).toBe(201);
-    const untargeted = notification(); expect(await worker.notifyUser(untargeted)).toBe("sent");
-    expect((await pool.query("SELECT sender_user_id,event FROM cloud_v2_notifications WHERE workspace_id=$1 AND notification_id=$2",
-      [f.workspaceId,untargeted.notificationId])).rows[0]).toEqual({ sender_user_id: null,event: null });
+    const inherited = notification(); expect(await worker.notifyUser(inherited)).toBe("sent");
+    const row = (await pool.query("SELECT sender_user_id,event FROM cloud_v2_notifications WHERE workspace_id=$1 AND notification_id=$2",
+      [f.workspaceId,inherited.notificationId])).rows[0];
+    expect(row.sender_user_id).toBe(f.owner.id);
+    expect(JSON.parse(row.event)).toMatchObject({ notificationId: inherited.notificationId });
+    const first = await stream.event("notify"); expect(first.notificationId).toBe(inherited.notificationId);
     const next = f.prompt(); activeMessageId = next.userMessageId; await promptApi.enqueue(next);
     const targeted = notification(); expect(await worker.notifyUser(targeted)).toBe("sent");
-    const delivered = await stream.event("notify"); expect(delivered.notificationId).toBe(targeted.notificationId);
-    await expect.poll(() => receiver.notifications).toEqual([delivered]);
-    expect(stream.events.filter(event => event.event === "notify")).toHaveLength(1);
+    const delivered = await stream.event("notify", event => event.notificationId === targeted.notificationId);
+    await expect.poll(() => receiver.notifications).toEqual([first,delivered]);
+    expect(stream.events.filter(event => event.event === "notify")).toHaveLength(2);
   });
 
   it("decodes the real workspace notification limit and still accepts the same receipt as an empty 202", async () => {

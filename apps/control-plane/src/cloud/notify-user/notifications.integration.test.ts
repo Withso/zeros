@@ -95,15 +95,16 @@ database("NotifyUser through the real worker and device routers", () => {
     expect((await rows()).rows).toHaveLength(1);
   });
 
-  it("accepts API/N-1 latest messages without a channel target and never falls back to an older desktop sender", async () => {
+  it("inherits the desktop notification sender across API sends while preserving legacy retirement", async () => {
     const stream = await localDeviceStream(f,mac);
     try {
       await stream.event("ready");
       const api = await f.store.prompts.enqueueApi(f.workspaceId,f.owner.id,{ chatId: "chat",userMessageId: randomUUID(),agentId: "codex",message: "API follow-up" });
       expect(api.receipt.sequence).toBe("2");
       const oldTurn = input(); expect((await notify(oldTurn)).status).toBe(202);
-      expect((await rows()).rows[0]).toMatchObject({ sender_user_id: null,sender_message_id: null,event: null });
-      expect(await read(oldTurn.notificationId)).toEqual([]);
+      expect((await rows()).rows[0]).toMatchObject({ sender_user_id: f.owner.id,sender_message_id: api.receipt.userMessageId });
+      expect((await stream.event("notify")).notificationId).toBe(oldTurn.notificationId);
+      expect(await read(oldTurn.notificationId)).toHaveLength(1);
       const app = f.prompt(); await f.submit(app,mac.headers);
       await f.store.prompts.retireLocalSender(f.workspaceId,f.owner.id,"0",null);
       const legacy = { ...input(),userMessageId: app.userMessageId }; expect((await notify(legacy)).status).toBe(202);
@@ -112,6 +113,14 @@ database("NotifyUser through the real worker and device routers", () => {
       const current = { ...input(),userMessageId: next.userMessageId }; expect((await notify(current)).status).toBe(202);
       expect((await stream.event("notify")).notificationId).toBe(current.notificationId);
     } finally { await stream.close(); }
+  });
+
+  it("accepts a never-desktop chat's notification without any device delivery", async () => {
+    const prompt = f.prompt("api-only"); expect((await f.submit(prompt)).status).toBe(201);
+    const request = { ...input(),chatId: prompt.chatId,userMessageId: prompt.userMessageId };
+    expect((await notify(request)).status).toBe(202);
+    expect((await rows()).rows[0]).toMatchObject({ sender_user_id: null,sender_message_id: null,event: null });
+    expect(await read(request.notificationId)).toEqual([]);
   });
 
   it("never exposes another member's notifications or accepts a chat in another workspace", async () => {

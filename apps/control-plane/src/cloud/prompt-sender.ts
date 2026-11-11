@@ -5,7 +5,7 @@ export type CloudChatSender = { creator_user_id: string | null; user_message_id:
   sender_registration_id: string | null; valid: boolean; name: string | null };
 
 /** The latest message selects the person; the notifying/running turn may be
- * older. API and legacy sends retire this binding at their existing boundary. */
+ * older. Same-person durable sends carry their verified desktop binding. */
 export async function cloudChatSender(tx: Tx, workspace: { id: string; org_id: string; access_epoch: string }, chatId: string) {
   return (await tx.query<CloudChatSender>(`SELECT p.creator_user_id,p.user_message_id,p.sequence::text,c.epoch::text,c.local_command_generation::text,
     p.sender_binding_generation::text,p.sender_device_id,p.sender_registration_id,d.name,

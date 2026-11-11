@@ -38,14 +38,59 @@ database("local command sender binding through prompts", () => {
     expect((await pool.query("SELECT device_id FROM cloud_v2_connected_macs WHERE workspace_id=$1", [f.workspaceId])).rows).toEqual([{ device_id: first.device.deviceId }]);
   });
 
-  it("retires the target on API, N-1 and stopped-chat sends", async () => {
+  it("inherits the verified Mac across same-person API and headerless sends until another desktop moves it", async () => {
+    const first = await f.register(), second = await f.register();
+    expect((await f.submit(f.prompt(), first.headers)).status).toBe(201);
+    const api = { chatId: "chat", userMessageId: "api-message", agentId: "codex" as const, message: "API fixture" };
+    await f.store.prompts.enqueueApi(f.workspaceId, f.owner.id, api);
+    expect(await sender()).toMatchObject({ creator_user_id: f.owner.id, sender_device_id: first.device.deviceId,
+      sender_registration_id: first.device.registrationId, sender_binding_generation: "0" });
+    expect((await f.submit()).status).toBe(201);
+    expect((await sender()).sender_device_id).toBe(first.device.deviceId);
+    expect((await f.submit(f.prompt(), second.headers)).status).toBe(201);
+    expect((await f.store.prompts.enqueueApi(f.workspaceId, f.owner.id, api)).replay).toBe(true);
+    expect((await f.submit()).status).toBe(201);
+    expect(await sender()).toMatchObject({ sender_device_id: second.device.deviceId,
+      sender_registration_id: second.device.registrationId, sender_binding_generation: "0" });
+  });
+
+  it("keeps the Mac for a new turn after chat Stop without reviving the cancelled prompt", async () => {
+    const mac = await f.register(), prompt = f.prompt();
+    expect((await f.submit(prompt, mac.headers)).status).toBe(201);
+    expect(await f.store.prompts.stop(f.workspaceId, f.owner.id, "chat", "0")).toEqual({ chatId: "chat", epoch: "1" });
+    expect((await f.submit()).status).toBe(201);
+    expect((await sender()).sender_device_id).toBe(mac.device.deviceId);
+    expect((await pool.query("SELECT cancel_requested,state,epoch::text FROM cloud_v2_prompt_outbox WHERE user_message_id=$1", [prompt.userMessageId])).rows[0])
+      .toEqual({ cancel_requested: true, state: "cancelled", epoch: "0" });
+    expect((await pool.query("SELECT epoch::text FROM cloud_v2_prompt_outbox WHERE workspace_id=$1 ORDER BY sequence DESC LIMIT 1", [f.workspaceId])).rows[0].epoch).toBe("1");
+  });
+
+  it("does not invent a binding for a chat that has never had a desktop message", async () => {
+    await f.register();
+    expect((await f.submit()).status).toBe(201);
+    expect(await sender()).toMatchObject({ sender_device_id: null, sender_registration_id: null, sender_binding_generation: null });
+  });
+
+  it("never inherits another person's binding or searches past a different sender", async () => {
+    const own = await f.register(), other = await f.register(undefined, f.other);
+    expect((await f.submit(f.prompt(), own.headers)).status).toBe(201);
+    expect((await f.submit(f.prompt(), other.headers)).status).toBe(404);
+    const previous = f.prompt(); expect((await f.submit(previous, own.headers)).status).toBe(201);
+    // Model a persisted turn by another person without widening creator-only writes.
+    await pool.query(`UPDATE cloud_v2_prompt_outbox SET creator_user_id=$2,sender_device_id=$3,sender_registration_id=$4
+      WHERE user_message_id=$1`, [previous.userMessageId, f.other.id, other.device.deviceId, other.device.registrationId]);
+    expect((await f.submit()).status).toBe(201);
+    expect(await sender()).toMatchObject({ creator_user_id: f.owner.id, sender_device_id: null,
+      sender_registration_id: null, sender_binding_generation: null });
+  });
+
+  it.each(["access", "legacy"])("does not revive a binding retired by %s authority", async change => {
     const mac = await f.register();
-    await f.submit(f.prompt(), mac.headers);
-    await f.store.prompts.enqueueApi(f.workspaceId, f.owner.id, { chatId: "chat", userMessageId: "api-message", agentId: "codex", message: "API fixture" });
-    expect((await sender()).sender_device_id).toBeNull();
-    await f.submit(f.prompt(), mac.headers);
-    await f.submit();
-    expect((await sender()).sender_device_id).toBeNull();
+    expect((await f.submit(f.prompt(), mac.headers)).status).toBe(201);
+    if (change === "legacy") await f.store.prompts.retireLocalSender(f.workspaceId, f.owner.id, "0", null);
+    else await pool.query("UPDATE cloud_v2_workspaces SET access_epoch=access_epoch+1 WHERE id=$1", [f.workspaceId]);
+    expect((await f.submit()).status).toBe(201);
+    expect(await sender()).toMatchObject({ sender_device_id: null, sender_registration_id: null, sender_binding_generation: null });
   });
 
   it("rechecks a desktop session after waiting for the enqueue mutation lock", async () => {

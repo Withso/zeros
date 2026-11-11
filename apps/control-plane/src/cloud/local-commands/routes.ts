@@ -11,6 +11,7 @@ import { localUnavailable, type CloudLocalCommands } from "./requests.js";
 import { CloudLocalDevices, DEVICE_HEARTBEAT_MS } from "./devices.js";
 import { CloudLocalCommandSignals, deviceSignal } from "./signals.js";
 import type { CloudNotifyUser, NotificationHint } from "../notify-user/store.js";
+import { localCommandDiagnostic, type LocalChannelCloseReason } from "./diagnostics.js";
 
 export type CloudLocalDeviceRoutes = { devices: CloudLocalDevices; signals: CloudLocalCommandSignals; requests?: CloudLocalCommands; notifications?: CloudNotifyUser };
 export const isLocalCommandResultPath = (path: string) => /^\/v1\/cloud-v2\/devices\/[0-9a-f-]{36}\/requests\/[0-9a-f-]{36}\/result$/i.test(path);
@@ -119,6 +120,9 @@ export function createCloudLocalDeviceRoutes(deps: CloudLocalDeviceRoutes): Hono
     const initial = await deps.devices.snapshot(user, identity);
     await deps.signals.start();
     return streamSSE(c, async stream => {
+      const openedAt = performance.now();
+      let closeReason: LocalChannelCloseReason = "client_closed";
+      localCommandDiagnostic({ event: "channel_opened", userId: user.id, ...identity });
       const controller = new AbortController(); stream.onAbort(() => controller.abort());
       const signal = AbortSignal.any([controller.signal, c.req.raw.signal]);
       let first = true, previousPresence = "", lastHeartbeat = Date.now();
@@ -175,16 +179,26 @@ export function createCloudLocalDeviceRoutes(deps: CloudLocalDeviceRoutes): Hono
               await stream.writeSSE({ event: "heartbeat", data: JSON.stringify({ at: new Date().toISOString(), presence: snapshot.presence }) });
               lastHeartbeat = Date.now();
             }
-            if (!deps.signals.healthy()) break;
+            if (!deps.signals.healthy()) { closeReason = "signals_unhealthy"; break; }
             await waiter.wait;
           } finally { waiter.dispose(); }
         }
+        if (stream.aborted || signal.aborted) closeReason = "client_closed";
+        else if (Date.now() >= tokenEnd-TOKEN_END_MARGIN_MS) closeReason = "token_end";
       } catch (error) {
         // The database clock may pass the token's end before this one does.
         const tokenEnded = error instanceof HttpError && error.status === 401 && Date.now() >= tokenEnd-TOKEN_END_SKEW_MS;
-        if (!tokenEnded && !stream.aborted && !signal.aborted && error instanceof HttpError && [401,404,409].includes(error.status))
-          await stream.writeSSE({ event: "revoked", data: JSON.stringify({ code: error.status === 401 ? "session_revoked" : "device_registration_changed" }) });
-      } finally { unsubscribe?.(); controller.abort(); }
+        closeReason = stream.aborted || signal.aborted ? "client_closed" : tokenEnded ? "token_end" : "error";
+        if (!tokenEnded && !stream.aborted && !signal.aborted && error instanceof HttpError && [401,404,409].includes(error.status)) {
+          const code = error.status === 401 ? "session_revoked" : "device_registration_changed";
+          closeReason = `revoked:${code}`;
+          try { await stream.writeSSE({ event: "revoked", data: JSON.stringify({ code }) }); }
+          catch { closeReason = stream.aborted || signal.aborted ? "client_closed" : "error"; }
+        }
+      } finally {
+        unsubscribe?.(); controller.abort();
+        localCommandDiagnostic({ event: "channel_closed", userId: user.id, ...identity, reason: closeReason, secondsOpen: (performance.now()-openedAt)/1000 });
+      }
     });
   });
   return app;

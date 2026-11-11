@@ -13,6 +13,7 @@ import { LocalCommandIdSchema, LocalCommandInputSchema, LocalMacResultSchema, ty
   type LocalCommandOutcome, type LocalCommandReceipt, type LocalCommandResult, type LocalDeviceBinding } from "./contract.js";
 import { CloudLocalDevices, limited, localUserAuthority, notFound } from "./devices.js";
 import { openLocalInput, openLocalResult, sealLocalInput, sealLocalResult } from "./envelope.js";
+import { localCommandDiagnostic, type LocalCommandDiagnostic, type LocalTargetReason } from "./diagnostics.js";
 
 export const NewLocalCommandSchema = z.object({ requestId: z.string().uuid(), chatId: LocalCommandIdSchema,
   executionId: LocalCommandIdSchema, input: LocalCommandInputSchema }).strict();
@@ -193,7 +194,8 @@ export class CloudLocalCommands {
   }
 
   async create(token: string, bootId: string, input: NewLocalCommand): Promise<{ receipt: LocalCommandReceipt; replay: boolean }> {
-    try { return await withSystemTx(this.pool, async tx => {
+    let diagnostic: LocalCommandDiagnostic | undefined;
+    try { const result = await withSystemTx(this.pool, async tx => {
       const workspace = await this.worker(tx,token,bootId,true), hash = digest([input.chatId,input.executionId,input.input]);
       const existing = (await tx.query("SELECT input_hash FROM local_command_requests WHERE workspace_id=$1 AND request_id=$2", [workspace.id,input.requestId])).rows[0];
       if (existing) {
@@ -204,17 +206,24 @@ export class CloudLocalCommands {
       const sender = await cloudChatSender(tx,workspace,input.chatId);
       const userId = sender?.creator_user_id ?? null, defaultId = sender?.valid ? sender.sender_device_id : null;
       let outcome: LocalCommandOutcome | null = !workspace.local_commands_allowed ? "disabled" : !sender?.valid ? "no_target" : null;
+      let reason: LocalTargetReason | undefined = outcome === "no_target" ? "sender_invalid" : undefined;
       let target: { device_id: string; registration_id: string; instance_id: string; name: string } | undefined;
       if (!outcome && userId) {
-        const macs = (await this.devices.macs(tx,userId,workspace.id)).filter(mac => mac.connected && mac.reachable);
-        const matches = macs.filter(mac => input.input.mac === undefined ? mac.deviceId === defaultId : mac.name === input.input.mac);
+        const candidates = (await this.devices.macs(tx,userId,workspace.id))
+          .filter(mac => input.input.mac === undefined ? mac.deviceId === defaultId : mac.name === input.input.mac);
+        const matches = candidates.filter(mac => mac.connected && mac.reachable);
+        if (matches.length !== 1) reason = matches.length > 1 ? "ambiguous_name"
+          : candidates.some(mac => mac.connected) ? "not_reachable" : "not_connected";
         if (matches.length === 1) target = (await tx.query(`SELECT d.device_id,d.registration_id,d.instance_id,d.name FROM local_command_devices d
           WHERE user_id=$1 AND device_id=$2 FOR UPDATE`, [userId,matches[0]!.deviceId])).rows[0];
         if (target) {
-          const live = (await this.devices.macs(tx,userId,workspace.id)).find(mac => mac.deviceId === target!.device_id && mac.connected && mac.reachable);
-          if (!live || (input.input.mac === undefined && target.registration_id !== sender!.sender_registration_id)) target = undefined;
+          const live = (await this.devices.macs(tx,userId,workspace.id)).find(mac => mac.deviceId === target!.device_id);
+          if (input.input.mac === undefined && target.registration_id !== sender!.sender_registration_id) reason = "registration_changed";
+          else if (!live?.connected) reason = "not_connected";
+          else if (!live.reachable) reason = "not_reachable";
+          if (reason) target = undefined;
         }
-        if (!target) outcome = "mac_not_connected";
+        if (!target) { outcome = "mac_not_connected"; reason ??= "registration_changed"; }
       }
       // Workspace and target-device locks serialize budgets across API replicas
       // and across different workspaces addressing the same Mac.
@@ -249,8 +258,13 @@ export class CloudLocalCommands {
         envelope ? JSON.stringify(envelope) : null,envelope ? Buffer.byteLength(JSON.stringify(input.input)) : 0,outcome ? "terminal" : "pending",outcome,input.input.timeoutMs ?? 60_000,
         terminal ? JSON.stringify(terminal) : null]);
       if (!outcome) await tx.query("UPDATE cloud_v2_workspaces SET active_at=clock_timestamp() WHERE id=$1", [workspace.id]);
+      diagnostic = { event: "request_created", workspaceId: workspace.id, requestId: input.requestId,
+        userId, deviceId: target?.device_id ?? (input.input.mac === undefined ? defaultId : null), outcome: outcome ?? "pending", ...(reason ? { reason } : {}) };
       return { receipt: await this.receipt(tx,await this.row(tx,workspace.id,input.requestId)), replay: false };
-    }); } catch (error) {
+    });
+      if (diagnostic) localCommandDiagnostic(diagnostic);
+      return result;
+    } catch (error) {
       if (error && typeof error === "object" && "code" in error && error.code === "23505") throw conflict();
       throw error;
     }
@@ -309,20 +323,26 @@ export class CloudLocalCommands {
       return rows.map(row => this.notice(row));
     }, { consistentRead: true });
   }
-  received(user: AuthedUser, binding: LocalDeviceBinding, requestId: string) {
-    return withSystemTx(this.pool, async tx => {
+  async received(user: AuthedUser, binding: LocalDeviceBinding, requestId: string) {
+    let diagnostic: LocalCommandDiagnostic | undefined;
+    const result = await withSystemTx(this.pool, async tx => {
       let row = await this.settle(tx,await this.deviceRow(tx,user,binding,requestId,true));
       if (row.phase === "pending" && !row.delivered_at) {
         await tx.query("UPDATE local_command_requests SET delivered_at=clock_timestamp(),updated_at=clock_timestamp() WHERE workspace_id=$1 AND request_id=$2", [row.workspace_id,requestId]);
         row = await this.row(tx,row.workspace_id,requestId);
+        diagnostic = { event: "received", workspaceId: row.workspace_id, requestId, userId: user.id, deviceId: binding.deviceId };
       }
       return this.notice(row);
     });
+    if (diagnostic) localCommandDiagnostic(diagnostic);
+    return result;
   }
   async claim(user: AuthedUser, binding: LocalDeviceBinding, requestId: string, decision: "approve" | "deny") {
+    let diagnostic: LocalCommandDiagnostic | undefined;
     const result = await withSystemTx(this.pool, async tx => {
       const row = await this.settle(tx,await this.deviceRow(tx,user,binding,requestId,true));
       if (row.phase !== "pending" || !row.reachable || row.target_instance_id !== binding.instanceId) return null;
+      diagnostic = { event: "claimed", workspaceId: row.workspace_id, requestId, userId: user.id, deviceId: binding.deviceId, decision };
       if (decision === "deny") return this.notice(await this.finish(tx,row,{ outcome: "denied", denied: true, mac: row.target_name! }));
       await tx.query(`UPDATE local_command_requests SET phase='claimed',delivered_at=coalesce(delivered_at,clock_timestamp()),claimed_at=clock_timestamp(),
         run_deadline=least(clock_timestamp()+timeout_ms*interval '1 millisecond',approval_deadline+timeout_ms*interval '1 millisecond'),updated_at=clock_timestamp()
@@ -331,6 +351,7 @@ export class CloudLocalCommands {
       return this.notice(await this.row(tx,row.workspace_id,requestId));
     });
     if (!result) throw notPending();
+    if (diagnostic) localCommandDiagnostic(diagnostic);
     return result;
   }
   result(user: AuthedUser, binding: LocalDeviceBinding, requestId: string, value: MacResult) {
