@@ -228,7 +228,9 @@ describe("selective pull-request CI", () => {
       if (job.permissions)
         expect(job.permissions).toEqual(id === "ci-gate"
           ? { contents: "read", actions: "read", "pull-requests": "read" }
-          : id === "scope"
+          : id === "assurance"
+            ? { contents: "read", actions: "read" }
+            : id === "scope"
             ? { contents: "read", "pull-requests": "read" }
             : { contents: "read" });
       for (const step of job.steps ?? [])
@@ -1043,5 +1045,17 @@ describe("current pull-request labels", () => {
     const { result, output } = run({}, fakeGh(body, status));
     expect(result.status).not.toBe(0);
     expect(output).toBe("");
+  });
+});
+
+describe("reusable Preflight permissions", () => {
+  it("grants the called workflow every permission its jobs request, or GitHub refuses to start CI", () => {
+    const preflight = load(readFileSync(path.join(ROOT, ".github/workflows/preflight.yml"), "utf8")) as Workflow;
+    const caller = ci.jobs.assurance as Job & { permissions?: Record<string, string> };
+    const granted = { ...ci.permissions, ...(caller.permissions ?? {}) };
+    const rank = { none: 0, read: 1, write: 2 } as Record<string, number>;
+    for (const [id, job] of Object.entries(preflight.jobs))
+      for (const [scope, level] of Object.entries(job.permissions ?? {}))
+        expect(rank[granted[scope] ?? "none"], `${id} requests ${scope}: ${level}`).toBeGreaterThanOrEqual(rank[level]);
   });
 });

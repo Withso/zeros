@@ -1488,6 +1488,11 @@ jobs:
     name: Remaining full suite
     needs: [scope, control-plane-scope, control-plane-static]
     if: ${{ !cancelled() }}
+    # A called workflow cannot request more than its caller grants; Preflight's
+    # push-only merge-group-evidence job declares actions: read (skipped here).
+    permissions:
+      contents: read
+      actions: read
     uses: ./.github/workflows/preflight.yml
     with:
       full_database: true
