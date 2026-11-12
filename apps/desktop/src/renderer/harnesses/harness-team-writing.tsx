@@ -1,8 +1,8 @@
 // Team sharing phase 2 (slice C) with production components and synthetic
 // data: a member of an activated workspace writes as themself. The details
 // card offers Restart and Stop, a refused send asks for the member's own
-// agent account, a running turn names who it acts as, and the composer's
-// personal-secret notice shows. The smoke intercepts every control-plane route.
+// agent account, and a running turn names who it acts as. The smoke intercepts
+// every control-plane route.
 import "../../../../../styles/zeros-tokens.css";
 import "../../../../../styles/semantic-tokens.css";
 import "../../../../../styles/globals.css";
@@ -32,7 +32,6 @@ async function main() {
   const { TurnFailureCard } = await import("../features/agent/turn-failure-card");
   const { turnFailureForCard } = await import("../features/agent/turn-failure");
   const { ActingAs } = await import("../features/agent/acting-as");
-  const { TeamWritingNotice } = await import("../features/agent/team-writing-notice");
   const { BLANK, useSessionsStore } = await import("../features/agent/sessions-store");
   const { TeamSharingAccessEnded } = await import("../shell/team-sharing-access-ended");
   const { workspaceSyncLabel } = await import("../platform/workspace-sync");
@@ -67,7 +66,6 @@ async function main() {
       <section aria-label="Conversation" className="flex w-[640px] flex-col gap-4">
         <div aria-label="Running turn"><ActingAs chatId="chat-a" active /></div>
         <TurnFailureCard failure={refusal} onReconnect={provider => { calls.push(`connect:${provider}`); }} onRetry={() => { calls.push("retry"); }} />
-        <div aria-label="Composer footer"><TeamWritingNotice folder={folder} /></div>
       </section>
     </main>;
   }

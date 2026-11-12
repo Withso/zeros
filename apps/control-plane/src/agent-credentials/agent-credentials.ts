@@ -78,11 +78,13 @@ export class DatabaseCloudAgentCredentialService {
 
   private async owner(tx:Tx,userId:string,requirePro=false):Promise<void>{
     if(!uuid.safeParse(userId).success)unavailable();
-    const account=await tx.query(`SELECT account.id FROM users account WHERE account.id=$1 AND account.auth_status='active' AND account.deleted_at IS NULL
-      AND (NOT $2::boolean OR account_pro_user_live(account.id))
+    const account=await tx.query<{pro_missing:boolean}>(`SELECT ($2::boolean AND NOT account_pro_user_live(account.id)) AS pro_missing
+      FROM users account WHERE account.id=$1 AND account.auth_status='active' AND account.deleted_at IS NULL
       AND EXISTS(SELECT 1 FROM user_identities identity WHERE identity.user_id=account.id AND identity.provider='workos'
         AND identity.status='active' AND identity.email_verified_at IS NOT NULL) FOR KEY SHARE OF account SKIP LOCKED`,[userId,requirePro]);
     if(account.rowCount!==1)unavailable();
+    // The caller's own plan is no secret to them; a missing account still reads as unavailable.
+    if(account.rows[0]!.pro_missing)throw new HttpError(403,"pro_required","Connecting an agent login requires Pro");
   }
 
   async list(ownerUserId:string){
