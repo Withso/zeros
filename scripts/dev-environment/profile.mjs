@@ -84,6 +84,7 @@ function cloudV2Environment(workspace, profile, apiOrigin, env) {
   return {
     CLOUD_V2_ENABLED: "true", CLOUD_V2_API_URL: apiOrigin, CLOUD_V2_REALTIME_URL: apiOrigin.replace(/^https:/, "wss:"),
     CLOUD_V2_PROMPT_OUTBOX_ENABLED: env.CLOUD_V2_PROMPT_OUTBOX_ENABLED ?? "true",
+    ...(env.ZEROS_CLOUD_ACTING_USER_DEFAULT === undefined ? {} : { ZEROS_CLOUD_ACTING_USER_DEFAULT: env.ZEROS_CLOUD_ACTING_USER_DEFAULT }),
     // Off unless asked for: qualifies forking a stopped VM on this Boat account.
     ...(env.CLOUD_V2_CHECKPOINT_RETRY_ENABLED ? { CLOUD_V2_CHECKPOINT_RETRY_ENABLED: env.CLOUD_V2_CHECKPOINT_RETRY_ENABLED } : {}),
     CLOUD_V2_RUNTIME_SHA256: runtime, CLOUD_V2_RUNTIME_STORE_ENDPOINT: s.endpoint, CLOUD_V2_RUNTIME_STORE_BUCKET: s.bucket,

@@ -11,7 +11,7 @@ const run = promisify(execFile);
 const cleanup: (() => Promise<unknown>)[] = [];
 afterEach(async () => { for (const dispose of cleanup.splice(0).reverse()) await dispose(); });
 
-async function fixture(version = 1) {
+async function fixture(version = 1, features?: string[]) {
   const directory = await mkdtemp(join(tmpdir(), "publish-runtime-test-"));
   cleanup.push(() => rm(directory, { recursive: true, force: true }));
   const dist = join(directory, "dist");
@@ -21,6 +21,11 @@ async function fixture(version = 1) {
     await mkdir(dirname(join(dist, file)), { recursive: true });
     await writeFile(join(dist, file), content);
     files[file] = { sha256: createHash("sha256").update(content).digest("hex"), bytes: content.length };
+  }
+  if (features) {
+    const content = Buffer.from(JSON.stringify({ version: 1, features }));
+    await writeFile(join(dist, "worker-capabilities.json"), content);
+    files["worker-capabilities.json"] = { sha256: createHash("sha256").update(content).digest("hex"), bytes: content.length };
   }
   const native = ["@openai/codex-linux-x64", "@anthropic-ai/claude-agent-sdk-linux-x64", "@cursor/sdk-linux-x64"];
   await writeFile(join(dist, "runtime-manifest.json"), JSON.stringify({ version: 1, node: "24", platform: "linux", arch: "x64",
@@ -32,7 +37,7 @@ async function fixture(version = 1) {
   const sha256 = createHash("sha256").update(contents).digest("hex");
 
   const requests: { method: string; path: string; authorization: string; body: Buffer }[] = [];
-  const status = { head: 404, archive: 200, index: 200 };
+  const status = { head: 404, archive: 200, index: 200, capabilities: 200 };
   // What a runtime listing returns, and the bodies of stored source indices.
   const listing: { key: string; lastModified: string; size: number }[] = [], stored: Record<string, string> = {};
   const server = createServer(async (request, response) => {
@@ -51,7 +56,7 @@ async function fixture(version = 1) {
     }
     const body = request.method === "GET" ? stored[url.pathname.split("/").slice(2).join("/")] : undefined;
     if (body !== undefined) { response.writeHead(200, { "content-type": "application/json" }).end(body); return; }
-    response.writeHead(request.method === "HEAD" ? status.head : request.url!.includes("/sources/") ? status.index : status.archive).end();
+    response.writeHead(request.method === "HEAD" ? status.head : request.url!.includes("/sources/") ? status.index : request.url!.includes("/capabilities/") ? status.capabilities : status.archive).end();
   });
   await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
   cleanup.push(() => new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())));
@@ -164,4 +169,24 @@ it("skips retention with --no-prune and refuses an invalid --keep before contact
   const result = await test.publish("--keep", "not-a-sha").catch(error => error);
   expect(result.code).toBe(1);
   expect(test.requests).toEqual([]);
+});
+
+it("publishes digest-bound capabilities before the unchanged source index", async () => {
+  const features = ["acting-user-v1", "sync-context-v1"];
+  const test = await fixture(1, features);
+  const { stdout, stderr } = await test.publish("--local", "--no-prune");
+  expect(test.requests.map(request => request.method)).toEqual(["HEAD", "PUT", "PUT", "PUT"]);
+  expect(test.requests[2]!.path.split("?")[0]).toBe(`/fixture-local/cloud-v2/runtime/capabilities/${test.sha256}.json`);
+  expect(test.requests[2]!.body.toString()).toContain(JSON.stringify({ version: 1, sha256: test.sha256,
+    sourceSha256: "b".repeat(64), commit: "a".repeat(40), features }));
+  expect(test.requests[3]!.body.toString()).toContain(JSON.stringify({ version: 1, sourceSha256: "b".repeat(64), sha256: test.sha256, commit: "a".repeat(40) }));
+  expect(stdout).toContain(`CLOUD_V2_RUNTIME_SHA256=${test.sha256}`); expect(stderr).toBe("");
+});
+
+it("does not advertise a source or a pin when the capability upload fails", async () => {
+  const test = await fixture(1, ["acting-user-v1", "sync-context-v1"]); test.status.capabilities = 403;
+  const result = await test.publish("--local", "--no-prune").catch(error => error);
+  expect(result.code).toBe(1); expect(result.stdout).not.toContain("CLOUD_V2_RUNTIME_SHA256=");
+  expect(test.requests.map(request => request.method)).toEqual(["HEAD", "PUT", "PUT"]);
+  expect(test.requests.some(request => request.path.includes("/sources/"))).toBe(false);
 });

@@ -23,6 +23,14 @@ it("keeps prompt delivery opt-in and refuses ambiguous rollout configuration", (
   expect(loadConfig({ ...base, CLOUD_V2_PROMPT_OUTBOX_ENABLED: "true" }).cloudV2?.promptOutbox).toBe(true);
   expect(() => loadConfig({ ...base, CLOUD_V2_PROMPT_OUTBOX_ENABLED: "enabled" })).toThrow("CLOUD_V2_PROMPT_OUTBOX_ENABLED");
 });
+it("keeps new-workspace acting-user mode off until the channel explicitly enables it", () => {
+  const key = generateKeyPairSync("ed25519").privateKey.export({ format: "der", type: "pkcs8" }).toString("base64");
+  const base = { ...env, CLOUD_V2_WORKER_SIGNING_KEY: key };
+  expect(loadConfig(base).cloudV2).toMatchObject({ actingUserDefault: false });
+  expect(loadConfig({ ...base, ZEROS_CLOUD_ACTING_USER_DEFAULT: "0" }).cloudV2).toMatchObject({ actingUserDefault: false });
+  expect(loadConfig({ ...base, ZEROS_CLOUD_ACTING_USER_DEFAULT: "1" }).cloudV2).toMatchObject({ actingUserDefault: true });
+  for (const value of ["true", "enabled", "2"]) expect(() => loadConfig({ ...base, ZEROS_CLOUD_ACTING_USER_DEFAULT: value })).toThrow("ZEROS_CLOUD_ACTING_USER_DEFAULT");
+});
 it("returns creates before their GitHub checks unless a deployment turns it off, and refuses ambiguous values", () => {
   const key = generateKeyPairSync("ed25519").privateKey.export({ format: "der", type: "pkcs8" }).toString("base64");
   const base = { ...env, CLOUD_V2_WORKER_SIGNING_KEY: key };

@@ -232,6 +232,8 @@ export type Config = {
 };
 
 export type CloudV2Config = {
+  /** Applies only to new organization cloud workspaces on this channel. */
+  actingUserDefault?: boolean;
   /** Enable only after publishing the matching outbox-capable runtime. */
   promptOutbox?: boolean;
   /** Retries a stop's failed checkpoint on a fork of the stopped VM. Enable
@@ -271,6 +273,8 @@ function loadCloudV2Config(env: NodeJS.ProcessEnv, channel: string): CloudV2Conf
   if (checkpointRetry && !["true", "false"].includes(checkpointRetry)) throw new Error("Invalid environment: CLOUD_V2_CHECKPOINT_RETRY_ENABLED must be true or false");
   const asyncCreate = env.CLOUD_V2_ASYNC_CREATE_ENABLED?.trim().toLowerCase();
   if (asyncCreate && !["true", "false"].includes(asyncCreate)) throw new Error("Invalid environment: CLOUD_V2_ASYNC_CREATE_ENABLED must be true or false");
+  const actingUserDefault = env.ZEROS_CLOUD_ACTING_USER_DEFAULT?.trim();
+  if (actingUserDefault && !["0", "1"].includes(actingUserDefault)) throw new Error("Invalid environment: ZEROS_CLOUD_ACTING_USER_DEFAULT must be 0 or 1");
   const origin = (name: string, protocol: "https:" | "wss:") => {
     const raw = env[name]?.trim();
     let url: URL;
@@ -302,6 +306,7 @@ function loadCloudV2Config(env: NodeJS.ProcessEnv, channel: string): CloudV2Conf
     promptOutbox: promptOutbox === "true",
     checkpointRetry: checkpointRetry === "true",
     asyncCreate: asyncCreate !== "false",
+    actingUserDefault: actingUserDefault === "1",
     workerSigningKey, ...(previous ? { workerSigningKeyPrevious: previous } : {}),
     apiUrl: origin("CLOUD_V2_API_URL", "https:"),
     realtimeUrl: origin("CLOUD_V2_REALTIME_URL", "wss:"),

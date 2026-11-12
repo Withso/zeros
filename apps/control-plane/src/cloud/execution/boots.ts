@@ -7,6 +7,7 @@ import { actorBusy, actorChanged } from "./errors.js";
 import type { CloudExecutionContexts, ExecutionWorker, ExecutionWorkspace } from "./store.js";
 import { completeExecutionActivation } from "./activation.js";
 import { failExecutionActivation } from "./activation-state.js";
+import { completeExecutionCreation, failExecutionCreation } from "./creation.js";
 
 type Boot = { boot_id: string; access_epoch: string; stop_generation: string; worker_token_hash: Buffer; replaced_by: string | null;
   retirement_id: string | null; retirement_hash: Buffer | null; retired_count: number | null; clean_at: Date | null;
@@ -59,6 +60,7 @@ export class CloudExecutionBoots {
           WHERE workspace_id=$1 AND boot_id=$2`,
         [workspace.id, identity.bootId, input.processes, legacyMaterial, input.refusals ?? null]);
         await failExecutionActivation(tx, workspace.id, "execution_not_retired", { legacyMaterial, refusals: input.refusals ?? null });
+        await failExecutionCreation(tx, workspace);
         return { refused: true, firstFailure: boot.first_failed_at === null, workspaceId: workspace.id };
       }
       // Only the persisted replacement chain permits this boot to attest another
@@ -75,6 +77,7 @@ export class CloudExecutionBoots {
       await tx.query(`UPDATE cloud_v2_execution_boots SET retirement_id=$3,retirement_hash=$4,retired_count=$5,clean_at=clock_timestamp(),last_processes=0,legacy_material=$6,last_refusals=NULL
         WHERE workspace_id=$1 AND boot_id=$2`, [workspace.id, identity.bootId, input.retirementId, digest, ids.length, legacyMaterial]);
       if (ids.length) await tx.query("SELECT pg_notify('zeros_cloud_v2_prompts',$1)", [workspace.id]);
+      await completeExecutionCreation(tx, workspace);
       await completeExecutionActivation(tx, workspace, legacyMaterial, this.contexts);
       return { retired: ids.length };
     });

@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import pg from "pg";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { executionFixture, type ExecutionFixture } from "./test-fixture.js";
+import { withSystemTx } from "../../db.js";
 
 const database = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 database("bootstrap authority through the real worker router", () => {
@@ -48,6 +49,37 @@ database("bootstrap authority through the real worker router", () => {
     const next = (await reply.json()).config.bootstrapContextId;
     expect(next).toEqual(expect.any(String)); expect(next).not.toBe(first);
     expect((await f.worker("bootstrap-lease", { contextId: next })).status).toBe(200);
+  });
+
+  it("replaces an expired undelivered bootstrap after another member changes the source cache fingerprint", async () => {
+    const first = await bootstrap();
+    const before = (await pool.query("SELECT authority,source_fingerprint FROM cloud_v2_execution_contexts WHERE id=$1", [first])).rows[0];
+    await pool.query("UPDATE cloud_v2_execution_contexts SET expires_at=clock_timestamp()-interval '1 second' WHERE id=$1", [first]);
+    await withSystemTx(pool, async tx => {
+      await tx.query("DELETE FROM organization_members WHERE org_id=$1 AND user_id=$2", [f.organizationId, f.admin.id]);
+      await tx.query("UPDATE organizations SET authorization_revision=authorization_revision+1 WHERE id=$1", [f.organizationId]);
+    });
+    const response = await config(); expect(response.status).toBe(200);
+    const next = (await response.json()).config.bootstrapContextId;
+    expect(next).not.toBe(first);
+    const after = (await pool.query("SELECT authority,source_fingerprint FROM cloud_v2_execution_contexts WHERE id=$1", [next])).rows[0];
+    expect(after.authority).toEqual(before.authority);
+    expect(after.source_fingerprint).not.toBe(before.source_fingerprint);
+    expect((await f.worker("bootstrap-lease", { contextId: first })).status).toBe(409);
+    expect((await f.worker("bootstrap-lease", { contextId: next })).status).toBe(200);
+  });
+
+  it("refuses expired bootstrap replacement when its initiator's own GitHub selection changes", async () => {
+    const first = await bootstrap();
+    await pool.query("UPDATE cloud_v2_execution_contexts SET expires_at=clock_timestamp()-interval '1 second' WHERE id=$1", [first]);
+    const scope = { organizationId: f.organizationId, userId: f.creator.id, repositoryId: "42" };
+    const connections = f.cp.execution.deps.authority.connections;
+    await connections.save(scope, await connections.fingerprint(scope), { id: "12", login: "fixture" },
+      { method: "pat", accessToken: `synthetic-${f.creator.id}`, expiresAt: null });
+    expect((await config()).status).toBe(409);
+    expect((await pool.query("SELECT id FROM cloud_v2_execution_contexts WHERE workspace_id=$1 AND kind='bootstrap'", [f.workspace.id])).rows)
+      .toEqual([{ id: first }]);
+    expect((await f.worker("bootstrap-lease", { contextId: first })).status).toBe(409);
   });
 
   it("captures an older replica's material write and keeps the delivery receipt through erasure", async () => {

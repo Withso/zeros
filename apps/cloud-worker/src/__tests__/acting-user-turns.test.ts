@@ -104,9 +104,11 @@ class ActingRelay extends FakeRelay {
   }
 }
 
-async function setup(options: { bootstrapError?: unknown; activated?: boolean; bootstrap?: string; survivors?: number; noSweep?: boolean; beforeStart?: (home: string) => Promise<void>; environment?: unknown; log?: (line: string) => void; setupRunner?: (...args: any[]) => Promise<number>; checkout?: () => void } = {}) {
+async function setup(options: { freshCheckout?: boolean; bootstrapError?: unknown; activated?: boolean; bootstrap?: string; survivors?: number; noSweep?: boolean; beforeStart?: (home: string) => Promise<void>; environment?: unknown; log?: (line: string) => void; setupRunner?: (...args: any[]) => Promise<number>; checkout?: () => void } = {}) {
   const directory = await mkdtemp(join(tmpdir(), "zeros-acting-")); directories.push(directory);
   const root = join(directory, "checkout"); await mkdir(root);
+  // An existing checkout (a later process on this boot, or an earlier boot's): nothing to clone without a bootstrap.
+  if (!options.freshCheckout) await mkdir(join(root, ".git"));
   const relay = new ActingRelay(), drivers: FakeDriver[] = [];
   if (options.bootstrapError) relay.bootstrapError = options.bootstrapError;
   let socketPath = "";
@@ -120,7 +122,7 @@ async function setup(options: { bootstrapError?: unknown; activated?: boolean; b
     ...(options.log ? { log: options.log } : {}),
     drivers: { claude: () => { const driver = new FakeDriver(); drivers.push(driver); return driver; } } });
   workers.push(worker); worker.start();
-  await (options.bootstrapError || (options.bootstrap && options.survivors) ? (p: Promise<unknown>) => p.catch(() => {}) : (p: Promise<unknown>) => p)(relay.receive({ ...config, workspace: { ...config.workspace, checkoutPath: root, ...(options.setupRunner ? { setup: "make bootstrap" } : {}) }, promptOutbox: 1,
+  await (options.bootstrapError || options.freshCheckout || (options.bootstrap && options.survivors) ? (p: Promise<unknown>) => p.catch(() => {}) : (p: Promise<unknown>) => p)(relay.receive({ ...config, workspace: { ...config.workspace, checkoutPath: root, ...(options.setupRunner ? { setup: "make bootstrap" } : {}) }, promptOutbox: 1,
     ...(options.bootstrap ? { bootstrapContextId: options.bootstrap } : {}),
     ...(options.environment ? { environment: options.environment } : {}), agents: options.activated === false ? { claude: { apiKey: "creator-claude-key-000" } } : {},
     ...(options.activated === false ? {} : { actingUser: 1, gitIdentity: null }) }));
@@ -658,4 +660,13 @@ it("authors each review comment in an activated workspace as the person who made
   await f.relay.request(CLIENT_B, anonymous);
   await until(() => !!f.relay.response(anonymous.id)).toBe(true);
   expect(f.relay.response(anonymous.id)!.type).toBe("WORKSPACE_ERROR");
+});
+
+it("refuses to start a fresh activated checkout without a bootstrap context: nothing is cloned or set up as nobody", async () => {
+  const lines: string[] = [];
+  let cloned = false, setupRan = false;
+  const f = await setup({ freshCheckout: true, log: line => lines.push(line), checkout: () => { cloned = true; }, setupRunner: async () => { setupRan = true; return 0; } });
+  await until(() => lines.find(line => line.startsWith("startup failed"))).toBe("startup failed class=bootstrap_required code=WORKSPACE_UNAVAILABLE");
+  expect([cloned, setupRan]).toEqual([false, false]);
+  expect(f.relay.calls.some(call => call.op === "bootstrap-lease")).toBe(false);
 });

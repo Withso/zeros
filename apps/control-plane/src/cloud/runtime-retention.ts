@@ -9,6 +9,7 @@ export const RUNTIME_RETENTION = { newest: 2, graceMs: 24 * 60 * 60_000 } as con
 const PREFIX = "cloud-v2/runtime/";
 const ARCHIVE = /^cloud-v2\/runtime\/([0-9a-f]{64})\.tar\.gz$/;
 const INDEX = /^cloud-v2\/runtime\/sources\/[0-9a-f]{64}\.json$/;
+const CAPABILITIES = /^cloud-v2\/runtime\/capabilities\/([0-9a-f]{64})\.json$/;
 const SHA = /^[0-9a-f]{64}$/;
 
 export type StoredObject = { key: string; lastModified: Date; size: number };
@@ -17,7 +18,7 @@ export type RetentionOptions = { protect: readonly string[]; newest?: number; gr
 /** Which runtime objects can go. Kept: the protected runtimes (the live pin
  * and the one just published), the `newest` archives, and anything younger
  * than `graceMs`, which also covers a publish racing this one. Removed: older
- * archives, and the source indices naming them or an archive that is gone.
+ * archives, and their source indices and digest-bound capabilities.
  * Objects it does not recognise, and indices it could not read, always stay. */
 export function planRuntimeRetention(objects: readonly StoredObject[], targets: ReadonlyMap<string, string | null>,
   options: RetentionOptions & { now: number }) {
@@ -32,8 +33,8 @@ export function planRuntimeRetention(objects: readonly StoredObject[], targets: 
     archive.lastModified.getTime() >= cutoff).map(archive => archive.sha256));
   const removed = archives.filter(archive => !kept.has(archive.sha256));
   // An index whose archive is not kept either names a removed archive or one already gone.
-  const indices = objects.filter(object => INDEX.test(object.key) && object.lastModified.getTime() < cutoff).filter(object => {
-    const target = targets.get(object.key);
+  const indices = objects.filter(object => (INDEX.test(object.key) || CAPABILITIES.test(object.key)) && object.lastModified.getTime() < cutoff).filter(object => {
+    const target = object.key.match(CAPABILITIES)?.[1] ?? targets.get(object.key);
     return typeof target === "string" && !kept.has(target) && !protect.has(target);
   });
   return {
