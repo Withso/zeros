@@ -1,7 +1,8 @@
+import { spawnSync as spawnSyncChild } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { lstat, mkdir, readFile, readdir, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import type { CloudWorkspaceEnvironment } from "@zeros/protocol/cloud-v2-relay";
 import { seedEnvironment } from "../../workspace/environment-seed";
 import { configureGitIdentity } from "../../credentials/git-identity";
@@ -156,4 +157,96 @@ it("refuses when ~/.config itself is a link, and when the checkout's parent is a
   await symlink(g.directory, linkedParent);
   expect(await removeLegacyMaterial({ root: join(linkedParent, "checkout"), state: g.state, home: g.home, shm: g.shm })).toBe("refused");
   expect(await g.exists(join(g.root, ".env.local"))).toBe(true);
+});
+
+describe("each refusal names its closed class (boot-clean diagnostics), never a path", () => {
+  const classesOf = async (paths: Parameters<typeof removeLegacyMaterial>[0]) => {
+    const noted: string[] = [];
+    const result = await removeLegacyMaterial(paths, refusal => noted.push(refusal));
+    return { result, classes: [...new Set(noted)].sort() };
+  };
+  it("names a replaced or non-regular seeded file, and an invalid or unfinished journal", async () => {
+    const f = await fixture();
+    await seedEnvironment(f.scope, f.state, environment(), new AbortController().signal);
+    await unlink(join(f.root, ".env.local")); await writeFile(join(f.root, ".env.local"), "VALUE=someone-else\n");
+    expect(await classesOf({ root: f.root, state: f.state, home: f.home, shm: f.shm })).toEqual({ result: "refused", classes: ["seed_target_modified"] });
+    await unlink(join(f.root, ".env.local")); await symlink("/etc/hostname", join(f.root, ".env.local"));
+    expect((await classesOf({ root: f.root, state: f.state, home: f.home, shm: f.shm })).classes).toEqual(["seed_target_not_regular"]);
+    const g = await fixture();
+    await mkdir(join(g.state, "environment-seed"), { mode: 0o700 }); await writeFile(join(g.state, "environment-seed", "manifest.json"), "not json");
+    expect((await classesOf({ root: g.root, state: g.state, home: g.home, shm: g.shm })).classes).toEqual(["seed_journal_invalid"]);
+    const h = await fixture();
+    await seedEnvironment(h.scope, h.state, environment(), new AbortController().signal);
+    const path = join(h.state, "environment-seed", "manifest.json"), journal = JSON.parse(await readFile(path, "utf8"));
+    journal.complete = false; await writeFile(path, JSON.stringify(journal));
+    expect((await classesOf({ root: h.root, state: h.state, home: h.home, shm: h.shm })).classes).toEqual(["seed_journal_incomplete"]);
+  });
+  it("names the walk that met a link: the state dir, the checkout, the Git identity, the terminals dir; and an odd token dir", async () => {
+    const f = await fixture();
+    const foreign = join(f.directory, "foreign-local"); await mkdir(join(foreign, "share"), { recursive: true });
+    await symlink(foreign, join(f.home, ".local"));
+    // The terminal screens live under the same state path, so their walk meets the same link.
+    expect((await classesOf({ root: f.root, state: join(f.home, ".local", "share", "zeros"), home: f.home, shm: f.shm })).classes).toEqual(["state_dir_linked", "terminal_dir_linked"]);
+    const g = await fixture();
+    await seedEnvironment(g.scope, g.state, environment(), new AbortController().signal);
+    const linked = join(g.directory, "linked-checkouts"); await symlink(g.directory, linked);
+    expect((await classesOf({ root: join(linked, "checkout"), state: g.state, home: g.home, shm: g.shm })).classes).toEqual(["checkout_linked"]);
+    const h = await fixture();
+    const elsewhere = join(h.directory, "elsewhere"); await mkdir(join(elsewhere, "zeros"), { recursive: true });
+    await symlink(elsewhere, join(h.home, ".config"));
+    await symlink(join(h.directory, "elsewhere-terminals"), join(h.state, "terminals"));
+    await mkdir(join(h.directory, "elsewhere-terminals"));
+    const odd = join(h.shm, "zeros-restore-auth-ZyXw987654"); await mkdir(odd, { mode: 0o700 }); await writeFile(join(odd, "extra"), "x");
+    expect((await classesOf({ root: h.root, state: h.state, home: h.home, shm: h.shm })).classes).toEqual(["git_identity_linked", "restore_token_dir_invalid", "terminal_dir_linked"]);
+  });
+});
+
+describe("seed proof v2 at the first activated boot", () => {
+  const rewrite = async (path: string) => { const bytes = await readFile(path); await unlink(path); await writeFile(path, bytes, { mode: 0o600 }); };
+  it("removes the Creator's seeded files after a Stop/Start rewrote them (new inode, same bytes): the sequence that failed on Alpha", async () => {
+    const f = await fixture();
+    await seedEnvironment(f.scope, f.state, environment(), new AbortController().signal);
+    const before = (await lstat(join(f.root, ".env.local"))).ino;
+    await rewrite(join(f.root, ".env.local")); await rewrite(join(f.root, "private-env/.env.local"));
+    expect((await lstat(join(f.root, ".env.local"))).ino).not.toBe(before);
+    const noted: string[] = [];
+    expect(await removeLegacyMaterial({ root: f.root, state: f.state, home: f.home, shm: f.shm }, refusal => noted.push(refusal))).toBe("removed");
+    expect(noted).toEqual([]);
+    expect(await f.exists(join(f.root, ".env.local"))).toBe(false);
+    expect(await f.exists(join(f.root, "private-env/.env.local"))).toBe(false);
+  });
+  it("refuses a modified seeded file, keeping its bytes", async () => {
+    const f = await fixture();
+    await seedEnvironment(f.scope, f.state, environment(), new AbortController().signal);
+    await writeFile(join(f.root, ".env.local"), "VALUE=edited\n");
+    const noted: string[] = [];
+    expect(await removeLegacyMaterial({ root: f.root, state: f.state, home: f.home, shm: f.shm }, refusal => noted.push(refusal))).toBe("refused");
+    expect(noted).toEqual(["seed_target_modified"]);
+    expect(await readFile(join(f.root, ".env.local"), "utf8")).toBe("VALUE=edited\n");
+  });
+  it("refuses a version-1 journal as outdated (one legacy Start/Stop on the current runtime upgrades it)", async () => {
+    const f = await fixture();
+    await seedEnvironment(f.scope, f.state, environment(), new AbortController().signal);
+    const path = join(f.state, "environment-seed", "manifest.json"), journal = JSON.parse(await readFile(path, "utf8"));
+    await writeFile(path, JSON.stringify({ ...journal, version: 1, files: journal.files.map(({ sha256: _digest, ...file }: Record<string, unknown>) => file) }));
+    const noted: string[] = [];
+    expect(await removeLegacyMaterial({ root: f.root, state: f.state, home: f.home, shm: f.shm }, refusal => noted.push(refusal))).toBe("refused");
+    expect(noted).toEqual(["seed_journal_outdated"]);
+    expect(await f.exists(join(f.root, ".env.local"))).toBe(true);
+  });
+});
+
+const sudo = spawnSyncChild("sudo", ["-n", "true"]).status === 0;
+it.skipIf(!sudo)("refuses, keeping the file, when a seeded file's nested parent inside the checkout belongs to someone else (J-S1)", async () => {
+  const { spawnSync } = await import("node:child_process");
+  const f = await fixture();
+  await seedEnvironment(f.scope, f.state, environment(), new AbortController().signal);
+  const nested = join(f.root, "private-env");
+  spawnSync("sudo", ["-n", "chmod", "0777", nested]); spawnSync("sudo", ["-n", "chown", "0:0", nested]);
+  try {
+    const noted: string[] = [];
+    expect(await removeLegacyMaterial({ root: f.root, state: f.state, home: f.home, shm: f.shm }, refusal => noted.push(refusal))).toBe("refused");
+    expect(noted).toContain("checkout_foreign");
+    expect(await f.exists(join(nested, ".env.local"))).toBe(true);
+  } finally { spawnSync("sudo", ["-n", "chown", `${process.getuid!()}:${process.getgid!()}`, nested]); }
 });

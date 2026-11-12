@@ -1,11 +1,12 @@
 import { constants } from "node:fs";
 import { link, lstat, mkdir, mkdtemp, open, rename, rm, rmdir, unlink, type FileHandle } from "node:fs/promises";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { basename, dirname, isAbsolute, join } from "node:path";
 import { z } from "zod";
-import { isCloudEnvironmentPath, type CloudEnvironmentSeedError, type CloudWorkspaceEnvironment } from "@zeros/protocol/cloud-v2-relay";
+import { CLOUD_ENVIRONMENT_LIMITS, isCloudEnvironmentPath, type CloudEnvironmentSeedError, type CloudWorkspaceEnvironment } from "@zeros/protocol/cloud-v2-relay";
 import { CheckedFiles, descriptorPath } from "./checked-files";
-import { openDirectoryNoFollow } from "../sharing/no-follow";
+import { NoFollowRefusal, openDirectoryNoFollow } from "../sharing/no-follow";
+import type { CloudV2BootCleanRefusal } from "@zeros/protocol/cloud-v2-relay";
 import { commandRunner } from "./commands";
 import type { WorkspaceScope } from "./scope";
 
@@ -13,12 +14,17 @@ const SEED_DIRECTORY = "environment-seed";
 const fileSchema = z.object({ path: z.string().refine(isCloudEnvironmentPath), alias: z.string().uuid(),
   phase: z.enum(["preparing", "prepared", "publishing", "complete"]),
   dev: z.number().int().nonnegative().optional(), ino: z.number().int().nonnegative().optional(),
+  /** Version 2: SHA-256 (hex) of the exact bytes seeded here, the removal proof. dev/ino only make publishing crash-safe. */
+  sha256: z.string().regex(/^[0-9a-f]{64}$/).optional(),
 }).strict();
-const journalSchema = z.object({ version: z.literal(1), workspace: z.string(), versionId: z.string().uuid(), repositoryId: z.string(),
+const journalSchema = z.object({ version: z.union([z.literal(1), z.literal(2)]), workspace: z.string(), versionId: z.string().uuid(), repositoryId: z.string(),
   complete: z.boolean(), files: z.array(fileSchema).max(16),
 }).strict();
 type Journal = z.infer<typeof journalSchema>;
 type Entry = Journal["files"][number];
+const bytesDigest = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex");
+/** The exact bytes seedEnvironment writes for this content (Buffer.from(content)). */
+const contentDigest = (content: string) => bytesDigest(Buffer.from(content));
 const missing = (error: unknown) => (error as NodeJS.ErrnoException).code === "ENOENT";
 const noEntry = async (path: string) => lstat(path).catch(error => { if (missing(error)) return undefined; throw error; });
 const owns = (entry: Pick<Entry, "dev" | "ino">, info: { dev: number; ino: number }) => entry.dev === info.dev && entry.ino === info.ino;
@@ -110,6 +116,12 @@ export async function seedEnvironment(scope: WorkspaceScope, stateDirectory: str
     }
     if (!environment || (journal && (journal.workspace !== scope.key || journal.versionId !== environment.versionId || journal.repositoryId !== environment.repositoryId ||
       JSON.stringify(journal.files.map(file => file.path)) !== JSON.stringify(environment.files.map(file => file.path))))) return refuse("cloud_environment_pin_changed");
+    // Seed proof v2: the digest of each configured file's content, never of what is on disk. A version-1
+    // journal for this same pin is upgraded in place; the files themselves are left exactly as they are.
+    if (journal && journal.version === 1) {
+      journal = { ...journal, version: 2, files: journal.files.map((file, index) => ({ ...file, sha256: contentDigest(environment.files[index]!.content) })) };
+      if (journal.complete) await save(directory, journal);
+    }
     if (journal?.complete) {
       if (journal.files.some(file => file.phase !== "complete")) return refuse("cloud_environment_seed_uncertain");
       return;
@@ -151,8 +163,8 @@ export async function seedEnvironment(scope: WorkspaceScope, stateDirectory: str
           if (target && !(entry?.phase === "publishing" && target.isFile() && owns(entry, target))) return refuse("cloud_environment_path_conflict");
         } finally { await held.close(); }
       }
-      journal ??= { version: 1, workspace: scope.key, versionId: environment.versionId, repositoryId: environment.repositoryId, complete: false,
-        files: environment.files.map(file => ({ path: file.path, alias: randomUUID(), phase: "preparing" })) };
+      journal ??= { version: 2, workspace: scope.key, versionId: environment.versionId, repositoryId: environment.repositoryId, complete: false,
+        files: environment.files.map(file => ({ path: file.path, alias: randomUUID(), phase: "preparing", sha256: contentDigest(file.content) })) };
       await save(directory!, journal);
       for (let i = 0; i < journal.files.length; i++) {
         check();
@@ -213,63 +225,72 @@ export type LegacyRemoval = "none" | "removed" | "refused";
  * or unreadable journal, or a replaced, symlinked or foreign file refuses the
  * whole removal and keeps every byte and the journal. Already deleted files
  * are gone. Afterwards the private seed directory (journal, aliases) goes. */
-export async function removeSeededEnvironment(root: string, stateDirectory: string): Promise<LegacyRemoval> {
+export async function removeSeededEnvironment(root: string, stateDirectory: string, note: (refusal: CloudV2BootCleanRefusal) => void = () => {}): Promise<LegacyRemoval> {
   // Every ancestor of the state and checkout paths is walked without following links (sharing/no-follow).
   let state: FileHandle | undefined, seed: FileHandle | undefined;
+  const refused = (refusal: CloudV2BootCleanRefusal): LegacyRemoval => { note(refusal); return "refused"; };
   try {
     state = await openDirectoryNoFollow(stateDirectory);
     if (!state) return "none";
     seed = await open(`${descriptorPath(state)}/${SEED_DIRECTORY}`, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW)
-      .catch(error => { if (missing(error)) return undefined; throw error; });
+      .catch(error => { if (missing(error)) return undefined; throw ["ELOOP", "ENOTDIR"].includes(error.code) ? new NoFollowRefusal("linked") : error; });
     if (!seed) return "none";
-    return await removeSeededFiles(root, state, seed);
-  } catch { return "refused"; }
+    return await removeSeededFiles(root, state, seed, refused);
+  } catch (error) {
+    return refused(error instanceof NoFollowRefusal ? (error.kind === "linked" ? "state_dir_linked" : "state_dir_foreign") : "io_error");
+  }
   finally { await seed?.close().catch(() => {}); await state?.close().catch(() => {}); }
 }
 
-async function removeSeededFiles(root: string, state: FileHandle, seed: FileHandle): Promise<LegacyRemoval> {
+async function removeSeededFiles(root: string, state: FileHandle, seed: FileHandle, refused: (refusal: CloudV2BootCleanRefusal) => LegacyRemoval): Promise<LegacyRemoval> {
   let journal: Journal;
   try {
     const stored = await open(`${descriptorPath(seed)}/manifest.json`, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     try {
       const parsed = journalSchema.safeParse(JSON.parse((await readBounded(stored, 32 * 1024)).toString("utf8")));
-      if (!parsed.success) return "refused";
+      if (!parsed.success) return refused("seed_journal_invalid");
       journal = parsed.data;
     } finally { await stored.close(); }
-  } catch { return "refused"; }
-  if (!journal.complete || journal.files.some(file => file.phase !== "complete" || file.dev === undefined || file.ino === undefined)) return "refused";
+  } catch { return refused("seed_journal_invalid"); }
+  // Seed proof v2: a version-1 journal's inode proof does not survive a Stop/Start; one legacy Start/Stop upgrades it.
+  if (journal.version === 1) return refused("seed_journal_outdated");
+  if (!journal.complete || journal.files.some(file => file.phase !== "complete")) return refused("seed_journal_incomplete");
+  if (journal.files.some(file => file.sha256 === undefined)) return refused("seed_journal_invalid");
   // Each target's parent, opened component by component without following links.
-  const parentOf = async (relative: string): Promise<FileHandle | undefined> => {
-    const checkout = await openDirectoryNoFollow(root);
-    if (!checkout) return undefined;
-    let handle: FileHandle = checkout;
-    try {
-      for (const part of relative.split("/").slice(0, -1)) {
-        const next = await open(`${descriptorPath(handle)}/${part}`, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW)
-          .catch(error => { if (missing(error)) return undefined; throw error; });
-        await handle.close();
-        if (!next) return undefined;
-        handle = next;
-      }
-      return handle;
-    } catch (error) { await handle.close(); throw error; }
-  };
-  const targets: Array<{ entry: Entry; held: FileHandle }> = [];
+  // Each target's parent through the one root-anchored walk: no link anywhere, and nothing below the first
+  // user-owned directory (the checkout's nested parents included) belongs to anyone else (J-S1).
+  const parentOf = (relative: string): Promise<FileHandle | undefined> => openDirectoryNoFollow(join(root, dirname(relative)));
+  const targets: Array<{ entry: Entry; held: FileHandle; identity?: { dev: number; ino: number } }> = [];
   try {
     for (const entry of journal.files) {
       const held = await parentOf(entry.path);
       if (!held) continue;   // its directory is gone: so is the file
-      targets.push({ entry, held });
-      const info = await noEntry(`${descriptorPath(held)}/${basename(entry.path)}`);
-      if (info && (!info.isFile() || !owns(entry, info))) return "refused";
+      const target = { entry, held } as (typeof targets)[number];
+      targets.push(target);
+      // The exact bytes, read through the held parent without following a link: a regular file of this user whose digest is the seeded one.
+      const file = await open(`${descriptorPath(held)}/${basename(entry.path)}`, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
+        .catch(error => { if (missing(error)) return undefined; if (["ELOOP", "ENXIO", "EISDIR"].includes(error.code)) return null; throw error; });
+      if (file === undefined) continue;
+      if (file === null) return refused("seed_target_not_regular");
+      try {
+        const info = await file.stat();
+        if (!info.isFile()) return refused("seed_target_not_regular");
+        if (info.uid !== process.getuid?.()) return refused("checkout_foreign");
+        if (info.size > CLOUD_ENVIRONMENT_LIMITS.fileBytes) return refused("seed_target_modified");
+        if (bytesDigest(await readBounded(file, CLOUD_ENVIRONMENT_LIMITS.fileBytes)) !== entry.sha256) return refused("seed_target_modified");
+        target.identity = { dev: info.dev, ino: info.ino };
+      } finally { await file.close(); }
     }
-    for (const { entry, held } of targets) await retire(`${descriptorPath(held)}/${basename(entry.path)}`, entry);
-    for (const { entry, held } of targets) {
-      const left = await noEntry(`${descriptorPath(held)}/${basename(entry.path)}`);
-      if (left && owns(entry, left)) return "refused";
+    // Removed only while each is still the file read above (an inode checked within this boot only).
+    for (const { entry, held, identity } of targets) if (identity) await retire(`${descriptorPath(held)}/${basename(entry.path)}`, identity);
+    for (const { entry, held, identity } of targets) {
+      const left = identity && await noEntry(`${descriptorPath(held)}/${basename(entry.path)}`);
+      if (left && owns(identity, left)) return refused("io_error");
     }
-  } catch { return "refused"; }
+  } catch (error) {
+    return refused(error instanceof NoFollowRefusal ? (error.kind === "linked" ? "checkout_linked" : "checkout_foreign") : "io_error");
+  }
   finally { await Promise.all(targets.map(({ held }) => held.close().catch(() => {}))); }
-  try { await rm(`${descriptorPath(state)}/${SEED_DIRECTORY}`, { recursive: true, force: true }); } catch { return "refused"; }
+  try { await rm(`${descriptorPath(state)}/${SEED_DIRECTORY}`, { recursive: true, force: true }); } catch { return refused("io_error"); }
   return "removed";
 }

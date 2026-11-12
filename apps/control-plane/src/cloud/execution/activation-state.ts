@@ -1,5 +1,6 @@
 import { HttpError } from "../../authz.js";
 import type { Tx } from "../../db.js";
+import type { CloudV2BootCleanRefusal } from "../contract.js";
 
 export const activationBusy = () => new HttpError(409, "actor_busy", "Shared execution is changing; wait for the workspace to restart");
 
@@ -39,10 +40,13 @@ export async function confirmExecutionStop(tx: Tx, id: string, generation: strin
   await clearStoppedExecutionTransition(tx, id);
 }
 
-export async function failExecutionActivation(tx: Tx, id: string, code: string) {
-  const result = await tx.query(`UPDATE cloud_v2_execution_activations a SET phase='failed',first_error_code=coalesce(first_error_code,$2),updated_at=clock_timestamp()
+export async function failExecutionActivation(tx: Tx, id: string, code: string,
+  bootClean?: { legacyMaterial: "none" | "removed" | "refused"; refusals: CloudV2BootCleanRefusal[] | null }) {
+  const result = await tx.query(`UPDATE cloud_v2_execution_activations a SET phase='failed',first_error_code=coalesce(first_error_code,$2),
+    legacy_material=CASE WHEN first_error_code IS NULL AND $3::text IS NOT NULL THEN $3 ELSE legacy_material END,
+    first_failed_refusals=CASE WHEN first_error_code IS NULL THEN $4::text[] ELSE first_failed_refusals END,updated_at=clock_timestamp()
     FROM cloud_v2_workspaces w WHERE w.id=$1 AND a.id=w.execution_transition_id AND a.phase IN ('draining','authorizing','booting')
-    RETURNING a.id`, [id, code]);
+    RETURNING a.id`, [id, code, bootClean?.legacyMaterial ?? null, bootClean?.refusals ?? null]);
   if (!result.rowCount) return;
   await clearStoppedExecutionTransition(tx, id);
   await tx.query(`UPDATE cloud_v2_workspaces SET state='stopping',stop_generation=stop_generation+CASE WHEN state='stopping' THEN 0 ELSE 1 END,

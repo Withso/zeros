@@ -320,9 +320,21 @@ export const CloudV2RetiredRequestSchema = z.object({ retirementId: z.uuid(), re
   processes: z.number().int().min(0).max(2147483647) }).strict();
 export const CloudV2RetiredReplySchema = z.object({ retired: z.literal(true) }).strict();
 /** §7a: once per boot, before any begin or lease. The boot is the authenticated X-Zeros-Worker-Boot; processes 0 is the clean attestation. */
+/** Why a boot's cleanup is unproven or refused: closed classes only, never paths or values. */
+export const CLOUD_V2_BOOT_CLEAN_REFUSALS = ["proc_unreadable", "cgroup_unavailable", "cgroup_root", "cgroup_unreadable", "survivors", "contexts_erase_failed",
+  "state_dir_linked", "state_dir_foreign", "checkout_linked", "checkout_foreign", "seed_journal_invalid", "seed_journal_incomplete",
+  "seed_journal_outdated", "seed_target_modified", "seed_target_not_regular", "git_identity_linked", "git_identity_foreign", "git_identity_not_regular", "git_identity_changed",
+  "terminal_dir_linked", "terminal_entry_foreign", "shm_linked", "restore_token_dir_invalid", "io_error"] as const;
+export const CloudV2BootCleanRefusalSchema = z.enum(CLOUD_V2_BOOT_CLEAN_REFUSALS);
+export type CloudV2BootCleanRefusal = z.infer<typeof CloudV2BootCleanRefusalSchema>;
 export const CloudV2BootCleanRequestSchema = z.object({ retirementId: z.uuid(), processes: z.number().int().min(0).max(2147483647),
   /** Slice D (Q-D2): the phase-1 Creator material this boot removed; the control plane activates only on none/removed (missing = refused). */
-  legacyMaterial: z.enum(["none", "removed", "refused"]).optional() }).strict();
+  legacyMaterial: z.enum(["none", "removed", "refused"]).optional(),
+  /** Each class that made the cleanup unproven or refused (diagnostics; present only when non-empty). */
+  refusals: z.array(CloudV2BootCleanRefusalSchema).min(1).max(CLOUD_V2_BOOT_CLEAN_REFUSALS.length)
+    .refine(values => values.every((value, index) => index === 0 || values[index - 1]! < value), "Each class once, sorted").optional() }).strict()
+  // Consistent with the result: a clean boot names no class. Classes stay optional otherwise (an older worker sends none).
+  .refine(body => !(body.processes === 0 && (body.legacyMaterial === "none" || body.legacyMaterial === "removed") && body.refusals), "A clean boot names no class");
 export const CloudV2BootCleanReplySchema = z.object({ retired: z.number().int().min(0) }).strict();
 /** Context refusal codes (409/403/503 bodies {error:{code,message,agent?}}). */
 export const CloudV2ContextErrorCodeSchema = z.enum(["actor_changed", "actor_busy", "worker_update_required", "workspace_stopping",

@@ -562,8 +562,18 @@ initiator, source and permission revisions, run, runtime digest and action.
 Changed authority or a stale approval refuses execution. Repeating a committed
 action with the same activation identity and approval is inert.
 
-`prepare` preserves current execution, tokens and N-1 visibility. Change only
-`action` to `activate`, obtain a new plan and approve that plan separately.
+`prepare` preserves current execution, tokens and N-1 visibility. Existing
+workspaces need a version-2 seed journal before activation. If the journal is
+version 1, perform one ordinary Stop/Start on the current runtime while still
+legacy or prepared, then Stop. That boot upgrades the journal using the pinned
+configuration's content digests and preserves the person's file edits. Prepare
+a fresh activation after this cycle: the previous boot/run snapshot is stale.
+Then change only `action` to `activate`, obtain a new plan and approve it.
+The operator's `bootClean.seedJournal` reports `outdated` when a retained
+refusal proves it; `unknown` means the server has not observed the journal.
+Planning does not inspect or wake a VM. When the version is unknown, perform
+the legacy/prepared cycle before preparing the final activation.
+
 Activation blocks new prompts, connects and starts; advances the access epoch;
 cancels pending work; and records a durable drain. The normal lifecycle must
 confirm provider Stop before starting the pinned runtime. Each lifecycle
@@ -577,6 +587,25 @@ Readiness and every execution lease wait for that boot's process cleanup and
 keeps execution closed and stops the attempted rollout. The worker owns
 descriptor-checked removal of managed legacy files; the control plane never
 scripts their deletion. The server-side Creator environment pin is retained.
+Managed file removal uses the version-2 journal's SHA-256 of the exact seeded
+bytes, a regular file owned by the worker user, and a root-anchored path walk
+without following links. Device and inode numbers are not proof across boots.
+A version-1 journal refuses with `seed_journal_outdated`. Modified bytes refuse
+with `seed_target_modified` and remain on disk: the Creator must remove the
+file or restore its intended seeded content before retrying activation.
+First complete the failed rollout's provider Stop and rollback; do not retry
+cleanup or activate around its fence. Then use the legacy/prepared upgrade
+cycle, prepare a new activation and activate it.
+
+The worker may include a sorted, unique, nonempty `refusals` array of at most
+24 closed classes. No paths, digests, values or raw errors enter this field.
+The boot keeps its latest classes and preserves its first failure, including
+an unknown first diagnostic. The activation and operator output retain the
+first classes in `bootClean.refusals`; `null` means unreported. A committed
+first failed boot logs `[cloud-v2] activation boot-clean refused classes=...`
+with only the closed classes and a workspace UUID prefix. Diagnostics never
+relax the clean-boot requirement; old workers without the field still refuse
+or succeed by the same process/material rules.
 
 Initial activation refuses a lost VM that needs checkpoint restoration. It
 retains the checkpoint and completes Stop; the operator can roll back, restore
@@ -587,6 +616,13 @@ before unpacking any checkpoint content. Git starts with a fresh repository,
 system/global configuration, hooks, helpers and redirects disabled. Bundle
 application after the fetch is offline. A denied initiator receives
 `github_access_required`; the Creator's credential is never substituted.
+Active restores exclude journal-managed environment targets from the Git
+working tree and ignored-file archive, and never apply `environment.tar` to
+the checkout. This also covers a retained legacy checkpoint from before
+activation. The original workspace pin stays on the server; each execution
+lease selects its acting person's environment. Legacy restores continue
+restoring their environment files; checkpoint capture accepts seed journal
+versions 1 and 2.
 
 The restore consumes a durable attempt before releasing the credential. An
 uncertain fetch or unpack cannot receive another credential on that VM: retry

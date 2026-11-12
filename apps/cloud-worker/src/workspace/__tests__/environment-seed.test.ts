@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { link, mkdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -89,5 +89,26 @@ describe("durable cloud environment seeds", () => {
       await f.seed(env); expect((await f.journal()).complete).toBe(true);
       expect(await readFile(join(f.root, ".env.local"), "utf8") === env.files[0]!.content).toBe(true);
     }
+  });
+});
+
+describe("seed proof v2: content digests, not inodes", () => {
+  const digest = (content: string) => createHash("sha256").update(content).digest("hex");
+  it("records the exact bytes' SHA-256 for each seeded target, and no value", async () => {
+    const f = await fixture(); await f.seed();
+    const journal = await f.journal();
+    expect(journal.version).toBe(2);
+    expect(journal.files.map((file: { path: string; sha256: string }) => [file.path, file.sha256])).toEqual(f.environment.files.map(file => [file.path, digest(file.content)]));
+  });
+  it("upgrades a complete version-1 journal from the configured content, leaving the files on disk as they are", async () => {
+    const f = await fixture(); await f.seed();
+    const path = join(f.state, "environment-seed", "manifest.json"), journal = await f.journal();
+    await writeFile(path, JSON.stringify({ ...journal, version: 1, files: journal.files.map(({ sha256: _digest, ...file }: Record<string, unknown>) => file) }));
+    await writeFile(join(f.root, ".env.local"), "VALUE=edited-by-a-person\n");
+    await f.seed();
+    const upgraded = await f.journal();
+    expect(upgraded.version).toBe(2);
+    expect(upgraded.files[0].sha256).toBe(digest(f.environment.files[0]!.content));
+    expect(await readFile(join(f.root, ".env.local"), "utf8")).toBe("VALUE=edited-by-a-person\n");
   });
 });

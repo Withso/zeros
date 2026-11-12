@@ -1,3 +1,4 @@
+import type { CloudV2BootCleanRefusal } from "@zeros/protocol/cloud-v2-relay";
 import { readdir, readFile } from "node:fs/promises";
 
 /** One process's identity, read from /proc. start is in clock ticks since the VM booted. */
@@ -14,6 +15,8 @@ export interface BootCleanDeps {
   erase(): Promise<void>;
   now?(): number; sleep?(ms: number): Promise<void>;
   deadlineMs?: number; termMs?: number; intervalMs?: number;
+  /** Each class that left the boot unproven, for the boot-clean diagnostics (no paths, pids or values). */
+  note?(refusal: CloudV2BootCleanRefusal): void;
 }
 
 const SESSION_SCOPE = /^0::\/user\.slice\/user-\d+\.slice\/session-[^/]+\.scope(?:\/|$)/m;
@@ -56,7 +59,8 @@ export async function bootClean(deps: BootCleanDeps): Promise<number> {
   const deadline = now() + (deps.deadlineMs ?? 10_000);
   let unproven = 0;
   const self = await deps.identity(deps.self).catch(() => undefined);
-  if (!self) return 1;
+  const note = (refusal: CloudV2BootCleanRefusal) => deps.note?.(refusal);
+  if (!self) { note("proc_unreadable"); return 1; }
 
   const table = async () => {
     const found = new Map<number, ProcIdentity>();
@@ -67,7 +71,7 @@ export async function bootClean(deps: BootCleanDeps): Promise<number> {
     return found;
   };
   let processes: Map<number, ProcIdentity>;
-  try { processes = await table(); } catch { return 1; }
+  try { processes = await table(); } catch { note("proc_unreadable"); return 1; }
 
   // This worker's own chain (its launcher included), by parentage.
   const ancestors = new Set<number>();
@@ -95,14 +99,14 @@ export async function bootClean(deps: BootCleanDeps): Promise<number> {
   // (1) The worker's own control group: unified v2, its own (not the root), holding nothing from before this boot.
   const path = /^0::(\/\S*)$/m.exec(self.cgroup)?.[1];
   const groupTargets = new Set<number>();
-  if (!path || path === "/") unproven++;
+  if (!path || path === "/") { unproven++; note(path ? "cgroup_root" : "cgroup_unavailable"); }
   else {
     try {
       for (const pid of await deps.cgroupProcs(path)) {
         const process = processes.get(pid);
         if (process && preBoot(process) && !ancestors.has(pid)) groupTargets.add(pid);
       }
-    } catch { unproven++; }
+    } catch { unproven++; note("cgroup_unreadable"); }
   }
 
   // (2) Every pre-boot process of the VM user (and anything pre-boot in the worker's group), SIGTERM then SIGKILL.
@@ -126,8 +130,9 @@ export async function bootClean(deps: BootCleanDeps): Promise<number> {
     await sleep(deps.intervalMs ?? 50);
   }
   unproven += targets.size;
+  if (targets.size) note("survivors");
 
   // (3) No person's files survive the boot.
-  try { await deps.erase(); } catch { unproven++; }
+  try { await deps.erase(); } catch { unproven++; note("contexts_erase_failed"); }
   return unproven;
 }

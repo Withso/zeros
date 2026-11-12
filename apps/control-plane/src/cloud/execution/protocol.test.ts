@@ -45,7 +45,13 @@ describe("acting-user standalone protocol parity", () => {
       { retirementId: uuid, processes: 0 }, { retirementId: uuid, processes: 2147483647 },
       ...["none", "removed", "refused", "unknown", null, true].map(legacyMaterial => ({ retirementId: uuid, processes: 0, legacyMaterial })),
       { retirementId: uuid, processes: 2147483648 }, { retirementId: uuid, processes: 0, bootId: other },
+      ...mirrored.CLOUD_V2_BOOT_CLEAN_REFUSALS.map(refusal => ({ retirementId: uuid, processes: 0, legacyMaterial: "refused", refusals: [refusal] })),
+      ...[[], ["io_error", "survivors"], ["survivors", "io_error"], ["io_error", "io_error"], ["seed_target_replaced"], ["/private/secret"], [null], Array(25).fill("io_error")]
+        .map(refusals => ({ retirementId: uuid, processes: 1, legacyMaterial: "refused", refusals })),
+      { retirementId: uuid, processes: 0, legacyMaterial: "none", refusals: ["seed_target_modified"] },
+      { retirementId: uuid, processes: 0, refusals: ["seed_journal_outdated"] },
     ]],
+    ["CloudV2BootCleanRefusalSchema", [...mirrored.CLOUD_V2_BOOT_CLEAN_REFUSALS, "seed_target_replaced", "unknown", null, true]],
     ["CloudV2BootCleanReplySchema", [{ retired: 0 }, { retired: 128 }, { retired: -1 }, { retired: true }]],
   ];
   it.each(matrices)("keeps %s identical on accepted, rejected and strict extra-field inputs", (name, values) => {
