@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import pg from "pg";
+import { withSystemTx } from "../../db.js";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { executionFixture, type ExecutionFixture } from "./test-fixture.js";
 
@@ -76,7 +77,7 @@ database("usable execution lifetimes through the real router", () => {
   it("refreshes a live parent's deadline for steering without replacing its identity", async () => {
     const turn = await f.dispatch();
     expect((await f.worker("turn-lease", turn.lease)).status).toBe(200);
-    await pool.query("UPDATE cloud_v2_execution_contexts SET expires_at=clock_timestamp()+interval '9 seconds' WHERE id=$1", [turn.begun.contextId]);
+    await withSystemTx(pool, tx => tx.query("UPDATE cloud_v2_execution_contexts SET expires_at=clock_timestamp()+interval '9 seconds' WHERE id=$1", [turn.begun.contextId]));
     const steer = await f.dispatch(f.prompt(randomUUID(), { mode: "steer" }));
     expect(steer.begun.contextId).toBe(turn.begun.contextId);
     const response = await f.worker("turn-lease", steer.lease); expect(response.status).toBe(200);
@@ -85,7 +86,7 @@ database("usable execution lifetimes through the real router", () => {
 
   it("does not deliver a short lease when time passed between turn dispatch and material delivery", async () => {
     const turn = await f.dispatch();
-    await pool.query("UPDATE cloud_v2_execution_contexts SET expires_at=clock_timestamp()+interval '9 seconds' WHERE id=$1", [turn.begun.contextId]);
+    await withSystemTx(pool, tx => tx.query("UPDATE cloud_v2_execution_contexts SET expires_at=clock_timestamp()+interval '9 seconds' WHERE id=$1", [turn.begun.contextId]));
     const response = await f.worker("turn-lease", turn.lease); expect(response.status).toBe(200);
     expect((await response.json()).expiresAt - Date.now()).toBeGreaterThanOrEqual(FLOOR);
   });

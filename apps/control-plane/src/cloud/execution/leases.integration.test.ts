@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import pg from "pg";
+import { withSystemTx } from "../../db.js";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { executionFixture, type ExecutionFixture } from "./test-fixture.js";
 
@@ -108,7 +109,7 @@ database("execution lease and retirement authority through the router", () => {
 
   it("never renews expired or stopped authority", async () => {
     const a = await f.dispatch(); await f.worker("turn-lease", a.lease);
-    await pool.query("UPDATE cloud_v2_execution_contexts SET expires_at=clock_timestamp()-interval '1 second' WHERE id=$1", [a.begun.contextId]);
+    await withSystemTx(pool, tx => tx.query("UPDATE cloud_v2_execution_contexts SET expires_at=clock_timestamp()-interval '1 second' WHERE id=$1", [a.begun.contextId]));
     expect((await (await f.worker("execution-leases/renew", { contextIds: [a.begun.contextId] })).json()).leases)
       .toEqual([{ contextId: a.begun.contextId, refused: "expired" }]);
     expect((await f.worker("turn-lease", a.lease)).status).toBe(409);

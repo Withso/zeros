@@ -59,7 +59,7 @@ database("per-person compatibility and delayed admission", () => {
   });
 
   it("does not apply an old verification completion after a newer connection has admitted a turn", async () => {
-    f = await executionFixture(pool); await f.cp.loginChanges.stop(); await f.activate(); await f.hello(); await f.login(f.viewer);
+    f = await executionFixture(pool); await f.cp.loginChanges.stop(); await f.activate(); await f.hello(); await f.login();
     const verifications = new PostgresGithubVerificationStore(pool);
     const scope = { organizationId: f.organizationId, userId: f.viewer.id, repositoryId: "42" };
     const store = f.cp.execution.deps.authority.connections;
@@ -80,7 +80,7 @@ database("per-person compatibility and delayed admission", () => {
   });
 
   it("applies a current source refusal to a surviving lease whose cache fingerprint predates a roster edit", async () => {
-    f = await executionFixture(pool); await f.activate(); await f.hello(); await f.login(f.viewer);
+    f = await executionFixture(pool); await f.activate(); await f.hello(); await f.login();
     const turn = await f.dispatch(f.prompt(randomUUID()), f.viewer);
     expect((await f.worker("turn-lease", turn.lease)).status).toBe(200);
     const previous = (await pool.query("SELECT source_fingerprint FROM cloud_v2_execution_contexts WHERE id=$1", [turn.begun.contextId])).rows[0].source_fingerprint;
@@ -97,7 +97,7 @@ database("per-person compatibility and delayed admission", () => {
   });
 
   it("keeps valid version-1 tickets, queued prompts and bootstrap intents across another person's roster change", async () => {
-    f = await executionFixture(pool); await f.activate(f.viewer); await f.hello(); await f.login(f.viewer);
+    f = await executionFixture(pool); await f.activate(f.viewer); await f.hello(); await f.login();
     const proof = await f.cp.execution.deps.authority.admit(f.workspace.id, f.viewer.id);
     const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
     const permissionSignature = hash(proof.person.legacyBasis.permission);

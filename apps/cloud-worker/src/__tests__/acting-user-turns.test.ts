@@ -8,7 +8,8 @@ import type { CloudV2WorkerFrame } from "@zeros/protocol/cloud-v2-relay";
 import { brokerRequest } from "../credentials/client";
 import { operationEnvironment } from "../sharing/operation-environment";
 import { CloudWorker } from "../worker";
-import { CLIENT_A, CLIENT_B, FakeDriver, FakeRelay, WORKSPACE_ID, browserFrame, config } from "./worker-fixtures";
+import { CLIENT_A, CLIENT_B, FakeDriver, FakeRelay, WORKSPACE_ID, WORKSPACE_KEY, browserFrame, config } from "./worker-fixtures";
+import { SessionStore } from "../sessions/session-store";
 
 /** Team sharing slice B: an activated workspace runs each turn as its CP-chosen person, from a lease. */
 const ALEX = "44444444-4444-4444-8444-444444444444", SAM = "55555555-5555-4555-8555-555555555555";
@@ -104,7 +105,7 @@ class ActingRelay extends FakeRelay {
   }
 }
 
-async function setup(options: { freshCheckout?: boolean; bootstrapError?: unknown; activated?: boolean; bootstrap?: string; survivors?: number; noSweep?: boolean; beforeStart?: (home: string) => Promise<void>; environment?: unknown; log?: (line: string) => void; setupRunner?: (...args: any[]) => Promise<number>; checkout?: () => void } = {}) {
+async function setup(options: { agentLogins?: Record<string, true>; freshCheckout?: boolean; bootstrapError?: unknown; activated?: boolean; bootstrap?: string; survivors?: number; noSweep?: boolean; beforeStart?: (home: string) => Promise<void>; environment?: unknown; log?: (line: string) => void; setupRunner?: (...args: any[]) => Promise<number>; checkout?: () => void } = {}) {
   const directory = await mkdtemp(join(tmpdir(), "zeros-acting-")); directories.push(directory);
   const root = join(directory, "checkout"); await mkdir(root);
   // An existing checkout (a later process on this boot, or an earlier boot's): nothing to clone without a bootstrap.
@@ -125,8 +126,9 @@ async function setup(options: { freshCheckout?: boolean; bootstrapError?: unknow
   await (options.bootstrapError || options.freshCheckout || (options.bootstrap && options.survivors) ? (p: Promise<unknown>) => p.catch(() => {}) : (p: Promise<unknown>) => p)(relay.receive({ ...config, workspace: { ...config.workspace, checkoutPath: root, ...(options.setupRunner ? { setup: "make bootstrap" } : {}) }, promptOutbox: 1,
     ...(options.bootstrap ? { bootstrapContextId: options.bootstrap } : {}),
     ...(options.environment ? { environment: options.environment } : {}), agents: options.activated === false ? { claude: { apiKey: "creator-claude-key-000" } } : {},
+    ...(options.agentLogins ? { agentLogins: options.agentLogins } : {}),
     ...(options.activated === false ? {} : { actingUser: 1, gitIdentity: null }) }));
-  return { relay, drivers, home, root, socketPath: () => socketPath };
+  return { relay, drivers, home, root, directory, worker, socketPath: () => socketPath };
 }
 
 it("attests a clean boot before its first begin, and starts no one's turn when cleanup is unproven", async () => {
@@ -669,4 +671,28 @@ it("refuses to start a fresh activated checkout without a bootstrap context: not
   await until(() => lines.find(line => line.startsWith("startup failed"))).toBe("startup failed class=bootstrap_required code=WORKSPACE_UNAVAILABLE");
   expect([cloned, setupRan]).toEqual([false, false]);
   expect(f.relay.calls.some(call => call.op === "bootstrap-lease")).toBe(false);
+});
+
+it("Creator pays: a turn refused for the Creator's login, or for a workspace with no Creator, says so in its cloud failure", async () => {
+  for (const [refusal, cloud] of [
+    [{ contextCode: "agent_login_required", agent: "claude", loginRequiredFrom: "creator" }, { source: "provider", provider: "claude", reason: "auth-required", loginRequiredFrom: "creator" }],
+    [{ contextCode: "workspace_creator_required" }, { source: "provider", provider: "claude", reason: "creator-required" }],
+  ] as const) {
+    const f = await setup();
+    f.relay.leaseReply = () => { throw Object.assign(new Error("refused"), { status: 409, ...refusal }); };
+    f.relay.deliver(delivery(ALEX));
+    await until(() => f.relay.calls.find(call => call.op === "outcome")?.body.state).toBe("failed");
+    await f.worker.dispose();
+    const store = await SessionStore.open(join(f.directory, "sessions"), WORKSPACE_KEY);
+    expect(store.snapshot("chat")!.messages.filter(message => message.kind === "error_notice").at(-1)).toMatchObject({ cloud });
+    await store.flush();
+    expect(f.drivers.every(driver => !driver.opened)).toBe(true);
+  }
+});
+
+it("Creator pays: a leased turn runs on its lease's login even when the presentation map says the Creator has none", async () => {
+  const f = await setup({ agentLogins: {} });
+  f.relay.deliver(delivery(ALEX));
+  await until(() => f.drivers[0]?.prompts.length ?? 0).toBe(1);
+  f.drivers[0]!.complete();
 });

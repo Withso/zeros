@@ -21,8 +21,8 @@ database("begin-time actors through the real desktop and worker routes", () => {
     expect((await pool.query("SELECT count(*)::int AS n FROM cloud_v2_tokens WHERE workspace_id=$1 AND kind IN ('api','proxy')", [f.workspace.id])).rows[0].n).toBe(0);
   });
 
-  it("refuses a missing personal agent login before queuing or waking", async () => {
-    await f.login(f.creator); await f.activate();
+  it("refuses a missing Creator login before queuing or waking, even when the sender has a login", async () => {
+    await f.login(f.viewer); await f.activate();
     await pool.query("UPDATE cloud_v2_workspaces SET state='stopped' WHERE id=$1", [f.workspace.id]);
     const response = await f.send(f.prompt(), f.viewer);
     expect(response.status).toBe(409);

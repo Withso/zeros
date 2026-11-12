@@ -138,6 +138,10 @@ export function CloudProviderConnections({
       <p className="text-fg3 m-0 text-3xxs leading-4">
         {NATIVE_BROWSER_UNAVAILABLE}
       </p>
+      {/* Creator pays: a cloud workspace's turns run on its Creator's agent login, whoever sends them. */}
+      <p className="text-fg3 m-0 text-3xxs leading-4" data-creator-pays-hint="">
+        Your login runs every turn in cloud workspaces you created.
+      </p>
     </div>
   );
 }

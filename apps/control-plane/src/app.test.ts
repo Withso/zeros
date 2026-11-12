@@ -158,13 +158,14 @@ function workosConfig(): Config {
 }
 
 describe("unexpected error privacy", () => {
-  it("preserves the selected agent on a shared execution login refusal", async () => {
+  it.each(["self", "creator"] as const)("preserves the selected agent and %s payer on a shared execution login refusal", async loginRequiredFrom => {
     const app = createApp(config(null), pool, emailConfig as never);
     const path = "/v1/cloud-v2/workspaces/11111111-1111-4111-8111-111111111111/prompts";
     const context = new Context(new Request(`https://api.example.test${path}`), { path });
-    const response = await app.errorHandler(new AgentLoginRequired("claude"), context);
+    const response = await app.errorHandler(new AgentLoginRequired("claude", loginRequiredFrom), context);
     expect(response.status).toBe(409);
-    expect(await response.json()).toEqual({ error: { code: "agent_login_required", agent: "claude", message: "Connect your claude account" } });
+    expect(await response.json()).toEqual({ error: { code: "agent_login_required", agent: "claude", loginRequiredFrom,
+      message: loginRequiredFrom === "self" ? "Connect your claude account" : "The Creator needs to connect claude" } });
   });
   it("keeps credential uncertainty retryable without exposing the underlying diagnostic", async () => {
     const app = createApp(config(null), pool, emailConfig as never), sentinel = "private_credential_diagnostic";

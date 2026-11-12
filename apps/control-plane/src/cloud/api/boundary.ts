@@ -4,6 +4,7 @@ import { HttpError } from "../../authz.js";
 import { isDatabaseUnavailable } from "../../db.js";
 import { rateLimit } from "../../ratelimit.js";
 import { CLOUD_V2_MAX_PROMPT_BYTES } from "../prompt-contract.js";
+import { AgentLoginRequired } from "../execution/errors.js";
 import type { CloudApiCredential, CloudApiCredentials } from "./credentials.js";
 import type { CloudApiService } from "./service.js";
 import { cloudApiPreAuthLimit, resolveCloudApiCredential } from "./preauth.js";
@@ -17,7 +18,7 @@ export function cloudApiFailure(error: unknown) {
   if (error instanceof HttpError) return { status: error.status === 403 ? 404 as const : error.status,
     retryAfter: error.status === 429 && typeof error.details?.retryAfterSeconds === "number" ? error.details.retryAfterSeconds : undefined,
     error: { code: error.status === 403 ? "not_found" : error.code, message: error.status === 403 ? "Not found" : error.message,
-      ...(error.code === "agent_login_required" && "agent" in error ? { agent: error.agent } : {}) } };
+      ...(error instanceof AgentLoginRequired ? { agent: error.agent, loginRequiredFrom: error.loginRequiredFrom } : {}) } };
   return { status: 500 as const, error: { code: "internal", message: "Internal error" } };
 }
 

@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useRef, useState, useSyncExternalStore } from "react";
 import { ArrowRight } from "lucide-react";
 import { Button } from "@/renderer/shared/ui/primitives/button";
 import {
@@ -6,9 +6,19 @@ import {
   AgentNotice,
   AgentNoticeText,
 } from "./agent-notice";
-import type { TurnFailure } from "./turn-failure";
+import { turnFailureDisplay, type TurnFailure } from "./turn-failure";
+import { parseCloudWorkspaceKey } from "../../platform/bridge/cloud-workspace-key";
+import { cloudWorkspaceDocument, subscribeCloudWorkspaces } from "../../state/cloud-workspace-catalog";
+import { memberName, useOrganizationRoster } from "../../state/organization-roster";
 
-const AGENT_NAMES = { claude: "Claude", codex: "Codex", cursor: "Cursor" } as const;
+/** Creator pays: the cloud workspace's current Creator's name, only when a failure names the Creator. */
+function useCreatorName(folder: string | null | undefined, needed: boolean): string | null {
+  const target = needed ? parseCloudWorkspaceKey(folder ?? undefined) : null;
+  const read = () => (target ? cloudWorkspaceDocument(target)?.ownerUserId ?? null : null);
+  const creator = useSyncExternalStore(subscribeCloudWorkspaces, read, read);
+  const roster = useOrganizationRoster(creator ? target?.organizationId : null, !!creator);
+  return creator ? memberName(roster, creator) : null;
+}
 
 export function TurnFailureCard({
   failure,
@@ -19,8 +29,11 @@ export function TurnFailureCard({
   onReconnect,
   onStartNewSession,
   onChooseModel,
+  folder,
 }: {
   failure: TurnFailure;
+  /** The chat's workspace key, to name a cloud workspace's Creator. */
+  folder?: string | null;
   readOnly?: boolean;
   onRetry?: () => Promise<void> | void;
   onRetryNewChat?: () => Promise<void> | void;
@@ -51,12 +64,12 @@ export function TurnFailureCard({
     }
   };
   const reason = failure.cloud?.source === "provider" ? failure.cloud.reason : undefined;
-  const accountAction = reason === "auth-required" || reason === "verification-required" || reason === "credentials-unavailable";
-  // An own-account refusal was never sent: after signing in, the same message can simply be retried.
-  const retryAction = !readOnly && (!accountAction || failure.ownAccount) && reason !== "session-expired" && reason !== "model-unavailable" ? onRetry : undefined;
+  const creatorName = useCreatorName(folder, failure.cloud?.source === "provider" && failure.cloud.loginRequiredFrom === "creator");
+  const display = turnFailureDisplay(failure, creatorName);
+  const retryAction = !readOnly && display.retry ? onRetry : undefined;
   const newChatAction = !readOnly && failure.newChatAllowed && (!reason || reason === "session-expired")
     ? reason === "session-expired" ? onStartNewSession ?? onRetryNewChat : onRetryNewChat : undefined;
-  const reconnectAction = !readOnly && accountAction ? onReconnect : undefined;
+  const reconnectAction = !readOnly && display.reconnect ? onReconnect : undefined;
   const modelAction = !readOnly && reason === "model-unavailable" ? onChooseModel : undefined;
   // The turn lane (turn-event-list.tsx) stacks this card between the output
   // and the footer row with no gap, so it keeps an 8px margin of its own —
@@ -64,7 +77,7 @@ export function TurnFailureCard({
   // separates it from the prompt.
   return (
     <AgentNotice
-      message={failure.message}
+      message={display.message}
       data-turn-failure-card
       className="my-2 first:mt-0"
     >
@@ -76,8 +89,7 @@ export function TurnFailureCard({
           </Button>}
           {reconnectAction && <Button type="button" variant="ghost" size="sm" disabled={busy}
             onClick={() => reconnectAction(failure.cloud?.source === "provider" ? failure.cloud.provider : undefined)} className={AGENT_NOTICE_ACTION}>
-            {failure.ownAccount && failure.cloud?.source === "provider" ? `Connect your ${AGENT_NAMES[failure.cloud.provider]} account`
-              : reason === "auth-required" ? "Reconnect provider account" : "Check provider connection"}
+            {display.reconnectLabel}
             <ArrowRight className="size-3.5" aria-hidden="true" />
           </Button>}
           {retryAction && (

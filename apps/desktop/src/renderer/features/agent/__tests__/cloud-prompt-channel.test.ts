@@ -121,6 +121,22 @@ describe("durable cloud prompt channel", () => {
       failure: "Connect your Claude account to send messages in this workspace." });
     expect(f.order).toEqual([]);
   });
+  it("Creator pays: names whose login is missing (the Creator's, or the sender's own), and a workspace with no Creator", async () => {
+    const cases: Array<[Record<string, unknown>, Record<string, unknown>, string]> = [
+      [{ code: "agent_login_required", agent: "claude", loginRequiredFrom: "creator" }, { code: "agent_login_required", agent: "claude", loginRequiredFrom: "creator" },
+        "The workspace's Creator needs to connect Claude before messages can run here."],
+      [{ code: "agent_login_required", agent: "codex", loginRequiredFrom: "self" }, { code: "agent_login_required", agent: "codex", loginRequiredFrom: "self" },
+        "Connect your Codex account to send messages in this workspace."],
+      [{ code: "workspace_creator_required" }, { code: "workspace_creator_required" }, "This workspace has no Creator. An admin can reassign it."],
+    ];
+    for (const [body, refusal, failure] of cases) {
+      const f = fixture();
+      f.api.enqueue.mockRejectedValueOnce(Object.assign(new Error("refused"), { status: 409, ...body }));
+      await f.channel.enqueue(async () => prompt("one")); await f.channel.flush();
+      expect(f.channel.snapshot.entries[0]).toMatchObject({ phase: "refused", refusal, failure });
+      expect(f.order).toEqual([]);
+    }
+  });
   it("restores committed remote work on another app and settles a mid-turn worker restart as interrupted", async () => {
     const f = fixture(); await f.api.enqueue(prompt("one")); f.rows.get("one")!.state = "accepted";
     await f.channel.refresh(true); expect(f.channel.snapshot.entries[0]?.state).toBe("accepted");

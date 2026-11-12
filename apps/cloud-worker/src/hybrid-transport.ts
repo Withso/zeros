@@ -32,7 +32,9 @@ interface Options {
 class HttpFailure extends Error {
   constructor(readonly status: number, readonly code?: "mcp_auth_required", readonly githubReason?: CloudGithubUnavailableReason,
     /** Slice B context routes: the closed refusal code (actor_changed, agent_login_required, …) and its agent. */
-    readonly contextCode?: string, readonly agent?: string) { super("Worker control request failed."); }
+    readonly contextCode?: string, readonly agent?: string,
+    /** Creator pays: whose agent login a 409 agent_login_required names (closed). */
+    readonly loginRequiredFrom?: "self" | "creator") { super("Worker control request failed."); }
 }
 const isContextPath = (path: string) => /^(turn|terminal|client|bootstrap)-lease$|^execution-leases\//.test(path);
 /** Routes whose refusals carry the closed context codes: the context routes, and an activated begin (actor_busy while a previous person's cleanup holds the chat). */
@@ -412,7 +414,8 @@ export class HybridTransport implements Transport {
         ...(payload === undefined ? {} : { body: payload }), redirect: "error", signal: controller.signal,
       });
       if (!response.ok) {
-        let code: "mcp_auth_required" | undefined, githubReason: CloudGithubUnavailableReason | undefined, contextCode: string | undefined, agent: string | undefined;
+        let code: "mcp_auth_required" | undefined, githubReason: CloudGithubUnavailableReason | undefined, contextCode: string | undefined, agent: string | undefined,
+          loginRequiredFrom: "self" | "creator" | undefined;
         if ((path.startsWith("mcp/") && response.status === 409) || path === "github-token" || decodesContext(path)) {
           const reader = response.body?.getReader();
           const chunks: Uint8Array[] = []; let bytes = 0;
@@ -429,6 +432,7 @@ export class HybridTransport implements Transport {
               if (decodesContext(path) && parsed.success) {
                 contextCode = parsed.data;
                 if (error?.agent === "codex" || error?.agent === "claude" || error?.agent === "cursor") agent = error.agent;
+                if (error?.loginRequiredFrom === "self" || error?.loginRequiredFrom === "creator") loginRequiredFrom = error.loginRequiredFrom;
               }
               if (path === "github-token" && error?.code === "github_token_unavailable") {
                 const reason = CloudGithubUnavailableReasonSchema.safeParse(error.reason);
@@ -438,7 +442,7 @@ export class HybridTransport implements Transport {
           } catch { /* Only the confirmed code can name a provider sign-in problem. */ }
           finally { await reader?.cancel(); }
         } else await response.body?.cancel();
-        throw new HttpFailure(response.status, code, githubReason, contextCode, agent);
+        throw new HttpFailure(response.status, code, githubReason, contextCode, agent, loginRequiredFrom);
       }
       if (response.status === 204) { await response.body?.cancel(); return {}; }
       const reader = response.body?.getReader();

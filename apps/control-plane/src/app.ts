@@ -443,7 +443,7 @@ export function createApp(
           error: {
             code: err.code,
             message: err.message,
-            ...(err instanceof AgentLoginRequired ? { agent: err.agent } : {}),
+            ...(err instanceof AgentLoginRequired ? { agent: err.agent, loginRequiredFrom: err.loginRequiredFrom } : {}),
             ...(err.details ? { details: err.details } : {}),
           },
         },

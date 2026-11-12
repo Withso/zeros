@@ -1,0 +1,9 @@
+{
+  "id": "cloud-creator-payer-separation",
+  "kind": "scenario",
+  "area": "control-plane",
+  "fixedBy": "pr:1061",
+  "symptom": "An admitted member without an agent login could use a shared cloud terminal and Git but could not run a turn on the workspace Creator's login. Changing the credential selector alone would also miss retirement when the pinned payer lost access.",
+  "rule": "Persist the agent payer separately from the acting person, retain that pin for running work, and retire only the contexts using lost payer authority. Keep environment, Git, sender and API identity with the actor; verify mixed-version dispatch retry and current-Creator availability through real boundaries (zstack-review authority and compatibility checks).",
+  "check": "pnpm --dir apps/control-plane exec vitest run src/cloud/execution/creator-pays.integration.test.ts src/cloud/execution/payer-lifetime.integration.test.ts src/cloud/execution/payer-availability.integration.test.ts src/cloud/execution/payer-migration.integration.test.ts src/cloud/execution/relay-client-authority.integration.test.ts"
+}

@@ -36,7 +36,7 @@ export type ExecutionContext = { id: string; workspace_id: string; org_id: strin
   authority: VersionedExecutionAuthority & { signature: string }; source_fingerprint: string; agent: CloudV2Agent | null; selection: ExecutionSelection | null;
   state: "active" | "revoked" | "retired"; reason: CloudV2ContextReason | null; expires_at: Date; material: unknown; bootstrap_material_issued: boolean | null;
   retirement_id: string | null; retirement_hash: Buffer | null; environment_version_id: string | null; mcp_fingerprint: string | null; intent_id: string | null };
-export type PromptExecutionAdmission = ExecutionAdmission & { agent: CloudV2Agent; selection: ExecutionSelection | null };
+export type PromptExecutionAdmission = ExecutionAdmission & { agent: CloudV2Agent; selection: ExecutionSelection | null; parentContextId?: string };
 type Config = Extract<CloudV2ControlFrame, { t: "config" }>;
 type Material = { gitIdentity: Config["gitIdentity"]; environment?: CloudWorkspaceEnvironment; mcpServers?: RuntimeMcpServer[] };
 export type ExecutionDeps = {
@@ -156,7 +156,8 @@ export class CloudExecutionContexts {
       login = (await selected()).material;
       await check();
     }
-    if (login.kind === "codex-chatgpt" && login.expiresAt * 1000 <= Date.now() + 30_000) throw new AgentLoginRequired("codex");
+    if (login.kind === "codex-chatgpt" && login.expiresAt * 1000 <= Date.now() + 30_000)
+      throw new AgentLoginRequired("codex", context.selection.version === 2 && context.selection.payer.userId !== context.user_id ? "creator" : "self");
     return { login, check };
   }
 
@@ -215,15 +216,24 @@ export class CloudExecutionContexts {
     const agent = await withSystemTx(this.pool, tx => this.agent(tx, id, input.chatId, input.agentId));
     await this.deps.authority.assert(proof);
     const existing = await withSystemTx(this.pool, tx => tx.query("SELECT 1 FROM cloud_v2_prompt_outbox WHERE workspace_id=$1 AND user_message_id=$2 AND creator_user_id=$3", [id, input.userMessageId, userId]));
-    const selection = existing.rowCount ? null : (await this.deps.logins.select(proof.person.organizationId, userId, agent)).selection;
+    const parent = !existing.rowCount && input.mode === "steer" ? await withSystemTx(this.pool, async tx => {
+      const context = (await tx.query<ExecutionContext>(`SELECT c.* FROM cloud_v2_prompt_chats chat JOIN cloud_v2_execution_contexts c
+        ON c.id=chat.active_context_id AND c.workspace_id=chat.workspace_id WHERE chat.workspace_id=$1 AND chat.chat_id=$2
+          AND c.user_id=$3 AND c.kind='turn' AND c.state='active' AND c.agent=$4`, [id, input.chatId, userId, agent])).rows[0];
+      if (context) await this.assertContext(tx, context, proof);
+      return context;
+    }) : undefined;
+    const selection = existing.rowCount ? null : parent
+      ? (await this.deps.logins.select(proof.person.organizationId, userId, agent, parent.selection!)).selection
+      : (await this.deps.logins.forWorkspace(id, userId, agent)).selection;
     await this.deps.authority.assert(proof);
-    return { ...proof, runBound: false, agent, selection };
+    return { ...proof, runBound: false, agent, selection, ...(parent ? { parentContextId: parent.id } : {}) };
   }
 
   async creationPrompt(tx: Tx, proof: ExecutionAdmission, input: Pick<CloudV2Prompt, "chatId" | "agentId">): Promise<PromptExecutionAdmission> {
     await this.deps.authority.assert(proof, tx);
     const agent = await this.agent(tx, proof.person.workspaceId, input.chatId, input.agentId);
-    const { selection } = await this.deps.logins.select(proof.person.organizationId, proof.person.userId, agent, undefined, tx);
+    const { selection } = await this.deps.logins.forWorkspace(proof.person.workspaceId, proof.person.userId, agent, undefined, tx);
     await this.deps.authority.assert(proof, tx);
     return { ...proof, runBound: false, agent, selection };
   }
@@ -231,7 +241,10 @@ export class CloudExecutionContexts {
   async assertPrompt(tx: Tx, proof: PromptExecutionAdmission, input: CloudV2Prompt) {
     await this.deps.authority.assert(proof, tx);
     await this.agent(tx, proof.person.workspaceId, input.chatId, input.agentId);
-    if (proof.selection) await this.deps.logins.select(proof.person.organizationId, proof.person.userId, proof.agent, proof.selection, tx);
+    if (proof.parentContextId) {
+      await this.assertContext(tx, await this.context(tx, proof.parentContextId, proof.person.workspaceId), proof);
+      await this.deps.logins.select(proof.person.organizationId, proof.person.userId, proof.agent, proof.selection!, tx);
+    } else if (proof.selection) await this.deps.logins.forWorkspace(proof.person.workspaceId, proof.person.userId, proof.agent, proof.selection, tx);
     await this.deps.authority.assert(proof, tx);
   }
 
@@ -250,20 +263,8 @@ export class CloudExecutionContexts {
     if (!pending(initial.prompt.state)) return { dispatch: false as const, state: initial.prompt.state };
     const proof = await this.deps.authority.admit(initial.workspace.id, initial.prompt.creator_user_id, { minimumSourceMs: EXECUTION_MINIMUM_LIFETIME_MS });
     const agent = await withSystemTx(this.pool, tx => this.agent(tx, initial.workspace.id, initial.prompt.chat_id, initial.prompt.payload!.agentId));
-    let selection: ExecutionSelection;
-    try { selection = (await this.deps.logins.select(initial.workspace.org_id, initial.prompt.creator_user_id, agent)).selection; }
-    catch (error) {
-      await this.deps.authority.assert(proof);
-      if (error instanceof AgentLoginRequired) await withSystemTx(this.pool, async tx => {
-        const workspace = await this.worker(tx, identity, true);
-        await this.deps.authority.assert(proof, tx);
-        await tx.query("UPDATE cloud_v2_prompt_outbox SET state='failed',terminal_at=clock_timestamp(),updated_at=clock_timestamp() WHERE workspace_id=$1 AND user_message_id=$2 AND state IN ('queued','inboxed')", [workspace.id, input.userMessageId]);
-        await notify(tx, workspace.id);
-      });
-      throw error;
-    }
     await this.deps.authority.assert(proof);
-    return withSystemTx(this.pool, async tx => {
+    const result = await withSystemTx(this.pool, async tx => {
       await tx.query("SELECT id FROM users WHERE id=$1 FOR KEY SHARE", [proof.person.userId]);
       const workspace = await this.worker(tx, identity, true);
       await this.maintenance.cancelQueued(tx, workspace.id);
@@ -304,6 +305,15 @@ export class CloudExecutionContexts {
         assertExecutionLifetime(active.expires_at.getTime());
         return this.begun(active!, "dispatching", true);
       }
+      let selection: ExecutionSelection;
+      try { selection = (await this.deps.logins.forWorkspace(workspace.id, row.creator_user_id, agent, undefined, tx)).selection; }
+      catch (error) {
+        if (!(error instanceof HttpError) || !["agent_login_required", "workspace_creator_required"].includes(error.code)) throw error;
+        await this.deps.authority.assert(proof, tx);
+        await tx.query("UPDATE cloud_v2_prompt_outbox SET state='failed',terminal_at=clock_timestamp(),updated_at=clock_timestamp() WHERE workspace_id=$1 AND user_message_id=$2", [workspace.id, row.user_message_id]);
+        await notify(tx, workspace.id);
+        return { refusal: error };
+      }
       const generation = (BigInt(chat.acting_generation) + (chat.acting_user_id === row.creator_user_id ? 0n : 1n)).toString();
       if (BigInt(generation) < 1n || BigInt(generation) > 9223372036854775806n) throw actorChanged();
       const contextId = randomUUID();
@@ -319,11 +329,14 @@ export class CloudExecutionContexts {
         [workspace.id, row.chat_id, row.creator_user_id, generation, contextId]);
       await tx.query(`UPDATE cloud_v2_prompt_outbox SET state='dispatching',dispatch_id=$3,execution_context_id=$4,updated_at=clock_timestamp()
         WHERE workspace_id=$1 AND user_message_id=$2`, [workspace.id, row.user_message_id, input.dispatchId, contextId]);
-      await this.deps.logins.select(workspace.org_id, row.creator_user_id, agent, selection, tx);
+      await this.deps.logins.forWorkspace(workspace.id, row.creator_user_id, agent, selection, tx);
       await this.deps.authority.assert(proof, tx);
       assertExecutionLifetime(context.expires_at.getTime());
       return this.begun(context, "dispatching", false);
     });
+    // Keep the failed receipt even when dispatch loses its payer while queued.
+    if ("refusal" in result) throw result.refusal;
+    return result;
   }
 
   private begun(context: ExecutionContext, state: CloudV2PromptState, steer: boolean) {
@@ -345,6 +358,7 @@ export class CloudExecutionContexts {
     if (row.access_epoch !== proof.person.accessEpoch || row.stop_generation !== proof.person.stopGeneration || row.worker_boot_id !== proof.person.bootId ||
         row.worker_token_hash.toString("hex") !== proof.person.workerTokenHash) throw actorChanged();
     if (row.client_token_expires_at && row.client_token_expires_at.getTime() <= Date.now()) throw actorChanged();
+    if (row.selection) await this.deps.logins.assertPayer(tx, row.org_id, row.selection);
     await this.deps.authority.assert(proof, tx, false, row.id);
     return row;
   }

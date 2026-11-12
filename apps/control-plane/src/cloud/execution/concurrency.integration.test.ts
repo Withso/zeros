@@ -16,7 +16,7 @@ database("execution fences across held material and database locks", () => {
   const changes = {
     member: () => withSystemTx(pool, tx => tx.query("DELETE FROM organization_members WHERE org_id=$1 AND user_id=$2", [f.organizationId, f.viewer.id])),
     account: () => withSystemTx(pool, tx => tx.query("UPDATE users SET auth_revision=auth_revision+1 WHERE id=$1", [f.viewer.id])),
-    credential: () => withSystemTx(pool, tx => tx.query("UPDATE cloud_agent_credentials SET revision=revision+1,revoked_at=clock_timestamp() WHERE owner_user_id=$1", [f.viewer.id])),
+    credential: () => withSystemTx(pool, tx => tx.query("UPDATE cloud_agent_credentials SET revision=revision+1,revoked_at=clock_timestamp() WHERE owner_user_id=$1", [f.creator.id])),
     source: () => withSystemTx(pool, tx => tx.query("UPDATE cloud_github_source_verifications SET failure_code='github_repository_access_required',failure_status=403 WHERE owner_user_id=$1", [f.viewer.id])),
     stop: () => f.call(`/v1/cloud-v2/workspaces/${f.workspace.id}/stop`, "POST"),
   };
