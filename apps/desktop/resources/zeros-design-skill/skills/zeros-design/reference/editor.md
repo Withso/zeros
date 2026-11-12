@@ -57,8 +57,9 @@ People edit frames in the Design tab while agents work on the same files. This p
 
 ## Canvas items
 
-- The tool rail beside Text places a Section, a Note or a Link card (from a workspace file) at a click. Each create, move, resize, text edit and delete is one write to the page's `items` in `meta/canvas.json` and one Undo step.
-- Items are not layers: they never appear in Layers, a selected item shows no Style fields, and no frame source changes.
+- The tool rail beside Text places a Section, a Note or a Link card (from a workspace file) at a click. Each create, move, resize, text edit and delete is one write to the page's `items` in `meta/canvas.json` and one Undo step. Undo or Redo reveals the affected page and selects the item only when it exists in that generation; frame and layer selection stay cleared.
+- Text validation counts Unicode code points. A section title that is empty after trimming writes nothing and shows no error on Enter or blur: a new section is not placed and an existing one keeps its confirmed title. Other invalid text or a rejected write leaves the draft open with a field error and leaves focus where the user put it; click back in to fix it or press Escape. Notes may be empty. Clearing a link card's custom title restores its filename fallback.
+- Items are not layers: they never appear in Layers, a selected item shows no Style fields, and no frame source changes. A page beyond its item cap says how many more items are not shown.
 
 ## Layout controls
 

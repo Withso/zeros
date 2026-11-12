@@ -11,6 +11,7 @@ export interface DesignHistoryGeometryPreview {
 }
 export interface DesignHistorySelectionPreview {
   activePageId?: string;
+  selectedItemId?: string | null;
   selectedFrame: string | null;
   selectedNodeId: null;
   selectedNodeIds: readonly string[];
@@ -87,7 +88,8 @@ export function presentDesignHistory(workspaceId: string, token: object, target:
     catalog: target.catalog ?? null, runtime: previous?.runtime ?? new Map(),
     selection: target.selection ? {
       owner: target.selectionOwner ?? { ownerRevision: owner?.ownerRevision, selectionEvent: owner?.selectionEvent },
-      value: { activePageId: target.selection.pageId, selectedFrame: target.selection.frame, selectedNodeId: null,
+      value: { activePageId: target.selection.pageId, selectedItemId: target.selection.itemId,
+        selectedFrame: target.selection.frame, selectedNodeId: null,
         selectedNodeIds: [], selectedTargets: target.selection.frame && target.selection.frameSelected ? [{ frame: target.selection.frame }] : [],
         frameSelected: target.selection.frame !== null && target.selection.frameSelected },
     } : null,

@@ -1915,14 +1915,18 @@ unique across every frame and item; x/y stay within ±1,000,000 and widths
 their text); a section title is one line of 1–120 characters, a note up to
 2,000 characters with its line breaks, a link card's title up to 120 and
 defaults to the file name. A page holds at most 256 items and 256 KiB of item
-text. Reading never throws: an invalid item is skipped, an unknown kind is
-kept as written and not drawn, and both reach `design validate` as warnings
+text. Reading never throws: an invalid item is skipped without reserving its
+id against a later valid item, an unknown kind is kept as written and not
+drawn, and both reach `design validate` as warnings
 (`canvas-item-invalid`, `canvas-item-link-unsafe`,
 `canvas-item-link-missing`) through every full lint, never through the
-canvas's own snapshot lint, so items cannot block Save or editing. Page
-summaries carry the drawable items; a link card whose target is not a regular
-file is marked `missing` from a local stat (at most 512 per read), never a
-read of its contents.
+canvas's own snapshot lint, so items cannot block Save or editing. Valid items
+past either cap still reserve their ids. Page summaries carry the drawable
+items and, when a cap hides valid items, `itemsNotShown`; one canvas notice
+says how many more are not shown without raising the cap. A link card whose
+resolved target escapes the workspace or is not a regular file is marked
+`missing` (at most 512 checks per read). The check opens the resolved target
+with no-follow semantics and inspects its descriptor, never its contents.
 
 A link target is a workspace-relative path checked by a hand-written scan: no
 leading `/`, `\`, `~`, scheme or URL, no empty, `.` or `..` segment, no
@@ -1934,16 +1938,30 @@ titles and paths render as text.
 The engine writes items with `design.canvas.item.put` and
 `design.canvas.item.delete` (Local only, offered as
 `design.canvas-items.v1`), each one catalog write and one shared history
-step like a page rename; the entry names no page, so Undo keeps the canvas's
-selection. An item's authored extra fields survive a write, and an id the
-file holds but cannot draw cannot be changed from the canvas. The canvas
+step like a page rename. Its history entry names the page and item: Undo and
+Redo reveal that page, clear frame and layer selection, and select the item
+only if it exists in the generation being restored. Immediate prediction is
+paint-only and item editing stays inert until the confirmed owner returns. An
+item's authored extra fields survive a write, and an id the file holds but
+cannot draw cannot be changed from the canvas. An edit or delete acts on the
+stored entry the reader draws, so a skipped entry with the same id (an
+earlier malformed one or a later duplicate) stays exactly as written. The canvas
 places them from the tool rail beside Text (Section `⇧S`, Note `⇧N`, Link
 card from a workspace file), because placing things is what that rail is
 for; there is no canvas context menu for empty space. Items are chrome in
 world coordinates above frames: no iframe or runtime, culled with the frame
 spatial index (following a wheel or pinch's painted camera), and a page
 without items mounts nothing. A drag or resize paints locally and writes on
-release; Escape cancels a drag or a text edit and writes nothing. A selected
+release; Escape cancels a drag or a text edit and writes nothing. Text is
+validated by the protocol's Unicode code-point limits after normalization.
+A section whose title is empty after trimming writes nothing and shows no
+error, on Enter or blur: a new section is not placed and an existing one
+keeps its confirmed title, as a Layers rename does. Other invalid input or a
+rejected write leaves the draft open beside a field error without moving
+focus, so after a click-away focus stays where the user put it and the user
+can click back in to fix the draft or press Escape. A write that settles
+after another item's editor opened closes only its own draft. Notes may be
+empty, and clearing a link's custom title restores its filename fallback. A selected
 item clears the frame and layer selection, so the Style panel shows its empty
 state; items never appear in Layers. No export carries them: PNG export,
 `design.capture`, thumbnails, recordings, the frame HTTP document, the

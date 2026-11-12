@@ -185,10 +185,13 @@ it("projects a page-scoped acknowledgement onto unchanged pages it did not resen
 it("keeps a page's canvas items across a page-scoped acknowledgement, which carries none", () => {
   const items = [{ id: "s1", kind: "section" as const, x: 0, y: 0, width: 200, text: "Flow" }];
   const previous: DesignWorkspaceSnapshotWire = { ...snapshot(), frames: [],
-    pages: [{ id: "one", title: "One", folder: "one", frameFiles: [], frameIds: [], items }],
+    pages: [{ id: "one", title: "One", folder: "one", frameFiles: [], frameIds: [], items, itemsNotShown: 2 }],
     preparation: { revision: "a".repeat(64), epoch: 1, current: [], errors: {}, descriptions: [], pageHashes: { one: "1".repeat(32) } } };
   const ack: DesignWorkspaceSnapshotWire = { ...snapshot(), preparation: undefined, frames: [],
     pageCatalog: { revision: "b".repeat(64), pages: [{ id: "one", title: "One", folder: "one", count: 0, hash: "1".repeat(32) }], frames: [] } };
   expect(projectDesignMutationSnapshot(previous, ack).pages![0]!.items).toBe(items);
-  expect(projectDesignMutationSnapshot({ ...previous, directoryId: "design_other" }, ack).pages![0]).not.toHaveProperty("items");
+  expect(projectDesignMutationSnapshot(previous, ack).pages![0]!.itemsNotShown).toBe(2);
+  const foreign = projectDesignMutationSnapshot({ ...previous, directoryId: "design_other" }, ack).pages![0]!;
+  expect(foreign).not.toHaveProperty("items");
+  expect(foreign).not.toHaveProperty("itemsNotShown");
 });

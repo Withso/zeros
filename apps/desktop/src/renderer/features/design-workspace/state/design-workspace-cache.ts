@@ -258,15 +258,17 @@ function recordGeometryHistory(workspaceId: string, before: DesignWorkspaceSnaps
   historyPreview.recordTransition(workspaceId, { kind: "geometry", geometry: geometry.before },
     { kind: "geometry", geometry: geometry.after }, historyStateKey(before), historyStateKey(after));
 }
-function catalogHistorySelection(snapshot: DesignWorkspaceSnapshotWire, hint: { pageId?: string; frame?: string }, frameSelected: boolean) {
+function catalogHistorySelection(snapshot: DesignWorkspaceSnapshotWire, hint: { pageId?: string; frame?: string; itemId?: string }, frameSelected: boolean) {
   const normalized = normalizeDesignPagesSnapshot(snapshot);
   const page = normalized.pages.find(page => page.id === hint.pageId || (hint.frame &&
     (page.frameFiles.includes(hint.frame) || (page.folder ? hint.frame.startsWith(page.folder + "/") : !hint.frame.includes("/"))))) ?? normalized.pages[0];
+  if (hint.itemId !== undefined) return { pageId: page?.id, frame: null, frameSelected: false,
+    itemId: page?.items?.some(item => item.id === hint.itemId) ? hint.itemId : null };
   const frame = hint.frame && page?.frameFiles.includes(hint.frame) ? hint.frame : page?.frameFiles[0] ?? null;
   return { pageId: page?.id, frame, frameSelected: frame !== null && frameSelected };
 }
 function recordCatalogHistory(workspaceId: string, before: DesignWorkspaceSnapshotWire | null | undefined, after: DesignWorkspaceSnapshotWire,
-  hint?: { pageId?: string; frame?: string },
+  hint?: { pageId?: string; frame?: string; itemId?: string },
 ) {
   if (!before) return;
   historyPreview.recordTransition(workspaceId, { kind: "catalog", catalog: new WeakRef(before), ...(hint ? { selection: catalogHistorySelection(before, hint, true) } : {}) },
@@ -1314,7 +1316,7 @@ export function stabilizeDesignWorkspaceSnapshot(
     return items ? { ...rest, items } : rest;
   }) : next.pages;
   const pages = previousPages && nextPages ? stableArray(previousPages, nextPages, (left, right) =>
-    left.items === right.items &&
+    left.items === right.items && left.itemsNotShown === right.itemsNotShown &&
     left.id === right.id && left.title === right.title && left.folder === right.folder &&
     left.frameFiles.length === right.frameFiles.length && left.frameFiles.every((file, index) => file === right.frameFiles[index]) &&
     left.frameIds?.length === right.frameIds?.length && (left.frameIds?.every((id, index) => id === right.frameIds?.[index]) ?? true)) : nextPages;
@@ -1716,14 +1718,14 @@ export async function renameDesignPageCached(workspaceId: string, pageId: string
 }
 
 /** Place, move, resize, retext or delete one canvas item: one engine write
- * and one Undo step. The canvas keeps its selection on undo. */
+ * and one Undo step with its page and restored item identity. */
 export async function putDesignCanvasItemCached(workspaceId: string, pageId: string, item: DesignCanvasItemInput) {
   return runLocalDesignMutation(workspaceId, async (assertOwner) => {
     const before = designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data;
     const result = await designPutCanvasItem(workspaceId, pageId, item);
     assertOwner();
     const snapshot = publishDesignWorkspaceSnapshot(workspaceId, result.snapshot);
-    recordCatalogHistory(workspaceId, before, snapshot);
+    recordCatalogHistory(workspaceId, before, snapshot, { pageId, itemId: result.itemId });
     return { itemId: result.itemId, snapshot };
   }, "edit", undefined, { catalog: true });
 }
@@ -1734,7 +1736,7 @@ export async function deleteDesignCanvasItemCached(workspaceId: string, pageId: 
     const result = await designDeleteCanvasItem(workspaceId, pageId, itemId);
     assertOwner();
     const snapshot = publishDesignWorkspaceSnapshot(workspaceId, result.snapshot);
-    recordCatalogHistory(workspaceId, before, snapshot);
+    recordCatalogHistory(workspaceId, before, snapshot, { pageId, itemId });
     return snapshot;
   }, "edit", undefined, { catalog: true });
 }

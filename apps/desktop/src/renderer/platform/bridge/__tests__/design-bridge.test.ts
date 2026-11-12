@@ -148,6 +148,15 @@ describe("Design bridge read budgets", () => {
     const bridge = { request: vi.fn(async () => ({ type: "WORKSPACE_RESPONSE", result: { result: null, historyPageId, snapshot: { protocolCapability: null, frames: [] } } })) } as unknown as RuntimeClient;
     await expect(bridgeDesignHistory(bridge, "ws_local_design", null, "undo")).rejects.toThrow("malformed");
   });
+  it.each([undefined, "note_123", null])("accepts optional item history metadata from old/new engines: %s", async historyItemId => {
+    const result = { result: null, snapshot: { protocolCapability: null, frames: [] }, ...(historyItemId !== undefined ? { historyItemId } : {}) };
+    const bridge = { request: vi.fn(async () => ({ type: "WORKSPACE_RESPONSE", result })) } as unknown as RuntimeClient;
+    expect(await bridgeDesignHistory(bridge, "ws_local_design", null, "undo")).toEqual(result);
+  });
+  it.each([3, "", "../item", "bad id"])("rejects malformed item history metadata: %j", async historyItemId => {
+    const bridge = { request: vi.fn(async () => ({ type: "WORKSPACE_RESPONSE", result: { result: null, historyItemId, snapshot: { protocolCapability: null, frames: [] } } })) } as unknown as RuntimeClient;
+    await expect(bridgeDesignHistory(bridge, "ws_local_design", null, "undo")).rejects.toThrow("malformed");
+  });
   it.each(["undo", "redo"] as const)("preserves the local %s wire contract without cloud source versions", async direction => {
     const request = vi.fn(async () => ({ type: "WORKSPACE_RESPONSE", result: { result: null, snapshot: { protocolCapability: null, frames: [] } } }));
     const bridge = { request } as unknown as RuntimeClient;

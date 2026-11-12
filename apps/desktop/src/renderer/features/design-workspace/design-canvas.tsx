@@ -62,11 +62,13 @@ import {
 import { cn } from "../../shared/ui/cn";
 import {
   DesignCanvasItemsLayer,
+  DesignCanvasItemsLimitNotice,
   isDesignCanvasItemTool,
   type DesignCanvasItemTool,
   type DesignCanvasItemsHandle,
 } from "./design-canvas-items";
-import { designPageItems } from "./state/design-canvas-items";
+import { designCanvasItemsPageId, designPageItems } from "./state/design-canvas-items";
+import { setDesignCanvasItemSelection, useDesignCanvasItemSelection } from "./state/design-canvas-item-selection";
 import { DESIGN_CANVAS_ITEMS_CAPABILITY } from "@zeros/protocol/design-canvas-items";
 import { warmWorkspaceFiles } from "../../shell/workspace-files-cache";
 import { createMenuAnchor, type MenuAnchor } from "../../shared/ui/menu-anchor";
@@ -992,17 +994,18 @@ export const DesignCanvas = React.memo(function DesignCanvas({
     activeToolRef.current = tool;
     setActiveTool(tool);
   }, []);
-  // Sections, notes and link cards: drawn from the page summary, written only
-  // by an engine that offers them, selected here and never in Layers.
-  const pageItems = designPageItems(snapshot?.pages?.find((page) => page.id === view.activePageId) ??
-    (snapshot?.pages?.length === 1 ? snapshot.pages[0] : undefined));
-  const itemsPageId = snapshot?.pages?.find((page) => page.id === view.activePageId)?.id ??
-    (snapshot?.pages?.length === 1 ? snapshot.pages[0]!.id : null);
+  // Item painting may follow history's page, but mutation ownership stays on
+  // the confirmed page above. Item history is read-only until authority returns.
+  const itemsPageId = designCanvasItemsPageId(view.activePageId, historySelection);
+  const itemsPage = snapshot?.pages?.find((page) => page.id === itemsPageId) ??
+    (snapshot?.pages?.length === 1 ? snapshot.pages[0] : undefined);
+  const pageItems = designPageItems(itemsPage);
+  const itemsHistoryPreview = historySelection?.selectedItemId !== undefined;
   const itemsWritable = !!workspaceId && !!folder && !isCloudWorkspace(workspaceId) &&
     getActiveBridge()?.supportsEngineCapability?.(DESIGN_CANVAS_ITEMS_CAPABILITY, workspaceId) === true;
   const itemsLayerRef = useRef<DesignCanvasItemsHandle | null>(null);
-  const [selectedItem, setSelectedItem] = useState<{ owner: string; id: string } | null>(null);
-  const selectedItemId = selectedItem?.owner === canvasDocumentOwner ? selectedItem.id : null;
+  const confirmedSelectedItemId = useDesignCanvasItemSelection(canvasDocumentOwner);
+  const selectedItemId = itemsHistoryPreview ? historySelection.selectedItemId ?? null : confirmedSelectedItemId;
   // The theme matrix is a persistent non-modal tool window launched from the
   // canvas toolbar, so it may coexist with canvas and inspector work.
   const [themeEditorOpen, setThemeEditorOpen] = useState(false);
@@ -1572,10 +1575,10 @@ export const DesignCanvas = React.memo(function DesignCanvas({
   // panel shows its empty state; choosing a frame or layer clears it.
   const selectCanvasItem = useCallback((id: string | null) => {
     if (id === null) {
-      setSelectedItem(null);
+      setDesignCanvasItemSelection(canvasDocumentOwnerRef.current, null);
       return;
     }
-    setSelectedItem({ owner: canvasDocumentOwnerRef.current, id });
+    setDesignCanvasItemSelection(canvasDocumentOwnerRef.current, id);
     const current = workspaceId ? designWorkspaceView(workspaceId) : null;
     if (current && (current.frameSelected || current.selectedNodeIds.length > 0)) {
       const frame = current.selectedFrame === null ? null : designFrameViews(designWorkspaceSnapshotCache.peekSnapshot(workspaceId!).data)
@@ -1584,7 +1587,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
     }
   }, [publishSelection, workspaceId]);
   useEffect(() => {
-    if (view.frameSelected || view.selectedNodeIds.length > 0) setSelectedItem(null);
+    if (view.frameSelected || view.selectedNodeIds.length > 0) setDesignCanvasItemSelection(canvasDocumentOwnerRef.current, null);
   }, [view.frameSelected, view.selectedNodeIds]);
 
   const itemsView = useMemo(() => ({ zoom: view.zoom, panX: view.panX, panY: view.panY }), [view.panX, view.panY, view.zoom]);
@@ -1597,7 +1600,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
     const tool = activeToolRef.current;
     if (!isDesignCanvasItemTool(tool) || !active || !event.isPrimary || event.button !== 0) return false;
     const viewport = viewportRef.current;
-    if (!viewport || !itemsWritable) return false;
+    if (!viewport || !itemsWritable || itemsHistoryPreview) return false;
     event.preventDefault();
     event.stopPropagation();
     const bounds = viewport.getBoundingClientRect();
@@ -1608,7 +1611,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
     });
     activateTool("select");
     return true;
-  }, [activateTool, active, itemsWritable, workspaceId]);
+  }, [activateTool, active, itemsHistoryPreview, itemsWritable, workspaceId]);
 
   // The first authoritative fallback is a real activation too: publish it so
   // get_selection agrees with the inspector before the user clicks anything.
@@ -7772,7 +7775,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
       ) {
         return;
       }
-      if (event.target === event.currentTarget) setSelectedItem(null);
+      if (event.target === event.currentTarget) setDesignCanvasItemSelection(canvasDocumentOwnerRef.current, null);
       if (event.target === event.currentTarget && startMarquee(event)) return;
       if (event.target === event.currentTarget) publishSelection(selectedDescription ?? null);
     },
@@ -8951,7 +8954,7 @@ export const DesignCanvas = React.memo(function DesignCanvas({
               view={itemsView}
               viewport={viewportSize}
               active={active}
-              editable={itemsWritable && active}
+              editable={itemsWritable && active && !itemsHistoryPreview}
               selectedId={selectedItemId}
               onSelect={selectCanvasItem}
               zoom={paintedZoom}
@@ -9018,6 +9021,8 @@ export const DesignCanvas = React.memo(function DesignCanvas({
           />
         </div>
         </div>
+
+        {workspaceId && itemsPage ? <DesignCanvasItemsLimitNotice count={itemsPage.itemsNotShown} /> : null}
 
         <div
           ref={marqueeRef}

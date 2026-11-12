@@ -29,7 +29,7 @@ import {
   type DesignThumbnailsReply,
 } from "@zeros/protocol/design-capture";
 import { designPageCatalogSchema, designPageIdSchema, normalizeDesignPagesSnapshot, type DesignPageSummary } from "@zeros/protocol/design-pages";
-import type { DesignCanvasItem } from "@zeros/protocol/design-canvas-items";
+import { isDesignCanvasItemId, type DesignCanvasItem } from "@zeros/protocol/design-canvas-items";
 
 /** What the canvas sends: an item's own fields; no id creates one. */
 export type DesignCanvasItemInput = DesignCanvasItem extends infer Item ? Item extends DesignCanvasItem
@@ -481,6 +481,8 @@ export interface DesignApiMutationReplyWire {
   historyFrame?: string;
   /** Catalog history can affect an empty page with no frame to identify it. */
   historyPageId?: string;
+  /** Item history names the item only when it exists in the restored generation. */
+  historyItemId?: string | null;
 }
 
 function designFoundationOpenReply(value: unknown): DesignFoundationOpenWire {
@@ -534,6 +536,8 @@ function designApiMutationReply(
       typeof reply.historyFrame !== "string") ||
     (reply.historyPageId !== undefined &&
       !designPageIdSchema.safeParse(reply.historyPageId).success) ||
+    (reply.historyItemId !== undefined && reply.historyItemId !== null &&
+      !isDesignCanvasItemId(reply.historyItemId)) ||
     (requireSnapshot &&
       (!reply.snapshot ||
         !validMutationSnapshot(reply.snapshot) ||

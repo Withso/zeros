@@ -86,6 +86,7 @@ import { normalizeDesignCanvasBackground } from "./design-canvas-background";
 import { DesignCanvasBackgroundEditor } from "./design-canvas-background-editor";
 import { DesignPagePicker } from "./design-page-picker";
 import { restoreDesignPageHistorySelection } from "./state/design-page-history";
+import { designCanvasItemOwner, setDesignCanvasItemSelection } from "./state/design-canvas-item-selection";
 import { DesignComputedCssEditor } from "./design-computed-css-editor";
 import {
   DesignTokenCatalogContext,
@@ -1607,7 +1608,9 @@ export const DesignInspector = React.memo(function DesignInspector({
           // in-document step brings back the node selection of the state it
           // returns to.
           settleDesignHistorySelection(workspaceId, result.historySelection === undefined ? result.historyFrame ?? null : null);
-          void restoreDesignPageHistorySelection(workspaceId, owner, result, direction).catch((selectionError: unknown) => {
+          void restoreDesignPageHistorySelection(workspaceId, owner, result, direction, (itemId, page) => {
+            setDesignCanvasItemSelection(designCanvasItemOwner(workspaceId, owner.directoryId, page.id), itemId);
+          }).catch((selectionError: unknown) => {
             toast.error("Couldn't save the restored frame selection", {
               description: errorMessage(selectionError),
             });

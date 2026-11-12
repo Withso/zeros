@@ -5,10 +5,11 @@
 // Undo step; gestures paint locally and write on release.
 
 import { File as FileIcon } from "lucide-react";
-import React, { useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useId, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   DESIGN_CANVAS_ITEM_LIMITS,
   designCanvasItemBounds,
+  designCanvasItemInputProblem,
   designCanvasItemTitle,
   designCanvasLinkTargetProblem,
   type DesignCanvasItem,
@@ -43,6 +44,16 @@ export const DESIGN_CANVAS_ITEM_TOOLS: readonly DesignCanvasItemTool[] = ["secti
 export const isDesignCanvasItemTool = (tool: string): tool is DesignCanvasItemTool =>
   tool === "section" || tool === "note" || tool === "link";
 
+export function DesignCanvasItemsLimitNotice({ count }: { count?: number }) {
+  if (!Number.isSafeInteger(count) || !count || count < 0) return null;
+  return (
+    <div data-design-canvas-items-not-shown="" role="status"
+      className="border-border2 bg-bg1 text-fg2 pointer-events-none absolute bottom-4 left-1/2 z-2 -translate-x-1/2 rounded-md border px-3 py-2 text-xs shadow-[var(--shadow-dropdown)]">
+      {count} more {count === 1 ? "item is" : "items are"} not shown
+    </div>
+  );
+}
+
 export interface DesignCanvasItemsHandle {
   /** Start placing an item of this kind at a world point. */
   place(kind: DesignCanvasItemTool, point: { x: number; y: number }): void;
@@ -76,9 +87,9 @@ function sameGeometry(item: DesignCanvasItemSummary, geometry: Geometry): boolea
     (item.kind !== "note" || geometry.height === undefined || item.height === geometry.height);
 }
 
-/** One line of up to the section limit; line breaks become spaces. */
+/** Line breaks and tabs become spaces; the protocol validates the result. */
 function sectionText(value: string): string {
-  return [...value.replace(/[\r\n\t]/g, " ")].slice(0, DESIGN_CANVAS_ITEM_LIMITS.sectionText).join("");
+  return value.replace(/[\r\n\t]/g, " ");
 }
 
 export interface DesignCanvasItemsLayerProps {
@@ -184,26 +195,43 @@ export const DesignCanvasItemsLayer = React.memo(React.forwardRef<DesignCanvasIt
       },
     }), [onSelect, props.folder]);
 
-    const commitEdit = useCallback((draft: Editing, value: string) => {
-      setEditing(null);
+    const commitEdit = useCallback(async (draft: Editing, value: string): Promise<string | null> => {
+      // A write can settle after another item's editor opened; close only this draft.
+      const close = () => setEditing((current) => current === draft ? null : current);
       const text = draft.kind === "section" ? sectionText(value).trim() : value.replace(/\r\n?/g, "\n");
-      if (draft.kind === "section" && !text) return;
-      if (draft.id === null) {
-        const input: DesignCanvasItemInput = draft.kind === "section"
-          ? { kind: "section", x: draft.geometry.x, y: draft.geometry.y, width: draft.geometry.width, text }
-          : { kind: "note", x: draft.geometry.x, y: draft.geometry.y, width: draft.geometry.width, height: draft.geometry.height ?? NEW_SIZE.note.height, text };
-        const writeOwner = ownerRef.current;
-        void write(input, draft.kind === "section" ? "Couldn't add the section" : "Couldn't add the note")
-          .then((result) => { if (ownerRef.current === writeOwner && result.itemId) propsRef.current.onSelect(result.itemId); })
-          .catch(() => {});
-        return;
+      // Like a Layers rename, an empty title keeps the confirmed one and places nothing.
+      if (draft.kind === "section" && !text) {
+        close();
+        return null;
       }
-      const item = propsRef.current.items.find((candidate) => candidate.id === draft.id);
-      if (!item) return;
-      const current = item.kind === "link" ? item.title ?? "" : item.text;
-      if (text === current || (item.kind === "link" && text.trim() === (item.title ?? ""))) return;
-      void write(itemInput(item, item, text), "Couldn't change the text").catch(() => {});
-    }, [write]);
+      const item = draft.id === null ? null : propsRef.current.items.find((candidate) => candidate.id === draft.id);
+      if (draft.id !== null && !item) return "That item is not on this page any more. Refresh before editing it.";
+      if (item) {
+        const current = item.kind === "link" ? item.title ?? "" : item.text;
+        if (text === current || (item.kind === "link" && text.trim() === current)) {
+          close();
+          return null;
+        }
+      }
+      const input: DesignCanvasItemInput = draft.id === null
+        ? draft.kind === "section"
+          ? { kind: "section", x: draft.geometry.x, y: draft.geometry.y, width: draft.geometry.width, text }
+          : { kind: "note", x: draft.geometry.x, y: draft.geometry.y, width: draft.geometry.width, height: draft.geometry.height ?? NEW_SIZE.note.height, text }
+        : itemInput(item!, item!, text);
+      const problem = designCanvasItemInputProblem(input);
+      if (problem) return problem;
+      if (!propsRef.current.editable) return "Canvas items are read-only while history or the active view is changing.";
+      const writeOwner = ownerRef.current;
+      try {
+        const result = await putDesignCanvasItemCached(workspaceId, pageId, input);
+        if (ownerRef.current !== writeOwner) return null;
+        close();
+        if (draft.id === null && result.itemId) propsRef.current.onSelect(result.itemId);
+        return null;
+      } catch (error) {
+        return errorMessage(error);
+      }
+    }, [pageId, workspaceId]);
 
     const pickFile = useCallback((target: string) => {
       const at = picking;
@@ -226,7 +254,8 @@ export const DesignCanvasItemsLayer = React.memo(React.forwardRef<DesignCanvasIt
     const startEdit = useCallback((item: DesignCanvasItemSummary) => {
       if (!propsRef.current.editable) return;
       setEditing({ id: item.id, kind: item.kind, geometry: item,
-        text: item.kind === "link" ? designCanvasItemTitle(item) : item.text });
+        text: item.kind === "link" ? item.title ?? "" : item.text,
+        ...(item.kind === "link" ? { target: item.target } : {}) });
     }, []);
 
     // Keys for the selected item, while the canvas owns focus.
@@ -391,7 +420,7 @@ const DesignCanvasItemView = React.memo(function DesignCanvasItemView({
   editing: Editing | null;
   onGesture: (event: React.PointerEvent<HTMLElement>, item: DesignCanvasItemSummary, mode: "move" | "width" | "height" | "corner") => void;
   onEdit: (item: DesignCanvasItemSummary) => void;
-  onCommitEdit: (draft: Editing, value: string) => void;
+  onCommitEdit: (draft: Editing, value: string) => Promise<string | null>;
   onCancelEdit: () => void;
   onKeyboardSettle: () => void;
   onOpen: (target: string) => void;
@@ -463,29 +492,58 @@ const DesignCanvasItemView = React.memo(function DesignCanvasItemView({
  * a note commits with Command-Enter or by leaving it. Escape writes nothing. */
 function DesignCanvasItemEditor({ draft, onCommit, onCancel, onKeyboardSettle, inline = false }: {
   draft: Editing;
-  onCommit: (draft: Editing, value: string) => void;
+  onCommit: (draft: Editing, value: string) => Promise<string | null>;
   onCancel: () => void;
   /** Enter or Escape hands the keyboard back to the canvas. */
   onKeyboardSettle: () => void;
   inline?: boolean;
 }) {
   const [value, setValue] = useState(draft.text);
+  const [problem, setProblem] = useState<string | null>(null);
+  const [pending, setPending] = useState(false);
+  const pendingRef = useRef(false);
   const settledRef = useRef(false);
   const fieldRef = useRef<HTMLInputElement & HTMLTextAreaElement>(null);
+  const problemId = useId();
   useLayoutEffect(() => {
     fieldRef.current?.focus({ preventScroll: true });
     fieldRef.current?.select();
   }, []);
   const settle = (commit: boolean, keyboard = false) => {
-    if (settledRef.current) return;
-    settledRef.current = true;
-    if (commit) onCommit(draft, value);
-    else onCancel();
-    if (keyboard) onKeyboardSettle();
+    if (settledRef.current || pendingRef.current) return;
+    if (!commit) {
+      settledRef.current = true;
+      onCancel();
+      if (keyboard) onKeyboardSettle();
+      return;
+    }
+    pendingRef.current = true;
+    setPending(true);
+    setProblem(null);
+    void onCommit(draft, value).then((nextProblem) => {
+      pendingRef.current = false;
+      setPending(false);
+      // Focus stays where the user put it: a keyboard commit never left the
+      // field, and a click-away must not be pulled back.
+      if (nextProblem) {
+        setProblem(nextProblem);
+        return;
+      }
+      settledRef.current = true;
+      if (keyboard) onKeyboardSettle();
+    }).catch((error: unknown) => {
+      pendingRef.current = false;
+      setPending(false);
+      setProblem(errorMessage(error));
+    });
   };
   const common = {
     ref: fieldRef,
     value,
+    readOnly: pending,
+    "aria-busy": pending || undefined,
+    "aria-invalid": problem ? true : undefined,
+    "aria-describedby": problem ? problemId : undefined,
     "data-design-canvas-item-editor": draft.kind,
     "aria-label": draft.kind === "section" ? "Section title" : draft.kind === "note" ? "Note text" : "Link card title",
     onPointerDown: (event: React.PointerEvent) => event.stopPropagation(),
@@ -494,9 +552,8 @@ function DesignCanvasItemEditor({ draft, onCommit, onCancel, onKeyboardSettle, i
   const field = draft.kind === "note" ? (
     <Textarea
       {...common}
-      maxLength={DESIGN_CANVAS_ITEM_LIMITS.noteText * 2}
       className="zd-canvas-item-editor zd-canvas-note-text"
-      onChange={(event) => setValue(event.target.value)}
+      onChange={(event) => { setValue(event.target.value); setProblem(null); }}
       onKeyDown={(event) => {
         event.stopPropagation();
         if (event.key === "Escape") { event.preventDefault(); settle(false, true); }
@@ -506,10 +563,9 @@ function DesignCanvasItemEditor({ draft, onCommit, onCancel, onKeyboardSettle, i
   ) : (
     <Input
       {...common}
-      maxLength={(draft.kind === "section" ? DESIGN_CANVAS_ITEM_LIMITS.sectionText : DESIGN_CANVAS_ITEM_LIMITS.linkTitle) * 2}
-      placeholder={draft.kind === "section" ? "Section" : undefined}
+      placeholder={draft.kind === "section" ? "Section" : draft.kind === "link" && draft.target ? draft.target.split("/").at(-1) : undefined}
       className={cn("zd-canvas-item-editor", draft.kind === "section" ? "zd-canvas-section-text" : "zd-canvas-link-title")}
-      onChange={(event) => setValue(event.target.value)}
+      onChange={(event) => { setValue(event.target.value); setProblem(null); }}
       onKeyDown={(event) => {
         event.stopPropagation();
         if (event.key === "Escape") { event.preventDefault(); settle(false, true); }
@@ -517,7 +573,13 @@ function DesignCanvasItemEditor({ draft, onCommit, onCancel, onKeyboardSettle, i
       }}
     />
   );
-  if (inline) return field;
+  const error = problem ? (
+    <div id={problemId} role="alert"
+      className="border-border2 bg-bg1 text-red-primary absolute left-0 top-full z-2 mt-1 w-72 rounded-md border p-2 text-xs leading-4 shadow-[var(--shadow-dropdown)]">
+      {problem}
+    </div>
+  ) : null;
+  if (inline) return <>{field}{error}</>;
   const { geometry } = draft;
   return (
     <div
@@ -527,6 +589,7 @@ function DesignCanvasItemEditor({ draft, onCommit, onCancel, onKeyboardSettle, i
       style={{ left: geometry.x, top: geometry.y, width: geometry.width, height: geometry.height }}
     >
       {field}
+      {error}
     </div>
   );
 }

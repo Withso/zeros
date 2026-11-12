@@ -59,12 +59,16 @@ export function projectDesignMutationSnapshot(previous: DesignWorkspaceSnapshotW
     descriptions = byPage.flat();
     // The catalog has no items; they change only with replies that resend
     // whole pages, so a same-owner page keeps its confirmed ones.
-    const priorItems = new Map((sameOwner ? previous.pages ?? [] : []).flatMap((page) => page.items ? [[page.id, page.items] as const] : []));
+    const priorItems = new Map((sameOwner ? previous.pages ?? [] : []).flatMap((page) =>
+      page.items || page.itemsNotShown !== undefined
+        ? [[page.id, { items: page.items, itemsNotShown: page.itemsNotShown }] as const] : []));
     pages = pageCatalog.pages.map((page, index) => {
-      const items = priorItems.get(page.id);
+      const kept = priorItems.get(page.id);
       return { id: page.id, title: page.title, folder: page.folder,
         frameFiles: byPage[index]!.map((description) => description.file),
-        frameIds: byPage[index]!.map((description) => description.frameId!), ...(items ? { items } : {}) };
+        frameIds: byPage[index]!.map((description) => description.frameId!),
+        ...(kept?.items ? { items: kept.items } : {}),
+        ...(kept?.itemsNotShown !== undefined ? { itemsNotShown: kept.itemsNotShown } : {}) };
     });
     paged = { pageHashes, ...(stalePages.length ? { stalePages } : {}) };
   } else descriptions = mutationCatalog!.frames.map(describeFrame);

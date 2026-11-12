@@ -67,6 +67,8 @@ export interface DesignCanvasItemIssue {
   /** invalid and unsafe-link items are skipped; unknown kinds are kept and
    * drawn as nothing; limit marks the items past a page's caps. */
   kind: "invalid" | "unsafe-link" | "unknown" | "limit";
+  /** Structured count for a limit issue; other issue kinds omit it. */
+  count?: number;
   message: string;
 }
 
@@ -266,10 +268,9 @@ export function readDesignCanvasPageItems(
       issues.push({ index, id, kind: "invalid", message: `The id ${id} is already a frame's or another item's.` });
       continue;
     }
-    // A kept entry keeps its id from later items, drawn or not.
-    if (id !== undefined) reserved.add(id);
     const parsed = parseItem(entry);
     if ("unknown" in parsed) {
+      if (id !== undefined) reserved.add(id);
       issues.push({ index, ...(id ? { id } : {}), kind: "unknown", message: `Kind ${JSON.stringify(parsed.unknown)} is kept and not drawn.` });
       continue;
     }
@@ -277,6 +278,8 @@ export function readDesignCanvasPageItems(
       issues.push({ index, ...(id ? { id } : {}), kind: parsed.unsafe ? "unsafe-link" : "invalid", message: parsed.problem });
       continue;
     }
+    // A valid or kept entry reserves its id even when a cap hides it.
+    if (id !== undefined) reserved.add(id);
     const weight = itemTextBytes(parsed.item);
     if (items.length >= DESIGN_CANVAS_ITEM_LIMITS.itemsPerPage || bytes + weight > DESIGN_CANVAS_ITEM_LIMITS.textBytesPerPage) {
       if (firstPast < 0) firstPast = index;
@@ -287,7 +290,7 @@ export function readDesignCanvasPageItems(
     items.push(parsed.item);
   }
   if (pastCap)
-    issues.push({ index: firstPast, kind: "limit", message:
+    issues.push({ index: firstPast, kind: "limit", count: pastCap, message:
       `${pastCap} ${pastCap === 1 ? "item is" : "items are"} past a page's ${DESIGN_CANVAS_ITEM_LIMITS.itemsPerPage} items or ${DESIGN_CANVAS_ITEM_LIMITS.textBytesPerPage / 1024} KiB of item text, and not drawn.` });
   return { items, issues };
 }

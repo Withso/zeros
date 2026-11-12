@@ -737,9 +737,12 @@ export async function handleDesignWorkspaceRoute(
           destination.push(entry); pruneWorkspaceDesignHistory(history);
           const snapshot = await host.readDesignSnapshot(workspace, remote, { hostLocalResources, fresh: true });
           const page = snapshot.pages?.find(page => page.id === entry.pageId);
+          const itemHistory = entry.itemId !== undefined;
+          const historyPageId = page?.id ?? (itemHistory ? undefined : snapshot.pages?.[0]?.id);
           return { result: null, snapshot,
-            ...(entry.pageId ? { historyPageId: page?.id ?? snapshot.pages?.[0]?.id,
-              historySelection: (page ?? snapshot.pages?.[0])?.frameFiles[0] ?? null } : {}) };
+            ...(entry.pageId ? { ...(historyPageId ? { historyPageId } : {}),
+              historySelection: itemHistory ? null : (page ?? snapshot.pages?.[0])?.frameFiles[0] ?? null,
+              ...(itemHistory ? { historyItemId: page?.items?.some(item => item.id === entry.itemId) ? entry.itemId : null } : {}) } : {}) };
         }
         if (entry.kind === "transfer") {
           const api = getWorkspaceDesignApi(workspace.path);
@@ -1426,14 +1429,14 @@ export async function handleDesignWorkspaceRoute(
       // shared history step each, like a page rename.
       const workspace = host.resolveDesignWorkspace(reqStr(params, "workspaceId"), remote);
       return withDesignWorkspaceMutation(workspace.path, async () => {
-        // No page in the entry: undoing an item keeps the canvas's selection
-        // rather than selecting the page's first frame.
-        const record = (change: Parameters<typeof catalogDesignHistoryEntry>[0]) =>
-          host.recordDesignHistory(workspace.path, catalogDesignHistoryEntry(change));
         const pageId = designPageIdSchema.parse(params.pageId);
+        let change: Parameters<typeof catalogDesignHistoryEntry>[0] | undefined;
+        const capture = (next: Parameters<typeof catalogDesignHistoryEntry>[0]) => { change = next; };
         const result = op === "design.canvas.item.put"
-          ? { item: await putDesignCanvasItem(workspace.path, { pageId, item: params.item }, record) }
-          : { deleted: await deleteDesignCanvasItem(workspace.path, { pageId, itemId: params.itemId }, record) };
+          ? { item: await putDesignCanvasItem(workspace.path, { pageId, item: params.item }, capture) }
+          : { deleted: await deleteDesignCanvasItem(workspace.path, { pageId, itemId: params.itemId }, capture) };
+        const itemId = "item" in result ? result.item?.id : result.deleted?.id;
+        if (change && itemId) host.recordDesignHistory(workspace.path, catalogDesignHistoryEntry(change, pageId, [], true, itemId));
         return { ...result, snapshot: await host.readDesignSnapshot(workspace, remote, { hostLocalResources, fresh: true }) };
       });
     }
