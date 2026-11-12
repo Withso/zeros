@@ -712,7 +712,9 @@ export class Agents {
     const context = this.acting ? route.context : undefined;
     if (this.acting && (!context || !this.contexts?.live(context.id)))
       throw tagged(new WorkspaceError("session-expired", "This turn's person is no longer current. Send the message again."), "context_not_live");
-    const config = context ? { ...this.config, agents: context.lease.agents } : this.config;
+    // The lease is the turn's authority; agentLogins only presents the Creator's agents and never gates a leased turn.
+    const { agentLogins: _presentation, ...leased } = this.config;
+    const config = context ? { ...leased, agents: context.lease.agents } : this.config;
     const unavailable = providerAvailability(route.agentId, config, !!this.factories[route.agentId]);
     if (unavailable) throw Object.assign(new Error(cloudFailureMessage(unavailable)), { cloud: unavailable });
     if (route.opening) return route.opening;
@@ -938,9 +940,13 @@ export class Agents {
         generation: assigned.actingUser.generation, contextId: assigned.contextId });
     } catch (error) {
       const code = contextCode(error);
-      const reason = code === "agent_login_required" ? "auth-required" as const : code === "agent_credentials_unavailable" ? "credentials-unavailable" as const : undefined;
+      const reason = code === "agent_login_required" ? "auth-required" as const : code === "agent_credentials_unavailable" ? "credentials-unavailable" as const
+        : code === "workspace_creator_required" ? "creator-required" as const : undefined;
       if (!reason) throw error;
-      const cloud = { source: "provider" as const, provider: route.agentId, reason };
+      // Creator pays: whose login is missing, when the control plane says (an older one does not).
+      const from = (error as { loginRequiredFrom?: unknown }).loginRequiredFrom;
+      const cloud = { source: "provider" as const, provider: route.agentId, reason,
+        ...(code === "agent_login_required" && (from === "self" || from === "creator") ? { loginRequiredFrom: from as "self" | "creator" } : {}) };
       throw Object.assign(new Error(cloudFailureMessage(cloud)), { cloud });
     }
     if (lease.userId !== assigned.actingUser.userId || lease.generation !== assigned.actingUser.generation)

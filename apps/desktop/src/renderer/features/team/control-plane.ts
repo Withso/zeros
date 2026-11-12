@@ -113,6 +113,8 @@ export class ControlPlaneError extends Error {
     message: string,
     /** Team sharing's agent_login_required names the agent the person must connect. */
     public agent?: "claude" | "codex" | "cursor",
+    /** Creator pays: whose login agent_login_required names (absent from an older control plane). */
+    public loginRequiredFrom?: "self" | "creator",
   ) {
     super(message);
   }

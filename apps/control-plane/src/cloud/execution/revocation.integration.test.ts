@@ -26,10 +26,10 @@ database("durable execution revocation", () => {
     expect((await pool.query("SELECT 1 FROM cloud_v2_execution_tokens WHERE context_id=$1", [active.begun.contextId])).rowCount).toBe(0);
   });
 
-  it("revokes the selected member credential even when that member owns no workspace", async () => {
+  it("revokes a pinned payer's credential after they cease to own a workspace", async () => {
     const active = await turn();
-    await pool.query("DELETE FROM cloud_v2_workspaces WHERE id=$1", [f.own.id]);
-    await pool.query("UPDATE cloud_agent_credentials SET revoked_at=clock_timestamp(),revision=revision+1 WHERE owner_user_id=$1", [f.viewer.id]);
+    await pool.query("UPDATE cloud_v2_workspaces SET creator_user_id=$2 WHERE id=$1", [f.workspace.id, f.viewer.id]);
+    await pool.query("UPDATE cloud_agent_credentials SET revoked_at=clock_timestamp(),revision=revision+1 WHERE owner_user_id=$1", [f.creator.id]);
     expect(await read(active.begun.contextId)).toMatchObject({ state: "revoked", reason: "actor_changed", material: null });
   });
 

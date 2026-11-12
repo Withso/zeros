@@ -212,9 +212,11 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
   const workerConfig = async (workspace: CloudV2Workspace & Partial<Pick<CloudV2WorkerSession, "loginRevision" | "executionMode">>, mode: "admission" | "continuation" = "admission",
     proof?: CloudSourceProof): Promise<ConfigFrame> => {
     if (workspace.executionMode === "active" || workspace.executionMode === undefined && await execution.active(workspace.id)) {
+      await execution.deps.logins.refreshAvailability(workspace.id);
       const bootstrapContextId = await execution.bootstrap(workspace.id);
-      const [setup, target, baseCommit] = await Promise.all([github.workspaceSetup(workspace, computers), github.identities.primary(workspace), store.baseCommit(workspace.id)]);
-      return { t: "config", actingUser: 1, bootstrapContextId, agents: {}, gitIdentity: null, loginRevision: workspace.loginRevision ?? "0",
+      const [setup, target, baseCommit, agentLogins] = await Promise.all([github.workspaceSetup(workspace, computers), github.identities.primary(workspace),
+        store.baseCommit(workspace.id), execution.deps.logins.availability(workspace.id)]);
+      return { t: "config", actingUser: 1, bootstrapContextId, agents: {}, agentLogins, gitIdentity: null, loginRevision: workspace.loginRevision ?? "0",
         promptOutbox: 1, notifyUser: 1, githubPullRequests: 1, githubUserTokens: 1, agentInteractions: 1, runtimeUpdate: 1,
         workspace: { id: workspace.id, organizationId: workspace.organizationId, repository: workspace.repository,
           checkoutPath: `${CLOUD_V2_HOME}/${workspace.repository}`, branch: workspace.branch, baseBranch: workspace.baseBranch,
@@ -308,7 +310,8 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
       const current = await store.relayActivity(binding, idle);
       if (!current) return null;
       if (!idle && current.state === "running" && current.executionMode !== "active") void continueSource(current, current).catch(() => {});
-      return { state: current.state, loginRevision: current.loginRevision, prompts: current.promptsPending };
+      const loginRevision = current.executionMode === "active" ? await execution.deps.logins.refreshAvailability(current.id) : null;
+      return { state: current.state, loginRevision: loginRevision ?? current.loginRevision, prompts: current.promptsPending };
     },
     mintWorkerToken: (id, boot) => signer.mint(id, boot),
     wake: async workspace => { await store.transition(workspace.id, ["stopped"], "starting"); },
@@ -392,6 +395,10 @@ export function createCloudV2(config: Config, pool: pg.Pool, roles: { relay: boo
         const scope = JSON.parse(notice.payload ?? "");
         if ((typeof scope?.ownerUserId === "string" || scope?.ownerUserId === null) && (scope.organizationId === null || typeof scope.organizationId === "string")) {
           const identity = { ...(typeof scope.ownerUserId === "string" ? { ownerUserId: scope.ownerUserId } : {}), ...(scope.organizationId ? { organizationId: scope.organizationId } : {}) };
+          if (notice.channel === "zeros_cloud_v2_logins" && scope.availabilityOnly === true) {
+            void relay?.refreshLogins(identity);
+            return;
+          }
           source.invalidate({ ...(identity.ownerUserId ? { userId: identity.ownerUserId } : {}), ...(identity.organizationId ? { organizationId: identity.organizationId } : {}) });
           relay?.revalidateSources(identity);
           if (notice.channel === "zeros_cloud_v2_logins") void relay?.refreshLogins(identity);

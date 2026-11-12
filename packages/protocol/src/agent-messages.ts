@@ -49,7 +49,9 @@ export interface AgentTextMessage {
   /** Failure before engine admission, or while the renderer lost its request
    * transport. Engine-confirmed failures also have a terminal error notice. */
   /** cloud/ownAccount: team sharing's refusal of a person without their own agent login (their own sign-in fixes it). */
-  recoveryFailure?: { kind: string; message: string; cloud?: { source: "provider"; provider: "claude" | "codex" | "cursor"; reason: "auth-required" }; ownAccount?: true };
+  recoveryFailure?: { kind: string; message: string; cloud?: { source: "provider"; provider: "claude" | "codex" | "cursor"; reason: "auth-required";
+    /** Creator pays: whose agent login is missing. */
+    loginRequiredFrom?: "self" | "creator" }; ownAccount?: true };
   /** Engine-side message id from the SessionNotification chunk. Used
    *  to coalesce streaming chunks of the SAME message; differs across
    *  turns, so without this every turn's agent reply would merge into

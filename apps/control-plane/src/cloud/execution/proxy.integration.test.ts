@@ -21,9 +21,9 @@ database("acting-user Codex proxy", () => {
     return { ...turn, token, request };
   };
 
-  it("uses the pinned sender login and rejects the token after its context ends", async () => {
+  it("uses the pinned Creator login and rejects the token after its context ends", async () => {
     const fetcher = vi.fn<typeof fetch>(async (_url, options) => {
-      expect(new Headers(options?.headers).get("authorization")).toBe(`Bearer synthetic-codex-${f.viewer.id}`);
+      expect(new Headers(options?.headers).get("authorization")).toBe(`Bearer synthetic-codex-${f.creator.id}`);
       expect(new Headers(options?.headers).has("chatgpt-account-id")).toBe(false);
       return Response.json({ ok: true });
     });

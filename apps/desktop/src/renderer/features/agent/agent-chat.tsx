@@ -4455,7 +4455,7 @@ function AgentChatBody({
               </AgentNotice>
             )}
             {preparationFailure && (
-              cloudPreparationFailure ? <TurnFailureCard failure={cloudPreparationFailure}
+              cloudPreparationFailure ? <TurnFailureCard failure={cloudPreparationFailure} folder={session.cwd ?? chatThread?.folder ?? null}
                 readOnly={!interactive || transcriptReadOnly} onReconnect={handleSignIn} onChooseModel={openModelPicker}
                 onStartNewSession={startNewSession} onRetry={retryPreparation} /> : <AgentNotice
                 data-agent-preparation-notice

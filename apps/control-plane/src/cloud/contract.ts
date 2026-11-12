@@ -155,6 +155,7 @@ export const CloudV2ControlFrameSchema = z.discriminatedUnion("t", [
     localCommandReason: z.literal(1).optional(),
     notifyUser: z.literal(1).optional(),
     actingUser: z.literal(1).optional(),
+    agentLogins: z.object({ claude: z.literal(true).optional(), codex: z.literal(true).optional(), cursor: z.literal(true).optional() }).strict().optional(),
     bootstrapContextId: z.uuid().optional(),
     agentInteractions: z.literal(1).optional(),
     codeReview: z.object({
@@ -280,4 +281,4 @@ export const CloudV2BootCleanRequestSchema = z.object({ retirementId: z.uuid(), 
 export const CloudV2BootCleanReplySchema = z.object({ retired: z.number().int().min(0) }).strict();
 /** Context refusal codes (409/403/503 bodies {error:{code,message,agent?}}). */
 export const CloudV2ContextErrorCodeSchema = z.enum(["actor_changed", "actor_busy", "worker_update_required", "workspace_stopping",
-  "agent_login_required", "member_access_revoked", "agent_credentials_unavailable", "execution_not_retired"]);
+  "agent_login_required", "member_access_revoked", "agent_credentials_unavailable", "execution_not_retired", "workspace_creator_required"]);

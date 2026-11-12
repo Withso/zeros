@@ -61,8 +61,12 @@ export function cloudPromptView(record: PromptJournalRecord, workspaceStatus: st
     const queued = unavailable && pending && !active && presentation?.endedAt === undefined;
     const failure = state === "interrupted" ? { kind: "transport-closed", message: "The worker restarted before this turn finished" }
       : state === "failed" ? { kind: "protocol-error", message: "This message could not be delivered. Retry to send it again." }
-      : entry.refusal && entry.failure ? { kind: "auth-required", message: entry.failure,
-          cloud: { source: "provider" as const, provider: entry.refusal.agent, reason: "auth-required" as const }, ownAccount: true as const }
+      : entry.refusal?.code === "workspace_creator_required" && entry.failure ? { kind: "creator-required", message: entry.failure }
+      : entry.refusal?.code === "agent_login_required" && entry.failure ? { kind: "auth-required", message: entry.failure,
+          cloud: { source: "provider" as const, provider: entry.refusal.agent, reason: "auth-required" as const,
+            ...(entry.refusal.loginRequiredFrom ? { loginRequiredFrom: entry.refusal.loginRequiredFrom } : {}) },
+          // Only the sender's own missing login is fixed by the sender's own sign-in.
+          ...(entry.refusal.loginRequiredFrom !== "creator" ? { ownAccount: true as const } : {}) }
       : entry.failure ? { kind: "transport-closed", message: entry.failure } : undefined;
     const row: AgentTextMessage = { id: payload.userMessageId, kind: "text", role: "user", createdAt: payload.startedAt,
       text: bubble?.displayText ?? payload.prompt.flatMap(block => block.type === "text" ? [block.text] : []).join(""),

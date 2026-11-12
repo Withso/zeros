@@ -86,7 +86,7 @@ database("active workspace per-person access loss", () => {
     expect(response.status).toBe(200);
   });
 
-  it("keeps a member's running turn and VM when the current Creator leaves", async () => {
+  it("cuts the departed Creator's funded turns while keeping the VM", async () => {
     await pool.query("UPDATE organization_members SET role='owner' WHERE org_id=$1 AND user_id=$2", [f.organizationId, f.admin.id]);
     const removed = await begin(), survivor = await begin(f.viewer), before = await workspace();
     const response = await f.call(`/v1/organizations/${f.organizationId}/members/${f.creator.id}`, "DELETE", undefined, f.creator);
@@ -95,9 +95,9 @@ database("active workspace per-person access loss", () => {
     expect(await workspace()).toEqual(before);
     const renewed = await f.worker("execution-leases/renew", { contextIds: [survivor.begun.contextId] });
     expect(renewed.status).toBe(200);
-    expect(await renewed.json()).toEqual({ leases: [{ contextId: survivor.begun.contextId, expiresAt: expect.any(Number) }] });
-    expect((await f.worker("turn-lease", survivor.lease)).status).toBe(200);
-    expect(await context(survivor.begun.contextId)).toMatchObject({ state: "active", has_material: true });
+    expect(await renewed.json()).toEqual({ leases: [{ contextId: survivor.begun.contextId, refused: "access_revoked" }] });
+    expect((await f.worker("turn-lease", survivor.lease)).status).toBe(409);
+    expect(await context(survivor.begun.contextId)).toMatchObject({ state: "revoked", has_material: false });
   });
 
   it("re-signs a phase-2 context after a roster edit without changing its material or generation", async () => {
@@ -115,8 +115,8 @@ database("active workspace per-person access loss", () => {
 
   it("re-signs a short phase-2 context when material delivery renews its lease", async () => {
     const turn = await begin(f.viewer), authority = await legacyAuthority(turn.begun.contextId);
-    await pool.query("UPDATE cloud_v2_execution_contexts SET authority=$2,expires_at=clock_timestamp()+interval '9 seconds' WHERE id=$1",
-      [turn.begun.contextId, authority]);
+    await withSystemTx(pool, tx => tx.query("UPDATE cloud_v2_execution_contexts SET authority=$2,expires_at=clock_timestamp()+interval '9 seconds' WHERE id=$1",
+      [turn.begun.contextId, authority]));
     const before = (await pool.query("SELECT material,generation FROM cloud_v2_execution_contexts WHERE id=$1", [turn.begun.contextId])).rows[0];
     await withSystemTx(pool, tx => tx.query("UPDATE organizations SET authorization_revision=authorization_revision+1 WHERE id=$1", [f.organizationId]));
     const response = await f.worker("turn-lease", turn.lease);
@@ -131,8 +131,8 @@ database("active workspace per-person access loss", () => {
     const first = await f.cp.execution.bootstrap(f.workspace.id);
     expect(first).toEqual(expect.any(String));
     const authority = await legacyAuthority(first!);
-    await pool.query("UPDATE cloud_v2_execution_contexts SET authority=$2,expires_at=clock_timestamp()-interval '1 second' WHERE id=$1",
-      [first, tampered ? { signature: "f".repeat(64) } : authority]);
+    await withSystemTx(pool, tx => tx.query("UPDATE cloud_v2_execution_contexts SET authority=$2,expires_at=clock_timestamp()-interval '1 second' WHERE id=$1",
+      [first, tampered ? { signature: "f".repeat(64) } : authority]));
     await withSystemTx(pool, tx => tx.query("UPDATE organizations SET authorization_revision=authorization_revision+1 WHERE id=$1", [f.organizationId]));
     const response = await f.worker("config", undefined, { method: "GET" });
     expect(response.status).toBe(tampered ? 409 : 200);

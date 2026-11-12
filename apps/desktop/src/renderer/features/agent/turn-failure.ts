@@ -82,7 +82,8 @@ export function turnFailureForCard(input: {
   if (input.status === "completed" && !backgroundFailure) return null;
   const fallback = input.fallback ?? input.recoveryFailure;
   const ownAccount = !notice && !input.fallback && input.recoveryFailure?.ownAccount === true;
-  const parsedCloud = CloudFailureSchema.safeParse(notice?.cloud ?? input.fallback?.cloud ?? (ownAccount ? input.recoveryFailure?.cloud : undefined));
+  // A refused message's own failure keeps its cloud evidence (Creator pays: whose login is missing).
+  const parsedCloud = CloudFailureSchema.safeParse(notice?.cloud ?? input.fallback?.cloud ?? (!notice && !input.fallback ? input.recoveryFailure?.cloud : undefined));
   const cloud = parsedCloud.success ? parsedCloud.data : undefined;
   const organizationMessage = claudeOrganizationStartupMessage(notice?.code) ??
     claudeOrganizationStartupMessage(claudeOrganizationStartupCode(input.fallback?.advice));
@@ -107,9 +108,26 @@ export function turnFailureForCard(input: {
   ].includes(kind);
   return {
     ...(cloud ? { cloud } : {}),
-    message: cloud && !ownAccount ? cloudFailureMessage(cloud) : redactLogSecrets(message).slice(0, 8000),
+    message: cloud && !ownAccount && !(!notice && !input.fallback && input.recoveryFailure) ? cloudFailureMessage(cloud) : redactLogSecrets(message).slice(0, 8000),
     kind,
     newChatAllowed,
     ...(ownAccount ? { ownAccount: true as const } : {}),
   };
+}
+
+const AGENT_NAMES = { claude: "Claude", codex: "Codex", cursor: "Cursor" } as const;
+/** What the failure card shows and offers. Creator pays: the Creator's missing login names the Creator (from the workspace
+ * document and roster) and offers no connect action, only Retry; no Creator offers Retry only. */
+export function turnFailureDisplay(failure: TurnFailure, creatorName: string | null): { message: string; retry: boolean; reconnect: boolean; reconnectLabel: string | undefined } {
+  const cloud = failure.cloud?.source === "provider" ? failure.cloud : undefined, reason = cloud?.reason;
+  if (failure.kind === "creator-required" || reason === "creator-required")
+    return { message: "This workspace has no Creator. An admin can reassign it.", retry: true, reconnect: false, reconnectLabel: undefined };
+  if (cloud?.loginRequiredFrom === "creator")
+    return { message: `${creatorName ?? "The workspace's Creator"} needs to connect ${AGENT_NAMES[cloud.provider]} before messages can run here.`, retry: true, reconnect: false, reconnectLabel: undefined };
+  const accountAction = reason === "auth-required" || reason === "verification-required" || reason === "credentials-unavailable";
+  // An own-account refusal was never sent: after signing in, the same message can simply be retried.
+  const retry = (!accountAction || failure.ownAccount === true) && reason !== "session-expired" && reason !== "model-unavailable";
+  const reconnectLabel = !accountAction ? undefined : failure.ownAccount && cloud ? `Connect your ${AGENT_NAMES[cloud.provider]} account`
+    : reason === "auth-required" ? "Reconnect provider account" : "Check provider connection";
+  return { message: failure.message, retry, reconnect: accountAction, reconnectLabel };
 }

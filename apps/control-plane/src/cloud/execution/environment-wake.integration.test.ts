@@ -31,7 +31,7 @@ database("active environment isolation across real start and prompt wake routes"
     const saved = await f.cp.routes.environments!.patch(f.organizationId, f.creator.id, "42", f.workspace.repository,
       { expectedRevision: 0, files: [{ path: seedPath, content }] });
     await withSystemTx(pool, tx => pinCloudEnvironment(tx, f.workspace, "42"));
-    await f.login(f.viewer); await f.activate(f.viewer);
+    await f.login(); await f.activate(f.viewer);
     const oldHome = join(directory, "old"), home = join(directory, "current"), origin = join(directory, "origin.git");
     const oldRepo = join(oldHome, f.workspace.repository), repo = join(home, f.workspace.repository);
     const env = { PATH: `${dirname(process.execPath)}:/usr/bin:/bin`, HOME: oldHome, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null",

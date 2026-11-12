@@ -12,6 +12,8 @@ const kindForReason: Record<CloudProviderFailure["reason"], BridgeAgentFailure["
   "auth-required": "auth-required", "verification-required": "verification-required",
   "credentials-unavailable": "cloud-credentials-unavailable", "rate-limited": "rate-limited",
   "session-expired": "session-expired", "model-unavailable": "protocol-error", "provider-unavailable": "transport-closed",
+  // Creator pays: no Creator is an account condition (no new chat fixes it); the cloud reason carries the specific copy.
+  "creator-required": "auth-required",
 };
 const object = (value: unknown): Record<string, unknown> | undefined => value && typeof value === "object" ? value as Record<string, unknown> : undefined;
 
@@ -55,6 +57,9 @@ export function providerFailure(provider: CloudV2Agent, error: unknown, stage?: 
 
 /** One verdict for advertised readiness and every new native admission. */
 export function providerAvailability(provider: CloudV2Agent, config: WorkerConfig, installed: boolean): CloudProviderFailure | undefined {
+  // Creator pays: an activated workspace's agents run on the current Creator's logins, which the config names (no secret).
+  if (installed && config.actingUser === 1 && config.agentLogins)
+    return config.agentLogins[provider] ? undefined : { source: "provider", provider, reason: "auth-required" };
   const login = config.agents[provider];
   const reason = !installed ? "provider-unavailable" : !login ? "auth-required"
     : "expiresAt" in login && login.expiresAt <= Date.now() ? "credentials-unavailable" : undefined;

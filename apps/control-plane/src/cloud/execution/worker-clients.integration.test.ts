@@ -147,7 +147,7 @@ database("real acting-user worker clients against HTTP routes and PostgreSQL", (
     await contexts.retire(a.result.contextId, "outcome", 0);
     const next = await begin(b);
     expect(next.result.actingUser).toMatchObject({ userId: f.viewer.id, generation: "2" });
-    expect(next.lease.agents.claude.apiKey).not.toBe(a.lease.agents.claude.apiKey);
+    expect(next.lease.agents.claude.apiKey).toBe(a.lease.agents.claude.apiKey);
     expect(next.lease.api.token).not.toBe(a.lease.api.token);
   });
 
@@ -380,8 +380,8 @@ database("real acting-user worker clients against HTTP routes and PostgreSQL", (
     await clean(); const turn = await begin(await offer(f.prompt(), f.viewer));
     const me = await f.app.request("/api/v0/me", { headers: { authorization: `Bearer ${turn.lease.api.token}` } });
     expect(await me.json()).toMatchObject({ userId: f.viewer.id, credential: "workspace_token" });
-    const absent = await f.send(f.prompt(), f.admin);
-    expect(absent.status).toBe(409); expect(await absent.json()).toMatchObject({ error: { code: "agent_login_required", agent: "claude" } });
+    const admitted = await f.send(f.prompt(), f.admin);
+    expect(admitted.status).toBe(201);
     const sentId = randomUUID();
     const sent = await f.app.request("/api/v0/sessions/chat/messages", { method: "POST",
       headers: { authorization: `Bearer ${turn.lease.api.token}`, "content-type": "application/json" },

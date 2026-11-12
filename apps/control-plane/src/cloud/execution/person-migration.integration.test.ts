@@ -16,7 +16,7 @@ database("0243 signature metadata and live migration cost", () => {
   afterAll(() => pool.end());
 
   it("captures bounded legacy inputs without copying the worker hash to tickets, prompts or intents", async () => {
-    await f.login(f.viewer);
+    await f.login();
     const input = f.prompt(); expect((await f.send(input, f.viewer)).status).toBe(201);
     const authority = { signature: "a".repeat(64), permissionSignature: "b".repeat(64), sourceFingerprint: "c".repeat(64) };
     const ticket = randomBytes(32);
