@@ -8,6 +8,9 @@ describe("stable execution activation target", () => {
   const target = (login = "temporary.branch1", host = "primary.psdb.cloud") =>
     parseDatabaseTarget(`postgres://${login}@${host}:5432/postgres?sslmode=verify-full`);
 
+  /** A target that skipped parseDatabaseTarget's own checks (synthetic host, no password). */
+  const unparsed = (login: string, host = "primary.psdb.cloud") => new URL(`postgres://${login}@${host}:5432/postgres`);
+
   it("retains the PlanetScale branch route while excluding the temporary login", async () => {
     const tx = { query: vi.fn() } as unknown as Tx;
     const first = await executionActivationTarget(tx, target(), owner, "alpha");
@@ -27,7 +30,7 @@ describe("stable execution activation target", () => {
     const tx = { query: vi.fn() } as unknown as Tx;
     // parseDatabaseTarget already refuses these; the target identity must not depend on that caller.
     for (const login of ["temporary", "temporary.", ".branch1"])
-      await expect(executionActivationTarget(tx, new URL(`postgres://${login}@primary.psdb.cloud:5432/postgres`), owner, "alpha")).rejects.toThrow(/identity/);
+      await expect(executionActivationTarget(tx, unparsed(login), owner, "alpha")).rejects.toThrow(/identity/);
   });
 
   it("reads the actual non-PlanetScale cluster identity and refuses an unknown identity", async () => {
