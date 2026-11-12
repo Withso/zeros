@@ -323,7 +323,7 @@ describe("WorkOS desktop public client", () => {
         expectedSubject: claims.providerSubject,
         expectedSessionId: claims.sessionId,
       }),
-    ).resolves.toEqual({ status: "terminal", reason: "invalid_grant" });
+    ).resolves.toEqual({ status: "terminal", reason: "invalid_grant", httpStatus: 400 });
 
     const unavailable = new WorkOSDesktopClient({
       config,

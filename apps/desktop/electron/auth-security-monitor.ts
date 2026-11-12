@@ -1,3 +1,4 @@
+import { logSignedOut, type SignedOutReason } from "./auth-signed-out-log";
 const SNAPSHOT_TIMEOUT_MS = 10_000;
 const SECURITY_SILENCE_MS = 60_000;
 const MAX_JSON_BYTES = 1024 * 1024;
@@ -451,9 +452,11 @@ export class WorkOSDesktopSecurityMonitor {
   private terminate(
     binding: { accountId: string; sessionId: string },
     reason: string,
+    logged: { kind: SignedOutReason; status?: number } = { kind: "revoked" },
   ): "signed_out" {
     this.disconnectStream();
     if (this.options.clearSession(binding)) {
+      logSignedOut(logged.kind, { code: reason, ...(logged.status !== undefined ? { status: logged.status } : {}) });
       this.options.emit("auth-security-revoked", { reason });
     }
     return "signed_out";
@@ -532,7 +535,7 @@ export class WorkOSDesktopSecurityMonitor {
           typeof error?.code === "string"
             ? error.code
             : "authorization_rejected";
-        return this.terminate(binding, reason);
+        return this.terminate(binding, reason, { kind: "snapshot_401", status: response.status });
       }
       if (!response.ok) {
         await response.body?.cancel().catch(() => undefined);
@@ -638,7 +641,7 @@ export class WorkOSDesktopSecurityMonitor {
     );
     if (response.status === 401 || response.status === 403) {
       await response.body?.cancel().catch(() => undefined);
-      this.terminate(binding, "authorization_rejected");
+      this.terminate(binding, "authorization_rejected", { kind: "revoked", status: response.status });
       return;
     }
     if (!response.ok || !response.body || !exactEventStream(response)) {

@@ -82,7 +82,7 @@ export interface WorkOSDesktopSession {
 
 export type WorkOSDesktopRefreshOutcome =
   | { status: "active"; session: WorkOSDesktopSession }
-  | { status: "terminal"; reason: "invalid_grant" }
+  | { status: "terminal"; reason: "invalid_grant"; httpStatus?: number }
   | {
       status: "transient";
       reason:
@@ -552,7 +552,7 @@ export class WorkOSDesktopClient {
       }
       if (!result.response.ok) {
         if (result.body?.error === "invalid_grant") {
-          return { status: "terminal", reason: "invalid_grant" };
+          return { status: "terminal", reason: "invalid_grant", httpStatus: result.response.status };
         }
         if (
           RETRYABLE_REFRESH_STATUS.has(result.response.status) &&

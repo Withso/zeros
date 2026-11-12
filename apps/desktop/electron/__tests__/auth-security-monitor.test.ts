@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { resetSignedOutLogForTests } from "../auth-signed-out-log";
 
 import {
   WorkOSDesktopSecurityMonitor,
@@ -126,6 +127,24 @@ describe("desktop WorkOS security lifecycle", () => {
     expect(emit).toHaveBeenCalledWith("auth-security-revoked", {
       reason: "session_revoked",
     });
+  });
+
+  it("logs one signed-out line for a snapshot rejection, with its code and status and no identity", async () => {
+    resetSignedOutLogForTests();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const monitor = new WorkOSDesktopSecurityMonitor({
+        baseUrl: "https://api-alpha.zeros.build",
+        getSession: async () => ({ provider: "workos", accessToken: "access", accountId: "00000000-0000-4000-8000-000000000001", sessionId: "session_example" }),
+        clearSession: () => true, emit: vi.fn(),
+        fetch: vi.fn(async () => Response.json({ error: { code: "session_revoked" } }, { status: 401 })) as unknown as typeof fetch,
+        connectStreams: false,
+      });
+      await expect(monitor.revalidate("launch", true)).resolves.toBe("signed_out");
+      const lines = warn.mock.calls.map(([line]) => String(line)).filter(line => line.startsWith("[auth] signed out"));
+      expect(lines).toEqual(["[auth] signed out reason=snapshot_401 code=session_revoked status=401"]);
+      expect(warn.mock.calls.flat().join(" ")).not.toMatch(/session_example|00000000-0000-4000-8000-000000000001|access/);
+    } finally { warn.mockRestore(); }
   });
 
   it("retains the session across network and server outages", async () => {
