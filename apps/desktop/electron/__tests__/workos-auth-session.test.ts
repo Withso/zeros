@@ -572,6 +572,18 @@ describe("WorkOS desktop multi-account sessions", () => {
       expect(parseStoredTokenSnapshot(mocks.raw)?.tokens).toMatchObject({ refreshToken: "refresh-next" });
     });
 
+    it("logs no signed-out line for a refresh skipped because the app is quitting", async () => {
+      const { resetSignedOutLogForTests } = await import("../auth-signed-out-log");
+      resetSignedOutLogForTests();
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        await install(Date.now() - 1);
+        await drainAuthRefreshForQuit();
+        await expect(getValidSessionForMain()).resolves.toBeNull();
+        expect(warn.mock.calls.flat().some(line => String(line).startsWith("[auth] signed out"))).toBe(false);
+      } finally { warn.mockRestore(); }
+    });
+
     it("sends no new refresh once quitting has begun, and keeps the stored session", async () => {
       await install(Date.now() - 1);
       await drainAuthRefreshForQuit();
